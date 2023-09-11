@@ -35,6 +35,9 @@ npm run electron:build
 
 By following these steps, you will be able to install the required dependencies, launch the software in development mode, and package it for distribution or deployment. Please make sure you have Node.js and npm installed before running these commands.
 
+## Connect to AI
+Integrate the wenda package from https://github.com/wenda-LLM/wenda. Then open the AI service and enter the access address in the AI module.
+
 ## license: CC BY-NC
 
 # 分布式多视图智能化知识管理平台
@@ -59,5 +62,8 @@ npm install //安装相关依赖
 npm run electron:serve //实现开发模式
 npm run electron:build //实现软件打包
 ```
+
+## 接入ai
+请使用wenda（https://github.com/wenda-LLM/wenda）中的整合包，然后打开AI服务，在AI模块中填入接入地址即可。
 
 ## license: CC BY-NC(禁止商用)

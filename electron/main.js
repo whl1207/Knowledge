@@ -7,7 +7,7 @@ const path = require('path')
  * 设置为development时使用vite可进行热更新
  * 打包时需要设置为其他*/
 
-const NODE_ENV = "1"
+const NODE_ENV = "development"
 
 let mainWindow = null
 function createWindow (mainWindow) {

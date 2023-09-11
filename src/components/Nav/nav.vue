@@ -34,27 +34,26 @@
     <transition name="fade">
         <div id="App_nav" :class="Show === true ?'nav':'panelUnactive'" :style="{width:store.app.navWidth+'px'}">
             <div class="tabs">
-                <div v-if="store.app.environment!='web'" :class="[store.app.navView=='file'?'tabActive':'tab']">
-                    <i class="fa fa-desktop" @click="store.app.navView='file';changeWidth(300)"></i>
+                <div class="tab" v-if="store.app.environment!='web'" :class="[store.app.navView=='file'?'active':'']" @click="store.app.navView='file';changeWidth(300)">
+                    <i class="iconfont">&#xeac6;</i>
                 </div>
-                <div :class="[store.app.navView=='cloud'?'tabActive':'tab']" @click="store.app.navView='cloud';changeWidth(300)">
-                    <i class="fa fa-cloud"></i>
+                <div class="tab" :class="[store.app.navView=='cloud'?'active':'']" @click="store.app.navView='cloud';changeWidth(300)">
+                    <i class="iconfont">&#xeac5;</i>
                 </div>
-                <div v-if="(store.app.environment!='web'&&store.app.storePath!='')||(store.app.environment=='web'&&store.app.network.length>0&&store.app.networkIndex!=-1)" :class="[store.app.navView=='search'?'tabActive':'tab']">
-                    <i class="fa fa-search" @click="store.app.navView='search';changeWidth(300)"></i>
+                <div class="tab" v-if="(store.app.environment!='web'&&store.app.storePath!='')||(store.app.environment=='web'&&store.app.network.length>0&&store.app.networkIndex!=-1)" :class="[store.app.navView=='search'?'active':'']" @click="store.app.navView='search';changeWidth(300)">
+                    <i class="fa fa-search"></i>
                 </div>
-                <div :class="[store.app.navView=='window'?'tabActive':'tab']">
-                    <i class="fa fa-eye" @click="store.app.navView='window';changeWidth(300)"></i>
+                <div class="tab" :class="[store.app.navView=='window'?'active':'']" @click="store.app.navView='window';changeWidth(300)">
+                    <i class="iconfont">&#xe619;</i>
                 </div>
-                <div :class="[store.app.navView=='AI'?'tabActive':'tab']">
-                    <i class="fa fa-reddit" @click="store.app.navView='AI';changeWidth(400)"></i>
+                <div class="tab" :class="[store.app.navView=='AI'?'active':'']" @click="store.app.navView='AI';changeWidth(400)">
+                    <i class="iconfont">&#xe65d;</i>
                 </div>
-                <div v-if="store.app.environment!='web'" :class="[store.app.navView=='server'?'tabActive':'tab']" @click="store.app.navView='server';changeWidth(300)">
-                    <i class="fa fa-server" style="color:var(--fontActiveColor)" v-if="store.app.server.state"></i>
-                    <i class="fa fa-server" style="color:var(--fontColor)" v-if="!store.app.server.state"></i>
+                <div class="tab" v-if="store.app.environment!='web'" :class="[store.app.navView=='server'?'active':'']" @click="store.app.navView='server';changeWidth(300)">
+                    <i class="iconfont" :style="{color:store.app.server.state?'var(--fontActiveColor)':'var(--fontColor)'}">&#xe6f2;</i>
                 </div>
-                <div :class="[store.app.navView=='set'?'tabActive':'tab']">
-                    <i class="fa fa-cog" @click="store.app.navView='set';changeWidth(300)"></i>
+                <div class="tab" :class="[store.app.navView=='set'?'active':'']" @click="store.app.navView='set';changeWidth(300)">
+                    <i class="iconfont">&#xe6c8;</i>
                 </div>
             </div>
             <div class="content" v-if="store.app.navView!=''">
@@ -111,17 +110,12 @@
     }
     .tab{
         -webkit-app-region: no-drag;
-    }
-    .tabActive{
-        border-left:3px solid var(--fontActiveColor);
-        background-color: var(--menuColor);
-        color:var(--fontActiveColor);
-    }
-    i{
         padding-left:12px;
         padding-top:13px;
         padding-bottom:13px;
         padding-right:7px;
+    }
+    i{
         width:calc(100% - 20px);
     }
     .tabActive i{
@@ -130,6 +124,12 @@
     .content{
         height:100%;width:calc(100% - 40px);
         -webkit-app-region: no-drag;
+    }
+    .active{
+        border-left:3px solid var(--fontActiveColor);
+        padding-left:9px;
+        background-color: var(--menuColor);
+        color:var(--fontActiveColor);
     }
   </style>
   
