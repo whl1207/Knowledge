@@ -108,19 +108,20 @@
         <i class="fa fa-list-ul"></i>
       </div>
       <div @click="toggleDomainView('图谱')" :class="[store.app.domainView.indexOf('图谱')>-1?'active':'']">
-        <i class="fa fa-xing"></i>
+        <i class="iconfont"  style="font-size: 16px;">&#xe662;</i>
       </div>
       <div @click="toggleDomainView('甘特')" :class="[store.app.domainView.indexOf('甘特')>-1?'active':'']">
-        <i class="fa fa-calendar-minus-o"></i>
+        <i class="iconfont">&#xe672;</i>
       </div>
       <div @click="toggleDomainView('日历')" :class="[store.app.domainView.indexOf('日历')>-1?'active':'']">
-        <i class="fa fa-calendar-o"></i>
+        <i class="iconfont" style="font-size: 24px;">&#xe600;</i>
+        
       </div>
       <div @click="toggleDomainView('年日历')" :class="[store.app.domainView.indexOf('年日历')>-1?'active':'']">
         <i class="fa fa-calendar"></i>
       </div>
       <div @click="toggleDomainView('地图')" :class="[store.app.domainView.indexOf('地图')>-1?'active':'']">
-        <i class="fa fa-location-arrow"></i>
+        <i class="iconfont"  style="font-size: 20px;">&#xe884;</i>
       </div>
       <div @click="toggleDomainView('表格')" :class="[store.app.domainView.indexOf('表格')>-1?'active':'']">
         <i class="fa fa-table"></i>
@@ -138,7 +139,7 @@
         <i class="fa fa-code"></i>
       </div>
       <div @click="toggleObjectView('导图')" :class="[store.app.objectView.indexOf('导图')>-1?'active':'']">
-        <i class="fa fa-map-o"></i>
+        <i class="iconfont" style="font-size: 20px;">&#xe7fa;</i>
       </div>
       <div @click="toggleObjectView('演示')" :class="[store.app.objectView.indexOf('演示')>-1?'active':'']">
         <i class="fa fa-television"></i>
