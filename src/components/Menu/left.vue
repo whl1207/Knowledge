@@ -99,6 +99,7 @@
       </ul>
     </div>
     <i @click="toggleDomainView('文件')" :class="[store.app.domainView.indexOf('文件')>-1?'active':'']" class="fa fa-folder show"></i>
+    <i @click="store.app.browser=!store.app.browser" class="iconfont show" style="padding-top:0px;" :class="[store.app.browser?'active':'']">&#xe697;</i>
     <i @click="domain=!domain" v-if="!domain" class="fa fa-superpowers show"></i>
     <div class="view" v-if="domain">
       <div>
@@ -115,7 +116,6 @@
       </div>
       <div @click="toggleDomainView('日历')" :class="[store.app.domainView.indexOf('日历')>-1?'active':'']">
         <i class="iconfont" style="font-size: 24px;">&#xe600;</i>
-        
       </div>
       <div @click="toggleDomainView('年日历')" :class="[store.app.domainView.indexOf('年日历')>-1?'active':'']">
         <i class="fa fa-calendar"></i>

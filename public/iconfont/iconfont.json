@@ -6,6 +6,13 @@
   "description": "",
   "glyphs": [
     {
+      "icon_id": "12601042",
+      "name": "browser",
+      "font_class": "browser",
+      "unicode": "e697",
+      "unicode_decimal": 59031
+    },
+    {
       "icon_id": "108916",
       "name": "日历",
       "font_class": "rili",

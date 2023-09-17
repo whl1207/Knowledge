@@ -15,6 +15,7 @@ export const usestore=defineStore('data',{
             //视图
             domainView:["文件"] as any[],
             objectView:["浏览"] as any[],
+            browser:false,
             miniView:[] as any[],
             //工具
             tool:[] as any[],
@@ -80,6 +81,7 @@ export const usestore=defineStore('data',{
             logs:[] as any[],
             
         },
+        web:"",
         catalogue:[] as any,//目录结构
         currMp3Buffer: null, //Buffer.alloc(0), //tts
         currMp3Url: "", //ttsurl

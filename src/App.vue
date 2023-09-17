@@ -30,16 +30,16 @@
   //加载对象插件
   import explorer from './components/Object/explorer.vue'
   import presentation from './components/Object/md/presentation.vue'
-  //import mdeditor from './components/Object/md/mdeditor.vue'
   import codeeditor from './components/Object/codeeditor.vue'
   import mindmap from './components/Object/md/mindmap.vue'
+  import browser from './components/Object/browser.vue'
   //加载小窗
   import miniView from './components/Menu/miniView.vue'
 
   const store=usestore()
   //初始化
   store.init()
-
+  let local=ref<HTMLIFrameElement | null>(null);
   //抓取数据给网络
   let ipcRenderer=null as any
   if(store.app.environment!="web"){
@@ -72,7 +72,7 @@
     }
   })
   //主菜单是否显示
-  let domainWidth=ref(1480)
+  let domainWidth=ref(680)
   //切换侧边栏时，触发resize事件
   const toggle=function(){
     store.app.showNav=!store.app.showNav
@@ -85,6 +85,7 @@
     store.app.navWidth = Math.max(Math.min(store.app.navWidth,document.body.clientWidth - 262),41)
   })
   onMounted(()=>{
+    //导航栏宽度
     let resize = document.getElementById("resize1")! as any
     resize.onmousedown = function(e:any) {
       // 颜色改变提醒
@@ -105,6 +106,7 @@
         document.onmouseup = null;
       }
     }
+    //领域视图宽度
     let resize2 = document.getElementById("resize2")! as any
     resize2.onmousedown = function(e:any) {
       // 颜色改变提醒
@@ -129,7 +131,7 @@
 </script>
 
 <template >
-  <div style="height:calc(100vh);width:100%;">
+  <div style="height:100vh;width:100%;">
     <div class="App_topMenu" v-if="store.app.UI.isMenu">
         <div class="App_home" @click="toggle">
           <i v-if="!store.app.showNav" class="fa fa-home"></i>
@@ -139,7 +141,6 @@
         <tabs />
         <right v-if="store.app.environment!='web'"/>
     </div>
-    
     <div style="display:flex;width:100%" :style="{height:store.app.UI.isMenu?'calc(100% - 41px)':'calc(100% - 2px)'}">
       <navView :Show="store.app.showNav" v-if="store.app.showNav"/>
       <div class="App_bottomHome" v-if="!store.app.UI.isMenu">
@@ -152,7 +153,7 @@
       <div v-show="store.app.navView!=''&&store.app.showNav" id="resize1"></div>
       <div class="App_bg" :style="{width:store.app.showNav?'calc(100% - '+store.app.navWidth+'px)':'100%'}">
         <!--内容栏-->
-        <div class="App_view" :style="{top:!store.app.UI.isMenu?'0px':'',height:!store.app.UI.isMenu?'calc(100% - 1px)':''}">
+        <div class="App_loacl" v-show="store.app.domainView.length>0||(store.app.objectView.length>0&&store.app.files.length>0)" ref="loacl" :style="{top:!store.app.UI.isMenu?'0px':'',height:!store.app.UI.isMenu?'calc(100% - 1px)':''}">
           <div class="App_domain" v-if="store.app.domainView.length>0&&(store.app.environment=='web'||(store.app.environment!='web'&&store.app.storePath!=''))" :style="{width:store.app.objectView.length!=0&&store.app.files.length>0?domainWidth+'px':'100%',maxWidth:store.app.objectView.length!=0&&store.app.files.length>0?'75%':'100%'}">
             <template v-for="(item,index) in store.app.domainView" :key="index">
               <fileView v-if="item=='文件'"/>
@@ -174,10 +175,11 @@
               <codeeditor v-if="item=='编辑'"/>
             </template>
           </div>
-          <empty v-if="(store.app.domainView.length==0&&store.app.objectView.length==0)||(store.app.domainView.length==0&&store.app.files.length==0)||(store.app.path==''&&store.app.files.length==0)"/>
         </div>
-        
+        <browser v-if="store.app.browser"/>
+        <empty v-if="((store.app.domainView.length==0&&store.app.objectView.length==0)||(store.app.domainView.length==0&&store.app.files.length==0)||(store.app.path==''&&store.app.files.length==0))&&!store.app.browser"/>
       </div>
+      
       <dialogView v-if="store.app.dialog!=''"/>
       <miniView />
     </div>
@@ -208,6 +210,8 @@
     height:100%;
     z-index: 5;
     flex: 1;
+    flex-direction: row;
+    display: flex;
   }
   .App_topMenu{
     width:100%;
@@ -246,9 +250,9 @@
     background-color:var(--menuActiveColor);
   }
 
-  .App_view{
+  .App_loacl{
     position: relative;
-    width:100%;
+    flex:2;
     display: flex;
     flex-direction:row;
     height:calc(100% - 0px);
@@ -430,66 +434,6 @@
     --el-tree-text-color: var(--fontColor) !important;
     --el-tree-expand-icon-color: var(--fontColor) !important;
   }
-  /**日历样式*/
-  /**
-  .el-calendar__body{
-    padding: 0px !important;
-  }
-  .el-calendar__header{
-    display: block;
-    height:30px;
-    background-color: var(--backgroundColor);
-    border-bottom:1px solid var(--borderColor) !important;
-    padding:0px !important;
-  }
-  .prev{
-    border-left-color:var(--borderColor) !important;
-    border-top:1px solid var(--borderColor) !important;
-    border-bottom:1px solid var(--borderColor) !important;
-    border-right:1px solid var(--borderColor) !important;
-    opacity: 0.5;
-  }
-  .current{
-    border-left-color:var(--borderColor) !important;
-    border-top-color:var(--borderColor) !important;
-    border-bottom:1px solid var(--borderColor) !important;
-    border-right:1px solid var(--borderColor) !important;
-  }
-  .next{
-    border-bottom:1px solid var(--borderColor) !important;
-    border-right:1px solid var(--borderColor) !important;
-    opacity: 0.5;
-  }
-  .is-selected{
-    background-color: var(--backgroundColor) !important;
-  }
-  .el-image-viewer__wrapper{
-    z-index: 10 !important;
-  }
-
-  .el-button {
-    background-color: var(--menuColor) !important;
-    color: var(--fontColor) !important;
-    border: 1px solid var(--borderColor) !important;
-    padding:5px !important;
-  }
-  .el-calendar-table thead th{
-    color: var(--fontColor) !important;
-    height:20px !important;
-  }
-  .el-calendar-table .current .el-calendar-day:hover {
-      cursor: pointer;
-      background-color: var(--menuColor);
-      color: var(--fontColor);
-  }
-  .el-calendar-table .prev .el-calendar-day:hover, 
-  .el-calendar-table .next .el-calendar-day:hover {
-      background-color: var(--backgroundColor);
-  }
-  .el-calendar-day{
-    height:fit-content !important;
-    padding: 0px !important;
-  }*/
   /**甘特图样式*/
   .gantt_container, .gantt_tooltip,.gantt_grid_scale,.gantt_scale_cell,.gantt_task_cell,.gantt_cell,.gantt_cell_tree{
     background-color: var(--backgroundColor) !important;

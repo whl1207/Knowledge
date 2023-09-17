@@ -347,7 +347,7 @@
   }
 
   .items {
-    width:calc(100% - 50px);
+    width:calc(100% - 22px);
     height: calc(100%);
     overflow-y: auto;
   }

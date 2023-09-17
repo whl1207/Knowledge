@@ -35,7 +35,8 @@ app.whenReady().then(() => {
       nodeIntegration: true,  //是否启用Node integration. 默认值为 false
       contextIsolation: false, //是否在独立 JavaScript 环境中运行 Electron API和指定的preload 脚本. 默认为 true。
       webSecurity: false, //跨域请求
-      spellcheck: false //纠错
+      spellcheck: false, //纠错
+      webviewTag: true //webview标签
     }
   })
   // 初始化后再显示窗体
