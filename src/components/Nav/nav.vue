@@ -34,7 +34,7 @@
     <transition name="fade">
         <div id="App_nav" :class="Show === true ?'nav':'panelUnactive'" :style="{width:store.app.navWidth+'px'}">
             <div class="tabs">
-                <div class="tab" v-if="store.app.environment!='web'" :class="[store.app.navView=='file'?'active':'']" @click="store.app.navView='file';changeWidth(300)">
+                <div class="tab" v-if="store.app.environment!='web'&&store.app.storePath!=''" :class="[store.app.navView=='file'?'active':'']" @click="store.app.navView='file';changeWidth(300)">
                     <i class="iconfont">&#xeac6;</i>
                 </div>
                 <div class="tab" :class="[store.app.navView=='cloud'?'active':'']" @click="store.app.navView='cloud';changeWidth(300)">

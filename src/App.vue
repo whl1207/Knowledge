@@ -78,6 +78,7 @@
     store.app.showNav=!store.app.showNav
     store.app.navWidth=300
     store.resize() //触发缩放
+    domainWidth.value = Math.max(Math.min(domainWidth.value,document.body.clientWidth - (store.app.showNav?store.app.navWidth:0) -265),260)
     store.saveApp() //储存配置信息
   }
   
@@ -118,9 +119,9 @@
         let endX = e.clientX
         let moveLen = endX - startX
         startX = endX
-        domainWidth.value = Math.max(Math.min(domainWidth.value + moveLen,document.body.clientWidth - 265),260)
+        domainWidth.value = Math.max(Math.min(domainWidth.value + moveLen,document.body.clientWidth - (store.app.showNav?store.app.navWidth:0) -265),260)
       }
-      document.onmouseup =async function() {
+      document.onmouseup = async function() {
         resize2.style.background = "" // 颜色恢复
         document.onmousemove = null
         document.onmouseup = null
@@ -212,6 +213,7 @@
     flex: 1;
     flex-direction: row;
     display: flex;
+    overflow: hidden;
   }
   .App_topMenu{
     width:100%;
@@ -258,6 +260,7 @@
     height:calc(100% - 0px);
     transition: 0.2s;
     z-index:-1;
+    flex-shrink: 0;
   }
   .App_domain{
     position:relative;

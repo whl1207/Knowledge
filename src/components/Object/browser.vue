@@ -96,20 +96,20 @@
                 store.web= url.value;
             });
             webview.addEventListener('did-start-loading', () => {
-                console.log('Webview 开始加载');
+                //console.log('Webview 开始加载');
                 state.value="加载中"
                 // 在这里执行开始加载的逻辑
             });
 
             webview.addEventListener('did-stop-loading', () => {
-                console.log('Webview 加载成功');
+                //console.log('Webview 加载成功');
                 state.value=""
                 store.web= url.value;
                 // 在这里执行停止加载的逻辑
             });
 
             webview.addEventListener('did-fail-load', () => {
-                console.log('Webview 加载失败');
+                //console.log('Webview 加载失败');
                 // 在这里执行加载失败的逻辑
             });
         }
@@ -145,6 +145,8 @@
     height: calc(100% - 2px);
     border-left: 1px solid var(--borderColor);
     flex:1;
+    flex-shrink: 0;
+    overflow: hidden;
   }
   .tools{
     float: left;

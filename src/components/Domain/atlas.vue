@@ -5,7 +5,6 @@
   import { nextTick, ref ,onMounted,onBeforeUnmount, reactive,watch,onErrorCaptured} from 'vue'
   import G6 from '@antv/g6'
   import file from '../../../electron/file'
-import { Loading } from 'element-plus/es/components/loading/src/service';
   const store=usestore()
 
   //错误处理函数
@@ -1287,7 +1286,6 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
         }
       }
       //添加关系到图中
-      console.log(edges.length)
       for(let i = 0;i<edges.length;i++){
         //判断边是否存在
         let exist = false
@@ -1300,8 +1298,6 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
           db.edges.push(filterEdge([edges[i]])[0])
         }
       }
-      
-      //console.log(db)
       //修改节点大小
       onNodeSizeMode()
       //更新布局
@@ -1634,6 +1630,37 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
       )
     }
   }
+  //执行分析代码
+  let code = ref("return data.nodes.length + ',' +data.edges.length") as any
+  let output = ref("") as any
+  const execute=function() {
+    //获取代码
+    code.value=editor.getValue()
+      try {
+        const data = store.app.data;
+        const fn = new Function('data', `${code.value};`);
+        output.value = fn(data);
+      } catch (e) {
+        console.error(e);
+        output.value = e;
+      }
+  }
+  //初始化代码编辑器
+  let editor = null as any
+  import * as monaco from 'monaco-editor'
+  const initCode = async function() {
+    await nextTick()
+    if(document.getElementById('atlasCode')!.childElementCount === 0){
+      // 初始化编辑器，确保dom已经渲染
+      editor = monaco.editor.create(document.getElementById('atlasCode')!, {
+        value: code.value, //编辑器初始显示文字
+        language: 'javascript', //此处使用的markdown
+        theme: "深色"==store.app.UI.theme?"hc-black":(["灰色","蓝色","红色"].includes(store.app.UI.theme)?'vs-dark':'vs'), //官方自带三种主题vs, hc-black, or vs-dark
+        quickSuggestionsDelay: 100, //代码提示延时
+        wordWrap: "on",//换行
+      })
+    }
+  }
   //更换领域时，更新图谱
   watch(()=>store.app.path, (newValue, oldValue) => {
     if(atlas.value.watchPath==1){
@@ -1759,21 +1786,24 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
           </li>
         </ul>
     </div>
-    <div class="panel scoll" v-if="controlPanel" style="width:300px">
-      <span title="设置" @click="controlPanelType='设置'" style="width:calc(20% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='设置'?'var(--menuColor)':''}">
+    <div class="panel scoll" v-if="controlPanel" style="width:350px">
+      <span title="设置" @click="controlPanelType='设置'" style="width:calc(16.66% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='设置'?'var(--menuColor)':''}">
         <i class="fa fa-cog"></i>
       </span>
-      <span title="样式" @click="controlPanelType='样式'" style="width:calc(20% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='样式'?'var(--menuColor)':''}">
+      <span title="样式" @click="controlPanelType='样式'" style="width:calc(16.66% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='样式'?'var(--menuColor)':''}">
         <i class="fa fa-adjust"></i>
       </span>
-      <span title="搜索" @click="controlPanelType='搜索'" style="width:calc(20% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='搜索'?'var(--menuColor)':''}">
+      <span title="搜索" @click="controlPanelType='搜索'" style="width:calc(16.66% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='搜索'?'var(--menuColor)':''}">
         <i class="fa fa-search"></i>
       </span>
-      <span @click="controlPanelType='点'" style="width:calc(20% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='点'?'var(--menuColor)':''}">
+      <span @click="controlPanelType='分析';initCode()" style="width:calc(16.66% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='分析'?'var(--menuColor)':''}">
+        <i class="fa fa-tachometer"></i>
+      </span>
+      <span @click="controlPanelType='点'" style="width:calc(16.66% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='点'?'var(--menuColor)':''}">
         <i class="fa fa-circle"></i>
         {{ db.nodes.length }}
       </span>
-      <span @click="controlPanelType='边'" style="width:calc(20% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='边'?'var(--menuColor)':''}">
+      <span @click="controlPanelType='边'" style="width:calc(16.66% - 12px);text-align:center;padding:5px;border:var(--borderColor) 1px solid" :style="{backgroundColor:controlPanelType=='边'?'var(--menuColor)':''}">
         <i class="fa fa-gg"></i>
         {{ db.edges.length }}
       </span>
@@ -2165,6 +2195,11 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
           </ul>
         </div>
       </div>
+      <div style="height:calc(100% - 40px);overflow-y:auto;overflow-x: hidden;" class="scoll" v-if="controlPanelType=='分析'">
+        <div id="atlasCode" style="height:calc(100% - 130px);"></div>
+        <button style="margin: 0px;border-radius: 0px;width:100%" @click="execute()">执行</button>
+        <textarea class="scoll" style="border-radius: 0px;" placeholder="此处为输出的结果，可用参数为data.nodes和data.edges，请使用return返回计算值" v-model="output"></textarea>
+      </div>
       <div style="height:calc(100% - 40px);overflow-y:auto;overflow-x: auto;" class="scoll" v-if="controlPanelType=='点'">
         <table>
           <tr>
@@ -2312,7 +2347,7 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
   textarea{
     position: relative;
     width:calc(100% - 22px);
-    height:calc(100% - 10px);
+    height:calc(90px);
     max-height:100%;
     background-color: var(--backgroundColor);
     color:var(--fontColor);
@@ -2324,6 +2359,7 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
     outline: none;
     padding-left: 10px;
     padding-right: 10px;
+    margin:0px
   }
   select{
     margin-top: 3px;
@@ -2445,7 +2481,6 @@ import { Loading } from 'element-plus/es/components/loading/src/service';
     position: relative;
     float:right;
     padding: 5px;
-    width:210px;
     height:calc(100% - 26px);
     background-color: var(--backgroundColor);
     border-left:1px solid var(--borderColor) ;

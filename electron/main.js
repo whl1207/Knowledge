@@ -21,7 +21,6 @@ function createWindow (mainWindow) {
 app.whenReady().then(() => {
   //创建窗体
   mainWindow = new BrowserWindow({
-    
     width: 1300,//窗口宽度
     height: 830,//窗口高度
     minWidth: 860,
