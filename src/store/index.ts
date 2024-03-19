@@ -6,6 +6,7 @@ export const usestore=defineStore('data',{
         app:{
             appPath:"",
             environment:"web",//环境
+            locales:'zh',//默认中文
             storePath:"",//仓库位置
             sharePath:"",//共享位置
             files:[] as any,//打开的文件
@@ -34,14 +35,14 @@ export const usestore=defineStore('data',{
             //界面
             UI:{
                 scale:1,//缩放
-                theme:"灰色",
+                theme:"深色",
                 fontsize:15,
-                backgroundColor:'rgb(30,30,30)',  /**背景颜色**/
-                menuColor:'#303030',/**菜单颜色**/
-                menuActiveColor:'#4c4c4c',/**菜单激活颜色**/
+                backgroundColor:'#0D1117',  /**背景颜色**/
+                menuColor:'#010409',/**菜单颜色**/
+                menuActiveColor:'#24272E',/**菜单激活颜色**/
                 fontColor:'#ffffff',/**字体颜色**/
-                fontActiveColor:'#ffff00',/**字体激活颜色**/
-                borderColor:'#555555',/**边框颜色**/
+                fontActiveColor:'#CCA700',/**字体激活颜色**/
+                borderColor:'#30363D',/**边框颜色**/
                 isFull:false,/**是否全屏**/
                 isMenu:true,/**显示标题栏**/
                 layout:'column',/**横向布局**/
@@ -83,8 +84,6 @@ export const usestore=defineStore('data',{
         },
         web:"",
         catalogue:[] as any,//目录结构
-        currMp3Buffer: null, //Buffer.alloc(0), //tts
-        currMp3Url: "", //ttsurl
     }), 
     //计算
     getters:{},
@@ -187,7 +186,7 @@ export const usestore=defineStore('data',{
                 parentPath:path.substring(0,path.lastIndexOf("\\")),//父级文件夹绝对路径
                 name:path.substring(path.lastIndexOf("\\")+1,path.lastIndexOf(".")==-1?path.length:path.lastIndexOf(".")),//文件名称（不包含后缀）
                 fullName:path.substring(path.lastIndexOf("\\")+1,path.length),//文件名称（包含后缀）
-                type:path.substring(path.lastIndexOf(".")+1)==path?'':path.substring(path.lastIndexOf(".")+1),//文件类型
+                type:path.substring(path.lastIndexOf(".")+1)==path?'':'.'+path.substring(path.lastIndexOf(".")+1),//文件类型
             }
             const fs = require("fs")
             let content=fs.readFileSync(path,'utf8')
@@ -233,6 +232,8 @@ export const usestore=defineStore('data',{
                 ".wb"
             ]
             //不是文件夹、在可用格式内部、不是云端文件，使用默认应用打开
+            console.log(data)
+            console.log((!data.isFolder),(!(availableType.indexOf(data.type)>-1)),(data.cloud==false||data.cloud==undefined))
             if((!data.isFolder)&&(!(availableType.indexOf(data.type)>-1))&&(data.cloud==false||data.cloud==undefined)){
                 //本地打开
                 let shell=null as any

@@ -23,7 +23,7 @@ app.whenReady().then(() => {
   mainWindow = new BrowserWindow({
     width: 1300,//窗口宽度
     height: 830,//窗口高度
-    minWidth: 860,
+    minWidth: 560,
     minHeight: 352,
     show: false,
     //alwaysOnTop:true,

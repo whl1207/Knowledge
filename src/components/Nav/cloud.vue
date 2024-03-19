@@ -24,7 +24,7 @@
 
   //用户管理
   let user = reactive({
-    name: '未命名节点',
+    name: 'Unname',
     password: "",
     ip: '127.0.0.1',
     port: '9000'
@@ -255,7 +255,7 @@
         {{ store.app.network[store.app.networkIndex].ip }}
       </span>
       <span v-if="store.app.networkIndex==-1">
-        未选择网络节点
+        {{store.app.locales=='zh'?'未链接到节点':'None Cloud Node'}}
       </span>
       <i class="fa fa-cog" style="float: right;margin-top:3px;margin-left:5px" :style="{color:showConfig?'var(--fontActiveColor)':''}" @click="showConfig=!showConfig"></i>
       <i class="fa fa-refresh" style="float: right;margin-top:3px" @click="getPartitions(store.app.networkIndex)"></i>
@@ -276,19 +276,19 @@
     </div>
     <div class="add" v-if="showConfig" >
       <div style="display: flex;align-items: flex-start;">
-        <span style="margin-bottom:5px">备注：</span>
+        <span style="margin-bottom:5px;margin-right:2px">{{store.app.locales=='zh'?'名称：':'Name:'}}</span>
         <input style="width:calc(100% - 148px);" v-model="user.name" />
-        <input style="width:calc(77px);" placeholder="密匙" type="password" v-model="user.password" />
+        <input style="width:calc(77px);" :placeholder="store.app.locales=='zh'?'密匙':'Key'" type="password" v-model="user.password" />
       </div>
       <div>
-        <span style="margin-bottom:5px">地址：</span>
+        <span style="margin-bottom:5px;">{{store.app.locales=='zh'?'地址：':'URL:'}}</span>
         <input style="width:calc(100% - 148px)" v-model="user.ip" />
         <input style="width:calc(41px)" v-model="user.port" />
         <button @click="addNetworkUser()" style="margin: 0px;"><i class="fa fa-plus"></i></button>
       </div>
     </div>
-    <div class="fixPanel">
-      <input v-model="filterText"  placeholder="搜索"/>
+    <div class="fixPanel" v-if="store.app.network.length>0">
+      <input v-model="filterText"  :placeholder="store.app.locales=='zh'?'请输入关键词':'Search'"/>
     </div>
     <span style="width:100%;text-align:center" v-if="err!=''||loading">
       <i v-if="loading" class="fa fa-spinner faa-spin animated"></i>

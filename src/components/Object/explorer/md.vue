@@ -27,7 +27,29 @@
   let toc=ref([] as any)
   //yaml信息
   let info = reactive({}) 
-
+  //AI配置
+  let AIconfig = ref({
+        model_url:'ws://127.0.0.1:17860/ws',
+        tts_url:'http://127.0.0.1:8080/?&lang=zh&speed=1.0&',
+        tts_voice:'mazhao',
+        stt_url:'http://127.0.0.1:8080/',
+        functions:[
+            {title:'正常对话',characters:'',scene:'',instruct:""},
+            {title:'总结',characters:'',scene:'',instruct:"请用中文总结以下资料："},
+            {title:'指导',characters:'',scene:'',instruct:"我想了解以下主题，请确定并分享从该主题中学到的最重要的部分。"},
+            {title:'测试',characters:'',scene:'',instruct:"我目前正在学习以下主题，问我一系列问题来测试我的知识。找出我答案中的知识空白，并给我更好的答案来填补这些空白。"},
+            {title:'解释',characters:'',scene:'',instruct:"用任何初学者都能理解的简单易懂的术语解释以下主题。"},
+            {title:'重写',characters:'',scene:'',instruct:"重写下面的文字，让初学者容易理解。"},
+            {title:'续写',characters:'',scene:'',instruct:"请根据以下文章进行续写："},
+            {title:'英文翻译',characters:'专业翻译家',scene:'',instruct:"请将以下段落翻译为英文，要求逻辑通顺，表达自然。"},
+            {title:'中文翻译',characters:'专业翻译家',scene:'',instruct:"请将以下段落翻译为中文，要求逻辑通顺，表达自然。"},
+            {title:'文字游戏',characters:'游戏执行人员',scene:'组织玩家进行剧本杀',instruct:"我想让你扮演一个基于文本的冒险游戏，我在这个冒险游戏中扮演一个角色。游戏中需要有一个最终的任务，完成了最终的任务，即获得游戏的胜利，否则游戏失败。请尽可能具体地描述角色所看到的内容和环境，并在游戏输出的唯一代码块中回复，而不是其它区域。我将输入命令来告诉角色做了什么，而你需要回复角色的行动结果以推动游戏的进行。请从这里开始故事。我的第一个命令是："},
+            /**{title:'剧本杀',instruct:"我需要你扮演专业的剧本杀作者，你将会按照以下剧本模版，结合自己的优秀想象力，写出一个包含丰富饱满的剧情、优秀的文笔、逻辑缜密，非常细节的时间线和线索，推理巧妙、立体饱满的人物角色塑造，能让玩家很轻松代入各自角色新颖创意。完整的剧本需要包含以下内容：剧情简介、人物介绍、我扮演的角色和第一幕场景。并且你要回复角色的行动结果以推动游戏的进行。我需要你围绕以下主题进行创作:"},**/
+        ],
+        memory:'', //记忆和知识的来源
+        searchNum:8 //互联网搜索条目数
+    }) //服务地址
+  let audioURLs = ref([]) as any //服务地址
   const md = new MarkdownIt({
     html: true,
     linkify: true,
@@ -94,7 +116,11 @@
       }
     }
   }
-
+  let selectedText = ref("");
+  //获取选中的文字
+  const handleSelection=function() {
+    selectedText.value = window.getSelection()?.toString()||'';
+  }
   //当点击保存后刷新本页
   async function save(e:any) {
     if (e.keyCode == 83 && (navigator.platform.match("Mac") ? e.metaKey : e.ctrlKey)){
@@ -173,6 +199,113 @@
   const closeExplorer = function(){
     store.app.objectView.splice(store.app.objectView.indexOf("浏览"),1)
   }
+  //发声
+  async function speak() {
+    let text = store.app.files[store.app.fileIndex].content;
+    if(selectedText.value!=""){
+      text = selectedText.value;
+    }
+    console.log(window.getSelection,text)
+    if(AIconfig.value.tts_url==""){
+      //windows自带的tts
+      var utterance = new SpeechSynthesisUtterance();
+      // 设置要朗读的文本
+      utterance.text = text;
+      //使用默认的语音合成器
+      var synth = window.speechSynthesis;
+      // 将 utterance 添加到语音合成队列中
+      synth.speak(utterance);
+    }else{
+      //调用tts服务
+      //删除yaml信息、替换#和>和*，按照。？！和换行符切割文本
+      let parts = text.replace(/^---[\s\S]*?---\n?/gm, '').replace(/[>#*]/g, " ").split(/[。？！\n]+/).filter(part => part.trim() !== '');
+      // 进一步处理，确保每个部分不是空的
+      parts = parts.map(part => part.trim()).filter(part => part.length > 0);
+      console.log(parts);
+      await fetchAndPlayAudio(parts);
+    }
+  }
+    //预加载音频并按顺序播放
+    async function fetchAndPlayAudio(textParts:any, currentIndex = 0) {
+        if (currentIndex >= textParts.length) {
+            console.log("播放完毕");
+            return; // 所有部分都已播放完毕
+        }
+        const text = textParts[currentIndex];
+        //如果未预加载则预加载音频
+        if(currentIndex==0){
+            const audioBlob = await fetchAudio(text);
+            const audioUrl = URL.createObjectURL(audioBlob);
+            audioURLs.value.push(audioUrl);
+            const audio = new Audio(audioUrl);
+
+            // 当前音频播放结束时，递归调用以播放下一段
+            audio.onended = () => {
+                console.log(`Part ${currentIndex + 1} of ${textParts.length} played.`);
+                fetchAndPlayAudio(textParts,currentIndex + 1);
+            };
+
+            // 如果不是最后一段，提前开始加载下一段音频
+            if (currentIndex < textParts.length - 1) {
+                const nextText = textParts[currentIndex + 1];
+                fetchAudio(nextText) // 提前请求下一段音频，但不等待它完成
+                    .then(blob => URL.createObjectURL(blob))
+                    .then(url => {
+                        // 可以在这里存储或处理预加载的音频URL，但由于自动播放策略，可能需要用户交互来实际播放
+                        audioURLs.value.push(url); // 将生成的URL存储到数组中
+                    })
+                    .catch(error => console.error("Error preloading audio:", error));
+            }
+
+            console.log(`Playing part ${currentIndex + 1} of ${textParts.length}`);
+            audio.play().catch(error => console.error("Error playing audio:", error));
+        }else{
+            if(audioURLs.value.length==currentIndex){
+                //当未返回音频时等待
+                setTimeout(fetchAndPlayAudio, 100,textParts,currentIndex);
+            }else if(audioURLs.value.length<currentIndex){
+              return;
+            }else{
+                const audioUrl = audioURLs.value[currentIndex];
+                const audio = new Audio(audioUrl);
+
+                audio.onended = () => {
+                    console.log(`Part ${currentIndex + 1} of ${audioURLs.value.length} played.`);
+                    fetchAndPlayAudio(textParts,currentIndex + 1);
+                };
+                // 如果不是最后一段，提前开始加载下一段音频
+                if (currentIndex < textParts.length - 1) {
+                    const nextText = textParts[currentIndex + 1];
+                    fetchAudio(nextText) // 提前请求下一段音频，但不等待它完成
+                        .then(blob => URL.createObjectURL(blob))
+                        .then(url => {
+                            // 可以在这里存储或处理预加载的音频URL，但由于自动播放策略，可能需要用户交互来实际播放
+                            audioURLs.value.push(url); // 将生成的URL存储到数组中
+                        })
+                        .catch(error => console.error("Error preloading audio:", error));
+                }else{
+                    audioURLs.value=[]
+                }
+                console.log(`Playing part ${currentIndex + 1} of ${audioURLs.value.length}`);
+                audio.play().catch(error => console.error("Error playing audio:", error));
+            }
+        }
+    }
+  //调用单次请求
+  async function fetchAudio(text:string) {
+    try {
+      const url = AIconfig.value.tts_url+'spk='+AIconfig.value.tts_voice+"&text="+text;
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+      const audioBlob = await response.blob();
+      return audioBlob; // 确保这里返回的是Blob对象
+    } catch (error) {
+      console.error("Error fetching audio:", error);
+      throw error; // 将错误向上抛出，以便可以在调用处捕获
+    }
+  }
   //打开编辑视图
   const openEdit = function(){
     store.app.objectView[store.app.objectView.length]="编辑"
@@ -189,8 +322,12 @@
   onMounted(()=>{
     init()
     window.addEventListener('keydown', save)
+    if (localStorage.getItem('AIconfig')!= null) {
+      AIconfig.value=JSON.parse(localStorage.getItem("AIconfig")!)
+    }
   })
   onBeforeUnmount(() => {
+    audioURLs.value=[]
     window.removeEventListener('keydown', save)
   })
 </script>
@@ -249,27 +386,34 @@
         </div>
       </div>
       <!--查看txt文件-->
-      <div v-if="store.app.files[store.app.fileIndex].type=='txt'&&store.app.files[store.app.fileIndex].content!=''" class="prep scoll" v-html="store.app.files[store.app.fileIndex].content">
+      <div v-if="store.app.files[store.app.fileIndex].type=='txt'&&store.app.files[store.app.fileIndex].content!=''" class="prep scoll" v-html="store.app.files[store.app.fileIndex].content" @mouseup="handleSelection" @keyup="handleSelection">
       </div>
       <!--查看md文件-->
-      <div v-if="(store.app.files[store.app.fileIndex].type=='.md'||store.app.files[store.app.fileIndex].type=='')&&prep!=''" class="prep scoll" v-html="prep" @contextmenu.prevent="nodeContextmenu($event)">
+      <div v-if="(store.app.files[store.app.fileIndex].type=='.md'||store.app.files[store.app.fileIndex].type=='')&&prep!=''" class="prep scoll" v-html="prep" @contextmenu.prevent="nodeContextmenu($event)" @mouseup="handleSelection" @keyup="handleSelection">
       </div>
     </div>
   </div>
-  <div class="menu" v-if="ifMenu&&(store.app.files[store.app.fileIndex].type=='.md'||store.app.files[store.app.fileIndex].type=='')" @mouseleave="ifMenu=false" :style="{top:menuPosition.y+'px',left:menuPosition.x+'px'}">
-    <div @click="iftoc=!iftoc" style="padding:2px" :class="[iftoc?'active':'']">
-      <i class="fa fa-bars"></i> &nbsp;
-      <span v-if="!iftoc">打开目录</span>
-      <span v-if="iftoc">关闭目录</span>
+  <div class="menus" v-if="ifMenu&&(store.app.files[store.app.fileIndex].type=='.md'||store.app.files[store.app.fileIndex].type=='')" @mouseleave="ifMenu=false" :style="{top:menuPosition.y+'px',left:menuPosition.x+'px'}">
+    <div class="menu" style="margin-bottom: 5px;">
+      <div @click="iftoc=!iftoc" class="button" :class="[iftoc?'active':'']" :title="iftoc?'关闭目录':'打开目录'">
+        <i class="fa fa-bars"></i>
+      </div>
+      <div @click="toggleView()" class="button" title="切换到思维导图视图">
+        <i class="fa fa-map-o"></i>
+      </div>
+      <div @click="closeView()" class="button" title="关闭视图">
+        <i class="fa fa-eye"></i>
+      </div>
+      <div @click="closeTab()" class="button" title="关闭页面">
+        <i class="fa fa-times"></i>
+      </div>
+      <div @click="speak()" class="button" title="开始朗读">
+        <i class="fa fa-volume-up"></i>
+      </div>
     </div>
-    <div @click="toggleView()" style="padding:2px">
-      <i class="fa fa-map-o"></i> &nbsp;思维导图
-    </div>
-    <div @click="closeView()" style="padding:2px">
-      <i class="fa fa-eye"></i> &nbsp;关闭视图
-    </div>
-    <div @click="closeTab()" style="padding:2px">
-      <i class="fa fa-times"></i> &nbsp;&nbsp;关闭页面
+    <div class="menu">
+      <div style="padding: 5px;">音色：</div>
+      <input v-model="AIconfig.tts_voice"/>
     </div>
   </div>
 </template>
@@ -405,7 +549,7 @@
   input{
     border-color: var(--backgroundColor);
   }
-  .menu{
+  .menus{
     z-index:100;
     position:fixed;
     background-color: var(--backgroundColor);
@@ -414,6 +558,20 @@
     cursor: pointer;
     border-radius: 5px;
     padding: 5px;
+  }
+  .menus .menu{
+    display: flex;
+  }
+  .menu .button{
+    padding:5px 10px;
+    margin-right: 5px;
+    border: 1px solid var(--borderColor);
+    border-radius: 5px;
+    text-align: center;
+  }
+  .menu input{
+    width: 135px;
+    border: 1px solid var(--borderColor);
   }
   .active{
     background-color: var(--menuColor);

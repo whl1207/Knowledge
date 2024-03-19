@@ -1812,9 +1812,9 @@
       <table>
         <tr style="text-align: center;">
           <td rowspan="2"><i class="fa fa-bars"></i></td>
-          <td rowspan="2" style="max-width:100px;text-overflow: ellipsis;">关系名称</td>
-          <td colspan="2">状态</td>
-          <td rowspan="2">颜色</td>
+          <td rowspan="2" style="max-width:100px;text-overflow: ellipsis;">{{store.app.locales=='zh'?'关系':'Relation'}}</td>
+          <td colspan="2">{{store.app.locales=='zh'?'状态':'State'}}</td>
+          <td rowspan="2">{{store.app.locales=='zh'?'颜色':'Color'}}</td>
         </tr>
         <tr style="text-align: center;">
           <td title="依赖"><i class="fa fa-angle-down"></i></td>
@@ -1822,14 +1822,14 @@
         </tr>
         <tr style="text-align: center;">
           <td><i class="fa fa-usb"></i></td>
-          <td>读取路径本体</td>
+          <td>{{store.app.locales=='zh'?'路径节点':'File Path'}}</td>
           <td colspan="2" v-if="atlas.showSelf==0" @click="atlas.showSelf=1;InitGraph()"><i class="fa fa-toggle-off" /></td>
           <td colspan="2" v-if="atlas.showSelf==1" @click="atlas.showSelf=0;InitGraph()"><i class="fa fa-toggle-on" /></td>
           <td></td>
         </tr>
         <tr style="text-align: center;">
           <td><i class="fa fa-usb"></i></td>
-          <td>默认隶属关系</td>
+          <td>{{store.app.locales=='zh'?'隶属关系':'Membership Relation'}}</td>
           <td colspan="2" v-if="atlas.showTree==0" @click="atlas.showTree=1;InitGraph()"><i class="fa fa-toggle-off" /></td>
           <td colspan="2" v-if="atlas.showTree==1" @click="atlas.showTree=0;InitGraph()"><i class="fa fa-toggle-on" /></td>
           <td><el-color-picker v-model="atlas.set.EdgeColor" show-alpha/></td>
@@ -1843,7 +1843,7 @@
         </tr>
         <tr v-for="(item,index) in atlas.attributes" :key="index" style="text-align: center;">
           <td><i class="fa fa-file-text"></i></td>
-          <td style="max-width:100px;text-overflow: ellipsis;" :title="item.name">{{item.name}}</td>
+          <td style="max-width:100px;text-overflow: ellipsis;" :title="item.name">{{store.app.locales=='zh'?item.name:((item.name!="开始时间"&&item.name!="结束时间")?item.name:(item.name=="开始时间"?"Start Time":"End Time"))}}</td>
           <td @click="expandAttribute(index,-1)" v-if="item.state==0||item.state==1"><i class="fa fa-toggle-off" /></td>
           <td @click="expandAttribute(index,0)" v-if="item.state==-1"><i class="fa fa-toggle-on" /></td>
           <td @click="expandAttribute(index,1)" v-if="item.state==0||item.state==-1"><i class="fa fa-toggle-off" /></td>
@@ -1852,7 +1852,7 @@
         </tr>
       </table>
       <hr />
-      <span class="label">隶属深度：</span>
+      <span class="label">{{store.app.locales=='zh'?'隶属深度：':'Depth'}}</span>
       <select v-model="atlas.deep" style="width:calc(100% - 82px)" @change="InitGraph()">
         <option value="1">1</option>
         <option value="2">2</option>
@@ -1865,37 +1865,37 @@
         <option value="9">9</option>
         <option value="10">10</option>
       </select>
-      <span class="label">布局类型：</span>
+      <span class="label">{{store.app.locales=='zh'?'布局算法：':'Layout'}}</span>
       <select v-model="atlas.layout.type" @change="updateLayoutType()" style="width:calc(100% - 82px)">
-        <option value="dagre">层次(dagre)</option>
-        <option value="forceAtlas2">力导向图(forceAtlas2)</option>
-        <option value="force">力导向图(force)</option>
-        <option value="gForce">力导向图(gForce)</option>
-        <option value="comboForce">组合力导向图(comboForce)</option>
-        <option value="mds">高维数据降维(mds)</option>
-        <option value="radial">辐射形(radial)</option>
-        <option value="grid">网格(grid)</option>
-        <option value="circular">环形(circular)</option>
-        <option value="concentric">同心圆(concentric)</option>
+        <option value="dagre">{{store.app.locales=='zh'?'层次':'dagre'}}</option>
+        <option value="forceAtlas2">{{store.app.locales=='zh'?'力导向图':'forceAtlas2'}}</option>
+        <option value="force">{{store.app.locales=='zh'?'力导向图':'force'}}</option>
+        <option value="gForce">{{store.app.locales=='zh'?'力导向图':'gForce'}}</option>
+        <option value="comboForce">{{store.app.locales=='zh'?'组合力导向图':'comboForce'}}</option>
+        <option value="mds">{{store.app.locales=='zh'?'高维数据降维':'mds'}}</option>
+        <option value="radial">{{store.app.locales=='zh'?'辐射形':'radial'}}</option>
+        <option value="grid">{{store.app.locales=='zh'?'网格':'grid'}}</option>
+        <option value="circular">{{store.app.locales=='zh'?'环形':'circular'}}</option>
+        <option value="concentric">{{store.app.locales=='zh'?'同心圆':'concentric'}}</option>
         <option value="fruchterman">fruchterman</option>
       </select>
-      <span class="label">节点大小：</span>
+      <span class="label">{{store.app.locales=='zh'?'节点大小：':'Node Size'}}</span>
       <select v-model="atlas.set.NodeSizeMode" @change="onNodeSizeMode()" style="width:calc(100% - 82px)">
-        <option value="一致">一致</option>
-        <option value="配置信息">配置信息</option>
+        <option value="一致">{{store.app.locales=='zh'?'一致':'Consistent'}}</option>
+        <option value="配置信息">{{store.app.locales=='zh'?'配置信息':'Config'}}</option>
       </select>
         <!--force参数-->
         <div v-if="atlas.layout.type=='force'">
           <div>
-            <span class="label">边长:</span>
+            <span class="label">{{store.app.locales=='zh'?'边长:':'linkDistance'}}</span>
             <input :title="atlas.layout.linkDistance" type="range" min="1" max="500" step="1" v-model.number="atlas.layout.linkDistance" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">节点力:</span>
+            <span class="label">{{store.app.locales=='zh'?'节点力:':'nodeStrength'}}</span>
             <input :title="atlas.layout.nodeStrength" type="range" min="-5" max="200" step="1" v-model.number="atlas.layout.nodeStrength" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">边力:</span>
+            <span class="label">{{store.app.locales=='zh'?'边力:':'edgeStrength'}}</span>
             <input :title="atlas.layout.edgeStrength" type="range" min="0.01" max="5" step="0.01" v-model.number="atlas.layout.edgeStrength" @change="updateLayout"/>
           </div>
         </div>
@@ -1903,23 +1903,23 @@
         <!--gForce参数-->
         <div v-if="atlas.layout.type=='gForce'">
           <div>
-            <span class="label">迭代:</span>
+            <span class="label">{{store.app.locales=='zh'?'迭代:':'maxIteration'}}</span>
             <input :title="atlas.layout.maxIteration" type="range" min="500" max="3000" step="1" v-model.number="atlas.layout.maxIteration" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">初始边长:</span>
+            <span class="label">{{store.app.locales=='zh'?'边长:':'linkDistance'}}</span>
             <input :title="atlas.layout.linkDistance" type="range" min="1" max="1000" step="1" v-model.number="atlas.layout.linkDistance" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">节点斥力:</span>
+            <span class="label">{{store.app.locales=='zh'?'节点斥力:':'nodeStrength'}}</span>
             <input :title="atlas.layout.nodeStrength" type="range" min="300" max="2000" step="1" v-model.number="atlas.layout.nodeStrength" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">边的拉力:</span>
+            <span class="label">{{store.app.locales=='zh'?'边的拉力:':'edgeStrength'}}</span>
             <input :title="atlas.layout.edgeStrength" type="range" min="50" max="400" step="0.01" v-model.number="atlas.layout.edgeStrength" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">显卡计算：</span>
+            <span class="label">{{store.app.locales=='zh'?'显卡计算:':'gpuEnabled'}}</span>
             <select v-model="atlas.layout.gpuEnabled" @change="updateLayout()" style="width:calc(100% - 82px)">
               <option value="true">true</option>
               <option value="false">false</option>
@@ -1930,19 +1930,19 @@
         <!--ComboForce参数-->
         <div v-if="atlas.layout.type=='comboForce'">
           <div>
-            <span class="label">初始边长:</span>
+            <span class="label">{{store.app.locales=='zh'?'边长:':'linkDistance'}}</span>
             <input :title="atlas.layout.linkDistance" type="range" min="1" max="100" step="1" v-model.number="atlas.layout.linkDistance" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">节点斥力:</span>
+            <span class="label">{{store.app.locales=='zh'?'节点斥力:':'nodeStrength'}}</span>
             <input :title="atlas.layout.nodeStrength" type="range" min="3" max="300" step="1" v-model.number="atlas.layout.nodeStrength" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">边的拉力:</span>
+            <span class="label">{{store.app.locales=='zh'?'边的拉力:':'edgeStrength'}}</span>
             <input :title="atlas.layout.edgeStrength" type="range" min="0.02" max="2" step="0.01" v-model.number="atlas.layout.edgeStrength" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">迭代数:</span>
+            <span class="label">{{store.app.locales=='zh'?'迭代数:':'maxIteration'}}</span>
             <input :title="atlas.layout.maxIteration" type="range" min="100" max="1000" step="1" v-model.number="atlas.layout.maxIteration" @change="updateLayout"/>
           </div>
         </div>
@@ -1950,15 +1950,15 @@
         <!--forceAtlas2参数-->
         <div v-if="atlas.layout.type=='forceAtlas2'">
           <div>
-            <span class="label">斥力系数:</span>
+            <span class="label">{{store.app.locales=='zh'?'斥力系数:':'kr'}}</span>
             <input :title="atlas.layout.kr" type="range" min="1" max="150" step="0.1" v-model.number="atlas.layout.kr" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">重力系数:</span>
+            <span class="label">{{store.app.locales=='zh'?'重力系数:':'kg'}}:</span>
             <input :title="atlas.layout.kg" type="range" min="1" max="50" step="0.1" v-model.number="atlas.layout.kg" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">移动速度:</span>
+            <span class="label">{{store.app.locales=='zh'?'移动速度:':'ks'}}</span>
             <input :title="atlas.layout.ks" type="range" min="1" max="20" step="0.1" v-model.number="atlas.layout.ks" @change="updateLayout"/>
           </div>
         </div>
@@ -1966,7 +1966,7 @@
         <!--mds参数-->
         <div v-if="atlas.layout.type=='mds'">
           <div>
-            <span class="label">长度:</span>
+            <span class="label">{{store.app.locales=='zh'?'边长:':'linkDistance'}}</span>
             <input :title="atlas.layout.linkDistance" type="range" min="20" max="500" step="1" v-model.number="atlas.layout.linkDistance" @change="updateLayout"/>
           </div>
         </div>
@@ -1974,7 +1974,7 @@
         <!--circular参数-->
         <div v-if="atlas.layout.type=='circular'">
           <div>
-            <span class="label">半径:</span>
+            <span class="label">{{store.app.locales=='zh'?'半径:':'radius'}}</span>
             <input :title="atlas.layout.radius" type="range" min="20" max="500" step="1" v-model.number="atlas.layout.radius" @change="updateLayout"/>
           </div>
         </div>
@@ -1982,15 +1982,15 @@
         <!--radial参数-->
         <div v-if="atlas.layout.type=='radial'">
           <div>
-            <span class="label">边长:</span>
+            <span class="label">{{store.app.locales=='zh'?'边长:':'linkDistance'}}</span>
             <input :title="atlas.layout.linkDistance" type="range" min="10" max="500" step="1" v-model.number="atlas.layout.linkDistance" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">半径:</span>
+            <span class="label">{{store.app.locales=='zh'?'半径:':'unitRadius'}}</span>
             <input :title="atlas.layout.unitRadius" type="range" min="50" max="500" step="1" v-model.number="atlas.layout.unitRadius" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">节点:</span>
+            <span class="label">{{store.app.locales=='zh'?'节点大小:':'nodeSize'}}</span>
             <input :title="atlas.layout.nodeSize" type="range" min="50" max="200" step="1" v-model.number="atlas.layout.nodeSize" @change="updateLayout"/>
           </div>
         </div>
@@ -1998,7 +1998,7 @@
         <!--concentric参数-->
         <div v-if="atlas.layout.type=='concentric'">
           <div>
-            <span class="label">节点:</span>
+            <span class="label">{{store.app.locales=='zh'?'节点大小:':'nodeSize'}}</span>
             <input :title="atlas.layout.nodeSize" type="range" min="30" max="100" step="1" v-model.number="atlas.layout.nodeSize" @change="updateLayout"/>
           </div>
         </div>
@@ -2006,30 +2006,30 @@
         <!--Dagre参数-->
         <div v-if="atlas.layout.type=='dagre'">
           <div>
-            <span class="label">宽度:</span>
+            <span class="label">{{store.app.locales=='zh'?'宽度:':'nodesep'}}</span>
             <input :title="atlas.layout.nodesep" type="range" min="-40" max="40" step="1" v-model.number="atlas.layout.nodesep" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">高度:</span>
+            <span class="label">{{store.app.locales=='zh'?'高度:':'ranksep'}}</span>
             <input :title="atlas.layout.ranksep" type="range" min="-20" max="40" step="1" v-model.number="atlas.layout.ranksep" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">布局方向：</span>
+            <span class="label">{{store.app.locales=='zh'?'布局方向:':'rankdir'}}</span>
             <select v-model="atlas.layout.rankdir" @change="updateLayoutType()" style="width:calc(100% - 80px)">
-              <option value="TB">从上至下</option>
-              <option value="BT">从下至上</option>
-              <option value="LR">从左至右</option>
-              <option value="RL">从右至左</option>
+              <option value="TB">{{store.app.locales=='zh'?'从上至下':'TB'}}</option>
+              <option value="BT">{{store.app.locales=='zh'?'从下至上':'BT'}}</option>
+              <option value="LR">{{store.app.locales=='zh'?'从左至右':'LR'}}</option>
+              <option value="RL">{{store.app.locales=='zh'?'从右至左':'RL'}}</option>
             </select>
           </div>
           <div>
-            <span class="label">对齐方式：</span>
+            <span class="label">{{store.app.locales=='zh'?'对齐方式:':'align'}}</span>
             <select v-model="atlas.layout.align" @change="updateLayoutType()" style="width:calc(100% - 80px)">
-              <option value="">中间对齐</option>
-              <option value="UL">对齐到左上角</option>
-              <option value="UR">对齐到右上角</option>
-              <option value="DL">对齐到左下角</option>
-              <option value="DR">对齐到右下角</option>
+              <option value="">{{store.app.locales=='zh'?'中间对齐:':'Center'}}</option>
+              <option value="UL">{{store.app.locales=='zh'?'对齐到左上角:':'UL'}}</option>
+              <option value="UR">{{store.app.locales=='zh'?'对齐到右上角:':'UR'}}</option>
+              <option value="DL">{{store.app.locales=='zh'?'对齐到左下角:':'DL'}}</option>
+              <option value="DR">{{store.app.locales=='zh'?'对齐到右下角:':'DR'}}</option>
             </select>
           </div>
         </div>
@@ -2037,33 +2037,33 @@
         <!--fruchterman参数-->
         <div v-if="atlas.layout.type=='fruchterman'">
           <div>
-            <span class="label">重力：</span>
+            <span class="label">{{store.app.locales=='zh'?'重力:':'gravity'}}</span>
             <input :title="atlas.layout.gravity" type="range" min="1" max="40" step="0.1" v-model.number="atlas.layout.gravity" @change="updateLayout"/>
           </div>
           <div>
-            <span class="label">速度：</span>
+            <span class="label">{{store.app.locales=='zh'?'速度:':'speed'}}</span>
             <input :title="atlas.layout.speed" style="" type="range" min="0.3" max="3" step="0.1" v-model.number="atlas.layout.speed" @change="updateLayout"/>
           </div>
         </div>
         <hr />
-        <span class="label">操作模式：</span>
+        <span class="label">{{store.app.locales=='zh'?'操作模式:':'Mode'}}</span>
         <select v-model="atlas.set.mode" style="width:calc(100% - 82px)"  @change="changeMode()">
-          <option value="浏览模式">浏览模式</option>
-          <option value="节点编辑">节点编辑</option>
-          <option value="添加链接">添加链接</option>
+          <option value="浏览模式">{{store.app.locales=='zh'?'浏览模式:':'Explorer'}}</option>
+          <option value="节点编辑">{{store.app.locales=='zh'?'节点编辑:':'Edit'}}</option>
+          <option value="添加链接">{{store.app.locales=='zh'?'添加链接:':'Link'}}</option>
         </select>
-        <span class="label">双击操作：</span>
+        <span class="label">{{store.app.locales=='zh'?'双击操作:':'DBClick'}}</span>
         <select v-model="store.app.clickToOpen" style="width:calc(100% - 82px)">
-          <option value="智能操作">智能操作</option>
-          <option value="本级，无分页">本级，无分页</option>
-          <option value="本级，有分页">本级，有分页</option>
-          <option value="上级，无分页">上级，无分页</option>
-          <option value="上级，有分页">上级，有分页</option>
+          <option value="智能操作">{{store.app.locales=='zh'?'智能操作:':'Smart'}}</option>
+          <option value="本级，无分页">{{store.app.locales=='zh'?'本级，无分页:':'Self,No Tab'}}</option>
+          <option value="本级，有分页">{{store.app.locales=='zh'?'本级，有分页:':'Self,Tab'}}</option>
+          <option value="上级，无分页">{{store.app.locales=='zh'?'上级，无分页:':'Up,No Tab'}}</option>
+          <option value="上级，有分页">{{store.app.locales=='zh'?'上级，有分页:':'Up,Tab'}}</option>
         </select>
-        <span class="label">路径变化：</span>
+        <span class="label">{{store.app.locales=='zh'?'路径变化:':'watchPath'}}</span>
         <select v-model="atlas.watchPath" style="width:calc(100% - 82px)">
-          <option value="1">监听</option>
-          <option value="0">不监听</option>
+          <option value="1">{{store.app.locales=='zh'?'监听:':'listen'}}</option>
+          <option value="0">{{store.app.locales=='zh'?'不监听:':'not listen'}}</option>
         </select>
         <!--<span >聚合重名：</span>
         <select v-model="AggregateDuplicates" style="width:calc(100% - 82px)" @change="InitGraph()">

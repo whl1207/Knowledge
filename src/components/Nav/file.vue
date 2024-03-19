@@ -220,7 +220,7 @@
 <template>
   <div class="bg">
     <div class="fixPanel">
-      <input v-model="filterText"  placeholder="搜索" />
+      <input v-model="filterText"  :placeholder="store.app.locales=='zh'?'搜索':'Search'" />
     </div>
     <!--文件列表-->
     <div class="content">
@@ -437,7 +437,7 @@
   
   .content{
     position: relative;
-    height: calc(100% - 48px);
+    height: calc(100% - 50px);
     float: center;
     overflow-y: auto;
     padding: 5px;

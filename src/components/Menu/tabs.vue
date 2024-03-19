@@ -47,11 +47,13 @@
     }
     const toggleView = function(){
         if(store.app.files.length>0){
-            if(store.app.files[store.app.fileIndex].attributes['推荐领域视图']!=undefined){
-                store.app.domainView=[store.app.files[store.app.fileIndex].attributes['推荐领域视图']]
-            }
-            if(store.app.files[store.app.fileIndex].attributes['推荐对象视图']!=undefined){
-                store.app.objectView=[store.app.files[store.app.fileIndex].attributes['推荐对象视图']]
+            if(store.app.files[store.app.fileIndex].attributes!=undefined){
+                if(store.app.files[store.app.fileIndex].attributes['推荐领域视图']!=undefined){
+                    store.app.domainView=[store.app.files[store.app.fileIndex].attributes['推荐领域视图']]
+                }
+                if(store.app.files[store.app.fileIndex].attributes['推荐对象视图']!=undefined){
+                    store.app.objectView=[store.app.files[store.app.fileIndex].attributes['推荐对象视图']]
+                }
             }
         }
     }

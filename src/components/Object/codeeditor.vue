@@ -131,43 +131,43 @@
         <div class="menu">
             <ul>
                 <li @click="" >
-                    <i class="fa fa-file-text"></i> 文件
+                    <i class="fa fa-file-text"></i> {{store.app.locales=='zh'?'文件':'file'}}
                     <ul>
                         <li @click="dispatchsave()">
-                            <i class="fa fa-floppy-o"></i> 保存
+                            <i class="fa fa-floppy-o"></i> {{store.app.locales=='zh'?'保存':'save'}}
                         </li>
                     </ul>
                 </li>
                 <li @click="" v-if="false">
-                    <i class="fa fa-legal"></i> 插入
+                    <i class="fa fa-legal"></i> {{store.app.locales=='zh'?'插入':'insert'}}
                     <ul>
                         <li @click="">
-                            <i class="fa fa-code"></i> 代码
+                            <i class="fa fa-code"></i> {{store.app.locales=='zh'?'代码':'code'}}
                         </li>
                         <li @click="">
-                            <i class="fa fa-file-image-o"></i> 图片
+                            <i class="fa fa-file-image-o"></i> {{store.app.locales=='zh'?'图片':'image'}}
                         </li>
                         <li @click="">
-                            <i class="fa fa-link"></i> 链接
+                            <i class="fa fa-link"></i> {{store.app.locales=='zh'?'链接':'link'}}
                         </li>
                     </ul>
                 </li>
                 <li @click="" >
-                    <i class="fa fa-adjust"></i> 主题
+                    <i class="fa fa-adjust"></i> {{store.app.locales=='zh'?'主题':'theme'}}
                     <ul>
                         <li @click="changeStyle('vs')">
-                            浅色
+                            {{store.app.locales=='zh'?'浅色':'vs'}}
                         </li>
                         <li @click="changeStyle('vs-dark')">
-                            深色
+                            {{store.app.locales=='zh'?'深色':'vs-dark'}}
                         </li>
                         <li @click="changeStyle('hc-black')">
-                            黑色
+                            {{store.app.locales=='zh'?'黑色':'hc-black'}}
                         </li>
                     </ul>
                 </li>
                 <li @click="" >
-                    <i class="fa fa-language"></i> 语言
+                    <i class="fa fa-language"></i> {{store.app.locales=='zh'?'语言':'language'}}
                     <ul>
                         <li @click="changeLanguage('markdown')">
                             markdown
@@ -181,7 +181,7 @@
                     </ul>
                 </li>
                 <li @click="" >
-                    <i class="fa fa-font"></i> 字体
+                    <i class="fa fa-font"></i> {{store.app.locales=='zh'?'字体':'font'}}
                     <ul>
                         <li @click="changeFont(12)">
                             12

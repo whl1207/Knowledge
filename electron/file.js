@@ -308,31 +308,35 @@ export default {
     getConfig(fullPath){
         const fs = require("fs")
         const path = require("path")
-        const yaml = require('js-yaml')
-        let isFolder=fs.statSync(fullPath).isDirectory()
-        fullPath = isFolder?(fullPath+"\\.readme.md"):(fullPath)
-        if(path.extname(fullPath)!='.md') return {}
-        let isFile = fs.existsSync(fullPath) //判断文件是否存在
-        if(isFile){
-            const fileContent = fs.readFileSync(fullPath, 'utf8')
-            const matches = fileContent.match(/^---\r?\n([\s\S]+?)\r?\n---/) // 如果找到匹配项，则解析YAML头
-            if (matches && matches.length > 1) {
-                 // 提取YAML头的内容
-                const yamlHeader = matches[1]
-                // 解析YAML头并返回结果
-                try {
-                    const headerObj = yaml.load(yamlHeader)
-                    return headerObj
-                } catch (error) {
-                    console.error('Failed to parse YAML header:', error)
-                    return {}
+        try {
+            const yaml = require('js-yaml');
+            let isFolder=fs.statSync(fullPath).isDirectory()
+            fullPath = isFolder?(fullPath+"\\.readme.md"):(fullPath)
+            if(path.extname(fullPath)!='.md') return {}
+            let isFile = fs.existsSync(fullPath) //判断文件是否存在
+            if(isFile){
+                const fileContent = fs.readFileSync(fullPath, 'utf8')
+                const matches = fileContent.match(/^---\r?\n([\s\S]+?)\r?\n---/) // 如果找到匹配项，则解析YAML头
+                if (matches && matches.length > 1) {
+                    // 提取YAML头的内容
+                    const yamlHeader = matches[1]
+                    // 解析YAML头并返回结果
+                    try {
+                        const headerObj = yaml.load(yamlHeader)
+                        return headerObj
+                    } catch (error) {
+                        console.error('Failed to parse YAML header:', error)
+                        return {}
+                    }
+                }else{
+                    return {}//不存在时返回默认配置
                 }
             }else{
                 return {}//不存在时返回默认配置
             }
-        }else{
-            return {}//不存在时返回默认配置
-        }
+        } catch (error) {
+            console.error('An error occurred while trying to load the js-yaml module:', error);
+        }        
     },
     //储存配置文件
     saveConfig (fullPath,data){

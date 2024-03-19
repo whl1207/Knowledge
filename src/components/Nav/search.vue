@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import { Ref,ref ,reactive,nextTick,watch,onMounted} from 'vue'
+  import { ref ,reactive,nextTick,watch,onMounted} from 'vue'
   import { usestore } from '../../store'
   import file from '../../../electron/file'
 
@@ -18,11 +18,6 @@
   //搜索并过滤文件
   let filterText = ref('')
   let timer = ref(null) as any
-  let ifMenu = ref(false)
-  let menuPosition=reactive({
-    x:0,
-    y:0
-  })
   //点击操作
   const open=(data:any)=>{
     store.addTab(data)
@@ -108,7 +103,7 @@
     <input v-model="filterText" class="search" placeholder="请输入搜索关键词" />
     <div class="type" v-if="store.app.environment!='web'">
       <div :class="[type=='本地'?'active':'']" @click="type='本地'">
-        <i class="fa fa-database"></i> 本地</div>
+        <i class="fa fa-database"></i> local</div>
       <div :class="[type=='云端'?'active':'']"  @click="type='云端'" v-if="store.app.network.length>0">
         <i class="fa fa-cloud"></i> 
         {{ store.app.network[store.app.networkIndex].name }}</div>
@@ -116,7 +111,7 @@
     <!--本地搜索结果-->
     <div class="content scoll" v-if="type=='本地'">
       <div style="width:100%;text-align: center;" v-if="ifloading">
-        <i class="fa fa-spinner fa-spin fa-1x"></i> 正在搜索
+        <i class="fa fa-spinner fa-spin fa-1x"></i>
       </div>
       <div class="panel" v-for="item,index in localResults" :key="index" @dblclick="open(item)">
         <div class="title">

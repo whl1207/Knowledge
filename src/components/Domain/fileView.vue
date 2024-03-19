@@ -144,7 +144,7 @@
   }
   //计算颜色
   const color =function(item:any){
-    if(item.attributes['颜色']!=undefined){
+    if(item.hasOwnProperty('颜色')){
       return item.attributes['颜色']
     }else{
       return 'var(--borderColor)'

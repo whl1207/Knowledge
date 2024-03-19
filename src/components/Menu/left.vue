@@ -27,6 +27,12 @@
     }
     store.resize() //触发缩放
   }
+  //关闭所有页面
+  const closeAll = function () {
+    if(store.app.files.length==0||store.app.fileIndex==-1) return
+    store.app.files=[]
+    store.app.fileIndex=-1
+  }
   //关闭其他页面
   const closeOther = function () {
     if(store.app.files.length==0||store.app.fileIndex==-1) return
@@ -49,11 +55,11 @@
                 <i class="fa fa-folder-open"></i> 仓库
               </li>
               <li @click="store.openFile()">
-                <i class="fa fa-folder-open"></i> 文件
+                <i class="fa fa-file-text"></i> 文件
               </li>
             </ul>
           </li>
-        <li  v-if="store.app.environment!='web'">
+        <li v-if="store.app.environment!='web'">
           <i class="fa fa-plus"></i> 创建
           <ul>
             <li @click="store.app.dialog='创建文件夹'">
@@ -81,6 +87,9 @@
         <li>
           <i class="fa fa-life-buoy"></i> 操作
           <ul>
+            <li @click="closeAll">
+              <i class="fa fa-bolt"></i> &nbsp; 关闭所有
+            </li>
             <li @click="closeOther">
               <i class="fa fa-bolt"></i> &nbsp; 保留当前
             </li>
@@ -99,7 +108,7 @@
       </ul>
     </div>
     <i @click="toggleDomainView('文件')" :class="[store.app.domainView.indexOf('文件')>-1?'active':'']" class="fa fa-folder show"></i>
-    <i @click="store.app.browser=!store.app.browser" class="iconfont show" style="padding-top:0px;" :class="[store.app.browser?'active':'']">&#xe697;</i>
+    <i @click="store.app.browser=!store.app.browser"  v-if="store.app.environment!='web'" class="iconfont show" style="padding-top:0px;" :class="[store.app.browser?'active':'']">&#xe697;</i>
     <i @click="domain=!domain" v-if="!domain" class="fa fa-superpowers show"></i>
     <div class="view" v-if="domain">
       <div>

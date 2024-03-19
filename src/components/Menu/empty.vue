@@ -35,56 +35,60 @@
 <template>
   <div class="App_empty">
     <div class="panels">
-      <div class="panel" style="width:100px">
-        <span> 基础视图</span>
-        <div class="base" @click="toggleDomainView('文件')" title="文件视图">
-          <i class="fa fa-folder" style="font-size: 30px;"></i>
-        </div>
-        <div class="base"  @click="store.app.browser=!store.app.browser"  title="网页视图">
-          <i class="iconfont" style="font-size: 30px;">&#xe697;</i>
+      <div style="padding:5px;margin-bottom: 5px;border:1px solid var(--borderColor);box-shadow:2px 2px 2px var(--menuColor);border-radius: 5px;text-align: left;">
+        <div>
+          <i class="fa fa-folder-open" @click="store.setStorePath()"></i> &nbsp;
+          <i class="fa fa-file-text" @click="store.openFile()"></i> &nbsp;
         </div>
       </div>
-      <div class="panel"  style="width:200px">
-        <span>领域视图</span>
+      <div class="panel">
+        <span class="header"><i class="fa fa-superpowers show"></i> {{store.app.locales=='zh'?'领域视图':'Domain View'}}</span>
+        <div class="views scoll">
           <div class="view" @click="toggleDomainView('甘特')" :class="[store.app.domainView.indexOf('甘特')>-1?'active':'']">
-            &nbsp;<i class="iconfont">&#xe672;</i>&nbsp; 甘特
+            &nbsp;<i class="iconfont">&#xe672;</i>&nbsp; <span>{{store.app.locales=='zh'?'甘特':'Gantt'}}</span>
           </div>
           <div class="view" @click="toggleDomainView('看板')" :class="[store.app.domainView.indexOf('看板')>-1?'active':'']">
-            &nbsp;<i class="fa fa-list-ul"></i>&nbsp; 看板
+            &nbsp;<i class="fa fa-list-ul"></i>&nbsp; <span>{{store.app.locales=='zh'?'看板':'Board'}}</span>
           </div>
           <div class="view" @click="toggleDomainView('日历')" :class="[store.app.domainView.indexOf('日历')>-1?'active':'']">
-            <i class="iconfont" style="font-size: 20px;">&#xe600;</i> 月历
+            <i class="iconfont" style="font-size: 20px;">&#xe600;</i> <span>{{store.app.locales=='zh'?'月历':'Month'}}</span>
           </div>
           <div class="view" @click="toggleDomainView('图谱')" :class="[store.app.domainView.indexOf('图谱')>-1?'active':'']">
-            <i class="iconfont"  style="font-size: 20px;">&#xe662;</i>&nbsp; 图谱
+            <i class="iconfont"  style="font-size: 20px;">&#xe662;</i>&nbsp;<span> {{store.app.locales=='zh'?'图谱':'Chart'}}</span>
           </div>
           <div class="view" @click="toggleDomainView('年日历')" :class="[store.app.domainView.indexOf('年日历')>-1?'active':'']">
-            &nbsp;<i class="fa fa-calendar"></i>&nbsp; 年历
+            &nbsp;<i class="fa fa-calendar"></i>&nbsp; <span>{{store.app.locales=='zh'?'年历':'Yearly'}}</span>
           </div>
           <div class="view" @click="toggleDomainView('地图')" :class="[store.app.domainView.indexOf('地图')>-1?'active':'']">
-            <i class="iconfont" style="font-size: 20px;">&#xe884;</i>&nbsp;地图
+            <i class="iconfont" style="font-size: 20px;">&#xe884;</i>&nbsp;<span>{{store.app.locales=='zh'?'地图':'Map'}}</span>
           </div>
           <div class="view" @click="toggleDomainView('表格')" :class="[store.app.domainView.indexOf('表格')>-1?'active':'']">
-            &nbsp;<i class="fa fa-table" ></i>&nbsp; 表格
+            &nbsp;<i class="fa fa-table" ></i>&nbsp; <span>{{store.app.locales=='zh'?'表格':'Table'}}</span>
           </div>
+        </div>
       </div>
-      <div class="panel"  style="width:100px">
-        <span>对象视图</span>
-        <ul>
-          <li @click="toggleObjectView('浏览')" :class="[store.app.objectView.indexOf('浏览')>-1?'active':'']">
-            <i class="fa fa-book"></i>&nbsp; 浏览
-          </li>
-          <li @click="toggleObjectView('导图')" :class="[store.app.objectView.indexOf('导图')>-1?'active':'']">
-            <i class="fa fa-map-o"></i>&nbsp;导图
-          </li>
-          <li @click="toggleObjectView('演示')" :class="[store.app.objectView.indexOf('演示')>-1?'active':'']">
-            <i class="fa fa-television"></i>&nbsp;演示
-          </li>
-          <li @click="toggleObjectView('编辑')" :class="[store.app.objectView.indexOf('编辑')>-1?'active':'']">
-            <i class="fa fa-code"></i>&nbsp;编辑
-          </li>
-        </ul>
+      <div class="panel">
+        <span class="header"><i class="fa fa-eye show"></i> {{store.app.locales=='zh'?'对象视图':'Object View'}}</span>
+        <div class="views scoll" style="padding:0px 50px">
+          <div class="view" @click="toggleObjectView('浏览')" :class="[store.app.objectView.indexOf('浏览')>-1?'active':'']">
+            <i class="fa fa-book"></i>&nbsp;<span>{{store.app.locales=='zh'?'浏览':'Browse'}}</span>
+          </div>
+          <div class="view" @click="toggleObjectView('导图')" :class="[store.app.objectView.indexOf('导图')>-1?'active':'']">
+            <i class="fa fa-map-o"></i>&nbsp;<span>{{store.app.locales=='zh'?'导图':'Mind Map'}}</span>
+          </div>
+          <div class="view" @click="toggleObjectView('演示')" :class="[store.app.objectView.indexOf('演示')>-1?'active':'']">
+            <i class="fa fa-television"></i>&nbsp;<span>{{store.app.locales=='zh'?'演示':'Presentation'}}</span>
+          </div>
+          <div class="view" @click="toggleObjectView('编辑')" :class="[store.app.objectView.indexOf('编辑')>-1?'active':'']">
+            <i class="fa fa-code"></i>&nbsp;<span>{{store.app.locales=='zh'?'编辑':'Edit'}}</span>
+          </div>
+        </div>
       </div>
+    </div>
+    
+    <div style="position: relative;width:100%;text-align: center;top: calc(50% - 100px);">
+      <span style="cursor: pointer;" @click="store.app.locales='zh'">中文</span>|
+      <span style="cursor: pointer;" @click="store.app.locales='en'">English</span>
     </div>
   </div>
 </template>
@@ -93,49 +97,45 @@
   .App_empty{
     flex:1;
     width:100%;
-    text-align: center;
-    vertical-align: middle;
+    height:100%;
     background-color: var(--backgroundColor);
     overflow: hidden;
-    z-index:-1
+    z-index:-1;
+    user-select: none;
   }
   .panels{
     position: relative;
-    transform:translate(-50%,-50%);
-    left:50%;
-    top:50%;
-    width:430px;
-    height:253px
-  }
-  .base{
-    position: relative;
-    width:calc(100% - 50px);
-    border:1px solid var(--borderColor);
-    border-radius: 5px;
-    margin:10px;
-    padding:15.5px;
-    line-height: 30px;
-    font-size: 30px;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width:450px;
+    max-width: calc(100% - 20px);
+    display: flex-direction;
   }
   .panel{
     position: relative;
-    margin-right:5px;
-    float:left;
+    margin-bottom:5px;
     border:1px solid var(--borderColor);
     box-shadow:2px 2px 2px var(--menuColor);
     border-radius: 5px;
   }
+  .views{
+    display: flex;
+    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
   .view{
-    width:calc(50% - 18px);
+    width:calc(100% - 18px);
     margin:4px;
     padding: 5px;
-    float: right;
     border-radius: 5px;
+    flex: 1;
   }
   .view:hover{
     background-color: var(--menuColor);
   }
-  span{
+  .header{
     width:calc(100% - 10px);
     background-color: var(--menuColor);
     border-bottom:1px solid var(--borderColor);

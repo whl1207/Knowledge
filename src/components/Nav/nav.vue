@@ -74,13 +74,13 @@
         color:var(--fontColor);
         background-color: var(--backgroundColor);
         min-width:41px;
-        max-width:calc(100% - 100px);
-        height:calc(100%  - 2px);
+        height:calc(100%  - 1px);
         padding:0px;
         opacity: 1;
         transition-property: width, opacity;
         border-left: var(--borderColor) 1px solid;
         border-right: var(--borderColor) 1px solid;
+        border-bottom: var(--borderColor) 1px solid;
         user-select: none;
         display: flex;
         flex-direction: row;
@@ -122,7 +122,8 @@
         padding-left:9px;
     }
     .content{
-        height:100%;width:calc(100% - 40px);
+        height:100%;
+        width:calc(100% - 40px);
         -webkit-app-region: no-drag;
     }
     .active{

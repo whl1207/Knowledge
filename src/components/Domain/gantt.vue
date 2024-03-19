@@ -44,7 +44,7 @@
         scale_height: 27,
         min_column_width:80,
         scales:[
-            {unit: "day", step: 1, format: "%M %d 日"}
+          {unit: "day", step: 1, format: store.app.locales=='zh'?"%M %d 日":"%M %d"}
         ]
       },
       {
@@ -53,12 +53,12 @@
          min_column_width:50,
          scales:[
           {unit: "week", step: 1, format: function (date:any) {
-           var dateToStr = gantt.date.date_to_str("%M %d 日");
+           var dateToStr = gantt.date.date_to_str(store.app.locales=='zh'?"%M %d 日":"%M %d");
            var endDate = gantt.date.add(date, 6, "day");
            var weekNum = gantt.date.date_to_str("%W")(date);
-           return "第" + weekNum + "周, " + dateToStr(date) + " - " + dateToStr(endDate);
-           }},
-           {unit: "day", step: 1, format: "%j %D"}
+           return store.app.locales=='zh'?("第" + weekNum + "周, "):(weekNum + " week, ") + dateToStr(date) + " - " + dateToStr(endDate);
+          }},
+          {unit: "day", step: 1, format: "%j %D"}
          ]
        },
        {
@@ -67,7 +67,7 @@
          min_column_width:120,
          scales:[
             {unit: "month", format: "%F, %Y"},
-            {unit: "week", format: "第%W周"}
+            {unit: "week", format: store.app.locales=='zh'?"第%W周":"%W"}
          ]
         },
         {
@@ -234,7 +234,7 @@
     init()
   })
   onMounted(() => {
-    gantt.i18n.setLocale("cn");
+    if(store.app.locales=='zh'){gantt.i18n.setLocale("cn");}else{gantt.i18n.setLocale("en");}
     gantt.config.step = 1;
     gantt.config.date_format = "%Y-%m-%d";
     gantt.config.sort = true; 
@@ -309,7 +309,7 @@
         <li @click="focusToday"><i class="fa fa-flag-o"></i></li>
         <li @click="scale('out')"><i class="fa fa-minus-square-o"></i></li>
         <li @click="scale('in')"><i class="fa fa-plus-square-o"></i></li>
-        <li @click="">扫描层级：{{ deep }}
+        <li @click="">{{store.app.locales=='zh'?'扫描层级:':'Scanning Level:'}}{{ deep }}
           <ul>
             <li @click="deep=1;init()">1</li>
             <li @click="deep=2;init()">2</li>

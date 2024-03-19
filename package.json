@@ -1,7 +1,7 @@
 {
   "name": "knowledge",
   "private": true,
-  "version": "3.8.19",
+  "version": "4.3.15",
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -19,11 +19,11 @@
     "concurrently": "^7.6.0",
     "electron": "^25.2.0",
     "electron-builder": "^24.5.2",
+    "js-yaml": "^4.1.0",
     "pinia": "^2.1.4",
     "typescript": "^4.5.4",
     "vite": "^2.9.16",
-    "vue": "^3.3.4",
-    "js-yaml": "^4.1.0"
+    "vue": "^3.3.4"
   },
   "build": {
     "appId": "com.whl.KM",
@@ -69,7 +69,6 @@
     "element-plus": "^2.2.10",
     "font-awesome-animation": "^1.1.1",
     "highlight.js": "^11.6.0",
-    "js-yaml": "^4.1.0",
     "leaflet": "^1.9.4",
     "markdown-it": "^13.0.1",
     "markdown-it-front-matter": "^0.2.3",

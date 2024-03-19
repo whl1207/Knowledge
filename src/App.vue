@@ -54,6 +54,10 @@
     })
   }
 
+  //全屏对话
+  const ifFullNav =function(){
+    return store.app.navWidth==document.body.clientWidth
+  }
   //初始化主题
   document.documentElement.style.setProperty("--backgroundColor",store.app.UI.backgroundColor);
   document.documentElement.style.setProperty("--menuColor",store.app.UI.menuColor);
@@ -152,9 +156,9 @@
         <i v-if="!store.app.showNav&&store.app.environment!='web'" class="fa fa-times" @click="ipcRenderer.send('closeWindow')"></i>
       </div>
       <div v-show="store.app.navView!=''&&store.app.showNav" id="resize1"></div>
-      <div class="App_bg" :style="{width:store.app.showNav?'calc(100% - '+store.app.navWidth+'px)':'100%'}">
+      <div class="App_bg" v-show="!ifFullNav()" :style="{width:store.app.showNav?'calc(100% - '+store.app.navWidth+'px)':'100%'}">
         <!--内容栏-->
-        <div class="App_loacl" v-show="store.app.domainView.length>0||(store.app.objectView.length>0&&store.app.files.length>0)" ref="loacl" :style="{top:!store.app.UI.isMenu?'0px':'',height:!store.app.UI.isMenu?'calc(100% - 1px)':''}">
+        <div class="App_loacl" v-show="(store.app.domainView.length>0&&store.app.path!='')||(store.app.objectView.length>0&&store.app.files.length>0)" ref="loacl" :style="{top:!store.app.UI.isMenu?'0px':'',height:!store.app.UI.isMenu?'calc(100% - 1px)':''}">
           <div class="App_domain" v-if="store.app.domainView.length>0&&(store.app.environment=='web'||(store.app.environment!='web'&&store.app.storePath!=''))" :style="{width:store.app.objectView.length!=0&&store.app.files.length>0?domainWidth+'px':'100%',maxWidth:store.app.objectView.length!=0&&store.app.files.length>0?'75%':'100%'}">
             <template v-for="(item,index) in store.app.domainView" :key="index">
               <fileView v-if="item=='文件'"/>
@@ -178,7 +182,10 @@
           </div>
         </div>
         <browser v-if="store.app.browser"/>
-        <empty v-if="((store.app.domainView.length==0&&store.app.objectView.length==0)||(store.app.domainView.length==0&&store.app.files.length==0)||(store.app.path==''&&store.app.files.length==0))&&!store.app.browser"/>
+        <empty v-if="((store.app.domainView.length==0&&store.app.objectView.length==0)||
+        (store.app.domainView.length==0&&store.app.files.length==0))
+        &&!store.app.browser"/>
+        <!--未选择视图时显示empty组件，未打开文件时显示empty组件，未选择仓库时显示-->
       </div>
       
       <dialogView v-if="store.app.dialog!=''"/>

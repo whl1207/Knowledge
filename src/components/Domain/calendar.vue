@@ -69,7 +69,7 @@
     setup(props) {
       const store = usestore()
       let attributes =ref([]) as any
-      let attribute =ref("结束时间")
+      let attribute =ref("开始时间")
       //获取节点属性
       const getAttributes = function(){
         // 获取所有属性

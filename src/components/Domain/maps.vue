@@ -250,7 +250,7 @@
         <div @click="config=false" title="关闭控制面板"><i class="fa fa-times"></i></div>
       </div>
       <div class="select">
-        <span>地图来源：</span>
+        <span>MAP URL</span>
         <select v-model="map.source">
           <option value="离线（卫星）">离线（卫星，gcj02）</option>
           <option value="高德地图（卫星）">高德地图（卫星，gcj02）</option>
@@ -273,17 +273,17 @@
         <input v-model="map.max"/>
       </div>
       <div class="select">
-        <span>跳转位置：</span>
+        <span>{{store.app.locales=='zh'?'跳转到':'Jump to :'}}</span>
         <input v-model="map.lat"/>
         <input v-model="map.lon"/>
         <div style="height:24px;padding:5px 10px;border: 1px solid var(--borderColor);" @click="go()"><i class="fa fa-map-pin"></i></div>
       </div>
       <div class="data scoll">
-        <table :key="nodes.length" style="width:100%">
+        <table :key="nodes.length" style="width:100%;text-align: center;">
           <tr>
-            <th>名称</th>
-            <th>纬度</th>
-            <th>经度</th>
+            <th>{{store.app.locales=='zh'?'名称':'Name'}}</th>
+            <th>{{store.app.locales=='zh'?'纬度':'Lat'}}</th>
+            <th>{{store.app.locales=='zh'?'经度':'Lon'}}</th>
             <th></th>
           </tr>
           <tr v-for="(item,index) in store.app.data.nodes" :key="index">

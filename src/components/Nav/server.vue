@@ -31,14 +31,14 @@
   <template>
     <div class="bg">
       <div class="panel">
-        <span style="margin-bottom: 5px;">共享知识库的位置：</span>
+        <span style="margin-bottom: 5px;">{{store.app.locales=='zh'?'共享位置':'Share Local'}}</span>
         <input class="path" style="" v-model="store.app.sharePath"/>
         <button class="selectPath" style="width:40px" @click="store.setSharePath()">
           <i class="fa fa-folder-open-o"></i>
         </button>
-        <button style="width:100%;" v-if="store.app.server.state==false" @click="openServer()">打开共享</button>
-        <button style="width:100%;" v-if="store.app.server.state==true&&closeing==false" @click="closeServer()">关闭共享</button>
-        <span style="margin-bottom: 5px;">共享密码：</span>
+        <button style="width:100%;" v-if="store.app.server.state==false" @click="openServer()">{{store.app.locales=='zh'?'打开服务':'Open Server'}}</button>
+        <button style="width:100%;" v-if="store.app.server.state==true&&closeing==false" @click="closeServer()">{{store.app.locales=='zh'?'关闭服务':'Close Server'}}</button>
+        <span style="margin-bottom: 5px;">{{store.app.locales=='zh'?'共享密匙':'Share Key'}}</span>
         <input type="password" v-model="store.app.server.password"/>
       </div>
       <div class="panel" style="height:calc(100% - 210px);overflow:hidden" v-if="store.app.logs.length>0">
