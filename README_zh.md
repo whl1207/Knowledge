@@ -14,7 +14,7 @@
 
 软件的界面如下图所示：
 
-![UI](ui.jpg)
+![ui](https://github.com/whl1207/Knowledge/assets/32924395/7eb5a5d6-e1b8-4f87-bc11-64c10ae22391)
 
 ## 2 软件开发方法
 
