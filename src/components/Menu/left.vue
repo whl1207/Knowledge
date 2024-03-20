@@ -49,66 +49,65 @@
     <div class="menu" v-if="op" @click="op=false">
       <ul>
         <li v-if="store.app.environment!='web'">
-          <i class="fa fa-folder-o"></i> 打开
+          <i class="fa fa-folder-o"></i> {{store.app.locales=='zh'?'打开':'Open'}}
             <ul>
               <li @click="store.setStorePath()">
-                <i class="fa fa-folder-open"></i> 仓库
+                <i class="fa fa-folder-open"></i> {{store.app.locales=='zh'?'仓库':'Lib'}}
               </li>
               <li @click="store.openFile()">
-                <i class="fa fa-file-text"></i> 文件
+                <i class="fa fa-file-text"></i> {{store.app.locales=='zh'?'文件':'File'}}
               </li>
             </ul>
           </li>
         <li v-if="store.app.environment!='web'">
-          <i class="fa fa-plus"></i> 创建
+          <i class="fa fa-plus"></i> {{store.app.locales=='zh'?'创建':'New'}}
           <ul>
             <li @click="store.app.dialog='创建文件夹'">
-              <i class="fa fa-folder"></i> 文件夹
+              <i class="fa fa-folder"></i> {{store.app.locales=='zh'?'文件夹':'Folder'}}
             </li>
             <li @click="store.app.dialog='创建文档'">
-              <i class="fa fa-file-text"></i> 文档
+              <i class="fa fa-file-text"></i> {{store.app.locales=='zh'?'文档':'md'}}
             </li>
             <li @click="store.app.dialog='创建白板'">
-              <i class="fa fa-file-o"></i> 白板
+              <i class="fa fa-file-o"></i> {{store.app.locales=='zh'?'白板':'wb'}}
             </li>
           </ul>
         </li>
         <li>
-          <i class="fa fa-adjust"></i> 主题
+          <i class="fa fa-adjust"></i> {{store.app.locales=='zh'?'主题':'Theme'}}
           <ul>
             <li @click="store.changeTheme('white')">
-              <i class="fa fa-sun-o"></i> 浅色主题
+              <i class="fa fa-sun-o"></i> {{store.app.locales=='zh'?'白色':'white'}}
             </li>
             <li @click="store.changeTheme('dark')">
-              <i class="fa fa-moon-o"></i> 深色主题
+              <i class="fa fa-moon-o"></i> {{store.app.locales=='zh'?'黑色':'dark'}}
             </li>
           </ul>
         </li>
         <li>
-          <i class="fa fa-life-buoy"></i> 操作
+          <i class="fa fa-life-buoy"></i> {{store.app.locales=='zh'?'其他':'Other'}}
           <ul>
             <li @click="closeAll">
-              <i class="fa fa-bolt"></i> &nbsp; 关闭所有
+              <i class="fa fa-bolt"></i> &nbsp; {{store.app.locales=='zh'?'关闭所有':'Close All'}}
             </li>
             <li @click="closeOther">
-              <i class="fa fa-bolt"></i> &nbsp; 保留当前
+              <i class="fa fa-bolt"></i> &nbsp; {{store.app.locales=='zh'?'保留当前':'Only One'}}
             </li>
             <li v-if="store.app.environment!='web'" @click="ipcRenderer.send('topWindow');isTop=!isTop;">
               <i class="fa fa-unlock-alt" v-if="!isTop"></i> &nbsp;
-              <i class="fa fa-lock" v-if="isTop"></i> 置顶窗口
+              <i class="fa fa-lock" v-if="isTop"></i>{{store.app.locales=='zh'?'置顶窗口':'Only One'}}
             </li>
             <li v-if="store.app.environment!='web'" @click="ipcRenderer.send('minWindow')">
-              <i class="fa fa-desktop"></i> 显示桌面
+              <i class="fa fa-desktop"></i> {{store.app.locales=='zh'?'显示桌面':'Desktop'}}
             </li>
           </ul>
         </li>
         <li v-if="store.app.environment!='web'" @click="ipcRenderer.send('closeWindow')">
-          <i class="fa fa-sign-out"></i> 关闭
+          <i class="fa fa-sign-out"></i> {{store.app.locales=='zh'?'关闭':'Close'}}
         </li>
       </ul>
     </div>
     <i @click="toggleDomainView('文件')" :class="[store.app.domainView.indexOf('文件')>-1?'active':'']" class="fa fa-folder show"></i>
-    <i @click="store.app.browser=!store.app.browser"  v-if="store.app.environment!='web'" class="iconfont show" style="padding-top:0px;" :class="[store.app.browser?'active':'']">&#xe697;</i>
     <i @click="domain=!domain" v-if="!domain" class="fa fa-superpowers show"></i>
     <div class="view" v-if="domain">
       <div>
@@ -134,6 +133,9 @@
       </div>
       <div @click="toggleDomainView('表格')" :class="[store.app.domainView.indexOf('表格')>-1?'active':'']">
         <i class="fa fa-table"></i>
+      </div>
+      <div @click="store.app.browser=!store.app.browser" v-if="store.app.environment!='web'" :class="[store.app.browser?'active':'']">
+        <i class="iconfont" style="font-size: 16px;">&#xe697;</i>
       </div>
     </div>
     <i @click="object=!object" v-if="!object" class="fa fa-eye show"></i>
@@ -204,7 +206,7 @@
     position: absolute;
     left: 41px;
     top: 40px;
-    width:70px;
+    width:80px;
     user-select: none;
     border-radius: 3px;
     background-color: var(--menuColor);
@@ -239,7 +241,7 @@
   }
   .menu li>ul{
     position: relative;
-    left: 65px;
+    left: 75px;
     top: -25px;
     width:fit-content;
     height: fit-content;

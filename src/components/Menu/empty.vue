@@ -131,6 +131,7 @@
     padding: 5px;
     border-radius: 5px;
     flex: 1;
+    text-align: center;
   }
   .view:hover{
     background-color: var(--menuColor);

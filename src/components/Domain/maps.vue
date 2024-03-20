@@ -252,28 +252,28 @@
       <div class="select">
         <span>MAP URL</span>
         <select v-model="map.source">
-          <option value="离线（卫星）">离线（卫星，gcj02）</option>
-          <option value="高德地图（卫星）">高德地图（卫星，gcj02）</option>
-          <option value="高德地图（简图）">高德地图（简图，gcj02）</option>
-          <option value="高德地图（矢量）">高德地图（矢量，gcj02）</option>
+          <option value="离线（卫星）">{{store.app.locales=='zh'?'离线（卫星，gcj02）':'Offline (Satellite, gcj02)'}}</option>
+          <option value="高德地图（卫星）">{{store.app.locales=='zh'?'高德地图（卫星，gcj02）':'Amap (satellite, gcj02)'}}</option>
+          <option value="高德地图（简图）">{{store.app.locales=='zh'?'高德地图（简图，gcj02）':'Amap (schematic, gcj02)'}}</option>
+          <option value="高德地图（矢量）">{{store.app.locales=='zh'?'高德地图（矢量，gcj02）':'Amap (vector, gcj02)'}}</option>
           <option value="ChinaOnlineCommunity_Mobile">ChinaOnlineCommunity_Mobile（gcj02）</option>
-          <option value="谷歌地图（街道）">谷歌地图（街道，gcj02）</option>
-          <option value="谷歌地图（卫星）">谷歌地图（卫星，wgs84）</option>
-          <option value="谷歌地图（地名）">谷歌地图（地名，gcj02）</option>
-          <option value="自定义">自定义</option>
+          <option value="谷歌地图（街道）">{{store.app.locales=='zh'?'谷歌地图（街道，gcj02）':'Google Maps (Street, gcj02)'}}</option>
+          <option value="谷歌地图（卫星）">{{store.app.locales=='zh'?'谷歌地图（卫星，wgs84）':'Google Maps (satellite, wgs84)'}}</option>
+          <option value="谷歌地图（地名）">{{store.app.locales=='zh'?'谷歌地图（地名，gcj02）':'Google Maps (place name, gcj02)'}}</option>
+          <option value="自定义">{{store.app.locales=='zh'?'自定义':'Custom'}}</option>
         </select>
       </div>
       <div class="select" v-if="map.source=='自定义'">
-        <span>瓦片地址：</span>
+        <span>{{store.app.locales=='zh'?'瓦片地址：':'Tile map Address:'}}</span>
         <input v-model="map.tileUrl"/>
       </div>
       <div class="select" v-if="map.source=='自定义'">
-        <span>缩放范围：</span>
+        <span>{{store.app.locales=='zh'?'缩放范围：':'Zoom range:'}}</span>
         <input v-model="map.min"/>
         <input v-model="map.max"/>
       </div>
       <div class="select">
-        <span>{{store.app.locales=='zh'?'跳转到':'Jump to :'}}</span>
+        <span>{{store.app.locales=='zh'?'跳转到':'Jump to:'}}</span>
         <input v-model="map.lat"/>
         <input v-model="map.lon"/>
         <div style="height:24px;padding:5px 10px;border: 1px solid var(--borderColor);" @click="go()"><i class="fa fa-map-pin"></i></div>
@@ -288,8 +288,8 @@
           </tr>
           <tr v-for="(item,index) in store.app.data.nodes" :key="index">
             <td>{{ item.name }}</td>
-            <td><span v-if="item.attributes.纬度!=undefined" :title="item.attributes.纬度">{{ item.attributes.纬度.toFixed(2) }}</span></td>
-            <td><span v-if="item.attributes.纬度!=undefined" :title="item.attributes.经度">{{ item.attributes.经度.toFixed(2) }}</span></td>
+            <td><span v-if="item.attributes!=undefined&&item.attributes.纬度!=undefined" :title="item.attributes.纬度">{{ item.attributes.纬度.toFixed(2) }}</span></td>
+            <td><span v-if="item.attributes!=undefined&&item.attributes.纬度!=undefined" :title="item.attributes.经度">{{ item.attributes.经度.toFixed(2) }}</span></td>
             <td><i class="fa fa-eye"></i></td>
           </tr>
         </table>

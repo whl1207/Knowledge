@@ -100,7 +100,7 @@
 
 <template>
   <div class="bg">
-    <input v-model="filterText" class="search" placeholder="请输入搜索关键词" />
+    <input v-model="filterText" class="search" :placeholder="store.app.locales=='zh'?'请输入搜索关键词':'keyword'" />
     <div class="type" v-if="store.app.environment!='web'">
       <div :class="[type=='本地'?'active':'']" @click="type='本地'">
         <i class="fa fa-database"></i> local</div>
