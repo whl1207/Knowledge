@@ -14,7 +14,7 @@ The platform is developed using Electron, with the frontend developed using Vue.
 
 The software interface is as shown in the figure below:
 
-![UI](ui.jpg)
+![UI](./ui.jpg)
 
 ## 2 Software Development Method
 
