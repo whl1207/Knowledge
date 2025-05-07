@@ -1,139 +1,164 @@
-# AI-KM
+# AI-KM Intelligent Knowledge Management Platform  
 
-This software provides a new set of tools for personal and organizational knowledge management and analysis.
+## Overview  
+AI-KM (Artificial Intelligence Knowledge Management) is a next-generation knowledge management platform that integrates cutting-edge AI technologies. Leveraging large language models and knowledge graph technologies, it helps individuals and organizations efficiently organize, deeply analyze, and intelligently apply knowledge.  
 
-## 1 Technical Solution
+## Core Value
+- **Intelligent Knowledge Processing**: Automatically parses, categorizes, and associates knowledge content  
+- **Multi-Dimensional Visualization**: Provides 6 view modes to display knowledge relationships  
+- **Open Model Integration**: Supports seamless switching between mainstream open-source large language models  
+- **Enterprise-Grade Security**: All data processing is performed locally  
 
-The platform is developed using Electron, with the frontend developed using Vue. Important modules used include Pania, Anvt-G6, Dhtmlx-Gantt, Markdown-it, Leaflet, pdfjs-dist, js-yaml, Monaco Editor, etc. This software has the following features:
+## Key Features  
 
-* Local data storage: Data is saved locally, ensuring good security.
-* Multiple views: Supported views include tree view, folder view, kanban, knowledge graph, Gantt chart, calendar, map, browser, editor, mind map, PPT, etc.
-* AI assistant: It can perform local analysis and interaction with the knowledge base by calling the Wenda large language model API.
-* TTS: It can interact with the AI assistant or read articles or novels by calling the GPT-SoVITE.
-* Distributed deployment: It can achieve distributed access and deployment in a local area network. Collaborative file sharing after opening data sharing on the client will be more convenient.
+### 1. Core Technical Architecture  
+- **Multi-Model Integration Engine**  
+  - Supports mainstream large language models deployed via the Ollama framework  
+  - Base models: Deepseek-R1, qwen3, LLaMA3.3, QWQ  
+  - Embedding models: nomic-embed-text, bge-m3  
+  - Multimodal models: Gemma3, Mistral-Small 3.1  
+  - Model performance monitoring panel (response time, token consumption, etc.)  
 
-The software interface is as shown in the figure below:
+- **Enhanced Retrieval System**  
+  - RAG (Retrieval-Augmented Generation) architecture  
+  - Hybrid retrieval strategy (semantic + keyword)  
+  - Supports customizable retrieval thresholds (default: CS ≥ 0.7 for strong relevance)  
+  - Retrieval result interpretability analysis  
 
-![ui](https://github.com/whl1207/Knowledge/assets/32924395/b9ab5707-33a3-4fa5-9536-8702b7e6cd11)
+- **Visual Workflow Engine**  
+  - Drag-and-drop AI processing pipeline construction  
+  - Pre-built templates with 3+ processing nodes  
+  - Workflow import/export  
 
-## 2 Software Development Method
+### 2. Intelligent Knowledge Processing  
+- **Content Parsing**  
+  - Deep Markdown parsing (supports GFM extended syntax)  
+  - Document structure analysis (heading hierarchy recognition)  
+  - Special handling for code blocks (30+ language support)  
 
-The development environment requires setting NODE_ENV = "development" in electron/main.js
+- **Knowledge Vectorization**  
+  - Dynamic chunking strategy (sliding window algorithm)  
+  - Multi-dimensional metadata extraction  
+  - Incremental update mechanism  
 
+- **Knowledge Association**  
+  - Automatically generates related questions (3-5 per knowledge fragment)  
+  - Cross-document reference detection  
+  - Similar content merging suggestions  
+
+- **Optimization Tools**  
+  - Retrieval effectiveness debugging console  
+  - Vector space visualization  
+  - Relevance feedback learning  
+
+### 3. Multi-View Collaboration System  
+
+| View Type       | Core Features                              | Use Cases                          |  
+|-----------------|-------------------------------------------|------------------------------------|  
+| Knowledge Graph | 3D force-directed graph layout<br>Dynamic relationship discovery | Knowledge discovery<br>Concept organization |  
+| Gantt Chart     | Timeline management<br>Progress tracking  | Project management<br>Learning plans |  
+| Mind Map        | Free node editing<br>Topic focus          | Brainstorming<br>Content creation  |  
+| Calendar View   | Schedule association<br>Daily knowledge cards | Personal management<br>Memory reinforcement |  
+| Geographic View | Geotagging<br>Spatial analysis           | Regional research<br>Field studies |  
+| Presentation Mode | Focus tracking<br>Animated transitions   | Knowledge presentation<br>Teaching and training |  
+
+## Installation and Deployment  
+
+### System Requirements  
+- Operating System: Windows 10+/macOS 12+/Linux (Ubuntu 20.04+)  
+- Hardware Configuration:  
+  - Minimum: 8GB RAM, 4-core CPU, 10GB storage  
+  - Recommended: 16GB+ RAM, dedicated GPU, 50GB+ storage  
+
+### Development Environment Setup  
+```shell  
+# Install dependencies  
+npm install  
+# Run in development mode  
+npm run dev  
+# Build Windows client  
+npm run build  
+# Generate installer  
+```
+
+
+# AI-KM 智能知识管理平台
+
+## 概述
+AI-KM（Artificial Intelligence Knowledge Management）是一个集成了前沿AI技术的下一代知识管理平台，通过大语言模型和知识图谱技术，帮助个人和组织实现知识的高效组织、深度分析和智能应用。
+
+## 核心价值
+- **智能知识处理**：自动解析、分类和关联知识内容
+- **多维度可视化**：提供6种视图模式呈现知识关系
+- **开放模型集成**：支持主流开源大语言模型自由切换
+- **企业级安全**：所有数据处理均在本地完成
+
+## 主要功能
+
+### 1. 核心技术架构
+- **多模型集成引擎**
+  - 支持 Ollama 框架部署的主流大语言模型
+  - 基础模型：Deepseek-R1、qwen3、LLaMA3.3、QWQ
+  - 嵌入模型：nomic-embed-text、bge-m3
+  - 多模态模型：Gemma3、Mistral-Small 3.1
+  - 模型性能监控面板（响应时间、token消耗等）
+
+- **增强检索系统**
+  - RAG（检索增强生成）架构
+  - 混合检索策略（语义+关键词）
+  - 支持自定义检索阈值（默认CS≥0.7为强相关）
+  - 检索结果可解释性分析
+
+- **可视化工作流引擎**
+  - 拖拽式AI处理流程构建
+  - 预置3+处理节点模板
+  - 工作流导入导出
+
+### 2. 智能知识处理
+- **内容解析**
+  - Markdown深度解析（支持GFM扩展语法）
+  - 文档结构分析（标题层级识别）
+  - 代码块特殊处理（30+语言支持）
+
+- **知识向量化**
+  - 动态分块策略（滑动窗口算法）
+  - 多维度元数据提取
+  - 增量更新机制
+
+- **知识关联**
+  - 自动生成关联问题（每个知识片段3-5个）
+  - 跨文档引用检测
+  - 相似内容合并建议
+
+- **优化工具**
+  - 检索效果调试台
+  - 向量空间可视化
+  - 相关性反馈学习
+
+### 3. 多视图协作系统
+| 视图类型 | 核心功能 | 适用场景 |
+|---------|--------|---------|
+| 知识图谱 | 3D力导向图布局<br>动态关系发现 | 知识发现<br>概念梳理 |
+| 甘特图 | 时间线管理<br>进度追踪 | 项目管理<br>学习计划 |
+| 思维导图 | 自由节点编辑<br>主题聚焦 | 头脑风暴<br>内容创作 |
+| 日历视图 | 日程关联<br>每日知识卡片 | 个人管理<br>记忆强化 |
+| 地理视图 | 地理标记<br>空间分析 | 区域研究<br>田野调查 |
+| 演示模式 | 焦点追踪<br>动画过渡 | 知识展示<br>教学培训 |
+
+## 安装与部署
+
+### 系统要求
+- 操作系统：Windows 10+/macOS 12+/Linux（Ubuntu 20.04+）
+- 硬件配置：
+  - 最低：8GB RAM，4核CPU，10GB存储
+  - 推荐：16GB+ RAM，独立GPU，50GB+存储
+
+### 开发环境配置
 ```shell
+# 安装依赖
 npm install
-npm run electron:serve
-```
-
-## 3 Software Packaging Method
-
-When packaging, set NODE_ENV = "other" in electron/main.js
-
-```shell
-npm run electron:build
-```
-
-## 4 Deployment of the Server
-
-### 4.1 Access to AI
-Please use the integration package in [Wenda](https://github.com/wenda-LLM/wenda), unzip the integration package, open the AI service, and fill in the address in the AI module.
-
-> This function requires a minimum of 6GB of VRAM on the server side.
-
-### 4.2 Access to TTS
-Please use the integration package in [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS), unzip the integration package, open the TTS service, and fill in the address in the AI module or article view.
-
-> This function requires a minimum of 2GB of VRAM on the server side.
-
-The link to the server integration package is: https://pan.baidu.com/s/1p3E77BJDBdqzmHGPlXDzyQ
-The extraction code for the integration package is: 8b9d
-
-## 5 Instructions for Use
-
-### 5.1 Basic Usage
-
-#### 5.1.1 Set Repository or Open MD File
-
-* Click on the icon in the top left corner (File | Open | Repository) to select the address for knowledge repository management.
-* Click on the icon in the top left corner (File | Open | File) to select and open an MD file.
-
-#### 5.1.2 Create New File
-
-* Click on the icon in the top left corner (New | Folder) to create a folder with a specified name in the current folder.
-* Click on the icon in the top left corner (New | File) to create an MD file with a specified name in the current folder, which is the main format used in this software.
-* Click on the icon in the top left corner (New | Whiteboard) to create a WB file with a specified name in the current folder, which is a whiteboard file.
-
-#### 5.1.3 Select Theme
-
-* Click on the icon in the top left corner (Theme | Light) to switch to a light theme.
-* Click on the icon in the top left corner (Theme | Dark) to switch to a dark theme.
-* You can also click on the settings button on the left to adjust specific parameters of the theme.
-
-#### 5.1.4 Other Basic Operations
-
-* Click on the icon in the top left corner (Other | Close All) to close all tabs.
-* Click on the icon in the top left corner (Other | Keep Current) to close all tabs except the currently open one.
-* Click on the icon in the top left corner (Other | Always on Top) to keep the software always on top.
-* Click on the icon in the top left corner (Other | Show Desktop) to minimize the software and show the desktop.
-* Click on the icon in the top left corner (Exit) to exit the software.
-
-#### 5.1.5 Quick View Selection
-
-At the top left, you can quickly select domain views and object views.
-
-* In domain views, you can choose from views such as kanban, knowledge graph, Gantt chart, monthly, yearly map, table, browser, etc.
-* In object views, you can choose from views like browse, edit, mind map, PPT, etc.
-
-### 5.2 File Tree Browser
-
-This feature can only be used after opening or creating a repository and allows management in a tree view format.
-
-* In the file tree, users can double-click on a file to open the corresponding tab. The software supports opening MD, PDF, HTML, JS, CSS, TS, PY, JSON, JPG, JPEG, PNG, WebP, MP4, WMV, AVI, MP3, M4A, WB file types; other file types will be opened using the computer's default software.
-* Within the file tree, users can perform operations like open, open with an external application, open the corresponding folder, copy, paste, etc.
-
-### 5.3 Accessing Data from Other Nodes
-
-This feature provides distributed access capability, allowing users to add other computers' IPs to access shared folders.
-
-* Click on the settings button to add the IP, name, and key of other computers, allowing you to add that node to frequently accessed nodes.
-* Click on the sync icon next to the node you want to access, enabling you to access the shared folder on the corresponding client. This operation requires the client to be open and sharing enabled.
-
-### 5.4 Multi-View Selection Module
-
-In this module, users can choose the type of view to use, including:
-
-* Domain views such as kanban, knowledge graph, Gantt chart, monthly, yearly map, table, etc.
-* Object views such as browse, edit, mind map, PPT, etc.
-
-Additionally, users can open a small window view and browse the required views in a small window.
-
-### 5.5 AI Assistant Module
-
-In this module, users can use the AI assistant for Q&A or specifically for MD or PDF files.
-
-* The AI assistant provides basic functions like normal conversation, summarization, guidance, testing, explanation, rewriting, continuation, translation, word games, etc.
-* Users can freely add required functions by specifying the role AI plays, the scene it is in, and the commands needed.
-* The AI assistant provides functions like related files, internet search, TTS with customizable voice settings, and NLP for compressing and searching based on natural language in associated data.
-
-> To use this module, you need to first use the integration package in [Wenda](https://github.com/wenda-LLM/wenda), open the AI server, and then set the corresponding server IP in the module's settings.
-
-> This module also supports TTS functionality, requiring configuration of the corresponding TTS service IP and voice settings to use.
-
-### 5.6 File Sharing Module
-
-In this module, you can select a folder to share and click "Open Share" to share the folder within the local area network. Other computers can access this shared folder by opening the client or web, setting the IP of the computer they want to access.
-
-When this module is not activated, the sharing mode will not be enabled, allowing for local knowledge management to enhance data security.
-
-### 5.7 Settings Module
-
-In this module, you can configure the following:
-
-* Software language, providing options for both Chinese and English interfaces.
-* Knowledge base location in the software.
-* Software theme, allowing for detailed configuration within this interface.
-* PPT dimensions.
-* Other interface configurations.
-* Other software operations like closing tabs, initializing, opening the command line, clearing the command line.
-
-License: CC BY-NC (Non-commercial use only)
+# 开发模式运行
+npm run dev
+# 构建Windows客户端
+npm run build
+# 生成安装包
