@@ -157,7 +157,7 @@
         }
     }
     // 推理单个切片问题
-    const reasoning = async function(i){
+    const reasoning = async function(i:any){
         blocks.value[i].Q='正在推理'
         let history = []
         history.push({role:'user',content:model.value.processPrompt+blocks.value[i].A})
