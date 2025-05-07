@@ -1,0 +1,341 @@
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+a {
+  font-weight: 500;
+  color: var(--fontActiveColor);
+  text-decoration: inherit;
+}
+a:hover {
+  color: var(--fontActiveColor);
+  opacity: 0.8;
+}
+a:link[target="_blank"] {
+  /* 样式定义 */
+  color: var(--fontActiveColor);
+}
+body {
+  margin: 0;
+  min-width: 120px;
+  min-height: 100vh;
+  color:var(--fontColor)
+}
+
+h1 {
+  font-size: 2.2em;
+  line-height: 1.0;
+  color:var(--fontActiveColor)
+}
+
+button {
+  border-radius: 0px;
+  border: 1px solid var(--borderColor);
+  padding: 0.2em 0.5em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: var(--menuColor);
+  color:var(--fontColor);
+  cursor: pointer;
+  transition: border-color 0.25s;
+  -webkit-app-region: no-drag;
+  margin-left: 0px;
+}
+button:hover {
+  background-color: var(--menuActiveColor);
+}
+select{
+  color:var(--fontColor);
+  background-color: var(--menuColor);
+  border:var(--borderColor) 1px solid;
+  height:31px;
+  border-radius:5px;
+  width:calc(100% - 10px);
+  font-size: 12px;
+  outline: none;
+  margin: 5px;
+}
+input{
+  width: calc(100% - 17px);
+  margin: 5px;
+  height:27px;
+  border-radius: 5px;
+  background-color:var(--menuColor);
+  border: 0px;
+  border:1px solid var(--borderColor);
+  color: var(--fontColor);
+}
+input:focus{
+  outline:none;
+}
+label{
+  line-height: 30px;
+  padding: 5px;
+}
+code {
+  padding: 2px 4px;
+  margin: 0 4px;
+  border-radius: 4px;
+}
+
+ul {
+  margin-left: 8px;
+  padding-left: 8px;
+}
+
+li {
+  padding-left: 3px;
+  cursor: pointer;
+}
+table{
+  width:100%;
+  background-color: var(--backgroundColor);
+  border-top: 1px solid var(--borderColor);
+  border-left: 1px solid var(--borderColor);
+  border-spacing: 0;
+}
+table td, table th{
+  border-bottom: 1px solid var(--borderColor);
+  border-right: 1px solid var(--borderColor);
+  height: 24px;
+  padding: 5px;
+}
+table thead th
+{
+  background-color: var(--menuColor);
+  color:var(--fontColor);
+}
+table tr:nth-child(odd)
+{
+  background: var(--backgroundColor);
+}
+
+hr{
+  border:1px solid var(--borderColor);
+  margin: 2px 0px;
+}
+textarea{
+  border-radius: 5px;
+  border: 1px solid var(--borderColor);
+  background-color: var(--backgroundColor);
+  color:var(--fontColor);
+  resize: none;
+  padding:5px;
+  width:calc(100%);
+}
+textarea:focus{
+  outline: none;
+}
+p{
+  margin-top: 0.2em;
+  margin-bottom: 0.2em;
+}
+
+#app {
+  margin: 0 auto;
+  color: var(--fontColor);
+}
+
+.container {
+  display: flex;
+  height: calc(100vh - 2px);
+  overflow: hidden;
+  width:100vw - 2px;
+  border: 1px solid var(--borderColor);
+  background-color: var(--backgroundColor);
+  border-radius: 0px;
+}
+
+.mainPanel { /*左侧面板*/
+  width: 300px;
+  height: 100vh;
+  max-height: calc(100vh);
+  overflow: hidden;
+  background-color: var(--menuColor);
+  transition: width 0.1s ease;
+  display: flex;
+}
+
+.mainPanel .panel-draggable{
+  margin-left: -1px;
+  width: 1px;
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 999;
+}
+.mainPanel .panel-draggable:hover{
+  background-color: var(--menuActiveColor);
+  opacity: 0.5;
+  margin-left: -5px;
+  width: 5px;
+}
+.mainPanel .panel-header{
+  height:100%;
+  width:38px;
+  display: flex;
+  cursor: pointer;
+  user-select: none;
+  flex-direction: column;
+  border-right: 1px solid var(--borderColor);
+  text-align: center;
+  font-size: 20px;
+}
+.panel-header div{
+  
+  height: 40px;
+  line-height: 40px;
+}
+.panel-header div:hover{
+  color:var(--fontActiveColor);
+  background-color: var(--menuColor);
+}
+
+.button{ /*按钮样式*/
+  margin:5px;
+  padding:3px 8px;
+  color:var(--fontColor);
+  border: 1px solid var(--borderColor);
+  width: fit-content;
+  display: inline-block;
+  height:23px;
+  border-radius: 5px;
+  -webkit-app-region: no-drag;
+  line-height: normal;
+  background-color: var(--menuColor);
+  margin-right: 0px;
+  text-align: center;
+  user-select: none;
+  cursor: pointer;
+}
+.button:hover{
+  background-color: var(--menuActiveColor);
+}
+.active{
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+  border-right: var(--fontActiveColor) 2px solid;
+}
+.mini-button{ /*按钮样式*/
+  margin:5px;
+  padding:3px 8px;
+  border: 1px solid var(--borderColor);
+  height:23px;
+  width:15px;
+  border-radius: 5px;
+  -webkit-app-region: no-drag;
+  line-height: normal;
+  background-color: var(--backgroundColor);
+  margin-right: 0px;
+  text-align: center;
+}
+.panel-hide { /*左侧面板隐藏*/
+  height: 0;
+  width: 0;
+  opacity:0;
+}
+
+.main { /*主面板*/
+  flex: 1;
+}
+/** 代码渲染样式和滑块样式*/
+.hljs{
+  border: 1px solid var(--borderColor);
+  padding:0px 5px;
+  margin:5px 0px;
+  overflow-x: auto;
+}
+.scoll::-webkit-scrollbar
+{  
+  width: 5px;
+  height:5px;
+}  
+.scoll::-webkit-scrollbar-track 
+{  
+  background-color:var(--menuColor);
+}
+.scoll::-webkit-scrollbar-thumb
+{
+  background-color:var(--fontActiveColor);
+}
+
+.el-tree {
+  --el-tree-node-content-height: 26px;
+  --el-tree-node-hover-bg-color: var(--el-fill-color-light);
+  --el-tree-text-color: var(--el-text-color-regular);
+  --el-tree-expand-icon-color: var(--el-text-color-placeholder);
+  background: var(--menuColor);
+  color: var(--fontColor);
+  cursor: default;
+  font-size: var(--el-font-size-base);
+  position: relative;
+}
+
+.el-tree-node:focus>.el-tree-node__content {
+  background-color: var(--menuColor);
+  color: var(--fontActiveColor);
+}
+
+.el-tree-node:hover>.el-tree-node__content {
+  background-color: var(--menuActiveColor);
+}
+ /**甘特图样式*/
+ .gantt_container, .gantt_tooltip,.gantt_grid_scale,.gantt_scale_cell,.gantt_task_cell,.gantt_cell,.gantt_cell_tree{
+  background-color: var(--backgroundColor) !important;
+  color:var(--fontColor) !important;
+}
+.gantt_row, .gantt_task_row{
+  border-bottom: 1px solid var(--borderColor) !important;
+}
+.gantt_task_line{
+  border: 1px solid var(--borderColor) !important;
+}
+.gantt_task_content{
+  background-color: var(--menuColor) !important;
+  color:var(--fontColor) !important;
+}
+.gantt_task_line.gantt_selected{
+  background-color: var(--menuActiveColor) !important;
+  box-shadow: 0 0 10px var(--fontActiveColor) !important;
+}
+.gantt_grid_head_cell{
+  background-color: var(--backgroundColor) !important;
+  color:var(--fontColor) !important;
+}
+.gantt_scale_cell,.gantt_task_cell{
+  border-right: 1px solid var(--borderColor) !important;
+}
+/** 滑块*/
+.gantt_task_vscroll{
+  background-color: var(--menuActiveColor) !important;
+}
+.gantt_hor_scroll::-webkit-scrollbar{
+  background-color: var(--menuActiveColor) !important;
+}
+.gantt_ver_scroll::-webkit-scrollbar {
+  background-color: var(--menuActiveColor) !important;
+}
+
+/* 定义滚动条轨道的背景颜色 */
+.gantt_hor_scroll::-webkit-scrollbar-track,.gantt_ver_scroll::-webkit-scrollbar-track {
+  background-color: var(--menuColor) !important;
+  border: 1px solid var(--borderColor);
+}
+
+/* 定义滚动条滑块的背景颜色 */
+.gantt_hor_scroll::-webkit-scrollbar-thumb,.gantt_ver_scroll::-webkit-scrollbar-thumb {
+  background-color: var(--fontActiveColor) !important;
+}
+
+/* 定义鼠标悬停在滑块上时的背景颜色 */
+.gantt_hor_scroll::-webkit-scrollbar-thumb:hover,.gantt_ver_scroll::-webkit-scrollbar-thumb:hover  {
+  background-color: var(--fontActiveColor) !important;
+}

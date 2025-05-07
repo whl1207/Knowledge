@@ -2,17 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" href="/icon.ico" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-eval';"><!--Electron安全策略-->
-    <base target=_blank>
-    <title>分布式知识管理</title>
+    <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline';" />
+    <title>AI Knowledge management Software</title>
     <link rel="stylesheet" type="text/css" href="/font-awesome/css/font-awesome.min.css">
     <link rel="stylesheet" href="/font-awesome/css/font-awesome-animation.min.css">
     <link rel="stylesheet" href="/iconfont/iconfont.css">
   </head>
-  <body class="scoll" style="margin:0px;height:100%;width:100%;">
-    <div id="app" style="height:100vh"></div>
+  <body>
+    <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

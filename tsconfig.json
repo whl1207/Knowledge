@@ -1,23 +1,20 @@
 {
   "compilerOptions": {
-    "target": "esnext",
+    "target": "ESNext",
     "useDefineForClassFields": true,
-    "module": "esnext",
-    "moduleResolution": "node",
+    "module": "ESNext",
+    "moduleResolution": "Node",
     "strict": true,
     "jsx": "preserve",
-    "allowJs": true,
-    "sourceMap": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "esModuleInterop": true,
-    "lib": ["esnext", "dom"],
+    "lib": ["ESNext", "DOM"],
     "skipLibCheck": true,
-    "outDir": "build",
-    "types": ["node", "vue"]
-    //"noImplicitAny":false//无法找到声明文件
+    "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"],
-  //"exclude": ["node_modules", "release/**/*","electron/**/*"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "include": ["src","globals.d.ts"],
+  "references": [
+    { "path": "./tsconfig.node.json" }
+  ]
 }

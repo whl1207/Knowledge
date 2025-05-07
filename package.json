@@ -1,98 +1,66 @@
 {
   "name": "knowledge",
+  "version": "5.4.18",
+  "main": "dist-electron/main/index.js",
+  "description": "AI Knowledge management Software",
+  "author": "whl",
+  "license": "MIT",
   "private": true,
-  "version": "4.3.15",
-  "main": "electron/main.js",
-  "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview",
-    "electron": "electron .",
-    "electron:bs": "npm run dev && vite build && electron .",
-    "electron:serve": "concurrently -k \"npm run dev\" \"npm run electron\"",
-    "electron:build": "vite build && electron-builder",
-    "electron:linux": "vite build && electron-builder --publish never --linux"
-  },
-  "devDependencies": {
-    "@antv/g6": "^4.8.17",
-    "@vitejs/plugin-vue": "^2.3.3",
-    "concurrently": "^7.6.0",
-    "electron": "^25.2.0",
-    "electron-builder": "^24.5.2",
-    "js-yaml": "^4.1.0",
-    "pinia": "^2.1.4",
-    "typescript": "^4.5.4",
-    "vite": "^2.9.16",
-    "vue": "^3.3.4"
-  },
-  "build": {
-    "appId": "com.whl.KM",
-    "productName": "知识管理",
-    "copyright": "Copyright © 2022 <nue.whl>",
-    "asar": true,
-    "asarUnpack": [
-      "config.json"
-    ],
-    "mac": {
-      "category": "public.app-category.utilities"
-    },
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "/public/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*"
-    ],
-    "directories": {
-      "buildResources": "assets",
-      "output": "release"
-    },
-    "extraResources": {
-      "from": "./config.json",
-      "to": "../"
+  "keywords": [
+    "AI",
+    "Knowledge",
+    "management"
+  ],
+  "debug": {
+    "env": {
+      "VITE_DEV_SERVER_URL": "http://127.0.0.1:3344/"
     }
   },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build && electron-builder",
+    "build-linux": "vue-tsc --noEmit && vite build && electron-builder --linux",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "electron": "^29.1.1",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.4.2",
+    "vite": "^5.1.5",
+    "vite-plugin-electron": "^0.28.4",
+    "vite-plugin-electron-renderer": "^0.14.5",
+    "vue": "^3.4.21",
+    "vue-tsc": "^2.0.6"
+  },
   "dependencies": {
-    "dhtmlx-gantt": "^8.0.4",
-    "element-plus": "^2.2.10",
-    "font-awesome-animation": "^1.1.1",
-    "highlight.js": "^11.6.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/leaflet": "^1.9.12",
+    "@types/markdown-it": "^14.1.2",
+    "d3": "^7.9.0",
+    "dhtmlx-gantt": "^8.0.9",
+    "draggable": "^4.2.0",
+    "element-plus": "^2.8.0",
+    "highlight.js": "^11.10.0",
+    "jsplumb": "^2.15.6",
     "leaflet": "^1.9.4",
-    "markdown-it": "^13.0.1",
-    "markdown-it-front-matter": "^0.2.3",
-    "markdown-it-katex": "^2.0.3",
-    "markdown-it-mark": "^3.0.1",
+    "localforage": "^1.10.0",
+    "mammoth": "^1.8.0",
+    "markdown-it": "^14.1.0",
+    "markdown-it-front-matter": "^0.2.4",
+    "markdown-it-mark": "^4.0.0",
     "markdown-it-mathjax3": "^4.3.2",
-    "markdown-it-replace-link": "^1.1.0",
     "markdown-it-toc-and-anchor": "^4.2.0",
-    "markmap": "^0.6.1",
-    "markmap-lib": "^0.14.3",
-    "markmap-view": "^0.14.3",
-    "mathjax": "^3.2.2",
-    "mime": "^3.0.0",
-    "monaco-editor": "^0.34.0",
-    "monaco-editor-webpack-plugin": "^7.0.1",
-    "node-nlp": "^4.27.0",
-    "nodejs-websocket": "^1.7.2",
-    "pdfjs-dist": "^3.9.179",
-    "reveal.js": "^4.4.0",
-    "speak-tts": "^2.0.8",
-    "tiny-whiteboard": "^0.1.9",
-    "uuid": "^9.0.0",
-    "vue": "^3.3.4",
-    "vue-audio-visual": "^3.0.1",
-    "ws": "^8.13.0"
+    "markmap-lib": "^0.17.0",
+    "markmap-view": "^0.17.0",
+    "ml-matrix": "^6.12.1",
+    "monaco-editor": "^0.50.0",
+    "ollama": "^0.5.14",
+    "pdfjs-dist": "^4.5.136",
+    "pinia": "^2.2.2",
+    "turndown": "^7.2.0",
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5"
   }
 }
