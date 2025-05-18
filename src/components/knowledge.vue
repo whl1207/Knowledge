@@ -11,7 +11,7 @@
     let blocks = ref([]) as any //知识库片段信息
     let panel = ref("管理") //显示模式，“管理”时显示知识库，“混合”时显示两个，“聊天”时只显示聊天
     let prompt = ref("") //默认问题
-    let result = ref("未推理") //推理结果
+    let result = ref(store.locales=="zh"?"未推理":"Unreasoned") //推理结果
     let kb_state = ref("") //支持库处理状态
     let ollama=null as any //服务
     let model = ref({
@@ -19,11 +19,11 @@
         list:[] as any,
         embed:"nomic-embed-text:latest", //嵌入模型
         process:"qwen2.5:latest", //知识库处理模型
-        processPrompt:"请根据如下资料，提出这些资料能够解答的若干个问题，不要返回其他表述。资料如下：", //知识库处理提示词
+        processPrompt:store.locales=="zh"?"请根据如下资料，提出这些资料能够解答的若干个问题，不要返回其他表述。资料如下：":"Based on the following information, please raise several questions that these materials can answer. Do not return any other expressions. The information is as follows:", //知识库处理提示词
         searchMethod:"余弦相似度", //按数量检索时，返回的知识片段个数
-        searchMode:"按匹配率", //检索模式：按数量/按匹配率
+        searchMode:"按数量", //检索模式：按数量/按匹配率
         matchRatio:0.58, //按匹配率检索时，返回的知识片段匹配率阈值
-        searchNum:5, //按数量检索时，返回的知识片段个数
+        searchNum:3, //按数量检索时，返回的知识片段个数
         searchCharacter:2500, //按字符检索时，限制的字符数量
         chat:"qwen2.5:latest", //聊天模型
         mdsIterations: 50, // MDS迭代次数
@@ -171,7 +171,7 @@
     //开始聊天
     const chat=async function(propmt:string){
         ollama = new Ollama({ host: model.value.url });
-        result.value="正在思考..."
+        result.value=store.locales=='zh'?"正在思考...":'Thinking...'
         // 计算问题的向量
         const queryResponse = await ollama.embed({
             model: model.value.embed,
@@ -217,7 +217,7 @@
             const queryData = {
                 x: queryPoint[0],
                 y: queryPoint[1],
-                label: "您的问题",
+                label: "Q",
                 p: 1,
                 isQuery: true
             };
@@ -244,9 +244,8 @@
             }
         }
         blocks.value.sort((a: any, b: any) => b.p - a.p);
-        // 其余代码保持不变...
         let history = []
-        let content = propmt+'。请根据参考资料解决以上问题，如果不相关可以忽略后续资料。'
+        let content = propmt+store.locales=="zh"?'。请根据参考资料解决以上问题，如果不相关可以忽略后续资料。':'. Please solve the above problems based on the reference materials. If they are not relevant, you can ignore the subsequent materials.'
         let num = 0;
         // 重置所有片段的匹配状态
         for (let i = 0; i < blocks.value.length; i++) {
@@ -286,7 +285,7 @@
             }
         }
         console.log(content)
-        result.value="正在思考，查询到"+num+"个资料。"
+        result.value=store.locales=='zh'?("正在思考，查询到"+num+"个资料。"):("Thinking and found "+num+" pieces of data.")
         //更新对话提示
         history.push({role:'user',content:content})
         //发送到ollama服务
@@ -458,7 +457,7 @@
                     .style('top', (event.pageY - 10) + 'px')
                     .html(`
                         <div><strong>${d.label}</strong></div>
-                        <div>相似度: ${(d.p*100).toFixed(1)}%</div>
+                        <div>${store.locales=='zh'?'相似度':'Similarity'}: ${(d.p*100).toFixed(1)}%</div>
                         <hr style="margin:5px 0;border-color:var(--borderColor);">
                         <div>${d.content || '无内容'}</div>
                     `);
@@ -497,7 +496,7 @@
             svg.append('text')
                 .attr('x', x(queryPoint.x) + 10)
                 .attr('y', y(queryPoint.y) - 10)
-                .text('您的问题')
+                .text('Q')
                 .attr('font-size', '12px')
                 .attr('fill', 'red');
         }
@@ -560,7 +559,7 @@
                 if (response >= 0 && response < kbs.length) {
                     let content = await window.ipcRenderer.invoke('readFile', kbs[response].path)
                     blocks.value = JSON.parse(content)
-                    kb_state.value = '已加载知识库: ' + kbs[response].label;
+                    kb_state.value = store.locales=='zh'?'已加载知识库: ':'Loaded knowledge base:' + kbs[response].label;
                 } else {
                     kb_state.value = '取消加载知识库，请对知识进行切片和初始化';
                 }
@@ -617,7 +616,7 @@
                 </div>
             </div>
             <div style="display: flex;width:calc(100% - 5px);padding-right: 5px;">
-                <input style="flex:2;margin-right: 0px;-webkit-app-region: no-drag;" phace v-model="prompt" placeholder="请输入问题"/>
+                <input style="flex:2;margin-right: 0px;-webkit-app-region: no-drag;" phace v-model="prompt" :placeholder="store.locales=='zh'?'请输入问题':'Please enter your question'"/>
                 <div class="button" @click="chat(prompt)"><i class="fa fa-send"></i> </div>
             </div>
             <div id="mds-chart-container" v-if="model.searchMethod=='MDS'" style="width:100%;height:200px;overflow: hidden;-webkit-app-region: no-drag; display: flex; justify-content: center; align-items: center;">
