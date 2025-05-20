@@ -3,6 +3,8 @@
 ## Overview
 AI-KM (Artificial Intelligence Knowledge Management) is a next-generation knowledge management platform that integrates cutting-edge AI technologies. Leveraging large language models and knowledge graph technologies, it helps individuals and organizations achieve efficient knowledge organization, in-depth analysis, and intelligent application.
 
+![Example](https://github.com/whl1207/Knowledge/blob/main/Example.jpg)
+
 ## Core Value
 - **Intelligent Knowledge Processing**: Automatically parses, queries, and associates knowledge content
 - **Multi-dimensional Visualization**: Provides 6 view modes to present knowledge relationships
