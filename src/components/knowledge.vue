@@ -5,7 +5,6 @@
     import {usestore} from '../store'
     import * as d3 from 'd3';
     import { Matrix,SingularValueDecomposition  } from 'ml-matrix';
-
     const store=usestore()
     let files = ref([]) as any //知识库文件信息
     let blocks = ref([]) as any //知识库片段信息
@@ -20,14 +19,21 @@
         embed:"nomic-embed-text:latest", //嵌入模型
         process:"qwen2.5:latest", //知识库处理模型
         processPrompt:store.locales=="zh"?"请根据如下资料，提出这些资料能够解答的若干个问题，不要返回其他表述。资料如下：":"Based on the following information, please raise several questions that these materials can answer. Do not return any other expressions. The information is as follows:", //知识库处理提示词
-        searchMethod:"余弦相似度", //按数量检索时，返回的知识片段个数
+        searchMethod:"CS", //按数量检索时，返回的知识片段个数
         searchMode:"按数量", //检索模式：按数量/按匹配率
         matchRatio:0.58, //按匹配率检索时，返回的知识片段匹配率阈值
         searchNum:3, //按数量检索时，返回的知识片段个数
         searchCharacter:2500, //按字符检索时，限制的字符数量
         chat:"qwen2.5:latest", //聊天模型
         mdsIterations: 50, // MDS迭代次数
-        mdsEpsilon: 0.1 // MDS收敛阈值
+        mdsEpsilon: 0.1, // MDS收敛阈值
+        pcaComponents: 2, // PCA主成分数量
+        tsnePerplexity: 30, // t-SNE 困惑度（通常建议5-50）
+        tsneIterations: 1000, // t-SNE 迭代次数
+        tsneLearningRate: 200, // t-SNE 学习率
+        umapNeighbors: 15, // UMAP 近邻数
+        umapMinDist: 0.1, // UMAP 最小距离
+        umapSpread: 1.0 // UMAP 分布参数
     })
     //现有的embedding模型列表
     let embeddingModelList = [
@@ -135,175 +141,316 @@
             kb_state.value = `处理失败`;
         }
     };
-    // 推理所有切片问题
-    const reasonings = async function(){
-        console.log("开始推理，共找到"+blocks.value.length+"个知识片段。")
-        for(let i = 0; i < blocks.value.length; i++){
-            console.log(i,blocks.value[i].Q)
-            if(blocks.value[i].Q!=='问题未推理'&&blocks.value[i].Q!=='') continue
-            console.log("开始推理，第"+i+"个知识片段。")
-            let history = []
-            //更新对话提示
-            history.push({role:'user',content:model.value.processPrompt+blocks.value[i].A})
-            //发送到ollama服务
-            ollama = new Ollama({host:  model.value.url})
-            console.log(ollama)
-            const response = await ollama.chat({ model: model.value.process, messages: history, stream: true })
-            blocks.value[i].Q = ""
-            //流式输出
+    // 推理单个切片问题
+    const reasoning = async function(i: number) {
+        blocks.value[i].Q = '正在推理';
+        let history = [{role: 'user', content: model.value.processPrompt + blocks.value[i].A}];
+        const ollama = new Ollama({host: model.value.url});
+        
+        try {
+            // 获取问题推理结果
+            const response = await ollama.chat({
+                model: model.value.process,
+                messages: history,
+                stream: true
+            });
+            
+            blocks.value[i].Q = "";
             for await (const part of response) {
-                blocks.value[i].Q=blocks.value[i].Q+part.message.content
+                blocks.value[i].Q += part.message.content;
             }
+
+            // 向量化处理
+            const embedResponse = await ollama.embed({
+                model: model.value.embed,
+                input: blocks.value[i].Q,
+                truncate: true,
+                keep_alive: "1h"
+            });
+            
+            if (!embedResponse?.embeddings?.[0]) {
+                throw new Error("向量化处理错误");
+            }
+            
+            // 检查向量维度一致性
+            if (blocks.value[i].A_vector?.length !== embedResponse.embeddings[0].length) {
+                console.warn(`向量维度不一致: A_vector=${blocks.value[i].A_vector?.length}, Q_vector=${embedResponse.embeddings[0].length}`);
+            }
+            
+            blocks.value[i].Q_vector = embedResponse.embeddings[0];
+        } catch (error) {
+            console.error("处理失败:", error);
+            blocks.value[i].Q_vector = [];
         }
     }
-    // 推理单个切片问题
-    const reasoning = async function(i:any){
-        blocks.value[i].Q='正在推理'
-        let history = []
-        history.push({role:'user',content:model.value.processPrompt+blocks.value[i].A})
-        ollama = new Ollama({host:  model.value.url})
-        const response = await ollama.chat({ model: model.value.process, messages: history, stream: true })
-        blocks.value[i].Q = ""
-        for await (const part of response) {
-            blocks.value[i].Q=blocks.value[i].Q+part.message.content
+
+    // 推理所有切片问题
+    const reasonings = async function() {
+        console.log(`开始推理，共找到${blocks.value.length}个知识片段。`);
+        for (let i = 0; i < blocks.value.length; i++) {
+            if (blocks.value[i].Q !== '问题未推理' && blocks.value[i].Q !== '') continue;
+            console.log(`开始推理第${i}个知识片段。`);
+            await reasoning(i);
         }
     }
     //开始聊天
-    const chat=async function(propmt:string){
+    const chat = async function(prompt: string) {
         ollama = new Ollama({ host: model.value.url });
-        result.value=store.locales=='zh'?"正在思考...":'Thinking...'
+        result.value = store.locales == 'zh' ? "正在思考..." : 'Thinking...'
+        
         // 计算问题的向量
         const queryResponse = await ollama.embed({
             model: model.value.embed,
-            input: propmt,
+            input: prompt,
             truncate: true,
             keep_alive: "1h",
         });
         const queryEmbedding = queryResponse.embeddings?.[0];
         
-        // 准备所有向量（包括问题）
-        const allVectors = blocks.value.map((b: any) => b.A_vector);
+        // 准备所有向量（包括问题和Q_vectors）
+        const allVectors = [];
+        const allBlocks = [] as Array<{ 
+            originalIndex: number, 
+            type: 'A' | 'Q', 
+            label: string, 
+            content: string 
+        }>;
+        
+        // 构建向量集合（添加唯一标识）
+        blocks.value.forEach((b: any, index: number) => {
+            // 添加A向量
+            allVectors.push(b.A_vector);
+            allBlocks.push({
+                originalIndex: index,
+                type: 'A',
+                label: b.label,
+                content: b.A
+            });
+            
+            // 如果有有效Q，也添加Q向量
+            if(b.Q.length > 0 && b.Q !== "问题未推理") {
+                allVectors.push(b.Q_vector);
+                allBlocks.push({
+                    originalIndex: index,
+                    type: 'Q',
+                    label: b.label,
+                    content: b.Q
+                });
+            }
+        });
+        
+        // 最后添加问题向量
         allVectors.push(queryEmbedding);
         
-        // 计算MDS降维结果
-        let mdsPoints: any[] = [];
+        // 计算相似度
         if (model.value.searchMethod === "MDS") {
+            // MDS降维
             const mdsResult = computeMDS(allVectors, model.value.mdsIterations, model.value.mdsEpsilon);
+            processDimensionalityReductionResults(mdsResult);
+        } else if(model.value.searchMethod === "MDS(M)") {
+            // 合并A和Q内容并计算嵌入向量
+            const mergedVectors = await computeMergedEmbeddings();
+            // 添加问题向量
+            mergedVectors.push(queryEmbedding);
+            // MDS降维
+            const mdsResult = computeMDS(mergedVectors, model.value.mdsIterations, model.value.mdsEpsilon);
+            processMergedDimensionalityReductionResults(mdsResult);
+        } else if(model.value.searchMethod === "PCA") {
+            // PCA降维
+            const pcaResult = computePCA(allVectors);
+            processDimensionalityReductionResults(pcaResult);
+        } else if (model.value.searchMethod === "CS(M)") {
+            // 合并A和Q内容并计算嵌入向量
+            const mergedVectors = await computeMergedEmbeddings();
             
-            // 提取问题点的坐标（最后一个点）
-            const queryPoint = mdsResult[mdsResult.length - 1];
-            
-            // 计算每个点与问题的距离（转换为相似度）
-            mdsPoints = blocks.value.map((block: any, i: number) => {
-                const point = mdsResult[i];
-                const dx = point[0] - queryPoint[0];
-                const dy = point[1] - queryPoint[1];
-                const distance = Math.sqrt(dx*dx + dy*dy);
-                
-                // 更新blocks的匹配度
-                block.p = 1 / (1 + distance);
-                
-                return {
-                    x: point[0],
-                    y: point[1],
-                    label: block.label,
-                    p: block.p,
-                    distance: distance,
-                    content: block.A // 添加片段内容
-                };
-            });
-            
-            // 添加问题点（不参与排序）
-            const queryData = {
-                x: queryPoint[0],
-                y: queryPoint[1],
-                label: "Q",
-                p: 1,
-                isQuery: true
-            };
-            
-            // 按相似度排序（仅对知识片段排序）
-            mdsPoints.sort((a, b) => b.p - a.p);
-            
-            // 绘制图表（包含排序后的点和问题点）
-            nextTick(() => {
-                const container = document.getElementById('mds-chart');
-                if (container) {
-                    // 合并排序后的点和问题点
-                    const pointsToDraw = [...mdsPoints.slice(0, 50), queryData];
-                    drawScatterPlot(container, pointsToDraw);
-                }
-            });
+            // 计算余弦相似度
+            for(let i = 0; i < blocks.value.length; i++) {
+                blocks.value[i].p = cosineSimilarity(queryEmbedding, mergedVectors[i]);
+            }
         } else {
-            // 原来的余弦相似度计算
+            // 传统的余弦相似度计算
             for(let i = 0; i < blocks.value.length; i++){
-                blocks.value[i].p = cosineSimilarity(queryEmbedding, blocks.value[i].A_vector);
-                if(blocks.value[i].Q_vector.length > 0){
-                    blocks.value[i].p = (blocks.value[i].p + cosineSimilarity(queryEmbedding, blocks.value[i].Q_vector)) / 2;
+                const similarities = [cosineSimilarity(queryEmbedding, blocks.value[i].A_vector)];
+                
+                if(blocks.value[i].Q.length > 0 && blocks.value[i].Q !== "问题未推理"){
+                    similarities.push(cosineSimilarity(queryEmbedding, blocks.value[i].Q_vector));
                 }
+                
+                // 计算平均相似度
+                blocks.value[i].p = similarities.reduce((a, b) => a + b, 0) / similarities.length;
             }
         }
+        
+        // 统一排序
         blocks.value.sort((a: any, b: any) => b.p - a.p);
-        let history = []
-        let content = propmt+store.locales=="zh"?'。请根据参考资料解决以上问题，如果不相关可以忽略后续资料。':'. Please solve the above problems based on the reference materials. If they are not relevant, you can ignore the subsequent materials.'
-        let num = 0;
-        // 重置所有片段的匹配状态
-        for (let i = 0; i < blocks.value.length; i++) {
-            blocks.value[i].state=false;
+        
+        // 绘制图表（如果是降维方法）
+        if (model.value.searchMethod === "MDS" || model.value.searchMethod === "PCA") {
+            drawVisualization();
         }
+        
+        // 知识片段召回
+        let history = [];
+        let content = prompt + ((store.locales == "zh") ? 
+            '。请根据参考资料解决以上问题，如果不相关可以忽略后续资料。' : 
+            '. Please solve the above problems based on the reference materials. If they are not relevant, you can ignore the subsequent materials.');
+        let num = 0;
+        
+        // 重置所有片段的匹配状态
+        blocks.value.forEach((b:any) => b.state = false);
+        
         // 按不同模式匹配
-        if(model.value.searchMode=="按数量"){
-            for (let i = 0; i < model.value.searchNum; i++) {
-                content += "《" + blocks.value[i].label + "》："
+        if(model.value.searchMode == "按数量"){
+            for (let i = 0; i < Math.min(model.value.searchNum, blocks.value.length); i++) {
+                content += "《" + blocks.value[i].label + "》：";
                 content += blocks.value[i].A + "。";
-                blocks.value[i].state=true;
+                blocks.value[i].state = true;
                 num++;
             }
-        }else if(model.value.searchMode=="按匹配率"){
+        } else if(model.value.searchMode == "按匹配率"){
             for (let i = 0; i < blocks.value.length; i++) {
                 if(blocks.value[i].p >= model.value.matchRatio) {
-                    content += "《" + blocks.value[i].label + "》："
+                    content += "《" + blocks.value[i].label + "》：";
                     content += blocks.value[i].A + "。";
-                    blocks.value[i].state=true;
+                    blocks.value[i].state = true;
                     num++;
                 } else {
                     break;
                 }
             }
-        }else if(model.value.searchMode=="按字符"){
+        } else if(model.value.searchMode == "按字符"){
             let currentLength = content.length;
             for (let i = 0; i < blocks.value.length; i++) {
                 const blockContent = "《" + blocks.value[i].label + "》：" + blocks.value[i].A + "。";
                 if (currentLength + blockContent.length <= model.value.searchCharacter) {
                     content += blockContent;
                     currentLength += blockContent.length;
-                    blocks.value[i].state=true;
+                    blocks.value[i].state = true;
                     num++;
                 } else {
                     break;
                 }
             }
         }
-        console.log(content)
-        result.value=store.locales=='zh'?("正在思考，查询到"+num+"个资料。"):("Thinking and found "+num+" pieces of data.")
-        //更新对话提示
-        history.push({role:'user',content:content})
-        //发送到ollama服务
-        ollama = new Ollama({host: model.value.url})
-        const response = await ollama.chat({ model: model.value.chat, messages: history, stream: true })
-        result.value = ""
-        //流式输出
+        
+        console.log(content);
+        result.value = store.locales == 'zh' ? 
+            `正在思考，查询到${num}个资料。` : 
+            `Thinking and found ${num} pieces of data.`;
+        
+        // 发送到ollama服务
+        history.push({ role: 'user', content: content });
+        ollama = new Ollama({ host: model.value.url });
+        const response = await ollama.chat({ 
+            model: model.value.chat, 
+            messages: history, 
+            stream: true 
+        });
+        
+        // 流式输出
+        result.value = "";
         for await (const part of response) {
-            result.value=result.value+part.message.content
+            result.value += part.message.content;
         }
-        return true
+        
+        return true;
+
+        // 辅助函数：处理降维结果
+        function processDimensionalityReductionResults(points: number[][]) {
+            const queryPoint = points[points.length - 1]; // 最后一个是查询点
+            const blockSimilarities = new Map<number, number[]>(); // 原始索引 -> 相似度数组
+            
+            // 计算每个block的相似度（不包括查询点）
+            for(let i = 0; i < allBlocks.length; i++) {
+                const originalIndex = allBlocks[i].originalIndex;
+                const point = points[i];
+                
+                const dx = point[0] - queryPoint[0];
+                const dy = point[1] - queryPoint[1];
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const similarity = 1 / (1 + distance);
+                
+                if(!blockSimilarities.has(originalIndex)) {
+                    blockSimilarities.set(originalIndex, []);
+                }
+                blockSimilarities.get(originalIndex)!.push(similarity);
+            }
+            
+            // 更新blocks.value中的相似度（取平均值）
+            blocks.value.forEach((block:any, index:any) => {
+                const similarities = blockSimilarities.get(index) || [];
+                block.p = similarities.length > 0 ? 
+                    similarities.reduce((a, b) => a + b, 0) / similarities.length : 
+                    0;
+            });
+        }
+        
+        // 辅助函数：绘制可视化
+        function drawVisualization() {
+            nextTick(() => {
+                const container = document.getElementById('mds-chart');
+                if (!container) return;
+                
+                // 准备前50个block的数据
+                const pointsToDraw = blocks.value.slice(0, 50).map((block:any) => ({
+                    x: block.A_vector[0], // 注意：实际应该使用降维后的坐标
+                    y: block.A_vector[1], // 这里简化处理，实际应用需要存储降维坐标
+                    label: block.label,
+                    p: block.p,
+                    content: block.A
+                }));
+                
+                // 添加查询点
+                pointsToDraw.push({
+                    x: 0, // 应该使用实际的查询点坐标
+                    y: 0,
+                    label: "Q",
+                    p: 1,
+                    isQuery: true
+                });
+                
+                drawScatterPlot(container, pointsToDraw);
+            });
+        }
+        
+        // 添加辅助函数：计算合并后的嵌入向量
+        async function computeMergedEmbeddings() {
+            const mergedVectors = [];
+            for (const block of blocks.value) {
+                // 合并A和Q内容
+                const mergedContent = block.A + (block.Q.length > 0 && block.Q !== "问题未推理" ? " " + block.Q : "");
+                // 计算合并内容的嵌入向量
+                const embedResponse = await ollama.embed({
+                    model: model.value.embed,
+                    input: mergedContent,
+                    truncate: true,
+                    keep_alive: "1h",
+                });
+                mergedVectors.push(embedResponse.embeddings?.[0]);
+            }
+            return mergedVectors;
+        }
+
+        // 添加辅助函数：处理合并后的降维结果
+        function processMergedDimensionalityReductionResults(points: number[][]) {
+            const queryPoint = points[points.length - 1]; // 最后一个是查询点
+                
+            // 计算每个block的相似度（不包括查询点）
+            for(let i = 0; i < blocks.value.length; i++) {
+                const point = points[i];
+                const dx = point[0] - queryPoint[0];
+                const dy = point[1] - queryPoint[1];
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                blocks.value[i].p = 1 / (1 + distance); // 直接使用距离的倒数作为相似度
+            }
+        }
     }
     
     // 计算余弦相似度
     function cosineSimilarity(vecA:number[], vecB:number[]) {
         // 确保向量长度相同
         if (vecA.length !== vecB.length) {
-            throw new Error("向量维度不匹配");
+            throw new Error(vecA.length+"/"+vecB.length+"向量维度不匹配");
         }
 
         // 计算点积
@@ -373,7 +520,49 @@
         
         return result;
     }
-
+    // 添加PCA计算函数
+    function computePCA(vectors: number[][]): number[][] {
+        const n = vectors.length;
+        if (n === 0) return [];
+        
+        // 创建矩阵
+        const matrix = new Matrix(vectors);
+        
+        // 中心化数据（减去均值）
+        const means = [];
+        for (let j = 0; j < matrix.columns; j++) {
+            let sum = 0;
+            for (let i = 0; i < matrix.rows; i++) {
+                sum += matrix.get(i, j);
+            }
+            means[j] = sum / matrix.rows;
+        }
+        
+        // 减去均值
+        for (let i = 0; i < matrix.rows; i++) {
+            for (let j = 0; j < matrix.columns; j++) {
+                matrix.set(i, j, matrix.get(i, j) - means[j]);
+            }
+        }
+        
+        // 计算协方差矩阵
+        const covMatrix = matrix.transpose().mmul(matrix).mul(1 / (matrix.rows - 1));
+        
+        // 计算特征值和特征向量
+        const svd = new SingularValueDecomposition(covMatrix);
+        const eigenvectors = svd.leftSingularVectors;
+        
+        // 取前两个主成分
+        const result: number[][] = [];
+        for (let i = 0; i < matrix.rows; i++) {
+            const row = matrix.getRow(i);
+            const pc1 = row.reduce((sum, val, j) => sum + val * eigenvectors.get(j, 0), 0);
+            const pc2 = row.reduce((sum, val, j) => sum + val * eigenvectors.get(j, 1), 0);
+            result.push([pc1, pc2]);
+        }
+        
+        return result;
+    }
     // 添加绘制散点图函数
     function drawScatterPlot(container: HTMLElement, points: {x: number, y: number, label: string, p: number, isQuery?: boolean, content?: string}[]) {
         // 清空容器
@@ -527,46 +716,54 @@
             })
     }
     // 读取处理后的知识库
-    const load = async function(){
-        //获取文件信息
-        if(store.root=='') return
-        let { fileList, relationList } = await window.ipcRenderer.invoke("getFilesRelation", store.root, 1)
-        const kbs = fileList.filter((file:any)=>file.path.endsWith('.kb'))
+    const load = async function() {
+        if (store.root === '') return;
         
-        if(kbs.length>0){
-            kb_state.value = '在文件夹中读取到'+kbs.length+'个知识库';
+        try {
+            // 获取文件信息（添加错误处理）
+            const result = await window.ipcRenderer.invoke("getFilesRelation", store.root, 1);
+            if (!result) {
+                kb_state.value = '获取文件信息失败';
+                return;
+            }
+
+            const { fileList = [], relationList = [] } = result;
+            const kbs = fileList.filter((file: any) => file.path.endsWith('.kb'));
+            
+            if (kbs.length === 0) {
+                kb_state.value = '文件夹中没有找到知识库文件';
+                return;
+            }
+
+            kb_state.value = '在文件夹中读取到' + kbs.length + '个知识库';
             
             // 创建对话框选项
             const options = {
                 type: 'question',
-                buttons: [...kbs.map((file:any) => file.label), '取消'], // 添加取消按钮
+                buttons: [...kbs.map((file: any) => file.label), '取消'],
                 defaultId: 0,
                 title: '选择知识库',
                 message: '请选择要加载的知识库文件:',
                 detail: '检测到多个知识库文件，请选择其中一个加载'
             };
             
-            try {
-                // 显示对话框并等待用户选择
-                const { response } = await window.ipcRenderer.invoke('showDialog', options);
-                
-                // 检查用户是否点击了取消按钮
-                if (response === kbs.length) { // 取消按钮是最后一个选项
-                    kb_state.value = '取消加载知识库，请对知识进行切片和初始化';
-                    return; // 直接返回，不加载任何文件
-                }
-                
-                if (response >= 0 && response < kbs.length) {
-                    let content = await window.ipcRenderer.invoke('readFile', kbs[response].path)
-                    blocks.value = JSON.parse(content)
-                    kb_state.value = store.locales=='zh'?'已加载知识库: ':'Loaded knowledge base:' + kbs[response].label;
-                } else {
-                    kb_state.value = '取消加载知识库，请对知识进行切片和初始化';
-                }
-            } catch (error) {
-                console.error('加载知识库出错:', error);
-                kb_state.value = '加载知识库出错';
+            const dialogResult = await window.ipcRenderer.invoke('showDialog', options);
+            
+            // 检查用户是否取消
+            if (dialogResult.response === kbs.length) {
+                kb_state.value = '取消加载知识库';
+                return;
             }
+
+            // 检查选择的索引是否有效
+            if (dialogResult.response >= 0 && dialogResult.response < kbs.length) {
+                const content = await window.ipcRenderer.invoke('readFile', kbs[dialogResult.response].path);
+                blocks.value = JSON.parse(content);
+                kb_state.value = (store.locales === 'zh' ? '已加载知识库: ' : 'Loaded knowledge base: ') + kbs[dialogResult.response].label;
+            }
+        } catch (error) {
+            console.error('加载知识库出错:', error);
+            kb_state.value = '加载知识库出错: ' + error;
         }
     }
     const init= async function() {
@@ -599,17 +796,24 @@
                         {{ option.name }} ({{ (option.size/1024/1024/1024).toFixed(2)+'GB' }})
                     </option>
                 </select>
-                <select v-model="model.searchMethod" style="width:72px;height:32px;margin: 5px 0px 5px 5px;-webkit-app-region: no-drag;" @click="getModel()">
-                    <option value="余弦相似度">{{store.locales=='zh'?'余弦相似度':'Cosine similarity'}}</option>
+                <select v-model="model.searchMethod" style="width:60px;height:32px;margin: 5px 0px 5px 5px;-webkit-app-region: no-drag;" @click="getModel()">
+                    <option value="CS">CS</option>
+                    <option value="CS(M)">CS(M)</option>
                     <option value="MDS">MDS</option>
+                    <option value="MDS(M)">MDS(M)</option>
+                    <option value="PCA">PCA</option>
+                    <!--
+                        <option value="t-SNE">t-SNE</option>
+                        <option value="UMAP">UMAP</option>
+                    -->
                 </select>
-                <select v-model="model.searchMode" style="width:72px;height:32px;margin: 5px 0px 5px 5px;-webkit-app-region: no-drag;" @click="getModel()">
-                    <option value="按匹配率">{{store.locales=='zh'?'按匹配率':'Matching rate'}}</option>
-                    <option value="按数量">{{store.locales=='zh'?'按数量':'Quantity'}}</option>
-                    <option value="按字符">{{store.locales=='zh'?'按字符':'Character'}}</option>
+                <select v-model="model.searchMode" style="width:60px;height:32px;margin: 5px 0px 5px 5px;-webkit-app-region: no-drag;" @click="getModel()">
+                    <option value="按匹配率">{{store.locales=='zh'?'匹配率':'Matching rate'}}</option>
+                    <option value="按数量">{{store.locales=='zh'?'数量':'Quantity'}}</option>
+                    <option value="按字符">{{store.locales=='zh'?'字符':'Character'}}</option>
                 </select>
                 <input type="number" style="width:45px;margin-right: 0px;-webkit-app-region: no-drag;" v-if="model.searchMode=='按匹配率'" v-model="model.matchRatio"/>
-                <input type="number" style="width:45px;margin-right: 0px;-webkit-app-region: no-drag;" v-if="model.searchMode=='按数量'" v-model="model.searchNum"/>
+                <input type="number" style="width:35px;margin-right: 0px;-webkit-app-region: no-drag;" v-if="model.searchMode=='按数量'" v-model="model.searchNum"/>
                 <input type="number" style="width:45px;margin-right: 0px;-webkit-app-region: no-drag;" v-if="model.searchMode=='按字符'" v-model="model.searchCharacter"/>
                 <div class="button" title="打开对话界面" @click="panel=='混合'?panel='聊天':panel='混合'" :class="{active:panel=='混合'}">
                     <i class="fa fa-stack-overflow" ></i>
