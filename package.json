@@ -73,7 +73,7 @@
     "monaco-editor": "^0.50.0",
     "ollama": "^0.6.3",
     "pdfjs-dist": "^4.10.38",
-    "pinia": "^2.2.2",
+    "pinia": "^3.0.4",
     "tsne-js": "^1.0.3",
     "turndown": "^7.2.0",
     "umap-js": "^1.4.0",
