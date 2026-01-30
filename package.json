@@ -67,7 +67,7 @@
     "markdown-it-mark": "^4.0.0",
     "markdown-it-mathjax3": "^4.3.2",
     "markdown-it-toc-and-anchor": "^4.2.0",
-    "markmap-lib": "^0.17.0",
+    "markmap-lib": "^0.18.12",
     "markmap-view": "^0.17.0",
     "ml-matrix": "^6.12.1",
     "monaco-editor": "^0.50.0",
