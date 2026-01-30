@@ -72,7 +72,7 @@
     "ml-matrix": "^6.12.1",
     "monaco-editor": "^0.50.0",
     "ollama": "^0.6.3",
-    "pdfjs-dist": "^4.10.38",
+    "pdfjs-dist": "^5.4.530",
     "pinia": "^2.2.2",
     "tsne-js": "^1.0.3",
     "turndown": "^7.2.0",
