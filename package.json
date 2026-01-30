@@ -70,7 +70,7 @@
     "markmap-lib": "^0.17.0",
     "markmap-view": "^0.17.0",
     "ml-matrix": "^6.12.1",
-    "monaco-editor": "^0.50.0",
+    "monaco-editor": "^0.55.1",
     "ollama": "^0.6.3",
     "pdfjs-dist": "^4.10.38",
     "pinia": "^2.2.2",
