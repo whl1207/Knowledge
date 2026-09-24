@@ -1,0 +1,12 @@
+// 编辑器（VS Code TS 服务）只自动发现名为 tsconfig.json 的配置：
+// 主进程原先只用根目录的 tsconfig.node.json（非标准文件名，且未被 references 引用），
+// 于是 electron/** 在编辑器里被当成「推断项目」（默认 node10 解析）→
+// import from 'node:crypto' / 'node:fs' 会报「找不到名称…是否需要安装 @types/node」。
+//
+// 这里让 electron/ 下的文件关联到主进程项目（继承根目录 tsconfig.node.json，含 types: ["node"]）。
+// 命令行类型校验仍用根配置，行为不变：
+//   npx tsc -p tsconfig.node.json --noEmit
+{
+  "extends": "../tsconfig.node.json",
+  "include": ["**/*.ts", "**/*.tsx"]
+}

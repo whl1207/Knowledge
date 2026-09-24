@@ -1,9 +1,10 @@
 {
   "name": "knowledge",
-  "version": "6.6.1",
+  "version": "6.9.21",
   "main": "dist-electron/main/index.js",
   "description": "AI Knowledge management Software",
   "author": "whl",
+  "homepage": "https://github.com/whl1207/Knowledge",
   "license": "MIT",
   "private": true,
   "keywords": [
@@ -20,28 +21,199 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build && electron-builder",
+    "build": "vue-tsc --noEmit && vite build && electron-builder --dir && node scripts/rename-unpacked.mjs",
+    "build:dist": "vue-tsc --noEmit && vite build && electron-builder && node scripts/rename-unpacked.mjs",
+    "build-portable": "vue-tsc --noEmit && vite build && electron-builder --win portable && node scripts/rename-unpacked.mjs",
     "build-linux": "vue-tsc --noEmit && vite build && electron-builder --linux",
     "preview": "vite preview"
   },
   "build": {
     "appId": "com.whl.aikm",
-    "productName": "aikm",
+    "productName": "AI-KM",
     "directories": {
       "output": "release"
     },
     "asar": true,
     "compression": "maximum",
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
     "win": {
-      "target": "portable",
-      "icon": "public/icon.png"
-    }
+      "target": "nsis",
+      "icon": "public/icon.png",
+      "artifactName": "${productName}_v${version}_Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icons",
+      "category": "Utility",
+      "maintainer": "whl",
+      "artifactName": "${productName}-Linux-${version}-${arch}.${ext}"
+    },
+    "fileAssociations": [
+      {
+        "ext": [
+          "kb"
+        ],
+        "name": "AI-KM Knowledge Base",
+        "description": "AI-KM Knowledge Base",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "md",
+          "markdown",
+          "mdown",
+          "mkd"
+        ],
+        "name": "Markdown Document",
+        "description": "Markdown Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "txt",
+          "log"
+        ],
+        "name": "Plain Text Document",
+        "description": "Plain Text Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "json",
+          "jsonc"
+        ],
+        "name": "JSON Document",
+        "description": "JSON Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "html",
+          "htm"
+        ],
+        "name": "HTML Document",
+        "description": "HTML Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "css",
+          "scss",
+          "less"
+        ],
+        "name": "Stylesheet",
+        "description": "Stylesheet",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "xml"
+        ],
+        "name": "XML Document",
+        "description": "XML Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "yaml",
+          "yml"
+        ],
+        "name": "YAML Document",
+        "description": "YAML Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "toml"
+        ],
+        "name": "TOML Document",
+        "description": "TOML Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "csv"
+        ],
+        "name": "CSV Document",
+        "description": "CSV Document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "ts",
+          "tsx",
+          "vue"
+        ],
+        "name": "TypeScript Source File",
+        "description": "TypeScript / Vue Source File",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "java",
+          "c",
+          "h",
+          "cpp",
+          "hpp",
+          "cs",
+          "go",
+          "rs",
+          "sql"
+        ],
+        "name": "Source Code File",
+        "description": "Source Code File",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "excalidraw"
+        ],
+        "name": "Excalidraw Drawing",
+        "description": "Excalidraw Whiteboard Drawing",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "drawio",
+          "dio"
+        ],
+        "name": "draw.io Diagram",
+        "description": "draw.io Diagram",
+        "role": "Editor"
+      }
+    ]
   },
   "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@types/turndown": "^5.0.6",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-vue": "^5.0.4",
-    "electron": "^29.1.1",
+    "electron": "^30.5.1",
     "electron-builder": "^24.13.3",
-    "typescript": "^5.4.2",
     "vite": "^5.1.5",
     "vite-plugin-electron": "^0.28.4",
     "vite-plugin-electron-renderer": "^0.14.5",
@@ -49,12 +221,12 @@
     "vue-tsc": "^2.0.6"
   },
   "dependencies": {
+    "@excalidraw/excalidraw": "^0.17.6",
     "@modelcontextprotocol/sdk": "^1.25.3",
     "@types/js-yaml": "^4.0.9",
     "@types/leaflet": "^1.9.12",
     "@types/markdown-it": "^14.1.2",
     "d3": "^7.9.0",
-    "dhtmlx-gantt": "^8.0.9",
     "draggable": "^4.2.0",
     "element-plus": "^2.8.0",
     "highlight.js": "^11.10.0",
@@ -69,18 +241,28 @@
     "markdown-it-toc-and-anchor": "^4.2.0",
     "markmap-lib": "^0.17.0",
     "markmap-view": "^0.17.0",
+    "mermaid": "^11.16.0",
     "ml-matrix": "^6.12.1",
     "monaco-editor": "^0.50.0",
-    "node-llama-cpp": "^3.18.1",
     "ollama": "^0.6.3",
+    "onnxruntime-web": "^1.27.0",
     "pdfjs-dist": "^4.10.38",
+    "pg": "^8.23.0",
     "pinia": "^2.2.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sherpa-onnx": "^1.13.5",
+    "sql.js": "^1.14.2",
     "tsne-js": "^1.0.3",
     "turndown": "^7.2.0",
+    "typescript": "^5.4.2",
     "umap-js": "^1.4.0",
     "vue-pdf-embed": "^2.1.3",
     "vuedraggable": "^4.1.0",
     "ws": "^8.18.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "y-monaco": "^0.1.6",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.32"
   }
 }

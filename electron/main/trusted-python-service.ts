@@ -8,6 +8,17 @@ import { app } from 'electron'
 
 const execAsync = promisify(exec)
 
+/** 解析有效的工作目录：cwd 不存在或非目录时回退到主进程当前目录（否则 exec 会报 spawn cmd.exe ENOENT） */
+function resolveExecCwd(cwd?: string): string {
+  if (cwd) {
+    try {
+      const st = fs.statSync(cwd)
+      if (st.isDirectory()) return cwd
+    } catch { /* 无效路径，回退 */ }
+  }
+  return process.cwd()
+}
+
 // Python 执行结果接口
 export interface PythonExecutionResult {
   success: boolean
@@ -70,7 +81,7 @@ export class TrustedPythonService {
   /**
    * 执行 Python 代码（无任何安全检查）
    */
-  async executeCode(code: string, input: any = ''): Promise<PythonExecutionResult> {
+  async executeCode(code: string, input: any = '', cwd?: string): Promise<PythonExecutionResult> {
     try {
       const isPythonInstalled = await this.checkInstallation()
       if (!isPythonInstalled) {
@@ -111,7 +122,8 @@ export class TrustedPythonService {
               timeout: 3600000, // 1小时超时（给复杂操作更多时间）
               maxBuffer: 1024 * 1024 * 50, // 50MB输出限制
               encoding: 'utf-8', // 明确指定编码
-              env: env // 添加环境变量
+              env: env, // 添加环境变量
+              cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
             })
             
             // 清理输入文件
@@ -138,7 +150,8 @@ export class TrustedPythonService {
               timeout: 300000,
               maxBuffer: 1024 * 1024 * 50,
               encoding: 'utf-8', // 明确指定编码
-              env: env // 添加环境变量
+              env: env, // 添加环境变量
+              cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
             })
             
             const executionTime = Date.now() - startTime
@@ -158,7 +171,8 @@ export class TrustedPythonService {
             timeout: 300000,
             maxBuffer: 1024 * 1024 * 50,
             encoding: 'utf-8', // 明确指定编码
-            env: env // 添加环境变量
+            env: env, // 添加环境变量
+            cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
           })
           
           const executionTime = Date.now() - startTime
@@ -243,7 +257,7 @@ export class TrustedPythonService {
       if (!exists || !stats?.isFile()) {
         // 列出当前目录文件帮助调试
         const dir = path.dirname(absolutePath)
-        let dirContents = []
+        let dirContents: string[] = []
         try {
           if (fs.existsSync(dir)) {
             dirContents = fs.readdirSync(dir)
@@ -293,7 +307,7 @@ export class TrustedPythonService {
       const { stdout, stderr } = await execAsync(command, {
         timeout: 300000,
         maxBuffer: 1024 * 1024 * 50,
-        cwd: path.dirname(absolutePath),
+        cwd: resolveExecCwd(path.dirname(absolutePath)),
         encoding: 'utf-8',
         env: env // 添加环境变量
       })

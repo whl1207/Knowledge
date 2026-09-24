@@ -24,11 +24,16 @@ a:link[target="_blank"] {
   /* 样式定义 */
   color: var(--fontActiveColor);
 }
+html,
 body {
   margin: 0;
   min-width: 120px;
   min-height: 100vh;
-  color:var(--fontColor)
+  color:var(--fontColor);
+  overflow: hidden;
+  /* 覆盖 Element Plus useLockscreen：弹窗打开时会设置 body.style.width = calc(100% - 滚动条宽)，
+     导致整个页面变窄。用 !important 强制保持 100% 宽度，避免弹窗出现/关闭时宽度跳动 */
+  width: 100% !important;
 }
 
 h1 {
@@ -56,7 +61,7 @@ button:hover {
 }
 select{
   color:var(--fontColor);
-  background-color: var(--menuColor);
+  background-color: var(--backgroundColor);
   border:var(--borderColor) 1px solid;
   height:31px;
   border-radius:5px;
@@ -103,10 +108,10 @@ input[type="checkbox"]:hover {
   border-color: var(--fontActiveColor);
 }
 
-/* Checkbox 选中状态 */
+/* Checkbox 选中状态（!important：防止组件 scoped 通用 input 规则覆盖背景/边框导致勾选无视觉反馈） */
 input[type="checkbox"]:checked {
-  background-color: var(--fontActiveColor);
-  border-color: var(--fontActiveColor);
+  background-color: var(--fontActiveColor) !important;
+  border-color: var(--fontActiveColor) !important;
 }
 
 /* Checkbox 选中后的勾选标记 */
@@ -120,6 +125,42 @@ input[type="checkbox"]:checked::after {
   border: solid var(--backgroundColor);
   border-width: 0 2px 2px 0;
   transform: translate(-50%, -60%) rotate(45deg);
+}
+
+/* ===== 全局兜底：避免 checkbox/radio 被各种通用 input 规则误命中而“拉伸变形 / 勾点看不见” =====
+   很多组件有 `.xxx input { flex:1 }` / `.form-group label{width:120px}` 等规则，
+   会波及 checkbox/radio（flex-basis 0 会吞掉 15px 尺寸，或把勾选框挤没）。
+   这里统一锁定为固定小尺寸、不参与 flex 拉伸，保证始终可见可点。
+   若某处需要更大/异形勾选，请用更高优先级（!important）覆盖这两条。 */
+input[type="checkbox"],
+input[type="radio"] {
+  flex: 0 0 auto !important;
+  width: 15px !important;
+  height: 15px !important;
+  max-width: 15px !important;
+  box-sizing: border-box;
+  vertical-align: middle;
+  margin: 2px 4px;
+}
+
+/* Checkbox 选中后的勾选标记在浅色填充下保持可见 */
+input[type="checkbox"]:checked::after {
+  border-color: #fff !important;
+}
+
+/* 单选框保持原生圆点可见（未做自定义 skin，防止个别组件 appearance:none 后消失）
+   加 !important 以对抗组件 scoped 样式覆盖 appearance/accent-color */
+input[type="radio"] {
+  -webkit-appearance: auto !important;
+  -moz-appearance: auto !important;
+  appearance: auto !important;
+  accent-color: var(--fontActiveColor, #409eff) !important;
+}
+input[type="radio"]:checked {
+  background-color: transparent !important;
+}
+input[type="radio"]:checked::after {
+  content: none !important;
 }
 
 /* Checkbox 禁用状态 */
@@ -193,11 +234,6 @@ table tr:nth-child(odd)
 {
   background: var(--backgroundColor);
 }
-
-hr{
-  border:1px solid var(--borderColor);
-  margin: 2px 0px;
-}
 textarea{
   border-radius: 5px;
   border: 1px solid var(--borderColor);
@@ -213,6 +249,201 @@ textarea:focus{
 p{
   margin-top: 0.2em;
   margin-bottom: 0.2em;
+}
+
+/* ====== Element Plus 全局主题覆盖（跟随 APP 主题变量） ====== */
+:root {
+  /* 主色 */
+  --el-color-primary: var(--fontActiveColor);
+  --el-color-primary-light-3: color-mix(in srgb, var(--fontActiveColor) 70%, transparent);
+  --el-color-primary-light-5: color-mix(in srgb, var(--fontActiveColor) 50%, transparent);
+  --el-color-primary-light-7: color-mix(in srgb, var(--fontActiveColor) 30%, transparent);
+  --el-color-primary-light-8: color-mix(in srgb, var(--fontActiveColor) 20%, transparent);
+  --el-color-primary-light-9: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
+  --el-color-primary-dark-2: color-mix(in srgb, var(--fontActiveColor) 80%, black);
+
+  /* 文字 */
+  --el-text-color-primary: var(--fontColor);
+  --el-text-color-regular: var(--fontColor);
+  --el-text-color-secondary: var(--fontColor);
+  --el-text-color-placeholder: color-mix(in srgb, var(--fontColor) 60%, transparent);
+
+  /* 背景 */
+  --el-bg-color: var(--backgroundColor);
+  --el-bg-color-overlay: var(--menuColor);
+  --el-bg-color-page: var(--backgroundColor);
+  --el-fill-color: var(--menuColor);
+  --el-fill-color-light: var(--menuActiveColor);
+  --el-fill-color-lighter: var(--menuColor);
+  --el-fill-color-blank: var(--backgroundColor);
+  --el-popup-bg-color: var(--menuColor);
+
+  /* 边框 */
+  --el-border-color: var(--borderColor);
+  --el-border-color-light: var(--borderColor);
+  --el-border-color-lighter: var(--borderColor);
+  --el-border-color-extra-light: var(--borderColor);
+  --el-border-color-dark: var(--fontActiveColor);
+
+  /* 对话框/消息 */
+  --el-dialog-bg-color: var(--menuColor);
+  --el-messagebox-bg-color: var(--menuColor);
+  --el-messagebox-content-color: var(--fontColor);
+  --el-messagebox-title-color: var(--fontActiveColor);
+  --el-messagebox-border-color: var(--borderColor);
+  --el-box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  --el-box-shadow-light: 0 2px 8px rgba(0,0,0,0.1);
+
+  /* 消息提示（ElMessage） */
+  --el-message-bg-color: var(--menuColor);
+  --el-message-text-color: var(--fontActiveColor);
+  --el-message-border-color: var(--borderColor);
+
+  /* 按钮 */
+  --el-button-bg-color: var(--menuColor);
+  --el-button-border-color: var(--borderColor);
+  --el-button-hover-bg-color: var(--menuActiveColor);
+  --el-button-hover-border-color: var(--fontActiveColor);
+  --el-button-text-color: var(--fontColor);
+  --el-button-hover-text-color: var(--fontActiveColor);
+
+  /* 输入框 */
+  --el-input-bg-color: var(--menuColor);
+  --el-input-border-color: var(--borderColor);
+  --el-input-hover-border-color: var(--fontActiveColor);
+  --el-input-focus-border-color: var(--fontActiveColor);
+  --el-input-text-color: var(--fontColor);
+  --el-input-placeholder-color: color-mix(in srgb, var(--fontColor) 60%, transparent);
+
+  /* 标签 */
+  --el-tag-bg-color: var(--menuColor);
+  --el-tag-border-color: var(--borderColor);
+  --el-tag-text-color: var(--fontColor);
+}
+
+/* Element Plus 消息提示样式（ElMessage toast） */
+.el-message {
+  background: var(--menuColor) !important;
+  border-color: var(--borderColor) !important;
+  color: var(--fontActiveColor) !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important;
+  position: fixed !important;
+  left: 10px !important;
+  right: auto !important;
+  top: auto !important;
+  bottom: 10px !important;
+  transform: none !important;
+}
+
+/* Element Plus 消息框（ElMessageBox）关闭按钮：全局紧凑化，避免默认 40px 触控区高于标题行/确认取消按钮 */
+.el-message-box__headerbtn {
+  width: 32px !important;
+  height: 32px !important;
+  top: 12px !important;
+  right: 10px !important;
+  padding: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.el-message-box__headerbtn .el-message-box__close {
+  font-size: 15px;
+  color: var(--el-text-color-secondary);
+}
+.el-message-box__headerbtn:hover .el-message-box__close {
+  color: var(--el-color-primary);
+}
+.el-message .el-message__content {
+  color: var(--fontActiveColor) !important;
+}
+.el-message .el-message__icon {
+  color: var(--fontActiveColor) !important;
+}
+.el-message .el-message__closeBtn {
+  color: var(--fontActiveColor) !important;
+}
+
+/* Element Plus 消息框样式修正 - 紧凑布局 */
+.el-message-box {
+  border: 1px solid var(--borderColor) !important;
+  padding: 8px !important;
+  width: auto !important;
+  min-width: 320px !important;
+  max-width: 480px !important;
+}
+
+.el-message-box__header {
+  padding: 0 0 2px 0 !important;
+}
+
+.el-message-box__title {
+  color: var(--fontActiveColor) !important;
+  font-size: 13px !important;
+  line-height: 1.4 !important;
+  border-bottom: 1px solid var(--borderColor) !important;
+  padding-bottom: 5px
+}
+
+.el-message-box__headerbtn {
+  top: 0 !important;
+  right: 0 !important;
+}
+
+.el-message-box__message {
+  color: var(--fontColor) !important;
+  font-size: 12px !important;
+  padding: 0 !important;
+}
+
+.el-message-box__message p {
+  margin: 0 !important;
+  line-height: 1.4 !important;
+}
+
+.el-message-box__input {
+  padding: 6px 0 0 0 !important;
+  margin: 0 !important;
+}
+
+.el-message-box__input .el-input__wrapper {
+  padding: 0 4px !important;
+}
+
+.el-message-box__input .el-input__inner {
+  height: 26px !important;
+  line-height: 26px !important;
+  font-size: 12px !important;
+  padding: 0 4px !important;
+}
+
+.el-message-box__errormsg {
+  font-size: 11px !important;
+  padding-top: 2px !important;
+}
+
+.el-message-box__btns {
+  padding: 10px 0 0 0 !important;
+  display: flex !important;
+  gap: 6px !important;
+  justify-content: flex-end !important;
+}
+
+.el-message-box__btns .el-button {
+  font-size: 12px !important;
+  padding: 4px 10px !important;
+  height: auto !important;
+  min-height: 24px !important;
+  line-height: 1 !important;
+}
+
+.el-button--primary {
+  --el-button-bg-color: var(--menuActiveColor) !important;
+  --el-button-text-color: var(--fontColor) !important;
+}
+
+/* 弹出框遮罩 */
+.el-overlay {
+  background-color: rgba(0, 0, 0, 0.3) !important;
 }
 
 #app {
@@ -263,6 +494,17 @@ p{
 }
 .button:hover{
   background-color: var(--menuActiveColor);
+}
+/* 修正 Monaco 编辑器内部按钮（find widget 等）被全局 .button 样式污染：
+   全局 .button 的 margin/padding/border/background 会破坏 Monaco 自带 UI（如 Ctrl+F 查找面板）。
+   在 .monaco-editor 作用域内重置，特异性高于全局 .button，且不影响 Monaco 自身的按钮样式
+   （Monaco 更高特异性的规则仍会生效，hover 高亮也保留） */
+.monaco-editor .button {
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background-color: transparent;
 }
 .active{
   background-color: var(--menuActiveColor);
@@ -325,8 +567,24 @@ p{
 {
   background-color:var(--menuActiveColor);
 }
+/* 滑块给上与方向匹配的光标，拖动时不再是一把箭头 */
+.scoll::-webkit-scrollbar-thumb:horizontal {
+  cursor: ew-resize;
+}
+.scoll::-webkit-scrollbar-thumb:vertical {
+  cursor: ns-resize;
+}
+.scoll::-webkit-scrollbar-thumb:horizontal:active {
+  cursor: grabbing;
+}
+.scoll::-webkit-scrollbar-thumb:vertical:active {
+  cursor: grabbing;
+}
+.scoll::-webkit-scrollbar-corner {
+  background-color: var(--menuColor);
+}
 
- /**甘特图样式*/
+/* 甘特图样式*/
  .gantt_container, .gantt_tooltip,.gantt_grid_scale,.gantt_scale_cell,.gantt_task_cell,.gantt_cell,.gantt_cell_tree{
   background-color: var(--backgroundColor) !important;
   color:var(--fontColor) !important;
@@ -377,4 +635,422 @@ p{
 /* 定义鼠标悬停在滑块上时的背景颜色 */
 .gantt_hor_scroll::-webkit-scrollbar-thumb:hover,.gantt_ver_scroll::-webkit-scrollbar-thumb:hover  {
   background-color: var(--fontActiveColor) !important;
+}
+
+/* ====== AgentSwarm 任务配置公共控件样式（SwarmTaskConfig 等共用） ====== */
+.run-tb-label {
+  font-size: 11px; font-weight: 500; color: var(--fontColor); opacity: 0.75;
+  white-space: nowrap; flex-shrink: 0;
+}
+.run-tb-select {
+  height: 26px; padding: 0 7px; font-size: 11px; background: var(--backgroundColor);
+  color: var(--fontColor); border: 1px solid var(--borderColor); border-radius: 3px;
+  outline: none; cursor: pointer; margin: 0;
+}
+.run-tb-select:focus { border-color: var(--fontActiveColor); }
+.run-tb-input {
+  height: 26px; padding: 0 7px; font-size: 11px; background: var(--backgroundColor);
+  color: var(--fontColor); border: 1px solid var(--borderColor); border-radius: 3px;
+  outline: none; box-sizing: border-box; margin: 0;
+  width:100%;
+}
+.task-textarea {
+  padding: 4px 7px; font-size: 11px; line-height: 1.4; box-sizing: border-box;
+  border: 1px solid var(--borderColor); border-radius: 3px;
+  background: var(--backgroundColor); color: var(--fontColor);
+  resize: vertical; font-family: inherit; outline: none; margin: 0;
+}
+.task-textarea:focus { border-color: var(--fontActiveColor); }
+.run-tb-btn {
+  display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 10px;
+  font-size: 11px; border: 1px solid var(--borderColor); border-radius: 3px; cursor: pointer;
+  color: var(--fontColor); background: var(--backgroundColor); transition: all .15s; white-space: nowrap;
+}
+.run-tb-btn:hover { color: var(--fontActiveColor); background: var(--menuActiveColor); border-color: var(--menuActiveColor); }
+.run-tb-btn.primary { background: #2196F3; color: #fff; border-color: #2196F3; }
+.run-tb-btn.primary:hover { background: #1976D2; border-color: #1976D2; }
+.run-tb-btn.danger { background: #f44336; color: #fff; border-color: #f44336; }
+.run-tb-btn.danger:hover { background: #d32f2f; }
+.run-tb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.run-progress { height: 5px; width: 100%; border-radius: 3px; background: var(--cardColor); overflow: hidden; }
+.run-progress-fill { height: 100%; background: #2196F3; transition: width .3s; }
+.run-progress-text { font-size: 10px; color: var(--fontColor); opacity: .8; white-space: nowrap; }
+.run-progress-text i { margin-right: 2px; }
+
+/* Agent 提问弹窗（markdown 渲染）：挂载在 body 下，需全局样式 */
+.agent-question-box.el-message-box {
+  max-width: 560px !important;
+}
+.agent-question-box .el-message-box__message {
+  max-height: 42vh;
+  overflow-y: auto;
+  width: 100%;
+  box-sizing: border-box;
+  padding-right: 2px !important;
+  scrollbar-width: thin;
+}
+/* prompt 模式下消息被包在 <label> 里：label 默认 inline，包裹块级 div 会撑出行框产生上下空隙 → 转块级并收紧行高 */
+.agent-question-box .el-message-box__message > label {
+  display: block;
+  line-height: 1.3;
+}
+.agent-question-markdown {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  line-height: 1.3;
+  font-size: 12.5px;
+  color: var(--fontColor);
+}
+.agent-question-markdown p {
+  margin: 2px 0 !important;
+  line-height: 1.3 !important;
+}
+.agent-question-markdown h1,
+.agent-question-markdown h2,
+.agent-question-markdown h3,
+.agent-question-markdown h4,
+.agent-question-markdown h5,
+.agent-question-markdown h6 {
+  margin: 4px 0 2px;
+  line-height: 1.25;
+  color: var(--fontActiveColor);
+}
+.agent-question-markdown h1 { font-size: 15px; }
+.agent-question-markdown h2 { font-size: 14px; }
+.agent-question-markdown h3 { font-size: 13px; }
+.agent-question-markdown h4,
+.agent-question-markdown h5,
+.agent-question-markdown h6 { font-size: 12.5px; }
+.agent-question-markdown ul,
+.agent-question-markdown ol {
+  margin: 2px 0 !important;
+  padding-left: 20px;
+}
+.agent-question-markdown li {
+  margin: 1px 0;
+}
+.agent-question-markdown > *:first-child {
+  margin-top: 0 !important;
+}
+.agent-question-markdown > *:last-child {
+  margin-bottom: 0 !important;
+}
+.agent-question-markdown ul ul,
+.agent-question-markdown ol ol,
+.agent-question-markdown ul ol,
+.agent-question-markdown ol ul {
+  margin: 0 !important;
+}
+.agent-question-markdown code {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11.5px;
+  background: var(--menuColor);
+  color: var(--fontActiveColor);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.agent-question-markdown pre {
+  background: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 4px 0 !important;
+  overflow-x: auto;
+}
+.agent-question-markdown pre code {
+  background: transparent;
+  padding: 0;
+  display: block;
+  white-space: pre;
+}
+.agent-question-markdown blockquote {
+  margin: 4px 0 !important;
+  padding: 2px 8px;
+  border-left: 3px solid var(--borderColor);
+  color: var(--fontColor);
+  opacity: 0.85;
+}
+.agent-question-markdown a {
+  color: #2196F3;
+  text-decoration: underline;
+}
+.agent-question-markdown table {
+  border-collapse: collapse;
+  margin: 4px 0;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.agent-question-markdown th,
+.agent-question-markdown td {
+  border: 1px solid var(--borderColor);
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.agent-question-markdown th {
+  background: var(--menuColor);
+  color: var(--fontActiveColor);
+}
+.agent-question-markdown strong {
+  color: var(--fontActiveColor);
+}
+.agent-question-markdown hr {
+  border: none;
+  border-top: 1px solid var(--borderColor);
+  margin: 4px 0;
+}
+
+/* ==========================================================================
+   highlight.js 全局自适应主题
+   --------------------------------------------------------------------------
+   nnfx-dark.min.css 被多个组件全局 import，其 .hljs-attr/.hljs-tag 等为白色、
+   其余 token 为深色主题配色，在浅色主题下对比度不足甚至不可见。此处用更高
+   特异性（pre.hljs 前缀，nnfx-dark 均为单 class）+ CSS 变量覆盖全部 token，
+   颜色随 --fontColor 自动适配，保证浅色 / 深色主题下代码高亮均清晰可读。
+   ========================================================================== */
+pre.hljs {
+  color: var(--fontColor, #333);
+  background: transparent;
+  border: 1px solid var(--borderColor);
+}
+pre.hljs code {
+  color: var(--fontColor, #333);
+  background: transparent;
+}
+
+/* 关键字 / 类型 / 内建 / 文档标签 / HTML 标签与标签名（红） */
+pre.hljs .hljs-keyword,
+pre.hljs .hljs-literal,
+pre.hljs .hljs-built_in,
+pre.hljs .hljs-type,
+pre.hljs .hljs-doctag,
+pre.hljs .hljs-tag,
+pre.hljs .hljs-name {
+  color: var(--hljs-keyword, #d73a49);
+}
+
+/* ==========================================================================
+   全局右键菜单样式 - 所有视图模块统一
+   --------------------------------------------------------------------------
+   原定义在 explorer.vue 的全局 <style> 块，主窗口加载了 explorer.vue 才有样式；
+   但独立文件窗口（FileWindow，加载导图/浏览/编辑等视图）不包含 explorer.vue，
+   导致右键菜单无样式。迁移到全局 style.css 后所有窗口（主窗口 + 独立窗口）
+   均能加载 .context-menu / .menu-item / .submenu 等类名样式。
+   ========================================================================== */
+.context-menu {
+  z-index: 9999;
+  background-color: var(--backgroundColor);
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  padding: 4px 0;
+  cursor: pointer;
+  min-width: 180px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+.menu-item {
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  color: var(--fontColor);
+}
+
+.menu-item:hover {
+  background-color: var(--menuColor);
+}
+
+.menu-item i {
+  width: 16px;
+  text-align: center;
+}
+
+.menu-divider {
+  height: 1px;
+  background: var(--borderColor);
+  margin: 4px 8px;
+}
+
+/* 二级菜单 */
+.has-submenu {
+  position: relative;
+}
+
+.has-submenu .submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  background-color: var(--backgroundColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  list-style: none;
+  margin: 0;
+  z-index: 10000;
+}
+
+.has-submenu:hover .submenu {
+  display: block;
+}
+
+.has-submenu .submenu li {
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  color: var(--fontColor);
+}
+
+/* 三级菜单：submenu 中的 has-submenu 项 */
+.submenu .has-submenu {
+  position: relative;
+}
+
+.submenu .has-submenu:hover {
+  background-color: var(--menuColor);
+}
+
+.submenu .has-submenu > .submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  background-color: var(--backgroundColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  list-style: none;
+  margin: 0;
+  z-index: 10001;
+}
+
+.submenu .has-submenu:hover > .submenu {
+  display: block;
+}
+
+/* 子菜单向上展开（底部空间不足时） */
+.submenu-up {
+  top: auto !important;
+  bottom: -4px !important;
+}
+
+/* 子菜单向左展开（右侧空间不足时） */
+.submenu-left {
+  left: auto !important;
+  right: 100% !important;
+}
+
+/* 字符串 / 正则 / 增补 / 属性名 / HTML 属性名 / 元信息字符串（蓝绿） */
+pre.hljs .hljs-string,
+pre.hljs .hljs-regexp,
+pre.hljs .hljs-addition,
+pre.hljs .hljs-attribute,
+pre.hljs .hljs-attr,
+pre.hljs .hljs-meta-string,
+pre.hljs .hljs-meta .hljs-string {
+  color: var(--hljs-string, color-mix(in srgb, #032f62 55%, var(--fontColor, #333)));
+}
+
+/* 数字 / 布尔（蓝） */
+pre.hljs .hljs-number,
+pre.hljs .hljs-boolean {
+  color: var(--hljs-number, #005cc5);
+}
+
+/* 函数 / 类名（紫） */
+pre.hljs .hljs-title,
+pre.hljs .hljs-title.class_,
+pre.hljs .hljs-title.class_.inherited__,
+pre.hljs .hljs-title.function_,
+pre.hljs .hljs-class .hljs-title {
+  color: var(--hljs-title, #6f42c1);
+}
+
+/* 注释 / 引用（灰，斜体） */
+pre.hljs .hljs-comment,
+pre.hljs .hljs-quote {
+  color: var(--hljs-comment, #6a737d);
+  font-style: italic;
+}
+
+/* 变量 / 模板变量 / 符号 / 列表标记（橙） */
+pre.hljs .hljs-variable,
+pre.hljs .hljs-template-variable,
+pre.hljs .hljs-symbol,
+pre.hljs .hljs-bullet {
+  color: var(--hljs-variable, #e36209);
+}
+
+/* 参数 / 替换文本 / 纯代码：跟随正文 */
+pre.hljs .hljs-params,
+pre.hljs .hljs-subst,
+pre.hljs .hljs-code {
+  color: var(--fontColor, #333);
+}
+
+/* 元信息 / 选择器 / 章节（绿） */
+pre.hljs .hljs-meta,
+pre.hljs .hljs-selector-tag,
+pre.hljs .hljs-selector-class,
+pre.hljs .hljs-selector-pseudo,
+pre.hljs .hljs-section {
+  color: var(--hljs-meta, #22863a);
+}
+
+/* 删除 / 选择器 id（红） */
+pre.hljs .hljs-deletion,
+pre.hljs .hljs-selector-id {
+  color: var(--hljs-deletion, #b31d28);
+}
+
+/* 链接（下划线） */
+pre.hljs .hljs-link {
+  text-decoration: underline;
+}
+
+/* 加粗 / 斜体 / 公式 */
+pre.hljs .hljs-strong { font-weight: 700; }
+pre.hljs .hljs-emphasis { font-style: italic; }
+pre.hljs .hljs-formula { font-style: italic; }
+
+/* ==========================================================================
+   Mermaid 图表统一适配容器（所有渲染入口共用 .mermaid-rendered-svg）
+   --------------------------------------------------------------------------
+   细长（竖向超长）图不把页面撑长，也不出现滚动条：max-height 施加到 svg 自身，
+   超高时按 viewBox 比例整体等比缩小，在限高内完整显示（无裁切、无滑块）。
+   短图（未超限）保持原样，宽度铺满容器。如需调整限高改这一处即可。
+   ========================================================================== */
+.mermaid-rendered-svg svg {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: min(58vh, 560px);
+  display: block;
+  margin: 0 auto;
+}
+
+/* ===== 两端对齐排版（src/lib/typeset）=====
+   只读视图（浏览 / 块编辑器渲染态）用：K-P 断行后每行一个块级 span，
+   行内用 word-spacing（西文空格）+ letter-spacing（中文间隙）撑满行宽。
+   编辑态（textarea）不参与 —— 它的断行由浏览器引擎决定，JS 接管不了。 */
+.ts-line {
+  display: block;
+  white-space: nowrap;
+  text-align: left;
 }

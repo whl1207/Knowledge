@@ -1,0 +1,167 @@
+/* kb-view.css — 知识库各视图统一工具栏样式（kt-*）
+ *
+ * 参照 OntologyViewer 本体工具栏（.toolbar-btn 等）的视觉规范，抽象为跨组件通用 class，
+ * 供 切片 / 问题 / 百科 / 测试 等视图工具栏统一使用（避免内联样式、保证一致外观）。
+ * 图标按钮不显示文字，名称一律用 title 提示；工具栏保持单行。
+ */
+
+/* 工具栏容器：单行 flex，必要时横向滚动 */
+.kt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--borderColor);
+  flex-shrink: 0;
+  user-select: none;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+/* 通用图标/文本按钮（本体视觉基准：29px 高、无内边距、圆角边框） */
+.kt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 29px;
+  min-width: 29px;
+  padding: 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background-color: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+.kt-btn:hover { background-color: var(--menuColor); }
+.kt-btn.active,
+.kt-btn.on {
+  background-color: var(--menuColor);
+  color: var(--fontActiveColor);
+  border-color: var(--fontActiveColor);
+}
+.kt-btn.resume { color: #FF9800; }
+.kt-btn.warn { color: #FF9800; }
+.kt-btn.ok { color: #4CAF50; }
+.kt-btn.danger:hover { color: #F56C6C; border-color: #F56C6C; }
+.kt-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 分隔条 / 弹性空白 */
+.kt-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--borderColor);
+  flex-shrink: 0;
+}
+.kt-spacer { flex: 1; }
+
+/* 下拉 / 数字输入 / 文本输入 */
+.kt-select {
+  height: 31px;
+  min-width: 80px;
+  max-width: 200px;
+  padding: 0 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  margin: 0;
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 0;
+}
+.kt-input {
+  height: 29px;
+  min-width: 0;
+  padding: 0 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  outline: none;
+  flex-shrink: 0;
+  margin: 0px
+}
+.kt-input:focus,
+.kt-select:focus { border-color: var(--fontActiveColor); }
+.kt-num {
+  width: 42px;
+  height: 26px;
+  padding: 0 4px;
+  text-align: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+/* 状态文字（计数/提示，非按钮） */
+.kt-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--borderColor);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.kt-label.ok { color: #4CAF50; }
+.kt-label.warn { color: #FF9800; }
+
+/* 搜索框（含放大镜） */
+.kt-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 29px;
+  min-width: 120px;
+  width: 180px;
+  padding: 0 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background-color: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.kt-search:focus-within { border-color: var(--fontActiveColor); }
+.kt-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  padding: 0;
+  margin: 0;
+  color: var(--fontColor);
+  font-size: 12px;
+}
+.kt-search-input::placeholder { color: var(--borderColor); }
+
+/* 行内小进度条（批量任务指示） */
+.kt-progress {
+  display: inline-block;
+  width: 80px;
+  height: 4px;
+  background: var(--borderColor);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.kt-progress-fill {
+  display: block;
+  height: 100%;
+  background: #FF9800;
+}

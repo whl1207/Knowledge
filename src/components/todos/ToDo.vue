@@ -1,192 +1,152 @@
 <template>
 <div class="bg">
-  <!-- 主视图切换 -->
-  <div class="header">
-    <div class="header-left">
-      <!-- 视图切换按钮 -->
-      <button 
-        v-for="view in viewModes" 
-        :key="view.id"
-        :class="{ active: currentView === view.id }"
-        @click="setCurrentView(view.id)"
-        :title="view.title">
-        <i :class="view.icon"></i>
-      </button>
-      <button v-if="currentView === 'waterfall'" @click="toggleWaterfallLayout" class="toolbar-action-btn">
-        <i class="fa" :class="waterfallLayout === 'masonry' ? 'fa-th-large' : 'fa-list'"></i>
-      </button>
-      <button v-if="currentView === 'tree'" @click="expandAll" class="toolbar-action-btn">
-        <i class="fa fa-expand"></i>
-      </button>
-      <button v-if="currentView === 'tree'" @click="collapseAll" class="toolbar-action-btn">
-        <i class="fa fa-compress"></i>
-      </button>
-      <button @click="prev" v-if="currentView === 'month' || currentView === 'week'">
-        <i class="fa fa-chevron-left"></i>
-      </button>
-      <button @click="next" v-if="currentView === 'month' || currentView === 'week'">
-        <i class="fa fa-chevron-right"></i>
-      </button>
+  <div class="home" ref="homeRef">
+    <div class="side-column">
+      <!-- 工具栏（左侧面板上方） -->
+      <div class="top-toolbar">
+    <!-- 视图选择（最左侧） -->
+    <select v-model="currentView" class="toolbar-select" :title="store.locales === 'zh' ? '切换视图' : 'Switch view'">
+      <option v-for="v in viewModes" :key="v.id" :value="v.id">{{ v.title }}</option>
+    </select>
+    <!-- 分类筛选（第一行右侧） -->
+    <select v-model="selectedStatus" class="toolbar-select" :title="store.locales === 'zh' ? '分类筛选' : 'Filter by category'">
+      <option value="">{{ store.locales === 'zh' ? '全部分类' : 'All categories' }}</option>
+      <option v-for="status in statusOptions" :key="status.value" :value="status.value">{{ status.label }}</option>
+      <option value="__undefined__">{{ store.locales === 'zh' ? '其他' : 'Other' }}</option>
+    </select>
+    <!-- 显示/隐藏筛选（默认显示；可看隐藏、全部） -->
+    <select v-model="visibilityFilter" class="toolbar-select" :title="store.locales === 'zh' ? '显示/隐藏筛选' : 'Show / Hide filter'">
+      <option value="show">{{ store.locales === 'zh' ? '显示' : 'Show' }}</option>
+      <option value="hidden">{{ store.locales === 'zh' ? '隐藏' : 'Hidden' }}</option>
+      <option value="all">{{ store.locales === 'zh' ? '全部' : 'All' }}</option>
+    </select>
+    <!-- 搜索框（展开状态） -->
+    <div v-if="noteSearchActive" class="notes-search-box">
+      <i class="fa fa-search"></i>
+      <input
+        v-model="searchText"
+        class="notes-search-input"
+        :placeholder="getSearchPlaceholder()"
+        @keydown.esc="closeNoteSearch"
+      />
+      <div v-if="searchText" class="notes-search-clear" @click="searchText = ''" :title="store.locales === 'zh' ? '清除' : 'Clear'">
+        <i class="fa fa-times-circle"></i>
+      </div>
     </div>
-    
-    <div class="header-center">
-      <!-- 视图标题 -->
-      <span v-if="currentView === 'month'">{{ currentMonth }}</span>
-      <span v-else-if="currentView === 'week'">{{ formatWeekRange(currentDate) }}</span>
-      <span v-else>{{ filteredItems.length }}</span>
+    <!-- 搜索按钮（收起状态） -->
+    <div v-else class="notes-search-toggle" @click="openNoteSearch" :title="store.locales === 'zh' ? '搜索' : 'Search'">
+      <i class="fa fa-search"></i>
     </div>
-    
-    <div class="header-right">
-      <!-- 搜索框 -->
-      <input 
-        type="text" 
-        v-model="searchText" 
-        :placeholder="getSearchPlaceholder()" 
-        class="search">
-       
-      <button 
-        v-for="status in statusOptions" 
-        :key="status.value"
-        :class="{ active: selectedStatuses.includes(status.value) }"
-        @click="toggleStatusFilter(status.value)"
-        :title="status.label"
-        class="status-filter-btn">
-        <i :class="status.icon"></i>
-      </button>
-      
-      <!-- 视图控制 -->
-      <button @click="addItem" :title="`添加项目`">
-        <i class="fa fa-plus"></i>
-      </button>
-      <button @click="toggleDataSet" :class="{ active: showDataSet }" title="数据管理">
-        <i class="fa fa-cogs"></i>
-      </button>
+    <!-- 新建笔记按钮 -->
+    <div class="notes-new-btn" :class="{ active: !editingItem || !selectedItem }" @click="startNewNote()" :title="store.locales === 'zh' ? '新建' : 'New'">
+      <i class="fa fa-plus"></i>
     </div>
-  </div>
-  
-  <div class="home">
-    <!-- 瀑布流视图 -->
-    <div class="container container-flex" v-if="currentView === 'waterfall'">
-      <div class="grid-scroll scoll" ref="waterfallGrid" @scroll="handleScroll">
-        <!-- 瀑布流网格布局 -->
-        <div v-if="waterfallLayout === 'masonry'" 
-            class="grid-container" 
-            :style="{ '--column-count': columnCount }">
-          <div v-for="column in columnItems" :key="`column-${column.index}`" class="grid-column">
-            <div v-for="item in column.items" 
-                :key="item.id"
-                class="grid-card"
-                :style="{ 'borderLeft': 'solid 5px '+ (item.color || '#e9ecef') }"
-                @click="selectItem(item)">
-              <div class="grid-card-content scoll">
-                <div class="grid-card-title">
-                  <div style="flex:1">
-                    {{ item.title }}
-                  </div>
-                  <div v-if="item.children && item.children.length > 0" class="sub-items-count">
-                    <i class="fa fa-sitemap"></i> {{ item.children.length }} 子项
-                  </div>
-                </div>
-                <div class="grid-card-meta">
-                  <span class="grid-status-icon" :title="item.status">
-                    <i :class="getStatusIcon(item.status)"></i>
-                  </span>
-                  <span class="grid-card-time">
-                    {{ formatItemTime(item.createdTime) }}
-                  </span>
-                </div>
-                
-                <div v-if="item.startTime && item.endTime" class="grid-card-dates">
-                  <div class="date-range">
-                    <i class="fa fa-calendar"></i>
-                    <span class="date-text">{{ formatDateForDisplay(item.startTime) }}</span>
-                    <span class="date-separator"> - </span>
-                    <span class="date-text">{{ formatDateForDisplay(item.endTime) }}</span>
-                  </div>
-                </div>
-              </div>
+    <!-- 设置（储存方案 / 导入导出） -->
+    <button class="toolbar-action-btn" @click="showSettings = true" :title="store.locales === 'zh' ? '设置' : 'Settings'">
+      <i class="fa fa-cog"></i>
+    </button>
+    </div>
+
+    <!-- 左侧内容：条目列表（随手记视图） -->
+    <div v-if="currentView === 'notes'" class="notes-list-panel">
+      <div class="notes-list scoll">
+        <!-- 所有条目卡片（含项目，可置顶，支持排序方式 / 正倒序） -->
+        <div
+          v-for="item in filteredEntries"
+          :key="item.id"
+          class="note-card"
+          :class="{ pinned: item.pinned, active: selectedItem && selectedItem.id === item.id }"
+          :style="item.color ? { borderLeftColor: item.color } : undefined"
+          :title="getItemPath(item) || undefined"
+          @click="selectItem(item)"
+          @contextmenu.prevent="openTreeContextMenu($event, item)"
+        >
+          <div class="note-card-header">
+            <span class="note-card-color" :style="{ backgroundColor: item.color || '#e9ecef' }" :title="getStatusLabel(item.status)">
+              <i :class="getStatusIcon(item.status)"></i>
+            </span>
+            <span class="note-card-title">{{ item.title || '无标题' }}</span>
+            <span class="note-card-time">{{ formatItemTime(item) }}</span>
+            <div class="note-card-actions">
+              <button class="note-action-btn" :class="{ active: item.pinned }" @click.stop="togglePin(item)" :title="store.locales === 'zh' ? '置顶' : 'Pin'">
+                <i class="fa fa-thumb-tack"></i>
+              </button>
+              <button class="note-action-btn" :class="{ active: item.hidden }" @click.stop="toggleHide(item)" :title="store.locales === 'zh' ? (item.hidden ? '显示' : '隐藏') : (item.hidden ? 'Show' : 'Hide')">
+                <i :class="item.hidden ? 'fa fa-eye-slash' : 'fa fa-eye'"></i>
+              </button>
+              <button class="note-action-btn" @click.stop="deleteItem(item)" :title="store.locales === 'zh' ? '删除' : 'Delete'">
+                <i class="fa fa-trash"></i>
+              </button>
             </div>
           </div>
         </div>
-        
-        <!-- 瀑布流列表布局 -->
-        <div v-else class="list-container">
-          <div v-for="item in filteredItems" 
-              :key="item.id"
-              class="list-item"
-              :style="{ 'borderLeft': 'solid 5px '+ (item.color || '#e9ecef') }"
-              @click="selectItem(item)">
-            <div class="list-item-content">
-              <div class="list-item-title">{{ item.title }}</div>
-              <div class="list-item-meta">
-                <span class="list-status-icon" :title="item.status">
-                  <i :class="getStatusIcon(item.status)"></i>
-                </span>
-                <span class="list-item-date">
-                  {{ formatItemTime(item.createdTime) }}
-                </span>
-                <span v-if="item.startTime && item.endTime" class="list-item-dates">
-                  <i class="fa fa-calendar"></i> 
-                  {{ formatDateForDisplay(item.startTime) }} - {{ formatDateForDisplay(item.endTime) }}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-        
-        <!-- 空状态 -->
-        <div v-if="filteredItems.length === 0" class="empty-state full-size">
-          <i class="fa" :class="getViewIcon()"></i>
-          <p v-if="!workspacePath">请先选择工作区</p>
-          <p v-else>暂无项目</p>
-          <p class="empty-hint" v-if="workspacePath">点击右上角的 + 按钮添加项目</p>
+
+        <div v-if="filteredEntries.length === 0" class="empty-state">
+          <i class="fa fa-sticky-note-o"></i>
+          <p v-if="!searchText">{{ store.locales === 'zh' ? '还没有内容，先记下一个想法吧' : 'No entries yet — capture a quick idea first' }}</p>
+          <p v-else>{{ store.locales === 'zh' ? '没有找到匹配的内容' : 'No matching entries found' }}</p>
         </div>
       </div>
     </div>
-    
-    <!-- 树状图视图 -->
-    <div class="container container-flex" v-if="currentView === 'tree'">
+
+    <!-- 树状图 -->
+    <div v-else-if="currentView === 'tree'" class="tree-panel">
       <div class="tree-container scoll">
         <div class="tree-view">
-          <draggable 
-            v-model="treeItems"
-            group="tree-items"
-            item-key="id"
-            :animation="150"
-            ghost-class="tree-ghost"
-            drag-class="tree-drag"
-            @change="onTopLevelDragEnd"
-            class="tree-root">
-            <template #item="{ element }">
-              <tree-node 
-                :item="element"
-                :depth="0"
-                :selected-item="selectedItem"
-                @select="selectItem"
-                @addChild="addChildItem"
-                @delete="deleteItem"
-                @moveToPending="moveToPending"
-                @moveToInspiration="moveToInspiration"
-                @toggleExpand="toggleExpand"
-                @childrenChanged="handleChildrenChanged"
-                @itemMoved="handleItemMoved"
-              />
+          <el-tree
+            ref="todoTreeRef"
+            class="todo-el-tree"
+            :data="treeItems"
+            node-key="id"
+            empty-text=""
+            :props="{ label: 'title', children: 'children' }"
+            :default-expanded-keys="expandedKeys"
+            :auto-expand-parent="false"
+            :expand-on-click-node="true"
+            draggable
+            :allow-drop="allowTreeDrop"
+            @node-click="onTreeNodeClick"
+            @node-drop="onTreeNodeDrop"
+            @node-expand="onTreeNodeExpand"
+            @node-collapse="onTreeNodeCollapse"
+          >
+            <template #default="{ data }">
+              <div class="el-tree-node-custom" :class="{ active: selectedItem && selectedItem.id === data.id }" @contextmenu.prevent="openTreeContextMenu($event, data)">
+                <span class="el-tree-color" :style="{ backgroundColor: data.color || '#e9ecef' }" :title="getStatusLabel(data.status)">
+                  <i :class="getStatusIcon(data.status)"></i>
+                </span>
+                <span class="el-tree-label">{{ data.title }}</span>
+                <span class="el-tree-time">{{ formatItemTime(data) }}</span>
+              </div>
             </template>
-          </draggable>
+          </el-tree>
         </div>
-        
+
         <!-- 空状态 -->
         <div v-if="treeItems.length === 0" class="empty-state full-size">
           <i class="fa fa-sitemap"></i>
-          <p v-if="!workspacePath">请先选择工作区</p>
-          <p v-else-if="selectedStatuses.length > 0 || searchText">没有符合条件的项目</p>
-          <p v-else>暂无项目</p>
+          <p v-if="selectedStatus || searchText">没有符合条件的项目</p>
+          <p v-else>暂无内容，点击 + 新建</p>
         </div>
       </div>
     </div>
-    
-    <!-- 月视图 -->
-    <div class="container" v-if="currentView === 'month'">
+
+    <!-- 完整模式左侧：月视图 -->
+    <div class="month-container" v-else-if="currentView === 'month'">
+      <div class="month-toolbar">
+        <span class="month-title"><i class="fa fa-calendar"></i> {{ currentMonth }}</span>
+        <button class="month-icon-btn" @click="goToday" :title="store.locales === 'zh' ? '回到今天' : 'Back to today'">
+          <i class="fa fa-crosshairs"></i>
+        </button>
+        <div class="month-nav">
+          <button class="month-icon-btn" @click="prev" :title="store.locales === 'zh' ? '上个月' : 'Previous month'">
+            <i class="fa fa-chevron-left"></i>
+          </button>
+          <button class="month-icon-btn" @click="next" :title="store.locales === 'zh' ? '下个月' : 'Next month'">
+            <i class="fa fa-chevron-right"></i>
+          </button>
+        </div>
+      </div>
       <table class="month-table">
         <thead>
           <tr>
@@ -199,21 +159,40 @@
                 :class="{
                   'date-cell': true,
                   'today': isToday(date.dateObject),
-                  'selected-date': isSameDay(selectedDate, date.dateObject)
+                  'selected-date': isSameDay(selectedDate, date.dateObject),
+                  'drag-over': dragOverDate && isSameDay(dragOverDate, date.dateObject)
                 }" 
-                @click="changeSelectedDate(date.dateObject)">
-              <div class="date-title" :class="{ today: isToday(date.dateObject) }">{{ date.day }}</div>
+                @click="onDateCellClick(date.dateObject)"
+                @dragover.prevent="onCellDragOver($event, date.dateObject)"
+                @drop.prevent="onCellDrop($event, date.dateObject)">
+              <div class="date-title" :class="{ today: isToday(date.dateObject) }">
+                <span>{{ date.day }}</span>
+                <span class="date-title-right">
+                  <button class="date-add-btn" :title="store.locales === 'zh' ? '新建' : 'New'" @click.stop="startNewNoteOnDate(date.dateObject)">
+                    <i class="fa fa-plus"></i>
+                  </button>
+                  <span v-if="countTodo(date.dateObject) > 0" class="date-count">{{ countTodo(date.dateObject) }}</span>
+                </span>
+              </div>
               <div class="date-items scoll">
                 <div v-for="item in getItemsForDate(date.dateObject)" 
                      :key="item.id" 
                      class="task-span"
+                     :class="{ dragging: dragItemId === item.id }"
                      :style="getItemSpanStyle(item, date.dateObject)"
-                     @click.stop="selectItem(item)">
+                     :title="getItemPath(item) || undefined"
+                     draggable="true"
+                     @click.stop="selectItem(item)"
+                     @dragstart="onTaskDragStart($event, item)"
+                     @dragend="onTaskDragEnd">
                   <div class="task-span-content">
                     <span class="task-span-title">{{ item.title }}</span>
-                    <span class="task-status-icon" :title="item.status">
+                    <span class="task-status-icon" :title="getStatusLabel(item.status)">
                       <i :class="getStatusIcon(item.status)"></i>
                     </span>
+                    <button class="task-span-del-btn" draggable="false" :title="store.locales === 'zh' ? '删除' : 'Delete'" @click.stop="deleteItem(item)">
+                      <i class="fa fa-trash"></i>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -222,178 +201,231 @@
         </tbody>
       </table>
     </div>
-    
-    <!-- 周视图 -->
-    <div class="container container-flex" v-if="currentView === 'week'">
-      <div class="week-calendar">
-        <div class="week-days">
-          <div v-for="day in weekDays" :key="day.date" 
-            class="week-day"
-            :class="{
-              'today': day.today,
-              'selected-day': day.selected
-            }" 
-            @click="changeSelectedDate(day.time)">
-            <span class="week-day-name">{{ day.name }}</span>
-            <span class="week-day-date">{{ day.date }}</span>
-            <span class="week-day-todos" v-if="day.todos>0">({{ day.todos }})</span>
-          </div>
-        </div>
-      </div>
-      <div class="tasks scoll full-height">
-        <div v-for="item in filteredWeekItems" 
-          :key="item.id"
-          @click="selectItem(item)">
-          <div class="task" 
-              :class="{ active: selectedItem && selectedItem.id === item.id }"
-              :style="{ '--task-color': item.color || '#e9ecef' }">
-            <div class="task-header">
-              <div class="task-title">{{ item.title }}</div>
-            </div>
-            <div class="task-dates">
-              <span class="task-status-icon" :title="item.status">
-                <i :class="getStatusIcon(item.status)"></i>
-              </span>
-              {{ formatDateForDisplay(item.startTime) }} - {{ formatDateForDisplay(item.endTime) }}
-            </div>
-          </div>
-        </div>
-        
-        <!-- 空状态 -->
-        <div v-if="filteredWeekItems.length === 0" class="empty-state">
-          <i class="fa fa-calendar"></i>
-          <p v-if="!workspacePath">请先选择工作区</p>
-          <p v-else>本周没有任务</p>
-        </div>
-      </div>
-    </div>
-    
-    <!-- 右侧面板：属性编辑和DataSet共享位置 -->
-    <div class="right-panel" v-if="selectedItem || showDataSet">
-      <!-- 属性编辑界面 - 保持原有紧凑样式 -->
-      <div class="property scoll" v-if="selectedItem && !showDataSet">
-        <div class="property-header">
-          <h3 class="property-title">项目属性</h3>
-          <div class="property-close-btn" @click="clearSelected">
-            <i class="fa fa-times"></i>
-          </div>
-        </div>
-        
-        <div class="property-content">
-          <!-- 标题编辑 - 只在焦点离开时保存 -->
-          <div class="property-field">
-            <textarea 
-              :value="selectedItemTitle" 
-              class="property-input scoll"
-              @input="onTitleInput($event)"
-              @blur="onBlur"
-              :placeholder="'项目标题...'"
-              rows="2">
-            </textarea>
-          </div>
-          
-          <!-- 正文编辑 - 只在焦点离开时保存 -->
-          <div class="property-field">
-            <textarea 
-              :value="selectedItemContent"
-              class="property-input scoll"
-              @input="onContentInput($event)"
-              @blur="onBlur"
-              :placeholder="'详细说明...'"
-              rows="6">
-            </textarea>
-          </div>
 
-          <!-- 颜色选择 -->
-          <div class="property-field">
-            <div class="color-picker">
-              <div class="color-options">
-                <div 
-                  v-for="color in colorOptions" 
-                  :key="color"
-                  class="color-option"
-                  :style="{ backgroundColor: color }"
-                  :class="{ selected: selectedItem.color === color }"
-                  @click="selectColor(color, selectedItem)">
-                  <i v-if="selectedItem.color === color" class="fa fa-check color-option-check"></i>
+    <!-- 完整模式左侧：周视图 -->
+    <div class="week-container" v-else-if="currentView === 'week'">
+      <div class="week-toolbar">
+        <span class="week-title"><i class="fa fa-calendar"></i> {{ currentWeekLabel }}</span>
+        <button class="month-icon-btn" @click="goToday" :title="store.locales === 'zh' ? '回到今天' : 'Back to today'">
+          <i class="fa fa-crosshairs"></i>
+        </button>
+        <div class="month-nav">
+          <button class="month-icon-btn" @click="prev" :title="store.locales === 'zh' ? '上一周' : 'Previous week'">
+            <i class="fa fa-chevron-left"></i>
+          </button>
+          <button class="month-icon-btn" @click="next" :title="store.locales === 'zh' ? '下一周' : 'Next week'">
+            <i class="fa fa-chevron-right"></i>
+          </button>
+        </div>
+      </div>
+      <table class="month-table week-table">
+        <thead>
+          <tr>
+            <th v-for="(day, d) in daysOfWeek" :key="day" :class="{ 'week-head-today': isToday(weekDays[d]) }">{{ day }}</th>
+          </tr>
+        </thead>
+        <tbody class="month-table-body">
+          <tr>
+            <td v-for="(date,d) in weekDays" :key="d"
+                :class="{
+                  'date-cell': true,
+                  'today': isToday(date),
+                  'selected-date': isSameDay(selectedDate, date),
+                  'drag-over': dragOverDate && isSameDay(dragOverDate, date)
+                }"
+                @click="onDateCellClick(date)"
+                @dragover.prevent="onCellDragOver($event, date)"
+                @drop.prevent="onCellDrop($event, date)">
+              <div class="date-title" :class="{ today: isToday(date) }">
+                <span>{{ formatMonthDay(date) }}</span>
+                <span class="date-title-right">
+                  <button class="date-add-btn" :title="store.locales === 'zh' ? '新建' : 'New'" @click.stop="startNewNoteOnDate(date)">
+                    <i class="fa fa-plus"></i>
+                  </button>
+                  <span v-if="countTodo(date) > 0" class="date-count">{{ countTodo(date) }}</span>
+                </span>
+              </div>
+              <div class="date-items scoll">
+                <div v-for="item in getItemsForDate(date)"
+                     :key="item.id"
+                     class="task-span"
+                     :class="{ dragging: dragItemId === item.id }"
+                     :style="getItemSpanStyle(item, date)"
+                     :title="getItemPath(item) || undefined"
+                     draggable="true"
+                     @click.stop="selectItem(item)"
+                     @dragstart="onTaskDragStart($event, item)"
+                     @dragend="onTaskDragEnd">
+                  <div class="task-span-content">
+                    <span class="task-span-title">{{ item.title }}</span>
+                    <span class="task-status-icon" :title="getStatusLabel(item.status)">
+                      <i :class="getStatusIcon(item.status)"></i>
+                    </span>
+                    <button class="task-span-del-btn" draggable="false" :title="store.locales === 'zh' ? '删除' : 'Delete'" @click.stop="deleteItem(item)">
+                      <i class="fa fa-trash"></i>
+                    </button>
+                  </div>
                 </div>
               </div>
-              <input 
-                type="color" 
-                :value="selectedItem.color || colorOptions[0]"
-                @input="(e) => {
-                  const target = e.target as HTMLInputElement;
-                  const color = target?.value;
-                  if (color && selectedItem) {
-                    selectedItem.color = color;
-                    saveIfNeeded('颜色更改');
-                  }
-                }"
-                class="color-input">
-            </div>
-          </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    </div>
 
-          <!-- 状态选择 -->
-          <div class="property-field">
-            <label class="property-label">状态</label>
-            <select :value="selectedItem?.status" 
-              class="property-select"
-              @change="updateItemStatus($event)">
-              <option value="灵感">灵感</option>
-              <option value="规划">规划</option>
-              <option value="待办">待办</option>
-              <option value="进行中">进行中</option>
-              <option value="已完成">已完成</option>
+    <!-- 拖拽分隔条：位于右侧编辑器左边缘 -->
+    <div class="resize-handle" :class="{ active: isResizing }" :style="{ right: (editorWidth + 5) + 'px' }" @mousedown="startResize"></div>
+
+    <!-- 右侧：编辑器（笔记 / 灵感项目共用，始终显示，宽度可拖拽调整） -->
+    <div class="notes-editor-panel" :style="{ width: editorWidth + 'px' }">
+      <div class="notes-editor">
+        <div class="notes-editor-title">
+          <input
+            v-model="editorTitle"
+            class="notes-input"
+            :placeholder="store.locales === 'zh' ? '标题' : 'Title'"
+            @keyup.enter="saveEditor"
+          />
+        </div>
+        <div class="notes-editor-content">
+          <div ref="noteEditorHost" class="notes-textarea notes-block-editor-host scoll">
+            <BlockEditor
+              ref="noteBeRef"
+              :value="noteEditorValue"
+              :doc-key="String(selectedItem?.id ?? '')"
+              :placeholder="store.locales === 'zh' ? '开始记录你的想法...' : 'Start writing your notes...'"
+              @change="onNoteEditorChange"
+              @save="saveEditor"
+            />
+          </div>
+        </div>
+        <!-- 选项按钮 + 颜色（一行，在下方） -->
+        <div class="notes-editor-options">
+          <!-- 预设颜色（单独一行） -->
+          <div class="notes-preset-colors">
+            <!-- 自定义颜色取色器（最左） -->
+            <label class="notes-color-btn" :style="{ backgroundColor: editorColor }" :title="store.locales === 'zh' ? '设置颜色' : 'Set color'">
+              <input type="color" :value="editorColor" @input="onEditorColorInput" />
+              <i class="fa fa-paint-brush"></i>
+            </label>
+            <span
+              v-for="c in colorOptions"
+              :key="c"
+              class="notes-preset-color"
+              :class="{ selected: editorColor === c }"
+              :style="{ backgroundColor: c }"
+              :title="c"
+              @click="setEditorColor(c)"
+            ></span>
+          </div>
+          <!-- 第二行：状态 / 日期 / 操作（铺满一行，超宽才滚动） -->
+          <div class="notes-editor-toolbar">
+          <!-- 统一条目：状态 / 日期 / 操作 -->
+          <template v-if="editingItem">
+            <select class="notes-opt-select" :value="editingItem.status" @change="updateItemStatus($event)" title="状态">
+              <option v-if="!hasStatusOption(editingItem.status)" :value="editingItem.status">{{ store.locales === 'zh' ? '其他' : 'Other' }}</option>
+              <option v-for="s in statusOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
             </select>
-          </div>
-          
-          <!-- 开始时间 -->
-          <div v-if="selectedItem?.status !== '灵感'" class="property-field">
-            <label class="property-label">开始时间</label>
-            <input type="date" 
-              class="property-date-input"
-              :value="formatDateForInput(selectedItem?.startTime)" 
-              @change="(e) => {
-                updateStartTime(e, selectedItem!);
-              }">
-          </div>
-
-          <!-- 结束时间 -->
-          <div v-if="selectedItem?.status !== '灵感'" class="property-field">
-            <label class="property-label">结束时间</label>
-            <input type="date" 
-              class="property-date-input"
-              :value="formatDateForInput(selectedItem?.endTime)" 
-              @change="(e) => {
-                updateEndTime(e, selectedItem!);
-              }">
-          </div>
-          
-          <!-- 删除按钮 -->
-          <div class="property-field">
-            <div class="property-btn" @click="deleteItem(selectedItem!)">
-              <i class="fa fa-trash"></i> 删除
-            </div>
-          </div>
-
-          <!-- 打开文件夹按钮 -->
-          <div class="property-field" v-if="selectedItem?.filePath">
-            <div class="property-btn" @click="openInFolder(selectedItem)">
-              <i class="fa fa-folder-open"></i> 打开所在文件夹
-            </div>
+            <template v-if="editingItem.status !== '灵感'">
+              <input type="date" class="notes-opt-date" :value="formatDateForInput(editingItem.startTime)" @change="updateStartTime($event, editingItem)" title="开始时间" />
+              <input type="date" class="notes-opt-date" :value="formatDateForInput(editingItem.endTime)" @change="updateEndTime($event, editingItem)" title="结束时间" />
+            </template>
+            <button class="notes-icon-btn" @click="addChildItem(editingItem)" title="添加子项"><i class="fa fa-plus"></i></button>
+            <button class="notes-icon-btn" @click="togglePin(editingItem)" :class="{ active: editingItem.pinned }" title="置顶"><i class="fa fa-thumb-tack"></i></button>
+            <button class="notes-icon-btn" @click="toggleHide(editingItem)" :class="{ active: editingItem.hidden }" :title="store.locales === 'zh' ? (editingItem.hidden ? '显示' : '隐藏') : (editingItem.hidden ? 'Show' : 'Hide')"><i :class="editingItem.hidden ? 'fa fa-eye-slash' : 'fa fa-eye'"></i></button>
+            <button class="notes-icon-btn primary" @click="saveEditor" title="保存 (Ctrl+S)"><i class="fa fa-save"></i></button>
+            <button class="notes-icon-btn danger" @click="deleteItem(editingItem)" title="删除"><i class="fa fa-trash"></i></button>
+          </template>
           </div>
         </div>
       </div>
-      
-      <!-- DataSet 组件 -->
-      <DataSet 
-        v-if="showDataSet" 
-        @data-imported="handleDataImported"
-        @data-cleared="handleDataCleared"
-        :workspacePath="workspacePath"
-        @workspace-changed="handleWorkspaceChanged"
-      />
     </div>
+  </div>
+
+  <!-- 设置模态框（ElMessage 风格） -->
+  <div v-if="showSettings" class="settings-overlay" @click.self="showSettings = false">
+    <div class="settings-modal">
+      <div class="settings-modal-header">
+        <span class="settings-modal-title">{{ store.locales === 'zh' ? '设置' : 'Settings' }}</span>
+        <button class="settings-close" @click="showSettings = false"><i class="fa fa-times"></i></button>
+      </div>
+      <div class="settings-modal-body">
+        <div class="settings-section">
+          <div class="settings-label">{{ store.locales === 'zh' ? '状态分类' : 'Status categories' }}</div>
+          <div class="stats-crumbs">
+            <span class="crumb">
+              <span class="crumb-label"><i class="fa fa-sticky-note-o"></i> {{ store.locales === 'zh' ? '总笔记' : 'Total notes' }}</span>
+              <span class="crumb-num">{{ statsSummary.totalNotes }}</span>
+            </span>
+            <span class="crumb" v-for="s in statsSummary.statusCounts" :key="s.value">
+              <span class="crumb-label"><i :class="s.icon"></i> {{ s.label }}</span>
+              <span class="crumb-num">{{ s.count }}</span>
+              <button class="status-chip-remove" @click="removeStatusOption(s.value)" :title="store.locales === 'zh' ? '删除分类' : 'Remove category'"><i class="fa fa-times"></i></button>
+            </span>
+            <span v-if="statsSummary.undefinedCount > 0" class="crumb" :title="store.locales === 'zh' ? '不属于任何分类的笔记/项目' : 'Entries not in any category'">
+              <span class="crumb-label"><i class="fa fa-tag"></i> {{ store.locales === 'zh' ? '其他' : 'Other' }}</span>
+              <span class="crumb-num">{{ statsSummary.undefinedCount }}</span>
+            </span>
+          </div>
+          <div class="settings-row">
+            <input v-model="newStatusName" class="settings-input" :placeholder="store.locales === 'zh' ? '新分类名称' : 'New category name'" @keyup.enter="addStatusOption" />
+            <button class="settings-btn" @click="addStatusOption"><i class="fa fa-plus"></i> {{ store.locales === 'zh' ? '添加' : 'Add' }}</button>
+            <button class="settings-btn" @click="resetStatusOptions"><i class="fa fa-refresh"></i> {{ store.locales === 'zh' ? '恢复默认' : 'Reset categories' }}</button>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-label">{{ store.locales === 'zh' ? '导入 / 导出' : 'Import / Export' }}</div>
+          <div class="settings-row">
+            <button class="settings-btn" @click="onMigrateLegacyNotes">
+              <i class="fa fa-download"></i> {{ store.locales === 'zh' ? '迁移旧版笔记数据' : 'Migrate legacy notes' }}
+            </button>
+            <button class="settings-btn" @click="importNotesFromFolder">
+              <i class="fa fa-folder-open"></i> {{ store.locales === 'zh' ? '导入笔记（从文件夹）' : 'Import notes from folder' }}
+            </button>
+            <button class="settings-btn" @click="exportNotesToFile">
+              <i class="fa fa-upload"></i> {{ store.locales === 'zh' ? '导出笔记（备份）' : 'Export notes (backup)' }}
+            </button>
+            <button class="settings-btn danger-btn" @click="clearAllEntries">
+              <i class="fa fa-trash"></i> {{ store.locales === 'zh' ? '清空笔记' : 'Clear all entries' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 树状图右键菜单（排序 / 添加子项 / 删除），鼠标移出自动关闭 -->
+  <div v-if="treeContextMenu.visible" class="tree-context-menu" :style="{ left: treeContextMenu.x + 'px', top: treeContextMenu.y + 'px' }" @mouseleave="closeTreeContextMenu">
+    <div class="ctx-item has-sub">
+      <i class="fa fa-sort"></i> {{ store.locales === 'zh' ? '排序方式' : 'Sort by' }}
+      <i class="fa fa-chevron-right ctx-sub-arrow"></i>
+      <div class="ctx-submenu">
+        <div class="ctx-item" :class="{ checked: treeSortMode === 'default' }" @click="setTreeSort('default')">{{ store.locales === 'zh' ? '默认（拖拽顺序）' : 'Default' }}</div>
+        <div class="ctx-item" :class="{ checked: treeSortMode === 'name' }" @click="setTreeSort('name')">
+          {{ store.locales === 'zh' ? '名称' : 'Name' }}
+          <span v-if="treeSortMode === 'name'" class="ctx-sort-dir">{{ treeSortDir === 'asc' ? '↑ 正序' : '↓ 倒序' }}</span>
+        </div>
+        <div class="ctx-item" :class="{ checked: treeSortMode === 'updated' }" @click="setTreeSort('updated')">
+          {{ store.locales === 'zh' ? '修改时间' : 'Updated time' }}
+          <span v-if="treeSortMode === 'updated'" class="ctx-sort-dir">{{ treeSortDir === 'asc' ? '↑ 正序' : '↓ 倒序' }}</span>
+        </div>
+        <div class="ctx-item" :class="{ checked: treeSortMode === 'start' }" @click="setTreeSort('start')">
+          {{ store.locales === 'zh' ? '开始时间' : 'Start time' }}
+          <span v-if="treeSortMode === 'start'" class="ctx-sort-dir">{{ treeSortDir === 'asc' ? '↑ 正序' : '↓ 倒序' }}</span>
+        </div>
+        <div class="ctx-item" :class="{ checked: treeSortMode === 'end' }" @click="setTreeSort('end')">
+          {{ store.locales === 'zh' ? '结束时间' : 'End time' }}
+          <span v-if="treeSortMode === 'end'" class="ctx-sort-dir">{{ treeSortDir === 'asc' ? '↑ 正序' : '↓ 倒序' }}</span>
+        </div>
+        <div class="ctx-item" v-if="!selectedStatus" :class="{ checked: treeSortMode === 'status' }" @click="setTreeSort('status')">
+          {{ store.locales === 'zh' ? '状态' : 'Status' }}
+          <span v-if="treeSortMode === 'status'" class="ctx-sort-dir">{{ treeSortDir === 'asc' ? '↑ 正序' : '↓ 倒序' }}</span>
+        </div>
+      </div>
+    </div>
+    <div class="ctx-item" v-if="currentView === 'tree'" @click="treeMenuAddChild"><i class="fa fa-plus"></i> {{ store.locales === 'zh' ? '添加子项' : 'Add child' }}</div>
+    <div class="ctx-item danger" @click="treeMenuDelete"><i class="fa fa-trash"></i> {{ store.locales === 'zh' ? '删除' : 'Delete' }}</div>
   </div>
 </div>
 </template>
@@ -408,131 +440,667 @@
 
 .home {
   width: 100%;
-  height: calc(100% - 40px);
   flex: 1;
+  min-height: 0;
+  position: relative;
   display: flex;
   flex-direction: row;
+  gap: 5px;
+  padding: 5px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* 左侧面板容器（填满剩余空间） */
+.side-column {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 180px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
-/* ========== 通用头部 ========== */
-.header {
-  display: flex;
-  height: 40px;
-  border-bottom: var(--borderColor) 1px solid;
+/* 拖拽分隔条：浮动在右侧编辑器左边缘，不占布局宽度（right 由模板按 editorWidth 动态绑定） */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 2px;
+  cursor: col-resize;
+  background: transparent;
+  border-radius: 2px;
+  z-index: 20;
+  transition: background 0.15s ease;
+}
+/* 仅在拖动时显示颜色（不拖动/悬停都保持透明） */
+.resize-handle.active {
+  background: var(--borderColor);
 }
 
-.header-left,
-.header-right {
+/* ========== 顶部工具栏 ========== */
+.top-toolbar {
   display: flex;
   align-items: center;
-  padding: 0 0px 0px 5px;
+  gap: 5px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  background: var(--backgroundColor);
+  margin-bottom: 5px;
 }
 
-.header-left button,
-.header-right button {
-  width: 30px;
-  height: 30px;
+.toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--borderColor);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+/* 工具栏第二行（视图选择 / 分类筛选） */
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.toolbar-select {
+  height: 28px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  padding: 0 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  width:auto;
+  margin: 0px;
+}
+
+.toolbar-action-btn {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-right: 5px;
   border: 1px solid var(--borderColor);
-  background: var(--backgroundColor);
-  color: var(--fontColor);
   border-radius: 4px;
   cursor: pointer;
+  color: var(--fontColor);
+  background-color: var(--backgroundColor);
+  font-size: 12px;
   padding: 0;
+  transition: all 0.15s ease;
 }
 
-.header-left button:hover,
-.header-right button:hover {
-  background: var(--menuActiveColor);
-}
-
-.header-left button.active,
-.header-right button.active {
-  background: var(--menuActiveColor);
-  border-color: var(--fontActiveColor);
+.toolbar-action-btn:hover {
+  background-color: var(--menuActiveColor);
   color: var(--fontActiveColor);
 }
 
-.header-center {
-  flex: 1;
-  user-select: none;
-  text-align: center;
-  line-height: 40px;
+.toolbar-action-btn.active {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+  border-color: var(--fontActiveColor);
 }
 
-.status-filter-btn {
-  width: 30px;
-  height: 30px;
+/* 视图选择下拉框（最左侧，固定宽度不随 flex 拉伸） */
+.view-select {
+  flex: 0 0 auto;
+  width: 76px;
+}
+
+/* ========== 左侧面板：树状图 ========== */
+.tree-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--backgroundColor);
+}
+
+/* 左侧面板：笔记列表（简单模式 / 瀑布流），宽时可多列 */
+.notes-list-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--backgroundColor);
+}
+
+/* 右侧编辑器：固定像素宽度（不随窗口拉伸），宽度由拖拽调整 */
+.notes-editor-panel {
+  flex: 0 0 auto;
+  min-width: 240px;
+  max-width: 70%;
+}
+
+.notes-editor {
+  height: 100%;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background: var(--backgroundColor);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  box-sizing: border-box;
+  min-height: 0;
+}
+
+.notes-input,
+.notes-textarea {
+  width: 100%;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  padding: 6px 8px;
+  margin: 0px;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.notes-editor-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* 编辑器底部选项行：预设颜色一行 + 操作一行 */
+.notes-editor-options {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--borderColor);
+  flex-wrap: wrap;
+}
+
+/* 第二行：状态/日期/操作（flex:1 铺满一行，超宽才横向滚动） */
+.notes-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--borderColor) transparent;
+}
+.notes-editor-toolbar::-webkit-scrollbar {
+  height: 4px;
+}
+.notes-editor-toolbar::-webkit-scrollbar-thumb {
+  background: var(--borderColor);
+  border-radius: 2px;
+}
+.notes-editor-toolbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.notes-opt-select,
+.notes-opt-date {
+  height: 22px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  padding: 0 4px;
+  cursor: pointer;
+  max-width: 100px;
+  margin: 0;
+  flex-shrink: 0;
+}
+/* 状态下拉框：撑满所在行剩余宽度 */
+.notes-opt-select {
+  flex: 1;
+  flex-shrink: 1;
+  min-width: 60px;
+  max-width: none;
+}
+
+.notes-icon-btn.danger {
+  color: #e74c3c;
+}
+.notes-icon-btn.danger:hover {
+  background: #fde8e8;
+  color: #c0392b;
+}
+
+.notes-textarea {
+  flex: 1;
+  resize: none;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.notes-block-editor-host {
+  overflow: hidden;
+  padding: 0;
+}
+
+/* 标题栏：输入框 + 右侧图标按钮 */
+.notes-editor-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.notes-editor-title .notes-input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.notes-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 标题栏右侧图标按钮 */
+.notes-icon-btn {
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--borderColor);
+  border-radius: 4px;
   background: var(--backgroundColor);
   color: var(--fontColor);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.notes-icon-btn:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+/* 置顶等激活态：强调色边框（与工具栏 active 一致） */
+.notes-icon-btn.active {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+  border-color: var(--fontActiveColor);
+}
+.notes-icon-btn.primary {
+  background: var(--menuColor);
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+.notes-icon-btn.primary:hover {
+  background-color: var(--menuActiveColor);
+}
+
+/* 颜色设置：取色器（与预设色块均分颜色行宽度） */
+.notes-color-btn {
+  position: relative;
+  flex: 1;
+  min-width: 16px;
+  max-width: none;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--borderColor);
+  border-radius: 3px;
+  box-sizing: border-box;
+  cursor: pointer;
+  overflow: hidden;
+  transition: all 0.15s ease;
+}
+.notes-color-btn:hover {
+  border-color: var(--fontActiveColor);
+}
+.notes-color-btn input[type="color"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.notes-color-btn i {
+  font-size: 9px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 50%;
+  width: 10px;
+  height: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* 预设颜色：单独一行（超宽横向滚动，不换行） */
+.notes-preset-colors {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-basis: 100%;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--borderColor) transparent;
+  padding-bottom: 2px;
+}
+.notes-preset-colors::-webkit-scrollbar {
+  height: 4px;
+}
+.notes-preset-colors::-webkit-scrollbar-thumb {
+  background: var(--borderColor);
+  border-radius: 2px;
+}
+.notes-preset-colors::-webkit-scrollbar-track {
+  background: transparent;
+}
+.notes-preset-color {
+  flex: 1;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  box-sizing: border-box;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.notes-preset-color:hover {
+  transform: scale(1.15);
+  border-color: var(--fontActiveColor);
+}
+.notes-preset-color.selected {
+  border-color: var(--fontActiveColor);
+  box-shadow: 0 0 0 1px var(--fontActiveColor);
+}
+
+/* 笔记侧边栏工具栏：搜索 + 新建（参照 home 侧边栏） */
+.notes-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 5px 0 5px;
+  flex-shrink: 0;
+}
+
+.notes-search-toggle {
+  flex: 2;
+  min-width: 0;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
   border-radius: 4px;
   cursor: pointer;
-  padding: 0;
+  color: var(--fontColor);
+  background-color: var(--backgroundColor);
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+.notes-search-toggle:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+
+.notes-search-box {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background-color: var(--backgroundColor);
+  color: var(--borderColor);
+  font-size: 12px;
+}
+.notes-search-box > i {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.notes-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 12px;
+}
+.notes-search-clear {
+  flex-shrink: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--borderColor);
+}
+.notes-search-clear:hover {
+  color: var(--fontActiveColor);
+}
+
+.notes-new-btn {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--fontColor);
+  background-color: var(--backgroundColor);
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+.notes-new-btn:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.notes-new-btn.active {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+  border-color: var(--fontActiveColor);
+}
+
+.notes-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 2px 0;
+}
+
+.notes-list-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.notes-list-count {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.notes-list {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 4px;
+  align-content: start;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  padding: 5px;
+}
+
+.note-card {
+  border: 1px solid var(--borderColor);
+  border-left: 3px solid var(--borderColor);
+  border-radius: 4px;
+  padding: 4px 6px;
+  background: var(--backgroundColor);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  cursor: pointer;
+  transition: all 0.15s ease;
   position: relative;
 }
 
-.status-filter-btn:hover {
-  background: var(--menuActiveColor);
+.note-card:hover {
+  background-color: var(--menuActiveColor);
 }
 
-.status-filter-btn.active {
-  background: var(--menuActiveColor);
+.note-card.active {
   border-color: var(--fontActiveColor);
+  background-color: var(--menuColor);
+}
+
+.note-card.pinned {
+  border-left-color: var(--fontActiveColor);
+}
+
+/* 瀑布流项目卡片：状态色块 + 图标 */
+.note-card .note-card-color {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.note-card .note-card-color i {
+  font-size: 9px;
+  color: var(--fontColor);
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.4);
+}
+
+.note-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  position: relative;
+}
+
+.note-card-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+
+/* 时间默认显示在最右侧；悬浮时隐藏，让图标按钮占据最右（参照 home 侧边栏） */
+.note-card-time {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--fontColor);
+  white-space: nowrap;
+  margin-left: 4px;
+}
+.note-card:hover .note-card-time {
+  display: none;
+}
+
+/* 操作按钮默认折叠隐藏（不占位，时间因此位于最右），悬浮时展开显示 */
+.note-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+}
+
+.note-action-btn {
+  width: 0;
+  height: 20px;
+  margin-left: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fontColor);
+  cursor: pointer;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 0.2s, width 0.15s ease, margin-left 0.15s ease;
+}
+.note-card:hover .note-action-btn {
+  width: 20px;
+  margin-left: 2px;
+  opacity: 0.6;
+  pointer-events: auto;
+}
+.note-action-btn:hover {
+  opacity: 1 !important;
+  color: var(--fontActiveColor);
+}
+.note-action-btn.active {
+  width: 20px;
+  margin-left: 2px;
+  opacity: 1;
+  pointer-events: auto;
   color: var(--fontActiveColor);
 }
 
-.status-filter-btn.active::after {
-  content: '';
-  position: absolute;
-  bottom: 2px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 4px;
-  height: 4px;
-  background-color: var(--fontActiveColor);
-  border-radius: 50%;
+/* 笔记列表空状态（紧凑） */
+.notes-list .empty-state {
+  grid-column: 1 / -1;
+}
+.notes-list .empty-state i {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+.notes-list .empty-state p {
+  font-size: 12px;
 }
 
-.search {
-  flex: 1;
-  min-width: 50px;
-  padding: 1px 4px;
-  margin: 0px;
-  margin-right:5px;
-  border-radius: 4px;
-  background-color: var(--backgroundColor);
-  border: 1px solid var(--borderColor);
-  color: var(--fontColor);
-}
-
-/* ========== 通用容器 ========== */
-.container {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  overflow: hidden;
-  height: calc(100% - 0px);
-}
-
-.container-flex {
-  flex: 1;
-}
 
 /* ========== 瀑布流视图 ========== */
 .grid-scroll {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 5px;
   position: relative;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background: var(--backgroundColor);
 }
 
 .grid-container {
@@ -711,37 +1279,211 @@
   min-height: 100%;
 }
 
-.tree-root {
-  min-height: 100%;
+/* el-tree 树状图 */
+.todo-el-tree {
+  width: 100%;
+  background: transparent;
+  --el-tree-node-hover-bg-color: var(--menuActiveColor);
 }
 
-.tree-ghost {
-  opacity: 0.5;
+.todo-el-tree :deep(.el-tree-node__content) {
+  height: 28px;
+  background: transparent;
+}
+
+.todo-el-tree :deep(.el-tree-node:focus > .el-tree-node__content) {
   background: var(--menuActiveColor);
 }
 
-.tree-drag {
-  opacity: 0.8;
-  transform: rotate(5deg);
-  background: var(--menuActiveColor);
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-}
-
-.sub-items-count {
-  font-size: 11px;
+.todo-el-tree :deep(.el-tree-node__expand-icon) {
   color: var(--fontColor);
-  opacity: 0.7;
-  margin-top: 4px;
+}
+
+.el-tree-node-custom {
   display: flex;
   align-items: center;
   gap: 4px;
-  left:0px
+  flex: 1;
+  min-width: 0;
+  padding-right: 4px;
 }
 
-/* ========== 月视图 ========== */
+.el-tree-node-custom .el-tree-color {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.el-tree-node-custom .el-tree-color i {
+  font-size: 9px;
+  color: var(--fontColor);
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.4);
+}
+
+.el-tree-node-custom .el-tree-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--fontColor);
+}
+
+.el-tree-node-custom.active .el-tree-label {
+  color: var(--fontActiveColor);
+  font-weight: 600;
+}
+
+.el-tree-node-custom .el-tree-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fontColor);
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+/* 树状图右键菜单 */
+.tree-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 130px;
+  background: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+}
+.tree-context-menu .ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.tree-context-menu .ctx-item:hover {
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.tree-context-menu .ctx-item.danger {
+  color: #e74c3c;
+}
+.tree-context-menu .ctx-item.danger:hover {
+  background: #fde8e8;
+  color: #c0392b;
+}
+
+/* 排序方式二级菜单 */
+.tree-context-menu .ctx-item.has-sub {
+  position: relative;
+}
+.tree-context-menu .ctx-submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  min-width: 150px;
+  background: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  z-index: 1001;
+}
+.tree-context-menu .ctx-item.has-sub:hover .ctx-submenu {
+  display: block;
+}
+.tree-context-menu .ctx-sub-arrow {
+  margin-left: auto;
+  font-size: 10px;
+  opacity: 0.6;
+}
+.tree-context-menu .ctx-item.checked {
+  color: var(--fontActiveColor);
+}
+/* 排序方向指示（正序/倒序箭头） */
+.tree-context-menu .ctx-sort-dir {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fontActiveColor);
+  opacity: 0.9;
+}
+
+/* ========== 月历视图 ========== */
+.month-container {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.month-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  background: var(--menuColor);
+  user-select: none;
+}
+
+/* 纯图标按钮（无边框，hover 变色） */
+.month-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--fontColor);
+  cursor: pointer;
+  padding: 0;
+  font-size: 14px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.month-icon-btn:hover {
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+
+.month-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.month-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fontColor);
+  white-space: nowrap;
+}
+.month-title i {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
 .month-table {
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  height: 100%;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -764,7 +1506,10 @@
 }
 
 .date-cell:hover {
-  border-color: var(--fontActiveColor);
+  /* 折叠边框（border-collapse: collapse）下相邻单元格共享边框，
+     border-color 只能点亮下/右两侧；改用 inset box-shadow
+     在单元格内侧绘制四边高亮环线 */
+  box-shadow: inset 0 0 0 1px var(--fontActiveColor);
 }
 
 .date-cell.today {
@@ -776,7 +1521,17 @@
   opacity: 1;
 }
 
+/* 拖拽悬停目标：点亮内环并加深背景 */
+.date-cell.drag-over {
+  background: var(--menuActiveColor);
+  box-shadow: inset 0 0 0 2px var(--fontActiveColor);
+}
+
 .date-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
   font-size: 10px;
   margin: 2px;
   color: var(--fontColor);
@@ -786,21 +1541,84 @@
   color: var(--fontActiveColor);
 }
 
+/* 日期右侧：新建按钮 + 数量徽标 */
+.date-title-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+/* 悬浮单元格时才显示的新建按钮 */
+.date-add-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fontColor);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+}
+.date-title:hover .date-add-btn {
+  display: inline-flex;
+}
+.date-add-btn:hover {
+  display: inline-flex;
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+
+/* 日期项目数量徽标（使用 borderColor 颜色，无项目不显示） */
+.date-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--borderColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  min-width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  box-sizing: border-box;
+}
+
 .date-items {
-  height: calc(100% - 20px);
+  /* 减去标题高度并留出少许余量，防止滚动区溢出盖住底部边框 */
+  height: calc(100% - 22px);
   overflow-y: auto;
+  /* 显式禁掉横向滚动，内容超宽时裁剪而不是出现横向滑块 */
+  overflow-x: hidden;
 }
 
 .task-span {
   position: relative;
   z-index: 1;
   font-size: 10px;
-  cursor: pointer;
+  cursor: grab;
   width: calc(100% - 14px);
   border-radius: 2px;
   margin-bottom: 2px;
   padding: 4px;
   border-left: 3px solid;
+}
+
+.task-span:active {
+  cursor: grabbing;
+}
+
+/* 拖拽中的源卡片：半透明提示 */
+.task-span.dragging {
+  opacity: 0.5;
 }
 
 .task-span-content {
@@ -817,134 +1635,103 @@
   flex: 1;
 }
 
-/* ========== 周视图 ========== */
-.week-calendar {
+/* 任务卡片删除按钮：默认隐藏（不占位），悬浮显示（与随手记逻辑一致） */
+.task-span-del-btn {
+  width: 0;
+  height: 16px;
+  margin-left: 0;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fontColor);
+  cursor: pointer;
+  font-size: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: var(--menuColor);
-  border-bottom: 1px solid var(--borderColor);
-  font-size: 10px;
-  user-select: none;
-  height: 40px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: opacity 0.2s, width 0.15s ease, margin-left 0.15s ease;
+}
+.task-span:hover .task-span-del-btn {
+  width: 16px;
+  margin-left: 2px;
+  opacity: 0.7;
+  pointer-events: auto;
+}
+.task-span-del-btn:hover {
+  opacity: 1 !important;
+  color: #e74c3c;
+  background: #fde8e8;
 }
 
-.week-days {
-  display: flex;
-  justify-content: space-around;
-  text-align: center;
-  margin: 0px;
+/* ========== 周视图 ========== */
+.week-container {
   flex: 1;
-  height: 40px;
-  line-height: normal;
-}
-
-.week-day {
-  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.week-toolbar {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  overflow: visible;
-  cursor: pointer;
-  position: relative;
-  height:100%
+  gap: 8px;
+  height: 38px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  background: var(--menuColor);
+  user-select: none;
 }
 
-.week-day:hover {
-  background-color: var(--menuActiveColor);
+.week-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fontColor);
+  white-space: nowrap;
+}
+.week-title i {
+  font-size: 12px;
+  opacity: 0.7;
 }
 
-.week-day.today {
+/* 周视图表头：只显示周次（日期已在日期单元格的 date-title 中展示） */
+.week-table th {
+  font-size: 12px;
+  padding: 3px 6px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.week-table .week-head-today {
   color: var(--fontActiveColor);
 }
 
-.week-day.selected-day {
-  background-color: var(--backgroundColor);
-  border-left: 1px solid var(--borderColor);
-  border-right: 1px solid var(--borderColor);
+/* 周视图只有一行：撑满容器高度 */
+.week-container .month-table tr {
+  height: 100%;
 }
 
-.week-day-name {
-  font-size: 10px;
-  line-height: 1.2;
+/* 周视图单元格内容更大，便于查看 */
+.week-container .date-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 4px 6px;
 }
-
-.week-day-date {
-  font-size: 12px;
-  line-height: 1.2;
-  font-weight: bold;
+/* 周视图标题更大，预留更多高度，避免滚动区盖住底部边框 */
+.week-container .date-items {
+  height: calc(100% - 30px);
 }
-
-.week-day-todos {
-  position: relative;
-  bottom: 0px;
-  left: 0;
-  right: 0;
-  font-size: 9px;
-  line-height: 1;
-  text-align: center;
-  opacity: 0.8;
-  color: var(--fontColor);
-}
-
-.tasks {
-  border-radius: 4px;
-  overflow-y: auto;
-  flex: 1;
-  padding: 5px;
-}
-
-.tasks.full-height {
-  height: calc(100% - 45px);
-}
-
-.task {
-  display: flex;
-  flex-direction: column;
-  padding: 5px;
-  border: 1px solid var(--borderColor);
-  border-radius: 4px;
-  margin-bottom: 5px;
-  cursor: pointer;
-  position: relative;
-  border-left: 4px solid var(--task-color, var(--borderColor));
-}
-
-.task:hover {
-  background: var(--menuActiveColor);
-  border-color: var(--fontActiveColor);
-}
-
-.task.active {
-  background: var(--menuActiveColor);
-  border-color: var(--fontActiveColor);
-  border-width: 1px;
-}
-
-.task-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 4px;
-}
-
-.task-title {
-  flex: 1;
-  font-size: 14px;
-  color: var(--fontColor);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 0 5px;
-}
-
-.task-dates {
-  font-size: 12px;
-  color: var(--fontColor);
-  opacity: 0.8;
-  padding-left: 5px;
-  white-space: nowrap;
+.week-container .task-span {
+  font-size: 11px;
+  padding: 5px 6px;
 }
 
 /* ========== 右侧面板 ========== */
@@ -1125,7 +1912,6 @@
   color: var(--fontColor);
   opacity: 0.5;
   text-align: center;
-  padding: 40px;
 }
 
 .empty-state.full-size {
@@ -1147,6 +1933,192 @@
   font-size: 12px;
   margin-top: 8px;
   opacity: 0.7;
+}
+
+/* ========== 设置模态框 ========== */
+.settings-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+}
+
+.settings-modal {
+  min-width: 360px;
+  max-width: 600px;
+  background: var(--backgroundColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.settings-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+}
+
+.settings-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fontColor);
+}
+
+.settings-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--fontColor);
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+.settings-close:hover {
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+
+.settings-modal-body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 统计数据：紧凑的面包屑式胶囊 */
+.stats-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 11px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.crumb-num {
+  font-weight: 600;
+  color: var(--fontActiveColor);
+}
+.crumb-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  opacity: 0.85;
+}
+.crumb-label i {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+.settings-label {
+  font-size: 12px;
+  color: var(--fontColor);
+  opacity: 0.8;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.settings-folder {
+  font-size: 11px;
+  color: var(--borderColor);
+  word-break: break-all;
+}
+
+.settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-btn:hover {
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+/* 危险操作按钮（清空等） */
+.settings-btn.danger-btn {
+  color: #e74c3c;
+  border-color: #e74c3c;
+}
+.settings-btn.danger-btn:hover {
+  background: #fde8e8;
+  color: #c0392b;
+}
+
+/* 状态分类管理 */
+.settings-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  margin: 0;
+}
+/* 分类胶囊内的删除按钮（统计与管理合并后） */
+.status-chip-remove {
+  width: 14px;
+  height: 14px;
+  border: none;
+  background: transparent;
+  color: var(--fontColor);
+  cursor: pointer;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  opacity: 0.6;
+  padding: 0;
+  margin-left: 2px;
+}
+.status-chip-remove:hover {
+  opacity: 1;
+  color: #e74c3c;
 }
 
 /* ========== 滚动条样式 ========== */
@@ -1171,16 +2143,15 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { usestore } from '../../store/index'
-import draggable from 'vuedraggable'
-import TreeNode from './TreeNode.vue'
-import DataSet from './DataSet.vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { usestore } from '@/store/index'
+import BlockEditor from '@/components/knowFile/view/block/BlockEditor.vue'
 
 const store = usestore()
 
 // 类型定义
-type ViewMode = 'waterfall' | 'tree' | 'week' | 'month';
-type ItemStatus = '灵感' | '规划' | '待办' | '进行中' | '已完成';
+type ViewMode = 'notes' | 'tree' | 'month' | 'week';
+type ItemStatus = string;
 
 interface Item {
   id: number;
@@ -1190,51 +2161,138 @@ interface Item {
   createdTime: Date;
   startTime?: Date;
   endTime?: Date;
+  updatedAt?: Date;
   color?: string;
   parentId?: number;
+  // 导入时暂存的父级标题（用于合并后重新关联父子结构，不会持久化）
+  parentTitle?: string;
   children?: Item[];
   expanded?: boolean;
   relatedId?: number;
   _order?: number;
   filePath?: string;
   isFolder?: boolean;
+  pinned?: boolean;
+  hidden?: boolean;
 }
 
 // 视图配置
 const viewModes = [
-  { id: 'waterfall' as ViewMode, title: '瀑布流', icon: 'fa fa-th-large' },
+  { id: 'notes' as ViewMode, title: '随手记', icon: 'fa fa-sticky-note-o' },
   { id: 'tree' as ViewMode, title: '树状图', icon: 'fa fa-sitemap' },
-  { id: 'week' as ViewMode, title: '周视图', icon: 'fa fa-calendar' },
-  { id: 'month' as ViewMode, title: '月视图', icon: 'fa fa-map-o' }
+  { id: 'month' as ViewMode, title: '月视图', icon: 'fa fa-map-o' },
+  { id: 'week' as ViewMode, title: '周视图', icon: 'fa fa-calendar-o' }
 ] as const;
 
-// 状态筛选选项
-const statusOptions = [
+// 状态分类（可自定义，localStorage 持久化），默认六类
+const STATUS_OPTIONS_KEY = 'todo-status-options';
+const DEFAULT_STATUS_OPTIONS: { value: string; label: string; icon: string }[] = [
   { value: '灵感', label: '灵感', icon: 'fa fa-lightbulb-o' },
   { value: '规划', label: '规划', icon: 'fa fa-sitemap' },
   { value: '待办', label: '待办', icon: 'fa fa-clock-o' },
-  { value: '进行中', label: '进行中', icon: 'fa fa-spinner' },
+  { value: '进行中', label: '进行中', icon: 'fa fa-spinner fa-spin' },
   { value: '已完成', label: '已完成', icon: 'fa fa-check-circle-o' }
-] as const;
+];
+const statusOptions = ref<{ value: string; label: string; icon: string }[]>([]);
+const newStatusName = ref('');
+
+function loadStatusOptions() {
+  try {
+    const raw = localStorage.getItem(STATUS_OPTIONS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) {
+        // 移除已废弃的"归档"分类（归档已改为独立的显示/隐藏状态）
+        statusOptions.value = parsed.filter(o => o && o.value !== '归档');
+        // 兼容旧数据：补齐缺失的默认分类
+        let changed = false;
+        for (const def of DEFAULT_STATUS_OPTIONS) {
+          if (!statusOptions.value.some(o => o.value === def.value)) {
+            statusOptions.value.push({ ...def });
+            changed = true;
+          }
+        }
+        if (changed) saveStatusOptions();
+        return;
+      }
+    }
+  } catch (e) { console.error('加载状态分类失败:', e); }
+  statusOptions.value = DEFAULT_STATUS_OPTIONS.map(o => ({ ...o }));
+}
+function saveStatusOptions() {
+  localStorage.setItem(STATUS_OPTIONS_KEY, JSON.stringify(statusOptions.value));
+}
+// 添加自定义分类
+function addStatusOption() {
+  const name = newStatusName.value.trim();
+  if (!name) return;
+  if (statusOptions.value.some(o => o.value === name)) {
+    ElMessage.warning(store.locales === 'zh' ? '该分类已存在' : 'Category already exists');
+    return;
+  }
+  statusOptions.value.push({ value: name, label: name, icon: 'fa fa-tag' });
+  newStatusName.value = '';
+  saveStatusOptions();
+}
+// 删除自定义分类（已使用该分类的笔记/项目将自动计入"其他"）
+function removeStatusOption(value: string) {
+  statusOptions.value = statusOptions.value.filter(o => o.value !== value);
+  if (selectedStatus.value === value) selectedStatus.value = '';
+  saveStatusOptions();
+}
+// 恢复默认分类
+function resetStatusOptions() {
+  statusOptions.value = DEFAULT_STATUS_OPTIONS.map(o => ({ ...o }));
+  saveStatusOptions();
+}
 
 // 响应式变量
-const currentView = ref<ViewMode>('waterfall');
+const VIEW_STORAGE_KEY = 'todo-full-view';
+const STATUS_STORAGE_KEY = 'todo-status-filter';
+
+// 当前视图：随手记 / 树状图 / 瀑布流 / 月视图（默认随手记）
+const currentView = ref<ViewMode>('notes');
+// 分类筛选（原 header 中的状态筛选，改为下拉框；默认灵感）
+const selectedStatus = ref('灵感');
+// 显示/隐藏筛选（默认只显示；'hidden' 只看隐藏；'all' 全部显示）
+const VISIBILITY_FILTER_KEY = 'todo-visibility-filter';
+const visibilityFilter = ref<'show' | 'hidden' | 'all'>('show');
+// 树状图排序方式（右键菜单选择，localStorage 持久化）
+const TREE_SORT_KEY = 'todo-tree-sort';
+const treeSortMode = ref<'default' | 'name' | 'updated' | 'start' | 'end' | 'status'>('default');
+// 排序方向：asc 正序 / desc 倒序（再次点击同项切换）
+const TREE_SORT_DIR_KEY = 'todo-tree-sort-dir';
+const treeSortDir = ref<'asc' | 'desc'>('desc');
+
 const currentDate = ref(new Date());
 const selectedDate = ref(new Date());
-const weekDays = ref([]) as any;
+// 月视图拖拽：当前拖拽的项目 id / 悬停目标日期（用于高亮）/ 阻止拖放后的误触点击
+let dragItemId: number | null = null;
+const dragOverDate = ref<Date | null>(null);
+let suppressCellClick = false;
 const allItems = ref<Item[]>([]);
 const nextId = ref(1);
 const selectedItem = ref<Item | null>(null);
-const selectedStatuses = ref<string[]>([]);
 const searchText = ref('');
+const noteSearchActive = ref(false);
 const workspacePath = ref<string>('');
-const showDataSet = ref(false);
+const DEFAULT_NOTE_COLOR = '#e9ecef';
+const showSettings = ref(false);
+const noteEditorHost = ref<HTMLElement | null>(null);
+/** 自研块编辑器：传给组件的 Markdown 与组件实例 */
+const noteEditorValue = ref('');
+const noteBeRef = ref<InstanceType<typeof BlockEditor> | null>(null);
+let handleNoteShortcut: ((event: KeyboardEvent) => void) | null = null;
 
-// UI状态
-const waterfallGrid = ref<HTMLElement | null>(null);
-const waterfallLayout = ref<'masonry' | 'list'>('masonry');
-const columnCount = ref(3);
-const columnItems = ref<Array<{index: number, items: Item[]}>>([]);
+// UI状态：右侧编辑器宽度（可拖拽调整，像素固定；窗口缩放不改变宽度）与引用
+const EDITOR_WIDTH_KEY = 'todo-editor-width';
+const editorWidth = ref(480);
+const homeRef = ref<HTMLElement | null>(null);
+// ResizeObserver：容器尺寸变化时按比例同步左右面板
+let resizeObserver: ResizeObserver | null = null;
+// el-tree 引用与展开状态
+const todoTreeRef = ref<any>(null);
+const expandedKeys = ref<number[]>([]);
 
 // 颜色选项
 const colorOptions = ref([
@@ -1248,69 +2306,112 @@ let lastSavedTitle = '';
 let lastSavedContent = '';
 let hasUnsavedChanges = false;
 
-// 计算属性 - 筛选项目
-const filteredItems = computed(() => {
-  if (!allItems.value.length) return [];
-  
-  let result = allItems.value;
-  
-  if (selectedStatuses.value.length > 0) {
-    result = result.filter((item: Item) => selectedStatuses.value.includes(item.status));
-  }
-  
-  if (searchText.value) {
-    const searchTerm = searchText.value.toLowerCase();
-    result = result.filter((item: Item) => 
-      item.title?.toLowerCase().includes(searchTerm) ||
-      item.content?.toLowerCase().includes(searchTerm)
-    );
-  }
-  
-  return result.sort((a: Item, b: Item) => {
-    if (currentView.value === 'waterfall' || currentView.value === 'tree') {
-      return new Date(b.createdTime).getTime() - new Date(a.createdTime).getTime();
-    } else {
-      const aStart = a.startTime ? new Date(a.startTime).getTime() : 0;
-      const bStart = b.startTime ? new Date(b.startTime).getTime() : 0;
-      return aStart - bStart;
-    }
-  });
+// 计算属性 - 筛选条目（随手记视图：所有条目，支持分类/搜索/排序方式/正倒序）
+const filteredEntries = computed(() => {
+  const q = searchText.value.trim().toLowerCase();
+  const dir = treeSortDir.value === 'asc' ? 1 : -1;
+  return allItems.value
+    .filter((item: Item) => {
+      const statusMatch = statusFilterMatch(item.status);
+      const visibleMatch = visibilityMatch(item);
+      const searchMatch = !q ||
+        (item.title || '').toLowerCase().includes(q) ||
+        (item.content || '').toLowerCase().includes(q);
+      return statusMatch && visibleMatch && searchMatch;
+    })
+    .sort((a: Item, b: Item) => {
+      // 置顶优先（不受方向影响）
+      if (a.pinned && !b.pinned) return -1;
+      if (!a.pinned && b.pinned) return 1;
+      // 其余按排序方式 × 方向
+      switch (treeSortMode.value) {
+        case 'name':
+          return dir * (a.title || '').localeCompare(b.title || '', 'zh-Hans-CN');
+        case 'updated': {
+          const ta = a.updatedAt ? new Date(a.updatedAt).getTime() : new Date(a.createdTime).getTime();
+          const tb = b.updatedAt ? new Date(b.updatedAt).getTime() : new Date(b.createdTime).getTime();
+          return dir * (tb - ta);
+        }
+        case 'start': {
+          const ta = a.startTime ? new Date(a.startTime).getTime() : new Date(a.createdTime).getTime();
+          const tb = b.startTime ? new Date(b.startTime).getTime() : new Date(b.createdTime).getTime();
+          return dir * (tb - ta);
+        }
+        case 'end': {
+          const ta = a.endTime ? new Date(a.endTime).getTime() : (a.startTime ? new Date(a.startTime).getTime() : new Date(a.createdTime).getTime());
+          const tb = b.endTime ? new Date(b.endTime).getTime() : (b.startTime ? new Date(b.startTime).getTime() : new Date(b.createdTime).getTime());
+          return dir * (tb - ta);
+        }
+        case 'status': {
+          const rank = (s: string) => {
+            const i = statusOptions.value.findIndex(o => o.value === s);
+            return i < 0 ? statusOptions.value.length : i;
+          };
+          return dir * (rank(a.status) - rank(b.status));
+        }
+        default: {
+          const ta = a.startTime ? new Date(a.startTime).getTime() : new Date(a.createdTime).getTime();
+          const tb = b.startTime ? new Date(b.startTime).getTime() : new Date(b.createdTime).getTime();
+          return dir * (tb - ta); // 默认：按时间
+        }
+      }
+    });
 });
 
-// 周视图筛选项目
-const filteredWeekItems = computed(() => {
-  const selected = new Date(selectedDate.value);
-  selected.setHours(0, 0, 0, 0);
-  
-  let result = allItems.value.filter((item: Item) => {
-    if (!item.startTime || !item.endTime) return false;
-    
-    const start = new Date(item.startTime);
-    const end = new Date(item.endTime);
-    start.setHours(0, 0, 0, 0);
-    end.setHours(23, 59, 59, 999);
-    
-    return selected >= start && selected <= end;
-  });
-  
-  if (selectedStatuses.value.length > 0) {
-    result = result.filter((item: Item) => selectedStatuses.value.includes(item.status));
-  }
-  
-  if (searchText.value) {
-    const searchTerm = searchText.value.toLowerCase();
-    result = result.filter((item: Item) => 
-      item.title?.toLowerCase().includes(searchTerm) ||
-      item.content?.toLowerCase().includes(searchTerm)
-    );
-  }
-  
-  return result.sort((a: Item, b: Item) => {
-    const aStart = a.startTime ? new Date(a.startTime).getTime() : 0;
-    const bStart = b.startTime ? new Date(b.startTime).getTime() : 0;
-    return aStart - bStart;
-  });
+// 统计数据（设置面板展示，笔记与项目已统一）
+const statsSummary = computed(() => {
+  const all = allItems.value;
+  const statusCounts = statusOptions.value.map(o => ({
+    value: o.value,
+    label: o.label,
+    icon: o.icon,
+    count: all.filter(i => i.status === o.value).length
+  }));
+  const undefinedCount = all.filter(i => !statusOptions.value.some(o => o.value === i.status)).length;
+  return {
+    noteCount: all.length,
+    itemCount: all.length,
+    totalNotes: all.length,
+    statusCounts,
+    undefinedCount
+  };
 });
+
+// 树状图排序：default（拖拽顺序）/ 名称 / 时间 / 状态（支持正倒序）
+function sortTreeChildren(a: Item, b: Item): number {
+  const dir = treeSortDir.value === 'asc' ? 1 : -1;
+  switch (treeSortMode.value) {
+    case 'name':
+      return dir * (a.title || '').localeCompare(b.title || '', 'zh-Hans-CN');
+    case 'updated': {
+      const ta = a.updatedAt ? new Date(a.updatedAt).getTime() : new Date(a.createdTime).getTime();
+      const tb = b.updatedAt ? new Date(b.updatedAt).getTime() : new Date(b.createdTime).getTime();
+      return dir * (ta - tb);
+    }
+    case 'start': {
+      const ta = a.startTime ? new Date(a.startTime).getTime() : new Date(a.createdTime).getTime();
+      const tb = b.startTime ? new Date(b.startTime).getTime() : new Date(b.createdTime).getTime();
+      return dir * (ta - tb);
+    }
+    case 'end': {
+      const ta = a.endTime ? new Date(a.endTime).getTime() : (a.startTime ? new Date(a.startTime).getTime() : new Date(a.createdTime).getTime());
+      const tb = b.endTime ? new Date(b.endTime).getTime() : (b.startTime ? new Date(b.startTime).getTime() : new Date(b.createdTime).getTime());
+      return dir * (ta - tb);
+    }
+    case 'status': {
+      const rank = (s: string) => {
+        const i = statusOptions.value.findIndex(o => o.value === s);
+        return i < 0 ? statusOptions.value.length : i;
+      };
+      return dir * (rank(a.status) - rank(b.status));
+    }
+    default: {
+      const aOrder = a._order !== undefined ? a._order : a.id;
+      const bOrder = b._order !== undefined ? b._order : b.id;
+      return aOrder - bOrder;
+    }
+  }
+}
 
 // 树状图项目计算
 const treeItems = computed({
@@ -1320,29 +2421,30 @@ const treeItems = computed({
     // 先根据筛选条件过滤项目，但注意：这里需要保持父子关系
     // 所以我们不能直接过滤，而是需要先找出所有符合条件的项目及其祖先
     let visibleItems = new Set<number>();
-    
-    if (selectedStatuses.value.length > 0 || searchText.value) {
-      // 找出所有符合条件的项目
-      allItems.value.forEach(item => {
-        const statusMatch = selectedStatuses.value.length === 0 || selectedStatuses.value.includes(item.status);
-        const searchMatch = !searchText.value || 
-          item.title?.toLowerCase().includes(searchText.value.toLowerCase()) ||
-          item.content?.toLowerCase().includes(searchText.value.toLowerCase());
 
-        if (statusMatch && searchMatch) {
-          // 添加这个项目及其所有祖先（显式检查 parentId 是否未定义）
-          let current: Item | undefined = item;
-          while (current) {
-            visibleItems.add(current.id);
-            if (current.parentId !== undefined && current.parentId !== null) {
-              current = allItems.value.find(i => i.id === current!.parentId);
-            } else {
-              break;
-            }
+    // 找出所有符合条件的项目（始终计算）
+    allItems.value.forEach(item => {
+      // 显示/隐藏筛选：显示模式排除隐藏分支，隐藏模式只看隐藏分支，全部模式不限
+      if (visibilityFilter.value === 'show' && isInHiddenBranch(item)) return;
+      if (visibilityFilter.value === 'hidden' && !isInHiddenBranch(item)) return;
+      const statusMatch = statusFilterMatch(item.status);
+      const searchMatch = !searchText.value || 
+        item.title?.toLowerCase().includes(searchText.value.toLowerCase()) ||
+        item.content?.toLowerCase().includes(searchText.value.toLowerCase());
+
+      if (statusMatch && searchMatch) {
+        // 添加这个项目及其所有祖先（显式检查 parentId 是否未定义）
+        let current: Item | undefined = item;
+        while (current) {
+          visibleItems.add(current.id);
+          if (current.parentId !== undefined && current.parentId !== null) {
+            current = allItems.value.find(i => i.id === current!.parentId);
+          } else {
+            break;
           }
         }
-      });
-    }
+      }
+    });
     
     // 构建树结构
     const buildTreeFromItems = (parentId?: number): Item[] => {
@@ -1350,22 +2452,18 @@ const treeItems = computed({
         .filter(item => {
           // 过滤父子关系（严格判断 parentId 是否未定义）
           if (parentId === undefined) {
-            return item.parentId === undefined || item.parentId === null;
+            // 顶层：无 parentId，或父级已不存在（孤立项兜底显示为顶层，避免数据在树状图中“消失”）
+            if (item.parentId === undefined || item.parentId === null) return true;
+            const parentExists = allItems.value.some(p => p.id === item.parentId);
+            return !parentExists;
           }
           return item.parentId === parentId;
         })
         .filter(item => {
-          // 如果有筛选条件，只显示可见的项目
-          if (visibleItems.size > 0) {
-            return visibleItems.has(item.id);
-          }
-          return true;
+          // 只显示可见的项目（含分类筛选与显示/隐藏筛选）
+          return visibleItems.has(item.id);
         })
-        .sort((a, b) => {
-          const aOrder = a._order !== undefined ? a._order : a.id;
-          const bOrder = b._order !== undefined ? b._order : b.id;
-          return aOrder - bOrder;
-        })
+        .sort(sortTreeChildren)
         .map(item => {
           // 递归获取子项
           const children = buildTreeFromItems(item.id);
@@ -1393,11 +2491,11 @@ const treeItems = computed({
         if (existingItem) {
           existingItem._order = index;
           existingItem.parentId = undefined;
-          saveItemToFile(existingItem);
         }
       });
-      // 强制刷新
+      // 强制刷新并保存到 localStorage
       allItems.value = [...allItems.value];
+      saveItemsToStorage();
     }
   }
 });
@@ -1461,35 +2559,647 @@ const weeks = computed(() => {
   return weeksArr;
 });
 
-const selectedItemTitle = computed({
-  get: () => selectedItem.value?.title || '',
-  set: (value: string) => {
-    if (selectedItem.value) {
-      selectedItem.value.title = value;
-    }
+// 周视图：当前周日期（周日~周六，与月视图表头一致）
+const weekDays = computed(() => {
+  const days: Date[] = [];
+  const start = new Date(currentDate.value);
+  start.setDate(start.getDate() - start.getDay());
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    days.push(d);
   }
+  return days;
 });
 
-// 选中项目的正文内容
-const selectedItemContent = computed({
-  get: () => selectedItem.value?.content || '',
-  set: (value: string) => {
-    if (selectedItem.value) {
-      selectedItem.value.content = value;
-    }
+// 周视图标题：日期范围 + 周序号
+const currentWeekLabel = computed(() => {
+  const start = weekDays.value[0];
+  const end = weekDays.value[6];
+  const sYear = start.getFullYear();
+  const sMonth = start.getMonth() + 1;
+  const eYear = end.getFullYear();
+  const eMonth = end.getMonth() + 1;
+  let range: string;
+  if (sYear === eYear && sMonth === eMonth) {
+    range = `${sYear}年${sMonth}月${start.getDate()}日 - ${end.getDate()}日`;
+  } else if (sYear === eYear) {
+    range = `${sYear}年${sMonth}月${start.getDate()}日 - ${eMonth}月${end.getDate()}日`;
+  } else {
+    range = `${sYear}年${sMonth}月${start.getDate()}日 - ${eYear}年${eMonth}月${end.getDate()}日`;
   }
+  return `${range} · 第${getISOWeekNumber(start)}周`;
 });
 
-// ========== 工具栏函数 ==========
-function toggleDataSet() {
-  if (showDataSet.value) {
-    // 关闭 DataSet 前检查是否需要保存
-    saveIfNeeded('关闭DataSet');
+// ISO 周序号
+function getISOWeekNumber(date: Date): number {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+}
+
+// 周视图日期显示：月份/日（跨月时清晰区分）
+function formatMonthDay(date: Date) {
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+// 当前正在编辑的条目（统一：笔记与项目一体）
+const editingItem = computed(() => selectedItem.value);
+
+// 编辑器绑定：统一编辑 selectedItem
+const editorTitle = computed({
+  get: () => selectedItem.value ? selectedItem.value.title : '',
+  set: (value: string) => { if (selectedItem.value) selectedItem.value.title = value; }
+});
+
+const editorContent = computed({
+  get: () => selectedItem.value ? (selectedItem.value.content || '') : '',
+  set: (value: string) => { if (selectedItem.value) selectedItem.value.content = value; }
+});
+
+const editorColor = computed({
+  get: () => selectedItem.value ? (selectedItem.value.color || DEFAULT_NOTE_COLOR) : DEFAULT_NOTE_COLOR,
+  set: (value: string) => { if (selectedItem.value) selectedItem.value.color = value; }
+});
+
+// ========== 编辑器底层（自研块编辑器，见 src/lib/blockeditor） ==========
+function initNoteEditor() {
+  if (!noteEditorHost.value) return;
+  // 首次挂载：把当前条目内容灌入编辑器
+  noteEditorValue.value = editorContent.value || '';
+}
+
+function destroyNoteEditor() {
+  // 生命周期由 Vue 管理（v-if / doc-key），无需手动销毁
+}
+
+/** 条目内容变化（切换条目 / 外部修改）时同步给编辑器 */
+function syncNoteEditorContent() {
+  noteEditorValue.value = editorContent.value || '';
+}
+
+/** 编辑器内容变化 → 写回当前条目（不落盘，落盘由 saveEditor 负责） */
+function onNoteEditorChange(markdown: string) {
+  if (selectedItem.value) {
+    selectedItem.value.content = markdown;
   }
-  showDataSet.value = !showDataSet.value;
-  if (showDataSet.value) {
+  hasUnsavedChanges = true;
+}
+
+// ========== 统一存储（localStorage 单一数据源，笔记 + 项目一体） ==========
+const ENTRIES_KEY = 'todo-entries-v1';
+
+// 从 localStorage 加载统一条目（笔记/项目一体）
+function loadItemsFromStorage() {
+  try {
+    const raw = localStorage.getItem(ENTRIES_KEY);
+    if (!raw) {
+      allItems.value = [];
+      nextId.value = 1;
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      allItems.value = [];
+      nextId.value = 1;
+      return;
+    }
+    allItems.value = parsed.map((it: any) => {
+      // 兼容旧数据：原“归档”状态迁移为独立隐藏标记（hidden: true），状态归回默认
+      const archived = it.status === '归档';
+      return {
+        id: it.id,
+        title: it.title || '无标题',
+        content: it.content || '',
+        status: archived ? '灵感' : (typeof it.status === 'string' && it.status ? it.status : '灵感'),
+        createdTime: it.createdTime ? new Date(it.createdTime) : new Date(),
+        updatedAt: it.updatedAt ? new Date(it.updatedAt) : undefined,
+        startTime: it.startTime ? new Date(it.startTime) : undefined,
+        endTime: it.endTime ? new Date(it.endTime) : undefined,
+        color: typeof it.color === 'string' ? it.color : undefined,
+        parentId: typeof it.parentId === 'number' ? it.parentId : undefined,
+        expanded: it.expanded !== undefined ? Boolean(it.expanded) : true,
+        relatedId: typeof it.relatedId === 'number' ? it.relatedId : undefined,
+        _order: typeof it._order === 'number' ? it._order : undefined,
+        filePath: typeof it.filePath === 'string' ? it.filePath : undefined,
+        isFolder: Boolean(it.isFolder),
+        pinned: Boolean(it.pinned),
+        hidden: Boolean(it.hidden) || archived
+      };
+    });
+    let maxId = 0;
+    allItems.value.forEach(i => { if (i.id > maxId) maxId = i.id; });
+    nextId.value = maxId + 1;
+  } catch (error) {
+    console.error('加载统一数据失败:', error);
+    allItems.value = [];
+  }
+}
+
+// 保存全部条目到 localStorage（children 为运行时结构，不序列化）
+function saveItemsToStorage() {
+  const data = allItems.value.map(i => {
+    const d: any = {
+      id: i.id,
+      title: i.title,
+      content: i.content,
+      status: i.status,
+      createdTime: i.createdTime instanceof Date ? i.createdTime.toISOString() : i.createdTime,
+      updatedAt: i.updatedAt instanceof Date ? i.updatedAt.toISOString() : i.updatedAt,
+      color: i.color,
+      parentId: i.parentId,
+      expanded: i.expanded,
+      relatedId: i.relatedId,
+      _order: i._order,
+      filePath: i.filePath,
+      isFolder: i.isFolder,
+      pinned: i.pinned,
+      hidden: Boolean(i.hidden)
+    };
+    if (i.startTime instanceof Date) d.startTime = i.startTime.toISOString();
+    if (i.endTime instanceof Date) d.endTime = i.endTime.toISOString();
+    return d;
+  });
+  localStorage.setItem(ENTRIES_KEY, JSON.stringify(data));
+}
+
+// 设置面板：迁移旧版数据（手动选择文件夹导入 .md）
+async function onMigrateLegacyNotes() {
+  const folder = await window.ipcRenderer.invoke('openFolderDialog');
+  if (!folder) return;
+  const folderNotes = await readNotesFromFolder(normalizePath(folder));
+  if (folderNotes.length === 0) {
+    ElMessage.info(store.locales === 'zh' ? '所选文件夹中没有 .md 笔记文件' : 'No .md note files found in the folder');
+    return;
+  }
+  let imported = 0;
+  for (const fn of folderNotes) {
+    // 按文件路径去重：同一文件不重复导入；标题相同的不同文件保留为独立条目
+    const byPath = fn.filePath ? allItems.value.find(n => n.filePath === fn.filePath) : undefined;
+    if (byPath) { Object.assign(byPath, fn); imported++; continue; }
+    allItems.value.push(fn);
+    imported++;
+  }
+  // 合并后重新按标题关联父子结构，避免产生悬空的 parentId
+  relinkImportedParents(folderNotes);
+  saveItemsToStorage();
+  ElMessage.success(store.locales === 'zh' ? `已导入 ${imported} 条旧版数据` : `Imported ${imported} legacy entries`);
+}
+
+// ========== 条目文件读写（导入 / 导出用，日常保存走 localStorage） ==========
+
+// 解析 frontmatter（简单行式解析）
+function parseFrontmatter(block: string): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const line of block.split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx < 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (!key) continue;
+    if (value === 'true') result[key] = true;
+    else if (value === 'false') result[key] = false;
+    else if (value !== '' && !isNaN(Number(value))) result[key] = Number(value);
+    else result[key] = value;
+  }
+  return result;
+}
+
+// 解析单个 .md 笔记文件（frontmatter + 正文）→ 部分 Item（id 由调用方分配）
+// parentTitle 为导出时写入的父级标题，用于导入时恢复树状结构
+function parseNoteFile(content: string, filePath: string): (Partial<Item> & { parentTitle?: string }) | null {
+  const match = content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n?([\s\S]*)$/);
+  let meta: Record<string, any> = {};
+  let body = content;
+  if (match) {
+    meta = parseFrontmatter(match[1]);
+    body = (match[2] || '').replace(/^\r?\n/, '');
+  }
+  const fileName = filePath.split(/[\/\\]/).pop() || '';
+  const now = new Date();
+  const result: Partial<Item> & { parentTitle?: string } = {
+    title: meta.title || fileName.replace(/\.md$/, '') || '无标题',
+    content: body.trim(),
+    createdTime: meta.createdAt ? new Date(meta.createdAt) : now,
+    updatedAt: meta.updatedAt ? new Date(meta.updatedAt) : now,
+    startTime: meta.startTime ? new Date(meta.startTime) : undefined,
+    endTime: meta.endTime ? new Date(meta.endTime) : undefined,
+    _order: typeof meta.order === 'number' ? meta.order : undefined,
+    parentTitle: typeof meta.parent === 'string' && meta.parent ? meta.parent : undefined,
+    pinned: Boolean(meta.pinned),
+    hidden: Boolean(meta.hidden),
+    color: typeof meta.color === 'string' && meta.color ? meta.color : undefined,
+    status: typeof meta.status === 'string' && meta.status ? meta.status : '灵感',
+    filePath,
+    expanded: true
+  };
+  return result;
+}
+
+// 写入单个 .md 笔记文件（导出用）；parentTitle 为父级标题，导入时用于恢复结构
+async function writeNoteFile(filePath: string, item: Item, parentTitle?: string) {
+  const meta: Record<string, any> = {
+    title: item.title,
+    createdAt: item.createdTime instanceof Date ? item.createdTime.toISOString() : item.createdTime,
+    updatedAt: item.updatedAt instanceof Date ? item.updatedAt.toISOString() : item.updatedAt,
+    status: item.status,
+    pinned: Boolean(item.pinned),
+    hidden: Boolean(item.hidden)
+  };
+  if (item.color) meta.color = item.color;
+  if (item.startTime instanceof Date) meta.startTime = item.startTime.toISOString();
+  if (item.endTime instanceof Date) meta.endTime = item.endTime.toISOString();
+  if (parentTitle) meta.parent = parentTitle;
+  if (item._order !== undefined) meta.order = item._order;
+  let content = '---\n';
+  for (const [k, v] of Object.entries(meta)) content += `${k}: ${v}\n`;
+  content += '---\n';
+  if (item.content) content += '\n' + item.content + '\n';
+  await window.ipcRenderer.invoke('writeFile', normalizePath(filePath), content);
+}
+
+// 从文件夹读取所有 .md 文件为条目，并按目录结构保留层级（文件夹为父节点，子文件挂其下）
+async function readNotesFromFolder(folder: string): Promise<Item[]> {
+  const loaded: Item[] = [];
+  const pendingParents = new Map<number, string>(); // 条目 id -> 父级标题（用于恢复树状结构）
+  try {
+    const { fileList } = await window.ipcRenderer.invoke('getFilesRelation', folder, 50);
+
+    // 1) 收集所有 .md 文件（兼容大小写）
+    const mdFiles: any[] = [];
+    for (const file of fileList) {
+      const lower = (file.label || '').toLowerCase();
+      if (file.type === 'file' && /\.md$/.test(lower)) mdFiles.push(file);
+    }
+    if (mdFiles.length === 0) return loaded;
+
+    // 2) 找出所有包含 .md 的目录，并为每个目录创建文件夹条目
+    const dirItemMap = new Map<string, Item>(); // 目录路径 -> 文件夹条目
+    for (const file of mdFiles) {
+      const filePath = normalizePath(file.path);
+      const dirPath = filePath.split(/[\/\\]/).slice(0, -1).join('\\');
+      if (!dirPath || dirItemMap.has(dirPath)) continue;
+      const segments = dirPath.split(/[\/\\]/);
+      const name = segments[segments.length - 1] || '未命名';
+      const parentDir = segments.slice(0, -1).join('\\');
+      const item: Item = {
+        id: nextId.value++,
+        title: name,
+        content: '',
+        status: '灵感',
+        createdTime: new Date(),
+        color: getRandomColor(),
+        filePath: dirPath,
+        expanded: true,
+        isFolder: true
+      };
+      // 父目录若也是条目，建立层级（fileList 按父先子后顺序，父目录已先创建）
+      if (parentDir && dirItemMap.has(parentDir)) {
+        item.parentId = dirItemMap.get(parentDir)!.id;
+      }
+      dirItemMap.set(dirPath, item);
+      loaded.push(item);
+    }
+
+    // 3) 处理每个 .md 文件：.README.md 填充文件夹内容，普通文件挂到所在目录下
+    for (const file of mdFiles) {
+      const filePath = normalizePath(file.path);
+      const dirPath = filePath.split(/[\/\\]/).slice(0, -1).join('\\');
+      const lower = (file.label || '').toLowerCase();
+      let content = '';
+      try { content = await window.ipcRenderer.invoke('readFile', file.path); } catch (e) { console.error('读取笔记文件失败:', file.path, e); continue; }
+      const parsed = parseNoteFile(content, filePath);
+      if (!parsed) continue;
+
+      // .README.md：作为其所在文件夹条目的内容
+      if (lower === '.readme.md') {
+        const dirItem = dirItemMap.get(dirPath);
+        if (dirItem) {
+          dirItem.content = parsed.content;
+          dirItem.status = parsed.status || dirItem.status;
+          dirItem.createdTime = parsed.createdTime || dirItem.createdTime;
+          dirItem.updatedAt = parsed.updatedAt;
+          dirItem.color = parsed.color || dirItem.color;
+          dirItem.pinned = parsed.pinned;
+          dirItem.hidden = parsed.hidden;
+        }
+        continue;
+      }
+
+      // 普通 .md 文件
+      const item: Item = {
+        id: nextId.value++,
+        title: parsed.title || '无标题',
+        content: parsed.content,
+        status: parsed.status || '灵感',
+        createdTime: parsed.createdTime || new Date(),
+        updatedAt: parsed.updatedAt,
+        startTime: parsed.startTime,
+        endTime: parsed.endTime,
+        color: parsed.color,
+        filePath: parsed.filePath,
+        expanded: true,
+        pinned: parsed.pinned,
+        hidden: parsed.hidden,
+        _order: parsed._order,
+        // 保留父级标题，供导入合并后重新关联（不会持久化）
+        parentTitle: parsed.parentTitle
+      };
+      // frontmatter 中带 parent（父级标题）的：记录待恢复结构，不再挂到目录下
+      if (parsed.parentTitle) {
+        pendingParents.set(item.id, parsed.parentTitle);
+      } else if (dirItemMap.has(dirPath)) {
+        // 所在目录若是条目，则作为其子节点
+        item.parentId = dirItemMap.get(dirPath)!.id;
+      }
+      loaded.push(item);
+    }
+
+    // 根据 frontmatter 中的 parent 标题恢复树状父子结构
+    const titleToItem = new Map<string, Item>();
+    for (const it of loaded) {
+      if (it.title && !titleToItem.has(it.title)) titleToItem.set(it.title, it);
+    }
+    for (const [childId, parentTitle] of pendingParents) {
+      const child = loaded.find(i => i.id === childId);
+      const parent = titleToItem.get(parentTitle);
+      if (child && parent && parent.id !== child.id) {
+        child.parentId = parent.id;
+      }
+    }
+  } catch (error) {
+    console.error('读取文件夹笔记失败:', error);
+  }
+  return loaded;
+}
+
+// 导入合并后统一按 parentTitle 重新关联父级，
+// 修复“子项按标题合并进已有条目后，parentId 仍指向已丢弃的导入 id”导致树状图中不可见的问题
+function relinkImportedParents(folderNotes: Item[]) {
+  const finalByTitle = new Map<string, Item>();
+  for (const n of allItems.value) {
+    if (n.title && !finalByTitle.has(n.title)) finalByTitle.set(n.title, n);
+  }
+  for (const fn of folderNotes) {
+    if (!fn.parentTitle) continue;
+    const parent = finalByTitle.get(fn.parentTitle);
+    if (!parent) continue;
+    const child = finalByTitle.get(fn.title);
+    if (child && parent.id !== child.id) {
+      child.parentId = parent.id;
+    }
+  }
+}
+
+// 导出所有条目到文件（备份）
+async function exportNotesToFile() {
+  const folder = await window.ipcRenderer.invoke('openFolderDialog');
+  if (!folder) return;
+  const folderPath = normalizePath(folder);
+  try {
+    await window.ipcRenderer.invoke('ensureDir', folderPath);
+    let count = 0;
+    for (const item of allItems.value) {
+      const name = sanitizeFileName(item.title) || '无标题';
+      let candidate = normalizePath(pathJoin(folderPath, `${name}.md`));
+      let i = 1;
+      while (await fileExists(candidate)) {
+        candidate = normalizePath(pathJoin(folderPath, `${name}_${i++}.md`));
+      }
+      // 记录父级标题，导入时用于恢复树状结构（id 在导入后会重新分配，故用标题关联）
+      const parentTitle = item.parentId != null
+        ? (allItems.value.find(p => p.id === item.parentId)?.title || '')
+        : '';
+      await writeNoteFile(candidate, item, parentTitle);
+      count++;
+    }
+    ElMessage.success(store.locales === 'zh' ? `已导出 ${count} 条内容到文件` : `Exported ${count} entries to files`);
+  } catch (e) {
+    console.error('导出失败:', e);
+    ElMessage.error(store.locales === 'zh' ? '导出失败' : 'Export failed');
+  }
+}
+
+// 导入笔记：从文件夹选择 .md 文件导入为条目（按标题合并去重）
+async function importNotesFromFolder() {
+  const folder = await window.ipcRenderer.invoke('openFolderDialog');
+  if (!folder) return;
+  const folderNotes = await readNotesFromFolder(normalizePath(folder));
+  if (folderNotes.length === 0) {
+    ElMessage.info(store.locales === 'zh' ? '所选文件夹中没有 .md 笔记文件' : 'No .md note files found in the folder');
+    return;
+  }
+  let imported = 0;
+  for (const fn of folderNotes) {
+    const byTitle = fn.title !== '无标题' ? allItems.value.find(n => n.title === fn.title) : undefined;
+    if (byTitle) { Object.assign(byTitle, fn); imported++; continue; }
+    allItems.value.push(fn);
+    imported++;
+  }
+  // 合并后重新按标题关联父子结构，避免产生悬空的 parentId
+  relinkImportedParents(folderNotes);
+  saveItemsToStorage();
+  ElMessage.success(store.locales === 'zh' ? `已导入 ${imported} 条内容` : `Imported ${imported} entries`);
+}
+
+// 清空所有笔记/条目（二次确认，防止误删）
+function clearAllEntries() {
+  if (allItems.value.length === 0) {
+    ElMessage.info(store.locales === 'zh' ? '当前没有可清空的内容' : 'Nothing to clear');
+    return;
+  }
+  const count = allItems.value.length;
+  // 先关闭设置框，避免确认弹窗被遮挡
+  showSettings.value = false;
+  ElMessageBox.confirm(
+    store.locales === 'zh' ? `确定要清空全部 ${count} 条内容吗？此操作不可撤销。` : `Clear all ${count} entries? This cannot be undone.`,
+    store.locales === 'zh' ? '清空确认' : 'Confirm clear',
+    {
+      confirmButtonText: store.locales === 'zh' ? '清空' : 'Clear',
+      cancelButtonText: store.locales === 'zh' ? '取消' : 'Cancel',
+      type: 'warning'
+    }
+  ).then(() => {
+    allItems.value = [];
+    nextId.value = 1;
     selectedItem.value = null;
+    lastSavedTitle = '';
+    lastSavedContent = '';
+    hasUnsavedChanges = false;
+    expandedKeys.value = [];
+    saveItemsToStorage();
+    syncNoteEditorContent();
+    ElMessage.success(store.locales === 'zh' ? '已清空全部内容' : 'All entries cleared');
+  }).catch(() => {
+    // 用户取消
+  });
+}
+
+// 保存编辑器内容（统一保存当前条目，新建时自动加入）
+async function saveEditor() {
+  if (!editingItem.value) return;
+  const item = editingItem.value;
+  const title = item.title.trim();
+  const content = (item.content || '').trim();
+  if (!title && !content) {
+    ElMessage.warning(store.locales === 'zh' ? '请输入标题或内容' : 'Enter a title or content');
+    return;
   }
+  // 新建（草稿不在 allItems 中）→ 加入并保存
+  const existing = allItems.value.find(i => i.id === item.id);
+  if (!existing) {
+    item.title = title || '无标题';
+    if (!item.createdTime) item.createdTime = new Date();
+    item.updatedAt = new Date();
+    allItems.value.push(item);
+    selectedItem.value = item;
+    saveItemsToStorage();
+    noteBeRef.value?.markSaved();
+    ElMessage.success(store.locales === 'zh' ? '已保存' : 'Saved');
+    return;
+  }
+  item.title = title || '无标题';
+  item.updatedAt = new Date();
+  await updateSelectedItem(item);
+  noteBeRef.value?.markSaved();
+  ElMessage.success(store.locales === 'zh' ? '已保存' : 'Saved');
+}
+
+// 新建条目：清空编辑器并进入新建状态。
+// 点击新建后立刻创建项目（标题默认“新项目”），直接入库并可在右侧编辑。
+// 日历（月）视图下自动带上选中日期作为起止时间，方便直接排期。
+function startNewNote(date?: Date) {
+  if (selectedItem.value) {
+    clearSelected();
+  }
+  // 指定日期优先；否则日历视图用当前选中日期；其他视图不预设日期
+  const baseDate = date || ((currentView.value === 'month' || currentView.value === 'week') ? new Date(selectedDate.value) : undefined);
+  let startTime: Date | undefined;
+  let endTime: Date | undefined;
+  if (baseDate) {
+    startTime = new Date(baseDate);
+    startTime.setHours(9, 0, 0, 0);
+    endTime = new Date(baseDate);
+    endTime.setHours(17, 0, 0, 0);
+  }
+  const newItem: Item = {
+    id: nextId.value++,
+    title: '新项目',
+    content: '',
+    status: '灵感',
+    createdTime: new Date(),
+    startTime,
+    endTime,
+    color: getRandomColor(),
+    expanded: true,
+    pinned: false,
+    isFolder: false
+  };
+  // 显式新建：立即入库并选中编辑
+  allItems.value.push(newItem);
+  selectedItem.value = newItem;
+  saveItemsToStorage();
+  lastSavedTitle = newItem.title;
+  lastSavedContent = '';
+  hasUnsavedChanges = false;
+  syncNoteEditorContent();
+}
+
+// 进入模块时打开空白草稿：仅选中编辑，不创建/持久化任何项目
+function openNewDraft() {
+  if (selectedItem.value) {
+    clearSelected();
+  }
+  const draft: Item = {
+    id: nextId.value++,
+    title: '',
+    content: '',
+    status: '灵感',
+    createdTime: new Date(),
+    color: getRandomColor(),
+    expanded: true,
+    pinned: false,
+    isFolder: false
+  };
+  selectedItem.value = draft;
+  lastSavedTitle = '';
+  lastSavedContent = '';
+  hasUnsavedChanges = false;
+  syncNoteEditorContent();
+}
+
+// 月视图日期单元格上的“+”按钮：选中该日期并新建（带该日期的起止时间）
+function startNewNoteOnDate(date: Date) {
+  changeSelectedDate(date);
+  startNewNote(date);
+}
+
+// 打开侧边栏搜索框并聚焦
+function openNoteSearch() {
+  noteSearchActive.value = true;
+  nextTick(() => {
+    document.querySelector<HTMLInputElement>('.notes-search-input')?.focus();
+  });
+}
+
+// 关闭搜索框并清空关键词
+function closeNoteSearch() {
+  noteSearchActive.value = false;
+  searchText.value = '';
+}
+
+// 置顶/取消置顶（所有条目统一支持）
+function togglePin(item: Item) {
+  if (!item) return;
+  item.pinned = !item.pinned;
+  item.updatedAt = new Date();
+  saveItemsToStorage();
+}
+
+// 显示/隐藏切换（所有条目统一支持，替代原“归档”状态）
+function toggleHide(item: Item) {
+  if (!item) return;
+  item.hidden = !item.hidden;
+  item.updatedAt = new Date();
+  saveItemsToStorage();
+}
+
+// 编辑器颜色输入：保存到当前条目
+function onEditorColorInput(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const color = target?.value || DEFAULT_NOTE_COLOR;
+  editorColor.value = color;
+  if (editingItem.value) {
+    hasUnsavedChanges = true;
+    saveIfNeeded('颜色更改');
+  }
+}
+
+// 预设颜色：点击色块设置颜色（与取色器逻辑一致）
+function setEditorColor(color: string) {
+  editorColor.value = color;
+  if (editingItem.value) {
+    hasUnsavedChanges = true;
+    saveIfNeeded('颜色更改');
+  }
+}
+
+function bindNoteShortcut() {
+  if (handleNoteShortcut) {
+    window.removeEventListener('keydown', handleNoteShortcut);
+  }
+
+  handleNoteShortcut = (event: KeyboardEvent) => {
+    const isSaveShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's';
+    if (!isSaveShortcut) return;
+
+    event.preventDefault();
+    saveEditor();
+  };
+
+  window.addEventListener('keydown', handleNoteShortcut);
 }
 
 // ========== 路径处理函数 ==========
@@ -1587,6 +3297,7 @@ async function loadWorkspace() {
         
         if (metadata?.startTime) item.startTime = new Date(metadata.startTime);
         if (metadata?.endTime) item.endTime = new Date(metadata.endTime);
+        if (metadata?.updatedAt) item.updatedAt = new Date(metadata.updatedAt);
         if (metadata?.order !== undefined) item._order = metadata.order;
         
         // 读取文件夹的正文内容（从 .README.md 中）
@@ -1634,6 +3345,7 @@ async function loadWorkspace() {
         
         if (metadata?.startTime) item.startTime = new Date(metadata.startTime);
         if (metadata?.endTime) item.endTime = new Date(metadata.endTime);
+        if (metadata?.updatedAt) item.updatedAt = new Date(metadata.updatedAt);
         if (metadata?.parentId) item.parentId = metadata.parentId;
         if (metadata?.order !== undefined) item._order = metadata.order;
         if (metadata?.relatedId) item.relatedId = metadata.relatedId;
@@ -1681,11 +3393,10 @@ async function loadWorkspace() {
     
     allItems.value = items;
     nextId.value = maxId + 1;
-    
-    if (currentView.value === 'waterfall') {
-      distributeItemsToColumns();
-    }
-    computer();
+    expandedKeys.value = collectExpandedIds();
+    nextTick(() => {
+      syncTreeExpansion();
+    });
     
     //console.log(`工作区加载完成，共 ${items.length} 个项目`);
     
@@ -1735,6 +3446,9 @@ async function getFileMetadata(filePath: string): Promise<any> {
 // 保存项目到文件
 async function saveItemToFile(item: Item) {
   if (!workspacePath.value) return;
+  
+  // 每次保存时更新修改时间
+  item.updatedAt = new Date();
   
   try {
     const isFolder = item.isFolder || (item.children && item.children.length > 0);
@@ -2007,7 +3721,8 @@ async function saveContentToFile(filePath: string, item: Item) {
     id: item.id,
     status: item.status,
     color: item.color,
-    createdTime: item.createdTime.toISOString()
+    createdTime: item.createdTime.toISOString(),
+    updatedAt: item.updatedAt ? item.updatedAt.toISOString() : new Date().toISOString()
   };
   
   if (item.startTime) metadata.startTime = item.startTime.toISOString();
@@ -2116,52 +3831,20 @@ async function deleteItemFile(item: Item) {
   }
 }
 
-// 在文件管理器中打开
-async function openInFolder(item: Item) {
-  if (!item.filePath) return;
-  await window.ipcRenderer.invoke('openInFolder', item.filePath);
-}
-
 // ========== 视图控制函数 ==========
 
-function setCurrentView(view: ViewMode) {
-  // 切换视图前检查是否需要保存
-  saveIfNeeded('切换视图');
-  currentView.value = view;
-  
-  if (view === 'week' || view === 'month') {
-    computer();
-  }
-  
-  if (view === 'waterfall') {
-    nextTick(() => {
-      calculateColumnCount();
-      distributeItemsToColumns();
-    });
-  }
-}
-
-function getViewIcon() {
-  const view = viewModes.find(v => v.id === currentView.value);
-  return view ? view.icon : 'fa-question';
-}
+// 视图切换（顶部下拉框选择）持久化
+watch(currentView, (view) => {
+  localStorage.setItem(VIEW_STORAGE_KEY, view);
+});
 
 function getSearchPlaceholder() {
   switch (currentView.value) {
-    case 'waterfall': return store.locales=='zh'?'搜索所有项目...':'Search all items...';
+    case 'notes': return store.locales=='zh'?'搜索笔记...':'Search notes...';
     case 'tree': return store.locales=='zh'?'搜索规划项目...':'Search for planned items...';
-    case 'week': 
     case 'month': return store.locales=='zh'?'搜索日历项目...':'Search calendar items...';
+    case 'week': return store.locales=='zh'?'搜索日历项目...':'Search calendar items...';
     default: return store.locales=='zh'?'搜索...':'Search...';
-  }
-}
-
-function toggleStatusFilter(status: string) {
-  const index = selectedStatuses.value.indexOf(status);
-  if (index > -1) {
-    selectedStatuses.value.splice(index, 1);
-  } else {
-    selectedStatuses.value.push(status);
   }
 }
 
@@ -2170,38 +3853,20 @@ function getRandomColor() {
 }
 
 function selectItem(item: Item) {
-  // 选择新项目前保存当前项目的更改
-  saveIfNeeded('切换项目');
-  
-  if (showDataSet.value) {
-    showDataSet.value = false;
-  }
+  // 切换条目前的自动保存由 watch(selectedItem) 统一处理（避免未保存修改丢失）
   const original = allItems.value.find(i => i.id === item.id);
   selectedItem.value = original || item;
-  
-  // 当选中项目时，记录当前的值用于后续比较
-  if (selectedItem.value) {
-    lastSavedTitle = selectedItem.value.title;
-    lastSavedContent = selectedItem.value.content || '';
-    hasUnsavedChanges = false;
-  }
 }
 
 function clearSelected() {
-  // 关闭右侧面板前保存更改
-  saveIfNeeded('关闭面板');
+  // 关闭面板前的自动保存由 watch(selectedItem) 统一处理
   selectedItem.value = null;
   hasUnsavedChanges = false;
 }
 
-// 添加项目
+// 添加项目（统一存储，无需工作区）
 async function addItem() {
-  if (!workspacePath.value) {
-    alert('请先选择工作区');
-    return;
-  }
-  
-  const defaultStatus = selectedStatuses.value.length > 0 ? selectedStatuses.value[0] : '灵感';
+  const defaultStatus = selectedStatus.value || '灵感';
   const today = new Date();
   
   let newItem: Item = {
@@ -2233,78 +3898,9 @@ async function addItem() {
   }
   
   allItems.value.push(newItem);
-  
-  await saveItemToFile(newItem);
-  
-  selectedItem.value = newItem;
-  
-  if (currentView.value === 'waterfall') {
-    distributeItemsToColumns();
-  }
-}
-
-// 移动项目到待办
-async function moveToPending(item: Item) {
-  const newItem: Item = {
-    id: nextId.value++,
-    title: item.title.length > 30 ? item.title.substring(0, 30) + '...' : item.title,
-    status: '待办',
-    createdTime: new Date(),
-    startTime: new Date(),
-    endTime: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    color: item.color || getRandomColor(),
-    relatedId: item.id,
-    isFolder: false,
-    content: item.content
-  };
-  
-  allItems.value.push(newItem);
-  await saveItemToFile(newItem);
-  
-  if (item.status === '规划') {
-    item.status = '已完成';
-    await saveItemToFile(item);
-    
-    const updateChildrenStatus = async (parentId: number) => {
-      const children = allItems.value.filter((i: Item) => i.parentId === parentId);
-      for (const child of children) {
-        child.status = '已完成';
-        await saveItemToFile(child);
-        await updateChildrenStatus(child.id);
-      }
-    };
-    
-    await updateChildrenStatus(item.id);
-  }
+  saveItemsToStorage();
   
   selectedItem.value = newItem;
-}
-
-// 移动到灵感
-async function moveToInspiration(item: Item) {
-  item.status = '灵感';
-  item.parentId = undefined;
-  delete item._order;
-  
-  await saveItemToFile(item);
-  
-  const updateChildrenStatus = async (parentId: number) => {
-    const children = allItems.value.filter((i: Item) => i.parentId === parentId);
-    for (const child of children) {
-      child.status = '灵感';
-      child.parentId = undefined;
-      delete child._order;
-      await saveItemToFile(child);
-      await updateChildrenStatus(child.id);
-    }
-  };
-  
-  await updateChildrenStatus(item.id);
-}
-
-// 切换瀑布流布局
-function toggleWaterfallLayout() {
-  waterfallLayout.value = waterfallLayout.value === 'masonry' ? 'list' : 'masonry';
 }
 
 function expandAll() {
@@ -2313,10 +3909,10 @@ function expandAll() {
       item.expanded = true;
     }
   });
-  // 强制更新树状图
-  if (currentView.value === 'tree') {
-    treeItems.value = [...treeItems.value];
-  }
+  allItems.value = [...allItems.value];
+  saveItemsToStorage();
+  expandedKeys.value = collectExpandedIds();
+  syncTreeExpansion();
 }
 
 function collapseAll() {
@@ -2325,17 +3921,19 @@ function collapseAll() {
       item.expanded = false;
     }
   });
-  if (currentView.value === 'tree') {
-    const newTreeItems = [...treeItems.value];
-  }
+  allItems.value = [...allItems.value];
+  saveItemsToStorage();
+  expandedKeys.value = collectExpandedIds();
+  syncTreeExpansion();
 }
 
 function prev() {
   if (currentView.value === 'month') {
     currentDate.value = new Date(currentYear.value, currentDate.value.getMonth() - 1, 1);
   } else if (currentView.value === 'week') {
-    currentDate.value.setDate(currentDate.value.getDate() - 7);
-    computer();
+    const d = new Date(currentDate.value);
+    d.setDate(d.getDate() - 7);
+    currentDate.value = d;
   }
 }
 
@@ -2343,48 +3941,16 @@ function next() {
   if (currentView.value === 'month') {
     currentDate.value = new Date(currentYear.value, currentDate.value.getMonth() + 1, 1);
   } else if (currentView.value === 'week') {
-    currentDate.value.setDate(currentDate.value.getDate() + 7);
-    computer();
+    const d = new Date(currentDate.value);
+    d.setDate(d.getDate() + 7);
+    currentDate.value = d;
   }
 }
 
-function computer() {
-  weekDays.value = [];
-  const dayOfWeek = currentDate.value.getDay();
-  const currentDay = currentDate.value.getDate();
-  const currentMonth = currentDate.value.getMonth();
-  const currentYear = currentDate.value.getFullYear();
-  
-  for (let i = 0; i < 7; i++) {
-    const date = new Date(currentYear, currentMonth, currentDay - dayOfWeek + i);
-    weekDays.value.push({
-      name: getDayName(date.getDay()),
-      date: formatDate(date),
-      time: date,
-      today: isToday(date),
-      selected: isSameDay(date, selectedDate.value),
-      todos: countTodo(date),
-    });
-  }
-}
-
-function getDayName(dayIndex: number) {
-  const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-  return days[dayIndex];
-}
-
-function formatDate(date: Date) {
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-  return `${month}-${day}`;
-}
-
-function formatWeekRange(date: Date) {
-  const start = new Date(date);
-  start.setDate(date.getDate() - date.getDay());
-  const end = new Date(start);
-  end.setDate(start.getDate() + 6);
-  return `${start.getMonth()+1}/${start.getDate()} - ${end.getMonth()+1}/${end.getDate()}`;
+// 回到今天：切换回当前月并选中今天
+function goToday() {
+  currentDate.value = new Date();
+  selectedDate.value = new Date();
 }
 
 function formatDateForDisplay(date: Date | undefined) {
@@ -2395,29 +3961,96 @@ function formatDateForDisplay(date: Date | undefined) {
   return `${month}-${day}`;
 }
 
-function formatItemTime(date: Date) {
-  if (!date) return '';
-  const d = new Date(date);
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMins = Math.floor(diffMs / (1000 * 60));
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  
-  if (diffMins < 60) {
-    return `${diffMins}分钟前`;
-  } else if (diffHours < 24) {
-    return `${diffHours}小时前`;
-  } else if (diffDays < 7) {
-    return `${diffDays}天前`;
-  } else {
-    return formatDateForDisplay(d);
+function changeSelectedDate(date: Date) {
+  // 拖放结束后浏览器会补发一次 click，这里吞掉以免误切换选中日期
+  if (suppressCellClick) {
+    suppressCellClick = false;
+    return;
+  }
+  selectedDate.value = new Date(date);
+}
+
+// 点击日期空白处（未点到具体项目，项目卡片已 .stop 拦截）：
+// 仅选中该日期，不自动新建；之后点“新建”按钮才以该日期创建项目
+function onDateCellClick(date: Date) {
+  if (suppressCellClick) {
+    suppressCellClick = false;
+    return;
+  }
+  changeSelectedDate(date);
+}
+
+// 拖拽开始：记录被拖项目 id
+function onTaskDragStart(event: DragEvent, item: Item) {
+  dragItemId = item.id;
+  if (event.dataTransfer) {
+    event.dataTransfer.setData('text/plain', String(item.id));
+    event.dataTransfer.effectAllowed = 'move';
   }
 }
 
-function changeSelectedDate(date: Date) {
-  selectedDate.value = new Date(date);
-  computer();
+// 拖拽结束：清除状态（无论是否成功放下）
+function onTaskDragEnd() {
+  dragItemId = null;
+  dragOverDate.value = null;
+}
+
+// 悬停日期单元格：允许放置并高亮目标日期
+function onCellDragOver(event: DragEvent, date: Date) {
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+  const d = new Date(date);
+  if (!dragOverDate.value || !isSameDay(dragOverDate.value, d)) {
+    dragOverDate.value = d;
+  }
+}
+
+// 拖放至日期单元格：移动项目到该日期
+function onCellDrop(event: DragEvent, date: Date) {
+  event.preventDefault();
+  dragOverDate.value = null;
+  const idStr = event.dataTransfer?.getData('text/plain');
+  let id: number | null = null;
+  if (idStr) {
+    const num = Number(idStr);
+    if (!Number.isNaN(num)) id = num;
+  }
+  if (id == null) id = dragItemId;
+  if (id == null) return;
+  const item = allItems.value.find(i => i.id === id);
+  if (!item) return;
+  moveItemToDate(item, date);
+  saveItemsToStorage();
+  dragItemId = null;
+  // 吞掉拖放后浏览器补发的 click
+  suppressCellClick = true;
+  setTimeout(() => { suppressCellClick = false; }, 300);
+}
+
+// 将项目移动到目标日期：有起止时间则平移整个时间段（保持时长），否则设为单日
+function moveItemToDate(item: Item, targetDate: Date) {
+  const target = new Date(targetDate);
+  if (item.startTime && item.endTime) {
+    const oldStart = new Date(item.startTime);
+    const oldEnd = new Date(item.endTime);
+    const durationMs = oldEnd.getTime() - oldStart.getTime();
+    const newStart = new Date(target);
+    newStart.setHours(oldStart.getHours(), oldStart.getMinutes(), oldStart.getSeconds(), 0);
+    const newEnd = new Date(newStart.getTime() + durationMs);
+    item.startTime = newStart;
+    item.endTime = newEnd;
+  } else {
+    // 无起止时间（灵感/笔记）：设为单日 9:00~17:00
+    const newStart = new Date(target);
+    newStart.setHours(9, 0, 0, 0);
+    const newEnd = new Date(target);
+    newEnd.setHours(17, 0, 0, 0);
+    item.startTime = newStart;
+    item.endTime = newEnd;
+  }
+  item.updatedAt = new Date();
 }
 
 function isToday(date: Date) {
@@ -2441,9 +4074,8 @@ function isSameDay(date1: Date, date2: Date): boolean {
 function countTodo(date: Date): number {
   let itemsToCount = allItems.value;
   
-  if (selectedStatuses.value.length > 0) {
-    itemsToCount = itemsToCount.filter((item: Item) => selectedStatuses.value.includes(item.status));
-  }
+  itemsToCount = itemsToCount.filter((item: Item) => statusFilterMatch(item.status));
+  itemsToCount = itemsToCount.filter((item: Item) => visibilityMatch(item));
   
   if (searchText.value) {
     const searchTerm = searchText.value.toLowerCase();
@@ -2454,26 +4086,34 @@ function countTodo(date: Date): number {
   }
   
   return itemsToCount.filter((item: Item) => {
-    if (!item.startTime || !item.endTime) return false;
-    
-    const taskStart = new Date(item.startTime);
-    const taskEnd = new Date(item.endTime);
+    // 有起止时间：按时间范围匹配
+    if (item.startTime && item.endTime) {
+      const taskStart = new Date(item.startTime);
+      const taskEnd = new Date(item.endTime);
+      const checkDate = new Date(date);
+      
+      taskStart.setHours(0, 0, 0, 0);
+      taskEnd.setHours(23, 59, 59, 999);
+      checkDate.setHours(0, 0, 0, 0);
+      
+      return checkDate >= taskStart && checkDate <= taskEnd;
+    }
+    // 无起止时间：按修改时间（回退创建时间）单日匹配
+    const anchor = item.updatedAt || item.createdTime;
+    if (!anchor) return false;
     const checkDate = new Date(date);
-    
-    taskStart.setHours(0, 0, 0, 0);
-    taskEnd.setHours(23, 59, 59, 999);
     checkDate.setHours(0, 0, 0, 0);
-    
-    return checkDate >= taskStart && checkDate <= taskEnd;
+    const anchorDate = new Date(anchor);
+    anchorDate.setHours(0, 0, 0, 0);
+    return checkDate.getTime() === anchorDate.getTime();
   }).length;
 }
 
 function getItemsForDate(date: Date) {
   let itemsToShow = allItems.value;
   
-  if (selectedStatuses.value.length > 0) {
-    itemsToShow = itemsToShow.filter((item: Item) => selectedStatuses.value.includes(item.status));
-  }
+  itemsToShow = itemsToShow.filter((item: Item) => statusFilterMatch(item.status));
+  itemsToShow = itemsToShow.filter((item: Item) => visibilityMatch(item));
   
   if (searchText.value) {
     const searchTerm = searchText.value.toLowerCase();
@@ -2484,15 +4124,24 @@ function getItemsForDate(date: Date) {
   }
   
   return itemsToShow.filter((item: Item) => {
-    if (!item.startTime || !item.endTime) return false;
-    
-    const taskStart = new Date(item.startTime);
-    const taskEnd = new Date(item.endTime);
-    taskStart.setHours(0, 0, 0, 0);
-    taskEnd.setHours(23, 59, 59, 999);
-    date.setHours(0, 0, 0, 0);
-    
-    return date >= taskStart && date <= taskEnd;
+    // 有起止时间：按时间范围匹配
+    if (item.startTime && item.endTime) {
+      const taskStart = new Date(item.startTime);
+      const taskEnd = new Date(item.endTime);
+      taskStart.setHours(0, 0, 0, 0);
+      taskEnd.setHours(23, 59, 59, 999);
+      const d = new Date(date);
+      d.setHours(0, 0, 0, 0);
+      return d >= taskStart && d <= taskEnd;
+    }
+    // 无起止时间：按修改时间（回退创建时间）单日匹配
+    const anchor = item.updatedAt || item.createdTime;
+    if (!anchor) return false;
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    const a = new Date(anchor);
+    a.setHours(0, 0, 0, 0);
+    return d.getTime() === a.getTime();
   });
 }
 
@@ -2518,8 +4167,26 @@ function getContrastColor(hexcolor: string): string {
 }
 
 function getItemSpanStyle(item: Item, cellDate: Date) {
+  // 无起止时间的项目：按修改/创建时间在该日显示单日块
   if (!item.startTime || !item.endTime) {
-    return { display: 'none' };
+    const anchor = item.updatedAt || item.createdTime;
+    if (!anchor) return { display: 'none' };
+    const cellDateCopy = new Date(cellDate);
+    cellDateCopy.setHours(0, 0, 0, 0);
+    const anchorDate = new Date(anchor);
+    anchorDate.setHours(0, 0, 0, 0);
+    if (cellDateCopy.getTime() !== anchorDate.getTime()) {
+      return { display: 'none' };
+    }
+    const backgroundColor = item.color || getRandomColor();
+    const textColor = getContrastColor(backgroundColor);
+    return {
+      backgroundColor,
+      color: textColor,
+      cursor: 'pointer',
+      borderLeft: `3px solid ${backgroundColor}`,
+      borderLeftColor: backgroundColor
+    };
   }
   
   const taskStart = new Date(item.startTime);
@@ -2546,77 +4213,7 @@ function getItemSpanStyle(item: Item, cellDate: Date) {
   };
 }
 
-// 计算瀑布流列数
-function calculateColumnCount() {
-  if (!waterfallGrid.value) return;
-  
-  const container = waterfallGrid.value;
-  const containerWidth = container.clientWidth;
-  const cardMinWidth = 200;
-  const gap = 10;
-  
-  const maxColumns = Math.floor((containerWidth + gap) / (cardMinWidth + gap));
-  const newColumnCount = Math.max(2, Math.min(12, maxColumns));
-  
-  if (newColumnCount !== columnCount.value) {
-    columnCount.value = newColumnCount;
-    distributeItemsToColumns();
-  }
-}
-
-// 分配项目到各列
-function distributeItemsToColumns() {
-  if (!filteredItems.value || filteredItems.value.length === 0 || waterfallLayout.value !== 'masonry') {
-    columnItems.value = Array.from({length: columnCount.value}, (_, i) => ({index: i, items: []}));
-    return;
-  }
-  
-  const columns: Array<{index: number, items: Item[]}> = Array.from(
-    {length: columnCount.value}, 
-    (_, i) => ({index: i, items: []})
-  );
-  
-  filteredItems.value.forEach((item: Item, index: number) => {
-    const columnIndex = index % columnCount.value;
-    columns[columnIndex].items.push(item);
-  });
-  
-  columnItems.value = columns;
-}
-
 // ========== 保存相关函数 ==========
-
-// 标题输入处理 - 只更新内存，标记有未保存更改
-function onTitleInput(event: Event) {
-  if (!selectedItem.value) return;
-  const target = event.target as HTMLInputElement;
-  selectedItem.value.title = target.value;
-  hasUnsavedChanges = true;
-  console.log(`标题输入: ${target.value} (已标记未保存)`);
-}
-
-// 内容输入处理 - 只更新内存，标记有未保存更改
-function onContentInput(event: Event) {
-  if (!selectedItem.value) return;
-  const target = event.target as HTMLTextAreaElement;
-  selectedItem.value.content = target.value;
-  hasUnsavedChanges = true;
-  console.log(`内容输入: ${target.value.substring(0, 20)}... (已标记未保存)`);
-}
-
-// 焦点离开时保存
-function onBlur() {
-  saveIfNeeded('焦点离开');
-}
-
-// 颜色选择时保存
-function selectColor(color: string, item: Item) {
-  if (item) {
-    item.color = color;
-    hasUnsavedChanges = true;
-    saveIfNeeded('颜色更改');
-  }
-}
 
 // 状态更改时保存
 function updateItemStatus(event: Event) {
@@ -2644,6 +4241,7 @@ async function updateStartTime(event: any, item: Item) {
     if (item.endTime) item.endTime.setHours(17, 0, 0, 0);
   }
   
+  item.updatedAt = new Date();
   hasUnsavedChanges = true;
   saveIfNeeded('开始时间更改');
 }
@@ -2665,33 +4263,35 @@ async function updateEndTime(event: any, item: Item) {
     if (item.startTime) item.startTime.setHours(9, 0, 0, 0);
   }
   
+  item.updatedAt = new Date();
   hasUnsavedChanges = true;
   saveIfNeeded('结束时间更改');
 }
 
-// 如果需要则保存（检查是否有未保存更改）
-async function saveIfNeeded(reason: string = '') {
-  if (!selectedItem.value) return;
+// 如果需要则保存（检查是否有未保存更改；item 参数用于保存即将被切换走的上一个条目）
+async function saveIfNeeded(reason: string = '', item?: Item) {
+  const target = item || selectedItem.value;
+  if (!target) return;
   
-  const hasTitleChanged = selectedItem.value.title !== lastSavedTitle;
-  const hasContentChanged = selectedItem.value.content !== lastSavedContent;
+  const hasTitleChanged = target.title !== lastSavedTitle;
+  const hasContentChanged = target.content !== lastSavedContent;
   
   if (hasUnsavedChanges || hasTitleChanged || hasContentChanged) {
-    console.log(`保存项目 (${reason}): ${selectedItem.value.title}`);
+    console.log(`保存项目 (${reason}): ${target.title}`);
     
     // 更新最后保存的记录
-    lastSavedTitle = selectedItem.value.title;
-    lastSavedContent = selectedItem.value.content || '';
+    lastSavedTitle = target.title;
+    lastSavedContent = target.content || '';
     hasUnsavedChanges = false;
     
     // 调用更新函数
-    await updateSelectedItem(selectedItem.value);
+    await updateSelectedItem(target);
   } else {
     console.log(`跳过保存 (${reason}): 无变化`);
   }
 }
 
-// 更新项目
+// 更新项目（若为新建草稿则自动加入）
 async function updateSelectedItem(item: Item) {
   const index = allItems.value.findIndex((i: Item) => i.id === item.id);
   if (index !== -1) {
@@ -2703,13 +4303,22 @@ async function updateSelectedItem(item: Item) {
       selectedItem.value = allItems.value[index];
     }
     
-    // 保存到文件系统
-    await saveItemToFile(allItems.value[index]);
-    
-    // 重新计算视图
-    computer();
+    // 保存到 localStorage
+    saveItemsToStorage();
     
     console.log(`项目已更新并保存: ${item.title}`);
+  } else {
+    // 新建草稿：标题和内容都为空则不加入列表，但保留草稿
+    // （避免切换类型/设置日期时选中项被清空，导致下方选项栏消失）
+    if (!item.title.trim() && !(item.content || '').trim()) {
+      return;
+    }
+    item.title = item.title.trim() || '无标题';
+    if (!item.createdTime) item.createdTime = new Date();
+    item.updatedAt = new Date();
+    allItems.value.push(item);
+    selectedItem.value = item;
+    saveItemsToStorage();
   }
 }
 
@@ -2729,60 +4338,13 @@ async function addChildItem(parent: Item) {
   
   allItems.value.push(newItem);
   
-  if (!parent.isFolder) {
-    parent.isFolder = true;
-    
-    if (parent.filePath) {
-      const oldPath = parent.filePath;
-      if (oldPath.endsWith('.md')) {
-        // 将 .md 文件转换为文件夹
-        const folderPath = normalizePath(oldPath.replace(/\.md$/, ''));
-        
-        try {
-          // 确保创建新文件夹
-          await window.ipcRenderer.invoke('ensureDir', folderPath);
-          
-          // 移动原文件内容到 .README.md
-          const readmePath = pathJoin(folderPath, '.README.md');
-          const content = await window.ipcRenderer.invoke('readFile', oldPath);
-          await window.ipcRenderer.invoke('writeFile', readmePath, content);
-          
-          // 删除原文件
-          await window.ipcRenderer.invoke('deleteFile', oldPath);
-          
-          // 更新父项目路径为文件夹路径
-          parent.filePath = folderPath;
-          await saveContentToFile(readmePath, parent);
-          
-          console.log(`成功将文件转换为文件夹: ${oldPath} -> ${folderPath}`);
-        } catch (error) {
-          console.error('转换文件夹失败:', error);
-          parent.isFolder = false;
-          return;
-        }
-      }
-    }
-  }
-  
-  // 确保父文件夹存在
-  if (parent.filePath) {
-    const parentExists = await fileExists(parent.filePath);
-    if (!parentExists) {
-      console.warn(`父文件夹不存在，重新创建: ${parent.filePath}`);
-      await window.ipcRenderer.invoke('ensureDir', parent.filePath);
-      
-      const readmePath = pathJoin(parent.filePath, '.README.md');
-      await saveContentToFile(readmePath, parent);
-    }
-  }
-  
-  // 先保存父项目，确保文件夹存在
-  await saveItemToFile(parent);
-  
-  // 然后再保存子项目
-  await saveItemToFile(newItem);
-  
+  // 本地化存储：只更新 localStorage，不创建任何文件/文件夹
   parent.expanded = true;
+  saveItemsToStorage();
+  expandedKeys.value = collectExpandedIds();
+  nextTick(() => {
+    syncTreeExpansion();
+  });
 }
 
 // 删除项目
@@ -2796,8 +4358,6 @@ async function deleteItem(item: Item) {
       if (index !== -1) {
         allItems.value.splice(index, 1);
       }
-      // 删除子项目的文件
-      await deleteItemFile(child);
     }
   };
   
@@ -2808,8 +4368,6 @@ async function deleteItem(item: Item) {
   const index = allItems.value.findIndex((i: Item) => i.id === item.id);
   if (index !== -1) {
     allItems.value.splice(index, 1);
-    // 删除当前项目的文件/文件夹
-    await deleteItemFile(item);
   }
   
   // 如果删除的是当前选中的项目，清除选中状态
@@ -2817,9 +4375,7 @@ async function deleteItem(item: Item) {
     selectedItem.value = null;
   }
   
-  // 刷新瀑布流视图
-  distributeItemsToColumns();
-  
+  saveItemsToStorage();
   console.log(`项目删除完成: ${item.title}`);
 }
 
@@ -2833,103 +4389,150 @@ function toggleExpand(item: Item) {
     item.expanded = !item.expanded;
   }
 
-  if (currentView.value === 'tree') {
-    allItems.value = [...allItems.value];
-  }
+  allItems.value = [...allItems.value];
+  saveItemsToStorage();
 }
 
-// 处理顶级拖拽
-async function onTopLevelDragEnd(event: any) {
-  if (event.moved) {
-    for (let i = 0; i < treeItems.value.length; i++) {
-      const item = treeItems.value[i];
-      const existingItem = allItems.value.find(e => e.id === item.id);
-      if (existingItem) {
-        existingItem._order = i;
-        await saveItemToFile(existingItem);
-      }
+// ========== el-tree 树状图事件 ==========
+function collectExpandedIds(): number[] {
+  return allItems.value.filter(i => i.expanded).map(i => i.id);
+}
+
+function onTreeNodeClick(data: Item) {
+  selectItem(data);
+}
+
+// ========== 树状图右键菜单 ==========
+const treeContextMenu = ref<{ visible: boolean; x: number; y: number; item: Item | null }>({ visible: false, x: 0, y: 0, item: null });
+
+function openTreeContextMenu(event: MouseEvent, item: Item) {
+  treeContextMenu.value.item = item;
+  // 视口边界修正（估算菜单尺寸 150x80）
+  const menuW = 150, menuH = 80;
+  let x = event.clientX;
+  let y = event.clientY;
+  if (x + menuW > window.innerWidth) x = window.innerWidth - menuW - 4;
+  if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 4;
+  treeContextMenu.value.x = Math.max(0, x);
+  treeContextMenu.value.y = Math.max(0, y);
+  treeContextMenu.value.visible = true;
+}
+
+function closeTreeContextMenu() {
+  treeContextMenu.value.visible = false;
+  treeContextMenu.value.item = null;
+}
+
+function treeMenuAddChild() {
+  const item = treeContextMenu.value.item;
+  closeTreeContextMenu();
+  if (item) addChildItem(item);
+}
+
+function treeMenuDelete() {
+  const item = treeContextMenu.value.item;
+  closeTreeContextMenu();
+  if (item) deleteItem(item);
+}
+
+// 切换树状图排序方式（再次点击同项切换正序/倒序，持久化到 localStorage）
+function setTreeSort(mode: 'default' | 'name' | 'updated' | 'start' | 'end' | 'status') {
+  if (treeSortMode.value === mode) {
+    // 同项再次点击：切换方向（default 无方向，直接关闭）
+    if (mode !== 'default') {
+      treeSortDir.value = treeSortDir.value === 'asc' ? 'desc' : 'asc';
+      localStorage.setItem(TREE_SORT_DIR_KEY, treeSortDir.value);
     }
-  } else if (event.added) {
-    const { element, newIndex } = event.added;
-    const item = allItems.value.find((i: Item) => i.id === element.id);
-    
-    if (item) {
-      item.parentId = undefined;
-      item._order = newIndex;
-      await saveItemToFile(item);
-      
-      const currentTopItems = treeItems.value;
-      for (let i = 0; i < currentTopItems.length; i++) {
-        const topItem = currentTopItems[i];
-        if (topItem.id !== item.id) {
-          const existingItem = allItems.value.find(e => e.id === topItem.id);
-          if (existingItem) {
-            existingItem._order = i >= newIndex ? i + 1 : i;
-            await saveItemToFile(existingItem);
-          }
+  } else {
+    treeSortMode.value = mode;
+    localStorage.setItem(TREE_SORT_KEY, mode);
+  }
+  closeTreeContextMenu();
+}
+
+function allowTreeDrop(draggingNode: any, dropNode: any, type: string): boolean {
+  if (!draggingNode || !dropNode) return false;
+  if (draggingNode.data.id === dropNode.data.id) return false;
+  const isSelfOrDescendant = (node: any): boolean => {
+    if (!node) return false;
+    if (node.data && node.data.id === draggingNode.data.id) return true;
+    return (node.childNodes || []).some(isSelfOrDescendant);
+  };
+  return !isSelfOrDescendant(dropNode);
+}
+
+async function onTreeNodeDrop(draggingNode: any, dropNode: any, dropType: string, ev: any) {
+  const movedItem = allItems.value.find(i => i.id === draggingNode.data.id);
+  const targetItem = allItems.value.find(i => i.id === dropNode.data.id);
+  if (!movedItem || !targetItem || movedItem.id === targetItem.id) return;
+
+  let newParentId: number | undefined;
+  if (dropType === 'inner') {
+    newParentId = targetItem.id;
+  } else {
+    newParentId = targetItem.parentId;
+  }
+  if (newParentId === movedItem.id) return;
+
+  // 防止拖入自己的后代
+  const isDescendantOf = (parentId: number | undefined): boolean => {
+    if (parentId === undefined || parentId === null) return false;
+    if (parentId === movedItem.id) return true;
+    const parent = allItems.value.find(i => i.id === parentId);
+    return parent ? isDescendantOf(parent.parentId) : false;
+  };
+  if (isDescendantOf(newParentId)) return;
+
+  movedItem.parentId = newParentId;
+
+  // 同级重新排序（本地化存储：只更新 localStorage）
+  const siblings = allItems.value
+    .filter(i => (i.parentId ?? null) === (newParentId ?? null))
+    .sort((a, b) => (a._order ?? a.id) - (b._order ?? b.id));
+  const withoutMoved = siblings.filter(i => i.id !== movedItem.id);
+  let insertIndex = withoutMoved.findIndex(i => i.id === targetItem.id);
+  if (insertIndex < 0) insertIndex = withoutMoved.length;
+  if (dropType === 'after') insertIndex += 1;
+  insertIndex = Math.min(insertIndex, withoutMoved.length);
+  withoutMoved.splice(insertIndex, 0, movedItem);
+  for (let i = 0; i < withoutMoved.length; i++) {
+    withoutMoved[i]._order = i;
+  }
+
+  allItems.value = [...allItems.value];
+  saveItemsToStorage();
+}
+
+function onTreeNodeExpand(data: Item) {
+  const item = allItems.value.find(i => i.id === data.id);
+  if (item) item.expanded = true;
+  if (!expandedKeys.value.includes(data.id)) expandedKeys.value.push(data.id);
+  saveItemsToStorage();
+}
+
+function onTreeNodeCollapse(data: Item) {
+  const item = allItems.value.find(i => i.id === data.id);
+  if (item) item.expanded = false;
+  expandedKeys.value = expandedKeys.value.filter(k => k !== data.id);
+  saveItemsToStorage();
+}
+
+// 数据加载后同步展开状态（兜底，避免 el-tree 挂载时数据尚未加载）
+function syncTreeExpansion() {
+  const tree: any = todoTreeRef.value;
+  if (!tree) return;
+  try {
+    const nodes: any[] = tree.store?._getAllNodes?.() || [];
+    nodes.forEach((node: any) => {
+      if (node && node.data && node.data.id !== undefined) {
+        const item = allItems.value.find(i => i.id === node.data.id);
+        if (item && node.expanded !== !!item.expanded) {
+          node.expanded = !!item.expanded;
         }
       }
-      
-      nextTick(() => {
-        treeItems.value = [...treeItems.value];
-      });
-    }
-  }
-}
-
-// 处理项目移动
-async function handleItemMoved(payload: { movedItem: Item, newParentId?: number, targetItemId?: number, position?: 'before' | 'after' | 'inside' }) {
-  const movedItem = allItems.value.find((i: Item) => i.id === payload.movedItem.id);
-  if (!movedItem) return;
-  
-  if (payload.newParentId === movedItem.id) return;
-  
-  const isChildOfMovedItem = (parentId: number): boolean => {
-    const children = allItems.value.filter(i => i.parentId === parentId);
-    for (const child of children) {
-      if (child.id === movedItem.id) return true;
-      if (isChildOfMovedItem(child.id)) return true;
-    }
-    return false;
-  };
-  
-  if (payload.newParentId && isChildOfMovedItem(movedItem.id)) return;
-  
-  const oldParentId = movedItem.parentId;
-  
-  if (payload.position === 'inside') {
-    movedItem.parentId = payload.newParentId;
-  } else if (payload.position === 'before' || payload.position === 'after') {
-    movedItem.parentId = payload.targetItemId ? 
-      allItems.value.find(i => i.id === payload.targetItemId)?.parentId : 
-      undefined;
-  }
-  
-  await saveItemToFile(movedItem);
-  
-  if (!movedItem.parentId && oldParentId) {
-    movedItem._order = treeItems.value.length;
-    await saveItemToFile(movedItem);
-    nextTick(() => {
-      treeItems.value = [...treeItems.value];
     });
-  } else if (movedItem.parentId && !oldParentId) {
-    nextTick(() => {
-      treeItems.value = treeItems.value.filter(item => item.id !== movedItem.id);
-    });
-  }
-}
-
-// 处理子项目变化
-async function handleChildrenChanged(payload: { itemId: number, children: Item[] }) {
-  for (let i = 0; i < payload.children.length; i++) {
-    const child = payload.children[i];
-    const childItem = allItems.value.find(c => c.id === child.id);
-    if (childItem) {
-      childItem.parentId = payload.itemId;
-      childItem._order = i;
-      await saveItemToFile(childItem);
-    }
+  } catch (e) {
+    console.warn('同步树展开状态失败:', e);
   }
 }
 
@@ -2942,17 +4545,103 @@ function formatDateForInput(date: Date | undefined) {
   return `${year}-${month}-${day}`;
 }
 
-function handleScroll(event: Event) {}
-
-function getStatusIcon(status: ItemStatus): string {
-  const statusIcons: Record<ItemStatus, string> = {
-    '灵感': 'fa fa-lightbulb-o',
-    '规划': 'fa fa-sitemap',
-    '待办': 'fa fa-clock-o',
-    '进行中': 'fa fa-spinner fa-spin',
-    '已完成': 'fa fa-check-circle-o'
+// 时间显示：有起止时间显示日期范围；无起止时间（灵感/笔记）显示相对时间或日期
+function formatItemTime(item: Item): string {
+  const fmt = (d: Date | undefined) => {
+    if (!d) return '';
+    const date = new Date(d);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    return `${month}-${day}`;
   };
-  return statusIcons[status] || 'fa fa-circle';
+  // 有起止时间：按时间范围显示（日历/任务类）
+  if (item.startTime) {
+    const s = fmt(item.startTime);
+    const e = fmt(item.endTime);
+    return e && e !== s ? `${s} ~ ${e}` : s;
+  }
+  // 无起止时间（灵感/笔记）：优先显示相对时间（修改/创建时间）
+  const anchor = item.updatedAt || item.createdTime;
+  if (!anchor) return '';
+  const ts = new Date(anchor).getTime();
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / (1000 * 60));
+  const hours = Math.floor(diff / (1000 * 60 * 60));
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const isZh = store.locales === 'zh';
+  if (mins < 1) return isZh ? '刚刚' : 'just now';
+  if (mins < 60) return isZh ? `${mins}分钟前` : `${mins}m ago`;
+  if (hours < 24) return isZh ? `${hours}小时前` : `${hours}h ago`;
+  if (days < 7) return isZh ? `${days}天前` : `${days}d ago`;
+  return fmt(anchor);
+}
+
+// 获取条目所属目录路径（父级链向上遍历），格式 目录A/子目录B/；无父级返回空串（不显示）
+function getItemPath(item: Item): string {
+  if (!item) return '';
+  const parts: string[] = [];
+  const seen = new Set<number>();
+  let cur: Item | undefined = item;
+  while (cur) {
+    // 显式标注类型：避免循环赋值（cur = parent）导致 TS 隐式 any 的循环依赖推断
+    const pid: number | undefined = cur.parentId;
+    if (pid === undefined || pid === null) break;
+    if (seen.has(pid)) break; // 防止循环引用
+    seen.add(pid);
+    const parent: Item | undefined = allItems.value.find(i => i.id === pid);
+    if (!parent) break;
+    parts.unshift(parent.title || '无标题');
+    cur = parent;
+  }
+  return parts.length ? parts.join('/') + '/' : '';
+}
+
+function getStatusIcon(status: string): string {
+  const opt = statusOptions.value.find(o => o.value === status);
+  return opt ? opt.icon : 'fa fa-tag';
+}
+
+// 状态标签（未知分类显示"其他"）
+function getStatusLabel(status: string): string {
+  const opt = statusOptions.value.find(o => o.value === status);
+  return opt ? opt.label : (store.locales === 'zh' ? '其他' : 'Other');
+}
+
+// 分类筛选匹配（"其他" = 不在任何自定义分类中）
+function statusFilterMatch(itemStatus: string): boolean {
+  if (!selectedStatus.value) return true;
+  if (selectedStatus.value === '__undefined__') {
+    return !statusOptions.value.some(o => o.value === itemStatus);
+  }
+  return itemStatus === selectedStatus.value;
+}
+
+// 判断条目是否位于隐藏分支（自身或任一祖先为隐藏）
+function isInHiddenBranch(item: Item): boolean {
+  let cur: Item | undefined = item;
+  const seen = new Set<number>();
+  while (cur) {
+    if (cur.hidden) return true;
+    if (cur.parentId === undefined || cur.parentId === null) break;
+    if (seen.has(cur.id)) break; // 防止循环引用
+    seen.add(cur.id);
+    // 用局部变量承接 parentId，避免闭包内类型收窄丢失
+    const pid: number | undefined = cur.parentId;
+    cur = allItems.value.find(i => i.id === pid);
+  }
+  return false;
+}
+
+// 显示/隐藏筛选匹配（替代原“归档”逻辑）
+function visibilityMatch(item: Item): boolean {
+  if (visibilityFilter.value === 'all') return true;
+  if (visibilityFilter.value === 'hidden') return Boolean(item.hidden);
+  return !item.hidden;
+}
+
+// 指定状态是否属于某个自定义分类
+function hasStatusOption(status: string): boolean {
+  return statusOptions.value.some(o => o.value === status);
 }
 
 // 检查文件是否存在
@@ -2982,43 +4671,61 @@ function sanitizeFileName(fileName: string): string {
     .substring(0, 100);
 }
 
-// 处理数据导入事件
-function handleDataImported(data: any) {
-  showDataSet.value = false;
-  if (workspacePath.value) {
-    loadWorkspace();
-  }
+// ========== 右侧编辑器宽度拖拽调整（像素固定：窗口缩放不改变宽度，仅做边界限制） ==========
+const isResizing = ref(false);
+
+// 编辑器最小宽度 / 左侧面板最小保留宽度
+const EDITOR_MIN_W = 240;
+const LEFT_MIN_W = 180;
+
+// 窗口/容器缩放时保持右侧编辑器像素宽度不变（仅在窗口过小/过大时收缩/放大到边界内）
+function clampEditorWidth() {
+  const home = homeRef.value;
+  if (!home) return;
+  const rect = home.getBoundingClientRect();
+  if (!rect.width) return;
+  // 限制最大宽度：保留至少 LEFT_MIN_W 给左侧面板，且不超过总宽的 70%
+  const maxAllowed = Math.max(LEFT_MIN_W, Math.min(rect.width * 0.7, rect.width - LEFT_MIN_W));
+  editorWidth.value = Math.min(maxAllowed, Math.max(EDITOR_MIN_W, editorWidth.value));
 }
 
-// 处理数据清空事件
-function handleDataCleared() {
-  showDataSet.value = false;
-  workspacePath.value = '';
-  allItems.value = [];
-  localStorage.removeItem('workspacePath');
+function startResize(e: MouseEvent) {
+  e.preventDefault();
+  isResizing.value = true;
+  document.addEventListener('mousemove', onResizeMove);
+  document.addEventListener('mouseup', stopResize);
 }
 
-// 处理工作区变化
-function handleWorkspaceChanged(newPath: string) {
-  workspacePath.value = newPath;
-  if (newPath) {
-    loadWorkspace();
-  }
+function onResizeMove(e: MouseEvent) {
+  if (!isResizing.value) return;
+  const home = homeRef.value;
+  if (!home) return;
+  const rect = home.getBoundingClientRect();
+  // 编辑器右边缘 = home 右边缘（去掉 padding 5px）
+  const raw = rect.width - (e.clientX - rect.left) - 5;
+  // 限制最大宽度：保留至少 LEFT_MIN_W 给左侧面板，且不超过总宽的 70%
+  const maxAllowed = Math.max(LEFT_MIN_W, Math.min(rect.width * 0.7, rect.width - LEFT_MIN_W));
+  editorWidth.value = Math.min(maxAllowed, Math.max(EDITOR_MIN_W, raw));
+}
+
+function stopResize() {
+  if (!isResizing.value) return;
+  isResizing.value = false;
+  document.removeEventListener('mousemove', onResizeMove);
+  document.removeEventListener('mouseup', stopResize);
+  localStorage.setItem(EDITOR_WIDTH_KEY, String(editorWidth.value));
 }
 
 // ========== 生命周期和监听 ==========
 
-watch([filteredItems, columnCount, waterfallLayout], () => {
-  if (currentView.value === 'waterfall') {
-    distributeItemsToColumns();
-  }
-}, { immediate: true, deep: true });
-
-watch(allItems, () => {
-  computer();
-});
-
 watch(selectedItem, (newVal, oldVal) => {
+  // 切换条目 / 关闭面板时：若原条目仍在列表中且有未保存修改，则自动保存（防止数据丢失）
+  if (oldVal && (!newVal || newVal.id !== oldVal.id)) {
+    const stillExists = allItems.value.some(i => i.id === oldVal.id);
+    if (stillExists) {
+      saveIfNeeded('切换条目', oldVal);
+    }
+  }
   if (newVal && (!oldVal || newVal.id !== oldVal.id)) {
     let parentId = newVal.parentId;
     while (parentId !== undefined && parentId !== null) {
@@ -3038,48 +4745,81 @@ watch(selectedItem, (newVal, oldVal) => {
   }
 });
 
-watch([selectedStatuses, searchText], () => {
-  if (currentView.value === 'week' || currentView.value === 'month') {
-    computer();
-  }
+// 编辑器内容变化时同步到编辑器
+watch(editorContent, () => {
+  syncNoteEditorContent();
 });
 
-function setupResizeObserver() {
-  const resizeObserver = new ResizeObserver(() => {
-    if (currentView.value === 'waterfall') {
-      calculateColumnCount();
-    }
-  });
-  
-  if (waterfallGrid.value) {
-    resizeObserver.observe(waterfallGrid.value);
-  }
-  
-  window.addEventListener('resize', () => {
-    if (currentView.value === 'waterfall') {
-      calculateColumnCount();
-    }
-  });
-  
-  return () => {
-    resizeObserver.disconnect();
-    window.removeEventListener('resize', () => {
-      if (currentView.value === 'waterfall') {
-        calculateColumnCount();
-      }
-    });
-  };
-}
+// 持久化分类筛选
+watch(selectedStatus, (status) => {
+  localStorage.setItem(STATUS_STORAGE_KEY, status);
+});
+
+// 持久化显示/隐藏筛选
+watch(visibilityFilter, (v) => {
+  localStorage.setItem(VISIBILITY_FILTER_KEY, v);
+});
 
 onMounted(() => {
+  loadStatusOptions();
+
+  // 从 localStorage 加载统一条目（旧版数据迁移改为手动，见设置面板）
+  loadItemsFromStorage();
+
+  // 点击任意处 / 滚动时关闭树状图右键菜单
+  document.addEventListener('click', closeTreeContextMenu);
+  document.addEventListener('scroll', closeTreeContextMenu, true);
+
+  // 恢复上次的视图 / 分类筛选 / 左侧宽度（旧版 waterfall 值映射为 notes）
+  const savedView = localStorage.getItem(VIEW_STORAGE_KEY);
+  if (savedView === 'notes' || savedView === 'tree' || savedView === 'month' || savedView === 'week') {
+    currentView.value = savedView;
+  } else if (savedView === 'waterfall') {
+    currentView.value = 'notes';
+  }
+  const savedStatus = localStorage.getItem(STATUS_STORAGE_KEY);
+  if (savedStatus) {
+    selectedStatus.value = savedStatus;
+  }
+  const savedVisibility = localStorage.getItem(VISIBILITY_FILTER_KEY);
+  if (savedVisibility === 'show' || savedVisibility === 'hidden' || savedVisibility === 'all') {
+    visibilityFilter.value = savedVisibility;
+  }
+  const savedSort = localStorage.getItem(TREE_SORT_KEY);
+  if (savedSort === 'name' || savedSort === 'updated' || savedSort === 'start' || savedSort === 'end' || savedSort === 'status' || savedSort === 'default') {
+    treeSortMode.value = savedSort;
+  }
+  const savedDir = localStorage.getItem(TREE_SORT_DIR_KEY);
+  if (savedDir === 'asc' || savedDir === 'desc') {
+    treeSortDir.value = savedDir;
+  }
+
   nextTick(() => {
-    setupResizeObserver();
-    computer();
-    
+    // 恢复右侧编辑器像素宽度（无记录保持默认 480px）
+    const savedWidth = Number(localStorage.getItem(EDITOR_WIDTH_KEY));
+    if (savedWidth >= 240 && savedWidth <= 1200) {
+      editorWidth.value = savedWidth;
+    }
+    clampEditorWidth();
+
+    // 容器尺寸变化（窗口缩放等）时保持编辑器宽度不变（仅边界限制）
+    if (typeof ResizeObserver !== 'undefined' && homeRef.value) {
+      resizeObserver = new ResizeObserver(() => clampEditorWidth());
+      resizeObserver.observe(homeRef.value);
+    }
+
+    // 编辑器常驻右侧，初始化一次
+    initNoteEditor();
+    bindNoteShortcut();
+
+    // 默认显示新建面板（右侧出现空草稿编辑器，仅草稿不持久化）
+    openNewDraft();
+
+    // 统一存储：数据已在 onMounted 从 localStorage 加载；
+    // 若存在旧工作区路径，仅保留字段（用于可选导入旧数据），不自动覆盖。
     const savedWorkspace = localStorage.getItem('workspacePath');
     if (savedWorkspace) {
       workspacePath.value = savedWorkspace;
-      loadWorkspace();
     }
   });
 });
@@ -3087,11 +4827,22 @@ onMounted(() => {
 onBeforeUnmount(() => {
   // 组件卸载前保存当前项目的更改
   saveIfNeeded('组件卸载');
+
+  document.removeEventListener('click', closeTreeContextMenu);
+  document.removeEventListener('scroll', closeTreeContextMenu, true);
   
   if (workspacePath.value) {
     localStorage.setItem('workspacePath', workspacePath.value);
   }
-  
-  window.removeEventListener('resize', () => {});
+
+  if (handleNoteShortcut) {
+    window.removeEventListener('keydown', handleNoteShortcut);
+    handleNoteShortcut = null;
+  }
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+  stopResize();
 });
 </script>

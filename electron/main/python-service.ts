@@ -5,8 +5,20 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { randomUUID } from 'crypto'
 import { app } from 'electron'
+import { buildSandboxEnv, writeSitecustomizeSandbox } from './python-sandbox'
 
 const execAsync = promisify(exec)
+
+/** 解析有效的工作目录：cwd 不存在或非目录时回退到主进程当前目录（否则 exec 会报 spawn cmd.exe ENOENT） */
+function resolveExecCwd(cwd?: string): string {
+  if (cwd) {
+    try {
+      const st = fs.statSync(cwd)
+      if (st.isDirectory()) return cwd
+    } catch { /* 无效路径，回退 */ }
+  }
+  return process.cwd()
+}
 
 // Python 安装状态接口
 export interface PythonInstallation {
@@ -95,7 +107,15 @@ export class PythonService {
   /**
    * 执行 Python 代码
    */
-  async executeCode(code: string, input: any = ''): Promise<PythonExecutionResult> {
+  async executeCode(code: string, input: any = '', cwd?: string, sandboxMode: 'safe' | 'workspace' = 'safe'): Promise<PythonExecutionResult> {
+    // 梯度 1：Python-lite 沙箱 —— sitecustomize 目录（audit hook + setrlimit），执行后清理
+    let sandboxDir: string | null = null
+    const cleanupSandbox = () => {
+      if (sandboxDir) {
+        try { fs.rmSync(sandboxDir, { recursive: true, force: true }) } catch (e) { /* ignore */ }
+        sandboxDir = null
+      }
+    }
     try {
       const pythonCheck = await this.checkInstallation()
       if (!pythonCheck.installed) {
@@ -106,8 +126,8 @@ export class PythonService {
         }
       }
 
-      // 验证代码安全性
-      const securityCheck = this.validateCodeSecurity(code)
+      // 验证代码安全性（workspace 模式放行文件写入与网络）
+      const securityCheck = this.validateCodeSecurity(code, sandboxMode)
       if (!securityCheck.isValid) {
         return {
           success: false,
@@ -116,28 +136,39 @@ export class PythonService {
         }
       }
 
-      // 创建安全执行的 Python 脚本（支持 pulp 和 gurobipy）
-      const safeScript = this.createSafePythonScript(code, input)
+      // 创建安全执行的 Python 脚本（支持 pulp 和 gurobipy，按沙箱模式调整限制）
+      // 梯度 1：Python-lite 沙箱 —— sitecustomize（audit hook + setrlimit）+ -I -E -P + 白名单 env
+      const tempDir = app.getPath('temp')
+      sandboxDir = path.join(tempDir, `aikm_sandbox_${Date.now()}_${randomUUID().substring(0, 8)}`)
+      try {
+        writeSitecustomizeSandbox(sandboxDir, sandboxMode)
+      } catch (e) {
+        console.warn('[Python沙箱] 写入 sitecustomize 失败，降级为无审计钩子执行:', e)
+      }
+
+      const safeScript = this.createSafePythonScript(code, input, sandboxMode, sandboxDir)
       
       // 创建临时文件来执行 Python 代码
-      const tempDir = app.getPath('temp')
       const tempFile = path.join(tempDir, `python_exec_${Date.now()}_${randomUUID().substring(0, 8)}.py`)
       
       fs.writeFileSync(tempFile, safeScript, 'utf-8')
       
       try {
-        // 直接执行生成的 Python 脚本（不带额外参数）
-        const { stdout, stderr } = await execAsync(`${pythonCheck.command} "${tempFile}"`, {
+        // 直接执行生成的 Python 脚本（-I 隔离模式隐含 -E -P；白名单 env 防泄漏 API key）
+        const { stdout, stderr } = await execAsync(`${pythonCheck.command} -I -E -P "${tempFile}"`, {
           timeout: 180000, // 180秒超时（给优化求解更多时间）
-          maxBuffer: 1024 * 1024 * 10 // 10MB输出限制
+          maxBuffer: 1024 * 1024 * 10, // 10MB输出限制
+          env: buildSandboxEnv(sandboxMode),
+          cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
         })
         
-        // 清理临时文件
+        // 清理临时文件与沙箱目录
         try {
           fs.unlinkSync(tempFile)
         } catch (e) {
           // 忽略清理错误
         }
+        cleanupSandbox()
         
         if (stderr && stderr.trim()) {
           console.warn('Python stderr:', stderr)
@@ -184,12 +215,13 @@ export class PythonService {
           }
         }
       } catch (execError: any) {
-        // 清理临时文件
+        // 清理临时文件与沙箱目录
         try {
           fs.unlinkSync(tempFile)
         } catch (e) {
           // 忽略清理错误
         }
+        cleanupSandbox()
         
         let errorMessage = `Python执行错误: ${execError.message || '未知错误'}`
         
@@ -205,6 +237,7 @@ export class PythonService {
         }
       }
     } catch (error: any) {
+      cleanupSandbox()
       return {
         success: false,
         error: error.message,
@@ -216,7 +249,7 @@ export class PythonService {
 /**
  * 创建安全的 Python 执行脚本（支持 pulp 和 gurobipy 库）
  */
-private createSafePythonScript(code: string, input: any): string {
+private createSafePythonScript(code: string, input: any, sandboxMode: 'safe' | 'workspace' = 'safe', sandboxHookDir: string | null = null): string {
   // 处理输入数据
   let inputData = input
   if (typeof input === 'string') {
@@ -250,6 +283,13 @@ private createSafePythonScript(code: string, input: any): string {
   
   // 创建 Python 脚本模板，使用 Python 字符串处理而不是 JavaScript 正则表达式
   return `
+import sys
+import os
+${sandboxHookDir ? `_sandbox_hook_dir = ${JSON.stringify(sandboxHookDir)}
+if _sandbox_hook_dir not in sys.path:
+    sys.path.insert(0, _sandbox_hook_dir)
+import sitecustomize  # AI-KM Python-lite 沙箱（audit hook + setrlimit）
+` : ''}
 import json
 import sys
 import traceback
@@ -262,6 +302,10 @@ import itertools
 import collections
 import statistics
 import io
+import csv
+
+# 沙箱模式（借鉴 Codex sandbox_mode）：safe=只读 / workspace=工作区写入（放行文件写入与网络）
+sandbox_mode = ${JSON.stringify(sandboxMode)}
 
 # 设置标准输出的编码为 UTF-8
 if sys.stdout.encoding != 'utf-8':
@@ -317,6 +361,54 @@ except ImportError:
         NUMPY_AVAILABLE = False
         np = None
 
+# 尝试导入 pandas 库（用于数据处理）
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    pd = None
+
+# 尝试导入 scipy 科学计算库（优化/线性代数/统计/积分/信号等，workspace 模式放行）
+try:
+    import scipy
+    from scipy import optimize, linalg, stats, integrate, interpolate, signal, sparse, special, ndimage, cluster, fft, constants
+    import scipy.io as scipy_io
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    scipy = None
+    optimize = linalg = stats = integrate = interpolate = signal = sparse = special = ndimage = cluster = fft = constants = None
+    scipy_io = None
+
+# 尝试导入 matplotlib 绘图库（workspace 模式放行 savefig 写文件）
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import pyplot as plt
+    from matplotlib import cm
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    plt = None
+    cm = None
+
+# 尝试导入 sympy 符号计算库
+try:
+    import sympy
+    SYMPY_AVAILABLE = True
+except ImportError:
+    SYMPY_AVAILABLE = False
+    sympy = None
+
+# 尝试导入 seaborn 统计绘图库（基于 matplotlib）
+try:
+    import seaborn as sns
+    SEABORN_AVAILABLE = True
+except ImportError:
+    SEABORN_AVAILABLE = False
+    sns = None
+
 # 安全环境类
 class SafeEnvironment:
     def __init__(self, input_data):
@@ -355,7 +447,8 @@ class SafeEnvironment:
             'sys': sys,
             'traceback': traceback,
             'time': time,
-            'io': io
+            'io': io,
+            'csv': csv
         }
         
         # 如果可用，添加优化求解库
@@ -393,24 +486,71 @@ class SafeEnvironment:
             self.allowed_modules['numpy'] = np
             self.allowed_modules['np'] = np
             self.logs.append("numpy 库已加载")
-    
+        
+        if PANDAS_AVAILABLE:
+            self.allowed_modules['pandas'] = pd
+            self.allowed_modules['pd'] = pd
+            self.logs.append("pandas 库已加载")
+        
+        # workspace 模式：放行网络模块（requests/urllib）
+        if sandbox_mode == 'workspace':
+            try:
+                import requests
+                self.allowed_modules['requests'] = requests
+                self.logs.append("requests 库已加载（workspace 模式）")
+            except ImportError:
+                pass
+            try:
+                import urllib.request
+                self.allowed_modules['urllib'] = urllib.request
+                self.allowed_modules['urllib.request'] = urllib.request
+                self.logs.append("urllib 库已加载（workspace 模式）")
+            except ImportError:
+                pass
+
+            # workspace 模式：放行科学计算与绘图库（scipy/matplotlib/sympy/seaborn）
+            if SCIPY_AVAILABLE:
+                self.allowed_modules['scipy'] = scipy
+                self.allowed_modules['scipy.optimize'] = optimize
+                self.allowed_modules['scipy.linalg'] = linalg
+                self.allowed_modules['scipy.stats'] = stats
+                self.allowed_modules['scipy.integrate'] = integrate
+                self.allowed_modules['scipy.interpolate'] = interpolate
+                self.allowed_modules['scipy.signal'] = signal
+                self.allowed_modules['scipy.sparse'] = sparse
+                self.allowed_modules['scipy.special'] = special
+                self.allowed_modules['scipy.ndimage'] = ndimage
+                self.allowed_modules['scipy.cluster'] = cluster
+                self.allowed_modules['scipy.fft'] = fft
+                self.allowed_modules['scipy.io'] = scipy_io
+                self.allowed_modules['scipy.constants'] = constants
+                self.logs.append("scipy 库已加载（workspace 模式）")
+            if MATPLOTLIB_AVAILABLE:
+                self.allowed_modules['matplotlib'] = matplotlib
+                self.allowed_modules['matplotlib.pyplot'] = plt
+                self.allowed_modules['plt'] = plt
+                self.allowed_modules['cm'] = cm
+                self.logs.append("matplotlib 库已加载（workspace 模式）")
+            if SYMPY_AVAILABLE:
+                self.allowed_modules['sympy'] = sympy
+                self.logs.append("sympy 库已加载（workspace 模式）")
+            if SEABORN_AVAILABLE:
+                self.allowed_modules['seaborn'] = sns
+                self.allowed_modules['sns'] = sns
+                self.logs.append("seaborn 库已加载（workspace 模式）")
+
     def _safe_import(self, name, globals=None, locals=None, fromlist=(), level=0):
         """安全的导入函数，匹配 __import__ 的完整签名"""
         module_name = name
-        
+
         if module_name in self.allowed_modules:
             module = self.allowed_modules[module_name]
-            
-            if fromlist:
-                if '*' in fromlist:
-                    return module
-                
-                result = {}
-                for attr_name in fromlist:
-                    if hasattr(module, attr_name):
-                        result[attr_name] = getattr(module, attr_name)
-                return result
-            
+            # import x.y 时 Python 期望返回顶层模块 x（以便把名字 x 绑定到包上）
+            if not fromlist and '.' in module_name:
+                top = module_name.split('.')[0]
+                if top in self.allowed_modules:
+                    return self.allowed_modules[top]
+            # 直接返回真实模块：from x.y import name 由 Python 的 fromlist 机制负责解析属性
             return module
         else:
             raise ImportError(f"不允许导入模块: {module_name}")
@@ -482,6 +622,8 @@ class SafeEnvironment:
                     'staticmethod': staticmethod,
                     'classmethod': classmethod
                 },
+                # workspace 模式：放行文件读写（open）
+                **({'open': open} if sandbox_mode == 'workspace' else {}),
                 'input': self.input,
                 'log': self.log,
                 'json': json,
@@ -523,6 +665,43 @@ class SafeEnvironment:
                 exec_globals['numpy'] = np
                 exec_globals['np'] = np
                 self.logs.append("在环境中添加 numpy 库")
+            
+            if PANDAS_AVAILABLE:
+                exec_globals['pandas'] = pd
+                exec_globals['pd'] = pd
+                self.logs.append("在环境中添加 pandas 库")
+
+            # workspace 模式：把科学计算/绘图库注入全局命名空间，用户可免 import 直接使用
+            if sandbox_mode == 'workspace':
+                if SCIPY_AVAILABLE:
+                    exec_globals['scipy'] = scipy
+                    exec_globals['scipy.optimize'] = optimize
+                    exec_globals['scipy.linalg'] = linalg
+                    exec_globals['scipy.stats'] = stats
+                    exec_globals['scipy.integrate'] = integrate
+                    exec_globals['scipy.interpolate'] = interpolate
+                    exec_globals['scipy.signal'] = signal
+                    exec_globals['scipy.sparse'] = sparse
+                    exec_globals['scipy.special'] = special
+                    exec_globals['scipy.ndimage'] = ndimage
+                    exec_globals['scipy.cluster'] = cluster
+                    exec_globals['scipy.fft'] = fft
+                    exec_globals['scipy.io'] = scipy_io
+                    exec_globals['scipy.constants'] = constants
+                    self.logs.append("在环境中添加 scipy 库")
+                if MATPLOTLIB_AVAILABLE:
+                    exec_globals['matplotlib'] = matplotlib
+                    exec_globals['matplotlib.pyplot'] = plt
+                    exec_globals['plt'] = plt
+                    exec_globals['cm'] = cm
+                    self.logs.append("在环境中添加 matplotlib 库")
+                if SYMPY_AVAILABLE:
+                    exec_globals['sympy'] = sympy
+                    self.logs.append("在环境中添加 sympy 库")
+                if SEABORN_AVAILABLE:
+                    exec_globals['seaborn'] = sns
+                    exec_globals['sns'] = sns
+                    self.logs.append("在环境中添加 seaborn 库")
             
             # 自定义 print 函数
             def custom_print(*args, **kwargs):
@@ -611,29 +790,31 @@ class SafeEnvironment:
             self.capture_output(message)
     
     def _check_code_safety(self, code: str):
-        """简化的代码安全检查，主要阻止危险操作"""
+        """简化的代码安全检查，主要阻止危险操作（workspace 模式放行文件写入与网络）"""
+        # 基础危险操作（所有模式均禁止：系统级/动态执行/反序列化等）
         dangerous_patterns = [
-            # 文件系统操作
-            (r'open\\(', '文件操作'),
             (r'os\\.', '操作系统访问'),
             (r'subprocess\\.', '子进程执行'),
             (r'exec\\(', '动态代码执行'),
             (r'eval\\(', '动态代码执行'),
             (r'__import__\\(', '动态导入'),
             (r'compile\\(', '代码编译'),
-            # 网络操作
-            (r'requests\\.', '网络请求'),
-            (r'urllib\\.', '网络请求'),
             (r'socket\\.', '网络套接字'),
-            (r'http\\.', 'HTTP协议'),
-            # 系统操作
             (r'shutil\\.', '文件操作'),
             (r'pickle\\.', '序列化'),
-            # 特定危险操作
             (r'__getattribute__\\(', '属性访问'),
             (r'__setattr__\\(', '属性设置'),
             (r'__delattr__\\(', '属性删除'),
         ]
+        
+        # safe（只读）模式额外禁止：文件写入与网络请求
+        if sandbox_mode != 'workspace':
+            dangerous_patterns += [
+                (r'open\\(', '文件操作'),
+                (r'requests\\.', '网络请求'),
+                (r'urllib\\.', '网络请求'),
+                (r'http\\.', 'HTTP协议'),
+            ]
         
         for pattern, desc in dangerous_patterns:
             if re.search(pattern, code, re.IGNORECASE):
@@ -923,18 +1104,19 @@ if __name__ == "__main__":
 /**
  * 验证 Python 代码安全性
  */
-validateCodeSecurity(code: string): { 
+validateCodeSecurity(code: string, sandboxMode: 'safe' | 'workspace' = 'safe'): { 
   isValid: boolean; 
   issues?: string[] 
 } {
   const issues: string[] = []
   
+  // workspace 模式放行文件写入（open）与网络（requests/urllib），仍禁系统级操作
+  const allowNetworkAndFiles = sandboxMode === 'workspace'
+  
   // 禁止的危险模块（基础安全）
-  const dangerousModules = [
-    'os', 'subprocess', 'shutil', 'socket',
-    'requests', 'urllib', 'webbrowser', 'pickle',
-    'eval', 'exec', '__import__', 'open'
-  ]
+  const dangerousModules = allowNetworkAndFiles
+    ? ['os', 'subprocess', 'shutil', 'socket', 'webbrowser', 'pickle', 'eval', 'exec', '__import__']
+    : ['os', 'subprocess', 'shutil', 'socket', 'requests', 'urllib', 'webbrowser', 'pickle', 'eval', 'exec', '__import__', 'open']
   
   // 检查危险模块的导入
   for (const module of dangerousModules) {
@@ -944,13 +1126,10 @@ validateCodeSecurity(code: string): {
     }
   }
   
-  // 检查危险函数调用
-  const dangerousCalls = [
-    'open\\(', 'exec\\(', 'eval\\(', 'compile\\(',
-    '__import__\\(', 'getattr\\(', 'setattr\\(',
-    'os\\.', 'sys\\.', 'subprocess\\.', 'shutil\\.',
-    'socket\\.'
-  ]
+  // 检查危险函数调用（workspace 放行 open(）
+  const dangerousCalls = allowNetworkAndFiles
+    ? ['exec\\(', 'eval\\(', 'compile\\(', '__import__\\(', 'getattr\\(', 'setattr\\(', 'os\\.', 'sys\\.', 'subprocess\\.', 'shutil\\.', 'socket\\.']
+    : ['open\\(', 'exec\\(', 'eval\\(', 'compile\\(', '__import__\\(', 'getattr\\(', 'setattr\\(', 'os\\.', 'sys\\.', 'subprocess\\.', 'shutil\\.', 'socket\\.']
   
   for (const call of dangerousCalls) {
     const regex = new RegExp(call, 'i')
@@ -959,52 +1138,53 @@ validateCodeSecurity(code: string): {
     }
   }
   
-  // 允许的科学计算和优化库 - 添加 gurobipy
-  const allowedScientificLibs = ['pulp', 'gurobipy', 'gurobipy as gp', 'gp', 'numpy', 'scipy', 'pandas', 'matplotlib']
-  
-  // 允许特定库的导入
-  // 这里的关键修改：允许 gurobipy 相关导入
+  // 导入检查：危险模块已在上面拦截；其余导入按"已知安全库宽放 + 未知名库放行并提示"处理。
+  // 不做"不在白名单即拒绝"——Python 生态庞大，白名单必然误伤合法库
+  // （如 import linprog / import csv / import sqlite3），应允许运行由运行时层 _check_code_safety 兜底。
+  // 常见安全库（科学计算 / 数据分析 / 可视化 / 优化求解 / 常用标准库）
+  const knownSafeLibs = [
+    // 科学计算与优化
+    'numpy', 'scipy', 'pandas', 'matplotlib', 'pulp', 'gurobipy', 'linprog', 'ortools', 'cvxpy', 'sympy',
+    'sklearn', 'scikit', 'statsmodels', 'pymoo', 'deap', 'z3', 'pulp_lp', 'mip',
+    // 标准库（无害常用）
+    'math', 'json', 'time', 'datetime', 're', 'random', 'itertools', 'collections', 'statistics',
+    'functools', 'operator', 'copy', 'textwrap', 'string', 'decimal', 'fractions', 'enum',
+    'pathlib', 'glob', 'csv', 'sqlite3', 'io', 'base64', 'binascii', 'hashlib', 'uuid',
+    'typing', 'dataclasses', 'abc', 'warnings', 'logging', 'traceback', 'sys',
+    // 网络（workspace 模式放行）
+    'requests', 'urllib', 'http', 'httpx', 'aiohttp', 'bs4', 'beautifulsoup', 'lxml', 'html.parser', 'json',
+  ]
   const importRegex = /(import\s+([\w\s,]+)|from\s+([\w.]+)\s+import)/gi;
   const imports = code.match(importRegex);
-  
+
   if (imports) {
     imports.forEach(importStmt => {
-      // 检查是否允许导入
-      let isAllowed = false;
-      
-      // 检查是否是允许的科学计算库
-      allowedScientificLibs.forEach(lib => {
-        if (importStmt.includes(lib) && !importStmt.includes('import ' + dangerousModules.join('|'))) {
-          isAllowed = true;
-        }
-      });
-      
-      if (!isAllowed) {
-        // 检查是否为内置模块或系统模块
-        const builtinModules = ['math', 'json', 'time', 'datetime', 're', 'random', 'itertools', 'collections', 'statistics'];
-        builtinModules.forEach(module => {
-          if (importStmt.includes(module)) {
-            isAllowed = true;
-          }
-        });
-      }
-      
-      if (!isAllowed) {
-        // 如果是 gurobipy 相关导入，允许通过
-        if (importStmt.includes('gurobipy') || importStmt.includes('gp') || importStmt.includes('GRB')) {
-          isAllowed = true;
-        }
-      }
-      
-      if (!isAllowed && !importStmt.includes('__future__')) {
-        issues.push(`需要检查的导入语句: ${importStmt.trim()}`);
-      }
-    });
+      const trimmed = importStmt.trim()
+      // __future__ 一律放行
+      if (trimmed.includes('__future__')) return
+      // 从导入语句中提取目标模块名（from x.y import z → x.y；import a, b → a）
+      const fromMatch = /^from\s+([\w.]+)/i.exec(trimmed)
+      const importMatch = /^import\s+([\w]+)/i.exec(trimmed)
+      const targetModule = (fromMatch?.[1] || importMatch?.[1] || '').toLowerCase()
+      if (!targetModule) return
+      // 危险模块已在上方拦截，这里直接跳过（双保险）
+      if (dangerousModules.some((m) => targetModule === m || targetModule.startsWith(m + '.'))) return
+      // 已知安全库：放行
+      if (knownSafeLibs.some((lib) => targetModule === lib || targetModule.startsWith(lib + '.'))) return
+      // 其余未知名导入：放行（运行时层 _check_code_safety 仍会拦截危险调用），仅提示
+      issues.push(`注意: 未知名导入 ${trimmed}`)
+    })
   }
   
+  // 将"注意"类提示与硬性错误区分：未知名导入不阻塞执行
+  const fatalIssues = issues.filter(i => i.startsWith('禁止'))
+  const warningIssues = issues.filter(i => i.startsWith('注意'))
+  if (fatalIssues.length > 0) {
+    return { isValid: false, issues: fatalIssues }
+  }
   return {
-    isValid: issues.length === 0,
-    issues: issues.length > 0 ? issues : undefined
+    isValid: true,
+    issues: warningIssues.length > 0 ? warningIssues : undefined
   }
 }
 

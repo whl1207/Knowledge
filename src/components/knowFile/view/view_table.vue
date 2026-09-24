@@ -1,6 +1,7 @@
 <script setup lang="ts">
-  import { usestore } from '../../../store'
+  import { usestore } from '@/store'
   import {ref, onMounted, watch, nextTick, computed} from 'vue'
+  import { ElMessage, ElMessageBox } from 'element-plus'
   
   const store = usestore()
   let editRowIndex = ref<number | null>(null)
@@ -106,12 +107,12 @@
   
   // 打开文件
   const open = function(i: number){
-    store.addTab(data.value[i])
+    store.openFileByMode(data.value[i])
   }
   
   // 打开文件夹
   const openFolder = function(path: string){
-    store.root = path
+    store.addRoot(path)
     init()
   }
   
@@ -349,12 +350,12 @@
         getAttributes()
       } else {
         console.error(`属性保存失败: ${file.label} - ${attribute}`)
-        alert(`保存失败，请检查控制台日志`)
+        ElMessage.error(`保存失败，请检查控制台日志`)
       }
       
     } catch (error: any) {
       console.error('保存属性失败:', error)
-      alert(`保存失败: ${error.message || '未知错误'}`)
+      ElMessage.error(`保存失败: ${error.message || '未知错误'}`)
     }
   }
   
@@ -537,14 +538,19 @@
   }
   
   // 添加新属性列
-  const addAttributeColumn = function(){
-    const newAttrName = prompt('请输入新属性名称:')
-    if (newAttrName && newAttrName.trim()) {
-      const attrName = newAttrName.trim()
+  const addAttributeColumn = async function(){
+    try {
+      const { value } = await ElMessageBox.prompt('请输入新属性名称:', '添加属性列', {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputPattern: /.+/,
+        inputErrorMessage: '名称不能为空'
+      })
+      const attrName = value.trim()
       if (!attributes.value.includes(attrName)) {
         attributes.value.push(attrName)
       }
-    }
+    } catch { /* 用户取消 */ }
   }
   
   // 清除搜索
@@ -552,10 +558,65 @@
     searchQuery.value = ''
   }
   
+  // ---- 悬浮提示（跟随鼠标显示文件信息，参考 view_file.vue） ----
+  const tooltipVisible = ref(false)
+  const tooltipPos = ref({ x: 0, y: 0 })
+  const tooltipData = ref<any>(null)
+  let tipSize = { w: 0, h: 0 }
+
+  /** 格式化文件大小（字节 → B/KB/MB/GB） */
+  const formatSize = function(size?: number): string {
+    if (size == null || size < 0) return ''
+    if (size < 1024) return size + ' B'
+    const units = ['KB', 'MB', 'GB', 'TB']
+    let value = size / 1024
+    let i = 0
+    while (value >= 1024 && i < units.length - 1) { value /= 1024; i++ }
+    return value.toFixed(1) + ' ' + units[i]
+  }
+
+  /** 格式化修改时间（时间戳 → yyyy-MM-dd HH:mm） */
+  const formatTime = function(mtime?: number): string {
+    if (!mtime) return ''
+    const d = new Date(mtime)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+
+  /** 鼠标移入文件名时显示提示（首次显示时测量尺寸） */
+  const showTooltip = (e: MouseEvent, data: any) => {
+    tooltipData.value = data
+    if (!tooltipVisible.value) {
+      tooltipVisible.value = true
+      nextTick(() => {
+        const el = document.querySelector('.table-tooltip') as HTMLElement | null
+        if (el) tipSize = { w: el.offsetWidth, h: el.offsetHeight }
+        updateTooltipPos(e)
+      })
+    }
+    updateTooltipPos(e)
+  }
+
+  /** 鼠标移动时更新提示位置：悬浮框在鼠标右上方（鼠标位于悬浮框左下角），超出视口时翻转 */
+  const updateTooltipPos = (e: MouseEvent) => {
+    if (!tooltipVisible.value) return
+    let x = e.clientX
+    let y = e.clientY - tipSize.h
+    if (tipSize.w && x + tipSize.w > window.innerWidth - 4) x = e.clientX - tipSize.w
+    if (tipSize.h && y < 4) y = e.clientY
+    tooltipPos.value = { x: Math.max(4, x), y: Math.max(4, y) }
+  }
+
+  /** 鼠标移出时隐藏提示 */
+  const hideTooltip = () => {
+    tooltipVisible.value = false
+    tooltipData.value = null
+  }
+  
   watch(() => store.root, () => {
     init()
   })
-  
+
   onMounted(() => {
     init()
   })
@@ -563,55 +624,6 @@
 
 <template>
   <div class="bg">
-    <!-- 顶部菜单栏 -->
-    <div class="menu">
-      <ul>
-        <!-- 路径信息 -->
-        <li class="path-info">
-          <i class="fa fa-table"></i>
-          {{ store.root == "" ? "根目录" : store.root }}
-        </li>
-
-        <!-- 搜索 -->
-        <li class="menu-tools search-container">
-          <div class="search-wrapper">
-            <i class="fa fa-search search-icon"></i>
-            <input 
-              class="search" 
-              v-model="searchQuery"
-              placeholder="搜索文件名或属性..."
-            />
-            <i 
-              v-if="searchQuery" 
-              class="fa fa-times clear-icon" 
-              @click="clearSearch"
-              title="清除搜索"
-            ></i>
-          </div>
-        </li>
-
-        <!-- 返回上一级按钮 -->
-        <li class="menu-tools">
-          <button @click="store.backPath()" title="返回上一级">
-            <i class="fa fa-arrow-up"></i>
-          </button>
-        </li>
-        
-        <!-- 添加属性列按钮 -->
-        <li class="menu-tools">
-          <button @click="addAttributeColumn" title="添加属性列">
-            <i class="fa fa-plus"></i>
-          </button>
-        </li>
-      </ul>
-    </div>
-    
-    <!-- 搜索结果提示 -->
-    <div v-if="searchQuery && filteredData.length !== data.length" class="search-info">
-      <i class="fa fa-info-circle"></i>
-      找到 {{ filteredData.length }} 条匹配结果（共 {{ data.length }} 条）
-    </div>
-    
     <!-- 表格内容区域 -->
     <div class="tab_content scoll">
       <table>
@@ -656,8 +668,11 @@
             </td>
             
             <!-- 文件名列 -->
-            <td class="fixed-col name">
-              <span :title="node.label" class="filename-text">{{ node.label }}</span>
+            <td class="fixed-col name"
+                @mouseover="showTooltip($event, node)"
+                @mousemove="updateTooltipPos($event)"
+                @mouseleave="hideTooltip">
+              <span class="filename-text">{{ node.label }}</span>
             </td>
             
             <!-- 属性列 -->
@@ -786,6 +801,29 @@
         </tbody>
       </table>
     </div>
+
+    <!-- 底部状态栏：搜索 / 返回上级 / 添加属性列 / 计数 -->
+    <div class="table-statusbar">
+      <div class="table-search">
+        <i class="fa fa-search table-search-icon"></i>
+        <input v-model="searchQuery" :placeholder="store.locales==='zh'?'搜索文件名或属性…':'Search…'"/>
+        <i v-if="searchQuery" class="fa fa-times table-clear-icon" @click="clearSearch" :title="store.locales==='zh'?'清除搜索':'Clear'"></i>
+      </div>
+      <span class="statusbar-spacer"></span>
+      <button class="statusbar-btn" @click="store.backPath()" :title="store.locales==='zh'?'返回上一级':'Go up'"><i class="fa fa-arrow-up"></i></button>
+      <button class="statusbar-btn" @click="addAttributeColumn()" :title="store.locales==='zh'?'添加属性列':'Add column'"><i class="fa fa-plus"></i> {{ store.locales==='zh'?'列':'Col' }}</button>
+      <span class="statusbar-item"><i class="fa fa-columns"></i> {{ attributes.length }}</span>
+      <span class="statusbar-item table-count" :title="store.locales==='zh'?('共 '+data.length+' 条'):('Total '+data.length)">
+        {{ searchQuery ? filteredData.length + ' / ' + data.length : data.length }}
+      </span>
+    </div>
+
+    <!-- 悬浮提示（跟随鼠标显示文件信息） -->
+    <div v-if="tooltipVisible && tooltipData" class="table-tooltip" :style="{ left: tooltipPos.x + 'px', top: tooltipPos.y + 'px' }">
+      <div class="tooltip-name">{{ tooltipData.label }}</div>
+      <div v-if="tooltipData.type !== 'folder' && tooltipData.size != null">{{ store.locales=='zh'?'大小':'Size' }}: {{ formatSize(tooltipData.size) }}</div>
+      <div v-if="tooltipData.mtime">{{ store.locales=='zh'?'修改时间':'Modified' }}: {{ formatTime(tooltipData.mtime) }}</div>
+    </div>
   </div>
 </template>
 
@@ -794,6 +832,7 @@
 .bg {
   width: 100%;
   height: 100%;
+  padding: 0;
   display: flex;
   flex-direction: column;
   background: var(--backgroundColor);
@@ -802,78 +841,27 @@
   box-sizing: border-box;
 }
 
+/* 顶部菜单精简：重置列表默认留白 */
 .menu {
-  height: 40px;
-  min-height: 40px;
-  max-height: 40px;
-  border-bottom: 1px solid var(--borderColor);
-  flex-shrink: 0;
+  margin: 0;
   padding: 0;
+  width: 100%;
 }
-
 .menu ul {
   margin: 0;
-  padding: 0 5px;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  white-space: nowrap;
-}
-
-.menu li {
-  cursor: pointer;
-  color: var(--fontColor);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px;
-  border-radius: 4px;
-  transition: background-color 0.2s;
-}
-
-.path-info {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 0 10px;
-}
-
-.path-info i {
-  color: var(--primaryColor);
-}
-
-.menu-tools {
-  display: flex;
-  padding: 0 5px;
-}
-
-.menu-tools button {
-  background: transparent;
-  border: 1px solid var(--borderColor);
-  border-radius: 4px;
-  color: var(--fontColor);
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-size: 14px;
   padding: 0;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.menu li {
   margin: 0;
-}
-
-.menu-tools button:hover {
-  background: var(--menuActiveColor);
-  border-color: var(--primaryColor);
-}
-
-/* 搜索相关样式 */
-.search-container {
-  flex: 1;
-  max-width: 300px;
-  min-width: 80px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  width: 100%;
 }
 
 .search-wrapper {
@@ -894,7 +882,8 @@
 
 .search {
   width: 100%;
-  padding: 4px 28px 4px 26px;
+  padding: 3px 28px 3px 24px;
+  margin: 0px;
   border: 1px solid var(--borderColor);
   border-radius: 4px;
   background: var(--backgroundColor);
@@ -903,7 +892,7 @@
   outline: none;
   transition: all 0.2s;
   box-sizing: border-box;
-  height: 28px;
+  height: 24px;
 }
 
 .search:focus {
@@ -1313,6 +1302,28 @@ td {
   opacity: 0.5;
 }
 
+/* 悬浮提示（跟随鼠标显示文件信息） */
+.table-tooltip {
+  position: fixed;
+  z-index: 99999;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border-radius: 4px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .25);
+  pointer-events: none;
+  max-width: 60vw;
+}
+.table-tooltip .tooltip-name {
+  white-space: normal;
+  word-break: break-all;
+  font-weight: bold;
+  color: var(--fontColor);
+}
+
 @media (max-width: 768px) {
   .fixed-col.name {
     width: 100px;
@@ -1325,4 +1336,73 @@ td {
     max-width: 100px;
   }
 }
+
+/* ===== 底部状态栏（与代码编辑/阅读视图一致观感） ===== */
+.table-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--fontColor);
+  background-color: var(--menuColor);
+  border-top: 1px solid var(--borderColor);
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.table-statusbar .statusbar-item { display: inline-flex; align-items: center; gap: 4px; opacity: 0.85; }
+.table-statusbar .statusbar-item i { font-size: 11px; opacity: 0.7; }
+.table-statusbar .statusbar-spacer { flex: 1; }
+.table-statusbar .statusbar-btn {
+  margin: 0; padding: 0 6px; height: 18px; border: none; border-radius: 3px; background: transparent;
+  color: var(--fontColor); font-size: 12px; display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; opacity: 0.85; transition: background-color 0.15s; flex-shrink: 0;
+}
+.table-statusbar .statusbar-btn:hover { background: var(--menuActiveColor); opacity: 1; }
+.table-statusbar .table-count { font-weight: 600; }
+
+/* 底栏内嵌搜索框 */
+.table-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.table-search input {
+  width: 170px;
+  height: 18px;
+  padding: 0 22px 0 20px;
+  margin: 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 3px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  outline: none;
+  box-sizing: border-box;
+}
+.table-search input:focus { border-color: var(--fontActiveColor); }
+.table-search-icon {
+  position: absolute;
+  left: 6px;
+  font-size: 10px;
+  color: var(--fontColor);
+  opacity: 0.6;
+  pointer-events: none;
+}
+.table-clear-icon {
+  position: absolute;
+  right: 6px;
+  font-size: 10px;
+  color: var(--fontColor);
+  opacity: 0.6;
+  cursor: pointer;
+}
+.table-clear-icon:hover { opacity: 1; color: var(--fontActiveColor); }
+
+/* 右键菜单样式统一在 explorer.vue 中定义 */
 </style>

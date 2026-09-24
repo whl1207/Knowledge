@@ -13,6 +13,7 @@ dist-ssr
 dist-electron
 release
 *.local
+*.tsbuildinfo
 
 # Editor directories and files
 .vscode/.debug.env
@@ -28,3 +29,48 @@ release
 package-lock.json
 pnpm-lock.yaml
 yarn.lock
+
+# FunASR online 开发基准产物（不入库）
+scripts/funasr-online/fixtures/
+scripts/funasr-online/.tmp_*
+
+# drawio 运行时（约 65MB，由 scripts/fetch-drawio-webapp.mjs 获取，不入库）
+public/drawio/
+.tmp-drawio*
+
+# Excalidraw 开发态资源（约 18MB，仅开发用，不入库）
+public/excalidraw-assets-dev/
+
+# scripts/：只保留「构建 / 资源获取」必需的脚本，其余（一次性排查、测试夹具、基准产物）留在本地不入库
+scripts/*
+# 以下 6 个为构建 / 打包必需，取消忽略（git 不支持行内注释，注释须单独成行）
+!scripts/rename-unpacked.mjs
+!scripts/build-tts-worker.mjs
+!scripts/fetch-drawio-webapp.mjs
+!scripts/make-builtin-mbtiles.py
+!scripts/build-linux-all.sh
+!scripts/build-linux-all.cmd
+
+# 临时脚本 / 实验产物（下划线开头，随手写的排查脚本）
+_*.mjs
+_*.cjs
+_*.txt
+
+# 内部设计 / 论文材料（不入库；使用说明书与 Linux 打包指南在 manual/）
+docs/
+
+# 运行 / 测试产生的任务文件与临时导出（示例数据请另建目录，不要放回仓库）
+*.task.bak
+*.tmp
+_*_demo.html
+tmp-*.cjs
+tmp-*.mjs
+
+# 离线地图包（约 30MB，二进制）：不入库，需自行构建
+#   python scripts/make-builtin-mbtiles.py --src public/tiles/6 --out public/maps/builtin.mbtiles
+# 缺少该文件时软件正常运行，只是地图视图没有内置离线底图（可另挂载自己的 .mbtiles）
+public/maps/*.mbtiles
+
+# Python 缓存
+__pycache__/
+*.pyc

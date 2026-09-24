@@ -5,6 +5,14 @@
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "AIKM",
   "asar": true,
+  // sherpa-onnx 是 WASM 运行时（.wasm 需以真实文件加载，不能从 asar 内联读取），
+  // TTS worker 线程文件同理需真实文件；二者都解包到 app.asar.unpacked
+  "asarUnpack": [
+    "node_modules/sherpa-onnx/**",
+    "dist-electron/main/tts-worker.js",
+    // 内置 MBTiles 地图包（PNG/JPG 已高度压缩，再压进 asar 徒增体积与构建耗时）
+    "dist/maps/**"
+  ],
   "productName": "AI-KM",
   "directories": {
     "output": "release/${version}"
@@ -39,7 +47,8 @@
   },
   "linux": {
     "target": [
-      "AppImage"
+      { "target": "AppImage", "arch": ["x64"] },
+      { "target": "deb", "arch": ["x64", "arm64"] }
     ],
     "artifactName": "${productName}-Linux-${version}.${ext}"
   }

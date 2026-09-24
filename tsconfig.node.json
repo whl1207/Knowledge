@@ -1,10 +1,19 @@
 {
   "compilerOptions": {
-    "composite": true,
+    "target": "ESNext",
     "module": "ESNext",
-    "moduleResolution": "Node",
+    "moduleResolution": "Bundler",
+    // baseUrl 自 TS 6.0 起弃用、7.0 移除；paths 用相对本文件的路径即可（必须以 ./ 开头）
+    "paths": {
+      "@/*": ["./src/*"]
+    },
     "resolveJsonModule": true,
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "lib": ["ESNext", "DOM"],
+    // 主进程（electron/）是 Node 环境：显式引入 node 类型（@types/node 已在 devDependencies 声明），
+    // 否则 node:crypto / node:fs 等内建模块的类型只能靠 @types 自动发现，依赖提升方式，容易在编辑器里报“找不到名称 node:crypto”。
+    "types": ["node"]
   },
   "include": ["vite.config.ts", "package.json", "electron"]
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import { usestore } from '../../../store'
+  import { usestore } from '@/store'
   import { nextTick, ref ,Ref,onMounted , onBeforeUnmount,watch} from 'vue'
 
   //获取数据
@@ -22,16 +22,16 @@
     if(store.data.length==0){
       //如果没有打开标签
       try {
-        data.value=await window.ipcRenderer.invoke("getFiles",store.root,1)
-        Draw()
+        const list:any = await window.ipcRenderer.invoke("getFiles",store.root,1)
+        setKanbanData(list)
       } catch (error) {
         // 处理错误
         console.error(error);
       }
     }else{
       try {
-        data.value=await window.ipcRenderer.invoke("getFiles",store.root,1)
-        Draw()
+        const list:any = await window.ipcRenderer.invoke("getFiles",store.root,1)
+        setKanbanData(list)
       } catch (error) {
         // 处理错误
         console.error(error);
@@ -47,34 +47,26 @@
     //设置svg高度
     svgHeight.value=bgheight.value
 
-    let endWidth=0
     //布局边距
-    let margin = 5
-    let width=200
+    let margin = 8
+    let minCardWidth = 180    // 卡片最小宽度，用于计算列数
     rects.value=[]
     if(type.value==""){
-      let x=margin
-      let y=margin
-      for(let i=0;i<data.value.length;i++){
-        //本节点赋值
-        data.value[i].x=x
-        data.value[i].y=y
-        //下一节点的位置
-        if(i!=data.value.length-1){
-          //本节点的宽度和高度
-          let nowheight=document.getElementById("node"+data.value[i].id)!.clientHeight
-          //下一个节点的宽度和高度
-          let nextheight=document.getElementById("node"+data.value[i+1].id)!.clientHeight
-          let nexty = y + nowheight +margin
-          //如果下一个节点容不下
-          if(nexty>bgheight.value-nextheight-margin){
-            x=x+width+margin
-            y=margin
-          }else{
-            y=nexty
-          }
-        }
+      // 无分类 - 使用网格布局，卡片铺满行宽
+      let availWidth = bgwidth.value - 2 * margin
+      let cols = Math.max(1, Math.floor(availWidth / (minCardWidth + margin)))
+      // 卡片实际宽度 = (可用宽度 - 间距) / 列数
+      let cardWidth = (availWidth - (cols - 1) * margin) / cols
+      let rowHeight = 48
+      for(let i = 0; i < data.value.length; i++){
+        let col = i % cols
+        let row = Math.floor(i / cols)
+        data.value[i].x = margin + col * (cardWidth + margin)
+        data.value[i].y = margin + row * rowHeight
+        data.value[i].cardWidth = cardWidth
       }
+      let totalRows = Math.ceil(data.value.length / cols)
+      svgHeight.value = margin + totalRows * rowHeight + margin
     }else{
       //节点分类
       let nodeArray = new Array();
@@ -117,87 +109,61 @@
           }
         }
       }
-      //计算位置，方案1
-      let initY=margin+24
-      let initX=0
+      //计算位置 - 垂直网格布局，每个类别从上到下排布
+      let margin = 8           // 分类框之间的间距
+      let pad = 8             // 分类框内边距（卡片与边框的距离）
+      let minCardWidth = 180   // 卡片最小宽度，用于计算列数
+      let rowHeight = 48       // 每个节点行高
 
-      let y = initY //当前y
-      let x = initX+margin //当前x
-      
+      // 卡片在分类框内的可用宽度
+      let availWidth = bgwidth.value - 2 * margin - 2 * pad
+      // 计算每行可放的节点数
+      let cols = Math.max(1, Math.floor(availWidth / (minCardWidth + margin)))
+      // 卡片实际宽度 = (可用宽度 - 间距) / 列数
+      let cardWidth = (availWidth - (cols - 1) * margin) / cols
+      let totalHeight = margin
+
       for(let j = 0; j < nodeArray.length; j++){
-        let maxY=0
-        initX =initX+margin
-        let rectdata={
-          x:x,
-          y:margin,
-          width:0,
-          height:0,
-          title:labelArray[j]!=undefined?labelArray[j].toString():'未定义',
-          count:0,
-        }
-        for (let i = 0; i < nodeArray[j].length; i++) {
-          //寻找当前节点信息
-          let index = -1
-          for(let a = 0;a<data.value.length;a++){
-            if(a==nodeArray[j][i]){
-              index=a
-              break
-            }
-          }
-          //如果找到了当前节点
-          if(index!=-1){
-            //设置节点位置
-            data.value[index].x=x+margin
-            data.value[index].y=y
-            //获取当前节点高度
-            let nowheight=document.getElementById("node"+data.value[index].id)!.clientHeight
-            //计算下一节点应在的位置
-            let nextY = y + nowheight + margin
-            //如果到达最后一个点，计算矩形位置后即可返回
-            if(i == nodeArray[j].length-1){
-              maxY=Math.max(maxY,nextY)
-              break
-            }
-            //寻找下一节点高度
-            let indexNext = -1
-            for(let a = 0;a<data.value.length;a++){
-              if(data.value[a].id==nodeArray[j][i+1]){
-                indexNext=a
-                break
-              }
-            }
-            let nextheight =0
-            if(indexNext!=-1){
-              nextheight=document.getElementById("node"+data.value[indexNext].id)!.clientHeight
-            }
-            //如果下一个节点在本列容不下
-            if(nextY>bgheight.value-nextheight-margin){
-              //记录最大背景矩形的高度
-              maxY=Math.max(maxY,nextY)
-              //换行并重置绘制高度
-              x=x+width+margin
-              y=initY
-              //如果到达最后一个节点，不用换行
-              if(i==nodeArray[j].length-1){x=x-125}
-            }else{
-              y=nextY
-              if(y>=maxY){maxY=y}
-            }
-          }
-        }
-        //计算包裹矩形的位置
-        rectdata.height=Math.max(maxY-margin,10)
-        rectdata.width=x-rectdata.x+width+2*margin
-        rects.value.push(rectdata)
-        //计算下一个方块的起始位置
-        //方案1：遇见下一组就换到下一列
-        x=x+width+3*margin
-        y=initY
+        let groupY = totalHeight
+        
+        // 计算组内节点需要多少行
+        let items = nodeArray[j].length
+        let rows = Math.max(1, Math.ceil(items / cols))
+        let groupHeight = margin + 16 + rows * rowHeight + margin
 
-        endWidth=x+width+3*margin
+        let rectdata = {
+          x: margin,
+          y: groupY,
+          width: bgwidth.value - 2 * margin,
+          height: groupHeight,
+          title: labelArray[j] != undefined ? labelArray[j].toString() : '未定义',
+          count: 0,
+        }
+        
+        for (let i = 0; i < items; i++) {
+          let index = -1
+          for(let a = 0; a < data.value.length; a++){
+            if(a == nodeArray[j][i]){
+              index = a
+              break
+            }
+          }
+          if(index != -1){
+            let col = i % cols
+            let row = Math.floor(i / cols)
+            data.value[index].x = margin + pad + col * (cardWidth + margin)
+            data.value[index].y = groupY + margin + 24 + row * rowHeight
+            data.value[index].cardWidth = cardWidth
+          }
+        }
+        
+        rects.value.push(rectdata)
+        totalHeight += groupHeight + margin
       }
+      
+      svgHeight.value = totalHeight
     }
-    svgWidth.value=endWidth
+    svgWidth.value = bgwidth.value
     
     // 绘制完成后检查是否需要滚动条
     setTimeout(checkScrollbar, 50)
@@ -229,32 +195,42 @@
     attributes.value = result
   }
   
-  // 检查是否需要显示滚动条
+  // 检查面板高度
   const checkScrollbar = () => {
     const panel = document.getElementById('panel')
     if (!panel) return
-    
-    // 检查内容高度是否超过容器高度
-    const contentHeight = panel.scrollHeight
-    const containerHeight = panel.clientHeight
-    
-    // 如果需要滚动，设置overflow
-    if (contentHeight > containerHeight) {
-      panel.style.overflowY = 'auto'
-    } else {
-      panel.style.overflowY = 'hidden'
-    }
+    // 让 CSS 的 overflow-y: auto 控制滚动
   }
   
   const resize = async function(){
     getData()
   }
+
+  // 看板搜索：过滤卡片并重新布局
+  const kanbanQuery = ref('')
+  let kanbanTimer: any = null
+  let fullKanban: any[] = []
+  const setKanbanData = function (arr: any[]) {
+    fullKanban = arr || []
+    const q = kanbanQuery.value.trim().toLowerCase()
+    data.value = q ? fullKanban.filter((it: any) => String(it.label || '').toLowerCase().includes(q)) : fullKanban
+    Draw()
+  }
+  const applyKanbanSearch = function () {
+    const q = kanbanQuery.value.trim().toLowerCase()
+    data.value = q ? fullKanban.filter((it: any) => String(it.label || '').toLowerCase().includes(q)) : fullKanban
+    Draw()
+  }
+  watch(kanbanQuery, () => {
+    clearTimeout(kanbanTimer)
+    kanbanTimer = setTimeout(applyKanbanSearch, 150)
+  })
   //计算style函数
   const style=(item:any)=>{
     return {
       'left':item.x+'px',
       'top':item.y+'px',
-      'width':200+'px',
+      'width':(item.cardWidth || 200)+'px',
       'max-width':'calc(100% - ' +2*1+ 'px)',
       'background-color':item.attributes!=undefined?(item.attributes.颜色!=undefined?item.attributes.颜色:'var(--menuColor)'):''
     }
@@ -275,18 +251,11 @@
   }
   const open=(data:any)=>{
     console.log(data)
-    store.addTab(data)
+    store.openFileByMode(data)
     if(!data.isFolder&&(data.extension==".md"||data.extension==""||data.extension==".html")){
       //let content= window.ipcRenderer.invoke("",data.path)
       //data = {...data,content}
     }
-  }
-  
-  // 分类选择变化处理
-  const handleCategoryChange = (event: Event) => {
-    const select = event.target as HTMLSelectElement
-    type.value = select.value
-    store.resize()
   }
   
   watch(()=>store.root, (newValue, oldValue) => {
@@ -304,41 +273,6 @@
 <template>
   <!--看板视图-->
   <div class="bg">
-    <!-- 顶部菜单 - 修改为与其他模块一致的样式 -->
-    <div class="menu">
-      <ul>
-        <!-- 路径信息 -->
-        <li class="path-info">
-          <i class="fa fa-th-large"></i>
-          {{ store.root == "" ? "根目录" : store.root }}
-        </li>
-        
-        <!-- 返回上一级按钮 -->
-        <li class="menu-tools">
-          <button @click="store.backPath()" title="返回上一级">
-            <i class="fa fa-arrow-up"></i>
-          </button>
-        </li>
-        
-        <!-- 分类选择器 -->
-        <li class="menu-tools">
-          <div class="category-selector">
-            <select 
-              v-model="type" 
-              @change="handleCategoryChange"
-              title="分类方式"
-              class="category-select"
-            >
-              <option value="">不分类</option>
-              <option v-for="(item, index) in attributes" :key="index" :value="item">
-                {{ item }}
-              </option>
-            </select>
-          </div>
-        </li>
-      </ul>
-    </div>
-    
     <!-- 看板内容区域 -->
     <div class="panel" id="panel">
       <!--节点-->
@@ -374,11 +308,32 @@
           v-for="(item,index) in rects"
           font-size="14"
           :x="item.x+item.width/2"
-          :y="21"
-          style="text-anchor: middle;fill:var(--fontColor);"
+          :y="item.y+17"
+          style="text-anchor: middle;fill:var(--fontActiveColor);"
         >{{getTitle(item.title)}}
         </text>
       </svg>
+    </div>
+
+    <!-- 底部状态栏：搜索 / 分类方式 / 返回上级 / 节点计数 -->
+    <div class="kanban-statusbar">
+      <div class="statusbar-search" @click.stop :title="store.locales=='zh'?'搜索卡片':'Search cards'">
+        <i class="fa fa-search"></i>
+        <input v-model="kanbanQuery" :placeholder="store.locales=='zh'?'搜索卡片…':'Search…'" @keydown.stop @keyup.esc="kanbanQuery=''"/>
+        <i v-if="kanbanQuery" class="fa fa-times" @click="kanbanQuery=''" :title="store.locales=='zh'?'清除搜索':'Clear'"></i>
+      </div>
+      <span class="statusbar-sep"></span>
+      <button class="statusbar-btn" @click="store.backPath()" :title="store.locales=='zh'?'返回上一级':'Go up'"><i class="fa fa-arrow-up"></i></button>
+      <span class="statusbar-sep"></span>
+      <span class="statusbar-item"><i class="fa fa-tag"></i> {{ store.locales=='zh'?'分类':'Group' }}</span>
+      <select class="statusbar-select" v-model="type" @change="store.resize()" :title="store.locales=='zh'?'分类方式':'Group by'">
+        <option value="">{{ store.locales=='zh'?'不分类':'No Group' }}</option>
+        <option v-for="a in attributes" :key="a" :value="a">{{ a }}</option>
+      </select>
+      <span class="statusbar-item status-cur" :title="type || (store.locales=='zh'?'不分类':'No Group')">{{ type || (store.locales=='zh'?'未分类':'Ungrouped') }}</span>
+      <span class="statusbar-spacer"></span>
+      <span class="statusbar-item"><i class="fa fa-file"></i> {{ data.length }} {{ store.locales=='zh'?'项':'items' }}</span>
+      <button class="statusbar-btn" @click="store.resize()" :title="store.locales=='zh'?'刷新布局':'Refresh'"><i class="fa fa-refresh"></i></button>
     </div>
   </div>
 </template>
@@ -395,119 +350,15 @@
   box-sizing: border-box;
 }
 
-/* 顶部菜单 - 与其他模块保持一致 */
-.menu {
-  height: 40px;
-  min-height: 40px;
-  max-height: 40px;
-  border-bottom: 1px solid var(--borderColor);
-  flex-shrink: 0;
-  padding: 0;
-}
-
-.menu ul {
-  margin: 0;
-  padding: 0 10px;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  white-space: nowrap;
-}
-
-.menu li {
-  cursor: pointer;
-  color: var(--fontColor);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px;
-  border-radius: 4px;
-  transition: background-color 0.2s;
-}
-
-.path-info {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 0 10px;
-}
-
-.path-info i {
-  color: var(--primaryColor);
-}
-
-.menu-tools {
-  display: flex;
-  padding: 0 5px;
-}
-
-.menu-tools button {
-  background: transparent;
-  border: 1px solid var(--borderColor);
-  border-radius: 4px;
-  color: var(--fontColor);
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-size: 14px;
-  padding: 0;
-  margin: 0;
-}
-
-.menu-tools button:hover {
-  background: var(--menuActiveColor);
-  border-color: var(--primaryColor);
-}
-
-/* 分类选择器样式 */
-.category-selector {
-  display: flex;
-  align-items: center;
-}
-
-.category-select {
-  min-width: 120px;
-  height: 28px;
-  padding: 0 8px;
-  background-color: var(--menuColor);
-  border: 1px solid var(--borderColor);
-  border-radius: 4px;
-  color: var(--fontColor);
-  font-size: 14px;
-  cursor: pointer;
-  outline: none;
-  transition: all 0.2s;
-}
-
-.category-select:hover {
-  border-color: var(--primaryColor);
-  background-color: var(--menuHoverColor);
-}
-
-.category-select:focus {
-  border-color: var(--primaryColor);
-  box-shadow: 0 0 0 2px rgba(var(--primaryColor-rgb, 0, 123, 255), 0.25);
-}
-
-.category-select option {
-  background-color: var(--menuColor);
-  color: var(--fontColor);
-  padding: 8px;
-}
-
 /* 看板内容区域 */
 .panel {
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
   width: 100%;
-  height: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  height: calc(100% - 24px);
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* SVG 背景 */
@@ -523,20 +374,16 @@
 /* 滚动条样式 */
 .panel::-webkit-scrollbar {
   width: 8px;
-  height: 8px;
 }
-
 .panel::-webkit-scrollbar-track {
   background: transparent;
 }
-
 .panel::-webkit-scrollbar-thumb {
-  background-color: rgba(var(--borderColor-rgb, 128, 128, 128), 0.3);
+  background-color: rgba(128, 128, 128, 0.3);
   border-radius: 4px;
 }
-
 .panel::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(var(--borderColor-rgb, 128, 128, 128), 0.5);
+  background-color: rgba(128, 128, 128, 0.5);
 }
 
 /* 节点样式 */
@@ -546,30 +393,33 @@
   transition: 0.2s;
   max-width: calc(100% - 10px);
   border: 1px solid var(--borderColor);
-  border-radius: 3px;
+  border-radius: 6px;
   background-color: var(--menuColor);
   z-index: 1;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+  padding: 6px 0;
 }
 
 .node:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.15);
   transform: translateY(-1px);
   border-color: var(--primaryColor);
 }
 
 .title {
   position: relative;
-  width: calc(100% - 15px);
-  padding: 5px;
-  padding-left: 10px;
+  width: calc(100% - 20px);
+  padding: 4px 8px;
   margin: 0;
-  margin-bottom: -3px;
   overflow: hidden;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   user-select: none;
-  border-radius: 3px;
+  border-radius: 4px;
   color: var(--fontColor);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .title span {
@@ -588,4 +438,59 @@
   right: 8px;
   font-size: 12px;
 }
+
+/* 右键菜单样式统一在 explorer.vue 中定义 */
+/* 子菜单宽度覆盖 + 悬停桥接 */
+.has-submenu .submenu {
+  min-width: 120px;
+}
+.has-submenu::after {
+  content: '';
+  position: absolute;
+  right: -12px;
+  top: 0;
+  width: 12px;
+  height: 100%;
+}
+
+/* ===== 底部状态栏（与代码编辑/阅读视图一致观感） ===== */
+.kanban-statusbar{
+  display:flex; align-items:center; gap:8px; flex-shrink:0;
+  height:24px; box-sizing:border-box; padding:0 8px;
+  font-size:12px; color:var(--fontColor);
+  background-color:var(--menuColor);
+  border-top:1px solid var(--borderColor);
+  user-select:none; white-space:nowrap; overflow:hidden;
+}
+.kanban-statusbar .statusbar-item{ display:inline-flex; align-items:center; gap:4px; opacity:.85; }
+.kanban-statusbar .statusbar-item i{ font-size:11px; opacity:.7; }
+.kanban-statusbar .statusbar-spacer{ flex:1; }
+.kanban-statusbar .statusbar-btn{
+  margin:0; padding:0 6px; height:18px; border:none; border-radius:3px; background:transparent;
+  color:var(--fontColor); font-size:12px; display:inline-flex; align-items:center; justify-content:center;
+  cursor:pointer; opacity:.85; transition:background-color .15s; flex-shrink:0;
+}
+.kanban-statusbar .statusbar-btn:hover{ background:var(--menuActiveColor); opacity:1; }
+.kanban-statusbar .statusbar-sep{ width:1px; height:14px; background:var(--borderColor); flex-shrink:0; }
+.kanban-statusbar .statusbar-select{
+  height:18px; border:1px solid var(--borderColor); border-radius:3px;
+  background: var(--backgroundColor); color:var(--fontColor); font-size:11px; padding:0 4px;
+  width:auto; min-width:56px; max-width:120px; outline:none; cursor:pointer; flex-shrink:0;
+}
+.kanban-statusbar .statusbar-select option{
+  background: var(--backgroundColor); color: var(--fontColor);
+}
+.kanban-statusbar .status-cur{ color: var(--fontActiveColor); opacity: .9; }
+.kanban-statusbar .statusbar-search {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 18px; padding: 0 6px; box-sizing: border-box;
+  border: 1px solid var(--borderColor); border-radius: 3px;
+  background: var(--backgroundColor); color: var(--fontColor); flex-shrink: 0;
+}
+.kanban-statusbar .statusbar-search i { font-size: 10px; opacity: 0.6; cursor: pointer; }
+.kanban-statusbar .statusbar-search input {
+  width: 120px; height: 100%; border: none; outline: none;
+  background: transparent; color: var(--fontColor); font-size: 11px; padding: 0;
+}
+.kanban-statusbar .statusbar-search input::placeholder { color: var(--borderColor); }
 </style>
