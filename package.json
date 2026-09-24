@@ -5,7 +5,7 @@
   "description": "AI Knowledge management Software",
   "author": "whl",
   "homepage": "https://github.com/whl1207/Knowledge",
-  "license": "MIT",
+  "license": "LicenseRef-PolyForm-Noncommercial-1.0.0",
   "private": true,
   "keywords": [
     "AI",
@@ -41,7 +41,141 @@
     "win": {
       "target": "nsis",
       "icon": "public/icon.png",
-      "artifactName": "${productName}_v${version}_Setup.${ext}"
+      "artifactName": "${productName}_v${version}_Setup.${ext}",
+      "fileAssociations": [
+        {
+          "ext": [
+            "kb"
+          ],
+          "name": "AI-KM Knowledge Base",
+          "description": "AI-KM Knowledge Base",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "md",
+            "markdown",
+            "mdown",
+            "mkd"
+          ],
+          "name": "Markdown Document",
+          "description": "Markdown Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "txt",
+            "log"
+          ],
+          "name": "Plain Text Document",
+          "description": "Plain Text Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "json",
+            "jsonc"
+          ],
+          "name": "JSON Document",
+          "description": "JSON Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "html",
+            "htm"
+          ],
+          "name": "HTML Document",
+          "description": "HTML Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "css",
+            "scss",
+            "less"
+          ],
+          "name": "Stylesheet",
+          "description": "Stylesheet",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "xml"
+          ],
+          "name": "XML Document",
+          "description": "XML Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "yaml",
+            "yml"
+          ],
+          "name": "YAML Document",
+          "description": "YAML Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "toml"
+          ],
+          "name": "TOML Document",
+          "description": "TOML Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "csv"
+          ],
+          "name": "CSV Document",
+          "description": "CSV Document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "ts",
+            "tsx",
+            "vue"
+          ],
+          "name": "TypeScript Source File",
+          "description": "TypeScript / Vue Source File",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "java",
+            "c",
+            "h",
+            "cpp",
+            "hpp",
+            "cs",
+            "go",
+            "rs",
+            "sql"
+          ],
+          "name": "Source Code File",
+          "description": "Source Code File",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "excalidraw"
+          ],
+          "name": "Excalidraw Drawing",
+          "description": "Excalidraw Whiteboard Drawing",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "drawio",
+            "dio"
+          ],
+          "name": "draw.io Diagram",
+          "description": "draw.io Diagram",
+          "role": "Editor"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -69,141 +203,7 @@
       "category": "Utility",
       "maintainer": "whl",
       "artifactName": "${productName}-Linux-${version}-${arch}.${ext}"
-    },
-    "fileAssociations": [
-      {
-        "ext": [
-          "kb"
-        ],
-        "name": "AI-KM Knowledge Base",
-        "description": "AI-KM Knowledge Base",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "md",
-          "markdown",
-          "mdown",
-          "mkd"
-        ],
-        "name": "Markdown Document",
-        "description": "Markdown Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "txt",
-          "log"
-        ],
-        "name": "Plain Text Document",
-        "description": "Plain Text Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "json",
-          "jsonc"
-        ],
-        "name": "JSON Document",
-        "description": "JSON Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "html",
-          "htm"
-        ],
-        "name": "HTML Document",
-        "description": "HTML Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "css",
-          "scss",
-          "less"
-        ],
-        "name": "Stylesheet",
-        "description": "Stylesheet",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "xml"
-        ],
-        "name": "XML Document",
-        "description": "XML Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "yaml",
-          "yml"
-        ],
-        "name": "YAML Document",
-        "description": "YAML Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "toml"
-        ],
-        "name": "TOML Document",
-        "description": "TOML Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "csv"
-        ],
-        "name": "CSV Document",
-        "description": "CSV Document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "ts",
-          "tsx",
-          "vue"
-        ],
-        "name": "TypeScript Source File",
-        "description": "TypeScript / Vue Source File",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "java",
-          "c",
-          "h",
-          "cpp",
-          "hpp",
-          "cs",
-          "go",
-          "rs",
-          "sql"
-        ],
-        "name": "Source Code File",
-        "description": "Source Code File",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "excalidraw"
-        ],
-        "name": "Excalidraw Drawing",
-        "description": "Excalidraw Whiteboard Drawing",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "drawio",
-          "dio"
-        ],
-        "name": "draw.io Diagram",
-        "description": "draw.io Diagram",
-        "role": "Editor"
-      }
-    ]
+    }
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

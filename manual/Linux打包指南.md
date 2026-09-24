@@ -142,23 +142,35 @@ echo "node: $(node -v), npm: $(npm -v)"
     "appId": "com.whl.aikm",
     "productName": "AI-KM",
     "directories": { "output": "release" },
+    "win": {
+      // ⚠️ 文件关联只能写在 win 下，不能写在顶层 build（原因见下方注意）
+      "fileAssociations": [ /* ext / name / description / role … */ ]
+    },
     "linux": {
       // 按架构指定目标：AppImage 只出 x64；deb 出 x64 + arm64
       "target": [
         { "target": "AppImage", "arch": ["x64"] },
         { "target": "deb", "arch": ["x64", "arm64"] }
       ],
-      "icon": "public/icon.png",          // 建议 512x512（当前为 256x256）
+      // 必须是「多尺寸图标目录」（文件名形如 256x256.png），单张 png 会导致装完没图标
+      "icon": "build/icons",
       "category": "Utility",
-      "maintainer": "whl <1920191110@nue.edu.com>",  // deb 必需，格式：名称 <邮箱>
+      "maintainer": "whl",   // deb 必需，格式：名称 或 名称 <邮箱>
       "artifactName": "${productName}-Linux-${version}-${arch}.${ext}"
     }
   }
 }
 ```
 
-> 注意：**真正生效的配置在 `package.json` 的 `build` 字段**，而不是根目录的 `electron-builder.json5`。
-> electron-builder 优先读取 `package.json#build`。
+> 注意 1：**真正生效的配置在 `package.json` 的 `build` 字段**，而不是根目录的 `electron-builder.json5`。
+> electron-builder 优先读取 `package.json#build`（只要它有 `build` 键，同名配置文件就被完全忽略）。
+>
+> 注意 2：**`fileAssociations` 不能写在顶层 `build` 下**。electron-builder 会把它一并传给 AppImage 目标，而 AppImage 要求 `ext` 是字符串，于是报
+> `⨯ appimage.AppImageConfiguration.FileAssociations: ... ReadString: expects " or n, but found [`，AppImage 与 deb 全部打不出来。
+> 把该字段移到 `build.win` 即可：Windows（NSIS）照常注册关联，Linux 侧收不到这份列表。
+>
+> 注意 3：**打 AppImage 时 `NODE_OPTIONS` 必须给足**（`--max-old-space-size=6144`，脚本已内置），否则 `vite build` 会以
+> `FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory` 中断。
 
 ---
 

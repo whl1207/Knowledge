@@ -24,11 +24,13 @@
 - **Large assets are user-provided, repository slimmed down further**: `scripts/` keeps only six build/resource helpers (one-off diagnostics and test fixtures stay local), the offline map package `public/maps/*.mbtiles` (~30 MB) is not committed and is built with `scripts/make-builtin-mbtiles.py`; the README gained an "Optional local assets" section (map package / drawio runtime / Excalidraw dev assets) and the manual was synced; measured commit size dropped from 48 MB to 17.6 MB.
 - **Dev scripts tidied up**: the Windows entry point for one-click Linux packaging (`build-linux-all.cmd`) moved into `scripts/` next to the `.sh` (usage unchanged, still double-clickable), and all other one-off diagnostics, test fixtures and probe artifacts (~118 MB) were deleted locally.
 - **`.gitignore` extended**: ignores the Excalidraw dev assets and the browser profiles produced by probe scripts (hundreds of MB) as well as temporary scripts and demo pages, so no useless large files are uploaded.
+- **Licence changed to noncommercial**: MIT → PolyForm Noncommercial 1.0.0 — any commercial use now requires a separate licence, while personal, study, research, education and public-interest use stays free (noncommercial redistribution allowed); README and installer metadata were updated.
 
 ### Fixed
 
 - **Agent Scaffold still showed Chinese in the English UI**: status bar (`共`/`出错`), round names and cross-round references (第1轮 → Round 1, normalized when old task files are opened, including references inside prompts), result-page and Excel column headers (`_行号` / `_轮次·` / `_来源`), the default result column name, log-page thread labels, graph tooltips and kind names, and instance tab names (Agent脚手架 1 → Agent Scaffold 1) now all follow the UI language.
 - **Renamed export columns had no values on the result page or in Excel**: after renaming a custom column the header used the old name while the data used the new one (blank cells on the result page, shifted columns in the exported Excel); both now use the same column name.
+- **Linux one-click packaging produced no artifacts**: fixed the failure of `scripts/build-linux-all.cmd`, which now produces all three packages — x64 (deb + AppImage) and arm64 (deb).
 
 ---
 

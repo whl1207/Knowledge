@@ -25,11 +25,13 @@
 - **大资源改为用户自备、仓库进一步瘦身**：`scripts/` 只保留 6 个构建 / 资源获取脚本（一次性排查与测试夹具不入库），离线地图包 `public/maps/*.mbtiles`（30MB）不入库并改由 `scripts/make-builtin-mbtiles.py` 自行构建；README 新增「Optional local assets」说明（地图包 / drawio 运行时 / Excalidraw 开发资源），说明书同步；实测提交体积 48MB → 17.6MB。
 - **开发脚本整理**：一键打包 Linux 的 Windows 入口 `build-linux-all.cmd` 移入 `scripts/`（与 `.sh` 同目录，用法不变，双击即可），其余一次性排查脚本、测试夹具与探针产物（约 118MB）全部删除、本地不再保留。
 - **`.gitignore` 补充**：忽略 Excalidraw 开发态资源、探针脚本的浏览器运行产物（上百 MB）、临时脚本 / 演示页，避免上传仓库时带上无用大文件。
+- **授权改为非商业许可**：MIT → PolyForm Noncommercial 1.0.0，禁止任何商业使用（个人 / 学习 / 研究 / 教育 / 公益等非商业用途免费，允许非商业转发）；README 与安装包元数据同步。
 
 ### 修复
 
 - **Agent脚手架英文界面下仍有中文**：状态栏（「共 / 出错」）、轮次名与跨轮引用（第1轮 → Round 1，打开旧任务时自动归一，指令里的引用一并迁移）、结果页与导出 Excel 的列名（`_行号` / `_轮次·` / `_来源`）与默认结果列名、日志页线程标签、图谱悬停信息与类型名、实例标签名（Agent脚手架 1 → Agent Scaffold 1）都改为跟随界面语言。
 - **导出列改名后结果页与 Excel 取不到该列的值**：自定义列名后表头用的是原名、数据用的是新名（结果页显示空白、导出的 Excel 列错位），现已统一为同一个列名。
+- **Linux 一键打包不出包**：修复 `scripts/build-linux-all.cmd` 打包失败的问题，现在可一次产出 x64（deb + AppImage）与 arm64（deb）三个安装包。
 
 ---
 

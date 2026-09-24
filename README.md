@@ -4,8 +4,8 @@
 
 Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machine: models can be local (Ollama / LM Studio / GPUStack / ONNX) or remote APIs you configure, and no content is sent anywhere else. The UI, the in-app help and the manual are bilingual (Chinese / English).
 
-![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-6.9.21-blue)
+![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)
+![Version](https://img.shields.io/badge/version-6.9.24-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Electron](https://img.shields.io/badge/Electron-30-47848F)
 ![Vue](https://img.shields.io/badge/Vue-3.4-42b883)
@@ -118,7 +118,11 @@ Before opening a PR, please make sure:
 
 ## 📄 License
 
-[MIT](LICENSE) © 2024 whl
+[PolyForm Noncommercial 1.0.0](LICENSE) © 2024 whl
+
+**Source-available, not open source.** Use is free for any **noncommercial** purpose — personal use, study, research, experiment, hobby projects, and use by charitable, educational, public-research, public-health and government organizations. **Any commercial use requires a separate licence from the author.** Noncommercial redistribution is allowed as long as the licence terms and the `Required Notice` line travel with the software; the software is provided as is, without warranty.
+
+For commercial licensing, open an issue at [github.com/whl1207/Knowledge](https://github.com/whl1207/Knowledge/issues).
 
 ## 🙏 Acknowledgements
 
