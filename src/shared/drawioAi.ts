@@ -32,7 +32,10 @@ export interface DrawioContext {
   edges: DrawioEdgeHint[]
   /** 新图形的建议排布起点：已有内容的右侧留白，避免与旧内容重叠 */
   origin: { x: number; y: number }
-  /** 页数（>1 时只改第 1 页，UI 会提示） */
+  /** 本次处理的页（0 起）与页名 */
+  pageIndex: number
+  pageName: string
+  /** 总页数 */
   pages: number
 }
 
@@ -51,8 +54,9 @@ export interface DrawioMergeResult {
   edgeLabels: string[]
   /** 被调整顶点的文本 */
   updatedLabels: string[]
-  /** 页码（1 起）与总页数 */
+  /** 改动落在第几页（1 起）与总页数、页名 */
   pageIndex: number
+  pageName: string
   pages: number
 }
 
@@ -99,11 +103,35 @@ function repairXml(text: string): string {
   return escaped.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
 }
 
-function rootElement(doc: Document): Element | null {
+function rootElement(doc: Document, pageIndex = 0): Element | null {
+  const diagrams = doc.getElementsByTagName('diagram')
+  if (diagrams.length) {
+    // 取目标页的 mxGraphModel（压缩页没有 mxGraphModel 子节点 → 交给调用方报错）
+    const page = diagrams[clampPageIndex(diagrams.length, pageIndex)]
+    const model = page.getElementsByTagName('mxGraphModel')[0]
+    if (!model) return null
+    return model.getElementsByTagName('root')[0] || null
+  }
   const model = doc.getElementsByTagName('mxGraphModel')[0]
   if (model) return model.getElementsByTagName('root')[0] || null
   const root = doc.getElementsByTagName('root')[0]
   return root || null
+}
+
+/** 页码夹到有效范围（越界时取最后一页） */
+function clampPageIndex(total: number, pageIndex: number): number {
+  const n = Number.isFinite(pageIndex) ? Math.floor(pageIndex) : 0
+  if (!(total > 0)) return 0
+  return Math.min(Math.max(0, n), total - 1)
+}
+
+/** 多页文件的页名 / 页数（无 <diagram> 时视为单页） */
+function pageMeta(doc: Document, pageIndex: number): { total: number; index: number; name: string } {
+  const diagrams = doc.getElementsByTagName('diagram')
+  const total = Math.max(1, diagrams.length)
+  const index = clampPageIndex(diagrams.length, pageIndex)
+  const name = diagrams.length ? String(diagrams[index].getAttribute('name') || '') : ''
+  return { total, index, name }
 }
 
 /** root 下的直接子 mxCell（不含嵌套 group 的子单元） */
@@ -141,12 +169,17 @@ function roundToGrid(n: number): number {
 
 // ---------------- 上下文 ----------------
 
-/** 解析当前图表：已有图形/连线（带 id）+ 建议的新图形起点（已有内容右侧留白） */
-export function collectDrawioContext(xml: string): DrawioContext {
-  const empty: DrawioContext = { shapes: [], edges: [], origin: { x: 40, y: 40 }, pages: 1 }
+/** 解析当前图表：已有图形/连线（带 id）+ 建议的新图形起点（已有内容右侧留白）
+ *  pageIndex 为编辑器里当前打开的页（0 起），缺省第 1 页 */
+export function collectDrawioContext(xml: string, pageIndex = 0): DrawioContext {
+  const empty: DrawioContext = { shapes: [], edges: [], origin: { x: 40, y: 40 }, pageIndex: 0, pageName: '', pages: 1 }
   const doc = parseXml(xml)
   if (!doc) return empty
-  const root = rootElement(doc)
+  const meta = pageMeta(doc, pageIndex)
+  empty.pageIndex = meta.index
+  empty.pageName = meta.name
+  empty.pages = meta.total
+  const root = rootElement(doc, meta.index)
   if (!root) return empty
 
   const shapes: DrawioShapeHint[] = []
@@ -188,7 +221,14 @@ export function collectDrawioContext(xml: string): DrawioContext {
     : { x: 40, y: 40 }
 
   // 只把前 80 个图形喂给模型，避免提示词过长（大图也不至于失控）
-  return { shapes: shapes.slice(0, 80), edges: edges.slice(0, 80), origin, pages }
+  return {
+    shapes: shapes.slice(0, 80),
+    edges: edges.slice(0, 80),
+    origin,
+    pageIndex: meta.index,
+    pageName: meta.name,
+    pages: meta.total || pages,
+  }
 }
 
 // ---------------- 提示词 ----------------
@@ -302,7 +342,13 @@ export function buildDrawioMessages(requirement: string, ctx: DrawioContext, zh:
     }
     if (!ctx.edges.length) lines.push('- （无连线）')
     lines.push(`建议的新图形排布起点：x=${ctx.origin.x}, y=${ctx.origin.y}（纯新增时会自动挪到这里；若你在调整布局，请自己给坐标）`)
-    if (ctx.pages > 1) lines.push(`注意：这是多页图表（共 ${ctx.pages} 页），本次只会改第 1 页。`)
+    if (ctx.pages > 1) {
+      lines.push(
+        `注意：这是多页图表（共 ${ctx.pages} 页），本次只改第 ${ctx.pageIndex + 1} 页` +
+          (ctx.pageName ? `（页名「${ctx.pageName}」）` : '') +
+          '。表格里已有内容都是该页的，不要引用其它页的图形。',
+      )
+    }
     if (mode === 'add') lines.push('【本次模式：仅新增】不要修改或删除任何已有图形/连线。')
     lines.push('', '用户需求：', requirement.trim())
   } else {
@@ -319,7 +365,13 @@ export function buildDrawioMessages(requirement: string, ctx: DrawioContext, zh:
     }
     if (!ctx.edges.length) lines.push('- (no edges)')
     lines.push(`Suggested origin for new shapes: x=${ctx.origin.x}, y=${ctx.origin.y} (pure additions are auto-offset there; if you rearrange the layout, give your own coordinates)`)
-    if (ctx.pages > 1) lines.push(`Note: multi-page diagram (${ctx.pages} pages); only page 1 will be updated.`)
+    if (ctx.pages > 1) {
+      lines.push(
+        `Note: multi-page diagram (${ctx.pages} pages); only page ${ctx.pageIndex + 1} will be updated` +
+          (ctx.pageName ? ` (page name "${ctx.pageName}")` : '') +
+          '. The listed content belongs to that page; do not reference shapes from other pages.',
+      )
+    }
     if (mode === 'add') lines.push('[Mode: ADD ONLY] Do not modify or delete any existing shape or edge.')
     lines.push('', 'User requirement:', requirement.trim())
   }
@@ -361,17 +413,26 @@ export function extractGraphFragment(text: string): string | null {
  * - 既有 id → **调整**：用片段里的定义就地覆盖该单元（属性 + 几何；只给 style 不给几何时保留原几何/坐标）
  * - `<mxCell id="X" remove="1"/>` → **删除**该单元
  * 引用既有图形 id 的连线保留（可连到老图形上）；端点解析不出来的连线整条丢弃。
+ * pageIndex 为编辑器里当前打开的页（0 起），多页文件只改该页。
  */
 export function mergeDrawioFragment(
   baseXml: string,
   fragment: string,
-  opts: { allowEdit?: boolean } = {},
+  opts: { allowEdit?: boolean; pageIndex?: number } = {},
 ): DrawioMergeResult | DrawioMergeError {
   const allowEdit = opts.allowEdit !== false
   const baseDoc = parseXml(baseXml)
   if (!baseDoc) return { error: '当前图表内容无法解析' }
-  const baseRoot = rootElement(baseDoc)
-  if (!baseRoot) return { error: '无法定位图表内容（压缩格式或非 mxGraphModel），请先在编辑器中做一次改动后再试' }
+  const meta = pageMeta(baseDoc, opts.pageIndex || 0)
+  const baseRoot = rootElement(baseDoc, meta.index)
+  if (!baseRoot) {
+    return {
+      error:
+        meta.total > 1
+          ? `第 ${meta.index + 1} 页内容无法解析（可能是压缩格式），请先在编辑器里改一下该页再试`
+          : '无法定位图表内容（压缩格式或非 mxGraphModel），请先在编辑器中做一次改动后再试',
+    }
+  }
 
   const fragDoc = parseXml(fragment) || parseXml(repairXml(fragment))
   if (!fragDoc) return { error: '模型输出的不是合法 XML' }
@@ -557,7 +618,7 @@ export function mergeDrawioFragment(
       minX = Math.min(minX, numAttr(g, 'x', 0))
       minY = Math.min(minY, numAttr(g, 'y', 0))
     }
-    const ctx = collectDrawioContext(baseXml)
+    const ctx = collectDrawioContext(baseXml, meta.index)
     const dx = ctx.origin.x - minX
     const dy = ctx.origin.y - minY
     if (dx || dy) {
@@ -586,14 +647,14 @@ export function mergeDrawioFragment(
     }
   }
 
-  // 4) 拼进目标的 <root>（多页时取第 1 页）
+  // 4) 拼进目标页的 <root>（多页时只改 pageIndex 对应的那一页）
   for (const cell of imported) baseRoot.appendChild(cell)
   const xml = new XMLSerializer().serializeToString(baseDoc)
 
-  // 5) 自检：结果必须仍能解析，且单元数 = 原有 - 删除 + 新增
+  // 5) 自检：结果必须仍能解析，且目标页的单元数 = 原有 - 删除 + 新增
   const checkDoc = parseXml(xml)
   if (!checkDoc) return { error: '合并后的内容校验失败' }
-  const checkRoot = rootElement(checkDoc)
+  const checkRoot = rootElement(checkDoc, meta.index)
   const expectCells = existing.size - removedIds.length + imported.length
   if (!checkRoot || topCells(checkRoot).length < expectCells) {
     return { error: '合并后的内容不完整，已取消应用' }
@@ -624,7 +685,8 @@ export function mergeDrawioFragment(
     labels: labels.slice(0, 20),
     edgeLabels: edgeLabels.slice(0, 20),
     updatedLabels: updatedLabels.slice(0, 20),
-    pageIndex: 1,
-    pages: Math.max(1, baseDoc.getElementsByTagName('diagram').length),
+    pageIndex: meta.index + 1,
+    pageName: meta.name,
+    pages: meta.total,
   }
 }

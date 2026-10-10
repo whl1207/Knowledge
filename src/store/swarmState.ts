@@ -36,7 +36,7 @@ export const knowledgeBaseList = ref<KbFileInfo[]>([])
 export const swarmMode = ref<SwarmRunMode>('auto')
 export const debateRounds = ref(2)
 export const hideModeHint = ref(false)
-/** 运行细节设置（collabMode / enableHostSummary / managerAgentIdx / injectHistory） */
+/** 运行细节设置（collabMode / managerAgentIdx / injectHistory） */
 export const settings = ref<Record<string, any>>({})
 
 // ==================== 运行归属与代际 ====================
@@ -80,7 +80,7 @@ export const agentStepSeq = ref<Record<number, number>>({})
 /** 主进程会话 id → { 成员下标, 调用序号 } */
 export const agentViewSeq = ref<Record<string, { agentIdx: number; seq: number }>>({})
 
-/** 本轮被 @点名 / 被群主撮合而追加发言的成员下标（避免重复唤起） */
+/** 本轮被 @点名（成员互拉）而追加发言的成员下标（避免重复唤起） */
 export const summonedMembers = ref<number[]>([])
 
 /** 执行顺序时间线（内部状态展示用） */

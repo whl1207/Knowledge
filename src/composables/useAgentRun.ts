@@ -23,7 +23,7 @@ import { toolsFromCapabilities } from '@/lib/agent/capabilities'
 import { renderQuestionMarkdown, escapeHtml } from '@/lib/markdown/render'
 // 会话视图 → 消息投影（与集群模式共用同一实现，保证工具调用/思考/来源样式一致）
 import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos } from '@/lib/agent/projection'
-import { estimateAgentSeedTokens } from '@/lib/contextUsage'
+import { estimateAgentSeedTokens, resolveLimitFor } from '@/lib/contextUsage'
 import {
   buildSkillAgentOptions,
 
@@ -553,14 +553,17 @@ export function useAgentRun(deps: AgentRunDeps) {
     return message ? `${fileContext}\n\n${message}` : fileContext
   }
 
+  /** 是否网页端（局域网共享，无 ipcRenderer）：智能体循环跑在主机，能力由主机白名单决定 */
+  const isLanGuest = typeof window !== 'undefined' && !(window as any).ipcRenderer
+
   /** 创建 agent 会话并接入聊天（公共流程：创建 → 占位消息 → 订阅 → 发送） */
   const startAgentSessionInChat = async (
     options: AgentOptions,
     userInput: string,
     images?: Array<string | Uint8Array | ArrayBuffer>,
   ) => {
-    if (!window.dsh?.agent) {
-      ElMessage.error(store.locales == 'zh' ? '智能体功能需要桌面版支持' : 'Agent Loop requires the desktop app')
+    if (!agentBridge.available) {
+      ElMessage.error(store.locales == 'zh' ? '智能体功能需要桌面版或主机侧局域网共享' : 'Agent Loop requires the desktop app or host LAN sharing')
       return null
     }
     const chat = getCurrentChat()
@@ -568,7 +571,14 @@ export function useAgentRun(deps: AgentRunDeps) {
       // 多模态附图（上传的图片）：转成 data URL 字符串塞进 options（JSON 安全），
       // 主进程只在内存里持有，并在每次请求时挂回「带图的那条 user 消息」
       const taskImages = await toTaskImages(images)
-      const view = await agentBridge.create(taskImages.length ? { ...options, taskImages } : options)
+      // 上下文窗口上限：与主页圆环同源解析（手填 > 已加载实例探测 > 记住值 > 模型上限 > 来源默认），
+      // 交给主进程做请求前预算检查与主动压缩（P0 上下文压缩）
+      const contextLimit = resolveLimitFor(store.AIconfig.llm, {
+        provider: options.provider,
+        model: options.llmConfig?.model || options.config?.model,
+        customSourceIndex: store.AIconfig.llm.custom?.activeIndex,
+      }).limit
+      const view = await agentBridge.create({ ...options, contextLimit, ...(taskImages.length ? { taskImages } : {}) })
       agentSessionId.value = view.id
       const assistantMsg: ChatMessage = {
         role: 'assistant', content: '', timestamp: Date.now(),
@@ -607,6 +617,41 @@ export function useAgentRun(deps: AgentRunDeps) {
       ElMessage.error(store.locales == 'zh' ? `启动智能体失败：${e?.message || e}` : `Failed to start agent: ${e?.message || e}`)
       return null
     }
+  }
+
+  /**
+   * 网页端（局域网共享）智能体模式：**循环跑在主机**，本端只下发任务 + 渲染事件流。
+   *
+   * 与桌面端的差别（有意为之）：
+   * - tools / cwd / sandbox / maxSteps / provider / config 本端一律不下发——
+   *   主机按「设置 → 协作 → 权限」的访客白名单自行决定（下发也会被忽略）；
+   * - 系统提示由主机组装（含主机技能库清单、共享知识库、可用工具清单）；
+   * - 技能已并入智能体：输入 `$技能名 任务` 时由主机解析技能并注入指令（需主机开放 skill 工具）；
+   * - 会话逐轮独立（与桌面一致）：每轮新建主机会话，用本端聊天记录作为种子历史衔接上下文。
+   */
+  const handleBrowserAgentMode = async (message: string) => {
+    const { content, images, fileAttachments } = buildUserMessageFromUploads(message)
+    const chat = getCurrentChat()
+    const userMessage: ChatMessage = { role: 'user', content, timestamp: Date.now(), images, fileAttachments }
+    chat.messages.push(userMessage)
+    chat.isGenerating = true
+    inputText.value = ''
+    currentUploads.value = []
+    autoScrollEnabled.value = true
+    scrollToBottom()
+    saveChats()
+
+    const options: AgentOptions = {
+      provider: 'lan-host',
+      config: {},
+      llmConfig: {},
+      label: 'lan-guest',
+      guestLocale: store.locales == 'zh' ? 'zh' : 'en',
+      // 访客选用的智能体（主机「协作 → 权限」开放的预设；默认通用智能体）
+      guestAgentId: chat.config.guestAgentId || 'general',
+      seedHistory: buildSeedHistory(chat),
+    }
+    await startAgentSessionInChat(options, withFileAttachments(content, fileAttachments), images)
   }
 
   /**
@@ -972,6 +1017,10 @@ export function useAgentRun(deps: AgentRunDeps) {
     attachAgentToChat,
     startAgentSessionInChat,
     handleAgentLoopMode,
+    /** 网页端（局域网共享）智能体模式：主机侧执行，本端只下发任务 + 渲染事件 */
+    handleBrowserAgentMode,
+    /** 是否网页端（无 ipcRenderer）：供 home 决定发送前检查项 */
+    isLanGuest,
     handleAgentPresetMode,
     /** PTC 模式（程序化工具调用）：同一 agent 循环 + run_code 呈现 */
     handlePtcMode,

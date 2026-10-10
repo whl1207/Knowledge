@@ -28,3 +28,11 @@
 
 - 渲染层类型检查：`npx vue-tsc --noEmit -p tsconfig.json`（改主进程再加 `npx tsc -p tsconfig.node.json --noEmit`）
 - 涉及界面时，用浏览器打开 `http://localhost:5173/#/settings-window`（改 hash 需重新加载）做一次实际渲染核对。
+
+## 四、严禁用 PowerShell 读写文本文件（血泪教训）
+
+**绝对不要**用 PowerShell 的 `Get-Content` / `Set-Content` / `Out-File` / `Add-Content` / `>` `>>` 管道去读或写源码、文档等含中文的文本文件：
+
+- Windows PowerShell 5.1 读取**无 BOM 的 UTF-8** 文件时会按系统 ANSI（CP936）解码，回写时又按 UTF-8 编码 —— 中文会被**永久损坏**成乱码（`工作流` → `宸ヤ綔娴?`），且 `?` 处会永久丢失字节、引号等 ASCII 字符也会被吞掉，**无法还原**；
+- 需要批量改文件时：用 `edit` / `create` 工具，或写 Node 脚本（`node x.cjs`，Node 的 `fs` 读写默认按 UTF-8，安全）；
+- PowerShell 只用来**执行命令、跑构建、跑测试、看进程**，不要用它做文本内容处理。若必须用 PowerShell 处理字符串，只能用 `[System.IO.File]::ReadAllText/WriteAllText` 并显式指定 `UTF8Encoding($false)`。

@@ -2,7 +2,13 @@
 import { usestore } from '@/store'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { newDrawioXml } from '@/shared/drawioFile'
+import { NEW_FILE_TYPES, newFileType, type NewFileTypeKey } from '@/lib/knowFile/newFileTypes'
+import { FILE_SORT_ITEMS, fileTypeKey, type FileSortKey } from '@/lib/knowFile/fileSort'
+import { parseSearchQuery, matchSearchTerms, searchTextTerms } from '@/lib/knowFile/itemSearch'
+// 音视频扩展名判定 + ID3 封面解析（与播放器 MediaAudio.vue 共用）
+import { isAudioExt, isVideoExt, extractAlbumArt } from '@/lib/knowFile/mediaMeta'
+// 文件系统变更：全局单例订阅 + 目录监听租约（见 lib/knowFile/fileWatch.ts）
+import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
 
 // 获取数据
 const store = usestore()
@@ -18,21 +24,40 @@ const menuPosition = reactive({
   y: 0
 })
 
-// 显示模式：grid（图标）、list（列表）
-const viewMode = ref('grid')
+// ---- 显示偏好持久化（视图模式 / 图标尺寸 / 文件名 / 宽高比；本机记住上次设置） ----
+const MODE_KEY = 'fileview-mode'
+const SHOW_NAME_KEY = 'fileview-show-name'
+const ASPECT_KEY = 'fileview-aspect'
+const SCALE_KEY = 'fileview-icon-scale'
+// 图标尺寸范围（连续可调，单位 px；小于最小值即为列表视图）
+const ICON_SCALE_MIN = 56
+const ICON_SCALE_MAX = 220
 
-// 是否显示文件名
-const showFileName = ref(true)
+// 显示模式：grid（图标）、list（列表）
+const viewMode = ref(localStorage.getItem(MODE_KEY) === 'list' ? 'list' : 'grid')
+
+// 是否显示文件名（默认显示；只有显式存过 '0' 才隐藏）
+const showFileName = ref(localStorage.getItem(SHOW_NAME_KEY) !== '0')
 
 // 图片宽高比模式：'portrait'(2:3 竖屏), 'landscape'(3:2 横屏), 'square'(正方形)
-const imageAspectRatio = ref('square')
+const savedAspect = localStorage.getItem(ASPECT_KEY)
+const imageAspectRatio = ref<'square' | 'landscape' | 'portrait'>(
+  savedAspect === 'landscape' || savedAspect === 'portrait' ? savedAspect : 'square'
+)
 
-// 图标尺寸（连续可调，单位 px；最小时为列表视图）
-const iconScale = ref(80)
+// 图标尺寸（连续可调，单位 px）；读取历史值时做一次范围限制，避免脏数据导致布局异常
+const savedScale = Number(localStorage.getItem(SCALE_KEY))
+const iconScale = ref(
+  Number.isFinite(savedScale) && savedScale > 0
+    ? Math.max(ICON_SCALE_MIN, Math.min(ICON_SCALE_MAX, Math.round(savedScale)))
+    : 80
+)
+watch(viewMode, (v) => localStorage.setItem(MODE_KEY, v))
+watch(showFileName, (v) => localStorage.setItem(SHOW_NAME_KEY, v ? '1' : '0'))
+watch(imageAspectRatio, (v) => localStorage.setItem(ASPECT_KEY, v))
+watch(iconScale, (v) => localStorage.setItem(SCALE_KEY, String(v)))
 
-// ---- 导航历史（后退/前进） ----
-const navStack = ref<string[]>([])
-const navIndex = ref(-1)
+// ---- 导航历史（后退/前进）已移到 store，供知识管理各视图共用 ----
 
 // ---- 选中/聚焦（单选+多选） ----
 const selectedPaths = ref<string[]>([])
@@ -40,14 +65,15 @@ const focusedIndex = ref(-1)
 let lastClickedIndex = -1
 
 // ---- 排序 ----
-const sortKey = ref<'name' | 'mtime' | 'size'>('name')
+const sortKey = ref<FileSortKey>('name')
 const sortDir = ref<'asc' | 'desc'>('asc')
 
-// ---- 应用内剪贴板（复制/剪切/粘贴） ----
-const clipboardFiles = ref<{ paths: string[]; cut: boolean } | null>(null)
+// ---- 应用内剪贴板（复制/剪切/粘贴）：与左侧文件树 panel.vue 共用 store.fileClipboard ----
+const clipboardFiles = computed(() => store.fileClipboard)
 
 // ---- 搜索过滤 ----
-const searchText = ref('')
+// 搜索词来自顶部工具栏（explorer 里统一渲染，各全局视图共用一份）
+const searchText = computed(() => store.knowQuery)
 
 // ---- 拖放（内部移动到文件夹 / 外部文件导入） ----
 const dragPaths = ref<string[]>([])
@@ -60,9 +86,6 @@ let marqueeStart: { x: number; y: number } | null = null
 let marqueeAdditive = false
 let marqueeRaf = 0
 let marqueeItemRects: { path: string; rect: DOMRect }[] = []
-
-// 文件变化监听定时器
-let fileChangeTimer: NodeJS.Timeout | null = null
 
 const getData = async function () {
   // 未打开文件时回退到根目录，方便直接浏览
@@ -96,10 +119,157 @@ const isSystemOpenFile = function (item: any) {
   return SYSTEM_OPEN_EXTS.includes((item.extension || '').toLowerCase())
 }
 
+// 是否为音频 / 视频文件（列表里显示封面；扩展名清单与播放器共用）
+const isAudioFile = function (item: any) {
+  return item.type === 'file' && isAudioExt(item.extension)
+}
+const isVideoFile = function (item: any) {
+  return item.type === 'file' && isVideoExt(item.extension)
+}
+const isMediaFile = function (item: any) {
+  return isAudioFile(item) || isVideoFile(item)
+}
+
+// ---- 媒体封面（音频 ID3 封面 / 视频首帧）----
+// 缩略图生成（读文件、解码音频标签、解码视频帧）都比较重，因此：
+//   1. 只有滚动到可见的条目才登记（IntersectionObserver）；
+//   2. 并发上限 2，逐个排队生成，不阻塞首屏渲染；
+//   3. 结果按路径缓存，翻页回来不再重复解析。
+const mediaCovers = reactive<Record<string, string>>({}) // path -> blob URL（'' = 已尝试但无封面）
+const coverObjectUrls = new Set<string>() // 需要 revoke 的 blob URL
+const coverInFlight = new Set<string>()
+const coverQueue: string[] = []
+let coverRunning = 0
+const COVER_MAX_CONCURRENT = 2
+let coverObserver: IntersectionObserver | null = null
+const filesContainerRef = ref<HTMLElement | null>(null)
+
+// 从视频中截取一帧作为封面（当前窗口 webSecurity:false，可绘制 file:// 视频；
+// 若解码/绘制失败——如不支持的编码或跨域受限——返回空串，列表回退到文件图标）
+function captureVideoPoster(item: any): Promise<string> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video')
+    let settled = false
+    const finish = (url: string) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      video.onloadeddata = null
+      video.onseeked = null
+      video.onerror = null
+      video.removeAttribute('src')
+      video.load()
+      resolve(url)
+    }
+    const timer = window.setTimeout(() => finish(''), 8000)
+    const draw = () => {
+      try {
+        const w = video.videoWidth
+        const h = video.videoHeight
+        if (!w || !h) return finish('')
+        const scale = Math.min(1, 480 / Math.max(w, h))
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(w * scale))
+        canvas.height = Math.max(1, Math.round(h * scale))
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return finish('')
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        canvas.toBlob((blob) => finish(blob ? URL.createObjectURL(blob) : ''), 'image/jpeg', 0.82)
+      } catch {
+        finish('')
+      }
+    }
+    video.onloadeddata = () => {
+      const d = video.duration
+      const t = Number.isFinite(d) && d > 0 ? Math.min(1, d / 2) : 0
+      if (t > 0) {
+        try {
+          video.currentTime = t
+          return
+        } catch { /* 落到直接绘制 */ }
+      }
+      draw()
+    }
+    video.onseeked = draw
+    video.onerror = () => finish('')
+    video.muted = true
+    video.preload = 'metadata'
+    video.src = getAddress(item)
+  })
+}
+
+// 生成单条封面（音频读 ID3 APIC；视频截首帧），失败或无封面返回 ''
+async function buildMediaCover(item: any): Promise<string> {
+  try {
+    if (isAudioFile(item)) {
+      const bytes: Uint8Array | null = await window.ipcRenderer.invoke('readFileBinary', item.path)
+      if (!bytes || !bytes.length) return ''
+      return extractAlbumArt(bytes) || ''
+    }
+    if (isVideoFile(item)) return await captureVideoPoster(item)
+  } catch { /* 读取/解析失败：回退到文件图标 */ }
+  return ''
+}
+
+// 队列泵：并发受限地逐个生成封面
+function pumpCoverQueue() {
+  while (coverRunning < COVER_MAX_CONCURRENT && coverQueue.length) {
+    const path = coverQueue.shift() as string
+    if (mediaCovers[path] !== undefined || coverInFlight.has(path)) continue
+    const item = files.value.find((f: any) => f.path === path)
+    if (!item) continue
+    coverInFlight.add(path)
+    coverRunning++
+    buildMediaCover(item)
+      .then((url) => {
+        mediaCovers[path] = url
+        if (url) coverObjectUrls.add(url)
+      })
+      .catch(() => { mediaCovers[path] = '' })
+      .finally(() => {
+        coverInFlight.delete(path)
+        coverRunning--
+        pumpCoverQueue()
+      })
+  }
+}
+
+// 懒加载观察器：条目进入可视区（含 150px 预取边距）才排队生成封面
+function ensureCoverObserver(): IntersectionObserver {
+  if (coverObserver) return coverObserver
+  coverObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue
+      const el = entry.target as HTMLElement
+      coverObserver?.unobserve(el)
+      const path = el.dataset.coverPath || ''
+      if (!path || mediaCovers[path] !== undefined || coverInFlight.has(path) || coverQueue.includes(path)) continue
+      coverQueue.push(path)
+    }
+    pumpCoverQueue()
+  }, { root: filesContainerRef.value, rootMargin: '150px 0px' })
+  return coverObserver
+}
+
+// 列表变化（换目录 / 搜索 / 切换网格列表）后重新登记待生成封面的条目
+function refreshMediaCovers() {
+  const container = filesContainerRef.value
+  if (!container) return
+  const observer = ensureCoverObserver()
+  observer.disconnect()
+  coverQueue.length = 0
+  container.querySelectorAll<HTMLElement>('.media-thumb[data-cover-path]').forEach((el) => {
+    const path = el.dataset.coverPath || ''
+    if (!path || mediaCovers[path] !== undefined || coverInFlight.has(path)) return
+    observer.observe(el)
+  })
+  pumpCoverQueue()
+}
+
 // 打开文件/文件夹（文件夹进入目录；文件按文件操作模式：新窗口 / 窗口内）
 const open = async function (data: any) {
   if (data.type === 'folder') {
-    enterDir(data.path)
+    store.knowEnterDir(data.path)
     return
   }
   // 系统打开类文件 / Linux 可执行文件：直接用系统默认应用打开
@@ -110,74 +280,9 @@ const open = async function (data: any) {
   store.openFileByMode(data)
 }
 
-// ---- 导航（后退/前进/向上 + 面包屑） ----
-const canBack = computed(() => navIndex.value > 0)
-const canForward = computed(() => navIndex.value < navStack.value.length - 1)
-
-// 跨平台取父目录（Windows 盘符根 / Linux 根正确归位，返回父目录或空串）
-const parentPathOf = function (p: string): string {
-  if (!p) return ''
-  const sep = p.includes('\\') ? '\\' : '/'
-  const trimmed = p.replace(/[\\/]+$/, '')
-  if (!trimmed) return ''
-  const i = trimmed.lastIndexOf(sep)
-  if (i <= 0) {
-    if (sep === '/' && trimmed.startsWith('/')) return '/'
-    return ''
-  }
-  return trimmed.substring(0, i)
-}
-
-const canUp = computed(() => {
-  const p = store.path || store.root
-  if (!p) return false
-  const parent = parentPathOf(p)
-  return !!parent && parent !== p
-})
-
-// 进入目录（记录导航历史；栈当前位置始终等于 store.path，back/forward 即栈指针移动）
-const enterDir = function (dir: string) {
-  if (!dir || dir === store.path) return
-  navStack.value = navStack.value.slice(0, navIndex.value + 1)
-  navStack.value.push(dir)
-  navIndex.value = navStack.value.length - 1
-  store.path = dir
-}
-
-const goBack = function () {
-  if (!canBack.value) return
-  navIndex.value--
-  store.path = navStack.value[navIndex.value]
-}
-const goForward = function () {
-  if (!canForward.value) return
-  navIndex.value++
-  store.path = navStack.value[navIndex.value]
-}
-const goUp = function () {
-  const p = store.path || store.root
-  if (!p) return
-  const parent = parentPathOf(p)
-  if (parent && parent !== p) enterDir(parent)
-}
+// ---- 导航（后退/前进/向上 + 面包屑）：导航状态与历史统一存在 store，工具栏见 ViewToolbar.vue ----
+const goUp = function () { store.knowUp() }
 const refresh = async function () { await getData() }
-
-// 面包屑（按路径层级拆分，可点击跳转）
-const crumbs = computed(() => {
-  const p = store.path || store.root
-  if (!p) return []
-  const sep = p.includes('\\') ? '\\' : '/'
-  const isRootAbs = p.startsWith('/')
-  const parts = p.split(sep).filter(Boolean)
-  const arr: { label: string; path: string }[] = []
-  let acc = ''
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i]
-    acc = acc ? acc + sep + part : (isRootAbs ? '/' + part + sep : part + sep)
-    arr.push({ label: part, path: acc })
-  }
-  return arr
-})
 
 // 右键菜单溢出视口时自动调整位置，保证完全显示（参照 panel.vue）
 const adjustContextMenuPosition = function (pos: { x: number; y: number }) {
@@ -492,7 +597,7 @@ const deleteByMenu = async function () {
 }
 
 // ---- 排序（列表列头点击） ----
-const setSort = function (key: 'name' | 'mtime' | 'size') {
+const setSort = function (key: FileSortKey) {
   if (sortKey.value === key) {
     sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
   } else {
@@ -500,7 +605,7 @@ const setSort = function (key: 'name' | 'mtime' | 'size') {
     sortDir.value = 'asc'
   }
 }
-const sortIcon = function (key: 'name' | 'mtime' | 'size') {
+const sortIcon = function (key: FileSortKey) {
   if (sortKey.value !== key) return 'fa fa-sort'
   return sortDir.value === 'asc' ? 'fa fa-sort-asc' : 'fa fa-sort-desc'
 }
@@ -518,6 +623,10 @@ const sortedFiles = computed(() => {
       r = String(a.label).localeCompare(String(b.label), undefined, { numeric: true, sensitivity: 'base' })
     } else if (sortKey.value === 'mtime') {
       r = (a.mtime || 0) - (b.mtime || 0)
+    } else if (sortKey.value === 'type') {
+      // 按类型（扩展名）排序，同类型再按名称，避免同类型文件之间顺序随扫描结果变化
+      r = fileTypeKey(a.label).localeCompare(fileTypeKey(b.label))
+        || String(a.label).localeCompare(String(b.label), undefined, { numeric: true, sensitivity: 'base' })
     } else {
       r = (a.size || 0) - (b.size || 0)
     }
@@ -526,27 +635,106 @@ const sortedFiles = computed(() => {
   return arr
 })
 
-// ---- 搜索过滤（按文件名实时过滤 + 高亮） ----
+// ---- YAML 属性筛选（状态等任意属性；状态栏下拉选择） ----
+const ATTR_FILTER_KEY = 'fileview-attr-key'
+const ATTR_FILTER_VALUE = 'fileview-attr-value'
+/** 属性值未设置时使用的占位值 */
+const NONE_VALUE = '__none__'
+const attrFilterKey = ref(localStorage.getItem(ATTR_FILTER_KEY) || '')
+const attrFilterValue = ref(localStorage.getItem(ATTR_FILTER_VALUE) || '')
+watch(attrFilterKey, (v) => localStorage.setItem(ATTR_FILTER_KEY, v))
+watch(attrFilterValue, (v) => localStorage.setItem(ATTR_FILTER_VALUE, v))
+
+/** 当前目录下出现过的所有 YAML 属性名（按出现次数降序） */
+const attributeKeys = computed(() => {
+  const map = new Map<string, number>()
+  for (const f of files.value as any[]) {
+    const attrs = f?.attributes
+    if (!attrs || typeof attrs !== 'object') continue
+    for (const k of Object.keys(attrs)) map.set(k, (map.get(k) || 0) + 1)
+  }
+  return [...map.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(e => e[0])
+})
+
+/** 选定属性下出现过的所有取值 */
+const attributeValues = computed(() => {
+  const key = attrFilterKey.value
+  if (!key) return [] as string[]
+  const set = new Set<string>()
+  for (const f of files.value as any[]) {
+    const attrs = f?.attributes
+    if (!attrs || typeof attrs !== 'object') continue
+    const v = attrs[key]
+    if (v === undefined || v === null || v === '') continue
+    set.add(String(v))
+  }
+  return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+})
+
+/** 取某文件在选中属性下的值（未设置为 NONE_VALUE） */
+const attrOf = function (f: any): string | null {
+  const key = attrFilterKey.value
+  if (!key) return null
+  const attrs = f?.attributes
+  const v = attrs && typeof attrs === 'object' ? attrs[key] : undefined
+  if (v === undefined || v === null || v === '') return NONE_VALUE
+  return String(v)
+}
+
+const clearAttrFilter = function () {
+  attrFilterKey.value = ''
+  attrFilterValue.value = ''
+}
+
+// 切换目录后属性/取值已不存在时自动清除筛选，避免看到空列表
+watch([attributeKeys, attributeValues], ([keys, vals]) => {
+  if (!files.value.length) return
+  if (attrFilterKey.value && !keys.includes(attrFilterKey.value)) {
+    clearAttrFilter()
+    return
+  }
+  if (attrFilterValue.value && !vals.includes(attrFilterValue.value) && attrFilterValue.value !== NONE_VALUE) {
+    attrFilterValue.value = ''
+  }
+})
+
+// ---- 搜索过滤（文件夹内条目：文件名 / 路径 / 属性值，语法见 lib/knowFile/itemSearch.ts）与属性筛选（二者叠加） ----
+const searchTerms = computed(() => parseSearchQuery(searchText.value))
 const filteredFiles = computed(() => {
-  const q = searchText.value.trim().toLowerCase()
-  if (!q) return sortedFiles.value
-  return sortedFiles.value.filter((f: any) => String(f.label).toLowerCase().includes(q))
+  let arr = sortedFiles.value
+  // 属性筛选：选中属性 + 选中值时才生效
+  if (attrFilterKey.value && attrFilterValue.value) {
+    arr = arr.filter((f: any) => attrOf(f) === attrFilterValue.value)
+  }
+  const terms = searchTerms.value
+  if (!terms.length) return arr
+  return arr.filter((f: any) => matchSearchTerms(f, terms))
 })
 
 const escapeHtml = function (s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-// 文件名高亮（匹配段加 mark）
+// 文件名高亮（匹配段加 mark；属性命中时不加亮，由搜索结果列表本身体现）
 const highlightName = function (label: string) {
   const text = String(label)
-  const q = searchText.value.trim()
-  if (!q) return escapeHtml(text)
-  const idx = text.toLowerCase().indexOf(q.toLowerCase())
-  if (idx < 0) return escapeHtml(text)
+  const terms = searchTextTerms(searchTerms.value)
+  if (!terms.length) return escapeHtml(text)
+  const lower = text.toLowerCase()
+  let hit = ''
+  for (const t of terms) {
+    if (t && lower.includes(t.toLowerCase())) {
+      hit = t
+      break
+    }
+  }
+  if (!hit) return escapeHtml(text)
+  const idx = lower.indexOf(hit.toLowerCase())
   return escapeHtml(text.slice(0, idx)) +
-    '<mark>' + escapeHtml(text.slice(idx, idx + q.length)) + '</mark>' +
-    escapeHtml(text.slice(idx + q.length))
+    '<mark>' + escapeHtml(text.slice(idx, idx + hit.length)) + '</mark>' +
+    escapeHtml(text.slice(idx + hit.length))
 }
 
 // ---- 复制 / 剪切 / 粘贴（应用内剪贴板，复用主进程 copyFile/moveFile） ----
@@ -560,7 +748,7 @@ const copySelected = function () {
     ElMessage.warning(store.locales == 'zh' ? '请先选择文件' : 'Select files first')
     return
   }
-  clipboardFiles.value = { paths: [...selectedPaths.value], cut: false }
+  store.fileClipboard = { paths: [...selectedPaths.value], cut: false }
   ElMessage.success(store.locales == 'zh' ? `已复制 ${selectedPaths.value.length} 项` : `${selectedPaths.value.length} copied`)
 }
 const cutSelected = function () {
@@ -568,7 +756,7 @@ const cutSelected = function () {
     ElMessage.warning(store.locales == 'zh' ? '请先选择文件' : 'Select files first')
     return
   }
-  clipboardFiles.value = { paths: [...selectedPaths.value], cut: true }
+  store.fileClipboard = { paths: [...selectedPaths.value], cut: true }
   ElMessage.success(store.locales == 'zh' ? `已剪切 ${selectedPaths.value.length} 项` : `${selectedPaths.value.length} cut`)
 }
 const pasteFiles = async function () {
@@ -594,7 +782,7 @@ const pasteFiles = async function () {
   }
   // 剪切：仅保留失败项以便重试（成功移动的项已不存在）；复制：保留剪贴板以支持向多个目标重复粘贴
   if (cut) {
-    clipboardFiles.value = failed.length ? { paths: failed, cut: true } : null
+    store.fileClipboard = failed.length ? { paths: failed, cut: true } : null
   }
   await getData()
   if (failed.length) {
@@ -753,41 +941,25 @@ const onMarqueeUp = function () {
   if (marqueeRaf) { cancelAnimationFrame(marqueeRaf); marqueeRaf = 0 }
 }
 
-// 处理文件系统变化
-const handleFileSystemChange = async (event: any, data: any) => {
-  // 防抖：延迟刷新，避免频繁刷新
-  if (fileChangeTimer) {
-    clearTimeout(fileChangeTimer)
-  }
-  fileChangeTimer = setTimeout(async () => {
-    await getData()
-    fileChangeTimer = null
-  }, 500)
-}
-
-// 当前查看模式显示文本（状态栏提示；网格模式显示实际像素便于感知连续缩放）
+// 当前查看模式显示文本（状态栏提示；不显示缩放像素值，像素仅供 Ctrl+滚轮内部换算）
 const viewModeLabel = computed(() => {
   if (viewMode.value === 'list') return store.locales == 'zh' ? '列表' : 'List'
-  return Math.round(iconScale.value) + 'px'
+  return store.locales == 'zh' ? '网格' : 'Grid'
 })
 
-// 图片宽高比显示文本（状态栏）
+// 图片宽高比显示文本（右键菜单「显示 → 宽高比」里作为当前值提示）
 const aspectRatioLabel = computed(() => {
   if (imageAspectRatio.value === 'landscape') return store.locales == 'zh' ? '横屏' : 'Landscape'
   if (imageAspectRatio.value === 'portrait') return store.locales == 'zh' ? '竖屏' : 'Portrait'
   return store.locales == 'zh' ? '方形' : 'Square'
 })
 
-// 循环切换宽高比（方形 → 横屏 → 竖屏）
-const cycleAspectRatio = function () {
-  const order = ['square', 'landscape', 'portrait']
-  const i = order.indexOf(imageAspectRatio.value)
-  imageAspectRatio.value = order[(i + 1) % order.length] as 'square' | 'landscape' | 'portrait'
+// 设置宽高比（右键菜单「显示 → 宽高比」：方形 / 横屏 / 竖屏）
+const setAspectRatio = function (value: 'square' | 'landscape' | 'portrait') {
+  imageAspectRatio.value = value
 }
 
 // Ctrl+滚轮连续缩放图标大小：最小时为列表视图，向上滚动逐级放大（无级调节）
-const ICON_SCALE_MIN = 56
-const ICON_SCALE_MAX = 220
 const onContainerWheel = function (e: WheelEvent) {
   if (!e.ctrlKey && !e.metaKey) return
   e.preventDefault()
@@ -934,49 +1106,26 @@ const createNewFolder = async function () {
   } catch { /* 用户取消 */ }
 }
 
-// 新建 Markdown 文件
-const createNewMd = async function () {
+// 新建文件（类型见 lib/knowFile/newFileTypes.ts，与文件树右键「新建」同一份列表）
+const createNewFile = async function (key: NewFileTypeKey) {
+  const def = newFileType(key) || NEW_FILE_TYPES[0]
+  const zh = store.locales == 'zh'
   try {
-    const { value } = await ElMessageBox.prompt(store.locales == 'zh' ? '请输入文件名:' : 'Enter file name:', store.locales == 'zh' ? '新建 Markdown 文件' : 'New Markdown File', {
-      confirmButtonText: store.locales == 'zh' ? '确定' : 'OK',
-      cancelButtonText: store.locales == 'zh' ? '取消' : 'Cancel',
+    const { value } = await ElMessageBox.prompt(zh ? '请输入文件名:' : 'Enter file name:', zh ? `新建 ${def.labelZh}` : `New ${def.labelEn}`, {
+      confirmButtonText: zh ? '确定' : 'OK',
+      cancelButtonText: zh ? '取消' : 'Cancel',
       inputPattern: /.+/,
-      inputErrorMessage: store.locales == 'zh' ? '名称不能为空' : 'Name cannot be empty'
+      inputErrorMessage: zh ? '名称不能为空' : 'Name cannot be empty'
     })
-    const path = await window.ipcRenderer.invoke('createFile', store.path || store.root, value.trim() + '.md')
-    if (path) { await getData() }
-  } catch { /* 用户取消 */ }
-}
-
-// 新建 Excalidraw 文件
-const createNewExcalidraw = async function () {
-  try {
-    const { value } = await ElMessageBox.prompt(store.locales == 'zh' ? '请输入文件名:' : 'Enter file name:', store.locales == 'zh' ? '新建 Excalidraw 文件' : 'New Excalidraw File', {
-      confirmButtonText: store.locales == 'zh' ? '确定' : 'OK',
-      cancelButtonText: store.locales == 'zh' ? '取消' : 'Cancel',
-      inputPattern: /.+/,
-      inputErrorMessage: store.locales == 'zh' ? '名称不能为空' : 'Name cannot be empty'
-    })
-    const path = await window.ipcRenderer.invoke('createFile', store.path || store.root, value.trim() + '.excalidraw')
-    if (path) { await getData() }
-  } catch { /* 用户取消 */ }
-}
-
-// 新建 draw.io 图表文件
-const createNewDrawio = async function () {
-  try {
-    const { value } = await ElMessageBox.prompt(store.locales == 'zh' ? '请输入文件名:' : 'Enter file name:', store.locales == 'zh' ? '新建 draw.io 图表' : 'New draw.io Diagram', {
-      confirmButtonText: store.locales == 'zh' ? '确定' : 'OK',
-      cancelButtonText: store.locales == 'zh' ? '取消' : 'Cancel',
-      inputPattern: /.+/,
-      inputErrorMessage: store.locales == 'zh' ? '名称不能为空' : 'Name cannot be empty'
-    })
-    const path = await window.ipcRenderer.invoke('createFile', store.path || store.root, value.trim() + '.drawio')
-    // 写入空白图表框架，避免留下 0 字节文件
-    if (path) {
-      try { await window.ipcRenderer.invoke('saveFile', path, newDrawioXml()) } catch { /* ignore */ }
-      await getData()
+    const path = await window.ipcRenderer.invoke('createFile', store.path || store.root, value.trim() + def.ext)
+    if (!path) return
+    // 需要初始内容的类型先写入（draw.io 空白图表框架 / 脚手架空任务骨架），避免留下 0 字节文件
+    if (def.skeleton) {
+      try { await window.ipcRenderer.invoke('saveFile', path, def.skeleton()) } catch { /* ignore */ }
     }
+    await getData()
+    // 脚手架任务：建好就进独立窗口的「脚手架」视图（与文件树右键「新建」一致，一步到位）
+    if (key === 'task') store.openFileByMode({ path, type: 'file', extension: def.ext })
   } catch { /* 用户取消 */ }
 }
 
@@ -1007,21 +1156,36 @@ watch(() => store.root, () => {
   getData()
 })
 
-// 外部修改路径（如打开文件后）时，导航历史重置到当前位置
-watch(() => store.path, (nv) => {
-  if (navStack.value[navIndex.value] !== nv) {
-    navStack.value = [nv]
-    navIndex.value = 0
-  }
+// 外部修改路径（如打开文件后）时刷新列表；导航历史由工具栏同步（store.knowSyncNav）
+watch(() => store.path, () => {
   getData()
 })
 
+// 顶部工具栏的「刷新」：重新拉取当前目录
+watch(() => store.knowRefreshTick, () => {
+  void getData()
+})
+
+// 列表内容 / 视图模式变化后，重新登记需要生成封面的音视频条目（懒加载）
+watch([filteredFiles, viewMode], () => {
+  nextTick(refreshMediaCovers)
+})
+
+// 文件系统变更订阅的解绑函数（全局单例：ipcRenderer 上永远只有 1 个监听）
+let disposeFileWatch: (() => void) | null = null
+let watchAcquired = false
+
 onMounted(() => {
   getData()
-  
-  // 监听文件系统变化
-  window.ipcRenderer.on('fileSystemChanged', handleFileSystemChange)
-  
+
+  // 监听文件系统变化（去抖由 fileWatch 统一处理）
+  disposeFileWatch = onFileSystemChanged(() => { void getData() })
+  // 目录监听按租约参与：与左侧文件树共享，任一文件界面可见就保持监听
+  if (store.roots?.length) {
+    watchAcquired = true
+    void acquireFileWatch([...store.roots])
+  }
+
   // 点击其他地方关闭菜单
   document.addEventListener('click', handleDocumentClick)
 
@@ -1030,43 +1194,31 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  // 移除事件监听
-  window.ipcRenderer.off('fileSystemChanged', handleFileSystemChange)
+  // 取消订阅（唯一监听本身不解绑）
+  disposeFileWatch?.()
+  disposeFileWatch = null
   document.removeEventListener('click', handleDocumentClick)
   document.removeEventListener('mouseover', handleSubmenuOverflow)
-  
-  // 清理定时器
-  if (fileChangeTimer) {
-    clearTimeout(fileChangeTimer)
-    fileChangeTimer = null
+  // 释放目录监听租约（最后一个消费者释放后宽限 3s 才真正 stopWatching）
+  if (watchAcquired) {
+    watchAcquired = false
+    releaseFileWatch()
   }
+  // 停止封面懒加载并释放 blob URL
+  coverObserver?.disconnect()
+  coverObserver = null
+  coverQueue.length = 0
+  for (const url of coverObjectUrls) URL.revokeObjectURL(url)
+  coverObjectUrls.clear()
 })
 </script>
 
 <template>
   <div class="file-viewer">
-    <!-- 工具栏：后退/前进/向上/刷新 + 面包屑 -->
-    <div class="file-toolbar">
-      <div class="file-nav-btns">
-        <button class="toolbar-btn" :disabled="!canBack" @click="goBack" :title="store.locales=='zh'?'后退 (Alt+←)':'Back (Alt+←)'"><i class="fa fa-arrow-left"></i></button>
-        <button class="toolbar-btn" :disabled="!canForward" @click="goForward" :title="store.locales=='zh'?'前进 (Alt+→)':'Forward (Alt+→)'"><i class="fa fa-arrow-right"></i></button>
-        <button class="toolbar-btn" :disabled="!canUp" @click="goUp" :title="store.locales=='zh'?'向上 (Backspace)':'Up (Backspace)'"><i class="fa fa-arrow-up"></i></button>
-        <button class="toolbar-btn" @click="refresh" :title="store.locales=='zh'?'刷新 (Ctrl+R)':'Refresh (Ctrl+R)'"><i class="fa fa-refresh"></i></button>
-      </div>
-      <div class="file-breadcrumb" :title="store.path || store.root">
-        <template v-for="(c, i) in crumbs" :key="c.path">
-          <span class="crumb" :class="{ active: i === crumbs.length - 1 }" @click="enterDir(c.path)">{{ c.label }}</span>
-          <i v-if="i < crumbs.length - 1" class="fa fa-chevron-right crumb-sep"></i>
-        </template>
-      </div>
-      <div class="file-search" @click.stop :title="store.locales=='zh'?'搜索当前目录文件':'Search current folder'">
-        <i class="fa fa-search"></i>
-        <input v-model="searchText" class="file-search-input" :placeholder="store.locales=='zh'?'搜索文件…':'Search…'" @keydown.stop @keyup.esc="searchText=''" />
-      </div>
-    </div>
+    <!-- 顶部工具栏（路径面包屑 + 搜索）由 explorer.vue 统一渲染一条，见 ViewToolbar.vue -->
 
     <!-- 文件列表区域 -->
-    <div class="files-container scoll" :class="[viewMode, imageAspectRatio]" tabindex="0" @mousedown="onContainerMouseDown" @dragover.prevent @drop="onContainerDrop" @contextmenu.prevent="showViewContextMenu" @keydown="containerKeydown" @click="focusContainer" @wheel="onContainerWheel">
+    <div ref="filesContainerRef" class="files-container scoll" :class="[viewMode, imageAspectRatio]" tabindex="0" @mousedown="onContainerMouseDown" @dragover.prevent @drop="onContainerDrop" @contextmenu.prevent="showViewContextMenu" @keydown="containerKeydown" @click="focusContainer" @wheel="onContainerWheel">
       <!-- 鼠标框选矩形（视口定位，不拦截事件） -->
       <div v-if="marqueeVisible" class="marquee-select" :style="{ left: marqueeRect.left + 'px', top: marqueeRect.top + 'px', width: marqueeRect.width + 'px', height: marqueeRect.height + 'px' }"></div>
       <!-- 网格视图 -->
@@ -1087,12 +1239,19 @@ onBeforeUnmount(() => {
             borderColor: color(item),
 
           }">
-            <i v-if="!isImageFile(item)" :class="item.executable ? 'fa fa-cogs' : store.icon(item.extension)" :style="{ 
-              fontSize: getImageContainerStyle().iconFontSize 
-            }"></i>
-            <div v-if="isImageFile(item)" class="img">
-              <img :src="getAddress(item)" loading="lazy" draggable="false" />
+            <!-- 音视频：滚动到可见时才生成封面（音频 ID3 / 视频首帧），生成前/无封面时回退文件图标 -->
+            <div v-if="isMediaFile(item)" class="img media-thumb" :data-cover-path="item.path">
+              <img v-if="mediaCovers[item.path]" :src="mediaCovers[item.path]" draggable="false" />
+              <i v-else :class="store.icon(item.extension)" :style="{ fontSize: getImageContainerStyle().iconFontSize }"></i>
             </div>
+            <template v-else>
+              <i v-if="!isImageFile(item)" :class="item.executable ? 'fa fa-cogs' : store.icon(item.extension)" :style="{ 
+                fontSize: getImageContainerStyle().iconFontSize 
+              }"></i>
+              <div v-if="isImageFile(item)" class="img">
+                <img :src="getAddress(item)" loading="lazy" draggable="false" />
+              </div>
+            </template>
           </div>
           <!-- 文件名显示 -->
           <div v-if="showFileName" class="file-title" :style="{
@@ -1117,10 +1276,16 @@ onBeforeUnmount(() => {
              @click="onItemClick($event, item, index)" @dblclick="onItemDblClick(item)" @contextmenu="nodeContextmenu($event, item)" 
              @mousemove="showTooltip($event, item)" @mouseleave="hideTooltip">
           <div class="list-icon" :style="{ color: color(item) }">
-            <i v-if="!isImageFile(item)" :class="item.executable ? 'fa fa-cogs' : store.icon(item.extension)"></i>
-            <div v-if="isImageFile(item)" class="list-img">
-              <img :src="getAddress(item)" loading="lazy" draggable="false" />
+            <div v-if="isMediaFile(item)" class="list-img media-thumb" :data-cover-path="item.path">
+              <img v-if="mediaCovers[item.path]" :src="mediaCovers[item.path]" draggable="false" />
+              <i v-else :class="store.icon(item.extension)"></i>
             </div>
+            <template v-else>
+              <i v-if="!isImageFile(item)" :class="item.executable ? 'fa fa-cogs' : store.icon(item.extension)"></i>
+              <div v-if="isImageFile(item)" class="list-img">
+                <img :src="getAddress(item)" loading="lazy" draggable="false" />
+              </div>
+            </template>
           </div>
           <span class="list-col-name" v-html="highlightName(item.label)"></span>
           <span class="list-col-time">{{ formatTime(item.mtime) }}</span>
@@ -1135,18 +1300,24 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 状态栏：选中数 / 当前视图 / 文件名开关 / 宽高比 / 总文件数（右下角） -->
+    <!-- 状态栏：选中数 / 当前视图 / 属性筛选 / 总文件数（右下角）；文件名与宽高比在右键菜单的「显示」里 -->
     <div class="file-statusbar">
       <span v-if="selectedPaths.length" class="status-selected">
         <i class="fa fa-check-square-o"></i> {{ store.locales=='zh' ? ('已选 ' + selectedPaths.length + ' 项') : (selectedPaths.length + ' selected') }}
       </span>
       <span class="statusbar-item statusbar-mode" :title="store.locales=='zh'?'当前视图，Ctrl+滚轮切换大小':'View mode, Ctrl+wheel to resize'"><i class="fa fa-th-large"></i> {{ viewModeLabel }}</span>
-      <button class="statusbar-btn" :class="{ active: showFileName }" @click="toggleFileName" :title="store.locales=='zh'?'显示文件名':'Show file names'">
-        <i class="fa fa-i-cursor"></i>&nbsp;{{ store.locales=='zh'?'文件名':'File Names' }}
-      </button>
-      <button class="statusbar-btn" @click="cycleAspectRatio" :title="store.locales=='zh'?'宽高比，点击切换':'Aspect ratio, click to switch'">
-        <i class="fa fa-picture-o"></i>&nbsp;{{ aspectRatioLabel }}
-      </button>
+      <span class="statusbar-sep"></span>
+      <span class="statusbar-item" :title="store.locales=='zh'?'按 YAML 属性筛选（如状态）':'Filter by YAML attribute'"><i class="fa fa-filter"></i> {{ store.locales=='zh'?'筛选':'Filter' }}</span>
+      <select class="statusbar-select" v-model="attrFilterKey" :title="store.locales=='zh'?'属性名（含状态）':'Attribute (incl. status)'">
+        <option value="">{{ store.locales=='zh'?'全部属性':'All attributes' }}</option>
+        <option v-for="k in attributeKeys" :key="k" :value="k">{{ k }}</option>
+      </select>
+      <select v-if="attrFilterKey" class="statusbar-select" v-model="attrFilterValue" :title="store.locales=='zh'?'属性值':'Attribute value'">
+        <option value="">{{ store.locales=='zh'?'全部值':'All values' }}</option>
+        <option v-for="v in attributeValues" :key="v" :value="v">{{ v }}</option>
+        <option :value="NONE_VALUE">{{ store.locales=='zh'?'（未设置）':'(unset)' }}</option>
+      </select>
+      <button v-if="attrFilterKey" class="statusbar-btn" @click="clearAttrFilter" :title="store.locales=='zh'?'清除筛选':'Clear filter'"><i class="fa fa-times"></i></button>
       <span class="statusbar-item statusbar-count" :title="store.locales=='zh'?'当前目录文件数':'File count'"><i class="fa fa-file-o"></i> {{ filteredFiles.length }} {{ store.locales=='zh'?'项':'items' }}</span>
     </div>
 
@@ -1181,6 +1352,49 @@ onBeforeUnmount(() => {
       <div class="menu-item" v-if="clipboardFiles" @click="pasteFiles(); ifMenu = false">
         <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
       </div>
+      <!-- 排序（二级菜单，与左侧文件树 panel.vue 一致：再次点击同一项切换升降序） -->
+      <div class="menu-divider"></div>
+      <div class="menu-item has-submenu">
+        <i class="fa fa-sort"></i>
+        <span style="flex:1">{{ store.locales=='zh'?'排序':'Sort' }}</span>
+        <ul class="submenu">
+          <li v-for="s in FILE_SORT_ITEMS" :key="s.key" @click="setSort(s.key); ifMenu = false">
+            <i :class="sortKey==s.key ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+            <span style="flex:1">{{ store.locales=='zh' ? s.labelZh : s.labelEn }}</span>
+            <i v-if="sortKey==s.key" :class="sortDir=='asc' ? 'fa fa-sort-amount-asc' : 'fa fa-sort-amount-desc'" style="font-size:10px;width:auto"></i>
+          </li>
+        </ul>
+      </div>
+      <!-- 显示（二级菜单）：文件名开关 / 宽高比 -->
+      <div class="menu-item has-submenu">
+        <i class="fa fa-eye"></i>
+        <span style="flex:1">{{ store.locales=='zh'?'显示':'Display' }}</span>
+        <ul class="submenu">
+          <li @click="toggleFileName(); ifMenu = false">
+            <i :class="showFileName ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+            <span style="flex:1">{{ store.locales=='zh'?'文件名':'File Names' }}</span>
+          </li>
+          <li class="has-submenu">
+            <i class="fa fa-picture-o"></i>
+            <span style="flex:1">{{ store.locales=='zh'?'宽高比':'Aspect Ratio' }}</span>
+            <span style="opacity:.6;font-size:10px">{{ aspectRatioLabel }}</span>
+            <ul class="submenu">
+              <li @click="setAspectRatio('square'); ifMenu = false">
+                <i :class="imageAspectRatio=='square' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+                <span style="flex:1">{{ store.locales=='zh'?'方形':'Square' }}</span>
+              </li>
+              <li @click="setAspectRatio('landscape'); ifMenu = false">
+                <i :class="imageAspectRatio=='landscape' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+                <span style="flex:1">{{ store.locales=='zh'?'横屏':'Landscape' }}</span>
+              </li>
+              <li @click="setAspectRatio('portrait'); ifMenu = false">
+                <i :class="imageAspectRatio=='portrait' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+                <span style="flex:1">{{ store.locales=='zh'?'竖屏':'Portrait' }}</span>
+              </li>
+            </ul>
+          </li>
+        </ul>
+      </div>
     </div>
 
     <div v-if="showViewMenu" class="context-menu" :style="{ left: viewMenuPos.x + 'px', top: viewMenuPos.y + 'px' }" @mouseleave="hideViewMenu">
@@ -1190,7 +1404,7 @@ onBeforeUnmount(() => {
         <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
       </div>
       <div class="menu-divider" v-if="clipboardFiles"></div>
-      <!-- 新建（二级菜单）：文件夹 / Markdown / Excalidraw -->
+      <!-- 新建（二级菜单）：文件夹 / Markdown / Excalidraw / 工作流 -->
       <div class="menu-item has-submenu">
         <i class="fa fa-plus-circle"></i>
         <span style="flex:1">{{ store.locales=='zh'?'新建':'New' }}</span>
@@ -1198,14 +1412,51 @@ onBeforeUnmount(() => {
           <li @click="createNewFolder(); hideViewMenu()">
             <i class="fa fa-folder"></i> {{ store.locales=='zh'?'文件夹':'Folder' }}
           </li>
-          <li @click="createNewMd(); hideViewMenu()">
-            <i class="fa fa-file-text-o"></i> Markdown
+          <li v-for="t in NEW_FILE_TYPES" :key="t.key" @click="createNewFile(t.key); hideViewMenu()">
+            <i :class="t.icon"></i> {{ store.locales=='zh' ? t.labelZh : t.labelEn }}
           </li>
-          <li @click="createNewExcalidraw(); hideViewMenu()">
-            <i class="fa fa-paint-brush"></i> Excalidraw
+        </ul>
+      </div>
+      <div class="menu-divider"></div>
+      <!-- 排序（二级菜单，与左侧文件树 panel.vue 一致：再次点击同一项切换升降序） -->
+      <div class="menu-item has-submenu">
+        <i class="fa fa-sort"></i>
+        <span style="flex:1">{{ store.locales=='zh'?'排序':'Sort' }}</span>
+        <ul class="submenu">
+          <li v-for="s in FILE_SORT_ITEMS" :key="s.key" @click="setSort(s.key); hideViewMenu()">
+            <i :class="sortKey==s.key ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+            <span style="flex:1">{{ store.locales=='zh' ? s.labelZh : s.labelEn }}</span>
+            <i v-if="sortKey==s.key" :class="sortDir=='asc' ? 'fa fa-sort-amount-asc' : 'fa fa-sort-amount-desc'" style="font-size:10px;width:auto"></i>
           </li>
-          <li @click="createNewDrawio(); hideViewMenu()">
-            <i class="fa fa-object-group"></i> draw.io
+        </ul>
+      </div>
+      <!-- 显示（二级菜单）：文件名开关 / 宽高比 -->
+      <div class="menu-item has-submenu">
+        <i class="fa fa-eye"></i>
+        <span style="flex:1">{{ store.locales=='zh'?'显示':'Display' }}</span>
+        <ul class="submenu">
+          <li @click="toggleFileName(); hideViewMenu()">
+            <i :class="showFileName ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+            <span style="flex:1">{{ store.locales=='zh'?'文件名':'File Names' }}</span>
+          </li>
+          <li class="has-submenu">
+            <i class="fa fa-picture-o"></i>
+            <span style="flex:1">{{ store.locales=='zh'?'宽高比':'Aspect Ratio' }}</span>
+            <span style="opacity:.6;font-size:10px">{{ aspectRatioLabel }}</span>
+            <ul class="submenu">
+              <li @click="setAspectRatio('square'); hideViewMenu()">
+                <i :class="imageAspectRatio=='square' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+                <span style="flex:1">{{ store.locales=='zh'?'方形':'Square' }}</span>
+              </li>
+              <li @click="setAspectRatio('landscape'); hideViewMenu()">
+                <i :class="imageAspectRatio=='landscape' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+                <span style="flex:1">{{ store.locales=='zh'?'横屏':'Landscape' }}</span>
+              </li>
+              <li @click="setAspectRatio('portrait'); hideViewMenu()">
+                <i :class="imageAspectRatio=='portrait' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+                <span style="flex:1">{{ store.locales=='zh'?'竖屏':'Portrait' }}</span>
+              </li>
+            </ul>
           </li>
         </ul>
       </div>
@@ -1274,6 +1525,13 @@ onBeforeUnmount(() => {
 .files-grid .img {
   width: 100%;
   height: 100%;
+}
+
+/* 媒体封面（音频/视频）：回退图标在容器内居中 */
+.files-grid .img.media-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .files-grid .img img {
@@ -1357,6 +1615,13 @@ onBeforeUnmount(() => {
   height: 28px;
 }
 
+/* 媒体封面（音频/视频）：回退图标在容器内居中 */
+.files-list .list-img.media-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .files-list .list-img img {
   width: 100%;
   height: 100%;
@@ -1418,61 +1683,7 @@ onBeforeUnmount(() => {
   flex: none;
 }
 
-/* ---- 工具栏与面包屑 ---- */
-.file-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
-  border-bottom: 1px solid var(--borderColor);
-  background: var(--menuColor);
-  flex-shrink: 0;
-  user-select: none;
-}
-.file-nav-btns {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-}
-.toolbar-btn {
-  width: 26px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--fontColor);
-  cursor: pointer;
-  font-size: 13px;
-  transition: background 0.15s;
-}
-.toolbar-btn:hover:not(:disabled) { background: var(--menuActiveColor); }
-.toolbar-btn:disabled { opacity: 0.35; cursor: default; }
-.file-breadcrumb {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  overflow-x: auto;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--fontColor);
-  scrollbar-width: none;
-}
-.file-breadcrumb::-webkit-scrollbar { height: 0; }
-.crumb {
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 3px;
-  color: var(--fontColor);
-  opacity: 0.85;
-  flex-shrink: 0;
-}
-.crumb:hover { background: var(--menuActiveColor); opacity: 1; }
-.crumb.active { opacity: 1; font-weight: 600; cursor: default; }
-.crumb-sep { font-size: 9px; opacity: 0.5; margin: 0 1px; flex-shrink: 0; }
+/* ---- 工具栏与面包屑：见 ViewToolbar.vue（各全局视图共用，样式只维护一份） ---- */
 
 /* ---- 选中态 ---- */
 .files-grid .file-item.selected .file-content {
@@ -1486,39 +1697,7 @@ onBeforeUnmount(() => {
 }
 .files-container:focus { outline: none; }
 
-/* ---- 搜索框与匹配高亮 ---- */
-.file-search {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  padding: 0 6px;
-  height: 26px; /* 与 toolbar-btn 同高，不撑高工具栏 */
-  box-sizing: border-box;
-  border: 1px solid var(--borderColor);
-  border-radius: 4px;
-  background: var(--backgroundColor);
-  color: var(--fontColor);
-}
-.file-search i { font-size: 12px; opacity: 0.6; }
-.file-search-input {
-  width: 110px;
-  height: 100%;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--fontColor);
-  font-size: 12px;
-  padding: 0;
-}
-.file-search-input::placeholder { color: var(--borderColor); }
-
-/* 工具栏内搜索框：靠右显示 */
-.file-toolbar .file-search {
-  margin-left: 8px;
-  background: var(--menuColor);
-}
-.file-toolbar .file-search .file-search-input { width: 140px; }
+/* ---- 搜索匹配高亮（搜索框本身在 ViewToolbar.vue） ---- */
 .file-title mark,
 .list-col-name mark {
   background: color-mix(in srgb, var(--fontActiveColor) 45%, transparent);
@@ -1537,7 +1716,7 @@ onBeforeUnmount(() => {
 .file-statusbar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   padding: 3px 8px;
   border-top: 1px solid var(--borderColor);
   background: var(--menuColor);
@@ -1545,6 +1724,33 @@ onBeforeUnmount(() => {
   color: var(--fontColor);
   flex-shrink: 0;
   user-select: none;
+  overflow: hidden;
+}
+.file-statusbar .statusbar-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--borderColor);
+  flex-shrink: 0;
+}
+.file-statusbar .statusbar-select {
+  height: 18px;
+  border: 1px solid var(--borderColor);
+  border-radius: 3px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  padding: 0 4px;
+  width: auto;
+  min-width: 64px;
+  max-width: 130px;
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0px;
+}
+.file-statusbar .statusbar-select option {
+  background: var(--menuColor);
+  color: var(--fontColor);
 }
 .file-statusbar i { font-size: 11px; }
 .file-statusbar .statusbar-item {

@@ -17,6 +17,46 @@ import '@/assets/kb-view.css'
 // If you want use Node.js, the`nodeIntegration` needs to be enabled in the Main process.
 // import '@/demos/node'
 
+// ---------------------------------------------------------------------------
+// 剪贴板兼容：局域网共享的网页端常以 http://192.168.x.x:3345 打开，
+// 属于**非安全上下文**（非 https / 非 localhost），浏览器不提供 navigator.clipboard，
+// 于是所有「复制」按钮都会抛 `Cannot read properties of undefined (reading 'writeText')`。
+// 这里补一个基于 execCommand 的实现，位置透明，各组件无需改动。
+// ---------------------------------------------------------------------------
+if (typeof navigator !== 'undefined' && !navigator.clipboard?.writeText) {
+  const fallbackWrite = (text: string): boolean => {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = String(text ?? '')
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'fixed'
+      ta.style.top = '-1000px'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      ta.setSelectionRange(0, ta.value.length)
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      return ok
+    } catch {
+      return false
+    }
+  }
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          if (!fallbackWrite(text)) throw new Error('clipboard unavailable')
+        },
+        readText: async () => '',
+      },
+    })
+  } catch (e) {
+    console.warn('[clipboard] 兼容实现注入失败（复制按钮在 http 局域网页可能不可用）:', e)
+  }
+}
+
 createApp(App)
   .use(pinia)
   .component(ElTree.name!, ElTree)

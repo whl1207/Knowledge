@@ -13,6 +13,12 @@ import LlmTestRow from './LlmTestRow.vue'
 const store = usestore()
 const zh = () => store.locales === 'zh'
 
+/** 只渲染哪一块：sources=来源（默认）/ embed=嵌入（嵌入兜底）；省略时两块都渲染（兼容旧调用） */
+const props = defineProps<{ section?: 'sources' | 'embed' | '' }>()
+const sec = computed(() => props.section || '')
+const showSources = computed(() => !sec.value || sec.value === 'sources')
+const showEmbed = computed(() => !sec.value || sec.value === 'embed')
+
 // ================ 模型来源列表（左侧：搜索 + 9 种内置来源 + 自定义来源） ================
 
 interface LlmSourceDef { key: string; icon: string; labelZh: string; labelEn: string; descZh: string; descEn: string }
@@ -245,12 +251,38 @@ const filteredLlmSources = computed(() => {
 })
 
 const llmSourceActive = (key: string): boolean => store.AIconfig.llm.type === key
-/** 选择来源：切换类型并持久化，延迟刷新该来源的模型列表（DeepSeek 单来源：接口样式在配置块内切换） */
-const selectLlmSource = (key: string) => {
-  store.AIconfig.llm.type = key
-  applyUseCredFromConfig()
-  cancelRename()
+
+/** 来源显示名（页头「正在查看」用） */
+const llmSourceLabel = (key: string): string => {
+  if (key === 'custom') return zh() ? '自定义来源' : 'Custom source'
+  const s = llmSources.find(x => x.key === key)
+  return s ? (zh() ? s.labelZh : s.labelEn) : key
+}
+
+// ================ 正在查看的来源 ⇄ 默认来源（解耦） ================
+// 旧行为：点左侧列表或自定义来源即改 `llm.type`，等于「看一下就换默认」（home / RAG / 工作流立刻跟着变）。
+// 现行为：点击只切换右侧查看/编辑的来源（viewType），默认只在点「设为默认」时变更。
+const viewType = ref<string>(store.AIconfig.llm.type)
+/** 正在查看的就是默认来源 */
+const isViewingDefault = computed(() => store.AIconfig.llm.type === viewType.value)
+/** 是否正在查看该来源 */
+const llmSourceViewing = (key: string): boolean => viewType.value === key
+/** 把当前查看的来源设为默认（真正影响 home / RAG / 工作流使用哪个来源） */
+const setViewAsDefault = () => {
+  if (isViewingDefault.value) return
+  store.AIconfig.llm.type = viewType.value
+  applyUseCredFromConfig(viewType.value)
   store.saveConfig()
+  ElMessage.success(zh()
+    ? `已把「${llmSourceLabel(viewType.value)}」设为默认来源`
+    : `“${llmSourceLabel(viewType.value)}” is now the default source`)
+}
+
+/** 选择来源：只切换右侧查看/编辑的来源，不改默认（默认由「设为默认」按钮切换） */
+const selectLlmSource = (key: string) => {
+  viewType.value = key
+  applyUseCredFromConfig(key)
+  cancelRename()
   setTimeout(async () => {
     if (key === 'ollama') await refreshOllamaModels()
     else if (key === 'lmstudio') await refreshLMStudioModels()
@@ -268,7 +300,7 @@ const customSourceStatusOf = (id: number): 'online' | 'offline' | 'untested' =>
 // ================ 当前来源的帮助文本 ================
 
 const getCurrentConfigHelp = computed(() => {
-  const type = store.AIconfig.llm.type
+  const type = viewType.value
   switch (type) {
     case 'ollama':
       return zh() ? 'Ollama是本地运行的AI模型服务。请确保Ollama服务已启动。' : 'Ollama is a local AI model service. Make sure Ollama service is running.'
@@ -523,7 +555,7 @@ const lmUnloadModel = async (id: string) => {
   }
 }
 // 切到本地来源时自动读一次加载状态（挂载 / 改地址 / 点「API 状态」已由 refresh*Models 覆盖）
-watch(() => store.AIconfig.llm.type, (t) => {
+watch(viewType, (t) => {
   if (t === 'lmstudio') void refreshLmModelStates()
   else if (t === 'ollama') void refreshOlModelStates()
 })
@@ -713,8 +745,7 @@ const toggleUseCred = (v: boolean) => !v
 
 /** 根据当前来源的实际配置自动初始化显示模式（仅在选择来源/挂载时调用，之后仍可手动切换）：
  *  有凭据引用(apiKeyRef) → 显示凭据；否则 → 显示 API 密钥 */
-const applyUseCredFromConfig = () => {
-  const type = store.AIconfig.llm.type
+const applyUseCredFromConfig = (type = store.AIconfig.llm.type) => {
   const hasRef = (ref?: string) => !!(ref || '').trim()
   lmstudioUseCred.value = type === 'lmstudio' ? hasRef(store.AIconfig.llm.lmstudio.apiKeyRef) : false
   openaiUseCred.value = type === 'openai' ? hasRef(store.AIconfig.llm.openai.apiKeyRef) : false
@@ -735,7 +766,7 @@ const handleDeepseekModelChange = () => { store.saveConfig() }
 // 说明：DeepSeek 是**单一来源**（llm.type='deepseek'），接口样式由 llm.deepseek.api_style 决定
 // （'chat' 默认 / 'responses'）。历史来源键 'deepseek-responses' 已合并，不再出现在任何来源列表；
 // llm.deepseekResponses 只是「Responses 样式的凭据/模型记忆块」，切换样式时与 deepseek 互相同步密钥与地址。
-const isDeepSeekSource = computed(() => store.AIconfig.llm.type === 'deepseek')
+const isDeepSeekSource = computed(() => viewType.value === 'deepseek')
 /** 当前接口样式（chat=Chat Completions，responses=Responses API）：直接读写 llm.deepseek.api_style */
 const dsStyle = computed<'chat' | 'responses'>({
   get: () => deepSeekApiStyle(store.AIconfig.llm),
@@ -1141,16 +1172,20 @@ onMounted(() => {
   } else if (fbSetting.llmType && !EMBED_FALLBACK_KEYS.includes(fbSetting.llmType)) {
     fbSetting.llmType = 'ollama'
   }
-  store.testAllLlmSources()
-  // 嵌入兜底：首次进入且尚无候选时自动拉一次（testAllLlmSources 通常已填充，这里只做兜底）
-  if (store.AIconfig.llm.embeddingFallback?.llmType && embedFallbackModels.value.length === 0) {
-    refreshEmbedFallbackModels()
-  } else if (store.AIconfig.llm.embeddingFallback?.llmType) {
-    // 已配置兜底来源：补拉一次嵌入模型名单（用于过滤「兜底嵌入模型」下拉）
-    void fetchEmbedFallbackEmbedNames(embedFallbackKey.value)
+  // 仅在「来源」页做连接测试与模型列表刷新（嵌入页不需要，避免无谓请求）
+  if (showSources.value) {
+    store.testAllLlmSources()
+    // 嵌入兜底：首次进入且尚无候选时自动拉一次（testAllLlmSources 通常已填充，这里只做兜底）
+    if (store.AIconfig.llm.embeddingFallback?.llmType && embedFallbackModels.value.length === 0) {
+      refreshEmbedFallbackModels()
+    } else if (store.AIconfig.llm.embeddingFallback?.llmType) {
+      // 已配置兜底来源：补拉一次嵌入模型名单（用于过滤「兜底嵌入模型」下拉）
+      void fetchEmbedFallbackEmbedNames(embedFallbackKey.value)
+    }
   }
   window.addEventListener('beforeunload', flushCustomSave)
   setTimeout(async () => {
+    if (!showSources.value) return
     // 以「存档中的类型」决定是否自动刷新，避免内存 type 与存档不一致（如应为 custom 却显示 ollama）时
     // 误调用 ollama 刷新并把 ollama 写回存档
     let savedType = ''
@@ -1158,7 +1193,7 @@ onMounted(() => {
       const s = localStorage.getItem('AIconfig')
       if (s) savedType = (JSON.parse(s)?.llm?.type) || ''
     } catch { /* 存档解析失败则回退内存类型 */ }
-    const effType = savedType || store.AIconfig.llm.type
+    const effType = savedType || viewType.value
     if (effType === 'ollama') await refreshOllamaModels()
     else if (effType === 'lmstudio') await refreshLMStudioModels()
   }, 100)
@@ -1166,9 +1201,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="llm-settings">
+  <div class="llm-settings" :class="{ 'llm-embed-only': !showSources }">
     <!-- ====== 左侧：模型来源列表 ====== -->
-    <div class="llm-sidebar">
+    <div v-if="showSources" class="llm-sidebar">
       <div class="llm-toolbar">
         <div class="notes-search-box">
           <i class="fa fa-search"></i>
@@ -1194,7 +1229,7 @@ onMounted(() => {
           v-for="s in filteredLlmSources"
           :key="s.key"
           class="llm-source-item"
-          :class="{ active: llmSourceActive(s.key), disabled: store.isLlmSourceDisabled(s.key) }"
+          :class="{ active: llmSourceViewing(s.key), 'is-default': llmSourceActive(s.key), disabled: store.isLlmSourceDisabled(s.key) }"
           @click="selectLlmSource(s.key)"
           :title="zh() ? s.descZh : s.descEn"
         >
@@ -1203,6 +1238,7 @@ onMounted(() => {
             <span class="llm-source-name">{{ zh() ? s.labelZh : s.labelEn }}</span>
             <span class="llm-source-desc">{{ zh() ? s.descZh : s.descEn }}</span>
           </div>
+          <span v-if="llmSourceActive(s.key)" class="llm-source-default" :title="zh() ? '默认来源：主页 / 知识库 / 工作流默认用它' : 'Default source: used by home / KB / workflow by default'">{{ zh() ? '默认' : 'Default' }}</span>
           <span class="llm-source-status" :class="llmSourceStatus(s.key)">
             <i class="fa" :class="llmSourceStatus(s.key) === 'online' ? 'fa-check-circle' : llmSourceStatus(s.key) === 'offline' ? 'fa-times-circle' : 'fa-circle-thin'"></i>
           </span>
@@ -1237,6 +1273,7 @@ onMounted(() => {
                 <span class="llm-source-desc">{{ zh() ? '自定义 API' : 'Custom API' }}</span>
               </template>
             </div>
+            <span v-if="customActive(cs.index)" class="llm-source-default" :title="zh() ? '默认来源：主页 / 知识库 / 工作流默认用它' : 'Default source: used by home / KB / workflow by default'">{{ zh() ? '默认' : 'Default' }}</span>
             <div class="llm-source-actions" @click.stop>
               <i class="fa fa-trash-o" @click="removeCustomSource(cs.index)"
                 :title="zh() ? '删除' : 'Delete'"></i>
@@ -1253,18 +1290,26 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- ====== 右侧：当前来源配置 ====== -->
+    <!-- ====== 右侧：当前查看来源的配置（showSources：查看/编辑，默认由「设为默认」切换） ====== -->
     <div class="llm-content scoll">
-      <div class="settings-group">
+      <div v-if="showSources" class="settings-group">
         <div class="llm-content-header">
-          <h3>{{ zh() ? '大语言模型设置' : 'Large Language Model Settings' }}</h3>
+          <div class="llm-content-title">
+            <h3>{{ zh() ? '大语言模型设置' : 'Large Language Model Settings' }}</h3>
+            <span class="llm-view-hint">{{ zh() ? '正在查看' : 'Viewing' }}：{{ llmSourceLabel(viewType) }}</span>
+            <span v-if="isViewingDefault" class="llm-default-tag" :title="zh() ? '当前查看的已是默认来源（主页 / 知识库 / 工作流默认用它）' : 'The viewed source is already the default'">{{ zh() ? '默认' : 'Default' }}</span>
+            <div v-else class="button llm-set-default" @click="setViewAsDefault"
+              :title="zh() ? '把当前查看的来源设为默认：主页 / 知识库 / 工作流默认用它（不选模型的对话也会用它）' : 'Make the viewed source the default: used by home / KB / workflow'">
+              <i class="fa fa-check"></i> {{ zh() ? '设为默认' : 'Set as default' }}
+            </div>
+          </div>
           <div class="config-description" style="margin-left:0;margin-top:2px;font-size: 10px;">
             {{ getCurrentConfigHelp }}
           </div>
         </div>
 
         <!-- Ollama配置 -->
-        <div v-if="store.AIconfig.llm.type === 'ollama'" class="llm-config-block">
+        <div v-if="viewType === 'ollama'" class="llm-config-block">
           <div class="form-group">
             <label>{{ zh()?'模型地址' : 'Model URL' }}</label>
             <div class="input-with-button">
@@ -1340,7 +1385,7 @@ onMounted(() => {
         </div>
 
         <!-- LM Studio 配置 -->
-        <div v-if="store.AIconfig.llm.type === 'lmstudio'" class="llm-config-block">
+        <div v-if="viewType === 'lmstudio'" class="llm-config-block">
           <div class="form-group">
             <label>{{ zh()?'服务地址' : 'Service URL' }}</label>
             <input v-model="store.AIconfig.llm.lmstudio.base_url"
@@ -1430,7 +1475,7 @@ onMounted(() => {
         </div>
 
         <!-- OpenAI 配置（独立） -->
-        <div v-if="store.AIconfig.llm.type === 'openai'" class="llm-config-block">
+        <div v-if="viewType === 'openai'" class="llm-config-block">
           <div class="form-group">
             <label>{{ openaiUseCred ? (zh()?'凭据引用' : 'Credential') : (zh()?'API密钥' : 'API Key') }}</label>
             <div class="input-with-button">
@@ -1556,7 +1601,7 @@ onMounted(() => {
         </div>
 
         <!-- Anthropic配置 -->
-        <div v-if="store.AIconfig.llm.type === 'anthropic'" class="llm-config-block">
+        <div v-if="viewType === 'anthropic'" class="llm-config-block">
           <div class="form-group">
             <label>{{ anthropicUseCred ? (zh()?'凭据引用' : 'Credential') : (zh()?'API密钥' : 'API Key') }}</label>
             <div class="input-with-button">
@@ -1596,7 +1641,7 @@ onMounted(() => {
         </div>
 
         <!-- Google配置 -->
-        <div v-if="store.AIconfig.llm.type === 'google'" class="llm-config-block">
+        <div v-if="viewType === 'google'" class="llm-config-block">
           <div class="form-group">
             <label>{{ googleUseCred ? (zh()?'凭据引用' : 'Credential') : (zh()?'API密钥' : 'API Key') }}</label>
             <div class="input-with-button">
@@ -1636,7 +1681,7 @@ onMounted(() => {
         </div>
 
         <!-- Azure配置 -->
-        <div v-if="store.AIconfig.llm.type === 'azure'" class="llm-config-block">
+        <div v-if="viewType === 'azure'" class="llm-config-block">
           <div class="form-group">
             <label>{{ azureUseCred ? (zh()?'凭据引用' : 'Credential') : (zh()?'API密钥' : 'API Key') }}</label>
             <div class="input-with-button">
@@ -1687,7 +1732,7 @@ onMounted(() => {
         </div>
 
         <!-- GPUStack配置（内置自托管来源） -->
-        <div v-if="store.AIconfig.llm.type === 'gpustack'" class="llm-config-block">
+        <div v-if="viewType === 'gpustack'" class="llm-config-block">
           <div class="form-group">
             <label>{{ zh()?'服务地址' : 'Server URL' }}</label>
             <input v-model="store.AIconfig.llm.gpustack.base_url"
@@ -1744,7 +1789,7 @@ onMounted(() => {
         </div>
 
         <!-- 自定义配置 -->
-        <div v-if="store.AIconfig.llm.type === 'custom'" class="llm-config-block">
+        <div v-if="viewType === 'custom'" class="llm-config-block">
           <div class="form-group">
             <label>{{ zh()?'来源名称' : 'Source Name' }}</label>
             <input v-model="store.AIconfig.llm.custom.name"
@@ -1858,8 +1903,20 @@ onMounted(() => {
                   :title="zh() ? '远端自托管后端（内网/公网 LM Studio / Ollama / custom 端点）同一后端同时在途流式请求上限；本机 localhost 与云端官方 API 不受此限。默认 2，用于防远端单机推理服务并发空回/500；批量/集群等编排运行时会自动跟随自身设置的并发数，无需手工保持一致' : 'Max concurrent in-flight streaming requests per remote self-hosted backend (LM Studio / Ollama / custom, non-localhost). Localhost and cloud APIs are not limited. Default 2 prevents empty-stream/500 on remote single-machine inference servers; batch/swarm runs auto-follow their own configured concurrency'" />
           </div>
         </div>
+      </div>
 
-        <!-- 嵌入兜底：当前来源不提供嵌入接口（DeepSeek / Anthropic 等）时，向量化改用所选来源 -->
+      <!-- ====== 嵌入（嵌入兜底）：当前来源不提供嵌入接口（DeepSeek / Anthropic 等）时，向量化改用所选来源 ====== -->
+      <div v-if="showEmbed" class="settings-group">
+        <div class="llm-content-header">
+          <div class="llm-content-title">
+            <h3>{{ zh() ? '嵌入（用于兜底嵌入）' : 'Embedding (fallback)' }}</h3>
+          </div>
+          <div class="config-description" style="margin-left:0;margin-top:2px;font-size: 10px;">
+            {{ zh()
+              ? '当前模型来源不提供嵌入接口（如 DeepSeek / Anthropic）时，知识库建库与检索的向量化改用这里选的来源；各来源自己的「默认嵌入模型」在「模型 → 来源」页配置。'
+              : 'When the current source exposes no embedding endpoint (e.g. DeepSeek / Anthropic), KB building and retrieval embedding uses the source chosen here; each source’s own “default embedding model” is configured under Models → Sources.' }}
+          </div>
+        </div>
         <div class="llm-config-block" v-if="store.AIconfig.llm.embeddingFallback">
           <div class="form-group">
             <label>{{ zh()?'嵌入兜底' : 'Embedding Fallback' }}</label>
@@ -2019,11 +2076,28 @@ onMounted(() => {
 /* 禁用的来源：置灰 + 名称删除线 */
 .llm-source-item.disabled { opacity: .45; }
 .llm-source-item.disabled .llm-source-name { text-decoration: line-through; }
+/* 「默认来源」标识（查看中的来源不一定就是默认来源） */
+.llm-source-default {
+  flex-shrink: 0; font-size: 9px; line-height: 14px; padding: 0 4px;
+  color: var(--fontActiveColor); border: 1px solid var(--fontActiveColor);
+  border-radius: 3px; opacity: .85; white-space: nowrap;
+}
+.llm-source-item.is-default { border-color: color-mix(in srgb, var(--fontActiveColor) 45%, transparent); }
 
 /* ====== 右侧：配置区 ====== */
 .llm-content { flex: 1; min-width: 0; overflow-y: auto; padding: 8px; }
 .llm-content .settings-group { display: flex; flex-direction: column; gap: 8px; }
 .llm-content-header { border-bottom: 1px solid var(--borderColor); padding-bottom: 5px }
+.llm-content-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.llm-view-hint { font-size: 11px; opacity: .75; }
+.llm-default-tag {
+  font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 3px;
+  color: var(--fontActiveColor); border: 1px solid var(--fontActiveColor); opacity: .9;
+}
+/* 「设为默认」：把当前查看的来源设为默认（点击来源只查看，不再自动改默认） */
+.llm-set-default { width: auto; padding: 2px 8px; font-size: 12px; gap: 4px; }
+/* 嵌入页：不需要左右两栏 */
+.llm-embed-only { display: block; overflow-y: auto; }
 .llm-content-header h3 {
   position: relative; color: var(--fontActiveColor); margin: 0;
   padding: 0 0 4px 10px; font-size: 14px; font-weight: 600;

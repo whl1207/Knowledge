@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, globalShortcut, Menu, nativeImage, screen, net, session } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, globalShortcut, Menu, nativeImage, screen, net, session, clipboard } from 'electron'
 import { release, networkInterfaces } from 'node:os'
 import { join, dirname, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +17,7 @@ import { trustedPythonService } from './trusted-python-service'
 import { shellService } from './shell-service'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
 import { credentialStore } from './credentials'
+import { flowAwareExt } from './file-ext'
 import { mcpService } from './mcp-service'
 import { mcpExposeServer, MCP_EXPOSE_PORT } from './mcp-expose'
 import { browserAgentService } from './browser-agent'
@@ -28,6 +29,25 @@ import { skillService, parseSkillMetadata } from './skill-service'
 import { registerNamespacedIpc, sendToAll } from './ipc-registry'
 import { registerCoreTools, setWebSearchConfig, getWebSearchConfig, runWebSearch } from './tools'
 import { setAgentBroadcast } from './agent-loop'
+// 局域网访客（网页端）主机侧执行层（P3 令牌/并发 + P4 智能体桥，见该文件头注释）
+import {
+  acquireLanSlot,
+  disposeAllLanGuestSessions,
+  getLanGuestPolicy,
+  handleLanAgentApi,
+  lanGuestDenied,
+  lanGuestInfo,
+  lanGuestToken,
+  lanGuestTokenRequired,
+  lanUnlockPageHtml,
+  setLanGuestAgents,
+  setLanGuestLlm,
+  setLanGuestPolicy,
+  setLanMaxConcurrent,
+  setLanPolicyRequester,
+  setLanShareDir,
+} from './lan-guest'
+import { LAN_GUEST_COOKIE } from '@/shared/lanGuest'
 import { registerTtsIpc, disposeTtsService } from './tts-service'
 import { registerCollabIpc, stopCollab } from './collab-service'
 import { registerRemoteFsIpc, stopRemoteFsAll } from './remote-fs-service'
@@ -162,7 +182,7 @@ async function createWindow() {
     title: 'AI-KM',
     width: 900,
     height: 600,
-    minWidth: 600,
+    minWidth: 300,
     minHeight: 350,
     icon: join(publicDir, 'favicon.ico'),
     // 消除闪白：初始不显示，首帧渲染完成（ready-to-show）后再显示；后备背景用当前主题色
@@ -326,6 +346,12 @@ app.whenReady().then(async () => {
     BrowserWindow.getAllWindows().forEach((w) => {
       if (!w.isDestroyed()) w.webContents.send('skill:change', { kind, names })
     })
+  })
+  // 访客智能体桥：网页端请求 /api/agent/info 时，由主进程回头让渲染层重新下发一次最新策略
+  setLanPolicyRequester(() => requestGuestPolicyFromRenderer())
+  // 任何窗口加载完成都拉一次访客权限策略（策略在渲染层 localStorage，主进程启动时不知道）
+  app.on('web-contents-created', (_e, contents) => {
+    contents.on('did-finish-load', () => requestGuestPolicyFromRenderer())
   })
 })
 
@@ -523,8 +549,20 @@ function openFileWindow(opts: {
   // 登记到映射表（同一路径的多个视图各自一个窗口），窗口关闭时清理
   if (byView) byView.set(viewKey, childWindow)
   else fileWindowsByPath.set(pathKey, new Map([[viewKey, childWindow]]))
+  const childWcId = childWindow.webContents.id
   childWindow.on('closed', () => {
+    // 托盘里该窗口的后台任务登记一并清掉（否则任务会一直挂在托盘菜单上）
+    trayService.forgetWindow(childWcId)
     unregisterFileWindow(pathKey, viewKey, childWindow)
+  })
+
+  // 有后台任务运行中且已开启「折叠到托管区」：关窗改为隐藏（任务继续跑），
+  // 之后可从托盘右键菜单点该任务（或「隐藏的窗口」里的条目）唤回这个窗口。
+  childWindow.on('close', (event) => {
+    if (trayService.shouldHideFileWindowOnClose(childWindow)) {
+      event.preventDefault()
+      trayService.hideChildWindow(childWindow)
+    }
   })
 
   // 首帧渲染完成后显示窗口，避免加载期白屏；did-finish-load 兜底防止极端情况窗口不出现
@@ -603,7 +641,7 @@ const READ_VIEW_EXTS = [
   '.md', '.markdown', '.mdown', '.mkd', '.mdx',
   '.html', '.htm',
   '.docx', '.doc',
-  '.pdf', '.xlsx', '.xls', '.csv', '.excalidraw',
+  '.pdf', '.xlsx', '.xls', '.csv', '.excalidraw', '.flow', '.workflow', '.flow.yml', '.flow.yaml', '.data',
   '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif',
   '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp', '.mpg', '.mpeg',
   '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.wma', '.ape', '.aiff',
@@ -611,7 +649,7 @@ const READ_VIEW_EXTS = [
 
 /** 文件关联打开时的默认视图：有专属浏览视图的类型 → 浏览(read)，其余（代码/文本/未知）→ 源码编辑(edit) */
 function pickDefaultView(filePath: string): string {
-  return READ_VIEW_EXTS.includes(extname(filePath).toLowerCase()) ? 'read' : 'edit'
+  return READ_VIEW_EXTS.includes(flowAwareExt(filePath).toLowerCase()) ? 'read' : 'edit'
 }
 
 /**
@@ -1260,7 +1298,7 @@ function getDirectoryTree(directoryPath: string): any {
       label: path.basename(directoryPath),
       type: 'file',
       path: absolutePath,
-      extension: path.extname(directoryPath),
+      extension: flowAwareExt(directoryPath),
       mtime: stats.mtimeMs,
       size: stats.size
     };
@@ -1297,13 +1335,13 @@ async function getDirectoryTreeAsync(directoryPath: string, dirMtimes?: Map<stri
       }
       if (dirent.isFile()) {
         const s = await fs.promises.stat(childPath)
-        return { label: dirent.name, type: 'file', path: childPath, extension: path.extname(dirent.name), mtime: s.mtimeMs, size: s.size }
+        return { label: dirent.name, type: 'file', path: childPath, extension: flowAwareExt(dirent.name), mtime: s.mtimeMs, size: s.size }
       }
       // 符号链接等特殊类型：stat 解析（失败则忽略）
       try {
         const s = await fs.promises.stat(childPath)
         if (s.isDirectory()) return getDirectoryTreeAsync(childPath, dirMtimes)
-        return { label: dirent.name, type: 'file', path: childPath, extension: path.extname(dirent.name), mtime: s.mtimeMs, size: s.size }
+        return { label: dirent.name, type: 'file', path: childPath, extension: flowAwareExt(dirent.name), mtime: s.mtimeMs, size: s.size }
       } catch {
         return null
       }
@@ -1317,7 +1355,7 @@ async function getDirectoryTreeAsync(directoryPath: string, dirMtimes?: Map<stri
     }
     return { label: path.basename(directoryPath), type: 'folder', path: absolutePath, children: nodes, extension: 'folder', size, mtime }
   } else {
-    return { label: path.basename(directoryPath), type: 'file', path: absolutePath, extension: path.extname(directoryPath), mtime: stats.mtimeMs, size: stats.size }
+    return { label: path.basename(directoryPath), type: 'file', path: absolutePath, extension: flowAwareExt(directoryPath), mtime: stats.mtimeMs, size: stats.size }
   }
 }
 
@@ -1511,7 +1549,7 @@ function getFiles(folderPath: string, depth: number, fileList: any[] = []): any[
     if (stats.isDirectory() && depth > 0) {
       getFiles(filePath, depth, fileList);
     } else {
-      const fileExtension = path.extname(filePath);
+      const fileExtension = flowAwareExt(filePath);
       let fileData = {
         label: path.basename(filePath),
         type: stats.isDirectory() ? 'folder' : 'file',
@@ -1553,7 +1591,7 @@ async function getFilesRelation(folderPath: string, depth: number, parentIndex: 
       label: dirent.name,
       type: isDir ? 'folder' : 'file',
       path: filePath,
-      extension: isDir ? 'folder' : path.extname(filePath),
+      extension: isDir ? 'folder' : flowAwareExt(filePath),
       size: stats.size,
       mtime: stats.mtimeMs,
       attributes: {}
@@ -2327,7 +2365,7 @@ function getInf(filePath: string): any {
     const stats = fs.statSync(filePath);
     const type = stats.isDirectory() ? 'folder' : 'file';
     const label = path.basename(filePath);
-    const extension = type === 'folder' ? 'folder' : path.extname(filePath);
+    const extension = type === 'folder' ? 'folder' : flowAwareExt(filePath);
     return { type, label, extension };
   } catch (error) {
     console.error(`Error getting file info for path ${filePath}:`, error);
@@ -2440,16 +2478,34 @@ ipcMain.handle('openInFolder', async (event, filePath) => {
   }
 });
 
-// 打开本机应用数据目录（设置页「常用操作 → 打开数据目录」）：
-// userData 下有配置、缓存、会话日志、Word 预览图片缓存等，排障/备份时直接定位
-ipcMain.handle('open-data-dir', async () => {
-  const dir = app.getPath('userData');
+// 打开本机应用数据目录（设置页「数据 → 数据目录 / 会话日志」）：
+// userData 下有配置、缓存、会话日志、Word 预览图片缓存等，排障/备份时直接定位；
+// 可传 sub（相对子目录，如 session-logs）打开其中某一类数据，目录不存在时自动创建。
+ipcMain.handle('open-data-dir', async (_e, payload?: { sub?: string }) => {
+  const base = app.getPath('userData');
+  // 只允许单层相对子目录：拒绝绝对路径与 .. ，避免越界打开任意目录
+  const sub = typeof payload?.sub === 'string' ? payload.sub.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : '';
+  const safeSub = sub && !sub.includes('..') && !/^[a-zA-Z]:/.test(sub) ? sub : '';
+  const dir = safeSub ? path.join(base, safeSub) : base;
   try {
+    if (safeSub && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const err = await shell.openPath(dir);
     if (err) return { success: false, error: err, path: dir };
     return { success: true, path: dir };
   } catch (e: any) {
     return { success: false, error: String(e?.message || e), path: dir };
+  }
+});
+
+// 读取本机应用数据目录路径（不打开；设置页「数据」展示用；sub 同 open-data-dir）
+ipcMain.handle('data-dir-path', (_e, payload?: { sub?: string }) => {
+  try {
+    const base = app.getPath('userData');
+    const sub = typeof payload?.sub === 'string' ? payload.sub.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : '';
+    const safeSub = sub && !sub.includes('..') && !/^[a-zA-Z]:/.test(sub) ? sub : '';
+    return { success: true, path: safeSub ? path.join(base, safeSub) : base };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e), path: '' };
   }
 });
 
@@ -2878,6 +2934,31 @@ ipcMain.handle('drawio-export-write', async (_event, payload) => {
 })
 
 /**
+ * 把图片写进系统剪贴板（drawio「复制为图片」用，粘贴到 Word / PPT / 微信等）。
+ * 渲染层负责把图表 SVG 光栅化成 PNG（高清倍率由用户选），这里只做「进剪贴板」：
+ *  - image：PNG 二进制（nativeImage）→ 提供位图格式
+ *  - html：`<img src="data:image/png;base64,…" width height>` → Word/PPT 会按这个尺寸排版
+ *    （与 drawio 官方 copyImage 的写法一致，否则 4 倍图粘进去会大到离谱）
+ */
+ipcMain.handle('clipboard-write-image', async (_event, payload) => {
+  const { base64, html } = payload || {}
+  if (!base64) return { ok: false, error: '缺少图片数据' }
+  try {
+    const buf = Buffer.from(String(base64).replace(/^data:[^,]*,/, ''), 'base64')
+    const img = nativeImage.createFromBuffer(buf)
+    if (img.isEmpty()) return { ok: false, error: '图片数据无法解析' }
+    const data: { image: Electron.NativeImage; html?: string } = { image: img }
+    if (html) data.html = String(html)
+    clipboard.write(data)
+    const size = img.getSize()
+    return { ok: true, width: size.width, height: size.height }
+  } catch (e: any) {
+    console.error('[clipboard] 写入图片失败', e)
+    return { ok: false, error: String(e?.message || e) }
+  }
+})
+
+/**
  * 下载兜底：Electron 默认把页面发起的下载静默写进系统下载目录（不弹框、不提示）。
  * 落到「当前图表所在目录」（没有则系统下载目录），完成后再告知渲染层提示用户。
  * 正常情况走不到这里 —— drawio 的导出已被上面的 IPC 接管。
@@ -3165,7 +3246,10 @@ async function search(storePath: string, filterText: string, dirPath: string = s
     const dir = {
       label: path.basename(itemPath),
       path: path.join(dirPath, itemPath),
-      extension: path.extname(itemPath),
+      extension: flowAwareExt(itemPath),
+      // 明确文件 / 文件夹：渲染层据此按「文件操作」设置打开（新窗口 / 软件内），
+      // 文件夹仍走软件内（进入该目录），文件在软件内打开时当前目录取其父目录
+      type: isFile ? 'file' : 'folder',
     } as any
 
     if (!isFile) {
@@ -3724,8 +3808,15 @@ ipcMain.handle('startWatching', async (event, folderPath: string | string[]) => 
     for (const p of paths) {
       const w = fs.watch(p, { recursive: true }, (eventType, filename) => {
         if (!filename) return;
-        // 工作区有变更：使该根目录的树缓存失效，下次刷新重新扫描
-        treeCache.delete(p);
+        // 树缓存失效策略（切换「知识管理」卡顿的主因之一）：
+        //  - 'rename' = 新增 / 删除 / 重命名（结构变更）→ 让该根缓存失效，下次刷新重扫；
+        //  - 'change' = 仅文件内容修改 → **保留缓存**：目录自身 mtime 未变，
+        //    isTreeCacheValid 的「顶层签名 + 全目录 mtime」校验会判定有效，
+        //    从而跳过十万级文件的整树重扫 + 数十 MB IPC 回传。
+        //    知识处理模块持续写文件时，这正是每次切回知识管理都要等几秒的根因。
+        // 兜底：若某平台把结构变更报成 'change'，目录 mtime 校验仍会判定失效并重扫。
+        // 代价：被修改文件的 size / mtime 展示会滞后，直到下一次结构变更或缓存重扫。
+        if (eventType === 'rename') treeCache.delete(p);
 
         // 防抖：避免短时间内多次触发
         if (watchTimeout) {
@@ -3981,17 +4072,52 @@ const mimeTypes: Record<string, string> = {
   '.wasm': 'application/wasm',
 }
 
+/** 把主进程当前实际持有的访客策略（模式/工具/模型）推给所有窗口：设置页据此核对是否已生效 */
+function broadcastLanGuestState() {
+  let info: any = null
+  try {
+    info = lanGuestInfo()
+  } catch (e) {
+    console.warn('[lan-guest] 生成访客状态失败:', e)
+    return
+  }
+  BrowserWindow.getAllWindows().forEach((w) => {
+    if (!w.isDestroyed()) w.webContents.send('lan:guest-state', info)
+  })
+}
+
+/**
+ * 向渲染层“拉”访客权限策略（渲染层收到后回 `lan:setGuest`）。
+ *
+ * 为什么需要：策略存在渲染层 localStorage，而主进程每次启动都是默认值
+ * （只开普通 + 知识库）。开发模式下主进程会因 HMR 反复重启，重启后渲染层不会重新
+ * 挂载 → 没人再推送 → 主进程一直停在默认策略，网页端就看不到已经开启的「智能体」模式。
+ * 因此在「页面加载完成」与「启动共享」两个时机主动请求，并重试几次以避开渲染层监听注册的时序。
+ */
+function requestGuestPolicyFromRenderer() {
+  for (const delay of [0, 800, 2400]) {
+    setTimeout(() => {
+      BrowserWindow.getAllWindows().forEach((w) => {
+        if (!w.isDestroyed()) w.webContents.send('lan:request-guest-policy')
+      })
+    }, delay)
+  }
+}
+
 /** 向渲染进程推送服务器状态 */
 function notifyLanServerStatus() {
   const running = lanServer !== null
   const ips = running ? getLanIPs() : []
-  if (win && !win.isDestroyed()) {
-    win.webContents.send('lan-server-status', {
-      running,
-      port: running ? lanServerPort : 0,
-      ips,
-    })
+  // 推给**所有窗口**（不能只推主窗口：设置独立窗口里才是「启动/停止共享」的操作入口，
+  // 只推主窗口会导致设置页看不到地址更新，必须手动刷新才出现）
+  const payload = {
+    running,
+    port: running ? lanServerPort : 0,
+    ips,
   }
+  BrowserWindow.getAllWindows().forEach((w) => {
+    if (!w.isDestroyed()) w.webContents.send('lan-server-status', payload)
+  })
 }
 
 // ==================== 局域网共享知识库（/api/kb/*） ====================
@@ -4152,6 +4278,15 @@ async function handleLanKbApi(req: http.IncomingMessage, res: http.ServerRespons
     const blocks = (data.blocks as any[]).filter(b => b && typeof b.A === 'string' && b.A.trim())
     if (!blocks.length) { send(200, { ok: true, method: 'none', blocks: [], context: q }); return }
 
+    // 并发闸门（P3）：向量检索与聊天共用同一额度（保护主机 GPU / 模型）；拿不到额度直接 429
+    try {
+      const releaseSlot = await acquireLanSlot(30_000)
+      res.on('close', () => releaseSlot())
+    } catch (e: any) {
+      send(429, { ok: false, code: 'BUSY', error: e?.message || '主机访客并发已满' })
+      return
+    }
+
     const kbModel = data.config?.embedModel as string | undefined
     const tokens = lanTokenize(q)
 
@@ -4286,6 +4421,41 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
 
       let urlPath = req.url || '/'
 
+      // ===== 访问令牌（P3）：主机开启「访问令牌」后，接口与静态站都需要令牌 =====
+      // 接口：Authorization: Bearer / X-AIKM-Token / ?token= / Cookie 任一即可；
+      // 静态站：首次带 ?token= 访问时换成 Cookie 并跳回干净地址（静态资源无法带自定义头）。
+      if (lanGuestTokenRequired()) {
+        const denied = lanGuestDenied(req)
+        if (denied) {
+          const isApi = urlPath.startsWith('/api/') || urlPath.startsWith('/__proxy')
+          const qToken = parseLanQuery(req.url || '').token || ''
+          if (!isApi && qToken && qToken === lanGuestToken()) {
+            // 令牌有效（denied 为空时不会走到这里）→ 换 Cookie + 跳到去掉 token 的地址
+            const cleanUrl = (req.url || '/').replace(/([?&])token=[^&]*/, '$1').replace(/[?&]$/, '') || '/'
+            res.statusCode = 302
+            res.setHeader('Set-Cookie', `${LAN_GUEST_COOKIE}=${encodeURIComponent(qToken)}; Path=/; Max-Age=2592000; SameSite=Lax`)
+            res.setHeader('Location', cleanUrl)
+            res.end()
+            return
+          }
+          res.statusCode = denied.status
+          if (isApi) {
+            res.setHeader('Content-Type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(denied.body))
+          } else {
+            res.setHeader('Content-Type', 'text/html; charset=utf-8')
+            res.end(lanUnlockPageHtml())
+          }
+          return
+        }
+      }
+
+      // ===== 访客智能体桥（P4）：/api/agent/*（主机侧跑 agent 循环 + SSE 事件流） =====
+      if (urlPath.startsWith('/api/agent')) {
+        void handleLanAgentApi(req, res, urlPath)
+        return
+      }
+
       // ===== API 代理路由 =====
       if (urlPath.startsWith('/__proxy')) {
         // 手动解析查询字符串（兼容所有环境，避免 URLSearchParams / new URL 解析差异）
@@ -4312,7 +4482,7 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
         // 先收集完 body，再发起代理请求（确保 Content-Length 正确设置）
         const bodyChunks: any[] = []
         req.on('data', (chunk: any) => bodyChunks.push(chunk))
-        req.on('end', () => {
+        req.on('end', async () => {
           try {
             const target = new URL(targetUrl)
             const targetPort = target.port || (target.protocol === 'https:' ? 443 : 80)
@@ -4323,8 +4493,10 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
             // 网页端提问日志：识别聊天类请求 → 新建会话并记录用户问题
             // （web 无桌面主进程会话，经 /__proxy 代理的聊天在此落 sessionLog，供「设置→日志」检视）
             let lanWebSession: string | null = null
+            let lanChatBody: { question: string; system: string } | null = null
             try {
-              const chat = lanProxyChatBody(body)
+              lanChatBody = lanProxyChatBody(body)
+              const chat = lanChatBody
               if (chat) {
                 lanWebSession = `lan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
                 sessionLog.append(lanWebSession, 'session/start', {
@@ -4338,6 +4510,20 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
               }
             } catch (e) {
               console.warn('[lan-server] 网页提问日志失败:', e)
+            }
+
+            // 并发闸门（P3）：聊天类请求占用访客额度（与 /api/kb/search、访客智能体共用），
+            // 保护主机 GPU / 模型；流式响应结束（res close）即释放。嵌入等非聊天请求不占额度。
+            if (lanChatBody) {
+              try {
+                const releaseSlot = await acquireLanSlot(30_000)
+                res.on('close', () => releaseSlot())
+              } catch (e: any) {
+                res.statusCode = 429
+                res.setHeader('Content-Type', 'application/json; charset=utf-8')
+                res.end(JSON.stringify({ ok: false, code: 'BUSY', error: e?.message || '主机访客并发已满' }))
+                return
+              }
             }
 
             // 构造要转发的头（只转发必要项）
@@ -4456,6 +4642,8 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
               }
               res.statusCode = 200
               res.setHeader('Content-Type', 'text/html; charset=utf-8')
+              // index.html 不缓存：主机重新构建后访客刷新即拿到新版本（否则会继续用旧界面）
+              res.setHeader('Cache-Control', 'no-cache')
               res.end(data2)
             })
             return
@@ -4470,6 +4658,12 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
         const mime = mimeTypes[fileExt] || 'application/octet-stream'
         res.statusCode = 200
         res.setHeader('Content-Type', `${mime}; charset=utf-8`)
+        // 构建产物：assets/ 下的文件名带内容哈希可长缓存；入口页不缓存
+        if (resolved.includes(`${path.sep}assets${path.sep}`)) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+        } else if (fileExt === '.html') {
+          res.setHeader('Cache-Control', 'no-cache')
+        }
         res.end(data)
       })
     })
@@ -4498,6 +4692,9 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
 
     lanServer.listen(port, '0.0.0.0', () => {
       notifyLanServerStatus()
+      broadcastLanGuestState()
+      // 启动共享时主动拉一次策略：确保「先启动共享、后改设置」也能拿到最新白名单
+      requestGuestPolicyFromRenderer()
       resolve({ success: true })
     })
   })
@@ -4508,6 +4705,8 @@ async function stopLanServer(): Promise<{ success: boolean }> {
   if (!lanServer) {
     return { success: false }
   }
+  // 访客智能体会话随服务一起结束（防悬空 agent / 挂起 SSE）
+  disposeAllLanGuestSessions()
   return new Promise((resolve) => {
     lanServer!.close(() => {
       lanServer = null
@@ -4544,9 +4743,31 @@ ipcMain.handle('getLanServerInfo', async () => {
 // 局域网共享知识库目录/嵌入配置（渲染进程「协作→局域网共享」维护）
 ipcMain.handle('lan:setKbDir', async (_e, dir?: string) => {
   lanKbDir = typeof dir === 'string' ? dir : ''
+  // 共享目录同时是访客智能体的文件围栏根（工具的相对路径锚点）
+  setLanShareDir(lanKbDir)
   return { success: true }
 })
 ipcMain.handle('lan:getKbDir', async () => ({ dir: lanKbDir }))
+
+// 访客（网页端）权限策略 + 主机模型（P3/P4）：渲染进程在「协作 → 权限」改动后推送；
+// 主进程据此校验令牌、限并发、并给访客智能体兑上主机模型与工具白名单
+ipcMain.handle('lan:setGuest', async (_e, payload?: any) => {
+  const p = setLanGuestPolicy(payload?.policy)
+  setLanMaxConcurrent(p.maxConcurrent)
+  setLanGuestLlm(payload?.llm)
+  // 访客可用智能体档案（渲染层组装：预设提示词/工具/知识库/MCP），主进程据此叠加盟客策略限制。
+  // ⚠️ 仅在 payload 明确带 agents 时才覆盖：局部下发（旧版本渲染层）不能把清单清空。
+  if (payload && Object.prototype.hasOwnProperty.call(payload, 'agents')) setLanGuestAgents(payload.agents)
+  // 诊断日志：网页端能不能用智能体模式完全取决于这条策略是否到位
+  console.log(`[lan-guest] 访客策略已更新: modes=[${p.modes.join(',')}] tools=${Array.isArray(p.tools) ? p.tools.length : '默认集'} maxSteps=${p.maxSteps} maxConcurrent=${p.maxConcurrent} 令牌=${p.requireToken ? '需要' : '不需要'} 预设=${Array.isArray(payload?.agents) ? payload.agents.map((a: any) => a?.name).join('/') || '无' : '无'} 模型=${payload?.llm?.provider || '-'}/${payload?.llm?.config?.model || '来源默认'}`)
+  // 回推生效状态：设置页「主机当前生效」直接照它显示（挂载时也会主动拉一次）
+  broadcastLanGuestState()
+  return { success: true, policy: p }
+})
+ipcMain.handle('lan:getGuest', async () => ({
+  policy: getLanGuestPolicy(),
+  info: lanGuestInfo(),
+}))
 ipcMain.handle('lan:setEmbed', async (_e, cfg?: any) => {
   lanKbEmbedConfig = cfg && typeof cfg === 'object'
     ? { llmType: String(cfg.llmType || ''), base: String(cfg.base || ''), model: String(cfg.model || ''), apiKey: String(cfg.apiKey || '') }

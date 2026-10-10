@@ -24,6 +24,7 @@ import { docxToMarkdown } from './office/docx-to-markdown'
 import { shellService } from './shell-service'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
 import { retrieveKnowledge } from '@/shared/kbRetrieval'
+import { keywordSearchBlocks } from '@/services/learningSearch'
 import { isBotChallengePage, extractDoiFromUrl, fetchDoiViaCrossref } from '@/shared/webFetchHelpers'
 import { computeEditDiff, makeEditDiffPreview, countTextLines, EDIT_DIFF_MAX_CHARS, type EditDiffFilePreview } from '@/shared/editDiff'
 import { skillService } from './skill-service'
@@ -34,6 +35,7 @@ import { browserAgentService } from './browser-agent'
 import { asUint8 } from './buffer-view'
 import { RUN_CODE_DESCRIPTION, RUN_CODE_INPUT_SCHEMA, runCodeHandler } from './code-sdk'
 import { excludeFromAppZoom } from './window-zoom'
+import { registerTeamTools } from './team-tools'
 import {
   normalizeWebSearchConfig,
   findWebSearchCustomSource,
@@ -792,6 +794,30 @@ async function runShell(input: any, ctx: ToolExecutionContext): Promise<ToolResu
   }
 }
 
+/** 知识库切片内存缓存（关键词兜底用；按 mtime 失效，最多留 4 个库） */
+const kbBlockCache = new Map<string, { mtime: number; blocks: Array<{ label: string; content: string }> }>()
+
+/**
+ * 读取 .kb 的切片（仅 label + 正文），供向量检索不可用时做本地关键词兜底。
+ * 纯本地计算，不依赖任何模型：嵌入模型未加载 / 服务端不支持 embeddings 时仍能检索。
+ */
+function loadKbBlocksForKeyword(kbPath: string): Array<{ label: string; content: string }> {
+  try {
+    const st = fs.statSync(kbPath)
+    const hit = kbBlockCache.get(kbPath)
+    if (hit && hit.mtime === st.mtimeMs) return hit.blocks
+    const data = JSON.parse(fs.readFileSync(kbPath, 'utf8'))
+    const blocks = (Array.isArray(data?.blocks) ? data.blocks : [])
+      .map((b: any) => ({ label: String(b?.label || ''), content: String(b?.A || '') }))
+      .filter((b: { content: string }) => b.content.trim())
+    if (kbBlockCache.size > 4) kbBlockCache.clear()
+    kbBlockCache.set(kbPath, { mtime: st.mtimeMs, blocks })
+    return blocks
+  } catch {
+    return []
+  }
+}
+
 async function kbSearch(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const query = String(input?.query ?? '')
   if (!query) return { ok: false, error: 'query 参数必填' }
@@ -815,28 +841,49 @@ async function kbSearch(input: any, ctx: ToolExecutionContext): Promise<ToolResu
 
   const allBlocks: any[] = []
   let ragContext = ''
+  let lastError = ''
   for (const kbPath of explicitPaths) {
     const kbName = String(kbPath).split(/[/\\]/).pop() || String(kbPath)
     if (kbFilter && kbName !== kbFilter && String(kbPath) !== kbFilter) continue
     if (!fs.existsSync(kbPath)) continue
+    // 向量检索失败 / 无结果时的本地关键词兜底（不依赖模型）
+    const keywordFallback = (reason: string) => {
+      const kw = keywordSearchBlocks(query, loadKbBlocksForKeyword(kbPath), topK)
+      if (!kw.length) return false
+      allBlocks.push(...kw)
+      ragContext += `【知识库：${kbName}】（${reason}；已退回关键词匹配）\n${kw.map(b => String(b.content)).join('\n')}\n`
+      return true
+    }
     try {
       const result = await retrieveKnowledge(query, kbPath, {
+        // 来源 / 嵌入兜底 / 检索策略由调用方（渲染进程）下发；缺省时退回 ollama 默认（兼容旧调用）
+        ...(((ctx as any)?.retrieval as any) || {}),
         topK,
         debug: !!input?.debug,
         missingModelStrategy: 'fallback',
-      })
-      if ((result as any)?.context) {
-        ragContext += `【知识库：${kbName}】\n${(result as any).context}\n`
-      }
+      } as any)
       const blocks = (result as any)?.relevantBlocks || []
-      if (Array.isArray(blocks) && blocks.length > 0) allBlocks.push(...blocks)
+      if (Array.isArray(blocks) && blocks.length > 0) {
+        allBlocks.push(...blocks)
+        if ((result as any)?.context) ragContext += `【知识库：${kbName}】\n${(result as any).context}\n`
+      } else if (!keywordFallback('向量检索无结果')) {
+        ragContext += `【知识库：${kbName}】未匹配到相关内容\n`
+      }
     } catch (e: any) {
-      ragContext += `【知识库：${kbName}】检索失败：${e?.message || String(e)}\n`
+      lastError = e?.message || String(e)
+      if (!keywordFallback(`向量检索失败：${lastError}`)) {
+        ragContext += `【知识库：${kbName}】检索失败：${lastError}\n`
+      }
     }
   }
 
-  if (!ragContext.trim()) {
-    return { ok: false, error: `未检索到与「${query}」相关的知识库内容，请更换检索词后重试。` }
+  // 确实什么都没检索到：返回 ok:false（让 agent 知道是“检索失败/无结果”而不是“库里没有”），并带上原因
+  if (!allBlocks.length) {
+    const tail = lastError ? `（向量检索失败：${lastError}）` : ''
+    return {
+      ok: false,
+      error: `未检索到与「${query}」相关的内容${tail}。可换关键词重试；若持续失败，请检查「设置 → 模型 → 嵌入」的嵌入模型/嵌入兜底配置。`,
+    }
   }
   const preview = ragContext.length > 6000 ? ragContext.slice(0, 6000) + '\n...(内容过长已截断)' : ragContext
   return {
@@ -2536,5 +2583,9 @@ export function registerCoreTools(): void {
       },
     }),
   )
+
+  // Agent Teams 协议工具（群聊 = Agent Teams）：主进程只转发，语义在渲染层
+  registerTeamTools()
+
   console.log(`[tools] ${toolRegistry.snapshot().length} core tools registered`)
 }

@@ -1,78 +1,36 @@
 <template>
-  <div class="bg">
-    <!-- 顶部标签栏（新窗口模式下无标签，整个隐藏；主页按钮组已移至左侧面板） -->
-    <div class="top-panel" v-if="store.UI.fileOpenMode !== 'window'">
-      <!-- 主页按钮 -->
-      <div class="home">
-        <div class="button" style="flex:1" :class="{active:mode=='file'}" @click="toggleMode('file')">
-          <i class="fa fa-navicon"></i>
-        </div>
-        <div class="button" @click="openFolderDialog" :title="store.locales=='zh'?'添加工作区':'Add Workspace'">
-          <i class="fa fa-folder-open"></i>
-        </div>
-        <div class="button" @click="openFileDialog" :title="store.locales=='zh'?'打开文件':'Open File'">
-          <i class="fa fa-file-text"></i>
-        </div>
-        <div class="button" style="flex:1" :class="{active:searchOpen}" @click="searchOpen=!searchOpen" v-if="store.root!=''">
-          <i class="fa fa-search"></i> 
-        </div>
-        <!-- 眼睛按钮：仅存在于 top-panel 内，而 top-panel 已在窗口内模式才渲染，故无需再判断 fileOpenMode -->
-        <div class="button" style="flex:1"
-          :class="{active: viewsPopover}"
-          @click.stop="viewsPopover = !viewsPopover"
-          title="视图">
-          <i class="fa fa-eye"></i>
-        </div>
-        <div class="button" style="flex:1" 
-          :class="{disabled: store.data.length <= 1}"
-          @click="clearAllTabs"
-          :title="`关闭所有标签页 (共${store.data.length}个)`">
-          <i class="fa fa-times-circle"></i>
-        </div>
-      </div>
-      <div class="App_tabs" ref="tabsContainer" @wheel="handleWheel">
-        <transition-group name="tab" tag="div" class="tabs-wrapper">
-          <div class="App_tab" 
-               v-for="(item,index) in store.data" 
-               :key="item.path" 
-               :class="{ 'active': store.index === index }" 
-               @click="selectFile(Number(index))">
-            <i :class="store.icon(item.extension)"></i>
-            <span class="tab-label" :title="item.label">{{item.label}}</span>&nbsp;
-            <span><i class="fa fa-times" @click="close($event, Number(index))"></i></span>
-          </div>
-        </transition-group>
-      </div>
-    </div>
-    
+  <div class="bg knowfile-menu">
     <!-- 主要内容区域保持不变 -->
     <div class="explorer-container">
-      <!-- 左侧面板（可调整宽度，始终为文件树） -->
-      <div class="left-wrap" v-if="mode" :style="{ width: leftWidth + 'px', minWidth: minLeftWidth + 'px' }">
-        <panel v-if="mode=='file'" ref="panelRef" class="left-panel" :show-views="viewsPopover" @reset-view-sizes="resetViewSizes">
-          <!-- 新窗口模式：工作区/打开文件/搜索/创建文件 按钮组，置于面板顶部（top-panel 已隐藏；无"收起面板"按钮，因为收起后无 top-panel 可恢复） -->
-          <template v-if="store.UI.fileOpenMode === 'window'" #toolbar>
-            <div class="panel-home">
-              <div class="panel-home-btn" @click="openFolderDialog" :title="store.locales=='zh'?'添加工作区':'Add Workspace'">
-                <i class="fa fa-folder-open"></i>
+      <!-- 左侧面板（可调整宽度，始终为文件树；收起 / 展开走宽度过渡动画，见下方 .left-panel-* 类） -->
+      <Transition name="left-panel" @after-enter="store.resize()" @after-leave="store.resize()">
+        <div class="left-wrap" v-if="mode" :style="{ '--left-w': leftWidth + 'px' }">
+          <panel v-if="mode=='file'" ref="panelRef" class="left-panel">
+            <!-- 面板顶部按钮组：工作区 / 打开文件 / 搜索 / 创建文件 -->
+            <template #toolbar>
+              <div class="panel-home">
+                <div class="panel-home-btn" @click="openFolderDialog" :title="store.locales=='zh'?'添加工作区':'Add Workspace'">
+                  <i class="fa fa-folder-open"></i>
+                </div>
+                <div class="panel-home-btn" @click="openFileDialog" :title="store.locales=='zh'?'打开文件':'Open File'">
+                  <i class="fa fa-file-text"></i>
+                </div>
+                <div class="panel-home-btn" :class="{active:searchOpen}" @click="searchOpen=!searchOpen" v-if="store.root!=''" :title="store.locales=='zh'?'搜索':'Search'">
+                  <i class="fa fa-search"></i>
+                </div>
+                <div class="panel-home-btn" v-if="store.root!=''" @click="panelRef?.promptCreateFile()" :title="store.locales=='zh'?'创建文件':'Create File'">
+                  <i class="fa fa-plus"></i>
+                </div>
               </div>
-              <div class="panel-home-btn" @click="openFileDialog" :title="store.locales=='zh'?'打开文件':'Open File'">
-                <i class="fa fa-file-text"></i>
-              </div>
-              <div class="panel-home-btn" :class="{active:searchOpen}" @click="searchOpen=!searchOpen" v-if="store.root!=''" :title="store.locales=='zh'?'搜索':'Search'">
-                <i class="fa fa-search"></i>
-              </div>
-              <div class="panel-home-btn" v-if="store.root!=''" @click="panelRef?.promptCreateFile()" :title="store.locales=='zh'?'创建文件':'Create File'">
-                <i class="fa fa-plus"></i>
-              </div>
-            </div>
-          </template>
-        </panel>
-      </div>
-      <div class="resizer" v-if="mode" @mousedown.prevent="startDrag" :style="{ left: (leftWidth - 3) + 'px' }"></div>
+            </template>
+          </panel>
+        </div>
+      </Transition>
+      <!-- 拖拽条：收起时滑到左边并淡出，跟随面板的宽度过渡（不用 v-if，否则展开时会瞬间出现在终点） -->
+      <div class="resizer" :class="{ 'is-hidden': !mode, 'is-dragging': isDragging }" @mousedown.prevent="startDrag" :style="{ left: (mode ? leftWidth - 3 : -6) + 'px' }"></div>
       <!-- 右侧内容区域 -->
       <div class="right-content">
-        <!-- 远程只读提示条（仅「窗口内打开」的远程标签显示；单击快速预览不显示） -->
+        <!-- 远程只读提示条（远程文件在右窗格预览时显示；单击快速预览不显示） -->
         <div v-if="isRemoteFile && !isActiveRemotePreview" class="remote-readonly-bar">
           <i class="fa fa-cloud" style="color:#42b883"></i>
           <span>{{ store.locales=='zh'?'远程文件为只读预览':'Remote file (read-only preview)' }}</span>
@@ -81,6 +39,17 @@
             <i class="fa fa-download"></i> {{ store.locales=='zh'?'下载到本地':'Download' }}
           </span>
         </div>
+        <!-- 全局视图共用的顶部工具栏：多视图并排时只显示这一条（面板开关 + 路径面包屑 + 搜索 + 刷新） -->
+        <ViewToolbar
+          v-if="viewToolbarVisible"
+          v-model:search="store.knowQuery"
+          :panel-open="!!mode"
+          :searchable="viewToolbarSearchable"
+          :placeholder="store.locales === 'zh' ? '搜索当前目录…（支持 属性:值）' : 'Search this folder… (attr:value)'"
+          :search-title="store.locales === 'zh' ? '搜索当前目录：标题 / 状态 / 属性值，也支持 状态:待办、优先级>2' : 'Search this folder: title / status / attribute values (Status:todo, Priority>2)'"
+          @toggle-panel="toggleMode('file')"
+          @refresh="store.knowRefreshViews()"
+        />
         <div class="explorer" :style="{flexDirection:store.UI.layout=='horizontal'?'row':'column'}">
           <template v-for="(viewName, vi) in getVisibleViews()" :key="viewName">
             <!-- 视图内容 -->
@@ -88,7 +57,6 @@
               <view_file v-if="viewName==='文件'" />
               <view_graph v-if="viewName==='图谱'" />
               <view_kanban v-if="viewName==='看板'" />
-              <view_gantt v-if="viewName==='甘特'" />
               <view_year v-if="viewName==='日历'" />
               <view_map v-if="viewName==='地图'" />
               <view_table v-if="viewName==='表格'" />
@@ -98,11 +66,15 @@
               <Excalidraw v-if="isExcalidrawFile && isExcalidrawContentView(viewName)" :path="activeFilePath" :content="activeFileContent" />
               <!-- 音视频等多媒体文件：浏览/编辑/块编辑/导图/演示视图统一渲染 Media 播放器 -->
               <Media v-else-if="isMediaFile && isMediaContentView(viewName)" :path="activeFilePath" :content="activeFileContent" />
-              <md_read v-if="!isExcalidrawFile && !isDrawioFile && !isMediaFile && viewName===VIEW_BROWSE&&hasActiveFile" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
+              <!-- 工作流（Dify DSL .flow.yml）：浏览 / 可视编辑渲染新版编辑器 -->
+              <WorkflowEditor v-if="isFlowDslFile && isFlowContentView(viewName)" :path="activeFilePath" :content="activeFileContent" :readonly="isRemoteFile" />
+              <!-- 数据画布（.data）：浏览 / 可视编辑渲染画布模块，保存由组件自己回写文件（内容经 file-saved 同步回标签） -->
+              <DataCanvasModule v-if="isDataFile && isDataContentView(viewName)" :task-file-path="activeFilePath" mode="full" @file-saved="onDataCanvasSaved" />
+              <md_read v-if="!isExcalidrawFile && !isDrawioFile && !isMediaFile && !isFlowDslFile && !isDataFile && viewName===VIEW_BROWSE&&hasActiveFile" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
               <md_mind v-if="!isExcalidrawFile && !isDrawioFile && viewName===VIEW_MINDMAP&&store.index!=null" />
               <md_ppt v-if="!isExcalidrawFile && !isDrawioFile && viewName===VIEW_PRESENTATION&&store.index!=null" />
               <Edit_Code v-if="!isExcalidrawFile && !isDrawioFile && viewName===VIEW_SOURCE&&store.index!=null" />
-              <Edit_Block v-if="!isExcalidrawFile && !isDrawioFile && viewName===VIEW_VISUAL&&store.index!=null" />
+              <Edit_Block v-if="!isExcalidrawFile && !isDrawioFile && !isFlowDslFile && !isDataFile && viewName===VIEW_VISUAL&&store.index!=null" />
             </div>
             <!-- 视图之间的拖拽手柄 -->
             <div v-if="vi < getVisibleViews().length - 1"
@@ -141,13 +113,13 @@
   import {usestore} from '@/store'
   import { FILE_VIEW_NAMES, NON_BROWSE_FILE_VIEWS, VIEW_BROWSE, VIEW_SOURCE, VIEW_VISUAL, VIEW_MINDMAP, VIEW_PRESENTATION } from '@/lib/knowFile/fileViews'
   import { isDrawioFile as detectDrawioFile } from '@/shared/drawioFile'
+  import { isFlowDslPath } from '@/shared/flowFile'
   import { ElMessageBox, ElMessage } from 'element-plus'
   import { downloadRemoteFile } from '@/platform/remoteFs'
   
   import view_file from '@/components/knowFile/view/view_file.vue'
   import view_kanban from '@/components/knowFile/view/view_kanban.vue'
   import view_graph from '@/components/knowFile/view/view_graph.vue'
-  import view_gantt from '@/components/knowFile/view/view_gantt.vue'
   import view_year from '@/components/knowFile/view/view_year.vue'
   import view_map from '@/components/knowFile/view/view_map.vue'
   import view_table from '@/components/knowFile/view/view_table.vue'
@@ -164,12 +136,17 @@
   const Drawio = defineAsyncComponent(() => import('@/components/knowFile/view/Drawio.vue'))
   // 音视频多媒体播放器（懒加载，音视频文件统一用它打开）
   const Media = defineAsyncComponent(() => import('@/components/knowFile/view/Media.vue'))
+  // 工作流编辑器（懒加载，Dify DSL 文件 .flow.yml / .flow.yaml）
+  const WorkflowEditor = defineAsyncComponent(() => import('@/workflow/ui/WorkflowEditor.vue'))
+  // 数据画布（懒加载，.data 文件的数据建模 / 录入 / 看板视图）
+  const DataCanvasModule = defineAsyncComponent(() => import('@/components/DataCanvas/DataCanvasModule.vue'))
   
   import panel from '@/components/knowFile/panel.vue'
+  import ViewToolbar from '@/components/knowFile/ViewToolbar.vue'
   import search from '@/components/knowFile/search.vue'
   
   const store = usestore();
-  const tabsContainer = ref<HTMLElement | null>(null);
+
   const mode = ref('file');
   // 文件树面板引用（用于刷新左侧文件树）
   const panelRef = ref<any>(null);
@@ -190,7 +167,8 @@
   const leftWidth = ref<number>(270);
   const minLeftWidth = 230;
   const maxLeftWidth = 900;
-  let isDragging = false;
+  // 拖动面板宽度时用它屏蔽拖拽条的 left 过渡（否则拖拽条会滞后于面板边缘）
+  const isDragging = ref(false);
 
   // 各视图大小（flex basis, px），水平布局按宽度，垂直布局按高度
   const viewSizes = ref<Record<string, number>>({})
@@ -206,6 +184,18 @@
     if (v === VIEW_BROWSE) return hasActiveFile.value
     return true
   })
+
+  // 知识管理的「全局视图」：这些视图共用同一条顶部工具栏（路径面包屑 + 搜索 + 刷新），
+  // 所以工具栏在 explorer 里只渲染一次（多视图并排时不会每个视图各来一条）
+  const GLOBAL_VIEWS = ['文件', '看板', '表格', '图谱', '地图', '日历']
+  const visibleGlobalViews = computed(() => getVisibleViews().filter(v => GLOBAL_VIEWS.includes(v)))
+  // 只有「地图」没有搜索需求：可见的全局视图只剩地图时就不显示搜索框
+  const viewToolbarSearchable = computed(() => visibleGlobalViews.value.some(v => v !== '地图'))
+  // 工具栏是否显示：有可见的全局视图就显示；即使一个全局视图都没开（但已打开工作区）也要显示 ——
+  // 视图选择就在这条工具栏上（见 ViewToolbar.vue），否则关掉全部全局视图后就没有入口再打开
+  const viewToolbarVisible = computed(() =>
+    !!visibleGlobalViews.value.length || !!store.root
+  )
 
   // 获取视图尺寸，返回 flex 样式
   const getViewStyle = (name: string) => {
@@ -283,20 +273,20 @@
   }
 
   const startDrag = (e: MouseEvent) => {
-    isDragging = true;
+    isDragging.value = true;
     document.body.style.userSelect = 'none';
     window.addEventListener('mousemove', onDrag);
     window.addEventListener('mouseup', stopDrag);
   };
 
   const onDrag = (e: MouseEvent) => {
-    if (!isDragging) return;
+    if (!isDragging.value) return;
     const newWidth = Math.max(minLeftWidth, Math.min(maxLeftWidth, e.clientX));
     leftWidth.value = newWidth;
   };
 
   const stopDrag = () => {
-    isDragging = false;
+    isDragging.value = false;
     document.body.style.userSelect = '';
     window.removeEventListener('mousemove', onDrag);
     window.removeEventListener('mouseup', stopDrag);
@@ -385,7 +375,7 @@
       const inf = await window.ipcRenderer.invoke('getInf', path); //获取信息
       const attributes = await window.ipcRenderer.invoke('getConfig', path); //获取属性
       const fileContent = await window.ipcRenderer.invoke('readFile', path)
-      // 按文件操作模式打开：新窗口模式 → 独立窗口；窗口内模式 → 标签页
+      // 打开文件：一律用独立窗口打开（原「窗口内打开」模式已去掉）
       store.openFileByMode({
         ...inf,
         type: 'file',
@@ -435,9 +425,9 @@
       const rel = cur.remoteRel || cur.label || 'file'
       const localPath = await downloadRemoteFile(root, rel, store.root)
       ElMessage.success(store.locales === 'zh' ? ('已下载到: ' + localPath) : ('Downloaded: ' + localPath))
-      // 下载后打开本地副本（以编辑；知识库 .kb 由 openInApp 统一跳转知识处理）
+      // 下载后打开本地副本（以编辑；知识库 .kb 由 openFileByMode 统一跳转知识处理）
       const ext = (cur.extension || '').toLowerCase()
-      store.openInApp({ path: localPath, label: (localPath.replace(/\\/g, '/').split('/').pop() || ''), type: 'file', extension: ext })
+      store.openFileByMode({ path: localPath, label: (localPath.replace(/\\/g, '/').split('/').pop() || ''), type: 'file', extension: ext })
     } catch (e: any) {
       ElMessage.error(store.locales === 'zh' ? ('下载失败: ' + (e?.message || '')) : ('Download failed: ' + (e?.message || '')))
     }
@@ -523,107 +513,38 @@
     return FILE_VIEW_NAMES.includes(name)
   };
 
-  // 新增：清空所有标签的方法
-  const clearAllTabs = async function() {
-    // 只有当标签数量大于1时才执行
-    if (store.data.length <= 1) {
-      return;
-    }
-    
-    // 添加确认对话框，避免误操作
-    try {
-      await ElMessageBox.confirm(`确定要关闭所有 ${store.data.length} 个标签页吗？`, '提示', {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning'
-      })
-      // 使用动画效果关闭所有标签
-      const tabs = document.querySelectorAll('.App_tab');
-      tabs.forEach(tab => {
-        tab.classList.add('closing');
-      });
-      
-      // 等待动画完成
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      // 清除所有标签
-      store.data.splice(0, store.data.length);
-      
-      // 重置状态
-      store.index = null;
-      store.path = '';
-    } catch {}
+  // 计算属性：当前激活文件是否为 Dify DSL 工作流（.flow.yml / .flow.yaml）
+  const isFlowDslFile = computed(() => {
+    if (!hasActiveFile.value) return false
+    const cur = store.data[store.index!]
+    if (!cur) return false
+    return isFlowDslPath(cur.path) || isFlowDslPath(cur.extension)
+  });
+
+  // 工作流：浏览 / 可视编辑渲染流程画布；源码编辑按 YAML 文本打开
+  const isFlowContentView = (name: string) => {
+    return name === VIEW_BROWSE || name === VIEW_VISUAL
   };
 
-  // 视图管理面板（默认关闭，点击顶部眼睛按钮开关；面板渲染在 panel.vue 的 list scoll 上方）
-  const viewsPopover = ref(false);
+  // 计算属性：当前激活文件是否为数据画布（.data）
+  const isDataFile = computed(() => {
+    if (!hasActiveFile.value) return false
+    const cur = store.data[store.index!]
+    if (!cur) return false
+    return String(cur.extension || '').toLowerCase() === '.data' || String(cur.path || '').toLowerCase().endsWith('.data')
+  });
 
-  // 平均分配所有视图尺寸（清空保存的视图尺寸，全部等分）
-  const resetViewSizes = () => {
-    viewSizes.value = {}
-    try { localStorage.setItem('explorerViewSizes', JSON.stringify(viewSizes.value)) } catch (e) {}
-    store.resize()
+  // 数据画布：浏览 / 可视编辑渲染画布模块（内含 主页 / 数据 / 画布 / 帮助 四个子标签）；源码编辑保持 JSON 文本
+  const isDataContentView = (name: string) => {
+    return name === VIEW_BROWSE || name === VIEW_VISUAL
   };
 
-  // 选择文件
-  const selectFile = function(index: number) {
-    if (index >= 0 && index < store.data.length) {
-      store.index = index;
-      const cur = store.data[store.index]
-      // 选中远程标签 = 视为「窗口内打开」：清除快速预览标记（显示远程只读条）；远程路径不改变本地导航
-      if (cur && cur.isRemote === true) {
-        if (cur.quickPreview) cur.quickPreview = false
-        return
-      }
-      if (cur && cur.type == 'file') {
-        store.path = cur.path.substring(0, cur.path.lastIndexOf('\\'));
-      } else if (cur) {
-        store.path = cur.path;
-      }
-    }
-  };
-
-  // 关闭文件
-  const close = async function(event: Event, index: number) {
-    event.stopPropagation();
-    
-    if (index < 0 || index >= store.data.length) {
-      return;
-    }
-    
-    // 添加关闭动画
-    const tabElement = event.currentTarget as HTMLElement;
-    const tab = tabElement.closest('.App_tab');
-    if (tab) {
-      tab.classList.add('closing');
-      
-      // 等待动画完成
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-    
-    store.data.splice(index, 1);
-    
-    if (store.data.length == 0) {
-      store.index = null;
-    } else {
-      if (store.index == index) {
-        store.index = Math.max(0, Math.min(index, store.data.length - 1));
-        if (store.data[store.index] && store.data[store.index].type == 'file') {
-          store.path = store.data[store.index].path.substring(0, store.data[store.index].path.lastIndexOf('\\'));
-        } else if (store.data[store.index]) {
-          store.path = store.data[store.index].path;
-        }
-      } else if (store.index > index) {
-        store.index -= 1;
-      }
-    }
-  };
-  
-  const handleWheel = function(event: WheelEvent) {
-    if (tabsContainer.value) {
-      tabsContainer.value.scrollLeft += event.deltaY;
-      event.preventDefault();
-    }
+  /** 数据画布保存成功：把写盘内容同步回打开的标签，并通知其它窗口（避免再读一次大文件） */
+  const onDataCanvasSaved = (path: string, content?: string) => {
+    if (!path || typeof content !== 'string') return
+    const tab = (store.data || []).find((item: any) => item && item.path === path)
+    if (tab) tab.content = content
+    window.ipcRenderer?.invoke('notify-file-changed', { path, content }).catch(() => {})
   };
 </script>
 
@@ -636,29 +557,7 @@
     overflow: hidden; /* 防止整体溢出 */
   }
 
-  .top-panel{
-    width:100%;
-    height:40px;
-    line-height:40px;
-    border-bottom:1px solid var(--borderColor);
-    user-select: none;
-    display: flex;
-    flex-shrink: 0;
-  }
-
-  .home{
-    position: relative; /* 为视图管理悬浮面板提供定位参考 */
-    display: flex;
-    align-items: center;
-    line-height: normal;
-    text-align: center;
-    font-size: 16px;
-    color: var(--fontColor);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
-  /* 新窗口模式：4 按钮组与视图下拉/搜索框同一行（由 tree-toolbar flex-wrap 控制，窄时搜索框换行） */
+  /* 面板顶部 4 按钮组（工作区 / 打开文件 / 搜索 / 创建文件）：与搜索框同一行（见 panel.vue 的 .tree-toolbar） */
   .panel-home {
     display: flex;
     align-items: center;
@@ -688,146 +587,6 @@
     color: var(--fontActiveColor);
   }
 
-  .App_tabs {
-    white-space: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    line-height: normal;
-    scroll-behavior: smooth;
-    flex: 1;
-    display: flex;
-    align-items: flex-end;
-    padding: 0 3px;
-    flex-shrink: 0;
-  }
-
-  .App_tabs::-webkit-scrollbar {
-    display: none;
-  }
-
-  .tabs-wrapper {
-    display: flex;
-    align-items: flex-end;
-    flex-shrink: 0;
-    position: relative;
-    min-height: 35px;
-  }
-
-  .App_tab {
-    background-color: var(--backgroundColor);
-    border: 1px solid var(--borderColor);
-    border-bottom: 0px;
-    height: 35px;
-    min-width: fit-content;
-    max-width: 220px; /* 限制标签最大宽度 */
-    white-space: nowrap;
-    display: inline-flex;
-    align-items: center;
-    user-select: none;
-    padding: 0 8px;
-    margin-right: 5px;
-    border-radius: 5px 5px 0px 0px;
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: all 0.3s ease;
-    transform-origin: left center;
-    opacity: 1;
-    transform: scale(1);
-  }
-
-  /* 标签文字过长时用省略号截断 */
-  .App_tab .tab-label {
-    display: inline-block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 160px;
-    vertical-align: middle;
-  }
-
-  .App_tab.active {
-    background-color: var(--backgroundColor);
-    border-bottom: 0px;
-  }
-
-  .App_tab i:not(.fa-times) {
-    margin-right: 5px;
-  }
-
-  .App_tab .fa-times {
-    opacity: 0.6;
-    font-size: 12px;
-    margin-left: 5px;
-    transition: opacity 0.2s;
-  }
-
-  .App_tab .fa-times:hover {
-    opacity: 1;
-    transform: scale(1.1);
-  }
-
-  /* 标签添加动画 */
-  .tab-enter-active {
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    transition-delay: 0.1s;
-  }
-
-  .tab-leave-active {
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    position: absolute;
-    width: auto !important; /* 保持宽度 */
-  }
-
-  /* 修改这里：从下往上进入，从当前位置向下离开 */
-  .tab-enter-from {
-    opacity: 0;
-    transform: translateY(20px) scale(0.95);
-  }
-
-  .tab-leave-to {
-    opacity: 0;
-    transform: translateY(10px) scale(0.95);
-    margin-right: -100px; /* 让元素向右移动消失 */
-  }
-
-  .tab-enter-to,
-  .tab-leave-from {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-
-  .tab-move {
-    transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  }
-
-  @keyframes closeTab {
-    0% {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-    50% {
-      opacity: 0.5;
-      transform: translateY(5px) scale(0.97);
-    }
-    100% {
-      opacity: 0;
-      transform: translateY(15px) scale(0.9);
-      margin-right: -40px;
-      width: 0;
-      padding: 0;
-    }
-  }
-
-  /* 标签悬停效果 */
-  .App_tab:hover:not(.active) {
-    background-color: rgba(128, 128, 128, 0.1);
-    transform: translateY(-1px);
-  }
-
-  .App_tab.active:hover {
-    background-color: var(--backgroundColor);
-  }
-
   .explorer-container {
     display: flex;
     width: 100%;
@@ -837,7 +596,7 @@
     position: relative; /* 为绝对定位的 resizer 提供参考 */
   }
   
-  /* 左侧面板容器，宽度由 inline style 控制 */
+  /* 左侧面板容器，宽度由 --left-w 控制（收起 / 展开时过渡这个宽度做出滑出观感） */
   .left-wrap {
     height: 100%;
     overflow: hidden;
@@ -845,11 +604,23 @@
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    width: 200px;
+    width: var(--left-w, 200px);
+    min-width: 0;
+  }
+
+  /* 收起 / 展开动画：外层宽度 0 ↔ --left-w，内层面板保持原宽（被裁切而非被压扁） */
+  .left-wrap.left-panel-enter-active,
+  .left-wrap.left-panel-leave-active {
+    transition: width 0.22s ease, opacity 0.22s ease;
+  }
+  .left-wrap.left-panel-enter-from,
+  .left-wrap.left-panel-leave-to {
+    width: 0;
+    opacity: 0;
   }
 
   .left-panel {
-    width: 100%;
+    width: var(--left-w, 100%);
     min-width: 0;
     height: 100%;
     overflow: hidden;
@@ -863,9 +634,12 @@
     cursor: col-resize;
     background: transparent;
     z-index: 20;
-    transition: background-color 0.15s;
+    transition: background-color 0.15s, left 0.22s ease, opacity 0.22s ease;
     transform: translateX(-3px);
   }
+  .resizer.is-hidden { opacity: 0; pointer-events: none; }
+  /* 拖动宽度时去掉 left 过渡，拖拽条要贴着面板边缘即时跟手 */
+  .resizer.is-dragging { transition: background-color 0.15s; }
   .resizer:hover { background: rgba(0,0,0,0.04); }
 
   .right-content {
@@ -984,31 +758,6 @@
   }
   .view-resizer:hover::before { background: var(--borderColor); }
   
-  .button{
-    background-color: var(--backgroundColor);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 3px 8px;
-    transition: all 0.2s;
-  }
-  
-  .button.active {
-    background-color: var(--menuActiveColor);
-  }
-  
-  /* 新增：禁用状态样式 */
-  .button.disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    pointer-events: none;
-  }
-  
-  .button:not(.disabled):hover {
-    background-color: var(--menuHoverColor);
-    transform: translateY(-1px);
-  }
-
   /* 模糊搜索窗口（类似设置界面，悬浮弹出） */
   .search-overlay {
     position: fixed;
@@ -1023,8 +772,8 @@
     background-color: rgba(0, 0, 0, 0.35);
   }
   .search-panel {
-    width: min(720px, calc(100% - 96px));
-    height: min(520px, calc(100% - 96px));
+    width: min(1200px, calc(100% - 48px));
+    height: min(820px, calc(100% - 48px));
     border-radius: 10px;
     overflow: hidden;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);

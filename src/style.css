@@ -801,6 +801,139 @@ p{
 }
 
 /* ==========================================================================
+   学习模块 Markdown 正文排版（.learn-md）
+   --------------------------------------------------------------------------
+   用途：练习卡「解析」「参考切片」、错题「AI 讲解」等面板里的 block_md 内容。
+   段落/列表/代码/mermaid 规则对齐 home.vue 的 .message-content（两者视觉一致）；
+   标题额外给面板级紧凑字号（同 .agent-question-markdown），避免全局 h1{2.2em} 与
+   浏览器默认 h2/h3 的大字号大边距把窄面板撑得很空。
+   ========================================================================== */
+.learn-md {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fontColor);
+  word-wrap: break-word;
+}
+.learn-md p {
+  margin: 4px 0;
+}
+.learn-md ul,
+.learn-md ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.learn-md li {
+  margin: 2px 0;
+  padding-left: 0;
+}
+.learn-md li > p {
+  margin: 0.1em 0;
+}
+.learn-md li > p:first-child {
+  margin-top: 0;
+}
+.learn-md li > p:last-child {
+  margin-bottom: 0;
+}
+.learn-md ul ul,
+.learn-md ol ol,
+.learn-md ul ol,
+.learn-md ol ul {
+  margin: 0;
+}
+.learn-md h1,
+.learn-md h2,
+.learn-md h3,
+.learn-md h4,
+.learn-md h5,
+.learn-md h6 {
+  margin: 8px 0 3px;
+  line-height: 1.3;
+  color: var(--fontActiveColor);
+}
+.learn-md h1 { font-size: 15px; }
+.learn-md h2 { font-size: 14px; }
+.learn-md h3 { font-size: 13px; }
+.learn-md h4,
+.learn-md h5,
+.learn-md h6 { font-size: 12.5px; }
+.learn-md > :first-child { margin-top: 0; }
+.learn-md > :last-child { margin-bottom: 0; }
+.learn-md strong { color: var(--fontActiveColor); }
+.learn-md a { color: #2196F3; }
+.learn-md blockquote {
+  margin: 4px 0;
+  padding: 2px 8px;
+  border-left: 3px solid var(--borderColor);
+  opacity: 0.85;
+}
+.learn-md hr {
+  border: none;
+  border-top: 1px solid var(--borderColor);
+  margin: 6px 0;
+}
+.learn-md code {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11.5px;
+  background: var(--menuColor);
+  color: var(--fontActiveColor);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.learn-md pre {
+  background: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 4px 0;
+  overflow-x: auto;
+}
+.learn-md pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  display: block;
+  white-space: pre;
+}
+.learn-md table {
+  border-collapse: collapse;
+  margin: 4px 0;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.learn-md th,
+.learn-md td {
+  border: 1px solid var(--borderColor);
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.learn-md th {
+  background: var(--menuColor);
+  color: var(--fontActiveColor);
+}
+/* 图（mermaid / 图片）在窄面板里自适应宽度 */
+.learn-md img,
+.learn-md svg {
+  max-width: 100%;
+  height: auto;
+}
+.learn-md .mermaid-wrapper {
+  margin: 8px 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.learn-md .mermaid-rendered-svg {
+  overflow-x: auto;
+  padding: 6px;
+}
+.learn-md .mermaid-rendered-svg svg {
+  display: block;
+  margin: 0 auto;
+}
+
+/* ==========================================================================
    highlight.js 全局自适应主题
    --------------------------------------------------------------------------
    nnfx-dark.min.css 被多个组件全局 import，其 .hljs-attr/.hljs-tag 等为白色、
@@ -838,7 +971,9 @@ pre.hljs .hljs-name {
    均能加载 .context-menu / .menu-item / .submenu 等类名样式。
    ========================================================================== */
 .context-menu {
-  z-index: 9999;
+  /* 必须高于各视图的「跟随鼠标悬浮提示」（panel.vue / view_file / view_table / fileView 的
+     文件信息 tooltip 均为 z-index: 99999），否则右键菜单会被文件信息盖住 */
+  z-index: 100000;
   background-color: var(--backgroundColor);
   position: fixed;
   display: flex;
@@ -954,6 +1089,281 @@ pre.hljs .hljs-name {
 .submenu-left {
   left: auto !important;
   right: 100% !important;
+}
+
+/* ==========================================================================
+   知识管理模块：紧凑右键菜单
+   --------------------------------------------------------------------------
+   知识管理里的右键菜单统一成「看板卡片菜单」的紧凑样式（12px 字号 / 24px 行高 /
+   168px 起宽），与 view_kanban.vue 的卡片菜单视觉一致。
+   作用域 = 主窗口 explorer.vue 根节点与独立文件窗口 FileWindow.vue 根节点上的
+   .knowfile-menu；其它模块（主页聊天 / 内置浏览器 / 知识处理 / 学习等）的菜单保持原样。
+   ========================================================================== */
+.knowfile-menu .context-menu {
+  min-width: 168px;
+  padding: 4px;
+  background-color: var(--menuColor);
+  font-size: 12px;
+  user-select: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+.knowfile-menu .context-menu .menu-item,
+.knowfile-menu .context-menu .submenu li:not(.menu-divider) {
+  height: 24px;
+  padding: 0 8px;
+  gap: 6px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+.knowfile-menu .context-menu .menu-item:hover,
+.knowfile-menu .context-menu .submenu li:not(.menu-divider):hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+
+.knowfile-menu .context-menu .menu-item i,
+.knowfile-menu .context-menu .submenu li i {
+  width: 12px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+/* 需要占满剩余宽度并省略的菜单文字（如「移入「状态」」「新窗口打开」） */
+.knowfile-menu .context-menu .menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 当前生效项（单选类菜单） */
+.knowfile-menu .context-menu .menu-item.current,
+.knowfile-menu .context-menu .submenu li.current {
+  color: var(--fontActiveColor);
+  font-weight: 600;
+}
+
+.knowfile-menu .context-menu .menu-item.menu-danger:hover {
+  color: #e74c3c;
+}
+
+.knowfile-menu .context-menu .menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  padding: 0;
+  background: var(--borderColor);
+  border-radius: 0;
+}
+
+/* 二级 / 三级菜单：与父项紧贴（left:100% 不留缝隙，否则鼠标跨过空隙会丢掉 hover 导致菜单收起） */
+.knowfile-menu .context-menu .has-submenu .submenu,
+.knowfile-menu .context-menu .submenu .has-submenu > .submenu {
+  min-width: 132px;
+  padding: 4px;
+  border-radius: 6px;
+  background-color: var(--menuColor);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+/* 只有「叶子」子菜单才限制高度并内部滚动：带下级菜单的层一旦成为滚动容器，
+   就会裁剪绝对定位的三级菜单（出现滚动条、且三级菜单难以命中） */
+.knowfile-menu .context-menu .submenu:not(:has(.submenu)) {
+  max-height: 260px;
+  overflow-y: auto;
+  /* 只做纵向滚动：另一轴留 visible 时浏览器会把它提升成 auto，长标签会撑出横向滚动条 */
+  overflow-x: clip;
+}
+
+/* ==========================================================================
+   知识管理：条目「颜色」子菜单（看板卡片菜单 / 日历条目菜单共用）
+   色卡本身来自 lib/knowFile/itemMeta.ts 的预设色板（随主题切换两套色）
+   ========================================================================== */
+.kb-swatches {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  padding: 4px 6px;
+}
+.kb-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  /* 边框用主题边框色：深色主题的深色色卡也能看清（纯黑边框在深色底上会消失） */
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.kb-swatch:hover {
+  transform: scale(1.12);
+}
+.kb-swatch.current {
+  box-shadow: 0 0 0 2px var(--fontActiveColor);
+}
+/* 自定义颜色 / 清除颜色：整行可点，原生取色器铺满该行 */
+.kb-color-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  margin-top: 2px;
+  padding: 0 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fontColor);
+  cursor: pointer;
+}
+.kb-color-row:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.kb-color-row i {
+  width: 12px;
+  font-size: 11px;
+  text-align: center;
+  opacity: 0.75;
+}
+/* 当前颜色值（十六进制）：贴在该行右侧 */
+.kb-color-hex {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+.kb-color-row input[type='color'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* ==========================================================================
+   知识管理：时间编辑浮层（看板卡片 / 列表行「设置时间」、日历条目「设置时间」共用）
+   浮层根类名固定为 .kb-date-edit，内部行样式统一 .de-*；看板的新建卡片面板复用同一套行样式
+   ========================================================================== */
+.kb-date-edit,
+.kb-card-new {
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  user-select: none;
+  font-size: 12px;
+}
+.kb-date-edit {
+  position: fixed;
+  z-index: 30;
+  width: 208px;
+  padding: 8px;
+  box-sizing: border-box;
+}
+:is(.kb-date-edit, .kb-card-new) .de-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+  color: var(--fontActiveColor);
+}
+:is(.kb-date-edit, .kb-card-new) .de-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:is(.kb-date-edit, .kb-card-new) .de-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 4px 0 0;
+  padding: 0px;
+}
+:is(.kb-date-edit, .kb-card-new) .de-label {
+  flex: 0 0 58px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+:is(.kb-date-edit, .kb-card-new) .de-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  outline: none;
+  margin: 0px;
+}
+:is(.kb-date-edit, .kb-card-new) .de-input:hover,
+:is(.kb-date-edit, .kb-card-new) .de-input:focus {
+  border-color: var(--fontActiveColor);
+}
+:is(.kb-date-edit, .kb-card-new) .de-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+:is(.kb-date-edit, .kb-card-new) .de-btn {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 3px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.9;
+}
+:is(.kb-date-edit, .kb-card-new) .de-btn:hover:not(:disabled) {
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+:is(.kb-date-edit, .kb-card-new) .de-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+:is(.kb-date-edit, .kb-card-new) .de-btn.primary {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+/* 浮层右上角的关闭按钮（与状态分类面板的按钮同一观感） */
+:is(.kb-date-edit, .kb-card-new) .de-close {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 3px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.9;
+}
+:is(.kb-date-edit, .kb-card-new) .de-close:hover {
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
 }
 
 /* 字符串 / 正则 / 增补 / 属性名 / HTML 属性名 / 元信息字符串（蓝绿） */

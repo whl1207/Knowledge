@@ -1,8 +1,10 @@
 <script setup lang="ts">
   import * as d3 from 'd3';
-  import { onMounted,onBeforeUnmount,ref, nextTick,watch } from 'vue'
+  import { onMounted,onBeforeUnmount,ref, computed, nextTick,watch } from 'vue'
   import { usestore } from '@/store'
+  import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
   import { ElMessage, ElMessageBox } from 'element-plus'
+  import { parseSearchQuery, matchSearchTerms } from '@/lib/knowFile/itemSearch'
   const store=usestore()
   const graphContainer = ref<HTMLElement | null>(null);
 
@@ -14,20 +16,20 @@
     nodes:[],
     links:[]
   }) as any
+  let linkSVG=ref(null) as any //svg中的边
+  let nodeSVG=ref(null) as any //svg中的节点
+  let labelSVG=ref(null) as any //svg中的标签
+  let zoomLayer=ref(null) as any //承载缩放/平移的图层：节点/边/标签都在其中（拖动与点击坐标因此天然在图数据坐标系里）
   const zoom = d3.zoom<SVGSVGElement, unknown>()
     .scaleExtent([0.1, 10])
     .on('zoom', (event: any) => {
-      nodeSVG.value.attr('transform', event.transform);
-      linkSVG.value.attr('transform', event.transform);
-      labelSVG.value.attr('transform', event.transform);
+      // 只变换这一个图层：逐个元素设 transform 时，每次缩放要写 N×3 个属性（大图卡顿、跟手差）
+      zoomLayer.value?.attr('transform', event.transform);
     });
   const  svg = d3.select(graphContainer.value).append('svg')
     .attr('width', width.value)
     .attr('height', height.value)
     .call(zoom);
-  let linkSVG=ref(null) as any //svg中的边
-  let nodeSVG=ref(null) as any //svg中的节点
-  let labelSVG=ref(null) as any //svg中的标签
   
   let layoutType = ref("force") //布局类型
   let panelType = ref("")
@@ -38,6 +40,11 @@
   let showHierarchy = ref(true)
   // 文件引用关系（由 computeFileReferences 生成）
   let fileReferenceLinks = ref<any[]>([])
+  
+  // 点击节点高亮其关联节点
+  const selectedNodeId = ref<any>(null) // 当前高亮节点（null = 未选中）
+  let selectedKey: string | null = null // 选中节点的稳定标识（数据重载后 id 会重建，用它续上）
+  let renderedLinks: any[] = [] // 当前已绘制的边（含层级/属性/引用边），用于计算邻居
   
   // 右键菜单
   const contextMenu = ref({
@@ -140,14 +147,19 @@
     })
   }
   
-  // 打开节点（文件/文件夹）
+  // 打开节点（文件/文件夹）：与文件树面板（panel.vue）双击一致，
+  // 文件统一交给 store.openFileByMode 调度——按「设置 → 文件操作」的打开方式打开，
+  // 并统一处理特殊类型（.kb → 知识处理、.task → Agent脚手架、.html → 内置浏览器、
+  // .flow / .data / .excalidraw / .drawio 走各自的文件视图、可执行与压缩包交系统应用），
+  // 不再按扩展名分流到系统默认应用。
   const openNode = function(d: any) {
     if (!d.path) return
-    const ext = d.extension || d.path?.substring(d.path.lastIndexOf('.')) || ''
-    if (ext === '.md') {
-      store.openFileByMode({ path: d.path, label: d.label, type: d.type, extension: ext })
-    } else {
+    // 文件夹没有对应的应用内视图：交系统文件管理器打开（与表格视图一致）
+    if (d.type === 'folder') {
       store.openByApp(d.path)
+    } else {
+      const ext = d.extension || d.path.substring(d.path.lastIndexOf('.')) || ''
+      store.openFileByMode({ path: d.path, label: d.label, type: d.type, extension: ext })
     }
     hideContextMenu()
   }
@@ -168,7 +180,7 @@
       if (trimmed === d.label) return
       const result = await window.ipcRenderer.invoke('renameFile', d.path, trimmed)
       if (result.success) {
-        await init()
+        await init(true)
         ElMessage.success('重命名成功')
       } else {
         ElMessage.error(`重命名失败: ${result.error}`)
@@ -192,7 +204,7 @@
       const result = await window.ipcRenderer.invoke('deleteFile', d.path)
       if (result) {
         hideContextMenu()
-        await init()
+        await init(true)
         ElMessage.success('删除成功')
       }
     } catch (error) {
@@ -275,13 +287,21 @@
     }
   }
   
-  const init = async function(){
+  const init = async function(refreshReferences = false){
     if (graphContainer.value) {
       await nextTick()
+      if (!graphContainer.value) return // 等待期间视图已卸载/隐藏
       width.value = graphContainer.value.offsetWidth
       height.value = graphContainer.value.offsetHeight
       try {
         await loadFile()
+        // 引用关系按节点 id 关联，数据重新载入后 id 全部重建：不重算会连到错误节点
+        // （节点数变少时甚至会因 id 缺失让 forceLink 直接报错）
+        if (refreshReferences && showBidirectionalLinks.value) {
+          fileReferenceLinks.value = await computeFileReferences()
+        }
+        // 异步读取期间视图可能已卸载/隐藏：此时重绘会留下无法停止的力导向模拟
+        if (!graphContainer.value) return
         renderGraph()
         resize()
         getAttributes()
@@ -291,18 +311,22 @@
     }
   }
   // 图谱搜索：按名称过滤节点并裁剪其关联边，随后重绘
-  const graphQuery = ref('')
+  // 搜索词来自顶部工具栏（explorer 里统一渲染，各全局视图共用一份）
+  const graphQuery = computed(() => store.knowQuery)
   let graphSearchTimer: any = null
   const fullGraphNodes: any[] = []
   const fullGraphLinks: any[] = []
   const syncGraphView = function () {
-    const q = graphQuery.value.trim().toLowerCase()
-    if (!q) {
+    const terms = parseSearchQuery(graphQuery.value)
+    if (!terms.length) {
       data.value.nodes = fullGraphNodes
       data.value.links = fullGraphLinks
       return
     }
-    const nodes = fullGraphNodes.filter((n: any) => String(n.label || n.name || '').toLowerCase().includes(q))
+    // 与其它视图同一套搜索语法（文件名 / 路径 / 属性值）
+    const nodes = fullGraphNodes.filter((n: any) =>
+      matchSearchTerms({ label: n.label ?? n.name, path: n.path, attributes: n.attributes }, terms)
+    )
     const kept = new Set<any>(nodes.map((n: any) => n.id))
     data.value.nodes = nodes
     data.value.links = fullGraphLinks.filter((l: any) => {
@@ -321,7 +345,7 @@
   })
 
   const loadFile=async function(){
-    let { fileList, relationList } = await window.ipcRenderer.invoke("getFilesRelation", store.root, deep.value);
+    let { fileList, relationList } = await window.ipcRenderer.invoke("getFilesRelation", store.dataDir, deep.value);
     fileList=fileList.map((obj: any,index:number)  => {
       return proxyToRegular({ ...obj  });
     })
@@ -460,35 +484,73 @@
     })
   }
 
+  // ---- 节点样式与「点击高亮关联节点」 ----
+  const HIGHLIGHT_COLOR = '#ff9800'
+  const nodeBaseR = (d: any) => d.type === 'folder' ? 7 : d.type === 'file' ? 6 : 4
+  const nodeBaseFill = (d: any) => d.type === 'folder' ? '#50c878' : d.type === 'file' ? '#4a9eff' : '#ff9a4a'
+  const nodeBaseStroke = (d: any) => d.type === 'folder' ? '#3a9e5e' : d.type === 'file' ? '#2a7ed6' : '#d47a2a'
+  // 稳定标识：文件夹/文件用路径，属性节点用「类型 + 名称」
+  const nodeKey = (n: any) => n.path ? 'p:' + n.path : 'a:' + n.type + ':' + n.label
+  const linkEndIds = (l: any) => [l.source?.id ?? l.source, l.target?.id ?? l.target]
+
+  // 按当前选中节点重刷高亮：关联节点/相连边保持高亮，其余淡出；未选中时全部还原
+  const applyHighlight = function(){
+    const nodes = nodeSVG.value
+    if (!nodes) return
+    const links = linkSVG.value
+    const labels = labelSVG.value
+    const selId = selectedNodeId.value
+
+    nodes.attr('r', nodeBaseR).attr('fill', nodeBaseFill).attr('stroke', nodeBaseStroke)
+      .attr('stroke-width', 1.5).attr('opacity', 1)
+    labels?.attr('opacity', 1)
+    links?.attr('stroke-opacity', (l: any) => l.type === 'reference' ? 0.7 : 0.6)
+      .attr('stroke-width', (l: any) => l.type === 'reference' ? 1.5 : Math.sqrt(l.value || 1))
+    if (selId == null) return
+
+    const related = new Set<any>([selId])
+    renderedLinks.forEach((l: any) => {
+      const [s, t] = linkEndIds(l)
+      if (s === selId) related.add(t)
+      else if (t === selId) related.add(s)
+    })
+
+    nodes.attr('opacity', (d: any) => related.has(d.id) ? 1 : 0.15)
+      .attr('r', (d: any) => d.id === selId ? nodeBaseR(d) + 3 : nodeBaseR(d))
+      .attr('stroke', (d: any) => related.has(d.id) ? HIGHLIGHT_COLOR : nodeBaseStroke(d))
+      .attr('stroke-width', (d: any) => d.id === selId ? 3 : related.has(d.id) ? 2.5 : 1.5)
+    labels?.attr('opacity', (d: any) => related.has(d.id) ? 1 : 0.15)
+    links?.attr('stroke-opacity', (l: any) => {
+      const [s, t] = linkEndIds(l)
+      return (s === selId || t === selId) ? 1 : 0.08
+    }).attr('stroke-width', (l: any) => {
+      const [s, t] = linkEndIds(l)
+      const base = l.type === 'reference' ? 1.5 : Math.sqrt(l.value || 1)
+      return (s === selId || t === selId) ? base + 1 : base
+    })
+  }
+
+  // 点击节点：再次点击同一节点或点击空白处取消
+  const toggleNodeSelection = function(d: any){
+    const key = nodeKey(d)
+    if (selectedKey === key) {
+      selectedKey = null
+      selectedNodeId.value = null
+    } else {
+      selectedKey = key
+      selectedNodeId.value = d.id
+    }
+    applyHighlight()
+  }
+
+  const clearNodeSelection = function(){
+    if (selectedKey === null) return
+    selectedKey = null
+    selectedNodeId.value = null
+    applyHighlight()
+  }
+
   const renderGraph=function(){
-    function svgDragstarted(event: any) {
-        // 在拖动开始时，记录当前的鼠标位置和 SVG 元素的当前位置
-        event.subject.startX = event.x;
-        event.subject.startY = event.y;
-        event.subject.fx = event.subject.x;
-        event.subject.fy = event.subject.y;
-      }
-
-      function svgDragged(event: any) {
-        // 计算鼠标移动的距离
-        const dx = event.x - event.subject.startX;
-        const dy = event.y - event.subject.startY;
-
-        // 更新 SVG 元素的位置
-        event.subject.fx += dx;
-        event.subject.fy += dy;
-      }
-
-      function svgDragended(event: any) {
-        // 在拖动结束时，清除固定的位置
-        event.subject.fx = null;
-        event.subject.fy = null;
-      }
-      const svgDrag: any = d3.drag()
-                        .on('start', svgDragstarted)
-                        .on('drag', svgDragged)
-                        .on('end', svgDragended)
-
       const existingSvg = d3.select(graphContainer.value).select("svg");
       if (existingSvg) {
         existingSvg.remove();
@@ -499,6 +561,15 @@
                     .attr('height', height.value)
                     .call(zoom); // 调用拖动事件
       
+      // 所有图元放在同一个图层里：缩放/平移只改这一层，拖动与点击坐标天然等于图数据坐标
+      const rootG = svg.append('g');
+      zoomLayer.value = rootG;
+      // 只有点在空白画布上才取消高亮（点在节点 / 边 / 标签上不处理）
+      svg.on('click', (event: MouseEvent) => {
+        if ((event.target as Element)?.tagName !== 'svg') return;
+        clearNodeSelection();
+      });
+      
       if (simulation) simulation.stop();
       
       // 合并参考链接到数据中
@@ -508,6 +579,7 @@
       if (showBidirectionalLinks.value && fileReferenceLinks.value.length > 0) {
         allLinks = [...allLinks, ...fileReferenceLinks.value]
       }
+      renderedLinks = allLinks
 
       if (layoutType.value === "force") {
         simulation = d3.forceSimulation<any, any>(data.value.nodes)
@@ -547,7 +619,7 @@
         .attr("d", "M0,-5L10,0L0,5")
         .attr("fill", "#999")
       //定义线条     
-      linkSVG.value = svg.selectAll('line')
+      linkSVG.value = rootG.selectAll('line')
                       .data(allLinks)
                       .enter().append('line')
                       .attr('stroke', (d: any) => d.style?.stroke || '#999')
@@ -579,29 +651,33 @@
         .on('end', dragended);
 
       if(layoutType.value === "force"){
-        nodeSVG.value = svg.selectAll<SVGCircleElement, any>('circle')
+        nodeSVG.value = rootG.selectAll<SVGCircleElement, any>('circle')
                       .data(data.value.nodes)
                       .enter().append('circle')
-                      .attr('r', (d: any) => d.type === 'folder' ? 7 : d.type === 'file' ? 6 : 4)
-                      .attr('fill', (d: any) => d.type === 'folder' ? '#50c878' : d.type === 'file' ? '#4a9eff' : '#ff9a4a')
-                      .attr('stroke', (d: any) => d.type === 'folder' ? '#3a9e5e' : d.type === 'file' ? '#2a7ed6' : '#d47a2a')
+                      .attr('r', nodeBaseR)
+                      .attr('fill', nodeBaseFill)
+                      .attr('stroke', nodeBaseStroke)
                       .attr('stroke-width', 1.5)
+                      .style('cursor', 'pointer')
                       .call(drag as d3.ValueFn<SVGCircleElement, any, any> ,0, [])
+                      .on('click', (_event: MouseEvent, d: any) => toggleNodeSelection(d))
                       .on('dblclick', nodeDblClick)
                       .on('contextmenu', (event: MouseEvent, d: any) => showNodeContextMenu(event, d))
                       .on('mouseover', (event: MouseEvent, d: any) => showTooltip(event, d))
                       .on('mousemove', (event: MouseEvent) => updateTooltipPos(event))
                       .on('mouseleave', hideTooltip)
       }else{ // 静态布局：圆形/树状/同心圆/网格
-        nodeSVG.value = svg.selectAll<SVGCircleElement, any>('circle')
+        nodeSVG.value = rootG.selectAll<SVGCircleElement, any>('circle')
                       .data(data.value.nodes)
                       .enter().append('circle')
-                      .attr('r', (d: any) => d.type === 'folder' ? 7 : d.type === 'file' ? 6 : 4)
-                      .attr('fill', (d: any) => d.type === 'folder' ? '#50c878' : d.type === 'file' ? '#4a9eff' : '#ff9a4a')
-                      .attr('stroke', (d: any) => d.type === 'folder' ? '#3a9e5e' : d.type === 'file' ? '#2a7ed6' : '#d47a2a')
+                      .attr('r', nodeBaseR)
+                      .attr('fill', nodeBaseFill)
+                      .attr('stroke', nodeBaseStroke)
                       .attr('stroke-width', 1.5)
+                      .style('cursor', 'pointer')
                       .attr('cx', (d: any) => d.x) // 使用固定的x位置
                       .attr('cy', (d: any) => d.y) // 使用固定的y位置
+                      .on('click', (_event: MouseEvent, d: any) => toggleNodeSelection(d))
                       .on('dblclick', nodeDblClick)
                       .on('contextmenu', (event: MouseEvent, d: any) => showNodeContextMenu(event, d))
                       .on('mouseover', (event: MouseEvent, d: any) => showTooltip(event, d))
@@ -609,7 +685,7 @@
                       .on('mouseleave', hideTooltip);
       }
       // 添加节点标签
-      labelSVG.value = svg.selectAll('.label')
+      labelSVG.value = rootG.selectAll('.label')
         .data(data.value.nodes)
         .enter().append('text')
         .attr('class', 'label')
@@ -637,41 +713,32 @@
                .attr('y', (d: any) => d.y);
         });
       }
+
+      // 数据重载后 id 会重建：按稳定标识重新定位选中节点（找不到说明该节点已消失）
+      if (selectedKey) {
+        const hit = data.value.nodes.find((n: any) => nodeKey(n) === selectedKey)
+        selectedNodeId.value = hit ? hit.id : null
+        if (!hit) selectedKey = null
+      }
+      applyHighlight()
         
       function dragstarted(event: any) {
         if (!event.active) simulation.alphaTarget(0.1).restart();
-        
-        // 获取当前的缩放变换
-        const transform = d3.zoomTransform(svg.node() as SVGSVGElement);
-        
-        // d3-drag 的坐标已经考虑了缩放，需要转换回原始坐标系
-        // 节点的 fx/fy 应该设置为原始坐标系中的位置
         event.subject.fx = event.subject.x;
         event.subject.fy = event.subject.y;
       }
 
       function dragged(event: any) {
-        if (event.subject) {
-          // 获取当前的缩放变换
-          const transform = d3.zoomTransform(svg.node() as SVGSVGElement);
-          
-          // 将拖动坐标从缩放坐标系转换回原始坐标系
-          // 使用逆变换：原始坐标 = (缩放坐标 - 平移量) / 缩放比例
-          const originalX = (event.x - transform.x) / transform.k;
-          const originalY = (event.y - transform.y) / transform.k;
-          
-          // 更新节点位置到原始坐标系
-          event.subject.fx = originalX;
-          event.subject.fy = originalY;
-        }
+        if (!event.subject) return;
+        // event.x/y = 图数据坐标，且已包含「按下时鼠标 → 节点中心」的偏移（d3-drag 内置），直接赋值即精确跟手；
+        // 旧实现按缩放做逆变换，把已经换算过的坐标又换算了一次 → 缩放/平移后越拖越偏
+        event.subject.fx = event.x;
+        event.subject.fy = event.y;
       }
 
       function dragended(event: any) {
         if (!event.active) simulation.alphaTarget(0);
-        if (event.subject) {
-          event.subject.fx = null;
-          event.subject.fy = null;
-        }
+        // 松手后保持固定在该位置：力导向不再把节点拉回原位（重新读取数据或换布局时自动复位）
       }
   }
   
@@ -957,21 +1024,10 @@ const expandAttribute=async function(indexParam:string|number,state:number){
     tooltipData.value = null
   }
 
-  // 双击文件节点打开文件
-  const nodeDblClick = function(event: any, d: any) {
+  // 双击文件节点打开文件：与右键「打开」走同一条路径，一律在独立窗口打开
+  const nodeDblClick = function(_event: any, d: any) {
     if (d.type !== 'file' && d.type !== 'folder') return
-    if (!d.path) return
-    const ext = d.extension || d.path?.substring(d.path.lastIndexOf('.')) || ''
-    if (ext === '.md') {
-      store.addTab({
-        path: d.path,
-        label: d.label,
-        type: d.type,
-        extension: ext
-      })
-    } else {
-      store.openByApp(d.path)
-    }
+    openNode(d)
   }
 
   // 计算文件树的最大深度
@@ -991,17 +1047,74 @@ const expandAttribute=async function(indexParam:string|number,state:number){
       maxDepth.value = Math.max(getMaxDepth(val), 1)
     }
   }, { immediate: true })
-  watch(()=>store.root, (newValue, oldValue) => {
-    init()
+
+  // ---- 文件系统变更 → 自动刷新图谱 ----
+  // 图谱数据由主进程实时读取目录（含 .md 的 frontmatter 属性与引用关系），
+  // 外部新增/删除/改名以及文件内容（属性、链接）变化都需要重读；主进程与 fileWatch
+  // 已各自去抖，这里再合并一次，避免连续写文件（如知识处理批量产出）时反复全量重绘。
+  const GRAPH_REFRESH_DEBOUNCE_MS = 600
+  let disposeFileWatch: (() => void) | null = null
+  let watchAcquired = false
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null
+  let refreshing = false
+  let refreshPending = false
+
+  const scheduleGraphRefresh = function(){
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null
+      void refreshGraph()
+    }, GRAPH_REFRESH_DEBOUNCE_MS)
+  }
+
+  // 重读数据并重绘；上一次重绘未结束时再次触发，合并为结束后的最后一次
+  const refreshGraph = async function(){
+    if (refreshing) {
+      refreshPending = true
+      return
+    }
+    refreshing = true
+    try {
+      await init(true)
+    } finally {
+      refreshing = false
+      if (refreshPending) {
+        refreshPending = false
+        scheduleGraphRefresh()
+      }
+    }
+  }
+
+  watch([()=>store.root, ()=>store.path], (newValue, oldValue) => {
+    init(true)
   })
+  // 顶部工具栏的「刷新」：重新拉取当前目录并重建图谱
+  watch(() => store.knowRefreshTick, () => { init(true) })
   onMounted(() => {
     init()
+    // 订阅文件系统变更：目录内容或文件内容变化时自动刷新图谱（与其它视图共享同一监听与去抖）
+    disposeFileWatch = onFileSystemChanged(() => { scheduleGraphRefresh() })
+    // 按租约参与目录监听：左侧面板收起（panel.vue 卸载）或图谱单列显示时仍能收到变更
+    if (store.roots?.length) {
+      watchAcquired = true
+      void acquireFileWatch([...store.roots])
+    }
     window.addEventListener('resize', resize)
     document.addEventListener('click', hideContextMenu)
     // 子菜单溢出检测
     document.addEventListener('mouseover', handleSubmenuOverflow)
   });
   onBeforeUnmount(() => {
+    disposeFileWatch?.()
+    disposeFileWatch = null
+    if (refreshTimer) {
+      clearTimeout(refreshTimer)
+      refreshTimer = null
+    }
+    if (watchAcquired) {
+      watchAcquired = false
+      releaseFileWatch()
+    }
     window.removeEventListener('resize', resize)
     document.removeEventListener('click', hideContextMenu)
     document.removeEventListener('mouseover', handleSubmenuOverflow)
@@ -1019,6 +1132,7 @@ const expandAttribute=async function(indexParam:string|number,state:number){
 
 <template >
   <div class="graph">
+    <!-- 顶部工具栏（路径面包屑 + 搜索）由 explorer.vue 统一渲染一条 -->
     <!-- 节点右键菜单 -->
     <div v-if="nodeCtxMenu.visible" class="context-menu" 
          :style="{ left: nodeCtxMenu.x + 'px', top: nodeCtxMenu.y + 'px' }">
@@ -1072,14 +1186,10 @@ const expandAttribute=async function(indexParam:string|number,state:number){
     <!-- 图形容器 -->
     <div ref="graphContainer" id="graphContainer" @click="closePanel"></div>
 
-    <!-- 底部状态栏：布局/深度/开关/字段设置 + 节点统计 -->
+    <!-- 底部状态栏：布局/深度/开关/字段设置 + 节点统计（路径与搜索在顶部工具栏） -->
     <div class="graph-statusbar">
-      <div class="statusbar-search" @click.stop :title="store.locales=='zh'?'搜索节点':'Search nodes'">
-        <i class="fa fa-search"></i>
-        <input v-model="graphQuery" :placeholder="store.locales=='zh'?'搜索节点…':'Search…'" @keydown.stop @keyup.esc="graphQuery=''"/>
-        <i v-if="graphQuery" class="fa fa-times" @click="graphQuery=''" :title="store.locales=='zh'?'清除搜索':'Clear'"></i>
-      </div>
-      <span class="statusbar-sep"></span>
+      <span v-if="store.folderName" class="statusbar-item status-folder" :title="store.dataDir" style="max-width:220px"><i class="fa fa-folder-open-o"></i><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ store.folderName }}</span></span>
+      <span v-if="store.folderName" class="statusbar-sep"></span>
       <button class="statusbar-btn" @click="resetView()" :title="store.locales=='zh'?'聚焦视图':'Reset view'"><i class="fa fa-arrows-alt"></i></button>
       <span class="statusbar-sep"></span>
       <span class="statusbar-item"><i class="fa fa-share-alt"></i> {{ store.locales=='zh'?'布局':'Layout' }}</span>
@@ -1091,7 +1201,7 @@ const expandAttribute=async function(indexParam:string|number,state:number){
         <option value="grid">{{ store.locales=='zh'?'网格':'Grid' }}</option>
       </select>
       <span class="statusbar-item"><i class="fa fa-sitemap"></i> {{ store.locales=='zh'?'深度':'Depth' }}</span>
-      <select class="statusbar-select" v-model.number="deep" @change="init()" :title="store.locales=='zh'?'读取深度':'Read depth'">
+      <select class="statusbar-select" v-model.number="deep" @change="init(true)" :title="store.locales=='zh'?'读取深度':'Read depth'">
         <option v-for="d in maxDepth" :key="d" :value="d">{{ d }}</option>
       </select>
       <button class="statusbar-btn" :class="{ active: showHierarchy }" @click="toggleHierarchy()"
@@ -1187,14 +1297,7 @@ const expandAttribute=async function(indexParam:string|number,state:number){
     border-bottom: 1px solid var(--borderColor);
   }
   
-  /* 右键菜单样式统一在 explorer.vue 中定义 */
-  /* 菜单宽度覆盖 */
-  .context-menu {
-    min-width: 200px;
-  }
-  .has-submenu .submenu {
-    min-width: 160px;
-  }
+  /* 右键菜单样式统一在 style.css（.context-menu + 知识管理紧凑变体）中定义 */
   
   /* 右下角节点统计 */
   .node-stats {
@@ -1277,16 +1380,4 @@ const expandAttribute=async function(indexParam:string|number,state:number){
   .graph-statusbar .statusbar-select option{
     background: var(--backgroundColor); color: var(--fontColor);
   }
-  .graph-statusbar .statusbar-search {
-    display: inline-flex; align-items: center; gap: 4px;
-    height: 18px; padding: 0 6px; box-sizing: border-box;
-    border: 1px solid var(--borderColor); border-radius: 3px;
-    background: var(--backgroundColor); color: var(--fontColor); flex-shrink: 0;
-  }
-  .graph-statusbar .statusbar-search i { font-size: 10px; opacity: 0.6; cursor: pointer; }
-  .graph-statusbar .statusbar-search input {
-    width: 120px; height: 100%; border: none; outline: none;
-    background: transparent; color: var(--fontColor); font-size: 11px; padding: 0;
-  }
-  .graph-statusbar .statusbar-search input::placeholder { color: var(--borderColor); }
 </style>

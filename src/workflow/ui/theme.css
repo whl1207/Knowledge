@@ -1,0 +1,249 @@
+/*
+ * theme.css — 工作流 UI 主题层（唯一配色来源）
+ *
+ * 只做三件事：
+ *  1) 把 APP 主题变量（store.setTheme 写在 <html> 上：--backgroundColor / --menuColor /
+ *     --menuActiveColor / --fontColor / --fontActiveColor / --borderColor）映射成 --wf-* 语义变量，
+ *     18 套预设主题（含深色）自动跟随，不写任何按主题分支的样式；
+ *  2) 覆盖 Vue Flow 自带样式里写死的浅色（连线 / 手柄 / 小地图 / 缩放控件 / 网格点）；
+ *  3) 提供组件间共用的派生色（弱化文字、下沉底、状态色、阴影），避免各文件各写一份 color-mix。
+ *
+ * 约定：组件样式只允许使用 --wf-*；确实需要「随主题反相」的节点主色时用
+ * color-mix(in srgb, var(--node-color) 82%, var(--wf-text))，浅色主题加深、深色主题提亮。
+ */
+
+:root {
+  /* ── 底 / 面 ── */
+  --wf-bg: var(--backgroundColor, #ffffff); /* 画布底 */
+  --wf-surface: var(--menuColor, #f6f8fa); /* 卡片 / 面板 / 弹层底 */
+  --wf-surface-2: var(--menuActiveColor, #cde4ff); /* 悬浮 / 选中底 */
+  --wf-sunken: color-mix(in srgb, var(--fontColor, #1f2328) 7%, var(--menuColor, #f6f8fa)); /* 代码块 / 只读区 */
+
+  /* ── 文字 ── */
+  --wf-text: var(--fontColor, #1f2328);
+  --wf-text-soft: color-mix(in srgb, var(--fontColor, #1f2328) 78%, transparent);
+  --wf-text-dim: color-mix(in srgb, var(--fontColor, #1f2328) 55%, transparent);
+
+  /* ── 线 ── */
+  --wf-border: var(--borderColor, #d0d7de);
+  --wf-border-soft: color-mix(in srgb, var(--borderColor, #d0d7de) 60%, transparent);
+
+  /* ── 强调 / 交互 ── */
+  --wf-accent: var(--fontActiveColor, #03254d);
+  --wf-hover: color-mix(in srgb, var(--fontActiveColor, #03254d) 12%, transparent);
+  /* 实心强调底上的文字：浅色主题用画布白、深色主题用画布深色，两边都保证对比度 */
+  --wf-on-accent: var(--backgroundColor, #ffffff);
+  --wf-accent-text: color-mix(in srgb, var(--fontActiveColor, #03254d) 82%, var(--wf-text));
+  --wf-accent-soft: color-mix(in srgb, var(--fontActiveColor, #03254d) 22%, transparent);
+  --wf-focus-ring: 0 0 0 2px color-mix(in srgb, var(--fontActiveColor, #03254d) 28%, transparent);
+
+  /* ── 状态色（深浅主题都保证可读：文字色与底色分别朝主题文字 / 面板底靠拢）── */
+  --wf-running: color-mix(in srgb, #2563eb 85%, var(--wf-text));
+  --wf-success: color-mix(in srgb, #16a34a 85%, var(--wf-text));
+  --wf-danger: color-mix(in srgb, #dc2626 85%, var(--wf-text));
+  --wf-warning: color-mix(in srgb, #d97706 85%, var(--wf-text));
+  --wf-skipped: color-mix(in srgb, var(--fontColor, #1f2328) 38%, transparent);
+  --wf-danger-bg: color-mix(in srgb, #dc2626 14%, var(--wf-surface));
+  --wf-warning-bg: color-mix(in srgb, #d97706 16%, var(--wf-surface));
+  --wf-success-bg: color-mix(in srgb, #16a34a 14%, var(--wf-surface));
+  --wf-info-bg: color-mix(in srgb, var(--fontActiveColor, #03254d) 12%, var(--wf-surface));
+
+  /* ── 阴影 / 画布细节 ── */
+  --wf-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  --wf-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.14);
+  --wf-canvas-dot: color-mix(in srgb, var(--fontColor, #1f2328) 24%, transparent);
+  --wf-edge: color-mix(in srgb, var(--fontColor, #1f2328) 34%, transparent);
+  --wf-edge-selected: var(--wf-accent);
+  --wf-handle: color-mix(in srgb, var(--fontColor, #1f2328) 40%, transparent);
+}
+
+/* ==================== Vue Flow 自带样式覆盖 ==================== */
+
+/* 连线：默认 stroke 写死 #b1b1b7，选中态也是写死的 #555 */
+.wf-editor .vue-flow__edge-path {
+  stroke: var(--wf-edge);
+  stroke-width: 1.6;
+}
+
+.wf-editor .vue-flow__edge.selected .vue-flow__edge-path,
+.wf-editor .vue-flow__edge:focus .vue-flow__edge-path,
+.wf-editor .vue-flow__edge:focus-visible .vue-flow__edge-path {
+  stroke: var(--wf-edge-selected);
+  stroke-width: 2;
+}
+
+.wf-editor .vue-flow__edge:hover .vue-flow__edge-path {
+  stroke: var(--wf-accent);
+}
+
+.wf-editor .vue-flow__connection-path {
+  stroke: var(--wf-accent);
+  stroke-width: 1.6;
+}
+
+.wf-editor .vue-flow__edge-text {
+  fill: var(--wf-text-soft);
+  font-size: 10px;
+}
+
+.wf-editor .vue-flow__edge-textbg {
+  fill: var(--wf-surface);
+}
+
+/* 端口：默认无背景色（仅默认节点类型才着色），自定义节点必须显式给色，否则不可见 */
+.wf-editor .vue-flow__handle {
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--wf-surface);
+  border-radius: 50%;
+  background: var(--node-accent, var(--wf-handle));
+}
+
+.wf-editor .vue-flow__handle:hover {
+  background: var(--wf-accent);
+}
+
+/* 网格背景：颜色由组件的 pattern 子元素属性写死为浅灰，改用 CSS 覆盖（属性优先级低于 CSS） */
+.wf-editor .vue-flow__background pattern circle {
+  fill: var(--wf-canvas-dot);
+}
+
+.wf-editor .vue-flow__background pattern path {
+  stroke: var(--wf-canvas-dot);
+}
+
+/* 小地图：背景 / 视窗遮罩 / 节点块都为写死的浅色 */
+.wf-editor .vue-flow__minimap {
+  border: 1px solid var(--wf-border);
+  border-radius: 6px;
+  background-color: var(--wf-surface);
+  /* 缩略图四周留 5px，紧贴画布右下角 */
+  margin: 5px;
+}
+
+.wf-editor .vue-flow__minimap-mask {
+  fill: color-mix(in srgb, var(--wf-bg) 72%, transparent);
+  stroke: var(--wf-border);
+}
+
+.wf-editor .vue-flow__minimap-node {
+  fill: color-mix(in srgb, var(--wf-text) 45%, var(--wf-surface));
+  stroke: none;
+}
+
+/* 缩放控件：按钮底 / 分割线 / 图标 fill 都是写死的浅色 */
+.wf-editor .vue-flow__controls {
+  border: 1px solid var(--wf-border);
+  border-radius: 6px;
+  box-shadow: var(--wf-shadow-sm);
+  overflow: hidden;
+}
+
+.wf-editor .vue-flow__controls-button {
+  border-bottom: 1px solid var(--wf-border);
+  background: var(--wf-surface);
+  fill: var(--wf-text);
+}
+
+.wf-editor .vue-flow__controls-button:hover {
+  background: var(--wf-surface-2);
+}
+
+.wf-editor .vue-flow__controls-button svg {
+  fill: var(--wf-text);
+}
+
+/* 框选矩形 */
+.wf-editor .vue-flow__nodesselection-rect {
+  border: 1px dashed var(--wf-accent);
+  background: var(--wf-hover);
+}
+
+/* ==================== 滚动条 ==================== */
+
+/*
+ * 模块内的自建滚动区域一律加 .scoll（style.css 里软件统一的滚动条：5px 滑块，
+ * 轨道 --menuColor / 滑块 --menuActiveColor，拖拽时按方向切光标），这里只补两类拿不到 class 的：
+ *  1) Element Plus 文本域的内层 textarea（class 挂在 wrapper 上，无法直接加 .scoll）；
+ *  2) el-scrollbar（下拉 / 弹层内部滚动条）的滑块配色。
+ */
+.wf-props .el-textarea__inner,
+.wf-run .el-textarea__inner,
+.wf-dialog .el-textarea__inner {
+  scrollbar-width: thin;
+  scrollbar-color: var(--menuActiveColor) var(--menuColor);
+}
+
+.wf-props .el-textarea__inner::-webkit-scrollbar,
+.wf-run .el-textarea__inner::-webkit-scrollbar,
+.wf-dialog .el-textarea__inner::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.wf-props .el-textarea__inner::-webkit-scrollbar-track,
+.wf-run .el-textarea__inner::-webkit-scrollbar-track,
+.wf-dialog .el-textarea__inner::-webkit-scrollbar-track {
+  background-color: var(--menuColor);
+}
+
+.wf-props .el-textarea__inner::-webkit-scrollbar-thumb,
+.wf-run .el-textarea__inner::-webkit-scrollbar-thumb,
+.wf-dialog .el-textarea__inner::-webkit-scrollbar-thumb {
+  background-color: var(--menuActiveColor);
+}
+
+/* el-scrollbar 滑块（面板里的下拉、节点选择器弹层等） */
+.wf-props .el-scrollbar__thumb,
+.wf-run .el-scrollbar__thumb,
+.wf-picker .el-scrollbar__thumb,
+.wf-dialog .el-scrollbar__thumb {
+  background-color: var(--menuActiveColor);
+}
+
+/* ── 应用设置弹窗：收紧 Element Plus 的默认留白（原来四周空太多）── */
+.wf-dialog {
+  --el-dialog-padding-primary: 12px;
+}
+
+.wf-dialog .el-dialog__header {
+  padding: 10px 14px 8px;
+  margin-right: 0;
+  border-bottom: 1px solid var(--wf-border);
+}
+
+.wf-dialog .el-dialog__title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.wf-dialog .el-dialog__headerbtn {
+  top: 8px;
+  right: 8px;
+}
+
+.wf-dialog .el-dialog__body {
+  padding: 6px 14px 12px;
+}
+
+.wf-dialog .el-tabs__header {
+  margin-bottom: 8px;
+}
+
+.wf-dialog .el-tabs__item {
+  height: 30px;
+  font-size: 13px;
+  line-height: 30px;
+}
+
+.wf-dialog .el-tabs__nav-wrap::after {
+  height: 1px;
+}
+
+.wf-dialog .wf-field {
+  margin-bottom: 8px;
+}
+
+.wf-dialog .wf-field__hint {
+  margin-top: 2px;
+}

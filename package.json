@@ -1,6 +1,6 @@
 {
   "name": "knowledge",
-  "version": "6.9.24",
+  "version": "6.10.9",
   "main": "dist-electron/main/index.js",
   "description": "AI Knowledge management Software",
   "author": "whl",
@@ -174,6 +174,23 @@
           "name": "draw.io Diagram",
           "description": "draw.io Diagram",
           "role": "Editor"
+        },
+        {
+          "ext": [
+            "flow",
+            "workflow"
+          ],
+          "name": "AI-KM Workflow",
+          "description": "AI-KM Workflow Diagram",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "data"
+          ],
+          "name": "AI-KM Data Canvas",
+          "description": "AI-KM Data Canvas",
+          "role": "Editor"
         }
       ]
     },
@@ -182,6 +199,9 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "${productName}_v${version}_Portable.${ext}"
     },
     "linux": {
       "target": [
@@ -226,11 +246,16 @@
     "@types/js-yaml": "^4.0.9",
     "@types/leaflet": "^1.9.12",
     "@types/markdown-it": "^14.1.2",
+    "@vue-flow/background": "^1.3.2",
+    "@vue-flow/controls": "^1.1.3",
+    "@vue-flow/core": "^1.48.2",
+    "@vue-flow/minimap": "^1.5.4",
     "d3": "^7.9.0",
     "draggable": "^4.2.0",
     "element-plus": "^2.8.0",
     "highlight.js": "^11.10.0",
     "jsplumb": "^2.15.6",
+    "katex": "^0.16.47",
     "leaflet": "^1.9.4",
     "localforage": "^1.10.0",
     "mammoth": "^1.8.0",
@@ -239,6 +264,7 @@
     "markdown-it-mark": "^4.0.0",
     "markdown-it-mathjax3": "^4.3.2",
     "markdown-it-toc-and-anchor": "^4.2.0",
+    "markmap-html-parser": "0.17.0",
     "markmap-lib": "^0.17.0",
     "markmap-view": "^0.17.0",
     "mermaid": "^11.16.0",

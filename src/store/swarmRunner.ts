@@ -36,10 +36,15 @@ import {
   settings, executionOrder, agentStepViews, selectedStepKey, stepFollowUserPicked,
   agentStepSeq, agentViewSeq, attachedSwarmViews, invocationRunStates, summonedMembers,
   runEpoch,
+  swarmRunChatId,
+  setSwarmRunChatId,
 } from '@/store/swarmState'
 import { getSkillPrompt } from '@/composables/swarm/useSwarmAgents'
+import { ensureRoom, buildMembers, startEpisode, endEpisode, roomOf, setMemberSession, setMemberStatus, noteMemberTool, noteMemberTokens, pushMessage, addArtifact } from '@/store/swarmRoom'
+import { readyTaskIds, tasksSettled, describeBoard } from '@/lib/agent/teamProtocol'
+import type { SwarmRoom } from '@/types/swarmRoom'
 // 消息写入对话（与普通/智能体模式同一套消息与渲染）
-import { pushMemberMessage, pushUserTaskMessage, pushSystemMessage, finishMemberMessage, swarmRunChat } from '@/composables/swarm/useSwarmChat'
+import { pushMemberMessage, pushUserTaskMessage, pushSystemMessage, pushSwarmMessage, finishMemberMessage, swarmRunChat } from '@/composables/swarm/useSwarmChat'
 // 会话视图 → 消息投影（与 useAgentRun 共用同一实现，工具调用/思考样式天然一致）
 import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos } from '@/lib/agent/projection'
 import type { ChatMessage } from '@/types/chat'
@@ -250,6 +255,10 @@ function waitForBridgeCompletion(
     const handledAsks = new Set<string>()
     /** 已收集来源的 kb_search 调用 */
     const processedKb = new Set<string>()
+    /** 项目组：已计入活动的工具调用 id（防重复计数） */
+    const recordedTools = new Set<string>()
+    /** 项目组：该会话已计入的累计 token（取增量） */
+    let usageSeen = 0
     /** 运行代际是否仍有效（未切换对话/集群） */
     const alive = () => runEpoch.value === myEpoch
     const finish = (fn: () => void) => {
@@ -289,6 +298,42 @@ function waitForBridgeCompletion(
         projectUsage(msg, v)
       }
       if (alive() && chat) projectTodos(chat, v)
+      // 项目组工作台活动指标：工具次数 / 累计 token（对齐 cc-haha 活动面板）
+      if (alive() && settings.value?.collabMode === 'team') {
+        const r = roomOf(swarmRunChatId.value || '')
+        if (r) {
+          const step = v.steps[v.steps.length - 1]
+          const tc = step?.toolCalls?.[step.toolCalls.length - 1]
+          if (tc && tc.status !== 'running' && tc.callId && !recordedTools.has(tc.callId)) {
+            recordedTools.add(tc.callId)
+            noteMemberTool(r, agentIdx, tc.name)
+            // 产出物：登记到房间 + 任务，并在群聊里放一张产物卡片（正文不进上下文）
+            if (tc.name === 'post_artifact') {
+              const raw: any = tc.result
+              const v: any = (raw && typeof raw === 'object' && raw.value) ? raw.value : raw
+              if (v && typeof v === 'object' && v.path) {
+                const art = addArtifact(r, {
+                  name: String(v.name || ''),
+                  path: String(v.path),
+                  bytes: Number(v.bytes) || 0,
+                  taskId: r.members[agentIdx]?.currentTaskId,
+                  agentIdx,
+                })
+                pushSwarmMessage({
+                  role: 'system',
+                  content: '',
+                  timestamp: Date.now(),
+                  swarmArtifact: { name: art.name, path: art.path, bytes: art.bytes },
+                })
+              }
+            }
+          }
+          if (typeof v.usageTotal === 'number' && v.usageTotal > usageSeen) {
+            noteMemberTokens(r, agentIdx, v.usageTotal - usageSeen)
+            usageSeen = v.usageTotal
+          }
+        }
+      }
       // 状态投影（工具调用中 / 思考中）
       const st = alive() ? agentRunStates.value[agentIdx] : undefined
       if (st && v.status === 'running') {
@@ -453,7 +498,7 @@ async function executeAgent(agentIdx: number, prompt: string, opts: AgentRunOpts
     const { provider, config, llmConfig } = isGeneric
       ? buildProviderConfig(store.AIconfig.llm.type)
       : buildProviderConfig(a.llmType, a.model)
-    const tools = isGeneric ? [] : buildSwarmTools(a)
+    const tools = isGeneric ? [] : [...buildSwarmTools(a), ...(opts.extraTools || [])]
     const mcp = isGeneric ? null : agentMcpConfig(a)
     const options: AgentOptions = {
       systemPrompt: sysContent,
@@ -491,6 +536,11 @@ async function executeAgent(agentIdx: number, prompt: string, opts: AgentRunOpts
   setAgentState(agentIdx, { agentId: view.id })
   activeAgentSessions.add(view.id)
   attachedSwarmViews.add(view.id)
+  // 项目组（Agent Teams）：登记成员会话（协议工具 send_message 据此投递）
+  if (settings.value?.collabMode === 'team') {
+    const r = roomOf(swarmRunChatId.value || '')
+    if (r) setMemberSession(r, agentIdx, view.id)
+  }
   // 会话序号已在入口分配（与执行时间线条目 seq 对应），这里建立 view → 调用 的映射
   agentViewSeq.value[view.id] = { agentIdx, seq }
 
@@ -538,6 +588,171 @@ const retrieveKnowledgeForAgent = async (agent: SwarmAgent, query: string, kbFil
 }
 
 // ---------------------------------------------------------------------------
+// 项目组（Agent Teams）：Lead 编排 + 共享任务板
+// 设计见 docs/plan/群聊-AgentTeams-实施设计（逐文件）.md
+// ---------------------------------------------------------------------------
+
+/** Lead 专属协议工具 */
+const TEAM_LEAD_TOOLS = [
+  'team_spawn', 'team_task_create', 'team_task_list', 'team_task_update', 'team_task_delete', 'team_shutdown', 'team_delete', 'post_artifact',
+]
+/** 成员协议工具 */
+const TEAM_MEMBER_TOOLS = ['send_message', 'team_task_list', 'team_task_update', 'team_task_claim', 'post_artifact']
+
+/** 执行一个任务：派给其负责人，回写任务板 */
+async function runTeamTask(ctx: SwarmRuntimeContext, room: SwarmRoom, taskId: string): Promise<void> {
+  const t = room.tasks.find((x) => x.id === taskId)
+  if (!t || t.status === 'done') return
+  if (t.assignee === undefined) {
+    // 未指派：轮流分给「非 Lead」成员，避免所有任务都压到 Lead 身上
+    const leadIdx = room.episode?.leadIdx ?? 0
+    const pool = room.members.filter((m) => m.idx !== leadIdx)
+    const list = pool.length ? pool : room.members
+    if (!list.length) return
+    t.assignee = list[room.tasks.filter((x) => x.assignee !== undefined).length % list.length].idx
+  }
+  t.status = 'running'
+  t.startedAt = Date.now()
+  setMemberStatus(room, t.assignee, 'running', { currentTaskId: t.id })
+  const upstream = t.deps
+    .map((d) => room.tasks.find((x) => x.id === d))
+    .filter(Boolean)
+    .map((d: any) => `【${d.id} ${d.title}】\n${d.output || '（无产出）'}`)
+    .join('\n\n')
+  const prompt = [
+    `## 团队任务 ${t.id}：${t.title}`,
+    t.prompt,
+    upstream ? `\n## 上游任务产出（依赖已完成）\n${upstream}` : '',
+    `\n完成后请调用 team_task_update(id="${t.id}", status="done", output="<简要结论>") 回写任务板；长产出（报告/代码/数据）请用 post_artifact 落成文件、output 只写摘要；需要同事配合时用 send_message。`,
+  ].filter(Boolean).join('\n')
+  try {
+    const out = await ctx.runAgent(t.assignee, prompt, { role: 'worker', stage: `任务 ${t.id}`, extraTools: TEAM_MEMBER_TOOLS })
+    if ((t.status as string) !== 'done') { t.output = String(out || '').slice(0, 2000); t.status = 'done' }
+    t.endedAt = Date.now()
+  } catch (e: any) {
+    t.status = 'error'
+    t.error = e?.message || String(e)
+    t.endedAt = Date.now()
+  } finally {
+    setMemberStatus(room, t.assignee, 'idle', { currentTaskId: undefined })
+  }
+  // 后台任务完成 → 通知 Lead（进通信流与群聊），让 Lead 知道可以继续推进
+  if (t.background) {
+    pushMessage(room, {
+      from: t.assignee ?? -1,
+      to: 'lead',
+      kind: 'inform',
+      summary: `后台任务 ${t.id}·${t.title} ${t.status === 'done' ? '已完成' : '失败'}`,
+    })
+  }
+}
+
+/**
+ * 项目组回合（Agent Teams）：
+ *   Lead 拆解（team_task_create）→ 调度 ready 任务（并发闸门内）→ Lead 交付。
+ * 终止由 teamProtocol 程序化判定（任务板收敛 + 无 in-flight），不依赖 LLM 自称完成。
+ */
+async function runEpisode(ctx: SwarmRuntimeContext, opts: { resume?: boolean } = {}): Promise<void> {
+  const zh = ctx.locale !== 'en'
+  const chatId = swarmRunChatId.value || ''
+  const room = ensureRoom(chatId, buildMembers(ctx.agentsOf.map((a) => ({ name: a.name, role: a.role, model: a.model }))))
+  const leadIdx = (() => {
+    const n = Number(ctx.settings?.managerAgentIdx)
+    return Number.isInteger(n) && n >= 0 && n < ctx.agentsOf.length ? n : 0
+  })()
+  const roster = ctx.agentsOf
+    .map((a, i) => `${i}. ${a.name}${a.role ? `（${a.role}）` : ''}${i === leadIdx ? ' ← Lead' : ''}`)
+    .join('\n')
+
+  if (opts.resume) {
+    // 断点续跑：不重新规划，把中断/失败的任务复位为可执行，直接进调度循环
+    for (const t of room.tasks) if (t.status === 'running' || t.status === 'error') t.status = 'ready'
+    if (room.episode) room.episode.status = 'running'
+    else startEpisode(room, ctx.task, leadIdx)
+  } else {
+    startEpisode(room, ctx.task, leadIdx)
+    // 1) Lead 拆解
+    ctx.setAgentState(leadIdx, { status: 'thinking', stage: zh ? '编排' : 'Plan' })
+    await ctx.runAgent(leadIdx, [
+    `## 用户目标`, ctx.task, '',
+    `## 团队成员（下标. 名称）`, roster, '',
+    `## 当前任务板`, describeBoard(room.tasks), '',
+    zh
+      ? '你是本回合的 Team Lead。若目标较复杂，请用 team_task_create 拆成有依赖的子任务（assignee 填**成员名**，deps 填任务 id）；请把任务分给最合适的成员，不要都留给自己。简单目标直接回答即可。成员完成后会更新任务板。'
+      : 'You are the Team Lead. For complex goals, split work with team_task_create (assignee = the member NAME, deps = task ids); assign each task to the most suitable member rather than keeping them all. For simple goals, just answer.',
+  ].join('\n'), { role: 'manager', stage: zh ? '编排' : 'Plan', extraTools: TEAM_LEAD_TOOLS })
+
+    // 1b) 兜底：Lead 未拆解任何任务（简单任务 / 弱模型）→ 全员各自作答，再由 Lead 交付
+    if (!room.tasks.length) {
+      for (const idx of ctx.selectedIndices) {
+        if (idx === leadIdx) continue
+        await ctx.runAgent(idx, `## 任务\n${ctx.task}\n\n请直接处理上面内容并给出你的结论。`, {
+          role: 'worker', stage: zh ? '协作' : 'Work', extraTools: TEAM_MEMBER_TOOLS,
+        })
+      }
+    }
+  }
+
+  // 2) 调度循环（并发闸门 + 后台任务）
+  const MAX_LOOPS = 24
+  let prevSig = ''
+  let stalled = 0
+  /** 在飞的后台任务：taskId → Promise（不阻塞主流程，但计入收尾判定） */
+  const bg = new Map<string, Promise<void>>()
+  const isBg = (id: string) => !!room.tasks.find((t) => t.id === id)?.background
+  for (let loop = 0; loop < MAX_LOOPS; loop++) {
+    const ready = readyTaskIds(room.tasks)
+    const fg = ready.filter((id) => !isBg(id))
+    const bgReady = ready.filter((id) => isBg(id))
+
+    // 后台任务：启动即返回（不 await），由调度器在收尾时统一等待
+    for (const id of bgReady) {
+      if (bg.has(id)) continue
+      bg.set(id, runTeamTask(ctx, room, id).finally(() => bg.delete(id)))
+    }
+
+    if (fg.length) {
+      await Promise.all(fg.slice(0, Math.max(1, room.maxInflight)).map((id) => runTeamTask(ctx, room, id)))
+    } else if (bg.size) {
+      // 只剩后台任务在跑：等一个先完成，避免空转
+      await Promise.race([...bg.values()])
+    }
+
+    if (!fg.length && !bg.size && !ready.length) {
+      if (tasksSettled(room.tasks)) break
+      // 有未完成但无 ready（依赖未满足/成环）：请 Lead 调整一次后退出
+      await ctx.runAgent(leadIdx, [
+        `## 任务板（存在卡住的任务，请检查依赖或改派）`, describeBoard(room.tasks), '',
+        zh ? '请调整依赖/负责人，或直接给出结论。' : 'Adjust deps/assignee, or conclude.',
+      ].join('\n'), { role: 'manager', stage: zh ? '调整' : 'Adjust', extraTools: TEAM_LEAD_TOOLS })
+      break
+    }
+
+    const sig = room.tasks.map((t) => `${t.id}:${t.status}`).join('|')
+    if (sig === prevSig) { if (++stalled >= 3) break } else { stalled = 0; prevSig = sig }
+  }
+  // 收尾：等剩余后台任务跑完（完成时已各自通知 Lead）
+  if (bg.size) await Promise.all([...bg.values()])
+
+  // 3) Lead 交付
+  ctx.setAgentState(leadIdx, { status: 'thinking', stage: zh ? '交付' : 'Deliver' })
+  await ctx.runAgent(leadIdx, [
+    `## 用户目标`, ctx.task, '',
+    `## 任务板`, describeBoard(room.tasks), '',
+    zh ? '请作为 Team Lead 汇总最终交付：结论、产出与遗留问题。' : 'As Team Lead, summarize the final deliverable: conclusions, outputs, open issues.',
+  ].join('\n'), { role: 'manager', stage: zh ? '交付' : 'Deliver', extraTools: TEAM_LEAD_TOOLS })
+
+  // Episode 结束：回收成员会话（决策：Episode 结束 dispose，释放资源）
+  for (const m of room.members) {
+    if (!m.sessionId) continue
+    try { await agentBridge.dispose(m.sessionId) } catch { /* 忽略 */ }
+    activeAgentSessions.delete(m.sessionId)
+    m.sessionId = undefined
+  }
+  endEpisode(room, 'done')
+}
+
+// ---------------------------------------------------------------------------
 // 运行入口：策略注册表分派
 // ---------------------------------------------------------------------------
 
@@ -546,7 +761,7 @@ const retrieveKnowledgeForAgent = async (agent: SwarmAgent, query: string, kbFil
  * @param rawTask 任务文本（由调用方从对话输入框捕获，集群不维护自己的输入状态）
  * @param modeOverride 本次临时覆盖的运行方式（缺省用集群默认模式）
  */
-export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode) => {
+export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode, opts: { resume?: boolean } = {}) => {
   const taskText = String(rawTask || '').trim()
   if (!taskText || !canRun.value) return
   // 本次运行所使用的模式：modeOverride 为本次临时覆盖（发送框），否则用默认模式
@@ -609,6 +824,7 @@ export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode) => 
   }
 
   try {
+    const useTeam = settings.value?.collabMode === 'team'
     const strategy = resolveSwarmStrategy(swarmMode.value)
     // 运行代际守卫：切换预案（runEpoch 递增）后，本次运行的策略不再向当前集群 UI 写入、
     // 也不再启动新 Agent 会话；已创建的主进程会话继续在后台完成（结果不污染新集群）。
@@ -620,7 +836,8 @@ export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode) => 
       runAgent: (i, p, o) => (alive() ? ctx.runAgent(i, p, o) : Promise.resolve('')),
       retrieveKnowledge: (ag, q, f) => (alive() ? ctx.retrieveKnowledge(ag, q, f) : Promise.resolve('')),
     }
-    await strategy.run(gctx)
+    if (useTeam) await runEpisode(gctx, opts)
+    else await strategy.run(gctx)
   } catch (err: any) {
     if (runEpoch.value === myEpoch) {
       addOutput('system', '错误', `${err?.message || err}`)
@@ -642,6 +859,22 @@ export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode) => 
     }
     setActiveSwarmJobId(null)
   }
+}
+
+// ---------------------------------------------------------------------------
+// 断点续跑（项目组）：保留的任务板继续跑未完成任务
+// ---------------------------------------------------------------------------
+
+export const resumeSwarm = async (chatId?: string): Promise<void> => {
+  if (running.value) return
+  if (chatId) setSwarmRunChatId(chatId)
+  const chat = swarmRunChat()
+  const msgs = ((chat?.messages || []) as any[])
+  const lastUser = [...msgs].reverse().find((m) => m.role === 'user' && m.content)
+  const goal = roomOf(chatId || swarmRunChatId.value || '')?.episode?.goal
+  const task = String(lastUser?.content || goal || '').trim()
+  if (!task) return
+  await runSwarm(task, undefined, { resume: true })
 }
 
 // ---------------------------------------------------------------------------

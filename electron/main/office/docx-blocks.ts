@@ -47,7 +47,7 @@ export function plainToRuns(text: string, rPr = ''): string {
 }
 
 /** 拆段落 xml → { openTag, pPr, rest }（rest 为去掉 pPr 后的段内内容） */
-function splitParagraph(pXml: string): { openTag: string; pPr: string; rest: string } {
+export function splitParagraph(pXml: string): { openTag: string; pPr: string; rest: string } {
   let openTag = ''
   let inner = ''
   if (/^<w:p\b[^>]*\/>\s*$/.test(pXml)) {
@@ -84,10 +84,17 @@ export interface DocxStyleInfo {
 
 let styleCatalogCache: { key: string; list: DocxStyleInfo[] } | null = null
 
-/** 解析 styles.xml，得到可用样式清单（带进程内缓存，键为 styles.xml 文本长度+样式数近似） */
+/** 内容近似哈希（避免 styles.xml 被改写但长度不变时命中陈旧缓存） */
+function quickHash(s: string): number {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  return h
+}
+
+/** 解析 styles.xml，得到可用样式清单（带进程内缓存） */
 export function styleCatalog(pkg: DocxPackage): DocxStyleInfo[] {
   const xml = pkg.entries.find(e => e.name === 'word/styles.xml')?.data.toString('utf8') || ''
-  const cacheKey = `${pkg.path}|${xml.length}`
+  const cacheKey = `${pkg.path}|${xml.length}|${quickHash(xml)}`
   if (styleCatalogCache && styleCatalogCache.key === cacheKey) return styleCatalogCache.list
   const list: DocxStyleInfo[] = []
   const re = /<w:style\b[^>]*>[\s\S]*?<\/w:style>/g
@@ -222,6 +229,11 @@ function refParagraph(layout: BodyLayout, index?: number): string {
   return first ? first.xml : ''
 }
 
+/** 新段落克隆参考段 pPr 时要去掉 w:sectPr（分节符属于「段落的页面设置」，复制会凭空多出一节） */
+function stripSectPr(pPr: string): string {
+  return pPr.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, '').replace(/<w:sectPr\b[^>]*\/>/g, '')
+}
+
 /** 计算插入偏移：position=before/after 以 index 为锚点；end 或无 index 时追加到正文末尾（sectPr 之前） */
 function anchorOffset(layout: BodyLayout, index: number | undefined, position: string | undefined): { at: number } | { error: string } {
   const pos = position || (index === undefined ? 'end' : 'after')
@@ -288,7 +300,7 @@ export function insertParagraph(pkg: DocxPackage, opts: { index?: number; positi
   if ('error' in off) return { ok: false, error: off.error }
   const ref = refParagraph(layout, opts.index)
   const { pPr, rest } = splitParagraph(ref)
-  let targetPPr = pPr
+  let targetPPr = stripSectPr(pPr)
   if (opts.headingLevel !== undefined || opts.style !== undefined) {
     let styleId: string | null | undefined
     if (opts.headingLevel !== undefined) {
@@ -300,7 +312,7 @@ export function insertParagraph(pkg: DocxPackage, opts: { index?: number; positi
       styleId = resolveStyleId(pkg, String(opts.style))
       if (!styleId) return { ok: false, error: `未找到样式「${opts.style}」` }
     }
-    targetPPr = withParagraphStyle(`<w:p>${pPr}</w:p>`, styleId).replace(/^<w:p>/, '').replace(/<\/w:p>$/, '')
+    targetPPr = withParagraphStyle(`<w:p>${targetPPr}</w:p>`, styleId).replace(/^<w:p>/, '').replace(/<\/w:p>$/, '')
   }
   const xml = buildParagraph(opts.text, targetPPr, firstRpr(rest))
   splice(pkg, off.at, off.at, xml)
@@ -433,10 +445,10 @@ export function insertMarkdown(pkg: DocxPackage, markdown: string, opts: { index
       xml += buildTableXml(b.rows, { header: true })
       continue
     }
-    let blockPPr = pPr
+    let blockPPr = stripSectPr(pPr)
     if (b.headingLevel !== undefined) {
       const styleId = b.headingLevel > 0 ? headingStyleId(pkg, b.headingLevel) : (resolveStyleId(pkg, 'Title') || 'Title')
-      blockPPr = withParagraphStyle(`<w:p>${pPr}</w:p>`, styleId).replace(/^<w:p>/, '').replace(/<\/w:p>$/, '')
+      blockPPr = withParagraphStyle(`<w:p>${blockPPr}</w:p>`, styleId).replace(/^<w:p>/, '').replace(/<\/w:p>$/, '')
     }
     xml += buildParagraph(b.text, blockPPr, rPr)
   }

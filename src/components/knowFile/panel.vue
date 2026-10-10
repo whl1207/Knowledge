@@ -1,17 +1,18 @@
 <script setup lang="ts">
   import { ref, watch, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-  import { usestore, markRawTree } from '@/store'
+  import { usestore, markRawTree, isPathInside } from '@/store'
   import { ElTree } from 'element-plus'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import type { RemoteRoot, RemoteFsNode } from '@/types/collab'
   import { fetchFsInfo, fetchFsList, fetchFsRead, downloadRemoteFile, remotePathOf } from '@/platform/remoteFs'
-  import { FILE_VIEWS as FILE_VIEWS_DEFS, FILE_VIEW_NAMES } from '@/lib/knowFile/fileViews'
-  import { newDrawioXml } from '@/shared/drawioFile'
+  import { FILE_VIEWS as FILE_VIEWS_DEFS } from '@/lib/knowFile/fileViews'
+  import { NEW_FILE_TYPES, newFileType, type NewFileTypeKey } from '@/lib/knowFile/newFileTypes'
+  import { FILE_SORT_ITEMS, fileTypeKey, type FileSortKey } from '@/lib/knowFile/fileSort'
+  // 文件系统变更：全局单例订阅 + 目录监听租约（见 lib/knowFile/fileWatch.ts）
+  import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
   
   const store = usestore()
-  // 视图管理面板显隐（由 explorer 顶部的眼睛按钮控制）
-  const props = defineProps<{ showViews?: boolean }>()
-  const emit = defineEmits<{ (e: 'reset-view-sizes'): void }>()
+
   const filterText = ref('') //搜索并过滤文件
   const treeRef = ref<InstanceType<typeof ElTree>>() //树状图数据
   const expandedKeys = ref<string[]>([]); //展开状态数据
@@ -37,8 +38,8 @@
   const REMOTE_DBL_MS = 320
 
   const click = function(data: any){
-    // 远程节点：单击=窗口内快速预览（远程只读，单次点击更顺手）；
-    //         双击=按「文件操作」模式打开（新窗口模式 → 独立窗口 FileWindow）
+    // 远程节点：单击=主窗口内快速预览（远程只读，单次点击更顺手）；
+    //         双击=在独立窗口打开（FileWindow）
     if (data?.remote) {
       if (data.type === 'file') handleRemoteFileClick(data)
       return
@@ -57,13 +58,18 @@
       if(curNodeId == preNodeId){//第一次点击的节点和第二次点击的节点id相同
         // 双击按节点类型分发：
         //  - 文件：走 store.openFileByMode（与文件视图 view_file.vue 一致）——.kb 知识库跳转知识处理、
-        //    系统打开类交系统应用；其余按「新窗口/窗口内」操作模式打开，并按扩展名选择浏览/源码视图
-        //  - 文件夹（含工作区根目录）：切换展开/折叠，绝不能当文件标签打开
-        //    （文件夹被 addTab 后编辑视图会按文件读取目录 → EISDIR 报错）
+        //    系统打开类交系统应用；其余一律在独立窗口打开，并按扩展名选择浏览/源码视图
+        //  - 文件夹（含工作区根目录）：只让右侧各视图定位到该目录；树本身不展开 /
+        //    折叠（单击也不开合，展开 / 折叠点节点左侧箭头，这样双击不会出现先开后收的闪动）；
+        //    也绝不能当文件标签打开（文件夹被 addTab 后编辑视图会按文件读取目录 → EISDIR 报错）
         if (data.type === 'file') {
           store.openFileByMode(data)
-        } else {
-          toggleNodeExpand(data)
+        } else if (isPathInside(data.path, store.root)) {
+          // 右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）跟随该目录，与「文件」视图双击文件夹、
+          // 点击面包屑同一套导航；跨工作区的目录不跟随（其它视图的数据源只认工作区内的目录，见 store.dataDir）
+          // 用 isPathInside 而非 startsWith：盘符大小写 / 结尾分隔符不同时也要算「在工作区内」，
+          // 否则双击文件夹会静默不切换当前目录（看板等视图仍停在原目录，新建的卡片也就落到了别处）
+          store.knowEnterDir(data.path)
         }
         curNodeId = null
         preNodeId = null
@@ -75,18 +81,6 @@
       preNodeId = null
       nodeCount = 0
     },300)
-  }
-
-  /** 双击文件夹：切换展开/折叠（经 treeRef 节点模型操作，兼容 lazy 懒加载目录）。
-      文件夹不能当作文件标签打开——编辑视图会按文件读取目录 → EISDIR 报错 */
-  const toggleNodeExpand = (data: any) => {
-    const node: any = (treeRef.value as any)?.store?.getNode(data.path)
-    if (!node) return
-    if (node.expanded) {
-      node.collapse()
-    } else {
-      node.expand()
-    }
   }
 
   // 开始重命名
@@ -111,7 +105,7 @@
         if (store.root === data.path) {
           store.root = result.newPath;
         }
-        await refreshTree();
+        await refreshTreeAndViews();
         ElMessage.success('重命名成功');
       } else {
         ElMessage.error(`重命名失败: ${result.error}`);
@@ -129,7 +123,7 @@
         ElMessage.warning(store.locales === 'zh' ? '该文件夹已在工作区列表中' : 'This folder is already in your workspace list')
         return
       }
-      await refreshTree()
+      await refreshTreeAndViews()
       // 启动文件监听（监听所有工作区）
       await window.ipcRenderer.invoke('startWatching', [...store.roots])
     }
@@ -243,7 +237,7 @@
     const root = remoteRootOf(data)
     if (!root) return
     const rel = relOfRemoteNode(root, data)
-    // quickPreview：单击快速预览（主窗口不显示远程只读条）；false/未传 = 正式「窗口内打开」（选到该标签时显示只读条）
+    // quickPreview：单击快速预览（主窗口不显示远程只读条）；false/未传 = 正式打开（选到该标签时显示只读条）
     const isPreview = opts?.preview === true
     try {
       const ext = (data.label || '').substring(data.label.lastIndexOf('.')) || ''
@@ -319,9 +313,9 @@
     }
   }
 
-  // ---- 远程文件「双击按文件操作模式打开」（新窗口模式 → 独立窗口 FileWindow） ----
+  // ---- 远程文件「双击在独立窗口打开」（FileWindow） ----
 
-  /** 远程文件单击/双击判定：单击 → 窗口内快速预览；320ms 内再次点击同一节点 → 双击打开 */
+  /** 远程文件单击/双击判定：单击 → 主窗口内快速预览；320ms 内再次点击同一节点 → 双击打开 */
   const handleRemoteFileClick = (data: any) => {
     if (nodeTimer) { clearTimeout(nodeTimer); nodeTimer = null }
     const now = Date.now()
@@ -332,7 +326,7 @@
       openRemoteByMode(data)
       return
     }
-    // 单击：远程只读，窗口内快速预览（不显示远程只读条）
+    // 单击：远程只读，主窗口内快速预览（不显示远程只读条）
     preNodeId = data.path
     remoteClickAt = now
     clickRemoteNode(data, { preview: true })
@@ -343,13 +337,9 @@
     }, REMOTE_DBL_MS)
   }
 
-  /** 双击远程文件：按「文件操作」模式打开——新窗口模式 → 独立窗口(FileWindow)；窗口内模式 → 窗口内预览 */
+  /** 双击远程文件：在独立窗口(FileWindow)打开（只读预览） */
   const openRemoteByMode = (data: any) => {
-    if (store.UI.fileOpenMode === 'window') {
-      openRemoteInNewWindow(data)
-    } else {
-      clickRemoteNode(data)
-    }
+    openRemoteInNewWindow(data)
   }
 
   /** 在新窗口（FileWindow.vue）打开远程文件：只读，默认浏览视图（可切导图/演示），可下载到本地 */
@@ -394,7 +384,7 @@
     try {
       const localPath = await downloadRemoteFile(root, rel, store.root)
       ElMessage.success(store.locales === 'zh' ? ('已下载到: ' + localPath) : ('Downloaded: ' + localPath))
-      await refreshTree()
+      await refreshTreeAndViews()
     } catch (e: any) {
       ElMessage.error(store.locales === 'zh' ? ('下载失败: ' + (e?.message || '')) : ('Download failed: ' + (e?.message || '')))
     }
@@ -495,7 +485,7 @@
   }
 
   // ---- 文件树排序 ----
-  const sortBy = ref<'name' | 'mtime' | 'size'>(store.treeSort?.by || 'name')
+  const sortBy = ref<FileSortKey>(store.treeSort?.by || 'name')
   const sortOrder = ref<'asc' | 'desc'>(store.treeSort?.order || 'asc')
 
   // 快速自然排序：数字段按数值比较、忽略大小写（替代 localeCompare numeric 选项的高开销，大目录可提速数十倍）；
@@ -540,6 +530,10 @@
       result = (a.mtime || 0) - (b.mtime || 0)
     } else if (sortBy.value === 'size') {
       result = (a.size || 0) - (b.size || 0)
+    } else if (sortBy.value === 'type') {
+      // 按类型（扩展名）排序，同类型再按名称，避免同类型文件之间顺序随扫描结果变化
+      result = naturalCompare(fileTypeKey(a.label), fileTypeKey(b.label))
+        || naturalCompare(String(a.label ?? ''), String(b.label ?? ''))
     } else {
       result = naturalCompare(String(a.label ?? ''), String(b.label ?? ''))
     }
@@ -574,7 +568,7 @@
   }
 
   /** 设置排序方式；再次点击同一项切换升/降序 */
-  const setSort = (by: 'name' | 'mtime' | 'size') => {
+  const setSort = (by: FileSortKey) => {
     if (sortBy.value === by) {
       sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc'
     } else {
@@ -617,6 +611,8 @@
 
   /** 鼠标悬浮时显示提示（首次显示时测量尺寸以决定防溢出方向） */
   const showTooltip = (e: MouseEvent, data: any) => {
+    // 右键菜单打开期间不显示文件信息提示，避免提示盖住菜单
+    if (contextMenu.value.visible) return
     tooltipData.value = data
     if (!tooltipVisible.value) {
       tooltipVisible.value = true
@@ -719,6 +715,16 @@
     }
   }
 
+  /**
+   * 文件树被本面板改动（重命名 / 新建 / 删除 / 粘贴 / 移动 / 下载 / 工作区增删）后调用：
+   * 刷新文件树，并递增 knowRefreshTick 让右侧各视图（日历 / 看板 / 表格 / 地图 / 图谱 / 文件）
+   * 立即重新拉数据——否则它们要等手动点「刷新」才更新（如重命名后日历仍是旧名字）。
+   */
+  const refreshTreeAndViews = async () => {
+    await refreshTree()
+    store.knowRefreshViews()
+  }
+
   // 通过对话框，打开其他文件
   const selectFile = async function() {
     const path = await window.ipcRenderer.invoke('selectFile')
@@ -728,7 +734,7 @@
   // 应用内无法预览/编辑的文件（可执行/压缩包等）：双击直接用系统默认应用打开
   const SYSTEM_OPEN_EXTS = ['.exe', '.msi', '.dll', '.apk', '.dmg', '.deb', '.rpm', '.iso', '.appimage', '.run', '.bin', '.flatpak', '.snap', '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst']
 
-  // 通过路径打开文件（窗口内打开；知识库 .kb 由 store.openInApp 统一跳转知识处理）
+  // 通过路径打开文件（统一交给 store.openFileByMode：一律在新窗口打开；知识库 .kb 走知识处理）
   const openFile = async function(path: any) {
     if(path != null){
       // 系统打开类文件：直接用系统默认应用打开，不进入应用内预览/编辑
@@ -740,7 +746,7 @@
       const inf = await window.ipcRenderer.invoke('getInf', path); //获取信息
       const attributes = await window.ipcRenderer.invoke('getConfig', path); //获取属性
       const fileContent = await window.ipcRenderer.invoke('readFile', path)
-      store.openInApp({
+      store.openFileByMode({
         ...inf,
         attributes: attributes,
         path: path,
@@ -749,24 +755,26 @@
     }
   }
 
-  //创建文件（fileType: md / excalidraw / drawio）
-  const createFile = async (fileName: string, fileType: 'md' | 'excalidraw' | 'drawio' = 'md') => {
+  // 创建文件（类型见 lib/knowFile/newFileTypes.ts：Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架）
+  const createFile = async (fileName: string, fileType: NewFileTypeKey = 'md') => {
     if (!store.root) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
-    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : store.root
-    const suffix = fileType === 'excalidraw' ? '.excalidraw' : (fileType === 'drawio' ? '.drawio' : '.md')
+    const def = newFileType(fileType) || NEW_FILE_TYPES[0]
+    // 右键某个文件夹时建在它里面；否则建在**当前文件夹**（与「文件」视图一致，不再一律落到工作区根目录）
+    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : (store.path || store.root)
+    const suffix = def.ext
     const path = await window.ipcRenderer.invoke('createFile', targetDir, fileName + suffix);
     if (path) {
-      // .drawio 先写入空白图表框架，避免留下 0 字节文件（打开时与 drawio 默认新建一致）
-      if (fileType === 'drawio') {
-        try { await window.ipcRenderer.invoke('saveFile', path, newDrawioXml()) } catch { /* ignore */ }
+      // 需要初始内容的类型（draw.io 空白图表框架 / 脚手架空任务骨架）先写入，避免留下 0 字节文件
+      if (def.skeleton) {
+        try { await window.ipcRenderer.invoke('saveFile', path, def.skeleton()) } catch { /* ignore */ }
       }
       openFile(path)
       ElMessage.success(`文件 "${fileName}${suffix}" 创建成功`);
     }
-    await refreshTree()
+    await refreshTreeAndViews()
   };
 
   const createFolder = async (folderName: string) => {
@@ -774,26 +782,27 @@
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
-    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : store.root
+    // 与创建文件同一套：右键文件夹时建在它里面，否则建在当前文件夹
+    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : (store.path || store.root)
     const dir = await window.ipcRenderer.invoke('createFolder', targetDir, folderName);
     if (dir) {
       ElMessage.success(`文件夹 "${folderName}" 创建成功`);
     }
-    await refreshTree()
+    await refreshTreeAndViews()
   };
 
   // 创建文件对话框状态
   const createDialogVisible = ref(false)
-  const createFileType = ref<'md' | 'excalidraw' | 'drawio'>('md')
+  const createFileType = ref<NewFileTypeKey>('md')
   const createFileName = ref('')
 
-  // 通过弹窗创建文件（单框：选择类型 + 输入文件名）
-  const promptCreateFile = () => {
+  // 通过弹窗创建文件（单框：选择类型 + 输入文件名；「新建」子菜单会带入所选类型）
+  const promptCreateFile = (fileType: NewFileTypeKey = 'md') => {
     if (!store.root) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
-    createFileType.value = 'md'
+    createFileType.value = fileType
     createFileName.value = ''
     createDialogVisible.value = true
   };
@@ -828,33 +837,74 @@
     } catch { /* 用户取消 */ }
   };
 
-  // ---- 复制/粘贴 ----
-  const copiedPath = ref<string | null>(null)
+  // ---- 复制 / 粘贴（剪贴板与「文件」视图共用：store.fileClipboard）----
 
-  /** 复制文件或文件夹路径到剪贴板 */
+  /** 取路径所在目录（兼容 \ 与 /） */
+  const dirOfPath = (p: string): string => {
+    const i = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'))
+    return i >= 0 ? p.substring(0, i) : ''
+  }
+
+  // 剪贴板里是否有可粘贴的项（与「文件」视图共用，复制后即可粘贴）
+  const hasClipboard = computed(() => !!store.fileClipboard?.paths?.length)
+
+  /**
+   * 复制文件或文件夹（node 为树节点数据，取其 path 写入共用剪贴板）
+   */
   const copyNode = (node: any) => {
-    copiedPath.value = node.data.path
+    const p = node?.path || node?.data?.path
+    if (!p) return
+    store.fileClipboard = { paths: [p], cut: false }
     ElMessage.success(store.locales === 'zh' ? '已复制' : 'Copied')
   }
 
-  /** 将已复制的文件/文件夹粘贴到当前右键的文件夹下 */
+  /** 粘贴目标目录：右键文件夹 → 它本身；右键文件 → 它所在目录；空白处 → 当前目录 */
+  const pasteTargetDir = (): string => {
+    const node = contextMenu.value.node
+    if (!node) return store.path || store.root
+    if (node.type === 'folder') return node.path
+    return dirOfPath(node.path) || store.path || store.root
+  }
+
+  /** 将剪贴板中的文件/文件夹粘贴到目标目录（与「文件」视图共用剪贴板，剪切项走移动） */
   const pasteNode = async () => {
-    if (!copiedPath.value) return
-    const targetDir = contextMenu.value.node?.path || store.root
+    const clip = store.fileClipboard
+    if (!clip?.paths?.length) return
+    const targetDir = pasteTargetDir()
     if (!targetDir) return
 
-    try {
-      const result = await window.ipcRenderer.invoke('copyFile', copiedPath.value, targetDir)
-      if (result.success) {
-        ElMessage.success(store.locales === 'zh' ? '粘贴成功' : 'Pasted successfully')
-        copiedPath.value = null
-        await refreshTree()
-      } else {
-        ElMessage.error(result.error || (store.locales === 'zh' ? '粘贴失败' : 'Paste failed'))
+    const sep = targetDir.includes('\\') ? '\\' : '/'
+    const failed: string[] = []
+    let n = 0
+    for (const p of clip.paths) {
+      // 剪切到同目录无意义；复制到同目录由主进程自动加「_副本」
+      if (clip.cut && dirOfPath(p) === targetDir) continue
+      // 防止把文件夹粘贴到其自身或子目录内（会无限递归或改名失败）
+      if (targetDir === p || targetDir.startsWith(p + sep)) {
+        failed.push(p)
+        continue
       }
-    } catch (error) {
-      console.error('粘贴失败:', error)
-      ElMessage.error(store.locales === 'zh' ? '粘贴失败' : 'Paste failed')
+      const res = clip.cut
+        ? await window.ipcRenderer.invoke('moveFile', p, targetDir)
+        : await window.ipcRenderer.invoke('copyFile', p, targetDir)
+      if (res && res.success) n++
+      else failed.push(p)
+    }
+    // 剪切：仅保留失败项以便重试；复制：保留剪贴板以支持向多处重复粘贴
+    if (clip.cut) store.fileClipboard = failed.length ? { paths: failed, cut: true } : null
+    await refreshTreeAndViews()
+    if (failed.length) {
+      ElMessage.warning(
+        store.locales === 'zh'
+          ? `已${clip.cut ? '移动' : '复制'} ${n} 项，${failed.length} 项失败`
+          : `${clip.cut ? 'Moved' : 'Copied'} ${n}, ${failed.length} failed`
+      )
+    } else if (n) {
+      ElMessage.success(
+        clip.cut
+          ? (store.locales === 'zh' ? `已移动 ${n} 项` : `Moved ${n}`)
+          : (store.locales === 'zh' ? `已复制 ${n} 项` : `Copied ${n}`)
+      )
     }
   }
 
@@ -887,7 +937,7 @@
       const result = await window.ipcRenderer.invoke('moveFile', sourcePath, targetDir)
       if (result.success) {
         ElMessage.success(store.locales === 'zh' ? '移动成功' : 'Moved successfully')
-        await refreshTree()
+        await refreshTreeAndViews()
       } else {
         ElMessage.error(result.error || (store.locales === 'zh' ? '移动失败' : 'Move failed'))
       }
@@ -896,6 +946,19 @@
       ElMessage.error(store.locales === 'zh' ? '移动文件失败' : 'Failed to move file')
     }
   };
+
+  // 在系统文件管理器中定位右键的节点（文件夹→打开其所在位置）
+  const revealInFolder = (node: any) => {
+    if (!node?.path) return
+    window.ipcRenderer.invoke('openInFolder', node.path)
+  }
+
+  // 复制右键节点的完整路径到剪贴板
+  const copyNodePath = (node: any) => {
+    if (!node?.path) return
+    store.copyToClipboard(node.path)
+    ElMessage.success(store.locales === 'zh' ? '已复制地址' : 'Path copied')
+  }
 
   //右键菜单变量
   const contextMenu = ref({
@@ -948,7 +1011,8 @@
   //右键菜单逻辑（文件节点）
   const handleRightClick = (event: MouseEvent, data: any) => {
     event.preventDefault(); // 阻止默认的右键菜单
-    
+    hideTooltip(); // 隐藏文件信息提示，避免其盖住右键菜单
+
     contextMenu.value.visible = true;
     contextMenu.value.style = {
       left: event.clientX + 'px',
@@ -965,6 +1029,12 @@
   const isWordNode = computed(() => {
     const p = String(contextMenu.value?.node?.path || '').toLowerCase();
     return p.endsWith('.docx') || p.endsWith('.doc');
+  });
+
+  // 右键「打开文件所在位置」文案：文件夹说「所在位置」，文件说「文件所在位置」
+  const revealLabel = computed(() => {
+    if (store.locales !== 'zh') return 'Reveal in Folder'
+    return contextMenu.value.node?.type === 'folder' ? '打开所在位置' : '打开文件所在位置'
   });
 
   // 远程节点右键操作：根节点删除远程工作区；文件下载到本地工作区
@@ -989,6 +1059,7 @@
     const target = e.target as HTMLElement
     if (target.closest('.el-tree-node') || target.closest('.context-menu')) return
     e.preventDefault()
+    hideTooltip(); // 隐藏文件信息提示，避免其盖住右键菜单
     contextMenu.value.visible = true;
     contextMenu.value.style = {
       left: e.clientX + 'px',
@@ -1134,7 +1205,7 @@
           }
         }
       }
-      await refreshTree()
+      await refreshTreeAndViews()
       contextMenu.value.visible = false
       ElMessage.success('删除成功')
     } catch (error) {
@@ -1162,35 +1233,31 @@
     }
     store.removeRoot(node.path)
     contextMenu.value.visible = false
-    await refreshTree()
+    await refreshTreeAndViews()
     // 重启文件监听（监听剩余工作区）
     await window.ipcRenderer.invoke('startWatching', [...store.roots])
     ElMessage.success('已从工作区列表删除')
   };
 
-  // 处理文件系统变化
-  const handleFileSystemChange = async (event: any, data: any) => {
-    // 防抖：延迟刷新，避免频繁刷新
-    if (window._refreshTimer) {
-      clearTimeout(window._refreshTimer);
-    }
-    window._refreshTimer = setTimeout(async () => {
-      await refreshTree();
-      window._refreshTimer = null;
-    }, 500);
-  };
+  // 处理文件系统变化：走全局单例订阅。
+  // 此前每个面板实例各自 window.ipcRenderer.on('fileSystemChanged')，而 preload 的 off
+  // 跨 contextBridge 不可靠 → 每挂载一次就多一个永不移除的监听（>10 触发
+  // MaxListenersExceededWarning），旧实例被闭包引用无法回收、事件时重复全量刷新。
+  // 现在 ipcRenderer 上永远只有 1 个监听，且去抖共享（一次事件只刷新一次）。
+  let disposeFileWatch: (() => void) | null = null;
+  let watchAcquired = false;
 
   // 监听文件系统变化
   onMounted(async () => {
-    // 监听文件系统变化事件
-    window.ipcRenderer.on('fileSystemChanged', handleFileSystemChange);
-    
+    disposeFileWatch = onFileSystemChanged(() => { void refreshTree() });
+
     if (store.root || (store.roots && store.roots.length)) {
       // 恢复上次保存的展开状态（须在树数据加载前调用，node.initialize 才会按 key 展开）
       loadExpandedKeys(store.root)
       await refreshTree();
-      // 启动文件监听（监听所有工作区）
-      await window.ipcRenderer.invoke('startWatching', [...store.roots]);
+      // 启动文件监听（租约：来回切模块时复用现有 watcher，不重建）
+      await acquireFileWatch([...store.roots]);
+      watchAcquired = true;
     }
   });
 
@@ -1199,17 +1266,16 @@
     contextMenu.value.visible = false;
   };
 
-  onBeforeUnmount(async () => {
-    // 移除事件监听
-    window.ipcRenderer.off('fileSystemChanged', handleFileSystemChange);
+  onBeforeUnmount(() => {
+    // 取消订阅（唯一监听本身不解绑，避免 off 不可靠时重复注册）
+    disposeFileWatch?.();
+    disposeFileWatch = null;
     // 移除文档级点击监听
     document.removeEventListener('click', hideContextMenuOnDocClick);
-    // 停止文件监听
-    await window.ipcRenderer.invoke('stopWatching');
-    // 清除定时器
-    if (window._refreshTimer) {
-      clearTimeout(window._refreshTimer);
-      window._refreshTimer = null;
+    // 释放目录监听（最后一个消费者释放后宽限 3s 才真正 stopWatching）
+    if (watchAcquired) {
+      watchAcquired = false;
+      releaseFileWatch();
     }
   });
 
@@ -1223,6 +1289,12 @@
   const hideContextMenu = () => {
     contextMenu.value.visible = false;
   };
+
+  // 「新建」子菜单可用条件：已打开本地工作区，且未右键远程节点（只读）；
+  // 文件节点不提供（与「文件」视图一致，避免新建到非同级目录）
+  const canCreateInMenu = computed(
+    () => !!store.root && !contextMenu.value.isRemote && (!contextMenu.value.node || contextMenu.value.node.type === 'folder')
+  );
 
   // 判断该节点是否为工作区根目录
   const isWorkspaceRoot = (path: string) => {
@@ -1240,51 +1312,8 @@
   }
 
 
-  const viewsList = computed(() => store.viewList)
-
-  // 文件形式视图（随文件在标签/新窗口中打开，与文件树视图管理区的全局视图分开管理）
-  // 顺序 / 名称统一来自 src/lib/knowFile/fileViews.ts
-  const FILE_VIEWS = FILE_VIEW_NAMES
-  // Word 等只读文件：不允许窗口内开可编辑/演示视图（菜单里隐藏这几项）
+  // Word 等只读文件：不允许开可编辑/演示视图（菜单里隐藏这几项）
   const READONLY_VIEW_KEYS = ['edit', 'blockedit', 'presentation']
-
-  // 视图本地化显示名：store.view / viewList 的内部标识恒为中文（isView/toggleView/组件 v-if 均依赖），
-  // 仅下拉展示文本随语言切换；英文命名与 empty.vue 欢迎页视图网格保持一致，避免同屏两处显示不一致
-  const VIEW_NAME_EN: Record<string, string> = {
-    '文件': 'Files', '图谱': 'Graph', '看板': 'Kanban', '甘特': 'Gantt', '日历': 'Year',
-    '地图': 'Map', '表格': 'Table',
-    // 文件视图（浏览/源码编辑/可视编辑/思维导图/演示）的英文名统一取自 fileViews.ts
-    ...Object.fromEntries(FILE_VIEWS_DEFS.map((v) => [v.name, v.labelEn])),
-  }
-  // 中文显示名覆盖：甘特视图对外展示为「日程」（内部标识仍为「甘特」）
-  const VIEW_NAME_ZH: Record<string, string> = { '甘特': '日程' }
-  const viewName = (v: string) => (store.locales === 'zh' ? (VIEW_NAME_ZH[v] || v) : (VIEW_NAME_EN[v] || v))
-
-  // 视图管理区显示的视图：新窗口打开模式下隐藏文件形式视图，只显示其他 7 个（文件/图谱/看板/甘特/日历/地图/表格）
-  const viewsForGrid = computed(() => {
-    if (store.UI.fileOpenMode === 'window') {
-      return store.viewList.filter(v => !FILE_VIEWS.includes(v))
-    }
-    return store.viewList
-  })
-
-  // 全部关闭视图
-  const closeAllViews = function() {
-    store.view.splice(0, store.view.length);
-    store.saveConfig();
-  };
-
-  // 当前激活的全局视图（select 显示值；多个开启时取第一个）
-  const activeGlobalView = computed(() => viewsForGrid.value.find(v => store.isView(v)) || '')
-  // select 切换视图：互斥单选（开启选中的，关闭 select 内其他视图；select 范围外的视图开关不受影响）
-  const onGlobalViewChange = (e: Event) => {
-    const v = (e.target as HTMLSelectElement).value
-    if (!v || !viewsForGrid.value.includes(v)) return
-    const keep = store.view.filter((x: string) => !viewsForGrid.value.includes(x))
-    if (!keep.includes(v)) keep.push(v)
-    store.view = keep
-    store.saveConfig()
-  }
 
   watch(filterText, (val) => {
     treeRef.value!.filter(val)
@@ -1300,30 +1329,9 @@
 <template>
   <div class="bg" @mouseleave="hideContextMenu">
     <div class="list scoll" v-if="mode=='file'" @contextmenu.prevent="showViewMenu">
-      <!-- 视图管理（list scoll 上方，由 explorer 眼睛按钮开关；新窗口模式下改用搜索栏左侧常驻下拉） -->
-      <div class="views-container" v-if="showViews && store.UI.fileOpenMode !== 'window'">
-        <!-- 视图下拉 + 均分/关闭图标按钮（同一行） -->
-        <select :value="activeGlobalView" @change="onGlobalViewChange" class="views-select"
-                :title="store.locales=='zh'?'选择视图':'Select view'">
-          <option v-for="v in viewsForGrid" :key="v" :value="v">{{ viewName(v) }}</option>
-        </select>
-        <div class="views-btn" @click="emit('reset-view-sizes')" :title="store.locales=='zh'?'平均分配视图宽度':'Distribute equally'">
-          <i class="fa fa-arrows-h"></i>
-        </div>
-        <div class="views-btn" @click="closeAllViews" :title="store.locales=='zh'?'全部关闭':'Close all'">
-          <i class="fa fa-eye-slash"></i>
-        </div>
-      </div>
       <!-- 未打开工作区时隐藏工具栏（无可用控件），由下方空态引导提供「打开工作区/打开文件」入口 -->
       <div class="tree-toolbar" :title="store.root" v-if="store.root!='' || store.remoteRoots.length">
-        <!-- 新窗口模式下：视图选择常驻于搜索栏左侧（窗口内模式用上方弹出视图管理） -->
-        <select v-if="store.UI.fileOpenMode === 'window' && store.root!=''" :value="activeGlobalView" @change="onGlobalViewChange" class="views-select tree-view-select"
-                :title="store.locales=='zh'?'选择视图':'Select view'">
-          <option v-for="v in viewsForGrid" :key="v" :value="v">{{ viewName(v) }}</option>
-        </select>
-        <!-- 新窗口模式下 4 按钮组（来自 explorer 的 toolbar slot；与视图/搜索框同一行，面板变窄时搜索框自动换行） -->
-        <slot name="toolbar" />
-        <!-- 搜索框（参照 home.vue chat-toolbar 样式；flex 1 1 160px：宽度不足时自动换到下一行独占） -->
+        <!-- 文件搜索（放在原「视图选择」的位置；视图选择现已常驻顶部工具栏，见 ViewToolbar.vue） -->
         <div v-if="store.root!=''" class="tree-search-box">
           <i class="fa fa-search"></i>
           <input v-model="filterText" class="tree-search-input" :placeholder="store.locales=='zh'?'搜索文件':'search file'"/>
@@ -1331,10 +1339,8 @@
             <i class="fa fa-times-circle"></i>
           </div>
         </div>
-        <!-- 添加按钮（参照 home.vue chat-toolbar 样式；新窗口模式下已移入工具栏按钮组） -->
-        <div class="tree-new-btn" v-if="store.root!=''&&mode=='file'&&store.UI.fileOpenMode !== 'window'" @click="promptCreateFile" :title="store.locales=='zh'?'创建文件':'Create File'">
-          <i class="fa fa-plus"></i>
-        </div>
+        <!-- 面板顶部 4 按钮组（来自 explorer 的 toolbar slot；与搜索框同一行） -->
+        <slot name="toolbar" />
       </div>
       <div class="tree-scroll scoll">
         <!-- 未打开任何工作区：清晰引导新手如何开始使用 -->
@@ -1356,6 +1362,8 @@
             </div>
           </div>
         </div>
+        <!-- 单击不展开（expand-on-click-node=false）：展开 / 折叠点节点左侧箭头，双击留给「右侧各视图定位到该目录」，
+             否则双击的两次单击会各开合一次，出现先开后收的伸缩闪动 -->
         <el-tree
           v-else
           ref="treeRef"
@@ -1366,6 +1374,7 @@
           lazy
           :load="loadTreeNode"
           :props="{ isLeaf: (data: any) => data.type === 'file' }"
+          :expand-on-click-node="false"
           draggable
           :allow-drag="allowDrag"
           :allow-drop="allowDrop"
@@ -1418,10 +1427,28 @@
           <i class="fa fa-trash"></i> {{ store.locales=='zh'?'删除远程工作区':'Remove Remote Workspace' }}
         </div>
       </template>
-      <!-- 工作区根目录右键：仅显示系统打开 + 删除该工作区 -->
+      <!-- 工作区根目录右键：系统打开 / 新建 / 删除该工作区 -->
       <template v-else-if="contextMenu.isRoot">
         <div class="menu-item" @click="store.openByApp(contextMenu.node.path); hideContextMenu()">
           <i class="fa fa-external-link"></i> {{ store.locales=='zh'?'系统打开':'Open in System' }}
+        </div>
+        <div class="menu-divider"></div>
+        <!-- 新建（二级菜单，与「文件」视图一致）：建在该工作区根目录 -->
+        <div class="menu-item has-submenu" v-if="canCreateInMenu">
+          <i class="fa fa-plus-circle"></i>
+          <span style="flex:1">{{ store.locales=='zh'?'新建':'New' }}</span>
+          <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
+          <ul class="submenu">
+            <li @click="promptCreateFolder(); hideContextMenu()">
+              <i class="fa fa-folder"></i> {{ store.locales=='zh'?'文件夹':'Folder' }}
+            </li>
+            <li v-for="t in NEW_FILE_TYPES" :key="t.key" @click="promptCreateFile(t.key); hideContextMenu()">
+              <i :class="t.icon"></i> {{ store.locales=='zh' ? t.labelZh : t.labelEn }}
+            </li>
+          </ul>
+        </div>
+        <div class="menu-item" v-if="hasClipboard" @click="pasteNode(); hideContextMenu()">
+          <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
         </div>
         <div class="menu-divider"></div>
         <div class="menu-item" @click="deleteWorkspaceRoot()">
@@ -1437,55 +1464,66 @@
         <i class="fa fa-cloud" style="color:#42b883"></i> {{ store.locales=='zh'?'连接远程工作区':'Connect Remote Workspace' }}
       </div>
       <div class="menu-divider" v-if="!contextMenu.node"></div>
-      <!-- 打开（一级，仅文件） -->
-      <div class="menu-item has-submenu" v-if="contextMenu.node">
+      <!-- 粘贴（一级，空白处右键 → 粘贴到当前目录；剪贴板与「文件」视图共用） -->
+      <div class="menu-item" v-if="!contextMenu.node && hasClipboard" @click="pasteNode(); hideContextMenu()">
+        <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
+      </div>
+      <!-- 新建（二级菜单，与「文件」视图一致）：右键文件夹建在它里面，空白处建在当前目录 -->
+      <div class="menu-item has-submenu" v-if="canCreateInMenu">
+        <i class="fa fa-plus-circle"></i>
+        <span style="flex:1">{{ store.locales=='zh'?'新建':'New' }}</span>
+        <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
+        <ul class="submenu">
+          <li @click="promptCreateFolder(); hideContextMenu()">
+            <i class="fa fa-folder"></i> {{ store.locales=='zh'?'文件夹':'Folder' }}
+          </li>
+          <li v-for="t in NEW_FILE_TYPES" :key="t.key" @click="promptCreateFile(t.key); hideContextMenu()">
+            <i :class="t.icon"></i> {{ store.locales=='zh' ? t.labelZh : t.labelEn }}
+          </li>
+        </ul>
+      </div>
+      <!-- 打开（一级）：文件 → 视图列表（即「新窗口打开」的各视图）；文件夹 → 所在位置 / 复制地址 / 系统打开 -->
+      <div class="menu-item has-submenu" v-if="contextMenu.node && contextMenu.node.type === 'file'">
         <i class="fa fa-folder-open-o"></i>
         <span style="flex:1">{{ store.locales=='zh'?'打开':'Open' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
-          <li @click="store.openInApp(contextMenu.node); hideContextMenu()">
-            <i class="fa fa-file-text-o"></i> {{ store.locales=='zh'?'软件内打开':'In App' }}
+          <li v-for="v in FILE_VIEWS_DEFS" :key="v.key" v-show="!isWordNode || !READONLY_VIEW_KEYS.includes(v.key)"
+              @click="openInNewWindow(contextMenu.node.path, v.key); hideContextMenu()">
+            <i :class="v.icon"></i> {{ store.locales=='zh' ? v.name : v.labelEn }}
           </li>
-          <li class="has-submenu">
-            <i class="fa fa-window-maximize"></i>
-            <span style="flex:1">{{ store.locales=='zh'?'新窗口打开':'New Window' }}</span>
-            <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
-            <ul class="submenu">
-              <li v-for="v in FILE_VIEWS_DEFS" :key="v.key" v-show="!isWordNode || !READONLY_VIEW_KEYS.includes(v.key)"
-                  @click="openInNewWindow(contextMenu.node.path, v.key); hideContextMenu()">
-                <i :class="v.icon"></i> {{ store.locales=='zh' ? v.name : v.labelEn }}
-              </li>
-            </ul>
+        </ul>
+      </div>
+      <div class="menu-item has-submenu" v-else-if="contextMenu.node">
+        <i class="fa fa-folder-open-o"></i>
+        <span style="flex:1">{{ store.locales=='zh'?'打开':'Open' }}</span>
+        <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
+        <ul class="submenu">
+          <li @click="revealInFolder(contextMenu.node); hideContextMenu()">
+            <i class="fa fa-folder-open-o"></i> {{ revealLabel }}
+          </li>
+          <li @click="copyNodePath(contextMenu.node); hideContextMenu()">
+            <i class="fa fa-link"></i> {{ store.locales=='zh'?'复制地址':'Copy Path' }}
           </li>
           <li @click="store.openByApp(contextMenu.node.path); hideContextMenu()">
             <i class="fa fa-external-link"></i> {{ store.locales=='zh'?'系统打开':'System' }}
           </li>
         </ul>
       </div>
-      <!-- 操作（一级，仅右键到文件夹且有工作区时显示；创建文件位置取决于点击的文件夹） -->
-      <div class="menu-item has-submenu" v-if="contextMenu.node && contextMenu.node.type === 'folder' && store.root">
+      <!-- 操作（二级，仅文件）：打开位置 / 复制地址 / 系统打开 -->
+      <div class="menu-item has-submenu" v-if="contextMenu.node && contextMenu.node.type === 'file'">
         <i class="fa fa-wrench"></i>
         <span style="flex:1">{{ store.locales=='zh'?'操作':'Actions' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
-          <li v-if="contextMenu.node" @click="copyNode(contextMenu.node); hideContextMenu()">
-            <i class="fa fa-copy"></i> {{ store.locales=='zh'?'复制':'Copy' }}
+          <li @click="revealInFolder(contextMenu.node); hideContextMenu()">
+            <i class="fa fa-folder-open-o"></i> {{ revealLabel }}
           </li>
-          <li v-if="copiedPath" @click="pasteNode(); hideContextMenu()">
-            <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
+          <li @click="copyNodePath(contextMenu.node); hideContextMenu()">
+            <i class="fa fa-link"></i> {{ store.locales=='zh'?'复制地址':'Copy Path' }}
           </li>
-          <li @click="promptCreateFile(); hideContextMenu()">
-            <i class="fa fa-plus"></i> {{ store.locales=='zh'?'创建文件':'Create File' }}
-          </li>
-          <li @click="promptCreateFolder(); hideContextMenu()">
-            <i class="fa fa-folder"></i> {{ store.locales=='zh'?'创建文件夹':'Create Folder' }}
-          </li>
-          <div class="menu-divider"></div>
-          <li @click="selectFile(); hideContextMenu()">
-            <i class="fa fa-file-text"></i> {{ store.locales=='zh'?'打开文件':'Open File' }}
-          </li>
-          <li @click="openFolderDialog(); hideContextMenu()">
-            <i class="fa fa-folder-open"></i> {{ store.locales=='zh'?'打开文件夹':'Open Folder' }}
+          <li @click="store.openByApp(contextMenu.node.path); hideContextMenu()">
+            <i class="fa fa-external-link"></i> {{ store.locales=='zh'?'系统打开':'System' }}
           </li>
         </ul>
       </div>
@@ -1496,26 +1534,23 @@
         <span style="flex:1">{{ store.locales=='zh'?'排序':'Sort' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
-          <li @click="setSort('name'); hideContextMenu()">
-            <i :class="sortBy=='name' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
-            <span style="flex:1">{{ store.locales=='zh'?'名称':'Name' }}</span>
-            <i v-if="sortBy=='name'" :class="sortOrder=='asc' ? 'fa fa-sort-amount-asc' : 'fa fa-sort-amount-desc'" style="font-size:10px;width:auto"></i>
-          </li>
-          <li @click="setSort('mtime'); hideContextMenu()">
-            <i :class="sortBy=='mtime' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
-            <span style="flex:1">{{ store.locales=='zh'?'修改时间':'Modified' }}</span>
-            <i v-if="sortBy=='mtime'" :class="sortOrder=='asc' ? 'fa fa-sort-amount-asc' : 'fa fa-sort-amount-desc'" style="font-size:10px;width:auto"></i>
-          </li>
-          <li @click="setSort('size'); hideContextMenu()">
-            <i :class="sortBy=='size' ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
-            <span style="flex:1">{{ store.locales=='zh'?'大小':'Size' }}</span>
-            <i v-if="sortBy=='size'" :class="sortOrder=='asc' ? 'fa fa-sort-amount-asc' : 'fa fa-sort-amount-desc'" style="font-size:10px;width:auto"></i>
+          <li v-for="s in FILE_SORT_ITEMS" :key="s.key" @click="setSort(s.key); hideContextMenu()">
+            <i :class="sortBy==s.key ? 'fa fa-check-square-o' : 'fa fa-square-o'" style="color:var(--primaryColor)"></i>
+            <span style="flex:1">{{ store.locales=='zh' ? s.labelZh : s.labelEn }}</span>
+            <i v-if="sortBy==s.key" :class="sortOrder=='asc' ? 'fa fa-sort-amount-asc' : 'fa fa-sort-amount-desc'" style="font-size:10px;width:auto"></i>
           </li>
         </ul>
       </div>
       <!-- 重命名（一级，仅文件） -->
       <div class="menu-item" v-if="contextMenu.node" @click="startRename(contextMenu.node)">
         <i class="fa fa-edit"></i> {{ store.locales=='zh'?'重命名':'Rename' }}
+      </div>
+      <!-- 复制 / 粘贴（一级，文件 / 文件夹均可复制；剪贴板与「文件」视图共用） -->
+      <div class="menu-item" v-if="contextMenu.node" @click="copyNode(contextMenu.node); hideContextMenu()">
+        <i class="fa fa-copy"></i> {{ store.locales=='zh'?'复制':'Copy' }}
+      </div>
+      <div class="menu-item" v-if="contextMenu.node && hasClipboard" @click="pasteNode(); hideContextMenu()">
+        <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
       </div>
       <!-- 删除（一级，仅文件） -->
       <div class="menu-item" v-if="contextMenu.node" @click="deleteFile">
@@ -1540,9 +1575,8 @@
         </div>
         <div class="pf-body">
           <div class="pf-types">
-            <div class="pf-type" :class="{ on: createFileType === 'md' }" @click="createFileType = 'md'"><i class="fa fa-file-text-o"></i>Markdown</div>
-            <div class="pf-type" :class="{ on: createFileType === 'excalidraw' }" @click="createFileType = 'excalidraw'"><i class="fa fa-paint-brush"></i> Excalidraw</div>
-            <div class="pf-type" :class="{ on: createFileType === 'drawio' }" @click="createFileType = 'drawio'"><i class="fa fa-object-group"></i> draw.io</div>
+            <div v-for="t in NEW_FILE_TYPES" :key="t.key" class="pf-type" :class="{ on: createFileType === t.key }"
+                 @click="createFileType = t.key"><i :class="t.icon"></i> {{ store.locales=='zh' ? t.labelZh : t.labelEn }}</div>
           </div>
           <input
             v-model="createFileName"
@@ -1614,7 +1648,7 @@
   /* 文件树工具栏（参照 home.vue chat-toolbar 样式） */
   .tree-toolbar {
     display: flex;
-    flex-wrap: wrap; /* 面板变窄时，搜索框可自动换行到下一行 */
+    flex-wrap: nowrap; /* 始终一行：空间不足时由搜索框收缩，不换行 */
     align-items: center;
     gap: 4px;
     padding: 5px;
@@ -1624,8 +1658,8 @@
     container-type: inline-size; /* 启用宽度容器查询：按面板宽度切换 宽/窄 布局 */
   }
   .tree-search-box {
-    flex: 1 1 80px; /* 最小 80px：宽度不足时整体换行独占一行 */
-    min-width: 0;
+    flex: 1 1 80px; /* 占满一行里搜索框之后剩下的空间；窄面板时收缩（最小 56px），不换行 */
+    min-width: 56px;
     height: 26px;
     display: flex;
     align-items: center;
@@ -1658,103 +1692,6 @@
   }
   .tree-search-clear:hover {
     color: var(--fontActiveColor);
-  }
-  .tree-new-btn {
-    flex-shrink: 0;
-    width: 26px;
-    height: 26px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--borderColor);
-    border-radius: 4px;
-    cursor: pointer;
-    color: var(--fontColor);
-    background-color: var(--backgroundColor);
-    font-size: 12px;
-    transition: all 0.15s ease;
-  }
-  .tree-new-btn:hover {
-    background-color: var(--menuActiveColor);
-    color: var(--fontActiveColor);
-  }
-
-  /* 视图管理面板（list scoll 上方）：视图下拉 + 均分/关闭图标按钮同一行 */
-  .views-container {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 6px;
-    border-bottom: 1px solid var(--borderColor);
-  }
-  .views-select {
-    flex: 1;
-    min-width: 0;
-    width: auto; /* 覆盖全局 select 的 calc(100% - 10px) */
-    height: 24px;
-    margin: 0; /* 覆盖全局 select 的 margin: 5px */
-    padding: 0 4px;
-    border: 1px solid var(--borderColor);
-    border-radius: 4px;
-    background-color: var(--backgroundColor);
-    color: var(--fontColor);
-    font-size: 12px;
-    outline: none;
-    cursor: pointer;
-  }
-  .views-select option {
-    background-color: var(--menuColor);
-    color: var(--fontColor);
-  }
-  .views-btn {
-    flex-shrink: 0;
-    width: 26px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    cursor: pointer;
-    color: var(--fontColor);
-    border: 1px solid var(--borderColor);
-    border-radius: 4px;
-    user-select: none;
-  }
-  .views-btn:hover {
-    background-color: var(--menuActiveColor);
-    color: var(--fontActiveColor);
-  }
-  /* 新窗口模式：搜索栏左侧的常驻视图下拉（复用 .views-select 基础样式，覆盖 toolbar 语境；
-     宽面板时固定 76px，由搜索框占满剩余；窄面板时（见下方 @container）拉伸填满第一行按钮后的空白） */
-  .tree-view-select {
-    flex: 0 0 auto;
-    width: 76px;
-    height: 28px;
-    margin: 0;
-    box-sizing: border-box;
-  }
-  .tree-view-select option {
-    background-color: var(--menuColor);
-    color: var(--fontColor);
-  }
-
-  /* 新窗口模式（存在 tree-view-select 时）宽面板：搜索框占满剩余宽度，视图下拉固定 */
-  .tree-toolbar:has(.tree-view-select) .tree-search-box {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-  /* 窄面板（容器 < 400px）：搜索框换行独占一行，视图下拉拉伸填满第一行按钮后的空白 */
-  @container (max-width: 399px) {
-    .tree-toolbar:has(.tree-view-select) .tree-view-select {
-      flex: 1 1 auto;
-      min-width: 76px;
-      width: auto;
-    }
-    .tree-toolbar:has(.tree-view-select) .tree-search-box {
-      flex: 1 1 100%;
-      min-width: 0;
-    }
   }
 
   .list {
@@ -2083,10 +2020,7 @@
     font-weight: bold;
   }
   
-  /* 右键菜单样式统一在 explorer.vue 中定义 */
-  .context-menu {
-    min-width: 160px;
-  }
+  /* 右键菜单样式统一在 style.css（.context-menu + 知识管理紧凑变体）中定义 */
 
   /* 已打开的标签：用主题色标识并加粗 */
   .custom-tree-node.tab-open .tree-label {

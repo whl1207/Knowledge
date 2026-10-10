@@ -13,23 +13,28 @@ import {
   listKbFiles, readKbForLearning,
   type LearningKbFile, type LearningKbLoaded,
 } from '@/services/kbReader'
+import { workspaceRoots } from '@/services/workspaceScan'
 import {
   emptyLData, loadLData, saveLData, syncObjectsWithKb,
   recordAttempt, clearObject, clearStale, objectMastery, wrongAttempts,
   trendStats, streakDays, claimMastered, tagAttemptErr,
-  type LData, type LAttempt, type ErrType,
+  setExplain, clearExplain,
+  type LData, type LAttempt, type ErrType, type LExplainKind, type LExplainEntry,
 } from '@/services/learningRecord'
 import {
   computeMastery, MASTERY_GATE,
   type KbType, guessKbType, kbTypeLabel,
 } from '@/services/learningCore'
 import type { LvmItem, PracticeItem, EntityItem } from '@/components/learning/types'
+import { detectContentLanguage } from '@/services/learningPrompt'
 import overview from '@/components/learning/overview.vue'
 import mapView from '@/components/learning/mapView.vue'
 import entityView from '@/components/learning/entityView.vue'
+import graphView from '@/components/learning/graphView.vue'
 import reviewView from '@/components/learning/reviewView.vue'
 import mistakesView from '@/components/learning/mistakesView.vue'
 import practiceView from '@/components/learning/practiceView.vue'
+import solverView from '@/components/learning/solverView.vue'
 import examView from '@/components/learning/examView.vue'
 
 const store = usestore()
@@ -39,6 +44,7 @@ const tr = (zh: string, en: string) => (store.locales === 'zh' ? zh : en)
 const kbFiles = ref<LearningKbFile[]>([])
 const selectedPath = ref('')
 const loading = ref(false)
+const scanning = ref(false)
 const kb = ref<LearningKbLoaded | null>(null)
 const loadedMtime = ref(0)
 const stateMsg = ref('')
@@ -79,7 +85,21 @@ async function flushSave() {
 function fileKeyOf(b: any): string {
   return b.filePath || b.path || b.label || ''
 }
-type FileMeta = { sliceCount: number; qCount: number; blockIds: (string | number)[]; type?: KbType }
+
+// ==================== AI 解析缓存（随 .learning 一并落盘） ====================
+/** 已缓存的解析：传给练习卡 / 错题本，命中就直接渲染（不再调模型） */
+const explains = computed<Record<string, LExplainEntry>>(() => ldata.value?.explains || {})
+/** 生成完成后写回并保存 */
+function doSaveExplain(key: string, text: string, kind: LExplainKind, lang?: 'zh' | 'en') {
+  if (!ldata.value) return
+  if (setExplain(ldata.value, key, text, kind, lang)) scheduleSave()
+}
+/** 「重新生成」前清掉旧缓存 */
+function doDropExplain(key: string) {
+  if (!ldata.value) return
+  clearExplain(ldata.value, key)
+  scheduleSave()
+}type FileMeta = { sliceCount: number; qCount: number; blockIds: (string | number)[]; type?: KbType }
 const TYPE_KEYS: KbType[] = ['memory', 'procedure', 'concept', 'design']
 function buildMeta() {
   const map: Record<string, FileMeta & { counts?: Record<KbType, number> }> = {}
@@ -147,9 +167,24 @@ function kbLabelOf(key: string): string {
   return f?.label || key.split(/[\\/]/).pop() || key
 }
 
+/**
+ * 扫描范围：全部工作区（store.roots），并兜底当前工作区。
+ * 学习模块只能靠扫描定位 .kb（没有「知识处理」那种按路径打开的入口），
+ * 只看 store.root 会漏掉放在子目录或另一个工作区里的 .kb。
+ */
+function kbRoots(): string[] {
+  return workspaceRoots(store.roots, store.root)
+}
+
 async function scan() {
-  if (!store.root) { kbFiles.value = []; return }
-  kbFiles.value = await listKbFiles(store.root)
+  const roots = kbRoots()
+  if (!roots.length) { kbFiles.value = []; return }
+  scanning.value = true
+  try {
+    kbFiles.value = await listKbFiles(roots)
+  } finally {
+    scanning.value = false
+  }
   if (selectedPath.value && !kbFiles.value.some(k => k.path === selectedPath.value)) {
     selectedPath.value = ''
     kb.value = null
@@ -168,8 +203,9 @@ function onPick() {
 }
 /** 切回时按需刷新（仅列表变化或所选库 mtime 变化才重载） */
 async function refreshOnActivate() {
-  if (!store.root) { kbFiles.value = []; return }
-  kbFiles.value = await listKbFiles(store.root)
+  const roots = kbRoots()
+  if (!roots.length) { kbFiles.value = []; return }
+  kbFiles.value = await listKbFiles(roots)
   if (!selectedPath.value) return
   const cur = kbFiles.value.find(k => k.path === selectedPath.value)
   if (!cur) { selectedPath.value = ''; kb.value = null; ldata.value = null; practice.value = null; return }
@@ -177,16 +213,19 @@ async function refreshOnActivate() {
 }
 
 // ==================== 视图 ====================
-type ViewKey = 'overview' | 'map' | 'exam' | 'review' | 'mistakes'
+type ViewKey = 'overview' | 'map' | 'exam' | 'review' | 'mistakes' | 'solver'
 const activeView = ref<ViewKey>('overview')
 const showStale = ref(false)
 const entityShowAll = ref(true) // 实体轴默认显示所有实体（含未练习）
+const graphQuestions = ref(false) // 本体图谱是否一并显示问题节点（默认仅实体）
+const graphMode = ref<'entity' | 'slice' | 'file'>('entity') // 图谱显示内容：实体 / 切片+问题 / 文件+问题
 const examTrack = ref(false) // 考试结果计入学习对象
 const tabs: { key: ViewKey; icon: string; zh: string; en: string }[] = [
   { key: 'overview', icon: 'fa fa-dashboard', zh: '总览', en: 'Overview' },
   { key: 'map', icon: 'fa fa-map-o', zh: '地图', en: 'Map' },
   { key: 'review', icon: 'fa fa-refresh', zh: '复习', en: 'Review' },
   { key: 'mistakes', icon: 'fa fa-exclamation-circle', zh: '错题本', en: 'Mistakes' },
+  { key: 'solver', icon: 'fa fa-comments-o', zh: '答疑', en: 'Q&A' },
   { key: 'exam', icon: 'fa fa-graduation-cap', zh: '考试', en: 'Exam' },
 ]
 
@@ -240,16 +279,34 @@ const summaryCounts = computed(() => {
   return c
 })
 // ==================== 地图轴（文件 / 实体） ====================
-const mapAxis = ref<'file' | 'entity'>('file')
+const mapAxis = ref<'file' | 'entity' | 'graph'>('file')
 // 地图过滤下拉（all=显示过期/未开始, active=仅已有练习）→ 双向映射到各轴显示开关
 const filterSel = computed<string>({
   get: () => {
-    if (mapAxis.value === 'entity') return entityShowAll.value ? 'all' : 'active'
+    if (mapAxis.value === 'entity' || mapAxis.value === 'graph') return entityShowAll.value ? 'all' : 'active'
     return showStale.value ? 'all' : 'active'
   },
   set: (v: string) => {
-    if (mapAxis.value === 'entity') entityShowAll.value = v === 'all'
+    if (mapAxis.value === 'entity' || mapAxis.value === 'graph') entityShowAll.value = v === 'all'
     else showStale.value = v === 'all'
+  },
+})
+// 本体图谱的范围下拉：把「显示内容（实体/切片/文件）」「实体范围」「是否含问题节点」合成一个选择框
+// 取值：all | active | all+q | active+q（实体）｜ slice+q（切片+问题）｜ file+q（文件+问题）
+const graphFilterSel = computed<string>({
+  get: () => {
+    if (graphMode.value !== 'entity') return graphMode.value + '+q'
+    return (entityShowAll.value ? 'all' : 'active') + (graphQuestions.value ? '+q' : '')
+  },
+  set: (v: string) => {
+    if (v === 'slice+q' || v === 'file+q') {
+      graphMode.value = v === 'slice+q' ? 'slice' : 'file'
+      graphQuestions.value = true
+      return
+    }
+    graphMode.value = 'entity'
+    entityShowAll.value = v.startsWith('all')
+    graphQuestions.value = v.endsWith('+q')
   },
 })
 // 学习统计（P2）：近 7 天趋势 + 连续打卡
@@ -258,6 +315,28 @@ const trend30 = computed(() => (ldata.value ? trendStats(ldata.value, 30) : []))
 const trendTotals = computed(() => trend7.value.map(t => t.total))
 const trend30Totals = computed(() => trend30.value.map(t => t.total))
 const streak = computed(() => (ldata.value ? streakDays(ldata.value) : 0))
+// 内容语言：中文库优先中文输出（AI 讲解/图解的图内标签也用中文），扫描到英文库才用英文
+const contentLang = computed<'zh' | 'en'>(() => {
+  const blocks = kb.value?.blocks || []
+  if (!blocks.length) return 'zh'
+  return detectContentLanguage(blocks.slice(0, 200).flatMap((b: any) => [b?.label, b?.A]))
+})
+// 切片级作答统计（切片图谱着色：无作答=灰 / 有错=橙 / 全对=绿）
+const blockStats = computed<Record<string, { attempts: number; ok: number }>>(() => {
+  const m: Record<string, { attempts: number; ok: number }> = {}
+  const data = ldata.value
+  if (!data) return m
+  for (const key of Object.keys(data.objects)) {
+    for (const a of data.objects[key].attempts) {
+      const id = String(a.blockId ?? '')
+      if (!id) continue
+      const r = m[id] || (m[id] = { attempts: 0, ok: 0 })
+      r.attempts++
+      if (a.ok) r.ok++
+    }
+  }
+  return m
+})
 // 实体轴（P2）：由文件作答经 entityNames 投影；实体本身不单独落盘（同一份记录两套视图）
 const entityVM = computed<EntityItem[]>(() => {
   const out: EntityItem[] = []
@@ -372,7 +451,8 @@ function makeItems(blocks: any[], max = 10): PracticeItem[] {
       q: q.text,
       back: exAns || refs[0]?.content || '',
       hasAnswer: !!exAns,
-      slices: exAns ? refs : [],
+      // 参考切片始终保留：练习卡第三个标签「参考切片」用 block_md 渲染出处
+      slices: refs,
       objKey: f,
       filePath: f,
       blockId: q.srcBlockId,
@@ -386,6 +466,7 @@ function makeItems(blocks: any[], max = 10): PracticeItem[] {
       chosen.push({
         q: tr('请用自己的话复述本切片要点', 'Summarize this slice in your own words'),
         back: String(b.A || '').trim(),
+        slices: [{ label: b.label || String(b.id), content: String(b.A || '').trim() }],
         objKey: fileKeyOf(b),
         filePath: fileKeyOf(b),
         blockId: b.id,
@@ -546,14 +627,8 @@ function doSetErr(key: string, attemptId: string, errType: string) {
 }
 
 // ==================== 生命周期 ====================
-watch(() => store.root, () => {
-  selectedPath.value = ''
-  kb.value = null
-  ldata.value = null
-  practice.value = null
-  stateMsg.value = ''
-  refreshOnActivate()
-})
+// 工作区变化：重扫。列表已覆盖全部工作区，所选 .kb 只要仍能扫到就保留选择（扫不到才清空）
+watch([() => store.root, () => store.roots], () => { refreshOnActivate() }, { deep: true })
 watch(() => store.AIconfig?.llm, () => syncModel(), { deep: true })
 
 onMounted(async () => {
@@ -602,8 +677,8 @@ onDeactivated(async () => {
           </option>
           <option v-for="k in kbFiles" :key="k.path" :value="k.path">{{ k.label }}</option>
         </select>
-        <button class="tb-btn" :title="tr('刷新知识库列表', 'Refresh KB list')" @click="scan">
-          <i class="fa fa-refresh" :class="{ 'fa-spin': loading }"></i>
+        <button class="tb-btn" :disabled="scanning" :title="tr('刷新知识库列表', 'Refresh KB list')" @click="scan">
+          <i class="fa fa-refresh" :class="{ 'fa-spin': loading || scanning }"></i>
         </button>
       </div>
     </div>
@@ -626,15 +701,16 @@ onDeactivated(async () => {
         <li>{{ tr('① 到「知识处理」打开工作区并完成：文件 → 切片 → 向量化（可按需构建本体 / 推理问题）', '① Open the folder in Knowledge Processing: Files → Slices → Embed (optionally build ontology / infer questions)') }}</li>
         <li>{{ tr('② 点击上方「保存知识库」生成 .kb 文件', '② Click "Save KB" to produce a .kb file') }}</li>
         <li>{{ tr('③ 回到本页右上角刷新列表并选择它即可开始（作答记录另存为 .learning，绝不改写 .kb）', '③ Refresh & pick it here — records go to .learning, never into .kb') }}</li>
+        <li>{{ tr('④ 本模块扫描所有工作区及其子目录（工作区在 设置 → 通用 → 基础 → 路径设置 里管理），.kb 不在当前工作区也能列出', '④ All workspaces and their subfolders are scanned (manage them in Settings → General → Basic → Path Settings), so a .kb outside the current workspace still shows up') }}</li>
       </ul>
     </div>
     <div v-else-if="!selectedPath" class="empty-state lk-help">
       <i class="fa fa-dashboard"></i>
       <h3>{{ tr('请选择一个知识库', 'Pick a knowledge base') }}</h3>
-      <p class="lk-help-desc">{{ tr('当前工作区共有 ' + kbFiles.length + ' 个知识库，选择后即可开始：', 'There are ' + kbFiles.length + ' KB(s) in this workspace — pick one to start:') }}</p>
+      <p class="lk-help-desc">{{ tr('所有工作区共扫到 ' + kbFiles.length + ' 个知识库，选择后即可开始：', 'Found ' + kbFiles.length + ' KB(s) across all workspaces — pick one to start:') }}</p>
       <ul class="lk-help-list">
         <li>{{ tr('从右上角下拉选择一个知识库（「总览」会给出下一步建议）', 'Choose one from the top-right dropdown; Overview suggests your next step') }}</li>
-        <li>{{ tr('点击下拉旁的刷新按钮可重新扫描；新保存的 .kb 刷新后才会出现', 'Click refresh next to the dropdown to rescan; freshly saved .kb appears after refresh') }}</li>
+        <li>{{ tr('点击下拉旁的刷新按钮可重新扫描（扫描所有工作区及其子目录）；新保存的 .kb 刷新后才会出现', 'Click refresh next to the dropdown to rescan every workspace and its subfolders; freshly saved .kb appears after refresh') }}</li>
       </ul>
     </div>
     <div v-else-if="loading || !kb || !ldata" class="empty-state">
@@ -649,9 +725,18 @@ onDeactivated(async () => {
         v-if="practice"
         :store="store"
         :item="practice.items[practice.idx] || null"
+        :model="model"
+        :lang="contentLang"
+        :explains="explains"
+        @explain-save="doSaveExplain"
+        @explain-drop="doDropExplain"
         @result="onPracticeResult"
         @close="closePractice"
       />
+      <!-- 答疑（P1：基于 .kb 检索 + 强制切片引用作答） -->
+      <div v-else-if="activeView === 'solver'" class="view-wrap">
+        <solverView :store="store" :kb-path="selectedPath" :model="model" :blocks="kb.blocks" :files="kb.files" :file-summaries="kb.fileSummaries" :entities="kb.entities" />
+      </div>
       <!-- 考试（P0 迁入；“计入学习对象”开关已收进考试工具栏） -->
       <div v-else-if="activeView === 'exam'" class="map-shell">
         <div class="view-wrap exam-host">
@@ -659,6 +744,7 @@ onDeactivated(async () => {
             :store="store"
             :blocks="kb.blocks"
             :model="model"
+            :kb-path="selectedPath"
             :exam-track="examTrack"
             @updateState="(s: any) => { stateMsg = s }"
             @updateLiveState="(s: any) => { liveMsg = s }"
@@ -674,7 +760,7 @@ onDeactivated(async () => {
           :vm="vm"
           :streak="streak"
           :days="trendTotals"
-          :days-30="trend30Totals"
+          :days30="trend30Totals"
           :wrong-count="wrongList.length"
           :total-practice="stats.totalPractice"
           :total-correct="stats.totalCorrect"
@@ -684,12 +770,12 @@ onDeactivated(async () => {
           @map="activeView = 'map'"
         />
       </div>
-      <!-- 学习地图（按文件 | 按实体） -->
+      <!-- 学习地图（按文件 | 按实体 | 本体图谱） -->
       <div v-else-if="activeView === 'map'" class="map-shell">
         <div class="map-axis">
-          <button class="axis-btn" :class="{ active: mapAxis === 'file' }" @click="mapAxis = 'file'"><i class="fa fa-file-text-o"></i> {{ tr('按文件', 'By file') }}</button>
-          <button class="axis-btn" :class="{ active: mapAxis === 'entity' }" @click="mapAxis = 'entity'"><i class="fa fa-eercast"></i> {{ tr('按实体', 'By entity') }}</button>
-          <span class="axis-note">{{ mapAxis === 'file' ? tr('以来源文件为学习单位', 'files as learning units') : tr('以本体实体为学习单位（由文件作答投影）', 'entities as units (projected from file answers)') }}</span>
+          <button class="axis-btn" :class="{ active: mapAxis === 'file' }" @click="mapAxis = 'file'" :title="tr('按文件：以来源文件为学习单位', 'By file: files as learning units')"><i class="fa fa-file-text-o"></i> {{ tr('按文件', 'By file') }}</button>
+          <button class="axis-btn" :class="{ active: mapAxis === 'entity' }" @click="mapAxis = 'entity'" :title="tr('按实体：以本体实体为学习单位（由文件作答投影）', 'By entity: entities as learning units (projected from file answers)')"><i class="fa fa-eercast"></i> {{ tr('按实体', 'By entity') }}</button>
+          <button class="axis-btn" :class="{ active: mapAxis === 'graph' }" @click="mapAxis = 'graph'" :title="tr('本体图谱：把本体（实体 + 关系）画成图谱，节点颜色即掌握状态；需先在「知识处理」构建本体。右侧范围下拉可选 全部/仅已练习实体、带问题节点、切片+问题、文件+问题', 'Ontology graph: draws the ontology (entities + relations); node colour = mastery; build it in Knowledge Processing first. The scope dropdown on the right adds questions / slices / files or filters to practised items')"><i class="fa fa-sitemap"></i> {{ tr('本体图谱', 'Ontology graph') }}</button>
           <span style="flex:1;"></span>
           <select
             v-if="mapAxis === 'file'"
@@ -701,13 +787,26 @@ onDeactivated(async () => {
             <option value="all">{{ tr('含过期', 'Include stale') }}</option>
           </select>
           <select
-            v-else
+            v-else-if="mapAxis === 'entity'"
             v-model="filterSel"
             class="axis-select"
             :title="tr('实体范围：全部实体 / 仅已有练习的实体', 'Entity scope: all / only with attempts')"
           >
             <option value="all">{{ tr('全部实体', 'All entities') }}</option>
             <option value="active">{{ tr('仅已练习', 'With attempts') }}</option>
+          </select>
+          <select
+            v-else
+            v-model="graphFilterSel"
+            class="axis-select"
+            :title="tr('图谱范围：显示内容（实体 / 切片+问题 / 文件+问题）+ 实体范围 + 是否带问题节点', 'Graph scope: content (entities / slices+questions / files+questions) + entity range + question nodes')"
+          >
+            <option value="all">{{ tr('全部实体', 'All entities') }}</option>
+            <option value="active">{{ tr('仅已练习', 'With attempts') }}</option>
+            <option value="all+q">{{ tr('全部实体 + 问题', 'All entities + questions') }}</option>
+            <option value="active+q">{{ tr('仅已练习 + 问题', 'With attempts + questions') }}</option>
+            <option value="slice+q">{{ tr('切片 + 问题', 'Slices + questions') }}</option>
+            <option value="file+q">{{ tr('文件 + 问题', 'Files + questions') }}</option>
           </select>
         </div>
         <div class="view-wrap">
@@ -723,7 +822,8 @@ onDeactivated(async () => {
             @claim-mastered="doClaimMastered"
             @set-type="doSetType"
           />
-          <entityView v-else :store="store" :items="entityVM" :show-all="entityShowAll" @practice="startEntityPractice" @review="startEntityReview" />
+          <entityView v-else-if="mapAxis === 'entity'" :store="store" :items="entityVM" :show-all="entityShowAll" @practice="startEntityPractice" @review="startEntityReview" />
+          <graphView v-else :store="store" :entities="kb.entities" :relations="kb.relations" :items="entityVM" :show-all="entityShowAll" :questions="kb.questions" :with-questions="graphQuestions" :entity-to-blocks="kb.entityToBlocks || []" :mode="graphMode" :blocks="kb.blocks" :files="kb.files" :file-items="vm" :block-stats="blockStats" @practice="startEntityPractice" @review="startEntityReview" @practice-block="(fp, bid) => startPractice(fp, bid)" @practice-file="(fp) => startPractice(fp)" />
         </div>
       </div>
       <!-- 复习 -->
@@ -736,7 +836,11 @@ onDeactivated(async () => {
           :store="store"
           :kb="kb"
           :model="model"
+          :lang="contentLang"
+          :explains="explains"
           :wrong="wrongList"
+          @explain-save="doSaveExplain"
+          @explain-drop="doDropExplain"
           @practice-one="(k, bid) => startPractice(k, bid)"
           @update-err="doSetErr"
         />
@@ -913,7 +1017,6 @@ onDeactivated(async () => {
 .axis-btn { cursor: pointer; border: 1px solid var(--borderColor); background: var(--backgroundColor); color: var(--fontColor); border-radius: 4px; font-size: 12px; padding: 2px 10px; }
 .axis-btn:hover { background: var(--menuActiveColor); }
 .axis-btn.active { border-color: var(--fontActiveColor); color: var(--fontActiveColor); background: var(--menuActiveColor); }
-.axis-note { font-size: 11px; color: var(--borderColor); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 地图过滤下拉：参照 kb-select（无边框、无底色），固定高度不撑开地图轴 */
 .axis-select {
   height: 24px;

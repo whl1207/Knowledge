@@ -20,9 +20,11 @@ import SessionLogPanel from '@/components/set/SessionLogPanel.vue'
 import CredentialsPanel from '@/components/set/CredentialsPanel.vue'
 import CollabSettings from '@/components/set/CollabSettings.vue'
 import FileAssocSettings from '@/components/set/FileAssocSettings.vue'
-import { chatsRef, currentChatIndexRef } from '@/store/chats'
+import DataSettings from '@/components/set/DataSettings.vue'
 import { FILE_VIEWS } from '@/lib/knowFile/fileViews'
 import { ElMessage, ElMessageBox } from 'element-plus'
+// 数据页（DataSettings.vue）与「常用操作」共用：占用统计 / 文件 IO / 聊天记录读取
+import { LOCAL_STORAGE_LIMIT, MD_FILTERS, countEntries, formatBytes, lsTotalBytes, readLsJson, readStoredChats, saveTextFile, stampText } from '@/lib/settingsData'
 
 const store = usestore()
 
@@ -47,11 +49,36 @@ const navTree = ref<NavItem[]>([
     title_en: 'General',
     children: [
       { id: 'view', icon: 'fa fa-eye', title_zh: '基础', title_en: 'Basic' },
-      { id: 'collab', icon: 'fa fa-users', title_zh: '协作', title_en: 'Collaboration' },
-      { id: 'llm', icon: 'fa fa-comments', title_zh: '模型', title_en: 'LLM' },
-      { id: 'credentials', icon: 'fa fa-key', title_zh: '凭据', title_en: 'Credentials' },
+      { id: 'features', icon: 'fa fa-th-large', title_zh: '功能', title_en: 'Features' },
+      { id: 'data', icon: 'fa fa-database', title_zh: '数据', title_en: 'Data' },
       { id: 'fileassoc', icon: 'fa fa-link', title_zh: '关联', title_en: 'Associations' },
       { id: 'other', icon: 'fa fa-ellipsis-h', title_zh: '其他', title_en: 'Other' },
+    ]
+  },
+  {
+    // 模型（一级分组）：来源（各来源连接配置）→ 嵌入（嵌入兜底）→ 凭据（API 密钥管理）
+    // 页面入口：来源 = LlmSettings（默认整页）；嵌入 = LlmSettings section="embed"；凭据 = CredentialsPanel
+    id: 'llm-group',
+    icon: 'fa fa-comments',
+    title_zh: '模型',
+    title_en: 'Models',
+    children: [
+      { id: 'llm', icon: 'fa fa-server', title_zh: '来源', title_en: 'Sources' },
+      { id: 'llm-embed', icon: 'fa fa-cubes', title_zh: '嵌入', title_en: 'Embedding' },
+      { id: 'credentials', icon: 'fa fa-key', title_zh: '凭据', title_en: 'Credentials' },
+    ]
+  },
+  {
+    // 协作（一级分组）：共享（局域网共享 / 共享文件夹）→ 协同（协同文件编辑）→ 权限（访客能力白名单）
+    // 顺序即「先决定共享什么，再决定允许什么」；子项 id 中 'collab' 保留给「协同」，兼容旧链接 ?nav=collab
+    id: 'collab-group',
+    icon: 'fa fa-users',
+    title_zh: '协作',
+    title_en: 'Collaboration',
+    children: [
+      { id: 'share', icon: 'fa fa-globe', title_zh: '共享', title_en: 'Sharing' },
+      { id: 'collab', icon: 'fa fa-users', title_zh: '协同', title_en: 'Collaborative Editing' },
+      { id: 'perm', icon: 'fa fa-shield', title_zh: '权限', title_en: 'Permissions' },
     ]
   },
   {
@@ -103,7 +130,7 @@ const navTree = ref<NavItem[]>([
 // 当前激活的导航项（叶子 id；默认进入界面设置）
 const activeNav = ref('view')
 
-// 已展开的一级分组（默认只展开激活项所在分组，避免导航栏过长）
+// 已展开的一级分组（默认只展开激活项所在分组；手风琴式：一次只展开一个，避免导航栏过长）
 const expandedGroups = ref<Set<string>>(new Set(['base-group']))
 
 // 根据二级子项 id 找到其所属的一级分组 id
@@ -218,12 +245,6 @@ const openFolder = async function() {
     }
   }
 }
-const openWorkflowFolder = async function() {
-  let path = await window.ipcRenderer.invoke('openFolderDialog')
-  if(path!=null){
-    store.workflowPath = path
-  }
-}
 // 计算属性：根据当前语言获取标题
 const getTitle = (item:any) => {
   return store.locales === 'zh' ? item.title_zh : item.title_en
@@ -235,19 +256,17 @@ const getTitle = (item:any) => {
 const VIEW_ICONS: Record<string, string> = {
   ...Object.fromEntries(FILE_VIEWS.map((v) => [v.name, v.icon])),
   '文件': 'fa fa-folder', '表格': 'fa fa-table', '图谱': 'fa fa-xing',
-  '看板': 'fa fa-list-ul', '地图': 'fa fa-location-arrow', '日历': 'fa fa-calendar-o', '甘特': 'fa fa-list-alt',
+  '看板': 'fa fa-list-ul', '地图': 'fa fa-location-arrow', '日历': 'fa fa-calendar-o',
 }
 const VIEW_TITLE_EN: Record<string, string> = {
   ...Object.fromEntries(FILE_VIEWS.map((v) => [v.name, v.labelEn])),
   '文件': 'Files', '表格': 'Table', '图谱': 'Graph',
-  '看板': 'Kanban', '地图': 'Map', '日历': 'Year Calendar', '甘特': 'Gantt',
+  '看板': 'Kanban', '地图': 'Map', '日历': 'Year Calendar',
 }
-// 中文显示名覆盖：甘特对外展示为「日程」
-const VIEW_TITLE_ZH: Record<string, string> = { '甘特': '日程' }
 const viewButtons = computed(() => store.viewList.map((v: string) => ({
   id: v,
   icon: VIEW_ICONS[v] || 'fa fa-file-o',
-  title_zh: VIEW_TITLE_ZH[v] || v,
+  title_zh: v,
   title_en: VIEW_TITLE_EN[v] || v,
 })))
 
@@ -258,12 +277,7 @@ const navSwitches = computed(() => {
     { key: '主页', icon: 'fa fa-home', label: zh ? '主页' : 'Home' },
     { key: '知识管理', icon: 'fa fa-book', label: zh ? '知识管理' : 'Knowledge Management' },
     { key: '知识处理', icon: 'fa fa-stack-overflow', label: zh ? '知识处理' : 'Knowledge Processing' },
-    { key: '学习', icon: 'fa fa-graduation-cap', label: zh ? '学习' : 'Learning' },
-    { key: '工作流管理', icon: 'fa fa-stumbleupon', label: zh ? '工作流管理' : 'Workflow' },
-    { key: '数据画布', icon: 'fa fa-object-group', label: zh ? '数据画布' : 'Data Canvas' },
-    { key: 'Agent脚手架', icon: 'fa fa-deviantart', label: zh ? 'Agent脚手架' : 'Agent Scaffold' },
-    { key: 'Agent Swarm', icon: 'fa fa-cubes', label: 'Agent Swarm' },
-    { key: '待办管理', icon: 'fa fa-lightbulb-o', label: zh ? '待办管理' : 'Todo Management' }
+    { key: '学习', icon: 'fa fa-graduation-cap', label: zh ? '学习' : 'Learning' }
   ]
 })
 
@@ -391,33 +405,12 @@ const environmentCapabilitySummary = computed(() => {
     : 'Capabilities: compute only (numpy/pulp etc.), no file I/O or network.'
 })
 // ================ localStorage 占用统计（初始化按钮中显示） ================
-// 浏览器 localStorage 配额按 UTF-16 码元计（key + value 每字符 2 字节），Electron 上限约 100MB
-const LOCAL_STORAGE_LIMIT = 100 * 1024 * 1024 // 100MB
-// 容量上限的可读文本（进度条/占用文本共用；随 LOCAL_STORAGE_LIMIT 自动变化）
+// 容量上限与格式化见 @/lib/settingsData（与「数据」页同一口径）
 const localStorageLimitText = `${LOCAL_STORAGE_LIMIT / (1024 * 1024)} MB`
 const localStorageBytes = ref(0)
 
 // 统计当前 localStorage 全部键值对占用（字节）
-const refreshLocalStorageUsage = () => {
-  let total = 0
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i)
-      if (key == null) continue
-      const value = localStorage.getItem(key) || ''
-      total += (key.length + value.length) * 2
-    }
-  } catch (e) {
-    console.error('统计 localStorage 占用失败:', e)
-  }
-  localStorageBytes.value = total
-}
-
-// 格式化字节数为可读大小（KB/MB）
-const formatBytes = (b: number) => {
-  if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(2) + ' MB'
-  return (b / 1024).toFixed(1) + ' KB'
-}
+const refreshLocalStorageUsage = () => { localStorageBytes.value = lsTotalBytes() }
 
 // 按钮中的占用文本，如 "24.5 KB / 100 MB · 0.02%"
 const localStorageUsageText = computed(() => {
@@ -430,87 +423,38 @@ const localStoragePct = computed(() => {
   return Math.min((localStorageBytes.value / LOCAL_STORAGE_LIMIT) * 100, 100)
 })
 
-// ================ userData 缓存占用（清理缓存按钮用） ================
-// 仅统计可安全清理的 Chromium 缓存目录，不含配置/会话等数据
-const userDataCacheBytes = ref(0)
-const userDataCacheText = computed(() => formatBytes(userDataCacheBytes.value))
+// ================ 「数据」页已拆为独立模块 ================
+// 数据总览 / 数据清单 / 按类导入导出 → DataSettings.vue；共用工具函数 → @/lib/settingsData。
 
-// 查询可清理缓存(Cache/Code Cache/GPUCache 等)总占用（主进程统计 userData 下缓存目录）
-const refreshUserDataCache = async () => {
-  if (!window.ipcRenderer) return
-  try {
-    const res = await window.ipcRenderer.invoke('userdata-cache-info')
-    userDataCacheBytes.value = res?.bytes || 0
-  } catch (e) {
-    console.error('查询缓存占用失败:', e)
-  }
+
+// 本机数据概览文本（初始化确认框用）：列出会被清空的各类数据数量
+const localDataSummary = (): string => {
+  const zh = store.locales === 'zh'
+  const chats = readStoredChats()
+  const msgCount = chats.reduce((n: number, c: any) => n + (Array.isArray(c?.messages) ? c.messages.length : 0), 0)
+  const parts = [
+    zh ? `聊天 ${chats.length} 个会话（${msgCount} 条消息）` : `chats: ${chats.length} (${msgCount} messages)`,
+    zh ? `旧版待办 ${countEntries(readLsJson('todo-entries-v1'))} 条` : `legacy todos: ${countEntries(readLsJson('todo-entries-v1'))}`,
+    zh ? `Agent 预设 ${countEntries(readLsJson('agentPresets'))} 个` : `agent presets: ${countEntries(readLsJson('agentPresets'))}`,
+    zh ? `MCP ${countEntries(readLsJson('mcpServers'))} 个` : `MCP servers: ${countEntries(readLsJson('mcpServers'))}`,
+  ]
+  return parts.join(zh ? ' · ' : ' · ')
 }
 
-// 清理 userData 缓存：只删缓存/临时文件，绝不动配置、聊天记录、会话日志、账号数据
-const handleCleanUserDataCache = async () => {
-  await refreshUserDataCache()
-  const size = userDataCacheBytes.value
-  if (size <= 0) {
-    ElMessage.info(store.locales === 'zh' ? '当前没有可清理的缓存' : 'No cache to clean right now')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      store.locales === 'zh'
-        ? `确定清理缓存文件吗（当前约 ${formatBytes(size)}）？只清理浏览器缓存/临时文件（Cache、Code Cache、GPUCache 等）与 Word 预览图片缓存（docx-media，重开 Word 文件会自动重新提取），不会删除任何配置、聊天记录、会话日志或账号数据。`
-        : `Clean cache files now (about ${formatBytes(size)})? Only Chromium cache/temp files (Cache, Code Cache, GPUCache, etc.) and the Word preview image cache (docx-media, re-extracted on next open) will be removed. Config, chats, session logs and credentials are NOT affected.`,
-      store.locales === 'zh' ? '提示' : 'Confirm',
-      {
-        confirmButtonText: store.locales === 'zh' ? '清理' : 'Clean',
-        cancelButtonText: store.locales === 'zh' ? '取消' : 'Cancel',
-        type: 'warning',
-      }
-    )
-    const res = await window.ipcRenderer.invoke('clean-userdata-cache')
-    if (res?.ok) {
-      ElMessage.success(
-        store.locales === 'zh'
-          ? `已清理缓存 ${formatBytes(res.freed || 0)}`
-          : `Cache cleaned: ${formatBytes(res.freed || 0)}`
-      )
-      if (res.failed && res.failed.length) {
-        ElMessage.warning(
-          store.locales === 'zh'
-            ? `部分缓存正在被占用，已标记为下次启动时自动补清：${res.failed.join('、')}`
-            : `Some cache is in use and is scheduled to be fully cleared on next startup: ${res.failed.join(', ')}`
-        )
-      }
-    } else {
-      ElMessage.error(
-        store.locales === 'zh'
-          ? '清理失败：' + (res?.error || '未知错误')
-          : 'Clean failed: ' + (res?.error || 'unknown error')
-      )
-    }
-    refreshUserDataCache()
-  } catch {
-    // 用户取消操作，不做处理
-  }
-}
-
-// 切换到「系统」页时刷新占用统计
-watch(activeNav, (nav) => {
-  if (nav === 'system') {
-    refreshLocalStorageUsage()
-    refreshUserDataCache()
-  }
-})
-
-// 初始化确认
+// 初始化确认（提示当前本机数据数量与占用，避免用户没备份就清空）
+// 说明：消息用 HTML 换行（dangerouslyUseHTMLString），因为弹框内容渲染在 <p> 里、\n 会被折叠
 const handleInitConfig = async () => {
   refreshLocalStorageUsage()
+  const usage = localStorageUsageText.value
+  const summary = localDataSummary()
   try {
     await ElMessageBox.confirm(
       store.locales === 'zh'
-        ? '确定要初始化吗？所有配置将被清除，应用将自动重启。'
-        : 'Are you sure to initialize? All configurations will be cleared and the app will restart.',
+        ? `确定要初始化吗？所有配置将被清除，应用将自动重启。<br/>当前本机数据：${summary}（共 ${usage}）`
+        : `Are you sure to initialize? All configurations will be cleared and the app will restart.<br/>Local data: ${summary} (${usage} in total)`,
       store.locales === 'zh' ? '提示' : 'Confirm',
       {
+        dangerouslyUseHTMLString: true,
         confirmButtonText: store.locales === 'zh' ? '确定' : 'OK',
         cancelButtonText: store.locales === 'zh' ? '取消' : 'Cancel',
         type: 'warning',
@@ -544,152 +488,12 @@ const handleClearChats = async () => {
   }
 }
 
-// ================ 聊天记录导入 / 导出（备份与恢复） ================
-// 主窗口与设置窗口共享同一份 localStorage 存档（ai-chats）：
-//   读：优先内存（主窗口已挂载时最新），否则 localStorage；
-//   写：写入 localStorage，主窗口内存也在同一渲染器时就一并同步，并广播通知其它窗口重载。
+// ================ 聊天记录导入 / 导出 ================
+// 聊天备份（导出/合并导入）与文件读写工具已抽到 @/lib/settingsData：
+// readStoredChats / writeStoredChats / exportChats / importChats / saveTextFile / stampText / JSON_FILTERS / MD_FILTERS
+// （数据页 DataSettings.vue 与下方「导出 Markdown」共用同一套实现）
 
-/** 当前聊天列表（优先内存，回退 localStorage） */
-const readStoredChats = (): any[] => {
-  if (Array.isArray(chatsRef.value) && chatsRef.value.length) return chatsRef.value
-  try {
-    const saved = localStorage.getItem('ai-chats')
-    const list = saved ? JSON.parse(saved) : []
-    return Array.isArray(list) ? list : []
-  } catch { return [] }
-}
-
-/** 写回聊天存档；不动 ai-chats-index（主窗口加载时会自行 clamp） */
-const writeStoredChats = (list: any[]) => {
-  localStorage.setItem('ai-chats', JSON.stringify(list))
-  if (Array.isArray(chatsRef.value) && chatsRef.value.length) chatsRef.value = list
-  window.dispatchEvent(new CustomEvent('ai-chats-changed'))
-  // 独立设置窗口场景：通知其它窗口（主窗口）重新加载，否则主窗口下次 saveChats 会把导入结果覆盖掉
-  try { (window as any).ipcRenderer?.send?.('chats-changed') } catch { /* 忽略 */ }
-  refreshLocalStorageUsage()
-}
-
-/** 时间戳后缀：YYYYMMDD-HHmmss（导出文件名用） */
-const stampText = () => {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
-}
-
-/** 导出文件名：ai-chats-YYYYMMDD-HHmmss.json */
-const chatsFileName = () => `ai-chats-${stampText()}.json`
-
-/** 另存为对话框的文件类型过滤（导出聊天 / 备份 / Markdown 共用） */
-const JSON_FILTERS = [{ name: 'JSON', extensions: ['json'] }, { name: 'All Files', extensions: ['*'] }]
-const MD_FILTERS = [{ name: 'Markdown', extensions: ['md'] }, { name: 'All Files', extensions: ['*'] }]
-
-/** 保存文本文件：桌面版走原生「另存为」，浏览器/LAN 模式走浏览器下载。
- *  返回保存路径（浏览器模式为空串）；用户取消返回 null；写入失败抛错。 */
-const saveTextFile = async (
-  defaultName: string,
-  content: string,
-  mime: string,
-  filters: { name: string; extensions: string[] }[],
-): Promise<string | null> => {
-  const ipc: any = (window as any).ipcRenderer
-  if (ipc?.invoke) {
-    const target = await ipc.invoke('saveFileDialog', { defaultPath: defaultName, filters })
-    if (!target) return null
-    const ok = await ipc.invoke('saveFile', target, content)
-    if (!ok) throw new Error(store.locales === 'zh' ? '无法写入文件' : 'cannot write file')
-    return target
-  }
-  const url = URL.createObjectURL(new Blob([content], { type: mime }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = defaultName
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-  return ''
-}
-
-/** 导出全部聊天记录（含分支 / 知识库来源 / 工具调用时间线等完整字段）为 JSON 备份文件 */
-const handleExportChats = async () => {
-  const list = readStoredChats()
-  if (!list.length) {
-    ElMessage.warning(store.locales === 'zh' ? '当前没有聊天记录可导出' : 'No chat history to export')
-    return
-  }
-  const payload = { app: 'ai-km', kind: 'chats', version: 1, exportedAt: new Date().toISOString(), chats: list }
-  const json = JSON.stringify(payload, null, 2)
-  try {
-    const target = await saveTextFile(chatsFileName(), json, 'application/json', JSON_FILTERS)
-    if (target === null) return
-    ElMessage.success(store.locales === 'zh'
-      ? `已导出 ${list.length} 个聊天${target ? ` → ${target}` : ''}`
-      : `Exported ${list.length} chats${target ? ` → ${target}` : ''}`)
-  } catch (e: any) {
-    ElMessage.error((store.locales === 'zh' ? '导出失败：' : 'Export failed: ') + (e?.message || String(e)))
-  }
-}
-
-/** 解析导入文件内容（兼容「完整导出包」与「裸数组」两种格式） */
-const parseChatsFile = (text: string): any[] => {
-  const data = JSON.parse(text)
-  const list = Array.isArray(data) ? data : (data && Array.isArray(data.chats) ? data.chats : null)
-  if (!list) throw new Error(store.locales === 'zh' ? '不是有效的聊天导出文件' : 'not a valid chats export file')
-  return list.filter((c: any) => c && typeof c === 'object' && (Array.isArray(c.messages) || c.config))
-}
-
-/** 浏览器 / LAN 模式选文件（无 ipcRenderer 时用 <input type=file>） */
-const pickTextFileInBrowser = (): Promise<string> => new Promise((resolve) => {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = 'application/json,.json'
-  input.onchange = () => {
-    const f = input.files && input.files[0]
-    if (!f) { resolve(''); return }
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => resolve('')
-    reader.readAsText(f)
-  }
-  input.click()
-})
-
-/** 导入聊天记录（JSON）：与现有记录合并，同 id 跳过（可重复导入而不产生重复） */
-const handleImportChats = async () => {
-  try {
-    let text = ''
-    const ipc: any = (window as any).ipcRenderer
-    if (ipc?.invoke) {
-      const res = await ipc.invoke('openFile') // → { content, filePath }
-      if (!res || res.content == null) return
-      text = String(res.content)
-    } else {
-      text = await pickTextFileInBrowser()
-      if (!text) return
-    }
-    const incoming = parseChatsFile(text)
-    if (!incoming.length) {
-      ElMessage.warning(store.locales === 'zh' ? '文件中没有可导入的聊天记录' : 'No chats found in the file')
-      return
-    }
-    const existing = readStoredChats()
-    const ids = new Set(existing.map((c: any) => String(c?.id ?? '')))
-    const added = incoming.filter((c: any) => !ids.has(String(c?.id ?? '')))
-    const skipped = incoming.length - added.length
-    if (!added.length) {
-      ElMessage.info(store.locales === 'zh' ? `未发现新聊天（${skipped} 个已存在）` : `Nothing new (${skipped} already exist)`)
-      return
-    }
-    writeStoredChats([...existing, ...added])
-    ElMessage.success(store.locales === 'zh'
-      ? `已导入 ${added.length} 个聊天${skipped ? `（跳过 ${skipped} 个已存在）` : ''}`
-      : `Imported ${added.length} chats${skipped ? ` (${skipped} skipped)` : ''}`)
-  } catch (e: any) {
-    ElMessage.error((store.locales === 'zh' ? '导入失败：' : 'Import failed: ') + (e?.message || String(e)))
-  }
-}
-
-// ================ 导出为 Markdown（人类可读归档；完整字段备份请用「导出聊天」） ================
+// ================ 导出为 Markdown（人类可读归档；完整字段备份请用数据页的「导出聊天记录」） ================
 
 /** 本地时间文本：YYYY-MM-DD HH:mm:ss */
 const fmtDateTime = (ts?: number) => {
@@ -788,91 +592,8 @@ const handleExportChatsMarkdown = async () => {
   }
 }
 
-// ================ 全部数据备份（界面 + AI 配置 + 预设；不含聊天记录） ================
-
-/** 备份覆盖的存档键（聊天记录体积大，由「导出聊天」单独备份，这里不重复） */
-const BACKUP_KEYS = [
-  'AIconfig', 'UI', 'customLlmSources', 'llmSourceStatus', 'llmDisabledSources', 'llmCustomSourceStatus',
-  'agentPresets', 'generalAgentMaxSteps', 'mcpServers', 'disabledSkills', 'skillStoreSources', 'agentTools',
-  'webSearchConfig',
-  'enabledScaffolds', 'hiddenNavs', 'customTitle', 'interfaceConfigMode', 'collab', 'remoteFs', 'lan',
-  'remoteRoots', 'mapConfig', 'locales', 'roots', 'root', 'path', 'skillsPath', 'workflowPath', 'treeSort',
-  'view', 'mainPanel', 'canvasTaskPath',
-]
-
-/** 备份全部配置与预设为一个 JSON 文件（初始化/换机前留底） */
-const handleBackupAllData = async () => {
-  const zh = store.locales === 'zh'
-  const data: Record<string, any> = {}
-  let count = 0
-  for (const k of BACKUP_KEYS) {
-    const raw = localStorage.getItem(k)
-    if (raw === null) continue
-    try { data[k] = JSON.parse(raw) } catch { data[k] = raw }
-    count++
-  }
-  if (!count) {
-    ElMessage.warning(zh ? '当前没有可备份的配置' : 'Nothing to back up')
-    return
-  }
-  const payload = {
-    app: 'ai-km', kind: 'backup', version: 1,
-    exportedAt: new Date().toISOString(),
-    appVersion: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '',
-    keys: count, data,
-  }
-  try {
-    const target = await saveTextFile(`ai-km-backup-${stampText()}.json`, JSON.stringify(payload, null, 2), 'application/json', JSON_FILTERS)
-    if (target === null) return
-    ElMessage.success(zh ? `已备份 ${count} 项配置与预设${target ? ` → ${target}` : ''}` : `Backed up ${count} config entries${target ? ` → ${target}` : ''}`)
-  } catch (e: any) {
-    ElMessage.error((zh ? '备份失败：' : 'Backup failed: ') + (e?.message || String(e)))
-  }
-}
-
-/** 打开本机数据目录（userData：配置、缓存、会话日志等；仅桌面版） */
-const handleOpenDataDir = async () => {
-  const zh = store.locales === 'zh'
-  const ipc: any = (window as any).ipcRenderer
-  if (!ipc?.invoke) {
-    ElMessage.warning(zh ? '浏览器模式下无法打开本机目录' : 'Not available in browser mode')
-    return
-  }
-  try {
-    const res = await ipc.invoke('open-data-dir')
-    if (res?.success) ElMessage.success(zh ? `已打开数据目录：${res.path}` : `Opened data folder: ${res.path}`)
-    else ElMessage.error((zh ? '打开失败：' : 'Failed: ') + (res?.error || ''))
-  } catch (e: any) {
-    ElMessage.error((zh ? '打开失败：' : 'Failed: ') + (e?.message || String(e)))
-  }
-}
-
-/** 清空全部会话日志（智能体/会话的原始事件记录，仅桌面版） */
-const handleClearSessionLog = async () => {
-  const zh = store.locales === 'zh'
-  if (!window.dsh?.sessionLog) {
-    ElMessage.warning(zh ? '浏览器模式下无法清空会话日志' : 'Not available in browser mode')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      zh
-        ? '确定清空全部会话日志吗？该日志是智能体/会话的原始事件记录（用于「设置 → 日志」检视），清空后不可恢复。正在运行的智能体任务请先停止。'
-        : 'Clear all session logs? These are the raw event records shown in Settings → Session Log and cannot be recovered.',
-      zh ? '提示' : 'Confirm',
-      {
-        confirmButtonText: zh ? '确定' : 'OK',
-        cancelButtonText: zh ? '取消' : 'Cancel',
-        type: 'warning',
-      }
-    )
-    const res = await window.dsh.sessionLog.clearAll()
-    if (res?.success === false) throw new Error(zh ? '清空失败' : 'clear failed')
-    ElMessage.success(zh ? '已清空全部会话日志' : 'All session logs cleared')
-  } catch {
-    // 用户取消 / 清空失败：取消不做处理
-  }
-}
+// ================ 数据管理与备份 ================
+// 打开数据目录 / 清理缓存 / 清空会话日志 / 各类数据导入导出，均已归入「通用 → 数据」页（DataSettings.vue）。
 
 /** 在系统文件管理器中打开某个工作区文件夹（工作区行右侧按钮；仅桌面版） */
 const openWorkspaceFolder = async (p: string) => {
@@ -1035,23 +756,27 @@ const applyCloseBehavior = async () => {
   }
 }
 
-// 界面配置随软件分发开关：开启后界面配置保存到软件根目录 interface-config.json，便于整机分发
-const toggleInterfaceConfig = async () => {
-  const on = !store.interfaceConfigMode
-  if (on) {
-    try {
+// 配置随软件分发（下拉：关闭 / 开启）：开启后界面配置保存到软件根目录 interface-config.json，便于整机分发
+const onPortableConfigChange = async (e: Event) => {
+  const el = e.target as HTMLSelectElement
+  const on = el.value === '1'
+  if (on === store.interfaceConfigMode) return
+  try {
+    if (on) {
       const res = await store.setInterfaceConfigMode(true)
       ElMessage.success(
         store.locales === 'zh'
           ? '已开启：界面配置将保存到软件根目录\n' + res.path
           : 'Enabled: interface config will be saved to\n' + res.path
       )
-    } catch (e: any) {
-      ElMessage.error(store.locales === 'zh' ? '开启失败：' + (e?.message || e) : 'Failed: ' + (e?.message || e))
+    } else {
+      await store.setInterfaceConfigMode(false)
+      ElMessage.success(store.locales === 'zh' ? '已关闭：界面配置回到本机保存' : 'Disabled: interface config saved locally')
     }
-  } else {
-    await store.setInterfaceConfigMode(false)
-    ElMessage.success(store.locales === 'zh' ? '已关闭：界面配置回到本机保存' : 'Disabled: interface config saved locally')
+  } catch (e: any) {
+    // 失败时把下拉回退到实际状态（不跟着用户选的那项走，避免“看着开了其实没开”）
+    el.value = store.interfaceConfigMode ? '1' : '0'
+    ElMessage.error(store.locales === 'zh' ? '开启失败：' + (e?.message || e) : 'Failed: ' + (e?.message || e))
   }
 }
 
@@ -1344,13 +1069,55 @@ onBeforeUnmount(() => {
 
       </div>
 
-      <!-- 协作设置（局域网共享 + 协同文件编辑 + 共享文件夹 + 知识库共享） —— 独立模块 -->
-      <CollabSettings v-if="activeNav === 'collab'" :store="store" />
+      <!-- 协作（一级分组）：共享 / 协同 / 权限——同一组件按 section 渲染（逻辑与状态集中在那里） -->
+      <CollabSettings v-if="activeNav === 'share'" :store="store" section="share" />
+      <CollabSettings v-else-if="activeNav === 'collab'" :store="store" section="collab" />
+      <CollabSettings v-else-if="activeNav === 'perm'" :store="store" section="perm" />
 
       <!-- 界面设置 -->
       <div v-if="activeNav === 'view'" class="settings-section">
         <div class="settings-group">
-          <h3>{{ store.locales=='zh'?'界面' : 'UI' }}</h3>
+          <h3>{{ store.locales=='zh'?'工作区路径设置' : 'Workspace Path Settings' }}</h3>
+            <div class="form-group workspace-form">
+              <label>{{ store.locales=='zh'?'工作区' : 'Workspace' }}</label>
+              <!-- 工作区列表 + 添加入口：上下排列 -->
+              <div class="workspace-stack">
+                <div class="workspace-list" v-if="store.roots.length">
+                  <div
+                    v-for="root in store.roots"
+                    :key="root"
+                    class="workspace-item"
+                    :class="{ active: root === store.root }"
+                    :title="root"
+                  >
+                    <span class="workspace-path">{{ root }}</span>
+                    <div class="workspace-actions">
+                      <div class="button workspace-action activate" style="width:20px;" @click="activateWorkspace(root)"
+                           :title="store.locales=='zh'?'设为当前工作区' : 'Set as active workspace'">
+                        <i class="fa" :class="root === store.root ? 'fa-check-circle' : 'fa-circle-o'"></i>
+                      </div>
+                      <div class="button workspace-action" style="width:20px;" @click="openWorkspaceFolder(root)"
+                           :title="store.locales=='zh'?'在系统文件管理器中打开该工作区文件夹' : 'Open this workspace folder in the file manager'">
+                        <i class="fa fa-external-link"></i>
+                      </div>
+                      <div class="button workspace-action" style="width:20px;" @click="removeWorkspace(root)"
+                           :title="store.locales=='zh'?'移除工作区' : 'Remove workspace'">
+                        <i class="fa fa-times"></i>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <!-- 添加工作区 -->
+                <div class="input-with-button">
+                  <input v-model="newWorkspacePath" @keyup.enter="addWorkspaceFromInput"
+                         :placeholder="store.locales=='zh'?'输入工作区路径或选择文件夹' : 'Enter path or select folder'"/>
+                  <div class="button" style="width:20px;" @click="openFolder" :title="store.locales=='zh'?'选择文件夹并添加' : 'Select folder and add'">
+                    <i class="fa fa-folder-open"></i>
+                  </div>
+                </div>
+              </div>
+            </div>
+          <h3>{{ store.locales=='zh'?'软件界面' : 'Software UI' }}</h3>
           <div class="form-group">
             <label>{{ store.locales=='zh'?'语言/Language' : 'Language/语言' }}</label>
             <select v-model="store.locales" @change="store.setLocale(store.locales)">
@@ -1382,6 +1149,17 @@ onBeforeUnmount(() => {
               <option v-for="t in themeOptions" :key="t" :value="t">
                 {{ themeLabel(t) }}
               </option>
+            </select>
+          </div>
+          <!-- 文字对齐模式：仅作用于浏览视图（md_read）与可视编辑的渲染态（BlockEditor） -->
+          <div class="form-group">
+            <label>{{ store.locales=='zh'?'文字对齐' : 'Text Alignment' }}</label>
+            <select v-model="store.UI.textAlignMode" @change="store.saveConfig()"
+                    :title="store.locales=='zh'
+                      ? '浏览视图与可视编辑渲染态的段落对齐：两端对齐（浏览器原生，默认）／K-P 最优断行（中文精细排版：K-P 断行 + 逐行拉伸，行末更齐，长文首次渲染稍慢）'
+                      : 'Paragraph alignment for the reader view and the visual-editor rendered state: browser-native justify (default) / Knuth\u2013Plass optimal line breaking (finer CJK typesetting; slightly slower on long docs)'">
+              <option value="justify">{{ store.locales=='zh'?'两端对齐（浏览器原生）' : 'Justify (browser native)' }}</option>
+              <option value="kp">{{ store.locales=='zh'?'K-P 最优断行' : 'Knuth\u2013Plass optimal' }}</option>
             </select>
           </div>
           <!-- 自定义主题色卡（仅「自定义」主题显示；已从系统页移至界面页） -->
@@ -1427,79 +1205,28 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
-          <!-- 文件打开方式（自「知识管理」迁入）：新窗口 / 窗口内打开 -->
-          <div class="form-group">
-            <label>{{ store.locales=='zh' ? '文件打开方式' : 'File Opening' }}</label>
-            <select v-model="store.UI.fileOpenMode" class="layout-select" @change="store.saveConfig()">
-              <option value="window">{{ store.locales=='zh'?'新窗口打开' : 'New Window' }}</option>
-              <option value="inner">{{ store.locales=='zh'?'窗口内打开' : 'Open Inside' }}</option>
-            </select>
-          </div>
           <!-- 关闭按钮行为：直接退出 / 折叠到托管区（托盘）
                —— 折叠后窗口只是隐藏，后台任务继续运行；鼠标悬停托盘图标可看任务数与进度 -->
           <div class="form-group">
             <label>{{ store.locales=='zh' ? '关闭按钮行为' : 'Close Button' }}</label>
-            <select v-model="store.UI.closeToTray" class="layout-select" @change="applyCloseBehavior">
+            <select v-model="store.UI.closeToTray" class="layout-select" @change="applyCloseBehavior"
+                    :title="store.locales=='zh'
+                      ? '选择「折叠到托管区」后，点关闭只隐藏窗口、后台任务继续运行；鼠标悬停在托管区图标上可查看运行中的任务数与进度（含每个实例的已完成/总数与预计剩余时间），右键可退出。'
+                      : 'With “Collapse to tray”, closing only hides the window while background tasks keep running. Hover the tray icon to see running tasks and progress; right-click to quit.'">
               <option :value="false">{{ store.locales=='zh' ? '直接退出软件' : 'Quit directly' }}</option>
               <option :value="true">{{ store.locales=='zh' ? '折叠到托管区（后台继续运行）' : 'Collapse to tray (keep running)' }}</option>
             </select>
           </div>
-          <div class="form-hint">
-            {{ store.locales=='zh'
-              ? '选择「折叠到托管区」后，点关闭只隐藏窗口、后台任务继续运行；鼠标悬停在托管区图标上可查看运行中的任务数与进度（含每个实例的已完成/总数与预计剩余时间），右键可退出。'
-              : 'With “Collapse to tray”, closing only hides the window while background tasks keep running. Hover the tray icon to see running tasks and progress; right-click to quit.' }}
-          </div>
-          <!-- 路径设置（自「系统」迁入）：工作区 / 工作流 -->
-          <div class="settings-group">
-            <h3>{{ store.locales=='zh'?'路径设置' : 'Path Settings' }}</h3>
-            <div class="form-group workspace-form">
-              <label>{{ store.locales=='zh'?'工作区' : 'Workspace' }}</label>
-              <!-- 工作区列表 + 添加入口：上下排列 -->
-              <div class="workspace-stack">
-                <div class="workspace-list" v-if="store.roots.length">
-                  <div
-                    v-for="root in store.roots"
-                    :key="root"
-                    class="workspace-item"
-                    :class="{ active: root === store.root }"
-                    :title="root"
-                  >
-                    <span class="workspace-path">{{ root }}</span>
-                    <div class="workspace-actions">
-                      <div class="button workspace-action activate" style="width:20px;" @click="activateWorkspace(root)"
-                           :title="store.locales=='zh'?'设为当前工作区' : 'Set as active workspace'">
-                        <i class="fa" :class="root === store.root ? 'fa-check-circle' : 'fa-circle-o'"></i>
-                      </div>
-                      <div class="button workspace-action" style="width:20px;" @click="openWorkspaceFolder(root)"
-                           :title="store.locales=='zh'?'在系统文件管理器中打开该工作区文件夹' : 'Open this workspace folder in the file manager'">
-                        <i class="fa fa-external-link"></i>
-                      </div>
-                      <div class="button workspace-action" style="width:20px;" @click="removeWorkspace(root)"
-                           :title="store.locales=='zh'?'移除工作区' : 'Remove workspace'">
-                        <i class="fa fa-times"></i>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <!-- 添加工作区 -->
-                <div class="input-with-button">
-                  <input v-model="newWorkspacePath" @keyup.enter="addWorkspaceFromInput"
-                         :placeholder="store.locales=='zh'?'输入工作区路径或选择文件夹' : 'Enter path or select folder'"/>
-                  <div class="button" style="width:20px;" @click="openFolder" :title="store.locales=='zh'?'选择文件夹并添加' : 'Select folder and add'">
-                    <i class="fa fa-folder-open"></i>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="form-group">
-              <label>{{ store.locales=='zh'?'工作流' : 'Workflow' }}</label>
-              <div class="input-with-button">
-                <input v-model="store.workflowPath" :placeholder="store.locales=='zh'?'请输入工作流文件路径' : 'Enter workflow file path'"/>
-                <div class="button" style="width:20px;" @click="openWorkflowFolder" :title="store.locales=='zh'?'选择文件夹' : 'Select Folder'">
-                  <i class="fa fa-folder-open"></i>
-                </div>
-              </div>
-            </div>
+          <!-- 配置随软件分发（界面块最下方）：开启后界面配置保存到软件根目录 interface-config.json，便于整机分发 -->
+          <div class="form-group">
+            <label>{{ store.locales=='zh'?'配置随软件分发' : 'Portable Config' }}</label>
+            <select class="layout-select" :value="store.interfaceConfigMode ? '1' : '0'" @change="onPortableConfigChange"
+                    :title="store.locales=='zh'
+                      ? '开启后界面配置保存到软件根目录 interface-config.json，软件拷贝到其他电脑仍按该配置显示；关闭则仅保存在本机。'
+                      : 'When enabled, interface config is saved as interface-config.json next to the app, so it follows the software to other machines; when disabled, it is saved locally only.'">
+              <option value="0">{{ store.locales=='zh'?'关闭（仅本机保存）' : 'Off (local only)' }}</option>
+              <option value="1">{{ store.locales=='zh'?'开启（随软件分发）' : 'On (portable)' }}</option>
+            </select>
           </div>
           <!-- 常用操作（自「系统」迁入）：置于路径设置下方；无 label，按钮行占满整行宽度 -->
           <div class="settings-group">
@@ -1509,78 +1236,70 @@ onBeforeUnmount(() => {
                 <div class="button" @click="openConsole()" :title="store.locales=='zh'?'开发者工具' : 'Developer Tools'">
                   <i class="fa fa-terminal"></i> {{ store.locales=='zh'?'控制台' : 'Console' }}
                 </div>
-                <div class="button" @click="handleInitConfig" :title="store.locales=='zh'?'初始化（将清除全部配置并重启）\n当前占用：' + localStorageUsageText : 'initialization (clears all config and restarts)\nUsage: ' + localStorageUsageText">
+                <div class="button" @click="handleInitConfig" :title="store.locales=='zh'?'初始化（将清除全部配置并重启）\n当前本机数据：' + localDataSummary() + '（共 ' + localStorageUsageText + '）' : 'initialization (clears all config and restarts)\nLocal data: ' + localDataSummary() + ' (' + localStorageUsageText + ')'">
                   <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'初始化' : 'initialization' }}
                 </div>
                 <div class="button" @click="handleClearChats" :title="store.locales=='zh'?'清空全部聊天记录' : 'Clear all chat history'">
                   <i class="fa fa-trash"></i> {{ store.locales=='zh'?'清空聊天' : 'Clear Chats' }}
                 </div>
-                <div class="button" @click="handleExportChats" :title="store.locales=='zh'?'导出全部聊天记录为 JSON 备份文件（含分支、消息、知识库来源与工具调用记录）' : 'Export all chats as a JSON backup (branches, messages, KB sources and tool calls included)'">
-                  <i class="fa fa-download"></i> {{ store.locales=='zh'?'导出聊天' : 'Export Chats' }}
-                </div>
-                <div class="button" @click="handleImportChats" :title="store.locales=='zh'?'从 JSON 备份文件导入聊天记录：与现有记录合并，相同 ID 跳过（可重复导入不产生重复）' : 'Import chats from a JSON backup: merged into existing records, same ID skipped (safe to re-import)'">
-                  <i class="fa fa-upload"></i> {{ store.locales=='zh'?'导入聊天' : 'Import Chats' }}
-                </div>
-                <div class="button" @click="handleExportChatsMarkdown" :title="store.locales=='zh'?'导出全部聊天记录为 Markdown（一个文件汇总所有会话，人类可读；图片附件与工具入参不写入，完整备份请用「导出聊天」）' : 'Export all chats as one human-readable Markdown file (image attachments and tool arguments are omitted; use \'Export Chats\' for a full backup)'">
+                <div class="button" @click="handleExportChatsMarkdown" :title="store.locales=='zh'?'导出全部聊天记录为 Markdown（一个文件汇总所有会话，人类可读；图片附件与工具入参不写入，完整备份请用「数据」页的「导出聊天记录」）' : 'Export all chats as one human-readable Markdown file (image attachments and tool arguments are omitted; use Export Chats on the Data page for a full backup)'">
                   <i class="fa fa-file-text-o"></i> {{ store.locales=='zh'?'导出Markdown' : 'Export MD' }}
-                </div>
-                <div class="button" @click="handleBackupAllData" :title="store.locales=='zh'?'备份全部界面与 AI 配置、Agent 预设、MCP 服务等为一个 JSON 文件（不含聊天记录，聊天请用「导出聊天」）；初始化/换机前建议先备份' : 'Back up all UI & AI config, agent presets and MCP servers into one JSON file (chats excluded, use \'Export Chats\' for those)'">
-                  <i class="fa fa-archive"></i> {{ store.locales=='zh'?'备份数据' : 'Backup' }}
-                </div>
-                <div class="button" @click="handleOpenDataDir" :title="store.locales=='zh'?'在系统文件管理器中打开本机数据目录（配置、缓存、会话日志所在位置）' : 'Open the local data folder (config, cache and session logs) in the file manager'">
-                  <i class="fa fa-folder-open-o"></i> {{ store.locales=='zh'?'打开数据目录' : 'Data Folder' }}
-                </div>
-                <div class="button" @click="handleClearSessionLog" :title="store.locales=='zh'?'清空全部会话日志（智能体/会话的原始事件记录，即「日志」页面的数据源）' : 'Clear all session logs (raw event records shown in the Session Log page)'">
-                  <i class="fa fa-list-alt"></i> {{ store.locales=='zh'?'清空会话日志' : 'Clear Logs' }}
                 </div>
                 <div class="button" @click="handleResetAIconfig" :title="store.locales=='zh'?'恢复默认 AI 配置' : 'Reset AI config to defaults'">
                   <i class="fa fa-undo"></i> {{ store.locales=='zh'?'恢复AI配置' : 'Reset AI' }}
                 </div>
-                <div class="button" @click="handleCleanUserDataCache" :title="(store.locales=='zh'?'清理本机缓存文件（Cache/Code Cache/GPUCache、Word 预览图片缓存 docx-media 等），只删缓存不动数据/配置。\n当前可清理：':'Clean local cache files (Cache/Code Cache/GPUCache, Word preview images docx-media, etc.). Removes cache only, keeps data & config.\nCleanable: ')+userDataCacheText">
-                  <i class="fa fa-eraser"></i> {{ store.locales=='zh'?'清理缓存' : 'Clean Cache' }}
-                </div>
               </div>
             </div>
           </div>
-          <!-- ① 导航与模块：主界面顶层入口（始终显示）；与界面其它分组一致（标题+说明+配置） -->
-          <div class="settings-group">
-            <h3>{{ store.locales=='zh' ? '导航与模块' : 'Navigation & Modules' }}</h3>
-            <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-              ? '主界面导航栏显示的顶层模块（主页、知识管理、Agent脚手架等）。关闭某模块即从导航栏隐藏；下方依赖它的子开关（知识管理视图等）也会随之不可用。'
-              : 'Top-level modules shown in the navbar (Home, Knowledge, Agent Scaffold…). Hiding a module removes its entry, and its dependent sub-switches below become unavailable too.' }}</div>
-            <div class="nav-switch-list">
+          <div class="form-group">
+            <label></label>
+            <div class="config-description" style="margin-left:0; line-height:1.5;">
+              {{ store.locales=='zh'
+                ? '使用 Ctrl + / Ctrl - 可随时调整窗口缩放（50% ~ 200%），也可在上方直接输入比例。'
+                : 'Use Ctrl + / Ctrl - to adjust window zoom (50% ~ 200%), or type a ratio above.' }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 功能（通用/功能）：模块开关（导航与模块）与模块子开关（知识管理视图与布局） -->
+      <div v-if="activeNav === 'features'" class="settings-section">
+        <div class="settings-group">
+          <h3>{{ store.locales=='zh' ? '导航与模块' : 'Navigation & Modules' }}</h3>
+          <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
+            ? '主界面导航栏显示的顶层模块（主页、知识管理、知识处理、学习）。关闭某模块即从导航栏隐藏；下方依赖它的子开关（知识管理视图等）也会随之不可用。'
+            : 'Top-level modules shown in the navbar (Home, Knowledge, Knowledge Processing, Learning). Hiding a module removes its entry, and its dependent sub-switches below become unavailable too.' }}</div>
+          <div class="nav-switch-list">
+            <div
+              v-for="sw in navSwitches"
+              :key="sw.key"
+              class="nav-switch-item"
+              :class="{ disabled: !store.isNavVisible(sw.key) }"
+            >
+              <div class="nav-switch-icon" :class="{ muted: !store.isNavVisible(sw.key) }">
+                <i :class="sw.icon"></i>
+              </div>
+              <div class="nav-switch-info">
+                <span class="nav-switch-name">{{ sw.label }}</span>
+              </div>
               <div
-                v-for="sw in navSwitches"
-                :key="sw.key"
-                class="nav-switch-item"
-                :class="{ disabled: !store.isNavVisible(sw.key) }"
+                class="nav-switch-toggle"
+                :class="{ on: store.isNavVisible(sw.key) }"
+                :title="store.isNavVisible(sw.key) ? (store.locales=='zh' ? '点击隐藏' : 'Click to hide') : (store.locales=='zh' ? '点击显示' : 'Click to show')"
+                @click="store.toggleNav(sw.key)"
               >
-                <div class="nav-switch-icon" :class="{ muted: !store.isNavVisible(sw.key) }">
-                  <i :class="sw.icon"></i>
-                </div>
-                <div class="nav-switch-info">
-                  <span class="nav-switch-name">{{ sw.label }}</span>
-                </div>
-                <div
-                  class="nav-switch-toggle"
-                  :class="{ on: store.isNavVisible(sw.key) }"
-                  :title="store.isNavVisible(sw.key) ? (store.locales=='zh' ? '点击隐藏' : 'Click to hide') : (store.locales=='zh' ? '点击显示' : 'Click to show')"
-                  @click="store.toggleNav(sw.key)"
-                >
-                  <span class="nav-switch-knob"></span>
-                </div>
+                <span class="nav-switch-knob"></span>
               </div>
             </div>
           </div>
-          <!-- ② 知识管理视图与布局：仅知识管理模块开启时显示（12 项视图 + 布局下拉同属该模块） -->
+          <!-- 知识管理（模块子开关）：仅知识管理模块开启时显示（12 项视图 + 布局下拉同属该模块） -->
           <div v-if="store.isNavVisible('知识管理')" class="settings-group">
             <h3>{{ store.locales=='zh' ? '知识管理' : 'Knowledge Management' }}</h3>
             <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-              ? '知识管理模块的界面配置：可用的视图方式（浏览/编辑/导图/演示等）与视图排布方向（仅「窗口内打开」时生效，打开方式见上方「界面」）。需先在上方「导航与模块」开启「知识管理」。浏览器相关设置（默认页面 / 保存文件夹）请见下方「浏览器」模块。'
-              : 'UI configuration of the Knowledge Management module: available view modes (Browse/Edit/Mindmap…) and the layout direction (effective only when files open inside the window; the opening mode lives in "UI" above). Requires Knowledge Management enabled in the block above. Browser-related settings (home page / save folder) live in the Browser module below.' }}</div>
+              ? '知识管理模块的界面配置：可用的视图方式（浏览/编辑/导图/演示等）与视图排布方向。需先在上方开启「知识管理」。浏览器相关设置（默认页面 / 保存文件夹）在「其他 → 浏览器」。'
+              : 'UI configuration of the Knowledge Management module: available view modes (Browse/Edit/Mindmap…) and the layout direction. Requires Knowledge Management enabled above. Browser-related settings (home page / save folder) live under Other → Browser.' }}</div>
             <!-- 视图布局：置于视图列表上方，样式与界面其它行一致（不加额外边框） -->
-            <!-- 视图布局仅「窗口内打开」生效：新窗口打开时 explorer 不再渲染左右/上下分栏，布局无意义 -->
-            <div v-if="store.UI.fileOpenMode === 'inner'" class="form-group">
+            <div class="form-group">
               <label>{{ store.locales=='zh' ? '视图布局' : 'View Layout' }}</label>
               <select v-model="store.UI.layout" class="layout-select">
                 <option value="horizontal">{{ store.locales=='zh'?'横向' : 'Horizontal' }}</option>
@@ -1611,35 +1330,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
-          <!-- 界面配置随软件分发：开启后保存到软件根目录 interface-config.json，便于整机分发 -->
-          <div class="form-group">
-            <label>{{ store.locales=='zh'?'配置随软件分发' : 'Portable Config' }}</label>
-            <div class="portable-config">
-              <div
-                class="nav-switch-toggle"
-                :class="{ on: store.interfaceConfigMode }"
-                :title="store.interfaceConfigMode ? (store.locales=='zh' ? '点击关闭' : 'Click to disable') : (store.locales=='zh' ? '点击开启' : 'Click to enable')"
-                @click="toggleInterfaceConfig"
-              >
-                <span class="nav-switch-knob"></span>
-              </div>
-              <span class="config-description" style="margin-left:6px;">
-                {{ store.locales=='zh'
-                  ? '开启后界面配置保存到软件根目录 interface-config.json，软件拷贝到其他电脑仍按该配置显示；关闭则仅保存在本机。'
-                  : 'When enabled, interface config is saved as interface-config.json next to the app, so it follows the software to other machines; when disabled, it is saved locally only.' }}
-              </span>
-            </div>
-          </div>
-          <div class="form-group">
-            <label></label>
-            <div class="config-description" style="margin-left:0; line-height:1.5;">
-              {{ store.locales=='zh'
-                ? '使用 Ctrl + / Ctrl - 可随时调整窗口缩放（50% ~ 200%），也可在上方直接输入比例。'
-                : 'Use Ctrl + / Ctrl - to adjust window zoom (50% ~ 200%), or type a ratio above.' }}
-            </div>
-          </div>
         </div>
       </div>
+
+      <!-- 数据（通用/数据）：本机数据总览 + 数据清单（独立模块 DataSettings.vue） -->
+      <DataSettings v-if="activeNav === 'data'" />
 
       <!-- 其他（通用/其他）：浏览器 / Word 导出 / 离线地图（MBTiles） -->
       <div v-if="activeNav === 'other'" class="settings-section">
@@ -1738,7 +1433,12 @@ onBeforeUnmount(() => {
 
       <!-- 大模型设置（独立模块：左右布局，来源列表 + 配置） -->
       <div v-if="activeNav === 'llm'" class="settings-section llm-section">
-        <LlmSettings />
+        <LlmSettings section="sources" />
+      </div>
+
+      <!-- 嵌入（当前来源无嵌入接口时的向量化兜底来源） -->
+      <div v-if="activeNav === 'llm-embed'" class="settings-section llm-section">
+        <LlmSettings section="embed" />
       </div>
 
       <!-- 语音设置（独立组件 TtsSettings.vue） -->
@@ -2562,14 +2262,7 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 
-/* 界面配置随软件分发开关行 */
-.portable-config {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
+/* ================ 「数据」页样式已随组件移至 DataSettings.vue ================ */
 
 /* 布局方向下拉（置于 label 右侧，与其它输入框一致） */
 .layout-select {

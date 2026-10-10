@@ -7,9 +7,10 @@
  *
  * 覆盖范围：
  *  - 分式 mfrac、根式 msqrt / mroot、上下标 msup / msub / msubsup
- *  - 上下限 munder / mover / munderover：∑ ∫ ∏ ⋃… → n 元运算符；lim / max / min… → 上下极限
+ *  - 上下限 munder / mover / munderover：∑ ∫ ∏ ⋃… → n 元运算符（紧跟的被求和项一并放进它的操作数位）；lim / max / min… → 上下极限
  *  - 定界符 \left…\right（mrow + OPEN/CLOSE 标记）→ m:d，可随内容自动伸缩
- *  - 矩阵与方程组 mtable：pmatrix / bmatrix / array / cases → m:m；aligned / align → m:eqArr
+ *  - 矩阵与方程组 mtable：pmatrix / bmatrix / array / cases → m:m；aligned / align → m:eqArr；
+ *    带编号的 \tag{} / align 编号行（mlabeledtr，首格是编号）→ 提取编号拼在行末，正文照常输出
  *  - 重音 \hat \vec \tilde 与上/下划线 \overline \underline → m:acc / m:bar
  *  - \text{} 中文（m:r + eastAsia 字体）、\mathbf / \mathbb / \mathcal 等数学字体
  *  - \boxed / \cancel 等 menclose、\binom（无横线分式）
@@ -24,6 +25,11 @@ type Sty = 'i' | 'p' | 'b' | 'bi'
 
 /** MathJax 的不可见字符（函数应用符 U+2061、不可见乘号 U+2062 等）与零宽字符 */
 const INVISIBLE_RE = /[\u2061-\u2064\u200B-\u200D\uFEFF]/g
+
+/** 裸括号配对（`\sum (…)` 这类未用 \left…\right 的括号） */
+const BRACKET_PAIRS: Record<string, string> = {
+  '(': ')', '[': ']', '{': '}', '⟨': '⟩', '⌈': '⌉', '⌊': '⌋', '⟦': '⟧', '【': '】',
+}
 
 /** 大字运算符：MathJax 给它们挂上下限，Word 侧对应 n 元运算符对象 */
 const BIG_OPS = new Set([
@@ -150,23 +156,118 @@ function markerChar(el: Element, kind: 'OPEN' | 'CLOSE'): string | null {
   return null
 }
 
+/** 一对定界符 + 内部元素 → Word 的括号对象（可伸缩） */
+function delimXml(beg: string, end: string, inner: Element[], ctx: Ctx): string {
+  const pr = `<m:dPr><m:begChr m:val="${esc(beg)}"/><m:endChr m:val="${esc(end)}"/><m:grow m:val="1"/></m:dPr>`
+  return `<m:d>${pr}<m:e>${convertList(inner, ctx)}</m:e></m:d>`
+}
+
 /** 一层子节点序列：整体被一对定界符包住时输出 m:d（Word 的括号对象），否则平铺 */
 function convertSequence(els: Element[], ctx: Ctx): string {
   if (els.length >= 2) {
     const beg = markerChar(els[0], 'OPEN')
     const end = markerChar(els[els.length - 1], 'CLOSE')
-    if (beg !== null && end !== null) {
-      const inner = convertList(els.slice(1, -1), ctx)
-      const pr = `<m:dPr><m:begChr m:val="${esc(beg)}"/><m:endChr m:val="${esc(end)}"/><m:grow m:val="1"/></m:dPr>`
-      return `<m:d>${pr}<m:e>${inner}</m:e></m:d>`
-    }
+    if (beg !== null && end !== null) return delimXml(beg, end, els.slice(1, -1), ctx)
   }
   return convertList(els, ctx)
 }
 
+/**
+ * 大字运算符 + 上下限（`\sum_{r=0}^{m}`）在 MathML 里与被求和项是**兄弟节点**：
+ * TeX 只把紧跟的一个“普通原子”当作它的操作数（运算符 / 标点不算）。
+ * Word 的 n 元运算符对象（m:nary）则必须把被求和项放进 <m:e>，否则导出后会
+ * 变成「∑ + 一个空占位框 + 被求和项排在求和符号外面」。
+ */
+function bigOpInfo(el: Element): { chr: string; sub?: Element; sup?: Element; limLoc: 'undOvr' | 'subSup' } | null {
+  const name = local(el)
+  const cs = kids(el)
+  const base = cs[0]
+  if (!base || local(base) !== 'mo') return null
+  const chr = clean(base.textContent || '').trim()
+  if (!BIG_OPS.has(chr)) return null
+  if (name === 'munderover' || name === 'msubsup') {
+    return { chr, sub: cs[1], sup: cs[2], limLoc: name === 'munderover' ? 'undOvr' : 'subSup' }
+  }
+  if (name === 'munder' || name === 'msub') {
+    return { chr, sub: cs[1], limLoc: name === 'munder' ? 'undOvr' : 'subSup' }
+  }
+  if (name === 'mover' || name === 'msup') {
+    return { chr, sup: cs[1], limLoc: name === 'mover' ? 'undOvr' : 'subSup' }
+  }
+  return null
+}
+
+/** 紧跟求和号的元素能否当作它的操作数：普通原子（字母/分组 mrow/上下标/分式…）可以，
+ *  运算符与标点（+ − = , 裸括号…）不行（与 TeX 规则一致） */
+function isNaryOperand(el: Element): boolean {
+  const name = local(el)
+  if (name === 'mspace' || name === 'mphantom') return false
+  if (name === 'mo') {
+    const cls = (el.getAttribute('data-mjx-texclass') || '').toUpperCase()
+    return cls === 'ORD' || cls === 'INNER'
+  }
+  return true
+}
+
+/** 紧跟求和号的“裸括号组”：`\sum_i (a_i+b_i)` 的括号没用 \left…\right，MathJax 不给 texclass，
+ *  按 TeX 规则也算不上操作数；但把它整组并进求和号内，Word 里才不会剩一个空的占位框。
+ *  找不到配对的右括号时返回 null（不吸收，保证安全） */
+function siblingBracketGroup(els: Element[], k: number): { beg: string; end: string; inner: Element[]; next: number } | null {
+  const el = els[k]
+  if (!el || local(el) !== 'mo') return null
+  const beg = clean(el.textContent || '').trim()
+  const end = BRACKET_PAIRS[beg] || (beg === '|' || beg === '‖' ? beg : '')
+  if (!end) return null
+  // \left…\right 的标记（OPEN/CLOSE）由 convertSequence 处理，这里不重复吸收
+  const cls = (el.getAttribute('data-mjx-texclass') || '').toUpperCase()
+  if (cls === 'OPEN' || cls === 'CLOSE') return null
+  let depth = 1
+  for (let i = k + 1; i < els.length; i++) {
+    const e = els[i]
+    if (local(e) !== 'mo') continue
+    const t = clean(e.textContent || '').trim()
+    if (beg !== end && t === beg) { depth++; continue }
+    if (t === end) {
+      depth--
+      if (depth === 0) return { beg, end, inner: els.slice(k + 1, i), next: i + 1 }
+    }
+  }
+  return null
+}
+
+/** 取 els[k] 起的被运算项：普通原子（嵌套大运算符沿链条继续吃）、或配平的裸括号整组 */
+function naryOperand(els: Element[], k: number, ctx: Ctx): { xml: string; next: number } | null {
+  const el = els[k]
+  if (!el) return null
+  // 括号组优先：`|x|` 这类 MathJax 会给 texclass ORD，若先按“普通原子”处理就只会吃掉一个竖线
+  const grp = local(el) === 'mo' ? siblingBracketGroup(els, k) : null
+  if (grp) return { xml: delimXml(grp.beg, grp.end, grp.inner, ctx), next: grp.next }
+  if (isNaryOperand(el)) return convertOperand(els, k, ctx)
+  return null
+}
+
+/**
+ * 从 els[k] 开始转换“一个操作数”，返回 XML 与下一个未消费的下标。
+ * 大运算符（∑/∫…）会把紧跟的一个普通原子并进自己的操作数位；嵌套
+ * `\sum_i \sum_j a_{ij}` 时内层求和号也会继续把再后面的一项吃掉。
+ */
+function convertOperand(els: Element[], k: number, ctx: Ctx): { xml: string; next: number } {
+  const el = els[k]
+  if (!el) return { xml: '', next: k + 1 }
+  const big = bigOpInfo(el)
+  if (!big) return { xml: convertElement(el, ctx), next: k + 1 }
+  const body = naryOperand(els, k + 1, ctx)
+  if (!body) return { xml: naryXml(big.chr, big.sub, big.sup, big.limLoc, ctx), next: k + 1 }
+  return { xml: naryXml(big.chr, big.sub, big.sup, big.limLoc, ctx, body.xml), next: body.next }
+}
+
 function convertList(els: Element[], ctx: Ctx): string {
   let out = ''
-  for (const el of els) out += convertElement(el, ctx)
+  for (let i = 0; i < els.length;) {
+    const r = convertOperand(els, i, ctx)
+    out += r.xml
+    i = r.next
+  }
   return out
 }
 
@@ -186,10 +287,25 @@ function scriptXml(kind: 'sSup' | 'sSub' | 'sSubSup', el: Element, ctx: Ctx): st
   return `<m:${kind}>${parts.join('')}</m:${kind}>`
 }
 
-/** n 元运算符（∑/∫/⋃…）：chr=运算符字符，limLoc 决定上下限位置 */
-function naryXml(chr: string, sub: Element | undefined, sup: Element | undefined, limLoc: 'undOvr' | 'subSup', ctx: Ctx): string {
-  const pr = `<m:naryPr><m:chr m:val="${esc(chr)}"/><m:limLoc m:val="${limLoc}"/><m:grow m:val="1"/></m:naryPr>`
-  return `<m:nary>${pr}<m:sub>${arg(sub, ctx)}</m:sub><m:sup>${arg(sup, ctx)}</m:sup><m:e/></m:nary>`
+/** n 元运算符（∑/∫/⋃…）：chr=运算符字符，limLoc 决定上下限位置，
+ *  body=被求和项（Word 的 n 元对象把操作数放在 <m:e> 里，缺省为空占位） */
+function naryXml(
+  chr: string,
+  sub: Element | undefined,
+  sup: Element | undefined,
+  limLoc: 'undOvr' | 'subSup',
+  ctx: Ctx,
+  body?: Element | string,
+): string {
+  const e = body === undefined ? '' : typeof body === 'string' ? body : arg(body, ctx)
+  const subXml = arg(sub, ctx)
+  const supXml = arg(sup, ctx)
+  // 只有一侧上下限时，把另一侧标记为“隐藏”（m:subHide / m:supHide）：
+  // Word 自己写这种求和号时就是这么标记的（实测其文档里 <m:supHide m:val="1"/> + <m:sup/>），
+  // 否则空的那一侧会在 Word 里显示成一个空的占位框。
+  const hide = `${subXml ? '' : '<m:subHide m:val="1"/>'}${supXml ? '' : '<m:supHide m:val="1"/>'}`
+  const pr = `<m:naryPr><m:chr m:val="${esc(chr)}"/><m:limLoc m:val="${limLoc}"/><m:grow m:val="1"/>${hide}</m:naryPr>`
+  return `<m:nary>${pr}<m:sub>${subXml}</m:sub><m:sup>${supXml}</m:sup><m:e>${e}</m:e></m:nary>`
 }
 
 const limLowXml = (base: Element | undefined, lim: Element | undefined, ctx: Ctx): string =>
@@ -248,29 +364,53 @@ function fracXml(el: Element, ctx: Ctx): string {
   return `<m:f>${pr}<m:num>${arg(cs[0], ctx)}</m:num><m:den>${arg(cs[1], ctx)}</m:den></m:f>`
 }
 
-/** 表格：aligned/align → 公式数组；pmatrix/bmatrix/array/cases → 矩阵 */
+/**
+ * 表格：aligned/align → 公式数组；pmatrix/bmatrix/array/cases → 矩阵。
+ * 带编号的展示公式（`\tag{4-4}`，以及 align 的编号行）MathJax 用 <mlabeledtr> 代替 <mtr>，
+ * 且**首格是编号**而不是正文：编号格必须单独取出，否则整张表会被判成空表 → 整条公式丢失。
+ * Word 没有公式编号对象，编号按普通文字拼在该行末尾。
+ */
 function tableXml(el: Element, ctx: Ctx): string {
-  const rows = kids(el).filter((c) => local(c) === 'mtr')
+  const rows = kids(el).filter((c) => local(c) === 'mtr' || local(c) === 'mlabeledtr')
   if (!rows.length) return ''
-  const cellsOf = (r: Element) => kids(r).filter((c) => local(c) === 'mtd')
-  const colCount = Math.max(1, ...rows.map((r) => cellsOf(r).length))
+  const labelOf = (r: Element): string => {
+    if (local(r) !== 'mlabeledtr') return ''
+    const first = kids(r).filter((c) => local(c) === 'mtd')[0]
+    return first ? clean(first.textContent || '').trim() : ''
+  }
+  const cellsOf = (r: Element) => {
+    const cells = kids(r).filter((c) => local(c) === 'mtd')
+    return local(r) === 'mlabeledtr' ? cells.slice(1) : cells
+  }
+  /** 每行的正文单元格 XML（多行编号公式的编号拼在末格；单行的编号由外层段落制表位排版） */
+  const rowCells = rows.map((r, ri) => {
+    const cells = cellsOf(r).map((c) => convertList(kids(c), ctx))
+    const lab = labelOf(r)
+    if (lab && !(rows.length === 1 && ri === 0)) {
+      const i = Math.max(0, cells.length - 1)
+      cells[i] = (cells[i] || '') + run('\u2003' + lab, 'p', ctx)
+    }
+    return cells
+  })
+  const colCount = Math.max(1, ...rowCells.map((c) => c.length))
   const aligns = (el.getAttribute('columnalign') || '').trim().split(/\s+/).filter(Boolean)
   const hasLines = !!(el.getAttribute('columnlines') || el.getAttribute('rowlines'))
   const isAligned = !hasLines && colCount >= 2 && aligns.length >= 2
     && Array.from({ length: colCount }).every((_, i) => (i % 2 === 0 ? aligns[i] === 'right' : aligns[i] === 'left'))
   if (isAligned) {
-    return `<m:eqArr>${rows.map((r) => `<m:e>${convertList(cellsOf(r), ctx)}</m:e>`).join('')}</m:eqArr>`
+    return `<m:eqArr>${rowCells.map((cs) => `<m:e>${cs.join('')}</m:e>`).join('')}</m:eqArr>`
   }
+  // 单行单列（\tag 编号公式多为此形态）：不必生成 1×1 矩阵对象，直接平铺成普通公式内容
+  if (!hasLines && colCount === 1 && rowCells.length === 1) return rowCells[0].join('')
   let mcs = ''
   for (let i = 0; i < colCount; i++) {
     const a = aligns.length ? aligns[Math.min(i, aligns.length - 1)] : 'center'
     const jc = a === 'right' ? 'right' : a === 'left' ? 'left' : 'center'
     mcs += `<m:mc><m:mcPr><m:count m:val="1"/><m:mcJc m:val="${jc}"/></m:mcPr></m:mc>`
   }
-  const body = rows.map((r) => {
-    const cs = cellsOf(r)
+  const body = rowCells.map((cs) => {
     let cells = ''
-    for (let i = 0; i < colCount; i++) cells += `<m:e>${cs[i] ? convertList(kids(cs[i]), ctx) : ''}</m:e>`
+    for (let i = 0; i < colCount; i++) cells += `<m:e>${cs[i] || ''}</m:e>`
     return `<m:mr>${cells}</m:mr>`
   }).join('')
   return `<m:m><m:mPr><m:mcs>${mcs}</m:mcs></m:mPr>${body}</m:m>`
@@ -444,4 +584,31 @@ export function mathmlToOmml(mathEl: Element | null | undefined): string {
 export function mathmlPlainText(mathEl: Element | null | undefined): string {
   if (!mathEl) return ''
   return clean(mathEl.textContent || '').trim()
+}
+
+/** 深度查找第一个 <mlabeledtr>（\tag 编号行） */
+function findLabelRow(el: Element): Element | null {
+  for (const c of kids(el)) {
+    if (local(c) === 'mlabeledtr') return c
+    const deeper = findLabelRow(c)
+    if (deeper) return deeper
+  }
+  return null
+}
+
+/**
+ * 公式编号（`\tag{4-4}` → `(4-4)`）：MathJax 把编号放在单行 <mlabeledtr> 的首格里。
+ * 只认“单行编号公式”：这种公式的编号交给外层段落用制表位排到右端（与 Word 公式编号一致）；
+ * 多行编号（多行 align 逐行带号）拿不到单一编号，仍由 tableXml 拼在行末。
+ */
+export function mathmlTagLabel(mathEl: Element | null | undefined): string {
+  if (!mathEl) return ''
+  try {
+    const row = findLabelRow(mathEl)
+    if (!row) return ''
+    const rows = kids(row.parentElement || row).filter((c) => local(c) === 'mtr' || local(c) === 'mlabeledtr')
+    if (rows.length !== 1) return ''
+    const cell = kids(row).find((c) => local(c) === 'mtd')
+    return cell ? clean(cell.textContent || '').trim() : ''
+  } catch { return '' }
 }

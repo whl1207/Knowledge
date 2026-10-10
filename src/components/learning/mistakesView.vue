@@ -1,20 +1,32 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import block_md from '@/components/block_md.vue'
 import * as kbAi from '@/shared/kbAiClient'
+import { explainPrompt, diagramPrompt } from '@/services/learningPrompt'
+import { explainCacheKey } from '@/services/learningRecord'
 import type { ErrType } from '@/services/learningRecord'
 
 const props = defineProps<{
   store: any
   kb: any
   model: any
+  /** 知识库内容语言（'en' 时 AI 讲解用英文，否则优先中文） */
+  lang?: 'zh' | 'en'
+  /** 已持久化的 AI 解析缓存（key=explainCacheKey；命中直接显示） */
+  explains?: Record<string, { text: string; at: number }>
   wrong: { key: string; label: string; a: { id: string; q: string; at: number; src: string; blockId: any; note?: string; errType?: ErrType; answer?: string; hasAnswer?: boolean } }[]
 }>()
 const emit = defineEmits<{
   practiceOne: [key: string, blockId: any]
   updateErr: [key: string, id: string, errType: ErrType]
+  /** 生成完成：由父级写回 .learning */
+  explainSave: [key: string, text: string, kind: 'explain' | 'diagram', lang: 'zh' | 'en']
+  /** 重新生成前清旧值 */
+  explainDrop: [key: string]
 }>()
 const tr = (zh: string, en: string) => (props.store.locales === 'zh' ? zh : en)
-const zh = () => props.store.locales === 'zh'
+/** AI 输出的语言：界面中文 + 知识库非英文 → 中文；界面英文或英文库 → 英文 */
+const zh = () => props.store.locales === 'zh' && props.lang !== 'en'
 
 type WrongItem = (typeof props.wrong)[number]
 
@@ -30,6 +42,9 @@ function closeDetail() {
 
 const expl = ref<Record<string, string>>({})
 const explaining = ref<Record<string, boolean>>({})
+// 图解讲解（P1）：解题过程 → Markdown + mermaid 知识结构图，由 block_md 渲染
+const diag = ref<Record<string, string>>({})
+const diagLoading = ref<Record<string, boolean>>({})
 const srcLabel = (s: string) =>
   s === 'self' ? tr('自测', 'Self') : s === 'exam' ? tr('考试', 'Exam') : tr('复习', 'Review')
 
@@ -62,28 +77,91 @@ function fmt(t: number): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-/** 就地 AI 讲解：基于来源切片解释该题要点（不跳转 QA） */
+/** 讲解素材：作答快照答案（优先）或当前来源切片正文 */
+function sliceTextOf(w: WrongItem): string {
+  const ans = w.a.answer && w.a.answer.trim()
+  if (ans) return ans
+  return blockBack(w.a.blockId) || w.a.note || ''
+}
+
+/** 就该题读取已保存的解析（kind=explain/diagram） */
+function cachedOf(w: WrongItem, kind: 'explain' | 'diagram'): { text: string; at: number } | undefined {
+  const key = explainCacheKey(kind, w.a.blockId, w.a.q)
+  const hit = props.explains?.[key]
+  return hit?.text ? hit : undefined
+}
+/** 生成成功后写回 .learning */
+function saveExplain(w: WrongItem, kind: 'explain' | 'diagram', text: string) {
+  const body = String(text || '').trim()
+  if (!body) return
+  emit('explainSave', explainCacheKey(kind, w.a.blockId, w.a.q), body, kind, zh() ? 'zh' : 'en')
+}
+function dropExplain(w: WrongItem, kind: 'explain' | 'diagram') {
+  emit('explainDrop', explainCacheKey(kind, w.a.blockId, w.a.q))
+}
+
+/** 就地 AI 讲解：基于来源切片解释该题要点（不跳转 QA）；已保存过的直接展开 */
 async function explain(w: WrongItem) {
   const id = w.a.id
   if (explaining.value[id]) return
+  if (expl.value[id]) {   // 再点一次收起
+    expl.value[id] = ''
+    return
+  }
+  const hit = cachedOf(w, 'explain')
+  if (hit) { expl.value[id] = hit.text; return }
   if (!props.model?.chat && !props.model?.process) {
     expl.value[id] = tr('未配置可用的 AI 模型（请到设置-模型配置）', 'No AI model configured (Settings → Models)')
     return
   }
   explaining.value[id] = true
   try {
-    const slice = (w.a.answer && w.a.answer.trim()) || blockBack(w.a.blockId) || w.a.note || '(无切片原文)'
-    const prompt = zh()
-      ? `你是知识讲解老师。请针对下面这道错题，基于参考切片讲清核心知识点与正确答案的依据，用中文，200 字内，不要前后缀。\n\n题目：${w.a.q}\n\n【参考切片】\n${slice}`
-      : `You are a tutor. Explain the key point and why the correct answer is right for this missed question, based on the reference slice, within 200 words.\n\nQuestion: ${w.a.q}\n\n[Reference]\n${slice}`
+    const slice = sliceTextOf(w) || '(无切片原文)'
+    const prompt = explainPrompt(zh(), w.a.q, slice)
     const spec = kbAi.buildSpecFromModel(props.model, props.store)
     const out = await kbAi.chat(spec, [{ role: 'user', content: prompt }])
     expl.value[id] = String(out || '').trim() || tr('（无返回内容）', '(empty response)')
+    saveExplain(w, 'explain', expl.value[id])
   } catch (e) {
     expl.value[id] = tr('讲解失败：', 'Explain failed: ') + (e instanceof Error ? e.message : String(e))
   } finally {
     explaining.value[id] = false
   }
+}
+
+/** 图解讲解：分步拆解 + mermaid 知识结构图（Markdown 渲染）；已保存过的直接展开 */
+async function explainDiagram(w: WrongItem) {
+  const id = w.a.id
+  if (diagLoading.value[id]) return
+  if (diag.value[id]) {   // 已有结果：再点一次收起
+    diag.value[id] = ''
+    return
+  }
+  const hit = cachedOf(w, 'diagram')
+  if (hit) { diag.value[id] = hit.text; return }
+  if (!props.model?.chat && !props.model?.process) {
+    diag.value[id] = tr('未配置可用的 AI 模型（请到设置-模型配置）', 'No AI model configured (Settings → Models)')
+    return
+  }
+  diagLoading.value[id] = true
+  try {
+    const prompt = diagramPrompt(zh(), w.a.q, sliceTextOf(w))
+    const spec = kbAi.buildSpecFromModel(props.model, props.store)
+    const out = await kbAi.chat(spec, [{ role: 'user', content: prompt }])
+    diag.value[id] = String(out || '').trim() || tr('（无返回内容）', '(empty response)')
+    saveExplain(w, 'diagram', diag.value[id])
+  } catch (e) {
+    diag.value[id] = tr('图解失败：', 'Diagram failed: ') + (e instanceof Error ? e.message : String(e))
+  } finally {
+    diagLoading.value[id] = false
+  }
+}
+
+/** 「重新生成」：清掉缓存并重新调用模型 */
+async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
+  dropExplain(w, kind)
+  if (kind === 'diagram') { diag.value[w.a.id] = ''; await explainDiagram(w) }
+  else { expl.value[w.a.id] = ''; await explain(w) }
 }
 </script>
 
@@ -123,6 +201,10 @@ async function explain(w: WrongItem) {
           <!-- 操作按钮固定在头部（关闭按钮左侧）：切片过长时也不用到最底部找 -->
           <button class="lk-btn" @click="emit('practiceOne', active.key, active.a.blockId)"><i class="fa fa-pencil-square-o"></i> {{ tr('重练此题', 'Retry') }}</button>
           <button class="lk-btn" @click="explain(active)"><i class="fa fa-graduation-cap"></i> {{ tr('AI 讲解', 'Explain') }}</button>
+          <button class="lk-btn" :class="{ on: !!diag[active.a.id] }" @click="explainDiagram(active)"
+            :title="tr('图解讲解：分步拆解 + 知识结构图（mermaid）', 'Illustrated explanation: steps + mermaid knowledge map')">
+            <i class="fa" :class="diagLoading[active.a.id] ? 'fa-spinner fa-spin' : 'fa-sitemap'"></i> {{ tr('图解', 'Diagram') }}
+          </button>
           <button class="lk-close" @click="closeDetail" :title="tr('关闭详情', 'Close')"><i class="fa fa-times"></i></button>
         </div>
         <!-- 详情正文：头部固定，正文在此滚动 -->
@@ -154,7 +236,24 @@ async function explain(w: WrongItem) {
             <span class="lk-ref-label">{{ tr('无答案', 'No answer') }}</span>{{ tr('（作答时未记录答案，且对应来源切片已更新/移除）', '(answer was not saved, and the source slice was updated/removed)') }}
           </div>
           <div v-if="explaining[active.a.id]" class="lk-expl"><i class="fa fa-spinner fa-spin"></i> {{ tr('讲解中…', 'Explaining…') }}</div>
-          <div v-else-if="expl[active.a.id]" class="lk-expl">{{ expl[active.a.id] }}</div>
+          <div v-else-if="expl[active.a.id]" class="lk-expl">
+            {{ expl[active.a.id] }}
+            <div class="lk-diag-foot">
+              <span v-if="cachedOf(active, 'explain')"><i class="fa fa-database"></i> {{ tr('已存入学习记录', 'Saved to learning record') }}</span>
+              <span style="flex:1;"></span>
+              <button class="lk-mini" @click="regenExplain(active, 'explain')"><i class="fa fa-refresh"></i> {{ tr('重新生成', 'Regenerate') }}</button>
+            </div>
+          </div>
+          <!-- 图解讲解：Markdown + mermaid（block_md 渲染；点上图按钮展开/收起） -->
+          <div v-if="diagLoading[active.a.id]" class="lk-expl"><i class="fa fa-spinner fa-spin"></i> {{ tr('生成图解中…', 'Building diagram…') }}</div>
+          <div v-else-if="diag[active.a.id]" class="lk-diag learn-md">
+            <block_md :content="diag[active.a.id]" :fontSize="'13px'" />
+            <div class="lk-diag-foot">
+              <span v-if="cachedOf(active, 'diagram')"><i class="fa fa-database"></i> {{ tr('已存入学习记录', 'Saved to learning record') }}</span>
+              <span style="flex:1;"></span>
+              <button class="lk-mini" @click="regenExplain(active, 'diagram')"><i class="fa fa-refresh"></i> {{ tr('重新生成', 'Regenerate') }}</button>
+            </div>
+          </div>
         </div>
       </template>
       <div v-else class="lk-detail-empty">
@@ -211,6 +310,13 @@ async function explain(w: WrongItem) {
 .lk-btn { cursor: pointer; border: 1px solid var(--borderColor, #d0d7de); background: var(--backgroundColor, #fff); color: var(--fontColor, #1f2328); border-radius: 4px; font-size: 12px; padding: 3px 10px; }
 .lk-btn:hover { background: var(--menuActiveColor, #e5e5e5); }
 .lk-expl { font-size: 12px; line-height: 1.6; color: var(--fontColor, #1f2328); white-space: pre-wrap; background: var(--backgroundColor, #fff); border: 1px solid var(--borderColor, #d0d7de); border-radius: 4px; padding: 6px 8px; margin: 0 12px 10px; }
+/* 解析页脚：持久化状态 + 重新生成（在 pre-wrap 容器里要恢复正常换行） */
+.lk-diag-foot { display: flex; align-items: center; gap: 6px; margin-top: 4px; padding-top: 3px; border-top: 1px dashed var(--borderColor, #d0d7de); font-size: 10.5px; color: var(--borderColor, #888); white-space: normal; }
+.lk-mini { cursor: pointer; border: none; background: none; padding: 1px 5px; border-radius: 5px; font-size: 10.5px; color: var(--fontActiveColor, #0969da); display: inline-flex; align-items: center; gap: 3px; }
+.lk-mini:hover { background: var(--menuActiveColor, #e5e5e5); }
+/* 图解讲解：Markdown/HTML 渲染（不要 pre-wrap，否则会撑开标签间空白） */
+.lk-diag { line-height: 1.45; color: var(--fontColor, #1f2328); border: 1px solid var(--fontActiveColor, #0969da); border-radius: 4px; padding: 6px 8px; margin: 0 12px 10px; }
+.lk-btn.on { color: var(--fontActiveColor, #0969da); border-color: var(--fontActiveColor, #0969da); }
 .lk-empty { margin: auto; text-align: center; color: var(--borderColor, #888); padding: 20px; }
 .lk-empty i { font-size: 26px; }
 .lk-empty p { font-size: 12px; }

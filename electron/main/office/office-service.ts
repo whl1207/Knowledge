@@ -9,11 +9,12 @@
  *  - Word（.docx，本文件）：open_document / list_blocks / read_text / find_text / document_info /
  *    export_markdown / find_and_replace_text / replace_paragraph / insert_paragraph / insert_table /
  *    insert_markdown / set_paragraph_style / delete_block / save_document / close_document
+ *  - Word 样式与字符格式（docx-styles）：list_styles / create_style / update_style / delete_style / set_text_format
  *  - Excel（.xlsx/.xls/.csv，见 xlsx-service）：open_workbook / list_sheets / read_sheet / search_cells /
  *    query_rows / aggregate / set_cells / append_rows / add_sheet / rename_sheet / delete_sheet /
  *    create_workbook / save_workbook / close_workbook
  *
- * 仅依赖 Node + docx-reader / docx-editor / docx-to-markdown / docx-blocks / xlsx-*（均不 import electron），
+ * 仅依赖 Node + docx-reader / docx-editor / docx-to-markdown / docx-blocks / docx-styles / xlsx-*（均不 import electron），
  * 内核可复用于未来独立 stdio CLI。
  */
 import { randomUUID } from 'node:crypto'
@@ -25,6 +26,8 @@ import { loadDocxPackage, applyFindReplace, saveDocxPackage, buildDocxBuffer, ty
 import { docxToMarkdown } from './docx-to-markdown'
 // 块级编辑（M1.2）：replace / insert / delete / 样式 / Markdown 导入
 import { findTextInBlocks, styleCatalog, replaceParagraphText, insertParagraph, insertTable, insertMarkdown, setParagraphStyle, deleteBlock } from './docx-blocks'
+// 样式定义与字符格式（M1.3）：styles.xml 新建 / 修改 / 删除 + run 级字符格式
+import { listStyles, createStyle, updateStyle, deleteStyle, setTextFormat, type RunFormat, type StyleFormat } from './docx-styles'
 // Excel 服务（会话式读写 .xlsx；工具定义与执行器都在 xlsx-service）
 import { xlsxService } from './xlsx-service'
 
@@ -294,6 +297,33 @@ function docxEditToolDefinitions(): any[] {
   const docIdAlias = { doc_id: { type: 'string', description: 'docId 的别名，任选其一' } }
   const index = { index: { type: 'number', description: '块序号（1 起，见 list_blocks / find_text）' }, block_index: { type: 'number', description: 'index 的别名，任选其一' } }
   const position = { position: { type: 'string', enum: ['before', 'after', 'end'], description: '插入位置：before/after 相对 index 块；end（或省略 index）= 追加到正文末尾' } }
+  // 字符级格式（create_style / update_style / set_text_format 共用）
+  const runFmt = {
+    font: { type: 'string', description: '中文字体（eastAsia），如 黑体 / 楷体 / 仿宋 / 方正小标宋简体；只给 font 时西文也用同一字体' },
+    fontAscii: { type: 'string', description: '西文字体（ascii/hAnsi），如 Times New Roman（可选，默认跟随 font）' },
+    fontSize: { type: 'number', description: '字号（磅）：小四=12、四号=14、三号=16、小二=18、二号=22' },
+    bold: { type: 'boolean', description: '加粗（false = 显式取消加粗）' },
+    italic: { type: 'boolean', description: '斜体（false = 取消）' },
+    strike: { type: 'boolean', description: '删除线' },
+    underline: { type: 'boolean', description: '下划线（true/false，也可传 single/double/dotted/wave）' },
+    color: { type: 'string', description: '字体颜色（6 位十六进制，如 1F4E79 或 #FF0000）' },
+    highlight: { type: 'string', description: '底纹高亮（yellow / green / cyan / red / blue / darkBlue… / none）' },
+  }
+  // 段落级格式（仅段落样式与 set_paragraph_style 类操作可用）
+  const paraFmt = {
+    align: { type: 'string', description: '对齐：left / center / right / both（两端对齐）' },
+    lineSpacing: { type: 'number', description: '行距倍数（如 1.5、2）；与 lineSpacingExact 二选一' },
+    lineSpacingExact: { type: 'number', description: '固定行距（磅，如 28）' },
+    spaceBefore: { type: 'number', description: '段前间距（磅）' },
+    spaceAfter: { type: 'number', description: '段后间距（磅）' },
+    firstLineIndent: { type: 'number', description: '首行缩进（字符数，正文常用 2；0 = 顶格）' },
+    leftIndent: { type: 'number', description: '左缩进（字符数）' },
+    rightIndent: { type: 'number', description: '右缩进（字符数）' },
+    outlineLevel: { type: 'number', description: '大纲级别 1-9（1 级=标题 1 级别，会进导航窗格；0 = 取消）' },
+    keepNext: { type: 'boolean', description: '与下段同页' },
+    keepLines: { type: 'boolean', description: '段中不分页' },
+    pageBreakBefore: { type: 'boolean', description: '段前分页' },
+  }
   return [
     {
       name: 'find_text',
@@ -392,6 +422,91 @@ function docxEditToolDefinitions(): any[] {
       },
     },
     {
+      name: 'list_styles',
+      description: '列出文档样式（读取 styles.xml）：id、显示名、类型（paragraph / character / table）、基于样式、标题级别、格式摘要（字体 / 字号 / 加粗 / 对齐 / 行距 / 缩进 / 大纲级别）与正文引用次数。新建 / 修改样式前先看这里。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId,
+          ...docIdAlias,
+          type: { type: 'string', enum: ['paragraph', 'character', 'table', 'all'], description: '只看某一类样式（默认 all）' },
+          detail: { type: 'boolean', description: '是否附带样式原始的 rPr / pPr（默认 true，便于精确改写）' },
+        },
+        required: ['docId'],
+      },
+    },
+    {
+      name: 'create_style',
+      description: '新建段落样式或字符样式（写进文档的 styles.xml，不改变现有正文）。至少要给一个格式字段（font / fontSize / bold / align / lineSpacing / firstLineIndent / outlineLevel…）。建好后可用 set_paragraph_style 把样式套到段落上；styleId 省略时按 name 自动生成。已有同名或同 ID 样式会报错，请改用 update_style。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId,
+          ...docIdAlias,
+          name: { type: 'string', description: '样式显示名，如「本文小标题」「图表题注」' },
+          styleId: { type: 'string', description: '样式 ID（可选；省略则按 name 生成）' },
+          styleType: { type: 'string', enum: ['paragraph', 'character'], description: 'paragraph（默认，段落样式）/ character（字符样式，只能有字符格式）' },
+          basedOn: { type: 'string', description: '基于哪个样式（可选，如 Normal / 正文；继承它的格式）' },
+          next: { type: 'string', description: '该样式段落回车后，下一段套用的样式（可选）' },
+          quickFormat: { type: 'boolean', description: '是否加入样式库快捷列表（默认 true）' },
+          ...runFmt,
+          ...paraFmt,
+        },
+        required: ['docId', 'name'],
+      },
+    },
+    {
+      name: 'update_style',
+      description: '修改已有样式定义（styles.xml）：改名（newName）、换基于样式、改字体 / 字号 / 加粗 / 颜色、改对齐 / 行距 / 段距 / 首行缩进 / 大纲级别等。只传要改的字段即可，其余保持不变；改完正文中所有引用该样式的段落会一起变（不必逐段设置）。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId,
+          ...docIdAlias,
+          style: { type: 'string', description: '要修改的样式：显示名或 styleId（如「标题 1」/ Heading1 / Normal）' },
+          newName: { type: 'string', description: '新显示名（可选，改名用）' },
+          basedOn: { type: 'string', description: '改为基于某样式（可选）' },
+          next: { type: 'string', description: '改「后续段落样式」（可选）' },
+          quickFormat: { type: 'boolean', description: '加入 / 移出样式库快捷列表（可选）' },
+          ...runFmt,
+          ...paraFmt,
+        },
+        required: ['docId', 'style'],
+      },
+    },
+    {
+      name: 'delete_style',
+      description: '删除样式定义（styles.xml）。样式仍被正文引用时默认拒绝并告知引用处数；确认要删就传 force=true（删除后引用它的段落退回默认格式）。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId,
+          ...docIdAlias,
+          style: { type: 'string', description: '要删除的样式：显示名或 styleId' },
+          force: { type: 'boolean', description: '样式仍被引用时是否强制删除（默认 false）' },
+        },
+        required: ['docId', 'style'],
+      },
+    },
+    {
+      name: 'set_text_format',
+      description: '给某个段落（或段内查找命中的文字）直接施加字符格式（字体 / 字号 / 加粗 / 斜体 / 删除线 / 下划线 / 颜色 / 高亮），不依赖样式。省略 find = 作用于整段；给了 find 只影响命中的文字（跨多个 run 时自动按字符切分，不影响其它文字）。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId,
+          ...docIdAlias,
+          ...index,
+          find: { type: 'string', description: '只给命中的文字套格式（可选，如 “第一章”；省略 = 整段）' },
+          find_text: { type: 'string', description: 'find 的别名，任选其一' },
+          scope: { type: 'string', enum: ['all', 'first'], description: '命中多处时：all（默认）全部 / first 只第一处' },
+          ignoreCase: { type: 'boolean', description: '查找是否忽略大小写（默认 false）' },
+          ...runFmt,
+        },
+        required: ['docId', 'index'],
+      },
+    },
+    {
       name: 'delete_block',
       description: '删除指定块（段落或表格）。删除后后续块序号会前移，需重新 list_blocks 确认。',
       inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias, ...index }, required: ['docId', 'index'] },
@@ -400,6 +515,102 @@ function docxEditToolDefinitions(): any[] {
 }
 
 // ---------------- 工具执行内核 ----------------
+/** 布尔参数归一（兼容 "true"/"false"、"是"/"否" 等写法） */
+function boolArg(v: any): boolean | undefined {
+  if (v === undefined || v === null || v === '') return undefined
+  if (typeof v === 'boolean') return v
+  const s = String(v).trim().toLowerCase()
+  if (['true', '1', 'yes', 'y', '是', '开'].includes(s)) return true
+  if (['false', '0', 'no', 'n', '否', '关'].includes(s)) return false
+  return undefined
+}
+
+/** 数值参数归一（非法值返回 undefined） */
+function numArg(v: any): number | undefined {
+  if (v === undefined || v === null || v === '') return undefined
+  const n = Number(v)
+  return Number.isFinite(n) ? n : undefined
+}
+
+/** 从工具参数提取字符格式（未提供的字段保持 undefined = 不改动） */
+function runFormatFromArgs(args: Record<string, any>): RunFormat {
+  const f: RunFormat = {}
+  const str = (keys: string[]): string | undefined => {
+    const v = arg(args, keys)
+    return v === undefined ? undefined : String(v)
+  }
+  const font = str(['font', 'fontName', 'font_name', 'eastAsia', 'east_asia'])
+  if (font !== undefined) f.font = font
+  const fontAscii = str(['fontAscii', 'font_ascii', 'ascii'])
+  if (fontAscii !== undefined) f.fontAscii = fontAscii
+  const fontHAnsi = str(['fontHAnsi', 'font_hansi', 'hAnsi'])
+  if (fontHAnsi !== undefined) f.fontHAnsi = fontHAnsi
+  const size = numArg(arg(args, ['fontSize', 'font_size', 'size', 'sizePt', 'size_pt']))
+  if (size !== undefined) f.fontSize = size
+  const bold = boolArg(arg(args, ['bold']))
+  if (bold !== undefined) f.bold = bold
+  const italic = boolArg(arg(args, ['italic']))
+  if (italic !== undefined) f.italic = italic
+  const strike = boolArg(arg(args, ['strike', 'strikethrough']))
+  if (strike !== undefined) f.strike = strike
+  const uRaw = arg(args, ['underline', 'underLine'])
+  if (uRaw !== undefined) {
+    const ub = boolArg(uRaw)
+    f.underline = ub !== undefined ? ub : String(uRaw)
+  }
+  const color = str(['color', 'fontColor', 'font_color'])
+  if (color !== undefined) f.color = color
+  const highlight = str(['highlight', 'bgColor', 'bg_color'])
+  if (highlight !== undefined) f.highlight = highlight
+  return f
+}
+
+/** 从工具参数提取样式格式（= 字符格式 + 段落格式 + 样式元信息） */
+function styleFormatFromArgs(args: Record<string, any>): StyleFormat & { styleId?: string } {
+  const f: StyleFormat & { styleId?: string } = runFormatFromArgs(args)
+  const str = (keys: string[]): string | undefined => {
+    const v = arg(args, keys)
+    return v === undefined ? undefined : String(v)
+  }
+  const name = str(['name', 'styleName', 'style_name'])
+  if (name !== undefined) f.name = name
+  const styleId = str(['styleId', 'style_id', 'id'])
+  if (styleId !== undefined) f.styleId = styleId
+  const type = str(['styleType', 'style_type', 'type'])
+  if (type && type !== 'all') f.type = /char/i.test(type) ? 'character' : 'paragraph'
+  const basedOn = str(['basedOn', 'based_on', 'base'])
+  if (basedOn !== undefined) f.basedOn = basedOn
+  const next = str(['next', 'nextStyle', 'next_style'])
+  if (next !== undefined) f.next = next
+  const qf = boolArg(arg(args, ['quickFormat', 'quick_format']))
+  if (qf !== undefined) f.quickFormat = qf
+  const align = str(['align', 'alignment', 'jc'])
+  if (align !== undefined) f.align = align
+  const line = numArg(arg(args, ['lineSpacing', 'line_spacing', 'lineHeight', 'line_height']))
+  if (line !== undefined) f.lineSpacing = line
+  const lineExact = numArg(arg(args, ['lineSpacingExact', 'line_spacing_exact', 'lineExact']))
+  if (lineExact !== undefined) f.lineSpacingExact = lineExact
+  const before = numArg(arg(args, ['spaceBefore', 'space_before', 'before']))
+  if (before !== undefined) f.spaceBefore = before
+  const after = numArg(arg(args, ['spaceAfter', 'space_after', 'after']))
+  if (after !== undefined) f.spaceAfter = after
+  const fli = numArg(arg(args, ['firstLineIndent', 'first_line_indent', 'indentFirstLine']))
+  if (fli !== undefined) f.firstLineIndent = fli
+  const li = numArg(arg(args, ['leftIndent', 'left_indent', 'indentLeft']))
+  if (li !== undefined) f.leftIndent = li
+  const ri = numArg(arg(args, ['rightIndent', 'right_indent', 'indentRight']))
+  if (ri !== undefined) f.rightIndent = ri
+  const ol = numArg(arg(args, ['outlineLevel', 'outline_level', 'outline']))
+  if (ol !== undefined) f.outlineLevel = ol
+  const kn = boolArg(arg(args, ['keepNext', 'keep_next']))
+  if (kn !== undefined) f.keepNext = kn
+  const kl = boolArg(arg(args, ['keepLines', 'keep_lines']))
+  if (kl !== undefined) f.keepLines = kl
+  const pb = boolArg(arg(args, ['pageBreakBefore', 'page_break_before']))
+  if (pb !== undefined) f.pageBreakBefore = pb
+  return f
+}
+
 /** 回退实现：用 docx-reader 的块模型拼 Markdown（无编号回填 / 无公式 / 不剔空表，仅在转换管线异常时用） */
 function markdownFromBlocks(s: OfficeSession): string {
   const out: string[] = []
@@ -613,6 +824,101 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       refreshRead(s)
       return JSON.stringify({ ok: true, index: r.index, detail: r.detail, style: styleOfBlock(s, idx), modified: s.pkg.modified, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
     }
+    case 'list_styles': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const typeRaw = arg(args, ['type', 'styleType'])
+      const type = typeRaw === undefined ? '' : String(typeRaw).toLowerCase()
+      const styles = listStyles(s.pkg, {
+        detail: boolArg(arg(args, ['detail'])) !== false,
+        ...(type && type !== 'all' ? { type } : {}),
+      })
+      return JSON.stringify({
+        count: styles.length,
+        styles,
+        note: 'format 是格式摘要；rPr / pPr 是样式定义原始 XML（可直接改这几个字段后用 update_style 写回）',
+      }, null, 2)
+    }
+    case 'create_style': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const spec = styleFormatFromArgs(args)
+      if (!spec.name) return '缺少 name（样式显示名，如「本文小标题」）'
+      const r = createStyle(s.pkg, spec)
+      if (!r.ok) return r.error || '新建样式失败'
+      refreshRead(s)
+      return JSON.stringify({
+        ok: true,
+        styleId: r.styleId,
+        detail: r.detail,
+        warnings: r.warnings,
+        modified: s.pkg.modified,
+        note: '样式已写入内存 styles.xml：用 set_paragraph_style 把「' + spec.name + '」套到段落上，最后 save_document 写盘',
+      }, null, 2)
+    }
+    case 'update_style': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const target = arg(args, ['style', 'styleId', 'style_id', 'styleName', 'name'])
+      if (target === undefined) return '缺少 style（要修改的样式显示名或 styleId，可先 list_styles 查看）'
+      const patch: StyleFormat & { styleId?: string; newName?: string } = styleFormatFromArgs(args)
+      delete patch.name // 改显示名请用 newName（避免与「目标样式」混淆）
+      delete patch.styleId
+      const newName = arg(args, ['newName', 'new_name'])
+      if (newName !== undefined) patch.newName = String(newName)
+      const r = updateStyle(s.pkg, String(target), patch)
+      if (!r.ok) return r.error || '修改样式失败'
+      refreshRead(s)
+      return JSON.stringify({
+        ok: true,
+        styleId: r.styleId,
+        detail: r.detail,
+        warnings: r.warnings,
+        modified: s.pkg.modified,
+        note: '样式定义已改，正文引用会自动跟随；请调用 save_document 写盘',
+      }, null, 2)
+    }
+    case 'delete_style': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const target = arg(args, ['style', 'styleId', 'style_id', 'styleName', 'name'])
+      if (target === undefined) return '缺少 style（要删除的样式显示名或 styleId）'
+      const r = deleteStyle(s.pkg, String(target), boolArg(arg(args, ['force'])) === true)
+      if (!r.ok) return r.error || '删除样式失败'
+      refreshRead(s)
+      return JSON.stringify({
+        ok: true,
+        styleId: r.styleId,
+        detail: r.detail,
+        modified: s.pkg.modified,
+        note: '样式定义已从 styles.xml 移除；请调用 save_document 写盘',
+      }, null, 2)
+    }
+    case 'set_text_format': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const idx = Number(arg(args, ['index', 'block_index']))
+      if (!Number.isFinite(idx)) return '缺少 index（块序号，见 list_blocks / find_text）'
+      const findRaw = arg(args, ['find', 'find_text', 'query', 'text'])
+      const r = setTextFormat(s.pkg, idx, {
+        ...runFormatFromArgs(args),
+        ...(findRaw !== undefined ? { find: String(findRaw) } : {}),
+        scope: String(arg(args, ['scope']) || 'all').toLowerCase() === 'first' ? 'first' : 'all',
+        ignoreCase: boolArg(arg(args, ['ignoreCase', 'ignore_case'])) === true,
+      })
+      if (!r.ok) return r.error || '设置字符格式失败'
+      refreshRead(s)
+      return JSON.stringify({
+        ok: true,
+        index: idx,
+        ranges: r.ranges,
+        runs: r.runs,
+        detail: r.detail,
+        warnings: r.warnings,
+        modified: s.pkg.modified,
+        note: '直接改了文字格式（不依赖样式）；请调用 save_document 写盘',
+      }, null, 2)
+    }
     case 'delete_block': {
       const s = sessionOf(args)
       if (!s) return sessionError(args)
@@ -691,7 +997,7 @@ async function ensureServer(): Promise<any> {
     sharedServerReady = (async () => {
       const sdk = await getServerSdk()
       const server = new sdk.Server(
-        { name: 'AI-KM Office (Word / Excel 读写)', version: '0.3.0' },
+        { name: 'AI-KM Office (Word / Excel 读写)', version: '0.4.0' },
         { capabilities: { tools: {} } }
       )
       const tools = toolDefinitions()

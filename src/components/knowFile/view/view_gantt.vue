@@ -2,8 +2,18 @@
   import { usestore } from '@/store'
   import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
   import { ElMessageBox, ElMessage } from 'element-plus'
+  import { stripMdSuffix, attrDateOf, collectTimeFields, resolveStartFieldOf, DEFAULT_TIME_FIELD, colorOfAttributes } from '@/lib/knowFile/itemMeta'
   
   const store = usestore()
+
+  // 嵌入「日历」视图时：由父级提供视图切换器（月视图 / 周视图 / 甘特图），
+  // 避免上下叠出两条状态栏；单独使用时（showViewSwitch=false）行为不变。
+  const props = defineProps({
+    showViewSwitch: { type: Boolean, default: false },
+    viewMode: { type: String, default: 'gantt' }
+  })
+  const emit = defineEmits(['change-view'])
+  const onViewSelect = (e: Event) => emit('change-view', (e.target as HTMLSelectElement).value)
   const contextMenu = ref(null) as any
   const showContextMenu = ref(false)
   const contextMenuPos = ref({ x: 0, y: 0 })
@@ -11,12 +21,18 @@
   const timelineRef = ref<HTMLElement | null>(null)
   const deep = ref(1)
   
-  // 可配置的开始/结束时间字段
-  const startField = ref(localStorage.getItem('gantt_startField') || '开始时间')
-  const endField = ref(localStorage.getItem('gantt_endField') || '结束时间')
-  const allAttributes = ref<string[]>([])
-  watch(startField, v => localStorage.setItem('gantt_startField', v))
-  watch(endField, v => localStorage.setItem('gantt_endField', v))
+  // 可配置的开始/结束时间字段：与日历视图共用同一组偏好
+  // （起始 calendar_time_field、结束 gantt_endField；旧键 gantt_startField 做一次迁移后不再使用）
+  const START_FIELD_KEY = 'calendar_time_field'
+  const END_FIELD_KEY = 'gantt_endField'
+  const legacyStart = localStorage.getItem('gantt_startField')
+  if (!localStorage.getItem(START_FIELD_KEY) && legacyStart) localStorage.setItem(START_FIELD_KEY, legacyStart)
+  const startField = ref(localStorage.getItem(START_FIELD_KEY) || DEFAULT_TIME_FIELD)
+  const endField = ref(localStorage.getItem(END_FIELD_KEY) || '结束时间')
+  // 起止字段候选：只收时间类字段（与日历一致，不再把 状态 / 颜色 之类也列进来）
+  const timeFields = ref<string[]>([])
+  watch(startField, v => localStorage.setItem(START_FIELD_KEY, v))
+  watch(endField, v => localStorage.setItem(END_FIELD_KEY, v))
   
   // 任务数据
   interface GanttTask {
@@ -46,10 +62,15 @@
   const rowHeight = 32
   const taskNameWidth = 200
 
-  // 日期范围 - 覆盖较宽的时间段
+  /** 取当天 0 点：时间轴按「天」对齐（属性里可能带时分秒，YAML 还可能解析成 Date） */
+  const dayFloor = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const addMonths = (d: Date, n: number) => { const x = new Date(d); x.setMonth(x.getMonth() + n); return x }
+  const daysBetween = (a: Date, b: Date) => (b.getTime() - a.getTime()) / 86400000
+
+  // 日期范围 - 覆盖较宽的时间段（两端都对齐到 0 点，保证表头列与任务条同一套坐标）
   const dateRange = computed(() => {
     if (tasks.value.length === 0) {
-      const now = new Date()
+      const now = dayFloor(new Date())
       const start = new Date(now)
       start.setFullYear(start.getFullYear() - 1)
       const end = new Date(now)
@@ -63,9 +84,9 @@
       if (s < minDate) minDate = s
       if (e > maxDate) maxDate = e
     })
-    const start = new Date(minDate)
+    const start = dayFloor(new Date(minDate))
     start.setMonth(start.getMonth() - 6)
-    const end = new Date(maxDate)
+    const end = dayFloor(new Date(maxDate))
     end.setMonth(end.getMonth() + 7)
     return { start, end }
   })
@@ -118,36 +139,58 @@
     return 1 + Math.round(((temp.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7)
   }
   
-  function daysDiff(a: string, b: string): number {
-    const start = new Date(a)
-    const end = new Date(b)
-    const diff = Math.ceil((end.getTime() - start.getTime()) / (1000 * 3600 * 24))
-    return Math.max(diff, 1)
-  }
-  
   // 任务条的 left (px)，根据缩放级别换算
+  /**
+   * 日期 → 时间轴像素位置（与表头列一一对应）。
+   * 日/周按天数比例；月按**自然月**插值（不能按 30 天近似，否则一年会累计偏出好几列）。
+   */
+  function dateToPx(input: Date): number {
+    const s = dateRange.value.start
+    const d = dayFloor(input)
+    let cols = 0
+    if (currentZoom.value === 'day') {
+      cols = daysBetween(s, d)
+    } else if (currentZoom.value === 'week') {
+      cols = daysBetween(s, d) / 7
+    } else {
+      const whole = (d.getFullYear() - s.getFullYear()) * 12 + (d.getMonth() - s.getMonth())
+      const colStart = addMonths(s, whole)
+      const colEnd = addMonths(s, whole + 1)
+      const span = daysBetween(colStart, colEnd)
+      cols = whole + (span > 0 ? daysBetween(colStart, d) / span : 0)
+    }
+    return cols * columnWidth.value
+  }
+
   function barLeft(task: GanttTask): number {
-    const start = new Date(task.start_date)
-    const rangeStart = dateRange.value.start
-    const dayOffset = Math.floor((start.getTime() - rangeStart.getTime()) / (1000 * 3600 * 24))
-    switch (currentZoom.value) {
-      case 'day': return dayOffset * columnWidth.value
-      case 'week': return (dayOffset / 7) * columnWidth.value
-      case 'month': return (dayOffset / 30) * columnWidth.value
-    }
+    return dateToPx(new Date(task.start_date))
   }
-  
-  // 任务条的 width (px)，根据缩放级别换算
+
+  // 任务条的 width (px)：duration = 覆盖天数，右边界为「末日 + 1」
   function barWidth(task: GanttTask): number {
-    let w: number
-    switch (currentZoom.value) {
-      case 'day': w = task.duration * columnWidth.value; break
-      case 'week': w = (task.duration / 7) * columnWidth.value; break
-      case 'month': w = (task.duration / 30) * columnWidth.value; break
-    }
-    return Math.max(w, 10)
+    const s = dayFloor(new Date(task.start_date))
+    const e = new Date(s)
+    e.setDate(e.getDate() + task.duration)
+    return Math.max(dateToPx(e) - dateToPx(s), 10)
   }
-  
+
+  /** 今天在时间轴上的像素位置（红线） */
+  const todayPx = computed(() => dateToPx(new Date()))
+
+  /**
+   * 任务条样式：位置 / 宽度 + 配色。
+   * 有 `颜色` 属性时用该颜色作为边框与淡底（与日历条目条、看板卡片同一套色），
+   * 没有则用主题强调色 —— 避免只用半透明底色导致任务条在浅/深主题下都看不清。
+   */
+  function barStyle(task: GanttTask) {
+    const s: Record<string, string> = {
+      left: barLeft(task) + 'px',
+      width: barWidth(task) + 'px'
+    }
+    const c = colorOfAttributes(task.data && task.data.attributes)
+    if (c) s['--bar-color'] = c
+    return s
+  }
   // 格式化日期
   function formatDate(dateStr: string): string {
     const d = new Date(dateStr)
@@ -156,32 +199,35 @@
   
   // 获取数据
   const init = async function () {
-    if (store.root === '') return
+    const dir = store.dataDir
+    if (dir === '') return
     try {
-      const files = await window.ipcRenderer.invoke('getFiles', store.root, deep.value)
-      // 收集所有可用属性
-      const attrSet = new Set<string>()
-      files.forEach((f: any) => { if (f.attributes) Object.keys(f.attributes).forEach(k => attrSet.add(k)) })
-      allAttributes.value = Array.from(attrSet).sort()
-      
-      tasks.value = files.map((f: any, i: number) => {
-        let start_date: string
-        let duration = 1
+      const list = await window.ipcRenderer.invoke('getFiles', dir, deep.value)
+      // 只排期 Markdown 文件：文件夹与其它格式（图片 / 表格 / 代码等）不参与甘特
+      const files = (list || []).filter((f: any) => f.type === 'file' && String(f.extension || '').toLowerCase() === '.md')
+      // 起止字段候选：只收时间类字段（与日历视图一致）
+      timeFields.value = collectTimeFields(files)
+
+      tasks.value = files.map((f: any) => {
         const attrs = f.attributes || {}
-        if (attrs[startField.value]) {
-          start_date = attrs[startField.value]
-          if (attrs[endField.value]) {
-            duration = daysDiff(attrs[startField.value], attrs[endField.value])
-          }
-        } else {
-          // 没有设置日期则默认放到今天
-          start_date = store.StampToDate(new Date())
+        // 起始字段：显式指定 > 自动（开始时间 / 首个时间类字段），与日历同一套解析
+        const sf = resolveStartFieldOf(f, startField.value)
+        const ef = endField.value
+        const sDate = attrDateOf(f, sf)
+        const eDate = ef ? attrDateOf(f, ef) : null
+        // 天数按「含首尾」计：9/30 ~ 10/02 = 3 天（先对齐到当天 0 点再算间隔，避开时分秒与夏令时误差）
+        let duration = 1
+        if (sDate && eDate && eDate >= sDate) {
+          duration = Math.max(Math.round(daysBetween(dayFloor(sDate), dayFloor(eDate))) + 1, 1)
         }
+        // 没有可用的起始日期：放到今天（保持原有兜底行为）
+        const start_date = sDate ? store.StampToDate(sDate) : store.StampToDate(new Date())
+        // end_date 为**含**末日的日期（显示 / 默认值用）；任务条宽度另按 duration 天算
         const endDate = new Date(start_date)
-        endDate.setDate(endDate.getDate() + duration)
+        endDate.setDate(endDate.getDate() + duration - 1)
         return {
           id: f.path,
-          text: f.label,
+          text: stripMdSuffix(f.label),
           start_date,
           end_date: store.StampToDate(endDate),
           duration,
@@ -212,22 +258,15 @@
   // 滚动时间轴到指定日期
   const scrollToDate = function (date: Date) {
     if (!timelineRef.value) return
-    const rangeStart = dateRange.value.start
-    const dayOffset = Math.floor((date.getTime() - rangeStart.getTime()) / (1000 * 3600 * 24))
-    let scrollTo: number
-    switch (currentZoom.value) {
-      case 'day': scrollTo = dayOffset * columnWidth.value - 200; break
-      case 'week': scrollTo = (dayOffset / 7) * columnWidth.value - 200; break
-      case 'month': scrollTo = (dayOffset / 30) * columnWidth.value - 200; break
-    }
-    timelineRef.value.scrollLeft = Math.max(0, scrollTo)
+    timelineRef.value.scrollLeft = Math.max(0, dateToPx(date) - 200)
   }
   
   // 右键菜单中设置开始/结束时间
   const setDateForSelected = async function (isStart: boolean) {
     const task = tasks.value.find(t => t.id === selectedTaskId.value)
     if (!task) return
-    const field = isStart ? startField.value : endField.value
+    // 起始字段可能选了「默认」——按该文件实际使用的时间字段写入
+    const field = isStart ? resolveStartFieldOf(task.data, startField.value) : endField.value
     const label = store.locales === 'zh' ? (isStart ? '开始时间' : '结束时间') : (isStart ? 'Start Time' : 'End Time')
     const defaultValue = isStart ? task.start_date.substring(0, 10) : task.end_date.substring(0, 10)
     await doSetDate(task, field, label, defaultValue)
@@ -327,7 +366,7 @@
     }
   }
   
-  watch(() => store.root, () => init())
+  watch([() => store.root, () => store.path], () => init())
   
   onMounted(() => {
     init()
@@ -370,12 +409,12 @@
         <!-- 任务条区域 -->
         <div class="timeline-body" :style="{ width: totalTimelineWidth + 'px' }">
           <!-- 今日标记线 -->
-          <div class="today-marker" :style="{ left: barLeft({ id:'', text:'', start_date: store.StampToDate(new Date()), end_date: '', duration: 1, data: null }) + 'px' }"></div>
+          <div class="today-marker" :style="{ left: todayPx + 'px' }"></div>
           <!-- 网格线和任务条 -->
           <div v-for="(task, ti) in tasks" :key="task.id" class="bar-row" :style="{ height: rowHeight + 'px' }"
                @contextmenu="showEditorContextMenu($event, task.id)"
                @dblclick="store.openFileByMode(task.data)">
-            <div class="bar" :style="{ left: barLeft(task) + 'px', width: barWidth(task) + 'px' }">
+            <div class="bar" :style="barStyle(task)">
               <span class="bar-text">{{ task.text }}</span>
             </div>
           </div>
@@ -389,8 +428,20 @@
       <p>{{ store.locales === 'zh' ? '暂无任务数据' : 'No task data' }}</p>
     </div>
 
-    <!-- 底部状态栏：缩放 / 层级 / 刷新 / 时间字段 / 计数 -->
+    <!-- 底部状态栏：视图(月/周/甘特，嵌入日历视图时) / 缩放 / 层级 / 刷新 / 时间字段 / 计数 -->
     <div class="gantt-statusbar">
+      <span v-if="store.folderName" class="statusbar-item status-folder" :title="store.dataDir" style="max-width:220px"><i class="fa fa-folder-open-o"></i><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ store.folderName }}</span></span>
+      <span v-if="store.folderName" class="statusbar-sep"></span>
+      <template v-if="props.showViewSwitch">
+        <span class="statusbar-item"><i class="fa fa-calendar-o"></i> {{ store.locales === 'zh' ? '视图' : 'View' }}</span>
+        <select class="statusbar-select" :value="props.viewMode" @change="onViewSelect" :title="store.locales === 'zh' ? '月视图 / 周视图 / 年视图 / 甘特图' : 'Month / Week / Year / Gantt'">
+          <option value="month">{{ store.locales === 'zh' ? '月视图' : 'Month' }}</option>
+          <option value="week">{{ store.locales === 'zh' ? '周视图' : 'Week' }}</option>
+          <option value="year">{{ store.locales === 'zh' ? '年视图' : 'Year' }}</option>
+          <option value="gantt">{{ store.locales === 'zh' ? '甘特图' : 'Gantt' }}</option>
+        </select>
+        <span class="statusbar-sep"></span>
+      </template>
       <span class="statusbar-item"><i class="fa fa-search-plus"></i> {{ store.locales === 'zh' ? '缩放' : 'Zoom' }}</span>
       <select class="statusbar-select" v-model="currentZoom" @change="nextTick(() => focusToday())" :title="store.locales === 'zh' ? '时间粒度' : 'Time granularity'">
         <option value="day">{{ store.locales === 'zh' ? '日' : 'Day' }}</option>
@@ -404,15 +455,18 @@
       </select>
       <button class="statusbar-btn" @click="init()" :title="store.locales === 'zh' ? '刷新' : 'Refresh'"><i class="fa fa-refresh"></i></button>
       <button class="statusbar-btn" @click="focusToday()" :title="store.locales === 'zh' ? '跳转到今天' : 'Focus Today'"><i class="fa fa-flag-o"></i></button>
-      <template v-if="allAttributes.length">
+      <template v-if="timeFields.length">
         <span class="statusbar-sep"></span>
         <span class="statusbar-item"><i class="fa fa-clock-o"></i> {{ store.locales === 'zh' ? '开始' : 'Start' }}</span>
-        <select class="statusbar-select" v-model="startField" @change="init()" :title="store.locales === 'zh' ? '开始时间字段' : 'Start field'">
-          <option v-for="attr in allAttributes" :key="attr" :value="attr">{{ attr }}</option>
+        <select class="statusbar-select" v-model="startField" @change="init()" :title="store.locales === 'zh' ? '起始时间字段（与日历视图共用）' : 'Start field (shared with the Calendar view)'">
+          <option :value="DEFAULT_TIME_FIELD">{{ store.locales === 'zh' ? '默认' : 'Default' }}</option>
+          <option v-if="startField !== DEFAULT_TIME_FIELD && !timeFields.includes(startField)" :value="startField">{{ startField }}</option>
+          <option v-for="attr in timeFields" :key="attr" :value="attr">{{ attr }}</option>
         </select>
         <span class="statusbar-item"><i class="fa fa-clock-o"></i> {{ store.locales === 'zh' ? '结束' : 'End' }}</span>
-        <select class="statusbar-select" v-model="endField" @change="init()" :title="store.locales === 'zh' ? '结束时间字段' : 'End field'">
-          <option v-for="attr in allAttributes" :key="attr" :value="attr">{{ attr }}</option>
+        <select class="statusbar-select" v-model="endField" @change="init()" :title="store.locales === 'zh' ? '结束时间字段（与日历视图共用）' : 'End field (shared with the Calendar view)'">
+          <option v-if="!timeFields.includes(endField)" :value="endField">{{ endField }}</option>
+          <option v-for="attr in timeFields" :key="attr" :value="attr">{{ attr }}</option>
         </select>
       </template>
       <span class="statusbar-spacer"></span>
@@ -449,24 +503,29 @@
         </ul>
       </div>
       <div class="menu-divider"></div>
-      <div class="menu-item has-submenu" v-if="allAttributes.length>0" @mouseenter="adjustSubmenu">
+      <div class="menu-item has-submenu" v-if="timeFields.length>0" @mouseenter="adjustSubmenu">
         <i class="fa fa-clock-o"></i>
-        <span style="flex:1">{{ store.locales === 'zh' ? '开始时间字段' : 'Start Field' }}</span>
-        <span style="font-size:11px;color:var(--borderColor)">{{ startField }}</span>
+        <span style="flex:1">{{ store.locales === 'zh' ? '起始时间字段' : 'Start Field' }}</span>
+        <span style="font-size:11px;color:var(--borderColor)">{{ startField === DEFAULT_TIME_FIELD ? (store.locales === 'zh' ? '默认' : 'Default') : startField }}</span>
         <ul class="submenu">
-          <li v-for="attr in allAttributes" :key="attr" @click="startField=attr; init(); hideContextMenu()">
+          <li @click="startField=DEFAULT_TIME_FIELD; init(); hideContextMenu()">
+            <i class="fa fa-dot-circle-o" v-if="startField===DEFAULT_TIME_FIELD"></i>
+            <i class="fa fa-circle-o" v-else></i>
+            {{ store.locales === 'zh' ? '默认（按文件自动）' : 'Default (per file)' }}
+          </li>
+          <li v-for="attr in timeFields" :key="attr" @click="startField=attr; init(); hideContextMenu()">
             <i class="fa fa-dot-circle-o" v-if="startField===attr"></i>
             <i class="fa fa-circle-o" v-else></i>
             {{ attr }}
           </li>
         </ul>
       </div>
-      <div class="menu-item has-submenu" v-if="allAttributes.length>0" @mouseenter="adjustSubmenu">
+      <div class="menu-item has-submenu" v-if="timeFields.length>0" @mouseenter="adjustSubmenu">
         <i class="fa fa-clock-o"></i>
         <span style="flex:1">{{ store.locales === 'zh' ? '结束时间字段' : 'End Field' }}</span>
         <span style="font-size:11px;color:var(--borderColor)">{{ endField }}</span>
         <ul class="submenu">
-          <li v-for="attr in allAttributes" :key="attr" @click="endField=attr; init(); hideContextMenu()">
+          <li v-for="attr in timeFields" :key="attr" @click="endField=attr; init(); hideContextMenu()">
             <i class="fa fa-dot-circle-o" v-if="endField===attr"></i>
             <i class="fa fa-circle-o" v-else></i>
             {{ attr }}
@@ -562,6 +621,7 @@
 }
 .header-cell {
   flex-shrink: 0;
+  box-sizing: border-box;
   font-size: 11px;
   color: var(--fontColor);
   text-align: center;
@@ -585,17 +645,22 @@
   top: 4px;
   height: 24px;
   border-radius: 4px;
-  background: var(--menuColor);
-  opacity: 0.75;
+  /* 边框用条目颜色（无 `颜色` 属性时用主题强调色），底色取同色淡底：浅色/深色主题下都能看清 */
+  border: 1px solid var(--bar-color, var(--fontActiveColor));
+  background: color-mix(in srgb, var(--bar-color, var(--fontActiveColor)) 18%, var(--backgroundColor));
+  color: var(--fontColor);
   display: flex;
   align-items: center;
   padding: 0 6px;
   box-sizing: border-box;
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: background-color 0.15s, box-shadow 0.15s;
   overflow: hidden;
 }
-.bar:hover { opacity: 1; }
+.bar:hover {
+  background: color-mix(in srgb, var(--bar-color, var(--fontActiveColor)) 34%, var(--backgroundColor));
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
 .bar-text {
   font-size: 11px;
   white-space: nowrap;

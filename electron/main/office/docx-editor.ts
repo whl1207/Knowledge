@@ -264,6 +264,21 @@ export function applyFindReplace(pkg: DocxPackage, find: string, replace: string
 
 // ==================== 导出 / 保存 ====================
 
+/** 读内存包中某部件的文本（不存在返回 null） */
+export function readPackageEntryText(pkg: DocxPackage, name: string): string | null {
+  const e = pkg.entries.find(x => x.name === name)
+  return e ? e.data.toString('utf8') : null
+}
+
+/** 写内存包中某部件的文本（不存在则新增条目）并置 modified —— styles.xml 等部件改动用它回写 */
+export function writePackageEntryText(pkg: DocxPackage, name: string, text: string): void {
+  const i = pkg.entries.findIndex(x => x.name === name)
+  const entry = { name, data: Buffer.from(text, 'utf8') }
+  if (i >= 0) pkg.entries[i] = entry
+  else pkg.entries.push(entry)
+  pkg.modified = true
+}
+
 /**
  * 内存包 → .docx Buffer（不落盘、不改动 pkg）。
  * 用于外部工具在“已改但还没 save”时拿到当前内容的完整包（如 Office MCP 的 export_markdown）。

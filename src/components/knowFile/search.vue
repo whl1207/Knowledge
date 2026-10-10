@@ -7,8 +7,18 @@
   //搜索并过滤文件
   let filterText = ref('')
   let timer = ref(null) as any
+  // 注意：打开文件后**不关闭**搜索面板（不再向外抛事件），方便连续打开多个结果；
+  // 关闭方式仍为右上角 ✕ / Esc / 点击浮层外空白处（见 explorer.vue）。
   const open=(data:any)=>{
-    store.openInApp(data)
+    if (!data || !data.path) return
+    // 打开文件：一律在独立窗口打开（与文件树 / 看板 / 表格的打开方式一致）
+    // （文件夹则进入该目录）
+    store.openFileByMode({
+      path: data.path,
+      label: data.label,
+      type: data.type === 'folder' ? 'folder' : 'file',
+      extension: data.extension || '',
+    })
   }
   //搜索并过滤文件
   const getResults=async function(keyword:string){

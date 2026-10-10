@@ -10,6 +10,7 @@
  */
 
 import { usestore } from '@/store'
+import { ensureBuiltinAgentPresets, isBuiltinAgentPreset, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 
 /** presetId → .agent 文件路径（扫描时建立；改名/新增时更新） */
 export const agentPresetFileMap = new Map<string, string>()
@@ -45,6 +46,8 @@ export const scanAgentPresets = async (): Promise<void> => {
     }
     // 以文件夹内 .agent 文件为准（不做 localStorage → 文件夹的自动同步迁移）
     store.agentPresets = presets
+    // 内置预设（代码智能体 / 办公智能体）按 id 幂等兜底：文件夹模式以文件为准，但内置项不能因文件夹缺文件而消失
+    ensureBuiltinAgentPresets(store.agentPresets as any[], builtinPresetDefaultsFromStore(store))
   } catch { /* 静默忽略（目录不可读等） */ }
 }
 
@@ -116,6 +119,8 @@ export const exportAllAgentPresets = async (): Promise<number> => {
   if (!dir) return -1
   let ok = 0
   for (const c of store.agentPresets as any[]) {
+    // 内置预设（代码 / 办公智能体）由软件自带，不导出：避免在同名文件夹里覆盖用户自建预设文件
+    if (isBuiltinAgentPreset(c)) continue
     try {
       const p = agentFilePath(c, dir)
       await window.ipcRenderer.invoke('writeFile', p, JSON.stringify(c, null, 2))

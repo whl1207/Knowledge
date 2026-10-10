@@ -33,7 +33,7 @@ import { usestore } from '@/store'
 interface GraphNode {
   id: string
   label: string
-  type: 'source' | 'file' | 'data' | 'agent' | 'mcp'
+  type: 'source' | 'file' | 'slice' | 'data' | 'agent' | 'mcp' | 'question'
   color: 'green' | 'blue' | 'orange' | 'red' | 'gray' | 'purple'
   data?: any
   sourceId?: string
@@ -53,6 +53,10 @@ interface GraphEdge {
 
 const props = defineProps<{
   graphData: { nodes: GraphNode[]; edges: GraphEdge[] }
+  /** 节点标题（标签）显示策略：true=总是显示 / false=不显示 / 不传或 null=按节点数自动（大图模式隐藏） */
+  showLabels?: boolean | null
+  /** 节点间距倍数（1=标准，>1 更疏、<1 更紧）：同时影响电荷斥力、连线长度与碰撞半径 */
+  spacing?: number
 }>()
 
 const emit = defineEmits<{
@@ -82,6 +86,7 @@ let labelsG: d3.Selection<SVGGElement, unknown, null, undefined> | null = null
 let width = 0
 let height = 0
 let isLargeGraph = false    // 节点数超过阈值时启用大图优化模式
+let labelsShown = false     // 当前是否已渲染标签（用于切换显示/隐藏时清一次 DOM）
 let tickRafId: number | null = null  // RAF 手柄
 let pendingTick = false              // 是否有待执行的 tick 更新
 
@@ -124,8 +129,8 @@ const getNodeColor = (color: string): string => {
 const getNodeTypeText = (type?: string): string => {
   const zh = !isEn.value
   const types: Record<string, string> = zh
-    ? { source: '网页信源', file: '原始文件', data: '数据实体', agent: '智能体', mcp: 'MCP 服务' }
-    : { source: 'Web source', file: 'Source file', data: 'Data entity', agent: 'Agent', mcp: 'MCP service' }
+    ? { source: '网页信源', file: '原始文件', slice: '切片', data: '数据实体', agent: '智能体', mcp: 'MCP 服务', question: '问题' }
+    : { source: 'Web source', file: 'Source file', slice: 'Slice', data: 'Data entity', agent: 'Agent', mcp: 'MCP service', question: 'Question' }
   return type ? types[type] || type : (zh ? '未知' : 'Unknown')
 }
 
@@ -143,11 +148,11 @@ const applyPositions = () => {
     .attr('cx', (d: any) => d.x)
     .attr('cy', (d: any) => d.y)
   
-  // 非大图才更新标签（大图模式跳过标签减少 DOM 操作）
-  if (!isLargeGraph) {
+  // 标签位置：只要标签实际在画（含大图强制显示）就要跟随节点
+  if (labelsShown) {
     g.selectAll<SVGTextElement, any>('.labels text')
-      .attr('x', (d: any) => d.x)
-      .attr('y', (d: any) => d.y)
+      .attr('x', (d: any) => d.x ?? 0)
+      .attr('y', (d: any) => d.y ?? 0)
   }
 }
 
@@ -305,6 +310,33 @@ const LARGE_GRAPH_THRESHOLD = 500  // 超过此数启用大图优化
 /** 大图模式滞回：进入 500 后要降到 400 以下才退出，避免节点数在阈值附近抖动导致渲染反复切换（闪） */
 const LARGE_GRAPH_EXIT_THRESHOLD = 400
 
+/** 节点半径（大图用小半径）：力参数里也要用，提到顶层方便复用 */
+const radiusOf = (d: any) => isLargeGraph ? (d.type === 'data' ? 5 : 4) : (d.type === 'data' ? 16 : 12)
+/**
+ * 节点标题字号：节点越多越小（大图默认字号相对小圆点显得过大，会糊成一片）。
+ * 小图维持原字号；大图按节点总数分档缩小，下限 2.5px（再小也看不清，不如靠缩放）。
+ */
+const labelFontSize = (d: any) => {
+  if (!isLargeGraph) return d.type === 'data' ? '8px' : '9px'
+  const n = simNodes.length
+  const scale = n <= 1000 ? 1 : n <= 3000 ? 0.8 : n <= 10000 ? 0.65 : 0.5
+  const base = d.type === 'data' ? 5.5 : 5
+  return Math.max(2.5, base * scale) + 'px'
+}
+/** 标题截断长度：大图也更短，避免长标签横跨整张图 */
+const labelLimit = (d: any) => {
+  const base = d.type === 'agent' ? 20 : d.type === 'question' ? 14 : 12
+  if (!isLargeGraph) return base
+  const scale = simNodes.length <= 1000 ? 0.85 : 0.6
+  return Math.max(6, Math.round(base * scale))
+}
+/** 间距倍数（1=标准；0 或非法值回落为 1，上限 3 避免跑飞） */
+const spacingFactor = () => {
+  const s = Number(props.spacing)
+  if (!s || s <= 0 || Number.isNaN(s)) return 1
+  return Math.min(3, s)
+}
+
 /** 按节点数决定是否启用大图模式（带滞回），返回是否发生变化 */
 const applyLargeMode = (totalNodes: number): boolean => {
   const was = isLargeGraph
@@ -333,38 +365,36 @@ const updateGraph = () => {
   // 更新 center force
   simulation.force('center', d3.forceCenter(width / 2, height / 2))
   
-  // 大图模式：移除碰撞力，限制电荷力范围，防止节点飞散
+  const sp = spacingFactor()
+  // 大图模式：保留碰撞力（半径按间距放大），否则大量节点会叠在一起看不清
   if (isLargeGraph) {
-    simulation.force('collision', null as any)
-    // 移除旧的 forceX/forceY 避免叠加
     simulation.force('x', null as any).force('y', null as any)
-    
     // 快速收敛参数：高初始能量 + 快衰减 + 早停
     simulation.alphaDecay(0.06).alphaMin(0.01)
-    
-    // 电荷力：弱排斥，关联网页结构清晰不需要强力散开
+
+    simulation.force('collision', d3.forceCollide().radius((d: any) => radiusOf(d) + 2 * sp))
+
+    // 电荷力：按间距线性放大排斥（指数放大容易让大图飞散）
     const charge = simulation.force('charge') as d3.ForceManyBody<any>
-    if (charge) charge.strength(-40).theta(1.0)
-    
+    if (charge) charge.strength(-40 * sp).theta(1.0)
+
     // 链接力：短距 + 高强度驱动布局
     const lf = simulation.force('link') as d3.ForceLink<any, any>
-    if (lf) lf.distance(40).strength(0.8)
-    
-    // forceX/forceY：温和向心
+    if (lf) lf.distance(40 * sp).strength(0.8)
+
+    // forceX/forceY：温和向心（固定强度，保证节点不会无限散开）
     simulation.force('x', d3.forceX(width / 2).strength(0.08))
     simulation.force('y', d3.forceY(height / 2).strength(0.08))
   } else {
     // 移除大图模式加入的 forceX/forceY
     simulation.force('x', null as any).force('y', null as any)
-    if (!simulation.force('collision')) {
-      simulation.force('collision', d3.forceCollide().radius((d: any) => (d.type === 'data' ? 20 : 16)))
-    }
+    simulation.force('collision', d3.forceCollide().radius((d: any) => radiusOf(d) + 4 * sp))
     simulation.alphaDecay(0.02).alphaMin(0.001)
     const charge = simulation.force('charge') as d3.ForceManyBody<any>
-    if (charge) charge.theta(0.9)
+    if (charge) charge.strength((d: any) => (d.type === 'data' ? -500 : -300) * sp).theta(0.9)
     // 恢复默认链接距离
     const lf = simulation.force('link') as d3.ForceLink<any, any>
-    if (lf) lf.distance(150).strength(0.3)
+    if (lf) lf.distance(150 * sp).strength(0.3)
   }
   
   const linkForce = simulation.force('link') as d3.ForceLink<any, any>
@@ -402,10 +432,7 @@ const updateGraph = () => {
   }
   
   // ---- 节点大小（大图用小半径） ----
-  const nodeRadius = (d: any) => {
-    if (isLargeGraph) return d.type === 'data' ? 5 : 4
-    return d.type === 'data' ? 16 : 12
-  }
+  const nodeRadius = (d: any) => radiusOf(d)
   
   // ---- 边数据 ----
   // ---- 增量同步边：按 key 复用对象（保留 d3 解析后的 source/target 引用，布局不被打断） ----
@@ -556,33 +583,38 @@ const updateGraph = () => {
       .attr('r', nodeRadius)
   }
   
-  // ---- 标签（大图模式跳过，减少 DOM 节点数） ----
-  if (isLargeGraph) {
-    // 清除所有标签（只在刚切到大图时清一次，避免每帧重建）
-    if (!wasLarge) labelsG.selectAll('*').remove()
+  // ---- 标签（数量大时默认跳过，减少 DOM 节点数；showLabels 可强制显示/隐藏） ----
+  const wantLabels = props.showLabels == null ? !isLargeGraph : !!props.showLabels
+  if (!wantLabels) {
+    // 只在刚隐藏时清一次，避免每帧重建
+    if (labelsShown) { labelsG.selectAll('*').remove(); labelsShown = false }
   } else {
+    labelsShown = true
     const labelJoin = labelsG
       .selectAll<SVGTextElement, any>('text')
       .data(simNodes, (d: any) => d.id)
-    
+
     labelJoin.exit().remove()
-    
+
     const labelEnter = labelJoin.enter().append('text')
-      .attr('font-size', (d: any) => d.type === 'data' ? '8px' : '9px')
       .attr('fill', 'var(--fontColor)')
       .attr('text-anchor', 'middle')
-      .attr('dy', (d: any) => -(d.type === 'data' ? 22 : 18))
       .attr('opacity', 0)
-    
+
     labelsG.selectAll<SVGTextElement, any>('text')
+      .attr('font-size', (d: any) => labelFontSize(d))
+      .attr('dy', (d: any) => -(nodeRadius(d) + (isLargeGraph ? 3 : 4)))
+      // 位置必须当场写好：大图模式下仿真可能已冷却（不再有 tick），否则标签会堆在左上角
+      .attr('x', (d: any) => d.x ?? width / 2)
+      .attr('y', (d: any) => d.y ?? height / 2)
       .text((d: any) => {
         let label = d.label || d.id
-        // 智能体节点通常是「行号 + 标题」，允许多显示几个字
-        const limit = d.type === 'agent' ? 20 : 12
+        // 智能体节点通常是「行号 + 标题」，允许多显示几个字；问题节点更短一些
+        const limit = labelLimit(d)
         if (label.length > limit) label = label.slice(0, limit - 2) + '...'
         return label
       })
-    
+
     labelEnter.transition().duration(300).attr('opacity', 1)
   }
   
@@ -718,6 +750,20 @@ watch(() => [props.graphData.nodes, props.graphData.edges], () => {
   nodes.value = props.graphData.nodes
   edges.value = props.graphData.edges
   nextTick(scheduleUpdate)
+})
+
+// 标题显示策略变更 → 重跑一次增量更新（只动标签，不重排布局）
+watch(() => props.showLabels, () => nextTick(scheduleUpdate))
+
+// 间距变更 → 重套力参数并重新布局（用户主动调整，重排一次可接受）
+watch(() => props.spacing, () => {
+  nextTick(() => {
+    updateGraph()
+    if (simulation) {
+      autoFitArmed = true
+      simulation.alpha(0.9).velocityDecay(0.4).restart()
+    }
+  })
 })
 
 // ==================== 生命周期 ====================

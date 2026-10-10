@@ -54,16 +54,34 @@ export interface LMeta {
   dayStats: Record<string, DayStat>
 }
 
+/** AI 解析类型：explain=短讲解；diagram=图解/解析（分步拆解 + 知识结构图） */
+export type LExplainKind = 'explain' | 'diagram'
+/**
+ * AI 解析结果（随学习记录持久化）：同一题再次打开直接复用，不重复烧 token。
+ * key = explainCacheKey(kind, blockId, 题干)（题干指纹，换题/改题自动失效）。
+ */
+export interface LExplainEntry {
+  text: string
+  at: number
+  kind: LExplainKind
+  /** 生成时用的语言（英文库/英文界面为 'en'） */
+  lang?: 'zh' | 'en'
+}
+
 export interface LData {
   schemaVersion: 1
   kbFile: string
   updatedAt: number
   objects: Record<string, LObject>
   meta: LMeta
+  /** AI 解析/图解的本地缓存（可选字段：旧记录无此项也能正常读） */
+  explains?: Record<string, LExplainEntry>
 }
 
 const MAX_ATTEMPTS = 40
 const MAX_DAYSTATS = 120
+/** 解析缓存条数上限（超出按时间淘汰最旧，避免 .learning 无限膨胀） */
+const MAX_EXPLAINS = 300
 
 function dayKeyOf(t: number): string {
   const d = new Date(t)
@@ -83,7 +101,57 @@ export function emptyLData(kbFile: string): LData {
     updatedAt: now,
     objects: {},
     meta: emptyMeta(),
+    explains: {},
   }
+}
+
+// ==================== AI 解析缓存（随 .learning 一并落盘） ====================
+
+/** 题干指纹：djb2 哈希（去空白 + 截断），避免把整个题干当 key 撑大 .learning */
+function fingerprint(s: string): string {
+  const t = String(s || '').replace(/\s+/g, ' ').trim().slice(0, 400)
+  let h = 5381
+  for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}
+
+/** 缓存 key：类型 + 切片 id + 题干指纹（题干改了会自动重新生成） */
+export function explainCacheKey(kind: LExplainKind, blockId: any, question: string): string {
+  return `${kind}:${blockId ?? ''}:${fingerprint(question)}`
+}
+
+/** 读取已缓存的解析（无则 undefined） */
+export function getExplain(data: LData | null | undefined, key: string): LExplainEntry | undefined {
+  const e = data?.explains?.[key]
+  return e && e.text ? e : undefined
+}
+
+/** 写入解析缓存（自动剪枝，返回是否真的写入了） */
+export function setExplain(
+  data: LData,
+  key: string,
+  text: string,
+  kind: LExplainKind,
+  lang?: 'zh' | 'en',
+): boolean {
+  const body = String(text || '').trim()
+  if (!key || !body) return false
+  if (!data.explains) data.explains = {}
+  data.explains[key] = { text: body, at: Date.now(), kind, lang }
+  const keys = Object.keys(data.explains)
+  if (keys.length > MAX_EXPLAINS) {
+    keys
+      .sort((a, b) => (data.explains![a].at || 0) - (data.explains![b].at || 0))
+      .slice(0, keys.length - MAX_EXPLAINS)
+      .forEach(k => { delete data.explains![k] })
+  }
+  data.updatedAt = Date.now()
+  return true
+}
+
+/** 删除某条解析缓存（用于「重新生成」前清旧值） */
+export function clearExplain(data: LData, key: string): void {
+  if (data.explains && data.explains[key]) { delete data.explains[key]; data.updatedAt = Date.now() }
 }
 
 /** 由 .kb 路径推导学习记录文件路径（新约定：同目录 <库名>.learning，不再追加 json） */
@@ -108,6 +176,8 @@ export async function loadLData(kbPath: string): Promise<LData | null> {
       // 迁移/兜底：meta
       if (!data.meta) data.meta = emptyMeta()
       if (!data.meta.dayStats) data.meta.dayStats = {}
+      // 兼容旧记录：补上解析缓存容器
+      if (!data.explains) data.explains = {}
       if (!data.schemaVersion) data.schemaVersion = 1
       return data
     } catch (e) { /* 尝试下一候选 */ }

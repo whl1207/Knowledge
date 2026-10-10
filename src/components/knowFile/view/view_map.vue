@@ -127,7 +127,7 @@
     curZoom.value = map.zoomLevel
     tooltipsOn.value = true
     if(store.root=="") return //如果未设定仓库和路径
-    data = await window.ipcRenderer.invoke("getFiles", store.root, deep.value)
+    data = await window.ipcRenderer.invoke("getFiles", store.dataDir, deep.value)
     //添加节点到地图
     data.forEach((item: any) => {
       if (!item.attributes?.纬度 || !item.attributes?.经度) return;
@@ -289,10 +289,12 @@
       map.target.remove();
     }
   })
-  watch(()=>store.root, (newValue, oldValue) => {
+  watch([()=>store.root, ()=>store.path], (newValue, oldValue) => {
     //if (map.target) {map.target.remove()}
     initMap()
   })
+  // 顶部工具栏的「刷新」：重新加载地图数据
+  watch(()=>store.knowRefreshTick, () => { initMap() })
   watch(()=>map.source, (newValue, oldValue) => {//修改图源
     getSource()
   })
@@ -312,6 +314,7 @@
 
 <template >
   <div class="map">
+    <!-- 顶部工具栏（路径面包屑）由 explorer.vue 统一渲染一条 -->
     <!-- 主地图区 -->
     <div class="map-canvas">
       <div id="map"></div>
@@ -422,6 +425,8 @@
 
     <!-- 底部状态栏（与代码编辑/阅读视图一致观感） -->
     <div class="map-statusbar">
+      <span v-if="store.folderName" class="statusbar-item status-folder" :title="store.dataDir" style="max-width:220px"><i class="fa fa-folder-open-o"></i><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ store.folderName }}</span></span>
+      <span v-if="store.folderName" class="statusbar-sep"></span>
       <button class="statusbar-btn" @click="zoomIn" :title="store.locales=='zh'?'放大':'Zoom in'"><i class="fa fa-plus"></i></button>
       <button class="statusbar-btn" @click="zoomOut" :title="store.locales=='zh'?'缩小':'Zoom out'"><i class="fa fa-minus"></i></button>
       <span class="statusbar-sep"></span>
@@ -447,6 +452,8 @@
 <style scoped>
   .map{
     position: relative;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     height: calc(100% - 1px);
     min-width:120px;
@@ -457,11 +464,12 @@
     flex:2;
     user-select: none;
   }
-  /* 主地图区（为底部 24px 状态栏留位） */
+  /* 主地图区（顶部工具栏与底部状态栏都在流内，剩余高度给地图） */
   .map-canvas{
     position: relative;
     width: 100%;
-    height: calc(100% - 24px);
+    flex: 1;
+    min-height: 0;
     overflow: hidden;
   }
   #map{
@@ -589,9 +597,9 @@
 
   /* ===== 底部状态栏（与代码编辑/阅读视图一致观感） ===== */
   .map-statusbar{
-    position:absolute; left:0; right:0; bottom:0;
     display:flex; align-items:center; gap:8px;
     height:24px; box-sizing:border-box; padding:0 8px;
+    flex-shrink: 0;
     font-size:12px; color:var(--fontColor);
     background-color:var(--menuColor);
     border-top:1px solid var(--borderColor);

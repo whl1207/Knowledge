@@ -10,6 +10,10 @@
   import MermaidViewer from '@/components/MermaidViewer.vue'
   import { Transformer } from 'markmap-lib'
   import * as markmap from 'markmap-view'
+  // 公式渲染需带 KaTeX 样式表（KaTeX 靠 CSS 定位字形并隐藏重复的 MathML 分支）
+  import 'katex/dist/katex.min.css'
+  import { liftMindMapBlocks, MARKMAP_HTML_OPTIONS } from '@/lib/knowFile/mindMapMath'
+  import { preprocessMath } from '@/lib/markdown/render'
   import {usestore} from '@/store'
   const store = usestore()
   const props = defineProps({
@@ -173,28 +177,26 @@
     // 思维导图专用预处理：mermaid 代码块 → “图标记”叶节点
     const { cleaned, sources } = collectMermaidForMindmap(markdown)
     markdown = cleaned
+    // 公式交给 @/lib/knowFile/mindMapMath 用内置 KaTeX 预渲染（markmap 自带插件在本项目打包环境下取不到渲染函数）
+    const transformer = new Transformer()
+    markdown = liftMindMapBlocks(preprocessMath(markdown), transformer.md)
+    const { root, features } = transformer.transform(markdown, MARKMAP_HTML_OPTIONS)
     if(map==null){
         //创建思维导图
         const container = document.getElementById(id.value);
         if (container == null) return;
         container.innerHTML = "";
         
-        const transformer = new Transformer()
-        const { root, features } = transformer.transform(markdown)
-        const { styles, scripts } = transformer.getUsedAssets(features)
-        const { Markmap, loadCSS, loadJS } = markmap
-        //if (styles) loadCSS(styles);
+        const { scripts } = transformer.getUsedAssets(features)
+        const { Markmap, loadJS } = markmap
         if (scripts) loadJS(scripts, { getMarkmap: () => markmap })
         container.style.width = "100%"
         container.style.height = "100%"
         map = Markmap.create('#'+id.value,undefined, root)
       }else{
         //更新数据
-        const transformer = new Transformer()
-        const { root, features } = transformer.transform(markdown)
-        const { styles, scripts } = transformer.getUsedAssets(features)
-        const { Markmap, loadCSS, loadJS } = markmap
-        //if (styles) loadCSS(styles)
+        const { scripts } = transformer.getUsedAssets(features)
+        const { Markmap, loadJS } = markmap
         if (scripts) loadJS(scripts, { getMarkmap: () => markmap })
         map.setData(root)
       }
@@ -391,6 +393,17 @@
 
   .minddiv::-webkit-scrollbar {
     display: none;
+  }
+  /* 思维导图节点内的公式：不折行（否则会被通用折行规则拆成一列），并去掉 KaTeX 展示公式的上下边距
+     （边距会塌陷出测量框，导致公式下半截越出节点下划线） */
+  .minddiv :deep(.markmap-foreign .katex),
+  .minddiv :deep(.markmap-foreign .katex *) {
+    white-space: nowrap;
+    word-break: normal;
+    overflow-wrap: normal;
+  }
+  .minddiv :deep(.markmap-foreign .katex-display) {
+    margin: 0 !important;
   }
   .md{
     position: relative;

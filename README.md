@@ -25,7 +25,7 @@ Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machin
 | **🧩 Skills & presets** | Codex-style skill import, reusable Agent presets (role, model, per-tool switches, attached skills), skill store |
 | **🔌 Models, tools & MCP** | Ollama / LM Studio / GPUStack / DeepSeek / OpenAI-compatible and multiple custom providers with per-provider enable + connection test; credential table; per-tool switches; built-in MCP services (Office Word & Excel, draw.io, PostgreSQL, literature search, web search, browser) optionally exposed over HTTP |
 | **🗣️ Speech** | Local TTS (Kokoro / Piper via ONNX) and ASR (ONNX Whisper, Whisper API, Qwen3-ASR with streaming punctuation) |
-| **📦 Also included** | Learning module (mastery map, review, mistake book, exams), todo board (memo / tree / month view), offline maps (MBTiles), built-in browser with auto-recycled AI tabs, session logs, bilingual in-app help |
+| **📦 Also included** | Learning module (mastery map, review, mistake book, exams), a task kanban board (per-attribute grouping, quick capture, drag to change status, archive), offline maps (MBTiles), built-in browser with auto-recycled AI tabs, session logs, bilingual in-app help |
 
 Background tasks keep running when the window is closed to the tray, closing is guarded while tasks run, and settings live in a separate window.
 
@@ -79,7 +79,7 @@ Type check the renderer before committing: `npx vue-tsc --noEmit -p tsconfig.jso
 ```
 electron/main/      Electron main process (window, IPC, MCP runtime, AI service, TTS/ASR workers)
 electron/preload/   Preload bridge exposed to the renderer
-src/components/     Renderer UI (home, knowFile, knowRAG, workFlow, AgentScaffold, DataCanvas, learning, browser, todos, set)
+src/components/     Renderer UI (home, knowFile, knowRAG, workFlow, AgentScaffold, DataCanvas, learning, browser, set)
 src/lib/            Shared libraries (markdown / block editor, export, file handling, task files)
 src/services/       Renderer-side services (agent skills, KB reader, speech)
 src/shared/         Code shared by main and renderer (AI core, tool registry, retrieval, search)

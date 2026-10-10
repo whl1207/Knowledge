@@ -74,6 +74,11 @@ async function runTask(agentId: string, req: RendererTaskRequest): Promise<void>
 /** 按 kind 分发（新增渲染层任务在此加分支） */
 async function executeTask(kind: string, payload: any): Promise<RendererTaskResult> {
   if (kind === 'export_word') return await exportWord(payload)
+  // Agent Teams 协议工具：主进程转发过来的群聊语义（懒加载，避免非常驻体积）
+  if (kind === 'swarm_room') {
+    const { handleSwarmRoom } = await import('@/composables/swarm/useSwarmRoomTask')
+    return await handleSwarmRoom(payload)
+  }
   return { ok: false, error: `未知的渲染层任务类型: ${kind}` }
 }
 

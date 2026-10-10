@@ -31,6 +31,13 @@ import {
   type DrawioMergeResult,
 } from '@/shared/drawioAi'
 import { installDrawioExportBridge, exportFilters, type DrawioExportHost } from '@/shared/drawioExportBridge'
+import {
+  COPY_SCALES,
+  clampScale,
+  decodeSvgText,
+  drawioSvgToPngDataUrl,
+  svgLogicalSize,
+} from '@/shared/drawioImage'
 
 const props = defineProps<{
   /** 文件绝对路径（写盘目标） */
@@ -77,6 +84,12 @@ const readonlyMode = computed(() => !!props.readonly || !hasIpc || !collabEditab
 const canWrite = computed(() => !readonlyMode.value && !isCollabActive.value)
 
 // ---- 智能操作（AI 生成图形 → 画布预览 → 确认写入）----
+const showCopyPanel = ref(false)
+/** 复制为图片进行中（光栅化 + 写剪贴板） */
+const copyBusy = ref(false)
+/** 可选倍率（按钮菜单） */
+const copyScales = COPY_SCALES
+
 const showAiPanel = ref(false)
 const aiInput = ref('')
 const aiBusy = ref(false)
@@ -101,6 +114,9 @@ const aiPreview = ref<{
   edgeLabels: string[]
   updatedLabels: string[]
   pages: number
+  /** 改动落在第几页（0 起）与页名：预览/取消后要把画布切回这一页 */
+  pageIndex: number
+  pageName: string
 } | null>(null)
 let aiAbort: AbortController | null = null
 /** 本地写盘路径（非协同）或协同会话中的宿主，才能插入内容 */
@@ -113,8 +129,10 @@ let latestXml = ''       // drawio 最近一次回传的 XML
 let lastSig = ''         // 最近一次写盘内容签名（幂等守卫：防重复写盘 / 防远端回环）
 let diskSig = ''         // 磁盘上内容的签名（只用于「未保存」标记：取消 AI 预览等场景会改 lastSig）
 let lastRemotePatchKey = '' // 最近一次应用的远端 patch 指纹（避免把远端 apply 的结果再广播回去）
-let exportWaiter: ((xml: string) => void) | null = null
+let exportWaiter: { format: string; resolve: (data: string, msg: any) => void } | null = null
 let loadWaiter: ((ok: boolean) => void) | null = null
+/** 下一次 load 完成后要切回的页（0 起；null=不动）。load 会重建内容并回到第 1 页 */
+let pendingRestorePage: number | null = null
 let attached = false
 /** 主进程下载兜底落盘完成的通知监听（onMounted 注册 / onBeforeUnmount 注销） */
 let downloadDoneHandler: ((e: any, payload: any) => void) | null = null
@@ -163,6 +181,31 @@ function blockFrameBeforeUnload(w: Window) {
     })
   } catch (e) {
     console.warn('[Drawio] 屏蔽 beforeunload 失败（忽略）:', e)
+  }
+}
+
+/**
+ * 在 iframe 文档里挂 Ctrl+Alt+X（drawio 桌面端「复制为图片」的快捷键）。
+ * 键盘事件不会跨 frame 冒泡，画布聚焦时宿主的 onKeydown 收不到，所以要在 iframe 内用
+ * 捕获阶段拦下来（同源直接调宿主函数，无需再走 postMessage）。
+ */
+function bindFrameCopyShortcut(w: any) {
+  try {
+    if (w.__aimCopyKeyBound) return
+    w.__aimCopyKeyBound = true
+    w.addEventListener(
+      'keydown',
+      (e: KeyboardEvent) => {
+        if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'x' || e.key === 'X')) {
+          e.preventDefault()
+          e.stopPropagation()
+          void copyAsImage(4)
+        }
+      },
+      true,
+    )
+  } catch (e) {
+    console.warn('[Drawio] 绑定 iframe 复制快捷键失败（忽略）:', e)
   }
 }
 
@@ -277,13 +320,13 @@ const exportHost: DrawioExportHost = {
 }
 
 /** 把覆盖样式注入 iframe 文档（跨域时静默跳过，不影响功能） */
-function prepareFrame() {
-  const frame = frameRef.value
+function prepareFrame() {  const frame = frameRef.value
   const doc = frame?.contentDocument
   if (!doc) return
   const fw: any = frame?.contentWindow
   if (fw) {
     blockFrameBeforeUnload(fw)
+    bindFrameCopyShortcut(fw)
     // 导出 / 另存为：接住 drawio 内嵌模式的浏览器下载与 File System Access，改走宿主原生对话框
     // （Electron 下前者会静默写入系统下载目录、后者 Promise 永不 settle，都表现为「点了没反应」）
     installDrawioExportBridge(fw, exportHost, (...a: any[]) => console.warn('[Drawio][export]', ...a), exportBridgeState)
@@ -484,18 +527,30 @@ function queueSave(xml: string, immediate: boolean, patch?: any) {
   if (immediate) void flush(false)
 }
 
-/** 主动向编辑器索取当前 XML（宿主 Ctrl+S 时用，保证拿到最新内容） */
-function requestXml(): Promise<string> {
-  return new Promise((resolve) => {
-    exportWaiter = resolve
-    send({ action: 'export', format: 'xml' })
+/**
+ * 待回应的导出请求（按 format 排队，避免并发请求互相顶掉）。
+ * drawio 的回应：format=xml 放在 msg.xml，图片等放在 msg.data。
+ */
+const exportWaiters = new Map<string, (data: string, msg: any) => void>()
+
+function requestExport(format: string, opts: Record<string, any> = {}, timeout = 8000) {
+  return new Promise<{ data: string; xml: string }>((resolve) => {
+    const done = (data: string, msg: any) => resolve({ data, xml: String(msg?.xml || '') })
+    exportWaiters.set(format, done)
+    send({ action: 'export', format, ...opts })
     setTimeout(() => {
-      if (exportWaiter === resolve) {
-        exportWaiter = null
-        resolve('')
+      if (exportWaiters.get(format) === done) {
+        exportWaiters.delete(format)
+        resolve({ data: '', xml: '' })
       }
-    }, 4000)
+    }, timeout)
   })
+}
+
+/** 主动向编辑器索取当前 XML（宿主 Ctrl+S 时用，保证拿到最新内容） */
+async function requestXml(): Promise<string> {
+  const r = await requestExport('xml', {}, 4000)
+  return r.xml || r.data
 }
 
 /** 保存（宿主 Ctrl+S / 面板保存按钮）：夺取当前 XML 并立即写盘；协同会话中仅主机可保存 */
@@ -594,6 +649,14 @@ function onMessage(ev: MessageEvent) {
         loadWaiter = null
         done(true)
       }
+      // 重建内容后编辑器会回到第 1 页（实测）→ 需要时切回原来的页
+      if (pendingRestorePage !== null) {
+        const idx = pendingRestorePage
+        pendingRestorePage = null
+        setTimeout(() => {
+          drawioApi()?.selectPage(idx)
+        }, 30)
+      }
       break
     case 'autosave':
       queueSave(String(msg.xml || ''), false, msg.patch)
@@ -601,13 +664,15 @@ function onMessage(ev: MessageEvent) {
     case 'save':
       queueSave(String(msg.xml || ''), true, msg.patch)
       break
-    case 'export':
-      if (exportWaiter && msg.xml) {
-        const resolve = exportWaiter
-        exportWaiter = null
-        resolve(String(msg.xml))
+    case 'export': {
+      const fmt = String(msg.format || '')
+      const waiter = exportWaiters.get(fmt)
+      if (waiter) {
+        exportWaiters.delete(fmt)
+        waiter(String(msg.data || ''), msg)
       }
       break
+    }
     case 'exit':
       // 已隐藏退出按钮；真出现时忽略（不关闭宿主视图）
       break
@@ -616,12 +681,101 @@ function onMessage(ev: MessageEvent) {
   }
 }
 
-/** 宿主侧 Ctrl+S：iframe 未聚焦时也会命中这里 */
+/** 宿主侧快捷键：iframe 未聚焦时也会命中这里（Ctrl+S 保存 / Ctrl+Alt+X 复制为图片，与 drawio 桌面端一致） */
 function onKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 's' || e.key === 'S')) {
     e.preventDefault()
     e.stopPropagation()
     void saveNow()
+    return
+  }
+  if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'x' || e.key === 'X')) {
+    e.preventDefault()
+    e.stopPropagation()
+    void copyAsImage(4)
+  }
+}
+
+// ---------------- 复制为图片（粘贴到 Word / PPT 等）----------------
+
+/**
+ * 把当前页（或选中的元素）复制到系统剪贴板（图片 + HTML 尺寸）。
+ * drawio 内嵌在 iframe 里时它自带的「复制为图片」不可用（Editor.enableNativeClipboard 要求
+ * window === window.top），所以这里自己取图：
+ *  ① 默认走编辑器内部 graph.getSvg：**有选中元素时只导选中的那几个**（与 drawio 原生一致），
+ *     整页导出也用它；
+ *  ② 拿不到编辑器实例时退回内嵌协议 `{action:'export', format:'svg'}`（只导整页）。
+ * 两种方式都带 scale=1 / 白底 / 浅色主题（保证粘到白纸文档上可读），再在本机按倍率光栅化成
+ * 高清 PNG → 主进程 clipboard.writeImage（iframe 未聚焦也能写）。
+ */
+async function copyAsImage(scale: number) {
+  if (copyBusy.value || !ready.value) return
+  showCopyPanel.value = false
+  if (!hasIpc) {
+    ElMessage.warning(zh.value ? '当前环境无法写入系统剪贴板（需要桌面端）' : 'Clipboard unavailable in this environment')
+    return
+  }
+  copyBusy.value = true
+  try {
+    let svg = ''
+    let selected = 0
+    const api: any = (frameRef.value?.contentWindow as any)?.__aimDrawioImageApi
+    if (api) {
+      // 首次可能还没捕获到 EditorUi 实例（要等一次导出或一次选中变化）：先做一次 xml 导出“催”出捕获
+      if (!api.ready()) await requestExport('xml', {}, 4000)
+      if (api.ready()) {
+        selected = api.selectionCount()
+        svg = api.svgForCopy({ scale: 1, border: 8, background: '#ffffff', theme: 'light' })
+      }
+    }
+    if (!svg) {
+      selected = 0
+      const r = await requestExport(
+        'svg',
+        { scale: 1, border: 8, background: '#ffffff', theme: 'light', asText: true },
+        15000,
+      )
+      svg = decodeSvgText(r.data)
+    }
+    if (!svg) throw new Error(zh.value ? '未能获取图表内容' : 'Failed to read the diagram')
+    const size = svgLogicalSize(svg)
+    if (!size) throw new Error(zh.value ? '无法识别图表尺寸' : 'Unknown diagram size')
+    const n = clampScale(scale, size.w, size.h)
+    const png = await drawioSvgToPngDataUrl(svg, n, size)
+    const res = await (window as any).ipcRenderer
+      .invoke('clipboard-write-image', {
+        base64: png.slice(png.indexOf(',') + 1),
+        // HTML 里给出显示尺寸（逻辑像素）：Word/PPT 按它排版，不会把 4 倍图放大 4 倍粘进来
+        html: `<img src="${png}" width="${size.w}" height="${size.h}">`,
+      })
+      .catch((e: any) => ({ ok: false, error: e?.message || String(e) }))
+    if (res?.ok) {
+      const px = Number(res.width) > 0 ? Number(res.width) : Math.round(size.w * n)
+      const py = Number(res.height) > 0 ? Number(res.height) : Math.round(size.h * n)
+      const what = selected > 0
+        ? (zh.value ? `选中 ${selected} 个元素` : `${selected} selected element(s)`)
+        : (zh.value ? '整页' : 'whole page')
+      ElMessage.success(
+        (zh.value ? '已复制为图片（' : 'Copied as image (') +
+          `${what} · ${px}×${py}` +
+          (zh.value ? ' 像素，可直接粘贴到 Word / PPT）' : ' px, paste into Word / PPT)'),
+      )
+    } else {
+      ElMessage.error((zh.value ? '复制失败: ' : 'Copy failed: ') + (res?.error || ''))
+    }
+  } catch (e: any) {
+    console.error('[Drawio] 复制为图片失败:', e)
+    ElMessage.error((zh.value ? '复制为图片失败: ' : 'Copy as image failed: ') + (e?.message || e))
+  } finally {
+    copyBusy.value = false
+  }
+}
+
+function toggleCopyPanel() {
+  showCopyPanel.value = !showCopyPanel.value
+  if (showCopyPanel.value) {
+    showCollabPanel.value = false
+    showAiPanel.value = false
   }
 }
 
@@ -657,6 +811,9 @@ const collabBridge: DrawioCollabBridge = {
     latestXml = xml
     lastSig = signature(xml)
     lastRemotePatchKey = ''
+    // 整体重建会回到第 1 页：先记住本机正在看的页，load 完再切回来（各成员各看各的页）
+    const cur = drawioApi()?.currentPage?.()
+    pendingRestorePage = cur && cur.index >= 0 ? cur.index : null
     sendLoad()
   },
   async exportXml() {
@@ -776,6 +933,7 @@ function toggleCollabPanel() {
   showCollabPanel.value = !showCollabPanel.value
   if (showCollabPanel.value) {
     showAiPanel.value = false
+    showCopyPanel.value = false
     if (!collabJoinName.value.trim()) collabJoinName.value = store.collab.nickname || ''
   }
 }
@@ -815,10 +973,29 @@ async function currentXml(): Promise<string> {
   return (fromEditor && fromEditor.trim()) || latestXml || (props.content || '') || newDrawioXml()
 }
 
-/** 主动把画布内容换成指定 XML（预览 / 取消回退用），等 load 事件确认完成 */
-function loadXmlIntoEditor(xml: string): Promise<boolean> {
+/** iframe 里的取图 / 页面接口（bridge 注入，同源直接调用） */
+function drawioApi(): any {
+  return (frameRef.value?.contentWindow as any)?.__aimDrawioImageApi || null
+}
+
+/**
+ * 编辑器当前打开的页（0 起）。智能操作按页进行：上下文只取这一页、改动也只写回这一页。
+ * 协议 `{action:'load'}` 重建内容后编辑器会回到第 1 页，所以预览/回退后要用 pendingRestorePage 切回来。
+ */
+async function currentEditorPage(): Promise<{ index: number; name: string; total: number } | null> {
+  const api = drawioApi()
+  if (!api) return null
+  if (!api.ready()) await requestExport('xml', {}, 4000) // 催一次捕获 EditorUi 实例
+  const p = api.currentPage()
+  if (!p || !(p.index >= 0)) return null
+  return { index: p.index, name: String(p.name || ''), total: Number(p.total) || 0 }
+}
+
+/** 主动把画布内容换成指定 XML（预览 / 取消回退用），等 load 事件确认完成；restorePage 为要切回的页（0 起） */
+function loadXmlIntoEditor(xml: string, restorePage?: number): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     latestXml = xml
+    pendingRestorePage = typeof restorePage === 'number' ? restorePage : null
     loadWaiter = resolve
     sendLoad()
     setTimeout(() => {
@@ -842,6 +1019,7 @@ function toggleAiPanel() {
   showAiPanel.value = !showAiPanel.value
   if (!showAiPanel.value) return
   showCollabPanel.value = false
+  showCopyPanel.value = false
 }
 
 function stopAi() {
@@ -916,7 +1094,9 @@ async function runAi(req: string) {
   aiAbort = new AbortController()
   try {
     const base = await currentXml()
-    const ctx = collectDrawioContext(base)
+    // 智能操作以「编辑器里当前打开的页」为准：上下文只取该页，改动也只写回该页
+    const page = await currentEditorPage()
+    const ctx = collectDrawioContext(base, page ? page.index : 0)
     const messages = buildDrawioMessages(req, ctx, zh.value, aiMode.value)
     const frag = await generateFragment(messages)
     if (!frag) {
@@ -927,7 +1107,10 @@ async function runAi(req: string) {
       )
       return
     }
-    const merged = mergeDrawioFragment(base, frag, { allowEdit: aiMode.value !== 'add' })
+    const merged = mergeDrawioFragment(base, frag, {
+      allowEdit: aiMode.value !== 'add',
+      pageIndex: ctx.pageIndex,
+    })
     if ('error' in merged) {
       pushAi('assistant', (zh.value ? '插入失败：' : 'Insert failed: ') + (merged as { error: string }).error, req)
       return
@@ -963,8 +1146,10 @@ async function startAiPreview(base: string, merged: DrawioMergeResult) {
     edgeLabels: merged.edgeLabels,
     updatedLabels: merged.updatedLabels,
     pages: merged.pages,
+    pageIndex: merged.pageIndex - 1,
+    pageName: merged.pageName || '',
   }
-  const ok = await loadXmlIntoEditor(merged.xml)
+  const ok = await loadXmlIntoEditor(merged.xml, merged.pageIndex - 1)
   // 磁盘内容仍是 backup：签名回填，避免取消后误写
   lastSig = backupSig
   if (!ok) {
@@ -973,12 +1158,18 @@ async function startAiPreview(base: string, merged: DrawioMergeResult) {
     pushAi('assistant', zh.value ? '预览加载失败，已保持原内容。' : 'Preview failed to load; original content kept.')
     return
   }
+  const onPage =
+    merged.pages > 1
+      ? zh.value
+        ? `；改动在第 ${merged.pageIndex} 页` + (merged.pageName ? `「${merged.pageName}」` : '')
+        : `; change is on page ${merged.pageIndex}` + (merged.pageName ? ` (${merged.pageName})` : '')
+      : ''
   pushAi(
     'assistant',
     (zh.value
       ? '已在画布中预览（尚未写入文件）：' + changeSummary(merged.added, merged.updated, merged.removed)
       : 'Previewed on the canvas (not written yet): ' + changeSummary(merged.added, merged.updated, merged.removed)) +
-      (merged.pages > 1 ? (zh.value ? '；多页图表，只改第 1 页' : '; multi-page diagram, page 1 only') : '') +
+      onPage +
       (zh.value ? '。' : '.')
   )
 }
@@ -1034,7 +1225,7 @@ async function cancelAiPreview() {
   if (!p) return
   previewActive = false
   aiPreview.value = null
-  const ok = await loadXmlIntoEditor(p.backup)
+  const ok = await loadXmlIntoEditor(p.backup, p.pageIndex)
   lastSig = p.backupSig
   pushAi('assistant', ok ? (zh.value ? '已取消，画布已恢复原状。' : 'Cancelled; canvas restored.') : (zh.value ? '已取消。' : 'Cancelled.'))
 }
@@ -1189,8 +1380,18 @@ watch(themeKey, () => {
       <i class="fa fa-lock"></i> {{ zh ? '只读预览' : 'Read-only' }}
     </div>
 
-    <!-- 右下角操作区：与 drawio 底部页签栏等高居中，只显图标（智能操作 / 协同 / 保存） -->
+    <!-- 右下角操作区：与 drawio 底部页签栏等高居中，只显图标（复制为图片 / 智能操作 / 协同 / 保存） -->
     <div v-if="ready" class="drawio-actions">
+      <button
+        v-if="hasIpc"
+        class="drawio-action-btn"
+        :class="{ active: showCopyPanel }"
+        :title="zh ? '复制为图片（有选中元素时只复制选中的，粘贴到 Word / PPT 等）' : 'Copy as image (selection only if any; paste into Word / PPT)'"
+        @click.stop="toggleCopyPanel"
+      >
+        <i v-if="copyBusy" class="fa fa-spinner fa-spin"></i>
+        <i v-else class="fa fa-clipboard"></i>
+      </button>
       <button
         v-if="canUseAi"
         class="drawio-action-btn"
@@ -1221,6 +1422,24 @@ watch(themeKey, () => {
         <i class="fa fa-floppy-o"></i>
         <span v-if="dirty" class="drawio-dirty-dot"></span>
       </button>
+    </div>
+
+    <!-- 复制为图片：倍率选择（默认 4 倍高清，图片直接进系统剪贴板） -->
+    <div v-if="showCopyPanel" class="copy-panel" @click.stop>
+      <div class="copy-panel-head">
+        <span><i class="fa fa-clipboard"></i> {{ zh ? '复制为图片' : 'Copy as image' }}</span>
+        <i v-if="copyBusy" class="fa fa-spinner fa-spin"></i>
+      </div>
+      <button
+        v-for="o in copyScales"
+        :key="o.scale"
+        class="copy-item"
+        :disabled="copyBusy"
+        @click="copyAsImage(o.scale)"
+      >
+        {{ zh ? o.zh : o.en }}
+      </button>
+      <div class="copy-panel-tip">{{ zh ? '有选中元素时只复制选中的，未选中则复制整页；复制后直接粘贴到 Word / PPT' : 'Copies the selection if any, otherwise the whole page; paste into Word / PPT' }}</div>
     </div>
 
     <!-- 协同编辑面板（与源码编辑视图 Edit_Code.vue 同一套结构与样式） -->
@@ -1329,7 +1548,12 @@ watch(themeKey, () => {
       </div>
 
       <div v-if="aiPreview" class="ai-preview">
-        <div class="ai-preview-title"><i class="fa fa-eye"></i> {{ zh ? '预览中（尚未写入文件）' : 'Preview (not written yet)' }}</div>
+        <div class="ai-preview-title">
+          <i class="fa fa-eye"></i> {{ zh ? '预览中（尚未写入文件）' : 'Preview (not written yet)' }}
+          <span v-if="aiPreview.pages > 1" class="ai-preview-page">
+            {{ zh ? `第 ${aiPreview.pageIndex + 1} 页` : `page ${aiPreview.pageIndex + 1}` }}{{ aiPreview.pageName ? (zh ? `「${aiPreview.pageName}」` : ` (${aiPreview.pageName})`) : '' }}
+          </span>
+        </div>
         <div class="ai-preview-summary">{{ changeSummary(aiPreview.added, aiPreview.updated, aiPreview.removed) }}</div>
         <div v-if="aiPreview.labels.length || aiPreview.edgeLabels.length || aiPreview.updatedLabels.length" class="ai-preview-list">
           <div v-for="(l, i) in aiPreview.labels" :key="'add' + i" class="ai-preview-item"><span class="ai-preview-op">+</span> {{ l }}</div>
@@ -1525,6 +1749,61 @@ watch(themeKey, () => {
   height: 6px;
   border-radius: 50%;
   background: #e6a23c;
+}
+
+/* ===== 复制为图片：倍率选择面板（贴在操作区上方，与协同面板同风格） ===== */
+.copy-panel {
+  position: absolute;
+  right: 5px;
+  bottom: 34px;
+  width: 172px;
+  padding: 8px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fontColor, #333);
+  background: var(--menuColor, #f5f5f5);
+  border: 1px solid var(--borderColor, #ddd);
+  border-radius: 5px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+.drawio-wrap.has-ai .copy-panel {
+  right: 326px;
+}
+.copy-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+.copy-item {
+  width: 100%;
+  padding: 4px 8px;
+  text-align: left;
+  font-size: 12px;
+  border: 1px solid var(--borderColor, #ddd);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fontColor, #333);
+  cursor: pointer;
+}
+.copy-item:hover:not(:disabled) {
+  color: var(--fontActiveColor, #409eff);
+  border-color: var(--fontActiveColor, #409eff);
+}
+.copy-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.copy-panel-tip {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.7;
 }
 
 /* ===== 协同编辑面板（与源码编辑视图 Edit_Code.vue 同一套样式，保持一致/紧凑） ===== */
@@ -1803,6 +2082,12 @@ watch(themeKey, () => {
 .ai-preview-title {
   font-size: 11px;
   font-weight: 600;
+}
+/* 多页时标明改动落在哪一页 */
+.ai-preview-page {
+  margin-left: 4px;
+  font-weight: 400;
+  opacity: 0.75;
 }
 .ai-preview-summary {
   font-size: 10px;

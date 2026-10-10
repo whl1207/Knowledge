@@ -15,6 +15,41 @@
 import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUsage, TodoItem } from '@/types/agent'
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
+import { lanAgentTransport } from '@/platform/lanAgentClient'
+
+/**
+ * 传输层：桌面端 = `window.dsh.agent`（IPC），网页端（局域网共享）= `/api/agent/*`（HTTP + SSE）。
+ * 除这四个方法外，其余可选能力（sdkDocs / declareConcurrency / 渲染层任务）在网页端不可用。
+ */
+interface AgentTransport {
+  create(options: AgentOptions): Promise<{ id: string }>
+  send(id: string, content: string, source?: string, images?: string[]): Promise<{ success: boolean }>
+  steer(id: string, content: string): Promise<{ success: boolean; reason?: string }>
+  inject(id: string, content: string): Promise<{ success: boolean }>
+  cancel(id: string, cause?: string, keepInbox?: boolean): Promise<{ success: boolean }>
+  answer(id: string, askId: string, message: string): Promise<{ success: boolean }>
+  dispose(id: string): Promise<{ success: boolean }>
+  list(): Promise<any[]>
+  state(id: string): Promise<AgentStateView>
+  onEvent(cb: (ev: AgentEvent) => void): () => void
+  /** 仅桌面端：PTC SDK 声明文本 / 编排级并发声明 / 渲染层任务接缝 */
+  sdkDocs?(scope?: string, whitelist?: string[]): Promise<string>
+  declareConcurrency?(scopeId: string, concurrency: number): Promise<{ success: boolean }>
+  revokeConcurrency?(scopeId: string): Promise<{ success: boolean }>
+}
+
+/** 网页端（局域网共享）判定：无 ipcRenderer 即浏览器访客 */
+function isBrowserGuest(): boolean {
+  return typeof window !== 'undefined' && !(window as any).ipcRenderer
+}
+
+/** 解析当前环境的智能体传输层（桌面 IPC 优先；浏览器回退到主机 HTTP 桥） */
+function resolveTransport(): AgentTransport | null {
+  const dsh = (window as any)?.dsh?.agent
+  if (dsh) return dsh as AgentTransport
+  if (isBrowserGuest()) return lanAgentTransport as unknown as AgentTransport
+  return null
+}
 
 // ---------------------------------------------------------------------------
 // 视图类型
@@ -115,23 +150,36 @@ class AgentBridge {
   private unsub: (() => void) | null = null
   /** 工具参数流式节流（长内容写入时合并通知，避免每 chunk 全量重渲染卡顿） */
   private toolArgsTimer: ReturnType<typeof setTimeout> | null = null
+  /** 传输层解析结果（避免每事件都探测 window） */
+  private cachedTransport: AgentTransport | null = null
 
-  /** 惰性订阅 agent:event（只在真正使用时订阅一次） */
+  /** 惰性订阅事件流（只在真正使用时订阅一次） */
   private ensureSubscribed(): void {
-    if (this.unsub || !window.dsh?.agent?.onEvent) return
-    this.unsub = window.dsh.agent.onEvent((ev) => this.onEvent(ev))
+    if (this.unsub) return
+    const transport = this.transportOrNull()
+    if (!transport) return
+    this.unsub = transport.onEvent((ev) => this.onEvent(ev))
+  }
+
+  private transportOrNull(): AgentTransport | null {
+    // 只用命中的结果做缓存：null 可能是「预加载尚未注入」的瞬时状态，不应粘住
+    if (this.cachedTransport) return this.cachedTransport
+    const transport = resolveTransport()
+    if (transport) this.cachedTransport = transport
+    return transport
+  }
+
+  /** 取传输层（不可用时抛错，fail-loud） */
+  private dshAgent(): AgentTransport {
+    const transport = this.transportOrNull()
+    if (!transport) {
+      throw new Error('智能体不可用：桌面端需 window.dsh.agent，网页端需主机开启局域网共享')
+    }
+    return transport
   }
 
   get available(): boolean {
-    return !!window.dsh?.agent
-  }
-
-  /** 取 window.dsh.agent（不可用时抛错，fail-loud） */
-  private dshAgent() {
-    if (!window.dsh?.agent) {
-      throw new Error('window.dsh.agent 不可用（智能体功能仅桌面版支持）')
-    }
-    return window.dsh.agent
+    return !!this.transportOrNull()
   }
 
   /**
@@ -161,6 +209,13 @@ class AgentBridge {
     this.ensureSubscribed()
     const agent = this.dshAgent()
     const { id } = await agent.create(this.sanitizeOptions(options))
+    // 创建期间可能已有事件到达（onEvent 发现未知会话会先建占位视图）：
+    // 此时必须沿用该视图，否则新空视图会覆盖已投影的状态/步骤（网页端 SSE 更易命中）。
+    const existing = this.sessions.get(id)
+    if (existing) {
+      if (!existing.label) existing.label = options.label
+      return existing
+    }
     const view = createView(id, options.label)
     // 注意：DeepSeek Responses 的服务端联网搜索已被官方移除（内置 web_search 被忽略），
     // 联网搜索改由本地 web_search 工具承担 → 不再存在「服务端搜索会话」的推理切分特例
@@ -258,17 +313,19 @@ class AgentBridge {
 
   /** PTC（Code Mode）：获取模型可见的 SDK 声明文本（scope / 能力白名单可选） */
   async getSdkDocs(scope?: string, whitelist?: string[]): Promise<string> {
-    return this.dshAgent().sdkDocs(scope, whitelist)
+    const transport = this.dshAgent()
+    if (!transport.sdkDocs) return ''
+    return transport.sdkDocs(scope, whitelist)
   }
 
   /** 声明编排级期望并发（AgentBatch 等运行期调用：让远端模型并发跟随自身并发数） */
   async declareConcurrency(scopeId: string, concurrency: number): Promise<void> {
-    try { await this.dshAgent().declareConcurrency(scopeId, concurrency) } catch { /* 无桌面/旧构建忽略 */ }
+    try { await this.dshAgent().declareConcurrency?.(scopeId, concurrency) } catch { /* 无桌面/旧构建忽略 */ }
   }
 
   /** 撤销编排级并发声明（运行结束/停止时调用） */
   async revokeConcurrency(scopeId: string): Promise<void> {
-    try { await this.dshAgent().revokeConcurrency(scopeId) } catch { /* 忽略 */ }
+    try { await this.dshAgent().revokeConcurrency?.(scopeId) } catch { /* 忽略 */ }
   }
 
   async dispose(id: string): Promise<void> {

@@ -9,7 +9,7 @@
  * 若某条公式拿不到 MathML 或转换失败，则回退为内嵌 PNG 图片（仅观感，不可编辑）。
  */
 import { svgToPngDataUrl, parseSvgSize } from '@/lib/markdown/mermaid'
-import { mathmlToOmml, mathmlPlainText } from '@/lib/export/mathml-to-omml'
+import { mathmlToOmml, mathmlPlainText, mathmlTagLabel } from '@/lib/export/mathml-to-omml'
 
 /** 一张待嵌入的图片 */
 interface DocxImage {
@@ -37,6 +37,8 @@ interface DocxOmmlItem {
   xml: string
   /** 是否为独立成行的展示公式（$$…$$） */
   display: boolean
+  /** 公式编号（`\tag{4-4}` → `(4-4)`）；展示公式靠段落制表位排到右端，行内公式拼在公式后 */
+  label?: string
 }
 
 type DocxOmmlStore = Map<string, DocxOmmlItem>
@@ -280,7 +282,9 @@ function convertFormulasToOmml(doc: Document): DocxOmmlStore {
     if (!xml || !isWellFormedOmml(xml)) continue
     const display = c.getAttribute('display') === 'true' || math.getAttribute('display') === 'block'
     const key = `omml${++seq}`
-    store.set(key, { xml, display })
+    // 公式编号（\tag{4-4}）：交给段落排版（居中公式 + 右端编号），不再写进公式内容
+    const label = mathmlTagLabel(math)
+    store.set(key, { xml, display, label })
     const span = doc.createElement('span')
     span.setAttribute('data-omml-id', key)
     span.setAttribute('data-omml-display', display ? '1' : '0')
@@ -321,7 +325,7 @@ async function convertFormulasToImages(doc: Document, page?: DocxPageProfile): P
     const svg = c.querySelector('svg')
     if (!svg) return
     try {
-      const info = await renderFormulaImage(svg.outerHTML, page)
+      const info = await renderFormulaImage(svg, page)
       if (!info) return
       const img = doc.createElement('img')
       img.setAttribute('src', info.dataUrl)
@@ -393,10 +397,44 @@ function smartCjkQuotes(doc: Document): void {
   if (doc.body) walk(doc.body)
 }
 
+/** 量公式尺寸时用的宿主字号（MathJax 的 ex/em 按当前字号解析） */
+const MATH_HOST_PX = 16
+
+/**
+ * 公式 SVG 的尺寸。
+ *  - 外层 svg 自带 viewBox（绝大多数公式）：viewBox 即 MathJax 设计单位（1em = 1000）；
+ *  - MathJax 表格公式（`\tag{}` / cases / aligned…）：外层 svg 是 width="100%" 且**没有** viewBox，
+ *    只有内层 `<svg data-table>` 带一个伪 viewBox（宽恒为 1），按它取值会算出 1×1419 的假尺寸，
+ *    栅格化出空图 → 公式整条消失。故改为在真实布局里量像素尺寸，再折算成设计单位。
+ * 量不到返回 null（交给纯文本回退）。
+ */
+function formulaSvgSize(svg: Element, page?: DocxPageProfile): { w: number; h: number; pxW: number; pxH: number } | null {
+  if (svg.getAttribute('viewBox')) {
+    const size = parseSvgSize(svg.outerHTML)
+    if (size && size.w > 0 && size.h > 0) return { w: size.w, h: size.h, pxW: size.w, pxH: size.h }
+  }
+  try {
+    const contentPx = Math.round(((page?.contentWTw || DOC_CONTENT_W_TW) * 635) / 9525)
+    const host = document.createElement('div')
+    host.setAttribute('style', `position:fixed;left:-20000px;top:0;width:${contentPx}px;font-size:${MATH_HOST_PX}px;visibility:hidden`)
+    const clone = svg.cloneNode(true) as Element
+    host.appendChild(clone)
+    document.body.appendChild(host)
+    const rect = clone.getBoundingClientRect()
+    host.remove()
+    if (rect.width > 1 && rect.height > 1) {
+      const unit = MATH_UNITS_PER_EM / MATH_HOST_PX // 像素 → 设计单位（1em = 1000）
+      return { w: rect.width * unit, h: rect.height * unit, pxW: rect.width, pxH: rect.height }
+    }
+  } catch { /* 量不到：走纯文本回退 */ }
+  return null
+}
+
 /** 单个公式 SVG → PNG dataURL + 目标显示尺寸（EMU） */
-async function renderFormulaImage(svgString: string, page?: DocxPageProfile): Promise<{ dataUrl: string; emuW: number; emuH: number } | null> {
-  const size = parseSvgSize(svgString)
-  if (!size || !(size.w > 0) || !(size.h > 0)) return null
+async function renderFormulaImage(svg: Element, page?: DocxPageProfile): Promise<{ dataUrl: string; emuW: number; emuH: number } | null> {
+  const svgString = svg.outerHTML
+  const size = formulaSvgSize(svg, page)
+  if (!size) return null
   const vbW = size.w
   const vbH = size.h
   // 按字号换算目标显示尺寸：像素宽 = viewBoxW * 字号(pt→EMU) / 1000
@@ -413,15 +451,17 @@ async function renderFormulaImage(svgString: string, page?: DocxPageProfile): Pr
   }
   // 栅格化分辨率：约为显示尺寸的 3 倍（保证打印清晰），限制上下限避免超大/过小图
   const displayPxW = emuW / 9525
-  const scale = Math.max(0.03, Math.min(1, (3 * displayPxW) / vbW))
+  const scale = Math.max(0.03, Math.min(1, (3 * displayPxW) / size.pxW))
   let dataUrl = ''
   try {
-    dataUrl = await svgToPngDataUrl(svgString, scale)
+    // 显式给出栅格化尺寸：无 viewBox 的表格公式若交给内部 viewBox 解析会画出空图
+    dataUrl = await svgToPngDataUrl(svgString, scale, { w: size.pxW, h: size.pxH })
   } catch (e) {
     console.warn('[export-docx] 公式转 PNG 失败:', e)
     return null
   }
-  if (!dataUrl) return null
+  // 空图（canvas 尺寸为 0 时是 data:,）判失败，避免生成一张没有内容的图片占位
+  if (!/^data:image\//i.test(dataUrl)) return null
   return { dataUrl, emuW, emuH }
 }
 
@@ -506,10 +546,37 @@ function buildOoxml(doc: Document, images: DocxImage[], themeRid?: string, page?
     return item ? `<m:oMath>${item.xml}</m:oMath>` : ''
   }
 
+  /** 公式编号（`\tag{4-4}` → `(4-4)`）；展示公式改用制表位排版，其余场合拼在公式后 */
+  function ommlLabelOf(el: Element): string {
+    const id = el.getAttribute('data-omml-id')
+    if (!id || !ommlStore) return ''
+    return ommlStore.get(id)?.label || ''
+  }
+
+  /** 行内/单元格/列表项里的公式编号：跟在公式后用 em 空格隔开 */
+  function labelRunXml(el: Element, inherited: RprFlags): string {
+    const lab = ommlLabelOf(el)
+    return lab ? `<w:r>${rprXml(inherited)}<w:t xml:space="preserve">\u2003${escapeXml(lab)}</w:t></w:r>` : ''
+  }
+
   /** 独立成行的展示公式（$$…$$）：整段居中，输出 Word 公式区 oMathPara */
   function displayMathParagraph(om: string): string {
     return `<w:p><w:pPr><w:ind w:firstLineChars="0" w:firstLine="0"/></w:pPr>` +
       `<m:oMathPara><m:oMathParaPr><m:jc m:val="center"/></m:oMathParaPr>${om}</m:oMathPara></w:p>`
+  }
+
+  /**
+   * 带编号的展示公式：用 Word 自己的公式编号排版——居中制表位放公式、右制表位放编号，
+   * 与预览里「公式居中 + 编号贴右边界」一致（此处必须用行内 m:oMath，不能包 oMathPara，
+   * 否则制表位段落里的 tab 与公式区会各行其是）。
+   */
+  function numberedMathParagraph(om: string, label: string): string {
+    const W = PAGE.contentWTw
+    return `<w:p><w:pPr><w:tabs><w:tab w:val="center" w:pos="${Math.round(W / 2)}"/>` +
+      `<w:tab w:val="right" w:pos="${W}"/></w:tabs>` +
+      `<w:ind w:firstLineChars="0" w:firstLine="0"/></w:pPr>` +
+      `<w:r><w:tab/></w:r>${om}` +
+      `<w:r><w:tab/><w:t xml:space="preserve">${escapeXml(label)}</w:t></w:r></w:p>`
   }
 
   function buildInline(node: Node, inherited: RprFlags): string {
@@ -525,7 +592,7 @@ function buildOoxml(doc: Document, images: DocxImage[], themeRid?: string, page?
       const tag = el.tagName.toLowerCase()
       // 原生公式（OMML）直接作为 w:p 的数学区输出，不能再包 <w:r>
       const om = ommlOf(el)
-      if (om) { out += om; continue }
+      if (om) { out += om + labelRunXml(el, inherited); continue }
       if (tag === 'br') { out += `<w:r>${rprXml(inherited)}<w:br/></w:r>`; continue }
       if (tag === 'img') { const d = drawingFor(el); if (d) out += `<w:r>${rprXml(inherited)}${d}</w:r>`; continue }
       if (BLOCK_TAGS.has(tag)) continue
@@ -621,7 +688,7 @@ function buildOoxml(doc: Document, images: DocxImage[], themeRid?: string, page?
       // 原生公式（OMML）：段落内直接输出数学区（单元格/列表项里也用行内式，
       // oMathPara 在表格内不宜使用）
       const om = ommlOf(el)
-      if (om) { acc.push(om); return }
+      if (om) { acc.push(om + labelRunXml(el, baseRpr)); return }
       switch (tag) {
         case 'p': emit(); acc.push(buildInline(el, baseRpr)); return
         case 'ul': emit(); paras.push(listBlock(el, 'bullet', nestedStart)); return
@@ -848,7 +915,12 @@ function buildOoxml(doc: Document, images: DocxImage[], themeRid?: string, page?
       // 原生公式（OMML）：展示公式单独成段居中，行内公式按普通段落输出
       const om = ommlOf(el)
       if (om) {
-        out += el.getAttribute('data-omml-display') === '1' ? displayMathParagraph(om) : paragraph(om)
+        const lab = ommlLabelOf(el)
+        if (el.getAttribute('data-omml-display') === '1') {
+          out += lab ? numberedMathParagraph(om, lab) : displayMathParagraph(om)
+        } else {
+          out += paragraph(om + labelRunXml(el, {}))
+        }
         continue
       }
       switch (tag) {

@@ -187,12 +187,15 @@
 
             <div class="content-card">
               <h3>{{ t('knowledge.views.title') }}</h3>
-              <div class="nodes-grid">
-                <div class="node-item" v-for="v in knowledgeViews" :key="v.id">
-                  <div class="node-icon">{{ v.icon }}</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t(`knowledge.views.${v.key}.name`) }}</div>
-                    <div class="node-desc">{{ t(`knowledge.views.${v.key}.desc`) }}</div>
+              <div v-for="g in knowledgeViewGroups" :key="g.key" class="views-group">
+                <h4 class="views-group-title">{{ t(`knowledge.views.${g.titleKey}`) }}</h4>
+                <div class="nodes-grid">
+                  <div class="node-item" v-for="v in g.items" :key="v.id">
+                    <div class="node-icon">{{ v.icon }}</div>
+                    <div class="node-info">
+                      <div class="node-name">{{ t(`knowledge.views.${v.key}.name`) }}</div>
+                      <div class="node-desc">{{ t(`knowledge.views.${v.key}.desc`) }}</div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -268,7 +271,7 @@
               </div>
             </div>
 
-            <!-- 文件打开方式：新窗口打开 / 窗口内打开 -->
+            <!-- 文件打开方式：一律独立窗口 -->
             <div class="content-card">
               <h3>{{ t('knowledge.openMode.title') }}</h3>
               <p v-html="t('knowledge.openMode.overview')"></p>
@@ -277,13 +280,6 @@
                 <div class="guide-content">
                   <strong v-html="t('knowledge.openMode.newWindow.name')"></strong>
                   <p v-html="t('knowledge.openMode.newWindow.desc')"></p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">2</span>
-                <div class="guide-content">
-                  <strong v-html="t('knowledge.openMode.inner.name')"></strong>
-                  <p v-html="t('knowledge.openMode.inner.desc')"></p>
                 </div>
               </div>
               <div class="example-box" style="margin-top: 10px;">
@@ -335,6 +331,13 @@
                 <div class="guide-content">
                   <strong>{{ t('knowledge.drawio.step5.title') }}</strong>
                   <p v-html="t('knowledge.drawio.step5.desc')"></p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">6</span>
+                <div class="guide-content">
+                  <strong>{{ t('knowledge.drawio.step6.title') }}</strong>
+                  <p v-html="t('knowledge.drawio.step6.desc')"></p>
                 </div>
               </div>
               <div class="example-box">
@@ -588,6 +591,13 @@
 
           <div class="section-content">
             <div class="content-card">
+              <h3>{{ t('workflow.usage.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, index) in t('workflow.usage.items')" :key="index" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
               <h3>{{ t('workflow.nodes.title') }}</h3>
               
               <div class="nodes-grid">
@@ -599,6 +609,20 @@
                   </div>
                 </div>
               </div>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('workflow.variables.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, index) in t('workflow.variables.items')" :key="index" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('workflow.run.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, index) in t('workflow.run.items')" :key="index" v-html="item"></li>
+              </ul>
             </div>
 
             <div class="content-card">
@@ -692,6 +716,13 @@
                 <div class="guide-content">
                   <strong>{{ t('settings.contextUsage.step3.title') }}</strong>
                   <p v-html="t('settings.contextUsage.step3.desc')"></p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">4</span>
+                <div class="guide-content">
+                  <strong>{{ t('settings.contextUsage.step4.title') }}</strong>
+                  <p v-html="t('settings.contextUsage.step4.desc')"></p>
                 </div>
               </div>
               <div class="example-box">
@@ -812,7 +843,7 @@
           </div>
         </section>
 
-        <!-- 数据画布（顶层模块） -->
+        <!-- 数据画布（知识管理中的 .data 文件视图） -->
         <section id="data-canvas" class="help-section" v-show="activeSection === 'data-canvas'">
           <div class="section-header">
             <div class="section-icon"><i class="fa fa-object-group"></i></div>
@@ -823,6 +854,13 @@
           </div>
 
           <div class="section-content">
+            <div class="content-card">
+              <h3>{{ t('dataCanvas.usage.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, index) in t('dataCanvas.usage.items')" :key="index" v-html="item"></li>
+              </ul>
+            </div>
+
             <div class="content-card">
               <h3>{{ t('dataCanvas.overview.title') }}</h3>
               <p v-html="t('dataCanvas.overview.description')"></p>
@@ -966,51 +1004,6 @@
           </div>
         </section>
 
-        <!-- 待办管理 -->
-        <section id="todo" class="help-section" v-show="activeSection === 'todo'">
-          <div class="section-header">
-            <div class="section-icon"><i class="fa fa-lightbulb-o"></i></div>
-            <div class="section-title-content">
-              <h2>{{ t('sections.todo.title') }}</h2>
-              <p class="section-desc">{{ t('sections.todo.subtitle') }}</p>
-            </div>
-          </div>
-
-          <div class="section-content">
-            <div class="content-card">
-              <h3>{{ t('todo.overview.title') }}</h3>
-              <p v-html="t('todo.overview.description')"></p>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('todo.views.title') }}</h3>
-              <div class="nodes-grid">
-                <div class="node-item" v-for="v in todoViews" :key="v.id">
-                  <div class="node-icon">{{ v.icon }}</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t(`todo.views.${v.key}.name`) }}</div>
-                    <div class="node-desc">{{ t(`todo.views.${v.key}.desc`) }}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('todo.tips.title') }}</h3>
-              <template v-for="v in todoTips" :key="v.key">
-                <h4 class="view-tips-name"><i :class="'fa ' + v.icon"></i> {{ t(`todo.tips.${v.key}.name`) }}</h4>
-                <div class="guide-step" v-for="s in v.steps" :key="s">
-                  <span class="guide-number">{{ s }}</span>
-                  <div class="guide-content">
-                    <strong>{{ t(`todo.tips.${v.key}.step${s}.title`) }}</strong>
-                    <p>{{ t(`todo.tips.${v.key}.step${s}.desc`) }}</p>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </div>
-        </section>
-
         <!-- 更新日志（内容来自仓库根目录 CHANGELOG.md / CHANGELOG.en.md，按界面语言选择） -->
         <section id="changelog" class="help-section" v-show="activeSection === 'changelog'">
           <div class="section-header">
@@ -1141,7 +1134,6 @@ const sections = ref([
   { id: 'data-canvas', icon: 'fa-object-group' },
   { id: 'agent-scaffold', icon: 'fa-deviantart' },
   { id: 'browser', icon: 'fa-globe' },
-  { id: 'todo', icon: 'fa-lightbulb-o' },
   { id: 'settings', icon: 'fa-cogs' },
   { id: 'changelog', icon: 'fa-history' },
   { id: 'credits', icon: 'fa-github' }
@@ -1151,22 +1143,28 @@ const sections = ref([
 const nodes = ref([
   { id: 1, icon: 'fa-play-circle', key: 'start' },
   { id: 2, icon: 'fa-flag-checkered', key: 'end' },
-  { id: 3, icon: 'fa-tag', key: 'text' },
-  { id: 4, icon: 'fa-file-text', key: 'file' },
-  { id: 5, icon: 'fa-search', key: 'webSearch' },
-  { id: 6, icon: 'fa-globe', key: 'webCrawl' },
-  { id: 7, icon: 'fa-microchip', key: 'inference' },
-  { id: 8, icon: 'fa-code-fork', key: 'decision' },
-  { id: 9, icon: 'fa-code', key: 'python' },
-  { id: 10, icon: 'fa-database', key: 'knowledge' },
-  { id: 11, icon: 'fa-table', key: 'structured' },
-  { id: 12, icon: 'fa-plug', key: 'mcp' },
-  { id: 13, icon: 'fa-sitemap', key: 'subflow' },
-  { id: 14, icon: 'fa-repeat', key: 'iteration' },
-  { id: 15, icon: 'fa-object-group', key: 'aggregator' },
-  { id: 16, icon: 'fa-list', key: 'list' },
-  { id: 17, icon: 'fa-file-excel-o', key: 'data' },
-  { id: 18, icon: 'fa-android', key: 'agent' }
+  { id: 3, icon: 'fa-comment', key: 'answer' },
+  { id: 4, icon: 'fa-microchip', key: 'llm' },
+  { id: 5, icon: 'fa-code-fork', key: 'ifElse' },
+  { id: 6, icon: 'fa-tags', key: 'classifier' },
+  { id: 7, icon: 'fa-repeat', key: 'iteration' },
+  { id: 8, icon: 'fa-refresh', key: 'loop' },
+  { id: 9, icon: 'fa-code', key: 'code' },
+  { id: 10, icon: 'fa-file-code-o', key: 'template' },
+  { id: 11, icon: 'fa-globe', key: 'http' },
+  { id: 12, icon: 'fa-wrench', key: 'tool' },
+  { id: 13, icon: 'fa-database', key: 'knowledge' },
+  { id: 14, icon: 'fa-object-group', key: 'aggregator' },
+  { id: 15, icon: 'fa-pencil-square-o', key: 'assigner' },
+  { id: 16, icon: 'fa-list', key: 'listOp' },
+  { id: 17, icon: 'fa-filter', key: 'paramExtract' },
+  { id: 18, icon: 'fa-file-text-o', key: 'extractor' },
+  { id: 19, icon: 'fa-file-word-o', key: 'word' },
+  { id: 20, icon: 'fa-file-excel-o', key: 'csv' },
+  { id: 21, icon: 'fa-folder-open-o', key: 'localFile' },
+  { id: 22, icon: 'fa-book', key: 'localKb' },
+  { id: 23, icon: 'fa-plug', key: 'mcp' },
+  { id: 24, icon: 'fa-sitemap', key: 'subflow' }
 ])
 
 // 学习模块视图列表（图标与学习模块顶部标签一致，均为 fa）
@@ -1175,10 +1173,11 @@ const learningViews = ref([
   { id: 2, icon: 'fa-map-o', key: 'map' },
   { id: 3, icon: 'fa-refresh', key: 'review' },
   { id: 4, icon: 'fa-exclamation-circle', key: 'mistakes' },
-  { id: 5, icon: 'fa-graduation-cap', key: 'exam' }
+  { id: 5, icon: 'fa-comments-o', key: 'solver' },
+  { id: 6, icon: 'fa-graduation-cap', key: 'exam' }
 ])
 // 学习核心机制步骤
-const learningSteps = ref([1, 2, 3, 4, 5])
+const learningSteps = ref([1, 2, 3, 4, 5, 6])
 
 // 设计参考的开源项目（仅借鉴设计思路，不复制代码）：项目名 + 简介 + 借用到本产品的要点
 const creditProjects = ref([
@@ -1318,8 +1317,8 @@ const crPoints = (o: { pointsZh: string[]; pointsEn: string[] }, zh: boolean) =>
 // 集群运行方式列表（3 档，与主页输入区「运行方式」下拉一致）
 const swarmModes = ref([
   { id: 1, icon: '🤖', key: 'auto-mention' },
-  { id: 2, icon: '🧑‍✈️', key: 'auto-host' },
-  { id: 3, icon: '🗣️', key: 'debate' }
+  { id: 2, icon: '🗣️', key: 'debate' },
+  { id: 3, icon: '🧭', key: 'team' }
 ])
 
 // 浏览器功能列表（帮助中心「浏览器」章节）
@@ -1361,11 +1360,20 @@ const ragViewItems = ref([
 const settingGroups = ref([
   { groupKey: 'basic', children: [
     { icon: 'fa-eye', key: 'view' },
-    { icon: 'fa-users', key: 'collab' },
-    { icon: 'fa-comments', key: 'llm' },
-    { icon: 'fa-key', key: 'credentials' },
+    { icon: 'fa-th-large', key: 'features' },
+    { icon: 'fa-database', key: 'data' },
     { icon: 'fa-link', key: 'fileassoc' },
     { icon: 'fa-ellipsis-h', key: 'other' }
+  ] },
+  { groupKey: 'models', children: [
+    { icon: 'fa-server', key: 'llm' },
+    { icon: 'fa-cubes', key: 'llm-embed' },
+    { icon: 'fa-key', key: 'credentials' }
+  ] },
+  { groupKey: 'collabGroup', children: [
+    { icon: 'fa-globe', key: 'share' },
+    { icon: 'fa-users', key: 'collab' },
+    { icon: 'fa-shield', key: 'perm' }
   ] },
   { groupKey: 'speech', children: [
     { icon: 'fa-volume-up', key: 'tts' },
@@ -1408,29 +1416,25 @@ const knowledgeViews = ref([
   { id: 5, icon: '📂', key: 'files' },
   { id: 6, icon: '📋', key: 'kanban' },
   { id: 7, icon: '🕸️', key: 'graph' },
-  { id: 8, icon: '📊', key: 'gantt' },
-  { id: 9, icon: '🗓️', key: 'calendar' },
-  { id: 10, icon: '📍', key: 'map' },
-  { id: 11, icon: '📝', key: 'table' },
-  { id: 12, icon: '🖥️', key: 'presentation' },
-  { id: 13, icon: '🎨', key: 'excalidraw' },
-  { id: 14, icon: '📐', key: 'drawio' }
+  { id: 8, icon: '🗓️', key: 'calendar' },
+  { id: 9, icon: '📍', key: 'map' },
+  { id: 10, icon: '📝', key: 'table' },
+  { id: 11, icon: '🖥️', key: 'presentation' }
 ])
 
-// 待办管理视图列表
-const todoViews = ref([
-  { id: 1, icon: '📝', key: 'notes' },
-  { id: 2, icon: '🌲', key: 'tree' },
-  { id: 3, icon: '🗓️', key: 'month' },
-  { id: 4, icon: '📅', key: 'week' }
+// 文件专属视图 / 特殊文件：白板与图表是画布视图，工作流是流程画布，知识库与任务文件交由对应模块打开
+const knowledgeFileViews = ref([
+  { id: 1, icon: '🎨', key: 'excalidraw' },
+  { id: 2, icon: '📐', key: 'drawio' },
+  { id: 3, icon: '🔀', key: 'flow' },
+  { id: 4, icon: '📚', key: 'kb' },
+  { id: 5, icon: '🧰', key: 'task' }
 ])
 
-// 待办管理各视图使用要点（steps 为步骤序号列表）
-const todoTips = ref([
-  { key: 'notes', icon: 'fa-sticky-note-o', steps: [1, 2, 3] },
-  { key: 'tree', icon: 'fa-sitemap', steps: [1, 2, 3] },
-  { key: 'month', icon: 'fa-map-o', steps: [1, 2, 3] },
-  { key: 'week', icon: 'fa-calendar-o', steps: [1, 2, 3, 4] }
+// 视图一览的两个分组（分组小标题 + 该组的视图项，模板按组各渲染一个网格）
+const knowledgeViewGroups = computed(() => [
+  { key: 'views', titleKey: 'groupViews', items: knowledgeViews.value },
+  { key: 'fileViews', titleKey: 'groupFileViews', items: knowledgeFileViews.value }
 ])
 
 // AI 对话方案列表（六种：普通 / 知识库 / 工作流 / 智能体 / PTC / 集群）
@@ -1474,11 +1478,11 @@ const translations = {
       },
       'workflow': {
         title: '工作流',
-        subtitle: '自动化'
+        subtitle: '在知识管理中编辑'
       },
       'data-canvas': {
         title: '数据画布',
-        subtitle: '无代码数据建模'
+        subtitle: '在知识管理中编辑 · 无代码建模'
       },
       'settings': {
         title: '设置',
@@ -1491,10 +1495,6 @@ const translations = {
       'browser': {
         title: '浏览器',
         subtitle: '内置网页浏览与 AI 网页操作'
-      },
-      'todo': {
-        title: '待办管理',
-        subtitle: '灵感与规划'
       },
       'learning': {
         title: '学习',
@@ -1520,8 +1520,8 @@ const translations = {
       }
     },
     quickStart: {
-      overview: 'AI-KM 是一款<strong>本地优先的桌面 AI 知识管理平台</strong>：AI 对话（RAG 知识问答 / 智能体对话）、文档与白板管理、知识处理（切片向量化构建 .kb 知识库）、掌握式学习与间隔复习、可视化工作流、Agent脚手架与多智能体集群协作、待办与灵感管理一应俱全；数据默认保存在本地，支持离线使用。以下 6 步带你快速上手：',
-      tags: ['AI 对话', '知识管理', '知识处理', '掌握式学习', '可视化工作流', 'Agent脚手架', '多智能体集群', '待办管理'],
+      overview: 'AI-KM 是一款<strong>本地优先的桌面 AI 知识管理平台</strong>：AI 对话（RAG 知识问答 / 智能体对话）、文档与白板管理、知识处理（切片向量化构建 .kb 知识库）、掌握式学习与间隔复习、可视化工作流、Agent脚手架与多智能体集群协作、知识管理里的任务看板一应俱全；数据默认保存在本地，支持离线使用。以下 6 步带你快速上手：',
+      tags: ['AI 对话', '知识管理', '知识处理', '掌握式学习', '可视化工作流', 'Agent脚手架', '多智能体集群', '任务看板'],
       step1: {
         title: '部署 AI 环境',
         items: [
@@ -1542,12 +1542,12 @@ const translations = {
         ]
       },
       step3: {
-        title: '记录待办',
+        title: '记录任务与灵感',
         items: [
-          '点击顶部工具栏的 <strong>"+" 号</strong> 按钮快速创建新笔记',
-          '在富文本编辑器中输入你的想法、灵感或待办事项',
-          '支持 Markdown 语法，可插入图片、链接和代码块',
-          '笔记自动保存在本地，支持分类标签和全文搜索'
+          '点击顶部导航栏的 <strong>知识管理</strong>，在左侧面板的「视图」里勾选 <strong>看板</strong>',
+          '点看板左下角状态栏的 <strong>+</strong> 打开<strong>新建卡片</strong>面板：填名称即会在当前文件夹建一个 Markdown 文件，还能顺手选择状态与开始 / 结束时间（都可留空，开始时间默认今天）；卡片右侧的日历图标可随时设置 / 修改它的开始 / 结束时间',
+          '卡片可<strong>拖到别的列改状态</strong>、<strong>右键</strong>打开菜单（归档 / 移入某个取值 / 删除等）；顶部气泡可按取值多选筛选，状态栏「分组」可换成任意属性',
+          '任务就是普通 Markdown 文件：可在<strong>日历</strong>视图里拖拽排期、在<strong>表格</strong>视图批量改属性；看板状态栏「状态分类」可自定义分类顺序与图标'
         ]
       },
       step4: {
@@ -1576,8 +1576,8 @@ const translations = {
           '<strong>技能</strong>（技能管理 / 技能商店 / Agent 预设）统一收在 <strong>设置 → 技能</strong> 中，不再单独占用顶部导航：商店可下载新技能，管理可查看 / 编辑技能文件，并可在 <strong>Agent 预设</strong> 里创建可复用模板、以该角色对话',
           '在 <strong>主页</strong> 输入区把模式下拉切到 <strong>PTC</strong>（程序化工具调用）：描述需求后 AI 会写一段 TypeScript 程序经 run_code 组合调用工具，消息里会展示程序、返回值与程序内调用的工具',
           '需要多智能体协作时，把模式切到 <strong>集群</strong>：勾选多个 Agent 预设作为成员（成员在「设置 → 智能体 → 预设」维护），发送任务后成员依次发言，可 <strong>@成员名</strong> 点名某一位',
-          '打开 <strong>Agent脚手架</strong>：它是这里唯一的脚手架（批量智能体运行 / 表格定向推理 / 文件采集 / 链接采集是它的四种预设）；每个实例关联一个 <code>.task</code> 任务文件，可中断续跑、后台继续',
-          '<strong>数据画布</strong>（导航栏「数据画布」）是独立的无代码数据建模模块：画布建模 + 表单录入 + 图表看板，内容自动保存到画布任务文件'
+          '<strong>脚手架任务</strong>已成为知识管理里的一种文件类型（<code>.task</code>）：新建 / 双击 <code>.task</code> 即在<strong>独立窗口</strong>里打开它的专属「脚手架」视图（这里唯一的脚手架；批量智能体运行 / 表格定向推理 / 文件采集 / 链接采集是它的四种预设），任务可中断续跑、后台继续',
+          '<strong>数据画布</strong>不再是顶层模块，而是<strong>知识管理中的一种文件类型</strong>（<code>.data</code>）：在文件树里打开 <code>.data</code> 即进入画布模块（画布建模 + 表单录入 + 图表看板），内容会自动保存回该文件'
         ]
       }
     },
@@ -1588,7 +1588,7 @@ const translations = {
           items: [
             '日常问答：通识问题、概念解释、头脑风暴。',
             '写作与润色：改写、摘要、翻译、校对。',
-            '文件参考：上传文件 / 图片，让 AI 基于内容作答或总结。',
+            '文件参考：上传文件 / 图片（也可直接把文件拖进聊天窗口），让 AI 基于内容作答或总结。',
             '实时信息：切换到联网搜索模型时自动搜索并给出可点击来源。'
           ]
         },
@@ -1640,17 +1640,17 @@ const translations = {
           '<strong>② 多种对话模式</strong>：普通 / 知识库 / 工作流 / 智能体 / PTC / 集群 六种入口，任务从“问答”延伸到“执行”“程序化调用”与“多智能体协作”。',
           '<strong>③ RAG 只是其一</strong>：知识库模式先检索你的文档再作答，并可选本体 / 问题增强 / 多跳 / 社区等策略，但并非全部能力。',
           '<strong>④ 工具与智能体</strong>：智能体可按需读写文件、搜索、浏览网页、访问知识库、调用技能与 MCP。',
-          '<strong>⑤ 数据本地化</strong>：对话、.kb、.learning、.flow 均存本地，隐私可控、可离线。'
+          '<strong>⑤ 数据本地化</strong>：对话、.kb、.learning、.flow.yml 均存本地，隐私可控、可离线。'
         ]
       },
       schemes: {
         title: '六种对话模式',
-        normal: { name: '普通对话', desc: '直接与 AI 交流，支持上传文件/图片作为参考，适合日常提问与写作；选择联网搜索模型（如 DeepSeek）后提问可自动联网并列出来源。' },
-        retrieval: { name: '知识库问答', desc: '关联 .kb 知识库，AI 基于你的文档精准回答（RAG），答案下方展示参考片段与相似度；可在输入框上方选择检索策略（相似度 / 文件增强 / 问题增强 / 本体增强 / 多跳 / 社区 / Agentic 等）。' },
-        workflow: { name: '工作流对话', desc: '关联 .flow 工作流，输入起始文本触发自动化流程，实时查看各节点执行步骤与日志。' },
+        normal: { name: '普通对话', desc: '直接与 AI 交流，支持上传文件/图片作为参考（也可把文件直接拖进聊天窗口），适合日常提问与写作；选择联网搜索模型（如 DeepSeek）后提问可自动联网并列出来源。' },
+        retrieval: { name: '知识库问答', desc: '关联 .kb 知识库，AI 基于你的文档精准回答（RAG），答案下方展示参考片段与相似度；可在输入框上方选择检索策略（相似度 / 文件增强 / 问题增强 / 本体增强 / 多跳 / 社区 / Agentic 等）；知识库模式下把 .kb 文件拖进聊天窗口即完成关联。' },
+        workflow: { name: '工作流对话', desc: '关联 .flow.yml / .flow.yaml 工作流文件（用可视画布编排也请在知识管理里打开同一份文件，见「工作流」页签），输入起始文本触发自动化流程：各节点排成可展开的步骤卡片（图标 / 状态 / 参数 / 输出，样式与智能体模式一致），结束后给出最终输出。' },
         agent: { name: '智能体对话', desc: '在输入框选择「智能体」模式：可点 👤 选 Agent 预设，或以通用智能体对话。AI 自主规划并调用工具（读写文件 / 搜索 / 浏览网页 / 知识库检索 / 技能 / MCP 等）完成复杂任务；输入 $技能名 可直达技能；支持<strong>上传图片</strong>（多模态，需所选模型支持视觉）与文本附件。<strong>执行期间输入框不锁死</strong>：继续输入要求后按 Enter 即作为<strong>引导</strong>投递给它（不打断当前执行，智能体在下一个 step 带上）。' },
         code: { name: 'PTC（程序化工具调用）', desc: '在输入框模式下拉选择 <strong>PTC</strong>：模型不逐个调用工具，而是写一段 TypeScript 程序，经 <code>run_code</code> 组合调用工具并返回结果。消息里以代码块展示程序、并列出执行返回值、console 日志与<strong>程序内实际调用的工具</strong>；适合多步循环、批量处理这类“一次写清”的任务。步数沿用「设置 → 智能体预设 → 通用智能体」的循环轮数。' },
-        swarm: { name: '集群对话', desc: '在输入框选择「集群」模式：勾选<strong>多个 Agent 预设</strong>作为成员，一次任务由多成员协作完成（依次响应 / 群主撮合 / 辩论），可用 <code>@成员名</code> 只点名某一位；成员回复与工具调用与智能体模式完全一致；运行中也可输入<strong>引导</strong>（Enter 发送，投递给正在发言的成员）。' }
+        swarm: { name: '集群对话', desc: '在输入框选择「集群」模式：勾选<strong>多个 Agent 预设</strong>作为成员，一次任务由多成员协作完成（全员响应 / 辩论 / 项目组），可用 <code>@成员名</code> 只点名某一位；成员回复与工具调用与智能体模式完全一致；运行中也可输入<strong>引导</strong>（Enter 发送，投递给正在发言的成员）。' }
       },
       guide: {
         title: '四步使用指南',
@@ -1683,31 +1683,35 @@ const translations = {
     knowledge: {
       overview: {
         title: '什么是知识管理？',
-        description: '知识管理模块（knowFile）是一个<strong>多视图桌面文件管理器</strong>，支持以多种形式浏览、编辑和组织你的本地文件。它提供了标签页式文件浏览、多视图切换和全文搜索等能力，帮助你高效管理知识资产。'
+        description: '知识管理模块（knowFile）是一个<strong>多视图桌面文件管理器</strong>，支持以多种形式浏览、编辑和组织你的本地文件。它提供了独立窗口式文件浏览、多视图切换和全文搜索等能力，帮助你高效管理知识资产。'
       },
       views: {
-        title: '视图一览（12 种视图 + 文件专属视图）',
-        browse: { name: '浏览', desc: 'Markdown 预览渲染' },
-        edit: { name: '源码编辑', desc: 'Markdown 源码编辑器' },
-        blockedit: { name: '可视编辑', desc: '块编辑（所见即所得）' },
-        mindmap: { name: '思维导图', desc: '思维导图视图' },
-        files: { name: '文件', desc: '文件树浏览' },
-        kanban: { name: '看板', desc: '看板任务管理' },
-        graph: { name: '图谱', desc: '文件关联图谱' },
-        gantt: { name: '甘特', desc: '甘特图时间线' },
-        calendar: { name: '月历', desc: '日历视图' },
-        map: { name: '地图', desc: '地理位置标注' },
-        table: { name: '表格', desc: '表格数据视图' },
-        presentation: { name: '演示', desc: '演示文稿幻灯片视图' },
-        excalidraw: { name: '白板', desc: 'Excalidraw 无限画布绘图（.excalidraw 文件专属）' },
-        drawio: { name: '图表', desc: 'draw.io 图表绘图（.drawio / .dio 文件专属）' }
+        title: '视图一览（11 种视图 + 5 种专用视图）',
+        groupViews: '11 种视图',
+        groupFileViews: '5 种专用视图（文件专属 / 特殊文件）',
+        browse: { name: '浏览', desc: '统一预览视图（默认）：Markdown 会渲染公式、代码高亮、表格、图片与 Mermaid 图表；Word、PDF、图片、音视频等也各有预览。底部状态栏还提供「智能操作」（与当前文档对话）与导出 Markdown / Word / PDF。' },
+        edit: { name: '源码编辑', desc: 'Monaco 代码编辑器：直接改 Markdown 源码与 YAML 头，支持 AI 辅助与拖入图片 / 文件生成引用链接；代码与数据文件（.py、.json、.flow.yml 等）也在这里以文本方式打开。' },
+        blockedit: { name: '可视编辑', desc: '块编辑（所见即所得）：按块编辑，输入 / 唤出块类型菜单（标题 / 列表 / 待办 / 表格 / 代码 / 公式等），块手柄菜单的「转换为」可把当前块换成其它类型，不懂 Markdown 语法也能排版。' },
+        mindmap: { name: '思维导图', desc: '思维导图视图：按 Markdown 标题层级生成可缩放、可逐层折叠的导图（支持 LaTeX 公式渲染，独立成段的展示公式与带公式的正文段落都会成节点），节点文字宽度与展开层数可在状态栏调节。' },
+        files: { name: '文件', desc: '文件视图：网格 / 列表浏览当前目录（Ctrl+滚轮无级缩放图标，缩到最小即列表），支持多选、框选与键盘操作；音频 / 视频显示封面缩略图；状态栏可按 YAML 属性（含状态）筛选；右键菜单可打开 / 重命名 / 删除 / 复制 / 剪切 / 粘贴 / 在文件夹中显示 / 排序（名称 / 修改时间 / 大小 / 类型）/ 显示（文件名开关、宽高比），空白处右键还能排序、切换显示与新建 Markdown、Excalidraw、工作流等文件与文件夹。' },
+        kanban: { name: '看板', desc: '看板任务管理：卡片 = 当前文件夹（顶部面包屑所指目录）里的一个 Markdown 文件，可按任意属性分列（默认 状态），点左下角状态栏的 + 打开新建面板（填名称即可，还可选择状态与开始 / 结束时间，三者都能留空，开始时间默认今天），新建后立刻出现在日历 / 甘特上、卡片拖到别的列即改该属性值、卡片显示起止时间且右侧日历图标（或右键「设置时间」）可设置开始 / 结束时间（时间文字本身不可点）且右键可设置颜色（预设色板随主题切换，浅色 / 深色主题各一套，也可用取色器自定义或清除）/ 重命名 / 归档 / 移入某个取值 / 删除；在别处改了文件的属性（表格视图、源码编辑、外部编辑器）后卡片会自动刷新；面板宽度放不下并排两列时列会自动改为上下摆放；状态栏的「筛选」按钮可按分组字段的取值多选筛选（每个取值带卡片数，取值多时自动换行并滚动），状态栏还可切换看板 / 列表、读取深度与「是否显示已归档」，并可在「状态分类」里编辑分类的顺序与图标（与日历共用）；只出现在文件里的取值会列在面板底部，可一键加入分类表参与排序' },
+        graph: { name: '图谱', desc: '文件关联图谱：目录层级与文件引用关系一图看清（目录内文件增删改后自动刷新；点击节点高亮其关联节点，拖动节点可手动调整布局；双击节点打开文件，与文件树一致——一律独立窗口打开并统一调度特殊文件）' },
+        calendar: { name: '日历', desc: '月视图 / 周视图 / 年视图 / 甘特图四合一：支持起止区间（跨天条目横跨每一天）、颜色与状态图标、内搜索、拖拽改期、日期格内新建（建在当前文件夹）；只显示 Markdown 文件，且仅 Markdown 可拖拽改期；条目上右键可 打开 / 重命名 / 设置时间 / 颜色（预设色板随主题切换，也可用取色器自定义或清除）/ 归档 / 复制文件路径 / 在文件夹中显示 / 删除（与看板卡片的菜单一致，弹出的日期列表里同样可用），状态栏的归档图标控制是否显示已归档条目（默认不显示）' },
+        map: { name: '地图', desc: '按文件 YAML 里的 纬度 / 经度 属性在地图上打点（可一键只显示有经纬度的文件），点标记或右侧列表即可打开文件；地图不需要搜索，工具栏只显示路径。' },
+        table: { name: '表格', desc: '一行 = 一个文件、一列 = 一个 YAML 属性的表格：默认只列 Markdown（可切「全部」，非 Markdown 整行只读），列按当前「深度」范围内的属性生成（改深度 / 换目录时列跟着变，不会留下整列空白的旧列；被收敛的属性可在「列」面板底部一键加回，面板「+」还能手动加列）；列头点击即排序（升 / 降 / 取消），列菜单可按取值筛选（含「未设置」）/ 指定编辑器类型 / 重命名属性 / 隐藏此列，列可拖拽换序与拖右边界调宽，列序 / 列宽 / 类型 / 排序 / 筛选都会记住；单元格按属性类型编辑（文本 / 数字 / 日期 / 日期时间 / 复选框 / 颜色 / 单选 / 标签，状态列直接用状态分类的取值与图标），支持方向键移动、Enter 编辑 / Esc 取消 / Delete 清空与整块粘贴 Excel 数据，行首勾选后可批量设置 / 删除属性或删除文件，行右键菜单可打开 / 进入文件夹 / 新窗口打开 / 在文件夹中显示 / 复制路径 / 新建同级 / 重命名 / 删除' },
+        presentation: { name: '演示', desc: '把 Markdown 变成幻灯片：按 --- 或「智能切分」（依标题 / 空行自动分页并避开代码块）分页，支持目录 / 总览 / 全屏放映、自适应与 16:9 / 4:3 比例、6 种幻灯片主题；frontmatter 的 title / keywords / summary 会自动生成封面。' },
+        excalidraw: { name: '白板', desc: 'Excalidraw 无限画布绘图（.excalidraw 文件专属）：手绘风格图形 / 箭头 / 文字 / 自由笔，编辑后自动写回文件（Ctrl+S 立即保存），无需单独安装' },
+        drawio: { name: '图表', desc: 'draw.io 图表绘图（.drawio / .dio 文件专属）：流程图 / 架构图 / UML / ER 图等；编辑器内置，无需单独安装 draw.io，也不联网' },
+        flow: { name: '工作流', desc: '工作流文件（.flow.yml / .flow.yaml，文件专属视图）：文件内容是 Dify 应用 DSL，在浏览 / 可视编辑视图直接打开工作流编辑器编排、运行与查看运行日志；源码编辑视图看到的是 YAML 文本' },
+        kb: { name: '知识库文件', desc: '知识库文件（.kb）：存放知识处理（RAG）切分好的知识块与索引，体积较大。双击不会进入文件视图，而是跳到「知识处理」加载该库，可检索、问答与重新切分' },
+        task: { name: '脚手架', desc: '脚手架任务文件（.task，文件专属视图）：一个 .task = 一个独立任务，双击在独立窗口里打开脚手架画布（导入表格 / 执行 / 图谱 / 日志 / 结果都在里面），配置与结果都保存在该文件里；旧脚手架的 .task 打开时自动转换配置' }
       },
       features: {
         title: '核心功能',
-        step1: { title: '📂 文件浏览', desc: '左侧文件树展示目录结构，支持展开/折叠。点击文件在右侧以对应视图打开，支持多标签页同时打开多个文件。' },
+        step1: { title: '📂 文件浏览', desc: '左侧文件树展示目录结构。展开 / 折叠点节点左侧的箭头（单击不再开合）；点击 / 双击文件一律在独立窗口打开（可同时开多个窗口并排对照）；双击文件夹只让右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）定位到该目录。右键菜单按节点类型区分：文件上「打开」直接列出各视图、「操作」里是 打开所在位置 / 复制地址 / 系统打开；文件夹与空白处可在「新建」里建 文件夹 / Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架，并支持 复制 / 粘贴（剪贴板与「文件」视图共用）/ 重命名 / 删除。' },
         step2: { title: '🔄 多视图切换', desc: '同一个文件可切换不同视图查看：浏览（渲染）、源码编辑、可视编辑（块编辑/所见即所得）、思维导图、演示。你可以在设置中开启/关闭不需要的视图。' },
-        step3: { title: '🔍 全文搜索', desc: '顶部搜索框支持按文件名和内容全文搜索，快速定位所需文件。搜索结果可点击直接跳转到文件位置。' },
-        step4: { title: '🏷️ 分类管理', desc: '支持标签分类、看板视图管理任务、甘特图跟踪项目进度、图谱展示文件关联关系，满足不同维度的管理需求。' }
+        step3: { title: '🔍 全文搜索', desc: '顶部搜索框支持按文件名和内容全文搜索，快速定位所需文件；结果双击在独立窗口打开，打开后搜索面板保持打开，可连续打开多个结果（按 Esc 或点右上角 ✕ 关闭）。' },
+        step4: { title: '🏷️ 分类管理', desc: '支持按 YAML 属性（状态等）筛选文件、「看板」视图按属性分组并快速记录 / 拖拽改属性（卡片即 Markdown 文件）、「表格」视图按列查看与整理属性（排序 / 筛选 / 批量改值 / 整块粘贴，列按当前「深度」范围的属性生成）、日历视图的甘特模式跟踪项目进度、图谱展示文件关联关系，满足不同维度的管理需求。除「文件」视图外，日历 / 看板 / 表格 / 图谱 / 地图都跟随左侧当前目录取数据；它们与文件视图共用一条顶部工具栏（多视图并排时也只有一条）：最左侧的显示 / 隐藏左侧面板开关 + 视图选择 + 后退 / 前进 / 向上 / 刷新 + 可点击的路径面包屑 + 右侧搜索框（工具栏很窄时导航按钮与面包屑会自动收起，快捷键 Alt+← / Alt+→ / Backspace 仍可用），搜索框也是共用的，各视图语法一致（关键词匹配文件名 / 路径 / 属性值，另支持 状态:待办、优先级>2）；底部状态栏只放各视图自己的设置与计数。' }
       },
       smart: {
         title: '🧠 文档智能操作与导出 Word',
@@ -1718,7 +1722,7 @@ const translations = {
         },
         step2: {
           title: '导出 Markdown / Word / PDF',
-          desc: '点状态栏的 ⬇ <strong>导出文档</strong> 图标，菜单里有「导出 Markdown」「导出 Word」「导出 PDF」三项。'
+          desc: '点状态栏的 ⬇ <strong>导出文档</strong> 图标，菜单里有「导出 Markdown」「导出 Word」「导出 PDF」三项；<strong>导出 Markdown</strong> 同样会弹出<strong>另存为对话框</strong>（默认当前文件所在目录），导出后提示实际保存路径。'
         },
         step3: {
           title: '导出 Word 的另存为对话框',
@@ -1730,33 +1734,28 @@ const translations = {
         },
         note: {
           title: '📌 使用提示：',
-          text: '附带上下文有<strong>约 12 万字符</strong>上限，超出时会在输入区与已发送气泡中<strong>明确提示已截断</strong>（不会静默丢弃）；PDF 的智能操作使用同一面板，可选附带「当前页文字 / 全文 / 当前页图片」。'
+          text: '附带上下文有<strong>约 12 万字符</strong>上限，超出时会在输入区与已发送气泡中<strong>明确提示已截断</strong>（不会静默丢弃）；PDF 的智能操作使用同一面板，可选附带「当前页文字 / 全文 / 当前页图片」。<br><strong>PDF 还支持翻译</strong>：选中文字后<strong>右键 → 翻译</strong>，或点右下角的<strong>翻译图标</strong>叠加中文译文（滚动 / 翻页到的页会自动继续翻译，整份文档要么每页都叠加、要么都不叠加）；译文按段落<strong>原地叠在原文位置</strong>（双栏论文按栏、表格按单元格，不遮挡旁边的栏），<strong>公式自动按 LaTeX 渲染</strong>（KaTeX），并还原原文的首行 / 悬挂缩进，译文较短时自动放开行距并上下居中填满原段落。译文语言跟随系统语言；再点图标整份切回原文，右键图标可指定翻译来源与模型（默认跟随系统默认来源），弹层里还有「清空译文缓存」。'
         }
       },
       openMode: {
-        title: '🪟 文件打开方式（新窗口 / 窗口内）',
-        overview: '在 <strong>设置 → 通用 → 基础 → 文件打开方式</strong> 中选择文件的打开方式，它决定了在知识管理中<strong>双击文件</strong>时的行为与主窗口布局：',
+        title: '🪟 文件打开方式（独立窗口）',
+        overview: '知识管理里<strong>双击文件</strong>一律在<strong>独立窗口</strong>打开；原有的「窗口内打开」模式（主窗口标签栏、视图管理面板）已去掉：',
         newWindow: {
-          name: '🪟 新窗口打开（默认）',
-          desc: '双击文件时在<strong>独立窗口</strong>中打开，主窗口顶部标签栏自动隐藏。每个文件窗口可独立切换「浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示」视图，窗口标题显示「文件名 - 视图」。多个文件可同时在不同窗口中打开，<strong>并排对照</strong>互不影响主窗口。'
-        },
-        inner: {
-          name: '📑 窗口内打开',
-          desc: '双击文件时在主窗口<strong>右侧标签页</strong>中打开（原行为），顶部保留标签栏，可快速在多个文件间切换。标签会<strong>持久化保存</strong>，重启应用后自动恢复；视图管理面板显示全部视图（含浏览 / 源码编辑等文件视图）。'
+          name: '🪟 独立窗口打开',
+          desc: '双击文件时在<strong>独立窗口</strong>中打开。窗口内可切换该文件类型支持的视图（如 Markdown 支持全部五种，CSV 只有浏览 + 源码编辑，工作流 / 数据画布 / 脚手架 / 图片 / 音视频 / PDF 固定单一视图，此时不显示视图下拉），窗口标题显示「文件名 - 视图」，<strong>鼠标悬停在标题栏文件名上会显示文件的绝对路径</strong>。没有正文的 Markdown（空文件，或只有 YAML 头、如看板新建的卡片）会<strong>默认打开「源码编辑」</strong>而不是空白的浏览视图。多个文件可同时在不同窗口中打开，<strong>并排对照</strong>互不影响主窗口。'
         },
         effect: {
           title: '🔧 对操作的影响',
           items: [
-            '<strong>双击打开位置</strong>：新窗口模式 → 独立窗口；窗口内模式 → 主窗口标签页',
-            '<strong>标签栏</strong>：新窗口模式隐藏主窗口标签栏（文件树面板顶部改为「添加工作区 / 打开文件 / 搜索 / 创建文件」按钮组）；窗口内模式保留标签栏',
-            '<strong>视图选择</strong>：新窗口模式在独立窗口左上角切换视图；窗口内模式用文件树面板的「👁 眼睛」按钮打开视图管理',
-            '<strong>标签持久化</strong>：新窗口模式不保存标签（重启后标签栏为空）；窗口内模式重启后恢复上次打开的标签',
-            '<strong>多文件对比</strong>：新窗口模式可将多个文件放在不同窗口并排查看；窗口内模式只能在标签间切换'
+            '<strong>双击打开位置</strong>：一律在独立窗口打开；主窗口只负责全局视图（文件 / 图谱 / 看板 / 日历 / 地图 / 表格）',
+            '<strong>标签栏</strong>：主窗口不再有标签栏，文件树面板顶部是「添加工作区 / 打开文件 / 搜索 / 创建文件」按钮组',
+            '<strong>视图选择</strong>：主窗口在顶部工具栏（左侧折叠图标右侧）切换全局视图，文件窗口左上角切换该文件自己的视图',
+            '<strong>多文件对比</strong>：把多个文件放在不同窗口并排查看，各窗口的视图互不影响'
           ]
         },
         note: {
           title: '📌 使用提示：',
-          text: '无论选择哪种模式，以下操作始终不变：右键「软件内打开」、全文搜索点击结果、文件对话框打开的文件始终在主窗口标签页打开；右键「新窗口打开」子菜单（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）始终可用；知识库（.kb）文件一律跳转到知识处理（RAG）模块。'
+          text: '以下操作始终不变：右键文件时「打开」直接列出各视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示，按文件类型给出），打开文件所在位置 / 复制地址 / 系统打开在同级的「操作」里；知识库（.kb）文件一律跳转到知识处理（RAG）模块；脚手架（.task）一律在独立窗口里打开它的专属「脚手架」视图；本地网页（.html / .htm）一律用内置浏览器打开；远程文件单击仍是主窗口内的快速预览，双击才开独立窗口。'
         }
       },
       drawio: {
@@ -1764,7 +1763,7 @@ const translations = {
         overview: '知识管理内置 <strong>draw.io 图表编辑器</strong>（draw.io 官方 webapp 随软件打包，<strong>完全离线可用</strong>）：<code>.drawio</code> / <code>.dio</code> 文件（以及内容含 <code>&lt;mxfile&gt;</code> 的 <code>.xml</code>）在<strong>浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示</strong>任一视图中都会直接打开绘图画布，用来画流程图、架构图、泳道图、ER 图、UML 等，无需另外安装 draw.io 或联网。',
         step1: {
           title: '创建与打开',
-          desc: '文件树顶部 <strong>➕ 创建文件</strong> 弹窗中把类型切到 <strong>draw.io</strong>（自动写入空白图表框架），或在文件上右键「新建文件」时选择该类型；双击 <code>.drawio</code> 文件即进入图表视图。'
+          desc: '文件树顶部 <strong>➕ 创建文件</strong> 弹窗中把类型切到 <strong>draw.io</strong>（自动写入空白图表框架），或在文件树上右键「<strong>新建 → draw.io</strong>」；双击 <code>.drawio</code> 文件即进入图表视图。'
         },
         step2: {
           title: '编辑与保存',
@@ -1776,11 +1775,15 @@ const translations = {
         },
         step4: {
           title: '智能操作（AI 生成 / 调整 / 删除图形）',
-          desc: '点右下角 ✨ <strong>智能操作</strong> 打开右侧 AI 面板，用自然语言描述需求（如「加一个三步审批流程：提交 → 审核 → 归档」）。AI 会先读取当前图表内容，再生成增量片段并<strong>直接在画布上预览</strong>（面板列出「新增 / 调整 / 删除」明细）：点「确认应用」才写入文件，点「取消」原样回退。既可<strong>新增</strong>图形与连线，也能<strong>调整</strong>已有图形的位置 / 尺寸 / 文字 / 颜色 / 层级 / 连线，或按 id <strong>删除</strong>已有单元。'
+          desc: '点右下角 ✨ <strong>智能操作</strong> 打开右侧 AI 面板，用自然语言描述需求（如「加一个三步审批流程：提交 → 审核 → 归档」）。AI 会先读取当前图表内容，再生成增量片段并<strong>直接在画布上预览</strong>（面板列出「新增 / 调整 / 删除」明细）：点「确认应用」才写入文件，点「取消」原样回退。既可<strong>新增</strong>图形与连线，也能<strong>调整</strong>已有图形的位置 / 尺寸 / 文字 / 颜色 / 层级 / 连线，或按 id <strong>删除</strong>已有单元。多页图表只作用于<strong>画布当前打开的那一页</strong>，预览与取消后仍停留在该页。'
         },
         step5: {
           title: '两种智能操作模式',
           desc: '输入框左侧的模式下拉：<strong>自动可调</strong>（默认，允许新增 + 调整 + 删除）/ <strong>仅新增</strong>（只添加新图形与连线，绝不改动已有内容，新图形会自动避让到空白区）。协同会话中只有主机能发起智能操作，插入后会向所有成员重新同步图表。'
+        },
+        step6: {
+          title: '复制为图片（直接粘贴到 Word / PPT）',
+          desc: '点右下角 📋 <strong>复制为图片</strong>（快捷键 <code>Ctrl+Alt+X</code>）把当前图表放进系统剪贴板：可选 <strong>高清 4×（默认）/ 标准 2× / 原始 1×</strong>，然后到 Word / PPT / 聊天窗口里 <code>Ctrl+V</code> 即可，<strong>不必先保存文件</strong>。图片是<strong>白底</strong>、按图表原始大小排版（高清不会撑满整页），粘贴后依然清晰；超大图表会自动降档避免卡死；只输出<strong>当前页</strong>，图里的图片与换行标签都按画布所见还原。'
         },
         note: {
           title: '📌 使用提示：',
@@ -1792,7 +1795,7 @@ const translations = {
         overview: '在<strong>同一局域网</strong>内，多台电脑可以<strong>实时协同编辑</strong>同一个文件——支持 <strong>代码 / Markdown 编辑器</strong>、<strong>Excalidraw 白板</strong>与 <strong>draw.io 图表</strong>三种场景。基于 <strong>Yjs CRDT</strong> 与增量补丁（draw.io 使用官方 diffSync）技术实现元素级实时同步：一边编辑、另一边立即可见，并显示<strong>成员光标、名称徽标</strong>与成员列表。',
         step1: {
           title: '开启协作',
-          desc: '进入 <strong>设置 → 通用 → 协作</strong>，打开「<strong>启用协作</strong>」开关，然后点击「<strong>启动协同服务</strong>」。可配置端口（默认 <code>3346</code>）、最大成员数、编辑权限与房间 Token。'
+          desc: '进入 <strong>设置 → 协作 → 协同</strong>，打开「<strong>启用协作</strong>」开关，然后点击「<strong>启动协同服务</strong>」。可配置端口（默认 <code>3346</code>）、最大成员数、编辑权限与房间 Token。'
         },
         step2: {
           title: '共享文件 / 白板 / 图表',
@@ -1820,7 +1823,7 @@ const translations = {
         overview: '通过<strong>共享文件夹</strong>，可以把本机的一个文件夹<strong>只读共享</strong>给局域网内的其他电脑：对方在「知识管理 → 文件树」中添加为<strong>远程工作区</strong>（云朵图标，恒显示在所有本地工作区最下方），即可浏览、<strong>预览</strong>其中的文件——支持 <strong>Markdown / 文本 / PDF / 图片 / Word</strong>，下载后即可编辑。',
         step1: {
           title: '主机端共享',
-          desc: '在 <strong>设置 → 通用 → 共享文件夹</strong> 中启动服务，选择共享目录，配置端口（默认 <code>3347</code>）与 Token，然后复制连接地址（<code>remote-fs://IP:端口?token=…</code>）发给局域网内的其他成员。'
+          desc: '在 <strong>设置 → 协作 → 共享</strong> 中启动共享文件夹服务，选择共享目录，配置端口（默认 <code>3347</code>）与 Token，然后复制连接地址（<code>remote-fs://IP:端口?token=…</code>）发给局域网内的其他成员。'
         },
         step2: {
           title: '客户端添加远程工作区',
@@ -1880,7 +1883,7 @@ const translations = {
       },
       config: {
         title: '配置说明',
-        description: '知识处理全程使用<strong>全局 AI 配置</strong>的模型（设置 → 通用 → 模型中选择的 AI 来源与模型），无需在此单独配置来源。嵌入、对话、处理模型分别默认取该来源的默认嵌入模型与主模型；嵌入模型可在知识库「设置」中调整。支持多种检索算法：余弦相似度、BM25 及混合检索，检索数量可选按数量 / 按匹配率 / 按字符；检索策略可在「策略配置」中自定义（见下）。'
+        description: '知识处理全程使用<strong>全局 AI 配置</strong>的模型（设置 → 模型 → 来源中选择的 AI 来源与模型），无需在此单独配置来源。嵌入、对话、处理模型分别默认取该来源的默认嵌入模型与主模型；嵌入模型可在知识库「设置」中调整。支持多种检索算法：余弦相似度、BM25 及混合检索，检索数量可选按数量 / 按匹配率 / 按字符；检索策略可在「策略配置」中自定义（见下）。'
       },
       strategies: {
         title: '自定义检索策略（处理管线）',
@@ -1904,45 +1907,85 @@ const translations = {
       }
     },
     workflow: {
+      usage: {
+        title: '📂 打开与保存（知识管理里的 .flow.yml）',
+        items: [
+          '入口：工作流是<strong>知识管理里的一种文件类型</strong>——打开 <code>.flow.yml</code> / <code>.flow.yaml</code> 文件即进入画布；新建时在「工作流」类型里创建',
+          '格式：文件内容就是<strong>Dify 应用 DSL（YAML）</strong>，可被 Dify 直接导入；打开 Dify 导出的应用文件时，未识别的节点类型会原样保留并给出提示',
+          '画布操作：左键拖动节点、从节点右侧端口拖出连线、右键在画布空白或节点上添加节点、<code>Ctrl+D</code> 复制、<code>Del</code> 删除选中；连线会自动阻止自连 / 重复 / 成环',
+          '底部状态栏：左下角是 添加节点 / 自动布局 / 运行 / 应用设置 / <strong>AI 编排</strong> / 删除选中 / 保存，右下角是 节点 · 连线数量 / 缩小 / 缩放百分比 / 放大 / 适应画布 / <strong>锁定画布</strong>（防误拖） / <strong>小地图开关</strong>，<code>Ctrl+S</code> 保存',
+          'AI 编排：点左下角 ✨ 打开面板，用自然语言描述需求（如「加一个条件分支」），模型会生成 / 改写整份工作流并可直接撤销；面板样式与运行面板一致',
+          '容器（迭代 / 循环）：把节点拖进容器框内即成为子节点，容器右下角可拖拽调整大小（自动布局不会缩回去）；容器内部连线与容器出口都正常显示',
+          '外观：画布跟随「设置 → 界面」的主题（深色 / 浅色与全部皮肤）自动适配；节点卡片第二行显示该节点的关键配置（模型、输入 / 输出变量、迭代变量、文件等）',
+          '右侧面板按需出现：选中节点显示<strong>属性面板</strong>，点「运行」显示<strong>运行面板</strong>（点它右上角 ✕ 关闭），两者不同时显示',
+          '保存：工具栏「保存」写回文件；属性面板里的改动会即时把文件标记为未保存（工具栏出现 ●）'
+        ]
+      },
       nodes: {
-        title: '十八种节点类型',
-        start: { name: '开始节点', desc: '工作流的起点' },
-        end: { name: '结束节点', desc: '工作流的终点' },
-        text: { name: '文本节点', desc: '输入固定文本' },
-        file: { name: '本地文件', desc: '读取电脑文件' },
-        webSearch: { name: '网络搜索', desc: '上网查资料' },
-        webCrawl: { name: '网页抓取', desc: '获取网页内容' },
-        inference: { name: '推理节点', desc: '调用AI思考' },
-        decision: { name: '决策节点', desc: '分支条件判断' },
-        python: { name: 'Python节点', desc: '运行代码' },
-        knowledge: { name: '知识库节点', desc: '从知识库找资料' },
-        structured: { name: '结构化节点', desc: '表格数据处理' },
-        mcp: { name: 'MCP节点', desc: '调用外部工具' },
-        subflow: { name: '子工作流节点', desc: '加载并执行外部子工作流' },
-        iteration: { name: '迭代节点', desc: '对数组每个元素执行内部流水线，可用 {{节点名.item.字段}} 引用当前元素' },
-        aggregator: { name: '变量聚合', desc: '跨迭代收集或合并变量（收集逐次追加，合并扁平化嵌套数组）' },
-        list: { name: '列表操作', desc: '对列表执行过滤 / 提取 / 排序 / 去重 / 截取等操作' },
-        data: { name: '数据(CSV)', desc: '流式读取 CSV/TSV/TXT/JSON 数据文件，可分批输出配合迭代处理' },
-        agent: { name: '智能体节点', desc: '调起通用或预设智能体，自主规划并调用工具完成任务' }
+        title: '节点类型',
+        start: { name: '开始', desc: '工作流入口，定义输入变量' },
+        end: { name: '结束', desc: '声明最终输出变量' },
+        answer: { name: '直接回复', desc: '把正文作为回复内容' },
+        llm: { name: '大语言模型', desc: '调用模型，配置提示词与上下文' },
+        ifElse: { name: '条件分支', desc: '按条件分流，不命中走 ELSE' },
+        classifier: { name: '问题分类器', desc: '让模型把输入归到某个分类分支' },
+        iteration: { name: '迭代', desc: '把数组逐项送进容器处理，结果收成数组' },
+        loop: { name: '循环', desc: '按轮次重复容器内节点，可设结束条件' },
+        code: { name: '代码执行', desc: '运行 Python 3；定义 main 时自动调用并取返回值（Dify 写法），否则输出 JSON 即输出变量' },
+        template: { name: '模板转换', desc: '用变量填充模板文本' },
+        http: { name: 'HTTP 请求', desc: '调用外部接口，地址与参数支持变量' },
+        tool: { name: '工具', desc: '通过 MCP 调用外部工具' },
+        knowledge: { name: '知识检索', desc: '从知识库检索相关片段' },
+        aggregator: { name: '变量聚合', desc: '取第一个有值的变量' },
+        assigner: { name: '变量赋值', desc: '写入会话变量或循环变量' },
+        listOp: { name: '列表操作', desc: '过滤 / 排序 / 提取字段 / 截断' },
+        paramExtract: { name: '参数提取器', desc: '让模型抽取结构化参数' },
+        extractor: { name: '文档提取器', desc: '读取文件内容为文本' },
+        word: { name: '导出 Word', desc: '把上游内容导出为 .docx（本地扩展）' },
+        csv: { name: '本地数据表', desc: '读取 CSV / TSV / Excel，可分批（本地扩展）' },
+        localFile: { name: '本地文件', desc: '读取文件，支持模板切片（本地扩展）' },
+        localKb: { name: '本地知识库', desc: '检索本地 .kb 知识库（本地扩展）' },
+        mcp: { name: 'MCP 工具', desc: '内联或引用设置里的 MCP 服务（本地扩展）' },
+        subflow: { name: '子工作流', desc: '调用另一个工作流文件（本地扩展）' }
+      },
+      variables: {
+        title: '🔗 变量、分支与容器',
+        items: [
+          '取值一律用<strong>变量选择器</strong>（不写死节点名）：按「上游节点输出 / 系统变量 / 环境变量 / 会话变量」分组选择，改名不会断链',
+          '在文本里引用变量：提示词、回复正文等可写 <code>{{#节点.变量#}}</code>，用选择器的「插入变量」直接插到光标处',
+          '<strong>分支节点</strong>（条件分支 / 问题分类器）每个分支出一个端口，运行时只走命中的那一支，其余分支标记为「已跳过」',
+          '<strong>容器节点</strong>（迭代 / 循环）：把节点拖进容器框内即成为子节点，入口节点提供 <code>item</code> 与 <code>index</code>；循环可用「变量赋值」更新循环变量'
+        ]
+      },
+      run: {
+        title: '▶️ 运行与设置',
+        items: [
+          '运行：工具栏「运行」→ 填写开始节点声明的输入变量 → 开始运行；运行中可随时中止',
+          '画布反馈：节点右上角圆点表示状态（蓝=运行中 / 绿=成功 / 红=失败 / 灰=跳过）；右侧运行面板给出<strong>追踪树</strong>（容器子节点缩进）、每节点耗时、日志与流式输出',
+          '运行历史：面板顶部可切换最近 5 次运行，便于对比',
+          '应用设置：工具栏「应用设置」可改应用名称 / 图标 / 应用模式、开场白与推荐问题、文件上传等功能开关，以及全局的<strong>环境变量</strong>与<strong>会话变量</strong>',
+          '异常处理：每个节点可选「出错即终止 / 忽略错误继续 / 走异常分支」，并可开启失败重试（支持指数退避）'
+        ]
       },
       example: {
-        title: '示例：分析新闻文章',
+        title: '示例：从问题到 Word 报告',
         step1: {
-          title: '拖拽三个节点：',
-          tags: ['🕸️ 网页抓取', '📚 知识库节点', '🤖 推理节点']
+          title: '拖出四个节点：',
+          tags: ['▶️ 开始', '🤖 大语言模型', '🔀 条件分支', '📄 导出 Word']
         },
         step2: {
-          title: '连接节点：',
-          description: '点击节点底部的连接点 → 拖到下一个节点顶部',
-          flow: '网页内容 → 知识库检索 → AI分析'
+          title: '连线并填变量：',
+          description: '从节点右侧端口拖到下一个节点；在「结束」或「导出 Word」里用变量选择器取上游输出',
+          flow: '开始(question) → 大语言模型 → 条件分支 → 导出 Word'
         },
         step3: {
           title: '配置并运行：',
           items: [
-            '网页抓取：输入网址',
-            '知识库：选择你的知识库',
-            '推理节点：输入分析指令',
-            '点击"运行所有节点"'
+            '开始：定义输入变量 question',
+            '大语言模型：选模型来源与模型，提示词里插入 {{#开始.question#}}',
+            '条件分支：给分支配条件（例如内容长度 > 100）',
+            '导出 Word：内容变量选大语言模型的 text，选模板与保存目录',
+            '点工具栏「运行」，填 question 后开始；运行面板里看每个节点的耗时与输出'
           ]
         }
       }
@@ -1950,18 +1993,33 @@ const translations = {
     settings: {
       overview: {
         title: '设置总览',
-        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 协作 / 模型 / 凭据 / 关联 / 其他）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / MCP / 注册表）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。'
+        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 模型 / 凭据 / 关联 / 其他）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / MCP / 注册表）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。'
       },
       groups: {
         basic: {
           title: '🧭 通用',
           items: {
-            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文件打开方式</strong> / <strong>关闭按钮行为</strong>，以及路径与常用操作。' },
-            collab: { name: '协作', desc: '局域网共享、协同编辑与共享文件夹（端口 / 权限 / Token）。' },
-            llm: { name: '模型', desc: '全局 AI 来源与模型、嵌入模型，以及<strong>上下文窗口</strong>（见下方专述）。' },
-            credentials: { name: '凭据', desc: 'API Key 表格化管理，明文只存主进程，可被模型配置引用。' },
+            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文字对齐</strong>（两端对齐 / K-P 最优断行）/ <strong>关闭按钮行为</strong> / <strong>配置随软件分发</strong>，以及路径与常用操作。' },
+            features: { name: '功能', desc: '主界面导航栏的顶层模块开关（主页 / 知识管理 / 知识处理 / 学习），以及知识管理模块的子开关（<strong>视图布局</strong>与 11 种视图）。' },
+            data: { name: '数据', desc: '本机数据总览：本地存储占用、数据目录（可打开所在文件夹）与可清理缓存，<strong>配置备份</strong>可一键导出 / 导入全部配置；数据清单逐类列出聊天记录 / 旧版待办与随手记 / Agent 预设 / MCP / 会话日志 / 配置的数量与占用，每类可导出 / 导入（会话日志可清空或打开所在文件夹），并可直接前往对应设置页。只统计本机数据，工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。' },
             fileassoc: { name: '关联', desc: '按文件类型设置系统默认打开方式，可一键设置 / 全部取消。' },
             other: { name: '其他', desc: '系统状态、浏览器、Word 导出与离线地图包（MBTiles）。' }
+          }
+        },
+        models: {
+          title: '🧠 模型',
+          items: {
+            llm: { name: '来源', desc: '各 AI 来源的连接配置（地址 / 密钥 / 模型 / 接口样式 / 默认嵌入模型）、<strong>通用参数</strong>（温度 / 最大令牌 / 流式 / 推理强度）与<strong>上下文窗口</strong>（见下方专述）。左侧列表可点选查看任意来源，<strong>点「设为默认」才改变默认来源</strong>。' },
+            'llm-embed': { name: '嵌入', desc: '<strong>嵌入兜底</strong>：当前来源不提供嵌入接口（如 DeepSeek / Anthropic）时，知识库建库与检索的向量化改用这里选的来源。' },
+            credentials: { name: '凭据', desc: 'API Key 表格化管理，明文只存主进程，可被各来源的「凭据引用」使用。' }
+          }
+        },
+        collabGroup: {
+          title: '🤝 协作',
+          items: {
+            share: { name: '共享', desc: '局域网共享（网页端入口 / 端口 / 知识库目录）与共享文件夹（远程只读文件服务，端口 / 目录 / Token）。' },
+            collab: { name: '协同', desc: '协同文件编辑：端口 / 成员上限 / 编辑权限（开放·批准·只读）/ 房间 Token。' },
+            perm: { name: '权限', desc: '<strong>局域网访客白名单</strong>：允许的对话模式（默认仅普通 + 知识库）、<strong>可用智能体</strong>（通用智能体固定开放，可选开放 Agent 预设）、智能体工具（默认只读，技能由 <code>skill</code> 工具控制）、<strong>访客用的模型来源与模型</strong>（默认跟随主机当前来源）、并发与步数、沙箱级别与访问令牌（默认不需要）；网页端智能体由主机执行。' }
           }
         },
         speech: {
@@ -1990,7 +2048,7 @@ const translations = {
         agent: {
           title: '🤖 智能体',
           items: {
-            presets: { name: '预设', desc: '角色 / 模型 / 系统提示与逐工具能力，对话中点 👤 使用。' },
+            presets: { name: '预设', desc: '角色 / 模型 / 系统提示与逐工具能力，对话中点 👤 使用；内置「通用智能体」「代码智能体」「办公智能体」三个预设，开箱可用、可编辑，但不可删除。' },
             console: { name: '控制台', desc: '实时查看执行计划、任务清单、工具调用时间线与后台任务。' },
             log: { name: '日志', desc: '会话事件日志（JSONL）：事件流、消息派发与完整性。' }
           }
@@ -2004,7 +2062,7 @@ const translations = {
       },
       contextUsage: {
         title: '🧮 上下文窗口与占用圆环',
-        overview: '每个对话都有自己的<strong>上下文窗口</strong>（模型一次能记住的 token 上限）。主页聊天标题右侧的<strong>圆环</strong>就是当前对话的占用率：悬停显示「已用 / 上限」与判定依据；低于 70% 为主题色，70–90% 变橙，≥90% 变红，提示该新建对话了。',
+        overview: '每个对话都有自己的<strong>上下文窗口</strong>（模型一次能记住的 token 上限）。主页聊天标题右侧的<strong>圆环</strong>就是当前对话的占用率：悬停显示「已用 / 上限」与判定依据；低于 70% 为主题色，70–90% 变橙，≥90% 变红，提示该新建对话了；达到 <strong>80%</strong> 时会自动压缩较早的对话（见第 4 条）。',
         step1: {
           title: '已用 token 的口径',
           desc: '优先使用后端返回的<strong>真实 promptTokens</strong>；后端不回传用量时，按与实际请求一致的口径<strong>估算</strong>，并在悬停提示里标注「（估算）」。集群模式不显示圆环（每个成员各有独立上下文，合并数值没有意义）。'
@@ -2015,7 +2073,11 @@ const translations = {
         },
         step3: {
           title: '「模型」页里的两行只读信息',
-          desc: '设置 → 通用 → <strong>模型</strong>。<strong>Ollama 与 LM Studio</strong> 的配置块有一行 <strong>模型加载状态</strong>：网格逐列列出全部模型及其类型（对话 / 视觉 / 嵌入）、是否已加载、<strong>生效上下文</strong>与<strong>模型上限</strong>的对照（Ollama 还会显示 Modelfile 的 num_ctx），并可 <strong>⬇ 加载 / ⏏ 卸载</strong>（Ollama 走 keep_alive，嵌入模型自动改用 /api/embed；LM Studio 走官方 lms 命令）；不限高度、不出滑块，因此这两个来源不再重复显示「上下文窗口」行。其余来源仍有一行只读的 <strong>上下文窗口</strong>显示圆环实际使用的分母；需要重新探测时，点该块底部的 <strong>API 状态</strong> 即可（各来源的刷新按钮已合并到这一处）。<strong>窗口上限覆盖</strong>行仅在你历史上设置过覆盖值时才会出现（届时可 ✕ 清除）。',
+          desc: '设置 → <strong>模型 → 来源</strong>。<strong>Ollama 与 LM Studio</strong> 的配置块有一行 <strong>模型加载状态</strong>：网格逐列列出全部模型及其类型（对话 / 视觉 / 嵌入）、是否已加载、<strong>生效上下文</strong>与<strong>模型上限</strong>的对照（Ollama 还会显示 Modelfile 的 num_ctx），并可 <strong>⬇ 加载 / ⏏ 卸载</strong>（Ollama 走 keep_alive，嵌入模型自动改用 /api/embed；LM Studio 走官方 lms 命令）；不限高度、不出滑块，因此这两个来源不再重复显示「上下文窗口」行。其余来源仍有一行只读的 <strong>上下文窗口</strong>显示圆环实际使用的分母；需要重新探测时，点该块底部的 <strong>API 状态</strong> 即可（各来源的刷新按钮已合并到这一处）。<strong>窗口上限覆盖</strong>行仅在你历史上设置过覆盖值时才会出现（届时可 ✕ 清除）。',
+        },
+        step4: {
+          title: '上下文自动压缩',
+          desc: '占用达到窗口上限的 <strong>80%</strong> 时会<strong>自动压缩</strong>：较早的对话被替换为一份结构化摘要（最近 3 轮原文逐字保留），摘要随会话保存、可在「设置 → 日志」查看。模型仍记得任务目标、已完成的结论、涉及的文件与未决问题，更早的原文细节则由摘要代替——<strong>聊天里的原始消息一条都不会删</strong>。若后端直接报「上下文超限」，会自动压缩并<strong>重试一次</strong>；本地 Ollama / LM Studio 头部静默截断（表现为「失忆」）的情况也一并避免。'
         },
         note: {
           title: '📌 使用提示：',
@@ -2051,7 +2113,7 @@ const translations = {
         },
         office: {
           name: 'Office 文档读写（builtin-office，Word + Excel）',
-          desc: '读写本地 <strong>.docx</strong> 与 <strong>.xlsx</strong>（共 29 个函数，会话式：open 后返回 docId / workbookId）。<strong>Word</strong>：open_document / list_blocks / read_text / <strong>find_text</strong>（查找定位） / <strong>document_info</strong>（字数·大纲·样式表） / export_markdown（转 Markdown） / find_and_replace_text / <strong>replace_paragraph</strong>（整段重写，保样式） / <strong>insert_paragraph</strong> / <strong>insert_table</strong> / <strong>insert_markdown</strong>（Markdown 成段写入）/ <strong>set_paragraph_style</strong>（标题级别·样式） / <strong>delete_block</strong> / save_document（自动 .bak 备份）。<strong>Excel</strong>：open_workbook / list_sheets / read_sheet（区域读取，Markdown/JSON/CSV，可看公式）/ search_cells（定位单元格）/ <strong>query_rows</strong>（多条件筛选·排序·分页）/ <strong>aggregate</strong>（分组求和·均值·计数·去重·极值）/ set_cells（批量写单元格，保留原样式）/ append_rows / add_sheet / rename_sheet / delete_sheet / create_workbook（新建）/ save_workbook / close_workbook。写入均<strong>只改动对应 XML 部件</strong>（样式、公式、图表、图片全部保留），保存前自动生成 <code>.bak</code> 可回滚；.xls / .csv 只能读取查询（写回会提示先另存为 .xlsx）；工具参数在调用前会做<strong>别名归一</strong>（如 query_sheet → sheet、workbook_id → workbookId），漏传必填参数（如 workbookId / docId）会被直接拦住并提示先 open，不再笼统报「会话已关闭」。'
+          desc: '读写本地 <strong>.docx</strong> 与 <strong>.xlsx</strong>（共 34 个函数，会话式：open 后返回 docId / workbookId）。<strong>Word</strong>：open_document / list_blocks / read_text / <strong>find_text</strong>（查找定位） / <strong>document_info</strong>（字数·大纲·样式表） / export_markdown（转 Markdown） / find_and_replace_text / <strong>replace_paragraph</strong>（整段重写，保样式） / <strong>insert_paragraph</strong> / <strong>insert_table</strong> / <strong>insert_markdown</strong>（Markdown 成段写入）/ <strong>set_paragraph_style</strong>（标题级别·样式） / <strong>delete_block</strong> / save_document（自动 .bak 备份）；<strong>样式</strong>：<strong>list_styles</strong>（样式清单·格式·引用次数） / <strong>create_style</strong>（新建段落·字符样式） / <strong>update_style</strong>（改样式定义，正文自动跟随）/ <strong>delete_style</strong> / <strong>set_text_format</strong>（给选中文字直接设字体·字号·加粗·颜色，不依赖样式）。<strong>Excel</strong>：open_workbook / list_sheets / read_sheet（区域读取，Markdown/JSON/CSV，可看公式）/ search_cells（定位单元格）/ <strong>query_rows</strong>（多条件筛选·排序·分页）/ <strong>aggregate</strong>（分组求和·均值·计数·去重·极值）/ set_cells（批量写单元格，保留原样式）/ append_rows / add_sheet / rename_sheet / delete_sheet / create_workbook（新建）/ save_workbook / close_workbook。写入均<strong>只改动对应 XML 部件</strong>（正文只改 document.xml、样式改动只改 styles.xml，公式 / 图表 / 图片全部保留），保存前自动生成 <code>.bak</code> 可回滚；.xls / .csv 只能读取查询（写回会提示先另存为 .xlsx）；工具参数在调用前会做<strong>别名归一</strong>（如 query_sheet → sheet、workbook_id → workbookId），漏传必填参数（如 workbookId / docId）会被直接拦住并提示先 open，不再笼统报「会话已关闭」。'
         },
         drawio: {
           name: 'drawio 图表（builtin-drawio）',
@@ -2079,13 +2141,13 @@ const translations = {
         },
         tray: {
           title: '折叠到托管区（后台继续运行）',
-          desc: '点关闭只把窗口<strong>收起</strong>到屏幕右下角「托管区」（Windows 通知区域 / macOS 菜单栏），程序与后台任务<strong>不受影响</strong>地继续运行；因为不会中断任务，折叠时<strong>不再弹提醒</strong>，首次折叠会有一个气泡提示。'
+          desc: '点关闭只把窗口<strong>收起</strong>到屏幕右下角「托管区」（Windows 通知区域 / macOS 菜单栏），程序与后台任务<strong>不受影响</strong>地继续运行；因为不会中断任务，折叠时<strong>不再弹提醒</strong>，首次折叠会有一个气泡提示。<strong>文件窗口</strong>（画布 / 脚手架等独立窗口）在<strong>后台任务运行中</strong>关窗时同样只收起、不结束任务（可从托管区唤回），没有任务在跑时关窗即正常关闭。'
         },
         trayMenu: {
           title: '📌 托管区图标可以做什么：',
-          hover: '<strong>鼠标悬停</strong>：显示后台任务数与<strong>每一个实例</strong>的进度与预计剩余时间（如「AI-KM · 3 个任务运行中 / · Agent脚手架 1 12/50 剩 3分20秒 / · Agent脚手架 2 3/80 剩 9分10秒」）—— Agent脚手架任务会给出<strong>已完成/总数</strong>与<strong>预计剩余时间</strong>（本段还没跑完任何一项时显示「剩 估算中」）；受系统提示长度限制只列前后几个实例，并在末尾标「…还有 N 个」，完整列表看右键菜单。',
+          hover: '<strong>鼠标悬停</strong>：显示后台任务数与<strong>每个任务</strong>的进度与预计剩余时间（如「AI-KM · 3 个任务运行中 / · Agent脚手架 12/50 剩 3分20秒 / · Agent脚手架 3/80 剩 9分10秒」）—— Agent脚手架任务会给出<strong>已完成/总数</strong>与<strong>预计剩余时间</strong>（本段还没跑完任何一项时显示「剩 估算中」）；受系统提示长度限制只列前后几个任务，并在末尾标「…还有 N 个」，完整列表看右键菜单。',
           leftClick: '<strong>单击图标</strong>：窗口在前台时收起、已收起时唤回；<strong>双击</strong>始终唤回窗口。',
-          rightClick: '<strong>右键菜单</strong>（系统原生菜单）：显示主窗口 / <strong>设置…</strong>（直达「基础」，方便改回关闭行为）/ 后台任务列表 / 退出 AI-KM。'
+          rightClick: '<strong>右键菜单</strong>（系统原生菜单）：显示主窗口 / <strong>设置…</strong>（直达「基础」，方便改回关闭行为）/ 后台任务列表（多个窗口同时有任务时按窗口分组，<strong>点某条任务即唤回它所在的窗口</strong>）/ 隐藏的窗口（列出已收起的窗口，点一下即唤回）/ 退出 AI-KM。'
         },
         note: {
           title: '📌 使用提示：',
@@ -2094,9 +2156,20 @@ const translations = {
       }
     },
     dataCanvas: {
+      usage: {
+        title: '📂 使用方式（.data 画布文件）',
+        items: [
+          '文件类型：<code>.data</code> 就是画布文件——在<strong>知识管理</strong>的文件树里打开它：<strong>浏览</strong>与<strong>可视编辑</strong>视图都渲染数据画布模块（模块自带 主页 / 数据 / 画布 / 帮助 四个子标签），<strong>源码编辑</strong>视图显示 JSON 文本',
+          '新建：文件树顶部 ➕ 创建文件，或文件树 / 文件视图右键「新建 → 数据画布」，类型选 <strong>数据画布</strong>（<code>.data</code>）；新建的文件打开即<strong>空画布</strong>，可直接建模',
+          '保存：画布内容变更后约 <strong>1.5 秒防抖自动保存</strong>回它自己的 <code>.data</code> 文件，工具栏 💾 也可手动保存；保存后已打开的标签内容同步（切到源码编辑立刻能看到新 JSON），其它窗口 / 标签也会被通知刷新',
+          '切换文件：切换标签时未保存的改动会<strong>先静默写回原文件</strong>再载入新文件，新文件为空时画布清空（不残留上一个文件的内容）；关闭标签 / 离开知识管理时同样先写回',
+          '独立窗口：文件右键「打开」<strong>固定为画布</strong>（没有视图切换器）；要改 JSON 请在知识管理里切到「源码编辑」。<code>.data</code> 已注册系统文件关联，双击即用本应用打开',
+          '两种用法：既可作为画布文件打开编辑，也可用画布工具栏「导出」得到 <code>.data</code> 数据包、或把 <code>.data</code> 拖进画布作为<strong>子画布节点</strong>导入（两者内容同构：<code>models</code> + <code>activeModelId</code>）'
+        ]
+      },
       overview: {
         title: '什么是数据画布？',
-        description: '数据画布是<strong>顶层独立模块</strong>（原属 Agent脚手架模块，现已独立到导航栏）：在画布上用节点与连线做<strong>无代码数据建模</strong>——表格 / 参数 / 图表 / 子画布等节点，可缩放、吸附网格、一键重新计算；「数据」页为每列配置<strong>表单录入</strong>方式（文本 / 多行 / 数字 / 日期 / 下拉 / 开关）并批量录入，「主页」页以图表看板展示。画布内容会<strong>自动保存</strong>到关联的 <code>.task</code> 任务文件（变更后约 1.5 秒防抖，工具栏 💾 可立即保存），双击画布 <code>.task</code> 文件会直接打开本模块并加载。'
+        description: '数据画布是<strong>知识管理中的一种文件类型</strong>（<code>.data</code>，不再是顶层模块、也没有单独的导航入口）：在画布上用节点与连线做<strong>无代码数据建模</strong>——表格 / 参数 / 图表 / 子画布等节点，可缩放、吸附网格、一键重新计算；「数据」页为每列配置<strong>表单录入</strong>方式（文本 / 多行 / 数字 / 日期 / 下拉 / 开关）并批量录入，「主页」页以图表看板展示。画布内容会<strong>自动保存</strong>到它自己的 <code>.data</code> 文件（变更后约 1.5 秒防抖，工具栏 💾 可立即保存），在知识管理中双击 <code>.data</code> 即打开本模块并加载。'
       },
       scenarios: {
         title: '典型场景',
@@ -2110,7 +2183,7 @@ const translations = {
       steps: {
         title: '使用步骤',
         items: [
-          '在导航栏选择 <strong>数据画布</strong>（可在 设置 → 界面 → 功能开关 中隐藏该按钮）',
+          '在<strong>知识管理</strong>的文件树里打开 <code>.data</code> 文件（<strong>浏览</strong> / <strong>可视编辑</strong>视图即画布模块）',
           '「画布」页双击空白处或点 + 添加节点（表格 / 参数 / 图表 / 子画布等），拖拽摆位、连线定义数据流向；选中节点后可在右侧属性面板编辑',
           '「数据」页录入数据：按列配置录入方式（或由表格节点从 Excel / Markdown 导入），侧边栏按标题字段快速切换记录',
           '「主页」页查看图表看板：支持顺序排列 / 自定义拖放与布局锁定；画布工具栏可导出 / 导入 <code>.data</code> 数据包'
@@ -2119,16 +2192,17 @@ const translations = {
       notes: {
         title: '说明',
         items: [
-          '画布文件与其它脚手架同为 <code>.task</code> 格式：内容变更自动保存，文件缺失时下次保存会重新询问位置',
-          '一个画布任务文件可容纳多个数据模型，随文件一起保存与恢复；导出数据包用于分享或备份',
-          '数据画布不再出现在 Agent脚手架 的「新建实例」菜单中；旧版本的画布 <code>.task</code> 文件双击仍会打开本模块'
+          '画布文件为 <code>.data</code>：内容变更自动保存，文件缺失时下次保存会重新询问位置',
+          '一个画布文件可容纳多个数据模型，随文件一起保存与恢复；导出数据包用于分享或备份',
+          '画布不再从 <code>.task</code> 打开：旧的画布 <code>.task</code> 文件（内容形如 <code>{ "models": [...] }</code>）双击时会提示改用 <code>.data</code> 扩展名——把它<strong>改名为 <code>.data</code> 并放进工作区</strong>，即可在知识管理里继续当画布编辑（内容形状同构，改名即可打开）',
+          '画布顶栏会随面板宽度<strong>自动换行</strong>：分屏或窗口很窄时右侧按钮不会被裁掉'
         ]
       }
     },
     agentScaffold: {
       overview: {
         title: '什么是 Agent脚手架？',
-        description: 'Agent脚手架是<strong>通用 Agent 执行框架</strong>（应用内称 Harness）：以<strong>表格驱动</strong>的方式跑批量任务——<strong>面板里唯一的脚手架就是「Agent脚手架」</strong>：原批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格四种脚手架已并入为它的<strong>四种预设</strong>（旧 <code>.task</code> 文件打开时自动转换）。每个<strong>实例</strong>关联一个 <code>.task</code> 任务文件，可中断续跑、后台继续；需要“写程序调用工具”的 PTC 能力请用<strong>主页的 PTC 模式</strong>。'
+        description: 'Agent脚手架是<strong>通用 Agent 执行框架</strong>（应用内称 Harness）：以<strong>表格驱动</strong>的方式跑批量任务——<strong>唯一的脚手架就是它自己</strong>：原批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格四种脚手架已并入为它的<strong>四种预设</strong>（旧 <code>.task</code> 文件打开时自动转换）。每个 <code>.task</code> 文件就是一个独立任务（专属「脚手架」视图，在独立窗口打开），可中断续跑、后台继续；需要“写程序调用工具”的 PTC 能力请用<strong>主页的 PTC 模式</strong>。'
       },
       scaffolds: {
         title: 'Agent脚手架的配置方法（来源 × 执行方式 × 输出方式）',
@@ -2154,15 +2228,15 @@ const translations = {
         },
         pipeline: {
           title: '🧩 Agent脚手架',
-          desc: '以「批量智能体运行」为骨架演进的<strong>Agent脚手架</strong>：任务页拆为<strong>来源</strong>、<strong>执行方式</strong>与<strong>输出方式</strong>三个维度——来源可选 <strong>表格（导入 xlsx / csv）</strong>、<strong>文件夹（扫描本地文件，逐文件生成任务行）</strong> 或 <strong>文本（每行一条：可粘贴网址 / 文件路径 / 任意文本）</strong>；执行方式可选 <strong>智能体（完整会话，带工具）</strong>（任务指令、并发智能体）或 <strong>纯 LLM 推理（无工具）</strong>；输出方式可选 <strong>单独结果</strong>（智能体→结果列；纯 LLM→逐列写回原表新列）或 <strong>结构化提取</strong>（每行输出 JSON，按字段/主键合并进数据表；智能体与纯 LLM 都可用）——单独结果即「只有一个字段的结构化结果」，两者共用导出列 / 运行信息配置，相互切换不会丢失导出列选择；旧「表格定向推理」任务读取后自动落在「结构化提取」（旧写回值会转成数据表记录）。纯 LLM 的结构化分支另含<strong>任务目标</strong>（支持 {{列名}} 占位符）与<strong>内容获取</strong>（行数据 / 读取字段中的本地文件 / 抓取字段中的网页——抓网页即链接采集，会把页面标题与发现的链接存为行字段并按「链接跟随」策略在深度与页数约束内自动扩展新任务行）。<strong>任务页</strong>无外框无标题，三列排布：左列＝<strong>执行与配置</strong>一张卡片（<strong>操作栏并入卡片顶部</strong>：读取 / 保存 / 另存为 · 重置 / 停止 / 启动；随后就是<strong>预设</strong>下拉），中列＝<strong>输入</strong>，右列＝<strong>输出</strong>（窄窗口直接降为单列——不再有中间的两栏态；三列面板铺满任务页高度，内容超高时在各自面板内滚动——左列配置项随卡片整体上下滚动；输入面板里「数据选择」在上、「任务指令」占满剩余高度）：「预设」下拉（批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格）可一键套用旧脚手架的配置形态，手动改动后回到「自定义配置」；「读取」还能直接打开旧脚手架的 .task 任务文件并自动转换（含写回值 / 任务行 / 已采集数据）。导入表格或选择文件夹后，输入面板下方会显示<strong>来源路径</strong>（附行数，悬停看全文）；「执行」面板的<strong>详情标题</strong>可选详情表格左列显示哪个字段（不显示 / 一个字段，运行中可随时切换）；「输出」面板的<strong>输出字段</strong>以表格编辑（字段名 + 推理指令 / 说明；结构化提取时另含「必填 / 主键」两列）——逐列写回与结构化提取<strong>共用同一张字段列表</strong>，切换输出方式不用重配；<strong>输入</strong>面板分<strong>任务指令</strong>（原「任务模板 / 任务目标」统一，含 {{列名}} 占位符，每行渲染一次，三种执行方式共用）与<strong>数据选择</strong>（点列名把 {{列名}} 写入 / 移除任务指令，已引用高亮，带全部引用 / 全部移除；结构化提取的「内容获取 / 取值字段 / 抓取设置」也在此）两段。页面按标签页分工：<strong>任务</strong>（配置与启动）、<strong>详情</strong>（每行一个子任务：状态 / 开始结束时间 / 耗时 / 推理步数 / Token（<strong>纯 LLM 推理同样统计行 Token</strong>）/ 错误；<strong>结构化提取按「提取字段」、逐列写回按「目标列」逐列展示</strong>，点行看完整记录（写回模式可在行详情里改目标列结果 JSON）与提取数据；运行中可直接<strong>停止</strong>）、<strong>结果</strong>（预览与导出：结构化模式看提取数据集，否则只读一览全部行；纯 LLM 写回列自动成列；导出预览：结果页直接展示<strong>导出 Excel 会写入的内容</strong>，列在「输出」面板配置（竖向列表逐项开关原表列 / 运行信息（行号 / 任务指令 / 状态 / 时间 / Token…）/ 各轮结果，拖动手柄调整顺序——顺序即导出表的列顺序，点列名即可改名（结果页表头与导出的 Excel 同用此名，改过名的列标出原名），结构化模式下按产生该条数据的任务行合并；「输出方式 / 输出字段 / 导出列」的说明文字改为在标题上悬停查看）、结果页<strong>渐进式加载</strong>（滚动到底自动继续），支持全列关键字搜索、按列筛选与行号跳转高亮，并可<strong>逐条删除</strong>单条结果；重跑结构化提取默认 <strong>替换该行原有结果</strong>（可在「输出 → 重跑结果」改为「保留并合并」）；结果表最左「<strong>任务行</strong>」列点号可直接跳到「详情」对应行；源表改过时点「<strong>同步源表</strong>」重读并按行指纹 / 首列值把结果对回原位（新增 / 已变更 / 已移除都标出来，工具栏「+新增 ~变更 -移除」里点「新增 / 变更」即在下方表格筛选、悬停看列级差异与对位说明）；源表增删 / 改过行后重读表格会按<strong>行指纹</strong>把历史结果对回正确的行，并给出「新增 / 已变更 / 已移除」增量（已变更 = 还是同一行、结果仍留在该行上（源数据改过，建议重跑）；已删行的多余结果会自动删掉（对位不可靠时只标「已移除」，结果页「已移除 N」按钮可只看这些）；结果条数多于任务行数时表下会给出统计，工具栏的「异常 N」按钮可筛出不属于任何任务行的结果（「删除这些」可删掉，「清除」只取消筛选），「同步结果」则按当前任务行重建结果、数量与数据都与任务行一致））；增删位置不可靠时只报行数增减）、<strong>图谱</strong>（链接采集的<strong>爬取轨迹</strong>——节点=页面、边=谁发现谁、给出深度分布；或任意智能体行的<strong>访问路径</strong>——每行一个「智能体」节点（紫），连向它访问过的信源与调用过的 MCP 服务（未调用工具的智能体也显示为单个节点）；工具栏用<strong>彩色圆点图例</strong>展示各类型（单击即筛选显示 / 隐藏），节点上限与视图选择同栏（默认 2000；打开时先给一个较广的初始视角，布局收敛后自动把全部节点框进视口并居中——自己缩放 / 拖动后就不再自动调整了）；不需要时可在「执行与配置」取消勾选 <strong>启用「图谱」标签页</strong>（关闭后不做投影、也不显示该页签）；默认视图会按任务自动选择（有网页行 → 爬取轨迹，否则有过程快照 → 访问路径），无内容时给出说明文案）与<strong>日志</strong>（主日志 + 各线程、级别筛选；清空按钮在日志工具栏右侧）。旧的批量 / 表格推理 / 文件采集 / 链接采集 <code>.task</code> 文件打开时会自动转换为本流水线配置。'
+          desc: '以「批量智能体运行」为骨架演进的<strong>Agent脚手架</strong>：任务页拆为<strong>来源</strong>、<strong>执行方式</strong>与<strong>输出方式</strong>三个维度——来源可选 <strong>表格（导入 xlsx / csv）</strong>、<strong>文件夹（扫描本地文件，逐文件生成任务行）</strong> 或 <strong>文本（每行一条：可粘贴网址 / 文件路径 / 任意文本）</strong>；执行方式可选 <strong>智能体（完整会话，带工具）</strong>（任务指令、并发智能体）或 <strong>纯 LLM 推理（无工具）</strong>；输出方式可选 <strong>单独结果</strong>（智能体→结果列；纯 LLM→逐列写回原表新列）或 <strong>结构化提取</strong>（每行输出 JSON，按字段/主键合并进数据表；智能体与纯 LLM 都可用）——单独结果即「只有一个字段的结构化结果」，两者共用导出列 / 运行信息配置，相互切换不会丢失导出列选择；旧「表格定向推理」任务读取后自动落在「结构化提取」（旧写回值会转成数据表记录）。纯 LLM 的结构化分支另含<strong>任务目标</strong>（支持 {{列名}} 占位符）与<strong>内容获取</strong>（行数据 / 读取字段中的本地文件 / 抓取字段中的网页——抓网页即链接采集，会把页面标题与发现的链接存为行字段并按「链接跟随」策略在深度与页数约束内自动扩展新任务行）。<strong>任务页</strong>无外框无标题，三列排布：左列＝<strong>执行与配置</strong>一张卡片（<strong>操作栏并入卡片顶部</strong>：读取 / 保存 / 另存为 · 重置 / 停止 / 启动；随后就是<strong>预设</strong>下拉），中列＝<strong>输入</strong>，右列＝<strong>输出</strong>（窄窗口直接降为单列——不再有中间的两栏态；三列面板铺满任务页高度，内容超高时在各自面板内滚动——左列配置项随卡片整体上下滚动；输入面板里「数据选择」在上、「任务指令」占满剩余高度）：「预设」下拉（批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格）可一键套用旧脚手架的配置形态，手动改动后回到「自定义配置」；「读取」还能直接打开旧脚手架的 .task 任务文件并自动转换（含写回值 / 任务行 / 已采集数据）。导入表格或选择文件夹后，输入面板下方会显示<strong>来源路径</strong>（附行数，悬停看全文）；「执行」面板的<strong>详情标题</strong>可选详情表格左列显示哪个字段（不显示 / 一个字段，运行中可随时切换）；「输出」面板的<strong>输出字段</strong>以表格编辑（字段名 + 推理指令 / 说明；结构化提取时另含「必填 / 主键」两列）——逐列写回与结构化提取<strong>共用同一张字段列表</strong>，切换输出方式不用重配；<strong>输入</strong>面板分<strong>任务指令</strong>（原「任务模板 / 任务目标」统一，含 {{列名}} 占位符，每行渲染一次，三种执行方式共用）与<strong>数据选择</strong>（点列名把 {{列名}} 写入 / 移除任务指令，已引用高亮，带全部引用 / 全部移除；结构化提取的「内容获取 / 取值字段 / 抓取设置」也在此）两段。页面按标签页分工：<strong>任务</strong>（配置与启动）、<strong>详情</strong>（每行一个子任务：状态 / 开始结束时间 / 耗时 / 推理步数 / Token（<strong>纯 LLM 推理同样统计行 Token</strong>）/ 错误；<strong>结构化提取按「提取字段」、逐列写回按「目标列」逐列展示</strong>，点行看完整记录（写回模式可在行详情里改目标列结果 JSON）与提取数据；运行中可直接<strong>停止</strong>）、<strong>结果</strong>（预览与导出：结构化模式看提取数据集，否则只读一览全部行；纯 LLM 写回列自动成列；导出预览：结果页直接展示<strong>导出 Excel 会写入的内容</strong>，列在「输出」面板配置（竖向列表逐项开关原表列 / 运行信息（行号 / 任务指令 / 状态 / 时间 / Token…）/ 各轮结果，拖动手柄调整顺序——顺序即导出表的列顺序，点列名即可改名（结果页表头与导出的 Excel 同用此名，改过名的列标出原名），结构化模式下按产生该条数据的任务行合并；「输出方式 / 输出字段 / 导出列」的说明文字改为在标题上悬停查看）、结果页<strong>渐进式加载</strong>（滚动到底自动继续），支持全列关键字搜索、按列筛选与行号跳转高亮，并可<strong>逐条删除</strong>单条结果；重跑结构化提取默认 <strong>替换该行原有结果</strong>（可在「输出 → 重跑结果」改为「保留并合并」）；结果表最左「<strong>任务行</strong>」列点号可直接跳到「详情」对应行；源表改过时点「<strong>同步源表</strong>」重读并按行指纹 / 首列值把结果对回原位（新增 / 已变更 / 已移除都标出来，工具栏「+新增 ~变更 -移除」里点「新增 / 变更」即在下方表格筛选、悬停看列级差异与对位说明）；源表增删 / 改过行后重读表格会按<strong>行指纹</strong>把历史结果对回正确的行，并给出「新增 / 已变更 / 已移除」增量（已变更 = 还是同一行、结果仍留在该行上（源数据改过，建议重跑）；已删行的多余结果会自动删掉（对位不可靠时只标「已移除」，结果页「已移除 N」按钮可只看这些）；结果条数多于任务行数时表下会给出统计，工具栏的「异常 N」按钮可筛出不属于任何任务行的结果（「删除这些」可删掉，「清除」只取消筛选），「同步结果」则按当前任务行重建结果、数量与数据都与任务行一致））；增删位置不可靠时只报行数增减）、<strong>图谱</strong>（链接采集的<strong>爬取轨迹</strong>——节点=页面、边=谁发现谁、给出深度分布；或任意智能体行的<strong>访问路径</strong>——每行一个「智能体」节点（紫），连向它访问过的信源与调用过的 MCP 服务（未调用工具的智能体也显示为单个节点）；工具栏用<strong>彩色圆点图例</strong>展示各类型（单击即筛选显示 / 隐藏），节点上限与视图选择同栏（默认 2000；打开时先给一个较广的初始视角，布局收敛后自动把全部节点框进视口并居中——自己缩放 / 拖动后就不再自动调整了）；不需要时可在「执行与配置」取消勾选 <strong>启用「图谱」标签页</strong>（关闭后不做投影、也不显示该页签）；默认视图会按任务自动选择（有网页行 → 爬取轨迹，否则有过程快照 → 访问路径），无内容时给出说明文案）与<strong>日志</strong>（左侧导航栏纵向列出主日志与各线程、级别筛选；清空按钮在导航栏标题右侧）。旧的批量 / 表格推理 / 文件采集 / 链接采集 <code>.task</code> 文件打开时会自动转换为本流水线配置。'
         }
       },
       usage: {
         title: '使用步骤',
         items: [
-          '在左侧导航栏选择 <strong>Agent脚手架</strong>',
-          '顶部 <strong>实例导航栏</strong> 可同时开多个实例：左端常驻按钮 <strong>打开 / 新建 / 开始 / 暂停 / 保存</strong>（<strong>开始 / 暂停 按当前实例的任务状态显示</strong>：有待处理行才出现「开始」，运行中只显示「暂停」，没活可干时两个都不出现）（打开 = 选择 .task 文件在新实例中打开；新建 = 直接新建一个任务实例（**不预建文件**，首次「保存」时再选 .task 保存位置）；<strong>开始 / 暂停 / 保存只作用于当前标签的任务</strong>（开始 = 运行 / 继续当前任务；暂停 = 暂停当前任务（状态保留）；保存 = 把当前任务写回它的任务文件（尚未关联文件的会先弹出保存对话框选位置），运行中的保存当前快照）；<strong>按住 Ctrl / ⌘ / Alt 点击</strong> 这三个按钮则作用于全部已打开实例；保存与「导出 Excel」的结果（保存中 / 已保存 / 已取消 / 失败）显示在<strong>底部状态栏左侧</strong>，成功与取消不再弹提示框，几秒后自动消失（失败详情悬停可见），一次保存多个实例时汇总成一行；任务的<strong>运行状态显示在状态栏最左侧</strong>（转圈 + 「执行中…」等文字），左列「启动」按钮运行时只变灰、不再显示「运行中…」）——不再有下拉菜单；标签悬停可看文件位置（运行中还会显示进度与预计剩余时间），双击或右键重命名、点 × 关闭（文件保留）；双击 <code>.task</code> 文件会直接打开对应实例（关闭全部实例后会出现<strong>引导页</strong>：「新建任务 / 打开任务」两个推荐按钮；此时实例导航栏会隐藏，因为其中的按钮在这里没作用）',
-          '新建实例即「Agent脚手架」（唯一类型）；新建时<strong>不预建任务文件</strong>，首次点「保存」再选 <code>.task</code> 保存位置；在任务页左上「<strong>预设</strong>」下拉选四种形态之一（批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格），或保持「自定义配置」',
+          '在<strong>知识管理</strong>的文件树 / 文件视图里双击（或搜索、右键打开）一个 <code>.task</code> 文件，即在<strong>独立窗口</strong>里打开它的专属「脚手架」视图；也可用右键「新建 → 脚手架」新建一个（写入空任务骨架，随即打开窗口）',
+          '一个窗口只服务一个 .task（单文件隔离；再次打开同一文件会聚焦已开的窗口）：脚手架本体就在窗口里——任务 / 详情 / 结果 / 图谱 / 日志 页签，底部状态栏的 读取 / 保存 / 另存为 · 重置 / 停止 / 启动，配置与结果都写回这个文件',
+          '「新建 → 脚手架」写入的是空任务骨架（<code>scaffold: pipeline</code>）；在任务页左上「<strong>预设</strong>」下拉选四种形态之一（批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格），或保持「自定义配置」',
           '任务页左列「执行与配置」的 <strong>随任务文件保留</strong> 可分别勾选是否把 <strong>图谱数据</strong>（行过程快照，图谱与行详情的数据来源）与 <strong>运行日志</strong> 写进任务文件（重开后仍可查看）；<strong>默认两者都不保留</strong>（任务文件更小）',
           '任务页「<strong>轮次</strong>」可对同一批任务行跑多轮：新建轮次保留行数据（状态置回待处理）、可换配置或指令再跑，每轮各存一份配置快照与结果，用下拉切换查看（结果 / 图谱 / 导出都针对当前轮）',
           '「数据选择」里的<strong>前轮结果</strong>芯片（如 <code>{{第1轮.结果}}</code> / <code>{{第1轮.字段}}</code>）可把前几轮产出写进本轮指令（取<strong>同一行</strong>的前轮结果）；「导出列」里再勾选想要的轮次，就能把各轮结果按行<strong>并排成列</strong>对比',
@@ -2170,7 +2244,7 @@ const translations = {
           '点表格行弹出<strong>行详情</strong>，分<strong>任务 / 过程 / 输出</strong>三个页签（页签在左、运行计数（开始 / 结束 / 耗时 / 步数 / Token）在右；切换页签后会保持，连续核对多行不用反复切）：任务 = 占位符替换后真正发出的任务，过程 = 推理步骤与工具调用（与主页对话的工具盒子同款：<strong>默认只显示单行摘要</strong>，点一下展开参数与结果，运行中实时更新），输出 = 提取数据 / 写回列 / 结果文本（运行中<strong>直接流式显示渲染后的正文</strong>，不再显示 Markdown 源码；Markdown 按预览尺寸紧凑排版，不再整段被撑高）；<strong>底部按钮栏</strong>从左到右是页签对应的操作（复制 / 编辑，编辑时变保存 + 取消）→ <strong>状态下拉</strong>（待处理 / 已完成 / 失败 / 跳过，只改状态、结果不动——选「待处理」即待执行，回任务页点启动就会跑它；执行中的行不可改）→ <strong>停止本行</strong>（仅该行执行中显示：取消它的会话或请求，收尾为「跳过」，<strong>其它行与整批不受影响</strong>）→ <strong>重跑本行</strong>（不是执行中时显示：批量运行中→插到队首立即执行，未运行→置待处理并启动）→ 删除，右侧是关闭（按钮与下拉同高；详情表格的「操作」列只显示状态文字，不再放任何按钮）',
           '「<strong>详情</strong>」页的<strong>筛选</strong>按钮打开筛选面板：状态 / 搜索 / 结果 / 行号 / 步数 / 耗时 集中在一处（步数、耗时用 <strong>&lt; ≤ &gt; ≥ =</strong> + 数值；未运行按 0 步 / 0 秒，耗时默认秒且可写 90 / 1.5m / 2m30s），面板内实时显示<strong>命中行数</strong>；命中行可一键<strong>批量标记</strong>为 待处理（= 待执行，下次启动即跑）/ 跳过 / 已完成 / 失败，或直接「重跑命中行」（标记待处理并立即执行）',
           '按 <strong>来源 / 执行方式 / 输出方式</strong> 三个维度补齐配置：来源 = 表格 / 文件夹 / 文本，执行方式 = 智能体 / 纯 LLM，输出方式 = 单独结果 / 结构化提取；再点「启动」开始',
-          '任务支持中断后续跑（状态保留），并保存在实例关联的 <code>.task</code> 任务文件中，双击该文件即可恢复',
+          '任务支持中断续跑（状态保留），并保存在自己的 <code>.task</code> 任务文件中，重开该文件即可继续',
         ]
       }
     },
@@ -2183,15 +2257,15 @@ const translations = {
         title: '使用步骤',
         step1: { title: '准备 Agent 预设', desc: '先到「设置 → 智能体 → 预设」准备成员：每个预设包含角色系统提示、模型、温度与能力（工具 / 技能 / 知识库 / MCP）。集群成员即预设本身，不需要在集群里重复配置。' },
         step2: { title: '在主页切到集群模式', desc: '主页输入区左下角的<strong>模式下拉</strong>选择「集群」，旁边会出现<strong>成员标签</strong>；点击后勾选参与本次任务的预设（<strong>勾选顺序 = 发言顺序</strong>），浮层底部可直接进入「管理预设...」。' },
-        step3: { title: '选择运行方式与总结', desc: '成员标签右侧的<strong>运行方式</strong>下拉提供三档：全员响应 / 群主撮合 / 辩论；再右侧的<strong>总结</strong>开关决定任务结束后是否由群主汇总（默认关闭）。这些选项随对话保存。' },
+        step3: { title: '选择运行方式', desc: '成员标签右侧的<strong>运行方式</strong>下拉提供三档：全员响应 / 辩论 / 项目组；该选项随对话保存。' },
         step4: { title: '发送任务 & @点名', desc: '在输入框输入任务并发送：不带 <code>@</code> 时按运行方式让成员参与；输入 <code>@成员名</code> 则<strong>只唤起该成员</strong>单独执行（不总结）。' },
         step5: { title: '查看过程与结果', desc: '成员汇报就是对话里的消息：正文按 Markdown 渲染，<strong>工具调用 / 思考过程以卡片形式内联</strong>（与智能体模式完全一致），可展开查看参数与结果；运行中可 ■ 停止，任务完成后会自动生成对话标题。' }
       },
       modes: {
         title: '运行方式（输入区下拉）',
         'auto-mention': { name: '全员响应', desc: '所有选中成员依次就任务作答；成员也可在回复里 @同事 追加协作。默认方式。' },
-        'auto-host': { name: '群主撮合', desc: '全员发言后由群主串场点名撮合：成员即使不写 @ 也能被安排接力回应，随后可选群主总结。' },
-        debate: { name: '辩论', desc: '多个成员围绕任务多轮辩论，最后由群主中立总结，适合需要多方对比的决策类问题。' }
+        debate: { name: '辩论', desc: '多个成员围绕任务多轮辩论，最后由群主中立总结，适合需要多方对比的决策类问题。' },
+        team: { name: '项目组（Lead 编排）', desc: '由第一位成员担任 Lead，自动把目标拆成任务、按依赖指派成员，结束时汇总交付；消息、泳道、名册、任务、通信为并列标签且各自全宽；泳道按依赖层级竖向展示任务关系与成员状态；名册显示各成员 token / 工具次数 / 最后活动（超 90 秒无活动会提示可能卡住）；停止后可从任务页「继续未完成任务」；任务页可调并发闸门（1~8），点任务跳转到对应消息、点消息上的任务标签回到任务板；长产出用产出物落成文件（群聊显示可打开的卡片，任务卡带 📎 附件），不占上下文。' }
       }
     },
     browser: {
@@ -2224,69 +2298,29 @@ const translations = {
           'AI 会话标签会<strong>空闲自动回收</strong>以免堆积；想保留某个页面就点一下该标签。',
           '缓存管理位于右侧设置栏底部，可查看缓存大小并一键清理。',
           '浏览器 Agent 同时是<strong>内置 MCP 服务（builtin-browser）</strong>：智能体通过 browser_* 工具导航、新建 / 切换 / 关闭标签、读取正文（文本 / Markdown / HTML）、点击、输入、滚动与截图，可在「设置 → 工具 → MCP」中开关与查看函数。同页还有 <strong>drawio 内置服务（builtin-drawio）</strong>：智能体用 44 个 drawio_* 工具直接创建、查看、修改、布局与导出本地 .drawio 图表。',
-          '知识管理中的 <strong>.html / .htm</strong> 本地网页可用「打开文件」直接交给浏览器打开渲染，AI 还能继续对其操作、提取正文。'
+          '知识管理中的 <strong>.html / .htm</strong> 本地网页默认交给<strong>内置浏览器</strong>打开渲染（双击 / 搜索 / 各视图点开，与「打开文件」一致），AI 还能继续对其操作、提取正文；要看文件视图预览或改源码，走右键「打开 → 选对应视图」。'
         ]
-      }
-    },
-    todo: {
-      overview: {
-        title: '什么是待办管理？',
-        description: '待办管理是一个<strong>灵感 / 规划 / 待办一体的条目管理器</strong>（笔记与项目一体），数据默认保存在浏览器 <code>localStorage</code>，可随时导入 / 导出备份迁移。支持 <strong>随手记、树状图、月视图、周视图</strong> 四种查看方式。'
-      },
-      views: {
-        title: '四种视图',
-        notes: { name: '随手记', desc: '条目卡片列表 + 右侧块编辑器，可置顶 / 隐藏 / 删除' },
-        tree: { name: '树状图', desc: '可拖拽排序的层级树，支持添加子项、删除' },
-        month: { name: '月视图', desc: '整月日历，把条目拖拽到日期上安排日程' },
-        week: { name: '周视图', desc: '单周日历（周日~周六），左右翻周、拖拽排程' }
-      },
-      tips: {
-        title: '各视图使用要点',
-        notes: {
-          name: '随手记',
-          step1: { title: '快速记录', desc: '点工具栏「+」新建，右侧块编辑器直接输入，Ctrl+S 或点保存持久化；标题或正文填写其一即可。' },
-          step2: { title: '置顶 / 隐藏', desc: '卡片图钉按钮可置顶，眼睛按钮可隐藏（类似归档）；配合顶部「显示/隐藏筛选」可查看隐藏项或全部。' },
-          step3: { title: '搜索与筛选', desc: '顶部搜索框按标题 / 正文全文匹配；分类筛选按状态过滤；默认置顶优先 + 按更新时间排序。' }
-        },
-        tree: {
-          name: '树状图',
-          step1: { title: '层级与子项', desc: '节点可添加子项，展开 / 折叠状态自动保存；拖拽节点可调整层级与顺序。' },
-          step2: { title: '右键排序', desc: '右键节点可切换排序方式（默认拖拽顺序 / 名称 / 修改时间 / 开始 / 结束 / 状态），再次点击同项切换正倒序。' },
-          step3: { title: '跳转编辑', desc: '点击节点在右侧编辑器查看 / 编辑；父级被筛选隐藏时会自动保留可见的后代节点。' }
-        },
-        month: {
-          name: '月视图',
-          step1: { title: '翻月', desc: '「回到今天」回到当前月；◀ / ▶ 切换上 / 下月；点击日期可选中该日期。' },
-          step2: { title: '拖拽排程', desc: '把项目卡片拖到任意日期：有起止时间的项目整段平移（保持时长），无时间的项目落为单日 9:00~17:00。' },
-          step3: { title: '快速新建', desc: '点击日期右上角「+」以该日期为起止时间新建项目；日期旁徽标显示当天项目数量。' }
-        },
-        week: {
-          name: '周视图',
-          step1: { title: '翻周', desc: '工具栏「回到今天」返回本周；◀ / ▶ 按钮向前 / 后翻 7 天；标题显示当前周的日期范围与周序号。' },
-          step2: { title: '排程拖拽', desc: '项目卡片可直接拖拽到任意一天（与月视图一致）：有起止时间的项目整段平移（保持时长），无时间的项目落为单日 9:00~17:00。' },
-          step3: { title: '快速新建', desc: '点击某天的「+」会以该日期为起止时间新建项目；每天顶部显示项目数量徽标，今天列高亮。' },
-          step4: { title: '删除', desc: '悬浮项目卡片时右上角出现垃圾桶按钮，点击即可删除（含子项）。' }
-        }
       }
     },
     faq: [],
     learning: {
       overview: {
         title: '掌握式学习：记忆与复习',
-        desc: '<strong>学习</strong>模块把已保存的知识库（<code>.kb</code>）变成可以“学会”的内容：围绕文件与本体实体做掌握度追踪与间隔复习，配合闪卡练习、错题本与考试，形成“练习 → 复习 → 考试”的闭环。学习记录独立保存在每个知识库旁的 <code>&lt;库名&gt;.learning</code> 中，绝不写入 <code>.kb</code>；知识库更新后旧记录会被标记“过期”保留。'
+        desc: '<strong>学习</strong>模块把已保存的知识库（<code>.kb</code>）变成可以“学会”的内容：围绕文件与本体实体做掌握度追踪与间隔复习，配合闪卡练习、错题本与考试，形成“练习 → 复习 → 考试”的闭环。学习记录（含作答与已生成的 AI 解析）独立保存在每个知识库旁的 <code>&lt;库名&gt;.learning</code> 中，绝不写入 <code>.kb</code>；知识库更新后旧记录会被标记“过期”保留。'
       },
-      viewsTitle: '五大视图',
+      viewsTitle: '六大视图',
       view: {
         overview: { name: '总览', desc: '行动中心：下一步建议；整体掌握 / 正确率 / 累计练习在底部状态栏显示；连续学习打卡与近 7/30 天趋势' },
-        map: { name: '学习地图', desc: '按文件或按实体查看掌握度（卡片底部横向进度条）；可标记已掌握(跳测)、切换知识类型、清除过期 / 重学' },
-        review: { name: '复习', desc: '到期队列（近期答错 / 连续答错优先），一键开始到期复习' },
-        mistakes: { name: '错题本', desc: '左列表 + 右详情：参考答案(来源切片)、错因标注(记忆 / 概念 / 步骤 / 粗心)、AI 讲解、重练此题' },
-        exam: { name: '考试', desc: '随机或勾选切片生成四类题目(单选 / 多选 / 判断 / 问答)；客观题本地判分、问答题 AI 评分；可把每题计入对应文件学习对象' }
+        map: { name: '学习地图', desc: '三种轴：按文件 / 按实体（卡片底部横向进度条，可标记已掌握(跳测)、切换知识类型、清除过期 / 重学）/ 本体图谱（实体关系图，节点颜色即掌握状态；范围下拉可选 全部实体 / 仅已练习 / 全部实体+问题 / 仅已练习+问题 / 切片+问题 / 文件+问题，问题连到它依据的实体或切片 / 来源文件，点节点看详情或开始练习；图例栏可设节点间距（紧凑 / 标准 / 宽松 / 很宽，默认宽松）、显示数量（200 / 500 / 1000 / 2000 / 5000 / 10000 / 20000，默认 2000）与节点标题（跟随数量 / 总是显示 / 不显示，节点越多字号自动越小），超出时图例会标明「已画 / 共多少」）' },
+        review: { name: '复习', desc: '到期队列（近期答错 / 连续答错优先），一键开始到期复习；练习卡底部三个标签：答案 / 解析 / 参考切片（出处切片按 Markdown 渲染），右上「答案区」可整块隐藏用于自测' },
+        mistakes: { name: '错题本', desc: '左列表 + 右详情：参考答案(来源切片)、错因标注(记忆 / 概念 / 步骤 / 粗心)、AI 讲解与图解讲解、重练此题' },
+        solver: { name: '答疑', desc: '就当前知识库直接提问，走与主页相同的智能体循环（自动调用 kb_search 多轮检索，必要时用 search_files 按文本查找或 read_file 读原文）；流式输出并展示执行步骤（每步调用的工具与命中数），答案只依据切片生成、逐条标注引用编号 [n]，引用切片可展开核对。' },
+        exam: { name: '考试', desc: '随机 / 勾选切片 / 手动 / 真题仿写四种出题方式(单选 / 多选 / 判断 / 问答)；客观题本地判分、问答题 AI 评分；可把每题计入对应文件学习对象' }
       },
       mech: { title: '核心机制' },
       step1: {
         title: '先有知识库，再选库学习',
-        desc: '在「知识处理」切片 / 向量化并保存生成 <code>.kb</code> 后，进入「学习」模块，右上角选择该知识库即可开始。'
+        desc: '在「知识处理」切片 / 向量化并保存生成 <code>.kb</code> 后，进入「学习」模块，右上角选择该知识库即可开始。下拉会扫描 <strong>全部工作区及其子目录</strong>（工作区在 设置 → 通用 → 基础 → 路径设置 里管理），所以 <code>.kb</code> 不在当前工作区也能选到；同名库会补标所在目录。'
       },
       step2: {
         title: '掌握度与门控',
@@ -2303,6 +2337,10 @@ const translations = {
       step5: {
         title: '错因标注与考试联动',
         desc: '错题可标注错因（记忆混淆 / 概念不清 / 步骤错误 / 粗心）便于复盘与筛选；考试交卷时可把每题计入对应文件的学习对象，让考试结果同步驱动掌握度与复习。'
+      },
+      step6: {
+        title: '解析与真题仿写',
+        desc: '练习卡底部有三个标签：<strong>答案</strong>（参考答案）、<strong>解析</strong>（流式逐字输出并实时渲染 Markdown：一句话核心 / 前置概念 / 分步推理 / 易混点 + 一张知识结构图，首次切到该标签时才生成）、<strong>参考切片</strong>（出处切片按 Markdown 渲染）；错题详情里也有同样的 AI 讲解。解析结果会随学习记录存入 <code>&lt;库名&gt;.learning</code>，再次打开直接显示、可用页脚「重新生成」刷新。学习模块里的 Markdown 排版与主页一致。解析与图内标签<strong>优先用中文</strong>，只有知识库正文本身是英文（或界面切到英文）时才用英文。考试的<strong>真题仿写</strong>可导入或粘贴一份真题，先分析其题型配比与措辞风格（风格档案按知识库保存在本机），再按这个风格仿写新题。'
       }
     },
     footer: {
@@ -2344,11 +2382,11 @@ const translations = {
       },
       'workflow': {
         title: 'Workflow',
-        subtitle: 'Automation'
+        subtitle: 'Edits in Knowledge Management'
       },
       'data-canvas': {
         title: 'Data Canvas',
-        subtitle: 'No-code data modeling'
+        subtitle: 'Edits in Knowledge Management · No-code Modeling'
       },
       'settings': {
         title: 'Settings',
@@ -2361,10 +2399,6 @@ const translations = {
       'browser': {
         title: 'Browser',
         subtitle: 'Built-in browsing with AI web actions'
-      },
-      'todo': {
-        title: 'Todo',
-        subtitle: 'Ideas & Plans'
       },
       'learning': {
         title: 'Learning',
@@ -2390,8 +2424,8 @@ const translations = {
       }
     },
     quickStart: {
-      overview: 'AI-KM is a <strong>local-first desktop AI knowledge platform</strong>: AI chat (RAG Q&A / agent chat), document & whiteboard management, knowledge processing (chunk & embed into a .kb), mastery-based learning with spaced review, a visual workflow editor, Agent Scaffold and multi-agent swarm collaboration, plus todo & idea capture — all data stays local by default and works offline. These 6 steps get you started fast:',
-      tags: ['AI Chat', 'Knowledge', 'Processing', 'Learning', 'Workflow', 'Agent Scaffold', 'Agent Swarm', 'Todo'],
+      overview: 'AI-KM is a <strong>local-first desktop AI knowledge platform</strong>: AI chat (RAG Q&A / agent chat), document & whiteboard management, knowledge processing (chunk & embed into a .kb), mastery-based learning with spaced review, a visual workflow editor, Agent Scaffold and multi-agent swarm collaboration, plus a task kanban board inside Knowledge Management — all data stays local by default and works offline. These 6 steps get you started fast:',
+      tags: ['AI Chat', 'Knowledge', 'Processing', 'Learning', 'Workflow', 'Agent Scaffold', 'Agent Swarm', 'Kanban Board'],
       step1: {
         title: 'Set Up AI Environment',
         items: [
@@ -2412,12 +2446,12 @@ const translations = {
         ]
       },
       step3: {
-        title: 'Save Todos',
+        title: 'Capture Tasks & Ideas',
         items: [
-          'Click the <strong>"+" button</strong> in the top toolbar to quickly create a new note',
-          'Enter your thoughts, ideas, or to-do items in the rich text editor',
-          'Supports Markdown syntax, images, links, and code blocks',
-          'Notes are saved locally with category tags and full-text search support'
+          'Open <strong>Knowledge Management</strong> in the top navbar and tick <strong>Kanban</strong> in the left panel views',
+          'Click <strong>+</strong> on the board status bar (bottom left) to open the new card panel: type a name and a Markdown file is created in the current folder, with the status and start / end dates optional (start defaults to today)',
+          'Drag a card into another column to <strong>change its status</strong>, <strong>right-click</strong> a card for archive / set value / delete; the chips filter by value and the status bar "Group" can switch to any attribute',
+          'Cards are plain Markdown files: reschedule them in the <strong>Calendar</strong> view, batch-edit attributes in <strong>Table</strong>, and adjust status order / icons from the board status bar'
         ]
       },
       step4: {
@@ -2446,8 +2480,8 @@ const translations = {
           '<strong>Skills</strong> (Skill Manager / Skill Store / Agent Presets) live under <strong>Settings → Skills</strong> — they no longer occupy their own top-level nav entry: the Store downloads new skills, Manage views/edits skill files, and <strong>Agent Presets</strong> let you create reusable templates and chat as that role',
           'Switch the mode dropdown to <strong>PTC</strong> (programmatic tool call) in the Home input bar: describe the task and the AI writes a TypeScript program that calls tools through run_code — the message shows the program, the return value and the tools called inside it',
           'For multi-agent collaboration switch to <strong>Swarm</strong>: tick several Agent presets as members (manage them in Settings → Agent → Presets) and use <strong>@member-name</strong> to call just one',
-          'Open <strong>Agent Scaffold</strong>: it is the only scaffold in that module (Batch Agent / Table Reasoning / Collect File / Collect Web are its four presets); every instance links its own <code>.task</code> file, can be paused/resumed and keeps running in the background',
-          '<strong>Data Canvas</strong> (nav entry “Data Canvas”) is a standalone no-code data modeling module: canvas modeling + form entry + chart dashboards, auto-saved to its own canvas task file'
+          '<strong>Scaffold tasks</strong> are now a file type in Knowledge Management (<code>.task</code>): create one from the right-click “New → Scaffold” menu or double-click an existing <code>.task</code> to open its dedicated “Scaffold” view in a <strong>separate window</strong> (the only scaffold; Batch Agent / Table Reasoning / Collect File / Collect Web are its four presets), and the task can be paused / resumed and keeps running in the background',
+          '<strong>Data Canvas</strong> is no longer a top-level module but a <strong>file type in Knowledge Management</strong> (<code>.data</code>): open a <code>.data</code> file from the file tree to enter the canvas module (canvas modeling + form entry + chart dashboards), and changes auto-save back to that file'
         ]
       }
     },
@@ -2458,7 +2492,7 @@ const translations = {
           items: [
             'Everyday Q&A: general questions, explaining concepts, brainstorming.',
             'Writing & polishing: rewriting, summarizing, translating, proofreading.',
-            'File context: upload files/images and ask AI to answer or summarize from them.',
+            'File context: upload files/images (or drag files straight into the chat window) and ask AI to answer or summarize from them.',
             'Live info: with a web-search model enabled, questions auto-search the web and list clickable sources.'
           ]
         },
@@ -2510,17 +2544,17 @@ const translations = {
           '<strong>② Multiple chat modes</strong>: Normal / Knowledge Base / Workflow / Agent / PTC / Swarm — tasks range from Q&A to execution, programmatic tool calling and multi-agent collaboration.',
           '<strong>③ RAG is just one piece</strong>: Knowledge Base mode first searches your documents, with ontology / question-enhance / multi-hop / community strategies — but that is not all.',
           '<strong>④ Tools & Agents</strong>: Agents can read/write files, search, browse the web, query knowledge bases, invoke skills and MCP.',
-          '<strong>⑤ Local data</strong>: chats, .kb, .learning and .flow all live locally — private and offline-ready.'
+          '<strong>⑤ Local data</strong>: chats, .kb, .learning and .flow.yml all live locally — private and offline-ready.'
         ]
       },
       schemes: {
         title: 'Six Chat Modes',
-        normal: { name: 'Normal Chat', desc: 'Chat directly with AI; upload files/images as context. Ideal for everyday questions and writing; with a web-search-capable model (e.g. DeepSeek) questions can auto-search the web and list sources.' },
-        retrieval: { name: 'Knowledge Base QA', desc: 'Link a .kb knowledge base; AI answers from your documents (RAG), showing reference chunks below. You can pick a retrieval strategy above the input (Similarity / File Enhance / Question Enhance / Ontology Enhance / Multi-hop / Community / Agentic, etc.).' },
-        workflow: { name: 'Workflow Chat', desc: 'Link a .flow workflow; enter start text to trigger automation and watch each node\'s steps and logs live.' },
+        normal: { name: 'Normal Chat', desc: 'Chat directly with AI; upload files/images as context (you can also drag files straight into the chat window). Ideal for everyday questions and writing; with a web-search-capable model (e.g. DeepSeek) questions can auto-search the web and list sources.' },
+        retrieval: { name: 'Knowledge Base QA', desc: 'Link a .kb knowledge base; AI answers from your documents (RAG), showing reference chunks below. You can pick a retrieval strategy above the input (Similarity / File Enhance / Question Enhance / Ontology Enhance / Multi-hop / Community / Agentic, etc.). In this mode, dropping a .kb file into the chat window links it as the knowledge base.' },
+        workflow: { name: 'Workflow Chat', desc: 'Link a .flow.yml / .flow.yaml workflow file (open the same file in Knowledge Management to author it on the canvas — see the Workflow tab); enter start text to trigger the flow: every node becomes an expandable step card (icon / status / params / output, same style as Agent mode) and the final output follows the steps.' },
         agent: { name: 'Agent Chat', desc: 'Pick the "Agent" mode in the input bar: choose an Agent preset via 👤, or chat with the general agent. The AI plans autonomously and invokes tools (read/write files, search, browse the web, KB retrieval, skills, MCP, etc.); typing $skill-name triggers a skill directly. <strong>Image uploads</strong> (multimodal, needs a vision-capable model) and text attachments are supported too. The input box stays available <strong>while it runs</strong>: keep typing and press Enter to send <strong>guidance</strong> (the run is not interrupted; the agent picks it up at its next step).' },
         code: { name: 'PTC (Programmatic Tool Call)', desc: 'Pick <strong>PTC</strong> in the input-bar mode dropdown: instead of calling tools one by one, the model writes a TypeScript program that calls tools through <code>run_code</code> and returns the result. The message shows the program as a code block plus the return value, the console logs and the <strong>tools actually called inside the program</strong> — great for multi-step loops and batch processing. Max steps follows the general agent setting (Settings → Agent → Presets).' },
-        swarm: { name: 'Swarm Chat', desc: 'Pick the "Swarm" mode in the input bar: tick <strong>multiple Agent presets</strong> as members and let them collaborate on one task (respond in turn / host-led / debate); use <code>@member-name</code> to call a single member. Replies and tool calls render exactly like Agent mode. You can also send <strong>guidance</strong> mid-run (Enter) — it goes to the member currently speaking.' }
+        swarm: { name: 'Swarm Chat', desc: 'Pick the "Swarm" mode in the input bar: tick <strong>multiple Agent presets</strong> as members and let them collaborate on one task (respond in turn / debate / team); use <code>@member-name</code> to call a single member. Replies and tool calls render exactly like Agent mode. You can also send <strong>guidance</strong> mid-run (Enter) — it goes to the member currently speaking.' }
       },
       guide: {
         title: '4-Step Guide',
@@ -2553,31 +2587,35 @@ const translations = {
     knowledge: {
       overview: {
         title: 'What is Knowledge Management?',
-        description: 'The Knowledge Management module (knowFile) is a <strong>multi-view desktop file manager</strong> that lets you browse, edit, and organize your local files in various formats. It provides tabbed file browsing, multi-view switching, and full-text search capabilities.'
+        description: 'The Knowledge Management module (knowFile) is a <strong>multi-view desktop file manager</strong> that lets you browse, edit, and organize your local files in various formats. It provides separate-window file browsing, multi-view switching, and full-text search capabilities.'
       },
       views: {
-        title: 'Views (12 views + file-specific views)',
-        browse: { name: 'Browse', desc: 'Markdown rendered preview' },
-        edit: { name: 'Source', desc: 'Markdown source editor' },
-        blockedit: { name: 'Visual', desc: 'Block editor (WYSIWYG)' },
-        mindmap: { name: 'Mind Map', desc: 'Mind map visualization' },
-        files: { name: 'Files', desc: 'File tree explorer' },
-        kanban: { name: 'Kanban', desc: 'Kanban task management' },
-        graph: { name: 'Graph', desc: 'File relationship graph' },
-        gantt: { name: 'Gantt', desc: 'Gantt chart timeline' },
-        calendar: { name: 'Calendar', desc: 'Monthly calendar view' },
-        map: { name: 'Map', desc: 'Geolocation mapping' },
-        table: { name: 'Table', desc: 'Tabular data view' },
-        presentation: { name: 'Presentation', desc: 'Presentation slides view' },
-        excalidraw: { name: 'Whiteboard', desc: 'Excalidraw infinite canvas (.excalidraw files only)' },
-        drawio: { name: 'Diagram', desc: 'draw.io diagram editor (.drawio / .dio files only)' }
+        title: 'Views (11 views + 5 dedicated views)',
+        groupViews: '11 views',
+        groupFileViews: '5 dedicated views (file-specific / special files)',
+        browse: { name: 'Browse', desc: 'The unified preview view (default): Markdown renders formulas, highlighted code, tables, images and Mermaid diagrams; Word, PDF, images and media have their own previews too. The bottom status bar also offers Smart actions (chat with the document) and export to Markdown / Word / PDF.' },
+        edit: { name: 'Source', desc: 'Monaco code editor: edit Markdown source and YAML front matter directly, with AI help and drag-and-drop images / files that become reference links; code and data files (.py, .json, .flow.yml …) open here as plain text too.' },
+        blockedit: { name: 'Visual', desc: 'Block editor (WYSIWYG): edit block by block and type / for the block type menu (headings, lists, to-dos, tables, code, formulas …); the block handle menu’s “Turn into” converts a block to another type, so you never need Markdown syntax.' },
+        mindmap: { name: 'Mind Map', desc: 'Mind map view: turns the Markdown heading hierarchy into a zoomable, level-by-level collapsible map (LaTeX math supported; display formulas and paragraphs containing math become their own nodes); node text width and expand level are adjustable in the status bar.' },
+        files: { name: 'Files', desc: 'Files view: browse the current folder as a grid or list (Ctrl+wheel scales icons continuously; the smallest size is list mode) with multi-select, rubber-band selection and keyboard navigation; audio / video files show cover thumbnails; filter by YAML attribute (incl. status) in the status bar; the right-click menu offers open / rename / delete / copy / cut / paste / reveal in folder / sort (name, modified, size, type) / display (file names, aspect ratio), and right-clicking empty space also sorts, switches display options and creates Markdown, Excalidraw and workflow files or folders.' },
+        kanban: { name: 'Kanban', desc: 'Kanban task management: a card is one Markdown file in the current folder (the one shown in the top breadcrumb); group cards by any attribute (status by default); click + on the status bar (bottom left) to open the new card panel (a name is all you need, plus optional status and start / end dates; 开始时间 defaults to today, so the card shows up in Calendar / Gantt right away), drag a card into another column to change that attribute, cards show their start / end dates and the calendar icon on a card (or right-click → Set dates) sets them (the date text itself is read-only) and a right-click menu sets the color (a preset palette per theme — one for light, one for dark — plus the system picker and clear) / renames / archives / sets a value / deletes; cards refresh automatically when a file\u2019s attributes change elsewhere (Table view, source editor, external editor); when the panel is too narrow for two columns side by side the columns stack vertically; the status bar can filter by the group field\u2019s values (multi-select panel with per-value counts, wrapping and scrolling) as well as switch board / list, read depth and whether archived cards show, and the status categories (order / icons, shared with Calendar) can be edited; values that only exist in your files are listed at the bottom of that panel and can be added to the categories in one click to take part in the order' },
+        graph: { name: 'Graph', desc: 'File relationship graph: folder hierarchy and file references at a glance (auto-refreshes on file changes; click a node to highlight its related nodes, drag nodes to adjust the layout; double-click a node to open the file exactly like the file tree — always in a separate window, with special files dispatched to their own module)' },
+        calendar: { name: 'Calendar', desc: 'Month / week / year / Gantt in one: date ranges (multi-day entries span every day), colors & status icons, in-view search, drag to reschedule, create in a date cell (created in the current folder); Markdown files only, and only Markdown can be dragged to reschedule; right-click an entry for open / rename / set dates / color (a preset palette per theme, plus the system picker and clear) / archive / copy path / reveal in folder / delete — the same menu as on Kanban cards, also available in the day list dialog — and the status bar archive icon controls whether archived entries show (hidden by default)' },
+        map: { name: 'Map', desc: 'Plots files on a map from their 纬度 / 经度 YAML attributes (one click to show geo-tagged files only); click a marker or a row in the side list to open the file. Maps need no search, so the toolbar only shows the path.' },
+        table: { name: 'Table', desc: 'One row per file, one column per YAML attribute: Markdown only by default (switch to All — non-Markdown rows are read-only), and columns come from the attributes inside the current "depth" range (change the depth or the folder and the columns follow, with no leftover all-empty columns; collapsed attributes can be added back from the bottom of the Columns panel, whose "+" also adds a column manually). Click a header to sort (asc / desc / off), and use the column menu to filter by value (incl. "unset") / set the editor type / rename the attribute / hide the column; columns can be reordered and resized by dragging, and order / width / type / sort / filter are all remembered. Cells edit by attribute type (text / number / date / date-time / checkbox / color / select / tags, with the Status attribute using the status taxonomy values and icons), with arrow-key navigation, Enter to edit / Esc to cancel / Delete to clear and Excel block paste; row checkboxes allow batch attribute setting / removal or file deletion, and the row right-click menu offers open / open folder / open in new window / reveal in folder / copy path / new sibling / rename / delete' },
+        presentation: { name: 'Presentation', desc: 'Turns Markdown into slides: pages split on --- or by smart splitting (by headings / blank lines, skipping code blocks), with an outline / overview grid, full-screen presenting, auto and 16:9 / 4:3 ratios and 6 slide themes; front-matter title / keywords / summary build a cover slide automatically.' },
+        excalidraw: { name: 'Whiteboard', desc: 'Excalidraw infinite canvas (.excalidraw files only): hand-drawn shapes / arrows / text / free draw; changes are written back to the file automatically (Ctrl+S saves at once) and nothing else needs installing' },
+        drawio: { name: 'Diagram', desc: 'draw.io diagram editor (.drawio / .dio files only): flowcharts, architecture, UML and ER diagrams; the editor is built in, with no separate draw.io install and no network' },
+        flow: { name: 'Workflow', desc: 'Workflow files (.flow.yml / .flow.yaml, a file-specific view): the file is a Dify app DSL, opened as a workflow editor in the Browse / Visual views where you can author, run and read the run logs; the Source view shows the YAML text' },
+        kb: { name: 'Knowledge Base', desc: 'Knowledge base files (.kb) hold the chunks and index produced by knowledge processing (RAG) and are fairly large. Double-clicking does not open a file view but jumps to Knowledge Processing and loads the base for search, Q&A and re-chunking' },
+        task: { name: 'Scaffold', desc: 'Scaffold task files (.task, a file-specific view): one .task = one standalone task — double-click to open the scaffold canvas in a separate window (import a table, run, and review graph / logs / results there), and both configuration and results are saved back to that file; legacy scaffold .task files convert automatically' }
       },
       features: {
         title: 'Core Features',
-        step1: { title: '📂 File Browsing', desc: 'File tree on the left shows directory structure with expand/collapse. Click a file to open it in the corresponding view on the right. Supports multiple tabs for simultaneous file access.' },
+        step1: { title: '📂 File Browsing', desc: 'File tree on the left shows directory structure. Expand / collapse with the arrow on the left of a node (a plain click no longer opens or closes it); click / double-click a file to open it in a separate window (open several windows side by side for comparison). Double-clicking a folder brings every view on the right (Files / Kanban / Table / Graph / Map / Calendar) to that folder. The context menu adapts to the node: on a file, "Open" lists the views directly while "Actions" holds Reveal in Folder / Copy Path / System; on a folder or the empty area, "New" creates a folder / Markdown / Excalidraw / draw.io / workflow / data-canvas / scaffold file, plus Copy / Paste (clipboard shared with the file view) / Rename / Delete.' },
         step2: { title: '🔄 Multi-View Switching', desc: 'The same file can be viewed in different modes: Browse (rendered), Edit (source), Mindmap, Presentation. You can enable/disable views in Settings.' },
-        step3: { title: '🔍 Full-Text Search', desc: 'The top search bar supports filename and full-text content search to quickly locate files. Search results are clickable to jump directly to the file.' },
-        step4: { title: '🏷️ Organization', desc: 'Supports tag categorization, Kanban for task management, Gantt for project timelines, Graph for file relationships, and more to meet different management needs.' }
+        step3: { title: '🔍 Full-Text Search', desc: 'The top search bar searches filenames and full text to quickly locate files. Double-click a result to open it in a separate window; the search panel stays open so several results can be opened in a row (close it with Esc or ✕).' },
+        step4: { title: '🏷️ Organization', desc: 'Filter files by YAML attribute (status and more), group and capture on the "Kanban" view (each card is a Markdown file, drag to change an attribute), review and tidy attributes column by column in the "Table" view (sort / filter / batch edit / block paste; its columns come from the attributes inside the current depth), track project timelines with the Calendar view\u2019s Gantt mode, and explore file relationships in the Graph. Except Files, every global view reads the folder selected on the left and they all share one top toolbar (a single bar even when several views are side by side): a leftmost show / hide left panel switch + a view selector + back / forward / up / refresh + a clickable path breadcrumb + a shared search box (when the toolbar gets very narrow the nav buttons and breadcrumb collapse; the Alt+← / Alt+→ / Backspace shortcuts still work) whose syntax is identical everywhere (keywords match file name / path / attribute values, plus 状态:todo or 优先级>2); the bottom status bar keeps only each view\u2019s own settings and counters.' }
       },
       smart: {
         title: '🧠 Document Smart Actions & Word Export',
@@ -2588,7 +2626,7 @@ const translations = {
         },
         step2: {
           title: 'Export Markdown / Word / PDF',
-          desc: 'Click the ⬇ <strong>Export document</strong> icon in the status bar: the menu offers “Export Markdown”, “Export Word” and “Export PDF”.'
+          desc: 'Click the ⬇ <strong>Export document</strong> icon in the status bar: the menu offers “Export Markdown”, “Export Word” and “Export PDF”. <strong>Export Markdown</strong> also opens a <strong>save-as dialog</strong> (defaults to the folder of the current file) and reports the saved path.'
         },
         step3: {
           title: 'The Word “Save as” dialog',
@@ -2600,33 +2638,28 @@ const translations = {
         },
         note: {
           title: '📌 Tip:',
-          text: 'Attached context is capped at <strong>about 120,000 characters</strong>; when exceeded, both the input area and the sent bubble <strong>explicitly warn that it was truncated</strong> (nothing is dropped silently). PDF smart actions use the same panel, with attachments for “current page text / full text / current page image”.'
+          text: 'Attached context is capped at <strong>about 120,000 characters</strong>; when exceeded, both the input area and the sent bubble <strong>explicitly warn that it was truncated</strong> (nothing is dropped silently). PDF smart actions use the same panel, with attachments for “current page text / full text / current page image”.<br><strong>PDF translation</strong>: select text and <strong>right-click → Translate</strong>, or click the <strong>translate icon</strong> at the bottom right to overlay Chinese; <strong>pages you scroll to are translated automatically</strong> (the whole document is either overlaid on every page or on none — never half translated). Click the icon again to show the original throughout. The translation is laid <strong>on top of the original text block by block</strong> (per column in two-column papers, per cell in tables, never covering the neighbouring column); original first-line and hanging indents are reproduced, and short translations expand line height and centre vertically to fill the original paragraph. Formulas are rendered with KaTeX from LaTeX. The target language follows the app language; right-click the icon to pick the source and model (defaults to the system default source), and the popover also offers <strong>Clear translation cache</strong>.'
         }
       },
       openMode: {
-        title: '🪟 File Open Mode (New Window / Inside)',
-        overview: 'In <strong>Settings → General → Basic → File Opening</strong>, choose how files open in Knowledge Management. It controls the <strong>double-click</strong> behavior and the main-window layout:',
+        title: '🪟 File Opening (Separate Window)',
+        overview: 'In Knowledge Management, <strong>double-clicking a file</strong> always opens it in a <strong>separate window</strong>; the former “Open Inside” mode (main-window tab bar, view manager panel) has been removed:',
         newWindow: {
-          name: '🪟 New Window (default)',
-          desc: 'Double-clicking a file opens it in a <strong>separate window</strong>; the main-window tab bar is hidden. Each file window can independently switch among "Read / Source / Block Edit / Mind Map / Presentation" views, and the window title shows "filename - view". Multiple files can be opened in different windows at the same time, <strong>side by side</strong>, without affecting the main window.'
-        },
-        inner: {
-          name: '📑 Open Inside',
-          desc: 'Double-clicking a file opens it in a <strong>tab</strong> on the right side of the main window (original behavior). The tab bar stays on top for quick switching between files. Tabs are <strong>persisted</strong> and restored automatically after restart; the view manager shows all 12 views (including file views such as Browse / Edit).'
+          name: '🪟 Separate Window',
+          desc: 'Double-clicking a file opens it in a <strong>separate window</strong>, which offers the views that the file type actually supports (Markdown: all five; CSV: Browse + Source; workflow / data canvas / scaffold / images / audio-video / PDF: a single fixed view, so no view dropdown), and the window title shows "filename - view"; <strong>hovering the file name in the title bar shows its absolute path</strong>. Markdown with no body (an empty file, or one that only has a YAML header — e.g. a card created on the Kanban board) opens in <strong>Source view</strong> by default instead of a blank rendered view. Multiple files can be opened in different windows at the same time, <strong>side by side</strong>, without affecting the main window.'
         },
         effect: {
           title: '🔧 Impact on Operations',
           items: [
-            '<strong>Double-click location</strong>: New Window mode → separate window; Inside mode → main-window tab',
-            '<strong>Tab bar</strong>: New Window mode hides it (the file-tree panel top becomes an "Add Workspace / Open File / Search / Create File" button group); Inside mode keeps it',
-            '<strong>View switching</strong>: New Window mode switches views from the top-left of the separate window; Inside mode opens the view manager with the "eye" button in the file-tree panel',
-            '<strong>Tab persistence</strong>: New Window mode does not persist tabs (the tab bar stays empty after restart); Inside mode restores the previously opened tabs',
-            '<strong>Multi-file comparison</strong>: New Window mode lets you arrange files side by side in separate windows; Inside mode only switches between tabs'
+            '<strong>Double-click location</strong>: always a separate window; the main window only hosts the global views (Files / Graph / Kanban / Calendar / Map / Table)',
+            '<strong>Tab bar</strong>: the main window has none; the file-tree panel top is the "Add Workspace / Open File / Search / Create File" button group',
+            '<strong>View switching</strong>: the main window switches global views from the top toolbar (right of the collapse icon on the left), while a file window switches that file\u2019s own views from its top-left',
+            '<strong>Multi-file comparison</strong>: arrange files side by side in separate windows, each keeping its own views'
           ]
         },
         note: {
           title: '📌 Tip:',
-          text: 'Regardless of the mode, the following stay unchanged: right-click "In App", search-result clicks, and files opened via the file dialog always open as in-window tabs; the right-click "New Window" submenu (Read / Source / Block Edit / Mind Map / Presentation) is always available; knowledge-base (.kb) files always jump to the Knowledge RAG module.'
+          text: 'The following stay unchanged: right-clicking a file lists its views directly under "Open" (Read / Source / Block Edit / Mind Map / Presentation, per file type), while Reveal in Folder / Copy Path / System live in the sibling "Actions" submenu; knowledge-base (.kb) files always jump to the Knowledge RAG module; scaffold (.task) files always open their dedicated “Scaffold” view in a separate window; local web pages (.html / .htm) always open in the built-in browser; single-clicking a remote file still previews it in the main window, and double-clicking opens a separate window.'
         }
       },
       drawio: {
@@ -2634,7 +2667,7 @@ const translations = {
         overview: 'Knowledge Management embeds the <strong>draw.io diagram editor</strong> (the official draw.io webapp is bundled, <strong>fully offline</strong>): <code>.drawio</code> / <code>.dio</code> files (plus <code>.xml</code> whose content contains <code>&lt;mxfile&gt;</code>) open the canvas directly in any of the <strong>Browse / Source / Visual / Mind Map / Presentation</strong> views — for flowcharts, architecture, swimlanes, ER and UML diagrams, with no separate draw.io install and no network.',
         step1: {
           title: 'Create & open',
-          desc: 'In the file tree <strong>➕ Create file</strong> dialog switch the type to <strong>draw.io</strong> (a blank diagram skeleton is written), or pick that type when creating a file from the context menu; double-click a <code>.drawio</code> file to open the diagram view.'
+          desc: 'In the file tree <strong>➕ Create file</strong> dialog switch the type to <strong>draw.io</strong> (a blank diagram skeleton is written), or right-click a folder in the file tree and pick <strong>New → draw.io</strong>; double-click a <code>.drawio</code> file to open the diagram view.'
         },
         step2: {
           title: 'Edit & save',
@@ -2646,11 +2679,15 @@ const translations = {
         },
         step4: {
           title: 'Smart actions (AI creates / adjusts / deletes shapes)',
-          desc: 'Click ✨ <strong>Smart actions</strong> at the bottom-right to open the AI panel and describe what you want in natural language (for example “add a three-step approval flow: submit → review → archive”). The AI reads the current diagram, generates an incremental fragment and <strong>previews it right on the canvas</strong> (the panel lists the added / updated / deleted items): click “Apply” to write the file or “Cancel” to restore. It can <strong>add</strong> shapes and edges, <strong>adjust</strong> an existing item’s position / size / label / style / z-order / connections, or <strong>delete</strong> cells by id.'
+          desc: 'Click ✨ <strong>Smart actions</strong> at the bottom-right to open the AI panel and describe what you want in natural language (for example “add a three-step approval flow: submit → review → archive”). The AI reads the current diagram, generates an incremental fragment and <strong>previews it right on the canvas</strong> (the panel lists the added / updated / deleted items): click “Apply” to write the file or “Cancel” to restore. It can <strong>add</strong> shapes and edges, <strong>adjust</strong> an existing item’s position / size / label / style / z-order / connections, or <strong>delete</strong> cells by id. For multi-page diagrams it only reads and updates the <strong>currently open page</strong> and stays on that page after preview or cancel.'
         },
         step5: {
           title: 'Two smart-action modes',
           desc: 'The mode dropdown next to the input box: <strong>Auto</strong> (default; may add, adjust and delete) / <strong>Add only</strong> (only adds new shapes and edges, never touches existing content, and places new shapes in free space automatically). In a collaboration session only the host can run smart actions, and all members are re-synced afterwards.'
+        },
+        step6: {
+          title: 'Copy as image (paste into Word / PPT)',
+          desc: 'Click 📋 <strong>Copy as image</strong> at the bottom-right (shortcut <code>Ctrl+Alt+X</code>) to put the diagram on the system clipboard: choose <strong>High 4× (default) / Normal 2× / Original 1×</strong>, then press <code>Ctrl+V</code> in Word, PowerPoint or any chat window — <strong>no need to save the file first</strong>. The image has a <strong>white background</strong> and is laid out at the diagram’s original size (higher resolution will not blow it up on the page) and stays sharp after pasting; very large diagrams are scaled down automatically to avoid stalls. Only the <strong>current page</strong> is copied, with images and multi-line labels rendered as seen on the canvas.'
         },
         note: {
           title: '📌 Tip:',
@@ -2662,7 +2699,7 @@ const translations = {
         overview: 'On the <strong>same local network</strong>, multiple computers can <strong>edit the same file in real time</strong> — <strong>Code / Markdown editor</strong>, <strong>Excalidraw whiteboard</strong> and <strong>draw.io diagrams</strong> are all supported. Powered by <strong>Yjs CRDT</strong> plus incremental patches (draw.io uses the official diffSync) for element-level real-time sync: edit on one side and it appears instantly on the other, with <strong>member cursors, name badges</strong> and a member list.',
         step1: {
           title: 'Enable Collaboration',
-          desc: 'Go to <strong>Settings → General → Collaboration</strong>, turn on the "<strong>Enable Collaboration</strong>" switch, then click "<strong>Start Collab Service</strong>". You can configure the port (default <code>3346</code>), max members, edit permission, and room token.'
+          desc: 'Go to <strong>Settings → Collaboration → Collaborative Editing</strong>, turn on the "<strong>Enable Collaboration</strong>" switch, then click "<strong>Start Collab Service</strong>". You can configure the port (default <code>3346</code>), max members, edit permission, and room token.'
         },
         step2: {
           title: 'Share a File / Whiteboard / Diagram',
@@ -2690,7 +2727,7 @@ const translations = {
         overview: 'With a <strong>shared folder</strong>, you can <strong>read-only share</strong> a local folder to other computers on the LAN: they add it as a <strong>remote workspace</strong> in Knowledge Management (cloud icon, always at the bottom of the local workspaces) to browse and <strong>preview</strong> its files — supporting <strong>Markdown / text / PDF / image / Word</strong>; download to edit.',
         step1: {
           title: 'Host: Share',
-          desc: 'In <strong>Settings → General → Shared Folder</strong>, start the service, choose the shared directory, configure the port (default <code>3347</code>) and token, then copy the link (<code>remote-fs://IP:port?token=…</code>) to other LAN members.'
+          desc: 'In <strong>Settings → Collaboration → Sharing</strong>, start the shared-folder service, choose the shared directory, configure the port (default <code>3347</code>) and token, then copy the link (<code>remote-fs://IP:port?token=…</code>) to other LAN members.'
         },
         step2: {
           title: 'Client: Add Remote Workspace',
@@ -2774,45 +2811,85 @@ const translations = {
       }
     },
     workflow: {
+      usage: {
+        title: '📂 Open & save (.flow.yml in Knowledge Management)',
+        items: [
+          'Where: workflows are <strong>a file type in Knowledge Management</strong> — open a <code>.flow.yml</code> / <code>.flow.yaml</code> file to get the canvas; create one with the Workflow type',
+          'Format: the file content is a <strong>Dify app DSL (YAML)</strong> document that Dify can import directly; opening a Dify export keeps unknown node types untouched and reports them',
+          'Canvas: drag nodes, drag from the right-side port to connect, right-click the pane or a node to add one, <code>Ctrl+D</code> to duplicate, <code>Del</code> to delete; connections reject self / duplicate / cyclic links',
+          'Bottom status bar: Add node / Auto layout / Run / App settings / <strong>AI authoring</strong> / Delete selected / Save on the left; node · edge count / zoom out / zoom % / zoom in / fit view / <strong>lock canvas</strong> / <strong>minimap toggle</strong> on the right, <code>Ctrl+S</code> saves',
+          'AI authoring: click the ✨ button to open the panel, describe the change in plain language (e.g. “add an if-else”) and the model rewrites the whole workflow for you — undoable in one click; the panel looks exactly like the run panel',
+          'Containers (iteration / loop): drop a node inside the box to make it a child; drag the bottom-right handle to resize the container (auto layout never shrinks it back); inner edges and the container’s own output edge are shown correctly',
+          'Look: the canvas follows the theme in Settings → Interface (dark / light and every skin); each node card shows its key config on the second line (model, input / output variables, iterator variable, file …)',
+          'The right panel appears on demand: select a node for the <strong>properties panel</strong>, click Run for the <strong>run panel</strong> (close it with ✕ at its top-right); they never show at the same time',
+          'Save: the Save button writes the file; edits in the properties panel mark the file dirty immediately (a ● appears in the toolbar)'
+        ]
+      },
       nodes: {
-        title: '18 Node Types',
-        start: { name: 'Start', desc: 'Workflow entry point' },
-        end: { name: 'End', desc: 'Workflow end point' },
-        text: { name: 'Text', desc: 'Static text input' },
-        file: { name: 'File', desc: 'Read local files' },
-        webSearch: { name: 'Web Search', desc: 'Search online' },
-        webCrawl: { name: 'Web Crawl', desc: 'Fetch web content' },
-        inference: { name: 'Inference', desc: 'AI reasoning' },
-        decision: { name: 'Decision', desc: 'Branch condition routing' },
-        python: { name: 'Python', desc: 'Run Python code' },
-        knowledge: { name: 'Knowledge', desc: 'Query knowledge base' },
-        structured: { name: 'Structured', desc: 'Process tabular data' },
-        mcp: { name: 'MCP', desc: 'Call external tools' },
-        subflow: { name: 'Sub Workflow', desc: 'Load and execute external sub-workflow' },
-        iteration: { name: 'Iteration', desc: 'Runs an inner pipeline for each array element; reference items via {{nodeName.item.field}}' },
-        aggregator: { name: 'Aggregator', desc: 'Collect or merge variables across iterations (Collect appends, Merge flattens nested arrays)' },
-        list: { name: 'List Ops', desc: 'Filter / extract / sort / unique / slice a list' },
-        data: { name: 'Data (CSV)', desc: 'Streaming read of CSV/TSV/TXT/JSON data; can output batches for iteration' },
-        agent: { name: 'Agent', desc: 'Invoke a general or preset Agent to plan and call tools autonomously' }
+        title: 'Node types',
+        start: { name: 'Start', desc: 'Entry point; defines input variables' },
+        end: { name: 'End', desc: 'Declares the final output variables' },
+        answer: { name: 'Answer', desc: 'Uses the text as the reply' },
+        llm: { name: 'LLM', desc: 'Calls a model with prompt and context' },
+        ifElse: { name: 'If/Else', desc: 'Routes by conditions; falls through to ELSE' },
+        classifier: { name: 'Question Classifier', desc: 'Lets the model pick a class branch' },
+        iteration: { name: 'Iteration', desc: 'Processes each array item in the container, collecting results' },
+        loop: { name: 'Loop', desc: 'Repeats container nodes, optionally with break conditions' },
+        code: { name: 'Code', desc: 'Runs Python 3 with injected variables; a main() function is called automatically (Dify style), otherwise printed JSON keys become outputs' },
+        template: { name: 'Template', desc: 'Fills a template with variables' },
+        http: { name: 'HTTP Request', desc: 'Calls外部 HTTP APIs with variable templates' },
+        tool: { name: 'Tool', desc: 'Calls external tools through MCP' },
+        knowledge: { name: 'Knowledge Retrieval', desc: 'Retrieves relevant chunks' },
+        aggregator: { name: 'Variable Aggregator', desc: 'Takes the first non-empty variable' },
+        assigner: { name: 'Variable Assigner', desc: 'Writes conversation or loop variables' },
+        listOp: { name: 'List Operator', desc: 'Filter / sort / extract / limit' },
+        paramExtract: { name: 'Parameter Extractor', desc: 'Extracts structured parameters with a model' },
+        extractor: { name: 'Document Extractor', desc: 'Reads a file into text' },
+        word: { name: 'Export Word', desc: 'Exports upstream content as .docx (local extension)' },
+        csv: { name: 'Local Table', desc: 'Reads CSV / TSV / Excel, optionally batched (local extension)' },
+        localFile: { name: 'Local File', desc: 'Reads a file with optional template slices (local extension)' },
+        localKb: { name: 'Local Knowledge', desc: 'Retrieves from a local .kb file (local extension)' },
+        mcp: { name: 'MCP Tool', desc: 'Inline or configured MCP service (local extension)' },
+        subflow: { name: 'Sub-workflow', desc: 'Runs another workflow file (local extension)' }
+      },
+      variables: {
+        title: '🔗 Variables, branches and containers',
+        items: [
+          'Every value is picked with the <strong>variable selector</strong> (no hard-coded node names): grouped as upstream node outputs / system / environment / conversation variables, so renaming a node never breaks links',
+          'Inside text (prompts, answers) reference variables as <code>{{#node.var#}}</code>; the selector\'s “Insert variable” writes it at the caret',
+          '<strong>Branch nodes</strong> (If/Else, Question Classifier) expose one port per branch; at runtime only the matched branch runs and the others are marked “Skipped”',
+          '<strong>Container nodes</strong> (Iteration, Loop): drag a node inside the container box to make it a child; the entry node exposes <code>item</code> and <code>index</code>, and loops can update variables with the Variable Assigner'
+        ]
+      },
+      run: {
+        title: '▶️ Running and settings',
+        items: [
+          'Run: toolbar “Run” → fill the input variables declared by the Start node → Start run; you can stop at any time',
+          'Canvas feedback: the dot on each node shows its state (blue = running, green = success, red = failed, grey = skipped); the run panel offers a <strong>trace tree</strong> (container children indented), per-node duration, logs and streamed output',
+          'Run history: switch between the last 5 runs at the top of the panel to compare results',
+          'App settings: the toolbar “App settings” edits the app name / icon / mode, opening statement and suggested questions, feature toggles, and the global <strong>environment</strong> and <strong>conversation</strong> variables',
+          'Error handling: each node can terminate, continue on error or take a fail branch, and can enable retries with exponential backoff'
+        ]
       },
       example: {
-        title: 'Example: Analyze News Article',
+        title: 'Example: from a question to a Word report',
         step1: {
-          title: 'Drag 3 nodes:',
-          tags: ['🕸️ Web Crawl', '📚 Knowledge', '🤖 Inference']
+          title: 'Add four nodes:',
+          tags: ['▶️ Start', '🤖 LLM', '🔀 If/Else', '📄 Export Word']
         },
         step2: {
-          title: 'Connect nodes:',
-          description: 'Click bottom connector → Drag to next node top',
-          flow: 'Web Content → Knowledge Search → AI Analysis'
+          title: 'Connect and bind variables:',
+          description: 'Drag from a node\'s right port to the next node; pick upstream outputs with the variable selector in End or Export Word',
+          flow: 'Start(question) → LLM → If/Else → Export Word'
         },
         step3: {
           title: 'Configure and run:',
           items: [
-            'Web Crawl: Enter URL',
-            'Knowledge: Select your knowledge base',
-            'Inference: Enter analysis prompt',
-            'Click "Run All Nodes"'
+            'Start: define the input variable question',
+            'LLM: pick provider and model, then insert {{#Start.question#}} in the prompt',
+            'If/Else: give the branches conditions (e.g. length > 100)',
+            'Export Word: bind the content variable to the LLM text, choose template and folder',
+            'Click Run in the toolbar, fill question, and watch per-node duration and output in the run panel'
           ]
         }
       }
@@ -2820,18 +2897,33 @@ const translations = {
     settings: {
       overview: {
         title: 'Settings Overview',
-        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / Collaboration / LLM / Credentials / Associations / Other), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / MCP / Registry), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.'
+        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / LLM / Credentials / Associations / Other), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / MCP / Registry), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.'
       },
       groups: {
         basic: {
           title: '🧭 General',
           items: {
-            view: { name: 'Basic', desc: 'Language / theme / window zoom / <strong>file opening</strong> / <strong>close button behavior</strong>, plus paths and common actions.' },
-            collab: { name: 'Collaboration', desc: 'LAN sharing, collaborative editing and shared folder (port / permission / token).' },
-            llm: { name: 'LLM', desc: 'Global AI providers, models and embedding, plus the <strong>context window</strong> (detailed below).' },
-            credentials: { name: 'Credentials', desc: 'API keys managed as a table; plaintext stays in the main process and can be referenced.' },
+            view: { name: 'Basic', desc: 'Language / theme / window zoom / <strong>text alignment</strong> (browser justify vs Knuth\u2013Plass optimal) / <strong>close button behavior</strong> / <strong>portable config</strong>, plus paths and common actions.' },
+            features: { name: 'Features', desc: 'Top-level navbar modules (Home / Knowledge / Processing / Learning) and the Knowledge Management sub-switches (<strong>view layout</strong> and the 11 views).' },
+            data: { name: 'Data', desc: 'Local data overview: local storage usage, the data folder (openable) and cleanable cache; <strong>Config Backup</strong> exports / imports all config in one click. The inventory lists counts & sizes for chats / legacy todos & notes / agent presets / MCP / session logs / config — each row can be exported / imported (session logs can be cleared or opened in the file manager) and jumps to the related settings page. Only local data is counted; workspace files such as knowledge bases, workflows and Data Canvas are not included (check Knowledge Management for those).' },
             fileassoc: { name: 'Associations', desc: 'Set the system default app per file type; one-click set all / clear all.' },
             other: { name: 'Other', desc: 'System status, browser settings, Word export and offline maps (MBTiles).' }
+          }
+        },
+        models: {
+          title: '🧠 Models',
+          items: {
+            llm: { name: 'Sources', desc: 'Per-source connection settings (URL / key / model / API style / default embedding model), <strong>common parameters</strong> (temperature / max tokens / streaming / reasoning effort) and the <strong>context window</strong> (detailed below). Clicking a source only views it — press <strong>Set as default</strong> to change the default.' },
+            'llm-embed': { name: 'Embedding', desc: '<strong>Embedding fallback</strong>: when the current source has no embedding endpoint (e.g. DeepSeek / Anthropic), KB building and retrieval embedding uses the source chosen here.' },
+            credentials: { name: 'Credentials', desc: 'API keys managed as a table; plaintext stays in the main process and can be referenced by each source.' }
+          }
+        },
+        collabGroup: {
+          title: '🤝 Collaboration',
+          items: {
+            share: { name: 'Sharing', desc: 'LAN sharing (remote web entry / port / KB folder) and shared folder (read-only file service: port / directory / token).' },
+            collab: { name: 'Collaborative Editing', desc: 'Collaborative editing: port / max members / edit permission (open \u00b7 approve \u00b7 read-only) / room token.' },
+            perm: { name: 'Permissions', desc: '<strong>LAN guest whitelist</strong>: allowed chat modes, agent tools (read-only by default), concurrency and steps, sandbox level and access token.' }
           }
         },
         speech: {
@@ -2860,7 +2952,7 @@ const translations = {
         agent: {
           title: '🤖 Agent',
           items: {
-            presets: { name: 'Presets', desc: 'Role / model / system prompt and per-tool capabilities; pick with 👤 in chat.' },
+            presets: { name: 'Presets', desc: 'Role / model / system prompt and per-tool capabilities; pick with 👤 in chat. Three built-in presets ship with the app — General Agent, Code Agent and Office Agent — ready to use and editable, but not deletable.' },
             console: { name: 'Console', desc: 'Watch live plans, task lists, tool-call timelines and background tasks.' },
             log: { name: 'Session Log', desc: 'Session event log (JSONL): event stream, message dispatch and integrity.' }
           }
@@ -2874,7 +2966,7 @@ const translations = {
       },
       contextUsage: {
         title: '🧮 Context Window & Usage Ring',
-        overview: 'Every conversation has its own <strong>context window</strong> (the token budget the model can remember at once). The <strong>ring</strong> next to the chat title on Home shows the current usage: hover it to see “used / limit” and how the limit was determined. Below 70% it uses the theme colour, 70–90% turns orange and ≥90% turns red — a hint to start a new chat.',
+        overview: 'Every conversation has its own <strong>context window</strong> (the token budget the model can remember at once). The <strong>ring</strong> next to the chat title on Home shows the current usage: hover it to see “used / limit” and how the limit was determined. Below 70% it uses the theme colour, 70–90% turns orange and ≥90% turns red — a hint to start a new chat. At <strong>80%</strong> earlier turns are compacted automatically (see item 4).',
         step1: {
           title: 'How “used” tokens are measured',
           desc: 'The <strong>real promptTokens</strong> returned by the backend are used when available; otherwise usage is <strong>estimated</strong> with the same counting rules as the actual request and the tooltip says “(estimated)”. Swarm mode shows no ring (each member has its own context, so a merged number would be meaningless).'
@@ -2886,6 +2978,10 @@ const translations = {
         step3: {
           title: 'The two read-only rows under “LLM”',
           desc: 'In Settings → General → <strong>LLM</strong>, the <strong>Ollama and LM Studio</strong> blocks have a <strong>Loaded Models</strong> row: a grid listing every model with its type (chat / vision / embedding), loaded state, and an <strong>effective-context vs model-max</strong> comparison (Ollama also shows the Modelfile num_ctx), plus <strong>⬇ load / ⏏ unload</strong> buttons (Ollama via keep_alive, falling back to /api/embed for embedding models; LM Studio via the official lms CLI); it grows freely with no scrollbar, so these two sources no longer duplicate a “Context window” row. Other providers keep a read-only <strong>Context window</strong> row showing the denominator the ring actually uses; to re-probe, click <strong>API Status</strong> at the bottom of that block (per-row refresh buttons were merged into it). The <strong>Window override</strong> row appears only when you have a historical override set (then you can ✕ clear it).'
+        },
+        step4: {
+          title: 'Automatic context compaction',
+          desc: 'When usage reaches <strong>80%</strong> of the window, earlier turns are <strong>compacted automatically</strong>: they are replaced by a structured summary (the latest 3 turns stay verbatim), stored with the session and viewable under Settings → Logs. The model keeps the goal, decided facts, key paths and open issues, while older verbatim details give way to the summary — <strong>no original message is deleted from the chat</strong>. If the backend reports a context overflow, the request is compacted and <strong>retried once</strong>, which also avoids the silent prompt truncation (“amnesia”) of local Ollama / LM Studio backends.'
         },
         note: {
           title: '📌 Tip:',
@@ -2921,7 +3017,7 @@ const translations = {
         },
         office: {
           name: 'Office Documents (builtin-office, Word + Excel)',
-          desc: 'Reads & writes local <strong>.docx</strong> and <strong>.xlsx</strong> files (29 tools, session-based: open returns a docId / workbookId). <strong>Word</strong>: open_document / list_blocks / read_text / <strong>find_text</strong> (locate) / <strong>document_info</strong> (word count · outline · style list) / export_markdown / find_and_replace_text / <strong>replace_paragraph</strong> (rewrite a block, style kept) / <strong>insert_paragraph</strong> / <strong>insert_table</strong> / <strong>insert_markdown</strong> / <strong>set_paragraph_style</strong> (heading level or style) / <strong>delete_block</strong> / save_document (auto <code>.bak</code> backup). <strong>Excel</strong>: open_workbook / list_sheets / read_sheet (range as Markdown/JSON/CSV, formulas optional) / search_cells / <strong>query_rows</strong> (multi-condition filter · sort · paging) / <strong>aggregate</strong> (grouped sum / avg / count / distinct / min / max) / set_cells (batch write, existing styles kept) / append_rows / add_sheet / rename_sheet / delete_sheet / create_workbook / save_workbook / close_workbook. Writes only touch the affected XML parts (styles, formulas, charts and images are preserved) and always back up to <code>.bak</code> first; .xls / .csv are read-only (writing tells the model to save as .xlsx first). Tool arguments are alias-normalized (e.g. query_sheet → sheet, workbook_id → workbookId), and missing required arguments such as workbookId / docId are reported up front with an “open first” hint instead of a vague “session closed” error.'
+          desc: 'Reads & writes local <strong>.docx</strong> and <strong>.xlsx</strong> files (34 tools, session-based: open returns a docId / workbookId). <strong>Word</strong>: open_document / list_blocks / read_text / <strong>find_text</strong> (locate) / <strong>document_info</strong> (word count · outline · style list) / export_markdown / find_and_replace_text / <strong>replace_paragraph</strong> (rewrite a block, style kept) / <strong>insert_paragraph</strong> / <strong>insert_table</strong> / <strong>insert_markdown</strong> / <strong>set_paragraph_style</strong> (heading level or style) / <strong>delete_block</strong> / save_document (auto <code>.bak</code> backup); <strong>styles</strong>: <strong>list_styles</strong> (style list · format · usage) / <strong>create_style</strong> (new paragraph or character style) / <strong>update_style</strong> (edit a style definition, referencing text follows) / <strong>delete_style</strong> / <strong>set_text_format</strong> (font, size, bold, color for matched text — no style needed). <strong>Excel</strong>: open_workbook / list_sheets / read_sheet (range as Markdown/JSON/CSV, formulas optional) / search_cells / <strong>query_rows</strong> (multi-condition filter · sort · paging) / <strong>aggregate</strong> (grouped sum / avg / count / distinct / min / max) / set_cells (batch write, existing styles kept) / append_rows / add_sheet / rename_sheet / delete_sheet / create_workbook / save_workbook / close_workbook. Writes only touch the affected XML parts (body text only document.xml, style edits only styles.xml; formulas, charts and images are preserved) and always back up to <code>.bak</code> first; .xls / .csv are read-only (writing tells the model to save as .xlsx first). Tool arguments are alias-normalized (e.g. query_sheet → sheet, workbook_id → workbookId), and missing required arguments such as workbookId / docId are reported up front with an “open first” hint instead of a vague “session closed” error.'
         },
         drawio: {
           name: 'drawio Diagrams (builtin-drawio)',
@@ -2949,13 +3045,13 @@ const translations = {
         },
         tray: {
           title: 'Collapse to tray (keep running)',
-          desc: 'Closing only <strong>hides</strong> the window into the notification area (Windows) or menu bar (macOS); the app and its background tasks <strong>keep running</strong>. Because nothing is interrupted, no warning is shown and a balloon hint appears the first time.'
+          desc: 'Closing only <strong>hides</strong> the window into the notification area (Windows) or menu bar (macOS); the app and its background tasks <strong>keep running</strong>. Because nothing is interrupted, no warning is shown and a balloon hint appears the first time. A <strong>file window</strong> (canvas / scaffold and other standalone windows) also only collapses while its <strong>background task is running</strong>, so the task is not killed — restore it from the tray; with no task running, closing works as usual.'
         },
         trayMenu: {
           title: '📌 What the tray icon offers:',
-          hover: '<strong>Hover</strong>: the number of running tasks and each task’s progress (e.g. “AI-KM · 3 tasks running / · Agent Scaffold 1 12/50 · 3m20s left / · Agent Scaffold 2 3/80 · 9m10s left”).',
+          hover: '<strong>Hover</strong>: the number of running tasks and each task’s progress (e.g. “AI-KM · 3 tasks running / · Agent Scaffold 12/50 · 3m20s left / · Agent Scaffold 3/80 · 9m10s left”).',
           leftClick: '<strong>Left click</strong>: hide the window when it is in front, bring it back when hidden; <strong>double click</strong> always brings it back.',
-          rightClick: '<strong>Right-click menu</strong> (native system menu): Show Main Window / <strong>Settings…</strong> (opens Basic, where this option lives) / running task list / Quit AI-KM.'
+          rightClick: '<strong>Right-click menu</strong> (native system menu): Show Main Window / <strong>Settings…</strong> (opens Basic, where this option lives) / running task list (grouped by window when several windows have tasks — <strong>click a task to bring its window back</strong>) / hidden windows (collapsed windows, click to restore) / Quit AI-KM.'
         },
         note: {
           title: '📌 Tip:',
@@ -2964,9 +3060,20 @@ const translations = {
       }
     },
     dataCanvas: {
+      usage: {
+        title: '📂 How to use it (.data canvas file)',
+        items: [
+          'File type: <code>.data</code> is the canvas file — open it from the <strong>Knowledge Management</strong> file tree: <strong>Browse</strong> and <strong>Visual</strong> both render the Data Canvas module (with its Home / Data / Canvas / Help sub-tabs), while <strong>Source</strong> shows the plain JSON text',
+          'New: file tree ➕ Create File → type <strong>Data Canvas</strong> (<code>.data</code>), or pick “New → Data Canvas” in the file tree / file view context menu; a new file opens as an <strong>empty canvas</strong> ready to model on',
+          'Save: canvas changes are <strong>auto-saved after ~1.5s debounce</strong> back to its own <code>.data</code> file, and the 💾 toolbar button saves immediately; after saving, the open tab is synced (the Source view shows the new JSON at once) and other windows / tabs are notified to refresh',
+          'Switching files: unsaved edits are <strong>written back silently</strong> before the next file loads, and an empty file clears the canvas (no leftovers from the previous file); closing the tab or leaving Knowledge Management writes back the same way',
+          'Own window: right-click the file → Open gives the <strong>canvas only</strong> (no view switcher); to edit the JSON, use the Source view in Knowledge Management. <code>.data</code> is registered as a system file association, so double-clicking it opens this app',
+          'Two uses: open a <code>.data</code> file as a canvas, or export one from the canvas toolbar as a <strong><code>.data</code> package</strong>, or drag a <code>.data</code> file into the canvas to import it as a <strong>sub-canvas node</strong> (both share the same shape: <code>models</code> + <code>activeModelId</code>)'
+        ]
+      },
       overview: {
         title: 'What is Data Canvas?',
-        description: 'Data Canvas is a <strong>standalone top-level module</strong> (formerly part of the Agent Scaffold module, now its own nav entry): build <strong>no-code data models</strong> with nodes and links — table / parameter / chart / sub-canvas nodes with zoom, grid snap and one-click recompute; configure per-column <strong>form entry</strong> types (text / textarea / number / date / select / boolean) on the Data tab, and view charts on the Dashboard tab. Changes are <strong>auto-saved</strong> to the linked <code>.task</code> file (debounced ~1.5s; 💾 saves immediately), and double-clicking a canvas <code>.task</code> file opens this module directly.'
+        description: 'Data Canvas is a <strong>file type in Knowledge Management</strong> (<code>.data</code>) — it is no longer a top-level module and has no nav entry of its own: build <strong>no-code data models</strong> with nodes and links — table / parameter / chart / sub-canvas nodes with zoom, grid snap and one-click recompute; configure per-column <strong>form entry</strong> types (text / textarea / number / date / select / boolean) on the Data tab, and view charts on the Dashboard tab. Changes are <strong>auto-saved</strong> to its own <code>.data</code> file (debounced ~1.5s; 💾 saves immediately), and double-clicking a <code>.data</code> file in Knowledge Management opens this module and loads it.'
       },
       scenarios: {
         title: 'Typical Scenarios',
@@ -2980,7 +3087,7 @@ const translations = {
       steps: {
         title: 'How to Use',
         items: [
-          'Select <strong>Data Canvas</strong> from the navigation bar (hide it via Settings → Interface → Feature Switches)',
+          'Open a <code>.data</code> file from the <strong>Knowledge Management</strong> file tree (the <strong>Browse</strong> / <strong>Visual</strong> view is the canvas module)',
           'On the <strong>Canvas</strong> tab, double-click empty space or press + to add nodes (table / parameter / chart / sub-canvas…), drag to arrange and link them to define data flow',
           'Enter data on the <strong>Data</strong> tab: set an input type per column (or import tables from Excel / Markdown); the sidebar switches records by title field',
           'View charts on the <strong>Dashboard</strong> tab (flow layout / free drag, layout lock); the canvas toolbar exports / imports a <code>.data</code> package'
@@ -2989,16 +3096,17 @@ const translations = {
       notes: {
         title: 'Notes',
         items: [
-          'Canvas files use the same <code>.task</code> format as other scaffolds: changes auto-save; if the file goes missing you will be asked for a new location on the next save',
-          'One canvas task file can hold several data models, saved and restored together with the file; the exported package is for sharing or backup',
-          'Data Canvas no longer appears in the Agent Scaffold “New instance” menu; old canvas <code>.task</code> files still open this module on double-click'
+          'Canvas files use the <code>.data</code> format: changes auto-save, and if the file goes missing you will be asked for a new location on the next save',
+          'One canvas file can hold several data models, saved and restored together with the file; the exported package is for sharing or backup',
+          'Canvases no longer open from <code>.task</code>: double-clicking an old canvas <code>.task</code> file (shaped like <code>{ "models": [...] }</code>) prompts you to switch to the <code>.data</code> extension — <strong>rename it to <code>.data</code> and put it in your workspace</strong> and Knowledge Management will open it as a canvas again (the contents are isomorphic, so renaming is all it takes)',
+          'The canvas toolbar <strong>wraps</strong> with the panel width: in split view or a very narrow window the right-hand buttons are never clipped'
         ]
       }
     },
     agentScaffold: {
       overview: {
         title: 'What is the Agent Scaffold?',
-        description: 'The <strong>Agent Scaffold</strong> is a <strong>universal Agent execution framework</strong> (the Harness): it runs table-driven batch work — and it is the <strong>only scaffold</strong> left, the former Batch Agent / Table Reasoning / Collect File / Collect Web scaffolds now being its <strong>four presets</strong> (legacy <code>.task</code> files convert automatically when opened). Each <strong>instance</strong> links its own <code>.task</code> file and can be paused, resumed, or left running in the background; for programmatic tool calling use the <strong>PTC mode on the Home page</strong>.'
+        description: 'The <strong>Agent Scaffold</strong> is a <strong>universal Agent execution framework</strong> (the Harness): it runs table-driven batch work — and it is the <strong>only scaffold</strong> left, the former Batch Agent / Table Reasoning / Collect File / Collect Web scaffolds now being its <strong>four presets</strong> (legacy <code>.task</code> files convert automatically when opened). Each <code>.task</code> file is a standalone task (opened in a separate window with its own “Scaffold” view) that can be paused, resumed, or left running in the background; for programmatic tool calling use the <strong>PTC mode on the Home page</strong>.'
       },
       scaffolds: {
         title: 'How to Configure the Agent Scaffold (Source × Execution × Output)',
@@ -3024,15 +3132,15 @@ const translations = {
         },
         pipeline: {
           title: '🧩 Agent Scaffold',
-          desc: 'The <strong>Agent scaffold</strong>, evolved from Batch Agent. The task page splits into <strong>Source</strong>, <strong>Execution</strong> and <strong>Output</strong>: the source is a <strong>Table (import xlsx / csv)</strong>, a <strong>Folder (scan local files, one task row per file)</strong>, or <strong>Text (one entry per line: URLs, file paths or plain text)</strong>; execution is <strong>Agent (full session, with tools)</strong> — task instruction, concurrent agents — or <strong>Pure LLM (no tools)</strong>; output is <strong>Single result</strong> (agent → result column; pure LLM → write back to source-table columns) or <strong>Structured extraction</strong> (JSON per row merged into the data table by field / primary key — available for both Agent and Pure LLM); a single result is just the “one field” form of a structured result, and both share the export columns / runtime info settings, so switching never loses that selection; legacy “Table Reasoning” files open as Structured extraction (old write-back values become data-table records). The pure-LLM structured branch adds a <strong>Goal</strong> (supports {{column}} placeholders) and <strong>Content</strong> (row data / local file in a field / web page in a field — fetching is link crawling: page titles and discovered links are stored as row fields and followed into new rows by the follow policy Within depth/page caps). The <strong>Task page</strong> is frameless and title-free, laid out in three columns: left = one <strong>Run &amp; Settings</strong> card with the <strong>action bar merged at its top</strong> (Load / Save / Save as · Reset / Stop / Start, then the <strong>preset</strong> dropdown), middle = <strong>Input</strong> (Data selection on top, the Task instruction filling the rest), right = <strong>Output</strong> (narrow windows go straight to a single column — there is no in-between two-column state; all three panels fill the task page height and scroll inside when content is taller — the left Run &amp; Settings card scrolls as a whole) — the preset dropdown (Batch Agent / Table Reasoning / Collect Files / Collect Web) applies the configuration shape of a legacy scaffold in one click (any manual change switches it back to “Custom”), and <strong>Load</strong> can even open legacy .task files, converting them automatically (write-back values, task rows and collected data included). The imported table or scanned folder <strong>path</strong> appears under the Input panel (with the row count; hover for the full path); <strong>Row title</strong> under Run picks which field the details table shows at its left (none or one field, switchable while running); <strong>Output fields</strong> are edited as a full-width table (field name + inference instruction / description; structured extraction adds Required / PK columns) — column-by-column write-back and structured extraction <strong>share the same field list</strong>, so switching the output mode needs no re-configuring; the <strong>Input</strong> panel has two segments — <strong>Task instruction</strong> (the old template / goal unified; {{column}} placeholders rendered once per row, shared by all three execution modes) and <strong>Data selection</strong> (click a column to write / remove its {{column}} placeholder in the instruction; referenced columns are highlighted, with All / None; content fetching, value field and crawl settings live here too). The page splits into tabs: <strong>Task</strong> (setup and start), <strong>Details</strong> (one row per sub-task: status / start &amp; finish time / duration / reasoning steps / tokens (<strong>pure LLM inference counts per-row tokens too</strong>) / error; in structured mode the extracted fields, and in write-back mode the target columns, become the result columns — click a row for the full record (write-back results are editable as JSON in the row dialog) and extracted data; the batch can be <strong>stopped</strong> right from this tab), <strong>Results</strong> (preview &amp; export: the page shows exactly what “Export Excel” writes — the columns are configured under Output (a vertical list where you switch each source column, runtime info item such as row # / instruction / status / times / tokens, and each round’s result on or off and drag the handle to reorder them — that order is the export column order, and you can rename any column by clicking its name (used by the Results tab and the exported Excel; a renamed column still shows its original name); merged per task row in structured mode; the explanatory text of Output mode / Output fields / Export columns now lives in the hover title), results load <strong>progressively</strong> (scrolling to the bottom keeps loading), with full-text search, filtering by column and row-number jump highlighting, and any single result can be <strong>deleted</strong> individually; results are separate from task rows and rerunning structured extraction <strong>replaces that row’s previous records</strong> by default (switch to keep &amp; merge under Output → Rerun results); the leftmost <strong>Task row</strong> column links each result back to its task row; when the source table changes, “<strong>Sync source</strong>” re-reads it and re-attaches results by fingerprint / first value (new / changed / removed are all marked — click “new” / “changed” in the “+new ~changed -removed” toolbar summary to filter the table below (hover for column-level differences and the matching notes)) (click to open it in the Details tab), and when the source table changes (rows added / removed / edited) a re-import re-attaches results by <strong>row fingerprint</strong> and reports a new / changed / removed delta (only the row-count difference is reported when the positions cannot be determined reliably; changed rows keep their results on the same row (source data edited — rerun when you like); surplus results of deleted rows are deleted automatically (when the match looks unreliable they are only marked “removed” — the “Removed N” button on the Results tab filters down to them); when the Results count exceeds the task-row count, the line under the table breaks it down and the “Orphan N” button filters out results that belong to no task row (“Delete these” removes them; “Clear” only cancels the filter); “Sync results” rebuilds the results from the current task rows so the count and the data line up))), <strong>Graph</strong> (the crawl trajectory — nodes = pages, edges = who discovered whom, with a depth distribution — or the access path of any agent row — one “agent” node per row (purple) with edges to the sources it visited and the MCP services it called (a row that called no tool still shows as a single node); the toolbar shows a <strong>coloured-dot legend</strong> (click a dot to filter that type in/out) next to the view picker and node cap (default 2000; the graph opens with a wider initial view and, once the layout settles, is auto-framed and centred to include every node — manual zoom/pan turns that off); untick <strong>Enable graph tab</strong> under Run &amp; Settings to skip the projection and hide the tab entirely; the view is picked automatically for the task (web rows → crawl trajectory, otherwise process snapshots → access path), with an explanatory empty state) and <strong>Logs</strong> (main + per-worker, level filter; the clear button sits at the right of the log toolbar). Legacy batch / table-reasoning / collect-file / collect-web <code>.task</code> files open into this pipeline and convert automatically.'
+          desc: 'The <strong>Agent scaffold</strong>, evolved from Batch Agent. The task page splits into <strong>Source</strong>, <strong>Execution</strong> and <strong>Output</strong>: the source is a <strong>Table (import xlsx / csv)</strong>, a <strong>Folder (scan local files, one task row per file)</strong>, or <strong>Text (one entry per line: URLs, file paths or plain text)</strong>; execution is <strong>Agent (full session, with tools)</strong> — task instruction, concurrent agents — or <strong>Pure LLM (no tools)</strong>; output is <strong>Single result</strong> (agent → result column; pure LLM → write back to source-table columns) or <strong>Structured extraction</strong> (JSON per row merged into the data table by field / primary key — available for both Agent and Pure LLM); a single result is just the “one field” form of a structured result, and both share the export columns / runtime info settings, so switching never loses that selection; legacy “Table Reasoning” files open as Structured extraction (old write-back values become data-table records). The pure-LLM structured branch adds a <strong>Goal</strong> (supports {{column}} placeholders) and <strong>Content</strong> (row data / local file in a field / web page in a field — fetching is link crawling: page titles and discovered links are stored as row fields and followed into new rows by the follow policy Within depth/page caps). The <strong>Task page</strong> is frameless and title-free, laid out in three columns: left = one <strong>Run &amp; Settings</strong> card with the <strong>action bar merged at its top</strong> (Load / Save / Save as · Reset / Stop / Start, then the <strong>preset</strong> dropdown), middle = <strong>Input</strong> (Data selection on top, the Task instruction filling the rest), right = <strong>Output</strong> (narrow windows go straight to a single column — there is no in-between two-column state; all three panels fill the task page height and scroll inside when content is taller — the left Run &amp; Settings card scrolls as a whole) — the preset dropdown (Batch Agent / Table Reasoning / Collect Files / Collect Web) applies the configuration shape of a legacy scaffold in one click (any manual change switches it back to “Custom”), and <strong>Load</strong> can even open legacy .task files, converting them automatically (write-back values, task rows and collected data included). The imported table or scanned folder <strong>path</strong> appears under the Input panel (with the row count; hover for the full path); <strong>Row title</strong> under Run picks which field the details table shows at its left (none or one field, switchable while running); <strong>Output fields</strong> are edited as a full-width table (field name + inference instruction / description; structured extraction adds Required / PK columns) — column-by-column write-back and structured extraction <strong>share the same field list</strong>, so switching the output mode needs no re-configuring; the <strong>Input</strong> panel has two segments — <strong>Task instruction</strong> (the old template / goal unified; {{column}} placeholders rendered once per row, shared by all three execution modes) and <strong>Data selection</strong> (click a column to write / remove its {{column}} placeholder in the instruction; referenced columns are highlighted, with All / None; content fetching, value field and crawl settings live here too). The page splits into tabs: <strong>Task</strong> (setup and start), <strong>Details</strong> (one row per sub-task: status / start &amp; finish time / duration / reasoning steps / tokens (<strong>pure LLM inference counts per-row tokens too</strong>) / error; in structured mode the extracted fields, and in write-back mode the target columns, become the result columns — click a row for the full record (write-back results are editable as JSON in the row dialog) and extracted data; the batch can be <strong>stopped</strong> right from this tab), <strong>Results</strong> (preview &amp; export: the page shows exactly what “Export Excel” writes — the columns are configured under Output (a vertical list where you switch each source column, runtime info item such as row # / instruction / status / times / tokens, and each round’s result on or off and drag the handle to reorder them — that order is the export column order, and you can rename any column by clicking its name (used by the Results tab and the exported Excel; a renamed column still shows its original name); merged per task row in structured mode; the explanatory text of Output mode / Output fields / Export columns now lives in the hover title), results load <strong>progressively</strong> (scrolling to the bottom keeps loading), with full-text search, filtering by column and row-number jump highlighting, and any single result can be <strong>deleted</strong> individually; results are separate from task rows and rerunning structured extraction <strong>replaces that row’s previous records</strong> by default (switch to keep &amp; merge under Output → Rerun results); the leftmost <strong>Task row</strong> column links each result back to its task row; when the source table changes, “<strong>Sync source</strong>” re-reads it and re-attaches results by fingerprint / first value (new / changed / removed are all marked — click “new” / “changed” in the “+new ~changed -removed” toolbar summary to filter the table below (hover for column-level differences and the matching notes)) (click to open it in the Details tab), and when the source table changes (rows added / removed / edited) a re-import re-attaches results by <strong>row fingerprint</strong> and reports a new / changed / removed delta (only the row-count difference is reported when the positions cannot be determined reliably; changed rows keep their results on the same row (source data edited — rerun when you like); surplus results of deleted rows are deleted automatically (when the match looks unreliable they are only marked “removed” — the “Removed N” button on the Results tab filters down to them); when the Results count exceeds the task-row count, the line under the table breaks it down and the “Orphan N” button filters out results that belong to no task row (“Delete these” removes them; “Clear” only cancels the filter); “Sync results” rebuilds the results from the current task rows so the count and the data line up))), <strong>Graph</strong> (the crawl trajectory — nodes = pages, edges = who discovered whom, with a depth distribution — or the access path of any agent row — one “agent” node per row (purple) with edges to the sources it visited and the MCP services it called (a row that called no tool still shows as a single node); the toolbar shows a <strong>coloured-dot legend</strong> (click a dot to filter that type in/out) next to the view picker and node cap (default 2000; the graph opens with a wider initial view and, once the layout settles, is auto-framed and centred to include every node — manual zoom/pan turns that off); untick <strong>Enable graph tab</strong> under Run &amp; Settings to skip the projection and hide the tab entirely; the view is picked automatically for the task (web rows → crawl trajectory, otherwise process snapshots → access path), with an explanatory empty state) and <strong>Logs</strong> (a left-side nav lists the main log and each thread, with level filtering; the clear button sits in the nav header). Legacy batch / table-reasoning / collect-file / collect-web <code>.task</code> files open into this pipeline and convert automatically.'
         }
       },
       usage: {
         title: 'How to Use',
         items: [
-          'Select <strong>Agent Scaffold</strong> from the left navigation',
-          'Use the <strong>instance bar</strong> at the top to open several instances at once: five persistent buttons on its left — <strong>Open / New / Start / Pause / Save</strong> (<strong>Start / Pause appear according to that instance’s task state</strong>: Start shows only when it has pending rows, Pause only while it is running, and neither shows when there is nothing to do) (Open picks a .task file for a new instance; New creates an instance right away — no file is created yet, so the first Save asks where to put its <code>.task</code>; <strong>Start / Pause / Save act on the current tab’s task only</strong> (Start runs/resumes it; Pause pauses it keeping its state; Save writes it back to its task file, asking for a location if it has none yet, and saving the current snapshot while running); <strong>hold Ctrl / ⌘ / Alt</strong> while clicking those three to apply to every opened instance; the result of Save and of “Export Excel” (saving / saved / canceled / failed) is shown in the <strong>bottom-left status bar</strong> — success and cancel no longer pop up a message, it clears itself after a few seconds, hover for the failure detail, and saving several instances at once is summarized into one line). No dropdown menu anymore. Hover a tab for the file path (and, while running, the progress and estimated time left), double-click or right-click to rename, click × to close (the file is kept). Double-clicking a <code>.task</code> file opens its instance directly (after closing every instance a <strong>guide page</strong> appears with New task / Open task shortcuts, and the instance bar is hidden since its buttons do nothing there)',
-          'A new instance is always the <strong>Agent Scaffold</strong> (the only type); no task file is created up front — the first Save asks where to put it; pick one of the four presets on the task page (Batch Agent / Table Reasoning / Collect File / Collect Web), or keep “Custom”',
+          'Double-click a <code>.task</code> file in Knowledge Management (file tree / file view, search or right-click open) to open its dedicated “Scaffold” view in a <strong>separate window</strong>; “New → Scaffold” creates one too (an empty task skeleton is written and the window opens right away)',
+          'One window serves exactly one .task (the file is isolated in its own window; opening the same file again focuses the existing window): the scaffold itself lives in that window — the Task / Details / Results / Graph / Logs tabs plus the status-bar Load / Save / Save as · Reset / Stop / Start actions — and everything is written back to this file',
+          '“New → Scaffold” writes an empty task skeleton (<code>scaffold: pipeline</code>); pick one of the four presets on the task page (Batch Agent / Table Reasoning / Collect File / Collect Web), or keep “Custom”',
           '<strong>Keep in file</strong> (Run &amp; Settings) lets you tick <strong>Graph data</strong> (per-row process snapshots that the graph and row details are built from) and/or <strong>Run logs</strong> so they are written into the task file (still viewable after reopening); both are <strong>off by default</strong> to keep the file small',
           '<strong>Rounds</strong> on the task page let one batch of rows run several times: a new round keeps the rows (status back to pending) and the current config snapshot, so you can change settings / instruction and run again — switch rounds from the dropdown (results / graph / export always follow the active round)',
           '<strong>Previous rounds</strong> chips under Data selection (e.g. <code>{{Round 1.result}}</code> / <code>{{Round 1.field}}</code>) inject an earlier round’s output for the <strong>same row</strong> into this round’s instruction; tick the rounds you want in Export columns to place their results <strong>side by side</strong> for comparison',
@@ -3040,7 +3148,7 @@ const translations = {
           'Clicking a table row opens the <strong>row detail</strong> in three tabs — <strong>Task / Process / Output</strong> (tabs on the left, the run counters — start / end / duration / steps / tokens — on the right; the tab you pick is kept when you open other rows, so checking many rows for the same kind of info needs no re-clicking): Task = the prompt actually sent after substitution, Process = reasoning steps and tool calls (same tool box as the home chat: <strong>a single-line summary by default</strong>, click to expand arguments and result; live while running), Output = extracted data / written-back columns / result text (while running it <strong>streams the rendered text</strong> instead of the Markdown source; Markdown is laid out compactly for the preview size instead of being stretched out); the <strong>bottom button bar</strong> holds, left to right, the tab action (Copy / Edit — Save + Cancel while editing) → <strong>status dropdown</strong> (Pending / Completed / Failed / Skipped — status only, results are kept; “Pending” = to-run, press Start on the Task tab to run it; running rows cannot be changed) → <strong>Stop this row</strong> (shown while that row is running: its session/request is cancelled and the row is marked “Skipped”; <strong>other rows and the batch keep running</strong>) → <strong>Rerun this row</strong> (shown whenever it is not running: while the batch runs it jumps the queue, otherwise it is marked pending and started right away) → Delete, with Close on the right (buttons and the dropdown share the same height; the Operations column of the table shows plain status text only, no buttons',
           'The <strong>Filter</strong> button on the Details tab opens one panel with every condition — status / search / result / row range / steps / took (steps and duration take <strong>&lt; ≤ &gt; ≥ =</strong> plus a value; never-run rows count as 0 steps / 0 seconds, durations are seconds by default but accept 90 / 1.5m / 2m30s) — and it shows how many rows <strong>match</strong> live; the matched rows can be <strong>marked in bulk</strong> as Pending (= queued for the next Start) / Skipped / Completed / Failed, or rerun right away with “Rerun matched” (mark pending + run)',
           'Configure the three dimensions — <strong>Source</strong> (table / folder / text), <strong>Execution</strong> (agent / pure LLM) and <strong>Output</strong> (single result / structured extraction) — then click Start',
-          'Click the run / execute button on the panel — runs can be stopped and resumed later (progress is preserved), and everything is saved to the linked <code>.task</code> file',
+          'Click the run / execute button in the window — runs can be stopped and resumed later (progress is preserved), and everything is saved to its own <code>.task</code> file (reopen that file to continue)',
         ]
       }
     },
@@ -3053,15 +3161,15 @@ const translations = {
         title: 'How to Use',
         step1: { title: 'Prepare Agent presets', desc: 'Create members under Settings → Agents → Presets: each preset carries its system prompt, model, temperature and capabilities (tools / skills / knowledge base / MCP). Members are the presets themselves — no duplicate setup needed.' },
         step2: { title: 'Switch to Swarm mode', desc: 'Pick “Swarm” in the <strong>mode selector</strong> at the bottom-left of the home input area; a <strong>member chip</strong> appears — click it to tick the presets that join the task (<strong>tick order = speaking order</strong>):', capabilities: ['📂 Read Files', '💻 Execute Code', '🔎 Web Search', '🗄️ Knowledge Base', '🖥️ Browse Web', '✍️ Write Files', '🔌 MCP Services', '🤖 Skills'] },
-        step3: { title: 'Choose run mode & summary', desc: 'Next to the member chip, the <strong>run mode</strong> dropdown offers three options: All respond / Host-led / Debate. The <strong>Summary</strong> toggle decides whether the host wraps up at the end (off by default). Both are saved with the conversation.' },
+        step3: { title: 'Choose run mode', desc: 'Next to the member chip, the <strong>run mode</strong> dropdown offers three options: All respond / Debate / Team. It is saved with the conversation.' },
         step4: { title: 'Send a Task & Collaborate', desc: 'Type a task at the bottom and send (typing <code>@member-name</code> pops up candidates and calls that member directly). Without @, members speak in turn according to the mode; members can <code>@colleague</code> in replies to pull others in, or spawn a <strong>generic subagent</strong>. Generic / custom members automatically carry enabled global MCP services plus read/write, search, code and skill capabilities.' },
         step5: { title: 'Watch results', desc: 'Member replies are ordinary messages in the conversation: Markdown body with <strong>inline tool-call / thinking cards</strong> (identical to Agent mode) that expand to show args and results. ■ stops a running task, and a chat title is generated automatically when the task finishes.' }
       },
       modes: {
         title: 'Run Modes (input bar dropdown)',
         'auto-mention': { name: 'All respond', desc: 'Every selected member answers the task in turn; members may also @colleagues in their reply. Default.' },
-        'auto-host': { name: 'Host-led', desc: 'After everyone speaks, the host names members to follow up — collaboration works even without @. Optional summary afterwards.' },
-        debate: { name: 'Debate', desc: 'Members debate the task over rounds, then the host gives a neutral summary. Best for comparing options.' }
+        debate: { name: 'Debate', desc: 'Members debate the task over rounds, then the host gives a neutral summary. Best for comparing options.' },
+        team: { name: 'Team (Lead-led)', desc: 'The first member acts as Lead: it splits the goal into tasks, assigns them by dependency and delivers a summary. Messages, Flow, Roster, Tasks and Comm are full-width sibling tabs; the Flow view shows task dependencies and member status vertically; the Roster shows per-member tokens / tool count / last activity (a running member idle for over 90s is flagged); a stopped episode can be resumed from the Tasks tab; the Tasks tab also has a concurrency gate (1-8), and clicking a task jumps to its messages (and back); long outputs are saved as artifacts (openable card in the chat, 📎 chips on the task card) so full text stays out of context.' }
       }
     },
     browser: {
@@ -3094,69 +3202,29 @@ const translations = {
           'AI session tabs are <strong>recycled when idle</strong> to avoid clutter; click a tab to keep it.',
           'Cache management sits at the bottom of the right rail — inspect the cache size and clear it in one click.',
           'The Browser Agent is also a <strong>built-in MCP server (builtin-browser)</strong>: agents drive it via browser_* tools (navigate, new / switch / close tabs, read text / Markdown / HTML, click, type, scroll, screenshot). Manage it under Settings → Tools → MCP. The <strong>drawio (builtin-drawio)</strong> built-in server likewise lets agents create, inspect, edit, lay out and export local .drawio diagrams through 44 drawio_* tools.',
-          'Local <strong>.html / .htm</strong> pages in Knowledge Management can be sent straight to the browser with “Open File”, and AI can keep operating or extracting them.'
+          'Local <strong>.html / .htm</strong> pages in Knowledge Management open in the <strong>built-in browser</strong> by default (double-click / search / any view, same as “Open File”), where AI can keep operating on them or extract text; use the right-click “Open → pick a view” menu to preview them in a file view or edit the source.'
         ]
-      }
-    },
-    todo: {
-      overview: {
-        title: 'What is Todo Management?',
-        description: 'Todo Management is an <strong>all-in-one item manager for ideas / plans / todos</strong> (notes and projects unified). Data is stored in the browser <code>localStorage</code> and can be imported / exported anytime. Four views are provided: <strong>Notes, Tree, Month, and Week</strong>.'
-      },
-      views: {
-        title: 'Four Views',
-        notes: { name: 'Notes', desc: 'Card list + block editor, supports pin / hide / delete' },
-        tree: { name: 'Tree', desc: 'Draggable hierarchical tree with child items' },
-        month: { name: 'Month', desc: 'Full-month calendar, drag items onto dates to schedule' },
-        week: { name: 'Week', desc: 'Single-week calendar (Sun–Sat), flip weeks and drag to schedule' }
-      },
-      tips: {
-        title: 'Usage Tips for Each View',
-        notes: {
-          name: 'Notes',
-          step1: { title: 'Quick Capture', desc: 'Click the toolbar "+" to create, type in the block editor, and press Ctrl+S or Save to persist; either a title or content is enough.' },
-          step2: { title: 'Pin / Hide', desc: 'The pin button on a card pins it; the eye button hides it (like archiving); use the "Show / Hide" filter to view hidden or all items.' },
-          step3: { title: 'Search & Filter', desc: 'The top search box matches title / content; the category filter filters by status; sorting defaults to pinned first, then by update time.' }
-        },
-        tree: {
-          name: 'Tree',
-          step1: { title: 'Hierarchy & Children', desc: 'Add child items to nodes; expand / collapse state is saved automatically; drag nodes to adjust hierarchy and order.' },
-          step2: { title: 'Right-click Sort', desc: 'Right-click a node to switch sort mode (default drag order / name / updated / start / end / status); click the same item again to toggle ascending / descending.' },
-          step3: { title: 'Jump & Edit', desc: 'Click a node to view / edit it in the right editor; hidden ancestors keep their visible descendants.' }
-        },
-        month: {
-          name: 'Month',
-          step1: { title: 'Navigate Months', desc: '"Back to today" returns to the current month; ◀ / ▶ switch months; click a date to select it.' },
-          step2: { title: 'Drag to Schedule', desc: 'Drag item cards onto any date: items with start/end times shift the whole span (keeping duration); items without times drop as a single day 9:00–17:00.' },
-          step3: { title: 'Quick Create', desc: 'Click the "+" at the top-right of a date to create an item on that date; the badge beside the date shows the item count.' }
-        },
-        week: {
-          name: 'Week',
-          step1: { title: 'Navigate Weeks', desc: 'Toolbar "Back to today" returns to the current week; ◀ / ▶ buttons go back / forward 7 days; the title shows the date range and week number of the current week.' },
-          step2: { title: 'Drag to Schedule', desc: 'Drag item cards onto any day (same as month view): items with start/end times shift the whole span (keeping duration); items without times drop as a single day 9:00–17:00.' },
-          step3: { title: 'Quick Create', desc: 'Click the "+" on a day to create an item on that date; each day shows an item-count badge and today is highlighted.' },
-          step4: { title: 'Delete', desc: 'Hover an item card to reveal a trash button at the top-right; click to delete (including children).' }
-        }
       }
     },
     faq: [],
     learning: {
       overview: {
         title: 'Mastery Learning: Remember & Review',
-        desc: 'The <strong>Learning</strong> module turns saved knowledge bases (<code>.kb</code>) into content you can “master”: mastery tracking and spaced repetition over files and ontology entities, plus flashcards, a mistake book and exams — closing the practice → review → exam loop. Learning records live in a separate <code>&lt;name&gt;.learning</code> next to each KB and are never written into <code>.kb</code>; after a KB update old records are marked “stale” and kept.'
+        desc: 'The <strong>Learning</strong> module turns saved knowledge bases (<code>.kb</code>) into content you can “master”: mastery tracking and spaced repetition over files and ontology entities, plus flashcards, a mistake book and exams — closing the practice → review → exam loop. Learning records (answers plus generated AI explanations) live in a separate <code>&lt;name&gt;.learning</code> next to each KB and are never written into <code>.kb</code>; after a KB update old records are marked “stale” and kept.'
       },
-      viewsTitle: 'Five views',
+      viewsTitle: 'Six views',
       view: {
         overview: { name: 'Overview', desc: 'Action center: next-step suggestions; overall mastery / accuracy / total practice in the bottom status bar; streak & 7/30-day trend' },
-        map: { name: 'Map', desc: 'Mastery per file or entity (horizontal progress bar at card bottom); claim mastered (test-out), switch knowledge type, clear stale or relearn' },
+        map: { name: 'Map', desc: 'Three axes: by file / by entity (horizontal progress bar at card bottom; claim mastered (test-out), switch knowledge type, clear stale or relearn) / ontology graph (entity-relation graph coloured by mastery; the scope dropdown offers all entities / practised only / all entities + questions / practised only + questions / slices + questions / files + questions, where questions attach to the entities, slices or source files they are based on; click a node for details or to practice; the legend bar offers node spacing (tight / normal / wide / extra, default wide), a show-count picker (200 / 500 / 1000 / 2000 / 5000 / 10000 / 20000, default 2000) capping how many nodes of each kind are drawn, and a label picker (auto / always / never; labels shrink automatically as node count grows); the legend states shown / total)' },
         review: { name: 'Review', desc: 'Due queue (recent / consecutive misses first) with one-click due review' },
         mistakes: { name: 'Mistakes', desc: 'List on the left, detail on the right: reference (source slice), reason tagging (memory / concept / procedure / careless), AI explain, retry' },
-        exam: { name: 'Exam', desc: 'Random or selected-slice questions (single / multi / true-false / essay); objective graded locally, essays graded by AI; optionally feed each answer into its file learning object' }
+        solver: { name: 'Q&A', desc: 'Ask about the current KB directly, running the same agent loop as Home (it calls kb_search across multiple rounds, plus search_files semantic/keyword or read_file when needed); streams the answer and shows execution steps (tools called and hit counts), answers only from slices with [n] citations that can be expanded for verification.' },
+        exam: { name: 'Exam', desc: 'Four ways to build a paper (random / selected slices / manual / mimic exam) with single / multi / true-false / essay; objective graded locally, essays by AI; optionally feed each answer into its file learning object' }
       },
       mech: { title: 'Core mechanics' },
       step1: {
         title: 'Build a KB first, then study',
-        desc: 'After slicing / vectorizing and saving a <code>.kb</code> in Knowledge Processing, open Learning and pick that KB at the top-right.'
+        desc: 'After slicing / vectorizing and saving a <code>.kb</code> in Knowledge Processing, open Learning and pick that KB at the top-right. The dropdown scans <strong>every workspace and its subfolders</strong> (manage workspaces in Settings → General → Basic → Path Settings), so a <code>.kb</code> outside the current workspace still shows up; duplicates get their folder appended.'
       },
       step2: {
         title: 'Mastery & gate',
@@ -3173,6 +3241,10 @@ const translations = {
       step5: {
         title: 'Reason tagging & exam feed',
         desc: 'Tag the reason of each miss (memory / concept / procedure / careless) for review; when grading an exam you can feed every answer into the source file learning object.'
+      },
+      step6: {
+        title: 'Explain & mimic exam',
+        desc: 'A practice card has three tabs at the bottom: <strong>Answer</strong>, <strong>Explain</strong> (streamed live as Markdown; AI breaks the point into core idea / prerequisites / step-by-step reasoning / common confusions plus a knowledge map) and <strong>Slices</strong> (source slices rendered as Markdown); mistake details offer the same AI explain. All learning-module Markdown uses the same typography as Home, and explanations/diagram labels prefer Chinese, switching to English only when the KB itself is English (or the UI is in English). <strong>Mimic exam</strong> lets you import or paste a real exam, analyzes its question mix and wording style (profile stored locally per KB), then writes new questions in that style.'
       }
     },
     footer: {
@@ -3689,6 +3761,20 @@ const translations = {
   font-size: 10px;
   color: var(--fontColor);
   opacity: 0.8;
+}
+
+/* 「视图一览」的分组小标题（11 种视图 / 5 种专用视图） */
+.views-group + .views-group {
+  margin-top: 16px;
+}
+
+.views-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+  margin: 2px 0 6px 2px;
+  padding-bottom: 3px;
+  border-bottom: 1px dashed var(--borderColor);
 }
 
 /* 设计参考开源项目区：更详细的列表式展示 */

@@ -25,8 +25,8 @@ import { normalizeUrl, parseLinksField } from './fetch'
 export interface PipelineGraphNode {
   id: string
   label: string
-  /** viewer 内置类型：source=网页信源 / file=原始文件 / data=数据实体 / agent=智能体 / mcp=MCP 服务 */
-  type: 'source' | 'file' | 'data' | 'agent' | 'mcp'
+  /** viewer 内置类型：source=网页信源 / file=原始文件 / data=数据实体 / agent=智能体 / mcp=MCP 服务 / question=问题 */
+  type: 'source' | 'file' | 'data' | 'agent' | 'mcp' | 'question'
   /** viewer 支持的颜色：green/blue/orange/red/gray/purple */
   color: 'green' | 'blue' | 'orange' | 'red' | 'gray' | 'purple'
   /**

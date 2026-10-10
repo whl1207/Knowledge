@@ -5,6 +5,14 @@ import { Transformer } from 'markmap-lib'
 import * as markmap from 'markmap-view'
 import { readImageAsDataUrl } from '@/lib/export/docx'
 import { prepareTalkPage } from '@/lib/mindmap-talk'
+import { preprocessMath } from '@/lib/markdown/render'
+import { applyMdLinkRule } from '@/lib/markdown/mdLinkPolicy'
+import { handleMdContainerClick, currentDocDir } from '@/lib/knowFile/mdLinkOpen'
+import { liftMindMapBlocks, MARKMAP_HTML_OPTIONS } from '@/lib/knowFile/mindMapMath'
+// 公式渲染：markmap 内置 KaTeX 插件会把 $…$ / $$…$$ 转成 KaTeX 的 HTML，
+// 但**必须带 KaTeX 样式表**（KaTeX 靠 CSS 定位字形并隐藏重复的 MathML 分支），
+// 否则公式会以「MathML + 裸 span」的原始形态堆在一起，看起来像没渲染。
+import 'katex/dist/katex.min.css'
 import MermaidViewer from '@/components/MermaidViewer.vue'
 
 const store = usestore()
@@ -140,10 +148,25 @@ function resolveRelativeImages(md: string): string {
   return md
 }
 
-// 取当前文档内容：去 frontmatter + 解析相对图片为绝对路径
+// 取当前文档内容：去 frontmatter + 解析相对图片为绝对路径 + LaTeX 预处理
 function getResolvedContent(): string {
   const raw = store.data[store.index] && store.data[store.index].content
-  return resolveRelativeImages(stripFrontmatter(String(raw || '')))
+  // LaTeX 预处理与浏览 / 演示视图共用（preprocessMath）：把 \[..\]、\(..\)、裸 \begin{} 环境
+  // 统一成 $ / $$，交由 markmap 的 KaTeX 插件渲染；否则这些定界符会被转义成 [..]、(..) 原样显示
+  return preprocessMath(resolveRelativeImages(stripFrontmatter(String(raw || ''))))
+}
+
+/** 创建 markmap 转换器：链接按当前文档目录解析成绝对路径（点击由容器统一处理，见 handleMindLinkClick） */
+function createTransformer(): Transformer {
+  const t = new Transformer()
+  applyMdLinkRule(t.md, () => currentDocDir())
+  return t
+}
+
+/** 节点内 Markdown 链接点击：本地文件按当前文档目录解析后打开（与浏览 / 演示视图一致）。
+ *  用捕获阶段：markmap 在节点 <g> 上也有 click（折叠/展开），必须在它之前拦下链接点击。 */
+const handleMindLinkClick = (e: MouseEvent) => {
+  void handleMdContainerClick(e, currentDocDir())
 }
 
 // markmap 只保留“位于标题下”的图片；若图片行紧挨在下一个标题之上会被整段丢弃。
@@ -184,9 +207,15 @@ function relocateImagesBeforeHeadings(md: string): string {
   return out.join('\n')
 }
 
+// 把 markdown 转成 markmap 节点树（额外节点收集规则：展示公式块 div.md-math 也要成为节点）
+function transformMindMap(transformer: Transformer, markdown: string) {
+  return transformer.transform(markdown, MARKMAP_HTML_OPTIONS)
+}
+
 // 把本地图片内联为 data URL（foreignObject 内更可靠，规避路径/file 访问/测量时机问题）
-async function toMindMapMarkdown(): Promise<string> {
-  const md = relocateImagesBeforeHeadings(getResolvedContent()).replace(/\r\n?/g, '\n')
+// md 为当前 markmap 转换器的 markdown-it 实例：含公式的段落 / 展示公式块需要借它渲染（见 mindMapMath）
+async function toMindMapMarkdown(md: Transformer['md']): Promise<string> {
+  const lifted = liftMindMapBlocks(relocateImagesBeforeHeadings(getResolvedContent()).replace(/\r\n?/g, '\n'), md)
   // 注意：上方已把 md 统一为 LF 换行（CRLF 会让行尾锚点类正则失配，例如 mermaid 代码块收敛）
   // 收集本地绝对路径图片（Windows 盘符路径），跳过 http/data/file 外链
   const localSrcs: string[] = []
@@ -196,9 +225,9 @@ async function toMindMapMarkdown(): Promise<string> {
   }
   let mm: RegExpExecArray | null
   const mdRe = /!\[[^\]]*\]\(([^)\s]+)/g
-  while ((mm = mdRe.exec(md))) collect(mm[1])
+  while ((mm = mdRe.exec(lifted))) collect(mm[1])
   const htmlRe = /<img[^>]*?\ssrc="([^"]+)"/gi
-  while ((mm = htmlRe.exec(md))) collect(mm[1])
+  while ((mm = htmlRe.exec(lifted))) collect(mm[1])
 
   const unique = [...new Set(localSrcs)]
   const urlMap = new Map<string, string>()
@@ -211,7 +240,7 @@ async function toMindMapMarkdown(): Promise<string> {
     }
   }))
 
-  let out = md
+  let out = lifted
   for (const [abs, dataUrl] of urlMap) {
     const esc = abs.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     out = out.replace(new RegExp(`(\\!\\[[^\\]]*\\]\\()${esc}(\\))`, 'g'), `$1${dataUrl}$2`)
@@ -279,9 +308,9 @@ const init = async function() {
   const svgElement = document.getElementById(id.value)!
   svgElement.innerHTML = ""
   
-  let markdown = await toMindMapMarkdown()
-  const transformer = new Transformer()
-  const { root, features } = transformer.transform(markdown)
+  const transformer = createTransformer()
+  let markdown = await toMindMapMarkdown(transformer.md)
+  const { root, features } = transformMindMap(transformer, markdown)
   maxTreeDepth.value = computeTreeDepth(root)
   ensureRootText(root)
   // 初始展开两级，但不超过真实深度
@@ -396,9 +425,9 @@ const expandToLevel = async function(level: number) {
   svgElement.innerHTML = ""
   
   // 获取当前内容
-  const markdown = await toMindMapMarkdown()
-  const transformer = new Transformer()
-  const { root } = transformer.transform(markdown)
+  const transformer = createTransformer()
+  const markdown = await toMindMapMarkdown(transformer.md)
+  const { root } = transformMindMap(transformer, markdown)
   maxTreeDepth.value = computeTreeDepth(root)
   ensureRootText(root)
   
@@ -499,6 +528,18 @@ function applyCustomStyles() {
       word-break: normal;
       overflow-wrap: normal;
     }
+    /* 公式（KaTeX）：不折行 —— KaTeX 由大量 span 拼成，被上面的通用折行规则拆开会竖成一列（又窄又高） */
+    #${id.value} .markmap-foreign .katex,
+    #${id.value} .markmap-foreign .katex * {
+      white-space: nowrap;
+      word-break: normal;
+      overflow-wrap: normal;
+    }
+    /* 展示公式的上下边距会塌陷出测量框（测量值不含边距、渲染却含），导致公式下半截越出节点下划线 */
+    #${id.value} .markmap-foreign .katex-display {
+      margin: 0 !important;
+    }
+
     /* 表格：单元格允许折行 + 限宽，避免不可折长串把表格撑出外框 / 外框高度虚高 */
     #${id.value} .markmap-foreign table {
       max-width: 100%;
@@ -547,6 +588,10 @@ function ensureRichFixStyle() {
   st.textContent = `
     /* 含代码块(<pre>)的测量组：按代码原始宽度测量，不被 maxWidth 截断 */
     .${id.value}-g .markmap-foreign-testing-max:has(pre) {
+      max-width: none !important;
+    }
+    /* 含公式(KaTeX)的测量组：同上，按公式原始宽度测量，否则外框会比公式窄、公式溢出 */
+    .${id.value}-g .markmap-foreign-testing-max:has(.katex) {
       max-width: none !important;
     }
     /* 含表格的测量组：单元格可折行 + 表格限宽，避免测量高度虚高 */
@@ -832,9 +877,9 @@ async function update(preserveView = false) {
   if (!map || !store.data[store.index]) return
   forceLeaveTalk() // 若在讲解中，先退出（update 会 setData 重建恢复）
   
-  let markdown = await toMindMapMarkdown()
-  const transformer = new Transformer()
-  const { root } = transformer.transform(markdown)
+  const transformer = createTransformer()
+  let markdown = await toMindMapMarkdown(transformer.md)
+  const { root } = transformMindMap(transformer, markdown)
   maxTreeDepth.value = computeTreeDepth(root)
   ensureRootText(root)
   if (currentLevel.value > maxTreeDepth.value) currentLevel.value = maxTreeDepth.value
@@ -939,7 +984,7 @@ onBeforeUnmount(() => {
   
 <template>
   <div class="mindmap-container" v-if="store.data[store.index] != undefined">
-    <div class="mindmap" ref="containerRef">
+    <div class="mindmap" ref="containerRef" @click.capture="handleMindLinkClick">
       <svg :id="id" class="mindmap-svg"></svg>
       <!-- Mermaid 图查看（放大/平移/导出，复用共享组件） -->
       <MermaidViewer ref="mermaidViewerRef" />
@@ -988,25 +1033,27 @@ onBeforeUnmount(() => {
 
         <!-- ============ 讲解模式工具栏（整条切换） ============ -->
         <template v-else>
-          <!-- 左侧：状态 + 当前标题 / 路径（标题弹性占满中间空位） -->
+          <!-- 最左侧：上一步 / 下一步（纯图标） -->
+          <button class="statusbar-btn" @click="talkPrevOrExit()" :title="store.locales==='zh' ? '上一步（看图时先退回上一张；已在第一页则退出讲解、回到全局预览） / ←/↑' : 'Previous / ←/↑ (at first page: back to overview)'">
+            <i class="fa fa-chevron-left"></i>
+          </button>
+          <button class="statusbar-btn talk-main" :disabled="talkIndex >= talkTotal - 1 && talkMermaidCursor >= talkPageMermaidList.length - 1" @click="talkNext()" :title="store.locales==='zh' ? '下一步（多图页依次看图 / 下钻 / →/↓）' : 'Next / →/↓'">
+            <i class="fa fa-chevron-right"></i>
+          </button>
+
+          <span class="statusbar-sep"></span>
+
+          <!-- 中间：状态 + 当前标题 / 路径（标题弹性占满空位） -->
           <span class="statusbar-item talk-step">{{ store.locales==='zh' ? '步骤' : 'Step' }} {{ talkIndex + 1 }} / {{ talkTotal }}</span>
           <span v-if="talkMermaidCursor >= 0" class="statusbar-item talk-mermaid-step"><i class="fa fa-picture-o"></i> {{ store.locales==='zh' ? '图' : 'Fig' }} {{ talkMermaidCursor + 1 }}/{{ talkPageMermaidList.length }}</span>
           <span ref="talkCrumbEl" class="statusbar-item talk-breadcrumb" :class="{ 'bc-trunc': talkCrumbTrunc }" :title="talkPathFull">
             <span class="bc-text">{{ talkPathFull || (store.locales==='zh' ? '（无标题）' : '(no title)') }}</span>
           </span>
 
-          <!-- 右侧：上一步 / 下一步 + 退出（页内固定两层，不再提供“结构 N”调节） -->
-          <span class="statusbar-sep"></span>
-          <button class="statusbar-btn" @click="talkPrevOrExit()" :title="store.locales==='zh' ? '上一步（看图时先退回上一张；已在第一页则退出讲解、回到全局预览） / ←/↑' : 'Previous / ←/↑ (at first page: back to overview)'">
-            <i class="fa fa-chevron-left"></i> {{ store.locales==='zh' ? '上一步' : 'Prev' }}
-          </button>
-          <button class="statusbar-btn talk-main" :disabled="talkIndex >= talkTotal - 1 && talkMermaidCursor >= talkPageMermaidList.length - 1" @click="talkNext()" :title="store.locales==='zh' ? '下一步（多图页依次看图 / 下钻 / →/↓）' : 'Next / →/↓'">
-            {{ store.locales==='zh' ? '下一步' : 'Next' }} <i class="fa fa-chevron-right"></i>
-          </button>
-
+          <!-- 最右侧：退出（页内固定两层，不再提供“结构 N”调节） -->
           <span class="statusbar-sep"></span>
           <button class="statusbar-btn talk-exit" @click="exitTalk()" :title="store.locales==='zh' ? '退出讲解模式（恢复展开）' : 'Exit talk mode'">
-            <i class="fa fa-close"></i> {{ store.locales==='zh' ? '退出' : 'Exit' }}
+            <i class="fa fa-close"></i>
           </button>
         </template>
       </div>

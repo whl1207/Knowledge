@@ -76,11 +76,38 @@ export interface AgentOptions {
   /** kb_search 每次检索召回切片数（预设配置，默认 5） */
   kbTopK?: number
   /**
+   * 知识库检索参数（kb_search 读取）。
+   * 传入后 agent 内的检索会走「当前模型来源 + 嵌入兜底」的同一套配置，
+   * 而不是主进程默认的 ollama（否则 LM Studio 等来源下会因缺嵌入模型而检索为空）。
+   */
+  retrieval?: {
+    llmType?: string
+    providerConfig?: any
+    embedModel?: string
+    chatModel?: string
+    processModel?: string
+    strategy?: string
+    embedFallbackType?: string
+    embedFallbackProviderConfig?: any
+    embedFallbackModel?: string
+  }
+  /**
    * 沙箱模式（'safe' | 'workspace' | 'trusted'）：传给工具执行上下文，
    * 由统一策略解析（sandbox-policy）决定 run_python/shell 的放行级别；
    * 缺省视为 'safe'（fail-closed）。
    */
   sandboxMode?: 'safe' | 'workspace' | 'trusted'
+  /**
+   * 本次会话生效的上下文窗口上限（tokens）：由渲染层用 `resolveLimitFor()`
+   * （与主页圆环同源：手填 > 已加载实例探测值 > 记住值 > 模型上限 > 来源默认）解析后传入。
+   * 主进程据此做请求前预算检查与主动压缩；缺省时回退 FALLBACK_CONTEXT_WINDOW(128K)。
+   */
+  contextLimit?: number
+  /**
+   * 是否启用上下文自动压缩（默认 true）：占用 ≥ 80% 时压缩旧轮次，
+   * provider 报上下文超限时压缩后重放本 step。旁路会话（如摘要器）应传 false 防递归。
+   */
+  contextCompact?: boolean
   /** 禁用的技能名（技能管理开关关闭的；skill 工具加载时校验拒绝） */
   disabledSkills?: string[]
   /** 父 agent id（子代理接缝：父销毁时级联销毁子代理） */
@@ -101,6 +128,16 @@ export interface AgentOptions {
   swarmDepth?: number
   /** 本次协作已召唤的群成员名调用链（防环：同一成员不重复召唤） */
   swarmChain?: string[]
+  /**
+   * 【仅网页端访客】界面语言：主机据此生成中文 / 英文的访客系统提示
+   * （局域网共享下 agent 循环跑在主机，系统提示由主机组装，本端不参与）。
+   */
+  guestLocale?: 'zh' | 'en'
+  /**
+   * 【仅网页端访客】选用的智能体（主机「协作 → 权限」开放的那些）：
+   * 'general'（或留空）= 通用智能体；其余为主机 Agent 预设 id。
+   */
+  guestAgentId?: string
 }
 
 /** 群成员子代理设定（AgentSwarm 注入；供 run_subagent 以成员身份执行） */

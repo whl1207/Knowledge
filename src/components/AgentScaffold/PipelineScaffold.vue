@@ -547,12 +547,19 @@
             </div>
         </div>
 
-        <!-- 执行日志（独立标签页）：不再显示标题栏（页签名已是「日志」）；清空按钮移入日志工具栏 -->
+        <!-- 执行日志（独立标签页）：左列＝主日志 / 线程导航栏（纵向排列、可滚动），右列＝过滤条 + 日志列表 -->
         <div v-if="activeTab === 'logs'" class="task-col">
           <div class="task-col-body logs-body">
             <div class="logs-content">
-              <div class="log-toolbar">
-                <div class="logs-tabs">
+              <!-- 左列：主日志 / 线程导航栏（每项一行、纵向排列 + 纵向滚动，线程多时不再横向挤占日志宽度） -->
+              <aside class="logs-nav">
+                <div class="logs-nav-head">
+                  <span class="logs-nav-title" :title="en() ? 'Switch between the main log and each thread log' : '在主日志与各线程日志之间切换'">
+                    <i class="fa fa-list-ul"></i>{{ en() ? 'Logs' : '日志导航' }}
+                  </span>
+                  <span class="action-icon danger" style="flex:none;" @click="clearLogs" :title="en() ? 'Clear logs' : '清空日志'"><i class="fa fa-trash"></i></span>
+                </div>
+                <div class="logs-nav-list scoll">
                   <button class="log-tab-btn" :class="{ active: logTab === 'main' }" @click="logTab = 'main'">
                     <i class="fa fa-terminal"></i> {{ en() ? 'Main' : '主日志' }}
                     <span class="log-tab-count">{{ logs.length }}</span>
@@ -564,11 +571,7 @@
                     <span class="log-tab-count">{{ slot.rowCount || 0 }}{{ en() ? 'r' : '行' }}</span>
                   </button>
                 </div>
-                <!-- 工具栏尾部：清空日志（原来在页签标题栏里） -->
-                <div class="log-toolbar-tail">
-                  <span class="action-icon danger" style="flex:none;" @click="clearLogs" :title="en() ? 'Clear logs' : '清空日志'"><i class="fa fa-trash"></i></span>
-                </div>
-              </div>
+              </aside>
 
               <!-- 日志过滤：级别（带计数，可多选；不选 = 全部）+ 关键字搜索 -->
               <div class="log-filter-bar">
@@ -1345,9 +1348,8 @@
 defineOptions({ name: 'PipelineScaffold' })
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
-import { reportInstanceRunning, reportInstanceProgress, reportInstanceState } from '@/store/runningTasks'
-import { useTaskFileOpen } from '@/composables/useTaskFileOpen'
-import { useInstanceTaskFile } from '@/composables/useInstanceTaskFile'
+import { reportInstanceRunning, reportInstanceProgress } from '@/store/runningTasks'
+import { useTaskFile } from '@/composables/useTaskFile'
 import {
   BatchAgent, MAX_CONCURRENCY, renderTemplate, extractPlaceholders, effectiveLlmType,
   type BatchRow, type BatchConfig, type BatchWorkerInfo, type BatchRowStatus,
@@ -1371,8 +1373,8 @@ import { AGENT_MAX_STEPS_MAX } from '@/shared/agent-loop-rounds'
 const store = usestore()
 const en = () => store.locales === 'en'
 
-// ====== 实例上下文（由 AgentScaffold 传入：实例 id 用于运行态上报，taskFilePath 为关联任务文件） ======
-const props = defineProps<{ externalTab?: string; instanceId?: string; taskFilePath?: string }>()
+// ====== 任务文件读写（打开即自动载入该文件，保存写回同一文件；独立窗口的固定路径由宿主传入） ======
+const props = defineProps<{ externalTab?: string; taskFilePath?: string }>()
 const emit = defineEmits<{
   'update:externalTab': [tab: string]
   /** 脚手架内部对话框选中文件后回传路径，供宿主写入实例 meta */
@@ -1565,12 +1567,11 @@ const isDeepSeekResponses = computed(() => effectiveLlm.value === 'deepseek' && 
 
 const rows = ref<BatchRow[]>([])
 const isRunning = ref(false)
-// 后台运行登记（按实例 id，供导航栏状态点 / 关闭确认使用；独立使用时退回脚手架 key）
-const instanceKey = computed(() => props.instanceId || 'pipeline')
-watch(isRunning, (v) => reportInstanceRunning(instanceKey.value, v))
+// 后台运行登记（供托盘提示 / 关窗确认使用；脚手架只有 pipeline 一种）
+const SCAFFOLD_KEY = 'pipeline'
+watch(isRunning, (v) => reportInstanceRunning(SCAFFOLD_KEY, v))
 onBeforeUnmount(() => {
-  reportInstanceRunning(instanceKey.value, false)
-  reportInstanceState(instanceKey.value, null)
+  reportInstanceRunning(SCAFFOLD_KEY, false)
 })
 // 正在读取任务/表格文件（加载期间禁用保存/运行/导入/清空等按钮，避免并发冲突）
 const isLoading = ref(false)
@@ -3068,23 +3069,6 @@ const pendingRows = computed(() => statusCounts.pending)
 const runningRows = computed(() => statusCounts.running)
 const skippedRows = computed(() => statusCounts.skipped)
 
-/**
- * 实例任务状态上报（实例栏据此决定显示 / 隐藏「开始」「暂停」按钮）：
- * 待处理行数变化（导入表格 / 扫描文件夹 / 跑完 / 停止 / 重置）与运行状态变化都要同步一次。
- */
-watch(
-  [pendingRows, runningRows, () => rows.value.length, isRunning],
-  () => {
-    reportInstanceState(instanceKey.value, {
-      pending: pendingRows.value,
-      runningRows: runningRows.value,
-      rows: rows.value.length,
-      canStart: !isRunning.value && pendingRows.value > 0,
-    })
-  },
-  { immediate: true },
-)
-
 const statusIcon = (status: BatchRowStatus): string => {
   const map: Record<string, string> = {
     pending: 'fa fa-hourglass-o',
@@ -3179,7 +3163,7 @@ const updateTimerDisplay = () => {
     etaMs = 0
   }
   etaDisplay.value = etaMs == null ? '' : formatDuration(etaMs)
-  reportInstanceProgress(instanceKey.value, processed, total, etaMs)
+  reportInstanceProgress(SCAFFOLD_KEY, processed, total, etaMs)
 }
 
 // ====== 日志 ======
@@ -6956,10 +6940,9 @@ const {
   saveTaskState: saveTaskStateToFile,
   saveToFile,
   loadTaskState: loadTaskStateFromFile,
-} = useInstanceTaskFile({
+} = useTaskFile({
   scaffold: 'pipeline',
   filePath: () => taskFilePath.value,
-  instanceId: () => instanceKey.value,
   isBusy: () => isRunning.value,
   collect: () => buildTaskJson(buildTaskStateObject()),
   apply: (state: any) => applyTaskState(state, taskFilePath.value),
@@ -7076,15 +7059,7 @@ const saveTaskStateAs = async () => {
     const path = String(res.path || '')
     const sizeText = `${Math.round(jsonStr.length / 1024)}KB`
     addLog('info', `${en() ? 'Saved as: ' : '已另存为: '}${path}（${sizeText}，不含表格数据）`)
-    const conflict = store.instanceByFilePath(path, instanceKey.value)
-    if (conflict) {
-      addLog('warning', en()
-        ? `"${path}" is already linked to instance "${conflict.title}" — the copy was written, but this instance keeps its current file`
-        : `「${path}」已被实例「${conflict.title}」关联 —— 副本已写出，但本实例仍关联原文件`)
-      setStatusHint('ok', en() ? 'Saved as a copy' : '已另存为副本', `${path} · ${sizeText}`, STATUS_HINT_KEEP_MS)
-      return
-    }
-    // 切换关联文件：后续「保存」与定时自动保存都写新文件
+    // 记录新路径：独立窗口里 taskFilePath 由宿主固定为打开的那个文件，后续「保存」仍写回它（另存为只留副本）
     taskFilePath.value = path
     lastAutoSaveAt.value = Date.now()
     lastAutoSaveSig.value = checkpointSig()
@@ -7107,12 +7082,6 @@ const loadTaskState = async (filePath?: string) => {
     isLoading.value = false
   }
 }
-
-// 从知识管理双击 .task 跳转过来时：切回「任务」页并加载该任务文件
-useTaskFileOpen('pipeline', async (path) => {
-  activeTab.value = 'task'
-  await loadTaskState(path)
-})
 
 // ==================== 重置 ====================
 const clearAll = async () => {
@@ -7232,7 +7201,7 @@ const dispose = () => {
   stopAutoSaveTimer()
   clearStatusHintTimer()
   isRunning.value = false
-  reportInstanceRunning(instanceKey.value, false)
+  reportInstanceRunning(SCAFFOLD_KEY, false)
 }
 
 /**
@@ -7554,8 +7523,22 @@ textarea:disabled {
 .task-col-body { flex: 1; overflow-y: auto; padding: 6px; }
 /* 日志作为任务页右列：内部自身滚动（logs-content 撑满 + log-list flex:1） */
 .logs-body { display: flex; flex-direction: column; padding: 5px; overflow: hidden; }
-.logs-body > .logs-content { flex: 1; min-height: 0; height: auto; }
-.logs-body .log-list { margin-top: 4px; }
+/* 日志页：左列＝主日志 / 线程导航栏（跨两行、自身纵向滚动）；右列＝过滤条（第 1 行）+ 日志列表（第 2 行） */
+.logs-body > .logs-content {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  display: grid;
+  grid-template-columns: 124px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 4px;
+}
+.logs-body > .logs-content > .log-filter-bar { grid-column: 2; grid-row: 1; }
+.logs-body > .logs-content > .log-list { grid-column: 2; grid-row: 2; margin-top: 0; }
+/* 窄窗口：导航栏收窄，尽量把宽度留给日志正文 */
+@media (max-width: 720px) {
+  .logs-body > .logs-content { grid-template-columns: 96px minmax(0, 1fr); }
+}
 
 /* ====== 表单 ====== */
 .form-group { display: flex; flex-direction: row; align-items: center; margin-bottom: 5px; }
@@ -8204,7 +8187,7 @@ textarea:disabled {
 
 /* ====== 日志/表格 通用 ====== */
 .logs-content, .table-content { display: flex; flex-direction: column; height: 100%; }
-/* 日志工具栏：grid 布局——第 1 列＝标签区（1fr，内部横向滚动），第 2 列＝尾部操作（auto，如清空日志） */
+/* 工具栏基类：grid 两列（内容区 1fr + 尾部操作 auto）；表格页由 .table-toolbar 覆盖为可换行 flex */
 .log-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -8213,7 +8196,6 @@ textarea:disabled {
   gap: 4px;
   padding: 0px 5px;
 }
-.log-toolbar-tail { display: flex; align-items: center; gap: 4px; }
 /* 表格页工具栏：控件多（搜索/跳转/筛选/重跑/图标组）且窄窗口需自动换行，保持 flex，覆盖上面的 grid */
 .table-toolbar {
   display: flex;
@@ -8316,8 +8298,66 @@ textarea:disabled {
 .filter-mark-hint { margin: 6px 0 6px; font-size: 10px; line-height: 1.5; opacity: 0.75; }
 
 .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-/* 线程/主日志标签：可换行（不再横向滚动）——窗口变窄时标签自动折到下一行 */
-.logs-tabs { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; padding: 2px 0; }
+/* ====== 左侧日志导航栏（主日志 + 各线程）：每项一行，纵向排列 + 纵向滚动 ====== */
+.logs-nav {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--backgroundColor);
+}
+.logs-nav-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 2px 2px 6px;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+  font-size: 10px;
+  color: var(--fontColor);
+}
+.logs-nav-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  opacity: 0.9;
+}
+.logs-nav-title i { margin-right: 4px; opacity: 0.8; }
+/* 列表：纵向可滚动——并发线程多时在这里滚动，不挤占左边日志的宽度 */
+.logs-nav-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-anchor: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px;
+}
+/* 导航项：整行铺满 + 左对齐；flex:none 防止列方向 flex 容器把项压扁而不滚动 */
+.logs-nav-list .log-tab-btn {
+  flex: none;
+  display: flex;
+  width: 100%;
+  box-sizing: border-box;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 3px 6px;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.35;
+}
+.logs-nav-list .log-tab-btn i { flex: none; }
+.logs-nav-list .log-tab-btn .log-tab-count { flex: none; margin-left: 4px; }
 .log-tab-btn {
   display: inline-flex;
   align-items: center;

@@ -15,6 +15,8 @@
   import 'highlight.js/styles/nnfx-dark.min.css'
   import { normalizeMermaidSource } from '@/lib/markdown/mermaid-normalize'
   import { preprocessMath as sharedPreprocessMath } from '@/lib/markdown/render'
+  import { applyMdLinkRule } from '@/lib/markdown/mdLinkPolicy'
+  import { handleMdContainerClick } from '@/lib/knowFile/mdLinkOpen'
   import MermaidViewer from '@/components/MermaidViewer.vue'
   import mermaid from 'mermaid'
 
@@ -94,6 +96,15 @@
       return `<div class="mermaid"><div class="mermaid-src" style="display:none">${escaped}</div><div class="mermaid-ph"><i class="fa fa-picture-o"></i></div></div>`
     }
     return defaultFence(tokens, idx, options, env, self)
+  }
+
+  // 链接策略：相对路径链接打上 md-file-link + data-path（绝对路径），点击由 handleSlideLinkClick 处理；
+  // 否则相对 href 会被当成应用内地址，点 md 链接会跳错/跳走
+  applyMdLinkRule(md, () => mdBasePath)
+
+  // 幻灯片内 Markdown 链接点击：本地文件按当前文档目录解析后打开（与浏览 / 导图视图一致）
+  const handleSlideLinkClick = (e: MouseEvent) => {
+    void handleMdContainerClick(e, mdBasePath)
   }
 
   // 智能图片排版：根据图片数量和文本内容自动布局
@@ -884,7 +895,7 @@
 </script>
 
 <template >
-  <div class="ppt-container" ref="pptContainerRef" :data-theme="pptTheme" @wheel="handleWheel">
+  <div class="ppt-container" ref="pptContainerRef" :data-theme="pptTheme" @wheel="handleWheel" @click="handleSlideLinkClick">
     <!-- 总览网格 -->
     <div v-if="showOverview" class="overview-grid scoll">
       <div v-for="(item, index) in prepList" :key="index" class="overview-item" @click="showIndex = +index; showOverview = false">

@@ -59,7 +59,7 @@ import BlockTypeMenu from './BlockTypeMenu.vue'
 import BlockTable from './BlockTable.vue'
 import MermaidViewer from '@/components/MermaidViewer.vue'
 import DocChatPanel from '@/components/knowFile/view/DocChatPanel.vue'
-import { typesetRoot, scheduleTypeset, installTypesetCopyFix } from '@/lib/typeset'
+import { typesetRoot, revertTypeset, scheduleTypeset, installTypesetCopyFix } from '@/lib/typeset'
 
 // Monaco 体积很大：代码块用它编辑，但只有真的点进代码块时才需要加载，
 // 所以拆成异步组件（避免打开知识管理就把 Monaco 拉下来）
@@ -67,6 +67,13 @@ const BlockCode = defineAsyncComponent(() => import('./BlockCode.vue'))
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
+
+/**
+ * 对齐模式（设置 → 通用 → 界面 → 文字对齐）：
+ *  - 'justify'（默认）：CSS `text-align: justify`，不跑排版引擎；
+ *  - 'kp'：K-P 最优断行 + 逐行拉伸的精细排版（仅渲染态可用，编辑态是 textarea）。
+ */
+const kpAlign = computed(() => store.UI.textAlignMode === 'kp')
 
 const props = withDefaults(
   defineProps<{
@@ -1008,12 +1015,14 @@ function applySlash(item: BlockTypeItem) {
 
 // --- 块菜单（左侧手柄下拉） -------------------------------------------------
 
-const menu = reactive({ open: false, x: 0, y: 0, index: -1, panel: 'main' as 'main' | 'type', subIndex: 0 })
+const menu = reactive({ open: false, x: 0, y: 0, index: -1, subIndex: 0 })
 const menuRef = ref<HTMLElement | null>(null)
+/** 「转换为」子菜单的落位（top 为相对父项的偏移；left=右侧放不下时改为向左展开） */
+const typeSub = reactive({ left: false, top: -4 })
 
 /**
  * 渲染后用真实尺寸再钳制一次。
- * 预设高度只是估值（类型列表比主菜单高多了），算偏了菜单会跑到窗口外面看不见。
+ * 预设高度只是估值，算偏了菜单会跑到窗口外面看不见。
  */
 function clampMenuRect() {
   nextTick(() => {
@@ -1029,23 +1038,34 @@ function clampMenuRect() {
 
 function openBlockMenu(i: number, e: MouseEvent) {
   const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
-  const pos = clampMenu(r.left, r.bottom + 4, 200, 320)
+  const pos = clampMenu(r.left, r.bottom + 4, 200, 260)
   menu.open = true
   menu.index = i
-  menu.panel = 'main'
   menu.subIndex = 0
+  typeSub.left = false
+  typeSub.top = -4
   menu.x = pos.x
   menu.y = pos.y
   clampMenuRect()
 }
 
-/** 切到「转换为」面板（重新钳制位置：类型列表更高） */
-function showTypePanel() {
-  const pos = clampMenu(menu.x, menu.y, 200, 340)
-  menu.x = pos.x
-  menu.y = pos.y
-  menu.panel = 'type'
-  clampMenuRect()
+/**
+ * 「转换为」子菜单开合前的落位（类型列表比主菜单高，需要按真实尺寸回收）：
+ * 右侧放不下 → 向左展开；下方放不下 → 整体上移，最多顶到窗口上边缘。
+ * 等 rAF 后才量得到尺寸（:hover 生效、子菜单渲染出来）。
+ */
+function adjustTypeSubmenu() {
+  requestAnimationFrame(() => {
+    const item = menuRef.value?.querySelector<HTMLElement>('.be-has-sub')
+    const sub = item?.querySelector<HTMLElement>('.be-sub')
+    if (!menu.open || !item || !sub) return
+    const ir = item.getBoundingClientRect()
+    const sr = sub.getBoundingClientRect()
+    typeSub.left = ir.right + 4 + sr.width > window.innerWidth - 8
+    const bottomOverflow = ir.top - 4 + sr.height - (window.innerHeight - 8)
+    const shift = Math.min(Math.max(bottomOverflow, 0), Math.max(ir.top - 8, 0))
+    typeSub.top = -4 - shift
+  })
 }
 
 function menuSetType(item: BlockTypeItem) {
@@ -1281,6 +1301,11 @@ function refreshRendered(force = false) {
 function typesetRendered(ids?: string[]) {
   const root = rootRef.value
   if (!root) return
+  // 默认模式（text-align: justify）：不跑排版引擎，并把已有的逐行包裹还原
+  if (!kpAlign.value) {
+    try { revertTypeset(root) } catch { /* 已还原/无包裹时忽略 */ }
+    return
+  }
   const targets = ids ? touchedBlockEls(ids) : [root]
   for (const t of targets) {
     try {
@@ -1908,8 +1933,8 @@ function onRootKeydown(e: KeyboardEvent) {
 
 function onDocumentPointerDown(e: MouseEvent) {
   const t = e.target as HTMLElement | null
-  // 菜单自身的事件已经在模板里 stop 了；这里是兑底：
-  // 面板切换会同步换 DOM，被点的节点可能已经脱离文档（closest 会失效），此时不能当成「点了外面」
+  // 菜单自身的事件已经在模板里 stop 了；这里是兑底：菜单重绘（如子菜单展开）后被点的节点
+  // 可能已经脱离文档（closest 会失效），此时不能当成「点了外面」
   if (!t || !t.isConnected) return
   if (t.closest('.be-slash, .be-menu')) return
   slash.open = false
@@ -2078,16 +2103,40 @@ onMounted(() => {
     wrapObserver.observe(wrapRef.value)
     wrapWidth.value = wrapRef.value.clientWidth
   }
-  // 正文区宽度变化（目录 / 对话面板 / 窗口）→ 防抖重排
+  // 正文区宽度变化（目录 / 对话面板 / 窗口）→ 防抖重排（仅 K-P 模式需要）
   const root = rootRef.value
-  if (typeof ResizeObserver !== 'undefined' && root) {
+  if (kpAlign.value && typeof ResizeObserver !== 'undefined' && root) {
     typesetObserver = new ResizeObserver(() => {
       const r = rootRef.value
       if (r) scheduleTypeset(r, {}, 120)
     })
     typesetObserver.observe(root)
   }
-  if (root) disposeCopyFix = installTypesetCopyFix(root)
+  if (root && kpAlign.value) disposeCopyFix = installTypesetCopyFix(root)
+})
+
+// 对齐模式切换：K-P → 建观察器 + 排版；默认 → 还原 DOM 并清掉观察器
+watch(kpAlign, () => {
+  nextTick(() => {
+    const root = rootRef.value
+    if (!root) return
+    if (kpAlign.value) {
+      if (!typesetObserver && typeof ResizeObserver !== 'undefined') {
+        typesetObserver = new ResizeObserver(() => {
+          const r = rootRef.value
+          if (r) scheduleTypeset(r, {}, 120)
+        })
+        typesetObserver.observe(root)
+      }
+      if (!disposeCopyFix) disposeCopyFix = installTypesetCopyFix(root)
+    } else {
+      typesetObserver?.disconnect()
+      typesetObserver = null
+      disposeCopyFix?.()
+      disposeCopyFix = null
+    }
+    typesetRendered()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -2117,7 +2166,7 @@ onBeforeUnmount(() => {
   <div
     ref="wrapRef"
     class="be-root"
-    :class="{ 'be-loading': rendering }"
+    :class="{ 'be-loading': rendering, 'align-justify': !kpAlign }"
     :style="{ '--be-font': editorFontSize + 'px' }"
     @keydown="onRootKeydown"
     @dragover="onDragOver"
@@ -2422,30 +2471,31 @@ onBeforeUnmount(() => {
       class="be-menu scoll"
       :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
     >
-      <template v-if="menu.panel === 'main'">
-        <div class="be-menu-item" @mousedown.prevent.stop="showTypePanel">
-          <i class="fa fa-exchange"></i>{{ zh ? '转换为' : 'Turn into' }}<i class="fa fa-chevron-right be-menu-arrow"></i>
+      <div
+        class="be-menu-item be-has-sub"
+        :class="{ 'be-sub-left': typeSub.left }"
+        :title="zh ? '转换为其它块类型' : 'Turn into another block type'"
+        @mouseenter="adjustTypeSubmenu"
+        @mousedown.prevent.stop
+      >
+        <i class="fa fa-exchange"></i>{{ zh ? '转换为' : 'Turn into' }}<i class="fa fa-chevron-right be-menu-arrow"></i>
+        <div class="be-sub" :style="{ top: typeSub.top + 'px' }">
+          <BlockTypeMenu
+            :items="typeItems"
+            :active="menu.subIndex"
+            @select="menuSetType"
+            @hover="(n: number) => (menu.subIndex = n)"
+          />
         </div>
-        <div class="be-menu-sep"></div>
-        <div class="be-menu-item" @mousedown.prevent.stop="menuMove(-1)"><i class="fa fa-arrow-up"></i>{{ zh ? '上移' : 'Move up' }}</div>
-        <div class="be-menu-item" @mousedown.prevent.stop="menuMove(1)"><i class="fa fa-arrow-down"></i>{{ zh ? '下移' : 'Move down' }}</div>
-        <div class="be-menu-item" @mousedown.prevent.stop="menuIndent(1)"><i class="fa fa-indent"></i>{{ zh ? '增加缩进' : 'Indent' }}</div>
-        <div class="be-menu-item" @mousedown.prevent.stop="menuIndent(-1)"><i class="fa fa-outdent"></i>{{ zh ? '减少缩进' : 'Outdent' }}</div>
-        <div class="be-menu-sep"></div>
-        <div class="be-menu-item" @mousedown.prevent.stop="menuDuplicate()"><i class="fa fa-copy"></i>{{ zh ? '复制' : 'Duplicate' }}</div>
-        <div class="be-menu-item be-danger" @mousedown.prevent.stop="menuDelete()"><i class="fa fa-trash-o"></i>{{ zh ? '删除' : 'Delete' }}</div>
-      </template>
-      <template v-else>
-        <div class="be-menu-head" @mousedown.prevent.stop="menu.panel = 'main'">
-          <i class="fa fa-chevron-left"></i>{{ zh ? '转换为' : 'Turn into' }}
-        </div>
-        <BlockTypeMenu
-          :items="typeItems"
-          :active="menu.subIndex"
-          @select="menuSetType"
-          @hover="(n: number) => (menu.subIndex = n)"
-        />
-      </template>
+      </div>
+      <div class="be-menu-sep"></div>
+      <div class="be-menu-item" @mousedown.prevent.stop="menuMove(-1)"><i class="fa fa-arrow-up"></i>{{ zh ? '上移' : 'Move up' }}</div>
+      <div class="be-menu-item" @mousedown.prevent.stop="menuMove(1)"><i class="fa fa-arrow-down"></i>{{ zh ? '下移' : 'Move down' }}</div>
+      <div class="be-menu-item" @mousedown.prevent.stop="menuIndent(1)"><i class="fa fa-indent"></i>{{ zh ? '增加缩进' : 'Indent' }}</div>
+      <div class="be-menu-item" @mousedown.prevent.stop="menuIndent(-1)"><i class="fa fa-outdent"></i>{{ zh ? '减少缩进' : 'Outdent' }}</div>
+      <div class="be-menu-sep"></div>
+      <div class="be-menu-item" @mousedown.prevent.stop="menuDuplicate()"><i class="fa fa-copy"></i>{{ zh ? '复制' : 'Duplicate' }}</div>
+      <div class="be-menu-item be-danger" @mousedown.prevent.stop="menuDelete()"><i class="fa fa-trash-o"></i>{{ zh ? '删除' : 'Delete' }}</div>
     </div>
 
     <!-- 拖拽幽灵 -->
@@ -3001,6 +3051,16 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
+/* 对齐模式（设置 → 界面 → 文字对齐）：默认用浏览器原生两端对齐；
+   K-P 模式下逐行包裹已把每行撑满，不需要也不应再叠加 text-align */
+.be-root.align-justify :deep(.be-p),
+.be-root.align-justify :deep(.be-li-text),
+.be-root.align-justify :deep(.be-todo-text),
+.be-root.align-justify :deep(.be-quote) {
+  text-align: justify;
+  text-justify: inter-ideograph;
+}
+
 /* 标题字号用 em，跟随状态栏的 A- / A+ 一起缩放 */
 .be-rendered :deep(.be-h1) { font-size: 1.53em; font-weight: 600; line-height: 1.4; }
 .be-rendered :deep(.be-h2) { font-size: 1.27em; font-weight: 600; line-height: 1.45; }
@@ -3237,10 +3297,6 @@ onBeforeUnmount(() => {
 
 .be-menu {
   min-width: 168px;
-  /* 永不超出窗口：超出部分自己滚（主菜单项少，类型列表高时才用得上） */
-  max-height: calc(100vh - 16px);
-  overflow-y: auto;
-  overflow-x: hidden;
   background: var(--menuColor);
   border: 1px solid var(--borderColor);
   border-radius: 6px;
@@ -3250,31 +3306,27 @@ onBeforeUnmount(() => {
   color: var(--fontColor);
 }
 
-/* 「转换为」面板的返回条（之前漏写样式，和菜单项保持一致） */
-.be-menu-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 28px;
-  padding: 0 8px;
-  margin-bottom: 2px;
-  border-bottom: 1px solid var(--borderColor);
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-  font-size: 12px;
-  opacity: 0.85;
+/* 「转换为」二级菜单：与全局菜单（.has-submenu .submenu）保持同一套几何 —— 默认在右侧展开，
+   紧贴父项不留缝（有缝会丢 hover）；右侧空间不足时加 .be-sub-left 改为向左展开；
+   top 由脚本按视口回收 */
+.be-has-sub {
+  position: relative;
 }
 
-.be-menu-head:hover {
-  background: color-mix(in srgb, var(--fontActiveColor) 16%, transparent);
-  opacity: 1;
+.be-sub {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -4px;
 }
 
-.be-menu-head i {
-  width: 14px;
-  font-size: 12px;
-  text-align: center;
+.be-has-sub:hover > .be-sub {
+  display: block;
+}
+
+.be-sub-left > .be-sub {
+  left: auto;
+  right: 100%;
 }
 
 .be-menu-item {

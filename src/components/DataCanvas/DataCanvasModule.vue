@@ -121,11 +121,11 @@
 
 <script setup lang="ts">
 defineOptions({ name: 'DataCanvasModule' })
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useDataCanvas } from '@/components/DataCanvas/store'
 import { usestore } from '@/store'
-import { useInstanceTaskFile } from '@/composables/useInstanceTaskFile'
+import { useTaskFile } from '@/composables/useTaskFile'
 import CanvasView from '@/components/DataCanvas/CanvasView.vue'
 import EntryView from '@/components/DataCanvas/EntryView.vue'
 import DashboardView from '@/components/DataCanvas/DashboardView.vue'
@@ -138,8 +138,6 @@ const props = withDefaults(defineProps<{
   config?: DcConfig
   data?: { models?: Model[]; activeModelId?: string }
   externalTab?: 'canvas' | 'entry' | 'dashboard'
-  /** 实例上下文（由 AgentScaffold 传入；独立使用时为空） */
-  instanceId?: string
   taskFilePath?: string
 }>(), {
   mode: 'full',
@@ -155,12 +153,12 @@ const emit = defineEmits<{
   (e: 'chart-click', data: DcChartClick): void
   (e: 'error', data: { code: string; message: string }): void
   (e: 'update:externalTab', tab: 'canvas' | 'entry' | 'dashboard'): void
-  /** 脚手架内部对话框选中文件后回传路径，供宿主写入实例 meta */
+  /** 内部对话框选中文件后回传路径，供宿主记录关联文件 */
   (e: 'link-file', path: string): void
   /** 关联任务文件不可用（被移动/删除） */
   (e: 'file-missing', path: string): void
-  /** 已保存到关联文件 */
-  (e: 'file-saved', path: string): void
+  /** 已保存到关联文件（content = 写盘的内容，宿主用它同步标签/其它窗口） */
+  (e: 'file-saved', path: string, content?: string): void
 }>()
 
 // ==================== Store ====================
@@ -288,13 +286,25 @@ const showDashboard = computed(() =>
 // ==================== 宿主通知转发 ====================
 let offChange: (() => void) | null = null
 
-// ==================== 实例关联任务文件（.task 即画布存储格式） ====================
-const { saveTaskState: saveTaskStateToFile, saveToFile, loadFromFile } = useInstanceTaskFile({
+// ==================== 关联任务文件（.data 即画布存储格式） ====================
+/** 文件驱动（知识管理里打开 .data / 独立窗口）：文件内容是唯一真相，自己控制载入顺序 */
+const fileDriven = !!props.taskFilePath
+/** 画布当前内容属于哪个文件（切换文件时按它把改动写回原文件） */
+let loadedFile = props.taskFilePath || ''
+/**
+ * 内存里的画布状态属于哪个文件（画布 store 是渲染进程单例，新打开的文件不知道它是谁的）。
+ * 挂载到某个文件、而该文件又给不出状态时，据此清空画布，避免显示上一个文件的内容。
+ */
+let stateBelongsToFile = ''
+/** 关联文件是否真的给出了画布状态（空占位 / 零字节 / 读不到 → false；供宿主判断要不要兜底） */
+let fileYieldedState = false
+
+const { saveTaskState: saveTaskStateToFile, saveToFile, loadFromFile } = useTaskFile({
   scaffold: 'canvas',
   filePath: () => props.taskFilePath || '',
-  instanceId: () => props.instanceId || 'canvas',
   // 画布没有长耗时任务：内容自动保存，无需“运行中不加载”保护
   isBusy: () => false,
+  autoLoad: !fileDriven,
   collect: () => ({ models: JSON.parse(JSON.stringify(store.models.value)), activeModelId: store.activeModelId.value }),
   apply: async (state: any) => {
     await store.importData({ models: state.models || [], activeModelId: state.activeModelId || '' })
@@ -304,8 +314,25 @@ const { saveTaskState: saveTaskStateToFile, saveToFile, loadFromFile } = useInst
     else if (level === 'warning') ElMessage.warning(message)
   },
   onFileMissing: (path) => emit('file-missing', path),
-  onSaved: (path) => emit('file-saved', path),
+  onSaved: (path) => {
+    dirtySinceSave = false
+    emit('file-saved', path)
+  },
+  onSavedJson: (path, json) => emit('file-saved', path, json),
 })
+
+/**
+ * 载入关联文件（文件驱动）。
+ * 文件不可用或为空占位时返回 false —— 由调用方决定兜底（首次挂载回落上次会话缓存；
+ * 切换文件则清成空画布，绝不把上一个文件的内容留在画面上）。
+ */
+const loadLinkedFile = async (path: string): Promise<boolean> => {
+  loadedFile = path
+  const ok = await loadFromFile(path)
+  fileYieldedState = ok
+  if (ok) stateBelongsToFile = path
+  return ok
+}
 
 /** 工具栏保存按钮的 title（显示关联文件路径） */
 const linkedFileTitle = computed(() => props.taskFilePath
@@ -320,10 +347,25 @@ const saveToTaskFile = async () => {
 
 /** 画布变更 → 防抖自动保存到关联文件（对齐现有实时持久化体验） */
 let taskFileSaveTimer: ReturnType<typeof setTimeout> | null = null
+/** 有改动尚未写回文件（切文件 / 卸载时据此决定要不要 flush，避免无谓地重写大文件） */
+let dirtySinceSave = false
+
 const scheduleTaskFileSave = () => {
   if (!props.taskFilePath) return
+  dirtySinceSave = true
   if (taskFileSaveTimer) clearTimeout(taskFileSaveTimer)
   taskFileSaveTimer = setTimeout(() => { void saveTaskStateToFile() }, 1500)
+}
+
+/**
+ * 静默把待写的改动立刻写回指定文件（切文件 / 卸载时调用）。
+ * 必须传入「改动所属的路径」：props.taskFilePath 这时可能已经换成新文件了。
+ */
+const flushTaskFile = async (path?: string): Promise<void> => {
+  if (!dirtySinceSave || !path) return
+  if (taskFileSaveTimer) { clearTimeout(taskFileSaveTimer); taskFileSaveTimer = null }
+  const ok = await saveToFile(path)
+  if (ok) dirtySinceSave = false
 }
 
 function onStoreChange(e: { type: 'node' | 'edge' | 'data' | 'model'; payload: any }) {
@@ -400,7 +442,7 @@ defineExpose({
   saveTaskState: () => saveToFile(),
   /** 「数据画布」面板：打开 .task 时显式加载（宿主消费 store.canvasPathToOpen 后调用） */
   loadFromFile: (path: string) => loadFromFile(path),
-  /** 关闭实例时的清理（宿主导航栏调用）：清掉待执行的自动保存定时器 */
+  /** 关闭实例时的清理：清掉待执行的自动保存定时器 */
   dispose: () => { if (taskFileSaveTimer) { clearTimeout(taskFileSaveTimer); taskFileSaveTimer = null } },
 })
 
@@ -413,16 +455,47 @@ onMounted(async () => {
     const initial = props.data?.models?.length
       ? { models: props.data.models, activeModelId: props.data.activeModelId }
       : (props.config?.initialData ?? undefined)
-    await store.init(initial)
+    // 文件驱动：文件才是真相 —— 不读缓存、不写缓存、也不预造空模型
+    store.setCacheEnabled(!fileDriven)
+    await store.init(initial, { skipCache: fileDriven })
     offChange = store.onChange(onStoreChange)
+    if (fileDriven && props.taskFilePath) {
+      const sameFile = stateBelongsToFile === props.taskFilePath
+      const loaded = await loadLinkedFile(props.taskFilePath)
+      // 文件为空 / 不可用：给空画布；若内存里还是「别的文件」的内容，必须先清掉
+      if (!loaded) {
+        if (!sameFile) store.resetAll()
+        store.ensureDefaultModel()
+        stateBelongsToFile = props.taskFilePath
+      }
+    }
     if (store.activeModelId.value) emit('load', { modelId: store.activeModelId.value })
   } catch (err: any) {
     emit('error', { code: 'INIT_FAILED', message: err?.message || String(err) })
   }
 })
 
+/**
+ * 宿主切换了关联文件（知识管理里切标签 / 面板重新关联文件）：
+ * 先把改动写回「原文件」，再载入新文件；新文件为空或不可用时清成空画布。
+ */
+watch(() => props.taskFilePath, async (next, prev) => {
+  if (next === prev) return
+  await flushTaskFile(loadedFile || prev)
+  if (!next) { loadedFile = ''; return }
+  const loaded = await loadLinkedFile(next)
+  if (!loaded) {
+    // 换到另一个文件而它给不出状态：清成空画布，别把上一个文件的内容留在画面上
+    store.resetAll()
+    store.ensureDefaultModel()
+    stateBelongsToFile = next
+  }
+})
+
 onBeforeUnmount(() => {
   offChange?.()
+  // 关标签 / 离开模块：把待写的改动立刻写回它自己的文件（画布是防抖自动保存，别丢最后 1.5 秒）
+  void flushTaskFile(loadedFile)
 })
 </script>
 
@@ -448,6 +521,9 @@ onBeforeUnmount(() => {
   padding-right: 5px;
   border-bottom: 1px solid var(--borderColor);
   background: var(--menuColor);
+  /* 窄面板下整条顶栏换行（标签一行、工具栏一行），而不是把右侧按钮裁掉 */
+  flex-wrap: wrap;
+  row-gap: 4px;
   flex-shrink: 0;
 }
 .dc-module-tabs { display: flex; flex-shrink: 0; gap: 2px; }
@@ -475,8 +551,14 @@ onBeforeUnmount(() => {
 
 /* ====== 画布工具栏（提升到标签栏右侧） ====== */
 .dc-module-canvas-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; flex: 1; min-width: 0; overflow: hidden; }
+/* 窄面板（分屏 / 独立窗口缩窄）下工具栏换行，避免右侧按钮被裁掉 */
+.dc-module-canvas-toolbar { flex-wrap: wrap; row-gap: 4px; min-width: min(100%, 420px); }
+.dc-module-canvas-toolbar .dc-toolbar-right { margin-left: auto; }
 .dc-module-canvas-toolbar .dc-toolbar-left,
 .dc-module-canvas-toolbar .dc-toolbar-right { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; flex-shrink: 1; min-width: 0; }
+/* 窄面板：两组各自也可换行，避免按钮被裁掉 */
+.dc-module-canvas-toolbar .dc-toolbar-right { flex-wrap: wrap; row-gap: 4px; }
+.dc-module-canvas-toolbar .dc-breadcrumb { flex-wrap: wrap; }
 .dc-module-canvas-toolbar .dc-breadcrumb { display: flex; align-items: center; gap: 2px; font-size: 11px; }
 .dc-module-canvas-toolbar .dc-crumb { cursor: pointer; padding: 2px 6px; border-radius: 4px; }
 .dc-module-canvas-toolbar .dc-crumb:hover { background: var(--backgroundColor); }

@@ -89,17 +89,11 @@ const viewLabel = (name: string) => {
 }
 
 // 视图分行
-const viewRow1 = ['文件', '图谱', '看板', '甘特', '日历', '地图', '表格']
+const viewRow1 = ['文件', '图谱', '看板', '日历', '地图', '表格']
 const viewRow2 = FILE_VIEW_NAMES
 
-// 文件形式视图（随文件在标签/新窗口中打开，与全局视图分开管理）
-const FILE_VIEWS = FILE_VIEW_NAMES
-// 欢迎页视图按钮：新窗口打开模式下只显示 7 个全局视图（文件形式视图由独立窗口承担）；窗口内模式显示全部 12 个
-const visibleViews = computed(() => {
-  const all = [...viewRow1, ...viewRow2]
-  if (store.UI.fileOpenMode === 'window') return all.filter(v => !FILE_VIEWS.includes(v))
-  return all
-})
+// 欢迎页视图按钮：主窗口只管 6 个全局视图（文件形式视图由独立文件窗口承担，文件一律在新窗口打开）
+const visibleViews = computed(() => [...viewRow1])
 </script>
 
 <template>
@@ -124,7 +118,7 @@ const visibleViews = computed(() => {
           </p>
         </div>
 
-        <!-- 视图按钮（新窗口打开模式下仅显示 7 个全局视图） -->
+        <!-- 视图按钮（仅 6 个全局视图；文件形式视图由独立文件窗口承担） -->
         <div class="views-container">
           <div class="views scoll">
             <template v-for="v in visibleViews" :key="v">

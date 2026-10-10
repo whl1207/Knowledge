@@ -32,6 +32,25 @@ export function normalizeLlmType(type?: string | null): string {
   return t === DEEPSEEK_LEGACY_TYPE ? 'deepseek' : t
 }
 
+/** 内置来源的显示名（设置页 / 下拉通用；自定义来源另有自己的名称） */
+export const LLM_SOURCE_LABELS: Record<string, string> = {
+  ollama: 'Ollama',
+  lmstudio: 'LM Studio',
+  openai: 'OpenAI',
+  deepseek: 'DeepSeek',
+  gpustack: 'GPUStack',
+  anthropic: 'Anthropic',
+  google: 'Google',
+  azure: 'Azure',
+  custom: 'Custom',
+}
+
+/** 来源键 → 显示名（未知键首字母大写） */
+export function llmSourceLabel(type?: string | null): string {
+  const t = normalizeLlmType(type)
+  return LLM_SOURCE_LABELS[t] || (t ? t.charAt(0).toUpperCase() + t.slice(1) : '')
+}
+
 /**
  * 归一来源键列表：合并历史别名并去重（保序）。
  * 用于 llm.types 与各处硬编码来源清单，保证列表里不再出现 'deepseek-responses'。
@@ -115,6 +134,32 @@ export function resolveLlmSource(
     return { type: 'custom', config: src ? { ...c, ...src } : { ...c } }
   }
   return { type: t, config: { ...(llm?.[t] || {}) } }
+}
+
+/**
+ * 来源键 → 该来源的连接配置（与 store.currentLLMConfig 同一套映射；custom 取激活来源）。
+ * 配置里带 model 字段，调用方可按需用目标模型名覆盖。
+ */
+export function llmConfigByKey(llm: any, key: string): any {
+  if (!llm) return null
+  switch (normalizeLlmType(key)) {
+    case 'ollama': return llm.ollama
+    case 'lmstudio': return llm.lmstudio
+    case 'openai': return llm.openai
+    case 'deepseek': return deepSeekConfig(llm)
+    case 'gpustack': return llm.gpustack
+    case 'anthropic': return llm.anthropic
+    case 'google': return llm.google
+    case 'azure': return llm.azure
+    case 'custom': {
+      const c = llm.custom
+      if (!c) return null
+      const srcs = Array.isArray(c.sources) ? c.sources : []
+      const idx = (typeof c.activeIndex === 'number' && c.activeIndex >= 0 && c.activeIndex < srcs.length) ? c.activeIndex : 0
+      return srcs[idx] ? { ...c, ...srcs[idx] } : c
+    }
+    default: return null
+  }
 }
 
 /**

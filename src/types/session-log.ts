@@ -30,6 +30,7 @@ export type SessionEventType =
   | 'tool/call' // 模型发起的工具调用（模型可见）
   | 'tool/result' // 工具执行结果（模型可见）
   | 'assistant/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call，仅 UI 保真）
+  | 'context/compaction' // 上下文压缩（旧轮次摘要；deriveMessages 据此替换被覆盖区间）
   | 'agent/status' // agent 生命周期状态（idle/running/stopping/disposed）
 
 /** 每个事件的载荷 */
@@ -79,6 +80,25 @@ export interface SessionEventMap {
     results?: Array<{ title?: string; url?: string }>
     action?: any
   }
+  /**
+   * 上下文压缩：把 [fromSeq, toSeq] 事件区间内的模型可见消息替换为一条结构化摘要。
+   * 事件本身追加在区间之后（压缩那一刻写入），deriveMessages 会把它搬回区间起点，
+   * 从而得到「system → 摘要 → 最近若干轮原文」的历史。
+   */
+  'context/compaction': {
+    fromSeq: number
+    toSeq: number
+    summary: string
+    /** 压缩前 / 后的大致 token（估算，用于日志与 UI 展示） */
+    tokensBefore: number
+    tokensAfter: number
+    /** 被替换掉的消息条数 */
+    droppedMessages: number
+    /** 触发方式：主动阈值 / 溢出重试 / 用户手动 */
+    kind: 'auto' | 'overflow-retry' | 'manual'
+    /** 生成摘要的模型（审计用） */
+    model?: string
+  }
   'agent/status': { status: string }
 }
 
@@ -111,6 +131,15 @@ export interface DerivedMessage {
   toolCallId?: string
   /** tool 消息的工具名 */
   name?: string
+  /** 该消息由上下文压缩摘要合成（不是真实用户输入：不计入轮次/附图序号） */
+  compacted?: boolean
+}
+
+/** 派生消息 + 它来源于哪条事件（供上下文压缩确定事件区间） */
+export interface DerivedEntry {
+  /** 来源事件 seq；压缩摘要合成为虚拟值（区间起点之前的半整数） */
+  seq: number
+  msg: DerivedMessage
 }
 
 // ---------------------------------------------------------------------------

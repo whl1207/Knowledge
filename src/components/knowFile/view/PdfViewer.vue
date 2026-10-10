@@ -9,11 +9,16 @@
   import { loadDocTocWidth, saveDocTocWidth, loadDocTocOpen, saveDocTocOpen, flattenTocTree, DOC_TOC_MIN_WIDTH, DOC_TOC_MAX_WIDTH, type TocFlatItem } from '@/lib/markdown/toc'
   import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
   import { ocrImage, ocrProviderLabel, rankOcrModels, hasVisionLikeModel, loadOcrModelPref, saveOcrModelPref, llmConfigByKey, loadOcrSourcePref, saveOcrSourcePref, OCR_SELECTABLE_SOURCES, OCR_MAX_IMAGE_SIDE } from '@/lib/knowFile/ocr'
+  // PDF 翻译：分块（带坐标）/ 逐段翻译 / 结果缓存 / 叠加层定位
+  import { buildPageBlocks, blocksForSelection, blockOverlayStyle, splitTexSegments, translateBlocks, translateErrorText, targetLangOfLocale, activeTranslateProvider, sourceModel, makeCacheId, getCached, putCached, clearTranslateCache, translateCacheSize, loadTranslateSourcePref, saveTranslateSourcePref, loadTranslateModelPref, saveTranslateModelPref, type PdfTextBlock } from '@/lib/knowFile/translate'
+  // 译文里的公式用 KaTeX 渲染（与思维导图同一套做法：renderToString + 失败不抛）
+  import katex from 'katex'
+  import 'katex/dist/katex.min.css'
   // 智能对话面板：与 md_read 共用同一个组件（避免两套对话逻辑漂移）
   const DocChatPanel = defineAsyncComponent(() => import('@/components/knowFile/view/DocChatPanel.vue'))
 
-  // 全局只需设置一次 worker 路径（相对路径，兼容 dev server 和 Electron file://）
-  pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
+  // pdf.js 运行时资源（worker / CMap / 标准字体）：统一在 @/lib/pdfjs 配置，缺 CMap 会导致整段文字不渲染
+  import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
 
   const store = usestore()
 
@@ -45,6 +50,8 @@
   const pageBoxRef = ref<HTMLDivElement | null>(null)
   const textLayerRef = ref<HTMLDivElement | null>(null)
   let textLayerToken = 0
+  // 单页模式：译文叠加层（在文本层下方，保证框选/复制不受影响）
+  const transLayerRef = ref<HTMLDivElement | null>(null)
   // 连续滚动模式容器（多页顺序向下阅读）
   const scrollRef = ref<HTMLDivElement | null>(null)
 
@@ -132,6 +139,44 @@
   const ocrStreamText = ref('')
   const ocrActiveTab = ref(0) // 当前激活的 tab 索引
 
+  // === 翻译状态 ===
+  // 目标语言 = 系统当前语言：英文界面译成英文，其余译成简体中文
+  const transTarget = computed(() => targetLangOfLocale(store.locales))
+  // 来源：默认跟随「系统默认来源」（'' = 跟随），可在翻译设置里临时指定
+  const transSourcePref = ref(loadTranslateSourcePref())
+  const transModelInput = ref('')
+  const transProvider = computed(() => activeTranslateProvider(store.AIconfig?.llm, transSourcePref.value))
+  const transModel = computed(() => transModelInput.value.trim() || sourceModel(store.AIconfig?.llm, transProvider.value))
+  const transRunning = ref(false)
+  const transProgress = ref('')
+  const transMsg = ref('')
+  /**
+   * 全局开关：true = 叠加译文（并继续翻译滚动到的页），false = 只看原文。
+   * 叠加状态是**全页统一**的 —— 要么每页都叠加中文，要么都不叠加，避免翻页/滚动时出现「有的页有、有的页没有」。
+   */
+  const transOn = ref(false)
+  const transMap = ref<Record<string, string>>({}) // blockId → 译文
+  const transPageBlocks = ref<PdfTextBlock[]>([]) // 当前页分块（右键菜单求交用）
+  const transModels = ref<string[]>([])
+  const transSettings = ref({ visible: false, x: 0, y: 0 })
+  const transCtx = ref({ visible: false, x: 0, y: 0, selection: '' })
+  /** 翻译可选的来源下拉项（设置里已启用的来源；不含「跟随默认来源」） */
+  const transSourceOptions = computed(() => {
+    const enabled: string[] = (store.enabledLlmTypes as string[]) || []
+    return OCR_SELECTABLE_SOURCES.filter((k) => enabled.includes(k)).map((k) => ({ key: k, label: ocrProviderLabel(k) }))
+  })
+  let transAbort: AbortController | null = null
+  let transToken = 0 // 翻译会话令牌（取消/换页后丢弃旧结果）
+  let transLayerToken = 0 // 叠加层绘制令牌
+  const transBlockCache = new Map<number, PdfTextBlock[]>()
+  /** 已有译文的页（只给这些页画叠加层，避免为未翻译页做昂贵的分块） */
+  const transPages = new Set<number>()
+  /** 已触发过自动翻译的页（避免滚动时反复入队） */
+  const transStarted = new Set<number>()
+  /** 待翻译任务队列：页任务（滚动/按钮触发）或指定块（右键选区） */
+  const transJobs: ({ page: number } | { blocks: PdfTextBlock[] })[] = []
+  let transWorkerActive = false
+
 
   // === 清理 ===
   const cleanup = () => {
@@ -157,6 +202,17 @@
     ocrRunning.value = false
     ocrCancelled.value = true
     ocrActiveTab.value = 0
+    // 翻译：中止在途请求、清缓存的分块与叠加层（transMap 保留：同一文件换页回来仍有译文）
+    transAbort?.abort()
+    transAbort = null
+    transRunning.value = false
+    transProgress.value = ''
+    transMsg.value = ''
+    transJobs.length = 0
+    transPageBlocks.value = []
+    transBlockCache.clear()
+    transLayerToken++
+    clearTransLayers()
     resetScrollMode()
     pageRawSizes.value = []
     textLayerToken++
@@ -215,6 +271,9 @@
     const token = ++textLayerToken
     savedSelectionRanges = []
     renderTextLayer(page, viewport, token)
+    // 译文叠加层：坐标系与文本层一致（同一 --scale-factor），缩放只需同步变量，无需重算块
+    syncTransLayerScale(viewport.scale)
+    if (transOn.value) void paintTransPage(currentPage.value)
 
     const ctx = canvas.getContext('2d')!
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -275,6 +334,8 @@
   // === 加载 PDF ===
   const load = async () => {
     cleanup()
+    // 换文件：清掉上一份文档的译文（块 id 只带页内序号，跨文件复用会串味）
+    transMap.value = {}
     const filePath = props.path
     if (!filePath && !props.base64) return
 
@@ -309,7 +370,7 @@
         bytes[i] = binaryStr.charCodeAt(i)
       }
 
-      const loadingTask = pdfjsLib.getDocument({ data: bytes })
+      const loadingTask = pdfjsLib.getDocument({ data: bytes, ...PDFJS_RUNTIME_OPTIONS })
       const pdf = await loadingTask.promise
       pdfDoc = pdf
       pageCount.value = pdf.numPages
@@ -486,6 +547,7 @@
   }
 
   // 滚轮缩放（以鼠标位置为中心缩放）
+  // Ctrl + 滚轮 = 缩放当前页（以鼠标为中心；双击 / 按钮复位）
   const handleWheel = (e: WheelEvent) => {
     if (!pdfDoc) return
     // 连续模式：滚轮交给浏览器原生滚动（Ctrl+滚轮才缩放）
@@ -493,6 +555,7 @@
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
     const newScale = Math.max(0.2, Math.min(8, userScale.value * factor))
     if (newScale === userScale.value) return
+    hideTransWhileZooming()
 
     const container = viewportRef.value
     if (container) {
@@ -550,6 +613,8 @@
   // 按钮缩放（1.25 倍步进，与 Ctrl +/- 快捷键一致）
   const zoomBy = (dir: number) => {
     const factor = dir > 0 ? 1.25 : 1 / 1.25
+    if (isScrollMode.value) pendingZoomAnchor = 'center'
+    hideTransWhileZooming()
     setUserScale(userScale.value * factor)
   }
 
@@ -560,12 +625,19 @@
     const tag = t?.tagName || ''
     const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || !!t?.isContentEditable
     if (e.ctrlKey) {
-      if (e.key === '+' || e.key === '=') { e.preventDefault(); setUserScale(userScale.value * 1.25) }
-      else if (e.key === '-' || e.key === '_') { e.preventDefault(); setUserScale(userScale.value / 1.25) }
+      // 连续模式下的快捷键缩放以视口中心为锚点（与状态栏按钮一致）
+      if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(1) }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(-1) }
       else if (e.key === '0') { e.preventDefault(); resetFit() }
       return
     }
     if (e.key === 'Escape') {
+      // 菜单/弹层优先：先关它们，再复位视图
+      if (transCtx.value.visible || transSettings.value.visible) {
+        closeTransCtx()
+        closeTransSettings()
+        return
+      }
       resetFit()
       return
     }
@@ -650,11 +722,21 @@
         page.render({ canvasContext: ctx, viewport }).promise,
         needTextLayer ? renderScrollTextLayer(page, viewport, el) : Promise.resolve(),
       ])
+      // 该页的译文叠加层：每页各自叠加（没有译文的页跳过，缩放由 .pdf-scroll 的 --scale-factor 自动跟随）
+      if (transOn.value && transPages.has(p)) void paintTransPage(p)
     } catch (err) {
       renderScaleOf.delete(p)
       console.error('[PdfViewer] 连续模式渲染第', p, '页失败:', err)
     }
   }
+
+  /**
+   * 缩放锚点：
+   * - `{x,y}`（Ctrl+滚轮）= 鼠标位置 → 缩放后该点下的内容保持不动；
+   * - `'center'`（状态栏按钮 / 快捷键）= 视口中心；
+   * - `null`（容器尺寸变化触发的重排）= 保持当前页顶部位置，避免阅读位置漂移。
+   */
+  let pendingZoomAnchor: { x: number; y: number } | 'center' | null = null
 
   // 缩放只改 CSS 变量（O(1)，实测 ~2ms/次）：页盒尺寸由 calc(var(--pdf-scroll-scale)) 自动跟随，
   // 旧画布由 CSS 拉伸立即给出反馈；文本层 span 的重排（实测 ~30ms/次）放到手势结束后的 settle，
@@ -662,12 +744,34 @@
   const applyScrollZoom = () => {
     const container = scrollRef.value
     if (!container || !scrollBaseWidth) return
-    // 记录当前页相对视口的位置，缩放后恢复，避免阅读位置漂移
-    const anchorEl = pageEls.value[currentPage.value - 1] || null
-    const delta = anchorEl ? anchorEl.offsetTop - container.scrollTop : null
-    const scale = computeScrollScale()
-    container.style.setProperty('--pdf-scroll-scale', String(scale))
-    if (anchorEl && delta !== null) container.scrollTop = anchorEl.offsetTop - delta
+    const pageEl = pageEls.value[currentPage.value - 1] || null
+    const prevScale = parseFloat(container.style.getPropertyValue('--pdf-scroll-scale')) || computeScrollScale()
+    const nextScale = computeScrollScale()
+    const anchor = pendingZoomAnchor
+    pendingZoomAnchor = null
+
+    // 无锚点（尺寸变化）：退回「保持当前页顶部不动」
+    const offsetBefore = pageEl ? pageEl.offsetTop - container.scrollTop : null
+    const cRect = container.getBoundingClientRect()
+    const anchorPt = anchor === 'center'
+      ? { x: cRect.left + cRect.width / 2, y: cRect.top + cRect.height / 2 }
+      : anchor
+    const rect0 = pageEl ? pageEl.getBoundingClientRect() : null
+    // 鼠标（或中心）所指内容点在页面内的相对位置（scale=1 的页面坐标）
+    const keep = rect0 && anchorPt && prevScale > 0
+      ? { fx: (anchorPt.x - rect0.left) / prevScale, fy: (anchorPt.y - rect0.top) / prevScale }
+      : null
+
+    container.style.setProperty('--pdf-scroll-scale', String(nextScale))
+
+    if (keep && rect0 && anchorPt) {
+      // 读一次新布局，再把滚动位置校正回「同一内容点仍在鼠标下」
+      const rect1 = pageEl!.getBoundingClientRect()
+      container.scrollLeft += rect1.left + keep.fx * nextScale - anchorPt.x
+      container.scrollTop += rect1.top + keep.fy * nextScale - anchorPt.y
+    } else if (pageEl && offsetBefore != null) {
+      container.scrollTop = pageEl.offsetTop - offsetBefore
+    }
     if (scrollRelayoutTimer) clearTimeout(scrollRelayoutTimer)
     scrollRelayoutTimer = setTimeout(() => {
       if (!isScrollMode.value || !pageObserver) return
@@ -707,6 +811,8 @@
     pageEls.value.forEach((el) => { if (el && pageObserver) pageObserver.observe(el) })
     renderScrollPage(anchor)
     scrollToPageEl(anchor, false)
+    // 页盒刚重建：补画当前页译文
+    void refreshTransOverlay()
   }
 
   // 连续模式：滚动到指定页
@@ -737,14 +843,21 @@
     else syncActiveToc()
   }
 
-  const onScrollModeScroll = () => syncPageFromScroll()
+  const onScrollModeScroll = () => {
+    syncPageFromScroll()
+    // 滚动到新页时继续翻译（全局开关打开时）；叠加层本身按页各自绘制，不依赖 currentPage
+    if (transOn.value) enqueuePage(visibleScrollPage())
+  }
 
   // 连续阅读模式：普通滚轮 = 原生向下滚动；Ctrl + 滚轮 = 缩放（下限 1，不会缩到两侧留白）
-  // 缩放量为 O(1) 的 CSS 变量更新（见 applyScrollZoom），因此可以逐事件响应，手感平滑
+  // 缩放量为 O(1) 的 CSS 变量更新（见 applyScrollZoom），因此可以逐事件响应，手感平滑；
+  // 锚点取鼠标位置（缩放后鼠标下的内容保持不动，而不是只朝左上角放大）
   const onScrollWheel = (e: WheelEvent) => {
     if (!pdfDoc || !e.ctrlKey) return
     e.preventDefault()
     e.stopPropagation()
+    pendingZoomAnchor = { x: e.clientX, y: e.clientY }
+    hideTransWhileZooming()
     // 按 delta 比例计算（触控板小步、鼠标滚轮大步都跟手），并限制单次幅度
     const factor = Math.min(1.25, Math.max(0.8, Math.pow(1.002, -e.deltaY)))
     setUserScale(userScale.value * factor)
@@ -781,6 +894,7 @@
     if (mode === 'scroll') {
       // 切换瞬间 userScale 归位会触发缩放缓程，这里先屏蔽避免重复排版
       skipScaleRelayout = true
+      pendingZoomAnchor = null
       userScale.value = 1
       pan.value = { x: 0, y: 0 }
       resetScrollMode()
@@ -1344,15 +1458,501 @@
     }
   }
 
+  // === 翻译 ===
+  // 两种触发方式：① 选中文字后右键「翻译」→ 只翻选区命中的文本块；② 右下角翻译图标 → 翻当前页。
+  // 译文原地叠加在原文字位置（.pdf-trans-layer 在文本层**下方**，因此框选 / 复制 / 右键都不受影响）。
+
+  /** 缓存键里的文件标识（远程 base64 预览没有路径，用长度 + 前缀兜底） */
+  const transFileKey = (): string => {
+    if (props.path) return props.path
+    const b64 = props.base64 || ''
+    return `b64:${b64.length}:${b64.slice(0, 48)}`
+  }
+
+  const transLayerFor = (pageNum: number): HTMLElement | null => {
+    if (!isScrollMode.value) return transLayerRef.value
+    const el = pageEls.value[pageNum - 1]
+    return (el?.querySelector('.pdf-trans-layer') as HTMLElement | null) || null
+  }
+
+  const clearTransLayers = () => {
+    document.querySelectorAll('.pdf-trans-layer').forEach((el) => el.replaceChildren())
+  }
+
+  /**
+   * 缩放期间先隐藏译文叠加层：缩放时画布是 CSS 拉伸、文本层要等手势结束才重排，
+   * 这一瞬间的叠加层会与原文错位（看起来“字跑偏”）；手势结束后再按新比例重画。
+   */
+  let transShowTimer: ReturnType<typeof setTimeout> | null = null
+  const hideTransWhileZooming = () => {
+    document.querySelectorAll<HTMLElement>('.pdf-trans-layer').forEach((el) => { el.style.visibility = 'hidden' })
+    if (transShowTimer) clearTimeout(transShowTimer)
+    transShowTimer = setTimeout(() => {
+      transShowTimer = null
+      document.querySelectorAll<HTMLElement>('.pdf-trans-layer').forEach((el) => el.style.removeProperty('visibility'))
+      if (transOn.value) void refreshTransOverlay()
+    }, 280)
+  }
+
+  /** 单页模式：叠加层自带 --scale-factor（写法与 pdf.js 给文本层的一致）；连续模式由 .pdf-scroll 统一提供 */
+  const syncTransLayerScale = (scale: number) => {
+    if (isScrollMode.value || !transLayerRef.value) return
+    transLayerRef.value.style.setProperty('--scale-factor', String(scale))
+  }
+
+  /** 取某页文本块（带缓存；pdf.js 的 getTextContent 自身也缓存） */
+  const ensureTransBlocks = async (pageNum: number): Promise<PdfTextBlock[]> => {
+    const hit = transBlockCache.get(pageNum)
+    if (hit) return hit
+    if (!pdfDoc) return []
+    try {
+      const page = await pdfDoc.getPage(pageNum)
+      const blocks = await buildPageBlocks(page, pageNum)
+      transBlockCache.set(pageNum, blocks)
+      return blocks
+    } catch (err) {
+      console.error('[Translate] 文本分块失败:', err)
+      return []
+    }
+  }
+
+  /** 排版上限：译文比原文短时最多放大多少（字号 / 行距），避免过度稀疏 */
+  const TRANS_FILL_MIN_RATIO = 0.94
+  const TRANS_MAX_FONT_GROW = 1.32
+  const TRANS_MAX_LINE_HEIGHT = 1.72
+  const TRANS_BASE_LINE_HEIGHT = 1.28
+
+  /** 单段 TeX → KaTeX HTML（公式写错时不抛异常，返回空串由调用方回退为原文） */
+  const renderTex = (tex: string, displayMode: boolean): string => {
+    try {
+      return katex.renderToString(tex, { displayMode, throwOnError: false, strict: 'ignore' })
+    } catch {
+      return ''
+    }
+  }
+
+  /** 把译文写进叠加块：`$…$` / `$$…$$` 等 LaTeX 片段交给 KaTeX 渲染，其余按纯文本 */
+  const setTransContent = (el: HTMLElement, text: string) => {
+    // 外层负责「原段落范围 + 垂直居中」，内层承载内容（保持行内公式与正文同段不断行）
+    const inner = document.createElement('div')
+    inner.className = 'pdf-trans-inner'
+    for (const seg of splitTexSegments(text)) {
+      if (seg.type === 'text') {
+        inner.appendChild(document.createTextNode(seg.value))
+        continue
+      }
+      const host = document.createElement('span')
+      const html = renderTex(seg.value, seg.type === 'display')
+      if (html) {
+        host.className = seg.type === 'display' ? 'pdf-trans-math-display' : 'pdf-trans-math'
+        host.innerHTML = html
+      } else {
+        // 渲染失败（TeX 不合法）→ 原样显示定界符，至少内容不丢
+        host.textContent = seg.type === 'display' ? `$$${seg.value}$$` : `$${seg.value}$`
+      }
+      inner.appendChild(host)
+    }
+    el.replaceChildren(inner)
+  }
+
+  /**
+   * 排版自适应：
+   * - 译文比原文长 → 逐步缩小字号（不越出原段落太多）；
+   * - 译文比原文短（中文通常行数更少）→ 先放开行距、再略放大字号，让文字填满原段落范围，
+   *   避免叠加框里留一大片空白（字号/行距都有上限，过度稀疏反而难看）；剩余空白由外层上下均分。
+   * 注意：这里量的是**内层内容块**的高度 —— 外层有 min-height 且 flex 居中，
+   * 用外层的 scrollHeight 会量成「框高」或「居中溢出的一半」，两个方向都会误判。
+   */
+  const fitTransItem = (el: HTMLElement, b: PdfTextBlock) => {
+    const inner = el.firstElementChild as HTMLElement | null
+    if (!inner) return
+    const parent = el.parentElement
+    const sf = parent ? (parseFloat(getComputedStyle(parent).getPropertyValue('--scale-factor')) || 1) : 1
+    const targetH = (b.height + b.fontSize * 0.5) * sf
+    const measure = () => inner.getBoundingClientRect().height
+    const setSize = (f: number) => el.style.setProperty('font-size', `calc(var(--scale-factor) * ${(b.fontSize * f).toFixed(2)}px)`)
+    const setLh = (v: number) => el.style.setProperty('line-height', v.toFixed(2))
+
+    let f = 1
+    while (f > 0.62 && measure() > targetH + 1) { f -= 0.06; setSize(f) }
+
+    // 只在「本来就没超（还是原字号）」且是多行段落时才填空，避免放大后反而溢出
+    if (b.lines >= 2 && f === 1) {
+      const minH = targetH * TRANS_FILL_MIN_RATIO
+      let lh = TRANS_BASE_LINE_HEIGHT
+      while (lh < TRANS_MAX_LINE_HEIGHT && measure() < minH) {
+        lh = Math.min(TRANS_MAX_LINE_HEIGHT, lh + 0.06)
+        setLh(lh)
+      }
+      while (f < TRANS_MAX_FONT_GROW && measure() < minH) { f += 0.05; setSize(f) }
+      // 放大过头（换行变多、变高）→ 回调一点，保证不越出原段落范围
+      while (f > 1 && measure() > targetH + 1) { f -= 0.05; setSize(f) }
+    }
+  }
+
+  /** 画出单个译文块（旋转文字不叠加，避免定位错乱） */
+  const paintTransBlock = (layer: HTMLElement, b: PdfTextBlock, text: string) => {
+    if (b.angle !== 0) return
+    const el = document.createElement('div')
+    el.className = 'pdf-trans-item'
+    const style = blockOverlayStyle(b)
+    for (const k of Object.keys(style)) el.style.setProperty(k, style[k])
+    setTransContent(el, text)
+    layer.appendChild(el)
+    fitTransItem(el, b)
+  }
+
+  /** 重画「单页」的译文叠加层（不依赖 currentPage：连续阅读时每页各自叠加） */
+  const paintTransPage = async (pageNum: number): Promise<void> => {
+    const token = transLayerToken
+    const layer = transLayerFor(pageNum)
+    if (!layer) return
+    layer.replaceChildren()
+    if (!transOn.value) return
+    const blocks = await ensureTransBlocks(pageNum)
+    if (token !== transLayerToken || !transOn.value) return
+    if (pageNum === currentPage.value) transPageBlocks.value = blocks
+    for (const b of blocks) {
+      const text = transMap.value[b.id]
+      if (text) paintTransBlock(layer, b, text)
+    }
+  }
+
+  /** 记录某页已有译文（只给这些页画叠加层，避免为未翻译页做昂贵的分块） */
+  const markTransPage = (p: number) => { transPages.add(p) }
+
+  /** 重画所有「已有译文且已渲染」的页（开关切换 / 重排后同步整屏） */
+  const refreshTransOverlay = async (): Promise<void> => {
+    const token = ++transLayerToken
+    clearTransLayers()
+    if (!pdfDoc || !transOn.value) return
+    const pages = [...transPages].filter((p) => !!transLayerFor(p))
+    await Promise.all(pages.map(async (p) => {
+      const blocks = await ensureTransBlocks(p)
+      if (token !== transLayerToken) return
+      const layer = transLayerFor(p)
+      if (!layer) return
+      for (const b of blocks) {
+        const text = transMap.value[b.id]
+        if (text) paintTransBlock(layer, b, text)
+      }
+    }))
+    transPageBlocks.value = await ensureTransBlocks(currentPage.value)
+  }
+
+  /** 连续模式：视野中心所在的页（比 currentPage 更贴近用户实际看到的内容） */
+  const visibleScrollPage = (): number => {
+    const c = scrollRef.value
+    if (!c) return currentPage.value
+    const probe = c.scrollTop + c.clientHeight / 2
+    let cur = currentPage.value
+    for (let i = 0; i < pageEls.value.length; i++) {
+      const el = pageEls.value[i]
+      if (!el) continue
+      if (el.offsetTop <= probe) cur = i + 1
+      else break
+    }
+    return cur
+  }
+
+  /** 入队「翻译某页」；force=false 时每页只自动触发一次（缓存命中不会重复请求） */
+  const enqueuePage = (pageNum: number, force = false): void => {
+    if (!transOn.value || !pdfDoc) return
+    if (!force && transStarted.has(pageNum)) return
+    transStarted.add(pageNum)
+    transJobs.push({ page: pageNum })
+    void runTransQueue()
+  }
+
+  /** 入队「翻译这批块」（右键选区 / 指定页时用） */
+  const enqueueBlocks = (blocks: PdfTextBlock[]): void => {
+    if (!blocks.length) return
+    transJobs.push({ blocks })
+    void runTransQueue()
+  }
+
+  /** 串行执行翻译队列：一次只跑一页/一批，避免并发请求互相打断 */
+  const runTransQueue = async (): Promise<void> => {
+    if (transWorkerActive) return
+    transWorkerActive = true
+    try {
+      while (transJobs.length) {
+        if (!transOn.value) { transJobs.length = 0; break }
+        const job = transJobs.shift()!
+        if ('page' in job) {
+          const blocks = await ensureTransBlocks(job.page)
+          if (!transOn.value) { transJobs.length = 0; break }
+          if (job.page === currentPage.value) transPageBlocks.value = blocks
+          await runTranslate(blocks)
+          await paintTransPage(job.page)
+        } else {
+          await runTranslate(job.blocks)
+        }
+      }
+    } finally {
+      transWorkerActive = false
+    }
+  }
+
+  const cancelTranslate = () => {
+    transAbort?.abort()
+    transAbort = null
+    transToken++
+    transRunning.value = false
+    transProgress.value = ''
+    transJobs.length = 0
+    transMsg.value = store.locales === 'zh' ? '翻译已取消' : 'Translation cancelled'
+  }
+
+  /** 翻译这些文本块：命中缓存的直接叠加，其余按批请求模型 */
+  const runTranslate = async (blocks: PdfTextBlock[]) => {
+    const zh = store.locales === 'zh'
+    const model = transModel.value
+    if (!model) {
+      ElMessage.warning(zh ? '当前来源没有设置模型，请在「翻译设置」里填写模型名' : 'No model selected for the current source')
+      return
+    }
+    const fileKey = transFileKey()
+    const target = transTarget.value
+    // 公式 / 数字碎片（无自然语言）不送去翻译：保留原样，避免被改写或产生无意义译文
+    const targets = blocks.filter((b) => !b.math)
+    const skipped = blocks.length - targets.length
+    if (!targets.length) {
+      transMsg.value = zh ? '这些内容以公式 / 数字为主，无需翻译' : 'Formula/number only — nothing to translate'
+      ElMessage.info(transMsg.value)
+      return
+    }
+    // 先吃缓存（同一文件 + 目标语言 + 模型下的同段译文不再重复请求）
+    const pending: { id: string; text: string }[] = []
+    const sourceById = new Map<string, string>()
+    const pageById = new Map<string, number>()
+    let cachedHits = 0
+    for (const b of targets) {
+      pageById.set(b.id, b.page)
+      if (transMap.value[b.id]) { markTransPage(b.page); continue }
+      const cached = getCached(makeCacheId(fileKey, target, model, b.text))
+      if (cached) { transMap.value[b.id] = cached; markTransPage(b.page); cachedHits++ } else pending.push({ id: b.id, text: b.text })
+    }
+    const skipNote = skipped ? (zh ? `，跳过 ${skipped} 个公式块` : `, skipped ${skipped} formula block(s)`) : ''
+    if (cachedHits) await refreshTransOverlay()
+    if (!pending.length) {
+      if (cachedHits) transMsg.value = (zh ? `已从缓存加载 ${cachedHits} 段译文` : `Loaded ${cachedHits} block(s) from cache`) + skipNote
+      return
+    }
+    for (const p of pending) sourceById.set(p.id, p.text)
+
+    transAbort?.abort()
+    const ac = new AbortController()
+    transAbort = ac
+    const token = ++transToken
+    transRunning.value = true
+    transMsg.value = ''
+    const total = pending.length
+    transProgress.value = zh ? `翻译中 0/${total}` : `Translating 0/${total}`
+
+    try {
+      const res = await translateBlocks(pending, {
+        provider: transProvider.value,
+        config: llmConfigByKey(store.AIconfig?.llm, transProvider.value) || {},
+        model,
+        target,
+        zh,
+        signal: ac.signal,
+        onProgress: (done) => {
+          if (token !== transToken) return
+          transProgress.value = zh ? `翻译中 ${done}/${total}` : `Translating ${done}/${total}`
+        },
+        onBlock: (id, text) => {
+          if (token !== transToken) return
+          transMap.value[id] = text
+          putCached(makeCacheId(fileKey, target, model, sourceById.get(id) || ''), text)
+          const page = pageById.get(id) ?? currentPage.value
+          markTransPage(page)
+          // 即时叠加：画到该块所在页（连续阅读时可能不是当前页）
+          const b = blocks.find((x) => x.id === id)
+          const layer = transLayerFor(page)
+          if (b && layer && transOn.value) paintTransBlock(layer, b, text)
+        },
+      })
+      if (token !== transToken) return
+      transRunning.value = false
+      transProgress.value = ''
+      if (res.cancelled) transMsg.value = zh ? '翻译已取消' : 'Translation cancelled'
+      else if (res.failed.length) transMsg.value = (zh ? `完成，${res.failed.length} 段未翻译（可再点一次重试）` : `Done, ${res.failed.length} block(s) failed`) + skipNote
+      else transMsg.value = (zh ? `翻译完成，共 ${total} 段` : `Translated ${total} block(s)`) + skipNote
+    } catch (err) {
+      if (token !== transToken) return
+      transRunning.value = false
+      transProgress.value = ''
+      const brief = translateErrorText(err, zh)
+      transMsg.value = brief
+      ElMessage.error((zh ? '翻译失败：' : 'Translation failed: ') + brief)
+      console.error('[Translate] 翻译失败:', err)
+    } finally {
+      if (token === transToken) transAbort = null
+    }
+  }
+
+  /** 翻译当前页（扫描件无内嵌文字时给出 OCR 提示） */
+  const translateCurrentPage = async () => {
+    const blocks = await ensureTransBlocks(currentPage.value)
+    transPageBlocks.value = blocks
+    if (!blocks.length) {
+      ElMessage.warning(store.locales === 'zh'
+        ? '本页没有可翻译的内嵌文字（扫描件请先用「转化 → OCR 识别」）'
+        : 'No embedded text on this page (use Convert → OCR for scanned pages)')
+      return
+    }
+    transOn.value = true
+    transStarted.add(currentPage.value)
+    enqueueBlocks(blocks)
+  }
+
+  /** 只翻选区命中的文本块 */
+  const translateSelection = async () => {
+    const sel = transCtx.value.selection || pdfSelectionText()
+    closeTransCtx()
+    if (!sel) return
+    const blocks = await ensureTransBlocks(currentPage.value)
+    transPageBlocks.value = blocks
+    const hits = blocksForSelection(blocks, sel)
+    if (!hits.length) {
+      ElMessage.warning(store.locales === 'zh'
+        ? '未能定位选中文字所在的段落（扫描件请先用 OCR 识别）'
+        : 'Could not locate the paragraph of the selection')
+      return
+    }
+    transOn.value = true
+    enqueueBlocks(hits)
+  }
+
+  /**
+   * 显示 / 隐藏译文。**全页统一**：打开后每页都叠加中文（滚动到的页会自动翻译），
+   * 关闭则整份文档都不叠加，不会出现「有的页有、有的页没有」。
+   */
+  const toggleTransVisible = async () => {
+    const zh = store.locales === 'zh'
+    if (transOn.value) {
+      transJobs.length = 0
+      cancelTranslate()
+      transOn.value = false
+      await refreshTransOverlay()
+      transMsg.value = zh ? '已隐藏译文，只看原文' : 'Translation hidden'
+      return
+    }
+    transOn.value = true
+    // 重新打开：允许把各页重新补翻（缓存命中时不会重复请求）
+    transStarted.clear()
+    await refreshTransOverlay()
+    enqueuePage(currentPage.value, true)
+    if (isScrollMode.value) enqueuePage(visibleScrollPage(), true)
+    transMsg.value = zh ? '已显示译文' : 'Translation shown'
+  }
+
+  /** 右下角翻译图标：进行中→取消；否则切换「叠加译文 / 只看原文」 */
+  const onTransButton = () => {
+    closeTransCtx()
+    if (transRunning.value) { cancelTranslate(); return }
+    void toggleTransVisible()
+  }
+
+  // ---- 右键菜单 ----
+  const closeTransCtx = () => { if (transCtx.value.visible) transCtx.value = { visible: false, x: 0, y: 0, selection: '' } }
+  const closeTransSettings = () => { if (transSettings.value.visible) transSettings.value = { visible: false, x: 0, y: 0 } }
+
+  const onPdfContextMenu = (e: MouseEvent) => {
+    e.preventDefault()
+    // 右键点开时浏览器一般保留选区；若已丢失则用快照兜底（点输入框后选区会被清空）
+    const sel = pdfSelectionText() || (savedSelectionRanges.length ? savedSelectionRanges.map((r) => r.toString()).join('\n').trim() : '')
+    const x = Math.min(e.clientX, Math.max(8, window.innerWidth - 200))
+    const y = Math.min(e.clientY, Math.max(8, window.innerHeight - 160))
+    transCtx.value = { visible: true, x, y, selection: sel }
+  }
+
+  const copyPdfSelection = () => {
+    const text = transCtx.value.selection || pdfSelectionText()
+    closeTransCtx()
+    if (!text) return
+    navigator.clipboard.writeText(text)
+      .then(() => ElMessage.success(store.locales === 'zh' ? '已复制' : 'Copied'))
+      .catch(() => {})
+  }
+
+  const openTransSettings = (e: MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    closeTransCtx()
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    transSettings.value = { visible: true, x: Math.max(8, rect.right - 272), y: rect.top - 6 }
+    void fetchTransModels()
+  }
+
+  /** 拉取当前来源的模型列表（给「翻译设置」的输入建议用） */
+  const fetchTransModels = async () => {
+    transModels.value = []
+    try {
+      const r: any = await store.testLlmSource(transProvider.value, false)
+      transModels.value = Array.isArray(r?.models) ? r.models : []
+    } catch (err) {
+      console.error('[Translate] 获取模型列表失败:', err)
+    }
+  }
+
+  const onTransSourceChange = () => {
+    saveTranslateSourcePref(transSourcePref.value)
+    transModelInput.value = loadTranslateModelPref(transProvider.value)
+    void fetchTransModels()
+  }
+
+  /** 清空本地译文缓存：连已叠加的译文一起收回，避免「看着有译文但缓存已空」 */
+  const clearCachedTranslations = () => {
+    const zh = store.locales === 'zh'
+    const n = translateCacheSize()
+    clearTranslateCache()
+    transMap.value = {}
+    transPages.clear()
+    transStarted.clear()
+    transJobs.length = 0
+    transMsg.value = zh ? '译文缓存已清空' : 'Translation cache cleared'
+    void refreshTransOverlay()
+    ElMessage.success(zh
+      ? (n ? `已清空 ${n} 段译文缓存` : '译文缓存本来就是空的')
+      : (n ? `Cleared ${n} cached translation(s)` : 'Translation cache was already empty'))
+  }
+
+  watch(transModelInput, (v) => {
+    const model = v.trim()
+    if (model) saveTranslateModelPref(transProvider.value, model)
+  })
+
+  /** 菜单/弹层的统一点击外关闭 */
+  const onDocMouseDownCloseMenus = (e: MouseEvent) => {
+    const t = e.target as HTMLElement | null
+    if (!t) return
+    if (t.closest('.context-menu') || t.closest('.pdf-trans-settings')) return
+    closeTransCtx()
+    closeTransSettings()
+  }
+  const onDocScrollCloseMenus = () => { closeTransCtx(); closeTransSettings() }
+
   // === 监听 ===
   watch([currentPage, userScale], () => { nextTick(() => renderPage()) })
   watch(currentPage, () => { pan.value = { x: 0, y: 0 }; syncActiveToc() })
+  // 换页：刷新当前页的叠加层（其余页各自保留自己的译文，不受影响）
+  watch(currentPage, () => {
+    transMsg.value = '' // 状态栏提示只对应当前页
+    void nextTick(() => paintTransPage(currentPage.value))
+    // 翻页/跳页后继续翻译当前页（全局开关打开时）
+    if (transOn.value) enqueuePage(currentPage.value)
+  })
   watch(() => props.path, () => { load() })
   // 远程 PDF：base64 变化时同样重载
   watch(() => props.base64, () => { if (props.base64) load() })
 
   onMounted(() => {
     load()
+    // 翻译模型偏好：来源=跟随默认时也允许记住上次手填的模型
+    transModelInput.value = loadTranslateModelPref(transProvider.value)
     // 监听容器尺寸变化：单页模式重新铺满，连续模式重新排版
     resizeObserver = new ResizeObserver(() => {
       if (!pdfDoc) return
@@ -1369,6 +1969,9 @@
     document.addEventListener('selectionchange', onDocSelectionChange)
     document.addEventListener('focusin', onDocFocusIn)
     document.addEventListener('mousedown', onDocMouseDownClearSelection, true)
+    // 右键菜单 / 翻译设置弹层：点击别处或滚动时关闭
+    document.addEventListener('mousedown', onDocMouseDownCloseMenus, true)
+    window.addEventListener('scroll', onDocScrollCloseMenus, true)
   })
   onBeforeUnmount(() => {
     cleanup()
@@ -1377,9 +1980,12 @@
     document.removeEventListener('selectionchange', onDocSelectionChange)
     document.removeEventListener('focusin', onDocFocusIn)
     document.removeEventListener('mousedown', onDocMouseDownClearSelection, true)
+    document.removeEventListener('mousedown', onDocMouseDownCloseMenus, true)
+    window.removeEventListener('scroll', onDocScrollCloseMenus, true)
     document.removeEventListener('mousemove', onViewportMouseMove)
     document.removeEventListener('mouseup', onViewportMouseUp)
     document.removeEventListener('selectstart', preventSelect)
+    if (transShowTimer) { clearTimeout(transShowTimer); transShowTimer = null }
     window.removeEventListener('mousemove', onPanelResize, true)
     window.removeEventListener('mouseup', stopPanelResize, true)
   })
@@ -1409,6 +2015,7 @@
     <div v-if="!isScrollMode" ref="viewportRef" class="pdf-viewport"
       @wheel.prevent.stop="handleWheel"
       @mousedown="onViewportMouseDown"
+      @contextmenu.prevent="onPdfContextMenu"
       @dblclick="onViewportDblClick">
       <div v-if="loading" class="pdf-loading">
         <i class="fa fa-spinner fa-spin"></i>
@@ -1425,13 +2032,15 @@
         <!-- 页面盒：画布 + 可框选复制的文本层，统一缩放 / 平移 -->
         <div ref="pageBoxRef" class="pdf-page-box">
           <canvas ref="canvasRef" class="pdf-canvas"></canvas>
+          <!-- 译文叠加层：压在文本层下方（z-index 更小），因此框选 / 复制 / 右键都不受影响 -->
+          <div ref="transLayerRef" class="pdf-trans-layer"></div>
           <div ref="textLayerRef" class="textLayer pdf-text-layer"></div>
         </div>
       </div>
     </div>
 
     <!-- 内容区 B：连续阅读模式（滚轮向下顺序阅读多页，页面懒渲染） -->
-    <div v-else ref="scrollRef" class="pdf-scroll scoll" @scroll.passive="onScrollModeScroll" @wheel="onScrollWheel">
+    <div v-else ref="scrollRef" class="pdf-scroll scoll" @scroll.passive="onScrollModeScroll" @wheel="onScrollWheel" @contextmenu.prevent="onPdfContextMenu">
       <div v-if="loading" class="pdf-loading">
         <i class="fa fa-spinner fa-spin"></i>
         <span>{{ store.locales === 'zh' ? '正在加载PDF...' : 'Loading PDF...' }}</span>
@@ -1457,6 +2066,7 @@
           :style="{ '--pdf-page-w': size.w + 'px', '--pdf-page-h': size.h + 'px' }"
         >
           <canvas class="pdf-scroll-canvas"></canvas>
+          <div class="pdf-trans-layer"></div>
           <div class="textLayer pdf-text-layer"></div>
           <span class="pdf-scroll-num">{{ idx + 1 }}</span>
         </div>
@@ -1683,6 +2293,16 @@
         <span>{{ textExtractProgress }}</span>
       </span>
 
+      <!-- 翻译 状态（进行中可点击取消；完成后显示结果提示） -->
+      <span v-if="transRunning" class="statusbar-item pdf-status-progress" @click="onTransButton" :title="store.locales==='zh' ? '翻译中，点击取消' : 'Translating, click to cancel'">
+        <i class="fa fa-spinner fa-spin" style="color:#FF9800;"></i>
+        <span>{{ transProgress }}</span>
+      </span>
+      <span v-else-if="transMsg" class="statusbar-item pdf-status-progress" @click="onTransButton" :title="store.locales==='zh' ? '译文状态，点击切换原文 / 译文' : 'Translation status, click to toggle'">
+        <i class="fa fa-language" style="color:#4CAF50;"></i>
+        <span>{{ transMsg }}</span>
+      </span>
+
       <span class="statusbar-spacer"></span>
 
       <!-- 转化：PDF → Markdown（仅图标） -->
@@ -1693,6 +2313,65 @@
       <button class="statusbar-btn" :class="{ active: smartPanelOpen && smartMode === 'chat' }" @click="toggleSmartPanel('chat')" :title="store.locales==='zh' ? '智能操作：对 PDF 智能对话' : 'Smart: chat about PDF'">
         <i class="fa fa-magic"></i>
       </button>
+      <!-- 翻译：单击翻译当前页并叠加译文（进行中→取消；已有译文→切换原文/译文）；右键打开翻译设置 -->
+      <button class="statusbar-btn" :class="{ active: transRunning || transOn }"
+        @click="onTransButton" @contextmenu.prevent="openTransSettings"
+        :title="transRunning
+          ? (store.locales==='zh' ? '翻译中，点击取消' : 'Translating, click to cancel')
+          : (transOn
+            ? (store.locales==='zh' ? '已叠加译文（全部页）：点击切回原文；右键选择翻译模型' : 'Translation shown (all pages): click to show original; right-click for model')
+            : (store.locales==='zh' ? '翻译：叠加中文译文（滚动到的页会自动翻译；右键选择翻译模型）' : 'Translate: overlay Chinese (pages are translated as you scroll; right-click for model)'))">
+        <i class="fa" :class="transRunning ? 'fa-spinner fa-spin' : 'fa-language'"></i>
+      </button>
+    </div>
+
+    <!-- 右键菜单：选中文字可原地翻译；无选区则翻译整页 -->
+    <div v-if="transCtx.visible" class="context-menu" :style="{ left: transCtx.x + 'px', top: transCtx.y + 'px' }" @click.stop @contextmenu.prevent>
+      <div v-if="transCtx.selection" class="menu-item" @click.stop="translateSelection()">
+        <i class="fa fa-language"></i>
+        {{ store.locales==='zh' ? '翻译选中文字（叠在原文上）' : 'Translate selection (overlay)' }}
+      </div>
+      <div v-if="transCtx.selection" class="menu-item" @click.stop="copyPdfSelection()">
+        <i class="fa fa-copy"></i> {{ store.locales==='zh' ? '复制文字' : 'Copy Text' }}
+      </div>
+      <div class="menu-item" @click.stop="closeTransCtx(); translateCurrentPage()">
+        <i class="fa fa-file-text-o"></i> {{ store.locales==='zh' ? '翻译本页并叠加译文' : 'Translate this page (overlay)' }}
+      </div>
+      <div v-if="transOn" class="menu-item" @click.stop="closeTransCtx(); toggleTransVisible()">
+        <i class="fa fa-eye-slash"></i> {{ store.locales==='zh' ? '隐藏译文，只看原文（全部页）' : 'Hide translation (all pages)' }}
+      </div>
+      <div class="menu-item" @click.stop="openTransSettings($event)">
+        <i class="fa fa-cog"></i> {{ store.locales==='zh' ? '翻译设置…' : 'Translation settings…' }}
+      </div>
+    </div>
+
+    <!-- 翻译设置（来源 / 模型）：默认跟随系统默认来源，也可临时指定 -->
+    <div v-if="transSettings.visible" class="pdf-trans-settings" :style="{ left: transSettings.x + 'px', top: transSettings.y + 'px' }" @click.stop @contextmenu.prevent>
+      <div class="pdf-trans-settings-title">{{ store.locales==='zh' ? '翻译设置' : 'Translation settings' }}</div>
+      <div class="pdf-trans-settings-row">
+        <label>{{ store.locales==='zh' ? '来源' : 'Source' }}</label>
+        <select v-model="transSourcePref" @change="onTransSourceChange">
+          <option value="">{{ store.locales==='zh' ? '跟随默认来源' : 'Follow default source' }}</option>
+          <option v-for="s in transSourceOptions" :key="s.key" :value="s.key">{{ s.label }}</option>
+        </select>
+      </div>
+      <div class="pdf-trans-settings-row">
+        <label>{{ store.locales==='zh' ? '模型' : 'Model' }}</label>
+        <input v-model="transModelInput" list="pdf-trans-model-list" :placeholder="transModel || (store.locales==='zh' ? '跟随该来源当前模型' : 'Follow source model')" />
+        <datalist id="pdf-trans-model-list">
+          <option v-for="m in transModels" :key="m" :value="m" />
+        </datalist>
+      </div>
+      <div class="pdf-trans-settings-tip">
+        {{ store.locales==='zh'
+          ? `译文语言跟随系统语言：${transTarget === 'zh' ? '简体中文' : 'English'}`
+          : `Target language follows the app language: ${transTarget === 'zh' ? 'Simplified Chinese' : 'English'}` }}
+      </div>
+      <div class="pdf-trans-settings-actions">
+        <button class="pdf-trans-settings-btn" :title="store.locales==='zh' ? '清除本机保存的全部段落译文（再次翻译会重新请求模型）' : 'Remove all cached passage translations on this machine'" @click="clearCachedTranslations()">
+          <i class="fa fa-eraser"></i> {{ store.locales==='zh' ? '清空译文缓存' : 'Clear translation cache' }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -3313,6 +3992,79 @@
 .pdf-convert-mini-btn {
   padding: 0 10px;
 }
+
+/* === 翻译设置弹层（固定定位，锚在右下角翻译按钮上方） === */
+.pdf-trans-settings {
+  position: fixed;
+  z-index: 100001;
+  transform: translateY(-100%);
+  width: 264px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fontColor);
+  background-color: var(--backgroundColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.pdf-trans-settings-title {
+  font-weight: 600;
+}
+.pdf-trans-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pdf-trans-settings-row label {
+  flex: 0 0 auto;
+  width: 34px;
+  opacity: 0.8;
+  padding: 0px
+}
+.pdf-trans-settings-row select,
+.pdf-trans-settings-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--fontColor);
+  background-color: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  box-sizing: border-box;
+  margin: 0px
+}
+.pdf-trans-settings-tip {
+  opacity: 0.62;
+  line-height: 1.4;
+}
+.pdf-trans-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.pdf-trans-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--fontColor);
+  background-color: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.pdf-trans-settings-btn:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+  border-color: var(--fontActiveColor);
+}
 </style>
 
 <!--
@@ -3368,5 +4120,56 @@
 /* 焦点转到右侧对话面板后保持「选中」可见：由组件给命中的 span 打标记类 */
 .pdf-text-layer span.pdf-sel-hit {
   background: rgba(0, 0, 255, 0.28);
+}
+
+/* ==================== 译文叠加层 ==================== */
+/* 定位与文本层同一套坐标系（乘 --scale-factor，缩放自动跟随）；
+   z-index 比文本层（2）小 → 原文文字仍在最上层，框选 / 复制 / 右键菜单都不受影响。 */
+.pdf-trans-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.pdf-trans-item {
+  position: absolute;
+  box-sizing: border-box;
+  padding: 0 2px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: initial;
+  font-family: inherit;
+  background: #ffffff;
+  color: #1f1f1f;
+  /* 内容比原段落短时上下居中：剩余留白上下均分，比全堆在底部好看 */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.pdf-trans-item > .pdf-trans-inner {
+  width: 100%;
+}
+/* 深色 / 柔和阅读下 canvas 被反色，叠加层要配同色底 + 浅色字才不刺眼 */
+.pdf-container.pdf-dark .pdf-trans-item {
+  background: #101114;
+  color: #e8e8e8;
+}
+.pdf-container.pdf-soft .pdf-trans-item {
+  background: #1b1c20;
+  color: #dcdcdc;
+}
+/* 译文里的公式由 KaTeX 渲染：字号跟随正文（KaTeX 默认 1.21em 偏大），
+   行内公式不额外撑高，展示公式收紧上下留白（叠加框按原段落高度自适应排版）。 */
+.pdf-trans-item .katex {
+  font-size: 1em;
+  line-height: 1.1;
+}
+.pdf-trans-item .katex-display {
+  margin: 0.25em 0;
+}
+.pdf-trans-item .katex-display > .katex {
+  white-space: normal;
 }
 </style>

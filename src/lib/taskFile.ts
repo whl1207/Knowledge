@@ -5,17 +5,18 @@
  *
  * 文件格式（v2，所有脚手架统一）：
  *   { "version": 2, "scaffold": "<脚手架 key>", "savedAt": "<ISO>", ...各脚手架自己的状态字段 }
- * 新建实例**不再**自动落盘占位文件（首次「保存」时才选择路径）：`emptyTaskFileContent` 仍供数据画布等
- * 创建占位文件，`isEmptyTaskFile` 用于识别旧占位文件（自动加载时跳过，避免覆盖当前状态）。
+ * 新建实例**不再**自动落盘占位文件（首次「保存」时才选择路径）：`emptyTaskFileContent` 仍供 Agent脚手架
+ * 等领域模块复用，`isEmptyTaskFile` 用于识别旧占位文件（自动加载时跳过，避免覆盖当前状态）。
  *
  * 兼容：v1 旧文件没有 `scaffold` 字段，按各脚手架状态对象的特征键推断（detectTaskScaffold ② 段）。
  * 供 store（打开 .task 时识别并跳转实例）与各脚手架组件共享。
  */
 
 /** 可保存 .task 任务的脚手架 key。
- *  注意：'canvas' 已独立为顶层主面板；'batch' / 'file' / 'collector' / 'tabreason' 已并入「Agent脚手架」
- *  （见 MERGED_SCAFFOLD_KEYS）——它们不再是 Agent脚手架，但 .task 仍可识别，
- *  打开时由 store.openTaskFileByPath 路由（canvas → 数据画布面板；其余 → pipeline 并自动转换）。 */
+ *  注意：'canvas' 曾是数据画布（现已并入「知识管理」的 .data 文件视图，.task 不再承载画布）；
+ *  'batch' / 'file' / 'collector' / 'tabreason' 已并入「Agent脚手架」（见 MERGED_SCAFFOLD_KEYS）
+ *  ——它们不再是 Agent脚手架，但 .task 仍可识别，打开时由 store.openTaskFileWindow 路由
+ *  （canvas → 提示改用 .data；其余 → pipeline 并自动转换）。 */
 export const TASK_SCAFFOLD_KEYS = ['collector', 'file', 'batch', 'tabreason', 'canvas', 'pipeline'] as const
 
 /** 已并入「Agent脚手架」的旧脚手架 key（2026-09-21 收尾）：其 .task 由 pipeline 打开并自动转换配置 */
@@ -96,7 +97,7 @@ export function detectTaskScaffold(text?: string | null): string | null {
     const hasKey = (key: string) => s.includes(`"${key}"`)
 
     // ② 旧文件（v1，无 scaffold 标记）：按各脚手架状态对象的特征键推断
-    // 数据画布：models + activeModelId（.task 化之前的 .data 内容同构）
+    // 数据画布：models + activeModelId（旧 .data 画布文件内容同构，现只用于给出「改用 .data」的提示）
     if (hasKey('activeModelId') || (hasKey('models') && hasKey('data'))) return 'canvas'
     // 注意：程序化工具调用（type: 'agent-task' / requirementInput）为已下线脚手架，见 detectRetiredTaskScaffold
     // 链接采集 / 文件采集：均为 taskConfig + dataSchema，用 files / graphData·cachedPages 区分

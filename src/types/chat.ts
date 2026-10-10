@@ -1,11 +1,11 @@
 /**
  * chat.ts — 聊天领域类型（从 home.vue 抽出，避免巨型组件承载类型定义）
  *
- * 依赖：WorkflowData 来自工作流引擎（仅类型引用）。
+ * 依赖：DslDocument 来自工作流 DSL 层（仅类型引用）。
  * 供 home.vue 与各 composables（useChatSessions / useChatSend / ...）共用。
  */
 
-import type { WorkflowData } from '@/components/workFlow/engine/WorkflowRunner'
+import type { DslDocument } from '@/workflow/dsl/types'
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
 
@@ -152,7 +152,24 @@ export interface ChatMessage {
     seq?: number
     /** 本次调用状态（供头像 spinner / 失败标记） */
     status?: 'running' | 'done' | 'error'
+    /** Agent Teams：本条汇报归属的任务 id（看板↔气泡联动） */
+    taskId?: string
   }
+
+  /** Agent Teams：本消息是一条协议通信（send_message 投影，折叠通信条） */
+  swarmComm?: {
+    /** 接收方显示名（'*' = 广播） */
+    to: string
+    kind: 'request' | 'inform' | 'handoff' | 'question' | 'reply'
+    /** 一句话摘要（时间线展示） */
+    summary: string
+  }
+
+  /** Agent Teams：本消息是协议生命周期事件（team_spawn / team_shutdown / task 变更等，折叠细条） */
+  swarmProtocol?: { kind: string; text: string }
+
+  /** Agent Teams：产出物卡片（post_artifact 预留） */
+  swarmArtifact?: { name: string; path: string; bytes: number }
 }
 
 /** 每条聊天的独立配置 */
@@ -172,21 +189,24 @@ export interface ChatConfig {
   /** 浏览器模式（LAN 共享）：使用主机「局域网共享→知识库目录」中的现有 .kb（只存引用，不落盘内容） */
   sharedKb?: { name: string; size?: number }
   workflowPath?: string
-  workflowData?: WorkflowData
+  workflowData?: DslDocument
   /** Agent 预设模式：选中的预设 id（mode='agent' 时生效） */
   presetId?: string
+  /** 浏览器模式（LAN 共享）：选用的智能体（主机开放的 Agent 预设 id；'general'/空 = 通用智能体） */
+  guestAgentId?: string
   /** 自定义来源：绑定的来源索引（llmType='custom' 时生效；缺省用设置页当前激活来源） */
   customSourceIndex?: number
   /** 集群模式：参与本次对话的 Agent 预设 id 列表（有序 = 发言顺序）；不落预案文件，改预设即改成员 */
   swarmPresetIds?: string[]
   /** 集群模式：运行方式等选项（随对话保存，不做群内成员特化） */
   swarmOptions?: {
-    /** 运行方式：auto=全员响应（默认）/ host=群主撮合 / debate=辩论 */
-    runMode?: 'auto' | 'host' | 'debate'
-    /** 结束后由群主总结（默认关闭） */
-    hostSummary?: boolean
-    /** 群主：-1=中立 LLM（默认）；>=0 = 成员下标 */
-    hostIdx?: number
+    /**
+     * 运行方式：
+     * - auto=全员响应（默认）/ debate=辩论
+     * - team=**项目组**（Agent Teams 范式：Lead 编排、任务板、结构化通信）
+     * 注：旧的 host（群主撮合）档位已下线，读到时回落为 auto
+     */
+    runMode?: 'auto' | 'debate' | 'team'
     /** 把群聊前文注入成员提示词（默认开） */
     injectHistory?: boolean
     /** 辩论轮数（runMode='debate' 时生效） */

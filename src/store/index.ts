@@ -7,11 +7,16 @@ import { AIUtils } from '@/services/ai-utils'
 import type { McpServerConfig } from '@/types/mcp'
 import { generateMcpServerId } from '@/types/mcp'
 import { FILE_VIEW_NAMES, normalizeViewName } from '@/lib/knowFile/fileViews'
-import { detectTaskScaffold, detectRetiredTaskScaffold, isTaskFile, RETIRED_SCAFFOLD_LABELS, MERGED_SCAFFOLD_KEYS, MERGED_SCAFFOLD_LABELS } from '@/lib/taskFile'
+import { isFlowDslPath } from '@/shared/flowFile'
+import { detectTaskScaffold, detectRetiredTaskScaffold, isTaskFile, isEmptyTaskFile, RETIRED_SCAFFOLD_LABELS, MERGED_SCAFFOLD_KEYS, MERGED_SCAFFOLD_LABELS } from '@/lib/taskFile'
+import type { FileSortKey } from '@/lib/knowFile/fileSort'
 import { DEFAULT_AGENT_MAX_STEPS, normalizeAgentMaxSteps } from '@/shared/agent-loop-rounds'
+import { ensureBuiltinAgentPresets, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 import { normalizeWebSearchConfig, newWebSearchCustomSource, toCustomProviderId, type WebSearchConfig, type WebSearchCustomSource } from '@/shared/webSearch'
 import { migrateLegacyContextWindow } from '@/lib/contextUsage'
 import { deepSeekConfig, deepSeekStyleOf, migrateDeepSeekMerge, normalizeLlmType, normalizeLlmTypeList, DEEPSEEK_LEGACY_TYPE } from '@/shared/llmSources'
+// 局域网访客（网页端）能力白名单：默认只读策略 + 旧存档归一化见 src/shared/lanGuest.ts
+import { defaultLanGuestPolicy, normalizeLanGuestPolicy } from '@/shared/lanGuest'
 import { ElMessage } from 'element-plus'
 declare global {
   interface Window {
@@ -32,7 +37,63 @@ export function markRawTree(tree: any[]): any[] {
   return markRaw(walk(tree))
 }
 // 主面板导航按钮 key 顺序（设置页「功能开关」据此隐藏/显示；当前面板被隐藏时自动跳到第一个可见面板）
-const MAIN_PANEL_KEYS = ['主页', '知识管理', '知识处理', '学习', '工作流管理', '数据画布', 'Agent脚手架', '待办管理']
+const MAIN_PANEL_KEYS = ['主页', '知识管理', '知识处理', '学习']
+
+/** 本地网页（.html / .htm）：默认一律交给内置浏览器（浏览器 Agent）打开渲染，而不是文件视图 */
+function isLocalHtmlPath(p: any): boolean {
+    return /\.html?$/i.test(String(p || ''))
+}
+
+/** 用内置浏览器打开本地网页（浏览器 Agent 独立窗口；失败时提示，不静默失败） */
+function openLocalHtmlInBrowser(path: string, zh: boolean) {
+    if (!path) return
+    window.ipcRenderer?.invoke('browser-agent:open-file', { path })
+        .then((r: any) => { if (r && r.ok === false) throw new Error(r.error || 'open failed') })
+        .catch((e: any) => {
+            ElMessage.error(zh ? `打开失败：${e?.message || e}` : `Open failed: ${e?.message || e}`)
+        })
+}
+
+/**
+ * 取路径最后一段作为文件夹名（各视图状态栏展示「当前文件夹」用）。
+ * - `D:\proj\notes` / `/home/u/notes` → `notes`
+ * - 根盘符（`D:\`、`/`）或空路径无法取末段时，回退为原样字符串（便于判断/展示）
+ */
+export function folderLabelOf(p: string): string {
+    if (!p) return ''
+    const trimmed = p.replace(/[\\/]+$/, '')
+    if (!trimmed) return p
+    const i = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
+    return i >= 0 ? trimmed.slice(i + 1) : trimmed
+}
+
+/**
+ * 路径比较用的归一化：统一分隔符 / 去掉结尾分隔符 / 忽略大小写。
+ * 同一目录可能写成 `D:\a\b`、`D:/a/b` 或 `d:\A\B`（Windows 大小写不敏感），比较时必须算「同一个目录」。
+ */
+export function pathKeyOf(p: any): string {
+    return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+/** p 是否就是 dir、或位于 dir 之下（按目录边界比较，`D:\ab` 不算在 `D:\a` 下） */
+export function isPathInside(p: any, dir: any): boolean {
+    const kp = pathKeyOf(p)
+    const kd = pathKeyOf(dir)
+    return !!kp && !!kd && (kp === kd || kp.startsWith(kd + '/'))
+}
+
+/**
+ * 知识管理各「非文件」视图（日历 / 看板 / 表格 / 图谱 / 地图）的数据源目录：
+ * 跟随文件视图的当前目录（`path`）；越出所有工作区（如直接打开外部文件）或为空时回退到当前工作区根（`root`）。
+ * 这样这些视图与左侧文件树、顶部面包屑指向同一处，状态栏也就能可靠地显示「当前文件夹」。
+ */
+function dataDirOf(state: { path: string; root: string; roots?: string[] }): string {
+    const p = String(state.path || '')
+    if (!p) return state.root
+    // 多工作区：path 落在哪个工作区就跟随它（只认当前工作区时，切到别的工作区的目录会被误回退到当前工作区根）
+    const roots = (state.roots && state.roots.length ? state.roots : [state.root]).filter(Boolean)
+    return roots.some((r) => isPathInside(p, r)) ? p : state.root
+}
 
 // 主题广播抑制标志：applyThemeFromBroadcast 应用其他窗口广播时置真，避免 setTheme 再广播造成循环
 // （每个渲染进程是独立模块实例，此标志天然按窗口隔离）
@@ -45,12 +106,12 @@ let lastBroadcastLocale = ''
 let lastAppliedWebSearchJson = ''
 
 // 是否持久化标签栏（data/index）：独立文件窗口设 false，避免把新窗口打开的标签写进共享 localStorage，
-// 导致主窗口重启后恢复出独立窗口产生的标签（新窗口模式主窗口标签栏应为空）
+// 导致主窗口重启后恢复出独立窗口产生的标签（标签栏只属于独立文件窗口，主窗口不渲染标签栏）
 let persistTabs = true
 
 // 是否持久化主面板导航（mainPanel）：独立窗口（设置/文件/浏览器）设 false。
 // mainPanel 只在主窗口有意义，而独立窗口的 store 是「打开那一刻的快照」——
-// 它写盘会把主窗口当前面板覆盖回旧值（现象：关闭设置子窗口后主窗口从「主页」跳回「工作流管理」）。
+// 它写盘会把主窗口当前面板覆盖回旧值（现象：关闭设置子窗口后主窗口从「主页」跳回「学习」）。
 let persistMainPanel = true
 
 // 是否作为「设置写盘方」：仅设置独立窗口置真，saveConfig 时额外广播配置变更给其它窗口
@@ -58,7 +119,7 @@ let settingsConfigWriter = false
 
 // 预设主题配色表（设置页「界面-主题」18 个预设主题；changeTheme 统一从表取值，下拉框由 Object.keys 生成，labelEn 供英文界面展示）
 /** 跨平台取父目录：Windows 盘符根 / Linux 根正确归位（返回父目录或空串） */
-function parentPathOf(p: string): string {
+export function parentPathOf(p: string): string {
     if (!p) return ''
     const sep = p.includes('\\') ? '\\' : '/'
     const trimmed = p.replace(/[\\/]+$/, '')
@@ -69,6 +130,25 @@ function parentPathOf(p: string): string {
         return ''
     }
     return trimmed.substring(0, i)
+}
+
+/**
+ * 面包屑：把绝对路径按层级拆成「可点击跳转」的分段。
+ * 与 view_file.vue 的文件视图工具栏共用同一份实现，避免各视图各自实现出现差异。
+ */
+export function crumbsOf(p: string): { label: string; path: string }[] {
+    if (!p) return []
+    const sep = p.includes('\\') ? '\\' : '/'
+    const isRootAbs = p.startsWith('/')
+    const parts = p.split(sep).filter(Boolean)
+    const arr: { label: string; path: string }[] = []
+    let acc = ''
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i]
+        acc = acc ? acc + sep + part : (isRootAbs ? '/' + part + sep : part + sep)
+        arr.push({ label: part, path: acc })
+    }
+    return arr
 }
 
 export const THEMES: Record<string, { labelEn: string; backgroundColor: string; borderColor: string; menuColor: string; menuActiveColor: string; fontColor: string; fontActiveColor: string }> = {
@@ -103,41 +183,6 @@ export function normalizeThemeName(ui: any): boolean {
     return true
 }
 
-// Agent脚手架定义（AgentScaffold 实例类型 / 新建入口共用，避免两处维护名称/图标）
-// multi：是否允许开多个实例（多开时每个实例关联一个独立 .task 文件）；maxInstances：单类型实例上限
-// 2026-09-21 收尾：批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格 四个旧脚手架已并入
-// 「Agent脚手架」（对应其四种预设，见 Pipeline/presets.ts），SCAFFOLDS 收敛为唯一一项；
-// 旧 .task 文件仍可识别：打开时自动转换为 Agent脚手架配置（见 openTaskFileByPath 与 MERGED_SCAFFOLD_KEYS）。
-export const SCAFFOLDS: { key: string; icon: string; labelZh: string; labelEn: string; multi: boolean; maxInstances: number; preview?: boolean }[] = [
-    { key: 'pipeline', icon: 'fa fa-sitemap', labelZh: 'Agent脚手架', labelEn: 'Agent Scaffold', multi: true, maxInstances: 4 },
-]
-// 注：原「agent（程序化工具调用 / PTC）」脚手架已下线，改为主页对话模式 ChatMode='code'（下拉选「PTC」）。
-// 旧 .task 文件仍可被识别（lib/taskFile.ts RETIRED_TASK_SCAFFOLDS），打开时给出迁移提示。
-
-/** 默认启用的脚手架 key（`preview` 标记的默认关闭；当前无预览项）。
- *  注：设置页的「脚手架」开关已移除（2026-09-21）——脚手架恒定启用；
- *  下列字段保留以兼容旧存档（旧值仍会被尊重）。 */
-export function defaultEnabledScaffoldKeys(): string[] {
-    return SCAFFOLDS.filter(s => !s.preview).map(s => s.key)
-}
-
-/** Agent脚手架实例（多开）：一个实例 = 一个独立任务 + 一个关联 .task 文件 */
-export interface ScaffoldInstanceMeta {
-    /** 实例 id：`<脚手架 key>:<随机串>`（删除后不复用） */
-    id: string
-    /** 脚手架 key（对应 SCAFFOLDS.key） */
-    type: string
-    /** 显示标题（默认取关联文件名，可手动重命名） */
-    title: string
-    /** 关联任务文件绝对路径（新建实例时立即创建占位文件，禁止与其他实例重复） */
-    filePath: string
-    /** 标题是否被手动改过（true 后不再跟随文件名重命名） */
-    titleManual?: boolean
-    /** 关联文件缺失（被移动/删除） */
-    fileMissing?: boolean
-    createdAt: number
-    lastActiveAt: number
-}
 // 默认 AI 配置快照（「恢复默认 AI 配置」用）：state() 首次执行时捕获出厂默认值，
 // 确保恢复结果与初始默认完全一致，不受后续 loadConfig 合并/用户修改影响
 let DEFAULT_AIconfig: any = null
@@ -149,8 +194,15 @@ export const usestore = defineStore('data', {
         root: "" as string, // 当前工作区路径（兼容旧字段，指向 roots 中的当前项）
         roots: [] as string[], // 工作区列表（支持多个工作区）
         path: "" as string, // 当前路径
+        // 知识管理各全局视图（文件 / 看板 / 图谱 / 表格 / 地图 / 日历）共用的目录导航历史：
+        // 顶部工具栏的后退 / 前进即移动这里的指针，栈内的当前项始终等于 path
+        knowNavStack: [] as string[],
+        knowNavIndex: -1 as number,
+        // 顶部工具栏的搜索词（各全局视图共用一份，搜索框只在 explorer 里渲染一个）
+        knowQuery: '' as string,
+        // 顶部工具栏「刷新」递增计数：各视图 watch 它重新拉取自己的数据
+        knowRefreshTick: 0 as number,
         skillsPath: "" as string, // 技能文件夹路径
-        workflowPath: "" as string, // 工作流文件夹路径
         agentPresetPath: "" as string, // Agent 预设（.agent 文件）存储文件夹路径（仅会话内生效，不持久化）
         // 工具管理：智能体/技能（Agent 循环）默认可调用的工具白名单（null=默认全集，[]=全部关闭，其他=仅启用列表中的工具）
         agentTools: null as string[] | null,
@@ -159,10 +211,13 @@ export const usestore = defineStore('data', {
         // 技能商店：用户自定义的 GitHub 技能源（owner/repo）
         skillStoreSources: [] as { name: string; url: string; type: string }[],
         tree: [] as any, // 目录结构
-        treeSort: { by: 'name', order: 'asc' } as { by: 'name' | 'mtime' | 'size'; order: 'asc' | 'desc' }, // 文件树排序方式
+        treeSort: { by: 'name', order: 'asc' } as { by: FileSortKey; order: 'asc' | 'desc' }, // 文件树排序方式
         // 主进程文件树版本号：持久化在 store 使面板重挂载后仍可命中「数据未变」快路径，
         // 避免每次切换都整树回传（海量文件下内存暴涨）；初始 -1 强制首次加载
         treeVersion: -1 as number,
+        // 应用内文件剪贴板：文件树 panel.vue 与「文件」视图 view_file.vue 共用一份
+        // （paths = 已复制 / 已剪切的路径，cut = true 表示剪切，粘贴时移动）；仅会话内有效，不持久化
+        fileClipboard: null as { paths: string[]; cut: boolean } | null,
         data: [] as any, // 打开的文件数据
         index: null as any, // 打开的文件序号
         view: [] as any, // 视图
@@ -175,20 +230,7 @@ export const usestore = defineStore('data', {
         interfaceConfigMode: false,
         // 功能开关：被隐藏的主面板导航按钮 key（设置页「界面-功能开关」控制，App.vue 导航栏据此过滤）
         hiddenNavs: [] as string[],
-        // Agent脚手架：启用的脚手架 key（保留字段以兼容旧存档；设置页开关已移除，当前恒定启用全部）
-        enabledScaffolds: defaultEnabledScaffoldKeys(),
-        // Agent脚手架 当前激活的脚手架 key（App 标题栏下拉 + AgentScaffold 共用；由当前实例的类型同步，保留供旧代码/设置页使用）
-        activeScaffold: SCAFFOLDS[0].key as string,
-        // Agent脚手架「实例」（多开）：每项 = 一个独立任务实例，关联一个 .task 文件
-        scaffoldInstances: [] as ScaffoldInstanceMeta[],
-        // 当前激活的实例 id（App 标题栏下拉 + AgentScaffold 导航栏共用）
-        activeInstanceId: '' as string,
         kbPathToOpen: null as string | null, // 待加载的知识库(.kb)文件路径（从知识库打开时跳转到知识处理模块）
-        taskPathToOpen: null as string | null, // 待加载的脚手架任务(.task)文件路径（打开时跳转 Agent脚手架模块）
-        // 「数据画布」独立主面板：关联任务文件路径（空 = 尚未关联；首次进入面板时自动创建占位文件）
-        canvasTaskPath: '' as string,
-        // 待加载的画布任务文件（双击 .task 时由 openTaskFileByPath 标记，画布面板消费并加载）
-        canvasPathToOpen: null as string | null,
         locales: 'zh', // 语言
         TrustedPython: false, // 兼容旧字段（pythonSandbox 三态模式）
         pythonSandbox: 'workspace' as 'safe' | 'workspace' | 'trusted', // Python 执行沙箱模式（借鉴 Codex sandbox_mode）：safe=只读 / workspace=工作区写入 / trusted=完全访问
@@ -212,10 +254,15 @@ export const usestore = defineStore('data', {
             rootDir: '', // 共享根目录
             token: '', // 访问凭据
         },
-        // 局域网共享知识库目录（主机，设置页「协作→局域网共享」配置；
-        // 远端网页端在 home 知识库模式可从该目录选择现有 .kb 或上传自己的）
+        // 局域网共享：知识库目录 + 访客（网页端）能力白名单（主机，设置页「协作→共享 / 权限」配置）
         lan: {
             kbDir: '', // 供局域网网页端列出/读取 .kb 的共享目录
+            // 访客权限（默认全只读，等价于「只能普通对话 + 知识库检索」）——
+            // 详见 src/shared/lanGuest.ts；后续主进程 /api/agent/* 直接消费本策略
+            guest: defaultLanGuestPolicy(),
+            // 访客权限模型版本：权限页首版（无此字段）的 requireToken 默认 true，
+            // 现改为默认「不需要令牌」→ 旧存档按版本标记回落新默认（详见 loadConfig）
+            guestVersion: 2,
         },
         // 远程工作区（客户端，文件树下方分区显示）
         remoteRoots: [] as import('@/types/collab').RemoteRoot[],
@@ -231,7 +278,6 @@ export const usestore = defineStore('data', {
             layout: 'horizontal',
             windowZoom: 100, // 窗口缩放比例（百分比，50~200；由主进程 window-zoom.json 持久化）
             navLayout: 'top' as 'top' | 'left' | 'bottom', // 导航栏布局：top=顶部（默认）/ left=左侧 / bottom=下方
-            fileOpenMode: 'window' as 'window' | 'inner', // 文件操作：双击打开方式（window=新窗口打开/默认, inner=窗口内打开）
             closeToTray: false, // 关闭按钮行为：false=直接退出（默认）/ true=折叠到托管区（托盘，后台任务继续运行）
             // ↑ 主进程是唯一事实源（userData/app-behavior.json，见 electron/main/tray-service.ts），
             //   这里仅镜像一份供界面显示与关闭提醒判定，设置页改动经 IPC 下发主进程落盘
@@ -239,6 +285,10 @@ export const usestore = defineStore('data', {
             browserSaveDir: '', // 浏览器保存文件夹（离线保存网页 + 收藏书签落盘目录；留空=当前工作区根目录）
             wordExportStylePath: '', // Word 导出样式文件（.docx，可选；留空则用内置默认样式）
             wordExportTemplate: 'gongwen', // Word 导出模板：gongwen=公文(GB/T 9704-2012)/cn=中文论文/en=英文论文(APA)/custom=自定义 .docx
+            // 文字对齐模式（仅作用于「浏览视图」md_read 与「可视编辑渲染态」BlockEditor 两处）：
+            //  - justify（默认）：用 CSS text-align: justify，浏览器原生两端对齐，不跑排版引擎
+            //  - kp：开启 Knuth–Plass（K-P）最优断行 + 逐行拉伸的精细排版（长文首次渲染略慢）
+            textAlignMode: 'justify' as 'justify' | 'kp',
         }, // 主题颜色
         AIconfig: {
             // 大模型配置
@@ -554,6 +604,8 @@ export const usestore = defineStore('data', {
         agentPresets: [] as Array<{
             id: string
             name: string
+            /** 是否为出厂内置预设（代码智能体 / 办公智能体）：不可删除，注入幂等 */
+            builtin?: boolean
             /** 预设标签（用于预设面板 / 集群配置面板按名称和标签搜索） */
             tags: string[]
             llmType: string
@@ -751,8 +803,24 @@ export const usestore = defineStore('data', {
         
         // 所有可用视图列表（统一管理，新增视图只需在此添加）
         // 文件视图的顺序 / 名称见 src/lib/knowFile/fileViews.ts（改那里即可，勿在这里写死）
+        // 「甘特」已合并进「日历」视图（日历状态栏可切换 月视图 / 周视图 / 甘特图）
+        // 「看板」= 按属性分组（默认 状态）的卡片看板：快速新建 / 拖拽改值 / 归档 / 状态筛选，取代了原看板实现
         viewList: () => {
-            return ['文件', '表格', '图谱', '看板', '地图', '日历', '甘特', ...FILE_VIEW_NAMES]
+            return ['文件', '看板', '表格', '图谱', '地图', '日历', ...FILE_VIEW_NAMES]
+        },
+
+        // 知识管理各视图的数据源目录（跟随文件视图当前目录，越出工作区则回退到工作区根）
+        dataDir: (state) => dataDirOf(state),
+        // 当前文件夹名称：知识管理各视图状态栏展示「当前文件夹」用（完整路径见 dataDir）
+        folderName: (state) => folderLabelOf(dataDirOf(state)),
+        // 顶部工具栏：当前目录的面包屑（可点击跳转；与文件视图同一份实现，显示真实路径而非回退后的数据源）
+        knowCrumbs: (state) => crumbsOf(state.path || state.root),
+        knowCanBack: (state) => state.knowNavIndex > 0,
+        knowCanForward: (state) => state.knowNavIndex < state.knowNavStack.length - 1,
+        knowCanUp: (state) => {
+            const p = state.path || state.root
+            const parent = parentPathOf(p)
+            return !!parent && parent !== p
         },
     },
     
@@ -954,7 +1022,6 @@ export const usestore = defineStore('data', {
             localStorage.setItem('roots', JSON.stringify(this.roots))
             localStorage.setItem('path', JSON.stringify(this.path))
             localStorage.setItem('skillsPath', JSON.stringify(this.skillsPath))
-            localStorage.setItem('workflowPath', JSON.stringify(this.workflowPath))
             localStorage.setItem('agentTools', JSON.stringify(this.agentTools))
             localStorage.setItem('disabledSkills', JSON.stringify(this.disabledSkills))
             localStorage.setItem('skillStoreSources', JSON.stringify(this.skillStoreSources))
@@ -970,10 +1037,6 @@ export const usestore = defineStore('data', {
             localStorage.setItem('hiddenNavs', JSON.stringify(this.hiddenNavs))
             localStorage.setItem('customTitle', JSON.stringify(this.customTitle))
             localStorage.setItem('interfaceConfigMode', JSON.stringify(this.interfaceConfigMode))
-            localStorage.setItem('enabledScaffolds', JSON.stringify(this.enabledScaffolds))
-            localStorage.setItem('scaffoldInstances', JSON.stringify(this.scaffoldInstances))
-            localStorage.setItem('activeInstanceId', JSON.stringify(this.activeInstanceId))
-            localStorage.setItem('canvasTaskPath', JSON.stringify(this.canvasTaskPath))
             localStorage.setItem('locales', JSON.stringify(this.locales))
             localStorage.setItem('AIconfig', JSON.stringify(this.AIconfig))
             // 自定义来源独立双写存档：与 AIconfig 保持一致；即使 AIconfig 合并异常也能从独立键恢复
@@ -1062,9 +1125,6 @@ export const usestore = defineStore('data', {
             if (localStorage.getItem('skillsPath') !== null) {
                 this.skillsPath = JSON.parse(localStorage.getItem('skillsPath')!)
             }
-            if (localStorage.getItem('workflowPath') !== null) {
-                this.workflowPath = JSON.parse(localStorage.getItem('workflowPath')!)
-            }
             if (localStorage.getItem('agentTools') !== null) {
                 const parsedTools = JSON.parse(localStorage.getItem('agentTools')!)
                 // 未配置(null)/关闭([])/启用列表 均原样保留；非法值回退 null
@@ -1093,7 +1153,13 @@ export const usestore = defineStore('data', {
             if (localStorage.getItem('view') !== null) {
                 const parsedView = JSON.parse(localStorage.getItem('view')!)
                 // 视图改名兼容：历史配置里的「编辑 / 块编辑 / 导图」归一化为「源码编辑 / 可视编辑 / 思维导图」
-                this.view = Array.isArray(parsedView) ? parsedView.map((v: any) => (typeof v === 'string' ? normalizeViewName(v) : v)) : []
+                // 「甘特」已合并进「日历」视图（日历状态栏可切换 月/周/甘特），旧配置迁移为「日历」并去重
+                const mapped = Array.isArray(parsedView)
+                    ? parsedView
+                        .map((v: any) => (typeof v === 'string' ? normalizeViewName(v) : v))
+                        .map((v: any) => (v === '甘特' ? '日历' : v))
+                    : []
+                this.view = mapped.filter((v: any, i: number) => mapped.indexOf(v) === i)
             }
             // 默认显示文件视图：无任何激活视图时自动开启「文件」，避免空白欢迎页
             if (!this.view || this.view.length === 0) {
@@ -1104,10 +1170,16 @@ export const usestore = defineStore('data', {
             }
             if (localStorage.getItem('mainPanel') !== null) {
                 this.mainPanel = JSON.parse(localStorage.getItem('mainPanel')!)
-                // 旧版模块名迁移：灵感管理 → 待办管理；Agent CLI → Agent脚手架（2026-09 改名）
-                if (this.mainPanel === '灵感管理') this.mainPanel = '待办管理'
-                if (this.mainPanel === 'Agent CLI') this.mainPanel = 'Agent脚手架'
+                // 旧版模块名迁移：Agent CLI → Agent脚手架（2026-09 改名），
+                //「Agent脚手架」又于 2026-10 从主面板移除（脚手架改为知识管理里的 .task 专属视图）→ 一律落到「知识管理」
+                if (this.mainPanel === 'Agent CLI' || this.mainPanel === 'Agent脚手架') this.mainPanel = '知识管理'
+                // 工作流面板已并为主面板「知识管理」里的 .flow 文件视图，旧存档不能落到已删除的面板
+                if (this.mainPanel === '工作流管理') this.mainPanel = '知识管理'
+                // 待办管理模块已删除（任务改在「知识管理 → 看板」视图里做），旧存档同样落到「知识管理」
+                if (this.mainPanel === '灵感管理' || this.mainPanel === '待办管理') this.mainPanel = '知识管理'
             }
+            // 旧存档：数据画布已并入知识管理（.data 文件视图），不能落到已删除的面板
+            if (this.mainPanel === '数据画布') this.mainPanel = '知识管理'
             // 功能开关：被隐藏的主面板导航按钮（旧存档无此 key 时兜底为空数组，全部显示）
             if (localStorage.getItem('hiddenNavs') !== null) {
                 const parsedNavs = JSON.parse(localStorage.getItem('hiddenNavs')!)
@@ -1128,53 +1200,6 @@ export const usestore = defineStore('data', {
             } else {
                 this.interfaceConfigMode = false
             }
-            // Agent脚手架：启用的脚手架 key（过滤非法值；至少保留一个，兜底为全部）
-            if (localStorage.getItem('enabledScaffolds') !== null) {
-                const parsedScaffolds = JSON.parse(localStorage.getItem('enabledScaffolds')!)
-                this.enabledScaffolds = Array.isArray(parsedScaffolds)
-                    ? parsedScaffolds.filter((k: any) => SCAFFOLDS.some(s => s.key === k))
-                    : defaultEnabledScaffoldKeys()
-            } else {
-                this.enabledScaffolds = defaultEnabledScaffoldKeys()
-            }
-            if (!this.enabledScaffolds.length) this.enabledScaffolds = [SCAFFOLDS[0].key]
-            // 「数据画布」独立主面板：关联任务文件路径（旧存档无此 key → 由下方画布迁移从旧 canvas 实例接管）
-            if (localStorage.getItem('canvasTaskPath') !== null) {
-                const parsedCanvasPath = JSON.parse(localStorage.getItem('canvasTaskPath')!)
-                this.canvasTaskPath = typeof parsedCanvasPath === 'string' ? parsedCanvasPath : ''
-            }
-            // Agent脚手架实例（多开）：从 localStorage 恢复；首次启动（无存档）时由 ensureInstances 按启用脚手架建成单实例
-            if (localStorage.getItem('scaffoldInstances') !== null) {
-                const parsedInstances = JSON.parse(localStorage.getItem('scaffoldInstances')!)
-                const rawInstances = Array.isArray(parsedInstances) ? parsedInstances : []
-                // 画布迁移：在过滤掉旧 canvas 实例（已不在 SCAFFOLDS 中）之前，先接管其关联任务文件
-                this.migrateCanvasPanelState(rawInstances)
-                this.scaffoldInstances = rawInstances
-                    .filter((it: any) => it && typeof it.id === 'string' && SCAFFOLDS.some(s => s.key === it.type))
-                    .map((it: any) => ({
-                        id: String(it.id),
-                        type: String(it.type),
-                        title: String(it.title || ''),
-                        filePath: String(it.filePath || ''),
-                        titleManual: it.titleManual === true,
-                        fileMissing: it.fileMissing === true,
-                        createdAt: Number(it.createdAt) || Date.now(),
-                        lastActiveAt: Number(it.lastActiveAt) || Number(it.createdAt) || Date.now(),
-                    }))
-            }
-            if (localStorage.getItem('activeInstanceId') !== null) {
-                const parsedActive = JSON.parse(localStorage.getItem('activeInstanceId')!)
-                this.activeInstanceId = typeof parsedActive === 'string' ? parsedActive : ''
-            }
-            // 当前激活脚手架不在启用列表中时（如只启用了一个脚手架后重启），
-            // 校正到第一个启用的脚手架，避免首次打开 Agent脚手架时仍显示已下线的脚手架
-            if (this.enabledScaffolds.indexOf(this.activeScaffold) === -1) {
-                this.activeScaffold = this.firstEnabledScaffold()
-            }
-            // 升级迁移：把新加入的脚手架一次性补进老存档（启用列表 + 补一个实例；用户手动关闭后不会恢复）
-            this.migrateScaffoldDefaults()
-            this.ensureInstances()
-            this.migrateScaffoldTitles()
             if (localStorage.getItem('locales') !== null) {
                 this.locales = JSON.parse(localStorage.getItem('locales')!)
             }
@@ -1326,8 +1351,8 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.windowZoom !== 'number' || !isFinite(this.UI.windowZoom)) this.UI.windowZoom = 100
                 // 旧存档可能缺少 navLayout，兜底为顶部导航
                 if (this.UI.navLayout !== 'top' && this.UI.navLayout !== 'left' && this.UI.navLayout !== 'bottom') this.UI.navLayout = 'top'
-                // 旧存档可能缺少 fileOpenMode，兜底为新窗口打开
-                if (this.UI.fileOpenMode !== 'window' && this.UI.fileOpenMode !== 'inner') this.UI.fileOpenMode = 'window'
+                // 旧存档里的「文件打开方式」（fileOpenMode：新窗口 / 窗口内）已取消：文件一律在新窗口打开
+                delete (this.UI as any).fileOpenMode
                 // 旧存档可能缺少 closeToTray，兜底为直接退出（真实值以主进程 app-behavior.json 为准，启动时握手同步）
                 if (typeof this.UI.closeToTray !== 'boolean') this.UI.closeToTray = false
                 // 旧存档可能缺少 browserHomeUrl，兜底为空（浏览器 Agent 默认空白页）
@@ -1338,6 +1363,8 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.wordExportStylePath !== 'string') this.UI.wordExportStylePath = ''
                 // 旧存档可能缺少 wordExportTemplate，兜底为公文模板
                 if (typeof this.UI.wordExportTemplate !== 'string' || ['gongwen', 'cn', 'en', 'custom'].indexOf(this.UI.wordExportTemplate) === -1) this.UI.wordExportTemplate = 'gongwen'
+                // 旧存档可能缺少 textAlignMode，兜底为浏览器原生两端对齐
+                if (this.UI.textAlignMode !== 'justify' && this.UI.textAlignMode !== 'kp') this.UI.textAlignMode = 'justify'
                 // 主题名归一化：旧存档里的 '浅蓝色' 等表外名称 → '浅蓝'（否则主题下拉框空白、changeTheme 失效）
                 normalizeThemeName(this.UI)
                 this.setTheme()
@@ -1414,6 +1441,8 @@ export const usestore = defineStore('data', {
             }
             // 内置浏览器 Agent MCP 服务兜底注入（幂等；防旧存档缺失 / 误删后丢失浏览器工具）
             this.ensureBuiltinMcpServer()
+            // 内置 Agent 预设兜底注入（幂等）：代码智能体 / 办公智能体，只补缺失项，不覆盖用户编辑
+            if (ensureBuiltinAgentPresets(this.agentPresets as any[], builtinPresetDefaultsFromStore(this))) needPersist = true
             // 协同文件编辑配置（含默认值兜底，兼容旧存档无此 key）
             if (localStorage.getItem('collab') !== null) {
                 try {
@@ -1450,13 +1479,20 @@ export const usestore = defineStore('data', {
                     console.warn('读取远程文件共享配置失败:', e)
                 }
             }
-            // 局域网共享知识库目录
+            // 局域网共享：知识库目录 + 访客权限白名单
             if (localStorage.getItem('lan') !== null) {
                 try {
                     const raw = JSON.parse(localStorage.getItem('lan')!)
                     if (raw && typeof raw === 'object') {
+                        const guest = normalizeLanGuestPolicy(raw.guest)
+                        // 一次性迁移：权限页首版（无 guestVersion）requireToken 默认 true，
+                        // 现改为默认 false → 旧存档强制回落到新默认；带版本标记后以用户设置为准
+                        if (Number(raw.guestVersion || 0) < 2) guest.requireToken = false
                         this.lan = {
                             kbDir: typeof raw.kbDir === 'string' ? raw.kbDir : '',
+                            // 旧存档无 guest：归一化为默认只读策略（不回退为「放开」）
+                            guest,
+                            guestVersion: 2,
                         }
                     }
                 } catch (e) {
@@ -1561,6 +1597,21 @@ export const usestore = defineStore('data', {
             this.saveMcpServers()
         },
 
+        /**
+         * 确保出厂内置的 Agent 预设存在（幂等）：代码智能体 / 办公智能体。
+         *
+         * 与内置 MCP 服务同策略：按固定 id 判重，只补缺失项，**不覆盖**用户对内置预设的编辑；
+         * 内置项在设置页不可删除（可编辑、可在聊天 / 工作流 / 集群 / 批量 / 网页端选到）。
+         * 软件启动（loadConfig）、设置页挂载、扫描预设文件夹后都会调一次，
+         * 防止旧存档缺失（老用户升级）或打开过预设文件夹后内置项丢失。
+         * @returns 是否新增了预设
+         */
+        ensureBuiltinAgentPresets(): boolean {
+            const changed = ensureBuiltinAgentPresets(this.agentPresets as any[], builtinPresetDefaultsFromStore(this))
+            if (changed) this.saveConfig()
+            return changed
+        },
+
         /** 新增 MCP 服务并持久化 */
         addMcpServer(config: Partial<McpServerConfig>): McpServerConfig {
             const server: McpServerConfig = {
@@ -1606,7 +1657,7 @@ export const usestore = defineStore('data', {
         
         async addTab(data: any) {
             // 远程文件：内容由调用方提供（data.content 已含预览内容），不再读本地磁盘
-            // 注意：知识库(.kb)跳转已统一由 openFileByMode / openInApp 处理，addTab 只负责标签操作
+            // 注意：知识库(.kb)跳转已统一由 openFileByMode 处理，addTab 只负责标签操作
             const isRemote = data && data.isRemote === true
             let existIndex = null
             let i = 0
@@ -1615,9 +1666,11 @@ export const usestore = defineStore('data', {
                 i++;
             }
             if (existIndex == null) {
+                const isDataCanvas = !isRemote && String(data.path || '').toLowerCase().endsWith('.data')
                 // 远程文件内容由调用方提供（data.content 已含预览内容），不再读本地磁盘
+                // 数据画布（.data）内容由画布模块自己按路径读取（文件可能十几 MB）：这里仍读一份供「源码编辑」用，但跳过 frontmatter 解析
                 const fileContent = isRemote ? (data.content ?? '') : await window.ipcRenderer.invoke('readFile', data.path)
-                const attributes = isRemote ? {} : await window.ipcRenderer.invoke('getConfig', data.path)
+                const attributes = (isRemote || isDataCanvas) ? {} : await window.ipcRenderer.invoke('getConfig', data.path)
                 // 新标签插入到第一个位置
                 this.data.unshift({
                     ...data, // 使用对象展开语法将原始数据的属性展开到新的对象中
@@ -1645,7 +1698,8 @@ export const usestore = defineStore('data', {
             }
         },
 
-        /** 按「文件操作」模式打开文件：新窗口模式（且为文件）→ 独立窗口浏览视图；否则窗口内打开 */
+        /** 打开文件：一律用独立窗口打开（原「窗口内打开」模式已去掉）。
+            特殊类型不走文件视图：.kb → 知识处理；.task → 独立窗口的「脚手架」专属视图；本地 .html/.htm → 内置浏览器 */
         openFileByMode(data: any) {
             if (!data || !data.path) return
             // 知识库(.kb)文件：无论何种文件操作模式，一律跳转到知识处理(knowRAG)模块加载
@@ -1655,53 +1709,39 @@ export const usestore = defineStore('data', {
                 this.openKbFile(data.path)
                 return
             }
-            // 脚手架任务(.task)文件：识别所属脚手架后跳转 Agent脚手架 并加载（与 .kb 一致，不走文件视图）
+            // 脚手架任务(.task)文件：有专属「脚手架」视图，一律在独立窗口打开（先做归属校验，见 openTaskFileWindow）
             if (!isRemote && isTaskFile(data.path)) {
-                void this.openTaskFileByPath(data.path)
+                void this.openTaskFileWindow(data.path)
+                return
+            }
+            // 本地网页(.html/.htm)：用内置浏览器（浏览器 Agent）打开渲染，不走文件视图
+            // （与「打开文件」对话框、AI 工具卡片的「打开」一致；想用文件视图看请走右键「新窗口打开」子菜单）
+            if (!isRemote && isLocalHtmlPath(data.path)) {
+                openLocalHtmlInBrowser(data.path, this.locales === 'zh')
                 return
             }
             const isFile = data.type === 'file' || (data.extension != null && data.extension !== '')
-            if (this.UI.fileOpenMode === 'window' && isFile) {
-                // 默认以源码编辑视图打开（代码类 + 未识别/未知类型兜底为纯文本编辑）；
-                // 有专属浏览视图的类型（md/html/图片/音视频/pdf/excel/excalidraw）默认浏览视图
-                const ext = String(data.path).substring(String(data.path).lastIndexOf('.')).toLowerCase()
-                // 系统打开类（可执行/压缩包/镜像等）：直接交给系统默认应用，不进入应用内视图
-                const SYSTEM_OPEN_EXTS = ['.exe', '.msi', '.dll', '.apk', '.dmg', '.deb', '.rpm', '.iso', '.appimage', '.run', '.bin', '.flatpak', '.snap', '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst']
-                if (SYSTEM_OPEN_EXTS.includes(ext)) {
-                    window.ipcRenderer.invoke('openWithSystemApp', data.path)
-                    return
-                }
-                // 有专属浏览视图、默认以浏览打开的类型
-                const READ_EXTS = [
-                    '.md', '.html', '.htm',
-                    '.docx', '.doc',
-                    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif',
-                    '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp', '.mpg', '.mpeg',
-                    '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.wma', '.ape', '.aiff',
-                    '.pdf', '.xlsx', '.xls', '.excalidraw', '.drawio', '.dio'
-                ]
-                const view = READ_EXTS.includes(ext) ? 'read' : 'edit'
-                window.ipcRenderer.invoke('open-file-window', { path: data.path, view }).catch(() => {})
-            } else {
-                this.addTab(data)
-            }
-        },
-
-        /** 在窗口内打开文件（右键「软件内打开」/搜索/文件对话框等强制窗口内场景）；
-            知识库(.kb)文件无论何种模式一律跳转知识处理(knowRAG)，与 openFileByMode 保持一致 */
-        openInApp(data: any) {
-            if (!data || !data.path) return
-            const isRemote = data.isRemote === true
-            if (!isRemote && String(data.path).toLowerCase().endsWith('.kb')) {
-                this.openKbFile(data.path)
+            if (!isFile) return
+            // 默认以源码编辑视图打开（代码类 + 未识别/未知类型兜底为纯文本编辑）；
+            // 有专属浏览视图的类型（md/html/图片/音视频/pdf/excel/excalidraw）默认浏览视图
+            const ext = String(data.path).substring(String(data.path).lastIndexOf('.')).toLowerCase()
+            // 系统打开类（可执行/压缩包/镜像等）：直接交给系统默认应用，不进入应用内视图
+            const SYSTEM_OPEN_EXTS = ['.exe', '.msi', '.dll', '.apk', '.dmg', '.deb', '.rpm', '.iso', '.appimage', '.run', '.bin', '.flatpak', '.snap', '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst']
+            if (SYSTEM_OPEN_EXTS.includes(ext)) {
+                window.ipcRenderer.invoke('openWithSystemApp', data.path)
                 return
             }
-            // 脚手架任务(.task)文件：识别所属脚手架后跳转 Agent脚手架 并加载（与「软件内打开」的 .kb 行为一致）
-            if (!isRemote && isTaskFile(data.path)) {
-                void this.openTaskFileByPath(data.path)
-                return
-            }
-            this.addTab(data)
+            // 有专属浏览视图、默认以浏览打开的类型
+            const READ_EXTS = [
+                '.md', '.html', '.htm', '.docx', '.doc',
+                '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif',
+                '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp', '.mpg', '.mpeg',
+                '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.wma', '.ape', '.aiff',
+                '.pdf', '.xlsx', '.xls', '.excalidraw', '.drawio', '.dio',
+                '.flow.yml', '.flow.yaml', '.data'
+            ]
+            const view = READ_EXTS.includes(ext) || isFlowDslPath(data.path) ? 'read' : 'edit'
+            window.ipcRenderer.invoke('open-file-window', { path: data.path, view }).catch(() => {})
         },
 
         /** 打开知识库(.kb)文件：跳转到知识处理(knowRAG)模块并标记待加载文件 */
@@ -1710,66 +1750,50 @@ export const usestore = defineStore('data', {
             this.kbPathToOpen = path
         },
 
-        /** 打开脚手架任务(.task)文件：读取文件头识别所属脚手架 → 跳转 Agent脚手架并标记待加载。
-            旧文件（无 scaffold 标记）按特征键推断；无法识别时提示并放弃跳转。 */
-        async openTaskFileByPath(path: string) {
+        /**
+         * 打开脚手架任务(.task)文件：在独立窗口里用专属「脚手架」视图打开（单文件隔离在一个窗口）。
+         * 打开前只读文件头做一次归属校验：已下线脚手架的旧文件、早期的画布文件（需改用 .data）
+         * 与无法识别的旧文件给出提示并不打开；已并入 Agent脚手架 的旧脚手架按 pipeline 打开
+         * （PipelineScaffold 读取时按特征键自动转换配置）。
+         */
+        async openTaskFileWindow(path: string) {
             const zh = this.locales !== 'en'
             // 只读文件头片段：结果/日志可能达上百 MB，避免整体读入渲染层（识别所需的键均在 JSON 开头）
             const res = await window.ipcRenderer.invoke('readTaskFile', path, 262144)
-            if (!res || !res.success) {
-                ElMessage.error(zh ? `读取任务文件失败: ${res?.error || '未知错误'}` : `Failed to read task file: ${res?.error || 'unknown error'}`)
-                return
-            }
-            let key = detectTaskScaffold(res.content as string)
-            if (!key) {
-                // 已下线脚手架的旧任务文件（如 PTC）：给出迁移提示（不再创建实例）
-                const retired = detectRetiredTaskScaffold(res.content as string)
+            const content = res && res.success ? String(res.content || '') : ''
+            if (content.trim()) {
+                // 已下线脚手架的旧任务文件（如 PTC）：给出迁移提示（不再打开）
+                const retired = detectRetiredTaskScaffold(content)
                 if (retired) {
                     const label = RETIRED_SCAFFOLD_LABELS[retired]
                     ElMessage.warning(zh
-                        ? `该任务文件属于已下线的「${label?.labelZh || retired}」脚手架，已不再打开实例；该功能已迁移到主页对话模式的「PTC」`
-                        : `This task file belongs to the retired "${label?.labelEn || retired}" scaffold; it no longer opens an instance — the feature moved to the "PTC" chat mode on the Home page`)
+                        ? `该任务文件属于已下线的「${label?.labelZh || retired}」脚手架，不再打开；该功能已迁移到主页对话模式的「PTC」`
+                        : `This task file belongs to the retired "${label?.labelEn || retired}" scaffold; it no longer opens — the feature moved to the "PTC" chat mode on the Home page`)
                     return
                 }
-                ElMessage.warning(zh ? '无法识别该任务文件所属脚手架，已取消打开' : 'Unrecognized .task file: cannot tell which scaffold it belongs to')
-                return
-            }
-            // 「数据画布」已独立为顶层主面板（不再是 Agent脚手架）：跳转到画布面板，由面板消费并加载
-            if (key === 'canvas') {
-                this.mainPanel = '数据画布'
-                this.canvasPathToOpen = path
-                return
-            }
-            // 已并入「Agent脚手架」的旧脚手架（批量 / 表格推理 / 文件采集 / 链接采集）：
-            // 提示后按 pipeline 打开（PipelineScaffold 读取时按特征键自动转换配置）
-            if ((MERGED_SCAFFOLD_KEYS as readonly string[]).includes(key)) {
-                const mergedLabel = MERGED_SCAFFOLD_LABELS[key]
-                ElMessage.info(zh
-                    ? `该任务文件属于已并入「Agent脚手架」的${mergedLabel ? '「' + mergedLabel.labelZh + '」' : '旧脚手架'}，将自动转换为 Agent脚手架配置打开`
-                    : `This task file belongs to the merged${mergedLabel ? ' "' + mergedLabel.labelEn + '"' : ''} scaffold — opening it with the Pipeline and converting automatically`)
-                key = 'pipeline'
-            }
-            // 该脚手架在设置页被关闭时自动启用（用户从文件打开，意图明确）
-            if (this.enabledScaffolds.indexOf(key) === -1) this.enabledScaffolds.push(key)
-            this.mainPanel = 'Agent脚手架'
-            // 关联文件禁止重复：已有实例关联该文件 → 直接激活它（并触发重新加载）
-            const exist = this.instanceByFilePath(path)
-            if (exist) {
-                this.setActiveInstance(exist.id)
-                // 已打开的实例需要显式重新加载；从未加载过的实例被激活时会自动加载（避免大文件重复读两遍）
-                this.taskPathToOpen = path
-            } else {
-                const targets = this.instancesOfType(key)
-                if (this.instanceLimitReached(key) && targets.length) {
-                    // 已达单类型上限：复用该类型最近使用的实例（其原关联文件保留在磁盘上，不再引用）
-                    const last = targets.slice().sort((a: any, b: any) => b.lastActiveAt - a.lastActiveAt)[0]
-                    this.linkInstanceFile(last.id, path)
-                    this.setActiveInstance(last.id)
-                } else {
-                    const id = this.addInstance(key, { filePath: path })
-                    this.linkInstanceFile(id, path)
+                const key = detectTaskScaffold(content)
+                // 无 scaffold 标记、又非占位空文件的旧文件：无法判断归属，不打开
+                if (!key && !isEmptyTaskFile(content)) {
+                    ElMessage.warning(zh ? '无法识别该任务文件所属脚手架，已取消打开' : 'Unrecognized .task file: cannot tell which scaffold it belongs to')
+                    return
+                }
+                // 「数据画布」已并入知识管理（.data 文件视图）：早期画布文件请改用 .data
+                if (key === 'canvas') {
+                    ElMessage.warning(zh
+                        ? '画布文件已改用 .data 扩展名：请把该文件改名为 .data，再到「知识管理」里打开'
+                        : 'Canvas files now use the .data extension: rename this file to .data and open it in Knowledge Management')
+                    return
+                }
+                // 已并入「Agent脚手架」的旧脚手架（批量 / 表格推理 / 文件采集 / 链接采集）：提示后照常打开
+                if (key && (MERGED_SCAFFOLD_KEYS as readonly string[]).includes(key)) {
+                    const mergedLabel = MERGED_SCAFFOLD_LABELS[key]
+                    ElMessage.info(zh
+                        ? `该任务文件属于已并入「Agent脚手架」的${mergedLabel ? '「' + mergedLabel.labelZh + '」' : '旧脚手架'}，将自动转换为 Agent脚手架配置打开`
+                        : `This task file belongs to the merged${mergedLabel ? ' "' + mergedLabel.labelEn + '"' : ''} scaffold — opening it with the Pipeline and converting automatically`)
                 }
             }
+            // .task 的专属视图固定在「浏览」位置（文件窗口按扩展名识别为脚手架视图）
+            window.ipcRenderer.invoke('open-file-window', { path, view: 'read' }).catch(() => {})
         },
 
         /** 根据路径关闭对应的标签页 */
@@ -1808,6 +1832,47 @@ export const usestore = defineStore('data', {
                 // 如果当前路径不在 root 目录下，则不执行任何操作
                 return;
             }
+        },
+
+        // ===== 知识管理全局视图的目录导航（顶部工具栏：后退 / 前进 / 向上 + 面包屑） =====
+        /** 进入目录（记录导航历史；栈指针位置始终等于 path） */
+        knowEnterDir(dir: string) {
+            const target = String(dir || '')
+            if (!target || target === this.path) return
+            this.knowNavStack = this.knowNavStack.slice(0, this.knowNavIndex + 1)
+            this.knowNavStack.push(target)
+            this.knowNavIndex = this.knowNavStack.length - 1
+            this.path = target
+        },
+        knowBack() {
+            if (this.knowNavIndex <= 0) return
+            this.knowNavIndex -= 1
+            this.path = this.knowNavStack[this.knowNavIndex]
+        },
+        knowForward() {
+            if (this.knowNavIndex >= this.knowNavStack.length - 1) return
+            this.knowNavIndex += 1
+            this.path = this.knowNavStack[this.knowNavIndex]
+        },
+        knowUp() {
+            const p = this.path || this.root
+            if (!p) return
+            const parent = parentPathOf(p)
+            if (parent && parent !== p) this.knowEnterDir(parent)
+        },
+        /**
+         * 外部改动 path（点文件树、打开文件、切换工作区）时把导航历史重置到当前位置。
+         * 由顶部工具栏在 path 变化时调用，避免历史栈与真实路径脱节。
+         */
+        knowSyncNav() {
+            const p = this.path || this.root
+            if (this.knowNavStack[this.knowNavIndex] === p) return
+            this.knowNavStack = p ? [p] : []
+            this.knowNavIndex = p ? 0 : -1
+        },
+        /** 顶部工具栏「刷新」：递增计数，各视图 watch 后重新拉数据 */
+        knowRefreshViews() {
+            this.knowRefreshTick += 1
         },
 
         /** 添加工作区：注册到列表并设为当前工作区。返回是否新增（重复路径仅切换当前工作区并返回 false） */
@@ -1889,16 +1954,17 @@ export const usestore = defineStore('data', {
         },
 
         /**
-         * 旧存档导航 key 迁移（模块改名）：'Agent CLI' → 'Agent脚手架'（2026-09 改名）。
+         * 旧存档导航 key 迁移：已删除的模块（'工作流管理' / '待办管理' / '灵感管理'，
+         * 以及 2026-10 起不再是主面板的 'Agent CLI' / 'Agent脚手架'）直接丢弃。
          * 只保留字符串、去重；localStorage 存档与分发的 interface-config.json 共用。
          */
         migrateNavKeys(list: any): string[] {
-            const LEGACY: Record<string, string> = { 'Agent CLI': 'Agent脚手架' }
+            const REMOVED = ['工作流管理', '待办管理', '灵感管理', 'Agent CLI', 'Agent脚手架']
             const out: string[] = []
             for (const x of Array.isArray(list) ? list : []) {
                 if (typeof x !== 'string') continue
-                const k = LEGACY[x] || x
-                if (out.indexOf(k) === -1) out.push(k)
+                if (REMOVED.indexOf(x) !== -1) continue
+                if (out.indexOf(x) === -1) out.push(x)
             }
             return out
         },
@@ -1918,278 +1984,12 @@ export const usestore = defineStore('data', {
             this.saveConfig()
         },
         
-        /** 判断 Agent脚手架是否启用 */
-        isScaffoldEnabled(key: string) {
-            return this.enabledScaffolds.indexOf(key) !== -1
-        },
-        
-        /** 切换 Agent脚手架启用/禁用（至少保留一个开启）
-         *  启用：若该类型尚无实例则补一个（导航栏立即出现）；
-         *  禁用：移除该类型的全部实例（磁盘文件保留），激活实例切到剩余实例 */
-        toggleScaffold(key: string) {
-            const i = this.enabledScaffolds.indexOf(key)
-            if (i === -1) {
-                this.enabledScaffolds.push(key)
-                if (!this.instancesOfType(key).length) {
-                    this.addInstance(key, { title: this.fileBaseName('') })
-                }
-            } else {
-                if (this.enabledScaffolds.length <= 1) return
-                this.enabledScaffolds.splice(i, 1)
-                this.scaffoldInstances = this.scaffoldInstances.filter(it => it.type !== key)
-                if (!this.activeInstance() || this.activeScaffold === key) {
-                    const next = this.scaffoldInstances[0]
-                    if (next) { this.activeInstanceId = next.id; this.activeScaffold = next.type }
-                    else { this.activeInstanceId = ''; this.activeScaffold = this.firstEnabledScaffold() }
-                }
-            }
-            // 恢复被关闭类型时（重新启用）补齐实例标题
-            this.scaffoldInstances.forEach((it) => { if (!it.title) it.title = this.fileBaseName(it.filePath) || it.type })
-            this.saveConfig()
-        },
-        
-        /** 设置当前激活的 Agent脚手架（仅允许切到已启用的；同时把激活实例切到该类型的首个实例） */
-        setActiveScaffold(key: string) {
-            if (!this.enabledScaffolds.includes(key)) return
-            this.activeScaffold = key
-            const first = this.scaffoldInstances.find(it => it.type === key)
-            if (first) this.setActiveInstance(first.id)
-        },
-
-        // ==================== 脚手架实例（多开） ====================
-
-        /** 脚手架定义（按 key） */
-        scaffoldDef(key: string) {
-            return SCAFFOLDS.find(s => s.key === key)
-        },
-
-        /** 当前激活实例（无有效实例时返回 null；调用方应保证 ensureInstances 已执行） */
-        activeInstance(): ScaffoldInstanceMeta | null {
-            return this.scaffoldInstances.find(it => it.id === this.activeInstanceId) || null
-        },
-
-        /** 当前启用的脚手架对应的实例列表（按创建顺序；供导航栏/标题栏下拉渲染） */
-        visibleInstances(): ScaffoldInstanceMeta[] {
-            return this.scaffoldInstances.filter(it => this.enabledScaffolds.indexOf(it.type) !== -1)
-        },
-
-        /** 指定类型的实例列表 */
-        instancesOfType(type: string): ScaffoldInstanceMeta[] {
-            return this.scaffoldInstances.filter(it => it.type === type)
-        },
-
-        /** 按关联文件路径查实例（用于「关联文件禁止重复」校验） */
-        instanceByFilePath(filePath: string, excludeId?: string): ScaffoldInstanceMeta | null {
-            if (!filePath) return null
-            const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase()
-            const target = norm(filePath)
-            return this.scaffoldInstances.find(it => it.id !== excludeId && it.filePath && norm(it.filePath) === target) || null
-        },
-
-        /** 新建实例（返回实例 id；文件创建由调用方通过主进程 createTaskFile 完成后传入 filePath） */
-        addInstance(type: string, opts?: { title?: string; filePath?: string }): string {
-            const def = this.scaffoldDef(type)
-            const count = this.instancesOfType(type).length
-            const id = `${type}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
-            const now = Date.now()
-            this.scaffoldInstances.push({
-                id,
-                type,
-                title: opts?.title || `${def ? (this.locales === 'en' ? def.labelEn : def.labelZh) : type} ${count + 1}`,
-                filePath: opts?.filePath || '',
-                createdAt: now,
-                lastActiveAt: now,
-            })
-            this.setActiveInstance(id)
-            this.saveConfig()
-            return id
-        },
-
-        /** 切换激活实例（并同步 activeScaffold，保证设置页/标题栏文案一致） */
-        setActiveInstance(id: string) {
-            const inst = this.scaffoldInstances.find(it => it.id === id)
-            if (!inst) return
-            this.activeInstanceId = id
-            inst.lastActiveAt = Date.now()
-            if (this.activeScaffold !== inst.type) this.activeScaffold = inst.type
-            this.saveConfig()
-        },
-
-        /** 重命名实例（titleManual=true 后不再跟随文件名变化） */
-        renameInstance(id: string, title: string) {
-            const inst = this.scaffoldInstances.find(it => it.id === id)
-            if (!inst) return
-            inst.title = String(title || '').trim() || inst.title
-            inst.titleManual = true
-            this.saveConfig()
-        },
-
-        /** 关联/更换实例的任务文件（禁止与其他实例重复；返回冲突实例） */
-        linkInstanceFile(id: string, filePath: string): ScaffoldInstanceMeta | null {
-            const inst = this.scaffoldInstances.find(it => it.id === id)
-            if (!inst || !filePath) return null
-            const conflict = this.instanceByFilePath(filePath, id)
-            if (conflict) return conflict
-            inst.filePath = filePath
-            inst.fileMissing = false
-            if (!inst.titleManual) inst.title = this.fileBaseName(filePath)
-            this.saveConfig()
-            return null
-        },
-
-        /** 标记实例关联文件缺失（文件被移动/删除） */
-        markInstanceFileMissing(id: string, missing: boolean) {
-            const inst = this.scaffoldInstances.find(it => it.id === id)
-            if (inst) inst.fileMissing = missing
-        },
-
-        /** 关闭（删除）实例：仅从列表移除，磁盘上的任务文件保留 */
-        removeInstance(id: string) {
-            const idx = this.scaffoldInstances.findIndex(it => it.id === id)
-            if (idx === -1) return
-            const type = this.scaffoldInstances[idx].type
-            this.scaffoldInstances.splice(idx, 1)
-            if (this.activeInstanceId === id) {
-                const next = this.scaffoldInstances.find(it => it.type === type) || this.scaffoldInstances[0]
-                if (next) { this.activeInstanceId = next.id; this.activeScaffold = next.type }
-                else { this.activeInstanceId = '' }
-            }
-            this.saveConfig()
-        },
-
-        /** 文件路径 → 标题（去目录与扩展名） */
-        fileBaseName(filePath: string) {
-            const base = String(filePath || '').split(/[\\/]/).pop() || ''
-            return base.replace(/\.task$/i, '') || base
-        },
-
-        /** 确保实例列表可用：清除已禁用类型的实例；空列表时按启用脚手架建单实例；校正激活实例
-         *  同时在配置加载完成后调用（旧版本存档只有 enabledScaffolds/activeScaffold，需迁移出实例） */
-        ensureInstances() {
-            // 剔除已禁用类型的实例（保留磁盘文件，仅从导航栏移除）
-            const kept = this.scaffoldInstances.filter(it => this.enabledScaffolds.indexOf(it.type) !== -1)
-            if (kept.length !== this.scaffoldInstances.length) this.scaffoldInstances = kept
-            // 空列表（首次使用 / 全部类型刚被启用）：每个启用的脚手架建一个实例
-            if (!this.scaffoldInstances.length) {
-                const now = Date.now()
-                this.enabledScaffolds.forEach((type: string, i: number) => {
-                    this.scaffoldInstances.push({
-                        id: `${type}:${(now + i).toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-                        type,
-                        title: '',
-                        filePath: '',
-                        createdAt: now + i,
-                        lastActiveAt: now + i,
-                    })
-                })
-            }
-            // 标题兜底（迁移出来的实例没有标题）
-            this.scaffoldInstances.forEach((it) => { if (!it.title) it.title = this.fileBaseName(it.filePath) || it.type })
-            // 激活实例校正：优先沿用 activeInstanceId，其次匹配 activeScaffold 类型，最后取第一个
-            if (!this.scaffoldInstances.some(it => it.id === this.activeInstanceId)) {
-                const byType = this.scaffoldInstances.find(it => it.type === this.activeScaffold)
-                this.activeInstanceId = (byType || this.scaffoldInstances[0])?.id || ''
-            }
-            const act = this.activeInstance()
-            if (act) this.activeScaffold = act.type
-        },
-
-        /**
-         * 一次性迁移：清理存量实例标题里的「（预览）」字样，并把自动生成的旧脚手架名
-         * （「通用流水线」/「Pipeline」）改为现在的「Agent脚手架」/「Agent Scaffold」（手动改名的实例不动）。
-         */
-        migrateScaffoldTitles() {
-            let changed = false
-            for (const it of this.scaffoldInstances) {
-                if (it.titleManual) continue
-                let t = String(it.title || '')
-                const before = t
-                if (t.includes('（预览）')) t = t.replace('（预览）', '').trim()
-                // 存量自动标题：通用流水线 1 / Pipeline 1 → Agent脚手架 1 / Agent Scaffold 1
-                t = t.replace(/^通用流水线/, 'Agent脚手架').replace(/^Pipeline\b/, 'Agent Scaffold')
-                if (t !== before) {
-                    it.title = t
-                    changed = true
-                }
-            }
-            if (changed) this.saveConfig()
-        },
-
-        /**
-         * 一次性迁移：「数据画布」由 Agent脚手架独立为顶层主面板。
-         * 接管旧画布实例（type='canvas'）中最近使用且有关联文件的 .task 路径 → canvasTaskPath；
-         * canvas 实例本身随实例列表的 SCAFFOLDS 过滤被移除（磁盘 .task 保留，双击仍可打开到画布面板）。
-         */
-        migrateCanvasPanelState(rawInstances: any[]) {
-            if (this.canvasTaskPath) return
-            const canvasInsts = (Array.isArray(rawInstances) ? rawInstances : [])
-                .filter((it: any) => it && it.type === 'canvas' && typeof it.filePath === 'string' && it.filePath)
-                .sort((a: any, b: any) => (Number(b.lastActiveAt) || 0) - (Number(a.lastActiveAt) || 0))
-            if (!canvasInsts.length) return
-            this.canvasTaskPath = String(canvasInsts[0].filePath)
-            try { localStorage.setItem('canvasTaskPath', JSON.stringify(this.canvasTaskPath)) } catch { /* 忽略 */ }
-        },
-
-        /**
-         * 一次性迁移：把「新加入的脚手架」补进老存档的启用列表并补一个实例。
-         * - 仅执行一次：已应用的迁移 id 记录在 localStorage:scaffoldMigrations，用户之后手动关闭不会被自动恢复；
-         * - 不改变当前激活实例（避免启动时抢焦点）；全新安装不走此路径（默认列表已包含）。
-         */
-        migrateScaffoldDefaults() {
-            // 新增默认启用的脚手架时，在此追加一条（id 仅用于一次性判定；重复追加请使用新 id）
-            const MIGRATIONS: Array<{ id: string; key: string }> = [
-                { id: 'pipeline-2026-09-21', key: 'pipeline' },
-            ]
-            let applied: string[] = []
-            try {
-                const parsed = JSON.parse(localStorage.getItem('scaffoldMigrations') || '[]')
-                applied = Array.isArray(parsed) ? parsed.filter((x: any) => typeof x === 'string') : []
-            } catch { applied = [] }
-            let changed = false
-            for (const m of MIGRATIONS) {
-                if (applied.indexOf(m.id) !== -1) continue
-                applied.push(m.id)
-                changed = true
-                if (!SCAFFOLDS.some(s => s.key === m.key)) continue
-                if (this.enabledScaffolds.indexOf(m.key) === -1) this.enabledScaffolds.push(m.key)
-                if (!this.instancesOfType(m.key).length) {
-                    const def = this.scaffoldDef(m.key)
-                    const now = Date.now()
-                    this.scaffoldInstances.push({
-                        id: `${m.key}:${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-                        type: m.key,
-                        title: `${def ? (this.locales === 'en' ? def.labelEn : def.labelZh) : m.key} 1`,
-                        filePath: '',
-                        createdAt: now,
-                        lastActiveAt: now,
-                    })
-                }
-            }
-            if (changed) {
-                try { localStorage.setItem('scaffoldMigrations', JSON.stringify(applied)) } catch { /* 忽略 */ }
-                this.saveConfig()
-            }
-        },
-
-        /** 新建实例时该类型是否已达上限 */
-        instanceLimitReached(type: string): boolean {
-            const def = this.scaffoldDef(type)
-            const max = def?.maxInstances ?? 1
-            return this.instancesOfType(type).length >= max
-        },
-        
-        /** 第一个启用的脚手架 key（无则回退到首个在册脚手架） */
-        firstEnabledScaffold() {
-            return this.enabledScaffolds.find(k => SCAFFOLDS.some(s => s.key === k)) || SCAFFOLDS[0].key
-        },
-        
-        /** 汇总当前界面配置（UI + 标题 + 功能开关 + 脚手架 + 视图 + 语言），供根目录文件持久化 */
+        /** 汇总当前界面配置（UI + 标题 + 功能开关 + 视图 + 语言），供根目录文件持久化 */
         gatherInterfaceConfig() {
             return {
                 UI: JSON.parse(JSON.stringify(this.UI)),
                 customTitle: this.customTitle,
                 hiddenNavs: [...this.hiddenNavs],
-                enabledScaffolds: [...this.enabledScaffolds],
                 view: [...this.view],
                 locales: this.locales,
             }
@@ -2205,14 +2005,6 @@ export const usestore = defineStore('data', {
             }
             if (typeof cfg.customTitle === 'string') this.customTitle = cfg.customTitle
             if (Array.isArray(cfg.hiddenNavs)) this.hiddenNavs = this.migrateNavKeys(cfg.hiddenNavs)
-            if (Array.isArray(cfg.enabledScaffolds)) {
-                this.enabledScaffolds = cfg.enabledScaffolds.filter((k: any) => SCAFFOLDS.some(s => s.key === k))
-                if (!this.enabledScaffolds.length) this.enabledScaffolds = [SCAFFOLDS[0].key]
-                // 界面配置应用后同样校正激活脚手架，确保其始终指向已启用的脚手架
-                if (this.enabledScaffolds.indexOf(this.activeScaffold) === -1) {
-                    this.activeScaffold = this.firstEnabledScaffold()
-                }
-            }
             if (Array.isArray(cfg.view)) this.view = cfg.view.map((v: any) => (typeof v === 'string' ? normalizeViewName(v) : v))
             if (typeof cfg.locales === 'string') this.locales = cfg.locales
             this.setTheme()
@@ -2257,13 +2049,13 @@ export const usestore = defineStore('data', {
                     layout: this.UI.layout,
                     windowZoom: this.UI.windowZoom,
                     navLayout: this.UI.navLayout,
-                    fileOpenMode: this.UI.fileOpenMode,
                     // ⚠️ changeTheme 会重建整个 UI 对象：新增的 UI 字段必须在这里带上，否则切主题就丢设置
                     closeToTray: this.UI.closeToTray,
                     browserHomeUrl: this.UI.browserHomeUrl,
                     browserSaveDir: this.UI.browserSaveDir,
                     wordExportStylePath: this.UI.wordExportStylePath,
-                    wordExportTemplate: this.UI.wordExportTemplate || 'gongwen'
+                    wordExportTemplate: this.UI.wordExportTemplate || 'gongwen',
+                    textAlignMode: this.UI.textAlignMode === 'kp' ? 'kp' : 'justify'
                 }
             }
             this.setTheme()
@@ -3160,11 +2952,13 @@ export const usestore = defineStore('data', {
                     c = "fa fa-database";
                     break;
                 case ".task":
-                    // 脚手架任务文件（Agent脚手架实例保存的状态文件）：列表图标用任务清单，
-                    // 与 .kb(fa-database) / .flow(fa-stumbleupon) / .md(fa-file-text-o) 区分
+                    // 脚手架任务文件（.task，一个文件 = 一个独立任务）：列表图标用任务清单，
+                    // 与 .kb(fa-database) / .flow.yml(fa-stumbleupon) / .md(fa-file-text-o) 区分
                     c = "fa fa-tasks";
                     break;
-                case ".flow":
+                // Dify DSL 工作流（.flow.yml / .flow.yaml）：按完整双后缀上色，避免落到通用 YAML 图标
+                case ".flow.yml":
+                case ".flow.yaml":
                     c = "fa fa-stumbleupon";
                     break;
                 case ".md":
@@ -3275,21 +3069,28 @@ export const usestore = defineStore('data', {
                     c = "fa fa-file-text-o";
                     break;
                 case ".mp4":
-                    c = "fa fa-file-video-o";
-                    break;
                 case ".wmv":
-                    c = "fa fa-file-video-o";
-                    break;
                 case ".avi":
-                    c = "fa fa-file-video-o";
-                    break;
-                case "flv":
+                case ".flv":
+                case ".webm":
+                case ".mkv":
+                case ".mov":
+                case ".m4v":
+                case ".3gp":
+                case ".mpg":
+                case ".mpeg":
                     c = "fa fa-file-video-o";
                     break;
                 case ".mp3":
-                    c = "fa fa-file-audio-o";
-                    break;
                 case ".m4a":
+                case ".flac":
+                case ".wav":
+                case ".ogg":
+                case ".aac":
+                case ".opus":
+                case ".wma":
+                case ".ape":
+                case ".aiff":
                     c = "fa fa-file-audio-o";
                     break;
                 case ".wb":
@@ -3301,6 +3102,9 @@ export const usestore = defineStore('data', {
                 case ".drawio":
                 case ".dio":
                     // 不用 fa-sitemap：与工作流文件 .flow 的 fa-stumbleupon 都是「节点分支」图形，肉眼易混
+                    c = "fa fa-object-group";
+                    break;
+                case ".data":
                     c = "fa fa-object-group";
                     break;
                 case ".exe":

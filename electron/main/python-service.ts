@@ -27,6 +27,51 @@ export interface PythonInstallation {
   command: string | null
 }
 
+interface SandboxEnvelope {
+  success?: boolean
+  result?: string
+  output?: string
+  error?: string
+  logs?: string[]
+  captured?: string[]
+  executionTime?: number
+}
+
+/**
+ * 从沙箱脚本的 stdout 里取出结果信封。
+ *
+ * 沙箱包装脚本最后用 `sys.stdout.write` 单独写一行 JSON 信封，信封里的
+ * result / output / captured 里可能包含 `{`、`}`（用户打印的 JSON），
+ * 所以不能用 lastIndexOf('{') 截取；改为整段优先、其次从最后一行往前找可解析的 JSON 行。
+ */
+function parseSandboxEnvelope(stdout: string): SandboxEnvelope | null {
+  const text = String(stdout ?? '').trim()
+  if (!text) return null
+
+  const asObject = (value: unknown): SandboxEnvelope | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? (value as SandboxEnvelope) : null
+
+  try {
+    const whole = asObject(JSON.parse(text))
+    if (whole) return whole
+  } catch {
+    // 整段不是 JSON，继续按行找
+  }
+
+  const lines = text.split('\n')
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index].trim()
+    if (!line.startsWith('{') || !line.endsWith('}')) continue
+    try {
+      const parsed = asObject(JSON.parse(line))
+      if (parsed) return parsed
+    } catch {
+      // 换上一行
+    }
+  }
+  return null
+}
+
 // Python 执行结果接口
 export interface PythonExecutionResult {
   success: boolean
@@ -175,34 +220,27 @@ export class PythonService {
         }
         
         try {
-          // 尝试从 stdout 中提取 JSON 结果
-          // 查找最后一个有效的 JSON 对象
-          const jsonStart = stdout.lastIndexOf('{')
-          const jsonEnd = stdout.lastIndexOf('}') + 1
-          
-          if (jsonStart >= 0 && jsonEnd > jsonStart) {
-            const jsonStr = stdout.substring(jsonStart, jsonEnd)
-            
-            const result = JSON.parse(jsonStr)
-            
+          // 沙箱信封：脚本最后写一行 JSON（result 里可能带 { } 字符串，不能靠 lastIndexOf('{') 取）
+          const envelope = parseSandboxEnvelope(stdout)
+
+          if (envelope) {
             return {
-              success: result.success !== false,
-              result: result.result || result.output || '',
-              output: result.output || result.result || '',
-              logs: result.logs || [],
-              captured: result.captured || [],
-              executionTime: result.executionTime || 0,
+              success: envelope.success !== false,
+              result: envelope.result || envelope.output || '',
+              output: envelope.output || envelope.result || '',
+              logs: envelope.logs || [],
+              captured: envelope.captured || [],
+              executionTime: envelope.executionTime || 0,
               rawOutput: stdout
             }
-          } else {
-            // 如果没有找到 JSON，返回原始输出
-            return {
-              success: true,
-              result: stdout.trim(),
-              output: stdout.trim(),
-              logs: [],
-              rawOutput: stdout
-            }
+          }
+          // 如果没有找到信封，返回原始输出
+          return {
+            success: true,
+            result: stdout.trim(),
+            output: stdout.trim(),
+            logs: [],
+            rawOutput: stdout
           }
         } catch (parseError) {
           // 如果解析失败，返回原始输出

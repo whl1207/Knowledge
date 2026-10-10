@@ -223,8 +223,9 @@ export function ensureSvgExplicitSize(svg: string, w: number, h: number): string
   let out = svg
     .replace(/\swidth\s*=\s*"[^"]*"/i, ` width="${W}"`)
     .replace(/\sheight\s*=\s*"[^"]*"/i, ` height="${H}"`)
-    // 去掉 style 中的 max-width（会限制图片渲染尺寸）
+    // 去掉 style 中的 max-width / min-width（会限制图片渲染尺寸）
     .replace(/\sstyle\s*=\s*"[^"]*max-width\s*:[^"]*"/i, '')
+    .replace(/\sstyle\s*=\s*"[^"]*min-width\s*:[^"]*"/i, '')
   // 部分渲染器只给 style max-width + viewBox，缺 width/height 属性时补全
   if (!/width\s*=/.test(out)) {
     out = out.replace(/^<svg([^>]*?)\/?>/, (m, attrs) => `<svg${attrs} width="${W}">`)
@@ -236,46 +237,81 @@ export function ensureSvgExplicitSize(svg: string, w: number, h: number): string
 }
 
 /**
- * 从 SVG 字符串生成 PNG 下载链接（绘制前先净化，避免 canvas 被污染）
+ * 从 SVG 字符串生成 PNG 下载链接（默认先净化，避免 canvas 被污染）
  *
  * 注意：mermaid 输出的 SVG 使用 width="100%" + viewBox，必须：
- *  1) 从 viewBox 解析真实尺寸；
+ *  1) 从 viewBox 解析真实尺寸（或由调用方显式传入 explicitSize）；
  *  2) 把 width/height 固定为 viewBox 像素尺寸，否则会以极小 intrinsic 尺寸渲染，
  *     导致多行文字出现亚像素偏移（放大后可见）；
  *  3) 用显式宽高绘制，否则只画出左上角。
+ *
+ * opts.sanitize=false 用于「自己知道内容安全」的场景（如 drawio 导出的 SVG：图片已是
+ * data URI、标签靠 foreignObject 渲染），跳过净化以保留 <image> 与 foreignObject 的还原度。
+ * opts.urlMode='data' 直接用 data URI 加载（默认 blob:）：含 foreignObject 的 SVG 用
+ * blob: 加载后 Chromium 会判定画布被污染、toDataURL 抛 SecurityError（data URI 则正常）。
  */
-export function svgToPngDataUrl(svgString: string, scale = 2): Promise<string> {
-  const cleanSvg = sanitizeSvgForCanvas(svgString)
-  const svgSize = parseSvgSize(cleanSvg)
+export function svgToPngDataUrl(
+  svgString: string,
+  scale = 2,
+  explicitSize?: { w: number; h: number },
+  opts?: { sanitize?: boolean; urlMode?: 'blob' | 'data' },
+): Promise<string> {
+  const cleanSvg = opts?.sanitize === false ? svgString : sanitizeSvgForCanvas(svgString)
+  // 显式尺寸优先：MathJax 表格公式外层无 viewBox，内部解析会拿到嵌套 svg 的伪 viewBox
+  const svgSize = explicitSize || parseSvgSize(cleanSvg)
   const vbW = svgSize?.w || 300
   const vbH = svgSize?.h || 150
   // 固定 width/height 为 viewBox 像素尺寸，保证 <img> 全分辨率渲染
   const sizedSvg = ensureSvgExplicitSize(cleanSvg, vbW, vbH)
+  const useData = opts?.urlMode === 'data'
+  return rasterizeSvgToPng(sizedSvg, vbW, vbH, scale, useData).catch((e) => {
+    // blob: 被判定污染时，退回 data URI 再试一次（等价内容，Chromium 不视为跨源）
+    if (useData) throw e
+    return rasterizeSvgToPng(sizedSvg, vbW, vbH, scale, true)
+  })
+}
+
+/** 把固定尺寸的 SVG 绘制到 canvas 并导出 PNG（useData=用 data URI 而非 blob URL） */
+function rasterizeSvgToPng(
+  sizedSvg: string,
+  vbW: number,
+  vbH: number,
+  scale: number,
+  useData: boolean,
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    const blob = new Blob([sizedSvg], { type: 'image/svg+xml;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
+    const url = useData
+      ? 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(sizedSvg)))
+      : URL.createObjectURL(new Blob([sizedSvg], { type: 'image/svg+xml;charset=utf-8' }))
+
+    const revoke = () => {
+      if (!useData) URL.revokeObjectURL(url)
+    }
 
     const img = new Image()
     img.onload = () => {
       const w = img.naturalWidth || vbW
       const h = img.naturalHeight || vbH
-      const canvas = document.createElement('canvas')
-      canvas.width = w * scale
-      canvas.height = h * scale
-      const ctx = canvas.getContext('2d')
-      if (!ctx) {
-        URL.revokeObjectURL(url)
-        reject(new Error('Canvas 2D context not available'))
-        return
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = w * scale
+        canvas.height = h * scale
+        const ctx = canvas.getContext('2d')
+        if (!ctx) throw new Error('Canvas 2D context not available')
+        ctx.scale(scale, scale)
+        // 显式指定目标宽高，避免 SVG 以不可靠的默认尺寸绘制导致只显示左上角
+        ctx.drawImage(img, 0, 0, w, h)
+        const png = canvas.toDataURL('image/png')
+        revoke()
+        resolve(png)
+      } catch (e) {
+        // 必须在 onload 里 reject：直接抛异常会让 Promise 永不 settle，调用方挂死
+        revoke()
+        reject(e)
       }
-      ctx.scale(scale, scale)
-      // 显式指定目标宽高，避免 SVG 以不可靠的默认尺寸绘制导致只显示左上角
-      ctx.drawImage(img, 0, 0, w, h)
-      URL.revokeObjectURL(url)
-      resolve(canvas.toDataURL('image/png'))
     }
     img.onerror = (e) => {
-      URL.revokeObjectURL(url)
+      revoke()
       reject(e)
     }
     img.src = url

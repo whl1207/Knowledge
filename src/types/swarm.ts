@@ -8,7 +8,7 @@
 
 /**
  * 执行模式（策略注册表键名，见 src/lib/agent/swarmStrategies.ts）：
- * - `auto`：全员响应（`settings.collabMode` 再分「点名 / 接力 / 撮合 / 仅发言」档），可选群主总结；
+ * - `auto`：全员响应（`settings.collabMode` 再分「点名 / 接力 / 仅发言」档），可选群主总结；
  * - `debate`：多轮辩论，最后由群主中立总结。
  *
  * 输入框 `@成员名` → 由发送层 `runNamedTask` 拦截（点名执行，不经策略、不总结）。

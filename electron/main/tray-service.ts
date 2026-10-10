@@ -14,7 +14,7 @@
  *    `app.setPath('userData', …-dev)` 写在 index.ts 模块体里，导入求值早于它。
  *    因此延迟到 init()（app ready 之后）。
  */
-import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, webContents } from 'electron'
 import type { NativeImage, MenuItemConstructorOptions } from 'electron'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -43,8 +43,13 @@ class TrayService {
   private loaded = false
   /** 正在退出应用（before-quit / 托盘菜单退出）：此时不再拦截窗口关闭 */
   private quitting = false
-  /** 渲染层上报的后台任务（悬停提示与菜单的数据源） */
-  private items: TrayTaskItem[] = []
+  /**
+   * 各窗口上报的后台任务（悬停提示与菜单的数据源）。
+   * ⚠ 必须按**上报窗口**分开存：主窗口与各文件窗口各有独立的渲染进程与任务登记表，
+   *    若只存最后一份（旧实现），多窗口同时有任务时提示会在两份列表之间来回跳动。
+   *    key = webContents id（窗口销毁后由 updateStatus/refresh 清理）。
+   */
+  private statusByWindow = new Map<number, { items: TrayTaskItem[]; label: string }>()
   private locale = 'zh'
   /** 是否已提示过「已折叠到托管区」（只在首次折叠时提示，避免每次关窗都弹） */
   private hiddenToastShown = false
@@ -69,8 +74,8 @@ class TrayService {
       return { closeToTray: this.closeToTray }
     })
 
-    // 渲染层上报后台任务摘要（高频，用 send；主进程只做展示）
-    ipcMain.on('tray:status', (_e, payload?: TrayStatusPayload) => this.updateStatus(payload))
+    // 渲染层上报后台任务摘要（高频，用 send；主进程按窗口汇总后展示）
+    ipcMain.on('tray:status', (event, payload?: TrayStatusPayload) => this.updateStatus(event.sender.id, payload))
 
     ipcMain.handle('tray:show-window', () => {
       this.showMainWindow()
@@ -162,6 +167,36 @@ class TrayService {
       win.hide()
     } catch (e) {
       console.warn('[tray] 隐藏主窗口失败:', e)
+    }
+    this.notifyHidden()
+  }
+
+  /**
+   * 文件（子）窗口关闭时调用：该窗口还有后台任务、且已开启「折叠到托管区」→ 拦截关闭改为隐藏。
+   * 任务继续在后台跑，托盘右键菜单里点对应任务（或「隐藏的窗口」里的条目）即可唤回该窗口。
+   * 没有后台任务时返回 false（正常关闭并销毁），避免窗口「消失且唤不回」。
+   */
+  shouldHideFileWindowOnClose(win: BrowserWindow): boolean {
+    this.load()
+    if (!this.closeToTray || this.quitting) return false
+    if (!this.hasRunningTasks(win)) return false
+    if (!this.tray && !this.createTray()) return false
+    return true
+  }
+
+  /** 该窗口是否有上报中的后台任务 */
+  hasRunningTasks(win: BrowserWindow): boolean {
+    if (!win || win.isDestroyed()) return false
+    const id = win.webContents?.id
+    return id != null && (this.statusByWindow.get(id)?.items.length || 0) > 0
+  }
+
+  /** 隐藏子窗口并给出「已折叠到托管区」提示（托盘可唤回） */
+  hideChildWindow(win: BrowserWindow): void {
+    try {
+      win.hide()
+    } catch (e) {
+      console.warn('[tray] 隐藏子窗口失败:', e)
     }
     this.notifyHidden()
   }
@@ -258,24 +293,82 @@ class TrayService {
 
   /** 悬停提示：任务数 + 每个任务的进度 / 预计剩余时间（控制在系统提示长度上限内） */
   private tooltipText(): string {
-    return buildTrayTooltip(this.items, this.locale)
+    return buildTrayTooltip(this.allItems(), this.locale)
   }
 
-  /** 右键菜单（系统原生菜单）：显示窗口 / 设置 / 后台任务列表 / 退出 */
+  /** 所有窗口上报的任务（按窗口登记顺序合并） */
+  private allItems(): TrayTaskItem[] {
+    const out: TrayTaskItem[] = []
+    for (const g of this.statusByWindow.values()) out.push(...g.items)
+    return out
+  }
+
+  /** 唤回并聚焦某个窗口（托盘菜单点任务条目）；窗口已不在时退回主窗口 */
+  private focusWindow(senderId: number): void {
+    const wc = webContents.fromId(senderId)
+    const win = wc ? BrowserWindow.fromWebContents(wc) : null
+    if (win && !win.isDestroyed()) {
+      this.showWindow(win)
+      return
+    }
+    this.showMainWindow()
+  }
+
+  private showWindow(win: BrowserWindow): void {
+    try {
+      if (win.isMinimized()) win.restore()
+      if (!win.isVisible()) win.show()
+      win.focus()
+    } catch (e) {
+      console.warn('[tray] 唤回窗口失败:', e)
+    }
+  }
+
+  /** 已隐藏的窗口（折叠到托管区的子窗口 / 独立窗口）：主窗口另有「显示主窗口」条目 */
+  private listHiddenWindows(): { win: BrowserWindow; title: string }[] {
+    const main = this.getMainWindow?.() || null
+    const out: { win: BrowserWindow; title: string }[] = []
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || w === main || w.isVisible()) continue
+      const title = String(w.getTitle() || '').trim()
+      if (title) out.push({ win: w, title })
+    }
+    return out
+  }
+
+  /** 右键菜单（系统原生菜单）：显示窗口 / 设置 / 后台任务（可点击唤回所属窗口）/ 隐藏的窗口 / 退出 */
   private buildMenu(): Menu {
     const zh = this.locale !== 'en'
     const template: MenuItemConstructorOptions[] = [
       { label: zh ? '显示主窗口' : 'Show Main Window', click: () => this.showMainWindow() },
       { label: zh ? '设置…' : 'Settings…', click: () => this.openSettings() },
     ]
-    if (this.items.length) {
+    const groups = [...this.statusByWindow.entries()].filter(([, g]) => g.items.length > 0)
+    const total = groups.reduce((n, [, g]) => n + g.items.length, 0)
+    if (total) {
       template.push({ type: 'separator' })
       template.push({
-        label: zh ? `后台任务（${this.items.length}）` : `Background tasks (${this.items.length})`,
+        label: zh ? `后台任务（${total}）` : `Background tasks (${total})`,
         enabled: false,
       })
-      for (const it of this.items.slice(0, 12)) {
-        template.push({ label: `   ${trayItemLine(it)}`, enabled: false })
+      // 多窗口同时有任务时按窗口分组（组标题=窗口标题），点击任务即唤回它所在的窗口
+      const grouped = groups.length > 1
+      for (const [senderId, g] of groups) {
+        if (grouped) template.push({ label: ` ${g.label}`, enabled: false })
+        for (const it of g.items.slice(0, 12)) {
+          template.push({
+            label: `${grouped ? '   ' : ' '}${trayItemLine(it)}`,
+            click: () => this.focusWindow(senderId),
+          })
+        }
+      }
+    }
+    const hidden = this.listHiddenWindows()
+    if (hidden.length) {
+      template.push({ type: 'separator' })
+      template.push({ label: zh ? '隐藏的窗口' : 'Hidden windows', enabled: false })
+      for (const h of hidden) {
+        template.push({ label: ` ${h.title}`, click: () => this.showWindow(h.win) })
       }
     }
     template.push({ type: 'separator' })
@@ -289,7 +382,7 @@ class TrayService {
     this.hiddenToastShown = true
     if (process.platform !== 'win32' || !this.tray) return
     const zh = this.locale !== 'en'
-    const n = this.items.length
+    const n = this.allItems().length
     try {
       this.tray.displayBalloon({
         title: zh ? 'AI-KM 已折叠到托管区' : 'AI-KM is in the tray',
@@ -304,16 +397,35 @@ class TrayService {
 
   // ==================== 状态上报 ====================
 
-  updateStatus(payload?: TrayStatusPayload): void {
+  /**
+   * 渲染层上报：按上报窗口分别记录（见 statusByWindow 注释）。
+   * 空列表 = 该窗口已无后台任务 → 删除登记（窗口关闭拦截也随之失效）。
+   */
+  updateStatus(senderId: number, payload?: TrayStatusPayload): void {
     const raw = Array.isArray(payload?.items) ? payload!.items! : []
-    this.items = raw
+    const items = raw
       .filter((it) => !!it && typeof it.name === 'string' && it.name.trim() !== '')
       .slice(0, 12)
       .map((it) => ({
         name: String(it.name).slice(0, 40),
         detail: it.detail ? String(it.detail).slice(0, 32) : undefined,
       }))
+    if (items.length) {
+      // 分组标题用窗口自身标题（文件窗口是「文件名 - 视图」，主窗口是软件标题）
+      const wc = webContents.fromId(senderId)
+      const win = wc ? BrowserWindow.fromWebContents(wc) : null
+      const label = String(win?.getTitle() || '').trim()
+      this.statusByWindow.set(senderId, { items, label: label || (this.locale === 'en' ? 'Window' : '窗口') })
+    } else {
+      this.statusByWindow.delete(senderId)
+    }
     if (payload?.locale === 'zh' || payload?.locale === 'en') this.locale = payload.locale
+    this.refresh()
+  }
+
+  /** 窗口销毁后清掉它的登记（避免托盘里残留已关闭窗口的任务） */
+  forgetWindow(senderId: number): void {
+    if (!this.statusByWindow.delete(senderId)) return
     this.refresh()
   }
 }

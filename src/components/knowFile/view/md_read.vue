@@ -15,15 +15,17 @@
   import { preprocessMath as sharedPreprocessMath } from '@/lib/markdown/render'
   import MermaidViewer from '@/components/MermaidViewer.vue'
   import WordExportDialog from '@/components/export/WordExportDialog.vue'
-  import { typesetRoot, scheduleTypeset, installTypesetCopyFix } from '@/lib/typeset'
+  import { typesetRoot, revertTypeset, scheduleTypeset, installTypesetCopyFix } from '@/lib/typeset'
   import { inlineLocalImagesAsDataUrls } from '@/lib/export/download'
   import { allowLocalFileLinks, applyMdLinkRule, normalizeAnchorText } from '@/lib/markdown/mdLinkPolicy'
+  import { openMdFileLink, resolveMdLinkTarget } from '@/lib/knowFile/mdLinkOpen'
   import { readImageAsDataUrl } from '@/lib/export/docx'
   import PdfViewer from '@/components/knowFile/view/PdfViewer.vue'
   import { defineAsyncComponent } from 'vue'
   import DocTocPanel from '@/components/knowFile/view/DocTocPanel.vue'
   import { loadDocTocWidth, saveDocTocWidth, loadDocTocOpen, saveDocTocOpen, flattenTocTree, DOC_TOC_MIN_WIDTH, DOC_TOC_MAX_WIDTH } from '@/lib/markdown/toc'
   import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
+  import { saveTextFile, MD_FILTERS } from '@/lib/settingsData'
   import { isDrawioFile as detectDrawioFile } from '@/shared/drawioFile'
   // 智能操作：与当前 md / Word 文档对话（右侧面板，懒加载）
   const DocChatPanel = defineAsyncComponent(() => import('@/components/knowFile/view/DocChatPanel.vue'))
@@ -160,6 +162,9 @@
   const showRenderingState = computed(() => {
     if (!isTextDoc.value) return false
     if (isRendering.value || props.loading) return true
+    // 宿主显式告知「加载已结束」（loading === false，如 FileWindow 读完磁盘后）时不再用宽限期兜底：
+    // 空文件直接落到空内容提示，而不是先闪一句「正在渲染…」
+    if (props.loading === false) return false
     return waitingContent.value && !prep.value
   })
 
@@ -178,8 +183,9 @@
   }
 
   // 内容/路径变化：文本类文档还没拿到内容（且尚未渲染出东西）→ 视为加载中
-  watch(() => [data.value.content, data.value.path, prep.value] as const, () => {
-    scheduleContentWait(isTextDoc.value && !data.value.content && !prep.value)
+  // props.loading === false 表示宿主已明确告知加载结束（空文件就是空文件）→ 不再启动等待计时
+  watch(() => [data.value.content, data.value.path, prep.value, props.loading] as const, () => {
+    scheduleContentWait(props.loading !== false && isTextDoc.value && !data.value.content && !prep.value)
   }, { immediate: true })
   // 是否显示目录（用 const：v-model 绑定 ref 时编译器会写入 .value）
   // 初始值跟其它视图共享：在任一处打开目录后，切到别的视图也会打开
@@ -232,11 +238,10 @@
   )
 
   let metaVisible = ref(false)
-  let metaForm = ref([] as any)
+  // 标签 / 属性面板（只读展示，不提供编辑）
+  let metaEntries = ref([] as { key: string; value: string; tags?: string[] }[])
   let isLoadingWord = ref(false) // Word文档加载状态
   let wordError = ref('') // Word文档错误信息
-
-
 
   ensureMermaidInit()
 
@@ -598,18 +603,20 @@
       await nextTick()
       await renderMermaidDiagrams(document.querySelector<HTMLElement>('.prep'))
       await enhancePythonBlocks(document.querySelector<HTMLElement>('.prep'))
-      // 只读态两端对齐排版（K-P 断行 + 逐行拉伸）；再延后一次兜住 MathJax / 图片尺寸变化
+      // 只读态两端对齐排版（仅 K-P 模式；默认模式走 CSS text-align: justify）
       typesetPrepared()
       observeTypeset()
-      scheduleTypeset(prepRef.value, {}, 400)
+      if (kpAlign.value) scheduleTypeset(prepRef.value, {}, 400)
       // 初始化 TOC 滚动联动（给标题标记序号，与 tocFlat 的 id 对位）
       setupScrollSpy()
-      // 内容更新后清除旧的搜索高亮
+      // 内容更新后：先清掉旧搜索高亮，再按当前关键词重搜
+      // （搜索面板开着时，切文件 / 正文被外部改动后结果与高亮跟着刷新）
       clearSearchMarks()
       searchMatches = []
       searchMatchCount.value = 0
       searchIndex.value = -1
       searchResults.value = []
+      if (searchVisible.value && searchQuery.value.trim()) doSearch()
     }
   }
   
@@ -695,49 +702,11 @@
     const link = target.closest('a.md-file-link') as HTMLAnchorElement | null
     if (!link) return
 
-    let filePath = link.getAttribute('data-path')
-    if (!filePath) return
-
     e.preventDefault()
     e.stopPropagation()
 
-    // 解码可能被 markdown-it URL 编码的路径（如 %20 → 空格）
-    try {
-      filePath = decodeURI(filePath)
-    } catch {
-      // decodeURI 失败时尝试 decodeURIComponent
-      try { filePath = decodeURIComponent(filePath) } catch {}
-    }
-
-    // 打开前先确认目标存在（远程只读模式跳过校验）：
-    // 否则会弹出子窗口后只显示 `Error reading file: ENOENT`
-    if (!props.isRemote) {
-      try {
-        const info = await (window as any).ipcRenderer?.invoke?.('getInf', filePath)
-        if (!info) {
-          ElMessage.warning(store.locales === 'zh' ? `目标文件不存在：${filePath}` : `File not found: ${filePath}`)
-          return
-        }
-      } catch (err) {
-        // 校验失败时按原逻辑继续打开
-        console.warn('[md_read] 链接目标校验失败:', err)
-      }
-    }
-
-    // 如果文件已打开，直接切换到对应标签页，避免重复读取
-    const existingIndex = store.data.findIndex((d: any) => d.path === filePath)
-    if (existingIndex >= 0) {
-      store.index = existingIndex
-      return
-    }
-
-    // 未打开时调用 store.openFileByMode 打开（按文件操作模式；知识库 .kb 跳转知识处理）
-    await store.openFileByMode({
-      path: filePath,
-      label: filePath.replace(/\\/g, '/').split('/').pop() || 'file',
-      type: 'file',
-      extension: filePath.substring(filePath.lastIndexOf('.'))
-    })
+    // 打开目标文件（已打开则切到该标签）：与导图 / 演示视图共用同一实现
+    await openMdFileLink(resolveMdLinkTarget(link, mdBasePath), { isRemote: props.isRemote })
   }
   
   //当点击保存后刷新本页
@@ -838,24 +807,34 @@
     wordExportVisible.value = true
   }
 
-  const exportToMarkdown = function() {
-    // Word 文档：导出主进程转换好的 Markdown（方便 Word → .md 转化）；
-    // Markdown 文档：导出当前内容副本
+  // 导出 Markdown（Word 文档导出主进程转换好的 Markdown，方便 Word → .md 转化；
+  // Markdown 文档导出当前内容副本）：桌面版走原生「另存为」并默认定位到当前文件所在目录，
+  // 浏览器 / LAN 模式回退为直接下载——与设置页的「导出 Markdown」共用 settingsData 的文件 IO
+  const exportToMarkdown = async function() {
     const mdContent = data.value.isWord ? wordContent.value : data.value.content
     if (!mdContent) return
+    const zh = store.locales === 'zh'
     let title = ''
     if (data.value.path) {
       title = data.value.path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '文档'
     } else {
       title = '文档'
     }
-    const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${title}.md`
-    a.click()
-    URL.revokeObjectURL(url)
+    const fileName = `${title}.md`
+    // remote:// 等远程标识没有本地目录，留空即交给系统对话框决定初始位置
+    const curPath = (data.value.path || '').replace(/\\/g, '/')
+    const isLocalAbs = /^(?:[a-zA-Z]:\/|\\\\|\/)/.test(curPath)
+    const lastSlash = isLocalAbs ? curPath.lastIndexOf('/') : -1
+    const baseDir = lastSlash >= 0 ? curPath.substring(0, lastSlash + 1) : ''
+    try {
+      const saved = await saveTextFile(`${baseDir}${fileName}`, mdContent, 'text/markdown;charset=utf-8', MD_FILTERS, zh)
+      if (saved === null) return // 用户取消
+      const where = saved || fileName
+      ElMessage.success(zh ? `已导出 Markdown：${where}` : `Markdown exported: ${where}`)
+    } catch (err) {
+      console.error('导出 Markdown 失败:', err)
+      ElMessage.error(zh ? '导出 Markdown 失败' : 'Markdown export failed')
+    }
   }
 
   // 导出当前文档为 PDF（隐藏窗口渲染 HTML → printToPDF）
@@ -917,11 +896,34 @@ ${inlinedHtml}
     }
   }
 
-  const openMetaEditor = async function(e?: any){
-    if (e && e.stopPropagation) e.stopPropagation()
-    const path = data.value.path
-    console.log('md_read.openMetaEditor path=', path)
-    if (!path) return
+  /** frontmatter 里的数组值可能以 YAML 列表、JSON 数组或「逗号 / 空格分隔」字符串形式存在 */
+  const parseTagList = (raw: string): string[] => {
+    const t = (raw || '').trim()
+    if (!t) return []
+    if (t.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(t.replace(/'/g, '"'))
+        if (Array.isArray(parsed)) return parsed.map((v) => String(v).trim()).filter(Boolean)
+      } catch {
+        // 非标准 JSON：下面按分隔符拆分
+      }
+    }
+    return t
+      .replace(/^\[|\]$/g, '')
+      .split(/[,，;；\s]+/)
+      .map((s) => s.replace(/^["']|["']$/g, '').trim())
+      .filter(Boolean)
+  }
+
+  /**
+   * 读取「标签 / 属性」面板数据：优先主进程 getConfig（只读文件头 frontmatter），
+   * 取不到再回退读文件解析（宿主传入的正文已剥离 frontmatter 时也能显示）。
+   * 非文本文件（图片 / PDF / 音视频 / 图表…）没有 frontmatter：直接清空，避免把大文件整读进来。
+   */
+  let metaSeq = 0
+  const loadMetaEntries = async function(path: string){
+    const seq = ++metaSeq // 快速切换文件时丢弃过期结果，避免旧文件的标签覆盖新文件
+    if (!path || !isTextDoc.value) { metaEntries.value = []; return }
     try {
       let cfg = await window.ipcRenderer.invoke('getConfig', path)
       // 如果 getConfig 未返回有效元数据，尝试从文件 frontmatter 回退解析
@@ -933,15 +935,15 @@ ${inlinedHtml}
             try {
               const parsed = yaml.load(fmMatch[1])
               if (parsed && typeof parsed === 'object') cfg = parsed
-            } catch (e) {
-              console.warn('yaml parse failed', e)
+            } catch (err) {
+              console.warn('yaml parse failed', err)
             }
           }
-        } catch (e) {
+        } catch (err) {
         }
       }
       
-      const entries: any[] = []
+      const entries: { key: string; value: string; tags?: string[] }[] = []
       if (cfg && typeof cfg === 'object') {
         for (const [k, v] of Object.entries(cfg)) {
           let valueStr = ''
@@ -960,53 +962,42 @@ ${inlinedHtml}
         }
       }
       
+      // 标签行置顶（其余字段按原顺序），标签值解析成一个个标签
+      const tagIdx = entries.findIndex((e2) => e2.key === 'tags' || e2.key === '标签')
+      if (tagIdx > -1) {
+        const [tagEntry] = entries.splice(tagIdx, 1)
+        const tags = parseTagList(tagEntry.value)
+        if (tags.length) tagEntry.tags = tags
+        entries.unshift(tagEntry)
+      }
       const idx = entries.findIndex((e2: any) => e2.key === 'summary')
       if (idx > -1) entries.unshift(entries.splice(idx, 1)[0])
       
-      // 确保使用响应式方式更新
-      metaForm.value = entries
-      
+      if (seq === metaSeq) metaEntries.value = entries
     } catch (err) {
-      metaForm.value = []
+      if (seq === metaSeq) metaEntries.value = []
     }
-    // 左侧栏互斥：打开标签编辑时关闭目录 / 搜索
+  }
+
+  // 切换文件 / 内容刷新时同步标签面板（面板打开时才重新读）：
+  // 目录随正文渲染刷新，标签面板若不同步就会停留在上一个文件。防抖避免连续编辑时反复读盘。
+  let metaSyncTimer: any = 0
+  watch(() => [data.value.path, data.value.content] as const, () => {
+    if (!metaVisible.value) return
+    if (metaSyncTimer) clearTimeout(metaSyncTimer)
+    metaSyncTimer = setTimeout(() => { void loadMetaEntries(data.value.path) }, 200)
+  })
+
+  // 打开标签 / 属性面板（只读展示 frontmatter，编辑请用其它视图或直接改文件）
+  const openMetaPanel = async function(e?: any){
+    if (e && e.stopPropagation) e.stopPropagation()
+    const path = data.value.path
+    if (!path) return
+    await loadMetaEntries(path)
+    // 左侧栏互斥：打开标签面板时关闭目录 / 搜索
     iftoc.value = false
     searchVisible.value = false
     metaVisible.value = true
-  }
-
-  // 保存元数据（写回 frontmatter）
-  const saveMeta = async function() {
-    const path = data.value.path
-    if (!path) return
-    try {
-      const obj: any = {}
-      for (const entry of metaForm.value) {
-        if (!entry || !entry.key) continue
-        const key = String(entry.key)
-        let val: any = entry.value
-        try {
-          const parsed = JSON.parse(entry.value)
-          val = parsed
-        } catch (e) {
-          val = entry.value
-        }
-        obj[key] = val
-      }
-      const ok = await window.ipcRenderer.invoke('saveFileMetadata', path, obj)
-      if (ok) {
-        metaVisible.value = false
-        // 尝试刷新当前渲染（如果内容来自磁盘则重新读取）
-        if (!props.content && props.path) {
-          const content = await window.ipcRenderer.invoke('readFile', props.path)
-          await RenderMarkdown(content)
-        } else {
-          await init()
-        }
-      }
-    } catch (e) {
-      console.error('保存元数据失败', e)
-    }
   }
 
   const openToc = async function(){
@@ -1092,28 +1083,46 @@ ${inlinedHtml}
   const searchIndex = ref(-1)
   const prepRef = ref<HTMLElement | null>(null)
 
-  /** 排版正文（只读态）；已在排版中的异常不影响阅读 */
+  /**
+   * 对齐模式（设置 → 通用 → 界面 → 文字对齐）：
+   *  - 'justify'（默认）：交给 CSS `text-align: justify`，不跑排版引擎；
+   *  - 'kp'：K-P 最优断行 + 逐行拉伸的精细排版（只读态专用）。
+   * 两种模式互斥：切到默认模式时会把已逐行包裹的 DOM 还原（revertTypeset）。
+   */
+  const kpAlign = computed(() => store.UI.textAlignMode === 'kp')
+
+  /** 按当前对齐模式准备正文（只读态）；排版异常不影响阅读 */
   const typesetPrepared = () => {
     const el = prepRef.value
     if (!el) return
     try {
-      typesetRoot(el)
+      if (kpAlign.value) typesetRoot(el)
+      else revertTypeset(el)
     } catch (e) {
       console.warn('[md_read] 排版失败：', e)
     }
   }
-  /** 正文宽度变化（目录 / 对话面板 / 窗口）→ 防抖重排 */
+  /** 正文宽度变化（目录 / 对话面板 / 窗口）→ 防抖重排（仅 K-P 模式需要） */
   let typesetObserver: ResizeObserver | null = null
   let disposeCopyFix: (() => void) | null = null
   const observeTypeset = () => {
     const el = prepRef.value
-    if (!el || typeof ResizeObserver === 'undefined') return
     disposeCopyFix?.()
-    disposeCopyFix = installTypesetCopyFix(el)
+    disposeCopyFix = null
     typesetObserver?.disconnect()
+    typesetObserver = null
+    if (!el || typeof ResizeObserver === 'undefined' || !kpAlign.value) return
+    disposeCopyFix = installTypesetCopyFix(el)
     typesetObserver = new ResizeObserver(() => scheduleTypeset(prepRef.value, {}, 120))
     typesetObserver.observe(el)
   }
+  // 切换对齐模式：重新准备（K-P → 排版；默认 → 还原 DOM 并清掉观察器）
+  watch(kpAlign, () => {
+    nextTick(() => {
+      typesetPrepared()
+      observeTypeset()
+    })
+  })
   onMounted(() => {
     nextTick(observeTypeset)
   })
@@ -1220,8 +1229,8 @@ ${inlinedHtml}
 
     searchResults.value = buildSearchResults(searchMatches)
     searchMatchCount.value = searchMatches.length
-    // 高亮是包在行内的 <mark>，宽度会微变 → 重排一次（防抖）
-    scheduleTypeset(prepRef.value, {}, 150)
+    // 高亮是包在行内的 <mark>，宽度会微变 → 重排一次（防抖，仅 K-P 模式）
+    if (kpAlign.value) scheduleTypeset(prepRef.value, {}, 150)
     if (searchMatches.length > 0) {
       gotoSearchMatch(1)
     } else {
@@ -1447,7 +1456,7 @@ ${inlinedHtml}
   }
   const toggleMeta = () => {
     if (metaVisible.value) { metaVisible.value = false; return }
-    openMetaEditor()
+    openMetaPanel()
   }
   const toggleSearch = () => {
     if (searchVisible.value) { closeSearch(); return }
@@ -1480,7 +1489,7 @@ ${inlinedHtml}
   const chooseExport = async (kind: 'md' | 'word' | 'pdf') => {
     exportMenuOpen.value = false
     document.removeEventListener('click', closeExportMenu)
-    if (kind === 'md') exportToMarkdown()
+    if (kind === 'md') await exportToMarkdown()
     else if (kind === 'word') await exportToWord()
     else await exportToPdf()
   }
@@ -1657,6 +1666,7 @@ ${inlinedHtml}
     stopTtsPoll()
     document.removeEventListener('click', closeExportMenu)
     if (fileChangedTipTimer) clearTimeout(fileChangedTipTimer)
+    if (metaSyncTimer) clearTimeout(metaSyncTimer)
     onTocDragEnd()
     onChatDragEnd()
     // 仅当全局兜底仍是本实例注册的才清理（同窗口可能存在多个 md_read 实例）
@@ -1688,31 +1698,25 @@ ${inlinedHtml}
       @select="scrollToToc"
     />
 
-    <!-- 编辑标签 / 全文搜索：沿用原左侧栏（与目录互斥） -->
+    <!-- 标签 / 属性（只读） / 全文搜索：沿用原左侧栏（与目录互斥） -->
     <div class="nav resize" v-if="metaVisible || searchVisible" :style="{ width: tocNavWidth + 'px' }">
       <div class="toc-resizer" @mousedown.prevent.stop="startTocDrag" :title="store.locales==='zh' ? '拖动调整宽度' : 'Drag to resize'"></div>
 
-      <!-- 编辑标签 -->
+      <!-- 标签 / 属性（只读展示） -->
       <div v-if="metaVisible" class="left-body">
         <div class="left-panel-head">
-          <span class="left-panel-title"><i class="fa fa-tags"></i> {{ store.locales==='zh' ? '编辑标签' : 'Edit Tags' }}</span>
+          <span class="left-panel-title"><i class="fa fa-tags"></i> {{ store.locales==='zh' ? '标签与属性' : 'Tags & Properties' }}</span>
           <button class="left-panel-close" @click="metaVisible=false" :title="store.locales==='zh' ? '关闭' : 'Close'"><i class="fa fa-times"></i></button>
         </div>
         <div class="left-scroll scoll meta-scroll">
-          <div v-if="metaForm.length===0" class="meta-editor-empty">{{store.locales==='zh'?'暂无元数据':'No metadata'}}</div>
-          <div v-for="(entry, idx) in metaForm" :key="idx" class="meta-card">
-            <div class="meta-card-top">
-              <input v-model="entry.key" class="meta-card-key" :placeholder="store.locales==='zh' ? '字段名 / key' : 'Field / key'" />
-              <button class="meta-card-del" @click="metaForm.splice(idx,1)" :title="store.locales==='zh' ? '删除该字段' : 'Delete field'"><i class="fa fa-trash"></i></button>
+          <div v-if="metaEntries.length===0" class="meta-view-empty">{{store.locales==='zh'?'暂无标签与属性':'No tags or properties'}}</div>
+          <div v-for="(entry, idx) in metaEntries" :key="idx" class="meta-row">
+            <div class="meta-row-key">{{ entry.key }}</div>
+            <div v-if="entry.tags" class="meta-row-tags">
+              <span v-for="(tag, ti) in entry.tags" :key="ti" class="meta-tag">{{ tag }}</span>
             </div>
-            <textarea v-model="entry.value" class="meta-card-value scoll" rows="3" :placeholder="store.locales==='zh' ? '内容 / value（可粘贴 JSON）' : 'Value (JSON ok)'"></textarea>
+            <div v-else class="meta-row-value">{{ entry.value }}</div>
           </div>
-        </div>
-        <div class="left-panel-actions">
-          <button class="meta-editor-btn" @click="metaForm.push({key:'',value:''})"><i class="fa fa-plus"></i> {{store.locales==='zh'?'添加字段':'Add field'}}</button>
-          <div class="meta-editor-spacer"></div>
-          <button class="meta-editor-btn" @click="metaVisible=false">{{store.locales==='zh'?'取消':'Cancel'}}</button>
-          <button class="meta-editor-btn meta-editor-btn-primary" @click="saveMeta"><i class="fa fa-check"></i> {{store.locales==='zh'?'保存':'Save'}}</button>
         </div>
       </div>
 
@@ -1746,7 +1750,7 @@ ${inlinedHtml}
       </div>
     </div>
     
-    <div class="content" :class="{ 'content-full': !showStatusbar }" @contextmenu.prevent="showContextMenu">
+    <div class="content" :class="{ 'content-full': !showStatusbar, 'align-justify': !kpAlign }" @contextmenu.prevent="showContextMenu">
       <!-- 右键菜单 -->
       <div v-if="contextMenu.visible && data && (data.isMd || data.isWord)" 
            class="context-menu" 
@@ -1856,8 +1860,8 @@ ${inlinedHtml}
       <button v-if="toc.length > 0" class="statusbar-btn" :class="{ active: iftoc }" @click="toggleToc" :title="store.locales==='zh' ? (iftoc ? '关闭目录' : '打开目录') : (iftoc ? 'Close TOC' : 'Open TOC')">
         <i class="fa fa-bars"></i>
       </button>
-      <!-- 编辑标签（本机 md，左栏） -->
-      <button v-if="data.isMd && data.path && !data.isRemote" class="statusbar-btn" :class="{ active: metaVisible }" @click="toggleMeta" :title="store.locales==='zh' ? (metaVisible ? '关闭标签编辑' : '编辑标签') : (metaVisible ? 'Close tags' : 'Edit tags')">
+      <!-- 标签与属性（只读展示；本机 md，左栏） -->
+      <button v-if="data.isMd && data.path && !data.isRemote" class="statusbar-btn" :class="{ active: metaVisible }" @click="toggleMeta" :title="store.locales==='zh' ? (metaVisible ? '关闭标签与属性' : '查看标签与属性') : (metaVisible ? 'Close tags & properties' : 'View tags & properties')">
         <i class="fa fa-tags"></i>
       </button>
       <!-- 全文搜索开关 -->
@@ -1937,7 +1941,6 @@ ${inlinedHtml}
   <WordExportDialog v-model="wordExportVisible" :markdown="wordExportMarkdown" :title="wordExportTitle"
                     :default-dir="wordExportDir" :base-dir="wordExportDir" :strip-frontmatter="!data.isWord" />
 
-  <!-- 编辑标签 已移入左侧栏 -->
 </template>
 
 <style scoped>
@@ -2203,6 +2206,14 @@ ${inlinedHtml}
   .Column::-webkit-scrollbar {
     display: none;
   }
+  /* 对齐模式（设置 → 界面 → 文字对齐）：默认用浏览器原生两端对齐。
+     K-P 模式下逐行包裹已把每行撑满，不需要也不应再叠加 text-align。 */
+  .content.align-justify :deep(.prep p),
+  .content.align-justify :deep(.prep li),
+  .content.align-justify :deep(.prep blockquote) {
+    text-align: justify;
+    text-justify: inter-ideograph;
+  }
   .prep{
     position: absolute;
     float: left;
@@ -2356,14 +2367,6 @@ ${inlinedHtml}
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-  }
-  .left-panel-actions{
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
-    border-top: 1px solid var(--borderColor);
-    flex-shrink: 0;
   }
   .info{
     padding:5px;
@@ -2598,133 +2601,46 @@ ${inlinedHtml}
     border-color: 1px solid var(--borderColor);
     margin: 0px
   }
-  .meta-editor-body{
-    padding: 5px;
-    max-height: 40vh;
-    overflow-y: auto;
-  }
-  .meta-editor-empty{
+  .meta-view-empty{
     color: var(--borderColor);
     margin-bottom: 8px;
     font-size: 13px;
   }
-  .meta-editor-row{
+  .meta-row{
+    margin-bottom: 10px;
+  }
+  .meta-row-key{
+    font-size: 12px;
+    color: var(--fontActiveColor);
+    margin-bottom: 3px;
+    word-break: break-all;
+  }
+  .meta-row-value{
+    font-size: 13px;
+    color: var(--fontColor);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .meta-row-tags{
     display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 4px;
+    flex-wrap: wrap;
+    gap: 4px;
   }
-  .meta-editor-key{
-    width: 20%;
-    min-width: 80px;
-    border: 1px solid var(--borderColor);
-    background: var(--backgroundColor);
+  .meta-tag{
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--menuColor);
     color: var(--fontColor);
-    padding: 4px 6px;
-    border-radius: 3px;
-    font-size: 13px;
-  }
-  .meta-editor-value{
-    flex: 1;
-    border: 1px solid var(--borderColor);
-    background: var(--backgroundColor);
-    color: var(--fontColor);
-    padding: 4px 6px;
-    border-radius: 3px;
-    font-size: 13px;
-    margin:0px
-  }
-  .meta-editor-del{
-    width: auto;
-    padding: 2px 8px;
-    background: none;
-    border: none;
-    color: var(--fontColor);
-    cursor: pointer;
-    font-size: 14px;
-  }
-  .meta-editor-del:hover{
-    color: #e74c3c;
+    word-break: break-all;
   }
   .meta-scroll{
     padding: 8px;
   }
-  .meta-card-top{
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 6px;
-  }
-  .meta-card-key{
-    flex: 1;
-    min-width: 0;
-    border: 1px solid var(--borderColor);
-    background: var(--backgroundColor);
-    color: var(--fontColor);
-    padding: 4px 6px;
-    border-radius: 4px;
-    font-size: 13px;
-    margin: 0;
-  }
-  .meta-card-del{
-    width: auto;
-    padding: 0 6px;
-    background: none;
-    border: none;
-    color: var(--fontColor);
-    cursor: pointer;
-    font-size: 13px;
-    flex-shrink: 0;
-  }
-  .meta-card-del:hover{
-    color: #e74c3c;
-  }
-  .meta-card-value{
-    width: 100%;
-    box-sizing: border-box;
-    border: 1px solid var(--borderColor);
-    background: var(--backgroundColor);
-    color: var(--fontColor);
-    padding: 5px;
-    border-radius: 4px;
-    font-size: 13px;
-    resize: vertical;
-    font-family: inherit;
-    line-height: 1.5;
-    margin: 0;
-  }
-  .meta-editor-actions{
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    margin-top: 5px;
-  }
-  .meta-editor-spacer{
-    flex: 1;
-  }
-  .meta-editor-btn{
-    width: auto;
-    padding: 5px;
-    border: 1px solid var(--borderColor);
-    border-radius: 3px;
-    background: var(--backgroundColor);
-    color: var(--fontColor);
-    cursor: pointer;
-    font-size: 13px;
-    white-space: nowrap;
-  }
-  .meta-editor-btn:hover{
-    opacity: 0.85;
-  }
-  .meta-editor-btn-primary{
-    background: var(--menuColor);
-    font-weight: 600;
-  }
 
-  /* 右键菜单样式统一在 explorer.vue 中定义 */
-  .context-menu {
-    min-width: 160px;
-  }
+  /* 右键菜单样式统一在 style.css（.context-menu + 知识管理紧凑变体）中定义 */
   .active{
     background-color: var(--menuColor);
   }

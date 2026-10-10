@@ -1,5 +1,22 @@
 <template>
-  <div class="ai-chat-container">
+  <div
+    class="ai-chat-container"
+    :class="{ 'drop-files-active': dropFilesActive }"
+    @dragenter="onHomeDragEnter"
+    @dragover="onHomeDragOver"
+    @dragleave="onHomeDragLeave"
+    @drop="onHomeDrop"
+  >
+    <!-- 拖入文件提示遮罩（桌面端与网页端一致：松开即加入待发送附件 / 知识库） -->
+    <div v-if="dropFilesActive" class="drop-files-hint">
+      <div class="drop-files-hint-card">
+        <i class="fa fa-cloud-upload"></i>
+        <span>{{ store.locales == 'zh' ? '松开即可添加文件 / 图片' : 'Drop to attach files / images' }}</span>
+        <span class="drop-files-hint-sub">{{ currentChat.mode === 'retrieval'
+          ? (store.locales == 'zh' ? '知识库模式：.kb 将作为知识库关联' : 'KB mode: .kb files become the knowledge base')
+          : (store.locales == 'zh' ? '支持图片与 md / docx / pdf / txt / xlsx 等文档' : 'Images and md / docx / pdf / txt / xlsx documents') }}</span>
+      </div>
+    </div>
     <!-- 聊天列表侧边栏（收起时用宽度动画滑出，不再 v-show 直接消失） -->
     <div class="chat-sidebar" :class="{ collapsed: !showSidebar }">
       <!-- 顶部工具栏：搜索 + 新建聊天 -->
@@ -100,7 +117,7 @@
     </div>
     
     <!-- 主聊天区域 -->
-    <div class="chat-main" :class="{ 'sidebar-hidden': !showSidebar, 'empty-chat': isEmptyChat }"
+    <div class="chat-main" :class="{ 'sidebar-hidden': !showSidebar, 'empty-chat': isEmptyChat && !isTeamChat }"
       :style="{ '--composer-shift': composerShift + 'px' }">
       <!-- 聊天头部 -->
       <div class="chat-header" ref="chatHeaderRef" @wheel="handleHeaderWheel">
@@ -130,7 +147,7 @@
         </div>
         <!-- 集群模式：执行时用各成员预设里的模型，右上角模型选择不参与 → 隐藏 -->
         <select 
-          v-if="currentChat.mode !== 'swarm'"
+          v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
           v-model="llmTypeSelectModel"
           class="model-select"
           title="模型类型"
@@ -149,7 +166,7 @@
           </template>
         </select>
         <select 
-          v-if="currentChat.mode !== 'swarm'"
+          v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
           v-model="currentChat.config.model" 
           @click="refreshModels"
           class="model-select"
@@ -187,8 +204,11 @@
         @scroll="handleScroll"
         @contextmenu.prevent="onMessageContextMenu"
       >
+        <!-- Agent Teams（项目组）：独立消息栏；下方发送栏为共用控件 -->
+        <SwarmTeamStream v-if="isTeamChat" :chat="currentChat" />
         <!-- 合并的消息显示（集群模式的成员汇报同为 chat.messages 消息，共用同一渲染） -->
         <div 
+          v-if="!isTeamChat"
           v-for="(message, index) in currentChat.messages" 
           :key="index" 
           class="message-item"
@@ -592,7 +612,7 @@
       <!-- 输入区域 -->
       <div class="input-area">
         <!-- 空聊天引导提示（仅没有任何历史消息时显示，随输入卡片一起垂直居中） -->
-        <div v-if="isEmptyChat" class="empty-chat-hint">
+        <div v-if="isEmptyChat && !isTeamChat" class="empty-chat-hint">
           <div class="empty-chat-hint-title">{{ store.locales=='zh' ? '有什么可以帮你的？' : 'How can I help you today?' }}</div>
           <div class="empty-chat-hint-sub">{{ emptyChatHintSub }}</div>
         </div>
@@ -716,11 +736,11 @@
               <span
                 v-if="currentChat.mode === 'agent' || currentChat.mode === 'agent2'"
                 class="mode-linked-chip"
-                @click="showAgentPresetPicker = !showAgentPresetPicker"
+                @click="toggleAgentPicker"
                 :title="getAgentButtonTitle()"
               >
                 <i class="fa fa-user-circle"></i>
-                <span class="mode-linked-name">{{ currentChat.config.presetId ? getAgentPresetName() : (store.locales=='zh' ? '通用智能体' : 'General Agent') }}</span>
+                <span class="mode-linked-name">{{ currentAgentLabel }}</span>
               </span>
 
               <!-- PTC 模式：只读说明胶囊（无可配置项；步数跟随「设置 → 智能体预设 → 通用智能体」） -->
@@ -735,17 +755,28 @@
                 <span class="mode-linked-name">{{ store.locales=='zh' ? '程序化调用 run_code' : 'Programmatic (run_code)' }}</span>
               </span>
 
-              <!-- 集群模式：成员 + 运行方式 + 总结全部收进这一个入口（输入区只多一个控件） -->
+              <!-- 集群模式：仅成员选择入口（勾选顺序即发言顺序）——运行方式已拆成右侧独立下拉 -->
               <span
                 v-if="currentChat.mode === 'swarm'"
                 class="mode-linked-chip"
                 :class="{ empty: !(currentChat.config.swarmPresetIds || []).length, error: swarmMissingPresets.length > 0 }"
                 @click="showSwarmMemberPicker = !showSwarmMemberPicker; syncSwarmMembers()"
-                :title="store.locales=='zh' ? '集群设置：参与成员（勾选顺序即发言顺序）、运行方式与群主总结；各成员使用自己预设里的模型' : 'Swarm settings: members (tick order = speaking order), run mode and host summary; each member uses the model from its preset'"
+                :title="store.locales=='zh' ? '选择参与成员：勾选顺序即发言顺序（各成员使用自己预设里的模型）' : 'Pick members: tick order = speaking order (each member uses the model from its preset)'"
               >
                 <i class="fa fa-users"></i>
                 <span class="mode-linked-name">{{ swarmChipLabel }}</span>
               </span>
+
+              <!-- 集群运行方式：与成员选择分离的独立下拉（选项随对话保存） -->
+              <select
+                v-if="currentChat.mode === 'swarm'"
+                v-model="swarmRunMode"
+                class="mode-select swarm-mode-select"
+                :disabled="isAnyExecuting"
+                :title="swarmRunModeTitle"
+              >
+                <option v-for="m in swarmRunModeOptions" :key="m.value" :value="m.value" :title="m.desc">{{ m.label }}</option>
+              </select>
 
               <!-- 对话模式下拉：放在「已关联项」胶囊右侧（同一行：胶囊 → 下拉 → 检索策略） -->
               <select
@@ -758,7 +789,7 @@
                 <option v-for="m in modeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
               </select>
 
-              <!-- 集群设置浮层（成员多选 + 运行方式 + 群主总结 + 管理预设） -->
+              <!-- 集群成员浮层（成员多选 + 群主总结 + 管理预设；运行方式已移至输入区独立下拉） -->
               <div v-if="showSwarmMemberPicker" class="agent-preset-picker swarm-picker scoll" @click.stop>
                 <div v-if="!(store.agentPresets || []).length" class="preset-picker-empty">
                   {{ store.locales=='zh' ? '还没有预设：请先在「设置 → 预设」中创建' : 'No presets yet — create one in Settings → Presets' }}
@@ -785,32 +816,6 @@
                   </template>
                 </template>
 
-                <!-- 运行方式（单选） -->
-                <div class="shared-kb-divider"></div>
-                <div class="swarm-picker-caption">{{ store.locales=='zh' ? '运行方式' : 'Run mode' }}</div>
-                <div
-                  v-for="m in swarmRunModeOptions"
-                  :key="m.value"
-                  class="preset-picker-item"
-                  :class="{ active: swarmRunMode === m.value }"
-                  @click="swarmRunMode = m.value"
-                >
-                  <i class="fa" :class="swarmRunMode === m.value ? 'fa-dot-circle-o' : 'fa-circle-o'"></i>
-                  <span class="swarm-picker-name">{{ m.label }}</span>
-                </div>
-
-                <!-- 群主总结 -->
-                <div class="shared-kb-divider"></div>
-                <div
-                  class="preset-picker-item"
-                  :class="{ active: swarmHostSummary }"
-                  @click="toggleSwarmHostSummary"
-                  :title="store.locales=='zh' ? '任务结束后由群主汇总结果（默认关闭）' : 'Host summarizes at the end (default off)'"
-                >
-                  <i class="fa" :class="swarmHostSummary ? 'fa-check-square-o' : 'fa-square-o'"></i>
-                  <span class="swarm-picker-name">{{ store.locales=='zh' ? '结束由群主总结' : 'Host summary at end' }}</span>
-                </div>
-
                 <!-- 管理预设 -->
                 <div class="shared-kb-divider"></div>
                 <div class="preset-picker-item" @click="goManageAgentPresets()">
@@ -831,25 +836,22 @@
                 <option v-for="s in retrievalStrategyOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
               </select>
 
+              <!-- 网页端（LAN 共享）智能体模式：复用客户端胶囊 + 预设浮层，选项数据直接来自主机 -->
               <!-- Agent 预设选择浮层（含「通用智能体」） -->
               <div v-if="showAgentPresetPicker" class="agent-preset-picker scoll" @click.stop>
                 <div
+                  v-for="a in agentPickerItems"
+                  :key="a.id"
                   class="preset-picker-item"
-                  :class="{ active: !currentChat.config.presetId }"
-                  @click="selectGeneralAgent"
+                  :class="{ active: isAgentItemActive(a) }"
+                  :title="a.desc || a.name"
+                  @click="selectAgentItem(a)"
                 >
-                  <i class="fa fa-android"></i>
-                  <span>{{ store.locales=='zh' ? '通用智能体' : 'General Agent' }}</span>
+                  <i class="fa" :class="a.id === 'general' ? 'fa-android' : 'fa-user'"></i>
+                  <span>{{ a.name }}</span>
                 </div>
-                <div
-                  v-for="p in store.agentPresets"
-                  :key="p.id"
-                  class="preset-picker-item"
-                  :class="{ active: currentChat.config.presetId === p.id }"
-                  @click="selectAgentPreset(p)"
-                >
-                  <i class="fa fa-user"></i>
-                  <span>{{ p.name || (store.locales=='zh' ? '未命名' : 'Unnamed') }}</span>
+                <div v-if="isBrowser && !agentPickerItems.length" class="preset-picker-empty">
+                  {{ store.locales=='zh' ? '主机未开放任何智能体' : 'The host has not opened any agent' }}
                 </div>
               </div>
 
@@ -1047,7 +1049,12 @@ import { retrieveKnowledge, resolveStrategyId } from '@/shared/kbRetrieval'
 import { buildEmbedFallbackFromStore } from '@/shared/kbAiClient'
 import { listSharedKbs, searchSharedKb, searchUploadedKbTexts } from '@/platform/lanKb'
 import { getEnabledStrategies, setUserStrategies } from '@/shared/graphrag/strategy'
-import { WorkflowRunner, type WorkflowData, type ExecutionCallback, type NodeType } from '@/components/workFlow/engine/WorkflowRunner'
+import { WorkflowChatRunner, type ChatWorkflowCallbacks } from '@/workflow/chatRunner'
+import { parseDslYaml } from '@/workflow/dsl/codec'
+import { validateAndNormalizeDsl } from '@/workflow/dsl/validator'
+import { createFlowT } from '@/workflow/ui/locales'
+import { isFlowDslPath } from '@/shared/flowFile'
+import type { DslDocument } from '@/workflow/dsl/types'
 import { hashContent, renderMermaidSvgLenient, getCachedSvgLenient, clearMermaidCache, ensureMermaidInit } from '@/lib/markdown/mermaid'
 import MermaidViewer from '@/components/MermaidViewer.vue'
 import WordExportDialog from '@/components/export/WordExportDialog.vue'
@@ -1067,6 +1074,9 @@ import {
   setCachedRealContextWindow,
 } from '@/lib/contextUsage'
 import { md, renderMarkdown, highlightCodeHtml, normalizeMermaidSource } from '@/lib/markdown/render'
+// 上下文压缩（P0）：普通聊天发送前预算检查 + 旧轮次摘要 + 溢出后自动压缩重试
+import { chatHistoryForRequest, compactChat, shouldCompactChat } from '@/lib/agent/chatCompact'
+import { isContextOverflowError } from '@/shared/contextBudget'
 // PTC（Code Mode）：run_code 输出解析（返回值 / console 日志 / 程序内调用的工具）
 import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/agent/ptc'
 import type { EditDiffFilePreview } from '@/shared/editDiff'
@@ -1078,6 +1088,7 @@ import { agents as swarmAgents, swarmMode, settings as swarmSettings, debateRoun
 import { runSwarm, runNamedTask, stopSwarm } from '@/store/swarmRunner'
 import { applyMembers } from '@/composables/swarm/useSwarmMembers'
 import { loadSkillList } from '@/composables/swarm/useSwarmAgents'
+import SwarmTeamStream from '@/components/swarm/SwarmTeamStream.vue'
 import { chatsRef, currentChatIndexRef, globalExecutionStateRef, workflowStartTimeRef, workflowErrorRef, ensureInitialChat } from '@/store/chats'
 // 导入技能管理器
 import { getSkillManager, type Skill } from '@/services/agentSkills'
@@ -1089,6 +1100,42 @@ const store = usestore()
 
 // 浏览器模式（LAN 共享）：无 ipcRenderer，知识库退化为上传文件
 const isBrowser = typeof window !== 'undefined' && !(window as any).ipcRenderer
+
+/**
+ * 网页端（局域网共享）：主机能力概览（GET /api/agent/info）。
+ * 关键：访客的可用模式 / 工具白名单以**主机**「设置 → 协作 → 权限」为准，
+ * 不能读本机 localStorage 的 store.lan（那是访客自己的存档，与主机无关）。
+ * 取到的模式白名单会缓存到本机，主机接口一时不可达时仍按上次结果展示（否则智能体模式会突然消失）。
+ */
+const LAN_HOST_MODES_KEY = 'lanHostGuestModes'
+const lanHostGuestInfo = ref<import('@/platform/lanAgentClient').LanAgentInfo | null>(null)
+const refreshLanHostGuestInfo = async () => {
+  if (!isBrowser) return
+  try {
+    const { lanAgentTransport } = await import('@/platform/lanAgentClient')
+    lanHostGuestInfo.value = await lanAgentTransport.info()
+    const modes = lanHostGuestInfo.value?.modes || []
+    if (modes.length) {
+      try { localStorage.setItem(LAN_HOST_MODES_KEY, JSON.stringify(modes)) } catch { /* 存储满等忽略 */ }
+    }
+  } catch (e) {
+    console.warn('[lan-guest] 读取主机能力概览失败:', e)
+    ElMessage.warning(store.locales == 'zh'
+      ? '未能读取主机能力配置（可能主机未开启共享或已停止），对话模式按上次记录显示'
+      : 'Could not read host capabilities (host sharing may be off) — modes fall back to the last known set')
+  }
+}
+
+/** 访客可用的对话模式：本次取到的主机策略 → 上次缓存 → 本机存档默认 */
+const hostGuestModes = computed<string[]>(() => {
+  const live = lanHostGuestInfo.value?.modes
+  if (Array.isArray(live) && live.length) return live
+  try {
+    const cached = JSON.parse(localStorage.getItem(LAN_HOST_MODES_KEY) || '[]')
+    if (Array.isArray(cached) && cached.length) return cached
+  } catch { /* 忽略脏数据 */ }
+  return Array.isArray(store.lan?.guest?.modes) ? store.lan.guest.modes : ['normal', 'retrieval']
+})
 
 // 聊天领域类型已抽到 src/types/chat.ts（见上方 import type）
 
@@ -1102,7 +1149,7 @@ const globalExecutionState = globalExecutionStateRef as unknown as Ref<{
   currentStep: string
   stepIcon: string
   stepIndicatorClass: string
-  workflowRunner: WorkflowRunner | null
+  workflowRunner: WorkflowChatRunner | null
   abortController: AbortController | null
 }>
 
@@ -1117,10 +1164,13 @@ const isFirstInit = ensureInitialChat(createNewChatData)
 const chats = chatsRef as Ref<Chat[]>
 // 当前聊天索引提升为模块级共享 ref：卸载模块后保留现场，重进回到同一聊天栏
 const currentChatIndex = currentChatIndexRef
-// 持久化当前聊天栏（供应用重启后恢复）
+// 持久化当前聊天栏（供应用重启后恢复）。
+// ⚠️ **不能加 immediate**：initialized 阶段会先把默认值 0 写进 localStorage，
+// 而恢复手在 onMounted 的 loadChatsFromStorage() 里才读——读到的就是被覆盖掉的 0，
+// 结果每次重启/刷新都只能打开第一个聊天（网页端与桌面端同样受影响）。
 watch(currentChatIndex, (idx) => {
   localStorage.setItem('ai-chats-index', String(idx))
-}, { immediate: true })
+})
 const inputText = ref<string>('')
 
 const showSidebar = ref(false)  // 聊天列表侧边栏：初始不显示，由聊天标题左侧的 fa-bars 开关展开
@@ -1483,8 +1533,8 @@ const emptyChatHintSub = computed(() => {
       return zh ? 'PTC 模式：写一段程序组合多步工具调用' : 'PTC mode: write a program that chains several tool calls'
     default:
       return zh
-        ? '直接提问，或上传文件 / 图片一起分析；也可切换下方模式做知识库检索、跑工作流或交给智能体'
-        : 'Ask anything, or upload files / images for context; switch modes below for retrieval, workflows or agents'
+        ? '直接提问，或上传 / 拖入文件、图片一起分析；也可切换下方模式做知识库检索、跑工作流或交给智能体'
+        : 'Ask anything, or upload / drag in files and images for context; switch modes below for retrieval, workflows or agents'
   }
 })
 
@@ -1688,6 +1738,8 @@ const workflowRunner = computed({
 const isSendButtonDisabled = computed(() => {
   const chat = currentChat.value
   const isSwarm = chat.mode === 'swarm'
+  // 网页端（局域网共享）智能体模式：模型来自主机，不要求本端选模型
+  const hostAgent = isBrowser && (chat.mode === 'agent' || chat.mode === 'agent2' || chat.mode === 'skill')
   // 运行中引导：智能体/集群执行期间输入框保持可用（Enter = 投递引导，不打断本轮）
   const steerMode = canSteerRun.value
   return Boolean(
@@ -1697,9 +1749,76 @@ const isSendButtonDisabled = computed(() => {
     (isSwarm && swarmRunning.value && !steerMode) ||
     (!inputText.value.trim() && currentUploads.value.length === 0) ||
     // 集群不要求顶层模型（各成员用自己预设的模型）
-    (!isSwarm && !chat.config.model)
+    (!isSwarm && !hostAgent && !chat.config.model)
   )
 })
+
+/** 网页端智能体模式（主机侧执行）：本端模型选择不参与，隐藏之 */
+const hostAgentMode = computed(() =>
+  isBrowser && (currentChat.value.mode === 'agent' || currentChat.value.mode === 'agent2' || currentChat.value.mode === 'skill')
+)
+
+/** 网页端可选的智能体（主机返回的 agents；按 id 去重，首位为通用智能体） */
+const hostGuestAgents = computed<Array<{ id: string; name: string; desc?: string }>>(() => {
+  const list = lanHostGuestInfo.value?.agents
+  const seen = new Set<string>()
+  const out: Array<{ id: string; name: string; desc?: string }> = []
+  for (const a of Array.isArray(list) ? list : []) {
+    const id = String((a as any)?.id || '')
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push({ id, name: String((a as any)?.name || id), desc: (a as any)?.desc })
+  }
+  return out.length ? out : [{ id: 'general', name: store.locales == 'zh' ? '通用智能体' : 'General Agent' }]
+})
+
+/**
+ * 智能体选择浮层的选项（与客户端同一个浮层组件）：
+ * - 桌面端：通用智能体 + 本机 Agent 预设；
+ * - 网页端（LAN 共享）：**直接读主机返回的 agents**（主机只下发已开放的项）。
+ */
+const agentPickerItems = computed<Array<{ id: string; name: string; desc?: string; preset?: any }>>(() => {
+  if (isBrowser) return hostGuestAgents.value.map((a) => ({ id: a.id, name: a.name, desc: a.desc }))
+  return [
+    { id: 'general', name: store.locales == 'zh' ? '通用智能体' : 'General Agent' },
+    ...(store.agentPresets || []).map((p: any) => ({ id: String(p.id), name: p.name || (store.locales == 'zh' ? '未命名' : 'Unnamed'), preset: p })),
+  ]
+})
+
+/** 网页端当前选用的智能体 */
+const currentGuestAgentId = computed(() => currentChat.value?.config?.guestAgentId || 'general')
+
+/** 胶囊显示名（网页端 = 主机开放的智能体名；桌面端 = 预设名/通用智能体） */
+const currentAgentLabel = computed(() => {
+  if (isBrowser) return agentPickerItems.value.find((a) => a.id === currentGuestAgentId.value)?.name
+    || (store.locales == 'zh' ? '通用智能体' : 'General Agent')
+  return currentChat.value.config.presetId ? getAgentPresetName() : (store.locales == 'zh' ? '通用智能体' : 'General Agent')
+})
+
+/** 浮层项选中态：网页端看聊天级 guestAgentId；桌面端看 presetId */
+const isAgentItemActive = (item: { id: string }) => {
+  if (isBrowser) return currentGuestAgentId.value === item.id
+  return item.id === 'general' ? !currentChat.value.config.presetId : currentChat.value.config.presetId === item.id
+}
+
+/** 打开/关闭智能体浮层（打开时的主机能力刷新见下方 showAgentPresetPicker 的 watch） */
+const toggleAgentPicker = () => {
+  showAgentPresetPicker.value = !showAgentPresetPicker.value
+}
+
+/** 选中浮层里的项：网页端只改聊天级选择；桌面端沿用原有预设切换（含模型配置跟随） */
+const selectAgentItem = (item: { id: string; preset?: any }) => {
+  if (isBrowser) {
+    const id = item.id === 'general' ? undefined : item.id
+    currentChat.value.config.guestAgentId = id
+    currentChat.value.config.presetId = undefined
+    showAgentPresetPicker.value = false
+    saveChats()
+    return
+  }
+  if (item.preset) selectAgentPreset(item.preset)
+  else selectGeneralAgent()
+}
 
 const availableModels = computed(() => {
   const llmType = currentChat.value.config.llmType
@@ -2870,13 +2989,19 @@ const isParseableFile = (fileName: string): boolean => {
 const handleFileUpload = async (event: Event) => {
   const target = event.target as HTMLInputElement
   const files = target.files
-  
   if (!files || files.length === 0) return
-  
+  await addFilesAsUploads(Array.from(files))
+  target.value = ''
+}
+
+/**
+ * 把文件加入待发送附件（上传按钮与「拖入窗口」共用同一套逻辑）。
+ * 图片 → 多模态附图；可解析文档 → 读取文本作为附件；其余类型提示不支持。
+ */
+const addFilesAsUploads = async (files: File[]) => {
+  if (!files.length) return
   try {
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i]
-      
+    for (const file of files) {
       // 图片处理
       if (file.type.startsWith('image/')) {
         if (file.size > 5 * 1024 * 1024) {
@@ -2893,29 +3018,29 @@ const handleFileUpload = async (event: Event) => {
         })
         continue
       }
-      
+
       // 文档文件处理（Markdown / Word / PDF 等）
       if (isParseableFile(file.name)) {
         if (file.size > 20 * 1024 * 1024) {
           ElMessage.warning(`文件 ${file.name} 大小超过20MB限制`)
           continue
         }
-        
-        // 通过 Electron IPC 读取并解析文件
+
+        // 桌面端：通过 Electron IPC 读取并解析（docx / pdf / xlsx 等需要主进程解析）；
+        // 网页端（局域网访客）：只能读文本，.md/.txt/.kb 等可直接解析
         let parsedContent = ''
-        if (typeof window !== 'undefined' && (window as any).ipcRenderer) {
-          parsedContent = await (window as any).ipcRenderer.invoke('readFile', file.path || file.name)
+        const ipc = typeof window !== 'undefined' ? (window as any).ipcRenderer : null
+        if (ipc) {
+          parsedContent = await ipc.invoke('readFile', (file as any).path || file.name)
         } else {
-          // 浏览器环境：尝试用 FileReader 读取文本文件
-          const text = await file.text()
-          parsedContent = text
+          parsedContent = await file.text()
         }
-        
+
         if (typeof parsedContent === 'string' && parsedContent.startsWith('Error reading file:')) {
           ElMessage.error(`文件 ${file.name} 读取失败`)
           continue
         }
-        
+
         const charCount = parsedContent.length
         currentUploads.value.push({
           kind: 'file',
@@ -2930,20 +3055,89 @@ const handleFileUpload = async (event: Event) => {
         continue
       }
     }
-    
-    target.value = ''
-    
+
     if (currentUploads.value.length > 0 && !inputText.value.trim()) {
       const textInput = document.querySelector('.message-input') as HTMLTextAreaElement
       if (textInput) {
         textInput.focus()
       }
     }
-    
+
   } catch (error) {
     console.error('文件上传失败:', error)
     ElMessage.error('文件/图片上传失败，请重试')
   }
+}
+
+// ==================== 拖入窗口上传（桌面端与网页端一致） ====================
+
+/** 是否有文件正在拖过聊天界面（用于显示提示遮罩） */
+const dropFilesActive = ref(false)
+/** 进入/离开计数：dragleave 会在子元素间反复触发，用计数避免提示闪烁 */
+let dragDepth = 0
+
+/** 只接管「文件」拖拽：聊天列表行的 vuedraggable 排序（非 Files）不受影响 */
+const isFileDrag = (e: DragEvent): boolean => {
+  const types = e.dataTransfer?.types
+  if (!types) return false
+  return Array.from(types).includes('Files')
+}
+
+const onHomeDragEnter = (e: DragEvent) => {
+  if (!isFileDrag(e)) return
+  dragDepth++
+  dropFilesActive.value = true
+}
+
+const onHomeDragOver = (e: DragEvent) => {
+  if (!isFileDrag(e)) return
+  // 必须 preventDefault，否则浏览器/Electron 会直接打开被拖入的文件
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+  dropFilesActive.value = true
+}
+
+const onHomeDragLeave = (e: DragEvent) => {
+  if (!isFileDrag(e)) return
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dropFilesActive.value = false
+}
+
+const onHomeDrop = async (e: DragEvent) => {
+  const files = Array.from(e.dataTransfer?.files || [])
+  dragDepth = 0
+  dropFilesActive.value = false
+  if (!files.length) return
+  e.preventDefault()
+  await routeDroppedFiles(files)
+}
+
+/** 拖入文件的去向：检索模式下的 .kb 直接关联为知识库，其余作为待发送附件 */
+const routeDroppedFiles = async (files: File[]) => {
+  const chat = currentChat.value
+  const isKb = (f: File) => f.name.toLowerCase().endsWith('.kb')
+  if (chat?.mode === 'retrieval') {
+    const kbs = files.filter(isKb)
+    const others = files.filter((f) => !isKb(f))
+    if (kbs.length) {
+      if (isBrowser) {
+        await addKbFiles(kbs)
+      } else {
+        const p = (kbs[0] as any).path as string | undefined
+        if (p) {
+          chat.config.kbPath = p
+          if (chat.config.kbTopK === undefined) chat.config.kbTopK = 5
+          saveChats()
+          ElMessage.success(store.locales == 'zh' ? `已关联知识库: ${kbs[0].name}` : `Knowledge base linked: ${kbs[0].name}`)
+        } else {
+          await addFilesAsUploads(kbs)
+        }
+      }
+    }
+    if (others.length) await addFilesAsUploads(others)
+    return
+  }
+  await addFilesAsUploads(files)
 }
 
 const removeUpload = (index: number) => {
@@ -3059,6 +3253,8 @@ onMounted(async () => {
   window.addEventListener('ai-chats-cleared', onAiChatsCleared)
   // 监听设置独立窗口的聊天记录变更（导入/清空）→ 从本地存档重新加载
   window.ipcRenderer?.on('chats-changed', onChatsChangedRemote)
+  // 网页端（局域网共享）：拉取主机能力概览，决定可用对话模式（默认只含 普通 + 知识库）
+  void refreshLanHostGuestInfo()
   checkCurrentModelConnection()
   if (isFirstInit) {
     // 首次初始化：普通聊天可从主进程磁盘缓冲续接（应用重启后恢复完整回答）
@@ -3318,6 +3514,19 @@ const loadSkills = async (forceRefresh: boolean = false) => {
 // Agent 预设选择浮层显示状态
 const showAgentPresetPicker = ref(false)
 
+/**
+ * 浮层打开期间定时刷新主机能力：主机改动「可用智能体 / 模式 / 工具」后，
+ * 网页端不刷新页面也能看到更新（请求已加时间戳防缓存，主机会在现场重新下发一次）。
+ */
+let lanHostInfoTimer: ReturnType<typeof setInterval> | null = null
+watch(showAgentPresetPicker, (open) => {
+  if (lanHostInfoTimer) { clearInterval(lanHostInfoTimer); lanHostInfoTimer = null }
+  if (open && isBrowser) {
+    void refreshLanHostGuestInfo()
+    lanHostInfoTimer = setInterval(() => void refreshLanHostGuestInfo(), 8000)
+  }
+})
+
 /** 选择通用智能体：清空预设，走通用 agent 循环（agent2 语义） */
 const selectGeneralAgent = () => {
   currentChat.value.mode = 'agent2'
@@ -3486,6 +3695,13 @@ const handleKbFileUpload = async (event: Event) => {
   const target = event.target as HTMLInputElement
   const files = target.files
   if (!files || files.length === 0) return
+  await addKbFiles(Array.from(files))
+  target.value = ''
+}
+
+/** 把 .kb 加入当前聊天的知识库（上传按钮与「拖入窗口」共用） */
+const addKbFiles = async (files: File[]) => {
+  if (!files.length) return
   try {
     const chat = currentChat.value
     // 确保处于检索模式
@@ -3499,8 +3715,7 @@ const handleKbFileUpload = async (event: Event) => {
     // 选择了上传自己的文件 → 清除主机共享 .kb（二者互斥）
     chat.config.sharedKb = undefined
     const MAX_KB_FILE = 50 * 1024 * 1024
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i]
+    for (const file of files) {
       // 知识库模式仅允许 .kb；其他类型文件请切到「普通」模式作为附件上传
       if (!file.name.toLowerCase().endsWith('.kb')) {
         ElMessage.warning(store.locales == 'zh'
@@ -3531,7 +3746,6 @@ const handleKbFileUpload = async (event: Event) => {
         ElMessage.error(store.locales == 'zh' ? `文件 ${file.name} 读取失败` : `Failed to read ${file.name}`)
       }
     }
-    target.value = ''
     if (chat.config.kbFiles.length > 0) {
       ElMessage.success(store.locales == 'zh' ? `已添加 ${chat.config.kbFiles.length} 个 .kb 知识库文件` : `${chat.config.kbFiles.length} .kb file(s) added as knowledge base`)
     }
@@ -3594,7 +3808,7 @@ const selectWorkflow = async () => {
     try {
       const filePath = await window.ipcRenderer.invoke('selectFile', {
         filters: [
-          { name: '工作流文件', extensions: ['flow', 'json'] },
+          { name: '工作流文件', extensions: ['yml', 'yaml'] },
           { name: '所有文件', extensions: ['*'] }
         ]
       })
@@ -3605,10 +3819,10 @@ const selectWorkflow = async () => {
         currentChat.value.config.workflowPath = undefined
         currentChat.value.config.workflowData = undefined
         workflowError.value = false
-      } else if (filePath && (filePath.endsWith('.flow') || filePath.endsWith('.json'))) {
+      } else if (filePath && isFlowDslPath(filePath)) {
         await loadWorkflowFile(filePath)
-      } else if (filePath && !filePath.endsWith('.flow') && !filePath.endsWith('.json')) {
-        ElMessage.warning('请选择.flow或.json格式的工作流文件')
+      } else if (filePath) {
+        ElMessage.warning(store.locales=='zh' ? '请选择 .flow.yml 格式的工作流文件' : 'Please pick a .flow.yml workflow file')
       }
     } catch (error: any) {
       console.error('选择工作流文件失败:', error)
@@ -3618,18 +3832,18 @@ const selectWorkflow = async () => {
     try {
       const filePath = await window.ipcRenderer.invoke('selectFile', {
         filters: [
-          { name: '工作流文件', extensions: ['flow', 'json'] },
+          { name: '工作流文件', extensions: ['yml', 'yaml'] },
           { name: '所有文件', extensions: ['*'] }
         ]
       })
       
-      if (filePath && (filePath.endsWith('.flow') || filePath.endsWith('.json'))) {
+      if (filePath && isFlowDslPath(filePath)) {
         currentChat.value.mode = 'workflow'
         // 清除其他模式的配置
         currentChat.value.config.kbPath = undefined
         await loadWorkflowFile(filePath)
-      } else if (filePath && !filePath.endsWith('.flow') && !filePath.endsWith('.json')) {
-        ElMessage.warning('请选择.flow或.json格式的工作流文件')
+      } else if (filePath) {
+        ElMessage.warning(store.locales=='zh' ? '请选择 .flow.yml 格式的工作流文件' : 'Please pick a .flow.yml workflow file')
       }
     } catch (error: any) {
       console.error('选择工作流文件失败:', error)
@@ -3661,9 +3875,15 @@ const modeOptions = computed(() => {
     // 集群：多 Agent 预设协作（成员 = 预设引用，改预设即改成员）
     { value: 'swarm', label: isZh ? '集群' : 'Swarm' }
   ]
-  // 浏览器模式（LAN 共享）：工作流/技能/Agent 预设依赖本地文件系统，仅保留普通对话与知识库（退化为上传文件）
+  // 浏览器模式（LAN 共享）：可用模式由主机「设置 → 协作 → 权限」的访客白名单决定
+  // （默认只读 = 普通 + 知识库）。智能体模式由主机侧桥接（循环在主机跑，工具白名单/沙箱由主机定）。
   if (isBrowser) {
-    return all.filter(m => m.value === 'normal' || m.value === 'retrieval')
+    const browserImplemented = new Set(['normal', 'retrieval', 'agent'])
+    // 模式白名单来自主机（/api/agent/info，取不到时用上次缓存）；未取到时回退本机存档（旧行为）
+    const allow = new Set<string>(hostGuestModes.value)
+    // 兜底：主机把模式全关掉时至少保留「普通」，否则聊天无法使用
+    if (!allow.size) allow.add('normal')
+    return all.filter(m => browserImplemented.has(m.value) && allow.has(m.value))
   }
   return all
 })
@@ -3726,6 +3946,8 @@ const onModeSelect = async (event: Event) => {
 
   // 先关闭 Agent 预设浮层（若切到 agent 模式会重新打开）
   showAgentPresetPicker.value = false
+  // 网页端智能体模式：切进来时立刻向主机重取一次智能体清单（避免首次打开时列表为空/过旧）
+  if (isBrowser && (mode === 'agent' || mode === 'agent2' || mode === 'skill')) void refreshLanHostGuestInfo()
 
   // 选择的是当前模式：不重复处理（重新选择文件请点击旁边的已关联标签）
   if (chat.mode === mode) return
@@ -3792,9 +4014,9 @@ const onModeSelect = async (event: Event) => {
       chat.config.presetId = undefined
       workflowError.value = false
       saveChats()
-      if (!window.dsh?.agent) {
+      if (!window.dsh?.agent && !isBrowser) {
         ElMessage.warning(store.locales == 'zh' ? '智能体模式需要桌面版（window.dsh.agent 不可用）' : 'Agent mode requires the desktop app (window.dsh.agent unavailable)')
-      } else if (store.skillsPath) {
+      } else if (!isBrowser && store.skillsPath) {
         // 预热技能目录（供 $技能名 / 技能列表 / help 自动识别）
         void loadSkills(false)
       }
@@ -3826,6 +4048,10 @@ const onModeSelect = async (event: Event) => {
       chat.config.presetId = undefined
       workflowError.value = false
       if (!Array.isArray(chat.config.swarmPresetIds)) chat.config.swarmPresetIds = []
+      // 兼容旧存档：已删除的「群主撮合」档位持久化为全员响应（避免残留旧值）
+      if ((chat.config.swarmOptions?.runMode as string) === 'host') {
+        chat.config.swarmOptions = { ...(chat.config.swarmOptions || {}), runMode: 'auto' }
+      }
       saveChats()
       if (!window.dsh?.agent) {
         ElMessage.warning(store.locales == 'zh' ? '集群模式需要桌面版（window.dsh.agent 不可用）' : 'Swarm mode requires the desktop app (window.dsh.agent unavailable)')
@@ -3846,9 +4072,9 @@ const onModeSelect = async (event: Event) => {
       chat.config.presetId = undefined
       workflowError.value = false
       saveChats()
-      if (!window.dsh?.agent) {
+      if (!window.dsh?.agent && !isBrowser) {
         ElMessage.warning(store.locales == 'zh' ? '智能体模式需要桌面版（window.dsh.agent 不可用）' : 'Agent Loop mode requires the desktop app (window.dsh.agent unavailable)')
-      } else if (store.skillsPath) {
+      } else if (!isBrowser && store.skillsPath) {
         // 预热技能目录（供 $技能名 / 技能列表 / help 自动识别）
         void loadSkills(false)
       }
@@ -3866,51 +4092,52 @@ const showSwarmMemberPicker = ref(false)
 /** 引用失效的预设 id（预设被删/改名），UI 提示后一键清理 */
 const swarmMissingPresets = ref<string[]>([])
 
-/** 运行方式（写回对话 config，随对话保存） */
+/** 运行方式（写回对话 config，随对话保存）
+ *  兼容旧存档：已删除的「群主撮合」档位回落为「全员响应」（否则下拉会因无对应 option 显示空白） */
 const swarmRunMode = computed({
-  get: () => currentChat.value.config.swarmOptions?.runMode || 'auto',
-  set: (v: 'auto' | 'host' | 'debate') => {
+  get: () => {
+    const v = currentChat.value.config.swarmOptions?.runMode as string | undefined
+    return (!v || v === 'host') ? 'auto' : (v as 'auto' | 'debate' | 'team')
+  },
+  set: (v: 'auto' | 'debate' | 'team') => {
     currentChat.value.config.swarmOptions = { ...(currentChat.value.config.swarmOptions || {}), runMode: v }
     saveChats()
   }
 })
-/** 结束群主总结开关（默认关闭） */
-const swarmHostSummary = computed({
-  get: () => currentChat.value.config.swarmOptions?.hostSummary === true,
-  set: (v: boolean) => {
-    currentChat.value.config.swarmOptions = { ...(currentChat.value.config.swarmOptions || {}), hostSummary: v }
-    saveChats()
-  }
-})
-const toggleSwarmHostSummary = () => { swarmHostSummary.value = !swarmHostSummary.value }
+
+/** 项目组（Agent Teams）：使用独立消息栏（底部发送栏复用） */
+const isTeamChat = computed(() =>
+  currentChat.value.mode === 'swarm' && currentChat.value.config.swarmOptions?.runMode === 'team'
+)
 
 /** 成员在勾选列表中的序号（1 起；未选中返回 0）——同时表达发言顺序 */
 const swarmMemberOrder = (id: string): number => (currentChat.value.config.swarmPresetIds || []).indexOf(id) + 1
 
-/** 运行方式选项（集群设置浮层内单选） */
+/** 运行方式选项（输入区独立下拉；标签取短名，详细说明进 option.title 与下拉 title） */
 const swarmRunModeOptions = computed(() => {
   const zh = store.locales == 'zh'
   return [
-    { value: 'auto' as const, label: zh ? '全员响应' : 'All respond' },
-    { value: 'host' as const, label: zh ? '群主撮合' : 'Host-led' },
-    { value: 'debate' as const, label: zh ? '辩论' : 'Debate' },
+    { value: 'auto' as const, label: zh ? '全员响应' : 'All respond', desc: zh ? '所有选中成员依次就任务作答（默认）' : 'All selected members answer in turn (default)' },
+    { value: 'debate' as const, label: zh ? '辩论' : 'Debate', desc: zh ? '多轮互驳，最后由群主中立总结' : 'Multi-round debate, host summarizes at the end' },
+    { value: 'team' as const, label: zh ? '项目组' : 'Team', desc: zh ? 'Lead 编排：把目标拆成任务板，成员按依赖并行/串行执行' : 'Lead-led: splits the goal into a task board with dependencies' },
   ]
 })
 
+/** 运行方式下拉的悬停说明（当前档位） */
+const swarmRunModeTitle = computed(() => {
+  const cur = swarmRunModeOptions.value.find(o => o.value === swarmRunMode.value)
+  if (!cur) return ''
+  return `${store.locales == 'zh' ? '集群运行方式' : 'Swarm run mode'}：${cur.label} — ${cur.desc}`
+})
+
 /**
- * 集群入口 chip 文本：成员数 + 当前运行方式/总结。
- * 输入区只保留这一个控件，因此把关键设置压进文本，保证不展开也能感知当前配置。
+ * 集群成员 chip 文本：只表达成员选择（运行方式已由右侧下拉独立展示）。
  */
 const swarmChipLabel = computed(() => {
   const zh = store.locales == 'zh'
   const ids = currentChat.value.config.swarmPresetIds || []
   if (!ids.length) return zh ? '选择成员...' : 'Pick members...'
-  const o = currentChat.value.config.swarmOptions || {}
-  const parts = [zh ? `成员 ${ids.length}` : `${ids.length} members`]
-  if (o.runMode === 'host') parts.push(zh ? '撮合' : 'Host-led')
-  else if (o.runMode === 'debate') parts.push(zh ? '辩论' : 'Debate')
-  if (o.hostSummary) parts.push(zh ? '总结' : 'Summary')
-  return parts.join(' · ')
+  return zh ? `成员 ${ids.length}` : `${ids.length} members`
 })
 
 /** 把当前对话的成员预设同步进集群运行时（发送前 / 勾选后调用） */
@@ -3952,13 +4179,14 @@ const goManageAgentPresets = () => {
 const applySwarmOptions = () => {
   const o = currentChat.value.config.swarmOptions || {}
   const runMode = o.runMode || 'auto'
-  // 运行时用 swarmMode + settings.collabMode 组合表达三档：全员响应 / 群主撮合 / 辩论
+  // 运行时用 swarmMode + settings.collabMode 组合表达两档（全员响应 / 辩论）+ 项目组；
+  // 旧存档里的 host（群主撮合）已下线，这里一并回落为 mention（全员响应）
   swarmMode.value = runMode === 'debate' ? 'debate' : 'auto'
   swarmSettings.value = {
     ...swarmSettings.value,
-    collabMode: runMode === 'host' ? 'host' : 'mention',
-    enableHostSummary: o.hostSummary === true,
-    managerAgentIdx: typeof o.hostIdx === 'number' ? o.hostIdx : -1,
+    collabMode: runMode === 'team' ? 'team' : 'mention',
+    enableHostSummary: false, // 旧「结束由群主总结」已下线，显式关掉避免残留
+    managerAgentIdx: runMode === 'team' ? 0 : -1,
     injectHistory: o.injectHistory !== false,
   }
   swarmDebateRounds.value = o.debateRounds || 2
@@ -4020,51 +4248,49 @@ const loadWorkflowFile = async (filePath: string) => {
   }
   try {
     const content = await window.ipcRenderer.invoke('readFile', filePath)
-    const workflowData = JSON.parse(content)
-    
-    if (!workflowData.items || !Array.isArray(workflowData.items)) {
-      throw new Error('无效的工作流文件格式')
+    // 文件内容就是 Dify 应用 DSL（YAML），与知识管理里的工作流画布同一份格式
+    const parsed = parseDslYaml(String(content ?? ''))
+    const { document, issues } = validateAndNormalizeDsl(parsed)
+    if (!document) {
+      throw new Error(store.locales=='zh' ? '无效的工作流文件格式' : 'Invalid workflow file format')
     }
     
-    const startNode = workflowData.items.find((item: any) => item.type === 'start')
-    const endNode = workflowData.items.find((item: any) => item.type === 'end')
+    const startNode = document.workflow.graph.nodes.find((node) => String(node.data.type) === 'start')
+    const endNode = document.workflow.graph.nodes.find((node) => String(node.data.type) === 'end')
     
     if (!startNode) {
-      throw new Error('工作流缺少开始节点')
+      throw new Error(store.locales=='zh' ? '工作流缺少开始节点' : 'Workflow has no start node')
     }
     
     if (!endNode) {
-      throw new Error('工作流缺少结束节点')
+      throw new Error(store.locales=='zh' ? '工作流缺少结束节点' : 'Workflow has no end node')
     }
     
     currentChat.value.config.workflowPath = filePath
-    currentChat.value.config.workflowData = workflowData
+    currentChat.value.config.workflowData = document
     workflowError.value = false
     
     initWorkflowRunner()
     
-    if (startNode.prompt && startNode.prompt.trim()) {
-      inputText.value = startNode.prompt
-    } else {
-      inputText.value = ''
-    }
+    inputText.value = ''
     
     console.log(`已加载工作流: ${filePath}`)
+    for (const issue of issues) console.warn(`[工作流] ${issue.level}: ${issue.message}`)
     
     try {
       const isValid = await validateWorkflow()
       if (!isValid) {
-        ElMessage.warning('工作流验证失败，请检查配置')
+        ElMessage.warning(store.locales=='zh' ? '工作流验证失败，请检查配置' : 'Workflow validation failed, please check the configuration')
         workflowError.value = true
       }
     } catch (error: any) {
-      ElMessage.error(`工作流验证错误: ${error.message}`)
+      ElMessage.error(`${store.locales=='zh' ? '工作流验证错误' : 'Workflow validation error'}: ${error.message}`)
       workflowError.value = true
     }
     
   } catch (error: any) {
     console.error('加载工作流失败:', error)
-    ElMessage.error(`加载工作流失败: ${error.message}`)
+    ElMessage.error(`${store.locales=='zh' ? '加载工作流失败' : 'Failed to load workflow'}: ${error.message}`)
     currentChat.value.config.workflowPath = undefined
     currentChat.value.config.workflowData = undefined
     workflowError.value = true
@@ -4826,8 +5052,11 @@ const sendMessage = async () => {
   if (isExecuting.value) {
     return
   }
-  
-  if (!currentChat.value.config.model) {
+
+  // 网页端（局域网共享）智能体模式：模型与工具全由主机提供，不再要求本端选模型 / 连接可用
+  const isHostAgentMode = isBrowser && (currentChat.value.mode === 'agent' || currentChat.value.mode === 'agent2' || currentChat.value.mode === 'skill')
+
+  if (!isHostAgentMode && !currentChat.value.config.model) {
     console.log('请先选择模型')
     return
   }
@@ -4838,7 +5067,7 @@ const sendMessage = async () => {
   }
   
   // 集群模式：模型来自各成员的 Agent 预设（群主用全局设置），与当前对话的模型配置无关 → 跳过连接检查
-  if (currentChat.value.mode !== 'swarm' && !currentChat.value.online) {
+  if (!isHostAgentMode && currentChat.value.mode !== 'swarm' && !currentChat.value.online) {
     if(!testCurrentModelConnection()){
       try {
         await ElMessageBox.confirm('模型未连接，是否继续发送？', '提示', {
@@ -4857,10 +5086,12 @@ const sendMessage = async () => {
       break
     case 'skill':
     case 'agent2':
-      await handleAgentLoopMode(message)
+      if (isBrowser) await handleBrowserAgentMode(message)
+      else await handleAgentLoopMode(message)
       break
     case 'agent':
-      await handleAgentMode(message)
+      if (isBrowser) await handleBrowserAgentMode(message)
+      else await handleAgentMode(message)
       break
     case 'code':
       await handlePtcMode(message)
@@ -4885,6 +5116,7 @@ const {
   handleAgentLoopMode,
   handleAgentPresetMode,
   handlePtcMode,
+  handleBrowserAgentMode,
   steerRunningAgents,
   reconcileAgentRuns,
   stopAgentsInChat,
@@ -4922,6 +5154,152 @@ const handleAgentMode = async (message: string) => {
 
 // ==================== 工作流相关函数 ====================
 
+/** 取当前工作流里某个节点的 DSL 数据（步骤卡片的「参数」区用） */
+const workflowNodeData = (nodeId: string): Record<string, any> | undefined => {
+  const nodes = ((currentChat.value?.config?.workflowData as any)?.workflow?.graph?.nodes ?? []) as any[]
+  const node = nodes.find((n) => String(n?.id) === String(nodeId))
+  return (node?.data ?? undefined) as Record<string, any> | undefined
+}
+
+/** 步骤卡片的参数：只挑该节点最关键的输入（与智能体模式的工具参数区一致，避免整段 DSL） */
+const workflowUnitArgs = (data: Record<string, any> | undefined): Record<string, any> | undefined => {
+  if (!data) return undefined
+  const pick = (keys: string[]): Record<string, any> | undefined => {
+    const out: Record<string, any> = {}
+    for (const key of keys) {
+      const value = data[key]
+      if (value === undefined || value === null || value === '') continue
+      if (Array.isArray(value) && !value.length) continue
+      if (typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length) continue
+      out[key] = value
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+  const selectorText = (value: unknown): string => (Array.isArray(value) ? value.filter(Boolean).join('.') : String(value ?? ''))
+
+  switch (String(data.type)) {
+    case 'start':
+      return Array.isArray(data.variables) && data.variables.length
+        ? { 输入变量: (data.variables as any[]).map((v) => `${v.label || v.variable}（${v.variable}）`) }
+        : undefined
+    case 'end':
+      return Array.isArray(data.outputs) && data.outputs.length
+        ? { 输出: (data.outputs as any[]).map((o) => `${o.variable} ← ${selectorText(o.value_selector)}`) }
+        : undefined
+    case 'llm':
+      return {
+        模型: data.model?.name ? `${data.model.provider} · ${data.model.name}` : '未配置',
+        提示词: (Array.isArray(data.prompt_template) ? data.prompt_template as any[] : [])
+          .map((m) => `${m.role}: ${m.text}`)
+          .join('\n'),
+      }
+    case 'question-classifier':
+      return {
+        输入: selectorText(data.query_variable_selector),
+        分类: (Array.isArray(data.classes) ? data.classes as any[] : []).map((c) => `${c.id} · ${c.label || c.name || ''}`),
+      }
+    case 'if-else':
+      return {
+        条件: (Array.isArray(data.cases) ? data.cases as any[] : []).map((c, index) => {
+          const parts = (Array.isArray(c.conditions) ? c.conditions : []).map(
+            (x: any) => `${selectorText(x.variable_selector)} ${x.comparison_operator || ''} ${x.value ?? ''}`.trim(),
+          )
+          return `case ${c.case_id || index + 1}: ${parts.join(` ${c.logical_operator || 'and'} `)}`
+        }),
+      }
+    case 'code':
+      return { 语言: data.code_language, 输入变量: (Array.isArray(data.variables) ? data.variables as any[] : []).map((v) => v.variable), 代码: data.code }
+    case 'template-transform':
+      return {
+        模板: data.template,
+        变量: (Array.isArray(data.variables) ? data.variables as any[] : []).map((v) => `${v.variable} ← ${selectorText(v.value_selector)}`),
+      }
+    case 'http-request':
+      return pick(['url', 'method', 'headers', 'params', 'body'])
+    case 'knowledge-retrieval':
+    case 'ai-km-knowledge':
+      return pick(['kb_path', 'query_variable_selector', 'retrieval_mode', 'multiple_retrieval_config'])
+    case 'iteration':
+      return pick(['iterator_selector', 'output_selector', 'is_parallel', 'error_handle_mode'])
+    case 'loop':
+      return pick(['loop_count', 'loop_variables', 'break_conditions', 'error_handle_mode'])
+    case 'assigner':
+    case 'variable-assigner':
+      return {
+        赋值: (Array.isArray(data.items) ? data.items as any[] : []).map(
+          (i) => `${selectorText(i.variable_selector)} ${i.operation || i.write_mode || 'over-write'}`,
+        ),
+      }
+    case 'parameter-extractor':
+      return pick(['query', 'instruction', 'parameters', 'model'])
+    case 'list-operator':
+      return pick(['variable', 'filter_by', 'order_by', 'extract_by', 'limit'])
+    case 'document-extractor':
+      return pick(['variable_selector'])
+    case 'tool':
+    case 'ai-km-mcp':
+      return pick(['tool_name', 'tool_parameters', 'mcp_server'])
+    case 'ai-km-word':
+      return pick(['template', 'style_path', 'dir_path', 'file_name', 'content_variable_selector'])
+    case 'ai-km-csv':
+      return pick(['file_path', 'delimiter', 'has_header', 'load_mode', 'preview_rows'])
+    case 'ai-km-file':
+      return pick(['file_path', 'file_mode', 'file_templates'])
+    case 'ai-km-subflow':
+      return pick(['subflow_path', 'subflow_name', 'variables'])
+    default:
+      return undefined
+  }
+}
+
+/** 步骤卡片的结果：优先取该节点的主要输出（折叠态显示一行摘要，与智能体模式的工具结果一致） */const workflowUnitResultText = (nodeType: string, result: unknown): string => {
+  let outputs: Record<string, any> = {}
+  if (result && typeof result === 'object' && !Array.isArray(result)) outputs = result as Record<string, any>
+  else if (typeof result === 'string') {
+    try {
+      const parsed = JSON.parse(result)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) outputs = parsed
+    } catch {
+      return result
+    }
+  }
+  const primaryKeys = nodeType === 'llm'
+    ? ['text', 'reasoning_content']
+    : nodeType === 'answer'
+      ? ['answer']
+      : nodeType === 'http-request'
+        ? ['body']
+        : nodeType === 'template-transform' || nodeType === 'variable-aggregator'
+          ? ['output']
+          : ['text', 'output', 'answer', 'body', 'result']
+  for (const key of primaryKeys) {
+    const value = outputs[key]
+    if (typeof value === 'string' && value.trim()) return value
+    if (value !== undefined && value !== null && typeof value !== 'object') return String(value)
+  }
+  if (Object.keys(outputs).length) return prettyJson(outputs)
+  return typeof result === 'string' ? result : ''
+}
+
+/** 工作流最终输出：聚合结果（JSON）转成易读文本——单个输出直接给值，多个输出列成列表 */
+const formatWorkflowOutput = (raw: unknown): string => {
+  const text = typeof raw === 'string' ? raw : prettyJson(raw)
+  const trimmed = String(text ?? '').trim()
+  if (!trimmed.startsWith('{')) return trimmed
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>
+    const entries = Object.entries(parsed || {})
+    if (!entries.length) return trimmed
+    if (entries.length === 1) {
+      const value = entries[0][1]
+      return typeof value === 'string' ? value : prettyJson(value)
+    }
+    return entries.map(([key, value]) => `- **${key}**：${typeof value === 'string' ? value : prettyJson(value)}`).join('\n')
+  } catch {
+    return trimmed
+  }
+}
+
 const initWorkflowRunner = () => {
   if (!currentChat.value.config.workflowData) {
     globalExecutionState.value.workflowRunner = null
@@ -4933,7 +5311,7 @@ const initWorkflowRunner = () => {
     return
   }
   
-  const callbacks: ExecutionCallback = {
+  const callbacks: ChatWorkflowCallbacks = {
     onNodeStart: (nodeId, nodeName, nodeType) => {
       console.log(`工作流节点开始: ${nodeName} (${nodeType})`)
       
@@ -4947,7 +5325,8 @@ const initWorkflowRunner = () => {
           name: nodeName,
           nodeType: nodeType,
           status: 'running',
-          startTime: Date.now()
+          startTime: Date.now(),
+          args: workflowUnitArgs(workflowNodeData(nodeId))
         }
         
         if (existingIndex !== -1) {
@@ -4960,12 +5339,26 @@ const initWorkflowRunner = () => {
         
         workflowMessage.executionProgress = {
           completed: workflowMessage.executionUnits.filter(u => u.status === 'success' || u.status === 'error').length,
-          total: currentChat.value.config.workflowData!.items.length
+          total: globalExecutionState.value.workflowRunner?.nodeCount ?? 0
         }
       }
       
       setStep(`执行节点: ${nodeName}`, 'fa fa-cog fa-spin', 'step-executing')
       scrollToBottom()
+    },
+    
+    // 节点流式输出：写进该步骤卡片（折叠态就是单行摘要，展开可看全文），与智能体模式一致
+    onNodeStream: (nodeId, _chunk, accumulated) => {
+      const workflowMessage = currentChat.value.messages.find(msg => msg.isExecuting && msg.executionType === 'workflow')
+      if (!workflowMessage?.executionUnits) return
+      const index = workflowMessage.executionUnits.findIndex(u => u.id === nodeId)
+      if (index === -1) return
+      const unit = workflowMessage.executionUnits[index] as WorkflowUnit
+      unit.streamContent = accumulated
+      unit.status = 'running'
+      workflowMessage.executionUnits.splice(index, 1, { ...unit })
+      workflowMessage.executionUnits = [...workflowMessage.executionUnits]
+      scheduleAutoScroll()
     },
     
     onNodeComplete: (nodeId, nodeName, nodeType, status, result) => {
@@ -4978,43 +5371,25 @@ const initWorkflowRunner = () => {
         const nodeIndex = workflowMessage.executionUnits.findIndex(u => u.id === nodeId)
         if (nodeIndex !== -1) {
           const unit = workflowMessage.executionUnits[nodeIndex] as WorkflowUnit
+          let resultText = workflowUnitResultText(nodeType, result)
+          // 结束节点常常没声明输出（对话型应用由「直接回复」节点给出正文）：用已执行的回复节点正文兜底，
+          // 这样最后一张步骤卡片与消息正文一致，不会显示空 JSON
+          if (!resultText && nodeType === 'end') {
+            resultText = (workflowMessage.executionUnits as WorkflowUnit[])
+              .filter((u) => u.nodeType === 'answer' && u.resultPreview)
+              .map((u) => String(u.resultPreview))
+              .join('\n\n')
+          }
           const updatedUnit: WorkflowUnit = {
             ...unit,
-            status: (status === 'idle' ? 'pending' : status) as 'pending' | 'running' | 'success' | 'error',
-            endTime: Date.now()
+            // 状态用对话侧的四态（pending/running/success/error），与智能体模式一致
+            status: status,
+            endTime: Date.now(),
+            streamContent: undefined,
+            resultPreview: resultText || unit.resultPreview
           }
-          
-          if (result) {
-            try {
-              const parsedResult = JSON.parse(result)
-              if (parsedResult.result) {
-                if (nodeType === 'reasoning' || nodeType === 'python') {
-                  updatedUnit.resultPreview = typeof parsedResult.result === 'string' 
-                    ? parsedResult.result
-                    : JSON.stringify(parsedResult.result, null, 2)
-                } else {
-                  updatedUnit.resultPreview = typeof parsedResult.result === 'string' 
-                    ? parsedResult.result.substring(0, 200) + (parsedResult.result.length > 200 ? '...' : '')
-                    : JSON.stringify(parsedResult.result).substring(0, 200) + '...'
-                }
-              } else {
-                if (nodeType === 'python') {
-                  updatedUnit.resultPreview = typeof result === 'string' ? result : String(result)
-                } else {
-                  updatedUnit.resultPreview = typeof result === 'string' 
-                    ? result.substring(0, 300)
-                    : String(result).substring(0, 300)
-                }
-              }
-            } catch {
-              if (nodeType === 'python') {
-                updatedUnit.resultPreview = typeof result === 'string' ? result : String(result)
-              } else {
-                updatedUnit.resultPreview = typeof result === 'string' 
-                  ? result.substring(0, 300)
-                  : String(result).substring(0, 300)
-              }
-            }
+          if (!resultText && status === 'error') {
+            updatedUnit.error = typeof result === 'string' ? result : String(result ?? '')
           }
           
           workflowMessage.executionUnits.splice(nodeIndex, 1, updatedUnit)
@@ -5023,7 +5398,7 @@ const initWorkflowRunner = () => {
         
         workflowMessage.executionProgress = {
           completed: workflowMessage.executionUnits.filter(u => u.status === 'success' || u.status === 'error').length,
-          total: currentChat.value.config.workflowData!.items.length
+          total: globalExecutionState.value.workflowRunner?.nodeCount ?? 0
         }
       }
       
@@ -5113,9 +5488,12 @@ const initWorkflowRunner = () => {
         const nodeIndex = workflowMessage.executionUnits.findIndex(u => u.id === nodeId)
         if (nodeIndex !== -1) {
           const unit = workflowMessage.executionUnits[nodeIndex] as WorkflowUnit
+          const decisionText = `${store.locales=='zh' ? '选择分支: ' : 'Selected branch: '}${branchName}`
           const updatedUnit = {
             ...unit,
-            decisionInfo: `${store.locales=='zh' ? '选择分支: ' : 'Selected branch: '}${branchName}`
+            decisionInfo: decisionText,
+            // 折叠态摘要显示选中的分支（分支节点「结果」就是这个选择）
+            resultPreview: unit.resultPreview || decisionText
           }
           workflowMessage.executionUnits.splice(nodeIndex, 1, updatedUnit)
           workflowMessage.executionUnits = [...workflowMessage.executionUnits]
@@ -5144,7 +5522,7 @@ const initWorkflowRunner = () => {
       if (workflowMessageIndex !== -1) {
         const workflowMessage = messages[workflowMessageIndex]
         workflowMessage.isExecuting = false
-        workflowMessage.content = success ? finalResult : `${store.locales=='zh' ? '工作流执行失败: ' : 'Workflow execution failed: '} ${finalResult}`
+        workflowMessage.content = success ? formatWorkflowOutput(finalResult) : `${store.locales=='zh' ? '工作流执行失败: ' : 'Workflow execution failed: '}${finalResult}`
         workflowMessage.executionTime = Date.now() - workflowStartTime.value
         
         if (success && aggregatedResults && aggregatedResults.executionStats) {
@@ -5190,11 +5568,12 @@ const initWorkflowRunner = () => {
     }
   }
   
-  globalExecutionState.value.workflowRunner = new WorkflowRunner(
-    currentChat.value.config.workflowData,
+  globalExecutionState.value.workflowRunner = new WorkflowChatRunner({
     store,
-    callbacks
-  )
+    t: createFlowT(store.locales || 'zh'),
+    document: currentChat.value.config.workflowData,
+    callbacks,
+  })
 }
 
 const workflowStartTime = workflowStartTimeRef
@@ -5206,22 +5585,23 @@ const validateWorkflow = async (): Promise<boolean> => {
   
   try {
     const workflowData = currentChat.value.config.workflowData
+    const graph = workflowData.workflow?.graph
     
-    if (!workflowData.items || !Array.isArray(workflowData.items)) {
-      throw new Error('无效的工作流文件格式')
+    if (!graph || !Array.isArray(graph.nodes)) {
+      throw new Error(store.locales=='zh' ? '无效的工作流文件格式' : 'Invalid workflow file format')
     }
     
-    const nodeTypes = new Set(workflowData.items.map((item: any) => item.type))
+    const nodeTypes = new Set(graph.nodes.map((node: any) => String(node.data.type)))
     const requiredTypes = ['start', 'end']
     
     for (const type of requiredTypes) {
       if (!nodeTypes.has(type)) {
-        throw new Error(`工作流缺少${type}节点`)
+        throw new Error(store.locales=='zh' ? `工作流缺少 ${type} 节点` : `Workflow has no ${type} node`)
       }
     }
     
-    if (!workflowData.links || !Array.isArray(workflowData.links)) {
-      throw new Error('工作流连接数据无效')
+    if (!Array.isArray(graph.edges)) {
+      throw new Error(store.locales=='zh' ? '工作流连接数据无效' : 'Invalid workflow edges')
     }
     
     return true
@@ -5265,11 +5645,20 @@ const runWorkflow = async (userInput: string) => {
   autoScrollEnabled.value = true
   scrollToBottom()
   
-  // 节点消息映射：nodeId → 占位消息对象
-  const nodeMessages = new Map<number, ChatMessage>()
-  
-  // 保存原回调引用
+  // 该次执行的步骤统一挂在一条助手消息上（executionUnits → tool-box 时间线），
+  // 与智能体模式的步骤样式一致
   const runner = globalExecutionState.value.workflowRunner
+  const workflowMessage: ChatMessage = {
+    role: 'assistant',
+    content: '',
+    timestamp: Date.now(),
+    executionType: 'workflow',
+    isExecuting: true,
+    executionUnits: [],
+    executionProgress: { completed: 0, total: runner?.nodeCount ?? 0 }
+  }
+  currentChatData.messages.push(workflowMessage)
+  scrollToBottom()
   
   // 构建带文件内容的工作流输入
   let workflowInput = userInput
@@ -5288,85 +5677,9 @@ const runWorkflow = async (userInput: string) => {
       throw new Error('设置起始节点输入失败')
     }
     
-    // 临时替换回调以实现每步独立消息框
-    const stepCallbacks: ExecutionCallback = {
-      onNodeStart: (nodeId, nodeName, nodeType) => {
-        // 开始/结束节点不创建消息框（开始节点即用户输入，结束节点内容冗余）
-        if (nodeType === 'start' || nodeType === 'end') return
-        
-        // 创建该节点独立的占位消息
-        const stepMsg: ChatMessage = {
-          role: 'assistant',
-          content: '',
-          timestamp: Date.now(),
-          executionType: 'workflow',
-          isExecuting: true,
-          executionName: nodeName
-        }
-        currentChatData.messages.push(stepMsg)
-        nodeMessages.set(nodeId, stepMsg)
-        
-        setStep(`执行节点: ${nodeName}`, 'fa fa-cog fa-spin', 'step-executing')
-        scrollToBottom()
-      },
-      
-      onNodeStream: (nodeId, chunk, accumulated) => {
-        const stepMsg = nodeMessages.get(nodeId)
-        if (stepMsg) {
-          stepMsg.content = accumulated
-          stepMsg.streaming = true
-          const idx = currentChatData.messages.findIndex(m => m.timestamp === stepMsg.timestamp)
-          if (idx !== -1) {
-            currentChatData.messages[idx] = { ...stepMsg }
-          }
-          scheduleAutoScroll()
-        }
-      },
-      
-      onNodeComplete: (nodeId, nodeName, nodeType, status, result) => {
-        // 开始/结束节点不管
-        if (nodeType === 'start' || nodeType === 'end') return
-        
-        const stepMsg = nodeMessages.get(nodeId)
-        if (stepMsg) {
-          if (!stepMsg.content && result) {
-            try {
-              const parsed = typeof result === 'string' ? JSON.parse(result) : result
-              stepMsg.content = parsed.result || parsed.response || JSON.stringify(parsed)
-              
-              // 知识检索节点：提取相关片段到 kbInfo
-              if (nodeType === 'knowledge' && parsed.relevantBlocks) {
-                stepMsg.kbInfo = {
-                  kbPath: parsed.kbPath || '',
-                  relevantBlocks: parsed.relevantBlocks.map((b: any) => ({
-                    label: b.metadata?.source || b.label || '',
-                    content: b.text || b.content || '',
-                    similarity: b.similarity || 0
-                  }))
-                }
-              }
-            } catch {
-              stepMsg.content = String(result)
-            }
-          }
-          stepMsg.isExecuting = false
-          stepMsg.streaming = false
-          const idx = currentChatData.messages.findIndex(m => m.timestamp === stepMsg.timestamp)
-          if (idx !== -1) {
-            currentChatData.messages[idx] = { ...stepMsg }
-          }
-        }
-      }
-    }
-    
-    // 保存原回调，替换为每步独立消息框的回调
-    const origCallbacks = runner.callbacks
-    runner.callbacks = stepCallbacks
-    
+    // 回调由 runner 自带（initWorkflowRunner 里注册）：节点开始 / 流式 / 完成 / 分支都会写进
+    // 上面那条助手消息的 executionUnits，渲染出来就是与智能体模式一致的步骤卡片列表
     await runner.run()
-    
-    // 恢复原回调
-    runner.callbacks = origCallbacks
 
     // 生成聊天标题（取最后一条助理消息的内容；传 currentChatData 以定位实际所属聊天）
     const lastAssistantMsg = [...currentChatData.messages].reverse().find(m => m.role === 'assistant')
@@ -5377,17 +5690,19 @@ const runWorkflow = async (userInput: string) => {
   } catch (error: any) {
     console.error('运行工作流失败:', error)
     
-    // 如果有正在执行的节点消息，标记为失败
-    for (const [, stepMsg] of nodeMessages) {
-      if (stepMsg.isExecuting) {
-        stepMsg.isExecuting = false
-        stepMsg.content = stepMsg.content || `${store.locales=='zh' ? '执行失败: ' : 'Failed: '} ${error.message}`
-        const idx = currentChatData.messages.findIndex(m => m.timestamp === stepMsg.timestamp)
-        if (idx !== -1) {
-          currentChatData.messages[idx] = { ...stepMsg }
-        }
-      }
+    // 收尾：还在执行的步骤标记为失败，消息补上错误内容并结束执行态（与智能体模式一致）
+    if (workflowMessage.executionUnits?.length) {
+      workflowMessage.executionUnits = workflowMessage.executionUnits.map((unit: any) =>
+        unit.status === 'running'
+          ? { ...unit, status: 'error', endTime: Date.now(), error: unit.error || String(error?.message || error) }
+          : unit,
+      )
     }
+    workflowMessage.isExecuting = false
+    workflowMessage.streaming = false
+    workflowMessage.content = workflowMessage.content
+      || `${store.locales=='zh' ? '工作流执行失败: ' : 'Workflow execution failed: '} ${error?.message || error}`
+    workflowMessage.executionTime = Date.now() - (workflowStartTime.value || Date.now())
     
     workflowError.value = true
     
@@ -6000,21 +6315,30 @@ const sendChatMessage = async (message: string) => {
   scrollToBottom()
   
   try {
-    let messages
-    if (userMessage.images && userMessage.images.length > 0) {
-      messages = buildMultimodalMessages(currentChatData, retrievedContext, userMessage.images)
-    } else {
-      messages = buildMessagesWithFunction(currentChatData, retrievedContext)
+    // 上下文压缩（P0）：发送前预算检查——占用过高先把旧轮次压成摘要，
+    // 避免云端 400 中断、也避免本地后端静默截断 prompt 头部（"失忆"）
+    if (await compactChatBeforeSend(currentChatData)) {
+      ElMessage.info(store.locales == 'zh'
+        ? '上下文占用较高，已自动压缩较早的对话（原消息仍保留在聊天里）'
+        : 'Context was getting long — earlier turns were summarized (original messages are kept).')
     }
-    // Agent 预设模式：注入预设系统提示（角色设定已合并进预设 systemPrompt）
-    if (currentChatData.mode === 'agent' && currentChatData.config.presetId) {
-      const preset = store.agentPresets.find((c: any) => c.id === currentChatData.config.presetId)
-      if (preset) {
-        const sysContent = preset.systemPrompt?.trim()
-          || (store.locales == 'zh' ? '你是一个乐于助人的AI助手。' : 'You are a helpful AI assistant.')
-        messages = [{ role: 'system', content: sysContent }, ...messages]
+    // 请求消息构造（含压缩摘要水位）；溢出自愈重试时复用同一构造逻辑
+    const rebuildChatMessages = () => {
+      let list: any[] = userMessage.images && userMessage.images.length > 0
+        ? buildMultimodalMessages(currentChatData, retrievedContext, userMessage.images)
+        : buildMessagesWithFunction(currentChatData, retrievedContext)
+      // Agent 预设模式：注入预设系统提示（角色设定已合并进预设 systemPrompt）
+      if (currentChatData.mode === 'agent' && currentChatData.config.presetId) {
+        const preset = store.agentPresets.find((c: any) => c.id === currentChatData.config.presetId)
+        if (preset) {
+          const sysContent = preset.systemPrompt?.trim()
+            || (store.locales == 'zh' ? '你是一个乐于助人的AI助手。' : 'You are a helpful AI assistant.')
+          list = [{ role: 'system', content: sysContent }, ...list]
+        }
       }
+      return list
     }
+    let messages = rebuildChatMessages()
     // 流式渲染缓冲（节流：每 ~100ms 才写入一次消息，避免每 chunk 全量 markdown 重渲染卡顿）
     let streamBuffer = ''
     
@@ -6043,9 +6367,31 @@ const sendChatMessage = async (message: string) => {
     const controller = new AbortController()
     globalExecutionState.value.abortController = controller
 
-    await store.sendToAI(
-      messages,
-      {
+    /** 失败收尾（原 onError 行为）：写错误消息 + 复位执行态 */
+    const failChatSend = (error: Error) => {
+      console.error('AI请求失败:', error)
+      const lastMessage = currentChatData.messages[currentChatData.messages.length - 1]
+      if (lastMessage.role === 'assistant') {
+        lastMessage.content = '抱歉，请求失败：' + error.message
+        // 清除开始时间标记
+        delete lastMessage._startTime
+      }
+      // 除对话里的错误消息外，再在输入行给一个图标提示（悬停看全文）
+      setSystemError('抱歉，请求失败：' + error.message)
+      currentChatData.isGenerating = false
+      currentChatData.activeRequestId = undefined
+      retrievalStats.value = null
+      // 修复3: 清除步骤指示器
+      globalExecutionState.value.currentStep = ''
+      globalExecutionState.value.stepIcon = ''
+      globalExecutionState.value.stepIndicatorClass = ''
+      globalExecutionState.value.abortController = null
+      saveChats()
+    }
+
+    // 上下文超限不在 onError 里直接收尾：先记下，压缩旧轮次后自动重发一次
+    let pendingOverflow = ''
+    const sendCallbacks: any = {
         onStream: (chunk: string) => {
           streamBuffer += chunk
           // 节流渲染：保持 markdown 渲染但限制频率（每 ~100ms 一次）
@@ -6112,30 +6458,50 @@ const sendChatMessage = async (message: string) => {
           completeAssistantReply(currentChatData, content, metadata)
         },
         onError: (error: Error) => {
-          console.error('AI请求失败:', error)
-          const lastMessage = currentChatData.messages[currentChatData.messages.length - 1]
-          if (lastMessage.role === 'assistant') {
-            lastMessage.content = '抱歉，请求失败：' + error.message
-            // 清除开始时间标记
-            delete lastMessage._startTime
+          // 上下文超限（P0）：先不当失败收尾，交给外层压缩后自动重发一次
+          if (isContextOverflowError(error.message)) {
+            console.warn('[chat-compact] 上下文超限 → 压缩旧轮次后重发:', error.message)
+            pendingOverflow = error.message
+            return
           }
-          // 除对话里的错误消息外，再在输入行给一个图标提示（悬停看全文）
-          setSystemError('抱歉，请求失败：' + error.message)
-          
-          currentChatData.isGenerating = false
-          currentChatData.activeRequestId = undefined
-          retrievalStats.value = null
-          // 修复3: 清除步骤指示器
-          globalExecutionState.value.currentStep = ''
-          globalExecutionState.value.stepIcon = ''
-          globalExecutionState.value.stepIndicatorClass = ''
-          globalExecutionState.value.abortController = null
-          saveChats()
+          failChatSend(error)
         },
         signal: controller.signal,
         requestId
+    }
+
+    // 发送（含上下文超限自愈）：首次失败若是「上下文超限」，压缩旧轮次后自动重发一次
+    for (let effort = 0; ; effort++) {
+      pendingOverflow = ''
+      try {
+        await store.sendToAI(messages, sendCallbacks)
+      } catch (e) {
+        if (!pendingOverflow) throw e
       }
-    )
+      if (!pendingOverflow || effort >= 1) {
+        if (pendingOverflow) failChatSend(new Error(pendingOverflow))
+        break
+      }
+      const res = await compactChat(currentChatData, { summarize: runOneShotLlm })
+      if (!res.ok) {
+        failChatSend(new Error(pendingOverflow))
+        break
+      }
+      messages = rebuildChatMessages()
+      // 复位占位助手消息（首次失败时还没写入任何内容）
+      const last = currentChatData.messages[currentChatData.messages.length - 1]
+      if (last?.role === 'assistant') {
+        last.content = ''
+        last.streaming = true
+        last._startTime = Date.now()
+      }
+      streamBuffer = ''
+      currentChatData.isGenerating = true
+      currentChatData.activeRequestId = requestId
+      ElMessage.info(store.locales == 'zh'
+        ? '上下文超限，已自动压缩较早的对话并重试'
+        : 'Context limit exceeded — earlier turns were summarized and the request retried.')
+    }
   } catch (error) {
     console.error('发送消息失败:', error)
     const lastMessage = currentChatData.messages[currentChatData.messages.length - 1]
@@ -6337,46 +6703,55 @@ const contextUsageTooltip = computed(() => {
 })
 
 const buildMultimodalMessages = (chat: Chat, context: string, images: Array<string | Uint8Array | ArrayBuffer>) => {
-  const historyMessages = chat.messages
-    .slice(0, -1)
-    .map(msg => {
-      if (msg.images && msg.images.length > 0) {
-        return {
-          role: msg.role,
-          content: msg.content,
-          images: msg.images
-        }
-      } else {
-        return {
-          role: msg.role,
-          content: msg.content
-        }
-      }
-    })
-  
+  // 历史由 chatCompact 统一构造：自动应用压缩水位（不改变可见消息）
+  const historyMessages = chatHistoryForRequest(chat, true)
+
   const currentMessage = {
     role: 'user' as const,
     content: context,
     images: images
   }
-  
+
   return [ ...historyMessages, currentMessage]
 }
 
-const buildMessagesWithFunction = (chat: Chat, context: string) => {  
-  const historyMessages = chat.messages
-    .slice(0, -1)
-    .map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }))
-  
+const buildMessagesWithFunction = (chat: Chat, context: string) => {
+  const historyMessages = chatHistoryForRequest(chat, false)
+
   const lastMessage = {
     role: 'user' as const,
     content: context
   }
-  
+
   return [ ...historyMessages, lastMessage]
+}
+
+/**
+ * 发送前预算检查：占用达 80% 时先把旧轮次压成摘要。
+ * 返回是否真的压缩了（调用方据此给用户一次可见提示）。
+ */
+const compactChatBeforeSend = async (chatData: any): Promise<boolean> => {
+  if (!shouldCompactChat(chatData, contextLimit.value)) return false
+  const used = estimateChatContextTokens(chatData)
+  console.info(`[chat-compact] 占用约 ${(used / Math.max(1, contextLimit.value) * 100).toFixed(0)}%（${used}/${contextLimit.value} tokens）→ 压缩旧轮次`)
+  const res = await compactChat(chatData, {
+    summarize: async (prompt: string) => runOneShotLlm(prompt),
+  })
+  if (!res.ok) {
+    console.warn('[chat-compact] 压缩未生效:', res.error)
+    return false
+  }
+  console.info(`[chat-compact] 已压缩 ${res.dropped} 条消息${res.fallback ? '（无 LLM 兜底摘要）' : ''}`)
+  return true
+}
+
+/** 一次性 LLM 调用（无工具）：供压缩摘要等旁路请求复用当前聊天模型配置 */
+const runOneShotLlm = async (prompt: string): Promise<string> => {
+  let out = ''
+  await store.sendToAI([{ role: 'user', content: prompt }], {
+    onStream: (chunk: string) => { out += chunk },
+  })
+  return out
 }
 
 // ==================== 输入框拖动缩放 ====================
@@ -7222,10 +7597,45 @@ const formatTime = (timestamp: number): string => {
 }
 
 /** 工具单元图标（智能体：工具名映射；工作流节点：默认齿轮） */
+/** 工作流节点类型 → 图标（智能体模式按工具名取图标，工作流按节点类型取，两者风格一致） */
+const workflowNodeIcons: Record<string, string> = {
+  start: 'fa-play-circle',
+  'start-placeholder': 'fa-play-circle',
+  end: 'fa-stop-circle',
+  answer: 'fa-comment-o',
+  llm: 'fa-magic',
+  'knowledge-retrieval': 'fa-book',
+  'question-classifier': 'fa-tags',
+  'if-else': 'fa-code-fork',
+  code: 'fa-code',
+  'template-transform': 'fa-file-text-o',
+  'http-request': 'fa-exchange',
+  tool: 'fa-wrench',
+  'variable-aggregator': 'fa-object-group',
+  'variable-assigner': 'fa-pencil-square-o',
+  assigner: 'fa-pencil-square-o',
+  'parameter-extractor': 'fa-filter',
+  iteration: 'fa-refresh',
+  'iteration-start': 'fa-sign-in',
+  loop: 'fa-repeat',
+  'loop-start': 'fa-sign-in',
+  'loop-end': 'fa-sign-out',
+  'document-extractor': 'fa-file-o',
+  'list-operator': 'fa-list-ol',
+  'ai-km-word': 'fa-file-word-o',
+  'ai-km-csv': 'fa-table',
+  'ai-km-file': 'fa-file-code-o',
+  'ai-km-knowledge': 'fa-database',
+  'ai-km-mcp': 'fa-plug',
+  'ai-km-subflow': 'fa-sitemap'
+}
+
 const unitToolIcon = (unit: any): string => {
   if (unit.stepType === 'content') return 'fa-lightbulb-o'
   const toolName = unit.description
   if (toolName && toolIcons[toolName]) return toolIcons[toolName]
+  const nodeIcon = workflowNodeIcons[String(unit.nodeType || '')]
+  if (nodeIcon) return nodeIcon
   return unit.nodeType === 'python' ? 'fa-code' : 'fa-cog'
 }
 
@@ -7651,6 +8061,35 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   --chat-sidebar-w: 220px;
 }
 
+/* ====== 拖入文件提示 ====== */
+.drop-files-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 3000;
+  pointer-events: none; /* 不拦截拖放事件本身（dragover/drop 仍落在容器上） */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--backgroundColor) 78%, transparent);
+  border: 2px dashed var(--fontActiveColor);
+  border-radius: 8px;
+}
+.drop-files-hint-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 26px;
+  border-radius: 10px;
+  background: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  color: var(--fontColor);
+}
+.drop-files-hint-card i { font-size: 26px; color: var(--fontActiveColor); }
+.drop-files-hint-sub { font-size: 11px; opacity: 0.65; text-align: center; }
+
 /* ====== 分支按钮样式 ====== */
 .branch-btn:hover {
   background-color: var(--menuActiveColor);
@@ -8006,13 +8445,13 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .preset-picker-item.swarm-missing {
   color: #e6a23c;
 }
-/* 集群设置浮层：比单纯预设列表内容多（成员 + 运行方式 + 总结 + 管理预设），放宽高度与宽度 */
+/* 集群成员浮层：比单纯预设列表内容多（成员 + 总结 + 管理预设），放宽高度与宽度 */
 .agent-preset-picker.swarm-picker {
   min-width: 200px;
   max-width: 240px;
   max-height: 300px;
 }
-/* 集群设置浮层：名称自适应 + 勾选序号徽标（发言顺序）+ 分组标题 */
+/* 集群成员浮层：名称自适应 + 勾选序号徽标（发言顺序） */
 .swarm-picker-name {
   flex: 1;
   min-width: 0;
@@ -8031,11 +8470,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   text-align: center;
   color: var(--backgroundColor);
   background: #2d8cf0;
-}
-.swarm-picker-caption {
-  padding: 4px 8px 2px;
-  font-size: 11px;
-  opacity: 0.6;
 }
 .preset-picker-item:hover {
   background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
@@ -8119,6 +8553,11 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 /* 知识库检索策略选择：样式与 mode-select 统一，仅宽度不同 */
 .strategy-select {
   width: 96px;
+}
+
+/* 集群运行方式下拉：与成员 chip 相邻（cluster 设置组），标签为短名，宽度够「全员响应」 */
+.swarm-mode-select {
+  width: 104px;
 }
 
 /* 已关联项标签（点击重新选择） */

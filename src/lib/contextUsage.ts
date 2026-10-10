@@ -21,15 +21,29 @@
  */
 
 import { normalizeLlmType } from '@/shared/llmSources'
+// token 估算与压缩预算口径统一放在 @/shared/contextBudget（主进程 agent-loop 共用同一实现）
+import {
+  estimateTokens,
+  CONTEXT_WARN_RATIO,
+  CONTEXT_COMPACT_RATIO,
+  FALLBACK_CONTEXT_WINDOW,
+  IMAGE_TOKEN_ESTIMATE,
+  TOOL_SCHEMA_TOKEN_ESTIMATE,
+  estimateMessagesTokens,
+  type BudgetMessage,
+} from '@/shared/contextBudget'
+
+export {
+  estimateTokens,
+  estimateMessagesTokens,
+  CONTEXT_WARN_RATIO,
+  CONTEXT_COMPACT_RATIO,
+  IMAGE_TOKEN_ESTIMATE,
+  TOOL_SCHEMA_TOKEN_ESTIMATE,
+}
 
 /** 完全无法判定窗口时的兜底分母（主流云端模型常见档位；tooltip 会显式标注「未知」） */
-export const UNKNOWN_CONTEXT_WINDOW = 128_000
-
-/** 单张图片计入上下文的粗略 token（视觉模型高细节档量级；分辨率差异大，取中值） */
-export const IMAGE_TOKEN_ESTIMATE = 800
-
-/** 单个工具/函数的 JSON schema 粗略 token（智能体每一步请求都要带上全部工具定义） */
-export const TOOL_SCHEMA_TOKEN_ESTIMATE = 140
+export const UNKNOWN_CONTEXT_WINDOW = FALLBACK_CONTEXT_WINDOW
 
 /** 来源默认窗口（tokens）：仅在模型名关键字未命中时使用 */
 const PROVIDER_CONTEXT_WINDOW: Record<string, number> = {
@@ -222,21 +236,23 @@ export function manualContextWindow(llm: any, provider: string, customSourceInde
 // ---------------------------------------------------------------------------
 
 /**
- * 按字符类型粗估 token：CJK ≈ 1.5 字/token（主流 BPE 中文实测 1.4~1.8），
- * ASCII ≈ 4 字符/token，其它（emoji/西里尔等）折中按 2。
+ * 解析某来源 / 模型「实际生效」的窗口上限（渲染层唯一入口）。
+ * 与 home.vue 圆环的分母同源：手填 > 已加载实例探测值 > 记住的探测值 > 模型上限 > 模型名 > 来源默认。
+ * 供上下文压缩预算取用（智能体创建时把结果带进主进程）。
  */
-export function estimateTokens(text: string): number {
-  if (!text) return 0
-  let cjk = 0
-  let ascii = 0
-  let other = 0
-  for (const ch of text) {
-    const code = ch.codePointAt(0)!
-    if ((code >= 0x2e80 && code <= 0x9fff) || (code >= 0xac00 && code <= 0xd7af) || (code >= 0xf900 && code <= 0xfaff)) cjk++
-    else if (code < 0x80) ascii++
-    else other++
-  }
-  return Math.ceil(cjk / 1.5) + Math.ceil(ascii / 4) + Math.ceil(other / 2)
+export function resolveLimitFor(
+  llm: any,
+  opts: { provider: string; model?: string | null; customSourceIndex?: number | null },
+): ContextLimit {
+  const key = realContextWindowCacheKey(opts.provider, String(opts.model || ''), opts.customSourceIndex)
+  return resolveContextLimit({
+    manual: manualContextWindow(llm, opts.provider, opts.customSourceIndex),
+    realLoaded: getCachedLoadedContextWindow(key),
+    probed: probedContextWindow(llm, key),
+    real: getCachedRealContextWindow(key),
+    provider: opts.provider,
+    model: opts.model,
+  })
 }
 
 /** 安全 JSON 序列化（循环引用/超大对象兜底为空串） */
@@ -293,15 +309,23 @@ export function estimateChatContextTokens(chat: any): number {
   const msgs: any[] = (chat && chat.messages) || []
   if (!msgs.length) return 0
 
+  // 上下文压缩（P0）：前 coveredCount 条消息已不再随请求发出，改由压缩摘要替代
+  const cp = chat?.compaction
+  const covered = cp && Number(cp.coveredCount) > 0 ? Math.min(Number(cp.coveredCount), msgs.length) : 0
+
   let total = 0
-  for (const m of msgs) {
+  if (covered > 0 && cp?.summary) total += estimateTokens(String(cp.summary)) + 16
+  for (let i = covered; i < msgs.length; i++) {
+    const m = msgs[i]
     if (typeof m?.content === 'string') total += estimateTokens(m.content)
   }
 
-  const lastAssistant = [...msgs].reverse().find((m) => m?.role === 'assistant')
-  const lastUser = [...msgs].reverse().find((m) => m?.role === 'user')
+  const lastAssistantIdx = msgs.reduce((acc, m, i) => (m?.role === 'assistant' ? i : acc), -1)
+  const lastUserIdx = msgs.reduce((acc, m, i) => (m?.role === 'user' ? i : acc), -1)
+  const lastAssistant = lastAssistantIdx >= 0 ? msgs[lastAssistantIdx] : undefined
+  const lastUser = lastUserIdx >= 0 ? msgs[lastUserIdx] : undefined
 
-  if (lastAssistant) {
+  if (lastAssistant && lastAssistantIdx >= covered) {
     if (typeof lastAssistant.ctxSeedTokens === 'number') total += lastAssistant.ctxSeedTokens
     const blocks = lastAssistant.kbInfo?.relevantBlocks
     if (Array.isArray(blocks)) {
@@ -312,7 +336,7 @@ export function estimateChatContextTokens(chat: any): number {
     }
   }
 
-  if (lastUser) {
+  if (lastUser && lastUserIdx >= covered) {
     if (Array.isArray(lastUser.images)) total += lastUser.images.length * IMAGE_TOKEN_ESTIMATE
     // 文件附件正文经 retrievedContext 前置进请求，但不在 m.content 里
     if (Array.isArray(lastUser.fileAttachments)) {
@@ -321,4 +345,14 @@ export function estimateChatContextTokens(chat: any): number {
   }
 
   return total
+}
+
+/** 供压缩/预算使用的消息投影（只取模型可见部分） */
+export function toBudgetMessages(msgs: readonly any[] | null | undefined): BudgetMessage[] {
+  return (msgs || []).map((m) => ({
+    role: m?.role,
+    content: typeof m?.content === 'string' ? m.content : '',
+    toolCalls: m?.toolCalls,
+    images: Array.isArray(m?.images) ? m.images.length : undefined,
+  }))
 }

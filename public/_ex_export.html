@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<!--
+  报告配图导出页 v2（把 drawio 逐页导出成报告用的 PNG）
+
+  为什么不用「整页截图 + 裁白边」：截图受浏览器视口限制，画布比视口大时
+  右下会被截掉（症状：右侧表格、底部行看不见）。本页改用：
+    · 内容边界直接从 drawio XML 算（union of vertex / edge 几何），不受视口
+      和 viewer 添加的页面白底影响 → 不会切内容；
+    · 再把 viewer 包内容那层 <g> 的 transform（如 translate(0,-30)）合成进
+      裁剪框 —— 否则图片会整体偏移，症状是「左上角标题被切」；
+    · 按内容边界裁切 + 少量留白 → 没有多余空白；
+    · 在页面内用 canvas 光栅化（SCALE 倍），再 POST 到本地接收服务落盘
+      （Playwright 沙箱里没有 fs / fetch，数据只能从页面发出去）。
+
+  drawio 侧的配套约定（否则仍会有空白）：
+    · title() / note() 的单元格宽度按文本实测收窄，不要用整页宽；
+    · note() 的高度按行数自适应，否则多行注释会被截；
+    · 条形图的数值用 d.txt() 放在条形右侧，写在条内会压到左邻标签上。
+
+  用法：
+    1. AI-KM 跑 npm run dev（已内置 drawio viewer）
+    2. 启动本目录的 图片接收服务.py（监听 127.0.0.1:8791）
+    3. 把 06_统计聚合/输出/*.drawio 拷到 AI-KM public/，命名为
+         _ex_flow.drawio(数据获取与处理流程图) / _ex_full.drawio(全量)
+         _ex_spk.drawio(发言人) / _ex_com.drawio(委员会)
+       并把本文件也拷进 public/
+    4. 打开 http://localhost:5173/导出图片.html，调用 window.__run()
+       （或 window.__run(10) 只导某一张）
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>export v2</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #fff; }
+  #stage { position: absolute; left: 0; top: 0; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="/drawio/js/viewer-static.min.js"></script>
+<script>
+const JOBS = [
+  {src:'_ex_flow.drawio', pg:0,  out:'01_数据获取与处理流程图'},
+  {src:'_ex_full.drawio', pg:0,  out:'02_人员数据规模与质量'},
+  {src:'_ex_full.drawio', pg:1,  out:'03_性别分布'},
+  {src:'_ex_full.drawio', pg:2,  out:'04_族裔大区分布'},
+  {src:'_ex_full.drawio', pg:4,  out:'05_国家分布'},
+  {src:'_ex_full.drawio', pg:5,  out:'06_中国专题_规模与口径'},
+  {src:'_ex_full.drawio', pg:6,  out:'07_中国专题_构成对比'},
+  {src:'_ex_full.drawio', pg:7,  out:'08_中国专题_逐年趋势'},
+  {src:'_ex_full.drawio', pg:9,  out:'09_年度趋势'},
+  {src:'_ex_full.drawio', pg:10, out:'10_重点会议逐年'},
+  {src:'_ex_full.drawio', pg:12, out:'11_全库基线对比'},
+  {src:'_ex_spk.drawio',  pg:1,  out:'12_发言人_性别分布'},
+  {src:'_ex_com.drawio',  pg:1,  out:'13_委员会_性别分布'},
+  {src:'_ex_full.drawio', pg:3,  out:'14_族裔细类分布'},
+  {src:'_ex_disc.drawio', pg:0,  out:'学科00_采集口径与完整性'},
+  {src:'_ex_disc.drawio', pg:1,  out:'学科01_完整性四指标'},
+  {src:'_ex_disc.drawio', pg:2,  out:'学科02_学科四项指标'},
+  {src:'_ex_disc.drawio', pg:3,  out:'学科03_缺失构成'},
+  {src:'_ex_disc.drawio', pg:4,  out:'学科04_学科年度趋势'},
+  {src:'_ex_disc.drawio', pg:5,  out:'学科05_A_T年度趋势'},
+  {src:'_ex_disc.drawio', pg:6,  out:'学科06_学科中国人员'},
+  {src:'_ex_disc.drawio', pg:7,  out:'学科07_A_T中国人员'},
+  {src:'_ex_disc.drawio', pg:8,  out:'学科08_中国占比热力矩阵'},
+  {src:'_ex_disc.drawio', pg:9,  out:'学科09_学科代表度'},
+  {src:'_ex_flow.drawio', pg:2,  out:'15_性别推断流程'},
+  {src:'_ex_imp.drawio',  pg:0,  out:'影响力00_总览与口径'},
+  {src:'_ex_imp.drawio',  pg:1,  out:'影响力01_国家对比'},
+  {src:'_ex_imp.drawio',  pg:2,  out:'影响力02_学科对比'},
+  {src:'_ex_imp.drawio',  pg:3,  out:'影响力03_中国vs非中国'}
+];
+const SERVER = 'http://127.0.0.1:8791/save?name=';
+const SCALE = 2.5;     // 输出倍率
+const PAD   = 16;      // 内容四周留白（drawio 模型单位）
+const PAGE_W = {_ex_flow: 1500, _ex_imp: 1500, _ex_full: 1500, _ex_spk: 1500, _ex_com: 1500, _ex_disc: 1500};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+const cache = {};
+async function getXml(src) {
+  if (!cache[src]) cache[src] = await (await fetch('/' + src)).text();
+  return cache[src];
+}
+
+function num(el, a, dflt) {
+  const v = el.getAttribute(a);
+  return v === null || v === '' ? dflt : parseFloat(v);
+}
+
+/** 解析 SVG transform 列表 → 矩阵 {a,b,c,d,e,f}（按书写顺序依次左乘） */
+function mat(str) {
+  let m = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const re = /(matrix|scale|translate)\s*\(([^)]*)\)/g;
+  let t;
+  while ((t = re.exec(str || ''))) {
+    const v = t[2].split(/[\s,]+/).map(s => parseFloat(s)).filter(n => !isNaN(n));
+    let n;
+    if (t[1] === 'scale') n = { a: v[0], b: 0, c: 0, d: v.length > 1 ? v[1] : v[0], e: 0, f: 0 };
+    else if (t[1] === 'translate') n = { a: 1, b: 0, c: 0, d: 1, e: v[0], f: v.length > 1 ? v[1] : 0 };
+    else n = { a: v[0], b: v[1], c: v[2], d: v[3], e: v[4], f: v[5] };
+    m = mul(m, n);
+  }
+  return m;
+}
+/** m ∘ n（先 n 后 m） */
+function mul(m, n) {
+  return {
+    a: m.a * n.a + m.c * n.b, b: m.b * n.a + m.d * n.b,
+    c: m.a * n.c + m.c * n.d, d: m.b * n.c + m.d * n.d,
+    e: m.a * n.e + m.c * n.f + m.e, f: m.b * n.e + m.d * n.f + m.f
+  };
+}
+/** 轴对齐矩形按矩阵映射后的新轴对齐包围盒 */
+function mapBox(m, b) {
+  const pts = [[b.x, b.y], [b.x + b.w, b.y], [b.x, b.y + b.h], [b.x + b.w, b.y + b.h]]
+    .map(([x, y]) => [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f]);
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const x0 = Math.min(...xs), y0 = Math.min(...ys);
+  return { x: x0, y: y0, w: Math.max(...xs) - x0, h: Math.max(...ys) - y0 };
+}
+
+/** viewer 会把内容包在带 transform 的 <g> 里（如 translate(0,-30)），
+ *  而 contentBox 给的是 drawio 模型坐标 —— 必须把这条链合成进裁剪框，
+ *  否则裁出来的图会整体偏移（症状：左上角标题被切）。 */
+function contentTransform(svg) {
+  const leaf = svg.querySelector('rect, path, text, foreignObject, ellipse, line, polyline, circle');
+  const chain = [];
+  for (let n = leaf; n && n !== svg; n = n.parentNode) {
+    if (n.tagName === 'g') chain.push(n);
+  }
+  let m = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  for (const g of chain.reverse()) m = mul(m, mat(g.getAttribute('transform') || ''));
+  return m;
+}
+
+/** 从 drawio XML 算某一页的内容边界（模型单位） */
+function contentBox(xml, pg) {
+  const doc = new DOMParser().parseFromString(xml, 'text/xml');
+  const dgs = doc.querySelectorAll('diagram');
+  const dg = dgs[pg];
+  if (!dg) throw new Error('no diagram ' + pg);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const acc = (x, y, w, h) => {
+    if ([x, y, w, h].some(v => !isFinite(v))) return;
+    x0 = Math.min(x0, x); y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + h);
+  };
+  dg.querySelectorAll('mxCell[vertex="1"]').forEach(c => {
+    const g = c.querySelector('mxGeometry');
+    if (g) acc(num(g, 'x', 0), num(g, 'y', 0), num(g, 'width', 0), num(g, 'height', 0));
+  });
+  // 顶点自身的 waypoint（label 偏移等）
+  dg.querySelectorAll('mxCell[edge="1"] > mxGeometry > Array > mxPoint').forEach(p => {
+    acc(num(p, 'x', NaN), num(p, 'y', NaN), 0, 0);
+  });
+  if (!isFinite(x0)) throw new Error('empty page ' + pg);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+async function renderSvg(src, pg) {
+  const host = document.getElementById('stage');
+  host.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'mxgraph';
+  d.style.width = (PAGE_W[src.replace(/^_ex_|\.drawio$/g, '')] || 1500) + 'px';
+  d.setAttribute('data-mxgraph', JSON.stringify({
+    xml: await getXml(src), resize: false, nav: false, toolbar: null,
+    lightbox: false, page: pg, border: 0
+  }));
+  host.appendChild(d);
+  GraphViewer.processElements();
+  for (let i = 0; i < 400; i++) {
+    const svg = host.querySelector('svg');
+    if (svg && svg.querySelector('g')) { await sleep(80); return svg; }
+    await sleep(50);
+  }
+  throw new Error('render timeout pg=' + pg);
+}
+
+function raster(svg, modelBox) {
+  const box = mapBox(contentTransform(svg), modelBox);
+  const x = Math.floor(box.x) - PAD, y = Math.floor(box.y) - PAD;
+  const w = Math.ceil(box.w) + PAD * 2, h = Math.ceil(box.h) + PAD * 2;
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+  clone.setAttribute('width', w);
+  clone.setAttribute('height', h);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  const str = new XMLSerializer().serializeToString(clone);
+  const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(str);
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = Math.round(w * SCALE);
+      c.height = Math.round(h * SCALE);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(b => b ? res({ blob: b, w, h }) : rej(new Error('toBlob null')), 'image/png');
+    };
+    img.onerror = () => rej(new Error('img decode fail'));
+    img.src = url;
+  });
+}
+
+async function upload(blob, name) {
+  const r = await fetch(SERVER + encodeURIComponent(name), { method: 'POST', body: blob });
+  if (!r.ok) throw new Error('upload HTTP ' + r.status);
+}
+
+window.__state = { done: [], errors: [], running: false, cur: null };
+
+window.__run = async (only) => {
+  const S = window.__state;
+  S.running = true; S.done = []; S.errors = [];
+  const idx = (only === undefined || only === null) ? JOBS.map((_, i) => i)
+            : (Array.isArray(only) ? only : [only]);
+  for (const i of idx) {
+    const J = JOBS[i];
+    S.cur = J.out;
+    try {
+      const xml = await getXml(J.src);
+      const box = contentBox(xml, J.pg);
+      const svg = await renderSvg(J.src, J.pg);
+      const r = await raster(svg, box);
+      await upload(r.blob, J.out + '.png');
+      S.done.push({ out: J.out, model: `${r.w}x${r.h}`, px: `${Math.round(r.w*SCALE)}x${Math.round(r.h*SCALE)}` });
+    } catch (e) {
+      S.errors.push(J.out + ' :: ' + String(e).slice(0, 160));
+    }
+  }
+  S.cur = null; S.running = false;
+  document.title = S.errors.length ? 'ERR' : 'done';
+  return JSON.stringify({ done: S.done.length, errors: S.errors, list: S.done });
+};
+</script>
+</body>
+</html>

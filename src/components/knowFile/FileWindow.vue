@@ -10,11 +10,18 @@ import md_mind from '@/components/knowFile/view/md_mind.vue'
 import md_ppt from '@/components/knowFile/view/md_ppt.vue'
 import { FILE_VIEWS, fileViewByKey } from '@/lib/knowFile/fileViews'
 import { isDrawioFile as detectDrawioFile } from '@/shared/drawioFile'
+import { isFlowDslPath } from '@/shared/flowFile'
+import { isTaskFile as isTaskFilePath } from '@/lib/taskFile'
 
 // Excalidraw 白板（懒加载，.excalidraw 文件统一用它打开）
 const Excalidraw = defineAsyncComponent(() => import('@/components/knowFile/view/Excalidraw.vue'))
 // draw.io 图表（懒加载，.drawio/.dio 文件统一用它打开）
 const Drawio = defineAsyncComponent(() => import('@/components/knowFile/view/Drawio.vue'))
+// 工作流编辑器（懒加载，Dify DSL 文件 .flow.yml / .flow.yaml）
+const WorkflowEditor = defineAsyncComponent(() => import('@/workflow/ui/WorkflowEditor.vue'))
+const DataCanvasModule = defineAsyncComponent(() => import('@/components/DataCanvas/DataCanvasModule.vue'))
+// 脚手架任务（懒加载，.task 文件固定用它打开：单文件视图，无实例栏）
+const PipelineScaffold = defineAsyncComponent(() => import('@/components/AgentScaffold/PipelineScaffold.vue'))
 
 const store = usestore()
 
@@ -41,13 +48,34 @@ const isMaximized = ref(false)
 
 const titleText = computed(() => fileName.value)
 
+/**
+ * Markdown 正文是否为空（忽略 YAML frontmatter）。
+ * 只有 `---\n…\n---` 头的文件同样没有可读正文（看板新建的卡片就是这样），
+ * 浏览视图只会显示空内容提示，因此这类文件也应优先落到源码编辑视图。
+ */
+function mdBodyIsEmpty(text: string): boolean {
+  const s = String(text || '').replace(/^\uFEFF/, '')
+  const fm = s.match(/^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/)
+  return !(fm ? s.slice(fm[0].length) : s).trim()
+}
+
 // 是否为 .excalidraw 白板文件
 const isExcalidraw = computed(() => filePath.value.toLowerCase().endsWith('.excalidraw'))
 // 是否为 draw.io 图表（.drawio/.dio/.drawio.xml 按后缀；.xml 需内容像图表）
 const isDrawio = computed(() => detectDrawioFile(filePath.value, fileContent.value))
+// 是否为 Dify DSL 工作流（.flow.yml / .flow.yaml，走工作流编辑器）
+const isFlowDsl = computed(() => isFlowDslPath(filePath.value))
+// 是否为数据画布（.data）
+const isDataCanvas = computed(() => filePath.value.toLowerCase().endsWith('.data'))
+// 是否为脚手架任务（.task，文件专属的「脚手架」视图）
+const isTask = computed(() => isTaskFilePath(filePath.value))
 
 // 代码类文件：新窗口仅提供源码编辑视图（默认），不显示视图切换器
-const CODE_FILE_EXTS = ['.js', '.ts', '.py', '.json', '.css', '.flow', '.kb', '.task', '.txt']
+const CODE_FILE_EXTS = ['.js', '.ts', '.py', '.json', '.css', '.kb', '.task', '.txt']
+// 纯文本表格数据（csv/tsv）：只需要浏览与源码编辑两个视图
+const TEXT_TABLE_EXTS = ['.csv', '.tsv']
+// Excel（xlsx/xls）：磁盘上是二进制、浏览视图看到的是主进程转好的 Markdown 表格，只给浏览
+const EXCEL_EXTS = ['.xlsx', '.xls']
 // 图片类文件：固定单一浏览视图，不显示视图切换器
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif']
 // 音视频类文件：固定单一浏览视图（播放器），不显示视图切换器
@@ -70,15 +98,25 @@ const isRemoteAdvanced = computed(() => {
   if (!isRemoteFile.value) return false
   return fileExt.value === '.md' || fileExt.value === '.docx'
 })
-// 是否显示视图切换器（代码/图片/音视频/pdf/excalidraw 等固定单一视图不显示；远程只有单一视图时也不显示）
+// 是否显示视图切换器（代码/图片/音视频/pdf/excalidraw/工作流/数据画布等固定单一视图不显示；远程只有单一视图时也不显示）
 const showViewSwitcher = computed(() => {
   if (isRemoteFile.value) return availableViews.value.length > 1
-  return !isExcalidraw.value && !isDrawio.value && !isCodeFile.value && !isMediaFile.value && !isPdfFile.value
+  return !isExcalidraw.value && !isDrawio.value && !isFlowDsl.value && !isDataCanvas.value && !isTask.value && !isCodeFile.value && !isMediaFile.value && !isPdfFile.value && !EXCEL_EXTS.includes(fileExt.value)
 })
-// 可切换的视图选项（按文件类型过滤：html 仅浏览/源码编辑；Word 仅浏览/思维导图）
+// 可切换的视图选项（按文件类型过滤：html 仅浏览/源码编辑；Word 仅浏览/思维导图；csv/tsv 仅浏览/源码编辑）
 const availableViews = computed<ViewType[]>(() => {
   // Word：只读浏览 + 思维导图（不提供编辑/快编辑/演示）
   if (isWordFile.value) return ['read', 'mindmap']
+  // 工作流：新窗口固定工作流编辑器（YAML 文本请在知识管理的「源码编辑」里改）
+  if (isFlowDsl.value) return ['read']
+  // 数据画布：新窗口固定画布（同工作流；JSON 在知识管理里改）
+  if (isDataCanvas.value) return ['read']
+  // 脚手架任务：新窗口固定「脚手架」视图（单文件，无实例栏）
+  if (isTask.value) return ['read']
+  // Excel：只有浏览（表格是主进程转换出的 Markdown，源码编辑会把 Markdown 写回二进制文件）
+  if (EXCEL_EXTS.includes(fileExt.value)) return ['read']
+  // csv/tsv：浏览（表格/Markdown）+ 源码编辑（原始文本）
+  if (TEXT_TABLE_EXTS.includes(fileExt.value)) return ['read', 'edit']
   // 远程只读：不支持 编辑/块编辑；固定浏览视图；Markdown 额外支持 导图/演示
   if (isRemoteFile.value) {
     return isRemoteAdvanced.value ? ['read', 'mindmap', 'presentation'] : ['read']
@@ -98,7 +136,9 @@ const viewLabel = (v: ViewType): string => {
 // 因此在渲染进程重新设置 document.title（Electron 会自动同步到系统窗口标题/任务栏）。
 const windowTitle = computed(() => {
   if (!fileName.value) return 'AI-KM'
-  return `${fileName.value} - ${viewLabel(viewType.value)}`
+  // .task 是文件专属的「脚手架」视图（不是通用浏览），标题直接写视图名更直观
+  const viewName = isTask.value ? (store.locales === 'zh' ? '脚手架' : 'Scaffold') : viewLabel(viewType.value)
+  return `${fileName.value} - ${viewName}`
 })
 // 视图切换、媒体切歌等文件名/视图变化时同步系统窗口标题
 watch(windowTitle, (t) => { document.title = t }, { immediate: true })
@@ -232,6 +272,11 @@ function onViewSwitch(e: Event) {
   if (VIEW_TYPES.includes(v) && availableViews.value.includes(v)) viewType.value = v
 }
 
+/** 数据画布保存成功：同步内存里的文件内容，并刷新标题栏（画布自己写的盘，无需再读文件） */
+const onDataCanvasSaved = (_path: string, content?: string) => {
+  if (typeof content === 'string') fileContent.value = content
+}
+
 // 通道 B：其他窗口保存文件后广播，此处刷新预览
 const onFileContentChanged = (_event: any, payload: { path?: string; content?: string }) => {
   if (!payload?.path || payload.path !== filePath.value) return
@@ -264,7 +309,7 @@ onMounted(async () => {
   store.refreshAIconfigFromStorage()
 
   // 独立窗口不持久化标签：避免把新窗口打开的标签写进共享 localStorage，
-  // 导致主窗口重启后恢复出这些标签（新窗口模式主窗口标签栏应为空）
+  // 导致主窗口重启后恢复出这些标签（标签栏只属于独立文件窗口）
   store.setPersistTabs(false)
 
   const hash = window.location.hash
@@ -335,10 +380,23 @@ onMounted(async () => {
     return
   }
 
+  // 脚手架任务(.task)：固定「脚手架」视图，任务状态由 PipelineScaffold 按需自己读取
+  //（任务文件含整张结果表，可能上百 MB，避免这里再整体读一遍到渲染层）
+  if (isTask.value) {
+    contentLoading.value = false
+    return
+  }
+
   // 本地文件：从磁盘读取
   contentLoading.value = true
   try {
     fileContent.value = await window.ipcRenderer.invoke('readFile', filePath.value)
+    // 空 .md（正文为空 / 仅空白，或**只有 YAML 头**）默认跳到源码编辑视图：
+    // 浏览视图对这类文件无内容可读，只会先闪一下「正在渲染」再落到空内容提示；
+    // 新建 / 待填写的文档直接用编辑视图才符合预期（用户显式选了其它视图时不干预）。
+    if (fileExt.value === '.md' && viewType.value === 'read' && mdBodyIsEmpty(fileContent.value)) {
+      viewType.value = 'edit'
+    }
     const ext = filePath.value.substring(filePath.value.lastIndexOf('.'))
     // addTab 新建当前文件标签（清空历史后必然走新建分支，内部会从磁盘读 content）
     await store.addTab({ path: filePath.value, label: fileName.value, type: 'file', extension: ext })
@@ -362,7 +420,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="file-window">
+  <div class="file-window knowfile-menu">
     <div class="file-titlebar">
       <!-- 视图类型切换（按文件类型过滤；.excalidraw/代码/图片等固定单一视图，不显示） -->
       <div v-if="showViewSwitcher" class="file-view-switcher">
@@ -370,7 +428,9 @@ onBeforeUnmount(() => {
           <option v-for="v in availableViews" :key="v" :value="v">{{ viewLabel(v) }}</option>
         </select>
       </div>
-      <div class="file-titlebar-title">{{ titleText }}</div>
+      <div class="file-titlebar-title" :title="filePath">
+        <span class="file-titlebar-title-text">{{ titleText }}</span>
+      </div>
       <div class="file-titlebar-actions">
         <div @click="minimizeWindow" :title="store.locales=='zh'?'最小化':'Minimize'">
           <i class="fa fa-minus"></i>
@@ -400,6 +460,19 @@ onBeforeUnmount(() => {
     </div>
     <div v-else-if="isExcalidraw" class="file-view">
       <Excalidraw :path="filePath" :content="fileContent" />
+    </div>
+    <!-- 工作流（Dify DSL，.flow.yml/.flow.yaml）：工作流编辑器 -->
+    <div v-else-if="isFlowDsl" class="file-view">
+      <WorkflowEditor :path="filePath" :content="fileContent" :readonly="isRemoteFile" />
+    </div>
+    <!-- 数据画布（.data）：固定画布模块视图 -->
+    <div v-else-if="isDataCanvas && !isRemoteFile" class="file-view">
+      <DataCanvasModule :task-file-path="filePath" mode="full" @file-saved="onDataCanvasSaved" />
+    </div>
+    <!-- 脚手架任务（.task）：固定「脚手架」视图（单文件隔离在一个窗口里，无实例栏；状态由画布自行读写该文件）；
+         远程只读 .task 不走这里（沿用文本预览） -->
+    <div v-else-if="isTask && !isRemoteFile" class="file-view">
+      <PipelineScaffold :task-file-path="filePath" />
     </div>
     <div v-else-if="viewType === 'read'" class="file-view">
       <md_read :path="filePath" :content="fileContent" :loading="contentLoading" :is-remote="isRemoteFile" :remote-base64="remoteBase64" :remote-text="remoteText" @update:path="onMediaPathChange" />
@@ -447,6 +520,11 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* 文件名文本单独设 no-drag：标题栏是 drag 区（鼠标事件不下发到渲染进程），
+   只有可交互区域才能触发 title 悬停提示；标题栏其余空白仍是拖拽区。 */
+.file-titlebar-title-text {
+  -webkit-app-region: no-drag;
 }
 /* 视图类型切换器（位于标题文本左侧；标题栏为 drag 区，切换器需 no-drag 才能点击） */
 .file-view-switcher {

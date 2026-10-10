@@ -66,9 +66,21 @@ function toPlain<T>(value: T): T {
   return JSON.parse(JSON.stringify(value))
 }
 
+/**
+ * 是否把状态写进会话缓存（IndexedDB）。默认开启（「数据画布」面板的老行为）。
+ * 文件驱动场景（知识管理里打开 .data / 独立窗口）应关掉：文件才是真相，
+ * 否则文件内容会覆盖掉用户「尚未关联文件」的那份缓存（面板首次进入还要靠它兜底）。
+ */
+let cacheEnabled = true
+
+function setCacheEnabled(v: boolean) {
+  cacheEnabled = v
+}
+
 async function persist() {
   const m = activeModel.value
   if (m) m.updatedAt = Date.now()
+  if (!cacheEnabled) return
   try {
     await db.setItem('models', toPlain(models.value))
     if (activeModelId.value) await db.setItem('activeModelId', activeModelId.value)
@@ -325,12 +337,18 @@ function resetAll() {
   notify('model', { action: 'reset' })
 }
 
+/** 画布为空时给一个可用的空模型（文件驱动模式下打开空 .data 用） */
+function ensureDefaultModel(): void {
+  if (models.value.length > 0) return
+  const m = createModel('默认模型')
+  setActiveModel(m.id)
+}
+
 // ==================== 初始化 / 加载 ====================
 let initialized = false
 
-async function init(initialData?: any) {
-  if (initialized) return
-  initialized = true
+/** 读取上次会话缓存（IndexedDB）并套用；返回是否真的恢复了状态 */
+async function hydrateFromCache(): Promise<boolean> {
   try {
     const saved = (await db.getItem('models')) as Model[] | null
     const savedActive = (await db.getItem('activeModelId')) as string | null
@@ -341,18 +359,33 @@ async function init(initialData?: any) {
         : saved[0].id
       activeModelId.value = target
       modelPath.value = [target]
-      return
+      return true
     }
   } catch (e) {
     console.warn('[DataCanvas] 读取存储失败', e)
   }
-  // 无存储数据：使用外部 initialData 或创建默认模型
+  return false
+}
+
+/**
+ * 初始化。`skipCache` 用于「文件驱动」场景（知识管理里打开的 .data / 独立窗口）：
+ * 此时文件内容才是真相，绝不能用上次会话的缓存兜底（否则会显示/保存成别的画布的内容）。
+ * 缓存仍会在文件不可用时作为一次性回落，见 hydrateFromCache。
+ */
+async function init(initialData?: any, opts: { skipCache?: boolean } = {}) {
+  if (initialized) return
+  initialized = true
+  if (!opts.skipCache && (await hydrateFromCache())) return
+  // 已有状态（文件可能已先载入）：不覆盖
+  if (models.value.length > 0) return
   if (initialData) {
     await importData(initialData)
-  } else {
-    const m = createModel('默认模型')
-    setActiveModel(m.id)
+    return
   }
+  // 文件驱动：不先造空模型，等文件内容来填（调用方用 ensureDefaultModel 兜底）
+  if (opts.skipCache) return
+  const m = createModel('默认模型')
+  setActiveModel(m.id)
 }
 
 function refresh() {
@@ -375,6 +408,8 @@ export function useDataCanvas() {
     isRoot,
     // 生命周期
     init,
+    hydrateFromCache,
+    setCacheEnabled,
     setConfig,
     refresh,
     // 模型
@@ -406,6 +441,7 @@ export function useDataCanvas() {
     importData,
     exportData,
     resetAll,
+    ensureDefaultModel,
     // 宿主通知
     onChange,
     persist,

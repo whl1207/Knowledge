@@ -146,6 +146,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
+// ID3 封面/歌词与 LRC 解析：与文件视图的媒体缩略图共用同一套实现
+import { isAudioExt, isMediaExt, extractAlbumArt, extractAudioLyrics, parseLrc } from '@/lib/knowFile/mediaMeta'
 
 const store = usestore()
 
@@ -162,15 +164,12 @@ const emit = defineEmits<{
 const currentPath = ref(props.path)
 
 // ---------- 文件类型判断 ----------
-const AUDIO_EXTS = ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.wma', '.ape', '.aiff']
-const VIDEO_EXTS = ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp', '.ts', '.mpg', '.mpeg']
-
 const extension = computed(() => {
   const p = currentPath.value || ''
   const i = p.lastIndexOf('.')
   return i >= 0 ? p.slice(i).toLowerCase() : ''
 })
-const isAudio = computed(() => AUDIO_EXTS.includes(extension.value))
+const isAudio = computed(() => isAudioExt(extension.value))
 
 const extLabel = computed(() => (extension.value || '.audio').replace('.', '').toUpperCase())
 
@@ -259,7 +258,7 @@ const displayModeLabel = computed(() => {
 const currentLyricText = computed(() => {
   const arr = lyrics.value
   if (!arr.length) return store.locales === 'zh' ? '♪ 暂无歌词' : '♪ No lyrics'
-  if (arr[0].time < 0) return arr[0].text || '♪'
+  if (!hasTimeline.value) return arr[0].text || '♪'
   if (activeLyric.value >= 0) return arr[activeLyric.value]?.text || '♪'
   return store.locales === 'zh' ? '♪ 即将开始…' : '♪ Coming up…'
 })
@@ -267,7 +266,7 @@ const currentLyricText = computed(() => {
 const waveLyricText = computed(() => {
   const arr = lyrics.value
   if (!arr.length) return ''
-  if (arr[0].time < 0) return arr[0].text || ''
+  if (!hasTimeline.value) return arr[0].text || ''
   return activeLyric.value >= 0 ? (arr[activeLyric.value]?.text || '') : ''
 })
 // 循环切换：黑胶 → 磁带 → 整体波形 → 实时频谱 → …
@@ -319,6 +318,8 @@ let albumArtUrl: string | null = null
 
 // 歌词（USLT 帧 / LRC 时间轴）
 const lyrics = ref<{ time: number; text: string }[]>([])
+// 是否为带时间轴的歌词（纯文本歌词不高亮、不滚动）
+const hasTimeline = computed(() => lyrics.value.some(l => l.time >= 0))
 const activeLyric = ref(-1)
 const lyricsPanel = ref<HTMLElement | null>(null)
 let lyricScrollRaf: number | null = null
@@ -359,7 +360,7 @@ async function loadAudio() {
       albumArtUrl = art
     }
     // 尝试从 ID3 标签提取歌词
-    const lrcText = extractLyrics(uint8)
+    const lrcText = extractAudioLyrics(uint8)
     if (lrcText) {
       lyrics.value = parseLrc(lrcText)
     }
@@ -393,158 +394,14 @@ async function loadAudio() {
   }
 }
 
-// 从音频文件头部解析 ID3v2 标签，提取 APIC 专辑封面（返回 blob URL）
-function extractAlbumArt(bytes: Uint8Array): string | null {
-  try {
-    if (bytes.length < 10) return null
-    if (bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null // "ID3"
-    const major = bytes[3]
-    if (major !== 2 && major !== 3 && major !== 4) return null
-    // 标签体大小（syncsafe）
-    const tagSize = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f)
-    const tagEnd = Math.min(bytes.length, 10 + tagSize)
-    let pos = 10
-    while (pos + 10 <= tagEnd) {
-      const id = String.fromCharCode(bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3])
-      if (id === '\u0000\u0000\u0000\u0000') break
-      let frameSize: number
-      if (major === 4) {
-        frameSize = ((bytes[pos + 4] & 0x7f) << 21) | ((bytes[pos + 5] & 0x7f) << 14) | ((bytes[pos + 6] & 0x7f) << 7) | (bytes[pos + 7] & 0x7f)
-      } else {
-        frameSize = (bytes[pos + 4] << 24) | (bytes[pos + 5] << 16) | (bytes[pos + 6] << 8) | bytes[pos + 7]
-      }
-      const frameStart = pos + 10
-      const frameEnd = frameStart + frameSize
-      if (frameEnd > tagEnd || frameEnd > bytes.length) break
-      if (id === 'APIC') {
-        const img = parseApic(bytes, frameStart, frameEnd)
-        if (img) return img
-      }
-      pos = frameEnd
-    }
-  } catch (e) { /* 忽略解析错误 */ }
-  return null
-}
-
-// 解析 APIC 帧：encoding + mime(null) + pictureType(1) + description(null) + 图片数据
-function parseApic(bytes: Uint8Array, start: number, end: number): string | null {
-  if (end - start < 5) return null
-  const enc = bytes[start] // 0=ISO-8859-1, 1=UTF-16, 2=UTF-16BE, 3=UTF-8
-  let p = start + 1
-  // MIME 类型（null 终止）
-  let mimeEnd = p
-  while (mimeEnd < end && bytes[mimeEnd] !== 0) mimeEnd++
-  if (mimeEnd >= end) return null
-  const mime = String.fromCharCode(...bytes.slice(p, mimeEnd)).toLowerCase()
-  if (!mime.startsWith('image/')) return null
-  p = mimeEnd + 1
-  if (p >= end) return null
-  p += 1 // 图片类型
-  if (p >= end) return null
-  // 跳过描述（按编码读取终止符）
-  if (enc === 1 || enc === 2) {
-    while (p + 1 < end && !(bytes[p] === 0 && bytes[p + 1] === 0)) p++
-    p += 2
-  } else {
-    while (p < end && bytes[p] !== 0) p++
-    p += 1
-  }
-  if (p >= end) return null
-  const imgBytes = bytes.slice(p, end)
-  if (!imgBytes.length) return null
-  const blob = new Blob([imgBytes], { type: mime })
-  return URL.createObjectURL(blob)
-}
-
-// 从音频文件解析 ID3v2 USLT 帧提取歌词
-function extractLyrics(bytes: Uint8Array): string | null {
-  try {
-    if (bytes.length < 10) return null
-    if (bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null
-    const major = bytes[3]
-    if (major !== 2 && major !== 3 && major !== 4) return null
-    const tagSize = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f)
-    const tagEnd = Math.min(bytes.length, 10 + tagSize)
-    let pos = 10
-    while (pos + 10 <= tagEnd) {
-      const id = String.fromCharCode(bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3])
-      if (id === '\u0000\u0000\u0000\u0000') break
-      let frameSize: number
-      if (major === 4) {
-        frameSize = ((bytes[pos + 4] & 0x7f) << 21) | ((bytes[pos + 5] & 0x7f) << 14) | ((bytes[pos + 6] & 0x7f) << 7) | (bytes[pos + 7] & 0x7f)
-      } else {
-        frameSize = (bytes[pos + 4] << 24) | (bytes[pos + 5] << 16) | (bytes[pos + 6] << 8) | bytes[pos + 7]
-      }
-      const frameStart = pos + 10
-      const frameEnd = frameStart + frameSize
-      if (frameEnd > tagEnd || frameEnd > bytes.length) break
-      if (id === 'USLT') {
-        const txt = parseUslt(bytes, frameStart, frameEnd)
-        if (txt) return txt
-      }
-      pos = frameEnd
-    }
-  } catch (e) { /* 忽略解析错误 */ }
-  return null
-}
-
-// 解析 USLT 帧：encoding + language(3) + descriptor(null) + 歌词文本
-function parseUslt(bytes: Uint8Array, start: number, end: number): string | null {
-  if (end - start < 5) return null
-  const enc = bytes[start]
-  let p = start + 1
-  p += 3 // language
-  if (p >= end) return null
-  // 跳过描述（按编码读取终止符）
-  if (enc === 1 || enc === 2) {
-    while (p + 1 < end && !(bytes[p] === 0 && bytes[p + 1] === 0)) p++
-    p += 2
-  } else {
-    while (p < end && bytes[p] !== 0) p++
-    p += 1
-  }
-  if (p >= end) return null
-  const lyricBytes = bytes.slice(p, end)
-  let text: string
-  try {
-    if (enc === 1) text = new TextDecoder('utf-16').decode(lyricBytes)
-    else if (enc === 2) text = new TextDecoder('utf-16be').decode(lyricBytes)
-    else text = new TextDecoder('utf-8').decode(lyricBytes)
-  } catch {
-    text = new TextDecoder('utf-8').decode(lyricBytes)
-  }
-  return text.replace(/\u0000/g, '').trim() || null
-}
-
-// 解析 LRC 时间轴歌词；无时间戳则按行返回（不高亮）
-function parseLrc(text: string): { time: number; text: string }[] {
-  const result: { time: number; text: string }[] = []
-  let hasTimestamp = false
-  const lines = text.split(/\r?\n/)
-  for (const rawLine of lines) {
-    const timeMatches = [...rawLine.matchAll(/\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)]
-    if (timeMatches.length) {
-      hasTimestamp = true
-      const lyricText = rawLine.replace(/\[[^\]]*\]/g, '').trim()
-      for (const m of timeMatches) {
-        const min = parseInt(m[1], 10)
-        const sec = parseInt(m[2], 10)
-        const frac = m[3] ? parseInt(m[3].padEnd(3, '0'), 10) / 1000 : 0
-        result.push({ time: min * 60 + sec + frac, text: lyricText })
-      }
-    } else {
-      result.push({ time: -1, text: rawLine })
-    }
-  }
-  return hasTimestamp ? result : result.map(l => ({ time: -1, text: l.text }))
-}
-
 // 根据播放进度更新当前歌词行并平滑滚动到可见（force 时即使行不变也强制定位）
 function updateActiveLyric(force = false) {
   const arr = lyrics.value
-  if (!arr.length || arr[0].time < 0) return
+  if (!arr.length || !hasTimeline.value) return
   let idx = -1
   for (let i = 0; i < arr.length; i++) {
+    // 无时间戳的行（纯文本歌词里的杂项）不参与高亮
+    if (arr[i].time < 0) continue
     if (currentTime.value >= arr[i].time) idx = i
     else break
   }
@@ -1036,7 +893,7 @@ async function loadFolderAudioList() {
     if (!folderPath) { folderFiles = []; return }
     const files: any[] = (await window.ipcRenderer.invoke('getFiles', folderPath, 0)) || []
     folderFiles = files
-      .filter((f: any) => f && f.type === 'file' && (AUDIO_EXTS.includes((f.extension || '').toLowerCase()) || VIDEO_EXTS.includes((f.extension || '').toLowerCase())))
+      .filter((f: any) => f && f.type === 'file' && isMediaExt(f.extension))
       .sort((a: any, b: any) => String(a.label || '').localeCompare(String(b.label || ''), undefined, { numeric: true }))
       .map((f: any) => ({ path: f.path, label: f.label, extension: f.extension }))
   } catch {

@@ -25,6 +25,7 @@
 - **Dev scripts tidied up**: the Windows entry point for one-click Linux packaging (`build-linux-all.cmd`) moved into `scripts/` next to the `.sh` (usage unchanged, still double-clickable), and all other one-off diagnostics, test fixtures and probe artifacts (~118 MB) were deleted locally.
 - **`.gitignore` extended**: ignores the Excalidraw dev assets and the browser profiles produced by probe scripts (hundreds of MB) as well as temporary scripts and demo pages, so no useless large files are uploaded.
 - **Licence changed to noncommercial**: MIT → PolyForm Noncommercial 1.0.0 — any commercial use now requires a separate licence, while personal, study, research, education and public-interest use stays free (noncommercial redistribution allowed); README and installer metadata were updated.
+- **Windows portable renamed**: the artifact is now `…_Portable.exe` instead of `…_Setup.exe`, so it is no longer confused with the installer (the installer keeps `_Setup`).
 
 ### Fixed
 

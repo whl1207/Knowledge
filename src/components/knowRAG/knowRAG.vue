@@ -24,10 +24,9 @@ import {
 } from '@/shared/kbQuestions'
 import type { KbQuestion, QuestionAnswerRef } from '@/shared/kbQuestions'
 
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
-
-// PDF 文本提取所需（参考 PdfViewer.vue），全局只需设置一次 worker 路径
-GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
+import { getDocument } from 'pdfjs-dist'
+// pdf.js 运行时资源（worker / CMap / 标准字体）：统一在 @/lib/pdfjs 配置，缺 CMap 会导致整段文字不渲染
+import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
 
 // GraphRAG 风格工具
 import {
@@ -1602,6 +1601,8 @@ async function loadFolderFiles(rootPath?: string, switchToFile = true) {
         size: f.size || 0,
         mtime: f.mtime || 0,
         content: '',
+        // 正文是否已加载：初始化**不读文件内容**（见下方注释），按需读取后置 true
+        contentLoaded: false,
         attributes: f.attributes || {}
     }))
 
@@ -1612,72 +1613,38 @@ async function loadFolderFiles(rootPath?: string, switchToFile = true) {
         documents.value.push({ name })
     }
 
-    for (let i = 0; i < files.value.length; i++) {
-        try {
-            const file = files.value[i]
-            const ext = file.extension?.toLowerCase()
-            
-            if (isPdfFile(ext)) {
-                file.content = '[PDF文件 - 使用预览功能查看]'
-                continue
-            }
-            if (isImageFile(ext)) {
-                file.content = store.locales == 'zh' ? '[图片文件 - 不参与切片]' : '[Image file - not sliced]'
-                continue
-            }
-            if (isMediaFile(ext)) {
-                file.content = store.locales == 'zh' ? '[音视频文件 - 不参与切片]' : '[Media file - not sliced]'
-                continue
-            }
-            
-            if (isWordFile(ext)) {
-                const result = await window.ipcRenderer.invoke('readFile', file.path)
-                
-                if (typeof result === 'object' && result !== null) {
-                    if (result.success === false) {
-                        file.content = result.content || `[Word文档读取失败]`
-                    } else {
-                        file.content = result.content || ''
-                    }
-                } else {
-                    file.content = result ?? ''
-                }
-                
-                extractFileSummary(file)
-                continue
-            }
-            
-            const content = await window.ipcRenderer.invoke('readFile', file.path)
-            file.content = content ?? ''
-            
-            extractFileSummary(file)
-        } catch (err) {
-            const errorMessage = getErrorMessage(err)
-            console.error('读取文件内容失败', files.value[i].path, errorMessage)
-            
-            if (isPdfFile(files.value[i].extension)) {
-                files.value[i].content = '[PDF文件 - 预览时加载]'
-            } else if (isWordFile(files.value[i].extension)) {
-                files.value[i].content = store.locales == 'zh' ? 
-                    `[Word文档读取失败: ${errorMessage}]` : 
-                    `[Word document read failed: ${errorMessage}]`
-            } else {
-                files.value[i].content = store.locales == 'zh' ? 
-                    `读取失败: ${errorMessage}` : 
-                    `Read failed: ${errorMessage}`
-            }
+    // 初始化只处理元数据，**不读取任何文件内容**：
+    // 此前这里对每个文件发一次 readFile（整篇内容经 IPC 回传），工作区文件多时（几千个文件
+    // 就是几千次 IPC + 全文传输）打开知识处理要等很久——这是「打开知识处理很慢」的主因。
+    // 现在正文改为**按需读取**：
+    //  - 选中预览：previewFile() 只读这一个；
+    //  - 切片 / 生成摘要：各自流程在用到时读（sliceOnly / readMdBody 均自带按需读取）；
+    //  - 摘要状态统计：直接用 attributes（.md 的 frontmatter 由主进程只读文件头 8KB 得到）。
+    for (const file of files.value) {
+        const ext = (file.extension || '').toLowerCase()
+        if (isPdfFile(ext)) {
+            file.content = store.locales == 'zh' ? '[PDF文件 - 使用预览功能查看]' : '[PDF file - use the preview panel]'
+            file.contentLoaded = true
+            continue
         }
+        if (isImageFile(ext)) {
+            file.content = store.locales == 'zh' ? '[图片文件 - 不参与切片]' : '[Image file - not sliced]'
+            file.contentLoaded = true
+            continue
+        }
+        if (isMediaFile(ext)) {
+            file.content = store.locales == 'zh' ? '[音视频文件 - 不参与切片]' : '[Media file - not sliced]'
+            file.contentLoaded = true
+            continue
+        }
+        // 摘要：优先用 attributes（不读正文也能拿到 frontmatter 摘要）
+        extractFileSummary(file)
     }
 
     if (files.value.length > 0) {
-        if (isPdfFile(files.value[0].extension)) {
-            previewContent.value = store.locales == 'zh' ? 
-                'PDF文件 - 使用右侧预览功能查看内容' : 
-                'PDF file - Use the preview function on the right to view content'
-        } else {
-            previewContent.value = stripFrontmatter(files.value[0].content || '')
-        }
         selectedFileIndex.value = 0
+        // 只为初始预览读这一个文件（其余保持未加载，用到再读）
+        await previewFile(0)
     }
 
     // 扫描 PDF/Word 文件的规范化状态（是否有同名 .md 文档）
@@ -1692,6 +1659,16 @@ async function loadFolderFiles(rootPath?: string, switchToFile = true) {
 }
 
 function extractFileSummary(file: any) {
+    // 优先 attributes（主进程只读文件头 8KB 得到的 frontmatter）：初始化不读正文也能拿到摘要
+    if (file.attributes && (file.attributes.summary || file.attributes.摘要 || file.attributes.abstract)) {
+        const summary = file.attributes.summary || file.attributes.摘要 || file.attributes.abstract
+        fileSummaries.value.set(file.path, {
+            content: summary.toString().trim(),
+            vector: null
+        })
+        return
+    }
+
     if (!file.content || typeof file.content !== 'string') return
     
     const yamlMatch = file.content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/)
@@ -1706,14 +1683,6 @@ function extractFileSummary(file: any) {
             })
             return
         }
-    }
-    
-    if (file.attributes && (file.attributes.summary || file.attributes.摘要 || file.attributes.abstract)) {
-        const summary = file.attributes.summary || file.attributes.摘要 || file.attributes.abstract
-        fileSummaries.value.set(file.path, {
-            content: summary.toString().trim(),
-            vector: null
-        })
     }
 }
 
@@ -2552,38 +2521,22 @@ const previewFile = async function(i: number) {
             previewContent.value = ''
             return
         }
-        
-        if (isWordFile(file?.extension)) {
-            if (file.content && file.content !== '') {
-                previewContent.value = file.content
-                return
-            }
-            
-            const result = await window.ipcRenderer.invoke('readFile', file.path)
-            
-            if (typeof result === 'object' && result !== null) {
-                if (result.success === false) {
-                    previewContent.value = result.content || `读取Word文档失败: ${result.error || '未知错误'}`
-                } else {
-                    previewContent.value = result.content || ''
-                }
-            } else {
-                previewContent.value = result || ''
-            }
-            
-            file.content = previewContent.value
-            extractFileSummary(file)
+
+        // 正文已加载过（含空文件）→ 直接用缓存，不重复读盘
+        if (file.contentLoaded && typeof file.content === 'string') {
+            previewContent.value = isWordFile(file.extension) ? file.content : stripFrontmatter(file.content)
             return
         }
 
-        if (file && file.content !== undefined && file.content !== '') {
-            previewContent.value = stripFrontmatter(file.content)
-            return
-        }
-
-        const content = await window.ipcRenderer.invoke('readFile', file.path)
-        previewContent.value = stripFrontmatter(content ?? '')
-        if (file) file.content = content ?? ''
+        const result = await window.ipcRenderer.invoke('readFile', file.path)
+        const raw = (typeof result === 'object' && result !== null)
+            ? (result.success === false
+                ? (result.content || `读取Word文档失败: ${result.error || '未知错误'}`)
+                : (result.content || ''))
+            : (result ?? '')
+        file.content = raw
+        file.contentLoaded = true
+        previewContent.value = isWordFile(file.extension) ? raw : stripFrontmatter(raw)
         extractFileSummary(file)
     } catch (err) {
         console.error('预览文件失败', err)
@@ -2672,7 +2625,7 @@ async function extractPdfText(filePath: string): Promise<string> {
         bytes[i] = binaryStr.charCodeAt(i)
     }
 
-    const loadingTask = getDocument({ data: bytes })
+    const loadingTask = getDocument({ data: bytes, ...PDFJS_RUNTIME_OPTIONS })
     const pdf = await loadingTask.promise
     const pageCount = pdf.numPages
     let text = ''
@@ -2810,6 +2763,9 @@ const readMdBody = async (file: any): Promise<string> => {
         try {
             const r = await window.ipcRenderer.invoke('readFile', file.path)
             content = (typeof r === 'object' && r !== null) ? (r.content || '') : (r ?? '')
+            // 顺手缓存：后续预览/切片不再重复读盘（初始化已不再预读全文）
+            file.content = content
+            file.contentLoaded = true
         } catch (e) {
             console.error('读取文件内容失败（生成摘要）:', file.path, e)
             return ''

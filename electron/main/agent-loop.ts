@@ -38,11 +38,27 @@ import type {
   AgentStateView,
   TodoItem,
 } from '@/types/agent'
-import type { DerivedMessage } from '@/types/session-log'
+import type { DerivedMessage, DerivedEntry } from '@/types/session-log'
 import type { ToolResult, ToolExecutionContext } from '@/types/tool'
 import { brand, type ToolName, type AgentId } from '@/types/ids'
 import { runCodeFunctionSchema } from './code-sdk'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
+// 上下文预算与压缩（P0）：与渲染层共用同一口径（详见 src/shared/contextBudget.ts）
+import {
+  COMPACT_KEEP_TURNS,
+  COMPACT_SYSTEM_PROMPT,
+  OVERFLOW_RETRY_LIMIT,
+  TOOL_SCHEMA_TOKEN_ESTIMATE,
+  buildCompactionPrompt,
+  compactedContextMessage,
+  estimateMessagesTokens,
+  indexSummary,
+  isContextOverflowError,
+  pickCompactionRange,
+  planContextBudget,
+  type BudgetMessage,
+  type ContextBudget,
+} from '@/shared/contextBudget'
 
 // ---------------------------------------------------------------------------
 // 广播
@@ -50,14 +66,45 @@ import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 
 let broadcast: ((ev: AgentEvent) => void) | null = null
 
+/** 附加订阅者（局域网访客 SSE 等）：与桌面广播并行接收同一事件流 */
+const extraSubscribers = new Set<(ev: AgentEvent) => void>()
+
 /** 设置 agent 事件广播（main/index.ts 在 app ready 时注入） */
 export function setAgentBroadcast(fn: ((ev: AgentEvent) => void) | null): void {
   broadcast = fn
 }
 
+/**
+ * 订阅 agent 事件流（与广播同一份事件对象）。
+ * 用途：局域网访客经 `/api/agent/events` 接收自己会话的事件。
+ * 返回取消订阅函数（SSE 断开时必须调用，防监听器泄漏）。
+ */
+export function subscribeAgentEvents(fn: (ev: AgentEvent) => void): () => void {
+  extraSubscribers.add(fn)
+  return () => {
+    extraSubscribers.delete(fn)
+  }
+}
+
+/** 分发一条事件到广播与全部订阅者（订阅者异常不影响其它订阅者） */
+function dispatchEvent(ev: AgentEvent): void {
+  try {
+    broadcast?.(ev)
+  } catch (e) {
+    console.error('[agent-loop] 广播监听器异常:', e)
+  }
+  for (const fn of Array.from(extraSubscribers)) {
+    try {
+      fn(ev)
+    } catch (e) {
+      console.error('[agent-loop] 事件订阅者异常:', e)
+    }
+  }
+}
+
 /** 向指定 agent 广播事件（供模块级函数使用，如 requestAnswer） */
 function emitTo<K extends AgentEventType>(agentId: string, type: K, payload: AgentEventMap[K]): void {
-  broadcast?.({ agentId: agentId as any, type, payload } as AgentEvent)
+  dispatchEvent({ agentId: agentId as any, type, payload } as AgentEvent)
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +390,8 @@ class AgentImpl implements AgentControl {
   private jobId: string | null = null
   // 已加载过的技能（防模型反复调用 skill 工具导致死循环）
   private loadedSkills = new Set<string>()
+  /** 上下文压缩重入守卫（压缩本身是一次 LLM 调用，不能递归触发） */
+  private compacting = false
 
   constructor(options: AgentOptions) {
     this.id = brand(`agent-${randomUUID()}`)
@@ -434,6 +483,23 @@ class AgentImpl implements AgentControl {
       }
       this.idleWaiters.push(resolve)
     })
+  }
+
+  /**
+   * 旁路一次性调用：发送内容并在本轮 turn 结束后返回最终助手文本。
+   *
+   * 不能直接用 `whenIdle()`：`send()` 只是把输入投递到 inbox，驱动器还没来得及把状态切到
+   * running，此时 `whenIdle()` 会**立即解析**（拿到的 lastContent 是空的）。
+   * 这里先等状态离开 idle（有界等待），再等收敛。
+   */
+  async runOnce(content: string): Promise<string> {
+    this.send(content)
+    const deadline = Date.now() + 5 * 60_000
+    while (!this.disposed && this._status === 'idle' && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    await this.whenIdle()
+    return this.lastAssistantContent
   }
 
   async dispose(): Promise<void> {
@@ -573,10 +639,10 @@ class AgentImpl implements AgentControl {
         jobRegistry.progress(this.jobId!, Math.min(95, Math.round((stepsInTurn / Math.max(1, maxSteps)) * 100)), `步骤 ${stepsInTurn}/${maxSteps}`)
 
         // item 为 null 时（工具调用后续轮）消息仅由日志历史 + 注入上下文组成
-        const messages = this.buildMessages(item, injected)
+        const messages = await this.buildMessages(item, injected)
         // 本 step 的工具参数流式累积清零（最终 payload 丢参时按 callId 兜底用）
         this.streamedArgs.clear()
-        const result = await this.runStep(messages)
+        const result = await this.runStepWithOverflowRetry(messages)
         item = null // 本 step 的输入已消费
 
         if (this.turnController.signal.aborted) break
@@ -617,7 +683,11 @@ class AgentImpl implements AgentControl {
     } catch (err: any) {
       aborted = this.turnController.signal.aborted
       if (!aborted) {
-        const message = err?.message || String(err)
+        const raw = err?.message || String(err)
+        // 上下文超限且压缩后仍失败：给可操作提示，而不是一句原始 400
+        const message = isContextOverflowError(raw)
+          ? `上下文超限（已尝试压缩仍无法继续）：${raw}\n建议：减少单次读取/搜索返回量、开启新会话，或改用上下文窗口更大的模型。`
+          : raw
         this.setError(message)
         sessionLog.append(this.id, 'agent/status', { status: 'error' })
         this.emit('agent/error', { message })
@@ -657,7 +727,11 @@ class AgentImpl implements AgentControl {
     return item
   }
 
-  private buildMessages(item: InboxItem | null, injected: InboxItem[]): any[] {
+  /**
+   * 构建本 step 的请求消息（async：可能在请求前触发上下文压缩）。
+   * 顺序：先落盘本 step 输入 →（预算检查）必要时压缩旧轮次 → 从日志派生请求消息。
+   */
+  private async buildMessages(item: InboxItem | null, injected: InboxItem[]): Promise<any[]> {
     // "模型可见即已记录"：本 step 的输入（用户消息 / 注入上下文）先落盘，
     // 再从日志派生历史——工具续轮时原始输入不会丢失，且可完整重建
     if (injected.length > 0) {
@@ -675,28 +749,124 @@ class AgentImpl implements AgentControl {
       })
     }
     // 模型历史从会话日志派生（单一事实源，而不是第二份消息状态）
-    const history = sessionLog.deriveMessages(this.id)
+    let entries = sessionLog.deriveEntries(this.id)
     // 附图任务：记住「第 N 条 user 消息带图」（图片本体不进日志，后续 step / 多轮都从这里复原）
     if (item?.images?.length) {
-      const seq = history.filter((m) => m.role === 'user').length
+      const seq = this.userSeqOf(entries)
       this.taskImagesBySeq.set(seq, item.images)
       if (this.taskImagesBySeq.size > 4) {
         const oldest = this.taskImagesBySeq.keys().next().value
         if (typeof oldest === 'number') this.taskImagesBySeq.delete(oldest)
       }
     }
+    // 上下文压缩（P0）：请求前预算检查，达到阈值即压缩旧轮次（写日志 → 重新派生）
+    if (this.options.contextCompact !== false) {
+      const budget = this.requestBudget(entries)
+      if (budget.level === 'compact') {
+        console.info(`[agent-compact] ${this.id} 占用约 ${(budget.ratio * 100).toFixed(0)}%（${budget.used}/${budget.limit} tokens）→ 主动压缩旧轮次`)
+        if (await this.compact('auto')) entries = sessionLog.deriveEntries(this.id)
+      }
+    }
+    return this.toRequestMessages(entries)
+  }
+
+  /** 日志派生条目 → 请求消息（附图按「真实 user 消息序号」挂回；压缩摘要不计入序号） */
+  private toRequestMessages(entries: DerivedEntry[]): any[] {
     let userSeq = 0
-    return history.map((m) => {
-      const msg = toOpenAIMessage(m)
-      if (msg.role === 'user') {
+    return entries.map(({ msg }) => {
+      const out = toOpenAIMessage(msg)
+      if (out.role === 'user' && !msg.compacted) {
         userSeq++
         const imgs = this.taskImagesBySeq.get(userSeq)
-        if (imgs?.length) msg.images = imgs
+        if (imgs?.length) out.images = imgs
       }
-      return msg
+      return out
     })
   }
 
+  /** 真实 user 消息条数（压缩摘要消息不计） */
+  private userSeqOf(entries: DerivedEntry[]): number {
+    return entries.reduce((n, e) => n + (e.msg.role === 'user' && !e.msg.compacted ? 1 : 0), 0)
+  }
+
+  /** 本次请求的预算（system + 工具 schema + 全部历史） */
+  private requestBudget(entries: DerivedEntry[]): ContextBudget {
+    const tools = this.visibleTools()
+    const used = estimateMessagesTokens(entries.map((e): BudgetMessage => ({
+      role: e.msg.role,
+      content: e.msg.content,
+      toolCalls: e.msg.toolCalls,
+    }))) + tools.length * TOOL_SCHEMA_TOKEN_ESTIMATE
+    return planContextBudget({ limit: this.options.contextLimit, used })
+  }
+
+  /**
+   * 上下文压缩：把「最近 COMPACT_KEEP_TURNS 轮之前」的旧轮次替换为一条结构化摘要
+   * （以 context/compaction 事件落盘，deriveMessages 自动应用；支持多级压缩）。
+   *
+   * 摘要由当前模型生成（一次无工具的独立会话，可在「设置 → 日志」审计）；
+   * 摘要失败时退化为**无 LLM 的关键信息索引**，保证"绝不因超限中断"。
+   */
+  private async compact(kind: 'auto' | 'overflow-retry' | 'manual'): Promise<boolean> {
+    if (this.compacting) return false
+    this.compacting = true
+    try {
+      const entries = sessionLog.deriveEntries(this.id)
+      const items = entries.map((e): BudgetMessage => ({
+        role: e.msg.role,
+        content: e.msg.content,
+        toolCalls: e.msg.toolCalls,
+      }))
+      const plan = pickCompactionRange(items, { keepTurns: COMPACT_KEEP_TURNS })
+      if (!plan) {
+        console.warn(`[agent-compact] ${this.id} 可压缩内容不足（不足 ${COMPACT_KEEP_TURNS} 轮或轮次太少），跳过压缩`)
+        return false
+      }
+      const dropped = entries.slice(plan.startIndex, plan.endIndex)
+      const droppedItems = items.slice(plan.startIndex, plan.endIndex)
+      const tokensBefore = estimateMessagesTokens(droppedItems)
+      const summary = (await this.summarize(buildCompactionPrompt(droppedItems))) || indexSummary(droppedItems)
+      const fromSeq = dropped[0]?.seq ?? entries[plan.startIndex].seq
+      const toSeq = dropped[dropped.length - 1]?.seq ?? fromSeq
+      sessionLog.append(this.id, 'context/compaction', {
+        fromSeq,
+        toSeq,
+        summary,
+        tokensBefore,
+        tokensAfter: estimateMessagesTokens([{ role: 'user', content: compactedContextMessage(summary) }]),
+        droppedMessages: dropped.length,
+        kind,
+        model: String((this.options.llmConfig?.model || this.options.config?.model || '') || '') || undefined,
+      })
+      console.info(`[agent-compact] ${this.id} 已压缩 ${dropped.length} 条消息（约 ${tokensBefore} tokens → 摘要 ${summary.length} 字符，kind=${kind}）`)
+      return true
+    } catch (e: any) {
+      console.warn(`[agent-compact] ${this.id} 压缩失败（保持原历史）:`, e?.message || e)
+      return false
+    } finally {
+      this.compacting = false
+    }
+  }
+
+  /** 生成压缩摘要（复用当前 provider / 模型；失败返回空串由调用方兜底） */
+  private async summarize(prompt: string): Promise<string> {
+    try {
+      const text = await runLlmOnce({
+        prompt,
+        systemPrompt: COMPACT_SYSTEM_PROMPT,
+        provider: this.options.provider,
+        config: this.options.config,
+        llmConfig: this.options.llmConfig,
+        label: '上下文压缩',
+      })
+      return String(text || '').trim()
+    } catch (e: any) {
+      console.warn('[agent-compact] 摘要生成失败，改用无 LLM 兜底摘要:', e?.message || e)
+      return ''
+    }
+  }
+
+  /** 无 LLM 兜底摘要：保留「谁说了什么 + 工具调用与关键参数」的可操作索引 */
   private visibleTools(): any[] {
     // PTC（Code Mode）：能力目录（options.tools）不变，但模型可见的工具
     // schema 坍缩为单个 run_code——模型写程序用 ctx SDK 组合多步操作
@@ -725,6 +895,28 @@ class AgentImpl implements AgentControl {
   }
 
   // ---------------- LLM step ----------------
+
+  /**
+   * 带「溢出自愈」的 step 执行：provider 报上下文超限时先压缩旧轮次再重放本 step
+   * （最多 OVERFLOW_RETRY_LIMIT 次）。把原本的“直接中断”变成自愈；
+   * 压缩不可行（可压缩内容不足 / 摘要失败）时抛回原错误，不掩盖真实原因。
+   */
+  private async runStepWithOverflowRetry(messages: any[]): Promise<{ content: string; toolCalls: any[]; reasoning?: string; usage?: AgentStepUsage; finishReason?: string }> {
+    let current = messages
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.runStep(current)
+      } catch (err: any) {
+        const msg = err?.message || String(err)
+        if (attempt >= OVERFLOW_RETRY_LIMIT || !isContextOverflowError(msg)) throw err
+        console.warn(`[agent-compact] ${this.id} 上下文超限（第 ${attempt + 1} 次）→ 压缩后重放本 step：${msg}`)
+        const ok = await this.compact('overflow-retry')
+        if (!ok) throw err
+        // 输入已落盘，压缩后重新派生历史即可重放
+        current = this.toRequestMessages(sessionLog.deriveEntries(this.id))
+      }
+    }
+  }
 
   /**
    * runStep 外层：对远程自托管后端做在途并发限流——
@@ -1079,6 +1271,9 @@ class AgentImpl implements AgentControl {
       // 预设模式的知识库候选范围与召回数（kb_search 工具读取）
       kbPaths: this.options.kbPaths,
       kbTopK: this.options.kbTopK,
+      // 检索参数（来源/嵌入兜底/策略）：kb_search 与 search_files(semantic) 读取，
+      // 保证 agent 内的检索与主页问答用同一套来源配置
+      retrieval: (this.options as any).retrieval,
         // MCP 配置（mcp_call 工具读取）
         mcpServerId: this.options.mcpServerId,
         mcpServerConfig: this.options.mcpServerConfig,
@@ -1091,7 +1286,7 @@ class AgentImpl implements AgentControl {
   // ---------------- 事件 ----------------
 
   private emit<K extends AgentEventType>(type: K, payload: AgentEventMap[K]): void {
-    broadcast?.({ agentId: this.id as any, type, payload } as AgentEvent)
+    dispatchEvent({ agentId: this.id as any, type, payload } as AgentEvent)
   }
 
   private emitStatus(): void {
@@ -1164,6 +1359,39 @@ const agents = new Map<string, AgentImpl>()
 
 // 子代理接缝（路线图 2.6）：parentId → 活跃子代理 id 集合；父销毁时级联销毁
 const childAgents = new Map<string, Set<string>>()
+
+/**
+ * 一次性 LLM 调用（无工具、单 step）：给上下文压缩等“旁路请求”复用 AgentImpl 的
+ * provider 适配 / 凭据解析 / 重试逻辑，避免再写一套 provider 分发。
+ * 用独立会话（可在「设置 → 日志」中审计），完成后立即销毁。
+ */
+async function runLlmOnce(opts: {
+  prompt: string
+  systemPrompt?: string
+  provider: string
+  config?: any
+  llmConfig?: any
+  label?: string
+}): Promise<string> {
+  const agent = new AgentImpl({
+    systemPrompt: opts.systemPrompt,
+    provider: opts.provider,
+    config: opts.config,
+    llmConfig: opts.llmConfig,
+    tools: [],
+    maxSteps: 2,
+    label: opts.label,
+    // 旁路请求自身不参与上下文压缩（防递归）
+    contextCompact: false,
+  })
+  agents.set(agent.id, agent)
+  agent.drive()
+  try {
+    return await agent.runOnce(opts.prompt)
+  } finally {
+    await agent.dispose()
+  }
+}
 
 /** 创建 agent（异步驱动立即启动，返回控制句柄） */
 export function createAgent(options: AgentOptions): AgentControl {

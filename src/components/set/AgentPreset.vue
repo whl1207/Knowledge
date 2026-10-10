@@ -60,15 +60,17 @@
               class="contact-item" :class="{ active: selectedId === element.id }"
               @click="selectPreset(element.id)"
               @contextmenu.prevent="showPresetMenu($event, element)">
-              <div class="contact-item-avatar"><i class="fa fa-user"></i></div>
+              <div class="contact-item-avatar"><i class="fa" :class="presetIcon(element)"></i></div>
               <div class="contact-item-info">
                 <span class="contact-item-name">{{ element.name || (store.locales === 'en' ? 'Unnamed' : '未命名') }}</span>
-                <span v-if="element.tags && element.tags.length" class="contact-item-tags">
-                  <span v-for="t in element.tags.slice(0, 3)" :key="t" class="contact-tag-chip">{{ t }}</span>
-                  <span v-if="element.tags.length > 3" class="contact-tag-more">+{{ element.tags.length - 3 }}</span>
+                <span v-if="element.builtin || (element.tags && element.tags.length)" class="contact-item-tags">
+                  <span v-if="element.builtin" class="contact-tag-chip">{{ store.locales === 'en' ? 'built-in' : '内置' }}</span>
+                  <span v-for="t in (element.tags || []).slice(0, 3)" :key="t" class="contact-tag-chip">{{ t }}</span>
+                  <span v-if="(element.tags || []).length > 3" class="contact-tag-more">+{{ (element.tags || []).length - 3 }}</span>
                 </span>
               </div>
-              <button class="contact-item-del" @click.stop="removePreset(element.id)" :title="store.locales === 'en' ? 'Delete' : '删除'">
+              <span v-if="element.builtin" class="contact-item-lock" :title="store.locales === 'en' ? 'Built-in, cannot be deleted' : '内置项，不可删除'"><i class="fa fa-lock"></i></span>
+              <button v-else class="contact-item-del" @click.stop="removePreset(element.id)" :title="store.locales === 'en' ? 'Delete' : '删除'">
                 <i class="fa fa-trash"></i>
               </button>
             </div>
@@ -434,7 +436,7 @@
           <i class="fa fa-download"></i> {{ store.locales === 'en' ? 'Export .agent' : '导出 .agent 文件' }}
         </div>
         <div class="menu-divider"></div>
-        <div class="menu-item danger" @click="removePresetFromMenu(); hidePresetMenu()">
+        <div v-if="!presetMenu.preset?.builtin" class="menu-item danger" @click="removePresetFromMenu(); hidePresetMenu()">
           <i class="fa fa-trash"></i> {{ store.locales === 'en' ? 'Delete' : '删除' }}
         </div>
       </div>
@@ -456,6 +458,7 @@ import {
 } from '@/composables/useAgentPresets'
 import { renderLoopSections } from '@/lib/agent/skill'
 import { AGENT_MAX_STEPS_MAX, DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
+import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset } from '@/shared/builtinAgentPresets'
 import { deepSeekStyleOf, normalizeLlmTypeList } from '@/shared/llmSources'
 
 const store = usestore()
@@ -471,6 +474,12 @@ const matchesKeyword = (c: any): boolean => {
     tags.toLowerCase().includes(kw)
 }
 const filteredContacts = computed(() => (store.agentPresets as any[]).filter(matchesKeyword))
+
+/** 列表头像图标：内置预设用各自图标（代码 / 办公），其余为用户图标 */
+const presetIcon = (p: any): string =>
+  p?.id === BUILTIN_AGENT_PRESET_IDS.code ? 'fa-code'
+    : p?.id === BUILTIN_AGENT_PRESET_IDS.office ? 'fa-briefcase'
+      : 'fa-user'
 
 // ====== 标签 ======
 const tagInput = ref('')
@@ -523,6 +532,8 @@ interface AgentPresetCapabilities {
 interface AgentPreset {
   id: string
   name: string
+  /** 是否为出厂内置预设（代码智能体 / 办公智能体）：不可删除 */
+  builtin?: boolean
   /** 预设标签（用于按名称/标签搜索） */
   tags: string[]
   llmType: string
@@ -747,6 +758,10 @@ const loadMcpEquipments = async (agent: AgentPreset) => {
     try {
       const ok = await mcpManager.connect(serverId, server, serverId)
       if (!ok) continue
+      // 仅当服务确实提供 list_agents 时才查询装备：向不支持该工具的服务（Web Agent / Office / drawio / 文献检索 等）
+      // 盲发调用会把未知工具名交给主进程执行，产生无谓副作用（浏览器 Agent 会被拉起窗口）
+      const tools = mcpManager.getTools(serverId, serverId) || []
+      if (!tools.some((t: any) => t && t.name === 'list_agents')) continue
       const res = await mcpManager.callTool(serverId, 'list_agents', {}, serverId, 35000)
       let data: any = res?.data
       if (typeof data === 'string') { try { data = JSON.parse(data) } catch { data = [] } }
@@ -1000,6 +1015,8 @@ const duplicatePreset = async (preset: AgentPreset | null) => {
     id: genId(),
     name: `${preset.name || 'Agent'}${store.locales === 'en' ? ' (copy)' : ' 副本'}`,
   }
+  // 副本是普通预设：不带内置标记（否则会变成“不可删除”）
+  delete (clone as any).builtin
   store.agentPresets.push(clone)
   selectedId.value = clone.id
   store.saveConfig()
@@ -1033,7 +1050,8 @@ const exportPreset = async (preset: AgentPreset | null) => {
 /** 删除：右键菜单调用（复用 removePreset，删除 .agent 文件并移出列表） */
 const removePresetFromMenu = () => {
   const p = presetMenu.value.preset
-  if (!p || p.id === GENERAL_PRESET_ID) return // 内置通用智能体不可删除
+  // 内置项不可删除：通用智能体（虚拟项）+ 出厂预设（代码智能体 / 办公智能体）
+  if (!p || p.id === GENERAL_PRESET_ID || isBuiltinAgentPreset(p)) return
   removePreset(p.id)
 }
 
@@ -1109,6 +1127,8 @@ const addPreset = async () => {
 /** 删除预设（删除 .agent 文件 + 移出列表） */
 const removePreset = async (id: string) => {
   if (id === GENERAL_PRESET_ID) return // 内置通用智能体不可删除
+  const target = store.agentPresets.find((c: AgentPreset) => c.id === id)
+  if (isBuiltinAgentPreset(target)) return // 出厂内置预设（代码智能体 / 办公智能体）不可删除
   const idx = store.agentPresets.findIndex((c: AgentPreset) => c.id === id)
   if (idx >= 0) {
     await removeAgentPreset(id)
@@ -1154,6 +1174,8 @@ const importAgentFile = async () => {
       ElMessage.warning(store.locales === 'en' ? 'This preset already exists' : '该预设已存在')
       return
     }
+    // 导入的是普通预设：剥掉内置标记（内置预设由软件自己按 id 注入）
+    delete data.builtin
     // 同名冲突：避免写入时覆盖已有预设的文件（文件名 = 名称清洗后）
     const dir = store.agentPresetPath
     if (dir) {
@@ -1246,6 +1268,8 @@ watch(() => store.agentPresets, () => {
   if (presetSaveTimer) clearTimeout(presetSaveTimer)
   presetSaveTimer = setTimeout(() => {
     for (const c of store.agentPresets as any[]) {
+      // 内置预设不落盘：由软件按 id 幂等提供，避免在用户预设文件夹里多出非自建文件
+      if (isBuiltinAgentPreset(c)) continue
       writeAgentPreset(c)
     }
   }, 600)
@@ -1254,6 +1278,8 @@ watch(() => store.agentPresets, () => {
 onMounted(async () => {
   // .agent 文件模式：先扫描预设文件夹（有 agentPresetPath 时以文件为准）
   await scanAgentPresets()
+  // 出厂内置预设（代码智能体 / 办公智能体）幂等兜底：旧存档 / 文件夹模式下缺失也能补上
+  store.ensureBuiltinAgentPresets()
   // 兼容迁移：旧数据 selectedSkill(string) → selectedSkills(string[])
   for (const c of store.agentPresets as any[]) {
     if (!Array.isArray(c.selectedSkills)) {

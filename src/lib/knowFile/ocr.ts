@@ -19,7 +19,7 @@
  *   2. 命中复读后换一套更强的抑制参数重试（用同一套参数重试必然再次失败）。
  */
 import { AIUtils } from '@/services/ai-utils'
-import { deepSeekConfig, normalizeLlmType } from '@/shared/llmSources'
+import { normalizeLlmType } from '@/shared/llmSources'
 import { prepareImageDataUrl } from '@/lib/image/prepareImage'
 
 /** Ollama 生成参数（options），仅列出 OCR 需要的字段 */
@@ -160,28 +160,9 @@ export function ocrProviderLabel(key: string): string {
 /**
  * 取某来源的连接配置（与 store.currentLLMConfig 同一套映射；custom 取激活来源）。
  * 配置里带 model 字段，OCR 调用时会被目标模型名覆盖。
+ * 实现已抽到共享模块 `shared/llmSources.ts`（PDF 翻译等同样按来源取配置），这里保留同名导出。
  */
-export function llmConfigByKey(llm: any, key: string): any {
-  if (!llm) return null
-  switch (normalizeLlmType(key)) {
-    case 'ollama': return llm.ollama
-    case 'lmstudio': return llm.lmstudio
-    case 'openai': return llm.openai
-    case 'deepseek': return deepSeekConfig(llm)
-    case 'gpustack': return llm.gpustack
-    case 'anthropic': return llm.anthropic
-    case 'google': return llm.google
-    case 'azure': return llm.azure
-    case 'custom': {
-      const c = llm.custom
-      if (!c) return null
-      const srcs = Array.isArray(c.sources) ? c.sources : []
-      const idx = (typeof c.activeIndex === 'number' && c.activeIndex >= 0 && c.activeIndex < srcs.length) ? c.activeIndex : 0
-      return srcs[idx] ? { ...c, ...srcs[idx] } : c
-    }
-    default: return null
-  }
-}
+export { llmConfigByKey } from '@/shared/llmSources'
 
 /** 模型名里含 ocr → 最可能是 OCR 专用模型（deepseek-ocr / glm-ocr / olmocr / nanonets-ocr …） */
 const OCR_NAME_RE = /ocr/i

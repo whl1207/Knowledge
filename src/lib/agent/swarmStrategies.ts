@@ -2,14 +2,14 @@
  * swarmStrategies.ts — 集群执行策略注册表
  *
  * 模式即策略键：
- * - auto（默认，群聊协作）：发送任务时不带 @ 符号 → 把任务广播给群内所有成员并行作答，
- *   全部完成后由「群主」做最终总结（默认使用中立 LLM；若预案曾指定某 Agent 为群主则用其设定）；
- *   发送时带 @（发送层 runNamedTask 拦截）→ 只唤起被点名成员，单点不总结。
- * - task  原语模式：按 settings.taskMode 分派 graphflow / debate / broadcast / sequential
+ * - auto（默认，群聊协作）：发送任务时不带 @ → 任务交给群内所有成员依次作答，
+ *   成员可在正文里 @同事（或 @成员名 发任务）追加一轮协作；
+ *   发送时带 @（发送层 runNamedTask 拦截）→ 只唤起被点名成员，不经策略。
+ * - task  原语模式：目前只剩辩论（多轮互驳 + 中立总结）。
  *
  * 协作约定（无管理器 / 无结构化黑板与事件协议）：
  * - 成员想共享的信息直接写在正文里，通过「群聊历史注入」（historySection 跨任务前文）
- *   与任务内上下文累积（ctxText）自然传给后续成员/群主，由模型自行判断要不要共享。
+ *   与任务内上下文累积（ctxText）自然传给后续成员，由模型自行判断要不要共享。
  */
 
 import type { SwarmAgent, SwarmAgentRunState, SwarmRunMode } from '@/types/swarm'
@@ -26,6 +26,8 @@ export interface AgentRunOpts {
   ragContext?: string
   /** 群主总结：使用默认 LLM + 中立 system prompt，不携带 Agent 的角色设定 */
   generic?: boolean
+  /** 额外工具（追加到按能力推导的白名单之后；用于 Agent Teams 协议工具） */
+  extraTools?: string[]
 }
 
 export interface SwarmRuntimeContext {
@@ -121,7 +123,7 @@ function buildMemberPrompt(ctx: SwarmRuntimeContext, idx: number, taskBody: stri
 // ---------------------------------------------------------------------------
 
 /** 图谱流程：按边拓扑排序，沿边传递上下文 */
-/** 原「图谱流程 / 顺序执行」已随关系图谱一并移除（集群保留：全员响应 / 群主撮合 / 辩论） */
+/** 原「图谱流程 / 顺序执行」已随关系图谱一并移除（集群运行方式：全员响应 / 辩论 / 项目组） */
 
 /**
  * 群主总结（原“通用管理器”去调度化后只保留的中立总结角色）：
@@ -211,64 +213,7 @@ async function runMention(ctx: SwarmRuntimeContext, relay = false) {
   }
 }
 
-/** 汇总群聊中的成员汇报（assistant 消息且来自成员）为文本段 */
-function memberPosts(ctx: SwarmRuntimeContext): string {
-  return (ctx.historyMessages || [])
-    .filter((m: any) => m && m.content && m.role === 'assistant' && (m.swarmAgent?.idx ?? -1) >= 0)
-    .map((m: any) => `### ${m.swarmAgent?.name || 'Agent'}\n${m.content}`)
-    .join('\n\n')
-}
-
-/** 自动 · 撮合：全员先发言一轮，随后由群主串场点名撮合（最多 HOST_MERGE_ROUNDS 轮），成员无需写 @ 也能被点名 */
-async function runHostCollab(ctx: SwarmRuntimeContext) {
-  const zh = ctx.locale !== 'en'
-  ctx.selectedIndices.forEach(idx => ctx.setAgentState(idx, { status: 'pending', stage: '等待发言' }))
-  for (const idx of ctx.selectedIndices) {
-    await ctx.runAgent(idx, buildMemberPrompt(ctx, idx, `## 任务\n${ctx.task}\n`, { noMention: true }))
-  }
-  const HOST_MERGE_ROUNDS = 2
-  for (let r = 1; r <= HOST_MERGE_ROUNDS; r++) {
-    const hostPrompt = [
-      `## 总体目标`,
-      ctx.task,
-      ``,
-      `## 目前的群聊发言`,
-      memberPosts(ctx) || (zh ? '（暂无成员发言）' : '(no posts yet)'),
-      ``,
-      zh
-        ? '你是群主。请撮合讨论：若有成员的观点需要另一位成员直接回应、补充或反驳，请输出一行 @<成员名>：<希望它回应的问题>（只能 @ 已在群中的成员）；如果已经不需要补充，请直接输出：无需补充。'
-        : 'You are the host. If a view needs another member to respond/elaborate/rebut, output a line like @<member>: <question> (only mention existing members); otherwise output: no more needed.',
-    ].join('\n')
-    const out = await runHost(ctx, hostPrompt, `撮合 ${r}`)
-    const assigns = parseMentions(out, ctx.agentsOf, zh ? '群主' : 'Host')
-    if (!assigns.length) break
-    for (const m of assigns) {
-      if (summonedMembers.value.includes(m.idx)) continue
-      summonedMembers.value.push(m.idx)
-      ctx.setAgentState(m.idx, { status: 'pending', stage: '回应撮合' })
-      await ctx.runAgent(m.idx, buildMemberPrompt(ctx, m.idx, `## 群主撮合请求\n${m.task}`, { noMention: true }))
-    }
-  }
-}
-
-/** 群主收尾总结（auto 各档最后调用）。从群聊输出中取各成员最终汇报交群主综合。 */
-async function runHostSummary(ctx: SwarmRuntimeContext) {
-  const zh = ctx.locale !== 'en'
-  const en = !zh
-  const body = memberPosts(ctx) || (zh ? '（本轮无成员汇报内容）' : '（No member output this round）')
-  const summaryPrompt = [
-    `## 总体目标`,
-    ctx.task,
-    ``,
-    `## 各成员汇报`,
-    body,
-    ``,
-    en ? 'Please summarize this collaboration as the host: conclusions, outputs/deliverables, and open issues.' : '请作为群主，汇总本次全员协作的最终结果：结论、产出物与遗留问题。',
-  ].join('\n')
-  await runHost(ctx, summaryPrompt, '总结')
-}
-
-/** task 策略：原语模式（只剩辩论；全员响应/群主撮合由 auto 策略的档位表达） */
+/** task 策略：原语模式（只剩辩论；全员响应由 auto 策略表达，项目组见 swarmRunner.runEpisode） */
 export const taskStrategy: SwarmStrategy = {
   type: 'task',
   label: '辩论',
@@ -279,21 +224,18 @@ export const taskStrategy: SwarmStrategy = {
 }
 
 // ---------------------------------------------------------------------------
-// auto 策略（默认，群聊协作）：内部按 settings.collabMode 分四档——
-//   mention 点名（默认）/ relay 接力 / host 撮合 / plain 仅发言；收尾统一群主总结。
-// 用户在输入框 @（runNamedTask）→ 只唤起被点名成员，单点执行不总结。
+// auto 策略（默认，群聊协作）：内部按 settings.collabMode 分档——
+//   mention 点名（默认）/ relay 接力 / plain 仅发言。
+// 用户在输入框 @（runNamedTask）→ 只唤起被点名成员，单点执行。
 export const autoStrategy: SwarmStrategy = {
   type: 'auto',
   label: '自动',
-  description: '群聊协作（默认）：按“点名/接力/撮合/仅发言”分档执行，结束由群主总结；输入框 @ 点名单点执行',
+  description: '群聊协作（默认）：成员依次作答、可在回复里 @同事接续；输入框 @ 点名单点执行',
   async run(ctx) {
     const collab = ctx.settings?.collabMode
     if (collab === 'plain') await runPlain(ctx)
     else if (collab === 'relay') await runMention(ctx, true)
-    else if (collab === 'host') await runHostCollab(ctx)
     else await runMention(ctx, false) // 默认：点名
-    // 群主总结：默认关闭（settings.enableHostSummary === true 才开启）
-    if (ctx.settings?.enableHostSummary === true) await runHostSummary(ctx)
   },
 }
 

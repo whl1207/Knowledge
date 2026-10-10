@@ -781,11 +781,26 @@ class BrowserAgentService {
   }
 
   // ===================== 工具执行（toolRegistry 直通 与 进程内 MCP server 共用） =====================
+
+  /** 已知工具名集合（懒计算；供 executeTool 在创建窗口前拦截未知工具名） */
+  private knownToolNameCache: Set<string> | null = null
+  private knownToolNames(): Set<string> {
+    if (!this.knownToolNameCache) {
+      this.knownToolNameCache = new Set(
+        (this.toolDefinitions() as any[]).map((t) => String(t?.name || '')).filter(Boolean)
+      )
+    }
+    return this.knownToolNameCache
+  }
+
   /**
    * @param opts.owner 发起本次调用的 agent 会话 id（由 tools.ts 从 ToolExecutionContext.agentId/sessionId 注入）：
    *                   该会话新建的 AI 标签会打上 owner，会话 idle/结束时可精确回收。
    */
   async executeTool(toolName: string, args: Record<string, any>, opts?: { owner?: string }): Promise<string> {
+    // 工具名校验必须早于窗口创建：MCP 客户端可能发来本服务不存在的工具名（如集群控制的 list_agents），
+    // 若无条件 ensureWindow 会把浏览器窗口无端弹出（现象：打开含 Web Agent 的预设/客户端探测工具时跳窗）
+    if (!this.knownToolNames().has(String(toolName || ''))) throw new Error(`未知工具: ${toolName}`)
     // AI 首次调用而窗口尚未创建 → 自动创建（M0：浏览器 Agent 独立窗口）
     if (!this.win || this.win.isDestroyed()) this.ensureWindow()
     const owner = typeof opts?.owner === 'string' && opts.owner.trim() ? opts.owner.trim() : null

@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, watch } from 'vue'
 import block_md from '@/components/block_md.vue'
 import { usestore } from '@/store'
 import * as kbAi from '@/shared/kbAiClient'
 import * as XLSX from 'xlsx'
+import {
+  styleProfilePrompt, mimicQuestionPrompt, normalizeStyleProfile, styleProfileSummary,
+  emptyStyleProfile, type ExamStyleProfile,
+} from '@/services/learningPrompt'
 
 // 定义组件接口
 interface Props {
   store: any
   blocks: any[]
   model: any
+  kbPath?: string       // 当前知识库路径（真题风格档案按知识库分别保存）
   examTrack?: boolean   // 考试结果是否计入学习对象（父级状态）
   getModel?: () => Promise<void>
   cosineSimilarity?: (vecA: number[], vecB: number[]) => number
@@ -85,9 +90,14 @@ const examTypeLabels: Record<ExamQuestionType, { zh: string, en: string }> = {
   essay: { zh: '问答题', en: 'Essay' }
 }
 
-// 出题方式：随机采样 / 自选切片 / 手动输入
-const examMode = ref<'random' | 'select' | 'manual'>('random')
+// 出题方式：随机采样 / 自选切片 / 手动输入 / 真题仿写
+const examMode = ref<'random' | 'select' | 'manual' | 'mimic'>('random')
 const examCount = ref(5)  // 随机出题的题数（= 采样切片数）
+// 题数输入框：随机/自选模式写 examCount，仿写模式写 mimicCount（模板共用同一个输入框）
+const countValue = computed<number>({
+  get: () => (examMode.value === 'mimic' ? mimicCount.value : examCount.value),
+  set: (v: number) => { if (examMode.value === 'mimic') mimicCount.value = v; else examCount.value = v },
+})
 const examTypes = reactive<Record<ExamQuestionType, boolean>>({ single: true, multi: true, judge: true, essay: true })
 const examQuestions = ref<ExamQuestion[]>([])
 const examGenerating = ref(false)
@@ -458,6 +468,205 @@ async function generateExamQuestions() {
   } finally {
     examGenerating.value = false
   }
+}
+
+// ==================== 真题仿写（P1：样卷风格档案 → 仿写命题） ====================
+// 流程：导入/粘贴真题 → 分析出风格档案（JSON，按知识库持久化在 localStorage）→ 按档案 + 切片出题
+const mimicSource = ref('')            // 真题全文（导入或粘贴）
+const mimicSourceName = ref('')        // 来源文件名（仅展示）
+const mimicProfile = ref<ExamStyleProfile | null>(null)
+const mimicAnalyzing = ref(false)      // 分析风格中
+const mimicCount = ref(5)              // 本次生成题数
+const mimicPanelOpen = ref(true)       // 左侧仿写面板开关
+const mimicShowProfile = ref(false)    // 展开查看风格档案原文
+
+function mimicStorageKey(): string {
+  return 'learning:mimicStyle:' + (props.kbPath || 'default')
+}
+function loadMimicProfile() {
+  try {
+    const raw = localStorage.getItem(mimicStorageKey())
+    mimicProfile.value = raw ? normalizeStyleProfile(JSON.parse(raw)) : null
+  } catch { mimicProfile.value = null }
+}
+function saveMimicProfile() {
+  try {
+    if (mimicProfile.value) localStorage.setItem(mimicStorageKey(), JSON.stringify(mimicProfile.value))
+    else localStorage.removeItem(mimicStorageKey())
+  } catch { /* localStorage 不可用时仅保留内存态 */ }
+}
+watch(() => props.kbPath, () => { loadMimicProfile() }, { immediate: true })
+
+function mimicLive(msg: string) { emit('updateLiveState', msg) }
+function mimicState(msg: string) { emit('updateState', msg) }
+
+/** 读取样卷文本：.pdf 走 pdfjs 逐页取文本（按需加载 pdfjs），.md/.txt/.docx 走主进程 readFile */
+async function readExamText(filePath: string): Promise<string> {
+  const ext = (filePath.split('.').pop() || '').toLowerCase()
+  if (ext === 'pdf') {
+    // 按需引入 pdfjs（仅导入 PDF 时才加载该依赖，不增加学习模块默认体积）
+    // 注意：文本提取同样需要 CMap 数据——预定义 CMap 的字体缺数据时提取不出文字（与渲染同理）
+    const { getDocument } = await import('pdfjs-dist')
+    const { PDFJS_RUNTIME_OPTIONS } = await import('@/lib/pdfjs')
+    const result = await window.ipcRenderer.invoke('readFileBase64', filePath)
+    if (typeof result !== 'string' || !result.startsWith('data:')) throw new Error('读取 PDF 失败')
+    const binary = atob(result.split(',')[1] || '')
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    const pdf = await getDocument({ data: bytes, ...PDFJS_RUNTIME_OPTIONS }).promise
+    let text = ''
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i)
+      const content = await page.getTextContent()
+      text += (content.items as any[]).map((it: any) => it.str).join(' ') + '\n\n'
+    }
+    try { pdf.destroy() } catch { /* 忽略 */ }
+    return text.trim()
+  }
+  const r: any = await window.ipcRenderer.invoke('readFile', filePath)
+  const text = (r && typeof r === 'object') ? String(r.content || '') : String(r ?? '')
+  if (/^Error reading file/.test(text) || /^不支持的文件格式/.test(text)) throw new Error(text)
+  return text.trim()
+}
+
+/** 导入真题文件（.md/.txt/.docx/.pdf） */
+async function importMimicFile() {
+  const path = await window.ipcRenderer.invoke('selectFile', {
+    filters: [
+      { name: store.locales == 'zh' ? '真题/样卷' : 'Reference exam', extensions: ['md', 'txt', 'docx', 'pdf'] },
+      { name: store.locales == 'zh' ? '所有文件' : 'All Files', extensions: ['*'] },
+    ],
+  })
+  if (!path) return
+  try {
+    const text = await readExamText(path)
+    if (!text) { mimicState(store.locales == 'zh' ? '文件内容为空' : 'File is empty'); return }
+    mimicSource.value = text
+    mimicSourceName.value = String(path).split(/[\\/]/).pop() || ''
+    mimicState(store.locales == 'zh' ? `已导入样卷：${mimicSourceName.value}（${text.length} 字）` : `Imported ${mimicSourceName.value}`)
+  } catch (e) {
+    mimicState(store.locales == 'zh' ? '导入失败：' + (e instanceof Error ? e.message : String(e)) : 'Import failed: ' + String(e))
+  }
+}
+
+/** 分析风格：把样卷交给大模型抽取风格档案（结果按知识库落盘，可反复使用） */
+async function analyzeMimicStyle() {
+  if (mimicAnalyzing.value) return
+  const src = mimicSource.value.trim()
+  if (!src) { mimicState(store.locales == 'zh' ? '请先导入或粘贴真题内容' : 'Import or paste a reference exam first'); return }
+  if (!props.model?.chat && !props.model?.process) { mimicState(store.locales == 'zh' ? '未配置可用的 AI 模型' : 'No AI model configured'); return }
+  mimicAnalyzing.value = true
+  try {
+    mimicLive(store.locales == 'zh' ? '正在分析真题风格...' : 'Analyzing exam style...')
+    // 样卷过长时截断，避免超出上下文（风格靠开头题目即可判断）
+    const prompt = styleProfilePrompt(store.locales == 'zh', src.slice(0, 12000))
+    const out = await kbChat([{ role: 'user', content: prompt }])
+    const parsed = parseExamJsonArray(out || '')
+    const p = normalizeStyleProfile(parsed[0] || null)
+    if (!parsed.length) { mimicLive(store.locales == 'zh' ? '风格分析失败：模型未返回合法 JSON' : 'Style analysis failed: invalid JSON'); return }
+    mimicProfile.value = p
+    saveMimicProfile()
+    const mixTotal = p.types.single + p.types.multi + p.types.judge + p.types.essay
+    if (mixTotal > 0) mimicCount.value = Math.min(50, Math.max(1, mixTotal))
+    mimicShowProfile.value = true
+    mimicLive(store.locales == 'zh' ? '风格分析完成' : 'Style analyzed')
+  } catch (e) {
+    mimicLive(store.locales == 'zh' ? '风格分析失败：' + String(e) : 'Style analysis failed: ' + String(e))
+  } finally {
+    mimicAnalyzing.value = false
+  }
+}
+
+/** 仿写题型轮换：优先按样卷题量配比抽样，配比缺失时回退为勾选题型轮换 */
+function pickMimicType(qIdx: number, types: ExamQuestionType[]): ExamQuestionType {
+  const p = mimicProfile.value
+  if (p) {
+    const weighted: ExamQuestionType[] = []
+    for (const t of types) {
+      const n = Math.max(0, Math.round(p.types[t] || 0))
+      for (let i = 0; i < n; i++) weighted.push(t)
+    }
+    if (weighted.length) return weighted[qIdx % weighted.length]
+  }
+  return types[qIdx % types.length]
+}
+
+/** 仿写单题：同题型失败后换其他已启用题型，最多 3 次重试 */
+async function generateMimicOne(
+  s: ExamSourceSlice, typeList: ExamQuestionType[], qIdx: number, style: ExamStyleProfile
+): Promise<ExamQuestion | null> {
+  for (const t of typeList) {
+    const ruleZh = t === 'single' ? '（1 个正确答案，4 个选项）' : t === 'multi' ? '（2~4 个正确答案，4 个选项）' : t === 'judge' ? '（对/错）' : '（简答，给出参考答案）'
+    const ruleEn = t === 'single' ? ' (1 correct answer, 4 options)' : t === 'multi' ? ' (2-4 correct answers, 4 options)' : t === 'judge' ? ' (true/false)' : ' (short answer with reference)'
+    const prompt = mimicQuestionPrompt(
+      store.locales == 'zh', { label: s.label, content: s.content },
+      t, ruleZh, ruleEn, examTypeLabels[t].zh, examTypeLabels[t].en, style
+    )
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const rr = await kbChat([{ role: 'user', content: prompt }])
+        const pp = parseExamJsonArray(rr || '')
+        if (pp.length) {
+          const cand = normalizeExamItem(pp[0], s, qIdx)
+          if (cand && !isLikelyUnanswerable(cand, s)) return cand
+        }
+      } catch (e) {
+        console.error('仿写出题失败:', e)
+      }
+    }
+  }
+  return null
+}
+
+/** 按风格档案生成试卷（新题追加到已有题之后，与其它模式一致） */
+async function generateMimicQuestions() {
+  if (examGenerating.value) return
+  if (!mimicProfile.value) { mimicLive(store.locales == 'zh' ? '请先分析真题风格' : 'Analyze the exam style first'); return }
+  const usable = examUsableSlices.value
+  if (!usable.length) { mimicLive(store.locales == 'zh' ? '知识库切片为空，无法出题' : 'No slices available'); return }
+  const types = enabledExamTypes.value
+  if (!types.length) { mimicLive(store.locales == 'zh' ? '请至少勾选一种题型' : 'Enable at least one question type'); return }
+  const target = Math.min(50, Math.max(1, Number(mimicCount.value) || 1))
+  const pool = shuffleArr(usable).map((b: any) => ({
+    label: b.label || b.id || '', content: String(b.A).trim(),
+    blockId: b.id, filePath: b.filePath || b.path || b.label,
+  } as ExamSourceSlice))
+  examGenerating.value = true
+  examGraded.value = false
+  try {
+    const style = mimicProfile.value
+    let poolIdx = 0
+    let made = 0
+    while (made < target && poolIdx < pool.length) {
+      const s = pool[poolIdx]
+      poolIdx++
+      const qIdx = examQuestions.value.length
+      const primary = pickMimicType(qIdx, types)
+      const typeList = [primary, ...types.filter(x => x !== primary)]
+      mimicLive(store.locales == 'zh' ? `正在仿写第 ${qIdx + 1} 题（本次新增 ${made + 1}/${target}）...` : `Writing question ${qIdx + 1} (+${made + 1}/${target})...`)
+      const q = await generateMimicOne(s, typeList, qIdx, style)
+      if (q) { examQuestions.value.push(q); made++ }
+    }
+    const summary = made
+      ? (store.locales == 'zh' ? `本次新增 ${made}/${target} 道仿写题，共 ${examQuestions.value.length} 题` : `Added ${made}/${target} mimic questions, total ${examQuestions.value.length}`)
+      : (store.locales == 'zh' ? '仿写出题失败：大模型未返回合法题目' : 'Mimic generation failed: invalid questions')
+    mimicLive(summary)
+  } catch (e) {
+    console.error('仿写出题失败:', e)
+    mimicLive(store.locales == 'zh' ? '仿写出题失败：' + String(e) : 'Mimic generation failed: ' + String(e))
+  } finally {
+    examGenerating.value = false
+  }
+}
+
+/** 清空真题仿写状态（保留已生成的题目） */
+function resetMimic() {
+  mimicSource.value = ''
+  mimicSourceName.value = ''
+  mimicProfile.value = null
+  mimicShowProfile.value = false
+  saveMimicProfile()
+  mimicState(store.locales == 'zh' ? '已清空真题与风格档案' : 'Reference exam and style cleared')
 }
 
 // 自选切片勾选
@@ -846,6 +1055,8 @@ const examSummary = computed(() => {
            :title="store.locales=='zh'?'出题方式：勾选切片后出题':'Select slices'"><i class="fa fa-list-ul"></i></div>
       <div class="button" :class="{active: examMode==='manual'}" @click="examMode='manual'"
            :title="store.locales=='zh'?'出题方式：手动输入题目':'Manual input'"><i class="fa fa-pencil"></i></div>
+      <div class="button" :class="{active: examMode==='mimic'}" @click="examMode='mimic'"
+           :title="store.locales=='zh'?'出题方式：真题仿写（导入样卷 → 分析风格 → 按其次风格出题）':'Mimic exam (import a reference exam → analyze style → generate)'"><i class="fa fa-clone"></i></div>
       <span style="width:1px;height:16px;background:var(--borderColor);flex-shrink:0;margin:0 2px;"></span>
       <!-- 题型勾选（图标 + title 说明） -->
       <div v-for="(t, key) in examTypes" :key="key" class="button" :class="{active: t}" @click="toggleExamType(key)"
@@ -853,11 +1064,13 @@ const examSummary = computed(() => {
         <i class="fa" :class="examTypeIcon(key)"></i>
       </div>
       <span style="width:1px;height:16px;background:var(--borderColor);flex-shrink:0;margin:0 2px;"></span>
-      <!-- 题数（随机/自选模式；自选时勾选切片较多则随机抽取） -->
+      <!-- 题数（随机/自选/仿写模式；自选时勾选切片较多则随机抽取） -->
       <template v-if="examMode !== 'manual'">
         <span style="font-size:11px;color:var(--borderColor);white-space:nowrap;">{{ store.locales=='zh'?'题数':'N' }}</span>
-        <input v-model.number="examCount" type="number" min="1" max="50" step="1" style="width:46px;"
-               :title="examMode==='random'
+        <input v-model.number="countValue" type="number" min="1" max="50" step="1" style="width:46px;"
+               :title="examMode==='mimic'
+                 ? (store.locales=='zh' ? '本次仿写题目数量' : 'Number of mimic questions')
+                 : examMode==='random'
                  ? (store.locales=='zh' ? '生成题目数量（随机采样切片数）' : 'Number of questions (random slices)')
                  : (store.locales=='zh' ? '生成题目数量（勾选切片较多时随机抽取）' : 'Number of questions (sample from selected)')"/>
       </template>
@@ -867,9 +1080,16 @@ const examSummary = computed(() => {
            :title="store.locales=='zh' ? (examSelectOpen ? '收起自选面板' : '展开自选面板') : 'Toggle select panel'">
         <i class="fa fa-columns"></i>
       </div>
+      <!-- 仿写面板开关 -->
+      <div v-if="examMode === 'mimic'" class="button" :class="{active: mimicPanelOpen}" @click="mimicPanelOpen = !mimicPanelOpen"
+           :title="store.locales=='zh' ? (mimicPanelOpen ? '收起真题面板' : '展开真题面板') : 'Toggle reference-exam panel'">
+        <i class="fa fa-columns"></i>
+      </div>
       <!-- 操作按钮 -->
-      <div v-if="examMode !== 'manual'" class="button" @click="generateExamQuestions" :disabled="examGenerating"
-           :title="store.locales=='zh'?'生成题目：根据所选切片由大模型生成题目':'Generate questions from slices'">
+      <div v-if="examMode !== 'manual'" class="button" @click="examMode === 'mimic' ? generateMimicQuestions() : generateExamQuestions()" :disabled="examGenerating"
+           :title="examMode === 'mimic'
+             ? (store.locales=='zh'?'按真题风格生成题目（需先分析风格）':'Generate in the reference exam style (analyze style first)')
+             : (store.locales=='zh'?'生成题目：根据所选切片由大模型生成题目':'Generate questions from slices')">
         <i class="fa" :class="examGenerating ? 'fa-spinner fa-spin' : 'fa-magic'"></i>
       </div>
       <div class="button" @click="gradeExam" :disabled="examGrading || !examQuestions.length || examGenerating"
@@ -896,6 +1116,41 @@ const examSummary = computed(() => {
 
     <!-- 考试页面（随机/自选切片出题 → 答题 → 大模型判分） -->
     <div class="exam-main">
+      <!-- 真题仿写面板（mimic 模式 + 开启时显示） -->
+      <div v-if="examMode==='mimic' && mimicPanelOpen" class="exam-select-panel">
+        <div class="exam-select-toolbar">
+          <span class="exam-editor-title" style="font-size:12px;"><i class="fa fa-clone"></i> {{ store.locales=='zh'?'真题仿写':'Mimic exam' }}</span>
+          <span class="exam-spacer"></span>
+          <button class="exam-panel-btn" @click="importMimicFile" :title="store.locales=='zh'?'导入真题文件（.md/.txt/.docx/.pdf）':'Import reference exam (.md/.txt/.docx/.pdf)'"><i class="fa fa-folder-open-o"></i></button>
+          <button class="exam-panel-btn" @click="mimicPanelOpen=false" :title="store.locales=='zh'?'收起面板':'Collapse'"><i class="fa fa-times"></i></button>
+        </div>
+        <div class="exam-select-list scoll">
+          <div class="exam-mimic-hint">
+            {{ store.locales=='zh'
+              ? '① 导入或粘贴真题/样卷 → ② 分析风格 → ③ 工具栏设置题数并点「生成」，即按其次风格出题（风格档案按知识库保存在本机）'
+              : '① Import or paste a reference exam → ② Analyze style → ③ Set the count in the toolbar and click Generate. The style profile is stored locally per KB.' }}
+          </div>
+          <textarea v-model="mimicSource" class="exam-mimic-src" spellcheck="false"
+                    :placeholder="store.locales=='zh'?'在此粘贴真题全文，或点右上角文件夹导入…':'Paste the exam text here, or use the folder button above…'"></textarea>
+          <div class="exam-mimic-file">{{ (mimicSourceName || (store.locales=='zh'?'未选择文件':'no file')) }} · {{ mimicSource.length }} {{ store.locales=='zh'?'字':'chars' }}</div>
+          <button class="exam-mimic-btn" :disabled="mimicAnalyzing" @click="analyzeMimicStyle">
+            <i class="fa" :class="mimicAnalyzing ? 'fa-spinner fa-spin' : 'fa-magic'"></i> {{ store.locales=='zh'?'分析真题风格':'Analyze style' }}
+          </button>
+          <template v-if="mimicProfile">
+            <div class="exam-mimic-sum">{{ styleProfileSummary(mimicProfile, store.locales=='zh') }}</div>
+            <div class="exam-mimic-actions">
+              <button class="exam-mimic-btn ghost" @click="mimicShowProfile = !mimicShowProfile"><i class="fa fa-code"></i> {{ store.locales=='zh'?'查看风格档案':'View profile' }}</button>
+              <button class="exam-mimic-btn ghost" @click="resetMimic"><i class="fa fa-eraser"></i> {{ store.locales=='zh'?'清空':'Clear' }}</button>
+            </div>
+            <pre v-if="mimicShowProfile" class="exam-mimic-json">{{ JSON.stringify(mimicProfile, null, 2) }}</pre>
+          </template>
+        </div>
+        <div class="exam-select-footer">
+          <i class="fa" :class="mimicProfile ? 'fa-check-circle-o exam-icon-check' : 'fa-square-o exam-icon-check'"></i>
+          <span>{{ mimicProfile ? (store.locales=='zh'?'风格档案已就绪':'Style profile ready') : (store.locales=='zh'?'尚未分析风格':'No style profile yet') }}</span>
+        </div>
+      </div>
+
       <!-- 左侧自选面板（select 模式 + 开启时显示；参照集群关系面板的文件面板样式） -->
       <div v-if="examMode==='select' && examSelectOpen" class="exam-select-panel">
         <div class="exam-select-toolbar">
@@ -1218,6 +1473,29 @@ const examSummary = computed(() => {
   background: var(--menuColor);
 }
 .exam-select-empty { padding: 20px 10px; text-align: center; color: var(--borderColor); font-size: 11px; }
+/* ===== 真题仿写面板（mimic） ===== */
+.exam-mimic-hint { font-size: 11px; line-height: 1.6; color: var(--borderColor); padding: 2px 4px 6px; }
+.exam-mimic-src {
+  width: 100%; min-height: 130px; max-height: 40vh; resize: vertical; box-sizing: border-box;
+  background: var(--backgroundColor); color: var(--fontColor); font-size: 11px; line-height: 1.5;
+  border: 1px solid var(--borderColor); border-radius: 4px; padding: 4px 6px;
+}
+.exam-mimic-file { font-size: 10px; color: var(--borderColor); padding: 3px 2px; word-break: break-all; }
+.exam-mimic-btn {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 5px;
+  cursor: pointer; font-size: 12px; padding: 5px 8px; margin: 2px 0; border-radius: 4px;
+  border: 1px solid var(--fontActiveColor); color: var(--fontActiveColor); background: var(--backgroundColor);
+}
+.exam-mimic-btn:hover { background: rgba(33, 150, 243, .12); }
+.exam-mimic-btn:disabled { opacity: .6; cursor: default; }
+.exam-mimic-btn.ghost { border-color: var(--borderColor); color: var(--fontColor); }
+.exam-mimic-actions { display: flex; gap: 4px; }
+.exam-mimic-sum { font-size: 11px; line-height: 1.6; color: var(--fontColor); padding: 6px; margin-top: 4px; border: 1px dashed var(--borderColor); border-radius: 4px; }
+.exam-mimic-json {
+  font-size: 10px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  max-height: 30vh; overflow: auto; margin: 4px 0 0; padding: 6px;
+  background: var(--menuColor); color: var(--fontColor); border-radius: 4px;
+}
 .exam-panel-btn {
   display: flex;
   align-items: center;

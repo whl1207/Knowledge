@@ -7,9 +7,11 @@
   //  - swarmRunning：智能体集群
   //  - runningTaskNames：各脚手架自行登记（见 store/runningTasks.ts）
   import { globalExecutionStateRef, chatsRef } from '@/store/chats'
-  import { runningTaskNames, runningTaskList, runningTaskInstanceId } from '@/store/runningTasks'
+  import { runningTaskNames, runningTaskList } from '@/store/runningTasks'
   import { formatTaskProgressDetail } from '@/utils/taskProgress'
   import { running as swarmRunning } from '@/store/swarmState'
+  // 局域网访客权限默认策略（启动时下发给主进程；见 syncLanGuestPolicyAtStartup）
+  import { defaultLanGuestPolicy } from '@/shared/lanGuest'
   const store=usestore()
 
   // 首屏主页保持静态加载；其余主面板改为按需异步加载（defineAsyncComponent）：
@@ -25,11 +27,6 @@
   const explorer = lazyPanel(() => import('@/components/knowFile/explorer.vue'))
   const knowledge = lazyPanel(() => import('@/components/knowRAG/knowRAG.vue'))
   const learning = lazyPanel(() => import('@/components/learning/learning.vue'))
-  const flow = lazyPanel(() => import('@/components/workFlow/workFlow.vue'))
-  const ToDo = lazyPanel(() => import('@/components/todos/ToDo.vue'))
-  const AgentScaffoldPanel = lazyPanel(() => import('@/components/AgentScaffold/AgentScaffold.vue'))
-  // 「数据画布」独立主面板（原 Agent脚手架模块之一，已独立为顶层导航）
-  const CanvasPanel = lazyPanel(() => import('@/components/DataCanvas/CanvasPanel.vue'))
   // ⚠️ 变量名不能叫 Set：会遮蔽全局 Set 构造函数，导致下方 collectRunningTasks 里的 `new Set(...)`
   // 抛 “Set is not a constructor”（关闭窗口时才触发，不易发现）
   const SetPanel = lazyPanel(() => import('@/components/set/Set.vue'))
@@ -56,6 +53,29 @@
   const isBrowser = typeof window !== 'undefined' && !(window as any).ipcRenderer // 浏览器模式（LAN 共享）
   store.setTheme()
 
+  /**
+   * 局域网共享：把「访客权限策略 + 主机模型」下发给主进程（P3/P4 的主机侧据此校验令牌、
+   * 限并发、并给访客智能体会话兑上模型与工具白名单）。
+   *
+   * 为什么放在启动时同步、而不是只靠设置页：
+   * 策略存在渲染层 localStorage，而主进程每次启动都回到默认值（只开普通 + 知识库）。
+   * 如果只在打开「协作」设置页时推送，那么「勾选了智能体 → 重启应用 → 直接用手机打开共享地址」
+   * 的路径下，网页端拿到的是默认策略 → 看不到「智能体」模式（表现为「配置已经开了却没有」）。
+   */
+  const syncLanGuestPolicyAtStartup = async () => {
+    if (!window.ipcRenderer) return
+    try {
+      const guest = store.lan?.guest || defaultLanGuestPolicy()
+      // 单一入口：策略 + 主机模型 + 可用智能体档案一起下发
+      // （漏带 agents 会清空主机的智能体清单 → 网页端只剩「通用智能体」）
+      const { pushLanGuestPolicy } = await import('@/platform/lanGuestSync')
+      await pushLanGuestPolicy(store)
+      console.log('[lan-guest] 已向主进程下发访客权限:', (guest.modes || []).join('/'), '| 工具', Array.isArray(guest.tools) ? guest.tools.length : '默认集', '| 智能体', (guest.presetIds || []).length + 1)
+    } catch (e) {
+      console.warn('[lan-guest] 同步访客权限失败:', e)
+    }
+  }
+
   // 计算标题文本
   const panelTitle = computed(() => {
     // 自定义标题：界面设置中定义后固定不变，不再随当前面板变化
@@ -68,9 +88,6 @@
         case '知识管理': return 'Knowledge Management';
         case '知识处理': return 'Knowledge Processing';
         case '学习': return 'Learning';
-        case '工作流管理': return 'Workflow';
-        case '数据画布': return 'Data Canvas';
-        case '待办管理': return 'Todo Management';
         default: return store.mainPanel;
       }
     }
@@ -91,10 +108,6 @@
       { key: '知识管理', icon: 'fa fa-book', title: zh ? '知识管理' : 'Knowledge Management' },
       { key: '知识处理', icon: 'fa fa-stack-overflow', title: zh ? '知识处理' : 'Knowledge Processing' },
       { key: '学习', icon: 'fa fa-graduation-cap', title: zh ? '学习' : 'Learning' },
-      { key: '工作流管理', icon: 'fa fa-stumbleupon', title: zh ? '工作流管理' : 'Workflow' },
-      { key: '数据画布', icon: 'fa fa-object-group', title: zh ? '数据画布' : 'Data Canvas' },
-      { key: 'Agent脚手架', icon: 'fa fa-deviantart', title: zh ? 'Agent脚手架' : 'Agent Scaffold' },
-      { key: '待办管理', icon: 'fa fa-lightbulb-o', title: zh ? '待办管理' : 'Todo Management' },
       // 功能开关：被隐藏的按钮不显示（设置页「界面-功能开关」）
     ].filter(btn => store.isNavVisible(btn.key))
   })
@@ -107,8 +120,12 @@
     // 检测是否在设置独立窗口中
     isSettingsWindow.value = window.location.hash.startsWith('#/settings-window')
 
-    // 独立窗口也需要加载配置（主题等）
+    // 独立窗口也需要加载配置（主题等；loadConfig 为同步动作，返回后 store.lan 已就绪）
     store.loadConfig()
+    // 局域网共享：启动即把「访客权限策略 + 主机模型」下发给主进程（见函数注释）
+    void syncLanGuestPolicyAtStartup()
+    // 主进程主动来拉（它每次重启都回到默认策略，而本窗口不会再挂载一次）→ 收到就重新下发
+    window.ipcRenderer?.on('lan:request-guest-policy', () => { void syncLanGuestPolicyAtStartup() })
     // 界面配置随软件分发：开启时以根目录 interface-config.json 覆盖界面配置（独立窗口同样生效）
     await store.loadRemoteInterfaceConfig()
 
@@ -136,10 +153,15 @@
       })
     }
 
+    // 托盘（托管区）任务上报：**独立窗口也要上报**（子窗口里跑的脚手架任务要能出现在托盘的
+    // 后台任务列表里，托盘右键点它即可唤回该窗口；主进程按窗口分组，见 electron/main/tray-service.ts）
+    watch(trayTasks, () => scheduleTrayPush(), { deep: true, immediate: true })
+
     if (isFileWindow.value || isBrowserAgentWindow.value || isSettingsWindow.value) return // 独立窗口无需加载主界面数据
 
     // ============ 文件类型关联（双击文件 / 系统「打开方式」） ============
-    // 主进程把「需在主窗口内打开」的文件请求投递到这里（如 .kb 知识库 → 跳转「知识处理」）；
+    // 主进程把「需在主窗口内处理的文件请求」投递到这里（如 .kb 知识库 → 跳转「知识处理」）；
+    // 其余文件按统一调度打开（现在一律开独立窗口，见 store.openFileByMode）；
     // 同时回报「渲染层已就绪」，主进程据此在挂载完成后投递排队中的请求（消息早于监听器注册会丢失）
     window.ipcRenderer?.on('open-file-request', (_e: any, payload: any) => {
       const p = typeof payload?.path === 'string' ? payload.path : ''
@@ -148,7 +170,7 @@
       const slash = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
       const label = slash >= 0 ? p.substring(slash + 1) : p
       const dot = label.lastIndexOf('.')
-      store.openInApp({ path: p, label, type: 'file', extension: dot >= 0 ? label.substring(dot).toLowerCase() : '' })
+      store.openFileByMode({ path: p, label, type: 'file', extension: dot >= 0 ? label.substring(dot).toLowerCase() : '' })
     })
     window.ipcRenderer?.invoke('main-window-ui-ready').catch(() => {})
 
@@ -165,8 +187,7 @@
         for (const j of list || []) applyJobEvent(j)
       }).catch(() => {})
     }
-    // 任务增减 / 进度变化即上报给主进程（节流见 scheduleTrayPush）
-    watch(trayTasks, () => scheduleTrayPush(), { deep: true, immediate: true })
+    // 任务增减 / 进度变化即上报给主进程（节流见 scheduleTrayPush；已在上面注册，含独立窗口）
 
     // 初始状态：渲染进程重载（HMR/刷新）时设置窗口可能已经开着，主动查一次以免高亮丢失
     window.ipcRenderer?.invoke('get-settings-window-state').then((res: any) => {
@@ -184,7 +205,7 @@
 
   // 主面板切换即落盘（mainPanel 只在主窗口有意义）：
   // 否则共享 localStorage 里会长期残留旧值，任何一次 loadConfig（例如设置窗口保存后主窗口同步配置）
-  // 或下次启动都会把导航拉回那个旧面板（现象：关掉设置子窗口后从「主页」跳回「工作流管理」）。
+  // 或下次启动都会把导航拉回那个旧面板（现象：关掉设置子窗口后从「主页」跳回「学习」）。
   // 只写这一个键，避免整份 saveConfig（写 20+ 键、可能还落盘 interface-config.json）的开销。
   watch(() => store.mainPanel, (panel) => {
     if (isSettingsWindow.value || isFileWindow.value || isBrowserAgentWindow.value) return
@@ -264,13 +285,9 @@
     }
     // 2) 脚手架任务（批量运行 / 文件采集 / 表格推理…）：带进度与预计剩余时间
     //    （脚手架计时器每秒上报 done/total/etaMs → 托盘悬停即可看到「12/50 · 剩 3分20秒」）
-    //    ⚠ 按**实例**而不是按类型展示：同一类型多开时，以前用类型名做去重键会把它们并成一行，
-    //      于是托盘只显示「每一个类型的剩余时间」；这里改用实例标题做名字（去重键=名字）。
+    //    多个窗口同时跑时由主进程按窗口分组（见 electron/main/tray-service.ts 的 buildMenu）
     for (const t of runningTaskList.value) {
-      const instId = runningTaskInstanceId(t)
-      const meta = instId ? store.scaffoldInstances.find(i => i.id === instId) : undefined
-      const title = String(meta?.title || '').trim()
-      push(title || (zh ? t.labelZh : t.labelEn), formatTaskProgressDetail(t.progress, zh))
+      push(zh ? t.labelZh : t.labelEn, formatTaskProgressDetail(t.progress, zh))
     }
     // 3) 工作流 / 技能执行：currentStep 即当前进度描述
     const exec = globalExecutionStateRef.value
@@ -394,37 +411,36 @@
             <!-- 顶部导航布局（默认）：导航按钮 + 标题 + 右侧按钮 -->
             <div v-if="store.isNavVisible('主页')" :class="{active:store.mainPanel=='主页'}" @click="store.mainPanel='主页';" :title="store.locales === 'en' ? 'Home' : '主页'"><i class="fa fa-home"></i></div>
             <div v-if="store.isNavVisible('知识管理')" :class="{active:store.mainPanel=='知识管理'}" @click="store.mainPanel='知识管理';"  :title="store.locales === 'en' ? 'Knowledge Management' : '知识管理'"><i class="fa fa-book"></i></div>
-            <div v-if="store.isNavVisible('知识处理')" :class="{active:store.mainPanel=='知识处理'}" @click="store.mainPanel='知识处理';" :title="store.locales === 'en' ? 'Knowledge Processing' : '知识处理'"><i class="fa fa-stack-overflow"></i></div>            <div v-if="store.isNavVisible('学习')" :class="{active:store.mainPanel=='学习'}" @click="store.mainPanel='学习';" :title="store.locales === 'en' ? 'Learning' : '学习'"><i class="fa fa-graduation-cap"></i></div>            <div v-if="store.isNavVisible('工作流管理')" :class="{active:store.mainPanel=='工作流管理'}" @click="store.mainPanel='工作流管理'"  :title="store.locales === 'en' ? 'Workflow' : '工作流管理'"><i class="fa fa-stumbleupon"></i></div>
-            <div v-if="store.isNavVisible('数据画布')" :class="{active:store.mainPanel=='数据画布'}" @click="store.mainPanel='数据画布'"  :title="store.locales === 'en' ? 'Data Canvas' : '数据画布'"><i class="fa fa-object-group"></i></div>
-            <div v-if="store.isNavVisible('Agent脚手架')" :class="{active:store.mainPanel=='Agent脚手架'}" @click="store.mainPanel='Agent脚手架'"  :title="store.locales === 'en' ? 'Agent Scaffold' : 'Agent脚手架'"><i class="fa fa-deviantart"></i></div>
+            <div v-if="store.isNavVisible('知识处理')" :class="{active:store.mainPanel=='知识处理'}" @click="store.mainPanel='知识处理';" :title="store.locales === 'en' ? 'Knowledge Processing' : '知识处理'"><i class="fa fa-stack-overflow"></i></div>            <div v-if="store.isNavVisible('学习')" :class="{active:store.mainPanel=='学习'}" @click="store.mainPanel='学习';" :title="store.locales === 'en' ? 'Learning' : '学习'"><i class="fa fa-graduation-cap"></i></div>
             <!-- 弹性占位：将右侧按钮推到右端，同时作为顶栏可拖拽空白 -->
             <div class="panel-title-spacer" style="flex:1;"></div>
             <!-- 标题水平居中（各面板一致：仅文本，无图标） -->
             <div class="compact-title" style="font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
-            <!-- 浏览器 Agent 独立窗口入口（非主面板；置于「待办」左侧，紧邻右侧设置/窗口按钮组） -->
-            <div @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
-            <div v-if="store.isNavVisible('待办管理')" :class="{active:store.mainPanel=='待办管理'}" @click="store.mainPanel='待办管理';"  :title="store.locales === 'en' ? 'Todo Management' : '待办管理'"><i class="fa fa-lightbulb-o"></i></div>
-            <div :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()"><i class="fa fa-cogs"></i></div>
-            <div @click="minimizeWindow" title="最小化">
+            <!-- 浏览器 Agent 独立窗口入口（非主面板；置于右侧设置/窗口按钮组之前；窗口过窄时随标题一起收起） -->
+            <div class="nav-narrow-hide" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
+            <div :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
+            <div class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
             </div>
-            <div @click="maximizeWindow" title="最大化/还原">
+            <div class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
               <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
             </div>
-            <div @click="closeWindow" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
+            <div @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
           </template>
           <template v-else>
             <!-- 左侧/下方导航布局：顶栏只保留标题 + 3 个窗口按钮（其余按钮在对应导航栏）；标题水平居中 -->
             <div class="compact-title" style="-webkit-app-region: drag;font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
-            <div @click="minimizeWindow" title="最小化">
+            <!-- 窗口过窄时：标题收起，右侧只留 设置 + 关闭（设置按钮只在窄窗口出现，宽窗口仍用导航栏里的那个） -->
+            <div class="nav-narrow-only" :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
+            <div class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
             </div>
-            <div @click="maximizeWindow" title="最大化/还原">
+            <div class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
               <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
             </div>
-            <div @click="closeWindow" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
+            <div @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
           </template>
         </div>
       </div>
@@ -440,17 +456,6 @@
       <!-- KeepAlive 缓存 Learning：切换主面板时学习模块不销毁，练习/考试作答状态保留 -->
       <KeepAlive include="Learning">
         <learning v-if="store.mainPanel=='学习'"/>
-      </KeepAlive>
-      <!-- KeepAlive 缓存 flow：切换主面板时工作流不销毁，运行中的工作流后台继续 -->
-      <KeepAlive include="Workflow">
-        <flow v-if="store.mainPanel=='工作流管理'"/>
-      </KeepAlive>      <!-- KeepAlive 缓存 CanvasPanel：「数据画布」独立面板，切换主面板时画布编辑状态保留 -->
-      <KeepAlive include="CanvasPanel">
-        <CanvasPanel v-if="store.mainPanel=='数据画布'"/>
-      </KeepAlive>      <ToDo v-if="store.mainPanel=='待办管理'"/>
-      <!-- KeepAlive 缓存 Harness：切换主面板时脚手架不销毁，采集/执行任务后台继续 -->
-      <KeepAlive include="Harness">
-        <AgentScaffoldPanel v-if="store.mainPanel=='Agent脚手架'"/>
       </KeepAlive>
       </div>
     </div>
@@ -634,6 +639,17 @@
   /* 左侧/下方布局：右侧窗口按钮靠右 */
   .panel-header-compact {
     justify-content: flex-end;
+  }
+
+  /* 窗口过窄（< 600px）：顶栏右侧只留「设置 + 关闭」（标题、浏览器 Agent 入口、最小化 / 最大化收起），
+     避免图标挤在一起；设置按钮在左侧/下方导航布局里本就常驻导航栏，这里只在窄窗口补一个 */
+  .panel-header .nav-narrow-only {
+    display: none;
+  }
+  @media (max-width: 600px) {
+    .panel-header .compact-title { display: none; }
+    .panel-header .nav-narrow-hide { display: none; }
+    .panel-header .nav-narrow-only { display: block; }
   }
 
   /* ============ 左侧导航布局 ============ */

@@ -6,7 +6,8 @@
 // 远端网页端（无 ipcRenderer）在 home 知识库模式通过这些接口「选择终端设定的文件夹中现有的
 // 知识库」来使用；也可继续上传自己的文件作为知识库。主机端负责把知识库目录 + 嵌入配置同步给主进程。
 import * as kbAi from '@/shared/kbAiClient'
-import { normalizeLlmType } from '@/shared/llmSources'
+import { normalizeLlmType, resolveLlmSource } from '@/shared/llmSources'
+import { resolveLimitFor } from '@/lib/contextUsage'
 
 export interface SharedKbFile {
   name: string
@@ -111,6 +112,50 @@ export function buildLanEmbedPayload(store: any): { llmType: string; base: strin
     model: (oc.embed_model as string) || 'nomic-embed-text:latest',
     apiKey: (oc.api_key as string) || '',
   }
+}
+
+/**
+ * 主机（Electron）：由当前 AI 配置构建「访客智能体用的主机模型」配置，随局域网共享同步给
+ * 主进程。网页端没有本地执行能力，「智能体」模式由主机侧跑 agent 循环，
+ * 因此模型也由主机提供（访客无需配置 Key）。
+ *
+ * @param policy 访客权限策略（可选）：`guestLlmType` / `guestLlmModel` 用于指定
+ *   访客会话用哪个来源与模型；留空 = 跟随主机当前来源与当前模型。
+ */
+export function buildLanLlmPayload(
+  store: any,
+  policy?: { guestLlmType?: string; guestLlmModel?: string },
+): { provider: string; config: any; llmConfig: any; contextLimit: number } {
+  const llm = store?.AIconfig?.llm || {}
+  // 来源：访客指定（含 custom:<索引>）优先，否则跟随主机当前激活来源
+  const rawType = String(policy?.guestLlmType || '').trim()
+  const customIdx = rawType.startsWith('custom:') ? (parseInt(rawType.slice('custom:'.length), 10) || 0) : undefined
+  const type = rawType ? normalizeLlmType(rawType) : normalizeLlmType(llm.type || 'ollama')
+  const { config } = resolveLlmSource(llm, type, customIdx)
+  const guestConfig = { ...(config || {}) }
+  // 模型：访客指定则覆盖来源当前模型
+  const model = String(policy?.guestLlmModel || '').trim()
+  if (model) guestConfig.model = model
+  // ⚠️ 必须净化：config 来自 store（Vue 响应式 Proxy），嵌套数组/对象仍是 Proxy，
+  // 直接经 ipcRenderer.invoke 会抛 “An object could not be cloned.”（本功能曾因此完全下发失败）
+  return JSON.parse(JSON.stringify({
+    provider: type,
+    config: guestConfig,
+    llmConfig: {
+      type,
+      stream: true,
+      temperature: llm.temperature,
+      max_tokens: llm.max_tokens,
+      // 远端自托管后端的并发基准跟随本机设置（与桌面端 agent 会话一致）
+      remoteMaxInflight: llm.remoteMaxInflight,
+    },
+    // 上下文窗口上限：与主页圆环同源解析，主进程据此做预算检查与主动压缩
+    contextLimit: resolveLimitFor(llm, {
+      provider: type,
+      model: guestConfig.model,
+      customSourceIndex: customIdx ?? llm.custom?.activeIndex,
+    }).limit,
+  }))
 }
 
 // ==================== 网页端上传 .kb 的本地检索 ====================

@@ -24,6 +24,7 @@ import {
   type SessionEvent,
   type SessionEventType,
   type DerivedMessage,
+  type DerivedEntry,
   type SessionLogIntegrity,
   type SessionEventMap,
 } from '@/types/session-log'
@@ -373,6 +374,18 @@ class SessionLogStore {
    * - `assistant/chunk` 不参与派生（仅 UI 保真）。
    */
   deriveMessages(sessionId: string): DerivedMessage[] {
+    return this.deriveEntries(sessionId).map((e) => e.msg)
+  }
+
+  /**
+   * 同上，但保留每条消息的来源事件 seq（供上下文压缩确定事件区间）。
+   *
+   * 上下文压缩的应用方式：`context/compaction` 事件把 [fromSeq, toSeq] 区间内的
+   * 模型可见消息整体替换为一条摘要消息。摘要插在**区间起点**（而不是事件自身的位置），
+   * 因此派生结果为「system → 摘要 → 保留的最近若干轮原文」，且支持多级压缩
+   * （后一次压缩可以覆盖前一次摘要所在的区间）。
+   */
+  deriveEntries(sessionId: string): DerivedEntry[] {
     const events = this.readAll(sessionId)
     // 第一遍：收集 tool/call 与 tool/result 的配对关系
     const toolResults = new Map<string, Extract<SessionEvent, { type: 'tool/result' }>>()
@@ -383,42 +396,71 @@ class SessionLogStore {
     }
 
     // 第二遍：按顺序派生模型历史
-    const out: DerivedMessage[] = []
+    const entries: DerivedEntry[] = []
+    const compactions: Array<Extract<SessionEvent, { type: 'context/compaction' }>> = []
     for (const ev of events) {
       switch (ev.type) {
         case 'session/start':
           if (ev.systemPrompt) {
-            out.push({ role: 'system', content: ev.systemPrompt })
+            entries.push({ seq: ev.seq, msg: { role: 'system', content: ev.systemPrompt } })
           }
           break
         case 'user/message':
-          out.push({ role: 'user', content: ev.content })
+          entries.push({ seq: ev.seq, msg: { role: 'user', content: ev.content } })
           break
         case 'assistant/message': {
           const msg: DerivedMessage = { role: 'assistant', content: ev.content }
           if (ev.toolCalls?.length) msg.toolCalls = ev.toolCalls
-          out.push(msg)
+          entries.push({ seq: ev.seq, msg })
           // 把该 assistant 消息发起的工具调用展开为 tool 消息（模型可见）
           for (const call of ev.toolCalls || []) {
             const res = toolResults.get(call.id)
-            out.push({
-              role: 'tool',
-              toolCallId: call.id,
-              name: call.name,
-              content: res
-                ? res.ok
-                  ? JSON.stringify(res.value ?? null)
-                  : `ERROR: ${res.error || '工具执行失败'}`
-                : 'ERROR: 工具结果缺失（日志不完整）',
+            entries.push({
+              seq: ev.seq,
+              msg: {
+                role: 'tool',
+                toolCallId: call.id,
+                name: call.name,
+                content: res
+                  ? res.ok
+                    ? JSON.stringify(res.value ?? null)
+                    : `ERROR: ${res.error || '工具执行失败'}`
+                  : 'ERROR: 工具结果缺失（日志不完整）',
+              },
             })
           }
           break
         }
+        case 'context/compaction':
+          compactions.push(ev)
+          break
         default:
           break
       }
     }
-    return out
+
+    // 第三遍：依次应用压缩（按事件顺序，天然支持多级压缩）
+    let list = entries
+    for (const c of compactions) {
+      const next: DerivedEntry[] = []
+      let inserted = false
+      for (const e of list) {
+        if (e.seq >= c.fromSeq && e.seq <= c.toSeq) {
+          if (!inserted) {
+            next.push({
+              // 虚拟 seq：排在区间起点之前，保证摘要位于保留内容之前
+              seq: c.fromSeq - 0.5,
+              msg: { role: 'user', content: c.summary, compacted: true },
+            })
+            inserted = true
+          }
+          continue
+        }
+        next.push(e)
+      }
+      if (inserted) list = next
+    }
+    return list
   }
 
   /** 运行时不变式校验：seq 连续、类型合法、事件有序 */

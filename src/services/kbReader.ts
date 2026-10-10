@@ -7,6 +7,7 @@
  * - 复用 kbRetrieval.loadKnowledgeBase（与 home 主聊天同一套只读解析）。
  */
 import { loadKnowledgeBase } from '@/shared/kbRetrieval'
+import { listWorkspaceFiles } from '@/services/workspaceScan'
 
 export interface LearningKbFile {
   path: string
@@ -22,7 +23,11 @@ export interface LearningKbLoaded {
   questions: any[]
   files: { path: string; label: string }[]
   entities: any[]
+  /** 本体关系（图谱轴用；source/target 为实体 id） */
+  relations: any[]
   entityToBlocks?: Array<{ entityName: string; blockIds: string[] }>
+  /** 文件级摘要（概览型提问的上下文来源；取自 .kb 的 fileIndex / fileSummaries） */
+  fileSummaries?: { path: string; label: string; content: string }[]
   kbConfig?: any
   blockCount: number
 }
@@ -33,25 +38,17 @@ function baseName(p: string): string {
   return parts[parts.length - 1] || p
 }
 
-/** 扫描当前工作区所有已保存的 .kb 文件（含自动知识库的排除由调用方决定：仅列实体 .kb） */
-export async function listKbFiles(root: string): Promise<LearningKbFile[]> {
-  if (!root) return []
-  try {
-    const result = await window.ipcRenderer.invoke('getFilesRelation', root, 1)
-    const fileList = (result && result.fileList) || []
-    const kbs = fileList.filter(
-      (f: any) => typeof f?.path === 'string' && f.path.toLowerCase().endsWith('.kb')
-    )
-    kbs.sort((a: any, b: any) => (b.mtime || 0) - (a.mtime || 0))
-    return kbs.map((f: any) => ({
-      path: f.path,
-      label: f.label || baseName(f.path),
-      mtime: f.mtime || 0,
-    }))
-  } catch (e) {
-    console.error('[learning] 扫描知识库失败:', e)
-    return []
-  }
+/**
+ * 扫描各工作区（含子目录，见 workspaceScan.WORKSPACE_SCAN_DEPTH）中已保存的 .kb 文件。
+ *
+ * 学习模块没有「知识处理」那种按任意路径打开 .kb 的入口（store.kbPathToOpen），
+ * 只能靠扫描定位；因此扫描**全部工作区**并下钻子目录，
+ * 避免 .kb 与知识库文件夹同级、或放在子目录里时漏掉。
+ */
+export async function listKbFiles(roots: string[]): Promise<LearningKbFile[]> {
+  const files = await listWorkspaceFiles(roots, ['.kb'])
+  files.sort((a, b) => b.mtime - a.mtime)
+  return files.map((f) => ({ path: f.path, label: f.label, mtime: f.mtime }))
 }
 
 /** 只读加载 .kb 并整理为学习模块可用的轻量结构（剥离向量/评分等运行期大字段不在此做，直接取所需字段） */
@@ -73,6 +70,14 @@ export async function readKbForLearning(kbPath: string): Promise<LearningKbLoade
       if (key && !fileMap.has(key)) fileMap.set(key, b.label || key)
     }
 
+    // 文件级摘要（概览型提问用）：fileIndex 优先，兼容旧 fileSummaries；都没有则为空数组
+    const summaryMap = new Map<string, string>()
+    for (const [k, v] of kb.fileIndex.entries()) if (v?.content) summaryMap.set(k, String(v.content))
+    for (const [k, v] of kb.fileSummaries.entries()) if (v?.content && !summaryMap.has(k)) summaryMap.set(k, String(v.content))
+    const fileSummaries = [...summaryMap.entries()].map(([p, content]) => ({
+      path: p, label: fileMap.get(p) || baseName(p), content,
+    }))
+
     return {
       path: kbPath,
       label: baseName(kbPath),
@@ -80,7 +85,9 @@ export async function readKbForLearning(kbPath: string): Promise<LearningKbLoade
       questions: kb.questions || [],
       files: [...fileMap.entries()].map(([p, label]) => ({ path: p, label })),
       entities: kb.ontology?.entities || [],
+      relations: kb.ontology?.relations || [],
       entityToBlocks: kb.ontology?.entityToBlocksIndex,
+      fileSummaries,
       kbConfig: kb.kbConfig,
       blockCount: blocks.length,
     }
