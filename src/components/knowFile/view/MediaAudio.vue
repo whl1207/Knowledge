@@ -19,7 +19,9 @@
         <div class="audio-body" :class="{ 'wave-mode': isWaveMode }">
           <!-- 黑胶模式：黑胶 + 标题/歌词 -->
           <div v-if="displayMode === 'record'" class="audio-main-row">
-            <div class="audio-art" :class="{ playing: isPlaying }">
+            <div class="audio-art" :class="{ playing: isPlaying }"
+                 @click="togglePlay"
+                 :title="isPlaying ? (store.locales==='zh'?'点击暂停':'Click to pause') : (store.locales==='zh'?'点击播放':'Click to play')">
               <img v-if="albumArt" :src="albumArt" class="art-img" alt="cover" />
               <div v-else class="art-fallback">
                 <i class="fa fa-music"></i>
@@ -40,7 +42,9 @@
           </div>
 
           <!-- 磁带模式：黑色金属外壳+螺丝 · 中央贴封面 · 封面内胶囊观察窗 · 下方格栅(歌名/歌词) + 全宽进度条 -->
-          <div v-else-if="displayMode === 'tape'" class="tape-stage" :class="{ playing: isPlaying }" ref="tapeStageRef">
+          <div v-else-if="displayMode === 'tape'" class="tape-stage" :class="{ playing: isPlaying }" ref="tapeStageRef"
+               @click="togglePlay"
+               :title="isPlaying ? (store.locales==='zh'?'点击暂停':'Click to pause') : (store.locales==='zh'?'点击播放':'Click to play')">
               <div class="tape-shell">
                 <span class="tape-screw tape-screw-l"></span>
                 <span class="tape-screw tape-screw-r"></span>
@@ -94,48 +98,51 @@
         </div>
       </template>
 
-      <!-- 控制条（加载失败时也显示，保证可播放） -->
-      <div class="ctl-bar" ref="ctlBar" :class="{ compact: ctlCompact, 'no-seek': displayMode === 'tape' }">
-        <!-- 全宽进度条（黑胶/磁带/波形/频谱通用）：线贴控制栏上沿、圆钮完整（下半伸入控制栏） -->
-        <div v-if="!loading && !waveError" class="tape-progress" ref="tapeProgressRef"
-             @mousedown="onTapeSeekDown"
-             @mouseenter="tapeHover = true"
-             @mouseleave="tapeHover = false">
-          <span v-if="tapeHover" class="tp-time tp-cur">{{ formatTime(currentTime) }}</span>
-          <div class="tp-track">
-            <div class="tp-fill" :style="{ width: seekPercent + '%' }"></div>
-            <div class="tp-thumb" :style="{ left: seekPercent + '%' }"></div>
+      <!-- 控制条（加载失败时也显示，保证可播放）：模块极小时整体折叠隐藏（点黑胶 / 磁带即可播放暂停） -->
+      <div class="ctl-wrap" ref="ctlWrap" :class="{ 'is-hidden': ctlCollapsed }"
+           :style="ctlHeight ? { '--ctl-h': ctlHeight + 'px' } : undefined">
+        <div class="ctl-bar" ref="ctlBar" :class="{ compact: ctlCompact, 'no-seek': displayMode === 'tape' }">
+          <!-- 全宽进度条（黑胶/磁带/波形/频谱通用）：线贴控制栏上沿、圆钮完整（下半伸入控制栏） -->
+          <div v-if="!loading && !waveError" class="tape-progress" ref="tapeProgressRef"
+               @mousedown="onTapeSeekDown"
+               @mouseenter="tapeHover = true"
+               @mouseleave="tapeHover = false">
+            <span v-if="tapeHover" class="tp-time tp-cur">{{ formatTime(currentTime) }}</span>
+            <div class="tp-track">
+              <div class="tp-fill" :style="{ width: seekPercent + '%' }"></div>
+              <div class="tp-thumb" :style="{ left: seekPercent + '%' }"></div>
+            </div>
+            <span v-if="tapeHover" class="tp-time tp-dur">{{ formatTime(duration) }}</span>
           </div>
-          <span v-if="tapeHover" class="tp-time tp-dur">{{ formatTime(duration) }}</span>
-        </div>
-        <button class="ctl-btn nav-btn" @click="playPrev" :title="store.locales==='zh'?'上一首':'Previous'">
-          <i class="fa fa-step-backward"></i>
-        </button>
-        <button class="ctl-btn play-btn" @click="togglePlay" :title="isPlaying ? (store.locales==='zh'?'暂停':'Pause') : (store.locales==='zh'?'播放':'Play')">
-          <i :class="isPlaying ? 'fa fa-pause' : 'fa fa-play'"></i>
-        </button>
-        <button class="ctl-btn nav-btn" @click="playNext" :title="store.locales==='zh'?'下一首':'Next'">
-          <i class="fa fa-step-forward"></i>
-        </button>
-        <div class="ctl-group">
-          <div class="volume-ctl">
-            <button class="ctl-btn" @click="volume = volume > 0 ? 0 : 1" :title="store.locales==='zh'?'静音':'Mute'">
-              <i :class="volume === 0 ? 'fa fa-volume-off' : volume < 0.5 ? 'fa fa-volume-down' : 'fa fa-volume-up'"></i>
+          <button class="ctl-btn nav-btn" @click="playPrev" :title="store.locales==='zh'?'上一首':'Previous'">
+            <i class="fa fa-step-backward"></i>
+          </button>
+          <button class="ctl-btn play-btn" @click="togglePlay" :title="isPlaying ? (store.locales==='zh'?'暂停':'Pause') : (store.locales==='zh'?'播放':'Play')">
+            <i :class="isPlaying ? 'fa fa-pause' : 'fa fa-play'"></i>
+          </button>
+          <button class="ctl-btn nav-btn" @click="playNext" :title="store.locales==='zh'?'下一首':'Next'">
+            <i class="fa fa-step-forward"></i>
+          </button>
+          <div class="ctl-group">
+            <div class="volume-ctl">
+              <button class="ctl-btn" @click="volume = volume > 0 ? 0 : 1" :title="store.locales==='zh'?'静音':'Mute'">
+                <i :class="volume === 0 ? 'fa fa-volume-off' : volume < 0.5 ? 'fa fa-volume-down' : 'fa fa-volume-up'"></i>
+              </button>
+              <input type="range" class="volume-slider" min="0" max="1" step="0.05" v-model.number="volume" @input="applyVolume" :title="store.locales==='zh'?'音量':'Volume'" />
+            </div>
+            <button class="ctl-btn mode-btn" @click="togglePlayMode" :title="playModeLabel">
+              <i :class="playMode === 'shuffle' ? 'fa fa-random' : playMode === 'loop' ? 'fa fa-repeat' : 'fa fa-forward'"></i>
             </button>
-            <input type="range" class="volume-slider" min="0" max="1" step="0.05" v-model.number="volume" @input="applyVolume" :title="store.locales==='zh'?'音量':'Volume'" />
+            <button class="ctl-btn fs-btn" @click="toggleFullscreen" :title="store.locales==='zh'?'全屏':'Fullscreen'">
+              <i class="fa fa-expand"></i>
+            </button>
+            <button class="ctl-btn viewmode-btn" @click="cycleDisplayMode"
+                    :title="store.locales==='zh'
+                      ? ('视图：' + displayModeLabel + ' · 点击切换（黑胶/磁带/波形/频谱）')
+                      : ('View: ' + displayModeLabel + ' · click to switch')">
+              <span class="viewmode-text">{{ displayGlyph }}</span>
+            </button>
           </div>
-          <button class="ctl-btn mode-btn" @click="togglePlayMode" :title="playModeLabel">
-            <i :class="playMode === 'shuffle' ? 'fa fa-random' : playMode === 'loop' ? 'fa fa-repeat' : 'fa fa-forward'"></i>
-          </button>
-          <button class="ctl-btn fs-btn" @click="toggleFullscreen" :title="store.locales==='zh'?'全屏':'Fullscreen'">
-            <i class="fa fa-expand"></i>
-          </button>
-          <button class="ctl-btn viewmode-btn" @click="cycleDisplayMode"
-                  :title="store.locales==='zh'
-                    ? ('视图：' + displayModeLabel + ' · 点击切换（黑胶/磁带/波形/频谱）')
-                    : ('View: ' + displayModeLabel + ' · click to switch')">
-            <span class="viewmode-text">{{ displayGlyph }}</span>
-          </button>
         </div>
       </div>
     </div>
@@ -326,9 +333,19 @@ let lyricScrollRaf: number | null = null
 
 // 控制条自适应 / 全屏
 const ctlBar = ref<HTMLElement | null>(null)
+const ctlWrap = ref<HTMLElement | null>(null)
 const audioCardRef = ref<HTMLElement | null>(null)
 const ctlCompact = ref(false)
+// 模块过小时整体折叠控制栏（黑胶 / 磁带视图）：改由点击封面播放暂停，波形 / 频谱视图保留控制栏
+const ctlHidden = ref(false)
+const ctlCollapsed = computed(() => ctlHidden.value && !isWaveMode.value)
+// 控制栏自然高度（px）：height: auto 无法参与过渡，需量得实际值再做折叠动画
+const ctlHeight = ref(0)
 let ctlObserver: ResizeObserver | null = null
+
+// 折叠阈值：宽 / 高任一小于此值即视为模块“过小”（约 400×300 的窗口/面板就应触发）
+const CTL_HIDE_MIN_WIDTH = 400
+const CTL_HIDE_MIN_HEIGHT = 340
 
 // 播放模式：sequential=顺序播放 loop=单曲循环
 const playMode = ref<'sequential' | 'loop' | 'shuffle'>('sequential')
@@ -963,6 +980,16 @@ function checkCtlOverflow() {
   const threshold = isAudio.value ? 620 : 430
   // clientWidth 不随按钮隐藏而变化，稳定无反馈循环
   ctlCompact.value = el.clientWidth < threshold
+  // 记录自然高度：包裹层负责高度动画，控制栏自身始终按内容量得真实高度
+  const h = el.offsetHeight
+  if (h > 0 && h !== ctlHeight.value) ctlHeight.value = h
+}
+
+// 模块过小：折叠控制栏（黑胶 / 磁带视图下仍可点封面播放，波形 / 频谱视图保留）
+function checkCardSize() {
+  const el = audioCardRef.value
+  if (!el) return
+  ctlHidden.value = el.clientWidth < CTL_HIDE_MIN_WIDTH || el.clientHeight < CTL_HIDE_MIN_HEIGHT
 }
 
 // 外部切换标签：同步到内部当前路径（与切歌共用重载逻辑）
@@ -1008,11 +1035,14 @@ onMounted(() => {
   rafId = requestAnimationFrame(tick)
   window.addEventListener('resize', drawWaveform)
   window.addEventListener('resize', checkCtlOverflow)
+  window.addEventListener('resize', checkCardSize)
   checkCtlOverflow()
-  // 监听控制条尺寸变化，过窄时自动隐藏次要控件
+  checkCardSize()
+  // 监听控制条 / 卡片尺寸变化：过窄时隐藏次要控件，模块过小时折叠控制栏
   if (typeof ResizeObserver !== 'undefined') {
-    ctlObserver = new ResizeObserver(() => checkCtlOverflow())
+    ctlObserver = new ResizeObserver(() => { checkCtlOverflow(); checkCardSize() })
     if (ctlBar.value) ctlObserver.observe(ctlBar.value)
+    if (audioCardRef.value) ctlObserver.observe(audioCardRef.value)
   }
 })
 
@@ -1023,6 +1053,7 @@ onBeforeUnmount(() => {
   lyricScrollRaf = null
   window.removeEventListener('resize', drawWaveform)
   window.removeEventListener('resize', checkCtlOverflow)
+  window.removeEventListener('resize', checkCardSize)
   if (ctlObserver) {
     ctlObserver.disconnect()
     ctlObserver = null
@@ -1100,6 +1131,7 @@ onBeforeUnmount(() => {
   inset: 0;
   overflow: hidden;
   background: #0b0b0d;
+  cursor: pointer; /* 点击磁带播放 / 暂停 */
 }
 /* 黑色金属机身外壳（整片作为背景） */
 .tape-shell {
@@ -1428,6 +1460,7 @@ onBeforeUnmount(() => {
 /* 黑胶唱片（随容器宽度平滑缩放，始终保持正方形） */
 .audio-art {
   flex: 0 0 auto;
+  cursor: pointer; /* 点击唱片播放 / 暂停 */
   width: clamp(120px, 55%, 440px);
   height: auto;
   aspect-ratio: 1 / 1;
@@ -1626,6 +1659,18 @@ onBeforeUnmount(() => {
 }
 
 /* ---------- 控制条 ---------- */
+/* 包裹层：模块过小时整体折叠 —— 控制栏随包裹层高度滑出卡片外（由卡片 overflow 裁剪） */
+.ctl-wrap {
+  flex-shrink: 0;
+  height: var(--ctl-h, auto); /* 由脚本量得的控制栏自然高度，便于做高度过渡 */
+  transition: height 0.3s ease, opacity 0.26s ease;
+}
+.ctl-wrap.is-hidden {
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .ctl-bar {
   flex-shrink: 0;
   display: flex;

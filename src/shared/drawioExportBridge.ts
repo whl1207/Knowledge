@@ -346,6 +346,20 @@ export function installDrawioExportBridge(
         return false
       }
     },
+    /** 全部页（序号 0 起 + 页 id / 页名）；拿不到返回空数组。内嵌渲染按页取图时用它列页。 */
+    pages: (): Array<{ index: number; id: string; name: string }> => {
+      const ui = state.ui
+      if (!ui || !ui.pages) return []
+      try {
+        return ui.pages.map((p: any, i: number) => ({
+          index: i,
+          id: p && typeof p.getId === 'function' ? String(p.getId()) : '',
+          name: p && typeof p.getName === 'function' ? String(p.getName()) : '',
+        }))
+      } catch {
+        return []
+      }
+    },
     selectionCount: () => {
       try {
         const graph = state.ui && state.ui.editor && state.ui.editor.graph

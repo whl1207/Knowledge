@@ -8,7 +8,7 @@
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import KnowledgeGraphViewer from '@/components/AgentScaffold/KnowledgeGraphViewer.vue'
+import KnowledgeGraphViewer from '@/features/agent-scaffold/KnowledgeGraphViewer.vue'
 import { fmtPct } from '@/services/learningCore'
 import type { EntityItem } from '@/components/learning/types'
 

@@ -70,11 +70,11 @@
               <WorkflowEditor v-if="isFlowDslFile && isFlowContentView(viewName)" :path="activeFilePath" :content="activeFileContent" :readonly="isRemoteFile" />
               <!-- 数据画布（.data）：浏览 / 可视编辑渲染画布模块，保存由组件自己回写文件（内容经 file-saved 同步回标签） -->
               <DataCanvasModule v-if="isDataFile && isDataContentView(viewName)" :task-file-path="activeFilePath" mode="full" @file-saved="onDataCanvasSaved" />
-              <md_read v-if="!isExcalidrawFile && !isDrawioFile && !isMediaFile && !isFlowDslFile && !isDataFile && viewName===VIEW_BROWSE&&hasActiveFile" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
-              <md_mind v-if="!isExcalidrawFile && !isDrawioFile && viewName===VIEW_MINDMAP&&store.index!=null" />
-              <md_ppt v-if="!isExcalidrawFile && !isDrawioFile && viewName===VIEW_PRESENTATION&&store.index!=null" />
-              <Edit_Code v-if="!isExcalidrawFile && !isDrawioFile && viewName===VIEW_SOURCE&&store.index!=null" />
-              <Edit_Block v-if="!isExcalidrawFile && !isDrawioFile && !isFlowDslFile && !isDataFile && viewName===VIEW_VISUAL&&store.index!=null" />
+              <md_read v-if="!isDrawingEditor && !isMediaFile && !isFlowDslFile && !isDataFile && viewName===VIEW_BROWSE&&hasActiveFile" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
+              <md_mind v-if="!isDrawingEditor && viewName===VIEW_MINDMAP&&store.index!=null" />
+              <md_ppt v-if="!isDrawingEditor && viewName===VIEW_PRESENTATION&&store.index!=null" />
+              <Edit_Code v-if="!isDrawingEditor && viewName===VIEW_SOURCE&&store.index!=null" />
+              <Edit_Block v-if="!isDrawingEditor && !isFlowDslFile && !isDataFile && viewName===VIEW_VISUAL&&store.index!=null" />
             </div>
             <!-- 视图之间的拖拽手柄 -->
             <div v-if="vi < getVisibleViews().length - 1"
@@ -112,8 +112,8 @@
   import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue';
   import {usestore} from '@/store'
   import { FILE_VIEW_NAMES, NON_BROWSE_FILE_VIEWS, VIEW_BROWSE, VIEW_SOURCE, VIEW_VISUAL, VIEW_MINDMAP, VIEW_PRESENTATION } from '@/lib/knowFile/fileViews'
-  import { isDrawioFile as detectDrawioFile } from '@/shared/drawioFile'
-  import { isFlowDslPath } from '@/shared/flowFile'
+  // 专属文件类型（白板 / 图表 / 工作流 / 数据画布）的判别、编辑器与视图范围统一取自 fileEditors.ts
+  import { detectEditorKind, editorVisibleInView, FILE_EDITORS } from '@/components/knowFile/fileEditors'
   import { ElMessageBox, ElMessage } from 'element-plus'
   import { downloadRemoteFile } from '@/platform/remoteFs'
   
@@ -130,16 +130,13 @@
   import md_ppt from '@/components/knowFile/view/md_ppt.vue'
   import empty from '@/components/knowFile/view/empty.vue'
 
-  // Excalidraw 白板（懒加载，.excalidraw 文件统一用它打开）
-  const Excalidraw = defineAsyncComponent(() => import('@/components/knowFile/view/Excalidraw.vue'))
-  // draw.io 图表（懒加载，.drawio/.dio 文件统一用它打开；drawio 运行时随应用打包在 /drawio）
-  const Drawio = defineAsyncComponent(() => import('@/components/knowFile/view/Drawio.vue'))
+  // 白板 / 图表 / 工作流编辑器 / 数据画布（懒加载入口统一取自 fileEditors.ts，drawio 运行时随应用打包在 /drawio）
+  const Excalidraw = defineAsyncComponent(FILE_EDITORS.excalidraw.load)
+  const Drawio = defineAsyncComponent(FILE_EDITORS.drawio.load)
   // 音视频多媒体播放器（懒加载，音视频文件统一用它打开）
   const Media = defineAsyncComponent(() => import('@/components/knowFile/view/Media.vue'))
-  // 工作流编辑器（懒加载，Dify DSL 文件 .flow.yml / .flow.yaml）
-  const WorkflowEditor = defineAsyncComponent(() => import('@/workflow/ui/WorkflowEditor.vue'))
-  // 数据画布（懒加载，.data 文件的数据建模 / 录入 / 看板视图）
-  const DataCanvasModule = defineAsyncComponent(() => import('@/components/DataCanvas/DataCanvasModule.vue'))
+  const WorkflowEditor = defineAsyncComponent(FILE_EDITORS.flow.load)
+  const DataCanvasModule = defineAsyncComponent(FILE_EDITORS.data.load)
   
   import panel from '@/components/knowFile/panel.vue'
   import ViewToolbar from '@/components/knowFile/ViewToolbar.vue'
@@ -465,35 +462,20 @@
     return '';
   });
 
-  // 计算属性：当前激活文件是否为 .excalidraw 白板
-  const isExcalidrawFile = computed(() => {
-    if (!hasActiveFile.value) return false
+  // 计算属性：当前激活文件的专属编辑器类型（.excalidraw / .drawio / .flow.yml / .data；其余为 null 走通用视图）
+  const editorKind = computed(() => {
+    if (!hasActiveFile.value) return null
     const cur = store.data[store.index!]
-    if (!cur) return false
-    const ext = (cur.extension || '').toLowerCase()
-    if (ext === '.excalidraw') return true
-    const p = cur.path || ''
-    return p.toLowerCase().endsWith('.excalidraw')
+    if (!cur) return null
+    return detectEditorKind({ path: cur.path, extension: cur.extension, content: cur.content })
   });
 
-  // .excalidraw 文件：浏览/源码编辑/可视编辑/思维导图/演示这些内容视图统一渲染 Excalidraw 白板组件
-  const isExcalidrawContentView = (name: string) => {
-    return FILE_VIEW_NAMES.includes(name)
-  };
-
-  // 计算属性：当前激活文件是否为 draw.io 图表
-  //（.drawio/.dio/.drawio.xml 按后缀；.xml 需内容含 <mxfile>/<mxGraphModel>，避免把所有 xml 当图表）
-  const isDrawioFile = computed(() => {
-    if (!hasActiveFile.value) return false
-    const cur = store.data[store.index!]
-    if (!cur) return false
-    return detectDrawioFile(cur.path, cur.content)
-  });
-
-  // draw.io 图表：内容视图同样统一渲染 Drawio 组件
-  const isDrawioContentView = (name: string) => {
-    return FILE_VIEW_NAMES.includes(name)
-  };
+  // 绘图类（白板 / 图表）接管全部视图：浏览 / 源码编辑 / 可视编辑 / 导图 / 演示 全部渲染绘图界面，通用视图让位
+  const isDrawingEditor = computed(() => editorKind.value === 'excalidraw' || editorKind.value === 'drawio');
+  const isExcalidrawFile = computed(() => editorKind.value === 'excalidraw');
+  const isDrawioFile = computed(() => editorKind.value === 'drawio');
+  const isExcalidrawContentView = (name: string) => editorVisibleInView('excalidraw', name);
+  const isDrawioContentView = (name: string) => editorVisibleInView('drawio', name);
 
   // 音频/视频扩展名集合
   const AUDIO_EXTS = ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.wma', '.ape', '.aiff'];
@@ -513,31 +495,11 @@
     return FILE_VIEW_NAMES.includes(name)
   };
 
-  // 计算属性：当前激活文件是否为 Dify DSL 工作流（.flow.yml / .flow.yaml）
-  const isFlowDslFile = computed(() => {
-    if (!hasActiveFile.value) return false
-    const cur = store.data[store.index!]
-    if (!cur) return false
-    return isFlowDslPath(cur.path) || isFlowDslPath(cur.extension)
-  });
-
-  // 工作流：浏览 / 可视编辑渲染流程画布；源码编辑按 YAML 文本打开
-  const isFlowContentView = (name: string) => {
-    return name === VIEW_BROWSE || name === VIEW_VISUAL
-  };
-
-  // 计算属性：当前激活文件是否为数据画布（.data）
-  const isDataFile = computed(() => {
-    if (!hasActiveFile.value) return false
-    const cur = store.data[store.index!]
-    if (!cur) return false
-    return String(cur.extension || '').toLowerCase() === '.data' || String(cur.path || '').toLowerCase().endsWith('.data')
-  });
-
-  // 数据画布：浏览 / 可视编辑渲染画布模块（内含 主页 / 数据 / 画布 / 帮助 四个子标签）；源码编辑保持 JSON 文本
-  const isDataContentView = (name: string) => {
-    return name === VIEW_BROWSE || name === VIEW_VISUAL
-  };
+  const isFlowDslFile = computed(() => editorKind.value === 'flow');
+  const isDataFile = computed(() => editorKind.value === 'data');
+  // 工作流 / 数据画布：浏览、可视编辑渲染流程画布或画布模块（源码编辑仍按 YAML / JSON 文本打开）
+  const isFlowContentView = (name: string) => editorVisibleInView('flow', name);
+  const isDataContentView = (name: string) => editorVisibleInView('data', name);
 
   /** 数据画布保存成功：把写盘内容同步回打开的标签，并通知其它窗口（避免再读一次大文件） */
   const onDataCanvasSaved = (path: string, content?: string) => {

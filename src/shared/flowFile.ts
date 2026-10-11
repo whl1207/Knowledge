@@ -1,7 +1,7 @@
 /**
  * flowFile.ts — 工作流文件（`.flow.yml` / `.flow.yaml`）的识别（渲染进程共用，保持无 DOM 依赖）
  *
- * 工作流文件就是 Dify 应用 DSL（YAML，见 src/workflow）：内容由工作流编辑器读写，
+ * 工作流文件就是 Dify 应用 DSL（YAML，见 src/features/workflow）：内容由工作流编辑器读写，
  * 因此一律按扩展名判定——知识库里的普通 `.json` / `.yml` 数量很多，不能嗅探内容当工作流。
  */
 

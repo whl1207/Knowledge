@@ -43,9 +43,13 @@ export function resolveMdLinkTarget(a: HTMLAnchorElement, baseDir = ''): string 
 
 /**
  * 打开本地文件：已打开则切到对应标签，否则按「文件操作模式」打开。
+ * @param opts.page 目标页（1 起的序号 / 页名）：`.drawio` 图表会直接定位到该页，用于 Markdown 内嵌图表点击
  * @returns 是否按本地文件处理（false = 不是本地文件链接）
  */
-export async function openMdFileLink(targetPath: string, opts: { isRemote?: boolean } = {}): Promise<boolean> {
+export async function openMdFileLink(
+  targetPath: string,
+  opts: { isRemote?: boolean; page?: string | number } = {},
+): Promise<boolean> {
   if (!targetPath) return false
   const store = usestore()
   // 打开前先确认目标存在（远程只读模式跳过校验）：否则会打开后只显示 `Error reading file: ENOENT`
@@ -64,13 +68,26 @@ export async function openMdFileLink(targetPath: string, opts: { isRemote?: bool
   const existingIndex = store.data.findIndex((d: any) => d.path === targetPath)
   if (existingIndex >= 0) {
     store.index = existingIndex
+    // 已在本窗口打开：图表窗口可能仍停在别的页，按同样方式通知换页（与主进程命中已开窗口的处理一致）
+    if (opts.page != null && opts.page !== '') {
+      try {
+        await (window as any).ipcRenderer?.invoke?.('open-file-window', {
+          path: targetPath,
+          view: 'read',
+          page: opts.page,
+        })
+      } catch {
+        /* 换页失败不影响切标签 */
+      }
+    }
     return true
   }
   await store.openFileByMode({
     path: targetPath,
     label: targetPath.replace(/\\/g, '/').split('/').pop() || 'file',
     type: 'file',
-    extension: targetPath.substring(targetPath.lastIndexOf('.'))
+    extension: targetPath.substring(targetPath.lastIndexOf('.')),
+    page: opts.page,
   })
   return true
 }

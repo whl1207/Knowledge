@@ -79,7 +79,8 @@ Type check the renderer before committing: `npx vue-tsc --noEmit -p tsconfig.jso
 ```
 electron/main/      Electron main process (window, IPC, MCP runtime, AI service, TTS/ASR workers)
 electron/preload/   Preload bridge exposed to the renderer
-src/components/     Renderer UI (home, knowFile, knowRAG, workFlow, AgentScaffold, DataCanvas, learning, browser, set)
+src/components/     Renderer shell & shared UI (home, knowFile, knowRAG, learning, browser, set)
+src/features/       Self-contained subsystems (workflow, data canvas, agent scaffold)
 src/lib/            Shared libraries (markdown / block editor, export, file handling, task files)
 src/services/       Renderer-side services (agent skills, KB reader, speech)
 src/shared/         Code shared by main and renderer (AI core, tool registry, retrieval, search)

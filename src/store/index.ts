@@ -1741,7 +1741,7 @@ export const usestore = defineStore('data', {
                 '.flow.yml', '.flow.yaml', '.data'
             ]
             const view = READ_EXTS.includes(ext) || isFlowDslPath(data.path) ? 'read' : 'edit'
-            window.ipcRenderer.invoke('open-file-window', { path: data.path, view }).catch(() => {})
+            window.ipcRenderer.invoke('open-file-window', { path: data.path, view, page: data.page }).catch(() => {})
         },
 
         /** 打开知识库(.kb)文件：跳转到知识处理(knowRAG)模块并标记待加载文件 */

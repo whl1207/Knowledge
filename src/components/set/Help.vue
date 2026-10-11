@@ -1689,7 +1689,7 @@ const translations = {
         title: '视图一览（11 种视图 + 5 种专用视图）',
         groupViews: '11 种视图',
         groupFileViews: '5 种专用视图（文件专属 / 特殊文件）',
-        browse: { name: '浏览', desc: '统一预览视图（默认）：Markdown 会渲染公式、代码高亮、表格、图片与 Mermaid 图表；Word、PDF、图片、音视频等也各有预览。底部状态栏还提供「智能操作」（与当前文档对话）与导出 Markdown / Word / PDF。' },
+        browse: { name: '浏览', desc: '统一预览视图（默认）：Markdown 会渲染公式、代码高亮、表格、图片、Mermaid 图表，以及内嵌的 draw.io 图表（![](图.drawio) 直接渲染成图并可点击打开编辑器，多页图表逐页渲染、可用 #page=2 指定页）；Word、PDF、图片、音视频等也各有预览。底部状态栏还提供「智能操作」（与当前文档对话）与导出 Markdown / Word / PDF。' },
         edit: { name: '源码编辑', desc: 'Monaco 代码编辑器：直接改 Markdown 源码与 YAML 头，支持 AI 辅助与拖入图片 / 文件生成引用链接；代码与数据文件（.py、.json、.flow.yml 等）也在这里以文本方式打开。' },
         blockedit: { name: '可视编辑', desc: '块编辑（所见即所得）：按块编辑，输入 / 唤出块类型菜单（标题 / 列表 / 待办 / 表格 / 代码 / 公式等），块手柄菜单的「转换为」可把当前块换成其它类型，不懂 Markdown 语法也能排版。' },
         mindmap: { name: '思维导图', desc: '思维导图视图：按 Markdown 标题层级生成可缩放、可逐层折叠的导图（支持 LaTeX 公式渲染，独立成段的展示公式与带公式的正文段落都会成节点），节点文字宽度与展开层数可在状态栏调节。' },
@@ -1726,7 +1726,7 @@ const translations = {
         },
         step3: {
           title: '导出 Word 的另存为对话框',
-          desc: '选「导出 Word」会弹出<strong>另存为对话框</strong>：<strong>导出样式</strong>可选 公文（GB/T 9704-2012，默认）/ 中文论文 / 英文论文（APA 7）/ <strong>自定义 .docx 模板</strong>，并可<strong>指定保存位置</strong>（默认当前文件所在目录）。数学公式、表格、图片、Mermaid 图会一并导出（公式优先转成 Word 原生可编辑公式）。'
+          desc: '选「导出 Word」会弹出<strong>另存为对话框</strong>：<strong>导出样式</strong>可选 公文（GB/T 9704-2012，默认）/ 中文论文 / 英文论文（APA 7）/ <strong>自定义 .docx 模板</strong>，并可<strong>指定保存位置</strong>（默认当前文件所在目录）。数学公式、表格、图片、Mermaid 图、内嵌的 draw.io 图表会一并导出（公式优先转成 Word 原生可编辑公式）。'
         },
         step4: {
           title: '其他导出入口与默认样式',
@@ -1760,7 +1760,7 @@ const translations = {
       },
       drawio: {
         title: '📐 draw.io 图表（.drawio / .dio）',
-        overview: '知识管理内置 <strong>draw.io 图表编辑器</strong>（draw.io 官方 webapp 随软件打包，<strong>完全离线可用</strong>）：<code>.drawio</code> / <code>.dio</code> 文件（以及内容含 <code>&lt;mxfile&gt;</code> 的 <code>.xml</code>）在<strong>浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示</strong>任一视图中都会直接打开绘图画布，用来画流程图、架构图、泳道图、ER 图、UML 等，无需另外安装 draw.io 或联网。',
+        overview: '知识管理内置 <strong>draw.io 图表编辑器</strong>（draw.io 官方 webapp 随软件打包，<strong>完全离线可用</strong>）：<code>.drawio</code> / <code>.dio</code> 文件（以及内容含 <code>&lt;mxfile&gt;</code> 的 <code>.xml</code>）在<strong>浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示</strong>任一视图中都会直接打开绘图画布，用来画流程图、架构图、泳道图、ER 图、UML 等，无需另外安装 draw.io 或联网。<br>另外，Markdown 里用 <code>![](图.drawio)</code> 引用图表时，<strong>浏览视图会把图表直接画在正文里</strong>（点击图表即打开编辑器，并<strong>直接定位到所点的那一页</strong>）；多页图表会<strong>逐页依次内嵌</strong>并标注「第 i / N 页」（超过 10 页只渲染前 10 页并提示），要只看某一页就写成 <code>![](图.drawio#page=2)</code>（也可用页名：<code>#page=页名</code>）。导出 Word / PDF 时图表同样会一并输出。',
         step1: {
           title: '创建与打开',
           desc: '文件树顶部 <strong>➕ 创建文件</strong> 弹窗中把类型切到 <strong>draw.io</strong>（自动写入空白图表框架），或在文件树上右键「<strong>新建 → draw.io</strong>」；双击 <code>.drawio</code> 文件即进入图表视图。'
@@ -2593,7 +2593,7 @@ const translations = {
         title: 'Views (11 views + 5 dedicated views)',
         groupViews: '11 views',
         groupFileViews: '5 dedicated views (file-specific / special files)',
-        browse: { name: 'Browse', desc: 'The unified preview view (default): Markdown renders formulas, highlighted code, tables, images and Mermaid diagrams; Word, PDF, images and media have their own previews too. The bottom status bar also offers Smart actions (chat with the document) and export to Markdown / Word / PDF.' },
+        browse: { name: 'Browse', desc: 'The unified preview view (default): Markdown renders formulas, highlighted code, tables, images, Mermaid diagrams and embedded draw.io diagrams (![](diagram.drawio) is drawn inline and can be clicked to open the editor; multi-page diagrams render page by page and #page=2 pins a page); Word, PDF, images and media have their own previews too. The bottom status bar also offers Smart actions (chat with the document) and export to Markdown / Word / PDF.' },
         edit: { name: 'Source', desc: 'Monaco code editor: edit Markdown source and YAML front matter directly, with AI help and drag-and-drop images / files that become reference links; code and data files (.py, .json, .flow.yml …) open here as plain text too.' },
         blockedit: { name: 'Visual', desc: 'Block editor (WYSIWYG): edit block by block and type / for the block type menu (headings, lists, to-dos, tables, code, formulas …); the block handle menu’s “Turn into” converts a block to another type, so you never need Markdown syntax.' },
         mindmap: { name: 'Mind Map', desc: 'Mind map view: turns the Markdown heading hierarchy into a zoomable, level-by-level collapsible map (LaTeX math supported; display formulas and paragraphs containing math become their own nodes); node text width and expand level are adjustable in the status bar.' },
@@ -2630,7 +2630,7 @@ const translations = {
         },
         step3: {
           title: 'The Word “Save as” dialog',
-          desc: 'Choosing “Export Word” opens a <strong>save-as dialog</strong>: pick an <strong>export style</strong> — Official (GB/T 9704-2012, default) / Chinese Paper / English Paper (APA 7) / <strong>Custom .docx template</strong> — and choose the <strong>save location</strong> (defaults to the folder of the current file). Formulas, tables, images and Mermaid diagrams are exported as well (formulas prefer editable native Word equations).'
+          desc: 'Choosing “Export Word” opens a <strong>save-as dialog</strong>: pick an <strong>export style</strong> — Official (GB/T 9704-2012, default) / Chinese Paper / English Paper (APA 7) / <strong>Custom .docx template</strong> — and choose the <strong>save location</strong> (defaults to the folder of the current file). Formulas, tables, images, Mermaid diagrams and embedded draw.io diagrams are exported as well (formulas prefer editable native Word equations).'
         },
         step4: {
           title: 'Other export entry points & default style',
@@ -2664,7 +2664,7 @@ const translations = {
       },
       drawio: {
         title: '📐 draw.io Diagrams (.drawio / .dio)',
-        overview: 'Knowledge Management embeds the <strong>draw.io diagram editor</strong> (the official draw.io webapp is bundled, <strong>fully offline</strong>): <code>.drawio</code> / <code>.dio</code> files (plus <code>.xml</code> whose content contains <code>&lt;mxfile&gt;</code>) open the canvas directly in any of the <strong>Browse / Source / Visual / Mind Map / Presentation</strong> views — for flowcharts, architecture, swimlanes, ER and UML diagrams, with no separate draw.io install and no network.',
+        overview: 'Knowledge Management embeds the <strong>draw.io diagram editor</strong> (the official draw.io webapp is bundled, <strong>fully offline</strong>): <code>.drawio</code> / <code>.dio</code> files (plus <code>.xml</code> whose content contains <code>&lt;mxfile&gt;</code>) open the canvas directly in any of the <strong>Browse / Source / Visual / Mind Map / Presentation</strong> views — for flowcharts, architecture, swimlanes, ER and UML diagrams, with no separate draw.io install and no network.<br>In Markdown, referencing a diagram as <code>![](diagram.drawio)</code> makes the Browse view <strong>draw it right inside the document</strong> (clicking a diagram opens the editor <strong>on that very page</strong>). Multi-page diagrams are embedded <strong>page by page</strong> with a “page i / N” label (only the first 10 pages if there are more); write <code>![](diagram.drawio#page=2)</code> to show a single page (page name works too: <code>#page=name</code>). Word / PDF export includes the diagrams as well.',
         step1: {
           title: 'Create & open',
           desc: 'In the file tree <strong>➕ Create file</strong> dialog switch the type to <strong>draw.io</strong> (a blank diagram skeleton is written), or right-click a folder in the file tree and pick <strong>New → draw.io</strong>; double-click a <code>.drawio</code> file to open the diagram view.'

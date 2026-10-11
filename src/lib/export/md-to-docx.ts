@@ -6,6 +6,7 @@
  *   1. （可选）去除 YAML frontmatter
  *   2. 导出专用 markdown-it 渲染（数学公式 / 删除线 / 带 alt 图片标题）
  *   3. mermaid 源码块 → PNG 图片内嵌
+ *   3.5 内嵌 drawio 图表（`![](diagram.drawio)`）→ PNG 图片内嵌
  *   4. 本地图片内联为 base64 data URL
  *   5. （可选）套用用户指定的 .docx 段落样式皮肤（仅 styles.xml / theme1.xml）
  *   6. 构建并下载 .docx
@@ -19,6 +20,8 @@ import { ElMessage } from 'element-plus'
 import { renderMermaidSvgForExport, svgToPngDataUrl } from '@/lib/markdown/mermaid'
 import { normalizeMermaidSource } from '@/lib/markdown/mermaid-normalize'
 import { allowLocalFileLinks } from '@/lib/markdown/mdLinkPolicy'
+import { isDrawioPath } from '@/shared/drawioFile'
+import { replaceDiagramFiguresWithImages, parseDiagramRef } from '@/shared/drawioRender'
 import { inlineLocalImagesAsDataUrls, downloadAsWord, blobToBase64, type WordSaveResult } from '@/lib/export/download'
 import { type DocxSkin, type DocxPageProfile, getDocxTemplatePreset } from '@/lib/export/docx'
 import { usestore } from '@/store'
@@ -55,6 +58,19 @@ allowLocalFileLinks(md)
 const defaultImageRender = md.renderer.rules.image || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
 md.renderer.rules.image = (tokens, idx, options, env, self) => {
   const token = tokens[idx]
+  // 图表文件（`![](diagram.drawio)`）：先占位，随后由 replaceDiagramFiguresWithImages 换成 PNG
+  const srcIndex = token.attrIndex('src')
+  if (srcIndex >= 0) {
+    const ref = parseDiagramRef(token.attrs![srcIndex][1])
+    if (ref.path && isDrawioPath(ref.path)) {
+      const pageAttr = ref.page ? ` data-drawio-page="${md.utils.escapeHtml(ref.page)}"` : ''
+      const caption = token.content ? md.utils.escapeHtml(token.content.trim()) : ''
+      return (
+        `<figure class="md-drawio-figure" data-drawio-path="${md.utils.escapeHtml(ref.path)}"${pageAttr}>` +
+        `<div class="md-drawio-body"></div>${caption ? `<figcaption>${caption}</figcaption>` : ''}</figure>`
+      )
+    }
+  }
   const imgHtml = defaultImageRender(tokens, idx, options, env, self)
   const altText = token.content ? md.utils.escapeHtml(token.content.trim()) : ''
   if (altText) {
@@ -342,7 +358,7 @@ export interface PreparedDocxHtml {
 /**
  * 把 Markdown 渲染成可构建 .docx 的 HTML，并解析导出模板与样式皮肤。
  * 步骤：frontmatter(可选) → markdown-it 渲染（数学/删除线/图片图注）→ mermaid 转 PNG →
- * 本地图片内联 base64 → 模板预设（opts.template 优先，其次设置页，最后公文）。
+ * 内嵌 drawio 图表转 PNG → 本地图片内联 base64 → 模板预设（opts.template 优先，其次设置页，最后公文）。
  * 供 exportMarkdownAsWord（下载）与工作流「Word 导出节点」（写指定路径）共用。
  */
 export async function prepareMarkdownDocxHtml(markdown: string, opts: MarkdownToWordOptions = {}): Promise<PreparedDocxHtml | null> {
@@ -355,8 +371,10 @@ export async function prepareMarkdownDocxHtml(markdown: string, opts: MarkdownTo
   const rendered = stripCjkStrongPad(md.render(padCjkStrong(preprocessMath(stripped))))
   // 3. mermaid → PNG
   const withMermaid = await renderMermaidToImages(rendered)
+  // 3.5 内嵌 drawio 图表 → PNG（drawio SVG 在 Word 里兼容性差，统一转位图）
+  const withDiagrams = await replaceDiagramFiguresWithImages(withMermaid, opts.baseDir)
   // 4. 本地图片内联 base64
-  const html = await inlineLocalImagesAsDataUrls(withMermaid, opts.baseDir)
+  const html = await inlineLocalImagesAsDataUrls(withDiagrams, opts.baseDir)
   // 5. 模板与样式：读最近持久化 UI（localStorage 优先，跨窗口即时反映设置变更），再回退内存 store
   const latestUi = (typeof window !== 'undefined') ? readLatestUiSettings() : {}
   let template = opts.template || latestUi.wordExportTemplate || ''

@@ -46,6 +46,8 @@ const props = defineProps<{
   content?: string
   /** 只读预览（远程文件等）：禁止写盘并阻断编辑器交互 */
   readonly?: boolean
+  /** 打开后定位到哪一页（1 起的序号 / 页名 / 页 id）：Markdown 里点击内嵌图表时带上对应页 */
+  page?: number | string
 }>()
 
 const store = usestore()
@@ -649,8 +651,13 @@ function onMessage(ev: MessageEvent) {
         loadWaiter = null
         done(true)
       }
-      // 重建内容后编辑器会回到第 1 页（实测）→ 需要时切回原来的页
-      if (pendingRestorePage !== null) {
+      // 指定页优先于「切回原页」：从 Markdown 内嵌图表点进来时要落到对应页
+      const wanted = props.page == null ? '' : String(props.page)
+      if (wanted !== '') {
+        pendingRestorePage = null
+        setTimeout(() => { void gotoPage(wanted) }, 30)
+      } else if (pendingRestorePage !== null) {
+        // 重建内容后编辑器会回到第 1 页（实测）→ 需要时切回原来的页
         const idx = pendingRestorePage
         pendingRestorePage = null
         setTimeout(() => {
@@ -977,6 +984,38 @@ async function currentXml(): Promise<string> {
 function drawioApi(): any {
   return (frameRef.value?.contentWindow as any)?.__aimDrawioImageApi || null
 }
+
+/** 页定位（1 起的序号 / 页名 / 页 id）→ 页序号（0 起）；解析不出来返回 null */
+function resolvePageSpec(spec: string): number | null {
+  const s = String(spec || '').trim()
+  if (!s) return null
+  if (/^\d+$/.test(s)) return Math.max(0, Number(s) - 1)
+  const api = drawioApi()
+  if (!api) return null
+  const pages: Array<{ index: number; id: string; name: string }> = api.pages?.() || []
+  const lower = s.toLowerCase()
+  const hit = pages.find((p) => p.name.trim().toLowerCase() === lower || p.id.toLowerCase() === lower)
+  return hit ? hit.index : null
+}
+
+/** 切到指定页。取图接口还没捕获到 EditorUi 时先「催」一次（同 currentEditorPage 的做法）。 */
+async function gotoPage(spec: string): Promise<void> {
+  const api = drawioApi()
+  if (!api) return
+  if (!api.ready?.()) await requestExport('xml', {}, 4000)
+  const idx = resolvePageSpec(spec)
+  if (idx == null) return
+  api.selectPage?.(idx)
+}
+
+// 窗口已经开着时，主进程会用 file-window-set-page 通知换页（不再重开窗口）→ 跟着切
+watch(
+  () => props.page,
+  (v) => {
+    if (v == null || v === '') return
+    void gotoPage(String(v))
+  },
+)
 
 /**
  * 编辑器当前打开的页（0 起）。智能操作按页进行：上下文只取这一页、改动也只写回这一页。

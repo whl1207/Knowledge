@@ -175,6 +175,28 @@ function parseOpenFileArgs(argv: string[]): string[] {
 // 启动参数携带的待打开文件（应用 ready 后再打开窗口）
 const PENDING_FILE_OPENS: string[] = parseOpenFileArgs(process.argv)
 
+/**
+ * 统一处理窗口内的 http(s) 外链：交给系统默认浏览器打开，而不是新开一个 Electron 窗口。
+ * 不注册这套处理的窗口里点 <a target="_blank"> 会由 Electron 默认行为开一个无边框子窗口
+ * （没有地址栏 / 返回键，用户会误以为「点了没反应」）。
+ *  - 新建窗口（target="_blank" / window.open）：一律拒绝，改为 openExternal
+ *  - 页面内跳转（will-navigate）：http(s) 拦截并交给默认浏览器，其余 scheme（file:// 等）放行
+ */
+function attachExternalLinkHandling(target: BrowserWindow): void {
+  const openExternally = (rawUrl: string): boolean => {
+    if (!/^https?:\/\//i.test(rawUrl)) return false
+    shell.openExternal(rawUrl)
+    return true
+  }
+  target.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url)
+    return { action: 'deny' }
+  })
+  target.webContents.on('will-navigate', (event, url) => {
+    if (openExternally(url)) event.preventDefault()
+  })
+}
+
 // ==================== 窗口创建 ====================
 
 async function createWindow() {
@@ -492,6 +514,8 @@ function openFileWindow(opts: {
   remoteRootId?: string
   remoteRel?: string
   label?: string
+  /** 打开后定位到的页（1 起的序号 / 页名）：Markdown 内嵌图表点击时带上 */
+  page?: string | number
 }): BrowserWindow | null {
   const filePath = opts.path
   if (!filePath) return null
@@ -507,6 +531,17 @@ function openFileWindow(opts: {
     let exist = byView.get(viewKey)
     if (!exist && !view) exist = Array.from(byView.values())[0]
     if (exist && !exist.isDestroyed()) {
+      // 指定了页 → 通知该窗口直接切页（窗口已加载完才发，否则消息会被丢掉）
+      if (opts.page != null && opts.page !== '') {
+        const payload = { path: filePath, page: opts.page }
+        if (exist.webContents.isLoading()) {
+          exist.webContents.once('did-finish-load', () => {
+            if (!exist!.isDestroyed()) exist!.webContents.send('file-window-set-page', payload)
+          })
+        } else {
+          exist.webContents.send('file-window-set-page', payload)
+        }
+      }
       if (exist.isMinimized()) exist.restore()
       exist.focus()
       return exist
@@ -549,6 +584,8 @@ function openFileWindow(opts: {
   // 登记到映射表（同一路径的多个视图各自一个窗口），窗口关闭时清理
   if (byView) byView.set(viewKey, childWindow)
   else fileWindowsByPath.set(pathKey, new Map([[viewKey, childWindow]]))
+  // 文件窗口内的外链（Markdown / PDF 里的网址等）走系统默认浏览器
+  attachExternalLinkHandling(childWindow)
   const childWcId = childWindow.webContents.id
   childWindow.on('closed', () => {
     // 托盘里该窗口的后台任务登记一并清掉（否则任务会一直挂在托盘菜单上）
@@ -587,6 +624,7 @@ function openFileWindow(opts: {
   if (opts.remoteRootId) hash += `&rid=${encodeURIComponent(opts.remoteRootId)}`
   if (opts.remoteRel) hash += `&rel=${encodeURIComponent(opts.remoteRel)}`
   if (opts.label) hash += `&label=${encodeURIComponent(opts.label)}`
+  if (opts.page != null && opts.page !== '') hash += `&page=${encodeURIComponent(String(opts.page))}`
   if (process.env.VITE_DEV_SERVER_URL) {
     childWindow.loadURL(`${url}#${hash}`)
   } else {
@@ -601,6 +639,7 @@ ipcMain.handle('open-file-window', async (_, opts: {
   remoteRootId?: string
   remoteRel?: string
   label?: string
+  page?: string | number
 }) => {
   openFileWindow(opts)
 })
@@ -761,6 +800,8 @@ function createSettingsWindow(nav = '', anchor?: BrowserWindow | null): BrowserW
     },
   })
   settingsWin = w
+  // 设置窗口内的外链（帮助页「设计参考」/ 更新日志、搜索设置等）走系统默认浏览器
+  attachExternalLinkHandling(w)
   if (process.platform !== 'darwin') w.setMenuBarVisibility(false)
   // 相对主窗口居中（主窗口不可用时退到请求方窗口 / 屏幕）：
   // 新建即调一次，ready-to-show（尺寸已定）再调一次，避免 DPI 舍入造成偏心

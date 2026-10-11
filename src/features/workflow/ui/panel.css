@@ -1,0 +1,236 @@
+/* src/features/workflow/ui/panel.css — 属性面板的公共字段样式（非 scoped，供各节点面板复用）
+ * 配色一律取自 theme.css 的 --wf-*（跟随 APP 主题，含深色），此处不写死颜色。 */
+
+.wf-field {
+  margin-bottom: 10px;
+}
+
+.wf-field__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.wf-field__label {
+  color: var(--wf-text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.wf-field__hint {
+  margin-top: 4px;
+  color: var(--wf-text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.wf-field__error {
+  margin-top: 4px;
+  color: var(--wf-danger);
+  font-size: 11px;
+}
+
+.wf-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-inline--full > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.wf-card {
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid var(--wf-border);
+  border-radius: 6px;
+  background: var(--wf-surface);
+}
+
+.wf-card__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.wf-card__title {
+  flex: 1;
+  color: var(--wf-text-dim);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wf-icon-btn {
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--wf-text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 18px;
+  margin: 0;
+}
+
+.wf-icon-btn:hover {
+  background: var(--wf-surface-2);
+  color: var(--wf-accent-text);
+}
+
+.wf-icon-btn.is-danger:hover {
+  background: var(--wf-danger-bg);
+  color: var(--wf-danger);
+}
+
+.wf-add-btn {
+  width: 100%;
+  padding: 5px 0;
+  border: 1px dashed var(--wf-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--wf-text-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.wf-add-btn:hover {
+  border-color: var(--wf-accent);
+  background: var(--wf-info-bg);
+  color: var(--wf-accent-text);
+}
+
+.wf-section-title {
+  margin: 14px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--wf-border);
+  color: var(--wf-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.wf-empty-hint {
+  padding: 10px 0;
+  color: var(--wf-text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+
+.wf-tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--wf-surface-2);
+  color: var(--wf-text-soft);
+  font-size: 11px;
+}
+
+/* ── 右侧面板外壳（运行 / AI 编排共用，与属性面板同为 320px 侧栏） ── */
+.wf-panel {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  flex: 0 0 320px;
+  border-left: 1px solid var(--wf-border);
+  background: var(--wf-surface);
+  color: var(--wf-text);
+  overflow: hidden;
+}
+
+.wf-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--wf-border);
+}
+
+.wf-panel__title {
+  flex: 1;
+  color: var(--wf-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.wf-panel__meta {
+  color: var(--wf-text-dim);
+  font-size: 11px;
+}
+
+.wf-panel__body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.wf-panel__actions {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.wf-panel__actions .wf-btn {
+  flex: 1;
+}
+
+.wf-panel__error {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--wf-danger-bg);
+  color: var(--wf-danger);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+/* ── 面板按钮（全局：面板内部的按钮不受编辑器 scoped 样式影响） ── */
+.wf-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.wf-btn--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+}
+
+.wf-btn--icon i {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.wf-btn--icon.is-active {
+  border-color: var(--wf-accent);
+  background: var(--wf-info-bg);
+  color: var(--wf-accent-text);
+}
+
+.wf-btn:hover:not(:disabled) {
+  border-color: var(--wf-accent);
+  color: var(--wf-accent-text);
+}
+
+.wf-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.wf-btn--primary,
+.wf-btn--primary:hover:not(:disabled) {
+  border-color: var(--wf-accent);
+  background: var(--wf-accent);
+  color: var(--wf-on-accent);
+}
+
+.wf-btn--primary:hover:not(:disabled) {
+  opacity: 0.88;
+}

@@ -9,19 +9,16 @@ import Edit_Block from '@/components/knowFile/view/Edit_Block.vue'
 import md_mind from '@/components/knowFile/view/md_mind.vue'
 import md_ppt from '@/components/knowFile/view/md_ppt.vue'
 import { FILE_VIEWS, fileViewByKey } from '@/lib/knowFile/fileViews'
-import { isDrawioFile as detectDrawioFile } from '@/shared/drawioFile'
-import { isFlowDslPath } from '@/shared/flowFile'
-import { isTaskFile as isTaskFilePath } from '@/lib/taskFile'
+// 专属文件的判别与编辑器入口统一取自 fileEditors.ts（.drawio / .excalidraw / .flow.yml / .data / .task）
+import { detectEditorKind, FILE_EDITORS } from '@/components/knowFile/fileEditors'
 
-// Excalidraw 白板（懒加载，.excalidraw 文件统一用它打开）
-const Excalidraw = defineAsyncComponent(() => import('@/components/knowFile/view/Excalidraw.vue'))
-// draw.io 图表（懒加载，.drawio/.dio 文件统一用它打开）
-const Drawio = defineAsyncComponent(() => import('@/components/knowFile/view/Drawio.vue'))
-// 工作流编辑器（懒加载，Dify DSL 文件 .flow.yml / .flow.yaml）
-const WorkflowEditor = defineAsyncComponent(() => import('@/workflow/ui/WorkflowEditor.vue'))
-const DataCanvasModule = defineAsyncComponent(() => import('@/components/DataCanvas/DataCanvasModule.vue'))
-// 脚手架任务（懒加载，.task 文件固定用它打开：单文件视图，无实例栏）
-const PipelineScaffold = defineAsyncComponent(() => import('@/components/AgentScaffold/PipelineScaffold.vue'))
+// 五类专属文件的编辑器（懒加载；组件路径集中在 fileEditors.ts）
+const Excalidraw = defineAsyncComponent(FILE_EDITORS.excalidraw.load)
+const Drawio = defineAsyncComponent(FILE_EDITORS.drawio.load)
+const WorkflowEditor = defineAsyncComponent(FILE_EDITORS.flow.load)
+const DataCanvasModule = defineAsyncComponent(FILE_EDITORS.data.load)
+// 脚手架任务固定用它打开：单文件视图，无实例栏
+const PipelineScaffold = defineAsyncComponent(FILE_EDITORS.task.load)
 
 const store = usestore()
 
@@ -38,6 +35,8 @@ const remoteRel = ref('')
 const remoteBase64 = ref('') // 图片/PDF 的裸 base64（无 data: 前缀）
 const remoteText = ref('')   // 远程 Word 转换好的 Markdown
 const remoteLoadError = ref('')
+// draw.io 图表要定位到的页（1 起的序号 / 页名）：来自 URL 的 page 参数，或主进程的换页通知
+const drawioPage = ref('')
 
 // 独立窗口支持的视图类型（浏览/源码编辑/思维导图/演示/块编辑）
 // 视图 key 顺序 / 显示名统一取自 fileViews.ts（顺序：浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）
@@ -59,16 +58,13 @@ function mdBodyIsEmpty(text: string): boolean {
   return !(fm ? s.slice(fm[0].length) : s).trim()
 }
 
-// 是否为 .excalidraw 白板文件
-const isExcalidraw = computed(() => filePath.value.toLowerCase().endsWith('.excalidraw'))
-// 是否为 draw.io 图表（.drawio/.dio/.drawio.xml 按后缀；.xml 需内容像图表）
-const isDrawio = computed(() => detectDrawioFile(filePath.value, fileContent.value))
-// 是否为 Dify DSL 工作流（.flow.yml / .flow.yaml，走工作流编辑器）
-const isFlowDsl = computed(() => isFlowDslPath(filePath.value))
-// 是否为数据画布（.data）
-const isDataCanvas = computed(() => filePath.value.toLowerCase().endsWith('.data'))
-// 是否为脚手架任务（.task，文件专属的「脚手架」视图）
-const isTask = computed(() => isTaskFilePath(filePath.value))
+// 当前文件的专属编辑器类型（.excalidraw / .drawio / .flow.yml / .data / .task；其余为 null 走通用视图）
+const editorKind = computed(() => detectEditorKind({ path: filePath.value, content: fileContent.value }))
+const isExcalidraw = computed(() => editorKind.value === 'excalidraw')
+const isDrawio = computed(() => editorKind.value === 'drawio')
+const isFlowDsl = computed(() => editorKind.value === 'flow')
+const isDataCanvas = computed(() => editorKind.value === 'data')
+const isTask = computed(() => editorKind.value === 'task')
 
 // 代码类文件：新窗口仅提供源码编辑视图（默认），不显示视图切换器
 const CODE_FILE_EXTS = ['.js', '.ts', '.py', '.json', '.css', '.kb', '.task', '.txt']
@@ -303,6 +299,11 @@ onMounted(async () => {
   window.ipcRenderer.on('file-content-changed', onFileContentChanged)
   // 监听主题广播（主窗口切换主题后本窗口跟随）
   window.ipcRenderer.on('theme-changed', onThemeChanged)
+  // 主进程发现「该图表窗口已开着」时发来目标页：本窗口直接切页，不再重开窗口
+  window.ipcRenderer.on('file-window-set-page', (_e: any, payload: any) => {
+    const p = payload && payload.page != null ? String(payload.page) : ''
+    if (p) drawioPage.value = p
+  })
 
   // 独立窗口使用独立 store：打开时从 localStorage 同步最新模型来源配置，
   // 避免自定义推理等使用主窗口修改前保存的旧来源（导致请求 URL 无效）
@@ -320,6 +321,8 @@ onMounted(async () => {
   const rid = decodeURIComponent(params.get('rid') || '')
   const rel = decodeURIComponent(params.get('rel') || '')
   const remoteLabel = decodeURIComponent(params.get('label') || '') || null
+  // draw.io 图表：从 Markdown 内嵌图表点进来时要定位到的页（1 起的序号 / 页名）
+  drawioPage.value = params.get('page') || ''
   isRemoteFile.value = !!(rid && rel)
   remoteRootId.value = rid
   remoteRel.value = rel
@@ -428,9 +431,7 @@ onBeforeUnmount(() => {
           <option v-for="v in availableViews" :key="v" :value="v">{{ viewLabel(v) }}</option>
         </select>
       </div>
-      <div class="file-titlebar-title" :title="filePath">
-        <span class="file-titlebar-title-text">{{ titleText }}</span>
-      </div>
+      <div class="file-titlebar-title" :title="filePath">{{ titleText }}</div>
       <div class="file-titlebar-actions">
         <div @click="minimizeWindow" :title="store.locales=='zh'?'最小化':'Minimize'">
           <i class="fa fa-minus"></i>
@@ -456,7 +457,7 @@ onBeforeUnmount(() => {
     <!-- draw.io 图表：与 Excalidraw 同样接管全部视图类型（read 分支的 md_read 内部也会渲染 drawio，
          因此这里必须串成 else-if，否则会同时出现两份绘图界面） -->
     <div v-if="isDrawio" class="file-view">
-      <Drawio :path="filePath" :content="fileContent" :readonly="isRemoteFile" />
+      <Drawio :path="filePath" :content="fileContent" :readonly="isRemoteFile" :page="drawioPage" />
     </div>
     <div v-else-if="isExcalidraw" class="file-view">
       <Excalidraw :path="filePath" :content="fileContent" />
@@ -510,6 +511,7 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--menuColor) 96%, var(--borderColor));
   border-bottom: 1px solid var(--borderColor);
   user-select: none;
+  cursor: move;
   -webkit-app-region: drag;
 }
 .file-titlebar-title {
@@ -521,11 +523,9 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 文件名文本单独设 no-drag：标题栏是 drag 区（鼠标事件不下发到渲染进程），
-   只有可交互区域才能触发 title 悬停提示；标题栏其余空白仍是拖拽区。 */
-.file-titlebar-title-text {
-  -webkit-app-region: no-drag;
-}
+/* 文件名不单独设 no-drag：整条标题栏（含文件名）都是窗口拖动区。
+   代价是 Electron 下该区域鼠标事件由系统接管，文件名悬停不再弹完整路径提示
+   （浏览器 / 局域网模式没有拖动区，提示照常显示）。 */
 /* 视图类型切换器（位于标题文本左侧；标题栏为 drag 区，切换器需 no-drag 才能点击） */
 .file-view-switcher {
   flex-shrink: 0;

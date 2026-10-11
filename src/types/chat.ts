@@ -5,7 +5,7 @@
  * 供 home.vue 与各 composables（useChatSessions / useChatSend / ...）共用。
  */
 
-import type { DslDocument } from '@/workflow/dsl/types'
+import type { DslDocument } from '@/features/workflow/dsl/types'
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
 

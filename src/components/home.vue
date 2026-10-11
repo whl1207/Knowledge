@@ -370,12 +370,13 @@
                   <i v-else-if="unit.status === 'error'" class="fa fa-times-circle"></i>
                   <i v-else class="fa fa-clock-o"></i>
                 </span>
-                <!-- 网页文件的「打开」按钮：工具写入的是本地 .html/.htm 时，用内置浏览器打开 -->
+                <!-- 写入 / 改写的文件的「打开」按钮：默认打开方式与知识管理一致（multi_replace 多文件时每个文件一个按钮） -->
                 <span
-                  v-if="openableWebPagePath(unit)"
+                  v-for="(p, pi) in openableToolPaths(unit)"
+                  :key="'open' + pi"
                   class="tool-box-open"
-                  :title="store.locales=='zh' ? '用内置浏览器打开' : 'Open in built-in browser'"
-                  @click.stop="openWebPageInBrowser(unit)"
+                  :title="store.locales=='zh' ? `打开：${p}` : `Open: ${p}`"
+                  @click.stop="openToolWrittenFile(p)"
                 >
                   <i class="fa fa-external-link"></i>
                 </span>
@@ -1049,12 +1050,12 @@ import { retrieveKnowledge, resolveStrategyId } from '@/shared/kbRetrieval'
 import { buildEmbedFallbackFromStore } from '@/shared/kbAiClient'
 import { listSharedKbs, searchSharedKb, searchUploadedKbTexts } from '@/platform/lanKb'
 import { getEnabledStrategies, setUserStrategies } from '@/shared/graphrag/strategy'
-import { WorkflowChatRunner, type ChatWorkflowCallbacks } from '@/workflow/chatRunner'
-import { parseDslYaml } from '@/workflow/dsl/codec'
-import { validateAndNormalizeDsl } from '@/workflow/dsl/validator'
-import { createFlowT } from '@/workflow/ui/locales'
+import { WorkflowChatRunner, type ChatWorkflowCallbacks } from '@/features/workflow/chatRunner'
+import { parseDslYaml } from '@/features/workflow/dsl/codec'
+import { validateAndNormalizeDsl } from '@/features/workflow/dsl/validator'
+import { createFlowT } from '@/features/workflow/ui/locales'
 import { isFlowDslPath } from '@/shared/flowFile'
-import type { DslDocument } from '@/workflow/dsl/types'
+import type { DslDocument } from '@/features/workflow/dsl/types'
 import { hashContent, renderMermaidSvgLenient, getCachedSvgLenient, clearMermaidCache, ensureMermaidInit } from '@/lib/markdown/mermaid'
 import MermaidViewer from '@/components/MermaidViewer.vue'
 import WordExportDialog from '@/components/export/WordExportDialog.vue'
@@ -1079,6 +1080,8 @@ import { chatHistoryForRequest, compactChat, shouldCompactChat } from '@/lib/age
 import { isContextOverflowError } from '@/shared/contextBudget'
 // PTC（Code Mode）：run_code 输出解析（返回值 / console 日志 / 程序内调用的工具）
 import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/agent/ptc'
+// 工作区根目录：与智能体工具的相对路径锚点（AgentOptions.cwd）保持同一来源
+import { workspaceRoot } from '@/lib/agent/promptContext'
 import type { EditDiffFilePreview } from '@/shared/editDiff'
 import type { ChatMode, RelevantBlock, ExecutionUnit, WorkflowUnit, UploadItem, ChatMessage, ChatConfig, Chat, RetrievalStats } from '@/types/chat'
 import { useChatModels } from '@/composables/useChatModels'
@@ -2879,39 +2882,55 @@ const getWriteFilePath = (unit: any): string => {
   return typeof args?.path === 'string' ? args.path : ''
 }
 
-/** 工具卡片「打开」按钮：写入 / 改写的是本地网页（.html / .htm）时给出路径，否则返回 '' */
-const openableWebPagePath = (unit: any): string => {
+/** 工具写入 / 改写的文件路径（写入成功才有；write_file / replace_in_file 取 path，multi_replace 取每条替换的 path，export_word 取结果里的输出路径） */
+const openableToolPaths = (unit: any): string[] => {
   const n = String(unit?.description || '')
-  if (n !== 'write_file' && n !== 'replace_in_file' && n !== 'multi_replace') return ''
-  if (unit?.status && unit.status !== 'success') return ''
-  const p = getWriteFilePath(unit)
-  if (!p) return ''
-  const low = p.split('?')[0].toLowerCase()
-  return (low.endsWith('.html') || low.endsWith('.htm')) ? p : ''
+  const WRITE_TOOLS = ['write_file', 'replace_in_file', 'multi_replace', 'export_word']
+  if (!WRITE_TOOLS.includes(n)) return []
+  if (unit?.status && unit.status !== 'success') return []
+  const out: string[] = []
+  const push = (p: any) => {
+    const s = String(p ?? '').trim()
+    if (s && !out.includes(s)) out.push(s)
+  }
+  // 导出 Word：输出路径在工具结果里（可能是系统下载目录的绝对路径）
+  if (n === 'export_word') {
+    push(unit?.result?.path)
+    return out
+  }
+  const args = unit?.args
+  if (!args) return out
+  if (typeof args === 'string') {
+    // 流式未闭合 JSON：从原文提取首个 path（避免文件内容里的 "path" 被误当作目标文件）
+    push(extractStreamedJsonField(args, 'path'))
+    return out
+  }
+  if (Array.isArray(args.replacements)) for (const r of args.replacements) push(r?.path)
+  push(args.path)
+  return out
 }
 
 /** 工具给的是相对路径时，按工作区根目录补成绝对路径（内置浏览器只接受绝对路径） */
 const toAbsoluteToolPath = (p: string): string => {
   if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/') || p.startsWith('\\\\')) return p
-  const root = (store.roots && store.roots[0]) || store.root || ''
+  // 必须用「当前工作区」而非 roots[0]：与工具 cwd（workspaceRoot）一致，
+  // 否则多工作区时会把相对路径拼到另一个工作区上，导致打开不存在的文件
+  const root = workspaceRoot(store) || (store.roots && store.roots[0]) || ''
   if (!root) return p
   return `${String(root).replace(/[\\/]+$/, '')}/${p.replace(/^[\\/]+/, '')}`
 }
 
-/** 用内置浏览器打开工具写入的网页（与知识管理里双击 html 的行为一致） */
-const openWebPageInBrowser = async (unit: any) => {
-  const p = openableWebPagePath(unit)
+/**
+ * 打开工具写入 / 改写的文件：与知识管理「打开」走同一套默认方式
+ * （应用内独立窗口 + 对应视图；本地 .html/.htm 用内置浏览器；不支持应用内打开的交给系统默认应用）。
+ */
+const openToolWrittenFile = (p: string) => {
   if (!p) return
   if (!window.ipcRenderer) {
     ElMessage.warning(store.locales == 'zh' ? '浏览器模式下无法打开本地文件' : 'Cannot open local files in browser mode')
     return
   }
-  try {
-    const r = await window.ipcRenderer.invoke('browser-agent:open-file', { path: toAbsoluteToolPath(p) })
-    if (r && r.ok === false) throw new Error(r.error || '打开失败')
-  } catch (e: any) {
-    ElMessage.error(store.locales == 'zh' ? `打开失败：${e?.message || e}` : `Open failed: ${e?.message || e}`)
-  }
+  store.openFileByMode({ path: toAbsoluteToolPath(p), type: 'file' })
 }
 
 /** 根据 write_file 目标路径的扩展名推断代码语言（highlight.js） */
