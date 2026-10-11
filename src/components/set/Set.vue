@@ -14,6 +14,13 @@ import SearchSettings from '@/components/set/SearchSettings.vue'
 import TtsSettings from '@/components/set/TtsSettings.vue'
 import AsrSettings from '@/components/set/AsrSettings.vue'
 import ToolRegistryPanel from '@/components/set/ToolRegistryPanel.vue'
+import PluginManagement from '@/components/set/PluginManagement.vue'
+import PluginStorePanel from '@/components/set/PluginStorePanel.vue'
+import PluginDevPanel from '@/components/set/PluginDevPanel.vue'
+import PluginSlot from '@/components/plugin/PluginSlot.vue'
+import { useAllSlotEntries } from '@/lib/plugin/useSlots'
+import { SETTINGS_CARD_SLOT, SETTINGS_TAB_SLOT } from '@/lib/plugin/coreSlots'
+import { SLOT_META_GROUP } from '@/shared/pluginSlots'
 import BrowserSettingsPanel from '@/components/browser/BrowserSettingsPanel.vue'
 import AgentConsole from '@/components/set/AgentConsole.vue'
 import SessionLogPanel from '@/components/set/SessionLogPanel.vue'
@@ -104,6 +111,18 @@ const navTree = ref<NavItem[]>([
     ]
   },
   {
+    // 插件（一级分组）：管理（本地插件启停 / 安装 / 详情）→ 商店（在线分发入口，P2 预留占位）→ 开发（把指令粘给大模型就能写插件）
+    id: 'plugin-group',
+    icon: 'fa fa-puzzle-piece',
+    title_zh: '插件',
+    title_en: 'Plugins',
+    children: [
+      { id: 'plugin', icon: 'fa fa-puzzle-piece', title_zh: '管理', title_en: 'Manage' },
+      { id: 'plugin-store', icon: 'fa fa-shopping-cart', title_zh: '商店', title_en: 'Store' },
+      { id: 'plugin-dev', icon: 'fa fa-code', title_zh: '开发', title_en: 'Develop' }
+    ]
+  },
+  {
     id: 'skill-group',
     icon: 'fa fa-superpowers',
     title_zh: '技能',
@@ -133,9 +152,56 @@ const activeNav = ref('view')
 // 已展开的一级分组（默认只展开激活项所在分组；手风琴式：一次只展开一个，避免导航栏过长）
 const expandedGroups = ref<Set<string>>(new Set(['base-group']))
 
+/**
+ * 插件贡献的设置页签（settings.tab 槽位）。
+ * - 内置页签保持原 navTree 不变（零回归）；
+ * - 插件条目按 `meta.group` 归入设置分组：默认归到内置的「插件」分组（id = plugin-group），
+ *   也可指定其它分组 id（如 'base-group' = 通用、'service-group' = 工具）；
+ * - 内容由右侧的 <PluginSlot name="settings.tab" :owner="activeNav"> 渲染。
+ */
+const extraSettingTabs = useAllSlotEntries(SETTINGS_TAB_SLOT)
+/** 插件条目默认归入的分组（内置「插件」分组的 id） */
+const PLUGIN_TAB_DEFAULT_GROUP = 'plugin-group'
+
+const navTreeAll = computed<NavItem[]>(() => {
+  const builtin = navTree.value
+  const additions = new Map<string, NavItem[]>()
+  for (const def of extraSettingTabs.value) {
+    const groupId = String(def.meta?.[SLOT_META_GROUP] ?? PLUGIN_TAB_DEFAULT_GROUP)
+    if (!additions.has(groupId)) additions.set(groupId, [])
+    const zhTitle = def.titleZh || def.key
+    additions.get(groupId)!.push({
+      id: def.key,
+      icon: def.icon || 'fa fa-puzzle-piece',
+      title_zh: zhTitle,
+      title_en: def.titleEn || zhTitle,
+    })
+  }
+  if (!additions.size) return builtin
+
+  const out: NavItem[] = []
+  const consumed = new Set<string>()
+  for (const group of builtin) {
+    const extra = additions.get(group.id)
+    if (!extra) {
+      out.push(group)
+      continue
+    }
+    // 指定已存在的分组 → 并入其子项（而不是新建分组，否则会出现两个同名分组）
+    consumed.add(group.id)
+    out.push({ ...group, children: [...(group.children ?? []), ...extra] })
+  }
+  // 剩余 id 不在内置分组里 → 新建分组（标题统一用「插件」，图标同插件页）
+  for (const [groupId, children] of additions) {
+    if (consumed.has(groupId)) continue
+    out.push({ id: groupId, icon: 'fa fa-puzzle-piece', title_zh: '插件', title_en: 'Plugins', children })
+  }
+  return out
+})
+
 // 根据二级子项 id 找到其所属的一级分组 id
 const findGroupByChild = (childId: string): string | undefined => {
-  return navTree.value.find(g => g.children?.some(c => c.id === childId))?.id
+  return navTreeAll.value.find(g => g.children?.some(c => c.id === childId))?.id
 }
 
 // 支持从 AgentSwarm 等模块跳转到指定设置模块
@@ -949,7 +1015,7 @@ onBeforeUnmount(() => {
     <!-- 左侧导航栏 -->
     <div class="settings-container">
     <div class="settings-nav scoll">
-      <template v-for="item in navTree" :key="item.id">
+      <template v-for="item in navTreeAll" :key="item.id">
         <!-- 一级分组（可折叠，含二级子项） -->
         <div v-if="item.children && item.children.length" class="nav-group">
           <div class="nav-group-header" @click="toggleGroup(item.id)" :title="getTitle(item)">
@@ -1509,6 +1575,27 @@ onBeforeUnmount(() => {
       <div v-if="activeNav === 'credentials'" class="settings-section">
         <CredentialsPanel />
       </div>
+
+      <!-- 插件（P0/P2 主进程插件宿主：发现 / 安装 / 启停 / 重载 / 日志 / 配置 / 详情 / 目录选择） -->
+      <div v-if="activeNav === 'plugin'" class="settings-section tool-section">
+        <PluginManagement />
+      </div>
+
+      <!-- 插件商店（P2 预留占位：在线分发通道后续版本提供，当前只说明本地安装方式） -->
+      <div v-if="activeNav === 'plugin-store'" class="settings-section">
+        <PluginStorePanel />
+      </div>
+
+      <!-- 插件开发（把可复制的指令粘给大模型即可写插件；含清单 / 槽位 / API 速查与排障提示词） -->
+      <div v-if="activeNav === 'plugin-dev'" class="settings-section">
+        <PluginDevPanel />
+      </div>
+
+      <!-- 插件贡献的设置页签（settings.tab 槽位；keyed 按 activeNav 分派） -->
+      <PluginSlot :name="SETTINGS_TAB_SLOT" :owner="activeNav" />
+
+      <!-- 插件贡献的设置卡片（settings.card 槽位；list + meta.target 归属到具体设置页） -->
+      <PluginSlot :name="SETTINGS_CARD_SLOT" :owner="activeNav" />
     </div>
     </div>
   </div>

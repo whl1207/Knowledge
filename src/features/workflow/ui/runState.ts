@@ -69,6 +69,69 @@ export const RUN_STATE_KEY: InjectionKey<Ref<RunUiState>> = Symbol('ai-km-run-st
 /** 画布是否不可编辑（readonly 或已锁定）：节点卡片据此隐藏交互手柄 */
 export const EDITOR_LOCK_KEY: InjectionKey<ComputedRef<boolean>> = Symbol('ai-km-editor-locked')
 
+/**
+ * 调试运行接口（属性面板「试跑此节点 / 运行此节点及下游」用）：
+ * 由编辑器 provide，属性面板 inject 后即可在任意节点上触发单节点试跑。
+ */
+export interface DebugRunActions {
+  /** 该节点此刻能否试跑（只读 / 运行中 / 容器内部节点 / 开始结束等返回 false） */
+  canRun: (nodeId: string) => boolean
+  /** 是否正在运行（按钮禁用用；函数式读取以便模板保持响应式） */
+  isRunning: () => boolean
+  /** 试跑：downstream=true 时连同下游节点一起跑（复用变量检查器里缓存的上游值） */
+  run: (nodeId: string, downstream: boolean) => void
+}
+
+export const DEBUG_RUN_KEY: InjectionKey<DebugRunActions> = Symbol('ai-km-debug-run')
+
+// ---------------------------------------------------------------------------
+// 变量检查器的纯逻辑（与 Vue 无关，便于单独核对）
+// ---------------------------------------------------------------------------
+
+/** 变量值 → 编辑框文本：字符串原样，其余按 JSON 展示 */
+export function varTextOf(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * 编辑框文本 → 变量值：按**原值类型**还原（数字 / 布尔 / 对象数组），
+ * 这样改一个数字不会变成字符串。对象类解析失败时抛错，由面板就地提示（不落值）。
+ */
+export function parseVarText(original: unknown, text: string): unknown {
+  const trimmed = text.trim()
+  if (typeof original === 'number') {
+    const num = Number(trimmed)
+    return Number.isFinite(num) ? num : text
+  }
+  if (typeof original === 'boolean') return trimmed === 'true'
+  if (original !== null && typeof original === 'object') return JSON.parse(trimmed || 'null')
+  return text
+}
+
+/** 变量检查器可见的变量：运行缓存 ∪ 手动编辑（编辑优先） */
+export function mergeVarSnapshot(
+  cache: Record<string, Record<string, unknown>>,
+  edits: Record<string, Record<string, unknown>>,
+): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {}
+  for (const nodeId of new Set([...Object.keys(cache), ...Object.keys(edits)])) {
+    out[nodeId] = { ...(cache[nodeId] ?? {}), ...(edits[nodeId] ?? {}) }
+  }
+  return out
+}
+
+/** 不参与单节点试跑的节点类型：开始 / 结束 / 直接回复 / 容器入口（与 Dify 一致） */
+export const NON_DEBUG_TYPES = ['start', 'end', 'answer', 'iteration-start', 'loop-start', 'loop-end']
+
+export function isDebuggableType(type: string): boolean {
+  return !NON_DEBUG_TYPES.includes(type)
+}
+
 export interface RunEventLogUpdate {
   state: RunUiState
   nextLogId: number
@@ -81,11 +144,12 @@ export function applyRunEvent(update: RunEventLogUpdate, event: RunEvent): void 
     case 'run-start':
       state.status = 'running'
       state.running = true
-      state.records = {}
       state.logs = []
       state.outputs = {}
       state.error = undefined
       state.elapsedMs = undefined
+      // records 不清空：每次运行只覆盖本次跑到的节点，其余节点保留「上次结果」
+      // （与 Dify 一致；这是单节点试跑能用的前提——否则一跑就把整棵追踪树清掉）
       pushLog(update, 'info', `开始运行，共 ${event.nodeCount} 个节点`)
       break
     case 'run-success':
@@ -127,6 +191,8 @@ export function applyRunEvent(update: RunEventLogUpdate, event: RunEvent): void 
         ...(state.records[event.nodeId] ?? { nodeId: event.nodeId, nodeType: '', title: '' }),
         status: 'error',
         error: event.error,
+        // 「默认值」策略兜底时带输出：照常展示本节点产出的变量
+        outputs: event.outputs ?? state.records[event.nodeId]?.outputs,
         finishedAt: Date.now(),
         elapsedMs: event.elapsedMs,
       })
@@ -190,8 +256,7 @@ export function buildTraceRows(document: DslDocument | null, records: Record<str
   return rows
 }
 
-/** 把运行记录写回节点的 `x-ai-km`（保存前调用，结果随文件持久化） */
-export function mergeRunStateIntoNodes(nodes: DslNode[], state: RunUiState): void {
+/** 把运行记录写回节点的 `x-ai-km`（保存前调用，结果随文件持久化） */export function mergeRunStateIntoNodes(nodes: DslNode[], state: RunUiState): void {
   for (const node of nodes) {
     const record = state.records[node.id]
     if (!record) continue

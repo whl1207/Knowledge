@@ -18,6 +18,8 @@ import { SKILL_AGENT_DEFAULT_TOOLS } from '@/lib/agent/skill'
 import { assembleAgentSystemPrompt, ensureAgentSkills, workspaceRoot } from '@/lib/agent/promptContext'
 import { getSkillManager } from '@/services/agentSkills'
 import { toolsFromCapabilities } from '@/lib/agent/capabilities'
+import { applyToolPresentation } from '@/lib/agent/presentation'
+import { presetPresentation } from '@/lib/agent/ptc'
 import { normalizeAgentMaxSteps, resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
 import { resolveLlmSource, normalizeLlmType } from '@/shared/llmSources'
 import { renderTemplate, buildStructuredOutputInstruction } from './render'
@@ -153,11 +155,19 @@ export async function buildBatchAgentOptions(row: BatchRow, config: BatchConfig,
       model: effModel || undefined,
       provider: effLlmType || undefined,
     })
+    // 呈现方式（预设声明）：'ptc' → 只暴露 run_code + 叠加 tools:sdk 段
+    const presented = await applyToolPresentation({
+      basePrompt: assembled.systemPrompt,
+      catalog: assembled.tools,
+      presentation: presetPresentation(preset),
+      scope: 'batch',
+    })
     return {
       ...base,
       cwd: assembled.cwd,
-      systemPrompt: assembled.systemPrompt,
-      tools: assembled.tools,
+      systemPrompt: presented.systemPrompt,
+      tools: presented.tools,
+      toolsPresentation: presented.toolsPresentation,
       ...provider,
       kbPaths: caps.knowledgeBaseFiles || [],
       kbTopK: typeof preset.kbTopK === 'number' ? preset.kbTopK : 5,

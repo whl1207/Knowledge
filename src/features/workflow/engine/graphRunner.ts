@@ -149,6 +149,27 @@ export async function executeGraph(params: GraphExecuteParams): Promise<GraphExe
       }
       return false
     }
+    if (strategy === 'default-value') {
+      // 默认值兜底（对齐 Dify）：把 default_value 当作本节点输出写进变量池，按正常连线继续往下跑
+      const fallback = (node.data as Record<string, unknown>).default_value
+      const outputs = fallback && typeof fallback === 'object' && !Array.isArray(fallback)
+        ? { ...(fallback as Record<string, unknown>) }
+        : {}
+      record.outputs = outputs
+      pool.setNodeOutputs(node.id, outputs)
+      const names = Object.keys(outputs)
+      emit({
+        type: 'log',
+        level: 'warning',
+        message: names.length
+          ? `${record.title} 失败（${message}），已使用默认值继续：${names.join('、')}`
+          : `${record.title} 失败（${message}），已按空默认值继续（节点未配置默认值）`,
+      })
+      for (const edgeRef of outgoing.get(node.id) ?? []) {
+        resolveEdge(edgeRef.edge, (edgeRef.edge.sourceHandle || 'source') === 'source')
+      }
+      return false
+    }
     if (strategy === 'continue-on-error' || strategy === 'remove-abnormal-output') {
       emit({ type: 'log', level: 'warning', message: `${record.title} 失败但继续执行：${message}` })
       skipDownstream(node.id)
@@ -255,8 +276,9 @@ export async function executeGraph(params: GraphExecuteParams): Promise<GraphExe
     const executor = getExecutor(String(node.data.type))
     if (!executor) {
       const message = `节点类型「${node.data.title || node.data.type}」暂不支持执行`
-      emit({ type: 'node-error', nodeId, error: message, elapsedMs: 0 })
-      if (handleNodeFailure(node, record, message)) {
+      const terminate = handleNodeFailure(node, record, message)
+      emit({ type: 'node-error', nodeId, error: message, elapsedMs: 0, outputs: record.outputs })
+      if (terminate) {
         failure = message
         break
       }
@@ -290,8 +312,11 @@ export async function executeGraph(params: GraphExecuteParams): Promise<GraphExe
       })
     } catch (error) {
       const message = (error as Error)?.message || String(error)
-      emit({ type: 'node-error', nodeId, error: message, elapsedMs: Date.now() - (record.startedAt ?? Date.now()) })
-      if (handleNodeFailure(node, record, message)) {
+      const elapsedMs = Date.now() - (record.startedAt ?? Date.now())
+      const terminate = handleNodeFailure(node, record, message)
+      // 失败事件放在错误策略处理之后：默认值兜底时 record.outputs 已填好，面板照常能看到变量
+      emit({ type: 'node-error', nodeId, error: message, elapsedMs, outputs: record.outputs })
+      if (terminate) {
         failure = message
         break
       }

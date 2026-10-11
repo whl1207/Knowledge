@@ -59,6 +59,9 @@ export type ToolName = Brand<string, 'ToolName'>
 /** Agent id（agent 循环的活跃实例标识） */
 export type AgentId = Brand<string, 'AgentId'>
 
+/** 插件 id（kebab-case，与插件目录名一致；工具 scope 形如 `plugin:<id>`） */
+export type PluginId = Brand<string, 'PluginId'>
+
 // ---------------------------------------------------------------------------
 // 常用校验
 // ---------------------------------------------------------------------------
@@ -71,4 +74,12 @@ export function isValidSkillName(name: string): boolean {
 /** 工具名必须为 snake_case（`^[a-z][a-z0-9_]*$`） */
 export function isValidToolName(name: string): boolean {
   return /^[a-z][a-z0-9_]*$/.test(name)
+}
+
+/**
+ * 插件 id 必须以小写字母/数字开头，仅含 `[a-z0-9._-]`。
+ * 同时用作目录名，故必须排除 `.` / `..` / 路径分隔符（首字符限定为字母数字即满足）。
+ */
+export function isValidPluginId(id: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]*$/.test(id)
 }

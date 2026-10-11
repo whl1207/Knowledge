@@ -63,8 +63,7 @@
               'chat-workflow': element.chat.mode === 'workflow',
               'chat-agent': element.chat.mode === 'agent',
               'chat-agent2': element.chat.mode === 'agent2',
-              'chat-swarm': element.chat.mode === 'swarm',
-              'chat-code': element.chat.mode === 'code'
+              'chat-swarm': element.chat.mode === 'swarm'
             }"
             @click="switchChat(element.originalIndex)"
             @contextmenu.prevent="onSidebarContextMenu($event, element.originalIndex)"
@@ -89,9 +88,6 @@
                   </div>
                   <div v-else-if="element.chat.mode === 'swarm'" class="mode-icon" title="集群（多智能体协作）">
                     <i class="fa fa-users"></i>
-                  </div>
-                  <div v-else-if="element.chat.mode === 'code'" class="mode-icon" :title="store.locales=='zh' ? 'PTC（程序化工具调用）' : 'PTC (programmatic tool call)'">
-                    <i class="fa fa-code"></i>
                   </div>
                   {{ element.chat.title || `聊天 ${element.originalIndex + 1}` }}
                 </span>
@@ -119,8 +115,8 @@
     <!-- 主聊天区域 -->
     <div class="chat-main" :class="{ 'sidebar-hidden': !showSidebar, 'empty-chat': isEmptyChat && !isTeamChat }"
       :style="{ '--composer-shift': composerShift + 'px' }">
-      <!-- 聊天头部 -->
-      <div class="chat-header" ref="chatHeaderRef" @wheel="handleHeaderWheel">
+      <!-- 聊天头部（项目组模式改用 SwarmTeamStream 顶栏：开关 + 标题与页签同排一行） -->
+      <div v-if="!isTeamChat" class="chat-header" ref="chatHeaderRef" @wheel="handleHeaderWheel">
         <!-- 聊天列表开关（fa-bars）：纯图标（不用按钮盒子样式），初始不显示聊天列表，点这里展开 / 收起 -->
         <div class="sidebar-toggle-btn" @click="toggleSidebar"
           :title="showSidebar
@@ -197,7 +193,8 @@
       
       <!-- 消息区域 -->
       <div 
-        class="message-container scoll" 
+        class="message-container scoll"
+        :class="{ 'is-team': isTeamChat }"
         id="messageContainer" 
         ref="messageContainer"
         @wheel="handleWheel"
@@ -205,7 +202,24 @@
         @contextmenu.prevent="onMessageContextMenu"
       >
         <!-- Agent Teams（项目组）：独立消息栏；下方发送栏为共用控件 -->
-        <SwarmTeamStream v-if="isTeamChat" :chat="currentChat" />
+        <SwarmTeamStream v-if="isTeamChat" :chat="currentChat">
+          <!-- 顶栏左侧：聊天列表开关 + 聊天名称（原 chat-header 的两项，与工作台页签合并为一行） -->
+          <template #head-left>
+            <div class="sidebar-toggle-btn" @click="toggleSidebar"
+              :title="showSidebar
+                ? (store.locales=='zh' ? '隐藏聊天列表' : 'Hide chat list')
+                : (store.locales=='zh' ? '显示聊天列表' : 'Show chat list')">
+              <i class="fa fa-bars"></i>
+            </div>
+            <input
+              v-if="!isEmptyChat"
+              v-model="currentChat.title"
+              :placeholder="store.locales=='zh' ? '输入聊天标题...' : 'Enter Chat Title...'"
+              class="chat-title-input"
+              @change="saveChats"
+            />
+          </template>
+        </SwarmTeamStream>
         <!-- 合并的消息显示（集群模式的成员汇报同为 chat.messages 消息，共用同一渲染） -->
         <div 
           v-if="!isTeamChat"
@@ -744,18 +758,6 @@
                 <span class="mode-linked-name">{{ currentAgentLabel }}</span>
               </span>
 
-              <!-- PTC 模式：只读说明胶囊（无可配置项；步数跟随「设置 → 智能体预设 → 通用智能体」） -->
-              <span
-                v-if="currentChat.mode === 'code'"
-                class="mode-linked-chip mode-chip-static"
-                :title="store.locales=='zh'
-                  ? 'PTC（程序化工具调用）：模型不逐个调用工具，而是写一段 TypeScript 程序经 run_code 组合调用工具；最大执行步数跟随「设置 → 智能体预设 → 通用智能体」的循环轮数'
-                  : 'PTC (programmatic tool call): instead of calling tools one by one the model writes a TypeScript program that calls them through run_code. Max steps follows Settings → Agent → Presets → General Agent.'"
-              >
-                <i class="fa fa-code"></i>
-                <span class="mode-linked-name">{{ store.locales=='zh' ? '程序化调用 run_code' : 'Programmatic (run_code)' }}</span>
-              </span>
-
               <!-- 集群模式：仅成员选择入口（勾选顺序即发言顺序）——运行方式已拆成右侧独立下拉 -->
               <span
                 v-if="currentChat.mode === 'swarm'"
@@ -1061,6 +1063,7 @@ import MermaidViewer from '@/components/MermaidViewer.vue'
 import WordExportDialog from '@/components/export/WordExportDialog.vue'
 import { AIUtils } from '@/services/ai-utils'
 import { deepSeekStyleOf, normalizeLlmType, resolveLlmSource } from '@/shared/llmSources'
+import { BUILTIN_AGENT_PRESET_IDS, builtinPresetDefaultsFromStore, ensureBuiltinAgentPresets } from '@/shared/builtinAgentPresets'
 import {
   estimateChatContextTokens,
   resolveContextLimit,
@@ -1532,8 +1535,6 @@ const emptyChatHintSub = computed(() => {
       return zh ? '交给通用智能体：自主规划并调用工具完成' : 'Hand it to the general agent: it plans and uses tools autonomously'
     case 'swarm':
       return zh ? '多智能体集群：拆解任务、分工协作完成' : 'Swarm: several agents split up and complete the work'
-    case 'code':
-      return zh ? 'PTC 模式：写一段程序组合多步工具调用' : 'PTC mode: write a program that chains several tool calls'
     default:
       return zh
         ? '直接提问，或上传 / 拖入文件、图片一起分析；也可切换下方模式做知识库检索、跑工作流或交给智能体'
@@ -1647,7 +1648,7 @@ const showStopButton = computed(() => {
 })
 
 /**
- * 当前聊天是否处于「运行中引导」状态：智能体（智能体/预设/PTC/技能）或集群成员正在执行时，
+ * 当前聊天是否处于「运行中引导」状态：智能体（智能体 / 预设（含 PTC）/ 技能）或集群成员正在执行时，
  * 输入框不锁死——用户可继续输入要求，Enter 即为**引导**（steer）：
  * 不打断当前执行，投递到智能体下一个 step 边界生效（对齐主流 agent 客户端）。
  */
@@ -2207,10 +2208,6 @@ const getInputPlaceholder = (): string => {
       return store.locales == 'zh'
         ? '向集群派发任务，@成员名可点名... (Enter发送，Shift+Enter换行)'
         : 'Dispatch a task to the swarm; @member to name one... (Enter to send, Shift+Enter for new line)';
-    case 'code':
-      return store.locales == 'zh'
-        ? '描述需求，AI 将写程序调用工具完成... (Enter发送，Shift+Enter换行)'
-        : 'Describe the task; the AI writes a program calling tools... (Enter to send, Shift+Enter for new line)';
     case 'workflow':
     case 'retrieval':
       return store.locales == 'zh'
@@ -2251,7 +2248,6 @@ const getSendButtonTitle = (): string => {
     case 'skill':
     case 'agent2':
     case 'agent':
-    case 'code':
       return store.locales == 'zh' ? '执行智能体任务 (Enter)' : 'Run Agent task (Enter)'
     case 'workflow':
       return 'Run workflow (Enter)'
@@ -3889,8 +3885,6 @@ const modeOptions = computed(() => {
     { value: 'workflow', label: isZh ? '工作流' : 'Workflow' },
     // 技能模式已并入「智能体」：输入 $技能名 或「技能列表/help」自动识别
     { value: 'agent', label: isZh ? '智能体' : 'Agent' },
-    // PTC（程序化工具调用 / Code Mode）：模型写 TS 程序，经 run_code 调用工具
-    { value: 'code', label: 'PTC' },
     // 集群：多 Agent 预设协作（成员 = 预设引用，改预设即改成员）
     { value: 'swarm', label: isZh ? '集群' : 'Swarm' }
   ]
@@ -4037,23 +4031,6 @@ const onModeSelect = async (event: Event) => {
         ElMessage.warning(store.locales == 'zh' ? '智能体模式需要桌面版（window.dsh.agent 不可用）' : 'Agent mode requires the desktop app (window.dsh.agent unavailable)')
       } else if (!isBrowser && store.skillsPath) {
         // 预热技能目录（供 $技能名 / 技能列表 / help 自动识别）
-        void loadSkills(false)
-      }
-      break
-    }
-    case 'code': {
-      // PTC（程序化工具调用）：工具呈现坍缩为 run_code（模型写程序调用工具）；步数沿用通用智能体设置
-      chat.mode = 'code'
-      chat.config.kbPath = undefined
-      chat.config.workflowPath = undefined
-      chat.config.workflowData = undefined
-      chat.config.presetId = undefined
-      workflowError.value = false
-      saveChats()
-      if (!window.dsh?.agent) {
-        ElMessage.warning(store.locales == 'zh' ? 'PTC 模式需要桌面版（window.dsh.agent 不可用）' : 'PTC mode requires the desktop app (window.dsh.agent unavailable)')
-      } else if (store.skillsPath) {
-        // 预热技能目录（技能清单进系统提示）
         void loadSkills(false)
       }
       break
@@ -4523,6 +4500,17 @@ const loadChatsFromStorage = () => {
         // 技能模式已并入「智能体」：旧存档的 mode='skill' 一律迁移到 agent2
         if (chat.mode === 'skill') {
           chat.mode = 'agent2'
+        }
+
+        // 主页「PTC」模式已下线（改为内置「PTC 智能体」预设）：
+        // 旧存档的 mode='code' 迁移为「智能体 + PTC 智能体」，能力目录随之改用预设自己的工具集
+        if (chat.mode === 'code') {
+          chat.mode = 'agent'
+          chat.config.presetId = BUILTIN_AGENT_PRESET_IDS.ptc
+          // 迁移可能早于 store.loadConfig（首页挂载先于主窗口配置加载）：这里兜底注入内置预设
+          if (ensureBuiltinAgentPresets(store.agentPresets, builtinPresetDefaultsFromStore(store))) {
+            store.saveConfig()
+          }
         }
 
         // DeepSeek 单来源迁移：旧聊天绑定的历史别名 'deepseek-responses' → 'deepseek'
@@ -5112,9 +5100,6 @@ const sendMessage = async () => {
       if (isBrowser) await handleBrowserAgentMode(message)
       else await handleAgentMode(message)
       break
-    case 'code':
-      await handlePtcMode(message)
-      break
     case 'workflow':
       await runWorkflow(message)
       break
@@ -5134,7 +5119,6 @@ const {
   startAgentSessionInChat,
   handleAgentLoopMode,
   handleAgentPresetMode,
-  handlePtcMode,
   handleBrowserAgentMode,
   steerRunningAgents,
   reconcileAgentRuns,
@@ -8426,11 +8410,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   color: #2d8cf0;
 }
 
-/* PTC 模式（code）：程序化工具调用，使用青色区分 */
-.chat-item.chat-code .mode-icon {
-  color: #00bcd4;
-}
-
 /* Agent 预设选择浮层 */
 .agent-preset-picker {
   position: absolute;
@@ -8619,18 +8598,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   color: #e74c3c;
 }
 
-/* PTC 模式的只读说明胶囊：仅展示（无可配置项），不作出可点击的暗示 */
-.mode-linked-chip.mode-chip-static {
-  cursor: default;
-  color: #00bcd4;
-  border-color: rgba(0, 188, 212, 0.45);
-  max-width: 150px;
-}
-.mode-linked-chip.mode-chip-static:hover {
-  border-color: rgba(0, 188, 212, 0.45);
-  color: #00bcd4;
-}
-
 .mode-linked-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8785,6 +8752,13 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   min-width: 100px;
 }
 
+/* 集群「项目组」顶栏：标题与工作台页签同排，宽度不足时标题优先收缩（否则会盖住页签） */
+.st-title .chat-title-input {
+  flex: 1 1 auto;
+  width: 0;
+  min-width: 0;
+}
+
 .model-select {
   max-width: 150px;
   flex: 1;
@@ -8820,16 +8794,20 @@ select {
 .message-container {
   flex: 1;
   overflow-y: auto;
-  /* 底部留白：最后一条消息与下方输入卡片之间保留间距，不贴边 */
+  /* 留白：左右不贴边，底部与下方输入卡片保留间距 */
   padding: 5px 5px 8px;
   display: flex;
   flex-direction: column;
   gap: 5px;
   min-height: 0;
 }
+/* 集群「项目组」：顶栏与消息流自带内边距且需要贴边，容器不再留白（否则边界出现双份空隙） */
+.message-container.is-team {
+  padding: 0;
+}
 
-/* 聊天头部左侧的聊天列表开关（fa-bars）：纯图标，不加按钮边框/底色 */
-.chat-header .sidebar-toggle-btn {
+/* 聊天列表开关（fa-bars，chat-header 或项目组顶栏）：纯图标，不加按钮边框/底色 */
+.sidebar-toggle-btn {
   margin: 0 2px 0 0;
   padding: 0;
   width: 26px;
@@ -8847,7 +8825,7 @@ select {
   -webkit-app-region: no-drag;
   transition: background-color .15s ease, color .15s ease;
 }
-.chat-header .sidebar-toggle-btn:hover {
+.sidebar-toggle-btn:hover {
   background-color: var(--menuActiveColor);
   color: var(--fontActiveColor);
 }

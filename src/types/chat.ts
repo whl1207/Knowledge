@@ -10,7 +10,7 @@ import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
 
 /** 聊天模式（每条聊天独立）
- *  code = PTC（程序化工具调用 / Code Mode）：工具呈现坍缩为单个 run_code，模型写程序调用工具 */
+ *  code = 旧「主页 PTC 模式」（已下线，存档载入时迁移为 agent + 内置「PTC 智能体」预设，见 home.vue loadChatsFromStorage） */
 export type ChatMode = 'normal' | 'retrieval' | 'workflow' | 'skill' | 'agent' | 'agent2' | 'swarm' | 'code'
 
 /** 知识库相关片段（检索结果展示） */

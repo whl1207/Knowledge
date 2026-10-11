@@ -42,9 +42,43 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'skills', tools: ['skill'] },
 ]
 
-/** 能力槽 → 该槽位工具列表（供 UI 逐槽展示；未知槽位返回空数组） */
+/**
+ * 能力槽 → 该槽位工具列表（供 UI 逐槽展示；未知槽位返回空数组）
+ */
 export const slotToolsOf = (key: string): string[] =>
   CAPABILITY_TOOL_SLOTS.find((s) => s.key === key)?.tools || []
+
+// ---------------------------------------------------------------------------
+// 插件工具（动态附加）
+//
+// 插件注册的工具在**主进程**工具注册表里（作用域 `plugin:<id>`），渲染层无法自行枚举，
+// 因此由渲染层在插件状态变化时（见 src/lib/agent/pluginTools.ts）把「已激活插件注册的工具名」
+// 推到这里。toolsFromCapabilities 会把它们**追加**到能力槽推导出的列表末尾：
+// - 只影响运行时可见集，**不写入** caps.enabledTools（停用插件即刻失效，不会留脏数据）；
+// - 用户要停用某个插件工具，直接把插件停用即可（或后续在工具管理里逐工具关闭）。
+// ---------------------------------------------------------------------------
+
+let pluginToolNames: string[] = []
+
+/** 更新「当前已激活插件注册的工具名」（由渲染层同步；空数组即清空） */
+export function setPluginToolNames(names: string[]): void {
+  pluginToolNames = Array.isArray(names) ? names.filter((n) => typeof n === 'string' && n.trim() !== '') : []
+}
+
+/** 当前已激活插件提供的工具名（只读快照） */
+export function getPluginToolNames(): string[] {
+  return pluginToolNames.slice()
+}
+
+/** 把插件工具追加到基础列表末尾（去重；不改动基础列表本身） */
+function withPluginTools(base: string[]): string[] {
+  if (!pluginToolNames.length) return base
+  const out = base.slice()
+  for (const name of pluginToolNames) {
+    if (!out.includes(name)) out.push(name)
+  }
+  return out
+}
 
 /**
  * 按能力槽组装工具白名单（统一入口）。
@@ -66,7 +100,7 @@ export function toolsFromCapabilities(caps: any, opts: { includeMcp?: boolean } 
     // 只要“访问知识库能力 + 已关联文件”成立即注入 kb_search，避免模型检索失效
     if (hasKb && caps.accessKnowledgeBase && !set.has('kb_search')) set.add('kb_search')
     if (opts.includeMcp === false) set.delete('mcp_call')
-    return Array.from(set)
+    return withPluginTools(Array.from(set))
   }
   // —— 旧模式：由能力槽布尔推导 ——
   const out: string[] = []
@@ -78,7 +112,7 @@ export function toolsFromCapabilities(caps: any, opts: { includeMcp?: boolean } 
     if (on && slot.needsKnowledgeFiles && !(Array.isArray(caps?.knowledgeBaseFiles) && caps.knowledgeBaseFiles.length)) on = false
     if (on) out.push(...slot.tools)
   }
-  return out
+  return withPluginTools(out)
 }
 
 // ---------------------------------------------------------------------------

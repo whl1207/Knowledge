@@ -42,6 +42,9 @@ export class WorkflowRunner {
     this.nodes = graph.nodes
     this.edges = graph.edges
 
+    // 试跑（单节点 / 运行区段）时只跑指定节点集；缺省跑全部根级节点
+    const scope = options.scope ? new Set(options.scope) : undefined
+
     this.pool = new VariablePool({
       systemVariables: {
         workflow_run_id: runId,
@@ -54,7 +57,13 @@ export class WorkflowRunner {
       conversationVariables: document.workflow.conversation_variables,
     })
 
-    emit({ type: 'run-start', runId, nodeCount: graph.nodes.length })
+    // 预置变量：用「变量检查器」里缓存 / 手改过的上游输出补齐变量池，
+    // 这样试跑某个节点时不必把上游全部重跑一遍（对齐 Dify 的步进执行）
+    for (const [nodeId, outputs] of Object.entries(options.initialVariables ?? {})) {
+      this.pool.setNodeOutputs(nodeId, outputs)
+    }
+
+    emit({ type: 'run-start', runId, nodeCount: scope ? scope.size : graph.nodes.length })
 
   // 顶层：容器子节点由对应的容器执行器驱动，先登记为「容器内部节点」，
   // 避免运行面板在容器跑起来之前把子节点显示成待运行。
@@ -80,6 +89,7 @@ export class WorkflowRunner {
       records: this.records,
       inputs: options.inputs ?? {},
       noRetry: options.noRetry,
+      scope,
       runSubgraph: (containerId, seed) => this.runSubgraph(containerId, seed, emit, options),
       resolveContainerEntry: (containerId) => {
         const container = this.nodes.find((n) => n.id === containerId)

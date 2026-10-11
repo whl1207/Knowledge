@@ -1145,26 +1145,27 @@ const nodes = ref([
   { id: 2, icon: 'fa-flag-checkered', key: 'end' },
   { id: 3, icon: 'fa-comment', key: 'answer' },
   { id: 4, icon: 'fa-microchip', key: 'llm' },
-  { id: 5, icon: 'fa-code-fork', key: 'ifElse' },
-  { id: 6, icon: 'fa-tags', key: 'classifier' },
-  { id: 7, icon: 'fa-repeat', key: 'iteration' },
-  { id: 8, icon: 'fa-refresh', key: 'loop' },
-  { id: 9, icon: 'fa-code', key: 'code' },
-  { id: 10, icon: 'fa-file-code-o', key: 'template' },
-  { id: 11, icon: 'fa-globe', key: 'http' },
-  { id: 12, icon: 'fa-wrench', key: 'tool' },
-  { id: 13, icon: 'fa-database', key: 'knowledge' },
-  { id: 14, icon: 'fa-object-group', key: 'aggregator' },
-  { id: 15, icon: 'fa-pencil-square-o', key: 'assigner' },
-  { id: 16, icon: 'fa-list', key: 'listOp' },
-  { id: 17, icon: 'fa-filter', key: 'paramExtract' },
-  { id: 18, icon: 'fa-file-text-o', key: 'extractor' },
-  { id: 19, icon: 'fa-file-word-o', key: 'word' },
-  { id: 20, icon: 'fa-file-excel-o', key: 'csv' },
-  { id: 21, icon: 'fa-folder-open-o', key: 'localFile' },
-  { id: 22, icon: 'fa-book', key: 'localKb' },
-  { id: 23, icon: 'fa-plug', key: 'mcp' },
-  { id: 24, icon: 'fa-sitemap', key: 'subflow' }
+  { id: 5, icon: 'fa-robot', key: 'agent' },
+  { id: 6, icon: 'fa-code-fork', key: 'ifElse' },
+  { id: 7, icon: 'fa-tags', key: 'classifier' },
+  { id: 8, icon: 'fa-repeat', key: 'iteration' },
+  { id: 9, icon: 'fa-refresh', key: 'loop' },
+  { id: 10, icon: 'fa-code', key: 'code' },
+  { id: 11, icon: 'fa-file-code-o', key: 'template' },
+  { id: 12, icon: 'fa-globe', key: 'http' },
+  { id: 13, icon: 'fa-wrench', key: 'tool' },
+  { id: 14, icon: 'fa-database', key: 'knowledge' },
+  { id: 15, icon: 'fa-object-group', key: 'aggregator' },
+  { id: 16, icon: 'fa-pencil-square-o', key: 'assigner' },
+  { id: 17, icon: 'fa-list', key: 'listOp' },
+  { id: 18, icon: 'fa-filter', key: 'paramExtract' },
+  { id: 19, icon: 'fa-file-text-o', key: 'extractor' },
+  { id: 20, icon: 'fa-file-word-o', key: 'word' },
+  { id: 21, icon: 'fa-file-excel-o', key: 'csv' },
+  { id: 22, icon: 'fa-folder-open-o', key: 'localFile' },
+  { id: 23, icon: 'fa-book', key: 'localKb' },
+  { id: 24, icon: 'fa-plug', key: 'mcp' },
+  { id: 25, icon: 'fa-sitemap', key: 'subflow' }
 ])
 
 // 学习模块视图列表（图标与学习模块顶部标签一致，均为 fa）
@@ -1385,6 +1386,10 @@ const settingGroups = ref([
     { icon: 'fa-plug', key: 'mcp' },
     { icon: 'fa-list-ul', key: 'toolregistry' }
   ] },
+  { groupKey: 'plugin', children: [
+    { icon: 'fa-puzzle-piece', key: 'plugin' },
+    { icon: 'fa-shopping-cart', key: 'plugin-store' }
+  ] },
   { groupKey: 'skills', children: [
     { icon: 'fa-drupal', key: 'manage' },
     { icon: 'fa-shopping-cart', key: 'store' }
@@ -1437,14 +1442,13 @@ const knowledgeViewGroups = computed(() => [
   { key: 'fileViews', titleKey: 'groupFileViews', items: knowledgeFileViews.value }
 ])
 
-// AI 对话方案列表（六种：普通 / 知识库 / 工作流 / 智能体 / PTC / 集群）
+// AI 对话方案列表（五种：普通 / 知识库 / 工作流 / 智能体 / 集群；PTC 为智能体的呈现方式，见「智能体对话」）
 const aiChatSchemes = ref([
   { id: 1, icon: '💬', key: 'normal' },
   { id: 2, icon: '📚', key: 'retrieval' },
   { id: 3, icon: '🔗', key: 'workflow' },
   { id: 4, icon: '🤖', key: 'agent' },
-  { id: 5, icon: '🧩', key: 'code' },
-  { id: 6, icon: '👥', key: 'swarm' }
+  { id: 5, icon: '👥', key: 'swarm' }
 ])
 
 // 切换FAQ
@@ -1574,7 +1578,7 @@ const translations = {
         title: '探索 Agent 功能',
         items: [
           '<strong>技能</strong>（技能管理 / 技能商店 / Agent 预设）统一收在 <strong>设置 → 技能</strong> 中，不再单独占用顶部导航：商店可下载新技能，管理可查看 / 编辑技能文件，并可在 <strong>Agent 预设</strong> 里创建可复用模板、以该角色对话',
-          '在 <strong>主页</strong> 输入区把模式下拉切到 <strong>PTC</strong>（程序化工具调用）：描述需求后 AI 会写一段 TypeScript 程序经 run_code 组合调用工具，消息里会展示程序、返回值与程序内调用的工具',
+          '需要"写一段程序组合多步工具调用"时，用内置的 <strong>PTC 智能体</strong> 预设（设置 → 智能体 → 预设 → 工具 可把任意预设的<strong>呈现方式</strong>切到 PTC）：描述需求后 AI 会写一段 TypeScript 程序经 run_code 组合调用工具，消息里会展示程序、返回值与程序内调用的工具，聊天 / 工作流 / 集群 / 批量通用',
           '需要多智能体协作时，把模式切到 <strong>集群</strong>：勾选多个 Agent 预设作为成员（成员在「设置 → 智能体 → 预设」维护），发送任务后成员依次发言，可 <strong>@成员名</strong> 点名某一位',
           '<strong>脚手架任务</strong>已成为知识管理里的一种文件类型（<code>.task</code>）：新建 / 双击 <code>.task</code> 即在<strong>独立窗口</strong>里打开它的专属「脚手架」视图（这里唯一的脚手架；批量智能体运行 / 表格定向推理 / 文件采集 / 链接采集是它的四种预设），任务可中断续跑、后台继续',
           '<strong>数据画布</strong>不再是顶层模块，而是<strong>知识管理中的一种文件类型</strong>（<code>.data</code>）：在文件树里打开 <code>.data</code> 即进入画布模块（画布建模 + 表单录入 + 图表看板），内容会自动保存回该文件'
@@ -1637,19 +1641,18 @@ const translations = {
         lead: 'AI-KM 的智能对话建立在以下核心概念之上（每点一个能力维度）：',
         items: [
           '<strong>① 本地优先 · 多模型</strong>：默认本地运行、可离线使用，可在多家模型来源间切换。',
-          '<strong>② 多种对话模式</strong>：普通 / 知识库 / 工作流 / 智能体 / PTC / 集群 六种入口，任务从“问答”延伸到“执行”“程序化调用”与“多智能体协作”。',
+          '<strong>② 多种对话模式</strong>：普通 / 知识库 / 工作流 / 智能体 / 集群 五种入口，任务从“问答”延伸到“执行”与“多智能体协作”；智能体还可把<strong>呈现方式</strong>设为 PTC（程序化工具调用）做“一次写清”的多步组合。',
           '<strong>③ RAG 只是其一</strong>：知识库模式先检索你的文档再作答，并可选本体 / 问题增强 / 多跳 / 社区等策略，但并非全部能力。',
           '<strong>④ 工具与智能体</strong>：智能体可按需读写文件、搜索、浏览网页、访问知识库、调用技能与 MCP。',
           '<strong>⑤ 数据本地化</strong>：对话、.kb、.learning、.flow.yml 均存本地，隐私可控、可离线。'
         ]
       },
       schemes: {
-        title: '六种对话模式',
+        title: '五种对话模式',
         normal: { name: '普通对话', desc: '直接与 AI 交流，支持上传文件/图片作为参考（也可把文件直接拖进聊天窗口），适合日常提问与写作；选择联网搜索模型（如 DeepSeek）后提问可自动联网并列出来源。' },
         retrieval: { name: '知识库问答', desc: '关联 .kb 知识库，AI 基于你的文档精准回答（RAG），答案下方展示参考片段与相似度；可在输入框上方选择检索策略（相似度 / 文件增强 / 问题增强 / 本体增强 / 多跳 / 社区 / Agentic 等）；知识库模式下把 .kb 文件拖进聊天窗口即完成关联。' },
         workflow: { name: '工作流对话', desc: '关联 .flow.yml / .flow.yaml 工作流文件（用可视画布编排也请在知识管理里打开同一份文件，见「工作流」页签），输入起始文本触发自动化流程：各节点排成可展开的步骤卡片（图标 / 状态 / 参数 / 输出，样式与智能体模式一致），结束后给出最终输出。' },
-        agent: { name: '智能体对话', desc: '在输入框选择「智能体」模式：可点 👤 选 Agent 预设，或以通用智能体对话。AI 自主规划并调用工具（读写文件 / 搜索 / 浏览网页 / 知识库检索 / 技能 / MCP 等）完成复杂任务；输入 $技能名 可直达技能；支持<strong>上传图片</strong>（多模态，需所选模型支持视觉）与文本附件。<strong>执行期间输入框不锁死</strong>：继续输入要求后按 Enter 即作为<strong>引导</strong>投递给它（不打断当前执行，智能体在下一个 step 带上）。' },
-        code: { name: 'PTC（程序化工具调用）', desc: '在输入框模式下拉选择 <strong>PTC</strong>：模型不逐个调用工具，而是写一段 TypeScript 程序，经 <code>run_code</code> 组合调用工具并返回结果。消息里以代码块展示程序、并列出执行返回值、console 日志与<strong>程序内实际调用的工具</strong>；适合多步循环、批量处理这类“一次写清”的任务。步数沿用「设置 → 智能体预设 → 通用智能体」的循环轮数。' },
+        agent: { name: '智能体对话', desc: '在输入框选择「智能体」模式：可点 👤 选 Agent 预设，或以通用智能体对话。AI 自主规划并调用工具（读写文件 / 搜索 / 浏览网页 / 知识库检索 / 技能 / MCP 等）完成复杂任务；输入 $技能名 可直达技能；支持<strong>上传图片</strong>（多模态，需所选模型支持视觉）与文本附件。<strong>执行期间输入框不锁死</strong>：继续输入要求后按 Enter 即作为<strong>引导</strong>投递给它（不打断当前执行，智能体在下一个 step 带上）。<strong>PTC（程序化工具调用）</strong> 就是本模式的一种预设呈现方式：把预设的呈现方式设为 PTC（内置「PTC 智能体」已配好），模型不再逐个调用工具，而是写一段 TypeScript 程序经 <code>run_code</code> 组合调用工具，消息里以代码块展示程序、返回值、console 日志与<strong>程序内实际调用的工具</strong>；适合多步循环与批量处理，同样适用于工作流 / 集群 / 批量。' },
         swarm: { name: '集群对话', desc: '在输入框选择「集群」模式：勾选<strong>多个 Agent 预设</strong>作为成员，一次任务由多成员协作完成（全员响应 / 辩论 / 项目组），可用 <code>@成员名</code> 只点名某一位；成员回复与工具调用与智能体模式完全一致；运行中也可输入<strong>引导</strong>（Enter 发送，投递给正在发言的成员）。' }
       },
       guide: {
@@ -1927,6 +1930,7 @@ const translations = {
         end: { name: '结束', desc: '声明最终输出变量' },
         answer: { name: '直接回复', desc: '把正文作为回复内容' },
         llm: { name: '大语言模型', desc: '调用模型，配置提示词与上下文' },
+        agent: { name: '智能体', desc: '交给所选智能体预设自主完成任务（自主规划 + 工具调用 + 技能 / 知识库 / MCP），输出 text / files / json' },
         ifElse: { name: '条件分支', desc: '按条件分流，不命中走 ELSE' },
         classifier: { name: '问题分类器', desc: '让模型把输入归到某个分类分支' },
         iteration: { name: '迭代', desc: '把数组逐项送进容器处理，结果收成数组' },
@@ -1963,8 +1967,9 @@ const translations = {
           '运行：工具栏「运行」→ 填写开始节点声明的输入变量 → 开始运行；运行中可随时中止',
           '画布反馈：节点右上角圆点表示状态（蓝=运行中 / 绿=成功 / 红=失败 / 灰=跳过）；右侧运行面板给出<strong>追踪树</strong>（容器子节点缩进）、每节点耗时、日志与流式输出',
           '运行历史：面板顶部可切换最近 5 次运行，便于对比',
+          '调试：选中节点后可「试跑此节点」或「运行此节点及下游」，上游不重跑；运行面板的<strong>变量</strong>区列出各节点产出的变量，可直接改值后单独重跑某个节点（改了的值会标记「已改」，可单项或整体恢复）',
           '应用设置：工具栏「应用设置」可改应用名称 / 图标 / 应用模式、开场白与推荐问题、文件上传等功能开关，以及全局的<strong>环境变量</strong>与<strong>会话变量</strong>',
-          '异常处理：每个节点可选「出错即终止 / 忽略错误继续 / 走异常分支」，并可开启失败重试（支持指数退避）'
+          '异常处理：每个节点可选「出错即终止 / 忽略错误继续 / 移除异常输出 / 走异常分支」，大语言模型 / 智能体 / HTTP 请求 / 代码 / 工具节点还可选「失败用<strong>默认值</strong>继续」（按输出变量名填 JSON 对象），并可开启失败重试（支持指数退避）'
         ]
       },
       example: {
@@ -1993,7 +1998,7 @@ const translations = {
     settings: {
       overview: {
         title: '设置总览',
-        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 模型 / 凭据 / 关联 / 其他）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / MCP / 注册表）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。'
+        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 模型 / 凭据 / 关联 / 其他）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / MCP / 注册表）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。'
       },
       groups: {
         basic: {
@@ -2038,6 +2043,14 @@ const translations = {
             toolregistry: { name: '注册表', desc: '只读查看主进程已注册的工具及其白名单状态。' }
           }
         },
+        plugin: {
+          title: '🔌 插件',
+          items: {
+            plugin: { name: '管理', desc: '本地插件（工具 / 界面扩展）的发现、启用停用、重载、日志、配置、详情与移除，行内动作都是图标按钮（悬停看说明）。插件既能给智能体加工具，也能加界面——主面板（自动出现在导航栏）、设置页签、设置卡片、集群工作台页签，还能注册全局快捷键、提供中英文案；本版新增两类宿主能力：<strong>调用大模型</strong>（可选来源与模型，权限 <code>llm</code>）与<strong>文件能力</strong>（选文件 / 选文件夹 / 列目录 / 读文本 / PDF 文本提取与<strong>页面预览</strong>，权限 <code>fs</code>，且只能访问你在该插件里亲自选过的路径），另有只读的应用信息（预设智能体清单）与<strong>语音朗读</strong>（把一段文本交给应用自带 TTS 念出来，引擎与音色跟随「设置 → 语音」，无需权限）。可从文件夹安装插件包（<code>package.json</code> + <code>aikm</code> 清单），移除时可选择连磁盘文件一起删除；插件目录默认 <code>userData/plugins</code>，也可像技能那样指定到自己的文件夹（改动自动重载）。插件与主进程同进程运行、<strong>不受工作区沙箱保护</strong>，启用前会先列出它申请的权限并要求确认。' },
+            'plugin-store': { name: '商店', desc: '<strong>占位页</strong>：在线分发（浏览 / 一键安装 / 更新）尚未提供，本版本只支持本地插件。' },
+            'plugin-dev': { name: '开发', desc: '写插件的地方：把「通用开发指令」整段复制给任意大模型，填清你要做的功能，它产出的文件放进插件目录就能启用。页内还有<strong>界面插件 / 工具插件 / 大模型与文件能力</strong>三个模板、<strong>排障指令</strong>（把「插件 → 管理 → 日志」里的报错一起粘给模型让它改）、从零开始的最小可运行示例、清单 / 槽位 / API 速查表，以及「如何使用插件」的完整步骤（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载）。' }
+          }
+        },
         skills: {
           title: '🧩 技能',
           items: {
@@ -2048,7 +2061,7 @@ const translations = {
         agent: {
           title: '🤖 智能体',
           items: {
-            presets: { name: '预设', desc: '角色 / 模型 / 系统提示与逐工具能力，对话中点 👤 使用；内置「通用智能体」「代码智能体」「办公智能体」三个预设，开箱可用、可编辑，但不可删除。' },
+            presets: { name: '预设', desc: '角色 / 模型 / 系统提示与逐工具能力，对话中点 👤 使用；内置「通用智能体」「代码智能体」「办公智能体」「PTC 智能体」四个预设，开箱可用、可编辑，但不可删除。「工具」页还可把<strong>呈现方式</strong>切到 PTC（程序化工具调用）＝模型只看到 <code>run_code</code>，用一段程序组合调用该预设启用的工具。' },
             console: { name: '控制台', desc: '实时查看执行计划、任务清单、工具调用时间线与后台任务。' },
             log: { name: '日志', desc: '会话事件日志（JSONL）：事件流、消息派发与完整性。' }
           }
@@ -2202,7 +2215,7 @@ const translations = {
     agentScaffold: {
       overview: {
         title: '什么是 Agent脚手架？',
-        description: 'Agent脚手架是<strong>通用 Agent 执行框架</strong>（应用内称 Harness）：以<strong>表格驱动</strong>的方式跑批量任务——<strong>唯一的脚手架就是它自己</strong>：原批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格四种脚手架已并入为它的<strong>四种预设</strong>（旧 <code>.task</code> 文件打开时自动转换）。每个 <code>.task</code> 文件就是一个独立任务（专属「脚手架」视图，在独立窗口打开），可中断续跑、后台继续；需要“写程序调用工具”的 PTC 能力请用<strong>主页的 PTC 模式</strong>。'
+        description: 'Agent脚手架是<strong>通用 Agent 执行框架</strong>（应用内称 Harness）：以<strong>表格驱动</strong>的方式跑批量任务——<strong>唯一的脚手架就是它自己</strong>：原批量智能体运行 / 表格定向推理 / 文件采集表格 / 链接采集表格四种脚手架已并入为它的<strong>四种预设</strong>（旧 <code>.task</code> 文件打开时自动转换）。每个 <code>.task</code> 文件就是一个独立任务（专属「脚手架」视图，在独立窗口打开），可中断续跑、后台继续；需要“写程序调用工具”的 PTC 能力时，把任务的预设换成<strong>PTC 智能体</strong>即可（聊天 / 工作流 / 集群同样适用）。'
       },
       scaffolds: {
         title: 'Agent脚手架的配置方法（来源 × 执行方式 × 输出方式）',
@@ -2265,7 +2278,7 @@ const translations = {
         title: '运行方式（输入区下拉）',
         'auto-mention': { name: '全员响应', desc: '所有选中成员依次就任务作答；成员也可在回复里 @同事 追加协作。默认方式。' },
         debate: { name: '辩论', desc: '多个成员围绕任务多轮辩论，最后由群主中立总结，适合需要多方对比的决策类问题。' },
-        team: { name: '项目组（Lead 编排）', desc: '由第一位成员担任 Lead，自动把目标拆成任务、按依赖指派成员，结束时汇总交付；消息、泳道、名册、任务、通信为并列标签且各自全宽；泳道按依赖层级竖向展示任务关系与成员状态；名册显示各成员 token / 工具次数 / 最后活动（超 90 秒无活动会提示可能卡住）；停止后可从任务页「继续未完成任务」；任务页可调并发闸门（1~8），点任务跳转到对应消息、点消息上的任务标签回到任务板；长产出用产出物落成文件（群聊显示可打开的卡片，任务卡带 📎 附件），不占上下文。' }
+        team: { name: '项目组（Lead 编排）', desc: '由第一位成员担任 Lead，自动把目标拆成任务、按依赖指派成员，结束时汇总交付；此模式顶部只有一行（左侧聊天名称、右侧工作台标签），消息、泳道、名册、任务、通信为并列标签且各自全宽；泳道按依赖层级竖向展示任务关系与成员状态；名册显示各成员 token / 工具次数 / 最后活动（超 90 秒无活动会提示可能卡住）；停止后可从任务页「继续未完成任务」；任务页可调并发闸门（1~8），点任务跳转到对应消息、点消息上的任务标签回到任务板；长产出用产出物落成文件（群聊显示可打开的卡片，任务卡带 📎 附件），不占上下文。' }
       }
     },
     browser: {
@@ -2478,7 +2491,7 @@ const translations = {
         title: 'Explore Agent Features',
         items: [
           '<strong>Skills</strong> (Skill Manager / Skill Store / Agent Presets) live under <strong>Settings → Skills</strong> — they no longer occupy their own top-level nav entry: the Store downloads new skills, Manage views/edits skill files, and <strong>Agent Presets</strong> let you create reusable templates and chat as that role',
-          'Switch the mode dropdown to <strong>PTC</strong> (programmatic tool call) in the Home input bar: describe the task and the AI writes a TypeScript program that calls tools through run_code — the message shows the program, the return value and the tools called inside it',
+          'For "write one program that chains several tool calls" use the built-in <strong>PTC Agent</strong> preset (Settings → Agent → Presets → Tools lets you switch any preset\'s <strong>presentation</strong> to PTC): the AI writes a TypeScript program that calls tools through run_code, and the message shows the program, the return value and the tools called inside it — available in chat / workflow / swarm / batch',
           'For multi-agent collaboration switch to <strong>Swarm</strong>: tick several Agent presets as members (manage them in Settings → Agent → Presets) and use <strong>@member-name</strong> to call just one',
           '<strong>Scaffold tasks</strong> are now a file type in Knowledge Management (<code>.task</code>): create one from the right-click “New → Scaffold” menu or double-click an existing <code>.task</code> to open its dedicated “Scaffold” view in a <strong>separate window</strong> (the only scaffold; Batch Agent / Table Reasoning / Collect File / Collect Web are its four presets), and the task can be paused / resumed and keeps running in the background',
           '<strong>Data Canvas</strong> is no longer a top-level module but a <strong>file type in Knowledge Management</strong> (<code>.data</code>): open a <code>.data</code> file from the file tree to enter the canvas module (canvas modeling + form entry + chart dashboards), and changes auto-save back to that file'
@@ -2541,19 +2554,18 @@ const translations = {
         lead: 'Smart Chat is built on these core ideas (one capability per point):',
         items: [
           '<strong>① Local-first · Multi-model</strong>: runs locally and offline by default; switch between many model providers.',
-          '<strong>② Multiple chat modes</strong>: Normal / Knowledge Base / Workflow / Agent / PTC / Swarm — tasks range from Q&A to execution, programmatic tool calling and multi-agent collaboration.',
+          '<strong>② Multiple chat modes</strong>: Normal / Knowledge Base / Workflow / Agent / Swarm — tasks range from Q&A to execution and multi-agent collaboration; an agent can additionally use the <strong>PTC presentation</strong> (programmatic tool call) for multi-step work written as one program.',
           '<strong>③ RAG is just one piece</strong>: Knowledge Base mode first searches your documents, with ontology / question-enhance / multi-hop / community strategies — but that is not all.',
           '<strong>④ Tools & Agents</strong>: Agents can read/write files, search, browse the web, query knowledge bases, invoke skills and MCP.',
           '<strong>⑤ Local data</strong>: chats, .kb, .learning and .flow.yml all live locally — private and offline-ready.'
         ]
       },
       schemes: {
-        title: 'Six Chat Modes',
+        title: 'Five Chat Modes',
         normal: { name: 'Normal Chat', desc: 'Chat directly with AI; upload files/images as context (you can also drag files straight into the chat window). Ideal for everyday questions and writing; with a web-search-capable model (e.g. DeepSeek) questions can auto-search the web and list sources.' },
         retrieval: { name: 'Knowledge Base QA', desc: 'Link a .kb knowledge base; AI answers from your documents (RAG), showing reference chunks below. You can pick a retrieval strategy above the input (Similarity / File Enhance / Question Enhance / Ontology Enhance / Multi-hop / Community / Agentic, etc.). In this mode, dropping a .kb file into the chat window links it as the knowledge base.' },
         workflow: { name: 'Workflow Chat', desc: 'Link a .flow.yml / .flow.yaml workflow file (open the same file in Knowledge Management to author it on the canvas — see the Workflow tab); enter start text to trigger the flow: every node becomes an expandable step card (icon / status / params / output, same style as Agent mode) and the final output follows the steps.' },
-        agent: { name: 'Agent Chat', desc: 'Pick the "Agent" mode in the input bar: choose an Agent preset via 👤, or chat with the general agent. The AI plans autonomously and invokes tools (read/write files, search, browse the web, KB retrieval, skills, MCP, etc.); typing $skill-name triggers a skill directly. <strong>Image uploads</strong> (multimodal, needs a vision-capable model) and text attachments are supported too. The input box stays available <strong>while it runs</strong>: keep typing and press Enter to send <strong>guidance</strong> (the run is not interrupted; the agent picks it up at its next step).' },
-        code: { name: 'PTC (Programmatic Tool Call)', desc: 'Pick <strong>PTC</strong> in the input-bar mode dropdown: instead of calling tools one by one, the model writes a TypeScript program that calls tools through <code>run_code</code> and returns the result. The message shows the program as a code block plus the return value, the console logs and the <strong>tools actually called inside the program</strong> — great for multi-step loops and batch processing. Max steps follows the general agent setting (Settings → Agent → Presets).' },
+        agent: { name: 'Agent Chat', desc: 'Pick the "Agent" mode in the input bar: choose an Agent preset via 👤, or chat with the general agent. The AI plans autonomously and invokes tools (read/write files, search, browse the web, KB retrieval, skills, MCP, etc.); typing $skill-name triggers a skill directly. <strong>Image uploads</strong> (multimodal, needs a vision-capable model) and text attachments are supported too. The input box stays available <strong>while it runs</strong>: keep typing and press Enter to send <strong>guidance</strong> (the run is not interrupted; the agent picks it up at its next step). <strong>PTC (programmatic tool call)</strong> is a presentation this mode offers: set a preset\'s presentation to PTC (the built-in <strong>PTC Agent</strong> already is), and instead of calling tools one by one the model writes a TypeScript program that calls them through <code>run_code</code> — the message shows the program as a code block plus the return value, console logs and the <strong>tools actually called inside it</strong>. Great for multi-step loops and batch work, and it also applies to workflow / swarm / batch.' },
         swarm: { name: 'Swarm Chat', desc: 'Pick the "Swarm" mode in the input bar: tick <strong>multiple Agent presets</strong> as members and let them collaborate on one task (respond in turn / debate / team); use <code>@member-name</code> to call a single member. Replies and tool calls render exactly like Agent mode. You can also send <strong>guidance</strong> mid-run (Enter) — it goes to the member currently speaking.' }
       },
       guide: {
@@ -2831,6 +2843,7 @@ const translations = {
         end: { name: 'End', desc: 'Declares the final output variables' },
         answer: { name: 'Answer', desc: 'Uses the text as the reply' },
         llm: { name: 'LLM', desc: 'Calls a model with prompt and context' },
+        agent: { name: 'Agent', desc: 'Runs the selected agent preset autonomously (planning + tool calls + skills / knowledge / MCP); outputs text / files / json' },
         ifElse: { name: 'If/Else', desc: 'Routes by conditions; falls through to ELSE' },
         classifier: { name: 'Question Classifier', desc: 'Lets the model pick a class branch' },
         iteration: { name: 'Iteration', desc: 'Processes each array item in the container, collecting results' },
@@ -2867,8 +2880,9 @@ const translations = {
           'Run: toolbar “Run” → fill the input variables declared by the Start node → Start run; you can stop at any time',
           'Canvas feedback: the dot on each node shows its state (blue = running, green = success, red = failed, grey = skipped); the run panel offers a <strong>trace tree</strong> (container children indented), per-node duration, logs and streamed output',
           'Run history: switch between the last 5 runs at the top of the panel to compare results',
+          'Debugging: with a node selected you can “Test this node” or “Run this node and downstream” without re-running upstream; the run panel’s <strong>Variables</strong> section lists every node output, and you can edit a value and re-run just that node (edited values are marked and can be reverted one by one or all at once)',
           'App settings: the toolbar “App settings” edits the app name / icon / mode, opening statement and suggested questions, feature toggles, and the global <strong>environment</strong> and <strong>conversation</strong> variables',
-          'Error handling: each node can terminate, continue on error or take a fail branch, and can enable retries with exponential backoff'
+          'Error handling: each node can terminate, continue on error, remove abnormal output or take a fail branch; LLM / Agent / HTTP Request / Code / Tool nodes can also continue with a <strong>default value</strong> (a JSON object keyed by output variable), and retries with exponential backoff are available'
         ]
       },
       example: {
@@ -2897,7 +2911,7 @@ const translations = {
     settings: {
       overview: {
         title: 'Settings Overview',
-        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / LLM / Credentials / Associations / Other), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / MCP / Registry), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.'
+        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / LLM / Credentials / Associations / Other), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / MCP / Registry), <strong>Plugins</strong> (Manage / Store / Develop), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.'
       },
       groups: {
         basic: {
@@ -2942,6 +2956,14 @@ const translations = {
             toolregistry: { name: 'Registry', desc: 'Read-only view of the registered tools and their whitelist state.' }
           }
         },
+        plugin: {
+          title: '🔌 Plugins',
+          items: {
+            plugin: { name: 'Manage', desc: 'Discovery, enable / disable, reload, logs, config, details and removal for local plugins — every row action is an icon button (hover for the hint). A plugin can add agent tools <strong>and</strong> UI — a main panel (appears in the nav automatically), settings tabs, settings cards and swarm workbench tabs, plus global shortcuts and zh / en text. Two new host capabilities: <strong>model access</strong> (pick source and model, permission <code>llm</code>) and <strong>file access</strong> (pick files / folders, list directories, read text, extract PDF text and <strong>render PDF pages</strong>, permission <code>fs</code> — limited to paths you picked inside that plugin), plus read-only app info (agent preset list) and <strong>speech</strong> (hand text to the app’s own TTS; engine and voice follow Settings → Voice; no permission needed). Install a plugin package (a <code>package.json</code> plus an <code>aikm</code> manifest) from a folder, and optionally delete its files when removing it. The plugins folder defaults to <code>userData/plugins</code> but can be pointed at your own folder, like skills (changes reload automatically). Plugins run in the main process and are <strong>not confined by the workspace sandbox</strong>; the permissions they request are listed before enabling.' },
+            'plugin-store': { name: 'Store', desc: '<strong>Placeholder page</strong>: online distribution (browse / one-click install / update) is not available yet — this version supports local plugins only.' },
+            'plugin-dev': { name: 'Develop', desc: 'Where you write plugins: copy the general development prompt to any model, describe the feature, and drop the returned files into the plugins folder. Also includes UI / tool / model-and-file templates, a debugging prompt (paste the error from Plugins → Manage → Logs so the model can fix it), a minimal runnable example, a manifest / slot / API cheat sheet, and the full “how to use plugins” walkthrough (install → confirm permissions on enable → where panels, tools and shortcuts appear → config → troubleshooting → removal).' }
+          }
+        },
         skills: {
           title: '🧩 Skills',
           items: {
@@ -2952,7 +2974,7 @@ const translations = {
         agent: {
           title: '🤖 Agent',
           items: {
-            presets: { name: 'Presets', desc: 'Role / model / system prompt and per-tool capabilities; pick with 👤 in chat. Three built-in presets ship with the app — General Agent, Code Agent and Office Agent — ready to use and editable, but not deletable.' },
+            presets: { name: 'Presets', desc: 'Role / model / system prompt and per-tool capabilities; pick with 👤 in chat. Four built-in presets ship with the app — General Agent, Code Agent, Office Agent and PTC Agent — ready to use and editable, but not deletable. On the Tools tab you can also set the <strong>presentation</strong> to PTC (programmatic tool call): the model only sees <code>run_code</code> and composes the preset tools inside a program.' },
             console: { name: 'Console', desc: 'Watch live plans, task lists, tool-call timelines and background tasks.' },
             log: { name: 'Session Log', desc: 'Session event log (JSONL): event stream, message dispatch and integrity.' }
           }
@@ -3106,7 +3128,7 @@ const translations = {
     agentScaffold: {
       overview: {
         title: 'What is the Agent Scaffold?',
-        description: 'The <strong>Agent Scaffold</strong> is a <strong>universal Agent execution framework</strong> (the Harness): it runs table-driven batch work — and it is the <strong>only scaffold</strong> left, the former Batch Agent / Table Reasoning / Collect File / Collect Web scaffolds now being its <strong>four presets</strong> (legacy <code>.task</code> files convert automatically when opened). Each <code>.task</code> file is a standalone task (opened in a separate window with its own “Scaffold” view) that can be paused, resumed, or left running in the background; for programmatic tool calling use the <strong>PTC mode on the Home page</strong>.'
+        description: 'The <strong>Agent Scaffold</strong> is a <strong>universal Agent execution framework</strong> (the Harness): it runs table-driven batch work — and it is the <strong>only scaffold</strong> left, the former Batch Agent / Table Reasoning / Collect File / Collect Web scaffolds now being its <strong>four presets</strong> (legacy <code>.task</code> files convert automatically when opened). Each <code>.task</code> file is a standalone task (opened in a separate window with its own “Scaffold” view) that can be paused, resumed, or left running in the background; for programmatic tool calling switch the task preset to <strong>PTC Agent</strong> (available in chat / workflow / swarm too).'
       },
       scaffolds: {
         title: 'How to Configure the Agent Scaffold (Source × Execution × Output)',
@@ -3169,7 +3191,7 @@ const translations = {
         title: 'Run Modes (input bar dropdown)',
         'auto-mention': { name: 'All respond', desc: 'Every selected member answers the task in turn; members may also @colleagues in their reply. Default.' },
         debate: { name: 'Debate', desc: 'Members debate the task over rounds, then the host gives a neutral summary. Best for comparing options.' },
-        team: { name: 'Team (Lead-led)', desc: 'The first member acts as Lead: it splits the goal into tasks, assigns them by dependency and delivers a summary. Messages, Flow, Roster, Tasks and Comm are full-width sibling tabs; the Flow view shows task dependencies and member status vertically; the Roster shows per-member tokens / tool count / last activity (a running member idle for over 90s is flagged); a stopped episode can be resumed from the Tasks tab; the Tasks tab also has a concurrency gate (1-8), and clicking a task jumps to its messages (and back); long outputs are saved as artifacts (openable card in the chat, 📎 chips on the task card) so full text stays out of context.' }
+        team: { name: 'Team (Lead-led)', desc: 'The first member acts as Lead: it splits the goal into tasks, assigns them by dependency and delivers a summary. This mode has a single top row (chat name on the left, workbench tabs on the right); Messages, Flow, Roster, Tasks and Comm are full-width sibling tabs; the Flow view shows task dependencies and member status vertically; the Roster shows per-member tokens / tool count / last activity (a running member idle for over 90s is flagged); a stopped episode can be resumed from the Tasks tab; the Tasks tab also has a concurrency gate (1-8), and clicking a task jumps to its messages (and back); long outputs are saved as artifacts (openable card in the chat, 📎 chips on the task card) so full text stays out of context.' }
       }
     },
     browser: {

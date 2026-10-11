@@ -107,6 +107,48 @@ interface Window {
       tile(payload: { id: string; z: number; x: number; y: number }): Promise<Uint8Array | null>
       onChange(cb: (sources: import('./electron/main/map-tiles').MapTileSource[]) => void): () => void
     }
+    /**
+     * 插件管理（P0 主进程插件宿主）。
+     * 变更类操作（enable/disable/reload/uninstall/setConfig）须传 confirm=true，
+     * 否则主进程返回 PERMISSION_DENIED 且不改变状态。
+     */
+    plugin: {
+      list(): Promise<{
+        plugins: import('./src/types/plugin').PluginSnapshot[]
+        rootDir: string
+        customRoot: boolean
+        services: string[]
+      }>
+      inspect(spec: string): Promise<{
+        ok: boolean
+        id: string | null
+        name: string | null
+        version: string | null
+        apiVersion: string | null
+        permissions: string[]
+        problem: string | null
+      }>
+      enable(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
+      disable(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
+      reload(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
+      uninstall(id: string, options?: { confirm?: boolean; deleteFiles?: boolean }): Promise<{ removed: boolean; deletedDir: boolean }>
+      getConfig(id: string): Promise<Record<string, unknown>>
+      setConfig(id: string, patch: Record<string, unknown>, confirm?: boolean): Promise<Record<string, unknown>>
+      logs(id: string): Promise<import('./src/types/plugin').PluginLogLine[]>
+      /** 渲染层半边的 bundle 源码（P1：渲染层用 Blob URL 动态 import） */
+      clientBundle(id: string): Promise<{ entry: string; code: string }>
+      /** 从本地文件夹安装插件（主进程弹目录选择框）；replace=true 表示覆盖同名插件 */
+      install(options?: { confirm?: boolean; replace?: boolean }): Promise<{
+        cancelled: boolean
+        snapshot: import('@/types/plugin').PluginSnapshot | null
+      }>
+      /** 选择插件目录（与技能目录同一交互）；不传 path 则由主进程弹目录选择框 */
+      setRoot(options?: { confirm?: boolean; path?: string }): Promise<{ cancelled: boolean; rootDir: string }>
+      /** 恢复默认插件目录（userData/plugins） */
+      resetRoot(options?: { confirm?: boolean }): Promise<{ cancelled: boolean; rootDir: string }>
+      openDir(id?: string): Promise<{ path: string }>
+      onEvent(cb: (ev: import('./src/types/plugin').PluginEvent) => void): () => void
+    }
   }
 }
 

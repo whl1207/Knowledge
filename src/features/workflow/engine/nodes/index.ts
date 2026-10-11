@@ -4,6 +4,7 @@
  * 与属性面板的注册表（nodes/registry.ts）分开：那份定义「怎么编辑」，这份定义「怎么执行」。
  * 后续实现新节点只需在此加一行 + 一个执行器文件。
  */
+import { agentExecutor } from './agent'
 import { answerExecutor } from './answer'
 import { assignerExecutor, variableAssignerExecutor } from './assigner'
 import { codeExecutor } from './code'
@@ -45,6 +46,7 @@ const EXECUTORS: WorkflowNodeExecutor[] = [
   templateTransformExecutor,
   httpRequestExecutor,
   toolExecutor,
+  agentExecutor,
   variableAggregatorExecutor,
   listOperatorExecutor,
   documentExtractorExecutor,

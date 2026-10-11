@@ -14,19 +14,16 @@
   import { defaultLanGuestPolicy } from '@/shared/lanGuest'
   const store=usestore()
 
-  // 首屏主页保持静态加载；其余主面板改为按需异步加载（defineAsyncComponent）：
-  // 大幅缩减首屏 JS 体积——Monaco/图谱/地图/PPT/Excalidraw 等重型依赖只在对应模块打开时才加载
-  import home from '@/components/home.vue'
-  // 异步面板加载中的占位（加载超过 delay 才显示，正常本地加载不会闪现）；
-  // 背景取应用主题色，使「预载遮罩 → 占位 → 内容」无缝衔接，避免白缝
-  const asyncLoading = () => h('div', {
-    style: 'height:100%;width:100%;background:var(--backgroundColor,#ffffff);display:flex;align-items:center;justify-content:center;color:#888;'
-  }, [h('i', { class: 'fa fa-spinner fa-spin', style: 'font-size:16px;' })])
-  const lazyPanel = (loader: () => Promise<any>) =>
-    defineAsyncComponent({ loader, loadingComponent: asyncLoading })
-  const explorer = lazyPanel(() => import('@/components/knowFile/explorer.vue'))
-  const knowledge = lazyPanel(() => import('@/components/knowRAG/knowRAG.vue'))
-  const learning = lazyPanel(() => import('@/components/learning/learning.vue'))
+  // 主面板与槽位：内置面板也走 plugin.main 槽位注册（见 lib/plugin/panels.ts）；
+  // 面板本体渲染在下方模板的 <PluginSlot name="panel.main">，导航按钮由同一条目派生。
+  // ⚠️ 查询走 vue-free 的 panelRegistry；panels.ts 负责注册内置面板（含静态组件 import）
+  import { PANEL_MAIN_SLOT } from '@/lib/plugin/coreSlots'
+  import { fallbackPanelFor, panelHeaderText } from '@/lib/plugin/panelRegistry'
+  import { lazyPanel as makeLazyPanel } from '@/lib/plugin/panels'
+  import { useAllSlotEntries } from '@/lib/plugin/useSlots'
+  import PluginSlot from '@/components/plugin/PluginSlot.vue'
+
+  const lazyPanel = makeLazyPanel
   // ⚠️ 变量名不能叫 Set：会遮蔽全局 Set 构造函数，导致下方 collectRunningTasks 里的 `new Set(...)`
   // 抛 “Set is not a constructor”（关闭窗口时才触发，不易发现）
   const SetPanel = lazyPanel(() => import('@/components/set/Set.vue'))
@@ -70,28 +67,18 @@
       // （漏带 agents 会清空主机的智能体清单 → 网页端只剩「通用智能体」）
       const { pushLanGuestPolicy } = await import('@/platform/lanGuestSync')
       await pushLanGuestPolicy(store)
-      console.log('[lan-guest] 已向主进程下发访客权限:', (guest.modes || []).join('/'), '| 工具', Array.isArray(guest.tools) ? guest.tools.length : '默认集', '| 智能体', (guest.presetIds || []).length + 1)
     } catch (e) {
       console.warn('[lan-guest] 同步访客权限失败:', e)
     }
   }
 
-  // 计算标题文本
+  // 计算标题文本（内置面板沿用历史文案，插件面板回退到注册表标题；见 lib/plugin/panels.ts）
   const panelTitle = computed(() => {
     // 自定义标题：界面设置中定义后固定不变，不再随当前面板变化
     if (store.customTitle && store.customTitle.trim()) {
       return store.customTitle
     }
-    if (store.locales === 'en') {
-      switch(store.mainPanel) {
-        case '主页': return 'home';
-        case '知识管理': return 'Knowledge Management';
-        case '知识处理': return 'Knowledge Processing';
-        case '学习': return 'Learning';
-        default: return store.mainPanel;
-      }
-    }
-    return store.mainPanel; // 默认使用中文
+    return panelHeaderText(store.mainPanel, store.locales !== 'en')
   })
 
   // 导航栏布局：left=左侧导航 / bottom=下方导航（默认 top=顶部导航）
@@ -100,17 +87,35 @@
   // 左侧/下方布局下，顶栏只保留标题 + 4 个窗口按钮
   const isCompactTop = computed(() => isLeftNav.value || isBottomNav.value)
 
-  // 主面板导航按钮（左侧/下方布局模式下全部集中显示在对应导航栏；顶部模式下按钮仍保持在顶栏原位置）
+  // 主面板导航按钮（来源 = panel.main 槽位注册表：内置面板与插件面板同一份数据；
+  // 功能开关：被隐藏的按钮不显示，见设置页「界面-功能开关」）
+  const panelSlotEntries = useAllSlotEntries(PANEL_MAIN_SLOT)
   const navButtons = computed(() => {
     const zh = store.locales === 'zh'
-    return [
-      { key: '主页', icon: 'fa fa-home', title: zh ? '主页' : 'Home' },
-      { key: '知识管理', icon: 'fa fa-book', title: zh ? '知识管理' : 'Knowledge Management' },
-      { key: '知识处理', icon: 'fa fa-stack-overflow', title: zh ? '知识处理' : 'Knowledge Processing' },
-      { key: '学习', icon: 'fa fa-graduation-cap', title: zh ? '学习' : 'Learning' },
-      // 功能开关：被隐藏的按钮不显示（设置页「界面-功能开关」）
-    ].filter(btn => store.isNavVisible(btn.key))
+    return panelSlotEntries.value
+      .filter((def) => store.isNavVisible(def.key))
+      .map((def) => ({
+        key: def.key,
+        icon: def.icon || 'fa fa-puzzle-piece',
+        title: (zh ? def.titleZh : def.titleEn) || def.titleZh || def.key,
+      }))
   })
+
+  /**
+   * 当前主面板已不可用 → 切到第一个可见面板。两种触发场景：
+   * 1) 存档里的 mainPanel 指向的面板已不存在（插件被卸载后重启）；
+   * 2) 使用中插件被停用 / 重载（槽位条目被撤销）。
+   * 因此同时观察「面板清单」与「mainPanel」本身，并在 setup 阶段立即校验一次。
+   */
+  const panelKeySignature = computed(() => panelSlotEntries.value.map((d) => d.key).join('\u0000'))
+  watch(
+    () => `${panelKeySignature.value}\u0001${store.mainPanel}`,
+    () => {
+      const next = fallbackPanelFor(store.mainPanel, (key) => store.isNavVisible(key))
+      if (next && next !== store.mainPanel) store.mainPanel = next
+    },
+    { immediate: true },
+  )
 
   onMounted(async () => {
     // 检测是否在文件独立窗口中
@@ -408,10 +413,15 @@
       <div class="mainPanel" v-if="!isBrowser">
         <div class="panel-header" :class="{ 'panel-header-compact': isCompactTop }">
           <template v-if="!isCompactTop">
-            <!-- 顶部导航布局（默认）：导航按钮 + 标题 + 右侧按钮 -->
-            <div v-if="store.isNavVisible('主页')" :class="{active:store.mainPanel=='主页'}" @click="store.mainPanel='主页';" :title="store.locales === 'en' ? 'Home' : '主页'"><i class="fa fa-home"></i></div>
-            <div v-if="store.isNavVisible('知识管理')" :class="{active:store.mainPanel=='知识管理'}" @click="store.mainPanel='知识管理';"  :title="store.locales === 'en' ? 'Knowledge Management' : '知识管理'"><i class="fa fa-book"></i></div>
-            <div v-if="store.isNavVisible('知识处理')" :class="{active:store.mainPanel=='知识处理'}" @click="store.mainPanel='知识处理';" :title="store.locales === 'en' ? 'Knowledge Processing' : '知识处理'"><i class="fa fa-stack-overflow"></i></div>            <div v-if="store.isNavVisible('学习')" :class="{active:store.mainPanel=='学习'}" @click="store.mainPanel='学习';" :title="store.locales === 'en' ? 'Learning' : '学习'"><i class="fa fa-graduation-cap"></i></div>
+            <!-- 顶部导航布局（默认）：导航按钮 + 标题 + 右侧按钮
+                 按钮来源 = panel.main 槽位注册表（内置 4 个 + 插件贡献），顺序由 order 决定 -->
+            <div
+              v-for="btn in navButtons"
+              :key="btn.key"
+              :class="{ active: store.mainPanel == btn.key }"
+              @click="store.mainPanel = btn.key"
+              :title="btn.title"
+            ><i :class="btn.icon"></i></div>
             <!-- 弹性占位：将右侧按钮推到右端，同时作为顶栏可拖拽空白 -->
             <div class="panel-title-spacer" style="flex:1;"></div>
             <!-- 标题水平居中（各面板一致：仅文本，无图标） -->
@@ -445,18 +455,9 @@
         </div>
       </div>
       
-      <!-- 中间内容区域 -->
+      <!-- 中间内容区域：面板由 panel.main 槽位解析（内置面板与插件面板走同一条路径） -->
       <div class="main">
-      <home v-if="store.mainPanel=='主页'"/>
-      <explorer v-if="store.mainPanel=='知识管理'"/>
-      <!-- KeepAlive 缓存 knowledge：切换主面板时知识处理不销毁，切片/构建等后台任务继续 -->
-      <KeepAlive include="Knowledge">
-        <knowledge v-if="store.mainPanel=='知识处理'"/>
-      </KeepAlive>
-      <!-- KeepAlive 缓存 Learning：切换主面板时学习模块不销毁，练习/考试作答状态保留 -->
-      <KeepAlive include="Learning">
-        <learning v-if="store.mainPanel=='学习'"/>
-      </KeepAlive>
+        <PluginSlot :name="PANEL_MAIN_SLOT" :owner="store.mainPanel" />
       </div>
     </div>
 
@@ -745,6 +746,15 @@
   .main-column {
     flex: 1;
     min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* 面板容器：显式给出高度与溢出策略，让「插件面板」这类外部内容也能内部滚动
+     （否则超过视口高度的内容会被直接裁掉、看不到滚动条） */
+  .main {
+    flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;

@@ -35,6 +35,15 @@
           <div v-for="(issue, index) in issues" :key="index" class="wf-issues__item">{{ issue }}</div>
         </div>
 
+        <div v-if="canTryNode" class="wf-inline wf-inline--full" style="margin-bottom:8px">
+          <button class="wf-btn" :disabled="debugRunning" :title="t('panel.tryNodeHint')" @click="tryNode(false)">
+            <i class="fa fa-play"></i> {{ t('panel.tryNode') }}
+          </button>
+          <button class="wf-btn" :disabled="debugRunning" :title="t('panel.runDownstreamHint')" @click="tryNode(true)">
+            <i class="fa fa-step-forward"></i> {{ t('panel.runDownstream') }}
+          </button>
+        </div>
+
         <div class="wf-section-title"><i class="fa fa-sliders"></i> {{ t('panel.nodeConfig') }}</div>
         <component :is="panelComponent" v-if="panelComponent" v-bind="panelProps" />
         <GenericProperties v-else v-bind="panelProps" />
@@ -59,14 +68,27 @@
             @update:model-value="data.error_strategy = $event"
           >
             <el-option
-              v-for="opt in ERROR_STRATEGIES"
+              v-for="opt in errorStrategies"
               :key="opt"
               :label="t('errorStrategy.' + opt)"
               :value="opt"
             />
           </el-select>
         </div>
-        <template v-if="isModelNode">
+        <div v-if="errorStrategy === 'default-value'" class="wf-field">
+          <div class="wf-field__label">{{ t('panel.defaultValue') }}</div>
+          <el-input
+            :model-value="defaultValueText"
+            type="textarea"
+            :rows="3"
+            size="small"
+            :disabled="readonly"
+            @update:model-value="onDefaultValueInput"
+          />
+          <div v-if="defaultValueError" class="wf-field__error">{{ defaultValueError }}</div>
+          <div class="wf-field__hint">{{ t('panel.defaultValueHint') }}</div>
+        </div>
+        <template v-if="isRetryableNode">
           <div class="wf-inline" style="margin-bottom:6px">
             <el-switch :model-value="!!retry?.enabled" size="small" :disabled="readonly" @update:model-value="setRetry('enabled', $event)" />
             <span class="wf-field__label">{{ t('panel.retry') }}</span>
@@ -102,7 +124,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, shallowRef, watch, type Component } from 'vue'
+import { computed, defineAsyncComponent, inject, ref, shallowRef, watch, type Component } from 'vue'
 import { ElInput, ElInputNumber, ElOption, ElSelect, ElSwitch } from 'element-plus'
 import { usestore } from '@/store'
 import { createFlowT } from './locales'
@@ -110,6 +132,7 @@ import GenericProperties from '@/features/workflow/nodes/GenericProperties.vue'
 import { getNodeOutputs, getNodePanel, validateNode, type NodeOutputDeclaration } from '@/features/workflow/nodes/registry'
 import { getNodePresentation } from '@/features/workflow/nodes/presentation'
 import { isPrivateNodeType, type BaseNodeData, type ConversationVariable, type DslEdge, type DslNode, type EnvironmentVariable, type ErrorStrategy } from '@/features/workflow/dsl/types'
+import { DEBUG_RUN_KEY } from './runState'
 import './panel.css'
 
 const props = defineProps<{
@@ -130,7 +153,7 @@ const emit = defineEmits<{
 const store = usestore()
 const t = createFlowT(store.locales || 'zh')
 
-const ERROR_STRATEGIES: ErrorStrategy[] = ['terminated', 'continue-on-error', 'remove-abnormal-output']
+const ERROR_STRATEGIES: ErrorStrategy[] = ['terminated', 'continue-on-error', 'remove-abnormal-output', 'fail-branch']
 
 const presentation = computed(() => getNodePresentation(String(props.data?.type ?? '')))
 const typeLabel = computed(() => {
@@ -138,7 +161,47 @@ const typeLabel = computed(() => {
   return key ? t(key) : String(props.data?.type ?? '')
 })
 const isPrivate = computed(() => isPrivateNodeType(String(props.data?.type ?? '')))
-const isModelNode = computed(() => String(props.data?.type ?? '') === 'llm')
+/** 支持「默认值」错误策略与失败重试的节点：会调模型 / 请求外部服务的（与 Dify 一致） */
+const RETRYABLE_TYPES = ['llm', 'agent', 'http-request', 'code', 'tool', 'ai-km-mcp']
+const isRetryableNode = computed(() => RETRYABLE_TYPES.includes(String(props.data?.type ?? '')))
+const errorStrategies = computed<ErrorStrategy[]>(() =>
+  isRetryableNode.value ? [...ERROR_STRATEGIES, 'default-value'] : ERROR_STRATEGIES,
+)
+
+/** 「默认值」兜底输出（JSON 对象：输出变量名 → 值） */
+const defaultValueError = ref('')
+const defaultValueText = computed(() => {
+  const value = props.data?.default_value
+  if (value === undefined || value === null) return '{}'
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return '{}'
+  }
+})
+
+function onDefaultValueInput(text: string): void {
+  if (!props.data) return
+  try {
+    const parsed = JSON.parse(text || '{}')
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(t('panel.defaultValueObjectOnly'))
+    }
+    props.data.default_value = parsed as Record<string, unknown>
+    defaultValueError.value = ''
+  } catch (error) {
+    defaultValueError.value = (error as Error).message
+  }
+}
+
+/** 试跑入口（由编辑器 provide；独立使用本组件时为空则隐藏按钮） */
+const debugRun = inject(DEBUG_RUN_KEY, null)
+const canTryNode = computed(() => !!debugRun && !!props.data && debugRun.canRun(props.nodeId))
+const debugRunning = computed(() => (debugRun ? debugRun.isRunning() : false))
+
+function tryNode(downstream: boolean): void {
+  debugRun?.run(props.nodeId, downstream)
+}
 
 const errorStrategy = computed(() => props.data?.error_strategy ?? 'terminated')
 const retry = computed(() => props.data?.retry_config as BaseNodeData['retry_config'])

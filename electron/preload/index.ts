@@ -375,6 +375,128 @@ const dsh = {
       return subscribe('map-tiles:changed', cb)
     },
   },
+
+  /**
+   * 插件管理（P0：主进程插件宿主）。
+   * 变更类操作（enable/disable/reload/uninstall/setConfig）必须传 confirm=true：
+   * 插件与宿主同进程运行、不受工作区沙箱保护，UI 必须先展示权限并弹确认框。
+   */
+  plugin: {
+    list(): Promise<{
+      plugins: import('@/types/plugin').PluginSnapshot[]
+      rootDir: string
+      customRoot: boolean
+      services: string[]
+    }> {
+      return invokeIpc('plugin:list')
+    },
+    inspect(spec: string): Promise<{
+      ok: boolean
+      id: string | null
+      name: string | null
+      version: string | null
+      apiVersion: string | null
+      permissions: string[]
+      problem: string | null
+    }> {
+      return invokeIpc('plugin:inspect', { spec })
+    },
+    enable(id: string, confirm = false): Promise<import('@/types/plugin').PluginSnapshot> {
+      return invokeIpc('plugin:enable', { id, confirm })
+    },
+    disable(id: string, confirm = false): Promise<import('@/types/plugin').PluginSnapshot> {
+      return invokeIpc('plugin:disable', { id, confirm })
+    },
+    reload(id: string, confirm = false): Promise<import('@/types/plugin').PluginSnapshot> {
+      return invokeIpc('plugin:reload', { id, confirm })
+    },
+    uninstall(
+      id: string,
+      options?: { confirm?: boolean; deleteFiles?: boolean },
+    ): Promise<{ removed: boolean; deletedDir: boolean }> {
+      return invokeIpc('plugin:uninstall', { id, confirm: options?.confirm === true, deleteFiles: options?.deleteFiles === true })
+    },
+    getConfig(id: string): Promise<Record<string, unknown>> {
+      return invokeIpc('plugin:get-config', { id })
+    },
+    setConfig(id: string, patch: Record<string, unknown>, confirm = false): Promise<Record<string, unknown>> {
+      return invokeIpc('plugin:set-config', { id, patch, confirm })
+    },
+    logs(id: string): Promise<import('@/types/plugin').PluginLogLine[]> {
+      return invokeIpc('plugin:logs', { id })
+    },
+    /** 渲染层半边的 bundle 源码（P1：渲染层用 Blob URL 动态 import） */
+    clientBundle(id: string): Promise<{ entry: string; code: string }> {
+      return invokeIpc('plugin:client-bundle', { id })
+    },
+    /** 从本地文件夹安装插件（P2：主进程弹目录选择框）；replace=true 表示覆盖同名插件 */
+    install(options?: { confirm?: boolean; replace?: boolean }): Promise<{
+      cancelled: boolean
+      snapshot: import('@/types/plugin').PluginSnapshot | null
+    }> {
+      return invokeIpc('plugin:install', {
+        confirm: options?.confirm === true,
+        replace: options?.replace === true,
+      })
+    },
+    /** 选择插件目录（P2：与技能目录同一交互）；不传 path 则由主进程弹目录选择框 */
+    setRoot(options?: { confirm?: boolean; path?: string }): Promise<{ cancelled: boolean; rootDir: string }> {
+      return invokeIpc('plugin:set-root', {
+        confirm: options?.confirm === true,
+        ...(options?.path ? { path: options.path } : {}),
+      })
+    },
+    /** 恢复默认插件目录（userData/plugins） */
+    resetRoot(options?: { confirm?: boolean }): Promise<{ cancelled: boolean; rootDir: string }> {
+      return invokeIpc('plugin:reset-root', { confirm: options?.confirm === true })
+    },
+    openDir(id?: string): Promise<{ path: string }> {
+      return invokeIpc('plugin:open-dir', id ? { id } : undefined)
+    },
+    /**
+     * 插件文件能力（合同审核等需要"上传 + 预览 + 读法规"的插件）：
+     * 主进程只放行"用户在该插件里亲自选过"的路径（capability allowlist），且要求 fs 权限。
+     */
+    files: {
+      pick(options: { id: string; accept?: string; multiple?: boolean }): Promise<{
+        cancelled: boolean
+        files: Array<{ path: string; name: string; size: number }>
+      }> {
+        return ipcRenderer.invoke('plugin:files:pick', options)
+      },
+      pickDirectory(options: { id: string }): Promise<{
+        cancelled: boolean
+        dir: { path: string; name: string } | null
+      }> {
+        return ipcRenderer.invoke('plugin:files:pick-dir', options)
+      },
+      list(options: { id: string; path: string }): Promise<{
+        dir: string
+        entries: Array<{ name: string; path: string; isDir: boolean; size: number }>
+      }> {
+        return ipcRenderer.invoke('plugin:files:list', options)
+      },
+      readText(options: { id: string; path: string; maxBytes?: number }): Promise<{
+        path: string
+        text: string
+        pages: number
+        pdf: boolean
+      }> {
+        return ipcRenderer.invoke('plugin:files:read-text', options)
+      },
+      readBase64(options: { id: string; path: string; maxBytes?: number }): Promise<{
+        path: string
+        base64: string
+        size: number
+      }> {
+        return ipcRenderer.invoke('plugin:files:read-base64', options)
+      },
+    },
+    /** 订阅插件事件（状态变更 / 日志 / 通知） */
+    onEvent(cb: (ev: import('@/types/plugin').PluginEvent) => void): () => void {
+      return subscribe('plugin:event', cb)
+    },
+  },
 }
 
 // 使用 contextBridge 暴露（contextIsolation: true 时生效）

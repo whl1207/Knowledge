@@ -41,7 +41,7 @@ export type RunEvent =
   | { type: 'node-start'; nodeId: string; nodeType: string; title: string }
   | { type: 'node-stream'; nodeId: string; text: string }
   | { type: 'node-success'; nodeId: string; outputs: Record<string, unknown>; elapsedMs: number }
-  | { type: 'node-error'; nodeId: string; error: string; elapsedMs: number }
+  | { type: 'node-error'; nodeId: string; error: string; elapsedMs: number; /** 「默认值」策略兜底时一并给出输出，便于面板照常展示变量 */ outputs?: Record<string, unknown> }
   | { type: 'node-skip'; nodeId: string; reason: string }
   | { type: 'log'; level: 'info' | 'warning' | 'error'; message: string }
 
@@ -54,6 +54,16 @@ export interface RunOptions {
   onEvent?: (event: RunEvent) => void
   /** 只跑一次不重试（调试用） */
   noRetry?: boolean
+  /**
+   * 只运行这些节点（缺省 = 整张图）：
+   * 单节点试跑传 [nodeId]，「运行此节点及下游」传该节点与下游节点集。
+   */
+  scope?: Iterable<string>
+  /**
+   * 运行前预置的节点输出（变量检查器里的缓存值 / 手动改过的值）。
+   * 作用：试跑某个节点时用缓存补齐上游变量，不必重跑上游节点。
+   */
+  initialVariables?: Record<string, Record<string, unknown>>
 }
 
 export interface RunResult {

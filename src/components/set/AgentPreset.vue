@@ -222,6 +222,15 @@
         <div v-if="activeTab === 'tools'" class="ae-tab-body">
           <div class="cfg-row column cfg-box">
             <div class="cap-body">
+              <!-- 工具呈现方式（对齐 DeepSeek-Harness：一个 agent 只用一种呈现，此处按预设声明） -->
+              <div class="exec-config-item preset-pres-row">
+                <span class="exec-config-label">{{ store.locales === 'en' ? 'Presentation' : '呈现方式' }}</span>
+                <select v-model="presentationValue" class="loop-mode-select">
+                  <option value="native">{{ store.locales === 'en' ? 'One by one' : '逐个调用' }}</option>
+                  <option value="ptc">PTC</option>
+                </select>
+                <span class="exec-config-hint">{{ presentationHint }}</span>
+              </div>
               <div class="preset-tool-list">
                 <div v-for="t in toolRows" :key="t.name"
                   class="preset-tool-item"
@@ -475,11 +484,12 @@ const matchesKeyword = (c: any): boolean => {
 }
 const filteredContacts = computed(() => (store.agentPresets as any[]).filter(matchesKeyword))
 
-/** 列表头像图标：内置预设用各自图标（代码 / 办公），其余为用户图标 */
+/** 列表头像图标：内置预设用各自图标（代码 / 办公 / PTC），其余为用户图标 */
 const presetIcon = (p: any): string =>
   p?.id === BUILTIN_AGENT_PRESET_IDS.code ? 'fa-code'
     : p?.id === BUILTIN_AGENT_PRESET_IDS.office ? 'fa-briefcase'
-      : 'fa-user'
+      : p?.id === BUILTIN_AGENT_PRESET_IDS.ptc ? 'fa-file-code-o'
+        : 'fa-user'
 
 // ====== 标签 ======
 const tagInput = ref('')
@@ -544,6 +554,11 @@ interface AgentPreset {
   kbTopK?: number
   /** 多选技能路径数组（新建预设默认全选，与通用智能体一致） */
   selectedSkills: string[]
+  /**
+   * 工具呈现方式（对齐 DeepSeek-Harness 的 preset `mode`）：
+   * 'native'（缺省）= 逐个工具 schema 暴露；'ptc' = 只暴露 run_code，模型写程序经 SDK 调工具。
+   */
+  presentation?: 'native' | 'ptc'
   capabilities: AgentPresetCapabilities
   /** Agent 循环：单个回合最大 step 数（默认 500；未配置时回退通用智能体的循环轮数） */
   maxSteps?: number
@@ -598,6 +613,18 @@ const togglePresetTool = (tool: string) => {
     }
   }
 }
+
+// 工具呈现方式（缺省 native）：写入预设顶层 presentation 字段，运行时据此叠 SDK 段 / 补 run_code
+const presentationValue = computed<string>({
+  get: () => (selected.value?.presentation === 'ptc' ? 'ptc' : 'native'),
+  set: (v: string) => {
+    if (!selected.value) return
+    selected.value.presentation = v === 'ptc' ? 'ptc' : 'native'
+  },
+})
+const presentationHint = computed(() => (store.locales === 'en'
+  ? 'One by one: every enabled tool is exposed as a function schema. PTC: the model only sees run_code and composes the enabled tools inside a TypeScript program (run_code is turned on automatically and is not listed here).'
+  : '逐个调用：每个启用的工具以函数 schema 暴露给模型。PTC（程序化工具调用）：模型只看到 run_code，用一段 TypeScript 程序组合调用下面启用的工具（run_code 自动启用，不在列表中）。'))
 
 // ====== LLM 来源 ======
 const llmTypes = computed<string[]>(() => {
@@ -1572,6 +1599,9 @@ onMounted(async () => {
 }
 .preset-tool-item:hover { border-color: var(--fontActiveColor); }
 .preset-tool-item.on { border-color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent); }
+/* 工具呈现方式（native / PTC）：工具列表上方的单行配置 */
+.preset-pres-row { flex-shrink: 0; }
+.preset-pres-row .exec-config-label { min-width: 52px; font-weight: 600; }
 .preset-tool-icon {
   width: 22px; height: 22px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;

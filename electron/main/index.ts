@@ -29,6 +29,10 @@ import { skillService, parseSkillMetadata } from './skill-service'
 import { registerNamespacedIpc, sendToAll } from './ipc-registry'
 import { registerCoreTools, setWebSearchConfig, getWebSearchConfig, runWebSearch } from './tools'
 import { setAgentBroadcast } from './agent-loop'
+// 插件宿主（P0）：插件工具必须在建窗口/建会话之前注册好，见 app.whenReady
+import { initPluginHost, registerPluginIpc } from './plugin-ipc'
+import { registerPluginFilesIpc } from './plugin-files'
+import { pluginHost } from './plugin-host'
 // 局域网访客（网页端）主机侧执行层（P3 令牌/并发 + P4 智能体桥，见该文件头注释）
 import {
   acquireLanSlot,
@@ -204,8 +208,8 @@ async function createWindow() {
     title: 'AI-KM',
     width: 900,
     height: 600,
-    minWidth: 300,
-    minHeight: 350,
+    minWidth: 350,
+    minHeight: 300,
     icon: join(publicDir, 'favicon.ico'),
     // 消除闪白：初始不显示，首帧渲染完成（ready-to-show）后再显示；后备背景用当前主题色
     show: false,
@@ -311,6 +315,11 @@ app.whenReady().then(async () => {
   registerCoreTools()
   // 命名空间 IPC 通道（agent:* / sessionLog:* / skill:* / tools:*）
   registerNamespacedIpc()
+  // 插件通道（plugin:*）与插件宿主（P0）：宿主在窗口创建前加载，
+  // 保证「首个 agent 会话就能看到插件工具」；加载失败不阻断启动（降级为无插件）。
+  registerPluginIpc()
+  registerPluginFilesIpc()
+  await initPluginHost().catch((e) => console.error('[plugin] 宿主初始化失败（降级为无插件）:', e))
   // 本地 ONNX TTS（Kokoro / Piper）主进程服务
   registerTtsIpc()
   // 局域网协同文件编辑（WebSocket 服务器 + 房间管理）
@@ -447,6 +456,8 @@ app.on('will-quit', () => {
   disposeTtsService()
   stopCollab().catch(() => {})
   stopRemoteFsAll()
+  // 插件宿主：卸载全部插件（撤销其注册与后台资源）
+  pluginHost.dispose().catch((err) => console.error('[plugin] dispose error', err))
 })
 
 // ==================== IPC 处理器 ====================

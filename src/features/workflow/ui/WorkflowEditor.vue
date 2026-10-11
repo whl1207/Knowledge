@@ -67,10 +67,16 @@
         :document="doc"
         :state="runState"
         :history="runHistory"
+        :var-cache="debugCache"
+        :var-edits="debugEdits"
         :readonly="!!readonly"
         @run="runWorkflow"
         @stop="stopRun"
         @close="panelMode = 'props'"
+        @debug-run="onDebugRun"
+        @edit-var="onEditVar"
+        @reset-var="onResetVar"
+        @reset-vars="debugEdits = {}"
       />
       <AiPanel
         v-else-if="panelMode === 'ai'"
@@ -132,7 +138,6 @@
         <button class="wf-btn wf-btn--icon" :disabled="readonly || !hasSelection" :title="t('flow.deleteSelected')" :aria-label="t('flow.deleteSelected')" @click="deleteSelection">
           <i class="fa fa-trash-o"></i>
         </button>
-        <span v-if="isDirty" class="wf-statusbar__dirty" :title="t('flow.unsaved')">●</span>
         <button
           v-if="!readonly"
           class="wf-btn wf-btn--icon wf-btn--primary"
@@ -143,6 +148,7 @@
         >
           <i class="fa fa-save"></i>
         </button>
+        <span v-if="isDirty" class="wf-statusbar__dirty" :title="t('flow.unsaved')">●</span>
         <span v-if="readonly" class="wf-statusbar__tag">{{ t('flow.readonly') }}</span>
       </div>
 
@@ -151,10 +157,10 @@
           {{ t('flow.nodes') }} {{ nodeCount }} · {{ t('flow.edges') }} {{ edgeCount }}
         </span>
         <span class="wf-statusbar__sep" />
+        <button class="wf-statusbar__zoom" :title="t('flow.zoomReset')" @click="zoomTo(1, { duration: 150 })">{{ zoomPercent }}</button>
         <button class="wf-btn wf-btn--icon" :disabled="!doc" :title="t('flow.zoomOut')" :aria-label="t('flow.zoomOut')" @click="zoomOut({ duration: 120 })">
           <i class="fa fa-search-minus"></i>
         </button>
-        <button class="wf-statusbar__zoom" :title="t('flow.zoomReset')" @click="zoomTo(1, { duration: 150 })">{{ zoomPercent }}</button>
         <button class="wf-btn wf-btn--icon" :disabled="!doc" :title="t('flow.zoomIn')" :aria-label="t('flow.zoomIn')" @click="zoomIn({ duration: 120 })">
           <i class="fa fa-search-plus"></i>
         </button>
@@ -230,13 +236,17 @@ import AiPanel from './AiPanel.vue'
 import AppSettingsDialog from './AppSettingsDialog.vue'
 import { WorkflowRunner } from '@/features/workflow/engine/runner'
 import {
+  DEBUG_RUN_KEY,
   EDITOR_LOCK_KEY,
   RUN_STATE_KEY,
   applyRunEvent,
   createRunUiState,
+  isDebuggableType,
   mergeRunStateIntoNodes,
+  mergeVarSnapshot,
   readRunStateFromNodes,
   snapshotRun,
+  type DebugRunActions,
   type RunHistoryEntry,
   type RunUiState,
 } from './runState'
@@ -273,7 +283,18 @@ const loadError = ref('')
 const isDirty = ref(false)
 const selectedNodeId = ref<string | null>(null)
 const selectionVersion = ref(0)
+/**
+ * 变量检查器：上次运行产出的变量（自动刷新）与手动改过的值（edits 优先）。
+ * 试跑节点时用两者合并的结果预置变量池 —— 上游不必重跑。
+ */
+const debugCache = ref<Record<string, Record<string, unknown>>>({})
+const debugEdits = ref<Record<string, Record<string, unknown>>>({})
 let loading = false
+/**
+ * 已落盘（或刚载入）的内容签名：脏标记与它比较。
+ * 只用「草稿签名 ≠ 基线」判定未保存，避免刚打开文件就因为载入本身被标记成未保存。
+ */
+let cleanSignature = ''
 
 const ctx = ref<{ open: boolean; x: number; y: number; target: 'pane' | 'node'; nodeId: string }>({
   open: false,
@@ -409,6 +430,15 @@ function markDirty(): void {
   }
 }
 
+/** 把当前内容作为「已保存」基线（载入完成 / 保存成功后调用），清除脏标记 */
+function markClean(): void {
+  cleanSignature = graphSignature()
+  if (isDirty.value) {
+    isDirty.value = false
+    emit('dirty', false)
+  }
+}
+
 /**
  * 容器节点（迭代 / 循环）手动缩放：手柄按下后由编辑器接管指针，
  * 屏幕位移要除以当前缩放才等于画布坐标位移。
@@ -497,8 +527,7 @@ function loadFromContent(content: string): void {  loading = true
       doc.value = result.document
       setGraph(result.document)
     }
-    isDirty.value = false
-    emit('dirty', false)
+    markClean()
   } catch (error) {
     doc.value = null
     flowNodes.value = []
@@ -540,8 +569,7 @@ async function save(): Promise<void> {  const current = doc.value
   try {
     const ok = await window.ipcRenderer.invoke('saveFile', props.path, content)
     if (!ok) throw new Error('saveFile 返回失败')
-    isDirty.value = false
-    emit('dirty', false)
+    markClean()
     emit('saved', props.path, content)
     void window.ipcRenderer.invoke('notify-file-changed', { path: props.path, content }).catch(() => {})
     ElMessage.success(t('flow.saved'))
@@ -683,8 +711,97 @@ function stopRun(): void {
   runState.value.running = false
 }
 
+// ── 变量检查器 / 单节点试跑 ──────────────────────────────
+
+/** 检查器可见的变量：上次运行产出 ∪ 手动改过的值（edits 优先） */
+const variableSnapshot = computed(() => mergeVarSnapshot(debugCache.value, debugEdits.value))
+
+/** 运行结束后刷新缓存：把本次跑到的节点输出收进变量检查器 */
+function refreshDebugCache(): void {
+  const next = { ...debugCache.value }
+  for (const [nodeId, record] of Object.entries(runState.value.records)) {
+    if (!record.outputs) continue
+    if (record.status !== 'success' && record.status !== 'error') continue
+    try {
+      next[nodeId] = JSON.parse(JSON.stringify(record.outputs))
+    } catch {
+      next[nodeId] = { ...record.outputs }
+    }
+  }
+  debugCache.value = next
+}
+
+function onEditVar(payload: { nodeId: string; name: string; value: unknown }): void {
+  const nodeEdits = { ...(debugEdits.value[payload.nodeId] ?? {}) }
+  nodeEdits[payload.name] = payload.value
+  debugEdits.value = { ...debugEdits.value, [payload.nodeId]: nodeEdits }
+}
+
+function onResetVar(payload: { nodeId: string; name: string }): void {
+  const nodeEdits = { ...(debugEdits.value[payload.nodeId] ?? {}) }
+  delete nodeEdits[payload.name]
+  const next = { ...debugEdits.value }
+  if (Object.keys(nodeEdits).length) next[payload.nodeId] = nodeEdits
+  else delete next[payload.nodeId]
+  debugEdits.value = next
+}
+
+/** 不参与试跑的节点：开始 / 结束 / 直接回复（与 Dify 一致），容器内部节点由容器驱动 */
+function canDebugRun(nodeId: string): boolean {
+  if (props.readonly || runState.value.running || !doc.value) return false
+  const node = flowNodes.value.find((n) => n.id === nodeId)
+  if (!node || node.parentNode) return false
+  return isDebuggableType(String(node.data?.dsl?.type ?? ''))
+}
+
+/** 某节点的下游节点集（顺连线广度优先；容器内部节点由容器驱动，不在此展开） */
+function downstreamOf(nodeId: string): string[] {
+  const out: string[] = []
+  const seen = new Set([nodeId])
+  const queue = [nodeId]
+  while (queue.length) {
+    const current = queue.shift() as string
+    for (const edge of flowEdges.value) {
+      if (edge.source !== current || seen.has(edge.target)) continue
+      seen.add(edge.target)
+      out.push(edge.target)
+      queue.push(edge.target)
+    }
+  }
+  return out
+}
+
+/** 试跑：只跑该节点（或连同下游），变量池用检查器缓存的上游值 */
+function onDebugRun(payload: { nodeId: string; downstream: boolean }): void {
+  if (!canDebugRun(payload.nodeId)) return
+  const ids = [payload.nodeId, ...(payload.downstream ? downstreamOf(payload.nodeId) : [])]
+  panelMode.value = 'run'
+  void executeRun({ scope: ids, recordHistory: false })
+}
+
+/** 属性面板里的「试跑此节点 / 运行此节点及下游」入口 */
+provide(DEBUG_RUN_KEY, {
+  canRun: (nodeId: string) => canDebugRun(nodeId),
+  isRunning: () => runState.value.running,
+  run: (nodeId: string, downstream: boolean) => onDebugRun({ nodeId, downstream }),
+} satisfies DebugRunActions)
+
 /** 运行工作流：先把画布状态同步进文档，保证跑的就是所见内容 */
 async function runWorkflow(inputs: Record<string, unknown>): Promise<void> {
+  await executeRun({ inputs, recordHistory: true })
+}
+
+/**
+ * 统一的执行入口。
+ * - 整图运行：`scope` 省略，输入来自开始节点表单，结果进运行历史；
+ * - 试跑（单节点 / 运行区段）：`scope` 指定节点集，变量池用变量检查器的缓存预置，
+ *   不重跑上游、不进运行历史（历史里的条目始终是「整图运行」的快照）。
+ */
+async function executeRun(options: {
+  inputs?: Record<string, unknown>
+  scope?: string[]
+  recordHistory?: boolean
+}): Promise<void> {
   if (props.readonly) return
   const current = doc.value
   if (!current) return
@@ -697,7 +814,9 @@ async function runWorkflow(inputs: Record<string, unknown>): Promise<void> {
   const runner = new WorkflowRunner({ store, t })
   try {
     await runner.run(current, {
-      inputs,
+      inputs: options.inputs ?? {},
+      scope: options.scope,
+      initialVariables: options.scope ? variableSnapshot.value : undefined,
       signal: controller.signal,
       onEvent: (event) => {
         applyRunEvent(update, event)
@@ -707,14 +826,15 @@ async function runWorkflow(inputs: Record<string, unknown>): Promise<void> {
   } catch (error) {
     applyRunEvent(update, {
       type: 'run-error',
-      error: (error as Error)?.message || String(error),
+      error: (error as Error)?.message ?? String(error),
       elapsedMs: 0,
     })
     logSeq = update.nextLogId
   } finally {
     if (runAbort === controller) runAbort = null
+    refreshDebugCache()
     // 保留最近 5 次运行，便于对比（仅内存）
-    if (runState.value.status !== 'running') {
+    if (options.recordHistory !== false && runState.value.status !== 'running') {
       runHistory.value = [snapshotRun(runState.value), ...runHistory.value].slice(0, 5)
     }
   }
@@ -854,7 +974,18 @@ function graphSignature(): string {
 
 watch(
   () => graphSignature(),
-  () => markDirty(),
+  (signature) => {
+    if (loading) return
+    // 与「已载入 / 已保存」的内容一致（刚打开文件、撤销回原样）→ 不算未保存
+    if (signature === cleanSignature) {
+      if (isDirty.value) {
+        isDirty.value = false
+        emit('dirty', false)
+      }
+      return
+    }
+    markDirty()
+  },
 )
 </script>
 

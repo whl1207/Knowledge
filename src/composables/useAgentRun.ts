@@ -8,8 +8,8 @@
  *
  * 说明：技能模式与智能体模式已合并（parseSkillIntent 自动识别 $技能名 / 列表 / help）；
  * Agent 预设模式（handleAgentPresetMode）与智能体模式共用同一 agent 循环 +
- * 统一工具注册表；PTC（程序化工具调用 / Code Mode）为 handlePtcMode，
- * 仅改变「工具呈现」（run_code）与系统提示（叠加 tools:sdk 段）。
+ * 统一工具注册表；PTC（程序化工具调用 / Code Mode）由**预设的呈现方式**声明
+ * （presentation='ptc'，仅改变 run_code 呈现与系统提示叠加的 tools:sdk 段）。
  */
 
 import { ref, type Ref } from 'vue'
@@ -32,8 +32,9 @@ import {
   parseSkillIntent,
 } from '@/lib/agent/skill'
 import { assembleAgentSystemPrompt, buildMcpServersContext, ensureAgentSkills } from '@/lib/agent/promptContext'
-// PTC（Code Mode）：系统提示叠加 tools:sdk 段（SDK 声明由主进程生成）
-import { buildPtcSystemPrompt } from '@/lib/agent/ptc'
+// 工具呈现方式：PTC = 补 run_code 白名单 + 系统提示叠加 tools:sdk 段（统一实现在 lib/agent/presentation）
+import { applyToolPresentation } from '@/lib/agent/presentation'
+import { presetPresentation } from '@/lib/agent/ptc'
 import type { Chat, ChatMessage, UploadItem } from '@/types/chat'
 import type { AgentOptions } from '@/types/agent'
 import { normalizeAgentMaxSteps, resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
@@ -777,65 +778,6 @@ export function useAgentRun(deps: AgentRunDeps) {
     await startAgentSessionInChat(options, withFileAttachments(userInput, fileAttachments), images)
   }
 
-  /**
-   * PTC 模式（程序化工具调用 / Code Mode）：与自主规划同一套基础提示词与能力目录，
-   * 差别只在「工具呈现」：坍缩为单个 run_code（toolsPresentation='code' + 系统提示叠加 tools:sdk 段）。
-   * 由本模式直接负责：能力目录 = 全局工具白名单；SDK 声明按同一白名单生成（不含 run_code 自身）。
-   * 步数沿用唯一数据源（设置 → 智能体预设 → 通用智能体的循环轮数），不再自成一套。
-   */
-  const handlePtcMode = async (message: string) => {
-    const { content: msgContent, images, fileAttachments } = buildUserMessageFromUploads(message)
-    const userMessage: ChatMessage = { role: 'user', content: msgContent, timestamp: Date.now(), images, fileAttachments }
-    const chat = getCurrentChat()
-    chat.messages.push(userMessage)
-    chat.isGenerating = true
-    inputText.value = ''
-    currentUploads.value = []
-    autoScrollEnabled.value = true
-    scrollToBottom()
-    saveChats()
-
-    const llmType = chat.config.llmType || store.AIconfig.llm.type
-    const { provider, config, llmConfig } = buildAgentProviderConfig(llmType)
-    const activeMcpServers = getActiveMcpServers()
-    // 能力目录（SDK 暴露的工具 = 该白名单）：未配置全局白名单时用默认标准工具集
-    const catalog = store.agentTools === null ? [...SKILL_AGENT_DEFAULT_TOOLS] : [...store.agentTools]
-    // run_code 是呈现工具，必须进 tools（引擎白名单守卫会校验），但不写进 SDK 声明
-    const toolsWithPtc = catalog.includes('run_code') ? catalog : [...catalog, 'run_code']
-    const mcpCtx = (catalog.includes('mcp_call') && activeMcpServers.length > 0)
-      ? await buildMcpServersContext(activeMcpServers, store.locales)
-      : ''
-    const assembled = assembleAgentSystemPrompt({
-      store,
-      tools: toolsWithPtc,
-      enabledSkills: await ensureAgentSkills(store),
-      mcpContext: mcpCtx,
-    })
-    // tools:sdk 段（主进程生成；非桌面版返回空，静默降级为普通智能体提示词）
-    let sdkDocs = ''
-    try {
-      sdkDocs = await agentBridge.getSdkDocs(undefined, catalog)
-    } catch { /* SDK 不可用不影响执行 */ }
-    const options: AgentOptions = {
-      systemPrompt: buildPtcSystemPrompt({ basePrompt: assembled.systemPrompt, sdkDocs }),
-      provider,
-      config,
-      llmConfig,
-      tools: assembled.tools,
-      cwd: assembled.cwd,
-      label: 'agent-ptc',
-      toolsPresentation: 'code',
-      // 步数：唯一数据源 = 「智能体预设 → 通用智能体」的循环轮数
-      maxSteps: normalizeAgentMaxSteps(store.generalAgentMaxSteps),
-      seedHistory: buildSeedHistory(chat),
-      sandboxMode: store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe'),
-      disabledSkills: store.disabledSkills || [],
-      mcpServerIds: activeMcpServers.map((s: any) => s.id),
-      mcpServerConfigs: activeMcpServers,
-    }
-    await startAgentSessionInChat(options, withFileAttachments(message, fileAttachments), images)
-  }
-
   /** 技能模式（新路径）：技能指令组装为 systemPrompt，由 agent 循环驱动 */
   const handleSkillAgentLoop = async (userInput: string, skillName: string | null) => {
     const skill = skillName ? skillManager.getSkill(skillName) : undefined
@@ -942,18 +884,26 @@ export function useAgentRun(deps: AgentRunDeps) {
     const tools = assembled.tools
     const cwd = assembled.cwd
 
+    // 呈现方式（预设声明）：'ptc' → 只暴露 run_code + 叠加 tools:sdk 段；缺省 native 原样透传
+    const presented = await applyToolPresentation({
+      basePrompt: systemPrompt,
+      catalog: tools,
+      presentation: presetPresentation(preset),
+    })
+
     // 执行跟随聊天右上角选择的模型来源/种类：选中预设时已把预设模型写入聊天配置，
     // 此后右上角再改动即改聊天配置，智能体执行使用变化后的来源/模型（预设字段仅作回退）。
     const llmType = chat.config.llmType || preset.llmType || store.AIconfig.llm.type
     const { provider, config, llmConfig } = buildAgentProviderConfig(llmType)
 
     const options: AgentOptions = {
-      systemPrompt,
+      systemPrompt: presented.systemPrompt,
       provider,
       config,
       llmConfig,
-      tools,
+      tools: presented.tools,
       cwd,
+      toolsPresentation: presented.toolsPresentation,
       label: preset.name || 'agent-preset',
       kbPaths: preset.capabilities?.knowledgeBaseFiles || [],
       kbTopK: typeof preset.kbTopK === 'number' ? preset.kbTopK : 5,
@@ -1022,8 +972,6 @@ export function useAgentRun(deps: AgentRunDeps) {
     /** 是否网页端（无 ipcRenderer）：供 home 决定发送前检查项 */
     isLanGuest,
     handleAgentPresetMode,
-    /** PTC 模式（程序化工具调用）：同一 agent 循环 + run_code 呈现 */
-    handlePtcMode,
     /** 收集当前聊天里正在执行的 agent 会话 id（单智能体 + 集群发言中成员） */
     collectRunningAgentSessions,
     /** 运行中「引导」：把输入作为 steer 投递给运行中的会话（下一个 step 生效），返回受理数 */

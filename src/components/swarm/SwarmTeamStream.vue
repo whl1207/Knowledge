@@ -1,13 +1,15 @@
 <template>
   <div class="swarm-team">
-    <!-- 顶部：房间信息 + 工作台页签 -->
+    <!-- 顶部：聊天名称（由 chat-header 合并进来）+ 工作台页签 -->
     <div class="st-head">
       <div class="st-title">
-        <i class="fa fa-users"></i>
-        <span>{{ zh ? '项目组' : 'Team' }}</span>
-        <span v-if="room" class="st-sub">
-          {{ room.members.length }} {{ zh ? '名成员' : 'members' }} · {{ episodeLabel }}
-        </span>
+        <slot name="head-left">
+          <i class="fa fa-users"></i>
+          <span>{{ zh ? '项目组' : 'Team' }}</span>
+          <span v-if="room" class="st-sub">
+            {{ room.members.length }} {{ zh ? '名成员' : 'members' }} · {{ episodeLabel }}
+          </span>
+        </slot>
       </div>
       <div class="st-tabs">
         <button class="st-btn" :class="{ active: tab === 'msg' }" @click="setTab('msg')">
@@ -25,6 +27,16 @@
         <button class="st-btn" :class="{ active: tab === 'comm' }" @click="setTab('comm')">
           {{ zh ? '通信' : 'Comm' }}
         </button>
+        <!-- 扩展页签（插件经 swarm.workbench.tab 槽位追加；内置 5 个页签保持不变） -->
+        <button
+          v-for="t in extraTabs"
+          :key="t.key"
+          class="st-btn"
+          :class="{ active: tab === t.key }"
+          @click="setTab(t.key)"
+        >
+          {{ zh ? t.titleZh : t.titleEn }}
+        </button>
       </div>
     </div>
 
@@ -32,7 +44,7 @@
       <!-- 消息流（独立 UI；底部发送栏复用聊天输入框） -->
       <div v-show="tab === 'msg'" ref="streamEl" class="st-stream scoll">
         <div v-if="!visibleMessages.length" class="st-empty">
-          {{ zh ? '发送一条任务，Lead 会自动拆解并派活；成员之间用 send_message 协作。' : 'Send a task; the Lead will plan and assign.' }}
+          {{ zh ? '在下方输入框描述你想完成的目标：Lead 会把它拆成任务并按依赖分派给成员，成员之间也会互相沟通协作——这里实时显示大家的进展与产出。' : 'Describe the goal you want done in the input box below: the Lead splits it into tasks and assigns them to members by dependency, and members also message each other. Progress and outputs show up here live.' }}
         </div>
         <template v-for="(m, i) in visibleMessages" :key="i">
           <!-- 协议事件细条（折叠展示） -->
@@ -217,7 +229,7 @@
         </template>
 
         <!-- 通信流 -->
-        <template v-else>
+        <template v-else-if="tab === 'comm'">
           <div v-if="commGraph" class="comm-graph">
             <svg :width="commGraph.width" :height="commGraph.height">
               <defs>
@@ -253,6 +265,15 @@
             <div class="st-card-sub">{{ c.summary }}</div>
           </div>
         </template>
+
+        <!-- 扩展页签（插件贡献；渲染在同一个工作台面板内） -->
+        <template v-else-if="activeExtraTab">
+          <PluginBoundary :label="activeExtraTab.titleZh || activeExtraTab.key">
+            <template #default="{ attempt }">
+              <component :is="activeExtraTab.component" :key="attempt" />
+            </template>
+          </PluginBoundary>
+        </template>
       </div>
     </div>
   </div>
@@ -275,6 +296,9 @@ import { roomOf, ensureRoom, buildMembers } from '@/store/swarmRoom'
 import { deriveMembers } from '@/composables/swarm/useSwarmMembers'
 import { renderMarkdown } from '@/lib/markdown/render'
 import { ensureMermaidInit, getCachedSvg, renderMermaidSvg } from '@/lib/markdown/mermaid'
+import { useAllSlotEntries } from '@/lib/plugin/useSlots'
+import PluginBoundary from '@/components/plugin/PluginBoundary.vue'
+import { SWARM_WORKBENCH_SLOT } from '@/lib/plugin/coreSlots'
 import type { SwarmRoom } from '@/types/swarmRoom'
 
 const props = defineProps<{ chat: any }>()
@@ -283,8 +307,12 @@ const zh = computed(() => store.locales !== 'en')
 
 type LaneTab = 'msg' | 'lane' | 'roster' | 'tasks' | 'comm'
 /** 消息与工作台（泳道/名册/任务/通信）是**并列标签**，一次只显示一个（全宽） */
-const tab = ref<LaneTab>('msg')
-const setTab = (t: LaneTab) => { tab.value = t }
+const tab = ref<LaneTab | string>('msg')
+const setTab = (t: string) => { tab.value = t }
+
+/** 扩展页签（插件贡献；内置 5 个页签保持原实现不变） */
+const extraTabs = useAllSlotEntries(SWARM_WORKBENCH_SLOT)
+const activeExtraTab = computed(() => extraTabs.value.find((t) => t.key === tab.value))
 
 const room = computed<SwarmRoom | null>(() => roomOf(props.chat?.id))
 const streamEl = ref<HTMLElement | null>(null)
@@ -660,15 +688,18 @@ watch(
 .st-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  padding: 6px 10px;
+  /* 与其它模式的 .chat-header 一致：等高（40px 内容 + 上下 1px 内边距 + 1px 下边框）、左右同为 5px 内边距 */
+  min-height: 40px;
+  box-sizing: content-box;
+  padding: 1px 5px;
   border-bottom: 1px solid var(--borderColor);
   flex: 0 0 auto;
 }
-.st-title { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+/* 左侧承载聊天列表开关 + 聊天标题（可伸缩），右侧页签固定不压缩 */
+.st-title { display: flex; align-items: center; gap: 6px; font-size: 13px; flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .st-sub { font-size: 11px; opacity: 0.6; }
-.st-tabs { display: flex; gap: 4px; }
+.st-tabs { display: flex; gap: 4px; flex: 0 0 auto; }
 .st-btn {
   font-size: 12px;
   padding: 2px 8px;
@@ -679,7 +710,7 @@ watch(
   color: inherit;
   cursor: pointer;
 }
-.st-btn.active { border-color: var(--menuActiveColor); color: var(--menuActiveColor); }
+.st-btn.active { border-color: var(--menuActiveColor); color: var(--fontActiveColor); }
 
 .st-body-row { position: relative; flex: 1 1 auto; min-height: 0; }
 .st-stream { position: absolute; inset: 0; padding: 8px 14px; overflow: auto; }

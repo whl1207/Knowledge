@@ -23,6 +23,8 @@ import { agentBridge, type AgentSessionView } from '@/platform/agentBridge'
 import { assembleAgentSystemPrompt, buildMcpServersContext, ensureAgentSkills, workspaceRoot } from '@/lib/agent/promptContext'
 import { renderQuestionMarkdown, escapeHtml } from '@/lib/markdown/render'
 import { toolsFromCapabilities } from '@/lib/agent/capabilities'
+import { applyToolPresentation } from '@/lib/agent/presentation'
+import { presetPresentation } from '@/lib/agent/ptc'
 import { resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
 import { resolveLlmSource } from '@/shared/llmSources'
 
@@ -500,15 +502,27 @@ async function executeAgent(agentIdx: number, prompt: string, opts: AgentRunOpts
       : buildProviderConfig(a.llmType, a.model)
     const tools = isGeneric ? [] : [...buildSwarmTools(a), ...(opts.extraTools || [])]
     const mcp = isGeneric ? null : agentMcpConfig(a)
+    // 成员关联的预设：呈现方式（PTC）与循环轮数都跟随它（成员自身不声明呈现）
+    const memberPreset = (store.agentPresets || []).find((c: any) => c.id === (a as any).presetId)
+    const scope = `swarm-${displayName}`
+    const presented = isGeneric
+      ? { systemPrompt: sysContent, tools, toolsPresentation: 'native' as const }
+      : await applyToolPresentation({
+          basePrompt: sysContent,
+          catalog: tools,
+          presentation: presetPresentation(memberPreset),
+          scope,
+        })
     const options: AgentOptions = {
-      systemPrompt: sysContent,
+      systemPrompt: presented.systemPrompt,
       provider,
       config,
       llmConfig: {
         ...llmConfig,
         temperature: isGeneric ? llmConfig.temperature : (typeof a.temperature === 'number' ? a.temperature : llmConfig.temperature),
       },
-      tools,
+      tools: presented.tools,
+      toolsPresentation: presented.toolsPresentation,
       cwd: workspaceRoot(store) || undefined,
       label: `swarm:${displayName}`,
       kbPaths: isGeneric ? undefined : (a.capabilities.accessKnowledgeBase ? a.capabilities.knowledgeBaseFiles : undefined),
@@ -518,12 +532,9 @@ async function executeAgent(agentIdx: number, prompt: string, opts: AgentRunOpts
       mcpServerConfigs: mcp?.configs,
       mcpEquipmentIds: mcp?.equipmentIds,
       sandboxMode: store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe'),
-      scope: `swarm-${displayName}`,
+      scope,
       // 循环轮数：预设自带轮数为唯一例外，其余（含通用/自定义成员）一律用唯一数据源（不再写死 20）
-      maxSteps: resolveAgentMaxSteps(
-        (store.agentPresets || []).find((c: any) => c.id === (a as any).presetId)?.maxSteps,
-        store.generalAgentMaxSteps,
-      ),
+      maxSteps: resolveAgentMaxSteps(memberPreset?.maxSteps, store.generalAgentMaxSteps),
     }
     view = await agentBridge.create(options)
   } catch (err: any) {

@@ -17,6 +17,7 @@ import {
   normalizeLanGuestPolicy,
 } from '@/shared/lanGuest'
 import { llmSourceLabel, normalizeLlmType } from '@/shared/llmSources'
+import { presetPresentation } from '@/lib/agent/ptc'
 
 interface Props {
   store: any
@@ -341,6 +342,10 @@ const guestModeOn = (m: string) => Array.isArray(guest.modes) && guest.modes.inc
 
 /** 访客是否可用某 Agent 预设 */
 const guestPresetOn = (id: string) => Array.isArray(guest.presetIds) && guest.presetIds.includes(id)
+
+/** 可下发给访客的预设：PTC 预设不下发（访客档案是逐个调用的只读工具集，没有 run_code / SDK 段） */
+const shareablePresets = computed(() =>
+  (store.agentPresets || []).filter((p: any) => presetPresentation(p) !== 'ptc'))
 
 /** 勾选/取消「访客可用智能体」（改动即时下发：主进程据此允许访客建对应预设会话） */
 const toggleGuestPreset = (preset: any) => {
@@ -882,13 +887,13 @@ onBeforeUnmount(() => {
       </div>
       <!-- ② 访客可选的智能体（通用智能体固定开放；其余为 Agent 预设，需在此勾选） -->
       <div class="form-group perm-list-row">
-        <label>{{ store.locales=='zh'?'可用智能体' : 'Available agents' }}</label>
+        <label :title="store.locales=='zh'?'网页端访客可选的智能体；PTC 预设不下发（访客只能逐个调用工具）':'Agents a web guest may pick; PTC presets are not shared (guests call tools one by one)'">{{ store.locales=='zh'?'可用智能体' : 'Available agents' }}</label>
         <div class="perm-chips">
           <div class="perm-chip on disabled" :title="store.locales=='zh'?'通用智能体始终可用（自主规划 + 上方工具白名单）':'Always available (autonomous planning + the tool whitelist above)'">
             <span class="perm-chip-name">{{ store.locales=='zh'?'通用智能体' : 'General Agent' }}</span>
             <span class="perm-switch on"><i class="perm-switch-knob"></i></span>
           </div>
-          <div v-for="p in store.agentPresets || []" :key="p.id"
+          <div v-for="p in shareablePresets" :key="p.id"
                class="perm-chip"
                :class="{ on: guestPresetOn(p.id) }"
                :title="presetChipTitle(p)"

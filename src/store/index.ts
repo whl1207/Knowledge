@@ -18,6 +18,11 @@ import { deepSeekConfig, deepSeekStyleOf, migrateDeepSeekMerge, normalizeLlmType
 // 局域网访客（网页端）能力白名单：默认只读策略 + 旧存档归一化见 src/shared/lanGuest.ts
 import { defaultLanGuestPolicy, normalizeLanGuestPolicy } from '@/shared/lanGuest'
 import { ElMessage } from 'element-plus'
+// 主面板 key 顺序（设置页「功能开关」据此隐藏/显示；当前面板被隐藏时自动跳到第一个可见面板）
+// 来源改为 panel.main 槽位注册表：内置面板 + 插件贡献同一份数据。
+// ⚠️ 必须走 vue-free 的 panelRegistry（不能 import panels.ts —— 那会形成
+// store → panels → home.vue → store 的循环依赖，实测会抛 "Cannot access 'usestore' before initialization"）
+import { panelKeys } from '@/lib/plugin/panelRegistry'
 declare global {
   interface Window {
     _refreshTimer: NodeJS.Timeout | null;
@@ -37,8 +42,6 @@ export function markRawTree(tree: any[]): any[] {
   return markRaw(walk(tree))
 }
 // 主面板导航按钮 key 顺序（设置页「功能开关」据此隐藏/显示；当前面板被隐藏时自动跳到第一个可见面板）
-const MAIN_PANEL_KEYS = ['主页', '知识管理', '知识处理', '学习']
-
 /** 本地网页（.html / .htm）：默认一律交给内置浏览器（浏览器 Agent）打开渲染，而不是文件视图 */
 function isLocalHtmlPath(p: any): boolean {
     return /\.html?$/i.test(String(p || ''))
@@ -1221,10 +1224,6 @@ export const usestore = defineStore('data', {
                     asr: savedConfig.asr ? { ...this.AIconfig.asr, ...savedConfig.asr } : this.AIconfig.asr,
                 }
 
-                // 诊断：确认 loadConfig 后内存里的来源类型（排查「重启后回退 ollama」）
-                console.warn('[AIconfig] loadConfig 完成，内存 llm.type =', this.AIconfig?.llm?.type,
-                    '（存档 llm.type =', savedConfig?.llm?.type, '）')
-
                 // 迁移（标点校验全局化）：旧版本 useLLMPunctuation 布尔 + funasr.puncDir 子配置
                 // → 新版本 asr.punctMode（'none'|'local'|'llm'）全局 + asr.puncDir 全局目录
                 {
@@ -1978,7 +1977,7 @@ export const usestore = defineStore('data', {
                 this.hiddenNavs.splice(i, 1)
             }
             if (!this.isNavVisible(this.mainPanel)) {
-                const first = MAIN_PANEL_KEYS.find(k => this.isNavVisible(k))
+                const first = panelKeys().find(k => this.isNavVisible(k))
                 if (first) this.mainPanel = first
             }
             this.saveConfig()

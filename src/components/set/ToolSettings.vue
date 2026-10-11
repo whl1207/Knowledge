@@ -74,8 +74,8 @@ const skillManager = getSkillManager(store)
 // 工具列表头部完整说明（悬停提示）
 const toolHeadHint = computed(() => {
   return store.locales === 'zh'
-    ? '配置「智能体」模式（Agent 循环）的全局默认工具白名单：未配置=使用全部默认工具，全部关闭=模型不调用任何工具，仅启用列表中的工具。\n「询问用户 / 更新计划 / 任务清单」也可在此开关。\n「Agent 预设」模式使用预设自身的能力槽配置，不受此白名单影响。\n「PTC 程序化调用」模式自动启用 run_code（呈现工具，不在此配置）；其程序内 SDK 可用的能力 = 本白名单。'
-    : 'Configure the global default tool whitelist for the Agent Loop mode: unset = all default tools, all off = no tools callable, list = only listed tools.\nAsk User / Update Plan / Update Todo can also be toggled here.\n"Agent Preset" mode uses each preset\'s own capability slots, unaffected by this whitelist.\nPTC (programmatic call) mode enables run_code automatically (a presentation tool, not configured here); the capabilities available to its in-program SDK = this whitelist.'
+    ? '配置「智能体」模式（Agent 循环）的全局默认工具白名单：未配置=使用全部默认工具，全部关闭=模型不调用任何工具，仅启用列表中的工具。\n「询问用户 / 更新计划 / 任务清单」也可在此开关。\n「Agent 预设」模式使用预设自身的能力槽配置，不受此白名单影响。\n「PTC 程序化调用」模式自动启用 run_code（呈现工具，不在此配置）；其程序内 SDK 可用的能力 = 本白名单。预设把「呈现方式」设为 PTC 时同理（自动启用 run_code，程序内 SDK 可用能力 = 该预设启用的工具）。'
+    : 'Configure the global default tool whitelist for the Agent Loop mode: unset = all default tools, all off = no tools callable, list = only listed tools.\nAsk User / Update Plan / Update Todo can also be toggled here.\n"Agent Preset" mode uses each preset\'s own capability slots, unaffected by this whitelist.\nPTC (programmatic call) mode enables run_code automatically (a presentation tool, not configured here); the capabilities available to its in-program SDK = this whitelist. The same holds when a preset\'s presentation is set to PTC (run_code is enabled automatically; the in-program SDK exposes the tools that preset enables).'
 })
 
 const tools = ref<AgentToolInfo[]>(AGENT_TOOL_REGISTRY)

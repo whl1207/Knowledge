@@ -162,8 +162,8 @@ export type NodeWrapperType = 'custom' | 'custom-iteration-start' | 'custom-loop
 
 // ── 错误处理 / 重试（对齐 Dify BaseNodeData） ─────────────────
 
-/** 节点错误策略 */
-export type ErrorStrategy = 'terminated' | 'continue-on-error' | 'remove-abnormal-output' | 'fail-branch'
+/** 节点错误策略（对齐 Dify：无 / 继续执行 / 移出异常输出 / 异常分支 / 默认值） */
+export type ErrorStrategy = 'terminated' | 'continue-on-error' | 'remove-abnormal-output' | 'fail-branch' | 'default-value'
 
 export interface RetryConfig {
   enabled?: boolean
@@ -187,6 +187,11 @@ export interface BaseNodeData {
   version?: string
   error_strategy?: ErrorStrategy
   retry_config?: RetryConfig
+  /**
+   * 「默认值」错误策略的兜底输出：输出变量名 → 值（对齐 Dify 的 default_value）。
+   * 节点失败时把这里的值写进变量池并继续往下跑，下游照常拿到数据。
+   */
+  default_value?: Record<string, unknown>
   /** 容器归属（子节点同时带 wrapper 级 parentId 与这里的 isInIteration/isInLoop） */
   isInIteration?: boolean
   iteration_id?: string | null

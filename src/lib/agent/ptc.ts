@@ -5,6 +5,42 @@
  * （SDK 说明 + tools 声明，由主进程 code-sdk.ts 生成），不含其它附加提示。
  */
 
+/** 呈现通道工具名（引擎可见性守卫与 SDK 声明共用；run_code 自身不进 SDK 声明） */
+export const RUN_CODE_TOOL = 'run_code'
+
+// ---------------------------------------------------------------------------
+// 工具呈现方式（对齐 DSH：一个 agent 只用一种呈现，由预设声明、运行时只读）
+// ---------------------------------------------------------------------------
+
+/**
+ * `native` = 逐个工具 schema 暴露给模型；`ptc` = 只暴露 `run_code` + 生成的 SDK
+ * （模型写一段程序组合调用）。
+ *
+ * 命名对齐 DeepSeek-Harness 的 preset 声明（`mode: native | ptc`）；引擎层
+ * `AgentOptions.toolsPresentation` 用 `'native' | 'code'`，转换见 presentationToEngine。
+ */
+export type AgentToolPresentation = 'native' | 'ptc'
+
+/** 预设声明的呈现方式；缺省 / 未知值 = native（不声明即继承部署默认，对齐 DSH） */
+export function presetPresentation(preset: any): AgentToolPresentation {
+  return String(preset?.presentation || '').toLowerCase() === 'ptc' ? 'ptc' : 'native'
+}
+
+/** 呈现方式 → AgentOptions.toolsPresentation */
+export function presentationToEngine(p: AgentToolPresentation): 'native' | 'code' {
+  return p === 'ptc' ? 'code' : 'native'
+}
+
+/**
+ * 按呈现方式补齐工具白名单：PTC 下 `run_code` 是**保留的呈现通道**，必须出现在
+ * `tools` 里（引擎级白名单守卫会校验），但它自身不参与 SDK 声明。
+ */
+export function withPresentationTools(tools: readonly string[], presentation: AgentToolPresentation): string[] {
+  const list = [...tools]
+  if (presentation === 'ptc' && !list.includes(RUN_CODE_TOOL)) list.push(RUN_CODE_TOOL)
+  return list
+}
+
 // ---------------------------------------------------------------------------
 // 系统提示词组装
 // ---------------------------------------------------------------------------

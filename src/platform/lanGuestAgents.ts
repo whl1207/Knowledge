@@ -17,6 +17,7 @@
  */
 
 import { toolsFromCapabilities } from '@/lib/agent/capabilities'
+import { presetPresentation } from '@/lib/agent/ptc'
 import {
   assembleAgentSystemPrompt,
   buildMcpServersContext,
@@ -106,6 +107,9 @@ export async function buildGuestAgentProfiles(
   for (const id of ids) {
     const preset = presets.find((p) => p && p.id === id)
     if (!preset) continue
+    // PTC 预设不下发给访客：访客档案恒为「逐个调用」的只读工具集（白名单里没有 run_code，
+    // 主机侧也不为访客生成 SDK 段），下发会让模型按「写程序」的提示词工作却只能逐个调用
+    if (presetPresentation(preset) === 'ptc') continue
     try {
       const tools = clip(toolsFromCapabilities(preset.capabilities || {}))
       // MCP：预设启用了 MCP 且选了服务时才注入服务/工具说明（含 serverId）

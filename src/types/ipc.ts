@@ -21,6 +21,16 @@ export const IpcErrorCode = {
   UNSUPPORTED: 'UNSUPPORTED',
   /** 内部错误 */
   INTERNAL: 'INTERNAL',
+  /** 权限不足（插件未声明该权限 / 沙箱策略拒绝 / 用户未批准） */
+  PERMISSION_DENIED: 'PERMISSION_DENIED',
+  /** 插件不存在（未安装 / id 非法） */
+  PLUGIN_NOT_FOUND: 'PLUGIN_NOT_FOUND',
+  /** 同名插件已存在（安装时需用户确认是否覆盖） */
+  PLUGIN_EXISTS: 'PLUGIN_EXISTS',
+  /** 插件加载失败（入口缺失 / apply 抛异常） */
+  PLUGIN_LOAD_FAILED: 'PLUGIN_LOAD_FAILED',
+  /** 插件要求的宿主 API 版本与当前宿主不匹配 */
+  API_VERSION_MISMATCH: 'API_VERSION_MISMATCH',
 } as const
 
 export type IpcErrorCodeValue = (typeof IpcErrorCode)[keyof typeof IpcErrorCode]

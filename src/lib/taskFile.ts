@@ -32,7 +32,7 @@ export const MERGED_SCAFFOLD_LABELS: Record<string, { labelZh: string; labelEn: 
 
 /**
  * 已下线的脚手架 key：其 .task 文件仍可被识别，但不再有对应实例类型。
- * 打开时给出明确提示（例：agent = 程序化工具调用，已迁移为主页 PTC 模式）。
+ * 打开时给出明确提示（例：agent = 程序化工具调用，已迁移为内置「PTC 智能体」预设）。
  */
 export const RETIRED_TASK_SCAFFOLDS = ['agent'] as const
 export type RetiredTaskScaffoldKey = typeof RETIRED_TASK_SCAFFOLDS[number]

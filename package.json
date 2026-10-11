@@ -25,7 +25,8 @@
     "build:dist": "vue-tsc --noEmit && vite build && electron-builder && node scripts/rename-unpacked.mjs",
     "build-portable": "vue-tsc --noEmit && vite build && electron-builder --win portable && node scripts/rename-unpacked.mjs",
     "build-linux": "vue-tsc --noEmit && vite build && electron-builder --linux",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:plugin-smoke": "node scripts/plugin-smoke/run.mjs"
   },
   "build": {
     "appId": "com.whl.aikm",

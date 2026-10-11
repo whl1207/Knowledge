@@ -16,7 +16,7 @@ Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machin
 
 | Area | Capabilities |
 |:---|:---|
-| **🏠 Home (chat)** | Plain chat · RAG chat over a knowledge base · workflow-triggered chat · skill / agent chat with autonomous planning · PTC (model writes code that composes tool calls) · swarm chat with Agent presets; multi-chat sidebar, per-chat model binding, context-usage ring, branch tree, attachments, stop & steer |
+| **🏠 Home (chat)** | Plain chat · RAG chat over a knowledge base · workflow-triggered chat · skill / agent chat with autonomous planning · swarm chat with Agent presets; an agent preset can use the PTC presentation (model writes code that composes tool calls); multi-chat sidebar, per-chat model binding, context-usage ring, branch tree, attachments, stop & steer |
 | **📚 Knowledge management** | 12 reading / editing views (browse, source, visual block editor, mind map, presentation, graph, …) plus dedicated views for `.drawio`, `.excalidraw`, PDF, images, code and media; export Markdown / Word / PDF; document smart actions (chat with a document); LAN collaborative editing and read-only remote shares |
 | **🔬 Knowledge processing** | Import Markdown / PDF / Word / TXT, configurable chunking, embedding & vector storage, retrieval strategies (hybrid, agentic evidence reranking, ontology-augmented), Q&A test sets with automatic scoring, knowledge base Q&A page |
 | **🧠 Ontology modelling** | Entity & relation extraction from slices, force-directed visualisation, entity cards, ontology-augmented retrieval with configurable score boosting |

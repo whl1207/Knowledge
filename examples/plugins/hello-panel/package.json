@@ -1,0 +1,31 @@
+{
+  "name": "aikm-plugin-hello-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-KM 示例插件：一个工具 + 一个服务 + 一个面板 + 一个设置页签",
+  "type": "module",
+  "aikm": {
+    "id": "hello-panel",
+    "name": "示例插件 Hello Panel",
+    "version": "1.0.0",
+    "apiVersion": "^1",
+    "description": "演示 AI-KM 插件的最小完整形态：主进程半边（工具 / 服务 / 事件 / 清理 / 存储）+ 渲染层半边（主面板 / 设置页签 / 工作台页签）。",
+    "main": "index.mjs",
+    "client": {
+      "entry": "client.mjs"
+    },
+    "inject": [
+      "tools"
+    ],
+    "declares": {
+      "tools": [
+        "hello_echo"
+      ],
+      "slots": [
+        "panel.main",
+        "settings.tab",
+        "swarm.workbench.tab"
+      ]
+    }
+  }
+}

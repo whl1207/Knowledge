@@ -404,7 +404,26 @@ const DEFINITIONS: NodeDefinition[] = [
       return { key: 'flow.summary.ops', params: { n: enabled.length } }
     },
   },
-  { type: 'agent', defaults: {}, outputs: [stringOutput('text'), { name: 'files', type: 'array[file]' }, { name: 'json', type: 'array[object]' }] },
+  {
+    // 智能体节点：Dify 的插件策略在本地不可用，改为映射 AI-KM 智能体预设（见 engine/nodes/agent.ts）
+    type: 'agent',
+    implemented: true,
+    defaults: {
+      agent_preset_id: '',
+      query: '',
+      model: { provider: '', name: '', completion_params: {} },
+      max_steps: 0,
+      tools_override: [],
+      structured_output: false,
+    },
+    outputs: [stringOutput('text'), { name: 'files', type: 'array[file]' }, { name: 'json', type: 'array[object]' }],
+    panel: () => import('./agent/Properties.vue'),
+    validate: (data) => (String(field(data, 'query') ?? '').trim() ? [] : ['请填写任务输入']),
+    summary: (data) => {
+      const presetId = String(field(data, 'agent_preset_id') ?? '').trim()
+      return presetId ? { key: 'flow.summary.agentPreset', params: { name: presetId } } : { key: 'flow.summary.agentGeneral' }
+    },
+  },
   { type: 'agent-v2', defaults: {}, outputs: [stringOutput('text'), { name: 'files', type: 'array[file]' }] },
   { type: 'human-input', defaults: {}, outputs: [] },
   { type: 'datasource', defaults: {}, outputs: [] },

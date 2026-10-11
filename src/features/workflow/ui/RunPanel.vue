@@ -102,6 +102,53 @@
         </div>
       </div>
 
+      <template v-if="varGroups.length">
+        <div class="wf-section-title">
+          <i class="fa fa-sliders"></i> {{ t('run.vars') }}
+          <button v-if="hasEdits && !state.running" class="wf-icon-btn" :title="t('run.varsResetAll')" @click="resetAllDrafts">↺</button>
+        </div>
+        <div class="wf-field__hint" style="margin-bottom:6px">{{ t('run.varsHint') }}</div>
+        <div v-for="group in varGroups" :key="group.nodeId" class="wf-run__var-group">
+          <div class="wf-run__var-head">
+            <span class="wf-run__var-title">{{ group.title }}</span>
+            <button
+              v-if="group.canRun"
+              class="wf-icon-btn"
+              :disabled="state.running || readonly"
+              :title="t('run.tryNode')"
+              @click="emit('debug-run', { nodeId: group.nodeId, downstream: false })"
+            >▶</button>
+            <button
+              v-if="group.canRun"
+              class="wf-icon-btn"
+              :disabled="state.running || readonly"
+              :title="t('run.runDownstream')"
+              @click="emit('debug-run', { nodeId: group.nodeId, downstream: true })"
+            >⇥</button>
+          </div>
+          <div v-for="item in group.items" :key="item.name" class="wf-field">
+            <div class="wf-field__label">
+              {{ item.name }}
+              <span class="wf-panel__meta">{{ item.type }}</span>
+              <span v-if="item.edited" class="wf-tag">{{ t('run.varEdited') }}</span>
+              <button v-if="item.edited" class="wf-icon-btn" :title="t('run.varReset')" @click="resetDraft(group.nodeId, item)">↺</button>
+            </div>
+            <el-input
+              :model-value="drafts[`${group.nodeId}|${item.name}`] ?? ''"
+              type="textarea"
+              :rows="2"
+              size="small"
+              :disabled="state.running || readonly"
+              @update:model-value="(text: string) => onDraftInput(group.nodeId, item, text)"
+            />
+            <div v-if="draftError[`${group.nodeId}|${item.name}`]" class="wf-field__error">
+              {{ draftError[`${group.nodeId}|${item.name}`] }}
+            </div>
+          </div>
+        </div>
+      </template>
+      <div v-else class="wf-empty-hint">{{ t('run.varsEmpty') }}</div>
+
       <template v-if="hasOutputs">
         <div class="wf-section-title"><i class="fa fa-sign-out"></i> {{ t('run.outputs') }}</div>
         <pre class="wf-run__pre scoll">{{ pretty(displayState.outputs) }}</pre>
@@ -120,26 +167,35 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { ElInput, ElInputNumber, ElOption, ElSelect, ElSwitch } from 'element-plus'
 import { usestore } from '@/store'
 import { createFlowT } from './locales'
 import type { NodeRunRecord, RunStatus } from '@/features/workflow/engine/types'
 import type { DslDocument, StartVariable } from '@/features/workflow/dsl/types'
-import { buildTraceRows, type RunHistoryEntry, type RunUiState } from './runState'
+import { buildTraceRows, isDebuggableType, parseVarText, varTextOf, type RunHistoryEntry, type RunUiState } from './runState'
 
 const props = defineProps<{
   document: DslDocument | null
   state: RunUiState
   /** 历史运行（最近若干次，最新在前） */
   history?: RunHistoryEntry[]
+  /** 变量检查器：上次运行产出的变量（按节点分组） */
+  varCache?: Record<string, Record<string, unknown>>
+  /** 变量检查器：手动改过的值（优先于 cache） */
+  varEdits?: Record<string, Record<string, unknown>>
   readonly?: boolean
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   (e: 'run', inputs: Record<string, unknown>): void
   (e: 'stop'): void
   (e: 'close'): void
+  /** 试跑：只跑该节点（downstream=true 时连同下游） */
+  (e: 'debug-run', payload: { nodeId: string; downstream: boolean }): void
+  (e: 'edit-var', payload: { nodeId: string; name: string; value: unknown }): void
+  (e: 'reset-var', payload: { nodeId: string; name: string }): void
+  (e: 'reset-vars'): void
 }>()
 
 const store = usestore()
@@ -179,6 +235,120 @@ const startVariables = computed<StartVariable[]>(() => {
 
 /** 追踪树（容器子节点缩进） */
 const traceRows = computed(() => buildTraceRows(props.document, displayState.value.records))
+
+// ── 变量检查器 ───────────────────────────────────────────
+// 展示「上次运行产出 ∪ 手动改过」的变量（按节点分组），可原地改值、单项回退、总回退；
+// 改完后用行内的「试跑 / 运行下游」按钮重跑，无需重跑上游节点。
+
+interface InspectVar {
+  name: string
+  value: unknown
+  type: string
+  edited: boolean
+}
+interface InspectGroup {
+  nodeId: string
+  title: string
+  type: string
+  canRun: boolean
+  items: InspectVar[]
+}
+
+const draftError = reactive<Record<string, string>>({})
+/** 编辑框文本（用户输入为准）与其「上次跟随的运行值」，用于判断草稿是否被手动改过 */
+const drafts = reactive<Record<string, string>>({})
+const seeded = reactive<Record<string, string>>({})
+
+const varGroups = computed<InspectGroup[]>(() => {
+  const cache = props.varCache ?? {}
+  const edits = props.varEdits ?? {}
+  const nodes = props.document?.workflow.graph.nodes ?? []
+  const groups: InspectGroup[] = []
+  for (const nodeId of new Set([...Object.keys(cache), ...Object.keys(edits)])) {
+    const node = nodes.find((n) => n.id === nodeId)
+    const values = { ...(cache[nodeId] ?? {}), ...(edits[nodeId] ?? {}) }
+    const items: InspectVar[] = Object.keys(values).map((name) => ({
+      name,
+      value: values[name],
+      type: valueType(values[name]),
+      edited: !!edits[nodeId] && name in (edits[nodeId] as Record<string, unknown>),
+    }))
+    if (!items.length) continue
+    groups.push({
+      nodeId,
+      title: String(node?.data?.title ?? nodeId),
+      type: String(node?.data?.type ?? ''),
+      canRun: !!node && !node.parentId && isDebuggableType(String(node.data?.type ?? '')),
+      items,
+    })
+  }
+  return groups
+})
+
+/** 值类型（供面板标注；与 DSL 的 VarType 不同，这里只用来看清是什么） */
+function valueType(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  return typeof value
+}
+
+/** 值 → 编辑框文本：字符串原样给，其余按 JSON 展示 */
+function valueText(value: unknown): string {
+  return varTextOf(value)
+}
+
+/**
+ * 同步编辑框文本：
+ * 用户没改过（也不是手动动过的草稿）就跟随最新运行结果刷新；一旦用户改过就保留其输入，
+ * 由「恢复」按钮显式回到运行结果。
+ */
+watch(
+  varGroups,
+  (groups) => {
+    for (const group of groups) {
+      for (const item of group.items) {
+        const key = `${group.nodeId}|${item.name}`
+        const text = valueText(item.value)
+        if (!(key in drafts) || (!item.edited && drafts[key] === seeded[key])) drafts[key] = text
+        seeded[key] = text
+      }
+    }
+  },
+  { immediate: true },
+)
+
+function safeJson(value: unknown): string {
+  return varTextOf(value)
+}
+
+/** 文本 → 值：按原值类型还原（数字 / 布尔 / 对象），对象解析失败时原地报错不落值 */
+function onDraftInput(nodeId: string, item: InspectVar, text: string): void {
+  const key = `${nodeId}|${item.name}`
+  drafts[key] = text
+  try {
+    emit('edit-var', { nodeId, name: item.name, value: parseVarText(item.value, text) })
+    delete draftError[key]
+  } catch (error) {
+    draftError[key] = `${t('run.varInvalidJson')}：${(error as Error).message}`
+  }
+}
+
+/** 单项回退到运行结果（丢掉这一处手动修改） */
+function resetDraft(nodeId: string, item: InspectVar): void {
+  const key = `${nodeId}|${item.name}`
+  delete draftError[key]
+  drafts[key] = valueText(item.value)
+  seeded[key] = valueText(item.value)
+  emit('reset-var', { nodeId, name: item.name })
+}
+
+function resetAllDrafts(): void {
+  for (const key of Object.keys(drafts)) delete drafts[key]
+  for (const key of Object.keys(draftError)) delete draftError[key]
+  emit('reset-vars')
+}
+
+const hasEdits = computed(() => Object.keys(props.varEdits ?? {}).length > 0)
 
 const hasOutputs = computed(() => Object.keys(displayState.value.outputs ?? {}).length > 0)
 
@@ -369,6 +539,32 @@ prefill()
 
 .wf-run__caret {
   color: var(--wf-text-dim);
+}
+
+/* 变量检查器：按节点分组的可编辑变量 */
+.wf-run__var-group {
+  margin-bottom: 6px;
+  padding: 4px 6px 6px;
+  border: 1px solid var(--wf-border);
+  border-radius: 6px;
+  background: var(--wf-sunken);
+}
+
+.wf-run__var-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.wf-run__var-title {
+  flex: 1;
+  overflow: hidden;
+  color: var(--wf-text);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wf-run__node-body {
