@@ -28,9 +28,10 @@
   import { saveTextFile, MD_FILTERS } from '@/lib/settingsData'
   // 专属文件类型（.excalidraw / .drawio）的判别与编辑器入口统一取自 fileEditors.ts
   import { detectEditorKind, FILE_EDITORS } from '@/components/knowFile/fileEditors'
-  import { isDrawioPath } from '@/shared/drawioFile'
-  // 内嵌图表：读目标 .drawio → drawio 离屏渲染成 SVG（单例渲染器 + 内容哈希缓存）
-  import { decodeDiagramPath, parseDiagramRef, readDiagramFile, renderDiagramPages, resolveDiagramPath } from '@/shared/drawioRender'
+  // 内嵌图表（`![](图.drawio)`）：占位卡片 + 离屏渲染回填（与演示 / 可视编辑 / 导图共用，见 shared 模块）
+  import { installDrawioImageRule, renderDrawioFigures } from '@/lib/markdown/drawioFigure'
+  // 点击图表打开编辑器时要把 `data-drawio-path` 里可能残留的百分号编码还原成真实路径
+  import { decodeDiagramPath } from '@/shared/drawioRender'
   // 智能操作：与当前 md / Word 文档对话（右侧面板，懒加载）
   const DocChatPanel = defineAsyncComponent(() => import('@/components/knowFile/view/DocChatPanel.vue'))
   // Excalidraw 白板 / draw.io 图表（懒加载入口取自 fileEditors.ts，避免 React/Excalidraw 拖慢首屏）
@@ -286,34 +287,11 @@
   /** 是否为本地文件图片（file:/// 或盘符绝对路径）——可能被个别环境拦截，需要 onerror 兜底 */
   const isLocalFileSrc = (src: string) => /^(file:\/\/|[A-Za-z]:[\\/]|\\\\)/i.test(src || '')
 
-  // 图表文件（`![](diagram.drawio)`）不能当图片加载：先占位，渲染完再塞入 drawio 输出的 SVG。
-  // 链接可用 `#page=2`（1 起的序号）/ `#page=页名` 定位到某一页，未指定则渲染全部页。
-  const drawioFigureHtml = (path: string, page: string, alt: string) => {
-    const safePath = md.utils.escapeHtml(path)
-    const pageAttr = page ? ` data-drawio-page="${md.utils.escapeHtml(page)}"` : ''
-    const caption = alt ? `<figcaption class="md-image-caption">${md.utils.escapeHtml(alt)}</figcaption>` : ''
-    return (
-      `<figure class="md-drawio-figure" data-drawio-path="${safePath}"${pageAttr} title="${md.utils.escapeHtml(store.locales === 'zh' ? '点击打开图表' : 'Click to open diagram')}">` +
-      `<div class="md-drawio-body" data-drawio-state="pending"><span class="md-drawio-hint">${store.locales === 'zh' ? '正在渲染图表…' : 'Rendering diagram…'}</span></div>` +
-      `${caption}</figure>`
-    )
-  }
-
   // 重写图片渲染规则，将相对路径转为基于文件所在目录的绝对路径，并添加图片描述
   const defaultImageRender = md.renderer.rules.image || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
   md.renderer.rules.image = (tokens, idx, options, env, self) => {
     const token = tokens[idx]
     const srcIndex = token.attrIndex('src')
-    // 图表文件：内嵌渲染成 SVG。必须在下面「相对路径拼绝对路径」之前判断 ——
-    // 图表路径要额外折叠 `..` 并还原百分号编码（md 里常写 `../输出/图.drawio`，中文目录会被
-    // 编码成 %E8%BE%93…），否则读取和点击打开都会拿到 `…/报告/../%E8%BE%93…/图.drawio` 这种
-    // 没规范化的路径（`<img>` 由浏览器自行规范化掩盖了这个问题，图表路径不会）。
-    if (srcIndex >= 0) {
-      const ref = parseDiagramRef(token.attrs![srcIndex][1])
-      if (ref.path && isDrawioPath(ref.path)) {
-        return drawioFigureHtml(resolveDiagramPath(ref.path, mdBasePath), ref.page, (token.content || '').trim())
-      }
-    }
     // 重写图片渲染规则，将相对路径转为基于文件所在目录的绝对路径，并添加图片描述
     if (srcIndex >= 0 && mdBasePath) {
       let src = token.attrs![srcIndex][1]
@@ -339,6 +317,11 @@
     }
     return imgHtml
   }
+
+  // 图表文件（`![](diagram.drawio)`）不能当图片加载：装上共享规则后先渲染成占位卡片，
+  // 正文挂上 DOM 后再由 renderDrawioFigures 把 drawio 输出的 SVG 填进去。链接可用
+  // `#page=2`（1 起的序号）/ `#page=页名` 定位到某一页，未指定则渲染全部页。
+  installDrawioImageRule(md, { getBasePath: () => mdBasePath, isZh: () => store.locales === 'zh' })
 
   /**
    * 本地图片兜底：`<img onerror>` 触发时，经 IPC 读取本地文件换成 data URL 再显示。
@@ -438,60 +421,16 @@
   /**
    * 内嵌图表渲染：读目标图表文件 → drawio 离屏渲染 → 把 SVG 塞进占位容器。
    *
-   * 串行执行（所有图表共用同一个离屏渲染器，见 shared/drawioRender），
-   * 因此**不 await**：让预览先可交互，图表渲染完自己填进去；
+   * 具体实现与演示 / 可视编辑 / 导图共用（见 @/lib/markdown/drawioFigure）：
+   * 串行执行（所有图表共用同一个离屏渲染器）且**不 await**，让预览先可交互；
    * 多页图表按页各出一张图并标注「第 i / N 页」（超过上限只渲染前 N 页）；
    * 失败的图表降级成"点击打开编辑器"的提示卡片（点击逻辑见 handlePrepClick）。
    */
-  const renderDrawioDiagrams = async (root?: HTMLElement | null) => {
-    const container = root || document.querySelector('.prep')
-    if (!container) return
-    const zh = store.locales === 'zh'
-    const figures = Array.from(container.querySelectorAll<HTMLElement>('.md-drawio-figure'))
-    for (const fig of figures) {
-      const body = fig.querySelector<HTMLElement>('.md-drawio-body')
-      if (!body || body.dataset.drawioState !== 'pending') continue
-      const path = fig.getAttribute('data-drawio-path') || ''
-      const pageSpec = fig.getAttribute('data-drawio-page') || ''
-      try {
-        const xml = await readDiagramFile(path)
-        if (!xml) throw new Error(props.isRemote ? '远程模式不支持内嵌图表' : '读取图表失败')
-        const pages = await renderDiagramPages(xml, { page: pageSpec })
-        if (!pages.length) throw new Error('图表没有可渲染的页')
-        // 渲染期间内容可能已被替换（切文件 / 重新渲染）：只在仍是同一份占位时写入
-        if (body.dataset.drawioState !== 'pending') continue
-        body.innerHTML = ''
-        for (const page of pages) {
-          const canvas = document.createElement('div')
-          canvas.className = 'md-drawio-canvas'
-          // 记下这一页的页码（1 起）：点击该图时编辑器直接定位到这一页
-          canvas.dataset.drawioPage = String(page.index + 1)
-          canvas.innerHTML = page.svg
-          body.appendChild(canvas)
-          if (page.total > 1) {
-            const label = document.createElement('div')
-            label.className = 'md-drawio-page-label'
-            label.textContent = zh ? `第 ${page.index + 1} / ${page.total} 页` : `Page ${page.index + 1} / ${page.total}`
-            body.appendChild(label)
-          }
-        }
-        const total = pages[0].total
-        if (pages.length > 1 && total > pages.length) {
-          const note = document.createElement('div')
-          note.className = 'md-drawio-hint'
-          note.textContent = zh
-            ? `共 ${total} 页，仅显示前 ${pages.length} 页（点击图表打开编辑器查看其余页）`
-            : `${total} pages in total, showing the first ${pages.length} (click the diagram to open the editor)`
-          body.appendChild(note)
-        }
-        body.dataset.drawioState = 'ready'
-      } catch (e) {
-        console.warn('[md_read] 内嵌图表渲染失败:', path, e)
-        body.dataset.drawioState = 'failed'
-        body.innerHTML = `<span class="md-drawio-hint">${zh ? '无法内嵌预览，点击打开图表' : 'Inline preview unavailable, click to open'}</span>`
-      }
-    }
-  }
+  const renderDrawioDiagrams = (root?: HTMLElement | null) =>
+    renderDrawioFigures(root || document.querySelector<HTMLElement>('.prep'), {
+      zh: store.locales === 'zh',
+      emptyMessage: props.isRemote ? '远程模式不支持内嵌图表' : '',
+    })
 
   // ===== Python 代码执行 =====
   // 为 Python 代码块添加「运行」按钮
@@ -2862,50 +2801,7 @@ ${inlinedHtml}
     opacity: 0.7;
   }
 
-  /* 内嵌图表（`![](diagram.drawio)`）：drawio 输出 SVG，白底浅色，点击打开编辑器 */
-  :deep(.md-drawio-figure) {
-    margin: 16px 0;
-    text-align: center;
-    cursor: pointer;
-  }
-  :deep(.md-drawio-body) {
-    display: block;
-  }
-  :deep(.md-drawio-canvas) {
-    display: inline-block;
-    max-width: 100%;
-    overflow-x: auto;
-    padding: 6px;
-    border: 1px solid var(--borderColor);
-    border-radius: 6px;
-    background-color: #ffffff;
-    transition: border-color 0.2s ease;
-  }
-  :deep(.md-drawio-canvas:hover) {
-    border-color: rgba(52, 152, 219, 0.6);
-  }
-  :deep(.md-drawio-canvas svg) {
-    display: block;
-    max-width: 100%;
-    height: auto;
-    margin: 0 auto;
-  }
-  /* 多页图表：每页一张图 + 页码 */
-  :deep(.md-drawio-page-label) {
-    margin: 6px 0 12px;
-    font-size: 12px;
-    font-style: normal;
-    color: var(--fontColor);
-    opacity: 0.65;
-  }
-  :deep(.md-drawio-hint) {
-    display: inline-block;
-    padding: 10px 14px;
-    font-size: 13px;
-    font-style: normal;
-    color: var(--fontColor);
-    opacity: 0.7;
-  }
+  /* 内嵌图表（`![](diagram.drawio)`）的卡片样式在 @/lib/markdown/drawio-figure.css（各视图共用） */
 
   /* PDF 预览样式 */
 </style>

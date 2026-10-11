@@ -1,0 +1,49 @@
+/**
+ * drawio-figure.css — Markdown 内嵌 draw.io 图表（`.md-drawio-figure`）的共享样式
+ *
+ * 占位卡片与渲染结果由 @/lib/markdown/drawioFigure 注入到正文 HTML 里（浏览 / 演示 / 可视编辑
+ * 共用同一套 class）。这些节点的宿主各不相同——浏览视图的 `.prep`、演示视图里 `v-html` 注入的
+ * 幻灯片、块编辑器里 `v-html` 注入的块——组件的 scoped 样式都命中不到，所以统一放这里，
+ * 由 drawioFigure.ts 引入一次。
+ */
+
+.md-drawio-figure {
+  margin: 16px 0;
+  text-align: center;
+  cursor: pointer;
+}
+.md-drawio-body {
+  display: block;
+}
+/* 每页一张图：白底浅色卡片（drawio 输出的就是浅色主题，深色界面下也不会变成黑底黑字）。
+   逐页渲染时每页各是一块，块级 + 居中 → 多页图表自上而下依次排列（不再有「第 i / N 页」文字，
+   页码信息对阅读没帮助还占地方）。 */
+.md-drawio-canvas {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px auto;
+  overflow-x: hidden;
+  padding: 6px;
+  border: 1px solid var(--borderColor, #d5d8de);
+  border-radius: 6px;
+  background-color: #ffffff;
+  transition: border-color 0.2s ease;
+}
+.md-drawio-canvas:hover {
+  border-color: rgba(52, 152, 219, 0.6);
+}
+.md-drawio-canvas svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+.md-drawio-hint {
+  display: inline-block;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-style: normal;
+  color: var(--fontColor, #555555);
+  opacity: 0.7;
+}

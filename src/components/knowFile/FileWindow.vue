@@ -262,11 +262,34 @@ async function downloadActiveRemote() {
   }
 }
 
-// 独立窗口左上角切换视图类型（浏览/源码编辑/块编辑/导图/演示），标题自动跟随
-function onViewSwitch(e: Event) {
-  const v = (e.target as HTMLSelectElement).value as ViewType
+// 独立窗口左上角切换视图类型（浏览/源码编辑/块编辑/导图/演示），标题自动跟随。
+// 用自绘下拉（见模板）：原生 <select> 的面板在标题栏拖动区里会被窗口拖动流程关掉。
+const viewSwitcherRef = ref<HTMLElement | null>(null)
+const viewMenuOpen = ref(false)
+
+function toggleViewMenu() {
+  viewMenuOpen.value = !viewMenuOpen.value
+}
+
+function selectView(v: ViewType) {
+  viewMenuOpen.value = false
   if (VIEW_TYPES.includes(v) && availableViews.value.includes(v)) viewType.value = v
 }
+
+/** 点到切换器之外 / 按 Esc 就收起下拉面板 */
+function closeViewMenuOnOutside(e: Event) {
+  if (!viewMenuOpen.value) return
+  if (e.type === 'keydown' && (e as KeyboardEvent).key !== 'Escape') return
+  const el = viewSwitcherRef.value
+  const target = e.target
+  if (e.type !== 'keydown' && el && target instanceof Node && el.contains(target)) return
+  viewMenuOpen.value = false
+}
+
+// 切换文件时收起面板，避免残留
+// （注意：不能同时监听 availableViews —— 它是 computed，文件加载过程中任何相关状态变化
+//  都会让它重新求值，回调里就会把刚打开的下拉又关掉）
+watch(() => filePath.value, () => { viewMenuOpen.value = false })
 
 /** 数据画布保存成功：同步内存里的文件内容，并刷新标题栏（画布自己写的盘，无需再读文件） */
 const onDataCanvasSaved = (_path: string, content?: string) => {
@@ -297,6 +320,9 @@ const onThemeChanged = (_event: any, ui: any) => {
 onMounted(async () => {
   // 监听其他窗口的文件内容变更广播
   window.ipcRenderer.on('file-content-changed', onFileContentChanged)
+  // 视图切换下拉：点到外面 / 按 Esc 收起
+  document.addEventListener('mousedown', closeViewMenuOnOutside)
+  document.addEventListener('keydown', closeViewMenuOnOutside)
   // 监听主题广播（主窗口切换主题后本窗口跟随）
   window.ipcRenderer.on('theme-changed', onThemeChanged)
   // 主进程发现「该图表窗口已开着」时发来目标页：本窗口直接切页，不再重开窗口
@@ -419,17 +445,38 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.ipcRenderer.off('file-content-changed', onFileContentChanged)
   window.ipcRenderer.off('theme-changed', onThemeChanged)
+  document.removeEventListener('mousedown', closeViewMenuOnOutside)
+  document.removeEventListener('keydown', closeViewMenuOnOutside)
 })
 </script>
 
 <template>
   <div class="file-window knowfile-menu">
     <div class="file-titlebar">
-      <!-- 视图类型切换（按文件类型过滤；.excalidraw/代码/图片等固定单一视图，不显示） -->
-      <div v-if="showViewSwitcher" class="file-view-switcher">
-        <select :value="viewType" @change="onViewSwitch" :title="store.locales=='zh'?'切换视图类型':'Switch view type'">
-          <option v-for="v in availableViews" :key="v" :value="v">{{ viewLabel(v) }}</option>
-        </select>
+      <!-- 视图类型切换（按文件类型过滤；.excalidraw/代码/图片等固定单一视图，不显示）
+           用自绘下拉而不是原生 <select>：标题栏是窗口拖动区，原生下拉面板在 Electron 里
+           容易一移动鼠标就被系统拖动流程关掉（选项"一闪就没"），自绘面板不受此影响 -->
+      <div v-if="showViewSwitcher" ref="viewSwitcherRef" class="file-view-switcher">
+        <button
+          type="button"
+          class="file-view-switcher-btn"
+          :class="{ open: viewMenuOpen }"
+          :title="store.locales=='zh'?'切换视图类型':'Switch view type'"
+          @pointerdown.stop
+          @click.stop="toggleViewMenu"
+        >
+          <span class="file-view-switcher-label">{{ viewLabel(viewType) }}</span>
+          <i class="fa fa-angle-down"></i>
+        </button>
+        <div v-if="viewMenuOpen" class="file-view-switcher-menu scoll" @pointerdown.stop>
+          <div
+            v-for="v in availableViews"
+            :key="v"
+            class="file-view-switcher-item"
+            :class="{ active: v === viewType }"
+            @click.stop="selectView(v)"
+          >{{ viewLabel(v) }}</div>
+        </div>
       </div>
       <div class="file-titlebar-title" :title="filePath">{{ titleText }}</div>
       <div class="file-titlebar-actions">
@@ -528,30 +575,74 @@ onBeforeUnmount(() => {
    （浏览器 / 局域网模式没有拖动区，提示照常显示）。 */
 /* 视图类型切换器（位于标题文本左侧；标题栏为 drag 区，切换器需 no-drag 才能点击） */
 .file-view-switcher {
+  position: relative;
   flex-shrink: 0;
   margin-right: 8px;
   -webkit-app-region: no-drag;
 }
-.file-view-switcher select {
+.file-view-switcher-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   height: 24px;
-  max-width: 110px;
-  padding: 0 4px;
+  max-width: 130px;
+  padding: 0 6px;
   border: none;
   border-radius: 4px;
   background-color: transparent; /* 与标题栏背景融为一体 */
   color: var(--fontColor);
   font-size: 12px;
+  font-family: inherit;
   outline: none;
   cursor: pointer;
   transition: background-color 0.15s;
 }
-.file-view-switcher select:hover {
+.file-view-switcher-btn:hover {
   background-color: color-mix(in srgb, var(--menuActiveColor) 40%, transparent);
 }
-/* 下拉选项项背景/文字跟随主题变量（面板空白区/边框仍由系统渲染） */
-.file-view-switcher select option {
-  background-color: var(--backgroundColor);
+.file-view-switcher-btn.open {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.file-view-switcher-btn > i {
+  font-size: 11px;
+  opacity: 0.7;
+}
+.file-view-switcher-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 下拉面板：自绘（原生 <select> 的面板会被标题栏拖动区关掉），样式跟随主题 */
+.file-view-switcher-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 3000;
+  min-width: 120px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--backgroundColor);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+.file-view-switcher-item {
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 12px;
   color: var(--fontColor);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.file-view-switcher-item:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.file-view-switcher-item.active {
+  color: var(--fontActiveColor);
+  font-weight: 600;
 }
 .file-titlebar-actions {
   display: flex;

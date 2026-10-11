@@ -6,6 +6,8 @@ import * as markmap from 'markmap-view'
 import { readImageAsDataUrl } from '@/lib/export/docx'
 import { prepareTalkPage } from '@/lib/mindmap-talk'
 import { preprocessMath } from '@/lib/markdown/render'
+// 内嵌图表（`![](图.drawio)`）：导图节点里以图片形式显示（图表先渲染成 SVG data URL 再内联）
+import { allowSvgDataUrlImages, inlineDrawioRefsAsImages } from '@/lib/markdown/drawioFigure'
 import { applyMdLinkRule } from '@/lib/markdown/mdLinkPolicy'
 import { handleMdContainerClick, currentDocDir } from '@/lib/knowFile/mdLinkOpen'
 import { liftMindMapBlocks, MARKMAP_HTML_OPTIONS } from '@/lib/knowFile/mindMapMath'
@@ -160,6 +162,8 @@ function getResolvedContent(): string {
 function createTransformer(): Transformer {
   const t = new Transformer()
   applyMdLinkRule(t.md, () => currentDocDir())
+  // 内联图表的 svg data URL 图片：markdown-it 默认拒绝该类型，需先放行（见 drawioFigure）
+  allowSvgDataUrlImages(t.md)
   return t
 }
 
@@ -215,7 +219,12 @@ function transformMindMap(transformer: Transformer, markdown: string) {
 // 把本地图片内联为 data URL（foreignObject 内更可靠，规避路径/file 访问/测量时机问题）
 // md 为当前 markmap 转换器的 markdown-it 实例：含公式的段落 / 展示公式块需要借它渲染（见 mindMapMath）
 async function toMindMapMarkdown(md: Transformer['md']): Promise<string> {
-  const lifted = liftMindMapBlocks(relocateImagesBeforeHeadings(getResolvedContent()).replace(/\r\n?/g, '\n'), md)
+  // 内嵌图表（`![](图.drawio)`）：导图节点只认真图片，先把图表渲染成 SVG data URL 内联进来；
+  // 必须在下面「收集本地图片」之前 —— 图表文件不是位图，不能交给 readImageAsDataUrl
+  const lifted = await inlineDrawioRefsAsImages(
+    liftMindMapBlocks(relocateImagesBeforeHeadings(getResolvedContent()).replace(/\r\n?/g, '\n'), md),
+    currentDocDir(),
+  )
   // 注意：上方已把 md 统一为 LF 换行（CRLF 会让行尾锚点类正则失配，例如 mermaid 代码块收敛）
   // 收集本地绝对路径图片（Windows 盘符路径），跳过 http/data/file 外链
   const localSrcs: string[] = []

@@ -55,6 +55,8 @@ import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WI
 import DocTocPanel from '@/components/knowFile/view/DocTocPanel.vue'
 import { renderInlineMarkdown, renderParagraphMarkdown } from '@/lib/markdown/inline'
 import { renderMermaidSvgLenient } from '@/lib/markdown/mermaid'
+// 内嵌图表（`![](图.drawio)`）：渲染态里的图表图片换成占位卡片后渲染成 SVG（与浏览 / 演示共用）
+import { renderDrawioFigures, swapDrawioImages } from '@/lib/markdown/drawioFigure'
 import BlockTypeMenu from './BlockTypeMenu.vue'
 import BlockTable from './BlockTable.vue'
 import MermaidViewer from '@/components/MermaidViewer.vue'
@@ -1395,7 +1397,7 @@ function syncGutterHeights(ids?: string[]) {
   }
 }
 
-/** 渲染后处理：图片相对路径 → 绝对路径；mermaid 占位 → 真实 SVG */
+/** 渲染后处理：图片相对路径 → 绝对路径；mermaid 占位 → 真实 SVG；图表图片 → 内嵌 SVG */
 async function postProcess(ids?: string[]) {
   const root = rootRef.value
   if (!root) return
@@ -1406,6 +1408,10 @@ async function postProcess(ids?: string[]) {
     const sig = el.dataset.sig ?? ''
     if (el.dataset.done === sig) continue
     el.dataset.done = sig
+
+    // 内嵌图表（`![](图.drawio)`）：此刻还是个加载不出来的 <img>，先换成占位卡片（点击进编辑态，
+    // 所以不给「点击打开图表」的提示），渲染由下面的 renderDrawioFigures 统一完成
+    swapDrawioImages(el, { basePath: props.basePath, zh: zh.value, title: null })
 
     if (props.basePath) {
       el.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
@@ -1425,6 +1431,9 @@ async function postProcess(ids?: string[]) {
         n.innerHTML = `<span class="be-mermaid-err">${zh.value ? '图表渲染失败' : 'Diagram failed'}</span>`
       }
     }
+
+    // 图表渲染不 await：所有图表共用同一个离屏渲染器（串行），让本轮其它块的处理先跑完
+    void renderDrawioFigures(el, { zh: zh.value })
   }
 }
 

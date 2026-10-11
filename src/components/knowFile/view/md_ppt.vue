@@ -14,9 +14,15 @@
   import hljs from 'highlight.js'
   import 'highlight.js/styles/nnfx-dark.min.css'
   import { normalizeMermaidSource } from '@/lib/markdown/mermaid-normalize'
+  // 内嵌图表（`![](图.drawio)`）：与浏览 / 可视编辑 / 导图共用同一套占位 + 回填（见 lib/markdown/drawioFigure）
+  import { installDrawioImageRule, renderDrawioFigures } from '@/lib/markdown/drawioFigure'
   import { preprocessMath as sharedPreprocessMath } from '@/lib/markdown/render'
   import { applyMdLinkRule } from '@/lib/markdown/mdLinkPolicy'
-  import { handleMdContainerClick } from '@/lib/knowFile/mdLinkOpen'
+  import { handleMdContainerClick, openMdFileLink } from '@/lib/knowFile/mdLinkOpen'
+  // 点击内嵌图表时还原 `data-drawio-path` 里可能残留的百分号编码（中文 / 空格路径）
+  import { decodeDiagramPath, readDiagramFile } from '@/shared/drawioRender'
+  // 图表形状（宽高）用于「按图片长宽选布局」：直接解析图表 XML 估算，不走离屏渲染
+  import { estimateDiagramSizes, pickDiagramSize } from '@/lib/markdown/drawioFigure'
   import MermaidViewer from '@/components/MermaidViewer.vue'
   import mermaid from 'mermaid'
 
@@ -83,6 +89,9 @@
     return imgHtml
   }
 
+  // 图表文件（`![](diagram.drawio)`）：先渲染成占位卡片，幻灯片挂上 DOM 后再由 renderDrawio() 填 SVG
+  installDrawioImageRule(md, { getBasePath: () => mdBasePath, isZh: () => store.locales === 'zh' })
+
   // Mermaid fence：```mermaid → 图表占位（源码隐藏存放，未渲染前不裸露代码），
   // 与 src/lib/markdown/render 等模块做法一致；实际渲染由下方 renderMermaid() 完成
   const defaultFence = md.renderer.rules.fence || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
@@ -104,88 +113,360 @@
 
   // 幻灯片内 Markdown 链接点击：本地文件按当前文档目录解析后打开（与浏览 / 导图视图一致）
   const handleSlideLinkClick = (e: MouseEvent) => {
+    // 内嵌图表：点哪一页就打开图表编辑器的哪一页（与浏览视图一致）
+    const fig = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('.md-drawio-figure')
+    if (fig) {
+      const path = decodeDiagramPath(fig.getAttribute('data-drawio-path') || '')
+      const canvas = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('.md-drawio-canvas')
+      const page = canvas?.dataset.drawioPage || fig.getAttribute('data-drawio-page') || ''
+      if (path) {
+        void openMdFileLink(path, { page })
+        return
+      }
+    }
     void handleMdContainerClick(e, mdBasePath)
   }
 
-  // 智能图片排版：根据图片数量和文本内容自动布局
-  function processSlideLayout(html: string): string {
-    const temp = document.createElement('div')
-    temp.innerHTML = html
+  // ===== 图文智能排版 =====
+  // 一页的内容怎么摆：按图片形状选布局（与幻灯片同形 → 图片独占一页；竖图 → 文字左 / 图右；
+  // 宽图 → 文字上 / 图下），文字过多时按块自动分页，尽量不让内容超出单页范围。
 
-    // 查找所有 figure 图片（可能被 <p> 包裹，但 <figure> 在 <p> 内不合法，浏览器会隐式闭合 <p>）
-    const allFigures = Array.from(temp.querySelectorAll<HTMLElement>('figure.md-image-figure'))
-    if (allFigures.length === 0) return html
+  /** 幻灯片可用宽高比（auto 模式没有固定比例，取 16:10 作为判定基准） */
+  const slideRatio = () => (ratioMode.value === '16:9' ? 16 / 9 : ratioMode.value === '4:3' ? 4 / 3 : 1.6)
+  /** 图片与幻灯片「形状相同」的容忍幅度：比例差在 ±25% 内即视作同形 */
+  const RATIO_TOLERANCE = 1.25
+  /** 单页容量（估分值）：纯文字页 */
+  const CAP_TEXT_ONLY = 1100
+  /**
+   * 图文混排页里「文字最多能占多少」：图越多，留给文字的比例越小 ——
+   * 否则文字会把图片挤成一条缝（这是之前图片被压扁的根因）。
+   */
+  const textShareFor = (figureCount: number) =>
+    figureCount >= 4 ? 0.22 : figureCount === 3 ? 0.26 : figureCount === 2 ? 0.32 : 0.42
+  /** 低于此分值的文字视作「图注」：与图同页，而不是另起一页 */
+  const CAPTION_SCORE = 80
 
-    // 收集所有顶层子节点，但排除因浏览器隐式闭合 <p> 产生的空 <p></p>
-    const children = Array.from(temp.children).filter((child) => {
-      // 跳过空 <p>（浏览器隐式闭合 <p> 产生）
-      if (child.tagName === 'P' && child.children.length === 0 && !child.textContent?.trim()) {
-        return false
+  /** 某段因「真的装不下」而收紧过几次容量（每收紧一次：单页容量 ÷1.6） */
+  const sectionTighten = new Map<string, number>()
+  /** 每一页的来源段键 / 是否可再分页（与 prepList 一一对应，供运行期溢出兜底使用） */
+  let slideKeys: string[] = []
+  let slideSplittable: boolean[] = []
+  /** 本轮构建里因溢出重建过几次（防止来回抖动） */
+  let overflowRebuilds = 0
+  let overflowTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 图片尺寸缓存（布局决策用；量不到存 null，按竖图兜底走左右布局） */
+  const figSizeCache = new Map<string, { w: number; h: number } | null>()
+
+  /** 读取图片固有尺寸（超时 / 失败返回 null） */
+  const loadImageSize = (src: string, timeout = 3000): Promise<{ w: number; h: number } | null> =>
+    new Promise((resolve) => {
+      if (!src) {
+        resolve(null)
+        return
       }
-      return true
+      const img = new Image()
+      let done = false
+      const finish = (v: { w: number; h: number } | null) => {
+        if (done) return
+        done = true
+        resolve(v)
+      }
+      const timer = window.setTimeout(() => {
+        img.src = ''
+        finish(null)
+      }, timeout)
+      img.onload = () => {
+        window.clearTimeout(timer)
+        finish(img.naturalWidth > 0 && img.naturalHeight > 0 ? { w: img.naturalWidth, h: img.naturalHeight } : null)
+      }
+      img.onerror = () => {
+        window.clearTimeout(timer)
+        finish(null)
+      }
+      img.src = src
     })
 
-    const imageBlocks: Element[] = []
-    const textBlocks: Element[] = []
+  /** 量出一页里所有图片 / 图表的尺寸（顺序与 figures 一致） */
+  const measureFigures = (figures: Element[]): Promise<Array<{ w: number; h: number } | null>> =>
+    Promise.all(
+      figures.map(async (fig) => {
+        const drawio = fig.classList.contains('md-drawio-figure')
+        const path = fig.getAttribute('data-drawio-path') || ''
+        const page = fig.getAttribute('data-drawio-page') || ''
+        const img = drawio ? null : fig.tagName === 'IMG' ? (fig as HTMLImageElement) : fig.querySelector('img')
+        const src = img?.getAttribute('src') || ''
+        const key = drawio ? `drawio:${path}#${page}` : `img:${src}`
+        if (figSizeCache.has(key)) return figSizeCache.get(key)!
+        let size: { w: number; h: number } | null = null
+        try {
+          if (drawio) {
+            // 估算图表形状（解析 XML，不渲染）：排版只需要"竖图 / 方图 / 宽图"，省下离屏渲染的等待
+            const xml = await readDiagramFile(path)
+            if (xml) size = pickDiagramSize(await estimateDiagramSizes(xml), page)
+          } else {
+            size = await loadImageSize(src)
+          }
+        } catch (e) {
+          console.warn('[PPT] 图片尺寸测量失败，按竖图排版:', key, e)
+        }
+        figSizeCache.set(key, size)
+        return size
+      }),
+    )
 
-    for (const child of children) {
-      // 检查当前元素是否为 figure，或其唯一子元素为 figure
-      let figure: Element | null = null
-      if (child.tagName === 'FIGURE' && child.classList.contains('md-image-figure')) {
-        figure = child
-      } else if (child.children.length === 1 &&
-                 child.children[0].tagName === 'FIGURE' &&
-                 child.children[0].classList.contains('md-image-figure')) {
-        figure = child.children[0] as Element
-      }
+  /** 页面估分：正文长度 + 块数 + 表格行数（与 calcAutoScale 同一口径）；mermaid 源码长度与图大小无关，按固定体积计 */
+  const blockScore = (el: Element): number => {
+    const clone = el.cloneNode(true) as Element
+    clone.querySelectorAll('.mermaid-src').forEach((n) => n.remove())
+    const mermaid = clone.querySelectorAll('.mermaid').length
+    const textLen = (clone.textContent || '').replace(/\s+/g, '').length
+    const blocks = clone.querySelectorAll('li, p, h1, h2, h3, h4, h5, h6, pre, table, blockquote, figure').length
+    // 表格按行计：一行的实际高度接近一行文字，只按字符数算会严重低估（长表格因此挤掉图片）
+    const tableRows = clone.querySelectorAll('table tr').length
+    return textLen + blocks * 8 + tableRows * 20 + mermaid * 260
+  }
 
-      if (figure) {
-        imageBlocks.push(figure)
-      } else {
-        textBlocks.push(child)
+  /** 按容量把块分成多页：先按总量算需要几页，再让每页装得差不多满（避免最后一页只剩两行） */
+  const groupBlocks = (blocks: Element[], cap: number): Element[][] => {
+    if (blocks.length <= 1) return blocks.length ? [blocks] : []
+    const scores = blocks.map(blockScore)
+    const total = scores.reduce((a, b) => a + b, 0)
+    if (total <= cap) return [blocks]
+    const pageCount = Math.ceil(total / cap)
+    const target = total / pageCount
+    const groups: Element[][] = []
+    let cur: Element[] = []
+    let curScore = 0
+    for (let i = 0; i < blocks.length; i++) {
+      cur.push(blocks[i])
+      curScore += scores[i]
+      const pagesLeft = pageCount - groups.length
+      const blocksLeft = blocks.length - i - 1
+      // 本页已装到均分量、且后面的块还够填满剩余页 → 断页
+      if (pagesLeft > 1 && curScore >= target && blocksLeft >= pagesLeft - 1) {
+        groups.push(cur)
+        cur = []
+        curScore = 0
       }
     }
+    if (cur.length) groups.push(cur)
+    return groups
+  }
 
-    if (imageBlocks.length === 0) return html
+  const isPictureFigure = (el: Element | null): boolean =>
+    !!el &&
+    el.tagName === 'FIGURE' &&
+    (el.classList.contains('md-image-figure') || el.classList.contains('md-drawio-figure'))
 
-    const result = document.createElement('div')
-    result.className = 'slide-layout-wrapper'
+  /** 图片形状相对幻灯片比例的分类 */
+  const figureShapeOf = (size: { w: number; h: number } | null): 'same' | 'tall' | 'wide' => {
+    // 量不到尺寸时按竖图（左右布局）兜底：与原行为一致，也不会把文字挤到别的页
+    if (!size || !(size.w > 0) || !(size.h > 0)) return 'tall'
+    const r = size.w / size.h
+    const base = slideRatio()
+    if (r > base * RATIO_TOLERANCE) return 'wide'
+    if (r < base / RATIO_TOLERANCE) return 'tall'
+    return 'same'
+  }
 
-    if (imageBlocks.length === 1 && textBlocks.length > 0) {
-      // 一张图片 + 有文字 → 左文字右图片
-      const row = document.createElement('div')
-      row.className = 'slide-layout-row'
+  const textBlocksHtml = (blocks: Element[]) => blocks.map((el) => el.outerHTML).join('')
 
-      const textCol = document.createElement('div')
-      textCol.className = 'slide-layout-text'
-      for (const tb of textBlocks) textCol.appendChild(tb.cloneNode(true))
+  /** 文字在左 / 图片在右 */
+  const mixedRowHtml = (texts: Element[], figures: Element[]) =>
+    `<div class="slide-layout-row"><div class="slide-layout-text">${textBlocksHtml(texts)}</div>` +
+    `<div class="slide-layout-image">${figures.map((f) => f.outerHTML).join('')}</div></div>`
 
-      const imgCol = document.createElement('div')
-      imgCol.className = 'slide-layout-image'
-      imgCol.appendChild(imageBlocks[0].cloneNode(true))
+  /** 文字在上 / 图片在下（宽图） */
+  const mixedStackHtml = (texts: Element[], figures: Element[]) =>
+    `<div class="slide-layout-stack"><div class="slide-layout-text">${textBlocksHtml(texts)}</div>` +
+    `<div class="slide-layout-image">${figures.map((f) => f.outerHTML).join('')}</div></div>`
 
-      row.appendChild(textCol)
-      row.appendChild(imgCol)
-      result.appendChild(row)
-    } else if (imageBlocks.length >= 2) {
-      // 两张及以上图片 → 文字在上，图片在下并排
-      for (const tb of textBlocks) result.appendChild(tb.cloneNode(true))
+  /**
+   * 多图同页的列数：优先并排展示，但如果「放在一起」会把图压得明显比单张更小
+   * （小于单张高度的 70%），就退到更少的列；没有合适方案时返回 0 —— 调用方改为
+   * 「一图一页」（例如 3 张与幻灯片同形的图，挤在一页上每人只剩一小块，不如各占一页）。
+   */
+  const chooseGridColumns = (sizes: Array<{ w: number; h: number } | null>, hasText: boolean): number => {
+    const n = sizes.length
+    if (n <= 1) return n
+    // 网格能分到的页面高度份额（有文字时文字要占一部分）
+    const availH = hasText ? 0.7 : 0.92
+    const ratioOf = (s: { w: number; h: number } | null) => (s && s.h > 0 ? s.w / s.h : slideRatio())
+    /** 这张图独占一页时占页面高度的比例 */
+    const alone = (s: { w: number; h: number } | null) => Math.min(1, 1 / ratioOf(s))
+    /** 这张图在 cols×rows 网格里占页面高度的比例 */
+    const share = (s: { w: number; h: number } | null, cols: number, rows: number) =>
+      Math.min(availH / rows, 1 / (cols * ratioOf(s)))
+    const candidates = n === 2 ? [2, 1] : n === 3 ? [3, 1] : n === 4 ? [2, 4, 1] : [3, 2, 1]
+    for (const cols of candidates) {
+      const rows = Math.ceil(n / cols)
+      if (sizes.every((s) => share(s, cols, rows) >= alone(s) * 0.7)) return cols
+    }
+    return 0
+  }
 
-      const grid = document.createElement('div')
-      grid.className = imageBlocks.length === 2 ? 'slide-layout-grid-2' : 'slide-layout-grid-n'
-      for (const ib of imageBlocks) {
-        const cell = document.createElement('div')
-        cell.className = 'slide-layout-cell'
-        cell.appendChild(ib.cloneNode(true))
-        grid.appendChild(cell)
-      }
-      result.appendChild(grid)
-    } else {
-      // 仅一张图片无文字 → 直接居中
-      result.appendChild(imageBlocks[0].cloneNode(true))
+  /** 多图网格：列数由内容决定（内联 grid-template-columns），其余交给 CSS（等高行 + 每格等比缩放） */
+  const gridHtml = (figures: Element[], cols: number) =>
+    `<div class="slide-layout-grid" style="grid-template-columns:repeat(${cols},minmax(0,1fr))">` +
+    figures.map((f) => `<div class="slide-layout-cell">${f.outerHTML}</div>`).join('') +
+    `</div>`
+
+  /** 图片独占一页：等比缩放到整页内并居中 */
+  const imagePageHtml = (figures: Element[]) =>
+    figures
+      .map((f) => {
+        const clone = f.cloneNode(true) as Element
+        clone.classList.add('slide-layout-page-image')
+        return clone.outerHTML
+      })
+      .join('')
+
+  /** 图文同页（多图）：标题固定在顶部，图与文字按原文顺序摆，网格吃掉剩余高度 */
+  const multiPageHtml = (heading: Element | null, texts: Element[], grid: string, figuresFirst: boolean) => {
+    const head = heading ? heading.outerHTML : ''
+    const textHtml = textBlocksHtml(texts)
+    const textBlock = textHtml ? `<div class="slide-layout-textblocks">${textHtml}</div>` : ''
+    return (
+      `<div class="slide-layout-multi">${head}` +
+      (figuresFirst ? `${grid}${textBlock}` : `${textBlock}${grid}`) +
+      `</div>`
+    )
+  }
+
+  interface SlidePart {
+    html: string
+    /** 这一页还能不能再分页（运行期发现溢出时据此决定要不要收紧容量重建） */
+    splittable: boolean
+  }
+
+  /**
+   * 把一段的渲染结果整理成 1~N 张幻灯片。
+   *
+   * @param sectionKey 来源段标识（运行期溢出兜底时按它收紧这一段的容量）
+   * @param allowSplit 是否允许自动分页（智能切分模式开；`---` 模式尊重用户的显式分页，只挑布局）
+   */
+  const buildSlideParts = async (renderedHtml: string, sectionKey: string, allowSplit: boolean): Promise<SlidePart[]> => {
+    const tmp = document.createElement('div')
+    tmp.innerHTML = renderedHtml
+    // 顶层子节点（排除浏览器隐式闭合 <p> 产生的空 <p>）
+    const blocks = Array.from(tmp.children).filter(
+      (el) => !(el.tagName === 'P' && !el.children.length && !(el.textContent || '').trim()),
+    )
+    if (!blocks.length) return []
+
+    const figures: Element[] = []
+    const texts: Element[] = []
+    for (const b of blocks) {
+      if (isPictureFigure(b)) figures.push(b)
+      else if (b.children.length === 1 && isPictureFigure(b.children[0])) figures.push(b.children[0])
+      else texts.push(b)
+    }
+    // 标题单独拿出来：续页 / 图片页都要在顶部重复标题（目录里只登记一次，见 init）
+    const heading = texts.length && /^H[1-6]$/.test(texts[0].tagName) ? texts[0] : null
+    const bodyTexts = heading ? texts.slice(1) : texts
+    // 原文里第一个非标题块是不是图片：是的话这一页就「图在上、文字在下」（尊重原文顺序）
+    const firstBody = blocks.find((b) => !/^H[1-6]$/.test(b.tagName))
+    const figuresFirst =
+      isPictureFigure(firstBody ?? null) ||
+      (!!firstBody && firstBody.children.length === 1 && isPictureFigure(firstBody.children[0]))
+
+    const sizes = await measureFigures(figures)
+    const capOf = (base: number) => base / Math.pow(1.6, sectionTighten.get(sectionKey) || 0)
+    const headingScore = heading ? blockScore(heading) : 0
+    const textCap = () => Math.max(260, capOf(CAP_TEXT_ONLY) - headingScore)
+    const textScore = bodyTexts.reduce((n, el) => n + blockScore(el), 0)
+    // 单个块就超过一页（超长代码 / 表格）：这一页再拆也没有用，别让运行期反复收紧
+    const atomic = bodyTexts.some((el) => blockScore(el) > textCap() * 0.9)
+    /** 纯文字页（文字过多按块分页，每页顶部都带标题） */
+    const textPages = (): SlidePart[] => {
+      if (!bodyTexts.length) return [{ html: renderedHtml, splittable: false }]
+      return groupBlocks(bodyTexts, textCap()).map((g) => ({
+        html: (heading ? heading.outerHTML : '') + textBlocksHtml(g),
+        splittable: !atomic && bodyTexts.length > 1,
+      }))
+    }
+    const headingHtml = heading ? heading.outerHTML : ''
+
+    // 没有图：纯文字页（文字过多就分页）
+    if (!figures.length) {
+      return allowSplit ? textPages() : [{ html: renderedHtml, splittable: false }]
     }
 
-    return result.innerHTML
+    // 只有图：整页居中展示（多张按网格铺开；压得太小则一图一页）
+    if (!bodyTexts.length && !heading) {
+      if (figures.length === 1) return [{ html: imagePageHtml(figures), splittable: false }]
+      const cols = chooseGridColumns(sizes, false)
+      if (cols === 0) {
+        return figures.map((f) => ({ html: imagePageHtml([f]), splittable: false }))
+      }
+      return [{ html: gridHtml(figures, cols), splittable: false }]
+    }
+
+    const mixedCap = Math.max(180, capOf(CAP_TEXT_ONLY) * textShareFor(figures.length))
+    const fitsMixed = textScore <= mixedCap
+    // 混排页在文字变多时也能靠「收回容量」把文字挪到单独一页 → 允许运行期收紧
+    const mixedSplittable = !atomic && bodyTexts.length > 1
+
+    // 多图：能同页就图文同页（图在上 / 下按原文顺序）；会被压得太小就一图一页；文字放不下就单独分页
+    if (figures.length >= 2) {
+      const cols = chooseGridColumns(sizes, bodyTexts.length > 0)
+      // 一图一页（例如 3 张与幻灯片同形的图）
+      const imagePages: SlidePart[] = figures.map((f) => ({
+        html: headingHtml + imagePageHtml([f]),
+        splittable: false,
+      }))
+      if (cols === 0) {
+        if (!bodyTexts.length) return imagePages
+        const textsOnly = textPages()
+        return figuresFirst ? [...imagePages, ...textsOnly] : [...textsOnly, ...imagePages]
+      }
+      const grid = gridHtml(figures, cols)
+      if (!allowSplit || fitsMixed) {
+        return [{ html: multiPageHtml(heading, bodyTexts, grid, figuresFirst), splittable: allowSplit && mixedSplittable }]
+      }
+      const gridPart: SlidePart = { html: multiPageHtml(heading, [], grid, true), splittable: false }
+      const textsOnly = textPages()
+      return figuresFirst ? [gridPart, ...textsOnly] : [...textsOnly, gridPart]
+    }
+
+    // 只有标题 + 一张图（正文为空）：图占满整页，标题留着做面包屑
+    if (!bodyTexts.length) {
+      return [{ html: headingHtml + imagePageHtml(figures), splittable: false }]
+    }
+
+    const shape = figureShapeOf(sizes[0])
+
+    // `---` 模式：只挑布局，不自动分页（同形图片也走左右，避免把文字挪到别的页）
+    if (!allowSplit) {
+      return [
+        { html: shape === 'wide' ? mixedStackHtml(texts, figures) : mixedRowHtml(texts, figures), splittable: false },
+      ]
+    }
+
+    // 与幻灯片同形：图片独占一页（文字另起一页）；文字很短时当图注留在同一页
+    if (shape === 'same') {
+      if (textScore <= CAPTION_SCORE) {
+        return [
+          {
+            html: `<div class="slide-layout-image-only">${imagePageHtml(figures)}<div class="slide-layout-caption">${headingHtml}${textBlocksHtml(bodyTexts)}</div></div>`,
+            splittable: mixedSplittable,
+          },
+        ]
+      }
+      return [...textPages(), { html: headingHtml + imagePageHtml(figures), splittable: false }]
+    }
+
+    // 竖图 → 左右布局；宽图 → 上下布局；文字放不下则图文各占一页
+    if (fitsMixed) {
+      return [
+        {
+          html: shape === 'tall' ? mixedRowHtml(texts, figures) : mixedStackHtml(texts, figures),
+          splittable: mixedSplittable,
+        },
+      ]
+    }
+    return [...textPages(), { html: headingHtml + imagePageHtml(figures), splittable: false }]
   }
 
   // 幻灯片面包屑路径列表
@@ -209,20 +490,37 @@
     return flatten(slideTree.value)
   })
   let ratioMode = ref('auto') // 'auto' | '16:9' | '4:3'
-  // 缩放比例（0.5 ~ 2.0）
+  // 缩放比例（0.5 ~ 2.0）；Ctrl + 滚轮可无级调节，用于看单页细节
   let zoomScale = ref(1)
 
+  /** 设置缩放（夹在 0.5~2.0，保留两位小数）；缩回 1 后重新做一次自适应排版 */
+  const setZoom = (v: number) => {
+    const next = Math.max(0.5, Math.min(2, Math.round(v * 100) / 100))
+    if (next === zoomScale.value) return
+    zoomScale.value = next
+    if (next === 1) scheduleLayoutPass(120)
+  }
+
+  /**
+   * 每页的「实测适配系数」：估算系数（autoScales）只按字数估，铺不满或装不下都常见；
+   * 页面上真正的可用高度只有排完版才知道，所以显示时按实测再微调一次，
+   * 让文字尽量铺满整页（装得下就放大、溢出就缩小，缩放范围 0.7~2.6）。
+   */
+  const fitScales = ref<number[]>([])
+  const slideScale = (index: number | string) => {
+    const i = Number(index)
+    return (autoScales.value[i] || 1) * (fitScales.value[i] || 1)
+  }
+
   const changeRatio = (mode: string) => {
+    if (ratioMode.value === mode) return
     ratioMode.value = mode
+    // 幻灯片比例变了 → 图片形状的判定基准跟着变，需要重新排版（停在原来那一页）
+    void rebuildKeepingSlide()
   }
+  const zoomIn = () => setZoom(zoomScale.value + 0.1)
 
-  const zoomIn = () => {
-    zoomScale.value = Math.min(2, +(zoomScale.value + 0.1).toFixed(1))
-  }
-
-  const zoomOut = () => {
-    zoomScale.value = Math.max(0.5, +(zoomScale.value - 0.1).toFixed(1))
-  }
+  const zoomOut = () => setZoom(zoomScale.value - 0.1)
 
   const zoomPercent = computed(() => Math.round(zoomScale.value * 100) + '%')
   // 翻页动画状态
@@ -297,6 +595,7 @@
     showIndex.value = 0
     nextTick(() => {
       renderMermaid()
+      renderDrawio()
     })
   }
 
@@ -357,6 +656,8 @@
       // 幻灯片 em 基准（.slide 的内联 font-size 就是相对它算的）——字号保底要用
       const base = parseFloat(getComputedStyle(root).fontSize) || 0
       emBasePx.value = Number.isFinite(base) && base > 0 ? base : 16
+      // 容器尺寸变了（窗口缩放 / 全屏 / 目录展开）→ 重新按实测适配字号
+      scheduleLayoutPass(260)
     })
   }
 
@@ -368,13 +669,13 @@
   const emBasePx = ref(16)
   /** 主幻灯片字号（em，含保底）；index 允许 string（v-for 索引在 any[] 上是 string | number） */
   const slideFontEm = (index: number | string) => {
-    const raw = 1.4 * zoomScale.value * viewScale.value * (autoScales.value[Number(index)] || 1)
+    const raw = 1.4 * zoomScale.value * viewScale.value * slideScale(index)
     const minEm = MIN_SLIDE_FONT_PX / (emBasePx.value || 16)
     return Math.max(raw, minEm)
   }
   /** 总览缩略图字号（固定 0.5 倍，不加保底——缩略图本来就该小） */
   const overviewFontEm = (index: number | string) =>
-    0.5 * 1.4 * zoomScale.value * viewScale.value * (autoScales.value[Number(index)] || 1)
+    0.5 * 1.4 * zoomScale.value * viewScale.value * slideScale(index)
   let viewResizeObserver: ResizeObserver | null = null
   // 布局变化（目录/总览/比例）时刷新容器系数
   watch([navOpen, showOverview, ratioMode], () => refreshViewScale())
@@ -411,6 +712,15 @@
   const normalizeWheel = (e: WheelEvent) =>
     e.deltaMode === 1 ? e.deltaY * 40 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY
   const handleWheel = (e: WheelEvent) => {
+    // Ctrl（或 ⌘）+ 滚轮：缩放当前页看细节，不翻页
+    if (e.ctrlKey || e.metaKey) {
+      const dy = normalizeWheel(e)
+      if (!dy) return
+      e.preventDefault()
+      wheelAccum = 0
+      setZoom(zoomScale.value + (dy < 0 ? 0.05 : -0.05))
+      return
+    }
     if (showOverview.value || animating.value) { wheelAccum = 0; return }
     // 目录 / 主题面板内的滚动不参与翻页
     const target = e.target as HTMLElement | null
@@ -543,36 +853,32 @@
     return result
   }
 
-  // 标题页增强：只有标题无内容的页，自动列出下一级子标题
-  function enrichHeadingOnlySlides(sections: string[]): string[] {
-    const result: string[] = []
-    for (let i = 0; i < sections.length; i++) {
-      const section = sections[i]
-      const lines = section.trim().split('\n')
-      const headingMatch = lines[0]?.match(/^(#{1,6})\s+(.+)$/)
-      if (headingMatch) {
-        const level = headingMatch[1].length
-        const hasBody = lines.slice(1).some(l => l.trim() && !l.trim().startsWith('#'))
-        if (!hasBody) {
-          // 仅标题：从后续段落收集下一级标题
-          const subs: string[] = []
-          for (let j = i + 1; j < sections.length; j++) {
-            const nl = sections[j].trim().split('\n')
-            const nm = nl[0]?.match(/^(#{1,6})\s+(.+)$/)
-            if (!nm) continue
-            const nlv = nm[1].length
-            if (nlv <= level) break
-            if (nlv === level + 1) subs.push(nm[2].trim())
-          }
-          if (subs.length > 0) {
-            result.push(section + '\n\n' + subs.map(s => '- ' + s).join('\n'))
-            continue
-          }
-        }
+  /** 该段是否只有标题、下面没有任何正文（如「## 4. 结论与局限」紧跟「### 4.1 结论」） */
+  function isHeadingOnlySection(section: string): boolean {
+    const lines = section.trim().split('\n')
+    if (!lines.length || !/^#{1,6}\s/.test(lines[0].trim())) return false
+    return !lines.slice(1).some((l) => l.trim() && !l.trim().startsWith('#'))
+  }
+
+  /**
+   * 纯标题段与其后一段合并成同一页（标题仍作为该页标题与面包屑）。
+   *
+   * 否则「## 4. 结论与局限」（下面没有正文）会单独占一页，页面上只有一个标题，很浪费；
+   * 末尾若仍是纯标题段则保持原样（没有可合并的内容，标题页总比丢掉好）。
+   */
+  function mergeHeadingOnlySections(sections: string[]): string[] {
+    const out: string[] = []
+    let pending: string[] = []
+    for (const section of sections) {
+      if (isHeadingOnlySection(section)) {
+        pending.push(section.trim())
+        continue
       }
-      result.push(section)
+      out.push(pending.length ? pending.join('\n\n') + '\n\n' + section : section)
+      pending = []
     }
-    return result
+    if (pending.length) out.push(pending.join('\n\n'))
+    return out
   }
 
   /** 预处理 LaTeX：统一沿用共享实现（`@/lib/markdown/render` 的 preprocessMath）
@@ -589,20 +895,45 @@
 
   // 从原始 markdown 解析标题并构建面包屑
   const init=async function(){
-    prepList.value=[]
-    slideBreadcrumbs.value=[]
-    autoScales.value=[]
-    slideTree.value=[]
     data=store.data[store.index]
     if(data.content==undefined) data.content=""
+    // 内容真的换了：清掉上一份内容留下的「容量收紧 / 溢出重建」记录
+    if (currentSourceKey() !== lastRenderedSourceKey) {
+      sectionTighten.clear()
+    }
+    // 每次重建最多再修 2 页（防止一次构建里反复重建）：逐次翻页会继续收敛，
+    // 且每段只收紧一次，所以不会来回抖动
+    overflowRebuilds = 0
+    // 先构建到局部数组，全部就绪后一次性替换：
+    // 重建（改比例 / 溢出收紧 / 外部改动）期间旧的那套幻灯片仍可正常翻页，
+    // 否则中途 prepList 只有一两页，左右键会「按不动」。
+    const firstBuild = prepList.value.length === 0
+    const slides: string[] = []
+    const breadcrumbs: string[] = []
+    const scales: number[] = []
+    const keys: string[] = []
+    const splittables: boolean[] = []
+    /** 构建完成后原子替换 */
+    const commit = () => {
+      prepList.value = slides
+      slideBreadcrumbs.value = breadcrumbs
+      autoScales.value = scales
+      // 新的页集合：实测适配系数重新开始（访问到哪一页就为哪一页收敛）
+      fitScales.value = new Array(slides.length).fill(1)
+      slideKeys = keys
+      slideSplittable = splittables
+      slideTree.value = buildTree(allHeadings)
+    }
+    let allHeadings: { level: number; text: string; slideIndex: number }[] = []
     if(data.extension==".md"||data.extension==""){
       // 去除 YAML frontmatter，避免内容页显示元信息
       const content = data.content.replace(/^\s*---[\s\S]*?---\s*\n?/, '')
       // 切分幻灯片：先按 --- 分隔，过长的段再按原规则二次切分
       const MAX_SLIDE_LINES = 18
       let sections = splitSections(content, MAX_SLIDE_LINES)
-      // 标题页增强：纯标题页自动列出下一级子标题
-      sections = enrichHeadingOnlySlides(sections)
+      // 纯标题段（下面没有正文）与其后一段合并，避免出现只有标题的空白页；
+      // `---` 模式是用户显式分页，保持原样
+      if (splitMode.value === 'smart') sections = mergeHeadingOnlySections(sections)
 
       // 生成封面页（取文件元数据中的标题和关键词）
       const meta = data.attributes || {}
@@ -638,15 +969,24 @@
           ${summaryHtml}
           ${otherFieldsHtml ? `<div class="cover-fields">${otherFieldsHtml}</div>` : ''}
         </div>`
-        prepList.value.push(coverHtml)
-        slideBreadcrumbs.value.push('')
-        autoScales.value.push(1) // 封面页内部已有大标题排版，不额外缩放
+        slides.push(coverHtml)
+        keys.push('cover')
+        splittables.push(false)
+        breadcrumbs.push('')
+        scales.push(1) // 封面页内部已有大标题排版，不额外缩放
+        // 首次打开：先把封面挂上，长文档构建期间不至于一片空白（构建完成后再整体替换）
+        if (firstBuild) {
+          prepList.value = [coverHtml]
+          slideBreadcrumbs.value = ['']
+          autoScales.value = [1]
+          fitScales.value = [1]
+          slideKeys = ['cover']
+          slideSplittable = [false]
+        }
       }
 
       // 标题层级栈
       const headingStack: { level: number; text: string }[] = []
-      // 收集所有标题以备构建树
-      const allHeadings: { level: number; text: string; slideIndex: number }[] = []
 
       // 设置图片相对路径的基目录
       if (data.path) {
@@ -657,6 +997,9 @@
         mdBasePath = ''
       }
 
+      // 智能切分模式才自动分页；`---` 模式尊重用户在 Markdown 里写的显式分页
+      const allowSplit = splitMode.value === 'smart'
+      let sectionIdx = 0
       for (const section of sections) {
         let renderedContent = md.render(preprocessMath(section))
         if (renderedContent === '') continue
@@ -679,13 +1022,14 @@
             return `<div class="python-block-wrapper"><pre class="hljs scoll" data-lang="python"><code>${codeContent}</code></pre><div class="python-run-bar"><button class="python-run-btn" type="button" data-code="${encoded}"><i class="fa fa-play"></i> ${store.locales=='zh'?'运行 Python':'Run Python'}</button></div><div class="python-result" style="display:none"></div></div>`
           }
         )
-        // 应用智能图片排版
-        renderedContent = processSlideLayout(renderedContent)
+        // 智能排版：按图片长宽选布局（同形 → 图片独占一页 / 竖图 → 左右 / 宽图 → 上下），
+        // 文字过多时自动分页，一段可能变成多张幻灯片
+        const sectionKey = `${sectionIdx++}|${section.trim().slice(0, 48)}`
+        const parts = await buildSlideParts(renderedContent, sectionKey, allowSplit)
 
         // 从原始文本第一行提取标题
         const firstLine = section.split('\n')[0].trim()
         const headingMatch = firstLine.match(/^(#{1,6})\s+(.+)$/)
-
         if (headingMatch) {
           const level = headingMatch[1].length
           const text = headingMatch[2].trim()
@@ -695,23 +1039,27 @@
             headingStack.pop()
           }
           headingStack.push({ level, text })
-          allHeadings.push({ level, text, slideIndex: prepList.value.length })
+          // 只有这一节的第一页登记标题：续页 / 图片页共用同一个面包屑，目录里也不会出现重复项
+          allHeadings.push({ level, text, slideIndex: slides.length })
         }
 
         // 面包屑路径，直接用标题文本
         const breadcrumb = headingStack.map(h => h.text).join(' / ')
 
-        prepList.value.push(renderedContent)
-        slideBreadcrumbs.value.push(breadcrumb)
-        autoScales.value.push(calcAutoScale(renderedContent, false)) // 按该页内容密度设置字号因子
+        for (const part of parts) {
+          slides.push(part.html)
+          keys.push(sectionKey)
+          splittables.push(part.splittable)
+          breadcrumbs.push(breadcrumb)
+          scales.push(calcAutoScale(part.html, false)) // 按该页内容密度设置字号因子
+        }
         // debug: 检查当前幻灯片是否包含 mermaid
         if (renderedContent.includes('mermaid')) {
           console.log('[PPT] slide包含mermaid, 前80字符:', renderedContent.substring(0, 80))
         }
       }
-
-      slideTree.value = buildTree(allHeadings)
     }
+    commit()
     // 记录本次构建来源（路径+内容），供 refreshPpt 去重
     lastRenderedSourceKey = currentSourceKey()
   }
@@ -823,9 +1171,245 @@
     }
   }
 
-  // 翻页 / 从总览切回后：slide 用 v-if 每次都会重建，需对当前页重新渲染 mermaid
-  watch(showIndex, () => { void nextTick(() => { void renderMermaid() }) })
-  watch(showOverview, (ov: boolean) => { if (!ov) void nextTick(() => { void renderMermaid() }) })
+  /**
+   * 内嵌图表（`![](图.drawio)`）渲染：把图表占位卡片填成 SVG。
+   * 与 mermaid 同源——slide 用 v-if 每次进入都会重建，所以每次翻页 / 重建后都要重跑一次
+   * （渲染器自带内容哈希缓存，同一份图表不会重复渲染）。
+   */
+  const renderDrawio = () => {
+    void renderDrawioFigures(pptContainerRef.value, { zh: store.locales === 'zh' }).then(() => {
+      // 图表填进占位后这页的高度才算最终确定 → 稍后统一跑「裁表格 + 溢出检查」
+      scheduleLayoutPass(700)
+    })
+  }
+
+  /**
+   * 超长表格：**尽量不跨页拆分**（拆成两页的表格没人看得懂），改为按实际可放高度裁行——
+   * 保留表头与放得下的行，末尾标出省略了多少行（完整表格看浏览视图 / 导出文件）。
+   * 只裁「的确放不下」的那张表：按表的顶边到正文底边的实际空间算，页面被别的长内容占满时不裁。
+   */
+  const trimOverflowingTables = () => {
+    const slide = pptContainerRef.value?.querySelector<HTMLElement>('.slide:not(.overview-slide-real)')
+    const body = slide?.querySelector<HTMLElement>(':scope > .slide-body')
+    if (!body || body.clientHeight < 60) return
+    const bodyBottom = body.getBoundingClientRect().bottom
+    const zh = store.locales === 'zh'
+    for (const table of Array.from(body.querySelectorAll<HTMLTableElement>('table'))) {
+      const top = table.getBoundingClientRect().top
+      // 整张表都在可视区之外：说明前面的内容已经占满，交给自动分页处理
+      if (top >= bodyBottom - 4) break
+      // 提示文字也要占一行高度，先留出来
+      const available = bodyBottom - top - 26
+      const rows = () => {
+        const tbody = Array.from(table.querySelectorAll<HTMLTableRowElement>('tbody tr'))
+        return tbody.length ? tbody : Array.from(table.querySelectorAll<HTMLTableRowElement>('tr')).slice(1)
+      }
+      const rowH = Math.max(1, (rows()[0] || table).getBoundingClientRect().height)
+      // 塞不下三行说明这一页主要被别的内容占了，裁表没有意义
+      if (available < rowH * 3 || table.offsetHeight <= available) continue
+      let guard = 0
+      let removed = 0
+      while (table.offsetHeight > available && guard < 400) {
+        const list = rows()
+        if (list.length <= 1) break
+        const cut = Math.max(1, Math.min(list.length - 1, Math.ceil((table.offsetHeight - available) / rowH)))
+        for (let i = 0; i < cut; i++) {
+          const r = list[list.length - 1 - i]
+          if (!r) break
+          r.remove()
+          removed += 1
+        }
+        guard += 1
+      }
+      if (!removed) continue
+      const note = document.createElement('div')
+      note.className = 'slide-table-trimmed'
+      note.textContent = zh
+        ? `表格过长，已省略 ${removed} 行（完整数据见浏览视图）`
+        : `Table trimmed: ${removed} rows omitted (see Browse view for all rows)`
+      table.insertAdjacentElement('afterend', note)
+    }
+  }
+
+  /**
+   * 运行期兜底：文字长度只是估算，代码块 / 表格 / 公式 / 图片的实际高度只有排完版才知道。
+   * 当前页真的装不下、且这一页还能再分页时，把该段容量收紧一档并重建（内容自动多分一页）；
+   * 每段最多收紧一次、每轮构建最多重建两次，并保持用户停留的那一页，避免翻页"被弹回去"。
+   */
+  const checkSlideOverflow = () => {
+    if (showOverview.value || animating.value) return
+    const idx = Number(showIndex.value)
+    if (!slideSplittable[idx]) return
+    const key = slideKeys[idx]
+    if (!key || (sectionTighten.get(key) || 0) >= 1 || overflowRebuilds >= 2) return
+    const slide = pptContainerRef.value?.querySelector<HTMLElement>('.slide:not(.overview-slide-real)')
+    const body = slide?.querySelector<HTMLElement>(':scope > .slide-body')
+    if (!body || body.clientHeight < 40) return
+    // 图本身已占满整页（它就该独占一页）：拆文字救不了，这不是「文字溢出」
+    const pageSizedFigure = Array.from(body.querySelectorAll<HTMLElement>('figure')).some(
+      (f) => f.getBoundingClientRect().height > body.clientHeight * 0.92,
+    )
+    if (pageSizedFigure) return
+    // 只要真的溢出了（>8px，即最后一行被切）就收紧一档；装得下时不动
+    if (body.scrollHeight - body.clientHeight <= 8) return
+    sectionTighten.set(key, (sectionTighten.get(key) || 0) + 1)
+    overflowRebuilds += 1
+    // 记住用户停在这一节的第几页，重建后停在同样的位置（而不是被弹回本节第一页）
+    const partOffset = idx - slideKeys.indexOf(key)
+    void rebuildKeepingSlide(key, partOffset)
+  }
+
+  /**
+   * 「先裁表格、再按实测调字号、最后查溢出」的统一入口：必须等翻页动画结束
+   * （动画期间幻灯片是绝对定位，高度量不准）、图表填进占位之后再量。
+   * 重复调用只保留最后一次。
+   */
+  const scheduleLayoutPass = (delay = 700) => {
+    if (overflowTimer) clearTimeout(overflowTimer)
+    overflowTimer = setTimeout(() => {
+      overflowTimer = null
+      if (showOverview.value || animating.value) {
+        scheduleLayoutPass(320)
+        return
+      }
+      trimOverflowingTables()
+      void autoFitCurrentSlide().then(() => {
+        trimOverflowingTables()
+        checkSlideOverflow()
+      })
+    }, delay)
+  }
+
+  /** 内容实际用掉的高度（未溢出时布局容器会撑满，得往里找文字块） */
+  const contentUsedHeight = (body: HTMLElement): number => {
+    const bodyTop = body.getBoundingClientRect().top
+    let bottom = bodyTop
+    for (const kid of Array.from(body.children) as HTMLElement[]) {
+      const el = kid.querySelector<HTMLElement>('.slide-layout-text, .slide-layout-textblocks') || kid
+      const r = el.getBoundingClientRect()
+      const mb = parseFloat(getComputedStyle(el).marginBottom) || 0
+      bottom = Math.max(bottom, r.bottom + mb)
+    }
+    return bottom - bodyTop
+  }
+
+  /**
+   * 等一帧（rAF，带上超时兜底）：窗口被隐藏 / 最小化时 rAF 会被节流甚至不触发，
+   * 只等 rAF 会让后面的排版流程整条卡住，所以必须有超时兜底。
+   */
+  const nextFrame = () =>
+    new Promise<void>((resolve) => {
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        resolve()
+      }
+      const timer = window.setTimeout(finish, 60)
+      try {
+        requestAnimationFrame(() => {
+          window.clearTimeout(timer)
+          finish()
+        })
+      } catch {
+        window.clearTimeout(timer)
+        finish()
+      }
+    })
+
+  /**
+   * 按实测把当前页字号调到「刚好铺满」：估算系数只按字数算，偏保守时文字不大、
+   * 下方还留一段空白。这里量真实高度后微调（装得下就放大、溢出就缩小，0.7~2.6 倍），
+   * 最多迭代 6 次；Ctrl+滚轮放大看细节时不参与（那不是排版问题）。
+   */
+  let fitRunning = false
+  const autoFitCurrentSlide = async (iterations = 6) => {
+    if (fitRunning || showOverview.value || animating.value || zoomScale.value !== 1) return
+    const slide = pptContainerRef.value?.querySelector<HTMLElement>('.slide:not(.overview-slide-real)')
+    const body = slide?.querySelector<HTMLElement>(':scope > .slide-body')
+    if (!body || body.clientHeight < 40) return
+    const idx = Number(showIndex.value)
+    // 有整页图片 / 图表时不放大：图由容器定尺寸，放大文字只会把图挤小
+    const hasFigure = !!body.querySelector('figure')
+    fitRunning = true
+    try {
+      // 先把之前可能过冲的系数收回来，再按实测逼近（避免上一轮留下的溢出一直存在）
+      const current = fitScales.value[idx] || 1
+      if (current > 1) {
+        const arr = fitScales.value.slice()
+        arr[idx] = 1
+        fitScales.value = arr
+      }
+      for (let i = 0; i < iterations; i++) {
+        await nextTick()
+        await nextFrame()
+        const h = body.clientHeight
+        if (!h) break
+        const overflowing = body.scrollHeight > h + 1
+        const used = overflowing ? body.scrollHeight : contentUsedHeight(body)
+        if (!used) break
+        const ratio = h / used
+        // 已经贴合（差 3% 以内）就收手：既不留明显空白，也不切掉最后一行
+        if (ratio >= 0.97 && ratio <= 1.01) break
+        if (!overflowing && hasFigure) break // 图占位时只缩小、不放大
+        const cur = fitScales.value[idx] || 1
+        // 目标：内容高度 ≈ 可用高度。放大 / 缩小都限幅（0.8~1.15 / 0.75~0.95），
+        // 让迭代单调收敛，不会一步放大过头、下一步又缩回去来回震荡
+        const raw = ratio * 0.99
+        const step = overflowing ? Math.min(0.95, Math.max(0.75, raw)) : Math.min(1.15, Math.max(0.8, raw))
+        const next = Math.max(0.7, Math.min(2.6, cur * step))
+        if (Math.abs(next - cur) < 0.012) break
+        const arr = fitScales.value.slice()
+        arr[idx] = next
+        fitScales.value = arr
+      }
+      // 收尾保底：迭代结束仍溢出（步长限幅导致）就按实测比例再收一次，绝不留最后一行被切
+      await nextTick()
+      await nextFrame()
+      const hEnd = body.clientHeight
+      const overEnd = hEnd ? body.scrollHeight - hEnd : 0
+      if (overEnd > 1) {
+        const cur = fitScales.value[idx] || 1
+        const next = Math.max(0.7, Math.min(2.6, (cur * (hEnd / body.scrollHeight)) * 0.99))
+        if (next < cur - 0.005) {
+          const arr = fitScales.value.slice()
+          arr[idx] = next
+          fitScales.value = arr
+        }
+      }
+    } finally {
+      fitRunning = false
+    }
+  }
+
+  /** 就地重建并停在原来那一页（按来源段键 + 节内页偏移定位；比例切换 / 溢出收紧后用） */
+  const rebuildKeepingSlide = async (key?: string, partOffset = 0) => {
+    const cur = key || slideKeys[Number(showIndex.value)] || ''
+    const offset = key ? partOffset : Math.max(0, Number(showIndex.value) - slideKeys.indexOf(cur))
+    await init()
+    const base = cur ? slideKeys.indexOf(cur) : -1
+    if (base >= 0) {
+      // 本节页数（重建后可能变多）：停在同样的第 k 页
+      let count = 0
+      while (base + count < slideKeys.length && slideKeys[base + count] === cur) count += 1
+      showIndex.value = Math.min(base + offset, base + count - 1)
+    } else {
+      showIndex.value = Math.max(0, Math.min(prepList.value.length - 1, Number(showIndex.value)))
+    }
+    await nextTick()
+    renderMermaid()
+    renderDrawio()
+  }
+
+  // 翻页 / 从总览切回后：slide 用 v-if 每次都会重建，需对当前页重新渲染 mermaid / 内嵌图表
+  watch(showIndex, () => {
+    void nextTick(() => {
+      void renderMermaid()
+      renderDrawio()
+    })
+    scheduleLayoutPass(1000)
+  })
+  watch(showOverview, (ov: boolean) => { if (!ov) void nextTick(() => { void renderMermaid(); renderDrawio() }) })
 
   /** 统一刷新入口：来源（路径/内容）真的变化才重建演示（保留当前页码）。
    *  由 标签切换 / 内容变化监听 / 外部文件变更 共用，天然去重。 */
@@ -837,6 +1421,7 @@
     showIndex.value = Math.max(0, Math.min(prepList.value.length - 1, prevIndex))
     await nextTick()
     renderMermaid()
+    renderDrawio()
     attachPythonRunHandler()
   }
 
@@ -863,7 +1448,9 @@
     await init()
     nextTick(() => {
       renderMermaid()
+      renderDrawio()
       attachPythonRunHandler()
+      scheduleLayoutPass(800)
     })
     // 容器尺寸自适应（跟随窗口缩放字号）
     refreshViewScale()
@@ -1579,86 +2166,176 @@
     flex-direction: column;
   }
 
-  /* 左文字右图片 — margin:auto 居中，内容长时自然撑开触发 slide 滚动 */
+  /* ===== 图文智能排版 =====
+     统一原则：布局容器占满正文区的剩余高度（flex:1 + min-height:0），容器里的图片一律
+     `max-width/max-height:100%` 等比缩放 —— 图片永远不会比幻灯片还高，也不再依赖 vh 单位。 */
+
+  /* 左文字右图片 */
   .slide :deep(.slide-layout-row) {
+    flex: 1 1 0;
+    min-height: 0;
     display: flex;
     flex-direction: row;
     gap: 24px;
-    align-items: center;
-    margin-top: auto;
-    margin-bottom: auto;
+    /* safe center：内容装得下就垂直居中；装不下时退回顶部对齐，
+       否则溢出的上半部分会被推到滚动区之外、滚不上去 */
+    align-items: safe center;
   }
   .slide :deep(.slide-layout-text) {
-    flex: 1;
+    /* 横向（左右布局）时按容器宽度等分：必须是可伸缩的，否则长段落会拉成一行、把图挤扁 */
+    flex: 1 1 0;
     min-width: 0;
   }
   .slide :deep(.slide-layout-image) {
     flex: 2 1 0;
     min-width: 0;
+    min-height: 0;
+    height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
   }
-  .slide :deep(.slide-layout-image) figure {
-    margin: 0;
-    width: 100%;
-  }
-  .slide :deep(.slide-layout-image) img {
-    width: 100%;
-    max-height: 60vh;
-    height: auto;
-    object-fit: contain;
-  }
 
-  /* 双图并排 — 高度一致，宽度自适应 */
-  .slide :deep(.slide-layout-grid-2) {
-    display: flex;
-    flex-direction: row;
-    gap: 20px;
-    margin: 16px 0;
-    align-items: flex-start;
-  }
-  .slide :deep(.slide-layout-grid-2) .slide-layout-cell {
-    flex: 1;
-    min-width: 0;
+  /* 文字在上 / 图片在下（宽图） */
+  .slide :deep(.slide-layout-stack) {
+    flex: 1 1 0;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    align-items: center;
+    gap: 16px;
   }
-  .slide :deep(.slide-layout-grid-2) .slide-layout-cell figure {
+  .slide :deep(.slide-layout-stack) .slide-layout-text {
+    /* 纵向（上下布局）时按内容高度撑开：被压缩到内容以下会让文字溢出、糊到图片上 */
+    flex: 0 0 auto;
+  }
+  .slide :deep(.slide-layout-stack) .slide-layout-image {
+    flex: 1 1 0;
+    /* 高度下限：文字多时也不把图压扁 */
+    min-height: 38%;
+    height: auto;
+  }
+
+  /* 多图 + 文字同页：标题 / 文字 / 网格 依序排，网格吃掉剩余高度 */
+  .slide :deep(.slide-layout-multi) {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .slide :deep(.slide-layout-multi) > h1,
+  .slide :deep(.slide-layout-multi) > h2,
+  .slide :deep(.slide-layout-multi) > h3,
+  .slide :deep(.slide-layout-multi) > h4,
+  .slide :deep(.slide-layout-multi) > h5,
+  .slide :deep(.slide-layout-multi) > h6 {
+    flex-shrink: 0;
+    margin-top: 0;
+  }
+  .slide :deep(.slide-layout-textblocks) {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+
+  /* 图片容器：单元格内「图占满 + 图注贴底」，图片按格等比缩放 */
+  .slide :deep(.slide-layout-image) figure,
+  .slide :deep(.slide-layout-grid) .slide-layout-cell figure,
+  .slide :deep(.slide-layout-page-image) {
     margin: 0;
     width: 100%;
     height: 100%;
-    display: flex;
-    flex-direction: column;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    justify-items: center;
+    align-items: center;
   }
-  .slide :deep(.slide-layout-grid-2) .slide-layout-cell img {
-    width: auto;
-    height: 35vh;
+  .slide :deep(.slide-layout-image) img,
+  .slide :deep(.slide-layout-grid) .slide-layout-cell img,
+  .slide :deep(.slide-layout-page-image) img {
     max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
     object-fit: contain;
   }
 
-  /* 多图网格 */
-  .slide :deep(.slide-layout-grid-n) {
+  /* 多图网格：列数由内容决定（内联 grid-template-columns），行数自动均分剩余高度 */
+  .slide :deep(.slide-layout-grid) {
+    flex: 1 1 45%;
+    /* 高度下限：文字再多也不许把图压成一条缝（页面因此放不下时交给自动分页处理） */
+    min-height: 34%;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-auto-rows: minmax(0, 1fr);
     gap: 16px;
-    margin: 16px 0;
+    margin: 0;
   }
-  .slide :deep(.slide-layout-grid-n) .slide-layout-cell {
+  .slide :deep(.slide-layout-grid) .slide-layout-cell {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  /* 图片独占一页（图片与幻灯片同形） */
+  .slide :deep(.slide-layout-page-image) {
+    flex: 1 1 0;
+    height: auto;
+  }
+  /* 内嵌 drawio 图表：卡片与 SVG 一起按框等比缩放，**不出现滚动条**（放不下就整体缩小） */
+  .slide :deep(.slide-layout-image) .md-drawio-body,
+  .slide :deep(.slide-layout-grid) .slide-layout-cell .md-drawio-body,
+  .slide :deep(.slide-layout-page-image) .md-drawio-body {
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
   }
-  .slide :deep(.slide-layout-grid-n) .slide-layout-cell figure {
-    margin: 0;
-    width: 100%;
-  }
-  .slide :deep(.slide-layout-grid-n) .slide-layout-cell img {
+  .slide :deep(.slide-layout-image) .md-drawio-canvas,
+  .slide :deep(.slide-layout-grid) .slide-layout-cell .md-drawio-canvas,
+  .slide :deep(.slide-layout-page-image) .md-drawio-canvas {
+    flex: 1 1 auto;
+    min-height: 0;
     max-width: 100%;
-    max-height: 40vh;
-    height: auto;
+    max-height: 100%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .slide :deep(.slide-layout-image) .md-drawio-canvas svg,
+  .slide :deep(.slide-layout-grid) .slide-layout-cell .md-drawio-canvas svg,
+  .slide :deep(.slide-layout-page-image) .md-drawio-canvas svg {
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    display: block;
+  }
+
+  /* 被裁剪的表格：末尾提示省略了多少行 */
+  .slide :deep(.slide-table-trimmed) {
+    flex-shrink: 0;
+    margin-top: 6px;
+    font-size: 0.7em;
+    opacity: 0.65;
+    text-align: right;
+  }
+
+  /* 同形图片 + 一句话图注：图占满剩余空间，图注贴着底部 */
+  .slide :deep(.slide-layout-image-only) {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .slide :deep(.slide-layout-caption) {
+    flex-shrink: 0;
+    text-align: center;
+    opacity: 0.8;
   }
   /* 幻灯片内表格：全部颜色走 --ppt-table-* 变量（各幻灯片主题各自赋值；default ⊆ 全局 var()）。
      背景必须显式设成 transparent/变量：全局 style.css 里有

@@ -1157,14 +1157,19 @@ onUnmounted(() => {
 .plugin-reset-root:hover {
   color: var(--fontActiveColor);
 }
+/* 弹层遮罩：必须脱离列表滚动容器。
+   插件列表在设置内容区（.settings-content）里滚动，若这里用 position:absolute，
+   遮罩会跟着内容一起滚——插件多时（列表很长、已向下滚动）弹窗就跑到了视口上方，
+   需要往上滑才看得见。改成 fixed 后弹窗永远居中在窗口里。
+   z-index 取 1600：高于设置层（.set-overlay 1500），低于 Element Plus 消息框（2000+）。 */
 .plugin-overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.35);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 20;
+  z-index: 1600;
 }
 .plugin-dialog {
   width: min(720px, 92%);
