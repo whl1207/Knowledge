@@ -77,7 +77,7 @@ npm install --registry=https://registry.npmmirror.com
 
 | Platform | Package published |
 |:---|:---|
-| Windows | `AI-KM_Windows_<ver>_x86_64_Setup.exe` (NSIS installer) |
+| Windows | `AI-KM_Windows_<ver>_x86_64_Setup.exe` (NSIS installer) and `AI-KM_Windows_<ver>_x86_64_Portable.exe` (single-file portable) |
 | Linux | `AI-KM_Linux_<ver>_x86_64.AppImage`, `AI-KM_Linux_<ver>_amd64.deb`, `AI-KM_Linux_<ver>_arm64.deb` |
 | macOS (Apple Silicon) | `AI-KM_Mac_<ver>_arm64.dmg` |
 
@@ -85,7 +85,7 @@ npm install --registry=https://registry.npmmirror.com
 * Pull requests and documentation-only pushes only build; they never publish.
 * The macOS build is unsigned (no Apple Developer certificate): first launch needs **right-click → Open**, or `xattr -cr /Applications/AI-KM.app`.
 * CI packages cannot include the ~30 MB offline basemap (`public/maps/*.mbtiles` is generated from a local tile pyramid); `public/drawio` *is* fetched before packaging, so `.drawio` editing works. Use `npm run release:*` locally if you want the basemap inside the package.
-* The green portable RAR stays local-only — GitHub runners have no WinRAR.
+* The green RAR is not built in CI (no WinRAR on the runners) — use `npm run release:win` locally for it.
 
 ### Optional local assets (not committed)
 

@@ -32,7 +32,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            args: --win
+            args: --win nsis portable
           - os: ubuntu-latest
             args: --linux
           - os: macos-latest
