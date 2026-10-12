@@ -1010,14 +1010,15 @@
   }
 
   //右键菜单逻辑（文件节点）
-  const handleRightClick = (event: MouseEvent, data: any) => {
+  const handleRightClick = (event: Event, data: any) => {
     event.preventDefault(); // 阻止默认的右键菜单
     hideTooltip(); // 隐藏文件信息提示，避免其盖住右键菜单
 
+    const pos = event as MouseEvent;
     contextMenu.value.visible = true;
     contextMenu.value.style = {
-      left: event.clientX + 'px',
-      top: event.clientY + 'px',
+      left: pos.clientX + 'px',
+      top: pos.clientY + 'px',
       transform: ''
     };
     contextMenu.value.node = data;

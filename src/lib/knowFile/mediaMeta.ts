@@ -344,7 +344,12 @@ function extractFlacAlbumArt(bytes: Uint8Array): string | null {
     for (const c of comments) {
       if (c.key !== 'COVERART') continue
       const raw = base64ToBytes(c.value)
-      if (raw && raw.length) return URL.createObjectURL(new Blob([raw], { type: mime || 'image/jpeg' }))
+      if (raw && raw.length) {
+        // 复制到新的 Uint8Array：base64ToBytes 的返回类型是宽化的 Uint8Array，
+        // 复制后的数组才能满足 Blob 对 ArrayBuffer 视图的要求
+        const cover = new Uint8Array(raw)
+        return URL.createObjectURL(new Blob([cover], { type: mime || 'image/jpeg' }))
+      }
     }
   } catch {
     /* 忽略解析错误 */

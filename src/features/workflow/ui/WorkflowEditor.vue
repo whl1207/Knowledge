@@ -193,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, markRaw, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, provide, ref, watch, type Ref } from 'vue'
 import { Background } from '@vue-flow/background'
 import { MiniMap } from '@vue-flow/minimap'
 import { useVueFlow, VueFlow, type Connection, type Edge, type NodeMouseEvent, type NodeTypesObject } from '@vue-flow/core'
@@ -275,8 +275,10 @@ const { screenToFlowCoordinate, fitView, getSelectedNodes, getSelectedEdges, zoo
 
 const rootRef = ref<HTMLElement | null>(null)
 const doc = ref<DslDocument | null>(null)
-const flowNodes = ref<DifyFlowNode[]>([])
-const flowEdges = ref<Edge[]>([])
+// 显式声明 Ref<…>：新版 Vue 的 UnwrapRef 作用在 DifyFlowNode / Edge 这类深层泛型上会触发 TS2589，
+// 用断言跳过 UnwrapRef（运行时仍是普通 ref，深层响应式行为不变）
+const flowNodes = ref([]) as Ref<DifyFlowNode[]>
+const flowEdges = ref([]) as Ref<Edge[]>
 const issues = ref<DslIssue[]>([])
 const issuesOpen = ref(true)
 const loadError = ref('')

@@ -91,7 +91,7 @@ export class FunasrOnlineRuntime {
 
   // 前端流式状态（等价 WavFrontendOnline，batch=1）
   private sampleBuf = new Float32Array(0) // 自下一帧起点起的残差采样
-  private lfrCache = new Float32Array(0) // LFR 拼接缓存（nMels 帧）
+  private lfrCache: Float32Array = new Float32Array(0) // LFR 拼接缓存（nMels 帧）
   private lfrCacheRows = 0
   private lfrPadDone = false
 
