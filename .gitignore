@@ -25,8 +25,7 @@ release
 *.sln
 *.sw?
 
-# lockfile
-package-lock.json
+# lockfile：提交 package-lock.json，保证 CI 与本地解析到完全相同的依赖版本
 pnpm-lock.yaml
 yarn.lock
 
