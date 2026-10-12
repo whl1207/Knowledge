@@ -14,6 +14,7 @@ import { officeService } from './office/office-service'
 import { drawioService } from './drawio/drawio-service'
 import { literatureService } from './literature/literature-service'
 import { postgresService } from './postgres/postgres-service'
+import { pluginDevService } from './plugin-dev/plugin-dev-service'
 
 /** 单次 MCP 工具调用默认超时（毫秒）；可由服务配置 timeoutMs 覆盖（设置页可改） */
 const DEFAULT_CALL_TIMEOUT_MS = 60000
@@ -29,6 +30,7 @@ const BUILTIN_SERVERS: Record<string, { createLocalServerPair: (config?: McpServ
   'builtin-drawio': drawioService,
   'builtin-literature': literatureService,
   'builtin-postgres': postgresService,
+  'builtin-plugin-dev': pluginDevService,
 }
 
 /** 运行时懒加载的 MCP SDK 类集合 */

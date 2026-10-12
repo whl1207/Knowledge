@@ -36,6 +36,8 @@ export interface PluginBridgeApi {
   getConfig(id: string): Promise<Record<string, unknown>>
   setConfig(id: string, patch: Record<string, unknown>, confirm?: boolean): Promise<Record<string, unknown>>
   logs(id: string): Promise<PluginLogLine[]>
+  /** 渲染层半边的日志上报（界面扩展装载失败 / 插件 warn·error）→ 落进插件日志缓冲（不阻塞） */
+  clientLog(id: string, level: 'debug' | 'info' | 'warn' | 'error', message: string): void
   openDir(id?: string): Promise<{ path: string }>
   /** 插件在主进程侧的数据文件（userData/plugins-data/<id>/，见 pluginData.ts） */
   dataFiles(id: string): Promise<{ id: string; entries: PluginDataFileStat[] }>

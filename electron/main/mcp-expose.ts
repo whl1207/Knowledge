@@ -1,5 +1,5 @@
 /**
- * 内置 MCP 服务对外 HTTP 暴露（builtin-office / builtin-browser / builtin-drawio / builtin-literature / builtin-postgres）
+ * 内置 MCP 服务对外 HTTP 暴露（builtin-office / builtin-browser / builtin-drawio / builtin-literature / builtin-postgres / builtin-plugin-dev）
  *
  * 把进程内内置服务通过「Streamable HTTP」暴露到本机端口（127.0.0.1），
  * 供其他软件（Claude Desktop / Claude Code / Cursor 等支持 MCP 的客户端，
@@ -10,8 +10,9 @@
  *   /mcp/builtin-browser    浏览器 Agent（browser_navigate / browser_screenshot / …）
  *   /mcp/builtin-drawio     drawio 图表（drawio_create / drawio_add_node / drawio_auto_layout / …）
  *   /mcp/builtin-literature 学术文献检索（search_crossref / search_openalex / search_arxiv / search_pubmed / get_by_doi）
- *   /mcp/builtin-postgres   PostgreSQL 只读查询（pg_status / pg_list_schemas / pg_list_tables / pg_describe_table / pg_sample_rows / pg_query）
- * 工具实际在主进程内执行（office / drawio）或经本应用渲染端 RPC 执行（browser），
+ *   /mcp/builtin-postgres   PostgreSQL 只读查询（pg_status / pg_list_schemas / … / pg_query）
+ *   /mcp/builtin-plugin-dev 插件开发参考（plugin_dev_guide：约束 / 清单 / 槽位 / 宿主 API / 示例 / 常见问题）
+ * 工具实际在主进程内执行（office / drawio / plugin-dev）或经本应用渲染端 RPC 执行（browser），
  * 因此「使用方连接时，本软件必须处于运行状态」。
  *
  * 与 2 SwarmPlanner 的 swarm-http-server 同构：共享单例 Server + 每会话一个
@@ -24,6 +25,7 @@ import { browserAgentService } from './browser-agent'
 import { drawioService } from './drawio/drawio-service'
 import { literatureService } from './literature/literature-service'
 import { postgresService } from './postgres/postgres-service'
+import { pluginDevService } from './plugin-dev/plugin-dev-service'
 
 export const MCP_EXPOSE_PORT = 43112
 
@@ -72,6 +74,13 @@ export const MCP_EXPOSE_ENDPOINTS: ExposeEndpoint[] = [
     name: 'PostgreSQL 只读查询',
     connect: (t) => postgresService.connectTransport(t),
     tools: () => postgresService.listToolNames(),
+  },
+  {
+    id: 'builtin-plugin-dev',
+    path: '/mcp/builtin-plugin-dev',
+    name: '插件开发参考',
+    connect: (t) => pluginDevService.connectTransport(t),
+    tools: () => pluginDevService.listToolNames(),
   },
 ]
 

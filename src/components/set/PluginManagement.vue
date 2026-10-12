@@ -170,6 +170,13 @@
               >
                 <i class="fa fa-database"></i> {{ formatBytes(pluginData[p.id].totalBytes) }}
               </span>
+              <span
+                v-if="p.hasClient && clientStates[p.id] && !clientStates[p.id].ok"
+                class="plugin-client-badge"
+                :title="clientBadgeHint(p.id)"
+              >
+                <i class="fa fa-exclamation-triangle"></i> {{ zh ? '界面半边装载失败' : 'UI half failed' }}
+              </span>
             </div>
 
             <div v-if="p.error" class="plugin-error" :title="p.error">
@@ -385,7 +392,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { useSlotSnapshot } from '@/lib/plugin/useSlots'
-import { clientShortcuts } from '@/lib/plugin/runtime'
+import { clientPluginLoadStates, clientShortcuts, syncClientPlugins } from '@/lib/plugin/runtime'
 import { formatBytes } from '@/lib/settingsData'
 import {
   PLUGIN_DATA_DIR,
@@ -420,6 +427,26 @@ const configText = ref('')
 const dataTarget = ref<PluginSnapshot | null>(null)
 const dataSummary = ref<PluginDataSummary | null>(null)
 const pluginData = ref<Record<string, PluginDataSummary>>({})
+/**
+ * 界面半边的装载结果（渲染层内存态，主进程快照里没有）：
+ * 主进程显示 active 不代表界面半边装上了 —— 常见于界面半边代码写错，
+ * 这时只报在浏览器控制台里，用户只会觉得「点了重载没反应」。
+ */
+const clientStates = ref<Record<string, { ok: boolean; message: string; ts: number }>>({})
+
+const refreshClientStates = () => {
+  clientStates.value = clientPluginLoadStates()
+}
+
+/** 同步界面半边（幂等）后再取装载结果：主进程事件与同步完成之间没有顺序保证，所以主动等一次 */
+const syncThenRefreshClients = async () => {
+  try {
+    await syncClientPlugins()
+  } catch {
+    /* 同步失败不影响列表展示 */
+  }
+  refreshClientStates()
+}
 /** 槽位注册表快照（详情面板用它把「界面位置」归到具体插件） */
 const slotSnapshot = useSlotSnapshot()
 
@@ -483,6 +510,7 @@ const applyList = (res: any) => {
   customRoot.value = res?.customRoot === true
   services.value = res?.services || []
   void refreshAllData()
+  void syncThenRefreshClients()
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +525,16 @@ const dataBadgeHint = (id: string): string => {
     zh.value ? '点左边的数据库按钮可以看明细 / 清理' : 'Use the database button on the left to inspect or clean it',
   ]
   return lines.join('\n')
+}
+
+/** 界面半边失败徽标的提示：给出真实报错与下一步动作 */
+const clientBadgeHint = (id: string): string => {
+  const st = clientStates.value[id]
+  if (!st) return ''
+  const when = new Date(st.ts).toLocaleTimeString()
+  return zh.value
+    ? `界面半边装载失败（${when}）：\n${st.message}\n点「重新载入」会重试；仍失败请照提示改插件代码。`
+    : `UI half failed to load (${when}):\n${st.message}\nReload retries it; if it still fails, fix the plugin code as the message says.`
 }
 
 /** 列表里给每个插件算一次占用（localStorage 扫一遍 + OPFS plugins/ 走一次） */
@@ -1115,6 +1153,9 @@ onUnmounted(() => {
 /* 插件数据占用徽标：`设置 → 插件 → 管理` 里一眼能看到谁占地方 */
 .plugin-data-badge {
   color: var(--fontActiveColor, #409eff);
+}
+.plugin-client-badge {
+  color: #d97706;
 }
 .plugin-data-list {
   margin-top: 6px;

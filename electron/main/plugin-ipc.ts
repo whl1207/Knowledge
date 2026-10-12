@@ -194,6 +194,18 @@ export function registerPluginIpc(): void {
   })
 
   /**
+   * 渲染层半边的日志上报（界面扩展装载失败、插件自己的 warn/error）：
+   * 只读语义的**追加**操作，不需要审批；只接受已登记插件的日志。
+   * 落进插件自己的日志缓冲后，「插件 → 管理 → 日志」与开发者 MCP 服务（plugin_dev_check）都能看到。
+   */
+  registerIpc('plugin:client-log', (payload) => {
+    const id = readString(payload?.id, 'id')
+    const level = typeof payload?.level === 'string' ? payload.level : 'info'
+    const message = typeof payload?.message === 'string' ? payload.message : ''
+    return { logged: pluginHost.appendClientLog(id, level, message) }
+  })
+
+  /**
    * 插件在主进程侧的数据文件（`userData/plugins-data/<id>/`，如 `ctx.storage` 的 storage.json）。
    * 只读，不需要审批；渲染层读不到这个目录，所以「插件管理 → 数据」靠它补齐统计。
    */

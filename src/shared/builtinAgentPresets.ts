@@ -37,6 +37,90 @@ export const BUILTIN_AGENT_PRESET_ID_SET: Set<string> = new Set(Object.values(BU
 export const isBuiltinAgentPreset = (preset: any): boolean =>
   !!preset && typeof preset.id === 'string' && BUILTIN_AGENT_PRESET_ID_SET.has(preset.id)
 
+// ---------------------------------------------------------------------------
+// 「插件开发智能体」提示词里的三段块（当前版本 + 旧版本）
+//
+// 旧版要求模型**先读仓库源码**（src/types/plugin.ts 等）来核对 API —— 那是开发仓库才有的路径，
+// 装机后的软件里根本没有源码，于是模型会满盘 read_file / search_files / 跑 shell 去找
+// 「AI-KM 装在哪」。当前版本改为调用内置工具 plugin_dev_guide 拿同一份官方指南（离线可用）。
+// `_V1` 常量只用于把**旧存档里的旧提示词**一次性订正过来（见 refreshBuiltinAgentPresets）。
+// ---------------------------------------------------------------------------
+
+/** 怎么拿 API 参考（当前）：经 mcp_call 调内置 MCP 服务 builtin-plugin-dev 的 6 个短工具 */
+const PLUGIN_PROMPT_GUIDE = [
+  '动手前必须先拿到官方 API 参考（不要凭记忆写，也**不要在磁盘上找 AI-KM 的源码**）：',
+  '- 用 mcp_call 调内置 MCP 服务 `builtin-plugin-dev`，它按主题拆成 6 个短工具，**按需取用、不要一次全取**：`plugin_dev_host`（本机插件目录 / 已装插件 / 数据放哪）、`plugin_dev_constraints`（14 条硬性约束）、`plugin_dev_manifest`（package.json 清单字段 + 内置槽位 + 可直接照抄的清单）、`plugin_dev_api`（宿主 API 速查 + 最小示例全文）、`plugin_dev_faq`（报错对照）、`plugin_dev_templates`（模板目录与安装步骤，正文要传 key，如 {"key":"panel"}），另有 `plugin_dev_check`（自检，见工作方式第 3 步）。',
+  '- 推荐起手三条：host（知道文件夹建在哪）→ constraints（避免加载失败）→ manifest + api（照着写清单与代码）。',
+  '- 为什么不能去找源码：软件安装目录里没有 `src/`（那是开发仓库才有的），用户的工作区一般是他的知识库、也不是 AI-KM 项目目录；满盘 read_file / search_files / 跑 shell 只会浪费轮次，什么也读不到。这些内容已内联在该 MCP 服务里。',
+  '- 只有当工作区里**确实**存在 AI-KM 源码（例如工作区根下有 `src/lib/plugin/devGuide.ts`，说明用户就是在开发 AI-KM 本身）时，才顺手读一眼源码核对；这种情形只是少数。',
+]
+
+/** 怎么拿 API 参考（旧版：一个 section 参数的 plugin_dev_guide 工具） */
+export const PLUGIN_PROMPT_GUIDE_V3 = [
+  '动手前必须先拿到官方 API 参考（不要凭记忆写，也**不要在磁盘上找 AI-KM 的源码**）：',
+  '- 第一步就用 mcp_call 调用内置 MCP 服务 `builtin-plugin-dev` 的 `plugin_dev_guide` 工具（args 可省略；要更多内容时传 {"section":["all"]}）——它返回本机插件目录的绝对路径、已装插件清单、硬性约束、package.json 清单字段、内置槽位、全部宿主 API 列表与最小示例。',
+  '- 为什么不能去找源码：软件安装目录里没有 `src/`（那是开发仓库才有的），用户的工作区一般是他的知识库、也不是 AI-KM 项目目录；满盘 read_file / search_files / 跑 shell 只会浪费轮次，什么也读不到。参考内容已经内联在该 MCP 服务里。',
+  '- 需要更多内容时按 section 分批取：["example"]（最小可运行示例）、["faq"]（报错对照）、["usage"]（安装与调试步骤）、["templates"]（可照抄的模板）、["all"]（全部）。',
+  '- 只有当工作区里**确实**存在 AI-KM 源码（例如工作区根下有 `src/lib/plugin/devGuide.ts`，说明用户就是在开发 AI-KM 本身）时，才顺手读一眼源码核对；这种情形只是少数。',
+]
+
+/** 怎么拿 API 参考（更旧版：一个返回全部内容的 plugin_dev_guide 内置工具；导出给自检脚本用） */
+export const PLUGIN_PROMPT_GUIDE_V2 = [
+  '动手前必须先拿到官方 API 参考（不要凭记忆写，也**不要在磁盘上找 AI-KM 的源码**）：',
+  '- 第一步就调用 `plugin_dev_guide` 工具——它返回本机插件目录的绝对路径、已装插件清单、硬性约束、package.json 清单字段、内置槽位、全部宿主 API 列表与最小示例。',
+  '- 为什么不能去找源码：软件安装目录里没有 `src/`（那是开发仓库才有的），用户的工作区一般是他的知识库、也不是 AI-KM 项目目录；满盘 read_file / search_files / 跑 shell 只会浪费轮次，什么也读不到。参考内容已经内联在 `plugin_dev_guide` 里。',
+  '- 需要更多内容时再取 `plugin_dev_guide` 的其它章节：["example"]（最小可运行示例）、["faq"]（报错对照）、["usage"]（安装与调试步骤）、["templates"]（可照抄的模板）、["all"]（全部）。',
+  '- 只有当工作区里**确实**存在 AI-KM 源码（例如工作区根下有 `src/lib/plugin/devGuide.ts`，说明用户就是在开发 AI-KM 本身）时，才顺手读一眼源码核对；这种情形只是少数。',
+]
+
+/** 怎么拿 API 参考（旧：指向仓库源码路径；导出给自检脚本构造「旧存档」样例） */
+export const PLUGIN_PROMPT_GUIDE_V1 = [
+  '动手前必须先读代码确认 API（不要凭记忆写）：',
+  '- src/types/plugin.ts —— PluginHostApi / PluginContext / 客户端 ctx 的形状。',
+  '- src/lib/plugin/devGuide.ts —— 官方「开发」页里的全部指令：硬性约束、清单 / 槽位 / API 速查、常见问题、最小示例。',
+  '- src/lib/plugin/runtime.ts（界面半边 ctx：vue / locale / llm / files / app / tts / shortcuts / slots / config / log / notify / effect）。',
+  '- src/lib/plugin/slots.ts 与 src/shared/pluginSlots.ts —— 内置槽位与 meta 约定。',
+  '- examples/plugins/hello-panel —— 仓库里可直接照抄的最小示例（含 package.json + client.mjs）。',
+]
+
+/** 交付到哪（当前） */
+const PLUGIN_PROMPT_DELIVERY = [
+  '交付方式（按用户实际情况选一种，并在回答里写清步骤）：',
+  '- 首选：把插件文件夹直接建在 `plugin_dev_host` 返回的插件目录里（用绝对路径，如 <插件目录>/<插件 id>/），写完让用户在「设置 → 插件 → 管理」点「重新扫描」（目录内文件改动也会自动重载）——这是最短的路径，无需搬文件。',
+  '- 用户想在别处保留源码：把文件夹建在用户指定的位置，再告诉用户在管理页点「选择插件目录」指向它（或把文件夹复制进插件目录），然后重载 / 刷新。',
+]
+
+/** 交付到哪（旧：让模型写进工作区的 examples/plugins；导出给自检脚本使用） */
+export const PLUGIN_PROMPT_DELIVERY_V1 = [
+  '交付方式（按用户实际情况选一种，并在回答里写清步骤）：',
+  '- 用户要装到自己电脑上：把插件文件夹建在用户指定的位置（或用工作区里的目录），写完告诉用户在「设置 → 插件 → 管理」里点「选择插件目录」指向它（或复制到默认目录 userData/plugins），再点重载 / 刷新。',
+  '- 只是演示：写到工作区的 examples/plugins/<插件 id>/ 下，避免污染用户其它目录。',
+]
+
+/** 工作方式（当前） */
+const PLUGIN_PROMPT_WORKFLOW = [
+  '工作方式：',
+  '1. 先用 ask_user 问清 3 件事：插件要做什么（具体到界面与按钮）、插件文件夹放哪（默认就放上面那个插件目录）、是否需要权限（文件 / 大模型 / 命令）。信息够了就动手，不要反复确认。',
+  '2. 先调 mcp_call（builtin-plugin-dev → plugin_dev_host / plugin_dev_constraints / plugin_dev_manifest / plugin_dev_api）拿参考，再写清单与代码。',
+  '3. **写完必须自检并修到通过**：调 mcp_call（builtin-plugin-dev → plugin_dev_check，参数 dir 传插件目录或 id）——它会用宿主**同一份**校验逻辑检查清单、入口文件、界面半边（import / template / 导出形状 / 槽位注册 / 误用 ctx.storage …），并返回**宿主真实的加载状态与日志**（含界面半边装载失败的原因）。有 ✗ 就改文件、再跑一次 check，直到没有 ✗ 才交付；也用 shell 跑 `node --check <插件目录>/client.mjs` 兜一层语法。',
+  '4. 改动优先精确替换（replace_in_file / multi_replace），新建文件才用 write_file。',
+  '5. 多步任务用 update_plan 列计划、update_todo 维护清单。',
+  '6. 不要读用户知识库里的文档 / 笔记来"找参考资料"——插件开发所需的一切都在 builtin-plugin-dev 服务里，与用户的知识库内容无关。',
+  '7. 交付时给出：文件清单（路径用行内代码）、每个文件的作用、启用步骤（含「重载 / 重新扫描」提醒）、以及怎么验证插件在界面上生效；保持简洁，不要贴整份代码。',
+  '8. 使用与用户相同的语言回答（用户说中文就用中文）。',
+]
+
+/** 工作方式（旧；导出给自检脚本使用） */
+export const PLUGIN_PROMPT_WORKFLOW_V1 = [
+  '工作方式：',
+  '1. 先用 ask_user 问清 3 件事：插件要做什么（具体到界面与按钮）、放在哪个目录、是否需要权限（文件 / 大模型 / 命令）。信息够了就动手，不要反复确认。',
+  '2. 先读上面列的参考文件，再写清单与代码；写完必须验证：用 shell 跑 `node --check <插件目录>/client.mjs`（和 index.mjs），有报错就改到通过。',
+  '3. 改动优先精确替换（replace_in_file / multi_replace），新建文件才用 write_file。',
+  '4. 多步任务用 update_plan 列计划、update_todo 维护清单。',
+  '5. 交付时给出：文件清单（路径用行内代码）、每个文件的作用、启用步骤（含「重载」提醒）、以及怎么验证插件在界面上生效；保持简洁，不要贴整份代码。',
+  '6. 使用与用户相同的语言回答（用户说中文就用中文）。',
+]
+
 /**
  * 内置预设定义（与 store.agentPresets 项结构一致）。
  *
@@ -239,12 +323,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       '- 只用界面半边的插件最常用：声明 declares.slots: ["panel.main"] 后，启用即自动出现在导航栏。',
       '- 权限是可选项（aikm.permissions）：fs（文件）、shell、net、agent、llm（调用大模型）；未声明就调用会抛错。界面半边还能直接用 ctx.tts 让应用自带 TTS 朗读（无需权限）。',
       '',
-      '动手前必须先读代码确认 API（不要凭记忆写）：',
-      '- src/types/plugin.ts —— PluginHostApi / PluginContext / 客户端 ctx 的形状。',
-      '- src/lib/plugin/devGuide.ts —— 官方「开发」页里的全部指令：硬性约束、清单 / 槽位 / API 速查、常见问题、最小示例。',
-      '- src/lib/plugin/runtime.ts（界面半边 ctx：vue / locale / llm / files / app / tts / shortcuts / slots / config / log / notify / effect）。',
-      '- src/lib/plugin/slots.ts 与 src/shared/pluginSlots.ts —— 内置槽位与 meta 约定。',
-      '- examples/plugins/hello-panel —— 仓库里可直接照抄的最小示例（含 package.json + client.mjs）。',
+      ...PLUGIN_PROMPT_GUIDE,
       '',
       '硬性约束（违反就加载失败，必须逐条遵守）：',
       '1. 界面半边 client.mjs 必须是**单文件 ESM 且没有 import**：宿主用 Blob URL 加载，裸模块名解析不了；Vue 由 ctx.vue 注入（h / defineComponent / ref / computed / onMounted / onUnmounted…）。',
@@ -256,20 +335,13 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       '7. 组件里的 ref / 输入状态必须建在 setup 作用域；写进渲染辅助函数里会每次重渲染重建、丢掉用户输入（踩过的坑）。',
       '8. 调用大模型要检查 ctx.llm.available，拿不到时给出可读原因（ctx.llm.reason）并降级；要求模型只回 JSON，并写容错解析（去代码围栏、截取第一个 { } / [ ]）；耗时操作要有 busy 状态与按钮禁用。',
       '',
-      '交付方式（按用户实际情况选一种，并在回答里写清步骤）：',
-      '- 用户要装到自己电脑上：把插件文件夹建在用户指定的位置（或用工作区里的目录），写完告诉用户在「设置 → 插件 → 管理」里点「选择插件目录」指向它（或复制到默认目录 userData/plugins），再点重载 / 刷新。',
-      '- 只是演示：写到工作区的 examples/plugins/<插件 id>/ 下，避免污染用户其它目录。',
+      ...PLUGIN_PROMPT_DELIVERY,
       '',
-      '工作方式：',
-      '1. 先用 ask_user 问清 3 件事：插件要做什么（具体到界面与按钮）、放在哪个目录、是否需要权限（文件 / 大模型 / 命令）。信息够了就动手，不要反复确认。',
-      '2. 先读上面列的参考文件，再写清单与代码；写完必须验证：用 shell 跑 `node --check <插件目录>/client.mjs`（和 index.mjs），有报错就改到通过。',
-      '3. 改动优先精确替换（replace_in_file / multi_replace），新建文件才用 write_file。',
-      '4. 多步任务用 update_plan 列计划、update_todo 维护清单。',
-      '5. 交付时给出：文件清单（路径用行内代码）、每个文件的作用、启用步骤（含「重载」提醒）、以及怎么验证插件在界面上生效；保持简洁，不要贴整份代码。',
-      '6. 使用与用户相同的语言回答（用户说中文就用中文）。',
+      ...PLUGIN_PROMPT_WORKFLOW,
     ].join('\n'),
     selectedSkills: [],
-    // 与「代码智能体」同一套工具目录（需要读写文件 + 跑 shell 做语法检查）
+    // 与「代码智能体」同一套工具目录（需要读写文件 + 跑 shell 做语法检查），外加 MCP：
+    // 官方插件开发参考由内置 MCP 服务 builtin-plugin-dev 提供（经 mcp_call 调用，见下面的 mcpServerIds）
     capabilities: {
       readFiles: true,
       writeFiles: true,
@@ -281,8 +353,8 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       runSubagent: true,
       skills: true,
       accessKnowledgeBase: false,
-      mcpAccess: false,
-      mcpServerIds: [],
+      mcpAccess: true,
+      mcpServerIds: ['builtin-plugin-dev'],
       mcpEquipmentIds: [],
       askUser: true,
       updatePlan: true,
@@ -290,6 +362,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'update_todo',
+        'mcp_call',
         'read_file', 'search_files', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
@@ -551,6 +624,118 @@ export function ensureBuiltinAgentPresets(
     if (!item.llmType && defaults.llmType) item.llmType = defaults.llmType
     if (!item.model && defaults.model) item.model = defaults.model
     list.unshift(item)
+    changed = true
+  }
+  return changed
+}
+
+/** 插件开发预设要绑定的 MCP 服务（只补不覆盖：用户自己加的服务保留） */
+const PLUGIN_PRESET_MCP_SERVER = 'builtin-plugin-dev'
+
+// ---------------------------------------------------------------------------
+// 提示词「段落」的定位与替换
+//
+// 这几段是**引擎说明**（怎么取参考 / 交付到哪 / 工作方式），历史上改过好几版：
+//   V1 让模型去读仓库源码 → V2 直接调一个内置工具 → V3 用 mcp_call 调一个返回全部内容的工具
+//   → V4 按主题拆成 6 个短工具 → 当前（增加 plugin_dev_check 自检）。
+// 与其一版版枚举原文（每改一次就要再加一个常量），这里按**段首/段尾标记**定位整段：
+// 段首认多个历史写法，段尾认下一段的开头；只有在段落**还不是当前版本**时才替换，
+// 因此对「用户自己改过、但仍能看出段落边界」的提示词会归一化为当前版本（这几段属于引擎说明，
+// 归一化比留着旧写法更安全——旧写法会指使模型去翻源码 / 漏掉自检）。
+// ---------------------------------------------------------------------------
+
+/** 段首标记（任一命中即为该段起点） */
+const GUIDE_STARTS = ['动手前必须先拿到官方 API 参考', '动手前必须先读代码确认 API', '动手前必须先']
+const DELIVERY_START = '交付方式（按用户实际情况选一种'
+const WORKFLOW_START = '工作方式：'
+
+/** 在 prompt 中定位「从 starts 之一开始、到 endMarker（或字符串结尾）为止」的整段 */
+function locateSection(prompt: string, starts: string[], endMarker?: string): { start: number; end: number } | null {
+  let start = -1
+  for (const s of starts) {
+    const i = prompt.indexOf(s)
+    if (i >= 0 && (start === -1 || i < start)) start = i
+  }
+  if (start < 0) return null
+  const end = endMarker ? prompt.indexOf(endMarker, start + 1) : -1
+  return { start, end: end < 0 ? prompt.length : end }
+}
+
+/** 段落是否已是当前版本（含全部关键标记就不动它） */
+function hasAll(text: string, markers: string[]): boolean {
+  return markers.every((m) => text.includes(m))
+}
+
+/**
+ * 一次性订正旧存档里「插件开发智能体」的提示词与能力配置。
+ *
+ * 旧版提示词让模型去读 `src/types/plugin.ts` 这类**仓库源码**核对 API：装机后软件里没有源码，
+ * 模型于是满盘搜索 AI-KM 的安装目录（用户看到一串 read_file / search_files / shell，什么也读不到）。
+ * 现在改为经 `mcp_call` 调内置 MCP 服务 `builtin-plugin-dev`（6 个话题工具 + 1 个自检工具）。
+ * 同时同步能力配置（开 mcp_call、绑服务、去掉已废弃的工具名）。
+ *
+ * @returns 是否发生了订正（调用方据此决定是否需要落盘）
+ */
+export function refreshBuiltinAgentPresets(list: any[]): boolean {
+  if (!Array.isArray(list)) return false
+  let changed = false
+  const item = list.find((p: any) => p && p.id === BUILTIN_AGENT_PRESET_IDS.plugin)
+  if (!item) return false
+
+  if (typeof item.systemPrompt === 'string') {
+    let prompt = item.systemPrompt
+
+    // 1) 「怎么取参考」段：到「交付方式」段之前
+    const guideSpan = locateSection(prompt, GUIDE_STARTS, DELIVERY_START)
+    if (guideSpan) {
+      const cur = prompt.slice(guideSpan.start, guideSpan.end)
+      if (!hasAll(cur, ['plugin_dev_host', 'plugin_dev_check', 'builtin-plugin-dev'])) {
+        prompt = prompt.slice(0, guideSpan.start) + PLUGIN_PROMPT_GUIDE.join('\n') + '\n\n' + prompt.slice(guideSpan.end)
+        changed = true
+      }
+    }
+
+    // 2) 「交付方式」段：到「工作方式」段之前
+    const deliverySpan = locateSection(prompt, [DELIVERY_START], WORKFLOW_START)
+    if (deliverySpan) {
+      const cur = prompt.slice(deliverySpan.start, deliverySpan.end)
+      if (!hasAll(cur, ['plugin_dev_host', '重新扫描'])) {
+        prompt = prompt.slice(0, deliverySpan.start) + PLUGIN_PROMPT_DELIVERY.join('\n') + '\n\n' + prompt.slice(deliverySpan.end)
+        changed = true
+      }
+    }
+
+    // 3) 「工作方式」段：一直到最后
+    const flowSpan = locateSection(prompt, [WORKFLOW_START])
+    if (flowSpan) {
+      const cur = prompt.slice(flowSpan.start)
+      if (!hasAll(cur, ['plugin_dev_check', 'update_plan'])) {
+        prompt = prompt.slice(0, flowSpan.start) + PLUGIN_PROMPT_WORKFLOW.join('\n') + '\n'
+        changed = true
+      }
+    }
+
+    if (changed) item.systemPrompt = prompt
+  }
+
+  const caps = item.capabilities
+  if (caps && Array.isArray(caps.enabledTools)) {
+    if (caps.enabledTools.includes('plugin_dev_guide')) {
+      caps.enabledTools = caps.enabledTools.filter((t: string) => t !== 'plugin_dev_guide')
+      changed = true
+    }
+    if (!caps.enabledTools.includes('mcp_call')) {
+      caps.enabledTools.push('mcp_call')
+      changed = true
+    }
+  }
+  if (caps && !caps.mcpAccess) {
+    caps.mcpAccess = true
+    changed = true
+  }
+  if (caps && !Array.isArray(caps.mcpServerIds)) caps.mcpServerIds = []
+  if (caps && !caps.mcpServerIds.includes(PLUGIN_PRESET_MCP_SERVER)) {
+    caps.mcpServerIds.push(PLUGIN_PRESET_MCP_SERVER)
     changed = true
   }
   return changed

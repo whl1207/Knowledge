@@ -150,6 +150,8 @@ export interface AikmClientPluginModule {
 
 interface ClientPluginHandle {
   snapshot: PluginSnapshot
+  /** 装载时主进程给的 loadedAt：变了说明主进程重新装载过（= 用户点了「重新载入」）→ 界面半边也要重来 */
+  loadedAt: number | null
   ctx: ClientPluginContext
   dispose: () => Promise<void>
 }
@@ -354,6 +356,14 @@ export function clientPluginLogs(id?: string): Array<{ id: string; level: Plugin
   return id ? clientLogs.filter((l) => l.id === id) : clientLogs.slice()
 }
 
+/**
+ * 界面半边的**装载结果**（按插件 id）：设置页据此提示「界面半边装载失败：…」。
+ * 只反映最近一次尝试，失败后再次 `syncClientPlugins()`（例如管理页点「重新载入」）会刷新它。
+ */
+export function clientPluginLoadStates(): Record<string, { ok: boolean; message: string; ts: number }> {
+  return Object.fromEntries(Array.from(clientLoadState.entries()))
+}
+
 function formatArgs(args: unknown[]): string {
   return args
     .map((a) => {
@@ -382,6 +392,16 @@ function createClientLogger(id: string): ClientPluginContext['log'] {
     if (level === 'error') console.error(prefix, message)
     else if (level === 'warn') console.warn(prefix, message)
     else console.log(prefix, message)
+    // warn / error 同步给主进程：界面半边出错（装载失败、apply 抛错）时，
+    // 「插件 → 管理 → 日志」与开发者 MCP 服务（plugin_dev_check）才看得到原因。
+    // 只转发 warn / error 且吞掉失败，避免 debug 日志刷爆 IPC。
+    if (level === 'error' || level === 'warn') {
+      try {
+        getPluginBridge()?.clientLog?.(id, level, message)
+      } catch {
+        /* 桥不可用（网页端）时忽略 */
+      }
+    }
   }
   return {
     debug: (...a: unknown[]) => push('debug', a),
@@ -396,7 +416,11 @@ function createClientLogger(id: string): ClientPluginContext['log'] {
 // ---------------------------------------------------------------------------
 
 const loaded = new Map<string, ClientPluginHandle>()
+/** 上一次界面半边装载结果（按插件 id）：供设置页显示「界面半边装载失败」的提示 */
+const clientLoadState = new Map<string, { ok: boolean; message: string; ts: number }>()
 let syncing: Promise<void> | null = null
+/** 同步期间又有新请求：**不能丢**，本轮结束后必须再跑一遍 */
+let syncPending = false
 let initialized = false
 
 /** 初始化渲染层插件运行时（入口调用一次；无插件桥时静默降级） */
@@ -413,11 +437,27 @@ export async function initPluginRuntime(): Promise<void> {
   await syncClientPlugins()
 }
 
-/** 同步渲染层插件：装载新增、卸载不再需要的（可并发调用，内部串行化） */
+/**
+ * 同步渲染层插件：装载新增、卸载不再需要、重试之前装载失败的。
+ *
+ * 关键：同步进行中收到的新请求**排队**而不是丢弃。以前这里是 `if (syncing) return syncing`——
+ * 主进程「重载插件」会先后广播两条 plugin/changed（卸载一条 + 装载一条），第二条常常落在
+ * 第一次同步的进行期间而被丢掉，于是**界面上那份（客户端半边）永远不再重试**：用户改好文件、
+ * 点「重新载入」看着没反应，只有重启软件（全新一次同步）才恢复。排队后最后一次状态一定会被应用。
+ */
 export function syncClientPlugins(): Promise<void> {
-  if (syncing) return syncing
-  syncing = doSync().finally(() => {
+  if (syncing) {
+    syncPending = true
+    return syncing
+  }
+  syncing = (async () => {
+    do {
+      syncPending = false
+      await doSync()
+    } while (syncPending)
+  })().finally(() => {
     syncing = null
+    syncPending = false
   })
   return syncing
 }
@@ -441,17 +481,18 @@ async function doSync(): Promise<void> {
   }
   setPluginToolNames(toolNames)
 
-  // 2) 卸载：不再需要（禁用 / 卸载 / 加载失败 / 不再有 client 半边）的插件
+  // 2) 卸载：不再需要（禁用 / 卸载 / 加载失败 / 不再有 client 半边）的插件，
+  //    以及主进程重新装载过的（loadedAt 变了）——否则改完界面半边点「重新载入」界面不会更新
   const wanted = plugins.filter((p) => p.status === 'active' && p.hasClient && p.clientEntry)
   for (const [id, handle] of Array.from(loaded.entries())) {
     const still = wanted.find((p) => p.id === id)
-    if (still) continue
+    if (still && handle.loadedAt === still.loadedAt) continue
     await handle.dispose()
     loaded.delete(id)
     bus.emit('plugin/unloaded', { id })
   }
 
-  // 3) 装载新增 / 重载（重载 = 状态里的 loadedAt 变了 → 这里用简单策略：未加载即加载）
+  // 3) 装载新增 / 重载（上一步已把需要重载的卸掉）
   for (const p of wanted) {
     if (loaded.has(p.id)) continue
     await loadOne(bridge, p)
@@ -474,11 +515,21 @@ async function loadOne(bridge: PluginBridgeApi, snapshot: PluginSnapshot): Promi
       await handle.dispose()
       throw e
     }
-    loaded.set(snapshot.id, { snapshot, ctx: handle.ctx, dispose: handle.dispose })
+    loaded.set(snapshot.id, { snapshot, loadedAt: snapshot.loadedAt ?? null, ctx: handle.ctx, dispose: handle.dispose })
+    clientLoadState.set(snapshot.id, { ok: true, message: '', ts: Date.now() })
     log.info(`${snapshot.name}@${snapshot.version} 界面扩展已装载`)
+    // 装载成功也同步给主进程一条（info 级日志默认不转发）：用户在「插件 → 管理 → 日志」、
+    // 以及开发者 MCP 服务（plugin_dev_check）里都能确认界面半边真的起来了，而不只是「没报错」。
+    try {
+      getPluginBridge()?.clientLog?.(snapshot.id, 'info', `${snapshot.name}@${snapshot.version} 界面扩展已装载`)
+    } catch {
+      /* 桥不可用时忽略 */
+    }
     bus.emit('plugin/loaded', { id: snapshot.id })
   } catch (e) {
-    log.error(`界面扩展装载失败：${e instanceof Error ? e.message : String(e)}`)
+    const message = e instanceof Error ? e.message : String(e)
+    clientLoadState.set(snapshot.id, { ok: false, message, ts: Date.now() })
+    log.error(`界面扩展装载失败：${message}`)
   }
 }
 

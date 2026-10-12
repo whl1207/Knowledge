@@ -428,7 +428,6 @@
                   <span v-else-if="unit.description === 'run_python' && getRunPythonCode(unit)" v-html="highlightCodeHtml(getRunPythonCode(unit), 'python')"></span>
                   <template v-else-if="unit.description === 'write_file'">
                     <div v-if="getWriteFilePath(unit)" :title="getWriteFilePath(unit)">{{ getWriteFilePath(unit) }}</div>
-                    <template v-else>{{ unitArgsText(unit) }}</template>
                   </template>
                   <template v-else>{{ unitArgsText(unit) }}</template>
                 </div>
@@ -2717,12 +2716,12 @@ const toolIcons: Record<string, string> = {
   'shell': 'fa-terminal',
   'kb_search': 'fa-book',
   'skill': 'fa-cubes',
+  'mcp_call': 'fa-plug',
   'run_subagent': 'fa-sitemap',
   'export_word': 'fa-file-word-o',
   'update_plan': 'fa-tasks',
   'update_todo': 'fa-list-ol',
   'ask_user': 'fa-question-circle',
-  'mcp_call': 'fa-plug',
   'reasoning': 'fa-lightbulb-o'
 }
 
@@ -2869,14 +2868,16 @@ const ptcResultText = (unit: any): string => formatPtcValue(ptcOutputOf(unit)?.r
   return typeof args?.content === 'string' ? args.content : ''
 }
 
-/** 提取 write_file 目标路径（流式未闭合 JSON 时尽力从原文提取） */
+/**
+ * 提取 write_file 目标路径（流式未闭合 JSON 时也能取到）。
+ * 用通用的流式字段提取：既支持 `{"path":…,"content":…}`（path 在前），也支持 content 在前
+ * 的写法；并且会做与完成态一致的反转义（否则流式期间会显示成 `D:\\a\\b`）。
+ * 路径还没流出来时返回 ''——**不要**退回展示原始 JSON，那会把整份文件内容再刷一遍（见 unitArgsText）。
+ */
 const getWriteFilePath = (unit: any): string => {
   const args = unit.args
   if (!args) return ''
-  if (typeof args === 'string') {
-    const m = args.match(/"path"\s*:\s*"([^"]*)"/)
-    return m ? m[1] : ''
-  }
+  if (typeof args === 'string') return extractStreamedJsonField(args, 'path')
   return typeof args?.path === 'string' ? args.path : ''
 }
 
@@ -7661,6 +7662,9 @@ const shouldShowUnitArgs = (unit: any): boolean => {
   if (n === 'server-search-visit') return false // 访问网站：无入参
   if (n === 'server-search-query') return false // 旧数据兼容（老卡片：查询词在结果区）
   if (n === 'context-compact') return false // 上下文压缩：无入参，状态写在结果区
+  // write_file：参数区只展示目标路径。路径还没流出来（模型先写 content）时整个参数框都不显示 ——
+  // 否则会退回展示原始 JSON，看起来就是「参数框和结果框显示同一份文件内容」。
+  if (n === 'write_file' && !getWriteFilePath(unit)) return false
   // server-search：查询词作为入参显示在参数区，结果在结果区（与 web_search 工具卡片一致）
   return true
 }
@@ -7710,7 +7714,14 @@ const unitArgsText = (unit: any): string => {
       const v = extractStreamedJsonField(args, key)
       if (v !== '') return v
     }
-    return prettyJson(args)
+    // 目标字段还没流出来（例如模型先写 content 再写 path）：**不要**退回展示原始 JSON ——
+    // 那时 args 可能已经是整份文件内容 / 整段代码，会把「参数框」变成第二个结果框、刷屏还看不出是参数。
+    // 短片段（小工具的正常入参）仍然原样显示。
+    const raw = prettyJson(args)
+    if (raw.length > 200) {
+      return isZh ? `参数生成中…（已接收 ${raw.length} 字）` : `Generating arguments… (${raw.length} chars)`
+    }
+    return raw
   }
   switch (n) {
     case 'run_python':
@@ -7739,6 +7750,14 @@ const unitArgsText = (unit: any): string => {
     case 'skill':
       // 只显示技能名（loadSkill 的入参就是 name）
       return typeof args?.name === 'string' ? args.name : prettyJson(args)
+    case 'mcp_call': {
+      // 显示「服务 · 工具」（如 builtin-plugin-dev · plugin_dev_guide），参数只在有内容时附在后面
+      const server = typeof args?.serverId === 'string' ? args.serverId : ''
+      const tool = typeof args?.tool === 'string' ? args.tool : typeof args?.toolName === 'string' ? args.toolName : ''
+      const head = [server, tool].filter(Boolean).join(' · ')
+      const inner = args?.args && typeof args.args === 'object' && Object.keys(args.args).length ? prettyJson(args.args) : ''
+      return [head || 'MCP', inner].filter(Boolean).join('\n')
+    }
     case 'search_files':
       if (typeof args?.query === 'string') {
         return args.filePattern ? `${args.query} (${args.filePattern})` : args.query
@@ -7855,6 +7874,18 @@ const unitResultText = (unit: any): string => {
         }).join('\n')
       }
       return prettyJson(r)
+    }
+    case 'mcp_call': {
+      // MCP 返回的是 { content: [{ type: 'text', text }] }：只取文本，避免把 JSON 转义后的长文塞进气泡
+      const data = r && typeof r === 'object' && 'data' in r ? (r as any).data : r
+      if (typeof data === 'string') return data
+      const parts = Array.isArray(data?.content) ? data.content : []
+      const text = parts
+        .map((c: any) => (typeof c?.text === 'string' ? c.text : ''))
+        .filter(Boolean)
+        .join('\n')
+      if (text) return text
+      return prettyJson(data ?? r)
     }
     case 'ask_user':
       if (typeof r === 'string') return r

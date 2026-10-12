@@ -434,6 +434,10 @@ const dsh = {
     logs(id: string): Promise<import('@/types/plugin').PluginLogLine[]> {
       return invokeIpc('plugin:logs', { id })
     },
+    /** 渲染层半边的日志上报（界面扩展装载失败 / 插件 warn·error）→ 落进插件日志缓冲（不阻塞） */
+    clientLog(id: string, level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
+      void ipcRenderer.invoke('plugin:client-log', { id, level, message }).catch(() => {})
+    },
     /** 渲染层半边的 bundle 源码（P1：渲染层用 Blob URL 动态 import） */
     clientBundle(id: string): Promise<{ entry: string; code: string }> {
       return invokeIpc('plugin:client-bundle', { id })

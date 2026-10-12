@@ -45,8 +45,9 @@ export interface PluginDevFaq {
  * 硬约束：所有模板都会带上这一段。
  * 每一条都对应真实踩过的坑（宿主校验 / Blob 模块加载 / 深色主题 / flex 布局），
  * 不是风格建议，写插件时是必须遵守的。
+ * 导出原因：核心工具 `plugin_dev_guide`（主进程）也要原样交给模型，见 electron/main/plugin-dev-guide.ts。
  */
-const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或直接失败）】
+export const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或直接失败）】
 1. 目录名必须等于插件 id（清单里的 aikm.id）；两者不一致清单校验直接失败。
 2. package.json 必须含 aikm 字段：id / version / apiVersion 必填，version 形如 1.0.0，apiVersion 写 "^1"。
 3. main 与 client 至少声明一个（main = 主进程半边，client.entry = 界面半边），路径必须是插件目录内的相对路径。
@@ -70,7 +71,7 @@ const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或直接�
 13. 错误要自己兜住：try/catch + ctx.log.warn(...)，不要只 console.log（插件日志在「插件 → 管理 → 日志」里看）。
 14. 不要往界面里注入全局 CSS、不要改应用其它部分；插件只负责自己那部分 UI。`
 
-const CONSTRAINTS_EN = `[Hard constraints the host enforces]
+export const CONSTRAINTS_EN = `[Hard constraints the host enforces]
 1. The folder name must equal the plugin id (aikm.id); a mismatch fails manifest validation.
 2. package.json needs an "aikm" object: id / version / apiVersion are required, version like 1.0.0, apiVersion "^1".
 3. Declare main and/or client (main = main-process half, client.entry = UI half); paths must be relative to the plugin folder.

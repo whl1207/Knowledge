@@ -15,7 +15,7 @@ import {
   type PluginClientDecl,
   type PluginPermission,
 } from '@/types/plugin'
-import { unknownPluginSlots } from '@/shared/pluginSlots'
+import { CORE_PLUGIN_SLOT_NAMES, unknownPluginSlots } from '@/shared/pluginSlots'
 
 /** 清单所在的字段名与文件名 */
 export const PLUGIN_MANIFEST_KEY = 'aikm'
@@ -72,8 +72,20 @@ export function parseManifest(raw: unknown, fallbackId?: string): ManifestCheck 
     return fail('bad-version', `version 非法："${version}"（须形如 1.0.0）`)
   }
 
-  const apiVersion = typeof m.apiVersion === 'string' ? m.apiVersion.trim() : ''
+  // apiVersion：宿主 API 版本区间（字符串，如 "^1"、">=1 <2"）。
+  // 兼容写成数字的清单（模型 / 手写常见）：1 → "1"（等价于要求主版本 1）；2 → "2"，由 checkApiVersion 给出
+  // 「插件要求 2，当前 1」这种准确报错，而不是含混的「必填」。
+  const apiRaw = m.apiVersion
+  const apiVersion = typeof apiRaw === 'string'
+    ? apiRaw.trim()
+    : (typeof apiRaw === 'number' && Number.isFinite(apiRaw) ? String(apiRaw) : '')
   if (!apiVersion) {
+    if (apiRaw !== undefined && apiRaw !== null) {
+      return fail(
+        'bad-api-version',
+        `apiVersion 必须是字符串或数字（推荐写字符串 "^1"），收到 ${JSON.stringify(apiRaw)}（${typeof apiRaw}）`,
+      )
+    }
     return fail('bad-api-version', 'apiVersion 必填（如 "^1"，表示要求宿主 API 主版本 1）')
   }
   if (parseComparatorSet(apiVersion) === 'unsupported') {
@@ -119,6 +131,15 @@ export function parseManifest(raw: unknown, fallbackId?: string): ManifestCheck 
   let inject: string[] | undefined
   if (m.inject !== undefined) {
     if (!isStringArray(m.inject)) return fail('bad-inject', 'inject 必须是字符串数组')
+    // inject 只放**宿主服务名**（tools / jobs / sessionLog 等）。写槽位名（panel.main / settings.tab …）
+    // 是最常见的手写 / 模型混淆——直接点明该写在哪，而不是等界面半边注册时报「槽位未声明」。
+    const slotInInject = (m.inject as string[]).filter((s) => CORE_PLUGIN_SLOT_NAMES.includes(s))
+    if (slotInInject.length) {
+      return fail(
+        'bad-inject',
+        `inject 里不能放槽位：${slotInInject.join(', ')}（inject 是宿主服务名，如 ["tools"]；槽位请写 declares.slots，如 { "declares": { "slots": ["${slotInInject[0]}"] } }）`,
+      )
+    }
     inject = dedupe(m.inject as string[])
   }
 

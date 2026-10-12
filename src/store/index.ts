@@ -11,7 +11,7 @@ import { isFlowDslPath } from '@/shared/flowFile'
 import { detectTaskScaffold, detectRetiredTaskScaffold, isTaskFile, isEmptyTaskFile, RETIRED_SCAFFOLD_LABELS, MERGED_SCAFFOLD_KEYS, MERGED_SCAFFOLD_LABELS } from '@/lib/taskFile'
 import type { FileSortKey } from '@/lib/knowFile/fileSort'
 import { DEFAULT_AGENT_MAX_STEPS, normalizeAgentMaxSteps } from '@/shared/agent-loop-rounds'
-import { ensureBuiltinAgentPresets, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
+import { ensureBuiltinAgentPresets, refreshBuiltinAgentPresets, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 import { normalizeWebSearchConfig, newWebSearchCustomSource, toCustomProviderId, type WebSearchConfig, type WebSearchCustomSource } from '@/shared/webSearch'
 import { migrateLegacyContextWindow } from '@/lib/contextUsage'
 import { deepSeekConfig, deepSeekStyleOf, migrateDeepSeekMerge, normalizeLlmType, normalizeLlmTypeList, DEEPSEEK_LEGACY_TYPE } from '@/shared/llmSources'
@@ -1545,6 +1545,8 @@ export const usestore = defineStore('data', {
             this.ensureBuiltinMcpServer()
             // 内置 Agent 预设兜底注入（幂等）：代码智能体 / 办公智能体，只补缺失项，不覆盖用户编辑
             if (ensureBuiltinAgentPresets(this.agentPresets as any[], builtinPresetDefaultsFromStore(this))) needPersist = true
+            // 迁移（插件开发预设）：旧提示词要求模型去读仓库源码核对 API，装机后没有源码会满盘搜索 → 订正为 plugin_dev_guide 工具
+            if (refreshBuiltinAgentPresets(this.agentPresets as any[])) needPersist = true
             // 协同文件编辑配置（含默认值兜底，兼容旧存档无此 key）
             if (localStorage.getItem('collab') !== null) {
                 try {
@@ -1692,6 +1694,20 @@ export const usestore = defineStore('data', {
                         // 大库（如 OpenAlex 快照）人名/模糊检索常需几十秒；单位毫秒
                         PG_MCP_STATEMENT_TIMEOUT_MS: '180000',
                     },
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                })
+            }
+            // 插件开发参考（builtin-plugin-dev）：让「插件开发智能体」与其它智能体 / 工作流 MCP 节点 /
+            // 外部 MCP 客户端都能读到官方插件开发指南（详见 electron/main/plugin-dev/plugin-dev-service.ts）
+            if (!this.mcpServers.some(s => s && s.id === 'builtin-plugin-dev')) {
+                this.mcpServers.push({
+                    id: 'builtin-plugin-dev',
+                    name: '插件开发参考',
+                    transport: 'stdio',
+                    builtin: true,
+                    autoConnect: true,
+                    enabled: true,
                     createdAt: Date.now(),
                     updatedAt: Date.now(),
                 })

@@ -42,6 +42,16 @@ import { shellService } from './shell-service'
 import { isShellAllowed, resolvePolicy } from './sandbox-policy'
 import { createPluginToolRegistrar } from './plugin-tools'
 
+/** 日志参数 → 文本（字符串原样；其它尽量 JSON，失败退回 String） */
+function fmtLogArg(a: unknown): string {
+  if (typeof a === 'string') return a
+  try {
+    return JSON.stringify(a)
+  } catch {
+    return String(a)
+  }
+}
+
 /** 每个插件保留的日志行数（内存环形缓冲，供设置页查看） */
 const LOG_LIMIT = 300
 /** 客户端半边 bundle 的大小上限（IPC 传字符串，避免误打包大文件打满内存） */
@@ -118,6 +128,8 @@ class PluginHost {
   private watchers: fs.FSWatcher[] = []
   private watchTimer: NodeJS.Timeout | null = null
   private dirty = new Set<string>()
+  /** 有插件目录之外的改动（新插件文件夹 / 删除 / 根目录散碎文件）→ 去抖后整体重扫 */
+  private dirtyRoot = false
   private initialized = false
   /** 已 dispose：作废后续的加载（含 fs.watch 去抖回调），避免退出后「插件复活」 */
   private disposed = false
@@ -424,6 +436,24 @@ class PluginHost {
   }
 
   /**
+   * 追加一条**渲染层半边**的日志（界面扩展装载失败、插件自己的 warn/error 等）。
+   *
+   * 为什么由渲染层推过来：界面半边的 log 原只留在渲染进程内存里，控制台之外看不到，
+   * 而「插件 → 管理 → 日志」与内置 MCP 服务（plugin_dev_check）都在主进程读日志 ——
+   * 统一落到插件自己的日志缓冲，界面半边出错时用户与开发者智能体都能看到原因。
+   * 只接受**已知插件**的日志，忽略未登记 id（防止污染）。
+   */
+  appendClientLog(id: string, level: string, message: string): boolean {
+    const rec = this.records.get(id as PluginId)
+    if (!rec) return false
+    const lv = (['debug', 'info', 'warn', 'error'] as const).includes(level as any) ? (level as PluginLogLevel) : 'info'
+    const text = String(message ?? '').slice(0, 4000)
+    if (!text) return false
+    this.pushLog(rec, lv, `[界面] ${text}`)
+    return true
+  }
+
+  /**
    * 读取插件渲染层半边的 bundle 源码（P1：渲染层拿到后用 Blob URL 动态 import）。
    *
    * 为什么不做自定义协议：dev（http server）与生产（file://）行为一致，且不必改
@@ -449,6 +479,11 @@ class PluginHost {
   /** 插件根目录（设置页「打开目录」用） */
   rootDir(): string {
     return this.pluginsRoot()
+  }
+
+  /** 供自检工具用：让宿主立刻重扫一次（发现新写的插件 / 清理已删除的），返回扫描后的状态 */
+  async rescanNow(): Promise<void> {
+    await this.rescan()
   }
 
   /** 服务名清单（设置页展示宿主能力面） */
@@ -490,9 +525,11 @@ class PluginHost {
   async reload(id: string): Promise<PluginSnapshot> {
     return this.withLock(async () => {
       const rec = this.requireRecord(id)
-      this.assertApiVersion(rec)
-      // 清单可能已被作者改过：重载前重新扫描本插件目录
+      // 顺序很重要：**先**重新扫描本插件目录（作者可能刚把清单改好），再校验 API 版本。
+      // 反过来的话，清单曾经校验失败的插件会一直卡在 invalid——改好文件也不会恢复，
+      // 只有手动「重新扫描」才行（写插件时的热重载循环就断了）。
       this.rescanRecord(rec)
+      this.assertApiVersion(rec)
       await this.unloadPlugin(rec, 'reload')
       if (rec.enabled) await this.loadPlugin(rec)
       return this.snapshot(rec)
@@ -1301,36 +1338,28 @@ class PluginHost {
   }
 
   private createLogger(rec: PluginRecord) {
-    const push = (level: PluginLogLevel, args: unknown[]): void => {
-      const message = args
-        .map((a) => {
-          if (typeof a === 'string') return a
-          try {
-            return JSON.stringify(a)
-          } catch {
-            return String(a)
-          }
-        })
-        .join(' ')
-      const line: PluginLogLine = { ts: Date.now(), level, message }
-      rec.logs.push(line)
-      if (rec.logs.length > LOG_LIMIT) rec.logs.splice(0, rec.logs.length - LOG_LIMIT)
-      const prefix = `[plugin:${rec.id}]`
-      if (level === 'error') console.error(prefix, message)
-      else if (level === 'warn') console.warn(prefix, message)
-      else console.log(prefix, message)
-      this.emit({ type: 'plugin/log', id: rec.id, line })
-    }
     return {
-      debug: (...args: unknown[]) => push('debug', args),
-      info: (...args: unknown[]) => push('info', args),
-      warn: (...args: unknown[]) => push('warn', args),
-      error: (...args: unknown[]) => push('error', args),
+      debug: (...args: unknown[]) => this.pushLog(rec, 'debug', args.map(fmtLogArg).join(' ')),
+      info: (...args: unknown[]) => this.pushLog(rec, 'info', args.map(fmtLogArg).join(' ')),
+      warn: (...args: unknown[]) => this.pushLog(rec, 'warn', args.map(fmtLogArg).join(' ')),
+      error: (...args: unknown[]) => this.pushLog(rec, 'error', args.map(fmtLogArg).join(' ')),
     }
   }
 
+  /** 落地一条插件日志（主进程与渲染层两条来源共用：写缓冲 + 控制台 + 事件广播） */
+  private pushLog(rec: PluginRecord, level: PluginLogLevel, message: string): void {
+    const line: PluginLogLine = { ts: Date.now(), level, message }
+    rec.logs.push(line)
+    if (rec.logs.length > LOG_LIMIT) rec.logs.splice(0, rec.logs.length - LOG_LIMIT)
+    const prefix = `[plugin:${rec.id}]`
+    if (level === 'error') console.error(prefix, message)
+    else if (level === 'warn') console.warn(prefix, message)
+    else console.log(prefix, message)
+    this.emit({ type: 'plugin/log', id: rec.id, line })
+  }
+
   private log(rec: PluginRecord, level: PluginLogLevel, message: string): void {
-    this.createLogger(rec)[level](message)
+    this.pushLog(rec, level, message)
   }
 
   // ---------------------------------------------------------------------------
@@ -1350,7 +1379,16 @@ class PluginHost {
       const first = filename.split(/[\\/]/)[0]
       if (!first || first.startsWith('.')) return
       const rec = this.recordForPath(path.resolve(base, filename))
-      if (!rec) return
+      if (!rec) {
+        // 落在任何已登记插件之外：可能是**新插件文件夹**（写插件时最常见）、被删掉的插件，
+        // 或插件根目录下的散碎文件。以前这里直接 return —— 结果新写好的插件要等重启
+        // （或手动点「重新扫描」）才出现，写插件的体验很差。改为标记「需要整体重扫」，
+        // 去抖后走一次 scan（发现新增 / 清理已删除）+ dispatchPending（装载新的，自动出现在界面上）。
+        this.dirtyRoot = true
+        if (this.watchTimer) clearTimeout(this.watchTimer)
+        this.watchTimer = setTimeout(() => void this.flushDirty(), WATCH_DEBOUNCE_MS)
+        return
+      }
       this.dirty.add(rec.id)
       if (this.watchTimer) clearTimeout(this.watchTimer)
       this.watchTimer = setTimeout(() => void this.flushDirty(), WATCH_DEBOUNCE_MS)
@@ -1389,11 +1427,34 @@ class PluginHost {
 
   private async flushDirty(): Promise<void> {
     if (this.disposed || this.installing || this.rootSwitching) return
+    // 新插件文件夹 / 目录被删：整体重扫一次（scan 发现新增并清理已删除，dispatchPending 装载新的）
+    if (this.dirtyRoot) {
+      this.dirtyRoot = false
+      try {
+        await this.rescan()
+        console.log('[plugin-host] 检测到插件目录变化，已重新扫描')
+      } catch (e) {
+        console.warn('[plugin-host] 自动重新扫描失败:', e)
+      }
+    }
     const ids = Array.from(this.dirty)
     this.dirty.clear()
     for (const id of ids) {
       const rec = this.records.get(id as PluginId)
-      if (!rec || rec.status === 'disabled') continue
+      if (!rec) continue
+      // 目录被删除 / 改名：直接摘掉记录，不要走重载（重载会因清单缺失报错，还会留下「幽灵插件」）
+      if (!fs.existsSync(rec.dir)) {
+        try {
+          await this.unloadPlugin(rec, 'removed')
+        } catch {
+          /* 卸载失败也要摘掉记录 */
+        }
+        this.records.delete(rec.id)
+        this.emit({ type: 'plugin/changed', id: rec.id, snapshot: null })
+        console.log(`[plugin-host] 插件目录已消失，已移除插件 ${rec.id}`)
+        continue
+      }
+      if (rec.status === 'disabled') continue
       try {
         await this.reload(rec.id)
         console.log(`[plugin-host] 检测到改动，已重载插件 ${rec.id}`)
