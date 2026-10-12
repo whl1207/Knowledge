@@ -31,6 +31,8 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          # 仓库不提交 lockfile（已在 .gitignore 中忽略），这里用 package.json 作为缓存键
+          cache-dependency-path: package.json
 
       - name: Install Linux System Dependencies
         if: runner.os == 'Linux'
