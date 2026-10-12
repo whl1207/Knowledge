@@ -6,7 +6,7 @@
  * 因此所有下发点（App.vue 启动同步、设置页「协作 → 权限」改动、主进程主动来拉）都调这里。
  */
 
-import { buildLanEmbedPayload, buildLanLlmPayload } from '@/platform/lanKb'
+import { buildLanEmbedPayload, buildLanLlmPayload, buildLanModelSourcesPayload } from '@/platform/lanKb'
 import { buildGuestAgentProfiles } from '@/platform/lanGuestAgents'
 import { getSkillManager } from '@/services/agentSkills'
 import { defaultLanGuestPolicy, effectiveGuestTools } from '@/shared/lanGuest'
@@ -28,6 +28,8 @@ export async function pushLanGuestPolicy(store: any): Promise<boolean> {
   const payload = JSON.parse(JSON.stringify({
     policy: guest,
     llm: buildLanLlmPayload(store, guest),
+    // 主机可用的模型来源（网页端据此对齐来源开关 / 地址 / 模型；见 buildLanModelSourcesPayload）
+    modelSources: buildLanModelSourcesPayload(store),
     // 可用智能体档案（预设提示词/工具/知识库/MCP 只有渲染层拿得到）
     agents: await buildGuestAgentProfiles(store, guest.presetIds || [], {
       skillManager: getSkillManager(store),

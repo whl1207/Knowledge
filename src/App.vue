@@ -131,6 +131,13 @@
     void syncLanGuestPolicyAtStartup()
     // 主进程主动来拉（它每次重启都回到默认策略，而本窗口不会再挂载一次）→ 收到就重新下发
     window.ipcRenderer?.on('lan:request-guest-policy', () => { void syncLanGuestPolicyAtStartup() })
+    // 网页端（局域网访客）：向主机对齐模型来源（来源开关 / 地址 / 模型）——
+    // 否则网页端用自己那份默认配置，会出现「主机能刷出的模型网页端刷不出来」「关掉的来源还在」
+    if (!window.ipcRenderer) {
+      void import('@/platform/lanHostLlm')
+        .then((m) => m.syncHostLlmSources(store, true))
+        .catch(() => { /* 主机不可达时保持默认配置 */ })
+    }
     // 界面配置随软件分发：开启时以根目录 interface-config.json 覆盖界面配置（独立窗口同样生效）
     await store.loadRemoteInterfaceConfig()
 

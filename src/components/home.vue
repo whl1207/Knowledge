@@ -164,7 +164,7 @@
         <select 
           v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
           v-model="currentChat.config.model" 
-          @click="refreshModels"
+          @click="onModelSelectRefresh"
           class="model-select"
           :disabled="!availableModels.length || isAnyExecuting"
           title="选择模型"
@@ -1231,6 +1231,17 @@ let asrManagerInstance: any = null
 // 每完成一句（VAD/停止）把 base 前滚，避免覆盖用户已输入内容，也支持多句连续
 let asrPartialFill = false
 let asrBaseText = ''
+// ASR 配置跨窗口同步：设置独立窗口保存后，主窗口会整份重载配置（AIconfig 被替换成新对象），
+// 而 ASR 管理器持有的是**创建时的旧对象引用** → 录音时读不到刚设置的模型路径 / 模型目录
+// （现象：设置完语音输入必须重启才能用）。这里在 ASR 配置真正变化时把最新配置推给已有管理器。
+watch(
+  () => JSON.stringify(store.AIconfig.asr || {}),
+  (_json, prev) => {
+    if (prev === undefined) return // 首次只建立基线：管理器创建时用的就是当前配置
+    asrManagerInstance?.updateConfig?.(store.AIconfig.asr)
+  },
+  { immediate: true },
+)
 const isUserScrolling = ref(false)
 const scrollTimeout = ref<NodeJS.Timeout | null>(null)
 const messageContainer = ref<HTMLElement | null>(null)
@@ -2304,6 +2315,23 @@ const isLiveStreamingTail = (wrapper: HTMLElement): boolean => {
 }
 
 /**
+ * 流式生成中的 mermaid 块先给「生成中 / 渲染中」占位提示。
+ * 源码在流式期间是隐藏的（.mermaid-src display:none），不提示就是一片空白，
+ * 用户会以为没反应——直到生成结束图才突然出现。
+ */
+const setMermaidPlaceholder = (wrapper: HTMLElement, text: string) => {
+  let ph = wrapper.querySelector<HTMLElement>('.mermaid-rendering')
+  if (!ph) {
+    ph = document.createElement('div')
+    ph.className = 'mermaid-rendering'
+    wrapper.appendChild(ph)
+  }
+  if (ph.dataset.mermaidText === text) return
+  ph.dataset.mermaidText = text
+  ph.innerHTML = `<i class="fa fa-circle-o-notch fa-spin"></i><span>${text}</span>`
+}
+
+/**
  * 同步恢复已缓存的 SVG：v-html 每次内容更新会重建整条消息 DOM（已渲染的图被清空），
  * 这里在每次 DOM 更新后立即把缓存里的图放回去——不重新解析，也没有空窗闪烁。
  * 返回是否发现「已定型但尚未渲染」的块（需要调度异步渲染）。
@@ -2329,17 +2357,15 @@ const mountCachedMermaid = (): boolean => {
     }
     const svg = getCachedSvgLenient(rawText)
     if (!svg) {
-      // 仍在增长的活动尾部：先不处理
-      if (isLiveStreamingTail(wrapper)) continue
+      // 仍在增长的活动尾部：代码还没写完，先给「正在生成图表」占位（否则整块空白、毫无反馈）
+      if (isLiveStreamingTail(wrapper)) {
+        setMermaidPlaceholder(wrapper, store.locales == 'zh' ? '正在生成图表…' : 'Generating diagram…')
+        continue
+      }
       // 已定型但尚未渲染：需要触发异步渲染
       needsWork = true
       // 异步渲染期间显示「渲染中」占位符，避免切换聊天/初次进入时图表突然出现
-      if (!wrapper.querySelector('.mermaid-rendering')) {
-        const ph = document.createElement('div')
-        ph.className = 'mermaid-rendering'
-        ph.innerHTML = `<i class="fa fa-circle-o-notch fa-spin"></i><span>${store.locales == 'zh' ? '正在渲染 Mermaid 图…' : 'Rendering diagram…'}</span>`
-        wrapper.appendChild(ph)
-      }
+      setMermaidPlaceholder(wrapper, store.locales == 'zh' ? '正在渲染 Mermaid 图…' : 'Rendering diagram…')
       continue
     }
     mountSvgIntoWrapper(wrapper, rawText, hashContent(rawText), svg)
@@ -2399,8 +2425,12 @@ const renderMermaidDiagrams = async (force = false) => {
       continue
     }
 
-    // 仍在生成的活动尾部：等它定型（force 用于生成结束/切换时的兜底渲染）
-    if (!force && isLiveStreamingTail(wrapper)) continue
+    // 仍在生成的活动尾部：等它定型（force 用于生成结束/切换时的兜底渲染）；
+    // 期间给出「正在生成图表」提示，避免整块空白
+    if (!force && isLiveStreamingTail(wrapper)) {
+      setMermaidPlaceholder(wrapper, store.locales == 'zh' ? '正在生成图表…' : 'Generating diagram…')
+      continue
+    }
 
     if (mermaidInflight.has(hash)) continue
     mermaidInflight.add(hash)
@@ -4920,6 +4950,23 @@ const {
   saveChats,
   getDefaultModel,
 })
+
+/**
+ * 模型下拉被点开时的刷新。
+ * - 桌面端：只走本地探测（行为不变）。
+ * - 网页端（局域网访客）：先本地探测（App 启动时已把地址对齐成主机的，经 /__proxy 探测的就是主机在用的服务），
+ *   再向主机要一次「权威结果」并覆盖——主机用自己的配置现场探测，所以桌面端能刷出的模型网页端也能刷出，
+ *   且本地探测失败时不会把主机给的列表清空。
+ */
+const onModelSelectRefresh = async () => {
+  await refreshModels()
+  if (!window.ipcRenderer) {
+    try {
+      const { syncHostLlmSources } = await import('@/platform/lanHostLlm')
+      await syncHostLlmSources(store, true)
+    } catch { /* 主机不可达：保留本地探测结果 */ }
+  }
+}
 
 /** 启用的来源选项：内置（过滤禁用）+ 自定义（过滤禁用，保留原索引） */
 const enabledLlmTypeOptions = computed(() => {

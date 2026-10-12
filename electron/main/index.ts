@@ -48,8 +48,12 @@ import {
   setLanGuestLlm,
   setLanGuestPolicy,
   setLanMaxConcurrent,
+  setLanModelSources,
   setLanPolicyRequester,
   setLanShareDir,
+  getLanModelSources,
+  probeLanModelSources,
+  refreshPolicyFromRenderer,
 } from './lan-guest'
 import { LAN_GUEST_COOKIE } from '@/shared/lanGuest'
 import { registerTtsIpc, disposeTtsService } from './tts-service'
@@ -4309,6 +4313,37 @@ function lanLexicalScore(queryTokens: string[], text: string): number {
   return hit / queryTokens.length
 }
 
+/**
+ * 处理 /api/llm/sources（网页端模型来源对齐）。
+ * 默认按需现场探测（主机用自己的配置连自己的服务，因此与桌面端结果一致）；
+ * `?cached=1` 只返回最近一次下发的快照，不触发探测。
+ */
+async function handleLanLlmSources(res: http.ServerResponse, urlPath: string) {
+  const send = (code: number, obj: any) => {
+    res.statusCode = code
+    res.setHeader('Content-Type', 'application/json; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-store')
+    res.end(JSON.stringify(obj))
+  }
+  try {
+    // 模型来源探测较慢（每个来源最慢 3.5s、并发执行）：网页端首次加载 / 点刷新时按需探测；
+    // `?cached=1` 只取主机最近一次下发的快照（不探测）。
+    const cached = /[?&]cached=1(?:&|$)/.test(urlPath)
+    if (!cached) {
+      // 主机刚在设置里改过来源 / 地址时也能拿到最新的（渲染层会重新下发一次，节流 2s）
+      await refreshPolicyFromRenderer()
+    }
+    const data = cached ? getLanModelSources() : await probeLanModelSources()
+    if (!data?.llm) {
+      send(503, { ok: false, error: '主机尚未下发模型来源配置（请先在主机打开一次「设置 → 协作 → 权限」页）' })
+      return
+    }
+    send(200, { ok: true, llm: data.llm, disabled: data.disabled })
+  } catch (e: any) {
+    send(500, { ok: false, error: e?.message || String(e) })
+  }
+}
+
 /** 处理 /api/kb/*（list / read / search），由局域网请求处理器调用 */
 async function handleLanKbApi(req: http.IncomingMessage, res: http.ServerResponse, urlPath: string) {
   const send = (code: number, obj: any) => {
@@ -4681,6 +4716,12 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
         return
       }
 
+      // ===== 主机模型来源（网页端对齐主机的来源开关 / 地址 / 模型） =====
+      if (urlPath.startsWith('/api/llm/sources')) {
+        void handleLanLlmSources(res, urlPath)
+        return
+      }
+
       // ===== 静态文件服务 =====
       // 去掉查询参数
       const pathOnly = req.url!.includes('?') ? req.url!.substring(0, req.url!.indexOf('?')) : req.url!
@@ -4824,6 +4865,8 @@ ipcMain.handle('lan:setGuest', async (_e, payload?: any) => {
   const p = setLanGuestPolicy(payload?.policy)
   setLanMaxConcurrent(p.maxConcurrent)
   setLanGuestLlm(payload?.llm)
+  // 主机可用的模型来源（网页端据此对齐来源开关 / 地址 / 模型；仅 payload 带该字段时覆盖）
+  if (payload && Object.prototype.hasOwnProperty.call(payload, 'modelSources')) setLanModelSources(payload.modelSources)
   // 访客可用智能体档案（渲染层组装：预设提示词/工具/知识库/MCP），主进程据此叠加盟客策略限制。
   // ⚠️ 仅在 payload 明确带 agents 时才覆盖：局部下发（旧版本渲染层）不能把清单清空。
   if (payload && Object.prototype.hasOwnProperty.call(payload, 'agents')) setLanGuestAgents(payload.agents)

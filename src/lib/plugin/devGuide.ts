@@ -10,6 +10,11 @@
  *   - src/lib/plugin/runtime.ts（客户端 ctx）
  *   - electron/main/plugin-host.ts（主进程 ctx）
  * 保持一致；改实现时请同步这里（否则开发者照着写会踩空）。
+ * 另外：设置页签的**一级分组 id 与设置页 id 清单**来自
+ *   - src/components/set/Set.vue 的 navTree（改动设置导航时，请同步「设置页签 / 设置卡片模板」一节、
+ *     速查表的两行与 FAQ 里那份清单；分组 id 写错会让插件多出一个同名的「插件」一级菜单）
+ * 模板 key 清单同时被 electron/main/plugin-dev-guide.ts 的 PLUGIN_DEV_TEMPLATE_KEYS 与
+ * plugin_dev_templates 的工具说明引用（新增模板小节时三处一起改）。
  */
 
 /** 一段可复制的指令 / 说明 */
@@ -56,6 +61,8 @@ export const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或�
 4. declares.slots 必须列全你要用的所有槽位，出现未知槽位会被拒绝；只允许这些槽位：
    panel.main（主面板 + 导航按钮）、settings.tab（设置页签）、settings.card（插到已有设置页的卡片，需 meta.target）、
    swarm.workbench.tab（集群工作台页签）、chat.message.actions（聊天消息级按钮）。
+   settings.tab 的 key 就是设置页 id（用 plugin-<插件 id> 前缀，别占用内置页 id），**meta.group 只能填已存在的一级分组 id（省略即内置「插件」分组，填不存在的 id 会多出一个同名「插件」一级菜单）**；
+   settings.card 的 meta.target 必填（内置设置页 id），不写会出现在所有设置页。细节与完整示例见「设置页签 / 设置卡片模板」一节。
 5. 用到宿主能力必须声明 permissions（可用：fs / shell / net / agent / llm）；未声明就调用会直接抛错。
    启用插件时软件会把申请的权限列给用户确认，所以不要多申请。
    **fs 不等于能读任意路径**：只能读「用户在该插件里亲自选过」的文件 / 文件夹，且授权到本次运行结束
@@ -113,6 +120,8 @@ export const CONSTRAINTS_EN = `[Hard constraints the host enforces]
 4. declares.slots must list every slot you use; unknown slots are rejected. Allowed slots:
    panel.main (main panel + its nav button), settings.tab (settings page tab), settings.card (card injected into an existing settings page, needs meta.target),
    swarm.workbench.tab (swarm workbench tab), chat.message.actions (per-message buttons).
+   A settings.tab key is the settings page id (prefix it with plugin-<plugin id>, never reuse a built-in page id) and **meta.group may only be an existing top-level group id (omit it for the built-in Plugins group; a non-existent id adds a second “Plugins” top-level menu)**;
+   settings.card requires meta.target (a built-in settings page id) — without it the card appears on every settings page. See the “Settings tab / card template” section for the full example.
 5. Host capabilities require permissions (fs / shell / net / agent / llm); calling without declaring throws. Users must confirm the requested
    permissions when enabling the plugin, so ask only for what you need.
    **fs does not mean “any path”**: a plugin may only read files/folders the user picked *inside that plugin*, and the grant lasts until the
@@ -204,14 +213,14 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Add a main panel plus its nav button (build component with ctx.vue.defineComponent).',
   },
   {
-    name: 'ctx.slots.register("settings.tab", { key, titleZh, titleEn, icon, meta: { group: "ui" }, component })',
-    descZh: '在「设置 → 插件」分组里加一个设置页签（key 即 activeNav 值）。',
-    descEn: 'Add a settings tab under the Plugins group (key becomes the activeNav value).',
+    name: 'ctx.slots.register("settings.tab", { key, titleZh, titleEn, icon, order, component })',
+    descZh: '在「设置 → 插件」分组里加一个设置页签（key 即 activeNav 值）。规则：① key 在 settings.tab 槽位内必须**全局唯一**（重复直接抛「key 重复」），用 plugin-<插件 id> 这种前缀，且**不要占用内置设置页 id**（view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help），否则导航里出现两个同 id 项、右侧同时渲染内置页与你的页签；② **meta.group 只能填已存在的一级分组 id**：base-group 通用 / llm-group 模型 / collab-group 协作 / ai-group 语音 / service-group 工具 / plugin-group 插件 / skill-group 技能 / agent-group 智能体；**省略 meta.group 即 plugin-group（内置「插件」分组）**，填别的 id（如 "ui"）会新建一个标题为「插件」的同名一级分组。',
+    descEn: 'Add a settings tab under the Plugins group (key is the activeNav value). Rules: ① the key must be **globally unique** inside the settings.tab slot (a duplicate throws “duplicate key”) — prefix it with plugin-<plugin id> and **never reuse a built-in page id** (view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help), otherwise the nav shows two entries with the same id and the right pane renders both pages; ② **meta.group may only be an existing top-level group id**: base-group / llm-group / collab-group / ai-group / service-group / plugin-group / skill-group / agent-group — **omitting it means plugin-group (the built-in Plugins group)**, while any other id (e.g. "ui") creates a second top-level group titled “Plugins”.',
   },
   {
-    name: 'ctx.slots.register("settings.card", { component, meta: { target: "view" } })',
-    descZh: '往已有设置页里插一块卡片（target 为该设置页 id，如 view / features）。',
-    descEn: 'Inject a card into an existing settings page (target is that page id, e.g. view / features).',
+    name: 'ctx.slots.register("settings.card", { key, component, meta: { target: "view" } })',
+    descZh: '往**已有**设置页里插一块卡片。**meta.target 必填**，取值是内置设置页 id（view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help），也可写数组同时插多页（{ target: ["view", "features"] }）；**不写 target 会出现在所有设置页**（包括插件商店这类不相干的页面）。',
+    descEn: 'Inject a card into an **existing** settings page. **meta.target is mandatory** and takes a built-in settings page id (view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help), or an array to inject into several pages ({ target: ["view", "features"] }); **without target the card shows up on every settings page** (including unrelated ones such as the plugin store).',
   },
   {
     name: 'ctx.shortcuts.register("Ctrl+Shift+H", handler, { descriptionZh, descriptionEn })',
@@ -337,6 +346,12 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
     qEn: 'Nothing happens after picking a file, or the panel keeps saying “no data”.',
     aZh: '两个高频原因：① **忘记 await**——`ctx.files.*` 全部返回 Promise，`const res = ctx.files.readSheet(p)` 拿到的是 Promise，`res.sheets` 是 undefined（不报错，所以很难发现）；② **pickFiles 的返回形状**：它返回 `{ cancelled, files: [{ path, name, size }] }`，不是路径数组，所以 `files.length` / `files[0]` 都不对，正确写法是 `const res = await ctx.files.pickFiles({ accept: "any" }); if (res.cancelled || !res.files.length) return; const path = res.files[0].path`（用户取消时**不抛错**，别用 try/catch 判取消）。plugin_dev_check 会把这两种情况静态报出来。',
     aEn: 'Two usual causes: ① **a missing await** — every `ctx.files.*` call returns a Promise, so `const res = ctx.files.readSheet(p)` yields a Promise and `res.sheets` is undefined (no error is thrown, which is why it is so hard to spot); ② **the pickFiles shape** — it returns `{ cancelled, files: [{ path, name, size }] }`, not an array of paths, so `files.length` / `files[0]` are both wrong; the correct form is `const res = await ctx.files.pickFiles({ accept: "any" }); if (res.cancelled || !res.files.length) return; const path = res.files[0].path` (cancellation **does not throw**, so never detect it with try/catch). plugin_dev_check reports both statically.',
+  },
+  {
+    qZh: '设置页签没进「插件」分组（左侧多出一个同名的「插件」一级菜单）/ 设置卡片出现在所有设置页',
+    qEn: 'The settings tab does not land in the Plugins group (a second top-level “Plugins” menu appears) / the settings card shows up on every settings page.',
+    aZh: '三种写法问题：① **meta.group 只能填已存在的一级分组 id**（base-group 通用 / llm-group 模型 / collab-group 协作 / ai-group 语音 / service-group 工具 / plugin-group 插件 / skill-group 技能 / agent-group 智能体）；**省略 meta.group = 内置「插件」分组**，填别的 id（如 "ui"）会新建一个标题硬编码为「插件」的一级分组——删掉 meta.group 或改成 plugin-group 即可；② **settings.card 必须写 meta.target**（内置设置页 id，可写数组），不写就会出现在所有设置页；③ 别用内置设置页 id 当 settings.tab 的 key（会与内置页撞同一个 id，导航里出现两项、右侧同时渲染两页）：用 plugin-<插件 id> 前缀。改完回「插件 → 管理」点一次重载。',
+    aEn: 'Three typical mistakes: ① **meta.group must be an existing top-level group id** (base-group / llm-group / collab-group / ai-group / service-group / plugin-group / skill-group / agent-group); **omitting meta.group means the built-in Plugins group**, and any other id (e.g. "ui") creates a new top-level group hard-titled “Plugins” — drop meta.group or set it to plugin-group; ② **settings.card requires meta.target** (a built-in settings page id, or an array), otherwise the card appears on every settings page; ③ never use a built-in settings page id as the settings.tab key (it collides with that page: the nav shows two entries and the right pane renders both pages) — prefix it with plugin-<plugin id>. Press Reload in Plugins → Manage afterwards.',
   },
 ]
 
@@ -488,7 +503,7 @@ ${CONSTRAINTS_ZH}
 【写法要点】
 - client.mjs 结构：export function apply(ctx) { ... }，用 ctx.vue 的 h / defineComponent / ref / computed 写；
 - 面板用 ctx.slots.register('panel.main', { key: '<my-panel>', titleZh, titleEn, icon, order: 900, component: Panel })；
-- 如果有可配置项，再加一个设置页签：ctx.slots.register('settings.tab', { key: '<my-panel>-settings', titleZh: '我的面板', titleEn: 'My panel', icon: 'fa fa-cogs', meta: { group: 'ui' }, component: Settings })，
+- 如果有可配置项，再加一个设置页签：ctx.slots.register('settings.tab', { key: 'plugin-<插件 id>', titleZh: '我的面板设置', titleEn: 'My panel settings', icon: 'fa fa-cogs', order: 900, component: Settings })（**不要写 meta: { group: 'ui' }**：省略 meta.group 即归入「设置 → 插件」分组，写不存在的分组 id 会多出一个同名「插件」一级分组；完整写法与可用 id 清单见「设置页签 / 设置卡片模板」一节），
   设置项改动要立即生效并持久化（可用 localStorage，键名带插件 id 前缀，如 'aikm.plugin.my-panel.settings'）；
   图片 / 存档这类大文件放本机 OPFS 的 'plugins/<插件 id>/' 目录（宿主「插件管理 → 数据」按这个约定统计与清理）；
 - 面板高度自适应：最外层 height:100%; box-sizing:border-box; display:flex; flex-direction:column，需要滚动的区域 class="scoll" + overflow-y:auto + min-height:0；
@@ -508,10 +523,242 @@ ${CONSTRAINTS_EN}
 [Implementation notes]
 - client.mjs shape: export function apply(ctx) { ... }, written with h / defineComponent / ref / computed from ctx.vue.
 - Register the panel with ctx.slots.register('panel.main', { key: '<my-panel>', titleZh, titleEn, icon, order: 900, component: Panel }).
-- If there are settings, add ctx.slots.register('settings.tab', { key: '<my-panel>-settings', titleZh: 'My panel', titleEn: 'My panel', icon: 'fa fa-cogs', meta: { group: 'ui' }, component: Settings }); changes must apply immediately and persist (localStorage with a plugin-id-prefixed key such as 'aikm.plugin.my-panel.settings'); put large blobs (images, saves) in OPFS under 'plugins/<plugin id>/' — that is how Settings → Plugins → Data measures and clears per-plugin data.
+- If there are settings, add ctx.slots.register('settings.tab', { key: 'plugin-<plugin id>', titleZh: 'My panel settings', titleEn: 'My panel settings', icon: 'fa fa-cogs', order: 900, component: Settings }) (**never write meta: { group: 'ui' }**: leaving meta.group out puts the tab in the built-in Plugins group, while an unknown group id adds a second top-level group with the same name; see the “Settings tab / card template” section for the full call and the allowed ids); changes must apply immediately and persist (localStorage with a plugin-id-prefixed key such as 'aikm.plugin.my-panel.settings'); put large blobs (images, saves) in OPFS under 'plugins/<plugin id>/' — that is how Settings → Plugins → Data measures and clears per-plugin data.
 - Panel height: outer element height:100%; box-sizing:border-box; display:flex; flex-direction:column; scrollable areas need class="scoll" + overflow-y:auto + min-height:0.
 - Set explicit foreground/background colours (theme variables) and compact sizes on every input/select.
 - Add a one-line usage hint in the panel or its settings tab, and document usage in README.md.`,
+  },
+  {
+    key: 'settings',
+    titleZh: '设置页签 / 设置卡片模板：把插件的配置项放进「设置 → 插件」',
+    titleEn: 'Settings tab / card template: put your plugin options under Settings → Plugins',
+    descZh:
+      '适合「插件要能配置」这类需求。整段粘给大模型即可：给了可直接抄的注册写法、**完整可用的设置组件骨架**（立即生效 + 本机持久化 + 恢复默认），以及设置**一级分组 id** 与**设置页 id** 两份清单——分组写错会多出一个同名的「插件」一级菜单，卡片不写 target 会出现在所有设置页。',
+    descEn:
+      'For “the plugin needs options”. Paste the whole block: it contains the exact registration calls, a **complete working settings component** (applies immediately, persists locally, has a reset button), and the two id lists (settings groups and settings pages) — a wrong group id creates a second top-level “Plugins” menu, and a card without target appears on every settings page.',
+    bodyZh: `请为 AI-KM 插件加一个「设置页签」（和可选的「设置卡片」），用来配置插件自己的选项。
+
+【插件信息】
+- 插件 id / 目录名：<my-panel>（**只能是 ASCII 小写 [a-z0-9._-]，不能用中文 / 大写 / 空格**——中文目录名会被宿主整目录跳过；中文写进清单的 aikm.name）
+- 设置页签名：<我的面板设置>（同时给英文名），图标用 FontAwesome 4 类名（如 "fa fa-cogs"）
+- 要配的选项：<例如 字号 / 是否显示网格 / 默认标题 …>
+
+${CONSTRAINTS_ZH}
+
+【一、注册：先记住三条规矩】
+1) settings.tab（设置页签）：
+   ctx.slots.register('settings.tab', { key: 'plugin-<插件 id>', titleZh: '我的面板设置', titleEn: 'My panel settings', icon: 'fa fa-cogs', order: 900, component: Settings })
+   · **key 就是设置页 id（= 导航里的 activeNav），在 settings.tab 槽位内必须全局唯一**：第二个插件用同一个 key 会直接抛「key 重复」。一律用 'plugin-<插件 id>' 这种前缀，**不要占用内置设置页 id**（view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help），否则导航里会出现两个同 id 的项、右侧同时渲染内置页和你的页签。
+   · **meta.group 决定挂在哪个一级分组下，只能填已存在的分组 id**：base-group 通用 / llm-group 模型 / collab-group 协作 / ai-group 语音 / service-group 工具 / plugin-group 插件 / skill-group 技能 / agent-group 智能体。**省略 meta.group = plugin-group（内置「插件」分组）**，这也是绝大多数插件的正确选择；填一个上面没有的 id（比如 'ui'）会新建一个**标题硬编码为「插件」**的一级分组，看起来就是「又多了一个同名的插件菜单」——这是最常见的踩坑。
+   · order 只影响同一分组内的排序（小的在前）；titleZh / titleEn / icon 决定导航项的文字与图标。
+2) settings.card（往**已有**设置页里插一张卡片，可选）：
+   ctx.slots.register('settings.card', { key: 'plugin-<插件 id>-card', component: Card, meta: { target: 'view' } })
+   · **必须写 meta.target**（要插到哪个设置页的 id，上面那份内置设置页 id 清单），也可以写数组同时插多页（如 { target: ['view', 'features'] }）；**不写 target 会出现在所有设置页**（包括插件商店那种不相干的页面）。
+   · 卡片是「list」槽位：多个插件的卡片按 order 依次排列，适合放一小块说明或几个开关；复杂配置还是用 settings.tab。
+3) 两个半边都不需要改：配置界面完全由你绘制，宿主只提供「位置」。
+
+【二、完整可抄的设置组件骨架（立即生效 + 本机持久化 + 恢复默认）】
+- 界面半边**没有 ctx.storage**，用 localStorage，键名带插件 id 前缀：'aikm.plugin.<插件 id>.settings'；
+- 把 settings 放在 **apply() 作用域**（不是组件里），面板与设置页签就共用同一份配置：改哪边都立即生效，也不用互相通知；
+- 用 ctx.effect 注册 watch（返回停止函数），插件禁用时自动停掉，不留副作用。
+
+  const SETTINGS_KEY = 'aikm.plugin.my-panel.settings'
+  const defaults = () => ({ size: 12, showGrid: true, title: '' })
+
+  const loadSettings = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null')
+      return saved && typeof saved === 'object' ? { ...defaults(), ...saved } : defaults()
+    } catch (e) {
+      ctx.log.warn('读取设置失败，按默认值开始：', e)
+      return defaults()
+    }
+  }
+
+  // apply() 作用域：面板与设置页签共用这一份
+  const settings = ref(loadSettings())
+  ctx.effect(() => {
+    const stop = watch(settings, () => {
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+      } catch (e) {
+        ctx.log.warn('保存设置失败：', e)
+      }
+    }, { deep: true })
+    return () => stop()
+  })
+
+  const inputStyle = 'height:22px;box-sizing:border-box;padding:0 4px;border:1px solid var(--borderColor,#dcdfe6);border-radius:3px;background:var(--backgroundColor,#fff);color:var(--fontColor,#303133);font-size:11px;width:74px'
+
+  const Settings = defineComponent({
+    name: 'MyPanelSettings',
+    setup() {
+      const numberField = (key, label, min, step) =>
+        h('label', { style: 'display:flex;align-items:center;gap:4px;font-size:12px' }, [
+          h('span', { style: 'opacity:.75' }, label),
+          h('input', {
+            type: 'number', min, step, value: settings.value[key], style: inputStyle,
+            onChange: (e) => {
+              const v = Number(e.target.value)
+              if (Number.isFinite(v)) settings.value[key] = v   // 立即生效；watch 负责落盘
+            },
+          }),
+        ])
+
+      return () =>
+        h('div', { class: 'scoll', style: 'height:100%;box-sizing:border-box;padding:8px 10px;overflow:auto;font-size:12px' }, [
+          h('h3', { style: 'margin:0 0 8px;padding:0 0 8px 10px;border-bottom:1px solid var(--borderColor,#dcdfe6);border-left:3px solid var(--fontActiveColor,#409eff);font-size:14px;font-weight:600' }, text.value.tabTitle),
+          h('div', { style: 'display:flex;align-items:center;gap:14px;row-gap:6px;flex-wrap:wrap' }, [
+            numberField('size', text.value.sizeLabel, 1, 1),
+            h('label', { style: 'display:flex;align-items:center;gap:4px;font-size:12px' }, [
+              h('input', { type: 'checkbox', checked: settings.value.showGrid, style: 'margin:0;cursor:pointer', onChange: (e) => (settings.value.showGrid = e.target.checked) }),
+              text.value.gridLabel,
+            ]),
+            h('button', {
+              onClick: () => { settings.value = defaults() },
+              style: 'cursor:pointer;padding:2px 8px;border-radius:4px;border:1px solid var(--borderColor,#dcdfe6);background:var(--menuColor,#fff);color:var(--fontColor,#303133);font-size:11px',
+            }, text.value.reset),
+          ]),
+          h('div', { style: 'font-size:11px;line-height:1.7;opacity:.68;margin-top:8px' }, text.value.settingsHint),
+        ])
+    },
+  })
+
+  // 文案照硬约束第 9 条用 ctx.locale.pick（取值写 text.value.xxx），这里从略
+  ctx.slots.register('settings.tab', {
+    key: 'plugin-my-panel',
+    titleZh: '我的面板设置',
+    titleEn: 'My panel settings',
+    icon: 'fa fa-cogs',
+    order: 900,
+    component: Settings,
+  })
+
+  // 可选：再往「设置 → 通用 → 基础」里插一张卡片（不放 meta.group，必须放 meta.target）
+  // 卡片通常比设置页更紧凑，实践里另写一个小组件（这里为省篇幅复用 Settings）
+  ctx.slots.register('settings.card', { key: 'plugin-my-panel-card', component: Settings, meta: { target: 'view' } })
+
+【三、大文件不放配置里】
+图片 / 存档这类大文件放本机 OPFS 的 'plugins/<插件 id>/' 目录（宿主「插件管理 → 数据」按这个约定统计与清理），配置里只存路径与开关。
+
+【四、交付前自查】
+- 「设置 → 插件」分组下应出现你的页签；**若左侧多出一个同名的「插件」一级菜单，就是 meta.group 写了不存在的 id**（删掉或改成 plugin-group）；
+- 设置卡片只应出现在目标页（检查 meta.target 是**设置页 id**，不是分组 id）；
+- 改配置立即生效且重启后保留（刷新页面 / 重载插件都试一次）；
+- 提示条只传字符串（ctx.notify(text.value.xxx)，别传 ref）。
+
+【交付物】按 === package.json === / === client.mjs === / === README.md === 分段给出完整文件内容，不要省略、不要写「此处略」。`,
+    bodyEn: `Add a settings tab (and optionally a settings card) to an AI-KM plugin so users can configure it.
+
+[Plugin info]
+- Plugin id / folder name: <my-panel> (**ASCII lowercase [a-z0-9._-] only** — a Chinese folder name is skipped by the host; put Chinese in the manifest’s aikm.name)
+- Settings tab title: <My panel settings> (also provide the other language), icon as a FontAwesome 4 class (e.g. "fa fa-cogs")
+- Options to expose: <e.g. font size / show grid / default title …>
+
+${CONSTRAINTS_EN}
+
+[1. Registration — three rules]
+1) settings.tab:
+   ctx.slots.register('settings.tab', { key: 'plugin-<plugin id>', titleZh: '…', titleEn: 'My panel settings', icon: 'fa fa-cogs', order: 900, component: Settings })
+   · **key is the settings page id (= activeNav) and must be unique inside the settings.tab slot**: a second plugin reusing it throws “duplicate key”. Always prefix with 'plugin-<plugin id>' and **do not take a built-in page id** (view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help), otherwise the nav shows two entries with the same id and the right pane renders both the built-in page and yours.
+   · **meta.group picks the top-level group and may only be an existing group id**: base-group (General) / llm-group (Models) / collab-group (Collaboration) / ai-group (Speech) / service-group (Tools) / plugin-group (Plugins) / skill-group (Skills) / agent-group (Agent). **Omitting meta.group means plugin-group (the built-in Plugins group)** — the right choice for almost every plugin; any other id (e.g. 'ui') creates a **new top-level group hard-titled “Plugins”**, i.e. “a second Plugins menu appeared”, the most common trap here.
+   · order only sorts inside the same group (ascending); titleZh / titleEn / icon drive the nav entry.
+2) settings.card (inject a card into an **existing** settings page, optional):
+   ctx.slots.register('settings.card', { key: 'plugin-<plugin id>-card', component: Card, meta: { target: 'view' } })
+   · **meta.target is mandatory** (the settings page id from the built-in list above) and may be an array to inject into several pages ({ target: ['view', 'features'] }); **without target the card appears on every settings page** (including unrelated ones such as the plugin store).
+   · It is a “list” slot: cards from different plugins are ordered by order; a small note or a couple of toggles fit well — use settings.tab for real configuration.
+3) Neither half needs changes: the host only provides the position, you draw the whole UI.
+
+[2. A complete settings component (applies immediately, persists locally, resettable)]
+- The UI half has **no ctx.storage**: use localStorage with a plugin-id-prefixed key, 'aikm.plugin.<plugin id>.settings'.
+- Keep settings in the **apply() scope** (not inside a component) so the panel and the settings tab share one object: edits apply everywhere immediately, no messaging needed.
+- Register the watch through ctx.effect (return the stop function) so nothing keeps running after the plugin is disabled.
+
+  const SETTINGS_KEY = 'aikm.plugin.my-panel.settings'
+  const defaults = () => ({ size: 12, showGrid: true, title: '' })
+
+  const loadSettings = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null')
+      return saved && typeof saved === 'object' ? { ...defaults(), ...saved } : defaults()
+    } catch (e) {
+      ctx.log.warn('load settings failed, using defaults:', e)
+      return defaults()
+    }
+  }
+
+  const settings = ref(loadSettings())   // apply() scope: shared by the panel and the settings tab
+  ctx.effect(() => {
+    const stop = watch(settings, () => {
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+      } catch (e) {
+        ctx.log.warn('save settings failed:', e)
+      }
+    }, { deep: true })
+    return () => stop()
+  })
+
+  const inputStyle = 'height:22px;box-sizing:border-box;padding:0 4px;border:1px solid var(--borderColor,#dcdfe6);border-radius:3px;background:var(--backgroundColor,#fff);color:var(--fontColor,#303133);font-size:11px;width:74px'
+
+  const Settings = defineComponent({
+    name: 'MyPanelSettings',
+    setup() {
+      const numberField = (key, label, min, step) =>
+        h('label', { style: 'display:flex;align-items:center;gap:4px;font-size:12px' }, [
+          h('span', { style: 'opacity:.75' }, label),
+          h('input', {
+            type: 'number', min, step, value: settings.value[key], style: inputStyle,
+            onChange: (e) => {
+              const v = Number(e.target.value)
+              if (Number.isFinite(v)) settings.value[key] = v   // applies immediately; the watch persists it
+            },
+          }),
+        ])
+
+      return () =>
+        h('div', { class: 'scoll', style: 'height:100%;box-sizing:border-box;padding:8px 10px;overflow:auto;font-size:12px' }, [
+          h('h3', { style: 'margin:0 0 8px;padding:0 0 8px 10px;border-bottom:1px solid var(--borderColor,#dcdfe6);border-left:3px solid var(--fontActiveColor,#409eff);font-size:14px;font-weight:600' }, text.value.tabTitle),
+          h('div', { style: 'display:flex;align-items:center;gap:14px;row-gap:6px;flex-wrap:wrap' }, [
+            numberField('size', text.value.sizeLabel, 1, 1),
+            h('label', { style: 'display:flex;align-items:center;gap:4px;font-size:12px' }, [
+              h('input', { type: 'checkbox', checked: settings.value.showGrid, style: 'margin:0;cursor:pointer', onChange: (e) => (settings.value.showGrid = e.target.checked) }),
+              text.value.gridLabel,
+            ]),
+            h('button', {
+              onClick: () => { settings.value = defaults() },
+              style: 'cursor:pointer;padding:2px 8px;border-radius:4px;border:1px solid var(--borderColor,#dcdfe6);background:var(--menuColor,#fff);color:var(--fontColor,#303133);font-size:11px',
+            }, text.value.reset),
+          ]),
+          h('div', { style: 'font-size:11px;line-height:1.7;opacity:.68;margin-top:8px' }, text.value.settingsHint),
+        ])
+    },
+  })
+
+  // Localised copy via ctx.locale.pick (read text.value.xxx), omitted here
+  ctx.slots.register('settings.tab', {
+    key: 'plugin-my-panel',
+    titleZh: '我的面板设置',
+    titleEn: 'My panel settings',
+    icon: 'fa fa-cogs',
+    order: 900,
+    component: Settings,
+  })
+
+  // Optional: one more card inside Settings → General → Basic (no meta.group, but meta.target is required)
+  // A card is usually more compact than a settings page — normally a separate small component (reused here for brevity)
+  ctx.slots.register('settings.card', { key: 'plugin-my-panel-card', component: Settings, meta: { target: 'view' } })
+
+[3. Keep big blobs out of the config]
+Put images / saves in OPFS under 'plugins/<plugin id>/' (Settings → Plugins → Data measures and clears them) and store only paths plus switches in the config.
+
+[4. Self-check before delivering]
+- The tab must appear under the Plugins group; **a second top-level “Plugins” menu means meta.group holds a non-existent id** (drop it or use plugin-group).
+- The card may only appear on the target page (make sure meta.target is a **settings page id**, not a group id).
+- Changes apply immediately and survive a restart (test a page reload and a plugin reload).
+- Pass strings to toasts only (ctx.notify(text.value.xxx), never a ref).
+
+[Deliverable] Full file contents under === package.json === / === client.mjs === / === README.md === headers; nothing omitted, no “rest omitted” placeholders.`,
   },
   {
     key: 'chart',

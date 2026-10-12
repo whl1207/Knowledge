@@ -43,6 +43,7 @@ import {
 import * as agentLoop from './agent-loop'
 import { skillService } from './skill-service'
 import { toolRegistry } from '@/shared/toolRegistry'
+import { AIUtils } from '@/shared/ai-core'
 import type { AgentEvent, AgentOptions } from '@/types/agent'
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ export interface LanGuestHostLlm {
 
 let policy: LanGuestPolicy = normalizeLanGuestPolicy(null)
 let hostLlm: LanGuestHostLlm | null = null
+/** 主机可用的模型来源快照（渲染层下发；网页端据此对齐来源开关 / 地址 / 模型） */
+let modelSources: { llm: any; disabled: string[] } | null = null
 /** 主机共享目录（= store.lan.kbDir）；访客智能体的文件围栏根 */
 let shareDir = ''
 /** 允许访客使用的智能体预设档案（渲染层组装后推送；id=general 为通用智能体，不在列表里） */
@@ -97,11 +100,11 @@ export function setLanPolicyRequester(fn: (() => void) | null): void {
 
 /**
  * 请渲染层重新下发一次策略，并等待其到达（超时则用现有数据继续）。
- * 用途：网页端请求 `/api/agent/info` 时保证拿到**主机当前最新的**智能体清单——
- * 否则主机改了「可用智能体」而没重开权限页时，网页端只能看到旧清单（需刷新页面）。
+ * 用途：网页端请求 `/api/agent/info`、`/api/llm/sources` 时保证拿到**主机当前最新的**
+ * 智能体清单与模型来源（否则主机改了「可用智能体」/ 来源地址而没重开权限页时，网页端只能看到旧数据）。
  * 节流：距上次下发 < 2s 则跳过，避免密集请求反复组装档案。
  */
-async function refreshPolicyFromRenderer(timeoutMs = 1500): Promise<void> {
+export async function refreshPolicyFromRenderer(timeoutMs = 1500): Promise<void> {
   if (!policyRequester) return
   if (pendingPolicyRefresh) return
   if (Date.now() - lastAgentsPushAt < 2000) return
@@ -148,6 +151,65 @@ export function setLanGuestLlm(raw: unknown): void {
 
 export function setLanShareDir(dir: unknown): void {
   shareDir = typeof dir === 'string' ? dir : ''
+}
+
+/** 接收渲染层下发的「主机可用的模型来源」快照（不含密钥；见 platform/lanKb.buildLanModelSourcesPayload） */
+export function setLanModelSources(raw: unknown): void {
+  const cfg = raw as any
+  modelSources = cfg && typeof cfg === 'object' && cfg.llm && typeof cfg.llm === 'object'
+    ? { llm: cfg.llm, disabled: Array.isArray(cfg.disabled) ? cfg.disabled.filter((x: any) => typeof x === 'string') : [] }
+    : null
+}
+
+/**
+ * 现场探测各来源的模型列表（网页端刷新 / 首次加载时调用）。
+ *
+ * 关键：探测**在主机用主机自己的配置**执行（与桌面端同一套 ai-core），
+ * 所以「桌面端能刷出来的，网页端也能刷出来」——不再依赖网页端自己的默认地址。
+ * 只探本地 / 自托管来源（ollama / lmstudio / 自定义）：云端来源需要密钥，不代网页端探测。
+ * 每个来源单独限时，避免某个不可达服务把整次请求拖死。
+ */
+export async function probeLanModelSources(timeoutMs = 3500): Promise<{ llm: any; disabled: string[] }> {
+  const data = modelSources
+  if (!data?.llm) return { llm: null, disabled: data?.disabled || [] }
+  const llm = JSON.parse(JSON.stringify(data.llm))
+  const within = async <T>(p: Promise<T>): Promise<T | null> => {
+    try {
+      return await Promise.race([
+        p,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+      ])
+    } catch {
+      return null
+    }
+  }
+  const jobs: Array<Promise<void>> = []
+  if (llm.ollama?.model_url) {
+    jobs.push((async () => {
+      const r: any = await within(AIUtils.checkOllamaConnection({ model_url: llm.ollama.model_url, model: llm.ollama.model || '' }))
+      if (r?.online && Array.isArray(r.available_models)) llm.ollama.available_models = r.available_models
+    })())
+  }
+  if (llm.lmstudio?.base_url) {
+    jobs.push((async () => {
+      const r: any = await within(AIUtils.checkLMStudioConnection({ base_url: llm.lmstudio.base_url, model: llm.lmstudio.model || '' }))
+      if (r?.online && Array.isArray(r.available_models)) llm.lmstudio.available_models = r.available_models
+    })())
+  }
+  for (const src of (Array.isArray(llm.custom?.sources) ? llm.custom.sources : [])) {
+    if (!src?.api_url) continue
+    jobs.push((async () => {
+      const r: any = await within(AIUtils.checkCustomConnection({ api_url: src.api_url, model: src.model || '' }))
+      if (r?.online && Array.isArray(r.available_models)) src.available_models = r.available_models
+    })())
+  }
+  await Promise.all(jobs)
+  return { llm, disabled: data.disabled || [] }
+}
+
+/** 最近一次由渲染层下发的模型来源快照（不触发探测） */
+export function getLanModelSources(): { llm: any; disabled: string[] } {
+  return modelSources ? { llm: modelSources.llm, disabled: modelSources.disabled } : { llm: null, disabled: [] }
 }
 
 // ---------------------------------------------------------------------------

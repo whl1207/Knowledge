@@ -12,9 +12,15 @@
   <div class="plugin-panel">
     <div class="settings-group">
       <div class="group-title-row">
-        <h3>{{ zh ? '插件管理' : 'Plugin Manager' }}</h3>
+        <h3>
+          {{ zh ? '插件管理' : 'Plugin Manager' }}
+          <!-- 安全声明收进图标悬停提示（内容较长，常驻会把列表挤下去；详情见 securityNotice） -->
+          <i class="fa fa-exclamation-triangle plugin-safe-icon" :title="securityNotice"></i>
+        </h3>
         <div class="plugin-head">
-          <span class="plugin-head-count">{{ plugins.length }} {{ zh ? '个插件' : 'plugins' }}</span>
+          <span class="plugin-head-count">
+            {{ kw ? `${filteredPlugins.length} / ${plugins.length}` : plugins.length }} {{ zh ? '个插件' : 'plugins' }}
+          </span>
           <span class="folder-path" :title="rootDir || (zh ? '未设置' : 'Not set')">
             <i class="fa fa-folder"></i> {{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}
           </span>
@@ -40,16 +46,21 @@
         </div>
       </div>
 
-      <!-- 安全声明 + 目录 -->
-      <div class="plugin-notice">
-        <i class="fa fa-exclamation-triangle"></i>
-        <div class="plugin-notice-body">
-          <div class="plugin-notice-title">{{ zh ? '插件以宿主权限运行' : 'Plugins run with host privileges' }}</div>
-          <div class="plugin-notice-desc">
-            {{ zh
-              ? '插件代码与主进程同进程，不受工作区沙箱保护。启用前请确认来源可信；下方「权限」即该插件申请的宿主能力。'
-              : 'Plugin code runs in the main process and is NOT confined by the workspace sandbox. Only enable plugins you trust; the “Permissions” listed below are the host capabilities it requests.' }}
-          </div>
+      <!-- 搜索过滤：名称 / id / 文件夹 / 权限 / 工具 / 描述 / 状态 任一命中即显示 -->
+      <div class="plugin-toolbar">
+        <div class="plugin-search">
+          <i class="fa fa-search"></i>
+          <input
+            v-model="keyword"
+            spellcheck="false"
+            :placeholder="zh ? '搜索插件（名称 / id / 文件夹 / 权限 / 工具）' : 'Search plugins (name / id / folder / permission / tool)'"
+          />
+          <i
+            v-if="keyword"
+            class="fa fa-times-circle plugin-search-clear"
+            :title="zh ? '清除搜索' : 'Clear search'"
+            @click="keyword = ''"
+          ></i>
         </div>
       </div>
 
@@ -82,8 +93,14 @@
           : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder above and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders (subfolders are scanned; the list shows which folder each plugin belongs to).' }}
       </div>
 
+      <!-- 有插件但被搜索条件过滤光了：给出明确的空态，否则会看起来像「插件不见了」 -->
+      <div v-else-if="!filteredPlugins.length" class="plugin-empty">
+        {{ zh ? `没有匹配「${keyword.trim()}」的插件。` : `No plugins match “${keyword.trim()}”.` }}
+        <span class="plugin-empty-clear" @click="keyword = ''">{{ zh ? '清除搜索' : 'Clear search' }}</span>
+      </div>
+
       <div v-else class="plugin-list">
-        <div v-for="p in plugins" :key="p.id" class="plugin-item" :class="`status-${p.status}`">
+        <div v-for="p in filteredPlugins" :key="p.id" class="plugin-item" :class="`status-${p.status}`">
           <div class="plugin-item-main">
             <div class="plugin-name-row">
               <span class="plugin-name">{{ p.name }}</span>
@@ -435,9 +452,33 @@ const services = ref<string[]>([])
 const unavailable = ref(false)
 /** 目录名不能作为插件 id 而被跳过的插件文件夹（相对插件目录；有清单但名字非法） */
 const invalidNamedDirs = ref<string[]>([])
+/** 搜索关键词（名称 / id / 文件夹 / 权限 / 工具 / 描述 / 状态 任一命中即显示） */
+const keyword = ref('')
+const kw = computed(() => keyword.value.trim().toLowerCase())
+
+/** 安全声明（悬停提示；与「详情 → 权限」配合看该插件申请的宿主能力） */
+const securityNotice = computed(() => (zh.value
+  ? '插件以宿主权限运行\n\n插件代码与主进程同进程，不受工作区沙箱保护。启用前请确认来源可信；列表里每条插件的「权限」即该插件申请的宿主能力。'
+  : 'Plugins run with host privileges\n\nPlugin code runs in the main process and is NOT confined by the workspace sandbox. Only enable plugins you trust; the “Permissions” shown for each plugin are the host capabilities it requests.'))
 
 /** 是否有插件放在子文件夹里：有则给顶层插件也标一个「根目录」徽标，避免看起来像没显示文件夹 */
 const nestedRoot = computed(() => plugins.value.some((p) => !!p.folder))
+
+/** 搜索过滤后的插件列表（空关键词 = 全部） */
+const filteredPlugins = computed(() => {
+  const k = kw.value
+  if (!k) return plugins.value
+  return plugins.value.filter((p) => {
+    const hay = [
+      p.name, p.id, p.folder, p.relDir, p.description, p.error,
+      (p.permissions || []).join(' '),
+      (p.tools || []).join(' '),
+      (p.services || []).join(' '),
+      statusLabel(p.status),
+    ].filter(Boolean).join(' ').toLowerCase()
+    return hay.includes(k)
+  })
+})
 
 const logTarget = ref<PluginSnapshot | null>(null)
 const logText = ref('')
@@ -1391,6 +1432,61 @@ onUnmounted(() => {
 }
 .folder-path i {
   margin-right: 3px;
+}
+/* 安全声明图标（插件以宿主权限运行）：内容收进 title，只留一个小图标，不占列表高度 */
+.plugin-safe-icon {
+  margin-left: 6px;
+  font-size: 12px;
+  color: #f39c12;
+  cursor: help;
+}
+/* 搜索过滤行（与标题行同一行宽的独立一条，避免把右上角图标按钮挤开） */
+.plugin-toolbar {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.plugin-search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 26px;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background: var(--menuColor);
+}
+.plugin-search:focus-within {
+  border-color: var(--fontActiveColor);
+}
+.plugin-search > i.fa-search {
+  font-size: 11px;
+  opacity: 0.6;
+}
+.plugin-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 12px;
+}
+.plugin-search-clear {
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0.55;
+}
+.plugin-search-clear:hover {
+  opacity: 1;
+}
+.plugin-empty-clear {
+  margin-left: 6px;
+  cursor: pointer;
+  color: var(--fontActiveColor);
+  text-decoration: underline;
 }
 /* 图标按钮：仅图标、无边框（与工具注册表 / 技能管理一致） */
 .plugin-panel .button.icon-btn {

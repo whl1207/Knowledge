@@ -6,7 +6,7 @@
 // 远端网页端（无 ipcRenderer）在 home 知识库模式通过这些接口「选择终端设定的文件夹中现有的
 // 知识库」来使用；也可继续上传自己的文件作为知识库。主机端负责把知识库目录 + 嵌入配置同步给主进程。
 import * as kbAi from '@/shared/kbAiClient'
-import { normalizeLlmType, resolveLlmSource } from '@/shared/llmSources'
+import { normalizeLlmType, normalizeLlmTypeList, resolveLlmSource } from '@/shared/llmSources'
 import { resolveLimitFor } from '@/lib/contextUsage'
 
 export interface SharedKbFile {
@@ -156,6 +156,64 @@ export function buildLanLlmPayload(
       customSourceIndex: customIdx ?? llm.custom?.activeIndex,
     }).limit,
   }))
+}
+
+// ==================== 网页端可选模型来源（对齐主机配置） ====================
+
+/** 下发给网页端的模型来源快照：主机的来源清单 + 各来源地址 / 模型（**不含任何密钥**） */
+export interface LanModelSourcesPayload {
+  llm: any
+  disabled: string[]
+}
+
+/**
+ * 主机（Electron）：构建「网页端可选的模型来源」快照，随访客策略一起下发主进程。
+ *
+ * 为什么需要：网页端（浏览器）用的是它**自己**的本地配置——默认地址、默认全来源。
+ * 于是①主机在「模型 → 来源」里关掉的来源，网页端照样列出来；②网页端按自己的默认地址
+ * 去探测（如 LM Studio 的 `localhost:1234`），而主机的服务在别的地址 / 端口时永远刷不出模型。
+ * 把主机的来源清单（含地址与已探测模型）下发后，网页端即可与主机桌面端完全一致。
+ *
+ * ⚠️ 必须剥离密钥：api_key / apiKeyRef / token 一律清空再下发（网页端只借用地址，不借用凭据）。
+ */
+export function buildLanModelSourcesPayload(store: any): LanModelSourcesPayload {
+  const llm = store?.AIconfig?.llm || {}
+  const disabled: string[] = Array.isArray(store?.llmDisabledSources)
+    ? store.llmDisabledSources.filter((x: any) => typeof x === 'string')
+    : []
+  const snapshot = {
+    types: normalizeLlmTypeList(llm.types || []),
+    type: normalizeLlmType(llm.type || 'ollama'),
+    ollama: llm.ollama,
+    lmstudio: llm.lmstudio,
+    openai: llm.openai,
+    deepseek: llm.deepseek,
+    gpustack: llm.gpustack,
+    anthropic: llm.anthropic,
+    google: llm.google,
+    azure: llm.azure,
+    custom: llm.custom,
+  }
+  return {
+    // 走一遍 JSON 净化：store 里全是响应式 Proxy，直接 invoke 会抛 “An object could not be cloned.”
+    llm: stripLanSecrets(JSON.parse(JSON.stringify(snapshot))),
+    disabled,
+  }
+}
+
+/** 递归清空密钥字段（密钥只留在主机本机，绝不随局域网下发） */
+function stripLanSecrets<T>(value: T): T {
+  const SECRET_KEYS = new Set(['api_key', 'apiKeyRef', 'token'])
+  const walk = (v: any, seen: WeakSet<object>): any => {
+    if (!v || typeof v !== 'object') return v
+    if (seen.has(v)) return undefined
+    seen.add(v)
+    if (Array.isArray(v)) return v.map((item) => walk(item, seen))
+    const out: Record<string, any> = {}
+    for (const k of Object.keys(v)) out[k] = SECRET_KEYS.has(k) ? '' : walk(v[k], seen)
+    return out
+  }
+  return walk(value, new WeakSet())
 }
 
 // ==================== 网页端上传 .kb 的本地检索 ====================

@@ -146,6 +146,9 @@ export const LAN_GUEST_TOKEN_KEY = 'lanGuestToken'
 /** 主机侧访客智能体接口前缀（/api/agent/create|send|events|…） */
 export const LAN_AGENT_API_BASE = '/api/agent'
 
+/** 主机侧「网页端可选模型来源」接口（含来源开关 / 地址 / 已探测模型；见 /api/llm/sources） */
+export const LAN_LLM_SOURCES_API = '/api/llm/sources'
+
 /**
  * 访客生效的智能体工具白名单。
  * 关键安全语义：策略里的 `tools: null`（渲染层表示「用默认集」）对访客**绝不**等于

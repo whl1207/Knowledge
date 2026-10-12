@@ -37,8 +37,16 @@ export const VIEW_TOP = TAB_BAR_H + NAV_BAR_H
 
 /** 单次返回给模型的正文/HTML 默认上限（可经 MCP 工具 schema 的 maxChars 参数覆盖；不传时默认 30000 字符） */
 const DEFAULT_MAX_TEXT = 30000
-/** 截图 dataUrl 上限字符 */
-const MAX_SCREENSHOT = 4_000_000
+/**
+ * 截图压缩目标：截图结果以**文本**（base64 dataUrl）回传给模型，字符数直接决定上下文占用，
+ * 原尺寸 PNG 一张常有 1~3MB（base64 后 130 万+ 字符）→ 一步就把上下文撑爆。
+ * 与渲染层上传图片同一口径：先缩到最长边 1024，再转 JPEG，并把 dataUrl 字符数压在 MAX_SCREENSHOT_CHARS 内
+ * （超标时逐级降质 / 继续缩小；**绝不截断**字符串——截断会破坏 base64，图直接变坏）。
+ */
+const SCREENSHOT_MAX_SIDE = 1024
+const SCREENSHOT_JPEG_QUALITY = 60
+/** 截图 dataUrl 字符上限（≈ 数万 token，远小于原 PNG 的百万级） */
+const MAX_SCREENSHOT_CHARS = 90_000
 /** AI 标签自动回收（窗口内建能力）：最后一次 AI 工具调用后空闲多久开始回收 AI 标签（ms） */
 const AGENT_RECYCLE_DELAY = 90_000
 /** 用户最近查看过的标签保留窗口：即便带 AI 标记，只要在此时间内被用户看过/操作过就不回收（ms） */
@@ -761,14 +769,50 @@ class BrowserAgentService {
     }
   }
 
-  /** 截图 → PNG dataUrl */
+  /**
+   * 截图 → JPEG dataUrl（缩放 + 有损压缩后再返回）。
+   *
+   * 截图结果是**文本**形式进入模型上下文（base64 每个字符都要被 tokenize），
+   * 因此不能像界面预览那样直接回原尺寸 PNG：先按最长边 SCREENSHOT_MAX_SIDE 等比缩小、
+   * 转 JPEG，仍超 MAX_SCREENSHOT_CHARS 时逐级降质 / 继续缩小尺寸。
+   */
   async screenshot(): Promise<{ dataUrl: string; width: number; height: number }> {
     const img = await this.ensureWc().capturePage()
-    const buf = img.toPNG()
-    let dataUrl = `data:image/png;base64,${buf.toString('base64')}`
-    if (dataUrl.length > MAX_SCREENSHOT) dataUrl = dataUrl.slice(0, MAX_SCREENSHOT) + '…[截图过大已截断]'
     const size = img.getSize()
-    return { dataUrl, width: size.width, height: size.height }
+    const longSide = Math.max(size.width, size.height)
+    const ratio = longSide > SCREENSHOT_MAX_SIDE ? SCREENSHOT_MAX_SIDE / longSide : 1
+    let out = ratio < 1
+      ? img.resize({
+        width: Math.max(1, Math.round(size.width * ratio)),
+        height: Math.max(1, Math.round(size.height * ratio)),
+        quality: 'good',
+      })
+      : img
+    let quality = SCREENSHOT_JPEG_QUALITY
+    let buf = out.toJPEG(quality)
+    const build = () => `data:image/jpeg;base64,${buf.toString('base64')}`
+    let dataUrl = build()
+    // 仍超上限（高细节长页面）：先逐级降质
+    while (dataUrl.length > MAX_SCREENSHOT_CHARS && quality > 30) {
+      quality -= 15
+      buf = out.toJPEG(quality)
+      dataUrl = build()
+    }
+    // 降质仍不够：继续缩小尺寸，直到达标或已经很小
+    while (dataUrl.length > MAX_SCREENSHOT_CHARS) {
+      const s = out.getSize()
+      if (Math.max(s.width, s.height) <= 360) break
+      const r = 0.8
+      out = out.resize({
+        width: Math.max(1, Math.round(s.width * r)),
+        height: Math.max(1, Math.round(s.height * r)),
+        quality: 'good',
+      })
+      buf = out.toJPEG(Math.min(quality, 50))
+      dataUrl = build()
+    }
+    const finalSize = out.getSize()
+    return { dataUrl, width: finalSize.width, height: finalSize.height }
   }
 
   /** 执行任意 JS（受 allowEval 开关约束） */
@@ -834,7 +878,7 @@ class BrowserAgentService {
         }
         case 'browser_screenshot': {
           const s = await this.screenshot()
-          return JSON.stringify({ mime: 'image/png', width: s.width, height: s.height, length: s.dataUrl.length, data: s.dataUrl })
+          return JSON.stringify({ mime: 'image/jpeg', width: s.width, height: s.height, length: s.dataUrl.length, data: s.dataUrl })
         }
         case 'browser_eval':
           return await this.evalJs(String(args?.code || ''))
@@ -969,7 +1013,7 @@ class BrowserAgentService {
       },
       {
         name: 'browser_screenshot',
-        description: '对当前标签页截图，返回 PNG base64 dataUrl（模型可直接查看图片理解页面）。',
+        description: '对当前标签页截图，返回压缩后的 JPEG base64 dataUrl（已按最长边 1024 缩放 + JPEG 压缩，避免一张图挤爆上下文；模型可直接查看图片理解页面）。',
         inputSchema: base.screenshot,
       },
       {

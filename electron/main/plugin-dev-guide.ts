@@ -33,7 +33,7 @@ export const PLUGIN_DEV_TOPICS = ['host', 'constraints', 'manifest', 'api', 'faq
 export type PluginDevTopic = (typeof PLUGIN_DEV_TOPICS)[number]
 
 /** 模板话题可单独取用的小节（key 与 devGuide 的 PLUGIN_DEV_SECTIONS 一致） */
-export const PLUGIN_DEV_TEMPLATE_KEYS = ['general', 'panel', 'chart', 'tool', 'llm-files', 'fix', 'usage', 'all'] as const
+export const PLUGIN_DEV_TEMPLATE_KEYS = ['general', 'panel', 'settings', 'chart', 'tool', 'llm-files', 'fix', 'usage', 'all'] as const
 
 // ---------------------------------------------------------------------------
 // 各话题正文
@@ -215,7 +215,7 @@ export const PLUGIN_DEV_TOOL_SPECS: readonly PluginDevToolSpec[] = [
     name: 'plugin_dev_templates',
     topic: 'templates',
     keyParam: true,
-    description: '读取可照抄的开发模板目录与「安装、启用、调试步骤」。默认只回目录（很短）；要正文时传 key，一次取一个：general（通用开发指令）、panel（界面插件：面板 + 设置页签 + 快捷键）、chart（图表面板：canvas 饼图 / 柱状图 + 数据变化重画）、tool（给智能体加工具）、llm-files（大模型与文件能力）、fix（排障指令）、usage（安装步骤）、all（全部，较长）。',
+    description: '读取可照抄的开发模板目录与「安装、启用、调试步骤」。默认只回目录（很短）；要正文时传 key，一次取一个：general（通用开发指令）、panel（界面插件：面板 + 设置页签 + 快捷键）、settings（设置页签 / 设置卡片：配置项放进「设置 → 插件」，含分组与设置页 id 清单、完整设置组件骨架）、chart（图表面板：canvas 饼图 / 柱状图 + 数据变化重画）、tool（给智能体加工具）、llm-files（大模型与文件能力）、fix（排障指令）、usage（安装步骤）、all（全部，较长）。',
   },
   {
     name: 'plugin_dev_check',

@@ -64,12 +64,17 @@
         //    也绝不能当文件标签打开（文件夹被 addTab 后编辑视图会按文件读取目录 → EISDIR 报错）
         if (data.type === 'file') {
           store.openFileByMode(data)
-        } else if (isPathInside(data.path, store.root)) {
+        } else {
+          // 目录可能属于**另一个工作区**（不在当前 root 下）：先把它所属的工作区设为当前工作区，
+          // 否则跨工作区双击文件夹会被下面的 isPathInside 挡掉、右侧各视图拿不到点击的路径（静默无反应）
+          const owner = store.roots
+            .filter((r: string) => isPathInside(data.path, r))
+            .sort((a: string, b: string) => b.length - a.length)[0]
+          if (owner && owner !== store.root) store.setActiveRoot(owner)
           // 右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）跟随该目录，与「文件」视图双击文件夹、
-          // 点击面包屑同一套导航；跨工作区的目录不跟随（其它视图的数据源只认工作区内的目录，见 store.dataDir）
-          // 用 isPathInside 而非 startsWith：盘符大小写 / 结尾分隔符不同时也要算「在工作区内」，
-          // 否则双击文件夹会静默不切换当前目录（看板等视图仍停在原目录，新建的卡片也就落到了别处）
-          store.knowEnterDir(data.path)
+          // 点击面包屑同一套导航；用 isPathInside 而非 startsWith：盘符大小写 / 结尾分隔符不同时也要算
+          // 「在工作区内」，否则双击文件夹会静默不切换当前目录（看板等视图仍停在原目录）
+          if (isPathInside(data.path, store.root)) store.knowEnterDir(data.path)
         }
         curNodeId = null
         preNodeId = null
