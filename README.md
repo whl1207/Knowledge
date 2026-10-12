@@ -2,10 +2,10 @@
 
 **A local-first AI knowledge management platform — chat, knowledge bases, ontology modelling, agentic skills, visual workflows and MCP tools in one desktop app.**
 
-Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machine: models can be local (Ollama / LM Studio / GPUStack / ONNX) or remote APIs you configure, and no content is sent anywhere else. The UI, the in-app help and the manual are bilingual (Chinese / English).
+Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machine: models can be local (Ollama / LM Studio / GPUStack / ONNX) or remote APIs you configure, and no content is sent anywhere else. The UI and the in-app help are bilingual (Chinese / English).
 
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)
-![Version](https://img.shields.io/badge/version-6.9.24-blue)
+![Version](https://img.shields.io/badge/version-6.10.12-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Electron](https://img.shields.io/badge/Electron-30-47848F)
 ![Vue](https://img.shields.io/badge/Vue-3.4-42b883)
@@ -16,16 +16,20 @@ Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machin
 
 | Area | Capabilities |
 |:---|:---|
-| **🏠 Home (chat)** | Plain chat · RAG chat over a knowledge base · workflow-triggered chat · skill / agent chat with autonomous planning · swarm chat with Agent presets; an agent preset can use the PTC presentation (model writes code that composes tool calls); multi-chat sidebar, per-chat model binding, context-usage ring, branch tree, attachments, stop & steer |
-| **📚 Knowledge management** | 12 reading / editing views (browse, source, visual block editor, mind map, presentation, graph, …) plus dedicated views for `.drawio`, `.excalidraw`, PDF, images, code and media; export Markdown / Word / PDF; document smart actions (chat with a document); LAN collaborative editing and read-only remote shares |
+| **🏠 Home (AI chat)** | Five chat modes: plain · knowledge base (RAG) · workflow · agent · swarm, all sharing one model config; an agent preset can use the PTC presentation (the model writes one program that composes its tool calls); multi-chat sidebar, per-chat model binding, context-usage ring, branch tree, attachments, stop & steer |
+| **📚 Knowledge management** | The file centre: 11 views (browse, source edit, visual block editor, mind map, presentation, files, graph, kanban, calendar, map, table) driven by Markdown YAML front matter; LAN collaborative editing (code / whiteboard / draw.io) and read-only remote shares |
+| **📄 General files** | Markdown, Word, PDF, images & media, plain text, Excel and local web pages, plus `.excalidraw` whiteboards and `.drawio` diagrams — opened from Knowledge Management with the view that fits; export Markdown / Word / PDF; document smart actions (chat with the current document), PDF OCR and in-place translation |
+| **🧩 Special files** | File types defined by the app, each with its own view: `.kb` knowledge base (double-click jumps to Knowledge Processing), `.flow.yml` workflow, `.task` Agent Scaffold and `.data` data canvas |
 | **🔬 Knowledge processing** | Import Markdown / PDF / Word / TXT, configurable chunking, embedding & vector storage, retrieval strategies (hybrid, agentic evidence reranking, ontology-augmented), Q&A test sets with automatic scoring, knowledge base Q&A page |
 | **🧠 Ontology modelling** | Entity & relation extraction from slices, force-directed visualisation, entity cards, ontology-augmented retrieval with configurable score boosting |
-| **🔗 Workflow** | Visual node editor (agent, MCP, Python, data, iteration, aggregator, Word export, web search, …) with test runs and inspectable intermediate output |
-| **🤖 Agent Scaffold** | Table-driven batch agents, per-column table reasoning, link & file collectors, data canvas; multi-round runs with per-round snapshots, per-row status / filters / retries, trajectory graph and Excel export; can also be driven from external MCP clients |
-| **🧩 Skills & presets** | Codex-style skill import, reusable Agent presets (role, model, per-tool switches, attached skills), skill store |
-| **🔌 Models, tools & MCP** | Ollama / LM Studio / GPUStack / DeepSeek / OpenAI-compatible and multiple custom providers with per-provider enable + connection test; credential table; per-tool switches; built-in MCP services (Office Word & Excel, draw.io, PostgreSQL, literature search, web search, browser) optionally exposed over HTTP |
+| **🔗 Workflow** | A file type in Knowledge Management (`.flow.yml`, Dify app DSL): visual node editor (agent, MCP, Python, data, iteration, aggregator, Word export, web search, …) with test runs and inspectable intermediate output |
+| **🤖 Agent Scaffold** | A file type in Knowledge Management (`.task`): table-driven batch agents, per-column table reasoning, link & file collectors; multi-round runs with per-round snapshots, per-row status / filters / retries, trajectory graph and Excel export; can also be driven from external MCP clients |
+| **🧩 Skills & presets** | Codex-style skill import (a folder plus `SKILL.md`), reusable Agent presets (role, model, per-tool switches, attached skills, PTC presentation), skill store |
+| **🔌 Plugins** | Local plugin host: plugins add tools for agents and register main panels / settings tabs / settings cards / swarm tabs / global hotkeys plus bilingual string tables, with declared permissions (`fs` / `shell` / `net` / `agent` / `llm`); install from the plugins folder or a shared-folder store; a built-in dev guide and the `builtin-plugin-dev` MCP service let a model write a plugin for you |
+| **🔌 Models, tools & MCP** | Ollama / LM Studio / GPUStack / DeepSeek / OpenAI-compatible and multiple custom providers with per-provider enable + connection test; credential table; per-tool switches; six built-in in-process MCP services (browser agent, Office Word & Excel, draw.io, literature search, PostgreSQL, plugin-dev reference) optionally exposed over HTTP |
+| **🌐 Browser** | Built-in browser window (separate from Knowledge Management): multi-tab, bookmarks, offline page saving, and AI-controllable pages — agents navigate, read text / Markdown / HTML, click, type and take screenshots through the `browser_*` tools, with auto-recycled AI tabs |
 | **🗣️ Speech** | Local TTS (Kokoro / Piper via ONNX) and ASR (ONNX Whisper, Whisper API, Qwen3-ASR with streaming punctuation) |
-| **📦 Also included** | Learning module (mastery map, review, mistake book, exams), a task kanban board (per-attribute grouping, quick capture, drag to change status, archive), offline maps (MBTiles), built-in browser with auto-recycled AI tabs, session logs, bilingual in-app help |
+| **📦 Also included** | Learning module (mastery map, review, mistake book, exams), a task kanban inside Knowledge Management (per-attribute grouping, quick capture, drag to change status, archive), offline maps (MBTiles), session logs, bilingual in-app help |
 
 Background tasks keep running when the window is closed to the tray, closing is guarded while tasks run, and settings live in a separate window.
 
@@ -95,9 +99,9 @@ CHANGELOG.md        Change log (Chinese, primary) — mirrored in English by CHA
 |:---|:---|
 | [CHANGELOG.md](CHANGELOG.md) | 更新日志（中文，主档）— every user-visible change, newest first |
 | [CHANGELOG.en.md](CHANGELOG.en.md) | Changelog in English |
-| [manual/使用说明书.md](manual/使用说明书.md) | Complete Chinese user manual (also readable inside the app) |
+| [manual/使用说明书.md](manual/使用说明书.md) | Complete Chinese user manual (also readable inside the app) — 11 chapters matching the in-app help: quick start, concepts, reasoning, knowledge management, knowledge processing, learning, general files, special files, browser, plugins, settings |
 | [manual/Linux打包指南.md](manual/Linux打包指南.md) | Linux packaging notes |
-| In-app help | **Settings → Help**: quick start, module-by-module guides, changelog and design references |
+| In-app help | **Settings → Help**: the same 11 sections (quick start, concepts, reasoning, knowledge, processing, learning, general files, special files, browser, plugins, settings) plus **Changelog** and **Credits** |
 
 The changelog shown in **Settings → Help → Changelog** is the same file as the repository root `CHANGELOG.md` (English UI reads `CHANGELOG.en.md`), so the app and the repository never drift apart.
 

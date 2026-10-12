@@ -105,6 +105,59 @@
               </div>
             </div>
           </div>
+
+          <!-- 常见问题（原独立页签并入「快速开始」） -->
+          <div class="content-card">
+            <h3>{{ t('quickStart.faq.title') }}</h3>
+            <div class="guide-step" v-for="(item, i) in faqItems" :key="'faq-' + i">
+              <span class="guide-number">Q</span>
+              <div class="guide-content">
+                <strong v-html="item.q"></strong>
+                <p v-html="item.a"></p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 概念介绍 -->
+        <section id="concepts" class="help-section" v-show="activeSection === 'concepts'">
+          <div class="section-header">
+            <div class="section-icon"><i class="fa fa-lightbulb-o"></i></div>
+            <div class="section-title-content">
+              <h2>{{ t('sections.concepts.title') }}</h2>
+              <p class="section-desc">{{ t('sections.concepts.subtitle') }}</p>
+            </div>
+          </div>
+
+          <div class="section-content">
+            <!-- 工作流文件（.flow.yml） -->
+
+            <div class="content-card">
+              <h3>{{ t('concepts.overview.title') }}</h3>
+              <p v-html="t('concepts.overview.desc')"></p>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('concepts.list.title') }}</h3>
+              <div class="nodes-grid">
+                <div class="node-item" v-for="c in conceptItems" :key="c.id">
+                  <div class="node-icon">{{ c.icon }}</div>
+                  <div class="node-info">
+                    <div class="node-name">{{ t(`concepts.items.${c.key}.name`) }}</div>
+                    <div class="node-desc" v-html="t(`concepts.items.${c.key}.desc`)"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('concepts.more.title') }}</h3>
+              <p v-html="t('concepts.more.desc')"></p>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('concepts.more.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+          </div>
         </section>
 
         <!-- 智能对话系统 -->
@@ -144,14 +197,7 @@
               </div>
             </div>
 
-            <div class="content-card">
-              <h3>{{ t('aiChat.concept.title') }}</h3>
-              <p v-html="t('aiChat.concept.lead')"></p>
-              <ul class="open-mode-list">
-                <li v-for="(item, i) in t('aiChat.concept.items')" :key="i" v-html="item"></li>
-              </ul>
-            </div>
-
+            <!-- 关键概念（大模型 / 智能体 / 工具 / MCP / 技能 …）已移到「概念介绍」页签 -->
             <!-- 集群模式（智能对话的一种模式）：只做简介，细节见下文模式说明 -->
             <div class="content-card">
               <h3>{{ t('agentSwarm.overview.title') }}</h3>
@@ -186,17 +232,27 @@
             </div>
 
             <div class="content-card">
-              <h3>{{ t('knowledge.views.title') }}</h3>
-              <div v-for="g in knowledgeViewGroups" :key="g.key" class="views-group">
-                <h4 class="views-group-title">{{ t(`knowledge.views.${g.titleKey}`) }}</h4>
-                <div class="nodes-grid">
-                  <div class="node-item" v-for="v in g.items" :key="v.id">
-                    <div class="node-icon">{{ v.icon }}</div>
-                    <div class="node-info">
-                      <div class="node-name">{{ t(`knowledge.views.${v.key}.name`) }}</div>
-                      <div class="node-desc">{{ t(`knowledge.views.${v.key}.desc`) }}</div>
-                    </div>
-                  </div>
+              <h3>{{ t('knowledge.fileTypes.title') }}</h3>
+              <p v-html="t('knowledge.fileTypes.overview')"></p>
+              <div class="guide-step">
+                <span class="guide-number">1</span>
+                <div class="guide-content">
+                  <strong>{{ t('knowledge.fileTypes.views.title') }}</strong>
+                  <p v-html="t('knowledge.fileTypes.views.desc')"></p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">2</span>
+                <div class="guide-content">
+                  <strong>{{ t('knowledge.fileTypes.general.title') }}</strong>
+                  <p v-html="t('knowledge.fileTypes.general.desc')"></p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">3</span>
+                <div class="guide-content">
+                  <strong>{{ t('knowledge.fileTypes.special.title') }}</strong>
+                  <p v-html="t('knowledge.fileTypes.special.desc')"></p>
                 </div>
               </div>
             </div>
@@ -291,58 +347,6 @@
               <div class="example-box" style="margin-top: 10px;">
                 <div class="example-title">{{ t('knowledge.openMode.note.title') }}</div>
                 <p v-html="t('knowledge.openMode.note.text')"></p>
-              </div>
-            </div>
-
-            <!-- draw.io 图表（.drawio / .dio 文件专属绘图视图） -->
-            <div class="content-card">
-              <h3>{{ t('knowledge.drawio.title') }}</h3>
-              <p v-html="t('knowledge.drawio.overview')"></p>
-              <div class="guide-step">
-                <span class="guide-number">1</span>
-                <div class="guide-content">
-                  <strong>{{ t('knowledge.drawio.step1.title') }}</strong>
-                  <p v-html="t('knowledge.drawio.step1.desc')"></p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">2</span>
-                <div class="guide-content">
-                  <strong>{{ t('knowledge.drawio.step2.title') }}</strong>
-                  <p v-html="t('knowledge.drawio.step2.desc')"></p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">3</span>
-                <div class="guide-content">
-                  <strong>{{ t('knowledge.drawio.step3.title') }}</strong>
-                  <p v-html="t('knowledge.drawio.step3.desc')"></p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">4</span>
-                <div class="guide-content">
-                  <strong>{{ t('knowledge.drawio.step4.title') }}</strong>
-                  <p v-html="t('knowledge.drawio.step4.desc')"></p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">5</span>
-                <div class="guide-content">
-                  <strong>{{ t('knowledge.drawio.step5.title') }}</strong>
-                  <p v-html="t('knowledge.drawio.step5.desc')"></p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">6</span>
-                <div class="guide-content">
-                  <strong>{{ t('knowledge.drawio.step6.title') }}</strong>
-                  <p v-html="t('knowledge.drawio.step6.desc')"></p>
-                </div>
-              </div>
-              <div class="example-box">
-                <div class="example-title">{{ t('knowledge.drawio.note.title') }}</div>
-                <p v-html="t('knowledge.drawio.note.text')"></p>
               </div>
             </div>
 
@@ -579,17 +583,109 @@
           </div>
         </section>
 
-        <!-- 工作流编辑器 -->
-        <section id="workflow" class="help-section" v-show="activeSection === 'workflow'">
+        <!-- 通用文件（Markdown / 文档 / 图表 / 白板） -->
+        <section id="general-files" class="help-section" v-show="activeSection === 'general-files'">
           <div class="section-header">
-            <div class="section-icon"><i class="fa fa-stumbleupon"></i></div>
+            <div class="section-icon"><i class="fa fa-file-text-o"></i></div>
             <div class="section-title-content">
-              <h2>{{ t('sections.workflow.title') }}</h2>
-              <p class="section-desc">{{ t('sections.workflow.subtitle') }}</p>
+              <h2>{{ t('sections.general-files.title') }}</h2>
+              <p class="section-desc">{{ t('sections.general-files.subtitle') }}</p>
             </div>
           </div>
 
           <div class="section-content">
+            <div class="content-card">
+              <h3>{{ t('generalFiles.overview.title') }}</h3>
+              <p v-html="t('generalFiles.overview.desc')"></p>
+              <div class="nodes-grid" style="margin-top: 8px;">
+                <div class="node-item" v-for="v in canvasViews" :key="v.id">
+                  <div class="node-icon">{{ v.icon }}</div>
+                  <div class="node-info">
+                    <div class="node-name">{{ t(`knowledge.views.${v.key}.name`) }}</div>
+                    <div class="node-desc" v-html="t(`knowledge.views.${v.key}.desc`)"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 11 种通用视图的文案与「知识管理」章节共用（knowledge.views.*） -->
+            <div class="content-card">
+              <h3>{{ t('generalFiles.views.title') }}</h3>
+              <div class="views-group">
+                <div class="nodes-grid">
+                  <div class="node-item" v-for="v in knowledgeViews" :key="v.id">
+                    <div class="node-icon">{{ v.icon }}</div>
+                    <div class="node-info">
+                      <div class="node-name">{{ t(`knowledge.views.${v.key}.name`) }}</div>
+                      <div class="node-desc" v-html="t(`knowledge.views.${v.key}.desc`)"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('generalFiles.docs.title') }}</h3>
+              <div class="guide-step" v-for="(s, i) in generalDocSteps" :key="i">
+                <span class="guide-number">{{ Number(i) + 1 }}</span>
+                <div class="guide-content">
+                  <strong>{{ s.title }}</strong>
+                  <p v-html="s.desc"></p>
+                </div>
+              </div>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('generalFiles.export.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('generalFiles.export.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- 专属文件（知识库 / 工作流 / Agent脚手架 / 数据画布） -->
+        <section id="special-files" class="help-section" v-show="activeSection === 'special-files'">
+          <div class="section-header">
+            <div class="section-icon"><i class="fa fa-files-o"></i></div>
+            <div class="section-title-content">
+              <h2>{{ t('sections.special-files.title') }}</h2>
+              <p class="section-desc">{{ t('sections.special-files.subtitle') }}</p>
+            </div>
+          </div>
+
+          <div class="section-content">
+            <div class="content-card">
+              <h3>{{ t('specialFiles.overview.title') }}</h3>
+              <p v-html="t('specialFiles.overview.desc')"></p>
+              <div class="nodes-grid" style="margin-top: 8px;">
+                <div class="node-item" v-for="f in specialFileItems" :key="f.id">
+                  <div class="node-icon">{{ f.icon }}</div>
+                  <div class="node-info">
+                    <div class="node-name">{{ t(`specialFiles.items.${f.key}.name`) }}</div>
+                    <div class="node-desc" v-html="t(`specialFiles.items.${f.key}.desc`)"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('specialFiles.kb.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('specialFiles.kb.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <!-- 工作流文件（.flow.yml）：在知识管理中双击打开工作流画布 -->
+            <!-- 工作流文件（.flow.yml） -->
+            <div class="content-card">
+              <h3>{{ t('specialFiles.flow.title') }}</h3>
+              <p v-html="t('specialFiles.flow.desc')"></p>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('specialFiles.flow.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
             <div class="content-card">
               <h3>{{ t('workflow.usage.title') }}</h3>
               <ul class="open-mode-list">
@@ -625,42 +721,110 @@
               </ul>
             </div>
 
+            <!-- Agent脚手架（.task 任务文件） -->
             <div class="content-card">
-              <h3>{{ t('workflow.example.title') }}</h3>
-              
-              <div class="workflow-example">
-                <div class="example-step">
-                  <div class="example-number">1</div>
-                  <div class="example-content">
-                    <strong>{{ t('workflow.example.step1.title') }}</strong>
-                    <div class="node-tags">
-                      <span v-for="(tag, index) in t('workflow.example.step1.tags')" 
-                            :key="index" 
-                            class="node-tag">{{ tag }}</span>
-                    </div>
-                  </div>
-                </div>
+              <h3>{{ t('specialFiles.task.title') }}</h3>
+              <p v-html="t('specialFiles.task.desc')"></p>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('specialFiles.task.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
 
-                <div class="example-step">
-                  <div class="example-number">2</div>
-                  <div class="example-content">
-                    <strong>{{ t('workflow.example.step2.title') }}</strong>
-                    <p>{{ t('workflow.example.step2.description') }}</p>
-                    <div class="flow-simple">{{ t('workflow.example.step2.flow') }}</div>
-                  </div>
-                </div>
+            <div class="content-card">
+              <h3>{{ t('agentScaffold.overview.title') }}</h3>
+              <p v-html="t('agentScaffold.overview.description')"></p>
+            </div>
 
-                <div class="example-step">
-                  <div class="example-number">3</div>
-                  <div class="example-content">
-                    <strong>{{ t('workflow.example.step3.title') }}</strong>
-                    <ul>
-                      <li v-for="(item, index) in t('workflow.example.step3.items')" :key="index">{{ item }}</li>
-                    </ul>
-                  </div>
+            <div class="content-card">
+              <h3>{{ t('agentScaffold.scaffolds.title') }}</h3>
+              <p v-html="t('agentScaffold.scaffolds.pipeline.desc')"></p>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('agentScaffold.scaffolds.presets.title') }}</h3>
+              <p class="section-desc" v-html="t('agentScaffold.scaffolds.presets.note')"></p>
+              <div class="guide-step">
+                <span class="guide-number">1</span>
+                <div class="guide-content">
+                  <strong>{{ t('agentScaffold.scaffolds.batch.title') }}</strong>
+                  <p>{{ t('agentScaffold.scaffolds.batch.desc') }}</p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">2</span>
+                <div class="guide-content">
+                  <strong>{{ t('agentScaffold.scaffolds.tabreason.title') }}</strong>
+                  <p>{{ t('agentScaffold.scaffolds.tabreason.desc') }}</p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">3</span>
+                <div class="guide-content">
+                  <strong>{{ t('agentScaffold.scaffolds.file.title') }}</strong>
+                  <p>{{ t('agentScaffold.scaffolds.file.desc') }}</p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">4</span>
+                <div class="guide-content">
+                  <strong>{{ t('agentScaffold.scaffolds.collector.title') }}</strong>
+                  <p>{{ t('agentScaffold.scaffolds.collector.desc') }}</p>
                 </div>
               </div>
             </div>
+
+            <div class="content-card">
+              <h3>{{ t('agentScaffold.usage.title') }}</h3>
+              <ul>
+                <li v-for="(item, index) in t('agentScaffold.usage.items')" :key="index" v-html="item"></li>
+              </ul>
+            </div>
+
+            <!-- 数据画布（.data 文件） -->
+            <div class="content-card">
+              <h3>{{ t('specialFiles.data.title') }}</h3>
+              <p v-html="t('specialFiles.data.desc')"></p>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('specialFiles.data.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('dataCanvas.usage.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, index) in t('dataCanvas.usage.items')" :key="index" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('dataCanvas.overview.title') }}</h3>
+              <p v-html="t('dataCanvas.overview.description')"></p>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('dataCanvas.scenarios.title') }}</h3>
+              <ul>
+                <li v-for="(item, i) in t('dataCanvas.scenarios.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('dataCanvas.steps.title') }}</h3>
+              <div class="guide-step" v-for="(s, i) in t('dataCanvas.steps.items')" :key="i">
+                <span class="guide-number">{{ Number(i) + 1 }}</span>
+                <div class="guide-content">
+                  <p v-html="s"></p>
+                </div>
+              </div>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('dataCanvas.notes.title') }}</h3>
+              <ul>
+                <li v-for="(item, i) in t('dataCanvas.notes.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
           </div>
         </section>
 
@@ -678,18 +842,16 @@
             <div class="content-card">
               <h3>{{ t('settings.overview.title') }}</h3>
               <p v-html="t('settings.overview.description')"></p>
-            </div>
 
-            <div class="content-card" v-for="g in settingGroups" :key="g.groupKey">
-              <h3>{{ t(`settings.groups.${g.groupKey}.title`) }}</h3>
-              <div class="nodes-grid">
-                <div class="node-item" v-for="c in g.children" :key="c.key">
-                  <div class="node-icon"><i class="fa" :class="c.icon"></i></div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t(`settings.groups.${g.groupKey}.items.${c.key}.name`) }}</div>
-                    <div class="node-desc" v-html="t(`settings.groups.${g.groupKey}.items.${c.key}.desc`)"></div>
-                  </div>
-                </div>
+              <!-- 设置导航总览：按分组逐级列出（分组标题 + 页面清单），比方块卡片更紧凑 -->
+              <div v-for="g in settingGroups" :key="g.groupKey" class="settings-tree-group">
+                <h4>{{ t(`settings.groups.${g.groupKey}.title`) }}</h4>
+                <ul class="settings-tree-list">
+                  <li v-for="c in g.children" :key="c.key">
+                    <span class="settings-tree-name">{{ t(`settings.groups.${g.groupKey}.items.${c.key}.name`) }}</span>
+                    <span class="settings-tree-desc" v-html="t(`settings.groups.${g.groupKey}.items.${c.key}.desc`)"></span>
+                  </li>
+                </ul>
               </div>
             </div>
 
@@ -766,50 +928,12 @@
             <div class="content-card">
               <h3>{{ t('settings.builtinMcp.title') }}</h3>
               <p v-html="t('settings.builtinMcp.overview')"></p>
-              <div class="nodes-grid">
-                <div class="node-item">
-                  <div class="node-icon">🌐</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t('settings.builtinMcp.browser.name') }}</div>
-                    <div class="node-desc" v-html="t('settings.builtinMcp.browser.desc')"></div>
-                  </div>
-                </div>
-                <div class="node-item">
-                  <div class="node-icon">📄</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t('settings.builtinMcp.office.name') }}</div>
-                    <div class="node-desc" v-html="t('settings.builtinMcp.office.desc')"></div>
-                  </div>
-                </div>
-                <div class="node-item">
-                  <div class="node-icon">📐</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t('settings.builtinMcp.drawio.name') }}</div>
-                    <div class="node-desc" v-html="t('settings.builtinMcp.drawio.desc')"></div>
-                  </div>
-                </div>
-                <div class="node-item">
-                  <div class="node-icon">📚</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t('settings.builtinMcp.literature.name') }}</div>
-                    <div class="node-desc" v-html="t('settings.builtinMcp.literature.desc')"></div>
-                  </div>
-                </div>
-                <div class="node-item">
-                  <div class="node-icon">🐘</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t('settings.builtinMcp.postgres.name') }}</div>
-                    <div class="node-desc" v-html="t('settings.builtinMcp.postgres.desc')"></div>
-                  </div>
-                </div>
-                <div class="node-item">
-                  <div class="node-icon">🧩</div>
-                  <div class="node-info">
-                    <div class="node-name">{{ t('settings.builtinMcp.pluginDev.name') }}</div>
-                    <div class="node-desc" v-html="t('settings.builtinMcp.pluginDev.desc')"></div>
-                  </div>
-                </div>
-              </div>
+              <ul class="settings-tree-list">
+                <li v-for="m in mcpServices" :key="m.key">
+                  <span class="settings-tree-name">{{ t(`settings.builtinMcp.${m.key}.name`) }}</span>
+                  <span class="settings-tree-desc" v-html="t(`settings.builtinMcp.${m.key}.desc`)"></span>
+                </li>
+              </ul>
               <div class="example-box">
                 <div class="example-title">{{ t('settings.builtinMcp.note.title') }}</div>
                 <p v-html="t('settings.builtinMcp.note.text')"></p>
@@ -847,118 +971,7 @@
                 <p v-html="t('settings.closeBehavior.note.text')"></p>
               </div>
             </div>
-          </div>
-        </section>
 
-        <!-- 数据画布（知识管理中的 .data 文件视图） -->
-        <section id="data-canvas" class="help-section" v-show="activeSection === 'data-canvas'">
-          <div class="section-header">
-            <div class="section-icon"><i class="fa fa-object-group"></i></div>
-            <div class="section-title-content">
-              <h2>{{ t('sections.data-canvas.title') }}</h2>
-              <p class="section-desc">{{ t('sections.data-canvas.subtitle') }}</p>
-            </div>
-          </div>
-
-          <div class="section-content">
-            <div class="content-card">
-              <h3>{{ t('dataCanvas.usage.title') }}</h3>
-              <ul class="open-mode-list">
-                <li v-for="(item, index) in t('dataCanvas.usage.items')" :key="index" v-html="item"></li>
-              </ul>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('dataCanvas.overview.title') }}</h3>
-              <p v-html="t('dataCanvas.overview.description')"></p>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('dataCanvas.scenarios.title') }}</h3>
-              <ul>
-                <li v-for="(item, i) in t('dataCanvas.scenarios.items')" :key="i" v-html="item"></li>
-              </ul>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('dataCanvas.steps.title') }}</h3>
-              <div class="guide-step" v-for="(s, i) in t('dataCanvas.steps.items')" :key="i">
-                <span class="guide-number">{{ Number(i) + 1 }}</span>
-                <div class="guide-content">
-                  <p v-html="s"></p>
-                </div>
-              </div>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('dataCanvas.notes.title') }}</h3>
-              <ul>
-                <li v-for="(item, i) in t('dataCanvas.notes.items')" :key="i" v-html="item"></li>
-              </ul>
-            </div>
-          </div>
-        </section>
-
-        <!-- Agent脚手架 通用执行框架 -->
-        <section id="agent-scaffold" class="help-section" v-show="activeSection === 'agent-scaffold'">
-          <div class="section-header">
-            <div class="section-icon"><i class="fa fa-deviantart"></i></div>
-            <div class="section-title-content">
-              <h2>{{ t('sections.agent-scaffold.title') }}</h2>
-              <p class="section-desc">{{ t('sections.agent-scaffold.subtitle') }}</p>
-            </div>
-          </div>
-
-          <div class="section-content">
-            <div class="content-card">
-              <h3>{{ t('agentScaffold.overview.title') }}</h3>
-              <p v-html="t('agentScaffold.overview.description')"></p>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('agentScaffold.scaffolds.title') }}</h3>
-              <p v-html="t('agentScaffold.scaffolds.pipeline.desc')"></p>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('agentScaffold.scaffolds.presets.title') }}</h3>
-              <p class="section-desc" v-html="t('agentScaffold.scaffolds.presets.note')"></p>
-              <div class="guide-step">
-                <span class="guide-number">1</span>
-                <div class="guide-content">
-                  <strong>{{ t('agentScaffold.scaffolds.batch.title') }}</strong>
-                  <p>{{ t('agentScaffold.scaffolds.batch.desc') }}</p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">2</span>
-                <div class="guide-content">
-                  <strong>{{ t('agentScaffold.scaffolds.tabreason.title') }}</strong>
-                  <p>{{ t('agentScaffold.scaffolds.tabreason.desc') }}</p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">3</span>
-                <div class="guide-content">
-                  <strong>{{ t('agentScaffold.scaffolds.file.title') }}</strong>
-                  <p>{{ t('agentScaffold.scaffolds.file.desc') }}</p>
-                </div>
-              </div>
-              <div class="guide-step">
-                <span class="guide-number">4</span>
-                <div class="guide-content">
-                  <strong>{{ t('agentScaffold.scaffolds.collector.title') }}</strong>
-                  <p>{{ t('agentScaffold.scaffolds.collector.desc') }}</p>
-                </div>
-              </div>
-            </div>
-
-            <div class="content-card">
-              <h3>{{ t('agentScaffold.usage.title') }}</h3>
-              <ul>
-                <li v-for="(item, index) in t('agentScaffold.usage.items')" :key="index" v-html="item"></li>
-              </ul>
-            </div>
           </div>
         </section>
 
@@ -1007,6 +1020,67 @@
               <ul class="open-mode-list">
                 <li v-for="(item, i) in t('browser.tips.items')" :key="i" v-html="item"></li>
               </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- 插件 -->
+        <section id="plugins" class="help-section" v-show="activeSection === 'plugins'">
+          <div class="section-header">
+            <div class="section-icon"><i class="fa fa-puzzle-piece"></i></div>
+            <div class="section-title-content">
+              <h2>{{ t('sections.plugins.title') }}</h2>
+              <p class="section-desc">{{ t('sections.plugins.subtitle') }}</p>
+            </div>
+          </div>
+
+          <div class="section-content">
+            <div class="content-card">
+              <h3>{{ t('plugins.overview.title') }}</h3>
+              <p v-html="t('plugins.overview.desc')"></p>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('plugins.capabilities.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('plugins.capabilities.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('plugins.manage.title') }}</h3>
+              <p v-html="t('plugins.manage.overview')"></p>
+              <div class="guide-step" v-for="(s, i) in pluginManageSteps" :key="i">
+                <span class="guide-number">{{ Number(i) + 1 }}</span>
+                <div class="guide-content">
+                  <strong>{{ s.title }}</strong>
+                  <p v-html="s.desc"></p>
+                </div>
+              </div>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('plugins.store.title') }}</h3>
+              <p v-html="t('plugins.store.desc')"></p>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('plugins.dev.title') }}</h3>
+              <p v-html="t('plugins.dev.desc')"></p>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('plugins.dev.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('plugins.perms.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('plugins.perms.items')" :key="i" v-html="item"></li>
+              </ul>
+              <div class="example-box">
+                <div class="example-title">{{ t('plugins.perms.note.title') }}</div>
+                <p v-html="t('plugins.perms.note.text')"></p>
+              </div>
             </div>
           </div>
         </section>
@@ -1131,16 +1205,18 @@ const t = (key: string) => {
 const activeSection = ref('quick-start')
 
 // 章节定义（图标与软件主界面导航栏一致，均为 fa-icon，标题通过国际化获取）
+// 顺序与《使用说明书》目录一致：技能 / Agent 预设归入「设置」，工作流 / 数据画布 / 脚手架归入「专属文件」
 const sections = ref([
   { id: 'quick-start', icon: 'fa-home' },
+  { id: 'concepts', icon: 'fa-lightbulb-o' },
   { id: 'ai-chat', icon: 'fa-comment' },
   { id: 'knowledge', icon: 'fa-book' },
   { id: 'know-rag', icon: 'fa-stack-overflow' },
   { id: 'learning', icon: 'fa-graduation-cap' },
-  { id: 'workflow', icon: 'fa-stumbleupon' },
-  { id: 'data-canvas', icon: 'fa-object-group' },
-  { id: 'agent-scaffold', icon: 'fa-deviantart' },
+  { id: 'general-files', icon: 'fa-file-text-o' },
+  { id: 'special-files', icon: 'fa-files-o' },
   { id: 'browser', icon: 'fa-globe' },
+  { id: 'plugins', icon: 'fa-puzzle-piece' },
   { id: 'settings', icon: 'fa-cogs' },
   { id: 'changelog', icon: 'fa-history' },
   { id: 'credits', icon: 'fa-github' }
@@ -1411,6 +1487,16 @@ const settingGroups = ref([
   ] }
 ])
 
+// 内置 MCP 服务清单（设置章节按清单逐条展示，键与 settings.builtinMcp.* 对应）
+const mcpServices = ref([
+  { key: 'browser' },
+  { key: 'office' },
+  { key: 'drawio' },
+  { key: 'literature' },
+  { key: 'postgres' },
+  { key: 'pluginDev' }
+])
+
 // 知识处理自定义检索策略类型列表（对应策略配置的四种 kind）
 const strategyKinds = ref([
   { id: 1, icon: '🛤️', key: 'pipeline' },
@@ -1443,11 +1529,33 @@ const knowledgeFileViews = ref([
   { id: 5, icon: '🧰', key: 'task' }
 ])
 
-// 视图一览的两个分组（分组小标题 + 该组的视图项，模板按组各渲染一个网格）
-const knowledgeViewGroups = computed(() => [
-  { key: 'views', titleKey: 'groupViews', items: knowledgeViews.value },
-  { key: 'fileViews', titleKey: 'groupFileViews', items: knowledgeFileViews.value }
+// 「通用文件」章节展示的两张画布（白板 / 图表）；工作流 / 知识库 / 脚手架由「专属文件」章节负责
+const canvasViews = computed(() => knowledgeFileViews.value.filter((v) => ['excalidraw', 'drawio'].includes(v.key)))
+
+// 「专属文件」章节的四类文件（知识库 / 工作流 / Agent脚手架 / 数据画布）
+const specialFileItems = ref([
+  { id: 1, icon: '📚', key: 'kb' },
+  { id: 2, icon: '🔀', key: 'flow' },
+  { id: 3, icon: '🧰', key: 'task' },
+  { id: 4, icon: '📊', key: 'data' }
 ])
+
+// 「概念介绍」章节的关键概念卡片
+const conceptItems = ref([
+  { id: 1, icon: '🧠', key: 'llm' },
+  { id: 2, icon: '🤖', key: 'agent' },
+  { id: 3, icon: '🧰', key: 'tool' },
+  { id: 4, icon: '📜', key: 'ptc' },
+  { id: 5, icon: '🔌', key: 'mcp' },
+  { id: 6, icon: '🎓', key: 'skill' },
+  { id: 7, icon: '📚', key: 'kb' },
+  { id: 8, icon: '🧩', key: 'plugin' }
+])
+
+// 结构化的文案列表（显式数组类型，模板 v-for 索引方可参与运算）
+const faqItems = computed(() => (t('quickStart.faq.items') || []) as Array<{ q: string; a: string }>)
+const generalDocSteps = computed(() => (t('generalFiles.docs.items') || []) as Array<{ title: string; desc: string }>)
+const pluginManageSteps = computed(() => (t('plugins.manage.items') || []) as Array<{ title: string; desc: string }>)
 
 // AI 对话方案列表（五种：普通 / 知识库 / 工作流 / 智能体 / 集群；PTC 为智能体的呈现方式，见「智能体对话」）
 const aiChatSchemes = ref([
@@ -1468,60 +1576,60 @@ const translations = {
     },
     header: {
       title: 'AI-KM 智能生产力平台',
-      subtitle: '新手友好指南 - 八大核心功能'
+      subtitle: '新手友好指南 · 十一个章节'
     },
     sections: {
       'quick-start': {
         title: '快速开始',
-        subtitle: '5分钟体验'
+        subtitle: '5 分钟上手 + 常见问题'
+      },
+      'concepts': {
+        title: '概念介绍',
+        subtitle: '先弄清这些名词'
       },
       'ai-chat': {
-        title: '智能对话',
-        subtitle: 'RAG助手'
+        title: '智能推理',
+        subtitle: '主页 AI 对话 · 五种模式'
       },
       'knowledge': {
         title: '知识管理',
-        subtitle: '数字大脑'
+        subtitle: '文件中心与协作'
       },
       'know-rag': {
         title: '知识处理',
-        subtitle: 'RAG引擎'
-      },
-      'workflow': {
-        title: '工作流',
-        subtitle: '在知识管理中编辑'
-      },
-      'data-canvas': {
-        title: '数据画布',
-        subtitle: '在知识管理中编辑 · 无代码建模'
-      },
-      'settings': {
-        title: '设置',
-        subtitle: '集中管理'
-      },
-      'agent-scaffold': {
-        title: 'Agent脚手架',
-        subtitle: '通用执行框架'
-      },
-      'browser': {
-        title: '浏览器',
-        subtitle: '内置网页浏览与 AI 网页操作'
+        subtitle: 'RAG 知识库'
       },
       'learning': {
         title: '学习',
         subtitle: '掌握式记忆与复习'
       },
-      'credits': {
-        title: '设计参考',
-        subtitle: '借鉴的开源项目'
+      'general-files': {
+        title: '通用文件',
+        subtitle: 'Markdown · 文档 · 图表 · 白板'
       },
-      'faq': {
-        title: '常见问题',
-        subtitle: '新手必读'
+      'special-files': {
+        title: '专属文件',
+        subtitle: '知识库 · 工作流 · Agent · 数据画布'
+      },
+      'browser': {
+        title: '浏览器',
+        subtitle: '内置网页浏览与 AI 网页操作'
+      },
+      'plugins': {
+        title: '插件',
+        subtitle: '扩展工具与界面'
+      },
+      'settings': {
+        title: '设置',
+        subtitle: '集中管理'
       },
       'changelog': {
         title: '更新日志',
         subtitle: '历次功能变更'
+      },
+      'credits': {
+        title: '设计参考',
+        subtitle: '借鉴的开源项目'
       }
     },
     changelog: {
@@ -1562,12 +1670,11 @@ const translations = {
         ]
       },
       step4: {
-        title: '创建任务',
+        title: '弄清概念、认识文件类型',
         items: [
-          '进入左侧导航栏的 <strong>任务管理</strong> 模块',
-          '点击"新建任务"，填写任务标题、描述和截止时间',
-          '支持设置优先级（高/中/低）和任务分类标签',
-          '完成任务后勾选复选框即可标记完成，支持看板和列表两种视图'
+          '先看 <strong>概念介绍</strong>：大模型 / 智能体 / 工具 / MCP / 技能 / 知识库 / PTC / 插件各是什么，一口气理清',
+          '文件分两类：<strong>通用文件</strong>（Markdown / Word / PDF / 图片 / 网页，以及 Excalidraw 白板、draw.io 图表）与<strong>专属文件</strong>（<code>.kb</code> 知识库、<code>.flow.yml</code> 工作流、<code>.task</code> 脚手架、<code>.data</code> 数据画布），双击即用对应视图打开',
+          '需要扩展能力时看<strong>插件</strong>：给智能体加工具，或往界面加主面板 / 设置页签 / 快捷键'
         ]
       },
       step5: {
@@ -1590,6 +1697,171 @@ const translations = {
           '<strong>脚手架任务</strong>已成为知识管理里的一种文件类型（<code>.task</code>）：新建 / 双击 <code>.task</code> 即在<strong>独立窗口</strong>里打开它的专属「脚手架」视图（这里唯一的脚手架；批量智能体运行 / 表格定向推理 / 文件采集 / 链接采集是它的四种预设），任务可中断续跑、后台继续',
           '<strong>数据画布</strong>不再是顶层模块，而是<strong>知识管理中的一种文件类型</strong>（<code>.data</code>）：在文件树里打开 <code>.data</code> 即进入画布模块（画布建模 + 表单录入 + 图表看板），内容会自动保存回该文件'
         ]
+      },
+      faq: {
+        title: '常见问题（FAQ）',
+        items: [
+          { q: 'Q：聊天时提示未连接怎么办？', a: '到 <strong>设置 → 模型 → 来源</strong> 确认 AI 类型与地址 / Key 正确，点「测试连接」；本地 Ollama / LM Studio 请确认服务已启动。要让主页默认用它，还要再点一次「设为默认」。' },
+          { q: 'Q：知识处理提示未在运行或模型配置错误？', a: '知识处理跟随全局 AI 配置：确认当前来源已「测试连接 / API 状态」成功、所选模型存在，并配置好<strong>默认嵌入模型</strong>（如 <code>nomic-embed-text</code>）；LM Studio 还要求该嵌入模型已被加载（或在 Server 里开启 Just-In-Time 加载）。' },
+          { q: 'Q：我的数据安全吗？能离线用吗？', a: '所有对话、知识库与配置默认保存在本地，不会上传到第三方服务器（在线 API 请求除外）；使用本地模型（Ollama / LM Studio）即可完全离线，语音识别也可选本地 ONNX Whisper。' },
+          { q: 'Q：新手先学哪个模块？', a: '建议顺序：<strong>设置</strong>（配模型）→ <strong>智能推理</strong>（聊天）→ <strong>知识管理</strong>（建文件 / 看板记任务）→ <strong>知识处理</strong>（建知识库）→ <strong>学习</strong>（复习掌握）→ 通用文件 / 专属文件 → 插件。' },
+          { q: 'Q：PDF 怎么进知识库？', a: '在<strong>知识处理 → 文件</strong>里，对缺少同名 md 的 PDF 点「转换」生成 Markdown，再走切片 → 向量化 → 保存流程。' },
+          { q: 'Q：可以在手机上用吗？', a: '可以。在 <strong>设置 → 协作 → 共享 → 局域网共享</strong> 启动共享，用手机浏览器访问显示的局域网地址即可聊天（桌面专属的文件浏览 / 设置不可用）。' },
+          { q: 'Q：加载知识库后提示检测到未完成的本体构建进度？', a: '这是<strong>断点续建</strong>机制：未跑完的本体构建不会自动继续，需在底部状态栏或「百科」页点「继续」才恢复；清空本体后按钮应显示 ▶ 开始，若仍显示「继续」，重进或再清一次即可。' },
+          { q: 'Q：为什么有些实体没有关联到切片？', a: '关联采用「切片文本精确包含实体名」的匹配；模型给出归纳名而原文没有原词时会保留为<strong>孤立概念</strong>，可在「百科」页手动添加实体补关联。' }
+        ]
+      }
+    },
+    concepts: {
+      overview: {
+        title: '本软件是怎么搭起来的',
+        desc: '本软件把<strong>模型 + 工具 + 知识</strong>组装成一个能替你干活的助手。看懂下面这几个名词，后面所有章节都会变得很直白——它们大多只是<strong>在设置里的哪一页、在对话里怎么用</strong>的区别。'
+      },
+      list: {
+        title: '八个关键概念'
+      },
+      items: {
+        llm: { name: '大模型（LLM）', desc: '软件的<strong>大脑</strong>，负责理解你的话并生成回答。可接本地模型（<code>Ollama</code> / <code>LM Studio</code>，完全离线）或在线模型（<code>DeepSeek</code> / <code>OpenAI</code> / <code>Anthropic</code> / <code>Google</code> / <code>Azure</code> / <code>GPUStack</code> / 自定义），配置在 <strong>设置 → 模型 → 来源</strong>；对话、知识处理、学习、工作流、Agent 共用这份全局配置。' },
+        agent: { name: '智能体（Agent）', desc: '<strong>大模型 + 角色设定 + 一组工具</strong>。它会自己规划步骤、调用工具、看结果再决定下一步，直到把任务做完。角色由<strong>Agent 预设</strong>定义（系统提示 / 模型 / 工具 / 技能 / 知识库 / MCP），主页点 👤 选用即进入智能体模式。' },
+        tool: { name: '工具（工具调用）', desc: '智能体能主动调用的能力：读写文件、搜索网页、打开网页、执行代码、检索知识库等。你不需要手动点，模型自己决定<strong>用哪个、传什么参数</strong>；带副作用的工具走<strong>审批策略</strong>。' },
+        ptc: { name: '程序化工具调用（PTC）', desc: '默认逐个调用工具；PTC 下模型只看到 <code>run_code</code>，它<strong>写一段 TypeScript 程序</strong>在程序里组合调用多个工具（如循环处理 20 个文件再汇总）。往返更少、批处理更省 token，消息里会展示程序、返回值与程序内调用过的工具。' },
+        mcp: { name: 'MCP（模型上下文协议）', desc: '接入外部工具能力的通用协议：把一堆函数打包成一个服务，智能体 / 工作流 / 外部客户端按同一套方式调用。软件<strong>内置 6 个进程内 MCP 服务</strong>（浏览器 Agent / Office 文档 / drawio / 文献检索 / PostgreSQL / 插件开发参考），也可接入外部服务或对外开放。' },
+        skill: { name: '技能（Skill）', desc: '一份<strong>怎么写、按什么步骤做</strong>的操作手册：一个文件夹 + 一个 <code>SKILL.md</code>。它不提供新工具，而是教智能体用好已有能力；聊天里输入 <code>$技能名 任务</code> 显式触发，或让智能体按描述自动匹配。' },
+        kb: { name: '知识库（.kb）与 RAG', desc: '把你的文档<strong>切片 → 向量化</strong>之后得到的可检索索引。对话时先检索最相关的切片（<strong>RAG</strong>），再交给模型作答——回答有依据、可溯源。由<strong>知识处理</strong>构建，可被主页知识库模式、智能体、工作流与<strong>学习</strong>模块使用。' },
+        plugin: { name: '插件（Plugin）', desc: '给软件本身增加能力的扩展包：既能给智能体<strong>加工具</strong>，也能往界面<strong>加主面板 / 设置页签 / 快捷键</strong>。权限按清单声明（文件 / 命令 / 网络 / 会话日志 / 大模型），未申请的一律拒绝。' }
+      },
+      more: {
+        title: '另外几个常见名词',
+        desc: '后面章节还会反复出现这几个词，先各记一句话：',
+        items: [
+          '<strong>工作流（.flow.yml）</strong>：把检索 → 判断 → 生成 → 导出这类步骤用节点和连线画出来，一键按固定流程执行（见<strong>专属文件</strong>）。',
+          '<strong>集群</strong>：主页的一种对话模式，多个 Agent 预设作为成员分工协作（见<strong>智能推理</strong>）。',
+          '<strong>本体图谱</strong>：知识处理从文档里抽出的<strong>实体 + 关系</strong>，用于图谱问答与增强检索（见<strong>知识处理</strong>）。',
+          '<strong>脚手架（.task）</strong>：通用 Agent 执行框架，一个文件 = 一个可反复运行的批量任务（见<strong>专属文件</strong>）。',
+          '<strong>数据画布（.data）</strong>：无代码数据建模，画布定义对象与字段，再用表单录入、图表查看（见<strong>专属文件</strong>）。'
+        ]
+      }
+    },
+    generalFiles: {
+      overview: {
+        title: '什么是通用文件？',
+        desc: '<strong>通用文件</strong>是你日常真正读写的东西：Markdown 笔记、Word / PDF 文档、图片音视频、纯文本、Excel、本地网页，以及两张画布——<strong>Excalidraw 白板</strong>与 <strong>draw.io 图表</strong>。它们都在<strong>知识管理</strong>里创建与打开，双击即用最合适的视图渲染。'
+      },
+      views: {
+        title: '通用视图（11 种）'
+      },
+      docs: {
+        title: 'Markdown 与文档编辑',
+        items: [
+          { title: '浏览', desc: '只读预览：公式 / 代码高亮 / 表格 / 图片 / Mermaid / 内嵌 draw.io 图表都能渲染；底部状态栏还有 ✨ 智能操作（与当前文档对话）与 ⬇ 导出文档。' },
+          { title: '源码编辑', desc: 'Monaco 编辑器直接改 Markdown 原文（含 YAML 头），支持 AI 辅助与拖入图片 / 文件自动生成引用链接；<code>.py</code> / <code>.json</code> 等代码与数据文件也在这里以文本方式打开。' },
+          { title: '可视编辑（块编辑）', desc: '块式富文本：输入 <code>/</code> 唤出块类型菜单，块手柄菜单的「转换为」可在标题 / 列表 / 表格 / 代码之间转换。' },
+          { title: '思维导图 / 演示', desc: '导图按 Markdown 标题层级生成；演示把 Markdown 转成幻灯片（按 <code>---</code> 或智能切分分页，支持目录 / 全屏 / 主题切换）。' },
+          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>原地翻译</strong>；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）默认交给<strong>内置浏览器</strong>渲染。' }
+        ]
+      },
+      export: {
+        title: '导出与打印',
+        items: [
+          '浏览视图的<strong>导出文档</strong>菜单提供导出 Markdown / Word / PDF，其中 Markdown 与 Word 会弹出另存为对话框（Word 另有公文 / 中文论文 / 英文论文 / 自定义样式，公式优先转为 Word 原生公式）。',
+          'draw.io 图表支持导出 PNG / JPEG / SVG / XML 与 PDF，并可<strong>复制为图片</strong>（<code>Ctrl+Alt+X</code>）直接粘贴到 Word / PPT。',
+          '导出与打印都走本地通道，<strong>离线可用</strong>。'
+        ]
+      }
+    },
+    specialFiles: {
+      overview: {
+        title: '什么是专属文件？',
+        desc: '<strong>专属文件</strong>是本软件自己定义的文件类型：它们都有专属的处理模块或编辑器，在知识管理里新建、双击即用对应视图打开。'
+      },
+      items: {
+        kb: { name: '知识库 .kb', desc: '由「知识处理」切片 / 向量化生成的可检索索引；双击跳到<strong>知识处理</strong>加载该库。' },
+        flow: { name: '工作流 .flow.yml', desc: '节点 + 连线的流程编排（可反复运行的固定流程）；双击在独立窗口里打开<strong>工作流画布</strong>。' },
+        task: { name: 'Agent脚手架 .task', desc: '一个文件 = 一个可反复运行的批量 Agent 任务；双击在独立窗口里打开<strong>脚手架视图</strong>。' },
+        data: { name: '数据画布 .data', desc: '无代码数据建模：对象 + 字段 + 表单 + 图表；双击在独立窗口里打开<strong>数据画布视图</strong>。' }
+      },
+      kb: {
+        title: '知识库文件（.kb）',
+        items: [
+          '<strong>怎么来</strong>：在<strong>知识处理</strong>里打开工作区 → 文件 → 切片 → 向量化 → 保存知识库。',
+          '<strong>怎么用</strong>：双击 <code>.kb</code> 会跳到<strong>知识处理</strong>加载它，可检索、问答、重新切片；主页<strong>知识库模式</strong>选中它即进入检索 + 回答；智能体预设开启「访问知识库」后会通过 <code>kb_search</code> 自动检索；<strong>学习</strong>模块也围绕它生成练习与复习内容。',
+          '<strong>在哪管</strong>：一个 <code>.kb</code> 支持多个版本，工具栏可切换 / 保存；学习记录单独存在同目录的 <code>&lt;库名&gt;.learning</code> 里，不会写进 <code>.kb</code>。'
+        ]
+      },
+      flow: {
+        title: '工作流文件（.flow.yml）',
+        desc: '工作流把大模型、代码、网络请求、知识检索、文件处理等步骤<strong>拖拽连线</strong>串成自动化流程，一键运行；流程本身就是一个 <code>.flow.yml</code> 文件（Dify 应用 DSL，可直接被 Dify 导入、也能打开 Dify 导出的应用文件）。',
+        items: [
+          '<strong>怎么来</strong>：文件树顶部 ➕ 创建文件 → 类型选<strong>工作流</strong>（生成 <code>.flow.yml</code> 的空骨架）。',
+          '<strong>怎么用</strong>：双击即在<strong>独立窗口</strong>里打开工作流画布——添加节点、连线、在右侧属性面板配参数，点工具栏<strong>运行</strong>查看每个节点的结果；在主页用<strong>工作流模式</strong>选中同一个 <code>.flow.yml</code> 也能按节点执行。',
+          '<strong>在哪管</strong>：一个文件 = 一个流程，复制 / 改名即可做变体；文件名后的 ● 表示有未保存改动，<code>Ctrl+S</code> 写回文件。'
+        ]
+      },
+      task: {
+        title: 'Agent脚手架任务（.task）',
+        desc: 'Agent脚手架是<strong>通用 Agent 执行框架</strong>（应用内称 Harness）：以<strong>表格驱动</strong>的方式跑批量任务——一个 <code>.task</code> 文件就是一个独立任务，可中断续跑、后台继续。',
+        items: [
+          '<strong>怎么来</strong>：文件树 / 文件视图右键 → <strong>新建 → 脚手架</strong>（生成 <code>.task</code> 空任务骨架），建好即在独立窗口里打开。',
+          '<strong>怎么用</strong>：任务页左上<strong>预设</strong>下拉一键套用四种形态——<strong>批量智能体运行</strong>（每行一个独立智能体）/ <strong>表格定向推理</strong>（逐行推理、补字段）/ <strong>文件采集表格</strong>（扫文件夹提字段）/ <strong>链接采集表格</strong>（逐页抓取 + 链接跟随）；也可以手动组合<strong>来源 × 执行方式 × 输出方式</strong>三个维度。',
+          '<strong>在哪管</strong>：左列卡片顶部的<strong>保存</strong>写回这个 <code>.task</code>（<strong>另存为</strong>另存副本）；「执行与配置」里可勾选是否把图谱数据 / 运行日志写进任务文件。'
+        ]
+      },
+      data: {
+        title: '数据画布文件（.data）',
+        desc: '数据画布是<strong>无代码数据建模</strong>：用节点与连线搭出表格 / 参数 / 图表 / 子画布等结构，再用表单录入数据、用图表看结果；它是知识管理里的一种文件类型（<code>.data</code>）。',
+        items: [
+          '<strong>怎么来</strong>：文件树顶部 ➕ 创建文件 → 类型选<strong>数据画布</strong>（生成 <code>.data</code>），或在文件树 / 文件视图右键 → 新建 → 数据画布；新建后是空画布，可直接建模。',
+          '<strong>怎么用</strong>：在知识管理里打开 <code>.data</code>（浏览 / 可视编辑视图即画布模块，自带<strong>主页 / 数据 / 画布 / 帮助</strong>四个子标签）：画布页摆节点连线，数据页按列配置表单录入，主页页看图表看板。',
+          '<strong>在哪管</strong>：改动约 1.5 秒防抖<strong>自动保存</strong>回它自己的 <code>.data</code> 文件（工具栏 💾 可立即保存）；源码编辑视图里看到的是 JSON，可以直接改。'
+        ]
+      }
+    },
+    plugins: {
+      overview: {
+        title: '什么是插件？',
+        desc: '插件是给软件本身增加能力的扩展包：既能给智能体<strong>加工具</strong>，也能往界面<strong>加主面板 / 设置页签 / 设置卡片</strong>、注册<strong>全局快捷键</strong>与中英文案，用来把自己写的脚本 / 团队内部工具接进 AI-KM。入口在<strong>设置 → 插件</strong>，分<strong>管理 / 商店 / 开发</strong>三个页签。'
+      },
+      capabilities: {
+        title: '插件能做什么',
+        items: [
+          '<strong>加工具</strong>：插件注册的工具会自动加入智能体的可用工具集（在预设「工具」页可按需关闭；停用插件后工具立即消失），不会与内置工具重名。',
+          '<strong>加界面</strong>：主面板（与主页 / 知识管理一样出现在导航栏）、设置页签、设置卡片，以及集群工作台页签；停用 / 卸载后立即消失，正停在插件面板上时会自动切回主页。',
+          '<strong>调宿主能力</strong>：<code>ctx.llm</code> 按来源 / 模型发起对话、<code>ctx.files</code> 选文件 / 读文本 / 读表格 / 读二进制 / 用内置查看器打开、<code>ctx.app.agentPresets()</code> 读取 Agent 预设清单等。',
+          '<strong>其它</strong>：注册全局快捷键（输入框内不触发）、提供中英文案字典、主动弹通知，以及读写自己的配置。'
+        ]
+      },
+      manage: {
+        title: '安装与管理（设置 → 插件 → 管理）',
+        overview: '插件包就是一个文件夹：<code>package.json</code> 里带 <code>aikm</code> 清单字段。放进插件目录即被发现——新写的插件约 1 秒内自动装载，不必重启。',
+        items: [
+          { title: '放对位置', desc: '插件目录默认在用户数据目录下的 <code>plugins</code>，可点「选择插件目录」改到自己的文件夹；支持分文件夹存放（递归到第 4 层，跳过隐藏目录与 <code>node_modules</code>），也可以点 ➕ 从任意文件夹安装。' },
+          { title: '目录名必须是合法插件 id', desc: '文件夹名要等于清单里的 <code>aikm.id</code>，且只能用 ASCII 小写 <code>[a-z0-9._-]</code>；带<strong>中文 / 大写 / 空格</strong>的文件夹会被宿主<strong>整目录跳过</strong>（不会出现在列表里），中文请写进清单的 <code>aikm.name</code>。' },
+          { title: '启用前确认权限', desc: '启用 / 变更操作会先弹出确认框并列出该插件申请的权限；停用插件即收回它的一切能力。' },
+          { title: '日常操作', desc: '启用 / 禁用 / 重载（先撤销旧注册再重新执行，改完界面代码不必重启）/ 日志 / 配置（传给插件的 JSON，保存后点重载生效）/ 详情 / 移除；「数据」按钮可查看并清理该插件的存储占用。' }
+        ]
+      },
+      store: {
+        title: '商店（从共享目录安装）',
+        desc: '把<strong>设置 → 协作 → 共享</strong>里共享的文件夹直接当插件来源：粘贴 <code>remote-fs://…</code> 地址（或点「本机共享目录」），商店会自动扫描出其中的插件与技能并支持一键安装，安装前会列出该插件申请的权限。把插件文件夹放进共享目录即可发布，<strong>不需要手写索引文件</strong>。'
+      },
+      dev: {
+        title: '开发（写插件的起点）',
+        desc: '不需要先读源码：把<strong>设置 → 插件 → 开发</strong>页里的「通用开发指令」整段复制给任意大模型，写清你要的功能，它产出的文件放进插件目录就能启用。也可以直接在聊天里选<strong>插件开发智能体</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>，能按需取回官方参考，并在交付前用宿主的真实加载状态自检。',
+        items: [
+          '页面提供：如何使用插件（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载，可一键复制）、从零开始的最小插件、可复制的指令模板（界面插件 / 工具插件 / 大模型与文件能力 / 排障指令）、清单与槽位 / API 速查表、常见问题（装载失败、槽位未声明、深色主题白底白字等）。',
+          '仓库 <code>examples/plugins/hello-panel</code> 是可直接复制的示例插件（工具 + 界面 + 快捷键 + 双语示例）。'
+        ]
+      },
+      perms: {
+        title: '权限与安全',
+        items: [
+          '<code>fs</code> 文件读写（带此权限的插件工具默认需要审批）、<code>shell</code> 执行命令（仍受 trusted 策略约束）、<code>net</code> 网络请求、<code>agent</code> 只读会话日志、<code>llm</code> 调用你配置的来源与模型（会消耗额度 / 算力）；<strong>未申请的权限一律拒绝</strong>。',
+          '单个插件的界面崩溃会就地显示「扩展出错了」+ 重试按钮，其余部分照常使用，不会连累主界面。'
+        ],
+        note: {
+          title: '⚠️ 请只启用你信任的插件',
+          text: '插件与主进程同进程运行（界面部分与主界面在同一页面），<strong>不受工作区沙箱保护</strong>：插件代码能做到宿主能做的任何事，权限声明只用于透明化与误操作防护。'
+        }
       }
     },
     aiChat: {
@@ -1694,6 +1966,22 @@ const translations = {
       overview: {
         title: '什么是知识管理？',
         description: '知识管理模块（knowFile）是一个<strong>多视图桌面文件管理器</strong>，支持以多种形式浏览、编辑和组织你的本地文件。它提供了独立窗口式文件浏览、多视图切换和全文搜索等能力，帮助你高效管理知识资产。'
+      },
+      fileTypes: {
+        title: '文件类型与视图',
+        overview: '知识管理是软件的文件中心：左侧是文件树（可添加本地 / 远程工作区），右侧是当前视图，顶部工具栏统一管路径与搜索。文件分两类、视图共 11 种——这一节先认识它们，细节看各自的页签。',
+        views: {
+          title: '11 种视图',
+          desc: '打开文件后有 <strong>浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示</strong>，另有 <strong>文件 / 图谱 / 看板 / 日历 / 地图 / 表格</strong> 六个全局视图（用顶部「视图选择」下拉切换，默认视图可在<strong>设置 → 功能 → 知识管理</strong>里改）。'
+        },
+        general: {
+          title: '通用文件',
+          desc: 'Markdown、Word、PDF、图片音视频、纯文本、Excel、本地网页，以及 Excalidraw 白板与 draw.io 图表——见<strong>「通用文件」</strong>页签。'
+        },
+        special: {
+          title: '专属文件',
+          desc: '<code>.kb</code> 知识库、<code>.flow.yml</code> 工作流、<code>.task</code> Agent脚手架、<code>.data</code> 数据画布——各有专属视图，见<strong>「专属文件」</strong>页签。'
+        }
       },
       views: {
         title: '视图一览（11 种视图 + 5 种专用视图）',
@@ -2385,60 +2673,60 @@ const translations = {
     },
     header: {
       title: 'AI-KM Intelligent Productivity Platform',
-      subtitle: 'Beginner Friendly Guide - 8 Core Features'
+      subtitle: 'Beginner Friendly Guide · 11 sections'
     },
     sections: {
       'quick-start': {
         title: 'Start',
-        subtitle: '5 min experience'
+        subtitle: '5 min + FAQ'
+      },
+      'concepts': {
+        title: 'Concepts',
+        subtitle: 'Key terms first'
       },
       'ai-chat': {
-        title: 'Chat',
-        subtitle: 'RAG Assistant'
+        title: 'Reasoning',
+        subtitle: 'Home AI chat · five modes'
       },
       'knowledge': {
         title: 'Knowledge',
-        subtitle: 'Digital Brain'
+        subtitle: 'Files & collaboration'
       },
       'know-rag': {
-        title: 'RAG',
-        subtitle: 'RAG Engine'
+        title: 'Processing',
+        subtitle: 'RAG knowledge base'
       },
-      'workflow': {
-        title: 'Workflow',
-        subtitle: 'Edits in Knowledge Management'
+      'learning': {
+        title: 'Learning',
+        subtitle: 'Mastery & review'
       },
-      'data-canvas': {
-        title: 'Data Canvas',
-        subtitle: 'Edits in Knowledge Management · No-code Modeling'
+      'general-files': {
+        title: 'General files',
+        subtitle: 'Markdown · docs · diagrams · whiteboard'
       },
-      'settings': {
-        title: 'Settings',
-        subtitle: 'Central config'
-      },
-      'agent-scaffold': {
-        title: 'Agent Scaffold',
-        subtitle: 'Execution framework'
+      'special-files': {
+        title: 'Special files',
+        subtitle: 'KB · workflow · agent · data canvas'
       },
       'browser': {
         title: 'Browser',
         subtitle: 'Built-in browsing with AI web actions'
       },
-      'learning': {
-        title: 'Learning',
-        subtitle: 'Mastery & Review'
+      'plugins': {
+        title: 'Plugins',
+        subtitle: 'Extend tools & UI'
       },
-      'credits': {
-        title: 'Credits',
-        subtitle: 'Open-source inspirations'
-      },
-      'faq': {
-        title: 'FAQ',
-        subtitle: 'Must read'
+      'settings': {
+        title: 'Settings',
+        subtitle: 'Central config'
       },
       'changelog': {
         title: 'Changelog',
         subtitle: 'What changed in each version'
+      },
+      'credits': {
+        title: 'Credits',
+        subtitle: 'Open-source inspirations'
       }
     },
     changelog: {
@@ -2479,12 +2767,11 @@ const translations = {
         ]
       },
       step4: {
-        title: 'Create Task',
+        title: 'Learn the concepts & the file types',
         items: [
-          'Go to the <strong>Task Management</strong> module in the left navigation bar',
-          'Click "New Task", fill in the title, description, and due date',
-          'Supports priority levels (High/Medium/Low) and task category tags',
-          'Check the checkbox to mark tasks as complete, supports Kanban and List views'
+          'Read <strong>Concepts</strong> first: what an LLM, agent, tool, MCP, skill, knowledge base, PTC and plugin each are — one page clears it all up',
+          'Files come in two kinds: <strong>general files</strong> (Markdown / Word / PDF / images / web pages plus Excalidraw whiteboards and draw.io diagrams) and <strong>special files</strong> (<code>.kb</code> knowledge base, <code>.flow.yml</code> workflow, <code>.task</code> scaffold, <code>.data</code> data canvas); double-click to open each with its own view',
+          'Need to extend the app? See <strong>Plugins</strong>: add tools to agents, or add a main panel / settings tab / hotkey to the UI'
         ]
       },
       step5: {
@@ -2507,6 +2794,171 @@ const translations = {
           '<strong>Scaffold tasks</strong> are now a file type in Knowledge Management (<code>.task</code>): create one from the right-click “New → Scaffold” menu or double-click an existing <code>.task</code> to open its dedicated “Scaffold” view in a <strong>separate window</strong> (the only scaffold; Batch Agent / Table Reasoning / Collect File / Collect Web are its four presets), and the task can be paused / resumed and keeps running in the background',
           '<strong>Data Canvas</strong> is no longer a top-level module but a <strong>file type in Knowledge Management</strong> (<code>.data</code>): open a <code>.data</code> file from the file tree to enter the canvas module (canvas modeling + form entry + chart dashboards), and changes auto-save back to that file'
         ]
+      },
+      faq: {
+        title: 'FAQ',
+        items: [
+          { q: 'Q: Chat says "not connected" — what now?', a: 'Go to <strong>Settings → Models → Sources</strong>, check the type and URL / key, then click “Test connection”. For local Ollama / LM Studio make sure the service is running. To make Home use it by default, also click <strong>Set as default</strong>.' },
+          { q: 'Q: Processing says the service is not running or the model config is wrong?', a: 'Knowledge Processing follows the global AI config: make sure the active source passes “Test connection / API status”, the model exists, and a <strong>default embedding model</strong> is set (e.g. <code>nomic-embed-text</code>). LM Studio additionally requires that embedding model to be loaded (or Just-In-Time loading enabled).' },
+          { q: 'Q: Is my data safe? Can it work offline?', a: 'All chats, knowledge bases and settings stay local and are not uploaded to third parties (apart from the online API requests you configure). With a local model (Ollama / LM Studio) the app works fully offline, and speech recognition can use local ONNX Whisper.' },
+          { q: 'Q: Which module should a beginner learn first?', a: 'Suggested order: <strong>Settings</strong> (configure a model) → <strong>Reasoning</strong> (chat) → <strong>Knowledge</strong> (files / kanban tasks) → <strong>Processing</strong> (build a knowledge base) → <strong>Learning</strong> (review & master) → general / special files → plugins.' },
+          { q: 'Q: How do I get a PDF into a knowledge base?', a: 'In <strong>Processing → Files</strong>, click “Convert” on a PDF that has no matching md file to generate Markdown, then run chunk → embed → save.' },
+          { q: 'Q: Can I use it on my phone?', a: 'Yes. Start sharing in <strong>Settings → Collaboration → Share → LAN share</strong> and open the shown LAN address in a mobile browser to chat (desktop-only file browsing / settings are unavailable).' },
+          { q: 'Q: After loading a KB it warns about an unfinished ontology build?', a: 'That is the <strong>resume-from-checkpoint</strong> mechanism: an unfinished ontology build does not continue automatically — click “Continue” in the status bar or on the Wiki page. After clearing the ontology the button should read ▶ Start; if it still says “Continue”, reopen or clear it once more.' },
+          { q: 'Q: Why are some entities not linked to any chunk?', a: 'Linking requires the chunk text to contain the entity name verbatim; when the model returns a normalized name that does not appear in the source, the entity is kept as an <strong>isolated concept</strong>. You can add the link manually on the Wiki page.' }
+        ]
+      }
+    },
+    concepts: {
+      overview: {
+        title: 'How this app is put together',
+        desc: 'This app assembles <strong>model + tools + knowledge</strong> into an assistant that gets work done. A handful of terms unlock every later section — most of the time they only differ in <strong>which settings page they live on and how you use them in chat</strong>.'
+      },
+      list: {
+        title: 'Eight key concepts'
+      },
+      items: {
+        llm: { name: 'LLM', desc: 'The app’s <strong>brain</strong>: it understands your request and writes the answer. Connect a local model (<code>Ollama</code> / <code>LM Studio</code>, fully offline) or an online one (<code>DeepSeek</code> / <code>OpenAI</code> / <code>Anthropic</code> / <code>Google</code> / <code>Azure</code> / <code>GPUStack</code> / custom) in <strong>Settings → Models → Sources</strong>; chat, processing, learning, workflows and agents all share this global config.' },
+        agent: { name: 'Agent', desc: '<strong>An LLM + a role + a set of tools.</strong> It plans steps, calls tools, reads the results and decides what to do next until the task is done. Roles come from <strong>Agent presets</strong> (system prompt / model / tools / skills / knowledge base / MCP); pick one with 👤 on Home to enter agent mode.' },
+        tool: { name: 'Tools (tool calling)', desc: 'Capabilities an agent can invoke: read/write files, search the web, open pages, run code, search a knowledge base, and so on. You never click them — the model decides <strong>which tool and which arguments</strong>. Tools with side effects go through the <strong>approval policy</strong>.' },
+        ptc: { name: 'Programmatic tool calling (PTC)', desc: 'By default tools are called one at a time; with PTC the model only sees <code>run_code</code> and <strong>writes one TypeScript program</strong> that chains several tools (e.g. loop over 20 files, then summarize). Fewer round trips and cheaper batching — the message shows the program, its return value and the tools called inside it.' },
+        mcp: { name: 'MCP (Model Context Protocol)', desc: 'A common way to plug in external tool capability: a bundle of functions exposed as one service that agents / workflows / external clients all call the same way. Six <strong>in-process MCP services ship built in</strong> (Browser Agent / Office docs / drawio / literature search / PostgreSQL / plugin-dev reference); you can also add external servers or expose the built-ins.' },
+        skill: { name: 'Skill', desc: 'A <strong>how-to / step-by-step playbook</strong>: one folder plus one <code>SKILL.md</code>. It adds no new tools — it teaches the agent to use what it already has. Trigger it explicitly with <code>$skill-name task</code>, or let the agent match it by description.' },
+        kb: { name: 'Knowledge base (.kb) & RAG', desc: 'A searchable index built by <strong>chunking → embedding</strong> your documents. Chat retrieves the most relevant chunks first (<strong>RAG</strong>) and then answers from them — grounded and traceable. Built by <strong>Processing</strong> and used by Home’s KB mode, agents, workflows and the <strong>Learning</strong> module.' },
+        plugin: { name: 'Plugin', desc: 'An extension package that grows the app itself: it can <strong>add tools</strong> for agents and <strong>add a main panel / settings tab / hotkey</strong> to the UI. Permissions are declared in its manifest (files / shell / network / session logs / LLM); anything not requested is denied.' }
+      },
+      more: {
+        title: 'A few more recurring terms',
+        desc: 'These show up again later — one line each:',
+        items: [
+          '<strong>Workflow (.flow.yml)</strong>: draw steps such as retrieve → branch → generate → export as nodes and wires, then run the fixed flow in one click (see <strong>Special files</strong>).',
+          '<strong>Swarm</strong>: a Home chat mode where several agent presets work on one task as members (see <strong>Reasoning</strong>).',
+          '<strong>Ontology graph</strong>: entities + relations extracted from your documents, used for graph Q&A and retrieval boost (see <strong>Processing</strong>).',
+          '<strong>Scaffold (.task)</strong>: a general agent execution framework — one file = one repeatable batch task (see <strong>Special files</strong>).',
+          '<strong>Data canvas (.data)</strong>: no-code data modeling — define objects and fields on a canvas, then enter data via forms and inspect charts (see <strong>Special files</strong>).'
+        ]
+      }
+    },
+    generalFiles: {
+      overview: {
+        title: 'What are general files?',
+        desc: '<strong>General files</strong> are the everyday things you read and write: Markdown notes, Word / PDF documents, images and media, plain text, Excel, local web pages, plus two canvases — <strong>Excalidraw whiteboards</strong> and <strong>draw.io diagrams</strong>. All of them are created and opened in <strong>Knowledge Management</strong>, rendered by whichever view fits best on double-click.'
+      },
+      views: {
+        title: 'General views (11)'
+      },
+      docs: {
+        title: 'Markdown & document editing',
+        items: [
+          { title: 'Browse', desc: 'Read-only preview: formulas, code highlighting, tables, images, Mermaid and embedded draw.io diagrams all render; the status bar also offers ✨ smart actions (chat about this document) and ⬇ export.' },
+          { title: 'Source edit', desc: 'Monaco editor over the raw Markdown (incl. YAML front matter), with AI assistance and drag-and-drop to create reference links; code and data files such as <code>.py</code> / <code>.json</code> open as text here too.' },
+          { title: 'Visual edit (blocks)', desc: 'Block-based rich text: type <code>/</code> for the block menu, and the block handle’s “Convert to” switches between heading / list / table / code.' },
+          { title: 'Mind map / Presentation', desc: 'The mind map follows heading levels; Presentation turns Markdown into slides (split by <code>---</code> or smart splitting, with outline / full-screen / themes).' },
+          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>in-place translation</strong>; Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' }
+        ]
+      },
+      export: {
+        title: 'Export & print',
+        items: [
+          'The Browse view’s <strong>export</strong> menu offers Markdown / Word / PDF; Markdown and Word open a save-as dialog (Word also has official-document / Chinese-paper / English-paper / custom styles, with formulas converted to native Word equations first).',
+          'draw.io diagrams export to PNG / JPEG / SVG / XML and PDF, and <strong>copy as image</strong> (<code>Ctrl+Alt+X</code>) pastes straight into Word / PPT.',
+          'Export and print both go through local channels, so they work <strong>offline</strong>.'
+        ]
+      }
+    },
+    specialFiles: {
+      overview: {
+        title: 'What are special files?',
+        desc: '<strong>Special files</strong> are file types defined by this app: each has a dedicated module or editor, and double-clicking one in Knowledge Management opens that view.'
+      },
+      items: {
+        kb: { name: 'Knowledge base .kb', desc: 'The searchable index built by chunking / embedding in Processing; double-click jumps to <strong>Processing</strong> and loads that base.' },
+        flow: { name: 'Workflow .flow.yml', desc: 'Node-and-wire process orchestration (a fixed flow you can rerun); double-click opens the <strong>workflow canvas</strong> in its own window.' },
+        task: { name: 'Agent scaffold .task', desc: 'One file = one repeatable batch agent task; double-click opens the <strong>scaffold view</strong> in its own window.' },
+        data: { name: 'Data canvas .data', desc: 'No-code data modeling: objects + fields + forms + charts; double-click opens the <strong>data canvas view</strong> in its own window.' }
+      },
+      kb: {
+        title: 'Knowledge base file (.kb)',
+        items: [
+          '<strong>Where it comes from</strong>: open a workspace in <strong>Processing</strong> → Files → Chunk → Embed → Save knowledge base.',
+          '<strong>How to use it</strong>: double-clicking a <code>.kb</code> jumps to <strong>Processing</strong> and loads it for search, Q&A and re-chunking; pick it in Home’s <strong>KB mode</strong> for retrieval + answering; agent presets with “access knowledge base” on call it through <code>kb_search</code>; the <strong>Learning</strong> module builds practice and review around it.',
+          '<strong>Where it is managed</strong>: one <code>.kb</code> can hold several versions (switch / save from the toolbar); learning records live next to it in <code>&lt;name&gt;.learning</code> and never inside the <code>.kb</code>.'
+        ]
+      },
+      flow: {
+        title: 'Workflow file (.flow.yml)',
+        desc: 'A workflow wires steps such as model calls, code, HTTP requests, knowledge retrieval and file handling into an automated flow you can run in one click; the flow itself is a <code>.flow.yml</code> file (Dify app DSL — importable into Dify, and Dify exports open here too).',
+        items: [
+          '<strong>Where it comes from</strong>: ➕ in the file tree → type <strong>Workflow</strong> (creates an empty <code>.flow.yml</code> skeleton).',
+          '<strong>How to use it</strong>: double-click to open the workflow canvas in a <strong>separate window</strong> — add nodes, wire them, set parameters in the right-hand panel, then click <strong>Run</strong> to inspect each node’s output; picking the same <code>.flow.yml</code> in Home’s <strong>workflow mode</strong> also runs it node by node.',
+          '<strong>Where it is managed</strong>: one file = one flow, so copy / rename it to make variants; a ● after the file name means unsaved changes, and <code>Ctrl+S</code> writes them back.'
+        ]
+      },
+      task: {
+        title: 'Agent scaffold task (.task)',
+        desc: 'Agent Scaffold is a <strong>general agent execution framework</strong> (called Harness in the app): it runs batch work in a <strong>table-driven</strong> way, and one <code>.task</code> file is one independent task that can be paused, resumed and left running in the background.',
+        items: [
+          '<strong>Where it comes from</strong>: right-click in the file tree / Files view → <strong>New → Scaffold</strong> (creates an empty <code>.task</code>), which opens in its own window right away.',
+          '<strong>How to use it</strong>: pick one of four presets at the top-left of the task page — <strong>Batch Agent Run</strong> (one separate agent per row) / <strong>Table Reasoning</strong> (row-by-row inference to fill fields) / <strong>Collect File</strong> (scan a folder and extract fields) / <strong>Collect Web</strong> (page-by-page scraping with link following) — or combine the three dimensions <strong>source × execution × output</strong> manually.',
+          '<strong>Where it is managed</strong>: <strong>Save</strong> at the top of the left column writes back to this <code>.task</code> (<strong>Save as</strong> keeps a copy); Execution & config lets you choose whether graph data / run logs are stored inside the task file.'
+        ]
+      },
+      data: {
+        title: 'Data canvas file (.data)',
+        desc: 'The data canvas is <strong>no-code data modeling</strong>: build tables / parameters / charts / sub-canvases from nodes and wires, enter data through forms and read results on charts — it is a file type inside Knowledge Management (<code>.data</code>).',
+        items: [
+          '<strong>Where it comes from</strong>: ➕ in the file tree → type <strong>Data canvas</strong> (creates a <code>.data</code>), or right-click → New → Data canvas; a new file opens as an empty canvas you can model in right away.',
+          '<strong>How to use it</strong>: open the <code>.data</code> file in Knowledge Management (Browse / Visual edit render the canvas module, which has its own <strong>Home / Data / Canvas / Help</strong> tabs): place and wire nodes on the Canvas tab, configure per-column form entry on the Data tab, and watch the chart dashboard on Home.',
+          '<strong>Where it is managed</strong>: changes <strong>auto-save</strong> back into the <code>.data</code> file after about 1.5 seconds of debounce (💾 in the toolbar saves immediately); the source editor shows the same content as JSON if you want to edit it directly.'
+        ]
+      }
+    },
+    plugins: {
+      overview: {
+        title: 'What is a plugin?',
+        desc: 'A plugin is an extension package that grows the app itself: it can <strong>add tools</strong> for agents and <strong>add a main panel / settings tab / settings card / global hotkey</strong> plus bilingual string tables to the UI, so your own scripts and team tools plug into AI-KM. Find them under <strong>Settings → Plugins</strong>, split into <strong>Manage / Store / Develop</strong>.'
+      },
+      capabilities: {
+        title: 'What plugins can do',
+        items: [
+          '<strong>Add tools</strong>: tools a plugin registers join every agent’s tool set automatically (switch them off per preset on the Tools page; disabling the plugin removes them instantly) and can never clash with built-in names.',
+          '<strong>Add UI</strong>: a main panel (appears in the nav like Home / Knowledge), settings tabs, settings cards and swarm-workbench tabs; all of them disappear the moment the plugin is disabled or removed — if you were on that panel the app returns to Home.',
+          '<strong>Call host capabilities</strong>: <code>ctx.llm</code> to run a chat on a configured source / model, <code>ctx.files</code> to pick files, read text / tables / binary or open the built-in viewer, and <code>ctx.app.agentPresets()</code> to read the agent preset list.',
+          '<strong>And more</strong>: register global hotkeys (never inside text inputs), ship bilingual string tables, post notifications, and read / write their own config.'
+        ]
+      },
+      manage: {
+        title: 'Install & manage (Settings → Plugins → Manage)',
+        overview: 'A plugin package is just a folder with an <code>aikm</code> manifest in <code>package.json</code>. Drop it into the plugins folder and it is discovered — freshly written plugins load within about a second, no restart needed.',
+        items: [
+          { title: 'Put it in the right place', desc: 'The plugins folder defaults to <code>plugins</code> inside your user-data directory and can be changed with “Choose plugins folder”. Subfolders are supported (scanned up to 4 levels deep, skipping hidden folders and <code>node_modules</code>), or click ➕ to install from any folder.' },
+          { title: 'The folder name must be a valid plugin id', desc: 'The folder name must equal the manifest’s <code>aikm.id</code> and use only ASCII lowercase <code>[a-z0-9._-]</code>; a folder with <strong>Chinese characters / uppercase / spaces</strong> is <strong>skipped entirely</strong> (it never shows up in the list). Put display text in the manifest’s <code>aikm.name</code>.' },
+          { title: 'Confirm permissions on enable', desc: 'Enabling or changing a plugin first shows a confirm dialog listing the permissions it requests; disabling it revokes everything it had.' },
+          { title: 'Everyday actions', desc: 'Enable / disable / reload (unregisters then runs again — no restart after editing UI code) / logs / config (JSON passed to the plugin, applied on reload) / details / remove; the data button shows and clears the plugin’s storage usage.' }
+        ]
+      },
+      store: {
+        title: 'Store (install from a shared folder)',
+        desc: 'Point the store at the folder shared under <strong>Settings → Collaboration → Share</strong>: paste the <code>remote-fs://…</code> address (or click “local shared folder”) and it scans for plugins and skills with one-click install, listing the requested permissions first. Publishing is just dropping a plugin folder into the shared folder — <strong>no index file to write</strong>.'
+      },
+      dev: {
+        title: 'Develop (where to start writing plugins)',
+        desc: 'No need to read the source first: copy the whole “general development prompt” from <strong>Settings → Plugins → Develop</strong> into any model, describe what you want, and drop the returned files into the plugins folder. You can also pick the <strong>plugin development agent</strong> in chat — it is bound to the built-in MCP service <code>builtin-plugin-dev</code>, fetches the official reference on demand and self-checks against the host’s real load status before delivering.',
+        items: [
+          'The page ships: how to use plugins (install → confirm permissions → where panels / tools / hotkeys appear → config → troubleshooting → removal, copyable), a minimal plugin from scratch, copyable prompt templates (UI plugin / tool plugin / model & file capability / troubleshooting), a manifest, slot and API cheat sheet, and an FAQ (load failures, undeclared slots, white-on-white in dark theme, and so on).',
+          'The repository’s <code>examples/plugins/hello-panel</code> is a ready-to-copy sample plugin (tool + UI + hotkey + bilingual strings).'
+        ]
+      },
+      perms: {
+        title: 'Permissions & safety',
+        items: [
+          '<code>fs</code> file read/write (tools with this permission need approval by default), <code>shell</code> run commands (still bound by the trusted policy), <code>net</code> network requests, <code>agent</code> read-only session logs, <code>llm</code> call your configured sources and models (consumes quota / compute); <strong>anything not requested is denied</strong>.',
+          'If a plugin’s UI crashes it shows “extension error” with a retry button in place, while the rest of the app keeps working.'
+        ],
+        note: {
+          title: '⚠️ Only enable plugins you trust',
+          text: 'Plugins run in the same process as the host (the UI half shares the main page) and are <strong>not protected by the workspace sandbox</strong>: plugin code can do anything the host can. Permission declarations are for transparency and accident prevention only.'
+        }
       }
     },
     aiChat: {
@@ -2611,6 +3063,22 @@ const translations = {
       overview: {
         title: 'What is Knowledge Management?',
         description: 'The Knowledge Management module (knowFile) is a <strong>multi-view desktop file manager</strong> that lets you browse, edit, and organize your local files in various formats. It provides separate-window file browsing, multi-view switching, and full-text search capabilities.'
+      },
+      fileTypes: {
+        title: 'File types & views',
+        overview: 'Knowledge Management is the app’s file centre: the file tree on the left (local and remote workspaces), the active view on the right, and one toolbar for path and search. Files come in two kinds and there are 11 views in total — this section just introduces them, each tab has the details.',
+        views: {
+          title: '11 views',
+          desc: 'Opening a file gives you <strong>Browse / Source edit / Visual edit / Mind map / Presentation</strong>, plus six global views — <strong>Files / Graph / Kanban / Calendar / Map / Table</strong> — switched with the “view” dropdown in the toolbar. The default view is set in <strong>Settings → Features → Knowledge Management</strong>.'
+        },
+        general: {
+          title: 'General files',
+          desc: 'Markdown, Word, PDF, images and media, plain text, Excel, local web pages, plus Excalidraw whiteboards and draw.io diagrams — see the <strong>General files</strong> tab.'
+        },
+        special: {
+          title: 'Special files',
+          desc: '<code>.kb</code> knowledge base, <code>.flow.yml</code> workflow, <code>.task</code> agent scaffold and <code>.data</code> data canvas — each has its own view, see the <strong>Special files</strong> tab.'
+        }
       },
       views: {
         title: 'Views (11 views + 5 dedicated views)',
@@ -3764,6 +4232,31 @@ const translations = {
   gap: 6px;
   margin: 6px 0;
 }
+
+/* 设置章节的导航总览：分组标题 + 逐条清单（比方块卡片更紧凑、更像分级文档） */
+.settings-tree-group { margin: 10px 0 0 2px; }
+.settings-tree-group h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+  margin: 0 0 4px 0;
+  padding-bottom: 3px;
+  border-bottom: 1px dashed var(--borderColor);
+}
+.settings-tree-list {
+  list-style: none;
+  margin: 0 0 0 2px;
+  padding: 0 0 0 12px;
+  border-left: 1px solid var(--borderColor);
+}
+.settings-tree-list li { margin: 4px 0; line-height: 1.6; }
+.settings-tree-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+  margin-right: 6px;
+}
+.settings-tree-desc { font-size: 10px; color: var(--fontColor); opacity: 0.8; }
 
 .node-item {
   display: grid;
