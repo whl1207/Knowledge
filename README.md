@@ -63,6 +63,13 @@ npm install --registry=https://registry.npmmirror.com
 | `npm run build:dist` | Windows installer (NSIS) |
 | `npm run build-portable` | Windows portable build |
 | `npm run build-linux` | Linux AppImage / deb |
+| `npm run release:win` | **Publish-ready Windows set**: portable `.exe` + green `.rar` (from the unpacked folder) |
+| `npm run release:win-setup` | Same, plus the NSIS installer |
+| `npm run release:linux` | Linux AppImage / deb through the WSL one-click script, then collected |
+| `npm run release:all` | Windows first, then Linux — a full publish-ready `release/` |
+| `npm run release:collect` | Only collect/rename the current artifacts (and rebuild the green RAR) |
+
+`scripts/collect-release.mjs` normalises whatever electron-builder produced into the published names — `AI-KM_Windows_<ver>_x86_64_Portable.exe`, `AI-KM_Windows_<ver>_x86_64_green.rar`, `AI-KM_Linux_<ver>_x86_64.AppImage`, `AI-KM_Linux_<ver>_amd64.deb`, `AI-KM_Linux_<ver>_arm64.deb` — and packs the unpacked `release/AI-KM` folder into the green RAR (WinRAR's `Rar.exe`; override the path with `AIKM_RAR`). It is idempotent, so re-running it is safe.
 
 ### Optional local assets (not committed)
 
@@ -74,7 +81,7 @@ A few large assets are intentionally **not** in this repository. The app runs fi
 | `public/drawio/` (~65 MB) | `node scripts/fetch-drawio-webapp.mjs` (add `--force` to re-download) | `.drawio` files cannot be opened / edited offline |
 | `public/excalidraw-assets-dev/` (~18 MB, dev only) | Dev-time Excalidraw assets | Whiteboard assets for `npm run dev` |
 
-`scripts/` follows the same policy: only the six build/runtime helpers (`rename-unpacked`, `build-tts-worker`, `fetch-drawio-webapp`, `make-builtin-mbtiles`, `build-linux-all.sh` + `build-linux-all.cmd`) are versioned; one-off diagnostics, test fixtures and benchmark data stay local.
+`scripts/` follows the same policy: only the build/runtime helpers (`rename-unpacked`, `collect-release`, `build-tts-worker`, `fetch-drawio-webapp`, `make-builtin-mbtiles`, `build-linux-all.sh` + `build-linux-all.cmd`) are versioned; one-off diagnostics, test fixtures and benchmark data stay local.
 
 Type check the renderer before committing: `npx vue-tsc --noEmit -p tsconfig.json`.
 

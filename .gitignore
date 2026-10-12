@@ -43,13 +43,14 @@ public/excalidraw-assets-dev/
 
 # scripts/：只保留「构建 / 资源获取」必需的脚本，其余（一次性排查、测试夹具、基准产物）留在本地不入库
 scripts/*
-# 以下 6 个为构建 / 打包必需，取消忽略（git 不支持行内注释，注释须单独成行）
+# 以下 7 个为构建 / 打包必需，取消忽略（git 不支持行内注释，注释须单独成行）
 !scripts/rename-unpacked.mjs
 !scripts/build-tts-worker.mjs
 !scripts/fetch-drawio-webapp.mjs
 !scripts/make-builtin-mbtiles.py
 !scripts/build-linux-all.sh
 !scripts/build-linux-all.cmd
+!scripts/collect-release.mjs
 
 # 临时脚本 / 实验产物（下划线开头，随手写的排查脚本）
 _*.mjs

@@ -25,6 +25,11 @@
     "build:dist": "vue-tsc --noEmit && vite build && electron-builder && node scripts/rename-unpacked.mjs",
     "build-portable": "vue-tsc --noEmit && vite build && electron-builder --win portable && node scripts/rename-unpacked.mjs",
     "build-linux": "vue-tsc --noEmit && vite build && electron-builder --linux",
+    "release:win": "vue-tsc --noEmit && vite build && electron-builder --win portable && node scripts/rename-unpacked.mjs && node scripts/collect-release.mjs",
+    "release:win-setup": "vue-tsc --noEmit && vite build && electron-builder --win nsis portable && node scripts/rename-unpacked.mjs && node scripts/collect-release.mjs",
+    "release:linux": "scripts\\build-linux-all.cmd && node scripts/collect-release.mjs",
+    "release:all": "npm run release:win && npm run release:linux",
+    "release:collect": "node scripts/collect-release.mjs",
     "preview": "vite preview",
     "test:plugin-smoke": "node scripts/plugin-smoke/run.mjs"
   },
