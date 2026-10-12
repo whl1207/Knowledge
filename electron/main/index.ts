@@ -288,6 +288,10 @@ async function createWindow() {
 
   // 主窗口关闭时一并关闭「设置」独立窗口（否则应用会因仍有窗口存活而不退出）
   win.on('closed', () => {
+    // 释放主窗口引用：仍可能有其它窗口存活（如「浏览器 Agent」窗口），此时 window-all-closed
+    // 不会触发，若继续留着这个已销毁的引用，后续 second-instance（从桌面图标再次启动）/
+    // 托盘 / 广播等路径再操作它就会抛 “Object has been destroyed”。
+    if (win === mainWin) win = null
     // 渲染层就绪标记复位：下次重新创建主窗口后需重新握手
     mainWindowUiReady = false
     // 主窗口已真正关闭（直接退出模式，或托盘模式下正在退出）→ 托盘失去意义
@@ -414,14 +418,15 @@ app.on('second-instance', (_event, commandLine) => {
     openFilesWithApp(files)
     return
   }
-  if (win) {
+  // 主窗口可能已销毁但应用仍在运行（「浏览器 Agent」等窗口还开着）→ 走下面的重建分支
+  if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore()
     // 折叠到托管区时窗口只是隐藏，visible=false 需要 show() 才能唤回
     if (!win.isVisible()) win.show()
     win.focus()
     return
   }
-  // 仅浏览器模式运行中、再次普通启动 → 进入软件本体
+  // 没有主窗口（仅浏览器 Agent 在运行 / 主窗口已关闭）→ 进入软件本体
   createWindow()
 })
 
@@ -1247,6 +1252,17 @@ function getWinBySender(senderId: number): BrowserWindow | null {
   return found || win
 }
 
+/**
+ * IPC 操作的「归属窗口」：优先主窗口；主窗口不存在 / 已销毁时（例如只开着「浏览器 Agent」、
+ * 文件窗口或设置窗口）退回发起请求的窗口。
+ * 旧代码在这些地方直接用主窗口（win!）——主窗口关闭后它就是已销毁对象，调用其 API 会抛
+ * “Object has been destroyed”。能发出 IPC 说明发起方窗口一定存活，故这里保证返回存活窗口。
+ */
+function ipcOwnerWindow(senderId: number): BrowserWindow {
+  if (win && !win.isDestroyed()) return win
+  return BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && w.webContents.id === senderId)!
+}
+
 ipcMain.handle('toggle-fullscreen', (event) => {
   const target = getWinBySender(event.sender.id)
   if (!target) return false
@@ -1810,7 +1826,7 @@ ipcMain.handle('exportDocx', async (_event, payload) => {
 })
 
 ipcMain.handle('openFolderDialog', async (event) => {
-  const result = await dialog.showOpenDialog(win!, {
+  const result = await dialog.showOpenDialog(ipcOwnerWindow(event.sender.id), {
     properties: ['openDirectory']
   });
 
@@ -1925,7 +1941,7 @@ ipcMain.handle('parseTableFile:done', async (event, filePath: string) => {
 
 // 保存任务状态文件 (.task)
 ipcMain.handle('saveTaskFile', async (event, content: string) => {
-  const result = await dialog.showSaveDialog(win!, {
+  const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
     title: '保存任务状态',
     defaultPath: `task_${new Date().toISOString().slice(0, 10)}.task`,
     filters: [{ name: '任务文件', extensions: ['task'] }]
@@ -1944,7 +1960,7 @@ ipcMain.handle('saveTaskFile', async (event, content: string) => {
 
 // 读取任务状态文件 (.task)
 ipcMain.handle('loadTaskFile', async (event) => {
-  const result = await dialog.showOpenDialog(win!, {
+  const result = await dialog.showOpenDialog(ipcOwnerWindow(event.sender.id), {
     title: '读取任务状态',
     properties: ['openFile'],
     filters: [{ name: '任务文件', extensions: ['task'] }]
@@ -2054,7 +2070,7 @@ ipcMain.handle('saveTaskFileAuto', async (event, referencePath: string, content:
 
 // 导出 PDF：隐藏窗口渲染 HTML → printToPDF → 保存
 ipcMain.handle('exportPdf', async (event, { html, title }: { html: string; title: string }) => {
-  const result = await dialog.showSaveDialog(win!, {
+  const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
     title: '导出 PDF',
     defaultPath: `${title || '文档'}.pdf`,
     filters: [{ name: 'PDF 文档', extensions: ['pdf'] }]
@@ -2122,7 +2138,7 @@ const sanitizeExcelRows = (data: Record<string, any>[]): Record<string, string>[
 
 /** 一次性导出（小数据 / 旧调用方）：选路径 → 建表 → 落盘 */
 ipcMain.handle('exportExcel', async (event, { data, filename }: { data: Record<string, any>[]; filename: string }) => {
-  const result = await dialog.showSaveDialog(win!, {
+  const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
     title: '导出数据',
     defaultPath: `${filename}.xlsx`,
     filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }]
@@ -2151,9 +2167,9 @@ ipcMain.handle('exportExcel', async (event, { data, filename }: { data: Record<s
 type ExcelExportSession = { filePath: string; header: string[]; ws: any | null; count: number }
 let excelExportSession: ExcelExportSession | null = null
 
-ipcMain.handle('exportExcel:start', async (_event, { filename, header }: { filename: string; header?: string[] }) => {
+ipcMain.handle('exportExcel:start', async (event, { filename, header }: { filename: string; header?: string[] }) => {
   excelExportSession = null
-  const result = await dialog.showSaveDialog(win!, {
+  const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
     title: '导出数据',
     defaultPath: `${filename}.xlsx`,
     filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }]
@@ -2857,7 +2873,7 @@ ipcMain.handle('extractWordImages', async (event, filePath) => {
 });
 
 ipcMain.handle('openAndReadFile', async (event, type) => {
-  const result = await dialog.showOpenDialog(win!, {
+  const result = await dialog.showOpenDialog(ipcOwnerWindow(event.sender.id), {
     title: '打开文件',
     filters: [{
       name: type,
@@ -3242,16 +3258,17 @@ ipcMain.handle('fetchWebPageTitle', async (event, url: string) => {
   }
 })
 
-ipcMain.on('dev', () => {
-  if (win!.webContents.isDevToolsOpened()) {
-    win!.webContents.closeDevTools();
+ipcMain.on('dev', (event) => {
+  const target = ipcOwnerWindow(event.sender.id)
+  if (target.webContents.isDevToolsOpened()) {
+    target.webContents.closeDevTools();
   } else {
-    win!.webContents.openDevTools({ mode: "undocked", activate: true });
+    target.webContents.openDevTools({ mode: "undocked", activate: true });
   }
 })
 
 ipcMain.handle('openFile', async (event) => {
-  const result = await dialog.showOpenDialog(win!, {
+  const result = await dialog.showOpenDialog(ipcOwnerWindow(event.sender.id), {
     properties: ['openFile']
   })
 
