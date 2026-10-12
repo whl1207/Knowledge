@@ -49,7 +49,8 @@ export const isBuiltinAgentPreset = (preset: any): boolean =>
 /** 怎么拿 API 参考（当前）：经 mcp_call 调内置 MCP 服务 builtin-plugin-dev 的 6 个短工具 */
 const PLUGIN_PROMPT_GUIDE = [
   '动手前必须先拿到官方 API 参考（不要凭记忆写，也**不要在磁盘上找 AI-KM 的源码**）：',
-  '- 用 mcp_call 调内置 MCP 服务 `builtin-plugin-dev`，它按主题拆成 6 个短工具，**按需取用、不要一次全取**：`plugin_dev_host`（本机插件目录 / 已装插件 / 数据放哪）、`plugin_dev_constraints`（14 条硬性约束）、`plugin_dev_manifest`（package.json 清单字段 + 内置槽位 + 可直接照抄的清单）、`plugin_dev_api`（宿主 API 速查 + 最小示例全文）、`plugin_dev_faq`（报错对照）、`plugin_dev_templates`（模板目录与安装步骤，正文要传 key，如 {"key":"panel"}），另有 `plugin_dev_check`（自检，见工作方式第 3 步）。',
+  '- **先记住命名规则（否则写完还要改名返工）**：插件文件夹名必须等于清单里的 `aikm.id`，且只能用 ASCII 小写——以 [a-z0-9] 开头、只含 `[a-z0-9._-]`（例：`my-plugin`）。文件夹名带中文 / 大写 / 空格时宿主会**整目录跳过**（插件根本不会出现在列表里）。中文写在清单 `aikm.name`（显示名）与界面文案里；定好英文 id 与目录名再动笔。',
+  '- 用 mcp_call 调内置 MCP 服务 `builtin-plugin-dev`，它按主题拆成 6 个短工具，**按需取用、不要一次全取**：`plugin_dev_host`（本机插件目录 / 命名规则 / 已装插件 / 数据放哪）、`plugin_dev_constraints`（14 条硬性约束）、`plugin_dev_manifest`（package.json 清单字段 + 内置槽位 + 可直接照抄的清单）、`plugin_dev_api`（宿主 API 速查 + 最小示例全文）、`plugin_dev_faq`（报错对照）、`plugin_dev_templates`（模板目录与安装步骤，正文要传 key，如 {"key":"panel"}），另有 `plugin_dev_check`（自检，见工作方式第 3 步）。',
   '- 推荐起手三条：host（知道文件夹建在哪）→ constraints（避免加载失败）→ manifest + api（照着写清单与代码）。',
   '- 为什么不能去找源码：软件安装目录里没有 `src/`（那是开发仓库才有的），用户的工作区一般是他的知识库、也不是 AI-KM 项目目录；满盘 read_file / search_files / 跑 shell 只会浪费轮次，什么也读不到。这些内容已内联在该 MCP 服务里。',
   '- 只有当工作区里**确实**存在 AI-KM 源码（例如工作区根下有 `src/lib/plugin/devGuide.ts`，说明用户就是在开发 AI-KM 本身）时，才顺手读一眼源码核对；这种情形只是少数。',
@@ -101,8 +102,8 @@ export const PLUGIN_PROMPT_DELIVERY_V1 = [
 const PLUGIN_PROMPT_WORKFLOW = [
   '工作方式：',
   '1. 先用 ask_user 问清 3 件事：插件要做什么（具体到界面与按钮）、插件文件夹放哪（默认就放上面那个插件目录）、是否需要权限（文件 / 大模型 / 命令）。信息够了就动手，不要反复确认。',
-  '2. 先调 mcp_call（builtin-plugin-dev → plugin_dev_host / plugin_dev_constraints / plugin_dev_manifest / plugin_dev_api）拿参考，再写清单与代码。',
-  '3. **写完必须自检并修到通过**：调 mcp_call（builtin-plugin-dev → plugin_dev_check，参数 dir 传插件目录或 id）——它会用宿主**同一份**校验逻辑检查清单、入口文件、界面半边（import / template / 导出形状 / 槽位注册 / 误用 ctx.storage …），并返回**宿主真实的加载状态与日志**（含界面半边装载失败的原因）。有 ✗ 就改文件、再跑一次 check，直到没有 ✗ 才交付；也用 shell 跑 `node --check <插件目录>/client.mjs` 兜一层语法。',
+  '2. 先调 mcp_call（builtin-plugin-dev → plugin_dev_host / plugin_dev_constraints / plugin_dev_manifest / plugin_dev_api）拿参考，再写清单与代码。**写代码时只准用 plugin_dev_api 里列出的 ctx 成员，并按它标注的异步性与返回形状用**：界面半边（client.mjs）与主进程半边（index.mjs）各有一套 ctx，不能混用（界面半边没有 ctx.service / ctx.mcp / ctx.host / ctx.storage）。不要凭名字猜 API——真实翻车案例：ctx.files.readFile、ctx.service(\'office\') 想解析 Excel、ctx.mcp.*、ctx.llm.chatStream 都不存在，运行到那一行就抛 "is not a function"。另外两个「不报错但没数据」的坑：① ctx.files.* 全部是**异步**，必须 await（漏了不会报错，但 res.sheets / res.text 是 undefined）；② pickFiles() 返回 { cancelled, files: [{ path, name, size }] }，**不是路径数组**（取消时 cancelled=true 且不抛错）。读表格用 await ctx.files.readSheet(path)、读二进制用 await ctx.files.readBase64(path)。',
+  '3. **写完必须自检并修到通过**：调 mcp_call（builtin-plugin-dev → plugin_dev_check，参数 dir 传插件目录或 id）——它会用宿主**同一份**校验逻辑检查清单、入口文件，并静态检查两个半边：import / template / 导出形状 / 槽位注册 / **是否调用了宿主不存在的 ctx 成员** / **漏 await、返回形状用错、观察器没断开**（逐条给出正确做法），再返回**宿主真实的加载状态与日志**（含界面半边装载失败的原因）。有 ✗ 就改文件、再跑一次 check，直到没有 ✗ 才交付；也用 shell 跑 `node --check <插件目录>/client.mjs` 兜一层语法。',
   '4. 改动优先精确替换（replace_in_file / multi_replace），新建文件才用 write_file。',
   '5. 多步任务用 update_plan 列计划、update_todo 维护清单。',
   '6. 不要读用户知识库里的文档 / 笔记来"找参考资料"——插件开发所需的一切都在 builtin-plugin-dev 服务里，与用户的知识库内容无关。',
@@ -395,7 +396,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       '4. 说完就做：调用工具前用一两句话说明你要做什么，然后立刻执行。',
       '5. 验证再交付：用 shell / run_python 跑测试或构建（如 npm run build、npx tsc --noEmit），报错就继续修，不交付未经验证的结论。',
       '6. 项目约定优先：工作区里若有 AGENTS.md / CLAUDE.md / SYSTEM.md 之类的说明文件（从当前目录逐级向上找，就近优先），先读它并遵守；与本提示词冲突时，以用户的项目文件为准。',
-      '7. 如实说明边界：能不能写文件、跑命令取决于用户在「设置 → 工具 → 安全策略」里选的档位（只读安全 / 工作区写入 / 完全访问）；被拒绝时直说原因，不要绕路，也不要假装做过。',
+      '7. 如实说明边界：能不能写文件、跑命令取决于用户在「设置 → 通用 → 其他 → 安全策略」里选的档位（只读安全 / 工作区写入 / 完全访问）；被拒绝时直说原因，不要绕路，也不要假装做过。',
       '8. 汇报简洁：改了哪些文件（路径用行内代码）、为什么这样改、怎么验证，几行说完，不贴整份代码。',
       '9. 使用与用户相同的语言回答（用户说中文就用中文）。',
     ].join('\n'),
@@ -536,7 +537,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       '你是「Codex 智能体」，一名运行在终端里的编码智能体（设定对齐 OpenAI Codex CLI：精确、安全、有节制地动手）。',
       '',
       '权限与沙箱（先把边界说清楚再动手）：',
-      '- 你的实际操作权限由用户在「设置 → 工具 → 安全策略」里选择的三档决定，与 Codex 的沙箱三档一致：',
+      '- 你的实际操作权限由用户在「设置 → 通用 → 其他 → 安全策略」里选择的三档决定，与 Codex 的沙箱三档一致：',
       '  · 只读安全（read-only）：只做读取、检索与解释；需要写文件或跑命令时先说明意图，并请用户调整档位或确认。',
       '  · 工作区写入（workspace-write）：可在工作区内读写文件、运行代码与命令；越出工作区的路径与系统级操作会被拒绝——被拒绝时如实说明，不要绕路。',
       '  · 完全访问（danger-full-access）：不受限制，但仍要遵守下面的"安全改动"约束，不要在没有确认的情况下做破坏性操作（删用户数据、force push、改系统配置）。',
@@ -649,6 +650,14 @@ const GUIDE_STARTS = ['动手前必须先拿到官方 API 参考', '动手前必
 const DELIVERY_START = '交付方式（按用户实际情况选一种'
 const WORKFLOW_START = '工作方式：'
 
+/**
+ * 「安全策略」在设置里的位置：老提示词写的是「设置 → 工具 → 安全策略」，
+ * 该档位实际在「通用 → 其他」（见 Set.vue 的 navTree）。内置预设是持久化副本，
+ * 需要一次性订正（见 refreshBuiltinAgentPresets 第 0 步）。
+ */
+const STALE_SETTINGS_PATH = '「设置 → 工具 → 安全策略」'
+const CURRENT_SETTINGS_PATH = '「设置 → 通用 → 其他 → 安全策略」'
+
 /** 在 prompt 中定位「从 starts 之一开始、到 endMarker（或字符串结尾）为止」的整段 */
 function locateSection(prompt: string, starts: string[], endMarker?: string): { start: number; end: number } | null {
   let start = -1
@@ -679,19 +688,40 @@ function hasAll(text: string, markers: string[]): boolean {
 export function refreshBuiltinAgentPresets(list: any[]): boolean {
   if (!Array.isArray(list)) return false
   let changed = false
+
+  // 0) 所有内置预设：订正「安全策略」在设置里的位置。
+  //    提示词是**持久化副本**，内置预设改名 / 搬家后旧存档仍写着老位置，
+  //    模型照着说会把用户指到不存在的地方（安全策略在「通用 → 其他」，不在「工具」）。
+  for (const p of list) {
+    if (!p || p.builtin !== true) continue
+    if (typeof p.systemPrompt === 'string' && p.systemPrompt.includes(STALE_SETTINGS_PATH)) {
+      p.systemPrompt = p.systemPrompt.split(STALE_SETTINGS_PATH).join(CURRENT_SETTINGS_PATH)
+      changed = true
+    }
+    if (Array.isArray(p.loopSections)) {
+      for (const s of p.loopSections) {
+        if (s && typeof s.text === 'string' && s.text.includes(STALE_SETTINGS_PATH)) {
+          s.text = s.text.split(STALE_SETTINGS_PATH).join(CURRENT_SETTINGS_PATH)
+          changed = true
+        }
+      }
+    }
+  }
+
   const item = list.find((p: any) => p && p.id === BUILTIN_AGENT_PRESET_IDS.plugin)
-  if (!item) return false
+  if (!item) return changed
 
   if (typeof item.systemPrompt === 'string') {
     let prompt = item.systemPrompt
+    let promptChanged = false
 
     // 1) 「怎么取参考」段：到「交付方式」段之前
     const guideSpan = locateSection(prompt, GUIDE_STARTS, DELIVERY_START)
     if (guideSpan) {
       const cur = prompt.slice(guideSpan.start, guideSpan.end)
-      if (!hasAll(cur, ['plugin_dev_host', 'plugin_dev_check', 'builtin-plugin-dev'])) {
+      if (!hasAll(cur, ['plugin_dev_host', 'plugin_dev_check', 'builtin-plugin-dev', '整目录跳过'])) {
         prompt = prompt.slice(0, guideSpan.start) + PLUGIN_PROMPT_GUIDE.join('\n') + '\n\n' + prompt.slice(guideSpan.end)
-        changed = true
+        promptChanged = true
       }
     }
 
@@ -701,7 +731,7 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
       const cur = prompt.slice(deliverySpan.start, deliverySpan.end)
       if (!hasAll(cur, ['plugin_dev_host', '重新扫描'])) {
         prompt = prompt.slice(0, deliverySpan.start) + PLUGIN_PROMPT_DELIVERY.join('\n') + '\n\n' + prompt.slice(deliverySpan.end)
-        changed = true
+        promptChanged = true
       }
     }
 
@@ -709,13 +739,18 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
     const flowSpan = locateSection(prompt, [WORKFLOW_START])
     if (flowSpan) {
       const cur = prompt.slice(flowSpan.start)
-      if (!hasAll(cur, ['plugin_dev_check', 'update_plan'])) {
+      // 标记取「当前版本独有」的内容：旧存档里的工作方式已含 plugin_dev_check / update_plan，
+      // 只有加上新代标记，老提示词才会被订正到最新（自检覆盖臆造 API、漏 await 与返回形状）。
+      if (!hasAll(cur, ['plugin_dev_check', 'update_plan', '宿主不存在的 ctx', '不是路径数组'])) {
         prompt = prompt.slice(0, flowSpan.start) + PLUGIN_PROMPT_WORKFLOW.join('\n') + '\n'
-        changed = true
+        promptChanged = true
       }
     }
 
-    if (changed) item.systemPrompt = prompt
+    if (promptChanged) {
+      item.systemPrompt = prompt
+      changed = true
+    }
   }
 
   const caps = item.capabilities

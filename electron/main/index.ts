@@ -3483,7 +3483,7 @@ ipcMain.handle('executeShell', async (event, params) => {
     const policy = resolvePolicy(environment, { workspaceRoot: cwd })
     if (!isShellAllowed(policy)) {
       const msg = `shell 执行被沙箱策略拒绝：当前模式 ${policy.mode}（enforcement: ${policy.enforcement}）。` +
-        `仅「完全访问（trusted）」模式允许执行 shell 命令，请在设置 → 环境 中切换。`
+        `仅「完全访问（trusted）」模式允许执行 shell 命令，可在「设置 → 通用 → 其他 → 安全策略」中切换。`
       console.warn(`[主进程] ${msg}`)
       return { success: false, error: msg, sandbox: policy, denied: true }
     }

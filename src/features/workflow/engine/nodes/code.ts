@@ -21,8 +21,8 @@ function toPythonLiteral(value: unknown): string {
  * 参数按**声明顺序**位置传参（与 Dify 的变量列表 = 函数参数列表一致）。
  *
  * 注意：safe / workspace 沙箱限制很紧——主进程静态检查禁止 `getattr(` / `sys.` 等，
- * 运行层的内置函数白名单里也没有 `globals`，`_safe_import` 还会拒绝白名单外的模块
- * （`inspect` 会被拒），所以这里只用 `dir()` / `callable` / `print` / `import json`。
+ * 运行层的内置函数白名单里也没有 `globals`，`_safe_import` 还会拒绝 os / subprocess / socket 这类
+ * 系统级模块（其余模块如 openpyxl / inspect 正常放行），所以这里只用 `dir()` / `callable` / `print` / `import json`。
  */
 const RUNNER = [
   '',

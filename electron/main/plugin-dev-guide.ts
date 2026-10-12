@@ -33,7 +33,7 @@ export const PLUGIN_DEV_TOPICS = ['host', 'constraints', 'manifest', 'api', 'faq
 export type PluginDevTopic = (typeof PLUGIN_DEV_TOPICS)[number]
 
 /** 模板话题可单独取用的小节（key 与 devGuide 的 PLUGIN_DEV_SECTIONS 一致） */
-export const PLUGIN_DEV_TEMPLATE_KEYS = ['general', 'panel', 'tool', 'llm-files', 'fix', 'usage', 'all'] as const
+export const PLUGIN_DEV_TEMPLATE_KEYS = ['general', 'panel', 'chart', 'tool', 'llm-files', 'fix', 'usage', 'all'] as const
 
 // ---------------------------------------------------------------------------
 // 各话题正文
@@ -45,6 +45,11 @@ export function topicHost(): string {
   const custom = pluginHost.hasCustomRoot()
   lines.push(`- 插件目录（绝对路径，插件文件夹就建在这里面）：${pluginHost.rootDir()}`)
   lines.push(`- 上面这个是${custom ? '用户在设置里自定义的目录' : '默认目录（userData/plugins）'}；写出插件文件夹后让用户在「设置 → 插件 → 管理」点「重新扫描」即可发现，不必重启软件。`)
+  lines.push('- **插件文件夹命名（动手前先定好，否则要改名返工）**：文件夹名必须等于清单里的 aikm.id，且只能是 ASCII 小写——以 [a-z0-9] 开头、只含 `[a-z0-9._-]`（例：my-plugin）。文件夹名带中文 / 大写 / 空格时宿主会**整目录跳过**（插件根本不会出现在列表里），只能改名重来。中文写在清单 aikm.name（显示名）与界面文案里。')
+  const skipped = pluginHost.invalidNamedDirs()
+  if (skipped.length) {
+    lines.push(`- ⚠ 当前有 ${skipped.length} 个文件夹因目录名不能作为插件 id 被跳过（有清单但名字非法）：${skipped.join('、')}——需要改成 ASCII 名字才会被识别。`)
+  }
   lines.push(`- 宿主插件 API 版本：${PLUGIN_HOST_API_VERSION}（清单里写 apiVersion: "^1"）`)
   lines.push(`- 可申请的权限：${SUPPORTED_PLUGIN_PERMISSIONS.join(' / ')}（不申请就用不了对应能力；多申请会让用户多一层顾虑）`)
   const plugins = pluginHost.list()
@@ -82,7 +87,7 @@ export function topicManifest(): string {
     '    "declares": { "slots": ["panel.main"] }',
     '  }',
     '}',
-    '（id 必须等于插件目录名；name 是显示名；version 形如 1.0.0；apiVersion 是**字符串** "^1"。）',
+    '（id 必须等于插件目录名，且只能是 ASCII 小写 [a-z0-9._-]（目录名带中文会被宿主直接跳过）；name 是显示名，可用中文；version 形如 1.0.0；apiVersion 是**字符串** "^1"。）',
     '',
     '【内置槽位（declares.slots 只能填这些，未知槽位会被拒绝）】',
     slots,
@@ -184,12 +189,12 @@ export const PLUGIN_DEV_TOOL_SPECS: readonly PluginDevToolSpec[] = [
   {
     name: 'plugin_dev_host',
     topic: 'host',
-    description: '读取本机插件运行态：插件目录的绝对路径、是默认目录还是自定义目录、已装插件清单、宿主插件 API 版本、可申请的权限、插件数据该放在哪。写插件前先取它，就知道该把文件夹建在哪里。',
+    description: '读取本机插件运行态：插件目录的绝对路径、**插件文件夹命名规则（必须等于清单 id 且只能用 ASCII 小写 [a-z0-9._-]，中文目录名会被宿主整目录跳过）**、是默认目录还是自定义目录、已装插件清单、宿主插件 API 版本、可申请的权限、插件数据该放在哪。写插件前先取它，就知道该把文件夹建成什么名字、放在哪里。',
   },
   {
     name: 'plugin_dev_constraints',
     topic: 'constraints',
-    description: '读取插件开发的硬性约束（14 条，违反会加载失败或界面出错）：目录名＝id、清单必填字段、可用槽位与权限、界面半边必须单文件 ESM 无 import、Vue 由 ctx.vue 注入、副作用必须可清理、主题变量与滚动样式、面板不能撑大窗口等。写代码前必读。',
+    description: '读取插件开发的硬性约束（15 条，违反会加载失败或界面出错）：目录名＝id 且只能用 ASCII 小写（中文 / 大写 / 空格会被整目录跳过，要返工改名的就是这一条）、清单必填字段、可用槽位与权限（含 fs 只能读用户在插件里选过的路径）、界面半边必须单文件 ESM 无 import、**只准调用指南列出的宿主 API（界面 / 主进程两半边不能混用；ctx.service / ctx.mcp / ctx.files.readFile 都不存在）**、canvas 2D 不认 CSS 变量、Vue 由 ctx.vue 注入、副作用必须可清理、主题变量与滚动样式、面板不能撑大窗口等。动手写第一个文件之前必读。',
   },
   {
     name: 'plugin_dev_manifest',
@@ -210,11 +215,11 @@ export const PLUGIN_DEV_TOOL_SPECS: readonly PluginDevToolSpec[] = [
     name: 'plugin_dev_templates',
     topic: 'templates',
     keyParam: true,
-    description: '读取可照抄的开发模板目录与「安装、启用、调试步骤」。默认只回目录（很短）；要正文时传 key，一次取一个：general（通用开发指令）、panel（界面插件：面板 + 设置页签 + 快捷键）、tool（给智能体加工具）、llm-files（大模型与文件能力）、fix（排障指令）、usage（安装步骤）、all（全部，较长）。',
+    description: '读取可照抄的开发模板目录与「安装、启用、调试步骤」。默认只回目录（很短）；要正文时传 key，一次取一个：general（通用开发指令）、panel（界面插件：面板 + 设置页签 + 快捷键）、chart（图表面板：canvas 饼图 / 柱状图 + 数据变化重画）、tool（给智能体加工具）、llm-files（大模型与文件能力）、fix（排障指令）、usage（安装步骤）、all（全部，较长）。',
   },
   {
     name: 'plugin_dev_check',
     dirParam: true,
-    description: '自检一个插件文件夹（交付前必跑）：用宿主**同一份**校验逻辑检查 package.json 清单（字段类型 / apiVersion / 槽位声明 / 权限）、声明的入口文件是否存在，并静态检查界面半边（是否含 import/require、是否用了 template、是否导出 apply(ctx)、是否调用 ctx.slots.register、是否误用界面半边没有的 ctx.storage、生命周期钩子是否在 setup 里）。返回逐条 ✓/✗ 与修法；有问题就改完再跑一次，直到没有 ✗。参数 dir 传插件文件夹路径或插件 id。',
+    description: '自检一个插件文件夹（交付前必跑）：检查目录名能否作为插件 id（中文 / 大写 / 空格会被宿主跳过）、用宿主**同一份**校验逻辑检查 package.json 清单（字段类型 / apiVersion / 槽位声明 / 权限）、声明的入口文件是否存在，并静态检查两个半边：界面半边（是否含 import/require、是否用了 template、是否导出 apply(ctx)、是否调用 ctx.slots.register、生命周期钩子是否在 setup 里）、**是否用了宿主不存在的 ctx 成员**（如 ctx.service / ctx.mcp / ctx.files.readFile 会逐条报「宿主没有这个」并给出正确做法；两半边 ctx 串用也会报）以及**运行时陷阱**（异步成员漏 await、pickFiles 返回值当数组用、ResizeObserver 没 disconnect、**把 ctx.locale.pick/ref 的 ref 当字符串用（模板字符串 / 字符串相加 / 传给 ctx.notify → 界面显示 "[object Object]"）**——这几类都不报错，但会让面板「没有数据」或提示显示 "[object Object]"），另外检查主进程半边（ctx.host / ctx.storage / ctx.tool 等）与「写死绝对路径却没让用户选文件」。返回逐条 ✓/✗ 与修法；有问题就改完再跑一次，直到没有 ✗。参数 dir 传插件文件夹路径或插件 id。',
   },
 ]

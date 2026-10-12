@@ -387,6 +387,8 @@ const dsh = {
       rootDir: string
       customRoot: boolean
       services: string[]
+      /** 因目录名不能作为插件 id 而被跳过的目录（相对插件目录；有清单但名字非 ASCII 小写） */
+      invalidNamedDirs?: string[]
     }> {
       return invokeIpc('plugin:list')
     },
@@ -534,6 +536,13 @@ const dsh = {
         size: number
       }> {
         return ipcRenderer.invoke('plugin:files:read-base64', options)
+      },
+      readSheet(options: { id: string; path: string; maxRows?: number; maxSheets?: number }): Promise<{
+        path: string
+        sheetCount: number
+        sheets: Array<{ name: string; headers: string[]; rows: unknown[][]; truncated: boolean }>
+      }> {
+        return ipcRenderer.invoke('plugin:files:read-sheet', options)
       },
     },
     /** 订阅插件事件（状态变更 / 日志 / 通知） */

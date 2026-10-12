@@ -38,6 +38,12 @@ export function registerPluginIpc(): void {
     /** 是否为用户在设置里选的自定义目录（false = 默认 userData/plugins） */
     customRoot: pluginHost.hasCustomRoot(),
     services: pluginHost.serviceNames(),
+    /**
+     * 扫描时因「目录名不能作为插件 id」被跳过的目录（相对插件根目录）。
+     * 这类目录有清单但名字是中文 / 带大写或空格，宿主只能整目录跳过——
+     * 以前只打一条 console.warn，用户看到的是「文件夹放进去什么都没发生」。
+     */
+    invalidNamedDirs: pluginHost.invalidNamedDirs(),
   })
 
   registerIpc('plugin:list', () => hostState())

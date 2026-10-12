@@ -53,6 +53,24 @@
         </div>
       </div>
 
+      <!-- 被跳过的目录（有清单但目录名不能作为插件 id）：必须显式提示，否则用户只看到「放进去什么都没发生」 -->
+      <div v-if="invalidNamedDirs.length" class="plugin-notice warn">
+        <i class="fa fa-exclamation-circle"></i>
+        <div class="plugin-notice-body">
+          <div class="plugin-notice-title">
+            {{ zh ? `有 ${invalidNamedDirs.length} 个插件文件夹被跳过` : `${invalidNamedDirs.length} plugin folder(s) skipped` }}
+          </div>
+          <div class="plugin-notice-desc">
+            {{ zh
+              ? '这些文件夹里有插件清单，但目录名不能作为插件 id（必须是 ASCII 小写、只含 a-z0-9._-，以字母或数字开头；中文 / 大写 / 空格都会被跳过）。改成英文目录名后会自动识别，无需重启。'
+              : 'These folders contain a manifest, but the folder name cannot be used as a plugin id (ASCII lowercase only, containing a-z0-9._- and starting with a letter or digit; Chinese characters, uppercase letters and spaces are skipped). Rename them to ASCII and they are picked up automatically — no restart needed.' }}
+            <div class="plugin-invalid-dirs">
+              <code v-for="d in invalidNamedDirs" :key="d">{{ d }}</code>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div v-if="unavailable" class="plugin-empty">
         <i class="fa fa-info-circle"></i>
         {{ zh ? '插件管理仅桌面版可用（window.dsh.plugin 不可用）' : 'Plugin management requires the desktop app (window.dsh.plugin unavailable)' }}
@@ -415,6 +433,8 @@ const rootDir = ref('')
 const customRoot = ref(false)
 const services = ref<string[]>([])
 const unavailable = ref(false)
+/** 目录名不能作为插件 id 而被跳过的插件文件夹（相对插件目录；有清单但名字非法） */
+const invalidNamedDirs = ref<string[]>([])
 
 /** 是否有插件放在子文件夹里：有则给顶层插件也标一个「根目录」徽标，避免看起来像没显示文件夹 */
 const nestedRoot = computed(() => plugins.value.some((p) => !!p.folder))
@@ -509,6 +529,7 @@ const applyList = (res: any) => {
   rootDir.value = res?.rootDir || ''
   customRoot.value = res?.customRoot === true
   services.value = res?.services || []
+  invalidNamedDirs.value = Array.isArray(res?.invalidNamedDirs) ? res.invalidNamedDirs : []
   void refreshAllData()
   void syncThenRefreshClients()
 }
@@ -1046,6 +1067,26 @@ onUnmounted(() => {
 .plugin-notice i {
   color: #d97706;
   margin-top: 2px;
+}
+/* 被跳过的插件文件夹（目录名不能作为插件 id）：比普通提示更醒目，因为插件「完全不出现」 */
+.plugin-notice.warn {
+  border-color: #f0a020;
+  background: rgba(240, 160, 32, 0.08);
+}
+.plugin-notice.warn i {
+  color: #e07b00;
+}
+.plugin-invalid-dirs {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.plugin-invalid-dirs code {
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--borderColor, #ddd);
+  word-break: break-all;
 }
 .plugin-notice-title {
   font-weight: 600;

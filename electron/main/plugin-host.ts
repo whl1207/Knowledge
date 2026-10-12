@@ -120,6 +120,8 @@ export interface PluginHostInitOptions {
 
 class PluginHost {
   private records = new Map<PluginId, PluginRecord>()
+  /** 上一次扫描跳过的「目录名不能作为插件 id」目录（相对插件根目录；设置页据此提示） */
+  private invalidNamedDirsCache: string[] = []
   private services = new PluginServiceRegistry()
   private events = new PluginEventBus()
   private eventSink: ((event: PluginEvent) => void) | null = null
@@ -228,6 +230,14 @@ class PluginHost {
   /** 当前是否为自定义目录（UI 用来决定是否显示「恢复默认」） */
   hasCustomRoot(): boolean {
     return !!this.customRoot
+  }
+
+  /**
+   * 扫描时被跳过的目录（有插件清单、但目录名不能作为插件 id：中文 / 大写 / 空格）。
+   * 宿主只能整目录跳过，用户会看到「放进去什么都没发生」——所以报给设置页与开发参考。
+   */
+  invalidNamedDirs(): string[] {
+    return this.invalidNamedDirsCache.slice()
   }
 
   /** 插件私有数据根目录 */
@@ -781,11 +791,14 @@ class PluginHost {
   private scan(): void {
     const state = this.loadState()
     const seen = new Set<PluginId>()
+    /** 目录名不能作为插件 id 的目录（有清单但名字非法）→ 报给设置页，别让用户只看到「没反应」 */
+    const invalidNamed: string[] = []
 
     for (const dir of this.collectPluginDirs()) {
       const name = path.basename(dir)
       const id = this.toPluginId(name)
       if (!id) {
+        invalidNamed.push(this.relDirOf(dir))
         console.warn(`[plugin-host] 跳过目录（目录名不能作为插件 id）：${this.relDirOf(dir)}`)
         continue
       }
@@ -802,6 +815,7 @@ class PluginHost {
     for (const id of Array.from(this.records.keys())) {
       if (!seen.has(id)) this.records.delete(id)
     }
+    this.invalidNamedDirsCache = invalidNamed
   }
 
   /**

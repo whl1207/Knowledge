@@ -20,6 +20,19 @@ function resolveExecCwd(cwd?: string): string {
   return process.cwd()
 }
 
+/**
+ * 被代码安全检查拦下时，补一句「为什么被拦 / 怎么放行」。
+ * 安全策略档位在「设置 → 通用 → 其他 → 安全策略」里，用户看到 os./shutil. 这类报错时
+ * 往往不知道是档位问题（而不是代码本身有问题）。
+ */
+function sandboxHint(mode: string): string {
+  if (mode === 'trusted') return ''
+  const need = '如需执行系统级操作（os / shutil / subprocess 等），请在「设置 → 通用 → 其他 → 安全策略」中切换为「完全访问」'
+  return mode === 'workspace'
+    ? `。（当前为「工作区写入」：可读写文件与联网，仍禁系统级操作。${need}）`
+    : `。（当前为「只读安全」：不能读写文件与联网；要读写文件请切到「工作区写入」，要执行系统级操作请切到「完全访问」）`
+}
+
 // Python 安装状态接口
 export interface PythonInstallation {
   installed: boolean
@@ -176,7 +189,7 @@ export class PythonService {
       if (!securityCheck.isValid) {
         return {
           success: false,
-          error: `代码安全验证失败: ${securityCheck.issues?.join(', ')}`,
+          error: `代码安全验证失败: ${securityCheck.issues?.join(', ')}${sandboxHint(sandboxMode)}`,
           logs: securityCheck.issues || []
         }
       }
@@ -447,6 +460,27 @@ except ImportError:
     SEABORN_AVAILABLE = False
     sns = None
 
+# 逃逸 / 系统级模块黑名单（按沙箱模式过滤后交给 SafeEnvironment）：
+# 为什么是黑名单而不是白名单：Python 生态太大，白名单必然误伤正常库
+# （openpyxl / sqlite3 / sklearn / python-docx …）；真正的边界由宿主静态检查 + sitecustomize 的
+# audit hook（子进程 / 文件写入 / 网络）把关，这里只拦「明显不该出现」的模块。
+_BLOCKED_MODULES_COMMON = (
+    'os', 'subprocess', 'shutil', 'socket', 'pickle', 'webbrowser', 'ctypes',
+    'multiprocessing', 'pty', 'winreg', '_winreg', 'msvcrt', 'java', 'clr',
+)
+_BLOCKED_MODULES_SAFE_ONLY = (
+    'requests', 'urllib', 'http', 'httpx', 'aiohttp', 'ftplib', 'smtplib', 'telnetlib', 'xmlrpc',
+)
+BLOCKED_MODULES = _BLOCKED_MODULES_COMMON + (
+    () if sandbox_mode == 'workspace' else _BLOCKED_MODULES_SAFE_ONLY
+)
+# 被拦时的可操作提示（照抄给用户看的位置就是「设置 → 通用 → 其他 → 安全策略」）
+BLOCKED_HINT = (
+    '（当前安全策略：' + ('工作区写入' if sandbox_mode == 'workspace' else '只读安全') +
+    '；需要读写文件 / 联网请切到「工作区写入」，需要系统级能力（os / subprocess 等）或任意第三方模块'
+    '请切到「完全访问」——该档位对 Python 模块没有任何限制）'
+)
+
 # 安全环境类
 class SafeEnvironment:
     def __init__(self, input_data):
@@ -471,6 +505,9 @@ class SafeEnvironment:
         
         # 提供安全的导入函数
         self.safe_import = self._safe_import
+        # 真实导入函数：黑名单过滤后，其余模块直接走解释器（见 _safe_import）
+        self._real_import = __import__
+        self.blocked_modules = BLOCKED_MODULES
         
         # 允许的模块及其别名
         self.allowed_modules = {
@@ -578,20 +615,29 @@ class SafeEnvironment:
                 self.logs.append("seaborn 库已加载（workspace 模式）")
 
     def _safe_import(self, name, globals=None, locals=None, fromlist=(), level=0):
-        """安全的导入函数，匹配 __import__ 的完整签名"""
-        module_name = name
+        """导入闸门：按**黑名单**拦截系统级 / 逃逸类模块，其余一律交给解释器真实导入。
+
+        以前这里是「白名单未命中即拒绝」，于是 openpyxl / sqlite3 / sklearn 这类正常库也被
+        拦成「不允许导入模块: xxx」——与宿主静态检查「未知名库放行并提示」的口径自相矛盾，
+        用户看到的是「明明是普通读表代码却被拒」。现在只拦 BLOCKED_MODULES。
+        """
+        module_name = name or ''
+        top = module_name.split('.')[0]
+
+        if top in self.blocked_modules:
+            raise ImportError(f"模块 {top} 在当前安全策略下被禁用{BLOCKED_HINT}")
 
         if module_name in self.allowed_modules:
             module = self.allowed_modules[module_name]
             # import x.y 时 Python 期望返回顶层模块 x（以便把名字 x 绑定到包上）
             if not fromlist and '.' in module_name:
-                top = module_name.split('.')[0]
                 if top in self.allowed_modules:
                     return self.allowed_modules[top]
             # 直接返回真实模块：from x.y import name 由 Python 的 fromlist 机制负责解析属性
             return module
-        else:
-            raise ImportError(f"不允许导入模块: {module_name}")
+
+        # 其余模块：交给解释器真实导入（未知库不再拒绝，危险模块已被上面的黑名单过滤）
+        return self._real_import(name, globals, locals, fromlist, level)
     
     def log(self, *args, **kwargs):
         """日志记录函数"""
@@ -856,7 +902,7 @@ class SafeEnvironment:
         
         for pattern, desc in dangerous_patterns:
             if re.search(pattern, code, re.IGNORECASE):
-                raise SecurityError(f"安全检查失败: 检测到 {desc}")
+                raise SecurityError(f"安全检查失败: 检测到 {desc}{BLOCKED_HINT}")
 
 class SecurityError(Exception):
     """安全错误"""

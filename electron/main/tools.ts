@@ -783,7 +783,7 @@ async function runShell(input: any, ctx: ToolExecutionContext): Promise<ToolResu
   if (!isShellAllowed(policy)) {
     return {
       ok: false,
-      error: `shell 执行被沙箱策略拒绝：当前模式 ${policy.mode}（enforcement: ${policy.enforcement}）。仅「完全访问（trusted）」模式允许执行 shell 命令。`,
+      error: `shell 执行被沙箱策略拒绝：当前模式 ${policy.mode}（enforcement: ${policy.enforcement}）。仅「完全访问（trusted）」模式允许执行 shell 命令，可在「设置 → 通用 → 其他 → 安全策略」中切换。`,
     }
   }
   try {
@@ -2425,7 +2425,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('run_python', '执行 Python 代码。默认只读沙箱；需要写工作区时传 sandbox=workspace；完全访问可传 sandbox=trusted。', runPython, {
+    defineTool('run_python', '执行 Python 代码。沙箱档位由用户在「设置 → 通用 → 其他 → 安全策略」统一决定（只读安全 / 工作区写入 / 完全访问），工具本身没有 sandbox 参数；档位不够时报错会说明当前档位与去哪切换。第三方库（pandas / openpyxl / scipy 等）在工作区写入与完全访问下均可正常导入，只有 os / subprocess / socket 这类系统级模块在非完全访问档位被拦。', runPython, {
       inputSchema: {
         type: 'object',
         properties: {

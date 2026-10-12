@@ -18,11 +18,18 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { BrowserWindow, dialog, ipcMain } from 'electron'
 import * as PDFJS from 'pdfjs-dist'
+import xlsx from 'xlsx'
 import { IPCError } from '@/types/ipc'
 import { pluginHost } from './plugin-host'
 
 /** 单个插件被授权访问的路径集合（文件 + 文件夹前缀） */
 const grants = new Map<string, Set<string>>()
+
+/** 读表格的上限（避免大表把主进程内存打满；插件侧据此也能判断是否被截断） */
+const SHEET_MAX_BYTES = 32 * 1024 * 1024
+const SHEET_MAX_ROWS = 20000
+const SHEET_MAX_SHEETS = 20
+const SHEET_MAX_COLS = 200
 
 function grantRoots(pluginId: string): Set<string> {
   let set = grants.get(pluginId)
@@ -201,6 +208,47 @@ export function registerPluginFilesIpc(): void {
       if (stat.size > max) throw new IPCError('PLUGIN_FILES_TOO_LARGE', `文件过大：${Math.round(stat.size / 1024 / 1024)}MB（上限 ${Math.round(max / 1024 / 1024)}MB）`)
       const buffer = await fs.readFile(filePath)
       return { path: filePath, base64: buffer.toString('base64'), size: stat.size }
+    } catch (error) {
+      throw asIpcError(error)
+    }
+  })
+
+  /**
+   * 读表格（.xlsx / .xls / .csv → 每个工作表的表头 + 数据行）。
+   *
+   * 为什么需要它：插件界面半边是单文件 ESM、不能 import SheetJS，`readText` 对 xlsx 只会返回
+   * 二进制乱码；于是「读 Excel 画图」这类插件只能靠臆造 API（`ctx.files.readFile` / 调 office MCP）
+   * 而必然失败。这里复用主进程既有的 SheetJS（`read_file` 提取 Excel 用的同一套），
+   * 让「读表格」成为一条正经能力；权限与授权范围仍走 fs 权限 + 用户亲自选过的路径。
+   */
+  ipcMain.handle('plugin:files:read-sheet', async (_event, payload: { id?: string; path?: string; maxRows?: number; maxSheets?: number } = {}) => {
+    try {
+      const pluginId = readPluginId(payload)
+      requireFsPermission(pluginId)
+      const filePath = String(payload?.path ?? '').trim()
+      if (!filePath) throw new IPCError('INVALID_INPUT', '缺少文件路径')
+      assertAllowed(pluginId, filePath)
+      if (!/\.(xlsx|xls|csv)$/i.test(filePath)) {
+        throw new IPCError('INVALID_INPUT', '仅支持 .xlsx / .xls / .csv（其它格式请用 readText）')
+      }
+      const stat = await fs.stat(filePath)
+      if (stat.size > SHEET_MAX_BYTES) {
+        throw new IPCError('PLUGIN_FILES_TOO_LARGE', `表格过大：${Math.round(stat.size / 1024 / 1024)}MB（上限 ${Math.round(SHEET_MAX_BYTES / 1024 / 1024)}MB）`)
+      }
+      const maxRows = Math.max(10, Math.min(Number(payload?.maxRows) || SHEET_MAX_ROWS, SHEET_MAX_ROWS))
+      const maxSheets = Math.max(1, Math.min(Number(payload?.maxSheets) || SHEET_MAX_SHEETS, SHEET_MAX_SHEETS))
+      const workbook = xlsx.read(await fs.readFile(filePath), { type: 'buffer' })
+      const names = workbook.SheetNames.slice(0, maxSheets)
+      const sheets = names.map((name) => {
+        const worksheet = workbook.Sheets[name]
+        const grid = worksheet ? (xlsx.utils.sheet_to_json(worksheet, { header: 1, defval: '', blankrows: false }) as unknown[][]) : []
+        const header = (Array.isArray(grid[0]) ? grid[0] : []).slice(0, SHEET_MAX_COLS).map((v) => String(v ?? '').trim())
+        const body = grid
+          .slice(1, maxRows + 1)
+          .map((row) => (Array.isArray(row) ? row.slice(0, SHEET_MAX_COLS) : []))
+        return { name, headers: header, rows: body, truncated: grid.length - 1 > maxRows }
+      })
+      return { path: filePath, sheets, sheetCount: workbook.SheetNames.length }
     } catch (error) {
       throw asIpcError(error)
     }

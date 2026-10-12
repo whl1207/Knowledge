@@ -429,6 +429,9 @@ const checkPythonInstallation = async () => {
 // 环境切换（Codex sandbox_mode 三态：safe=只读 / workspace=工作区写入 / trusted=完全访问）
 const handleEnvironmentChange = async (envType: 'safe' | 'workspace' | 'trusted') => {
   store.pythonSandbox = envType
+  // 立即落盘并广播：设置界面是独立窗口，而 Agent / 工作流在主窗口里执行，
+  // 不写盘的话主窗口那半边仍用旧档位（选了「完全访问」也会被沙箱拒绝）。
+  store.saveConfig()
 }
 
 // 权限策略仅展示：由执行环境决定（完全访问=直接放行不询问，只读/工作区写入=执行前询问）

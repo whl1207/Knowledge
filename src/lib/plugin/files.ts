@@ -46,6 +46,13 @@ export interface PluginPdfPageResult {
   dataUrl: string
 }
 
+export interface PluginSheetResult {
+  path: string
+  /** 文件里实际有几个工作表（可能多于返回的 sheets，见 maxSheets） */
+  sheetCount: number
+  sheets: Array<{ name: string; headers: string[]; rows: unknown[][]; truncated: boolean }>
+}
+
 export interface PluginFilesApi {
   readonly available: boolean
   readonly reason: string
@@ -57,6 +64,13 @@ export interface PluginFilesApi {
   list(dir: string): Promise<{ dir: string; entries: PluginDirEntry[] }>
   /** 读文本（.pdf 自动走 PDF 文本提取，返回 pages） */
   readText(path: string, options?: { maxBytes?: number }): Promise<PluginReadTextResult>
+  /** 读二进制（base64；图片 / 压缩包等自定义解析用，上限 40MB） */
+  readBase64(path: string, options?: { maxBytes?: number }): Promise<{ path: string; base64: string; size: number }>
+  /**
+   * 读表格（.xlsx / .xls / .csv → 每个工作表的表头 + 数据行；上限 32MB / 2 万行 / 20 个工作表）。
+   * 界面半边拿不到 SheetJS，读表格请用它，不要自己解析二进制。
+   */
+  readSheet(path: string, options?: { maxRows?: number; maxSheets?: number }): Promise<PluginSheetResult>
   /** 把 PDF 的某一页渲染成 PNG data URL（视觉预览） */
   renderPdfPage(path: string, options?: { page?: number; scale?: number; maxWidth?: number }): Promise<PluginPdfPageResult>
   /** 用应用内置查看器打开文件（独立窗口；Markdown / PDF 等走各自视图） */
@@ -157,6 +171,21 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
     async readText(filePath, options) {
       guard()
       return ipc().readText({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
+    },
+
+    async readBase64(filePath, options) {
+      guard()
+      return ipc().readBase64({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
+    },
+
+    async readSheet(filePath, options) {
+      guard()
+      return ipc().readSheet({
+        id: deps.pluginId,
+        path: filePath,
+        maxRows: options?.maxRows,
+        maxSheets: options?.maxSheets,
+      })
     },
 
     async renderPdfPage(filePath, options) {

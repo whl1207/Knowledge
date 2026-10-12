@@ -19,7 +19,17 @@ export interface PluginClientBundle {
 }
 
 export interface PluginBridgeApi {
-  list(): Promise<{ plugins: PluginSnapshot[]; rootDir: string; customRoot: boolean; services: string[] }>
+  list(): Promise<{
+    plugins: PluginSnapshot[]
+    rootDir: string
+    customRoot: boolean
+    services: string[]
+    /**
+     * 扫描时被跳过的目录（相对插件根目录）：有清单但目录名不能作为插件 id
+     * （中文 / 大写 / 空格）→ 宿主只能整目录跳过，列表里不会出现。缺省视为空数组。
+     */
+    invalidNamedDirs?: string[]
+  }>
   inspect(spec: string): Promise<{
     ok: boolean
     id: string | null

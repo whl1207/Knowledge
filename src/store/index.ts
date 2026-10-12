@@ -1108,6 +1108,8 @@ export const usestore = defineStore('data', {
             localStorage.setItem('customTitle', JSON.stringify(this.customTitle))
             localStorage.setItem('interfaceConfigMode', JSON.stringify(this.interfaceConfigMode))
             localStorage.setItem('locales', JSON.stringify(this.locales))
+            // 安全策略（沙箱三态）：落盘后主窗口经 settings-config-changed → loadConfig 同步给 Agent 执行
+            localStorage.setItem('pythonSandbox', JSON.stringify(this.pythonSandbox))
             localStorage.setItem('AIconfig', JSON.stringify(this.AIconfig))
             // 自定义来源独立双写存档：与 AIconfig 保持一致；即使 AIconfig 合并异常也能从独立键恢复
             try {
@@ -1306,6 +1308,27 @@ export const usestore = defineStore('data', {
             }
             if (localStorage.getItem('locales') !== null) {
                 this.locales = JSON.parse(localStorage.getItem('locales')!)
+            }
+            // 安全策略（沙箱三态）：Agent 执行代码 / 命令 / 联网的权限档位。
+            // 必须落盘 + 跨窗口同步——设置界面在**独立窗口**里，而 Agent 跑在主窗口，
+            // 只改内存值时主窗口永远停在默认的「工作区写入」，表现为「明明选了完全访问，
+            // shell / Python 仍被沙箱拒绝」，且重启后选择也会丢。
+            {
+                const raw = localStorage.getItem('pythonSandbox')
+                // 兼容两种写法：JSON（"trusted"）与裸字符串（trusted）
+                const value = raw === null ? null : raw.replace(/^"|"$/g, '')
+                if (value === 'safe' || value === 'workspace' || value === 'trusted') {
+                    this.pythonSandbox = value
+                } else if (raw === null) {
+                    // 旧存档兼容：早期只有布尔字段 TrustedPython（true = 完全访问）；无该字段时保持默认档位
+                    let legacyTrusted = false
+                    try {
+                        legacyTrusted = JSON.parse(localStorage.getItem('TrustedPython') || 'false') === true
+                    } catch { /* 非法旧值按未开启处理 */ }
+                    this.pythonSandbox = legacyTrusted ? 'trusted' : 'workspace'
+                } else {
+                    this.pythonSandbox = 'workspace'
+                }
             }
             if (localStorage.getItem('AIconfig') !== null) {
                 // 保存当前选中的模型，避免被覆盖

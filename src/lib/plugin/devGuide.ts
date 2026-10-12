@@ -48,7 +48,9 @@ export interface PluginDevFaq {
  * 导出原因：核心工具 `plugin_dev_guide`（主进程）也要原样交给模型，见 electron/main/plugin-dev-guide.ts。
  */
 export const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或直接失败）】
-1. 目录名必须等于插件 id（清单里的 aikm.id）；两者不一致清单校验直接失败。
+1. 目录名必须等于插件 id（清单里的 aikm.id），且**只能用 ASCII 小写字母开头、只含 [a-z0-9._-]**（如 my-plugin）：
+   目录名是中文 / 含大写 / 含空格时宿主直接跳过这个文件夹（插件不会出现在列表里），id 与目录名不一致也会校验失败。
+   插件名称、界面文案要用中文就写在 aikm.name 与 ctx.locale 里，别写进 id / 目录名、也别写进工具名（工具名必须蛇形 ASCII）。
 2. package.json 必须含 aikm 字段：id / version / apiVersion 必填，version 形如 1.0.0，apiVersion 写 "^1"。
 3. main 与 client 至少声明一个（main = 主进程半边，client.entry = 界面半边），路径必须是插件目录内的相对路径。
 4. declares.slots 必须列全你要用的所有槽位，出现未知槽位会被拒绝；只允许这些槽位：
@@ -56,23 +58,56 @@ export const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或�
    swarm.workbench.tab（集群工作台页签）、chat.message.actions（聊天消息级按钮）。
 5. 用到宿主能力必须声明 permissions（可用：fs / shell / net / agent / llm）；未声明就调用会直接抛错。
    启用插件时软件会把申请的权限列给用户确认，所以不要多申请。
+   **fs 不等于能读任意路径**：只能读「用户在该插件里亲自选过」的文件 / 文件夹，且授权到本次运行结束
+   （软件重启后要重新选）。所以流程必须是 pickFiles() / pickDirectory() 让用户选一次 → 把路径存进
+   localStorage（键名带 aikm.plugin.<插件 id>. 前缀）→ 之后直接读；**写死绝对路径一定读不到**（报「未授权访问」）。
 6. 界面半边（client.entry 指向的文件）必须是**单文件 ESM 且没有任何 import/require**：
    宿主把源码包成 Blob URL 再 import，裸模块名（比如 'vue'）在 Blob 模块里无法解析。
    Vue 运行时由宿主注入：apply(ctx) 里从 ctx.vue 取 { h, defineComponent, ref, computed, watch, onMounted, onUnmounted, nextTick } 等。
+   界面半边**只有** ctx.vue 文档里列出的成员：**没有 ctx.service / ctx.mcp**（MCP 服务只给智能体用），也**没有 ctx.files.readFile**（读文件用 pickFiles/readText/readBase64/readSheet）——写不存在的 API 会在运行时直接抛错。
 7. 所有副作用必须可清理：定时器 / 事件监听 / 全局快捷键都要在 ctx.effect(() => 清理函数) 或组件的 onUnmounted 里撤销，
    否则禁用插件后它们还在跑（宿主只在卸载时撤销它自己记录的东西）。
 8. 组件的 onMounted / onUnmounted 必须在 defineComponent 的 setup() 里调用；在 setup 之外调用会报「无组件实例」。
 9. 文案中英双语：用 ctx.locale.pick({ zh: {...}, en: {...} })，不要在界面里写死中文。
+   ⚠️ **pick() / ref() 返回的是 ref（响应式对象），不是字符串**：取值必须写 text.value.title（切语言会自动更新）。
+   把它直接丢进 ctx.notify(...)、拼进模板字符串或与其它字符串相加，界面 / 提示里就会显示 "[object Object]"。
+   **提示只收字符串**：要一次性字符串用 ctx.locale.t(dict, 'key', { 参数 })，或先取 text.value.x 再自己拼。
 10. 样式必须跟随主题：颜色用 CSS 变量 --backgroundColor / --menuColor / --menuActiveColor / --borderColor /
     --fontColor / --fontActiveColor；需要滚动的容器加 class="scoll"（应用统一细滚动条）。
     原生 select / input 必须自己设紧凑宽度与显式前景/背景色（软件全局样式给的是 31px 高、宽度 calc(100%-10px)，深色主题下不设颜色会白底白字）。
+    ⚠️ **canvas / 图表是例外**：canvas 2D 的 fillStyle / strokeStyle **不认 CSS 变量**（写 'var(--fontColor)' 会被静默忽略，
+    表现为图表文字看不见或整块空白）。要真实颜色就
+    getComputedStyle(document.documentElement).getPropertyValue('--fontColor')，或直接写固定色值。
+    ⚠️ **图表必须由数据驱动重画——只在按钮点击里画，用户看到的就是空白**：用 watch(data, () => draw(), { flush: 'post' })
+    与 watch(viewMode, …) 在数据 / 视图变化后重画（或 await nextTick() 再画），别把绘制只挂在「挂载后的一个 setTimeout」上
+    （数据比定时器慢，就永远不画）；有多个图时**每个图各自判自己的 canvas**（if (!pieEl) return 只允许拦「当前要画的这个图」，
+    否则切到柱状图后一次都画不出来）；ResizeObserver 要观察**已经挂上 DOM 的** canvas（在 ref 回调里 observe，或 nextTick 后再 observe），
+    尺寸变了就重画；每次绘制都用 try/catch + ctx.log.warn 包住——一次抛错会中断整次绘制，用户只看到半张图或整块空白。
 11. 面板要横向铺满：外层用块级容器，不要在 flex 容器里只放一个卡片（flex 子元素在主轴方向不会被拉伸，卡片会缩成内容宽）。
 12. 面板高度不能撑大整个窗口：内容放在固定上限高度 + overflow:auto 的容器里，让面板内部滚动。
 13. 错误要自己兜住：try/catch + ctx.log.warn(...)，不要只 console.log（插件日志在「插件 → 管理 → 日志」里看）。
-14. 不要往界面里注入全局 CSS、不要改应用其它部分；插件只负责自己那部分 UI。`
+    绘图 / 解析这类「一抛错就整块空白」的代码尤其要包起来——canvas 绘制循环里一个变量名写错就会中断整次绘制，
+    用户只看到空白、日志里什么都没有，极难排查。
+14. 不要往界面里注入全局 CSS、不要改应用其它部分；插件只负责自己那部分 UI。
+15. **只调用本指南列出的宿主 API，不要凭名字猜**：两个半边各有一套 ctx，且**不能混用**——
+    界面半边（client.mjs）：plugin / config / vue / locale / llm / files / app / tts / shortcuts / slots / on / effect / notify / log；
+    主进程半边（index.mjs）：plugin / config / tool / service / getService / on / effect / host / storage / log。
+    也就是说界面半边**没有** ctx.service / ctx.mcp / ctx.host / ctx.storage / ctx.tool，主进程半边**没有** ctx.vue / ctx.files / ctx.slots。
+    真实翻车案例（都会在运行时抛 "is not a function"，面板表现为什么都不显示）：ctx.files.readFile、ctx.service('office', …)、
+    ctx.mcp.call、ctx.llm.chatStream。
+    并且要**按它标注的异步性与返回形状**用：
+    · ctx.files.* 全部是**异步**（pickFiles / pickDirectory / list / readText / readBase64 / readSheet / renderPdfPage / openInApp）——
+      必须写成 const res = await ctx.files.readSheet(path)；漏 await 不会报错，但 res.sheets 是 undefined，面板只会显示「文件为空」。
+    · pickFiles() 返回 { cancelled, files: [{ path, name, size }] }，**不是路径数组**：取消时 cancelled === true 且**不抛错**，
+      路径取 res.files[0].path；别用 try/catch 判取消（也不要判 e.message === 'cancelled'），别传 titleZh/titleEn 之类的自造参数。
+    · ctx.llm.models() / ctx.llm.chat() 同样是异步；返回结构见速查表。
+    交付前用 plugin_dev_check 自检，它会逐条报出「宿主没有这个成员 / 漏 await / 返回形状用错 / 观察器没断开」并列出可用成员。`
 
 export const CONSTRAINTS_EN = `[Hard constraints the host enforces]
-1. The folder name must equal the plugin id (aikm.id); a mismatch fails manifest validation.
+1. The folder name must equal the plugin id (aikm.id) and be ASCII lowercase: it must start with [a-z0-9] and contain only
+   [a-z0-9._-] (e.g. my-plugin). A folder named in Chinese, with uppercase letters or spaces is skipped entirely (the plugin never
+   appears in the list); a mismatch between id and folder name fails manifest validation. Put Chinese in aikm.name and ctx.locale —
+   never in the id / folder name or in tool names (tool names must be snake_case ASCII).
 2. package.json needs an "aikm" object: id / version / apiVersion are required, version like 1.0.0, apiVersion "^1".
 3. Declare main and/or client (main = main-process half, client.entry = UI half); paths must be relative to the plugin folder.
 4. declares.slots must list every slot you use; unknown slots are rejected. Allowed slots:
@@ -80,26 +115,63 @@ export const CONSTRAINTS_EN = `[Hard constraints the host enforces]
    swarm.workbench.tab (swarm workbench tab), chat.message.actions (per-message buttons).
 5. Host capabilities require permissions (fs / shell / net / agent / llm); calling without declaring throws. Users must confirm the requested
    permissions when enabling the plugin, so ask only for what you need.
+   **fs does not mean “any path”**: a plugin may only read files/folders the user picked *inside that plugin*, and the grant lasts until the
+   app exits (re-pick after a restart). So the flow is pickFiles() / pickDirectory() → store the path in localStorage (key prefixed with
+   aikm.plugin.<plugin id>.) → read it directly. **A hard-coded absolute path is never readable** (“not authorised”).
 6. The UI half (client.entry) must be a single-file ESM with NO imports/requires: the host loads it as a Blob URL module, so bare specifiers
    (e.g. 'vue') cannot resolve. Vue is injected: take { h, defineComponent, ref, computed, watch, onMounted, onUnmounted, nextTick } from ctx.vue.
+   The UI half has **only** the members documented for ctx: there is **no ctx.service / ctx.mcp** (MCP services are agent-only) and **no
+   ctx.files.readFile** (use pickFiles / readText / readBase64 / readSheet) — inventing APIs throws at runtime.
 7. Every side effect must be disposable: timers / listeners / global shortcuts must be released in ctx.effect(() => cleanup) or a component's onUnmounted,
    otherwise they keep running after the plugin is disabled.
 8. Call onMounted / onUnmounted inside a component's setup(); calling them outside warns "no component instance".
 9. Ship zh + en copy via ctx.locale.pick({ zh: {...}, en: {...} }).
+   ⚠️ **pick() / ref() return a ref (a reactive object), not a string**: read values as text.value.title (updates with the app language).
+   Feeding one straight into ctx.notify(...), a template literal or string concatenation renders "[object Object]" in the UI.
+   **notify only takes a string**: use ctx.locale.t(dict, 'key', { params }) for a one-off string, or read text.value.x first.
 10. Follow the theme: use CSS variables --backgroundColor / --menuColor / --menuActiveColor / --borderColor / --fontColor / --fontActiveColor;
     add class="scoll" to scrollable containers (app-wide thin scrollbar). Native select/input need explicit compact size and foreground/background
     colours (the app-wide rule is 31px tall, width calc(100% - 10px); without explicit colours they render white-on-white in dark themes).
+    ⚠️ **canvas / charts are the exception**: canvas 2D **does not resolve CSS variables** — fillStyle = 'var(--fontColor)' is silently
+    ignored (chart labels end up invisible, or the whole canvas looks blank). Use a literal colour, or read the real value with
+    getComputedStyle(document.documentElement).getPropertyValue('--fontColor').
+    ⚠️ **Charts must be redrawn when the data changes — painting only from a button click leaves the panel blank**:
+    redraw from watch(data, () => draw(), { flush: 'post' }) and watch(viewMode, …) (or await nextTick() first), never from a lone
+    setTimeout after mount (if the data arrives later than the timer, nothing is ever painted). With several charts, **each draw
+    must check its own canvas** (if (!pieEl) return may only guard the chart you are drawing, otherwise the bar chart never renders);
+    observe **an already-mounted** canvas with ResizeObserver (observe inside the ref callback, or after nextTick) and redraw on size
+    changes; wrap every paint in try/catch + ctx.log.warn — one throw aborts the whole paint, leaving a half-drawn chart or a blank area.
 11. Panels must fill the width: use block-level wrappers; a single card inside a flex container will not stretch on the main axis.
 12. Never grow the window: put content in a container with a max-height + overflow:auto so the panel scrolls internally.
-13. Handle errors yourself: try/catch + ctx.log.warn(...) (plugin logs are in Plugins → Manage → Logs).
-14. Do not inject global CSS or modify other parts of the app.`
+13. Handle errors yourself: try/catch + ctx.log.warn(...) (plugin logs are in Plugins → Manage → Logs). This matters most for drawing /
+    parsing code, where one thrown error blanks the whole panel: a single typo’d variable inside the canvas draw loop aborts the entire
+    paint, leaving an empty area with nothing in the logs.
+14. Do not inject global CSS or modify other parts of the app.
+15. **Only call the host APIs listed in this guide — never invent one from its name.** Each half has its own ctx and they are *not*
+    interchangeable. UI half (client.mjs): plugin / config / vue / locale / llm / files / app / tts / shortcuts / slots / on / effect /
+    notify / log. Main-process half (index.mjs): plugin / config / tool / service / getService / on / effect / host / storage / log.
+    So the UI half has **no** ctx.service / ctx.mcp / ctx.host / ctx.storage / ctx.tool, and the main half has **no** ctx.vue / ctx.files /
+    ctx.slots. Real failures (each throws “is not a function” and leaves the panel blank): ctx.files.readFile, ctx.service('office', …),
+    ctx.mcp.call, ctx.llm.chatStream. Correct calls: read a spreadsheet with ctx.files.readSheet(path), raw bytes with
+    ctx.files.readBase64(path), text with ctx.files.readText(path), and ask the user to pick a file with
+    ctx.files.pickFiles({ accept: 'any' }).
+    Also follow the documented **async-ness and return shapes**:
+    · every ctx.files.* method is **async** (pickFiles / pickDirectory / list / readText / readBase64 / readSheet /
+      renderPdfPage / openInApp) — always write const res = await ctx.files.readSheet(path). A missing await raises no error,
+      but res.sheets is undefined and the panel just says “file is empty”.
+    · pickFiles() returns { cancelled, files: [{ path, name, size }] }, **not an array of paths**: cancellation sets
+      cancelled === true and **does not throw**, so take res.files[0].path and never detect cancellation with try/catch
+      (nor by checking e.message === 'cancelled'), and do not invent options such as titleZh / titleEn.
+    · ctx.llm.models() / ctx.llm.chat() are async too; see the cheat sheet for their result shapes.
+    Run plugin_dev_check before delivering — it reports every member the host does not have, every missing await, wrong
+    return shape and undisconnected observer, together with the members that do exist.`
 
 /** API 速查（渲染成表格） */
 export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
   {
     name: 'package.json → aikm.id / name / version / apiVersion',
-    descZh: '插件 id（必须等于目录名）、显示名、版本、宿主 API 版本（写 "^1"）。',
-    descEn: 'Plugin id (must equal the folder name), display name, version, host API version ("^1").',
+    descZh: '插件 id（必须是 ASCII 小写 [a-z0-9._-] 且等于目录名）、显示名（可用中文）、版本、宿主 API 版本（写 "^1"）。',
+    descEn: 'Plugin id (ASCII lowercase [a-z0-9._-], must equal the folder name), display name (Chinese is fine here), version, host API version ("^1").',
   },
   {
     name: 'package.json → aikm.main',
@@ -147,14 +219,19 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Register a global shortcut; keys are not stolen while typing in inputs.',
   },
   {
+    name: 'ctx.locale.pick(dict) / ref(dict, key) / t(dict, key, params) / fixed(dict, language) / language',
+    descZh: '文案（中英双语）。**pick(dict) 与 ref(dict, key) 返回的是 ref，不是字符串**：写 const text = ctx.locale.pick({ zh: {...}, en: {...} })，取值用 text.value.title（切语言自动更新）；要一次性字符串用 t(dict, "key", { name }) 或 fixed(dict, "zh" | "en")。**把 ref 传给 ctx.notify()、拼进模板字符串或与字符串相加，界面 / 提示里就会显示 "[object Object]"**（真实翻车点）。en 缺项时逐项回退中文。',
+    descEn: 'Localised copy (zh + en). **pick(dict) and ref(dict, key) return a ref, not a string**: write const text = ctx.locale.pick({ zh: {...}, en: {...} }) and read text.value.title (updates with the app language); for a one-off string use t(dict, "key", { name }) or fixed(dict, "zh" | "en"). **Passing a ref to ctx.notify(), into a template literal or into string concatenation renders "[object Object]"** (a real failure mode). Missing en entries fall back to Chinese per key.',
+  },
+  {
     name: 'ctx.llm.chat({ source, model, system, messages, temperature, maxTokens, think, timeoutMs })',
     descZh: '调一次大模型（权限 llm）；ctx.llm.sources() / current() / models(source) 可用于下拉选择。',
     descEn: 'One-shot model call (permission llm); use sources() / current() / models(source) to build pickers.',
   },
   {
-    name: 'ctx.files.pickFiles / pickDirectory / list / readText / renderPdfPage / openInApp',
-    descZh: '文件能力（权限 fs）；PDF 会自动提取正文，renderPdfPage 把某页画成 PNG。只能访问用户在该插件里选过的路径。',
-    descEn: 'File capability (permission fs); PDF text is extracted automatically and renderPdfPage rasterises a page to PNG. Only paths the user picked for this plugin are readable.',
+    name: 'ctx.files.pickFiles / pickDirectory / list / readText / readBase64 / readSheet / renderPdfPage / openInApp',
+    descZh: '文件能力（权限 fs）。**这些方法全部返回 Promise，必须 await**；返回形状：pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] }（**取消时 cancelled=true，不抛错**，路径取 files[0].path）；readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] }（.xlsx/.xls/.csv，**界面半边没有 SheetJS，读表就用它**）；readText(path) → { text, pages, pdf }（PDF 自动提取正文）；readBase64(path) → { base64, size }；list(dir) → { dir, entries: [{ name, path, isDir, size }] }；renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }。只能访问用户在该插件里**选过**的路径，且授权仅本次运行有效（重启后要重新选）。',
+    descEn: 'File capability (permission fs). **Every method returns a Promise — always await.** Shapes: pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] } (**cancellation sets cancelled=true, it does not throw**; take files[0].path); readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } (.xlsx/.xls/.csv — **the UI half has no SheetJS, use this**); readText(path) → { text, pages, pdf }; readBase64(path) → { base64, size }; list(dir) → { dir, entries: [{ name, path, isDir, size }] }; renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }. Only paths the user picked for this plugin are readable, and the grant lasts for the current run only.',
   },
   {
     name: 'ctx.tts.speak(text, { stopPrevious }) / ctx.tts.stop() / ctx.tts.available / ctx.tts.reason',
@@ -167,9 +244,9 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Read-only list of configured agent presets (id / name) so users can pick a role.',
   },
   {
-    name: '界面半边：ctx.config / ctx.log / ctx.notify / ctx.on / ctx.effect',
-    descZh: '配置（设置页可编辑 JSON）、日志、轻提示、事件订阅、副作用登记（返回清理函数）；界面半边没有 storage，要持久化就用 localStorage（键名带插件 id 前缀）。',
-    descEn: 'Config (editable JSON in settings), logs, toasts, event subscription, side-effect registration (returns a disposer). The UI half has no storage — persist via localStorage with a plugin-id-prefixed key.',
+    name: '界面半边：ctx.config / ctx.log / ctx.notify(message) / ctx.on / ctx.effect',
+    descZh: '配置（设置页可编辑 JSON）、日志、轻提示、事件订阅、副作用登记（返回清理函数）。**ctx.notify(message) 只接受字符串**——传 ref / 对象进去，用户看到的提示就是 "[object Object]"（先取 .value 再传）。界面半边没有 storage，要持久化就用 localStorage（键名带插件 id 前缀）。',
+    descEn: 'Config (editable JSON in settings), logs, toasts, event subscription, side-effect registration (returns a disposer). **ctx.notify(message) only accepts a string** — pass a ref or an object and the toast reads "[object Object]" (read .value first). The UI half has no storage — persist via localStorage with a plugin-id-prefixed key.',
   },
   {
     name: '主进程半边：ctx.storage.{get,set,delete}',
@@ -231,10 +308,41 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
     aZh: '宿主会监视插件目录并自动重载；也可以手动点「插件 → 管理」里的重载按钮。界面元素随注册/撤销即时出现或消失，不需要重启软件。',
     aEn: 'The host watches the plugin folder and reloads automatically; you can also press Reload in Plugins → Manage. UI contributions appear/disappear immediately — no app restart needed.',
   },
+  {
+    qZh: '界面半边能不能调 MCP 服务 / 宿主内置服务（如用 office 服务解析 Excel）？',
+    qEn: 'Can the UI half call MCP or built-in host services (e.g. the office service to parse Excel)?',
+    aZh: '不能。界面半边只有 ctx 上列出的那些成员（**没有 ctx.service / ctx.mcp**），MCP 服务（office / 浏览器 / drawio 等）只暴露给智能体经 mcp_call 调用。插件要读表格请用 ctx.files.readSheet(path)（.xlsx/.xls/.csv），要读二进制用 ctx.files.readBase64(path)，要调外部服务请把它做成**主进程半边**的插件工具（ctx.tool）让智能体调用；写不存在的 API（如 ctx.files.readFile、ctx.service）会在运行时抛 "is not a function"。',
+    aEn: 'No. The UI half only has the members listed for ctx (**there is no ctx.service / ctx.mcp**); MCP services (office / browser / drawio …) are exposed to agents through mcp_call only. To read a spreadsheet use ctx.files.readSheet(path) (.xlsx/.xls/.csv), for raw bytes use ctx.files.readBase64(path), and for external services ship a **main-process half** tool (ctx.tool) the agent can call. Inventing APIs (ctx.files.readFile, ctx.service …) throws “is not a function” at runtime.',
+  },
+  {
+    qZh: '图表 / 画布（canvas）不显示，或页面空白（含「必须点一下按钮才出图」「柱状图永远不显示」）',
+    qEn: 'The chart / canvas shows nothing, or the panel goes blank (including “it only appears after clicking a button” and “the bar chart never shows up”).',
+    aZh: '三个常见坑：① **canvas 2D 不认 CSS 变量**——`ctx2d.fillStyle = "var(--fontColor)"` 会被忽略（用固定色，或 `getComputedStyle(document.documentElement).getPropertyValue("--fontColor")` 取真值）；② 绘制代码里变量名写错（如把 `s` 写成未定义的 `item`）会抛错并中断整次绘制，只画出一部分——绘制函数要 try/catch 并用 ctx.log.warn 记下来；③ 尺寸依赖容器的要在数据变化后重画，且 ResizeObserver / 定时器要断开（ctx.effect 或 onUnmounted），否则重载后会越画越乱；④ **只在按钮点击里重画**——数据到位后没有任何东西触发重画，canvas 就一直是空的（要么 watch(data, () => draw(), { flush: "post" }) / await nextTick() 后重画，要么画在 ref 回调里；别只依赖「挂载后的一个 setTimeout」，数据比定时器慢就永远不画）；⑤ **guard 写错会连带拦掉另一个图**——onResize 里用 `if (!pieEl) return` 判「要不要画」，切到柱状图时 pieEl 是 null（ref 回调把它置空了），于是柱状图一次都不画：**每个图各自判自己的 canvas**。',
+    aEn: 'Three classic traps: ① **canvas 2D does not resolve CSS variables** — ctx2d.fillStyle = "var(--fontColor)" is silently ignored (use literal colours, or read the real value via getComputedStyle(document.documentElement).getPropertyValue("--fontColor")); ② a typo’d variable in the draw loop (e.g. an undefined `item` instead of `s`) throws and aborts the whole paint, leaving a half-drawn chart — wrap the draw call in try/catch and ctx.log.warn; ③ redraw when data changes, and disconnect ResizeObserver / timers (ctx.effect or onUnmounted) so reloads do not pile up; ④ **drawing only from a click handler** — nothing redraws when the data arrives, so the canvas stays blank (redraw from watch(data, () => draw(), { flush: "post" }) / after await nextTick(), or paint inside the ref callback; never rely on a single setTimeout after mount, because data that arrives later than the timer is never painted); ⑤ **a wrong guard can block the other chart** — deciding “should I draw?” with `if (!pieEl) return` breaks the bar chart, because switching views nulls pieEl in the ref callback, so the bar chart is never painted: **each draw must check its own canvas**.',
+  },
+  {
+    qZh: '界面文案或提示显示 "[object Object]"',
+    qEn: 'The UI shows “[object Object]” instead of text.',
+    aZh: '把 ctx.locale.pick(...) / ref(...) 的返回值当字符串用了：它们返回的是 **ref**，取值要写 text.value.title（示例：const text = ctx.locale.pick({ zh: {...}, en: {...} })，再 h("div", null, text.value.title)）。传进 ctx.notify(...)、拼进模板字符串（`${ctx.locale.pick(...)}`）或与字符串相加，都会得到 "[object Object]"。要一次性字符串就用 ctx.locale.t(dict, "key", { 参数 })，或先取 .value 再拼。',
+    aEn: 'A ref returned by ctx.locale.pick(...) / ref(...) was used as a string: those return a **ref**, so read values with text.value.title (e.g. const text = ctx.locale.pick({ zh: {...}, en: {...} }); h("div", null, text.value.title)). Passing one to ctx.notify(...), into a template literal (`${ctx.locale.pick(...)}`) or into string concatenation all yield "[object Object]". For a one-off string use ctx.locale.t(dict, "key", { params }), or read .value first.',
+  },
+  {
+    qZh: '读文件报「未授权访问」',
+    qEn: 'Reading a file fails with “not authorised”.',
+    aZh: '插件只能读**用户在该插件里亲自选过**的路径（写死的绝对路径不算），且授权只到本次运行结束（软件重启后要重新选）。所以流程是：await ctx.files.pickFiles() 让用户选一次 → 把 res.files[0].path 存起来（localStorage `aikm.plugin.<插件 id>.*`）→ 之后直接读；万一报未授权，就再次弹选择框让用户确认。',
+    aEn: 'A plugin may only read paths the user picked **inside that plugin** (a hard-coded absolute path is not authorised), and the grant lasts until the app exits (re-pick after a restart). So: `await ctx.files.pickFiles()` once, store `res.files[0].path` (localStorage `aikm.plugin.<id>.*`), then read it directly — and if a read is refused, ask the user to pick again.',
+  },
+  {
+    qZh: '选了文件却「没有数据」/ 面板一直显示空（忘了 await 或返回形状用错）',
+    qEn: 'Nothing happens after picking a file, or the panel keeps saying “no data”.',
+    aZh: '两个高频原因：① **忘记 await**——`ctx.files.*` 全部返回 Promise，`const res = ctx.files.readSheet(p)` 拿到的是 Promise，`res.sheets` 是 undefined（不报错，所以很难发现）；② **pickFiles 的返回形状**：它返回 `{ cancelled, files: [{ path, name, size }] }`，不是路径数组，所以 `files.length` / `files[0]` 都不对，正确写法是 `const res = await ctx.files.pickFiles({ accept: "any" }); if (res.cancelled || !res.files.length) return; const path = res.files[0].path`（用户取消时**不抛错**，别用 try/catch 判取消）。plugin_dev_check 会把这两种情况静态报出来。',
+    aEn: 'Two usual causes: ① **a missing await** — every `ctx.files.*` call returns a Promise, so `const res = ctx.files.readSheet(p)` yields a Promise and `res.sheets` is undefined (no error is thrown, which is why it is so hard to spot); ② **the pickFiles shape** — it returns `{ cancelled, files: [{ path, name, size }] }`, not an array of paths, so `files.length` / `files[0]` are both wrong; the correct form is `const res = await ctx.files.pickFiles({ accept: "any" }); if (res.cancelled || !res.files.length) return; const path = res.files[0].path` (cancellation **does not throw**, so never detect it with try/catch). plugin_dev_check reports both statically.',
+  },
 ]
 
 /** 「如何使用插件」给人看的步骤 */
-export const PLUGIN_DEV_USAGE_ZH = `1) 安装：插件文件夹放进插件目录（可直接放，也可按用途放进各级子文件夹——管理页能看出它属于哪个文件夹），或「设置 → 插件 → 管理 → 从文件夹安装」；插件目录可改成自己的文件夹（和技能一样），点「打开插件目录」即可查看。手动放进新插件后点管理页目录栏的「重新扫描」即可发现（不必重启软件）。
+export const PLUGIN_DEV_USAGE_ZH = `0) 命名（先定好，避免返工）：**插件文件夹名必须等于清单 aikm.id，且只能是 ASCII 小写 [a-z0-9._-]**（如 my-plugin）。文件夹名带中文 / 大写 / 空格时宿主会直接跳过这个文件夹（插件根本不出现，管理页会给提示），只能改名重来；中文请写进 aikm.name 与界面文案。
+1) 安装：插件文件夹放进插件目录（可直接放，也可按用途放进各级子文件夹——管理页能看出它属于哪个文件夹），或「设置 → 插件 → 管理 → 从文件夹安装」；插件目录可改成自己的文件夹（和技能一样），点「打开插件目录」即可查看。手动放进新插件后点管理页目录栏的「重新扫描」即可发现（不必重启软件）。
 2) 启用：点启用按钮 → 弹窗会列出该插件申请的权限（文件 / 执行命令 / 网络 / 会话日志 / 大模型），确认后才会加载。停用后它加的界面元素与工具立即消失。
 3) 用它：
    · 主面板 —— 左侧或底部的导航栏会出现它的按钮（图标 + 名称）；
@@ -247,7 +355,8 @@ export const PLUGIN_DEV_USAGE_ZH = `1) 安装：插件文件夹放进插件目�
 5) 排障：插件 → 管理 → 日志（能看到它自己打的信息）；「详情」里有清单、槽位、权限与加载状态。
 6) 卸载：点移除（可选择是否删除插件文件夹）。`
 
-export const PLUGIN_DEV_USAGE_EN = `1) Install: drop the folder into the plugins folder (directly, or grouped by purpose in nested subfolders — the manager shows which folder each plugin belongs to), or use Plugins → Manage → Install from folder. The plugins folder can be moved to your own directory (like skills) — use “Open plugins folder”. Click “Rescan” in the folder bar to pick up manually added plugins (no restart needed).
+export const PLUGIN_DEV_USAGE_EN = `0) Naming (decide this first to avoid rework): **the plugin folder name must equal the manifest aikm.id and be ASCII lowercase [a-z0-9._-]** (e.g. my-plugin). A folder with Chinese characters, uppercase letters or spaces is skipped by the host (the plugin never shows up — the manager will say so) and only a rename fixes it; put Chinese in aikm.name and the UI copy.
+1) Install: drop the folder into the plugins folder (directly, or grouped by purpose in nested subfolders — the manager shows which folder each plugin belongs to), or use Plugins → Manage → Install from folder. The plugins folder can be moved to your own directory (like skills) — use “Open plugins folder”. Click “Rescan” in the folder bar to pick up manually added plugins (no restart needed).
 2) Enable: press Enable — a dialog lists the permissions it requests (files / commands / network / session logs / models). It loads only after you confirm. Disabling removes its UI contributions and tools instantly.
 3) Use it:
    · Main panel — a button (icon + name) shows up in the left or bottom nav;
@@ -291,13 +400,13 @@ ${CONSTRAINTS_ZH}
 界面半边 apply(ctx)：
 - ctx.plugin → { id, name, version, dir }；ctx.config → 用户在「插件 → 配置」里保存的 JSON（只读快照）
 - ctx.vue → { h, defineComponent, ref, shallowRef, reactive, computed, watch, watchEffect, onMounted, onUnmounted, onBeforeUnmount, nextTick, toRef, toRefs, markRaw, provide, inject, KeepAlive, Teleport, Transition, Fragment }
-- ctx.locale.pick({ zh: {...}, en: {...} }) → 拿到跟随语言切换的文案对象
-- ctx.log.{debug,info,warn,error}(...)、ctx.notify(message)（轻提示）
+- ctx.locale.pick({ zh: {...}, en: {...} }) → 拿到跟随语言切换的文案 **ref**：const text = ctx.locale.pick({...})，取值写 text.value.title（**它本身不是字符串**）；要一次性字符串用 ctx.locale.t({ zh, en }, 'key', { 参数 })
+- ctx.log.{debug,info,warn,error}(...)、ctx.notify(message)（轻提示，**只收字符串**——传 ref 会显示 "[object Object]"）
 - ctx.shortcuts.register('Ctrl+Shift+H', handler, { descriptionZh, descriptionEn })
 - ctx.slots.register(slot, { key, titleZh, titleEn, icon, order, component, meta })
 - ctx.on(type, listener) → 返回取消订阅函数；ctx.effect(fn) → 登记副作用并自动清理
 - ctx.llm（需要 llm 权限）：{ available, reason, sources(), current(), models(source), chat({ source, model, system, messages, temperature, maxTokens, think, timeoutMs }) }
-- ctx.files（需要 fs 权限）：{ available, reason, pickFiles({ accept, multiple }), pickDirectory(), list(dir), readText(path), renderPdfPage(path, { page, scale, maxWidth }), openInApp(path, view) }
+- ctx.files（需要 fs 权限，**全部是异步，必须 await**）：{ available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] }（取消时 cancelled=true 且不抛错，路径取 files[0].path）, pickDirectory() → { cancelled, dir: { path, name } }, list(dir) → { entries: [{ name, path, isDir, size }] }, readText(path) → { text, pages, pdf }, readBase64(path) → { base64, size }, readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] }（.xlsx/.xls/.csv，界面半边没有 SheetJS）, renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
 - ctx.app.agentPresets() → [{ id, name }]
 主进程半边 apply(ctx)：
 - export const inject = ['tools']（要用工具注册表时必须声明）
@@ -306,12 +415,14 @@ ${CONSTRAINTS_ZH}
 - ctx.log.*、ctx.host.notify(message)、ctx.shell.runShell(command, { cwd })、ctx.net.fetch(url, init)、ctx.sessions.list()
 
 【实现要求】
-1. 先给清单（package.json），再给代码；清单里的 id、目录名、文件名要互相一致，我会把目录名起成清单里的 id。
-2. declares.tools / declares.slots 必须与代码里实际注册的一致。
-3. 界面半边只用渲染函数（h(...)）写，不写模板字符串模板语法，不写 import。
-4. 代码要有中文注释解释关键取舍（为什么这样设计），并在 README.md 里写清使用步骤。
-5. 如果功能需要大模型，请把提示词写清楚，并对模型返回的 JSON 做容错（解析失败要有兜底，不能崩）。
-6. 结束时自查一遍：权限是否都申请了、副作用是否都清理了、offline（模型不可用）时是否还能跑。`,
+1. 命名规则（**先定好，避免返工**）：插件**目录名必须等于清单 aikm.id**，且只能用 ASCII 小写字母/数字开头、只含 \`[a-z0-9._-]\`（例：my-plugin）。目录名带中文 / 大写 / 空格时宿主会**整目录跳过**（插件根本不会出现在列表里），只能改名重来——所以先给出英文 id 与目录名，再写文件。中文写进清单的 aikm.name（显示名）与界面文案。
+2. 先给清单（package.json），再给代码；清单里的 id、目录名、文件名要互相一致，我会把目录名起成清单里的 id。
+3. declares.tools / declares.slots 必须与代码里实际注册的一致。
+4. 界面半边只用渲染函数（h(...)）写，不写模板字符串模板语法，不写 import。
+5. 代码要有中文注释解释关键取舍（为什么这样设计），并在 README.md 里写清使用步骤。
+6. 如果功能需要大模型，请把提示词写清楚，并对模型返回的 JSON 做容错（解析失败要有兜底，不能崩）。
+7. 结束时自查一遍：权限是否都申请了、副作用是否都清理了、offline（模型不可用）时是否还能跑。
+8. **只用上面【宿主 API】列出的成员**（界面半边 / 主进程半边各一套，不能混用）；不要凭名字猜 API——ctx.files.readFile、ctx.service、ctx.mcp、ctx.storage（界面半边）都不存在，读表格用 ctx.files.readSheet(path)、读二进制用 ctx.files.readBase64(path)、让用户选文件用 ctx.files.pickFiles({ accept: 'any' })。`,
     bodyEn: `You are a plugin developer for AI-KM (a local-first knowledge management desktop app built with Vue 3 + Electron). Implement a ready-to-run AI-KM plugin for me.
 
 [Deliverables] Output file contents only, in the format below, with nothing omitted and no “rest omitted” placeholders:
@@ -333,13 +444,13 @@ ${CONSTRAINTS_EN}
 UI half apply(ctx):
 - ctx.plugin → { id, name, version, dir }; ctx.config → JSON saved by the user in Plugins → Config (read-only snapshot)
 - ctx.vue → { h, defineComponent, ref, shallowRef, reactive, computed, watch, watchEffect, onMounted, onUnmounted, onBeforeUnmount, nextTick, toRef, toRefs, markRaw, provide, inject, KeepAlive, Teleport, Transition, Fragment }
-- ctx.locale.pick({ zh: {...}, en: {...} }) → copy that follows the app language
-- ctx.log.{debug,info,warn,error}(...), ctx.notify(message) (toast)
+- ctx.locale.pick({ zh: {...}, en: {...} }) → a **ref** of the language-aware copy: const text = ctx.locale.pick({...}); read text.value.title (**it is not a string**); for a one-off string use ctx.locale.t({ zh, en }, 'key', { params })
+- ctx.log.{debug,info,warn,error}(...), ctx.notify(message) (toast) — **message must be a string** (a ref renders "[object Object]")
 - ctx.shortcuts.register('Ctrl+Shift+H', handler, { descriptionZh, descriptionEn })
 - ctx.slots.register(slot, { key, titleZh, titleEn, icon, order, component, meta })
 - ctx.on(type, listener) → returns an unsubscribe function; ctx.effect(fn) → registers a disposable side effect
 - ctx.llm (needs the llm permission): { available, reason, sources(), current(), models(source), chat({ source, model, system, messages, temperature, maxTokens, think, timeoutMs }) }
-- ctx.files (needs the fs permission): { available, reason, pickFiles({ accept, multiple }), pickDirectory(), list(dir), readText(path), renderPdfPage(path, { page, scale, maxWidth }), openInApp(path, view) }
+- ctx.files (needs the fs permission; **every method is async — always await**): { available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] } (cancellation sets cancelled=true and does not throw; take files[0].path), pickDirectory() → { cancelled, dir: { path, name } }, list(dir) → { entries: [{ name, path, isDir, size }] }, readText(path) → { text, pages, pdf }, readBase64(path) → { base64, size }, readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } (.xlsx/.xls/.csv — the UI half has no SheetJS), renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
 - ctx.app.agentPresets() → [{ id, name }]
 Main-process half apply(ctx):
 - export const inject = ['tools'] (required when using the tool registry)
@@ -348,12 +459,14 @@ Main-process half apply(ctx):
 - ctx.log.*, ctx.host.notify(message), ctx.shell.runShell(command, { cwd }), ctx.net.fetch(url, init), ctx.sessions.list()
 
 [Implementation requirements]
-1. Manifest first, then code; ids/filenames must agree with each other, and I will name the folder after the manifest id.
-2. declares.tools / declares.slots must match what the code registers.
-3. Write the UI half with render functions h(...) only — no template syntax, no imports.
-4. Add comments explaining key trade-offs and put usage steps in README.md.
-5. If the feature needs a model, write a precise prompt and make JSON parsing fault-tolerant (a bad reply must not crash the plugin).
-6. Self-check before answering: are all permissions declared, are all side effects disposable, and does it still work when no model is available?`,
+1. Naming rule (**settle this first to avoid rework**): the plugin folder name must equal the manifest’s aikm.id and be ASCII lowercase — starting with [a-z0-9] and containing only [a-z0-9._-] (e.g. my-plugin). A folder named in Chinese, with uppercase letters or spaces is skipped entirely by the host (the plugin never shows up in the list) and only a rename fixes it — so decide the English id and folder name before writing files. Chinese belongs in aikm.name (display name) and in the UI copy.
+2. Manifest first, then code; ids/filenames must agree with each other, and I will name the folder after the manifest id.
+3. declares.tools / declares.slots must match what the code registers.
+4. Write the UI half with render functions h(...) only — no template syntax, no imports.
+5. Add comments explaining key trade-offs and put usage steps in README.md.
+6. If the feature needs a model, write a precise prompt and make JSON parsing fault-tolerant (a bad reply must not crash the plugin).
+7. Self-check before answering: are all permissions declared, are all side effects disposable, and does it still work when no model is available?
+8. **Use only the members listed under [Host API] above** (each half has its own set; they are not interchangeable). Never invent an API from its name — ctx.files.readFile, ctx.service, ctx.mcp and ctx.storage (UI half) do not exist. Read a spreadsheet with ctx.files.readSheet(path), raw bytes with ctx.files.readBase64(path), and ask the user to pick a file with ctx.files.pickFiles({ accept: 'any' }).`,
   },
   {
     key: 'panel',
@@ -367,7 +480,7 @@ Main-process half apply(ctx):
 <描述面板长什么样：几栏布局、有哪些控件、点击后做什么>
 
 【插件信息】
-- 插件 id / 目录名：<my-panel>
+- 插件 id / 目录名：<my-panel>（**只能是 ASCII 小写 [a-z0-9._-]，不能用中文 / 大写 / 空格**——中文目录名会被宿主整目录跳过；中文写进清单的 aikm.name）
 - 面板导航名：<面板名>（同时给英文名），图标用 FontAwesome 4 类名（如 "fa fa-heartbeat"）
 
 ${CONSTRAINTS_ZH}
@@ -387,7 +500,7 @@ ${CONSTRAINTS_ZH}
 <describe the panel: layout, controls, what clicking does>
 
 [Plugin info]
-- Plugin id / folder name: <my-panel>
+- Plugin id / folder name: <my-panel> (ASCII lowercase [a-z0-9._-] only — no Chinese, uppercase or spaces: a Chinese folder name is skipped entirely by the host; write Chinese in the manifest’s aikm.name)
 - Panel nav title: <name> (also provide English), icon as a FontAwesome 4 class (e.g. "fa fa-heartbeat")
 
 ${CONSTRAINTS_EN}
@@ -401,6 +514,59 @@ ${CONSTRAINTS_EN}
 - Add a one-line usage hint in the panel or its settings tab, and document usage in README.md.`,
   },
   {
+    key: 'chart',
+    titleZh: '图表面板模板：canvas 图表（饼图 / 柱状图切换）',
+    titleEn: 'Chart panel template: canvas charts (pie / bar)',
+    descZh:
+      '适合「选一个 Excel / CSV，按某一列分组画图」这类需求。**图表插件的失败几乎全在绘制时机上**（只在按钮点击里画、guard 拦错图、观察器挂在还没渲染的 canvas 上），这段模板把这些写法直接钉死。整段粘给大模型即可。',
+    descEn:
+      'For “pick an Excel / CSV and chart one column”. **Chart plugins fail almost entirely on drawing timing** (painting only from a click handler, a guard that blocks the other chart, an observer attached to a canvas that does not exist yet); this template pins those patterns down. Paste the whole block into your model.',
+    bodyZh: `请为 AI-KM（Vue3 + Electron 桌面应用）写一个「图表」插件：面板里选一个 Excel / CSV，按用户选的一列（如「领域」）分组统计，再用 canvas 画图，支持饼图 / 柱状图切换。
+
+【插件信息】
+- 插件 id / 目录名：<my-chart>（**只能是 ASCII 小写 [a-z0-9._-]，不能用中文 / 大写 / 空格**——中文目录名会被宿主整目录跳过）；permissions: ["fs"]；declares.slots: ["panel.main"]
+
+${CONSTRAINTS_ZH}
+
+【图表要点（照这段写；图表插件的失败几乎全在「绘制时机」上）】
+1. 取数据只用 ctx.files.pickFiles({ accept: 'any' }) 与 await ctx.files.readSheet(path)（返回 { sheetCount, sheets: [{ name, headers, rows, truncated }] }，rows 第一行是表头）；按表头名找列（headers.indexOf('领域')），找不到就给可读提示；选过的路径存进 localStorage（键名 aikm.plugin.<插件 id>.filePath）方便下次载入，**自动载入失败也要提示用户重新选**（软件重启后授权失效）。
+2. 状态与绘制分开：
+   const data = ref([]); const viewMode = ref('pie'); const pieEl = ref(null); const barEl = ref(null)
+   function draw() { try { if (viewMode.value === 'pie') drawPie(pieEl.value, data.value); else drawBar(barEl.value, data.value) } catch (e) { ctx.log.warn('[my-chart] 绘制失败', e) } }
+3. **数据 / 视图变化后自动重画**（只在按钮 onClick 里画，用户选完文件看到的就是空白 canvas）：
+   watch([data, viewMode], () => draw(), { flush: 'post' })
+   canvas 的 ref 回调里也画一次：ref: el => { pieEl.value = el; if (el) { observer.observe(el); draw() } }
+4. **每个图各自判自己的 canvas**：drawPie(canvas, rows) 第一行写 if (!canvas) return，drawBar 同理；**不要**写 if (!pieEl) return 这种「用另一个图的 ref 决定要不要画」的判定——切到柱状图时 pieEl 已被置空，柱状图就永远不画。
+5. canvas 尺寸与配色：const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1; canvas.width = rect.width * dpr; canvas.height = rect.height * dpr; const c = canvas.getContext('2d'); c.scale(dpr, dpr)。颜色写固定色值（canvas 2D **不认 CSS 变量**）；容器还没宽度时（rect.width < 2）直接 return，等 ResizeObserver 再画。
+6. ResizeObserver 只观察**已经挂上 DOM 的** canvas（在 ref 回调里 observe），onUnmounted 里 disconnect()；onMounted 里的 setTimeout 只作兜底，不能是唯一的重画入口。
+7. 数据多时只画前 12 项、其余合并成「其它」，图例放右侧；无数据时清屏后画一句「暂无数据」（不清屏会叠字）。
+8. 文案中英双语（ctx.locale.pick，取值写 text.value.x），提示只传字符串：ctx.notify(text.value.loaded)。
+
+【交付物】按 === package.json === / === client.mjs === / === README.md === 分段给出完整文件内容，不要省略、不要写「此处略」。`,
+    bodyEn: `Write an AI-KM (Vue 3 + Electron desktop app) “chart” plugin: pick an Excel / CSV in the panel, group rows by a chosen column (e.g. “Domain”) and draw the result on a canvas, with pie / bar switching.
+
+[Plugin info]
+- Plugin id / folder name: <my-chart> (**ASCII lowercase [a-z0-9._-] only — no Chinese, uppercase or spaces**; a Chinese folder name is skipped entirely by the host); permissions: ["fs"]; declares.slots: ["panel.main"]
+
+${CONSTRAINTS_EN}
+
+[Chart essentials — follow these; chart plugins fail almost entirely on drawing timing]
+1. Read data only through ctx.files.pickFiles({ accept: 'any' }) and await ctx.files.readSheet(path) (returns { sheetCount, sheets: [{ name, headers, rows, truncated }] }; rows[0] is the header row). Find the column by header name (headers.indexOf('Domain')) and show a readable message when it is missing. Keep the picked path in localStorage (key aikm.plugin.<plugin id>.filePath) so it can load next time, and **ask the user to pick again when the automatic load fails** (the grant expires when the app restarts).
+2. Keep state and painting apart:
+   const data = ref([]); const viewMode = ref('pie'); const pieEl = ref(null); const barEl = ref(null)
+   function draw() { try { if (viewMode.value === 'pie') drawPie(pieEl.value, data.value); else drawBar(barEl.value, data.value) } catch (e) { ctx.log.warn('[my-chart] draw failed', e) } }
+3. **Redraw whenever the data or the view mode changes** (painting only from a button onClick leaves the user staring at a blank canvas after picking a file):
+   watch([data, viewMode], () => draw(), { flush: 'post' })
+   and paint once from the canvas ref callback too: ref: el => { pieEl.value = el; if (el) { observer.observe(el); draw() } }
+4. **Each draw checks its own canvas**: start drawPie(canvas, rows) with if (!canvas) return, and the same in drawBar. Never decide “should I draw?” with if (!pieEl) return — switching to the bar chart has already nulled pieEl, so the bar chart would never render.
+5. Canvas size and colours: const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1; canvas.width = rect.width * dpr; canvas.height = rect.height * dpr; const c = canvas.getContext('2d'); c.scale(dpr, dpr). Use literal colour values (canvas 2D **does not resolve CSS variables**). Return early while the container has no width (rect.width < 2) and let ResizeObserver paint later.
+6. A ResizeObserver may only observe **an already-mounted** canvas (observe inside the ref callback) and must be disconnected in onUnmounted. The setTimeout in onMounted is a fallback, never the only way to draw.
+7. With many rows draw the top 12 and fold the rest into “Other”, with the legend on the right; with no data clear the canvas and paint a single “no data” line (otherwise old text stacks up).
+8. Keep zh + en copy via ctx.locale.pick (read text.value.x) and pass strings to ctx.notify(text.value.loaded).
+
+[Deliverable] Full file contents under === package.json === / === client.mjs === / === README.md === headers; nothing omitted, no “rest omitted” placeholders.`,
+  },
+  {
     key: 'tool',
     titleZh: '工具插件模板：给智能体加一个工具',
     titleEn: 'Tool plugin template: add an agent tool',
@@ -412,7 +578,7 @@ ${CONSTRAINTS_EN}
 <例如：把一段文字做统计并返回字数 / 调用本地 xxx 命令 / 读取某个目录下的文件清单>
 
 【插件信息】
-- 插件 id / 目录名：<my-tool>
+- 插件 id / 目录名：<my-tool>（**只能是 ASCII 小写 [a-z0-9._-]，不能用中文 / 大写 / 空格**——中文目录名会被宿主整目录跳过；中文写进清单的 aikm.name）
 - 工具名（蛇形命名，唯一）：<my_tool_action>；一句话描述（会展示给模型，直接影响它会不会用）
 
 ${CONSTRAINTS_ZH}
@@ -431,7 +597,7 @@ ${CONSTRAINTS_ZH}
 <e.g. count characters of a text / call a local command / list files under a directory>
 
 [Plugin info]
-- Plugin id / folder name: <my-tool>
+- Plugin id / folder name: <my-tool> (ASCII lowercase [a-z0-9._-] only — no Chinese, uppercase or spaces: a Chinese folder name is skipped entirely by the host; write Chinese in the manifest’s aikm.name)
 - Tool name (snake_case, unique): <my_tool_action>; one-line description (shown to the model — it decides whether the agent uses the tool)
 
 ${CONSTRAINTS_EN}
@@ -457,13 +623,17 @@ ${CONSTRAINTS_EN}
 <例如：选一个 PDF → 提取正文 → 让大模型按指定要求给结论 → 结果可复制导出>
 
 【插件信息】
-- 插件 id / 目录名：<my-ai-plugin>；permissions: ["llm", "fs"]
+- 插件 id / 目录名：<my-ai-plugin>（**只能是 ASCII 小写 [a-z0-9._-]，不能用中文 / 大写 / 空格**——中文目录名会被宿主整目录跳过；中文写进清单的 aikm.name）；permissions: ["llm", "fs"]
 
 ${CONSTRAINTS_ZH}
 
 【写法要点】
-- 选文件/文件夹：ctx.files.pickFiles({ accept: 'pdf', multiple: false }) / ctx.files.pickDirectory()；返回的路径是后续唯一可读的路径（主进程只授权用户选过的文件）；
-- 读文本：ctx.files.readText(path) → { text, pages, pdf }（PDF 由主进程提取正文，可能有页数/字数上限，按返回值展示真实页数）；
+- 选文件/文件夹：await ctx.files.pickFiles({ accept: 'any' }) / await ctx.files.pickDirectory()；返回的路径是后续唯一可读的路径（主进程只授权用户选过的文件）；
+- 读文本：await ctx.files.readText(path) → { text, pages, pdf }（PDF 由主进程提取正文，可能有页数/字数上限，按返回值展示真实页数）；
+- 读表格：await ctx.files.readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] }（.xlsx / .xls / .csv；界面半边没有 SheetJS，不要自己解析二进制；按表头名取列，注意 truncated 说明被截断）；
+- 读二进制：await ctx.files.readBase64(path) → { base64, size }（图片等自定义解析用，默认上限 40MB）；
+- ⚠️ **ctx.files 全部是异步**：忘 await 不会报错，但读 res.sheets / res.text 会得到 undefined（面板只会显示「数据为空」）；
+  另外 **pickFiles 的返回值不是路径数组**——是 { cancelled, files: [{ path, name, size }] }，取消时 cancelled=true 且不抛错；
 - 图片预览：ctx.files.renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }，用 <img src=${'$'}{dataUrl} style="display:block;margin:0 auto;width:auto;height:auto;max-width:100%;max-height:100%"> 展示（预览框要 flex 居中并设 max-height，免得页面下方留空白）；
 - 调模型：先检查 ctx.llm.available，不可用时在界面上给出可读原因（ctx.llm.reason）并允许降级；来源/模型下拉用 ctx.llm.sources() 与 ctx.llm.models(source)（本地服务可先拉清单），留空表示跟随设置；
 - 提示词要求模型只输出 JSON，并写一个容错的解析函数（去代码块围栏、截取第一个 { … } / [ … ]，解析失败要给可读错误 + 原始回复前 600 字）；
@@ -476,13 +646,18 @@ ${CONSTRAINTS_ZH}
 <e.g. pick a PDF → extract text → ask the model for a verdict → let the user copy/export the result>
 
 [Plugin info]
-- Plugin id / folder name: <my-ai-plugin>; permissions: ["llm", "fs"]
+- Plugin id / folder name: <my-ai-plugin> (ASCII lowercase [a-z0-9._-] only — no Chinese, uppercase or spaces: a Chinese folder name is skipped entirely by the host; write Chinese in the manifest’s aikm.name); permissions: ["llm", "fs"]
 
 ${CONSTRAINTS_EN}
 
 [Implementation notes]
-- Pick files/folders with ctx.files.pickFiles({ accept: 'pdf', multiple: false }) / ctx.files.pickDirectory(); only paths the user picked become readable (the main process authorises exactly those).
-- Read text with ctx.files.readText(path) → { text, pages, pdf } (the main process extracts PDF text; honour any page/char limits and show the real page count).
+- Pick files/folders with await ctx.files.pickFiles({ accept: 'pdf', multiple: false }) / await ctx.files.pickDirectory(); only paths the user picked become readable (the main process authorises exactly those).
+- Read text with await ctx.files.readText(path) → { text, pages, pdf } (the main process extracts PDF text; honour any page/char limits and show the real page count).
+- Read spreadsheets with await ctx.files.readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } (.xlsx / .xls / .csv; the UI half has no SheetJS — never parse binary yourself; index columns by header name and surface truncated).
+- Read raw bytes with await ctx.files.readBase64(path) → { base64, size } (for images and custom parsing; 40MB default cap).
+- ⚠️ **every ctx.files method is async**: a missing await throws nothing, but res.sheets / res.text come back undefined (the panel then
+  just says “data is empty”). And **pickFiles does not return an array of paths** — it returns { cancelled, files: [{ path, name, size }] };
+  cancellation sets cancelled=true and does not throw.
 - Preview pages with ctx.files.renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, rendered as <img src=${'$'}{dataUrl} style="display:block;margin:0 auto;width:auto;height:auto;max-width:100%;max-height:100%"> (centre the preview with flex and cap its height so no blank space is left below).
 - Call the model after checking ctx.llm.available; when unavailable show ctx.llm.reason and degrade gracefully. Build source/model pickers from ctx.llm.sources() and ctx.llm.models(source) (local servers can list models first); an empty value means “follow the app setting”.
 - Instruct the model to reply with JSON only and write a tolerant parser (strip code fences, take the first { … } / [ … ], and on failure show a readable error plus the first 600 characters of the raw reply).
@@ -546,7 +721,7 @@ Then output the corrected complete files and tell me what to do in the app (e.g.
 ]
 
 /** 从零开始的最小可用示例（和仓库 examples/plugins/hello-panel 一致） */
-export const PLUGIN_DEV_MINIMAL_ZH = `目录（目录名必须等于 id）：
+export const PLUGIN_DEV_MINIMAL_ZH = `目录（目录名必须等于 id，且只能是 ASCII 小写 [a-z0-9._-]；带中文 / 大写的目录名会被宿主跳过）：
 my-plugin/
 ├── package.json
 └── client.mjs

@@ -67,7 +67,7 @@ export function toolDefinitions(): any[] {
             properties: {
               key: {
                 type: 'string',
-                enum: ['general', 'panel', 'tool', 'llm-files', 'fix', 'usage', 'all'],
+                enum: ['general', 'panel', 'chart', 'tool', 'llm-files', 'fix', 'usage', 'all'],
                 description: '要取正文的模板 key（缺省只返回模板目录 + 安装步骤）；all 返回全部模板（较长）。',
               },
             },
