@@ -60,6 +60,9 @@ jobs:
         run: npm run build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS (arm64) 运行器的 Node 默认堆只有约 2GB，vite build 会 OOM 退出（Abort trap: 6），
+          # 统一抬高堆上限（与 scripts/build-linux-all.sh 里的 --max-old-space-size 对齐）
+          NODE_OPTIONS: --max-old-space-size=4096
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
