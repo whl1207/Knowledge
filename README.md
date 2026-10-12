@@ -69,7 +69,23 @@ npm install --registry=https://registry.npmmirror.com
 | `npm run release:all` | Windows first, then Linux — a full publish-ready `release/` |
 | `npm run release:collect` | Only collect/rename the current artifacts (and rebuild the green RAR) |
 
-`scripts/collect-release.mjs` normalises whatever electron-builder produced into the published names — `AI-KM_Windows_<ver>_x86_64_Portable.exe`, `AI-KM_Windows_<ver>_x86_64_green.rar`, `AI-KM_Linux_<ver>_x86_64.AppImage`, `AI-KM_Linux_<ver>_amd64.deb`, `AI-KM_Linux_<ver>_arm64.deb` — and packs the unpacked `release/AI-KM` folder into the green RAR (WinRAR's `Rar.exe`; override the path with `AIKM_RAR`). It is idempotent, so re-running it is safe.
+`scripts/collect-release.mjs` normalises whatever electron-builder produced into the published names — `AI-KM_Windows_<ver>_x86_64_Portable.exe`, `AI-KM_Windows_<ver>_x86_64_green.rar`, `AI-KM_Linux_<ver>_x86_64.AppImage`, `AI-KM_Linux_<ver>_amd64.deb`, `AI-KM_Linux_<ver>_arm64.deb`, `AI-KM_Mac_<ver>_<arch>.dmg` — and packs the unpacked `release/AI-KM` folder into the green RAR (WinRAR's `Rar.exe`; override the path with `AIKM_RAR`). It is idempotent, so re-running it is safe.
+
+### Automated releases (GitHub Actions)
+
+`.github/workflows/build.yml` builds all three platforms in parallel on every push to `main` and then publishes the packages to the GitHub Release tagged `v<version>` (the `version` field of `package.json`):
+
+| Platform | Package published |
+|:---|:---|
+| Windows | `AI-KM_Windows_<ver>_x86_64_Setup.exe` (NSIS installer) |
+| Linux | `AI-KM_Linux_<ver>_x86_64.AppImage`, `AI-KM_Linux_<ver>_amd64.deb`, `AI-KM_Linux_<ver>_arm64.deb` |
+| macOS (Apple Silicon) | `AI-KM_Mac_<ver>_arm64.dmg` |
+
+* Bump `version` in `package.json` before releasing — an existing release gets its same-named assets replaced (`--clobber`, hand-written notes are kept), while a new version creates a new release with generated notes.
+* Pull requests and documentation-only pushes only build; they never publish.
+* The macOS build is unsigned (no Apple Developer certificate): first launch needs **right-click → Open**, or `xattr -cr /Applications/AI-KM.app`.
+* CI packages cannot include the ~30 MB offline basemap (`public/maps/*.mbtiles` is generated from a local tile pyramid); `public/drawio` *is* fetched before packaging, so `.drawio` editing works. Use `npm run release:*` locally if you want the basemap inside the package.
+* The green portable RAR stays local-only — GitHub runners have no WinRAR.
 
 ### Optional local assets (not committed)
 

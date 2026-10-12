@@ -229,6 +229,11 @@
       "category": "Utility",
       "maintainer": "whl",
       "artifactName": "${productName}-Linux-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "icon": "build/icons/512x512.png",
+      "category": "public.app-category.productivity",
+      "artifactName": "AI-KM_Mac_${version}_${arch}.${ext}"
     }
   },
   "devDependencies": {

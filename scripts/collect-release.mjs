@@ -7,6 +7,7 @@
  *   AI-KM-Linux-<ver>-x86_64.AppImage    -> AI-KM_Linux_<ver>_x86_64.AppImage
  *   AI-KM-Linux-<ver>-amd64.deb          -> AI-KM_Linux_<ver>_amd64.deb
  *   AI-KM-Linux-<ver>-arm64.deb          -> AI-KM_Linux_<ver>_arm64.deb
+ *   AI-KM-<ver>-arm64.dmg                -> AI-KM_Mac_<ver>_arm64.dmg
  *   解包目录 release/AI-KM（免安装）       -> AI-KM_Windows_<ver>_x86_64_green.rar（内含 AI-KM/ 目录）
  *
  * 用法：
@@ -40,6 +41,9 @@ const RULES = [
   { src: `AI-KM-Linux-${VER}-x86_64.AppImage`, dst: `AI-KM_Linux_${VER}_x86_64.AppImage` },
   { src: `AI-KM-Linux-${VER}-amd64.deb`, dst: `AI-KM_Linux_${VER}_amd64.deb` },
   { src: `AI-KM-Linux-${VER}-arm64.deb`, dst: `AI-KM_Linux_${VER}_arm64.deb` },
+  // 备用命名（electron-builder 未套用 artifactName 时的 mac 默认名）
+  { src: `AI-KM-${VER}-arm64.dmg`, dst: `AI-KM_Mac_${VER}_arm64.dmg` },
+  { src: `AI-KM-${VER}-x64.dmg`, dst: `AI-KM_Mac_${VER}_x86_64.dmg` },
   // 备用命名（electron-builder.json5 里的 artifactName）
   { src: `AI-KM-Windows-${VER}-Setup.exe`, dst: `AI-KM_Windows_${VER}_x86_64_Setup.exe` },
   { src: `AI-KM-Mac-${VER}-Installer.dmg`, dst: `AI-KM_Mac_${VER}_x86_64.dmg` }
