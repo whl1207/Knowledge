@@ -91,6 +91,10 @@ export interface PluginSnapshot {
   description: string
   /** 插件目录绝对路径 */
   dir: string
+  /** 插件目录相对插件根目录的路径（正斜杠分隔，如 `办公/表格工具`；顶层插件即目录名） */
+  relDir: string
+  /** 所属文件夹（相对插件根目录的一级分类路径；顶层插件为空串）：列表里据此显示插件在哪个文件夹下 */
+  folder: string
   status: PluginStatus
   /** 用户选择（持久化）：false = 已禁用 */
   enabled: boolean
@@ -125,6 +129,13 @@ export interface PluginStorage {
   set(key: string, value: unknown): Promise<void>
   delete(key: string): Promise<boolean>
   keys(): Promise<string[]>
+}
+
+/** 插件在主进程侧的数据文件（`userData/plugins-data/<id>/` 下，相对路径 + 字节数） */
+export interface PluginDataFileStat {
+  /** 相对插件数据目录的路径（如 `storage.json`） */
+  name: string
+  size: number
 }
 
 /** 插件日志器：同时写文件与控制台，并经 plugin/log 事件推给设置页 */

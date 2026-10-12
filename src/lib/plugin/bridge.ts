@@ -8,7 +8,7 @@
  * 调用方据此静默降级。
  */
 
-import type { PluginEvent, PluginLogLine, PluginSnapshot } from '@/types/plugin'
+import type { PluginDataFileStat, PluginEvent, PluginLogLine, PluginSnapshot } from '@/types/plugin'
 
 /** 客户端插件 bundle（主进程读取后经 IPC 传入，渲染层用 Blob URL 动态 import） */
 export interface PluginClientBundle {
@@ -37,6 +37,14 @@ export interface PluginBridgeApi {
   setConfig(id: string, patch: Record<string, unknown>, confirm?: boolean): Promise<Record<string, unknown>>
   logs(id: string): Promise<PluginLogLine[]>
   openDir(id?: string): Promise<{ path: string }>
+  /** 插件在主进程侧的数据文件（userData/plugins-data/<id>/，见 pluginData.ts） */
+  dataFiles(id: string): Promise<{ id: string; entries: PluginDataFileStat[] }>
+  /** 一次拿到所有插件的主进程侧数据（列表页显示占用用） */
+  dataFilesAll(): Promise<{ byId: Record<string, PluginDataFileStat[]> }>
+  /** 删除插件数据目录里的一个文件 / 子目录（需 confirm：会真的删磁盘文件） */
+  removeDataFile(id: string, name: string, confirm?: boolean): Promise<{ removed: boolean }>
+  /** 删除插件整个主进程数据目录（需 confirm） */
+  clearDataFiles(id: string, confirm?: boolean): Promise<{ removed: boolean }>
   clientBundle(id: string): Promise<PluginClientBundle>
   /** 从本地文件夹安装插件（P2：主进程弹目录选择框） */
   install(options?: { confirm?: boolean; replace?: boolean }): Promise<{

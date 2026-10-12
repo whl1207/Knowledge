@@ -12,6 +12,11 @@
  *                                       [{ label, path, type, children?, size?, mtime? }]）
  *   GET /fs/read?path=相对路径&token=… → 文件内容（文本原样 / 二进制 base64）
  *   GET /fs/download?path=相对路径&token=… → 原始二进制流（下载用）
+ *   GET /fs/store?path=相对路径&token=…  → 商店清单（扫描出该目录下的插件 / 技能，含下载地址）
+ *   GET /fs/bundle?path=相对路径&token=… → 目录打包（{ files:[{path,text|base64}] }，安装技能 / 插件用）
+ *
+ * 后两条让「共享目录」可以直接当插件商店 / 技能商店的来源：客户端只认 HTTP（渲染层无法用 FTP），
+ * 这里复用了既有的 token、只读与目录穿越防护，不需要新协议 / 新端口。
  */
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
@@ -134,6 +139,147 @@ function readFileContent(abs: string): { text?: string; base64?: string; size: n
   return { base64: buf.toString('base64'), size: buf.length }
 }
 
+// ---------------------------------------------------------------------------
+// 商店索引（把共享目录当作「插件商店 / 技能商店」的来源，复用同一套 token + 只读接口）
+//
+// 为什么不另开协议：客户端（渲染层）只认 HTTP；FTP 既没有内建的只读/白名单语义，
+// 还必须新依赖 + 新端口 + 明文账号，收益只是"第三方工具也能连"。这里只加两个 GET：
+//   GET /fs/store?path=<相对目录>&token=…   → 目录扫描出的商店清单（技能 + 插件）
+//   GET /fs/bundle?path=<相对目录>&token=…  → 整个目录的内容（安装用，JSON + base64）
+// ---------------------------------------------------------------------------
+
+/** 商店扫描 / 打包的最大相对深度（共享根目录 = 0） */
+const STORE_SCAN_DEPTH = 4
+/** 目录打包上限：bundle 走 JSON（base64 会膨胀 4/3），必须设上限避免拉爆内存 */
+const BUNDLE_MAX_FILE_BYTES = 8 * 1024 * 1024
+const BUNDLE_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+const BUNDLE_MAX_FILES = 500
+/** 技能 / 插件的识别特征（与「技能管理」「插件宿主」的扫描规则保持一致） */
+const SKILL_FILE = 'SKILL.md'
+const MANIFEST_FILE = 'package.json'
+const MANIFEST_KEY = 'aikm'
+const STORE_SKIP_DIRS = new Set(['node_modules', '.git', 'plugins-data'])
+
+/** 读 SKILL.md 前几行作为描述（frontmatter 的 description 优先，其次首个非标题行） */
+function skillBrief(abs: string): string {
+  try {
+    const head = fs.readFileSync(abs, 'utf8').slice(0, 3000)
+    const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(head)
+    const desc = fm ? /^\s*description:\s*(.+)$/m.exec(fm[1])?.[1] : ''
+    if (desc && desc.trim()) return desc.trim().replace(/^["']|["']$/g, '').slice(0, 300)
+    for (const line of head.split(/\r?\n/)) {
+      const t = line.trim()
+      if (!t || t.startsWith('#') || t.startsWith('---') || /^[a-zA-Z_-]+:\s/.test(t)) continue
+      return t.slice(0, 300)
+    }
+  } catch { /* 读取失败就当没有描述 */ }
+  return ''
+}
+
+/** 目录是否是一个插件（有 package.json 且含 aikm 清单字段） */
+function readPluginManifest(dir: string): any | null {
+  const file = path.join(dir, MANIFEST_FILE)
+  if (!fs.existsSync(file)) return null
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const aikm = raw && typeof raw === 'object' ? raw[MANIFEST_KEY] : null
+    return aikm && typeof aikm === 'object' ? { ...aikm, __pkg: raw } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 扫描共享目录，生成商店清单。
+ * 识别规则与本地一致：目录内有 SKILL.md = 技能；有 package.json 且含 aikm = 插件（不再向下钻）。
+ * @param origin 请求来源（`http://host:port`），用于拼出下载地址，客户端可原样使用
+ */
+function buildStoreIndex(
+  dir: string,
+  relPrefix: string,
+  origin: string,
+  token: string,
+  depth = 0,
+  out: { skills: any[]; plugins: any[] } = { skills: [], plugins: [] },
+): { skills: any[]; plugins: any[] } {
+  const bundleUrl = (rel: string) =>
+    `${origin}/fs/bundle?path=${encodeURIComponent(rel)}&token=${encodeURIComponent(token)}`
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const d of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!d.isDirectory()) continue
+    if (d.name.startsWith('.') || STORE_SKIP_DIRS.has(d.name)) continue
+    const childAbs = path.join(dir, d.name)
+    const childRel = relPrefix ? `${relPrefix}/${d.name}` : d.name
+    const manifest = readPluginManifest(childAbs)
+    if (manifest) {
+      out.plugins.push({
+        id: String(manifest.id || d.name),
+        name: String(manifest.name || manifest.id || d.name),
+        version: String(manifest.version || ''),
+        apiVersion: String(manifest.apiVersion || ''),
+        description: String(manifest.description || ''),
+        permissions: Array.isArray(manifest.permissions) ? manifest.permissions : [],
+        path: childRel,
+        downloadUrl: bundleUrl(childRel),
+      })
+      continue
+    }
+    const skillFile = path.join(childAbs, SKILL_FILE)
+    if (fs.existsSync(skillFile) && fs.statSync(skillFile).isFile()) {
+      out.skills.push({
+        name: d.name,
+        description: skillBrief(skillFile),
+        path: childRel,
+        downloadUrl: bundleUrl(childRel),
+      })
+      continue
+    }
+    if (depth + 1 < STORE_SCAN_DEPTH) buildStoreIndex(childAbs, childRel, origin, token, depth + 1, out)
+  }
+  return out
+}
+
+/** 收集目录内所有文件（供 bundle 打包；跳过隐藏项 / 依赖目录 / 符号链接，并受大小上限约束） */
+function collectBundleFiles(abs: string): Array<{ path: string; text?: string; base64?: string; size: number }> {
+  const files: Array<{ path: string; text?: string; base64?: string; size: number }> = []
+  let total = 0
+  const walk = (dir: string, prefix: string, depth: number): void => {
+    if (depth > STORE_SCAN_DEPTH || files.length >= BUNDLE_MAX_FILES || total > BUNDLE_MAX_TOTAL_BYTES) return
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const d of entries) {
+      if (files.length >= BUNDLE_MAX_FILES || total > BUNDLE_MAX_TOTAL_BYTES) return
+      if (d.name.startsWith('.') || STORE_SKIP_DIRS.has(d.name) || d.isSymbolicLink()) continue
+      const childAbs = path.join(dir, d.name)
+      const childRel = prefix ? `${prefix}/${d.name}` : d.name
+      if (d.isDirectory()) {
+        walk(childAbs, childRel, depth + 1)
+        continue
+      }
+      let stat: fs.Stats
+      try {
+        stat = fs.statSync(childAbs)
+      } catch {
+        continue
+      }
+      if (!stat.isFile() || stat.size > BUNDLE_MAX_FILE_BYTES) continue
+      total += stat.size
+      files.push({ path: childRel, ...readFileContent(childAbs) })
+    }
+  }
+  walk(abs, '', 0)
+  return files
+}
+
 const TEXT_EXT = new Set([
   '.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg',
   '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.vue', '.css', '.scss', '.less',
@@ -240,6 +386,38 @@ function handleRequest(req: IncomingMessage, res: ServerResponse) {
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(path.basename(abs))}"`)
         res.setHeader('Cache-Control', 'no-store')
         fs.createReadStream(abs).pipe(res)
+        return
+      }
+      case '/fs/store': {
+        // 商店清单：把这个共享目录当成「插件商店 / 技能商店」来源时的索引（只读、需 token）
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+          writeJson(res, 404, { error: '目录不存在' })
+          return
+        }
+        const rel = url.searchParams.get('path') || ''
+        const origin = `http://${req.headers.host || `127.0.0.1:${serverPort}`}`
+        const index = buildStoreIndex(abs, rel.replace(/^[/\\]+/, ''), origin, token)
+        writeJson(res, 200, {
+          version: 1,
+          name: path.basename(state!.rootDir),
+          path: rel,
+          skills: index.skills,
+          plugins: index.plugins,
+        })
+        return
+      }
+      case '/fs/bundle': {
+        // 目录打包：安装技能 / 插件时一次性取回整个目录（文本原样，二进制 base64）
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+          writeJson(res, 404, { error: '目录不存在' })
+          return
+        }
+        const files = collectBundleFiles(abs)
+        if (!files.length) {
+          writeJson(res, 400, { error: '目录为空或全部内容超出打包上限' })
+          return
+        }
+        writeJson(res, 200, { path: url.searchParams.get('path') || '', files })
         return
       }
       default:

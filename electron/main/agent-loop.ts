@@ -48,16 +48,19 @@ import {
   COMPACT_KEEP_TURNS,
   COMPACT_SYSTEM_PROMPT,
   OVERFLOW_RETRY_LIMIT,
-  TOOL_SCHEMA_TOKEN_ESTIMATE,
   buildCompactionPrompt,
   compactedContextMessage,
   estimateMessagesTokens,
+  estimateToolSchemaTokens,
+  calibrateTokenScale,
+  clampTokenScale,
   indexSummary,
   isContextOverflowError,
   pickCompactionRange,
-  planContextBudget,
+  planAgentBudget,
   type BudgetMessage,
   type ContextBudget,
+  type TokenAccountingAnchor,
 } from '@/shared/contextBudget'
 
 // ---------------------------------------------------------------------------
@@ -392,10 +395,23 @@ class AgentImpl implements AgentControl {
   private loadedSkills = new Set<string>()
   /** 上下文压缩重入守卫（压缩本身是一次 LLM 调用，不能递归触发） */
   private compacting = false
+  /**
+   * 真实用量锚点：上一步请求由 provider 自报的 promptTokens（含 system prompt 与工具 schema）
+   * 及当时发出的派生条目数。后续预算 = 锚点 + 新增条目估算，避免纯字符启发式的系统性偏差
+   * （本地后端尤其明显；见 contextBudget.calibrateTokenScale）。压缩重写历史后锚点失效 → 置空。
+   */
+  private tokenAnchor: TokenAccountingAnchor | null = null
+  /** 估算校准系数（真实 / 估算；渲染层按「来源 + 模型」持久化后回传，跨会话复用） */
+  private tokenScale: number
+  /** 本次请求的纯估算值（不含系数，含工具 schema）与条目数：step 结束后用于校准与锚点 */
+  private lastRequestEstimate = 0
+  private lastRequestEntries = 0
 
   constructor(options: AgentOptions) {
     this.id = brand(`agent-${randomUUID()}`)
     this.options = options
+    // 估算校准系数的初始值：渲染层按「来源 + 模型」记住上次实测值（本地后端 tokenizer 偏差可达 ±30%）
+    this.tokenScale = clampTokenScale(options.tokenScale)
     // 会话事件日志：创建即写 session/start（模型可见的 systemPrompt 落盘）
     sessionLog.append(this.id, 'session/start', {
       provider: options.provider,
@@ -645,6 +661,18 @@ class AgentImpl implements AgentControl {
         const result = await this.runStepWithOverflowRetry(messages)
         item = null // 本 step 的输入已消费
 
+        // 真实用量校准：provider 自报的 promptTokens 就是**这份请求**的真实计数
+        // （Ollama prompt_eval_count / OpenAI 兼容 usage.prompt_tokens），含 system prompt 与工具 schema。
+        // 用它建立「锚点 + 新增内容估算」的口径，并更新估算系数（本地后端 tokenizer 偏差由此消除）。
+        // lastRequestEntries < 0 表示本 step 内发生过压缩重放（条目序号已重排）→ 本轮不建锚点。
+        const realPromptTokens = Number(result.usage?.promptTokens) || 0
+        if (realPromptTokens > 0 && this.lastRequestEntries >= 0) {
+          this.tokenAnchor = { entryCount: this.lastRequestEntries, promptTokens: realPromptTokens }
+          if (this.lastRequestEstimate > 0) {
+            this.tokenScale = calibrateTokenScale(this.tokenScale, this.lastRequestEstimate, realPromptTokens)
+          }
+        }
+
         if (this.turnController.signal.aborted) break
         // 归一化工具调用 arguments（GPUStack qwen3_xml 常给多层转义畸形 JSON），
         // 入日志/回传前解析为干净单层 JSON 字符串，避免下一轮回传 vLLM 时 400 Extra data；
@@ -672,7 +700,7 @@ class AgentImpl implements AgentControl {
         }
 
         sessionLog.append(this.id, 'step/end', { turn, step, toolCalls: toolCallsCount })
-        this.emit('agent/step-end', { turn, step, toolCalls: toolCallsCount, usage: result.usage })
+        this.emit('agent/step-end', { turn, step, toolCalls: toolCallsCount, usage: result.usage, tokenScale: this.tokenScale })
 
         // 工具调用欠一次请求（继续下一 step 携带工具结果），
         // 或运行期间收到了 steer（转向下一 step）→ 继续
@@ -763,10 +791,14 @@ class AgentImpl implements AgentControl {
     if (this.options.contextCompact !== false) {
       const budget = this.requestBudget(entries)
       if (budget.level === 'compact') {
-        console.info(`[agent-compact] ${this.id} 占用约 ${(budget.ratio * 100).toFixed(0)}%（${budget.used}/${budget.limit} tokens）→ 主动压缩旧轮次`)
+        console.info(`[agent-compact] ${this.id} 占用约 ${(budget.ratio * 100).toFixed(0)}%（${budget.used}/${budget.limit} tokens，估算×${this.tokenScale.toFixed(2)}${this.tokenAnchor ? '，以真实用量为锚点' : ''}）→ 主动压缩旧轮次`)
         if (await this.compact('auto')) entries = sessionLog.deriveEntries(this.id)
       }
     }
+    // 记录「本次请求的纯估算值与条目数」：step 结束后用 provider 自报的真实计数校准系数 + 建立锚点
+    this.lastRequestEntries = entries.length
+    this.lastRequestEstimate = estimateMessagesTokens(this.toBudgetEntries(entries))
+      + estimateToolSchemaTokens(this.visibleTools())
     return this.toRequestMessages(entries)
   }
 
@@ -789,15 +821,45 @@ class AgentImpl implements AgentControl {
     return entries.reduce((n, e) => n + (e.msg.role === 'user' && !e.msg.compacted ? 1 : 0), 0)
   }
 
-  /** 本次请求的预算（system + 工具 schema + 全部历史） */
+  /**
+   * 本次请求的预算（system prompt + 工具 schema + 全部历史）。
+   *
+   * 三条口径，都直接决定「压缩够不够及时」：
+   *  1) **工具结果与工具参数全部计入**（read_file 返回的文件正文在 tool 消息里、
+   *     write_file 的正文在 assistant 的 tool_calls 里，两者都随请求回发）；
+   *  2) **附图按张数计入**（图片本体在内存里，但每次请求都会带上，占用真实存在）；
+   *  3) **优先用 provider 自报的真实计数做锚点**（Ollama 的 prompt_eval_count、
+   *     OpenAI 兼容的 usage.prompt_tokens），只对锚点之后新增的内容做估算并乘校准系数——
+   *     本地后端 tokenizer 与字符启发式的系统性偏差（实测代码/JSON 类内容约 1.15~1.30 倍）
+   *     由此被消除，而不是一路低估到溢出。
+   */
   private requestBudget(entries: DerivedEntry[]): ContextBudget {
-    const tools = this.visibleTools()
-    const used = estimateMessagesTokens(entries.map((e): BudgetMessage => ({
-      role: e.msg.role,
-      content: e.msg.content,
-      toolCalls: e.msg.toolCalls,
-    }))) + tools.length * TOOL_SCHEMA_TOKEN_ESTIMATE
-    return planContextBudget({ limit: this.options.contextLimit, used })
+    const budget = this.toBudgetEntries(entries)
+    return planAgentBudget({
+      limit: this.options.contextLimit,
+      entries: budget,
+      schemaTokens: estimateToolSchemaTokens(this.visibleTools()),
+      anchor: this.tokenAnchor,
+      scale: this.tokenScale,
+    })
+  }
+
+  /** 派生条目 → 预算条目（附图按「真实 user 消息序号」折算张数；与请求消息一一对应） */
+  private toBudgetEntries(entries: DerivedEntry[]): BudgetMessage[] {
+    let userSeq = 0
+    return entries.map(({ msg }) => {
+      const out: BudgetMessage = {
+        role: msg.role,
+        content: msg.content,
+        toolCalls: msg.toolCalls,
+      }
+      if (msg.role === 'user' && !msg.compacted) {
+        userSeq++
+        const imgs = this.taskImagesBySeq.get(userSeq)
+        if (imgs?.length) out.images = imgs.length
+      }
+      return out
+    })
   }
 
   /**
@@ -822,6 +884,8 @@ class AgentImpl implements AgentControl {
         console.warn(`[agent-compact] ${this.id} 可压缩内容不足（不足 ${COMPACT_KEEP_TURNS} 轮或轮次太少），跳过压缩`)
         return false
       }
+      // 界面提示：摘要要额外发一次无工具 LLM 请求，不给提示时这一步看起来像卡住
+      this.emit('agent/compaction', { phase: 'start', kind })
       const dropped = entries.slice(plan.startIndex, plan.endIndex)
       const droppedItems = items.slice(plan.startIndex, plan.endIndex)
       const tokensBefore = estimateMessagesTokens(droppedItems)
@@ -839,9 +903,15 @@ class AgentImpl implements AgentControl {
         model: String((this.options.llmConfig?.model || this.options.config?.model || '') || '') || undefined,
       })
       console.info(`[agent-compact] ${this.id} 已压缩 ${dropped.length} 条消息（约 ${tokensBefore} tokens → 摘要 ${summary.length} 字符，kind=${kind}）`)
+      // 历史被重写：真实用量锚点与「本次请求估算」都失效（条目序号对不上），由下一次请求重新建立
+      this.tokenAnchor = null
+      this.lastRequestEntries = -1
+      this.lastRequestEstimate = 0
+      this.emit('agent/compaction', { phase: 'end', kind, ok: true, droppedMessages: dropped.length, tokensBefore })
       return true
     } catch (e: any) {
       console.warn(`[agent-compact] ${this.id} 压缩失败（保持原历史）:`, e?.message || e)
+      this.emit('agent/compaction', { phase: 'end', kind, ok: false })
       return false
     } finally {
       this.compacting = false

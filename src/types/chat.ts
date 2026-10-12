@@ -135,6 +135,11 @@ export interface ChatMessage {
    * 这些内容不落在消息正文上（主进程持有），后端未回传 usage 时上下文圆环靠它估算（见 lib/contextUsage）。
    */
   ctxSeedTokens?: number
+  /**
+   * 本会话的「估算校准系数」键（`来源::模型`）：主进程实测到真实/估算比值后，渲染层据此
+   * 记忆系数供后续会话与聊天模式复用（见 lib/contextUsage 的 getTokenScale / rememberTokenScale）。
+   */
+  ctxScaleKey?: string
 
   // 深度思考（<think>…</think>，Qwen3/vLLM 等）
   /** 思考内容（从正文剥离，单独折叠展示） */

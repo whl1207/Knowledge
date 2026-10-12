@@ -23,7 +23,7 @@ import { toolsFromCapabilities } from '@/lib/agent/capabilities'
 import { renderQuestionMarkdown, escapeHtml } from '@/lib/markdown/render'
 // 会话视图 → 消息投影（与集群模式共用同一实现，保证工具调用/思考/来源样式一致）
 import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos } from '@/lib/agent/projection'
-import { estimateAgentSeedTokens, resolveLimitFor } from '@/lib/contextUsage'
+import { estimateAgentSeedTokens, resolveLimitFor, getTokenScale, rememberTokenScale, tokenScaleKey } from '@/lib/contextUsage'
 import {
   buildSkillAgentOptions,
 
@@ -143,6 +143,7 @@ export function useAgentRun(deps: AgentRunDeps) {
     let lastReasoningLen = 0 // 已消费的推理文本长度
     let searchActive = false // 服务端搜索是否已激活（首个事件时初始化）
     let tlSeq = 0 // 单元序号（保证时间顺序稳定）
+    let notifiedCompactSeq = 0 // 已提示过的上下文压缩序号（每次压缩只弹一次完成提示）
     // 思考/工具时间线投影：与集群模式共用同一实现（见 src/lib/agent/projection）
     const projectSteps = (v: any) => {
       const { lastTool } = projectStepsToUnits(assistantMsg, v)
@@ -167,8 +168,25 @@ export function useAgentRun(deps: AgentRunDeps) {
       if (v.status === 'running') sawRunning = true
       projectKbInfo(assistantMsg, v, processedKb)
       projectUsage(assistantMsg, v)
+      // 校准系数回传：主进程实测的「真实/估算」比值按来源 + 模型记住（聊天模式的预算与圆环复用）
+      if (typeof (v as any).tokenScale === 'number' && assistantMsg.ctxScaleKey) {
+        const [p, m] = String(assistantMsg.ctxScaleKey).split('::')
+        rememberTokenScale(p, m, (v as any).tokenScale)
+      }
       // 思考/工具调用 → executionUnits 时间线 + 输入区快照
       projectSteps(v)
+      // 上下文压缩完成提示（时间线里的卡片由投影生成，这里再给一次可见提示，与普通聊天同口径）
+      const compaction: any = v.compaction
+      if (compaction && compaction.phase === 'done' && compaction.seq > notifiedCompactSeq) {
+        notifiedCompactSeq = compaction.seq
+        ElMessage.info(compaction.kind === 'overflow-retry'
+          ? (store.locales == 'zh'
+            ? '上下文超限，已自动压缩较早的对话并重试'
+            : 'Context limit exceeded — earlier turns were summarized and the request retried.')
+          : (store.locales == 'zh'
+            ? '上下文占用较高，已自动压缩较早的对话（原消息仍保留）'
+            : 'Context was getting long — earlier turns were summarized (original messages are kept).'))
+      }
       // ask_user 提问：弹窗收集回答（对齐 Swarm 预设行为；按 askId 去重）。
       // 主进程 ask_user 工具会挂起等待 agent:answer 回复，若不弹窗该工具永远不返回，
       // 会话结束时其 tool/result 缺失 → 日志显示「工具结果缺失」。
@@ -579,7 +597,17 @@ export function useAgentRun(deps: AgentRunDeps) {
         model: options.llmConfig?.model || options.config?.model,
         customSourceIndex: store.AIconfig.llm.custom?.activeIndex,
       }).limit
-      const view = await agentBridge.create({ ...options, contextLimit, ...(taskImages.length ? { taskImages } : {}) })
+      // 估算校准系数：按「来源 + 模型」复用上次实测的「真实 / 估算」比值（本地后端 tokenizer 与
+      // 字符启发式差异可达 ±30%），主进程据此修正请求前预算，并在运行中继续自校准
+      const providerKey = String(options.provider || '')
+      const modelKey = String(options.llmConfig?.model || options.config?.model || '')
+      const tokenScale = getTokenScale(providerKey, modelKey)
+      const view = await agentBridge.create({
+        ...options,
+        contextLimit,
+        tokenScale,
+        ...(taskImages.length ? { taskImages } : {}),
+      })
       agentSessionId.value = view.id
       const assistantMsg: ChatMessage = {
         role: 'assistant', content: '', timestamp: Date.now(),
@@ -594,6 +622,9 @@ export function useAgentRun(deps: AgentRunDeps) {
           tools: options.tools,
           seedHistory: options.seedHistory,
         }),
+        // 校准系数的记忆键：主进程实测的「真实/估算」比值会回传（agent/step-end.tokenScale），
+        // 这里按「来源 + 模型」记住，供后续会话与普通聊天复用（见 lib/contextUsage）
+        ctxScaleKey: tokenScaleKey(providerKey, modelKey),
       }
       chat.messages.push(assistantMsg)
       chat.isGenerating = true

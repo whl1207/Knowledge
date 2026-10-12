@@ -3770,6 +3770,23 @@ ipcMain.handle('writeFile', async (event, filePath, content) => {
   }
 })
 
+/**
+ * 按 base64 写文件（二进制内容，如技能 / 插件商店包里的图片）。
+ * `writeFile` 只支持 utf8，二进制必须走这条，否则内容会被破坏。
+ */
+ipcMain.handle('writeBase64', async (event, filePath, base64) => {
+  try {
+    if (!filePath) throw new Error('文件路径不能为空')
+    const directory = path.dirname(filePath)
+    if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true })
+    fs.writeFileSync(filePath, Buffer.from(String(base64 || ''), 'base64'))
+    return { success: true, path: filePath }
+  } catch (error: any) {
+    console.error(`[主进程] 写入二进制文件失败: ${filePath}`, error)
+    return { success: false, error: error.message }
+  }
+})
+
 ipcMain.handle('ensureDir', async (event, dirPath) => {
   try {
     if (!fs.existsSync(dirPath)) {

@@ -201,9 +201,10 @@ export const importChats = async (zh = true, onDone?: () => void) => {
 /** 配置类存档键（界面 + AI 配置 + 预设 + MCP 等；聊天记录体积大，由「导出聊天」单独备份，这里不重复） */
 export const BACKUP_KEYS = [
   'AIconfig', 'UI', 'customLlmSources', 'llmSourceStatus', 'llmDisabledSources', 'llmCustomSourceStatus',
-  'agentPresets', 'generalAgentMaxSteps', 'mcpServers', 'disabledSkills', 'skillStoreSources', 'agentTools',
+  'agentPresets', 'generalAgentMaxSteps', 'mcpServers', 'disabledSkills', 'skillStoreSources',
+  'pluginStoreSources', 'agentTools',
   'webSearchConfig',
-  'hiddenNavs', 'customTitle', 'interfaceConfigMode', 'collab', 'remoteFs', 'lan',
+  'hiddenNavs', 'hiddenExtras', 'customTitle', 'interfaceConfigMode', 'collab', 'remoteFs', 'lan',
   'remoteRoots', 'mapConfig', 'locales', 'roots', 'root', 'path', 'skillsPath', 'treeSort',
   'view', 'mainPanel',
 ]

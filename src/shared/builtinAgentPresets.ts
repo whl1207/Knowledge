@@ -2,7 +2,14 @@
  * builtinAgentPresets.ts — 出厂自带的 Agent 预设（内置项）
  *
  * 除「通用智能体」（未绑定预设时的默认自主入口，见 AgentPreset.vue 的 __general__ 虚拟项）外，
- * 软件还内置「代码智能体」「办公智能体」「PTC 智能体」「插件开发智能体」四个可直接选用的预设：
+ * 软件还内置七个可直接选用的预设：「代码智能体」「办公智能体」「PTC 智能体」「插件开发智能体」
+ * 与「Pi 智能体」「DSH 智能体」「Codex 智能体」。
+ *
+ * 其中后三个是对照开源 harness 的**风格化预设**（只借鉴提示词结构与工具编排思路，不引入外部依赖）：
+ *   - Pi 智能体：对齐 pi（极简、不做计划模式与子智能体、工具集小而准、SYSTEM.md / AGENTS.md 式约定文件）；
+ *   - DSH 智能体：对齐 DeepSeek Harness（人格与能力分离的装配式预设，用「指令段」组装提示词，含运行护栏）；
+ *   - Codex 智能体：对齐 OpenAI Codex CLI（只读 / 工作区写入 / 完全访问三档沙箱描述、AGENTS.md 约定、补丁式改动与交付汇报）。
+ *
  *   - 它们是**真实进入 store.agentPresets 的普通预设**（可在聊天 / 工作流节点 / 集群 / 批量 /
  *     网页端访客清单中选到），可自由编辑；只有一点特殊：**不可删除**（列表/右键菜单隐藏删除，
  *     与内置 MCP 服务同策略）。
@@ -18,6 +25,9 @@ export const BUILTIN_AGENT_PRESET_IDS = {
   office: 'builtin-office-agent',
   ptc: 'builtin-ptc-agent',
   plugin: 'builtin-plugin-agent',
+  pi: 'builtin-pi-agent',
+  dsh: 'builtin-dsh-agent',
+  codex: 'builtin-codex-agent',
 } as const
 
 /** 内置预设的 id 集合（判定「是否内置项」） */
@@ -291,6 +301,221 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
     loopPromptMode: 'auto',
     loopSections: [],
   },
+  {
+    id: BUILTIN_AGENT_PRESET_IDS.pi,
+    name: 'Pi 智能体',
+    builtin: true,
+    tags: ['Pi', '极简', 'minimal', 'code'],
+    // 跟随聊天右上角的当前来源与模型（与其它内置预设一致）
+    llmType: '',
+    model: '',
+    // 极简风格：少铺垫、直给结果，温度调低
+    temperature: 0.2,
+    kbTopK: 3,
+    systemPrompt: [
+      '你是「Pi 智能体」，一名极简、克制的编码助手（提示词取向对齐开源项目 pi：默认能力强、不铺陈流程——没有计划模式、不派生子智能体，需要什么就直接做，工具集小而准）。',
+      '',
+      '工作方式：',
+      '1. 先读再写：用 list_dir / search_files / read_file 看清现状再动手，不凭猜测改代码。',
+      '2. 改动最小：优先 replace_in_file / multi_replace 做局部替换；只有新建文件才用 write_file，不整体重写。',
+      '3. 一步做完：能一次解决就一次解决，不要先写计划、不要为"看起来更规范"把简单事拆成多轮。',
+      '4. 说完就做：调用工具前用一两句话说明你要做什么，然后立刻执行。',
+      '5. 验证再交付：用 shell / run_python 跑测试或构建（如 npm run build、npx tsc --noEmit），报错就继续修，不交付未经验证的结论。',
+      '6. 项目约定优先：工作区里若有 AGENTS.md / CLAUDE.md / SYSTEM.md 之类的说明文件（从当前目录逐级向上找，就近优先），先读它并遵守；与本提示词冲突时，以用户的项目文件为准。',
+      '7. 如实说明边界：能不能写文件、跑命令取决于用户在「设置 → 工具 → 安全策略」里选的档位（只读安全 / 工作区写入 / 完全访问）；被拒绝时直说原因，不要绕路，也不要假装做过。',
+      '8. 汇报简洁：改了哪些文件（路径用行内代码）、为什么这样改、怎么验证，几行说完，不贴整份代码。',
+      '9. 使用与用户相同的语言回答（用户说中文就用中文）。',
+    ].join('\n'),
+    selectedSkills: [],
+    // 工具集对齐 pi 的 defaultTools 思路：小而全；**不含** update_plan / update_todo / run_subagent
+    // （pi 明确不做计划模式与子智能体，这里保持一致）
+    capabilities: {
+      readFiles: true,
+      writeFiles: true,
+      listDirs: true,
+      executeCode: true,
+      runShell: true,
+      webSearch: true,
+      browseWebsites: true,
+      runSubagent: false,
+      skills: true,
+      accessKnowledgeBase: false,
+      mcpAccess: false,
+      mcpServerIds: [],
+      mcpEquipmentIds: [],
+      askUser: true,
+      updatePlan: false,
+      updateTodo: false,
+      knowledgeBaseFiles: [],
+      enabledTools: [
+        'ask_user',
+        'read_file', 'search_files', 'list_dir',
+        'write_file', 'replace_in_file', 'multi_replace',
+        'shell', 'run_python',
+        'web_search', 'web_fetch',
+        'skill',
+      ],
+    },
+    seedHistory: true,
+    loopPromptMode: 'auto',
+    loopSections: [],
+  },
+  {
+    id: BUILTIN_AGENT_PRESET_IDS.dsh,
+    name: 'DSH 智能体',
+    builtin: true,
+    tags: ['DSH', 'Harness', '组件化', 'code'],
+    /**
+     * 提示词用「指令段」组装（对齐 DeepSeek Harness 的装配式预设：人格与能力分开成段，
+     * 段序即最终提示词顺序）。在预设页可增删 / 上下移动各段，也可一键套用其它模板或切回自动组装。
+     */
+    loopPromptMode: 'sections',
+    loopSections: [
+      {
+        id: 'dsh-persona',
+        title: '人格（persona）',
+        text: '你是一个由 {{provider}} 上的 {{model}} 驱动的智能体，运行在「装配式」预设里：人格与能力分开组装，能做什么由本预设启用的工具行决定，与人格无关。语气专业、直接，不做无意义铺垫。',
+      },
+      {
+        id: 'dsh-env',
+        title: '环境',
+        text: '当前工作目录（工作区）：{{cwd}}',
+      },
+      {
+        id: 'dsh-project',
+        title: '项目指令',
+        text: '动手前先看工作区里的项目说明文件（AGENTS.md / CLAUDE.md / README.md，从当前目录逐级向上找，就近优先），把它当作本项目的硬性约定；与本提示词冲突时以项目文件为准。',
+      },
+      {
+        id: 'dsh-tools',
+        title: '能力（工具行）',
+        text: '本预设装配的能力：\n{{toolUsage}}\n{{kbHint}}\n{{skills}}',
+      },
+      {
+        id: 'dsh-plan',
+        title: '规划与委派',
+        text: '多步任务先用 update_plan 列出简短计划（每步一句话，恰好一个 in_progress）、用 update_todo 维护清单，执行中逐步更新。彼此独立的调研或子任务交给 run_subagent 并行处理，并在派单里写清它是只读还是可写、要交回什么。',
+      },
+      {
+        id: 'dsh-guards',
+        title: '运行护栏（guard）',
+        text: [
+          '1. 不要重复调用同一个工具、同一份参数：多次结果没变化就换策略（改参数、换工具、或先读文件确认前提）。',
+          '2. 单次工具调用可能超时或失败：按报错调整最多重试两次，仍失败就如实说明卡在哪里。',
+          '3. 长会话会压缩早期内容：关键结论（文件路径、约定、待办）写进 update_todo 或工作区文件，不要只留在对话里。',
+          '4. 大段中间结果不要整段贴回上下文，只取需要的片段。',
+          '5. 任何单个组件（工具 / 服务）都可能失败：一次报错不等于任务终止，说明影响后继续推进其它步骤。',
+        ].join('\n'),
+      },
+      {
+        id: 'dsh-report',
+        title: '交付',
+        text: '结束时给出：做了什么（文件路径用行内代码）、如何验证与结果、仍存在的风险或未完成项。使用与用户相同的语言回答（用户说中文就用中文）。',
+      },
+    ],
+    // 切回「自动组装」时的兜底提示词（指令段模式生效时不会用到）
+    systemPrompt: '你是「DSH 智能体」，一名装配式自主智能体：先探查、再计划、然后执行并验证；重复调用同一工具或原地打转时主动换策略。使用与用户相同的语言回答。',
+    llmType: '',
+    model: '',
+    temperature: 0.3,
+    kbTopK: 3,
+    selectedSkills: [],
+    // 完整开发工具集 + 规划 / 清单 / 子智能体（对齐 dsh standard 预设的能力面）
+    capabilities: {
+      readFiles: true,
+      writeFiles: true,
+      listDirs: true,
+      executeCode: true,
+      runShell: true,
+      webSearch: true,
+      browseWebsites: true,
+      runSubagent: true,
+      skills: true,
+      accessKnowledgeBase: false,
+      mcpAccess: false,
+      mcpServerIds: [],
+      mcpEquipmentIds: [],
+      askUser: true,
+      updatePlan: true,
+      updateTodo: true,
+      knowledgeBaseFiles: [],
+      enabledTools: [
+        'ask_user', 'update_plan', 'update_todo',
+        'read_file', 'search_files', 'list_dir',
+        'write_file', 'replace_in_file', 'multi_replace',
+        'run_python', 'shell',
+        'web_search', 'web_fetch',
+        'run_subagent', 'skill',
+      ],
+    },
+    seedHistory: true,
+  },
+  {
+    id: BUILTIN_AGENT_PRESET_IDS.codex,
+    name: 'Codex 智能体',
+    builtin: true,
+    tags: ['Codex', '终端', '代码'],
+    llmType: '',
+    model: '',
+    temperature: 0.3,
+    kbTopK: 3,
+    systemPrompt: [
+      '你是「Codex 智能体」，一名运行在终端里的编码智能体（设定对齐 OpenAI Codex CLI：精确、安全、有节制地动手）。',
+      '',
+      '权限与沙箱（先把边界说清楚再动手）：',
+      '- 你的实际操作权限由用户在「设置 → 工具 → 安全策略」里选择的三档决定，与 Codex 的沙箱三档一致：',
+      '  · 只读安全（read-only）：只做读取、检索与解释；需要写文件或跑命令时先说明意图，并请用户调整档位或确认。',
+      '  · 工作区写入（workspace-write）：可在工作区内读写文件、运行代码与命令；越出工作区的路径与系统级操作会被拒绝——被拒绝时如实说明，不要绕路。',
+      '  · 完全访问（danger-full-access）：不受限制，但仍要遵守下面的"安全改动"约束，不要在没有确认的情况下做破坏性操作（删用户数据、force push、改系统配置）。',
+      '',
+      '项目约定：',
+      '- 动手前先读工作区里的 AGENTS.md（没有就找 CLAUDE.md / README.md），把它当作本项目的硬性要求；从当前目录逐级向上找，就近优先。',
+      '- 不确定的 API、路径、依赖先读文件或搜索确认，绝不猜测或编造。',
+      '',
+      '工作方式：',
+      '1. 非平凡的多步任务先用 update_plan 制定简短计划（每步一句话，恰好一个 in_progress），用 update_todo 维护任务清单，执行中逐步更新。',
+      '2. 结束回合前把任务完全解决，不交付半成品、也不留给用户"你应该能猜到"的改动。',
+      '3. 改动精准、最小：优先 replace_in_file / multi_replace，保持原有代码风格；新建文件才用 write_file。',
+      '4. 用补丁式思维改代码：先看清上下文再替换，且替换必须唯一、可复现。',
+      '5. 改完必须验证：用 shell / run_python 跑测试或构建（npm run build、npx tsc --noEmit、pytest 等），失败就继续修到通过。',
+      '6. 需要外部资料时用 web_search / web_fetch 查证并给出出处；彼此独立的调研可以交给 run_subagent 并行。',
+      '7. 提问的时机：只有真正无法从工作区推断、且会改变结果的信息才用 ask_user；权限类问题不要用 ask_user 代替对沙箱档位的说明。',
+      '8. 最终汇报像给同事交接工作：简短分段小标题、按重要性排序的要点、文件路径用行内代码，写清验证方式与未决项。',
+      '9. 使用与用户相同的语言回答（用户说中文就用中文）。',
+    ].join('\n'),
+    selectedSkills: [],
+    // 与「代码智能体」同一套工具目录（Codex 的风格体现在提示词与权限约束，而不是削减能力）
+    capabilities: {
+      readFiles: true,
+      writeFiles: true,
+      listDirs: true,
+      executeCode: true,
+      runShell: true,
+      webSearch: true,
+      browseWebsites: true,
+      runSubagent: true,
+      skills: true,
+      accessKnowledgeBase: false,
+      mcpAccess: false,
+      mcpServerIds: [],
+      mcpEquipmentIds: [],
+      askUser: true,
+      updatePlan: true,
+      updateTodo: true,
+      knowledgeBaseFiles: [],
+      enabledTools: [
+        'ask_user', 'update_plan', 'update_todo',
+        'read_file', 'search_files', 'list_dir',
+        'write_file', 'replace_in_file', 'multi_replace',
+        'shell', 'run_python',
+        'web_search', 'web_fetch',
+        'run_subagent', 'skill',
+      ],
+    },
+    seedHistory: true,
+    loopPromptMode: 'auto',
+    loopSections: [],
+  },
 ]
 
 /**
@@ -329,4 +554,34 @@ export function ensureBuiltinAgentPresets(
     changed = true
   }
   return changed
+}
+
+/** 取内置预设的出厂定义（深拷贝副本；非内置 id 返回 null，避免调用方改到常量） */
+export function builtinPresetDefaultOf(id: string): Record<string, any> | null {
+  const seed = BUILTIN_AGENT_PRESETS.find((p) => p && p.id === id)
+  return seed ? JSON.parse(JSON.stringify(seed)) : null
+}
+
+/**
+ * 把某个内置预设恢复为出厂默认（预设页「恢复默认」按钮）。
+ *
+ * 就地替换列表里的那一项：位置不变、只还原内容；非内置 id 一律不动（用户自建预设没有「出厂默认」）。
+ * 来源 / 模型仍与首次注入一致：出厂定义里为空时沿用当前全局配置。
+ *
+ * @returns 是否真的恢复了一项（调用方据此提示成功 / 忽略）
+ */
+export function resetBuiltinAgentPreset(
+  list: any[],
+  id: string,
+  defaults: { llmType?: string; model?: string } = {},
+): boolean {
+  if (!Array.isArray(list) || !BUILTIN_AGENT_PRESET_ID_SET.has(id)) return false
+  const idx = list.findIndex((p: any) => p && p.id === id)
+  if (idx < 0) return false
+  const item: any = builtinPresetDefaultOf(id)
+  if (!item) return false
+  if (!item.llmType && defaults.llmType) item.llmType = defaults.llmType
+  if (!item.model && defaults.model) item.model = defaults.model
+  list.splice(idx, 1, item)
+  return true
 }

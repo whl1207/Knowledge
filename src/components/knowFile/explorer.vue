@@ -39,7 +39,7 @@
             <i class="fa fa-download"></i> {{ store.locales=='zh'?'下载到本地':'Download' }}
           </span>
         </div>
-        <!-- 全局视图共用的顶部工具栏：多视图并排时只显示这一条（面板开关 + 路径面包屑 + 搜索 + 刷新） -->
+        <!-- 顶部工具栏（面板开关 + 视图选择 + 路径面包屑 + 搜索 + 刷新）：右侧视图共用这一条 -->
         <ViewToolbar
           v-if="viewToolbarVisible"
           v-model:search="store.knowQuery"
@@ -50,40 +50,25 @@
           @toggle-panel="toggleMode('file')"
           @refresh="store.knowRefreshViews()"
         />
-        <div class="explorer" :style="{flexDirection:store.UI.layout=='horizontal'?'row':'column'}">
-          <template v-for="(viewName, vi) in getVisibleViews()" :key="viewName">
-            <!-- 视图内容 -->
-            <div class="view-panel" :style="getViewStyle(viewName)">
-              <view_file v-if="viewName==='文件'" />
-              <view_graph v-if="viewName==='图谱'" />
-              <view_kanban v-if="viewName==='看板'" />
-              <view_year v-if="viewName==='日历'" />
-              <view_map v-if="viewName==='地图'" />
-              <view_table v-if="viewName==='表格'" />
-              <!-- draw.io 图表：浏览/源码编辑/可视编辑/导图/演示视图统一渲染 Drawio 组件（远程文件只读） -->
-              <Drawio v-if="isDrawioFile && isDrawioContentView(viewName)" :path="activeFilePath" :content="activeFileContent" :readonly="isRemoteFile" />
-              <!-- .excalidraw 文件：浏览/编辑/块编辑/导图/演示视图统一渲染 Excalidraw 白板 -->
-              <Excalidraw v-if="isExcalidrawFile && isExcalidrawContentView(viewName)" :path="activeFilePath" :content="activeFileContent" />
-              <!-- 音视频等多媒体文件：浏览/编辑/块编辑/导图/演示视图统一渲染 Media 播放器 -->
-              <Media v-else-if="isMediaFile && isMediaContentView(viewName)" :path="activeFilePath" :content="activeFileContent" />
-              <!-- 工作流（Dify DSL .flow.yml）：浏览 / 可视编辑渲染新版编辑器 -->
-              <WorkflowEditor v-if="isFlowDslFile && isFlowContentView(viewName)" :path="activeFilePath" :content="activeFileContent" :readonly="isRemoteFile" />
-              <!-- 数据画布（.data）：浏览 / 可视编辑渲染画布模块，保存由组件自己回写文件（内容经 file-saved 同步回标签） -->
-              <DataCanvasModule v-if="isDataFile && isDataContentView(viewName)" :task-file-path="activeFilePath" mode="full" @file-saved="onDataCanvasSaved" />
-              <md_read v-if="!isDrawingEditor && !isMediaFile && !isFlowDslFile && !isDataFile && viewName===VIEW_BROWSE&&hasActiveFile" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
-              <md_mind v-if="!isDrawingEditor && viewName===VIEW_MINDMAP&&store.index!=null" />
-              <md_ppt v-if="!isDrawingEditor && viewName===VIEW_PRESENTATION&&store.index!=null" />
-              <Edit_Code v-if="!isDrawingEditor && viewName===VIEW_SOURCE&&store.index!=null" />
-              <Edit_Block v-if="!isDrawingEditor && !isFlowDslFile && !isDataFile && viewName===VIEW_VISUAL&&store.index!=null" />
-            </div>
-            <!-- 视图之间的拖拽手柄 -->
-            <div v-if="vi < getVisibleViews().length - 1"
-                 class="view-resizer"
-                 :class="store.UI.layout==='horizontal'?'resizer-h':'resizer-v'"
-                 @mousedown.prevent="startViewResize($event, viewName, getVisibleViews()[vi+1])">
-            </div>
-          </template>
-          <empty v-if="store.root=='' || getVisibleViews().length == 0" />
+        <div class="explorer">
+          <!-- 主窗口一次只显示一个视图：全局视图（store.view 单选，见 设置 → 功能 → 知识管理）；
+               远程文件预览标签激活时自动换成「浏览」（只读预览，不需要在设置里开），关掉标签即回到原视图 -->
+          <div v-if="activeView" class="view-panel">
+            <view_file v-if="activeView==='文件'" />
+            <view_graph v-if="activeView==='图谱'" />
+            <view_kanban v-if="activeView==='看板'" />
+            <view_year v-if="activeView==='日历'" />
+            <view_map v-if="activeView==='地图'" />
+            <view_table v-if="activeView==='表格'" />
+            <!-- 专属文件（图表 / 白板 / 工作流 / 数据画布）与音视频：在「浏览」视图里渲染各自编辑器（远程只读） -->
+            <Drawio v-if="isDrawioFile && isDrawioContentView(activeView)" :path="activeFilePath" :content="activeFileContent" :readonly="isRemoteFile" />
+            <Excalidraw v-if="isExcalidrawFile && isExcalidrawContentView(activeView)" :path="activeFilePath" :content="activeFileContent" />
+            <Media v-else-if="isMediaFile && isMediaContentView(activeView)" :path="activeFilePath" :content="activeFileContent" />
+            <WorkflowEditor v-if="isFlowDslFile && isFlowContentView(activeView)" :path="activeFilePath" :content="activeFileContent" :readonly="isRemoteFile" />
+            <DataCanvasModule v-if="isDataFile && isDataContentView(activeView)" :task-file-path="activeFilePath" mode="full" @file-saved="onDataCanvasSaved" />
+            <md_read v-if="!isDrawingEditor && !isMediaFile && !isFlowDslFile && !isDataFile && activeView===VIEW_BROWSE" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
+          </div>
+          <empty v-else />
         </div>
       </div>
     </div>
@@ -110,8 +95,8 @@
 
 <script setup lang="ts">
   import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue';
-  import {usestore} from '@/store'
-  import { FILE_VIEW_NAMES, NON_BROWSE_FILE_VIEWS, VIEW_BROWSE, VIEW_SOURCE, VIEW_VISUAL, VIEW_MINDMAP, VIEW_PRESENTATION } from '@/lib/knowFile/fileViews'
+  import { usestore, DEFAULT_VIEW } from '@/store'
+  import { VIEW_BROWSE } from '@/lib/knowFile/fileViews'
   // 专属文件类型（白板 / 图表 / 工作流 / 数据画布）的判别、编辑器与视图范围统一取自 fileEditors.ts
   import { detectEditorKind, editorVisibleInView, FILE_EDITORS } from '@/components/knowFile/fileEditors'
   import { ElMessageBox, ElMessage } from 'element-plus'
@@ -124,10 +109,6 @@
   import view_map from '@/components/knowFile/view/view_map.vue'
   import view_table from '@/components/knowFile/view/view_table.vue'
   import md_read from '@/components/knowFile/view/md_read.vue'
-  import md_mind from '@/components/knowFile/view/md_mind.vue'
-  import Edit_Code from '@/components/knowFile/view/Edit_Code.vue'
-  import Edit_Block from '@/components/knowFile/view/Edit_Block.vue'
-  import md_ppt from '@/components/knowFile/view/md_ppt.vue'
   import empty from '@/components/knowFile/view/empty.vue'
 
   // 白板 / 图表 / 工作流编辑器 / 数据画布（懒加载入口统一取自 fileEditors.ts，drawio 运行时随应用打包在 /drawio）
@@ -167,107 +148,19 @@
   // 拖动面板宽度时用它屏蔽拖拽条的 left 过渡（否则拖拽条会滞后于面板边缘）
   const isDragging = ref(false);
 
-  // 各视图大小（flex basis, px），水平布局按宽度，垂直布局按高度
-  const viewSizes = ref<Record<string, number>>({})
-  const viewOrder = computed(() => store.viewList)
-  const getVisibleViews = () => viewOrder.value.filter(v => {
-    if (!store.view.includes(v)) return false
-    // 远程文件只读预览：不允许用 源码编辑/可视编辑/思维导图/演示 渲染远程内容（仅「浏览」视图内联预览）。
-    // 本地工作区的全局视图（文件/图谱/看板/甘特/日历/地图/表格）不受远程预览影响，仍按正常规则显示，
-    // 避免预览远程文件时把已开启的本地视图全部隐藏 → 可见视图为 0 → 误触发 empty 空态。
-    if (isRemoteFile.value && NON_BROWSE_FILE_VIEWS.includes(v)) return false
-    if (v === '文件' || v === '看板' || v === '图谱' || v === '甘特' || v === '日历' || v === '地图' || v === '表格') return !!store.root
-    if (NON_BROWSE_FILE_VIEWS.includes(v)) return store.index != null
-    if (v === VIEW_BROWSE) return hasActiveFile.value
-    return true
+  // 主窗口一次只显示一个视图（见模板）：全局视图跟 store.view（单选），
+  // 远程文件预览标签激活时自动顶成「浏览」——关掉标签即回到原来选的全局视图，无需在设置里开「浏览」
+  const activeView = computed(() => {
+    if (isRemoteFile.value) return VIEW_BROWSE
+    if (!store.root) return ''
+    // 兜底默认视图：store.loadConfig 保证 store.view 至少有一个全局视图
+    return store.viewList.find((v: string) => store.view.includes(v)) || DEFAULT_VIEW
   })
 
-  // 知识管理的「全局视图」：这些视图共用同一条顶部工具栏（路径面包屑 + 搜索 + 刷新），
-  // 所以工具栏在 explorer 里只渲染一次（多视图并排时不会每个视图各来一条）
-  const GLOBAL_VIEWS = ['文件', '看板', '表格', '图谱', '地图', '日历']
-  const visibleGlobalViews = computed(() => getVisibleViews().filter(v => GLOBAL_VIEWS.includes(v)))
-  // 只有「地图」没有搜索需求：可见的全局视图只剩地图时就不显示搜索框
-  const viewToolbarSearchable = computed(() => visibleGlobalViews.value.some(v => v !== '地图'))
-  // 工具栏是否显示：有可见的全局视图就显示；即使一个全局视图都没开（但已打开工作区）也要显示 ——
-  // 视图选择就在这条工具栏上（见 ViewToolbar.vue），否则关掉全部全局视图后就没有入口再打开
-  const viewToolbarVisible = computed(() =>
-    !!visibleGlobalViews.value.length || !!store.root
-  )
-
-  // 获取视图尺寸，返回 flex 样式
-  const getViewStyle = (name: string) => {
-    // 最后一个可见视图始终 flex:1 填充剩余空间
-    const visible = getVisibleViews()
-    if (visible.length > 0 && name === visible[visible.length - 1]) return { flex: '1 1 0' }
-    const size = viewSizes.value[name]
-    if (!size) return {} // 无保存尺寸时使用 CSS flex:1 等分
-    const dim = store.UI.layout === 'horizontal' ? 'width' : 'height'
-    return { [dim]: size + 'px', flex: '0 0 auto' }
-  }
-
-  // 开始拖拽调整视图大小
-  let viewDragData: { name: string; nextName: string; startX: number; startSize: number; nextStartSize: number; dim: 'width' | 'height' } | null = null
-
-  const startViewResize = (e: MouseEvent, name: string, nextName: string) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const dim = store.UI.layout === 'horizontal' ? 'width' : 'height'
-    const sizes = viewSizes.value
-    // 从 DOM 获取实际尺寸作为初始值
-    const container = document.querySelector('.explorer') as HTMLElement
-    const totalSize = container ? (dim === 'width' ? container.offsetWidth : container.offsetHeight) : 600
-    // 估算各视图尺寸：未保存的按比例分配
-    const visible = getVisibleViews()
-    const unsizedCount = visible.filter(v => !sizes[v] && v !== name && v !== nextName).length + 2
-    const defaultSize = Math.max(80, Math.floor(totalSize / unsizedCount))
-    if (!sizes[name]) sizes[name] = defaultSize
-    if (!sizes[nextName]) sizes[nextName] = defaultSize
-    viewDragData = {
-      name, nextName,
-      startX: store.UI.layout === 'horizontal' ? e.clientX : e.clientY,
-      startSize: sizes[name],
-      nextStartSize: sizes[nextName],
-      dim
-    }
-    document.body.style.cursor = store.UI.layout === 'horizontal' ? 'col-resize' : 'row-resize'
-    document.body.style.userSelect = 'none'
-    window.addEventListener('mousemove', onViewDrag, true)
-    window.addEventListener('mouseup', stopViewDrag, true)
-  }
-
-  const onViewDrag = (e: MouseEvent) => {
-    if (!viewDragData) return
-    const current = store.UI.layout === 'horizontal' ? e.clientX : e.clientY
-    const delta = current - viewDragData.startX
-    let newSize = viewDragData.startSize + delta
-    let nextNewSize = viewDragData.nextStartSize - delta
-    const minSize = 80
-    // 若下一个视图是最后一个（flex:1 撑满剩余，不实际使用固定尺寸），
-    // 则不应拿它的虚拟尺寸做最小限制，否则会把 name 错误锁定导致拖不动
-    const visible = getVisibleViews()
-    const nextIsLast = visible.length > 0 && viewDragData.nextName === visible[visible.length - 1]
-    if (newSize < minSize) {
-      newSize = minSize
-      if (!nextIsLast) nextNewSize = viewDragData.startSize + viewDragData.nextStartSize - minSize
-    }
-    if (!nextIsLast && nextNewSize < minSize) {
-      nextNewSize = minSize
-      newSize = viewDragData.startSize + viewDragData.nextStartSize - minSize
-    }
-    viewSizes.value[viewDragData.name] = newSize
-    viewSizes.value[viewDragData.nextName] = nextNewSize
-  }
-
-  const stopViewDrag = () => {
-    viewDragData = null
-    document.body.style.cursor = ''
-    document.body.style.userSelect = ''
-    window.removeEventListener('mousemove', onViewDrag, true)
-    window.removeEventListener('mouseup', stopViewDrag, true)
-    try { localStorage.setItem('explorerViewSizes', JSON.stringify(viewSizes.value)) } catch (e) {}
-    // 视图尺寸变化后触发 resize，让依赖容器尺寸的组件（图表/画布等）重新布局
-    store.resize()
-  }
+  // 顶部工具栏（面板开关 + 视图选择 + 路径面包屑 + 搜索 + 刷新）：右侧视图共用这一条
+  const viewToolbarVisible = computed(() => !!store.root)
+  // 只有「地图」没有搜索需求：当前视图是地图时不显示搜索框
+  const viewToolbarSearchable = computed(() => activeView.value !== '地图')
 
   const startDrag = (e: MouseEvent) => {
     isDragging.value = true;
@@ -292,21 +185,16 @@
     store.resize()
   };
 
-  // 通道 B：其他窗口（或本窗口其它视图）保存文件后广播到达主窗口 → 同步本窗口 store 中匹配标签的内容，
-  // 让主窗口中同时打开的 浏览/导图/演示/块编辑 等视图实时刷新显示。
+  // 通道 B：其他窗口（本窗口以「浏览」预览远程文件时）保存文件后广播到达主窗口 → 同步本窗口 store 中匹配标签的内容，
+  // 让右侧预览实时刷新显示。
   const onFileContentChanged = (_event: any, payload: { path?: string; content?: string }) => {
     const changedPath = payload?.path
     const newContent = payload?.content
     if (!changedPath || newContent == null) return
-    // 正在以 编辑/块编辑 视图编辑“当前激活文件”时，跳过覆盖其内容（避免破坏编辑器里未保存的修改；
-    // 该编辑器自身的保存已自行把内容写入 store）。其余情况（未激活标签 / 非编辑中的激活文件）正常同步。
-    const activeTab = hasActiveFile.value ? store.data[store.index!] : null
-    const protectingActiveEdit = !!activeTab && activeTab.path === changedPath &&
-      (store.view.includes(VIEW_SOURCE) || store.view.includes(VIEW_VISUAL))
+    // 主窗口不再承载任何编辑器（文件一律在独立窗口编辑），广播到达后直接同步标签内容
     for (let i = 0; i < store.data.length; i++) {
       const tab = store.data[i]
       if (!tab || tab.path !== changedPath) continue
-      if (protectingActiveEdit && tab === activeTab) continue
       tab.content = newContent
     }
   }
@@ -318,10 +206,6 @@
         const v = parseInt(saved);
         if (!isNaN(v)) leftWidth.value = Math.max(minLeftWidth, Math.min(maxLeftWidth, v));
       }
-    } catch (e) {}
-    try {
-      const saved = localStorage.getItem('explorerViewSizes');
-      if (saved) viewSizes.value = JSON.parse(saved);
     } catch (e) {}
     // 监听其他窗口保存文件后的内容广播（通道 B）
     window.ipcRenderer.on('file-content-changed', onFileContentChanged)
@@ -490,10 +374,8 @@
     return AUDIO_EXTS.includes(ext) || VIDEO_EXTS.includes(ext)
   });
 
-  // 多媒体文件：浏览/源码编辑/可视编辑/思维导图/演示这些内容视图统一渲染 Media 播放器组件
-  const isMediaContentView = (name: string) => {
-    return FILE_VIEW_NAMES.includes(name)
-  };
+  // 多媒体文件：主窗口只在「浏览」视图里渲染 Media 播放器（远程文件的音视频预览也走这里）
+  const isMediaContentView = (name: string) => name === VIEW_BROWSE;
 
   const isFlowDslFile = computed(() => editorKind.value === 'flow');
   const isDataFile = computed(() => editorKind.value === 'data');
@@ -647,7 +529,7 @@
     overflow: hidden;
   }
   
-  /* 视图面板 - 由 inline style 控制 flex，默认等分 */
+  /* 视图面板 - 一次只渲染一个视图，撑满右侧区域 */
   .view-panel {
     flex: 1;
     min-width: 0;
@@ -663,63 +545,6 @@
     overflow: hidden;
   }
 
-  /* 视图之间的拖拽手柄：不占布局宽度，悬浮覆盖在视图交界处 */
-  .view-resizer {
-    flex: 0 0 0;          /* 不占用 flex 布局空间 */
-    background: transparent;
-    z-index: 20; /* 提高层级，确保不被相邻视图内容覆盖 */
-    pointer-events: auto;
-    touch-action: none;
-    position: relative;
-    overflow: visible;
-    transition: background-color 0.15s;
-  }
-  .view-resizer.resizer-h {
-    width: 0;
-    height: 100%;
-    cursor: col-resize;
-  }
-  .view-resizer.resizer-v {
-    width: 100%;
-    height: 0;
-    cursor: row-resize;
-  }
-  /* 悬浮视觉条（默认透明，悬停时显示） */
-  .view-resizer.resizer-h::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: -3px;
-    width: 6px;
-  }
-  .view-resizer.resizer-v::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: -3px;
-    height: 6px;
-  }
-  /* 扩大拖拽命中区（透明伪元素），提升可抓取性 */
-  .view-resizer.resizer-h::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: -5px;
-    right: -5px;
-  }
-  .view-resizer.resizer-v::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: -5px;
-    bottom: -5px;
-  }
-  .view-resizer:hover::before { background: var(--borderColor); }
-  
   /* 模糊搜索窗口（类似设置界面，悬浮弹出） */
   .search-overlay {
     position: fixed;

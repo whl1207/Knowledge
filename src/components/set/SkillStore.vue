@@ -206,6 +206,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { usestore } from '@/store'
 import { renderQuestionMarkdown } from '@/lib/markdown/render'
+import { normalizeRemoteStoreUrl } from '@/lib/remoteStore'
 
 const store = usestore()
 
@@ -280,8 +281,8 @@ const addCustomSource = async () => {
     ElMessage.warning(store.locales === 'en' ? 'Please enter a source address' : '请输入来源地址')
     return
   }
-  // 支持完整 URL（内网地址）或 GitHub owner/repo
-  const isHttp = /^https?:\/\//i.test(raw)
+  // 支持完整 URL（内网地址 / 共享目录）或 GitHub owner/repo
+  const isHttp = /^https?:\/\//i.test(raw) || /^remote-fs:\/\//i.test(raw)
   let url = raw
   let name = raw
   let type: 'github' | 'http' = 'github'
@@ -293,6 +294,12 @@ const addCustomSource = async () => {
     }
   } else {
     type = 'http'
+    // 共享目录：remote-fs://<ip>:<port>?token=… / http://…/fs 都规范化为「商店清单」地址
+    const normalized = normalizeRemoteStoreUrl(raw)
+    if (normalized) {
+      url = normalized.url
+      name = raw.replace(/^remote-fs:\/\//i, '').split('?')[0]
+    }
   }
   if (storeSources.value.some(s => s.url.toLowerCase() === url.toLowerCase())) {
     ElMessage.warning(store.locales === 'en' ? 'Source already exists' : '该来源已存在')
@@ -688,13 +695,35 @@ const downloadSkill = async (skill: StoreSkill) => {
   }
 }
 
-// 内网/HTTP 源递归下载：返回 JSON 数组视为目录，否则视为单文件
+// 内网/HTTP 源递归下载：共享目录的目录打包（{files:[{path,text|base64}]}）直接按相对路径写盘；
+// 返回 JSON 数组视为目录，否则视为单文件
 const downloadHttpRecursive = async (url: string, dir: string) => {
   const resp = await fetch(url)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   const ct = resp.headers.get('content-type') || ''
   if (ct.includes('application/json')) {
     const body = await resp.json()
+    // 共享目录打包（/fs/bundle）：一次取回整目录，带相对路径
+    if (body && Array.isArray(body.files)) {
+      for (const f of body.files) {
+        const rel = String(f?.path || '').replace(/\\/g, '/').replace(/^\/+/, '')
+        if (!rel || rel.split('/').includes('..')) continue
+        const parts = rel.split('/').filter(Boolean)
+        const fileName = parts.pop() || ''
+        if (!fileName) continue
+        const subDir = parts.length ? `${dir}/${parts.join('/')}` : dir
+        if (parts.length) await window.ipcRenderer.invoke('ensureDir', subDir)
+        const content = f.text != null ? String(f.text) : ''
+        if (f.base64 != null) {
+          const bin = await window.ipcRenderer.invoke('writeBase64', `${subDir}/${fileName}`, String(f.base64))
+          if (bin && bin.success === false) throw new Error(bin.error || 'write failed')
+        } else {
+          const result = await window.ipcRenderer.invoke('writeFile', `${subDir}/${fileName}`, content)
+          if (!result.success) throw new Error(result.error)
+        }
+      }
+      return
+    }
     if (Array.isArray(body)) {
       for (const item of body) {
         if (!item.name) continue

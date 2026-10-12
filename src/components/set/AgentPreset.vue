@@ -168,6 +168,13 @@
             :title="store.locales === 'en' ? 'Agent loop prompt & execution settings' : 'Agent 循环提示词与执行参数'">
             <i class="fa fa-refresh"></i> <span class="ae-tab-text">{{ store.locales === 'en' ? 'Loop' : '循环' }}</span>
           </button>
+          <!-- 内置预设才有「出厂默认」：改坏了可一键还原（用户自建预设不显示） -->
+          <button v-if="isBuiltinSelected" class="ae-tab ae-tab-reset" @click="resetSelectedToDefault"
+            :title="store.locales === 'en'
+              ? `Restore “${selected?.name}” to its factory settings (name / model / prompt / tools / skills / MCP / loop sections)`
+              : `把「${selected?.name}」恢复为出厂默认（名称 / 模型 / 系统提示 / 工具 / 技能 / MCP / 指令段）`">
+            <i class="fa fa-undo"></i> <span class="ae-tab-text">{{ store.locales === 'en' ? 'Reset' : '恢复默认' }}</span>
+          </button>
         </div>
 
         <!-- 通用：基础配置（名称 / 来源 / 模型 / 温度 / 标签 / 系统提示） -->
@@ -456,7 +463,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { usestore } from '@/store'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import draggable from 'vuedraggable'
 import { mcpManager } from '@/platform/mcpManager'
 import { toolsFromCapabilities, setToolEnabled, toolOn } from '@/lib/agent/capabilities'
@@ -467,7 +474,7 @@ import {
 } from '@/composables/useAgentPresets'
 import { renderLoopSections } from '@/lib/agent/skill'
 import { AGENT_MAX_STEPS_MAX, DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
-import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset } from '@/shared/builtinAgentPresets'
+import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset, resetBuiltinAgentPreset, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 import { deepSeekStyleOf, normalizeLlmTypeList } from '@/shared/llmSources'
 
 const store = usestore()
@@ -489,7 +496,11 @@ const presetIcon = (p: any): string =>
   p?.id === BUILTIN_AGENT_PRESET_IDS.code ? 'fa-code'
     : p?.id === BUILTIN_AGENT_PRESET_IDS.office ? 'fa-briefcase'
       : p?.id === BUILTIN_AGENT_PRESET_IDS.ptc ? 'fa-file-code-o'
-        : 'fa-user'
+        : p?.id === BUILTIN_AGENT_PRESET_IDS.plugin ? 'fa-puzzle-piece'
+          : p?.id === BUILTIN_AGENT_PRESET_IDS.pi ? 'fa-terminal'
+            : p?.id === BUILTIN_AGENT_PRESET_IDS.dsh ? 'fa-cubes'
+              : p?.id === BUILTIN_AGENT_PRESET_IDS.codex ? 'fa-window-maximize'
+                : 'fa-user'
 
 // ====== 标签 ======
 const tagInput = ref('')
@@ -871,6 +882,37 @@ const selected = computed<AgentPreset | undefined>(() => {
 
 // ====== 配置 Tab（参考 SwarmAgentCard ae-tabs：通用 / 技能 / MCP / 知识库 / AgentLoop） ======
 const activeTab = ref<'general' | 'tools' | 'skills' | 'mcp' | 'kb' | 'loop'>('general')
+/** 当前选中的是出厂内置预设（只有内置项有「出厂默认」可恢复） */
+const isBuiltinSelected = computed(() => !!selected.value && isBuiltinAgentPreset(selected.value))
+
+/**
+ * 把当前内置预设恢复为出厂默认：确认后按 id 就地还原内容（名称 / 模型 / 提示词 / 工具 / 技能 / MCP / 指令段）。
+ * 出厂定义里来源与模型为空时沿用当前全局配置（与首次注入内置预设的行为一致）。
+ */
+const resetSelectedToDefault = async () => {
+  const p = selected.value
+  if (!p || !isBuiltinAgentPreset(p)) return
+  try {
+    await ElMessageBox.confirm(
+      store.locales === 'en'
+        ? `Restore “${p.name}” to factory settings? Everything you edited on this preset (name / model / prompt / tools / skills / MCP / loop sections) will be replaced by the built-in defaults.`
+        : `把「${p.name}」恢复为出厂默认？你在这个预设上改过的名称 / 模型 / 系统提示 / 工具 / 技能 / MCP / 指令段都会被内置默认值替换。`,
+      store.locales === 'en' ? 'Restore built-in preset' : '恢复内置预设',
+      {
+        type: 'warning',
+        confirmButtonText: store.locales === 'en' ? 'Restore' : '恢复',
+        cancelButtonText: store.locales === 'en' ? 'Cancel' : '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  if (resetBuiltinAgentPreset(store.agentPresets as any[], p.id, builtinPresetDefaultsFromStore(store))) {
+    activeTab.value = 'general'
+    // 恢复后能力槽 / 工具集可能与当前所在 tab 不再匹配（如技能被关掉），回到「通用」页最稳妥
+    ElMessage.success(store.locales === 'en' ? 'Restored to factory settings' : '已恢复为出厂默认')
+  }
+}
 /** 技能/MCP/知识库 tab：对应能力开启后才可进入 */
 const skillsEnabled = computed(() => !!selected.value?.capabilities?.skills)
 const mcpEnabled = computed(() => !!selected.value?.capabilities?.mcpAccess)
@@ -1551,6 +1593,18 @@ onMounted(async () => {
   background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
 }
 .ae-tab.disabled { opacity: .4; cursor: not-allowed; }
+/* 内置预设的「恢复默认」：右对齐、与其它 tab 同一套观感，但常驻可见（改坏了要找得到） */
+.ae-tab-reset {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border-color: var(--borderColor);
+  opacity: .8;
+}
+.ae-tab-reset:hover {
+  opacity: 1;
+  color: #b45309;
+  border-color: #b45309;
+}
 .ae-tab-body { display: flex; flex-direction: column; gap: 5px; flex: 1; min-height: 0; }
 /* 配置分组框占满 tab 高度，避免下方留白 */
 .ae-tab-body > .cfg-box { flex: 1 1 auto; min-height: 0; }

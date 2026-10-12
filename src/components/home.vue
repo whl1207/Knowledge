@@ -2711,6 +2711,7 @@ const toolIcons: Record<string, string> = {
   'server-search': 'fa-globe',
   'server-search-query': 'fa-search',
   'server-search-visit': 'fa-external-link',
+  'context-compact': 'fa-compress',
   'run_code': 'fa-file-code-o',
   'run_python': 'fa-code',
   'shell': 'fa-terminal',
@@ -2740,6 +2741,7 @@ const getToolLabel = (name: string): string => {
     'server-search': isZh ? '服务端搜索' : 'Server Search',
     'server-search-query': isZh ? '搜索' : 'Search',
     'server-search-visit': isZh ? '访问网站' : 'Visited',
+    'context-compact': isZh ? '上下文压缩' : 'Context compaction',
     'run_code': isZh ? '程序化调用' : 'Run Code',
     'run_python': isZh ? '执行Python' : 'Run Python',
     'shell': isZh ? '执行Shell' : 'Run Shell',
@@ -7658,6 +7660,7 @@ const shouldShowUnitArgs = (unit: any): boolean => {
   if (n === 'update_plan' || n === 'update_todo') return false // 计划/清单直接以文本呈现，参数区省略
   if (n === 'server-search-visit') return false // 访问网站：无入参
   if (n === 'server-search-query') return false // 旧数据兼容（老卡片：查询词在结果区）
+  if (n === 'context-compact') return false // 上下文压缩：无入参，状态写在结果区
   // server-search：查询词作为入参显示在参数区，结果在结果区（与 web_search 工具卡片一致）
   return true
 }
@@ -7857,6 +7860,18 @@ const unitResultText = (unit: any): string => {
       if (typeof r === 'string') return r
       if (typeof r?.answer === 'string') return isZh ? `回答: ${r.answer}` : `Answer: ${r.answer}`
       return prettyJson(r)
+    case 'context-compact': {
+      // 上下文压缩卡片：摘要生成期间 / 结束 / 失败三态（result 为结构化状态，由主进程事件投影而来）
+      const count = typeof r?.droppedMessages === 'number' ? r.droppedMessages : 0
+      const before = typeof r?.tokensBefore === 'number' && r.tokensBefore > 0 ? Math.round(r.tokensBefore).toLocaleString() : ''
+      if (r?.phase === 'running') return isZh ? '正在压缩上下文…' : 'Compacting context…'
+      if (r?.phase === 'failed') {
+        return isZh ? '压缩未生效，本次沿用原历史' : 'Compaction did not take effect — history kept as is'
+      }
+      return isZh
+        ? `已压缩较早对话（原消息仍保留）${count ? `：已将 ${count} 条较早消息替换为摘要` : ''}${before ? `（压缩前约 ${before} tokens）` : ''}`
+        : `Earlier turns were summarized (originals are kept)${count ? ` — ${count} earlier messages replaced by a summary` : ''}${before ? ` (about ${before} tokens before compaction)` : ''}`
+    }
     case 'update_plan':
       // 只显示 plan 字段的值：对象取 plan；字符串视为 plan 本身；其余不显示
       if (r && typeof r === 'object') {

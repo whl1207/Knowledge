@@ -233,7 +233,7 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
 ]
 
 /** 「如何使用插件」给人看的步骤 */
-export const PLUGIN_DEV_USAGE_ZH = `1) 安装：插件文件夹放进插件目录，或「设置 → 插件 → 管理 → 从文件夹安装」；插件目录可改成自己的文件夹（和技能一样），点「打开插件目录」即可查看。
+export const PLUGIN_DEV_USAGE_ZH = `1) 安装：插件文件夹放进插件目录（可直接放，也可按用途放进各级子文件夹——管理页能看出它属于哪个文件夹），或「设置 → 插件 → 管理 → 从文件夹安装」；插件目录可改成自己的文件夹（和技能一样），点「打开插件目录」即可查看。手动放进新插件后点管理页目录栏的「重新扫描」即可发现（不必重启软件）。
 2) 启用：点启用按钮 → 弹窗会列出该插件申请的权限（文件 / 执行命令 / 网络 / 会话日志 / 大模型），确认后才会加载。停用后它加的界面元素与工具立即消失。
 3) 用它：
    · 主面板 —— 左侧或底部的导航栏会出现它的按钮（图标 + 名称）；
@@ -242,10 +242,11 @@ export const PLUGIN_DEV_USAGE_ZH = `1) 安装：插件文件夹放进插件目�
    · 快捷键 —— 插件会说明它用了哪些组合键，插件设置页里也能看到；
    · 集群工作台 / 聊天消息按钮 —— 出现在对应位置。
 4) 配置：插件 → 管理 → 配置（JSON），保存后点重载生效。
+5) 发给别人：把插件文件夹放进「协作 → 共享」里共享的目录（可分类放进子文件夹），对方在「插件 → 商店」粘贴共享地址即可一键安装（安装前会再次列出权限）；索引由软件实时扫描，不需要你手写任何清单文件。
 5) 排障：插件 → 管理 → 日志（能看到它自己打的信息）；「详情」里有清单、槽位、权限与加载状态。
 6) 卸载：点移除（可选择是否删除插件文件夹）。`
 
-export const PLUGIN_DEV_USAGE_EN = `1) Install: drop the folder into the plugins folder, or use Plugins → Manage → Install from folder. The plugins folder can be moved to your own directory (like skills) — use “Open plugins folder”.
+export const PLUGIN_DEV_USAGE_EN = `1) Install: drop the folder into the plugins folder (directly, or grouped by purpose in nested subfolders — the manager shows which folder each plugin belongs to), or use Plugins → Manage → Install from folder. The plugins folder can be moved to your own directory (like skills) — use “Open plugins folder”. Click “Rescan” in the folder bar to pick up manually added plugins (no restart needed).
 2) Enable: press Enable — a dialog lists the permissions it requests (files / commands / network / session logs / models). It loads only after you confirm. Disabling removes its UI contributions and tools instantly.
 3) Use it:
    · Main panel — a button (icon + name) shows up in the left or bottom nav;
@@ -254,8 +255,9 @@ export const PLUGIN_DEV_USAGE_EN = `1) Install: drop the folder into the plugins
    · Shortcuts — documented by the plugin and visible on its settings tab;
    · Swarm workbench / chat message buttons — appear in place.
 4) Configure: Plugins → Manage → Config (JSON), then hit Reload.
-5) Troubleshoot: Plugins → Manage → Logs (what the plugin logged) and Details (manifest, slots, permissions, load state).
-6) Remove: press Remove (optionally deleting the folder).`
+5) Share it: put the plugin folder into the folder shared under Collaboration → Share (category subfolders are fine); others paste the share address into Plugins → Store and install it in one click — the index is scanned on the fly, so you never hand-write a manifest file.
+6) Troubleshoot: Plugins → Manage → Logs (what the plugin logged) and Details (manifest, slots, permissions, load state).
+7) Remove: press Remove (optionally deleting the folder).`
 
 /** 各段可复制指令 */
 export const PLUGIN_DEV_SECTIONS: readonly PluginDevSection[] = [
@@ -374,6 +376,7 @@ ${CONSTRAINTS_ZH}
 - 面板用 ctx.slots.register('panel.main', { key: '<my-panel>', titleZh, titleEn, icon, order: 900, component: Panel })；
 - 如果有可配置项，再加一个设置页签：ctx.slots.register('settings.tab', { key: '<my-panel>-settings', titleZh: '我的面板', titleEn: 'My panel', icon: 'fa fa-cogs', meta: { group: 'ui' }, component: Settings })，
   设置项改动要立即生效并持久化（可用 localStorage，键名带插件 id 前缀，如 'aikm.plugin.my-panel.settings'）；
+  图片 / 存档这类大文件放本机 OPFS 的 'plugins/<插件 id>/' 目录（宿主「插件管理 → 数据」按这个约定统计与清理）；
 - 面板高度自适应：最外层 height:100%; box-sizing:border-box; display:flex; flex-direction:column，需要滚动的区域 class="scoll" + overflow-y:auto + min-height:0；
 - 数字/文本输入框、下拉框都要显式设前景色与背景色（主题变量）并给紧凑尺寸；
 - 别忘了在 settings 卡或面板上给出简短的使用提示（一句话），并在 README.md 写清用法。`,
@@ -391,7 +394,7 @@ ${CONSTRAINTS_EN}
 [Implementation notes]
 - client.mjs shape: export function apply(ctx) { ... }, written with h / defineComponent / ref / computed from ctx.vue.
 - Register the panel with ctx.slots.register('panel.main', { key: '<my-panel>', titleZh, titleEn, icon, order: 900, component: Panel }).
-- If there are settings, add ctx.slots.register('settings.tab', { key: '<my-panel>-settings', titleZh: 'My panel', titleEn: 'My panel', icon: 'fa fa-cogs', meta: { group: 'ui' }, component: Settings }); changes must apply immediately and persist (localStorage with a plugin-id-prefixed key such as 'aikm.plugin.my-panel.settings').
+- If there are settings, add ctx.slots.register('settings.tab', { key: '<my-panel>-settings', titleZh: 'My panel', titleEn: 'My panel', icon: 'fa fa-cogs', meta: { group: 'ui' }, component: Settings }); changes must apply immediately and persist (localStorage with a plugin-id-prefixed key such as 'aikm.plugin.my-panel.settings'); put large blobs (images, saves) in OPFS under 'plugins/<plugin id>/' — that is how Settings → Plugins → Data measures and clears per-plugin data.
 - Panel height: outer element height:100%; box-sizing:border-box; display:flex; flex-direction:column; scrollable areas need class="scoll" + overflow-y:auto + min-height:0.
 - Set explicit foreground/background colours (theme variables) and compact sizes on every input/select.
 - Add a one-line usage hint in the panel or its settings tab, and document usage in README.md.`,

@@ -108,6 +108,12 @@ export interface AgentOptions {
    * provider 报上下文超限时压缩后重放本 step。旁路会话（如摘要器）应传 false 防递归。
    */
   contextCompact?: boolean
+  /**
+   * 估算校准系数（真实 token 计数 / 字符启发式估算）：渲染层按「来源 + 模型」记住上次实测值
+   * 后回传，主进程用它修正请求前预算（本地后端 Ollama / LM Studio 的 tokenizer 与估算口径
+   * 差异可达 ±30%，不校准会系统性低估 → 压缩触发太晚）。缺省 1；运行时主进程还会继续自校准。
+   */
+  tokenScale?: number
   /** 禁用的技能名（技能管理开关关闭的；skill 工具加载时校验拒绝） */
   disabledSkills?: string[]
   /** 父 agent id（子代理接缝：父销毁时级联销毁子代理） */
@@ -204,7 +210,11 @@ export type AgentEventType =
   | 'agent/plan' // 执行计划更新（update_plan 工具）
   | 'agent/todos' // 待办清单更新（update_todo 工具）
   | 'agent/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call）
+  | 'agent/compaction' // 上下文压缩（旧轮次摘要）：start 事件 → 界面显示「正在压缩上下文…」
   | 'agent/error'
+
+/** 上下文压缩触发方式：自动（占用达阈值）/ 后端报超限后重试 / 手动 */
+export type AgentCompactionKind = 'auto' | 'overflow-retry' | 'manual'
 
 /** 单步 LLM 的 token 用量（真实 usage，用于上下文占用圆环与累计消耗展示） */
 export interface AgentStepUsage {
@@ -218,7 +228,7 @@ export interface AgentEventMap {
   'agent/turn-start': { turn: number }
   'agent/turn-end': { turn: number; reason: string }
   'agent/step-start': { turn: number; step: number }
-  'agent/step-end': { turn: number; step: number; toolCalls: number; usage?: AgentStepUsage }
+  'agent/step-end': { turn: number; step: number; toolCalls: number; usage?: AgentStepUsage; /** 估算校准系数（真实/估算，渲染层按来源+模型持久化后回传复用） */ tokenScale?: number }
   'agent/inbox': { pending: number }
   'assistant/chunk': { content: string }
   'assistant/reasoning': { text: string }
@@ -233,6 +243,16 @@ export interface AgentEventMap {
   'agent/plan': { plan: string | null }
   'agent/todos': { todos: TodoItem[] }
   'agent/search-status': { status: string; query?: string; results?: Array<{ title?: string; url?: string }>; action?: any }
+  /** phase='start' 表示开始生成摘要；phase='end' 表示结束（ok=false 表示压缩未生效，保持原历史） */
+  'agent/compaction': {
+    phase: 'start' | 'end'
+    kind: AgentCompactionKind
+    ok?: boolean
+    /** 被摘要替换掉的旧消息条数 */
+    droppedMessages?: number
+    /** 这些旧消息压缩前的估算 token */
+    tokensBefore?: number
+  }
   'agent/error': { message: string }
 }
 

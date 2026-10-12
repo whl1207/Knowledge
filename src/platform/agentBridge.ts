@@ -12,7 +12,7 @@
  * 列表，执行细节（循环/工具/状态）都在 agent 循环 + 本桥接层。
  */
 
-import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUsage, TodoItem } from '@/types/agent'
+import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUsage, TodoItem, AgentCompactionKind } from '@/types/agent'
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
 import { lanAgentTransport } from '@/platform/lanAgentClient'
@@ -84,6 +84,23 @@ export interface StepView {
   endTime?: number
 }
 
+/**
+ * 上下文压缩状态（主进程 `agent/compaction` 事件投影）。
+ * 供对话时间线显示一张「上下文压缩」卡片：生成摘要期间为 running，结束后转 success/failed。
+ */
+export interface CompactionView {
+  /** 递增序号：每次压缩一个新单元（单元 id 用序号，多次压缩互不覆盖） */
+  seq: number
+  phase: 'idle' | 'running' | 'done' | 'failed'
+  kind: AgentCompactionKind
+  /** 被摘要替换掉的旧消息条数（phase='done' 时有效） */
+  droppedMessages?: number
+  /** 压缩前这些消息的估算 token */
+  tokensBefore?: number
+  startTime?: number
+  endTime?: number
+}
+
 export interface AgentSessionView {
   id: string
   status: AgentStatus
@@ -99,6 +116,8 @@ export interface AgentSessionView {
   pendingQuestion: { askId: string; question: string } | null
   /** 服务端联网搜索状态（deepseek-responses web_search_call 投影；仅 UI 展示） */
   searchStatus: { status: string; query?: string; results?: Array<{ title?: string; url?: string }>; visitedUrls?: string[] } | null
+  /** 上下文压缩状态（旧轮次摘要；start 事件到达后对话时间线显示「正在压缩上下文…」） */
+  compaction: CompactionView
   /**
    * 服务端搜索事件队列（按到达顺序累积；useAgentRun 用已消费序号推进，不依赖快照对比）。
    * 事件类型：reasoning（推理全量文本快照）/ search（查询词）/ open（访问网页）/ done（结果）
@@ -112,6 +131,8 @@ export interface AgentSessionView {
   serverSearch: boolean
   /** 最近一步 LLM 的真实 token 用量（promptTokens = 真实上下文占用） */
   lastUsage?: AgentStepUsage
+  /** 估算校准系数（主进程实测的「真实/估算」比值；渲染层按来源 + 模型持久化后回传复用） */
+  tokenScale?: number
   /** 本会话累计消耗 token 数（所有 step 的 totalTokens 之和） */
   usageTotal: number
 }
@@ -136,6 +157,7 @@ function createView(id: string, label?: string): AgentSessionView {
     currentStream: '',
     pendingQuestion: null,
     searchStatus: null,
+    compaction: { seq: 0, phase: 'idle', kind: 'auto' },
     searchEvents: [],
     disposed: false,
     lastAssistantContent: '',
@@ -415,6 +437,7 @@ class AgentBridge {
           view.lastUsage = u
           view.usageTotal = (view.usageTotal || 0) + (u.totalTokens || 0)
         }
+        if (typeof ev.payload.tokenScale === 'number') view.tokenScale = ev.payload.tokenScale
         break
       }
       case 'assistant/chunk': {
@@ -537,6 +560,25 @@ class AgentBridge {
         this.scheduleToolArgsNotify(view.id)
         return
       }
+      case 'agent/compaction':
+        // 上下文压缩：start 起一张「上下文压缩」卡片（running），end 收口（ok=false → failed）
+        if (ev.payload.phase === 'start') {
+          view.compaction = {
+            seq: view.compaction.seq + 1,
+            phase: 'running',
+            kind: ev.payload.kind,
+            startTime: Date.now(),
+          }
+        } else {
+          view.compaction = {
+            ...view.compaction,
+            phase: ev.payload.ok === false ? 'failed' : 'done',
+            droppedMessages: ev.payload.droppedMessages ?? view.compaction.droppedMessages,
+            tokensBefore: ev.payload.tokensBefore ?? view.compaction.tokensBefore,
+            endTime: Date.now(),
+          }
+        }
+        break
       case 'agent/question':
         view.pendingQuestion = { askId: ev.payload.askId, question: ev.payload.question }
         break

@@ -12,7 +12,7 @@
  */
 import { computed, watch, onMounted } from 'vue'
 import { usestore } from '@/store'
-import { FILE_VIEWS as FILE_VIEWS_DEFS, FILE_VIEW_NAMES } from '@/lib/knowFile/fileViews'
+import { FILE_VIEWS as FILE_VIEWS_DEFS } from '@/lib/knowFile/fileViews'
 
 const store = usestore()
 const zh = (): boolean => store.locales === 'zh'
@@ -52,22 +52,19 @@ const VIEW_NAME_EN: Record<string, string> = {
 }
 const viewName = (v: string) => (store.locales === 'zh' ? v : (VIEW_NAME_EN[v] || v))
 
-/** 是否显示视图选择：打开工作区即可用（文件一律在独立窗口打开，这份下拉管主窗口的全局视图） */
+/** 是否显示视图选择：打开工作区即可用（文件一律在独立窗口打开，这份下拉管主窗口的视图） */
 const showViewSelect = computed(() => store.root !== '')
-/** 可切换的视图清单：只列全局视图（文件 / 图谱 / 看板 / 日历 / 地图 / 表格） */
+/** 可切换的视图清单：主窗口的全局视图（见 store 的 GLOBAL_VIEW_KEYS） */
 const viewsForGrid = computed(() =>
-  showViewSelect.value ? store.viewList.filter((v: string) => !FILE_VIEW_NAMES.includes(v)) : []
+  showViewSelect.value ? store.viewList : []
 )
-/** 当前激活的全局视图（多个开启时取第一个） */
-const activeGlobalView = computed(() => viewsForGrid.value.find((v: string) => store.isView(v)) || '')
-/** 切换视图：互斥单选（开启选中的、关掉清单里其它视图；清单外的视图开关不受影响） */
+/** 当前视图（远程文件预览时右侧会临时用「浏览」显示，下拉仍显示所选全局视图） */
+const activeGlobalView = computed(() => store.view.find((v: string) => viewsForGrid.value.includes(v)) || '')
+/** 切换视图：单选（切换即替换，见 store.selectView） */
 const onGlobalViewChange = (e: Event) => {
   const v = (e.target as HTMLSelectElement).value
-  if (!v || !viewsForGrid.value.includes(v)) return
-  const keep = store.view.filter((x: string) => !viewsForGrid.value.includes(x))
-  if (!keep.includes(v)) keep.push(v)
-  store.view = keep
-  store.saveConfig()
+  if (!v) return
+  store.selectView(v)
 }
 
 // path 被外部改动时同步导航历史（历史栈内当前项始终等于 path）

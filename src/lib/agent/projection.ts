@@ -72,6 +72,27 @@ export function projectStepsToUnits(msg: any, v: any): StepProjectionResult {
       })
     }
   }
+  // 上下文压缩：主进程在「开始生成摘要 / 结束」各推一个 agent/compaction 事件，
+  // 这里投影成时间线里一张卡片（生成摘要要额外发一次 LLM 请求，不给提示会看起来像卡住）。
+  const comp = v.compaction
+  if (comp && comp.seq > 0 && comp.phase !== 'idle') {
+    units.push({
+      id: `context-compact-${comp.seq}`,
+      status: comp.phase === 'running' ? 'running' : comp.phase === 'failed' ? 'error' : 'success',
+      stepType: 'tool',
+      description: 'context-compact',
+      args: undefined,
+      // 文案按当前语言在渲染层生成（本投影不依赖 store；见 home.vue 的 unitResultText）
+      result: {
+        phase: comp.phase,
+        kind: comp.kind,
+        droppedMessages: comp.droppedMessages,
+        tokensBefore: comp.tokensBefore,
+      },
+      startTime: comp.startTime || Date.now(),
+      endTime: comp.phase === 'running' ? undefined : (comp.endTime || Date.now()),
+    })
+  }
   if (!units.length) return { lastTool: null }
 
   // 按 id 合并：保留每个单元的最新状态（含已结束的），新单元按时间序追加。
@@ -89,7 +110,8 @@ export function projectStepsToUnits(msg: any, v: any): StepProjectionResult {
   }
   msg.executionUnits = existing
 
-  const lastTool = [...units].reverse().find((u: any) => u.stepType === 'tool') || null
+  // 压缩卡片不算工具调用：输入区「最近工具」快照不采纳
+  const lastTool = [...units].reverse().find((u: any) => u.stepType === 'tool' && u.description !== 'context-compact') || null
   return { lastTool }
 }
 

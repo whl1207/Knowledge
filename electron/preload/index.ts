@@ -390,6 +390,15 @@ const dsh = {
     }> {
       return invokeIpc('plugin:list')
     },
+    /** 重新扫描插件目录（可发现放进子文件夹的新插件；会装载插件代码 → 需 confirm） */
+    rescan(confirm = false): Promise<{
+      plugins: import('@/types/plugin').PluginSnapshot[]
+      rootDir: string
+      customRoot: boolean
+      services: string[]
+    }> {
+      return invokeIpc('plugin:rescan', { confirm })
+    },
     inspect(spec: string): Promise<{
       ok: boolean
       id: string | null
@@ -439,6 +448,18 @@ const dsh = {
         replace: options?.replace === true,
       })
     },
+    /**
+     * 从商店安装插件：url 指向共享目录的 `/fs/bundle?path=…&token=…`（或任意返回
+     * `{ files: [{ path, text | base64 }] }` 的 HTTP 商店）。下载与落盘都在主进程完成。
+     */
+    installFromStore(options: { url: string; id?: string; replace?: boolean; confirm?: boolean }): Promise<import('@/types/plugin').PluginSnapshot> {
+      return invokeIpc('plugin:install-from-store', {
+        url: options.url,
+        id: options.id,
+        confirm: options.confirm === true,
+        replace: options.replace === true,
+      })
+    },
     /** 选择插件目录（P2：与技能目录同一交互）；不传 path 则由主进程弹目录选择框 */
     setRoot(options?: { confirm?: boolean; path?: string }): Promise<{ cancelled: boolean; rootDir: string }> {
       return invokeIpc('plugin:set-root', {
@@ -452,6 +473,25 @@ const dsh = {
     },
     openDir(id?: string): Promise<{ path: string }> {
       return invokeIpc('plugin:open-dir', id ? { id } : undefined)
+    },
+    /**
+     * 插件在主进程侧的数据文件（`userData/plugins-data/<id>/`，如 `ctx.storage` 的 storage.json）。
+     * 渲染层读不到这个目录，「插件管理 → 数据」用它补齐统计。
+     */
+    dataFiles(id: string): Promise<{ id: string; entries: import('@/types/plugin').PluginDataFileStat[] }> {
+      return invokeIpc('plugin:data-files', { id })
+    },
+    /** 一次拿到所有插件的主进程侧数据（列表页显示占用用） */
+    dataFilesAll(): Promise<{ byId: Record<string, import('@/types/plugin').PluginDataFileStat[]> }> {
+      return invokeIpc('plugin:data-files-all')
+    },
+    /** 删除插件数据目录里的一个文件 / 子目录（删磁盘文件 → 需 confirm） */
+    removeDataFile(id: string, name: string, confirm = false): Promise<{ removed: boolean }> {
+      return invokeIpc('plugin:data-remove-file', { id, name, confirm })
+    },
+    /** 删除插件整个主进程数据目录（删磁盘文件 → 需 confirm） */
+    clearDataFiles(id: string, confirm = false): Promise<{ removed: boolean }> {
+      return invokeIpc('plugin:data-clear-files', { id, confirm })
     },
     /**
      * 插件文件能力（合同审核等需要"上传 + 预览 + 读法规"的插件）：

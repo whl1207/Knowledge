@@ -393,8 +393,8 @@
       >
         <i :class="btn.icon"></i>
       </div>
-      <!-- 浏览器 Agent 独立窗口入口（非主面板，不切换 mainPanel；置于设置按钮左侧） -->
-      <div class="side-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
+      <!-- 浏览器 Agent 独立窗口入口（非主面板，不切换 mainPanel；置于设置按钮左侧；可在「功能 → 导航与模块」里关掉） -->
+      <div v-if="store.isExtraVisible('agent')" class="side-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
         <i class="fa fa-globe"></i>
       </div>
       <div
@@ -427,8 +427,8 @@
             <!-- 标题水平居中（各面板一致：仅文本，无图标） -->
             <div class="compact-title" style="font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
-            <!-- 浏览器 Agent 独立窗口入口（非主面板；置于右侧设置/窗口按钮组之前；窗口过窄时随标题一起收起） -->
-            <div class="nav-narrow-hide" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
+            <!-- 浏览器 Agent 独立窗口入口（非主面板；置于右侧设置/窗口按钮组之前；窗口过窄时随标题一起收起；可在「功能 → 导航与模块」里关掉） -->
+            <div v-if="store.isExtraVisible('agent')" class="nav-narrow-hide" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
             <div :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
             <div class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
@@ -473,8 +473,8 @@
       >
         <i :class="btn.icon"></i>
       </div>
-      <!-- 浏览器 Agent 独立窗口入口（非主面板；置于设置按钮左侧） -->
-      <div class="bottom-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
+      <!-- 浏览器 Agent 独立窗口入口（非主面板；置于设置按钮左侧；可在「功能 → 导航与模块」里关掉） -->
+      <div v-if="store.isExtraVisible('agent')" class="bottom-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
         <i class="fa fa-globe"></i>
       </div>
       <div

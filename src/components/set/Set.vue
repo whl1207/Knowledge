@@ -317,8 +317,8 @@ const getTitle = (item:any) => {
 }
 
 // 计算属性：获取视图按钮数据（由 store.viewList 派生，顺序/命名随 store 同步；
-// id 恒为运行时视图标识，供 store.isView / toggleView 使用）
-// 文件视图（浏览/源码编辑/可视编辑/思维导图/演示）的名称与图标统一来自 fileViews.ts
+// id 恒为运行时视图标识，供 store.isView / store.selectView 使用）
+// store.viewList 只有主窗口右侧会渲染的视图（6 个全局视图 + 浏览）；「浏览」的名称与图标来自 fileViews.ts
 const VIEW_ICONS: Record<string, string> = {
   ...Object.fromEntries(FILE_VIEWS.map((v) => [v.name, v.icon])),
   '文件': 'fa fa-folder', '表格': 'fa fa-table', '图谱': 'fa fa-xing',
@@ -336,15 +336,20 @@ const viewButtons = computed(() => store.viewList.map((v: string) => ({
   title_en: VIEW_TITLE_EN[v] || v,
 })))
 
-// 功能开关：控制 App.vue 导航栏主面板按钮的显示/隐藏（与 store 的 MAIN_PANEL_KEYS 对齐）
+// 功能开关：控制 App.vue 导航栏按钮的显示/隐藏
+// 主面板（与 store 的 MAIN_PANEL_KEYS 对齐）走 hiddenNav；非主面板但占用导航栏的入口（浏览器 Agent）走 hiddenExtras
 const navSwitches = computed(() => {
   const zh = store.locales === 'zh'
-  return [
+  const panels: { key: string; icon: string; label: string }[] = [
     { key: '主页', icon: 'fa fa-home', label: zh ? '主页' : 'Home' },
     { key: '知识管理', icon: 'fa fa-book', label: zh ? '知识管理' : 'Knowledge Management' },
     { key: '知识处理', icon: 'fa fa-stack-overflow', label: zh ? '知识处理' : 'Knowledge Processing' },
-    { key: '学习', icon: 'fa fa-graduation-cap', label: zh ? '学习' : 'Learning' }
+    { key: '学习', icon: 'fa fa-graduation-cap', label: zh ? '学习' : 'Learning' },
+    { key: 'agent', icon: 'fa fa-globe', label: zh ? '浏览器 Agent' : 'Browser Agent' }
   ]
+  return panels.map(p => (p.key === 'agent'
+    ? { ...p, on: store.isExtraVisible(p.key), toggle: () => store.toggleExtra(p.key) }
+    : { ...p, on: store.isNavVisible(p.key), toggle: () => store.toggleNav(p.key) }))
 })
 
 // 自定义主题色配置（设置页「自定义」主题色卡：色块 + 名称 + 十六进制值）
@@ -929,6 +934,10 @@ onMounted(async () => {
       store.setPersistTabs(false)
       // 同理不持久化主面板导航 mainPanel：否则关闭设置窗口会把主窗口导航覆盖回旧值
       store.setPersistMainPanel(false)
+      // 同理不持久化工作区键（root/roots/path/remoteRoots）：设置窗口持有的可能是陈旧副本，
+      // 保存任意配置（如编辑智能体预设）都会把主窗口的工作区列表覆盖回去（表现为「工作区路径被清空」）。
+      // 本窗口里增删/切换工作区走 store.saveWorkspace()，仍会正常落盘并通知主窗口。
+      store.setPersistWorkspace(false)
       // 本窗口为「设置写盘方」：每次保存后广播配置变更，主窗口据此重新同步（模型/工具/MCP/预设等）
       store.setSettingsConfigWriter(true)
       // 首次定位（主进程 hash 传入，如从 AgentSwarm 跳「预设」）
@@ -1333,16 +1342,16 @@ onBeforeUnmount(() => {
         <div class="settings-group">
           <h3>{{ store.locales=='zh' ? '导航与模块' : 'Navigation & Modules' }}</h3>
           <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-            ? '主界面导航栏显示的顶层模块（主页、知识管理、知识处理、学习）。关闭某模块即从导航栏隐藏；下方依赖它的子开关（知识管理视图等）也会随之不可用。'
-            : 'Top-level modules shown in the navbar (Home, Knowledge, Knowledge Processing, Learning). Hiding a module removes its entry, and its dependent sub-switches below become unavailable too.' }}</div>
+            ? '主界面导航栏显示的顶层模块（主页、知识管理、知识处理、学习）与其他入口（浏览器 Agent）。关闭某项即从导航栏隐藏；下方依赖它的子开关（知识管理视图等）也会随之不可用。'
+            : 'Entries shown in the main navbar: top-level modules (Home, Knowledge, Knowledge Processing, Learning) and other entries (Browser Agent). Hiding one removes it from the navbar (left / top / bottom layouts alike), and its dependent sub-switches below become unavailable too.' }}</div>
           <div class="nav-switch-list">
             <div
               v-for="sw in navSwitches"
               :key="sw.key"
               class="nav-switch-item"
-              :class="{ disabled: !store.isNavVisible(sw.key) }"
+              :class="{ disabled: !sw.on }"
             >
-              <div class="nav-switch-icon" :class="{ muted: !store.isNavVisible(sw.key) }">
+              <div class="nav-switch-icon" :class="{ muted: !sw.on }">
                 <i :class="sw.icon"></i>
               </div>
               <div class="nav-switch-info">
@@ -1350,36 +1359,28 @@ onBeforeUnmount(() => {
               </div>
               <div
                 class="nav-switch-toggle"
-                :class="{ on: store.isNavVisible(sw.key) }"
-                :title="store.isNavVisible(sw.key) ? (store.locales=='zh' ? '点击隐藏' : 'Click to hide') : (store.locales=='zh' ? '点击显示' : 'Click to show')"
-                @click="store.toggleNav(sw.key)"
+                :class="{ on: sw.on }"
+                :title="sw.on ? (store.locales=='zh' ? '点击隐藏' : 'Click to hide') : (store.locales=='zh' ? '点击显示' : 'Click to show')"
+                @click="sw.toggle()"
               >
                 <span class="nav-switch-knob"></span>
               </div>
             </div>
           </div>
-          <!-- 知识管理（模块子开关）：仅知识管理模块开启时显示（12 项视图 + 布局下拉同属该模块） -->
+          <!-- 知识管理（模块子开关）：仅知识管理模块开启时显示（主窗口右侧的视图，单选） -->
           <div v-if="store.isNavVisible('知识管理')" class="settings-group">
             <h3>{{ store.locales=='zh' ? '知识管理' : 'Knowledge Management' }}</h3>
             <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-              ? '知识管理模块的界面配置：可用的视图方式（浏览/编辑/导图/演示等）与视图排布方向。需先在上方开启「知识管理」。浏览器相关设置（默认页面 / 保存文件夹）在「其他 → 浏览器」。'
-              : 'UI configuration of the Knowledge Management module: available view modes (Browse/Edit/Mindmap…) and the layout direction. Requires Knowledge Management enabled above. Browser-related settings (home page / save folder) live under Other → Browser.' }}</div>
-            <!-- 视图布局：置于视图列表上方，样式与界面其它行一致（不加额外边框） -->
-            <div class="form-group">
-              <label>{{ store.locales=='zh' ? '视图布局' : 'View Layout' }}</label>
-              <select v-model="store.UI.layout" class="layout-select">
-                <option value="horizontal">{{ store.locales=='zh'?'横向' : 'Horizontal' }}</option>
-                <option value="vertical">{{ store.locales=='zh'?'纵向' : 'Vertical' }}</option>
-              </select>
-            </div>
+              ? '知识管理主窗口右侧显示的视图（单选，一次只显示一个）：文件 / 看板 / 表格 / 图谱 / 地图 / 日历。文件本身一律在独立窗口打开，那边的可用视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）按文件类型决定，不在此配置；预览远程文件时会自动切到「浏览」。需先在上方开启「知识管理」；浏览器相关设置（默认页面 / 保存文件夹）在「其他 → 浏览器」。'
+              : 'The view shown on the right of the main window (single choice — one view at a time): Files / Kanban / Table / Graph / Map / Year Calendar. Files themselves always open in their own window, where the available views (Browse / Source / Visual / Mind Map / Presentation) follow the file type; previewing a remote file switches to Browse automatically. Requires Knowledge Management enabled above; browser-related settings (home page / save folder) live under Other → Browser.' }}</div>
             <div class="nav-switch-list">
               <div
                 v-for="view in viewButtons"
                 :key="view.id"
                 class="nav-switch-item"
-                :class="{ disabled: !store.isView(view.id) }"
+                :class="{ active: store.isView(view.id) }"
               >
-                <div class="nav-switch-icon" :class="{ muted: !store.isView(view.id) }">
+                <div class="nav-switch-icon">
                   <i :class="view.icon"></i>
                 </div>
                 <div class="nav-switch-info">
@@ -1388,8 +1389,8 @@ onBeforeUnmount(() => {
                 <div
                   class="nav-switch-toggle"
                   :class="{ on: store.isView(view.id) }"
-                  :title="store.isView(view.id) ? (store.locales=='zh' ? '点击关闭' : 'Click to disable') : (store.locales=='zh' ? '点击开启' : 'Click to enable')"
-                  @click="store.toggleView(view.id)"
+                  :title="store.isView(view.id) ? (store.locales=='zh' ? '当前视图' : 'Current view') : (store.locales=='zh' ? '切换到此视图' : 'Switch to this view')"
+                  @click="store.selectView(view.id)"
                 >
                   <span class="nav-switch-knob"></span>
                 </div>
@@ -2295,6 +2296,11 @@ onBeforeUnmount(() => {
 }
 .nav-switch-item:hover { border-color: var(--fontActiveColor); }
 .nav-switch-item.disabled { opacity: 0.55; }
+/* 知识管理视图列表是单选：当前视图高亮，其余保持普通行样式（不置灰） */
+.nav-switch-item.active {
+  border-color: var(--fontActiveColor);
+  background: color-mix(in srgb, var(--fontActiveColor) 8%, var(--menuColor));
+}
 .nav-switch-icon {
   width: 32px; height: 32px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;

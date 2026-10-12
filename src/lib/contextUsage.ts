@@ -29,6 +29,7 @@ import {
   FALLBACK_CONTEXT_WINDOW,
   IMAGE_TOKEN_ESTIMATE,
   TOOL_SCHEMA_TOKEN_ESTIMATE,
+  clampTokenScale,
   estimateMessagesTokens,
   type BudgetMessage,
 } from '@/shared/contextBudget'
@@ -266,6 +267,77 @@ function safeJson(value: any): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 估算校准系数（真实 token 计数 / 字符启发式估算，按「来源 + 模型」记忆）
+//
+// 为什么需要：字符启发式天然落后于各家 tokenizer，且**系统性**偏向低估代码 / JSON 类内容
+// （实测 Ollama gemma4：代码与工具结果 JSON 的真实计数是估算的 1.30 倍，qwen3.8 约 1.15 倍）。
+// 而 read_file 的结果、write_file 的参数正是这两类内容 —— 不校准就会一路低估到溢出，
+// 压缩也就来不及生效。这里把主进程实测到的比值落在本机（localStorage，独立键，不进设置文件），
+// 供下一次预算 / 圆环回退直接复用。
+// ---------------------------------------------------------------------------
+
+const TOKEN_SCALE_STORAGE_KEY = 'aikm.tokenScaleByModel'
+
+/** 估算校准系数按「来源::模型」记忆（模型决定 tokenizer，来源决定默认模型选择） */
+export function tokenScaleKey(provider?: string | null, model?: string | null): string {
+  const p = String(provider || '').trim() || 'unknown'
+  const m = String(model || '').trim() || 'default'
+  return `${p}::${m}`
+}
+
+let tokenScaleMap: Record<string, number> | null = null
+
+function loadTokenScaleMap(): Record<string, number> {
+  if (tokenScaleMap) return tokenScaleMap
+  const out: Record<string, number> = {}
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(TOKEN_SCALE_STORAGE_KEY) : null
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed)) {
+          const n = Number(v)
+          if (n > 0) out[k] = clampTokenScale(n)
+        }
+      }
+    }
+  } catch { /* 读取失败按空表处理（不影响功能，只是回到未校准） */ }
+  tokenScaleMap = out
+  return out
+}
+
+/** 取某来源 + 模型的估算校准系数（无记录返回 1） */
+export function getTokenScale(provider?: string | null, model?: string | null): number {
+  const key = tokenScaleKey(provider, model)
+  const v = loadTokenScaleMap()[key]
+  return v > 0 ? clampTokenScale(v) : 1
+}
+
+/**
+ * 记住一次实测的校准系数（EWMA，新样本权重 0.3；与主进程同一算法）。
+ * 只有偏离足够明显时才写入，避免频繁写 localStorage。
+ */
+export function rememberTokenScale(provider?: string | null, model?: string | null, scale?: number | null): boolean {
+  const next = clampTokenScale(scale)
+  if (!(Number(scale) > 0)) return false
+  const key = tokenScaleKey(provider, model)
+  const map = loadTokenScaleMap()
+  const prev = map[key] > 0 ? map[key] : 1
+  const merged = clampTokenScale(prev * 0.7 + next * 0.3)
+  if (Math.abs(merged - prev) < 0.005) return false
+  map[key] = merged
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(TOKEN_SCALE_STORAGE_KEY, JSON.stringify(map))
+  } catch { /* 写失败仅影响下次复用 */ }
+  return true
+}
+
+/** 聊天对象 → 校准系数（键取聊天的来源 + 模型） */
+function chatTokenScale(chat: any): number {
+  return getTokenScale(chat?.config?.llmType, chat?.config?.model)
+}
+
 /** 单个工具调用单元（参数 + 结果）计入上下文的 token 估算 */
 export function estimateUnitTokens(unit: any): number {
   if (!unit) return 0
@@ -304,6 +376,9 @@ export function estimateAgentSeedTokens(opts: {
  *     且都挂在最后一条助手消息上 → 只在最后一条计；
  *  4) 智能体的 system prompt + 工具 schema + 种子历史不落在消息上 → 读 ctxSeedTokens；
  *  5) 当前轮图片与文件附件（PDF/文本解析结果）挂在最后一条用户消息上 → 只在最后一条计。
+ *
+ * 结果再乘「估算校准系数」（按来源 + 模型记忆的实测比值，见 getTokenScale）：字符启发式对
+ * 代码 / JSON 类内容系统性低估（本地后端实测 1.15~1.30 倍），不校准会让压缩触发太晚。
  */
 export function estimateChatContextTokens(chat: any): number {
   const msgs: any[] = (chat && chat.messages) || []
@@ -344,7 +419,7 @@ export function estimateChatContextTokens(chat: any): number {
     }
   }
 
-  return total
+  return Math.round(total * chatTokenScale(chat))
 }
 
 /** 供压缩/预算使用的消息投影（只取模型可见部分） */

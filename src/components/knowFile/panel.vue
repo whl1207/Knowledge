@@ -701,6 +701,7 @@
             store.path = store.root
           }
           store.saveConfig()
+          store.saveWorkspace()
         }
         applySort()
         pruneExpandedKeys()

@@ -86,6 +86,88 @@ export function estimateMessageTokens(m: BudgetMessage): number {
   return t
 }
 
+/**
+ * 工具 schema 的 token 估算：按真实下发形态（`[{type:'function',function:{...}}]`）序列化后估算。
+ * 早年用「工具数 × 140」的固定值，实测与本项目 schema 体量接近（41 个工具约 5.4k tokens），
+ * 但换成显式序列化后能跟随 schema 增减（PTC 模式只有 1 个 run_code；插件工具可动态追加）。
+ */
+export function estimateToolSchemaTokens(tools: readonly any[] | null | undefined): number {
+  const list = tools || []
+  if (!list.length) return 0
+  try {
+    return estimateTokens(JSON.stringify(list) ?? '')
+  } catch {
+    return list.length * TOOL_SCHEMA_TOKEN_ESTIMATE
+  }
+}
+
+/** 真实用量锚点：上一次请求由 provider 自报的 promptTokens + 当时发出的条目数 */
+export interface TokenAccountingAnchor {
+  /** 该次请求发出的条目数（派生条目与预算条目一一对应） */
+  entryCount: number
+  /** provider 自报的真实 prompt 计数（含 system prompt 与工具 schema） */
+  promptTokens: number
+}
+
+/** 估算校准系数的合法区间：本地 tokenizer 与字符启发式的偏差可达 ±30%，超出区间视为异常样本 */
+export const TOKEN_SCALE_MIN = 0.5
+export const TOKEN_SCALE_MAX = 2.5
+
+/** 把校准系数夹到合法区间（非法值回落 1） */
+export function clampTokenScale(value: unknown): number {
+  const n = Number(value)
+  if (!(n > 0)) return 1
+  return Math.min(TOKEN_SCALE_MAX, Math.max(TOKEN_SCALE_MIN, n))
+}
+
+/**
+ * 用「真实计数 / 本次估算」更新校准系数（EWMA，新样本权重 0.3）。
+ *
+ * 为什么需要：字符启发式与各模型 tokenizer 差异是**系统性**的，且对代码/JSON 这类
+ * 内容偏差最大（实测 Ollama gemma4 上代码/工具结果 JSON 的真实值是估算的 1.30 倍）。
+ * 工具结果（read_file 内容）与工具参数（write_file 正文）正是这两类内容，
+ * 不校准就会系统性低估 → 压缩触发太晚。
+ */
+export function calibrateTokenScale(prev: number, estimate: number, real: number): number {
+  const base = clampTokenScale(prev)
+  if (!(Number(estimate) > 0) || !(Number(real) > 0)) return base
+  const sample = Number(real) / Number(estimate)
+  if (!Number.isFinite(sample) || sample <= 0) return base
+  return clampTokenScale(base * 0.7 + sample * 0.3)
+}
+
+/**
+ * 智能体「请求前预算」：优先用 provider 自报的真实计数做锚点，只对锚点之后新增的
+ * 内容做估算（并乘校准系数）；没有锚点（本会话第一次请求 / 刚压缩过）时回退纯估算。
+ *
+ * 口径说明：
+ *  - 有锚点：`used = 锚点真实值 + 新增内容估算 × 系数`（锚点已含 system prompt 与工具 schema，
+ *    不能再加 schemaTokens，否则重复计入）；
+ *  - 无锚点：`used = 全部条目估算 × 系数 + 工具 schema`。
+ */
+export function planAgentBudget(opts: {
+  limit?: number
+  /** 与请求消息一一对应的预算条目（含附图张数） */
+  entries: readonly BudgetMessage[]
+  /** 工具 schema 的 token（无锚点时计入） */
+  schemaTokens?: number
+  anchor?: TokenAccountingAnchor | null
+  /** 估算校准系数（真实 / 估算） */
+  scale?: number
+  reserve?: number
+}): ContextBudget {
+  const scale = clampTokenScale(opts.scale)
+  const entries = opts.entries || []
+  const anchor = opts.anchor
+  if (anchor && Number(anchor.promptTokens) > 0 && entries.length >= Number(anchor.entryCount)) {
+    const delta = entries.slice(Number(anchor.entryCount))
+    const used = Number(anchor.promptTokens) + estimateMessagesTokens(delta) * scale
+    return planContextBudget({ limit: opts.limit, used, reserve: opts.reserve })
+  }
+  const used = estimateMessagesTokens(entries) * scale + (Number(opts.schemaTokens) || 0)
+  return planContextBudget({ limit: opts.limit, used, reserve: opts.reserve })
+}
+
 /** 一组消息的 token 估算 */
 export function estimateMessagesTokens(msgs: readonly BudgetMessage[] | null | undefined): number {
   let t = 0

@@ -27,8 +27,15 @@
           <div class="button icon-btn" @click="openDir()" :title="zh ? '在资源管理器中打开' : 'Open in Explorer'">
             <i class="fa fa-external-link"></i>
           </div>
-          <div class="button icon-btn" @click="refresh" :title="zh ? '刷新' : 'Refresh'">
+          <div class="button icon-btn" @click="refresh" :title="zh ? '刷新列表' : 'Refresh list'">
             <i class="fa fa-refresh"></i>
+          </div>
+          <div
+            class="button icon-btn"
+            @click="rescan"
+            :title="zh ? '重新扫描插件目录（含子文件夹里的新插件；会装载插件代码，需确认）' : 'Rescan plugins folder (including new plugins in subfolders; loads plugin code, asks for confirmation)'"
+          >
+            <i class="fa fa-search-plus"></i>
           </div>
         </div>
       </div>
@@ -53,8 +60,8 @@
 
       <div v-else-if="!plugins.length" class="plugin-empty">
         {{ zh
-          ? '还没有插件。点右上角「安装」选择插件文件夹，或把插件文件夹放进上面的「插件目录」后点刷新。'
-          : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder above and refresh.' }}
+          ? '还没有插件。点右上角「安装」选择插件文件夹，或把插件文件夹放进上面的「插件目录」后点旁边的「重新扫描」。插件可以直接放在插件目录下，也可以按用途分文件夹存放（会扫描各级子文件夹，列表里能看到插件属于哪个文件夹）。'
+          : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder above and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders (subfolders are scanned; the list shows which folder each plugin belongs to).' }}
       </div>
 
       <div v-else class="plugin-list">
@@ -65,8 +72,75 @@
               <code class="plugin-id">{{ p.id }}</code>
               <span class="plugin-badge">v{{ p.version }}</span>
               <span class="plugin-badge" :title="zh ? '插件要求的宿主 API 版本区间' : 'Required host API range'">API {{ p.apiVersion || '—' }}</span>
+              <span
+                v-if="p.folder"
+                class="plugin-badge folder-badge"
+                :title="zh ? `该插件放在插件目录的子文件夹里：${p.relDir}` : `Plugin lives in a subfolder of the plugins directory: ${p.relDir}`"
+              ><i class="fa fa-folder"></i> {{ p.folder }}</span>
+              <span v-else-if="nestedRoot" class="plugin-badge folder-badge dim" :title="zh ? '直接放在插件目录下（不在子文件夹）' : 'Placed directly in the plugins folder'"><i class="fa fa-folder-o"></i> {{ zh ? '根目录' : 'root' }}</span>
               <span class="plugin-badge" :class="`badge-status status-${p.status}`">{{ statusLabel(p.status) }}</span>
               <span v-if="!p.enabled" class="plugin-badge dim">{{ zh ? '已禁用' : 'Disabled' }}</span>
+
+              <div class="plugin-item-actions">
+                <div
+                  v-if="!p.enabled"
+                  class="button icon-btn"
+                  :title="zh ? '启用插件（会先展示权限并要求确认）' : 'Enable plugin (shows permissions and asks for confirmation)'"
+                  @click="setEnabled(p, true)"
+                >
+                  <i class="fa fa-play-circle"></i>
+                </div>
+                <div
+                  v-else
+                  class="button icon-btn"
+                  :title="zh ? '禁用插件（工具与界面元素立即消失）' : 'Disable plugin (tools and UI elements disappear immediately)'"
+                  @click="setEnabled(p, false)"
+                >
+                  <i class="fa fa-pause-circle"></i>
+                </div>
+                <div
+                  class="button icon-btn"
+                  :title="zh ? '重载：撤销旧注册后重跑 apply（改代码 / 改配置后用它生效）' : 'Reload: dispose old registrations and re-run apply'"
+                  @click="reloadPlugin(p)"
+                >
+                  <i class="fa fa-refresh"></i>
+                </div>
+                <div
+                  class="button icon-btn"
+                  :title="zh ? '查看运行日志' : 'View runtime logs'"
+                  @click="openLogs(p)"
+                >
+                  <i class="fa fa-list-alt"></i>
+                </div>
+                <div
+                  class="button icon-btn"
+                  :title="zh ? '数据：查看这个插件占用了多少（设置 / 存档等）并清理' : 'Data: see how much this plugin uses (settings, saves, …) and clean it up'"
+                  @click="openData(p)"
+                >
+                  <i class="fa fa-database"></i>
+                </div>
+                <div
+                  class="button icon-btn"
+                  :title="zh ? '编辑配置（传给 ctx.config，保存后点重载生效）' : 'Edit config (passed to ctx.config; applies on reload)'"
+                  @click="openConfig(p)"
+                >
+                  <i class="fa fa-sliders"></i>
+                </div>
+                <div
+                  class="button icon-btn"
+                  :title="zh ? '详情：权限 / 注册内容 / 界面位置 / 快捷键' : 'Details: permissions / registrations / UI surfaces / shortcuts'"
+                  @click="openDetails(p)"
+                >
+                  <i class="fa fa-info-circle"></i>
+                </div>
+                <div
+                  class="button icon-btn danger"
+                  :title="zh ? '移除插件（可选是否连磁盘文件一起删除）' : 'Remove plugin (optionally delete its files)'"
+                  @click="removePlugin(p)"
+                >
+                  <i class="fa fa-trash-o"></i>
+                </div>
+              </div>
             </div>
 
             <div class="plugin-meta-row">
@@ -89,6 +163,13 @@
               <span v-if="p.declaredSlots.length" :title="zh ? '声明挂载的界面槽位（P1 生效）' : 'Declared UI slots (effective in P1)'">
                 <i class="fa fa-th-large"></i> {{ p.declaredSlots.join(', ') }}
               </span>
+              <span
+                v-if="pluginData[p.id] && pluginData[p.id].totalBytes > 0"
+                class="plugin-data-badge"
+                :title="dataBadgeHint(p.id)"
+              >
+                <i class="fa fa-database"></i> {{ formatBytes(pluginData[p.id].totalBytes) }}
+              </span>
             </div>
 
             <div v-if="p.error" class="plugin-error" :title="p.error">
@@ -96,56 +177,6 @@
             </div>
 
             <div v-if="p.description" class="plugin-desc">{{ p.description }}</div>
-          </div>
-
-          <div class="plugin-item-actions">
-            <div
-              v-if="!p.enabled"
-              class="button icon-btn"
-              :title="zh ? '启用插件（会先展示权限并要求确认）' : 'Enable plugin (shows permissions and asks for confirmation)'"
-              @click="setEnabled(p, true)"
-            >
-              <i class="fa fa-play-circle"></i>
-            </div>
-            <div
-              v-else
-              class="button icon-btn"
-              :title="zh ? '禁用插件（工具与界面元素立即消失）' : 'Disable plugin (tools and UI elements disappear immediately)'"
-              @click="setEnabled(p, false)"
-            >
-              <i class="fa fa-pause-circle"></i>
-            </div>
-            <div
-              class="button icon-btn"
-              :title="zh ? '重载：撤销旧注册后重跑 apply（改代码 / 改配置后用它生效）' : 'Reload: dispose old registrations and re-run apply'"
-              @click="reloadPlugin(p)"
-            >
-              <i class="fa fa-refresh"></i>
-            </div>
-            <div class="button icon-btn" :title="zh ? '查看运行日志' : 'View runtime logs'" @click="openLogs(p)">
-              <i class="fa fa-list-alt"></i>
-            </div>
-            <div
-              class="button icon-btn"
-              :title="zh ? '编辑配置（传给 ctx.config，保存后点重载生效）' : 'Edit config (passed to ctx.config; applies on reload)'"
-              @click="openConfig(p)"
-            >
-              <i class="fa fa-sliders"></i>
-            </div>
-            <div
-              class="button icon-btn"
-              :title="zh ? '详情：权限 / 注册内容 / 界面位置 / 快捷键' : 'Details: permissions / registrations / UI surfaces / shortcuts'"
-              @click="openDetails(p)"
-            >
-              <i class="fa fa-info-circle"></i>
-            </div>
-            <div
-              class="button icon-btn danger"
-              :title="zh ? '移除插件（可选是否连磁盘文件一起删除）' : 'Remove plugin (optionally delete its files)'"
-              @click="removePlugin(p)"
-            >
-              <i class="fa fa-trash-o"></i>
-            </div>
           </div>
         </div>
       </div>
@@ -185,6 +216,81 @@
         <div class="dialog-foot">
           <span class="hint">{{ zh ? 'JSON 对象；保存后在「重载」时生效' : 'JSON object; applied on Reload' }}</span>
           <div class="button small-btn" @click="saveConfig">{{ zh ? '保存' : 'Save' }}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 数据弹层：按插件看占用与清理（localStorage + OPFS plugins/<id>/ + 主进程 plugins-data/<id>/） -->
+    <div v-if="dataTarget" class="plugin-overlay" @click.self="closeData">
+      <div class="plugin-dialog">
+        <div class="dialog-head">
+          <span>{{ zh ? '数据' : 'Data' }} · {{ dataTarget.name }}</span>
+          <i class="fa fa-times" @click="closeData"></i>
+        </div>
+        <div class="plugin-detail-body">
+          <div class="detail-row">
+            <span class="detail-k">{{ zh ? '合计' : 'Total' }}</span>
+            <span class="detail-v">
+              <template v-if="dataSummary">
+                <b>{{ formatBytes(dataSummary.totalBytes) }}</b>
+                <span class="detail-note">
+                  {{ zh ? '设置（localStorage）' : 'settings (localStorage)' }} {{ formatBytes(dataSummary.lsBytes) }}
+                  ·
+                  {{ zh ? '本地文件（OPFS）' : 'local files (OPFS)' }} {{ formatBytes(dataSummary.fileBytes) }}
+                  <template v-if="dataSummary.hostSupported">
+                    · {{ zh ? '插件私有数据（主进程）' : 'plugin data (main process)' }} {{ formatBytes(dataSummary.hostBytes) }}
+                  </template>
+                </span>
+              </template>
+              <template v-else>{{ zh ? '统计中…' : 'Measuring…' }}</template>
+            </span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-k">{{ zh ? '位置' : 'Location' }}</span>
+            <span class="detail-v path">
+              localstorage://<code>{{ pluginLsPrefix(dataTarget.id) }}</code>*
+              <span class="detail-note">
+                + opfs://{{ PLUGIN_DATA_DIR }}/<code>{{ dataTarget.id }}</code>/
+                <template v-if="dataSummary && dataSummary.hostSupported"> + appdata://plugins-data/<code>{{ dataTarget.id }}</code>/</template>
+              </span>
+            </span>
+          </div>
+          <div v-if="dataSummary && !dataSummary.filesSupported" class="detail-note">
+            {{ zh ? '当前环境不支持 OPFS，只能看到 localStorage 里的数据。' : 'OPFS is unavailable here, so only localStorage data is listed.' }}
+          </div>
+          <div v-if="dataSummary && !dataSummary.hostSupported" class="detail-note">
+            {{ zh
+              ? '当前没有连接到主进程，插件私有数据（plugins-data/<插件 id>/）这一处看不到。'
+              : 'Not connected to the main process, so plugin data under plugins-data/<id>/ is not visible.' }}
+          </div>
+          <div v-if="dataSummary && dataSummary.error" class="detail-note error">
+            {{ dataSummary.error }}
+          </div>
+
+          <div v-if="dataSummary && dataSummary.entries.length" class="plugin-data-list">
+            <div v-for="(e, i) in dataSummary.entries" :key="`${e.kind}:${e.name}`" class="plugin-data-row">
+              <i class="fa" :class="e.kind === 'localStorage' ? 'fa-key' : e.kind === 'host' ? 'fa-hdd-o' : 'fa-file-o'"></i>
+              <span class="plugin-data-name" :title="e.name">{{ e.name }}</span>
+              <span class="plugin-data-size">{{ formatBytes(e.size) }}</span>
+              <i
+                class="fa fa-times plugin-data-del"
+                :title="zh ? '只删这一项' : 'Delete just this entry'"
+                @click="removeDataEntry(e)"
+              ></i>
+            </div>
+          </div>
+          <div v-else-if="dataSummary" class="plugin-empty-inline">
+            {{ zh ? '这个插件还没有数据。' : 'This plugin has no data yet.' }}
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <span class="hint">
+            {{ zh
+              ? '清理只删这个插件自己的设置 / 存档，不影响插件本体文件（那是「移除插件」）'
+              : 'Cleaning removes only this plugin’s own settings / saves, never the plugin files (that is “Remove”)' }}
+          </span>
+          <div class="button small-btn" @click="refreshCurrentData">{{ zh ? '刷新' : 'Refresh' }}</div>
+          <div class="button small-btn danger" @click="clearData">{{ zh ? '清除全部数据' : 'Clear all data' }}</div>
         </div>
       </div>
     </div>
@@ -247,7 +353,17 @@
             <span class="detail-v">{{ detailTarget.inject.length ? detailTarget.inject.join(', ') : (zh ? '无' : 'none') }}</span>
           </div>
           <div class="detail-row">
-            <span class="detail-k">{{ zh ? '目录' : 'Folder' }}</span>
+            <span class="detail-k">{{ zh ? '文件夹' : 'Folder' }}</span>
+            <span class="detail-v">
+              <template v-if="detailTarget.folder">
+                <i class="fa fa-folder"></i> {{ detailTarget.folder }}
+                <span class="detail-note">{{ zh ? `（相对插件目录：${detailTarget.relDir}）` : `(relative to plugins dir: ${detailTarget.relDir})` }}</span>
+              </template>
+              <template v-else>{{ zh ? '插件目录根（未分文件夹）' : 'plugins directory root' }}</template>
+            </span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-k">{{ zh ? '目录' : 'Path' }}</span>
             <span class="detail-v path">{{ detailTarget.dir }}</span>
           </div>
           <div v-if="detailTarget.error" class="detail-row">
@@ -270,6 +386,18 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { useSlotSnapshot } from '@/lib/plugin/useSlots'
 import { clientShortcuts } from '@/lib/plugin/runtime'
+import { formatBytes } from '@/lib/settingsData'
+import {
+  PLUGIN_DATA_DIR,
+  clearPluginData,
+  collectAllPluginData,
+  collectPluginData,
+  pluginDataFilesSupported,
+  pluginLsPrefix,
+  removePluginDataEntry,
+  type PluginDataEntry,
+  type PluginDataSummary,
+} from '@/lib/plugin/pluginData'
 import type { PluginSnapshot, PluginStatus, PluginLogLine, PluginEvent } from '@/types/plugin'
 
 const store = usestore()
@@ -281,10 +409,17 @@ const customRoot = ref(false)
 const services = ref<string[]>([])
 const unavailable = ref(false)
 
+/** 是否有插件放在子文件夹里：有则给顶层插件也标一个「根目录」徽标，避免看起来像没显示文件夹 */
+const nestedRoot = computed(() => plugins.value.some((p) => !!p.folder))
+
 const logTarget = ref<PluginSnapshot | null>(null)
 const logText = ref('')
 const configTarget = ref<PluginSnapshot | null>(null)
 const configText = ref('')
+// ---- 插件数据（localStorage + OPFS）：列表里显示占用，弹层里看明细 / 清理 ----
+const dataTarget = ref<PluginSnapshot | null>(null)
+const dataSummary = ref<PluginDataSummary | null>(null)
+const pluginData = ref<Record<string, PluginDataSummary>>({})
 /** 槽位注册表快照（详情面板用它把「界面位置」归到具体插件） */
 const slotSnapshot = useSlotSnapshot()
 
@@ -333,14 +468,176 @@ const refresh = async () => {
   }
   try {
     const res = await api.list()
-    plugins.value = res.plugins
-    rootDir.value = res.rootDir
-    customRoot.value = res.customRoot === true
-    services.value = res.services
+    applyList(res)
     unavailable.value = false
   } catch (e: any) {
     console.error('[PluginManagement] 加载插件列表失败:', e)
     unavailable.value = true
+  }
+}
+
+/** 应用 list / rescan 返回的宿主状态 */
+const applyList = (res: any) => {
+  plugins.value = res?.plugins || []
+  rootDir.value = res?.rootDir || ''
+  customRoot.value = res?.customRoot === true
+  services.value = res?.services || []
+  void refreshAllData()
+}
+
+// ---------------------------------------------------------------------------
+// 插件数据：统计 / 明细 / 单项删除 / 整体清理
+// ---------------------------------------------------------------------------
+const dataBadgeHint = (id: string): string => {
+  const d = pluginData.value[id]
+  if (!d) return ''
+  const lines = [
+    zh.value ? `插件数据合计 ${formatBytes(d.totalBytes)}` : `Plugin data: ${formatBytes(d.totalBytes)}`,
+    `${zh.value ? '设置' : 'settings'} ${formatBytes(d.lsBytes)} · ${zh.value ? '本地文件' : 'local files'} ${formatBytes(d.fileBytes)}`,
+    zh.value ? '点左边的数据库按钮可以看明细 / 清理' : 'Use the database button on the left to inspect or clean it',
+  ]
+  return lines.join('\n')
+}
+
+/** 列表里给每个插件算一次占用（localStorage 扫一遍 + OPFS plugins/ 走一次） */
+const refreshAllData = async () => {
+  const ids = plugins.value.map((p) => p.id)
+  if (!ids.length) {
+    pluginData.value = {}
+    return
+  }
+  try {
+    pluginData.value = await collectAllPluginData(ids)
+  } catch (e) {
+    console.error('[PluginManagement] 统计插件数据失败:', e)
+  }
+}
+
+const refreshData = async (id: string) => {
+  try {
+    const summary = await collectPluginData(id)
+    dataSummary.value = summary
+    pluginData.value = { ...pluginData.value, [id]: summary }
+  } catch (e: any) {
+    console.error('[PluginManagement] 统计插件数据失败:', e)
+    ElMessage.error(zh.value ? `统计失败：${e?.message || e}` : `Failed: ${e?.message || e}`)
+  }
+}
+
+/** 弹层里的「刷新」：刷新当前正在看的那个插件 */
+const refreshCurrentData = async () => {
+  const id = dataSummary.value?.id || dataTarget.value?.id
+  if (id) await refreshData(id)
+}
+
+const openData = async (p: PluginSnapshot) => {
+  dataTarget.value = p
+  dataSummary.value = null
+  await refreshData(p.id)
+}
+
+const closeData = () => {
+  dataTarget.value = null
+  dataSummary.value = null
+}
+
+const removeDataEntry = async (entry: PluginDataEntry) => {
+  const summary = dataSummary.value
+  const id = summary?.id || dataTarget.value?.id
+  if (!id) return
+  const okDel = await removePluginDataEntry(id, entry)
+  if (!okDel) {
+    ElMessage.error(zh.value ? '删除失败（可能已被别处删掉）' : 'Delete failed (it may already be gone)')
+  }
+  if (summary) {
+    const entries = summary.entries.filter((e) => !(e.kind === entry.kind && e.name === entry.name))
+    const next: PluginDataSummary = {
+      ...summary,
+      entries,
+      lsBytes: entries.filter((e) => e.kind === 'localStorage').reduce((n, e) => n + e.size, 0),
+      fileBytes: entries.filter((e) => e.kind === 'file').reduce((n, e) => n + e.size, 0),
+      hostBytes: entries.filter((e) => e.kind === 'host').reduce((n, e) => n + e.size, 0),
+      totalBytes: entries.reduce((n, e) => n + e.size, 0),
+    }
+    dataSummary.value = next
+    pluginData.value = { ...pluginData.value, [id]: next }
+  } else {
+    await refreshData(id)
+  }
+  ElMessage.success(zh.value ? '已删除这一项' : 'Entry deleted')
+}
+
+const clearData = async () => {
+  const p = dataTarget.value
+  if (!p) return
+  const sizeText = pluginData.value[p.id] ? formatBytes(pluginData.value[p.id].totalBytes) : ''
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? `清除「${p.name}」的全部数据（当前约 ${sizeText || '未知大小'}）？\n` +
+          '清除的内容：该插件的 localStorage 键（aikm.plugin.' +
+          p.id +
+          '.*）与本地文件（plugins/' +
+          p.id +
+          '/）、插件私有数据（plugins-data/' +
+          p.id +
+          '/）。插件本体文件、其它插件的数据都不会动。\n此操作不可撤销。'
+        : `Clear all data of “${p.name}” (currently about ${sizeText || 'unknown'})?\n` +
+          'Removes: its localStorage keys (aikm.plugin.' +
+          p.id +
+          '.*), its local files (plugins/' +
+          p.id +
+          '/) and its plugin-private data (plugins-data/' +
+          p.id +
+          '/). Plugin files and other plugins’ data are untouched.\nThis cannot be undone.',
+      zh.value ? '清除插件数据？' : 'Clear plugin data?',
+      {
+        type: 'warning',
+        confirmButtonText: zh.value ? '清除' : 'Clear',
+        cancelButtonText: zh.value ? '取消' : 'Cancel',
+      },
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await clearPluginData(p.id)
+    await refreshData(p.id)
+    await refreshAllData()
+    ElMessage.success(
+      zh.value ? `已清除 ${res.keys} 个键 / ${res.files} 个文件` : `Cleared ${res.keys} key(s) / ${res.files} file(s)`,
+    )
+  } catch (e: any) {
+    console.error('[PluginManagement] 清除插件数据失败:', e)
+    ElMessage.error(zh.value ? `清除失败：${e?.message || e}` : `Clear failed: ${e?.message || e}`)
+  }
+}
+
+/**
+ * 重新扫描插件目录：用户在插件目录（或其子文件夹）里手动放进新插件后，不必重启软件。
+ * 会装载插件代码（与宿主同进程）→ 弹确认框，确认后才带 confirm 调主进程。
+ */
+const rescan = async () => {
+  const api = bridge()
+  if (!api?.rescan) return
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? '将重新扫描插件目录（含各级子文件夹）：发现的新插件会立即装载，已删除的插件会从列表移除。插件代码与宿主同进程运行，不受工作区沙箱保护，请确认这些文件来源可信。'
+        : 'The plugins folder (including subfolders) will be rescanned: newly found plugins are loaded right away and removed ones disappear from the list. Plugin code runs in the main process and is not sandboxed — only continue if you trust these files.',
+      zh.value ? '重新扫描插件目录' : 'Rescan plugins folder',
+      { type: 'warning', confirmButtonText: zh.value ? '重新扫描' : 'Rescan', cancelButtonText: zh.value ? '取消' : 'Cancel' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await api.rescan(true)
+    applyList(res)
+    unavailable.value = false
+    ElMessage.success(zh.value ? `已重新扫描（${plugins.value.length} 个插件）` : `Rescanned (${plugins.value.length} plugins)`)
+  } catch (e: any) {
+    ElMessage.error(zh.value ? `重新扫描失败：${e?.message || e}` : `Rescan failed: ${e?.message || e}`)
   }
 }
 
@@ -509,7 +806,7 @@ const chooseRoot = async () => {
   try {
     await ElMessageBox.confirm(
       zh.value
-        ? '选择一个文件夹作为插件目录（每个子文件夹即一个插件）。切换后当前已加载的插件会先卸载，再从新目录重新扫描。'
+        ? '选择一个文件夹作为插件目录（每个含 aikm 清单的文件夹即一个插件，可按用途放进各级子文件夹）。切换后当前已加载的插件会先卸载，再从新目录重新扫描。'
         : 'Pick a folder to use as the plugins folder (each subfolder is a plugin). Loaded plugins are unloaded first, then the new folder is scanned.',
       zh.value ? '选择插件目录' : 'Select plugins folder',
       {
@@ -798,6 +1095,15 @@ onUnmounted(() => {
 .plugin-badge.dim {
   opacity: 0.5;
 }
+/* 所属文件夹徽标：与状态/版本徽标区分开，一眼能看出插件放在哪个子文件夹 */
+.plugin-badge.folder-badge {
+  border-style: dashed;
+  opacity: 0.9;
+}
+.plugin-badge.folder-badge > i {
+  margin-right: 3px;
+  opacity: 0.7;
+}
 .plugin-meta-row {
   display: flex;
   gap: 12px;
@@ -805,6 +1111,55 @@ onUnmounted(() => {
   font-size: 11px;
   opacity: 0.75;
   margin-top: 4px;
+}
+/* 插件数据占用徽标：`设置 → 插件 → 管理` 里一眼能看到谁占地方 */
+.plugin-data-badge {
+  color: var(--fontActiveColor, #409eff);
+}
+.plugin-data-list {
+  margin-top: 6px;
+  border-top: 1px solid var(--borderColor, #dcdfe6);
+}
+.plugin-data-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--borderColor, #dcdfe6);
+}
+.plugin-data-row > i.fa-key,
+.plugin-data-row > i.fa-file-o,
+.plugin-data-row > i.fa-hdd-o {
+  opacity: 0.6;
+  width: 12px;
+  flex-shrink: 0;
+}
+.plugin-data-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, monospace;
+}
+.plugin-data-size {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.plugin-data-del {
+  cursor: pointer;
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+.plugin-data-del:hover {
+  opacity: 1;
+  color: #dc2626;
+}
+.plugin-empty-inline {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.6;
 }
 .plugin-error {
   margin-top: 4px;
@@ -819,10 +1174,11 @@ onUnmounted(() => {
 }
 .plugin-item-actions {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: stretch;
+  flex-direction: row;
+  gap: 2px;
+  align-items: center;
   flex-shrink: 0;
+  margin-left: auto;
 }
 .small-btn {
   cursor: pointer;

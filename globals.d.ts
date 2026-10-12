@@ -129,6 +129,13 @@ interface Window {
         problem: string | null
       }>
       enable(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
+      /** 重新扫描插件目录（可发现放进子文件夹的新插件；会装载插件代码 → 需 confirm） */
+      rescan(confirm?: boolean): Promise<{
+        plugins: import('./src/types/plugin').PluginSnapshot[]
+        rootDir: string
+        customRoot: boolean
+        services: string[]
+      }>
       disable(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
       reload(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
       uninstall(id: string, options?: { confirm?: boolean; deleteFiles?: boolean }): Promise<{ removed: boolean; deletedDir: boolean }>
@@ -142,6 +149,11 @@ interface Window {
         cancelled: boolean
         snapshot: import('@/types/plugin').PluginSnapshot | null
       }>
+      /**
+       * 从商店安装插件：url 指向共享目录的 `/fs/bundle?path=…&token=…`
+       * （或任意返回 `{ files: [{ path, text | base64 }] }` 的 HTTP 商店）。
+       */
+      installFromStore(options: { url: string; id?: string; replace?: boolean; confirm?: boolean }): Promise<import('./src/types/plugin').PluginSnapshot>
       /** 选择插件目录（与技能目录同一交互）；不传 path 则由主进程弹目录选择框 */
       setRoot(options?: { confirm?: boolean; path?: string }): Promise<{ cancelled: boolean; rootDir: string }>
       /** 恢复默认插件目录（userData/plugins） */

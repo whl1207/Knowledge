@@ -24,6 +24,7 @@ import type {
   AikmPluginManifest,
   AikmPluginModule,
   PluginContext,
+  PluginDataFileStat,
   PluginEvent,
   PluginHostApi,
   PluginLogLevel,
@@ -35,7 +36,7 @@ import type {
   PluginStorage,
 } from '@/types/plugin'
 import { PluginEventBus, PluginServiceRegistry, createPluginContext } from '@/shared/pluginContext'
-import { checkApiVersion, isManifestFailure, parseManifest, PLUGIN_MANIFEST_FILE } from '@/shared/pluginManifest'
+import { checkApiVersion, isManifestFailure, parseManifest, PLUGIN_MANIFEST_FILE, PLUGIN_MANIFEST_KEY } from '@/shared/pluginManifest'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { shellService } from './shell-service'
 import { isShellAllowed, resolvePolicy } from './sandbox-policy'
@@ -51,6 +52,12 @@ const WATCH_DEBOUNCE_MS = 400
 const STATE_FILE = 'plugins-state.json'
 /** 私有数据目录名（同级） */
 const DATA_DIR = 'plugins-data'
+/**
+ * 深层扫描的最大相对深度（插件根目录 = 0）。
+ * 用户常把插件按用途分文件夹存放（plugins/办公/表格工具），因此扫描会向下递归；
+ * 但要防止误把某个大目录（如用户把整个桌面设为插件目录）整棵树走一遍。
+ */
+const MAX_SCAN_DEPTH = 4
 
 interface PluginState {
   version: 1
@@ -65,6 +72,8 @@ interface PluginState {
 interface PluginRecord {
   id: PluginId
   dir: string
+  /** 相对插件根目录的路径（正斜杠分隔，如 `办公/表格工具`；顶层插件即目录名） */
+  relDir: string
   manifest: AikmPluginManifest | null
   status: PluginStatus
   enabled: boolean
@@ -238,6 +247,100 @@ class PluginHost {
 
   private pluginDataDir(id: PluginId): string {
     return path.join(this.dataRoot(), id)
+  }
+
+  /**
+   * 列出插件在主进程侧的数据文件（`userData/plugins-data/<id>/`，例如 `ctx.storage` 的 storage.json）。
+   * 渲染层读不到这个目录，所以「设置 → 插件 → 数据」要经 IPC 拿它；插件没有数据时返回空数组。
+   */
+  listDataFiles(id: string): PluginDataFileStat[] {
+    const dir = this.dataDirOf(id)
+    return dir ? this.walkDataDir(dir) : []
+  }
+
+  /** 一次列出所有插件的主进程侧数据文件（列表页显示占用用，只走一遍数据根目录） */
+  listAllDataFiles(): Record<string, PluginDataFileStat[]> {
+    const out: Record<string, PluginDataFileStat[]> = {}
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(this.dataRoot(), { withFileTypes: true })
+    } catch {
+      return out
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const stats = this.walkDataDir(path.join(this.dataRoot(), entry.name))
+      if (stats.length) out[entry.name] = stats
+    }
+    return out
+  }
+
+  /** 递归列出一个目录下的文件（相对路径 + 字节数） */
+  private walkDataDir(dir: string): PluginDataFileStat[] {
+    const out: PluginDataFileStat[] = []
+    const walk = (abs: string, prefix: string, depth: number): void => {
+      if (depth > 8) return
+      let entries: fs.Dirent[]
+      try {
+        entries = fs.readdirSync(abs, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+        const child = path.join(abs, entry.name)
+        if (entry.isDirectory()) {
+          walk(child, rel, depth + 1)
+          continue
+        }
+        let size = 0
+        try {
+          size = fs.statSync(child).size
+        } catch {
+          size = 0
+        }
+        out.push({ name: rel, size })
+      }
+    }
+    walk(dir, '', 0)
+    out.sort((a, b) => a.name.localeCompare(b.name))
+    return out
+  }
+
+  /** 删除插件数据目录里的一个文件 / 子目录（相对路径，越界直接拒绝） */
+  removeDataFile(id: string, name: string): boolean {
+    const dir = this.dataDirOf(id)
+    if (!dir) return false
+    let target: string
+    try {
+      target = this.resolveInside(dir, name)
+    } catch {
+      return false
+    }
+    try {
+      fs.rmSync(target, { recursive: true, force: true })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 删除插件的整个主进程数据目录（`userData/plugins-data/<id>/`） */
+  clearDataDir(id: string): boolean {
+    const dir = this.dataDirOf(id)
+    if (!dir) return false
+    try {
+      fs.rmSync(dir, { recursive: true, force: true })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 校验插件 id 并给出它的数据目录（id 非法返回 null，避免越界读写） */
+  private dataDirOf(id: string): string | null {
+    const pid = this.toPluginId(String(id ?? ''))
+    return pid ? this.pluginDataDir(pid) : null
   }
 
   // ---------------------------------------------------------------------------
@@ -452,10 +555,15 @@ class PluginHost {
 
     const dest = path.join(this.pluginsRoot(), id)
     const sameLocation = path.resolve(src) === path.resolve(dest)
-    const exists = this.records.has(id as PluginId) || fs.existsSync(dest)
+    const existingRec = this.records.get(id as PluginId)
+    // 深层扫描后同名插件可能位于子文件夹（plugins/办公/<id>）：覆盖安装要作用在它身上，
+    // 否则会在根目录再建一份，出现两个同名插件（扫描只认最外层那份）。
+    const prevDir = existingRec && path.resolve(existingRec.dir) !== path.resolve(dest) ? existingRec.dir : ''
+    const exists = !!existingRec || fs.existsSync(dest)
 
     if (exists && !options.replace && !sameLocation) {
-      throw new IPCError('PLUGIN_EXISTS', `同名插件已存在：${id}（如需覆盖请使用「覆盖安装」）`)
+      const where = prevDir ? `（当前位于 ${existingRec?.relDir}）` : ''
+      throw new IPCError('PLUGIN_EXISTS', `同名插件已存在：${id}${where}（如需覆盖请使用「覆盖安装」）`)
     }
 
     this.installing++
@@ -463,9 +571,8 @@ class PluginHost {
       if (!sameLocation) {
         if (exists) {
           // 覆盖安装：先卸载（撤销注册）再删旧目录，避免残留旧文件与占用
-          const existing = this.records.get(id as PluginId)
-          if (existing) await this.unloadPlugin(existing, 'reinstall')
-          fs.rmSync(dest, { recursive: true, force: true })
+          if (existingRec) await this.unloadPlugin(existingRec, 'reinstall')
+          fs.rmSync(prevDir || dest, { recursive: true, force: true })
         }
         fs.mkdirSync(dest, { recursive: true })
         fs.cpSync(src, dest, {
@@ -496,6 +603,68 @@ class PluginHost {
   /** 读取配置 */
   getConfig(id: string): Record<string, unknown> {
     return this.requireRecord(id).config
+  }
+
+  /**
+   * 从「商店包」安装插件：包内容是一组内存中的文件（来自共享目录的 `/fs/bundle` 或任意商店索引）。
+   *
+   * 为什么先落盘到临时目录：安装流程（清单校验 / id 校验 / 复制 / 加载）只有一份，走
+   * `installFromDirectory` 才能保证「从文件夹安装」与「从商店安装」完全同构；商店包本身
+   * 不带路径语义，因此每个文件的相对路径都要重新校验（不许绝对路径 / 越界）。
+   */
+  async installFromBundle(
+    bundle: {
+      id?: string
+      files: Array<{ path?: string; text?: string; base64?: string }>
+    },
+    options: { replace?: boolean } = {},
+  ): Promise<PluginSnapshot> {
+    const files = Array.isArray(bundle?.files) ? bundle.files : []
+    if (!files.length) throw new IPCError('INVALID_ARGUMENT', '商店包为空')
+    const manifestEntry = files.find((f) => normalizeRel(f.path) === PLUGIN_MANIFEST_FILE)
+    if (!manifestEntry?.text) {
+      throw new IPCError('PLUGIN_LOAD_FAILED', `商店包缺少 ${PLUGIN_MANIFEST_FILE}（或其内容不是文本）`)
+    }
+    let raw: any
+    try {
+      raw = JSON.parse(manifestEntry.text)
+    } catch (e) {
+      throw new IPCError('PLUGIN_LOAD_FAILED', `清单不是合法 JSON：${e instanceof Error ? e.message : String(e)}`)
+    }
+    const id = String(raw?.[PLUGIN_MANIFEST_KEY]?.id || bundle.id || '')
+    if (!isValidPluginId(id)) {
+      throw new IPCError('INVALID_ARGUMENT', `商店包里的插件 id 非法："${id}"（须以小写字母/数字开头，仅含 [a-z0-9._-]）`)
+    }
+
+    const stage = path.join(app.getPath('temp'), 'aikm-plugin-store', `${id}-${Date.now().toString(36)}`)
+    const dir = path.join(stage, id)
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      for (const f of files) {
+        const rel = normalizeRel(f.path)
+        if (!rel) continue
+        const target = this.resolveInside(dir, rel)
+        fs.mkdirSync(path.dirname(target), { recursive: true })
+        const buf = f.text != null ? Buffer.from(String(f.text), 'utf8') : Buffer.from(String(f.base64 || ''), 'base64')
+        fs.writeFileSync(target, buf)
+      }
+    } catch (e) {
+      this.removeDir(stage)
+      throw new IPCError('PLUGIN_LOAD_FAILED', `商店包写入失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+    try {
+      return await this.installFromDirectory(dir, options)
+    } finally {
+      this.removeDir(stage)
+    }
+  }
+
+  private removeDir(dir: string): void {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true })
+    } catch (e) {
+      console.warn('[plugin-host] 清理临时目录失败（忽略）:', e)
+    }
   }
 
   /** 写入配置（合并；改动在重新加载后生效——避免每次编辑都触发一次卸载/加载） */
@@ -573,29 +742,100 @@ class PluginHost {
   // ---------------------------------------------------------------------------
 
   private scan(): void {
-    let entries: fs.Dirent[]
-    try {
-      entries = fs.readdirSync(this.pluginsRoot(), { withFileTypes: true })
-    } catch (e) {
-      console.error('[plugin-host] 扫描插件目录失败:', e)
-      return
-    }
     const state = this.loadState()
     const seen = new Set<PluginId>()
 
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
-      const id = this.toPluginId(entry.name)
-      if (!id) continue
+    for (const dir of this.collectPluginDirs()) {
+      const name = path.basename(dir)
+      const id = this.toPluginId(name)
+      if (!id) {
+        console.warn(`[plugin-host] 跳过目录（目录名不能作为插件 id）：${this.relDirOf(dir)}`)
+        continue
+      }
+      if (seen.has(id)) {
+        // 同名目录出现在不同文件夹里：只看最外层那一个，其余忽略（id 必须唯一）
+        console.warn(`[plugin-host] 忽略重复插件 id 的目录：${this.relDirOf(dir)}（${id} 已由更外层目录占用）`)
+        continue
+      }
       seen.add(id)
-      this.upsertRecord(id, path.join(this.pluginsRoot(), entry.name), state)
+      this.upsertRecord(id, dir, state)
     }
 
     // 目录已被删除的插件：清理注册表记录
     for (const id of Array.from(this.records.keys())) {
       if (!seen.has(id)) this.records.delete(id)
     }
+  }
+
+  /**
+   * 收集插件目录（支持「分类文件夹」深层存放）。
+   *
+   * 规则：
+   *  - 目录里有 `package.json` 且含 `aikm` 清单字段 → 该目录就是一个插件，**不再向下递归**
+   *    （插件自己的子目录如 src/ 不会被误当插件）；
+   *  - 否则视为分类文件夹，继续向下找，最多 MAX_SCAN_DEPTH 层；
+   *  - 跳过隐藏目录（`.` 开头）、`node_modules`、`plugins-data` 等非插件目录；
+   *  - 顺序稳定（按目录名排序），保证结果可预测。
+   */
+  private collectPluginDirs(): string[] {
+    const root = this.pluginsRoot()
+    const out: string[] = []
+    const walk = (dir: string, depth: number): void => {
+      let entries: fs.Dirent[]
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true })
+      } catch (e) {
+        console.error(`[plugin-host] 扫描目录失败（跳过）：${dir}`, e)
+        return
+      }
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory()) continue
+        if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === DATA_DIR) continue
+        const child = path.join(dir, entry.name)
+        if (this.looksLikePluginDir(child)) {
+          out.push(child)
+          continue
+        }
+        if (depth + 1 < MAX_SCAN_DEPTH) walk(child, depth + 1)
+      }
+    }
+    walk(root, 0)
+    return out
+  }
+
+  /** 目录是否「就是一个插件」：有 package.json 且 JSON 可解析、含 aikm 清单字段（清单内容合法性交给 readManifest 判定） */
+  private looksLikePluginDir(dir: string): boolean {
+    const file = path.join(dir, PLUGIN_MANIFEST_FILE)
+    if (!fs.existsSync(file)) return false
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+      return !!raw && typeof raw === 'object' && !!(raw as Record<string, unknown>)[PLUGIN_MANIFEST_KEY]
+    } catch {
+      // package.json 存在但坏了：大概率是用户正在编辑的插件 → 当作插件处理，让它在列表里显示错误原因
+      return true
+    }
+  }
+
+  /** 目录相对插件根目录的路径（正斜杠分隔；根目录本身返回空串） */
+  private relDirOf(dir: string): string {
+    return path.relative(this.pluginsRoot(), dir).replace(/\\/g, '/')
+  }
+
+  /** 插件所属「文件夹」：相对插件根目录的一级分类路径（顶层插件为 ''） */
+  private folderOf(rec: PluginRecord): string {
+    const idx = rec.relDir.lastIndexOf('/')
+    return idx < 0 ? '' : rec.relDir.slice(0, idx)
+  }
+
+  /**
+   * 重新扫描插件目录（设置页「重新扫描」用）：补上手动放进子文件夹的新插件、清掉已删除的，
+   * 然后照常按依赖装配。已加载的插件不会被卸载重建（scan 只更新清单与状态）。
+   */
+  async rescan(): Promise<void> {
+    return this.withLock(async () => {
+      this.scan()
+      await this.dispatchPending()
+    })
   }
 
   /** 新增或刷新单个插件的清单解析结果（重载/热更新共用） */
@@ -605,6 +845,7 @@ class PluginHost {
     const rec: PluginRecord = existing ?? {
       id,
       dir,
+      relDir: this.relDirOf(dir),
       manifest: null,
       status: 'discovered',
       enabled,
@@ -620,6 +861,7 @@ class PluginHost {
       services: [],
     }
     rec.dir = dir
+    rec.relDir = this.relDirOf(dir)
     rec.enabled = enabled
     const rawConfig = state.configs[id]
     rec.config = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig) ? rawConfig : {}
@@ -1097,19 +1339,25 @@ class PluginHost {
 
   private startWatcher(): void {
     const root = this.pluginsRoot()
-    const onChange = (filename: string | null): void => {
+    /**
+     * 目录改动 → 定位所属插件。
+     * 深层扫描后 `filename` 的第一段可能只是「分类文件夹」，不能再按第一段当插件 id
+     * （否则子文件夹里的插件永远收不到热重载）；这里按绝对路径落在哪个插件目录里来找。
+     */
+    const onChange = (base: string, filename: string | null): void => {
       if (this.disposed || this.installing) return
       if (!filename) return
       const first = filename.split(/[\\/]/)[0]
       if (!first || first.startsWith('.')) return
-      if (!this.records.has(first as PluginId)) return
-      this.dirty.add(first)
+      const rec = this.recordForPath(path.resolve(base, filename))
+      if (!rec) return
+      this.dirty.add(rec.id)
       if (this.watchTimer) clearTimeout(this.watchTimer)
       this.watchTimer = setTimeout(() => void this.flushDirty(), WATCH_DEBOUNCE_MS)
     }
 
     try {
-      const watcher = fs.watch(root, { recursive: true }, (_event, filename) => onChange(filename as string | null))
+      const watcher = fs.watch(root, { recursive: true }, (_event, filename) => onChange(root, filename as string | null))
       watcher.on('error', () => {
         /* 忽略监听错误（网络盘等场景不支持递归监听） */
       })
@@ -1118,7 +1366,7 @@ class PluginHost {
       // 回退：逐个插件目录非递归监听（对齐 skill-service 的做法）
       for (const rec of this.records.values()) {
         try {
-          const watcher = fs.watch(rec.dir, (_event, filename) => onChange(filename as string | null))
+          const watcher = fs.watch(rec.dir, (_event, filename) => onChange(rec.dir, filename as string | null))
           watcher.on('error', () => {
             /* 忽略 */
           })
@@ -1128,6 +1376,15 @@ class PluginHost {
         }
       }
     }
+  }
+
+  /** 改动路径落在哪个插件目录内（同一路径只可能命中一个插件；未命中返回 null） */
+  private recordForPath(abs: string): PluginRecord | null {
+    for (const rec of this.records.values()) {
+      const rel = path.relative(rec.dir, abs)
+      if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return rec
+    }
+    return null
   }
 
   private async flushDirty(): Promise<void> {
@@ -1272,6 +1529,8 @@ class PluginHost {
       apiVersion: rec.manifest?.apiVersion ?? '',
       description: rec.manifest?.description ?? '',
       dir: rec.dir,
+      relDir: rec.relDir,
+      folder: this.folderOf(rec),
       status: rec.status,
       enabled: rec.enabled,
       permissions: rec.manifest?.permissions ?? [],
@@ -1299,6 +1558,18 @@ class PluginHost {
       console.error('[plugin-host] 事件出口异常:', e)
     }
   }
+}
+
+/**
+ * 商店包里相对路径的规范化：统一分隔符、去掉前导分隔符与 `.` 段；
+ * 含 `..`（越界）或为空时返回 ''，由调用方跳过 / 报错。
+ */
+function normalizeRel(rel: unknown): string {
+  const text = String(rel ?? '').replace(/\\/g, '/').replace(/^\/+/, '').trim()
+  if (!text) return ''
+  const parts = text.split('/').filter((p) => p && p !== '.')
+  if (!parts.length || parts.some((p) => p === '..')) return ''
+  return parts.join('/')
 }
 
 /** 规范化插件模块导出（默认导出优先，其次具名 apply） */

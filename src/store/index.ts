@@ -6,7 +6,7 @@ import { TTSManager, createTTSManager } from '@/services/tts/manager'
 import { AIUtils } from '@/services/ai-utils'
 import type { McpServerConfig } from '@/types/mcp'
 import { generateMcpServerId } from '@/types/mcp'
-import { FILE_VIEW_NAMES, normalizeViewName } from '@/lib/knowFile/fileViews'
+import { normalizeViewName } from '@/lib/knowFile/fileViews'
 import { isFlowDslPath } from '@/shared/flowFile'
 import { detectTaskScaffold, detectRetiredTaskScaffold, isTaskFile, isEmptyTaskFile, RETIRED_SCAFFOLD_LABELS, MERGED_SCAFFOLD_KEYS, MERGED_SCAFFOLD_LABELS } from '@/lib/taskFile'
 import type { FileSortKey } from '@/lib/knowFile/fileSort'
@@ -120,6 +120,69 @@ let persistMainPanel = true
 // 是否作为「设置写盘方」：仅设置独立窗口置真，saveConfig 时额外广播配置变更给其它窗口
 let settingsConfigWriter = false
 
+/**
+ * 是否持久化「工作区」相关键（root / roots / path / remoteRoots）。
+ *
+ * 为什么需要这个开关：工作区既能在主窗口里增删（文件面板 / 顶部工具栏），也能在设置窗口的
+ * 「界面 → 工作区路径设置」里增删，而每个窗口各持一份内存副本。若所有窗口的 saveConfig 都
+ * 无条件把自己那份写回共享 localStorage，就会出现「设置窗口开着 → 主窗口新增 / 切换工作区 →
+ * 回设置窗口改任意一项配置（例如编辑智能体预设）」时用设置窗口的旧值（甚至空值）覆盖工作区列表，
+ * 表现为「改完预设，工作区路径被清空」。
+ *
+ * 约定：只有主窗口在普通保存时写这几个键；工作区发生真实变更时一律走显式入口 saveWorkspace()
+ * （它总是写入并通知其它窗口），因此独立窗口里的增删 / 切换依然能立即生效。
+ */
+let persistWorkspace = true
+
+/**
+ * 本窗口是否已执行过 loadConfig（读过 localStorage 里的工作区等配置）。
+ * 未读之前内存里是默认值（root = ''），此时若因某个组件的早期保存触发 saveConfig，
+ * 就会把空工作区写回去 —— 这正是「工作区路径被清空」的另一条路径，故一并挡掉。
+ */
+let configLoaded = false
+
+/**
+ * 主窗口右侧可选的「全局视图」（顺序即设置页与顶部工具栏视图下拉的展示顺序）。
+ * 主窗口一次只显示一个视图（单选），候选就是这几个；
+ * 文件形式视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）不进这份清单 —— 文件一律在独立窗口打开，
+ * 那边的可用视图按文件类型决定（见 FileWindow.vue 的 availableViews）；主窗口只在预览远程文件时
+ * 自动切到「浏览」（见 explorer.vue 的 activeView），不需要用户配置。
+ */
+export const GLOBAL_VIEW_KEYS = ['文件', '看板', '表格', '图谱', '地图', '日历']
+/** 主窗口默认视图（无有效存档时的兜底，避免右侧空白） */
+export const DEFAULT_VIEW = GLOBAL_VIEW_KEYS[0]
+
+/**
+ * 是否为独立窗口的哈希（设置 / 文件 / 浏览器窗口）。
+ * 这些窗口不持有工作区、标签栏与主面板导航等主窗口状态，相关保存必须跳过。
+ */
+export const isAuxWindowHash = (hash: string): boolean =>
+  /^#\/(settings-window|file-view|browser-agent)/.test(String(hash || ''))
+if (typeof window !== 'undefined' && isAuxWindowHash(window.location?.hash)) persistWorkspace = false
+
+/** 单独写入「工作区」相关键（root / roots / path / remoteRoots） */
+function writeWorkspaceKeys(state: {
+    root?: string
+    roots?: string[]
+    path?: string
+    remoteRoots?: unknown[]
+}): void {
+    localStorage.setItem('root', JSON.stringify(state.root || ''))
+    localStorage.setItem('roots', JSON.stringify(Array.isArray(state.roots) ? state.roots : []))
+    localStorage.setItem('path', JSON.stringify(state.path || ''))
+    localStorage.setItem('remoteRoots', JSON.stringify(Array.isArray(state.remoteRoots) ? state.remoteRoots : []))
+}
+
+/** 通知其它窗口（主窗口）从 localStorage 重新同步配置；仅「设置写盘方」发送 */
+function broadcastSettingsChanged(uiJson: string, locales: string): void {
+    if (!settingsConfigWriter || typeof window === 'undefined') return
+    const ipc: any = (window as any).ipcRenderer
+    if (!ipc) return
+    try {
+        ipc.send('settings-config-changed', { ui: JSON.parse(uiJson), locales })
+    } catch (e) { /* 忽略 */ }
+}
+
 // 预设主题配色表（设置页「界面-主题」18 个预设主题；changeTheme 统一从表取值，下拉框由 Object.keys 生成，labelEn 供英文界面展示）
 /** 跨平台取父目录：Windows 盘符根 / Linux 根正确归位（返回父目录或空串） */
 export function parentPathOf(p: string): string {
@@ -213,6 +276,8 @@ export const usestore = defineStore('data', {
         disabledSkills: [] as string[],
         // 技能商店：用户自定义的 GitHub 技能源（owner/repo）
         skillStoreSources: [] as { name: string; url: string; type: string }[],
+        /** 插件商店自定义来源（{ name, url }；url 为共享目录 /fs/store 或任意商店清单地址） */
+        pluginStoreSources: [] as { name: string; url: string }[],
         tree: [] as any, // 目录结构
         treeSort: { by: 'name', order: 'asc' } as { by: FileSortKey; order: 'asc' | 'desc' }, // 文件树排序方式
         // 主进程文件树版本号：持久化在 store 使面板重挂载后仍可命中「数据未变」快路径，
@@ -233,6 +298,11 @@ export const usestore = defineStore('data', {
         interfaceConfigMode: false,
         // 功能开关：被隐藏的主面板导航按钮 key（设置页「界面-功能开关」控制，App.vue 导航栏据此过滤）
         hiddenNavs: [] as string[],
+        /**
+         * 功能开关（非主面板入口）：被隐藏的右上/左上/底部导航入口 key。
+         * 目前只有 'agent'（浏览器 Agent 的独立窗口入口）；设置页「功能 → 导航与模块」控制。
+         */
+        hiddenExtras: [] as string[],
         kbPathToOpen: null as string | null, // 待加载的知识库(.kb)文件路径（从知识库打开时跳转到知识处理模块）
         locales: 'zh', // 语言
         TrustedPython: false, // 兼容旧字段（pythonSandbox 三态模式）
@@ -278,7 +348,6 @@ export const usestore = defineStore('data', {
             menuActiveColor: "#9ec4f0",
             fontColor: "#1f2328",
             fontActiveColor: "#03254d",
-            layout: 'horizontal',
             windowZoom: 100, // 窗口缩放比例（百分比，50~200；由主进程 window-zoom.json 持久化）
             navLayout: 'top' as 'top' | 'left' | 'bottom', // 导航栏布局：top=顶部（默认）/ left=左侧 / bottom=下方
             closeToTray: false, // 关闭按钮行为：false=直接退出（默认）/ true=折叠到托管区（托盘，后台任务继续运行）
@@ -804,13 +873,10 @@ export const usestore = defineStore('data', {
             return state.imageAttachments.length;
         },
         
-        // 所有可用视图列表（统一管理，新增视图只需在此添加）
-        // 文件视图的顺序 / 名称见 src/lib/knowFile/fileViews.ts（改那里即可，勿在这里写死）
+        // 主窗口右侧可选的视图（单选，见 GLOBAL_VIEW_KEYS 的注释）：统一管理，新增视图只需在此添加
         // 「甘特」已合并进「日历」视图（日历状态栏可切换 月视图 / 周视图 / 甘特图）
         // 「看板」= 按属性分组（默认 状态）的卡片看板：快速新建 / 拖拽改值 / 归档 / 状态筛选，取代了原看板实现
-        viewList: () => {
-            return ['文件', '看板', '表格', '图谱', '地图', '日历', ...FILE_VIEW_NAMES]
-        },
+        viewList: () => [...GLOBAL_VIEW_KEYS],
 
         // 知识管理各视图的数据源目录（跟随文件视图当前目录，越出工作区则回退到工作区根）
         dataDir: (state) => dataDirOf(state),
@@ -1021,13 +1087,13 @@ export const usestore = defineStore('data', {
                     console.warn(`[AIconfig] llm.type 变更: ${prevType} → ${curType}\n` + new Error().stack)
                 }
             } catch { /* 诊断日志，忽略解析错误 */ }
-            localStorage.setItem('root', JSON.stringify(this.root))
-            localStorage.setItem('roots', JSON.stringify(this.roots))
-            localStorage.setItem('path', JSON.stringify(this.path))
+            // 工作区键（root / roots / path）：非主窗口不写（见 persistWorkspace），避免用旧值覆盖主窗口
+            if (persistWorkspace && configLoaded) writeWorkspaceKeys(this)
             localStorage.setItem('skillsPath', JSON.stringify(this.skillsPath))
             localStorage.setItem('agentTools', JSON.stringify(this.agentTools))
             localStorage.setItem('disabledSkills', JSON.stringify(this.disabledSkills))
             localStorage.setItem('skillStoreSources', JSON.stringify(this.skillStoreSources))
+            localStorage.setItem('pluginStoreSources', JSON.stringify(this.pluginStoreSources))
             // 独立窗口不持久化标签（见 persistTabs），避免污染主窗口标签栏
             if (persistTabs) {
                 localStorage.setItem('data', JSON.stringify(this.data))
@@ -1038,6 +1104,7 @@ export const usestore = defineStore('data', {
             // mainPanel 只在主窗口有意义：独立窗口写入会覆盖主窗口当前面板（见 persistMainPanel 注释）
             if (persistMainPanel) localStorage.setItem('mainPanel', JSON.stringify(this.mainPanel))
             localStorage.setItem('hiddenNavs', JSON.stringify(this.hiddenNavs))
+            localStorage.setItem('hiddenExtras', JSON.stringify(this.hiddenExtras))
             localStorage.setItem('customTitle', JSON.stringify(this.customTitle))
             localStorage.setItem('interfaceConfigMode', JSON.stringify(this.interfaceConfigMode))
             localStorage.setItem('locales', JSON.stringify(this.locales))
@@ -1072,7 +1139,7 @@ export const usestore = defineStore('data', {
             localStorage.setItem('collab', JSON.stringify(this.collab))
             localStorage.setItem('remoteFs', JSON.stringify(this.remoteFs))
             localStorage.setItem('lan', JSON.stringify(this.lan))
-            localStorage.setItem('remoteRoots', JSON.stringify(this.remoteRoots))
+            if (persistWorkspace) localStorage.setItem('remoteRoots', JSON.stringify(this.remoteRoots))
             // 界面配置随软件分发：开启时同步写入软件根目录（fire-and-forget，界面配置以该文件为准）
             if (this.interfaceConfigMode && window.dsh?.interfaceConfig) {
                 window.dsh.interfaceConfig.save(this.gatherInterfaceConfig()).catch(() => {})
@@ -1092,12 +1159,21 @@ export const usestore = defineStore('data', {
             }
             // 设置独立窗口写盘：额外广播一次完整配置变更，主窗口据此从 localStorage 重新同步
             // （AI 模型来源/工具开关/MCP/Agent 预设等不在 UI 广播范围内，主窗口内存不会自动更新）
-            if (settingsConfigWriter && typeof window !== 'undefined' && (window as any).ipcRenderer) {
-                try {
-                    ;(window as any).ipcRenderer.send('settings-config-changed', { ui: JSON.parse(uiJson), locales: locale })
-                } catch (e) { /* 忽略 */ }
-            }
+            broadcastSettingsChanged(uiJson, locale)
             // 注意：图片附件不保存到localStorage，因为可能很大
+        },
+
+        /**
+         * 工作区变更的专用落盘入口（增删 / 切换工作区、远程工作区）。
+         *
+         * 与 saveConfig 的区别：**总是**写入 root / roots / path / remoteRoots，不受 persistWorkspace 限制——
+         * 设置独立窗口里增删工作区属于用户的显式操作，必须落盘并通知主窗口；而它主动编辑其它配置时
+         * 不该用自己那份旧的工作区副本去覆盖主窗口（见 persistWorkspace 注释）。
+         * 主窗口（非设置写盘方）改工作区后无需广播：只有设置窗口会广播配置，它会自行从 localStorage 重读。
+         */
+        saveWorkspace() {
+            writeWorkspaceKeys(this)
+            broadcastSettingsChanged(JSON.stringify(this.UI), this.locales)
         },
         
         // 读取配置信息
@@ -1125,6 +1201,9 @@ export const usestore = defineStore('data', {
             if (localStorage.getItem('path') !== null) {
                 this.path = JSON.parse(localStorage.getItem('path')!)
             }
+            // 工作区三键读完后即认为配置已加载：此后 saveConfig 才允许写工作区键
+            // （见 persistWorkspace / configLoaded 注释：读盘前的内存是默认空值，写盘会清空工作区）
+            configLoaded = true
             if (localStorage.getItem('skillsPath') !== null) {
                 this.skillsPath = JSON.parse(localStorage.getItem('skillsPath')!)
             }
@@ -1147,6 +1226,14 @@ export const usestore = defineStore('data', {
             } else {
                 this.skillStoreSources = []
             }
+            if (localStorage.getItem('pluginStoreSources') !== null) {
+                const parsedPluginStore = JSON.parse(localStorage.getItem('pluginStoreSources')!)
+                this.pluginStoreSources = Array.isArray(parsedPluginStore)
+                    ? parsedPluginStore.filter((x: any) => x && typeof x.url === 'string')
+                    : []
+            } else {
+                this.pluginStoreSources = []
+            }
             if (localStorage.getItem('data') !== null) {
                 this.data = JSON.parse(localStorage.getItem('data')!)
             }
@@ -1162,11 +1249,14 @@ export const usestore = defineStore('data', {
                         .map((v: any) => (typeof v === 'string' ? normalizeViewName(v) : v))
                         .map((v: any) => (v === '甘特' ? '日历' : v))
                     : []
-                this.view = mapped.filter((v: any, i: number) => mapped.indexOf(v) === i)
+                // 主窗口一次只显示一个视图（单选）：只认全局视图里的第一个
+                //（旧存档里的文件形式视图「浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示」不再由主窗口渲染）
+                const firstGlobal = mapped.find((v: any) => GLOBAL_VIEW_KEYS.includes(v))
+                this.view = firstGlobal ? [firstGlobal] : []
             }
-            // 默认显示文件视图：无任何激活视图时自动开启「文件」，避免空白欢迎页
+            // 无有效视图时兜底「文件」，避免右侧空白
             if (!this.view || this.view.length === 0) {
-                this.view = ['文件']
+                this.view = [DEFAULT_VIEW]
             }
             if (localStorage.getItem('treeSort') !== null) {
                 this.treeSort = JSON.parse(localStorage.getItem('treeSort')!)
@@ -1189,6 +1279,17 @@ export const usestore = defineStore('data', {
                 this.hiddenNavs = this.migrateNavKeys(parsedNavs)
             } else {
                 this.hiddenNavs = []
+            }
+            // 功能开关：被隐藏的非主面板入口（浏览器 Agent 等；旧存档无此 key 时兜底为空数组，全部显示）
+            if (localStorage.getItem('hiddenExtras') !== null) {
+                try {
+                    const parsedExtras = JSON.parse(localStorage.getItem('hiddenExtras')!)
+                    this.hiddenExtras = this.migrateExtraKeys(parsedExtras)
+                } catch {
+                    this.hiddenExtras = []
+                }
+            } else {
+                this.hiddenExtras = []
             }
             // 自定义标题：界面设置定义后固定不变（无存档时为空）
             if (localStorage.getItem('customTitle') !== null) {
@@ -1352,6 +1453,8 @@ export const usestore = defineStore('data', {
                 if (this.UI.navLayout !== 'top' && this.UI.navLayout !== 'left' && this.UI.navLayout !== 'bottom') this.UI.navLayout = 'top'
                 // 旧存档里的「文件打开方式」（fileOpenMode：新窗口 / 窗口内）已取消：文件一律在新窗口打开
                 delete (this.UI as any).fileOpenMode
+                // 旧存档里的「视图布局」（layout：横向 / 纵向）已取消：主窗口一次只显示一个视图，不再有并排方向
+                delete (this.UI as any).layout
                 // 旧存档可能缺少 closeToTray，兜底为直接退出（真实值以主进程 app-behavior.json 为准，启动时握手同步）
                 if (typeof this.UI.closeToTray !== 'boolean') this.UI.closeToTray = false
                 // 旧存档可能缺少 browserHomeUrl，兜底为空（浏览器 Agent 默认空白页）
@@ -1881,6 +1984,7 @@ export const usestore = defineStore('data', {
                 this.root = path
                 this.path = path
                 this.saveConfig()
+                this.saveWorkspace()
                 return false
             }
             this.roots.push(path)
@@ -1889,6 +1993,7 @@ export const usestore = defineStore('data', {
             // 根集合变化：使文件树版本失效（否则主进程缓存仍有效 + 版本一致 → unchanged 快路径，新增根不显示）
             this.treeVersion = -1
             this.saveConfig()
+            this.saveWorkspace()
             return true
         },
 
@@ -1904,6 +2009,7 @@ export const usestore = defineStore('data', {
             // 根集合变化：使文件树版本失效（否则剩余根缓存仍有效 + 版本一致 → unchanged 快路径，被删根残留）
             this.treeVersion = -1
             this.saveConfig()
+            this.saveWorkspace()
         },
 
         /** 添加远程工作区 */
@@ -1913,12 +2019,14 @@ export const usestore = defineStore('data', {
             if (idx !== -1) this.remoteRoots[idx] = r
             else this.remoteRoots.push(r)
             this.saveConfig()
+            this.saveWorkspace()
         },
 
         /** 移除远程工作区 */
         removeRemoteRoot(id: string) {
             this.remoteRoots = this.remoteRoots.filter((x) => x.id !== id)
             this.saveConfig()
+            this.saveWorkspace()
         },
 
         /** 切换当前工作区 */
@@ -1928,15 +2036,19 @@ export const usestore = defineStore('data', {
             this.root = path
             this.path = path
             this.saveConfig()
+            this.saveWorkspace()
         },
         
-        toggleView(str: string) {
-            if (this.view.indexOf(str) == -1) {
-                this.view[this.view.length] = str
-            } else {
-                this.view.splice(this.view.indexOf(str), 1)
-            }
+        /**
+         * 选择主窗口右侧显示的视图（单选：切换即替换；重复点当前视图无变化）。
+         * 只接受全局视图（GLOBAL_VIEW_KEYS）：文件形式视图由独立窗口按文件类型提供，不进主窗口。
+         */
+        selectView(str: string) {
+            if (!GLOBAL_VIEW_KEYS.includes(str)) return
+            if (this.view.length === 1 && this.view[0] === str) return
+            this.view = [str]
             this.resize()
+            this.saveConfig()
         },
         
         isView(str: string) {
@@ -1950,6 +2062,34 @@ export const usestore = defineStore('data', {
         /** 判断主面板导航按钮是否可见（默认全部可见；隐藏的按钮不会出现在导航栏） */
         isNavVisible(key: string) {
             return this.hiddenNavs.indexOf(key) === -1
+        },
+
+        /**
+         * 判断「非主面板入口」是否可见（默认全部可见）。
+         * 目前只有 'agent'：浏览器 Agent 的独立窗口入口（左上/右上/底部导航里的地球图标）。
+         */
+        isExtraVisible(key: string) {
+            return this.hiddenExtras.indexOf(key) === -1
+        },
+
+        /** 非主面板入口 key 的去重与清洗（只留字符串） */
+        migrateExtraKeys(list: any): string[] {
+            const out: string[] = []
+            for (const x of Array.isArray(list) ? list : []) {
+                if (typeof x === 'string' && x && out.indexOf(x) === -1) out.push(x)
+            }
+            return out
+        },
+
+        /** 切换非主面板入口的显示/隐藏（设置页「功能 → 导航与模块」） */
+        toggleExtra(key: string) {
+            const i = this.hiddenExtras.indexOf(key)
+            if (i === -1) {
+                this.hiddenExtras.push(key)
+            } else {
+                this.hiddenExtras.splice(i, 1)
+            }
+            this.saveConfig()
         },
 
         /**
@@ -1989,6 +2129,7 @@ export const usestore = defineStore('data', {
                 UI: JSON.parse(JSON.stringify(this.UI)),
                 customTitle: this.customTitle,
                 hiddenNavs: [...this.hiddenNavs],
+                hiddenExtras: [...this.hiddenExtras],
                 view: [...this.view],
                 locales: this.locales,
             }
@@ -2004,7 +2145,14 @@ export const usestore = defineStore('data', {
             }
             if (typeof cfg.customTitle === 'string') this.customTitle = cfg.customTitle
             if (Array.isArray(cfg.hiddenNavs)) this.hiddenNavs = this.migrateNavKeys(cfg.hiddenNavs)
-            if (Array.isArray(cfg.view)) this.view = cfg.view.map((v: any) => (typeof v === 'string' ? normalizeViewName(v) : v))
+            if (Array.isArray(cfg.hiddenExtras)) this.hiddenExtras = this.migrateExtraKeys(cfg.hiddenExtras)
+            if (Array.isArray(cfg.view)) {
+                // 主窗口一次只显示一个视图（单选）：只取全局视图里的第一个（历史配置可能带文件形式视图）
+                const firstGlobal = cfg.view
+                    .map((v: any) => (typeof v === 'string' ? normalizeViewName(v) : v))
+                    .find((v: any) => GLOBAL_VIEW_KEYS.includes(v))
+                this.view = firstGlobal ? [firstGlobal] : [DEFAULT_VIEW]
+            }
             if (typeof cfg.locales === 'string') this.locales = cfg.locales
             this.setTheme()
         },
@@ -2045,7 +2193,6 @@ export const usestore = defineStore('data', {
                     menuActiveColor: t.menuActiveColor,
                     fontColor: t.fontColor,
                     fontActiveColor: t.fontActiveColor,
-                    layout: this.UI.layout,
                     windowZoom: this.UI.windowZoom,
                     navLayout: this.UI.navLayout,
                     // ⚠️ changeTheme 会重建整个 UI 对象：新增的 UI 字段必须在这里带上，否则切主题就丢设置
@@ -2119,6 +2266,15 @@ export const usestore = defineStore('data', {
          */
         setPersistMainPanel(v: boolean) {
             persistMainPanel = v
+        },
+
+        /**
+         * 设置是否持久化「工作区」键（独立窗口设 false，见 persistWorkspace）。
+         * 独立窗口不维护工作区的日常保存，写盘会把主窗口的工作区覆盖回它打开时的旧值
+         * （现象：在设置窗口里改任意配置，主窗口工作区路径被清空）。
+         */
+        setPersistWorkspace(v: boolean) {
+            persistWorkspace = v
         },
 
         /**

@@ -4,6 +4,7 @@ import App from '@/App.vue'
 // Excalidraw 静态资源（字体/vendor）路径：指向 dist 根目录，dev 与 file:// 生产环境均可解析
 ;(window as any).EXCALIDRAW_ASSET_PATH = './'
 import { pinia } from '@/store/pinia'
+import { isAuxWindowHash } from '@/store'
 import { ElMessage, ElTree } from 'element-plus';
 import 'element-plus/theme-chalk/index.css';
 import '@/style.css'
@@ -71,7 +72,7 @@ import('@/platform/rendererTasks')
 
 // 插件宿主通知（ctx.host.notify → 主进程广播 plugin:notify）：仅在主窗口弹提示，
 // 设置/文件/浏览器等独立窗口不重复弹同一提示。
-if (!/^#\/(file-view|browser-agent|settings-window)/.test(window.location.hash)) {
+if (!isAuxWindowHash(window.location.hash)) {
   window.dsh?.plugin?.onEvent?.((ev) => {
     if (ev.type === 'plugin/notify') ElMessage.info(`[${ev.id}] ${ev.message}`)
   })

@@ -1,12 +1,16 @@
 /**
  * fileViews.ts — 文件视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）的统一顺序与名称。
  *
+ * ⚠ 这些视图**只属于独立文件窗口**（文件一律在新窗口打开，可用视图按文件类型决定，见
+ *   FileWindow.vue 的 availableViews）；主窗口不再列出它们 —— 它一次只显示一个全局视图
+ *   （见 store/index.ts 的 GLOBAL_VIEW_KEYS），仅在预览远程文件时自动切到「浏览」。
+ *
  * ★ 想调整「视图顺序 / 名称」只改这个文件（以及下面列出的映射点）即可：
- *   - 顺序：数组顺序 = 主界面视图栏、视图下拉、新窗口打开菜单、文件窗口切换器的顺序
+ *   - 顺序：数组顺序 = 文件窗口切换器、「打开」子菜单（文件树 / 表格 / 新建文件）的顺序
  *   - 中文名：`name`（同时是内部标识，见下）；英文名：`labelEn`
  *
- * ⚠ `name` 既是**内部标识**也是中文显示名（`store.viewList` / `store.view` / `store.isView` /
- *   `explorer.vue` 的组件 `v-if` / `panel.vue` 的视图管理，全都按它匹配），所以改名时：
+ * ⚠ `name` 既是**内部标识**也是中文显示名（独立窗口的组件 `v-if`、主窗口预览远程文件用的
+ *   `VIEW_BROWSE`、`panel.vue` / `view_table.vue` 的「打开」子菜单都按它匹配），所以改名时：
  *   1. 同步改这些比较点（都从这里取常量，别写字面量）；
  *   2. 用 `normalizeViewName()` 归一化历史持久化数据（旧名：编辑 / 块编辑 / 导图）。
  *
@@ -43,8 +47,6 @@ export const VIEW_SOURCE = FILE_VIEWS[1].name
 export const VIEW_VISUAL = FILE_VIEWS[2].name
 export const VIEW_MINDMAP = FILE_VIEWS[3].name
 export const VIEW_PRESENTATION = FILE_VIEWS[4].name
-/** 除「浏览」之外的文件视图（都需要有打开的文件，且远程只读预览下禁用） */
-export const NON_BROWSE_FILE_VIEWS = FILE_VIEW_NAMES.filter((n) => n !== VIEW_BROWSE)
 /** 旧标识 → 新标识（历史 localStorage 里的旧视图名与旧默认值） */
 const FILE_VIEW_ALIASES: Record<string, string> = {
   编辑: '源码编辑',
