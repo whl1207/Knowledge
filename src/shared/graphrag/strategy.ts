@@ -58,6 +58,16 @@ export interface StrategyDef {
   agentTools?: Record<string, boolean>
   /** Agentic 最大检索步数（多轮工具循环上限，默认 5） */
   maxRounds?: number
+  /** Agentic：检索工具内部候选切片数（留空=跟随「处理配置 → 工具候选数」，默认 15）。
+   *  可为不同 Agentic 策略设置不同值，便于做「候选池大小」消融。 */
+  agentToolTopN?: number
+  /** Agentic：最终重排时融合「工具通道分」的权重（留空=跟随「处理配置 → 子查询重排权重」，默认 0.5） */
+  agentSubQueryWeight?: number
+  /** Agentic：检索暖启动——把系统预取结果随首轮请求交给模型，避免重复检索同一问题（默认开） */
+  agentWarmStart?: boolean
+  /** Agentic：模型未调用任何工具时，自动按可用通道补一次确定性召回（默认开）。
+   *  关掉可做「纯 LLM 路由 vs 确定性通道」的消融。 */
+  agentFallback?: boolean
   /** Agentic（智能路由）自定义系统提示词：留空/未设置时使用内置默认（getDefaultAgentSystemPrompt）。
    *  自定义后不再区分界面语言，中英界面均使用该提示词。 */
   systemPrompt?: string
@@ -321,6 +331,10 @@ export function getStrategies(): StrategyDef[] {
       ingestionSteps: override.ingestionSteps?.length ? override.ingestionSteps : b.ingestionSteps,
       agentTools: { ...(b.agentTools || {}), ...(override.agentTools || {}) },
       maxRounds: override.maxRounds ?? b.maxRounds,
+      agentToolTopN: override.agentToolTopN ?? b.agentToolTopN,
+      agentSubQueryWeight: override.agentSubQueryWeight ?? b.agentSubQueryWeight,
+      agentWarmStart: override.agentWarmStart ?? b.agentWarmStart,
+      agentFallback: override.agentFallback ?? b.agentFallback,
       systemPrompt: override.systemPrompt ?? b.systemPrompt,
       channels: { ...(b.channels || {}), ...(override.channels || {}) },
       channelTopN: { ...(b.channelTopN || {}), ...(override.channelTopN || {}) },
@@ -458,6 +472,9 @@ export async function retrieveTopContext(
   ctx: RetrievalContext,
   query: string,
   topN: number,
+  /** 拼进 context 的条数（默认与 topN 相同）：工具检索可取更大的 topN 扩池，
+   *  但只把最相关的前若干条写进上下文，避免提示词体积随候选池线性增长。 */
+  contextTopN?: number,
 ): Promise<{ context: string; evidence: Evidence[]; scores: Map<string, number>; denseScores: Map<string, number>; sorted: any[] }> {
   const subCtx: RetrievalContext = { ...ctx, query }
   const res = await denseScore(subCtx)
@@ -474,10 +491,12 @@ export async function retrieveTopContext(
     .map(b => ({ block: b, p: scores.get(b.id) || 0 }))
     .sort((a, b) => b.p - a.p)
   const top = sorted.slice(0, Math.max(1, topN))
+  // 证据池 = 全部 topN（参与最终融合排序）；上下文 = 前 contextTopN 条（模型实际读到的内容）
+  const contextCount = Math.max(1, contextTopN ?? topN)
   let context = ''
   const evidence: Evidence[] = []
-  top.forEach(({ block: b, p }) => {
-    context += `《${b.label}》：${b.A}。`
+  top.forEach(({ block: b, p }, i) => {
+    if (i < contextCount) context += `《${b.label}》：${b.A}。`
     evidence.push({ id: b.id, label: b.label || '', filePath: b.filePath || '', content: b.A || '', score: p || 0, method: 'dense' })
   })
   return { context, evidence, scores, denseScores, sorted: top.map(t => t.block) }
@@ -1049,6 +1068,8 @@ async function executeAgenticTool(
   args: any,
   ctx: RetrievalContext,
   mergeEvidence: (evidence: Evidence[]) => void,
+  /** 工具内部候选切片数（比最终呈现的 searchNum 更大，用于扩池抬高召回上限） */
+  toolTopN: number,
 ): Promise<string> {
   const language = ctx.config.locale
   const zh = (zh: string, en: string) => (language === 'zh' ? zh : en)
@@ -1072,11 +1093,11 @@ async function executeAgenticTool(
           `No slices found for file "${filePath}". Available files: ${files.join(', ') || '(none)'}`)
       }
       const subCtx: RetrievalContext = { ...ctx, blocks: scopedBlocks }
-      const { context, evidence, denseScores } = await retrieveTopContext(subCtx, query, ctx.config.searchNum || 5)
+      const { context, evidence, denseScores } = await retrieveTopContext(subCtx, query, toolTopN, ctx.config.searchNum || 5)
       mergeEvidence(evidence.map(e => ({ ...e, method: 'agentic', subQuery: query, subScore: denseScores.get(e.id) ?? e.score })))
       return context || zh('该文件内未检索到相关内容。', 'No relevant content found within this file.')
     }
-    const { context, evidence, denseScores } = await retrieveTopContext(ctx, query, ctx.config.searchNum || 5)
+    const { context, evidence, denseScores } = await retrieveTopContext(ctx, query, toolTopN, ctx.config.searchNum || 5)
     mergeEvidence(evidence.map(e => ({ ...e, method: 'agentic', subQuery: query, subScore: denseScores.get(e.id) ?? e.score })))
     return context || zh('未检索到相关内容，请更换检索词。', 'No relevant content found, try another query.')
   }
@@ -1139,7 +1160,7 @@ async function executeAgenticTool(
     // 收敛：仅在该实体的关联切片上，按原始问题做稠密+文件融合检索
     const candidateBlocks = ctx.blocks.filter((b: any) => bid.has(b.id))
     const subCtx: RetrievalContext = { ...ctx, blocks: candidateBlocks }
-    const { context, evidence } = await retrieveTopContext(subCtx, ctx.query, ctx.config.searchNum || 5)
+    const { context, evidence } = await retrieveTopContext(subCtx, ctx.query, toolTopN, ctx.config.searchNum || 5)
     mergeEvidence(evidence.map((e: any) => ({ ...e, method: 'entity', reason: zh('实体「' + entityName + '」关联切片', 'slice linked to entity "' + entityName + '"') })))
     return context || zh('该实体无相关切片。', 'No relevant slices for this entity.')
   }
@@ -1217,6 +1238,25 @@ async function executeAgenticTool(
   return zh('未知工具', 'Unknown tool')
 }
 
+/** 是否为「有效数值输入」：界面上清空输入会得到 ''、空值可能是 null/undefined，这些都不算提供了值 */
+function hasNumericValue(value: unknown): boolean {
+  if (value === '' || value === null || value === undefined) return false
+  return Number.isFinite(Number(value))
+}
+
+/** 归一化正数配置（未提供或非法 → 用默认值） */
+function positiveInt(value: unknown, fallback: number): number {
+  if (!hasNumericValue(value)) return fallback
+  const n = Math.floor(Number(value))
+  return n > 0 ? n : fallback
+}
+
+/** 归一化 0~1 权重（未提供或非法 → 用默认值） */
+function unitWeight(value: unknown, fallback: number): number {
+  if (!hasNumericValue(value)) return fallback
+  return Math.min(1, Math.max(0, Number(value)))
+}
+
 /**
  * 对证据重排相关度（融合「工具通道分」与「原始问题对齐」）：
  * - 基础分：原始问题 vs 证据正文 的余弦相似度（对齐用户问题，保证 topK 裁剪与百分比展示可比）。
@@ -1230,6 +1270,8 @@ async function rerankEvidenceAgainstQuery(
   ctx: RetrievalContext,
   evidence: Evidence[],
   preQv?: number[] | null,
+  /** 工具通道分权重（覆盖 ctx.config.agentSubQueryWeight；Agentic 策略级配置用） */
+  subQueryWeight?: number,
 ): Promise<Evidence[]> {
   if (!evidence.length) return evidence
   const { services } = ctx
@@ -1257,7 +1299,7 @@ async function rerankEvidenceAgainstQuery(
     // 融合工具通道分（仅带 subScore 的语义检索工具证据生效；量纲 0~1 与余弦一致）
     let finalScore = sim
     if (e.subScore != null) {
-      const w = ctx.config.agentSubQueryWeight ?? 0.5
+      const w = unitWeight(subQueryWeight ?? ctx.config.agentSubQueryWeight, 0.5)
       const sub = Math.min(1, Math.max(0, e.subScore))
       finalScore = (1 - w) * sim + w * sub
     }
@@ -1288,6 +1330,18 @@ async function runAgentic(
   if (!services.agenticChat) return result
 
   const { tools, dropped } = buildAgenticTools(ctx, def.agentTools)
+  // 工具内部候选池：优先策略级设置，其次「处理配置 → 工具候选数」，默认 15。
+  // 比最终呈现的 searchNum 更大：工具召回的证据全部并入证据池参与最终重排，
+  // 从而抬高召回上限；模型读到的上下文仍只取 searchNum 条（提示词体积不变）。
+  const toolTopN = positiveInt(def.agentToolTopN ?? config.agentToolTopN, 15)
+  // 重排权重：策略级优先，其次「处理配置 → 子查询重排权重」（0=只用原始问题内容余弦，1=只用工具通道分）
+  const subQueryWeight = unitWeight(def.agentSubQueryWeight ?? config.agentSubQueryWeight, 0.5)
+  // 暖启动 / 未调工具时的补检索：默认开，可在策略配置里关闭（消融用）
+  const warmStart = def.agentWarmStart !== false
+  const fallbackEnabled = def.agentFallback !== false
+  if (toolTopN < (config.searchNum || 5)) {
+    console.warn(`[Strategy/agentic] 工具候选数(${toolTopN}) 小于召回数量(${config.searchNum})：位次最多只能到 ${toolTopN}，建议工具候选数 ≥ 召回数量`)
+  }
   result.meta.agentTools = tools.map((t: any) => t.function.name)
   result.meta.agentDroppedTools = dropped
   if (dropped.length) {
@@ -1314,6 +1368,8 @@ async function runAgentic(
     const byScore = (a: Evidence, b: Evidence) => (b.score || 0) - (a.score || 0)
     return [...sliceLevel.sort(byScore), ...support.sort(byScore)]
   }
+  // 重排统一口径：融合工具通道分（权重 = subQueryWeight）与原始问题内容余弦
+  const rerank = (list: Evidence[]) => rerankEvidenceAgainstQuery(ctx, list, queryVec, subQueryWeight)
 
   const allEvidence: Evidence[] = []
   const seenKeys = new Set<string>()
@@ -1325,7 +1381,7 @@ async function runAgentic(
       allEvidence.push(e)
     })
     // 每轮合并后按原始问题重排并排序（工具子查询的分值与伪分值不可比，统一换成语义相关度）
-    hooks.onEvidence?.(rankEvidence(await rerankEvidenceAgainstQuery(ctx, allEvidence, queryVec)))
+    hooks.onEvidence?.(rankEvidence(await rerank(allEvidence)))
   }
 
   // 工具调用轨迹（供问答「推理路径」面板与测试页「检索过程」回显）：
@@ -1370,11 +1426,33 @@ async function runAgentic(
     })
   }
 
+  // 系统预取结果作为「暖启动」交给模型：模型不必再对同一问题重复 kb_search，
+  // 首轮即可判断「已有什么、还缺什么」，把有限轮次用在补充检索上（同时减少重复检索耗时）。
+  // 可在策略配置里关闭（agentWarmStart=false）以做「有无暖启动」的消融。
+  if (allEvidence.length && warmStart) {
+    const previewCount = Math.max(1, config.searchNum || 5)
+    const preview = allEvidence.slice(0, previewCount)
+      .map(e => `《${e.label}》：${String(e.content || '').slice(0, 300)}`)
+      .join('\n')
+    const hitNote = allEvidence.slice(0, 8).map(e => `《${e.label}》`).join('、')
+    messages.push({
+      role: 'user',
+      content: zh(
+        `系统已用原始问题预取 ${allEvidence.length} 个候选片段（命中：${hitNote}），无需再对同一问题重复检索。\n\n${preview}\n\n` +
+        `请判断这些资料是否足以回答问题：足够就直接作答并引用《标签》；不足则调用工具补充检索（换更具体或同义的关键词，或用实体 / 文件 / 社区 / 图谱工具做定向补充）。`,
+        `The system pre-fetched ${allEvidence.length} candidate snippets for the original question (hits: ${hitNote}); do not repeat the same search.\n\n${preview}\n\n` +
+        `Decide whether this is enough: if yes, answer directly citing 《label》; if not, call tools to supplement (use more specific synonyms, or entity / file / community / graph tools).`,
+      ),
+    })
+  }
+
   let answer = ''
   // 模型是否真正调用过检索工具（用于诊断「只调了一轮大模型 / 没有工具调用记录」）
   let modelUsedTools = false
   // 模型不调工具时是否已做过一次确定性补充召回（只补一次，避免空转）
   let fallbackDone = false
+  /** 本次运行内的工具结果缓存（工具 + 参数 → 结果）：同参数重复调用直接复用，避免重复检索 */
+  const toolResultCache = new Map<string, string>()
 
   /**
    * 确定性补充召回：模型未调用任何工具时，按「已启用且有数据」的通道补齐系统预取未覆盖的召回
@@ -1383,12 +1461,13 @@ async function runAgentic(
    */
   const runFallbackRound = async (): Promise<string[]> => {
     const outs: string[] = []
+    if (!fallbackEnabled) return outs
     const isOn = (t: string) => !def.agentTools || def.agentTools[t] !== false
     const call = async (tool: string, args: any): Promise<string> => {
       if (!isOn(tool) || !agentToolAvailable(tool, ctx)) return ''
       recordStep({ round: 1, kind: 'fallback', tool, args, result: '', status: 'running' })
       try {
-        const r = await executeAgenticTool(tool, args, ctx, mergeEvidence)
+        const r = await executeAgenticTool(tool, args, ctx, mergeEvidence, toolTopN)
         recordStep({ round: 1, kind: 'fallback', tool, args, result: r, status: 'done' })
         if (r && !/未匹配到|暂无|未构建|未找到/.test(r)) outs.push(r)
         return r
@@ -1450,8 +1529,7 @@ async function runAgentic(
         })
 
         // 模型迟迟不用工具 → 先做一次确定性补充召回，再决定是否收尾
-        if (!modelUsedTools && !fallbackDone) {
-          fallbackDone = true
+        if (!modelUsedTools && !fallbackDone) {          fallbackDone = true
           const added = await runFallbackRound()
           if (added.length && !opts.skipAnswer) {
             // 问答：把补充资料交给模型再答一轮（下一轮若仍无工具调用则采用其正文）
@@ -1492,6 +1570,15 @@ async function runAgentic(
           args = typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {})
         } catch { args = {} }
         const toolName = tc.function?.name || 'unknown'
+        // 同一轮内重复调用同一工具+同一参数 → 复用上次结果（检索在同一次运行内是确定性的），
+        // 省一次检索耗时，也让模型看到「这是重复调用」而不误以为有新信息
+        const cacheKey = `${toolName}|${JSON.stringify(args)}`
+        if (toolResultCache.has(cacheKey)) {
+          const cached = zh('（与上次相同参数，复用上次检索结果）\n', '(same args as before; reusing the previous result)\n') + toolResultCache.get(cacheKey)!
+          recordStep({ round: round + 1, kind: 'tool', tool: toolName, args, result: cached, status: 'done', note: zh('重复调用，复用结果', 'duplicate call, reused') })
+          toolResults.push(cached)
+          continue
+        }
         hooks.onProgress?.(zh(`执行工具 ${toolName}...（第 ${round + 1} 轮）`, `Running ${toolName}... (round ${round + 1})`))
         recordStep({ round: round + 1, kind: 'tool', tool: toolName, args, result: '', status: 'running' })
         // 工具开关：被禁用的工具直接跳过（正常情况下工具列表已过滤，此为兜底）
@@ -1502,7 +1589,8 @@ async function runAgentic(
           continue
         }
         try {
-          const tr = await executeAgenticTool(toolName, args, ctx, mergeEvidence)
+          const tr = await executeAgenticTool(toolName, args, ctx, mergeEvidence, toolTopN)
+          toolResultCache.set(cacheKey, tr)
           recordStep({ round: round + 1, kind: 'tool', tool: toolName, args, result: tr, status: 'done' })
           toolResults.push(tr)
         } catch (e: any) {
@@ -1512,10 +1600,12 @@ async function runAgentic(
       }
 
       messages.push({ role: 'assistant', content: response.content || '', tool_calls: toolCalls })
-      // 工具结果按 OpenAI 口径带 tool_call_id 回传（严格校验的供应商会拒绝缺少该字段的 tool 消息）
+      // 工具结果按各来源口径回传：OpenAI 兼容用 tool_call_id，Ollama 用 tool_name
+      // （两个字段都带上，各来源只取自己认识的；缺失 tool_call_id 的 tool 消息会被严格校验的服务拒绝）
       toolCalls.forEach((tc: any, i: number) => messages.push({
         role: 'tool',
         tool_call_id: tc.id || `call_${round}_${i}`,
+        tool_name: tc.function?.name,
         name: tc.function?.name,
         content: toolResults[i] ?? '',
       }))
@@ -1543,7 +1633,7 @@ async function runAgentic(
 
   // 多轮检索后仍未产出正文（模型一直调工具到 maxRounds 用尽等）→ 基于已收集证据强制生成答案
   if (!opts.skipAnswer && !answer) {
-    const rankedNow = rankEvidence(await rerankEvidenceAgainstQuery(ctx, allEvidence, queryVec))
+    const rankedNow = rankEvidence(await rerank(allEvidence))
     const topCtx = rankedNow
       .slice(0, Math.max(1, config.searchNum || 5))
       .map(e => `《${e.label}》：${e.content}`)
@@ -1563,7 +1653,7 @@ async function runAgentic(
 
   // 收尾：按原始问题重排 + 排序后回传（排序在策略内收口：调用方按 top-K 取用时即按相关度取样，
   // 避免按「证据拼接顺序」截断而丢掉工具召回的证据——原先 agentic 因此退化为与单轮稠密检索等价）。
-  const ranked = rankEvidence(await rerankEvidenceAgainstQuery(ctx, allEvidence, queryVec))
+  const ranked = rankEvidence(await rerank(allEvidence))
   result.answer = answer || ''
   result.evidence = ranked
   result.scores = new Map(ranked.map(e => [e.id, e.score || 0]))

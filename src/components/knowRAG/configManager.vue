@@ -272,6 +272,18 @@ const configItems = computed<ConfigItem[]>(() => [
   },
   {
     group: 'process',
+    key: 'agentToolTopN',
+    label: '工具候选数',
+    labelEn: 'Tool Candidate Pool',
+    type: 'number',
+    min: 1,
+    max: 50,
+    step: 1,
+    description: '仅 Agentic（智能路由）生效：每个检索工具内部取多少条候选切片（默认 15）。这些候选全部并入证据池参与最终融合排序，因此调大可抬高召回上限；模型实际读到的上下文仍只有「切片数量」条（不增加提示词体积）。若在「策略配置」里给某个智能路由策略单独设了「工具候选数」，则以该策略设置为准。',
+    descriptionEn: 'Agentic only: how many candidate slices each retrieval tool fetches internally (default 15). All of them join the evidence pool for the final fused ranking, so a larger value raises the recall ceiling; the model still only reads "slice count" snippets (prompt size unchanged). A per-strategy "Tool candidate pool" in Strategy Config overrides this.'
+  },
+  {
+    group: 'process',
     key: 'sliceMaxChars',
     label: '切片最大字符数',
     labelEn: 'Max Chars Per Slice',

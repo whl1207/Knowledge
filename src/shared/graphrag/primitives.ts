@@ -154,6 +154,10 @@ export interface RetrievalConfig {
   think?: boolean
   /** Agentic：最终重排时融合子查询检索分数的权重（0=只用原始问题，1=只用子查询分数） */
   agentSubQueryWeight?: number
+  /** Agentic：检索工具（kb_search / entity_slice 等）内部的候选切片数（默认 15）。
+   *  比最终呈现的 searchNum 更大：工具把更多候选并入证据池参与最终重排，抬高召回上限，
+   *  而模型看到的上下文仍只取 searchNum 条（不增加提示词体积）。 */
+  agentToolTopN?: number
   /** 实体链接是否允许 LLM 兜底匹配（默认允许）。关闭后本体增强全程只用嵌入模型，
    *  避免 LM Studio 等单服务下每轮查询都因「对话兜底调用」与嵌入调用交替而反复换载模型（评测提速明显）。 */
   entityLinkLlm?: boolean

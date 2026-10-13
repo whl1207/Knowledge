@@ -456,6 +456,9 @@ let model = ref({
     // Agentic 最终重排：融合工具通道分（子查询/原始问题检索分）与原始问题内容余弦的权重
     // （默认等权 0.5；0=只用原始问题内容余弦，1=只用工具通道分）
     agentSubQueryWeight: 0.5,
+    // Agentic 检索工具内部候选池大小（默认 15）：工具召回的证据全部并入证据池参与最终重排，
+    // 抬高召回上限；模型读到的上下文仍只取「切片数量」条，不增加提示词体积
+    agentToolTopN: 15,
     sliceMaxChars: 4000,
     sliceOverlapChars: 300,
     semanticSplitThreshold: 0.86,
@@ -4193,6 +4196,7 @@ const buildRetrievalContext = (query: string): RetrievalContext => {
             // 实体链接 LLM 兜底开关（关闭后本体增强只用嵌入模型，避免每轮查询换载对话模型）
             entityLinkLlm: modelCfg.entityLinkLlm !== false,
             agentSubQueryWeight: modelCfg.agentSubQueryWeight ?? 0.5,
+            agentToolTopN: modelCfg.agentToolTopN ?? 15,
         },
         services: kbAi.buildRetrievalServices(buildKbSpec(), { cosineSimilarity, computeBM25: computeBM25Score }),
     }
@@ -4498,6 +4502,8 @@ const save = async function(){
             // 实体链接是否允许 LLM 兜底匹配（默认 true）
             entityLinkLlm: model.value.entityLinkLlm !== false,
             agentSubQueryWeight: model.value.agentSubQueryWeight,
+            // Agentic 检索工具内部候选池大小（随 .kb 保存，保证同一策略在各入口/复现实验口径一致）
+            agentToolTopN: model.value.agentToolTopN,
             searchConfig: {
                 bm25Enabled: model.value.bm25Enabled,
                 bm25Weight: model.value.bm25Weight,
@@ -4681,6 +4687,9 @@ const loadKnowledgeBases = async function(index?: number) {
         }
         if (saveData.config.agentSubQueryWeight !== undefined) {
             model.value.agentSubQueryWeight = saveData.config.agentSubQueryWeight
+        }
+        if (saveData.config.agentToolTopN !== undefined) {
+            model.value.agentToolTopN = saveData.config.agentToolTopN
         }
         
         if (saveData.config.searchConfig) {
@@ -6629,7 +6638,7 @@ onBeforeUnmount(() => {
                     </button>
                 </div>
                 <!-- 推理路径 tab：Agentic 工具调用轨迹 -->
-                <div v-if="activeRightTab === 'steps' && agentSteps.length > 0" class="qa-right-body">
+                <div v-if="activeRightTab === 'steps' && agentSteps.length > 0" class="qa-right-body scoll">
                     <div v-for="(st, i) in agentSteps" :key="i" class="qa-agent-step" :class="st.status">
                         <div class="qa-agent-step-head">
                             <span class="qa-agent-step-round">{{ st.kind === 'prefetch' ? '预' : '#' + st.round }}</span>
@@ -6644,11 +6653,11 @@ onBeforeUnmount(() => {
                         <div class="qa-agent-step-args" v-if="st.args && Object.keys(st.args).length">
                             {{ store.locales == 'zh' ? '参数' : 'Args' }}: {{ JSON.stringify(st.args) }}
                         </div>
-                        <div class="qa-agent-step-result">{{ st.result }}</div>
+                        <div class="qa-agent-step-result scoll">{{ st.result }}</div>
                     </div>
                 </div>
                 <!-- 佐证 tab：当前问答的证据 -->
-                <div v-else-if="activeRightTab === 'evidence' && currentEvidence.length > 0" class="qa-right-body">
+                <div v-else-if="activeRightTab === 'evidence' && currentEvidence.length > 0" class="qa-right-body scoll">
                     <div v-for="(ev, idx) in currentEvidence" :key="ev.id" class="evidence-item">
                         <div class="evidence-item-head">
                             <span class="evidence-idx">{{ idx + 1 }}</span>

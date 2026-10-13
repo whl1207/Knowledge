@@ -730,8 +730,9 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
       think: props.model.think,
       // 实体链接 LLM 兜底开关（关闭后本体增强评测全程只用嵌入模型，不再逐题换载对话模型）
       entityLinkLlm: props.model.entityLinkLlm !== false,
-      // Agentic 最终重排权重（评测与 QA 用同一配置，避免评测口径与实际问答不一致）
+      // Agentic 最终重排权重与工具候选池（评测与 QA / 主页用同一配置，保证口径一致）
       agentSubQueryWeight: props.model.agentSubQueryWeight ?? 0.5,
+      agentToolTopN: props.model.agentToolTopN ?? 15,
     },
     services: kbAi.buildRetrievalServices(kbSpec(), {
       cosineSimilarity,
@@ -3590,12 +3591,20 @@ const clearTestCases = () => {
                 </td>
                 <td style="text-align:center;"
                     :title="s.avgToolCalls > 0 || (s.avgFallbackCalls || 0) > 0 ? toolDistText(s.toolDistribution, s.avgFallbackCalls || 0) : (store.locales=='zh' ? '该策略不使用检索工具' : 'no retrieval tools')">
-                  {{ s.avgToolCalls > 0 ? fmtStat(s.avgToolCalls, s.std?.avgToolCalls, 1, 2) : ((s.avgFallbackCalls || 0) > 0 ? '0*' : '-') }}
+                  <!-- 模型自己调用的工具次数/题；为 0 但发生过系统补检索时显示 0*（括号内为补检索次数/题） -->
+                  {{ s.avgToolCalls > 0
+                    ? fmtStat(s.avgToolCalls, s.std?.avgToolCalls, 1, 2)
+                    : ((s.avgFallbackCalls || 0) > 0 ? `0* (${(s.avgFallbackCalls || 0).toFixed(2)})` : '-') }}
                 </td>
               </tr>
             </tbody>
           </table>
-          <!-- 配对显著性检验（vs 所选基线）：同批问题上的配对比较，判断策略差异是否显著 -->
+          <!-- 列说明：工具/题 与 模型调用/题 的读法（Agentic 成本与「模型是否真在用工具」一眼可辨） -->
+          <div v-if="allStrategyStats.length" class="ae-note" style="margin:4px 0 0;">
+            {{ store.locales=='zh'
+              ? '「模型调用/题」= 平均对话模型调用次数（Agentic 含工具轮与作答；本体增强的 LLM 兜底实体链接也会计入）；「工具/题」= 模型自己发起检索工具的次数，0* 表示模型全程未调工具、仅由系统按可用通道补检索（括号内为补检索次数/题，悬停可见工具分布与提示）'
+              : '"LLM/Qs" = avg chat-model calls per question (agentic tool rounds + answer; ontology LLM entity-link fallback counts too); "Tools/Qs" = tool calls the model itself issued — 0* means the model never called a tool and only the deterministic fallback ran (the number in brackets is fallback calls per question; hover for the tool mix)' }}
+          </div>
           <div v-if="allStrategyStats.length > 1" class="as-detail" style="margin-top:8px;">
             <div class="as-detail-title">
               <i class="fa fa-balance-scale"></i> {{ store.locales=='zh' ? '配对显著性检验' : 'Paired significance' }}
@@ -3819,7 +3828,7 @@ const clearTestCases = () => {
             {{ store.locales=='zh' ? '未就绪工具' : 'Tools without data' }}: {{ agentTrace.agent.droppedTools.join(', ') }}
           </span>
         </div>
-        <div class="tm-body">
+        <div class="tm-body scoll">
           <!-- 大模型判定结果（仅大模型判定模式）：命中与否 / 位次 / 理由 -->
           <div v-if="agentTrace.judge" class="tm-judge-line" :class="{ hit: agentTrace.judge.hit, err: !!agentTrace.judge.error }">
             <i class="fa fa-gavel"></i>
@@ -3852,7 +3861,7 @@ const clearTestCases = () => {
               <span class="tm-step-args-label">{{ store.locales=='zh' ? '参数' : 'Args' }}:</span>
               <span class="tm-step-args-value">{{ agentStepArgsText(st.args) }}</span>
             </div>
-            <div class="tm-step-result">{{ st.result || '—' }}</div>
+            <div class="tm-step-result scoll">{{ st.result || '—' }}</div>
           </div>
         </div>
       </div>
@@ -3869,7 +3878,7 @@ const clearTestCases = () => {
           </div>
           <button class="ae-close" @click="closeSlicePreview" :title="store.locales=='zh' ? '关闭' : 'Close'"><i class="fa fa-times"></i></button>
         </div>
-        <div class="tm-body">
+        <div class="tm-body scoll">
           <div v-for="(it, idx) in preview.entries" :key="idx" class="tm-entry">
             <div class="tm-entry-head">
               <i :class="it.icon || 'fa fa-file-text-o'"></i>

@@ -834,6 +834,13 @@ export class AIUtils {
                     } else if (data.choices[0].text) {
                         content = data.choices[0].text;
                     }
+                    // 工具调用（非流式 function calling）：LM Studio / vLLM 等 OpenAI 兼容服务在
+                    // message.tool_calls 返回；此前只取 message.content，工具调用被静默丢弃 →
+                    // Agentic（智能路由）等工具调用场景永远不会进入下一轮，退化为单轮检索
+                    const rawCalls = data.choices[0].message?.tool_calls;
+                    if (Array.isArray(rawCalls) && rawCalls.length > 0) {
+                        options?.onToolCalls?.(AIUtils.normalizeToolCalls(rawCalls));
+                    }
                 }
 
                 const usage = data.usage || {};
@@ -1314,8 +1321,9 @@ export class AIUtils {
 
                     const data = await response.json();
                     const content = data.message?.content || '';
-                    // 工具调用（非流式 function calling，Ollama 返回 message.tool_calls）
-                    const toolCalls = data.message?.tool_calls || [];
+                    // 工具调用（非流式 function calling，Ollama 返回 message.tool_calls：
+                    // 无 id/type 且 arguments 可能是对象，统一归一为 OpenAI 口径后交给上层工具循环）
+                    const toolCalls = AIUtils.normalizeToolCalls(data.message?.tool_calls || []);
                     if (toolCalls.length > 0) options?.onToolCalls?.(toolCalls);
                     const oPt = typeof data.prompt_eval_count === 'number' ? data.prompt_eval_count : 0
                     const oCt = typeof data.eval_count === 'number' ? data.eval_count : 0
@@ -1336,6 +1344,27 @@ export class AIUtils {
             options?.onError?.(error as Error);
             throw error;
         }
+    }
+
+    /**
+     * 归一化各来源的 tool_calls 为 OpenAI 口径（id / type=function / function.arguments 为 JSON 字符串）。
+     * 各来源差异：Ollama 无 id/type 且 arguments 可能是对象；OpenAI 兼容一般已合规；
+     * Gemini/Anthropic 已各自归一。统一后 Agentic 工具循环与 UI 回显无需分支。
+     */
+    static normalizeToolCalls(calls: any[]): any[] {
+        if (!Array.isArray(calls)) return []
+        return calls
+            .filter(tc => tc?.function?.name)
+            .map((tc: any, i: number) => ({
+                id: tc.id || `call_${Date.now().toString(36)}_${i}_${Math.random().toString(36).slice(2, 8)}`,
+                type: 'function',
+                function: {
+                    name: tc.function.name,
+                    arguments: typeof tc.function.arguments === 'string'
+                        ? tc.function.arguments
+                        : JSON.stringify(tc.function.arguments ?? {}),
+                },
+            }))
     }
 
     // ==================== 图片入参归一化（各来源多模态接口共用） ====================
@@ -2707,7 +2736,7 @@ export class AIUtils {
                     }
                     // 工具调用（非流式 function calling）
                     if (data.choices[0].message && data.choices[0].message.tool_calls && data.choices[0].message.tool_calls.length > 0) {
-                        options?.onToolCalls?.(data.choices[0].message.tool_calls);
+                        options?.onToolCalls?.(AIUtils.normalizeToolCalls(data.choices[0].message.tool_calls));
                     }
                 } else if (data.content && data.content[0]?.text) {
                     // Anthropic 格式

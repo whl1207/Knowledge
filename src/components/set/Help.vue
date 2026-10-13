@@ -2200,7 +2200,7 @@ const translations = {
         },
         params: {
           title: '检索参数',
-          desc: '每个策略可独立配置召回数量（TopK）、检索模式（按数量 / 按匹配率 / 按字符）、匹配率阈值、字符限制、BM25 开关与权重等；问答与测试即用当前选中策略的参数执行，并支持启用 / 停用 / 恢复默认。'
+          desc: '每个策略可独立配置召回数量（TopK）、检索模式（按数量 / 按匹配率 / 按字符）、匹配率阈值、字符限制、BM25 开关与权重等；问答与测试即用当前选中策略的参数执行，并支持启用 / 停用 / 恢复默认。智能路由（Agentic）另有四个专属项：<strong>最大步数</strong>（工具循环上限）、<strong>工具候选数</strong>（每个工具内部取多少条候选，全部并入证据池参与最终排序以抬高召回上限；留空=跟随处理配置）、<strong>重排权重</strong>（融合工具通道分与原始问题内容余弦，留空=跟随处理配置）、<strong>暖启动</strong>与<strong>自动补检索</strong>开关（关闭后者即「纯 LLM 路由」，可做消融）。注意「召回数量」是评测取用与呈现的条数（也是测试页的 K），并不限制「工具候选数」。'
         }
       }
     },
@@ -3297,7 +3297,7 @@ const translations = {
         },
         params: {
           title: 'Retrieval Parameters',
-          desc: 'Each strategy can independently configure TopK, retrieval mode (By Quantity / By Match Ratio / By Characters), match ratio threshold, character limit, BM25 toggle and weight; QA and tests use the currently selected strategy\'s parameters, with enable / disable / restore-default support.'
+          desc: 'Each strategy can independently configure TopK, retrieval mode (By Quantity / By Match Ratio / By Characters), match ratio threshold, character limit, BM25 toggle and weight; QA and tests use the currently selected strategy\'s parameters, with enable / disable / restore-default support. Agentic adds four extra knobs: <strong>Max Rounds</strong> (tool-loop cap), <strong>Tool Candidate Pool</strong> (candidates each tool fetches internally; all join the evidence pool for the final ranking to raise the recall ceiling; empty = follow Processing Config), <strong>Rerank Blend</strong> (fuses the tool channel score with original-question content similarity; empty = follow Processing Config), and the <strong>Warm Start</strong> / <strong>Auto Fallback</strong> switches (turn the latter off for a pure LLM-routing ablation). Note that TopK is what gets shown / used as the evaluation K — it does not cap the tool candidate pool.'
         }
       }
     },

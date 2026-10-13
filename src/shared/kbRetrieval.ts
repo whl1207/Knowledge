@@ -94,6 +94,12 @@ export interface KnowledgeBaseConfig {
   version?: string
   summaryWeight?: number
   sliceWeight?: number
+  /** Agentic：工具内部候选池大小（随 .kb 保存；缺省 15） */
+  agentToolTopN?: number
+  /** Agentic：最终重排权重（随 .kb 保存；缺省 0.5） */
+  agentSubQueryWeight?: number
+  /** 实体链接是否允许 LLM 兜底匹配 */
+  entityLinkLlm?: boolean
   [key: string]: any
 }
 
@@ -688,6 +694,10 @@ function buildRetrievalContextFromKb(params: {
       bm25K1: 1.5,
       bm25B: 0.75,
       searchNum: config.topK,
+      // 与知识库/测试页同源：这些开关随 .kb 保存，主页检索同样按它执行（避免同一策略在不同入口行为不一致）
+      agentSubQueryWeight: kbConfig?.agentSubQueryWeight ?? 0.5,
+      agentToolTopN: kbConfig?.agentToolTopN ?? 15,
+      entityLinkLlm: kbConfig?.entityLinkLlm !== false,
     },
     services: kbAi.buildRetrievalServices(spec, { cosineSimilarity, computeBM25: () => [] }, embedSpec),
   }

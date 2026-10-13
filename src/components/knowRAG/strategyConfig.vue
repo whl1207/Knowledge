@@ -342,9 +342,59 @@
               <label>{{ t('Agentic 最大步数', 'Agent Max Rounds') }}</label>
               <input type="number" v-model.number="selected.maxRounds" min="1" max="10" step="1" />
             </div>
+            <!-- 工具候选池：留空=跟随「处理配置 → 工具候选数」；填值则本策略单独生效（便于做候选池大小消融） -->
+            <div v-if="selected.kind === 'agentic'" class="cfg-row">
+              <label>{{ t('工具候选数', 'Tool Candidate Pool') }}</label>
+              <input type="number" v-model.number="selected.agentToolTopN" min="1" max="50" step="1"
+                     :placeholder="t('跟随处理配置', 'follow global')"
+                     :title="t('每个检索工具内部取多少条候选切片（全部并入证据池参与最终融合排序，因此调大可抬高召回上限；模型实际读到的上下文仍只有「召回数量」条）。留空=跟随「设置 → 处理配置 → 工具候选数」（默认 15）', 'How many candidate slices each retrieval tool fetches internally (all join the final fused ranking, so a larger value raises the recall ceiling; the model still reads only TopK snippets). Empty = follow Settings → Processing → Tool Candidate Pool (default 15).')" />
+              <button v-if="selected.agentToolTopN" class="sc-mini-btn" @click="selected.agentToolTopN = undefined; touch()"
+                      :title="t('清除，改为跟随处理配置', 'Clear and follow the global setting')">
+                <i class="fa fa-eraser"></i>
+              </button>
+              <span v-if="(selected.agentToolTopN || 0) > 0 && (selected.agentToolTopN || 0) < model.searchNum" class="sc-warn-inline"
+                    :title="t('工具候选数小于「召回数量」：位次最多只能到候选数，评测会低估该策略。建议候选数 ≥ 召回数量', 'Tool candidate pool is smaller than TopK: ranks can never exceed the pool size, which understates this strategy. Use pool ≥ TopK.')">
+                <i class="fa fa-exclamation-triangle"></i>
+              </span>
+            </div>
+            <!-- 子查询重排权重：留空=跟随处理配置（默认 0.5 等权） -->
+            <div v-if="selected.kind === 'agentic'" class="cfg-row">
+              <label>{{ t('重排权重', 'Rerank Blend') }}</label>
+              <input type="range" v-model.number="selected.agentSubQueryWeight" min="0" max="1" step="0.05"
+                     :title="t('最终重排时融合「工具通道分」与「原始问题内容余弦」的权重：越高越偏向工具按检索词召回的精确结果，越低越偏向切片正文与原始问题的相似度（留空=跟随处理配置，默认 0.5 等权）', 'Weight blending the tool channel score with original-question content similarity in the final rerank. Higher = favor precise tool recall; lower = favor slice-vs-question similarity. Empty = follow the global setting (default 0.5 equal).')" />
+              <span class="cfg-range-text">{{ (selected.agentSubQueryWeight ?? (model.agentSubQueryWeight ?? 0.5)).toFixed(2) }}</span>
+              <button v-if="selected.agentSubQueryWeight !== undefined" class="sc-mini-btn" @click="selected.agentSubQueryWeight = undefined; touch()"
+                      :title="t('清除，改为跟随处理配置', 'Clear and follow the global setting')">
+                <i class="fa fa-eraser"></i>
+              </button>
+            </div>
+            <!-- 暖启动 / 未调工具时的补检索：默认开，可分别关闭做消融 -->
+            <div v-if="selected.kind === 'agentic'" class="cfg-row">
+              <label>{{ t('暖启动', 'Warm Start') }}</label>
+              <label class="preset-checkbox">
+                <input type="checkbox" :checked="selected.agentWarmStart !== false"
+                     @change="toggleAgentFlag('agentWarmStart', $event)"
+                     :title="t('把系统预取的结果随首轮请求交给模型，避免模型重复检索同一问题、把轮次浪费掉', 'Pass the pre-fetched snippets to the model in the first request so it does not repeat the same search and waste rounds')" />
+                <span>{{ t('预取结果交给模型', 'Give pre-fetch to model') }}</span>
+              </label>
+            </div>
+            <div v-if="selected.kind === 'agentic'" class="cfg-row">
+              <label>{{ t('自动补检索', 'Auto Fallback') }}</label>
+              <label class="preset-checkbox">
+                <input type="checkbox" :checked="selected.agentFallback !== false"
+                     @change="toggleAgentFlag('agentFallback', $event)"
+                       :title="t('模型一次工具都不调用时，自动按可用通道（实体 / 文件 / 社区）补一次确定性召回；关闭后即「纯 LLM 路由」（可做消融）', 'When the model calls no tool at all, run one deterministic recall over available channels (entity / file / community). Turn off for a pure LLM-routing ablation.')" />
+                <span>{{ t('模型不调工具时补召回', 'Fallback when no tool call') }}</span>
+              </label>
+            </div>
+            <!-- 召回数量（= 评测的 K 与呈现条数）：与「工具候选数」分工不同，见下方说明 -->
             <div class="cfg-row">
               <label>{{ t('召回数量', 'TopK') }}</label>
-              <input type="number" v-model.number="model.searchNum" min="1" max="20" />
+              <input type="number" v-model.number="model.searchNum" min="1" max="20"
+                     :title="t('评测与呈现的取用条数：测试页的位次、Recall@K、Hit@K、MRR 都以它为 K，同时决定工具返回给模型的上下文条数；它不限制「工具候选数」——候选池更大时多出的候选仍参与最终排序，只是最多呈现 K 条', 'How many results are used/shown: test-page ranks and Recall@K / Hit@K / MRR use it as K, and it also caps how many snippets tools hand to the model. It does NOT cap the tool candidate pool: extra candidates still join the final ranking, only the top K are shown.')" />
+            </div>
+            <div v-if="selected.kind === 'agentic'" class="ae-note" style="margin:-2px 0 4px;">
+              {{ t('读法：工具候选数 = 每个工具内部取多少条候选（并入选池、抬高召回上限）；召回数量 = 最终呈现多少条（也是评测的 K）。建议工具候选数 ≥ 召回数量。', 'How to read: Tool Candidate Pool = candidates each tool fetches internally (raising the recall ceiling); TopK = how many are finally shown (also the evaluation K). Keep the pool ≥ TopK.') }}
             </div>
             <div class="cfg-row">
               <label>{{ t('检索模式', 'Mode') }}</label>
@@ -413,6 +463,14 @@ interface EditableStrategy {
   ingestionSteps: EditableIngestStep[]
   agentTools?: Record<string, boolean>
   maxRounds?: number
+  /** Agentic：检索工具内部候选池（留空=跟随处理配置；可为不同策略设不同值做消融） */
+  agentToolTopN?: number
+  /** Agentic：最终重排权重（留空=跟随处理配置） */
+  agentSubQueryWeight?: number
+  /** Agentic：检索暖启动（默认 true） */
+  agentWarmStart?: boolean
+  /** Agentic：模型未调工具时自动补检索（默认 true） */
+  agentFallback?: boolean
   /** Agentic（智能路由）自定义系统提示词；留空=内置默认 */
   systemPrompt?: string
   channels?: Record<string, boolean>
@@ -582,6 +640,14 @@ const agentIngestionSteps = computed(() => {
   return deriveAgentIngestion(sel.agentTools || {})
 })
 
+// 切换 Agentic 布尔开关（模板里不做类型断言，统一走这里）
+function toggleAgentFlag(key: 'agentWarmStart' | 'agentFallback', e: Event) {
+  const s = selected.value
+  if (!s) return
+  ;(s as any)[key] = !!(e.target as HTMLInputElement).checked
+  touch()
+}
+
 // ===== Agentic 系统提示词（可自定义；留空回退内置默认，默认文案随界面语言切换） =====
 const defaultAgentPrompt = computed(() => getDefaultAgentSystemPrompt(props.store?.locales === 'zh' ? 'zh' : 'en'))
 function fillDefaultAgentPrompt() {
@@ -749,6 +815,10 @@ function load() {
     })),
     agentTools: ensureAgentTools((s as any).agentTools),
     maxRounds: s.kind === 'agentic' ? (s.maxRounds ?? 5) : undefined,
+    agentToolTopN: s.kind === 'agentic' ? ((s as any).agentToolTopN || undefined) : undefined,
+    agentSubQueryWeight: s.kind === 'agentic' ? ((s as any).agentSubQueryWeight ?? undefined) : undefined,
+    agentWarmStart: s.kind === 'agentic' ? ((s as any).agentWarmStart !== false) : undefined,
+    agentFallback: s.kind === 'agentic' ? ((s as any).agentFallback !== false) : undefined,
     systemPrompt: (s as any).systemPrompt || undefined,
     channels: ensureChannels((s as any).channels),
     channelTopN: { ...((s as any).channelTopN || {}) },
@@ -784,6 +854,10 @@ function saveDeltas() {
         s.enabled === false ||
         JSON.stringify(s.agentTools || {}) !== JSON.stringify((b as any).agentTools || {}) ||
         (s.kind === 'agentic' && (s.maxRounds ?? 5) !== ((b as any).maxRounds ?? 5)) ||
+        (s.kind === 'agentic' && (s.agentToolTopN || 0) !== ((b as any).agentToolTopN || 0)) ||
+        (s.kind === 'agentic' && (s.agentSubQueryWeight ?? null) !== ((b as any).agentSubQueryWeight ?? null)) ||
+        (s.kind === 'agentic' && (s.agentWarmStart !== false) !== ((b as any).agentWarmStart !== false)) ||
+        (s.kind === 'agentic' && (s.agentFallback !== false) !== ((b as any).agentFallback !== false)) ||
         (s.kind === 'agentic' && (s.systemPrompt || '') !== ((b as any).systemPrompt || '')) ||
         JSON.stringify(s.channels || {}) !== JSON.stringify((b as any).channels || {}) ||
         JSON.stringify(s.channelTopN || {}) !== JSON.stringify((b as any).channelTopN || {}) ||
@@ -840,6 +914,10 @@ function resetStrategy(id: string) {
   }))
   s.agentTools = ensureAgentTools((builtin as any).agentTools)
   s.maxRounds = (builtin as any).maxRounds ?? 5
+  s.agentToolTopN = (builtin as any).agentToolTopN || undefined
+  s.agentSubQueryWeight = (builtin as any).agentSubQueryWeight ?? undefined
+  s.agentWarmStart = (builtin as any).agentWarmStart !== false
+  s.agentFallback = (builtin as any).agentFallback !== false
   s.systemPrompt = (builtin as any).systemPrompt || undefined
   s.channels = ensureChannels((builtin as any).channels)
   s.channelTopN = { ...((builtin as any).channelTopN || {}) }
@@ -1229,6 +1307,8 @@ onMounted(() => { load(); syncResetHeight() })
 }
 .sc-mini-btn:hover:not(:disabled) { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
 .sc-mini-btn:disabled { opacity: .5; cursor: default; }
+.sc-warn-inline { color: #FF9800; font-size: 11px; }
+.cfg-range-text { font-size: 10px; color: var(--fontColor); opacity: .8; min-width: 28px; }
 .sc-prompt-area {
   width: 100%; box-sizing: border-box; margin-top: 5px; padding: 5px 6px;
   font-size: 11px; line-height: 1.5; resize: vertical; min-height: 90px; max-height: 40vh;
