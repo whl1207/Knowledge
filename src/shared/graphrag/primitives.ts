@@ -28,24 +28,71 @@ export function clearEntityVectorCache() {
   entityVectorCache.clear()
 }
 
-/** 预热实体向量缓存：批量测试前一次性嵌入全部实体的 name/description 向量，避免首问逐实体嵌入 */
+/** 实体向量缓存命中统计（预热项状态展示用）：已缓存 / 实体总数 */
+export function entityVectorCacheStats(entities: Array<{ name: string; description?: string }>): { cached: number; total: number } {
+  let cached = 0
+  let total = 0
+  for (const e of entities) {
+    if (!e?.name) continue
+    total++
+    const cacheKey = (e.description ? `${e.name}\u0000${e.description}` : e.name).toLowerCase()
+    if (entityVectorCache.has(cacheKey)) cached++
+  }
+  return { cached, total }
+}
+
+/** 预热实体向量缓存：批量测试前一次性嵌入全部实体的 name/description 向量，避免首问逐实体嵌入。
+ *  分批批量嵌入（32 条/次）：实体多时不再逐实体一次请求 */
 export async function prewarmEntityVectors(
   entities: Array<{ name: string; description?: string }>,
   embed: (text: string) => Promise<number[] | undefined>,
+  embedBatch?: (texts: string[]) => Promise<(number[] | undefined)[]>,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<number> {
-  let n = 0
+  const todo: Array<{ cacheKey: string; text: string }> = []
   for (const e of entities) {
     if (!e?.name) continue
     const cacheKey = (e.description ? `${e.name}\u0000${e.description}` : e.name).toLowerCase()
     if (entityVectorCache.has(cacheKey)) continue
-    const vec = await embed(e.description ? `${e.name} ${e.description}` : e.name)
-    entityVectorCache.set(cacheKey, vec)
-    n++
+    todo.push({ cacheKey, text: e.description ? `${e.name} ${e.description}` : e.name })
+  }
+  const BATCH = 32
+  let n = 0
+  for (let start = 0; start < todo.length; start += BATCH) {
+    const chunk = todo.slice(start, start + BATCH)
+    const vecs = await embedMany({ embed, embedBatch }, chunk.map(x => x.text))
+    chunk.forEach((x, i) => {
+      const v = vecs[i]
+      if (v && v.length) { entityVectorCache.set(x.cacheKey, v); n++ }
+    })
+    onProgress?.(Math.min(start + BATCH, todo.length), todo.length)
   }
   return n
 }
 
 /** 查询向量缓存：一次 runStrategy 内 entity_link / dense_score / file_score 共享同一查询嵌入，避免重复嵌入 */
+/**
+ * 批量嵌入：优先用 services.embedBatch（一次请求多条），失败或未提供时退化为逐条 embed。
+ * 用途：把「逐条调用嵌入模型」的循环合并成少数几次请求，既省往返也避免与对话调用交替（模型反复换载）。
+ */
+async function embedMany(
+  services: { embed(text: string): Promise<number[] | undefined>; embedBatch?(texts: string[]): Promise<(number[] | undefined)[]> },
+  texts: string[],
+): Promise<(number[] | undefined)[]> {
+  if (texts.length === 0) return []
+  if (services.embedBatch) {
+    try {
+      const out = await services.embedBatch(texts)
+      if (out && out.length === texts.length) return out
+    } catch { /* 批量失败 → 逐条兜底 */ }
+  }
+  const out: (number[] | undefined)[] = []
+  for (const t of texts) {
+    try { out.push(await services.embed(t)) } catch { out.push(undefined) }
+  }
+  return out
+}
+
 async function embedQuery(ctx: RetrievalContext): Promise<number[] | undefined> {
   const cache = (ctx as any)._queryVecCache as Map<string, number[] | undefined> | undefined
   if (cache?.has(ctx.query)) return cache.get(ctx.query)
@@ -107,10 +154,15 @@ export interface RetrievalConfig {
   think?: boolean
   /** Agentic：最终重排时融合子查询检索分数的权重（0=只用原始问题，1=只用子查询分数） */
   agentSubQueryWeight?: number
+  /** 实体链接是否允许 LLM 兜底匹配（默认允许）。关闭后本体增强全程只用嵌入模型，
+   *  避免 LM Studio 等单服务下每轮查询都因「对话兜底调用」与嵌入调用交替而反复换载模型（评测提速明显）。 */
+  entityLinkLlm?: boolean
 }
 
 export interface RetrievalServices {
   embed(text: string): Promise<number[] | undefined>
+  /** 批量嵌入（可选）：一次请求嵌入多条文本，避免逐条 HTTP 往返（未提供时调用方退化为逐条 embed） */
+  embedBatch?(texts: string[]): Promise<(number[] | undefined)[]>
   /** 普通对话（非流式），返回文本 */
   chat(messages: any[]): Promise<string>
   /** 流式对话，逐块回调 */
@@ -208,6 +260,8 @@ export interface IngestionContext {
   }
   services: {
     embed(text: string): Promise<number[] | undefined>
+    /** 批量嵌入（可选）：一次请求嵌入多条文本（未提供时调用方退化为逐条 embed） */
+    embedBatch?(texts: string[]): Promise<(number[] | undefined)[]>
     streamChat(messages: any[], onChunk: (chunk: string) => void): Promise<string>
     /** 把推理摘要回写到文件（可选；提供后 summarize_file 会把摘要写回 YAML frontmatter 实现持久化） */
     syncFileSummary?(filePath: string, summary: string): Promise<boolean>
@@ -294,6 +348,8 @@ export async function entityLink(ctx: RetrievalContext): Promise<PrimitiveResult
   const { entities, services, config } = ctx
   const matched: MatchedEntity[] = []
   const seen = new Set<string>()
+  // 未构建本体（无实体）：不必匹配，也避免白跑一次 LLM 兜底调用（评测时每题都白调一次对话模型很慢）
+  if (!entities.length) return { matchedEntities: matched }
 
   // 1. 字符串模糊匹配
   try {
@@ -309,18 +365,32 @@ export async function entityLink(ctx: RetrievalContext): Promise<PrimitiveResult
   if (entities.length > 0 && entities.length <= 300) {
     try {
       const qv = await embedQuery(ctx)
+      // 模块级缓存：实体对象每次由 getCurrentOntologyContext() 重建，_vec 不可靠，
+      // 以「name + description」为 key 跨查询共享，避免每个查询对全部实体重新嵌入
+      const cacheKeyOf = (e: any) => (e.description ? `${e.name}\u0000${e.description}` : e.name).toLowerCase()
+      // 2a. 先批量补齐缺缓存的实体向量：一次请求若干条，代替「逐实体一次请求」
+      //     （首批查询由最多 300 次往返降到约 10 次，实体多时差距极大；后续查询命中缓存不再请求）
+      const missing: Array<{ key: string; text: string }> = []
+      for (const e of entities) {
+        const key = cacheKeyOf(e)
+        if ((e as any)._vec || entityVectorCache.has(key)) continue
+        missing.push({ key, text: e.description ? `${e.name} ${e.description}` : e.name })
+      }
+      const BATCH = 32
+      for (let start = 0; start < missing.length; start += BATCH) {
+        const chunk = missing.slice(start, start + BATCH)
+        const vecs = await embedMany(services, chunk.map(x => x.text))
+        chunk.forEach((x, i) => {
+          const v = vecs[i]
+          if (v && v.length) entityVectorCache.set(x.key, v)
+        })
+      }
+      // 2b. 用（缓存中的）实体向量与查询向量算相似度，取 top6
       const candidates: MatchedEntity[] = []
       for (const e of entities) {
-        // 模块级缓存：实体对象每次由 getCurrentOntologyContext() 重建，_vec 不可靠，
-        // 以「name + description」为 key 跨查询共享，避免每个查询对全部实体重新嵌入
-        const cacheKey = (e.description ? `${e.name}\u0000${e.description}` : e.name).toLowerCase()
-        let vec = (e as any)._vec || entityVectorCache.get(cacheKey)
-        if (!vec) {
-          vec = await services.embed(e.description ? `${e.name} ${e.description}` : e.name)
-          entityVectorCache.set(cacheKey, vec)
-          ;(e as any)._vec = vec
-        }
-        if (vec && qv) {
+        const vec = (e as any)._vec || entityVectorCache.get(cacheKeyOf(e))
+        if (!vec) continue
+        if (qv) {
           const sim = services.cosineSimilarity(qv, vec)
           // 阈值从 0.32 放宽到 0.26：提升实体链接覆盖率（配合 boost 的 minBaseScore 门槛抑制假阳性误伤）
           if (sim > 0.26) candidates.push({ name: e.name, confidence: sim })
@@ -334,8 +404,10 @@ export async function entityLink(ctx: RetrievalContext): Promise<PrimitiveResult
   }
 
   // 3. LLM 辅助匹配（携带描述提升语义判断）：零命中或仅有低置信匹配（<0.5）时兜底复核
-  //    语义匹配误命中错误实体（confidence 偏低）时也触发 LLM，避免带着错误实体直接 boost
-  if (config.process && (matched.length === 0 || matched.every(m => m.confidence < 0.5))) {
+  //    语义匹配误命中错误实体（confidence 偏低）时也触发 LLM，避免带着错误实体直接 boost。
+  //    config.entityLinkLlm=false 可整体关闭该兜底：LM Studio 等单服务下，它会让每轮查询都多出一次对话调用，
+  //    与嵌入调用交替触发模型反复换载（批量评测时尤其慢），关掉后本体增强全程只用嵌入模型。
+  if (config.entityLinkLlm !== false && config.process && (matched.length === 0 || matched.every(m => m.confidence < 0.5))) {
     try {
       const entityList = entities.map(e => e.description ? `${e.name}（${e.description.slice(0, 60)}）` : e.name)
       const prompt = buildQueryEntityMatchPrompt({ query: ctx.query, entityNames: entityList, language: config.locale })
@@ -615,12 +687,22 @@ function hashFileBlocks(fileBlocks: any[]): string {
  *   1) 已有摘要 + 向量 + 内容未变（contentHash 匹配）→ 完全复用（skipped++，不重算）
  *   2) 已有摘要文本但缺向量 / 内容已变 → 跳过 LLM，仅对已有摘要向量化（快速补向量）
  *   3) 无摘要 → 用 LLM 生成摘要再向量化（首次全量，慢）
+ * 执行分两阶段：先逐个文件生成摘要（只用对话模型），再统一（分批）嵌入全部摘要 ——
+ * 避免「每文件一次对话、一次嵌入」交替调用，导致 LM Studio 等单服务反复换载对话/嵌入模型。
  * 步骤参数：maxSlices（每文件最多聚合的切片数，默认 200）、maxChars（聚合文本截断，默认 30000 ——
  * 按文件开头顺序聚合切片，保证长文件摘要覆盖前约 30000 字）。
  */
 export async function summarizeFile(
   ctx: IngestionContext,
-  params: { maxSlices?: number; maxChars?: number; reuseExistingSummary?: boolean } = {},
+  params: {
+    maxSlices?: number
+    maxChars?: number
+    reuseExistingSummary?: boolean
+    /** 只生成摘要、不嵌入（摘要向量留到「摘要向量化缓存」再补） */
+    skipEmbed?: boolean
+    /** 只嵌入已有摘要、不调用 LLM 生成（无摘要文本的文件直接跳过） */
+    embedOnly?: boolean
+  } = {},
 ): Promise<{ processed: number; failed: number; skipped?: number }> {
   const { blocks, config, services, onProgress, isCancelled } = ctx
   const fileIndex = ctx.fileIndex
@@ -628,6 +710,8 @@ export async function summarizeFile(
   const maxSlices = params.maxSlices ?? 200
   const maxChars = params.maxChars ?? 30000
   const reuseExistingSummary = params.reuseExistingSummary ?? false
+  const skipEmbed = params.skipEmbed === true
+  const embedOnly = params.embedOnly === true
 
   const byPath = new Map<string, any[]>()
   for (const b of blocks) {
@@ -640,6 +724,8 @@ export async function summarizeFile(
   let failed = 0
   let skipped = 0
   let idx = 0
+  // 阶段一的产出：待嵌入的「文件 → 摘要」清单
+  const plan: Array<{ filePath: string; contentHash: string; summary: string; needWriteBack: boolean }> = []
   for (const [filePath, fileBlocks] of byPath) {
     idx++
     if (isCancelled?.()) return { processed, failed, skipped }
@@ -653,11 +739,13 @@ export async function summarizeFile(
     }
 
     // 已有摘要文本：跳过 LLM 生成，仅对已有摘要向量化（补 vector）。
-    // reuseExistingSummary=true（预热）：只要有摘要就只向量化（即使内容已变）；
+    // reuseExistingSummary=true（预热/仅向量化）：只要有摘要就复用（即使内容已变）；
     // 默认（管线/增量）：仅当内容未变时复用摘要补向量，内容变了则重新生成摘要。
-    const hasSummary = reuseExistingSummary
+    const hasSummary = (reuseExistingSummary || embedOnly)
       ? !!(existing?.content)
       : (!!(existing?.content) && existing.contentHash === contentHash)
+    // 仅向量化模式：没有摘要文本的文件不生成摘要，直接跳过
+    if (!hasSummary && embedOnly) { skipped++; continue }
     let summary = existing?.content || ''
     let fileText = ''
     if (!hasSummary) {
@@ -682,24 +770,51 @@ export async function summarizeFile(
       onProgress?.(`文件摘要: ${idx}/${byPath.size} ${filePath.split(/[\\/]/).pop()}（仅向量化）`)
     }
 
-    try {
-      if (!hasSummary) {
+    // 阶段一：只生成摘要（对话模型），不在此嵌入 —— 嵌入统一放到阶段二
+    if (!hasSummary) {
+      try {
         summary = await services.streamChat(
           [{ role: 'user', content: (config.fileSummaryPrompt || DEFAULT_FILE_SUMMARY_PROMPT) + fileText }],
           () => {},
         )
+      } catch (error) {
+        console.error('summarize_file 生成摘要失败:', filePath, error)
+        failed++
+        continue
       }
-      const vec = await services.embed(summary)
-      fileIndex.set(filePath, { content: summary, vector: vec || undefined, contentHash })
+    }
+    plan.push({ filePath, contentHash, summary, needWriteBack: !hasSummary })
+  }
+
+  // 阶段二：统一（分批）嵌入全部摘要 —— 同一嵌入模型只加载一次，
+  // 不再与对话调用交替，避免 LM Studio 等单服务反复换载模型（skipEmbed 时整段跳过）
+  const EMBED_BATCH = 16
+  const vecs: (number[] | undefined)[] = []
+  if (!skipEmbed) {
+    for (let start = 0; start < plan.length; start += EMBED_BATCH) {
+      if (isCancelled?.()) break
+      const chunk = plan.slice(start, start + EMBED_BATCH)
+      const got = await embedMany(services, chunk.map(p => p.summary))
+      for (let i = 0; i < chunk.length; i++) vecs.push(got[i])
+    }
+  }
+
+  // 阶段三：写入索引；向量缺失时也写入摘要文本（下次只需补向量，不必重新生成摘要）+ 可选 frontmatter 回写
+  for (let i = 0; i < plan.length; i++) {
+    const p = plan[i]
+    const vec = vecs[i]
+    if (!vec && !skipEmbed) console.warn(`文件摘要向量化失败（本次仅写入摘要文本，稍后可再补向量）: ${p.filePath}`)
+    try {
+      fileIndex.set(p.filePath, { content: p.summary, vector: vec || undefined, contentHash: p.contentHash })
       processed++
       // 仅新生成摘要时才回写 frontmatter（仅向量化时文件内容未变，避免误触发增量检测）
-      if (!hasSummary) {
+      if (p.needWriteBack) {
         // 回写文件 frontmatter 实现持久化（可选服务；失败仅记录，不影响主流程）
         try {
-          const ok = await services.syncFileSummary?.(filePath, summary)
-          if (ok === false) console.warn(`文件摘要回写失败: ${filePath}`)
+          const ok = await services.syncFileSummary?.(p.filePath, p.summary)
+          if (ok === false) console.warn(`文件摘要回写失败: ${p.filePath}`)
         } catch (e) {
-          console.warn('文件摘要回写异常:', filePath, e)
+          console.warn('文件摘要回写异常:', p.filePath, e)
         }
       }
     } catch (error) {
@@ -732,20 +847,25 @@ export async function semanticEnhance(ctx: IngestionContext): Promise<{ processe
       cleaned++
     }
   }
-  // 2) 问题语义增强：为缺向量的问题补全向量（问题文本 → 向量）
+  // 2) 问题语义增强：为缺向量的问题补全向量（问题文本 → 向量）。
+  //    分批批量嵌入：一次请求多条（问题常有几百上千条，逐条调用极慢）
   let processed = 0
   let failed = 0
-  const qs = questions || []
-  for (const q of qs) {
-    if (isCancelled?.()) break
-    if (q.status === 'merged') continue
+  const pending = (questions || []).filter((q: any) => {
+    if (!q || q.status === 'merged') return false
     const t = q.text ? String(q.text).trim() : ''
-    if (!t) continue
-    if (q.qVector && q.qVector.length) continue
-    try {
-      const v = await services.embed(t)
-      if (v && v.length) { q.qVector = v; processed++ }
-    } catch (e) { console.warn('问题语义增强失败:', String(t).slice(0, 40), e); failed++ }
+    return !!t && !(q.qVector && q.qVector.length)
+  })
+  const BATCH = 16
+  for (let start = 0; start < pending.length; start += BATCH) {
+    if (isCancelled?.()) break
+    const chunk = pending.slice(start, start + BATCH)
+    const vecs = await embedMany(services, chunk.map((q: any) => String(q.text).trim()))
+    chunk.forEach((q: any, i: number) => {
+      const v = vecs[i]
+      if (v && v.length) { q.qVector = v; processed++ } else failed++
+    })
+    if (pending.length > BATCH) onProgress?.(`问题语义增强: ${Math.min(start + BATCH, pending.length)}/${pending.length}`)
   }
   if (processed > 0) {
     onProgress?.(`问题语义增强：为 ${processed} 个问题生成向量（失败 ${failed}）`)

@@ -30,44 +30,38 @@
       <div class="pd-actions">
         <div class="button small" @click="goManage"><i class="fa fa-puzzle-piece"></i> {{ zh ? '去「管理」安装 / 启用' : 'Go to Manage' }}</div>
         <div class="button small" @click="openDir"><i class="fa fa-folder-open-o"></i> {{ zh ? '打开插件目录' : 'Open plugins folder' }}</div>
-        <div class="button small" @click="copy(usage, 'usage')"><i class="fa fa-copy"></i> {{ zh ? '复制「如何使用插件」' : 'Copy “How to use plugins”' }}</div>
-        <div class="button small" @click="copy(minimal, 'minimal')"><i class="fa fa-copy"></i> {{ zh ? '复制最小示例' : 'Copy minimal example' }}</div>
       </div>
 
-      <!-- 如何使用插件 -->
-      <div class="pd-block">
-        <div class="pd-block-head">
-          <div class="pd-block-title"><i class="fa fa-play-circle-o"></i> {{ zh ? '如何使用插件' : 'How to use plugins' }}</div>
-          <div class="button small" @click="copy(usage, 'usage')">{{ copiedKey === 'usage' ? (zh ? '已复制' : 'Copied') : zh ? '复制' : 'Copy' }}</div>
-        </div>
-        <pre class="pd-pre">{{ usage }}</pre>
+      <!-- 栏目页签：一个栏目一个页签，正文整块展示（不再每个栏目内部各挂一条滚动条） -->
+      <div class="pd-tabs" role="tablist">
+        <button
+          v-for="t in tabs"
+          :key="t.key"
+          class="pd-tab"
+          :class="{ active: activeTab === t.key }"
+          role="tab"
+          :aria-selected="activeTab === t.key"
+          @click="activeTab = t.key"
+        >
+          <i :class="t.icon"></i><span>{{ zh ? t.titleZh : t.titleEn }}</span>
+        </button>
       </div>
 
-      <!-- 最小示例 -->
-      <div class="pd-block">
-        <div class="pd-block-head">
-          <div class="pd-block-title"><i class="fa fa-file-code-o"></i> {{ zh ? '从零开始的最小插件（照抄即可跑）' : 'Minimal plugin from scratch' }}</div>
-          <div class="button small" @click="copy(minimal, 'minimal')">{{ copiedKey === 'minimal' ? (zh ? '已复制' : 'Copied') : zh ? '复制' : 'Copy' }}</div>
-        </div>
-        <pre class="pd-pre">{{ minimal }}</pre>
-      </div>
-
-      <!-- 各段指令 -->
-      <div v-for="s in sections" :key="s.key" class="pd-block">
-        <div class="pd-block-head">
-          <div class="pd-block-title"><i class="fa fa-magic"></i> {{ zh ? s.titleZh : s.titleEn }}</div>
-          <div class="button small" @click="copy(zh ? s.bodyZh : s.bodyEn, s.key)">
-            {{ copiedKey === s.key ? (zh ? '已复制' : 'Copied') : zh ? '复制指令' : 'Copy prompt' }}
+      <div class="pd-panel">
+        <div class="pd-panel-head">
+          <div class="pd-panel-title">{{ zh ? currentTab.titleZh : currentTab.titleEn }}</div>
+          <div v-if="currentTab.text" class="button small" @click="copy(currentTab.text, currentTab.key)">
+            <i class="fa fa-copy"></i> {{ copiedKey === currentTab.key ? (zh ? '已复制' : 'Copied') : zh ? '复制全文' : 'Copy all' }}
           </div>
         </div>
-        <div class="pd-block-desc">{{ zh ? s.descZh : s.descEn }}</div>
-        <pre class="pd-pre">{{ zh ? s.bodyZh : s.bodyEn }}</pre>
-      </div>
 
-      <!-- 速查表 -->
-      <div class="pd-block">
-        <div class="pd-block-title"><i class="fa fa-table"></i> {{ zh ? '清单 / 槽位 / API 速查' : 'Manifest, slots and API cheat sheet' }}</div>
-        <table class="pd-table">
+        <div v-if="currentTab.desc" class="pd-block-desc">{{ currentTab.desc }}</div>
+
+        <!-- 文本类栏目：如何使用插件 / 最小示例 / 各段指令模板 -->
+        <pre v-if="currentTab.text" class="pd-pre">{{ currentTab.text }}</pre>
+
+        <!-- 速查表 -->
+        <table v-else-if="currentTab.key === 'facts'" class="pd-table">
           <tbody>
             <tr v-for="f in facts" :key="f.name">
               <td class="pd-table-name"><code>{{ f.name }}</code></td>
@@ -75,14 +69,13 @@
             </tr>
           </tbody>
         </table>
-      </div>
 
-      <!-- 常见问题 -->
-      <div class="pd-block">
-        <div class="pd-block-title"><i class="fa fa-question-circle-o"></i> {{ zh ? '常见问题' : 'FAQ' }}</div>
-        <div v-for="(f, i) in faq" :key="i" class="pd-faq">
-          <div class="pd-faq-q"><i class="fa fa-angle-right"></i> {{ zh ? f.qZh : f.qEn }}</div>
-          <div class="pd-faq-a">{{ zh ? f.aZh : f.aEn }}</div>
+        <!-- 常见问题 -->
+        <div v-else class="pd-faq-list">
+          <div v-for="(f, i) in faq" :key="i" class="pd-faq">
+            <div class="pd-faq-q"><i class="fa fa-angle-right"></i> {{ zh ? f.qZh : f.qEn }}</div>
+            <div class="pd-faq-a">{{ zh ? f.aZh : f.aEn }}</div>
+          </div>
         </div>
       </div>
     </div>
@@ -110,6 +103,55 @@ const facts = PLUGIN_DEV_FACTS
 const faq = PLUGIN_DEV_FAQ
 const usage = computed(() => (zh.value ? PLUGIN_DEV_USAGE_ZH : PLUGIN_DEV_USAGE_EN))
 const minimal = computed(() => (zh.value ? PLUGIN_DEV_MINIMAL_ZH : PLUGIN_DEV_MINIMAL_EN))
+
+/** 页签：使用说明 / 最小示例 / 各段指令模板 / 速查表 / 常见问题 */
+interface DevTab {
+  key: string
+  icon: string
+  titleZh: string
+  titleEn: string
+  /** 已按当前语言取好的说明与正文（速查表 / FAQ 走模板分支，两者都没有） */
+  desc?: string
+  text?: string
+}
+
+const tabs = computed<DevTab[]>(() => [
+  {
+    key: 'usage',
+    icon: 'fa fa-play-circle-o',
+    titleZh: '如何使用插件',
+    titleEn: 'How to use plugins',
+    text: usage.value,
+  },
+  {
+    key: 'minimal',
+    icon: 'fa fa-file-code-o',
+    titleZh: '从零开始的最小插件',
+    titleEn: 'Minimal plugin from scratch',
+    text: minimal.value,
+  },
+  ...sections.map((s) => ({
+    key: s.key,
+    icon: 'fa fa-magic',
+    titleZh: s.tabZh,
+    titleEn: s.tabEn,
+    desc: zh.value ? s.descZh : s.descEn,
+    text: zh.value ? s.bodyZh : s.bodyEn,
+  })),
+  {
+    key: 'facts',
+    icon: 'fa fa-table',
+    titleZh: '清单 / 槽位 / API 速查',
+    titleEn: 'Manifest, slots and API cheat sheet',
+    desc: zh.value
+      ? '写插件时对照这张表：清单字段、槽位名与宿主 API。'
+      : 'Checklist while writing a plugin: manifest fields, slot ids and the host API.',
+  },
+  { key: 'faq', icon: 'fa fa-question-circle-o', titleZh: '常见问题', titleEn: 'FAQ' },
+])
+
+const activeTab = ref('usage')
+const currentTab = computed<DevTab>(() => tabs.value.find((t) => t.key === activeTab.value) || tabs.value[0])
 
 /** 刚复制成功的那一块（按钮上给个「已复制」反馈） */
 const copiedKey = ref('')
@@ -214,24 +256,56 @@ const copy = async (text: string, key: string) => {
   flex-wrap: wrap;
   margin-top: 10px;
 }
-.pd-block {
+/* 栏目页签：一行排开（放不下自动换行），当前页签高亮 */
+.pd-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   margin-top: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--borderColor);
+}
+.pd-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.pd-tab:hover {
+  background: color-mix(in srgb, var(--fontColor) 6%, transparent);
+}
+.pd-tab.active {
+  color: var(--fontActiveColor);
+  background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
+  border-color: color-mix(in srgb, var(--fontActiveColor) 40%, transparent);
+}
+.pd-panel {
+  margin-top: 10px;
   border: 1px solid var(--borderColor);
   border-radius: 5px;
   padding: 8px 10px;
   background: var(--menuColor);
 }
-.pd-block-head {
+.pd-panel-head {
   display: flex;
   align-items: center;
   gap: 8px;
   justify-content: space-between;
 }
-.pd-block-title {
+.pd-panel-title {
   font-size: 13px;
   font-weight: 600;
 }
-.pd-block-title i {
+.pd-panel-title i {
   color: var(--fontActiveColor);
   margin-right: 4px;
 }
@@ -244,15 +318,13 @@ const copy = async (text: string, key: string) => {
 .pd-pre {
   margin: 8px 0 0 0;
   padding: 8px;
-  max-height: 260px;
-  overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 11px;
   line-height: 1.65;
   font-family: Consolas, 'Courier New', monospace;
   color: var(--fontColor);
-  background: var(--menuActiveColor);
+  background: var(--menuColor);
   border: 1px solid var(--borderColor);
   border-radius: 4px;
 }

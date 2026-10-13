@@ -474,6 +474,12 @@ export function buildRetrievalServices(spec: KbModelSpec, deps: KbServicesDeps =
       const v = await embed(es, text)
       return v?.[0]
     },
+    // 批量嵌入：一次请求多条（检索侧实体链接等场景避免逐条往返）
+    embedBatch: async (texts: string[]): Promise<(number[] | undefined)[]> => {
+      if (!texts.length) return []
+      const v = await embed(es, texts)
+      return texts.map((_, i) => v?.[i])
+    },
     chat: async (messages: any[]): Promise<string> => chat(spec, messages),
     streamChat: async (messages: any[], onChunk: (c: string) => void): Promise<string> =>
       streamChat(spec, messages, onChunk),
@@ -490,6 +496,12 @@ export function buildIngestionServices(spec: KbModelSpec, deps: KbServicesDeps =
     embed: async (text: string): Promise<number[] | undefined> => {
       const v = await embed(spec, text)
       return v?.[0]
+    },
+    // 批量嵌入：一次请求多条（文件摘要 / 问题向量等批量补全时避免逐条往返）
+    embedBatch: async (texts: string[]): Promise<(number[] | undefined)[]> => {
+      if (!texts.length) return []
+      const v = await embed(spec, texts)
+      return texts.map((_, i) => v?.[i])
     },
     streamChat: async (messages: any[], onChunk: (c: string) => void): Promise<string> =>
       streamChat(spec, messages, onChunk),

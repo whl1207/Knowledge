@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx'
 import {usestore} from '@/store'
 import { runStrategy, getEnabledStrategies } from '@/shared/graphrag/strategy'
 import { computeBM25Score } from '@/shared/graphrag/search'
-import { INGESTION_PRIMITIVES, prewarmEntityVectors } from '@/shared/graphrag/primitives'
+import { INGESTION_PRIMITIVES, prewarmEntityVectors, entityVectorCacheStats } from '@/shared/graphrag/primitives'
 import type { RetrievalContext, IngestionContext } from '@/shared/graphrag/primitives'
 import { cosineSimilarity } from '@/shared/kbRetrieval'
 import * as kbAi from '@/shared/kbAiClient'
@@ -56,6 +56,12 @@ interface Props {
   ensureSliceVectors?: (onProgress: (msg: string) => void) => Promise<boolean>
   // 测试标签页「评测用嵌入模型」切换（留空=跟随设置中的嵌入模型）；返回 false 表示用户取消
   onTestEmbedChange?: (name: string) => Promise<boolean> | boolean | void
+  // 预热「问题向量缓存」：补齐未向量化问题（提取问题默认不再即时向量化），返回补全条数
+  ensureQuestionVectors?: (onProgress?: (msg: string) => void) => Promise<number>
+  // 问题库问题数（用于判断「问题向量缓存」预热项是否可用）
+  questionBankCount?: number
+  // 未向量化的问题数（预热项「问题向量缓存」的已就绪判断）
+  questionVectorMissing?: number
 }
 
 // 检索策略类型（与 QA 标签页的检索方式对齐，策略可配置）
@@ -611,6 +617,8 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
       bm25B: props.model.bm25B,
       searchNum,
       think: props.model.think,
+      // 实体链接 LLM 兜底开关（关闭后本体增强评测全程只用嵌入模型，不再逐题换载对话模型）
+      entityLinkLlm: props.model.entityLinkLlm !== false,
     },
     services: kbAi.buildRetrievalServices(kbSpec(), {
       cosineSimilarity,
@@ -1039,8 +1047,10 @@ const onTestEmbedModelChange = async () => {
 /** 模型列表为空/来源切换后，从当前 AI 来源重新拉取（无需进入设置） */
 const refreshEmbedModels = () => { props.getModel?.() }
 
-// ===== 批量测试面板：预热配置（向量化准备，时间单独计时、不计入检索） =====
-const prewarm = reactive({ file: false, entity: false, community: false })
+// ===== 批量测试面板：预热配置（摘要生成 + 各类向量缓存，时间单独计时、不计入检索） =====
+const prewarm = reactive({
+  summary: false, summaryVec: false, sliceVec: false, questionVec: false, entity: false, community: false,
+})
 const prewarmTimes = ref<Record<string, number>>({})
 const prewarmTotalMs = ref(0)
 const prewarmRunning = ref(false)
@@ -1050,21 +1060,108 @@ const prewarmDone = ref(false)
 const prewarmItemStates = reactive<Record<string, { status: 'pending' | 'running' | 'done'; index: number; total: number; detail: string }>>({})
 const prewarmRunningItemKey = ref('')
 
-interface PrewarmItem { key: 'file' | 'entity' | 'community'; label: string; labelEn: string; icon: string }
+interface PrewarmItem { key: 'summary' | 'summaryVec' | 'sliceVec' | 'questionVec' | 'entity' | 'community'; label: string; labelEn: string; icon: string }
+// 预热项：摘要生成与各类向量缓存分开（生成只调对话模型、向量化只调嵌入模型，各自一轮内不换载模型）
 const PREWARM_ITEMS: PrewarmItem[] = [
-  { key: 'file', label: '文件语义增强（摘要向量）', labelEn: 'File semantic enhance (fileIndex)', icon: 'fa-file-text-o' },
-  { key: 'entity', label: '实体向量缓存', labelEn: 'Entity vectorization (cache)', icon: 'fa-cube' },
+  { key: 'summary', label: '批量生成摘要（缺摘要才生成，已有摘要复用）', labelEn: 'Generate file summaries (reuse existing)', icon: 'fa-file-text-o' },
+  { key: 'summaryVec', label: '摘要向量缓存（只嵌入已有摘要，不重新生成）', labelEn: 'Summary vectors (embed existing summaries only)', icon: 'fa-magnet' },
+  { key: 'sliceVec', label: '切片向量缓存（补齐未向量化切片）', labelEn: 'Slice vectors (embed missing slices)', icon: 'fa-cubes' },
+  { key: 'questionVec', label: '问题向量缓存（补齐未向量化问题）', labelEn: 'Question vectors (embed missing questions)', icon: 'fa-question-circle-o' },
+  { key: 'entity', label: '实体向量缓存', labelEn: 'Entity vectors (cache)', icon: 'fa-cube' },
   { key: 'community', label: '社区报告（预生成报告）', labelEn: 'Community reports (pre-generate)', icon: 'fa-sitemap' },
 ]
 
-// 可选预热配置：按当前知识库数据状态过滤（对应数据缺失时该项不可选）。
+/** 知识库实际引用到的文件（切片所属文件；可能是建库时的路径，文件夹改名后与当前列表不同名） */
+const referencedFilePaths = computed(() => {
+  const set = new Set<string>()
+  for (const b of (props.blocks || []) as any[]) if (b?.filePath) set.add(String(b.filePath))
+  return set
+})
+const fileNameOf = (p: string) => String(p || '').replace(/\\/g, '/').split('/').pop() || ''
+
+/** 文件自带摘要（md frontmatter 元信息 / attributes）：按完整路径 + 文件名（同名兜底）建索引 */
+const frontmatterSummaries = computed(() => {
+  const byPath = new Map<string, string>()
+  const byName = new Map<string, string>()
+  for (const f of (props.files || []) as any[]) {
+    if (!f?.path) continue
+    const text = getFileSummaryText(f)
+    if (!text) continue
+    byPath.set(String(f.path), text)
+    const name = fileNameOf(f.path)
+    if (name && !byName.has(name)) byName.set(name, text)
+  }
+  return { byPath, byName }
+})
+
+/** 取某文件（按切片记录的路径）已有的摘要文本：优先索引，其次「同名文件」的自带摘要 */
+const existingSummaryOf = (path: string): string => {
+  const idx = (props.fileIndex as any)?.get?.(path)
+  if (idx?.content) return String(idx.content)
+  const fm = frontmatterSummaries.value
+  return fm.byPath.get(path) || fm.byName.get(fileNameOf(path)) || ''
+}
+
+/** 已有摘要文本的文件数（索引或文件元信息；= 无需再生成的） */
+const summaryTextCount = computed(() => {
+  let n = 0
+  for (const p of referencedFilePaths.value) if (existingSummaryOf(p)) n++
+  return n
+})
+/** 已有摘要向量的文件数（只有索引里的向量可用于检索） */
+const summaryVecCount = computed(() => {
+  let n = 0
+  const m = props.fileIndex as any
+  if (!m?.get) return 0
+  for (const p of referencedFilePaths.value) {
+    const v = m.get(p)
+    if (v?.content && v.vector && v.vector.length) n++
+  }
+  return n
+})
+
+/**
+ * 把「文件自带摘要」（md frontmatter 元信息）导入文件摘要索引：
+ * - 按切片记录的文件路径写入（同名文件也能匹配，兼容「建库后文件夹改名/移动」的情况）；
+ * - 只补摘要文本、不嵌入（向量交给「摘要向量缓存」或策略自动补齐）；
+ * - 导入后「批量生成摘要」会跳过这些文件，不再重复调用大模型。
+ */
+const importFrontmatterSummaries = (): number => {
+  const fi = props.fileIndex as any
+  if (!fi?.set) return 0
+  let n = 0
+  for (const p of referencedFilePaths.value) {
+    if (existingSummaryOf(p) && fi.get(p)?.content) continue // 索引里已有
+    const text = existingSummaryOf(p)
+    if (!text) continue
+    const cur = fi.get(p)
+    fi.set(p, { content: text, vector: cur?.vector, contentHash: cur?.contentHash })
+    n++
+  }
+  return n
+}
+/** 实体向量缓存状态（预热项「实体向量缓存」） */
+const entityVecStats = computed(() => {
+  const entities = props.getCurrentOntologyContext?.()?.entities || []
+  return entityVectorCacheStats(entities)
+})
+
+// 可选预热项：按当前知识库数据状态过滤（对应数据缺失时该项不可选）。
 // 全部不可选（length === 0）时，隐藏工具栏预热按钮 / toggle 与批量面板中的预热说明。
 const availablePrewarmItems = computed(() => {
   const hasFiles = (props.files?.length || 0) > 0
+  const hasSlices = (props.blocks?.length || 0) > 0
+  const hasSummaryText = summaryTextCount.value > 0
+  const hasQuestions = (props.questionBankCount || 0) > 0
   const hasEntities = (props.getCurrentOntologyContext?.()?.entities?.length || 0) > 0
   const hasCommunity = (props.communityResult?.count || 0) > 0 || (props.communityReports?.length || 0) > 0
   return PREWARM_ITEMS.filter(item => {
-    if (item.key === 'file' && !hasFiles) return false
+    // 摘要由切片内容按文件聚合生成，故以「有切片」为准（.kb 加载时 files 列表可能为空）
+    if (item.key === 'summary' && !hasSlices) return false
+    if (item.key === 'summaryVec' && !hasSummaryText) return false
+
+    if (item.key === 'sliceVec' && !hasSlices) return false
+    if (item.key === 'questionVec' && !hasQuestions) return false
     if (item.key === 'entity' && !hasEntities) return false
     if (item.key === 'community' && !hasCommunity) return false
     return true
@@ -1073,6 +1170,68 @@ const availablePrewarmItems = computed(() => {
 
 // 已勾选且可选的预热项（预热实际执行的顺序）
 const prewarmEnabledItems = computed(() => availablePrewarmItems.value.filter(item => prewarm[item.key]))
+
+// 预热浮层开关：所有预热项与状态、进度、耗时都集中在浮层里，工具栏只留一个入口按钮
+const prewarmPanelOpen = ref(false)
+const selectAllPrewarm = (on: boolean) => { for (const it of availablePrewarmItems.value) prewarm[it.key] = on }
+
+/**
+ * 预热项「已就绪」判断：对应数据（摘要 / 向量）已齐备 → 无需再跑，执行时会直接跳过。
+ * 用于按钮配色（就绪用 fontActiveColor）与提示文案。
+ */
+const prewarmReady = (key: string): boolean => {
+  switch (key) {
+    case 'summary':
+      return referencedFilePaths.value.size > 0 && summaryTextCount.value >= referencedFilePaths.value.size
+    case 'summaryVec':
+      return summaryTextCount.value > 0 && summaryVecCount.value >= summaryTextCount.value
+    case 'sliceVec':
+      return (props.blocks?.length || 0) > 0 && missingSliceVectorCount.value === 0
+    case 'questionVec':
+      return (props.questionBankCount || 0) > 0 && (props.questionVectorMissing ?? 1) === 0
+    case 'entity': {
+      const s = entityVecStats.value
+      return s.total > 0 && s.cached >= s.total
+    }
+    case 'community': {
+      const total = props.communityResult?.count || 0
+      return total > 0 && (props.communityReports?.length || 0) >= total
+    }
+    default:
+      return false
+  }
+}
+
+/** 就绪状态摘要（按钮 title 后缀：已就绪 / 还有多少待处理） */
+const prewarmStatusText = (key: string): string => {
+  const zh = store.locales == 'zh'
+  if (prewarmReady(key)) return zh ? '✅ 已就绪（执行时会跳过，不重复生成）' : '✅ Ready (skipped on run)'
+  switch (key) {
+    case 'summary': {
+      const miss = Math.max(0, referencedFilePaths.value.size - summaryTextCount.value)
+      return zh ? `待生成摘要：${miss} 个文件` : `${miss} file(s) need summaries`
+    }
+    case 'summaryVec': {
+      const miss = Math.max(0, summaryTextCount.value - summaryVecCount.value)
+      return zh ? `待向量化摘要：${miss} 个` : `${miss} summary vector(s) missing`
+    }
+    case 'sliceVec':
+      return zh ? `待向量化切片：${missingSliceVectorCount.value} 个` : `${missingSliceVectorCount.value} slice vector(s) missing`
+    case 'questionVec':
+      return zh ? `待向量化问题：${props.questionVectorMissing ?? 0} 条` : `${props.questionVectorMissing ?? 0} question vector(s) missing`
+    case 'entity': {
+      const s = entityVecStats.value
+      return zh ? `待缓存实体向量：${Math.max(0, s.total - s.cached)} 个` : `${Math.max(0, s.total - s.cached)} entity vector(s) missing`
+    }
+    case 'community': {
+      const total = props.communityResult?.count || 0
+      const miss = Math.max(0, total - (props.communityReports?.length || 0))
+      return zh ? `待生成报告：${miss} 份` : `${miss} report(s) missing`
+    }
+    default:
+      return ''
+  }
+}
 
 // 预热单项进度百分比（0-100，无总量时返回 0）
 const prewarmPct = (key: string): number => {
@@ -1100,6 +1259,7 @@ const runPrewarm = async () => {
   const started = performance.now()
   const ingestServices = kbAi.buildIngestionServices(kbSpec())
   const embedFn = async (text: string) => ingestServices.embed(text)
+  const embedBatchFn = async (texts: string[]) => ingestServices.embedBatch(texts)
   const streamChatFn = async (messages: any[], onChunk: (c: string) => void) =>
     ingestServices.streamChat(messages, onChunk)
   // 标记当前处理项；原语 onProgress 回调更新该项的 index/total/detail
@@ -1110,6 +1270,17 @@ const runPrewarm = async () => {
     if (m) { st.index = +m[1]; st.total = +m[2] }
     st.detail = msg
   }
+  // summarize_file 的摄取上下文（摘要生成 / 摘要向量缓存共用）
+  const buildSummaryCtx = (key: string): IngestionContext => ({
+    blocks: props.blocks as any,
+    config: { url: props.model.url, embed: props.model.embed, chat: props.model.chat, process: props.model.process, processPrompt: props.model.processPrompt, think: props.model.think },
+    services: { embed: embedFn, embedBatch: embedBatchFn, streamChat: streamChatFn },
+    fileIndex: props.fileIndex as any,
+    onProgress: onItemProgress(key),
+    isCancelled: () => false,
+  })
+  // 先把 md 元信息（frontmatter 摘要）导入文件摘要索引：已有摘要的文件不会被重新生成
+  const importedCount = importFrontmatterSummaries()
 
   try {
     for (const item of items) {
@@ -1118,32 +1289,34 @@ const runPrewarm = async () => {
       prewarmRunningItemKey.value = key
       prewarmItemStates[key].status = 'running'
       try {
-        if (key === 'file') {
-          const ctx: IngestionContext = {
-            blocks: props.blocks as any,
-            config: { url: props.model.url, embed: props.model.embed, chat: props.model.chat, process: props.model.process, processPrompt: props.model.processPrompt, think: props.model.think },
-            services: { embed: embedFn, streamChat: streamChatFn },
-            fileIndex: props.fileIndex as any,
-            onProgress: onItemProgress(key),
-            isCancelled: () => false,
-          }
-          const fsRaw = await INGESTION_PRIMITIVES.summarize_file(ctx, { reuseExistingSummary: true })
-          const fs = fsRaw as { processed: number; failed: number; skipped?: number }
-          const st = prewarmItemStates.file
-          if (st) st.detail = `文件摘要: 复用 ${fs.skipped ?? 0} / 新增 ${fs.processed} / 失败 ${fs.failed}`
+        if (key === 'summary') {
+          // 只生成缺失的摘要（已有摘要一律复用，不重新生成），不在本项里向量化
+          const r = await INGESTION_PRIMITIVES.summarize_file(buildSummaryCtx(key), { reuseExistingSummary: true, skipEmbed: true }) as { processed: number; failed: number; skipped?: number }
+          const st = prewarmItemStates.summary
+          if (st) st.detail = `摘要生成: 复用 ${r.skipped ?? 0}${importedCount ? `（含文件元信息 ${importedCount}）` : ''} / 新增 ${r.processed} / 失败 ${r.failed}`
+        } else if (key === 'summaryVec') {
+          // 只嵌入已有摘要文本，不调用 LLM 生成（无摘要的文件跳过）
+          const r = await INGESTION_PRIMITIVES.summarize_file(buildSummaryCtx(key), { embedOnly: true }) as { processed: number; failed: number; skipped?: number }
+          const st = prewarmItemStates.summaryVec
+          if (st) st.detail = `摘要向量: 已嵌入 ${r.processed} / 无摘要跳过 ${r.skipped ?? 0} / 失败 ${r.failed}`
+        } else if (key === 'sliceVec') {
+          // 切片向量缓存：补齐未向量化切片（与评测前自动补齐同一路径，精简模式 .kb 必需）
+          const st = prewarmItemStates.sliceVec
+          if (st) st.detail = '正在补齐切片向量...'
+          const ok = await props.ensureSliceVectors?.((msg) => onItemProgress(key)(msg))
+          if (st) st.detail = ok ? '切片向量已就绪' : '切片向量补齐未完成（检查嵌入模型配置）'
+        } else if (key === 'questionVec') {
+          // 问题向量缓存：补齐未向量化问题（Q 增强通道数据源；提取问题默认不再即时向量化）
+          const st = prewarmItemStates.questionVec
+          if (st) st.detail = '正在补齐问题向量...'
+          const n = await props.ensureQuestionVectors?.((msg) => onItemProgress(key)(msg))
+          if (st) st.detail = `问题向量: 已补全 ${n ?? 0} 条`
         } else if (key === 'entity') {
           const entities = props.getCurrentOntologyContext?.()?.entities || []
-          const total = entities.length
-          let done = 0
-          // prewarmEntityVectors 无回调，包装 embed 逐实体计数
-          const entityEmbed = async (text: string) => {
-            const v = await embedFn(text)
-            done++
+          await prewarmEntityVectors(entities, embedFn, embedBatchFn, (done, total) => {
             const st = prewarmItemStates.entity
             if (st) { st.index = done; st.total = total; st.detail = `实体向量化: ${done}/${total}` }
-            return v
-          }
-          await prewarmEntityVectors(entities, entityEmbed)
+          })
         } else if (key === 'community') {
           // ensureCommunityReports 无逐条进度，给出提示（父组件底部状态栏会显示报告进度）
           prewarmItemStates.community.detail = store.locales=='zh' ? '社区报告生成中（进度见底部状态栏）' : 'Generating community reports (see status bar)'
@@ -1167,59 +1340,57 @@ const runPrewarm = async () => {
 // （仅 embed、不调用 LLM 生成）。本体 / 社区 / 问题向量等较重管线由父级建库时实施，这里不做隐式生成模型调用。
 let _fileWarmFailed = false
 const ensureStrategyChannelsReady = async (algoIds?: string[]) => {
-  const fileMap = props.fileIndex as any
-  if (fileMap && fileMap.size > 0) return // 已就绪：永不需补齐
-  // 仅当「本次要测试的策略」本身用到 file_score 才自动补齐文件摘要，
-  // 避免单测相似度等纯切片策略也被其它启用策略（文件增强/本体/多跳）的文件依赖误触发生成摘要
+  // 仅当「本次要测试的策略」本身用到 file_score 才自动补齐文件摘要向量，
+  // 避免单测相似度等纯切片策略也被其它启用策略（文件增强/本体/多跳）的文件依赖误触发
   const defs = (algoIds && algoIds.length)
     ? getEnabledStrategies().filter(d => algoIds.includes(d.id))
     : getEnabledStrategies()
   const needFile = defs.some((def: any) =>
     (def?.steps || []).some((s: any) => s?.primitive === 'file_score'))
   if (!needFile) return
+  if (prewarmReady('summaryVec')) return // 已有摘要的向量均已就绪，无需补齐
   if (_fileWarmFailed) return // 已尝试补齐但失败，本次会话不再重复打扰
   _fileWarmFailed = true
-  // 文件本身自带摘要（markdown frontmatter / attributes）→ 不调用 LLM 重新生成，仅收集已有摘要文本待向量化
-  const targets: Array<{ path: string; text: string }> = []
-  const seenPaths = new Set<string>()
-  for (const f of props.files || []) {
-    if (!f?.path || seenPaths.has(f.path)) continue
-    const text = getFileSummaryText(f)
-    if (text) { seenPaths.add(f.path); targets.push({ path: f.path, text }) }
-  }
-  if (targets.length === 0) return // 库中无自带摘要的文件 → 无可向量化内容
+  // 先把「文件自带摘要」（markdown frontmatter 元信息 / attributes）导入索引（按切片路径 + 同名兜底），
+  // 再只对「已有摘要但缺向量」的文件统一嵌入：不调用 LLM 生成摘要
+  importFrontmatterSummaries()
+  if (summaryTextCount.value === 0) return // 库中无任何摘要文本 → 无可向量化内容
+  const total = summaryTextCount.value
   prewarmRunning.value = true
-  prewarmRunningItemKey.value = 'file'
-  prewarmItemStates.file = { status: 'running', index: 0, total: targets.length, detail: '' }
+  prewarmRunningItemKey.value = 'summaryVec'
+  prewarmItemStates.summaryVec = { status: 'running', index: 0, total, detail: '' }
   // 提示走底部状态栏（updateLiveState），便于跨视图看到文件摘要向量化的进度
   emit('updateLiveState', store.locales=='zh'
-    ? `文件摘要向量化（文件增强通道）0/${targets.length}`
-    : `Vectorizing file summaries (file-enhance) 0/${targets.length}`)
+    ? `文件摘要向量化（文件增强通道）0/${total}`
+    : `Vectorizing file summaries (file-enhance) 0/${total}`)
   try {
     const ingestServices = kbAi.buildIngestionServices(kbSpec())
-    let done = 0
-    for (const t of targets) {
-      try {
-        const vector = await ingestServices.embed(t.text)
-        fileMap.set(t.path, { content: t.text, vector, contentHash: `fs:${t.path}:${t.text.length}` })
-      } catch (e) {
-        console.error(`文件摘要向量化失败: ${t.path}`, e)
-      }
-      done++
-      const st = prewarmItemStates.file
-      if (st) { st.index = done; st.total = targets.length; st.detail = `文件摘要向量化: ${done}/${targets.length}` }
-      emit('updateLiveState', store.locales=='zh'
-        ? `文件摘要向量化: ${done}/${targets.length}`
-        : `Vectorizing file summaries: ${done}/${targets.length}`)
+    const ctx: IngestionContext = {
+      blocks: props.blocks as any,
+      config: { url: props.model.url, embed: props.model.embed, chat: props.model.chat, process: props.model.process, processPrompt: props.model.processPrompt, think: props.model.think },
+      services: {
+        embed: (t: string) => ingestServices.embed(t),
+        embedBatch: (ts: string[]) => ingestServices.embedBatch(ts),
+        streamChat: (m: any[], cb: (c: string) => void) => ingestServices.streamChat(m, cb),
+      },
+      fileIndex: props.fileIndex as any,
+      onProgress: (msg: string) => {
+        const st = prewarmItemStates.summaryVec
+        const m = msg.match(/(\d+)\s*\/\s*(\d+)/)
+        if (st && m) { st.index = +m[1]; st.total = +m[2]; st.detail = msg }
+        emit('updateLiveState', msg)
+      },
+      isCancelled: () => false,
     }
-    const st = prewarmItemStates.file
-    if (st) st.detail = `文件摘要向量化完成: ${done}/${targets.length}`
+    await INGESTION_PRIMITIVES.summarize_file(ctx, { embedOnly: true })
+    const st = prewarmItemStates.summaryVec
+    if (st) st.detail = `文件摘要向量化完成: ${summaryVecCount.value}/${total}`
   } catch (e) {
     console.error('自动向量化文件摘要失败（文件增强将退化为纯切片）：', e)
   } finally {
     prewarmRunning.value = false
     prewarmRunningItemKey.value = ''
-    if (prewarmItemStates.file) prewarmItemStates.file.status = 'done'
+    if (prewarmItemStates.summaryVec) prewarmItemStates.summaryVec.status = 'done'
     emit('updateLiveState', '')
   }
 }
@@ -1654,7 +1825,7 @@ const runAllStrategyTest = async () => {
   await ensureStrategyChannelsReady()
 
   // 已配置预热且未执行 → 先预热（时间单独计时，不计入检索时间）
-  if (!prewarmDone.value && (prewarm.file || prewarm.entity || prewarm.community)) {
+  if (!prewarmDone.value && (prewarm.summary || prewarm.summaryVec || prewarm.sliceVec || prewarm.questionVec || prewarm.entity || prewarm.community)) {
     await runPrewarm()
   }
 
@@ -2403,21 +2574,14 @@ const clearTestCases = () => {
              :title="store.locales=='zh' ? '清空批量测试结果 / 位次 / 统计（释放内存）' : 'Clear batch results / stats (free memory)'">
           <i class="fa fa-eraser"></i>
         </div>
-        <!-- 预热（仅当有可勾选项时显示）：开始 + 勾选项 -->
-        <template v-if="availablePrewarmItems.length > 0">
-          <span style="width:1px;height:20px;background:var(--borderColor);flex-shrink:0;"></span>
-          <div class="kt-btn" @click="runPrewarm" :disabled="prewarmRunning || test.isRunning"
-               :title="store.locales=='zh' ? '开始预热：按勾选的预热项执行向量化（耗时单独计时、不计入检索）' : 'Pre-warm: run checked vectorization (time excluded from retrieval)'">
-            <i class="fa" :class="prewarmRunning ? 'fa-spinner fa-spin' : 'fa-fire'"></i>
-          </div>
-          <span style="width:1px;height:20px;background:var(--borderColor);flex-shrink:0;"></span>
-          <div v-for="item in availablePrewarmItems" :key="item.key"
-               class="kt-btn" :class="{ on: prewarm[item.key] }"
-               :title="(prewarm[item.key] ? (store.locales=='zh' ? '已勾选：' : 'On: ') : (store.locales=='zh' ? '点击勾选：' : 'Click to enable: ')) + (store.locales=='zh' ? item.label : item.labelEn)"
-               @click="prewarm[item.key] = !prewarm[item.key]">
-            <i class="fa" :class="item.icon"></i>
-          </div>
-        </template>
+        <!-- 预热入口（仅当有可勾选项时显示）：摘要生成 / 各类向量缓存都在浮层里操作 -->
+        <div v-if="availablePrewarmItems.length > 0" class="kt-btn"
+             :class="{ on: prewarmPanelOpen, warn: prewarmRunning }"
+             @click="prewarmPanelOpen = !prewarmPanelOpen"
+             :title="store.locales=='zh' ? '预热 / 向量缓存：生成缺失摘要、补齐各类向量（已有数据自动跳过，耗时不计入检索）' : 'Pre-warm / vector caches: generate missing summaries, fill missing vectors (existing data is skipped)'">
+          <i class="fa" :class="prewarmRunning ? 'fa-spinner fa-spin' : 'fa-fire'"></i>
+          <span v-if="prewarmEnabledItems.length" class="pw-badge">{{ prewarmEnabledItems.length }}</span>
+        </div>
         <!-- 导出（固定放最右：margin-left:auto 吸收左侧剩余空间，与操作按钮自然分隔） -->
         <div class="kt-btn" style="margin-left:auto;" @click="exportAllTestData" :disabled="isExporting" :title="store.locales=='zh'?'导出全部测试数据（汇总+位次+切片明细）':'Export all test data (summary+rank+slices)'">
           <i class="fa fa-database"></i>
@@ -2684,58 +2848,6 @@ const clearTestCases = () => {
     <!-- 批量测试面板页面（批量测试 / 预热 / 用例管理 / 策略召回对比；顶部按钮见工具栏） -->
     <div v-if="activeTab === 'batch'" style="flex:1;border-radius:5px;padding:5px;display:flex;flex-direction:column;overflow:hidden;">
       <div class="scoll" style="flex:1;overflow:auto;">
-        <!-- 预热进度（运行中显示：每项状态 + 已处理数量 + 进度条） -->
-        <div v-if="prewarmRunning && prewarmEnabledItems.length > 0" class="as-detail" style="margin-bottom:6px;">
-          <div class="as-detail-title"><i class="fa fa-fire"></i> {{ store.locales=='zh' ? '预热进度（不计入检索时间）' : 'Pre-warm progress (excluded from retrieval)' }}</div>
-          <div v-for="item in prewarmEnabledItems" :key="item.key" class="prewarm-row">
-            <span class="prewarm-row-icon"><i class="fa" :class="item.icon"></i></span>
-            <span class="prewarm-row-name" :title="store.locales=='zh' ? item.label : item.labelEn">{{ store.locales=='zh' ? item.label : item.labelEn }}</span>
-            <div class="prewarm-row-bar">
-              <div class="prewarm-row-fill" :style="{ width: prewarmPct(item.key) + '%' }"></div>
-            </div>
-            <span class="prewarm-row-status" :class="prewarmItemStates[item.key]?.status || 'pending'">
-              <template v-if="prewarmItemStates[item.key]?.status === 'done'">
-                <i class="fa fa-check-circle"></i> {{ store.locales=='zh' ? '完成' : 'Done' }}
-              </template>
-              <template v-else-if="prewarmItemStates[item.key]?.status === 'running'">
-                <i class="fa fa-spinner fa-spin"></i>
-                <template v-if="prewarmItemStates[item.key].total > 0">{{ prewarmItemStates[item.key].index }}/{{ prewarmItemStates[item.key].total }}</template>
-                <template v-else>{{ store.locales=='zh' ? '处理中' : 'Running' }}</template>
-              </template>
-              <template v-else>{{ store.locales=='zh' ? '待处理' : 'Pending' }}</template>
-            </span>
-          </div>
-        </div>
-
-        <!-- 预热耗时（配置且执行过才显示） -->
-        <div v-if="prewarmDone && prewarmTotalMs > 0" class="as-detail">
-          <div class="as-detail-title"><i class="fa fa-clock-o"></i> {{ store.locales=='zh' ? '预热耗时（不计入检索时间）' : 'Pre-warm time (excluded from retrieval)' }}</div>
-          <table class="as-table as-detail-table">
-            <thead>
-              <tr>
-                <th>{{ store.locales=='zh' ? '项目' : 'Item' }}</th>
-                <th style="text-align:center;">{{ store.locales=='zh' ? '耗时' : 'Time' }}</th>
-                <th style="text-align:center;">{{ store.locales=='zh' ? '状态' : 'Status' }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="item in availablePrewarmItems" :key="item.key">
-                <td>{{ store.locales=='zh' ? item.label : item.labelEn }}</td>
-                <td style="text-align:center;">{{ prewarmTimes[item.key] != null ? formatTime(prewarmTimes[item.key]) : '-' }}</td>
-                <td style="text-align:center;">
-                  <span v-if="prewarm[item.key]" style="color:#4CAF50;"><i class="fa fa-check-circle"></i></span>
-                  <span v-else style="color:var(--borderColor);">-</span>
-                </td>
-              </tr>
-              <tr>
-                <td style="font-weight:bold;">{{ store.locales=='zh' ? '合计' : 'Total' }}</td>
-                <td style="text-align:center;font-weight:bold;">{{ formatTime(prewarmTotalMs) }}</td>
-                <td style="text-align:center;"><span style="color:#4CAF50;"><i class="fa fa-check-circle"></i></span></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
         <!-- 策略召回对比 -->
         <div class="as-detail">
           <div class="as-detail-title">
@@ -2821,6 +2933,101 @@ const clearTestCases = () => {
                 </tr>
               </tbody>
             </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 预热 / 向量缓存浮层：所有预热操作按钮与状态、进度、耗时集中在这里，工具栏只留一个入口 -->
+    <div v-if="prewarmPanelOpen" class="tm-overlay" @click.self="prewarmPanelOpen = false">
+      <div class="tm-modal pw-modal">
+        <div class="ae-head">
+          <div class="ae-title">
+            <i class="fa fa-fire"></i>
+            <span class="tm-modal-title">{{ store.locales=='zh' ? '预热 / 向量缓存' : 'Pre-warm / Vector Caches' }}</span>
+            <span class="ae-note">{{ store.locales=='zh' ? '已有摘要或向量会自动跳过、不重复生成；耗时单独计时、不计入检索时间' : 'Existing summaries/vectors are skipped; time is excluded from retrieval' }}</span>
+          </div>
+          <button class="ae-close" @click="prewarmPanelOpen = false" :title="store.locales=='zh' ? '关闭' : 'Close'"><i class="fa fa-times"></i></button>
+        </div>
+
+        <!-- 预热项：点击整行勾选；已就绪项（数据/向量齐全）用主题色显示 -->
+        <div class="pw-list scoll">
+          <div v-for="item in availablePrewarmItems" :key="item.key" class="pw-row"
+               :class="{ on: prewarm[item.key] }"
+               :title="(store.locales=='zh' ? item.label : item.labelEn) + ' ｜ ' + prewarmStatusText(item.key)"
+               @click="prewarm[item.key] = !prewarm[item.key]">
+            <i class="fa pw-check" :class="prewarm[item.key] ? 'fa-check-square-o' : 'fa-square-o'"></i>
+            <i class="fa" :class="item.icon" :style="prewarmReady(item.key) ? { color: 'var(--fontActiveColor)' } : {}"></i>
+            <span class="pw-label">{{ store.locales=='zh' ? item.label : item.labelEn }}</span>
+            <span class="pw-status" :style="prewarmReady(item.key) ? { color: 'var(--fontActiveColor)' } : {}">{{ prewarmStatusText(item.key) }}</span>
+          </div>
+        </div>
+
+        <!-- 运行进度（运行中） -->
+        <div v-if="prewarmRunning && prewarmEnabledItems.length > 0" class="as-detail">
+          <div class="as-detail-title"><i class="fa fa-spinner fa-spin"></i> {{ store.locales=='zh' ? '预热进度' : 'Pre-warm progress' }}</div>
+          <div v-for="item in prewarmEnabledItems" :key="'p-' + item.key" class="prewarm-row">
+            <span class="prewarm-row-icon"><i class="fa" :class="item.icon"></i></span>
+            <span class="prewarm-row-name" :title="store.locales=='zh' ? item.label : item.labelEn">{{ store.locales=='zh' ? item.label : item.labelEn }}</span>
+            <div class="prewarm-row-bar">
+              <div class="prewarm-row-fill" :style="{ width: prewarmPct(item.key) + '%' }"></div>
+            </div>
+            <span class="prewarm-row-status" :class="prewarmItemStates[item.key]?.status || 'pending'">
+              <template v-if="prewarmItemStates[item.key]?.status === 'done'">
+                <i class="fa fa-check-circle"></i> {{ store.locales=='zh' ? '完成' : 'Done' }}
+              </template>
+              <template v-else-if="prewarmItemStates[item.key]?.status === 'running'">
+                <i class="fa fa-spinner fa-spin"></i>
+                <template v-if="prewarmItemStates[item.key].total > 0">{{ prewarmItemStates[item.key].index }}/{{ prewarmItemStates[item.key].total }}</template>
+                <template v-else>{{ store.locales=='zh' ? '处理中' : 'Running' }}</template>
+              </template>
+              <template v-else>{{ store.locales=='zh' ? '待处理' : 'Pending' }}</template>
+            </span>
+          </div>
+          <div class="pw-detail">{{ prewarmItemStates[prewarmRunningItemKey]?.detail }}</div>
+        </div>
+
+        <!-- 耗时（执行过） -->
+        <div v-if="prewarmDone && prewarmTotalMs > 0" class="as-detail">
+          <div class="as-detail-title"><i class="fa fa-clock-o"></i> {{ store.locales=='zh' ? '预热耗时（不计入检索时间）' : 'Pre-warm time (excluded from retrieval)' }}</div>
+          <table class="as-table as-detail-table">
+            <thead>
+              <tr>
+                <th>{{ store.locales=='zh' ? '项目' : 'Item' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '耗时' : 'Time' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '状态' : 'Status' }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in availablePrewarmItems" :key="'t-' + item.key">
+                <td>{{ store.locales=='zh' ? item.label : item.labelEn }}</td>
+                <td style="text-align:center;">{{ prewarmTimes[item.key] != null ? formatTime(prewarmTimes[item.key]) : '-' }}</td>
+                <td style="text-align:center;">
+                  <span v-if="prewarm[item.key]" style="color:#4CAF50;"><i class="fa fa-check-circle"></i></span>
+                  <span v-else style="color:var(--borderColor);">-</span>
+                </td>
+              </tr>
+              <tr>
+                <td style="font-weight:bold;">{{ store.locales=='zh' ? '合计' : 'Total' }}</td>
+                <td style="text-align:center;font-weight:bold;">{{ formatTime(prewarmTotalMs) }}</td>
+                <td style="text-align:center;"><span style="color:#4CAF50;"><i class="fa fa-check-circle"></i></span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 操作 -->
+        <div class="pw-actions">
+          <div class="kt-btn" @click="selectAllPrewarm(true)" :title="store.locales=='zh' ? '勾选全部可预热项' : 'Select all'"><i class="fa fa-check-square-o"></i></div>
+          <div class="kt-btn" @click="selectAllPrewarm(false)" :title="store.locales=='zh' ? '清空勾选' : 'Clear selection'"><i class="fa fa-square-o"></i></div>
+          <span style="flex:1"></span>
+          <div class="kt-btn ok" :class="{ 'kt-disabled': prewarmRunning || test.isRunning || prewarmEnabledItems.length === 0 }"
+               :title="prewarmEnabledItems.length === 0
+                 ? (store.locales=='zh' ? '请先勾选需要的项' : 'Check at least one item')
+                 : (store.locales=='zh' ? `开始预热（${prewarmEnabledItems.length} 项）` : `Run pre-warm (${prewarmEnabledItems.length} item(s))`)"
+               @click="runPrewarm">
+            <i class="fa" :class="prewarmRunning ? 'fa-spinner fa-spin' : 'fa-play'"></i>
+            <span class="pw-run-label">{{ store.locales=='zh' ? '开始预热' : 'Run' }}</span>
           </div>
         </div>
       </div>
@@ -2995,7 +3202,7 @@ const clearTestCases = () => {
   background-color: color-mix(in srgb, var(--fontActiveColor) 22%, var(--backgroundColor));
 }
 
-/* ===== 预热进度行（批量面板预热进度区） ===== */
+/* ===== 预热进度行（预热 / 向量缓存浮层） ===== */
 .prewarm-row {
   display: flex;
   align-items: center;
@@ -3130,6 +3337,32 @@ const clearTestCases = () => {
 .tm-gold-ic.all .tm-gold-dot { color: #4CAF50; }
 .tm-gold-ic.some .tm-gold-dot { color: #FF9800; }
 .tm-gold-ic.none .tm-gold-dot { color: #f44336; }
+
+/* ===== 预热 / 向量缓存浮层 ===== */
+.pw-modal { width: min(700px, 94vw); height: auto; max-height: 86vh; overflow: hidden; }
+.pw-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; min-height: 0; }
+.pw-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--borderColor); border-radius: 5px;
+  background: var(--backgroundColor); font-size: 12px; cursor: pointer;
+}
+.pw-row:hover { border-color: var(--fontActiveColor); }
+.pw-row.on { border-color: var(--fontActiveColor); background: var(--menuColor); }
+.pw-check { font-size: 12px; color: var(--borderColor); flex-shrink: 0; }
+.pw-row.on .pw-check { color: var(--fontActiveColor); }
+.pw-label { flex-shrink: 0; }
+.pw-status { margin-left: auto; font-size: 11px; color: var(--borderColor); text-align: right; }
+.pw-detail { font-size: 11px; color: var(--borderColor); margin-top: 4px; white-space: pre-wrap; }
+.pw-actions { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--borderColor); padding-top: 8px; }
+.pw-actions .kt-btn { width: auto; min-width: 29px; padding: 0 8px; }
+.pw-run-label { margin-left: 5px; font-size: 12px; }
+.pw-badge {
+  position: absolute; top: -4px; right: -4px; min-width: 13px; height: 13px;
+  padding: 0 3px; border-radius: 7px; background: var(--fontActiveColor); color: #fff;
+  font-size: 9px; line-height: 13px; text-align: center;
+}
+.kt-btn { position: relative; }
+.kt-disabled { opacity: .5; pointer-events: none; }
 
 /* ===== 切片 / 关联切片查看模态框 ===== */
 .tm-overlay {

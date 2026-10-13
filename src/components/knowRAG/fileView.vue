@@ -12,6 +12,9 @@ interface Props {
   files: any[]
   selectedFileIndex: number
   fileChanges: any
+  /** 缺失文件：知识库记录但当前文件夹中已不存在（仅提示 + 手动清理，不自动删除切片） */
+  missingFiles?: string[]
+  onCleanupMissing?: () => void
   currentFileSummary?: string
   previewContent: string
   tooltipVisible: boolean
@@ -43,6 +46,9 @@ const fileChangeBadgeText = (file: any): string => {
     default: return ''
   }
 }
+/** 缺失文件在列表里的显示名（取文件名，完整路径放 title） */
+const missingName = (p: string) => String(p || '').replace(/\\/g, '/').split('/').pop() || p
+
 /** 文件行名称着色：按变更状态（新增=绿 / 修改=橙 / 删除=红），其次缺少同名 md 标红 */
 const fileChangeNameStyle = (file: any): Record<string, string> => {
   const t = fileChangeType(file)
@@ -57,6 +63,22 @@ const fileChangeNameStyle = (file: any): Record<string, string> => {
 <template>
   <div style="display:flex;gap:5px;padding:5px;height:100%;width:100%;box-sizing:border-box;align-items:stretch;">
     <div class="scoll" style="width:240px;height:100%; overflow:auto; border:1px solid var(--borderColor); border-radius:5px; padding:6px; box-sizing:border-box;user-select: none;">
+      <!-- 缺失文件：知识库记录但当前文件夹没有（可在此清理其切片；不会自动删除） -->
+      <div v-if="(missingFiles || []).length" class="file-missing-panel">
+        <div class="file-missing-head">
+          <i class="fa fa-exclamation-triangle"></i>
+          <span>{{ store.locales=='zh' ? `缺失文件 ${(missingFiles || []).length}` : `Missing ${(missingFiles || []).length}` }}</span>
+          <i class="fa fa-trash file-missing-clean"
+             :title="store.locales=='zh' ? '清理这些缺失文件的切片 / 问题 / 摘要（需确认；保存时不会自动执行）' : 'Clean up slices / questions / summaries of these missing files (asks for confirmation)'"
+             @click="onCleanupMissing && onCleanupMissing()"></i>
+        </div>
+        <div class="file-missing-list">
+          <div v-for="(p, i) in (missingFiles || [])" :key="i" class="file-missing-item" :title="p">
+            <i class="fa fa-file-o"></i> {{ missingName(p) }}
+          </div>
+        </div>
+        <div class="file-missing-note">{{ store.locales=='zh' ? '知识库仍在用这些文件的切片' : 'Slices of these files are still in the KB' }}</div>
+      </div>
       <div v-if="files.length===0" style="color:var(--borderColor);">无文件</div>
       <div v-for="(file, idx) in files" :key="idx" :class="['file-row', { active: selectedFileIndex===idx }]">
         <div
@@ -145,6 +167,20 @@ const fileChangeNameStyle = (file: any): Record<string, string> => {
 .file-change-badge.badge-added { background: #4CAF50; }
 .file-change-badge.badge-modified { background: var(--menuActiveColor); }
 .file-change-badge.badge-deleted { background: #F56C6C; }
+
+/* ===== 缺失文件面板（知识库记录但当前文件夹没有） ===== */
+.file-missing-panel {
+  border: 1px dashed #F56C6C; border-radius: 5px;
+  padding: 4px 6px; margin-bottom: 6px; font-size: 11px;
+}
+.file-missing-head {
+  display: flex; align-items: center; gap: 4px; color: #F56C6C; font-weight: 600;
+}
+.file-missing-clean { margin-left: auto; cursor: pointer; }
+.file-missing-clean:hover { color: var(--fontActiveColor); }
+.file-missing-list { max-height: 132px; overflow-y: auto; margin-top: 3px; }
+.file-missing-item { color: var(--fontColor); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-missing-note { color: var(--borderColor); margin-top: 3px; }
 .tree-tooltip {
   position: fixed;
   z-index: 99999;

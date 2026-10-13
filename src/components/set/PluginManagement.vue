@@ -10,60 +10,123 @@
 -->
 <template>
   <div class="plugin-panel">
-    <div class="settings-group">
-      <div class="group-title-row">
-        <h3>
-          {{ zh ? '插件管理' : 'Plugin Manager' }}
-          <!-- 安全声明收进图标悬停提示（内容较长，常驻会把列表挤下去；详情见 securityNotice） -->
-          <i class="fa fa-exclamation-triangle plugin-safe-icon" :title="securityNotice"></i>
-        </h3>
-        <div class="plugin-head">
-          <span class="plugin-head-count">
-            {{ kw ? `${filteredPlugins.length} / ${plugins.length}` : plugins.length }} {{ zh ? '个插件' : 'plugins' }}
-          </span>
-          <span class="folder-path" :title="rootDir || (zh ? '未设置' : 'Not set')">
-            <i class="fa fa-folder"></i> {{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}
-          </span>
-          <div class="button icon-btn" @click="installFromFolder" :title="zh ? '从本地文件夹安装插件' : 'Install a plugin from a local folder'">
-            <i class="fa fa-plus"></i>
-          </div>
-          <div class="button icon-btn" @click="chooseRoot" :title="zh ? '选择插件目录' : 'Select plugins folder'">
-            <i class="fa fa-folder-open"></i>
-          </div>
-          <div class="button icon-btn" @click="openDir()" :title="zh ? '在资源管理器中打开' : 'Open in Explorer'">
-            <i class="fa fa-external-link"></i>
-          </div>
-          <div class="button icon-btn" @click="refresh" :title="zh ? '刷新列表' : 'Refresh list'">
-            <i class="fa fa-refresh"></i>
-          </div>
-          <div
-            class="button icon-btn"
-            @click="rescan"
-            :title="zh ? '重新扫描插件目录（含子文件夹里的新插件；会装载插件代码，需确认）' : 'Rescan plugins folder (including new plugins in subfolders; loads plugin code, asks for confirmation)'"
-          >
-            <i class="fa fa-search-plus"></i>
-          </div>
-        </div>
+    <!-- ===================== 左侧：插件导航（安装 / 搜索 / 启用开关 / 状态） ===================== -->
+    <aside class="plugin-sidebar">
+      <div class="plugin-toolbar">
+        <button
+          class="toolbar-btn primary"
+          @click="installFromFolder"
+          :title="zh ? '从本地文件夹安装插件' : 'Install a plugin from a local folder'"
+        >
+          <i class="fa fa-plus"></i><span>{{ zh ? '安装插件' : 'Install' }}</span>
+        </button>
+        <button class="toolbar-btn" @click="refresh" :title="zh ? '刷新列表' : 'Refresh list'">
+          <i class="fa fa-refresh"></i>
+        </button>
+        <button
+          class="toolbar-btn"
+          @click="rescan"
+          :title="zh ? '重新扫描插件目录（含子文件夹里的新插件；会装载插件代码，需确认）' : 'Rescan plugins folder (including new plugins in subfolders; loads plugin code, asks for confirmation)'"
+        >
+          <i class="fa fa-search-plus"></i>
+        </button>
+        <button class="toolbar-btn" @click="openDir()" :title="zh ? '在资源管理器中打开插件目录' : 'Open the plugins folder in Explorer'">
+          <i class="fa fa-external-link"></i>
+        </button>
+        <button class="toolbar-btn" @click="chooseRoot" :title="zh ? '选择插件目录' : 'Select plugins folder'">
+          <i class="fa fa-folder-open"></i>
+        </button>
       </div>
 
       <!-- 搜索过滤：名称 / id / 文件夹 / 权限 / 工具 / 描述 / 状态 任一命中即显示 -->
-      <div class="plugin-toolbar">
-        <div class="plugin-search">
-          <i class="fa fa-search"></i>
-          <input
-            v-model="keyword"
-            spellcheck="false"
-            :placeholder="zh ? '搜索插件（名称 / id / 文件夹 / 权限 / 工具）' : 'Search plugins (name / id / folder / permission / tool)'"
-          />
-          <i
-            v-if="keyword"
-            class="fa fa-times-circle plugin-search-clear"
-            :title="zh ? '清除搜索' : 'Clear search'"
-            @click="keyword = ''"
-          ></i>
-        </div>
+      <div class="plugin-sidebar-search">
+        <i class="fa fa-search"></i>
+        <input
+          v-model="keyword"
+          spellcheck="false"
+          :placeholder="zh ? '搜索插件（名称 / id / 文件夹 / 权限 / 工具）' : 'Search plugins (name / id / folder / permission / tool)'"
+        />
+        <i
+          v-if="keyword"
+          class="fa fa-times-circle plugin-search-clear"
+          :title="zh ? '清除搜索' : 'Clear search'"
+          @click="keyword = ''"
+        ></i>
       </div>
 
+      <div class="plugin-nav-list scoll">
+        <div v-if="unavailable" class="plugin-empty">
+          <i class="fa fa-info-circle"></i>
+          {{ zh ? '插件管理仅桌面版可用（window.dsh.plugin 不可用）' : 'Plugin management requires the desktop app (window.dsh.plugin unavailable)' }}
+        </div>
+        <div v-else-if="!plugins.length" class="plugin-empty">
+          {{ zh
+            ? '还没有插件。点上方「安装插件」选择插件文件夹，或把插件文件夹放进插件目录后点「重新扫描」。插件可以直接放在插件目录下，也可以按用途分文件夹存放（会扫描各级子文件夹）。'
+            : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders.' }}
+        </div>
+        <div v-else-if="!filteredPlugins.length" class="plugin-empty">
+          {{ zh ? `没有匹配「${keyword.trim()}」的插件。` : `No plugins match “${keyword.trim()}”.` }}
+          <span class="plugin-empty-clear" @click="keyword = ''">{{ zh ? '清除搜索' : 'Clear search' }}</span>
+        </div>
+        <template v-else>
+          <div
+            v-for="p in filteredPlugins"
+            :key="p.id"
+            class="plugin-nav-item"
+            :class="{ active: selectedId === p.id, disabled: !p.enabled }"
+            :title="`${p.name} · ${p.id}`"
+            @click="selectPlugin(p.id)"
+          >
+            <div class="plugin-nav-top">
+              <span class="plugin-nav-icon" :class="`status-${p.status}`"><i :class="statusIcon(p.status)"></i></span>
+              <span class="plugin-nav-name">{{ p.name }}</span>
+              <span
+                class="plugin-nav-toggle"
+                :class="{ on: p.enabled }"
+                :title="p.enabled
+                  ? (zh ? '点击禁用（工具与界面元素立即消失）' : 'Click to disable (tools and UI elements disappear immediately)')
+                  : (zh ? '点击启用（会先展示权限并要求确认）' : 'Click to enable (shows permissions and asks for confirmation)')"
+                @click.stop="setEnabled(p, !p.enabled)"
+              ><span class="toggle-knob"></span></span>
+            </div>
+            <div class="plugin-nav-meta">
+              <span class="plugin-nav-status">
+                <i class="plugin-nav-dot" :class="`status-${p.status}`"></i>{{ statusLabel(p.status) }}
+              </span>
+              <span class="plugin-nav-badge">v{{ p.version }}</span>
+              <span v-if="p.tools.length" class="plugin-nav-tools" :title="zh ? '已注册的工具（scope = plugin:id）' : 'Registered tools (scope = plugin:id)'">
+                <i class="fa fa-wrench"></i>{{ p.tools.length }}
+              </span>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- 底部通栏：数量（含搜索命中数）+ 安全声明 / 可注入服务 / 插件目录 -->
+      <div class="plugin-sidebar-foot">
+        <div class="plugin-foot-row">
+          <span class="plugin-foot-count">
+            {{ kw ? `${filteredPlugins.length} / ${plugins.length}` : plugins.length }} {{ zh ? '个插件' : 'plugins' }}
+          </span>
+          <span class="plugin-foot-icons">
+            <i
+              v-if="customRoot"
+              class="fa fa-undo plugin-foot-icon action"
+              :title="zh ? '恢复默认插件目录（用户数据目录下的 plugins）' : 'Reset to the default plugins folder (userData/plugins)'"
+              @click="resetRoot"
+            ></i>
+            <i v-if="services.length" class="fa fa-plug plugin-foot-icon" :title="servicesHint"></i>
+            <i class="fa fa-exclamation-triangle plugin-safe-icon" :title="securityNotice"></i>
+          </span>
+        </div>
+        <div class="folder-path" :title="rootDir || (zh ? '未设置' : 'Not set')">
+          <i class="fa fa-folder"></i> {{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}
+        </div>
+      </div>
+    </aside>
+
+    <!-- ===================== 右侧：插件详情（详情 / 配置 / 日志 / 数据） ===================== -->
+    <section class="plugin-content scoll">
       <!-- 被跳过的目录（有清单但目录名不能作为插件 id）：必须显式提示，否则用户只看到「放进去什么都没发生」 -->
       <div v-if="invalidNamedDirs.length" class="plugin-notice warn">
         <i class="fa fa-exclamation-circle"></i>
@@ -82,348 +145,289 @@
         </div>
       </div>
 
-      <div v-if="unavailable" class="plugin-empty">
-        <i class="fa fa-info-circle"></i>
-        {{ zh ? '插件管理仅桌面版可用（window.dsh.plugin 不可用）' : 'Plugin management requires the desktop app (window.dsh.plugin unavailable)' }}
-      </div>
-
-      <div v-else-if="!plugins.length" class="plugin-empty">
-        {{ zh
-          ? '还没有插件。点右上角「安装」选择插件文件夹，或把插件文件夹放进上面的「插件目录」后点旁边的「重新扫描」。插件可以直接放在插件目录下，也可以按用途分文件夹存放（会扫描各级子文件夹，列表里能看到插件属于哪个文件夹）。'
-          : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder above and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders (subfolders are scanned; the list shows which folder each plugin belongs to).' }}
-      </div>
-
-      <!-- 有插件但被搜索条件过滤光了：给出明确的空态，否则会看起来像「插件不见了」 -->
-      <div v-else-if="!filteredPlugins.length" class="plugin-empty">
-        {{ zh ? `没有匹配「${keyword.trim()}」的插件。` : `No plugins match “${keyword.trim()}”.` }}
-        <span class="plugin-empty-clear" @click="keyword = ''">{{ zh ? '清除搜索' : 'Clear search' }}</span>
-      </div>
-
-      <div v-else class="plugin-list">
-        <div v-for="p in filteredPlugins" :key="p.id" class="plugin-item" :class="`status-${p.status}`">
-          <div class="plugin-item-main">
-            <div class="plugin-name-row">
-              <span class="plugin-name">{{ p.name }}</span>
-              <code class="plugin-id">{{ p.id }}</code>
-              <span class="plugin-badge">v{{ p.version }}</span>
-              <span class="plugin-badge" :title="zh ? '插件要求的宿主 API 版本区间' : 'Required host API range'">API {{ p.apiVersion || '—' }}</span>
-              <span
-                v-if="p.folder"
-                class="plugin-badge folder-badge"
-                :title="zh ? `该插件放在插件目录的子文件夹里：${p.relDir}` : `Plugin lives in a subfolder of the plugins directory: ${p.relDir}`"
-              ><i class="fa fa-folder"></i> {{ p.folder }}</span>
-              <span v-else-if="nestedRoot" class="plugin-badge folder-badge dim" :title="zh ? '直接放在插件目录下（不在子文件夹）' : 'Placed directly in the plugins folder'"><i class="fa fa-folder-o"></i> {{ zh ? '根目录' : 'root' }}</span>
-              <span class="plugin-badge" :class="`badge-status status-${p.status}`">{{ statusLabel(p.status) }}</span>
-              <span v-if="!p.enabled" class="plugin-badge dim">{{ zh ? '已禁用' : 'Disabled' }}</span>
-
-              <div class="plugin-item-actions">
-                <div
-                  v-if="!p.enabled"
-                  class="button icon-btn"
-                  :title="zh ? '启用插件（会先展示权限并要求确认）' : 'Enable plugin (shows permissions and asks for confirmation)'"
-                  @click="setEnabled(p, true)"
-                >
-                  <i class="fa fa-play-circle"></i>
-                </div>
-                <div
-                  v-else
-                  class="button icon-btn"
-                  :title="zh ? '禁用插件（工具与界面元素立即消失）' : 'Disable plugin (tools and UI elements disappear immediately)'"
-                  @click="setEnabled(p, false)"
-                >
-                  <i class="fa fa-pause-circle"></i>
-                </div>
-                <div
-                  class="button icon-btn"
-                  :title="zh ? '重载：撤销旧注册后重跑 apply（改代码 / 改配置后用它生效）' : 'Reload: dispose old registrations and re-run apply'"
-                  @click="reloadPlugin(p)"
-                >
-                  <i class="fa fa-refresh"></i>
-                </div>
-                <div
-                  class="button icon-btn"
-                  :title="zh ? '查看运行日志' : 'View runtime logs'"
-                  @click="openLogs(p)"
-                >
-                  <i class="fa fa-list-alt"></i>
-                </div>
-                <div
-                  class="button icon-btn"
-                  :title="zh ? '数据：查看这个插件占用了多少（设置 / 存档等）并清理' : 'Data: see how much this plugin uses (settings, saves, …) and clean it up'"
-                  @click="openData(p)"
-                >
-                  <i class="fa fa-database"></i>
-                </div>
-                <div
-                  class="button icon-btn"
-                  :title="zh ? '编辑配置（传给 ctx.config，保存后点重载生效）' : 'Edit config (passed to ctx.config; applies on reload)'"
-                  @click="openConfig(p)"
-                >
-                  <i class="fa fa-sliders"></i>
-                </div>
-                <div
-                  class="button icon-btn"
-                  :title="zh ? '详情：权限 / 注册内容 / 界面位置 / 快捷键' : 'Details: permissions / registrations / UI surfaces / shortcuts'"
-                  @click="openDetails(p)"
-                >
-                  <i class="fa fa-info-circle"></i>
-                </div>
-                <div
-                  class="button icon-btn danger"
-                  :title="zh ? '移除插件（可选是否连磁盘文件一起删除）' : 'Remove plugin (optionally delete its files)'"
-                  @click="removePlugin(p)"
-                >
-                  <i class="fa fa-trash-o"></i>
-                </div>
-              </div>
-            </div>
-
-            <div class="plugin-meta-row">
-              <span :title="permissionHint(p.permissions)">
-                <i class="fa fa-key"></i>
-                {{ p.permissions.length ? p.permissions.join(' / ') : (zh ? '无' : 'none') }}
-              </span>
-              <span v-if="p.inject.length" :title="zh ? '依赖的宿主服务' : 'Required host services'">
-                <i class="fa fa-cubes"></i> inject: {{ p.inject.join(', ') }}
-              </span>
-              <span v-if="p.tools.length" :title="zh ? '已注册的工具（scope = plugin:id）' : 'Registered tools (scope = plugin:id)'">
-                <i class="fa fa-wrench"></i> {{ p.tools.join(', ') }}
-              </span>
-              <span v-if="p.services.length" :title="zh ? '对外提供的服务' : 'Provided services'">
-                <i class="fa fa-share-alt"></i> {{ p.services.join(', ') }}
-              </span>
-              <span v-if="p.hasClient" :title="zh ? '含渲染层半边（P1 生效）' : 'Has a client half (effective in P1)'">
-                <i class="fa fa-paint-brush"></i> UI
-              </span>
-              <span v-if="p.declaredSlots.length" :title="zh ? '声明挂载的界面槽位（P1 生效）' : 'Declared UI slots (effective in P1)'">
-                <i class="fa fa-th-large"></i> {{ p.declaredSlots.join(', ') }}
-              </span>
-              <span
-                v-if="pluginData[p.id] && pluginData[p.id].totalBytes > 0"
-                class="plugin-data-badge"
-                :title="dataBadgeHint(p.id)"
+      <template v-if="selected">
+        <!-- 标题行：名称 + 标识徽标 + 状态（右侧：启用开关 + 重载 / 打开目录 / 移除） -->
+        <div class="plugin-pane-head">
+          <div class="plugin-pane-head-left">
+            <span class="plugin-pane-name">{{ selected.name }}</span>
+            <code class="plugin-id">{{ selected.id }}</code>
+            <span class="plugin-badge">v{{ selected.version }}</span>
+            <span class="plugin-badge" :title="zh ? '插件要求的宿主 API 版本区间' : 'Required host API range'">API {{ selected.apiVersion || '—' }}</span>
+            <span class="plugin-status-pill" :class="`status-${selected.status}`">{{ statusLabel(selected.status) }}</span>
+            <span v-if="!selected.enabled && selected.status !== 'disabled'" class="plugin-badge dim">{{ zh ? '已禁用' : 'Disabled' }}</span>
+          </div>
+          <div class="plugin-pane-head-actions">
+            <span
+              class="plugin-toggle"
+              :class="{ on: selected.enabled }"
+              :title="selected.enabled
+                ? (zh ? '已启用，点击禁用（工具与界面元素立即消失）' : 'Enabled, click to disable')
+                : (zh ? '已禁用，点击启用（会先展示权限并要求确认）' : 'Disabled, click to enable (shows permissions, asks for confirmation)')"
+              @click="setEnabled(selected, !selected.enabled)"
+            ><span class="toggle-knob"></span></span>
+            <span class="plugin-head-divider"></span>
+            <div class="head-btns">
+              <button
+                class="head-btn"
+                @click="reloadPlugin(selected)"
+                :title="zh ? '重载：撤销旧注册后重跑 apply（改代码 / 改配置后用它生效）' : 'Reload: dispose old registrations and re-run apply'"
               >
-                <i class="fa fa-database"></i> {{ formatBytes(pluginData[p.id].totalBytes) }}
-              </span>
-              <span
-                v-if="p.hasClient && clientStates[p.id] && !clientStates[p.id].ok"
-                class="plugin-client-badge"
-                :title="clientBadgeHint(p.id)"
+                <i class="fa fa-refresh"></i>
+              </button>
+              <button
+                class="head-btn"
+                @click="openDir(selected.id)"
+                :title="zh ? '在资源管理器中打开该插件目录' : 'Open this plugin folder in Explorer'"
               >
-                <i class="fa fa-exclamation-triangle"></i> {{ zh ? '界面半边装载失败' : 'UI half failed' }}
-              </span>
-            </div>
-
-            <div v-if="p.error" class="plugin-error" :title="p.error">
-              <i class="fa fa-times-circle"></i> {{ p.error }}
-            </div>
-
-            <div v-if="p.description" class="plugin-desc">{{ p.description }}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 宿主服务面（插件可 inject 的内置服务） -->
-      <div v-if="services.length" class="plugin-services">
-        <i class="fa fa-plug"></i>
-        {{ zh ? '宿主可注入服务：' : 'Host services available for inject: ' }}
-        <code v-for="s in services" :key="s" class="host-service">{{ s }}</code>
-        <span
-          v-if="customRoot"
-          class="plugin-reset-root"
-          @click="resetRoot"
-        >{{ zh ? '恢复默认插件目录' : 'Reset plugins folder' }}</span>
-      </div>
-    </div>
-
-    <!-- 日志弹层 -->
-    <div v-if="logTarget" class="plugin-overlay" @click.self="logTarget = null">
-      <div class="plugin-dialog">
-        <div class="dialog-head">
-          <span>{{ zh ? '日志' : 'Logs' }} · {{ logTarget.name }}</span>
-          <i class="fa fa-times" @click="logTarget = null"></i>
-        </div>
-        <pre class="plugin-log">{{ logText }}</pre>
-      </div>
-    </div>
-
-    <!-- 配置弹层 -->
-    <div v-if="configTarget" class="plugin-overlay" @click.self="closeConfig">
-      <div class="plugin-dialog">
-        <div class="dialog-head">
-          <span>{{ zh ? '配置' : 'Config' }} · {{ configTarget.name }}</span>
-          <i class="fa fa-times" @click="closeConfig"></i>
-        </div>
-        <textarea v-model="configText" spellcheck="false" class="plugin-config-input"></textarea>
-        <div class="dialog-foot">
-          <span class="hint">{{ zh ? 'JSON 对象；保存后在「重载」时生效' : 'JSON object; applied on Reload' }}</span>
-          <div class="button small-btn" @click="saveConfig">{{ zh ? '保存' : 'Save' }}</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 数据弹层：按插件看占用与清理（localStorage + OPFS plugins/<id>/ + 主进程 plugins-data/<id>/） -->
-    <div v-if="dataTarget" class="plugin-overlay" @click.self="closeData">
-      <div class="plugin-dialog">
-        <div class="dialog-head">
-          <span>{{ zh ? '数据' : 'Data' }} · {{ dataTarget.name }}</span>
-          <i class="fa fa-times" @click="closeData"></i>
-        </div>
-        <div class="plugin-detail-body">
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '合计' : 'Total' }}</span>
-            <span class="detail-v">
-              <template v-if="dataSummary">
-                <b>{{ formatBytes(dataSummary.totalBytes) }}</b>
-                <span class="detail-note">
-                  {{ zh ? '设置（localStorage）' : 'settings (localStorage)' }} {{ formatBytes(dataSummary.lsBytes) }}
-                  ·
-                  {{ zh ? '本地文件（OPFS）' : 'local files (OPFS)' }} {{ formatBytes(dataSummary.fileBytes) }}
-                  <template v-if="dataSummary.hostSupported">
-                    · {{ zh ? '插件私有数据（主进程）' : 'plugin data (main process)' }} {{ formatBytes(dataSummary.hostBytes) }}
-                  </template>
-                </span>
-              </template>
-              <template v-else>{{ zh ? '统计中…' : 'Measuring…' }}</template>
-            </span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '位置' : 'Location' }}</span>
-            <span class="detail-v path">
-              localstorage://<code>{{ pluginLsPrefix(dataTarget.id) }}</code>*
-              <span class="detail-note">
-                + opfs://{{ PLUGIN_DATA_DIR }}/<code>{{ dataTarget.id }}</code>/
-                <template v-if="dataSummary && dataSummary.hostSupported"> + appdata://plugins-data/<code>{{ dataTarget.id }}</code>/</template>
-              </span>
-            </span>
-          </div>
-          <div v-if="dataSummary && !dataSummary.filesSupported" class="detail-note">
-            {{ zh ? '当前环境不支持 OPFS，只能看到 localStorage 里的数据。' : 'OPFS is unavailable here, so only localStorage data is listed.' }}
-          </div>
-          <div v-if="dataSummary && !dataSummary.hostSupported" class="detail-note">
-            {{ zh
-              ? '当前没有连接到主进程，插件私有数据（plugins-data/<插件 id>/）这一处看不到。'
-              : 'Not connected to the main process, so plugin data under plugins-data/<id>/ is not visible.' }}
-          </div>
-          <div v-if="dataSummary && dataSummary.error" class="detail-note error">
-            {{ dataSummary.error }}
-          </div>
-
-          <div v-if="dataSummary && dataSummary.entries.length" class="plugin-data-list">
-            <div v-for="(e, i) in dataSummary.entries" :key="`${e.kind}:${e.name}`" class="plugin-data-row">
-              <i class="fa" :class="e.kind === 'localStorage' ? 'fa-key' : e.kind === 'host' ? 'fa-hdd-o' : 'fa-file-o'"></i>
-              <span class="plugin-data-name" :title="e.name">{{ e.name }}</span>
-              <span class="plugin-data-size">{{ formatBytes(e.size) }}</span>
-              <i
-                class="fa fa-times plugin-data-del"
-                :title="zh ? '只删这一项' : 'Delete just this entry'"
-                @click="removeDataEntry(e)"
-              ></i>
+                <i class="fa fa-folder-open"></i>
+              </button>
+              <button
+                class="head-btn danger"
+                @click="removePlugin(selected)"
+                :title="zh ? '移除插件（可选是否连磁盘文件一起删除）' : 'Remove plugin (optionally delete its files)'"
+              >
+                <i class="fa fa-trash-o"></i>
+              </button>
             </div>
           </div>
-          <div v-else-if="dataSummary" class="plugin-empty-inline">
-            {{ zh ? '这个插件还没有数据。' : 'This plugin has no data yet.' }}
-          </div>
         </div>
-        <div class="dialog-foot">
-          <span class="hint">
-            {{ zh
-              ? '清理只删这个插件自己的设置 / 存档，不影响插件本体文件（那是「移除插件」）'
-              : 'Cleaning removes only this plugin’s own settings / saves, never the plugin files (that is “Remove”)' }}
-          </span>
-          <div class="button small-btn" @click="refreshCurrentData">{{ zh ? '刷新' : 'Refresh' }}</div>
-          <div class="button small-btn danger" @click="clearData">{{ zh ? '清除全部数据' : 'Clear all data' }}</div>
-        </div>
-      </div>
-    </div>
 
-    <!-- 详情弹层：权限 / 注册内容 / 界面位置 / 快捷键（本地诊断，不联网） -->
-    <div v-if="detailTarget" class="plugin-overlay" @click.self="detailTarget = null">
-      <div class="plugin-dialog">
-        <div class="dialog-head">
-          <span>{{ zh ? '详情' : 'Details' }} · {{ detailTarget.name }}</span>
-          <i class="fa fa-times" @click="detailTarget = null"></i>
+        <div v-if="selected.error" class="plugin-notice error">
+          <i class="fa fa-times-circle"></i>
+          <div class="plugin-notice-body">
+            <div class="plugin-notice-title">{{ zh ? '加载失败' : 'Load failed' }}</div>
+            <div class="plugin-notice-desc">{{ selected.error }}</div>
+          </div>
         </div>
-        <div class="plugin-detail-body">
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '标识' : 'Id' }}</span>
-            <span class="detail-v"><code>{{ detailTarget.id }}</code> · v{{ detailTarget.version }} · API {{ detailTarget.apiVersion || '—' }}</span>
+
+        <!-- ① 详情：权限 / 注册内容 / 界面位置 / 快捷键（本地诊断，不联网） -->
+        <div class="plugin-group">
+          <div class="plugin-group-title">
+            <i class="fa fa-info-circle"></i><span>{{ zh ? '详情' : 'Details' }}</span>
+            <span class="plugin-group-note">{{ zh ? '取自插件清单与运行时注册表' : 'From the manifest and runtime registry' }}</span>
           </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '状态' : 'Status' }}</span>
-            <span class="detail-v">{{ statusLabel(detailTarget.status) }}<template v-if="!detailTarget.enabled"> · {{ zh ? '已禁用' : 'disabled' }}</template></span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '权限' : 'Permissions' }}</span>
-            <span class="detail-v">
-              {{ detailTarget.permissions.length ? detailTarget.permissions.join(' / ') : (zh ? '无' : 'none') }}
-              <template v-if="detailTarget.permissions.length">
+          <div class="plugin-detail-body">
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '标识' : 'Id' }}</span>
+              <span class="detail-v"><code>{{ selected.id }}</code> · v{{ selected.version }} · API {{ selected.apiVersion || '—' }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '状态' : 'Status' }}</span>
+              <span class="detail-v">{{ statusDetail(selected) }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '描述' : 'Description' }}</span>
+              <span class="detail-v">{{ selected.description || (zh ? '（插件未写描述）' : '(no description)') }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '权限' : 'Permissions' }}</span>
+              <span class="detail-v">
+                {{ selected.permissions.length ? selected.permissions.join(' / ') : (zh ? '无' : 'none') }}
                 <div
-                  v-for="perm in detailTarget.permissions"
+                  v-for="perm in selected.permissions"
                   :key="perm"
                   class="detail-hint"
                 >{{ PERMISSION_HINTS[perm] ? `${perm} — ${zh ? PERMISSION_HINTS[perm][0] : PERMISSION_HINTS[perm][1]}` : perm }}</div>
-              </template>
-            </span>
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '工具' : 'Tools' }}</span>
+              <span class="detail-v">{{ selected.tools.length ? selected.tools.join(', ') : (zh ? '无' : 'none') }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '服务' : 'Services' }}</span>
+              <span class="detail-v">{{ selected.services.length ? selected.services.join(', ') : (zh ? '无' : 'none') }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '界面位置' : 'UI surface' }}</span>
+              <span class="detail-v">
+                {{ detailSlots.length ? detailSlots.join(' · ') : (zh ? '未注册（或未声明 client 半边）' : 'none') }}
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '快捷键' : 'Shortcuts' }}</span>
+              <span class="detail-v">
+                <template v-if="detailShortcuts.length">
+                  <code v-for="s in detailShortcuts" :key="s.display" class="detail-shortcut">{{ s.display }}</code>
+                  <span class="detail-note">{{ detailShortcuts.map((s) => (zh ? s.descriptionZh : s.descriptionEn) || s.display).join('；') }}</span>
+                </template>
+                <template v-else>{{ zh ? '无' : 'none' }}</template>
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '依赖' : 'Requires' }}</span>
+              <span class="detail-v">{{ selected.inject.length ? selected.inject.join(', ') : (zh ? '无' : 'none') }}</span>
+            </div>
+            <div v-if="selected.hasClient" class="detail-row">
+              <span class="detail-k">{{ zh ? '界面半边' : 'UI half' }}</span>
+              <span class="detail-v" :class="{ error: clientStates[selected.id] && !clientStates[selected.id].ok }">
+                {{ clientStates[selected.id] && !clientStates[selected.id].ok
+                  ? (zh ? '装载失败' : 'Failed to load')
+                  : (zh ? '正常（P1 生效）' : 'OK (effective in P1)') }}
+                <div v-if="clientStates[selected.id] && !clientStates[selected.id].ok" class="detail-hint">{{ clientBadgeHint(selected.id) }}</div>
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '文件夹' : 'Folder' }}</span>
+              <span class="detail-v">
+                <template v-if="selected.folder">
+                  <i class="fa fa-folder"></i> {{ selected.folder }}
+                  <span class="detail-note">{{ zh ? `（相对插件目录：${selected.relDir}）` : `(relative to plugins dir: ${selected.relDir})` }}</span>
+                </template>
+                <template v-else>{{ zh ? '插件目录根（未分文件夹）' : 'plugins directory root' }}</template>
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '目录' : 'Path' }}</span>
+              <span class="detail-v path">{{ selected.dir }}</span>
+            </div>
           </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '工具' : 'Tools' }}</span>
-            <span class="detail-v">{{ detailTarget.tools.length ? detailTarget.tools.join(', ') : (zh ? '无' : 'none') }}</span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '服务' : 'Services' }}</span>
-            <span class="detail-v">{{ detailTarget.services.length ? detailTarget.services.join(', ') : (zh ? '无' : 'none') }}</span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '界面位置' : 'UI surface' }}</span>
-            <span class="detail-v">
-              {{ detailSlots.length ? detailSlots.join(' · ') : (zh ? '未注册（或未声明 client 半边）' : 'none') }}
-            </span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '快捷键' : 'Shortcuts' }}</span>
-            <span class="detail-v">
-              <template v-if="detailShortcuts.length">
-                <code v-for="s in detailShortcuts" :key="s.display" class="detail-shortcut">{{ s.display }}</code>
-                <span class="detail-note">{{ detailShortcuts.map((s) => (zh ? s.descriptionZh : s.descriptionEn) || s.display).join('；') }}</span>
-              </template>
-              <template v-else>{{ zh ? '无' : 'none' }}</template>
-            </span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '依赖' : 'Requires' }}</span>
-            <span class="detail-v">{{ detailTarget.inject.length ? detailTarget.inject.join(', ') : (zh ? '无' : 'none') }}</span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '文件夹' : 'Folder' }}</span>
-            <span class="detail-v">
-              <template v-if="detailTarget.folder">
-                <i class="fa fa-folder"></i> {{ detailTarget.folder }}
-                <span class="detail-note">{{ zh ? `（相对插件目录：${detailTarget.relDir}）` : `(relative to plugins dir: ${detailTarget.relDir})` }}</span>
-              </template>
-              <template v-else>{{ zh ? '插件目录根（未分文件夹）' : 'plugins directory root' }}</template>
-            </span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-k">{{ zh ? '目录' : 'Path' }}</span>
-            <span class="detail-v path">{{ detailTarget.dir }}</span>
-          </div>
-          <div v-if="detailTarget.error" class="detail-row">
-            <span class="detail-k">{{ zh ? '错误' : 'Error' }}</span>
-            <span class="detail-v error">{{ detailTarget.error }}</span>
+          <div class="plugin-group-foot">
+            <span class="hint">{{ zh ? '快捷键需插件已激活才生效' : 'Shortcuts are live only while the plugin is active' }}</span>
           </div>
         </div>
-        <div class="dialog-foot">
-          <span class="hint">{{ zh ? '快捷键需插件已激活才生效' : 'Shortcuts are live only while the plugin is active' }}</span>
-          <div class="button small-btn" @click="openLogsFromDetail">{{ zh ? '查看日志' : 'Logs' }}</div>
+
+        <!-- ② 配置：直接编辑（保存后点「重载」生效） -->
+        <div class="plugin-group">
+          <div class="plugin-group-title">
+            <i class="fa fa-sliders"></i><span>{{ zh ? '配置' : 'Config' }}</span>
+            <span class="plugin-group-note">{{ zh ? 'JSON 对象；传给 ctx.config，保存后点「重载」生效' : 'JSON object passed to ctx.config; save, then Reload to apply' }}</span>
+            <div class="plugin-group-actions">
+              <button
+                class="head-btn"
+                :disabled="configLoading"
+                @click="loadConfig(selected)"
+                :title="zh ? '重新读取（丢弃未保存的改动）' : 'Read again (discards unsaved edits)'"
+              >
+                <i class="fa" :class="configLoading ? 'fa-spinner fa-spin' : 'fa-undo'"></i>
+              </button>
+              <button
+                class="head-btn primary"
+                @click="saveConfig"
+                :title="zh ? '保存配置（重启或重载后生效）' : 'Save config (applies after restart or Reload)'"
+              >
+                <i class="fa fa-save"></i>
+              </button>
+            </div>
+          </div>
+          <div class="plugin-group-body">
+            <textarea
+              v-model="configText"
+              spellcheck="false"
+              class="plugin-config-input"
+              :placeholder="zh ? '{\n  // 传给插件的配置\n}' : '{\n  // config passed to the plugin\n}'"
+            ></textarea>
+          </div>
         </div>
+
+        <!-- ③ 日志：插件运行日志（本地缓冲） -->
+        <div class="plugin-group">
+          <div class="plugin-group-title">
+            <i class="fa fa-list-alt"></i><span>{{ zh ? '日志' : 'Logs' }}</span>
+            <span class="plugin-group-note">{{ zh ? '插件通过 ctx.log 输出（有新日志可点右侧刷新）' : 'Written by ctx.log (hit refresh for new lines)' }}</span>
+            <div class="plugin-group-actions">
+              <button
+                class="head-btn"
+                :disabled="logLoading"
+                @click="loadLogs(selected)"
+                :title="zh ? '刷新日志' : 'Refresh logs'"
+              >
+                <i class="fa" :class="logLoading ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
+              </button>
+            </div>
+          </div>
+          <pre class="plugin-log">{{ logText }}</pre>
+        </div>
+
+        <!-- ④ 数据：占用统计与清理（localStorage + OPFS plugins/<id>/ + 主进程 plugins-data/<id>/） -->
+        <div class="plugin-group">
+          <div class="plugin-group-title">
+            <i class="fa fa-database"></i><span>{{ zh ? '数据' : 'Data' }}</span>
+            <span class="plugin-group-note" :title="dataBadgeHint(selected.id)">
+              {{ zh ? '这个插件自己占用的设置 / 存档' : 'Settings and saves owned by this plugin' }}
+            </span>
+            <div class="plugin-group-actions">
+              <button class="head-btn" @click="refreshCurrentData" :title="zh ? '重新统计' : 'Re-measure'">
+                <i class="fa fa-refresh"></i>
+              </button>
+              <button
+                class="small-btn danger"
+                @click="clearData"
+                :title="zh ? '只删这个插件自己的设置 / 存档，不影响插件本体文件' : 'Removes only this plugin’s own settings / saves, never the plugin files'"
+              >{{ zh ? '清除全部数据' : 'Clear all data' }}</button>
+            </div>
+          </div>
+          <div class="plugin-detail-body">
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '合计' : 'Total' }}</span>
+              <span class="detail-v">
+                <template v-if="dataSummary">
+                  <b>{{ formatBytes(dataSummary.totalBytes) }}</b>
+                  <span class="detail-note">
+                    {{ zh ? '设置（localStorage）' : 'settings (localStorage)' }} {{ formatBytes(dataSummary.lsBytes) }}
+                    ·
+                    {{ zh ? '本地文件（OPFS）' : 'local files (OPFS)' }} {{ formatBytes(dataSummary.fileBytes) }}
+                    <template v-if="dataSummary.hostSupported">
+                      · {{ zh ? '插件私有数据（主进程）' : 'plugin-private data (main process)' }} {{ formatBytes(dataSummary.hostBytes) }}
+                    </template>
+                  </span>
+                </template>
+                <template v-else>{{ zh ? '统计中…' : 'Measuring…' }}</template>
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '位置' : 'Location' }}</span>
+              <span class="detail-v path">
+                localstorage://<code>{{ pluginLsPrefix(selected.id) }}</code>*
+                <span class="detail-note">
+                  + opfs://{{ PLUGIN_DATA_DIR }}/<code>{{ selected.id }}</code>/
+                  <template v-if="dataSummary && dataSummary.hostSupported"> + appdata://plugins-data/<code>{{ selected.id }}</code>/</template>
+                </span>
+              </span>
+            </div>
+            <div v-if="dataSummary && !dataSummary.filesSupported" class="detail-note">
+              {{ zh ? '当前环境不支持 OPFS，只能看到 localStorage 里的数据。' : 'OPFS is unavailable here, so only localStorage data is listed.' }}
+            </div>
+            <div v-if="dataSummary && !dataSummary.hostSupported" class="detail-note">
+              {{ zh
+                ? '当前没有连接到主进程，插件私有数据（plugins-data/<插件 id>/）这一处看不到。'
+                : 'Not connected to the main process, so plugin data under plugins-data/<id>/ is not visible.' }}
+            </div>
+            <div v-if="dataSummary && dataSummary.error" class="detail-note error">
+              {{ dataSummary.error }}
+            </div>
+
+            <div v-if="dataSummary && dataSummary.entries.length" class="plugin-data-list">
+              <div v-for="e in dataSummary.entries" :key="`${e.kind}:${e.name}`" class="plugin-data-row">
+                <i class="fa" :class="e.kind === 'localStorage' ? 'fa-key' : e.kind === 'host' ? 'fa-hdd-o' : 'fa-file-o'"></i>
+                <span class="plugin-data-name" :title="e.name">{{ e.name }}</span>
+                <span class="plugin-data-size">{{ formatBytes(e.size) }}</span>
+                <i
+                  class="fa fa-times plugin-data-del"
+                  :title="zh ? '只删这一项' : 'Delete just this entry'"
+                  @click="removeDataEntry(e)"
+                ></i>
+              </div>
+            </div>
+            <div v-else-if="dataSummary" class="plugin-empty-inline">
+              {{ zh ? '这个插件还没有数据。' : 'This plugin has no data yet.' }}
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div v-else class="plugin-content-empty">
+        <i class="fa fa-cube" style="font-size: 22px"></i>
+        <span>{{ zh
+          ? '在左侧选择一个插件，即可在右侧查看详情 / 配置 / 日志 / 数据。'
+          : 'Select a plugin on the left to view its details, config, logs and data here.' }}</span>
       </div>
-    </div>
+    </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { useSlotSnapshot } from '@/lib/plugin/useSlots'
@@ -461,8 +465,10 @@ const securityNotice = computed(() => (zh.value
   ? '插件以宿主权限运行\n\n插件代码与主进程同进程，不受工作区沙箱保护。启用前请确认来源可信；列表里每条插件的「权限」即该插件申请的宿主能力。'
   : 'Plugins run with host privileges\n\nPlugin code runs in the main process and is NOT confined by the workspace sandbox. Only enable plugins you trust; the “Permissions” shown for each plugin are the host capabilities it requests.'))
 
-/** 是否有插件放在子文件夹里：有则给顶层插件也标一个「根目录」徽标，避免看起来像没显示文件夹 */
-const nestedRoot = computed(() => plugins.value.some((p) => !!p.folder))
+/** 宿主可注入服务（插件 inject 后可用）：信息量小且占地方，收进底部图标用 title 展示 */
+const servicesHint = computed(() => (zh.value
+  ? `宿主可注入服务（插件 inject 后可用，共 ${services.value.length} 个）：\n${services.value.join('\n')}`
+  : `Host services available for inject (${services.value.length}):\n${services.value.join('\n')}`))
 
 /** 搜索过滤后的插件列表（空关键词 = 全部） */
 const filteredPlugins = computed(() => {
@@ -480,12 +486,15 @@ const filteredPlugins = computed(() => {
   })
 })
 
-const logTarget = ref<PluginSnapshot | null>(null)
+// ---- 左右布局：左侧导航的选中项 + 右侧详情（详情 / 配置 / 日志 / 数据同一页内展开） ----
+const selectedId = ref<string | null>(null)
+const selected = computed<PluginSnapshot | undefined>(() => plugins.value.find((p) => p.id === selectedId.value))
+
 const logText = ref('')
-const configTarget = ref<PluginSnapshot | null>(null)
+const logLoading = ref(false)
 const configText = ref('')
-// ---- 插件数据（localStorage + OPFS）：列表里显示占用，弹层里看明细 / 清理 ----
-const dataTarget = ref<PluginSnapshot | null>(null)
+const configLoading = ref(false)
+// ---- 插件数据（localStorage + OPFS）：详情里的「数据」分组看占用、明细与清理 ----
 const dataSummary = ref<PluginDataSummary | null>(null)
 const pluginData = ref<Record<string, PluginDataSummary>>({})
 /**
@@ -527,6 +536,27 @@ const statusLabel = (status: PluginStatus): string => {
   }
   const [z, e] = map[status]
   return zh.value ? z : e
+}
+
+/** 状态 + 启用状态：status = disabled 时状态文案本身就是「已禁用」，不再重复追加 */
+const statusDetail = (p: PluginSnapshot): string => {
+  const label = statusLabel(p.status)
+  if (p.enabled || p.status === 'disabled') return label
+  return `${label} · ${zh.value ? '已禁用' : 'disabled'}`
+}
+
+/** 列表 / 标题行的状态小图标（与 statusLabel 一一对应） */
+const statusIcon = (status: PluginStatus): string => {
+  const map: Record<PluginStatus, string> = {
+    discovered: 'fa fa-circle-o',
+    invalid: 'fa fa-exclamation-circle',
+    pending: 'fa fa-hourglass-half',
+    loading: 'fa fa-spinner fa-spin',
+    active: 'fa fa-check-circle',
+    failed: 'fa fa-times-circle',
+    disabled: 'fa fa-pause-circle',
+  }
+  return map[status] || 'fa fa-circle-o'
 }
 
 /** 权限的中文/英文说明（悬停与详情用；未收录的权限按原样显示） */
@@ -571,6 +601,8 @@ const applyList = (res: any) => {
   customRoot.value = res?.customRoot === true
   services.value = res?.services || []
   invalidNamedDirs.value = Array.isArray(res?.invalidNamedDirs) ? res.invalidNamedDirs : []
+  // 列表到手后若还没有选中项，默认展开第一个可见插件
+  if (!selectedId.value && filteredPlugins.value.length) selectedId.value = filteredPlugins.value[0].id
   void refreshAllData()
   void syncThenRefreshClients()
 }
@@ -624,26 +656,15 @@ const refreshData = async (id: string) => {
   }
 }
 
-/** 弹层里的「刷新」：刷新当前正在看的那个插件 */
+/** 「数据」分组里的刷新：重新统计当前选中的插件 */
 const refreshCurrentData = async () => {
-  const id = dataSummary.value?.id || dataTarget.value?.id
+  const id = selectedId.value
   if (id) await refreshData(id)
-}
-
-const openData = async (p: PluginSnapshot) => {
-  dataTarget.value = p
-  dataSummary.value = null
-  await refreshData(p.id)
-}
-
-const closeData = () => {
-  dataTarget.value = null
-  dataSummary.value = null
 }
 
 const removeDataEntry = async (entry: PluginDataEntry) => {
   const summary = dataSummary.value
-  const id = summary?.id || dataTarget.value?.id
+  const id = selectedId.value
   if (!id) return
   const okDel = await removePluginDataEntry(id, entry)
   if (!okDel) {
@@ -668,7 +689,7 @@ const removeDataEntry = async (entry: PluginDataEntry) => {
 }
 
 const clearData = async () => {
-  const p = dataTarget.value
+  const p = selected.value
   if (!p) return
   const sizeText = pluginData.value[p.id] ? formatBytes(pluginData.value[p.id].totalBytes) : ''
   try {
@@ -833,42 +854,44 @@ const removePlugin = async (p: PluginSnapshot) => {
         ? (zh.value ? '已移除并删除文件' : 'Removed and files deleted')
         : (zh.value ? '已从注册表移除（文件保留）' : 'Removed from registry (files kept)'),
     )
-    if (detailTarget.value?.id === p.id) detailTarget.value = null
     await refresh()
   } catch (e: any) {
     ElMessage.error(e?.message || String(e))
   }
 }
 
-const openLogs = async (p: PluginSnapshot) => {
+const loadLogs = async (p: PluginSnapshot) => {
+  const api = bridge()
+  if (!api) return
+  logLoading.value = true
   try {
-    const lines: PluginLogLine[] = await bridge().logs(p.id)
+    const lines: PluginLogLine[] = await api.logs(p.id)
     logText.value = lines.length
       ? lines.map((l) => `[${new Date(l.ts).toLocaleTimeString()}] ${l.level.toUpperCase()} ${l.message}`).join('\n')
       : (zh.value ? '（暂无日志）' : '(no logs yet)')
-    logTarget.value = p
   } catch (e: any) {
     ElMessage.error(e?.message || String(e))
+  } finally {
+    logLoading.value = false
   }
 }
 
-const openConfig = async (p: PluginSnapshot) => {
+const loadConfig = async (p: PluginSnapshot) => {
+  const api = bridge()
+  if (!api) return
+  configLoading.value = true
   try {
-    const cfg = await bridge().getConfig(p.id)
+    const cfg = await api.getConfig(p.id)
     configText.value = JSON.stringify(cfg ?? {}, null, 2)
-    configTarget.value = p
   } catch (e: any) {
     ElMessage.error(e?.message || String(e))
+  } finally {
+    configLoading.value = false
   }
-}
-
-const closeConfig = () => {
-  configTarget.value = null
-  configText.value = ''
 }
 
 const saveConfig = async () => {
-  const target = configTarget.value
+  const target = selected.value
   if (!target) return
   let patch: Record<string, unknown>
   try {
@@ -881,7 +904,6 @@ const saveConfig = async () => {
   try {
     await bridge().setConfig(target.id, patch, true)
     ElMessage.success(zh.value ? '配置已保存（点「重载」生效）' : 'Config saved (applies on Reload)')
-    closeConfig()
     await refresh()
   } catch (e: any) {
     ElMessage.error(e?.message || String(e))
@@ -1007,9 +1029,8 @@ const resetRoot = async () => {
 }
 
 /** 详情：注册的工具与服务来自主进程快照；界面位置来自渲染层槽位注册表（owner 归属） */
-const detailTarget = ref<PluginSnapshot | null>(null)
 const detailSlots = computed(() => {
-  const target = detailTarget.value
+  const target = selected.value
   if (!target) return []
   const owner = `plugin:${target.id}`
   return slotSnapshot.value
@@ -1017,21 +1038,44 @@ const detailSlots = computed(() => {
     .sort()
 })
 const detailShortcuts = computed(() => {
-  const target = detailTarget.value
+  const target = selected.value
   if (!target) return []
   return clientShortcuts(`plugin:${target.id}`) as Array<{ display: string; descriptionZh: string; descriptionEn: string }>
 })
 
-const openDetails = (p: PluginSnapshot) => {
-  detailTarget.value = p
+// ---------------------------------------------------------------------------
+// 选中与详情加载：右侧「详情 / 配置 / 日志 / 数据」四个分组都按当前选中项取数
+// ---------------------------------------------------------------------------
+const selectPlugin = (id: string) => {
+  if (selectedId.value !== id) selectedId.value = id
 }
 
-const openLogsFromDetail = async () => {
-  const target = detailTarget.value
-  if (!target) return
-  detailTarget.value = null
-  await openLogs(target)
+/** 切换插件时清空上一份内容，再拉取配置 / 日志 / 数据 */
+const loadDetail = async (p: PluginSnapshot | undefined) => {
+  logText.value = ''
+  configText.value = ''
+  dataSummary.value = null
+  if (!p) return
+  await Promise.all([loadConfig(p), loadLogs(p), refreshData(p.id)])
 }
+
+// 列表变化（首次加载 / 搜索过滤 / 插件被移除）后保证选中项始终有效：
+// 选中项被过滤掉或被移除时自动落到第一个可见插件；插件全没了就清空右侧
+watch(
+  () => filteredPlugins.value.map((p) => p.id).join(','),
+  () => {
+    const list = filteredPlugins.value
+    if (!list.length) {
+      if (!plugins.value.length) selectedId.value = null
+      return
+    }
+    if (!list.some((p) => p.id === selectedId.value)) selectedId.value = list[0].id
+  },
+)
+
+watch(selectedId, () => {
+  void loadDetail(selected.value)
+})
 
 onMounted(async () => {
   await refresh()
@@ -1049,423 +1093,83 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* ===========================================================================
+   根容器：左右分栏（参照 MCP 管理 .mcp-settings）
+     左 = 插件导航（安装 / 搜索 / 启用开关 / 状态）
+     右 = 选中插件的 详情 / 配置 / 日志 / 数据（全部内嵌，不再用弹层）
+   =========================================================================== */
 .plugin-panel {
   display: flex;
-  flex-direction: column;
   height: 100%;
   min-height: 0;
-  color: var(--fontColor);
-  position: relative;
-}
-.plugin-panel .settings-group {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  padding: 8px;
-  overflow: auto;
-}
-.group-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 0 0 10px 0;
-}
-.group-title-row h3 {
-  margin: 0;
-  font-size: 15px;
-}
-.plugin-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.plugin-count {
-  font-size: 12px;
-  opacity: 0.7;
-}
-.icon-btn {
-  cursor: pointer;
-  padding: 2px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--borderColor, #ddd);
-}
-.icon-btn:hover {
-  background: var(--hoverColor, rgba(0, 0, 0, 0.05));
-}
-.plugin-notice {
-  display: flex;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--borderColor, #e5e5e5);
-  background: var(--backgroundColor, #fffbe6);
-  border-radius: 6px;
-  margin-bottom: 10px;
-  font-size: 12px;
-  line-height: 1.6;
-}
-.plugin-notice i {
-  color: #d97706;
-  margin-top: 2px;
-}
-/* 被跳过的插件文件夹（目录名不能作为插件 id）：比普通提示更醒目，因为插件「完全不出现」 */
-.plugin-notice.warn {
-  border-color: #f0a020;
-  background: rgba(240, 160, 32, 0.08);
-}
-.plugin-notice.warn i {
-  color: #e07b00;
-}
-.plugin-invalid-dirs {
-  margin-top: 4px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.plugin-invalid-dirs code {
-  padding: 1px 6px;
-  border-radius: 3px;
-  border: 1px solid var(--borderColor, #ddd);
-  word-break: break-all;
-}
-.plugin-notice-title {
-  font-weight: 600;
-}
-.plugin-notice-desc {
-  opacity: 0.85;
-}
-.plugin-notice-path {
-  margin-top: 4px;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  opacity: 0.7;
-  word-break: break-all;
-}
-.plugin-empty {
-  padding: 24px 8px;
-  text-align: center;
-  opacity: 0.6;
-  font-size: 13px;
-}
-.plugin-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.plugin-item {
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-  padding: 8px 10px;
-  border: 1px solid var(--borderColor, #e5e5e5);
-  border-radius: 6px;
-  border-left-width: 3px;
-}
-.plugin-item.status-active {
-  border-left-color: #16a34a;
-}
-.plugin-item.status-failed,
-.plugin-item.status-invalid {
-  border-left-color: #dc2626;
-}
-.plugin-item.status-pending,
-.plugin-item.status-loading {
-  border-left-color: #d97706;
-}
-.plugin-item.status-disabled,
-.plugin-item.status-discovered {
-  border-left-color: #9ca3af;
-}
-.plugin-item-main {
-  min-width: 0;
-  flex: 1;
-}
-.plugin-name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.plugin-name {
-  font-weight: 600;
-}
-.plugin-id,
-.host-service {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  opacity: 0.7;
-}
-.plugin-badge {
-  font-size: 11px;
-  padding: 0 6px;
-  border-radius: 8px;
-  border: 1px solid var(--borderColor, #ddd);
-  opacity: 0.85;
-}
-.plugin-badge.badge-status.status-active {
-  border-color: #16a34a;
-  color: #16a34a;
-}
-.plugin-badge.badge-status.status-failed,
-.plugin-badge.badge-status.status-invalid {
-  border-color: #dc2626;
-  color: #dc2626;
-}
-.plugin-badge.dim {
-  opacity: 0.5;
-}
-/* 所属文件夹徽标：与状态/版本徽标区分开，一眼能看出插件放在哪个子文件夹 */
-.plugin-badge.folder-badge {
-  border-style: dashed;
-  opacity: 0.9;
-}
-.plugin-badge.folder-badge > i {
-  margin-right: 3px;
-  opacity: 0.7;
-}
-.plugin-meta-row {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  font-size: 11px;
-  opacity: 0.75;
-  margin-top: 4px;
-}
-/* 插件数据占用徽标：`设置 → 插件 → 管理` 里一眼能看到谁占地方 */
-.plugin-data-badge {
-  color: var(--fontActiveColor, #409eff);
-}
-.plugin-client-badge {
-  color: #d97706;
-}
-.plugin-data-list {
-  margin-top: 6px;
-  border-top: 1px solid var(--borderColor, #dcdfe6);
-}
-.plugin-data-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 0;
-  font-size: 12px;
-  border-bottom: 1px dashed var(--borderColor, #dcdfe6);
-}
-.plugin-data-row > i.fa-key,
-.plugin-data-row > i.fa-file-o,
-.plugin-data-row > i.fa-hdd-o {
-  opacity: 0.6;
-  width: 12px;
-  flex-shrink: 0;
-}
-.plugin-data-name {
-  flex: 1;
-  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: Consolas, monospace;
-}
-.plugin-data-size {
-  opacity: 0.7;
-  flex-shrink: 0;
-}
-.plugin-data-del {
-  cursor: pointer;
-  opacity: 0.45;
-  flex-shrink: 0;
-}
-.plugin-data-del:hover {
-  opacity: 1;
-  color: #dc2626;
-}
-.plugin-empty-inline {
-  margin-top: 8px;
-  font-size: 12px;
-  opacity: 0.6;
-}
-.plugin-error {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #dc2626;
-  word-break: break-all;
-}
-.plugin-desc {
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.7;
-}
-.plugin-item-actions {
-  display: flex;
-  flex-direction: row;
-  gap: 2px;
-  align-items: center;
-  flex-shrink: 0;
-  margin-left: auto;
-}
-.small-btn {
-  cursor: pointer;
-  font-size: 12px;
-  padding: 2px 10px;
-  text-align: center;
-  border: 1px solid var(--borderColor, #ddd);
-  border-radius: 4px;
-  white-space: nowrap;
-}
-.small-btn:hover {
-  background: var(--hoverColor, rgba(0, 0, 0, 0.05));
-}
-.small-btn.danger:hover {
-  border-color: #dc2626;
-  color: #dc2626;
-}
-.install-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border-color: var(--activeColor, #409eff);
-}
-.plugin-detail-body {
-  padding: 10px 12px;
-  overflow: auto;
-  max-height: 60vh;
-  font-size: 12px;
-}
-.detail-row {
-  display: flex;
-  gap: 10px;
-  padding: 4px 0;
-  border-bottom: 1px dashed var(--borderColor, #eee);
-}
-.detail-k {
-  flex: 0 0 72px;
-  opacity: 0.6;
-}
-.detail-v {
-  flex: 1;
-  min-width: 0;
-  word-break: break-all;
-}
-.detail-v.error {
-  color: #dc2626;
-}
-.detail-v.path {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  opacity: 0.8;
-}
-.detail-shortcut {
-  margin-right: 6px;
-}
-.detail-note {
-  opacity: 0.7;
+  color: var(--fontColor);
 }
 
-/* ===========================================================================
-   样式对齐：与「工具」「技能」设置页保持一致
-   （标题行 = ToolRegistryPanel 的 .group-title-row；图标按钮 = 其 .icon-btn；
-     列表卡片 / 徽标取色沿用 registry / skill 列表的变量写法）
-   =========================================================================== */
-.plugin-panel .settings-group {
-  flex: 1;
-  min-height: 0;
+/* ========== 左侧：插件导航栏 ========== */
+.plugin-sidebar {
+  width: 230px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 8px;
-  overflow: visible;
+  border-right: 1px solid var(--borderColor);
+  background: var(--menuColor);
 }
-/* 标题行：h3 在左（带强调色竖条 + 下边框），工具条在右 */
-.plugin-panel .group-title-row {
+/* 顶部工具栏：安装 / 刷新 / 重新扫描 / 打开目录 / 选择目录 */
+.plugin-toolbar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 0 0 10px 0;
+  gap: 4px;
+  padding: 5px;
   border-bottom: 1px solid var(--borderColor);
   flex-shrink: 0;
 }
-.plugin-panel .group-title-row h3 {
-  position: relative;
-  color: var(--fontActiveColor);
-  margin: 0;
-  padding: 0 0 8px 10px;
-  border-bottom: none;
-  font-size: 14px;
-  font-weight: 600;
+.plugin-toolbar .toolbar-btn {
   flex-shrink: 0;
-  white-space: nowrap;
-}
-.plugin-panel .group-title-row h3::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 3px;
-  bottom: 9px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--fontActiveColor);
-}
-.plugin-head {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 6px;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
-  min-width: 0;
-}
-.plugin-head-count {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--fontActiveColor);
-  white-space: nowrap;
-  opacity: 0.9;
-}
-.folder-path {
-  font-size: 10px;
-  opacity: 0.65;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 260px;
-  direction: rtl;
-  text-align: left;
-}
-.folder-path i {
-  margin-right: 3px;
-}
-/* 安全声明图标（插件以宿主权限运行）：内容收进 title，只留一个小图标，不占列表高度 */
-.plugin-safe-icon {
-  margin-left: 6px;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  cursor: pointer;
   font-size: 12px;
-  color: #f39c12;
-  cursor: help;
+  transition: all 0.12s;
 }
-/* 搜索过滤行（与标题行同一行宽的独立一条，避免把右上角图标按钮挤开） */
-.plugin-toolbar {
-  display: flex;
-  align-items: center;
-  margin-bottom: 8px;
+.plugin-toolbar .toolbar-btn:hover {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
 }
-.plugin-search {
+.plugin-toolbar .toolbar-btn.primary {
   flex: 1;
-  min-width: 0;
+  border-color: color-mix(in srgb, var(--fontActiveColor) 45%, transparent);
+  color: var(--fontActiveColor);
+}
+/* 搜索行 */
+.plugin-sidebar-search {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin: 5px;
   padding: 0 8px;
   height: 26px;
+  flex-shrink: 0;
   border: 1px solid var(--borderColor);
   border-radius: 5px;
-  background: var(--menuColor);
+  background: var(--backgroundColor);
 }
-.plugin-search:focus-within {
+.plugin-sidebar-search:focus-within {
   border-color: var(--fontActiveColor);
 }
-.plugin-search > i.fa-search {
+.plugin-sidebar-search > i.fa-search {
   font-size: 11px;
   opacity: 0.6;
 }
-.plugin-search input {
+.plugin-sidebar-search input {
   flex: 1;
   min-width: 0;
   border: none;
@@ -1482,82 +1186,284 @@ onUnmounted(() => {
 .plugin-search-clear:hover {
   opacity: 1;
 }
+/* 插件列表 */
+.plugin-nav-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 4px 4px;
+}
+.plugin-empty {
+  padding: 18px 10px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.65;
+  opacity: 0.65;
+}
 .plugin-empty-clear {
   margin-left: 6px;
   cursor: pointer;
   color: var(--fontActiveColor);
   text-decoration: underline;
 }
-/* 图标按钮：仅图标、无边框（与工具注册表 / 技能管理一致） */
-.plugin-panel .button.icon-btn {
-  width: 23px;
-  height: 23px;
-  margin: 0;
-  padding: 0;
-  border: none;
-  display: inline-flex;
+.plugin-nav-item {
+  padding: 5px 6px;
+  margin-bottom: 2px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.plugin-nav-item:hover {
+  background: color-mix(in srgb, var(--fontColor) 6%, transparent);
+}
+.plugin-nav-item.active {
+  background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
+  border-color: var(--fontActiveColor);
+}
+.plugin-nav-item.disabled {
+  opacity: 0.55;
+}
+.plugin-nav-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.plugin-nav-icon {
+  width: 16px;
+  flex-shrink: 0;
+  display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-}
-.plugin-panel .button.icon-btn:hover {
-  background-color: var(--menuActiveColor);
-}
-/* 说明块：虚线边框的信息块（参照「注册表不可用」提示的写法） */
-.plugin-notice {
-  display: flex;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px dashed var(--borderColor);
-  border-radius: 5px;
-  margin-bottom: 10px;
   font-size: 11px;
-  line-height: 1.6;
-  background: transparent;
+  color: var(--fontColor);
+  opacity: 0.6;
 }
-.plugin-notice i {
+.plugin-nav-icon.status-active {
+  color: #4caf50;
+  opacity: 1;
+}
+.plugin-nav-icon.status-failed,
+.plugin-nav-icon.status-invalid {
+  color: #e74c3c;
+  opacity: 1;
+}
+.plugin-nav-icon.status-pending,
+.plugin-nav-icon.status-loading {
   color: #f39c12;
-  margin-top: 2px;
+  opacity: 1;
 }
-.plugin-notice-title {
+.plugin-nav-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 启用开关（列表内点击不切换选中） */
+.plugin-nav-toggle {
+  width: 26px;
+  height: 14px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  background: var(--borderColor);
+  position: relative;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.plugin-nav-toggle .toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: all 0.15s;
+}
+.plugin-nav-toggle.on {
+  background: var(--fontActiveColor);
+}
+.plugin-nav-toggle.on .toggle-knob {
+  left: 14px;
+}
+.plugin-nav-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding-left: 22px;
+  min-width: 0;
+  font-size: 10px;
+}
+.plugin-nav-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fontColor);
+  opacity: 0.72;
+  white-space: nowrap;
+}
+.plugin-nav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  font-style: normal;
+  background: var(--borderColor);
+}
+.plugin-nav-dot.status-active {
+  background: #4caf50;
+}
+.plugin-nav-dot.status-failed,
+.plugin-nav-dot.status-invalid {
+  background: #e74c3c;
+}
+.plugin-nav-dot.status-pending,
+.plugin-nav-dot.status-loading {
+  background: #f39c12;
+  animation: plugin-blink 1s infinite;
+}
+@keyframes plugin-blink {
+  50% {
+    opacity: 0.3;
+  }
+}
+.plugin-nav-badge {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid var(--borderColor);
+  color: var(--fontActiveColor);
+  opacity: 0.85;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.plugin-nav-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fontActiveColor);
+  opacity: 0.9;
+  white-space: nowrap;
+}
+/* 底部：数量 / 安全声明 / 插件目录 / 宿主服务 */
+.plugin-sidebar-foot {
+  flex-shrink: 0;
+  padding: 6px 8px 8px;
+  border-top: 1px solid var(--borderColor);
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: 0.85;
+}
+.plugin-foot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.plugin-foot-count {
   font-weight: 600;
   color: var(--fontActiveColor);
 }
-.plugin-notice-desc {
-  opacity: 0.75;
-}
-.plugin-notice-path {
-  margin-top: 3px;
-  font-family: Consolas, monospace;
-  font-size: 10px;
-  opacity: 0.6;
-  word-break: break-all;
-}
-.plugin-empty {
-  padding: 14px;
-  text-align: center;
-  color: #888;
+/* 安全声明图标（插件以宿主权限运行）：内容收进 title，只留一个小图标 */
+.plugin-safe-icon {
   font-size: 12px;
-  border: 1px dashed var(--borderColor);
-  border-radius: 5px;
+  color: #f39c12;
+  cursor: help;
 }
-.plugin-list {
+.folder-path {
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  opacity: 0.7;
+}
+.folder-path i {
+  margin-right: 3px;
+}
+.plugin-foot-icons {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
-.plugin-item {
-  padding: 8px;
-  gap: 8px;
-  border: 1px solid var(--borderColor);
-  border-radius: 5px;
-  background: var(--menuColor);
-  transition: border-color 0.12s;
+/* 可注入服务收进图标（悬停 title 看列表），避免底部堆一排服务名 */
+.plugin-foot-icon {
+  font-size: 12px;
+  opacity: 0.7;
+  cursor: help;
 }
-.plugin-item:hover {
-  border-color: var(--fontActiveColor);
+.plugin-foot-icon.action {
+  cursor: pointer;
 }
-.plugin-name {
+.plugin-foot-icon:hover {
+  opacity: 1;
+  color: var(--fontActiveColor);
+}
+
+/* ========== 右侧：内容区 ========== */
+.plugin-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.plugin-content-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
   font-size: 13px;
+  line-height: 1.6;
+  opacity: 0.65;
+}
+
+/* 标题行：名称 + 徽标 + 状态 / 右侧启用开关与图标按钮 */
+.plugin-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--borderColor);
+  flex-shrink: 0;
+}
+.plugin-pane-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.plugin-pane-name {
+  font-size: 15px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-id {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.7;
 }
 .plugin-badge {
   font-size: 9px;
@@ -1565,201 +1471,363 @@ onUnmounted(() => {
   border: none;
   border-radius: 3px;
   background: color-mix(in srgb, var(--fontColor) 8%, transparent);
-  opacity: 1;
-}
-.plugin-badge.badge-status.status-active {
-  background: color-mix(in srgb, #4caf50 14%, transparent);
-  color: #4caf50;
-}
-.plugin-badge.badge-status.status-failed,
-.plugin-badge.badge-status.status-invalid {
-  background: color-mix(in srgb, #e74c3c 14%, transparent);
-  color: #e74c3c;
-}
-.plugin-badge.badge-status.status-pending,
-.plugin-badge.badge-status.status-loading {
-  background: color-mix(in srgb, #f39c12 14%, transparent);
-  color: #f39c12;
-}
-.plugin-meta-row {
-  font-size: 10px;
-  gap: 10px;
-  opacity: 0.75;
-}
-.plugin-item-actions {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px;
-}
-/* 行内动作按钮：只显示图标（悬停 title 说明），无边框，尺寸与工具页图标按钮一致 */
-.plugin-panel .button.icon-btn {
-  width: 23px;
-  height: 23px;
-  min-width: 23px;
-  margin: 0;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background-color: transparent;
-  color: var(--fontColor);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-}
-.plugin-panel .button.icon-btn:hover {
-  background-color: var(--menuActiveColor);
-}
-.plugin-panel .button.icon-btn.danger:hover {
-  color: #e74c3c;
-}
-/* 小按钮（弹层底部等仍用带边框的文字按钮） */
-.plugin-panel .button.small-btn {
-  padding: 2px 6px;
-  font-size: 10px;
-  height: 22px;
-  min-width: 22px;
-  margin: 0;
-  border: 1px solid var(--borderColor);
-  border-radius: 5px;
-  background-color: var(--menuColor);
-  color: var(--fontColor);
   white-space: nowrap;
 }
-.plugin-panel .button.small-btn:hover {
-  background-color: var(--menuActiveColor);
+.plugin-badge.dim {
+  opacity: 0.5;
 }
-.plugin-panel .button.small-btn.danger:hover {
-  border-color: #e74c3c;
+.plugin-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--borderColor);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.plugin-status-pill.status-active {
+  color: #4caf50;
+}
+.plugin-status-pill.status-failed,
+.plugin-status-pill.status-invalid {
   color: #e74c3c;
 }
-.plugin-services {
-  font-size: 11px;
-  opacity: 0.7;
-  margin-top: 10px;
+.plugin-status-pill.status-pending,
+.plugin-status-pill.status-loading {
+  color: #f39c12;
 }
-/* 详情弹窗里的权限说明（小字、缩进一行） */
-.plugin-dialog .detail-hint {
+.plugin-pane-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.plugin-toggle {
+  width: 30px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--borderColor);
+  position: relative;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.plugin-toggle .toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: all 0.15s;
+}
+.plugin-toggle.on {
+  background: var(--fontActiveColor);
+}
+.plugin-toggle.on .toggle-knob {
+  left: 16px;
+}
+.plugin-head-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--borderColor);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+.head-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.plugin-group-actions {
+  margin-left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.head-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.12s;
+}
+.head-btn:hover {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+.head-btn.primary {
+  color: var(--fontActiveColor);
+  border-color: color-mix(in srgb, var(--fontActiveColor) 40%, transparent);
+}
+.head-btn.danger {
+  color: #e74c3c;
+}
+.head-btn.danger:hover {
+  border-color: color-mix(in srgb, #e74c3c 45%, transparent);
+}
+.head-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 提示块：虚线边框的信息 / 警告块 */
+.plugin-notice {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--borderColor);
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+.plugin-notice > i {
+  color: #f39c12;
+  margin-top: 2px;
+}
+.plugin-notice.warn {
+  border-color: #f0a020;
+  background: rgba(240, 160, 32, 0.08);
+}
+.plugin-notice.warn > i {
+  color: #e07b00;
+}
+.plugin-notice.error {
+  border-color: #e74c3c;
+  background: rgba(231, 76, 60, 0.06);
+}
+.plugin-notice.error > i {
+  color: #e74c3c;
+}
+.plugin-notice-body {
+  flex: 1;
+  min-width: 0;
+}
+.plugin-notice-title {
+  font-weight: 600;
+  color: var(--fontActiveColor);
+}
+.plugin-notice-desc {
+  opacity: 0.8;
+  word-break: break-word;
+}
+.plugin-invalid-dirs {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.plugin-invalid-dirs code {
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--borderColor);
+  font-family: ui-monospace, Consolas, monospace;
+  word-break: break-all;
+}
+
+/* 分组卡片：详情 / 配置 / 日志 / 数据 */
+.plugin-group {
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background: var(--menuColor);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.plugin-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+  border-bottom: 1px solid color-mix(in srgb, var(--borderColor) 60%, transparent);
+  background: color-mix(in srgb, var(--fontColor) 3%, transparent);
+}
+.plugin-group-title > i {
+  font-size: 12px;
+}
+.plugin-group-note {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: normal;
+  color: var(--fontColor);
+  opacity: 0.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-group-body {
+  padding: 8px 10px;
+}
+.plugin-group-foot {
+  padding: 6px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--borderColor) 60%, transparent);
+  font-size: 11px;
+}
+.plugin-group-foot .hint {
+  opacity: 0.65;
+}
+
+/* 详情行 */
+.plugin-detail-body {
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.detail-row {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--borderColor) 70%, transparent);
+}
+.detail-row:last-child {
+  border-bottom: none;
+}
+.detail-k {
+  flex: 0 0 72px;
+  opacity: 0.6;
+}
+.detail-v {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.detail-v.error {
+  color: #e74c3c;
+}
+.detail-v.path {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.85;
+  word-break: break-all;
+}
+.detail-shortcut {
+  margin-right: 6px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.detail-note {
+  opacity: 0.7;
+}
+.detail-note.error {
+  color: #e74c3c;
+}
+.detail-hint {
   font-size: 10px;
   opacity: 0.6;
   margin-top: 2px;
   white-space: normal;
 }
-/* 弹层：与设置面板配色一致 */
-.plugin-dialog {
-  background: var(--backgroundColor);
-  border: 1px solid var(--borderColor);
-}
-.dialog-head {
-  border-bottom: 1px solid var(--borderColor);
-  color: var(--fontActiveColor);
-}
-.dialog-foot {
-  border-top: 1px solid var(--borderColor);
-}
-.plugin-dialog .button.small-btn {
-  border: 1px solid var(--borderColor);
-  border-radius: 5px;
-  background-color: var(--menuColor);
-  padding: 2px 10px;
-  font-size: 11px;
-  height: 22px;
-  cursor: pointer;
-}
-.plugin-dialog .button.small-btn:hover {
-  background-color: var(--menuActiveColor);
-}
+
+/* 配置输入 */
 .plugin-config-input {
-  border: 1px solid var(--borderColor);
-  border-radius: 5px;
-}
-.plugin-services {
-  margin-top: 12px;
-  font-size: 12px;
-  opacity: 0.75;
-}
-.host-service {
-  margin-left: 6px;
-}
-.plugin-reset-root {
-  margin-left: 10px;
-  cursor: pointer;
-  text-decoration: underline;
-  opacity: 0.85;
-}
-.plugin-reset-root:hover {
-  color: var(--fontActiveColor);
-}
-/* 弹层遮罩：必须脱离列表滚动容器。
-   插件列表在设置内容区（.settings-content）里滚动，若这里用 position:absolute，
-   遮罩会跟着内容一起滚——插件多时（列表很长、已向下滚动）弹窗就跑到了视口上方，
-   需要往上滑才看得见。改成 fixed 后弹窗永远居中在窗口里。
-   z-index 取 1600：高于设置层（.set-overlay 1500），低于 Element Plus 消息框（2000+）。 */
-.plugin-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1600;
-}
-.plugin-dialog {
-  width: min(720px, 92%);
-  max-height: 80%;
-  background: var(--backgroundColor, #fff);
-  border-radius: 8px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-}
-.dialog-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--borderColor, #eee);
-  font-size: 13px;
-  font-weight: 600;
-}
-.dialog-head i {
-  cursor: pointer;
-  opacity: 0.6;
-}
-.plugin-log {
-  margin: 0;
-  padding: 10px 12px;
-  overflow: auto;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 60vh;
-}
-.plugin-config-input {
-  margin: 10px 12px;
-  min-height: 220px;
+  width: 100%;
+  min-height: 170px;
+  max-height: 46vh;
+  box-sizing: border-box;
   padding: 8px;
-  border: 1px solid var(--borderColor, #ddd);
+  border: 1px solid var(--borderColor);
   border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
   resize: vertical;
-  background: transparent;
-  color: inherit;
 }
-.dialog-foot {
+.plugin-config-input:focus {
+  outline: none;
+  border-color: var(--fontActiveColor);
+}
+
+/* 日志 */
+.plugin-log {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fontColor);
+  opacity: 0.9;
+}
+
+/* 数据明细 */
+.plugin-data-list {
+  margin-top: 6px;
+  border-top: 1px solid var(--borderColor);
+}
+.plugin-data-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--borderColor, #eee);
+  gap: 8px;
+  padding: 3px 0;
   font-size: 12px;
+  border-bottom: 1px dashed var(--borderColor);
 }
-.dialog-foot .hint {
-  opacity: 0.65;
+.plugin-data-row > i:first-child {
+  opacity: 0.6;
+  width: 12px;
+  flex-shrink: 0;
+}
+.plugin-data-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.plugin-data-size {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.plugin-data-del {
+  cursor: pointer;
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+.plugin-data-del:hover {
+  opacity: 1;
+  color: #e74c3c;
+}
+.plugin-empty-inline {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+/* 小按钮（分组标题行内的文字按钮） */
+.small-btn {
+  height: 22px;
+  padding: 2px 8px;
+  font-size: 10px;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background-color: var(--menuColor);
+  color: var(--fontColor);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.small-btn:hover {
+  background-color: var(--menuActiveColor);
+}
+.small-btn.danger:hover {
+  border-color: #e74c3c;
+  color: #e74c3c;
 }
 </style>

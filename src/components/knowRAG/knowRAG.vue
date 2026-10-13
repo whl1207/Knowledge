@@ -460,6 +460,9 @@ let model = ref({
     // 提取问题时是否「边推理边向量化」。默认 false：先全部推理，结束后统一补一次向量。
     // 原因：LM Studio 等单服务下对话模型与嵌入模型不能同时常驻，边推理边嵌入会每条都换载模型，硬件不足时极慢。
     extractEmbedQuestions: false,
+    // 实体链接（本体增强/多跳）是否允许 LLM 兜底匹配。默认 true（质量优先）；
+    // 关闭后本体增强全程只用嵌入模型，避免每轮查询都因对话兜底调用而反复换载模型（批量评测提速明显）。
+    entityLinkLlm: true,
     // 本体推理描述词 - 实体类型
     ontologyEntityTypes: '概念、对象、事物、主体、人物、组织、地点、事件、时间、地点、角色、系统、过程、方法、工具、材料、属性、状态、规则、策略',
     // 卡片描述推理提示词模板（默认自带模板，留空则使用代码内置默认），占位符: {{entityName}} {{entityTypes}} {{content}} {{language}}
@@ -1196,14 +1199,14 @@ const updateQuestionById = async (id: string, patch: Partial<KbQuestion>) => {
   Object.assign(q, patch)
 }
 
-/** 补全缺失的问题向量。分批批量嵌入（同一嵌入模型只加载一次，避免逐条调用与反复换载模型）；
- *  shouldStop 返回 true 时提前结束（供「停止」中断统一补齐） */
-const embedMissingQuestionVectors = async (onMsg?: (msg: string) => void, shouldStop?: () => boolean) => {
+/** 补全缺失的问题向量。分批批量嵌入（同一嵌入模型只加载一次，避免逐条调用与反复换载模型）。
+ *  gate：每批前的闸门（返回 false 立即结束），供「提取结束后统一补齐」阶段响应暂停 / 停止 */
+const embedMissingQuestionVectors = async (onMsg?: (msg: string) => void, gate?: () => Promise<boolean>) => {
   const todo = questionBank.value.filter(q => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length))
   const BATCH = 16
   let done = 0
   for (let start = 0; start < todo.length; start += BATCH) {
-    if (shouldStop?.()) break
+    if (gate && !(await gate())) break
     const batch = todo.slice(start, start + BATCH)
     try {
       const embs = await kbEmbed(batch.map(q => q.text))
@@ -1338,6 +1341,10 @@ const resolveQuestionAnswerText = (q: KbQuestion): string => answerText(q, block
 
 /** 问题增强索引（供 buildRetrievalContext 注入 dense_score 的问题增强通道） */
 const questionVectorsByBlockIndex = () => computeBlockQuestionVectors(questionBank.value)
+
+/** 未向量化的问题数（测试页预热项「问题向量缓存」的状态显示与是否已就绪判断） */
+const questionVectorMissingCount = computed(() =>
+    questionBank.value.filter((q: any) => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length)).length)
 
 /** 问题库 → 测试用例派生（testCases 为派生产物：测试页实时反映问题库 kept 问题） */
 const syncTestCasesFromBank = (notify = false) => {
@@ -3157,7 +3164,17 @@ const extractQuestionsWithProgress = async function(startIndex: number = 0) {
             kb_state.value = store.locales === 'zh'
                 ? `提取完成：正在统一补齐 ${missing} 条问题向量（一次性完成，避免反复切换嵌入模型）...`
                 : `Extraction done: embedding ${missing} questions in one pass (avoids repeated model swaps)...`
-            filled = await embedMissingQuestionVectors((msg) => { kb_state.value = msg }, () => !extractProgress.value.isRunning)
+            // 统一补齐期间仍响应「暂停 / 停止提取」（每批前检查一次）
+            filled = await embedMissingQuestionVectors(
+                (msg) => { kb_state.value = msg },
+                async () => {
+                    while (extractProgress.value.isPaused) {
+                        await new Promise(resolve => setTimeout(resolve, 100))
+                        if (!extractProgress.value.isRunning) return false
+                    }
+                    return extractProgress.value.isRunning
+                },
+            )
         }
     }
     // 统一补齐期间被「停止提取」中断：保留已提取内容，只是不再显示完成提示
@@ -3485,6 +3502,87 @@ const refreshBuildManifest = async () => {
         }
         buildManifest.value = manifest
     } catch { /* 忽略 */ }
+}
+
+/** 路径归一 / 取文件名（用于「知识库记录的文件」与「文件夹现有文件」比对，容忍文件夹改名或移动） */
+const normPathKey = (p: any) => String(p || '').replace(/\\/g, '/').toLowerCase()
+const baseNameOf = (p: any) => String(p || '').replace(/\\/g, '/').split('/').pop() || ''
+
+/**
+ * 「缺失文件」：知识库构建清单里记录、但当前文件夹中已不存在的 .md 文件。
+ * - 按完整路径或同名文件匹配（.kb 来自其它文件夹、或文件夹被改名/移动时也能正确识别）；
+ * - 只做提示与手动清理，不会自动执行（切片仍保留，避免误删内容）；
+ * - 未选择文件夹 / 无构建基准（自动知识库）时为空。
+ */
+const missingFiles = computed<string[]>(() => {
+    if (!store.root) return []
+    const recorded = Object.keys(buildManifest.value || {})
+    if (recorded.length === 0) return []
+    const havePaths = new Set<string>()
+    const haveNames = new Set<string>()
+    for (const f of files.value as any[]) {
+        if (!f?.path) continue
+        havePaths.add(normPathKey(f.path))
+        const n = baseNameOf(f.path).toLowerCase()
+        if (n) haveNames.add(n)
+    }
+    return recorded.filter((p) => {
+        if (havePaths.has(normPathKey(p))) return false
+        const n = baseNameOf(p).toLowerCase()
+        return !(n && haveNames.has(n))
+    })
+})
+
+/**
+ * 清理「缺失文件」相关的数据（需确认）：切片 / 问题 / 文件摘要 / 构建清单条目，
+ * 并移除实体上对这些切片的关联引用（实体本身保留）。保存时不会自动执行。
+ */
+const cleanupMissingFiles = async () => {
+    const zh = store.locales === 'zh'
+    const missing = missingFiles.value
+    if (missing.length === 0) {
+        kb_state.value = zh ? '没有缺失文件需要清理' : 'No missing files to clean up'
+        return
+    }
+    const missKeys = new Set(missing.map(normPathKey))
+    const affectedBlocks = blocks.value.filter((b: any) => missKeys.has(normPathKey(b.filePath)))
+    const affectedIds = new Set(affectedBlocks.map((b: any) => b.id))
+    const affectedQuestions = questionBank.value.filter((q: any) =>
+        (q.srcBlockId && affectedIds.has(q.srcBlockId)) ||
+        (q.answerBlocks || []).some((r: any) => r?.blockId && affectedIds.has(r.blockId)))
+    try {
+        await ElMessageBox.confirm(
+            zh
+                ? `确定清理 ${missing.length} 个缺失文件（当前文件夹中已不存在）的相关数据吗？\n\n将移除：切片 ${affectedBlocks.length} 个、问题 ${affectedQuestions.length} 条、文件摘要与构建清单条目；实体上对这些切片的关联引用一并去除（实体本身保留）。此操作无法撤销。`
+                : `Clean up data of ${missing.length} missing file(s)?\n\nRemoves ${affectedBlocks.length} slice(s), ${affectedQuestions.length} question(s), their file summaries and manifest entries; entity references to those slices are dropped (entities stay). This cannot be undone.`,
+            zh ? '清理缺失文件' : 'Clean Up Missing Files',
+            { type: 'warning', confirmButtonText: zh ? '清理' : 'Clean', cancelButtonText: zh ? '取消' : 'Cancel', closeOnClickModal: false },
+        )
+    } catch { return }
+
+    blocks.value = blocks.value.filter((b: any) => !missKeys.has(normPathKey(b.filePath)))
+    if (affectedQuestions.length) {
+        const dropQ = new Set(affectedQuestions.map((q: any) => q.id))
+        questionBank.value = questionBank.value.filter((q: any) => !dropQ.has(q.id))
+    }
+    for (const p of missing) {
+        fileIndex.value.delete(p)
+        fileSummaries.value.delete(p)
+        delete buildManifest.value[p]
+    }
+    // 实体：去掉被删切片的关联引用（实体保留为孤立概念，避免推理结果凭空消失）
+    for (const e of globalEntities.value.values()) {
+        if (Array.isArray((e as any).associatedBlocks) && (e as any).associatedBlocks.length) {
+            ;(e as any).associatedBlocks = (e as any).associatedBlocks.filter((id: string) => !affectedIds.has(id))
+        }
+    }
+    updateOntologyViewer()
+    updateEntityCards()
+    scheduleRefreshAtlas(0)
+    fileChanges.value = { added: [], modified: [], deleted: [] }
+    kb_state.value = zh
+        ? `已清理 ${missing.length} 个缺失文件：切片 -${affectedBlocks.length}、问题 -${affectedQuestions.length}`
+        : `Cleaned ${missing.length} missing file(s): -${affectedBlocks.length} slices, -${affectedQuestions.length} questions`
 }
 
 /** 判断当前文件夹内是否存在有效的知识库基准（buildManifest 中有属于本文件夹的文件记录） */
@@ -4062,6 +4160,8 @@ const buildRetrievalContext = (query: string): RetrievalContext => {
             bm25B: modelCfg.bm25B,
             searchNum: modelCfg.searchNum || 5,
             think: modelCfg.think,
+            // 实体链接 LLM 兜底开关（关闭后本体增强只用嵌入模型，避免每轮查询换载对话模型）
+            entityLinkLlm: modelCfg.entityLinkLlm !== false,
             agentSubQueryWeight: modelCfg.agentSubQueryWeight ?? 0.3,
         },
         services: kbAi.buildRetrievalServices(buildKbSpec(), { cosineSimilarity, computeBM25: computeBM25Score }),
@@ -4363,6 +4463,8 @@ const save = async function(){
             ontologyBatchSize: model.value.ontologyBatchSize,
             // 提取问题时是否边推理边向量化（默认 false：推理结束后统一补一次，避免反复切换嵌入模型）
             extractEmbedQuestions: !!model.value.extractEmbedQuestions,
+            // 实体链接是否允许 LLM 兜底匹配（默认 true）
+            entityLinkLlm: model.value.entityLinkLlm !== false,
             agentSubQueryWeight: model.value.agentSubQueryWeight,
             searchConfig: {
                 bm25Enabled: model.value.bm25Enabled,
@@ -4408,14 +4510,19 @@ const save = async function(){
         buildProgress: buildProgressData
     };
     
+    // 保存不自动清理「缺失文件」的切片（避免误删内容）：仅在提示里告知，清理需在「文件」页手动执行
+    const missingCount = missingFiles.value.length
+    const missingHint = missingCount
+        ? (store.locales === 'zh' ? `；注意：有 ${missingCount} 个文件已不在当前文件夹（其切片仍保留，可在「文件」页清理）` : `; note: ${missingCount} file(s) are missing from the folder (slices kept; clean up in the File view)`)
+        : ''
     window.ipcRenderer.invoke('saveFile', `${store.root}/${kbFileName}`, JSON.stringify(saveData))
         .then((success) => {
             if (success) {
-                kb_state.value = persistVectors
-                    ? `文件 ${kbFileName} 保存成功`
+                kb_state.value = (persistVectors
+                    ? (store.locales === 'zh' ? `文件 ${kbFileName} 保存成功` : `${kbFileName} saved`)
                     : (store.locales === 'zh'
                         ? `文件 ${kbFileName} 保存成功（精简模式：未写入向量数据，首次问答将重新推导）`
-                        : `${kbFileName} saved (slim mode: no vectors stored, re-derived on first Q&A)`);
+                        : `${kbFileName} saved (slim mode: no vectors stored, re-derived on first Q&A)`)) + missingHint;
             } else {
                 kb_state.value = '文件保存失败';
             }
@@ -4486,6 +4593,17 @@ const loadKnowledgeBases = async function(index?: number) {
                 })
             })
         }
+        // 兼容旧 .kb：只有 fileSummaries（旧字段）而没有 fileIndex 时，按同样文件路径回填摘要文本，
+        // 否则「文件摘要状态 / 摘要向量缓存 / file_score 文件通道」都看不到这些已存在的摘要
+        fileSummaries.value.forEach((v: any, key: string) => {
+            const idx = fileIndex.value.get(key)
+            if (idx?.content) return
+            fileIndex.value.set(key, {
+                content: idx?.content || v?.content || '',
+                vector: idx?.vector || v?.vector || undefined,
+                contentHash: idx?.contentHash,
+            })
+        })
         // 恢复构建清单（增量变更检测基准）
         buildManifest.value = saveData.buildManifest || {}
         
@@ -4518,6 +4636,9 @@ const loadKnowledgeBases = async function(index?: number) {
         }
         if (saveData.config.extractEmbedQuestions !== undefined) {
             model.value.extractEmbedQuestions = !!saveData.config.extractEmbedQuestions
+        }
+        if (saveData.config.entityLinkLlm !== undefined) {
+            model.value.entityLinkLlm = !!saveData.config.entityLinkLlm
         }
         if (saveData.config.agentSubQueryWeight !== undefined) {
             model.value.agentSubQueryWeight = saveData.config.agentSubQueryWeight
@@ -6512,6 +6633,8 @@ onBeforeUnmount(() => {
                         :files="files"
                         :selected-file-index="selectedFileIndex"
                         :file-changes="fileChanges"
+                        :missing-files="missingFiles"
+                        :on-cleanup-missing="cleanupMissingFiles"
                         :current-file-summary="currentFileSummary"
                         :preview-content="previewContent"
                         :tooltip-visible="tooltipVisible"
@@ -6697,6 +6820,9 @@ onBeforeUnmount(() => {
                 :strategyVersion="strategyVersion"
                 :ensureCommunityReports="ensureCommunityReports"
                 :ensureSliceVectors="ensureTestVectors"
+                :ensureQuestionVectors="embedMissingQuestionVectors"
+                :questionBankCount="questionBank.length"
+                :questionVectorMissing="questionVectorMissingCount"
                 :onTestEmbedChange="handleTestEmbedModelChange"
                 @testCasesChange="onTestCasesChange"
                 @updateState="(state:any) => kb_state = state"
@@ -6774,6 +6900,12 @@ onBeforeUnmount(() => {
                     <span class="prep-file-text">{{ store.locales == 'zh'
                         ? `变更 新增 ${fileChanges.added.length} / 修改 ${fileChanges.modified.length} / 删除 ${fileChanges.deleted.length}`
                         : `+${fileChanges.added.length} ~${fileChanges.modified.length} -${fileChanges.deleted.length}` }}</span>
+                </div>
+                <!-- 缺失文件（知识库记录但当前文件夹没有）：提示 + 一键清理（不自动执行） -->
+                <div v-if="missingFiles.length > 0" class="prep-file-opts" style="color:#F56C6C;"
+                     :title="store.locales=='zh' ? `缺失文件 ${missingFiles.length} 个（知识库记录但当前文件夹中没有；可在文件页清理其切片）：\n${missingFiles.map(p => p.split(/[\\\\/]/).pop()).join('\n')}` : `${missingFiles.length} missing file(s)`">
+                    <i class="fa fa-exclamation-triangle"></i>
+                    <span class="prep-file-text">{{ store.locales == 'zh' ? `缺失 ${missingFiles.length}` : `-${missingFiles.length} missing` }}</span>
                 </div>
             </template>
         </div>

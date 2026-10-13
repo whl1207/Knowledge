@@ -561,7 +561,11 @@
   //更新目录和预览
   const init=async function(){
     prep.value=''
-    
+    // 切换文件时先清空目录：只有 markdown 会在下面重建目录，
+    // 图片 / 视频 / 音频 / PDF 等不重建，否则会残留上一个 md 文件的目录项
+    toc.value = []
+    lastHeadingAnchors = []
+
     // 如果没有通过 props 传入数据，则不处理
     const hasProp = props.content !== undefined || props.path !== undefined
     if (!hasProp) return;

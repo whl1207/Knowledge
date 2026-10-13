@@ -23,6 +23,9 @@ export interface PluginDevSection {
   /** 小节标题 */
   titleZh: string
   titleEn: string
+  /** 页签上的短标题（管理页用页签切换栏目，长标题放不下） */
+  tabZh: string
+  tabEn: string
   /** 小节说明（讲清这段是干什么用的、什么时候用） */
   descZh: string
   descEn: string
@@ -390,6 +393,8 @@ export const PLUGIN_DEV_SECTIONS: readonly PluginDevSection[] = [
     key: 'general',
     titleZh: '通用开发指令（推荐：整段粘给大模型）',
     titleEn: 'General development prompt (paste this whole block into your model)',
+    tabZh: '通用指令',
+    tabEn: 'General prompt',
     descZh:
       '把最后一行「这个插件要做什么」换成你的需求（越具体越好：界面长什么样、有哪些按钮、要存什么数据），连同整段一起发给大模型；它会产出可以直接放进插件目录的文件。',
     descEn:
@@ -487,6 +492,8 @@ Main-process half apply(ctx):
     key: 'panel',
     titleZh: '界面插件模板：主面板 + 设置页签 + 快捷键',
     titleEn: 'UI plugin template: main panel + settings tab + shortcut',
+    tabZh: '界面插件',
+    tabEn: 'UI panel',
     descZh: '适合「给我一个 xx 面板」这类需求。整段粘给大模型即可，最后一行写你要的面板长什么样。',
     descEn: 'For “give me a panel that does X” requests. Paste the whole block and fill in the last line.',
     bodyZh: `请为 AI-KM 写一个界面插件（只有 client 半边，不需要主进程代码）。
@@ -532,6 +539,8 @@ ${CONSTRAINTS_EN}
     key: 'settings',
     titleZh: '设置页签 / 设置卡片模板：把插件的配置项放进「设置 → 插件」',
     titleEn: 'Settings tab / card template: put your plugin options under Settings → Plugins',
+    tabZh: '设置页签',
+    tabEn: 'Settings tab',
     descZh:
       '适合「插件要能配置」这类需求。整段粘给大模型即可：给了可直接抄的注册写法、**完整可用的设置组件骨架**（立即生效 + 本机持久化 + 恢复默认），以及设置**一级分组 id** 与**设置页 id** 两份清单——分组写错会多出一个同名的「插件」一级菜单，卡片不写 target 会出现在所有设置页。',
     descEn:
@@ -764,6 +773,8 @@ Put images / saves in OPFS under 'plugins/<plugin id>/' (Settings → Plugins �
     key: 'chart',
     titleZh: '图表面板模板：canvas 图表（饼图 / 柱状图切换）',
     titleEn: 'Chart panel template: canvas charts (pie / bar)',
+    tabZh: '图表面板',
+    tabEn: 'Chart panel',
     descZh:
       '适合「选一个 Excel / CSV，按某一列分组画图」这类需求。**图表插件的失败几乎全在绘制时机上**（只在按钮点击里画、guard 拦错图、观察器挂在还没渲染的 canvas 上），这段模板把这些写法直接钉死。整段粘给大模型即可。',
     descEn:
@@ -817,6 +828,8 @@ ${CONSTRAINTS_EN}
     key: 'tool',
     titleZh: '工具插件模板：给智能体加一个工具',
     titleEn: 'Tool plugin template: add an agent tool',
+    tabZh: '工具插件',
+    tabEn: 'Tool plugin',
     descZh: '适合「让智能体会做 xx」这类需求（主进程半边 + 可选设置页）。整段粘给大模型即可。',
     descEn: 'For “let the agent do X” requests (main-process half plus an optional settings tab). Paste the whole block.',
     bodyZh: `请为 AI-KM 写一个「工具插件」：给智能体新增一个可以调用的工具。
@@ -862,6 +875,8 @@ ${CONSTRAINTS_EN}
     key: 'llm-files',
     titleZh: '大模型 / 文件能力模板',
     titleEn: 'Model + file capability template',
+    tabZh: '模型 / 文件',
+    tabEn: 'Model & files',
     descZh: '适合「上传文件让大模型处理」「选一个文件夹批量分析」这类需求（需要 llm / fs 权限）。',
     descEn: 'For “upload a file and let the model process it” or “pick a folder and analyse it in bulk” (needs llm / fs).',
     bodyZh: `请为 AI-KM 写一个同时使用「大模型」与「文件」能力的插件。
@@ -916,6 +931,8 @@ ${CONSTRAINTS_EN}
     key: 'fix',
     titleZh: '排障指令：把日志交给大模型改',
     titleEn: 'Debug prompt: hand the logs to the model',
+    tabZh: '排障',
+    tabEn: 'Troubleshoot',
     descZh: '插件没生效 / 报错时，先复制「插件 → 管理 → 日志」里的报错，再复制这份指令，两者一起发给大模型。',
     descEn: 'When a plugin fails, copy the error from Plugins → Manage → Logs and send it together with this prompt.',
     bodyZh: `我的 AI-KM 插件加载/运行失败了。下面依次是：清单、插件代码、以及软件里「插件 → 管理 → 日志」中的报错。请定位原因并给出**完整可替换的文件**（不要只给 diff 片段）。

@@ -85,14 +85,43 @@ function download(url, dest) {
   })
 }
 
-/** tar 在 Windows 10+ / macOS / Linux 均自带（Windows 为 bsdtar） */
+/**
+ * tar 在 Windows 10+ / macOS / Linux 均自带（Windows / macOS 为 bsdtar，Linux 为 GNU tar），
+ * 但 `*` 通配符的默认值不同：bsdtar 默认开启，GNU tar 1.35 起解包默认关闭，
+ * 于是 `webapp/*` 会被当成字面量并报 `Not found in archive`。
+ * 因此优先只给目录成员（tar 对目录名即递归解包，两端行为一致），
+ * 失败再退回「显式 --wildcards + `*`」；两种方式都校验关键文件是否真的落地。
+ */
 function extractWebapp(tarFile, outDir) {
-  mkdirSync(outDir, { recursive: true })
-  execFileSync(
-    'tar',
-    ['-xzf', tarFile, '-C', outDir, '--strip-components=4', `${ARCHIVE_ROOT}/src/main/webapp/*`],
-    { stdio: 'inherit' }
-  )
+  const member = `${ARCHIVE_ROOT}/src/main/webapp`
+  const base = ['-xzf', tarFile, '-C', outDir, '--strip-components=4']
+  const attempts = [
+    { label: '目录成员', args: [...base, member] },
+    { label: '--wildcards 通配符', args: [...base, '--wildcards', `${member}/*`] }
+  ]
+  let lastError
+  for (let i = 0; i < attempts.length; i += 1) {
+    const { label, args } = attempts[i]
+    rmSync(outDir, { recursive: true, force: true })
+    mkdirSync(outDir, { recursive: true })
+    try {
+      execFileSync('tar', args, { stdio: 'inherit' })
+      // 目录成员若被当成普通文件 / 只解出顶层，会缺子目录内容，用关键文件兜底判断
+      if (
+        existsSync(path.join(outDir, 'index.html')) &&
+        existsSync(path.join(outDir, 'js', 'app.min.js'))
+      ) {
+        return
+      }
+      lastError = new Error('tar 解包结果不完整（缺 index.html 或 js/app.min.js）')
+    } catch (err) {
+      lastError = err
+    }
+    if (i + 1 < attempts.length) {
+      log(`「${label}」方式未解出内容，改用「${attempts[i + 1].label}」方式重试…`)
+    }
+  }
+  throw lastError
 }
 
 function copyPruned(srcDir, destDir) {

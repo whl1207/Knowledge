@@ -300,6 +300,15 @@ const configItems = computed<ConfigItem[]>(() => [
   },
   {
     group: 'process',
+    key: 'entityLinkLlm',
+    label: '实体链接 LLM 兜底',
+    labelEn: 'Entity-link LLM Fallback',
+    type: 'checkbox',
+    description: '本体增强 / 多跳的实体链接在「模糊匹配 + 语义匹配」都无把握时，是否再调一次大模型兜底匹配。默认开（质量优先）；若对话与嵌入模型在同一服务（LM Studio / Ollama）且显存有限，运行本体增强策略时每轮查询都要在对话与嵌入模型间换载，评测会很慢——关掉后本体增强全程只用嵌入模型（召回可能略降）。',
+    descriptionEn: 'Whether entity linking (Ontology / Multi-hop) makes one extra LLM call when fuzzy + semantic matching are inconclusive. On by default (better recall); with LM Studio/Ollama the chat and embedding models cannot stay resident together, so every query swaps models and evaluation becomes very slow — turn it off to keep Ontology use of the embedding model only (recall may drop slightly).'
+  },
+  {
+    group: 'process',
     key: 'maxTestCases',
     label: '测试用例上限',
     labelEn: 'Max Test Cases',
