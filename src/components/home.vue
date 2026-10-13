@@ -2745,6 +2745,13 @@ const toolIcons: Record<string, string> = {
   'run_python': 'fa-code',
   'shell': 'fa-terminal',
   'kb_search': 'fa-book',
+  // Agentic（智能路由）知识库检索的工具单元图标
+  'kb_prefetch': 'fa-bookmark-o',
+  'file_search': 'fa-files-o',
+  'entity_link': 'fa-bullseye',
+  'entity_slice': 'fa-th-list',
+  'graph_hop': 'fa-sitemap',
+  'community_search': 'fa-users',
   'skill': 'fa-cubes',
   'mcp_call': 'fa-plug',
   'run_subagent': 'fa-sitemap',
@@ -2775,6 +2782,13 @@ const getToolLabel = (name: string): string => {
     'run_python': isZh ? '执行Python' : 'Run Python',
     'shell': isZh ? '执行Shell' : 'Run Shell',
     'kb_search': isZh ? '知识库检索' : 'Knowledge Search',
+    // Agentic（智能路由）知识库检索的工具单元（与智能体工具卡片同一套标签/图标）
+    'kb_prefetch': isZh ? '知识库预取' : 'KB pre-fetch',
+    'file_search': isZh ? '文件搜索' : 'File Search',
+    'entity_link': isZh ? '实体定位' : 'Entity Link',
+    'entity_slice': isZh ? '实体切片' : 'Entity Slices',
+    'graph_hop': isZh ? '图谱多跳' : 'Graph Hop',
+    'community_search': isZh ? '社区搜索' : 'Community Search',
     'skill': isZh ? '技能' : 'Skill',
     'run_subagent': isZh ? '子智能体' : 'Subagent',
     'export_word': isZh ? '导出 Word' : 'Export Word',
@@ -6151,6 +6165,8 @@ const sendChatMessage = async (message: string) => {
     retrievedContext = message ? `${fileContext}\n\n${message}` : fileContext
   }
   let relevantBlocks: RelevantBlock[] = []
+  // Agentic（智能路由）知识库检索的工具调用单元（检索阶段收集，助手消息创建后挂上）
+  let kbAgentUnits: any[] | undefined
   // 使用局部变量存储 kbInfo，而不是全局变量
   let tempKbInfo: {
     kbPath: string
@@ -6182,6 +6198,8 @@ const sendChatMessage = async (message: string) => {
           summaryWeight: 0.7,
           strategy: retrievalStrategy,
           debug: true,
+          // 对话模型（Agentic 智能路由需要：工具选择与检索词由对话模型决定；缺失时该策略自动回退相似度）
+          chatModel: currentChatData.config.model || '',
           llmType: _llmType as any,
           providerConfig: _providerCfg || undefined,
           // 当前来源无嵌入模型时回退到「嵌入兜底」设置的来源（默认 Ollama；聊天仍用当前来源）
@@ -6195,6 +6213,21 @@ const sendChatMessage = async (message: string) => {
       console.log(retrievalResult)
       retrievedContext = retrievalResult.context
       relevantBlocks = retrievalResult.relevantBlocks || []
+      // Agentic（智能路由）策略：把检索过程的工具调用映射为工具单元（在助手消息上按 tool-box 样式展示，
+      // 与智能体模式的工具卡片完全同一套渲染与样式）
+      if (retrievalResult.agentSteps?.length) {
+        const base = Date.now()
+        kbAgentUnits = retrievalResult.agentSteps.map((st: any, i: number) => ({
+          id: `kb-agent-${st.round}-${i}`,
+          status: st.status === 'running' ? 'running' : st.status === 'done' ? 'success' : 'error',
+          stepType: 'tool',
+          description: st.kind === 'prefetch' ? 'kb_prefetch' : (st.tool || 'kb_agent'),
+          args: st.args,
+          result: st.result,
+          startTime: base + i,
+          endTime: base + i,
+        }))
+      }
       
       const lastUserMessageIndex = [...currentChatData.messages].reverse().findIndex(msg => msg.role === 'user')
       if (lastUserMessageIndex !== -1) {
@@ -6362,6 +6395,10 @@ const sendChatMessage = async (message: string) => {
   // 如果有临时保存的 kbInfo，添加到助理消息
   if (tempKbInfo) {
     assistantMessage.kbInfo = { ...tempKbInfo }
+  }
+  // Agentic 知识库检索的工具调用轨迹：按智能体工具卡片（tool-box）样式排在消息内容之前
+  if (kbAgentUnits?.length) {
+    assistantMessage.executionUnits = kbAgentUnits
   }
   
   currentChatData.messages.push(assistantMessage)

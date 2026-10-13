@@ -258,6 +258,33 @@
                 </span>
               </div>
               <p class="sc-special-hint" style="margin-top:8px;">{{ agenticPrinciple }}</p>
+
+              <!-- 系统提示词：智能路由由大模型自主决定检索路径，提示词直接决定「会不会调工具、怎么调」
+                   留空=内置默认（按界面语言自动选中英文/中文默认提示词）；自定义后中英界面都用该文本 -->
+              <div class="cfg-row column" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--borderColor);">
+                <label style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                  {{ t('系统提示词', 'System prompt') }}
+                  <span class="sc-prompt-tag" :class="{ on: !!(selected.systemPrompt || '').trim() }">
+                    {{ (selected.systemPrompt || '').trim() ? t('自定义', 'Custom') : t('内置默认', 'Built-in default') }}
+                  </span>
+                  <span style="flex:1"></span>
+                  <button class="sc-mini-btn" @click="fillDefaultAgentPrompt"
+                          :title="t('把当前语言的默认提示词填入编辑框，便于在此基础上修改', 'Fill the current-locale default prompt so you can edit from it')">
+                    <i class="fa fa-file-text-o"></i> {{ t('填入默认', 'Fill default') }}
+                  </button>
+                  <button class="sc-mini-btn" :disabled="!(selected.systemPrompt || '').trim()" @click="clearAgentPrompt"
+                          :title="t('清空自定义提示词，回退内置默认', 'Clear the custom prompt and fall back to the built-in default')">
+                    <i class="fa fa-eraser"></i> {{ t('回退默认', 'Reset') }}
+                  </button>
+                </label>
+                <textarea v-model="selected.systemPrompt" class="sc-prompt-area scoll" rows="7"
+                          :placeholder="defaultAgentPrompt"
+                          @input="touch()"></textarea>
+                <p class="sc-special-hint" style="margin:4px 0 0;">
+                  {{ t('留空=内置默认提示词（随界面语言切换）；建议保留「先检索再作答、至少调用一次工具、换检索词复检、按《标签》引用」等约束，否则模型可能直接凭记忆作答。',
+                       'Empty = built-in default (locale aware). Keep the "retrieve before answering, call at least one tool, retry with different queries, cite 《label》" constraints; otherwise the model may answer from memory.') }}
+                </p>
+              </div>
             </template>
             <template v-else-if="selected.kind === 'hybrid'">
               <label>{{ t('召回通道与处理依赖', 'Recall Channels & Dependencies') }}</label>
@@ -354,7 +381,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
-import { getBuiltinStrategies, getStrategies, setUserStrategies, deriveAgentIngestion, deriveChannelIngestion, AGENT_TOOL_INGESTION, CHANNEL_INGESTION } from '@/shared/graphrag/strategy'
+import { getBuiltinStrategies, getStrategies, setUserStrategies, deriveAgentIngestion, deriveChannelIngestion, AGENT_TOOL_INGESTION, CHANNEL_INGESTION, getDefaultAgentSystemPrompt } from '@/shared/graphrag/strategy'
 import { PRIMITIVE_META } from '@/shared/graphrag/primitives'
 import type { RetrievalPrimitiveId, IngestionPrimitiveId } from '@/shared/graphrag/primitives'
 
@@ -386,6 +413,8 @@ interface EditableStrategy {
   ingestionSteps: EditableIngestStep[]
   agentTools?: Record<string, boolean>
   maxRounds?: number
+  /** Agentic（智能路由）自定义系统提示词；留空=内置默认 */
+  systemPrompt?: string
   channels?: Record<string, boolean>
   channelTopN?: Record<string, number>
   rerank?: { metric?: 'cosine' | 'rrf'; topK?: number }
@@ -553,6 +582,21 @@ const agentIngestionSteps = computed(() => {
   return deriveAgentIngestion(sel.agentTools || {})
 })
 
+// ===== Agentic 系统提示词（可自定义；留空回退内置默认，默认文案随界面语言切换） =====
+const defaultAgentPrompt = computed(() => getDefaultAgentSystemPrompt(props.store?.locales === 'zh' ? 'zh' : 'en'))
+function fillDefaultAgentPrompt() {
+  const s = selected.value
+  if (!s) return
+  s.systemPrompt = defaultAgentPrompt.value
+  touch()
+}
+function clearAgentPrompt() {
+  const s = selected.value
+  if (!s) return
+  s.systemPrompt = undefined
+  touch()
+}
+
 // Hybrid 处理管线（由启用的通道推导，只读展示）
 const hybridIngestionSteps = computed(() => {
   const sel = selected.value
@@ -705,6 +749,7 @@ function load() {
     })),
     agentTools: ensureAgentTools((s as any).agentTools),
     maxRounds: s.kind === 'agentic' ? (s.maxRounds ?? 5) : undefined,
+    systemPrompt: (s as any).systemPrompt || undefined,
     channels: ensureChannels((s as any).channels),
     channelTopN: { ...((s as any).channelTopN || {}) },
     rerank: ensureRerank((s as any).rerank),
@@ -739,6 +784,7 @@ function saveDeltas() {
         s.enabled === false ||
         JSON.stringify(s.agentTools || {}) !== JSON.stringify((b as any).agentTools || {}) ||
         (s.kind === 'agentic' && (s.maxRounds ?? 5) !== ((b as any).maxRounds ?? 5)) ||
+        (s.kind === 'agentic' && (s.systemPrompt || '') !== ((b as any).systemPrompt || '')) ||
         JSON.stringify(s.channels || {}) !== JSON.stringify((b as any).channels || {}) ||
         JSON.stringify(s.channelTopN || {}) !== JSON.stringify((b as any).channelTopN || {}) ||
         JSON.stringify(s.rerank || {}) !== JSON.stringify((b as any).rerank || {}) ||
@@ -794,6 +840,7 @@ function resetStrategy(id: string) {
   }))
   s.agentTools = ensureAgentTools((builtin as any).agentTools)
   s.maxRounds = (builtin as any).maxRounds ?? 5
+  s.systemPrompt = (builtin as any).systemPrompt || undefined
   s.channels = ensureChannels((builtin as any).channels)
   s.channelTopN = { ...((builtin as any).channelTopN || {}) }
   s.rerank = ensureRerank((builtin as any).rerank)
@@ -1168,6 +1215,27 @@ onMounted(() => { load(); syncResetHeight() })
   font-size: 11px; box-sizing: border-box; transition: all .12s;
 }
 .sc-reset-btn:hover { border-color: var(--fontActiveColor); color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent); }
+/* ===== Agentic 系统提示词编辑（策略配置页） ===== */
+.sc-prompt-tag {
+  font-size: 9px; padding: 0 5px; line-height: 15px; border-radius: 3px;
+  border: 1px solid var(--borderColor); color: var(--borderColor); white-space: nowrap;
+}
+.sc-prompt-tag.on { border-color: var(--fontActiveColor); color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
+.sc-mini-btn {
+  display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
+  padding: 1px 7px; font-size: 10px; cursor: pointer;
+  border: 1px solid var(--borderColor); border-radius: 3px;
+  background: var(--menuColor); color: var(--fontColor); transition: all .12s;
+}
+.sc-mini-btn:hover:not(:disabled) { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+.sc-mini-btn:disabled { opacity: .5; cursor: default; }
+.sc-prompt-area {
+  width: 100%; box-sizing: border-box; margin-top: 5px; padding: 5px 6px;
+  font-size: 11px; line-height: 1.5; resize: vertical; min-height: 90px; max-height: 40vh;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--backgroundColor); color: var(--fontColor);
+  font-family: inherit;
+}
 /* 开关策略：与重置按钮同尺寸，状态可点击切换 */
 .sc-enable-btn {
   flex: 0 0 auto; width: 26px; height: 24px; padding: 0; margin-left: 2px;

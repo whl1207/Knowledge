@@ -544,6 +544,21 @@ const dsh = {
       }> {
         return ipcRenderer.invoke('plugin:files:read-sheet', options)
       },
+      /** 该插件记住的路径（用户选过的文件 / 文件夹；跨重启有效，可在「插件 → 数据」里撤销） */
+      grants(options: { id: string }): Promise<{
+        id: string
+        entries: Array<{ path: string; isDir: boolean; exists: boolean }>
+      }> {
+        return ipcRenderer.invoke('plugin:files:grants', options)
+      },
+      /** 撤销一条授权（撤销磁盘上的记忆 → 需 confirm） */
+      revokeGrant(options: { id: string; path: string; confirm?: boolean }): Promise<{ removed: boolean }> {
+        return ipcRenderer.invoke('plugin:files:revoke-grant', options)
+      },
+      /** 清掉某个插件的全部授权（需 confirm） */
+      clearGrants(options: { id: string; confirm?: boolean }): Promise<{ removed: boolean }> {
+        return ipcRenderer.invoke('plugin:files:clear-grants', options)
+      },
     },
     /** 订阅插件事件（状态变更 / 日志 / 通知） */
     onEvent(cb: (ev: import('@/types/plugin').PluginEvent) => void): () => void {

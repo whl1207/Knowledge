@@ -41,6 +41,7 @@ import { toolRegistry } from '@/shared/toolRegistry'
 import { shellService } from './shell-service'
 import { isShellAllowed, resolvePolicy } from './sandbox-policy'
 import { createPluginToolRegistrar } from './plugin-tools'
+import { clearGrants } from './plugin-grants'
 
 /** 日志参数 → 文本（字符串原样；其它尽量 JSON，失败退回 String） */
 function fmtLogArg(a: unknown): string {
@@ -553,6 +554,8 @@ class PluginHost {
       this.records.delete(rec.id)
       this.removeDisabled(rec.id)
       this.removeConfig(rec.id)
+      // 卸载就把「这个插件记住的文件授权」一起清掉（换一个同名插件不该继承旧授权）
+      clearGrants(rec.id)
       this.saveState()
       this.emit({ type: 'plugin/changed', id: rec.id, snapshot: null })
 

@@ -412,6 +412,52 @@
             <div v-else-if="dataSummary" class="plugin-empty-inline">
               {{ zh ? '这个插件还没有数据。' : 'This plugin has no data yet.' }}
             </div>
+
+            <!-- 文件授权：fs 权限能读的路径（用户自己选过的，跨重启记得住） -->
+            <div class="detail-row" style="margin-top: 10px">
+              <span class="detail-k">{{ zh ? '文件授权' : 'File access' }}</span>
+              <span class="detail-v">
+                <template v-if="!grantsSupported">
+                  {{ zh ? '当前没有连接到主进程，看不到文件授权。' : 'Not connected to the main process, so file access is not visible.' }}
+                </template>
+                <template v-else-if="fileGrants.length">
+                  <b>{{ fileGrants.length }}</b>
+                  <span class="detail-note">
+                    {{ zh
+                      ? '个路径（你在这个插件里选过的文件 / 文件夹，重启后仍然有效）'
+                      : 'path(s) you picked inside this plugin — still valid after a restart' }}
+                  </span>
+                </template>
+                <template v-else>{{ zh ? '没有记住任何路径（插件读文件时会弹选择框）' : 'No remembered path (the plugin asks you to pick a file)' }}</template>
+              </span>
+            </div>
+            <div v-if="fileGrants.length" class="plugin-data-list">
+              <div v-for="g in fileGrants" :key="g.path" class="plugin-data-row">
+                <i class="fa" :class="g.exists ? (g.isDir ? 'fa-folder-open-o' : 'fa-file-o') : 'fa-unlink'"></i>
+                <span class="plugin-data-name" :title="g.path">{{ g.path }}</span>
+                <span class="plugin-data-size">
+                  {{ g.exists ? (g.isDir ? (zh ? '文件夹' : 'folder') : zh ? '文件' : 'file') : zh ? '已不存在' : 'missing' }}
+                </span>
+                <i
+                  class="fa fa-times plugin-data-del"
+                  :title="zh ? '撤销这条授权（撤销后要重新选）' : 'Revoke this grant (the plugin must ask again)'"
+                  @click="revokeGrantEntry(g)"
+                ></i>
+              </div>
+            </div>
+            <div v-if="fileGrants.length" class="detail-note" style="margin-top: 6px">
+              <span>
+                {{ zh
+                  ? '只有你亲自选过的路径能被这个插件读取；撤销只影响这个插件，不会动磁盘上的文件。'
+                  : 'Only paths you picked can be read by this plugin; revoking only affects this plugin and never touches your files.' }}
+              </span>
+              <button
+                class="small-btn danger"
+                style="margin-left: 6px"
+                @click="revokeAllGrants"
+                :title="zh ? '撤销这个插件记住的全部路径' : 'Revoke every remembered path of this plugin'"
+              >{{ zh ? '全部撤销' : 'Revoke all' }}</button>
+            </div>
           </div>
         </div>
       </template>
@@ -436,13 +482,18 @@ import { formatBytes } from '@/lib/settingsData'
 import {
   PLUGIN_DATA_DIR,
   clearPluginData,
+  clearPluginGrants,
   collectAllPluginData,
   collectPluginData,
+  collectPluginGrants,
   pluginDataFilesSupported,
+  pluginFileGrantsSupported,
   pluginLsPrefix,
   removePluginDataEntry,
+  revokePluginGrant,
   type PluginDataEntry,
   type PluginDataSummary,
+  type PluginGrantEntry,
 } from '@/lib/plugin/pluginData'
 import type { PluginSnapshot, PluginStatus, PluginLogLine, PluginEvent } from '@/types/plugin'
 
@@ -497,6 +548,9 @@ const configLoading = ref(false)
 // ---- 插件数据（localStorage + OPFS）：详情里的「数据」分组看占用、明细与清理 ----
 const dataSummary = ref<PluginDataSummary | null>(null)
 const pluginData = ref<Record<string, PluginDataSummary>>({})
+// ---- 文件授权（用户在该插件里选过的路径，跨重启有效）：同分组里展示与撤销 ----
+const fileGrants = ref<PluginGrantEntry[]>([])
+const grantsSupported = ref(true)
 /**
  * 界面半边的装载结果（渲染层内存态，主进程快照里没有）：
  * 主进程显示 active 不代表界面半边装上了 —— 常见于界面半边代码写错，
@@ -662,6 +716,72 @@ const refreshCurrentData = async () => {
   if (id) await refreshData(id)
 }
 
+// ---------------------------------------------------------------------------
+// 文件授权（fs 权限的「已记住路径」）：列表 + 逐条撤销 + 全部撤销
+// 记住的路径跨重启有效，所以插件不必每次开机都让你重选目录；撤销后它要重新让你选。
+// ---------------------------------------------------------------------------
+const refreshGrants = async (id: string) => {
+  if (!pluginFileGrantsSupported()) {
+    grantsSupported.value = false
+    fileGrants.value = []
+    return
+  }
+  grantsSupported.value = true
+  try {
+    fileGrants.value = await collectPluginGrants(id)
+  } catch {
+    fileGrants.value = []
+  }
+}
+
+const revokeGrantEntry = async (entry: PluginGrantEntry) => {
+  const p = selected.value
+  if (!p) return
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? `撤销「${p.name}」对下面这个路径的访问授权？\n${entry.path}\n撤销后，这个插件要再读它就必须重新弹出选择框让你确认。`
+        : `Revoke access for “${p.name}” to this path?\n${entry.path}\nAfterwards the plugin must ask you to pick it again.`,
+      zh.value ? '撤销文件授权？' : 'Revoke file access?',
+      {
+        type: 'warning',
+        confirmButtonText: zh.value ? '撤销' : 'Revoke',
+        cancelButtonText: zh.value ? '取消' : 'Cancel',
+      },
+    )
+  } catch {
+    return
+  }
+  const ok = await revokePluginGrant(p.id, entry.path)
+  await refreshGrants(p.id)
+  if (ok) ElMessage.success(zh.value ? '已撤销这条文件授权' : 'File access revoked')
+  else ElMessage.error(zh.value ? '撤销失败（可能已被撤销）' : 'Revoke failed (it may already be gone)')
+}
+
+const revokeAllGrants = async () => {
+  const p = selected.value
+  if (!p) return
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? `撤销「${p.name}」记住的全部路径（共 ${fileGrants.value.length} 个）？\n撤销后，这个插件要再读文件就必须重新弹出选择框让你确认。`
+        : `Revoke all ${fileGrants.value.length} remembered path(s) for “${p.name}”?\nAfterwards the plugin must ask you to pick files again.`,
+      zh.value ? '撤销全部文件授权？' : 'Revoke all file access?',
+      {
+        type: 'warning',
+        confirmButtonText: zh.value ? '全部撤销' : 'Revoke all',
+        cancelButtonText: zh.value ? '取消' : 'Cancel',
+      },
+    )
+  } catch {
+    return
+  }
+  const ok = await clearPluginGrants(p.id)
+  await refreshGrants(p.id)
+  if (ok) ElMessage.success(zh.value ? '已撤销全部文件授权' : 'All file access revoked')
+  else ElMessage.error(zh.value ? '撤销失败' : 'Revoke failed')
+}
+
 const removeDataEntry = async (entry: PluginDataEntry) => {
   const summary = dataSummary.value
   const id = selectedId.value
@@ -698,19 +818,19 @@ const clearData = async () => {
         ? `清除「${p.name}」的全部数据（当前约 ${sizeText || '未知大小'}）？\n` +
           '清除的内容：该插件的 localStorage 键（aikm.plugin.' +
           p.id +
-          '.*）与本地文件（plugins/' +
+          '.*）、本地文件（plugins/' +
           p.id +
           '/）、插件私有数据（plugins-data/' +
           p.id +
-          '/）。插件本体文件、其它插件的数据都不会动。\n此操作不可撤销。'
+          '/）以及它记住的文件授权（下次读文件要重新让你选）。插件本体文件、其它插件的数据都不会动。\n此操作不可撤销。'
         : `Clear all data of “${p.name}” (currently about ${sizeText || 'unknown'})?\n` +
           'Removes: its localStorage keys (aikm.plugin.' +
           p.id +
           '.*), its local files (plugins/' +
           p.id +
-          '/) and its plugin-private data (plugins-data/' +
+          '/), its plugin-private data (plugins-data/' +
           p.id +
-          '/). Plugin files and other plugins’ data are untouched.\nThis cannot be undone.',
+          '/) and its remembered file access (it will ask you to pick files again). Plugin files and other plugins’ data are untouched.\nThis cannot be undone.',
       zh.value ? '清除插件数据？' : 'Clear plugin data?',
       {
         type: 'warning',
@@ -1055,8 +1175,9 @@ const loadDetail = async (p: PluginSnapshot | undefined) => {
   logText.value = ''
   configText.value = ''
   dataSummary.value = null
+  fileGrants.value = []
   if (!p) return
-  await Promise.all([loadConfig(p), loadLogs(p), refreshData(p.id)])
+  await Promise.all([loadConfig(p), loadLogs(p), refreshData(p.id), refreshGrants(p.id)])
 }
 
 // 列表变化（首次加载 / 搜索过滤 / 插件被移除）后保证选中项始终有效：

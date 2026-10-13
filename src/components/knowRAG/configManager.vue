@@ -125,6 +125,15 @@ const configItems = computed<ConfigItem[]>(() => [
     descriptionEn: 'ON (default): block/file-summary/question vectors are stored in the .kb (fast retrieval but larger file). OFF: vectors are NOT stored, so the .kb is much smaller; vectors are re-derived on first Q&A with the current embed model (slow first time, cached per session; keep the same embed model to avoid dimension mismatch, re-enable + save to write them back).'
   },
   {
+    group: 'process',
+    key: 'saveTestResults',
+    label: '保存测试结果到 KB 文件',
+    labelEn: 'Save Test Results into KB File',
+    type: 'checkbox',
+    description: '开启：保存知识库时把测试页的检索结果、位次分析、策略召回对比统计与智能路由检索过程一并写入 .kb，下次加载即可直接查看/导出这些对比数据（无需重跑），便于复现实验与写论文；代价是 KB 文件变大（切片正文不重复保存，按 id 回源）。关闭（默认）：只保存测试用例（问题/参考答案/关联切片），结果需重跑。注意：结果按切片 id 回源，重新切片或换库后旧结果的正文与命中标记可能失配。',
+    descriptionEn: 'ON: saving the KB also writes the test page results — retrieval results, rank analysis, strategy recall stats and agentic retrieval traces — into the .kb, so they can be reviewed/exported after reloading without re-running (great for reproducible experiments and papers); the KB file gets larger (slice text is not duplicated; content is re-sourced by id). OFF (default): only test cases (question/answer/linked slices) are saved; results must be re-run. Note: results reference slices by id, so after re-slicing or switching KBs, text/hit marks may mismatch.'
+  },
+  {
     group: 'search',
     key: 'searchMethod',
     label: '检索方法',
@@ -258,8 +267,8 @@ const configItems = computed<ConfigItem[]>(() => [
     min: 0,
     max: 1,
     step: 0.05,
-    description: '仅 Agentic 生效：最终重排时融合「工具子查询检索分数」与「原始问题相似度」，值越高越偏向子查询召回的精确结果（0=只用原始问题，1=只用子查询分数）',
-    descriptionEn: 'Agentic only: final rerank blends tool sub-query retrieval score with original-question similarity. Higher = favor precise sub-query recall (0 = original query only, 1 = sub-query score only)'
+    description: '仅 Agentic 生效：最终重排时融合「工具检索通道分」与「原始问题内容余弦」的权重（默认 0.5 等权）。值越高越偏向工具按检索词召回的精确结果，越低越偏向切片正文与原始问题的相似度（0=只用原始问题，1=只用工具通道分）',
+    descriptionEn: 'Agentic only: weight blending the tool retrieval channel score with original-question content similarity in the final rerank (default 0.5, equal). Higher = favor precise tool recall, lower = favor slice-vs-question similarity (0 = original query only, 1 = channel score only)'
   },
   {
     group: 'process',
@@ -797,7 +806,7 @@ const handleStrategiesChanged = () => {
             <div class="config-scroll scoll">
               <div v-if="currentConfigItems.length > 0" class="config-items">
                 <div v-for="item in currentConfigItems" :key="item.key" class="config-item">
-                  <div class="config-item-label" :class="{ left: item.type === 'checkbox' }" :title="t(item.description, item.descriptionEn)">
+                  <div class="config-item-label" :title="t(item.description, item.descriptionEn)">
                     {{ t(item.label, item.labelEn) }}
                   </div>
                   <div class="config-item-field">

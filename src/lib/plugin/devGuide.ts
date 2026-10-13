@@ -68,9 +68,9 @@ export const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或�
    settings.card 的 meta.target 必填（内置设置页 id），不写会出现在所有设置页。细节与完整示例见「设置页签 / 设置卡片模板」一节。
 5. 用到宿主能力必须声明 permissions（可用：fs / shell / net / agent / llm）；未声明就调用会直接抛错。
    启用插件时软件会把申请的权限列给用户确认，所以不要多申请。
-   **fs 不等于能读任意路径**：只能读「用户在该插件里亲自选过」的文件 / 文件夹，且授权到本次运行结束
-   （软件重启后要重新选）。所以流程必须是 pickFiles() / pickDirectory() 让用户选一次 → 把路径存进
-   localStorage（键名带 aikm.plugin.<插件 id>. 前缀）→ 之后直接读；**写死绝对路径一定读不到**（报「未授权访问」）。
+   **fs 不等于能读任意路径**：只能读「用户在该插件里选过」的文件 / 文件夹，选过一次就记住
+   （跨重启有效，可在「插件 → 数据」撤销）。所以流程必须是 pickFiles() / pickDirectory() 让用户选一次 →
+   把路径存进 localStorage（键名带 aikm.plugin.<插件 id>. 前缀）→ 之后直接读；**写死绝对路径一定读不到**（报「未授权访问」）。
 6. 界面半边（client.entry 指向的文件）必须是**单文件 ESM 且没有任何 import/require**：
    宿主把源码包成 Blob URL 再 import，裸模块名（比如 'vue'）在 Blob 模块里无法解析。
    Vue 运行时由宿主注入：apply(ctx) 里从 ctx.vue 取 { h, defineComponent, ref, computed, watch, onMounted, onUnmounted, nextTick } 等。
@@ -127,9 +127,9 @@ export const CONSTRAINTS_EN = `[Hard constraints the host enforces]
    settings.card requires meta.target (a built-in settings page id) — without it the card appears on every settings page. See the “Settings tab / card template” section for the full example.
 5. Host capabilities require permissions (fs / shell / net / agent / llm); calling without declaring throws. Users must confirm the requested
    permissions when enabling the plugin, so ask only for what you need.
-   **fs does not mean “any path”**: a plugin may only read files/folders the user picked *inside that plugin*, and the grant lasts until the
-   app exits (re-pick after a restart). So the flow is pickFiles() / pickDirectory() → store the path in localStorage (key prefixed with
-   aikm.plugin.<plugin id>.) → read it directly. **A hard-coded absolute path is never readable** (“not authorised”).
+   **fs does not mean “any path”**: only files/folders the user picked *inside that plugin* are readable, and a pick is remembered
+   (it survives a restart; the user can revoke it under Plugins → Data). So the flow is pickFiles() / pickDirectory() → store the path in
+   localStorage (key prefixed with aikm.plugin.<plugin id>.) → read it directly. **A hard-coded absolute path is never readable** (“not authorised”).
 6. The UI half (client.entry) must be a single-file ESM with NO imports/requires: the host loads it as a Blob URL module, so bare specifiers
    (e.g. 'vue') cannot resolve. Vue is injected: take { h, defineComponent, ref, computed, watch, onMounted, onUnmounted, nextTick } from ctx.vue.
    The UI half has **only** the members documented for ctx: there is **no ctx.service / ctx.mcp** (MCP services are agent-only) and **no
@@ -242,8 +242,8 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
   },
   {
     name: 'ctx.files.pickFiles / pickDirectory / list / readText / readBase64 / readSheet / renderPdfPage / openInApp',
-    descZh: '文件能力（权限 fs）。**这些方法全部返回 Promise，必须 await**；返回形状：pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] }（**取消时 cancelled=true，不抛错**，路径取 files[0].path）；readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] }（.xlsx/.xls/.csv，**界面半边没有 SheetJS，读表就用它**）；readText(path) → { text, pages, pdf }（PDF 自动提取正文）；readBase64(path) → { base64, size }；list(dir) → { dir, entries: [{ name, path, isDir, size }] }；renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }。只能访问用户在该插件里**选过**的路径，且授权仅本次运行有效（重启后要重新选）。',
-    descEn: 'File capability (permission fs). **Every method returns a Promise — always await.** Shapes: pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] } (**cancellation sets cancelled=true, it does not throw**; take files[0].path); readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } (.xlsx/.xls/.csv — **the UI half has no SheetJS, use this**); readText(path) → { text, pages, pdf }; readBase64(path) → { base64, size }; list(dir) → { dir, entries: [{ name, path, isDir, size }] }; renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }. Only paths the user picked for this plugin are readable, and the grant lasts for the current run only.',
+    descZh: '文件能力（权限 fs）。**这些方法全部返回 Promise，必须 await**；返回形状：pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] }（**取消时 cancelled=true，不抛错**，路径取 files[0].path）；readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] }（.xlsx/.xls/.csv，**界面半边没有 SheetJS，读表就用它**）；readText(path) → { text, pages, pdf }（PDF 自动提取正文）；readBase64(path) → { base64, size }；list(dir) → { dir, entries: [{ name, path, isDir, size }] }（**一次最多 500 项**）；renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }。只能访问用户在该插件里**选过**的路径，选过一次会记住（跨重启有效，用户可在「插件 → 数据」撤销）。',
+    descEn: 'File capability (permission fs). **Every method returns a Promise — always await.** Shapes: pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] } (**cancellation sets cancelled=true, it does not throw**; take files[0].path); readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } (.xlsx/.xls/.csv — **the UI half has no SheetJS, use this**); readText(path) → { text, pages, pdf }; readBase64(path) → { base64, size }; list(dir) → { dir, entries: [{ name, path, isDir, size }] } (**at most 500 entries at a time**); renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }. Only paths the user picked for this plugin are readable, and a pick is remembered (it survives a restart; the user can revoke it under Plugins → Data).',
   },
   {
     name: 'ctx.tts.speak(text, { stopPrevious }) / ctx.tts.stop() / ctx.tts.available / ctx.tts.reason',
@@ -341,8 +341,8 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
   {
     qZh: '读文件报「未授权访问」',
     qEn: 'Reading a file fails with “not authorised”.',
-    aZh: '插件只能读**用户在该插件里亲自选过**的路径（写死的绝对路径不算），且授权只到本次运行结束（软件重启后要重新选）。所以流程是：await ctx.files.pickFiles() 让用户选一次 → 把 res.files[0].path 存起来（localStorage `aikm.plugin.<插件 id>.*`）→ 之后直接读；万一报未授权，就再次弹选择框让用户确认。',
-    aEn: 'A plugin may only read paths the user picked **inside that plugin** (a hard-coded absolute path is not authorised), and the grant lasts until the app exits (re-pick after a restart). So: `await ctx.files.pickFiles()` once, store `res.files[0].path` (localStorage `aikm.plugin.<id>.*`), then read it directly — and if a read is refused, ask the user to pick again.',
+    aZh: '插件只能读**用户在该插件里亲自选过**的路径（写死的绝对路径不算），选过一次就会记住（跨重启有效，用户可在「插件 → 数据」里撤销）。所以流程是：await ctx.files.pickFiles() 让用户选一次 → 把 res.files[0].path 存起来（localStorage `aikm.plugin.<插件 id>.*`）→ 之后直接读；万一报未授权，就再次弹选择框让用户确认。',
+    aEn: 'A plugin may only read paths the user picked **inside that plugin** (a hard-coded absolute path is not authorised), and a pick is remembered (it survives a restart; the user can revoke it under Plugins → Data). So: `await ctx.files.pickFiles()` once, store `res.files[0].path` (localStorage `aikm.plugin.<id>.*`), then read it directly — and if a read is refused, ask the user to pick again.',
   },
   {
     qZh: '选了文件却「没有数据」/ 面板一直显示空（忘了 await 或返回形状用错）',

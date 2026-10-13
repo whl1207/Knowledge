@@ -85,6 +85,20 @@ const onTestCasesChange = (data: { questions: string[], answers: string[], refs?
     }
 }
 
+// 测试页结果快照（结构由 testManager 定义）：仅在「处理配置 → 保存测试结果到 KB 文件」开启时写入 .kb。
+// 传引用不深拷贝：保存时序列化即可，避免每轮测试都复制大数组。
+interface KbTestData {
+    savedAt?: string
+    settings?: { searchNum?: number; repeat?: number; hitMode?: string; matchMode?: string }
+    testResults?: any[]
+    rankAnalysisResults?: any[]
+    allStrategyStats?: any[]
+    allStrategySliceResults?: any[]
+    strategyRuns?: Record<string, any[]>
+}
+const testData = ref<KbTestData | null>(null)
+const onTestDataChange = (data: KbTestData) => { testData.value = data || null }
+
 let idCounters = {
     block: 0,
     entity: 0,
@@ -228,6 +242,9 @@ let agentSteps = ref<Array<{
     args: any
     result: string
     status: 'running' | 'done' | 'error'
+    /** 步骤来源：prefetch=系统预取 / tool=模型调用 / fallback=模型未调工具时系统补检索 / model=模型回合决策 */
+    kind?: 'prefetch' | 'tool' | 'fallback' | 'model'
+    note?: string
 }>>([])
 
 // 问答右侧面板 tab（推理路径 / 佐证，两栏切换）
@@ -254,6 +271,15 @@ const qaAgentToolLabel = (tool: string): string => {
         'community_search': store.locales == 'zh' ? '社区搜索' : 'community_search',
     }
     return map[tool] || tool
+}
+
+// 推理路径步骤来源标签：系统预取 / 模型决策 / 模型工具 / 系统补检索
+const qaAgentStepKind = (st: any): string => {
+    const kind = st?.kind || 'tool'
+    if (kind === 'prefetch') return store.locales == 'zh' ? '系统预取' : 'pre-fetch'
+    if (kind === 'model') return store.locales == 'zh' ? '模型决策' : 'model'
+    if (kind === 'fallback') return store.locales == 'zh' ? '系统补检索' : 'fallback'
+    return store.locales == 'zh' ? '模型工具' : 'tool'
 }
 
 // 佐证筛选（topK）：按来源（method）分组、组内按分数降序（0 分保持原序），
@@ -427,8 +453,9 @@ let model = ref({
     searchCharacter:2500,
     chat: curLlmCfg.model || store.AIconfig.llm.ollama.model,
     sliceStrategy:"语义",
-    // Agentic 最终重排：融合工具子查询检索分数的权重（0=只用原始问题，1=只用子查询分数）
-    agentSubQueryWeight: 0.3,
+    // Agentic 最终重排：融合工具通道分（子查询/原始问题检索分）与原始问题内容余弦的权重
+    // （默认等权 0.5；0=只用原始问题内容余弦，1=只用工具通道分）
+    agentSubQueryWeight: 0.5,
     sliceMaxChars: 4000,
     sliceOverlapChars: 300,
     semanticSplitThreshold: 0.86,
@@ -449,6 +476,9 @@ let model = ref({
     sliceWeight: 1.0,
     // 是否把向量数据写入 .kb 文件（false=精简模式：不存向量、KB 文件更小，首次问答按需重新向量化）
     saveVectors: true,
+    // 是否把「测试页结果」写入 .kb 文件（默认 false=不写）：测试用例本来就会保存，这里额外保存
+    // 检索结果/位次分析/策略召回对比/检索过程，重新加载即可复现对比数据（不重跑），代价是 KB 变大
+    saveTestResults: false,
     // BM25相关配置
     bm25Enabled: false,
     bm25Weight: 0.3,
@@ -4162,7 +4192,7 @@ const buildRetrievalContext = (query: string): RetrievalContext => {
             think: modelCfg.think,
             // 实体链接 LLM 兜底开关（关闭后本体增强只用嵌入模型，避免每轮查询换载对话模型）
             entityLinkLlm: modelCfg.entityLinkLlm !== false,
-            agentSubQueryWeight: modelCfg.agentSubQueryWeight ?? 0.3,
+            agentSubQueryWeight: modelCfg.agentSubQueryWeight ?? 0.5,
         },
         services: kbAi.buildRetrievalServices(buildKbSpec(), { cosineSimilarity, computeBM25: computeBM25Score }),
     }
@@ -4458,6 +4488,8 @@ const save = async function(){
             version: "3.0",
             // false=精简模式：向量未写入 .kb（加载时据此恢复开关并标记）
             saveVectors: persistVectors,
+            // 是否把测试页结果写入 .kb（false 时写入 null，显式覆盖旧文件中的测试结果）
+            saveTestResults: model.value.saveTestResults === true,
             summaryWeight: model.value.summaryWeight,
             sliceWeight: model.value.sliceWeight,
             ontologyBatchSize: model.value.ontologyBatchSize,
@@ -4499,6 +4531,8 @@ const save = async function(){
         } : null,
         communityReports: communityReports.value,
         testCases: testCases.value,
+        // 测试页结果（检索结果/位次分析/策略召回对比/检索过程）：仅在勾选「保存测试结果到 KB 文件」时落盘
+        testData: model.value.saveTestResults === true ? (testData.value || null) : null,
         // 精简模式：问题向量(qVector)不写入 .kb（内存保留；问题语义增强/首次问答按需补全）
         questions: persistVectors
             ? questionBank.value
@@ -4631,6 +4665,11 @@ const loadKnowledgeBases = async function(index?: number) {
         if (saveData.config.saveVectors !== undefined) {
             model.value.saveVectors = saveData.config.saveVectors !== false
         }
+        // 测试结果开关与快照：开关随 .kb 恢复；快照存在即恢复（哪怕当前开关被关掉，先展示已有数据，重存时才按开关丢弃）
+        if (saveData.config.saveTestResults !== undefined) {
+            model.value.saveTestResults = saveData.config.saveTestResults === true
+        }
+        testData.value = (saveData as any).testData || null
         if (saveData.config.ontologyBatchSize !== undefined) {
             model.value.ontologyBatchSize = saveData.config.ontologyBatchSize
         }
@@ -5959,6 +5998,7 @@ const resetKbState = () => {
     result.value = ''
     currentEvidence.value = []
     testCases.value = { questions: [], answers: [], source: 'bank' }
+    testData.value = null
     fileSummaries.value.clear()
     fileIndex.value.clear()
     buildManifest.value = {}
@@ -6592,8 +6632,10 @@ onBeforeUnmount(() => {
                 <div v-if="activeRightTab === 'steps' && agentSteps.length > 0" class="qa-right-body">
                     <div v-for="(st, i) in agentSteps" :key="i" class="qa-agent-step" :class="st.status">
                         <div class="qa-agent-step-head">
-                            <span class="qa-agent-step-round">#{{ st.round }}</span>
-                            <span class="qa-agent-step-tool">{{ qaAgentToolLabel(st.tool) }}</span>
+                            <span class="qa-agent-step-round">{{ st.kind === 'prefetch' ? '预' : '#' + st.round }}</span>
+                            <span class="qa-agent-step-kind" :class="st.kind || 'tool'">{{ qaAgentStepKind(st) }}</span>
+                            <span v-if="st.tool" class="qa-agent-step-tool">{{ qaAgentToolLabel(st.tool) }}</span>
+                            <span v-if="st.note" class="qa-agent-step-note">{{ st.note }}</span>
                             <span class="qa-agent-step-status" :class="st.status">
                                 <i class="fa" :class="st.status === 'running' ? 'fa-spinner fa-spin' : st.status === 'done' ? 'fa-check-circle' : 'fa-times-circle'"></i>
                                 {{ store.locales == 'zh' ? (st.status === 'running' ? '执行中' : st.status === 'done' ? '完成' : '失败') : st.status }}
@@ -6814,6 +6856,7 @@ onBeforeUnmount(() => {
                 :communityResult="communityResult"
                 :chatWithOntology="chatWithOntology"
                 :testCases="testCases"
+                :testData="testData"
                 :onRefreshTestCases="refreshTestCasesFromBank"
                 :fileIndex="fileIndex"
                 :questionVectorsByBlock="questionVectorsByBlockIndex()"
@@ -6825,6 +6868,7 @@ onBeforeUnmount(() => {
                 :questionVectorMissing="questionVectorMissingCount"
                 :onTestEmbedChange="handleTestEmbedModelChange"
                 @testCasesChange="onTestCasesChange"
+                @testDataChange="onTestDataChange"
                 @updateState="(state:any) => kb_state = state"
                 @updateLiveState="(state:any) => kbLiveState = state"
                 @updateDedupProgress="(p:any) => dedupProgress = p"
@@ -7229,6 +7273,15 @@ onBeforeUnmount(() => {
         font-weight: 500;
         color: var(--fontColor);
     }
+    .qa-agent-step-kind {
+        font-size: 9px; padding: 0 4px; line-height: 14px; border-radius: 3px; white-space: nowrap;
+        border: 1px solid var(--borderColor); color: var(--borderColor);
+    }
+    .qa-agent-step-kind.prefetch { border-color: #607D8B; color: #607D8B; }
+    .qa-agent-step-kind.tool { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+    .qa-agent-step-kind.fallback { border-color: #FF9800; color: #FF9800; }
+    .qa-agent-step-kind.model { border-color: var(--borderColor); color: var(--fontColor); opacity: .7; }
+    .qa-agent-step-note { font-size: 9px; color: var(--fontColor); opacity: .7; }
     .qa-agent-step-status {
         font-size: 9px;
         margin-left: auto;

@@ -100,7 +100,8 @@ export interface ClientPluginContext {
   readonly llm: PluginLlmApi
   /**
    * 文件能力：选文件 / 选文件夹 / 列目录 / 读文本（PDF 自动提取）/ 渲染 PDF 页面 / 应用内置查看器打开。
-   * 需要清单声明 `permissions: ['fs']`；主进程另有「只能访问用户在该插件里选过的路径」的授权校验。
+   * 需要清单声明 `permissions: ['fs']`；主进程另有「只能访问用户在该插件里选过的路径」的授权校验
+   * （选一次就记住、跨重启有效，可在「插件 → 数据」里撤销）。
    */
   readonly files: PluginFilesApi
   /** 应用信息（只读）：名称 / 版本 / 语言、预设智能体清单 */

@@ -1,5 +1,6 @@
 // src/shared/kbRetrieval.ts
 import { runStrategy, getStrategies } from '@/shared/graphrag/strategy'
+import type { AgentStep } from '@/shared/graphrag/strategy'
 import type { RetrievalContext } from '@/shared/graphrag/primitives'
 import * as kbAi from '@/shared/kbAiClient'
 import type { KbModelSpec, KbProvider } from '@/shared/kbAiClient'
@@ -71,6 +72,8 @@ export interface RetrievalResult {
   relevantBlocks: RelevantBlock[]
   /** 实际使用的嵌入模型 */
   usedEmbedModel: string
+  /** Agentic（智能路由）策略：本次检索的工具调用轨迹（供主页按智能体工具卡片样式展示） */
+  agentSteps?: AgentStep[]
   /** 调试信息（仅在debug=true时返回） */
   debugInfo?: {
     config: RetrievalOptions
@@ -379,6 +382,8 @@ export async function retrieveKnowledge(
     let context = ''
     let relevantBlocks: RelevantBlock[] = []
     let selectedCount = 0
+    // Agentic 工具调用轨迹（running 追加 / done·error 原地回填）
+    const agentSteps: AgentStep[] = []
 
     // 相似度路径：复用已计算的 queryEmbedding / fileSummaryVectors
     const runSimilarityFallback = () => {
@@ -400,9 +405,13 @@ export async function retrieveKnowledge(
       runSimilarityFallback()
     } else {
       let sr: any = null
-      // 仅 pipeline 类策略可在主页执行（mapreduce/agentic 需要聊天模型与完整社区上下文，主页回退相似度）
+      // 主页可执行：pipeline（无需对话模型）；agentic（智能路由）需要对话模型做工具路由
+      // （mapreduce 需要完整社区上下文，仍回退相似度）
       const strategyDef = getStrategies().find(s => s.id === strategyId)
-      const canRunStrategy = strategyDef && strategyDef.kind === 'pipeline'
+      const canRunStrategy = !!strategyDef && (
+        strategyDef.kind === 'pipeline' ||
+        (strategyDef.kind === 'agentic' && !!String(spec?.chat || '').trim())
+      )
       if (!canRunStrategy) {
         runSimilarityFallback()
       } else {
@@ -411,7 +420,13 @@ export async function retrieveKnowledge(
             query, blocks, kbConfig, ontology, communityReports, communityResult, fileIndex, questions,
             spec, embedSpec, embedModel: effectiveEmbedModel, config,
           })
-          sr = await runStrategy(strategyId, query, ctx, {})
+          // Agentic：收集工具调用轨迹（主页按智能体工具卡片样式展示）+ 只做召回（回答仍由聊天流程统一生成）
+          const isAgentic = strategyDef.kind === 'agentic'
+          sr = await runStrategy(
+            strategyId, query, ctx,
+            isAgentic ? { onAgentStep: (st: AgentStep) => upsertAgentStep(agentSteps, st) } : {},
+            isAgentic ? { skipAnswer: true } : {},
+          )
         } catch (error) {
           console.warn(`策略框架检索失败（${strategyId}），回退相似度:`, error)
           sr = null
@@ -437,7 +452,9 @@ export async function retrieveKnowledge(
     const result: RetrievalResult = {
       context,
       relevantBlocks,
-      usedEmbedModel: effectiveEmbedModel
+      usedEmbedModel: effectiveEmbedModel,
+      // Agentic：工具调用轨迹（含系统预取/模型决策/系统补检索）随结果回传，供主页展示
+      ...(agentSteps.length ? { agentSteps } : {}),
     }
 
     // 9. 添加调试信息（如果需要）
@@ -570,6 +587,25 @@ function buildSpecFromOptions(config: Required<RetrievalOptions>): KbModelSpec {
     // 当前来源无嵌入模型时，嵌入回退到「嵌入兜底」设置的来源（默认 Ollama；聊天/处理仍用原来源）
     embedFallback: fbEmbed ? { llmType: fbType, config: fbProviderCfg, embed: fbEmbed } : undefined,
   }
+}
+
+/**
+ * 合并 Agentic 工具调用步骤：running 追加新条目；done / error 原地回填最近一条同轮同工具的 running 条目
+ * （同一轮同一工具可能被调用多次，与 knowRAG / 测试页的展示口径一致）。
+ */
+function upsertAgentStep(list: AgentStep[], step: AgentStep): void {
+  if (step.status === 'running') {
+    list.push(step)
+    return
+  }
+  for (let i = list.length - 1; i >= 0; i--) {
+    const s = list[i]
+    if (s.round === step.round && s.tool === step.tool && s.status === 'running') {
+      list[i] = step
+      return
+    }
+  }
+  list.push(step)
 }
 
 /**

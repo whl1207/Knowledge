@@ -316,6 +316,63 @@ export async function removePluginDataEntry(id: string, entry: PluginDataEntry):
   }
 }
 
+// ---------------------------------------------------------------------------
+// 文件授权（用户在该插件里选过的路径）：落盘在主进程，见 electron/main/plugin-grants.ts
+// ---------------------------------------------------------------------------
+export interface PluginGrantEntry {
+  path: string
+  isDir: boolean
+  exists: boolean
+}
+
+/** 文件授权桥（与 dataBridge 同一套降级规则：网页版返回 null） */
+function grantsBridge(): Pick<PluginBridgeApi, 'files'>['files'] | null {
+  const api = getPluginBridge()
+  const files = api && api.files
+  return files && typeof files.grants === 'function' ? files : null
+}
+
+/** 环境是否支持查看插件的文件授权（桌面版才有） */
+export function pluginFileGrantsSupported(): boolean {
+  return grantsBridge() !== null
+}
+
+/** 该插件记住的、可以被读取的文件 / 文件夹（跨重启有效） */
+export async function collectPluginGrants(id: string): Promise<PluginGrantEntry[]> {
+  const files = grantsBridge()
+  if (!files) return []
+  try {
+    const res = await files.grants({ id })
+    return Array.isArray(res?.entries) ? res.entries : []
+  } catch {
+    return []
+  }
+}
+
+/** 撤销一条文件授权（下次该插件再读这个路径就要重新让用户选） */
+export async function revokePluginGrant(id: string, target: string): Promise<boolean> {
+  const files = grantsBridge()
+  if (!files) return false
+  try {
+    const res = await files.revokeGrant({ id, path: target, confirm: true })
+    return res?.removed !== false
+  } catch {
+    return false
+  }
+}
+
+/** 清掉某个插件的全部文件授权 */
+export async function clearPluginGrants(id: string): Promise<boolean> {
+  const files = grantsBridge()
+  if (!files) return false
+  try {
+    const res = await files.clearGrants({ id, confirm: true })
+    return res?.removed !== false
+  } catch {
+    return false
+  }
+}
+
 /** 清空一个插件的全部数据（localStorage + `plugins/<id>/` + 主进程 `plugins-data/<id>/`） */
 export async function clearPluginData(id: string): Promise<{ keys: number; files: number }> {
   const keys = pluginLsKeys(id)
@@ -350,6 +407,12 @@ export async function clearPluginData(id: string): Promise<{ keys: number; files
     } catch {
       /* 删不掉就保持原样，界面上会看到它还在 */
     }
+  }
+  // 「清空全部数据」也把记住的文件授权一起收回（否则插件重启后还能读那些路径）
+  try {
+    await clearPluginGrants(id)
+  } catch {
+    /* 撤销失败就保持原样 */
   }
   return { keys: keys.length, files }
 }

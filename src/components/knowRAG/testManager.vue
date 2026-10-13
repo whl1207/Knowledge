@@ -3,7 +3,8 @@ import { ref, computed, reactive, watch, onMounted, nextTick } from 'vue'
 import block_md from '@/components/block_md.vue'
 import * as XLSX from 'xlsx'
 import {usestore} from '@/store'
-import { runStrategy, getEnabledStrategies } from '@/shared/graphrag/strategy'
+import { runStrategy, getEnabledStrategies, getStrategy } from '@/shared/graphrag/strategy'
+import type { AgentStep } from '@/shared/graphrag/strategy'
 import { computeBM25Score } from '@/shared/graphrag/search'
 import { INGESTION_PRIMITIVES, prewarmEntityVectors, entityVectorCacheStats } from '@/shared/graphrag/primitives'
 import type { RetrievalContext, IngestionContext } from '@/shared/graphrag/primitives'
@@ -62,14 +63,54 @@ interface Props {
   questionBankCount?: number
   // 未向量化的问题数（预热项「问题向量缓存」的已就绪判断）
   questionVectorMissing?: number
+  /** 随 .kb 保存/加载的测试页结果快照（结构见 SavedTestData；来自 JSON 文件故按 any 接收并做运行时校验） */
+  testData?: any
 }
 
 // 检索策略类型（与 QA 标签页的检索方式对齐，策略可配置）
 type SearchAlgorithm = string
 
+/** Agentic（智能路由）检索过程：工具调用轨迹 + 工具就绪汇总（供测试结果「检索过程」按钮回显） */
+interface AgentTrace {
+  /** 工具调用步骤（每轮每个工具一条，含参数与返回结果） */
+  steps: AgentStep[]
+  /** 本次实际暴露给模型的工具名（已按开关与数据就绪过滤） */
+  tools: string[]
+  /** 因索引未就绪被隐藏的工具名（模型不会调用） */
+  droppedTools: string[]
+  /** 模型未返回工具调用、退化为单次稠密检索 */
+  degraded?: boolean
+  /** 模型全程未调用任何检索工具（工具定义已下发但未被使用） */
+  noToolCalls?: boolean
+  /** 模型不调工具时已执行「确定性补充召回」 */
+  fallback?: boolean
+  /** 对话模型调用次数（含工具轮与最终作答） */
+  llmCalls: number
+}
+
+/**
+ * 测试页结果快照（随 .kb 保存/加载）。
+ * 仅在「处理配置 → 保存测试结果到 KB 文件」开启时写入 .kb；切片正文一律不存，按 id 回源知识库，
+ * 因此体积主要来自位次分析与智能路由的检索过程文本。
+ */
+interface SavedTestData {
+  savedAt: string
+  /** 测试页设置（复现同一批结果用） */
+  settings: { searchNum: number; repeat: number; hitMode: 'slice' | 'text' | 'llm'; matchMode: 'precise' | 'fuzzy' }
+  /** 每题最新一次检索结果 */
+  testResults: TestResult[]
+  /** 位次分析（含智能路由的检索过程轨迹） */
+  rankAnalysisResults: RankAnalysisResult[]
+  /** 策略召回对比汇总（含成本列与重复运行的均值/标准差） */
+  allStrategyStats: any[]
+  /** 策略 × 问题 × 切片明细（导出用） */
+  allStrategySliceResults: any[]
+  /** 重复运行的各轮汇总（恢复均值±标准差用） */
+  strategyRuns: Record<string, StrategyRunStat[]>
+}
+
 // 测试结果类型
-interface TestResult {
-  question: string
+interface TestResult {  question: string
   answer: string
   algorithm: SearchAlgorithm
   slices: Array<{
@@ -84,6 +125,8 @@ interface TestResult {
     isReferenceSlice: boolean
     /** 是否命中本问题判定基准：有关联切片时=isReferenceSlice；无关联切片（手动/导入）时=参考答案文本匹配 */
     containsAnswer: boolean
+    /** LLM 判定模式下：该切片被大模型判为答案所在片段（紧随其后的位次不再重复标记） */
+    llmHit?: boolean
     answerText: string
     rank: number
     detailedScores: {
@@ -108,6 +151,14 @@ interface TestResult {
   recallTimeMs?: number
   /** 本问题的关联切片判定基准（来源切片/参考切片，随 testCases.refs 行对齐传入） */
   ref?: TestCaseRef
+  /** Agentic（智能路由）：本次检索的工具调用过程（其它策略为 undefined） */
+  agent?: AgentTrace
+  /** 大模型判定结果（仅 hitMode='llm' 且智能路由策略）：命中与否、最前位次与理由 */
+  llmJudge?: { hit: boolean; rank: number; reason: string; error?: string }
+  /** 本次检索的对话模型调用次数（Agentic 工具轮 + 最终作答；社区 Map-Reduce 等也有值）：成本对比用 */
+  llmCalls?: number
+  /** 本次检索的工具调用次数（Agentic：工具步骤数；其它策略为 0） */
+  toolCalls?: number
   testConfig: {
     searchNum: number
     summaryWeight: number
@@ -125,8 +176,8 @@ interface RankAnalysisResult {
   bestRank: number
   foundCount: number
   answerParts?: string[]
-  /** 判定基准类型：slice=按关联切片身份比对；text=按参考答案文本（手动/导入无关联切片） */
-  refMode?: 'slice' | 'text'
+  /** 判定基准类型：slice=按关联切片身份比对；text=按参考答案文本（手动/导入无关联切片）；llm=大模型判定 */
+  refMode?: 'slice' | 'text' | 'llm'
   hitRate?: number
   hitCount?: number
   totalAnswers?: number
@@ -141,6 +192,14 @@ interface RankAnalysisResult {
   timestamp: string
   /** 本次召回耗时（毫秒） */
   timeMs?: number
+  /** Agentic（智能路由）：本次检索的工具调用过程（供批量面板「检索过程」回看） */
+  agent?: AgentTrace
+  /** 大模型判定结果（仅大模型判定模式：命中与否、最前位次与理由） */
+  llmJudge?: { hit: boolean; rank: number; reason: string; error?: string }
+  /** 本次检索的对话模型调用次数（成本对比用） */
+  llmCalls?: number
+  /** 本次检索的工具调用次数（Agentic：agent.steps 长度；其它策略为 0） */
+  toolCalls?: number
 }
 
 const props = defineProps<Props>()
@@ -150,11 +209,14 @@ const test = reactive({
   questions: [''] as string[],
   answers: [''] as string[],
   refs: [] as TestCaseRef[],
-  /** 命中判定基准：'slice'=切片精准命中（默认，按关联切片身份比对）；'text'=答案命中（按参考答案文本匹配，旧口径） */
-  hitMode: 'slice' as 'slice' | 'text',
+  /** 命中判定基准：'slice'=切片精准命中（默认，按关联切片身份比对）；'text'=答案命中（按参考答案文本匹配，旧口径）；
+   *  'llm'=大模型判定（仅智能路由类策略可用：由对话模型对比检索片段与问题/参考答案给命中与位次） */
+  hitMode: 'slice' as 'slice' | 'text' | 'llm',
   /** 答案命中子策略：'precise'=精准（切片须完整包含某段参考答案）；'fuzzy'=模糊（整段/反向前缀/分段/词比例任一命中，旧口径） */
   matchMode: 'fuzzy' as 'precise' | 'fuzzy',
   searchNum: 5 as any,
+  /** 「批量测试所有策略」的重复次数：同批问题重复 N 轮，用于报告各指标均值±标准差（1=不重复） */
+  repeat: 1 as any,
   isRunning: false,
   progress: 0,
   currentAlgorithm: 'similarity' as SearchAlgorithm,
@@ -286,13 +348,15 @@ const clearJudgementResults = () => {
   rankAnalysisResults.value = []
   allStrategyStats.value = []
   allStrategySliceResults.value = []
+  strategyRuns.value = {}
   test.questionStatus = test.questions.map(() => ({
     text: store.locales=='zh' ? '未测试' : 'Not Tested',
     color: 'var(--borderColor)', icon: 'fa fa-circle-o'
   }))
+  emitTestData()
 }
-watch(() => test.hitMode, () => { if (!test.isRunning) clearJudgementResults() })
-watch(() => test.matchMode, () => { if (!test.isRunning) clearJudgementResults() })
+watch(() => test.hitMode, () => { if (!test.isRunning && !restoringTestData) clearJudgementResults() })
+watch(() => test.matchMode, () => { if (!test.isRunning && !restoringTestData) clearJudgementResults() })
 
 // 手动清空全部测试结果（释放内存）
 const clearAllResults = () => {
@@ -487,6 +551,50 @@ const openGoldPreview = (qIndex: number) => {
   }
 }
 
+// ===== 智能路由（Agentic）检索过程模态框：工具调用轨迹（轮次 / 工具 / 参数 / 结果） =====
+const agentTrace = ref<{ question: string; heading: string; agent: AgentTrace; judge?: { hit: boolean; rank: number; reason: string; error?: string } } | null>(null)
+const closeAgentTrace = () => { agentTrace.value = null }
+// Agentic 工具中文标签（与问答侧「推理路径」面板同一套文案）
+const agentToolLabel = (tool: string): string => {
+  const map: Record<string, string> = {
+    'kb_search': store.locales == 'zh' ? '事实检索' : 'kb_search',
+    'file_search': store.locales == 'zh' ? '文件搜索' : 'file_search',
+    'entity_link': store.locales == 'zh' ? '实体定位' : 'entity_link',
+    'entity_slice': store.locales == 'zh' ? '实体切片' : 'entity_slice',
+    'graph_hop': store.locales == 'zh' ? '图谱多跳' : 'graph_hop',
+    'community_search': store.locales == 'zh' ? '社区搜索' : 'community_search',
+  }
+  return map[tool] || tool
+}
+const agentStepArgsText = (args: any): string => {
+  if (!args || Object.keys(args).length === 0) return ''
+  try { return JSON.stringify(args) } catch { return '' }
+}
+/** 步骤来源标签：系统预取 / 模型决策 / 模型工具 / 系统补检索 */
+const agentStepKindLabel = (st: AgentStep): string => {
+  const kind = st.kind || 'tool'
+  if (kind === 'prefetch') return store.locales == 'zh' ? '系统预取' : 'pre-fetch'
+  if (kind === 'model') return store.locales == 'zh' ? '模型决策' : 'model'
+  if (kind === 'fallback') return store.locales == 'zh' ? '系统补检索' : 'fallback'
+  return store.locales == 'zh' ? '模型工具' : 'tool'
+}
+// 某问题的智能路由检索过程（仅智能路由策略的结果有值；无则 undefined → 不显示「过程」按钮）
+const rowAgent = (qIndex: number): AgentTrace | undefined => testResults.value[qIndex]?.agent
+/** 该问题的「检索步骤数」= 模型工具调用 + 系统补检索（系统预取与模型决策不计入） */
+const agentRetrievalStepCount = (agent?: AgentTrace): number =>
+  (agent?.steps || []).filter(s => (s.kind || 'tool') === 'tool' || s.kind === 'fallback').length
+const openAgentTrace = (source: { question?: string; agent?: AgentTrace; llmJudge?: { hit: boolean; rank: number; reason: string; error?: string } } | undefined | null) => {
+  if (!source?.agent) return
+  agentTrace.value = {
+    question: source.question || '',
+    heading: store.locales == 'zh' ? '智能路由检索过程' : 'Agentic retrieval trace',
+    agent: source.agent,
+    judge: source.llmJudge,
+  }
+}
+const agentTraceRoundCount = computed(() =>
+  (agentTrace.value?.agent.steps || []).reduce((max, s) => Math.max(max, s.round || 0), 0))
+
 const rowGoldList = (idx: number) => {
   const ref = test.refs?.[idx]
   const ids = ref ? [...(ref.blockIds || [])] : []
@@ -511,7 +619,7 @@ const rowGoldCount = (idx: number): number => rowGoldList(idx).length
 const rowGoldHitCount = (idx: number): number => rowGoldList(idx).filter(g => g.hit).length
 
 // 位次分析页列头随判定基准类型变化（首行模式）
-const rankRefMode = computed<'slice' | 'text'>(() => rankAnalysisResults.value[0]?.refMode || 'text')
+const rankRefMode = computed<'slice' | 'text' | 'llm'>(() => rankAnalysisResults.value[0]?.refMode || 'text')
 
 // ==================== 答案命中（text 模式）子策略：精准 / 模糊 ====================
 // 参考答案按 | 分段（去空白段）——精准模式按段判定，位次分析也按段展示命中成分/完整率
@@ -584,7 +692,10 @@ const ensureTestVectors = async (): Promise<boolean> => {
 async function performSearch(question: string, searchNum: number, algorithm: SearchAlgorithm, answer?: string, ref?: TestCaseRef): Promise<{
   slices: TestResult['slices'],
   avgScore: number,
-  timeMs: number
+  timeMs: number,
+  agent?: AgentTrace,
+  llmCalls: number,
+  toolCalls: number
 }> {
   const startTime = performance.now()
   // 该策略启用的增强通道（决定是否展示「通道缺失·切片分兜底」标记）
@@ -619,6 +730,8 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
       think: props.model.think,
       // 实体链接 LLM 兜底开关（关闭后本体增强评测全程只用嵌入模型，不再逐题换载对话模型）
       entityLinkLlm: props.model.entityLinkLlm !== false,
+      // Agentic 最终重排权重（评测与 QA 用同一配置，避免评测口径与实际问答不一致）
+      agentSubQueryWeight: props.model.agentSubQueryWeight ?? 0.5,
     },
     services: kbAi.buildRetrievalServices(kbSpec(), {
       cosineSimilarity,
@@ -627,6 +740,20 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
   }
 
   const sr = await runStrategy(algorithm, question, ctx, {}, { skipAnswer: true })
+
+  // Agentic（智能路由）：把工具调用轨迹与工具就绪信息带回，供测试结果「检索过程」按钮回显
+  // （runAgentic 已在 meta 内收口 running→done 的合并，其它策略无该字段）
+  const agent: AgentTrace | undefined = getStrategy(algorithm)?.kind === 'agentic'
+    ? {
+        steps: (sr.meta.agentSteps || []) as AgentStep[],
+        tools: sr.meta.agentTools || [],
+        droppedTools: sr.meta.agentDroppedTools || [],
+        degraded: !!sr.meta.agentDegraded,
+        noToolCalls: !!sr.meta.agentNoToolCalls,
+        fallback: !!sr.meta.agentFallback,
+        llmCalls: sr.meta.llmCalls || 0,
+      }
+    : undefined
 
   // 通道分解分明细：dense_score/file_score 把「切片/问题/文件」原始通道分经管线累积到 sr.meta.blockDetails，
   // 这里按 blockId 取出，供查看模态框分项展示；总分(results.score)仍为各通道按策略权重合成的最终值
@@ -717,15 +844,64 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
   slices.sort((a, b) => (b.score || 0) - (a.score || 0))
   slices.forEach((s, i) => { s.rank = i + 1 })
 
-  return { slices, avgScore, timeMs: Math.round(performance.now() - startTime) }
+  return { slices, avgScore, timeMs: Math.round(performance.now() - startTime), agent, llmCalls: sr.meta.llmCalls || 0, toolCalls: agent?.steps.length || 0 }
 }
 
+
+// ==================== 大模型判定（仅智能路由类策略可用） ====================
+// 由对话模型对比「检索到的片段」与问题 / 参考答案，判定是否命中以及最前命中位次。
+// 用途：检索可能命中「同义但非同一切片」的内容（如改写过的答案），切片身份比对会漏判。
+// 说明：判定发生在检索计时之外（不计入平均检索时间），但会累加进「模型调用 / 题」成本列。
+
+/** 实际生效的判定模式：'llm' 仅对智能路由类策略有效，其它策略回退到 slice（有关联切片）或 text 口径 */
+const effectiveHitMode = (algorithm: string, ref?: TestCaseRef): 'slice' | 'text' | 'llm' => {
+  if (test.hitMode !== 'llm') return test.hitMode
+  if (getStrategy(algorithm)?.kind === 'agentic') return 'llm'
+  return hasGoldRef(ref) ? 'slice' : 'text'
+}
+
+/** 该策略当前是否支持大模型判定 */
+const llmJudgeAvailable = computed(() => getStrategy(test.currentAlgorithm)?.kind === 'agentic')
+
+/** 由对话模型判定「检索片段是否包含足以回答问题的内容」 */
+const judgeByLlm = async (question: string, answer: string, slices: TestResult['slices']): Promise<{ hit: boolean; rank: number; reason: string; error?: string }> => {
+  const top = slices.slice(0, Math.max(1, parseInt(String(test.searchNum)) || 5))
+  const zh = store.locales == 'zh'
+  const listText = top
+    .map((s, i) => `${i + 1}. 《${s.label}》：${(sliceTextOf(s) || '').slice(0, 800)}`)
+    .join('\n')
+  const prompt = zh
+    ? `你是检索评测员。判断下列「检索片段」是否包含足以回答问题的内容（参考答案仅供参考，以片段本身能否回答问题为准；同义改写、答案分散在片段中也算命中）。\n\n问题：${question}\n参考答案：${answer || '（未提供）'}\n\n检索片段：\n${listText}\n\n只输出 JSON，不要任何其他文字：{"hit": true|false, "rank": 最前命中位次（1-${top.length}，无命中填 0）, "reason": "一句话理由"}`
+    : `You are a retrieval judge. Decide whether the retrieved snippets below contain enough content to answer the question (the reference answer is only a hint; judge by the snippets themselves; paraphrases or answers spread across snippets count as a hit).\n\nQuestion: ${question}\nReference answer: ${answer || '(none)'}\n\nSnippets:\n${listText}\n\nReply with JSON only, no other text: {"hit": true|false, "rank": first matching rank (1-${top.length}, 0 if none), "reason": "one-line reason"}`
+  try {
+    const raw = await kbAi.chat(kbSpec(), [{ role: 'user', content: prompt }], { format: 'json' } as any)
+    const m = String(raw || '').match(/\{[\s\S]*\}/)
+    if (!m) throw new Error('未返回 JSON')
+    const obj = JSON.parse(m[0])
+    const rank = Math.max(0, Math.min(top.length, Math.floor(Number(obj?.rank) || 0)))
+    const hit = obj?.hit === true && rank > 0
+    return { hit, rank: hit ? rank : 0, reason: String(obj?.reason || '') }
+  } catch (e: any) {
+    return { hit: false, rank: 0, reason: '', error: String(e?.message || e) }
+  }
+}
 
 // 执行测试（支持算法选择；ref 为该问题关联切片判定基准）
 const performTestChat = async (question: string, searchNum: number, algorithm: SearchAlgorithm, index?: number, answer?: string, ref?: TestCaseRef) => {
   try {
-    const { slices, avgScore, timeMs } = await performSearch(question, searchNum, algorithm, answer, ref)
-    
+    const { slices, avgScore, timeMs, agent, llmCalls, toolCalls } = await performSearch(question, searchNum, algorithm, answer, ref)
+
+    // 大模型判定（仅智能路由类策略）：在检索计时之外调用，避免判定耗时混入检索时间
+    let llmJudge: TestResult['llmJudge']
+    let judgeCalls = 0
+    if (effectiveHitMode(algorithm, ref) === 'llm' && slices.length) {
+      const j = await judgeByLlm(question, answer || '', slices)
+      judgeCalls = 1
+      llmJudge = j
+      // 仅标记「最前命中位次」那一片（与切片命中口径一致：命中数=1），判定失败时不标记以避免误判为未命中
+      if (!j.error) slices.forEach((s, i) => { s.llmHit = !!j.hit && i + 1 === j.rank })
+    }
+
     const result: TestResult = {
       question: question,
       answer: answer || '',
@@ -733,6 +909,10 @@ const performTestChat = async (question: string, searchNum: number, algorithm: S
       slices: slices,
       avgScore: avgScore,
       recallTimeMs: timeMs,
+      agent,
+      llmJudge,
+      llmCalls: llmCalls + judgeCalls,
+      toolCalls,
       ref: hasGoldRef(ref) ? { srcBlockId: ref?.srcBlockId, blockIds: ref?.blockIds || [] } : undefined,
       timestamp: new Date().toISOString(),
       testConfig: {
@@ -771,12 +951,17 @@ const answerPartCount = (index: number): number => {
 // 输出统一写入 RankAnalysisResult（answerParts/totalAnswers/hitRate/matchedAnswers 等字段），下游统计与导出无需感知差异。
 const generateRankAnalysis = (result: TestResult) => {
   const ref = result.ref
-  const sliceMode = test.hitMode === 'slice'
+  // 判定模式按「该结果所属策略」解析：大模型判定仅智能路由类可用，其余策略回退 slice / text 口径
+  const mode = effectiveHitMode(result.algorithm, ref)
+  const sliceMode = mode === 'slice'
+  const llmMode = mode === 'llm'
   // 切片精准命中：仅当该问题有关联切片时按身份比对；无关联切片则无判定基准，不产生位次记录
   const goldMode = sliceMode && hasGoldRef(ref)
   // 答案命中：一律按参考答案文本匹配（忽略关联切片）
-  const textMode = !sliceMode
+  const textMode = mode === 'text'
   const answerText = result.answer?.trim()
+  // 大模型判定：调用/解析失败（无判定结果）→ 视为无判定基准，不产生位次记录（避免误判为未命中）
+  if (llmMode && (!result.llmJudge || result.llmJudge.error)) return
 
   // 关联切片基准：解析每个关联切片（id → blocks 中切片 → 展示名与身份键）
   const blocksById = new Map((props.blocks || []).map((b: any) => [b.id, b]))
@@ -794,8 +979,10 @@ const generateRankAnalysis = (result: TestResult) => {
   // 文本基准成分（参考答案 | 分段；答案命中模式）
   const textParts = (textMode && answerText) ? answerText.split('|').map((s: string) => s.trim()).filter((s: string) => s.length > 0) : []
 
-  // 判定基准成分清单：关联切片模式=关联切片标签；答案命中模式=参考答案分段
-  const parts = goldMode ? goldRefs.map(g => g.label) : textParts
+  // 判定基准成分清单：关联切片模式=关联切片标签；答案命中模式=参考答案分段；大模型判定=单一成分（整题命中与否）
+  const parts = llmMode
+    ? [store.locales=='zh' ? '大模型判定命中' : 'LLM judgement hit']
+    : goldMode ? goldRefs.map(g => g.label) : textParts
   if (parts.length === 0) return
 
   // 逐检索切片统计命中的基准成分与位次
@@ -810,7 +997,10 @@ const generateRankAnalysis = (result: TestResult) => {
 
   for (const slice of result.slices) {
     const matchedAnswers: string[] = []
-    if (goldMode) {
+    if (llmMode) {
+      // 大模型判定：仅「最前命中位次」那一片计为命中（成分=整题）
+      if (slice.llmHit) matchedAnswers.push(parts[0])
+    } else if (goldMode) {
       // 切片身份命中：仅与关联切片 blockId 精确比对（同一块），避免同标题多块被误判
       for (const g of goldRefs) {
         if (slice.id && g.id && slice.id === g.id) matchedAnswers.push(g.label)
@@ -824,13 +1014,15 @@ const generateRankAnalysis = (result: TestResult) => {
     }
 
     // 该切片是否计为一次命中位次：
+    //  - 大模型判定（llmMode）：按模型给出的命中位次标记
     //  - 切片命中（goldMode）：按关联切片成分命中（matchedAnswers > 0）
     //  - 答案命中（textMode）：按所选子策略统一判定 textSliceHit——
     //    precise=任一整段完整包含（等价于 matchedAnswers>0）；fuzzy=整段/反向前缀50字/分段/词比例任一命中
-    //    （fuzzy 可能整段成分都未完整包含却仍算命中，故不能仅用 matchedAnswers 判断命中位次）
-    const isHit = goldMode
-      ? matchedAnswers.length > 0
-      : textSliceHit(sliceTextOf(slice), answerText || '')
+    const isHit = llmMode
+      ? !!slice.llmHit
+      : goldMode
+        ? matchedAnswers.length > 0
+        : textSliceHit(sliceTextOf(slice), answerText || '')
 
     if (isHit) {
       answerRanks.push(slice.rank)
@@ -846,15 +1038,20 @@ const generateRankAnalysis = (result: TestResult) => {
 
   // 总体命中率：命中的基准成分数 / 成分总数
   const matchedPartSet = new Set<string>()
-  for (const slice of result.slices) {
-    if (goldMode) {
-      for (const g of goldRefs) {
-        if (slice.id && g.id && slice.id === g.id) matchedPartSet.add(g.label)
-      }
-    } else {
-      const sliceContent = sliceTextOf(slice).toLowerCase()
-      for (const part of parts) {
-        if (sliceContent.includes(part.toLowerCase())) matchedPartSet.add(part)
+  if (llmMode) {
+    // 大模型判定：整题命中与否（单一成分）
+    if (result.llmJudge?.hit) matchedPartSet.add(parts[0])
+  } else {
+    for (const slice of result.slices) {
+      if (goldMode) {
+        for (const g of goldRefs) {
+          if (slice.id && g.id && slice.id === g.id) matchedPartSet.add(g.label)
+        }
+      } else {
+        const sliceContent = sliceTextOf(slice).toLowerCase()
+        for (const part of parts) {
+          if (sliceContent.includes(part.toLowerCase())) matchedPartSet.add(part)
+        }
       }
     }
   }
@@ -869,14 +1066,18 @@ const generateRankAnalysis = (result: TestResult) => {
     bestRank: answerRanks.length > 0 ? Math.min(...answerRanks) : -1,
     foundCount: answerRanks.length,
     answerParts: parts,
-    refMode: goldMode ? 'slice' : 'text',
+    refMode: llmMode ? 'llm' : (goldMode ? 'slice' : 'text'),
     hitRate: overallHitRate,
     hitCount: matchedPartSet.size,
     totalAnswers: parts.length,
     matchedAnswers: Array.from(matchedPartSet),
     hitDetails,
     timestamp: result.timestamp,
-    timeMs: result.recallTimeMs || 0
+    timeMs: result.recallTimeMs || 0,
+    agent: result.agent,
+    llmCalls: result.llmCalls || 0,
+    toolCalls: result.toolCalls || 0,
+    llmJudge: result.llmJudge
   }
 
   // 检查是否已存在相同问题和算法的记录
@@ -956,8 +1157,9 @@ const runSingleTest = async (index: number) => {
     await performTestChat(question, searchNum, test.currentAlgorithm, index, answer, ref)
     
     const result = testResults.value[index]
-    // 切片精准命中模式下，无关联切片的问题无判定基准（不按分数误判，明确提示）
-    const notJudgeable = test.hitMode === 'slice' && !hasGoldRef(test.refs?.[index])
+    // 无判定基准的情况（不按分数误判，明确提示）：切片命中但无关联切片；或大模型判定未得到结果（调用/解析失败）
+    const notJudgeable = (effectiveHitMode(test.currentAlgorithm, test.refs?.[index]) === 'slice' && !hasGoldRef(test.refs?.[index]))
+      || (effectiveHitMode(test.currentAlgorithm, test.refs?.[index]) === 'llm' && !result?.llmJudge)
     const hasAnswerMatch = result?.slices?.some((s: any) => s.containsAnswer) || false
     const avgScore = result?.avgScore || 0
     
@@ -996,6 +1198,8 @@ const runSingleTest = async (index: number) => {
     lastUpdateTime.value = new Date().toLocaleTimeString()
     // 实时刷新策略召回对比：单测完成后该策略出现一行数据
     updateStrategyStats()
+    // 单测结果同样进入 .kb 快照（保留上一批统计数据，便于逐题补测）
+    emitTestData()
     
   } catch (error) {
     console.error('单行测试失败:', error)
@@ -1478,6 +1682,11 @@ const runBatchTest = async () => {
 
   // 先补齐切片向量再计时开测（向量化耗时不计入检索时间）
   if (!(await ensureTestVectors())) return
+  if (test.hitMode === 'llm' && !llmJudgeAvailable.value) {
+    emit('updateState', store.locales=='zh'
+      ? `大模型判定仅对智能路由类策略生效：当前策略「${getAlgorithmLabel(test.currentAlgorithm)}」将按切片/答案口径判定`
+      : `LLM judgement applies to agentic strategies only; "${getAlgorithmLabel(test.currentAlgorithm)}" will use slice/answer judging`)
+  }
 
   resetBatchCtl()
   batchRunKind.value = 'one'
@@ -1493,6 +1702,12 @@ const runBatchTest = async () => {
   // 仅清当前策略旧记录（同策略重测 = 替换为新结果）；testResults 为按问题覆盖的最新一次展示，无累积
   rankAnalysisResults.value = rankAnalysisResults.value.filter(r => r.algorithm !== test.currentAlgorithm)
   allStrategySliceResults.value = allStrategySliceResults.value.filter(row => row.strategyId !== test.currentAlgorithm)
+  // 同策略重测的「重复轮汇总」也一并作废（否则对比表的均值/标准差会混入旧轮次）
+  if (strategyRuns.value[test.currentAlgorithm]) {
+    const next = { ...strategyRuns.value }
+    delete next[test.currentAlgorithm]
+    strategyRuns.value = next
+  }
 
   // 仅当本次被测策略需要 file 通道时，自动对文件自带摘要向量化补齐（幂等、失败不阻断）
   await ensureStrategyChannelsReady([test.currentAlgorithm])
@@ -1536,8 +1751,9 @@ const runBatchTest = async () => {
       })
       
       const result = testResults.value[i]
-      // 切片精准命中模式下，无关联切片的问题无判定基准（不按分数误判，明确提示）
-      const notJudgeable = test.hitMode === 'slice' && !hasGoldRef(test.refs?.[i])
+      // 无判定基准的情况（不按分数误判，明确提示）：切片命中但无关联切片；或大模型判定未得到结果
+      const notJudgeable = (effectiveHitMode(test.currentAlgorithm, test.refs?.[i]) === 'slice' && !hasGoldRef(test.refs?.[i]))
+        || (effectiveHitMode(test.currentAlgorithm, test.refs?.[i]) === 'llm' && !result?.llmJudge)
       const hasAnswerMatch = result?.slices?.some((s: any) => s.containsAnswer) || false
       const avgScore = result?.avgScore || 0
       
@@ -1595,6 +1811,8 @@ const runBatchTest = async () => {
   lastUpdateTime.value = new Date().toLocaleTimeString()
   // 实时刷新策略召回对比：批测单个策略完成后该策略出现一行数据
   updateStrategyStats()
+  // 批量结果进入 .kb 快照
+  emitTestData()
   
   const answerMatches = testResults.value.reduce((count, result) => {
     if (!result || !result.slices) return count
@@ -1641,9 +1859,49 @@ const allStrategyStats = ref<Array<{
   mrr: number
   completeRate: number
   groups: { single: StrategyGroupStat, complex: StrategyGroupStat }
+  /** 平均对话模型调用次数 / 题（成本对比：Agentic 工具轮、社区 Map-Reduce 都会计入） */
+  avgLlmCalls: number
+  /** 平均工具调用次数 / 题（Agentic 专用：只统计模型自己调用的工具；其它策略为 0） */
+  avgToolCalls: number
+  /** 平均「系统补检索」次数 / 题（仅当模型不调工具时执行；用于判断模型是否真的会用工具） */
+  avgFallbackCalls?: number
+  /** 工具调用分布（工具名 → 平均次数/题），用于消融实验确认工具真被调用 */
+  toolDistribution: Record<string, number>
+  /** 已完成重复轮数（>1 时各指标附标准差） */
+  runs: number
+  /** 重复运行的标准差（仅 runs>1 有意义；缺失表示未重复） */
+  std?: Partial<Record<'recallRate' | 'avgHitRate' | 'hitAt1' | 'mrr' | 'completeRate' | 'avgFirstRank' | 'avgTimeMs' | 'avgLlmCalls' | 'avgToolCalls', number>>
 }>>([])
 
-// 分组统计视图：全部 / 单切片 / 复合
+/** 单轮（一次完整跑完全部问题）的策略汇总：重复运行时按轮聚合，得到均值±标准差 */
+interface StrategyRunStat {
+  recallRate: number
+  avgHitRate: number
+  hitAt1: number
+  mrr: number
+  completeRate: number
+  avgFirstRank: number
+  avgTimeMs: number
+  avgLlmCalls: number
+  avgToolCalls: number
+}
+/** strategyId → 各轮汇总（每次「全部策略」批量测试开始时清空） */
+const strategyRuns = ref<Record<string, StrategyRunStat[]>>({})
+
+/** 均值 / 样本标准差（n<2 时标准差为 undefined） */
+const meanOf = (list: number[]): number => (list.length ? list.reduce((s, x) => s + x, 0) / list.length : 0)
+const stdOf = (list: number[]): number | undefined => {
+  if (list.length < 2) return undefined
+  const m = meanOf(list)
+  return Math.sqrt(list.reduce((s, x) => s + (x - m) * (x - m), 0) / (list.length - 1))
+}
+/** 指标展示：有标准差时「均值 ± 标准差」 */
+const fmtStat = (mean: number, std: number | undefined, scale = 100, digits = 1): string => {
+  const base = (mean * scale).toFixed(digits)
+  return std === undefined ? base : `${base} ± ${(std * scale).toFixed(digits)}`
+}
+
+// 分组统计视图：全部 / 单切片 / 复合（成本列与重复标准差为策略级，不随分组变化）
 const statsGroup = ref<'all' | 'single' | 'complex'>('all')
 const displayStats = computed(() => {
   return allStrategyStats.value.map(s => {
@@ -1662,6 +1920,12 @@ const displayStats = computed(() => {
       mrr: g.mrr,
       completeRate: g.completeRate,
       groups: s.groups,
+      avgLlmCalls: s.avgLlmCalls,
+      avgToolCalls: s.avgToolCalls,
+      avgFallbackCalls: s.avgFallbackCalls,
+      toolDistribution: s.toolDistribution,
+      runs: s.runs,
+      std: undefined as typeof s.std,
     }
   })
 })
@@ -1726,6 +1990,10 @@ const updateStrategyStats = () => {
     hit1Count: number
     sumMRR: number
     completeCount: number
+    sumLlmCalls: number
+    sumToolCalls: number
+    sumFallbackCalls: number
+    toolCalls: Record<string, number>
     single: ReturnType<typeof mkGroup>
     complex: ReturnType<typeof mkGroup>
   }>()
@@ -1736,6 +2004,7 @@ const updateStrategyStats = () => {
       label: getAlgorithmLabel(key),
       testedCount: 0, hitCount: 0, sumHitRate: 0, sumFirstRank: 0,
       sumTimeMs: 0, rankCount: 0, hit1Count: 0, sumMRR: 0, completeCount: 0,
+      sumLlmCalls: 0, sumToolCalls: 0, sumFallbackCalls: 0, toolCalls: {},
       single: mkGroup(), complex: mkGroup(),
     }
     // 复合问题 = 参考答案含多个 | 成分（须综合多切片）
@@ -1746,6 +2015,18 @@ const updateStrategyStats = () => {
     const hr = r.hitRate || 0
     cur.sumHitRate += hr; g.sumHitRate += hr
     cur.sumTimeMs += r.timeMs || 0
+    // 成本：对话模型调用次数 + 工具调用分布（工具调用用于消融实验核对「工具是否真被调用」）
+    cur.sumLlmCalls += r.llmCalls || 0
+    // 工具分布只统计「模型自己调用的工具」；系统预取/系统补检索/模型决策不计入（补检索单列，见 avgFallbackCalls）
+    for (const st of (r.agent?.steps || [])) {
+      const kind = st.kind || 'tool'
+      if (kind === 'tool') {
+        cur.sumToolCalls += 1
+        cur.toolCalls[st.tool] = (cur.toolCalls[st.tool] || 0) + 1
+      } else if (kind === 'fallback') {
+        cur.sumFallbackCalls += 1
+      }
+    }
     if (r.firstRank > 0) {
       const rr = 1 / r.firstRank
       cur.sumFirstRank += r.firstRank; cur.rankCount++
@@ -1780,9 +2061,17 @@ const updateStrategyStats = () => {
       mrr: a.testedCount > 0 ? a.sumMRR / a.testedCount : 0,
       completeRate: a.testedCount > 0 ? a.completeCount / a.testedCount : 0,
       groups: { single: st(a.single), complex: st(a.complex) },
+      avgLlmCalls: a.testedCount > 0 ? a.sumLlmCalls / a.testedCount : 0,
+      avgToolCalls: a.testedCount > 0 ? a.sumToolCalls / a.testedCount : 0,
+      avgFallbackCalls: a.testedCount > 0 ? a.sumFallbackCalls / a.testedCount : 0,
+      // 工具分布按「平均次数/题」归一，便于消融实验直接读「该工具平均每题被调用几次」
+      toolDistribution: Object.fromEntries(
+        Object.entries(a.toolCalls as Record<string, number>).map(([k, v]) => [k, a.testedCount > 0 ? v / a.testedCount : 0]),
+      ),
+      runs: 1,
     }
   }
-  allStrategyStats.value = Array.from(agg.values()).map(fmt).sort((a, b) => {
+  const stats = Array.from(agg.values()).map(fmt).sort((a, b) => {
     // 冠军判定：先比召回率（高者胜）；相同再比平均位次（小者胜，-1=无命中视为最差）；仍相同比平均答案命中率（高者胜）
     if (b.recallRate !== a.recallRate) return b.recallRate - a.recallRate
     const ra = a.avgFirstRank > 0 ? a.avgFirstRank : Number.MAX_VALUE
@@ -1790,6 +2079,285 @@ const updateStrategyStats = () => {
     if (ra !== rb) return ra - rb
     return b.avgHitRate - a.avgHitRate
   })
+  // 重复运行（runs>1）时，用各轮汇总覆盖为「均值 ± 标准差」，用于判断差异是否稳定（见 fmtStat）
+  allStrategyStats.value = stats.map(s => withRunStd(s))
+}
+
+/**
+ * 把某策略「刚跑完的这一轮」汇总入 strategyRuns（重复运行时用于均值±标准差）。
+ * 必须在跑完该策略全部问题后调用：此时 rankAnalysisResults 中该策略的行只属于本轮。
+ */
+const snapshotStrategyRun = (strategyId: string) => {
+  const rows = rankAnalysisResults.value.filter(r => r.algorithm === strategyId)
+  if (!rows.length) return
+  const hit = rows.filter(r => r.foundCount > 0).length
+  const ranked = rows.filter(r => r.firstRank > 0)
+  const sumFirst = ranked.reduce((s, r) => s + r.firstRank, 0)
+  const stat: StrategyRunStat = {
+    recallRate: hit / rows.length,
+    avgHitRate: rows.reduce((s, r) => s + (r.hitRate || 0), 0) / rows.length,
+    hitAt1: rows.filter(r => r.firstRank === 1).length / rows.length,
+    mrr: rows.reduce((s, r) => s + (r.firstRank > 0 ? 1 / r.firstRank : 0), 0) / rows.length,
+    completeRate: rows.filter(r => (r.hitRate || 0) >= 1).length / rows.length,
+    avgFirstRank: ranked.length ? sumFirst / ranked.length : -1,
+    avgTimeMs: rows.reduce((s, r) => s + (r.timeMs || 0), 0) / rows.length,
+    avgLlmCalls: rows.reduce((s, r) => s + (r.llmCalls || 0), 0) / rows.length,
+    avgToolCalls: rows.reduce((s, r) => s + (r.toolCalls || 0), 0) / rows.length,
+  }
+  const list = strategyRuns.value[strategyId] || []
+  list.push(stat)
+  strategyRuns.value = { ...strategyRuns.value, [strategyId]: list }
+}
+
+/** 用各轮汇总覆盖展示指标为均值 + 标准差（仅 1 轮时原样返回） */
+const withRunStd = (s: (typeof allStrategyStats.value)[number]) => {
+  const runs = strategyRuns.value[s.strategyId] || []
+  if (runs.length < 2) return { ...s, runs: runs.length || 1 }
+  const pick = (fn: (r: StrategyRunStat) => number) => ({
+    mean: meanOf(runs.map(fn)),
+    std: stdOf(runs.map(fn)),
+  })
+  const recall = pick(r => r.recallRate)
+  const hitRate = pick(r => r.avgHitRate)
+  const hit1 = pick(r => r.hitAt1)
+  const mrr = pick(r => r.mrr)
+  const complete = pick(r => r.completeRate)
+  const firstRank = pick(r => (r.avgFirstRank > 0 ? r.avgFirstRank : 0))
+  const time = pick(r => r.avgTimeMs)
+  const llm = pick(r => r.avgLlmCalls)
+  const tools = pick(r => r.avgToolCalls)
+  return {
+    ...s,
+    recallRate: recall.mean,
+    avgHitRate: hitRate.mean,
+    hitAt1: hit1.mean,
+    mrr: mrr.mean,
+    completeRate: complete.mean,
+    avgFirstRank: firstRank.mean > 0 ? firstRank.mean : -1,
+    avgTimeMs: time.mean,
+    avgLlmCalls: llm.mean,
+    avgToolCalls: tools.mean,
+    runs: runs.length,
+    std: {
+      recallRate: recall.std,
+      avgHitRate: hitRate.std,
+      hitAt1: hit1.std,
+      mrr: mrr.std,
+      completeRate: complete.std,
+      avgFirstRank: firstRank.std,
+      avgTimeMs: time.std,
+      avgLlmCalls: llm.std,
+      avgToolCalls: tools.std,
+    },
+  }
+}
+
+// ==================== 配对显著性检验（同一批问题、同一判定基准下比较两策略） ====================
+// 199 题规模下 2~3% 的召回率差距常为噪声，故对「同一问题」做配对检验：
+//  - 命中/未命中（召回率口径 foundCount>0）→ McNemar 精确检验（二项双侧，取 min(b,c)）
+//  - 首次位次（未命中记 K+1）→ Wilcoxon 符号秩检验（正态近似 + 并列校正 + 连续性校正）
+// 结论以 p<0.05 为准：命中差异显著优先判定；否则看位次差异是否显著。
+interface PairedComparison {
+  strategyId: string
+  label: string
+  /** 双方都有判定记录的共同问题数 */
+  n: number
+  /** 基线命中而对比策略未命中（b） */
+  baseOnly: number
+  /** 基线未命中而对比策略命中（c） */
+  otherOnly: number
+  /** 配对命中率变化（对比 - 基线） */
+  deltaRecall: number
+  /** McNemar 精确检验 p 值 */
+  mcnemarP: number
+  /** Wilcoxon 符号秩检验 p 值 */
+  wilcoxonP: number
+  /** 平均位次差（对比 - 基线，负=对比更靠前；未命中记 K+1） */
+  rankDelta: number
+  verdict: 'better' | 'worse' | 'same'
+}
+
+/** 对数组合数 log C(n,k)：大 n 下避免溢出 */
+const logChoose = (n: number, k: number): number => {
+  if (k < 0 || k > n) return -Infinity
+  const kk = Math.min(k, n - k)
+  let s = 0
+  for (let i = 1; i <= kk; i++) s += Math.log(n - kk + i) - Math.log(i)
+  return s
+}
+
+/** McNemar 精确检验（双侧）：2*P(X ≤ min(b,c))，X ~ B(b+c, 0.5) */
+const mcnemarExactP = (b: number, c: number): number => {
+  const n = b + c
+  if (n <= 0) return 1
+  const logs: number[] = []
+  for (let i = 0; i <= n; i++) logs.push(logChoose(n, i) - n * Math.log(2))
+  const maxLog = Math.max(...logs)
+  let partial = 0
+  for (let i = 0; i <= Math.min(b, c); i++) partial += Math.exp(logs[i] - maxLog)
+  return Math.min(1, Math.max(0, 2 * Math.exp(maxLog) * partial))
+}
+
+/** 标准正态 CDF（Abramowitz–Stegun 7.1.26 近似，精度约 1e-7，足够 p 值展示） */
+const normalCdf = (z: number): number => {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z))
+  const d = 0.3989422804014327 * Math.exp((-z * z) / 2)
+  const p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+  return z >= 0 ? 1 - p : p
+}
+
+/** Wilcoxon 符号秩检验（配对、双侧；正态近似 + 并列校正 + 连续性校正） */
+const wilcoxonSignedRankP = (diffs: number[]): number => {
+  const d = diffs.filter(x => x !== 0)
+  const n = d.length
+  if (n === 0) return 1
+  const order = d.map((v, i) => ({ v: Math.abs(v), i })).sort((a, b) => a.v - b.v)
+  const ranks = new Array<number>(n).fill(0)
+  const tieGroups: number[] = []
+  let i = 0
+  while (i < n) {
+    let j = i
+    while (j + 1 < n && order[j + 1].v === order[i].v) j++
+    const size = j - i + 1
+    tieGroups.push(size)
+    const avgRank = (i + 1 + j + 1) / 2
+    for (let k = i; k <= j; k++) ranks[order[k].i] = avgRank
+    i = j + 1
+  }
+  let wPlus = 0
+  for (let k = 0; k < n; k++) if (d[k] > 0) wPlus += ranks[k]
+  const mu = (n * (n + 1)) / 4
+  let variance = (n * (n + 1) * (2 * n + 1)) / 24
+  for (const t of tieGroups) if (t > 1) variance -= (t ** 3 - t) / 48
+  const sd = Math.sqrt(Math.max(variance, 1e-9))
+  const delta = wPlus - mu
+  const z = (delta - Math.sign(delta) * 0.5) / sd
+  return Math.min(1, Math.max(0, 2 * (1 - normalCdf(Math.abs(z)))))
+}
+
+/** 行标识（同一问题可能出现多行）：问题文本 + 判定基准成分，保证配对到同一道题 */
+const rankRowKey = (r: RankAnalysisResult): string => `${r.question}\u0000${(r.answerParts || []).join('|')}`
+
+/** 以 baselineId 为基线，构建与其它策略的配对比较（共同题数不足时返回空） */
+const buildPairedComparisons = (baselineId: string): PairedComparison[] => {
+  const byStrategy = new Map<string, Map<string, RankAnalysisResult>>()
+  for (const r of rankAnalysisResults.value) {
+    if (!byStrategy.has(r.algorithm)) byStrategy.set(r.algorithm, new Map())
+    byStrategy.get(r.algorithm)!.set(rankRowKey(r), r)
+  }
+  const base = byStrategy.get(baselineId)
+  if (!base || base.size === 0) return []
+  const missRank = (parseInt(String(test.searchNum)) || 5) + 1
+  const out: PairedComparison[] = []
+  for (const [sid, rows] of byStrategy) {
+    if (sid === baselineId) continue
+    let n = 0, b = 0, c = 0
+    const diffs: number[] = []
+    for (const [key, baseRow] of base) {
+      const otherRow = rows.get(key)
+      if (!otherRow) continue
+      n++
+      const baseHit = baseRow.foundCount > 0
+      const otherHit = otherRow.foundCount > 0
+      if (baseHit && !otherHit) b++
+      else if (!baseHit && otherHit) c++
+      const baseRank = baseRow.firstRank > 0 ? baseRow.firstRank : missRank
+      const otherRank = otherRow.firstRank > 0 ? otherRow.firstRank : missRank
+      diffs.push(otherRank - baseRank)
+    }
+    if (n === 0) continue
+    const deltaRecall = (c - b) / n
+    const mcnemarP = mcnemarExactP(b, c)
+    const wilcoxonP = wilcoxonSignedRankP(diffs)
+    const rankDelta = meanOf(diffs)
+    let verdict: PairedComparison['verdict'] = 'same'
+    if (mcnemarP < 0.05 && deltaRecall !== 0) verdict = deltaRecall > 0 ? 'better' : 'worse'
+    else if (wilcoxonP < 0.05 && rankDelta !== 0) verdict = rankDelta < 0 ? 'better' : 'worse'
+    out.push({
+      strategyId: sid,
+      label: getAlgorithmLabel(sid),
+      n, baseOnly: b, otherOnly: c, deltaRecall, mcnemarP, wilcoxonP, rankDelta, verdict,
+    })
+  }
+  return out.sort((a, b) => b.deltaRecall - a.deltaRecall)
+}
+
+const sigBaseline = ref('similarity')
+/** 实际生效的基线（所选策略不在当前结果中时退回榜首或第一个可用策略） */
+const sigBaselineId = computed(() => {
+  const ids = allStrategyStats.value.map(s => s.strategyId)
+  if (ids.includes(sigBaseline.value)) return sigBaseline.value
+  return ids[0] || ''
+})
+const pairedComparisons = computed<PairedComparison[]>(() =>
+  allStrategyStats.value.length ? buildPairedComparisons(sigBaselineId.value) : [])
+
+const pText = (p: number): string => (p < 0.001 ? 'p<0.001' : `p=${p.toFixed(3)}`)
+const verdictLabel = (v: PairedComparison['verdict']): string =>
+  v === 'better' ? (store.locales=='zh' ? '显著更优' : 'Significantly better')
+    : v === 'worse' ? (store.locales=='zh' ? '显著更差' : 'Significantly worse')
+      : (store.locales=='zh' ? '无显著差异' : 'No significant difference')
+const verdictColor = (v: PairedComparison['verdict']): string =>
+  v === 'better' ? '#4CAF50' : v === 'worse' ? '#f44336' : 'var(--borderColor)'
+/** 增量着色：正=绿（更好），负=红 */
+const deltaColor = (delta: number): string => (delta > 0 ? '#4CAF50' : delta < 0 ? '#f44336' : 'var(--borderColor)')
+/** 工具分布文本（消融实验核对用）：kb_search 2.1/题 · entity_slice 0.4/题；含系统补检索时追加说明 */
+const toolDistText = (dist: Record<string, number>, fallback = 0): string => {
+  const main = Object.entries(dist).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${agentToolLabel(k)} ${v.toFixed(2)}/题`).join(' · ')
+  const fb = fallback > 0
+    ? (store.locales=='zh' ? `系统补检索 ${fallback.toFixed(2)}/题（模型未调工具时执行）` : `system fallback ${fallback.toFixed(2)}/q`)
+    : ''
+  return [main, fb].filter(Boolean).join(' · ') || (store.locales=='zh' ? '本次未调用检索工具' : 'no retrieval tools used')
+}
+
+// ==================== 测试结果随 .kb 保存/加载 ====================
+// 开启「处理配置 → 保存测试结果到 KB 文件」后：批量/单题测试的检索结果、位次分析、策略召回对比、
+// 检索过程（智能路由工具轨迹）都会随 .kb 落盘，重新加载即可复现对比数据（不重跑），便于论文/复现实验。
+// 切片正文一律不写盘（按 id 回源当前知识库），因此换库/重新切片后旧结果的正文与命中标记可能失配。
+let restoringTestData = false
+
+/** 上报当前测试结果快照（传引用、不做深拷贝；父组件仅在保存 .kb 时序列化） */
+const emitTestData = () => {
+  emit('testDataChange', {
+    savedAt: new Date().toISOString(),
+    settings: {
+      searchNum: parseInt(String(test.searchNum)) || 5,
+      repeat: Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1)),
+      hitMode: test.hitMode,
+      matchMode: test.matchMode,
+    },
+    testResults: testResults.value,
+    rankAnalysisResults: rankAnalysisResults.value,
+    allStrategyStats: allStrategyStats.value,
+    allStrategySliceResults: allStrategySliceResults.value,
+    strategyRuns: strategyRuns.value,
+  })
+}
+
+/** 从 .kb 恢复测试结果（含测试页设置；恢复期间屏蔽「口径变更即清空」的监听，避免刚恢复就被清掉） */
+const restoreTestData = async (data: any) => {
+  if (!data) return
+  restoringTestData = true
+  const st: any = data.settings || {}
+  if (st.searchNum) test.searchNum = st.searchNum
+  if (st.repeat) test.repeat = Math.max(1, Math.min(5, Number(st.repeat) || 1))
+  if (st.hitMode === 'slice' || st.hitMode === 'text' || st.hitMode === 'llm') test.hitMode = st.hitMode
+  if (st.matchMode === 'precise' || st.matchMode === 'fuzzy') test.matchMode = st.matchMode
+  testResults.value = Array.isArray(data.testResults) ? data.testResults : []
+  rankAnalysisResults.value = Array.isArray(data.rankAnalysisResults) ? data.rankAnalysisResults : []
+  allStrategyStats.value = Array.isArray(data.allStrategyStats) ? data.allStrategyStats : []
+  allStrategySliceResults.value = Array.isArray(data.allStrategySliceResults) ? data.allStrategySliceResults : []
+  strategyRuns.value = (data.strategyRuns && typeof data.strategyRuns === 'object') ? data.strategyRuns : {}
+  test.questionStatus = test.questions.map((_, i) => testResults.value[i]
+    ? { text: store.locales=='zh' ? '已加载' : 'Loaded', color: '#2196F3', icon: 'fa fa-history' }
+    : { text: store.locales=='zh' ? '未测试' : 'Not Tested', color: 'var(--borderColor)', icon: 'fa fa-circle-o' })
+  activeTab.value = allStrategyStats.value.length ? 'batch' : 'test'
+  await nextTick()
+  restoringTestData = false
+  emit('updateState', store.locales=='zh'
+    ? `已从知识库恢复测试结果：${testResults.value.length} 题结果 · ${allStrategyStats.value.length} 个策略统计`
+    : `Test results restored from the KB: ${testResults.value.length} result(s) · ${allStrategyStats.value.length} strategy stats`)
 }
 
 // 批量测试所有检索策略：每个策略跑一遍全部问题，统计召回准确率
@@ -1813,6 +2381,11 @@ const runAllStrategyTest = async () => {
 
   // 先补齐切片向量再计时开测（向量化耗时不计入检索时间）
   if (!(await ensureTestVectors())) return
+  if (test.hitMode === 'llm') {
+    emit('updateState', store.locales=='zh'
+      ? '大模型判定已启用：仅智能路由类策略按大模型判定，其余策略按切片/答案口径判定'
+      : 'LLM judgement on: agentic strategies are judged by the LLM, others fall back to slice/answer')
+  }
 
   resetBatchCtl()
   batchRunKind.value = 'all'
@@ -1832,53 +2405,63 @@ const runAllStrategyTest = async () => {
   const strategies = algorithmOptions.value
   const searchNum = parseInt(test.searchNum.toString())
   const rows = test.questions.map((q, i) => ({ question: q?.trim(), answer: test.answers?.[i]?.trim() || '' }))
-  const totalRuns = strategies.length * rows.length
+  // 重复次数：同一批问题重复跑 N 轮（各轮独立汇总，用于均值±标准差；默认 1=不重复）
+  const repeat = Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1))
+  const totalRuns = strategies.length * rows.length * repeat
   let done = 0
 
   // 新一次「全部策略」测试：自动清空上一次结果/位次/统计，只保留本次
   clearJudgementResults()
+  strategyRuns.value = {}
 
   let abortedRuns = false
-  for (const algo of strategies) {
-    for (let i = 0; i < rows.length; i++) {
-      // 暂停/停止：在问题之间生效（已测结果与统计保留）
-      if (!(await waitWhilePaused())) { abortedRuns = true; break }
-      const { question, answer } = rows[i]
-      if (!question || isJunkQuestion(question)) { done++; continue }
-      allTestProgressText.value = store.locales=='zh'
-        ? `策略「${algo.label}」· ${i + 1}/${rows.length}`
-        : `Strategy "${algo.label}" · ${i + 1}/${rows.length}`
-      let slices: TestResult['slices'] = []
-      try {
-        test.questionStatus[i] = {
-          text: store.locales=='zh' ? `测试中 [${algo.label}]...` : `Testing [${algo.label}]...`,
-          color: '#FF9800', icon: 'fa fa-spinner fa-spin', algorithm: algo.value
+  for (let rep = 0; rep < repeat && !abortedRuns; rep++) {
+    for (const algo of strategies) {
+      for (let i = 0; i < rows.length; i++) {
+        // 暂停/停止：在问题之间生效（已测结果与统计保留）
+        if (!(await waitWhilePaused())) { abortedRuns = true; break }
+        const { question, answer } = rows[i]
+        if (!question || isJunkQuestion(question)) { done++; continue }
+        allTestProgressText.value = store.locales=='zh'
+          ? `策略「${algo.label}」· ${i + 1}/${rows.length}${repeat > 1 ? `（第 ${rep + 1}/${repeat} 轮）` : ''}`
+          : `Strategy "${algo.label}" · ${i + 1}/${rows.length}${repeat > 1 ? ` (run ${rep + 1}/${repeat})` : ''}`
+        let slices: TestResult['slices'] = []
+        try {
+          test.questionStatus[i] = {
+            text: store.locales=='zh' ? `测试中 [${algo.label}]...` : `Testing [${algo.label}]...`,
+            color: '#FF9800', icon: 'fa fa-spinner fa-spin', algorithm: algo.value
+          }
+          slices = await performTestChat(question, searchNum, algo.value, i, answer, test.refs?.[i]) || []
+        } catch (error) {
+          console.error(`策略 ${algo.value} 问题 ${i + 1} 测试失败:`, error)
         }
-        slices = await performTestChat(question, searchNum, algo.value, i, answer, test.refs?.[i]) || []
-      } catch (error) {
-        console.error(`策略 ${algo.value} 问题 ${i + 1} 测试失败:`, error)
+        // 累积该策略×问题的切片明细（只存 id/元数据，正文按 id 回源；直接引用返回数组，不再深拷贝）
+        allStrategySliceResults.value.push({
+          strategyId: algo.value,
+          label: algo.label,
+          question,
+          answer,
+          avgScore: slices.length > 0 ? slices.reduce((s, x) => s + (x.score || 0), 0) / slices.length : 0,
+          timestamp: new Date().toISOString(),
+          slices
+        })
+        done++
+        test.progress = Math.round((done / totalRuns) * 100)
       }
-      // 累积该策略×问题的切片明细（只存 id/元数据，正文按 id 回源；直接引用返回数组，不再深拷贝）
-      allStrategySliceResults.value.push({
-        strategyId: algo.value,
-        label: algo.label,
-        question,
-        answer,
-        avgScore: slices.length > 0 ? slices.reduce((s, x) => s + (x.score || 0), 0) / slices.length : 0,
-        timestamp: new Date().toISOString(),
-        slices
-      })
-      done++
-      test.progress = Math.round((done / totalRuns) * 100)
+      // 本轮该策略已跑完全部问题：汇总本轮指标（重复运行时用于均值±标准差）
+      snapshotStrategyRun(algo.value)
+      // 每测完一个策略，立即刷新「策略召回对比」，让该策略数据实时可见
+      updateStrategyStats()
+      // 每跑完一个策略即刷新 .kb 快照（中途保存也能拿到已完成部分）
+      emitTestData()
+      activeTab.value = 'batch'
+      if (abortedRuns) break
     }
-    // 每测完一个策略，立即刷新「策略召回对比」，让该策略数据实时可见
-    updateStrategyStats()
-    activeTab.value = 'batch'
-    if (abortedRuns) break
   }
 
   // 聚合每个策略的召回统计（与单测/批测共用同一聚合逻辑）
   updateStrategyStats()
+  emitTestData()
   expandedStrategy.value = ''
   activeTab.value = 'batch'
 
@@ -1897,8 +2480,8 @@ const runAllStrategyTest = async () => {
 
   const best = allStrategyStats.value[0]
   emit('updateState', store.locales=='zh'
-    ? `全部策略测试完成：共 ${allStrategyStats.value.length} 个策略，最优「${best?.label}」召回 ${best ? (best.recallRate*100).toFixed(1) : 0}%`
-    : `All strategies tested: ${allStrategyStats.value.length} strategies, best "${best?.label}" recall ${best ? (best.recallRate*100).toFixed(1) : 0}%`)
+    ? `全部策略测试完成：共 ${allStrategyStats.value.length} 个策略${repeat > 1 ? `（每策略 ${repeat} 轮，指标为均值±标准差）` : ''}，最优「${best?.label}」召回 ${best ? (best.recallRate*100).toFixed(1) : 0}%`
+    : `All strategies tested: ${allStrategyStats.value.length} strategies${repeat > 1 ? ` (${repeat} runs each, mean±std)` : ''}, best "${best?.label}" recall ${best ? (best.recallRate*100).toFixed(1) : 0}%`)
 }
 
 // 导出策略召回对比到 Excel（汇总 + 明细两个工作表）
@@ -1911,7 +2494,7 @@ const exportAllStrategyStats = async () => {
   try {
     // 汇总表（按 策略 × 分组 展开：全部 / 单切片 / 复合，便于论文分组对比）
     const summary: any[][] = [
-      ['策略', '策略ID', '分组', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '平均时间(ms)']
+      ['策略', '策略ID', '分组', '重复轮数', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '平均时间(ms)', '模型调用/题', '工具调用/题', '工具分布']
     ]
     for (const s of allStrategyStats.value) {
       const groups: Array<{ key: string, g: any }> = [
@@ -1924,6 +2507,7 @@ const exportAllStrategyStats = async () => {
           s.label,
           s.strategyId,
           key,
+          s.runs,
           g.testedCount,
           g.hitCount,
           g.testedCount > 0 ? (g.recallRate * 100).toFixed(1) + '%' : '-',
@@ -1932,9 +2516,32 @@ const exportAllStrategyStats = async () => {
           g.testedCount > 0 ? g.mrr.toFixed(3) : '-',
           g.testedCount > 0 ? (g.completeRate * 100).toFixed(1) + '%' : '-',
           g.avgFirstRank > 0 ? g.avgFirstRank.toFixed(1) : '-',
-          s.avgTimeMs > 0 ? Math.round(s.avgTimeMs) : '-'
+          s.avgTimeMs > 0 ? Math.round(s.avgTimeMs) : '-',
+          s.avgLlmCalls > 0 ? s.avgLlmCalls.toFixed(2) : '-',
+          s.avgToolCalls > 0 ? s.avgToolCalls.toFixed(2) : '-',
+          s.avgToolCalls > 0 ? toolDistText(s.toolDistribution) : '-'
         ])
       }
+    }
+
+    // 配对显著性表（vs 当前所选基线）：命中差异（McNemar 精确）与位次差异（Wilcoxon 符号秩）
+    const significance: any[][] = [
+      ['基线', '对比策略', '对比策略ID', '共同题数', 'b(基线命中/对比未命中)', 'c(基线未命中/对比命中)', '命中率变化', 'McNemar p', 'Wilcoxon p', '平均位次变化', '结论']
+    ]
+    for (const c of pairedComparisons.value) {
+      significance.push([
+        getAlgorithmLabel(sigBaselineId.value),
+        c.label,
+        c.strategyId,
+        c.n,
+        c.baseOnly,
+        c.otherOnly,
+        (c.deltaRecall * 100).toFixed(1) + '%',
+        c.mcnemarP < 0.001 ? '<0.001' : c.mcnemarP.toFixed(4),
+        c.wilcoxonP < 0.001 ? '<0.001' : c.wilcoxonP.toFixed(4),
+        c.rankDelta.toFixed(2),
+        verdictLabel(c.verdict),
+      ])
     }
 
     // 明细表
@@ -1958,13 +2565,16 @@ const exportAllStrategyStats = async () => {
     }
 
     const ws1 = XLSX.utils.aoa_to_sheet(summary)
-    ws1['!cols'] = [{ wch: 18 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }]
+    ws1['!cols'] = [{ wch: 18 }, { wch: 14 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 32 }]
     const ws2 = XLSX.utils.aoa_to_sheet(detail)
     ws2['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 30 }, { wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }]
+    const ws3 = XLSX.utils.aoa_to_sheet(significance)
+    ws3['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 10 }, { wch: 20 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }]
 
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws1, '策略召回对比')
     XLSX.utils.book_append_sheet(wb, ws2, '明细')
+    XLSX.utils.book_append_sheet(wb, ws3, '配对显著性')
 
     const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
     XLSX.writeFile(wb, `strategy_recall_${timestamp}.xlsx`)
@@ -1977,7 +2587,7 @@ const exportAllStrategyStats = async () => {
   }
 }
 
-// 导出全部测试数据到 Excel（策略召回对比汇总 + 位次明细 + 切片明细 三个工作表）
+// 导出全部测试数据到 Excel（策略召回对比汇总 + 位次明细 + 切片明细 + 配对显著性 四个工作表）
 const exportAllTestData = async () => {
   if (allStrategyStats.value.length === 0 && rankAnalysisResults.value.length === 0 && allStrategySliceResults.value.length === 0) {
     emit('updateState', store.locales=='zh' ? '暂无测试数据，请先运行测试' : 'No test data yet, run tests first')
@@ -1987,7 +2597,7 @@ const exportAllTestData = async () => {
   try {
     // 表1：策略召回对比汇总（按 策略 × 分组 展开：全部 / 单切片 / 复合）
     const summary: any[][] = [
-      ['策略', '策略ID', '分组', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '平均时间(ms)']
+      ['策略', '策略ID', '分组', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '平均时间(ms)', '模型调用/题', '工具调用/题', '工具分布']
     ]
     for (const s of allStrategyStats.value) {
       const groups: Array<{ key: string, g: any }> = [
@@ -2008,14 +2618,17 @@ const exportAllTestData = async () => {
           g.testedCount > 0 ? g.mrr.toFixed(3) : '-',
           g.testedCount > 0 ? (g.completeRate * 100).toFixed(1) + '%' : '-',
           g.avgFirstRank > 0 ? g.avgFirstRank.toFixed(1) : '-',
-          s.avgTimeMs > 0 ? Math.round(s.avgTimeMs) : '-'
+          s.avgTimeMs > 0 ? Math.round(s.avgTimeMs) : '-',
+          s.avgLlmCalls > 0 ? s.avgLlmCalls.toFixed(2) : '-',
+          s.avgToolCalls > 0 ? s.avgToolCalls.toFixed(2) : '-',
+          s.avgToolCalls > 0 ? toolDistText(s.toolDistribution) : '-'
         ])
       }
     }
 
     // 表2：位次明细
     const detail: any[][] = [
-      ['策略', '策略ID', '问题', '参考答案', '是否命中', '答案命中率', '最优位次', '命中切片数', '召回时间(ms)']
+      ['策略', '策略ID', '问题', '参考答案', '是否命中', '答案命中率', '最优位次', '命中切片数', '召回时间(ms)', '模型调用', '工具调用', '判定方式', '大模型判定理由']
     ]
     const sorted = [...rankAnalysisResults.value].sort((a, b) =>
       a.algorithm.localeCompare(b.algorithm) || a.question.localeCompare(b.question))
@@ -2029,7 +2642,31 @@ const exportAllTestData = async () => {
         ((r.hitRate || 0) * 100).toFixed(1) + '%',
         r.firstRank > 0 ? r.firstRank : '-',
         r.foundCount,
-        r.timeMs ? Math.round(r.timeMs) : '-'
+        r.timeMs ? Math.round(r.timeMs) : '-',
+        r.llmCalls || 0,
+        r.toolCalls || 0,
+        r.refMode === 'llm' ? (store.locales=='zh' ? '大模型判定' : 'LLM judge') : (r.refMode === 'slice' ? (store.locales=='zh' ? '切片命中' : 'Slice hit') : (store.locales=='zh' ? '答案命中' : 'Answer hit')),
+        r.llmJudge ? (r.llmJudge.error ? (store.locales=='zh' ? '判定失败：' : 'failed: ') + r.llmJudge.error : r.llmJudge.reason || '') : ''
+      ])
+    }
+
+    // 表4：配对显著性（vs 当前所选基线）
+    const significance: any[][] = [
+      ['基线', '对比策略', '对比策略ID', '共同题数', 'b(基线命中/对比未命中)', 'c(基线未命中/对比命中)', '命中率变化', 'McNemar p', 'Wilcoxon p', '平均位次变化', '结论']
+    ]
+    for (const c of pairedComparisons.value) {
+      significance.push([
+        getAlgorithmLabel(sigBaselineId.value),
+        c.label,
+        c.strategyId,
+        c.n,
+        c.baseOnly,
+        c.otherOnly,
+        (c.deltaRecall * 100).toFixed(1) + '%',
+        c.mcnemarP < 0.001 ? '<0.001' : c.mcnemarP.toFixed(4),
+        c.wilcoxonP < 0.001 ? '<0.001' : c.wilcoxonP.toFixed(4),
+        c.rankDelta.toFixed(2),
+        verdictLabel(c.verdict),
       ])
     }
 
@@ -2066,16 +2703,19 @@ const exportAllTestData = async () => {
     }
 
     const ws1 = XLSX.utils.aoa_to_sheet(summary)
-    ws1['!cols'] = [{ wch: 18 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }]
+    ws1['!cols'] = [{ wch: 18 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 32 }]
     const ws2 = XLSX.utils.aoa_to_sheet(detail)
-    ws2['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 30 }, { wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }]
+    ws2['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 30 }, { wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 10 }]
     const ws3 = XLSX.utils.aoa_to_sheet(sliceSheet)
     ws3['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 30 }, { wch: 10 }, { wch: 8 }, { wch: 20 }, { wch: 50 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 20 }, { wch: 12 }]
+    const ws4 = XLSX.utils.aoa_to_sheet(significance)
+    ws4['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 10 }, { wch: 20 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }]
 
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws1, '策略召回对比')
     XLSX.utils.book_append_sheet(wb, ws2, '位次明细')
     XLSX.utils.book_append_sheet(wb, ws3, '切片明细')
+    XLSX.utils.book_append_sheet(wb, ws4, '配对显著性')
 
     const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
     XLSX.writeFile(wb, `strategy_test_all_${timestamp}.xlsx`)
@@ -2192,6 +2832,13 @@ onMounted(() => {
       color: 'var(--borderColor)', icon: 'fa fa-circle-o'
     }))
   }
+  // 若 .kb 已保存测试结果（处理配置勾选「保存测试结果到 KB 文件」），恢复位次/策略对比/检索过程
+  if (props.testData) restoreTestData(props.testData)
+})
+
+// 从 .kb 加载恢复测试结果（同一次会话内换库/重新打开 .kb 时也会触发；空值不覆盖已有结果）
+watch(() => props.testData, (val) => {
+  if (val && !test.isRunning) restoreTestData(val)
 })
 
 // 监听文件和blocks的变化
@@ -2245,6 +2892,8 @@ const emit = defineEmits<{
   updateLiveState: [state: string]
   updateDedupProgress: [progress: { total: number; compared: number; dupCount: number; mergedCount: number; current: number } | null]
   testCasesChange: [data: { questions: string[], answers: string[], refs?: TestCaseRef[], source?: 'bank' | 'external' }]
+  /** 测试结果快照变化（父组件据此在保存 .kb 时落盘；仅在「保存测试结果到 KB 文件」开启时写入） */
+  testDataChange: [data: SavedTestData]
 }>()
 
 // 测试用例上限（读取按钮右侧可快速设置；与「设置 · 处理配置」的 model.maxTestCases 同源同步）
@@ -2569,6 +3218,10 @@ const clearTestCases = () => {
              :title="store.locales=='zh' ? '批量测试所有策略：每个策略跑一遍全部问题，统计召回准确率' : 'Test all strategies: run all questions for every strategy'">
           <i class="fa fa-play"></i>
         </div>
+        <!-- 重复次数（仅「全部策略」批量生效）：同批问题重复 N 轮，各指标以均值±标准差呈现 -->
+        <input v-model="test.repeat" type="number" min="1" max="5" class="kt-input" style="width:42px;"
+               :disabled="test.isRunning"
+               :title="store.locales=='zh' ? '重复次数（仅「批量测试所有策略」生效）：同一批问题重复跑 N 轮，指标以均值±标准差呈现，用于判断策略差异是否稳定（默认 1）' : 'Repeat count (all-strategy test only): run the same questions N times and report mean ± std (default 1)'"/>
         <!-- 清空批量测试结果 -->
         <div class="kt-btn" @click="clearAllResults" :disabled="test.isRunning || prewarmRunning"
              :title="store.locales=='zh' ? '清空批量测试结果 / 位次 / 统计（释放内存）' : 'Clear batch results / stats (free memory)'">
@@ -2609,11 +3262,14 @@ const clearTestCases = () => {
           </option>
         </select>
         
-        <!-- 命中判定基准：切片精准命中（默认，按关联切片身份）/ 答案命中（按参考答案文本，旧口径） -->
-        <select v-model="test.hitMode" class="kt-select" style="width:92px;"
-                :title="store.locales=='zh' ? '命中判定：切片精准命中=检索到该问题的关联切片才算命中（推荐默认）；答案命中=按参考答案文本匹配（可在右侧选择 精准/模糊 子策略）' : 'Hit rule: Slice = hit only when the question\'s linked slice is recalled (default); Answer = match by reference-answer text (pick Exact/Fuzzy sub-strategy at right)'">
+        <!-- 命中判定基准：切片精准命中（默认，按关联切片身份）/ 答案命中（按参考答案文本，旧口径）/ 大模型判定（仅智能路由） -->
+        <select v-model="test.hitMode" class="kt-select" style="width:104px;"
+                :title="store.locales=='zh' ? '命中判定：切片精准命中=检索到该问题的关联切片才算命中（推荐默认）；答案命中=按参考答案文本匹配（可在右侧选择 精准/模糊 子策略）；大模型判定=由对话模型对比检索片段与问题/参考答案判定命中与位次（仅智能路由类策略可用，判定调用计入成本、不计入检索时间）' : 'Hit rule: Slice = hit only when the linked slice is recalled (default); Answer = match by reference-answer text; LLM = the chat model judges whether the retrieved snippets answer the question (agentic strategies only)'">
           <option value="slice">{{ store.locales=='zh' ? '切片命中' : 'Slice Hit' }}</option>
           <option value="text">{{ store.locales=='zh' ? '答案命中' : 'Answer Hit' }}</option>
+          <option value="llm" :disabled="!llmJudgeAvailable">
+            {{ store.locales=='zh' ? '大模型判定' : 'LLM Judge' }}{{ llmJudgeAvailable ? '' : (store.locales=='zh' ? '（仅智能路由）' : ' (agentic only)') }}
+          </option>
         </select>
 
         <!-- 答案命中子策略（仅选中「答案命中」时显示）：精准=切片须完整包含某段参考答案；模糊=原有模糊口径 -->
@@ -2689,6 +3345,24 @@ const clearTestCases = () => {
                     {{ getAlgorithmLabel(test.questionStatus[qIndex].algorithm as SearchAlgorithm) }}
                   </span>
                   <span style="flex:1"></span>
+                  <!-- 智能路由（Agentic）：查看本次检索的工具调用过程（其它策略不显示） -->
+                  <span v-if="rowAgent(qIndex)" class="tm-trace-btn" @click="openAgentTrace(testResults[qIndex])"
+                        :title="store.locales=='zh'
+                          ? `查看智能路由检索过程：检索步骤 ${agentRetrievalStepCount(rowAgent(qIndex))} 步 / 模型调用 ${rowAgent(qIndex)?.llmCalls || 0} 次${rowAgent(qIndex)?.noToolCalls ? '（模型未调用工具' + (rowAgent(qIndex)?.fallback ? '，已系统补检索）' : '）') : ''}`
+                          : `View agentic trace: ${agentRetrievalStepCount(rowAgent(qIndex))} retrieval step(s), ${rowAgent(qIndex)?.llmCalls || 0} LLM call(s)`">
+                    <i class="fa fa-random"></i>{{ store.locales=='zh' ? '过程' : 'Trace' }}
+                    <span v-if="agentRetrievalStepCount(rowAgent(qIndex))"> {{ agentRetrievalStepCount(rowAgent(qIndex)) }}</span>
+                    <span v-else-if="rowAgent(qIndex)?.noToolCalls" style="color:#FF9800;"> 0</span>
+                  </span>
+                  <!-- 大模型判定结果（仅智能路由 + 大模型判定模式）：显示命中/位次与理由 -->
+                  <span v-if="testResults[qIndex]?.llmJudge" class="tm-trace-btn"
+                        :class="{ 'tm-judge-hit': testResults[qIndex]?.llmJudge?.hit }"
+                        @click="openAgentTrace(testResults[qIndex])"
+                        :title="store.locales=='zh'
+                          ? `大模型判定：${testResults[qIndex]?.llmJudge?.hit ? '命中（位次 ' + testResults[qIndex]?.llmJudge?.rank + '）' : '未命中'}${testResults[qIndex]?.llmJudge?.reason ? ' · ' + testResults[qIndex]?.llmJudge?.reason : ''}`
+                          : `LLM judge: ${testResults[qIndex]?.llmJudge?.hit ? 'hit (rank ' + testResults[qIndex]?.llmJudge?.rank + ')' : 'miss'}`">
+                      <i class="fa fa-gavel"></i>{{ testResults[qIndex]?.llmJudge?.hit ? (store.locales=='zh' ? '判定✓' : 'judged✓') : (store.locales=='zh' ? '判定✗' : 'judged✗') }}
+                  </span>
                   <span v-if="answerPartCount(qIndex) > 0" style="font-size:10px;color:var(--borderColor);display:inline-flex;align-items:center;gap:3px;"
                         :title="store.locales=='zh' ? '参考答案分段数' : 'answer segments'">
                     <i class="fa fa-list-ul"></i>{{ answerPartCount(qIndex) }}
@@ -2764,8 +3438,8 @@ const clearTestCases = () => {
             <tr>
               <th style="padding:8px;border:1px solid var(--borderColor);text-align:left;">{{ store.locales=='zh' ? '问题' : 'Question' }}</th>
               <th style="padding:8px;border:1px solid var(--borderColor);text-align:left;"
-                  :title="rankRefMode === 'slice' ? (store.locales=='zh' ? '关联切片=判定基准；绿色=已被检索召回' : 'Linked slices are the hit reference; green = recalled') : ''">
-                {{ store.locales=='zh' ? (rankRefMode === 'slice' ? '关联切片' : '参考答案') : (rankRefMode === 'slice' ? 'Linked Slices' : 'Answer') }}
+                  :title="rankRefMode === 'slice' ? (store.locales=='zh' ? '关联切片=判定基准；绿色=已被检索召回' : 'Linked slices are the hit reference; green = recalled') : (rankRefMode === 'llm' ? (store.locales=='zh' ? '大模型判定：由对话模型给出命中与最前位次' : 'LLM judge: hit and best rank decided by the chat model') : '')">
+                {{ store.locales=='zh' ? (rankRefMode === 'slice' ? '关联切片' : rankRefMode === 'llm' ? '大模型判定' : '参考答案') : (rankRefMode === 'slice' ? 'Linked Slices' : rankRefMode === 'llm' ? 'LLM Judge' : 'Answer') }}
               </th>
               <th style="padding:8px;border:1px solid var(--borderColor);text-align:left;">{{ store.locales=='zh' ? '策略' : 'Strategy' }}</th>
               <th style="padding:8px;border:1px solid var(--borderColor);text-align:left;">{{ store.locales=='zh' ? '命中率' : 'Hit Rate' }}</th>
@@ -2876,6 +3550,14 @@ const clearTestCases = () => {
                 <th style="text-align:center;">{{ store.locales=='zh' ? '完整率' : 'Complete' }}</th>
                 <th style="text-align:center;">{{ store.locales=='zh' ? '平均位次' : 'Avg Rank' }}</th>
                 <th style="text-align:center;">{{ store.locales=='zh' ? '平均时间' : 'Avg Time' }}</th>
+                <th style="text-align:center;"
+                    :title="store.locales=='zh' ? '平均对话模型调用次数/题（成本）：Agentic 的工具轮与最终作答、社区 Map-Reduce 均计入' : 'Avg LLM calls per question (cost): agentic tool rounds + final answer, community map-reduce included'">
+                  {{ store.locales=='zh' ? '模型调用/题' : 'LLM/Qs' }}
+                </th>
+                <th style="text-align:center;"
+                    :title="store.locales=='zh' ? '平均工具调用次数/题（仅智能路由策略有值）：鼠标悬停看工具分布，消融实验可核对「工具是否真被调用」' : 'Avg tool calls per question (agentic only); hover for the distribution'">
+                  {{ store.locales=='zh' ? '工具/题' : 'Tools/Qs' }}
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -2883,26 +3565,96 @@ const clearTestCases = () => {
                   :class="{ 'as-best': idx === 0, expanded: expandedStrategy === s.strategyId }"
                   @click="toggleStrategyDetail(s.strategyId)"
                   :title="store.locales=='zh' ? '点击查看位次明细' : 'Click to view rank detail'">
-                <td>{{ idx === 0 ? '🏆 ' : '' }}{{ s.label }}</td>
+                <td>{{ idx === 0 ? '🏆 ' : '' }}{{ s.label }}<span v-if="s.runs > 1" class="ae-note"> ·{{ s.runs }}{{ store.locales=='zh' ? '轮' : 'runs' }}</span></td>
                 <td style="text-align:center;">{{ s.hitCount }}/{{ s.testedCount }}</td>
                 <td style="text-align:center;font-weight:bold;"
                     :style="{ color: s.recallRate>=0.7 ? '#4CAF50' : (s.recallRate>=0.4 ? '#FF9800' : '#f44336') }">
-                  {{ (s.recallRate*100).toFixed(1) }}%
+                  {{ fmtStat(s.recallRate, s.std?.recallRate) }}%
                 </td>
-                <td style="text-align:center;">{{ (s.avgHitRate*100).toFixed(1) }}%</td>
+                <td style="text-align:center;">{{ fmtStat(s.avgHitRate, s.std?.avgHitRate) }}%</td>
                 <td style="text-align:center;font-weight:bold;"
                     :style="{ color: s.hitAt1>=0.7 ? '#4CAF50' : (s.hitAt1>=0.4 ? '#FF9800' : '#f44336') }">
-                  {{ (s.hitAt1*100).toFixed(1) }}%
+                  {{ fmtStat(s.hitAt1, s.std?.hitAt1) }}%
                 </td>
-                <td style="text-align:center;">{{ s.mrr.toFixed(3) }}</td>
+                <td style="text-align:center;">{{ fmtStat(s.mrr, s.std?.mrr, 1, 3) }}</td>
                 <td style="text-align:center;" :style="{ color: s.completeRate>=0.7 ? '#4CAF50' : (s.completeRate>=0.4 ? '#FF9800' : '#f44336') }">
-                  {{ (s.completeRate*100).toFixed(1) }}%
+                  {{ fmtStat(s.completeRate, s.std?.completeRate) }}%
                 </td>
-                <td style="text-align:center;">{{ s.avgFirstRank>0 ? s.avgFirstRank.toFixed(1) : '-' }}</td>
-                <td style="text-align:center;">{{ formatTime(s.avgTimeMs) }}</td>
+                <td style="text-align:center;">
+                  {{ s.avgFirstRank>0 ? fmtStat(s.avgFirstRank, s.std?.avgFirstRank, 1, 2) : '-' }}
+                </td>
+                <td style="text-align:center;">{{ s.avgTimeMs > 0 ? fmtStat(s.avgTimeMs, s.std?.avgTimeMs, 1, 0) + ' ms' : '-' }}</td>
+                <td style="text-align:center;"
+                    :title="store.locales=='zh' ? (s.avgLlmCalls > 0 ? `平均每题 ${s.avgLlmCalls.toFixed(2)} 次对话模型调用` : '本题集未产生对话模型调用') : `avg ${s.avgLlmCalls.toFixed(2)} LLM calls per question`">
+                  {{ s.avgLlmCalls > 0 ? fmtStat(s.avgLlmCalls, s.std?.avgLlmCalls, 1, 2) : '-' }}
+                </td>
+                <td style="text-align:center;"
+                    :title="s.avgToolCalls > 0 || (s.avgFallbackCalls || 0) > 0 ? toolDistText(s.toolDistribution, s.avgFallbackCalls || 0) : (store.locales=='zh' ? '该策略不使用检索工具' : 'no retrieval tools')">
+                  {{ s.avgToolCalls > 0 ? fmtStat(s.avgToolCalls, s.std?.avgToolCalls, 1, 2) : ((s.avgFallbackCalls || 0) > 0 ? '0*' : '-') }}
+                </td>
               </tr>
             </tbody>
           </table>
+          <!-- 配对显著性检验（vs 所选基线）：同批问题上的配对比较，判断策略差异是否显著 -->
+          <div v-if="allStrategyStats.length > 1" class="as-detail" style="margin-top:8px;">
+            <div class="as-detail-title">
+              <i class="fa fa-balance-scale"></i> {{ store.locales=='zh' ? '配对显著性检验' : 'Paired significance' }}
+              <span class="as-group-tabs">
+                <span class="ae-note">{{ store.locales=='zh' ? '基线' : 'Baseline' }}</span>
+                <select v-model="sigBaseline" class="kt-select" style="width:auto;max-width:170px;">
+                  <option v-for="s in allStrategyStats" :key="s.strategyId" :value="s.strategyId">{{ s.label }}</option>
+                </select>
+              </span>
+            </div>
+            <div class="ae-note" style="margin:2px 0 5px;">
+              {{ store.locales=='zh'
+                ? '同一批问题、同一判定基准下与基线配对：命中差异用 McNemar 精确检验（b=基线命中/对比未命中，c=反之），位次差异用 Wilcoxon 符号秩检验（未命中记 K+1）；p<0.05 视为显著'
+                : 'Paired on the same questions vs the baseline: McNemar exact test for hit differences (b = baseline hit & other miss, c = vice versa), Wilcoxon signed-rank for ranks (miss = K+1); p<0.05 = significant' }}
+            </div>
+            <div v-if="!pairedComparisons.length" class="as-empty">
+              <i class="fa fa-info-circle"></i>
+              {{ store.locales=='zh' ? '暂无可配对数据（需至少两个策略各有判定记录）' : 'No paired data yet (need two strategies with judgements)' }}
+            </div>
+            <table v-else class="as-table as-detail-table">
+              <thead>
+                <tr>
+                  <th>{{ store.locales=='zh' ? '对比策略' : 'Strategy' }}</th>
+                  <th style="text-align:center;">{{ store.locales=='zh' ? '共同题' : 'Paired' }}</th>
+                  <th style="text-align:center;">{{ store.locales=='zh' ? '命中变化' : 'Δ Recall' }}</th>
+                  <th style="text-align:center;">b/c</th>
+                  <th style="text-align:center;">McNemar</th>
+                  <th style="text-align:center;">Wilcoxon</th>
+                  <th style="text-align:center;">{{ store.locales=='zh' ? '位次变化' : 'Δ Rank' }}</th>
+                  <th style="text-align:center;">{{ store.locales=='zh' ? '结论' : 'Verdict' }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="c in pairedComparisons" :key="c.strategyId">
+                  <td>{{ c.label }}</td>
+                  <td style="text-align:center;">{{ c.n }}</td>
+                  <td style="text-align:center;font-weight:bold;" :style="{ color: deltaColor(c.deltaRecall) }">
+                    {{ c.deltaRecall > 0 ? '+' : '' }}{{ (c.deltaRecall * 100).toFixed(1) }}%
+                  </td>
+                  <td style="text-align:center;" :title="store.locales=='zh' ? 'b/c（基线命中而对比未命中 / 反之）' : 'b/c (baseline-only hits / other-only hits)'">
+                    {{ c.baseOnly }}/{{ c.otherOnly }}
+                  </td>
+                  <td style="text-align:center;" :style="{ color: c.mcnemarP < 0.05 ? '#4CAF50' : 'var(--borderColor)', fontWeight: c.mcnemarP < 0.05 ? 700 : 400 }">
+                    {{ pText(c.mcnemarP) }}
+                  </td>
+                  <td style="text-align:center;" :style="{ color: c.wilcoxonP < 0.05 ? '#4CAF50' : 'var(--borderColor)', fontWeight: c.wilcoxonP < 0.05 ? 700 : 400 }">
+                    {{ pText(c.wilcoxonP) }}
+                  </td>
+                  <td style="text-align:center;" :style="{ color: deltaColor(-c.rankDelta) }">
+                    {{ c.rankDelta > 0 ? '+' : '' }}{{ c.rankDelta.toFixed(2) }}
+                  </td>
+                  <td style="text-align:center;font-weight:bold;" :style="{ color: verdictColor(c.verdict) }">
+                    {{ verdictLabel(c.verdict) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
           <!-- 位次明细（点击策略行展开） -->
           <div v-if="expandedStrategy" class="as-detail">
             <div class="as-detail-title">
@@ -2918,6 +3670,7 @@ const clearTestCases = () => {
                   <th style="text-align:center;">{{ store.locales=='zh' ? '答案命中率' : 'HitRate' }}</th>
                   <th style="text-align:center;">{{ store.locales=='zh' ? '最优位次' : 'Best Rank' }}</th>
                   <th style="text-align:center;">{{ store.locales=='zh' ? '召回时间' : 'Recall Time' }}</th>
+                  <th style="text-align:center;width:74px;">{{ store.locales=='zh' ? '检索过程' : 'Trace' }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -2930,6 +3683,16 @@ const clearTestCases = () => {
                   <td style="text-align:center;">{{ ((r.hitRate||0)*100).toFixed(0) }}%</td>
                   <td style="text-align:center;">{{ r.firstRank>0 ? r.firstRank : '-' }}</td>
                   <td style="text-align:center;">{{ formatTime(r.timeMs) }}</td>
+                  <!-- 智能路由：回看该问题的工具调用过程（其它策略无该数据） -->
+                  <td style="text-align:center;">
+                    <span v-if="r.agent" class="tm-trace-btn" @click="openAgentTrace(r)"
+                          :title="store.locales=='zh'
+                            ? `查看智能路由检索过程：检索步骤 ${agentRetrievalStepCount(r.agent)} 步 / 模型调用 ${r.agent.llmCalls} 次`
+                            : `View agentic trace: ${agentRetrievalStepCount(r.agent)} step(s), ${r.agent.llmCalls} LLM call(s)`">
+                      <i class="fa fa-random"></i>{{ agentRetrievalStepCount(r.agent) }}
+                    </span>
+                    <span v-else style="color:var(--borderColor);">-</span>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -2950,70 +3713,58 @@ const clearTestCases = () => {
           <button class="ae-close" @click="prewarmPanelOpen = false" :title="store.locales=='zh' ? '关闭' : 'Close'"><i class="fa fa-times"></i></button>
         </div>
 
-        <!-- 预热项：点击整行勾选；已就绪项（数据/向量齐全）用主题色显示 -->
-        <div class="pw-list scoll">
-          <div v-for="item in availablePrewarmItems" :key="item.key" class="pw-row"
-               :class="{ on: prewarm[item.key] }"
-               :title="(store.locales=='zh' ? item.label : item.labelEn) + ' ｜ ' + prewarmStatusText(item.key)"
-               @click="prewarm[item.key] = !prewarm[item.key]">
-            <i class="fa pw-check" :class="prewarm[item.key] ? 'fa-check-square-o' : 'fa-square-o'"></i>
-            <i class="fa" :class="item.icon" :style="prewarmReady(item.key) ? { color: 'var(--fontActiveColor)' } : {}"></i>
-            <span class="pw-label">{{ store.locales=='zh' ? item.label : item.labelEn }}</span>
-            <span class="pw-status" :style="prewarmReady(item.key) ? { color: 'var(--fontActiveColor)' } : {}">{{ prewarmStatusText(item.key) }}</span>
-          </div>
-        </div>
-
-        <!-- 运行进度（运行中） -->
-        <div v-if="prewarmRunning && prewarmEnabledItems.length > 0" class="as-detail">
-          <div class="as-detail-title"><i class="fa fa-spinner fa-spin"></i> {{ store.locales=='zh' ? '预热进度' : 'Pre-warm progress' }}</div>
-          <div v-for="item in prewarmEnabledItems" :key="'p-' + item.key" class="prewarm-row">
-            <span class="prewarm-row-icon"><i class="fa" :class="item.icon"></i></span>
-            <span class="prewarm-row-name" :title="store.locales=='zh' ? item.label : item.labelEn">{{ store.locales=='zh' ? item.label : item.labelEn }}</span>
-            <div class="prewarm-row-bar">
-              <div class="prewarm-row-fill" :style="{ width: prewarmPct(item.key) + '%' }"></div>
-            </div>
-            <span class="prewarm-row-status" :class="prewarmItemStates[item.key]?.status || 'pending'">
-              <template v-if="prewarmItemStates[item.key]?.status === 'done'">
-                <i class="fa fa-check-circle"></i> {{ store.locales=='zh' ? '完成' : 'Done' }}
-              </template>
-              <template v-else-if="prewarmItemStates[item.key]?.status === 'running'">
-                <i class="fa fa-spinner fa-spin"></i>
-                <template v-if="prewarmItemStates[item.key].total > 0">{{ prewarmItemStates[item.key].index }}/{{ prewarmItemStates[item.key].total }}</template>
-                <template v-else>{{ store.locales=='zh' ? '处理中' : 'Running' }}</template>
-              </template>
-              <template v-else>{{ store.locales=='zh' ? '待处理' : 'Pending' }}</template>
-            </span>
-          </div>
-          <div class="pw-detail">{{ prewarmItemStates[prewarmRunningItemKey]?.detail }}</div>
-        </div>
-
-        <!-- 耗时（执行过） -->
-        <div v-if="prewarmDone && prewarmTotalMs > 0" class="as-detail">
-          <div class="as-detail-title"><i class="fa fa-clock-o"></i> {{ store.locales=='zh' ? '预热耗时（不计入检索时间）' : 'Pre-warm time (excluded from retrieval)' }}</div>
-          <table class="as-table as-detail-table">
+        <!-- 预热项表格：每项只出现一行，勾选 / 状态 / 进度 / 耗时 都在这行里 -->
+        <div class="pw-table-wrap scoll">
+          <table class="as-table as-detail-table pw-table">
             <thead>
               <tr>
+                <th style="width:26px;"></th>
                 <th>{{ store.locales=='zh' ? '项目' : 'Item' }}</th>
-                <th style="text-align:center;">{{ store.locales=='zh' ? '耗时' : 'Time' }}</th>
-                <th style="text-align:center;">{{ store.locales=='zh' ? '状态' : 'Status' }}</th>
+                <th>{{ store.locales=='zh' ? '状态' : 'Status' }}</th>
+                <th style="width:132px;text-align:center;">{{ store.locales=='zh' ? '进度' : 'Progress' }}</th>
+                <th style="width:64px;text-align:center;">{{ store.locales=='zh' ? '耗时' : 'Time' }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="item in availablePrewarmItems" :key="'t-' + item.key">
-                <td>{{ store.locales=='zh' ? item.label : item.labelEn }}</td>
-                <td style="text-align:center;">{{ prewarmTimes[item.key] != null ? formatTime(prewarmTimes[item.key]) : '-' }}</td>
-                <td style="text-align:center;">
-                  <span v-if="prewarm[item.key]" style="color:#4CAF50;"><i class="fa fa-check-circle"></i></span>
-                  <span v-else style="color:var(--borderColor);">-</span>
+              <tr v-for="item in availablePrewarmItems" :key="item.key" class="pw-tr"
+                  :class="{ on: prewarm[item.key] }"
+                  :title="(store.locales=='zh' ? item.label : item.labelEn) + ' ｜ ' + prewarmStatusText(item.key)"
+                  @click="prewarm[item.key] = !prewarm[item.key]">
+                <td class="pw-td-check"><i class="fa" :class="prewarm[item.key] ? 'fa-check-square-o' : 'fa-square-o'"></i></td>
+                <td class="pw-td-item">
+                  <i class="fa" :class="item.icon" :style="prewarmReady(item.key) ? { color: 'var(--fontActiveColor)' } : {}"></i>
+                  <span>{{ store.locales=='zh' ? item.label : item.labelEn }}</span>
                 </td>
-              </tr>
-              <tr>
-                <td style="font-weight:bold;">{{ store.locales=='zh' ? '合计' : 'Total' }}</td>
-                <td style="text-align:center;font-weight:bold;">{{ formatTime(prewarmTotalMs) }}</td>
-                <td style="text-align:center;"><span style="color:#4CAF50;"><i class="fa fa-check-circle"></i></span></td>
+                <td class="pw-td-status">
+                  <template v-if="prewarmItemStates[item.key]?.status === 'running'">
+                    <i class="fa fa-spinner fa-spin"></i> {{ store.locales=='zh' ? '处理中' : 'Running' }}
+                  </template>
+                  <template v-else-if="prewarmItemStates[item.key]?.status === 'done'">
+                    <i class="fa fa-check-circle" style="color:#4CAF50;"></i> {{ store.locales=='zh' ? '已完成' : 'Done' }}
+                  </template>
+                  <span v-else :style="prewarmReady(item.key) ? { color: 'var(--fontActiveColor)' } : {}">{{ prewarmStatusText(item.key) }}</span>
+                </td>
+                <td class="pw-td-progress">
+                  <div class="prewarm-row-bar"><div class="prewarm-row-fill" :style="{ width: prewarmPct(item.key) + '%' }"></div></div>
+                  <span v-if="(prewarmItemStates[item.key]?.total || 0) > 0" class="pw-pct">{{ prewarmItemStates[item.key].index }}/{{ prewarmItemStates[item.key].total }}</span>
+                </td>
+                <td class="pw-td-time">{{ prewarmTimes[item.key] != null ? formatTime(prewarmTimes[item.key]) : '-' }}</td>
               </tr>
             </tbody>
+            <tfoot v-if="prewarmDone && prewarmTotalMs > 0">
+              <tr>
+                <td></td>
+                <td style="font-weight:600;">{{ store.locales=='zh' ? '合计' : 'Total' }}</td>
+                <td></td>
+                <td></td>
+                <td class="pw-td-time" style="font-weight:600;">{{ formatTime(prewarmTotalMs) }}</td>
+              </tr>
+            </tfoot>
           </table>
+        </div>
+        <!-- 当前项明细（运行中一行提示，不再重复整张表） -->
+        <div v-if="prewarmRunning" class="pw-detail">
+          {{ prewarmItemStates[prewarmRunningItemKey]?.detail || (store.locales=='zh' ? '准备中...' : 'Preparing...') }}
         </div>
 
         <!-- 操作 -->
@@ -3028,6 +3779,80 @@ const clearTestCases = () => {
                @click="runPrewarm">
             <i class="fa" :class="prewarmRunning ? 'fa-spinner fa-spin' : 'fa-play'"></i>
             <span class="pw-run-label">{{ store.locales=='zh' ? '开始预热' : 'Run' }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 智能路由（Agentic）检索过程模态框：工具调用轨迹（仅智能路由策略的结果带该数据） -->
+    <div v-if="agentTrace" class="tm-overlay" @click.self="closeAgentTrace">
+      <div class="tm-modal tm-trace-modal">
+        <div class="ae-head">
+          <div class="ae-title">
+            <i class="fa fa-random"></i>
+            <span class="tm-modal-title">{{ agentTrace.heading }}</span>
+            <span v-if="agentTrace.question" class="ae-note ellipsis" style="max-width:320px;" :title="agentTrace.question">{{ agentTrace.question }}</span>
+          </div>
+          <button class="ae-close" @click="closeAgentTrace" :title="store.locales=='zh' ? '关闭' : 'Close'"><i class="fa fa-times"></i></button>
+        </div>
+        <!-- 汇总：本次可用工具 / 轮次 / 模型调用 / 降级与未就绪工具提示 -->
+        <div class="tm-trace-sum">
+          <span class="tm-trace-stat">{{ store.locales=='zh' ? '下发工具定义' : 'Tool defs' }} {{ agentTrace.agent.tools.length }}</span>
+          <span v-for="tl in agentTrace.agent.tools" :key="tl" class="tm-trace-tool">{{ agentToolLabel(tl) }}</span>
+          <span class="tm-trace-stat">{{ store.locales=='zh' ? '轮次' : 'Rounds' }} {{ agentTraceRoundCount }}</span>
+          <span class="tm-trace-stat">{{ store.locales=='zh' ? '模型调用' : 'LLM calls' }} {{ agentTrace.agent.llmCalls }}</span>
+          <span v-if="agentTrace.agent.noToolCalls" class="tm-trace-warn">
+            <i class="fa fa-exclamation-triangle"></i>
+            {{ store.locales=='zh'
+              ? '模型本轮未调用任何检索工具（可能：该模型/服务不支持 function calling、提示词被忽略）'
+              : 'The model called no retrieval tool (model/service may lack function calling support)' }}
+          </span>
+          <span v-if="agentTrace.agent.fallback" class="tm-trace-warn">
+            <i class="fa fa-life-ring"></i>
+            {{ store.locales=='zh' ? '已按可用通道执行系统补检索' : 'Deterministic supplementary retrieval ran' }}
+          </span>
+          <span v-if="agentTrace.agent.degraded" class="tm-trace-warn">
+            <i class="fa fa-exclamation-triangle"></i>
+            {{ store.locales=='zh' ? '模型未返回工具调用，已退化为单次检索' : 'No tool calls returned; degraded to a single retrieval' }}
+          </span>
+          <span v-if="agentTrace.agent.droppedTools.length" class="tm-trace-note">
+            {{ store.locales=='zh' ? '未就绪工具' : 'Tools without data' }}: {{ agentTrace.agent.droppedTools.join(', ') }}
+          </span>
+        </div>
+        <div class="tm-body">
+          <!-- 大模型判定结果（仅大模型判定模式）：命中与否 / 位次 / 理由 -->
+          <div v-if="agentTrace.judge" class="tm-judge-line" :class="{ hit: agentTrace.judge.hit, err: !!agentTrace.judge.error }">
+            <i class="fa fa-gavel"></i>
+            <span v-if="agentTrace.judge.error">
+              {{ store.locales=='zh' ? '大模型判定失败：' : 'LLM judgement failed: ' }}{{ agentTrace.judge.error }}
+            </span>
+            <span v-else>
+              {{ store.locales=='zh'
+                ? `大模型判定：${agentTrace.judge.hit ? `命中（最前位次 ${agentTrace.judge.rank}）` : '未命中'}`
+                : `LLM judge: ${agentTrace.judge.hit ? `hit (best rank ${agentTrace.judge.rank})` : 'miss'}` }}
+              <span v-if="agentTrace.judge.reason" class="tm-judge-reason">· {{ agentTrace.judge.reason }}</span>
+            </span>
+          </div>
+          <div v-if="agentTrace.agent.steps.length === 0" class="tm-trace-empty">
+            {{ store.locales=='zh' ? '本次未记录到任何检索步骤（连系统预取都为空：知识库可能没有可用切片）。' : 'No retrieval step recorded (even the pre-fetch was empty).' }}
+          </div>
+          <div v-for="(st, i) in agentTrace.agent.steps" :key="i" class="tm-step" :class="st.status">
+            <div class="tm-step-head">
+              <span class="tm-step-round">{{ st.kind === 'prefetch' ? '预' : '#' + st.round }}</span>
+              <span class="tm-step-kind" :class="st.kind || 'tool'">{{ agentStepKindLabel(st) }}</span>
+              <span class="tm-step-tool">{{ st.tool ? agentToolLabel(st.tool) : '' }}</span>
+              <span v-if="st.note" class="tm-step-note">{{ st.note }}</span>
+              <span class="tm-step-status" :class="st.status">
+                <i class="fa" :class="st.status === 'running' ? 'fa-spinner fa-spin' : st.status === 'done' ? 'fa-check-circle' : 'fa-times-circle'"></i>
+                {{ store.locales=='zh' ? (st.status === 'running' ? '执行中' : st.status === 'done' ? '完成' : '失败') : st.status }}
+              </span>
+            </div>
+            <!-- 参数：工具调用参数（prefetch/补检索同样有参数），便于核对「用什么检索词查了什么」 -->
+            <div v-if="agentStepArgsText(st.args)" class="tm-step-args">
+              <span class="tm-step-args-label">{{ store.locales=='zh' ? '参数' : 'Args' }}:</span>
+              <span class="tm-step-args-value">{{ agentStepArgsText(st.args) }}</span>
+            </div>
+            <div class="tm-step-result">{{ st.result || '—' }}</div>
           </div>
         </div>
       </div>
@@ -3202,30 +4027,8 @@ const clearTestCases = () => {
   background-color: color-mix(in srgb, var(--fontActiveColor) 22%, var(--backgroundColor));
 }
 
-/* ===== 预热进度行（预热 / 向量缓存浮层） ===== */
-.prewarm-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 0;
-  font-size: 11px;
-}
-.prewarm-row-icon {
-  width: 16px;
-  text-align: center;
-  color: var(--fontActiveColor);
-  flex-shrink: 0;
-}
-.prewarm-row-name {
-  flex-shrink: 0;
-  min-width: 150px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* ===== 预热项进度条（预热 / 向量缓存浮层的表格内） ===== */
 .prewarm-row-bar {
-  flex: 1;
   height: 5px;
   min-width: 60px;
   background: var(--borderColor);
@@ -3238,15 +4041,6 @@ const clearTestCases = () => {
   border-radius: 3px;
   transition: width 0.15s;
 }
-.prewarm-row-status {
-  flex-shrink: 0;
-  min-width: 80px;
-  text-align: right;
-  color: var(--borderColor);
-  white-space: nowrap;
-}
-.prewarm-row-status.running { color: #FF9800; }
-.prewarm-row-status.done { color: #4CAF50; }
 
 /* ===== 策略召回对比表格样式（批量测试面板标签页使用） ===== */
 .as-table { width: 100%; border-collapse: collapse; font-size: 11px; }
@@ -3339,21 +4133,26 @@ const clearTestCases = () => {
 .tm-gold-ic.none .tm-gold-dot { color: #f44336; }
 
 /* ===== 预热 / 向量缓存浮层 ===== */
-.pw-modal { width: min(700px, 94vw); height: auto; max-height: 86vh; overflow: hidden; }
-.pw-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; min-height: 0; }
-.pw-row {
-  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
-  border: 1px solid var(--borderColor); border-radius: 5px;
-  background: var(--backgroundColor); font-size: 12px; cursor: pointer;
-}
-.pw-row:hover { border-color: var(--fontActiveColor); }
-.pw-row.on { border-color: var(--fontActiveColor); background: var(--menuColor); }
-.pw-check { font-size: 12px; color: var(--borderColor); flex-shrink: 0; }
-.pw-row.on .pw-check { color: var(--fontActiveColor); }
-.pw-label { flex-shrink: 0; }
-.pw-status { margin-left: auto; font-size: 11px; color: var(--borderColor); text-align: right; }
-.pw-detail { font-size: 11px; color: var(--borderColor); margin-top: 4px; white-space: pre-wrap; }
-.pw-actions { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--borderColor); padding-top: 8px; }
+/* 高度自适应内容（覆盖 .tm-modal 的固定高度；内容多少就多高，超过视口才在表格内滚动） */
+.tm-modal.pw-modal { width: min(720px, 94vw); height: auto; max-height: 88vh; overflow: hidden; }
+.pw-modal .ae-head { flex: none; }
+.pw-table-wrap { overflow: auto; min-height: 0; flex: 0 1 auto; }
+.pw-table { font-size: 12px; }
+.pw-table th { white-space: nowrap; }
+.pw-tr { cursor: pointer; }
+.pw-tr:hover td { background: var(--menuColor); }
+.pw-tr.on td { background: var(--menuColor); }
+.pw-td-check { text-align: center; color: var(--borderColor); }
+.pw-tr.on .pw-td-check { color: var(--fontActiveColor); }
+.pw-td-item { white-space: nowrap; }
+.pw-td-item > i { margin-right: 6px; }
+.pw-td-status { font-size: 11px; color: var(--borderColor); }
+.pw-td-progress { text-align: center; }
+.pw-td-progress .prewarm-row-bar { width: 100%; }
+.pw-pct { font-size: 10px; color: var(--borderColor); }
+.pw-td-time { text-align: center; font-size: 11px; }
+.pw-detail { font-size: 11px; color: var(--borderColor); margin-top: 4px; white-space: pre-wrap; flex: none; }
+.pw-actions { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--borderColor); padding-top: 8px; flex: none; }
 .pw-actions .kt-btn { width: auto; min-width: 29px; padding: 0 8px; }
 .pw-run-label { margin-left: 5px; font-size: 12px; }
 .pw-badge {
@@ -3390,6 +4189,67 @@ const clearTestCases = () => {
 /* 总分：右对齐（相对本行其余分项） */
 .tm-entry-total { margin-left: auto; font-weight: 700; white-space: nowrap; }
 .tm-entry-body { max-height: 46vh; overflow: auto; margin-top: 4px; padding: 6px; border: 1px dashed var(--borderColor); border-radius: 4px; }
+
+/* ===== 智能路由（Agentic）检索过程：行内按钮 + 轨迹模态框 ===== */
+.tm-trace-btn {
+  font-size: 10px; color: #42A5F5; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
+}
+.tm-trace-btn:hover { text-decoration: underline; }
+.tm-trace-modal { width: min(760px, 92vw); height: min(80vh, 720px); }
+.tm-trace-sum {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--borderColor); font-size: 10px; flex-shrink: 0;
+}
+.tm-trace-tool {
+  padding: 0 5px; line-height: 16px; border-radius: 3px;
+  background: color-mix(in srgb, var(--fontActiveColor) 14%, var(--backgroundColor));
+  color: var(--fontActiveColor); white-space: nowrap;
+}
+.tm-trace-stat { color: var(--fontColor); opacity: .8; white-space: nowrap; }
+.tm-trace-warn { color: #FF9800; }
+.tm-trace-note { color: var(--borderColor); }
+.tm-trace-empty { padding: 10px; font-size: 11px; color: var(--borderColor); line-height: 1.6; }
+/* 大模型判定结果行 */
+.tm-judge-line {
+  display: flex; align-items: flex-start; gap: 5px; flex-shrink: 0;
+  padding: 5px 7px; font-size: 11px; line-height: 1.5; border-radius: 4px;
+  border: 1px solid var(--borderColor); background: var(--backgroundColor); color: var(--fontColor);
+}
+.tm-judge-line.hit { border-color: #4CAF50; color: #4CAF50; }
+.tm-judge-line.err { border-color: #FF9800; color: #FF9800; }
+.tm-judge-reason { color: var(--fontColor); opacity: .8; }
+.tm-judge-hit { color: #4CAF50 !important; }
+.tm-step {
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  padding: 4px 6px; margin-bottom: 5px; background: var(--backgroundColor);
+}
+.tm-step-head { display: flex; align-items: center; gap: 6px; }
+.tm-step-round {
+  min-width: 18px; height: 16px; padding: 0 3px; border-radius: 8px;
+  background: var(--fontActiveColor); color: #fff; font-size: 10px;
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.tm-step-kind {
+  font-size: 9px; padding: 0 4px; line-height: 14px; border-radius: 3px; white-space: nowrap;
+  border: 1px solid var(--borderColor); color: var(--borderColor);
+}
+.tm-step-kind.prefetch { border-color: #607D8B; color: #607D8B; }
+.tm-step-kind.tool { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+.tm-step-kind.fallback { border-color: #FF9800; color: #FF9800; }
+.tm-step-kind.model { border-color: var(--borderColor); color: var(--fontColor); opacity: .7; }
+.tm-step-note { font-size: 9px; color: var(--fontColor); opacity: .7; }
+.tm-step-args-label { color: var(--borderColor); margin-right: 3px; }
+.tm-step-tool { font-size: 11px; font-weight: 600; color: var(--fontColor); }
+.tm-step-status { margin-left: auto; font-size: 9px; display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.tm-step-status.running { color: #409EFF; }
+.tm-step-status.done { color: #67C23A; }
+.tm-step-status.error { color: #F56C6C; }
+.tm-step-args { margin-top: 3px; font-size: 9px; color: var(--borderColor); word-break: break-all; }
+.tm-step-result {
+  margin-top: 3px; font-size: 11px; line-height: 1.45; color: var(--fontColor);
+  max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
 
 /* 工具栏无需横向滑块（覆盖 kb-view.css 的 overflow-x:auto）：空间不足时内容裁切，保持单行 */
 .kt-toolbar { overflow-x: hidden; }

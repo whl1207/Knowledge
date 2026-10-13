@@ -57,6 +57,17 @@ export interface PluginBridgeApi {
   removeDataFile(id: string, name: string, confirm?: boolean): Promise<{ removed: boolean }>
   /** 删除插件整个主进程数据目录（需 confirm） */
   clearDataFiles(id: string, confirm?: boolean): Promise<{ removed: boolean }>
+  /**
+   * 插件记住的文件授权（用户在插件里选过的文件 / 文件夹，跨重启有效）。
+   * 「设置 → 插件 → 数据」里展示与撤销，落盘实现见 electron/main/plugin-grants.ts。
+   */
+  files: {
+    grants(options: { id: string }): Promise<{ id: string; entries: Array<{ path: string; isDir: boolean; exists: boolean }> }>
+    /** 撤销一条授权（需 confirm） */
+    revokeGrant(options: { id: string; path: string; confirm?: boolean }): Promise<{ removed: boolean }>
+    /** 清掉某个插件的全部授权（需 confirm） */
+    clearGrants(options: { id: string; confirm?: boolean }): Promise<{ removed: boolean }>
+  }
   clientBundle(id: string): Promise<PluginClientBundle>
   /** 从本地文件夹安装插件（P2：主进程弹目录选择框） */
   install(options?: { confirm?: boolean; replace?: boolean }): Promise<{

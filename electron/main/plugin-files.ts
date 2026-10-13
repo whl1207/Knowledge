@@ -7,8 +7,10 @@
  *
  * 安全模型（两层）：
  * 1. **权限**：只有清单声明了 `fs` 权限、且插件当前处于激活态的插件才能调用；
- * 2. **授权范围（capability allowlist）**：只会话性地允许访问"用户在该插件里亲自选过"的文件
+ * 2. **授权范围（capability allowlist）**：只允许访问"用户在该插件里亲自选过"的文件
  *    与文件夹（及其子项）。插件不能凭一个路径字符串读到任意位置——即使它拿到了路径。
+ *    这份清单会**落盘**（见 plugin-grants.ts），所以「上次选的游戏目录 / 法规库目录」
+ *    重启后照样能用；用户可在「设置 → 插件 → 数据」里逐条撤销，卸载插件会全部清掉。
  *
  * PDF 文本提取用 pdfjs-dist（与 electron/main/index.ts 的 readPdf 同一套做法），
  * 视觉预览由**渲染层**用应用自带的 pdfjs 渲染成 PNG（见 src/lib/plugin/files.ts）。
@@ -21,9 +23,8 @@ import * as PDFJS from 'pdfjs-dist'
 import xlsx from 'xlsx'
 import { IPCError } from '@/types/ipc'
 import { pluginHost } from './plugin-host'
-
-/** 单个插件被授权访问的路径集合（文件 + 文件夹前缀） */
-const grants = new Map<string, Set<string>>()
+import { requirePluginApproval } from './plugin-approval'
+import { addGrant, clearGrants, grantPaths, listGrants, revokeGrant } from './plugin-grants'
 
 /** 读表格的上限（避免大表把主进程内存打满；插件侧据此也能判断是否被截断） */
 const SHEET_MAX_BYTES = 32 * 1024 * 1024
@@ -31,24 +32,12 @@ const SHEET_MAX_ROWS = 20000
 const SHEET_MAX_SHEETS = 20
 const SHEET_MAX_COLS = 200
 
-function grantRoots(pluginId: string): Set<string> {
-  let set = grants.get(pluginId)
-  if (!set) {
-    set = new Set()
-    grants.set(pluginId, set)
-  }
-  return set
-}
-
 /** 插件是否声明了 fs 权限（未声明一律拒绝） */
 function requireFsPermission(pluginId: string): void {
   const snapshot = pluginHost.list().find((p) => p.id === pluginId)
   if (!snapshot) throw new IPCError('PLUGIN_NOT_FOUND', `插件不存在：${pluginId}`)
-  if (!snapshot.enabled) {
-    // 停用即收回授权：重新启用后必须重新选择文件，避免路径长期留存
-    grants.delete(pluginId)
-    throw new IPCError('PERMISSION_DENIED', `插件未启用：${pluginId}`)
-  }
+  // 停用期间不接受任何调用；但「记住的路径」不清（授权是用户点过的，撤销走「插件 → 数据」）
+  if (!snapshot.enabled) throw new IPCError('PERMISSION_DENIED', `插件未启用：${pluginId}`)
   if (!snapshot.permissions.includes('fs')) {
     throw new IPCError('PERMISSION_DENIED', `插件 ${pluginId} 未声明 fs 权限（package.json 的 aikm.permissions）`)
   }
@@ -63,7 +52,7 @@ function readPluginId(payload: unknown): string {
 /** 路径是否落在该插件被授权的范围内（自身或某授权文件夹的子项） */
 function assertAllowed(pluginId: string, target: string): void {
   const resolved = path.resolve(target)
-  for (const root of grantRoots(pluginId)) {
+  for (const root of grantPaths(pluginId)) {
     if (resolved === root) return
     const prefix = root.endsWith(path.sep) ? root : root + path.sep
     if (resolved.startsWith(prefix)) return
@@ -74,11 +63,6 @@ function assertAllowed(pluginId: string, target: string): void {
   )
 }
 
-function rememberGrant(pluginId: string, target: string): void {
-  grantRoots(pluginId).add(path.resolve(target))
-}
-
-/** 把任意异常收敛成 IPCError（保留已是 IPCError 的 code） */
 function asIpcError(error: unknown): IPCError {
   if (error instanceof IPCError) return error
   return new IPCError('PLUGIN_FILES_FAILED', error instanceof Error ? error.message : String(error))
@@ -126,7 +110,7 @@ export function registerPluginFilesIpc(): void {
       if (result.canceled || !result.filePaths.length) return { cancelled: true, files: [] as Array<{ path: string; name: string; size: number }> }
       const files = []
       for (const filePath of result.filePaths) {
-        rememberGrant(pluginId, filePath)
+        addGrant(pluginId, filePath)
         const stat = await fs.stat(filePath).catch(() => null)
         files.push({ path: filePath, name: path.basename(filePath), size: stat ? stat.size : 0 })
       }
@@ -146,7 +130,7 @@ export function registerPluginFilesIpc(): void {
       const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
       if (result.canceled || !result.filePaths.length) return { cancelled: true, dir: null }
       const dir = result.filePaths[0]
-      rememberGrant(pluginId, dir)
+      addGrant(pluginId, dir)
       return { cancelled: false, dir: { path: dir, name: path.basename(dir) } }
     } catch (error) {
       throw asIpcError(error)
@@ -252,5 +236,33 @@ export function registerPluginFilesIpc(): void {
     } catch (error) {
       throw asIpcError(error)
     }
+  })
+
+  /**
+   * 列出某个插件记住的文件授权（设置 → 插件 → 数据 里显示）。
+   * 只读，不需要 fs 权限（停用的插件也要能看到并撤销它记住的路径）。
+   */
+  ipcMain.handle('plugin:files:grants', (_event, payload: { id?: string } = {}) => {
+    const pluginId = readPluginId(payload)
+    if (!pluginHost.list().some((p) => p.id === pluginId)) {
+      throw new IPCError('PLUGIN_NOT_FOUND', `插件不存在：${pluginId}`)
+    }
+    return { id: pluginId, entries: listGrants(pluginId) }
+  })
+
+  /** 撤销一条授权（撤销是「收回权限」，但仍要求用户确认，避免插件偷偷改别人的授权） */
+  ipcMain.handle('plugin:files:revoke-grant', (_event, payload: { id?: string; path?: string; confirm?: boolean } = {}) => {
+    const pluginId = readPluginId(payload)
+    const target = String(payload?.path ?? '').trim()
+    if (!target) throw new IPCError('INVALID_INPUT', '缺少路径')
+    requirePluginApproval(payload, `撤销插件 ${pluginId} 的文件授权`)
+    return { removed: revokeGrant(pluginId, target) }
+  })
+
+  /** 清掉某个插件的全部授权（用户确认后） */
+  ipcMain.handle('plugin:files:clear-grants', (_event, payload: { id?: string; confirm?: boolean } = {}) => {
+    const pluginId = readPluginId(payload)
+    requirePluginApproval(payload, `清除插件 ${pluginId} 的全部文件授权`)
+    return { removed: clearGrants(pluginId) }
   })
 }
