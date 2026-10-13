@@ -1,8 +1,8 @@
 <!-- SkillManagement.vue - 技能管理模块 -->
 <template>
-  <div class="agent-skill">
-    <!-- ====== 顶部工具栏 ====== -->
-    <div class="top-bar">
+  <div class="agent-skill" :class="{ tall: isTallLayout }">
+    <!-- ====== 顶部工具栏（细长窗口下只在技能列表屏显示，下钻后由各屏自己的返回条带路） ====== -->
+    <div class="top-bar" v-show="!isTallLayout || tallScreen === 'list'">
       <h3>{{ store.locales === 'en' ? 'Skill Management' : '技能管理' }}</h3>
       <div class="manage-toolbar">
         <span class="skill-count" v-if="skills.length > 0">{{ skills.length }} {{ store.locales === 'en' ? 'skills' : '个技能' }}</span>
@@ -25,7 +25,7 @@
     <div class="manage-content">
       <div class="manage-split">
         <!-- 左侧：技能列表 -->
-        <div class="manage-left">
+        <div class="manage-left" v-show="!isTallLayout || tallScreen === 'list'">
           <div class="skill-list">
             <div v-if="loading" class="empty-hint" style="height:100%;">
               <i class="fa fa-spinner fa-spin" style="font-size:20px;"></i>
@@ -69,13 +69,18 @@
         </div>
 
         <!-- 中间：文件树 -->
-        <div class="manage-middle">
+        <div class="manage-middle" v-show="!isTallLayout || tallScreen === 'tree'">
           <div v-if="!selectedSkill" class="empty-hint">
             <i class="fa fa-hand-pointer-o" style="font-size:28px;"></i>
             <span>{{ store.locales === 'en' ? 'Select a skill from the left' : '请从左侧选择一个技能' }}</span>
           </div>
           <div v-else class="file-tree-container">
             <div class="file-tree-header">
+              <!-- 细长窗口：文件树整屏时左上角返回（回到整屏技能列表） -->
+              <div v-if="isTallLayout" class="sk-back" @click="backToSkillList"
+                :title="store.locales === 'en' ? 'Back to skill list' : '返回技能列表'">
+                <i class="fa fa-arrow-left"></i>
+              </div>
               <span><i class="fa fa-folder-open-o"></i> {{ selectedSkill.name }}</span>
               <span class="file-count">{{ skillFiles.length }} {{ store.locales === 'en' ? 'files' : '个文件' }}</span>
             </div>
@@ -146,8 +151,13 @@
         </div>
 
         <!-- 右侧：编辑器（选中文件时显示） -->
-        <div class="manage-right" v-if="previewFile">
+        <div class="manage-right" v-if="previewFile" v-show="!isTallLayout || tallScreen === 'editor'">
           <div class="file-preview-header">
+            <!-- 细长窗口：编辑器整屏时左上角返回（回到整屏文件树） -->
+            <div v-if="isTallLayout" class="sk-back" @click="backToFileTree"
+              :title="store.locales === 'en' ? 'Back to file tree' : '返回文件树'">
+              <i class="fa fa-arrow-left"></i>
+            </div>
             <span><i :class="getFileIconClass(previewFile.name)"></i> {{ previewFile.name }}</span>
             <div style="display:flex;gap:8px;">
               <div @click="reloadPreviewContent" :disabled="saving" :title="store.locales === 'en' ? 'Reload' : '重载'">
@@ -171,8 +181,17 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { usestore } from '@/store'
 import * as monaco from 'monaco-editor'
 import { ensureMonacoEnvironment } from '@/lib/monaco-env'
+import { getPlatform, hasCapability } from '@/platform'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const store = usestore()
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：技能列表 / 文件树 / 编辑器三栏并排会把编辑区挤到
+// 不可用，改为**逐级整屏下钻**（与设置导航 / MCP 设置 / 预设编辑同一套做法）：
+// 技能列表 → 文件树 → 文件编辑，靠各屏左上角 ← 逐级返回；宽窗口下三栏并排，本状态无意义。
+const isTallLayout = useTallLayout()
+type TallScreen = 'list' | 'tree' | 'editor'
+const tallScreen = ref<TallScreen>('list')
 
 // Monaco worker 环境按需初始化（避免首屏加载 Monaco）
 ensureMonacoEnvironment()
@@ -344,7 +363,7 @@ const fileTree = computed(() => buildFileTree(skillFiles.value, selectedSkill.va
 
 // 打开技能文件夹选择对话框
 const openSkillsFolder = async () => {
-  const path = await window.ipcRenderer.invoke('openFolderDialog')
+  const path = await getPlatform().dialog.pickDirectory()
   if (path) {
     store.skillsPath = path
     store.saveConfig()
@@ -361,7 +380,7 @@ const loadSkillList = async () => {
 
   loading.value = true
   try {
-    const loaded = await window.ipcRenderer.invoke('loadSkills', store.skillsPath)
+    const loaded = await getPlatform().host.skills.list(store.skillsPath)
     skills.value = loaded
     addLog('info', `已加载 ${loaded.length} 个技能`)
   } catch (error: any) {
@@ -384,7 +403,17 @@ const selectSkill = (skill: SkillItem) => {
   selectedSkill.value = skill
   previewFile.value = null
   previewContent.value = ''
+  tallScreen.value = 'tree'   // 细长窗口：选中技能后整屏进入文件树
   addLog('info', `选中技能: ${skill.name}`)
+}
+
+/** 细长窗口：从文件树整屏返回技能列表 */
+const backToSkillList = () => { tallScreen.value = 'list' }
+
+/** 细长窗口：从文件编辑整屏返回文件树（Monaco 在隐藏期间量不到尺寸，回来时重新布局一次） */
+const backToFileTree = () => {
+  tallScreen.value = 'tree'
+  nextTick(() => previewEditor?.layout())
 }
 
 // ====== 技能启用开关（关闭的技能不注入智能体 / 不被 skill 工具加载） ======
@@ -434,8 +463,9 @@ const formatFileSize = (bytes: number): string => {
 const previewSkillFile = async (file: SkillFile) => {
   if (!file || !file.path) return
   previewFile.value = file
+  tallScreen.value = 'editor'   // 细长窗口：点文件即整屏进入编辑器（编辑器创建时容器已可见）
   try {
-    const content = await window.ipcRenderer.invoke('readFile', file.path)
+    const content = await getPlatform().fs.readText(file.path)
     if (typeof content !== 'string' || content.startsWith('Error reading file')) {
       throw new Error(content || '无法读取文件')
     }
@@ -452,7 +482,7 @@ const previewSkillFile = async (file: SkillFile) => {
 const reloadPreviewContent = async () => {
   if (!previewFile.value) return
   try {
-    const content = await window.ipcRenderer.invoke('readFile', previewFile.value.path)
+    const content = await getPlatform().fs.readText(previewFile.value.path)
     if (typeof content !== 'string' || content.startsWith('Error reading file')) {
       throw new Error(content || '无法读取文件')
     }
@@ -472,7 +502,7 @@ const savePreviewContent = async () => {
   if (!previewFile.value || !previewHasChanges.value) return
   saving.value = true
   try {
-    const result = await window.ipcRenderer.invoke('writeFile', previewFile.value.path, previewContent.value)
+    const result = await getPlatform().fs.writeText(previewFile.value.path, previewContent.value)
     if (result.success) {
       previewOriginalContent.value = previewContent.value
       addLog('info', `文件已保存: ${previewFile.value.name}`)
@@ -489,7 +519,7 @@ const savePreviewContent = async () => {
 // 在资源管理器中打开技能文件夹
 const openSkillInExplorer = () => {
   if (selectedSkill.value) {
-    window.ipcRenderer.invoke('openInFolder', selectedSkill.value.path)
+    getPlatform().shell.revealInFolder(selectedSkill.value.path)
   }
 }
 
@@ -1072,4 +1102,63 @@ onBeforeUnmount(() => {
   background: var(--borderColor);
   border-radius: 2px;
 }
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：技能列表 → 文件树 → 编辑器逐级整屏 ======
+   三栏并排会把编辑器挤到只剩一两百像素。三屏都用 v-show 隐藏，切回来时列表滚动位置与
+   编辑器内容都还在。 */
+.agent-skill.tall .manage-left,
+.agent-skill.tall .manage-middle {
+  width: 100%;
+  min-width: 0;
+  border-right: 0;
+}
+.agent-skill.tall .manage-right { width: 100%; }
+/* 技能条目按钢琴键式整宽条目呈现：行高够手指点 */
+.agent-skill.tall .skill-list { padding: 8px; }
+.agent-skill.tall .skill-item {
+  min-height: 56px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.agent-skill.tall .skill-name { font-size: 14px; }
+.agent-skill.tall .skill-desc { font-size: 12px; }
+/* 文件树条目同样放大（触摸目标够大） */
+.agent-skill.tall .file-item,
+.agent-skill.tall .folder-row { min-height: 34px; }
+/* 各屏标题栏里的返回按钮（只在细长窗口出现；做小以免撑高标题栏） */
+.sk-back {
+  flex-shrink: 0;
+  width: 26px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+.sk-back:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+/* 标题栏：返回按钮 + 标题靠左、其余靠右（原本的 space-between 会把标题挤到中间） */
+.agent-skill.tall .file-tree-header,
+.agent-skill.tall .file-preview-header { gap: 8px; }
+.agent-skill.tall .file-tree-header > span:first-of-type,
+.agent-skill.tall .file-preview-header > span:first-of-type {
+  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 顶部工具栏（技能文件夹 / 刷新 / 打开）在细长窗口下也允许横向滑动 */
+.agent-skill.tall .top-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.agent-skill.tall .top-bar::-webkit-scrollbar { display: none; }
 </style>

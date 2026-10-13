@@ -1,0 +1,18 @@
+{
+  "name": "genoffice",
+  "purpose": "Office 编辑器内核（Word / Excel / PPT / PDF）——AI-KM 以 WebContentsView 内嵌其编辑器，构建产物输出到 resources/office/",
+  "repository": "https://github.com/genspark-ai/genoffice",
+  "ref": "main",
+  "commit": "aff3d20aae749b64f87315093b26fd19e214c1d4",
+  "retrievedAt": "2026-10-14",
+  "vendorDir": "vendor/genoffice",
+  "license": "Apache-2.0（ee/ 目录为 GenOffice Enterprise License，本仓库不使用）",
+  "licenseNotice": "fork 必须替换品牌与商标（Apache-2.0 §6）；发布时需保留 NOTICE",
+  "fetch": "node scripts/fetch-office-vendor.mjs",
+  "build": "node scripts/build-office.mjs",
+  "notes": [
+    "上游 apps/* 的 devDependencies 声明 electron ^43，但我们只构建渲染层与主进程模块（不做 electron-builder 打包），因此可继续使用主项目的 Electron 42。",
+    "vendor 依赖安装时设置 ELECTRON_SKIP_BINARY_DOWNLOAD=1，避免下载多余的 Electron 二进制。",
+    "Excel（sheets）的原生 xlsx-sidecar 需要 Rust 工具链；缺失时用 --skip-native 跳过，表格编辑退化为纯 JS 引擎。"
+  ]
+}

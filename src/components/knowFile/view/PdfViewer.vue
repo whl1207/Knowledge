@@ -21,6 +21,7 @@
 
   // pdf.js 运行时资源（worker / CMap / 标准字体）：统一在 @/lib/pdfjs 配置，缺 CMap 会导致整段文字不渲染
   import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
+import { getPlatform, hasCapability } from '@/platform'
 
   const store = usestore()
 
@@ -356,7 +357,7 @@
     try {
       let base64 = props.base64 || ''
       if (!base64 && filePath) {
-        const result = await window.ipcRenderer.invoke('readFileBase64', filePath)
+        const result = await getPlatform().fs.readDataUrl(filePath)
         if (typeof result !== 'string' || !result.startsWith('data:')) {
           throw new Error(typeof result === 'string' ? result : '读取PDF文件失败')
         }
@@ -1059,7 +1060,7 @@
     const dir = store.root.replace(/[\\/]$/, '')
     const filePath = `${dir}${sep}${base}.md`
     try {
-      const ok = await window.ipcRenderer.invoke('saveFile', filePath, textExtractResult.value)
+      const ok = await getPlatform().fs.saveText(filePath, textExtractResult.value)
       textExtractProgress.value = ok
         ? (store.locales === 'zh' ? '已保存：' + filePath : 'Saved: ' + filePath)
         : (store.locales === 'zh' ? '保存失败' : 'Save failed')
@@ -1417,7 +1418,7 @@
     const fileName = `${(props.path || 'pdf').split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'document'}_page${result.page}.md`
     const savePath = `${store.root}/${fileName}`
     try {
-      await window.ipcRenderer.invoke('saveFile', savePath, result.text)
+      await getPlatform().fs.saveText(savePath, result.text)
       ocrProgress.value = store.locales === 'zh'
         ? `第 ${result.page} 页已保存`
         : `Page ${result.page} saved`
@@ -1459,7 +1460,7 @@
     const fileName = `${(props.path || 'pdf').split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'document'}.md`
     const savePath = `${store.root}/${fileName}`
     try {
-      await window.ipcRenderer.invoke('saveFile', savePath, fullText)
+      await getPlatform().fs.saveText(savePath, fullText)
       ocrProgress.value = store.locales === 'zh'
         ? `全部 ${ocrResults.value.length} 页已保存到 ${fileName}`
         : `All ${ocrResults.value.length} pages saved to ${fileName}`

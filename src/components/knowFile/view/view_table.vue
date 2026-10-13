@@ -16,7 +16,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { statusList, statusIconFor } from '@/lib/knowFile/statusOptions'
-import { FILE_VIEWS } from '@/lib/knowFile/fileViews'
+import { FILE_VIEWS, supportsOfficeView } from '@/lib/knowFile/fileViews'
 import { parseSearchQuery, matchSearchTerms, searchTextTerms, searchTextOf } from '@/lib/knowFile/itemSearch'
 
 const store = usestore()
@@ -873,7 +873,8 @@ const openFolderInSystem = (row: any) => {
   void ipc('openWithSystemApp', row.path)
 }
 const openInNewWindow = (row: any, view: string) => {
-  void ipc('open-file-window', { path: row.path, view }).catch(() => {})
+  // 统一走 store.openFileWindow：桌面独立窗口 / 单窗口环境（安卓、网页端）应用内浮层
+  store.openFileWindow({ path: row.path, view })
 }
 const parentDirOf = (p: string): string => {
   const s = String(p || '')
@@ -976,6 +977,11 @@ interface Pop {
 }
 const pop = ref<Pop | null>(null)
 const popEl = ref<HTMLElement | null>(null)
+
+// 「新窗口打开」的视图清单：非 Word / Excel / PPT 文件不列「Office 编辑」（与文件窗口的切换器一致）
+const popOpenViews = computed(() =>
+  FILE_VIEWS.filter((v) => v.key !== 'office' || supportsOfficeView(pop.value?.row?.path)),
+)
 
 function openPop(p: Pop) {
   pop.value = p
@@ -1558,7 +1564,7 @@ onBeforeUnmount(() => {
         <span class="menu-label">{{ zh() ? '新窗口打开' : 'Open in new window' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
-          <li v-for="v in FILE_VIEWS" :key="v.key" @click="runPop((p) => openInNewWindow(p.row, v.key))"><i :class="v.icon"></i> {{ zh() ? v.name : v.labelEn }}</li>
+          <li v-for="v in popOpenViews" :key="v.key" @click="runPop((p) => openInNewWindow(p.row, v.key))"><i :class="v.icon"></i> {{ zh() ? v.name : v.labelEn }}</li>
         </ul>
       </div>
       <div class="menu-item" @click="runPop((p) => revealRow(p.row))"><i class="fa fa-folder-open-o"></i> {{ zh() ? '打开文件所在位置' : 'Reveal in folder' }}</div>

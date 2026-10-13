@@ -80,6 +80,7 @@ import { ElInput, ElInputNumber, ElOption, ElSelect, ElSwitch } from 'element-pl
 import { usestore } from '@/store'
 import { createFlowT } from '@/features/workflow/ui/locales'
 import type { NodePanelProps } from '../panelProps'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<NodePanelProps>()
 const store = usestore()
@@ -101,7 +102,7 @@ function set(key: string, value: unknown): void {
 }
 
 async function pickFile(): Promise<void> {
-  const path = await window.ipcRenderer.invoke('selectFile', {
+  const path = await getPlatform().dialog.pickFile({
     filters: [{ name: '数据表', extensions: ['csv', 'tsv', 'xlsx', 'xls', 'txt'] }],
   })
   if (path) set('file_path', path)

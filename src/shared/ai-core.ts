@@ -8,19 +8,24 @@
 // - 主进程（electron/main/ai-service.ts）直接调用本模块的方法执行请求并解析。
 // - 渲染进程（src/services/ai-utils.ts）在浏览器/LAN 模式下也直接调用本模块；
 //   Electron 模式下则通过 IPC 桥委托给主进程。
-// - resolveApiUrl：仅在浏览器（无 ipcRenderer）时把请求转发到 LAN 服务器的
-//   /__proxy 代理；主进程环境没有 window，会直接使用原始 URL。
+// - resolveApiUrl：仅在「页面由局域网主机投递」（主机注入 __AIKM_HOST__，同源有 /__proxy）时
+//   转发到代理；Electron 主进程、安卓壳、本地浏览器都直连。
 
 /**
- * 在浏览器环境（无 ipcRenderer）时，通过 LAN 服务器的 /__proxy 代理转发 API 请求，
- * 解决远程浏览器无法直连本地 AI 服务（Ollama、LM Studio 等）的问题。
+ * 在「页面由局域网主机投递」时，通过主机的 /__proxy 代理转发 API 请求，
+ * 解决浏览器端的 CORS 限制以及「访客必须用主机模型」的策略。
+ *
+ * 判定「同源有 /__proxy」的唯一可靠信号是主机注入的 `window.__AIKM_HOST__`：
+ * - 安卓壳（Capacitor，页面来自本地 http://localhost）+ 本地浏览器 dev：同源没有 /__proxy，
+ *   必须直连（各家云 API 都带 CORS 头；本地 Ollama 由用户自行开 CORS）；
+ * - Electron 渲染进程：走 IPC 交主进程执行，这里不会被调用；
+ * - 主机投递的网页：同源 /__proxy 存在，需要代理（原生 fetch 也做不到主机的模型策略）。
  */
 function resolveApiUrl(originalUrl: string): string {
-  if (typeof window !== 'undefined' && !(window as any).ipcRenderer) {
-    const origin = window.location.origin
-    return `${origin}/__proxy?url=${encodeURIComponent(originalUrl)}`
-  }
-  return originalUrl
+  if (typeof window === 'undefined') return originalUrl
+  if ((window as any).ipcRenderer || (window as any).dsh) return originalUrl
+  if (!(window as any).__AIKM_HOST__) return originalUrl
+  return `${window.location.origin}/__proxy?url=${encodeURIComponent(originalUrl)}`
 }
 
 // 定义消息类型

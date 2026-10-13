@@ -10,16 +10,17 @@ import { buildLanEmbedPayload, buildLanLlmPayload, buildLanModelSourcesPayload }
 import { buildGuestAgentProfiles } from '@/platform/lanGuestAgents'
 import { getSkillManager } from '@/services/agentSkills'
 import { defaultLanGuestPolicy, effectiveGuestTools } from '@/shared/lanGuest'
+import { getPlatform, hasCapability } from '@/platform'
 
-/** 下发一次完整策略（无 IPC 环境直接返回 false，不抛错） */
+/** 下发一次完整策略（无宿主能力的环境直接返回 false，不抛错） */
 export async function pushLanGuestPolicy(store: any): Promise<boolean> {
-  if (typeof window === 'undefined' || !(window as any).ipcRenderer) return false
+  if (typeof window === 'undefined') return false
+  if (!hasCapability('host.lanShare')) return false
   const guest = store?.lan?.guest || defaultLanGuestPolicy()
-  const ipc = (window as any).ipcRenderer
   // 共享目录（知识库 / 访客智能体的文件围栏根）与主机嵌入配置一并同步
   try {
-    await ipc.invoke('lan:setKbDir', store?.lan?.kbDir || '')
-    await ipc.invoke('lan:setEmbed', JSON.parse(JSON.stringify(buildLanEmbedPayload(store))))
+    await getPlatform().host.lan.setKbDir(store?.lan?.kbDir || '')
+    await getPlatform().host.lan.setEmbed(JSON.parse(JSON.stringify(buildLanEmbedPayload(store))))
   } catch (e) {
     console.warn('[lan-guest] 同步共享目录 / 嵌入配置失败:', e)
   }
@@ -36,6 +37,6 @@ export async function pushLanGuestPolicy(store: any): Promise<boolean> {
       guestTools: effectiveGuestTools(guest),
     }),
   }))
-  await ipc.invoke('lan:setGuest', payload)
+  await getPlatform().host.lan.setGuest(payload)
   return true
 }

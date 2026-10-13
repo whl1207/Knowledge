@@ -737,6 +737,8 @@ export function lanGuestInfo() {
     skills: guestSkills(),
     maxSteps: policy.maxSteps,
     sandbox: policy.sandbox,
+    /** 访客对主机共享目录的文件访问档位（off / read / write） */
+    fs: policy.guestFs,
     shareKb: sharedKbPaths().map((p) => path.basename(p)),
     // 访客可选的智能体：以渲染层下发的档案为准（含 general），
     // 档案里没有 general 时才补一个内置通用智能体；按 id 去重（历史曾重复列出两个「通用智能体」）

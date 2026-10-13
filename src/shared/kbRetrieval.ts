@@ -7,6 +7,7 @@ import type { KbModelSpec, KbProvider } from '@/shared/kbAiClient'
 import { effectiveEmbedSpec } from '@/shared/kbAiClient'
 import { computeBlockQuestionVectors } from '@/shared/kbQuestions'
 import type { KbQuestion } from '@/shared/kbQuestions'
+import { getPlatform } from '@/platform'
 
 // ==================== 类型定义 ====================
 
@@ -518,7 +519,7 @@ export async function loadKnowledgeBase(kbPath: string): Promise<{
   communityResult?: any
 }> {
   try {
-    const content = await window.ipcRenderer.invoke('readFile', kbPath)
+    const content = await getPlatform().fs.readText(kbPath)
     const saveData = JSON.parse(content) as KnowledgeBaseData
 
     if (!saveData.blocks) {

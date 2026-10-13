@@ -1369,6 +1369,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { createDragGuard } from '@/utils/clickGuard'
 import { deepSeekApiStyle, normalizeLlmType } from '@/shared/llmSources'
 import { AGENT_MAX_STEPS_MAX } from '@/shared/agent-loop-rounds'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 const en = () => store.locales === 'en'
@@ -2462,7 +2463,7 @@ watch(() => (config.extensions || []).join(','), (v) => { if (v !== extInput.val
 watch(() => (config.excludeDirs || []).join(','), (v) => { if (v !== excludeInput.value) excludeInput.value = v })
 const pickFolder = async () => {
   try {
-    const path = await window.ipcRenderer.invoke('openFolderDialog')
+    const path = await getPlatform().dialog.pickDirectory()
     if (path) config.folderPath = path
   } catch (e: any) { addLog('error', String(e?.message || e)) }
 }
@@ -2474,8 +2475,7 @@ const doScanFolder = async (opts?: { rebuild?: boolean }): Promise<number> => {
   // 注意：传给 IPC 的参数必须是可以结构化克隆的普通值 —— config 是 reactive 对象，
   // 直接传 config.extensions / config.excludeDirs 会传进去 Vue 的 Proxy，
   // 主进程克隆时抛「An object could not be cloned.」（文件夹扫描失败的根因）。
-  const res = await window.ipcRenderer.invoke('scanFolder', {
-    folderPath: String(config.folderPath || ''),
+  const res = await getPlatform().fs.scan(String(config.folderPath || ''), {
     extensions: (config.extensions || []).map((s: any) => String(s)),
     excludeDirs: (config.excludeDirs || []).map((s: any) => String(s)),
     excludeFiles: [],
@@ -4246,20 +4246,20 @@ const autoLoadTable = (path: string): Promise<void> => {
  * 手动导入与「按路径自动读取」共用；onProgress(已读行数, 总行数) 用于在状态栏最左侧显示进度。
  */
 const loadTableRowsByPath = async (path: string, onProgress?: (loaded: number, total: number) => void): Promise<BatchRow[]> => {
-  const start = await window.ipcRenderer.invoke('parseTableFile:start', path)
+  const start = await getPlatform().host.table.start(path)
   if (!start || !start.success) throw new Error(start?.error || '解析表格失败')
-  const total = start.total
+  const total = Number(start.total || 0)
   if (total < 2) {
-    await window.ipcRenderer.invoke('parseTableFile:done', path)
+    await getPlatform().host.table.done(path)
     return []
   }
   const newRows: BatchRow[] = []
   let headers: string[] = []
   for (let off = 0; off < total; off += TABLE_LOAD_CHUNK) {
     onProgress?.(Math.min(off + TABLE_LOAD_CHUNK, total), total)
-    const res = await window.ipcRenderer.invoke('parseTableFile:chunk', path, off, TABLE_LOAD_CHUNK)
+    const res = await getPlatform().host.table.chunk(path, off, TABLE_LOAD_CHUNK)
     if (!res || !res.success) throw new Error(res?.error || '读取表格分片失败')
-    const chunkRows: any[][] = res.rows
+    const chunkRows: any[][] = res.rows || []
     if (off === 0) headers = (chunkRows[0] || []).map((h: any) => String(h ?? '').trim()).filter(Boolean)
     // 首块跳过表头行（index 0），其余块全量
     for (let i = (off === 0 ? 1 : 0); i < chunkRows.length; i++) {
@@ -4268,7 +4268,7 @@ const loadTableRowsByPath = async (path: string, onProgress?: (loaded: number, t
     }
     if ((off / TABLE_LOAD_CHUNK) % 4 === 3) await new Promise(resolve => setTimeout(resolve, 0))
   }
-  await window.ipcRenderer.invoke('parseTableFile:done', path)
+  await getPlatform().host.table.done(path)
   return newRows
 }
 const doAutoLoadTable = async (path: string) => {
@@ -5182,12 +5182,11 @@ const exportRowsChunked = async (filename: string, plan: ExportPlan): Promise<vo
 /** 真正的导出流程（按有无 Electron 分两条路；外面包 exporting 防止重入） */
 const runExport = async (filename: string, plan: ExportPlan, date: string): Promise<void> => {
   const total = plan.refs.length
-  const ipc = window.ipcRenderer
-  if (ipc) {
+  if (hasCapability('host.excelExport')) {
     setStatusHint('saving', en() ? 'Waiting for the save location…' : '等待选择保存位置…')
     let start: any
     try {
-      start = await ipc.invoke('exportExcel:start', { filename, header: plan.columns })
+      start = await getPlatform().host.excel.start({ filename, header: plan.columns })
     } catch (e: any) {
       addLog('error', `导出失败: ${e?.message || e}`)
       setStatusHint('err', en() ? 'Export failed (see Logs)' : '导出失败（详见日志）', String(e?.message || e))
@@ -5207,17 +5206,17 @@ const runExport = async (filename: string, plan: ExportPlan, date: string): Prom
       setStatusHint('saving', exportProgressText(0, total))
       for (let off = 0; off < total; off += EXPORT_CHUNK) {
         const rows = plan.refs.slice(off, off + EXPORT_CHUNK).map(r => exportRowAt(plan, r))
-        const res = await ipc.invoke('exportExcel:chunk', { rows, header: plan.columns })
+        const res = await getPlatform().host.excel.chunk({ rows, header: plan.columns })
         if (!res?.success) throw new Error(res?.error || '写入导出分片失败')
         setStatusHint('saving', exportProgressText(Math.min(off + EXPORT_CHUNK, total), total))
         await new Promise(r => setTimeout(r, 0))
       }
-      const done = await ipc.invoke('exportExcel:done', {})
+      const done = await getPlatform().host.excel.done()
       if (!done?.success) throw new Error(done?.error || '保存导出文件失败')
       addLog('info', `导出成功: ${done.path}（${total} 行）`)
       setStatusHint('ok', en() ? `Exported ${total} row(s)` : `已导出 ${total} 行`, done.path)
     } catch (e: any) {
-      await ipc.invoke('exportExcel:abort', {}).catch(() => { /* 忽略 */ })
+      await getPlatform().host.excel.abort().catch(() => { /* 忽略 */ })
       addLog('error', `导出失败: ${e?.message || e}`)
       setStatusHint('err', en() ? 'Export failed (see Logs)' : '导出失败（详见日志）', String(e?.message || e))
     }
@@ -6715,7 +6714,7 @@ const doAutoSave = async () => {
   autoSaveBusy = true
   try {
     const jsonStr = await buildTaskJson(buildTaskStateObject())
-    const res = await window.ipcRenderer.invoke('saveTaskFileAuto', taskFilePath.value, jsonStr)
+    const res = await getPlatform().fs.saveTaskFileAuto(taskFilePath.value, jsonStr)
     if (res && res.success) {
       lastAutoSaveAt.value = Date.now()
       lastAutoSaveSig.value = checkpointSig()
@@ -7049,7 +7048,7 @@ const saveTaskStateAs = async () => {
   setStatusHint('saving', en() ? 'Saving as…' : '另存中…')
   try {
     const jsonStr = await buildTaskJson(buildTaskStateObject())
-    const res = await window.ipcRenderer.invoke('saveTaskFile', jsonStr)
+    const res = await getPlatform().fs.saveTaskFileAs(jsonStr)
     if (!res?.success) {
       if (res?.error === '用户取消') { clearStatusHint(); return }
       addLog('error', (en() ? 'Save As failed: ' : '另存为失败: ') + (res?.error || ''))

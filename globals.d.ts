@@ -169,21 +169,7 @@ declare module 'js-yaml' {
   export default yaml;
 }
 
-// sherpa-onnx（纯 WASM Node 构建，CJS；仅声明用到的 API）
-declare module 'sherpa-onnx' {
-  export interface OfflineTtsAudio {
-    samples: Float32Array
-    sampleRate: number
-  }
-  export interface OfflineTts {
-    sampleRate: number
-    numSpeakers: number
-    generate(config: { text: string; sid?: number; speed?: number }): OfflineTtsAudio
-    free(): void
-  }
-  export function createOfflineTts(config: any): OfflineTts
-  export const version: string
-}
+// sherpa-onnx 原生运行时（sherpa-onnx-node）在 electron/vendor-shims.d.ts 声明
 declare module 'markdown-it-toc-and-anchor' {
   const tocAndAnchor: any;
   export default tocAndAnchor;

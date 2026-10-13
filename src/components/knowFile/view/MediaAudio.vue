@@ -155,6 +155,7 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
 // ID3 封面/歌词与 LRC 解析：与文件视图的媒体缩略图共用同一套实现
 import { isAudioExt, isMediaExt, extractAlbumArt, extractAudioLyrics, parseLrc } from '@/lib/knowFile/mediaMeta'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -367,7 +368,7 @@ async function loadAudio() {
   loading.value = true
   waveError.value = false
   try {
-    const uint8: Uint8Array | null = await window.ipcRenderer.invoke('readFileBinary', currentPath.value)
+    const uint8: Uint8Array | null = await getPlatform().fs.readBinary(currentPath.value)
     if (!uint8 || !uint8.length) throw new Error('read failed')
     const arrayBuffer = uint8.buffer.slice(uint8.byteOffset, uint8.byteOffset + uint8.byteLength) as ArrayBuffer
     // 尝试从 ID3 标签提取专辑封面
@@ -908,7 +909,7 @@ async function loadFolderAudioList() {
   try {
     const folderPath = (currentPath.value || '').replace(/\\/g, '/').split('/').slice(0, -1).join('/')
     if (!folderPath) { folderFiles = []; return }
-    const files: any[] = (await window.ipcRenderer.invoke('getFiles', folderPath, 0)) || []
+    const files: any[] = (await getPlatform().fs.listTree(folderPath, 0)) || []
     folderFiles = files
       .filter((f: any) => f && f.type === 'file' && isMediaExt(f.extension))
       .sort((a: any, b: any) => String(a.label || '').localeCompare(String(b.label || ''), undefined, { numeric: true }))

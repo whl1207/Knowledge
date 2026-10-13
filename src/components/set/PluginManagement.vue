@@ -9,9 +9,10 @@
   源码改动会触发自动重载（fs.watch）。
 -->
 <template>
-  <div class="plugin-panel">
-    <!-- ===================== 左侧：插件导航（安装 / 搜索 / 启用开关 / 状态） ===================== -->
-    <aside class="plugin-sidebar">
+  <div class="plugin-panel" :class="{ tall: isTallLayout }">
+    <!-- ===================== 左侧：插件导航（安装 / 搜索 / 启用开关 / 状态） =====================
+         细长窗口下与右侧详情各占满整屏互相切换（见 .tall 样式） -->
+    <aside class="plugin-sidebar" v-show="!isTallLayout || showNavScreen">
       <div class="plugin-toolbar">
         <button
           class="toolbar-btn primary"
@@ -57,12 +58,17 @@
       <div class="plugin-nav-list scoll">
         <div v-if="unavailable" class="plugin-empty">
           <i class="fa fa-info-circle"></i>
-          {{ zh ? '插件管理仅桌面版可用（window.dsh.plugin 不可用）' : 'Plugin management requires the desktop app (window.dsh.plugin unavailable)' }}
+          {{ zh ? '插件管理在当前环境不可用（找不到可读的插件目录 / 宿主未就绪）' : 'Plugin management is unavailable here (no readable plugins folder / host not ready)' }}
         </div>
         <div v-else-if="!plugins.length" class="plugin-empty">
-          {{ zh
+          <span>{{ zh
             ? '还没有插件。点上方「安装插件」选择插件文件夹，或把插件文件夹放进插件目录后点「重新扫描」。插件可以直接放在插件目录下，也可以按用途分文件夹存放（会扫描各级子文件夹）。'
-            : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders.' }}
+            : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders.' }}</span>
+          <span v-if="androidHost" class="plugin-empty-note">
+            {{ zh
+              ? '安卓：插件目录在应用私有存储里（插件目录用 data: 开头时指向应用私有目录）。用「安装插件」从手机里选插件文件夹最稳妥；把插件直接丢进公共「Documents/plugins」可能因系统权限读不到。'
+              : 'Android: the plugins folder lives in app-private storage (a folder named with the data: prefix). Prefer “Install” to copy a plugin folder from your phone; dropping plugins into public Documents/plugins may be unreadable due to system permissions.' }}
+          </span>
         </div>
         <div v-else-if="!filteredPlugins.length" class="plugin-empty">
           {{ zh ? `没有匹配「${keyword.trim()}」的插件。` : `No plugins match “${keyword.trim()}”.` }}
@@ -126,7 +132,15 @@
     </aside>
 
     <!-- ===================== 右侧：插件详情（详情 / 配置 / 日志 / 数据） ===================== -->
-    <section class="plugin-content scoll">
+    <section class="plugin-content scoll" v-show="!isTallLayout || !showNavScreen">
+      <!-- 细长窗口：详情屏左上角返回（回到整屏插件列表） -->
+      <div v-if="isTallLayout" class="plugin-back-bar">
+        <div class="plugin-back" @click="showNavScreen = true"
+          :title="zh ? '返回插件列表' : 'Back to plugin list'">
+          <i class="fa fa-arrow-left"></i>
+        </div>
+        <span class="plugin-back-title">{{ zh ? '插件详情' : 'Plugin Details' }}</span>
+      </div>
       <!-- 被跳过的目录（有清单但目录名不能作为插件 id）：必须显式提示，否则用户只看到「放进去什么都没发生」 -->
       <div v-if="invalidNamedDirs.length" class="plugin-notice warn">
         <i class="fa fa-exclamation-circle"></i>
@@ -478,7 +492,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { useSlotSnapshot } from '@/lib/plugin/useSlots'
 import { clientPluginLoadStates, clientShortcuts, syncClientPlugins } from '@/lib/plugin/runtime'
+import { getPluginBridge } from '@/lib/plugin/bridge'
+import { getPlatform } from '@/platform'
 import { formatBytes } from '@/lib/settingsData'
+import { useTallLayout } from '@/composables/useTallLayout'
 import {
   PLUGIN_DATA_DIR,
   clearPluginData,
@@ -499,6 +516,15 @@ import type { PluginSnapshot, PluginStatus, PluginLogLine, PluginEvent } from '@
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
+
+/** 安卓壳：插件目录在应用私有存储里，系统文件管理器打不开，需要不同的提示 */
+const androidHost = computed(() => {
+  try {
+    return getPlatform().kind === 'android'
+  } catch {
+    return false
+  }
+})
 
 const plugins = ref<PluginSnapshot[]>([])
 const rootDir = ref('')
@@ -541,6 +567,11 @@ const filteredPlugins = computed(() => {
 const selectedId = ref<string | null>(null)
 const selected = computed<PluginSnapshot | undefined>(() => plugins.value.find((p) => p.id === selectedId.value))
 
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：插件列表与详情不再并排，而是各占满整屏互相切换
+//（与设置导航 / 知识管理文件树 / 模型来源同一套做法）。true = 列表屏，false = 详情屏
+const isTallLayout = useTallLayout()
+const showNavScreen = ref(true)
+
 const logText = ref('')
 const logLoading = ref(false)
 const configText = ref('')
@@ -576,7 +607,13 @@ const slotSnapshot = useSlotSnapshot()
 
 let offEvent: (() => void) | null = null
 
-const bridge = () => (window as any).dsh?.plugin
+const bridgeOrNull = () => getPluginBridge()
+/** 调用点直接用：宿主不可用时抛错，由上层 try/catch 提示（桌面/安卓各自的宿主由 bridge 内部选择） */
+const bridge = () => {
+  const api = getPluginBridge()
+  if (!api) throw new Error(zh.value ? '插件宿主不可用' : 'Plugin host unavailable')
+  return api
+}
 
 const statusLabel = (status: PluginStatus): string => {
   const map: Record<PluginStatus, [string, string]> = {
@@ -633,7 +670,7 @@ const permissionHint = (permissions: string[]): string => {
 }
 
 const refresh = async () => {
-  const api = bridge()
+  const api = bridgeOrNull()
   if (!api) {
     unavailable.value = true
     return
@@ -859,7 +896,7 @@ const clearData = async () => {
  * 会装载插件代码（与宿主同进程）→ 弹确认框，确认后才带 confirm 调主进程。
  */
 const rescan = async () => {
-  const api = bridge()
+  const api = bridgeOrNull()
   if (!api?.rescan) return
   try {
     await ElMessageBox.confirm(
@@ -981,7 +1018,7 @@ const removePlugin = async (p: PluginSnapshot) => {
 }
 
 const loadLogs = async (p: PluginSnapshot) => {
-  const api = bridge()
+  const api = bridgeOrNull()
   if (!api) return
   logLoading.value = true
   try {
@@ -997,7 +1034,7 @@ const loadLogs = async (p: PluginSnapshot) => {
 }
 
 const loadConfig = async (p: PluginSnapshot) => {
-  const api = bridge()
+  const api = bridgeOrNull()
   if (!api) return
   configLoading.value = true
   try {
@@ -1032,7 +1069,11 @@ const saveConfig = async () => {
 
 const openDir = async (id?: string) => {
   try {
-    await bridge().openDir(id)
+    const res: any = await bridge().openDir(id)
+    // 当前环境唤不起系统文件管理器（安卓私有目录 / 网页）→ 退化为把路径告诉用户
+    if (res && res.path && res.opened === false) {
+      ElMessage.info(zh.value ? `插件目录：${res.path}（当前环境无法打开系统文件管理器）` : `Plugins folder: ${res.path} (no system file manager here)`)
+    }
   } catch (e: any) {
     ElMessage.error(e?.message || String(e))
   }
@@ -1040,9 +1081,9 @@ const openDir = async (id?: string) => {
 
 /** 选择插件目录（与技能管理同一交互：系统目录选择框 → 主进程切换根目录并重新扫描） */
 const chooseRoot = async () => {
-  const api = bridge()
+  const api = bridgeOrNull()
   if (!api?.setRoot) {
-    ElMessage.error(zh.value ? '插件目录设置仅桌面版可用' : 'Setting the plugins folder requires the desktop app')
+    ElMessage.error(zh.value ? '当前环境不支持切换插件目录' : 'Changing the plugins folder is not supported here')
     return
   }
   try {
@@ -1075,9 +1116,9 @@ const chooseRoot = async () => {
  * 同名冲突时主进程返回 PLUGIN_EXISTS，这里询问用户后再以 replace 重试。
  */
 const installFromFolder = async () => {
-  const api = bridge()
+  const api = bridgeOrNull()
   if (!api?.install) {
-    ElMessage.error(zh.value ? '插件安装仅桌面版可用' : 'Installing plugins requires the desktop app')
+    ElMessage.error(zh.value ? '当前环境不支持从文件夹安装插件' : 'Installing plugins from a folder is not supported here')
     return
   }
   try {
@@ -1128,7 +1169,7 @@ const installFromFolder = async () => {
 
 /** 恢复默认插件目录（仅在自定义目录时显示入口） */
 const resetRoot = async () => {
-  const api = bridge()
+  const api = bridgeOrNull()
   if (!api?.resetRoot) return
   try {
     await ElMessageBox.confirm(
@@ -1168,6 +1209,7 @@ const detailShortcuts = computed(() => {
 // ---------------------------------------------------------------------------
 const selectPlugin = (id: string) => {
   if (selectedId.value !== id) selectedId.value = id
+  showNavScreen.value = false   // 细长窗口：进入整屏详情屏（宽窗口下两者并排，本状态无意义）
 }
 
 /** 切换插件时清空上一份内容，再拉取配置 / 日志 / 数据 */
@@ -1225,6 +1267,57 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   color: var(--fontColor);
+}
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：插件列表 / 详情各占满整屏互相切换 ======
+   不再并排（并排会把详情区挤到只剩一两百像素）。两屏都用 v-show 隐藏，切回来时状态还在。 */
+.plugin-panel.tall .plugin-sidebar {
+  width: 100%;
+  border-right: 0;
+}
+/* 插件条目按钢琴键式整宽条目呈现：行高够手指点 */
+.plugin-panel.tall .plugin-nav-list { padding: 8px; }
+.plugin-panel.tall .plugin-nav-item {
+  min-height: 56px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  border-color: var(--borderColor);
+  background-color: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.plugin-panel.tall .plugin-nav-name { font-size: 14px; }
+/* 详情屏顶部的返回条（只在细长窗口出现） */
+.plugin-back-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--borderColor);
+}
+.plugin-back {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+.plugin-back:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.plugin-back-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
 }
 
 /* ========== 左侧：插件导航栏 ========== */
@@ -1320,6 +1413,14 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.65;
   opacity: 0.65;
+}
+.plugin-empty > span {
+  display: block;
+}
+.plugin-empty-note {
+  margin-top: 8px;
+  font-size: 11px;
+  opacity: 0.85;
 }
 .plugin-empty-clear {
   margin-left: 6px;

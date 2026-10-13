@@ -51,6 +51,7 @@ import { pushMemberMessage, pushUserTaskMessage, pushSystemMessage, pushSwarmMes
 import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos } from '@/lib/agent/projection'
 import type { ChatMessage } from '@/types/chat'
 import { resolveSwarmStrategy, type SwarmRuntimeContext, type AgentRunOpts } from '@/lib/agent/swarmStrategies'
+import { getPlatform } from '@/platform'
 
 // ---------------------------------------------------------------------------
 // 运行状态
@@ -575,7 +576,7 @@ const retrieveKnowledgeForAgent = async (agent: SwarmAgent, query: string, kbFil
     const isKb = kbPath.toLowerCase().endsWith('.kb')
     if (!isKb) {
       try {
-        const text = await window.ipcRenderer.invoke('readFile', kbPath)
+        const text = await getPlatform().fs.readText(kbPath)
         if (text && typeof text === 'string' && !text.startsWith('Error')) {
           ragContext += `### ${kbName}\n${text}\n`
           addOutput('system', `📄 ${agent.name} - 参考文件`, `已读取参考文件：${kbName}`)

@@ -208,6 +208,7 @@ import { parseSearchQuery, matchSearchTerms } from '@/lib/knowFile/itemSearch';
 import { colorOfAttributes, contrastTextColor, colorFieldOf, colorPresetsFor, COLOR_FIELD_DEFAULT, FIELD_ARCHIVED, isArchivedOf, statusIconOf, statusTextOf, stripMdSuffix, attrDateOf, resolveStartFieldOf, isTimeishField } from '@/lib/knowFile/itemMeta';
 // 浮层公用交互：点击外部 / Esc 收起、子菜单溢出翻转、贴边回收（见 lib/knowFile/overlay.ts）
 import { bindDismiss, createSubmenuHoverFix, clampToViewport } from '@/lib/knowFile/overlay';
+import { getPlatform, hasCapability } from '@/platform'
 
 // 甘特图（原独立的「甘特/日程」视图）作为日历视图的第三种模式懒加载，避免默认加载其代码
 const ViewGantt = defineAsyncComponent(() => import('@/components/knowFile/view/view_gantt.vue'));
@@ -630,7 +631,7 @@ const markdownTargetOf = async (item) => {
     const sep = p.includes('\\') ? '\\' : '/';
     const readme = p.replace(/[\\/]+$/, '') + sep + '.README.md';
     try {
-      const inf = await window.ipcRenderer.invoke('getInf', readme);
+      const inf = await getPlatform().fs.getInfo(readme);
       return inf ? readme : null;
     } catch { return null; }
   }
@@ -643,12 +644,12 @@ const resolveTimeField = (item) => startFieldOf(item);
 /** 合并写 frontmatter：一次读取 + 一次写盘，值为空则删除该字段（其余元数据原样保留） */
 const patchMeta = async (target, patch) => {
   try {
-    const meta = (await window.ipcRenderer.invoke('getConfig', target)) || {};
+    const meta = (await getPlatform().fs.readMetadata(target)) || {};
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined || v === null || v === '') delete meta[k];
       else meta[k] = v;
     }
-    return !!await window.ipcRenderer.invoke('saveFileMetadata', target, meta);
+    return !!await getPlatform().fs.saveMetadata(target, meta);
   } catch { return false; }
 };
 
@@ -732,7 +733,7 @@ const createOnDate = async (date) => {
     );
     const name = String(value || '').trim();
     if (!name) return;
-    const path = await window.ipcRenderer.invoke('createFile', dir, name + '.md');
+    const path = await getPlatform().fs.createFile(dir, name + '.md');
     if (!path) {
       ElMessage.error(store.locales === 'zh' ? '创建失败（可能同名文件已存在）' : 'Create failed (name may exist)');
       return;
@@ -826,7 +827,7 @@ const renameItem = async (item) => {
     const trimmed = String(value || '').trim();
     if (!trimmed || trimmed === base) return;
     const fileName = trimmed.toLowerCase().endsWith(ext.toLowerCase()) ? trimmed : trimmed + ext;
-    const result = await window.ipcRenderer.invoke('renameFile', item.path, fileName);
+    const result = await getPlatform().fs.renameFile(item.path, fileName);
     if (!result || !result.success) {
       ElMessage.error(store.locales === 'zh' ? `重命名失败：${(result && result.error) || ''}` : `Rename failed: ${(result && result.error) || ''}`);
       return;
@@ -869,7 +870,7 @@ const copyItemPath = async (item) => {
 const revealItem = async (item) => {
   const dir = parentPathOf(item.path);
   if (!dir) return;
-  await window.ipcRenderer.invoke('openWithSystemApp', dir);
+  await getPlatform().shell.openWithSystemApp(dir);
 };
 
 const removeItem = async (item) => {
@@ -882,7 +883,7 @@ const removeItem = async (item) => {
   } catch {
     return;
   }
-  const ok = !!(await window.ipcRenderer.invoke('deleteFile', item.path));
+  const ok = !!(await getPlatform().fs.deleteFile(item.path));
   if (!ok) {
     ElMessage.error(store.locales === 'zh' ? '删除失败' : 'Delete failed');
     return;

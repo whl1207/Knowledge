@@ -54,6 +54,7 @@ import { usestore } from '@/store'
 import { createFlowT } from '@/features/workflow/ui/locales'
 import type { NodePanelProps } from '../panelProps'
 import type { FileTemplate } from '@/features/workflow/dsl/types'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<NodePanelProps>()
 const store = usestore()
@@ -82,7 +83,7 @@ function removeTemplate(index: number): void {
 }
 
 async function pickFile(): Promise<void> {
-  const path = await window.ipcRenderer.invoke('selectFile', {
+  const path = await getPlatform().dialog.pickFile({
     filters: [{ name: '文本文件', extensions: ['md', 'txt', 'json', 'csv', 'docx'] }],
   })
   if (path) set('file_path', path)

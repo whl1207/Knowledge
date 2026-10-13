@@ -12,12 +12,14 @@ import {
   LAN_GUEST_MODES,
   LAN_GUEST_READONLY_TOOLS,
   LAN_GUEST_SANDBOX_OPTIONS,
+  LAN_GUEST_FS_OPTIONS,
   defaultLanGuestPolicy,
   effectiveGuestTools,
   normalizeLanGuestPolicy,
 } from '@/shared/lanGuest'
 import { llmSourceLabel, normalizeLlmType } from '@/shared/llmSources'
 import { presetPresentation } from '@/lib/agent/ptc'
+import { getPlatform, hasCapability } from '@/platform'
 
 interface Props {
   store: any
@@ -46,21 +48,19 @@ const lanKbDir = ref<string>(store.lan?.kbDir || '')
 
 // 监听局域网服务器状态变化
 const unsubLan: Array<() => void> = []
-if (window.ipcRenderer) {
-  const onLan = (_event: any, status: any) => {
+if (hasCapability('events.bus')) {
+  unsubLan.push(getPlatform().events.on('lan-server-status', (status: any) => {
     lanServerRunning.value = status.running
     lanServerPort.value = status.port
     lanServerIPs.value = status.ips
-  }
-  window.ipcRenderer.on('lan-server-status', onLan)
-  unsubLan.push(() => window.ipcRenderer.removeListener('lan-server-status', onLan))
+  }))
 }
 
 // 获取局域网服务器状态
 const refreshLanServerInfo = async () => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('host.lanShare')) return
   try {
-    const info = await window.ipcRenderer.invoke('getLanServerInfo')
+    const info = await getPlatform().host.lan.getServerInfo()
     lanServerRunning.value = info.running
     lanServerPort.value = info.port
     lanServerIPs.value = info.ips
@@ -71,11 +71,11 @@ const refreshLanServerInfo = async () => {
 
 // 把「知识库共享目录 + 主机嵌入配置」同步到主进程（LAN HTTP 服务据此提供 /api/kb/*）
 const syncLanKbToMain = async () => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('host.lanShare')) return
   try {
-    await window.ipcRenderer.invoke('lan:setKbDir', lanKbDir.value || '')
+    await getPlatform().host.lan.setKbDir(lanKbDir.value || '')
     // 主机嵌入配置：供远端网页端对共享 .kb 做向量检索（维度与建库模型一致）
-    await window.ipcRenderer.invoke('lan:setEmbed', JSON.parse(JSON.stringify(buildLanEmbedPayload(store))))
+    await getPlatform().host.lan.setEmbed(JSON.parse(JSON.stringify(buildLanEmbedPayload(store))))
   } catch (e) {
     console.warn('同步局域网知识库配置失败:', e)
   }
@@ -86,7 +86,7 @@ const syncLanKbToMain = async () => {
  * 主进程据此校验访问令牌、限制并发，并给网页端智能体会话兑上主机模型与工具白名单。
  */
 const syncLanGuestToMain = async () => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('host.lanShare')) return
   try {
     // 单一入口：策略 + 主机模型 + 可用智能体档案（见 src/platform/lanGuestSync.ts）
     await pushLanGuestPolicy(store)
@@ -99,9 +99,9 @@ const syncLanGuestToMain = async () => {
 
 // 选择知识库共享目录
 const chooseLanKbDir = async () => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('dialog.native')) return
   try {
-    const p = await window.ipcRenderer.invoke('openFolderDialog')
+    const p = await getPlatform().dialog.pickDirectory()
     if (p) {
       lanKbDir.value = p
       store.lan.kbDir = p
@@ -116,11 +116,11 @@ const chooseLanKbDir = async () => {
 
 // 启动局域网共享（启动前同步知识库目录/嵌入配置与访客权限，网页端即可使用）
 const startLanServer = async () => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('host.lanShare')) return
   try {
     await syncLanKbToMain()
     await syncLanGuestToMain()
-    const result = await window.ipcRenderer.invoke('startLanServer', lanServerPort.value)
+    const result = await getPlatform().host.lan.startServer(lanServerPort.value)
     if (result.success) {
       // 主动回读一次状态（不依赖推送时序），端口顺延/地址列表也能立即显示
       await refreshLanServerInfo()
@@ -135,9 +135,9 @@ const startLanServer = async () => {
 
 // 停止局域网共享
 const stopLanServer = async () => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('host.lanShare')) return
   try {
-    const result = await window.ipcRenderer.invoke('stopLanServer')
+    const result = await getPlatform().host.lan.stopServer()
     if (result.success) {
       await refreshLanServerInfo()
       ElMessage.success(t('局域网共享已停止', 'LAN sharing stopped'))
@@ -256,7 +256,7 @@ const refreshRemoteFsInfo = async () => {
 }
 
 const chooseRemoteFsRoot = async () => {
-  const path = await window.ipcRenderer.invoke('openFolderDialog')
+  const path = await getPlatform().dialog.pickDirectory()
   if (path) {
     store.remoteFs.rootDir = path
     store.saveConfig()
@@ -425,9 +425,9 @@ const guestActiveModel = ref('')
 
 /** 主动回读主机当前生效的访客模型 */
 const refreshGuestActiveModel = async () => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('host.lanShare')) return
   try {
-    const res = await window.ipcRenderer.invoke('lan:getGuest')
+    const res = await getPlatform().host.lan.getGuest()
     applyGuestHostModel(res?.info)
   } catch (e: any) {
     console.warn('[lan-guest] 读取主机访客状态失败:', e)
@@ -457,10 +457,8 @@ const presetChipTitle = (p: any): string => {
 }
 
 // 主进程每次收到策略就回推一次生效状态 → 设置页不需要自己轮询
-if (window.ipcRenderer) {
-  const onGuestState = (_e: any, info: any) => applyGuestHostModel(info)
-  window.ipcRenderer.on('lan:guest-state', onGuestState)
-  unsubLan.push(() => window.ipcRenderer.removeListener('lan:guest-state', onGuestState))
+if (hasCapability('events.bus')) {
+  unsubLan.push(getPlatform().events.on('lan:guest-state', (info: any) => applyGuestHostModel(info)))
 }
 
 /** 权限页各行的悬停说明（页面上只留控件，说明统一走 title） */
@@ -950,6 +948,15 @@ onBeforeUnmount(() => {
                :title="permHints.concurrency"
                @change="store.saveConfig()"
                :placeholder="store.locales=='zh'?'同时允许的访客任务数' : 'Concurrent guest tasks'"/>
+      </div>
+      <!-- 访客对主机共享目录的文件访问（网页端经 /api/fs/* 由主机代做，路径限制在共享目录内） -->
+      <div class="form-group">
+        <label :title="store.locales=='zh'?'网页端本身没有本地文件；打开后由主机代做，且只能访问「共享」页里设置的「知识库目录」。写入档位可新建 / 保存 / 重命名 / 删除。' : 'The web page has no local files of its own; when enabled the host does the work and only inside the shared folder set on the Share tab.'">{{ store.locales=='zh'?'文件访问' : 'File access' }}</label>
+        <select v-model="guest.guestFs" class="perm-hint" @change="store.saveConfig()">
+          <option v-for="o in LAN_GUEST_FS_OPTIONS" :key="o.value" :value="o.value">
+            {{ store.locales=='zh' ? o.zh : o.en }}
+          </option>
+        </select>
       </div>
       <div class="form-group">
         <label>{{ store.locales=='zh'?'沙箱级别' : 'Sandbox' }}</label>

@@ -7,9 +7,10 @@
      服务器配置持久化到 store.mcpServers（localStorage），运行时由主进程 mcp-service 承载，
      本组件通过 mcpManager（IPC 桥）完成连接 / 测试 / 工具查询。 -->
 <template>
-  <div class="mcp-settings">
-    <!-- ===================== 左侧：MCP 服务导航（开关 + 状态） ===================== -->
-    <aside class="mcp-sidebar">
+  <div class="mcp-settings" :class="{ tall: isTallLayout }">
+    <!-- ===================== 左侧：MCP 服务导航（开关 + 状态） =====================
+         细长窗口下与右侧配置各占满整屏互相切换（见 .tall 样式） -->
+    <aside class="mcp-sidebar" v-show="!isTallLayout || showNavScreen">
       <div class="mcp-toolbar">
         <button class="toolbar-action-btn mcp-add-btn" @click="newServer" :title="zh ? '新增 MCP 服务' : 'Add MCP server'">
           <i class="fa fa-plus"></i><span>{{ zh ? '新增服务' : 'Add Server' }}</span>
@@ -65,7 +66,15 @@
     </aside>
 
     <!-- ===================== 右侧：配置 / 按钮 / 函数 / 说明 ===================== -->
-    <section class="mcp-content scoll">
+    <section class="mcp-content scoll" v-show="!isTallLayout || !showNavScreen">
+      <!-- 细长窗口：配置屏左上角返回（回到整屏服务列表） -->
+      <div v-if="isTallLayout" class="mcp-back-bar">
+        <div class="mcp-back" @click="showNavScreen = true"
+          :title="zh ? '返回服务列表' : 'Back to server list'">
+          <i class="fa fa-arrow-left"></i>
+        </div>
+        <span class="mcp-back-title">{{ zh ? 'MCP 服务配置' : 'MCP Server' }}</span>
+      </div>
       <!-- ── 查看 / 编辑详情（选中服务；配置可直接编辑自动保存） ── -->
       <template v-if="selected">
         <!-- 标题：名称 + 徽标 + 状态（右：启用开关 + 连接/测试/刷新/删除 图标按钮） -->
@@ -254,12 +263,19 @@
 <script setup lang="ts">
 import { computed, reactive, ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import { usestore } from '@/store'
+import { getPlatform, hasCapability } from '@/platform'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { mcpManager } from '@/platform/mcpManager'
 import type { McpServerConfig, McpTool } from '@/types/mcp'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：服务列表与配置不再并排，而是各占满整屏互相切换
+//（与设置导航 / 知识管理文件树 / 模型来源同一套做法）。true = 服务列表屏，false = 配置屏
+const isTallLayout = useTallLayout()
+const showNavScreen = ref(true)
 
 // 徽标：内置本地服务（如浏览器 Agent）显示 LOCAL，否则显示传输类型大写
 const badgeOf = (s: McpServerConfig | undefined): string =>
@@ -278,6 +294,7 @@ const selectServer = (id: string) => {
   if (selectedId.value !== id) {
     selectedId.value = id
   }
+  showNavScreen.value = false   // 细长窗口：进入整屏配置屏（宽窗口下两者并排，本状态无意义）
 }
 
 // 当外部删除了当前选中服务时回退到列表第一项
@@ -325,8 +342,8 @@ const updateStatus = (id: string, status: string, tools?: McpTool[]) => {
   statusMap[id] = { status, tools: tools || cur.tools }
 }
 
-// 主进程状态广播监听
-const onStatusChanged = (_e: any, payload: any) => {
+// 宿主状态广播监听
+const onStatusChanged = (payload: any) => {
   if (!payload?.serverId) return
   updateStatus(payload.serverId, payload.status, payload.tools)
 }
@@ -444,6 +461,7 @@ const newServer = () => {
     autoConnect: true,
   })
   selectedId.value = server.id
+  showNavScreen.value = false   // 细长窗口：新建后直接进配置屏（提示语也是「请在右侧编辑配置」）
   ElMessage.success(zh.value ? '已创建，请在右侧编辑配置' : 'Created, edit config on the right')
 }
 
@@ -554,13 +572,15 @@ function pushPostgresLines(lines: string[], zhLang: boolean) {
 
 // ===================== 内置服务对外暴露信息（说明区展示外部接入方法） =====================
 const exposeInfo = ref<any>(null)
+/** mcp-status-changed 广播退订句柄（挂载时登记 / 卸载时释放） */
+let unsubMcpStatus: (() => void) | null = null
 const endpointOf = (id?: string) => exposeInfo.value?.endpoints?.find((e: any) => e.id === id)
 const isExposeOn = (id: string) => exposeInfo.value?.endpoints?.find((e: any) => e.id === id)?.enabled !== false
 const toggleExpose = async (id: string) => {
-  if (!window.ipcRenderer) return
+  if (!hasCapability('host.mcpExpose')) return
   const next = !isExposeOn(id)
   try {
-    exposeInfo.value = await window.ipcRenderer.invoke('mcp-expose-set', { id, enabled: next })
+    exposeInfo.value = await getPlatform().host.mcp.setEnabled({ id, enabled: next })
   } catch (e) { console.warn('[mcp-expose] toggle failed', e) }
 }
 function pushExternalLines(lines: string[], id?: string) {
@@ -629,17 +649,16 @@ onMounted(async () => {
     selectedId.value = servers.value[0].id
   }
   if (window.ipcRenderer) {
-    window.ipcRenderer.on('mcp-status-changed', onStatusChanged)
+    unsubMcpStatus = getPlatform().events.on('mcp-status-changed', onStatusChanged)
     refreshAllStatus()
     // 内置服务对外暴露信息（说明区展示外部接入 URL / 配置示例）
-    try { exposeInfo.value = await window.ipcRenderer.invoke('mcp-expose-info') } catch { /* 忽略 */ }
+    try { exposeInfo.value = await getPlatform().host.mcp.info() } catch { /* 忽略 */ }
   }
 })
 
 onBeforeUnmount(() => {
-  if (window.ipcRenderer) {
-    window.ipcRenderer.off('mcp-status-changed', onStatusChanged)
-  }
+  unsubMcpStatus?.()
+  unsubMcpStatus = null
 })
 </script>
 
@@ -652,6 +671,64 @@ onBeforeUnmount(() => {
   overflow: hidden;
   background: var(--backgroundColor);
   color: var(--fontColor);
+}
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：服务列表 / 配置各占满整屏互相切换 ======
+   不再并排（并排会把配置区挤到只剩一两百像素）。两屏都用 v-show 隐藏，切回来时表单状态还在。 */
+.mcp-settings.tall .mcp-sidebar {
+  width: 100%;
+  border-right: 0;
+}
+/* 服务条目按钢琴键式整宽条目呈现：行高够手指点 */
+.mcp-settings.tall .mcp-nav-list {
+  padding: 8px;
+}
+.mcp-settings.tall .mcp-nav-item {
+  min-height: 56px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  border-color: var(--borderColor);
+  background-color: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.mcp-settings.tall .mcp-nav-item.active {
+  background-color: var(--menuActiveColor);
+}
+.mcp-settings.tall .mcp-nav-name {
+  font-size: 14px;
+}
+/* 配置屏顶部的返回条（只在细长窗口出现） */
+.mcp-back-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--borderColor);
+}
+.mcp-back {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+.mcp-back:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.mcp-back-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
 }
 
 /* ========== 左侧：服务导航栏 ========== */

@@ -4,6 +4,7 @@ import { usestore } from '@/store'
 import { createASRManager } from '@/services/asr/manager'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BlockEditor from '@/components/knowFile/view/block/BlockEditor.vue'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -174,13 +175,13 @@ const saveContent = () => {
         originalContentSnapshot = body
 
         if (data.value.path) {
-            window.ipcRenderer.invoke('saveFile', data.value.path, data.value.content)
+            getPlatform().fs.saveText(data.value.path, data.value.content)
                 .then((success: boolean) => {
                     if (success) {
                         isDirty.value = false
                         console.log('文件保存成功')
                         // 通知其他窗口（独立窗口中的浏览/导图/演示等）刷新预览
-                        window.ipcRenderer.invoke('notify-file-changed', { path: data.value.path, content: data.value.content }).catch(() => {})
+                        getPlatform().app.notifyFileChanged({ path: data.value.path, content: data.value.content }).catch(() => {})
                     } else {
                         console.warn('文件保存失败')
                     }
@@ -266,7 +267,7 @@ const onDropFiles = async (payload: { files: File[]; index: number }) => {
 
         let linkPath = filePath
         if (data.value.path) {
-            const relPath = await window.ipcRenderer.invoke('getRelativePath', data.value.path, filePath)
+            const relPath = await getPlatform().fs.relativePath(data.value.path, filePath)
             if (relPath && !relPath.startsWith('../')) {
                 linkPath = relPath
             }

@@ -111,13 +111,12 @@ export interface KbChatOptions {
 
 // ==================== 工具函数 ====================
 
-/** 浏览器（无 ipcRenderer）环境下把请求转发到 LAN 服务器 /__proxy，Electron 直连 */
+/** 仅当页面由局域网主机投递（同源有 /__proxy）时转发；Electron / 安卓壳 / 本地浏览器直连 */
 function resolveApiUrl(originalUrl: string): string {
-  if (typeof window !== 'undefined' && !(window as any).ipcRenderer) {
-    const origin = window.location.origin
-    return `${origin}/__proxy?url=${encodeURIComponent(originalUrl)}`
-  }
-  return originalUrl
+  if (typeof window === 'undefined') return originalUrl
+  if ((window as any).ipcRenderer || (window as any).dsh) return originalUrl
+  if (!(window as any).__AIKM_HOST__) return originalUrl
+  return `${window.location.origin}/__proxy?url=${encodeURIComponent(originalUrl)}`
 }
 
 function stripTrailingSlash(s: string): string {

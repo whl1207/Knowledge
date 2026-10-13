@@ -189,6 +189,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { usestore } from '@/store'
 import { ElMessageBox } from 'element-plus'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -206,8 +207,8 @@ interface BmRow {
 const props = defineProps<{ dir: string; items: any[]; active?: boolean }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 
-const invoke = (channel: string, payload?: any) =>
-  window.ipcRenderer?.invoke ? window.ipcRenderer.invoke(channel, payload) : Promise.reject(new Error('IPC 不可用'))
+const invoke = (method: string, payload?: any) =>
+  getPlatform().browserAgent.call(method.replace(/^browser-agent:/, '') as any, payload)
 
 // ===== 搜索收藏（按标题/网址/目录名匹配，命中展平为结果列表） =====
 const searchText = ref('')
@@ -380,7 +381,7 @@ const locPickTitle = computed(() => {
 })
 const pickSaveDir = async () => {
   if (mutating.value || !window.ipcRenderer) return
-  const dir = await window.ipcRenderer.invoke('openFolderDialog').catch(() => null)
+  const dir = await getPlatform().dialog.pickDirectory().catch(() => null)
   if (dir && typeof dir === 'string' && dir !== (store.UI?.browserSaveDir || '').trim()) {
     store.UI.browserSaveDir = dir
     store.saveConfig()

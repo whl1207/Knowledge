@@ -21,6 +21,15 @@ import { flowAwareExt } from './file-ext'
 import { mcpService } from './mcp-service'
 import { mcpExposeServer, MCP_EXPOSE_PORT } from './mcp-expose'
 import { browserAgentService } from './browser-agent'
+import {
+  registerOfficeHostIpc,
+  registerOfficeSchemes,
+  disposeWindowViews,
+  disposeAll as disposeOfficeViews,
+  resolveEditorType,
+  isEditorAvailable,
+} from './office-host'
+import { registerOfficeAiIpc } from './office-ai'
 import { postgresService } from './postgres/postgres-service'
 import * as aiService from './ai-service'
 import { lmStudioCli } from './lmstudio-cli'
@@ -56,6 +65,7 @@ import {
   refreshPolicyFromRenderer,
 } from './lan-guest'
 import { LAN_GUEST_COOKIE } from '@/shared/lanGuest'
+import { LAN_FS_PREFIX, handleLanFsRequest, lanFsCapability } from './lan-fs-api'
 import { registerTtsIpc, disposeTtsService } from './tts-service'
 import { registerCollabIpc, stopCollab } from './collab-service'
 import { registerRemoteFsIpc, stopRemoteFsAll } from './remote-fs-service'
@@ -459,6 +469,7 @@ app.on('activate', () => {
 app.on('will-quit', () => {
   trayService.destroyTray()
   browserAgentService.dispose()
+  disposeOfficeViews()
   postgresService.closeAll().catch((err) => console.error('[pg-mcp] close error', err))
   mcpService.shutdown().catch((err) => console.error('[mcp] shutdown error', err))
   mcpExposeServer.close().catch((err) => console.error('[mcp-expose] close error', err))
@@ -576,6 +587,7 @@ function openFileWindow(opts: {
   // view 缺省时标题先只写文件名，渲染层挂载后会按实际视图重设 document.title
   const viewLabelMap: Record<string, string> = {
     read: '浏览',
+    office: 'Office 编辑',
     edit: '源码编辑',
     blockedit: '可视编辑',
     mindmap: '思维导图',
@@ -611,6 +623,8 @@ function openFileWindow(opts: {
     // 托盘里该窗口的后台任务登记一并清掉（否则任务会一直挂在托盘菜单上）
     trayService.forgetWindow(childWcId)
     unregisterFileWindow(pathKey, viewKey, childWindow)
+    // 该窗口内的 Office 编辑器视图（WebContentsView）随窗口一并回收
+    disposeWindowViews(childWindow)
   })
 
   // 有后台任务运行中且已开启「折叠到托管区」：关窗改为隐藏（任务继续跑），
@@ -700,7 +714,7 @@ const READ_VIEW_EXTS = [
   '.md', '.markdown', '.mdown', '.mkd', '.mdx',
   '.html', '.htm',
   '.docx', '.doc',
-  '.pdf', '.xlsx', '.xls', '.csv', '.excalidraw', '.flow', '.workflow', '.flow.yml', '.flow.yaml', '.data',
+  '.pdf', '.xlsx', '.xls', '.csv', '.excalidraw', '.flow', '.workflow', '.flow.yml', '.flow.yaml', '.data', '.mmd', '.mermaid',
   '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif',
   '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp', '.mpg', '.mpeg',
   '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.wma', '.ape', '.aiff',
@@ -708,6 +722,10 @@ const READ_VIEW_EXTS = [
 
 /** 文件关联打开时的默认视图：有专属浏览视图的类型 → 浏览(read)，其余（代码/文本/未知）→ 源码编辑(edit) */
 function pickDefaultView(filePath: string): string {
+  // 内嵌 Office 内核已构建时，Word / Excel / PPT 直接进真编辑器；
+  // 未构建（或类型不支持）时维持原默认视图，行为与接入前完全一致
+  const officeType = resolveEditorType(filePath)
+  if (officeType && isEditorAvailable(officeType)) return 'office'
   return READ_VIEW_EXTS.includes(flowAwareExt(filePath).toLowerCase()) ? 'read' : 'edit'
 }
 
@@ -905,6 +923,15 @@ ipcMain.handle('open-settings-window', (event, payload?: { nav?: string }) => {
     return { ok: false, error: String(err?.message || err) }
   }
 })
+
+// ==================== Office 编辑器宿主（Word / Excel / PPT，WebContentsView 内嵌 GenOffice） ====================
+// 视图挂在「发起打开的文件窗口」上；渲染层只负责上报占位区矩形。
+// 注意：renderer 的自定义协议（genoffice-app://）特权必须在 app ready 之前登记 ——
+// 这里是模块作用域，恰好满足时机要求。
+registerOfficeSchemes()
+registerOfficeHostIpc()
+// Office 编辑器请求的 AI / 环境 / 知识库通道（模型来自 AI-KM 设置，配置由渲染层推送）
+registerOfficeAiIpc()
 
 // ==================== 浏览器 Agent（M0/M1：独立窗口 + 内嵌 WebContentsView + 进程内 MCP server） ====================
 // 入口按钮 / MCP 工具首次导航都会惰性创建窗口；壳 UI 通过这些通道控制地址栏 / 前进后退 / 刷新 / 停止
@@ -4537,6 +4564,21 @@ function extractProxyAssistantText(raw: string): string {
 }
 
 /** 创建并启动 LAN HTTP 服务器 */
+/**
+ * 给局域网共享的**入口页**注入「宿主运行时」标记：网页端据此注册 HTTP 版平台后端
+ * （见 src/platform/host），从而在网页里获得主机的文件能力。
+ *
+ * 每次请求现算，因此主机改权限档位 / 换共享目录后，访客刷新即生效，无需重启服务。
+ */
+function withHostRuntime(html: Buffer | string): Buffer | string {
+  const isBuf = Buffer.isBuffer(html)
+  const text = isBuf ? html.toString('utf8') : String(html)
+  const cap = lanFsCapability(lanKbDir, getLanGuestPolicy()?.guestFs === 'write')
+  const boot = `<script>window.__AIKM_HOST__=${JSON.stringify({ fs: cap.fs, rootName: cap.root })};</script>`
+  const out = /<\/head>/i.test(text) ? text.replace(/<\/head>/i, `${boot}</head>`) : boot + text
+  return isBuf ? Buffer.from(out, 'utf8') : out
+}
+
 async function startLanServer(port: number): Promise<{ success: boolean; error?: string }> {
   if (lanServer) {
     return { success: false, error: '服务器已在运行' }
@@ -4595,6 +4637,33 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
           }
           return
         }
+      }
+
+      // ===== 主机文件能力（网页端 platform.host 的宿主机侧）：/api/fs/* =====
+      // 权限档位来自访客策略（off / read / write，默认 off）；路径一律限制在共享目录内
+      if (urlPath.startsWith(LAN_FS_PREFIX)) {
+        const guestPolicy = getLanGuestPolicy()
+        void handleLanFsRequest(
+          req,
+          res,
+          urlPath,
+          { root: lanKbDir, allowWrite: guestPolicy?.guestFs === 'write' },
+          (key: string) => parseLanQuery(req.url || '')[key] || '',
+        ).catch((e: any) => {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }))
+        })
+        return
+      }
+
+      // ===== 主机能力概览（网页端据此注册平台能力） =====
+      if (urlPath.startsWith('/api/host/info')) {
+        const caps = lanFsCapability(lanKbDir, getLanGuestPolicy()?.guestFs === 'write')
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: true, fs: caps.fs, rootName: caps.root }))
+        return
       }
 
       // ===== 访客智能体桥（P4）：/api/agent/*（主机侧跑 agent 循环 + SSE 事件流） =====
@@ -4797,7 +4866,7 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
               res.setHeader('Content-Type', 'text/html; charset=utf-8')
               // index.html 不缓存：主机重新构建后访客刷新即拿到新版本（否则会继续用旧界面）
               res.setHeader('Cache-Control', 'no-cache')
-              res.end(data2)
+              res.end(withHostRuntime(data2))
             })
             return
           }
@@ -4817,7 +4886,7 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
         } else if (fileExt === '.html') {
           res.setHeader('Cache-Control', 'no-cache')
         }
-        res.end(data)
+        res.end(fileExt === '.html' ? withHostRuntime(data) : data)
       })
     })
 

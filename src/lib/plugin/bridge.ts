@@ -9,6 +9,7 @@
  */
 
 import type { PluginDataFileStat, PluginEvent, PluginLogLine, PluginSnapshot } from '@/types/plugin'
+import { createLocalPluginHost, localPluginHostAvailable } from '@/platform/pluginHost'
 
 /** 客户端插件 bundle（主进程读取后经 IPC 传入，渲染层用 Blob URL 动态 import） */
 export interface PluginClientBundle {
@@ -48,7 +49,7 @@ export interface PluginBridgeApi {
   logs(id: string): Promise<PluginLogLine[]>
   /** 渲染层半边的日志上报（界面扩展装载失败 / 插件 warn·error）→ 落进插件日志缓冲（不阻塞） */
   clientLog(id: string, level: 'debug' | 'info' | 'warn' | 'error', message: string): void
-  openDir(id?: string): Promise<{ path: string }>
+  openDir(id?: string): Promise<{ path: string; opened?: boolean }>
   /** 插件在主进程侧的数据文件（userData/plugins-data/<id>/，见 pluginData.ts） */
   dataFiles(id: string): Promise<{ id: string; entries: PluginDataFileStat[] }>
   /** 一次拿到所有插件的主进程侧数据（列表页显示占用用） */
@@ -69,6 +70,14 @@ export interface PluginBridgeApi {
     clearGrants(options: { id: string; confirm?: boolean }): Promise<{ removed: boolean }>
   }
   clientBundle(id: string): Promise<PluginClientBundle>
+  /** 重新扫描插件目录（可选能力：渲染层宿主用它刷新列表） */
+  rescan?(confirm?: boolean): Promise<{
+    plugins: PluginSnapshot[]
+    rootDir: string
+    customRoot: boolean
+    services: string[]
+    invalidNamedDirs?: string[]
+  }>
   /** 从本地文件夹安装插件（P2：主进程弹目录选择框） */
   install(options?: { confirm?: boolean; replace?: boolean }): Promise<{
     cancelled: boolean
@@ -85,5 +94,23 @@ export interface PluginBridgeApi {
 export function getPluginBridge(): PluginBridgeApi | null {
   if (typeof window === 'undefined') return null
   const api = (window as any).dsh?.plugin
-  return api && typeof api.list === 'function' ? (api as PluginBridgeApi) : null
+  if (api && typeof api.list === 'function') return api as PluginBridgeApi
+  // 非 Electron 平台（安卓 / 局域网网页端）：用渲染层插件宿主（扫插件目录 + 装载界面半边）
+  try {
+    if (localPluginHostAvailable()) {
+      cachedLocalHost ||= createLocalPluginHost()
+      return cachedLocalHost
+    }
+  } catch {
+    /* 平台未就绪：按不可用处理 */
+  }
+  return null
+}
+
+let cachedLocalHost: PluginBridgeApi | null = null
+
+/** 当前用的是渲染层宿主（非 Electron）：界面据此调整文案（无插件工具 / 无主进程半边） */
+export function isLocalPluginHost(): boolean {
+  if (typeof window === 'undefined') return false
+  return !(window as any).dsh?.plugin && localPluginHostAvailable()
 }

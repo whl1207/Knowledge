@@ -13,6 +13,7 @@ import { ref, computed, watch } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import { exportMarkdownAsWord } from '@/lib/export/md-to-docx'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<{
   modelValue: boolean
@@ -48,8 +49,7 @@ const targetPath = ref('')
 const picked = ref(false)
 const busy = ref(false)
 
-const ipc: any = (window as any)?.ipcRenderer
-const canPick = !!ipc?.invoke
+const canPick = hasCapability('dialog.native')
 
 /** 文件名基（与 download.ts 的清洗规则一致，避免默认名与实际落盘名不符） */
 const safeBase = computed(() => (props.title || '文档').replace(/[\\/:*?"<>|]/g, '_').trim() || '文档')
@@ -89,7 +89,7 @@ const pickStyle = async () => {
     ElMessage.warning(zh.value ? '当前环境无法选择文件' : 'File picking unavailable here')
     return
   }
-  const path = await ipc.invoke('selectFile', {
+  const path = await getPlatform().dialog.pickFile({
     filters: [{ name: 'Word 样式模板', extensions: ['docx'] }],
     properties: ['openFile'],
   })
@@ -102,7 +102,7 @@ const browse = async () => {
     ElMessage.warning(zh.value ? '当前环境无法选择保存位置' : 'Save dialog unavailable here')
     return
   }
-  const path = await ipc.invoke('saveFileDialog', {
+  const path = await getPlatform().dialog.saveFile({
     defaultPath: targetPath.value || `${safeBase.value}.docx`,
     filters: [{ name: 'Word 文档', extensions: ['docx'] }],
   })

@@ -7,7 +7,9 @@
      - 配置保存在 store.webSearch（localStorage `webSearchConfig`），每次变更自动下发主进程（webSearch:set-config）。 -->
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { getPlatform } from '@/platform'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useTallLayout } from '@/composables/useTallLayout'
 import {
   WEB_SEARCH_PROVIDER_IDS,
   webSearchProviderMeta,
@@ -57,6 +59,17 @@ const listItems = computed(() => {
 /** 当前选中源（默认第一个启用源；选中项被停用时保持选中以便继续配置） */
 const selected = ref<string>(enabledIds.value[0] || WEB_SEARCH_PROVIDER_IDS[0])
 const currentMeta = computed(() => webSearchProviderMeta(selected.value, store.webSearch))
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：来源列表与配置不再并排，而是各占满整屏互相切换
+//（与设置导航 / 知识管理文件树 / 模型来源同一套做法）。true = 来源列表屏，false = 配置屏
+const isTallLayout = useTallLayout()
+const showNavScreen = ref(true)
+
+/** 选中某个搜索源（细长窗口下同时进入整屏配置屏） */
+const selectSource = (id: string) => {
+  selected.value = id
+  showNavScreen.value = false
+}
 
 const providerLabel = (id: string) => {
   const meta = webSearchProviderMeta(id, store.webSearch)
@@ -300,7 +313,7 @@ const openInBrowser = async (url?: string) => {
   const ipc = (window as any).ipcRenderer
   if (ipc?.invoke) {
     try {
-      const r = await ipc.invoke('browser-agent:open-url', { url: target })
+      const r = await getPlatform().browserAgent.call('open-url', { url: target })
       if (r?.ok !== false) return
     } catch {
       /* 主进程未注册该通道（旧版本）时退回下面的外部浏览器 */
@@ -314,9 +327,9 @@ const showKey = ref(false)
 </script>
 
 <template>
-  <div class="ws-settings">
-    <!-- ====== 左侧：搜索源列表 ====== -->
-    <div class="ws-sidebar">
+  <div class="ws-settings" :class="{ tall: isTallLayout }">
+    <!-- ====== 左侧：搜索源列表（细长窗口下与右侧配置各占满整屏互相切换，见 .tall 样式） ====== -->
+    <div class="ws-sidebar" v-show="!isTallLayout || showNavScreen">
       <div class="ws-toolbar">
         <span class="ws-toolbar-label">{{ t('多源策略', 'Strategy') }}</span>
         <select v-model="store.webSearch.strategy" class="ws-toolbar-select" @change="persist"
@@ -350,7 +363,7 @@ const showKey = ref(false)
             'drop-after': dropHint?.id === item.id && dropHint?.pos === 'after',
           }"
           draggable="true"
-          @click="selected = item.id"
+          @click="selectSource(item.id)"
           @dragstart="onDragStart(item.id, $event)"
           @dragover.prevent="onDragOver(item.id, $event)"
           @drop.prevent="onDrop(item.id)"
@@ -377,7 +390,15 @@ const showKey = ref(false)
     </div>
 
     <!-- ====== 右侧：配置区 ====== -->
-    <div class="ws-content scoll">
+    <div class="ws-content scoll" v-show="!isTallLayout || !showNavScreen">
+      <!-- 细长窗口：配置屏左上角返回（回到整屏来源列表） -->
+      <div v-if="isTallLayout" class="ws-back-bar">
+        <div class="ws-back" @click="showNavScreen = true"
+             :title="t('返回来源列表', 'Back to source list')">
+          <i class="fa fa-arrow-left"></i>
+        </div>
+        <span class="ws-back-title">{{ t('搜索源配置', 'Search Source') }}</span>
+      </div>
       <!-- 选中源标题 + 启用/停用 -->
       <div class="ws-content-header">
         <h3>
@@ -670,6 +691,41 @@ const showKey = ref(false)
   display: flex; height: 100%; flex: 1; overflow: hidden;
   background: var(--backgroundColor); color: var(--fontColor);
 }
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：来源列表 / 配置各占满整屏互相切换 ======
+   不再并排（并排会把配置区挤到只剩一两百像素）。两屏都用 v-show 隐藏，切回来时表单状态还在。 */
+.ws-settings.tall .ws-sidebar {
+  width: 100%;
+  border-right: 0;
+}
+/* 来源条目按钢琴键式整宽条目呈现：行高够手指点 */
+.ws-settings.tall .ws-source-list { padding: 8px; }
+.ws-settings.tall .ws-source-item {
+  min-height: 52px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--borderColor);
+  background-color: var(--backgroundColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.ws-settings.tall .ws-source-name { font-size: 14px; }
+.ws-settings.tall .ws-source-desc { font-size: 11px; }
+/* 配置屏顶部的返回条（只在细长窗口出现） */
+.ws-back-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 8px; margin-bottom: 8px;
+  border-bottom: 1px solid var(--borderColor);
+}
+.ws-back {
+  flex-shrink: 0; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--borderColor); border-radius: 6px;
+  cursor: pointer; color: var(--fontColor); font-size: 14px;
+  transition: all .15s;
+}
+.ws-back:hover { background-color: var(--menuActiveColor); color: var(--fontActiveColor); }
+.ws-back-title { font-size: 13px; font-weight: 600; color: var(--fontActiveColor); }
 .ws-sidebar {
   width: 210px; display: flex; flex-direction: column;
   border-right: 1px solid var(--borderColor); background: var(--menuColor);

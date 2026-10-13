@@ -1,11 +1,20 @@
 <template>
   <div class="bg knowfile-menu">
     <!-- 主要内容区域保持不变 -->
-    <div class="explorer-container">
-      <!-- 左侧面板（可调整宽度，始终为文件树；收起 / 展开走宽度过渡动画，见下方 .left-panel-* 类） -->
+    <div class="explorer-container" :class="{ tall: isTallLayout }">
+      <!-- 左侧面板（可调整宽度，始终为文件树；收起 / 展开走宽度过渡动画，见下方 .left-panel-* 类）
+           细长窗口（高宽比 > 16:9，如手机竖屏）下改为**覆盖式整屏抽屉**：右侧视图始终占满整屏，
+           抽屉由工具栏最左的开关打开、点文件夹 / 文件（或抽屉左上角的返回）后收起 -->
       <Transition name="left-panel" @after-enter="store.resize()" @after-leave="store.resize()">
-        <div class="left-wrap" v-if="mode" :style="{ '--left-w': leftWidth + 'px' }">
-          <panel v-if="mode=='file'" ref="panelRef" class="left-panel">
+        <div class="left-wrap" v-if="mode" :style="isTallLayout ? undefined : { '--left-w': leftWidth + 'px' }">
+          <panel v-if="mode=='file'" ref="panelRef" class="left-panel" @node-opened="onNodeOpened">
+            <!-- 抽屉左上角返回（细长窗口才有：抽屉盖住了工具栏上的那个开关） -->
+            <template #toolbar-left>
+              <div v-if="isTallLayout" class="panel-home-btn drawer-back" @click="toggleMode('file')"
+                :title="store.locales=='zh'?'收起文件树':'Close file tree'">
+                <i class="fa fa-arrow-left"></i>
+              </div>
+            </template>
             <!-- 面板顶部按钮组：工作区 / 打开文件 / 搜索 / 创建文件 -->
             <template #toolbar>
               <div class="panel-home">
@@ -26,8 +35,9 @@
           </panel>
         </div>
       </Transition>
-      <!-- 拖拽条：收起时滑到左边并淡出，跟随面板的宽度过渡（不用 v-if，否则展开时会瞬间出现在终点） -->
-      <div class="resizer" :class="{ 'is-hidden': !mode, 'is-dragging': isDragging }" @mousedown.prevent="startDrag" :style="{ left: (mode ? leftWidth - 3 : -6) + 'px' }"></div>
+      <!-- 拖拽条：收起时滑到左边并淡出，跟随面板的宽度过渡（不用 v-if，否则展开时会瞬间出现在终点）；
+           细长窗口下不调宽度（抽屉整屏），隐藏 -->
+      <div class="resizer" :class="{ 'is-hidden': !mode || isTallLayout, 'is-dragging': isDragging }" @mousedown.prevent="startDrag" :style="{ left: (mode ? leftWidth - 3 : -6) + 'px' }"></div>
       <!-- 右侧内容区域 -->
       <div class="right-content">
         <!-- 远程只读提示条（远程文件在右窗格预览时显示；单击快速预览不显示） -->
@@ -66,7 +76,8 @@
             <Media v-else-if="isMediaFile && isMediaContentView(activeView)" :path="activeFilePath" :content="activeFileContent" />
             <WorkflowEditor v-if="isFlowDslFile && isFlowContentView(activeView)" :path="activeFilePath" :content="activeFileContent" :readonly="isRemoteFile" />
             <DataCanvasModule v-if="isDataFile && isDataContentView(activeView)" :task-file-path="activeFilePath" mode="full" @file-saved="onDataCanvasSaved" />
-            <md_read v-if="!isDrawingEditor && !isMediaFile && !isFlowDslFile && !isDataFile && activeView===VIEW_BROWSE" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
+            <Mermaid v-if="isMermaidFile && isMermaidContentView(activeView)" :path="activeFilePath" :content="activeFileContent" />
+            <md_read v-if="!isDrawingEditor && !isMediaFile && !isFlowDslFile && !isDataFile && !isMermaidFile && activeView===VIEW_BROWSE" :content="activeFileContent" :path="activeFilePath" :is-remote="isRemoteFile" :remote-base64="activeRemoteBase64" :remote-text="activeRemoteText" />
           </div>
           <empty v-else />
         </div>
@@ -118,16 +129,36 @@
   const Media = defineAsyncComponent(() => import('@/components/knowFile/view/Media.vue'))
   const WorkflowEditor = defineAsyncComponent(FILE_EDITORS.flow.load)
   const DataCanvasModule = defineAsyncComponent(FILE_EDITORS.data.load)
+  // Mermaid 图表（.mmd / .mermaid）
+  const Mermaid = defineAsyncComponent(FILE_EDITORS.mermaid.load)
   
   import panel from '@/components/knowFile/panel.vue'
   import ViewToolbar from '@/components/knowFile/ViewToolbar.vue'
   import search from '@/components/knowFile/search.vue'
+import { getPlatform, hasCapability } from '@/platform'
+import { useTallLayout } from '@/composables/useTallLayout'
   
   const store = usestore();
 
   const mode = ref('file');
   // 文件树面板引用（用于刷新左侧文件树）
   const panelRef = ref<any>(null);
+
+  // 细长窗口（高宽比 > 16:9，如手机竖屏）：左栏改为覆盖式整屏抽屉，右侧视图始终占满整屏
+  //（判定与窗口监听与主页共用同一份，见 useTallLayout）
+  const isTallLayout = useTallLayout();
+
+  /** 收起抽屉（细长窗口下点文件夹 / 文件后自动收起，回到右侧视图） */
+  const closeDrawer = () => {
+    if (!mode.value) return
+    mode.value = ''
+    store.resize()
+  };
+
+  /** 文件树里打开了文件 / 进入了文件夹：细长窗口下收起抽屉，让右侧视图接手展示 */
+  const onNodeOpened = () => {
+    if (isTallLayout.value) closeDrawer();
+  };
 
   // 模糊搜索窗口显隐（类似设置界面，悬浮弹出）
   const searchOpen = ref(false);
@@ -187,9 +218,9 @@
 
   // 通道 B：其他窗口（本窗口以「浏览」预览远程文件时）保存文件后广播到达主窗口 → 同步本窗口 store 中匹配标签的内容，
   // 让右侧预览实时刷新显示。
-  const onFileContentChanged = (_event: any, payload: { path?: string; content?: string }) => {
-    const changedPath = payload?.path
-    const newContent = payload?.content
+  let unsubFileContent: (() => void) | null = null
+  const onFileContentChanged = (payload: unknown) => {
+    const { path: changedPath, content: newContent } = (payload || {}) as { path?: string; content?: string }
     if (!changedPath || newContent == null) return
     // 主窗口不再承载任何编辑器（文件一律在独立窗口编辑），广播到达后直接同步标签内容
     for (let i = 0; i < store.data.length; i++) {
@@ -207,15 +238,35 @@
         if (!isNaN(v)) leftWidth.value = Math.max(minLeftWidth, Math.min(maxLeftWidth, v));
       }
     } catch (e) {}
+    // 细长窗口：起手就按「抽屉」规则定好——有工作区时收起（右侧视图占满整屏），
+    // 没有工作区时展开（打开工作区 / 打开文件的入口都在树里，收起会让新手无从下手）
+    if (isTallLayout.value) mode.value = store.root ? '' : 'file'
     // 监听其他窗口保存文件后的内容广播（通道 B）
-    window.ipcRenderer.on('file-content-changed', onFileContentChanged)
+    unsubFileContent = getPlatform().events.on('file-content-changed', onFileContentChanged)
+  });
+
+  // 细长布局 / 工作区变化时调整抽屉：
+  //  - 刚打开工作区（空 → 有）：收起抽屉，直接看右侧视图
+  //  - 刚进入细长布局：有工作区收起、没有则展开
+  //  - 离开细长布局（回到宽窗口）：恢复桌面并排显示
+  watch([isTallLayout, () => store.root], ([tall, root], [wasTall, wasRoot]) => {
+    if (!tall) {
+      if (tall !== wasTall) { mode.value = 'file'; store.resize() }
+      return
+    }
+    if (!wasRoot && root) { closeDrawer(); return }
+    if (tall !== wasTall) {
+      mode.value = root ? '' : 'file'
+      store.resize()
+    }
   });
 
   onBeforeUnmount(() => {
     window.removeEventListener('mousemove', onDrag);
     window.removeEventListener('mouseup', stopDrag);
     window.removeEventListener('keydown', onSearchKeydown);
-    window.ipcRenderer.off('file-content-changed', onFileContentChanged)
+    unsubFileContent?.()
+    unsubFileContent = null
   });
 
   // 切换模式的方法
@@ -227,7 +278,7 @@
 
   // 通过对话框选择文件夹并添加为工作区（支持多个工作区）
   const openFolderDialog = async function() {
-    let path = await window.ipcRenderer.invoke('openFolderDialog')
+    let path = await getPlatform().dialog.pickDirectory()
     if(path != null){
       // 添加为新的工作区并设为当前工作区（重复路径仅切换当前工作区，返回 false）
       const isNew = store.addRoot(path)
@@ -236,7 +287,7 @@
         return
       }
       // 启动文件监听（监听所有工作区）
-      await window.ipcRenderer.invoke('startWatching', [...store.roots])
+      await getPlatform().watch.acquire([...store.roots])
       // 刷新左侧文件树
       await panelRef.value?.refreshTree()
     }
@@ -245,17 +296,17 @@
 
   // 通过对话框打开文件（打开文件）
   const openFileDialog = async function() {
-    const path = await window.ipcRenderer.invoke('selectFile')
+    const path = await getPlatform().dialog.pickFile()
     if(path != null){
       // 本地 HTML 文件：默认用浏览器 Agent 打开（与知识管理双击一致）
       const extLow = String(path).toLowerCase()
       if (extLow.endsWith('.html') || extLow.endsWith('.htm')) {
-        await window.ipcRenderer.invoke('browser-agent:open-file', { path })
+        await getPlatform().browserAgent.call('open-file', { path })
         return
       }
-      const inf = await window.ipcRenderer.invoke('getInf', path); //获取信息
-      const attributes = await window.ipcRenderer.invoke('getConfig', path); //获取属性
-      const fileContent = await window.ipcRenderer.invoke('readFile', path)
+      const inf = await getPlatform().fs.getInfo(path); //获取信息
+      const attributes = await getPlatform().fs.readMetadata(path); //获取属性
+      const fileContent = await getPlatform().fs.readText(path)
       // 打开文件：一律用独立窗口打开（原「窗口内打开」模式已去掉）
       store.openFileByMode({
         ...inf,
@@ -383,12 +434,16 @@
   const isFlowContentView = (name: string) => editorVisibleInView('flow', name);
   const isDataContentView = (name: string) => editorVisibleInView('data', name);
 
+  const isMermaidFile = computed(() => editorKind.value === 'mermaid');
+  // Mermaid 图表（.mmd / .mermaid）：只替换「浏览」视图（源码编辑在独立窗口用 Monaco 改）
+  const isMermaidContentView = (name: string) => editorVisibleInView('mermaid', name);
+
   /** 数据画布保存成功：把写盘内容同步回打开的标签，并通知其它窗口（避免再读一次大文件） */
   const onDataCanvasSaved = (path: string, content?: string) => {
     if (!path || typeof content !== 'string') return
     const tab = (store.data || []).find((item: any) => item && item.path === path)
     if (tab) tab.content = content
-    window.ipcRenderer?.invoke('notify-file-changed', { path, content }).catch(() => {})
+    getPlatform().app.notifyFileChanged({ path, content }).catch(() => {})
   };
 </script>
 
@@ -403,6 +458,7 @@
 
   /* 面板顶部 4 按钮组（工作区 / 打开文件 / 搜索 / 创建文件）：与搜索框同一行（见 panel.vue 的 .tree-toolbar） */
   .panel-home {
+
     display: flex;
     align-items: center;
     gap: 4px;
@@ -429,6 +485,10 @@
   }
   .panel-home-btn.active {
     color: var(--fontActiveColor);
+  }
+  /* 抽屉返回按钮（细长窗口）：只占一个图标位，放在搜索框左侧 */
+  .drawer-back {
+    margin-right: 2px;
   }
 
   .explorer-container {
@@ -485,6 +545,22 @@
   /* 拖动宽度时去掉 left 过渡，拖拽条要贴着面板边缘即时跟手 */
   .resizer.is-dragging { transition: background-color 0.15s; }
   .resizer:hover { background: rgba(0,0,0,0.04); }
+
+  /* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：左栏 = 覆盖式整屏抽屉 ======
+     不再与右侧视图分栏（分栏会把右侧挤到不可用），抽屉展开时整屏盖住内容区与工具栏，
+     关闭后右侧视图独占整屏；删除的分隔线 / 拖拽条在这里都不适用。 */
+  .explorer-container.tall .left-wrap {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    border-right: 0;
+    z-index: 30;
+  }
+  .explorer-container.tall .left-panel {
+    width: 100%;
+  }
 
   .right-content {
     flex: 1;

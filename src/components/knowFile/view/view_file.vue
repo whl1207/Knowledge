@@ -2,13 +2,14 @@
 import { usestore } from '@/store'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { NEW_FILE_TYPES, newFileType, type NewFileTypeKey } from '@/lib/knowFile/newFileTypes'
+import { NEW_FILE_TYPES, newFileType, writeNewFileSkeleton, type NewFileTypeKey } from '@/lib/knowFile/newFileTypes'
 import { FILE_SORT_ITEMS, fileTypeKey, type FileSortKey } from '@/lib/knowFile/fileSort'
 import { parseSearchQuery, matchSearchTerms, searchTextTerms } from '@/lib/knowFile/itemSearch'
 // 音视频扩展名判定 + ID3 封面解析（与播放器 MediaAudio.vue 共用）
 import { isAudioExt, isVideoExt, extractAlbumArt } from '@/lib/knowFile/mediaMeta'
 // 文件系统变更：全局单例订阅 + 目录监听租约（见 lib/knowFile/fileWatch.ts）
 import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
+import { getPlatform, hasCapability, getRuntimeKind } from '@/platform'
 
 // 获取数据
 const store = usestore()
@@ -91,11 +92,11 @@ const getData = async function () {
   // 未打开文件时回退到根目录，方便直接浏览
   const dir = store.path || store.root
   if (!dir) return
-  if (!(await window.ipcRenderer.invoke('isDirectory', dir))) {
+  if (!(await getPlatform().fs.isDirectory(dir))) {
     return
   }
   try {
-    files.value = await window.ipcRenderer.invoke('getFiles', dir, 1)
+    files.value = await getPlatform().fs.listTree(dir, 1)
   } catch (error) {
     console.error(error)
   }
@@ -202,7 +203,7 @@ function captureVideoPoster(item: any): Promise<string> {
 async function buildMediaCover(item: any): Promise<string> {
   try {
     if (isAudioFile(item)) {
-      const bytes: Uint8Array | null = await window.ipcRenderer.invoke('readFileBinary', item.path)
+      const bytes: Uint8Array | null = await getPlatform().fs.readBinary(item.path)
       if (!bytes || !bytes.length) return ''
       return extractAlbumArt(bytes) || ''
     }
@@ -274,7 +275,7 @@ const open = async function (data: any) {
   }
   // 系统打开类文件 / Linux 可执行文件：直接用系统默认应用打开
   if (data.executable || isSystemOpenFile(data)) {
-    window.ipcRenderer.invoke('openWithSystemApp', data.path)
+    getPlatform().shell.openWithSystemApp(data.path)
     return
   }
   store.openFileByMode(data)
@@ -362,7 +363,7 @@ const nodeContextmenu = function (event: any, item: any) {
 
 // 打开位置
 const openInFolder = async function (data: any) {
-  window.ipcRenderer.invoke('openInFolder', data.path)
+  getPlatform().shell.revealInFolder(data.path)
 }
 
 // 获取颜色
@@ -388,7 +389,7 @@ const startRename = async function (data: any) {
     const trimmed = newName.trim()
     if (trimmed === data.label) return
     
-    const result = await window.ipcRenderer.invoke('renameFile', data.path, trimmed)
+    const result = await getPlatform().fs.renameFile(data.path, trimmed)
     
     if (result.success) {
       await getData()
@@ -419,10 +420,10 @@ const deleteFile = async function () {
     )
 
     const result = isFolder
-      ? await window.ipcRenderer.invoke('deleteFolder', item.path)
-      : await window.ipcRenderer.invoke('deleteFile', item.path)
+      ? await getPlatform().fs.deleteFolder(item.path)
+      : await getPlatform().fs.deleteFile(item.path)
     // deleteFolder 返回 { success }，deleteFile 返回 boolean
-    const ok = isFolder ? !!(result && result.success) : !!result
+    const ok = isFolder ? !!(result as { success?: boolean })?.success : !!result
     if (ok) {
       if (!isFolder) store.closeTabByPath(item.path)
       await getData()
@@ -443,6 +444,9 @@ const deleteFile = async function () {
 const isSelected = function (path: string) {
   return selectedPaths.value.includes(path)
 }
+
+// 安卓（触摸屏）：单击即打开文件 / 进入文件夹（与 panel.vue 文件树同一约定）
+const tapOpensDirectly = getRuntimeKind() === 'android'
 
 const onItemClick = function (e: MouseEvent, item: any, index: number) {
   if (e.ctrlKey || e.metaKey) {
@@ -465,6 +469,9 @@ const onItemClick = function (e: MouseEvent, item: any, index: number) {
   lastClickedIndex = index
   // 聚焦容器以启用键盘导航
   ;(e.currentTarget as HTMLElement).closest<HTMLElement>('.files-container')?.focus?.()
+  // 安卓（触摸屏）：单击即打开文件 / 进入文件夹——移动端没有鼠标，双击既别扭又会被浏览器
+  // 当成缩放（单击被吞），表现为「点了没反应」（见 panel.vue 同名字段）
+  if (tapOpensDirectly && !e.ctrlKey && !e.metaKey && !e.shiftKey) open(item)
 }
 
 // 双击打开：文件夹进入目录，文件按模式打开
@@ -560,9 +567,9 @@ const deleteSelected = async function () {
       const isFolder = item?.type === 'folder'
       // deleteFolder 返回 { success }，deleteFile 返回 boolean
       const res = isFolder
-        ? await window.ipcRenderer.invoke('deleteFolder', p)
-        : await window.ipcRenderer.invoke('deleteFile', p)
-      const ok = isFolder ? !!(res && res.success) : !!res
+        ? await getPlatform().fs.deleteFolder(p)
+        : await getPlatform().fs.deleteFile(p)
+      const ok = isFolder ? !!(res as { success?: boolean })?.success : !!res
       if (!ok) { failed.push(p); continue }
       n++
       // 删除文件时同步关闭已打开的标签页
@@ -775,8 +782,8 @@ const pasteFiles = async function () {
       continue
     }
     const res = cut
-      ? await window.ipcRenderer.invoke('moveFile', p, targetDir)
-      : await window.ipcRenderer.invoke('copyFile', p, targetDir)
+      ? await getPlatform().fs.moveFile(p, targetDir)
+      : await getPlatform().fs.copyFile(p, targetDir)
     if (res && res.success) n++
     else failed.push(p)
   }
@@ -822,7 +829,7 @@ const onFolderDrop = async function (e: DragEvent, folder: any) {
   let n = 0
   for (const p of srcs) {
     if (p === folder.path) continue
-    const res = await window.ipcRenderer.invoke('moveFile', p, folder.path)
+    const res = await getPlatform().fs.moveFile(p, folder.path)
     if (res && res.success) n++
   }
   await getData()
@@ -843,7 +850,7 @@ const onContainerDrop = async function (e: DragEvent) {
   for (const f of Array.from(files)) {
     const p = (f as any).path
     if (!p) continue
-    const res = await window.ipcRenderer.invoke('copyFile', p, targetDir)
+    const res = await getPlatform().fs.copyFile(p, targetDir)
     if (res && res.success) n++
   }
   if (n) {
@@ -1101,7 +1108,7 @@ const createNewFolder = async function () {
       inputPattern: /.+/,
       inputErrorMessage: store.locales == 'zh' ? '名称不能为空' : 'Name cannot be empty'
     })
-    const path = await window.ipcRenderer.invoke('createFolder', store.path || store.root, value.trim())
+    const path = await getPlatform().fs.createFolder(store.path || store.root, value.trim())
     if (path) { await getData() }
   } catch { /* 用户取消 */ }
 }
@@ -1117,12 +1124,10 @@ const createNewFile = async function (key: NewFileTypeKey) {
       inputPattern: /.+/,
       inputErrorMessage: zh ? '名称不能为空' : 'Name cannot be empty'
     })
-    const path = await window.ipcRenderer.invoke('createFile', store.path || store.root, value.trim() + def.ext)
+    const path = await getPlatform().fs.createFile(store.path || store.root, value.trim() + def.ext)
     if (!path) return
-    // 需要初始内容的类型先写入（draw.io 空白图表框架 / 脚手架空任务骨架），避免留下 0 字节文件
-    if (def.skeleton) {
-      try { await window.ipcRenderer.invoke('saveFile', path, def.skeleton()) } catch { /* ignore */ }
-    }
+    // 需要初始内容的类型先写入（draw.io 空白图表框架 / 脚手架空任务骨架 / Office 空白文档），避免留下 0 字节文件
+    await writeNewFileSkeleton(path, def)
     await getData()
     // 脚手架任务：建好就进独立窗口的「脚手架」视图（与文件树右键「新建」一致，一步到位）
     if (key === 'task') store.openFileByMode({ path, type: 'file', extension: def.ext })

@@ -251,6 +251,7 @@ import {
   type RunUiState,
 } from './runState'
 import { createFlowT } from './locales'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<{
   /** 当前工作流文件路径（宿主持有；空 = 未打开） */
@@ -546,7 +547,7 @@ async function loadFromPath(): Promise<void> {
     return
   }
   try {
-    const content: string = await window.ipcRenderer.invoke('readFile', props.path)
+    const content: string = await getPlatform().fs.readText(props.path)
     loadFromContent(content)
   } catch (error) {
     loadError.value = `${t('flow.load_failed')}：${(error as Error).message}`
@@ -569,11 +570,11 @@ async function save(): Promise<void> {  const current = doc.value
   current.workflow.graph = graph
   const content = serializeDslYaml(current)
   try {
-    const ok = await window.ipcRenderer.invoke('saveFile', props.path, content)
+    const ok = await getPlatform().fs.saveText(props.path, content)
     if (!ok) throw new Error('saveFile 返回失败')
     markClean()
     emit('saved', props.path, content)
-    void window.ipcRenderer.invoke('notify-file-changed', { path: props.path, content }).catch(() => {})
+    void getPlatform().app.notifyFileChanged({ path: props.path, content }).catch(() => {})
     ElMessage.success(t('flow.saved'))
   } catch (error) {
     ElMessage.error(`${t('flow.save_failed')}：${(error as Error).message}`)

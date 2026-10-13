@@ -6,6 +6,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
+import { getPlatform, hasCapability } from '@/platform'
 import {
   BACKUP_KEYS,
   LOCAL_STORAGE_LIMIT,
@@ -78,8 +79,8 @@ const refresh = async () => {
     sessionLogCount.value = null
     return
   }
-  try { cacheBytes.value = (await ipc.invoke('userdata-cache-info'))?.bytes || 0 } catch { cacheBytes.value = 0 }
-  try { dataDirPath.value = (await ipc.invoke('data-dir-path'))?.path || '' } catch { /* 旧版本主进程无该通道：路径留空 */ }
+  try { cacheBytes.value = (await getPlatform().app.userdataCacheInfo())?.bytes || 0 } catch { cacheBytes.value = 0 }
+  try { dataDirPath.value = (await getPlatform().app.dataDirPath())?.path || '' } catch { /* 旧版本主进程无该通道：路径留空 */ }
   try {
     const list = await (window as any).dsh?.sessionLog?.list?.()
     sessionLogCount.value = Array.isArray(list) ? list.length : null
@@ -94,7 +95,7 @@ const openDataDir = async () => {
     return
   }
   try {
-    const res = await ipc.invoke('open-data-dir')
+    const res = await getPlatform().app.openDataDir()
     if (res?.success) ElMessage.success(zh() ? `已打开数据目录：${res.path}` : `Opened data folder: ${res.path}`)
     else ElMessage.error((zh() ? '打开失败：' : 'Failed: ') + (res?.error || ''))
   } catch (e: any) {
@@ -110,7 +111,7 @@ const openDataSubDir = async (sub: string) => {
     return
   }
   try {
-    const res = await ipc.invoke('open-data-dir', { sub })
+    const res = await getPlatform().app.openDataDir(sub)
     if (res?.success) ElMessage.success(zh() ? `已打开：${res.path}` : `Opened: ${res.path}`)
     else ElMessage.error((zh() ? '打开失败：' : 'Failed: ') + (res?.error || ''))
   } catch (e: any) {
@@ -140,7 +141,7 @@ const cleanCache = async () => {
       { confirmButtonText: zh() ? '清理' : 'Clean', cancelButtonText: zh() ? '取消' : 'Cancel', type: 'warning' }
     )
     const ipc: any = (window as any).ipcRenderer
-    const res = await ipc.invoke('clean-userdata-cache')
+    const res = await getPlatform().app.cleanUserdataCache()
     if (res?.ok) {
       ElMessage.success(zh() ? `已清理缓存 ${formatBytes(res.freed || 0)}` : `Cache cleaned: ${formatBytes(res.freed || 0)}`)
       if (res.failed && res.failed.length) {

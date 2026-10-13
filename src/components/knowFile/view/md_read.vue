@@ -32,6 +32,7 @@
   import { installDrawioImageRule, renderDrawioFigures } from '@/lib/markdown/drawioFigure'
   // 点击图表打开编辑器时要把 `data-drawio-path` 里可能残留的百分号编码还原成真实路径
   import { decodeDiagramPath } from '@/shared/drawioRender'
+import { getPlatform, hasCapability } from '@/platform'
   // 智能操作：与当前 md / Word 文档对话（右侧面板，懒加载）
   const DocChatPanel = defineAsyncComponent(() => import('@/components/knowFile/view/DocChatPanel.vue'))
   // Excalidraw 白板 / draw.io 图表（懒加载入口取自 fileEditors.ts，避免 React/Excalidraw 拖慢首屏）
@@ -465,7 +466,7 @@
     resultEl.innerHTML = `<div class="python-result-loading"><i class="fa fa-spinner fa-spin"></i> ${store.locales=='zh'?'执行中...':'Running...'}</div>`
     try {
       const environment = store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe') || 'safe'
-      const res = await window.ipcRenderer.invoke('executePython', { code, environment, input: '' })
+      const res = await getPlatform().host.python.execute({ code, environment, input: '' })
       if (res.success) {
         const output = res.output?.trim() || res.result?.trim() || ''
         resultEl.innerHTML = output
@@ -529,7 +530,8 @@
     }
     
     try {
-      const result = await window.ipcRenderer.invoke('readFile', cur.path)
+      // result 兼容历史对象信封（{ success, content }），故按 any 处理
+      const result: any = await getPlatform().fs.readText(cur.path)
       
       // 处理后端返回的对象格式
       let content = ''
@@ -929,7 +931,7 @@ ${inlinedHtml}
 </body>
 </html>`
     try {
-      const res = await window.ipcRenderer.invoke('exportPdf', { html: fullHtml, title })
+      const res = await getPlatform().host.docs.exportPdf({ html: fullHtml, title })
       if (res && res.success) {
         ElMessage.success(store.locales === 'zh' ? 'PDF 导出成功' : 'PDF exported successfully')
       } else if (res && res.error !== '用户取消') {
@@ -970,11 +972,11 @@ ${inlinedHtml}
     const seq = ++metaSeq // 快速切换文件时丢弃过期结果，避免旧文件的标签覆盖新文件
     if (!path || !isTextDoc.value) { metaEntries.value = []; return }
     try {
-      let cfg = await window.ipcRenderer.invoke('getConfig', path)
+      let cfg = await getPlatform().fs.readMetadata(path)
       // 如果 getConfig 未返回有效元数据，尝试从文件 frontmatter 回退解析
       if (!cfg || Object.keys(cfg).length === 0) {
         try {
-          const content = await window.ipcRenderer.invoke('readFile', path)
+          const content = await getPlatform().fs.readText(path)
           const fmMatch = (content || '').match(/^\s*---\r?\n([\s\S]*?)\r?\n---\r?\n?/) 
           if (fmMatch && fmMatch[1]) {
             try {
@@ -1075,20 +1077,21 @@ ${inlinedHtml}
     // 路径更新时重新启动文件监听（先停止旧监听）
     const cur = data.value
     if (cur.path) {
-      window.ipcRenderer.invoke('unwatchFile').then(() => {
-        window.ipcRenderer.invoke('watchFile', cur.path)
+      getPlatform().watch.unwatchFile().then(() => {
+        getPlatform().watch.watchFile(cur.path)
       })
     }
   })
 
-  // 文件变更自动刷新
-  const handleFileChanged = async (event: any, { path: changedPath }: { path: string }) => {
+  // 文件变更自动刷新（载荷统一按 unknown 收下再断言：宿主事件总线没有跨进程类型契约，见 platform/contract 的 EventsPort）
+  const handleFileChanged = async (payload: unknown) => {
+    const changedPath = (payload as { path?: string } | null)?.path
     const cur = data.value
-    if (!cur.path || cur.path !== changedPath) return
+    if (!changedPath || !cur.path || cur.path !== changedPath) return
     // 外部变更：底部状态栏短暂提示已自动刷新
     flashFileChanged()
     // 重新读取文件内容
-    const newContent = await window.ipcRenderer.invoke('readFile', cur.path)
+    const newContent = await getPlatform().fs.readText(cur.path)
     if (props.path) {
       // 通过 props 传入路径时，直接重新 init
       await init()
@@ -1680,6 +1683,9 @@ ${inlinedHtml}
     ]
   })
 
+  /** watchedFileChanged 退订句柄（onMounted 注册 / onBeforeUnmount 释放） */
+  let unsubWatchedFile: (() => void) | null = null
+
   onMounted(()=>{
     // 本地图片 onerror 兜底（须在 init 前注册，避免图片先于兜底函数加载）
     ;(window as any).__mdFixLocalImg = mdFixLocalImg
@@ -1689,11 +1695,11 @@ ${inlinedHtml}
     document.addEventListener('click', onDocumentClick)
     document.addEventListener('mouseover', handleSubmenuOverflow)
     // 监听文件变更
-    window.ipcRenderer.on('watchedFileChanged', handleFileChanged)
+    unsubWatchedFile = getPlatform().events.on('watchedFileChanged', handleFileChanged)
     // 启动文件监听
     const cur = data.value
     if (cur.path) {
-      window.ipcRenderer.invoke('watchFile', cur.path)
+      getPlatform().watch.watchFile(cur.path)
     }
     // 启动 TTS 状态轮询（供底部状态栏/右键菜单实时反映朗读状态）
     startTtsPoll()
@@ -1705,8 +1711,9 @@ ${inlinedHtml}
     document.removeEventListener('click', onDocumentClick)
     document.removeEventListener('mouseover', handleSubmenuOverflow)
     // 移除文件监听
-    window.ipcRenderer.off('watchedFileChanged', handleFileChanged)
-    window.ipcRenderer.invoke('unwatchFile')
+    unsubWatchedFile?.()
+    unsubWatchedFile = null
+    getPlatform().watch.unwatchFile()
     // 停止 TTS 轮询 / 清理导出菜单监听 / 清理变更提示定时器 / 清理目录与对话面板拖拽
     stopTtsPoll()
     document.removeEventListener('click', closeExportMenu)

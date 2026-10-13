@@ -71,6 +71,46 @@ npm install --registry=https://registry.npmmirror.com
 
 `scripts/collect-release.mjs` normalises whatever electron-builder produced into the published names — `AI-KM_Windows_<ver>_x86_64_Portable.exe`, `AI-KM_Windows_<ver>_x86_64_green.rar`, `AI-KM_Linux_<ver>_x86_64.AppImage`, `AI-KM_Linux_<ver>_amd64.deb`, `AI-KM_Linux_<ver>_arm64.deb`, `AI-KM_Mac_<ver>_<arch>.dmg` — and packs the unpacked `release/AI-KM` folder into the green RAR (WinRAR's `Rar.exe`; override the path with `AIKM_RAR`). It is idempotent, so re-running it is safe.
 
+### Android (Capacitor)
+
+The renderer is platform-agnostic, so the same `dist` bundle also runs inside a Capacitor shell. Capacitor only owns the Android target; the Electron packaging above is untouched.
+
+| Command | Output |
+|:---|:---|
+| `npm run android:sync` | Builds `dist` and copies it (+ plugins) into `android/` |
+| `npm run android:open` | Opens the Gradle project in Android Studio |
+| `npm run android:apk` | Builds `dist`, syncs, then Gradle-assembles a debug APK |
+| `scripts\build-android.cmd` | One-shot Windows script: `--skip-web`, `--install` (adb install), `--release`; copies the APK to `release\android\AI-KM_Android_<app version>_<variant>.apk` |
+
+Requirements: Android Studio (or the Android SDK + `ANDROID_HOME`) and JDK 21. Capability mapping lives in `src/platform/android` — files go through Capacitor Filesystem (app documents folder) or through a **user-granted folder via SAF** (`saf:` paths, see below), LLM requests go direct via `shared/ai-core`, and everything else degrades gracefully; see the platform contract in `src/platform/contract`.
+
+The APK version (`versionName` / `versionCode`) is derived from `package.json` in `android/app/build.gradle`, so the Android build always follows the project version. The system back gesture and the Settings → Basic → Zoom setting are wired to the renderer (`BackButtonPlugin` + `src/platform/android/back.ts`, and a root-element CSS zoom), and plugins are loaded locally in the app (plugins folder inside app-private storage, `data:` prefix).
+
+**Android Studio is optional.** The Gradle command line tools are enough:
+
+```bash
+# 1) JDK 21 (any distribution) + Android SDK command-line tools
+#    SDK: https://developer.android.com/studio#command-line-tools-only
+#    Unzip the tools to <sdk>/cmdline-tools/latest, then:
+android --sdk=<sdk> sdk install emulator              # optional, for an emulator
+android --sdk=<sdk> sdk install platform-tools
+android --sdk=<sdk> sdk install "platforms;android-36"
+android --sdk=<sdk> sdk install "build-tools;36.0.0"
+
+# 2) tell Gradle where the SDK is (android/local.properties is gitignored)
+#    sdk.dir=<sdk>
+
+# 3) build / install
+npm run android:apk        # dist build + cap sync + gradlew assembleDebug
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+`JAVA_HOME=<jdk>` and `ANDROID_HOME=<sdk>` must be set in the shell that runs Gradle. Debug APKs also enable WebView remote debugging, so `adb forward tcp:9333 localabstract:webview_devtools_remote_<pid>` lets you drive the running app from a browser or the CDP protocol.
+
+#### User-granted folders (SAF)
+
+`android/app/src/main/java/com/whl/aikm/SafFolderPlugin.java` is an in-app Capacitor plugin (`SafFolder`) that wraps the Storage Access Framework: the user picks a folder through the system dialog, the app keeps a *persistable* read/write grant for it, and all file operations are then performed relative to that folder. On the renderer side such paths are prefixed with `saf:` (`saf:<folder name>` is the root, `saf:<folder name>/sub/a.md` is a file inside it), so granted folders and the app sandbox can coexist in the same file tree — `src/platform/android/saf.ts` owns the path model and the adapter, `src/platform/android/index.ts` routes by prefix. Folder moves are emulated with copy + delete because SAF has no move API.
+
 ### Automated releases (GitHub Actions)
 
 `.github/workflows/build.yml` builds all three platforms in parallel on every push to `main` and then publishes the packages to the GitHub Release tagged `v<version>` (the `version` field of `package.json`):

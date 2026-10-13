@@ -4,9 +4,10 @@
      事件流采用分段加载：打开只取最近 PAGE_EVENTS 条，滚动到底自动加载更早历史，
      避免超大日志一次性 IPC + 渲染导致的打开卡顿。 -->
 <template>
-  <div class="session-log-panel">
-    <!-- ====== 左侧导航：会话列表 ====== -->
-    <div class="slp-nav">
+  <div class="session-log-panel" :class="{ tall: isTallLayout }">
+    <!-- ====== 左侧导航：会话列表 ======
+         细长窗口下与右侧详情各占满整屏互相切换（见 .tall 样式） -->
+    <div class="slp-nav" v-show="!isTallLayout || showNavScreen">
       <div class="slp-nav-toolbar">
         <div class="slp-nav-title-row">
           <span v-if="!hideHeader" class="slp-nav-title"><i class="fa fa-list-alt"></i> {{ isZh ? '会话日志' : 'Session Log' }}</span>
@@ -52,7 +53,7 @@
           class="slp-nav-item"
           :class="{ active: s.id === sessionId }"
           :title="rowTitle(s)"
-          @click="selectSession(s.id)"
+          @click="pickSession(s.id)"
         >
           <i v-if="hasContentHit(s.id) && !isIdMatch(s.id)" class="slp-content-dot" :title="isZh ? '命中聊天内容' : 'Matched in chat'"></i>
           <span class="slp-nav-name">{{ shortId(s.id) }}</span>
@@ -67,7 +68,15 @@
     </div>
 
     <!-- ====== 右侧：详情 ====== -->
-    <div class="slp-main">
+    <div class="slp-main" v-show="!isTallLayout || !showNavScreen">
+      <!-- 细长窗口：详情屏左上角返回（回到整屏会话列表） -->
+      <div v-if="isTallLayout" class="slp-back-bar">
+        <div class="slp-back" @click="showNavScreen = true"
+          :title="isZh ? '返回会话列表' : 'Back to session list'">
+          <i class="fa fa-arrow-left"></i>
+        </div>
+        <span class="slp-back-title">{{ isZh ? '会话日志' : 'Session Log' }}</span>
+      </div>
       <!-- Tab 栏 -->
       <div class="slp-tabs">
         <button v-for="t in tabs" :key="t.value" class="slp-tab" :class="{ active: tab === t.value }" @click="onTab(t.value)">
@@ -188,11 +197,18 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { SessionEvent, DerivedMessage, SessionLogIntegrity } from '@/types/session-log'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const props = defineProps<{ sessionId?: string; hideHeader?: boolean }>()
 
 const store = usestore()
 const isZh = computed(() => store.locales !== 'en')
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：会话列表与详情不再并排（并排会把详情挤到只剩
+// 一两百像素），而是各占满整屏互相切换（与设置导航 / MCP 设置 / 预设编辑同一套做法）。
+// true = 会话列表屏，false = 详情屏；宽窗口下两者并排，本状态无意义。
+const isTallLayout = useTallLayout()
+const showNavScreen = ref(true)
 
 type LogTab = 'events' | 'derive' | 'integrity'
 
@@ -367,6 +383,12 @@ async function refreshSessions(): Promise<void> {
 async function selectSession(id: string): Promise<void> {
   sessionId.value = id
   await loadSession()
+}
+
+/** 细长窗口：点会话即从整屏列表切到整屏详情（列表滚动位置与详情状态都保留） */
+function pickSession(id: string): void {
+  showNavScreen.value = false
+  void selectSession(id)
 }
 
 /** 重置单个会话内的各 tab 内容状态 */
@@ -828,6 +850,71 @@ defineExpose({ sessions, sessionId, refreshSessions, selectSession, load, clearA
 .slp-tab:hover { background: color-mix(in srgb, var(--fontColor) 8%, transparent); }
 .slp-tab.active { background: #409eff; color: #fff; }
 .slp-count { margin-left: auto; color: #888; font-size: 11px; white-space: nowrap; }
+
+/* ========== 细长窗口（高宽比 > 16:9，如手机竖屏）：会话列表 / 详情各占满整屏互相切换 ==========
+   不再并排（并排会把详情挤到只剩一两百像素）。两屏都用 v-show 隐藏，切回来时滚动位置还在。 */
+.session-log-panel.tall .slp-nav {
+  width: 100%;
+  min-width: 0;
+  border-right: 0;
+}
+/* 会话条目按钢琴键式整宽条目呈现：行高够手指点 */
+.session-log-panel.tall .slp-nav-list { padding: 8px; }
+.session-log-panel.tall .slp-nav-item {
+  min-height: 48px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background-color: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.session-log-panel.tall .slp-nav-item.active { background-color: var(--menuActiveColor); }
+.session-log-panel.tall .slp-nav-name { font-size: 13px; }
+.session-log-panel.tall .slp-main { width: 100%; }
+/* 详情屏顶部的返回条（只在细长窗口出现） */
+.slp-back-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+  flex-shrink: 0;
+}
+.slp-back {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+.slp-back:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.slp-back-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+}
+/* tab 栏：细长窗口整屏后宽度仍偏窄，允许横向滑动（标签文字保留，便于辨认） */
+.session-log-panel.tall .slp-tabs {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.session-log-panel.tall .slp-tabs::-webkit-scrollbar { display: none; }
+.session-log-panel.tall .slp-tab { flex: 0 0 auto; }
 
 .slp-body { flex: 1; overflow-y: auto; padding: 6px 10px 10px; min-height: 0; }
 

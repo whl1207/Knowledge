@@ -26,6 +26,7 @@ import {
   type KbType, guessKbType, kbTypeLabel,
 } from '@/services/learningCore'
 import type { LvmItem, PracticeItem, EntityItem } from '@/components/learning/types'
+import { useTallLayout } from '@/composables/useTallLayout'
 import { detectContentLanguage } from '@/services/learningPrompt'
 import overview from '@/components/learning/overview.vue'
 import mapView from '@/components/learning/mapView.vue'
@@ -39,6 +40,10 @@ import examView from '@/components/learning/examView.vue'
 
 const store = usestore()
 const tr = (zh: string, en: string) => (store.locales === 'zh' ? zh : en)
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：顶栏分两行（标签条整行可横向滑动 + 工具控件另起一行），
+// 否则 8 个标签在手机上会被裁掉、点不到（与主页 / 知识管理 / 设置同一套判定，见 useTallLayout）
+const isTallLayout = useTallLayout()
 
 // ==================== 知识库（自制读盘） ====================
 const kbFiles = ref<LearningKbFile[]>([])
@@ -645,8 +650,8 @@ onDeactivated(async () => {
 </script>
 
 <template>
-  <div class="main">
-    <!-- 顶栏：子标签（与知识处理同款） + 知识库选择 -->
+  <div class="main" :class="{ tall: isTallLayout }">
+    <!-- 顶栏：只放子标签（知识库选择已下移到左下角状态栏）；细长窗口下标签条可横向滑动 -->
     <div class="top-bar">
       <div class="top-tabs">
         <button
@@ -660,27 +665,6 @@ onDeactivated(async () => {
           <span v-if="tb.key === 'review' && dueList.length" class="due-badge">{{ dueList.length }}</span>
         </button>
       </div>
-      <div class="top-spacer"></div>
-      <div class="manage-toolbar">
-        <span v-if="kb" class="folder-path" :title="tr('切片/文件/作答统计', 'slices/files/answers')">
-          {{ kb.blockCount }} {{ tr('切片', 'slices') }} · {{ kb.files.length }} {{ tr('文件', 'files') }}
-        </span>
-        <select
-          v-model="selectedPath"
-          class="kb-select"
-          :disabled="!kbFiles.length || loading"
-          @change="onPick"
-          :title="tr('选择知识库（仅已保存的 .kb）', 'Select a saved .kb')"
-        >
-          <option value="" disabled>
-            {{ kbFiles.length ? tr('请选择知识库…', 'Select KB…') : tr('暂无知识库', 'No KB') }}
-          </option>
-          <option v-for="k in kbFiles" :key="k.path" :value="k.path">{{ k.label }}</option>
-        </select>
-        <button class="tb-btn" :disabled="scanning" :title="tr('刷新知识库列表', 'Refresh KB list')" @click="scan">
-          <i class="fa fa-refresh" :class="{ 'fa-spin': loading || scanning }"></i>
-        </button>
-      </div>
     </div>
 
     <!-- 空态 / 加载（未选库时显示帮助引导，与「知识处理」欢迎风格一致） -->
@@ -689,7 +673,7 @@ onDeactivated(async () => {
       <h3>{{ tr('欢迎使用学习模块', 'Welcome to Learning') }}</h3>
       <p class="lk-help-desc">{{ tr('学习模块围绕知识库（.kb）做掌握度追踪、间隔复习与考试。开始前请先选择一个工作区文件夹：', 'Learning tracks mastery over your knowledge bases (.kb) with spaced review and exams. Start by picking a workspace folder:') }}</p>
       <ul class="lk-help-list">
-        <li>{{ tr('点击右上角「选择知识库文件夹」，选择存放 Markdown 文档与 .kb 的文件夹（与「知识处理」同一工作区）', 'Click "Select KB folder" at top-right and choose the folder holding Markdown docs & .kb (same workspace as Knowledge Processing)') }}</li>
+        <li>{{ tr('点击左下角状态栏的「选择知识库」下拉，选择存放 Markdown 文档与 .kb 的文件夹（与「知识处理」同一工作区）', 'Use the "Select KB" dropdown at the bottom-left status bar and choose the folder holding Markdown docs & .kb (same workspace as Knowledge Processing)') }}</li>
         <li>{{ tr('若还没有 .kb，可先到「知识处理」切片 / 向量化后保存生成', 'No .kb yet? Slice/embed then save one in Knowledge Processing') }}</li>
       </ul>
     </div>
@@ -700,7 +684,7 @@ onDeactivated(async () => {
       <ul class="lk-help-list">
         <li>{{ tr('① 到「知识处理」打开工作区并完成：文件 → 切片 → 向量化（可按需构建本体 / 推理问题）', '① Open the folder in Knowledge Processing: Files → Slices → Embed (optionally build ontology / infer questions)') }}</li>
         <li>{{ tr('② 点击上方「保存知识库」生成 .kb 文件', '② Click "Save KB" to produce a .kb file') }}</li>
-        <li>{{ tr('③ 回到本页右上角刷新列表并选择它即可开始（作答记录另存为 .learning，绝不改写 .kb）', '③ Refresh & pick it here — records go to .learning, never into .kb') }}</li>
+        <li>{{ tr('③ 回到本页左下角刷新列表并选择它即可开始（作答记录另存为 .learning，绝不改写 .kb）', '③ Refresh & pick it in the bottom-left status bar — records go to .learning, never into .kb') }}</li>
         <li>{{ tr('④ 本模块扫描所有工作区及其子目录（工作区在 设置 → 通用 → 基础 → 路径设置 里管理），.kb 不在当前工作区也能列出', '④ All workspaces and their subfolders are scanned (manage them in Settings → General → Basic → Path Settings), so a .kb outside the current workspace still shows up') }}</li>
       </ul>
     </div>
@@ -709,7 +693,7 @@ onDeactivated(async () => {
       <h3>{{ tr('请选择一个知识库', 'Pick a knowledge base') }}</h3>
       <p class="lk-help-desc">{{ tr('所有工作区共扫到 ' + kbFiles.length + ' 个知识库，选择后即可开始：', 'Found ' + kbFiles.length + ' KB(s) across all workspaces — pick one to start:') }}</p>
       <ul class="lk-help-list">
-        <li>{{ tr('从右上角下拉选择一个知识库（「总览」会给出下一步建议）', 'Choose one from the top-right dropdown; Overview suggests your next step') }}</li>
+        <li>{{ tr('从左下角下拉选择一个知识库（「总览」会给出下一步建议）', 'Choose one from the bottom-left dropdown; Overview suggests your next step') }}</li>
         <li>{{ tr('点击下拉旁的刷新按钮可重新扫描（扫描所有工作区及其子目录）；新保存的 .kb 刷新后才会出现', 'Click refresh next to the dropdown to rescan every workspace and its subfolders; freshly saved .kb appears after refresh') }}</li>
       </ul>
     </div>
@@ -849,9 +833,27 @@ onDeactivated(async () => {
 
     <!-- 底部状态栏：练习/加载等操作状态；地图轴统计（其余视图统计在各视图内容区，避免重复） -->
     <div class="status-panel">
+      <!-- 最左：知识库操作（选择知识库 + 刷新列表，原顶部工具栏；顶部只留标签） -->
+      <span class="status-kb-actions">
+        <select
+          v-model="selectedPath"
+          class="status-kb-select"
+          :disabled="!kbFiles.length || loading"
+          @change="onPick"
+          :title="tr('选择知识库（仅已保存的 .kb）', 'Select a saved .kb')"
+        >
+          <option value="" disabled>
+            {{ kbFiles.length ? tr('请选择知识库…', 'Select KB…') : tr('暂无知识库', 'No KB') }}
+          </option>
+          <option v-for="k in kbFiles" :key="k.path" :value="k.path">{{ k.label }}</option>
+        </select>
+        <button class="status-kb-btn" :disabled="scanning" :title="tr('刷新知识库列表', 'Refresh KB list')" @click="scan">
+          <i class="fa fa-refresh" :class="{ 'fa-spin': loading || scanning }"></i>
+        </button>
+      </span>
       <!-- 未选择 / 未加载知识库：提示当前工作区有多少个知识库 -->
       <template v-if="!kb && !practice">
-        <span class="status-hint" :title="tr('点击右上角选择知识库', 'Pick a KB at top-right')">
+        <span class="status-hint" :title="tr('点击左下角选择知识库', 'Pick a KB at bottom-left')">
           <i class="fa fa-book"></i>
           <template v-if="kbFiles.length">{{ kbFiles.length }} {{ tr('个知识库', 'KB(s)') }}</template>
           <template v-else>{{ tr('暂无知识库，请先到「知识处理」切片并保存 .kb', 'No KB yet — slice & save .kb in Knowledge Processing') }}</template>
@@ -956,6 +958,30 @@ onDeactivated(async () => {
   white-space: nowrap;
 }
 .top-spacer { flex: 1; }
+
+/* ===== 细长窗口（高宽比 > 16:9，如手机竖屏）：顶栏只剩标签条 =====
+   标签条可**横向滑动**（隐藏滚动条，手指滑动即见全部标签）；底部状态栏（含左移过来的
+   选择知识库 / 刷新）同样可横向滑动，避免整排被裁掉后点不到。 */
+.main.tall .top-tabs {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.main.tall .top-tabs::-webkit-scrollbar { display: none; }
+.main.tall .top-tabs .tab-btn { flex: 0 0 auto; white-space: nowrap; }
+.main.tall .status-panel {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.main.tall .status-panel::-webkit-scrollbar { display: none; }
+.main.tall .status-kb-actions { padding-right: 6px; }
+.main.tall .status-kb-select { width: 120px; }
 .kb-select {
   width: 120px;
   height: 26px;
@@ -1058,4 +1084,28 @@ onDeactivated(async () => {
 .status-time { color: var(--borderColor); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-action { cursor: pointer; border: 1px solid #d93025; color: #d93025; background: transparent; border-radius: 4px; font-size: 11px; padding: 1px 8px; white-space: nowrap; flex-shrink: 0; }
 .status-action:hover { background: rgba(217, 48, 37, 0.08); }
+/* ===== 状态栏最左：知识库操作（选择知识库 + 刷新，原顶部工具栏） =====
+   高度跟随状态栏自身（align-self: stretch + height: 100%），**不把状态栏撑大** ===== */
+.status-kb-actions {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex-shrink: 0; padding-right: 8px;
+  border-right: 1px solid var(--borderColor);
+  align-self: stretch;
+}
+.status-kb-select {
+  height: 100%; min-height: 0; width: 150px; margin: 0; padding: 0 4px;
+  box-sizing: border-box; font-size: 11px; line-height: 1;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--backgroundColor); color: var(--fontColor);
+}
+.status-kb-select:disabled { opacity: .6; }
+.status-kb-btn {
+  flex-shrink: 0; height: 100%; min-height: 0; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--backgroundColor); color: var(--fontColor);
+  font-size: 11px; line-height: 1; cursor: pointer; box-sizing: border-box;
+}
+.status-kb-btn:disabled { opacity: .6; cursor: default; }
+.status-kb-btn:hover:not(:disabled) { color: var(--fontActiveColor); border-color: var(--fontActiveColor); }
 </style>

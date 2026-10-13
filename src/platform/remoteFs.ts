@@ -8,6 +8,7 @@
  *   GET /fs/download?path=相对路径&token=… → 二进制流
  */
 import type { RemoteRoot, RemoteFsNode } from '@/types/collab'
+import { getPlatform } from '@/platform'
 
 /** 构造远程文件唯一路径标识（用于 tab 的 path 字段） */
 export function remotePathOf(root: RemoteRoot, rel: string): string {
@@ -84,7 +85,7 @@ export async function fetchFsRead(
 
 /**
  * 下载远程文件到本地并返回本地路径。
- * 底层通过渲染进程 fetch 流式下载，再交给主进程保存（saveRemoteDownload）。
+ * 底层通过渲染进程 fetch 流式下载，再交给平台层落盘（`fs.remoteSave` 能力）。
  */
 export async function downloadRemoteFile(root: RemoteRoot, rel: string, targetDir: string): Promise<string> {
   const url = withToken(`${baseUrl(root)}/fs/download?path=${encodeURIComponent(rel)}`, root.token)
@@ -101,7 +102,7 @@ export async function downloadRemoteFile(root: RemoteRoot, rel: string, targetDi
   const data = new Uint8Array(buf)
   // 文件名取相对路径最后一段
   const name = rel.replace(/\\/g, '/').split('/').pop() || 'file'
-  const result = await window.ipcRenderer.invoke('saveRemoteDownload', {
+  const result = await getPlatform().fs.saveRemoteDownload({
     dir: targetDir,
     name,
     data: Array.from(data),
@@ -109,5 +110,5 @@ export async function downloadRemoteFile(root: RemoteRoot, rel: string, targetDi
   if (!result?.success) {
     throw new Error(result?.error || '保存失败')
   }
-  return result.path
+  return String(result.path || '')
 }

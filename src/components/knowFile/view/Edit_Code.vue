@@ -18,6 +18,7 @@ import BlockMd from '@/components/block_md.vue'
 import DocTocPanel from '@/components/knowFile/view/DocTocPanel.vue'
 import { extractMarkdownHeadings, flattenHeadingLevels, loadDocTocWidth, saveDocTocWidth, loadDocTocOpen, saveDocTocOpen, DOC_TOC_MIN_WIDTH, DOC_TOC_MAX_WIDTH } from '@/lib/markdown/toc'
 import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -382,7 +383,7 @@ const saveCustomPromptResult = async () => {
     const content = `---\n导出时间: ${now.toLocaleString('zh-CN')}\n---\n\n${customPromptResult.value}`
 
     try {
-        const success = await window.ipcRenderer.invoke('saveFile', filePath, content)
+        const success = await getPlatform().fs.saveText(filePath, content)
         if (success) {
             ElMessage.success(store.locales === 'zh' ? '保存成功' : 'Saved successfully')
         } else {
@@ -1375,7 +1376,7 @@ const saveContent = (): Promise<boolean> => {
             data.value.content = editor.getValue()
             
             if (data.value.path) {
-                window.ipcRenderer.invoke('saveFile', data.value.path, data.value.content)
+                getPlatform().fs.saveText(data.value.path, data.value.content)
                     .then((success) => {
                         if (success) {
                             // 更新保存快照并清除未保存标记
@@ -1385,7 +1386,7 @@ const saveContent = (): Promise<boolean> => {
                             ElMessage.success(store.locales === 'zh' ? '保存成功' : 'Saved successfully')
                             console.log('文件保存成功')
                             // 通知其他窗口（独立窗口中的浏览/导图/演示等）刷新预览
-                            window.ipcRenderer.invoke('notify-file-changed', { path: data.value.path, content: data.value.content }).catch(() => {})
+                            getPlatform().app.notifyFileChanged({ path: data.value.path, content: data.value.content }).catch(() => {})
                             resolve(true)
                         } else {
                             ElMessage.error(store.locales === 'zh' ? '保存失败' : 'Save failed')
@@ -1719,7 +1720,7 @@ const handleEditorDrop = async (e: DragEvent) => {
     // 计算路径
     let linkPath = filePath
     if (data.value.path) {
-        const relPath = await window.ipcRenderer.invoke('getRelativePath', data.value.path, filePath)
+        const relPath = await getPlatform().fs.relativePath(data.value.path, filePath)
         if (relPath) {
             // 在同一级目录或子级目录时才使用相对路径（不以 ../ 开头）
             if (!relPath.startsWith('../')) {

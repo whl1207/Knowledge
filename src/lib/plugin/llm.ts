@@ -92,11 +92,13 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
   return Math.min(max, Math.max(min, n))
 }
 
-/** 浏览器（LAN）模式下与 ai-core 同一套代理规则；Electron 直连 */
+/** 与 ai-core 同一套代理规则：仅「页面由局域网主机投递」时走 /__proxy，其余直连 */
 function apiUrl(url: string): string {
-  const w = typeof window !== 'undefined' ? (window as unknown as { ipcRenderer?: unknown; location: Location }) : null
-  if (w && !w.ipcRenderer) return `${w.location.origin}/__proxy?url=${encodeURIComponent(url)}`
-  return url
+  const w = typeof window !== 'undefined' ? (window as unknown as { ipcRenderer?: unknown; dsh?: unknown; __AIKM_HOST__?: unknown; location: Location }) : null
+  if (!w) return url
+  if (w.ipcRenderer || w.dsh) return url
+  if (!w.__AIKM_HOST__) return url
+  return `${w.location.origin}/__proxy?url=${encodeURIComponent(url)}`
 }
 
 const stripSlash = (url: string): string => String(url || '').replace(/\/+$/, '')

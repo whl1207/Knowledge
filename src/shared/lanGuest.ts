@@ -18,6 +18,14 @@ export type LanGuestMode = 'normal' | 'retrieval' | 'agent'
 /** 沙箱级别（与全局 sandbox-policy 同名；访客只允许取「不高于全局」的严格度） */
 export type LanGuestSandbox = 'safe' | 'workspace' | 'trusted'
 
+/**
+ * 访客对**主机共享目录**的文件访问档位：
+ * - `off`（默认）：网页端没有本地文件能力，只能用共享知识库（改动前行为）
+ * - `read`：可浏览 / 预览 / 检索共享目录（只读，写入一律拒绝）
+ * - `write`：在 `read` 基础上可新建 / 保存 / 重命名 / 删除（仍被限制在共享目录内）
+ */
+export type LanGuestFsAccess = 'off' | 'read' | 'write'
+
 /** 访客默认可用的对话模式（= 现状，不放开任何主机能力） */
 export const LAN_GUEST_DEFAULT_MODES: LanGuestMode[] = ['normal', 'retrieval']
 
@@ -101,6 +109,11 @@ export interface LanGuestPolicy {
   guestLlmType: string
   /** 访客智能体使用的**模型名**（'' = 用该来源当前配置的模型） */
   guestLlmModel: string
+  /**
+   * 访客对主机**共享目录**的文件访问档位（默认 off）。
+   * 打开后网页端才具备文件浏览 / 写入能力（见 LanGuestFsAccess），路径一律限制在共享目录内。
+   */
+  guestFs: LanGuestFsAccess
 }
 
 /** 默认策略：只读、不需要令牌、沙箱 safe、单并发 */
@@ -118,7 +131,27 @@ export function defaultLanGuestPolicy(): LanGuestPolicy {
     // 模型：默认跟随主机当前来源与当前模型（改动前行为）
     guestLlmType: '',
     guestLlmModel: '',
+    // 文件访问：默认关闭（网页端无本地文件能力）
+    guestFs: 'off',
   }
+}
+
+/** 访客文件访问档位选项（设置页「协作 → 权限」下拉） */
+export const LAN_GUEST_FS_OPTIONS: Array<{ value: LanGuestFsAccess; zh: string; en: string }> = [
+  { value: 'off', zh: '关闭（仅共享知识库）', en: 'Off (shared KB only)' },
+  { value: 'read', zh: '只读（浏览 / 预览 / 检索）', en: 'Read-only (browse / preview / search)' },
+  { value: 'write', zh: '可写（含新建 / 保存 / 删除）', en: 'Read & write (create / save / delete)' },
+]
+
+/** 是否允许访客读文件（共享目录内） */
+export function lanGuestFsReadable(policy: LanGuestPolicy | undefined | null): boolean {
+  const v = policy?.guestFs
+  return v === 'read' || v === 'write'
+}
+
+/** 是否允许访客写文件（共享目录内） */
+export function lanGuestFsWritable(policy: LanGuestPolicy | undefined | null): boolean {
+  return policy?.guestFs === 'write'
 }
 
 /** 沙箱级别选项（访客只能取「不高于全局」的严格度；顺序由严到宽） */
@@ -209,6 +242,8 @@ export function normalizeLanGuestPolicy(raw: any): LanGuestPolicy {
     // 访客模型来源/模型：仅接受字符串；非法值（含未知来源键）回落为「跟随主机」
     guestLlmType: typeof raw.guestLlmType === 'string' ? raw.guestLlmType.trim() : def.guestLlmType,
     guestLlmModel: typeof raw.guestLlmModel === 'string' ? raw.guestLlmModel.trim() : def.guestLlmModel,
+    // 文件访问档位：仅接受三个已知值，其余一律回默认（off）
+    guestFs: (['off', 'read', 'write'] as const).includes(raw.guestFs) ? raw.guestFs : def.guestFs,
   }
 }
 

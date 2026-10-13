@@ -1,6 +1,7 @@
 // src/services/tts/manager.ts
 
 import { ElMessage } from 'element-plus'
+import { getPlatform, hasCapability } from '@/platform'
 
 // 音频队列管理类
 class AudioQueue {
@@ -13,6 +14,7 @@ class AudioQueue {
     private onStateChange?: (state: any) => void;
     private isLocalTTS = false;
     private currentAudioUrl: string | null = null; // 当前音频URL
+    private nativeSpeaking = false; // 是否正在用宿主原生语音朗读（安卓系统 TTS）
     private lastHandledErrorIndex: number | null = null; // 防止同一错误被双触发重复消费队列
     private playingIndex: number | null = null; // 当前正在加载/播放的音频序号（onended/onerror 使用）
 
@@ -353,17 +355,17 @@ class AudioQueue {
         return null;
     }
 
-    // 本地 ONNX TTS（Kokoro / Piper）— 通过主进程 sherpa-onnx 合成 WAV 后播放
+    // 本地 ONNX TTS（Kokoro / Piper）— 通过宿主合成 WAV 后播放（桌面 = 主进程 sherpa-onnx；安卓不支持）
     private async fetchOnnxTTSAudio(text: string, index: number): Promise<string | null> {
         const ttsConfig = this.ttsConfig;
         try {
-            const dsh = (window as any).dsh
-            if (!dsh?.tts?.synthesize) {
-                console.error("[ONNX-TTS] 主进程 TTS 服务不可用");
+            const tts = getPlatform().host.tts
+            if (!hasCapability('host.tts')) {
+                console.error("[ONNX-TTS] 当前环境不提供本地语音合成");
                 return null;
             }
             console.log(`[ONNX-TTS] 开始合成 (${index}): ${text.substring(0, 50)}...`);
-            const wav = await dsh.tts.synthesize({
+            const wav = await tts.synthesize({
                 engine: ttsConfig.type, // 'Kokoro' | 'Piper'
                 modelDir: ttsConfig.onnx?.modelDir || '',
                 text,
@@ -385,10 +387,23 @@ class AudioQueue {
         }
     }
 
-    // 本地TTS
+    // 本地TTS：优先用宿主原生语音（安卓系统 TTS），其次用浏览器 Web Speech
     private playLocalTTS(text: string) {
         console.log(`[LocalTTS] 开始播放本地TTS: ${text.substring(0, 50)}...`);
         const ttsConfig = this.ttsConfig;
+        const finishLocal = () => {
+            this.queue.shift();
+            this.currentIndex++;
+            this.notifyStateChange();
+            setTimeout(() => this.playNext(), 100);
+        }
+
+        // 安卓：Android WebView 没有 speechSynthesis，走原生系统 TTS（宿主直接朗读，读完 resolve）
+        if (!this.hasWebSpeech()) {
+            void this.speakViaHost(text, finishLocal);
+            return;
+        }
+
         const utterance = new SpeechSynthesisUtterance(text);
         
         if (ttsConfig.voice) {
@@ -435,6 +450,49 @@ class AudioQueue {
         };
         
         window.speechSynthesis.speak(utterance);
+    }
+
+    /** 浏览器 / Electron 才有 Web Speech；Android WebView 没有，需要走宿主原生语音 */
+    private hasWebSpeech(): boolean {
+        return typeof window !== 'undefined' && typeof (window as any).speechSynthesis?.speak === 'function'
+    }
+
+    /** Web Speech 实例（安卓上没有 → null，所有调用点都必须经它兜底） */
+    private webSpeech(): any {
+        return this.hasWebSpeech() ? (window as any).speechSynthesis : null
+    }
+
+    /**
+     * 用宿主原生语音朗读一句（安卓系统 TTS）：读完（或被打断）后推进队列。
+     * 失败时按「跳过本句」处理，避免一个引擎问题卡死整个播放队列。
+     */
+    private async speakViaHost(text: string, done: () => void): Promise<void> {
+        const ttsConfig = this.ttsConfig;
+        this.nativeSpeaking = true;
+        try {
+            if (!hasCapability('host.tts')) {
+                console.error('[LocalTTS] 当前环境既没有 Web Speech 也没有原生语音');
+                ElMessage.warning('当前环境不支持语音朗读')
+                done()
+                return
+            }
+            const res = await getPlatform().host.tts.speak({
+                text,
+                rate: ttsConfig.rate || 1.0,
+                pitch: ttsConfig.pitch || 1.0,
+                voice: ttsConfig.voice || undefined,
+                lang: ttsConfig.language || undefined,
+            })
+            if (!res?.success && res?.error && res.error !== 'stopped') {
+                console.error('[LocalTTS] 原生语音失败:', res.error);
+            }
+        } catch (e: any) {
+            console.error('[LocalTTS] 原生语音异常:', e?.message || e);
+        } finally {
+            this.nativeSpeaking = false;
+            // 已被 stop() 清空队列时不再推进
+            if (this.queue.length) done()
+        }
     }
 
     // 获取indexTTS2音频
@@ -785,7 +843,10 @@ class AudioQueue {
         console.log(`[AudioQueue] 停止播放`);
         // 如果是本地TTS，停止语音合成
         if (this.isLocalTTS) {
-            window.speechSynthesis.cancel();
+            if (this.hasWebSpeech()) window.speechSynthesis.cancel();
+            if (this.nativeSpeaking || hasCapability('host.tts')) {
+                void getPlatform().host.tts.stop().catch(() => {});
+            }
         }
         
         this.cleanup();
@@ -862,9 +923,10 @@ export class TTSManager {
     // 停止TTS
     stop() {
         console.log(`[TTSManager] 停止TTS`);
-        // 停止本地TTS
+        // 停止本地TTS（浏览器 Web Speech / 安卓系统 TTS）
         if (this.ttsConfig.type === "本地") {
-            window.speechSynthesis.cancel();
+            if (typeof (window as any).speechSynthesis?.cancel === 'function') (window as any).speechSynthesis.cancel();
+            if (hasCapability('host.tts')) void getPlatform().host.tts.stop().catch(() => {});
         }
         
         // 停止音频队列
@@ -882,6 +944,13 @@ export class TTSManager {
         }
     }
 
+    /** Web Speech 实例（安卓 WebView 没有 speechSynthesis → null，调用点必须兜底） */
+    private webSpeech(): any {
+        return typeof window !== 'undefined' && typeof (window as any).speechSynthesis?.speak === 'function'
+            ? (window as any).speechSynthesis
+            : null
+    }
+
     // 获取TTS状态
     getTTSState() {
         let queueState = { 
@@ -895,9 +964,11 @@ export class TTSManager {
         }
         
         if (this.ttsConfig.type === "本地") {
+            const web = this.webSpeech();
             return {
-                isSpeaking: window.speechSynthesis.speaking || queueState.isPlaying,
-                isPaused: window.speechSynthesis.paused,
+                // 安卓 WebView 没有 Web Speech（走系统 TTS），此时以队列播放状态为准
+                isSpeaking: !!web?.speaking || queueState.isPlaying,
+                isPaused: !!web?.paused,
                 queueLength: queueState.queueLength,
                 type: 'local'
             };
@@ -945,12 +1016,14 @@ export class TTSManager {
     togglePause() {
         console.log(`[TTSManager] 切换暂停/恢复状态`);
         if (this.ttsConfig.type === "本地") {
-            if (window.speechSynthesis.speaking) {
-                if (window.speechSynthesis.paused) {
-                    window.speechSynthesis.resume();
+            const web = this.webSpeech();
+            // 安卓走系统 TTS，没有 pause/resume 能力（要停只能 stop），这里静默忽略
+            if (web?.speaking) {
+                if (web.paused) {
+                    web.resume();
                     console.log(`[TTSManager] 恢复本地TTS`);
                 } else {
-                    window.speechSynthesis.pause();
+                    web.pause();
                     console.log(`[TTSManager] 暂停本地TTS`);
                 }
             }

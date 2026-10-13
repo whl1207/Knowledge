@@ -17,6 +17,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
 import { base64ToBytes, bytesToBase64, composePdf, inspectPdf, normalizeAngle } from '@/lib/knowFile/pdfEdit'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<{
   modelValue: boolean
@@ -169,7 +170,7 @@ function observeAll() {
 async function readCurrentBytes(): Promise<Uint8Array> {
   let base64 = props.base64 || ''
   if (!base64 && props.path) {
-    const result = await ipc.invoke('readFileBase64', props.path)
+    const result = await getPlatform().fs.readDataUrl(props.path)
     if (typeof result !== 'string' || !result.startsWith('data:')) {
       throw new Error(typeof result === 'string' ? result : 'read failed')
     }
@@ -245,7 +246,7 @@ async function addPdfs() {
   if (busy.value || !ipc?.invoke) return
   let paths: string[] = []
   try {
-    paths = await ipc.invoke('selectFiles', {
+    paths = await getPlatform().dialog.pickFiles({
       filters: [{ name: 'PDF', extensions: ['pdf'] }],
       properties: ['openFile'],
     })
@@ -259,7 +260,7 @@ async function addPdfs() {
   let added = 0
   try {
     for (const p of paths) {
-      const result = await ipc.invoke('readFileBase64', p)
+      const result = await getPlatform().fs.readDataUrl(p)
       if (typeof result !== 'string' || !result.startsWith('data:')) {
         ElMessage.error(`${fileName(p)}：${zh.value ? '读取失败' : 'read failed'}`)
         continue
@@ -386,7 +387,7 @@ async function pickSavePath(): Promise<string> {
   if (canOverwrite.value) dir = String(props.path).replace(/[\\/][^\\/]*$/, '')
   else if (store.root) dir = String(store.root).replace(/[\\/]$/, '')
   const defaultPath = dir ? `${dir}${sep}${stem}_edited.pdf` : `${stem}_edited.pdf`
-  const picked = await ipc.invoke('saveFileDialog', {
+  const picked = await getPlatform().dialog.saveFile({
     defaultPath,
     filters: [{ name: 'PDF', extensions: ['pdf'] }],
   })
@@ -417,9 +418,9 @@ async function save(overwrite: boolean) {
   busy.value = true
   try {
     const bytes = await composePdf(sources.map((s) => s.bytes), pages.value.map((p) => ({ src: p.src, index: p.index, rotation: p.rotation })))
-    const ok = await ipc.invoke('writeFileBase64', target, bytesToBase64(bytes))
+    const ok = await getPlatform().fs.writeBase64(target, bytesToBase64(bytes))
     if (!ok) throw new Error('write failed')
-    void ipc.invoke('notify-file-changed', { path: target }).catch(() => {})
+    void getPlatform().app.notifyFileChanged({ path: target }).catch(() => {})
     ElMessage.success(`${zh.value ? '已保存：' : 'Saved: '}${target}`)
     emit('saved', target, overwrite)
     reset()

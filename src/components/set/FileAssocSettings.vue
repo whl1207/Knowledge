@@ -72,6 +72,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -80,7 +81,8 @@ const loading = ref(true)
 const busy = ref(false)
 const info = ref<any>(null)
 const states = ref<Record<string, { mode: string; userChoice?: string }>>({})
-const hasIpc = typeof window !== 'undefined' && !!(window as any).ipcRenderer
+/** 文件关联是应用壳能力（桌面主进程维护），网页端没有 */
+const hasIpc = hasCapability('app.shell')
 
 // ---------- 文案 ----------
 const intro = computed(() => zh.value
@@ -172,7 +174,7 @@ async function load() {
   if (!hasIpc) { loading.value = false; return }
   loading.value = true
   try {
-    const res: any = await (window as any).ipcRenderer.invoke('file-assoc:get-state')
+    const res: any = await getPlatform().app.getFileAssocState()
     if (res?.ok) applyState(res.data)
     else ElMessage.error(res?.error?.message || (zh.value ? '读取文件关联失败' : 'Failed to read file associations'))
   } catch (err: any) {
@@ -185,7 +187,7 @@ async function load() {
 async function setMode(key: string, mode: string) {
   busy.value = true
   try {
-    const res: any = await (window as any).ipcRenderer.invoke('file-assoc:set', { key, mode })
+    const res: any = await getPlatform().app.setFileAssoc({ key, mode })
     if (res?.ok) {
       applyState(res.data)
     } else {
@@ -211,7 +213,7 @@ async function applyAll(mode: 'default' | 'none') {
   try {
     for (const e of info.value.entries) {
       if (!isSelectable(e)) continue
-      const res: any = await (window as any).ipcRenderer.invoke('file-assoc:set', { key: e.key, mode })
+      const res: any = await getPlatform().app.setFileAssoc({ key: e.key, mode })
       if (res?.ok) applyState(res.data)
       else {
         ElMessage.error(res?.error?.message || (zh.value ? '设置失败' : 'Failed to apply'))

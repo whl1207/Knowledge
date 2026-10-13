@@ -1,7 +1,7 @@
 <template>
   <div
     class="ai-chat-container"
-    :class="{ 'drop-files-active': dropFilesActive }"
+    :class="{ 'drop-files-active': dropFilesActive, narrow: isNarrowLayout }"
     @dragenter="onHomeDragEnter"
     @dragover="onHomeDragOver"
     @dragleave="onHomeDragLeave"
@@ -65,7 +65,7 @@
               'chat-agent2': element.chat.mode === 'agent2',
               'chat-swarm': element.chat.mode === 'swarm'
             }"
-            @click="switchChat(element.originalIndex)"
+            @click="openChatFromList(element.originalIndex)"
             @contextmenu.prevent="onSidebarContextMenu($event, element.originalIndex)"
           >
             <div class="chat-item-body">
@@ -1093,6 +1093,7 @@ import { agents as swarmAgents, swarmMode, settings as swarmSettings, debateRoun
 import { runSwarm, runNamedTask, stopSwarm } from '@/store/swarmRunner'
 import { applyMembers } from '@/composables/swarm/useSwarmMembers'
 import { loadSkillList } from '@/composables/swarm/useSwarmAgents'
+import { useTallLayout } from '@/composables/useTallLayout'
 import SwarmTeamStream from '@/components/swarm/SwarmTeamStream.vue'
 import { chatsRef, currentChatIndexRef, globalExecutionStateRef, workflowStartTimeRef, workflowErrorRef, ensureInitialChat } from '@/store/chats'
 // 导入技能管理器
@@ -1100,6 +1101,7 @@ import { getSkillManager, type Skill } from '@/services/agentSkills'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as d3 from 'd3'
 import draggable from 'vuedraggable'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -1179,6 +1181,9 @@ watch(currentChatIndex, (idx) => {
 const inputText = ref<string>('')
 
 const showSidebar = ref(false)  // 聊天列表侧边栏：初始不显示，由聊天标题左侧的 fa-bars 开关展开
+// 细长布局（高宽比 > 16:9，典型如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换——
+// 进入主页先看到整屏聊天列表，点某条对话进入整屏对话，对话区左上角 fa-bars 再回到列表（见样式 .narrow）
+const isNarrowLayout = useTallLayout()
 const showBranchView = ref(false)  // 分支树视图开关
 
 // 聊天列表搜索
@@ -1292,8 +1297,8 @@ const enrichWebSearchTitles = async (results: any[]) => {
       r.title = webTitleCache.get(r.url) || r.title
       continue
     }
-    if (window.ipcRenderer) {
-      window.ipcRenderer.invoke('fetchWebPageTitle', r.url)
+    if (hasCapability('host.netFetch')) {
+      getPlatform().host.web.fetchTitle(r.url)
         .then((title: string) => {
           if (title) {
             webTitleCache.set(r.url, title)
@@ -3088,12 +3093,11 @@ const addFilesAsUploads = async (files: File[]) => {
           continue
         }
 
-        // 桌面端：通过 Electron IPC 读取并解析（docx / pdf / xlsx 等需要主进程解析）；
-        // 网页端（局域网访客）：只能读文本，.md/.txt/.kb 等可直接解析
+        // 桌面端：经平台层读取并解析（docx / pdf / xlsx 等需宿主解析）；
+        // 网页端（局域网访客）：无读文件能力，只能读文本，.md/.txt/.kb 等可直接解析
         let parsedContent = ''
-        const ipc = typeof window !== 'undefined' ? (window as any).ipcRenderer : null
-        if (ipc) {
-          parsedContent = await ipc.invoke('readFile', (file as any).path || file.name)
+        if (hasCapability('fs.pathRead')) {
+          parsedContent = await getPlatform().fs.readText((file as any).path || file.name)
         } else {
           parsedContent = await file.text()
         }
@@ -3306,6 +3310,7 @@ onMounted(async () => {
     if (inputEl) composerResizeObserver.observe(inputEl)
   }
   window.addEventListener('resize', updateComposerShift)
+  // 细长布局（高宽比 > 16:9，如安卓竖屏）：列表/对话整屏切换；判定与窗口监听见 useTallLayout
   if (isFirstInit || chats.value.length === 0) {
     loadChatsFromStorage()
   }
@@ -3314,7 +3319,7 @@ onMounted(async () => {
   // 监听设置页「清空聊天记录」事件
   window.addEventListener('ai-chats-cleared', onAiChatsCleared)
   // 监听设置独立窗口的聊天记录变更（导入/清空）→ 从本地存档重新加载
-  window.ipcRenderer?.on('chats-changed', onChatsChangedRemote)
+  unsubChatsChanged = getPlatform().events.on('chats-changed', onChatsChangedRemote)
   // 网页端（局域网共享）：拉取主机能力概览，决定可用对话模式（默认只含 普通 + 知识库）
   void refreshLanHostGuestInfo()
   checkCurrentModelConnection()
@@ -3443,9 +3448,9 @@ onMounted(async () => {
     // 不预加载模型，点击录音按钮后再加载
     
     // ASR 管理器就绪后再注册快捷键和监听器
-    if (window.ipcRenderer) {
-      // 监听 ASR 全局快捷键（来自 Electron 主进程）
-      window.ipcRenderer.on('asr-shortcut-toggle', () => {
+    if (hasCapability('shell.globalShortcut')) {
+      // 监听 ASR 全局快捷键（来自宿主主进程）
+      getPlatform().events.on('asr-shortcut-toggle', () => {
         if (isASRRecording.value) {
           stopASR()
         } else {
@@ -3469,7 +3474,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', updateComposerShift)
   store.saveConfig()
   window.removeEventListener('ai-chats-cleared', onAiChatsCleared)
-  window.ipcRenderer?.off('chats-changed', onChatsChangedRemote)
+  unsubChatsChanged?.()
+  unsubChatsChanged = null
   if (scrollTimeout.value) {
     clearTimeout(scrollTimeout.value)
   }
@@ -3492,8 +3498,8 @@ onBeforeUnmount(() => {
     asrManagerInstance.destroy()
     asrManagerInstance = null
   }
-  if (window.ipcRenderer) {
-    window.ipcRenderer.invoke('unregisterASRShortcut').catch(() => {})
+  if (hasCapability('shell.globalShortcut')) {
+    getPlatform().shell.unregisterShortcut().catch(() => {})
   }
 })
 
@@ -3626,14 +3632,14 @@ const selectAgentPreset = (preset: any) => {
 
 const selectKnowledgeBase = async () => {
   // 浏览器环境（LAN 共享）：弹出「共享知识库（主机目录）/ 上传自己的文件」选择浮层
-  if (!window.ipcRenderer) {
+  if (!hasCapability('dialog.native')) {
     await toggleSharedKbPicker()
     return
   }
   // 如果已经是检索模式，可以选择新的知识库或退出
   if (currentChat.value.mode === 'retrieval') {
     try {
-      const filePath = await window.ipcRenderer.invoke('selectFile')
+      const filePath = await getPlatform().dialog.pickFile()
       if (filePath == null) {
         // 如果取消选择，退出检索模式
         currentChat.value.mode = 'normal'
@@ -3654,7 +3660,7 @@ const selectKnowledgeBase = async () => {
   } else {
     // 切换到检索模式
     try {
-      const filePath = await window.ipcRenderer.invoke('selectFile')
+      const filePath = await getPlatform().dialog.pickFile()
       if (filePath && filePath.endsWith('.kb')) {
         currentChat.value.mode = 'retrieval'
         // 清除其他模式的配置
@@ -3861,14 +3867,14 @@ const getUploadButtonTitle = (): string => {
 
 const selectWorkflow = async () => {
   // 浏览器环境不支持文件选择
-  if (!window.ipcRenderer) {
+  if (!hasCapability('dialog.native')) {
     ElMessage.warning(store.locales=='zh' ? '文件选择仅桌面版支持' : 'File selection is only supported in desktop app')
     return
   }
   // 如果已经是工作流模式，可以选择新的工作流或退出
   if (currentChat.value.mode === 'workflow') {
     try {
-      const filePath = await window.ipcRenderer.invoke('selectFile', {
+      const filePath = await getPlatform().dialog.pickFile({
         filters: [
           { name: '工作流文件', extensions: ['yml', 'yaml'] },
           { name: '所有文件', extensions: ['*'] }
@@ -3892,7 +3898,7 @@ const selectWorkflow = async () => {
   } else {
     // 切换到工作流模式
     try {
-      const filePath = await window.ipcRenderer.invoke('selectFile', {
+      const filePath = await getPlatform().dialog.pickFile({
         filters: [
           { name: '工作流文件', extensions: ['yml', 'yaml'] },
           { name: '所有文件', extensions: ['*'] }
@@ -3968,9 +3974,9 @@ const retrievalStrategyOptions = computed(() => {
 
 // 从 .kb 文件读取保存的检索策略并应用到当前会话（策略名称对应不上时回退 similarity）
 const syncStrategyFromKb = async (kbPath: string) => {
-  if (!window.ipcRenderer || !kbPath) return
+  if (!hasCapability('fs.pathRead') || !kbPath) return
   try {
-    const content = await window.ipcRenderer.invoke('readFile', kbPath)
+    const content = await getPlatform().fs.readText(kbPath)
     const data = JSON.parse(content)
     const saved = data?.config?.searchConfig?.strategy
     if (saved) {
@@ -4285,12 +4291,12 @@ const onDocMouseDownForPresetPicker = (e: MouseEvent) => {
 }
 
 const loadWorkflowFile = async (filePath: string) => {
-  if (!window.ipcRenderer) {
+  if (!hasCapability('fs.pathRead')) {
     ElMessage.error(store.locales=='zh' ? '文件读取仅桌面版支持' : 'File reading is only supported in desktop app')
     return
   }
   try {
-    const content = await window.ipcRenderer.invoke('readFile', filePath)
+    const content = await getPlatform().fs.readText(filePath)
     // 文件内容就是 Dify 应用 DSL（YAML），与知识管理里的工作流画布同一份格式
     const parsed = parseDslYaml(String(content ?? ''))
     const { document, issues } = validateAndNormalizeDsl(parsed)
@@ -4500,6 +4506,7 @@ const onAiChatsCleared = () => {
  * 不重新加载的话主窗口下一次 saveChats 会把导入结果覆盖掉。
  * 正在执行/流式时不做整体替换（避免打断当前回答），只把新增的聊天追加进来。
  */
+let unsubChatsChanged: (() => void) | null = null
 const onChatsChangedRemote = () => {
   try {
     const saved = localStorage.getItem('ai-chats')
@@ -4714,6 +4721,8 @@ const createNewChat = () => {
   currentUploads.value = []
   chats.value.push(createNewChatData())
   currentChatIndex.value = chats.value.length - 1
+  // 细长布局：新建后直接进入整屏对话（列表收起），否则新对话被列表盖住、没法马上输入
+  if (isNarrowLayout.value) showSidebar.value = false
   saveChats()
 }
 
@@ -7286,7 +7295,7 @@ const exportChatToKb = async (messageIndex?: number | null) => {
   const rootDir = store.root
   if (!rootDir) return
   // 浏览器环境不支持写入本地文件
-  if (!window.ipcRenderer) {
+  if (!hasCapability('fs.pathWrite')) {
     ElMessage.warning(store.locales=='zh' ? '导出功能仅桌面版支持' : 'Export is only supported in desktop app')
     return
   }
@@ -7421,7 +7430,7 @@ const exportChatToKb = async (messageIndex?: number | null) => {
   })
   
   try {
-    await window.ipcRenderer.invoke('writeFile', filePath, markdownContent)
+    await getPlatform().fs.writeText(filePath, markdownContent)
     const msg = store.locales=='zh' 
       ? `已导出到知识库: ${fullFileName}` 
       : `Exported to knowledge base: ${fullFileName}`
@@ -7539,9 +7548,9 @@ async function stopASR() {
 
 // 注册/更新 ASR 全局快捷键
 async function registerASRShortcut() {
-  if (window.ipcRenderer && store.AIconfig.asr.shortcut) {
+  if (hasCapability('shell.globalShortcut') && store.AIconfig.asr.shortcut) {
     try {
-      const result = await window.ipcRenderer.invoke('registerASRShortcut', store.AIconfig.asr.shortcut)
+      const result = await getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut)
       if (!result.success) {
         console.warn('[ASR] 注册全局快捷键失败:', result.error)
       }
@@ -7552,7 +7561,22 @@ async function registerASRShortcut() {
 }
 
 const toggleSidebar = () => {
-  showSidebar.value = !showSidebar.value
+  // 细长布局：列表与对话各占满整屏，bars 只承担「回到聊天列表」这一个方向
+  // （对话中列表是收起的，所以此时点它必定是展开；列表铺满时对话区被隐藏，也没有 bars 可点）
+  showSidebar.value = isNarrowLayout.value ? true : !showSidebar.value
+}
+
+// ==================== 细长布局 ====================
+
+// 细长布局（高宽比 > 16:9，典型如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换。
+// 判定与窗口监听统一在 useTallLayout 里（与知识管理共用同一份）；进入时先给聊天列表（此时它就是
+// 「主页」），离开则按桌面习惯收起，切换点即 showSidebar（true = 整屏聊天列表，false = 整屏对话）
+watch(isNarrowLayout, (tall) => { showSidebar.value = tall }, { immediate: true })
+
+/** 从整屏聊天列表点开某条对话：细长布局下收起列表，让对话占满整屏 */
+const openChatFromList = (index: number) => {
+  if (isNarrowLayout.value) showSidebar.value = false
+  void switchChat(index)
 }
 
 // ==================== 分支对话 ====================
@@ -11499,6 +11523,23 @@ select {
   0% { box-shadow: 0 0 0 0 rgba(155, 89, 182, 0.4); }
   70% { box-shadow: 0 0 0 4px rgba(155, 89, 182, 0); }
   100% { box-shadow: 0 0 0 0 rgba(155, 89, 182, 0); }
+}
+
+/* 细长布局（高宽比 > 16:9，如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换——
+   进主页先看到整屏聊天列表，点某条对话进整屏对话，对话区左上角 fa-bars 再回到列表。
+   由 home.vue 按窗口高宽比切换 .narrow 类（不是宽度断点）。
+   宽度与内容都由 --chat-sidebar-w 推导，这里把它改成整屏宽即可；不加过渡，避免整屏切换时
+   出现「列表滑动、对话已铺满」的半截画面。 */
+.ai-chat-container.narrow {
+  --chat-sidebar-w: 100%;
+}
+.ai-chat-container.narrow .chat-sidebar {
+  border-right-width: 0;
+  transition: none;
+}
+/* 列表占据整屏时隐藏对话区（含它顶部的 fa-bars），两者互斥 */
+.ai-chat-container.narrow .chat-main:not(.sidebar-hidden) {
+  display: none;
 }
 
 /* 响应式调整 */

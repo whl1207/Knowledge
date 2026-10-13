@@ -11,6 +11,7 @@
 
 import { usestore } from '@/store'
 import { ensureBuiltinAgentPresets, isBuiltinAgentPreset, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
+import { getPlatform, hasCapability } from '@/platform'
 
 /** presetId → .agent 文件路径（扫描时建立；改名/新增时更新） */
 export const agentPresetFileMap = new Map<string, string>()
@@ -31,12 +32,12 @@ export const scanAgentPresets = async (): Promise<void> => {
   if (!dir) return
   agentPresetFileMap.clear()
   try {
-    const result = await window.ipcRenderer.invoke('getFilesRelation', dir, 1)
+    const result = await getPlatform().fs.listTreeWithRelations(dir, 1)
     const files: any[] = (result?.fileList || []).filter((f: any) => f.path?.endsWith('.agent'))
     const presets: any[] = []
     for (const f of files) {
       try {
-        const text = await window.ipcRenderer.invoke('readFile', f.path)
+        const text = await getPlatform().fs.readText(f.path)
         const data = JSON.parse(text)
         if (data && data.id) {
           presets.push(data)
@@ -78,7 +79,7 @@ export const writeAgentPreset = async (preset: any): Promise<boolean> => {
   // 新文件（prev 不存在）且目标被其它预设占用 → 跳过，避免互相覆盖
   if (!prev && pathTakenByOther(preset.id, next)) return false
   try {
-    await window.ipcRenderer.invoke('writeFile', target, JSON.stringify(preset, null, 2))
+    await getPlatform().fs.writeText(target, JSON.stringify(preset, null, 2))
     agentPresetFileMap.set(preset.id, target)
     return true
   } catch {
@@ -92,7 +93,7 @@ export const removeAgentPreset = async (id: string): Promise<void> => {
   const store = usestore()
   const path = agentPresetFileMap.get(id)
   if (path) {
-    try { await window.ipcRenderer.invoke('deleteFile', path) } catch { /* 忽略 */ }
+    try { await getPlatform().fs.deleteFile(path) } catch { /* 忽略 */ }
     agentPresetFileMap.delete(id)
   }
   const idx = store.agentPresets.findIndex((c: any) => c.id === id)
@@ -102,7 +103,7 @@ export const removeAgentPreset = async (id: string): Promise<void> => {
 /** 打开预设文件夹：选择文件夹 → 导入其中所有 .agent 文件（仅本次会话生效，不持久化路径） */
 export const openAgentPresetFolder = async (): Promise<void> => {
   const store = usestore()
-  const path = await window.ipcRenderer.invoke('openFolderDialog')
+  const path = await getPlatform().dialog.pickDirectory()
   if (!path) return
   store.agentPresetPath = path
   await scanAgentPresets()
@@ -115,7 +116,7 @@ export const openAgentPresetFolder = async (): Promise<void> => {
 export const exportAllAgentPresets = async (): Promise<number> => {
   const store = usestore()
   if (store.agentPresets.length === 0) return 0
-  const dir = await window.ipcRenderer.invoke('openFolderDialog')
+  const dir = await getPlatform().dialog.pickDirectory()
   if (!dir) return -1
   let ok = 0
   for (const c of store.agentPresets as any[]) {
@@ -123,7 +124,7 @@ export const exportAllAgentPresets = async (): Promise<number> => {
     if (isBuiltinAgentPreset(c)) continue
     try {
       const p = agentFilePath(c, dir)
-      await window.ipcRenderer.invoke('writeFile', p, JSON.stringify(c, null, 2))
+      await getPlatform().fs.writeText(p, JSON.stringify(c, null, 2))
       ok++
     } catch { /* 单个失败不影响其它 */ }
   }

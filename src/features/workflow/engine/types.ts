@@ -99,8 +99,14 @@ export interface NodeExecutionContext {
   ) => Promise<{ outputs: Record<string, Record<string, unknown>>; success: boolean; error?: string }>
   /** 解析容器入口节点 id（容器执行器据此把 item / index 写进去） */
   resolveContainerEntry: (containerId: string) => string | undefined
-  /** 调用主进程 IPC（代码执行 / 读文件等） */
+  /** 调用主进程 IPC（代码执行 / 读数据文件等） */
   invokeIpc: (channel: string, payload?: unknown) => Promise<any>
+  /**
+   * 读文件文本（平台层 `fs.pathRead` 能力）。
+   * 失败返回 `Error reading file: …` 前缀字符串（与主进程既有契约一致），
+   * 无该能力的环境抛错（调用方按读失败处理）。
+   */
+  readTextFile: (path: string) => Promise<string>
   /** 按节点模型配置调用大模型 */
   requestAi: (
     messages: Array<{ role: string; content: string }>,

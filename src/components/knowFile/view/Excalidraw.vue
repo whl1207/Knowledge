@@ -7,6 +7,7 @@ import { ElMessage } from 'element-plus'
 import { usestore } from '@/store'
 import { useCollabExcalidraw } from '@/composables/useCollabExcalidraw'
 import { cleanExcalidrawAppState } from '@/shared/excalidrawAppState'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -318,8 +319,7 @@ const renderEmbeddable = (element: any) => {
 // 写入 .excalidraw 文件；silent=true 时静默（自动保存不弹提示）
 function persist(json: string, silent = false) {
   const name = props.path.split(/[\\/]/).pop() || ''
-  window.ipcRenderer
-    .invoke('saveFile', props.path, json)
+  getPlatform().fs.saveText(props.path, json)
     .then((ok: boolean) => {
       if (ok) {
         const cur = store.data[store.index]

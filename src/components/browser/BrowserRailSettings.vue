@@ -74,6 +74,7 @@
 import { computed, ref, watch, onMounted } from 'vue'
 import { usestore } from '@/store'
 import BrowserSettingsPanel from '@/components/browser/BrowserSettingsPanel.vue'
+import { getPlatform } from '@/platform'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -99,8 +100,8 @@ const props = withDefaults(defineProps<{
 })
 
 // ===== 缓存管理 =====
-const invoke = (channel: string, payload?: any) =>
-  window.ipcRenderer?.invoke ? window.ipcRenderer.invoke(channel, payload) : Promise.resolve(null)
+const invoke = (method: string, payload?: any) =>
+  getPlatform().browserAgent.call(method.replace(/^browser-agent:/, '') as any, payload)
 
 const cacheBusy = ref(false)
 const cacheSize = ref<number | null>(null)

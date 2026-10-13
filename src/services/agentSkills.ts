@@ -1,3 +1,4 @@
+import { getPlatform, hasCapability } from '@/platform'
 // src/services/agentSkills.ts
 
 // ==================== Openclaw 兼容的类型定义 ====================
@@ -253,7 +254,7 @@ export class SkillManager {
     this.skillsPath = path
 
     try {
-      const loadedSkills = await window.ipcRenderer.invoke('loadSkills', path)
+      const loadedSkills = await getPlatform().host.skills.list(path)
       
       const skills: Skill[] = []
       this.skills.clear()

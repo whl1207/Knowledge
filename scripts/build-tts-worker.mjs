@@ -21,8 +21,8 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node18',
-  // sherpa-onnx / electron 保持外部（运行时从 node_modules 加载）
-  external: ['sherpa-onnx', 'electron'],
+  // sherpa-onnx-node / electron 保持外部（运行时从 node_modules 加载原生插件）
+  external: ['sherpa-onnx-node', 'electron'],
   outfile: path.join(outDir, 'tts-worker.js'),
   sourcemap: false,
   logLevel: 'info',

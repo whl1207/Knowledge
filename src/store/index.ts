@@ -23,6 +23,8 @@ import { ElMessage } from 'element-plus'
 // ⚠️ 必须走 vue-free 的 panelRegistry（不能 import panels.ts —— 那会形成
 // store → panels → home.vue → store 的循环依赖，实测会抛 "Cannot access 'usestore' before initialization"）
 import { panelKeys } from '@/lib/plugin/panelRegistry'
+import { getPlatform, hasCapability } from '@/platform'
+import type { OpenFileWindowPayload } from '@/platform/contract'
 declare global {
   interface Window {
     _refreshTimer: NodeJS.Timeout | null;
@@ -50,7 +52,7 @@ function isLocalHtmlPath(p: any): boolean {
 /** 用内置浏览器打开本地网页（浏览器 Agent 独立窗口；失败时提示，不静默失败） */
 function openLocalHtmlInBrowser(path: string, zh: boolean) {
     if (!path) return
-    window.ipcRenderer?.invoke('browser-agent:open-file', { path })
+    getPlatform().browserAgent.call('open-file', { path })
         .then((r: any) => { if (r && r.ok === false) throw new Error(r.error || 'open failed') })
         .catch((e: any) => {
             ElMessage.error(zh ? `打开失败：${e?.message || e}` : `Open failed: ${e?.message || e}`)
@@ -176,10 +178,9 @@ function writeWorkspaceKeys(state: {
 /** 通知其它窗口（主窗口）从 localStorage 重新同步配置；仅「设置写盘方」发送 */
 function broadcastSettingsChanged(uiJson: string, locales: string): void {
     if (!settingsConfigWriter || typeof window === 'undefined') return
-    const ipc: any = (window as any).ipcRenderer
-    if (!ipc) return
+    if (!hasCapability('events.bus')) return
     try {
-        ipc.send('settings-config-changed', { ui: JSON.parse(uiJson), locales })
+        getPlatform().events.emit('settings-config-changed', { ui: JSON.parse(uiJson), locales })
     } catch (e) { /* 忽略 */ }
 }
 
@@ -292,6 +293,9 @@ export const usestore = defineStore('data', {
         mainPanel: "主页" as any, // 主面板
         settingsOpen: false as boolean,
         settingsNav: '' as string,
+        // 单窗口环境（安卓 / 网页端）的应用内文件窗口参数：非空时 App.vue 以浮层渲染 FileWindow。
+        // 桌面版一律走真正的独立窗口，这里保持 null（见 openFileWindow）
+        fileWindowOverlay: null as OpenFileWindowPayload | null,
         // 自定义标题（设置页「界面-自定义标题」；非空时顶部标题固定不变，不再随当前面板变化）
         customTitle: '',
         // 界面配置随软件分发：开启后界面配置保存到软件根目录 interface-config.json（便于整机分发），关闭则存 localStorage
@@ -918,7 +922,7 @@ export const usestore = defineStore('data', {
         // 初始化配置（关闭后自动重启）
         initConfig() {
             localStorage.clear()
-            window.ipcRenderer.send('restartApp')
+            void getPlatform().window.restartApp()
         },
         
         // 恢复默认 AI 配置（仅 AIconfig 相关，不影响聊天记录/工作区等其它设置）
@@ -945,6 +949,26 @@ export const usestore = defineStore('data', {
             }
         },
         
+        /**
+         * 打开文件窗口（全应用唯一入口）。
+         * - 桌面版：以真正的独立窗口打开（FileWindow 读 URL hash 里的参数）。
+         * - 单窗口环境（安卓 / 网页端，无窗口壳）：退回**应用内浮层**，由 App.vue 渲染
+         *   FileWindow（参数经 props 传入）——与「设置」在同样环境下的浮层回退一致，
+         *   否则这些平台上的「打开文件」会静默无反应。
+         */
+        openFileWindow(payload: OpenFileWindowPayload) {
+            if (hasCapability('window.chrome')) {
+                getPlatform().window.openFileWindow(payload).catch(() => { /* 打不开时静默（与原行为一致） */ })
+                return
+            }
+            this.fileWindowOverlay = { ...payload }
+        },
+
+        /** 关闭应用内文件窗口浮层（桌面版独立窗口由窗口自己关闭） */
+        closeFileWindowOverlay() {
+            this.fileWindowOverlay = null
+        },
+
         /**
          * 打开「设置」。
          * - 桌面版：打开独立「设置」子窗口（无系统标题栏，顶栏可拖动）；窗口已存在则聚焦并切换分类。
@@ -1153,10 +1177,10 @@ export const usestore = defineStore('data', {
             if (uiJson !== lastBroadcastUiJson || locale !== lastBroadcastLocale) {
                 lastBroadcastUiJson = uiJson
                 lastBroadcastLocale = locale
-                if (typeof window !== 'undefined' && (window as any).ipcRenderer) {
+                if (typeof window !== 'undefined' && hasCapability('events.bus')) {
                     try {
-                        ;(window as any).ipcRenderer.send('notify-theme-change', { ui: JSON.parse(uiJson), locales: locale })
-                    } catch (e) { /* 非 Electron 或序列化失败时忽略 */ }
+                        getPlatform().events.emit('notify-theme-change', { ui: JSON.parse(uiJson), locales: locale })
+                    } catch (e) { /* 无事件总线或序列化失败时忽略 */ }
                 }
             }
             // 设置独立窗口写盘：额外广播一次完整配置变更，主窗口据此从 localStorage 重新同步
@@ -1810,8 +1834,8 @@ export const usestore = defineStore('data', {
                 const isDataCanvas = !isRemote && String(data.path || '').toLowerCase().endsWith('.data')
                 // 远程文件内容由调用方提供（data.content 已含预览内容），不再读本地磁盘
                 // 数据画布（.data）内容由画布模块自己按路径读取（文件可能十几 MB）：这里仍读一份供「源码编辑」用，但跳过 frontmatter 解析
-                const fileContent = isRemote ? (data.content ?? '') : await window.ipcRenderer.invoke('readFile', data.path)
-                const attributes = (isRemote || isDataCanvas) ? {} : await window.ipcRenderer.invoke('getConfig', data.path)
+                const fileContent = isRemote ? (data.content ?? '') : await getPlatform().fs.readText(data.path)
+                const attributes = (isRemote || isDataCanvas) ? {} : await getPlatform().fs.readMetadata(data.path)
                 // 新标签插入到第一个位置
                 this.data.unshift({
                     ...data, // 使用对象展开语法将原始数据的属性展开到新的对象中
@@ -1869,7 +1893,7 @@ export const usestore = defineStore('data', {
             // 系统打开类（可执行/压缩包/镜像等）：直接交给系统默认应用，不进入应用内视图
             const SYSTEM_OPEN_EXTS = ['.exe', '.msi', '.dll', '.apk', '.dmg', '.deb', '.rpm', '.iso', '.appimage', '.run', '.bin', '.flatpak', '.snap', '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst']
             if (SYSTEM_OPEN_EXTS.includes(ext)) {
-                window.ipcRenderer.invoke('openWithSystemApp', data.path)
+                getPlatform().shell.openWithSystemApp(data.path)
                 return
             }
             // 有专属浏览视图、默认以浏览打开的类型
@@ -1879,10 +1903,10 @@ export const usestore = defineStore('data', {
                 '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp', '.mpg', '.mpeg',
                 '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.wma', '.ape', '.aiff',
                 '.pdf', '.xlsx', '.xls', '.excalidraw', '.drawio', '.dio',
-                '.flow.yml', '.flow.yaml', '.data'
+                '.flow.yml', '.flow.yaml', '.data', '.mmd', '.mermaid'
             ]
             const view = READ_EXTS.includes(ext) || isFlowDslPath(data.path) ? 'read' : 'edit'
-            window.ipcRenderer.invoke('open-file-window', { path: data.path, view, page: data.page }).catch(() => {})
+            this.openFileWindow({ path: data.path, view, page: data.page })
         },
 
         /** 打开知识库(.kb)文件：跳转到知识处理(knowRAG)模块并标记待加载文件 */
@@ -1900,7 +1924,7 @@ export const usestore = defineStore('data', {
         async openTaskFileWindow(path: string) {
             const zh = this.locales !== 'en'
             // 只读文件头片段：结果/日志可能达上百 MB，避免整体读入渲染层（识别所需的键均在 JSON 开头）
-            const res = await window.ipcRenderer.invoke('readTaskFile', path, 262144)
+            const res = await getPlatform().fs.readTaskFile(path, 262144)
             const content = res && res.success ? String(res.content || '') : ''
             if (content.trim()) {
                 // 已下线脚手架的旧任务文件（如 PTC）：给出迁移提示（不再打开）
@@ -1934,7 +1958,7 @@ export const usestore = defineStore('data', {
                 }
             }
             // .task 的专属视图固定在「浏览」位置（文件窗口按扩展名识别为脚手架视图）
-            window.ipcRenderer.invoke('open-file-window', { path, view: 'read' }).catch(() => {})
+            this.openFileWindow({ path, view: 'read' })
         },
 
         /** 根据路径关闭对应的标签页 */
@@ -2258,11 +2282,11 @@ export const usestore = defineStore('data', {
             document.documentElement.style.setProperty("--fontActiveColor", this.UI.fontActiveColor);
             document.documentElement.style.setProperty("--borderColor", this.UI.borderColor);
             // 上报主题背景色到主进程，作为新开窗口首帧后备背景（消除加载白屏）
-            try { window.ipcRenderer?.send('theme-background-changed', this.UI.backgroundColor) } catch (e) { /* 非 Electron 环境忽略 */ }
+            try { getPlatform().events.emit('theme-background-changed', this.UI.backgroundColor) } catch (e) { /* 无事件总线环境忽略 */ }
             // 广播完整主题 + 语言给其他窗口（任一窗口改主题/语言后，其它窗口立即跟随；
             // 收到广播应用时由 themeBroadcastGuard 抑制，避免循环）
             if (!themeBroadcastGuard) {
-                try { window.ipcRenderer?.send('notify-theme-change', { ui: JSON.parse(JSON.stringify(this.UI)), locales: this.locales }) } catch (e) { /* 非 Electron 环境忽略 */ }
+                try { getPlatform().events.emit('notify-theme-change', { ui: JSON.parse(JSON.stringify(this.UI)), locales: this.locales }) } catch (e) { /* 无事件总线环境忽略 */ }
             }
         },
 
@@ -2487,10 +2511,10 @@ export const usestore = defineStore('data', {
             onnx.loading = true;
             onnx.error = '';
             try {
-                if (!(window as any).dsh?.tts) {
-                    return { success: false, message: '主进程 TTS 服务不可用（非 Electron 环境？）' };
+                if (!hasCapability('host.tts')) {
+                    return { success: false, message: '当前环境不提供本地语音合成的模型加载' };
                 }
-                const info = await (window as any).dsh.tts.load({
+                const info = await getPlatform().host.tts.load({
                     engine: this.AIconfig.tts.type,
                     modelDir: onnx.modelDir,
                     lang: onnx.lang,
@@ -3120,7 +3144,7 @@ export const usestore = defineStore('data', {
         
         // 使用系统默认应用打开文件
         openByApp: async (path: string) => {
-            await window.ipcRenderer.invoke('openByApp', path)
+            await getPlatform().shell.openByApp(path)
         },
         
         StampToDate(date?: any) {
@@ -3300,6 +3324,11 @@ export const usestore = defineStore('data', {
                     break;
                 case ".data":
                     c = "fa fa-object-group";
+                    break;
+                case ".mmd":
+                case ".mermaid":
+                    // 与块编辑器里的 Mermaid 图块同图标（lib/blockeditor/blockTypes.ts）
+                    c = "fa fa-sitemap";
                     break;
                 case ".exe":
                 case ".msi":

@@ -284,7 +284,7 @@ const TEXT_EXT = new Set([
   '.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg',
   '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.vue', '.css', '.scss', '.less',
   '.html', '.htm', '.xml', '.csv', '.tsv', '.log', '.py', '.ipynb', '.sh', '.bat',
-  '.flow', '.swarm', '.kb', '.excalidraw', '.agent',
+  '.flow', '.swarm', '.kb', '.excalidraw', '.agent', '.mmd', '.mermaid',
 ])
 function isLikelyText(abs: string): boolean {
   const ext = path.extname(abs).toLowerCase()

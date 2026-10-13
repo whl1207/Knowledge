@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { deepSeekStyleOf, normalizeLlmType } from '@/shared/llmSources'
 import strategyConfig from '@/components/knowRAG/strategyConfig.vue'
+import { getPlatform, hasCapability } from '@/platform'
 
 // 定义组件接口
 interface Props {
@@ -524,7 +525,7 @@ const scanKnowledgeBases = async () => {
     const processedFiles = await Promise.all(
       kbFiles.map(async (file: any) => {
         try {
-          const content = await window.ipcRenderer.invoke('readFile', file.path)
+          const content = await getPlatform().fs.readText(file.path)
           const data = JSON.parse(content)
           
           const kbFile: KnowledgeBaseFile = {
@@ -641,7 +642,7 @@ const deleteKnowledgeBase = async (index: number) => {
   } catch { return }
   
   try {
-    const success = await window.ipcRenderer.invoke('deleteFile', kbFile.path)
+    const success = await getPlatform().fs.deleteFile(kbFile.path)
     if (success) {
       knowledgeBases.value.splice(index, 1)
       emit('updateState', t(

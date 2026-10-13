@@ -22,6 +22,7 @@ import type {
 import { effectiveContentSource, resolveContentField } from './types'
 import { renderTemplate, schemaFieldList, schemaExampleJson } from './render'
 import { tryParseJson } from './parsers'
+import { getPlatform } from '@/platform'
 import {
   fetchPage, filterHtmlToText, extractLinksFromHtml, formatLinkList,
   extractPageTitle, PIPELINE_LINKS_FIELD, PIPELINE_TITLE_FIELD,
@@ -103,7 +104,7 @@ export class ExtractExecutor implements PipelineExecutor {
       if (!filePath) throw new Error('缺少文件路径（请通过「扫描文件夹」生成任务行，或在「内容获取」中指定字段）')
       // 读取文件内容（readFile 支持 md/txt/docx/pdf/xlsx/html 等转文本）
       try {
-        content = await window.ipcRenderer.invoke('readFile', filePath)
+        content = await getPlatform().fs.readText(filePath)
         if (!content || String(content).startsWith('Error reading file:')) {
           throw new Error(String(content || '读取文件失败'))
         }

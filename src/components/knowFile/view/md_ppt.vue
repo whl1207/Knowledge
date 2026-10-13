@@ -24,7 +24,9 @@
   // 图表形状（宽高）用于「按图片长宽选布局」：直接解析图表 XML 估算，不走离屏渲染
   import { estimateDiagramSizes, pickDiagramSize } from '@/lib/markdown/drawioFigure'
   import MermaidViewer from '@/components/MermaidViewer.vue'
+  import { useSwipeNav } from '@/composables/useSwipeNav'
   import mermaid from 'mermaid'
+import { getPlatform, hasCapability } from '@/platform'
 
   mermaid.initialize({
     startOnLoad: false,
@@ -48,6 +50,8 @@
 
   // 当前 Markdown 文件所在目录，用于解析相对图片路径
   let mdBasePath = ''
+/** watchedFileChanged 退订句柄（onMounted 注册 / onBeforeUnmount 释放） */
+let unsubWatchedFile: (() => void) | null = null
 
   const md: MarkdownIt = new MarkdownIt({
     html: true,
@@ -749,14 +753,18 @@
     showIndex.value = next
   }
 
+  // 上一页 / 下一页（键盘、底部按钮、触屏滑动共用）
+  const goPrevSlide = () => { showIndex.value = Math.max(0, showIndex.value - 1) }
+  const goNextSlide = () => { showIndex.value = Math.min(prepList.value.length - 1, showIndex.value + 1) }
+
   // 键盘控制：上下键滚动当前页，左右键翻页
   const handleKeydown = (e: KeyboardEvent) => {
     if (e.key === 'ArrowLeft') {
       e.preventDefault()
-      showIndex.value = Math.max(0, showIndex.value - 1)
+      goPrevSlide()
     } else if (e.key === 'ArrowRight') {
       e.preventDefault()
-      showIndex.value = Math.min(prepList.value.length - 1, showIndex.value + 1)
+      goNextSlide()
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       const el = getScrollContainer()
@@ -767,6 +775,16 @@
       if (el) el.scrollTop += 60
     }
   }
+
+  // 触屏：左右滑动翻页（触屏手机 / 平板；总览网格里不翻页，
+  // 代码块等横向可滚动区域先滚到边缘，再滑动才翻页 —— 与滚轮翻页规则一致）
+  useSwipeNav(pptContainerRef, {
+    enabled: () => !showOverview.value,
+    ignore: '.toolbar, .nav-panel, .theme-settings, .overview-grid, .mermaid-viewer-overlay',
+    respectInnerScrollX: true,
+    onSwipeLeft: goNextSlide,
+    onSwipeRight: goPrevSlide,
+  })
 
   // 构建树状导航数据
   const buildTree = (headings: { level: number; text: string; slideIndex: number }[]) => {
@@ -1086,7 +1104,7 @@
     resultEl.innerHTML = `<div class="python-result-loading"><i class="fa fa-spinner fa-spin"></i> ${store.locales=='zh'?'执行中...':'Running...'}</div>`
     try {
       const environment = store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe') || 'safe'
-      const res = await window.ipcRenderer.invoke('executePython', { code, environment, input: '' })
+      const res = await getPlatform().host.python.execute({ code, environment, input: '' })
       if (res.success) {
         const output = res.output?.trim() || res.result?.trim() || ''
         resultEl.innerHTML = output
@@ -1434,11 +1452,13 @@
   )
 
   // 文件变更自动刷新（外部工具/磁盘直接改动：主进程 fs 监听通知，主窗口收到）
-  const handleFileChanged = async (_event: any, { path: changedPath }: { path: string }) => {
+  // 载荷统一按 unknown 收下再断言：宿主事件总线没有跨进程类型契约，见 platform/contract 的 EventsPort
+  const handleFileChanged = async (payload: unknown) => {
+    const changedPath = (payload as { path?: string } | null)?.path
     const curPath = store.data[store.index]?.path
-    if (!curPath || curPath !== changedPath) return
+    if (!changedPath || !curPath || curPath !== changedPath) return
     // 重新读取文件内容并同步到 store —— 上方内容监听（refreshPpt）据此重建；内容未变则自动跳过
-    const newContent = await window.ipcRenderer.invoke('readFile', curPath)
+    const newContent = await getPlatform().fs.readText(curPath)
     if (store.data[store.index] && store.data[store.index].content !== newContent) {
       store.data[store.index].content = newContent
     }
@@ -1462,11 +1482,11 @@
     window.addEventListener('keydown', handleKeydown)
     document.addEventListener('fullscreenchange', repositionThemePanel)
     // 监听文件变更
-    window.ipcRenderer.on('watchedFileChanged', handleFileChanged)
+    unsubWatchedFile = getPlatform().events.on('watchedFileChanged', handleFileChanged)
     // 启动文件监听
     const curPath = store.data[store.index]?.path
     if (curPath) {
-      window.ipcRenderer.invoke('watchFile', curPath)
+      getPlatform().watch.watchFile(curPath)
     }
   })
 
@@ -1475,8 +1495,9 @@
     window.removeEventListener('keydown', handleKeydown)
     document.removeEventListener('fullscreenchange', repositionThemePanel)
     // 移除文件监听
-    window.ipcRenderer.off('watchedFileChanged', handleFileChanged)
-    window.ipcRenderer.invoke('unwatchFile')
+    unsubWatchedFile?.()
+    unsubWatchedFile = null
+    getPlatform().watch.unwatchFile()
     if (timeInterval) clearInterval(timeInterval)
   })
 </script>
@@ -1568,10 +1589,10 @@
           <span class="toolbar-sep"></span>
 
           <!-- 上一页 / 下一页 -->
-          <button class="nav-btn" @click="showIndex=Math.max(0,showIndex-1)" :disabled="showIndex===0">
+          <button class="nav-btn" @click="goPrevSlide" :disabled="showIndex===0">
             <i class="fa fa-chevron-left"></i>
           </button>
-          <button class="nav-btn" @click="showIndex=Math.min(prepList.length-1,showIndex+1)" :disabled="showIndex===prepList.length-1">
+          <button class="nav-btn" @click="goNextSlide" :disabled="showIndex===prepList.length-1">
             <i class="fa fa-chevron-right"></i>
           </button>
 

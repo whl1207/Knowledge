@@ -7,6 +7,7 @@
  */
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatsRef } from '@/store/chats'
+import { getPlatform, hasCapability } from '@/platform'
 
 /** 浏览器 localStorage 配额按 UTF-16 码元计（key + value 每字符 2 字节），Electron 上限约 100MB */
 export const LOCAL_STORAGE_LIMIT = 100 * 1024 * 1024 // 100MB
@@ -71,9 +72,9 @@ export const saveTextFile = async (
 ): Promise<string | null> => {
   const ipc: any = (window as any).ipcRenderer
   if (ipc?.invoke) {
-    const target = await ipc.invoke('saveFileDialog', { defaultPath: defaultName, filters })
+    const target = await getPlatform().dialog.saveFile({ defaultPath: defaultName, filters })
     if (!target) return null
-    const ok = await ipc.invoke('saveFile', target, content)
+    const ok = await getPlatform().fs.saveText(target, content)
     if (!ok) throw new Error(zh ? '无法写入文件' : 'cannot write file')
     return target
   }
@@ -108,7 +109,7 @@ export const pickTextFileInBrowser = (): Promise<string> => new Promise((resolve
 export const pickTextFile = async (): Promise<string> => {
   const ipc: any = (window as any).ipcRenderer
   if (ipc?.invoke) {
-    const res = await ipc.invoke('openFile') // → { content, filePath }
+    const res = await getPlatform().dialog.pickTextFile() // → { content, filePath }
     return res?.content != null ? String(res.content) : ''
   }
   return await pickTextFileInBrowser()

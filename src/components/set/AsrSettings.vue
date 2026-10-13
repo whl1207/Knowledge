@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -156,8 +157,8 @@ function clearASRTestResult() {
 
 // ================ FunASR 流式 Paraformer（funasr-online 引擎） ================
 async function pickFunasrModelDir() {
-  if (!window.ipcRenderer) return
-  const d = await window.ipcRenderer.invoke('openFolderDialog')
+  if (!hasCapability('dialog.native')) return
+  const d = await getPlatform().dialog.pickDirectory()
   if (d) {
     store.AIconfig.asr.funasr.dir = d
     store.saveConfig()
@@ -165,8 +166,8 @@ async function pickFunasrModelDir() {
 }
 
 async function selectFunasrRefine() {
-  if (!window.ipcRenderer) return
-  const f = await window.ipcRenderer.invoke('selectFile', {
+  if (!hasCapability('dialog.native')) return
+  const f = await getPlatform().dialog.pickFile({
     filters: [
       { name: 'ONNX Model', extensions: ['onnx'] },
       { name: 'All Files', extensions: ['*'] }
@@ -180,8 +181,8 @@ async function selectFunasrRefine() {
 
 // 选择官方 ct-punc（标点恢复）本地模型目录（全局标点目录）
 async function selectAsrPuncDir() {
-  if (!window.ipcRenderer) return
-  const d = await window.ipcRenderer.invoke('openFolderDialog')
+  if (!hasCapability('dialog.native')) return
+  const d = await getPlatform().dialog.pickDirectory()
   if (d) {
     store.AIconfig.asr.puncDir = d
     store.saveConfig()
@@ -217,8 +218,8 @@ function captureShortcut(event: KeyboardEvent) {
     store.AIconfig.asr.shortcut = parts.join('+')
     store.saveConfig()
     // 通知主进程更新快捷键
-    if (window.ipcRenderer) {
-      window.ipcRenderer.invoke('registerASRShortcut', store.AIconfig.asr.shortcut).catch(() => {})
+    if (hasCapability('shell.globalShortcut')) {
+      getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut).catch(() => {})
     }
   }
 }
@@ -227,8 +228,8 @@ function captureShortcut(event: KeyboardEvent) {
 function resetShortcut() {
   store.AIconfig.asr.shortcut = 'Ctrl+Shift+Space'
   store.saveConfig()
-  if (window.ipcRenderer) {
-    window.ipcRenderer.invoke('registerASRShortcut', store.AIconfig.asr.shortcut).catch(() => {})
+  if (hasCapability('shell.globalShortcut')) {
+    getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut).catch(() => {})
   }
 }
 
@@ -236,8 +237,8 @@ function resetShortcut() {
 async function selectOnnxModel() {
   try {
     // 如果支持 Electron 文件对话框
-    if (window.ipcRenderer) {
-      const result = await window.ipcRenderer.invoke('selectFile', {
+    if (hasCapability('dialog.native')) {
+      const result = await getPlatform().dialog.pickFile({
         filters: [
           { name: 'ONNX Model', extensions: ['onnx'] },
           { name: 'All Files', extensions: ['*'] }
@@ -271,7 +272,7 @@ async function selectOnnxModel() {
 // 组件挂载时注册 ASR 快捷键（后台录音快捷键由 home.vue 全局注册，这里作为设置页打开时的兜底）
 onMounted(() => {
   if (window.ipcRenderer && store.AIconfig.asr.shortcut) {
-    window.ipcRenderer.invoke('registerASRShortcut', store.AIconfig.asr.shortcut).catch(() => {})
+    getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut).catch(() => {})
   }
 })
 

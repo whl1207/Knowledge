@@ -1,11 +1,20 @@
 <!-- SkillStore.vue - 技能商店模块 -->
 <template>
-  <div class="agent-skill">
+  <div class="agent-skill" :class="{ tall: isTallLayout }">
     <!-- ====== 商店内容 ====== -->
     <div class="store-content">
       <div class="store-body">
-        <!-- 左侧：来源列表（可搜索 / 添加 / 删除） -->
-        <div class="store-sources">
+        <!-- 左侧：来源列表（可搜索 / 添加 / 删除）
+             细长窗口下三栏改为整屏切换：技能网格 ⇄ 来源列表 ⇄ 技能详情（见 .tall 样式） -->
+        <div class="store-sources" v-show="!isTallLayout || storeScreen === 'sources'">
+          <!-- 细长窗口：来源屏左上角返回（回到技能网格） -->
+          <div v-if="isTallLayout" class="sk-back-bar">
+            <div class="sk-back" @click="storeScreen = 'skills'"
+              :title="store.locales === 'en' ? 'Back to skills' : '返回技能列表'">
+              <i class="fa fa-arrow-left"></i>
+            </div>
+            <span class="sk-back-title">{{ store.locales === 'en' ? 'Skill Sources' : '技能来源' }}</span>
+          </div>
           <div class="store-sources-add">
             <input v-model="customSourceInput" :placeholder="store.locales === 'en' ? 'owner/repo' : 'owner/repo'" @keyup.enter="addCustomSource" :title="store.locales === 'en' ? 'Add custom source (owner/repo)' : '添加自定义来源（owner/repo）'" />
             <div class="button small store-add-btn" @click="addCustomSource" :title="store.locales === 'en' ? 'Add source' : '添加来源'">
@@ -34,8 +43,13 @@
           </div>
         </div>
         <!-- 中间：技能列表（详情打开时收缩为窄的一列，近似左侧来源导航） -->
-        <div class="store-skills" :class="{ 'is-narrow': !!detailSkill }">
+        <div class="store-skills" :class="{ 'is-narrow': !!detailSkill }" v-show="!isTallLayout || storeScreen === 'skills'">
           <div class="store-skills-toolbar">
+            <!-- 细长窗口：商店来源是整屏一屏，从网格左上角这个按钮进入（点来源即回到网格） -->
+            <div v-if="isTallLayout" class="button small store-sources-btn" @click="storeScreen = 'sources'"
+              :title="store.locales === 'en' ? 'Switch source' : '切换来源'">
+              <i class="fa fa-list-ul"></i>
+            </div>
             <i class="fa fa-search"></i>
             <input v-model="storeSearch" :placeholder="store.locales === 'en' ? 'Search skills...' : '搜索技能...'" />
             <span class="store-count" v-if="filteredStoreSkills.length > 0">{{ filteredStoreSkills.length }} {{ store.locales === 'en' ? 'skills' : '个技能' }}</span>
@@ -141,8 +155,13 @@
           </div>
         </div>
         <!-- 右侧：技能详情栏（点击技能后显示，取消选择即隐藏，不占用浏览宽度） -->
-        <div v-if="detailSkill" class="store-detail-pane">
+        <div v-if="detailSkill" class="store-detail-pane" v-show="!isTallLayout || storeScreen === 'detail'">
           <div class="store-detail-head">
+            <!-- 细长窗口：详情整屏时左上角返回（回到整屏技能网格；等同取消选择） -->
+            <div v-if="isTallLayout" class="sk-back" @click="deselectSkill"
+              :title="store.locales === 'en' ? 'Back to skills' : '返回技能列表'">
+              <i class="fa fa-arrow-left"></i>
+            </div>
             <i class="fa fa-cube detail-head-icon"></i>
             <span class="store-detail-title" :title="detailSkill.name">{{ detailSkill.name }}</span>
             <span class="store-skill-badge">SKILL</span>
@@ -207,8 +226,16 @@ import { ElMessage } from 'element-plus'
 import { usestore } from '@/store'
 import { renderQuestionMarkdown } from '@/lib/markdown/render'
 import { normalizeRemoteStoreUrl } from '@/lib/remoteStore'
+import { getPlatform, hasCapability } from '@/platform'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const store = usestore()
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：来源 / 技能网格 / 详情三栏并排会把网格与详情挤到
+// 不可用，改为整屏互相切换（与设置导航 / MCP 设置 / 技能管理同一套做法）：
+// 默认整屏技能网格，工具栏最左按钮切到整屏来源列表，点技能卡片进整屏详情，各屏左上角 ← 返回。
+const isTallLayout = useTallLayout()
+const storeScreen = ref<'skills' | 'sources' | 'detail'>('skills')
 
 // ==================== 类型 ====================
 interface StoreSkill {
@@ -272,6 +299,7 @@ const customSourceError = ref('')
 const selectSource = (src: StoreSource) => {
   if (storeSource.value?.url === src.url) return
   storeSource.value = src
+  storeScreen.value = 'skills'   // 细长窗口：选完来源回到整屏技能网格
   loadStoreSkills()
 }
 
@@ -641,7 +669,7 @@ const downloadSkill = async (skill: StoreSkill) => {
   set.add(skill.id); downloadingSkills.value = set; storeInstallMsg.value = ''
   try {
     const targetDir = `${store.skillsPath.replace(/\\/g, '/')}/${skill.name}`
-    await window.ipcRenderer.invoke('ensureDir', targetDir)
+    await getPlatform().fs.ensureDir(targetDir)
     if (storeSource.value.type === 'http') {
       const dl = skill.downloadUrl || (skill.path ? `${storeSource.value.url.replace(/\/+$/, '')}/${skill.path}` : '')
       if (!dl) throw new Error(store.locales === 'en' ? 'No download URL provided by this source' : '该来源未提供下载地址')
@@ -659,7 +687,7 @@ const downloadSkill = async (skill: StoreSkill) => {
         const parts = rel.split('/').filter(Boolean)
         const fileName = parts.pop() || 'file'
         const subDir = parts.length ? `${targetDir}/${parts.join('/')}` : targetDir
-        if (parts.length) await window.ipcRenderer.invoke('ensureDir', subDir)
+        if (parts.length) await getPlatform().fs.ensureDir(subDir)
         let content = ''
         const rawResp = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encPath(filePath)}`)
         if (rawResp.ok) {
@@ -673,7 +701,7 @@ const downloadSkill = async (skill: StoreSkill) => {
           if (!dlResp.ok) throw new Error(`HTTP ${dlResp.status}`)
           content = await dlResp.text()
         }
-        const result = await window.ipcRenderer.invoke('writeFile', `${subDir}/${fileName}`, content)
+        const result = await getPlatform().fs.writeText(`${subDir}/${fileName}`, content)
         if (!result.success) throw new Error(result.error)
       }
     } else {
@@ -712,13 +740,13 @@ const downloadHttpRecursive = async (url: string, dir: string) => {
         const fileName = parts.pop() || ''
         if (!fileName) continue
         const subDir = parts.length ? `${dir}/${parts.join('/')}` : dir
-        if (parts.length) await window.ipcRenderer.invoke('ensureDir', subDir)
+        if (parts.length) await getPlatform().fs.ensureDir(subDir)
         const content = f.text != null ? String(f.text) : ''
         if (f.base64 != null) {
-          const bin = await window.ipcRenderer.invoke('writeBase64', `${subDir}/${fileName}`, String(f.base64))
+          const bin = await getPlatform().fs.writeBinaryBase64(`${subDir}/${fileName}`, String(f.base64))
           if (bin && bin.success === false) throw new Error(bin.error || 'write failed')
         } else {
-          const result = await window.ipcRenderer.invoke('writeFile', `${subDir}/${fileName}`, content)
+          const result = await getPlatform().fs.writeText(`${subDir}/${fileName}`, content)
           if (!result.success) throw new Error(result.error)
         }
       }
@@ -734,7 +762,7 @@ const downloadHttpRecursive = async (url: string, dir: string) => {
     }
   }
   const fileName = url.split('/').filter(Boolean).pop() || 'file'
-  const result = await window.ipcRenderer.invoke('writeFile', `${dir}/${fileName}`, await resp.text())
+  const result = await getPlatform().fs.writeText(`${dir}/${fileName}`, await resp.text())
   if (!result.success) throw new Error(result.error)
 }
 
@@ -742,7 +770,7 @@ const downloadDir = async (items: any[], baseDir: string, owner: string, repo: s
   for (const item of items) {
     if (item.type === 'dir') {
       const sub = `${baseDir}/${item.name}`
-      await window.ipcRenderer.invoke('ensureDir', sub)
+      await getPlatform().fs.ensureDir(sub)
       const subResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${item.path}`)
       if (subResp.ok) { const subItems = await subResp.json(); if (Array.isArray(subItems)) await downloadDir(subItems, sub, owner, repo) }
     } else if (item.type === 'file') {
@@ -755,7 +783,7 @@ const downloadFile = async (file: any, targetDir: string) => {
   const resp = await fetch(file.download_url)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   const content = await resp.text()
-  const result = await window.ipcRenderer.invoke('writeFile', `${targetDir}/${file.name}`, content)
+  const result = await getPlatform().fs.writeText(`${targetDir}/${file.name}`, content)
   if (!result.success) throw new Error(result.error)
 }
 
@@ -842,6 +870,7 @@ const detailMetaFields = computed(() => {
 })
 
 const openSkillDetail = async (skill: StoreSkill) => {
+  storeScreen.value = 'detail'   // 细长窗口：点技能卡片即整屏进入详情
   // 已选中同一技能且非加载中：不重复闪烁
   if (detailSkill.value?.id === skill.id && !detailLoading.value) return
   detailSkill.value = skill
@@ -869,6 +898,7 @@ const deselectSkill = () => {
   detailSkill.value = null
   detailContent.value = ''
   detailLoading.value = false
+  storeScreen.value = 'skills'   // 细长窗口：详情整屏返回技能网格
 }
 
 // 读取技能 SKILL.md 原文（GitHub 源走 contents API，HTTP 源走 URL）
@@ -1735,5 +1765,100 @@ onBeforeUnmount(() => {
 ::-webkit-scrollbar-thumb {
   background: var(--borderColor);
   border-radius: 2px;
+}
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：技能网格 / 来源列表 / 技能详情各占满整屏 ======
+   三栏并排会把网格与详情挤到不可用。三屏都用 v-show 隐藏，切回来时搜索词、滚动位置与
+   详情内容都还在。 */
+.agent-skill.tall .store-sources {
+  width: 100%;
+  min-width: 0;
+  border-right: 0;
+}
+.agent-skill.tall .store-skills,
+.agent-skill.tall .store-skills.is-narrow {
+  width: 100%;
+  flex: 1 1 auto;
+  border-right: 0;
+}
+.agent-skill.tall .store-skills.is-narrow .store-skill-grid,
+.agent-skill.tall .store-skill-grid {
+  grid-template-columns: 1fr;
+}
+.agent-skill.tall .store-detail-pane {
+  width: 100%;
+  border-left: 0;
+}
+/* 来源条目按钢琴键式整宽条目呈现：行高够手指点 */
+.agent-skill.tall .store-sources-list { padding: 8px; }
+.agent-skill.tall .store-source-item {
+  min-height: 48px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.agent-skill.tall .store-source-item.active { background: var(--menuActiveColor); }
+.agent-skill.tall .store-source-name { font-size: 13px; }
+/* 技能卡片：整屏单列卡片（两列会挤掉描述），行高够手指点 */
+.agent-skill.tall .store-skill-item {
+  min-height: 68px;
+  padding: 10px;
+  border-radius: 8px;
+}
+.agent-skill.tall .store-skill-name { font-size: 14px; }
+/* 商店内容区顶部的返回条（只在细长窗口出现） */
+.sk-back-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+  flex-shrink: 0;
+}
+/* 各屏标题栏里的返回按钮（细长窗口专用；做小以免撑高标题栏） */
+.sk-back {
+  flex-shrink: 0;
+  width: 26px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+.sk-back-bar .sk-back { width: 28px; height: 28px; font-size: 14px; }
+.sk-back:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.sk-back-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+}
+/* 工具栏：细长窗口下按钮较多，允许横向滑动（搜索框保留可编辑宽度） */
+.agent-skill.tall .store-skills-toolbar {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.agent-skill.tall .store-skills-toolbar::-webkit-scrollbar { display: none; }
+.agent-skill.tall .store-skills-toolbar > input { min-width: 120px; }
+.agent-skill.tall .store-sources-btn { flex-shrink: 0; }
+/* 详情标题栏：返回按钮 + 标题靠左、下载 / 关闭靠右 */
+.agent-skill.tall .store-detail-head { gap: 6px; }
+.agent-skill.tall .store-detail-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

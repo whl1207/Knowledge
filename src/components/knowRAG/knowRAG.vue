@@ -123,7 +123,14 @@ const handleNodeClick = (node:any) => {
 
 import { Matrix,SingularValueDecomposition } from 'ml-matrix'
 import {usestore} from '@/store'
+import { useTallLayout } from '@/composables/useTallLayout'
+import { getPlatform, hasCapability } from '@/platform'
+import { beginLongTask, updateLongTask, endLongTask } from '@/platform/longTask'
 const store=usestore()
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：顶栏只留标签条并让其**横向滑动**，
+// 否则 8 个标签在手机上会被裁掉、点不到（与主页 / 知识管理 / 设置同一套判定，见 useTallLayout）
+const isTallLayout = useTallLayout()
 
 let files = ref([]) as any
 const selectedFileIndex = ref(-1) as any
@@ -137,18 +144,18 @@ let result = ref(store.locales=="zh"
 
 提问前请先准备好知识库，有以下几种方式：
 
-- **📂 打开文件夹**：点击右上角「选择知识库文件夹」按钮，选择存放 Markdown 文档的文件夹
+- **📂 打开文件夹**：点击左下角状态栏的「打开文件夹」按钮，选择存放 Markdown 文档的文件夹
 - **⚡ 自动知识库**：默认使用当前文件夹数据，提问时若尚未切片/向量化，系统将自动处理
-- **💾 选择 .kb 文件**：在右上角知识库下拉框中选择一个已保存的知识库版本
+- **💾 选择 .kb 文件**：在左下角状态栏的知识库下拉框中选择一个已保存的知识库版本
 
 也可以先到「切片」标签页手动切片/向量化，再回来提问。`
     : `### 👋 Welcome to Knowledge Base QA
 
 Prepare a knowledge base before asking:
 
-- **📂 Open folder**: click the "Select KB folder" button at top-right and choose a folder with Markdown documents
+- **📂 Open folder**: click the "Open folder" button in the bottom-left status bar and choose a folder with Markdown documents
 - **⚡ Auto KB**: uses the current folder's data by default; slicing/embedding runs automatically when you ask
-- **💾 Pick a .kb file**: select a saved knowledge base version from the top-right dropdown
+- **💾 Pick a .kb file**: select a saved knowledge base version from the dropdown in the bottom-left status bar
 
 You can also manually slice/embed in the "Slices" tab, then come back to ask.`)
 let kb_state = ref("")
@@ -1849,7 +1856,7 @@ async function loadFolderFiles(rootPath?: string, switchToFile = true) {
         return
     }
 
-    const result = await window.ipcRenderer.invoke('getFilesRelation', root, 3)
+    const result = await getPlatform().fs.listTreeWithRelations(root, 3)
     if (!result || !result.fileList) {
         kb_state.value = '获取文件列表失败'
         return
@@ -1994,7 +2001,7 @@ function safeParseLlmJson(content: string): any {
 
 const openFolder = async function() {
     try {
-        const picked = await window.ipcRenderer.invoke('openFolderDialog')
+        const picked = await getPlatform().dialog.pickDirectory()
         if (!picked) {
             kb_state.value = '未选择文件夹'
             return
@@ -2052,7 +2059,7 @@ const sliceOnly = async function(noSwitch?: boolean, onProgress?: (detail: strin
                 if ((files.value[i].extension || '').toLowerCase() !== '.md') {
                     continue
                 }
-                let result = await window.ipcRenderer.invoke('readFile', files.value[i].path);
+                let result: any = await getPlatform().fs.readText(files.value[i].path);
                 
                 let fileContent = result;
                 if (typeof result === 'object' && result !== null) {
@@ -2391,6 +2398,37 @@ const prepPushStep = (step: string): number => {
     prepState.steps.push({ step, status: 'running', detail: '' })
     return prepState.steps.length - 1
 }
+
+// 长任务保活（安卓前台服务 + 进度通知）：知识处理动辄几分钟，退到后台不能被杀。
+// 只要还有执行中的步骤就保持通知，全部结束（或出错 / 停止）后收起。其它平台为空操作。
+watch(() => prepState.active, (active) => {
+    if (active) {
+        beginLongTask({
+            title: store.locales === 'zh' ? '知识处理' : 'Knowledge processing',
+            text: prepState.steps.find((s) => s.status === 'running')?.detail || '',
+            indeterminate: true,
+        })
+    } else {
+        endLongTask()
+    }
+})
+
+watch(
+    () => prepState.steps.map((s) => `${s.status}:${s.detail}`).join('|'),
+    () => {
+        if (!prepState.active) return
+        const running = prepState.steps.filter((s) => s.status === 'running')
+        if (!running.length) return
+        const done = prepState.steps.filter((s) => s.status === 'done').length
+        const total = Math.max(1, prepState.steps.length)
+        // 粗粒度进度（按步骤数）+ 当前步骤的实时文案
+        updateLongTask({
+            text: running[running.length - 1].detail || '',
+            progress: Math.min(99, Math.round((done / total) * 100)),
+            indeterminate: prepState.steps.length <= 1 && !running[running.length - 1].detail,
+        })
+    }
+)
 
 // 右侧行为状态：只显示最新一条（进行中步骤 > 实时状态 > 一般提示 > 最近完成步骤；避免 kbPanelMsg 与步骤/去重进度重复堆叠）
 const latestBehavior = computed<{ status: string; icon: string; text: string; detail?: string } | null>(() => {
@@ -2756,7 +2794,7 @@ let previewContent = ref('') as any
 /** 把推理摘要写回文件 YAML frontmatter（新增/替换 摘要 字段），返回是否成功（用于文件摘要持久化） */
 const syncFileSummaryToFrontmatter = async (filePath: string, summary: string): Promise<boolean> => {
     try {
-        const content: string = await window.ipcRenderer.invoke('readFile', filePath)
+        const content: string = await getPlatform().fs.readText(filePath)
         if (typeof content !== 'string') return false
         const clean = String(summary || '').replace(/\s+/g, ' ').trim()
         if (!clean) return false
@@ -2774,7 +2812,7 @@ const syncFileSummaryToFrontmatter = async (filePath: string, summary: string): 
         } else {
             newContent = `---\n摘要: ${quoted}\n---\n\n` + content
         }
-        const res = await window.ipcRenderer.invoke('writeFile', filePath, newContent)
+        const res = await getPlatform().fs.writeText(filePath, newContent)
         return !!(res && res.success)
     } catch (e) {
         console.error('回写文件摘要失败:', filePath, e)
@@ -2812,7 +2850,7 @@ const previewFile = async function(i: number) {
             return
         }
 
-        const result = await window.ipcRenderer.invoke('readFile', file.path)
+        const result: any = await getPlatform().fs.readText(file.path)
         const raw = (typeof result === 'object' && result !== null)
             ? (result.success === false
                 ? (result.content || `读取Word文档失败: ${result.error || '未知错误'}`)
@@ -2897,7 +2935,7 @@ function scanNormalizeStatus() {
 
 // 提取 PDF 文本（参考 PdfViewer.vue：readFileBase64 + pdfjs-dist 读取每一页文本）
 async function extractPdfText(filePath: string): Promise<string> {
-    const result = await window.ipcRenderer.invoke('readFileBase64', filePath)
+    const result = await getPlatform().fs.readDataUrl(filePath)
     if (typeof result !== 'string' || !result.startsWith('data:')) {
         throw new Error(typeof result === 'string' ? result : '读取PDF文件失败')
     }
@@ -2951,7 +2989,7 @@ async function normalizeFiles() {
                     continue
                 }
                 // Word 文件转换参考 electron/main/index.ts 的 readFile
-                const result = await window.ipcRenderer.invoke('readFile', target.path)
+                const result: any = await getPlatform().fs.readText(target.path)
                 markdown = (typeof result === 'object' && result !== null)
                     ? (result.content || '')
                     : (result ?? '')
@@ -2963,7 +3001,7 @@ async function normalizeFiles() {
                 continue
             }
 
-            const writeResult = await window.ipcRenderer.invoke('writeFile', mdPathOf(target.path), markdown)
+            const writeResult = await getPlatform().fs.writeText(mdPathOf(target.path), markdown)
             if (writeResult && writeResult.success) {
                 successList.push(target)
             } else {
@@ -3045,7 +3083,7 @@ const readMdBody = async (file: any): Promise<string> => {
     let content = (typeof file.content === 'string' && file.content) ? file.content : ''
     if (!content) {
         try {
-            const r = await window.ipcRenderer.invoke('readFile', file.path)
+            const r: any = await getPlatform().fs.readText(file.path)
             content = (typeof r === 'object' && r !== null) ? (r.content || '') : (r ?? '')
             // 顺手缓存：后续预览/切片不再重复读盘（初始化已不再预读全文）
             file.content = content
@@ -3445,7 +3483,7 @@ const contentHash = (s: string): string => {
 /** 读取 .md 文本并计算内容哈希（读取失败返回 null） */
 const readFileContentHash = async (filePath: string): Promise<string | null> => {
     try {
-        const result: any = await window.ipcRenderer.invoke('readFile', filePath)
+        const result: any = await getPlatform().fs.readText(filePath)
         if (result && typeof result === 'object') {
             if (result.success === false) return null
             return contentHash(String(result.content ?? ''))
@@ -4555,7 +4593,7 @@ const save = async function(){
     const missingHint = missingCount
         ? (store.locales === 'zh' ? `；注意：有 ${missingCount} 个文件已不在当前文件夹（其切片仍保留，可在「文件」页清理）` : `; note: ${missingCount} file(s) are missing from the folder (slices kept; clean up in the File view)`)
         : ''
-    window.ipcRenderer.invoke('saveFile', `${store.root}/${kbFileName}`, JSON.stringify(saveData))
+    getPlatform().fs.saveText(`${store.root}/${kbFileName}`, JSON.stringify(saveData))
         .then((success) => {
             if (success) {
                 kb_state.value = (persistVectors
@@ -4601,7 +4639,7 @@ const loadKnowledgeBases = async function(index?: number) {
     }
 
     try {
-        const content = await window.ipcRenderer.invoke('readFile', kbFile.path)
+        const content = await getPlatform().fs.readText(kbFile.path)
         const saveData = JSON.parse(content)
         
         const version = saveData.config?.version || "1.0"
@@ -6557,7 +6595,7 @@ onBeforeUnmount(() => {
 </script>
     
 <template>
-    <div class="main">
+    <div class="main" :class="{ tall: isTallLayout }">
         <div class="top-bar">
             <div class="top-tabs">
                 <button class="tab-btn" :class="{ active: viewMode=='qa' }" @click="viewMode='qa'">
@@ -6584,21 +6622,6 @@ onBeforeUnmount(() => {
                 <button class="tab-btn" :class="{ active: viewMode=='set' }" @click="viewMode='set'">
                     <i class="fa fa-cog"></i> {{ store.locales == 'zh' ? '设置' : 'Settings' }}
                 </button>
-            </div>
-            <div class="top-spacer"></div>
-            <!-- 顶部右侧工具栏（知识库） -->
-            <div class="manage-toolbar">
-                <select v-if="knowledgeBases.length > 0" v-model="selectedKbIndex" class="kb-select" @change="loadKnowledgeBases(selectedKbIndex)" title="知识库版本切换">
-                    <option v-for="(kb, index) in knowledgeBases" :key="index" :value="index">
-                        {{ kb.label }}
-                    </option>
-                </select>
-                <div class="button" @click="openFolder" :title="store.locales == 'zh' ? '选择知识库文件夹' : 'Select KB folder'">
-                    <i class="fa fa-folder-open"></i>
-                </div>
-                <div class="button" v-if="isSliced" title="保存知识库" @click="save">
-                    <i class="fa fa-floppy-o"></i>
-                </div>
             </div>
         </div>
 
@@ -6886,9 +6909,23 @@ onBeforeUnmount(() => {
 
         <!-- 考试模块已迁移至「学习」主面板（components/learning/examView.vue） -->
 
-        <!-- 状态栏：显示在所有标签页下方（当前文件夹 + 知识库状态 + 行为状态） -->
+        <!-- 状态栏：显示在所有标签页下方（知识库操作 + 当前文件夹 + 知识库状态 + 行为状态） -->
         <div class="prep-status-panel">
-            <!-- 最左：当前知识库文件夹（悬停 title 显示完整路径） -->
+            <!-- 最左：知识库操作（打开文件夹 / 保存 / 版本切换，原顶部工具栏） -->
+            <div class="prep-kb-actions">
+                <div class="button prep-kb-btn" @click="openFolder" :title="store.locales == 'zh' ? '选择知识库文件夹' : 'Select KB folder'">
+                    <i class="fa fa-folder-open"></i>
+                </div>
+                <div class="button prep-kb-btn" v-if="isSliced" title="保存知识库" @click="save">
+                    <i class="fa fa-floppy-o"></i>
+                </div>
+                <select v-if="knowledgeBases.length > 0" v-model="selectedKbIndex" class="prep-kb-select" @change="loadKnowledgeBases(selectedKbIndex)" title="知识库版本切换">
+                    <option v-for="(kb, index) in knowledgeBases" :key="index" :value="index">
+                        {{ kb.label }}
+                    </option>
+                </select>
+            </div>
+            <!-- 当前知识库文件夹（悬停 title 显示完整路径） -->
             <span class="folder-path prep-folder" :title="store.root || (store.locales == 'zh' ? '未选择文件夹' : 'No folder selected')">
                 <i class="fa fa-folder prep-folder-ic"></i>
                 {{ rootFolderName }}
@@ -7103,6 +7140,39 @@ onBeforeUnmount(() => {
     /* 顶部工具栏弹性占位 */
     .top-spacer {
         flex: 1;
+    }
+
+    /* ===== 细长窗口（高宽比 > 16:9，如手机竖屏）：顶栏只剩标签条 =====
+       标签条可**横向滑动**（隐藏滚动条，手指滑动即见全部标签）；底部状态栏（含左移过来的
+       打开文件夹 / 保存 / 版本切换）同样可横向滑动，避免整排被裁掉后点不到。 */
+    .main.tall .top-tabs {
+        width: 100%;
+        min-width: 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .main.tall .top-tabs::-webkit-scrollbar {
+        display: none;
+    }
+    .main.tall .top-tabs .tab-btn {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+    .main.tall .prep-status-panel {
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        column-gap: 8px;
+    }
+    .main.tall .prep-status-panel::-webkit-scrollbar {
+        display: none;
+    }
+    .main.tall .prep-kb-actions {
+        padding-right: 6px;
     }
     /* 知识库版本切换下拉框 */
     .kb-select {
@@ -7358,6 +7428,43 @@ onBeforeUnmount(() => {
         flex-shrink: 0;
         overflow: hidden;
         min-width: 0;
+    }
+    /* ===== 状态栏最左：知识库操作（打开文件夹 / 保存 / 版本切换，原顶部工具栏） =====
+       高度跟随状态栏自身（align-self: stretch + height: 100%），**不把状态栏撑大** */
+    .prep-kb-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+        padding-right: 10px;
+        border-right: 1px solid var(--borderColor);
+        align-self: stretch;
+    }
+    .prep-kb-actions .prep-kb-btn {
+        height: 100%;
+        min-height: 0;
+        padding: 0 6px;
+        font-size: 11px;
+        line-height: 1;
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .prep-kb-actions .prep-kb-select {
+        height: 100%;
+        min-height: 0;
+        width: 110px;
+        margin: 0;
+        padding: 0 4px;
+        font-size: 11px;
+        line-height: 1;
+        box-sizing: border-box;
+        border: 1px solid var(--borderColor);
+        border-radius: 4px;
+        background-color: var(--backgroundColor);
+        color: var(--fontColor);
+        flex-shrink: 0;
     }
     /* 状态栏最左：当前文件夹（小字号 + 文件夹图标，与状态步骤同风格；右分隔线，可收缩截断） */
     .prep-status-panel .prep-folder {

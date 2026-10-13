@@ -68,17 +68,10 @@ export async function openMdFileLink(
   const existingIndex = store.data.findIndex((d: any) => d.path === targetPath)
   if (existingIndex >= 0) {
     store.index = existingIndex
-    // 已在本窗口打开：图表窗口可能仍停在别的页，按同样方式通知换页（与主进程命中已开窗口的处理一致）
+    // 已在本窗口打开：图表窗口可能仍停在别的页，按同样方式通知换页（与主进程命中已开窗口的处理一致；
+    // 单窗口环境（安卓 / 网页端）由 store.openFileWindow 更新应用内文件窗口的 page）
     if (opts.page != null && opts.page !== '') {
-      try {
-        await (window as any).ipcRenderer?.invoke?.('open-file-window', {
-          path: targetPath,
-          view: 'read',
-          page: opts.page,
-        })
-      } catch {
-        /* 换页失败不影响切标签 */
-      }
+      store.openFileWindow({ path: targetPath, view: 'read', page: opts.page })
     }
     return true
   }

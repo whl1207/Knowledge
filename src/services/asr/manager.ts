@@ -4,6 +4,7 @@
 import { FunasrOnlineMicSession } from '@/services/asr/funasr-online-mic'
 import { Qwen3SegmentMicSession } from '@/services/asr/qwen3-stream-mic'
 import { runQwen3Gradio, toWav16k, type Qwen3GradioOptions } from '@/services/asr/qwen3-gradio'
+import { getPlatform, hasCapability } from '@/platform'
 
 export type ASRType = 'whisper-api' | 'whisper-local' | 'onnx-whisper' | 'qwen3-asr' | 'funasr-online'
 
@@ -615,30 +616,17 @@ class WhisperLocalRecognizer {
     })
   }
 
-  private async transcribeLocal(audioBlob: Blob): Promise<string> {
-    // 通过 IPC 调用本地 Python Whisper 服务
-    try {
-      // 将音频 blob 转换为 base64
-      const buffer = await audioBlob.arrayBuffer()
-      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
-      
-      const result = await (window as any).ipcRenderer.invoke('transcribeAudio', {
-        audioData: base64,
-        mimeType: audioBlob.type,
-        language: this.config.language || 'zh-CN'
-      })
-
-      if (result.success) {
-        return result.text
-      } else {
-        throw new Error(result.error || '转录失败')
-      }
-    } catch (error: any) {
-      // 如果 IPC 调用失败，尝试使用 Whisper API 作为备选
-      console.warn('[ASR] 本地转录失败，尝试 API 备选:', error.message)
-      this.callbacks.onError?.(error.message)
-      return ''
-    }
+  /**
+   * 本地转录。
+   *
+   * 宿主侧目前**没有** `transcribeAudio` 处理器（历史遗留通道，调用必然失败），
+   * 因此这里直接按「本地转录不可用」上报，让上层走 Whisper API 备选；
+   * 将来恢复该能力时应经平台层能力接入，而不是裸 IPC。
+   */
+  private async transcribeLocal(_audioBlob: Blob): Promise<string> {
+    console.warn('[ASR] 本地转录不可用（宿主未提供该能力），改用 API 备选')
+    this.callbacks.onError?.('本地转录不可用')
+    return ''
   }
 
   abort() {
@@ -1237,10 +1225,10 @@ class OnnxWhisperRecognizer {
       const sepIdx = Math.max(modelPath.lastIndexOf('\\'), modelPath.lastIndexOf('/'))
       const modelDir = modelPath.substring(0, sepIdx)
       const readLocal = async (file: string): Promise<string> => {
-        if (!(window as any).ipcRenderer) throw new Error('非 Electron 环境')
-        return await (window as any).ipcRenderer.invoke('readFile', file)
+        if (!hasCapability('fs.pathRead')) throw new Error('非 Electron 环境')
+        return await getPlatform().fs.readText(file)
       }
-      // readFile 对不存在的文件返回 "Error reading file: ..." 字符串，需视为未找到
+      // 读文本对不存在的文件返回 "Error reading file: ..." 字符串，需视为未找到
       const readLocalContent = async (file: string): Promise<string | null> => {
         const content = await readLocal(file)
         if (!content || content.startsWith('Error reading file')) return null
@@ -1411,8 +1399,8 @@ class OnnxWhisperRecognizer {
       const mvnPath = modelDir + '\\am.mvn'
       
       let content: string
-      if ((window as any).ipcRenderer) {
-        content = await (window as any).ipcRenderer.invoke('readFile', mvnPath)
+      if (hasCapability('fs.pathRead')) {
+        content = await getPlatform().fs.readText(mvnPath)
       } else {
         console.warn('[ONNX-ASR] 非 Electron 环境，无法读取 am.mvn')
         return

@@ -8,7 +8,7 @@
  *  - 后果：① 每个旧监听闭包持有整个已卸载组件的作用域，大工作区（十万级文件）下内存暴涨；
  *          ② 事件触发时多个旧闭包各自刷新，重复全量扫描/回传。
  *
- * 因此改为**全窗口唯一监听**：所有组件都经本模块订阅，ipcRenderer 上永远只有 1 个
+ * 因此改为**全窗口唯一监听**：所有组件都经本模块订阅，平台层的文件变更订阅上永远只有 1 个
  * fileSystemChanged 监听（只注册、不解绑），去抖也共享——一次事件只刷新一次。
  *
  * 目录监听（`startWatching` / `stopWatching`）同样收敛为**租约**：
@@ -16,9 +16,11 @@
  *  - 最后一个订阅者 `releaseFileWatch()` 后**延迟 3 秒**才真正停止；
  *  - 期间重新挂载（在知识管理与知识处理之间来回切）直接复用现有 watcher，
  *    不再反复 `closeAllWatchers()` + 重建 recursive watcher（大工作区初始化很贵）。
+ *
+ * 平台差异：文件变更订阅与目录监听均由平台层能力提供（`fs.watch`）；
+ * 无该能力的环境（浏览器 / 局域网访客网页）静默降级——不订阅、不监听。
  */
-
-const FILE_CHANGE_CHANNEL = 'fileSystemChanged'
+import { getPlatform, hasCapability } from '@/platform'
 
 /** 事件去抖：多个组件共享同一个定时器（一次文件事件只刷新一次） */
 const CHANGE_DEBOUNCE_MS = 400
@@ -28,7 +30,7 @@ const WATCH_RELEASE_GRACE_MS = 3000
 type FileChangeListener = (data: any) => void
 
 const listeners = new Set<FileChangeListener>()
-let ipcBound = false
+let changeBound = false
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let pendingPayload: any = null
 
@@ -42,15 +44,14 @@ function flush(): void {
 }
 
 /**
- * 绑定唯一的 ipcRenderer 监听（幂等）。
- * 只注册、不解绑：即使 preload 的 off 失效也不会累积（永远只有这一个）。
+ * 绑定唯一的文件变更订阅（幂等）。
+ * 只注册、不解绑：即使平台层的退订失效也不会累积（永远只有这一个）。
  */
-function bindIpcOnce(): void {
-  if (ipcBound) return
-  const ipc = (window as any).ipcRenderer
-  if (!ipc?.on) return
-  ipcBound = true
-  ipc.on(FILE_CHANGE_CHANNEL, (_event: any, data: any) => {
+function bindChangeOnce(): void {
+  if (changeBound) return
+  if (!hasCapability('fs.watch')) return
+  changeBound = true
+  getPlatform().watch.onChange((data: unknown) => {
     pendingPayload = data
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(flush, CHANGE_DEBOUNCE_MS)
@@ -62,7 +63,7 @@ function bindIpcOnce(): void {
  * @returns 取消订阅函数（组件 onBeforeUnmount 调用）
  */
 export function onFileSystemChanged(fn: FileChangeListener): () => void {
-  bindIpcOnce()
+  bindChangeOnce()
   listeners.add(fn)
   return () => {
     listeners.delete(fn)
@@ -92,7 +93,7 @@ export async function acquireFileWatch(roots: string[]): Promise<void> {
   if (watching) return
   watching = true
   try {
-    await (window as any).ipcRenderer.invoke('startWatching', roots)
+    await getPlatform().watch.acquire(roots)
   } catch (e) {
     watching = false
     console.warn('[fileWatch] startWatching 失败:', e)
@@ -109,7 +110,7 @@ export function releaseFileWatch(delayMs = WATCH_RELEASE_GRACE_MS): void {
     if (leaseHolders > 0) return
     watching = false
     try {
-      await (window as any).ipcRenderer.invoke('stopWatching')
+      await getPlatform().watch.release()
     } catch { /* 忽略：窗口关闭等场景 */ }
   }, delayMs)
 }

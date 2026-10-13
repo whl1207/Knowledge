@@ -4,6 +4,7 @@ import block_md from '@/components/block_md.vue'
 import { usestore } from '@/store'
 import * as kbAi from '@/shared/kbAiClient'
 import * as XLSX from 'xlsx'
+import { getPlatform, hasCapability } from '@/platform'
 import {
   styleProfilePrompt, mimicQuestionPrompt, normalizeStyleProfile, styleProfileSummary,
   emptyStyleProfile, type ExamStyleProfile,
@@ -508,7 +509,7 @@ async function readExamText(filePath: string): Promise<string> {
     // 注意：文本提取同样需要 CMap 数据——预定义 CMap 的字体缺数据时提取不出文字（与渲染同理）
     const { getDocument } = await import('pdfjs-dist')
     const { PDFJS_RUNTIME_OPTIONS } = await import('@/lib/pdfjs')
-    const result = await window.ipcRenderer.invoke('readFileBase64', filePath)
+    const result = await getPlatform().fs.readDataUrl(filePath)
     if (typeof result !== 'string' || !result.startsWith('data:')) throw new Error('读取 PDF 失败')
     const binary = atob(result.split(',')[1] || '')
     const bytes = new Uint8Array(binary.length)
@@ -523,7 +524,7 @@ async function readExamText(filePath: string): Promise<string> {
     try { pdf.destroy() } catch { /* 忽略 */ }
     return text.trim()
   }
-  const r: any = await window.ipcRenderer.invoke('readFile', filePath)
+  const r: any = await getPlatform().fs.readText(filePath)
   const text = (r && typeof r === 'object') ? String(r.content || '') : String(r ?? '')
   if (/^Error reading file/.test(text) || /^不支持的文件格式/.test(text)) throw new Error(text)
   return text.trim()
@@ -531,7 +532,7 @@ async function readExamText(filePath: string): Promise<string> {
 
 /** 导入真题文件（.md/.txt/.docx/.pdf） */
 async function importMimicFile() {
-  const path = await window.ipcRenderer.invoke('selectFile', {
+  const path = await getPlatform().dialog.pickFile({
     filters: [
       { name: store.locales == 'zh' ? '真题/样卷' : 'Reference exam', extensions: ['md', 'txt', 'docx', 'pdf'] },
       { name: store.locales == 'zh' ? '所有文件' : 'All Files', extensions: ['*'] },

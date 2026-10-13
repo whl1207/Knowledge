@@ -5,6 +5,7 @@ import { Transformer } from 'markmap-lib'
 import * as markmap from 'markmap-view'
 import { readImageAsDataUrl } from '@/lib/export/docx'
 import { prepareTalkPage } from '@/lib/mindmap-talk'
+import { useSwipeNav } from '@/composables/useSwipeNav'
 import { preprocessMath } from '@/lib/markdown/render'
 // 内嵌图表（`![](图.drawio)`）：导图节点里以图片形式显示（图表先渲染成 SVG data URL 再内联）
 import { allowSvgDataUrlImages, inlineDrawioRefsAsImages } from '@/lib/markdown/drawioFigure'
@@ -880,6 +881,15 @@ function onTalkKeydown(e: KeyboardEvent) {
   if (isNext) talkNext()
   else talkPrevOrExit()
 }
+
+// 讲解模式下的触屏 ← / → 滑动：与键盘一致（左滑下一步，右滑上一步，已在第一页则退出讲解）。
+// 非讲解模式不接管 —— 那时横滑是 markmap 的平移手势。图片查看浮层里也不翻页。
+useSwipeNav(containerRef, {
+  enabled: () => inTalk.value,
+  ignore: '.mermaid-viewer-overlay',
+  onSwipeLeft: () => talkNext(),
+  onSwipeRight: () => talkPrevOrExit(),
+})
 
 async function update(preserveView = false) {
   ensureRichFixStyle() // setData 前确保富文本测量校准 CSS 已就位

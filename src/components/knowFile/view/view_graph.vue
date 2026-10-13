@@ -5,6 +5,7 @@
   import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import { parseSearchQuery, matchSearchTerms } from '@/lib/knowFile/itemSearch'
+import { getPlatform, hasCapability } from '@/platform'
   const store=usestore()
   const graphContainer = ref<HTMLElement | null>(null);
 
@@ -178,7 +179,7 @@
       })
       const trimmed = newName.trim()
       if (trimmed === d.label) return
-      const result = await window.ipcRenderer.invoke('renameFile', d.path, trimmed)
+      const result = await getPlatform().fs.renameFile(d.path, trimmed)
       if (result.success) {
         await init(true)
         ElMessage.success('重命名成功')
@@ -201,7 +202,7 @@
           type: 'warning',
         }
       )
-      const result = await window.ipcRenderer.invoke('deleteFile', d.path)
+      const result = await getPlatform().fs.deleteFile(d.path)
       if (result) {
         hideContextMenu()
         await init(true)
@@ -218,7 +219,7 @@
   // 在系统位置打开
   const openNodeInFolder = function(d: any) {
     if (!d.path) return
-    window.ipcRenderer.invoke('openInFolder', d.path)
+    getPlatform().shell.revealInFolder(d.path)
     hideContextMenu()
   }
   
@@ -892,7 +893,7 @@ const expandAttribute=async function(indexParam:string|number,state:number){
     
     for (const sourceNode of fileNodes) {
       try {
-        const content = await window.ipcRenderer.invoke('readFile', sourceNode.path)
+        const content = await getPlatform().fs.readText(sourceNode.path)
         if (!content || typeof content !== 'string') continue
         
         // 匹配 Markdown 链接 [text](path) 以及图片 ![text](path)
@@ -908,7 +909,7 @@ const expandAttribute=async function(indexParam:string|number,state:number){
           
           // 解析相对路径为绝对路径
           const sourceDir = sourceNode.path.substring(0, sourceNode.path.lastIndexOf('\\'))
-          const resolvedPath = await window.ipcRenderer.invoke('resolveRelativePath', sourceNode.path, cleanHref)
+          const resolvedPath = await getPlatform().fs.resolveRelativePath(sourceNode.path, cleanHref)
           if (!resolvedPath) continue
           
           // 查找目标节点

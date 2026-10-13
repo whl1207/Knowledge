@@ -65,6 +65,7 @@ import { createFlowT } from '@/features/workflow/ui/locales'
 import VariableSelector from '@/features/workflow/ui/VariableSelector.vue'
 import type { NodePanelProps } from '../panelProps'
 import type { ValueSelector } from '@/features/workflow/dsl/types'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<NodePanelProps>()
 const store = usestore()
@@ -89,7 +90,7 @@ function setConfig(key: string, value: unknown): void {
 }
 
 async function pickFile(): Promise<void> {
-  const path = await window.ipcRenderer.invoke('selectFile', {
+  const path = await getPlatform().dialog.pickFile({
     filters: [{ name: 'Knowledge Base', extensions: ['kb'] }],
   })
   if (path) set('kb_path', path)

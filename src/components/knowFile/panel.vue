@@ -5,13 +5,17 @@
   import { ElMessage, ElMessageBox } from 'element-plus'
   import type { RemoteRoot, RemoteFsNode } from '@/types/collab'
   import { fetchFsInfo, fetchFsList, fetchFsRead, downloadRemoteFile, remotePathOf } from '@/platform/remoteFs'
-  import { FILE_VIEWS as FILE_VIEWS_DEFS } from '@/lib/knowFile/fileViews'
-  import { NEW_FILE_TYPES, newFileType, type NewFileTypeKey } from '@/lib/knowFile/newFileTypes'
+  import { FILE_VIEWS as FILE_VIEWS_DEFS, supportsOfficeView } from '@/lib/knowFile/fileViews'
+  import { NEW_FILE_TYPES, newFileType, writeNewFileSkeleton, type NewFileTypeKey } from '@/lib/knowFile/newFileTypes'
   import { FILE_SORT_ITEMS, fileTypeKey, type FileSortKey } from '@/lib/knowFile/fileSort'
   // 文件系统变更：全局单例订阅 + 目录监听租约（见 lib/knowFile/fileWatch.ts）
   import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
+  import { getPlatform, hasCapability, getRuntimeKind } from '@/platform'
   
   const store = usestore()
+
+  /** 宿主（explorer.vue）用 node-opened 收起细长窗口下的整屏文件树抽屉 */
+  const emit = defineEmits<{ (e: 'node-opened'): void }>()
 
   const filterText = ref('') //搜索并过滤文件
   const treeRef = ref<InstanceType<typeof ElTree>>() //树状图数据
@@ -37,6 +41,37 @@
   let remoteClickAt = 0
   const REMOTE_DBL_MS = 320
 
+  // 安卓（触摸屏）：单击即打开文件 / 进入文件夹。
+  // 手机上没有鼠标、双击要靠连点两次，浏览器还会把双击当成缩放（单击被吞）——桌面上
+  // 「单击只选中、双击才打开」的约定在触摸屏上表现为「点了没反应」。
+  const tapOpensDirectly = getRuntimeKind() === 'android'
+
+  /** 打开文件 / 进入目录（单击即打开与双击打开共用同一套分发） */
+  const openOrEnterNode = (data: any) => {
+    // 通知宿主（explorer）：细长窗口下据此收起整屏文件树抽屉，把屏幕让给右侧视图
+    emit('node-opened')
+    // 按节点类型分发：
+    //  - 文件：走 store.openFileByMode（与文件视图 view_file.vue 一致）——.kb 知识库跳转知识处理、
+    //    系统打开类交系统应用；其余用文件窗口打开（桌面独立窗口 / 安卓应用内浮层），并按扩展名选择浏览/源码视图
+    //  - 文件夹（含工作区根目录）：只让右侧各视图定位到该目录；树本身不展开 /
+    //    折叠（展开 / 折叠点节点左侧箭头，这样双击不会出现先开后收的闪动）；
+    //    也绝不能当文件标签打开（文件夹被 addTab 后编辑视图会按文件读取目录 → EISDIR 报错）
+    if (data.type === 'file') {
+      store.openFileByMode(data)
+      return
+    }
+    // 目录可能属于**另一个工作区**（不在当前 root 下）：先把它所属的工作区设为当前工作区，
+    // 否则跨工作区打开文件夹会被下面的 isPathInside 挡掉、右侧各视图拿不到点击的路径（静默无反应）
+    const owner = store.roots
+      .filter((r: string) => isPathInside(data.path, r))
+      .sort((a: string, b: string) => b.length - a.length)[0]
+    if (owner && owner !== store.root) store.setActiveRoot(owner)
+    // 右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）跟随该目录，与「文件」视图进入文件夹、
+    // 点击面包屑同一套导航；用 isPathInside 而非 startsWith：盘符大小写 / 结尾分隔符不同时也要算
+    // 「在工作区内」，否则会静默不切换当前目录（看板等视图仍停在原目录）
+    if (isPathInside(data.path, store.root)) store.knowEnterDir(data.path)
+  }
+
   const click = function(data: any){
     // 远程节点：单击=主窗口内快速预览（远程只读，单次点击更顺手）；
     //         双击=在独立窗口打开（FileWindow）
@@ -50,32 +85,19 @@
       store.setActiveRoot(data.path)
     }
 
+    // 安卓：单击直接打开/进入（见 tapOpensDirectly 注释）
+    if (tapOpensDirectly) {
+      openOrEnterNode(data)
+      return
+    }
+
     nodeCount++
     //双击时打开标签
     if( preNodeId && nodeCount >= 2){
       curNodeId = data.path 
       nodeCount = 0
       if(curNodeId == preNodeId){//第一次点击的节点和第二次点击的节点id相同
-        // 双击按节点类型分发：
-        //  - 文件：走 store.openFileByMode（与文件视图 view_file.vue 一致）——.kb 知识库跳转知识处理、
-        //    系统打开类交系统应用；其余一律在独立窗口打开，并按扩展名选择浏览/源码视图
-        //  - 文件夹（含工作区根目录）：只让右侧各视图定位到该目录；树本身不展开 /
-        //    折叠（单击也不开合，展开 / 折叠点节点左侧箭头，这样双击不会出现先开后收的闪动）；
-        //    也绝不能当文件标签打开（文件夹被 addTab 后编辑视图会按文件读取目录 → EISDIR 报错）
-        if (data.type === 'file') {
-          store.openFileByMode(data)
-        } else {
-          // 目录可能属于**另一个工作区**（不在当前 root 下）：先把它所属的工作区设为当前工作区，
-          // 否则跨工作区双击文件夹会被下面的 isPathInside 挡掉、右侧各视图拿不到点击的路径（静默无反应）
-          const owner = store.roots
-            .filter((r: string) => isPathInside(data.path, r))
-            .sort((a: string, b: string) => b.length - a.length)[0]
-          if (owner && owner !== store.root) store.setActiveRoot(owner)
-          // 右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）跟随该目录，与「文件」视图双击文件夹、
-          // 点击面包屑同一套导航；用 isPathInside 而非 startsWith：盘符大小写 / 结尾分隔符不同时也要算
-          // 「在工作区内」，否则双击文件夹会静默不切换当前目录（看板等视图仍停在原目录）
-          if (isPathInside(data.path, store.root)) store.knowEnterDir(data.path)
-        }
+        openOrEnterNode(data)
         curNodeId = null
         preNodeId = null
         return
@@ -86,6 +108,18 @@
       preNodeId = null
       nodeCount = 0
     },300)
+  }
+
+  // 系统分享面板（安卓 / 支持 Web Share 的环境才有；桌面隐藏入口）
+  const canShare = hasCapability('shell.share')
+
+  /** 分享节点：文件交给系统分享面板（手机可发到聊天软件 / 云盘 / 邮件） */
+  const shareNode = async function(data: any) {
+    hideContextMenu()
+    const res = await getPlatform().shell.share(data.path)
+    if (!res.success) {
+      ElMessage.error((store.locales === 'zh' ? '分享失败: ' : 'Share failed: ') + (res.error || ''))
+    }
   }
 
   // 开始重命名
@@ -100,15 +134,16 @@
       })
       const trimmed = newName.trim()
       if (trimmed === data.label) return
-      const result = await window.ipcRenderer.invoke('renameFile', data.path, trimmed)
+      const result = await getPlatform().fs.renameFile(data.path, trimmed)
       if (result.success) {
         // 若重命名的是工作区根目录，同步更新工作区列表
+        const newPath = result.newPath || data.path
         const rootIdx = store.roots.indexOf(data.path)
         if (rootIdx !== -1) {
-          store.roots[rootIdx] = result.newPath
+          store.roots[rootIdx] = newPath
         }
         if (store.root === data.path) {
-          store.root = result.newPath;
+          store.root = newPath;
         }
         await refreshTreeAndViews();
         ElMessage.success('重命名成功');
@@ -120,7 +155,7 @@
 
   // 打开/添加工作区文件夹
   const openFolderDialog = async function() {
-    let path = await window.ipcRenderer.invoke('openFolderDialog')
+    let path = await getPlatform().dialog.pickDirectory()
     if(path != null){
       // 添加为新的工作区并设为当前工作区（重复路径仅切换当前工作区，返回 false）
       const isNew = store.addRoot(path)
@@ -130,7 +165,7 @@
       }
       await refreshTreeAndViews()
       // 启动文件监听（监听所有工作区）
-      await window.ipcRenderer.invoke('startWatching', [...store.roots])
+      await getPlatform().watch.acquire([...store.roots])
     }
     store.saveConfig()
   }
@@ -274,7 +309,7 @@
       if (extLower === '.docx') {
         const content = await fetchFsRead(root, rel)
         if (content?.base64) {
-          const md: any = await window.ipcRenderer.invoke('docxToMarkdown', { base64: content.base64 })
+          const md: any = await getPlatform().host.docs.docxToMarkdown({ base64: content.base64 })
           if (typeof md === 'string' && md) {
             store.addTab({
               path: remotePathOf(root, rel),
@@ -322,6 +357,11 @@
 
   /** 远程文件单击/双击判定：单击 → 主窗口内快速预览；320ms 内再次点击同一节点 → 双击打开 */
   const handleRemoteFileClick = (data: any) => {
+    // 安卓：单击即打开（只读预览浮层）——「主窗口内快速预览标签」在单窗口环境里没有落点（点了等于没反应）
+    if (tapOpensDirectly) {
+      openRemoteByMode(data)
+      return
+    }
     if (nodeTimer) { clearTimeout(nodeTimer); nodeTimer = null }
     const now = Date.now()
     // 双击：与上次单击同一节点且间隔在阈值内
@@ -344,6 +384,8 @@
 
   /** 双击远程文件：在独立窗口(FileWindow)打开（只读预览） */
   const openRemoteByMode = (data: any) => {
+    // 与本地文件一致：细长窗口下收起文件树抽屉，让屏幕交给文件窗口 / 右侧视图
+    emit('node-opened')
     openRemoteInNewWindow(data)
   }
 
@@ -354,13 +396,13 @@
     const rel = relOfRemoteNode(root, data)
     if (!rel) return
     const label = (data.label || rel.replace(/\\/g, '/').split('/').pop() || 'file')
-    window.ipcRenderer.invoke('open-file-window', {
+    store.openFileWindow({
       path: remotePathOf(root, rel),
       view: 'read',
       remoteRootId: root.id,
       remoteRel: rel,
       label,
-    }).catch(() => {})
+    })
   }
 
   /** 把服务端返回的绝对 path 转为共享根相对路径（去除共享根前缀） */
@@ -688,14 +730,14 @@
           knownVersion = -1
         }
       }
-      const result = await window.ipcRenderer.invoke('refreshMultiTree', roots, knownVersion)
+      const result = await getPlatform().fs.refreshTree(roots, knownVersion)
       if (result.success) {
         // 数据未变化：保留现有树，跳过整棵树回传与重新处理（markRawTree/排序/展开键修剪）
         if (result.unchanged) {
-          store.treeVersion = result.version
+          store.treeVersion = result.version ?? store.treeVersion
           return
         }
-        store.treeVersion = result.version
+        store.treeVersion = result.version ?? store.treeVersion
         store.tree = markRawTree(result.tree)
         // 同步工作区列表：过滤掉已不存在（被删除）的路径，保持列表顺序
         const existing = result.tree.map((n: any) => n.path)
@@ -733,7 +775,7 @@
 
   // 通过对话框，打开其他文件
   const selectFile = async function() {
-    const path = await window.ipcRenderer.invoke('selectFile')
+    const path = await getPlatform().dialog.pickFile()
     openFile(path)
   }
 
@@ -746,12 +788,12 @@
       // 系统打开类文件：直接用系统默认应用打开，不进入应用内预览/编辑
       const ext = String(path).substring(String(path).lastIndexOf('.')).toLowerCase()
       if (SYSTEM_OPEN_EXTS.includes(ext)) {
-        window.ipcRenderer.invoke('openWithSystemApp', path)
+        getPlatform().shell.openWithSystemApp(path)
         return
       }
-      const inf = await window.ipcRenderer.invoke('getInf', path); //获取信息
-      const attributes = await window.ipcRenderer.invoke('getConfig', path); //获取属性
-      const fileContent = await window.ipcRenderer.invoke('readFile', path)
+      const inf = await getPlatform().fs.getInfo(path); //获取信息
+      const attributes = await getPlatform().fs.readMetadata(path); //获取属性
+      const fileContent = await getPlatform().fs.readText(path)
       store.openFileByMode({
         ...inf,
         attributes: attributes,
@@ -761,7 +803,7 @@
     }
   }
 
-  // 创建文件（类型见 lib/knowFile/newFileTypes.ts：Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架）
+  // 创建文件（类型见 lib/knowFile/newFileTypes.ts：Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架 / Office 三件套）
   const createFile = async (fileName: string, fileType: NewFileTypeKey = 'md') => {
     if (!store.root) {
       ElMessage.warning('请先打开一个文件夹');
@@ -771,12 +813,10 @@
     // 右键某个文件夹时建在它里面；否则建在**当前文件夹**（与「文件」视图一致，不再一律落到工作区根目录）
     const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : (store.path || store.root)
     const suffix = def.ext
-    const path = await window.ipcRenderer.invoke('createFile', targetDir, fileName + suffix);
+    const path = await getPlatform().fs.createFile(targetDir, fileName + suffix);
     if (path) {
-      // 需要初始内容的类型（draw.io 空白图表框架 / 脚手架空任务骨架）先写入，避免留下 0 字节文件
-      if (def.skeleton) {
-        try { await window.ipcRenderer.invoke('saveFile', path, def.skeleton()) } catch { /* ignore */ }
-      }
+      // 需要初始内容的类型先写入（draw.io 空白图表框架 / 脚手架空任务骨架 / Office 空白文档），避免留下 0 字节文件
+      await writeNewFileSkeleton(path, def)
       openFile(path)
       ElMessage.success(`文件 "${fileName}${suffix}" 创建成功`);
     }
@@ -790,7 +830,7 @@
     }
     // 与创建文件同一套：右键文件夹时建在它里面，否则建在当前文件夹
     const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : (store.path || store.root)
-    const dir = await window.ipcRenderer.invoke('createFolder', targetDir, folderName);
+    const dir = await getPlatform().fs.createFolder(targetDir, folderName);
     if (dir) {
       ElMessage.success(`文件夹 "${folderName}" 创建成功`);
     }
@@ -891,8 +931,8 @@
         continue
       }
       const res = clip.cut
-        ? await window.ipcRenderer.invoke('moveFile', p, targetDir)
-        : await window.ipcRenderer.invoke('copyFile', p, targetDir)
+        ? await getPlatform().fs.moveFile(p, targetDir)
+        : await getPlatform().fs.copyFile(p, targetDir)
       if (res && res.success) n++
       else failed.push(p)
     }
@@ -940,7 +980,7 @@
     if (!sourcePath || !targetDir) return
 
     try {
-      const result = await window.ipcRenderer.invoke('moveFile', sourcePath, targetDir)
+      const result = await getPlatform().fs.moveFile(sourcePath, targetDir)
       if (result.success) {
         ElMessage.success(store.locales === 'zh' ? '移动成功' : 'Moved successfully')
         await refreshTreeAndViews()
@@ -956,7 +996,7 @@
   // 在系统文件管理器中定位右键的节点（文件夹→打开其所在位置）
   const revealInFolder = (node: any) => {
     if (!node?.path) return
-    window.ipcRenderer.invoke('openInFolder', node.path)
+    getPlatform().shell.revealInFolder(node.path)
   }
 
   // 复制右键节点的完整路径到剪贴板
@@ -1037,6 +1077,13 @@
     const p = String(contextMenu.value?.node?.path || '').toLowerCase();
     return p.endsWith('.docx') || p.endsWith('.doc');
   });
+
+  // 「打开」子菜单的视图清单：非 Word / Excel / PPT 文件不列「Office 编辑」（与文件窗口的切换器一致）
+  const contextMenuViews = computed(() =>
+    FILE_VIEWS_DEFS.filter(
+      (v) => v.key !== 'office' || (!contextMenu.value.isRemote && supportsOfficeView(contextMenu.value.node?.path)),
+    ),
+  );
 
   // 右键「打开文件所在位置」文案：文件夹说「所在位置」，文件说「文件所在位置」
   const revealLabel = computed(() => {
@@ -1196,9 +1243,9 @@
     // 执行删除
     try {
       if (isFolder) {
-        await window.ipcRenderer.invoke('deleteFolder', path)
+        await getPlatform().fs.deleteFolder(path)
       } else {
-        await window.ipcRenderer.invoke('deleteFile', path)
+        await getPlatform().fs.deleteFile(path)
         // 同步关闭已打开的标签页
         const tabIdx = store.data.findIndex((d: any) => d.path === path)
         if (tabIdx !== -1) {
@@ -1242,7 +1289,7 @@
     contextMenu.value.visible = false
     await refreshTreeAndViews()
     // 重启文件监听（监听剩余工作区）
-    await window.ipcRenderer.invoke('startWatching', [...store.roots])
+    await getPlatform().watch.acquire([...store.roots])
     ElMessage.success('已从工作区列表删除')
   };
 
@@ -1288,9 +1335,9 @@
 
   document.addEventListener('click', hideContextMenuOnDocClick);
 
-  // 新窗口打开文件
+  // 新窗口打开文件（桌面独立窗口 / 单窗口环境应用内浮层，统一走 store.openFileWindow）
   const openInNewWindow = async (path: string, view: string) => {
-    await window.ipcRenderer.invoke('open-file-window', { path, view })
+    store.openFileWindow({ path, view })
   }
 
   const hideContextMenu = () => {
@@ -1338,6 +1385,8 @@
     <div class="list scoll" v-if="mode=='file'" @contextmenu.prevent="showViewMenu">
       <!-- 未打开工作区时隐藏工具栏（无可用控件），由下方空态引导提供「打开工作区/打开文件」入口 -->
       <div class="tree-toolbar" :title="store.root" v-if="store.root!='' || store.remoteRoots.length">
+        <!-- 左侧插槽（细长窗口的抽屉返回按钮；桌面并排布局不用） -->
+        <slot name="toolbar-left" />
         <!-- 文件搜索（放在原「视图选择」的位置；视图选择现已常驻顶部工具栏，见 ViewToolbar.vue） -->
         <div v-if="store.root!=''" class="tree-search-box">
           <i class="fa fa-search"></i>
@@ -1495,7 +1544,7 @@
         <span style="flex:1">{{ store.locales=='zh'?'打开':'Open' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
-          <li v-for="v in FILE_VIEWS_DEFS" :key="v.key" v-show="!isWordNode || !READONLY_VIEW_KEYS.includes(v.key)"
+          <li v-for="v in contextMenuViews" :key="v.key" v-show="!isWordNode || !READONLY_VIEW_KEYS.includes(v.key)"
               @click="openInNewWindow(contextMenu.node.path, v.key); hideContextMenu()">
             <i :class="v.icon"></i> {{ store.locales=='zh' ? v.name : v.labelEn }}
           </li>
@@ -1515,6 +1564,9 @@
           <li @click="store.openByApp(contextMenu.node.path); hideContextMenu()">
             <i class="fa fa-external-link"></i> {{ store.locales=='zh'?'系统打开':'System' }}
           </li>
+          <li v-if="canShare" @click="shareNode(contextMenu.node)">
+            <i class="fa fa-share-alt"></i> {{ store.locales=='zh'?'分享':'Share' }}
+          </li>
         </ul>
       </div>
       <!-- 操作（二级，仅文件）：打开位置 / 复制地址 / 系统打开 -->
@@ -1531,6 +1583,9 @@
           </li>
           <li @click="store.openByApp(contextMenu.node.path); hideContextMenu()">
             <i class="fa fa-external-link"></i> {{ store.locales=='zh'?'系统打开':'System' }}
+          </li>
+          <li v-if="canShare" @click="shareNode(contextMenu.node)">
+            <i class="fa fa-share-alt"></i> {{ store.locales=='zh'?'分享':'Share' }}
           </li>
         </ul>
       </div>

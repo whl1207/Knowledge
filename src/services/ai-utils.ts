@@ -1,13 +1,13 @@
 // src/services/ai-utils.ts
-// AI IPC 桥（Electron 主进程执行）+ 浏览器/LAN 模式直连兜底
+// AI 请求接缝（宿主代理执行）+ 浏览器 / LAN / 安卓 直连兜底
 //
-// 架构：
-// - Electron 环境（有 window.ipcRenderer）：所有 AI 网络请求通过 ai:start 委托给
-//   主进程 electron/main/ai-service.ts 执行并解析；主进程按 requestId 缓冲完整回答
+// 架构（平台能力 `llm.hosted` 决定走哪条）：
+// - 宿主代理（桌面）：所有 AI 网络请求经 `platform.llm.*` 委托给主进程
+//   electron/main/ai-service.ts 执行并解析；主进程按 requestId 缓冲完整回答
 //   并落盘。渲染进程只负责把事件映射回 onStream/onComplete/onError 等回调。
 // - 前端切模块（home.vue 卸载）时主进程会话继续运行；重新进入后用同一个 requestId
 //   调用 resumeSession() 即可取回完整/部分回答并继续实时接收。
-// - 浏览器 / LAN 共享模式（无 ipcRenderer）：回退到 electron/ai-core.ts 直连
+// - 无宿主（纯网页 / LAN 访客 / 安卓）：回退到 shared/ai-core.ts 直连
 //   （保持原有 /__proxy 代理行为），功能不变。
 //
 // 对外 API 与旧版 ai-utils.ts 保持一致，store/index.ts 与 EntryView.vue 无需改动。
@@ -15,10 +15,18 @@
 import { AIUtils as AICore, normalizeReasoning, type ContextWindowProbe, type LmStudioModelInfo, type OllamaModelInfo, type OllamaLoadedModel } from '@/shared/ai-core'
 import { deepSeekStyleOf, normalizeLlmType } from '@/shared/llmSources'
 
-// ==================== IPC 工具 ====================
+import { getPlatform, hasCapability } from '@/platform'
 
-function isElectron(): boolean {
-  return typeof window !== 'undefined' && !!window.ipcRenderer
+// ==================== 平台 LLM 接缝 ====================
+
+/**
+ * LLM 请求是否由宿主代理。
+ * 桌面（`llm.hosted`）：请求经 `platform.llm.*` 交给主进程执行，可绕开 CORS/CSP，
+ * 并按 requestId 缓冲回答（切模块/刷新后 resume）。
+ * 纯网页 / 安卓：为 false，所有方法回退到 `shared/ai-core.ts` 直连（本文件下文的 if (!hostedLlm()) 分支）。
+ */
+function hostedLlm(): boolean {
+  return hasCapability('llm.hosted')
 }
 
 /** 深拷贝为纯 JSON / 保留 typed array：剥离 Vue 响应式 Proxy，保留 Uint8Array/ArrayBuffer/Blob */
@@ -43,11 +51,31 @@ function toPlain(value: any, seen = new WeakMap<any, any>()): any {
   return out
 }
 
+/**
+ * 调用宿主 LLM 能力（仅 `llm.hosted` 时可达）。
+ *
+ * 入参先经 `toPlain` 剥离 Vue 响应式 Proxy：模型配置常直接取自 store，
+ * 原样经 IPC 结构化克隆会抛 “An object could not be cloned.”。
+ * 通道名沿用宿主既有命名，便于与 `electron/main/ai-service.ts` 对照。
+ */
 function invoke(channel: string, payload: any): Promise<any> {
-  if (isElectron()) {
-    return window.ipcRenderer.invoke(channel, toPlain(payload))
+  if (!hostedLlm()) return Promise.reject(new Error('当前环境不支持宿主 LLM 代理（请走直连兜底）'))
+  const llm = getPlatform().llm
+  const p = toPlain(payload)
+  switch (channel) {
+    case 'ai:start': return llm.start(p?.requestId, p?.spec)
+    case 'ai:abort': return llm.abort(p?.requestId)
+    case 'ai:get': return llm.get(p?.requestId)
+    case 'ai:release': return llm.release(p?.requestId)
+    case 'ai:contextWindow': return llm.contextWindow(p)
+    case 'ai:contextWindowDetail': return llm.contextWindowDetail(p)
+    case 'ai:lmstudioModels': return llm.lmstudioModels(p)
+    case 'ai:lmstudioCli': return llm.lmstudioCli(p)
+    case 'ai:ollamaModels': return llm.ollamaModels(p)
+    case 'ai:ollamaModelAction': return llm.ollamaModelAction(p)
+    case 'ai:check': return llm.check(p)
+    default: return Promise.reject(new Error(`未知的宿主 LLM 能力: ${channel}`))
   }
-  return Promise.reject(new Error('IPC 不可用（请在 Electron 中运行）'))
 }
 
 function genRequestId(): string {
@@ -78,7 +106,7 @@ let listenerAttached = false
 function ensureListener(): void {
   if (listenerAttached) return
   listenerAttached = true
-  window.ipcRenderer.on('ai:event', (_e: any, payload: any) => {
+  getPlatform().llm.onEvent((payload: any) => {
     const { requestId, type } = payload || {}
     if (!requestId) return
     const h = sessions.get(requestId)
@@ -230,14 +258,14 @@ export class AIUtils {
 
   /** 获取模型真实上下文窗口（tokens）：Ollama / LM Studio / Google 可读，其余来源返回 null（按来源默认表兜底） */
   static fetchModelContextWindow(provider: string, config: any, model: string): Promise<number | null> {
-    if (!isElectron()) return AICore.fetchModelContextWindow(provider, config, model)
+    if (!hostedLlm()) return AICore.fetchModelContextWindow(provider, config, model)
     // Electron：委托主进程 fetch，避免渲染进程 CORS/CSP 拦截本地 Ollama /api/ps、/api/show
     return invoke('ai:contextWindow', { provider, config, model }).catch(() => null)
   }
 
   /** 同上，但带来源可信度（loaded / model-file / model-max）：上层据此区分「真正生效值」与「模型上限」 */
   static fetchModelContextWindowDetail(provider: string, config: any, model: string): Promise<ContextWindowProbe | null> {
-    if (!isElectron()) return AICore.fetchModelContextWindowDetail(provider, config, model)
+    if (!hostedLlm()) return AICore.fetchModelContextWindowDetail(provider, config, model)
     return invoke('ai:contextWindowDetail', { provider, config, model }).catch(() => null)
   }
 
@@ -247,7 +275,7 @@ export class AIUtils {
    * 其余来源无此能力，不做调用。
    */
   static listLmStudioModels(config: any): Promise<{ online: boolean; models: LmStudioModelInfo[]; native: boolean; error?: string }> {
-    if (!isElectron()) return AICore.listLmStudioModels(config || {})
+    if (!hostedLlm()) return AICore.listLmStudioModels(config || {})
     return invoke('ai:lmstudioModels', { config: config || {} })
       .then((res: any) => res || { online: false, models: [], native: false })
       .catch(() => ({ online: false, models: [], native: false }))
@@ -258,7 +286,7 @@ export class AIUtils {
    * REST API 不提供加载卸载（POST /api/v0/models/load 报 Unexpected endpoint），故走官方 CLI。
    */
   static lmStudioCli(payload: { action: 'ps' | 'load' | 'unload'; model?: string; contextLength?: number; all?: boolean }): Promise<any> {
-    if (!isElectron()) return Promise.resolve({ ok: false, available: false, models: [], error: 'LM Studio 命令行仅桌面版可用' })
+    if (!hostedLlm()) return Promise.resolve({ ok: false, available: false, models: [], error: 'LM Studio 命令行仅桌面版可用' })
     return invoke('ai:lmstudioCli', payload).catch((e: any) => ({ ok: false, available: false, models: [], error: e?.message || String(e) }))
   }
 
@@ -268,7 +296,7 @@ export class AIUtils {
    * 设置页用它显示模型类型（对话 / 视觉 / 嵌入）、参数、上下文与加载状态。
    */
   static listOllamaModels(config: any): Promise<{ online: boolean; models: OllamaModelInfo[]; loaded: OllamaLoadedModel[]; error?: string }> {
-    if (!isElectron()) return AICore.listOllamaModels(config || {})
+    if (!hostedLlm()) return AICore.listOllamaModels(config || {})
     return invoke('ai:ollamaModels', { config: config || {} })
       .then((res: any) => res || { online: false, models: [], loaded: [] })
       .catch(() => ({ online: false, models: [], loaded: [] }))
@@ -276,7 +304,7 @@ export class AIUtils {
 
   /** Ollama 加载 / 卸载模型（加载 = 预热并驻留 keepAlive；卸载 = keep_alive 0） */
   static ollamaModelAction(config: any, action: 'load' | 'unload', model: string, keepAlive?: string): Promise<{ ok: boolean; output?: string; error?: string }> {
-    if (!isElectron()) return AICore.ollamaModelAction(config || {}, action, model, keepAlive)
+    if (!hostedLlm()) return AICore.ollamaModelAction(config || {}, action, model, keepAlive)
     return invoke('ai:ollamaModelAction', { config: config || {}, action, model, keepAlive })
       .then((res: any) => res || { ok: false, error: '空响应' })
       .catch((e: any) => ({ ok: false, error: e?.message || String(e) }))
@@ -298,56 +326,56 @@ export class AIUtils {
   // ---------- 连接探测（Electron 走主进程，浏览器直连） ----------
 
   static checkOllamaConnection(ollamaConfig: any) {
-    if (!isElectron()) return AICore.checkOllamaConnection(ollamaConfig)
+    if (!hostedLlm()) return AICore.checkOllamaConnection(ollamaConfig)
     return invoke('ai:check', { provider: 'ollama', config: ollamaConfig })
   }
 
   static checkLMStudioConnection(lmstudioConfig: any) {
-    if (!isElectron()) return AICore.checkLMStudioConnection(lmstudioConfig)
+    if (!hostedLlm()) return AICore.checkLMStudioConnection(lmstudioConfig)
     return invoke('ai:check', { provider: 'lmstudio', config: lmstudioConfig })
   }
 
   static checkOpenAIConnection(openaiConfig: any) {
-    if (!isElectron()) return AICore.checkOpenAIConnection(openaiConfig)
+    if (!hostedLlm()) return AICore.checkOpenAIConnection(openaiConfig)
     return invoke('ai:check', { provider: 'openai', config: openaiConfig })
   }
 
   static checkCustomConnection(customConfig: any) {
-    if (!isElectron()) return AICore.checkCustomConnection(customConfig)
+    if (!hostedLlm()) return AICore.checkCustomConnection(customConfig)
     return invoke('ai:check', { provider: 'custom', config: customConfig })
   }
 
   static checkDeepSeekResponsesConnection(responsesConfig: any) {
-    if (!isElectron()) return AICore.checkDeepSeekResponsesConnection(responsesConfig)
+    if (!hostedLlm()) return AICore.checkDeepSeekResponsesConnection(responsesConfig)
     // DeepSeek 单来源：provider 统一为 'deepseek'，由 apiStyle 指明走 Responses 接口
     return invoke('ai:check', { provider: 'deepseek', apiStyle: 'responses', config: responsesConfig })
   }
 
   /** 查询 DeepSeek 账户余额（Electron 走主进程，避开渲染进程 CORS/CSP；浏览器直连） */
   static fetchDeepSeekBalance(deepseekConfig: any) {
-    if (!isElectron()) return AICore.fetchDeepSeekBalance(deepseekConfig)
+    if (!hostedLlm()) return AICore.fetchDeepSeekBalance(deepseekConfig)
     return invoke('ai:check', { provider: 'deepseek-balance', config: deepseekConfig })
   }
 
   static checkAnthropicConnection(anthropicConfig: any) {
-    if (!isElectron()) return AICore.checkAnthropicConnection(anthropicConfig)
+    if (!hostedLlm()) return AICore.checkAnthropicConnection(anthropicConfig)
     return invoke('ai:check', { provider: 'anthropic', config: anthropicConfig })
   }
 
   static checkGoogleConnection(googleConfig: any) {
-    if (!isElectron()) return AICore.checkGoogleConnection(googleConfig)
+    if (!hostedLlm()) return AICore.checkGoogleConnection(googleConfig)
     return invoke('ai:check', { provider: 'google', config: googleConfig })
   }
 
   static checkAzureConnection(azureConfig: any) {
-    if (!isElectron()) return AICore.checkAzureConnection(azureConfig)
+    if (!hostedLlm()) return AICore.checkAzureConnection(azureConfig)
     return invoke('ai:check', { provider: 'azure', config: azureConfig })
   }
 
   // ---------- 发送请求（Electron 走主进程会话，浏览器直连） ----------
 
   static sendToOllama(ollamaConfig: any, llmConfig: any, messages: any[], options?: any): Promise<string> {
-    if (!isElectron()) return AICore.sendToOllama(ollamaConfig, llmConfig, messages, options)
+    if (!hostedLlm()) return AICore.sendToOllama(ollamaConfig, llmConfig, messages, options)
     if (!ollamaConfig?.model) {
       const error = new Error('请先在AI配置中选择一个Ollama模型')
       options?.onError?.(error)
@@ -365,7 +393,7 @@ export class AIUtils {
   }
 
   static sendToLMStudio(lmstudioConfig: any, llmConfig: any, messages: any[], options?: any): Promise<string> {
-    if (!isElectron()) return AICore.sendToLMStudio(lmstudioConfig, llmConfig, messages, options)
+    if (!hostedLlm()) return AICore.sendToLMStudio(lmstudioConfig, llmConfig, messages, options)
     if (!lmstudioConfig?.model) {
       const error = new Error('请先在AI配置中选择一个LM Studio模型')
       options?.onError?.(error)
@@ -383,7 +411,7 @@ export class AIUtils {
   }
 
   static makeAPIRequest(endpoint: string, body: any, headers: Record<string, string>, options?: any): Promise<string> {
-    if (!isElectron()) return AICore.makeAPIRequest(endpoint, body, headers, options)
+    if (!hostedLlm()) return AICore.makeAPIRequest(endpoint, body, headers, options)
     const requestId = options?.requestId || genRequestId()
     return startSession(requestId, {
       provider: 'custom',
@@ -396,7 +424,7 @@ export class AIUtils {
   }
 
   static makeDeepSeekResponsesRequest(endpoint: string, body: any, headers: Record<string, string>, options?: any): Promise<string> {
-    if (!isElectron()) return AICore.makeDeepSeekResponsesRequest(endpoint, body, headers, options) as unknown as Promise<string>
+    if (!hostedLlm()) return AICore.makeDeepSeekResponsesRequest(endpoint, body, headers, options) as unknown as Promise<string>
     const requestId = options?.requestId || genRequestId()
     return startSession(requestId, {
       provider: 'deepseek',
@@ -408,7 +436,7 @@ export class AIUtils {
   }
 
   static makeAnthropicRequest(endpoint: string, body: any, headers: Record<string, string>, options?: any): Promise<string> {
-    if (!isElectron()) return AICore.makeAnthropicRequest(endpoint, body, headers, options)
+    if (!hostedLlm()) return AICore.makeAnthropicRequest(endpoint, body, headers, options)
     const requestId = options?.requestId || genRequestId()
     return startSession(requestId, {
       provider: 'anthropic',
@@ -419,7 +447,7 @@ export class AIUtils {
   }
 
   static makeGoogleRequest(endpoint: string, body: any, headers: Record<string, string>, options?: any): Promise<string> {
-    if (!isElectron()) return AICore.makeGoogleRequest(endpoint, body, headers, options)
+    if (!hostedLlm()) return AICore.makeGoogleRequest(endpoint, body, headers, options)
     const requestId = options?.requestId || genRequestId()
     return startSession(requestId, {
       provider: 'google',
@@ -640,7 +668,7 @@ export class AIUtils {
 
   /** 获取会话快照（内存/磁盘，主进程维护） */
   static async getSession(requestId: string) {
-    if (!isElectron()) return null
+    if (!hostedLlm()) return null
     return invoke('ai:get', { requestId })
   }
 
@@ -650,7 +678,7 @@ export class AIUtils {
    * getSession(requestId) 取回主进程缓冲的部分内容并写入消息，再 attach 继续实时接收。
    */
   static attachLiveSession(requestId: string, options?: any): { attached: boolean } {
-    if (!isElectron()) return { attached: false }
+    if (!hostedLlm()) return { attached: false }
     const h: SessionHandler = {
       requestId,
       onStream: options?.onStream,
@@ -679,13 +707,13 @@ export class AIUtils {
 
   /** 中止会话（主进程保留已生成内容并停止） */
   static async abortSession(requestId: string) {
-    if (!isElectron()) return { success: false }
+    if (!hostedLlm()) return { success: false }
     return invoke('ai:abort', { requestId })
   }
 
   /** 释放会话（主进程删除内存 + 磁盘文件） */
   static async releaseSession(requestId: string) {
-    if (!isElectron()) return { success: true }
+    if (!hostedLlm()) return { success: true }
     return invoke('ai:release', { requestId })
   }
 

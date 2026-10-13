@@ -64,6 +64,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { usestore } from '@/store'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -91,8 +92,8 @@ const hint = computed(() => zh.value
 
 // 选择保存文件夹（目录选择对话框；纯浏览器/LAN 模式无 IPC 时忽略）
 const pickSaveDir = async () => {
-  if (!window.ipcRenderer) return
-  const dir = await window.ipcRenderer.invoke('openFolderDialog')
+  if (!hasCapability('dialog.native')) return
+  const dir = await getPlatform().dialog.pickDirectory()
   if (dir && typeof dir === 'string') {
     store.UI.browserSaveDir = dir
     store.saveConfig()

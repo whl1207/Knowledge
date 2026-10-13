@@ -37,6 +37,17 @@ scripts/funasr-online/.tmp_*
 public/drawio/
 .tmp-drawio*
 
+# Office 编辑器内核源码（GenOffice，约 72MB，由 scripts/fetch-office-vendor.mjs 按 SHA 获取，不入库；
+# 版本锚点见 scripts/office-vendor.lock.json，构建产物由 scripts/build-office.mjs 输出到 resources/office/）
+vendor/
+
+# Office 编辑器构建产物（由 npm run office:build 生成，体积大且可复现，不入库）
+resources/office/
+
+# Excel 原生引擎（xlsx-sidecar，由 npm run office:build:native 编译 / 安置；二进制不入库）
+resources/native/*
+!resources/native/README.md
+
 # Excalidraw 开发态资源（约 18MB，仅开发用，不入库）
 public/excalidraw-assets-dev/
 
@@ -50,6 +61,9 @@ scripts/*
 !scripts/build-linux-all.sh
 !scripts/build-linux-all.cmd
 !scripts/collect-release.mjs
+!scripts/fetch-office-vendor.mjs
+!scripts/build-office.mjs
+!scripts/office-vendor.lock.json
 
 # 临时脚本 / 实验产物（下划线开头，随手写的排查脚本）
 _*.mjs

@@ -8,6 +8,7 @@
 
 import { store, skillList, knowledgeBaseList } from '@/store/swarmState'
 import type { SwarmAgent } from '@/types/swarm'
+import { getPlatform, hasCapability } from '@/platform'
 
 // ---------------------------------------------------------------------------
 // 技能
@@ -16,7 +17,7 @@ import type { SwarmAgent } from '@/types/swarm'
 export const loadSkillList = async () => {
   if (!store.skillsPath) { skillList.value = []; return }
   try {
-    const loaded = await window.ipcRenderer.invoke('loadSkills', store.skillsPath)
+    const loaded = await getPlatform().host.skills.list(store.skillsPath)
     skillList.value = (loaded || []).map((s: any) => ({
       name: s.name,
       path: s.path,
@@ -38,7 +39,7 @@ export const getSkillPrompt = async (agent: SwarmAgent): Promise<string> => {
       const parts: string[] = []
       for (const sk of skillList.value) {
         const mdPath = sk.path.replace(/\\/g, '/') + '/SKILL.md'
-        const content = await window.ipcRenderer.invoke('readFile', mdPath)
+        const content = await getPlatform().fs.readText(mdPath)
         if (content && typeof content === 'string' && !content.startsWith('Error')) {
           parts.push(`## 技能：${sk.name}\n${content}`)
         }
@@ -52,7 +53,7 @@ export const getSkillPrompt = async (agent: SwarmAgent): Promise<string> => {
       const parts: string[] = []
       for (const p of paths) {
         const mdPath = p.replace(/\\/g, '/') + '/SKILL.md'
-        const content = await window.ipcRenderer.invoke('readFile', mdPath)
+        const content = await getPlatform().fs.readText(mdPath)
         if (content && typeof content === 'string' && !content.startsWith('Error')) {
           const sk = skillList.value.find(s => s.path === p)
           const skillName = sk ? sk.name : (p.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '')
@@ -80,7 +81,7 @@ export const getAgentSkillName = (agent: SwarmAgent): string => {
 export const scanKnowledgeBases = async () => {
   if (!store.root) return
   try {
-    const result = await window.ipcRenderer.invoke('getFilesRelation', store.root, 1)
+    const result = await getPlatform().fs.listTreeWithRelations(store.root, 1)
     const fileList: any[] = result?.fileList || []
     knowledgeBaseList.value = fileList
       .filter((f: any) => f.path?.endsWith('.kb'))

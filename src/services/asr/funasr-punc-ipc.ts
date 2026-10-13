@@ -10,6 +10,7 @@
 import type { FunasrPuncConfig } from '@/services/asr/funasr-punc-config'
 import { buildFunasrPuncConfig } from '@/services/asr/funasr-punc-config'
 import { FunasrPuncEngine } from '@/services/asr/funasr-punc'
+import { getPlatform, hasCapability } from '@/platform'
 
 function pathJoin(dir: string, file: string): string {
   const sep = dir.includes('\\') ? '\\' : '/'
@@ -69,16 +70,14 @@ function requestWorker(type: string, payload: any, transfer?: Transferable[]): P
 }
 
 async function readBinary(path: string): Promise<Uint8Array | null> {
-  const ipc = (window as any).ipcRenderer
-  if (!ipc) throw new Error('非 Electron 环境：无法读取本地模型')
-  const b = await ipc.invoke('readFileBinary', path)
+  if (!hasCapability('fs.pathRead')) throw new Error('非 Electron 环境：无法读取本地模型')
+  const b = await getPlatform().fs.readBinary(path)
   return b instanceof Uint8Array ? b : null
 }
 
 async function readText(path: string): Promise<string | null> {
-  const ipc = (window as any).ipcRenderer
-  if (!ipc) return null
-  const t = await ipc.invoke('readFile', path)
+  if (!hasCapability('fs.pathRead')) return null
+  const t = await getPlatform().fs.readText(path)
   if (typeof t !== 'string' || t.startsWith('Error reading file')) return null
   return t
 }

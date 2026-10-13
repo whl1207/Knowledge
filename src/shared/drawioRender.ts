@@ -20,6 +20,7 @@
 import { DRAWIO_ASSET_DIR } from '@/shared/drawioFile'
 import { installDrawioExportBridge, type DrawioExportHost } from '@/shared/drawioExportBridge'
 import { clampScale, decodeSvgText, drawioSvgToPngDataUrl, svgLogicalSize } from '@/shared/drawioImage'
+import { getPlatform, hasCapability } from '@/platform'
 
 /** 首次渲染要加载 drawio 应用本体，给足时间；之后单次渲染只等一次 load 事件 */
 const BOOT_TIMEOUT = 30_000
@@ -516,18 +517,17 @@ export async function renderDiagramPng(xml: string, opts: { scale?: number; page
 
 /**
  * 读取本地图表文件文本。
- * `readFile` 走主进程（.drawio 落在"其他扩展名"分支按 UTF-8 文本返回）；
+ * `.drawio` 经平台层按 UTF-8 文本读回（落在「其他扩展名」分支）；
  * 中文 / 空格文件名可能是百分号编码，逐个候选路径尝试（与 readImageAsDataUrl 同策略）。
  */
 export async function readDiagramFile(path: string): Promise<string> {
-  const ipc: any = (window as any)?.ipcRenderer
   const raw = String(path || '')
-  if (!raw || !ipc?.invoke) return ''
+  if (!raw || !hasCapability('fs.pathRead')) return ''
   // 中文 / 空格文件名可能是百分号编码：原样与还原后各试一次
   const candidates = new Set<string>([raw, decodeDiagramPath(raw)])
   for (const cand of candidates) {
     try {
-      const r = await ipc.invoke('readFile', cand)
+      const r: any = await getPlatform().fs.readText(cand)
       const text =
         typeof r === 'string' ? r : r && typeof r === 'object' && r.success !== false ? String(r.content ?? '') : ''
       if (!text) continue

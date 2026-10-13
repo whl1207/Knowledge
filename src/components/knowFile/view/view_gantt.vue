@@ -3,6 +3,7 @@
   import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
   import { ElMessageBox, ElMessage } from 'element-plus'
   import { stripMdSuffix, attrDateOf, collectTimeFields, resolveStartFieldOf, DEFAULT_TIME_FIELD, colorOfAttributes } from '@/lib/knowFile/itemMeta'
+import { getPlatform, hasCapability } from '@/platform'
   
   const store = usestore()
 
@@ -202,7 +203,7 @@
     const dir = store.dataDir
     if (dir === '') return
     try {
-      const list = await window.ipcRenderer.invoke('getFiles', dir, deep.value)
+      const list = await getPlatform().fs.listTree(dir, deep.value)
       // 只排期 Markdown 文件：文件夹与其它格式（图片 / 表格 / 代码等）不参与甘特
       const files = (list || []).filter((f: any) => f.type === 'file' && String(f.extension || '').toLowerCase() === '.md')
       // 起止字段候选：只收时间类字段（与日历视图一致）
@@ -293,12 +294,12 @@
       // 读取当前元数据
       let metadata: Record<string, any> = {}
       try {
-        metadata = (await window.ipcRenderer.invoke('getConfig', filePath)) || {}
+        metadata = (await getPlatform().fs.readMetadata(filePath)) || {}
       } catch (e) {}
       
       // 更新字段并保存
       metadata[field] = dateStr
-      await window.ipcRenderer.invoke('saveFileMetadata', filePath, metadata)
+      await getPlatform().fs.saveMetadata(filePath, metadata)
       ElMessage.success(`${label}: ${dateStr}`)
       await init()
     } catch {

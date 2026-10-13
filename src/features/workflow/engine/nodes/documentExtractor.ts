@@ -1,7 +1,7 @@
 /**
  * document-extractor（文档提取器）执行器
  *
- * 取一个文件变量（本地路径），读成文本。主进程 readFile 已内置 .docx → Markdown 转换，
+ * 取一个文件变量（本地路径），读成文本。平台层读文本已内置 .docx → Markdown 转换，
  * 因此 word 文档也能直接读取；不支持的二进制格式会给出明确提示。
  */
 import { resolveSelector, stringifyValue } from '../template'
@@ -28,7 +28,7 @@ export const documentExtractorExecutor: WorkflowNodeExecutor = {
 
     ctx.log('info', `读取文件 ${path}`)
     try {
-      const text = await ctx.invokeIpc('readFile', path)
+      const text = await ctx.readTextFile(path)
       const content = typeof text === 'string' ? text : stringifyValue(text)
       ctx.log('info', `已读取 ${content.length} 字符`)
       return { outputs: { text: content } }

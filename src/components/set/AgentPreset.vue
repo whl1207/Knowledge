@@ -1,8 +1,9 @@
 <!-- AgentPreset.vue - Agent 预设：常用 Agent 模板库管理 -->
 <template>
-  <div class="agent-preset">
-    <!-- ====== 左侧：预设列表（ToDo 风格 top-toolbar：搜索 / 新建 / 打开文件夹） ====== -->
-    <div class="contact-sidebar">
+  <div class="agent-preset" :class="{ tall: isTallLayout }">
+    <!-- ====== 左侧：预设列表（ToDo 风格 top-toolbar：搜索 / 新建 / 打开文件夹） ======
+         细长窗口下与右侧编辑区各占满整屏互相切换（见 .tall 样式） -->
+    <div class="contact-sidebar" v-show="!isTallLayout || showNavScreen">
       <div class="top-toolbar contact-toolbar">
         <div class="contact-actions-row">
           <button class="toolbar-action-btn" @click="addPreset" :title="store.locales === 'en' ? 'New Preset' : '新建预设'">
@@ -80,7 +81,15 @@
     </div>
 
     <!-- ====== 右侧：预设配置编辑 ====== -->
-    <div class="contact-content">
+    <div class="contact-content" v-show="!isTallLayout || !showNavScreen">
+      <!-- 细长窗口：编辑屏左上角返回（回到整屏预设列表） -->
+      <div v-if="isTallLayout" class="ap-back-bar">
+        <div class="ap-back" @click="showNavScreen = true"
+          :title="store.locales === 'en' ? 'Back to preset list' : '返回预设列表'">
+          <i class="fa fa-arrow-left"></i>
+        </div>
+        <span class="ap-back-title">{{ store.locales === 'en' ? 'Preset Editor' : '预设编辑' }}</span>
+      </div>
       <div v-if="!selected" class="empty-hint" style="height:100%;">
         <i class="fa fa-address-book-o" style="font-size:36px;"></i>
         <span>{{ store.locales === 'en' ? 'Select a preset on the left to edit' : '选择左侧 Agent 预设进行编辑' }}</span>
@@ -476,8 +485,16 @@ import { renderLoopSections } from '@/lib/agent/skill'
 import { AGENT_MAX_STEPS_MAX, DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset, resetBuiltinAgentPreset, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 import { deepSeekStyleOf, normalizeLlmTypeList } from '@/shared/llmSources'
+import { getPlatform, hasCapability } from '@/platform'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const store = usestore()
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：预设列表与编辑区不再并排（并排会把编辑区挤到只剩
+// 一两百像素），而是各占满整屏互相切换（与设置导航 / 知识管理文件树 / MCP 设置同一套做法）。
+// true = 预设列表屏，false = 编辑屏；宽窗口下两者并排，本状态无意义。
+const isTallLayout = useTallLayout()
+const showNavScreen = ref(true)
 
 // ====== 搜索 ======
 const presetKeyword = ref('')
@@ -721,7 +738,7 @@ const skillList = ref<SkillInfo[]>([])
 const loadSkillList = async () => {
   if (!store.skillsPath) { skillList.value = []; return }
   try {
-    const loaded = await window.ipcRenderer.invoke('loadSkills', store.skillsPath)
+    const loaded = await getPlatform().host.skills.list(store.skillsPath)
     const disabled = new Set(store.disabledSkills || [])
     skillList.value = (loaded || [])
       .filter((s: any) => !disabled.has(s.name))
@@ -761,7 +778,7 @@ const knowledgeBaseList = ref<KbFileInfo[]>([])
 const scanKnowledgeBases = async () => {
   if (!store.root) return
   try {
-    const result = await window.ipcRenderer.invoke('getFilesRelation', store.root, 1)
+    const result = await getPlatform().fs.listTreeWithRelations(store.root, 1)
     const fileList: any[] = result?.fileList || []
     knowledgeBaseList.value = fileList
       .filter((f: any) => f.path?.endsWith('.kb'))
@@ -831,7 +848,7 @@ const toggleMcpEquipment = (agent: AgentPreset, key: string) => {
 
 // 添加知识库文件（追加到已选列表）
 const addKbFile = async (agent: AgentPreset) => {
-  const path = await window.ipcRenderer.invoke('selectFile')
+  const path = await getPlatform().dialog.pickFile()
   if (path && !agent.capabilities.knowledgeBaseFiles.includes(path)) {
     agent.capabilities.knowledgeBaseFiles.push(path)
   }
@@ -1061,7 +1078,7 @@ const moveLoopSection = (i: number, dir: number) => {
   arr[j] = tmp
 }
 
-const selectPreset = (id: string) => { selectedId.value = id; activeTab.value = 'general' }
+const selectPreset = (id: string) => { selectedId.value = id; activeTab.value = 'general'; showNavScreen.value = false }
 
 // ====== 右键菜单：复制 / 导出 .agent ======
 const presetMenu = ref<{ visible: boolean; x: number; y: number; preset: AgentPreset | null }>({
@@ -1088,6 +1105,7 @@ const duplicatePreset = async (preset: AgentPreset | null) => {
   delete (clone as any).builtin
   store.agentPresets.push(clone)
   selectedId.value = clone.id
+  showNavScreen.value = false   // 细长窗口：副本建好后直接进编辑屏
   store.saveConfig()
   const ok = await writeAgentPreset(clone)
   ElMessage.success(store.locales === 'en'
@@ -1100,7 +1118,7 @@ const exportPreset = async (preset: AgentPreset | null) => {
   if (!preset) return
   try {
     const safeName = String(preset.name || 'agent').replace(/[\\/:*?"<>|\s]+/g, '_')
-    const filePath = await window.ipcRenderer.invoke('saveFileDialog', {
+    const filePath = await getPlatform().dialog.saveFile({
       defaultPath: `${safeName}.agent`,
       filters: [
         { name: 'Agent Preset', extensions: ['agent'] },
@@ -1108,7 +1126,7 @@ const exportPreset = async (preset: AgentPreset | null) => {
       ],
     })
     if (filePath) {
-      await window.ipcRenderer.invoke('writeFile', filePath, JSON.stringify(preset, null, 2))
+      await getPlatform().fs.writeText(filePath, JSON.stringify(preset, null, 2))
       ElMessage.success(store.locales === 'en' ? 'Exported' : '已导出 .agent 文件')
     }
   } catch (e: any) {
@@ -1184,6 +1202,7 @@ const addPreset = async () => {
   }
   store.agentPresets.push(preset)
   selectedId.value = preset.id
+  showNavScreen.value = false   // 细长窗口：新建后直接进编辑屏
   store.saveConfig()
   const ok = await writeAgentPreset(preset)
   if (!ok) {
@@ -1225,7 +1244,7 @@ const exportAllPresets = async () => {
 
 /** 导入单个 .agent 文件到预设列表（并写入预设文件夹，与其它预设一致持久化） */
 const importAgentFile = async () => {
-  const path = await window.ipcRenderer.invoke('selectFile', {
+  const path = await getPlatform().dialog.pickFile({
     filters: [
       { name: 'Agent Preset', extensions: ['agent'] },
       { name: 'All Files', extensions: ['*'] },
@@ -1233,7 +1252,7 @@ const importAgentFile = async () => {
   })
   if (!path) return
   try {
-    const text = await window.ipcRenderer.invoke('readFile', path)
+    const text = await getPlatform().fs.readText(path)
     const data = JSON.parse(text)
     if (!data || !data.id || typeof data.id !== 'string') {
       ElMessage.error(store.locales === 'en' ? 'Invalid .agent file (missing id)' : '无效的 .agent 文件（缺少 id）')
@@ -1292,6 +1311,7 @@ const importAgentFile = async () => {
 
     store.agentPresets.push(data)
     selectedId.value = data.id
+    showNavScreen.value = false   // 细长窗口：导入后直接进编辑屏
     store.saveConfig()
     await writeAgentPreset(data)
     ElMessage.success(store.locales === 'en' ? 'Preset imported' : '已导入预设')
@@ -1871,4 +1891,82 @@ onMounted(async () => {
   background: color-mix(in srgb, #f56c6c 8%, transparent);
 }
 .loop-template-btn i { font-size: 10px; }
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：预设列表 / 编辑区各占满整屏互相切换 ======
+   不再并排（并排会把编辑区挤到只剩一两百像素）。两屏都用 v-show 隐藏，切回来时表单状态还在。 */
+.agent-preset.tall .contact-sidebar {
+  width: 100%;
+  border-right: 0;
+}
+/* 预设条目按钢琴键式整宽条目呈现：行高够手指点 */
+.agent-preset.tall .contact-sidebar-list {
+  padding: 8px;
+}
+.agent-preset.tall .contact-item {
+  min-height: 56px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background-color: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.agent-preset.tall .contact-item.active {
+  background-color: var(--menuActiveColor);
+}
+.agent-preset.tall .contact-item-name {
+  font-size: 14px;
+}
+.agent-preset.tall .contact-content {
+  width: 100%;
+}
+/* 编辑屏顶部的返回条（只在细长窗口出现） */
+.ap-back-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+  flex-shrink: 0;
+}
+.ap-back {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+.ap-back:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.ap-back-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+}
+/* tab 栏：细长窗口整屏后宽度仍偏窄（< 420px）会按容器查询只留图标，这里保留文字并允许横向滑动 */
+.agent-preset.tall .ae-tabs {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.agent-preset.tall .ae-tabs::-webkit-scrollbar { display: none; }
+.agent-preset.tall .ae-tab {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.agent-preset.tall .ae-tab-reset { margin-left: 0; }
+.agent-preset.tall .ae-tab-text { display: inline; }
 </style>

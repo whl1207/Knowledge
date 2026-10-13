@@ -15,13 +15,13 @@
  *   2. 用 `normalizeViewName()` 归一化历史持久化数据（旧名：编辑 / 块编辑 / 导图）。
  *
  * 独立「文件窗口」（FileWindow / 主进程 open-file-window）用的是另一套 key：
- *   read / edit / blockedit / mindmap / presentation（见 key 字段），窗口标题映射在
+ *   read / office / edit / blockedit / mindmap / presentation（见 key 字段），窗口标题映射在
  *   electron/main/index.ts 的 viewLabelMap（那边不能直接 import 本文件，改动时一起改）。
  */
 
 export interface FileViewDef {
   /** 独立文件窗口 / 主进程用的 key（稳定不改） */
-  key: 'read' | 'edit' | 'blockedit' | 'mindmap' | 'presentation'
+  key: 'read' | 'office' | 'edit' | 'blockedit' | 'mindmap' | 'presentation'
   /** 视图标识 = 中文显示名（改名要同步所有比较点，见文件头注释） */
   name: string
   /** 英文显示名 */
@@ -30,8 +30,15 @@ export interface FileViewDef {
   icon: string
 }
 
-/** 文件视图定义（顺序即展示顺序） */
+/**
+ * 文件视图定义（顺序即展示顺序）。
+ *
+ * 注意：`office`（内嵌 Office 编辑器）排在最前 —— 对 .docx / .xlsx / .pptx 它是默认视图
+ * （内核已构建时由主进程的 pickDefaultView 直接指定），也是切换器里的第一项。
+ * 其余类型（Markdown / 代码 / 图片…）不会出现该视图，见 FileWindow 的 availableViews。
+ */
 export const FILE_VIEWS: FileViewDef[] = [
+  { key: 'office', name: 'Office 编辑', labelEn: 'Office', icon: 'fa fa-file-word-o' },
   { key: 'read', name: '浏览', labelEn: 'Browse', icon: 'fa fa-book' },
   { key: 'edit', name: '源码编辑', labelEn: 'Source', icon: 'fa fa-code' },
   { key: 'blockedit', name: '可视编辑', labelEn: 'Visual', icon: 'fa fa-th-large' },
@@ -41,12 +48,35 @@ export const FILE_VIEWS: FileViewDef[] = [
 
 /** 文件视图标识列表（顺序同上） */
 export const FILE_VIEW_NAMES: string[] = FILE_VIEWS.map((v) => v.name)
-// 常用标识常量：代码里请在比较时用这些常量，不要再写字面量（改名时它们自动跟随）
-export const VIEW_BROWSE = FILE_VIEWS[0].name
-export const VIEW_SOURCE = FILE_VIEWS[1].name
-export const VIEW_VISUAL = FILE_VIEWS[2].name
-export const VIEW_MINDMAP = FILE_VIEWS[3].name
-export const VIEW_PRESENTATION = FILE_VIEWS[4].name
+
+// 常用标识常量：**按 key 取**而不是按下标取，这样调整 FILE_VIEWS 顺序不会让常量错位
+const nameOfKey = (key: FileViewDef['key']): string => {
+  const def = FILE_VIEWS.find((v) => v.key === key)
+  if (!def) throw new Error(`未知的文件视图 key：${key}`)
+  return def.name
+}
+
+export const VIEW_OFFICE = nameOfKey('office')
+export const VIEW_BROWSE = nameOfKey('read')
+export const VIEW_SOURCE = nameOfKey('edit')
+export const VIEW_VISUAL = nameOfKey('blockedit')
+export const VIEW_MINDMAP = nameOfKey('mindmap')
+export const VIEW_PRESENTATION = nameOfKey('presentation')
+
+/** 「Office 编辑」视图的 key（对 .docx / .xlsx / .pptx 生效；PDF 不在此列，继续用 PdfViewer） */
+export const OFFICE_VIEW_KEY = 'office' as const
+/** 「Office 编辑」适用的扩展名（与 platform/office.ts 的 EXT_TO_TYPE 一致，改动时一起改） */
+const OFFICE_VIEW_EXTS = ['.docx', '.xlsx', '.xlsm', '.pptx']
+/**
+ * 该路径是否适用「Office 编辑」视图。
+ * 视图切换器、「打开」子菜单都据此过滤：Office 编辑器只服务真实的 Word / Excel / PPT 文件，
+ * 其它格式（Markdown / 代码 / 图片 / PDF / 画布…）的选项里不应出现它。
+ */
+export function supportsOfficeView(filePath: string | null | undefined): boolean {
+  const p = String(filePath || '').toLowerCase()
+  const dot = p.lastIndexOf('.')
+  return dot >= 0 && OFFICE_VIEW_EXTS.includes(p.substring(dot))
+}
 /** 旧标识 → 新标识（历史 localStorage 里的旧视图名与旧默认值） */
 const FILE_VIEW_ALIASES: Record<string, string> = {
   编辑: '源码编辑',

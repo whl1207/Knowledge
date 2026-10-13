@@ -11,6 +11,7 @@ import { onActivated, onMounted } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { isEmptyTaskFile, wrapTaskFile } from '@/lib/taskFile'
+import { getPlatform, hasCapability } from '@/platform'
 
 export interface TaskFileOptions {
     /** 脚手架 key（写入任务文件的 scaffold 字段，供打开文件时识别归属） */
@@ -75,7 +76,7 @@ export function useTaskFile(opts: TaskFileOptions) {
     /** 从指定路径载入（宿主自动加载 / 打开 .task 跳转）；路径为空时为 null，返回是否成功应用 */
     const loadFromFile = async (path: string): Promise<boolean> => {
         loadedPath = path
-        const res = await window.ipcRenderer.invoke('readTaskFile', path)
+        const res = await getPlatform().fs.readTaskFile(path)
         if (!res || !res.success) {
             log('error', (zh() ? '读取失败: ' : 'Read failed: ') + (res?.error || (zh() ? '未知错误' : 'unknown error')) + ` (${path})`)
             opts.onFileMissing?.(path)
@@ -92,7 +93,7 @@ export function useTaskFile(opts: TaskFileOptions) {
         const jsonStr = await buildJson()
         const target = path || opts.filePath()
         if (target) {
-            const res = await window.ipcRenderer.invoke('writeTaskFile', target, jsonStr)
+            const res = await getPlatform().fs.writeTaskFile(target, jsonStr)
             if (!res || !res.success) {
                 log('error', (zh() ? '保存失败: ' : 'Save failed: ') + (res?.error || '') + ` (${target})`)
                 return false
@@ -103,11 +104,12 @@ export function useTaskFile(opts: TaskFileOptions) {
             return true
         }
         // 未关联文件（宿主外使用）：沿用旧的「另存为」对话框
-        const res = await window.ipcRenderer.invoke('saveTaskFile', jsonStr)
+        const res = await getPlatform().fs.saveTaskFileAs(jsonStr)
         if (res?.success) {
-            log('info', (zh() ? '任务状态已保存: ' : 'Task state saved: ') + res.path + ` (${(jsonStr.length / 1024).toFixed(0)}KB)`)
-            opts.onLinkFile?.(res.path)
-            opts.onSaved?.(res.path)
+            const savedPath = res.path || ''
+            log('info', (zh() ? '任务状态已保存: ' : 'Task state saved: ') + savedPath + ` (${(jsonStr.length / 1024).toFixed(0)}KB)`)
+            opts.onLinkFile?.(savedPath)
+            opts.onSaved?.(savedPath)
             return true
         }
         if (res?.error && res.error !== '用户取消') log('error', (zh() ? '保存失败: ' : 'Save failed: ') + res.error)
@@ -117,7 +119,7 @@ export function useTaskFile(opts: TaskFileOptions) {
     /** 旧入口：从对话框选择文件载入（无 path 参数时） */
     const loadTaskState = async (path?: string): Promise<boolean> => {
         if (path) return await loadFromFile(path)
-        const res = await window.ipcRenderer.invoke('loadTaskFile')
+        const res = await getPlatform().fs.pickTaskFile()
         if (!res || !res.success) {
             if (res?.error && res.error !== '用户取消') log('error', (zh() ? '读取失败: ' : 'Read failed: ') + res.error)
             return false
@@ -157,7 +159,7 @@ export function useTaskFile(opts: TaskFileOptions) {
         //    两个流程会并发读同一文件并各自读取一次大表格（主进程解析缓存互相释放 → 报「缓存不存在」）
         if (autoLoadInFlight?.path === path) return await autoLoadInFlight.task
         const task = (async () => {
-            const res = await window.ipcRenderer.invoke('readTaskFile', path, 262144)
+            const res = await getPlatform().fs.readTaskFile(path, 262144)
             // 读不到文件（被移动/删除）：标记缺失，等用户重新定位
             if (!res || !res.success) {
                 loadedPath = path

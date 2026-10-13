@@ -12,6 +12,7 @@
 
 import * as pdfjsLib from 'pdfjs-dist'
 import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
+import { getPlatform, hasCapability } from '@/platform'
 
 export interface PluginPickedFile {
   path: string
@@ -93,6 +94,125 @@ function ipc(): any {
   return api
 }
 
+/**
+ * 平台后端（非 Electron）：用平台能力层直接读写手机 / 网页端能访问的文件。
+ * - 选择文件：安卓走系统选择器（DocPicker，返回 content:// uri）；有原生对话框的平台走 dialog.pickFiles
+ * - 选择目录：dialog.pickDirectory（安卓 = SAF 目录授权，返回 `saf:<名字>`）
+ * - 列目录 / 读文本 / 读二进制：平台 fs（SAF 授权目录与沙箱都支持）
+ * - 读表格：暂不支持（需要桌面版的 SheetJS 解析）
+ */
+function platformAvailable(): boolean {
+  try {
+    return getPlatform().kind !== 'browser'
+  } catch {
+    return false
+  }
+}
+
+/** 桌面（Electron）由主进程提供插件文件服务；其它平台走渲染层平台实现 */
+function hasHostFiles(): boolean {
+  return typeof window !== 'undefined' && !!(window as any).dsh?.plugin?.files
+}
+
+function acceptToMime(accept: string): string {
+  if (accept === 'pdf') return 'application/pdf'
+  if (accept === 'text') return 'text/*'
+  return '*/*'
+}
+
+function base64FromBytes(bytes: Uint8Array): string {
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
+}
+
+function bytesFromBase64(base64: string): Uint8Array {
+  const bin = atob(base64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+async function platformPickFiles(payload: { accept: string; multiple: boolean }) {
+  const platform = getPlatform()
+  if (platform.kind === 'android') {
+    const { createDocumentsAdapter } = await import('@/platform/android/documents')
+    const docs = createDocumentsAdapter()
+    const files = await docs.pickFiles({ multiple: payload.multiple, mime: acceptToMime(payload.accept) })
+    return {
+      cancelled: files.length === 0,
+      files: files.map((f) => ({ path: f.uri, name: f.name, size: Number(f.size) || 0 })),
+    }
+  }
+  if (hasCapability('dialog.native')) {
+    const picked = payload.multiple ? await platform.dialog.pickFiles() : [await platform.dialog.pickFile()]
+    const files = picked.filter(Boolean).map((p: any) => ({ path: String(p.path || p), name: String(p.name || ''), size: Number(p.size) || 0 }))
+    return { cancelled: files.length === 0, files }
+  }
+  throw new Error('当前平台不支持选择文件（可在「打开文件夹」授权目录后读取其中的文件）')
+}
+
+async function platformReadBase64(path: string, maxBytes?: number): Promise<{ path: string; base64: string; size: number }> {
+  if (/^content:\/\//i.test(path)) {
+    const { createDocumentsAdapter } = await import('@/platform/android/documents')
+    const r = await createDocumentsAdapter().readBase64(path, maxBytes)
+    return { path, base64: r.base64, size: r.size }
+  }
+  const bytes = await getPlatform().fs.readBinary(path)
+  if (!bytes) throw new Error(`读取失败：${path}`)
+  const limited = maxBytes && maxBytes > 0 && bytes.length > maxBytes ? bytes.subarray(0, maxBytes) : bytes
+  return { path, base64: base64FromBytes(limited), size: limited.length }
+}
+
+async function platformReadText(path: string, maxBytes?: number): Promise<{ path: string; text: string; pages: number; pdf: boolean }> {
+  if (/^content:\/\//i.test(path)) {
+    const { createDocumentsAdapter } = await import('@/platform/android/documents')
+    const docs = createDocumentsAdapter()
+    const info = await docs.stat(path)
+    const isPdf = /pdf/i.test(info?.mime || '') || /\.pdf$/i.test(info?.name || '')
+    if (isPdf) {
+      const r = await docs.readBase64(path, maxBytes)
+      const parsed = await extractPdfText(bytesFromBase64(r.base64))
+      return { path, text: parsed.text, pages: parsed.pages, pdf: true }
+    }
+    const text = await docs.readText(path, maxBytes)
+    return { path, text, pages: 1, pdf: false }
+  }
+  const raw = await readTextRaw(path)
+  if (/\.pdf$/i.test(path)) {
+    const bytes = await getPlatform().fs.readBinary(path)
+    if (!bytes) throw new Error(`读取失败：${path}`)
+    const parsed = await extractPdfText(bytes)
+    return { path, text: parsed.text, pages: parsed.pages, pdf: true }
+  }
+  return { path, text: raw, pages: 1, pdf: false }
+}
+
+/** 平台 fs 读文本（不走主进度前缀约定：插件侧统一用异常表达失败） */
+async function readTextRaw(path: string): Promise<string> {
+  const text = await getPlatform().fs.readText(path)
+  if (typeof text !== 'string' || text.startsWith('Error reading file')) throw new Error(`读取失败：${path}`)
+  return text
+}
+
+/** 用应用自带的 pdf.js 抽取 PDF 文本（平台后端用；与主进程实现口径一致：按页拼接） */
+async function extractPdfText(bytes: Uint8Array): Promise<{ text: string; pages: number }> {
+  let doc: any
+  try {
+    doc = await pdfjsLib.getDocument({ data: bytes, ...PDFJS_RUNTIME_OPTIONS }).promise
+  } catch (e) {
+    throw new Error(`解析 PDF 失败：${describeError(e)}`)
+  }
+  const pages = Number(doc?.numPages) || 0
+  const parts: string[] = []
+  for (let i = 1; i <= pages; i++) {
+    const page = await doc.getPage(i)
+    const content = await page.getTextContent()
+    parts.push((content?.items || []).map((it: any) => String(it?.str ?? '')).join(' '))
+  }
+  return { text: parts.join('\n'), pages }
+}
+
 /** 把任意异常转成可读文本（pdf.js / DOMException / Electron IPC 错误形状各异） */
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message || error.name
@@ -112,12 +232,17 @@ function describeError(error: unknown): string {
 }
 
 export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
-  const reason = deps.permitted
-    ? ''
-    : `插件 ${deps.pluginId} 未声明 "fs" 权限（package.json 的 aikm.permissions 加 "fs"，然后在插件页重载）`
+  const hostFiles = hasHostFiles()
+  const platformOk = !hostFiles && platformAvailable()
+  const reason = !deps.permitted
+    ? `插件 ${deps.pluginId} 未声明 "fs" 权限（package.json 的 aikm.permissions 加 "fs"，然后在插件页重载）`
+    : !hostFiles && !platformOk
+      ? '当前环境不提供文件读取能力（手机版请用系统选择器授权后再读）'
+      : ''
 
   const guard = (): void => {
-    if (!deps.permitted) throw new Error(reason)
+    if (!deps.permitted) throw new Error(`插件 ${deps.pluginId} 未声明 "fs" 权限（package.json 的 aikm.permissions 加 "fs"，然后在插件页重载）`)
+    if (!hostFiles && !platformOk) throw new Error('当前环境不提供文件读取能力')
   }
 
   const loadPdf = async (path: string): Promise<{ data: Uint8Array; doc: any }> => {
@@ -125,9 +250,11 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
     const cached = pdfCache.get(key)
     if (cached) return cached
     const task = (async () => {
-      const res = await ipc().readBase64({ id: deps.pluginId, path })
+      const res = hasHostFiles()
+        ? await ipc().readBase64({ id: deps.pluginId, path })
+        : await platformReadBase64(path)
       const base64 = String(res?.base64 ?? '')
-      if (!base64) throw new Error('读取 PDF 失败：主进程返回空内容（文件可能过大或已被移动/删除）')
+      if (!base64) throw new Error('读取 PDF 失败：返回空内容（文件可能过大或已被移动/删除）')
       const binary = atob(base64)
       const data = new Uint8Array(binary.length)
       for (let i = 0; i < binary.length; i++) data[i] = binary.charCodeAt(i)
@@ -148,7 +275,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
 
   return {
     get available() {
-      return deps.permitted
+      return deps.permitted && (hostFiles || platformOk)
     },
     get reason() {
       return reason
@@ -156,37 +283,68 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
 
     async pickFiles(options) {
       guard()
-      return ipc().pick({ id: deps.pluginId, accept: options?.accept ?? 'any', multiple: options?.multiple === true })
+      const accept = options?.accept ?? 'any'
+      const multiple = options?.multiple === true
+      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+        return ipc().pick({ id: deps.pluginId, accept, multiple })
+      }
+      return platformPickFiles({ accept, multiple })
     },
 
     async pickDirectory() {
       guard()
-      return ipc().pickDirectory({ id: deps.pluginId })
+      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+        return ipc().pickDirectory({ id: deps.pluginId })
+      }
+      const dir = await getPlatform().dialog.pickDirectory()
+      if (!dir) return { cancelled: true, dir: null }
+      const name = String(dir).replace(/\\/g, '/').replace(/\/+$/, '').split('/').filter(Boolean).pop() || String(dir)
+      return { cancelled: false, dir: { path: dir, name } }
     },
 
     async list(dir) {
       guard()
-      return ipc().list({ id: deps.pluginId, path: dir })
+      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+        return ipc().list({ id: deps.pluginId, path: dir })
+      }
+      const nodes = await getPlatform().fs.listTree(dir, 1)
+      const entries: PluginDirEntry[] = (nodes || []).map((n: any) => ({
+        name: String(n.label || n.path || '').replace(/\\/g, '/').split('/').pop() || '',
+        path: String(n.path || ''),
+        isDir: n.type === 'folder',
+        size: Number(n.size) || 0,
+      }))
+      return { dir, entries }
     },
 
     async readText(filePath, options) {
       guard()
-      return ipc().readText({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
+      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+        return ipc().readText({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
+      }
+      return platformReadText(filePath, options?.maxBytes)
     },
 
     async readBase64(filePath, options) {
       guard()
-      return ipc().readBase64({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
+      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+        return ipc().readBase64({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
+      }
+      return platformReadBase64(filePath, options?.maxBytes)
     },
 
     async readSheet(filePath, options) {
       guard()
-      return ipc().readSheet({
-        id: deps.pluginId,
-        path: filePath,
-        maxRows: options?.maxRows,
-        maxSheets: options?.maxSheets,
-      })
+      void options
+      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+        return ipc().readSheet({
+          id: deps.pluginId,
+          path: filePath,
+          maxRows: options?.maxRows,
+          maxSheets: options?.maxSheets,
+        })
+      }
+      throw new Error('当前平台暂不支持读取表格（Excel / CSV 解析需要桌面版）')
     },
 
     async renderPdfPage(filePath, options) {
@@ -224,9 +382,9 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
 
     async openInApp(filePath, view) {
       guard()
-      const invoke = (window as any).ipcRenderer?.invoke
-      if (typeof invoke !== 'function') throw new Error('仅桌面版支持在应用内置查看器中打开文件')
-      await invoke('open-file-window', { path: filePath, view: view || 'read' })
+      // 桌面 = 独立窗口；安卓 / 网页端 = 应用内浮层（FileWindow overlay），由 store 决定
+      if (getPlatform().kind === 'browser') throw new Error('当前环境不支持在应用内置查看器中打开文件')
+      await getPlatform().window.openFileWindow({ path: filePath, view: view || 'read' })
     },
   }
 }

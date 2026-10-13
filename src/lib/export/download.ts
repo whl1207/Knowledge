@@ -5,6 +5,7 @@
  * 与 Word 原生公式（OMML）。
  */
 import { buildDocxBlob, readImageAsDataUrl, type DocxSkin, type DocxPageProfile } from '@/lib/export/docx'
+import { getPlatform, hasCapability } from '@/platform'
 
 /** 导出结果：name = 文件名；path = 实际落盘路径（浏览器模式或未拿到下载完成事件时为空） */
 export interface WordSaveResult {
@@ -31,26 +32,26 @@ export async function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /**
- * 等 Electron 主进程的下载完成事件（拿真实保存路径）。
+ * 等宿主的下载完成事件（拿真实保存路径）。
  * 主进程的 will-download 兜底会把页面发起的下载静默写盘（不弹框），完成后回发
  * `app-download-done`；拿不到（浏览器模式/超时/取消）就返回空串，不影响导出流程。
  */
 function waitDownloadDone(timeoutMs = 3000): Promise<string> {
-  const ipc: any = (typeof window !== 'undefined') ? (window as any).ipcRenderer : null
-  if (!ipc || typeof ipc.on !== 'function' || typeof ipc.off !== 'function') return Promise.resolve('')
+  if (!hasCapability('downloadSink')) return Promise.resolve('')
   return new Promise<string>((resolve) => {
     let done = false
+    let unsubscribe: () => void = () => {}
+    let timer: ReturnType<typeof setTimeout> | undefined
     const finish = (p: string) => {
       if (done) return
       done = true
       clearTimeout(timer)
-      try { ipc.off('app-download-done', listener) } catch { /* 忽略 */ }
+      try { unsubscribe() } catch { /* 忽略 */ }
       resolve(p)
     }
-    const listener = (_e: any, payload: any) => finish(String(payload?.path || ''))
-    const timer = setTimeout(() => finish(''), timeoutMs)
+    timer = setTimeout(() => finish(''), timeoutMs)
     try {
-      ipc.on('app-download-done', listener)
+      unsubscribe = getPlatform().fs.onDownloadComplete((path) => finish(path))
     } catch {
       finish('')
     }
@@ -69,9 +70,8 @@ export async function downloadAsWord(renderedHtml: string, title: string = '文�
   const name = `${safeName}.docx`
   // Electron：主进程直写目标路径（浏览器式下载拿不到目录信息，只会落下载文件夹）
   const targetPath = (target?.targetPath || '').trim()
-  const ipc: any = (typeof window !== 'undefined') ? (window as any).ipcRenderer : null
-  if (targetPath && ipc && typeof ipc.invoke === 'function') {
-    const res = await ipc.invoke('exportDocx', {
+  if (targetPath && hasCapability('fs.pathWrite')) {
+    const res = await getPlatform().fs.saveBase64({
       base64: await blobToBase64(blob),
       targetPath,
       overwrite: !!target?.overwrite,
@@ -104,12 +104,12 @@ export const downloadAsDocx = downloadAsWord
  * 使导出的 PDF / Word 图片不依赖本地绝对路径或 file:// 访问权限即可显示。
  * 兼容性：
  *  - data: / http(s): / // 远程资源直接跳过；
- *  - file:/// 前缀与 Windows 绝对路径（D:/...、C:\...）走 IPC readFileBase64 读取；
+ *  - file:/// 前缀与 Windows 绝对路径（D:/...、C:\...）走平台层读取（data URL）；
  *  - 相对路径（未以盘符/斜杠开头）可用 baseDir（需以 / 结尾）兜底拼接为绝对路径；
- *  - 非 Electron（浏览器模式）时原样返回。
+ *  - 无读文件能力（浏览器模式）时原样返回。
  */
 export async function inlineLocalImagesAsDataUrls(html: string, baseDir?: string): Promise<string> {
-  if (!html || typeof window === 'undefined' || !(window as any).ipcRenderer) {
+  if (!html || typeof window === 'undefined' || !hasCapability('fs.pathRead')) {
     return html
   }
   let doc: Document

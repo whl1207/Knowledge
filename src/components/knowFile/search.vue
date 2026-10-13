@@ -1,6 +1,7 @@
 <script setup lang="ts">
   import { ref,watch,onMounted, onBeforeUnmount} from 'vue'
   import {usestore} from '@/store'
+import { getPlatform, hasCapability } from '@/platform'
   const store=usestore()
   let localResults=ref([]) as any
   let ifloading = ref(false)
@@ -25,7 +26,7 @@
     if(filterText.value!=""){
       ifloading.value=true
       //本地搜索
-      localResults.value=await window.ipcRenderer.invoke('search',store.root,keyword)//search(store.root,filterText.value)
+      localResults.value=await getPlatform().fs.searchFiles(store.root,keyword)//search(store.root,filterText.value)
       ifloading.value=false
     }
   }

@@ -22,6 +22,8 @@
   import { lazyPanel as makeLazyPanel } from '@/lib/plugin/panels'
   import { useAllSlotEntries } from '@/lib/plugin/useSlots'
   import PluginSlot from '@/components/plugin/PluginSlot.vue'
+import { getPlatform, hasCapability } from '@/platform'
+import { useTallLayout } from '@/composables/useTallLayout'
 
   const lazyPanel = makeLazyPanel
   // ⚠️ 变量名不能叫 Set：会遮蔽全局 Set 构造函数，导致下方 collectRunningTasks 里的 `new Set(...)`
@@ -48,6 +50,10 @@
     try { return new URLSearchParams(h.substring(q + 1)).get('nav') || '' } catch { return '' }
   })()
   const isBrowser = typeof window !== 'undefined' && !(window as any).ipcRenderer // 浏览器模式（LAN 共享）
+  // 安卓（Capacitor 壳）：没有窗口壳概念，设置改为整页展示（手机屏幕小，浮层对话框太挤）
+  const isAndroid = getPlatform().kind === 'android'
+  // 细长窗口（高宽比 > 16:9，如手机竖屏）：与主页 / 知识管理同一套整屏做法（见 useTallLayout）
+  const isTallLayout = useTallLayout()
   store.setTheme()
 
   /**
@@ -130,7 +136,7 @@
     // 局域网共享：启动即把「访客权限策略 + 主机模型」下发给主进程（见函数注释）
     void syncLanGuestPolicyAtStartup()
     // 主进程主动来拉（它每次重启都回到默认策略，而本窗口不会再挂载一次）→ 收到就重新下发
-    window.ipcRenderer?.on('lan:request-guest-policy', () => { void syncLanGuestPolicyAtStartup() })
+    getPlatform().events.on('lan:request-guest-policy', () => { void syncLanGuestPolicyAtStartup() })
     // 网页端（局域网访客）：向主机对齐模型来源（来源开关 / 地址 / 模型）——
     // 否则网页端用自己那份默认配置，会出现「主机能刷出的模型网页端刷不出来」「关掉的来源还在」
     if (!window.ipcRenderer) {
@@ -141,9 +147,17 @@
     // 界面配置随软件分发：开启时以根目录 interface-config.json 覆盖界面配置（独立窗口同样生效）
     await store.loadRemoteInterfaceConfig()
 
+    // 窗口缩放：桌面由主进程在窗口创建时按存档应用；安卓/网页没有主进程，启动时把存档比例落到根元素
+    if (!hasCapability('window.chrome')) {
+      getPlatform().window.setZoom((store.UI.windowZoom || 100) / 100).catch(() => { /* 缩放失败不影响使用 */ })
+    }
+
+    // 安卓系统返回手势 / 返回键：交给渲染层的界面栈处理（见 handleAndroidBack）
+    if (isAndroid) unregisterBack = getPlatform().app.onBackPressed(handleAndroidBack)
+
     // 窗口缩放广播全局监听（Ctrl+Plus/Minus / 设置页调整），同步 store.UI.windowZoom
-    // 注：preload 的 on() 会包一层匿名 wrapper，off() 无法按原引用移除，故只在根组件注册一次
-    window.ipcRenderer?.on('window:zoom-changed', (_e: any, payload: any) => {
+    // 注：只在根组件注册一次；平台层已用同一包装函数登记，退订可精确移除
+    getPlatform().events.on('window:zoom-changed', (payload: any) => {
       if (payload && typeof payload.factor === 'number') {
         store.UI.windowZoom = Math.round(payload.factor * 100)
       }
@@ -151,7 +165,7 @@
 
     // 「设置」独立窗口开合状态广播：桌面版设置不再走窗口内浮层，导航按钮高亮改由此驱动
     // 注意：只更新 settingsWindowOpen，绝不动 store.settingsOpen（那是主窗口内浮层的开关）
-    window.ipcRenderer?.on('settings-window-state', (_e: any, payload: any) => {
+    getPlatform().events.on('settings-window-state', (payload: any) => {
       settingsWindowOpen.value = !!(payload && payload.open)
     })
 
@@ -160,7 +174,7 @@
     // 也需要跟着更新配置，否则设置里开了「协作」（collab.enabled 跟随服务运行状态），
     // 子窗口的协同按钮因 store 陈旧而始终不出现。
     if (!isSettingsWindow.value) {
-      window.ipcRenderer?.on('settings-config-changed', (_e: any, payload: any) => {
+      getPlatform().events.on('settings-config-changed', (payload: any) => {
         store.syncConfigFromPeers(payload?.ui, payload?.locales)
       })
     }
@@ -175,7 +189,7 @@
     // 主进程把「需在主窗口内处理的文件请求」投递到这里（如 .kb 知识库 → 跳转「知识处理」）；
     // 其余文件按统一调度打开（现在一律开独立窗口，见 store.openFileByMode）；
     // 同时回报「渲染层已就绪」，主进程据此在挂载完成后投递排队中的请求（消息早于监听器注册会丢失）
-    window.ipcRenderer?.on('open-file-request', (_e: any, payload: any) => {
+    getPlatform().events.on('open-file-request', (payload: any) => {
       const p = typeof payload?.path === 'string' ? payload.path : ''
       if (!p) return
       if (p.toLowerCase().endsWith('.kb')) { store.openKbFile(p); return }
@@ -184,10 +198,10 @@
       const dot = label.lastIndexOf('.')
       store.openFileByMode({ path: p, label, type: 'file', extension: dot >= 0 ? label.substring(dot).toLowerCase() : '' })
     })
-    window.ipcRenderer?.invoke('main-window-ui-ready').catch(() => {})
+    getPlatform().app.notifyUiReady().catch(() => {})
 
     // 关闭按钮行为以主进程配置为准（userData/app-behavior.json；设置页改动经 IPC 立即下发）
-    window.ipcRenderer?.invoke('app-behavior:get').then((res: any) => {
+    getPlatform().app.getBehavior().then((res: any) => {
       if (res && typeof res.closeToTray === 'boolean') store.UI.closeToTray = res.closeToTray
     }).catch(() => {})
 
@@ -202,7 +216,7 @@
     // 任务增减 / 进度变化即上报给主进程（节流见 scheduleTrayPush；已在上面注册，含独立窗口）
 
     // 初始状态：渲染进程重载（HMR/刷新）时设置窗口可能已经开着，主动查一次以免高亮丢失
-    window.ipcRenderer?.invoke('get-settings-window-state').then((res: any) => {
+    getPlatform().app.isSettingsWindowOpen().then((res: any) => {
       settingsWindowOpen.value = !!(res && res.open)
     }).catch(() => {})
 
@@ -213,6 +227,8 @@
   })
 
   onUnmounted(() => {
+    unregisterBack?.()
+    unregisterBack = null
   })
 
   // 主面板切换即落盘（mainPanel 只在主窗口有意义）：
@@ -225,12 +241,12 @@
   })
 
   function minimizeWindow() {
-    window.ipcRenderer.invoke('minimize-window');
+    getPlatform().window.minimize();
   }
 
   function maximizeWindow() {
     isMaximized.value=!isMaximized.value
-    window.ipcRenderer.invoke('maximize-window');
+    getPlatform().window.toggleMaximize();
   }
 
   // ============ 关闭保护：后台仍有任务在运行时先提醒 ============
@@ -327,8 +343,8 @@
   let trayPushTimer: ReturnType<typeof setTimeout> | null = null
   function pushTrayStatus() {
     try {
-      window.ipcRenderer?.send('tray:status', { items: trayTasks.value, locale: store.locales })
-    } catch (e) { /* 非 Electron 环境忽略 */ }
+      getPlatform().events.emit('tray:status', { items: trayTasks.value, locale: store.locales })
+    } catch (e) { /* 无事件总线环境忽略 */ }
   }
   function scheduleTrayPush() {
     if (trayPushTimer) return
@@ -364,15 +380,75 @@
       }
     }
     store.saveConfig()
-    window.ipcRenderer.invoke('close-window')
+    getPlatform().window.close()
   }
   function closeSetPanel() {
     store.settingsOpen = false
   }
+
+  /**
+   * 安卓系统返回手势 / 返回键的界面栈（渲染层状态，WebView 不知道）：
+   *   元素弹窗 → 应用内文件窗口 → 设置浮层 → 非主页则回主页 → 主页再按一次退出应用。
+   * 返回 true 表示已处理（不退出应用）；false 表示交回系统默认（结束应用）。
+   */
+  const BACK_EXIT_MS = 2000
+  let backExitUntil = 0
+  /** 返回手势退订函数（安卓；组件卸载时解绑） */
+  let unregisterBack: (() => void) | null = null
+
+  /** 关闭当前最上层的 Element Plus 弹窗（有的话）：返回是否真的点了关闭 */
+  function closeTopDialog(): boolean {
+    const overlays = Array.from(document.querySelectorAll('.el-overlay'))
+    for (let i = overlays.length - 1; i >= 0; i--) {
+      const el = overlays[i] as HTMLElement
+      if (el.offsetParent === null && el.getClientRects().length === 0) continue
+      const btn = el.querySelector<HTMLElement>('.el-message-box__close, .el-dialog__headerbtn, .el-drawer__close-btn')
+      if (btn) {
+        btn.click()
+        return true
+      }
+    }
+    return false
+  }
+
+  function handleAndroidBack(): boolean {
+    if (closeTopDialog()) return true
+    if (store.fileWindowOverlay) {
+      store.closeFileWindowOverlay()
+      return true
+    }
+    if (store.settingsOpen) {
+      closeSetPanel()
+      return true
+    }
+    // 主面板不是主页：先回主页（安卓上底部导航不一定常驻，返回手势是主要的回退方式）
+    if (store.mainPanel !== '主页') {
+      store.mainPanel = '主页'
+      return true
+    }
+    // 已在主页根：连按两次才退出（与系统习惯一致，避免误退出）
+    const now = Date.now()
+    if (now < backExitUntil) return false
+    backExitUntil = now + BACK_EXIT_MS
+    const zh = store.locales === 'zh'
+    ElMessage({
+      type: 'info',
+      duration: BACK_EXIT_MS,
+      message: zh ? '再按一次返回退出应用' : 'Press back again to exit',
+    })
+    return true
+  }
+  // 应用内文件窗口（安卓 / 网页端）的重建键：只在**换文件 / 换视图**时重建（重新读盘、视图复位），
+  // 同一文件再次打开（如文档里指向另一页的图表链接）只更新 page，由 FileWindow 自己换页。
+  const fileWindowOverlayKey = computed(() => {
+    const p: any = store.fileWindowOverlay
+    return p ? `${p.path}|${p.view || ''}` : 'none'
+  })
+
   // 打开「浏览器 Agent」独立窗口（多标签 + AI 可控制）；携带「浏览器默认页面」作为首个标签（仅手动打开生效）
   function openBrowserAgent() {
     const home = (store.UI?.browserHomeUrl || '').trim()
-    window.ipcRenderer?.invoke('browser-agent:open', { url: home }).catch(() => {})
+    getPlatform().browserAgent.call('open', { url: home }).catch(() => {})
   }
 </script>
 
@@ -387,9 +463,9 @@
   <SetPanel v-else-if="isSettingsWindow" standalone :initial-nav="settingsWindowNav" style="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;" />
 
   <!-- 主界面（仅当既不是文件窗口也不是浏览器 Agent 窗口时显示） -->
-  <div v-else class="container" :class="{ 'side-nav-mode': isLeftNav }">
-    <!-- 左侧导航栏（仅左侧布局模式显示：全部主面板按钮 + 设置） -->
-    <div v-if="!isBrowser && isLeftNav" class="side-nav">
+  <div v-else class="container" :class="{ 'side-nav-mode': isLeftNav, 'web-mode': isBrowser, 'android-mode': isAndroid, 'tall-mode': isTallLayout }">
+    <!-- 左侧导航栏（左侧布局模式显示：全部主面板按钮 + 设置；网页模式同样显示） -->
+    <div v-if="isLeftNav" class="side-nav">
       <div
         v-for="btn in navButtons"
         :key="btn.key"
@@ -416,8 +492,8 @@
 
     <!-- 右侧内容区：顶栏 + 主内容 -->
     <div class="main-column">
-      <!-- 上方面板 -->
-      <div class="mainPanel" v-if="!isBrowser">
+      <!-- 上方面板（顶栏）：网页模式同样显示，仅窗口控制按钮与浏览器 Agent 入口按能力隐藏 -->
+      <div class="mainPanel">
         <div class="panel-header" :class="{ 'panel-header-compact': isCompactTop }">
           <template v-if="!isCompactTop">
             <!-- 顶部导航布局（默认）：导航按钮 + 标题 + 右侧按钮
@@ -434,16 +510,16 @@
             <!-- 标题水平居中（各面板一致：仅文本，无图标） -->
             <div class="compact-title" style="font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
-            <!-- 浏览器 Agent 独立窗口入口（非主面板；置于右侧设置/窗口按钮组之前；窗口过窄时随标题一起收起；可在「功能 → 导航与模块」里关掉） -->
-            <div v-if="store.isExtraVisible('agent')" class="nav-narrow-hide" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
+            <!-- 浏览器 Agent 入口：需要独立窗口 + 主进程 WebContentsView，网页模式不可用 -->
+            <div v-if="store.isExtraVisible('agent') && hasCapability('window.chrome')" class="nav-narrow-hide" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
             <div :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
-            <div class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
+            <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
             </div>
-            <div class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
+            <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
               <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
             </div>
-            <div @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
+            <div v-if="hasCapability('window.chrome')" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
           </template>
           <template v-else>
             <!-- 左侧/下方导航布局：顶栏只保留标题 + 3 个窗口按钮（其余按钮在对应导航栏）；标题水平居中 -->
@@ -451,13 +527,13 @@
 
             <!-- 窗口过窄时：标题收起，右侧只留 设置 + 关闭（设置按钮只在窄窗口出现，宽窗口仍用导航栏里的那个） -->
             <div class="nav-narrow-only" :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
-            <div class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
+            <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
             </div>
-            <div class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
+            <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
               <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
             </div>
-            <div @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
+            <div v-if="hasCapability('window.chrome')" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
           </template>
         </div>
       </div>
@@ -468,8 +544,8 @@
       </div>
     </div>
 
-    <!-- 底部导航栏（仅底部布局模式显示：全部主面板按钮 + 设置） -->
-    <div v-if="!isBrowser && isBottomNav" class="bottom-nav">
+    <!-- 底部导航栏（底部布局模式显示：全部主面板按钮 + 设置；网页模式同样显示） -->
+    <div v-if="isBottomNav" class="bottom-nav">
       <div
         v-for="btn in navButtons"
         :key="btn.key"
@@ -501,9 +577,36 @@
       </div>
     </div>
   </div> <!-- /.container (v-else) -->
+
+  <!-- 应用内文件窗口（安卓 / 网页端等没有窗口壳的环境）：与设置浮层同样盖在主界面上方，
+       使「打开文件」在这些平台上有可见反馈（原先独立窗口调用是空操作 → 点了没反应）。 -->
+  <div v-if="store.fileWindowOverlay" class="file-window-overlay">
+    <FileWindow
+      :key="fileWindowOverlayKey"
+      overlay
+      :path="store.fileWindowOverlay.path"
+      :view="store.fileWindowOverlay.view"
+      :page="store.fileWindowOverlay.page"
+      :remote-root-id="store.fileWindowOverlay.remoteRootId"
+      :remote-rel="store.fileWindowOverlay.remoteRel"
+      :label="store.fileWindowOverlay.label"
+    />
+  </div>
 </template>
 
 <style scoped>
+  /* 应用内文件窗口浮层（单窗口环境）：铺满主界面，叠在设置浮层之下（设置 1500）、
+     Element Plus 弹窗（2000+）之上——文件窗口里的确认框 / 提示仍需可见。 */
+  .file-window-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1400;
+    background: var(--backgroundColor);
+  }
+
   .set-overlay {
     position: fixed;
     top: 0;
@@ -530,7 +633,27 @@
     overflow: hidden;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
   }
+
+  /* 安卓 / 细长窗口（高宽比 > 16:9，如手机竖屏）：设置整页铺满（手机上浮层对话框太挤，
+     设置内部再按「分类列表 ⇄ 设置内容」整屏切换，见 Set.vue 的 .tall）；顶部的窗口按钮也不适用 */
+  .container.android-mode .set-overlay,
+  .container.tall-mode .set-overlay {
+    background-color: transparent;
+  }
+  .container.android-mode .settings-panel,
+  .container.tall-mode .settings-panel {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+    box-shadow: none;
+  }
     
+  /* 网页模式（LAN 共享）：顶栏不再是窗口拖动区（-webkit-app-region 在浏览器里无效），
+     去掉移动光标；窗口控制按钮已按 window.chrome 能力隐藏 */
+  .container.web-mode .panel-header {
+    cursor: default;
+  }
+
   /* 左侧主面板 */
   .mainPanel {
     width: fit-content;

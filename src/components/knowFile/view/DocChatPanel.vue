@@ -15,6 +15,7 @@
   import { ElMessage } from 'element-plus'
   import { usestore } from '@/store'
   import { renderQuestionMarkdown } from '@/lib/markdown/render'
+import { getPlatform, hasCapability } from '@/platform'
 
   /** 可附带上下文选项 */
   interface AttachOption {
@@ -253,13 +254,12 @@
 
   const startChatWatchdog = (requestId: string, epoch: number) => {
     stopChatWatchdog()
-    const ipc = (window as any).ipcRenderer
-    if (!ipc?.invoke) return
+    if (!hasCapability('llm.hosted')) return
     chatWatchTimer = setInterval(async () => {
       if (epoch !== chatEpoch) { stopChatWatchdog(); return }
       if (!chatLoading.value) { stopChatWatchdog(); return }
       let snap: any = null
-      try { snap = await ipc.invoke('ai:get', { requestId }) } catch { /* 查询失败忽略 */ }
+      try { snap = await getPlatform().llm.get(requestId) } catch { /* 查询失败忽略 */ }
       const done = !snap || snap.status === 'completed' || snap.status === 'error' || snap.status === 'aborted'
       const last = chatList.value[chatList.value.length - 1]
       const hasContent = !!(last && last.role === 'assistant' && last.content)
@@ -268,7 +268,7 @@
       if (!done && !contentStall && !hardTimeout) return
       stopChatWatchdog()
       if (!snap || snap.status !== 'completed') {
-        try { await ipc.invoke('ai:abort', { requestId }) } catch { /* ignore */ }
+        try { await getPlatform().llm.abort(requestId) } catch { /* ignore */ }
       }
       chatLoading.value = false
       chatAbort = null
@@ -388,8 +388,7 @@
       chatLoading.value = false
       if (chatAbort) { try { chatAbort.abort() } catch { /* ignore */ } chatAbort = null }
       stopChatWatchdog()
-      const ipc = (window as any).ipcRenderer
-      if (ipc?.invoke && lastReqId) ipc.invoke('ai:abort', { requestId: lastReqId }).catch(() => {})
+      if (hasCapability('llm.hosted') && lastReqId) getPlatform().llm.abort(lastReqId).catch(() => { /* 忽略 */ })
     }
     chatComposing.value = false
     sendChatMessage()

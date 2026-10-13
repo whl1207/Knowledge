@@ -2,7 +2,11 @@
  * tts-worker.ts — 本地 ONNX TTS（Kokoro / Piper）工作线程
  *
  * 把 sherpa-onnx 的模型加载与语音合成从 Electron 主进程搬到 worker 线程，
- * 避免同步的 WASM 推理阻塞主进程事件循环（否则窗口拖动/菜单/IPC 会卡死）。
+ * 避免同步推理阻塞主进程事件循环（否则窗口拖动/菜单/IPC 会卡死）。
+ *
+ * 运行时用原生 N-API 版（sherpa-onnx-node）而非 WASM 版：WASM 版在 Node 下
+ * 强制单线程（"WASM does not support multi-threading"），Kokoro 这类大模型
+ * 实测 RTF ≈ 3.7，原生多线程可降到 RTF ≈ 0.3。
  *
  * 通信协议（主进程 → worker）：
  *   { id, type: 'status' | 'load' | 'synthesize' | 'dispose', payload }
@@ -11,9 +15,14 @@
  *   { id, ok: false, error }
  */
 
-import { parentPort } from 'node:worker_threads'
+import { parentPort, workerData } from 'node:worker_threads'
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
+
+/** 主进程传入的可写缓存目录（用于 espeak 数据目录的 ASCII 映射） */
+const cacheDir: string = (workerData as any)?.cacheDir || ''
 
 // ---------- sherpa-onnx 懒加载 ----------
 
@@ -24,15 +33,90 @@ async function loadSherpa(): Promise<any> {
   if (sherpa) return sherpa
   if (sherpaLoadPromise) return sherpaLoadPromise
   sherpaLoadPromise = (async () => {
-    const mod: any = await import('sherpa-onnx')
+    const mod: any = await import('sherpa-onnx-node')
     const s = mod?.default ?? mod
-    if (typeof s?.createOfflineTts !== 'function') {
-      throw new Error('sherpa-onnx 缺少 createOfflineTts')
+    if (typeof s?.OfflineTts !== 'function') {
+      throw new Error('sherpa-onnx-node 缺少 OfflineTts')
     }
     sherpa = s
     return s
   })()
   return sherpaLoadPromise
+}
+
+/** 切换模型 / 卸载时释放实例（原生运行时由 GC 回收，带 free() 的实现则显式调用） */
+function releaseTts(tts: any): void {
+  try {
+    if (typeof tts?.free === 'function') tts.free()
+  } catch { /* ignore */ }
+}
+
+/**
+ * espeak-ng / openfst 内部按 ANSI 处理路径，非 ASCII 的辅助文件路径会直接
+ * 崩掉原生运行时（espeak 报找不到 phontab；ruleFsts 在 createOfflineTts 时
+ * 触发 0xC0000409）。这里把这类路径映射到缓存目录下的 ASCII 链接/副本。
+ */
+const ASCII_PATH_RE = /^[\x20-\x7E]+$/
+
+function asciiCacheRoot(): string {
+  return cacheDir || path.join(os.tmpdir(), 'ai-km-tts')
+}
+
+function hashPath(p: string): string {
+  return createHash('sha1').update(p).digest('hex').slice(0, 12)
+}
+
+/** 非 ASCII 目录 → 缓存目录下的 ASCII 同名目录（优先建链接，失败则复制） */
+function ensureAsciiDir(srcDir: string): string {
+  if (!srcDir || ASCII_PATH_RE.test(srcDir)) return srcDir
+  const target = `${path.join(asciiCacheRoot(), 'espeak-ng-data')}-${hashPath(srcDir)}`
+  const usable = () => {
+    try {
+      return fs.readdirSync(target).length > 0
+    } catch {
+      return false
+    }
+  }
+  try {
+    if (!usable()) {
+      fs.rmSync(target, { recursive: true, force: true })
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      try {
+        fs.symlinkSync(srcDir, target, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch {
+        fs.cpSync(srcDir, target, { recursive: true })
+      }
+    }
+    if (usable()) return target
+  } catch (err: any) {
+    console.warn(`[TTS-WORKER] 数据目录 ASCII 映射失败，回退原路径: ${err?.message || err}`)
+  }
+  return srcDir
+}
+
+/** 非 ASCII 文件 → 缓存目录下的 ASCII 副本（ruleFsts 等小文件） */
+function ensureAsciiFile(srcFile: string): string {
+  if (!srcFile || ASCII_PATH_RE.test(srcFile)) return srcFile
+  const target = path.join(asciiCacheRoot(), 'rules', `${hashPath(srcFile)}-${path.basename(srcFile)}`)
+  try {
+    const src = fs.statSync(srcFile)
+    const same = (() => {
+      try {
+        const dst = fs.statSync(target)
+        return dst.size === src.size && dst.mtimeMs >= src.mtimeMs
+      } catch {
+        return false
+      }
+    })()
+    if (!same) {
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.copyFileSync(srcFile, target)
+    }
+    return target
+  } catch (err: any) {
+    console.warn(`[TTS-WORKER] 规则文件 ASCII 映射失败，回退原路径: ${err?.message || err}`)
+    return srcFile
+  }
 }
 
 // ---------- 模型目录文件探测 ----------
@@ -128,7 +212,7 @@ async function getTts(engine: string, modelDir: string, lang?: string): Promise<
     if (!model || !voices || !tokens) {
       throw new Error('Kokoro 模型目录缺少文件（需要 model.onnx + voices.bin + tokens.txt）')
     }
-    const dataDir = findDataDir(modelDir)
+    const dataDir = ensureAsciiDir(findDataDir(modelDir))
     const lexicons = findLexicons(modelDir)
     // 默认 en：lang='zh' 遇英文/数字会崩，'en' 中英文混合都正常
     const effectiveLang = lang || 'en'
@@ -151,14 +235,16 @@ async function getTts(engine: string, modelDir: string, lang?: string): Promise<
     if (!model || !tokens) {
       throw new Error('Piper 模型目录缺少文件（需要 *.onnx + tokens.txt）')
     }
-    const dataDir = findDataDir(modelDir)
+    const dataDir = ensureAsciiDir(findDataDir(modelDir))
     const lexicon = findFile(modelDir, ['lexicon.txt', 'lexicon-us-en.txt', 'lexicon-zh.txt'])
     // 中文 VITS 模型（如 vits-zh-hf-*）需 =/数字→中文归一；英文 Piper 不归一
     const isChinese = /(?:^|[-_])zh(?:[-_]|$)/i.test(modelDir) || /(?:^|[-_])zh(?:[-_]|$)/i.test(path.basename(model))
     // 中文 VITS 的 ruleFsts（数字/日期/电话规范化）与 dictDir（jieba 分词），
-    // 官方对 vits-zh-hf-* 系列必需，否则数字读法错误、前端退化为逐字
+    // 官方对 vits-zh-hf-* 系列必需，否则数字读法错误、前端退化为逐字；
+    // 原生运行时的 openfst 读不了非 ASCII 路径，需先映射（否则崩在 createOfflineTts）
     const fstNames = ['phone.fst', 'date.fst', 'number.fst', 'new_heteronym.fst', '*.fst']
     const fsts = [...new Set(fstNames.map((f) => findFile(modelDir, [f])).filter(Boolean) as string[])]
+      .map(ensureAsciiFile)
     const dictDir = path.join(modelDir, 'dict')
     const hasDict = fs.existsSync(dictDir) && fs.statSync(dictDir).isDirectory()
     resolvedEngine = 'Piper'
@@ -182,15 +268,19 @@ async function getTts(engine: string, modelDir: string, lang?: string): Promise<
   // 释放同引擎不同目录的旧实例，避免内存堆积
   for (const [k, v] of cache) {
     if (v.engine === resolvedEngine && k !== key) {
-      try { v.tts.free() } catch { /* ignore */ }
+      releaseTts(v.tts)
       cache.delete(k)
     }
   }
 
+  // 原生运行时支持多线程：按逻辑核数的一半取（上限 8，留出核心给界面）
+  const cpus = os.cpus()?.length || 2
+  const numThreads = Math.max(1, Math.min(8, Math.round(cpus / 2)))
+
   const config = {
     model: {
       ...(resolvedEngine === 'Kokoro' ? { kokoro: modelConfig } : { vits: modelConfig }),
-      numThreads: 1, // WASM 构建不支持多线程（自动降为 1）
+      numThreads,
       debug: 0,
       provider: 'cpu',
     },
@@ -202,7 +292,7 @@ async function getTts(engine: string, modelDir: string, lang?: string): Promise<
 
   let tts: any
   try {
-    tts = s.createOfflineTts(config)
+    tts = new s.OfflineTts(config)
   } catch (err: any) {
     throw new Error(`创建 TTS 失败（模型文件损坏或格式不支持？）: ${err?.message || err}`)
   }
@@ -340,11 +430,12 @@ function sanitizeTextForTts(text: string, aggressive = false): string {
 /** 合成一段（先做引擎相关归一，再常规清洗；失败则激进清洗重试一次） */
 function generateWithFallback(entry: ResolvedEntry, text: string, sid: number, speed: number): any {
   const prepared = prepareText(entry, text)
+  // enableExternalBuffer=false：Electron 禁止外部 ArrayBuffer，原生运行时默认开启会抛错
   try {
-    return entry.tts.generate({ text: sanitizeTextForTts(prepared), sid, speed })
+    return entry.tts.generate({ text: sanitizeTextForTts(prepared), sid, speed, enableExternalBuffer: false })
   } catch (e1: any) {
     console.warn(`[TTS-WORKER] 常规清洗合成失败，尝试激进清洗: ${e1?.message || String(e1)}`)
-    return entry.tts.generate({ text: sanitizeTextForTts(prepared, true), sid, speed })
+    return entry.tts.generate({ text: sanitizeTextForTts(prepared, true), sid, speed, enableExternalBuffer: false })
   }
 }
 
@@ -410,7 +501,7 @@ port.on('message', async (msg: any) => {
       return
     } else if (type === 'dispose') {
       for (const [, v] of cache) {
-        try { v.tts.free() } catch { /* ignore */ }
+        releaseTts(v.tts)
       }
       cache.clear()
       kokoroLangOverride.clear()

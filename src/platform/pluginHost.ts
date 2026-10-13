@@ -1,0 +1,462 @@
+/**
+ * platform/pluginHost — 渲染层插件宿主（非 Electron 平台的 PluginBridgeApi 实现）
+ *
+ * 背景：桌面版插件宿主在**主进程**（electron/main/plugin-host.ts）：扫描插件目录、解析清单、
+ * 分发工具、管配置 / 日志 / 授权。安卓与网页端没有主进程，于是这一层把「宿主」搬到渲染层，
+ * 直接用平台能力层（src/platform）读写手机上的插件目录——这样 **同一个插件（界面半边）**
+ * 在安卓上也能装载：面板、设置页、槽位、ctx.tts、ctx.files 都在渲染层，本来就不依赖主进程。
+ *
+ * 落地范围（务实的第一版）：
+ * - 插件目录：默认 `<应用文件根>/plugins`（安卓上即 /sdcard/Documents/plugins，用文件管理器就能放插件），
+ *   也可指向任意可读目录（含 SAF 授权目录，如 `saf:知识库/plugins`）；
+ * - 清单：复用 `shared/pluginManifest.parseManifest`，与桌面同一套校验（不出现「桌面能装、手机说非法」）；
+ * - 用户选择：启用 / 禁用、配置 JSON、日志缓冲、文件授权记录都存 localStorage（每个插件 id 一份）；
+ * - client 半边：读入口源码交给 `lib/plugin/runtime.ts`（Blob URL 动态 import）——与桌面同一条路径；
+ * - 主进程半边（插件工具 / ctx.storage）：本平台没有进程可跑，工具列表因此为空；
+ *   界面半边里的 `ctx.files` 走平台实现（见 lib/plugin/files.ts）。
+ */
+
+import type { PluginBridgeApi, PluginClientBundle } from '@/lib/plugin/bridge'
+import type { PluginLogLine, PluginSnapshot } from '@/types/plugin'
+import { PLUGIN_HOST_API_VERSION, type AikmPluginManifest } from '@/types/plugin'
+import { PLUGIN_MANIFEST_FILE, checkApiVersion, parseManifest } from '@/shared/pluginManifest'
+import { isValidPluginId } from '@/types/ids'
+import { capabilityMode, getPlatform } from '@/platform'
+
+/** localStorage 键（与应用既有约定一致：插件相关数据带 aikm.plugin. 前缀） */
+const LS_ROOT = 'aikm.plugins.root'
+const LS_ENABLED = 'aikm.plugins.enabled'
+const LS_CONFIG = 'aikm.plugins.config.'
+const LS_GRANTS = 'aikm.plugins.grants.'
+
+/** 默认插件目录（相对平台文件根；安卓实际默认走私有目录，见 pluginRootDir()） */
+export const DEFAULT_PLUGIN_DIR = 'plugins'
+
+const LOG_LIMIT = 200
+const READ_ERROR_PREFIX = 'Error reading file'
+
+interface GrantRecord {
+  path: string
+  isDir: boolean
+}
+
+/** 宿主的易失状态（装载时间 / 日志缓冲）；重启后由扫描重建 */
+const loadedAt = new Map<string, number>()
+const logBuffers = new Map<string, PluginLogLine[]>()
+
+function lsGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function lsSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* 配额 / 隐私模式：忽略 */
+  }
+}
+
+function lsRemove(key: string): void {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function readJson<T>(key: string, fallback: T): T {
+  const raw = lsGet(key)
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
+/** 用户自定义的插件目录（空 = 用默认值） */
+function customRootDir(): string {
+  return (lsGet(LS_ROOT) || '').trim()
+}
+
+/**
+ * 插件根目录：
+ * - 用户自定义优先（可写成 SAF 授权目录，如 `saf:知识库/plugins`）；
+ * - 安卓默认放**应用私有目录** `data:plugins`：Android 11+ 分区存储下，公共 Documents 里
+ *   由别的应用 / adb 写入的文件本应用读不到（EACCES），私有目录才稳定可读写；
+ * - 其它平台默认 `plugins`（相对平台文件根，桌面 = 当前目录下的 plugins）。
+ */
+export function pluginRootDir(): string {
+  const custom = customRootDir()
+  if (custom) return custom
+  try {
+    return getPlatform().kind === 'android' ? 'data:plugins' : DEFAULT_PLUGIN_DIR
+  } catch {
+    return DEFAULT_PLUGIN_DIR
+  }
+}
+
+function enabledMap(): Record<string, boolean> {
+  return readJson<Record<string, boolean>>(LS_ENABLED, {})
+}
+
+/** 默认启用：放进目录就该能用（手机上没有桌面那种「先扫描再手动启用」的审批面板） */
+function isEnabled(id: string): boolean {
+  return enabledMap()[id] !== false
+}
+
+function configOf(id: string): Record<string, unknown> {
+  return readJson<Record<string, unknown>>(LS_CONFIG + id, {})
+}
+
+function grantsOf(id: string): GrantRecord[] {
+  return readJson<GrantRecord[]>(LS_GRANTS + id, [])
+}
+
+function pushLog(id: string, level: PluginLogLine['level'], message: string): void {
+  const list = logBuffers.get(id) || []
+  list.push({ ts: Date.now(), level, message })
+  if (list.length > LOG_LIMIT) list.splice(0, list.length - LOG_LIMIT)
+  logBuffers.set(id, list)
+}
+
+function joinPath(dir: string, rel: string): string {
+  const d = String(dir || '').replace(/[\\/]+$/, '')
+  const r = String(rel || '').replace(/^[\\/]+/, '')
+  return d ? `${d}/${r}` : r
+}
+
+function baseName(p: string): string {
+  const norm = String(p || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  return norm.split('/').filter(Boolean).pop() || norm
+}
+
+/** 读文本文件；读不到（含「不存在」）返回 null */
+async function readTextOrNull(path: string): Promise<string | null> {
+  try {
+    const text = await getPlatform().fs.readText(path)
+    if (typeof text !== 'string' || text.startsWith(READ_ERROR_PREFIX)) return null
+    return text
+  } catch {
+    return null
+  }
+}
+
+/** 读一个插件目录的清单并转成 snapshot（清单非法时返回原因） */
+async function snapshotOf(dir: string, relDir: string, id: string): Promise<{ snapshot: PluginSnapshot | null; invalid?: string }> {
+  const text = await readTextOrNull(joinPath(dir, PLUGIN_MANIFEST_FILE))
+  if (text === null) return { snapshot: null, invalid: `缺少 ${PLUGIN_MANIFEST_FILE}` }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch (e: any) {
+    return { snapshot: null, invalid: `${PLUGIN_MANIFEST_FILE} 解析失败：${e?.message || e}` }
+  }
+
+  const parsed = parseManifest(raw, id)
+  if (!parsed.ok) return { snapshot: null, invalid: parsed.message }
+  const manifest: AikmPluginManifest = parsed.manifest
+  const apiCheck = checkApiVersion(manifest.apiVersion, PLUGIN_HOST_API_VERSION)
+  const enabled = isEnabled(parsed.id)
+  const hasClient = !!manifest.client?.entry
+  const hasMain = !!manifest.main
+  const error = !apiCheck.ok
+    ? apiCheck.reason
+    : !hasClient
+      ? hasMain
+        ? '该插件只有主进程半边（工具），当前平台没有主进程，无法加载'
+        : '没有可加载的入口'
+      : null
+
+  const snapshot: PluginSnapshot = {
+    id: parsed.id,
+    name: manifest.name || parsed.id,
+    version: manifest.version,
+    apiVersion: manifest.apiVersion,
+    description: manifest.description || '',
+    dir,
+    relDir,
+    folder: relDir.includes('/') ? relDir.slice(0, relDir.lastIndexOf('/')) : '',
+    status: error ? 'invalid' : !enabled ? 'disabled' : 'active',
+    enabled,
+    permissions: manifest.permissions || [],
+    inject: manifest.inject || [],
+    // 主进程半边的工具在手机上没有运行环境：列表为空（界面半边照常工作）
+    tools: [],
+    services: [],
+    hasMain,
+    hasClient,
+    clientEntry: manifest.client?.entry || null,
+    config: configOf(parsed.id),
+    declaredSlots: manifest.declares?.slots || [],
+    error,
+    loadedAt: loadedAt.get(parsed.id) || null,
+  }
+  return { snapshot }
+}
+
+/** 扫描插件根目录（顶层插件目录 + 一层分类文件夹里的插件） */
+export async function listPlugins(): Promise<{
+  plugins: PluginSnapshot[]
+  rootDir: string
+  customRoot: boolean
+  services: string[]
+  invalidNamedDirs: string[]
+}> {
+  const rootDir = pluginRootDir()
+  const customRoot = !!customRootDir()
+  const plugins: PluginSnapshot[] = []
+  const invalidNamedDirs: string[] = []
+  if (!capabilityMode('fs.pathRead').startsWith('local')) {
+    return { plugins, rootDir, customRoot, services: [], invalidNamedDirs }
+  }
+  const fs = getPlatform().fs
+  // 插件目录可能还不存在（安卓首次运行 / 用户自定义目录）：先建出来，读失败再按空列表处理
+  try {
+    await fs.ensureDir(rootDir)
+  } catch {
+    /* 建不了也没关系：下面的 listTree 会失败并返回空列表 */
+  }
+
+  /** 目录名必须是合法插件 id（与桌面一致：中文 / 大写 / 空格目录跳过并回报） */
+  const considerDir = async (dir: string, relDir: string) => {
+    const name = baseName(dir)
+    if (!isValidPluginId(name)) {
+      invalidNamedDirs.push(`${relDir}（目录名不能作为插件 id）`)
+      return
+    }
+    const { snapshot, invalid } = await snapshotOf(dir, relDir, name)
+    if (snapshot) plugins.push(snapshot)
+    else if (invalid) invalidNamedDirs.push(`${relDir}（${invalid}）`)
+  }
+
+  let top: any[] = []
+  try {
+    top = await fs.listTree(rootDir, 2)
+  } catch {
+    top = []
+  }
+
+  for (const node of top) {
+    if (node?.type !== 'folder') continue
+    const children: any[] = Array.isArray(node.children) ? node.children : []
+    const hasManifest = children.some((c) => c?.type === 'file' && baseName(c.path) === PLUGIN_MANIFEST_FILE)
+    if (hasManifest) {
+      await considerDir(node.path, baseName(node.path))
+      continue
+    }
+    for (const sub of children) {
+      if (sub?.type !== 'folder') continue
+      await considerDir(sub.path, `${baseName(node.path)}/${baseName(sub.path)}`)
+    }
+  }
+
+  plugins.sort((a, b) => a.id.localeCompare(b.id))
+  return { plugins, rootDir, customRoot, services: [], invalidNamedDirs }
+}
+
+/** 读插件 client 半边入口源码（runtime 用 Blob URL 动态 import） */
+export async function clientBundleOf(id: string): Promise<PluginClientBundle> {
+  const info = await listPlugins()
+  const snap = info.plugins.find((p) => p.id === id)
+  if (!snap) throw new Error(`插件未找到：${id}`)
+  if (!snap.clientEntry) throw new Error(`插件 ${id} 没有界面半边入口`)
+  const code = await readTextOrNull(joinPath(snap.dir, snap.clientEntry))
+  if (code === null) throw new Error(`读取入口失败：${snap.clientEntry}`)
+  // 记录装载时间：runtime 据此判断「重新载入」是否要重新 import
+  loadedAt.set(id, Date.now())
+  return { entry: snap.clientEntry, code }
+}
+
+/** 把选中的目录内容复制进插件根目录（手机上的「从文件夹安装插件」） */
+async function installFromDir(sourceDir: string, replace: boolean): Promise<PluginSnapshot> {
+  const fs = getPlatform().fs
+  const name = baseName(sourceDir)
+  if (!isValidPluginId(name)) throw new Error(`目录名 "${name}" 不能作为插件 id（须小写字母 / 数字 / . _ -）`)
+  const target = joinPath(pluginRootDir(), name)
+  if (!replace && (await readTextOrNull(joinPath(target, PLUGIN_MANIFEST_FILE))) !== null) {
+    throw new Error(`插件 ${name} 已存在（可勾选「覆盖」重装）`)
+  }
+  const nodes = await fs.listTree(sourceDir, 8)
+
+  const copyNode = async (node: any) => {
+    const rel = String(node.path || '').slice(String(sourceDir).length).replace(/^[\\/]+/, '')
+    const dest = joinPath(target, rel)
+    if (node.type === 'folder') {
+      await fs.ensureDir(dest)
+      for (const child of node.children || []) await copyNode(child)
+      return
+    }
+    const text = await readTextOrNull(node.path)
+    if (text !== null) {
+      const r = await fs.writeText(dest, text)
+      if (!r.success) throw new Error(`写入失败：${rel}`)
+      return
+    }
+    const bytes = await fs.readBinary(node.path)
+    if (!bytes) throw new Error(`读取失败：${rel}`)
+    let bin = ''
+    for (const b of bytes) bin += String.fromCharCode(b)
+    const r = await fs.writeBinaryBase64(dest, btoa(bin))
+    if (!r.success) throw new Error(`写入失败：${rel}`)
+  }
+
+  await fs.ensureDir(target)
+  for (const node of nodes) await copyNode(node)
+  const { snapshot, invalid } = await snapshotOf(target, name, name)
+  if (!snapshot) throw new Error(invalid || '安装后无法解析清单')
+  return snapshot
+}
+
+/** 构造渲染层插件宿主（PluginBridgeApi） */
+export function createLocalPluginHost(): PluginBridgeApi {
+  const findSnapshot = async (id: string): Promise<PluginSnapshot> => {
+    const { plugins } = await listPlugins()
+    const snap = plugins.find((p) => p.id === id)
+    if (!snap) throw new Error(`插件未找到：${id}`)
+    return snap
+  }
+  const setEnabled = async (id: string, enabled: boolean): Promise<PluginSnapshot> => {
+    const map = enabledMap()
+    map[id] = enabled
+    lsSet(LS_ENABLED, JSON.stringify(map))
+    return await findSnapshot(id)
+  }
+
+  return {
+    list: () => listPlugins(),
+
+    async inspect(spec) {
+      const empty = { id: null, name: null, version: null, apiVersion: null, permissions: [] as string[] }
+      const dir = String(spec || '').trim()
+      if (!dir) return { ok: false, ...empty, problem: '缺少插件目录' }
+      const { snapshot, invalid } = await snapshotOf(dir, baseName(dir), baseName(dir))
+      if (!snapshot) return { ok: false, ...empty, problem: invalid || '无法解析清单' }
+      return {
+        ok: true,
+        id: snapshot.id,
+        name: snapshot.name,
+        version: snapshot.version,
+        apiVersion: snapshot.apiVersion,
+        permissions: snapshot.permissions,
+        problem: null,
+      }
+    },
+
+    enable: (id) => setEnabled(id, true),
+    disable: (id) => setEnabled(id, false),
+
+    async reload(id) {
+      // 改完界面半边点「重新载入」：装载时间变化 → runtime 会卸载后重新 import 入口
+      loadedAt.set(id, Date.now())
+      return await findSnapshot(id)
+    },
+
+    async uninstall(id) {
+      const map = enabledMap()
+      delete map[id]
+      lsSet(LS_ENABLED, JSON.stringify(map))
+      lsRemove(LS_CONFIG + id)
+      lsRemove(LS_GRANTS + id)
+      // 手机上没有「移到回收站」的概念：目录留给用户自己删（不静默删用户文件）
+      return { removed: true, deletedDir: false }
+    },
+
+    async getConfig(id) {
+      return configOf(id)
+    },
+
+    async setConfig(id, patch) {
+      const next = { ...configOf(id), ...(patch || {}) }
+      lsSet(LS_CONFIG + id, JSON.stringify(next))
+      return next
+    },
+
+    async logs(id) {
+      return logBuffers.get(id) || []
+    },
+
+    clientLog(id, level, message) {
+      pushLog(id, level, String(message))
+    },
+
+    async openDir(id) {
+      const root = pluginRootDir()
+      // 没有系统文件管理器可唤起（安卓私有目录 / 网页）→ 只回路径，界面退化为提示
+      return { path: id ? joinPath(root, id) : root, opened: false }
+    },
+
+    /** 渲染层没有独立的插件数据目录（配置与日志都在 localStorage / OPFS），这里按空处理 */
+    async dataFiles(id) {
+      return { id, entries: [] }
+    },
+    async dataFilesAll() {
+      return { byId: {} }
+    },
+    async removeDataFile() {
+      return { removed: false }
+    },
+    async clearDataFiles() {
+      return { removed: false }
+    },
+
+    files: {
+      async grants(options) {
+        return { id: options.id, entries: grantsOf(options.id).map((g) => ({ ...g, exists: true })) }
+      },
+      async revokeGrant(options) {
+        const next = grantsOf(options.id).filter((g) => g.path !== options.path)
+        lsSet(LS_GRANTS + options.id, JSON.stringify(next))
+        return { removed: true }
+      },
+      async clearGrants(options) {
+        lsRemove(LS_GRANTS + options.id)
+        return { removed: true }
+      },
+    },
+
+    clientBundle: (id) => clientBundleOf(id),
+
+    /** 重新扫描（渲染层宿主没有缓存，重新列一遍即可） */
+    async rescan() {
+      return await listPlugins()
+    },
+
+    async install(options) {
+      const picked = await getPlatform().dialog.pickDirectory()
+      if (!picked) return { cancelled: true, snapshot: null }
+      const snapshot = await installFromDir(picked, options?.replace === true)
+      return { cancelled: false, snapshot }
+    },
+
+    async setRoot(options) {
+      if (options?.path) {
+        lsSet(LS_ROOT, options.path)
+        return { cancelled: false, rootDir: options.path }
+      }
+      const dir = await getPlatform().dialog.pickDirectory()
+      if (!dir) return { cancelled: true, rootDir: pluginRootDir() }
+      lsSet(LS_ROOT, dir)
+      return { cancelled: false, rootDir: dir }
+    },
+
+    async resetRoot() {
+      lsRemove(LS_ROOT)
+      return { cancelled: false, rootDir: pluginRootDir() }
+    },
+
+    onEvent() {
+      // 渲染层宿主没有跨进程事件：订阅返回空退订函数（列表刷新由调用方手动触发）
+      return () => {}
+    },
+  }
+}
+
+/** 当前平台是否能用渲染层插件宿主（能读文件即可；浏览器 dev / 局域网访客页会退回 null） */
+export function localPluginHostAvailable(): boolean {
+  return capabilityMode('fs.pathRead') !== 'none'
+}

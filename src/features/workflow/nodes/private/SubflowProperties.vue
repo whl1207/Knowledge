@@ -39,6 +39,7 @@ import { createFlowT } from '@/features/workflow/ui/locales'
 import SelectorList from '../SelectorList.vue'
 import type { SelectorRow } from '../SelectorList.vue'
 import type { NodePanelProps } from '../panelProps'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<NodePanelProps>()
 const store = usestore()
@@ -56,7 +57,7 @@ function set(key: string, value: unknown): void {
 }
 
 async function pickFile(): Promise<void> {
-  const path = await window.ipcRenderer.invoke('selectFile', {
+  const path = await getPlatform().dialog.pickFile({
     filters: [{ name: '工作流', extensions: ['yml', 'yaml'] }],
   })
   if (!path) return

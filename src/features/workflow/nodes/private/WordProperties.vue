@@ -73,6 +73,7 @@ import { createFlowT } from '@/features/workflow/ui/locales'
 import VariableSelector from '@/features/workflow/ui/VariableSelector.vue'
 import type { NodePanelProps } from '../panelProps'
 import type { ValueSelector } from '@/features/workflow/dsl/types'
+import { getPlatform, hasCapability } from '@/platform'
 
 const props = defineProps<NodePanelProps>()
 const store = usestore()
@@ -92,12 +93,12 @@ function set(key: string, value: unknown): void {
 }
 
 async function pickStyle(): Promise<void> {
-  const path = await window.ipcRenderer.invoke('selectFile', { filters: [{ name: 'Word 模板', extensions: ['docx'] }] })
+  const path = await getPlatform().dialog.pickFile({ filters: [{ name: 'Word 模板', extensions: ['docx'] }] })
   if (path) set('style_path', path)
 }
 
 async function pickDir(): Promise<void> {
-  const path = await window.ipcRenderer.invoke('selectFile', { properties: ['openDirectory'] })
+  const path = await getPlatform().dialog.pickFile({ properties: ['openDirectory'] })
   if (path) set('dir_path', path)
 }
 </script>

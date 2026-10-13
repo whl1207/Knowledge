@@ -32,8 +32,17 @@ import { FILE_VIEWS } from '@/lib/knowFile/fileViews'
 import { ElMessage, ElMessageBox } from 'element-plus'
 // 数据页（DataSettings.vue）与「常用操作」共用：占用统计 / 文件 IO / 聊天记录读取
 import { LOCAL_STORAGE_LIMIT, MD_FILTERS, countEntries, formatBytes, lsTotalBytes, readLsJson, readStoredChats, saveTextFile, stampText } from '@/lib/settingsData'
+import { getPlatform, hasCapability } from '@/platform'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const store = usestore()
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：导航列表与设置内容不再并排，而是各占满整屏互相切换
+//（与主页「聊天列表 ⇄ 对话」、知识管理「文件树抽屉 ⇄ 视图」同一套做法）
+const isTallLayout = useTallLayout()
+// 细长窗口下当前显示哪一屏：true = 设置分类列表，false = 设置内容；宽窗口下两者并排，本状态无意义。
+// 起手看分类列表（手机上这就是「设置首页」）；从别处跳转（工具 / MCP / 预设…）时直接进内容
+const showNavScreen = ref(true)
 
 // standalone：本组件作为「设置」独立子窗口的根组件渲染（窗口无系统标题栏，顶栏即拖动区）
 // initialNav：独立窗口首次打开时要定位的设置分类（主进程经 #/settings-window?nav=xxx 传入）
@@ -213,6 +222,8 @@ const applyNav = (nav: string) => {
   // 跳转后只展开目标项所属分组
   const groupId = findGroupByChild(nav)
   expandedGroups.value = groupId ? new Set([groupId]) : new Set()
+  // 细长窗口：跳转即进内容屏（用户是从别处被带到这一个设置页的，不该停在分类列表）
+  if (isTallLayout.value) showNavScreen.value = false
 }
 
 watch(() => store.settingsNav, (nav) => {
@@ -243,6 +254,17 @@ const selectNav = (id: string) => {
   expandedGroups.value = groupId ? new Set([groupId]) : new Set()
 }
 
+/**
+ * 点导航项：
+ * - 宽窗口：两者并排，只改选中项（一级项沿用原行为，不动分组展开状态）；
+ * - 细长窗口：整屏切换，点一下即进入该设置页（内容屏）。
+ */
+const onNavSelect = (id: string, isSub = false) => {
+  if (isSub) selectNav(id)
+  else activeNav.value = id
+  if (isTallLayout.value) showNavScreen.value = false
+}
+
 // ================ 版本信息 ================
 // 编译期由 vite define 注入（见 vite.config.ts），运行期不可变
 const appVersion: string = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : ''
@@ -257,15 +279,15 @@ const buildTimeText = computed(() => {
 })
 
 const openConsole = function() {
-  window.ipcRenderer.send('dev',{})
+  getPlatform().window.toggleDevTools()
 }
 let serveState = ref(false)
 
-if(window.ipcRenderer!=undefined){
-  window.ipcRenderer.on('server-status', (event, status) => {
+if(hasCapability('events.bus')){
+  getPlatform().events.on('server-status', (status: any) => {
     console.log(status)
     serveState.value = status
-  })  
+  })
 }
 
 // 协作设置（局域网共享/协同文件编辑/远程文件共享 + 知识库共享目录）已抽离为独立模块
@@ -299,7 +321,7 @@ const removeWorkspace = (path: string) => {
 }
 
 const openFolder = async function() {
-  let path = await window.ipcRenderer.invoke('openFolderDialog')
+  let path = await getPlatform().dialog.pickDirectory()
   if(path!=null){
     // 添加为新的工作区并设为当前工作区（重复路径仅切换当前工作区，返回 false）
     const isNew = store.addRoot(path)
@@ -413,7 +435,7 @@ const pythonInstallation = ref({
 // 检查Python安装状态
 const checkPythonInstallation = async () => {
   try {
-    const result = await window.ipcRenderer.invoke('checkPythonInstallation')
+    const result = await getPlatform().host.python.checkInstallation()
     pythonInstallation.value = result
     return result
   } catch (error) {
@@ -672,13 +694,12 @@ const handleExportChatsMarkdown = async () => {
 /** 在系统文件管理器中打开某个工作区文件夹（工作区行右侧按钮；仅桌面版） */
 const openWorkspaceFolder = async (p: string) => {
   const zh = store.locales === 'zh'
-  const ipc: any = (window as any).ipcRenderer
-  if (!ipc?.invoke) {
+  if (!hasCapability('shell.systemOpen')) {
     ElMessage.warning(zh ? '浏览器模式下无法打开本机文件夹' : 'Not available in browser mode')
     return
   }
   try {
-    const res = await ipc.invoke('openWithSystemApp', p)
+    const res = await getPlatform().shell.openWithSystemApp(p)
     if (res && res.success === false) ElMessage.error((zh ? '打开失败：' : 'Failed: ') + (res.error || ''))
   } catch (e: any) {
     ElMessage.error((zh ? '打开失败：' : 'Failed: ') + (e?.message || String(e)))
@@ -708,9 +729,9 @@ const handleResetAIconfig = async () => {
 
 // 关闭设置：独立窗口模式关闭窗口；主窗口浮层模式隐藏浮层
 const closeSettings = () => {
-  if (props.standalone) {
+  if (props.standalone && hasCapability('window.chrome')) {
     store.saveConfig()
-    window.ipcRenderer?.invoke('close-window').catch(() => {})
+    getPlatform().window.close().catch(() => {})
     return
   }
   store.settingsOpen = false
@@ -719,11 +740,11 @@ const closeSettings = () => {
 // ================ 独立窗口按钮（standalone 模式下显示在顶栏右侧） ================
 const isMaximized = ref(false)
 const minimizeWindow = () => {
-  window.ipcRenderer?.invoke('minimize-window').catch(() => {})
+  getPlatform().window.minimize().catch(() => {})
 }
 const maximizeWindow = () => {
   isMaximized.value = !isMaximized.value
-  window.ipcRenderer?.invoke('maximize-window').catch(() => {})
+  getPlatform().window.toggleMaximize().catch(() => {})
 }
 
 // 独立窗口的系统菜单/任务栏标题（index.html 的 <title>AI-KM</title> 会覆盖主进程设置的标题）
@@ -736,8 +757,8 @@ watch(() => store.locales, syncWindowTitle)
 // 全屏切换（桌面版：通过主进程切换窗口全屏；顶栏已无全屏按钮，统一在此操作）
 const isFullscreen = ref(false)
 const toggleFullscreen = async () => {
-  if (!window.ipcRenderer) return
-  isFullscreen.value = await window.ipcRenderer.invoke('toggle-fullscreen')
+  if (!hasCapability('window.chrome')) return
+  isFullscreen.value = await getPlatform().window.toggleFullscreen()
 }
 
 // Esc 键关闭设置面板（浮层模式；独立窗口下设置内的弹窗本身用 Esc 取消，故不响应关窗）
@@ -751,25 +772,23 @@ const onSettingsKeydown = (e: KeyboardEvent) => {
 const ZOOM_PCT_MIN = 50
 const ZOOM_PCT_MAX = 200
 
-// 同步主进程当前的缩放因子到输入框
+// 同步当前生效的缩放因子到输入框（桌面读主进程 zoomFactor；安卓/网页读根元素 CSS zoom）
 const syncWindowZoom = async () => {
-  if (!window.ipcRenderer) return
   try {
-    const res = await window.ipcRenderer.invoke('window:zoomGet')
-    if (res && typeof res.factor === 'number') {
-      store.UI.windowZoom = Math.round(res.factor * 100)
+    const factor = await getPlatform().window.getZoom()
+    if (typeof factor === 'number') {
+      store.UI.windowZoom = Math.round(factor * 100)
     }
   } catch (e) {
     console.error('获取窗口缩放失败:', e)
   }
 }
 
-// 应用缩放（百分比 → 主进程 zoomFactor）
+// 应用缩放（百分比 → 桌面改主进程 zoomFactor；安卓/网页改根元素 CSS zoom）
 const applyWindowZoom = (pct: number) => {
   const clamped = Math.min(ZOOM_PCT_MAX, Math.max(ZOOM_PCT_MIN, Math.round(pct)))
   store.UI.windowZoom = clamped
-  if (!window.ipcRenderer) return
-  window.ipcRenderer.invoke('window:zoomSet', { factor: clamped / 100 }).catch((e: any) => {
+  getPlatform().window.setZoom(clamped / 100).catch((e: any) => {
     console.error('设置窗口缩放失败:', e)
   })
 }
@@ -795,7 +814,7 @@ const resetZoom = () => {
 const syncCloseBehavior = async () => {
   if (!window.ipcRenderer) return
   try {
-    const res = await window.ipcRenderer.invoke('app-behavior:get')
+    const res = await getPlatform().app.getBehavior()
     if (res && typeof res.closeToTray === 'boolean') store.UI.closeToTray = res.closeToTray
   } catch (e) {
     console.error('获取关闭按钮行为失败:', e)
@@ -811,7 +830,7 @@ const applyCloseBehavior = async () => {
     return
   }
   try {
-    const res = await window.ipcRenderer.invoke('app-behavior:set', { closeToTray: want })
+    const res = await getPlatform().app.setBehavior({ closeToTray: want })
     const actual = !!(res && res.closeToTray)
     store.UI.closeToTray = actual
     store.saveConfig()
@@ -862,8 +881,8 @@ const wordExportTemplates = [
   { key: 'custom', labelZh: '自定义 Word 模板', labelEn: 'Custom Word Template' },
 ]
 const chooseWordExportStyle = async () => {
-  if (!window.ipcRenderer) return
-  const path = await window.ipcRenderer.invoke('selectFile', {
+  if (!hasCapability('dialog.native')) return
+  const path = await getPlatform().dialog.pickFile({
     filters: [{ name: 'Word 样式模板', extensions: ['docx'] }],
     properties: ['openFile'],
   })
@@ -921,9 +940,12 @@ const unmountMapTile = async (id: string, name: string) => {
 }
 
 // 其它窗口广播主题/语言时跟随（载荷 { ui, locales }；applyThemeFromBroadcast 内含抑制标志，不会回环广播）
-const onPeerThemeChanged = (_e: any, payload: any) => {
+const onPeerThemeChanged = (payload: any) => {
   store.applyThemeFromBroadcast(payload)
 }
+
+/** theme-changed 广播退订句柄（设置独立窗口挂载时登记） */
+let unsubPeerTheme: (() => void) | null = null
 
 // 组件挂载时初始化
 onMounted(async () => {
@@ -946,9 +968,9 @@ onMounted(async () => {
       // 首次定位（主进程 hash 传入，如从 AgentSwarm 跳「预设」）
       applyNav(props.initialNav || '')
       // 设置窗口已存在时再次被要求跳转（主窗口再次点「设置 → 工具/MCP/技能」等）
-      window.ipcRenderer?.on('settings:navigate', (_e: any, nav: string) => applyNav(nav))
+      getPlatform().events.on('settings:navigate', (nav: any) => applyNav(String(nav ?? '')))
       // 其它窗口（主窗口内的设置页）改主题/语言时本窗口跟随（广播载荷 { ui, locales }）
-      window.ipcRenderer?.on('theme-changed', onPeerThemeChanged)
+      unsubPeerTheme = getPlatform().events.on('theme-changed', onPeerThemeChanged)
     }
 
     // 同步窗口缩放比例（主进程缩放广播在 App.vue 全局监听，避免重复注册）
@@ -989,7 +1011,8 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onSettingsKeydown)
-  window.ipcRenderer?.off('theme-changed', onPeerThemeChanged)
+  unsubPeerTheme?.()
+  unsubPeerTheme = null
   mbUnsub?.()
   mbUnsub = null
   store.saveConfig()
@@ -997,9 +1020,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="settings-wrap" :class="{ standalone }">
+  <div class="settings-wrap" :class="{ standalone, tall: isTallLayout }">
     <!-- 顶部标题栏：标题 + 版本 + 关闭/窗口按钮（独立窗口中整条即为窗口拖动区） -->
     <div class="settings-header" :class="{ 'settings-header-drag': standalone }">
+      <!-- 细长窗口：内容屏左上角的返回（回到设置分类列表） -->
+      <div v-if="isTallLayout && !showNavScreen" class="settings-back" @click="showNavScreen = true"
+        :title="store.locales === 'zh' ? '返回设置分类' : 'Back to settings list'">
+        <i class="fa fa-arrow-left"></i>
+      </div>
       <span class="settings-header-title">
         <i class="fa fa-cogs"></i>
         {{ store.locales === 'zh' ? '设置' : 'Settings' }}
@@ -1008,8 +1036,8 @@ onBeforeUnmount(() => {
       <span class="settings-header-version" :title="buildTimeText ? ((store.locales=='zh' ? '构建时间：' : 'Built: ') + buildTimeText) : ''">
         {{ appVersion }}
       </span>
-      <!-- 独立窗口：最小化 / 最大化还原 / 关闭窗口 -->
-      <template v-if="standalone">
+      <!-- 独立窗口：最小化 / 最大化还原 / 关闭窗口（网页端无窗口壳，自动隐藏） -->
+      <template v-if="standalone && hasCapability('window.chrome')">
         <div class="settings-winbtn" @click="minimizeWindow" :title="store.locales === 'zh' ? '最小化' : 'Minimize'">
           <i class="fa fa-minus"></i>
         </div>
@@ -1020,13 +1048,13 @@ onBeforeUnmount(() => {
           <i class="fa fa-times"></i>
         </div>
       </template>
-      <div v-else class="settings-close" @click="closeSettings" :title="store.locales === 'zh' ? '关闭设置 (Esc)' : 'Close settings (Esc)'">
+      <div v-else class="settings-close" @click="closeSettings" :title="store.locales === 'zh' ? '关闭设置' : 'Close settings'">
         <i class="fa fa-times"></i>
       </div>
     </div>
-    <!-- 左侧导航栏 -->
+    <!-- 左侧导航栏（细长窗口下与右侧内容各占满整屏互相切换，见 .tall 样式） -->
     <div class="settings-container">
-    <div class="settings-nav scoll">
+    <div class="settings-nav scoll" v-show="!isTallLayout || showNavScreen">
       <template v-for="item in navTreeAll" :key="item.id">
         <!-- 一级分组（可折叠，含二级子项） -->
         <div v-if="item.children && item.children.length" class="nav-group">
@@ -1041,7 +1069,7 @@ onBeforeUnmount(() => {
               :key="child.id"
               class="nav-item nav-item-sub"
               :class="{ active: activeNav === child.id }"
-              @click="selectNav(child.id)"
+              @click="onNavSelect(child.id, true)"
               :title="getTitle(child)"
             >
               <i :class="child.icon || 'fa fa-angle-right'"></i>
@@ -1054,7 +1082,7 @@ onBeforeUnmount(() => {
           v-else
           class="nav-item"
           :class="{ active: activeNav === item.id }"
-          @click="activeNav = item.id"
+          @click="onNavSelect(item.id)"
           :title="getTitle(item)"
         >
           <i :class="item.icon"></i>
@@ -1063,8 +1091,8 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <!-- 右侧设置内容 -->
-    <div class="settings-content scoll">
+    <!-- 右侧设置内容（细长窗口下与左侧导航各占满整屏互相切换，见 .tall 样式） -->
+    <div class="settings-content scoll" v-show="!isTallLayout || !showNavScreen">
       <!-- 系统状态（原「系统配置」改名：Python / 安全策略 / 本地存储等运行状态；随「其他」分区显示） -->
       <div v-if="activeNav === 'other'" class="settings-section">
         <div class="settings-group">
@@ -1674,6 +1702,28 @@ onBeforeUnmount(() => {
   cursor: move;
 }
 
+/* 细长窗口（高宽比 > 16:9，如手机竖屏）：内容屏左上角的返回按钮（回到设置分类列表） */
+.settings-back {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fontColor);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 14px;
+  /* 独立窗口的顶栏是窗口拖动区，按钮需 no-drag 才能点击 */
+  -webkit-app-region: no-drag;
+}
+.settings-back:hover {
+  color: var(--fontActiveColor);
+  background-color: var(--menuActiveColor);
+}
+
 /* 独立窗口按钮（最小化 / 最大化还原 / 关闭） */
 .settings-winbtn {
   width: 30px;
@@ -1854,6 +1904,98 @@ onBeforeUnmount(() => {
   height: calc(100% - 0px);
   /* 与容器/面板圆角一致，避免右下角直角露出 */
   border-bottom-right-radius: 10px;
+}
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：导航 / 内容各占满整屏互相切换 ======
+   不再并排（并排会把设置内容挤到只剩一两百像素），由 showNavScreen 决定显示哪一屏；
+   两屏都用 v-show 隐藏（不是 v-if）：切回来时表单状态还在。 */
+.settings-wrap.tall .settings-nav,
+.settings-wrap.tall .settings-content {
+  width: 100%;
+  box-sizing: border-box;
+  border-right: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* 细长窗口的导航 = 钢琴键式列表：每项一条整宽「琴键」（图标 + 文字），行高够手指点。
+   层级靠**缩进 + 视觉轻重**区分（与桌面一致）：一级分组是加粗的宽键（带展开箭头），
+   二级子项缩进一层、键更轻，一眼能看出归属。
+   （窄窗口的 40px 图标条规则只作用于 :not(.tall)，这里不必再覆盖它。） */
+.settings-wrap.tall .settings-nav {
+  padding: 8px;
+  gap: 4px;
+  background-color: var(--backgroundColor);
+}
+.settings-wrap.tall .nav-group {
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+}
+/* 二级子项缩进 + 左侧竖线（与桌面同款「挂在分组下」的观感） */
+.settings-wrap.tall .nav-group-children {
+  gap: 4px;
+  margin: 0 0 6px 16px;
+  padding-left: 6px;
+  border-left: 1px solid var(--borderColor);
+}
+.settings-wrap.tall .nav-group-header,
+.settings-wrap.tall .nav-item {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  margin: 0;
+  justify-content: flex-start;
+  gap: 10px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background-color: var(--menuColor);
+  /* 琴键的立体感：上缘一道浅高光 + 轻微投影 */
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--backgroundColor) 60%, transparent), 0 1px 2px rgba(0, 0, 0, 0.06);
+  transition: transform 0.08s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+/* 一级分组：底色深一档、文字加粗（层级比子项重） */
+.settings-wrap.tall .nav-group-header {
+  opacity: 1;
+  font-size: 14px;
+  font-weight: 600;
+}
+/* 二级子项：更矮、更轻（底色回到页面底色），配合缩进明确「属于上一级」 */
+.settings-wrap.tall .nav-item-sub {
+  min-height: 40px;
+  padding: 0 12px;
+  margin: 0;
+  background-color: var(--backgroundColor);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+.settings-wrap.tall .nav-group-header span,
+.settings-wrap.tall .nav-item span {
+  display: inline;
+  flex: 1;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-wrap.tall .nav-group-header i,
+.settings-wrap.tall .nav-item i {
+  width: 18px;
+  font-size: 14px;
+}
+/* 按下去的「琴键」：略微内凹（缩小 + 去掉投影） */
+.settings-wrap.tall .nav-group-header:active,
+.settings-wrap.tall .nav-item:active {
+  transform: scale(0.99);
+  box-shadow: none;
+  background-color: var(--menuActiveColor);
+}
+.settings-wrap.tall .nav-item.active {
+  border-color: var(--fontActiveColor);
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.settings-wrap.tall .nav-item-sub.active::before {
+  display: none;
 }
 
 .settings-group {
@@ -2630,43 +2772,45 @@ onBeforeUnmount(() => {
 }
 
 /* 响应式调整 */
+/* 窄窗口（宽度 ≤ 600px）且**不是**细长窗口时：导航退化成 40px 图标条（细长窗口走整屏的钢琴键列表，
+   见下方 .settings-wrap.tall 的一组规则；用 :not(.tall) 把两者分开，否则手机上只会看到图标） */
 @media (max-width: 600px) {
-  .settings-nav {
+  .settings-wrap:not(.tall) .settings-nav {
     width: 40px;
     min-width: 40px;
   }
   
-  .nav-item span {
+  .settings-wrap:not(.tall) .nav-item span {
     display: none;
   }
   
-  .nav-item {
+  .settings-wrap:not(.tall) .nav-item {
     justify-content: center;
     padding: 10px 10px;
   }
 
   /* 窄模式：隐藏一级分组，二级全部展开 */
-  .nav-group-header {
+  .settings-wrap:not(.tall) .nav-group-header {
     display: none;
   }
-  .nav-group-children {
+  .settings-wrap:not(.tall) .nav-group-children {
     display: flex !important; /* 覆盖 v-show 折叠，二级始终展开 */
     margin-left: 0;
     padding-left: 0;
     border-left: none;
   }
-  .nav-item-sub {
+  .settings-wrap:not(.tall) .nav-item-sub {
     justify-content: center;
     padding: 4px 0;
   }
-  .nav-item-sub i {
+  .settings-wrap:not(.tall) .nav-item-sub i {
     font-size: 13px;
     width: 22px;
     height: 22px;
     line-height: 22px;
     color: var(--fontColor);
   }
-  .nav-item-sub.active::before {
+  .settings-wrap:not(.tall) .nav-item-sub.active::before {
     display: none;
   }
   

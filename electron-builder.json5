@@ -5,10 +5,13 @@
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "AIKM",
   "asar": true,
-  // sherpa-onnx 是 WASM 运行时（.wasm 需以真实文件加载，不能从 asar 内联读取），
+  // sherpa-onnx-node 是原生插件（.node/.dll 需以真实文件加载，不能从 asar 内联读取），
   // TTS worker 线程文件同理需真实文件；二者都解包到 app.asar.unpacked
   "asarUnpack": [
-    "node_modules/sherpa-onnx/**",
+    "node_modules/sherpa-onnx-node/**",
+    "node_modules/sherpa-onnx-win-*/**",
+    "node_modules/sherpa-onnx-linux-*/**",
+    "node_modules/sherpa-onnx-darwin-*/**",
     "dist-electron/main/tts-worker.js",
     // 内置 MBTiles 地图包（PNG/JPG 已高度压缩，再压进 asar 徒增体积与构建耗时）
     "dist/maps/**"
@@ -20,6 +23,19 @@
   "files": [
     "dist",
     "dist-electron"
+  ],
+  // Office 编辑器内核（GenOffice，由 npm run office:build 生成）
+  // 必须走 extraResources：asar 内无法加载 wasm / worker / 字体，编辑器也按真实路径读取
+  // resources/native：Excel 的原生引擎 xlsx-sidecar（必需件，见该目录的 README）
+  "extraResources": [
+    {
+      "from": "resources/office",
+      "to": "office"
+    },
+    {
+      "from": "resources/native",
+      "to": "native"
+    }
   ],
   "mac": {
     "target": [

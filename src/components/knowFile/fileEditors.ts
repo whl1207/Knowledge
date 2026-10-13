@@ -1,10 +1,10 @@
 /**
  * fileEditors.ts — 「专属文件类型 → 编辑器」的唯一注册点。
  *
- * 有五个文件类型各自带一个专属编辑器（不属于通用的浏览 / 源码编辑 / 可视编辑 / 导图 / 演示那一套）：
+ * 有六个文件类型各自带一个专属编辑器（不属于通用的浏览 / 源码编辑 / 可视编辑 / 导图 / 演示那一套）：
  *
  *   `.excalidraw` → 白板      `.drawio` → 图表       `.flow.yml` → 工作流编辑器
- *   `.data`       → 数据画布  `.task`   → 脚手架
+ *   `.data`       → 数据画布  `.task`   → 脚手架     `.mmd` → Mermaid 图表
  *
  * 打开它们的宿主有三处：主窗口 `components/knowFile/explorer.vue`（多面板视图）、
  * 独立窗口 `components/knowFile/FileWindow.vue`（单文件 + 视图切换）、
@@ -22,7 +22,7 @@ import { isTaskFile } from '@/lib/taskFile'
 import { FILE_VIEW_NAMES, VIEW_BROWSE, VIEW_VISUAL } from '@/lib/knowFile/fileViews'
 
 /** 专属编辑器类型 */
-export type EditorKind = 'excalidraw' | 'drawio' | 'flow' | 'data' | 'task'
+export type EditorKind = 'excalidraw' | 'drawio' | 'flow' | 'data' | 'task' | 'mermaid'
 
 /** 判定依据：路径 / 扩展名 / 内容（三者都可缺省） */
 export interface EditorSource {
@@ -83,6 +83,13 @@ export const FILE_EDITORS: Record<EditorKind, FileEditorDef> = {
   task: {
     match: ({ path }) => isTaskFile(path),
     load: () => import('@/features/agent-scaffold/PipelineScaffold.vue'),
+    views: [VIEW_BROWSE],
+  },
+  // Mermaid 图表：浏览视图渲染图，源码编辑仍走通用 Monaco（同工作流 / 数据画布）。
+  // 视图范围只给「浏览」：主窗口的其它全局视图（文件 / 图谱 / 表格…）不能被图表占掉
+  mermaid: {
+    match: ({ path, extension }) => suffixMatcher('.mmd')(path, extension) || suffixMatcher('.mermaid')(path, extension),
+    load: () => import('@/components/knowFile/view/Mermaid.vue'),
     views: [VIEW_BROWSE],
   },
 }

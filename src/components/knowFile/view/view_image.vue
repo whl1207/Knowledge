@@ -2,6 +2,7 @@
   import { ref, onMounted, onBeforeUnmount, computed, nextTick, watch } from 'vue'
   import { usestore } from '@/store'
   import { ocrImage, ocrProviderLabel, rankOcrModels, hasVisionLikeModel, loadOcrModelPref, saveOcrModelPref, llmConfigByKey, loadOcrSourcePref, saveOcrSourcePref, prepareOcrImage, OCR_SELECTABLE_SOURCES } from '@/lib/knowFile/ocr'
+import { getPlatform, hasCapability } from '@/platform'
 
   const store = usestore()
 
@@ -20,8 +21,8 @@
   // 本地路径需编码特殊字符（#、?、空格、中文），避免 #/？被当作 URL fragment/query 截断导致加载失败
   // 本地展示基于 innerPath（组件内部可用方向键在同目录图片间切换）
   const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']
-  // 是否具备本地 IPC 能力（浏览器/LAN 共享模式无 ipcRenderer，无法扫描目录，禁用导航）
-  const hasIpc = typeof window !== 'undefined' && !!(window as any).ipcRenderer
+  // 是否具备本地文件读取能力（浏览器/LAN 共享模式没有，无法扫描目录，禁用导航）
+  const hasIpc = hasCapability('fs.pathRead')
   // 当前实际显示的本地图片路径（组件内部可切换）
   const innerPath = ref(props.path || '')
   // 当前图片同目录下的全部图片（按文件名自然排序，含字节大小），供浏览上一张/下一张
@@ -452,7 +453,7 @@
   const readImageDataUrl = async (filePath: string): Promise<string> => {
     // 远程图片：直接复用已注入的 src data URL
     if (props.src && /^data:/i.test(props.src)) return props.src
-    const result = await window.ipcRenderer.invoke('readFileBase64', filePath)
+    const result = await getPlatform().fs.readDataUrl(filePath)
     if (typeof result !== 'string' || !result.startsWith('data:')) {
       throw new Error(typeof result === 'string' ? result : '读取图片失败')
     }
@@ -523,7 +524,7 @@
     const fileName = `${props.path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'image'}.md`
     const savePath = `${store.root}/${fileName}`
     try {
-      await window.ipcRenderer.invoke('saveFile', savePath, text)
+      await getPlatform().fs.saveText(savePath, text)
       ocrProgress.value = store.locales === 'zh' ? `已保存到 ${fileName}` : `Saved to ${fileName}`
     } catch (err) {
       console.error('[OCR] 保存失败:', err)
@@ -541,7 +542,7 @@
     const folder = path.replace(/\\/g, '/').split('/').slice(0, -1).join('/')
     if (!folder) return
     try {
-      const files: any[] = (await window.ipcRenderer.invoke('getFiles', folder, 0)) || []
+      const files: any[] = (await getPlatform().fs.listTree(folder, 0)) || []
       folderImages.value = files
         .filter((f: any) => f && f.type === 'file' && IMAGE_EXTS.includes(String(f.extension || '').toLowerCase()))
         .sort((a: any, b: any) => String(a.label || a.name || '').localeCompare(String(b.label || b.name || ''), undefined, { numeric: true }))

@@ -24,6 +24,7 @@ import { isDrawioPath } from '@/shared/drawioFile'
 import { replaceDiagramFiguresWithImages, parseDiagramRef } from '@/shared/drawioRender'
 import { inlineLocalImagesAsDataUrls, downloadAsWord, blobToBase64, type WordSaveResult } from '@/lib/export/download'
 import { type DocxSkin, type DocxPageProfile, getDocxTemplatePreset } from '@/lib/export/docx'
+import { getPlatform, hasCapability } from '@/platform'
 import { usestore } from '@/store'
 
 export interface MarkdownToWordOptions {
@@ -317,7 +318,7 @@ async function inflateEntry(bytes: Uint8Array, entry: ZipEntry): Promise<Uint8Ar
 /** 从本地 .docx 读取段落样式皮肤；失败返回 undefined（调用方自动回退默认样式） */
 export async function readDocxStyleSkin(path: string): Promise<DocxSkin | undefined> {
   try {
-    const dataUrl = await (window as any).ipcRenderer.invoke('readFileBase64', path)
+    const dataUrl = await getPlatform().fs.readDataUrl(path)
     if (typeof dataUrl !== 'string') return undefined
     const m = /;base64,(.+)$/s.exec(dataUrl)
     if (!m) return undefined
@@ -397,15 +398,14 @@ export async function prepareMarkdownDocxHtml(markdown: string, opts: MarkdownTo
 }
 
 /**
- * 把已构建的 .docx Blob 写到指定路径（Electron 主进程 exportDocx IPC）。
- * targetPath 非绝对路径（只有文件名）时主进程落系统下载目录；
+ * 把已构建的 .docx Blob 写到指定路径（平台层 `fs.pathWrite` 能力）。
+ * targetPath 非绝对路径（只有文件名）时由宿主落系统下载目录；
  * overwrite=false（默认）时重名自动追加 (1)，避免静默覆盖。
  */
 export async function saveDocxBlob(blob: Blob, targetPath: string, overwrite = false): Promise<{ ok: boolean; path?: string; error?: string }> {
-  const ipc: any = (typeof window !== 'undefined') ? (window as any).ipcRenderer : null
-  if (!ipc || typeof ipc.invoke !== 'function') return { ok: false, error: 'not-electron' }
+  if (!hasCapability('fs.pathWrite')) return { ok: false, error: 'not-electron' }
   try {
-    return await ipc.invoke('exportDocx', { base64: await blobToBase64(blob), targetPath, overwrite })
+    return await getPlatform().fs.saveBase64({ base64: await blobToBase64(blob), targetPath, overwrite })
   } catch (e: any) {
     return { ok: false, error: String(e?.message || e) }
   }

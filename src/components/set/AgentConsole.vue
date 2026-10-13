@@ -1,7 +1,7 @@
 <!-- AgentConsole.vue — 智能体控制台：执行中心（主从布局：任务列表 + 详情，按会话聚合） -->
 <!-- 用于设置 → 智能体 → 智能体控制台；会话可由外部指定（sessionId prop）或任务列表选择 -->
 <template>
-  <div class="agent-console">
+  <div class="agent-console" :class="{ tall: isTallLayout }">
     <!-- ====== 顶部：执行中心（主从布局：任务列表 + 详情，按会话聚合） ====== -->
     <div class="ac-exec">
       <div class="ac-exec-head">
@@ -21,8 +21,9 @@
       </div>
 
       <div class="ac-split">
-        <!-- ====== 主：任务列表（按会话聚合：agent 会话一行 + 非 agent 后台任务） ====== -->
-        <div class="ac-master scoll">
+        <!-- ====== 主：任务列表（按会话聚合：agent 会话一行 + 非 agent 后台任务） ======
+             细长窗口下与右侧详情各占满整屏互相切换（见 .tall 样式） -->
+        <div class="ac-master scoll" v-show="!isTallLayout || showNavScreen">
           <div v-if="taskRows.length === 0" class="ac-empty">
             <i class="fa fa-robot"></i>
             <p>{{ isZh ? '暂无任务。在主页选择「智能体」模式发送消息后，这里会显示执行过程与后台任务。' : 'No tasks yet. Send a message in "Agent" mode on Home to see execution here.' }}</p>
@@ -47,7 +48,15 @@
         </div>
 
         <!-- ====== 从：详情 ====== -->
-        <div class="ac-detail scoll">
+        <div class="ac-detail scoll" v-show="!isTallLayout || !showNavScreen">
+          <!-- 细长窗口：详情屏左上角返回（回到整屏任务列表） -->
+          <div v-if="isTallLayout" class="ac-back-bar">
+            <div class="ac-back" @click="showNavScreen = true"
+              :title="isZh ? '返回任务列表' : 'Back to task list'">
+              <i class="fa fa-arrow-left"></i>
+            </div>
+            <span class="ac-back-title">{{ isZh ? '执行详情' : 'Execution Detail' }}</span>
+          </div>
           <!-- agent 会话详情（复用原执行面板） -->
           <template v-if="selectedSession">
             <div class="ac-statusbar">
@@ -179,11 +188,18 @@ import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import { agentBridge, type AgentSessionView } from '@/platform/agentBridge'
 import type { JobInfo } from '../../../electron/main/job-registry'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const props = defineProps<{ sessionId?: string }>()
 
 const store = usestore()
 const isZh = computed(() => store.locales !== 'en')
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：任务列表与执行详情不再并排（并排会把详情挤到只剩
+// 一两百像素），而是各占满整屏互相切换（与设置导航 / MCP 设置 / 预设编辑同一套做法）。
+// true = 任务列表屏，false = 详情屏；宽窗口下两者并排，本状态无意义。
+const isTallLayout = useTallLayout()
+const showNavScreen = ref(true)
 
 // ---- agent 会话（agentBridge 实时视图；按会话聚合，一个会话一行） ----
 const sessions = ref<AgentSessionView[]>([])
@@ -269,6 +285,7 @@ function selectTask(row: TaskRow): void {
   selectedKey.value = row.key
   answerInput.value = ''
   toolOpen.value = {}
+  showNavScreen.value = false   // 细长窗口：点任务即从整屏列表切到整屏详情
 }
 
 function rowIcon(row: TaskRow): string {
@@ -596,4 +613,63 @@ onBeforeUnmount(() => {
 .ac-json { white-space: pre-wrap; word-break: break-all; margin: 0; font-size: 11px; background: var(--menuColor); padding: 6px; border-radius: 4px; max-height: 160px; overflow: auto; }
 .ac-result { color: #389e0d; }
 .ac-error-text { color: #cf1322; }
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：任务列表 / 执行详情各占满整屏互相切换 ======
+   不再并排（并排会把详情挤到只剩一两百像素）。两屏都用 v-show 隐藏，切回来时滚动位置还在。 */
+.agent-console.tall .ac-master {
+  width: 100%;
+  box-sizing: border-box;
+  border-right: 0;
+  padding: 8px;
+  gap: 4px;
+}
+/* 任务条目按钢琴键式整宽条目呈现：行高够手指点 */
+.agent-console.tall .ac-row {
+  min-height: 48px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background-color: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.agent-console.tall .ac-row-title { font-size: 13px; }
+.agent-console.tall .ac-detail { width: 100%; }
+/* 详情屏顶部的返回条（只在细长窗口出现；列表长时保持吸顶） */
+.ac-back-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.ac-back {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+.ac-back:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.ac-back-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fontActiveColor);
+}
+/* 顶部工具条：细长窗口下按钮较多，允许横向滑动，标题不换行 */
+.agent-console.tall .ac-exec-head { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.agent-console.tall .ac-exec-head::-webkit-scrollbar { display: none; }
+.agent-console.tall .ac-exec-title, .agent-console.tall .ac-hint { white-space: nowrap; flex-shrink: 0; }
 </style>

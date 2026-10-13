@@ -1,3 +1,4 @@
+import { getPlatform, hasCapability } from '@/platform'
 /**
  * 工作区文件扫描（学习模块的 .kb、工作流的 .flow.yml 等共用）
  *
@@ -42,7 +43,7 @@ export async function listWorkspaceFiles(roots: string[], exts: string[]): Promi
   const found: WorkspaceFile[] = []
   for (const dir of dirs) {
     try {
-      const result = await window.ipcRenderer.invoke('getFilesRelation', dir, WORKSPACE_SCAN_DEPTH)
+      const result = await getPlatform().fs.listTreeWithRelations(dir, WORKSPACE_SCAN_DEPTH)
       for (const f of ((result && result.fileList) || []) as any[]) {
         const p = typeof f?.path === 'string' ? f.path : ''
         if (!p) continue

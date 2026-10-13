@@ -9,6 +9,7 @@ import { deepSeekApiStyle } from '@/shared/llmSources'
 import type { LmStudioModelInfo, OllamaModelInfo, OllamaLoadedModel } from '@/shared/ai-core'
 import ModelContextWindow from './ModelContextWindow.vue'
 import LlmTestRow from './LlmTestRow.vue'
+import { useTallLayout } from '@/composables/useTallLayout'
 
 const store = usestore()
 const zh = () => store.locales === 'zh'
@@ -18,6 +19,11 @@ const props = defineProps<{ section?: 'sources' | 'embed' | '' }>()
 const sec = computed(() => props.section || '')
 const showSources = computed(() => !sec.value || sec.value === 'sources')
 const showEmbed = computed(() => !sec.value || sec.value === 'embed')
+
+// 细长窗口（高宽比 > 16:9，如手机竖屏）：来源列表与配置不再并排，而是各占满整屏互相切换
+//（与设置导航 / 知识管理文件树同一套做法）。true = 来源列表屏，false = 配置屏；宽窗口下本状态无意义
+const isTallLayout = useTallLayout()
+const showSourceScreen = ref(true)
 
 // ================ 模型来源列表（左侧：搜索 + 9 种内置来源 + 自定义来源） ================
 
@@ -126,6 +132,7 @@ const selectCustomSource = (index: number) => {
   cancelRename()
   // 每个来源独立记忆「下拉/手填」模式：有模型列表 → 下拉；空列表 → 手填兜底
   customModelMode.value = (c.available_models && c.available_models.length) ? 'select' : 'input'
+  showSourceScreen.value = false   // 细长窗口：点自定义来源即进入整屏配置屏
   store.saveConfig()
 }
 
@@ -283,6 +290,7 @@ const selectLlmSource = (key: string) => {
   viewType.value = key
   applyUseCredFromConfig(key)
   cancelRename()
+  showSourceScreen.value = false   // 细长窗口：进入整屏配置屏（宽窗口下两者并排，本状态无意义）
   setTimeout(async () => {
     if (key === 'ollama') await refreshOllamaModels()
     else if (key === 'lmstudio') await refreshLMStudioModels()
@@ -1201,9 +1209,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="llm-settings" :class="{ 'llm-embed-only': !showSources }">
-    <!-- ====== 左侧：模型来源列表 ====== -->
-    <div v-if="showSources" class="llm-sidebar">
+  <div class="llm-settings" :class="{ 'llm-embed-only': !showSources, tall: isTallLayout }">
+    <!-- ====== 左侧：模型来源列表（细长窗口下与右侧配置各占满整屏互相切换，见 .tall 样式） ====== -->
+    <div v-if="showSources" v-show="!isTallLayout || showSourceScreen" class="llm-sidebar">
       <div class="llm-toolbar">
         <div class="notes-search-box">
           <i class="fa fa-search"></i>
@@ -1291,10 +1299,15 @@ onMounted(() => {
     </div>
 
     <!-- ====== 右侧：当前查看来源的配置（showSources：查看/编辑，默认由「设为默认」切换） ====== -->
-    <div class="llm-content scoll">
+    <div class="llm-content scoll" v-show="!showSources || !isTallLayout || !showSourceScreen">
       <div v-if="showSources" class="settings-group">
         <div class="llm-content-header">
           <div class="llm-content-title">
+            <!-- 细长窗口：从来源列表进来的配置屏，左上角返回（回到整屏来源列表） -->
+            <div v-if="isTallLayout" class="llm-back" @click="showSourceScreen = true"
+              :title="zh() ? '返回来源列表' : 'Back to source list'">
+              <i class="fa fa-arrow-left"></i>
+            </div>
             <h3>{{ zh() ? '大语言模型设置' : 'Large Language Model Settings' }}</h3>
             <span class="llm-view-hint">{{ zh() ? '正在查看' : 'Viewing' }}：{{ llmSourceLabel(viewType) }}</span>
             <span v-if="isViewingDefault" class="llm-default-tag" :title="zh() ? '当前查看的已是默认来源（主页 / 知识库 / 工作流默认用它）' : 'The viewed source is already the default'">{{ zh() ? '默认' : 'Default' }}</span>
@@ -1958,6 +1971,48 @@ onMounted(() => {
   display: flex; height: 100%; flex: 1; overflow: hidden;
   background: var(--backgroundColor); color: var(--fontColor);
 }
+
+/* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：来源列表 / 配置各占满整屏互相切换 ======
+   不再并排（并排会把配置区挤到只剩一两百像素）。两屏都用 v-show 隐藏，切回来时表单状态还在。
+   来源条目按钢琴键式整宽条目呈现：图标 + 名称 / 说明，行高够手指点。 */
+.llm-settings.tall .llm-sidebar {
+  width: 100%;
+  border-right: 0;
+}
+.llm-settings.tall .llm-source-list {
+  display: flex; flex-direction: column; gap: 4px; padding: 8px;
+}
+.llm-settings.tall .llm-source-item {
+  min-height: 48px;
+  padding: 6px 12px;
+  margin: 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background-color: var(--menuColor);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.llm-settings.tall .llm-source-item:active {
+  transform: scale(0.99);
+  background-color: var(--menuActiveColor);
+}
+.llm-settings.tall .llm-source-item.active {
+  background-color: var(--menuActiveColor);
+}
+.llm-settings.tall .llm-source-avatar { width: 32px; height: 32px; }
+.llm-settings.tall .llm-source-avatar i { font-size: 15px; }
+.llm-settings.tall .llm-source-name { font-size: 14px; }
+.llm-settings.tall .llm-source-desc { font-size: 11px; }
+.llm-settings.tall .llm-source-group-title { padding: 6px 4px 2px; font-size: 11px; }
+/* 配置屏的返回按钮（只在细长窗口出现） */
+.llm-back {
+  flex-shrink: 0;
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--borderColor); border-radius: 6px;
+  cursor: pointer; color: var(--fontColor); font-size: 14px;
+  transition: all 0.15s ease;
+}
+.llm-back:hover { background-color: var(--menuActiveColor); color: var(--fontActiveColor); }
 /* ====== 左侧：来源列表（参照 AgentPreset .contact-sidebar） ====== */
 .llm-sidebar {
   width: 190px; display: flex; flex-direction: column;

@@ -7,6 +7,7 @@
  * entityNames/blockId 投影聚合。
  */
 import { computeMastery, initSrs, isSrsDue, KbType, Lsrs, MASTERY_GATE, srsNext, uid } from '@/services/learningCore'
+import { getPlatform, hasCapability } from '@/platform'
 
 export type AttemptSrc = 'self' | 'exam' | 'review'
 /** 错因标签（P2.5）：记忆混淆 / 概念不清 / 步骤错误 / 粗心 */
@@ -169,7 +170,7 @@ export async function loadLData(kbPath: string): Promise<LData | null> {
   // 新路径优先；旧 .learning.json 兜底（迁移存量记录），保证历史数据仍可读
   for (const path of [learningDataPath(kbPath), legacyJsonPath(kbPath)]) {
     try {
-      const content = await window.ipcRenderer.invoke('readFile', path)
+      const content = await getPlatform().fs.readText(path)
       const raw = JSON.parse(content)
       if (!raw || typeof raw !== 'object' || !raw.objects) return null
       const data = raw as LData
@@ -188,7 +189,7 @@ export async function loadLData(kbPath: string): Promise<LData | null> {
 export async function saveLData(kbPath: string, data: LData): Promise<boolean> {
   try {
     data.updatedAt = Date.now()
-    const ok = await window.ipcRenderer.invoke('saveFile', learningDataPath(kbPath), JSON.stringify(data))
+    const ok = await getPlatform().fs.saveText(learningDataPath(kbPath), JSON.stringify(data))
     return !!ok
   } catch (e) {
     console.error('[learning] 保存学习记录失败:', e)

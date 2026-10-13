@@ -2,7 +2,9 @@
  * tts-service.ts — 本地 ONNX TTS（Kokoro / Piper）主进程服务（worker 版）
  *
  * sherpa-onnx 的模型加载与合成运行在 worker 线程（tts-worker.ts），
- * 主进程仅做消息转发，避免同步 WASM 推理阻塞主进程事件循环导致窗口卡死。
+ * 主进程仅做消息转发，避免同步推理阻塞主进程事件循环导致窗口卡死。
+ * 运行时是原生 N-API 版（sherpa-onnx-node），支持多线程；缓存目录通过
+ * workerData 传入 worker（用于 espeak 数据目录的 ASCII 映射）。
  *
  * IPC（裸通道，二进制安全）：
  *   tts:status      → { available, version, error }
@@ -11,7 +13,7 @@
  *   tts:dispose     → { success }
  */
 
-import { ipcMain } from 'electron'
+import { app, ipcMain } from 'electron'
 import { Worker } from 'node:worker_threads'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -53,10 +55,19 @@ let workerReady: Promise<Worker> | null = null
 let nextId = 1
 const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>()
 
+/** worker 的缓存目录：espeak 数据目录的 ASCII 映射产物落在这里（持久化，避免每次启动重做） */
+function workerCacheDir(): string {
+  try {
+    return join(app.getPath('userData'), 'tts')
+  } catch {
+    return ''
+  }
+}
+
 function spawnWorker(): Promise<Worker> {
   if (workerReady) return workerReady
   workerReady = (async () => {
-    const w = new Worker(workerPath, { type: 'module' } as any)
+    const w = new Worker(workerPath, { type: 'module', workerData: { cacheDir: workerCacheDir() } } as any)
     w.unref()
     w.on('message', (msg: any) => {
       if (!msg || typeof msg.id !== 'number') return

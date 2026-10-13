@@ -23,7 +23,7 @@ export const localFileExecutor: WorkflowNodeExecutor = {
 
     let content: string
     try {
-      const raw = await ctx.invokeIpc('readFile', filePath)
+      const raw = await ctx.readTextFile(filePath)
       content = typeof raw === 'string' ? raw : stringifyValue(raw)
     } catch (error) {
       throw new Error(`读取文件失败：${(error as Error).message}`)

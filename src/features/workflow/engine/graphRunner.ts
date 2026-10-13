@@ -13,6 +13,7 @@ import type { DslEdge, DslNode } from '../dsl/types'
 import { getExecutor } from './nodes'
 import type { NodeExecutionContext, NodeRunRecord, RunEvent, WorkflowNodeExecutor } from './types'
 import type { VariablePool } from './variablePool'
+import { getPlatform } from '@/platform'
 
 /** 容器入口节点：由容器执行器驱动，不参与常规调度 */
 export const CONTAINER_ENTRY_TYPES = ['iteration-start', 'loop-start', 'loop-end']
@@ -219,6 +220,7 @@ export async function executeGraph(params: GraphExecuteParams): Promise<GraphExe
       if (!ipc?.invoke) throw new Error('IPC 不可用（当前环境没有 ipcRenderer）')
       return ipc.invoke(channel, payload)
     },
+    readTextFile: (path) => getPlatform().fs.readText(path),
   })
 
   /** 单节点执行（含重试） */

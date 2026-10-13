@@ -68,6 +68,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -102,7 +103,8 @@ let autoPlayAfterSwitch = false
 // 同目录视频列表（用于上一集/下一集）
 const folderVideos = ref<{ path: string; label: string }[]>([])
 const currentVideoIndex = ref(-1)
-const hasIpc = typeof window !== 'undefined' && !!(window as any).ipcRenderer
+/** 是否具备本地目录读取能力（网页端没有，无法扫描同目录，禁用导航） */
+const hasIpc = hasCapability('fs.pathRead')
 const canNavigateVideos = computed(() => !!currentPath.value && hasIpc)
 const normPath = (p: string) => String(p || '').replace(/\\/g, '/').toLowerCase()
 
@@ -114,7 +116,7 @@ async function loadFolderVideos() {
   const folder = (currentPath.value || '').replace(/\\/g, '/').split('/').slice(0, -1).join('/')
   if (!folder) return
   try {
-    const files: any[] = (await window.ipcRenderer.invoke('getFiles', folder, 0)) || []
+    const files: any[] = (await getPlatform().fs.listTree(folder, 0)) || []
     folderVideos.value = files
       .filter((f: any) => f && f.type === 'file' && VIDEO_EXTS.includes(String(f.extension || '').toLowerCase()))
       .sort((a: any, b: any) => String(a.label || '').localeCompare(String(b.label || ''), undefined, { numeric: true }))

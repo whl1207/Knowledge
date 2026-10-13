@@ -295,6 +295,7 @@ import { usestore } from '@/store'
 import { ElMessageBox } from 'element-plus'
 import BrowserRailSettings from '@/components/browser/BrowserRailSettings.vue'
 import BrowserBookmarksPanel from '@/components/browser/BrowserBookmarksPanel.vue'
+import { getPlatform } from '@/platform'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -409,8 +410,10 @@ const syncBrowserPrefs = () => {
   } catch { /* 忽略 */ }
 }
 
-const invoke = (channel: string, payload?: any) =>
-  window.ipcRenderer?.invoke ? window.ipcRenderer.invoke(channel, payload) : Promise.reject(new Error('IPC 不可用'))
+// 浏览器 Agent 是桌面专属子系统（独立窗口 + 主进程 WebContentsView）；
+// 经平台端口调用，其它环境 reject，调用方既有 .catch 会静默降级。
+const invoke = (method: string, payload?: any) =>
+  getPlatform().browserAgent.call(method.replace(/^browser-agent:/, '') as any, payload)
 
 // ===== 紧凑模式：窗口过小时隐藏地址/工具条，仅保留标签栏（宽度或高度低于阈值即触发；与主进程 browser-agent:set-compact 联动） =====
 const COMPACT_W = 760 // 窄窗口阈值（px）
@@ -440,17 +443,17 @@ const applyState = (s: any) => {
   state.allowEval = !!s.allowEval
 }
 
-const onEvent = (_e: any, payload: any) => applyState(payload)
+const onEvent = (payload: any) => applyState(payload)
 
 // 主题广播：主窗口切换主题后应用（更新 store.UI + 重设 CSS 变量），本窗口跟随
-const onThemeChanged = (_event: any, ui: any) => {
+const onThemeChanged = (ui: any) => {
   store.applyThemeFromBroadcast(ui)
   sendBrowserTheme()
 }
 // 把当前主题色同步给主进程，用于内嵌网页内容滚动条等按主题着色
 const sendBrowserTheme = () => {
   const u = store.UI
-  window.ipcRenderer?.invoke('browser-agent:set-theme', {
+  getPlatform().browserAgent.call('set-theme', {
     ui: {
       fontColor: u?.fontColor || '#888888',
       fontActiveColor: u?.fontActiveColor || '#409eff',
@@ -575,14 +578,14 @@ const openExternal = async () => {
   if (state.url && window.open) window.open(state.url, '_blank')
 }
 // 自绘窗口控制（无边框窗口；IPC 按发送方窗口定位）
-const minimizeWindow = async () => { await window.ipcRenderer?.invoke('minimize-window').catch(() => {}) }
+const minimizeWindow = async () => { await getPlatform().window.minimize().catch(() => {}) }
 const maximizeWindow = async () => {
   isMaximized.value = !isMaximized.value
-  await window.ipcRenderer?.invoke('maximize-window').catch(() => {})
+  await getPlatform().window.toggleMaximize().catch(() => {})
 }
 const closeWindow = async () => {
   store.saveConfig()
-  await window.ipcRenderer?.invoke('close-window').catch(() => {})
+  await getPlatform().window.close().catch(() => {})
 }
 
 // ===== 轻提示（toast） =====
@@ -595,7 +598,7 @@ const showToast = (msg: string, kind: 'ok' | 'err' = 'ok') => {
   if (toastTimer) clearTimeout(toastTimer)
   toastTimer = setTimeout(() => { toastMsg.value = '' }, 3000)
 }
-const onToastEvent = (_e: any, payload: any) => {
+const onToastEvent = (payload: any) => {
   if (payload?.message) showToast(payload.message, 'err')
 }
 
@@ -980,10 +983,13 @@ watch([railOpen, railView], () => syncBmAutoTimer(), { immediate: true })
 // 书签保存位置变化（本窗口或主窗口设置改动）→ 立即刷新一次
 watch(() => (store.UI?.browserSaveDir || '').trim(), () => { void refreshBookmarks() })
 
+/** 宿主事件退订句柄（挂载时登记，卸载时统一释放） */
+const unsubBrowserEvents: Array<() => void> = []
+
 onMounted(async () => {
-  window.ipcRenderer?.on('browser-agent:event', onEvent)
-  window.ipcRenderer?.on('theme-changed', onThemeChanged)
-  window.ipcRenderer?.on('browser-agent:toast', onToastEvent)
+  unsubBrowserEvents.push(getPlatform().events.on('browser-agent:event', onEvent))
+  unsubBrowserEvents.push(getPlatform().events.on('theme-changed', onThemeChanged))
+  unsubBrowserEvents.push(getPlatform().events.on('browser-agent:toast', onToastEvent))
   window.addEventListener('resize', onWinResize)
   measureCompact()
   sendBrowserTheme()
@@ -997,9 +1003,7 @@ onMounted(async () => {
   } catch { /* 忽略 */ }
 })
 onBeforeUnmount(() => {
-  window.ipcRenderer?.off('browser-agent:event', onEvent)
-  window.ipcRenderer?.off('theme-changed', onThemeChanged)
-  window.ipcRenderer?.off('browser-agent:toast', onToastEvent)
+  for (const off of unsubBrowserEvents.splice(0)) { try { off() } catch { /* 忽略 */ } }
   window.removeEventListener('resize', onWinResize)
   if (bmAutoTimer) { clearInterval(bmAutoTimer); bmAutoTimer = null }
 })

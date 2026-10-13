@@ -3,6 +3,7 @@
 import { computed, ref, nextTick, onUnmounted } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
+import { getPlatform, hasCapability } from '@/platform'
 
 const store = usestore()
 
@@ -21,6 +22,27 @@ const getTTSLabel = (type: string) => {
   if (!ttsType) return type
   return store.locales === 'zh' ? ttsType.label_zh : ttsType.label_en
 }
+
+/**
+ * 「本地语音合成」在不同环境用不同引擎：
+ * - 浏览器 / 桌面：Web Speech（SpeechSynthesis）
+ * - 安卓：WebView 没有 Web Speech，改用系统自带 TTS 引擎（无需模型、可离线）
+ */
+const localEngineHint = computed(() => {
+  const zh = store.locales === 'zh'
+  const hasWeb = typeof (window as any).speechSynthesis?.speak === 'function'
+  if (hasWeb) {
+    return zh
+      ? '当前由浏览器 / 桌面自带的语音引擎朗读，音色取决于系统；如需更好的音质可改用 Kokoro / Piper。'
+      : 'Spoken by the browser / desktop speech engine; voice quality depends on the system. Use Kokoro / Piper for better quality.'
+  }
+  if (hasCapability('host.tts')) {
+    return zh
+      ? '当前由手机系统自带的语音引擎朗读（无需模型、多数机型可离线）；音色 / 语速跟随系统「文字转语音」设置，可在下方调节语速与音高。'
+      : 'Spoken by the device system TTS engine (no model needed, usually works offline). Voice follows the system text-to-speech settings; rate and pitch can be adjusted below.'
+  }
+  return zh ? '当前环境没有可用的本地语音引擎。' : 'No local speech engine is available in this environment.'
+})
 
 // 测试TTS功能
 const testTTS = () => {
@@ -47,7 +69,7 @@ async function selectOnnxModelDir() {
       ElMessage.warning(store.locales === 'zh' ? '仅在 Electron 应用中可用' : 'Only available in Electron app')
       return
     }
-    const dir = await window.ipcRenderer.invoke('openFolderDialog')
+    const dir = await getPlatform().dialog.pickDirectory()
     if (!dir) return
     await applyModelDirAndLoad(dir, true)
   } catch (e: any) {
@@ -226,19 +248,22 @@ function concatWav(parts: Uint8Array[]): ArrayBuffer {
   return buffer
 }
 
-// Kokoro / Piper：调用主进程 sherpa-onnx 合成一段，返回 WAV 字节
+// Kokoro / Piper：调用宿主合成一段（桌面 = sherpa-onnx），返回 WAV 字节
 async function synthOnnxChunk(text: string): Promise<Uint8Array | null> {
-  const dsh = (window as any).dsh
-  if (!dsh?.tts?.synthesize) return null
+  if (!hasCapability('host.tts')) return null
   const onnx = store.AIconfig.tts.onnx || {}
-  return dsh.tts.synthesize({
-    engine: store.AIconfig.tts.type,
-    modelDir: onnx.modelDir || '',
-    text,
-    sid: onnx.sid ?? 0,
-    speed: onnx.speed ?? 1.0,
-    lang: onnx.lang || undefined,
-  })
+  try {
+    return await getPlatform().host.tts.synthesize({
+      engine: store.AIconfig.tts.type,
+      modelDir: onnx.modelDir || '',
+      text,
+      sid: onnx.sid ?? 0,
+      speed: onnx.speed ?? 1.0,
+      lang: onnx.lang || undefined,
+    })
+  } catch {
+    return null
+  }
 }
 
 // indexTTS2 / Qwen3-TTS：整段一次请求远程服务，返回音频字节与格式
@@ -378,6 +403,9 @@ onUnmounted(() => {
 
     <!-- 本地TTS设置 -->
     <div v-if="store.AIconfig.tts.type === '本地'">
+      <div class="form-group">
+        <div class="engine-hint">{{ localEngineHint }}</div>
+      </div>
       <div class="form-group">
         <label>{{ store.locales=='zh'?'语音设置' : 'Voice Settings' }}</label>
         <div class="voice-settings">

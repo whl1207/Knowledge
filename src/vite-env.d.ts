@@ -12,6 +12,16 @@ declare module '*.vue' {
   export default component
 }
 
+/**
+ * 局域网主机注入的运行时信息（见 electron/main/index.ts 的 withHostRuntime）：
+ * 网页端据此注册 HTTP 版平台后端（src/platform/host）。
+ */
+declare global {
+  interface Window {
+    __AIKM_HOST__?: { fs?: 'off' | 'read' | 'write'; rootName?: string }
+  }
+}
+
 interface IpcRendererApi {
   on(channel: string, listener: (event: any, ...args: any[]) => void): void
   off(channel: string, ...omit: any[]): void

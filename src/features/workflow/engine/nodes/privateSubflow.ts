@@ -25,7 +25,7 @@ export const subflowExecutor: WorkflowNodeExecutor = {
     // 1. 读取并校验子流程文件
     let content: string
     try {
-      const raw = await ctx.invokeIpc('readFile', path)
+      const raw = await ctx.readTextFile(path)
       content = typeof raw === 'string' ? raw : stringifyValue(raw)
     } catch (error) {
       throw new Error(`读取子工作流失败：${(error as Error).message}`)

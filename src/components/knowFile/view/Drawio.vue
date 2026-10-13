@@ -31,6 +31,7 @@ import {
   type DrawioMergeResult,
 } from '@/shared/drawioAi'
 import { installDrawioExportBridge, exportFilters, type DrawioExportHost } from '@/shared/drawioExportBridge'
+import { getPlatform, hasCapability } from '@/platform'
 import {
   COPY_SCALES,
   clampScale,
@@ -136,8 +137,8 @@ let loadWaiter: ((ok: boolean) => void) | null = null
 /** 下一次 load 完成后要切回的页（0 起；null=不动）。load 会重建内容并回到第 1 页 */
 let pendingRestorePage: number | null = null
 let attached = false
-/** 主进程下载兜底落盘完成的通知监听（onMounted 注册 / onBeforeUnmount 注销） */
-let downloadDoneHandler: ((e: any, payload: any) => void) | null = null
+/** 宿主下载兜底落盘完成的通知退订（onMounted 注册 / onBeforeUnmount 注销） */
+let downloadDoneUnsub: (() => void) | null = null
 /** AI 预览中：阻断一切写盘与协同广播（确认/取消时再定） */
 let previewActive = false
 
@@ -443,7 +444,7 @@ function signature(xml: string): string {
 /** 写入文件（沿用 Excalidraw 视图的 saveFile IPC + store 同步策略） */
 async function persist(xml: string, silent: boolean): Promise<boolean> {
   try {
-    const ok = await (window as any).ipcRenderer.invoke('saveFile', props.path, xml)
+    const ok = await getPlatform().fs.saveText(props.path, xml)
     if (ok) {
       // 回填签名：否则 lastSig 会一直是空，下一次 flush/自动保存会多写一次内容相同的文件
       lastSig = signature(xml) || lastSig
@@ -453,8 +454,7 @@ async function persist(xml: string, silent: boolean): Promise<boolean> {
       // 广播「文件内容已变更」：否则其它视图（浏览视图/预览/其它窗口）仍显示旧内容，
       // 看起来就像「没落盘」（主进程不会在 saveFile 里自动广播，必须由保存方主动 notify）
       try {
-        void (window as any).ipcRenderer
-          .invoke('notify-file-changed', { path: props.path, content: xml })
+        void getPlatform().app.notifyFileChanged({ path: props.path, content: xml })
           .catch(() => {})
       } catch { /* ignore */ }
       // 统一用 ElMessage 反馈保存结果；silent（卸载/切文件/进入 AI 预览前的兵底写盘）不打扰用户
@@ -1295,14 +1295,13 @@ function startWatchdog() {
   }, 20000)
 }
 
-/** 关窗兵底：文件窗口关闭时组件可能来不及跑卸载流程，用同步 IPC 兵底写盘（仅有未保存改动时） */
+/** 关窗兜底：文件窗口关闭时组件可能来不及跑卸载流程，用同步写盘兜底（仅有未保存改动时） */
 function onWindowBeforeUnload() {
   if (!dirty.value || !latestXml || !hasIpc) return
   try {
-    ;(window as any).ipcRenderer.sendSync('saveFileSync', props.path, latestXml)
-    dirty.value = false
+    if (getPlatform().fs.saveTextSync(props.path, latestXml)) dirty.value = false
   } catch (e) {
-    console.warn('[Drawio] 关窗兵底写盘失败:', e)
+    console.warn('[Drawio] 关窗兜底写盘失败:', e)
   }
 }
 
@@ -1315,13 +1314,12 @@ onMounted(() => {
   attached = true
   // 告知主进程当前图表所在目录：万一导出仍走了浏览器下载（will-download 兜底），
   // 也落在图表旁边而不是系统下载目录
-  if (hasIpc) void (window as any).ipcRenderer.invoke('drawio-export-dir', exportDirOf(props.path))
-  // 下载兜底落盘完成提示（主进程 will-download 处理完发回）
-  if (hasIpc) {
-    downloadDoneHandler = (_e: any, payload: any) => {
-      if (payload?.path) ElMessage.success((zh.value ? '已保存导出的文件: ' : 'Exported file saved: ') + payload.path)
-    }
-    ;(window as any).ipcRenderer.on('app-download-done', downloadDoneHandler)
+  if (hasIpc) void getPlatform().fs.setDownloadDirHint(exportDirOf(props.path))
+  // 下载兜底落盘完成提示（宿主 will-download 处理完发回真实路径）
+  if (hasCapability('downloadSink')) {
+    downloadDoneUnsub = getPlatform().fs.onDownloadComplete((path) => {
+      if (path) ElMessage.success((zh.value ? '已保存导出的文件: ' : 'Exported file saved: ') + path)
+    })
   }
   // 订阅协同服务状态（用于生成可复制的加入地址）
   if (window.dsh?.collab) {
@@ -1337,9 +1335,9 @@ onBeforeUnmount(() => {
     window.removeEventListener('beforeunload', onWindowBeforeUnload)
     attached = false
   }
-  if (downloadDoneHandler) {
-    try { (window as any).ipcRenderer?.removeListener('app-download-done', downloadDoneHandler) } catch { /* ignore */ }
-    downloadDoneHandler = null
+  if (downloadDoneUnsub) {
+    try { downloadDoneUnsub() } catch { /* ignore */ }
+    downloadDoneUnsub = null
   }
   if (collabStatusUnsub) {
     try { collabStatusUnsub() } catch { /* ignore */ }
@@ -1360,7 +1358,7 @@ watch(
     resetAiPreview()
     void flush()
     reload()
-    if (hasIpc) void (window as any).ipcRenderer.invoke('drawio-export-dir', exportDirOf(props.path))
+    if (hasIpc) void getPlatform().fs.setDownloadDirHint(exportDirOf(props.path))
   }
 )
 

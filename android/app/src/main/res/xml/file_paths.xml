@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可分享的根目录：分享 / 用系统应用打开时把沙箱文件转成 content:// uri。
+     external-path 覆盖公共存储（Capacitor 的 Directory.Documents 就落在 /sdcard/Documents），
+     files-path / external-files-path / cache-path 覆盖应用私有目录。 -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-path name="my_images" path="." />
+    <cache-path name="my_cache_images" path="." />
+    <files-path name="aikm_files" path="." />
+    <external-files-path name="aikm_external_files" path="." />
+</paths>

@@ -10,6 +10,7 @@
  */
 import { svgToPngDataUrl, parseSvgSize } from '@/lib/markdown/mermaid'
 import { mathmlToOmml, mathmlPlainText, mathmlTagLabel } from '@/lib/export/mathml-to-omml'
+import { getPlatform, hasCapability } from '@/platform'
 
 /** 一张待嵌入的图片 */
 interface DocxImage {
@@ -215,7 +216,7 @@ async function collectImages(doc: Document): Promise<DocxImage[]> {
  *  - 读取失败自动回退下一个候选路径。
  */
 export async function readImageAsDataUrl(filePath: string): Promise<string> {
-  if (!filePath || typeof window === 'undefined' || !(window as any).ipcRenderer) return ''
+  if (!filePath || typeof window === 'undefined' || !hasCapability('fs.pathRead')) return ''
   const candidates = new Set<string>()
   candidates.add(filePath)
   if (/%[0-9a-fA-F]{2}/.test(filePath)) {
@@ -225,7 +226,7 @@ export async function readImageAsDataUrl(filePath: string): Promise<string> {
   if (cleaned !== filePath) candidates.add(cleaned)
   for (const cand of candidates) {
     try {
-      const res = await (window as any).ipcRenderer.invoke('readFileBase64', cand)
+      const res = await getPlatform().fs.readDataUrl(cand)
       if (typeof res === 'string' && res.startsWith('data:')) return res
     } catch { /* 尝试下一个候选 */ }
   }
