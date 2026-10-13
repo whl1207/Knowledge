@@ -330,13 +330,14 @@ let _suppressKbMsg = false
 // 面板状态行自动清除定时器（无新状态一段时间后恢复显示知识库概况）
 let _kbPanelClearTimer: any = null
 
-// 持续进行中的任务（问题提取 / 自动准备 / 本体构建 / 处理管线）：期间状态栏提示不自动清除。
+// 持续进行中的任务（问题提取 / 自动准备 / 本体构建 / 社区报告 / 处理管线）：期间状态栏提示不自动清除。
 // 避免提取问题等长任务在两次更新间隔（>6s，如单块 LLM 推理）时回落到“最近完成摘要（向量化完成）”打断进度显示。
 const _kbTaskBusy = () =>
   (extractProgress?.value?.isRunning ?? false) ||
   (prepState?.active ?? false) ||
   (ingestRunning?.value ?? false) ||
-  (buildProgress?.value?.isRunning ?? false)
+  (buildProgress?.value?.isRunning ?? false) ||
+  (reportProgress?.value?.isRunning ?? false)
 
 // 状态文本分类：错误 / 成功 / 警告 / 普通信息
 const classifyKbMsg = (val: string): 'success' | 'warning' | 'info' | 'error' => {
@@ -413,6 +414,9 @@ let model = ref({
     think:false,
     // 默认嵌入模型：优先设置页(AI 来源)配置的默认嵌入模型；无 .kb 且未显式指定时跟随它
     embed: curLlmCfg.embed_model || savedEmbedModel,
+    // 评测用嵌入模型（测试标签页选择）：留空=跟随上面的 embed（设置中的嵌入模型）。
+    // 只覆盖本知识库在评测/检索时实际使用的嵌入模型，不修改设置里的嵌入模型；随 .kb 落盘（config.testEmbedModel）
+    testEmbed: '',
     process: curLlmCfg.model || store.AIconfig.llm.ollama.model,
     processPrompt:store.locales=="zh"?"请阅读下面的资料，针对资料内容列出若干“问题”，并为每个问题给出一个能直接回答它的“答案”。严格遵循以下格式，每个问题与答案独占一行成对出现：\n问题：<问题文本>\n答案：<答案文本>\n问题与答案都要分开存储，不要拼接成一句话；不要编号、不要标题、不要分组、不要任何解释或前后缀。若资料无法回答某个设问，则只保留“问题：”行、省略“答案：”。资料如下：":"Read the following information. For each question it can answer, output the question and a concise answer, one pair per two lines as: \nQuestion: <question>\nAnswer: <answer>\nKeep the question and answer as separate lines/fields; do NOT merge them into one sentence. No numbering, headings, grouping labels, explanations, or any prefix/suffix. If the text cannot answer a question you posed, output only its \"Question:\" line without \"Answer:\". The information is as follows:",
     searchMethod:"CS",
@@ -453,6 +457,9 @@ let model = ref({
     cosineWeight: 0.7,
     // 本体构建配置
     ontologyBatchSize: 8,
+    // 提取问题时是否「边推理边向量化」。默认 false：先全部推理，结束后统一补一次向量。
+    // 原因：LM Studio 等单服务下对话模型与嵌入模型不能同时常驻，边推理边嵌入会每条都换载模型，硬件不足时极慢。
+    extractEmbedQuestions: false,
     // 本体推理描述词 - 实体类型
     ontologyEntityTypes: '概念、对象、事物、主体、人物、组织、地点、事件、时间、地点、角色、系统、过程、方法、工具、材料、属性、状态、规则、策略',
     // 卡片描述推理提示词模板（默认自带模板，留空则使用代码内置默认），占位符: {{entityName}} {{entityTypes}} {{content}} {{language}}
@@ -464,13 +471,16 @@ let model = ref({
 // ==================== 统一模型来源客户端（多 provider 支持） ====================
 // 知识处理模块统一使用全局 AI 配置（store.AIconfig.llm.type），连接配置（URL / API Key / 模型）
 // 取自 store.AIconfig.llm[type]；嵌入模型优先用已加载 .kb 的配置，否则用该来源的默认嵌入模型。
+/** 实际生效的嵌入模型：测试标签页的选择优先（留空则跟随「设置中的嵌入模型」） */
+const effectiveEmbedModel = (): string => String(model.value.testEmbed || model.value.embed || '')
+
 const buildKbSpec = (): KbModelSpec => {
     const type: KbProvider = (store.AIconfig?.llm?.type as KbProvider) || 'ollama'
     const cfg = kbAi.getProviderConfig(store.AIconfig?.llm, type) || {}
     return {
         llmType: type,
         config: cfg,
-        embed: model.value.embed || cfg.embed_model || '',
+        embed: effectiveEmbedModel() || cfg.embed_model || '',
         chat: model.value.chat || cfg.model || '',
         process: model.value.process || cfg.model || '',
         think: model.value.think,
@@ -1134,6 +1144,44 @@ const removeQuestionById = (id: string) => {
   if (i >= 0) questionBank.value.splice(i, 1)
 }
 
+/** 清空问题库全部问题：危险操作，二次确认；切片 / 文件不受影响，测试页由问题库派生的用例一并清空 */
+const clearAllQuestions = async () => {
+  const zh = store.locales === 'zh'
+  const count = questionBank.value.length
+  if (count === 0) {
+    kb_state.value = zh ? '问题库已经是空的' : 'The question bank is already empty'
+    return
+  }
+  // 提取仍在进行时清空会被后续批次继续写入（恢复断点还会再次补回）→ 先停下再清
+  if (extractProgress.value.isRunning || extractProgress.value.isPaused) {
+    kb_state.value = zh
+      ? '问题提取正在运行/暂停中，请先「停止提取」再清空问题库'
+      : 'Question extraction is running/paused — stop it before clearing the bank'
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      zh
+        ? `确定要清空问题库中的全部 ${count} 个问题吗？\n\n切片与文件内容不受影响；「测试」页中由问题库派生的用例会一并清空（外部导入的独立用例保留）。此操作无法撤销。`
+        : `Clear all ${count} questions from the question bank?\n\nSlices and files are unaffected; test cases derived from the question bank are cleared too (imported standalone cases are kept). This cannot be undone.`,
+      zh ? '清空全部问题' : 'Clear All Questions',
+      {
+        type: 'warning',
+        confirmButtonText: zh ? '清空' : 'Clear',
+        cancelButtonText: zh ? '取消' : 'Cancel',
+        closeOnClickModal: false,
+      },
+    )
+  } catch { return }
+
+  questionBank.value = []
+  // 测试用例为问题库派生产物：来源为问题库时同步清空（外部导入的独立测试集不动）
+  if (testCases.value.source !== 'external') {
+    testCases.value = { questions: [], answers: [], refs: [], source: 'bank' }
+  }
+  kb_state.value = zh ? `已清空问题库（${count} 个问题）` : `Question bank cleared (${count} questions)`
+}
+
 /** 更新问题（文本变化时重新向量化） */
 const updateQuestionById = async (id: string, patch: Partial<KbQuestion>) => {
   const q = questionBank.value.find(x => x.id === id)
@@ -1148,16 +1196,20 @@ const updateQuestionById = async (id: string, patch: Partial<KbQuestion>) => {
   Object.assign(q, patch)
 }
 
-/** 后台补全缺失问题向量 */
-const embedMissingQuestionVectors = async (onMsg?: (msg: string) => void) => {
+/** 补全缺失的问题向量。分批批量嵌入（同一嵌入模型只加载一次，避免逐条调用与反复换载模型）；
+ *  shouldStop 返回 true 时提前结束（供「停止」中断统一补齐） */
+const embedMissingQuestionVectors = async (onMsg?: (msg: string) => void, shouldStop?: () => boolean) => {
   const todo = questionBank.value.filter(q => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length))
+  const BATCH = 16
   let done = 0
-  for (const q of todo) {
+  for (let start = 0; start < todo.length; start += BATCH) {
+    if (shouldStop?.()) break
+    const batch = todo.slice(start, start + BATCH)
     try {
-      const e = await kbEmbed(q.text)
-      if (e?.[0]) q.qVector = e[0]
-    } catch { /* 单条失败继续 */ }
-    done++
+      const embs = await kbEmbed(batch.map(q => q.text))
+      batch.forEach((q, k) => { const v = embs?.[k]; if (v) q.qVector = v })
+    } catch { /* 单批失败继续，其余批次与后续调用仍可补齐 */ }
+    done += batch.length
     onMsg?.(`向量化问题 ${done}/${todo.length}`)
   }
   return done
@@ -1195,6 +1247,8 @@ const handleEmbedModelChange = async (next: string) => {
     }
     embedPinned.value = true
     model.value.embed = target
+    // 设置里的嵌入模型优先于评测覆盖：清掉测试标签页的选择，避免覆盖导致本次切换不生效
+    model.value.testEmbed = ''
     if (!hasOldVectors) {
         kb_state.value = zh ? `嵌入模型已设为「${target}」` : `Embedding model set to "${target}"`
         return
@@ -1223,6 +1277,60 @@ const handleEmbedModelChange = async (next: string) => {
         ? `嵌入模型已切换为「${target}」并完成重新向量化`
         : `Switched to "${target}" and re-embedded`
     scheduleRefreshAtlas(0)
+}
+
+/**
+ * 测试标签页切换「评测用嵌入模型」（返回是否已切换；false=用户取消）：
+ * - 不改动设置里的嵌入模型（model.embed），只覆盖本知识库评测/检索时实际生效的模型
+ * - 新旧模型不同且已有向量时需清空重算（跨模型向量不可比：维度不同会静默得 0 分）
+ * - 选择随 .kb 保存（config.testEmbedModel），下次加载自动恢复
+ */
+const handleTestEmbedModelChange = async (next: string): Promise<boolean> => {
+    const zh = store.locales === 'zh'
+    const prevOverride = String(model.value.testEmbed || '')
+    const prevEffective = effectiveEmbedModel()
+    model.value.testEmbed = String(next || '').trim()
+    const nextEffective = effectiveEmbedModel()
+    if (nextEffective === prevEffective) return true
+
+    const sliceCount = blocks.value.filter((b: any) => b.A_vector && b.A_vector.length).length
+    const questionCount = questionBank.value.filter((q: any) => q.qVector && q.qVector.length).length
+    if (sliceCount > 0 || questionCount > 0) {
+        try {
+            await ElMessageBox.confirm(
+                zh
+                    ? `将评测/检索用的嵌入模型由「${prevEffective}」切换为「${nextEffective}」。\n\n现有切片/问题向量由旧模型生成，切换后需清空并用新模型重新向量化（切片 ${sliceCount} / 问题 ${questionCount}）。是否继续？`
+                    : `Switch the evaluation/retrieval embedding model from "${prevEffective}" to "${nextEffective}".\n\nExisting slice/question vectors were built with the old model and must be cleared & re-embedded (${sliceCount} slices / ${questionCount} questions). Continue?`,
+                zh ? '评测嵌入模型' : 'Evaluation Embedding Model',
+                {
+                    type: 'warning',
+                    confirmButtonText: zh ? '继续' : 'Continue',
+                    cancelButtonText: zh ? '取消' : 'Cancel',
+                    closeOnClickModal: false,
+                }
+            )
+        } catch {
+            model.value.testEmbed = prevOverride // 取消：还原原选择
+            return false
+        }
+    }
+
+    // 清空旧模型的向量（评测/问答时会用新模型按需重新向量化）
+    let clearedSlice = 0
+    for (const b of blocks.value) {
+        if (b.A_vector && b.A_vector.length) { b.A_vector = []; clearedSlice++ }
+    }
+    let clearedQuestion = 0
+    for (const q of questionBank.value) {
+        if (q.qVector && q.qVector.length) { q.qVector = undefined; clearedQuestion++ }
+    }
+    fileIndex.value.forEach((v: any) => { if (v && v.vector) v.vector = null })
+    clearEntityVectorCache() // 实体向量缓存按模型无关的 key 存储，清掉避免陈旧向量混用
+    kb_state.value = zh
+        ? `评测嵌入模型已切换为「${nextEffective}」${clearedSlice || clearedQuestion ? `（已清空旧向量：切片 ${clearedSlice} / 问题 ${clearedQuestion}）` : ''}；设置中的嵌入模型未改动，向量将在评测或问答时按需重新生成`
+        : `Evaluation embed model switched to "${nextEffective}"${clearedSlice || clearedQuestion ? ` (old vectors cleared: ${clearedSlice} slices / ${clearedQuestion} questions)` : ''}; the settings embed model is unchanged, vectors are re-derived on demand`
+    scheduleRefreshAtlas(0)
+    return true
 }
 
 /** 问题参考答案文本（外部答案优先，否则聚合答案切片内容） */
@@ -1485,6 +1593,123 @@ const stopBuildOntology = () => {
 
 const setOntologyBatchSize = (size: number) => {
     model.value.ontologyBatchSize = Math.max(1, Math.min(50, size))
+}
+
+// ==================== 社区报告生成状态管理（支持暂停 / 断点续跑） ====================
+interface ReportProgress {
+    isRunning: boolean
+    isPaused: boolean
+    totalCommunities: number
+    doneCommunities: number
+    startTime: number | null
+}
+
+const reportProgress = ref<ReportProgress>({
+    isRunning: false,
+    isPaused: false,
+    totalCommunities: 0,
+    doneCommunities: 0,
+    startTime: null
+})
+
+// 断点数据：已完成社区的签名 → 报告（续跑时按签名跳过，不重复调用大模型）
+let reportResumeReports: Map<string, CommunityReport> | null = null
+// 社区报告生成在底部状态栏中的步骤索引（停止时用于把该步骤标记为「已停止」）
+let reportStepIdx: number | null = null
+
+const saveReportProgress = () => {
+    if (!reportProgress.value.startTime) return
+    const progressToSave = {
+        totalCommunities: reportProgress.value.totalCommunities,
+        doneCommunities: reportProgress.value.doneCommunities,
+        startTime: reportProgress.value.startTime,
+        // 已完成的报告随断点一起保存，界面重载后仍可按签名续跑
+        reports: reportResumeReports ? Array.from(reportResumeReports.values()) : []
+    }
+    localStorage.setItem('communityReportProgress', JSON.stringify(progressToSave))
+}
+
+/** 读取本地保存的社区报告断点（1 小时内有效）；命中则装载已完成报告供续跑（不改变运行状态） */
+const loadReportProgress = () => {
+    const saved = localStorage.getItem('communityReportProgress')
+    if (saved) {
+        try {
+            const progress = JSON.parse(saved)
+            if (progress.startTime && Date.now() - progress.startTime < 3600000) {
+                reportProgress.value.totalCommunities = progress.totalCommunities || 0
+                reportProgress.value.doneCommunities = progress.doneCommunities || 0
+                reportProgress.value.startTime = progress.startTime
+                reportResumeReports = new Map<string, CommunityReport>(
+                    (progress.reports || [])
+                        .filter((r: any) => r && r.signature)
+                        .map((r: any) => [String(r.signature), r])
+                )
+                return true
+            }
+        } catch (e) {}
+    }
+    return false
+}
+
+const clearReportProgress = () => {
+    localStorage.removeItem('communityReportProgress')
+    reportResumeReports = null
+    reportStepIdx = null
+    reportProgress.value = {
+        isRunning: false,
+        isPaused: false,
+        totalCommunities: 0,
+        doneCommunities: 0,
+        startTime: null
+    }
+}
+
+const reportProgressPercent = computed(() => {
+    if (reportProgress.value.totalCommunities === 0) return 0
+    return Math.round((reportProgress.value.doneCommunities / reportProgress.value.totalCommunities) * 100)
+})
+
+const reportProgressText = computed(() => {
+    return `生成报告: ${reportProgress.value.doneCommunities}/${reportProgress.value.totalCommunities} (${reportProgressPercent.value}%)`
+})
+
+/** 暂停报告生成：在社区之间停下（当前社区的推理会先跑完）；断点已保存，可随时继续 */
+const pauseCommunityReports = () => {
+    if (reportProgress.value.isRunning && !reportProgress.value.isPaused) {
+        reportProgress.value.isPaused = true
+        saveReportProgress()
+        kb_state.value = store.locales === 'zh' ? '社区报告生成已暂停，点击"继续"按钮恢复' : 'Community report generation paused, click "Resume" to continue'
+    }
+}
+
+/** 停止报告生成：丢弃断点（已生成的报告仍保留在报告列表中） */
+const stopCommunityReports = () => {
+    const wasActive = reportProgress.value.isRunning || reportProgress.value.isPaused
+    reportProgress.value.isRunning = false
+    reportProgress.value.isPaused = false
+    if (reportStepIdx != null) {
+        setPrepStep(reportStepIdx, 'error', store.locales === 'zh' ? '已停止' : 'Stopped')
+        reportStepIdx = null
+    }
+    clearReportProgress()
+    if (wasActive) kb_state.value = store.locales === 'zh' ? '社区报告生成已停止' : 'Community report generation stopped'
+}
+
+/** 继续报告生成：运行中的循环从暂停点自行恢复（不重入）；无活动循环时从本地断点续跑 */
+const continueCommunityReports = async () => {
+    if (reportProgress.value.isRunning && reportProgress.value.isPaused) {
+        reportProgress.value.isPaused = false
+        kb_state.value = store.locales === 'zh' ? '继续生成社区报告...' : 'Resuming community report generation...'
+        return
+    }
+    if (loadReportProgress()) {
+        kb_state.value = store.locales === 'zh'
+            ? `从保存的进度恢复社区报告生成: ${reportProgressText.value}`
+            : `Resuming community reports from saved progress: ${reportProgressText.value}`
+        await generateCommunityReportsAction(undefined, { resume: true })
+    } else {
+        kb_state.value = store.locales === 'zh' ? '没有可恢复的社区报告进度，请重新生成' : 'No community report progress to resume'
+    }
 }
 
 async function getModel(){
@@ -2169,17 +2394,19 @@ const latestBehavior = computed<{ status: string; icon: string; text: string; de
     return null
 })
 
-/** 是否有未完成的处理进度（问题提取 / 本体构建），决定状态栏是否显示"继续"图标 */
+/** 是否有未完成的处理进度（问题提取 / 本体构建 / 社区报告），决定状态栏是否显示"继续"图标 */
 const hasUnfinishedProgress = computed(() => {
-    return extractProgress.value.isPaused || buildProgress.value.isPaused
+    return extractProgress.value.isPaused || buildProgress.value.isPaused || reportProgress.value.isPaused
 })
 
-/** 继续未完成的处理（优先问题提取，其次本体构建） */
+/** 继续未完成的处理（优先问题提取，其次本体构建，最后社区报告） */
 const continuePendingWork = async () => {
     if (extractProgress.value.isPaused) {
         await continueExtract()
     } else if (buildProgress.value.isPaused) {
         await continueBuildOntology()
+    } else if (reportProgress.value.isPaused) {
+        await continueCommunityReports()
     }
 }
 
@@ -2258,6 +2485,23 @@ const ensureKbReady = async (): Promise<boolean> => {
         prepState.active = false
         _suppressKbMsg = false
     }
+}
+
+/**
+ * 评测前置：确保切片向量就绪（供 testManager 调用）。
+ * 精简模式（.kb 未保存向量数据）加载后内存切片没有 A_vector，dense_score 的所有原始分恒为 0，
+ * 表现为「总分全为 0 但顺序看起来正常」；这里与问答路径一致地按当前嵌入模型懒补全。
+ * 返回是否就绪（未就绪时评测分数不可用，调用方应中止并提示）。
+ */
+const ensureTestVectors = async (onProgress?: (detail: string) => void): Promise<boolean> => {
+    if (blocks.value.length === 0) return false
+    if (isEmbedded.value) return true
+    const missing = blocks.value.filter((b: any) => !b.A_vector || b.A_vector.length === 0).length
+    kb_state.value = store.locales === 'zh'
+        ? `评测前补齐切片向量：${missing} 个切片未向量化，正在用「${effectiveEmbedModel()}」生成...`
+        : `Preparing slice vectors: embedding ${missing} slices with "${effectiveEmbedModel()}"...`
+    await embedBlocks((detail) => onProgress?.(detail))
+    return isEmbedded.value
 }
 
 function splitByHeadings(content: string): string[] {
@@ -2861,7 +3105,9 @@ const reasoning = async function(i: number) {
         const texts = pairs.map(p => p.text).filter(Boolean)
         const answers = pairs.map(p => p.answer)
         let vecs: (number[] | undefined)[] = []
-        if (texts.length) {
+        // 「提取时立即向量化」关闭（默认）时不在此嵌入：LM Studio 等单服务下对话/嵌入模型不能同时常驻，
+        // 每条都换载模型会拖垮速度；改为全部推理结束后统一补一次（见 extractQuestionsWithProgress）
+        if (texts.length && model.value.extractEmbedQuestions) {
             try {
                 const embs = await kbEmbed(texts)
                 vecs = texts.map((_, k) => embs?.[k])
@@ -2885,7 +3131,9 @@ const extractQuestionsWithProgress = async function(startIndex: number = 0) {
             await new Promise(resolve => setTimeout(resolve, 100))
             if (!extractProgress.value.isRunning) return
         }
-        
+        // 取消检查：停止提取会把 isRunning 置 false，这里立即退出（不再继续推理剩余切片）
+        if (!extractProgress.value.isRunning) return
+
         // 方案 A：该切片在问题库中已有推理问题则跳过（问题不再存于切片）
         const bId = blocks.value[i]?.id
         if (bId && questionBank.value.some(q => q.srcBlockId === bId && q.origin === 'reasoned' && q.status !== 'merged')) continue
@@ -2900,10 +3148,30 @@ const extractQuestionsWithProgress = async function(startIndex: number = 0) {
         await reasoning(i)
     }
     
+    // 未开启「提取时立即向量化」→ 推理全部结束后统一补一次问题向量：
+    // 同一嵌入模型只加载一次，避免 LM Studio 在对话/嵌入模型间反复换载（硬件不足时尤其明显）
+    let filled = 0
+    if (!model.value.extractEmbedQuestions) {
+        const missing = questionBank.value.filter(q => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length)).length
+        if (missing > 0) {
+            kb_state.value = store.locales === 'zh'
+                ? `提取完成：正在统一补齐 ${missing} 条问题向量（一次性完成，避免反复切换嵌入模型）...`
+                : `Extraction done: embedding ${missing} questions in one pass (avoids repeated model swaps)...`
+            filled = await embedMissingQuestionVectors((msg) => { kb_state.value = msg }, () => !extractProgress.value.isRunning)
+        }
+    }
+    // 统一补齐期间被「停止提取」中断：保留已提取内容，只是不再显示完成提示
+    if (!extractProgress.value.isRunning) {
+        kb_state.value = store.locales === 'zh' ? '问题提取已停止' : 'Extraction stopped'
+        return
+    }
+
     extractProgress.value.isRunning = false
     extractProgress.value.isPaused = false
     clearExtractProgress()
-    kb_state.value = store.locales === 'zh' ? '问题提取完成！' : 'Extraction complete!'
+    kb_state.value = store.locales === 'zh'
+        ? `问题提取完成！${filled > 0 ? `已统一向量化 ${filled} 条问题` : ''}`
+        : `Extraction complete!${filled > 0 ? ` Embedded ${filled} questions in one pass` : ''}`
 }
 
 const continueExtract = async () => {
@@ -3782,7 +4050,8 @@ const buildRetrievalContext = (query: string): RetrievalContext => {
         questionVectorsByBlock: questionVectorsByBlockIndex(),
         config: {
             url: modelCfg.url,
-            embed: modelCfg.embed,
+            // 评测用嵌入模型优先（与 buildKbSpec/向量化用的模型保持一致）
+            embed: effectiveEmbedModel(),
             chat: modelCfg.chat,
             process: modelCfg.process,
             locale: store.locales,
@@ -4082,6 +4351,9 @@ const save = async function(){
     const saveData = {
         config: {
             embedModel: model.value.embed,
+            // 评测用嵌入模型（测试标签页选择；留空=跟随 embedModel）。只覆盖评测/检索实际使用的模型，
+            // 不改动设置里的嵌入模型；随 .kb 落盘，下次加载自动恢复选择
+            testEmbedModel: model.value.testEmbed || '',
             timestamp: new Date().toISOString(),
             version: "3.0",
             // false=精简模式：向量未写入 .kb（加载时据此恢复开关并标记）
@@ -4089,6 +4361,8 @@ const save = async function(){
             summaryWeight: model.value.summaryWeight,
             sliceWeight: model.value.sliceWeight,
             ontologyBatchSize: model.value.ontologyBatchSize,
+            // 提取问题时是否边推理边向量化（默认 false：推理结束后统一补一次，避免反复切换嵌入模型）
+            extractEmbedQuestions: !!model.value.extractEmbedQuestions,
             agentSubQueryWeight: model.value.agentSubQueryWeight,
             searchConfig: {
                 bm25Enabled: model.value.bm25Enabled,
@@ -4226,6 +4500,9 @@ const loadKnowledgeBases = async function(index?: number) {
         } else {
             embedPinned.value = false
         }
+        // 评测用嵌入模型（测试标签页选择）：随 .kb 恢复；等于默认嵌入模型时视作「跟随设置」
+        const savedTestEmbed = String(saveData.config.testEmbedModel || '')
+        model.value.testEmbed = (savedTestEmbed && savedTestEmbed !== String(model.value.embed || '')) ? savedTestEmbed : ''
         if (saveData.config.summaryWeight !== undefined) {
             model.value.summaryWeight = saveData.config.summaryWeight
         }
@@ -4238,6 +4515,9 @@ const loadKnowledgeBases = async function(index?: number) {
         }
         if (saveData.config.ontologyBatchSize !== undefined) {
             model.value.ontologyBatchSize = saveData.config.ontologyBatchSize
+        }
+        if (saveData.config.extractEmbedQuestions !== undefined) {
+            model.value.extractEmbedQuestions = !!saveData.config.extractEmbedQuestions
         }
         if (saveData.config.agentSubQueryWeight !== undefined) {
             model.value.agentSubQueryWeight = saveData.config.agentSubQueryWeight
@@ -5504,24 +5784,12 @@ const updateOntologyViewer = () => {
     ontologyData.value.edges = edges
 }
 
-const clearOntology = async () => {
-    // 危险操作：二次确认，避免误触清空全部实体/关系/卡片/社区
-    try {
-        await ElMessageBox.confirm(
-            store.locales === 'zh'
-                ? '确定要清空本体/百科吗？将删除全部实体（即百科条目/卡片）及其实体间的关系，并清除由此派生的社区与报告；切片内容不受影响。此操作无法撤销。'
-                : 'Clear the ontology/encyclopedia? This removes all entities (the encyclopedia cards), their relations, and the derived communities/reports. Slice content is unaffected. This cannot be undone.',
-            store.locales === 'zh' ? '清空本体' : 'Clear Ontology',
-            {
-                type: 'warning',
-                confirmButtonText: store.locales === 'zh' ? '清空' : 'Clear',
-                cancelButtonText: store.locales === 'zh' ? '取消' : 'Cancel',
-                closeOnClickModal: false,
-            },
-        )
-    } catch { return }
+/** 清空本体/百科的实际动作（无确认框）：供 resetKbState 等内部状态重置复用，内部流程不应弹确认 */
+const doClearOntology = () => {
     // 清空构建进度（含断点 savedOntologyState）：清空后应从「开始」重新抽取，而非显示「继续」
     clearBuildProgress()
+    // 社区报告正在生成/暂停时一并终止：报告与社区都要清掉，循环不应继续写入
+    if (reportProgress.value.isRunning || reportProgress.value.isPaused) stopCommunityReports()
     // 若仍有正在运行/展示的「构建本体」步骤，先收尾，避免状态栏残留“构建本体 第 x/y 批”或误判为“完成”
     if (ontologyStepIdx != null) {
         setPrepStep(ontologyStepIdx, 'error', store.locales === 'zh' ? '已清空本体' : 'Ontology cleared')
@@ -5541,6 +5809,25 @@ const clearOntology = async () => {
     kb_state.value = store.locales === 'zh' ? '本体已清空' : 'Ontology cleared'
 }
 
+/** 清空本体/百科：危险操作，二次确认，避免误触清空全部实体/关系/卡片/社区 */
+const clearOntology = async () => {
+    try {
+        await ElMessageBox.confirm(
+            store.locales === 'zh'
+                ? '确定要清空本体/百科吗？将删除全部实体（即百科条目/卡片）及其实体间的关系，并清除由此派生的社区与报告；切片内容不受影响。此操作无法撤销。'
+                : 'Clear the ontology/encyclopedia? This removes all entities (the encyclopedia cards), their relations, and the derived communities/reports. Slice content is unaffected. This cannot be undone.',
+            store.locales === 'zh' ? '清空本体' : 'Clear Ontology',
+            {
+                type: 'warning',
+                confirmButtonText: store.locales === 'zh' ? '清空' : 'Clear',
+                cancelButtonText: store.locales === 'zh' ? '取消' : 'Cancel',
+                closeOnClickModal: false,
+            },
+        )
+    } catch { return }
+    doClearOntology()
+}
+
 /** 重置知识库所有状态（与初始化进入模块一致：清除切片/文件摘要/本体/社区/报告/测试用例等） */
 const resetKbState = () => {
     blocks.value = []
@@ -5555,7 +5842,8 @@ const resetKbState = () => {
     fileIndex.value.clear()
     buildManifest.value = {}
     fileChanges.value = { added: [], modified: [], deleted: [] }
-    clearOntology()
+    // 内部重置（非用户点「清空本体」）：直接清，不弹确认框
+    doClearOntology()
     clearExtractProgress()
     clearBuildProgress()
     resetScrollLoad()
@@ -5667,8 +5955,15 @@ const startBuildOntology = async (onProgress?: (detail: string) => void) => {
     }
 }
 
-// ===== 社区报告生成（GraphRAG 风格） =====
-const generateCommunityReportsAction = async (onProgress?: (detail: string) => void) => {
+// ===== 社区报告生成（GraphRAG 风格；支持暂停 / 断点续跑） =====
+const generateCommunityReportsAction = async (onProgress?: (detail: string) => void, opts: { resume?: boolean } = {}) => {
+    // 已有运行中/暂停中的循环时不再起新循环（避免并发写报告）
+    if (reportProgress.value.isRunning || reportProgress.value.isPaused) {
+        kb_state.value = store.locales === 'zh'
+            ? '社区报告生成已在运行或暂停中，请先继续或停止'
+            : 'Community report generation is already running/paused — resume or stop it first'
+        return
+    }
     if (!communityResult.value || communityResult.value.count === 0) {
         kb_state.value = store.locales === 'zh' ? '请先运行社区检测' : 'Please run community detection first'
         return
@@ -5679,12 +5974,27 @@ const generateCommunityReportsAction = async (onProgress?: (detail: string) => v
     }
 
     const reportIdx = prepPushStep(store.locales === 'zh' ? '社区报告' : 'Community Reports')
+    reportStepIdx = reportIdx
     const comMap = communityResult.value.communities
     const totalComs = comMap.size
     let completed = 0
     let generatedOk = 0
     let failedCount = 0
+    let reusedCount = 0
     const reports: CommunityReport[] = []
+
+    // 断点续跑：装载已完成报告（签名 → 报告），同社区直接复用；全新生成则丢弃旧断点
+    if (!reportResumeReports) reportResumeReports = new Map()
+    if (!opts.resume) {
+        reportResumeReports = new Map()
+        localStorage.removeItem('communityReportProgress')
+    }
+    reportProgress.value.isRunning = true
+    reportProgress.value.isPaused = false
+    reportProgress.value.totalCommunities = totalComs
+    reportProgress.value.doneCommunities = 0
+    reportProgress.value.startTime = Date.now()
+    saveReportProgress()
 
     // 构建实体 ID → 实体名称（小写）的映射，entityToBlocksIndex 的 key 是实体名称
     const idToNameMap = new Map<string, string>()
@@ -5693,6 +6003,14 @@ const generateCommunityReportsAction = async (onProgress?: (detail: string) => v
     }
 
     for (const [comId, entityIds] of comMap.entries()) {
+        // 暂停：停在社区边界，等用户点「继续」（断点已保存）
+        while (reportProgress.value.isPaused) {
+            await new Promise(resolve => setTimeout(resolve, 100))
+            if (!reportProgress.value.isRunning) return
+        }
+        // 停止 / 清空本体：立即退出，避免继续写入已清空的报告
+        if (!reportProgress.value.isRunning) return
+
         completed++
         setPrepStep(reportIdx, 'running', `(${completed}/${totalComs})`)
         const reportMsg = store.locales === 'zh' ?
@@ -5711,6 +6029,20 @@ const generateCommunityReportsAction = async (onProgress?: (detail: string) => v
             .map(key => globalEntities.value.get(key)?.name)
             .filter(Boolean) as string[]
 
+        const communityName = entityNames[0] || `社区${comId}`
+        const signature = communitySignature(entityIds)
+
+        // 断点续跑：该社区已有生成好的报告（按稳定签名匹配）→ 直接复用，跳过推理
+        const reused = opts.resume ? reportResumeReports.get(signature) : undefined
+        if (reused && reused.summary) {
+            reports.push({ ...reused, communityId: comId, signature })
+            reusedCount++
+            communityReports.value = [...reports]
+            reportProgress.value.doneCommunities = completed
+            saveReportProgress()
+            continue
+        }
+
         // 收集关联文本（传入实体名称，与 entityToBlocksIndex 的 key 匹配）
         const contextText = collectCommunityContext(
             entityNameKeys,
@@ -5718,14 +6050,13 @@ const generateCommunityReportsAction = async (onProgress?: (detail: string) => v
             blocks.value
         )
 
-        const communityName = entityNames[0] || `社区${comId}`
-        const signature = communitySignature(entityIds)
-
         if (!contextText) {
             console.warn(`社区 ${comId} 跳过: 无关联切片 (实体数=${entityIds.length}, 映射到名称=${entityNameKeys.length})`)
             // 占位报告，保持报告列表完整（供后续增量按签名复用）
             reports.push({ communityId: comId, title: communityName, summary: '', findings: [], rating: 0, signature })
             communityReports.value = [...reports]
+            reportProgress.value.doneCommunities = completed
+            saveReportProgress()
             continue
         }
 
@@ -5747,14 +6078,17 @@ const generateCommunityReportsAction = async (onProgress?: (detail: string) => v
                 const response = await kbChat([{ role: 'user', content: prompt }])
                 const parsed = safeParseLlmJson(response)
                 if (!parsed) throw new Error('无法解析社区报告 JSON')
-                reports.push({
+                const newReport: CommunityReport = {
                     communityId: comId,
                     title: parsed.title || communityName,
                     summary: parsed.summary || '',
                     findings: parsed.findings || [],
                     rating: parsed.rating ?? 5,
                     signature,
-                })
+                }
+                reports.push(newReport)
+                // 记入断点：暂停 / 界面重载后按签名复用，不再重复推理
+                reportResumeReports.set(signature, newReport)
                 generatedOk++
                 ok = true
             } catch (e) {
@@ -5766,14 +6100,26 @@ const generateCommunityReportsAction = async (onProgress?: (detail: string) => v
                 }
             }
         }
-        // 每生成一个报告就更新 communityReports，让 UI 实时刷新
+        // 每生成一个报告就更新 communityReports（UI 实时刷新）并保存断点（暂停 / 重启后可续跑）
         communityReports.value = [...reports]
+        reportProgress.value.doneCommunities = completed
+        saveReportProgress()
     }
 
-    setPrepStep(reportIdx, 'done', store.locales === 'zh' ? `生成 ${generatedOk} / 失败 ${failedCount}（共 ${totalComs}）` : `ok ${generatedOk} / fail ${failedCount} (of ${totalComs})`)
+    // 全部完成：清空断点，按钮回到「生成报告」
+    const reusedText = reusedCount ? (store.locales === 'zh' ? ` / 复用 ${reusedCount}` : ` / reused ${reusedCount}`) : ''
+    reportProgress.value.isRunning = false
+    reportProgress.value.isPaused = false
+    if (reportStepIdx != null) {
+        setPrepStep(reportStepIdx, 'done', store.locales === 'zh'
+            ? `生成 ${generatedOk} / 失败 ${failedCount}${reusedText}（共 ${totalComs}）`
+            : `ok ${generatedOk} / fail ${failedCount}${reusedText} (of ${totalComs})`)
+        reportStepIdx = null
+    }
+    clearReportProgress()
     kb_state.value = store.locales === 'zh' ?
-        `社区报告生成完成！成功 ${generatedOk} / 失败 ${failedCount} / 共 ${totalComs} 份` :
-        `Community reports generated! ok ${generatedOk} / fail ${failedCount} / of ${totalComs}`
+        `社区报告生成完成！成功 ${generatedOk} / 失败 ${failedCount}${reusedText} / 共 ${totalComs} 份` :
+        `Community reports generated! ok ${generatedOk} / fail ${failedCount}${reusedText} / of ${totalComs}`
 
     console.log('社区报告:', reports)
 }
@@ -6223,6 +6569,8 @@ onBeforeUnmount(() => {
                             :model-ontology-batch-size="model.ontologyBatchSize"
                             :community-reports-count="communityReports.length"
                             :community-reports="communityReports"
+                            :report-progress="reportProgress"
+                            :report-progress-text="reportProgressText"
                             :questions="questionBank"
                             @node-click="handleNodeClick"
                             @block-click="handleBlockClick"
@@ -6232,6 +6580,9 @@ onBeforeUnmount(() => {
                             @continue-build="continueBuildOntology"
                             @detect-communities="detectCommunities"
                             @generate-reports="generateCommunityReportsAction"
+                            @pause-reports="pauseCommunityReports"
+                            @continue-reports="continueCommunityReports"
+                            @stop-reports="stopCommunityReports"
                             @re-reason-community="reReasonCommunity"
                             @update-batch-size="(v: number) => setOntologyBatchSize(v)"
                             @update-total-nodes="(v: number) => ontologyTotalNodes = v"
@@ -6317,6 +6668,7 @@ onBeforeUnmount(() => {
                 :on-remove-question="removeQuestionById"
                 :on-update-question="updateQuestionById"
                 :on-embed-missing="embedMissingQuestionVectors"
+                :on-clear-questions="clearAllQuestions"
                 @update-state="(s: any) => kb_state = s"
                 @update-live-state="(s: any) => kbLiveState = s"
                 @update-review-bad="(n: number) => questionBadCount = n"
@@ -6344,6 +6696,8 @@ onBeforeUnmount(() => {
                 :questionVectorsByBlock="questionVectorsByBlockIndex()"
                 :strategyVersion="strategyVersion"
                 :ensureCommunityReports="ensureCommunityReports"
+                :ensureSliceVectors="ensureTestVectors"
+                :onTestEmbedChange="handleTestEmbedModelChange"
                 @testCasesChange="onTestCasesChange"
                 @updateState="(state:any) => kb_state = state"
                 @updateLiveState="(state:any) => kbLiveState = state"

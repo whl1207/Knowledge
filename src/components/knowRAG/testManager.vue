@@ -11,8 +11,16 @@ import { cosineSimilarity } from '@/shared/kbRetrieval'
 import * as kbAi from '@/shared/kbAiClient'
 const store=usestore()
 
-// 统一模型来源客户端（多 provider）：连接配置取自 store.AIconfig.llm[llmType]
-const kbSpec = () => kbAi.buildSpecFromModel(props.model, props.store)
+// 评测用嵌入模型（测试标签页选择）：留空则跟随设置中的嵌入模型（model.embed）
+const effectiveEmbedModel = (): string => String(props.model?.testEmbed || props.model?.embed || '')
+
+// 统一模型来源客户端（多 provider）：连接配置取自 store.AIconfig.llm[llmType]；
+// 评测用嵌入模型（testEmbed）优先于设置中的嵌入模型，保证评测与向量化用同一模型
+const kbSpec = () => {
+  const m = props.model
+  const embed = effectiveEmbedModel()
+  return kbAi.buildSpecFromModel(embed && embed !== m?.embed ? { ...m, embed } : m, props.store)
+}
 
 // 一条测试问题的「关联切片」判定基准（由问题库 answerBlocks/srcBlockId 派生）
 interface TestCaseRef { srcBlockId?: string; blockIds: string[] }
@@ -44,6 +52,10 @@ interface Props {
   strategyVersion?: number
   // 预热社区报告：预生成社区报告（由父组件提供）
   ensureCommunityReports?: () => Promise<boolean>
+  // 评测前置：确保切片向量就绪（精简模式 .kb 无向量时按当前嵌入模型懒补全），返回是否就绪
+  ensureSliceVectors?: (onProgress: (msg: string) => void) => Promise<boolean>
+  // 测试标签页「评测用嵌入模型」切换（留空=跟随设置中的嵌入模型）；返回 false 表示用户取消
+  onTestEmbedChange?: (name: string) => Promise<boolean> | boolean | void
 }
 
 // 检索策略类型（与 QA 标签页的检索方式对齐，策略可配置）
@@ -525,6 +537,43 @@ const fuzzyAnswerHit = (sliceContent: string, answerText: string): boolean => {
 const textSliceHit = (sliceContent: string, answerText: string): boolean =>
   test.matchMode === 'precise' ? preciseAnswerHit(sliceContent, answerText) : fuzzyAnswerHit(sliceContent, answerText)
 
+// 未向量化切片数：精简模式（.kb 未保存向量）加载后全部缺失。缺失时 dense_score 拿不到切片向量，
+// 各通道原始分恒为 0 → 所有「总分」都是 0%（排序退化为原始切片顺序，看起来「顺序正常」但并非按分数）
+const missingSliceVectorCount = computed(() =>
+  (props.blocks || []).filter((b: any) => !b.A_vector || b.A_vector.length === 0).length)
+
+/** 评测前置：切片向量缺失时先懒补全（与问答路径一致），避免静默全 0 分；返回是否可就绪地开测 */
+const ensureTestVectors = async (): Promise<boolean> => {
+  if (!(props.blocks || []).length) {
+    emit('updateState', store.locales=='zh' ? '没有切片数据，请先切片或选择已构建的知识库' : 'No slices: slice the KB or load a built KB first')
+    return false
+  }
+  if (missingSliceVectorCount.value === 0) return true
+  if (!props.ensureSliceVectors) {
+    emit('updateState', store.locales=='zh'
+      ? `有 ${missingSliceVectorCount.value} 个切片未向量化，相似度分将全为 0：请先在「切片」页向量化`
+      : `${missingSliceVectorCount.value} slices have no vector → all scores would be 0; embed them in the Slice view first`)
+    return false
+  }
+  emit('updateLiveState', store.locales=='zh'
+    ? `评测前补齐切片向量 0/${missingSliceVectorCount.value}`
+    : `Embedding slices 0/${missingSliceVectorCount.value}`)
+  let ok = false
+  try {
+    ok = await props.ensureSliceVectors((msg: string) => emit('updateLiveState', msg))
+  } catch (e) {
+    console.error('切片向量补齐失败:', e)
+  }
+  emit('updateLiveState', '')
+  if (!ok || missingSliceVectorCount.value > 0) {
+    emit('updateState', store.locales=='zh'
+      ? `切片向量化未完成（仍缺 ${missingSliceVectorCount.value} 个），总分不可用：请检查嵌入模型配置`
+      : `Slice embedding incomplete (${missingSliceVectorCount.value} missing); scores unusable — check the embed model`)
+    return false
+  }
+  return true
+}
+
 // 执行检索（统一走策略框架 runStrategy，与聊天共用同一套检索逻辑，消除实现漂移）
 async function performSearch(question: string, searchNum: number, algorithm: SearchAlgorithm, answer?: string, ref?: TestCaseRef): Promise<{
   slices: TestResult['slices'],
@@ -550,7 +599,8 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
     questionVectorsByBlock: (props.questionVectorsByBlock as any) || new Map() as Map<string, number[][]>,
     config: {
       url: props.model.url,
-      embed: props.model.embed,
+      // 评测用嵌入模型优先（与实际向量化用的 kbSpec 保持一致）
+      embed: effectiveEmbedModel(),
       chat: props.model.chat,
       process: props.model.process,
       locale: props.store.locales,
@@ -881,7 +931,9 @@ const runSingleTest = async (index: number) => {
     emit('updateState', store.locales=='zh' ? '请输入有效问题' : 'Please enter a valid question')
     return
   }
-  
+
+  if (!(await ensureTestVectors())) return
+
   try {
     test.questionStatus[index] = {
       text: store.locales=='zh' ? '测试中...' : 'Testing...',
@@ -951,6 +1003,41 @@ const runSingleTest = async (index: number) => {
     emit('updateState', store.locales=='zh' ? '测试失败: ' : 'Test Failed: ') + (error instanceof Error ? error.message : String(error))
   }
 }
+
+// ===== 评测用嵌入模型（当前模型来源可用；留空=跟随设置中的嵌入模型） =====
+// 选择只覆盖本知识库评测/检索时实际使用的嵌入模型，不改动设置里的嵌入模型；随 .kb 保存（config.testEmbedModel）
+const testEmbedSel = ref('')
+watch(() => props.model?.testEmbed, (v) => {
+  const s = String(v || '')
+  if (testEmbedSel.value !== s) testEmbedSel.value = s
+}, { immediate: true })
+
+/** 嵌入模型名判定（与 knowRAG.autoSetEmbedModel / configManager 保持一致） */
+const isEmbedModelName = (name: string) => /^(bge|text-embedding|ada-embedding|instructor|e5|gte|m3e)|embed|embedding/i.test(name || '')
+
+/** 下拉候选：当前来源可用模型中的嵌入模型 + 当前生效模型（不在列表时补上，避免已有选择丢失） */
+const embedModelOptions = computed<string[]>(() => {
+  const out: string[] = []
+  const add = (n: string) => { if (n && !out.includes(n)) out.push(n) }
+  const list = (props.model?.list || []).map((m: any) => String(m?.name || '')).filter(Boolean)
+  list.filter((n: string) => isEmbedModelName(n)).forEach(add)
+  add(effectiveEmbedModel())
+  return out
+})
+
+const followEmbedLabel = computed(() => store.locales == 'zh'
+  ? `跟随设置（${props.model?.embed || '未配置'}）`
+  : `Follow settings (${props.model?.embed || 'not set'})`)
+
+/** 切换评测用嵌入模型：交给父级确认/清空旧向量并落盘；取消则还原下拉选择 */
+const onTestEmbedModelChange = async () => {
+  const next = String(testEmbedSel.value || '')
+  const ok = await props.onTestEmbedChange?.(next)
+  if (ok === false) testEmbedSel.value = String(props.model?.testEmbed || '')
+}
+
+/** 模型列表为空/来源切换后，从当前 AI 来源重新拉取（无需进入设置） */
+const refreshEmbedModels = () => { props.getModel?.() }
 
 // ===== 批量测试面板：预热配置（向量化准备，时间单独计时、不计入检索） =====
 const prewarm = reactive({ file: false, entity: false, community: false })
@@ -1171,14 +1258,58 @@ const etaText = computed(() => {
 // 运行结束自动停止计时并清零
 watch(() => test.isRunning, (v) => { if (!v) { stopTestClock(); testStartedAt.value = 0 } })
 
+// ===== 批量测试（当前策略 / 全部策略）暂停与停止 =====
+// 暂停：在「问题之间」停下（当前问题的检索/推理跑完即可暂停），可继续；停止：立即结束剩余问题，已测结果保留
+const batchCtl = reactive({ paused: false, aborted: false })
+/** 正在运行的批量类型：''=未运行 / 'one'=当前策略 / 'all'=全部策略（决定按钮组显示暂停还是启动） */
+const batchRunKind = ref<'' | 'one' | 'all'>('')
+
+const resetBatchCtl = () => { batchCtl.paused = false; batchCtl.aborted = false }
+
+/** 暂停等待：暂停中挂起；返回 false 表示已停止（调用方应结束循环） */
+const waitWhilePaused = async (): Promise<boolean> => {
+  while (batchCtl.paused && !batchCtl.aborted) {
+    await new Promise(resolve => setTimeout(resolve, 120))
+  }
+  return !batchCtl.aborted
+}
+
+const pauseBatchTest = () => {
+  if (!test.isRunning || batchCtl.paused) return
+  batchCtl.paused = true
+  emit('updateState', store.locales=='zh' ? '批量测试已暂停（当前问题跑完后停下），点击「继续」或「停止」' : 'Batch test paused (after the current question); click Resume or Stop')
+}
+
+const continueBatchTest = () => {
+  if (!batchCtl.paused) return
+  batchCtl.paused = false
+  emit('updateState', store.locales=='zh' ? '继续批量测试...' : 'Resuming batch test...')
+}
+
+const stopBatchTest = () => {
+  if (!test.isRunning && !batchCtl.paused) return
+  batchCtl.aborted = true
+  batchCtl.paused = false
+}
+
 // 批量测试（使用当前算法）
 const runBatchTest = async () => {
+  // 已有批量测试（当前 / 全部策略）在跑：避免并发写进度与结果
+  if (test.isRunning) {
+    emit('updateState', store.locales=='zh' ? '已有批量测试正在运行，请先停止或等待完成' : 'A batch test is already running — stop it or wait for it to finish')
+    return
+  }
   const validQuestions = test.questions.filter((q, i) => q && q.trim())
   if (validQuestions.length === 0) {
     emit('updateState', store.locales=='zh' ? '请输入至少一个有效问题' : 'Please enter at least one valid question')
     return
   }
-  
+
+  // 先补齐切片向量再计时开测（向量化耗时不计入检索时间）
+  if (!(await ensureTestVectors())) return
+
+  resetBatchCtl()
+  batchRunKind.value = 'one'
   test.isRunning = true
   test.progress = 0
   startTestClock()
@@ -1196,6 +1327,8 @@ const runBatchTest = async () => {
   await ensureStrategyChannelsReady([test.currentAlgorithm])
   
   for (let i = 0; i < test.questions.length; i++) {
+    // 暂停/停止：在问题之间生效（已测结果保留）
+    if (!(await waitWhilePaused())) break
     const question = test.questions[i]?.trim()
     const answer = test.answers && test.answers[i] ? test.answers[i].trim() : ''
     
@@ -1284,6 +1417,9 @@ const runBatchTest = async () => {
     test.progress = ((i + 1) / test.questions.length) * 100
   }
   
+  const aborted = batchCtl.aborted
+  batchRunKind.value = ''
+  resetBatchCtl()
   test.isRunning = false
   lastUpdateTime.value = new Date().toLocaleTimeString()
   // 实时刷新策略召回对比：批测单个策略完成后该策略出现一行数据
@@ -1295,6 +1431,12 @@ const runBatchTest = async () => {
   }, 0)
   
   const doneCount = testResults.value.filter(Boolean).length
+  if (aborted) {
+    emit('updateState', store.locales=='zh'
+      ? `批量测试已停止：已测 ${doneCount}/${test.questions.length} 个问题（结果保留）`
+      : `Batch test stopped: ${doneCount}/${test.questions.length} questions tested (results kept)`)
+    return
+  }
   if (store.locales=='zh') {
     emit('updateState', `批量测试完成：共处理 ${doneCount} 个问题，${answerMatches} 个切片命中基准（关联切片 / 参考答案）`)
   } else {
@@ -1481,6 +1623,11 @@ const updateStrategyStats = () => {
 
 // 批量测试所有检索策略：每个策略跑一遍全部问题，统计召回准确率
 const runAllStrategyTest = async () => {
+  // 已有批量测试（当前 / 全部策略）在跑：避免并发写进度与结果
+  if (test.isRunning) {
+    emit('updateState', store.locales=='zh' ? '已有批量测试正在运行，请先停止或等待完成' : 'A batch test is already running — stop it or wait for it to finish')
+    return
+  }
   // 可测条件：答案命中=需参考答案文本；切片精准命中=需关联切片基准或参考答案文本（无基准问题仅检索、不计命中）
   const sliceMode = test.hitMode === 'slice'
   const hasTestable = test.questions.some((q, i) => q && q.trim() && (
@@ -1493,6 +1640,11 @@ const runAllStrategyTest = async () => {
     return
   }
 
+  // 先补齐切片向量再计时开测（向量化耗时不计入检索时间）
+  if (!(await ensureTestVectors())) return
+
+  resetBatchCtl()
+  batchRunKind.value = 'all'
   test.isRunning = true
   test.progress = 0
   startTestClock()
@@ -1515,9 +1667,11 @@ const runAllStrategyTest = async () => {
   // 新一次「全部策略」测试：自动清空上一次结果/位次/统计，只保留本次
   clearJudgementResults()
 
-  let firstStrategyDone = false
+  let abortedRuns = false
   for (const algo of strategies) {
     for (let i = 0; i < rows.length; i++) {
+      // 暂停/停止：在问题之间生效（已测结果与统计保留）
+      if (!(await waitWhilePaused())) { abortedRuns = true; break }
       const { question, answer } = rows[i]
       if (!question || isJunkQuestion(question)) { done++; continue }
       allTestProgressText.value = store.locales=='zh'
@@ -1548,10 +1702,8 @@ const runAllStrategyTest = async () => {
     }
     // 每测完一个策略，立即刷新「策略召回对比」，让该策略数据实时可见
     updateStrategyStats()
-    if (!firstStrategyDone) {
-      firstStrategyDone = true
-      activeTab.value = 'batch'
-    }
+    activeTab.value = 'batch'
+    if (abortedRuns) break
   }
 
   // 聚合每个策略的召回统计（与单测/批测共用同一聚合逻辑）
@@ -1559,9 +1711,18 @@ const runAllStrategyTest = async () => {
   expandedStrategy.value = ''
   activeTab.value = 'batch'
 
+  batchRunKind.value = ''
+  resetBatchCtl()
   test.isRunning = false
   allTestProgressText.value = ''
   lastUpdateTime.value = new Date().toLocaleTimeString()
+
+  if (abortedRuns) {
+    emit('updateState', store.locales=='zh'
+      ? `全部策略测试已停止：已完成 ${done}/${totalRuns} 次检索（已测结果与统计保留）`
+      : `All-strategy test stopped: ${done}/${totalRuns} retrievals done (results & stats kept)`)
+    return
+  }
 
   const best = allStrategyStats.value[0]
   emit('updateState', store.locales=='zh'
@@ -2181,20 +2342,63 @@ const clearTestCases = () => {
            :title="store.locales=='zh' ? '清空测试用例：清空当前 问题/答案/关联切片 列表（结果与统计一并清空）；问题库用例可点「读取测试用例」重新派生' : 'Clear test cases: empty the current question/answer/linked-slice list (results & stats cleared too); question-bank cases can be restored via \'Read test cases\''">        <i class="fa fa-trash"></i>
       </div>
       <span class="kt-sep"></span>
-      <!-- 批量测试（当前策略）：仅前两个面板（测试结果/位次分析）显示 -->
-      <div v-if="activeTab === 'test' || activeTab === 'rank'" class="kt-btn" @click="runBatchTest" :disabled="test.isRunning"
-           :title="store.locales=='zh' ? '批量测试（当前策略）：用当前策略跑全部问题' : 'Batch test (current strategy): run all questions'">
-        <i class="fa fa-play"></i>
+      <!-- 评测用嵌入模型（当前模型来源可用模型；留空=跟随设置中的嵌入模型）：只影响本知识库评测/检索，
+              不改动设置里的嵌入模型；切换后旧向量清空并按需用新模型重新生成；选择随 .kb 保存 -->
+      <select class="kt-select" style="width:175px;" v-model="testEmbedSel" @change="onTestEmbedModelChange"
+                 :disabled="test.isRunning || prewarmRunning"
+                 :title="(store.locales=='zh' ? '评测用嵌入模型：只影响本知识库评测/检索时使用的嵌入模型，不改动设置里的嵌入模型；留空=跟随设置。切换后旧向量会被清空，评测/问答时按需用新模型重新生成；选择随 .kb 保存' : 'Evaluation embedding model: affects only this KB\'s evaluation/retrieval; the settings embed model is untouched; empty = follow settings. Switching clears old vectors (re-derived on demand); the choice is saved with the .kb') + (props.model?.embed ? (store.locales=='zh' ? `｜设置在用：${props.model.embed}` : ` | settings: ${props.model.embed}`) : '')">
+           <option value="">{{ followEmbedLabel }}</option>
+           <option v-for="m in embedModelOptions" :key="m" :value="m">{{ m }}</option>
+      </select>
+      <div class="kt-btn" @click="refreshEmbedModels" :title="store.locales=='zh' ? '刷新嵌入模型列表（从当前 AI 来源拉取）' : 'Refresh embed model list (fetch from the current AI source)'">
+           <i class="fa fa-refresh"></i>
       </div>
+      <span class="kt-sep"></span>
+      <!-- 批量测试（当前策略）/ 暂停 / 继续 / 停止：仅前两个面板（测试结果/位次分析）显示 -->
+      <template v-if="activeTab === 'test' || activeTab === 'rank'">
+        <template v-if="test.isRunning && batchRunKind === 'one'">
+          <div class="kt-btn" v-if="batchCtl.paused" @click="continueBatchTest"
+               :title="store.locales=='zh' ? '继续批量测试' : 'Resume batch test'">
+            <i class="fa fa-play"></i>
+          </div>
+          <div class="kt-btn" v-else @click="pauseBatchTest"
+               :title="store.locales=='zh' ? '暂停批量测试（当前问题跑完后停下，可继续）' : 'Pause batch test (stops after the current question, resumable)'">
+            <i class="fa fa-pause"></i>
+          </div>
+          <div class="kt-btn" @click="stopBatchTest"
+               :title="store.locales=='zh' ? '停止批量测试（已测结果保留）' : 'Stop batch test (keep tested results)'">
+            <i class="fa fa-stop"></i>
+          </div>
+        </template>
+        <div v-else class="kt-btn" @click="runBatchTest" :disabled="test.isRunning"
+             :title="store.locales=='zh' ? '批量测试（当前策略）：用当前策略跑全部问题' : 'Batch test (current strategy): run all questions'">
+          <i class="fa fa-play"></i>
+        </div>
+      </template>
 
       <!-- 批量测试面板工具栏按钮组（仅该标签显示；窗口窄时右侧溢出隐藏，不显示横向滑块）。
            容器带 gap 保证 kt-btn 之间始终有间隔；导出按钮经 margin-left:auto 推到最右 -->
       <div v-if="activeTab === 'batch'" style="display:flex;align-items:center;flex:1;flex-wrap:nowrap;overflow:hidden;min-width:0;gap:5px;">
-        <!-- 批量测试 / 清空 -->
-        <div class="kt-btn" @click="runAllStrategyTest" :disabled="test.isRunning"
+        <!-- 批量测试（全部策略）/ 暂停 / 继续 / 停止 -->
+        <template v-if="test.isRunning && batchRunKind === 'all'">
+          <div class="kt-btn" v-if="batchCtl.paused" @click="continueBatchTest"
+               :title="store.locales=='zh' ? '继续批量测试所有策略' : 'Resume all-strategy test'">
+            <i class="fa fa-play"></i>
+          </div>
+          <div class="kt-btn" v-else @click="pauseBatchTest"
+               :title="store.locales=='zh' ? '暂停批量测试（当前问题跑完后停下，可继续）' : 'Pause batch test (stops after the current question, resumable)'">
+            <i class="fa fa-pause"></i>
+          </div>
+          <div class="kt-btn" @click="stopBatchTest"
+               :title="store.locales=='zh' ? '停止批量测试（已测结果与统计保留）' : 'Stop batch test (keep tested results & stats)'">
+            <i class="fa fa-stop"></i>
+          </div>
+        </template>
+        <div v-else class="kt-btn" @click="runAllStrategyTest" :disabled="test.isRunning"
              :title="store.locales=='zh' ? '批量测试所有策略：每个策略跑一遍全部问题，统计召回准确率' : 'Test all strategies: run all questions for every strategy'">
           <i class="fa fa-play"></i>
         </div>
+        <!-- 清空批量测试结果 -->
         <div class="kt-btn" @click="clearAllResults" :disabled="test.isRunning || prewarmRunning"
              :title="store.locales=='zh' ? '清空批量测试结果 / 位次 / 统计（释放内存）' : 'Clear batch results / stats (free memory)'">
           <i class="fa fa-eraser"></i>
@@ -2266,6 +2470,10 @@ const clearTestCases = () => {
         <span class="kt-label">{{ test.progress.toFixed(0) }}%</span>
         <span class="kt-label" :title="store.locales=='zh' ? '已运行时间' : 'Elapsed'"><i class="fa fa-clock-o"></i> {{ elapsedText }}</span>
         <span class="kt-label" :title="store.locales=='zh' ? '预计剩余（按当前进度推算）' : 'Estimated remaining'"><i class="fa fa-hourglass-half"></i> {{ etaText }}</span>
+        <!-- 已暂停：等当前问题跑完后停下，可继续 / 停止 -->
+        <span v-if="batchCtl.paused" class="kt-label" style="color:#FF9800;">
+          <i class="fa fa-pause"></i> {{ store.locales=='zh' ? '已暂停' : 'Paused' }}
+        </span>
         <span v-if="allTestProgressText" class="kt-label">{{ allTestProgressText }}</span>
       </template>
       <span v-else class="kt-label" style="margin-left:auto;font-size:12px;">

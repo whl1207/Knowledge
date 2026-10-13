@@ -802,6 +802,12 @@ const handleStrategiesChanged = () => {
                           <i class="fa fa-refresh"></i>
                         </div>
                       </div>
+                      <!-- 测试标签页设置了「评测用嵌入模型」时提示：评测/检索实际用的是它，此处设置不影响评测 -->
+                      <div v-if="model.testEmbed" class="config-embed-override"
+                           :title="t('在「测试」标签页选择了评测用嵌入模型，评测/检索实际使用它；此处设置不改变评测结果。清空测试页该项（选「跟随设置」）即可让此处设置生效。', 'An evaluation embed model is set on the Test tab and is used for evaluation/retrieval; this setting does not affect it. Choose &quot;Follow settings&quot; on the Test tab to make this setting take effect.')">
+                        <i class="fa fa-flask"></i>
+                        <span>{{ t('评测覆盖', 'Eval override') }}: {{ model.testEmbed }}</span>
+                      </div>
                     </template>
                     <template v-else-if="item.type === 'text'">
                       <input v-model="model[item.key]" :placeholder="t(item.placeholder || '', item.placeholderEn || '')" class="config-input" />
@@ -1003,6 +1009,12 @@ const handleStrategiesChanged = () => {
   font-size: 11px; cursor: pointer;
 }
 .config-embed-refresh:hover { color: var(--fontActiveColor); border-color: var(--fontActiveColor); }
+/* 评测用嵌入模型覆盖提示（测试标签页设置；仅提示，不改变设置值） */
+.config-embed-override {
+  display: flex; align-items: center; gap: 5px; margin-top: 4px;
+  font-size: 11px; color: #FF9800; cursor: help;
+}
+.config-embed-override i { flex-shrink: 0; }
 
 /* ====== Weight Info ====== */
 .weight-info { margin: 15px 0; padding: 12px; border: 1px dashed var(--borderColor); border-radius: 5px; background-color: rgba(0,0,0,0.02); }

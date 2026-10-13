@@ -32,6 +32,8 @@ interface Props {
   onApplyQuestionBank?: (list: KbQuestion[]) => void
   onAddManualQuestion?: (text: string, extraAnswer?: string, answerBlocks?: QuestionAnswerRef[]) => Promise<KbQuestion | null>
   onRemoveQuestion?: (id: string) => void
+  /** 清空问题库全部问题（父壳负责二次确认与联动清理） */
+  onClearQuestions?: () => void | Promise<void>
   onUpdateQuestion?: (id: string, patch: Partial<KbQuestion>) => Promise<void>
   onEmbedMissing?: (onMsg?: (msg: string) => void) => Promise<number>
 }
@@ -639,6 +641,19 @@ const embedMissing = async () => {
   if (n !== undefined) emit('updateState', zh.value ? `已补全 ${n} 条问题向量` : `Embedded ${n} question vectors`)
 }
 
+// ---------------- 提取时是否边推理边向量化（默认关：推理结束后统一补一次，避免反复切换嵌入模型） ----------------
+const extracting = computed(() => !!(props.extractProgress && (props.extractProgress.isRunning || props.extractProgress.isPaused)))
+const toggleExtractEmbed = () => {
+  if (extracting.value) {
+    emit('updateState', zh.value ? '提取进行中，无法切换该选项（可先停止提取）' : 'Extraction in progress; stop it before switching this option')
+    return
+  }
+  props.model.extractEmbedQuestions = !props.model.extractEmbedQuestions
+  emit('updateState', props.model.extractEmbedQuestions
+    ? (zh.value ? '提取时将立即向量化：每条推理后马上嵌入（显存充足时更快）' : 'Will embed right after each extraction call')
+    : (zh.value ? '提取时不再向量化：全部推理结束后统一补一次向量（推荐，避免反复切换嵌入模型）' : 'No embedding during extraction; one unified pass after reasoning (recommended)'))
+}
+
 // ---------------- Excel 导入 / 导出（含对应切片） ----------------
 /** 把导出的切片引用解析回当前知识库切片（优先 contentHash → blockId → filePath+label → filePath） */
 const resolveSliceRef = (r: any): any | null => {
@@ -858,6 +873,16 @@ const generateComplex = async () => {
           @click="onStartExtract && onStartExtract()"><i class="fa fa-play"></i></div>
       </template>
 
+      <!-- 提取时是否「边推理边向量化」：默认关（先全部推理，结束后统一补一次向量）。
+           LM Studio 等单服务下对话/嵌入模型不能同时常驻，边推理边嵌入会每条都换载模型，硬件不足时极慢 -->
+      <div class="kt-btn" :class="{ on: !!model.extractEmbedQuestions, warn: extracting }"
+           :title="zh
+             ? (extracting ? '提取进行中：' : '') + '提取时立即向量化：当前【' + (model.extractEmbedQuestions ? '开' : '关') + '】。开=每条推理后立刻嵌入（显存充足时更快）；关（默认）=先全部推理，结束后统一补一次向量，避免 LM Studio 反复交替加载对话/嵌入模型'
+             : (extracting ? 'Extraction running: ' : '') + 'Embed right after each extraction: ' + (model.extractEmbedQuestions ? 'ON' : 'OFF') + '. ON = embed after each call (faster with enough VRAM); OFF (default) = reason first, then one unified embedding pass to avoid repeated LM Studio model swaps'"
+           @click="toggleExtractEmbed">
+        <i class="fa fa-bolt" :class="{ 'fa-spin': extracting }"></i>
+      </div>
+
       <div class="kt-btn" :class="{ warn: complexRunning }" :title="zh ? '生成需综合多切片的复合问题' : 'Generate complex questions'" @click="generateComplex">
         <i class="fa fa-cubes" :class="{ 'fa-spin': complexRunning }"></i>
       </div>
@@ -887,6 +912,12 @@ const generateComplex = async () => {
       <!-- 分区四：导入导出 / 测试用例 / 复合生成 -->
       <div class="kt-btn" :title="zh ? '从 Excel 导入问题与参考答案' : 'Import from Excel'" @click="doImport"><i class="fa fa-upload"></i></div>
       <div class="kt-btn" :title="zh ? '导出问题与参考答案模板 (Excel)' : 'Export template (Excel)'" @click="exportTemplate"><i class="fa fa-download"></i></div>
+      <!-- 清空全部问题（危险操作，父壳二次确认）：删除问题库所有问题；切片与文件不受影响 -->
+      <div v-if="questionBank.length" class="kt-btn" style="color:#F56C6C;"
+           :title="zh ? `清空全部问题：删除问题库中的全部 ${questionBank.length} 个问题（需确认；切片与文件不受影响，测试页由问题库派生的用例会一并清空）` : `Clear all questions: remove all ${questionBank.length} questions (asks for confirmation; slices & files untouched; test cases derived from the bank are cleared too)`"
+           @click="onClearQuestions && onClearQuestions()">
+        <i class="fa fa-trash"></i>
+      </div>
 
       <span class="kt-spacer"></span>
 

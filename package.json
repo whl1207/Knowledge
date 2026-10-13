@@ -1,6 +1,6 @@
 {
   "name": "knowledge",
-  "version": "6.10.12",
+  "version": "6.10.13",
   "main": "dist-electron/main/index.js",
   "description": "AI Knowledge management Software",
   "author": "whl",

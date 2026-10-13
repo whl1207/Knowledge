@@ -33,8 +33,18 @@
       <div class="toolbar-btn" @click="$emit('detect-communities')" :title="store.locales == 'zh' ? '社区检测' : 'Communities'" :style="hasCommunityData ? {color: '#4CAF50'} : {}">
         <i class="fa fa-sitemap"></i>
       </div>
-      <div class="toolbar-btn" v-if="hasCommunityData" @click="$emit('generate-reports')" :title="store.locales == 'zh' ? '生成报告' : 'Reports'" :style="(communityReportsCount ?? 0) > 0 ? {color: '#2196F3'} : {}">
+      <!-- 生成报告 / 暂停 / 继续（生成过程中显示暂停；暂停后显示继续，支持断点续跑）+ 停止 -->
+      <div class="toolbar-btn" v-if="hasCommunityData && !reportProgress?.isRunning && !reportProgress?.isPaused" @click="$emit('generate-reports')" :title="store.locales == 'zh' ? '生成报告' : 'Reports'" :style="(communityReportsCount ?? 0) > 0 ? {color: '#2196F3'} : {}">
         <i class="fa fa-file-text-o"></i>
+      </div>
+      <div class="toolbar-btn pause" v-else-if="hasCommunityData && reportProgress?.isPaused" @click="$emit('continue-reports')" :title="(store.locales == 'zh' ? '继续生成报告（从断点恢复）' : 'Resume report generation (from checkpoint)') + ' · ' + (reportProgressText || '')">
+        <i class="fa fa-play"></i>
+      </div>
+      <div class="toolbar-btn pause" v-else-if="hasCommunityData && reportProgress?.isRunning" @click="$emit('pause-reports')" :title="(store.locales == 'zh' ? '暂停生成报告（保留断点，可继续）' : 'Pause report generation (checkpoint kept)') + ' · ' + (reportProgressText || '')">
+        <i class="fa fa-pause"></i>
+      </div>
+      <div class="toolbar-btn" v-if="hasCommunityData && (reportProgress?.isRunning || reportProgress?.isPaused)" @click="$emit('stop-reports')" :title="store.locales == 'zh' ? '停止生成报告（已生成的报告保留，断点丢弃）' : 'Stop report generation (keep generated reports, drop checkpoint)'">
+        <i class="fa fa-stop"></i>
       </div>
       <!-- 社区筛选下拉（有社区数据时显示，最上方为全部） -->
       <select class="toolbar-select" v-if="hasCommunityData" :value="selectedCommunity ?? ''" @change="onCommunitySelect" :title="store.locales == 'zh' ? '按社区筛选' : 'Filter by community'">
@@ -344,6 +354,9 @@ interface Props {
   buildProgressPercent?: number
   buildProgressText?: string
   modelOntologyBatchSize?: number
+  /** 社区报告生成进度（生成过程中显示暂停按钮，暂停后可继续，支持断点续跑） */
+  reportProgress?: { isRunning: boolean; isPaused: boolean; totalCommunities: number; doneCommunities: number }
+  reportProgressText?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -356,7 +369,9 @@ const props = withDefaults(defineProps<Props>(), {
   buildProgress: () => ({ isRunning: false, isPaused: false, currentBatchIndex: 0, totalBatches: 0 }),
   buildProgressPercent: 0,
   buildProgressText: '',
-  modelOntologyBatchSize: 8
+  modelOntologyBatchSize: 8,
+  reportProgress: () => ({ isRunning: false, isPaused: false, totalCommunities: 0, doneCommunities: 0 }),
+  reportProgressText: ''
 })
 
 // ==================== Emits ====================
@@ -370,6 +385,9 @@ const emit = defineEmits<{
   (e: 'continue-build'): void
   (e: 'detect-communities'): void
   (e: 'generate-reports'): void
+  (e: 'pause-reports'): void
+  (e: 'continue-reports'): void
+  (e: 'stop-reports'): void
   (e: 're-reason-community', comId: number | null): void
   (e: 'update-batch-size', size: number): void
   (e: 'update-total-nodes', count: number): void
@@ -2182,6 +2200,8 @@ onBeforeUnmount(() => {
   border-color: var(--fontActiveColor);
 }
 .toolbar-btn.resume { color: #FF9800; }
+/* 报告生成中的「暂停 / 继续」：用主题色区分（进行中/暂停后可续跑） */
+.toolbar-btn.pause { color: #FF9800; border-color: #FF9800; }
 
 /* 工具栏批大小配置 */
 .toolbar-config {
