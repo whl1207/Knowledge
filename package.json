@@ -284,6 +284,7 @@
     "monaco-editor": "^0.50.0",
     "ollama": "^0.6.3",
     "onnxruntime-web": "^1.27.0",
+    "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.10.38",
     "pg": "^8.23.0",
     "pinia": "^2.2.2",

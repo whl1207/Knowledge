@@ -1784,6 +1784,20 @@ ipcMain.handle('selectFile', async (event, payload) => {
   }
 });
 
+// 多选文件对话框（返回全部选中路径；selectFile 只回第一个，合并 PDF 这类多文件场景用这个）
+ipcMain.handle('selectFiles', async (event, payload) => {
+  const { filters, properties } = (payload && typeof payload === 'object') ? payload as any : {} as any
+  const parent = BrowserWindow.fromWebContents(event.sender) || win
+  const props: string[] = Array.isArray(properties) ? [...properties] : ['openFile']
+  if (!props.includes('multiSelections')) props.push('multiSelections')
+  const opts: Electron.OpenDialogOptions = {
+    properties: props as Electron.OpenDialogOptions['properties'],
+    ...(filters ? { filters } : {})
+  }
+  const result = parent ? await dialog.showOpenDialog(parent, opts) : await dialog.showOpenDialog(opts)
+  return result.canceled ? [] : result.filePaths
+});
+
 // 保存文件对话框（导出场景，如 Agent 预设 .agent 文件、Word 导出选保存位置）
 ipcMain.handle('saveFileDialog', async (event, payload) => {
   const { defaultPath, filters } = payload || {}
@@ -2901,6 +2915,18 @@ ipcMain.handle('saveFile', async (event, filePath, fileContent) => {
     return true;
   } catch (error) {
     console.error(error);
+    return false;
+  }
+});
+
+// 二进制落盘（PDF 页面整理等场景）：saveFile 走 UTF-8 文本，二进制必须走 base64 这一条
+ipcMain.handle('writeFileBase64', async (event, filePath, base64) => {
+  try {
+    const pure = String(base64 || '').includes('base64,') ? String(base64).slice(String(base64).indexOf('base64,') + 7) : String(base64 || '')
+    fs.writeFileSync(String(filePath), Buffer.from(pure, 'base64'));
+    return true;
+  } catch (error) {
+    console.error('[writeFileBase64]', error);
     return false;
   }
 });

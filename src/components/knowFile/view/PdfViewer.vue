@@ -16,6 +16,8 @@
   import 'katex/dist/katex.min.css'
   // 智能对话面板：与 md_read 共用同一个组件（避免两套对话逻辑漂移）
   const DocChatPanel = defineAsyncComponent(() => import('@/components/knowFile/view/DocChatPanel.vue'))
+  // 页面管理（合并 / 删除 / 排序 / 旋转）：懒加载，不用时（含 pdf-lib 约 1MB）不进入首屏
+  const PdfPageEditor = defineAsyncComponent(() => import('@/components/knowFile/view/PdfPageEditor.vue'))
 
   // pdf.js 运行时资源（worker / CMap / 标准字体）：统一在 @/lib/pdfjs 配置，缺 CMap 会导致整段文字不渲染
   import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
@@ -945,6 +947,14 @@
     smartMode.value = 'convert'
     convertMode.value = mode
     smartPanelOpen.value = true
+  }
+
+  // === 页面管理（合并 / 删除 / 调整顺序 / 旋转） ===
+  const pageEditorOpen = ref(false)
+  const openPageEditor = () => { pageEditorOpen.value = true }
+  /** 整理后的文件可能已覆盖原文件 → 重新从磁盘加载（另存为新文件时原文档不受影响，只提示路径） */
+  const onPageEditorSaved = (_path: string, overwrite: boolean) => {
+    if (overwrite) void load()
   }
 
   // 拖动面板左边界调整宽度
@@ -2305,6 +2315,10 @@
 
       <span class="statusbar-spacer"></span>
 
+      <!-- 页面管理：合并 / 删除 / 调整顺序 / 旋转（保存后覆盖原文件或另存为新 PDF） -->
+      <button class="statusbar-btn" :class="{ active: pageEditorOpen }" @click="openPageEditor" :title="store.locales==='zh' ? '页面管理：合并 / 删除 / 调整顺序 / 旋转页面' : 'Manage pages: merge / delete / reorder / rotate'">
+        <i class="fa fa-files-o"></i>
+      </button>
       <!-- 转化：PDF → Markdown（仅图标） -->
       <button class="statusbar-btn" :class="{ active: smartPanelOpen && smartMode === 'convert' }" @click="toggleSmartPanel('convert')" :title="store.locales==='zh' ? '转化：PDF 转 Markdown' : 'Convert: PDF → Markdown'">
         <i class="fa fa-file-text-o"></i>
@@ -2373,6 +2387,15 @@
         </button>
       </div>
     </div>
+
+    <!-- 页面管理对话框（懒加载：未点开时连组件都不下载） -->
+    <PdfPageEditor
+      v-if="pageEditorOpen"
+      v-model="pageEditorOpen"
+      :path="props.path"
+      :base64="props.base64"
+      @saved="onPageEditorSaved"
+    />
   </div>
 </template>
 

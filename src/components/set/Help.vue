@@ -1757,7 +1757,8 @@ const translations = {
           { title: '源码编辑', desc: 'Monaco 编辑器直接改 Markdown 原文（含 YAML 头），支持 AI 辅助与拖入图片 / 文件自动生成引用链接；<code>.py</code> / <code>.json</code> 等代码与数据文件也在这里以文本方式打开。' },
           { title: '可视编辑（块编辑）', desc: '块式富文本：输入 <code>/</code> 唤出块类型菜单，块手柄菜单的「转换为」可在标题 / 列表 / 表格 / 代码之间转换。' },
           { title: '思维导图 / 演示', desc: '导图按 Markdown 标题层级生成；演示把 Markdown 转成幻灯片（按 <code>---</code> 或智能切分分页，支持目录 / 全屏 / 主题切换）。' },
-          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>原地翻译</strong>；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）默认交给<strong>内置浏览器</strong>渲染。' }
+          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>原地翻译</strong>；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）默认交给<strong>内置浏览器</strong>渲染。' },
+          { title: 'PDF 页面管理', desc: 'PDF 状态栏的「页面管理」把整份 PDF 拆成一页一张的缩略图：可把别的 PDF <strong>合并</strong>进来、勾选后<strong>删除</strong>整页、拖拽缩略图<strong>调整顺序</strong>、单页或整组<strong>旋转</strong>；确认后由 pdf-lib 重新组页，可覆盖原文件或另存为新 PDF（远程预览只能另存）。' }
         ]
       },
       export: {
@@ -2854,7 +2855,8 @@ const translations = {
           { title: 'Source edit', desc: 'Monaco editor over the raw Markdown (incl. YAML front matter), with AI assistance and drag-and-drop to create reference links; code and data files such as <code>.py</code> / <code>.json</code> open as text here too.' },
           { title: 'Visual edit (blocks)', desc: 'Block-based rich text: type <code>/</code> for the block menu, and the block handle’s “Convert to” switches between heading / list / table / code.' },
           { title: 'Mind map / Presentation', desc: 'The mind map follows heading levels; Presentation turns Markdown into slides (split by <code>---</code> or smart splitting, with outline / full-screen / themes).' },
-          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>in-place translation</strong>; Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' }
+          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>in-place translation</strong>; Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' },
+          { title: 'PDF page management', desc: 'The “Manage pages” button in the PDF status bar turns the document into one-thumbnail-per-page cards: <strong>merge</strong> other PDFs in, <strong>delete</strong> selected pages, <strong>drag to reorder</strong>, and <strong>rotate</strong> a page or the whole selection. Confirming rebuilds the file with pdf-lib — overwrite the original or save as a new PDF (remote previews can only be saved as new).' }
         ]
       },
       export: {
