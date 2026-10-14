@@ -22,6 +22,8 @@
   import { lazyPanel as makeLazyPanel } from '@/lib/plugin/panels'
   import { useAllSlotEntries } from '@/lib/plugin/useSlots'
   import PluginSlot from '@/components/plugin/PluginSlot.vue'
+  // 插件面板全屏时请求隐藏宿主外壳（顶栏 / 左侧导航 / 底部导航）：见 lib/plugin/panelChrome.ts
+  import { panelChromeHidden, resetPanelChrome } from '@/lib/plugin/panelChrome'
 import { getPlatform, hasCapability, isHostGuestRuntime } from '@/platform'
 import { runTopBackLayer, registerBackLayer, BACK_ORDER } from '@/platform/backLayers'
 import { useTallLayout } from '@/composables/useTallLayout'
@@ -256,6 +258,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
   // 或下次启动都会把导航拉回那个旧面板（现象：关掉设置子窗口后从「主页」跳回「学习」）。
   // 只写这一个键，避免整份 saveConfig（写 20+ 键、可能还落盘 interface-config.json）的开销。
   watch(() => store.mainPanel, (panel) => {
+    // 换面板一定把外壳放回来：插件全屏时藏起了顶栏/导航栏，切走后不能让用户连导航都没有
+    resetPanelChrome()
     if (isSettingsWindow.value || isFileWindow.value || isBrowserAgentWindow.value) return
     try { localStorage.setItem('mainPanel', JSON.stringify(panel)) } catch { /* 写盘失败不影响使用 */ }
   })
@@ -488,7 +492,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
   <SetPanel v-else-if="isSettingsWindow" standalone :initial-nav="settingsWindowNav" style="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;" />
 
   <!-- 主界面（仅当既不是文件窗口也不是浏览器 Agent 窗口时显示） -->
-  <div v-else class="container" :class="{ 'side-nav-mode': isLeftNav, 'web-mode': isBrowser, 'android-mode': isAndroid, 'tall-mode': isTallLayout }">
+  <div v-else class="container" :class="{ 'side-nav-mode': isLeftNav, 'web-mode': isBrowser, 'android-mode': isAndroid, 'tall-mode': isTallLayout, 'chrome-hidden': panelChromeHidden }">
     <!-- 左侧导航栏（左侧布局模式显示：全部主面板按钮 + 设置；网页模式同样显示） -->
     <div v-if="isLeftNav" class="side-nav">
       <div
@@ -673,6 +677,14 @@ import { useTallLayout } from '@/composables/useTallLayout'
     box-shadow: none;
   }
     
+  /* 插件请求全屏（ctx.app.setChromeHidden(true)）时：顶栏 / 左侧导航 / 底部导航整块收起来，
+     画面拿到整个窗口。用 display:none 真隐藏（不是被盖住）——层叠、缩放、WebView 差异都不影响。 */
+  .container.chrome-hidden .mainPanel,
+  .container.chrome-hidden .side-nav,
+  .container.chrome-hidden .bottom-nav {
+    display: none;
+  }
+
   /* 网页模式（LAN 共享）：顶栏不再是窗口拖动区（-webkit-app-region 在浏览器里无效），
      去掉移动光标；窗口控制按钮已按 window.chrome 能力隐藏 */
   .container.web-mode .panel-header {

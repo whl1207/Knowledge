@@ -1674,6 +1674,29 @@ async function runAgentic(
 
 // ========== 统一入口 ==========
 
+/**
+ * 用「指定的策略定义」执行检索。
+ * 与 runStrategy 的唯一区别：不按 id 去注册表查定义，而是直接执行传入的 def。
+ * 用途：消融实验——同一策略的多个参数变体（改步骤参数 / 通道开关 / 轮次上限等）各自独立运行，
+ * 不需要污染全局策略注册表；变体的 def.id 即变体 id（结果按该 id 归属统计）。
+ */
+export async function runStrategyWith(
+  def: StrategyDef,
+  query: string,
+  ctx: RetrievalContext,
+  hooks: StrategyHooks = {},
+  opts: { skipAnswer?: boolean } = {},
+): Promise<StrategyResult> {
+  if (!def) throw new Error('runStrategyWith: strategy def is required')
+  const fullCtx: RetrievalContext = { ...ctx, query }
+  switch (def.kind) {
+    case 'pipeline': return runPipeline(def, fullCtx, hooks)
+    case 'mapreduce': return runMapReduce(def, fullCtx, hooks, opts)
+    case 'agentic': return runAgentic(def, fullCtx, hooks, opts)
+    case 'hybrid': return runHybrid(def, fullCtx, hooks, opts)
+  }
+}
+
 export async function runStrategy(
   id: string,
   query: string,
@@ -1683,13 +1706,7 @@ export async function runStrategy(
 ): Promise<StrategyResult> {
   const def = getStrategy(id)
   if (!def) throw new Error(`Unknown strategy: ${id}`)
-  const fullCtx: RetrievalContext = { ...ctx, query }
-  switch (def.kind) {
-    case 'pipeline': return runPipeline(def, fullCtx, hooks)
-    case 'mapreduce': return runMapReduce(def, fullCtx, hooks, opts)
-    case 'agentic': return runAgentic(def, fullCtx, hooks, opts)
-    case 'hybrid': return runHybrid(def, fullCtx, hooks, opts)
-  }
+  return runStrategyWith(def, query, ctx, hooks, opts)
 }
 
 /**

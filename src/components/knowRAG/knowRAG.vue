@@ -49,6 +49,7 @@ import { collectCommunityContext } from '@/shared/graphrag/community'
 import { isPdfFile, isWordFile, isImageFile, isMediaFile, stripFrontmatter, mdPathOf, hasCorrespondingMd, isKbSidecarFile } from '@/lib/kbFile'
 // 检索基础：余弦相似度等（单一实现，父壳与 headless/子组件共享）
 import { cosineSimilarity } from '@/shared/kbRetrieval'
+import { matchSliceKeyword } from '@/shared/kbSliceSearch'
 
 const ontologyData = ref<{
   nodes: any[],
@@ -970,15 +971,12 @@ watch(() => model.value.bm25Weight, (val) => {
 const sliceSearchKeyword = ref('')
 
 const filteredBlocks = computed(() => {
-    // 关键字搜索：跨全库切片检索（命中 label/正文/问题/文件路径），此时忽略当前文档选择
+    // 关键字搜索：跨全库切片检索（命中 label/正文/问题/文件路径），此时忽略当前文档选择。
+    // 匹配走 @/shared/kbSliceSearch（按切片缓存小写文本）：输入时不再对整段正文重复 toLowerCase，
+    // 大库下逐字过滤明显更快（切片页搜索卡顿的主要来源之一）
     const kw = sliceSearchKeyword.value.trim().toLowerCase()
     if (kw) {
-        return blocks.value.filter((block: any) =>
-            (block.label && block.label.toLowerCase().includes(kw)) ||
-            (block.A && block.A.toLowerCase().includes(kw)) ||
-            (block.filePath && block.filePath.toLowerCase().includes(kw)) ||
-            (block.Q && block.Q !== '问题未推理' && block.Q.toLowerCase().includes(kw))
-        )
+        return blocks.value.filter((block: any) => matchSliceKeyword(block, kw))
     }
     if (documentName.value === '全部') {
         return blocks.value;
@@ -2456,9 +2454,15 @@ const latestBehavior = computed<{ status: string; icon: string; text: string; de
     if (runningStep) {
         return { status: runningStep.status, icon: stepIcon(runningStep.status), text: runningStep.step, detail: runningStep.detail || undefined }
     }
-    // 3) 实时状态（检索测试/批测进度等）
+    // 3) 实时状态（检索测试/批测进度等）：支持「正文\n补充说明」两段（批测把时间信息放在第二行）
     if (kbLiveState.value) {
-        return { status: kbLiveStateClass.value, icon: kbLiveStateIcon.value, text: kbLiveState.value }
+        const [line0, ...rest] = String(kbLiveState.value).split('\n')
+        return {
+            status: kbLiveStateClass.value,
+            icon: kbLiveStateIcon.value,
+            text: line0,
+            detail: rest.join(' ').trim() || undefined,
+        }
     }
     // 4) 一般状态提示（kb_state 等，6s 自动清除）
     if (kbPanelMsg.value) {
@@ -6720,7 +6724,10 @@ onBeforeUnmount(() => {
                     />
 
                     <!-- 切片视图 -->
-                    <!-- 切片视图（工具栏 + 卡片网格；逻辑/数据由父壳注入） -->
+                    <!-- 切片视图（工具栏 + 卡片网格；逻辑/数据由父壳注入）
+                         KeepAlive：切走再切回时复用已挂载的组件实例，不再重新创建 40+ 张卡片、
+                         也不再重复 markdown/公式渲染（配合 block_md 的内容级 HTML 缓存）→ 切换标签页明显更快 -->
+                    <KeepAlive>
                     <sliceView
                         v-if="viewMode=='slice'"
                         :store="store"
@@ -6752,6 +6759,7 @@ onBeforeUnmount(() => {
                         :on-wheel="handleSliceWheel"
                         @change-document="(n: string) => { documentName = n }"
                     />
+                    </KeepAlive>
                     
                     <!-- 本体视图 -->
                     <div v-if="viewMode=='ontology'" style="display: flex;flex-direction: column;height:100%;">

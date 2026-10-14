@@ -226,6 +226,63 @@ function base64ToText(b64: string | Blob): string {
   }
 }
 
+/** 字节 → base64（分块拼接：几十 MB 一次性铺进参数表会炸栈） */
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = ''
+  const CHUNK = 0x8000
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, Math.min(i + CHUNK, bytes.length)))
+  }
+  return btoa(bin)
+}
+
+/** 「本地服务器直读」的地址缓存（同一文件反复读时省掉 getUri 那次桥调用） */
+const localServerUrlCache = new Map<string, string>()
+
+/**
+ * 经 Capacitor 本地服务器读文件字节（`http://localhost/_capacitor_file_…` / `_capacitor_content_…`）。
+ *
+ * 为什么必须这么做：原来的读法是**整个文件经 Capacitor 桥搬回来**——原生先 base64，再包成
+ * JSON 字符串，WebView 里再 atob 解回来。33MB 的 ROM 会变成约 44MB 的字符串在桥上来回，
+ * 安卓上要好几秒、还极易 OOM（「读取 ROM 很慢」主要就慢在这一步）。
+ * fetch 本地服务器拿到的是二进制正文，只多一次 getUri（毫秒级、且按路径缓存）。
+ *
+ * 任一步失败都返回 null，调用方退回原来的桥读法（老平台 / 没装 provider / 路径拿不到 uri）。
+ */
+async function fetchViaLocalServer(path: string, deps: AndroidDeps): Promise<Uint8Array | null> {
+  const key = String(path || '')
+  if (!key) return null
+  try {
+    let url = localServerUrlCache.get(key)
+    if (!url) {
+      const core: any = await import('@capacitor/core')
+      const convert = core?.Capacitor?.convertFileSrc
+      if (typeof convert !== 'function') return null
+      let uri = ''
+      if (isSafPath(key)) {
+        const r = deps.resolveSafUri ? await deps.resolveSafUri(key) : await defaultResolveSafUri(key)
+        uri = r?.uri ? String(r.uri) : ''
+      } else {
+        const r = deps.resolveFileUrl ? await deps.resolveFileUrl(key) : await defaultResolveFileUrl(key)
+        uri = r ? String(r) : ''
+      }
+      if (!uri) return null
+      url = String(convert(uri))
+      if (!/^https?:/i.test(url)) return null
+      if (localServerUrlCache.size > 128) localServerUrlCache.clear()
+      localServerUrlCache.set(key, url)
+    }
+    const res = await fetch(url)
+    if (!res.ok) return null
+    // html5mode：没有扩展名的路径会被回退成 index.html，那种响应不能当文件内容
+    const type = res.headers.get('content-type') || ''
+    if (/text\/html/i.test(type) && !/\.html?$/i.test(key)) return null
+    return new Uint8Array(await res.arrayBuffer())
+  } catch {
+    return null
+  }
+}
+
 const MIME_EXT: Array<[RegExp, string]> = [
   [/\.pdf$/i, 'application/pdf'],
   [/\.png$/i, 'image/png'],
@@ -335,12 +392,15 @@ async function buildTree(fs: AndroidFilesystemAdapter, rel: string, depth: numbe
   return out
 }
 
-function fsPortOf(fs: AndroidFilesystemAdapter): FileSystemPort {
+function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPort {
   const write = async (rel: string, data: string, encoding?: string) =>
     fs.writeFile({ path: rel, data, directory: DOCS, encoding, recursive: true })
 
   const port: FileSystemPort = {
     async readText(path) {
+      // 先试本地服务器直读（大文本，比如 588KB 的插件入口，能省一次几十万字符的桥往返）
+      const fast = await fetchViaLocalServer(path, deps)
+      if (fast) return new TextDecoder('utf-8').decode(fast)
       const rel = toRelativePath(path)
       if (rel === null) return `${READ_ERROR_PREFIX}路径非法`
       try {
@@ -353,6 +413,8 @@ function fsPortOf(fs: AndroidFilesystemAdapter): FileSystemPort {
     },
 
     async readDataUrl(path) {
+      const fast = await fetchViaLocalServer(path, deps)
+      if (fast) return `data:${mimeOf(path)};base64,${bytesToBase64(fast)}`
       const rel = toRelativePath(path)
       if (rel === null) return `${READ_ERROR_PREFIX}路径非法`
       try {
@@ -366,6 +428,9 @@ function fsPortOf(fs: AndroidFilesystemAdapter): FileSystemPort {
     },
 
     async readBinary(path) {
+      // 大文件（ROM / 存档）走本地服务器：原来的桥读法要把整个文件 base64 + JSON 搬两趟
+      const fast = await fetchViaLocalServer(path, deps)
+      if (fast) return fast
       const rel = toRelativePath(path)
       if (rel === null) return null
       try {
@@ -1141,7 +1206,7 @@ export function createAndroidPlatform(deps: AndroidDeps = {}): Platform {
   return {
     kind: 'android',
     capabilities: capabilitiesOf(),
-    fs: fsPortOf(fs),
+    fs: fsPortOf(fs, deps),
     watch: watchPort,
     dialog: makeDialogPort(deps),
     window: makeWindowPort(deps),

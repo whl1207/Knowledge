@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import block_md from '@/components/block_md.vue'
+import { matchSliceKeyword } from '@/shared/kbSliceSearch'
 
 defineOptions({ name: 'SliceView' })
 
@@ -53,11 +54,8 @@ const doResetZoom = () => props.onResetZoom?.()
 const localKw = ref('')
 const isSearching = computed(() => !!localKw.value.trim())
 const trimKw = computed(() => localKw.value.trim().toLowerCase())
-const matchSlice = (b: any, kw: string) =>
-    (b.label && b.label.toLowerCase().includes(kw)) ||
-    (b.A && b.A.toLowerCase().includes(kw)) ||
-    (b.filePath && b.filePath.toLowerCase().includes(kw)) ||
-    (b.Q && b.Q !== '问题未推理' && b.Q.toLowerCase().includes(kw))
+// 匹配逻辑与父壳共用（@/shared/kbSliceSearch）：按切片缓存小写文本，避免每次输入重复 toLowerCase 整段正文
+const matchSlice = (b: any, kw: string) => matchSliceKeyword(b, kw)
 // 命中切片总数（跨全库 blocks）；无关键词时为父壳已过滤数（按文档）
 const matchTotal = computed(() => {
     const kw = trimKw.value

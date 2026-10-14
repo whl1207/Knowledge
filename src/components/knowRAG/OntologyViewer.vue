@@ -118,17 +118,18 @@
       </div>
     </div>
 
-    <!-- 右侧属性面板 -->
-    <div class="association-panel" v-if="(selectedNode && showAssociationPanel) || showReportPanel" @click.stop>
+    <!-- 节点 / 社区报告详情：弹出面板（样式对齐 questionView 的 qb-pick-overlay；不再占用右侧侧边栏） -->
+    <div class="ov-overlay" v-if="(selectedNode && showAssociationPanel) || showReportPanel" @mousedown.self="closePanel">
+      <div class="ov-dialog">
       <div class="panel-header">
         <div class="panel-title">
           <span class="entity-dot" :class="selectedNode?.type || 'entity'"></span>
           <span :title="selectedNode?.name || (selectedReport?.title || '')">{{ selectedNode?.name || (selectedReport?.title || (store.locales == 'zh' ? '社区报告' : 'Community Report')) }}</span>
         </div>
         <div class="panel-actions">
-          <button class="panel-close" @click="showAssociationPanel = false; showReportPanel = false">
+          <div class="kt-btn" :title="store.locales == 'zh' ? '关闭' : 'Close'" @click="closePanel">
             <i class="fa fa-times"></i>
-          </button>
+          </div>
         </div>
       </div>
       
@@ -284,7 +285,21 @@
             <div v-else class="empty-tip">{{store.locales == 'zh' ? '暂无相关切片' : 'No related blocks'}}</div>
           </template>
         </div>
+      <div class="ov-foot">
+        <span class="ov-note">
+          <i class="fa fa-info-circle"></i>
+          {{ selectedReport
+            ? (store.locales == 'zh' ? '社区报告详情' : 'Community report detail')
+            : (store.locales == 'zh' ? '点击切片/节点卡片可跳转到对应节点' : 'Click a block/node card to jump to that node') }}
+        </span>
+        <span class="ov-flex"></span>
+        <div class="kt-btn ok" @click="closePanel">
+          <i class="fa fa-check"></i>
+          <span>{{ store.locales == 'zh' ? '关闭' : 'Close' }}</span>
+        </div>
       </div>
+      </div>
+    </div>
     </div>
     </div>
   </div>
@@ -410,6 +425,11 @@ const tooltipStyle = ref({})
 const selectedNode = ref<OntologyNode | null>(null)
 const showAssociationPanel = ref(false)
 const showReportPanel = ref(false)
+/** 关闭节点 / 社区报告详情弹出面板（点遮罩、点关闭按钮、点底部「关闭」都走这里） */
+const closePanel = () => {
+  showAssociationPanel.value = false
+  showReportPanel.value = false
+}
 /** 问题节点显示开关：问题库问题以节点形式入图，与参考切片连线 */
 const showQuestionNodes = ref(false)
 const activeTab = ref<'blocks' | 'relations' | 'info'>('blocks')
@@ -2386,15 +2406,30 @@ onBeforeUnmount(() => {
   display: block;
 }
 
-.association-panel {
-  width: 300px;
-  border-left: 1px solid var(--borderColor);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  height: 100%;
-  overflow: hidden;
+/* ===== 节点 / 社区报告详情：弹出面板（对齐 questionView 的 qb-pick-overlay / qb-pick-dialog） ===== */
+.ov-overlay {
+  position: fixed; inset: 0; z-index: 1200;
+  background: rgba(0, 0, 0, .35);
+  display: flex; align-items: center; justify-content: center;
 }
+.ov-dialog {
+  display: flex; flex-direction: column;
+  width: min(720px, calc(92vw / var(--ui-zoom, 1)));
+  max-height: min(660px, calc(88vh / var(--ui-zoom, 1)));
+  background: var(--backgroundColor);
+  border: 1px solid var(--borderColor); border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden;
+}
+.ov-flex { flex: 1; }
+.ov-foot {
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  border-top: 1px solid var(--borderColor); flex-shrink: 0;
+}
+.ov-foot .kt-btn { padding: 0 12px; }
+.ov-note { font-size: 9px; color: var(--borderColor); }
+.ov-note > i { margin-right: 3px; }
+.ov-dialog .panel-header { flex-shrink: 0; }
+.ov-dialog .panel-tabs { flex-shrink: 0; }
 
 .search-clear {
   cursor: pointer;
@@ -2700,19 +2735,6 @@ onBeforeUnmount(() => {
 .entity-dot.slice { background-color: #FF5722; }
 .entity-dot.file { background-color: #795548; }
 .entity-dot.question { background-color: #9C27B0; }
-
-.panel-close {
-  background: none;
-  border: none;
-  color: var(--fontColor);
-  cursor: pointer;
-  padding: 3px 6px;
-  border-radius: 4px;
-}
-
-.panel-close:hover {
-  background-color: var(--borderColor);
-}
 
 .panel-tabs {
   display: flex;

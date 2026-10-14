@@ -639,7 +639,9 @@
             <span class="agent-todos-count">{{ currentChat.agentTodos.filter(t => t.status === 'done').length }}/{{ currentChat.agentTodos.length }}</span>
             <span class="agent-todos-actions">
               <span class="agent-todos-action" :title="store.locales=='zh' ? '全部标记完成' : 'Mark all done'" @click="markAllTodosDone">
-                <i class="fa fa-check-double"></i>
+                <!-- 图标必须是 Font Awesome 4.7 里存在的类：fa-check-double 是 FA5+ 的图标名，
+                     本项目只加载 public/font-awesome（4.7.0），写它会渲染成空白方块 -->
+                <i class="fa fa-check-square-o"></i>
               </span>
               <span class="agent-todos-action" :title="store.locales=='zh' ? '清空任务清单' : 'Clear todos'" @click="clearAgentTodos">
                 <i class="fa fa-trash-o"></i>
@@ -704,6 +706,82 @@
           </div>
         </div>
         
+        <!-- 待执行队列面板（运行中按 Enter 入队 / Ctrl+Enter 插队的消息）
+             投递前都是渲染层的事实源：可编辑、拖动排序、置顶插队、单条删除、批量清除 -->
+        <div v-if="pendingQueue().length" class="pending-queue-panel">
+          <div class="pending-queue-header">
+            <i class="fa fa-tasks"></i>
+            <span>{{ store.locales=='zh' ? '待执行队列' : 'Queued' }} ({{ pendingQueue().length }})</span>
+            <span class="pending-queue-hint">
+              {{ store.locales=='zh' ? '不打断当前执行：轮到它的 step 边界投给智能体' : 'the run continues — delivered at its turn' }}
+            </span>
+            <span
+              class="pending-queue-clear"
+              :title="store.locales=='zh' ? `全部清除（${pendingQueue().length} 条）` : `Clear all (${pendingQueue().length})`"
+              @click="clearPendingQueueConfirmed"
+            >
+              <i class="fa fa-trash-o"></i>
+            </span>
+          </div>
+          <div class="pending-queue-list scoll">
+            <div
+              v-for="(pq, pi) in pendingQueue()"
+              :key="pq.id"
+              class="pending-queue-item"
+              :class="{ 'pq-pinned': pq.pinned, 'pq-dragging': draggingPendingId === pq.id }"
+              :draggable="true"
+              @dragstart="onPendingDragStart(pq.id, $event)"
+              @dragover="onPendingDragOver"
+              @drop.stop="onPendingDrop(pq.id)"
+              @dragend="draggingPendingId = ''"
+              :title="pq.text"
+            >
+              <span class="pending-queue-index" :class="{ pinned: pq.pinned }">{{ pi + 1 }}</span>
+              <span class="pending-queue-text">{{ pq.display || pq.text }}</span>
+              <span class="pending-queue-actions">
+                <span
+                  class="pq-action"
+                  :class="{ active: pq.pinned }"
+                  :title="pq.pinned
+                    ? (store.locales=='zh' ? '取消插队，回到排队顺序' : 'Cancel queue jump')
+                    : (store.locales=='zh' ? '插队：越过排队顺序，尽快在下一个 step 投递（不打断执行）' : 'Jump the queue: delivered before normal queued messages (run continues)')"
+                  @click.stop="togglePendingItemPin(pq.id)"
+                >
+                  <i class="fa fa-bolt"></i>
+                </span>
+                <span
+                  class="pq-action"
+                  :title="store.locales=='zh' ? '编辑：取回输入框修改（投递前才能改）' : 'Edit: pull it back into the composer'"
+                  @click.stop="editPendingItem(pq.id)"
+                >
+                  <i class="fa fa-pencil"></i>
+                </span>
+                <span
+                  class="pq-action"
+                  :title="store.locales=='zh' ? '上移一位' : 'Move up'"
+                  @click.stop="movePendingItem(pq.id, -1)"
+                >
+                  <i class="fa fa-chevron-up"></i>
+                </span>
+                <span
+                  class="pq-action"
+                  :title="store.locales=='zh' ? '下移一位' : 'Move down'"
+                  @click.stop="movePendingItem(pq.id, 1)"
+                >
+                  <i class="fa fa-chevron-down"></i>
+                </span>
+                <span
+                  class="pq-action pq-action-remove"
+                  :title="store.locales=='zh' ? '删除这条排队消息' : 'Remove this queued message'"
+                  @click.stop="removePendingItem(pq.id)"
+                >
+                  <i class="fa fa-times"></i>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+
         <!-- 输入区域拖动条 -->
         <div
           class="input-resize-handle"
@@ -715,8 +793,7 @@
           <textarea
             v-model="inputText"
             :placeholder="getInputPlaceholder()"
-            @keydown.enter.exact.prevent="sendMessage"
-            @keydown.enter.shift.exact.prevent="inputText += '\n'"
+            @keydown="onComposerKeydown"
             @contextmenu.prevent="onInputContextMenu"
             ref="textInput"
             class="message-input scoll"
@@ -946,11 +1023,11 @@
                   <span>{{ retrievalStats.returnedBlocks }}</span>
                 </div>
                 <div class="stat-item" title="最大相似度">
-                  <i class="fa fa-chart-line"></i>
+                  <i class="fa fa-line-chart"></i>
                   <span>{{ retrievalStats.maxSimilarity }}</span>
                 </div>
                 <div v-if="retrievalStats.averageSimilarity" class="stat-item" title="平均相似度">
-                  <i class="fa fa-chart-bar"></i>
+                  <i class="fa fa-bar-chart"></i>
                   <span>{{ retrievalStats.averageSimilarity }}</span>
                 </div>
               </div>
@@ -994,19 +1071,21 @@
                 v-if="showStopButton"
                 class="button stop-button"
                 @click="stopCurrentGeneration"
-                :title="store.locales=='zh' ? '停止生成' : 'Stop Generation'"
+                :title="store.locales=='zh' ? '停止生成（同时清空待执行队列）' : 'Stop generation (also clears the queue)'"
               >
                 <i class="fa fa-stop"></i>
               </div>
               <div 
                 v-else
                 class="button send-button" 
-                @click="sendMessage" 
+                :class="{ 'send-disabled': isSendButtonDisabled, 'queue-mode': queueMode }"
+                @click="onSendButtonClick" 
                 :disabled="isSendButtonDisabled"
-                :class="{ 'send-disabled': isSendButtonDisabled }"
                 :title="getSendButtonTitle()"
               >
-                <i class="fa" :class="canSteerRun ? 'fa-bullhorn' : 'fa-play'"></i>
+                <i class="fa" :class="queueMode ? 'fa-plus-square-o' : 'fa-play'"></i>
+                <!-- 待执行队列条数角标：不打断当前执行，投递前可编辑（见输入框上方的队列面板） -->
+                <span v-if="pendingQueue().length" class="send-queue-badge">{{ pendingQueue().length }}</span>
               </div>
             </div>
           </div>
@@ -1087,6 +1166,7 @@ import { workspaceRoot } from '@/lib/agent/promptContext'
 import type { EditDiffFilePreview } from '@/shared/editDiff'
 import type { ChatMode, RelevantBlock, ExecutionUnit, WorkflowUnit, UploadItem, ChatMessage, ChatConfig, Chat, RetrievalStats } from '@/types/chat'
 import { useChatModels } from '@/composables/useChatModels'
+import { usePendingQueue, type PendingQueueItem } from '@/composables/usePendingQueue'
 import { useAgentRun } from '@/composables/useAgentRun'
 import { useBackLayer } from '@/composables/useBackLayer'
 import { BACK_ORDER } from '@/platform/backLayers'
@@ -1671,17 +1751,400 @@ const showStopButton = computed(() => {
 })
 
 /**
- * 当前聊天是否处于「运行中引导」状态：智能体（智能体 / 预设（含 PTC）/ 技能）或集群成员正在执行时，
- * 输入框不锁死——用户可继续输入要求，Enter 即为**引导**（steer）：
- * 不打断当前执行，投递到智能体下一个 step 边界生效（对齐主流 agent 客户端）。
+ * 当前聊天是否仍会写消息 / 仍在执行（待执行队列的出队闸门）。
+ * 比 isExecuting 多两层：
+ * - 智能体会话已 idle 但收尾投影（idle 事件）还没被监听器处理完 → 再等一拍，避免抢跑；
+ * - 工作流/技能等全局执行若属于本聊天 → 同样要等。
+ * 注意：不能用 isAnyExecuting（全局口径）——别的聊天在后台跑，本聊天该发的照发。
  */
-const canSteerRun = computed(() => {
-  const chat = currentChat.value
-  if (!chat) return false
-  if (isAgentRunActive.value) return true
-  // 集群：仅当本次集群运行就属于当前对话时才可引导（其它集群聊天里不给引导）
-  return chat.mode === 'swarm' && swarmRunning.value && swarmRunChatId.value === chat.id
+const isCurrentChatRunning = computed(() => {
+  if (isExecuting.value) return true
+  const g = globalExecutionState.value
+  if (g.isExecuting && g.chatId === currentChat.value?.id) return true
+  return false
 })
+
+// ==================== 待执行队列（对齐 DSH：排队 / 插队 都在下一个 step 边界生效） ====================
+// 运行中按 Enter 的输入不再被丢弃，且**不打断当前执行**：先入队，等 agent 走到下一个 step 边界时
+// 通过 steer 通道投给它（主进程 claimPendingSteer 在 step 结束时领取），与 DSH 的 inbox 语义一致。
+// Ctrl+Enter = 插队（越过排队顺序、尽快投递，仍然不打断本轮）；「停止」(■) 才是真正打断。
+// 队列在渲染层是唯一事实源：投递前可编辑 / 拖动排序 / 置顶插队 / 删除 / 批量删除。
+const {
+  pending: pendingQueue,
+  hasPending: hasPendingQueue,
+  isQueueBusy,
+  enqueue: enqueuePendingItem,
+  removeItem: removePendingItem,
+  removeItems: removePendingItems,
+  updateItem: updatePendingItem,
+  togglePin: togglePendingPin,
+  reorder: reorderPendingQueue,
+  moveBy: movePendingBy,
+  clear: clearPendingQueue,
+  clearAll: clearPendingQueueAll,
+  flush: flushPendingQueue,
+  restoreFromStorage: restorePendingQueue,
+} = usePendingQueue({
+  getChatId: () => currentChat.value?.id,
+  isChatBusy: (chatId: string) => {
+    const chat = (chats.value || []).find((c: any) => c?.id === chatId)
+    if (!chat) return false
+    const g = globalExecutionState.value
+    if (g.isExecuting && g.chatId === chatId) return true
+    if (chat.isGenerating === true) return true
+    if ((chat.messages || []).some((m: any) => m?.isExecuting === true)) return true
+    if (chat.mode === 'swarm' && swarmRunning.value && swarmRunChatId.value === chatId) return true
+    return false
+  },
+  canFlush: (chatId: string) => currentChat.value?.id === chatId,
+  /**
+   * 投递时机（DSH：在**下一个 step 边界**进给正在跑的 agent，不打断本轮）：
+   * 只有当「确定还有下一个 step」时才投——本 step 的模型输出已产生（stepSettled）
+   * 且它调用的工具都已跑完（awaitingTools=false）。此时主进程正走到 step 末尾并
+   * `claimPendingSteer()`，投进去正好在下一个 step 被领取；投早了会落在 turn 收尾之后，
+   * 那条 steer 会另起一个没有订阅者的 turn（界面一直转圈）。
+   * 插队条目（pinned）享受的是**投递优先级**，时机门槛相同（安全第一）。
+   * 若本轮就此结束（没有工具调用）→ 队列等收尾后走 sendAsNewTurn（同样不丢内容）。
+   */
+  canDeliver: (chatId: string, item: PendingQueueItem) => {
+    void item
+    const chat = (chats.value || []).find((c: any) => c?.id === chatId)
+    if (!chat) return false
+    // 集群：成员会话由 steerRunningAgents 内部处理，且集群自己按轮次驱动，随时可投
+    if (chat.mode === 'swarm') return true
+    const viewId = findRunningAgentViewId(chat)
+    if (!viewId) return false
+    const view = agentBridge.get(viewId)
+    if (!view) return false
+    return isAgentStepSettled(viewId) && view.awaitingTools !== true
+  },
+  /** 运行中：通过 steer 通道投递（下一个 step 边界生效） */
+  push: (chatId: string, item: PendingQueueItem) => pushQueuedToRunningAgent(chatId, item),
+  /** 本轮已收尾 / 该模式没有 step 边界（普通聊天、知识库、工作流）：回退为新一轮任务 */
+  sendAsNewTurn: (chatId: string, item: PendingQueueItem) => dispatchQueuedItem(chatId, item),
+  onAfterSend: () => saveChats(),
+  notify: (text: string) => { ElMessage.info(text) },
+})
+
+/**
+ * 「本 step 的模型输出已经产生」信号（viewId → true）：来自 bridge 的 `view.stepSettled`
+ * （agent/assistant/message 之后为真，step-start / turn-start 时清掉）。
+ * 这是渲染层能拿到的最接近「step 边界」的时机——主进程在 step 结束后才 claimPendingSteer()，
+ * 此刻投递的排队消息正好在下一个 step 被领取（不打断本轮，也不会变成没人监听的游离 turn）。
+ */
+const agentStepSettled = ref<Record<string, boolean>>({})
+/** step 边界信号计数：用于 watch 触发队列续投（view 对象本身不是 Vue 响应式，不能用它当依赖） */
+const agentStepSignal = ref(0)
+
+/** 读某 view 的 step 边界信号（避免直接索引 ref 的 .value 报隐式 any） */
+const isAgentStepSettled = (viewId: string): boolean => agentStepSettled.value[viewId] === true
+
+/** 找某聊天里正在执行的 agent 会话 id（单智能体 / 预设 / 技能；集群由 steerRunningAgents 内部处理） */
+const findRunningAgentViewId = (chat: any): string | undefined => {
+  const msgs: any[] = chat?.messages || []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (m && m.role === 'assistant' && m.isExecuting === true && m.executionType === 'skill' && m.agentViewId) {
+      return String(m.agentViewId)
+    }
+  }
+  return undefined
+}
+
+// agent 事件订阅：把「step 边界信号」投影到本地表并触发队列续投。
+// 订阅与退订见 onMounted / onBeforeUnmount；bridge 的 on() 是「视图变化」回调，
+// 这里只关心 view.stepSettled（本 step 的模型输出已产生 = 下一个 step 边界即将到来）。
+let unsubAgentStepEvents: (() => void) | null = null
+const subscribeAgentStepSignals = () => {
+  if (unsubAgentStepEvents) return
+  unsubAgentStepEvents = agentBridge.on((v) => {
+    const settled = v.status === 'running' && v.stepSettled === true
+    if (settled === isAgentStepSettled(v.id)) return
+    agentStepSettled.value = { ...agentStepSettled.value, [v.id]: settled }
+    if (settled) agentStepSignal.value++
+  })
+}
+
+/**
+ * 兜底清理：会话已经空闲（不是运行中）却还有排队的 inbox 条目——说明某条 steer 投递
+ * 刚好卡在 turn 收尾之后，主进程会把它当成一个**新 turn** 跑起来，而渲染层对这一轮没有任何
+ * 订阅（气泡不会更新、界面一直转圈）。这里在「由执行中转为空闲」的时刻把它丢弃：
+ * `cancel(id, 'queue-cleanup', false)` 走 keepInbox=false，主进程会清空 inbox。
+ * 队列里的条目本身不受影响（它们仍在渲染层队列里，随后按新一轮任务正常发送）。
+ */
+const dropLeftoverInboxForIdleChats = () => {
+  for (const chat of (chats.value || []) as any[]) {
+    if (!chat || chat.isGenerating === true) continue
+    if ((chat.messages || []).some((m: any) => m?.isExecuting === true)) continue
+    for (const m of (chat.messages || []) as any[]) {
+      const viewId = m?.agentViewId
+      if (!viewId) continue
+      const view = agentBridge.get(String(viewId))
+      if (!view || view.status === 'running' || view.status === 'stopping') continue
+      if ((view.inbox || 0) > 0) void agentBridge.cancel(String(viewId), 'queue-cleanup', false).catch(() => { /* 尽力而为 */ })
+    }
+  }
+}
+
+/** 当前聊天是否处于「排队模式」（运行中）：此时 Enter 入队、Ctrl+Enter 插队 */
+const composerQueuing = computed(() =>
+  isCurrentChatRunning.value || isQueueBusy(currentChat.value?.id)
+)
+
+/** 发送按钮是否显示「加入队列」样式（队列里有活待干） */
+const queueMode = computed(() => hasPendingQueue() || isQueueBusy(currentChat.value?.id))
+
+/**
+ * 把当前输入组装成队列条目（文本 + 附件正文 + 图片）。
+ * 附件正文与智能体/普通聊天同一格式前置进任务正文（入队后就不该再依赖输入区的附件状态）。
+ */
+const buildPendingItem = (opts?: { raw?: string }): Omit<PendingQueueItem, 'id' | 'at'> | null => {
+  const raw = (opts?.raw ?? inputText.value).trim()
+  if (!raw && currentUploads.value.length === 0) return null
+  const { content, images, fileAttachments } = buildUserMessageFromUploads(raw)
+  const fileBlocks = (fileAttachments || []).map(f =>
+    `[文件: ${f.name} (${f.charCount}字)]\n\`\`\`\n${f.content}\n\`\`\``
+  )
+  const fileContext = fileBlocks.join('\n\n')
+  const text = fileContext ? (content ? `${fileContext}\n\n${content}` : fileContext) : content
+  if (!text.trim()) return null
+  // 图片转 data URL 字符串（队列条目要能 JSON 序列化；图片本身不落盘，见 usePendingQueue）
+  const imageUrls = (images || []).map((img: any) => (typeof img === 'string' ? img : '')).filter(Boolean)
+  return {
+    text,
+    display: content.trim() || (fileAttachments?.length ? fileAttachments.map(f => f.name).join('、') : ''),
+    mode: currentChat.value.mode,
+    fileAttachments: (fileAttachments || []).map(f => ({ name: f.name, content: f.content, charCount: f.charCount })),
+    images: imageUrls.length ? imageUrls : undefined,
+  }
+}
+
+/**
+ * 入队当前输入并清空输入区（运行中按 Enter / Ctrl+Enter 的路径）。
+ * `pin=true`（Ctrl+Enter）= 插队：标记投递优先级（不等 step 边界信号、优先于普通排队条目），
+ * 位置仍由用户拖动决定，不打断当前执行。
+ */
+const enqueueCurrentInput = (opts?: { pin?: boolean }): boolean => {
+  const item = buildPendingItem()
+  if (!item) return false
+  const entry = enqueuePendingItem(item, { pin: opts?.pin })
+  if (!entry) return false
+  inputText.value = ''
+  currentUploads.value = []
+  autoScrollEnabled.value = true
+  saveChats()
+  // 立刻尝试投递一次：插队条目会马上进 agent 的 inbox（仍然在下一个 step 边界被领取）
+  void flushPendingQueue()
+  return true
+}
+
+/**
+ * 运行中投递：把队列条目通过 steer 通道交给正在执行的 agent 会话。
+ * **不打断本轮**——主进程在下一个 step 边界领取（DSH 的 inbox/steer 语义）。
+ * 返回实际受理的会话数（0 = 没有可接收的会话，条目会留在队首稍后重试）。
+ */
+const pushQueuedToRunningAgent = async (chatId: string, item: PendingQueueItem): Promise<number> => {
+  const chat = (chats.value || []).find((c: any) => c?.id === chatId)
+  if (!chat) return 0
+  const delivered = await steerRunningAgents(chat, item.text)
+  if (!delivered) return 0
+  // 时间线上留痕：作为一条「运行中」用户消息（气泡带提示：不打断本轮，下一个 step 生效）
+  const userMessage: ChatMessage = {
+    role: 'user',
+    content: item.display || item.text,
+    timestamp: Date.now(),
+    steer: true,
+    images: item.images && item.images.length ? item.images : undefined,
+    fileAttachments: item.fileAttachments && item.fileAttachments.length ? item.fileAttachments : undefined,
+  }
+  chat.messages.push(userMessage)
+  autoScrollEnabled.value = true
+  if (currentChat.value?.id === chatId) scrollToBottom()
+  saveChats()
+  return delivered
+}
+
+/**
+ * 把队列条目按聊天当前模式发出（真正调用发送入口）——本轮已收尾时的路径。
+ * 发送函数都从输入区取附件，因此这里先把条目内容放回输入区，再调用对应模式。
+ */
+const dispatchQueuedItem = async (chatId: string, item: PendingQueueItem) => {
+  const chat = (chats.value || []).find((c: any) => c?.id === chatId)
+  if (!chat) return
+  const idx = chats.value.indexOf(chat)
+  if (idx >= 0 && currentChatIndex.value !== idx) currentChatIndex.value = idx
+  inputText.value = item.text
+  currentUploads.value = (item.fileAttachments || []).map((f) => ({
+    kind: 'file' as const,
+    data: '',
+    name: f.name,
+    size: f.content.length,
+    parsedContent: f.content,
+    charCount: f.charCount,
+  }))
+  autoScrollEnabled.value = true
+  switch (chat.mode) {
+    case 'swarm':
+      await handleSwarmMode(item.text)
+      break
+    case 'skill':
+    case 'agent2':
+      if (isBrowser) await handleBrowserAgentMode(item.text)
+      else await handleAgentLoopMode(item.text)
+      break
+    case 'agent':
+      if (isBrowser) await handleBrowserAgentMode(item.text)
+      else await handleAgentMode(item.text)
+      break
+    case 'workflow':
+      await runWorkflow(item.text)
+      break
+    case 'retrieval':
+      await sendChatMessage(item.text)
+      break
+    default:
+      await sendChatMessage(item.text)
+  }
+}
+
+/** 输入区键盘：Enter=排队，Ctrl/Cmd+Enter=插队，Shift+Enter=换行（都在下一个 step 边界生效，不打断本轮） */
+const onComposerKeydown = (e: KeyboardEvent) => {
+  if (e.key !== 'Enter') return
+  if (e.shiftKey) return // 换行（由模板的 shift.exact 处理）
+  const mod = e.ctrlKey || e.metaKey
+  // 只要处于「排队模式」（运行中/投递中）Enter 就入队；队列空不代表可以发送——
+  // 本轮仍在跑时发送会被 isExecuting 拦下，输入内容反而丢失。
+  const queuing = composerQueuing.value
+  e.preventDefault()
+  if (mod) {
+    // Ctrl+Enter：插队（越过排队顺序，仍然不打断本轮执行）
+    if (queuing) {
+      if (enqueueCurrentInput({ pin: true })) {
+        ElMessage.success(store.locales == 'zh'
+          ? '已插队：不打断当前执行，智能体在下一个 step 带上这条'
+          : 'Jumped the queue: the run continues; the agent picks this up at its next step')
+      }
+      return
+    }
+    void sendMessage()
+    return
+  }
+  if (queuing) {
+    // Enter：排队（不打断本轮），轮到它的 step 边界自动投递
+    if (enqueueCurrentInput()) {
+      ElMessage.success(store.locales == 'zh'
+        ? '已加入待执行队列：不打断当前执行，轮到它的 step 会带上（Ctrl+Enter 可插队）'
+        : 'Queued: the run continues; it is delivered at its turn (Ctrl+Enter to jump the queue)')
+    }
+    return
+  }
+  void sendMessage()
+}
+
+/**
+ * 发送按钮：空闲=发送；运行中（有内容）=加入待执行队列（与 Enter 同语义）。
+ * 运行中按钮不再置灰——点击即入队，避免用户以为「运行中就不能输入」。
+ */
+const onSendButtonClick = () => {
+  void sendMessage()
+}
+
+/** 队列面板：插队 / 取消插队（不打断本轮，只是越过排队顺序、尽快投递） */
+const togglePendingItemPin = (id: string) => {
+  const item = pendingQueue().find((it) => it.id === id)
+  if (!item) return
+  togglePendingPin(id)
+  ElMessage.info(!item.pinned
+    ? (store.locales == 'zh' ? '已插队：不打断当前执行，排在普通排队消息之前' : 'Jumped the queue — delivered before normal queued messages')
+    : (store.locales == 'zh' ? '已取消插队，回到排队顺序' : 'Queue jump cancelled'))
+  void flushPendingQueue()
+}
+
+/** 队列面板：把条目取回输入框编辑（编辑是队列独有的能力——投递出去后无法再改） */
+const editPendingItem = (id: string) => {
+  const item = pendingQueue().find((it) => it.id === id)
+  if (!item) return
+  // 取回输入区：文本还原成「用户输入」（去掉附件正文前缀），附件作为 chips 一起还原
+  const displayText = item.display || item.text
+  removePendingItem(id)
+  inputText.value = displayText
+  currentUploads.value = [
+    ...(item.fileAttachments || []).map((f) => ({
+      kind: 'file' as const,
+      data: '',
+      name: f.name,
+      size: f.content.length,
+      parsedContent: f.content,
+      charCount: f.charCount,
+    })),
+    ...(item.images || []).map((url, i) => ({
+      kind: 'image' as const,
+      data: url,
+      name: (store.locales == 'zh' ? '图片' : 'image') + '-' + (i + 1),
+      size: 0,
+    })),
+  ]
+  saveChats()
+  void nextTick(() => {
+    const el = document.querySelector<HTMLTextAreaElement>('.message-input')
+    el?.focus()
+    el?.setSelectionRange(el.value.length, el.value.length)
+  })
+}
+
+/** 队列面板：全部清除（带确认） */
+const clearPendingQueueConfirmed = async () => {
+  const count = pendingQueue().length
+  if (!count) return
+  try {
+    await ElMessageBox.confirm(
+      store.locales == 'zh' ? `确定清空待执行队列（${count} 条）？` : `Clear all ${count} queued message(s)?`,
+      store.locales == 'zh' ? '清空队列' : 'Clear queue',
+      {
+        confirmButtonText: store.locales == 'zh' ? '清空' : 'Clear',
+        cancelButtonText: store.locales == 'zh' ? '取消' : 'Cancel',
+        type: 'warning',
+      },
+    )
+  } catch { return }
+  clearPendingQueue()
+  saveChats()
+}
+
+/** 队列面板：拖动排序（HTML5 拖放，与聊天列表拖拽一致的直接操作感） */
+const draggingPendingId = ref<string>('')
+const onPendingDragStart = (id: string, e: DragEvent) => {
+  draggingPendingId.value = id
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    // Firefox 需要设置数据才认为拖拽有效
+    e.dataTransfer.setData('text/plain', id)
+  }
+}
+const onPendingDragOver = (e: DragEvent) => {
+  if (!draggingPendingId.value) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+}
+const onPendingDrop = (targetId: string) => {
+  const from = draggingPendingId.value
+  draggingPendingId.value = ''
+  if (!from || from === targetId) return
+  const ids = pendingQueue().map((it) => it.id)
+  const fromIdx = ids.indexOf(from)
+  const toIdx = ids.indexOf(targetId)
+  if (fromIdx < 0 || toIdx < 0) return
+  ids.splice(toIdx, 0, ids.splice(fromIdx, 1)[0])
+  reorderPendingQueue(ids)
+  saveChats()
+}
+
+/** 队列面板：上移 / 下移一位（键盘与触屏可用的排序入口） */
+const movePendingItem = (id: string, delta: number) => {
+  movePendingBy(id, delta)
+  saveChats()
+  void flushPendingQueue()
+}
 
 // 输入行内的「系统错误」提示（图标 + 悬停 title 显示完整错误）：
 // 来源 1：请求失败（onError / 发送异常）直接写入；来源 2：对话里新增的「系统」消息（如集群执行的报错）。
@@ -1767,13 +2230,12 @@ const isSendButtonDisabled = computed(() => {
   const isSwarm = chat.mode === 'swarm'
   // 网页端（局域网共享）智能体模式：模型来自主机，不要求本端选模型
   const hostAgent = isBrowser && (chat.mode === 'agent' || chat.mode === 'agent2' || chat.mode === 'skill')
-  // 运行中引导：智能体/集群执行期间输入框保持可用（Enter = 投递引导，不打断本轮）
-  const steerMode = canSteerRun.value
+  // 运行中：输入不锁死——Enter / 点击发送按钮 = 加入待执行队列（本轮结束后自动发）；Ctrl+Enter 插队
+  const canQueueInput = composerQueuing.value && (!!inputText.value.trim() || currentUploads.value.length > 0)
   return Boolean(
-    // 仅当前对话执行中时禁用发送；其它对话在后台推理不影响本对话发送
-    (isExecuting.value && !steerMode) ||
+    (!canQueueInput && isExecuting.value) ||
     // 集群：本对话的集群运行中不可重发（运行时为模块级单例，需等本轮结束）
-    (isSwarm && swarmRunning.value && !steerMode) ||
+    (!canQueueInput && isSwarm && swarmRunning.value) ||
     (!inputText.value.trim() && currentUploads.value.length === 0) ||
     // 集群不要求顶层模型（各成员用自己预设的模型）
     (!isSwarm && !hostAgent && !chat.config.model)
@@ -2208,11 +2670,11 @@ const getAgentButtonTitle = (): string => {
 
 // 获取输入框占位符
 const getInputPlaceholder = (): string => {
-  // 运行中引导：智能体/集群执行期间输入框可用，Enter 即投递引导（下一个 step 生效）
-  if (canSteerRun.value) {
+  // 运行中：Enter = 排队，Ctrl+Enter = 插队（都不打断本轮，在下一个 step 边界投给智能体）
+  if (composerQueuing.value) {
     return store.locales == 'zh'
-      ? '智能体运行中：输入要求可引导它（下一轮带上，Enter发送引导）'
-      : 'Agent is running: type to guide it (applied next round, Enter to send guidance)'
+      ? '运行中：Enter 排队（下一个 step 带上），Ctrl+Enter 插队，Shift+Enter 换行'
+      : 'Running: Enter queues (delivered at the next step), Ctrl+Enter jumps the queue, Shift+Enter for a new line'
   }
   switch (currentChat.value.mode) {
     case 'skill':
@@ -2253,11 +2715,11 @@ const getSendButtonTitle = (): string => {
   if (skillLoading.value) {
     return 'Skill executing...'
   }
-  // 运行中引导：发送按钮变成「发送引导」
-  if (canSteerRun.value) {
+  // 队列待发：按钮表示「加入待执行队列」（运行中 Enter 同语义）
+  if (composerQueuing.value) {
     return store.locales == 'zh'
-      ? '发送引导（智能体下一轮采用，不打断当前执行）(Enter)'
-      : 'Send guidance (agent adopts it next round, run continues) (Enter)'
+      ? '加入待执行队列（不打断当前执行，下一个 step 带上；Ctrl+Enter 插队）(Enter)'
+      : 'Add to queue (run continues; delivered at the next step — Ctrl+Enter to jump the queue) (Enter)'
   }
   if (isExecuting.value) {
     // 推理/执行中：输入框可打字起草，但发送需等本次推理结束（按钮禁用 + sendMessage 拦截）
@@ -3322,6 +3784,11 @@ onMounted(async () => {
   if (isFirstInit || chats.value.length === 0) {
     loadChatsFromStorage()
   }
+  // 待执行队列从存储恢复（只保留仍存在的聊天），并尝试续发已空闲聊天的条目
+  restorePendingQueue(new Set((chats.value || []).map((c: any) => String(c?.id ?? ''))))
+  void flushPendingQueue()
+  // agent 事件订阅：把「step 边界」信号投影给队列（决定排队消息何时投给正在跑的 agent）
+  subscribeAgentStepSignals()
   // 周期对账兜底：异常停止/主进程失联导致收尾事件缺失时，自动清转圈解锁聊天
   startAgentReconcileTimer()
   // 监听设置页「清空聊天记录」事件
@@ -3381,6 +3848,25 @@ onMounted(async () => {
       scrollToBottom()
     }
   })
+
+  // 待执行队列续投：三类触发点
+  // 1) step 边界信号（本 step 模型输出已产生 + 工具已跑完 = 主进程即将 claimPendingSteer）
+  //    —— 队列消息在这里投给正在跑的 agent，与 DSH「下一个 step 生效」一致；
+  // 2) 任意聊天「由执行中转为空闲」（切到别的对话后台跑完也算）—— 剩余条目回退为新一轮任务发送；
+  // 3) 兜底：会话已空闲却仍有残留 inbox（投递刚好卡在 turn 收尾）→ 丢弃它们并让队列走新轮路径，
+  //    避免主进程把它们当新 turn 跑起来而界面没有任何订阅者（会一直转圈）。
+  // 注意：不能把 agent 视图对象当依赖（它不是 Vue 响应式），所以用 agentStepSignal 计数触发。
+  watch(agentStepSignal, () => { void flushPendingQueue() })
+  watch(
+    () => (chats.value || []).map((c: any) => (c?.isGenerating ? 1 : 0)).join('') + '|' +
+      ((globalExecutionState.value.isExecuting ? globalExecutionState.value.chatId : '') || '') + '|' +
+      (swarmRunning.value ? String(swarmRunChatId.value || '') : ''),
+    (state, prev) => {
+      // 由「执行中」变为「空闲」的时刻：清理残留 inbox（见上第 3 条）
+      if (state !== prev) dropLeftoverInboxForIdleChats()
+      void flushPendingQueue()
+    }
+  )
 
   // 如果当前聊天是智能体模式（含已并入的技能模式），加载技能目录供 $技能名 触发
   if (currentChat.value.mode === 'agent2' || currentChat.value.mode === 'skill') {
@@ -3500,6 +3986,9 @@ onBeforeUnmount(() => {
 
   // 退订全部 agent 会话的流式订阅（不中断主进程执行；重进组件会重新订阅）
   disposeAgentRun?.()
+  // 退订队列用的 step 边界事件订阅（重进组件会重新订阅）
+  unsubAgentStepEvents?.()
+  unsubAgentStepEvents = null
   
   // 清理 ASR
   if (asrManagerInstance) {
@@ -4533,6 +5022,8 @@ const onAiChatsCleared = () => {
   currentUploads.value = []
   chats.value = [createNewChatData()]
   currentChatIndex.value = 0
+  // 清空聊天记录时队列一并作废（队列条目指向的聊天已不存在）
+  clearPendingQueueAll()
   saveChats()
 }
 
@@ -5076,91 +5567,25 @@ const llmTypeSelectModel = computed<string>({
 // ==================== 发送消息 - 统一入口 ====================
 
 /**
- * 把「运行中引导」记录进**正在执行的那条助手消息的时间线**（紧跟已产生的步骤之后，
- * 之后生成的步骤自然排在它下面）——比另发一条用户气泡更直观：引导就出现在它生效的位置。
+ * 发送入口（与 DSH 输入区一致）：
+ * - 空闲 → 正常发送本轮任务；
+ * - 运行中 → **入队**（不打断当前执行），本轮收尾后自动按序发出；
+ *   队列里的条目在发出前可以编辑 / 排序 / 删除（见输入框上方的待执行队列面板）。
+ * `opts.forceNewTurn` 供「队列已确认可发送」的内部路径使用（跳过入队判断）。
  */
-const insertGuidanceUnit = (chat: any, text: string): boolean => {
-  const msgs = (chat?.messages || []).filter((m: any) =>
-    m && m.role === 'assistant' && m.isExecuting === true &&
-    (m.executionType === 'skill' || m.swarmAgent)
-  )
-  const target = msgs[msgs.length - 1]
-  if (!target) return false
-  const now = Date.now()
-  const unit = {
-    id: `guidance-${now}`,
-    status: 'success' as const,
-    stepType: 'guidance' as any,
-    description: 'user-guidance',
-    result: text,
-    startTime: now,
-    endTime: now,
-  }
-  target.executionUnits = [...(target.executionUnits || []), unit]
-  return true
-}
-
-/**
- * 运行中「引导」发送（steer）：当前聊天有正在执行的智能体/集群会话时，把输入框内容投递给它——
- * **下一个 step 边界生效，不打断当前执行**（对齐主流 agent 客户端：运行中也能补充要求）。
- * 返回 true 表示本次输入已按「引导」处理（调用方结束发送流程）；false 表示按正常发送处理。
- */
-const trySteerRunningAgent = async (): Promise<boolean> => {
-  if (!canSteerRun.value) return false
-  const raw = inputText.value.trim()
-  if (!raw && currentUploads.value.length === 0) return false
-
-  const chat = currentChat.value
-  const { content: msgContent, images, fileAttachments } = buildUserMessageFromUploads(raw)
-  // 图片（多模态附图）无法随 steer 投递（引导只带文本）：提示等本轮结束后再发，避免被静默丢弃
-  if (images && images.length > 0) {
-    ElMessage.warning(store.locales == 'zh'
-      ? '智能体运行中不支持发送图片引导，请等本轮结束后再发送'
-      : 'Images cannot be sent as guidance while the agent is running — wait for this run to end')
-    return true
-  }
-  // 附件正文与智能体模式同格式前置（steer 只带文本，把文件内容带进引导里）
-  const fileBlocks = (fileAttachments || []).map(f =>
-    `[文件: ${f.name} (${f.charCount}字)]\n\`\`\`\n${f.content}\n\`\`\``
-  )
-  const fileContext = fileBlocks.join('\n\n')
-  const steerText = fileContext ? (msgContent ? `${fileContext}\n\n${msgContent}` : fileContext) : msgContent
-  if (!steerText.trim()) return false
-  // 时间线上展示的文本：用户实际输入（没打字只传文件时列出文件名，避免一片空白）
-  const displayText = msgContent.trim()
-    || (fileAttachments?.length ? fileAttachments.map(f => f.name).join('、') : '')
-
-  const delivered = await steerRunningAgents(chat, steerText)
-  if (delivered === 0) {
-    // 本轮刚好结束（或正在停止）：引导无处投递。
-    // 若该聊天已解锁 → 交回正常发送流程（本条输入作为新一轮任务发出）；
-    // 仍在执行中（停止中/状态未回）→ 保留输入并提示，稍后重发即可。
-    const stillRunning = isExecuting.value || (chat.mode === 'swarm' && swarmRunning.value)
-    if (!stillRunning) return false
-    ElMessage.info(store.locales == 'zh'
-      ? '智能体刚好结束了本轮，引导未投递；请稍后重新发送'
-      : 'The agent just finished this round, guidance not delivered — please resend')
-    return true
-  }
-
-  // 记进「正在执行的那条助手消息」的时间线（紧跟已产生的步骤，后续步骤排在它下面）
-  insertGuidanceUnit(chat, displayText || steerText)
-  inputText.value = ''
-  currentUploads.value = []
-  autoScrollEnabled.value = true
-  scrollToBottom()
-  saveChats()
-  ElMessage.success(store.locales == 'zh'
-    ? '已作为引导发送：智能体将在下一轮（下一个 step）带上这条要求'
-    : 'Sent as guidance — the agent will pick it up in its next round')
-  return true
-}
-
-const sendMessage = async () => {
+const sendMessage = async (opts?: { forceNewTurn?: boolean }) => {
   const message = inputText.value.trim()
+  const forceNewTurn = opts?.forceNewTurn === true
 
-  // 智能体/集群运行中：输入作为「引导」投递（下一个 step 生效，不打断本轮）
-  if (await trySteerRunningAgent()) return
+  // 运行中：入队（不打断本轮），轮到它的 step 边界自动投递给正在执行的 agent
+  if (!forceNewTurn && (isCurrentChatRunning.value || (currentChat.value?.mode === 'swarm' && swarmRunning.value && swarmRunChatId.value === currentChat.value?.id))) {
+    if (enqueueCurrentInput()) {
+      ElMessage.success(store.locales == 'zh'
+        ? '已加入待执行队列：不打断当前执行，轮到它的 step 会带上（Ctrl+Enter 可插队）'
+        : 'Queued: the run continues and picks it up at its next step (Ctrl+Enter to jump the queue)')
+    }
+    return
+  }
 
   // 仅拦截「当前对话」执行中：A 对话在后台推理时，切到 B 应能正常输入发送
   // （isAnyExecuting 是全局的，若用它拦截，任何对话执行时其它对话都无法发送）
@@ -5217,6 +5642,8 @@ const sendMessage = async () => {
     default:
       await sendChatMessage(message)
   }
+  // 本轮发送出去后，若可能还有排队条目（快速模式已收尾），尝试续发下一条
+  void flushPendingQueue()
 }
 
 // ==================== Agent 循环模式（agent2）/ 技能新路径 / 预设工具 ====================
@@ -5228,6 +5655,7 @@ const {
   handleAgentLoopMode,
   handleAgentPresetMode,
   handleBrowserAgentMode,
+  /** 运行中投递（steer）：队列消息在 step 边界交给正在执行的会话，不打断本轮 */
   steerRunningAgents,
   reconcileAgentRuns,
   stopAgentsInChat,
@@ -6980,6 +7408,22 @@ const resetChatExecutionUi = (chatData: any) => {
  *  - 智能体（agent2 / agent 预设 / 技能）：取消会话但**保留记录**（供后续智能体读取上下文），立即复位解锁。
  */
 const stopCurrentGeneration = () => {
+  const chat = currentChat.value
+  if (!chat) return
+
+  // 停止 = 本聊天的工作全部放弃（与 DSH 的 cancel 清空 inbox 同语义）：
+  // 待执行队列一并清空，避免「按了停止，队列又自动跑起来」。
+  // 注：运行中的排队 / 插队（Enter / Ctrl+Enter）都**不打断执行**，只有这里的「停止」才中断本轮。
+  clearPendingQueue(chat.id)
+
+  cancelCurrentRun()
+}
+
+/**
+ * 只中断当前轮，不动待执行队列。
+ * 语义对齐 DSH 的 `cancel(cause, { keepInbox: true })`——留给需要「保留队列的中断」的调用方。
+ */
+const cancelCurrentRun = () => {
   const chat = currentChat.value
   const g = globalExecutionState.value
   if (!chat) return
@@ -9872,6 +10316,155 @@ select {
 }
 .agent-todo-item.at-done .agent-todo-title { text-decoration: line-through; }
 
+/* ==================== 待执行队列面板（运行中 Enter 排队 / Ctrl+Enter 插队；
+   投递前可编辑、拖动排序、置顶插队、删除、批量清除。不打断当前执行） ==================== */
+.pending-queue-panel {
+  margin-bottom: 5px;
+  border: 1px solid var(--borderColor, #333);
+  border-left: 2px solid #f39c12;
+  border-radius: 6px;
+  padding: 6px 8px;
+  flex-shrink: 0;
+}
+.pending-queue-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.pending-queue-hint {
+  font-size: 10px;
+  font-weight: 400;
+  opacity: .55;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-queue-clear {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  opacity: .65;
+  transition: all .15s;
+}
+.pending-queue-clear:hover {
+  opacity: 1;
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.pending-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 108px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+.pending-queue-list::-webkit-scrollbar { width: 7px; }
+.pending-queue-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+.pending-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: grab;
+  transition: background-color .15s;
+}
+.pending-queue-item:hover { background-color: rgba(128, 128, 128, 0.08); }
+.pending-queue-item.pq-dragging { opacity: .45; }
+/* 已插队（Ctrl+Enter）：左侧高亮细条 + 更醒目的序号 */
+.pending-queue-item.pq-pinned {
+  background-color: rgba(243, 156, 18, 0.10);
+  box-shadow: inset 2px 0 0 #f39c12;
+}
+.pending-queue-index {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background-color: rgba(243, 156, 18, 0.18);
+  color: #f39c12;
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pending-queue-index.pinned { background-color: #f39c12; color: #fff; }
+.pending-queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-queue-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.pending-queue-item:hover .pending-queue-actions { opacity: 1; }
+.pq-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  opacity: .7;
+  color: var(--fontColor);
+  transition: all .15s;
+}
+.pq-action:hover {
+  opacity: 1;
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+/* 已插队条目的 ⚡ 常亮（面板收起悬停也能看出这条要插队） */
+.pq-action.active { opacity: 1; color: #f39c12; }
+.pq-action-remove:hover { color: #e74c3c; }
+
+/* 队列态发送按钮（运行中点击 = 加入待执行队列） */
+.send-button.queue-mode {
+  color: #f39c12;
+}
+/* 发送按钮需要作为角标的定位锚点 */
+.send-button { position: relative; }
+/* 发送按钮上的队列条数角标 */
+.send-queue-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background-color: #f39c12;
+  color: #fff;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
 .unit-header {
   display: flex;
   justify-content: space-between;
@@ -11105,6 +11698,7 @@ select {
 }
 /* 卡片上方的任务清单 / 预览区：有消息时与卡片同宽（通栏，不限制最大宽度） */
 .input-area > .agent-todos-panel,
+.input-area > .pending-queue-panel,
 .input-area > .preview-area {
   box-sizing: border-box;
   width: 100%;
@@ -11113,6 +11707,7 @@ select {
 .chat-main.empty-chat .input-container,
 .chat-main.empty-chat .empty-chat-hint,
 .chat-main.empty-chat .input-area > .agent-todos-panel,
+.chat-main.empty-chat .input-area > .pending-queue-panel,
 .chat-main.empty-chat .input-area > .preview-area {
   width: min(820px, calc(100% - 20px));
   margin-left: auto;

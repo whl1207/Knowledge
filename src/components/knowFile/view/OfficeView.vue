@@ -174,6 +174,12 @@ onMounted(async () => {
   offEvent = onOfficeEvent((e) => {
     if (e.viewId !== viewId.value) return
     if (e.event === 'saved') emit('saved', e.filePath || props.path)
+    // PPT 放映结束：主进程把视图从「铺满整窗」放回占位区，用的还是上一次上报的矩形。
+    // 立刻按当前布局重报一次，避免拿放映前的旧矩形去摆（窗口尺寸可能已经变了）。
+    if (e.event === 'show-ended') {
+      void officeRefresh(viewId.value)
+      pushBounds()
+    }
     if (e.event === 'crashed') {
       viewId.value = ''
       error.value = zh.value ? '编辑器进程异常退出' : 'Editor process crashed'

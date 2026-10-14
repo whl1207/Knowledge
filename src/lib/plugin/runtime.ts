@@ -15,7 +15,7 @@
  */
 
 import { declareCoreSlots, coreSlotScope, slotRegistry, type SlotDefinition } from './slots'
-import { getPluginBridge, type PluginBridgeApi } from './bridge'
+import { getPluginBridge, type PluginBridgeApi, type PluginClientBundle } from './bridge'
 import { createPluginLocaleApi, type PluginLocaleApi } from './locale'
 import { createPluginLlmApi, type PluginLlmApi } from './llm'
 import { createPluginFilesApi, releasePluginPdfCache, type PluginFilesApi } from './files'
@@ -494,18 +494,52 @@ async function doSync(): Promise<void> {
   }
 
   // 3) 装载新增 / 重载（上一步已把需要重载的卸掉）
-  for (const p of wanted) {
+  //
+  // 先**并发**把入口源码取回来，再按原顺序逐个装载：
+  //  - 慢的是 I/O（安卓上要经桥 + 本地服务器读每个插件入口，有的几百 KB），并发取能把这些等待叠起来；
+  //  - 而 `apply()` 的顺序必须保持与清单一致（槽位 key 冲突、日志顺序都依赖它），所以只并行"取"不并行"装"。
+  const toLoad = wanted.filter((p) => !loaded.has(p.id))
+  const prefetched = new Map<string, { bundle?: PluginClientBundle; error?: unknown }>()
+  await mapLimit(toLoad, 3, async (p) => {
+    try {
+      prefetched.set(p.id, { bundle: await bridge.clientBundle(p.id) })
+    } catch (e) {
+      prefetched.set(p.id, { error: e })
+    }
+  })
+  for (const p of toLoad) {
     if (loaded.has(p.id)) continue
-    await loadOne(bridge, p)
+    await loadOne(bridge, p, prefetched.get(p.id))
   }
 
   slotRegistry.notify()
 }
 
-async function loadOne(bridge: PluginBridgeApi, snapshot: PluginSnapshot): Promise<void> {
+/** 有上限的并发 map（稳定优先：不把桥 / 文件系统一次性打爆） */
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0
+  const width = Math.max(1, Math.min(limit, items.length))
+  await Promise.all(
+    Array.from({ length: width }, async () => {
+      for (;;) {
+        const i = next++
+        if (i >= items.length) return
+        await fn(items[i])
+      }
+    }),
+  )
+}
+
+async function loadOne(
+  bridge: PluginBridgeApi,
+  snapshot: PluginSnapshot,
+  prefetched?: { bundle?: PluginClientBundle; error?: unknown },
+): Promise<void> {
   const log = createClientLogger(snapshot.id)
   try {
-    const bundle = await bridge.clientBundle(snapshot.id)
+    // 已经并发取回来的 bundle 直接用；没有就现取（单独调用 loadOne 的路径）
+    if (prefetched?.error) throw prefetched.error
+    const bundle = prefetched?.bundle ?? (await bridge.clientBundle(snapshot.id))
     if (!bundle?.code) throw new Error('客户端 bundle 为空')
     const plugin = await importBundle(snapshot.id, bundle.code)
     const handle = createClientContext({ snapshot, log })

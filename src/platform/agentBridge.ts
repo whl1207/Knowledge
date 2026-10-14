@@ -132,6 +132,27 @@ export interface AgentSessionView {
    * 事件类型：reasoning（推理全量文本快照）/ search（查询词）/ open（访问网页）/ done（结果）
    */
   searchEvents: Array<{ kind: 'reasoning' | 'search' | 'open' | 'done'; at: number; text?: string; len?: number; query?: string; url?: string; results?: Array<{ title?: string; url?: string }> }>
+  /**
+   * 是否「本 step 的模型输出已经产生」（agent/assistant/message 到达后为 true，
+   * 下一个 step-start / turn-start 时清掉）。
+   *
+   * 用途：运行中入队的消息要投给正在跑的 agent（steer 通道），而主进程是在**一个 step 结束后**
+   * 才 `claimPendingSteer()` 领取——本标志就是渲染层能拿到的、最接近该边界的时机。
+   * 若在 step 中途投递，主进程本 step 不会领取，turn 恰好收尾时那条 steer 会变成
+   * 「没人监听的游离 turn」；等到本标志为真再投就不会有这个问题。
+   */
+  stepSettled: boolean
+  /** 本 view 生命周期内「step 输出已产生」的次数（供外部做去重/触发判断） */
+  stepSettleCount: number
+  /**
+   * 本 step 是否「模型已给出工具调用、但还有工具没跑完」。
+   *
+   * 用途：运行中入队的消息（steer）只应在**确定还有下一个 step** 时投递——
+   * 主进程在 step 结束时 `claimPendingSteer()` 领取，只要有工具调用就必然 `owesWork=true`
+   * 并继续下一个 step；反之（无工具调用）投早了会落在 turn 收尾之后，那条 steer 会另起一个
+   * 没有任何订阅者的 turn（界面会一直转圈）。等工具跑完（awaitingTools=false）再投最稳。
+   */
+  awaitingTools: boolean
   lastError?: string
   /** 运行期非致命提示（如 max_tokens 截断后自动续跑）：与 lastError 分开，不参与"会话失败"判定 */
   notice?: string
@@ -174,6 +195,9 @@ function createView(id: string, label?: string): AgentSessionView {
     lastAssistantContent: '',
     serverSearch: false,
     usageTotal: 0,
+    stepSettled: false,
+    stepSettleCount: 0,
+    awaitingTools: false,
   }
 }
 
@@ -420,6 +444,8 @@ class AgentBridge {
         view.status = ev.payload.status
         // turn 结束（idle）时清理挂起的提问状态（取消/异常路径的兜底）
         if (ev.payload.status === 'idle') view.pendingQuestion = null
+        // 不在运行：step 边界信号失效（避免用陈旧信号投递）
+        if (ev.payload.status !== 'running') view.stepSettled = false
         break
       case 'agent/turn-start':
         view.turn = ev.payload.turn
@@ -427,9 +453,12 @@ class AgentBridge {
         view.lastAssistantContent = ''
         view.searchStatus = null
         view.searchEvents = []
+        view.stepSettled = false
         break
       case 'agent/step-start':
         view.step = ev.payload.step
+        view.stepSettled = false
+        view.awaitingTools = false
         view.steps.push({
           turn: ev.payload.turn,
           step: ev.payload.step,
@@ -492,6 +521,12 @@ class AgentBridge {
         }
         view.currentStream = ''
         if (ev.payload.content) view.lastAssistantContent = ev.payload.content
+        // step 边界信号：模型输出已产生，主进程随后结束本 step 并 claimPendingSteer，
+        // 此刻投递的排队消息正好在下一个 step 边界被领取（见 stepSettled 注释）
+        view.stepSettled = true
+        view.stepSettleCount = (view.stepSettleCount || 0) + 1
+        // 同一条消息里已登记的工具调用：在结果回来前算「工具还没跑完」（见 awaitingTools）
+        view.awaitingTools = (view.steps[view.steps.length - 1]?.toolCalls || []).some((c) => c.status === 'running')
         break
       }
       case 'tool/call': {
@@ -533,6 +568,8 @@ class AgentBridge {
           if (ev.payload.preview) tc.preview = ev.payload.preview
           tc.endTime = Date.now()
         }
+        // 本 step 的工具都跑完了：主进程即将结束 step 并领取 steer（见 awaitingTools 注释）
+        if (s) view.awaitingTools = s.toolCalls.some((c) => c.status === 'running')
         break
       }
       case 'agent/tool-args': {

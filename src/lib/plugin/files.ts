@@ -69,6 +69,14 @@ export interface PluginFilesApi {
   /** 读二进制（base64；图片 / 压缩包等自定义解析用，上限 40MB） */
   readBase64(path: string, options?: { maxBytes?: number }): Promise<{ path: string; base64: string; size: number }>
   /**
+   * 读二进制（**直接给字节**，不经过 base64）。
+   *
+   * 大文件（几十 MB 的 ROM / 模型）用它在手机上快得多：base64 会把体积撑大 1/3，
+   * 而且要在 JS 里编码 + 解码各跑一遍（33MB → 44MB 字符串 → 再解回 33MB，既慢又吃内存）。
+   * 上限与 readBase64 相同（默认 40MB）。
+   */
+  readBytes(path: string, options?: { maxBytes?: number }): Promise<{ path: string; bytes: Uint8Array; size: number }>
+  /**
    * 读表格（.xlsx / .xls / .csv → 每个工作表的表头 + 数据行；上限 32MB / 2 万行 / 20 个工作表）。
    * 界面半边拿不到 SheetJS，读表格请用它，不要自己解析二进制。
    */
@@ -331,6 +339,22 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
         return ipc().readBase64({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
       }
       return platformReadBase64(filePath, options?.maxBytes)
+    },
+
+    async readBytes(filePath, options) {
+      guard()
+      const maxBytes = options?.maxBytes ?? 40 * 1024 * 1024
+      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+        // 桌面：主进程给的仍是 base64（IPC 形状不变），这里就地解成字节
+        const res = await ipc().readBase64({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
+        const b64 = String(res?.base64 ?? '')
+        return { path: String(res?.path ?? filePath), bytes: bytesFromBase64(b64), size: Number(res?.size) || 0 }
+      }
+      // 安卓 / 网页：平台层直接给字节（安卓走本地服务器 fetch，不经过 base64）
+      const bytes = await getPlatform().fs.readBinary(filePath)
+      if (!bytes) throw new Error(`读取失败：${filePath}`)
+      const limited = bytes.length > maxBytes ? bytes.subarray(0, maxBytes) : bytes
+      return { path: filePath, bytes: limited, size: limited.length }
     },
 
     async readSheet(filePath, options) {

@@ -160,6 +160,29 @@ async function readTextOrNull(path: string): Promise<string | null> {
   }
 }
 
+/**
+ * 有上限的并发 map（保持结果顺序）。
+ *
+ * 为什么需要：安卓上每一次目录列举 / 读文件都是一次「JS ↔ 原生」往返（SAF 目录还要问内容提供者），
+ * 串行做十几次就是几百毫秒。并发跑能把这些等待重叠起来；
+ * 上限是为了稳定：不把内容提供者 / 桥一次性打爆（SAF 原生侧本来就是单线程队列）。
+ */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length)
+  let next = 0
+  const width = Math.max(1, Math.min(limit, items.length))
+  await Promise.all(
+    Array.from({ length: width }, async () => {
+      for (;;) {
+        const i = next++
+        if (i >= items.length) return
+        out[i] = await fn(items[i], i)
+      }
+    }),
+  )
+  return out
+}
+
 /** 读一个插件目录的清单并转成 snapshot（清单非法时返回原因） */
 async function snapshotOf(dir: string, relDir: string, id: string): Promise<{ snapshot: PluginSnapshot | null; invalid?: string }> {
   const text = await readTextOrNull(joinPath(dir, PLUGIN_MANIFEST_FILE))
@@ -214,15 +237,40 @@ async function snapshotOf(dir: string, relDir: string, id: string): Promise<{ sn
 }
 
 /** 扫描插件根目录（顶层插件目录 + 一层分类文件夹里的插件） */
-export async function listPlugins(): Promise<{
+export interface PluginListResult {
   plugins: PluginSnapshot[]
   rootDir: string
   customRoot: boolean
   services: string[]
   invalidNamedDirs: string[]
-}> {
+}
+
+/**
+ * 扫描结果缓存（短 TTL）。
+ *
+ * 为什么需要：一次「启用 / 禁用 / 重载插件」会连着问好几遍清单——管理页 findSnapshot、
+ * 渲染层同步 bridge.list()、装载前的 clientBundle()。安卓上每一次扫描都要经 Capacitor 桥、
+ * SAF 目录还要逐个目录问内容提供者，重复扫就是白等（实测「开关插件很慢」主要来自这里）。
+ * 目录内容变化都会调用 invalidatePluginScan()，所以 TTL 只是兜底。
+ */
+const SCAN_TTL_MS = 1500
+let scanCache: { root: string; at: number; data: PluginListResult } | null = null
+
+/** 让下一次 listPlugins() 重新扫（目录 / 启停 / 配置变化时调用） */
+export function invalidatePluginScan(): void {
+  scanCache = null
+}
+
+export async function listPlugins(): Promise<PluginListResult> {
   const rootDir = pluginRootDir()
   const customRoot = !!customRootDir()
+  if (scanCache && scanCache.root === rootDir && Date.now() - scanCache.at < SCAN_TTL_MS) return scanCache.data
+  const data = await scanPlugins(rootDir, customRoot)
+  scanCache = { root: rootDir, at: Date.now(), data }
+  return data
+}
+
+async function scanPlugins(rootDir: string, customRoot: boolean): Promise<PluginListResult> {
   const plugins: PluginSnapshot[] = []
   const invalidNamedDirs: string[] = []
   if (!capabilityMode('fs.pathRead').startsWith('local')) {
@@ -248,28 +296,42 @@ export async function listPlugins(): Promise<{
     else if (invalid) invalidNamedDirs.push(`${relDir}（${invalid}）`)
   }
 
-  let top: any[] = []
-  try {
-    top = await fs.listTree(rootDir, 2)
-  } catch {
-    top = []
+  /** 只列一层目录（读不到按空处理） */
+  const listDir = async (dir: string): Promise<any[]> => {
+    try {
+      const nodes = await fs.listTree(dir, 1)
+      return Array.isArray(nodes) ? nodes : []
+    } catch {
+      return []
+    }
   }
+  const hasManifest = (nodes: any[]) => nodes.some((c) => c?.type === 'file' && baseName(c.path) === PLUGIN_MANIFEST_FILE)
 
-  for (const node of top) {
-    if (node?.type !== 'folder') continue
-    const children: any[] = Array.isArray(node.children) ? node.children : []
-    const hasManifest = children.some((c) => c?.type === 'file' && baseName(c.path) === PLUGIN_MANIFEST_FILE)
-    if (hasManifest) {
+  // ⚠️ 这里以前是 listTree(rootDir, 2)：会把**插件目录内部**也整棵列一遍（retro-emulator 的 core/ src/
+  // standalone/… 十来个子目录），每个目录一次桥调用、SAF 目录还要一次内容提供者查询——手机上
+  // 「开关插件 / 刷新列表很慢」主要就慢在这一步。现在只列一层：有清单的当场认作插件（不再进它内部），
+  // 只有「没有清单」的目录才当分类文件夹再列一层。
+  // 并发（外层 4 / 内层 3）：安卓上每次目录列举都是一次桥往返，串行十几次就是几百毫秒；
+  // 上限压住是为了稳定——SAF 原生侧是单线程队列，一次塞太多只会排队。
+  const top = await listDir(rootDir)
+  const topDirs = top.filter((n) => n?.type === 'folder')
+  await mapLimit(topDirs, 4, async (node) => {
+    const children = await listDir(node.path)
+    if (hasManifest(children)) {
       await considerDir(node.path, dirNameOf(node.path))
-      continue
+      return
     }
-    for (const sub of children) {
-      if (sub?.type !== 'folder') continue
-      await considerDir(sub.path, `${dirNameOf(node.path)}/${dirNameOf(sub.path)}`)
-    }
-  }
+    const subs = children.filter((s) => s?.type === 'folder')
+    await mapLimit(subs, 3, (sub) => considerDir(sub.path, `${dirNameOf(node.path)}/${dirNameOf(sub.path)}`))
+  })
 
   plugins.sort((a, b) => a.id.localeCompare(b.id))
+  // 并发扫描时 invalidNamedDirs 的收集顺序不确定：排序 + 去重，界面提示才是稳定的
+  if (invalidNamedDirs.length > 1) {
+    const uniq = Array.from(new Set(invalidNamedDirs))
+    uniq.sort((a, b) => a.localeCompare(b))
+    invalidNamedDirs.splice(0, invalidNamedDirs.length, ...uniq)
+  }
   // 安卓上 SAF 授权可能已经失效（换过授权文件夹 / 文件夹被移动或删除）：这时底层只会返回空，
   // 用户看到的是「插件全没了」却没有任何原因。明确说一句，别让人以为插件丢了。
   if (!plugins.length && customRoot && (await safRootMissing(rootDir))) {
@@ -364,6 +426,8 @@ export function createLocalPluginHost(): PluginBridgeApi {
     const map = enabledMap()
     map[id] = enabled
     lsSet(LS_ENABLED, JSON.stringify(map))
+    // 启停会改变 snapshot.status，清单要重扫（缓存里那份已经过期）
+    invalidatePluginScan()
     return await findSnapshot(id)
   }
 
@@ -394,6 +458,7 @@ export function createLocalPluginHost(): PluginBridgeApi {
     async reload(id) {
       // 改完界面半边点「重新载入」：装载时间变化 → runtime 会卸载后重新 import 入口
       loadedAt.set(id, Date.now())
+      invalidatePluginScan() // 入口文件可能刚被改过，清单里的 version / 权限也要重读
       return await findSnapshot(id)
     },
 
@@ -403,6 +468,7 @@ export function createLocalPluginHost(): PluginBridgeApi {
       lsSet(LS_ENABLED, JSON.stringify(map))
       lsRemove(LS_CONFIG + id)
       lsRemove(LS_GRANTS + id)
+      invalidatePluginScan()
       // 手机上没有「移到回收站」的概念：目录留给用户自己删（不静默删用户文件）
       return { removed: true, deletedDir: false }
     },
@@ -414,6 +480,7 @@ export function createLocalPluginHost(): PluginBridgeApi {
     async setConfig(id, patch) {
       const next = { ...configOf(id), ...(patch || {}) }
       lsSet(LS_CONFIG + id, JSON.stringify(next))
+      invalidatePluginScan() // snapshot 里带着 config 快照
       return next
     },
 
@@ -462,8 +529,9 @@ export function createLocalPluginHost(): PluginBridgeApi {
 
     clientBundle: (id) => clientBundleOf(id),
 
-    /** 重新扫描（渲染层宿主没有缓存，重新列一遍即可） */
+    /** 重新扫描：强制丢掉缓存再列一遍（用户在管理页点「刷新」） */
     async rescan() {
+      invalidatePluginScan()
       return await listPlugins()
     },
 
@@ -471,22 +539,26 @@ export function createLocalPluginHost(): PluginBridgeApi {
       const picked = await getPlatform().dialog.pickDirectory()
       if (!picked) return { cancelled: true, snapshot: null }
       const snapshot = await installFromDir(picked, options?.replace === true)
+      invalidatePluginScan()
       return { cancelled: false, snapshot }
     },
 
     async setRoot(options) {
       if (options?.path) {
         lsSet(LS_ROOT, options.path)
+        invalidatePluginScan()
         return { cancelled: false, rootDir: options.path }
       }
       const dir = await getPlatform().dialog.pickDirectory()
       if (!dir) return { cancelled: true, rootDir: pluginRootDir() }
       lsSet(LS_ROOT, dir)
+      invalidatePluginScan()
       return { cancelled: false, rootDir: dir }
     },
 
     async resetRoot() {
       lsRemove(LS_ROOT)
+      invalidatePluginScan()
       return { cancelled: false, rootDir: pluginRootDir() }
     },
 

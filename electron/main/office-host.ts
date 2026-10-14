@@ -87,6 +87,13 @@ interface EditorAdapter {
   activeSetter?: string
   /** 声明宿主窗口（另存为 / 消息框的父窗口） */
   setShellWindow?: string
+  /**
+   * 「放映铺满」钩子（PPT 专有）：上游放映/演讲者视图启动时会调它，请求把视图盖到整条
+   * 外壳 chrome 之上（GenOffice 自己的壳用它铺满标签栏，见 apps/shell 的 setSlidesShowBleed）。
+   * 宿主不接这个钩子时它只是空操作，放映就只剩下 HTML5 全屏兜底 —— 而 HTML5 全屏
+   * **不会**把 WebContentsView 撑到整窗，标题栏会一直露在放映画面之上。
+   */
+  showBleedHook?: string
   /** 文件已保存 / 已打开钩子 */
   fileSavedHook?: string
   fileOpenedHook?: string
@@ -359,6 +366,9 @@ const ADAPTERS: Record<EditorType, EditorAdapter> = {
       'configureSlidesRuntime',
       'registerSlidesIpc',
       'setSlidesHostWindowHook',
+      // 放映铺满钩子：缺了它放映时视图撑不满整窗（只剩 HTML5 全屏兜底），
+      // 所以按「必需」处理 —— 上游升级后改名会在这里立刻报出来，而不是静默退化成标题栏露头
+      'setSlidesShowBleed',
       'slidesIsDirty',
       'requestSlidesClose',
     ],
@@ -372,6 +382,7 @@ const ADAPTERS: Record<EditorType, EditorAdapter> = {
     requestSave: (wc) => wc.send('slides:menu', 'save'),
     requestClose: 'requestSlidesClose',
     hostWindowHook: 'setSlidesHostWindowHook',
+    showBleedHook: 'setSlidesShowBleed',
     activeSetter: 'setActiveSlidesWebContents',
     // 实测（genoffice-app://slides/index.html?mode=tab）品牌入口共三处，都是「图标 + Genspark AI」：
     //   · Ribbon 左侧 button.rb-big.ai-entry（rect 16,47，同组还有 AI 美化 / 事实核查 / 配图，保留）
@@ -395,6 +406,13 @@ interface ViewEntry {
   filePath: string
   /** 渲染层占位区矩形（窗口内容区坐标，DIP） */
   bounds?: Rect
+  /**
+   * 该视图正在放映（PPT 放映 / 演讲者视图）。
+   * 为 true 时视图矩形不再取渲染层占位区，而是**铺满宿主窗口整个内容区** ——
+   * 放映画面必须盖住文件窗口自己的标题栏，否则标题栏会一直露在幻灯片上方。
+   * 由上游的放映铺满钩子（setSlidesShowBleed）与 HTML5 全屏事件共同维护。
+   */
+  showFullScreen?: boolean
 }
 
 interface Rect {
@@ -558,6 +576,14 @@ function ensureBundle(type: EditorType): any {
   if (typeof mod[adapter.hostWindowHook] === 'function') {
     mod[adapter.hostWindowHook]((wc: WebContents) => entryOfWebContents(wc)?.hostWindow ?? null)
   }
+  // 放映铺满钩子（PPT）：上游放映/演讲者视图启动与结束时调它，宿主据此把视图撑满整窗。
+  // 必须在 registerIpc **之后**（钩子由 registerSlidesIpc 内部的处理器读取），且幂等：
+  // 上游只保存一个回调引用，重复注册是覆盖。
+  if (adapter.showBleedHook && typeof mod[adapter.showBleedHook] === 'function') {
+    mod[adapter.showBleedHook]((wc: WebContents, on: boolean) => {
+      setShowFullScreen(entryOfWebContents(wc), !!on)
+    })
+  }
   // 活动视图：Word 是 resolver（接函数），Excel / PPT 是直接 setter（接 wc），两者形状不同
   if (adapter.activeResolver && typeof mod[adapter.activeResolver] === 'function') {
     mod[adapter.activeResolver](() => {
@@ -661,10 +687,22 @@ async function simplifyEditorUi(entry: ViewEntry, script: string) {
   }
 }
 
-/** 把视图放在宿主窗口的最上层并占满占位区 */
+/**
+ * 放映铺满矩形：宿主窗口整个内容区（DIP，与渲染层上报的 rect 同一坐标系）。
+ * 窗口正在销毁时 getContentBounds 给 0 尺寸，返回 null 让调用方回落到占位区矩形。
+ * 注意：getContentBounds 直接是 DIP，不能再乘一次缩放 —— 乘了会在大缩放比下溢出窗口。
+ */
+function showBoundsOf(entry: ViewEntry): Rect | null {
+  if (entry.hostWindow.isDestroyed()) return null
+  const { width, height } = entry.hostWindow.getContentBounds()
+  if (width <= 0 || height <= 0) return null
+  return { x: 0, y: 0, width, height }
+}
+
+/** 把视图放在宿主窗口的最上层并占满占位区（放映中则铺满整个内容区） */
 function applyBounds(entry: ViewEntry) {
   if (entry.view.webContents.isDestroyed()) return
-  const b = entry.bounds
+  const b = (entry.showFullScreen ? showBoundsOf(entry) : null) ?? entry.bounds
   if (!b) return
   entry.view.setBounds({
     x: Math.round(b.x),
@@ -672,6 +710,34 @@ function applyBounds(entry: ViewEntry) {
     width: Math.max(0, Math.round(b.width)),
     height: Math.max(0, Math.round(b.height)),
   })
+}
+
+/**
+ * 进入/退出「放映铺满」。
+ *
+ * 为什么需要它：放映开始时渲染层会先请求上游把视图铺满，而这个请求在 AI-KM 里原本是
+ * 空操作（钩子没人接），于是只剩 HTML5 全屏兜底 —— 实测 HTML5 全屏只让**窗口**进全屏，
+ * WebContentsView 的矩形保持在占位区（`y=36` 的标题栏高度），标题栏就一直露在放映画面上方。
+ * 这里接上钩子后，视图矩形直接铺满窗口内容区，标题栏被盖住。
+ *
+ * 顺带说明：渲染层在窗口尺寸变化后仍会上报占位区矩形（office:set-bounds），
+ * 放映中这些上报会被本覆盖忽略；退出放映时再按最新的占位区矩形摆回去。
+ */
+function setShowFullScreen(entry: ViewEntry | null, on: boolean) {
+  if (!entry) return
+  if (entry.showFullScreen === on) {
+    // 重复上报（React strict-mode 重挂载 / 演讲者视图交接）时也要重摆一次：
+    // 窗口可能已经改变尺寸，覆盖矩形要跟着刷新
+    if (on) applyBounds(entry)
+    return
+  }
+  entry.showFullScreen = on
+  applyBounds(entry)
+  if (!on) {
+    // 退出时占位区矩形可能是放映前的旧值（放映期间渲染层只上报过占位区，
+    // 但窗口全屏切换的 resize 上报可能晚于窗口还原）：让渲染层立刻重报一次
+    notifyHost(entry, 'show-ended')
+  }
 }
 
 function showView(entry: ViewEntry) {
@@ -695,11 +761,31 @@ function showView(entry: ViewEntry) {
   entry.view.setVisible(true)
 }
 
+/** 挂过「窗口级兜底」监听的宿主窗口（每个窗口一次，视图开了关、关了开也不重复挂） */
+const trackedWindows = new WeakSet<BrowserWindow>()
+
+/**
+ * 宿主窗口级兜底：窗口尺寸一变就重摆放映中的视图。
+ *
+ * 放映期间渲染层也会上报占位区矩形，但那是**异步**的（要等 DOM resize 回合并到下一帧）；
+ * 窗口从全屏还原时若不重摆，视图会短暂地大于窗口。用 getContentBounds 现算现摆最稳。
+ */
+function trackWindow(hostWindow: BrowserWindow) {
+  if (trackedWindows.has(hostWindow)) return
+  trackedWindows.add(hostWindow)
+  hostWindow.on('resize', () => {
+    for (const entry of state.views.values()) {
+      if (entry.hostWindow === hostWindow && entry.showFullScreen) applyBounds(entry)
+    }
+  })
+}
+
 function attachView(entry: ViewEntry) {
   entry.hostWindow.contentView.addChildView(entry.view)
   entry.view.setVisible(false)
   applyBounds(entry)
   state.views.set(entry.viewId, entry)
+  trackWindow(entry.hostWindow)
 
   // 界面精简：编辑器加载完成后跑一次（如隐藏 Ribbon 上的 Genspark 品牌入口、在 AI 入口补图标）
   const adapterForView = ADAPTERS[entry.type]
@@ -720,13 +806,26 @@ function attachView(entry: ViewEntry) {
     console.warn(`[office:${entry.viewId}] 加载失败 code=${code} ${desc} ${url}`)
   })
 
-  // 编辑器内 HTML5 全屏（如 PPT 放映）→ 跟随窗口全屏
+  // 编辑器内 HTML5 全屏（如 PPT 放映）→ 跟随窗口全屏，并把视图铺满整个内容区。
+  //
+  // 为什么必须自己铺满：实测（Electron 43 + WebContentsView）HTML5 全屏**不会**把视图
+  // 撑到整窗 —— 宿主 DOM 侧那条 36px 标题栏仍露在放映画面上方。窗口全屏后渲染层的
+  // resize 上报也只是「忠实重报占位区」（y=36），所以主进程必须在这两个事件里接管矩形。
+  // 退出时清掉标记，视图回落到渲染层上报的占位区矩形。
   entry.view.webContents.on('enter-html-full-screen', () => {
     if (!entry.hostWindow.isFullScreen()) entry.hostWindow.setFullScreen(true)
+    setShowFullScreen(entry, true)
   })
   entry.view.webContents.on('leave-html-full-screen', () => {
     if (entry.hostWindow.isFullScreen()) entry.hostWindow.setFullScreen(false)
+    setShowFullScreen(entry, false)
   })
+  // 兜底：用户直接从系统全屏退出（Esc / F11 / 系统手势）时 HTML5 全屏事件可能不会来，
+  // 窗口一离开全屏就把放映标记清掉，避免视图一直按「铺满」摆放。
+  const leaveWindowFullScreen = () => {
+    if (entry.showFullScreen) setShowFullScreen(entry, false)
+  }
+  entry.hostWindow.on('leave-full-screen', leaveWindowFullScreen)
   entry.view.webContents.once('render-process-gone', () => {
     console.error(`[office] ${entry.viewId} 渲染进程崩溃`)
     destroyView(entry, false)
@@ -735,6 +834,9 @@ function attachView(entry: ViewEntry) {
 }
 
 function destroyView(entry: ViewEntry, teardown = true) {
+  // 视图没了，放映标记一并清掉：挂在宿主窗口上的 leave-full-screen 兜底监听
+  // 仍持有这个 entry，靠这个标记判断「是否还有事要做」。
+  entry.showFullScreen = false
   if (teardown) {
     const mod = state.bundles.get(entry.type)
     const adapter = ADAPTERS[entry.type]

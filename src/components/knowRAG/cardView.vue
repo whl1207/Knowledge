@@ -135,105 +135,118 @@ const iconOf = (b: any) => (props.onGetFileIcon ? props.onGetFileIcon(fileInfo(b
         </div>
       </div>
 
-      <!-- 卡片详情侧边栏 -->
-      <div v-if="showDetail && selected" class="card-detail-sidebar" @click.stop>
-        <div class="detail-header">
-          <div class="detail-title">
+      <!-- 卡片详情：弹出面板（样式对齐 questionView 的 qb-pick-overlay / qb-pick-dialog） -->
+      <div v-if="showDetail && selected" class="cv-overlay" @mousedown.self="onCloseDetail && onCloseDetail()">
+        <div class="cv-dialog">
+          <div class="cv-head">
             <i class="fa fa-cube"></i>
-            <span>{{ selected.name }}</span>
-          </div>
-          <button class="detail-close" :title="store.locales == 'zh' ? '删除实体' : 'Delete Entity'" @click="onDelete && onDelete(selected)">
-            <i class="fa fa-trash-o"></i>
-          </button>
-          <button class="detail-close" @click="onCloseDetail && onCloseDetail()">
-            <i class="fa fa-times"></i>
-          </button>
-        </div>
-
-        <div class="detail-body scoll">
-          <div class="detail-section">
-            <div class="section-title">
-              <span style="flex:1;">
-                <i class="fa fa-info-circle"></i> {{ store.locales == 'zh' ? "描述" : "Description" }}
-              </span>
-              <div style="cursor: pointer;" @click="onReasonDetail && onReasonDetail()" :disabled="isReasoningDetail">
-                <i class="fa fa-bullseye"></i> {{ store.locales == 'zh' ? '重新推理' : 'Re-reason' }}
-              </div>
-              <div style="cursor: pointer;" @click="editing ? (onSaveDescription && onSaveDescription()) : (onToggleEdit && onToggleEdit(true))" :disabled="isReasoningDetail">
-                <i class="fa" :class="editing ? 'fa-save' : 'fa-edit'"></i>
-                {{ editing ? (store.locales == 'zh' ? '保存' : 'Save') : (store.locales == 'zh' ? '编辑' : 'Edit') }}
-              </div>
-              <div style="cursor: pointer;" @click="onToggleEdit && onToggleEdit(false)" v-if="editing">
-                <i class="fa fa-sign-out"></i>
-                {{ (store.locales == 'zh' ? '退出' : 'Exit') }}
-              </div>
+            <span class="cv-title">{{ selected.name }}</span>
+            <span class="cv-flex"></span>
+            <div class="kt-btn" :title="store.locales == 'zh' ? '删除实体' : 'Delete Entity'" @click="onDelete && onDelete(selected)">
+              <i class="fa fa-trash-o"></i>
             </div>
-            <div class="section-content">
-              <!-- 显示模式 -->
-              <div v-if="!editing" class="description-display">
-                {{ selected.description || (store.locales == 'zh' ? '无描述' : 'No description') }}
-              </div>
-              <!-- 编辑模式 -->
-              <div v-else class="description-edit">
-                <textarea
-                  v-model="selected.description"
-                  :placeholder="store.locales == 'zh' ? '输入描述...' : 'Enter description...'"
-                  style="padding:5px; resize: vertical; overflow: auto; width: calc(100% - 12px); font-size: 10px; border: 1px solid var(--borderColor); border-radius: 4px; background: var(--backgroundColor); color: var(--fontColor);"
-                  rows="8"
-                  @blur="onSaveDescription && onSaveDescription()"
-                ></textarea>
-              </div>
-            </div>
-            <div v-if="isReasoningDetail" style="margin-top: 8px; font-size: 10px; color: #FF9800;">
-              <i class="fa fa-spinner fa-spin"></i> {{ store.locales == 'zh' ? '推理中...' : 'Reasoning...' }}
+            <div class="kt-btn" :title="store.locales == 'zh' ? '关闭' : 'Close'" @click="onCloseDetail && onCloseDetail()">
+              <i class="fa fa-times"></i>
             </div>
           </div>
 
-          <div class="detail-section">
-            <div class="section-title">
-              <i class="fa fa-tag"></i> {{ store.locales == 'zh' ? "元信息" : "Metadata" }}
-            </div>
-            <div class="meta-grid">
-              <div class="meta-item">
-                <span class="meta-label">{{ store.locales == 'zh' ? "层级:" : "Layer:" }}</span>
-                <span class="meta-value">{{ store.locales == 'zh' ? "数据" : "Data" }}</span>
-              </div>
-              <div class="meta-item">
-                <span class="meta-label">ID:</span>
-                <span class="meta-value mono">{{ selected.id }}</span>
-              </div>
-              <div class="meta-item">
-                <span class="meta-label">{{ store.locales == 'zh' ? "关联切片:" : "Associated Blocks:" }}</span>
-                <span class="meta-value">{{ entityCardDetailBlocks.length }} 个</span>
-              </div>
-              <div class="meta-item">
-                <span class="meta-label">{{ store.locales == 'zh' ? "关联文件:" : "Associated Files:" }}</span>
-                <span class="meta-value">{{ selected.associatedFiles?.length || 0 }} 个</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="detail-section" v-if="entityCardDetailBlocks.length > 0">
-            <div class="section-title">
-              <i class="fa fa-file-text-o"></i> {{ store.locales == 'zh' ? "关联切片" : "Associated Blocks" }}
-            </div>
-            <div class="blocks-list">
-              <div
-                v-for="block in entityCardDetailBlocks"
-                :key="block.id"
-                class="detail-block-card"
-                @click="onViewBlock && onViewBlock(block)"
-              >
-                <div class="block-header">
-                  <i :class="iconOf(block)"></i>
-                  <span class="block-name">{{ fileInfo(block).name }}</span>
+          <div class="cv-body scoll">
+            <div class="detail-section">
+              <div class="section-title">
+                <span style="flex:1;">
+                  <i class="fa fa-info-circle"></i> {{ store.locales == 'zh' ? "描述" : "Description" }}
+                </span>
+                <div style="cursor: pointer;" @click="onReasonDetail && onReasonDetail()" :disabled="isReasoningDetail">
+                  <i class="fa fa-bullseye"></i> {{ store.locales == 'zh' ? '重新推理' : 'Re-reason' }}
                 </div>
-                <div class="block-preview">{{ block.preview }}</div>
-                <div class="block-footer">
-                  <span class="block-size">{{ block.A?.length || 0 }} {{ store.locales == 'zh' ? "字符" : "characters" }}</span>
-                  <span class="view-link">{{ store.locales == 'zh' ? "查看详情 →" : "View Details →" }}</span>
+                <div style="cursor: pointer;" @click="editing ? (onSaveDescription && onSaveDescription()) : (onToggleEdit && onToggleEdit(true))" :disabled="isReasoningDetail">
+                  <i class="fa" :class="editing ? 'fa-save' : 'fa-edit'"></i>
+                  {{ editing ? (store.locales == 'zh' ? '保存' : 'Save') : (store.locales == 'zh' ? '编辑' : 'Edit') }}
+                </div>
+                <div style="cursor: pointer;" @click="onToggleEdit && onToggleEdit(false)" v-if="editing">
+                  <i class="fa fa-sign-out"></i>
+                  {{ (store.locales == 'zh' ? '退出' : 'Exit') }}
                 </div>
               </div>
+              <div class="section-content">
+                <!-- 显示模式 -->
+                <div v-if="!editing" class="description-display">
+                  {{ selected.description || (store.locales == 'zh' ? '无描述' : 'No description') }}
+                </div>
+                <!-- 编辑模式 -->
+                <div v-else class="description-edit">
+                  <textarea
+                    v-model="selected.description"
+                    :placeholder="store.locales == 'zh' ? '输入描述...' : 'Enter description...'"
+                    style="padding:5px; resize: vertical; overflow: auto; width: calc(100% - 12px); font-size: 11px; border: 1px solid var(--borderColor); border-radius: 4px; background: var(--backgroundColor); color: var(--fontColor);"
+                    rows="8"
+                    @blur="onSaveDescription && onSaveDescription()"
+                  ></textarea>
+                </div>
+              </div>
+              <div v-if="isReasoningDetail" style="margin-top: 8px; font-size: 10px; color: #FF9800;">
+                <i class="fa fa-spinner fa-spin"></i> {{ store.locales == 'zh' ? '推理中...' : 'Reasoning...' }}
+              </div>
+            </div>
+
+            <div class="detail-section">
+              <div class="section-title">
+                <i class="fa fa-tag"></i> {{ store.locales == 'zh' ? "元信息" : "Metadata" }}
+              </div>
+              <div class="meta-grid">
+                <div class="meta-item">
+                  <span class="meta-label">{{ store.locales == 'zh' ? "层级:" : "Layer:" }}</span>
+                  <span class="meta-value">{{ store.locales == 'zh' ? "数据" : "Data" }}</span>
+                </div>
+                <div class="meta-item">
+                  <span class="meta-label">ID:</span>
+                  <span class="meta-value mono">{{ selected.id }}</span>
+                </div>
+                <div class="meta-item">
+                  <span class="meta-label">{{ store.locales == 'zh' ? "关联切片:" : "Associated Blocks:" }}</span>
+                  <span class="meta-value">{{ entityCardDetailBlocks.length }} 个</span>
+                </div>
+                <div class="meta-item">
+                  <span class="meta-label">{{ store.locales == 'zh' ? "关联文件:" : "Associated Files:" }}</span>
+                  <span class="meta-value">{{ selected.associatedFiles?.length || 0 }} 个</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="detail-section" v-if="entityCardDetailBlocks.length > 0">
+              <div class="section-title">
+                <i class="fa fa-file-text-o"></i> {{ store.locales == 'zh' ? "关联切片" : "Associated Blocks" }}
+              </div>
+              <div class="blocks-list">
+                <div
+                  v-for="block in entityCardDetailBlocks"
+                  :key="block.id"
+                  class="detail-block-card"
+                  @click="onViewBlock && onViewBlock(block)"
+                >
+                  <div class="block-header">
+                    <i :class="iconOf(block)"></i>
+                    <span class="block-name">{{ fileInfo(block).name }}</span>
+                  </div>
+                  <div class="block-preview">{{ block.preview }}</div>
+                  <div class="block-footer">
+                    <span class="block-size">{{ block.A?.length || 0 }} {{ store.locales == 'zh' ? "字符" : "characters" }}</span>
+                    <span class="view-link">{{ store.locales == 'zh' ? "查看详情 →" : "View Details →" }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cv-foot">
+            <span class="cv-note">
+              <i class="fa fa-info-circle"></i>
+              {{ store.locales == 'zh' ? '点击关联切片可查看完整内容' : 'Click a linked block to view its full content' }}
+            </span>
+            <span class="cv-flex"></span>
+            <div class="kt-btn ok" @click="onCloseDetail && onCloseDetail()">
+              <i class="fa fa-check"></i>
+              <span>{{ store.locales == 'zh' ? '关闭' : 'Close' }}</span>
             </div>
           </div>
         </div>
@@ -263,13 +276,26 @@ const iconOf = (b: any) => (props.onGetFileIcon ? props.onGetFileIcon(fileInfo(b
 .reasoning-indicator { display: flex; align-items: center; gap: 6px; color: #FF9800; font-size: 10px; height: 30px; }
 .reasoning-indicator i { animation: cspin 1s linear infinite; }
 @keyframes cspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.card-detail-sidebar { width: 250px; background: var(--backgroundColor); border-left: 1px solid var(--borderColor); display: flex; flex-direction: column; z-index: 100; box-shadow: -2px 0 8px rgba(0, 0, 0, 0.1); animation: slideInRight 0.3s ease; }
-@keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
-.detail-header { display: flex; justify-content: space-between; align-items: center; padding: 2px 5px; border-bottom: 1px solid var(--borderColor); }
-.detail-title { display: flex; align-items: center; gap: 5px; font-size: 14px; font-weight: 500; color: var(--fontColor); flex: 1; }
-.detail-title i { color: #2196F3; }
-.detail-close { background: none; border: none; color: var(--borderColor); cursor: pointer; padding: 4px 8px; border-radius: 4px; width: 25px; }
-.detail-body { flex: 1; overflow-y: auto; padding: 5px; }
+/* ===== 卡片详情弹出面板（对齐 questionView 的 qb-pick-overlay / qb-pick-dialog） =====
+   z-index 取 980：低于父级「切片完整内容」模态框（modal-overlay = 1000），
+   这样在详情里点关联切片时，切片预览能正常盖在详情面板之上 */
+.cv-overlay { position: fixed; inset: 0; z-index: 980; background: rgba(0, 0, 0, .35); display: flex; align-items: center; justify-content: center; }
+.cv-dialog {
+  display: flex; flex-direction: column;
+  width: min(760px, calc(92vw / var(--ui-zoom, 1)));
+  max-height: min(660px, calc(88vh / var(--ui-zoom, 1)));
+  background: var(--backgroundColor); border: 1px solid var(--borderColor); border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden;
+}
+.cv-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--borderColor); font-size: 12px; flex-shrink: 0; }
+.cv-head > i { color: #2196F3; }
+.cv-title { font-weight: 600; color: var(--fontColor); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-flex { flex: 1; }
+.cv-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; overflow: auto; min-height: 0; flex: 1; }
+.cv-foot { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--borderColor); flex-shrink: 0; }
+.cv-foot .kt-btn { padding: 0 12px; }
+.cv-note { font-size: 9px; color: var(--borderColor); }
+.cv-note > i { margin-right: 3px; }
 .detail-section { margin-bottom: 5px; }
 .section-title { font-size: 11px; font-weight: 500; color: #2196F3; margin-bottom: 5px; display: flex; align-items: center; gap: 5px; padding-bottom: 4px; border-bottom: 1px solid var(--borderColor); }
 .section-content { font-size: 10px; color: var(--fontColor); line-height: 1.5; padding: 5px; background: var(--backgroundColor); border-radius: 5px; }

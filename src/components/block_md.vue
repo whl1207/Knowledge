@@ -1,12 +1,8 @@
 <script setup lang="ts">
   import { ref,watch,onMounted,onBeforeUnmount,nextTick} from 'vue'
   import { ElMessage } from 'element-plus'
-  import MarkdownIt from 'markdown-it'
-  import mathjax3 from 'markdown-it-mathjax3'
-  import mark from 'markdown-it-mark'
-  import hljs from 'highlight.js'
   import 'highlight.js/styles/nnfx-dark.min.css'
-  import { hashContent, renderMermaidSvgLenient, getCachedSvgLenient, ensureMermaidInit } from '@/lib/markdown/mermaid'
+  import { renderMermaidSvgLenient, getCachedSvgLenient, ensureMermaidInit } from '@/lib/markdown/mermaid'
   import MermaidViewer from '@/components/MermaidViewer.vue'
   import { Transformer } from 'markmap-lib'
   import * as markmap from 'markmap-view'
@@ -14,6 +10,8 @@
   import 'katex/dist/katex.min.css'
   import { liftMindMapBlocks, MARKMAP_HTML_OPTIONS } from '@/lib/knowFile/mindMapMath'
   import { preprocessMath } from '@/lib/markdown/render'
+  // 共享的卡片渲染器（全应用 1 个 markdown-it 实例 + 内容级 HTML 缓存；见该模块头注释）
+  import { cardMd as md, renderCardHtml } from '@/lib/markdown/cardMd'
   import {usestore} from '@/store'
   const store = usestore()
   const props = defineProps({
@@ -39,39 +37,9 @@
   let pattern = ref(/[#*-]/)
   ensureMermaidInit()
 
-  // Mermaid 源文本规范化已迁移至 '@/lib/markdown/mermaid-normalize'（顶部 import 的 normalizeMermaidSource）
-
-  const md: MarkdownIt = new MarkdownIt({
-    html: true,
-    linkify: true,
-    highlight: function (str:any, lang:any) {
-      if (lang && hljs.getLanguage(lang)) {
-        try {
-          return '<pre class="hljs scoll"><code>' +
-            hljs.highlight(str,{language: lang, ignoreIllegals: true }).value +
-            '</code></pre>';
-        } catch (__) {}
-      }
-      return '<pre class="hljs"><code>' + md.utils.escapeHtml(str) + '</code></pre>';
-    }
-  }).use(mathjax3)
-  .use(mark)
-
-  const defaultFence = md.renderer.rules.fence || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
-  md.renderer.rules.fence = (tokens, idx, options, env, self) => {
-    const token = tokens[idx]
-    const info = token.info ? token.info.trim() : ''
-    const langName = info ? info.split(/\s+/g)[0] : ''
-
-    if (langName === 'mermaid') {
-      const content = token.content.trim()
-      const h = hashContent(content)
-      const escaped = md.utils.escapeHtml(content)
-      return `<div class="mermaid-wrapper" data-mermaid-hash="${h}"><div class="mermaid-src" style="display:none">${escaped}</div></div>`
-    }
-
-    return defaultFence(tokens, idx, options, env, self)
-  }
+  // markdown-it 实例与 mermaid 代码块占位规则已上移到 @/lib/markdown/cardMd（模块级共享）：
+  // 原来每个卡片实例都 new MarkdownIt().use(mathjax3)，切片页 40+ 张卡片就要建 40+ 份 MathJax 文档，
+  // 是「进入切片页很慢」的主因。渲染结果还按内容缓存，反复进出同一批切片几乎零成本。
 
   const renderMermaidDiagrams = async (root?: HTMLElement | null) => {
     const container = root || mddiv.value
@@ -133,7 +101,8 @@
     if(props.content=="") return
     if(ifmd.value){
       map=null
-      prep.value = md.render(props.content!)
+      // renderCardHtml：共享实例 + 内容级缓存（同一张卡片反复渲染不再重复解析 markdown/公式）
+      prep.value = renderCardHtml(props.content!)
     }
     if(ifmind.value){
       markmind()

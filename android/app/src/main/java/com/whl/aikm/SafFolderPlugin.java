@@ -25,7 +25,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -162,6 +165,72 @@ public class SafFolderPlugin extends Plugin {
         return walk(t.root, t.sub);
     }
 
+    // ---------------------------------------------------------------- 目录列表缓存
+
+    /**
+     * 目录列表缓存：`dir.getUri()` → （子项名 → DocumentFile）。
+     *
+     * 为什么需要：`DocumentFile.findFile(name)` 内部是「先向内容提供者查询这一层的**全部**子项，
+     * 再按名字挑一个」——目录里躺着几百个 ROM 时，一次查询就是几十到上百毫秒；而按路径读一个文件
+     * 要逐段 findFile，于是「列目录 → 逐个读卡带（封面 / 存档）」会把同一层目录反复查很多遍。
+     * 这就是安卓上读 ROM / 读封面慢的第二个大头（第一个是经桥传 base64，已在渲染层解决）。
+     *
+     * 语义保持与「每次都查」一致：TTL 很短（2 秒），并且**任何写操作都会清空缓存**；
+     * 缓存只放 DocumentFile（轻量句柄），最多 32 个目录。
+     *
+     * 线程：所有文件 IO 都在单线程 executor 上执行，缓存不需要额外同步。
+     */
+    private static final long DIR_CACHE_TTL_MS = 2000;
+    private static final int DIR_CACHE_MAX = 32;
+    private final Map<String, CachedDir> dirCache = new HashMap<>();
+
+    private static final class CachedDir {
+        final Map<String, DocumentFile> byName;
+        final long at;
+
+        CachedDir(Map<String, DocumentFile> byName, long at) {
+            this.byName = byName;
+            this.at = at;
+        }
+    }
+
+    /** 列一层目录（带缓存）：提供者异常时按空目录处理 */
+    private Map<String, DocumentFile> childrenOf(DocumentFile dir) {
+        if (dir == null) return Collections.emptyMap();
+        String key;
+        try {
+            key = dir.getUri().toString();
+        } catch (Exception e) {
+            return Collections.emptyMap();
+        }
+        long now = System.currentTimeMillis();
+        CachedDir hit = dirCache.get(key);
+        if (hit != null && now - hit.at <= DIR_CACHE_TTL_MS) return hit.byName;
+        Map<String, DocumentFile> byName = new HashMap<>();
+        try {
+            for (DocumentFile f : dir.listFiles()) {
+                String n = f.getName();
+                if (n != null && !n.isEmpty()) byName.put(n, f);
+            }
+        } catch (Exception ignored) {
+            // 列不出来：当空目录（上层会按「不存在」处理，不会假装读到东西）
+        }
+        if (dirCache.size() >= DIR_CACHE_MAX) dirCache.clear();
+        dirCache.put(key, new CachedDir(byName, now));
+        return byName;
+    }
+
+    /** 取子项（走缓存，替代 DocumentFile.findFile 的全量查询） */
+    private DocumentFile childOf(DocumentFile dir, String name) {
+        if (dir == null || name == null || name.isEmpty()) return null;
+        return childrenOf(dir).get(name);
+    }
+
+    /** 任何写操作后都要清空（新建 / 删除 / 改名 / 复制都会让目录列表变化） */
+    private void invalidateDirCache() {
+        dirCache.clear();
+    }
+
     /** 从某个已定位目录往下走（每段都不允许 ..） */
     private DocumentFile walk(DocumentFile from, String rel) {
         if (from == null) return null;
@@ -171,7 +240,7 @@ public class SafFolderPlugin extends Plugin {
             if (seg.isEmpty() || seg.equals(".")) continue;
             if (seg.equals("..")) return null;
             if (cur == null || !cur.isDirectory()) return null;
-            cur = cur.findFile(seg);
+            cur = childOf(cur, seg);
             if (cur == null) return null;
         }
         return cur;
@@ -193,8 +262,11 @@ public class SafFolderPlugin extends Plugin {
         for (String seg : sub.split("/")) {
             if (seg.isEmpty() || seg.equals(".")) continue;
             if (seg.equals("..") || !cur.isDirectory()) return null;
-            DocumentFile next = cur.findFile(seg);
-            if (next == null) next = cur.createDirectory(seg);
+            DocumentFile next = childOf(cur, seg);
+            if (next == null) {
+                next = cur.createDirectory(seg);
+                invalidateDirCache(); // 刚建了目录：这一层的列表变了
+            }
             if (next == null) return null;
             cur = next;
         }
@@ -312,6 +384,7 @@ public class SafFolderPlugin extends Plugin {
     @PluginMethod
     public void clear(PluginCall call) {
         prefs().edit().remove(KEY_URI).remove(KEY_NAME).remove(KEY_ROOTS).remove(KEY_LAST).apply();
+        invalidateDirCache();
         call.resolve();
     }
 
@@ -348,6 +421,7 @@ public class SafFolderPlugin extends Plugin {
         }
         DocumentFile root = DocumentFile.fromTreeUri(getContext(), uri);
         String name = root != null && root.getName() != null ? root.getName() : "选择的文件夹";
+        invalidateDirCache(); // 换了 / 新增了授权根：旧的目录缓存一律作废
         // 多授权根：新增 / 更新这一条，**不覆盖**别的文件夹的授权。
         // 旧版只留一份，在别处再选一个文件夹就会把这里顶掉（插件目录因此读空）。
         JSONObject map = rootsMap();
@@ -358,8 +432,7 @@ public class SafFolderPlugin extends Plugin {
         }
         prefs().edit()
                 .putString(KEY_ROOTS, map.toString())
-                .putString(KEY_LAST, name)
-                // 旧版单根的两个键跟着「最近一次」写：万一退回旧版本，最近选的那个仍可用
+                .putString(KEY_LAST, name)                // 旧版单根的两个键跟着「最近一次」写：万一退回旧版本，最近选的那个仍可用
                 .putString(KEY_URI, uri.toString())
                 .putString(KEY_NAME, name)
                 .apply();
@@ -429,7 +502,9 @@ public class SafFolderPlugin extends Plugin {
             DocumentFile dir = resolve(path);
             JSArray files = new JSArray();
             if (dir != null && dir.isDirectory()) {
-                for (DocumentFile f : dir.listFiles()) files.put(entryOf(f));
+                // 走 childrenOf：顺手把这一层的子项填进缓存 —— 「列目录 → 逐个读文件（封面 / 存档 / 卡带）」
+                // 是最常见的用法，缓存命中后每个文件都不再重复查询这一层
+                for (DocumentFile f : childrenOf(dir).values()) files.put(entryOf(f));
             }
             JSObject res = new JSObject();
             res.put("files", files);
@@ -488,17 +563,20 @@ public class SafFolderPlugin extends Plugin {
                 }
                 try (OutputStream out = getContext().getContentResolver().openOutputStream(target.getUri(), "wt")) {
                     if (out == null) {
+                        invalidateDirCache(); // 文件可能刚被创建出来：目录列表已经变了
                         call.reject("无法写入文件");
                         return;
                     }
                     out.write(bytes);
                     out.flush();
                 }
+                invalidateDirCache(); // 写完清缓存：紧接着按路径读回来时才不会撞到「创建前」那份列表
                 JSObject res = new JSObject();
                 res.put("path", path);
                 res.put("size", bytes.length);
                 call.resolve(res);
             } catch (Exception e) {
+                invalidateDirCache();
                 call.reject("写入失败: " + e.getMessage());
             }
         });
@@ -522,6 +600,7 @@ public class SafFolderPlugin extends Plugin {
                 call.reject("创建目录失败: " + e.getMessage());
                 return;
             }
+            invalidateDirCache(); // 新建目录后目录列表变了
             JSObject res = new JSObject();
             res.put("path", path);
             call.resolve(res);
@@ -549,11 +628,13 @@ public class SafFolderPlugin extends Plugin {
                 }
                 // 递归删除：目录必须先删子项，否则 DocumentFile.delete() 会失败
                 if (deleteTree(f)) {
+                    invalidateDirCache(); // 删掉了东西：目录列表变了
                     call.resolve(new JSObject());
                 } else {
                     call.reject("删除失败: " + path);
                 }
             } catch (Exception e) {
+                invalidateDirCache();
                 call.reject("删除失败: " + e.getMessage());
             }
         });
@@ -583,6 +664,7 @@ public class SafFolderPlugin extends Plugin {
                 DocumentFile srcParent = src.getParentFile();
                 boolean sameParent = srcParent != null && srcParent.getUri().equals(destParent.getUri());
                 if (sameParent && src.renameTo(name)) {
+                    invalidateDirCache(); // 改名 / 移动都会让目录列表变化
                     JSObject res = new JSObject();
                     res.put("path", to);
                     call.resolve(res);
@@ -591,17 +673,21 @@ public class SafFolderPlugin extends Plugin {
                 // 跨目录移动：SAF 没有直接移动 API → 复制到目标后删除源（覆盖同名目标文件）
                 DocumentFile target = copyInto(src, destParent, name);
                 if (target == null) {
+                    invalidateDirCache();
                     call.reject("移动到目标失败: " + to);
                     return;
                 }
                 if (!deleteTree(src)) {
+                    invalidateDirCache();
                     call.reject("源删除失败: " + from);
                     return;
                 }
+                invalidateDirCache();
                 JSObject res = new JSObject();
                 res.put("path", to);
                 call.resolve(res);
             } catch (Exception e) {
+                invalidateDirCache();
                 call.reject("重命名失败: " + e.getMessage());
             }
         });
@@ -627,9 +713,11 @@ public class SafFolderPlugin extends Plugin {
                 }
                 if (src.isDirectory()) {
                     if (copyInto(src, destParent, name) == null) {
+                        invalidateDirCache();
                         call.reject("复制目录失败: " + to);
                         return;
                     }
+                    invalidateDirCache(); // 复制完成：目标那一层多了东西
                     JSObject res = new JSObject();
                     res.put("path", to);
                     call.resolve(res);
@@ -653,12 +741,14 @@ public class SafFolderPlugin extends Plugin {
                 }
                 try (OutputStream out = getContext().getContentResolver().openOutputStream(target.getUri(), "wt")) {
                     if (out == null) {
+                        invalidateDirCache();
                         call.reject("无法写入目标文件");
                         return;
                     }
                     out.write(bytes);
                     out.flush();
                 }
+                invalidateDirCache(); // 目标文件写好了：目录列表变了
                 JSObject res = new JSObject();
                 res.put("path", to);
                 call.resolve(res);

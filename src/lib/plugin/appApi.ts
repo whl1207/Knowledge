@@ -2,10 +2,13 @@
  * appApi.ts — 渲染层「应用信息服务」（插件上下文里的 `ctx.app`）
  *
  * 只读暴露宿主自己的配置面，让插件能"选一个预设智能体""看看当前模型"而不用自己解析
- * localStorage。**不给写接口**：插件要改软件配置请引导用户去设置页（避免两个来源写同一份状态）。
+ * localStorage。**基本不给写接口**（插件要改软件配置请引导用户去设置页），
+ * 唯一的例外是 `setChromeHidden`：插件面板要全屏时必须能让宿主把外壳收起来，
+ * 否则只能靠 `position:fixed` 去"盖住"顶栏——安卓 WebView 上不稳定（见 panelChrome.ts）。
  */
 
 import { usestore } from '@/store'
+import { panelChromeHidden, setPanelChromeHidden } from './panelChrome'
 
 export interface PluginAgentPresetInfo {
   id: string
@@ -23,6 +26,13 @@ export interface PluginAppApi {
   info(): { name: string; version: string; language: string }
   /** 预设智能体清单（设置 → 智能体 → 预设，含内置预设） */
   agentPresets(): PluginAgentPresetInfo[]
+  /**
+   * 请求隐藏 / 恢复宿主外壳（顶栏 + 左侧导航 + 底部导航）：插件面板进入"全屏 / 沉浸"模式时用。
+   * 宿主会在切换主面板或卸载插件时自动恢复，插件也应在自己退出全屏时传 false。
+   */
+  setChromeHidden(hidden: boolean): void
+  /** 当前宿主外壳是否处于隐藏状态（供插件自查） */
+  chromeHidden(): boolean
 }
 
 function pickString(source: Record<string, unknown>, keys: string[]): string {
@@ -69,6 +79,14 @@ export function createPluginAppApi(): PluginAppApi {
           tools: tools.length ? tools : capabilities,
         }
       })
+    },
+
+    setChromeHidden(hidden) {
+      setPanelChromeHidden(hidden === true)
+    },
+
+    chromeHidden() {
+      return panelChromeHidden.value === true
     },
   }
 }

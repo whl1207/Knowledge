@@ -3,8 +3,8 @@ import { ref, computed, reactive, watch, onMounted, nextTick } from 'vue'
 import block_md from '@/components/block_md.vue'
 import * as XLSX from 'xlsx'
 import {usestore} from '@/store'
-import { runStrategy, getEnabledStrategies, getStrategy } from '@/shared/graphrag/strategy'
-import type { AgentStep } from '@/shared/graphrag/strategy'
+import { runStrategy, runStrategyWith, getEnabledStrategies, getStrategy } from '@/shared/graphrag/strategy'
+import type { AgentStep, StrategyDef } from '@/shared/graphrag/strategy'
 import { computeBM25Score } from '@/shared/graphrag/search'
 import { INGESTION_PRIMITIVES, prewarmEntityVectors, entityVectorCacheStats } from '@/shared/graphrag/primitives'
 import type { RetrievalContext, IngestionContext } from '@/shared/graphrag/primitives'
@@ -96,7 +96,16 @@ interface AgentTrace {
 interface SavedTestData {
   savedAt: string
   /** 测试页设置（复现同一批结果用） */
-  settings: { searchNum: number; repeat: number; hitMode: 'slice' | 'text' | 'llm'; matchMode: 'precise' | 'fuzzy' }
+  settings: {
+    searchNum: number
+    repeat: number
+    hitMode: 'slice' | 'text' | 'llm'
+    matchMode: 'precise' | 'fuzzy'
+    /** Hit@K 曲线 K 上限（0=跟随切片数量） */
+    hitKMax?: number
+    /** 消融实验配置（策略参数变体）：随 .kb 保存，用于复现实验与解析变体标签 */
+    ablation?: any[]
+  }
   /** 每题最新一次检索结果 */
   testResults: TestResult[]
   /** 位次分析（含智能路由的检索过程轨迹） */
@@ -147,8 +156,14 @@ interface TestResult {  question: string
   }>
   avgScore: number
   timestamp: string
-  /** 本次检索/召回耗时（毫秒） */
+  /** 本次检索/召回耗时（毫秒，墙钟）：含本次实际发生的嵌入与对话模型调用 */
   recallTimeMs?: number
+  /** 耗时拆分（本地计算 / 嵌入 / 对话模型 + 嵌入缓存命中率）：见 RetrievalTiming */
+  timing?: RetrievalTiming
+  /** Hit@K 用：关联切片/参考答案在完整排名池里的最前位次（0=池内未命中；大模型判定=模型给出的位次） */
+  hitRank?: number
+  /** Hit@K 的分母基准：本次考察的排名池深度（深度不足 K 的题不计入该 K 的分母） */
+  rankPoolSize?: number
   /** 本问题的关联切片判定基准（来源切片/参考切片，随 testCases.refs 行对齐传入） */
   ref?: TestCaseRef
   /** Agentic（智能路由）：本次检索的工具调用过程（其它策略为 undefined） */
@@ -190,8 +205,13 @@ interface RankAnalysisResult {
     hitRate: number
   }>
   timestamp: string
-  /** 本次召回耗时（毫秒） */
+  /** 本次召回耗时（毫秒，墙钟） */
   timeMs?: number
+  /** 耗时拆分（本地计算 / 嵌入 / 对话模型 + 嵌入缓存命中率）：见 RetrievalTiming */
+  timing?: RetrievalTiming
+  /** Hit@K 用（随 .kb 保存）：完整排名池里的最前命中位次与池深度 */
+  hitRank?: number
+  rankPoolSize?: number
   /** Agentic（智能路由）：本次检索的工具调用过程（供批量面板「检索过程」回看） */
   agent?: AgentTrace
   /** 大模型判定结果（仅大模型判定模式：命中与否、最前位次与理由） */
@@ -217,6 +237,8 @@ const test = reactive({
   searchNum: 5 as any,
   /** 「批量测试所有策略」的重复次数：同批问题重复 N 轮，用于报告各指标均值±标准差（1=不重复） */
   repeat: 1 as any,
+  /** Hit@K 曲线的 K 上限：0=跟随切片数量（默认）；1~100 可显式指定（画更深的召回曲线用） */
+  hitKMax: 0 as any,
   isRunning: false,
   progress: 0,
   currentAlgorithm: 'similarity' as SearchAlgorithm,
@@ -382,6 +404,508 @@ watch(algorithmOptions, (opts) => {
     test.currentAlgorithm = opts[0].value
   }
 }, { immediate: true })
+
+// ==================== 消融实验：策略参数变体 ====================
+// 一个「变体」= 基础策略 + 参数覆盖（步骤参数 / 全局检索参数 / 策略级开关）。
+// 同一策略可以配置多组（复制变体 → 改一个参数），批量测试「全部策略」时逐个变体跑同一批问题，
+// 结果在对比表 / Hit@K 曲线 / 导出里各占一列（或一行），从而看清单个参数的边际贡献。
+// 变体不改动全局策略注册表：运行时用 runStrategyWith(变体 def) 直接执行。
+interface AblationRun {
+  /** 变体唯一 id（创建时生成；复制变体会生成新 id）：结果归属与保存/恢复用 */
+  id: string
+  /** 基础策略 id（来自策略注册表） */
+  strategyId: string
+  /** 自定义标签；留空则按「策略名 · 覆盖参数摘要」自动生成（摘要用短键，便于画图图例） */
+  label?: string
+  enabled: boolean
+  /** 该变体检索的切片数 K（留空=跟随面板「切片数量」）。它同时也是该变体 Hit@K 曲线的 K 上限 */
+  searchNum?: number
+  /** 全局检索参数覆盖（写进 ctx.config：BM25 / 增强权重 / 实体链接 LLM 兜底等） */
+  config?: {
+    summaryWeight?: number
+    bm25Enabled?: boolean
+    bm25Weight?: number
+    entityLinkLlm?: boolean
+    agentToolTopN?: number
+    agentSubQueryWeight?: number
+  }
+  /** 步骤参数覆盖：键 = `${原语}#${第几次出现}`（如 dense_score#0），值 = 该步骤的参数补丁 */
+  stepParams?: Record<string, Record<string, any>>
+  /** 策略级字段覆盖（agentic：maxRounds / agentTools / agentFallback / agentToolTopN / agentSubQueryWeight；
+   *  hybrid：channels / channelTopN / rerank 等） */
+  defPatch?: Record<string, any>
+}
+
+/** 由消融配置构建出的可执行变体 */
+interface AblationVariant {
+  /** 变体 id（=`${基础策略id}~${变体id}`）：作为结果里的 algorithm/strategyId，统计与导出都按它分组 */
+  id: string
+  runId: string
+  strategyId: string
+  label: string
+  searchNum?: number
+  config?: AblationRun['config']
+  def: StrategyDef
+}
+
+const ablation = reactive({ runs: [] as AblationRun[] })
+const ABLATION_LS_KEY = 'kb_test_ablation_v1'
+let _ablationSeq = 0
+const newAblationId = () => `v${Date.now().toString(36)}${(_ablationSeq++).toString(36)}`
+
+/** 消融组参数弹出面板：当前正在编辑的组 id（''=未选中）。表格行内只显示参数摘要，避免列宽被控件撑坏 */
+const ablationEditRunId = ref('')
+const ablationEditRun = computed<AblationRun | null>(() =>
+  ablation.runs.find(r => r.id === ablationEditRunId.value) || null)
+/** 策略配置面板（消融组列表 + 参数 + 将执行清单）：开关与关闭 */
+const configPanelOpen = ref(false)
+const openConfigPanel = (run?: AblationRun) => {
+  if (run) ablationEditRunId.value = run.id
+  else if (!ablationEditRunId.value && ablation.runs.length) ablationEditRunId.value = ablation.runs[0].id
+  configPanelOpen.value = true
+}
+const closeConfigPanel = () => { configPanelOpen.value = false }
+/** 配对显著性检验面板（内容较宽，改为弹出面板 + 工具栏按钮） */
+const sigPanelOpen = ref(false)
+
+/** 参数短名（自动标签用；保持 ASCII 便于直接作为图表图例） */
+const ABLATION_KEY_ABBR: Record<string, string> = {
+  summaryWeight: 'sw', weight: 'fw', boostWeight: 'bw', minBaseScore: 'minBase',
+  hops: 'hops', maxPerHop: 'maxPerHop', maxRounds: 'rounds', agentToolTopN: 'toolTopN',
+  agentSubQueryWeight: 'subQ', bm25Weight: 'bm25w', bm25Enabled: 'bm25', entityLinkLlm: 'entLLM',
+  agentFallback: 'fallback', agentWarmStart: 'warm', topK: 'topK', metric: 'rerank',
+  dense: 'dense', entity: 'ent', file: 'file', community: 'comm', graph: 'graph',
+}
+const abbrOf = (k: string): string => ABLATION_KEY_ABBR[k] || k
+const fmtParamVal = (v: any): string =>
+  typeof v === 'boolean' ? (v ? 'on' : 'off') : (typeof v === 'number' ? String(Math.round(v * 1000) / 1000) : String(v))
+
+/** 变体显示标签：用户填了用用户的，否则「策略名 · 覆盖参数摘要」 */
+const ablationLabel = (run: AblationRun, base: StrategyDef): string => {
+  if (run.label && run.label.trim()) return run.label.trim()
+  const ovr = ablationOverrideText(run)
+  return ovr ? `${base.label} · ${ovr}` : base.label
+}
+
+/** 参数覆盖摘要（行内展示 / 自动标签共用）：如「sw=0.3 · bw=2 · K=10」，短键便于直接当图表图例 */
+const ablationOverrideText = (run: AblationRun): string => {
+  const parts: string[] = []
+  if (run.searchNum) parts.push(`K=${run.searchNum}`)
+  for (const [k, v] of Object.entries(run.config || {})) if (v !== undefined) parts.push(`${abbrOf(k)}=${fmtParamVal(v)}`)
+  for (const patch of Object.values(run.stepParams || {})) {
+    for (const [k, v] of Object.entries(patch || {})) if (v !== undefined) parts.push(`${abbrOf(k)}=${fmtParamVal(v)}`)
+  }
+  const dp: any = run.defPatch || {}
+  for (const k of ['maxRounds', 'agentToolTopN', 'agentSubQueryWeight', 'agentWarmStart', 'agentFallback']) {
+    if (dp[k] !== undefined) parts.push(`${abbrOf(k)}=${fmtParamVal(dp[k])}`)
+  }
+  if (dp.channels) parts.push('ch=' + Object.entries(dp.channels).filter(([, on]) => on).map(([c]) => abbrOf(c)).join('+'))
+  if (dp.agentTools) parts.push('tools=' + Object.entries(dp.agentTools).filter(([, on]) => on).map(([t]) => abbrOf(t)).join('+'))
+  if (dp.rerank?.metric) parts.push('rerank=' + dp.rerank.metric)
+  if (dp.rerank?.topK !== undefined) parts.push(`topK=${fmtParamVal(dp.rerank.topK)}`)
+  return parts.join(' · ')
+}
+
+/** 仅保留已定义的覆盖项（避免用 undefined 覆盖掉配置里的有效值） */
+const definedOnly = (o?: Record<string, any>): Record<string, any> => {
+  const out: Record<string, any> = {}
+  for (const [k, v] of Object.entries(o || {})) if (v !== undefined && v !== null) out[k] = v
+  return out
+}
+
+/** 由消融配置构建可执行变体（步骤参数与通道/工具开关「深合并」到基础策略定义上） */
+const ablationVariants = computed<AblationVariant[]>(() => {
+  // 依赖父级策略版本：策略改名/停用/改步骤后（注册表在模块级），变体定义与标签需要跟着刷新
+  void props.strategyVersion
+  const out: AblationVariant[] = []
+  for (const run of ablation.runs) {
+    const base = getStrategy(run.strategyId)
+    if (!base) continue
+    const occ = new Map<string, number>()
+    const steps = (base.steps || []).map((st) => {
+      const n = occ.get(st.primitive) || 0
+      occ.set(st.primitive, n + 1)
+      const patch = run.stepParams?.[`${st.primitive}#${n}`]
+      return (patch && Object.keys(patch).length)
+        ? { ...st, params: { ...(st.params || {}), ...definedOnly(patch) } }
+        : { ...st }
+    })
+    const dp: any = definedOnly(run.defPatch)
+    const def: StrategyDef = {
+      ...base,
+      ...dp,
+      id: `${base.id}~${run.id}`,
+      label: ablationLabel(run, base),
+      steps,
+      // 开关类字段深合并：不能整体替换，否则会丢掉基础策略其它通道/工具的既有配置
+      agentTools: dp.agentTools ? { ...(base.agentTools || {}), ...dp.agentTools } : base.agentTools,
+      channels: dp.channels ? { ...(base.channels || {}), ...dp.channels } : base.channels,
+      channelTopN: dp.channelTopN ? { ...(base.channelTopN || {}), ...dp.channelTopN } : base.channelTopN,
+      rerank: dp.rerank ? { ...(base.rerank || {}), ...dp.rerank } : base.rerank,
+      builtin: true,
+      enabled: true,
+    }
+    out.push({
+      id: def.id, runId: run.id, strategyId: base.id,
+      label: def.label, searchNum: run.searchNum,
+      config: Object.keys(definedOnly(run.config)).length ? definedOnly(run.config) as any : undefined,
+      def,
+    })
+  }
+  return out
+})
+const ablationVariantMap = computed(() => new Map(ablationVariants.value.map(v => [v.id, v])))
+
+/** 启用的消融变体（批量测试实际执行的配置）：为空则退回「每个启用策略跑一次」的默认行为 */
+const ablationEnabledVariants = computed(() => {
+  const baseIds = new Set(getEnabledStrategies().map(s => s.id))
+  const enabled = new Set(ablation.runs.filter(r => r.enabled).map(r => r.id))
+  return ablationVariants.value.filter(v => enabled.has(v.runId) && baseIds.has(v.strategyId))
+})
+
+/**
+ * 「批量测试所有策略」实际会执行的清单（策略配置面板里预览用，也是运行循环的唯一来源，
+ * 保证预览与实际执行完全一致）：有启用的消融组 → 逐组执行；否则 → 每个启用策略按默认参数跑一次。
+ */
+const batchRunPreview = computed<Array<{ id: string; runId?: string; label: string; searchNum?: number; kind: 'variant' | 'strategy' }>>(() =>
+  ablationEnabledVariants.value.length
+    ? ablationEnabledVariants.value.map(v => ({ id: v.id, runId: v.runId, label: v.label, searchNum: v.searchNum, kind: 'variant' as const }))
+    : algorithmOptions.value.map(o => ({ id: o.value, runId: undefined, label: o.label, searchNum: undefined, kind: 'strategy' as const })))
+
+/** 组的显示名：自定义标签优先，否则用基础策略名（参数摘要另起一行展示） */
+const ablationBaseLabel = (run: AblationRun): string => {
+  const custom = (run.label || '').trim()
+  if (custom) return custom
+  const base = ablationBaseDef(run)
+  return base ? base.label : run.strategyId
+}
+
+/** 算法 id → 策略定义：变体 id 走变体表，普通 id 走注册表 */
+const defOf = (algo: string): StrategyDef | undefined => ablationVariantMap.value.get(algo)?.def || getStrategy(algo)
+/** 算法 id → 策略类型（判断是否智能路由等） */
+const kindOf = (algo: string): string | undefined => defOf(algo)?.kind
+/** 算法 id → 展示标签（变体优先；未注册变体（如恢复的旧结果）退化为 id） */
+const labelOf = (algo: string): string =>
+  ablationVariantMap.value.get(algo)?.label || algorithmOptions.value.find(o => o.value === algo)?.label || algo
+
+/** 变体的「机器可读参数摘要」（导出/复现实验用）：只列覆盖项，如 "searchNum=10; dense_score#0.summaryWeight=0.3" */
+const variantParamSummary = (algo: string): string => {
+  const v = ablationVariantMap.value.get(algo)
+  const run = v ? ablation.runs.find(r => r.id === v.runId) : undefined
+  if (!run) return ''
+  const parts: string[] = []
+  if (run.searchNum) parts.push(`searchNum=${run.searchNum}`)
+  for (const [k, val] of Object.entries(run.config || {})) if (val !== undefined) parts.push(`config.${k}=${fmtParamVal(val)}`)
+  for (const [stepKey, patch] of Object.entries(run.stepParams || {})) {
+    for (const [k, val] of Object.entries(patch || {})) if (val !== undefined) parts.push(`${stepKey}.${k}=${fmtParamVal(val)}`)
+  }
+  for (const [k, val] of Object.entries(run.defPatch || {})) {
+    if (val === undefined) continue
+    parts.push(typeof val === 'object' ? `${k}=${JSON.stringify(val)}` : `${k}=${fmtParamVal(val)}`)
+  }
+  return parts.join('; ')
+}
+
+/** 变体面板：基础策略定义（决定展示哪些参数、以及各参数的默认值提示） */
+const ablationBaseDef = (run: AblationRun): StrategyDef | undefined => getStrategy(run.strategyId)
+const ablationKind = (run: AblationRun): string => ablationBaseDef(run)?.kind || 'pipeline'
+const ablationHasPrimitive = (run: AblationRun, p: string): boolean =>
+  (ablationBaseDef(run)?.steps || []).some((s: any) => s?.primitive === p)
+/** 未填 label 时输入框的占位（= 自动标签） */
+const ablationAutoLabel = (run: AblationRun): string => {
+  const base = ablationBaseDef(run)
+  return base ? ablationLabel({ ...run, label: '' }, base) : ''
+}
+/** 基础策略里某步骤的当前参数（输入框占位用，提示「留空=用默认」） */
+const ablationBaseParams = (run: AblationRun, stepKey: string): Record<string, any> => {
+  const base = ablationBaseDef(run)
+  if (!base) return {}
+  const occ = new Map<string, number>()
+  for (const st of base.steps || []) {
+    const n = occ.get(st.primitive) || 0
+    occ.set(st.primitive, n + 1)
+    if (`${st.primitive}#${n}` === stepKey) return { ...(st.params || {}) }
+  }
+  return {}
+}
+/** 该变体的覆盖项数量（面板折叠标题显示） */
+const ablationOverrideCount = (run: AblationRun): number => {
+  let n = 0
+  if (run.searchNum) n++
+  n += Object.keys(definedOnly(run.config)).length
+  for (const patch of Object.values(run.stepParams || {})) n += Object.keys(definedOnly(patch)).length
+  const dp: any = run.defPatch || {}
+  for (const [k, v] of Object.entries(dp)) if (v !== undefined && k !== 'agentTools' && k !== 'channels' && k !== 'channelTopN') n++
+  n += Object.keys(dp.agentTools || {}).length + Object.keys(dp.channels || {}).length + Object.keys(dp.channelTopN || {}).length
+  return n
+}
+/** 智能路由工具开关：变更写入 defPatch（稀疏写入，未触碰的跟随基础策略） */
+const ablationToolOn = (run: AblationRun, key: string): boolean => {
+  const patch = (run.defPatch as any)?.agentTools
+  return patch?.[key] ?? (ablationBaseDef(run)?.agentTools?.[key] ?? true)
+}
+const setAblationTool = (run: AblationRun, key: string, on: boolean) => {
+  const dp = ablationDefPatchRef(run)
+  if (!dp.agentTools) dp.agentTools = {}
+  dp.agentTools[key] = on
+}
+/** 混合策略通道开关 */
+const ablationChannelOn = (run: AblationRun, key: string): boolean => {
+  const patch = (run.defPatch as any)?.channels
+  return patch?.[key] ?? (ablationBaseDef(run)?.channels?.[key] ?? false)
+}
+const setAblationChannel = (run: AblationRun, key: string, on: boolean) => {
+  const dp = ablationDefPatchRef(run)
+  if (!dp.channels) dp.channels = {}
+  dp.channels[key] = on
+}
+/** 通道候选上限（hybrid） */
+const ablationChannelTopN = (run: AblationRun, key: string): number | string => {
+  const patch = (run.defPatch as any)?.channelTopN
+  return patch?.[key] ?? ''
+}
+const setAblationChannelTopN = (run: AblationRun, key: string, v: any) => {
+  const dp = ablationDefPatchRef(run)
+  if (!dp.channelTopN) dp.channelTopN = {}
+  if (v === '' || v === null || isNaN(Number(v))) delete dp.channelTopN[key]
+  else dp.channelTopN[key] = Number(v)
+}
+/** 策略级数值/布尔覆盖（maxRounds / agentToolTopN / agentSubQueryWeight / agentFallback 等） */
+const ablationPatchVal = (run: AblationRun, key: string): any => (run.defPatch as any)?.[key] ?? ''
+const setAblationPatchVal = (run: AblationRun, key: string, v: any) => {
+  const dp = ablationDefPatchRef(run)
+  if (v === '' || v === null || v === undefined || (typeof v === 'number' && isNaN(v))) delete dp[key]
+  else dp[key] = v
+}
+/** 该变体可编辑的步骤参数分组（含基础值，供占位提示） */
+const ablationStepsOf = (run: AblationRun) => {
+  const base = ablationBaseDef(run)
+  return ablationStepFields(base).map(st => ({ ...st, base: ablationBaseParams(run, st.key) }))
+}
+/** 一键按「每个启用策略一组」铺开消融列表（默认无覆盖=基线） */
+const addDefaultAblationSet = () => {
+  for (const opt of algorithmOptions.value) {
+    if (!ablation.runs.some(r => r.strategyId === opt.value)) addAblationRun(opt.value)
+  }
+}
+
+/** 全局检索参数覆盖的写入（空值=删除覆盖，回到设置面板默认） */
+const setAblationConfigVal = (run: AblationRun, key: string, v: any) => {
+  const cfg = ablationConfigRef(run)
+  if (v === '' || v === null || v === undefined || (typeof v === 'number' && isNaN(Number(v)))) delete cfg[key]
+  else cfg[key] = typeof v === 'boolean' ? v : Number(v)
+}
+const setAblationConfigBool = (run: AblationRun, key: string, on: boolean) => {
+  const cfg = ablationConfigRef(run)
+  cfg[key] = on
+}
+/** 全局检索参数当前值（未覆盖时显示设置面板的值，便于对比） */
+const ablationConfigDefault = (key: string): string => {
+  const d: Record<string, string> = {
+    summaryWeight: String(props.model?.summaryWeight ?? 0.7),
+    bm25Weight: String(props.model?.bm25Weight ?? 0.3),
+    bm25Enabled: props.model?.bm25Enabled ? 'on' : 'off',
+    entityLinkLlm: props.model?.entityLinkLlm !== false ? 'on' : 'off',
+    agentToolTopN: String(props.model?.agentToolTopN ?? 15),
+    agentSubQueryWeight: String(props.model?.agentSubQueryWeight ?? 0.5),
+  }
+  return d[key] ?? ''
+}
+const ablationConfigOn = (run: AblationRun, key: string): boolean => {
+  const v = (run.config as any)?.[key]
+  if (v !== undefined) return !!v
+  if (key === 'bm25Enabled') return !!props.model?.bm25Enabled
+  if (key === 'entityLinkLlm') return props.model?.entityLinkLlm !== false
+  return false
+}
+/** 步骤参数覆盖的写入（空值=删除覆盖） */
+const setAblationStepParam = (run: AblationRun, stepKey: string, key: string, v: any) => {
+  const patch = ablationParamRef(run, stepKey)
+  if (v === '' || v === null || v === undefined || (typeof v === 'number' && isNaN(Number(v)))) delete patch[key]
+  else patch[key] = typeof v === 'boolean' ? v : Number(v)
+}
+const ablationStepParamVal = (run: AblationRun, stepKey: string, key: string): any =>
+  (run.stepParams?.[stepKey] as any)?.[key]
+/** 某智能路由变体是否需要展示「工具候选数 / 子查询权重」（策略级字段优先于全局配置） */
+const ablationAgentic = (run: AblationRun): boolean => ablationKind(run) === 'agentic'
+const ablationHybrid = (run: AblationRun): boolean => ablationKind(run) === 'hybrid'
+
+/** 智能路由工具键（消融：关掉某个工具看它对召回的贡献） */
+const AGENT_TOOL_KEYS = [
+  { key: 'kb_search', desc: '事实检索（稠密切片 + 文件语义）', descEn: 'dense + file-semantic search' },
+  { key: 'file_search', desc: '文件摘要检索', descEn: 'file summary search' },
+  { key: 'entity_link', desc: '实体定位', descEn: 'entity linking' },
+  { key: 'entity_slice', desc: '实体关联切片', descEn: 'entity-linked slices' },
+  { key: 'graph_hop', desc: '图谱多跳', descEn: 'graph multi-hop' },
+  { key: 'community_search', desc: '社区报告检索', descEn: 'community reports' },
+]
+/** 混合策略通道键（消融：逐个关闭通道看边际贡献） */
+const CHANNEL_KEYS = [
+  { key: 'dense', desc: '语义通道（切片稠密检索）', descEn: 'dense slices' },
+  { key: 'entity', desc: '实体通道', descEn: 'entity' },
+  { key: 'file', desc: '文件摘要通道', descEn: 'file summaries' },
+  { key: 'community', desc: '社区通道', descEn: 'community' },
+  { key: 'graph', desc: '图谱多跳通道', descEn: 'graph' },
+]
+/** 该组的切片数 K（留空=跟随工具栏「切片数量」） */
+const setAblationSearchNum = (run: AblationRun, v: any) => {
+  const n = Number(v)
+  if (v === '' || v === null || v === undefined || isNaN(n)) delete run.searchNum
+  else run.searchNum = Math.max(1, Math.min(100, Math.round(n)))
+}
+/** 混合策略 rerank 覆盖（metric / topK） */
+const setAblationRerank = (run: AblationRun, key: string, v: any) => {
+  const dp = ablationDefPatchRef(run)
+  if (!dp.rerank) dp.rerank = {}
+  if (v === '' || v === null || v === undefined || (key === 'topK' && isNaN(Number(v)))) delete dp.rerank[key]
+  else dp.rerank[key] = key === 'topK' ? Number(v) : v
+  if (!Object.keys(dp.rerank).length) delete dp.rerank
+}
+/** 重置该组的所有参数覆盖（保留策略、标签与启用状态） */
+const resetAblationRun = (run: AblationRun) => {
+  delete run.searchNum
+  delete run.config
+  delete run.stepParams
+  delete run.defPatch
+}
+
+
+/** Hit@K 曲线在「完整排名池」里统计到的最大深度：更深的位次对召回评测无意义，同时限制逐块匹配的开销 */
+const HIT_K_POOL_CAP = 100
+/** Hit@K 的 K 上限：面板设置优先，否则取本次评测用到的最大切片数（= 用户说的「切片数量」） */
+const hitKCap = computed(() => {
+  const set = Math.max(0, Math.min(HIT_K_POOL_CAP, parseInt(String(test.hitKMax)) || 0))
+  if (set > 0) return set
+  const used = [parseInt(String(test.searchNum)) || 5, ...ablationEnabledVariants.value.map(v => v.searchNum || 0)]
+  return Math.max(1, Math.min(HIT_K_POOL_CAP, Math.max(...used)))
+})
+
+// 消融配置的增删改（面板用）
+const addAblationRun = (strategyId?: string, copyFrom?: AblationRun) => {
+  const sid = strategyId || copyFrom?.strategyId || algorithmOptions.value[0]?.value || ''
+  if (!sid) return
+  const run: AblationRun = copyFrom
+    ? { ...JSON.parse(JSON.stringify(copyFrom)), id: newAblationId(), label: '', enabled: true }
+    : { id: newAblationId(), strategyId: sid, enabled: true, stepParams: {}, defPatch: {} }
+  ablation.runs.push(run)
+}
+const removeAblationRun = (id: string) => {
+  const i = ablation.runs.findIndex(r => r.id === id)
+  if (i >= 0) ablation.runs.splice(i, 1)
+}
+const setAblationEnabled = (on: boolean) => { for (const r of ablation.runs) r.enabled = on }
+const clearAblationRuns = () => { ablation.runs = [] }
+/** 复制一组并选中新组（便于只改一个参数做对照） */
+const duplicateAblationRun = (run: AblationRun) => {
+  addAblationRun(undefined, run)
+  const last = ablation.runs[ablation.runs.length - 1]
+  if (last) ablationEditRunId.value = last.id
+}
+/** 尚未配置消融组的启用策略（左栏列出，点击即可为其新增一组=用默认参数跑基线） */
+const ablationStrategiesWithoutGroup = computed(() =>
+  algorithmOptions.value.filter(o => !ablation.runs.some(r => r.strategyId === o.value)))
+/** 为某策略新增一组并选中 */
+const addAblationRunFor = (strategyId: string) => {
+  addAblationRun(strategyId)
+  const last = ablation.runs[ablation.runs.length - 1]
+  if (last) ablationEditRunId.value = last.id
+}
+
+/**
+ * 取/建某变体某步骤的参数补丁（面板 v-model 用）：键 = `${原语}#${出现序号}`。
+ * 写值时若与基础策略默认值相同会被清掉（保持覆盖集最小，自动标签也只显示真正的改动）。
+ */
+const ablationParamRef = (run: AblationRun, key: string): Record<string, any> => {
+  if (!run.stepParams) run.stepParams = {}
+  if (!run.stepParams[key]) run.stepParams[key] = {}
+  return run.stepParams[key]
+}
+const ablationConfigRef = (run: AblationRun): Record<string, any> => {
+  if (!run.config) (run as any).config = {}
+  return run.config as any
+}
+const ablationDefPatchRef = (run: AblationRun): Record<string, any> => {
+  if (!run.defPatch) (run as any).defPatch = {}
+  return run.defPatch as any
+}
+/** 该策略定义里可编辑的步骤参数清单（原语 + 出现序号 + 参数描述符 + 当前生效值） */
+const ablationStepFields = (def: StrategyDef | undefined) => {
+  const occ = new Map<string, number>()
+  return (def?.steps || []).map((st) => {
+    const n = occ.get(st.primitive) || 0
+    occ.set(st.primitive, n + 1)
+    return {
+      key: `${st.primitive}#${n}`,
+      primitive: st.primitive,
+      index: n,
+      fields: stepParamFields(st),
+    }
+  })
+}
+
+/** 步骤参数描述符：只列「值得做消融」的参数；表里没有但步骤自身携带的数值/布尔参数也会自动补上 */
+interface StepParamField {
+  key: string
+  label: string
+  labelEn: string
+  type: 'number' | 'checkbox' | 'select'
+  min?: number
+  max?: number
+  step?: number
+  options?: Array<{ value: string; label: string; labelEn?: string }>
+  tip?: string
+  tipEn?: string
+}
+const STEP_PARAM_FIELDS: Record<string, StepParamField[]> = {
+  dense_score: [
+    { key: 'summaryWeight', label: '增强权重 Q', labelEn: 'Enhance weight', type: 'number', min: 0, max: 1, step: 0.05, tip: '问题增强通道（问题向量）权重：0=纯切片相似度，1=纯问题增强', tipEn: 'Question-enhance channel weight: 0 = pure slice similarity' },
+    { key: 'bm25Enabled', label: 'BM25', labelEn: 'BM25', type: 'checkbox', tip: '该步骤是否叠加 BM25 稀疏分', tipEn: 'Add BM25 sparse score in this step' },
+    { key: 'bm25Weight', label: 'BM25 权重', labelEn: 'BM25 weight', type: 'number', min: 0, max: 1, step: 0.05 },
+  ],
+  file_score: [
+    { key: 'weight', label: '文件通道权重', labelEn: 'File weight', type: 'number', min: 0, max: 1, step: 0.05 },
+  ],
+  boost: [
+    { key: 'boostWeight', label: '提升倍率', labelEn: 'Boost', type: 'number', min: 0.5, max: 3, step: 0.1 },
+    { key: 'minBaseScore', label: '生效门槛', labelEn: 'Min base', type: 'number', min: 0, max: 1, step: 0.05, tip: '基础分低于该值时乘性提升不生效（抑制假阳性）', tipEn: 'Boost is skipped when base score is below this' },
+    { key: 'source', label: '来源', labelEn: 'Source', type: 'select', options: [
+      { value: 'entity', label: '实体', labelEn: 'entity' },
+      { value: 'hop', label: '多跳', labelEn: 'hop' },
+      { value: 'community', label: '社区', labelEn: 'community' },
+    ] },
+  ],
+  graph_hop: [
+    { key: 'hops', label: '跳数', labelEn: 'Hops', type: 'number', min: 1, max: 3, step: 1 },
+    { key: 'maxPerHop', label: '每跳上限', labelEn: 'Max per hop', type: 'number', min: 1, max: 10, step: 1 },
+  ],
+  community_select: [],
+}
+
+/** 某步骤可编辑的参数：描述符 ∪ 步骤自定义参数（数值/布尔），并带上当前生效值 */
+const stepParamFields = (st: any): Array<StepParamField & { current: any }> => {
+  const declared = STEP_PARAM_FIELDS[st?.primitive] || []
+  const known = new Set(declared.map(d => d.key))
+  const extra: StepParamField[] = Object.entries(st?.params || {})
+    .filter(([k, v]) => !known.has(k) && (typeof v === 'number' || typeof v === 'boolean'))
+    .map(([k, v]) => ({ key: k, label: k, labelEn: k, type: typeof v === 'boolean' ? 'checkbox' : 'number' }))
+  return [...declared, ...extra].map(f => ({ ...f, current: st?.params?.[f.key] }))
+}
+
+// 消融配置持久化：随 .kb 快照保存（emitTestData/restoreTestData），并额外写一份 localStorage，
+// 便于「重开应用后沿用上次的消融矩阵」
+const saveAblationLocal = () => {
+  try { localStorage.setItem(ABLATION_LS_KEY, JSON.stringify(ablation.runs)) } catch { /* 忽略隐私模式等写入失败 */ }
+}
+const loadAblationLocal = () => {
+  try {
+    const raw = localStorage.getItem(ABLATION_LS_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) ablation.runs = parsed.filter((r: any) => r?.id && r?.strategyId)
+  } catch { /* 忽略损坏数据 */ }
+}
+watch(() => ablation.runs, saveAblationLocal, { deep: true })
+
 
 // 文件摘要信息存储
 const fileSummaries = ref(new Map()) as any
@@ -688,25 +1212,260 @@ const ensureTestVectors = async (): Promise<boolean> => {
   return true
 }
 
+// ==================== 批量测试提速：查询向量缓存 / 批量预嵌入 / 运行内共享数据 ====================
+// 批量测试对「同一问题 × 每个策略 × 每轮重复」反复检索，而每个策略内部都要把查询文本嵌入一次
+// （dense_score / file_score / entity_link / 智能路由重排共享同一查询向量）。原实现每次检索都新建
+// 检索服务并即时请求，于是同一问题被重复嵌入「策略数 × 重复轮数」次，且每次都是一条独立 HTTP 往返
+// （本地嵌入服务还会因为与对话调用交替而反复换载模型）。这里做三件事：
+//   1) 查询向量缓存（文本 → 向量）：同一问题在整个评测期间只嵌入一次，所有策略 / 重复轮共享；
+//   2) 批量预嵌入：评测开始前按批（QUERY_EMBED_BATCH 条/请求）一次嵌入全部问题，把「N 次往返」
+//      压成「⌈N/批量⌉ 次」，并把嵌入调用集中到对话调用之前（避免模型反复换载）；
+//   3) 运行内共享「本体上下文 + 实体→切片索引 + 检索服务对象」：整轮评测恒定，无需每题每策略重建
+//      （父级 getCurrentOntologyContext 的关系映射是 O(关系×实体)，实体缺关联时索引是 O(实体×切片)）。
+// 计时口径见 RetrievalTiming：命中缓存的嵌入耗时≈0，故检索墙钟时间变成「热缓存耗时」；
+// 「在线延迟」用冷启动单条嵌入延迟（coldEmbedMs，由预嵌入阶段实测）替代被缓存掉的嵌入耗时还原。
+const QUERY_EMBED_BATCH = 32
+
+/** 查询向量缓存（问题文本 → 向量）：同一文本整个评测期间只嵌入一次（跨策略 / 跨重复轮 / 跨批量运行） */
+const queryVecCache = new Map<string, number[]>()
+
+/** 缓存容量上限（FIFO 淘汰）：长时间评测（智能路由子查询文本各不相同）不至于无限增长；
+ *  淘汰只降低命中率（miss 会重新嵌入），不影响正确性 */
+const QUERY_VEC_CACHE_MAX = 5000
+const cacheQueryVec = (text: string, v?: number[]): boolean => {
+  if (!v || !v.length) return false
+  const k = String(text ?? '')
+  if (queryVecCache.size >= QUERY_VEC_CACHE_MAX && !queryVecCache.has(k)) {
+    const oldest = queryVecCache.keys().next().value
+    if (oldest !== undefined) queryVecCache.delete(oldest)
+  }
+  queryVecCache.set(k, v)
+  return true
+}
+
+/**
+ * 单次检索的耗时拆分（毫秒）。用于把「策略自身成本」与「模型/网络成本」分开统计：
+ *  - localMs：本地检索计算（打分/融合/排序/图遍历等）= 墙钟 − 嵌入 − 对话模型；
+ *  - embedMs：本次检索真正花在嵌入请求上的时间（命中缓存≈0）；
+ *  - llmMs：本次检索真正花在对话模型上的时间（智能路由含工具轮）；
+ *  - embedHits/embedMisses：嵌入缓存命中情况（说明「热缓存」程度）。
+ */
+interface RetrievalTiming {
+  totalMs: number
+  embedMs: number
+  llmMs: number
+  localMs: number
+  embedHits: number
+  embedMisses: number
+}
+
+/** 当前正在计时的检索桶。performSearch 顺序执行（批量/单题都不并发），故用单个可变桶；
+ *  将来若引入并发检索，需改成按题传入上下文，避免串桶。 */
+let timingBucket: { embedMs: number; llmMs: number; embedHits: number; embedMisses: number } | null = null
+const newTimingBucket = () => ({ embedMs: 0, llmMs: 0, embedHits: 0, embedMisses: 0 })
+
+/** 冷启动单条嵌入延迟（毫秒，中位数）：用于把被缓存掉的嵌入耗时还原进「在线延迟」口径 */
+const coldEmbedMs = ref(0)
+/** 本次批量预嵌入的统计（问题数 / 请求数 / 每题摊销耗时），供界面说明批量向量化的收益 */
+const embedRunStats = reactive({ questions: 0, requests: 0, amortizedMs: 0, coldSingleMs: 0 })
+
+/** 检索服务缓存（含查询向量缓存 + 计时包装）：嵌入端点或模型变化即重建 */
+let cachedServices: { key: string; services: ReturnType<typeof kbAi.buildRetrievalServices> } | null = null
+
+/** 检索服务缓存键：嵌入端点或模型变化（含兜底来源）即重建服务并作废查询向量缓存 */
+const specServicesKey = (spec: any): string => {
+  const c = spec?.config || {}
+  const fb = spec?.embedFallback || {}
+  const fbc = fb?.config || {}
+  return [
+    spec?.llmType, spec?.embed,
+    c.model_url, c.base_url, c.api_url, c.endpoint, c.apiKeyRef, c.api_version, c.deployment,
+    fb.llmType, fb.embed, fbc.model_url, fbc.base_url, fbc.api_url, fbc.endpoint, fbc.apiKeyRef,
+  ].map(v => String(v ?? '')).join('|')
+}
+
+/**
+ * 取检索服务（带查询向量缓存 + 计时包装）。整轮评测复用同一对象：
+ *  - embed/embedBatch 命中 queryVecCache 直接返回（不再请求嵌入模型）；
+ *  - 同时把嵌入/对话模型耗时累加进 timingBucket，供 performSearch 拆分本次检索耗时。
+ */
+const retrievalServicesOf = (spec: any): ReturnType<typeof kbAi.buildRetrievalServices> => {
+  const key = specServicesKey(spec)
+  if (cachedServices && cachedServices.key === key) return cachedServices.services
+  const base = kbAi.buildRetrievalServices(spec, { cosineSimilarity, computeBM25: computeBM25Score })
+  // 端点/模型变了：旧向量与新模型不可比，全部作废
+  queryVecCache.clear()
+  coldEmbedMs.value = 0
+  const lookup = (text: string): number[] | undefined => queryVecCache.get(String(text ?? ''))
+  const remember = cacheQueryVec
+  const timedLlm = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const t0 = performance.now()
+    try { return await fn() } finally { if (timingBucket) timingBucket.llmMs += performance.now() - t0 }
+  }
+  const services: ReturnType<typeof kbAi.buildRetrievalServices> = {
+    ...base,
+    embed: async (text: string) => {
+      const hit = lookup(text)
+      if (hit) { if (timingBucket) timingBucket.embedHits++; return hit }
+      const t0 = performance.now()
+      try {
+        const v = await base.embed(String(text ?? ''))
+        remember(text, v)
+        return v
+      } finally {
+        if (timingBucket) { timingBucket.embedMs += performance.now() - t0; timingBucket.embedMisses++ }
+      }
+    },
+    // 批量嵌入：命中缓存的直接返回，只请求缺失部分，且同样按批发送
+    embedBatch: async (texts: string[]) => {
+      const out: (number[] | undefined)[] = new Array(texts.length)
+      const missing: number[] = []
+      texts.forEach((t, i) => {
+        const hit = lookup(t)
+        if (hit) { out[i] = hit; if (timingBucket) timingBucket.embedHits++ } else missing.push(i)
+      })
+      for (let s = 0; s < missing.length; s += QUERY_EMBED_BATCH) {
+        const idx = missing.slice(s, s + QUERY_EMBED_BATCH)
+        const t0 = performance.now()
+        try {
+          const vecs = await base.embedBatch!(idx.map(i => String(texts[i] ?? '')))
+          idx.forEach((i, j) => { out[i] = vecs?.[j]; remember(String(texts[i] ?? ''), vecs?.[j]) })
+        } catch {
+          // 批量接口不可用 → 逐条兜底（与 primitives.embedMany 行为一致，不阻断检索）
+          for (const i of idx) {
+            try { const v = await base.embed(String(texts[i] ?? '')); out[i] = v; remember(String(texts[i] ?? ''), v) } catch { out[i] = undefined }
+          }
+        } finally {
+          if (timingBucket) { timingBucket.embedMs += performance.now() - t0; timingBucket.embedMisses += idx.length }
+        }
+      }
+      return out
+    },
+    chat: (messages: any[]) => timedLlm(() => base.chat(messages)),
+    streamChat: (messages: any[], onChunk: (c: string) => void) => timedLlm(() => base.streamChat(messages, onChunk)),
+    agenticChat: (messages: any[], tools: any[]) => timedLlm(() => base.agenticChat(messages, tools)),
+  }
+  cachedServices = { key, services }
+  return services
+}
+
+/**
+ * 批量预嵌入问题向量：把「逐问题一次嵌入往返」合并成按批请求，并写入 queryVecCache 供所有策略 /
+ * 重复轮直接命中。返回本次真正嵌入成功的问题数（耗时由调用方排除在检索计时之外）。
+ * 批量失败（个别端点不接受数组输入）时直接放弃批量、由检索路径按需逐条嵌入，不阻断评测。
+ */
+const prewarmQueryVectors = async (questions: string[], onProgress?: (msg: string) => void): Promise<number> => {
+  const spec = kbSpec()
+  // 先确保检索服务与当前嵌入端点一致：端点/模型变化时这里会作废旧向量缓存（必须在预嵌入之前，
+  // 否则首次 performSearch 建服务时会把刚批量嵌入的结果清掉）；同一模型下则沿用已有缓存（跨批次复用）
+  retrievalServicesOf(spec)
+  const uniq: string[] = []
+  const seen = new Set<string>()
+  for (const q of questions) {
+    const t = String(q ?? '').trim()
+    if (!t || seen.has(t) || queryVecCache.has(t)) continue
+    seen.add(t); uniq.push(t)
+  }
+  let done = 0
+  let requests = 0
+  let embedMs = 0
+  for (let s = 0; s < uniq.length; s += QUERY_EMBED_BATCH) {
+    const chunk = uniq.slice(s, s + QUERY_EMBED_BATCH)
+    onProgress?.(store.locales === 'zh'
+      ? `批量向量化问题 ${Math.min(s + chunk.length, uniq.length)}/${uniq.length}（每批 ${QUERY_EMBED_BATCH} 条）`
+      : `Embedding questions ${Math.min(s + chunk.length, uniq.length)}/${uniq.length} (batch of ${QUERY_EMBED_BATCH})`)
+    const t0 = performance.now()
+    try {
+      const vecs = await kbAi.embed(spec, chunk)
+      embedMs += performance.now() - t0
+      requests++
+      chunk.forEach((t, i) => { if (cacheQueryVec(t, vecs?.[i])) done++ })
+    } catch (e) {
+      console.warn('[评测] 问题向量批量预嵌入失败，改为检索时按需逐条嵌入:', e)
+      break
+    }
+  }
+  // 冷启动单条嵌入延迟：批量完成后模型已加载，再量 3 次单条请求取中位数（无冷启动/换载干扰），
+  // 用于「在线延迟」口径——真实的一次用户提问只会嵌入 1 条查询文本。
+  // 全部命中缓存（重复跑同一批）时也要测：否则「在线延迟」会退化成 0 嵌入的热缓存时间，失去可比性。
+  if (coldEmbedMs.value <= 0) {
+    const sampleTexts = (uniq.length ? uniq : questions.map(q => String(q ?? '').trim()).filter(Boolean)).slice(0, 3)
+    const samples: number[] = []
+    for (const text of sampleTexts) {
+      const t0 = performance.now()
+      try { await kbAi.embed(spec, text); samples.push(performance.now() - t0) } catch { /* 忽略单次失败 */ }
+    }
+    if (samples.length) coldEmbedMs.value = samples.sort((a, b) => a - b)[Math.floor(samples.length / 2)]
+  }
+  embedRunStats.questions = done
+  embedRunStats.requests = requests
+  embedRunStats.amortizedMs = done > 0 ? embedMs / done : 0
+  embedRunStats.coldSingleMs = coldEmbedMs.value
+  return done
+}
+
+/** 评测前批量向量化本次要测的问题（耗时不计入检索时间；结果写入查询向量缓存，整轮复用） */
+const prewarmTestQueries = async () => {
+  const qs = (test.questions || []).map(q => String(q ?? '').trim()).filter(q => q && !isJunkQuestion(q))
+  if (qs.length < 2) return
+  const n = await prewarmQueryVectors(qs, (msg) => emit('updateLiveState', msg))
+  emit('updateLiveState', '')
+  if (n > 0) {
+    console.log(store.locales === 'zh'
+      ? `[评测] 已批量向量化 ${n} 条问题（${embedRunStats.requests} 次请求，摊销 ${embedRunStats.amortizedMs.toFixed(1)} ms/题；单条请求 ${embedRunStats.coldSingleMs.toFixed(1)} ms）：本批次所有策略 / 重复轮复用缓存向量`
+      : `[Eval] batch-embedded ${n} questions (${embedRunStats.requests} requests, ${embedRunStats.amortizedMs.toFixed(1)} ms/question amortized, ${embedRunStats.coldSingleMs.toFixed(1)} ms single): reused by every strategy/round`)
+  }
+}
+
+/** 单次评测运行内共享的准备数据：整轮恒定（评测期间不改本体/切片），避免每题每策略重建 */
+let runScope: {
+  ontology: { entities: any[]; relations: any[] }
+  entityToBlocks: Map<string, Set<string>>
+} | null = null
+
+const beginRunScope = () => {
+  runScope = {
+    ontology: props.getCurrentOntologyContext?.() || { entities: [], relations: [] },
+    entityToBlocks: buildEntityToBlocksIndex(),
+  }
+  embedRunStats.questions = 0; embedRunStats.requests = 0; embedRunStats.amortizedMs = 0; embedRunStats.coldSingleMs = 0
+  coldEmbedMs.value = 0
+}
+const endRunScope = () => { runScope = null }
+
 // 执行检索（统一走策略框架 runStrategy，与聊天共用同一套检索逻辑，消除实现漂移）
 async function performSearch(question: string, searchNum: number, algorithm: SearchAlgorithm, answer?: string, ref?: TestCaseRef): Promise<{
   slices: TestResult['slices'],
   avgScore: number,
   timeMs: number,
+  timing: RetrievalTiming,
+  /** Hit@K 用：该问题关联切片/参考在「完整排名池」中的最前位次（0=池内未命中） */
+  hitRank: number,
+  /** Hit@K 的分母基准：本次实际考察的排名池深度（= min(排名池长度, HIT_K_POOL_CAP)；大模型判定=呈现切片数） */
+  rankPoolSize: number,
   agent?: AgentTrace,
   llmCalls: number,
   toolCalls: number
 }> {
   const startTime = performance.now()
+  // 消融变体：命中变体表时用变体定义（步骤参数/开关覆盖）执行，并把变体配置合并进检索配置
+  const variant = ablationVariantMap.value.get(algorithm)
+  const def = variant?.def || getStrategy(algorithm)
+  // 本次检索的耗时桶：由带缓存的检索服务把嵌入/对话模型耗时累加进来（检索顺序执行，见 timingBucket 说明）
+  const bucket = newTimingBucket()
+  timingBucket = bucket
   // 该策略启用的增强通道（决定是否展示「通道缺失·切片分兜底」标记）
   const algoCh = channelFlagsOf(algorithm)
+  // 运行内共享的本体上下文 / 实体→切片索引：批量测试整轮复用（单题测试则即时构建）
+  const ontology = runScope?.ontology
+  const sharedE2B = runScope?.entityToBlocks
 
   const ctx: RetrievalContext = {
     query: question,
     blocks: props.blocks,
-    entities: (props.getCurrentOntologyContext?.()?.entities || []),
-    relations: (props.getCurrentOntologyContext?.()?.relations || []),
-    entityToBlocksIndex: buildEntityToBlocksIndex(),
+    entities: (ontology?.entities || props.getCurrentOntologyContext?.()?.entities || []),
+    relations: (ontology?.relations || props.getCurrentOntologyContext?.()?.relations || []),
+    entityToBlocksIndex: sharedE2B || buildEntityToBlocksIndex(),
     communityReports: props.communityReports,
     communityResult: props.communityResult as any,
     // 用真实的文件摘要索引（来自父组件 fileIndex），让 file_score 步骤在评测中真实参与，避免所有策略的文件通道失效
@@ -733,18 +1492,26 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
       // Agentic 最终重排权重与工具候选池（评测与 QA / 主页用同一配置，保证口径一致）
       agentSubQueryWeight: props.model.agentSubQueryWeight ?? 0.5,
       agentToolTopN: props.model.agentToolTopN ?? 15,
+      // 消融变体的全局检索参数覆盖（只覆盖显式设置的项，其余跟随设置面板）
+      ...(variant?.config || {}),
     },
-    services: kbAi.buildRetrievalServices(kbSpec(), {
-      cosineSimilarity,
-      computeBM25: computeBM25Score,
-    }),
+    services: retrievalServicesOf(kbSpec()),
   }
 
-  const sr = await runStrategy(algorithm, question, ctx, {}, { skipAnswer: true })
+  let sr: Awaited<ReturnType<typeof runStrategy>>
+  try {
+    // 变体：用变体定义执行（不改全局注册表）；普通策略走 runStrategy（按 id 查注册表）
+    sr = def
+      ? await runStrategyWith(def, question, ctx, {}, { skipAnswer: true })
+      : await runStrategy(algorithm, question, ctx, {}, { skipAnswer: true })
+  } finally {
+    // 计时桶收口：策略抛错时也要摘掉，避免后续调用把耗时累加进本次检索
+    timingBucket = null
+  }
 
   // Agentic（智能路由）：把工具调用轨迹与工具就绪信息带回，供测试结果「检索过程」按钮回显
   // （runAgentic 已在 meta 内收口 running→done 的合并，其它策略无该字段）
-  const agent: AgentTrace | undefined = getStrategy(algorithm)?.kind === 'agentic'
+  const agent: AgentTrace | undefined = kindOf(algorithm) === 'agentic'
     ? {
         steps: (sr.meta.agentSteps || []) as AgentStep[],
         tools: sr.meta.agentTools || [],
@@ -845,7 +1612,34 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
   slices.sort((a, b) => (b.score || 0) - (a.score || 0))
   slices.forEach((s, i) => { s.rank = i + 1 })
 
-  return { slices, avgScore, timeMs: Math.round(performance.now() - startTime), agent, llmCalls: sr.meta.llmCalls || 0, toolCalls: agent?.steps.length || 0 }
+  // ===== Hit@K 曲线：在「策略给出的完整排名池」里找该问题关联切片/参考答案的最前位次 =====
+  // 与只看前 searchNum 的 firstRank 分开统计：即使面板切片数=5，也能画出 Hit@1..Hit@20/50 的召回曲线。
+  // 大模型判定模式（llm）只能判定被呈现的 searchNum 条，故池深度记为 slices.length，深层 K 由分母缺失显示为「-」。
+  let hitRank = 0
+  const rankPoolSize = test.hitMode === 'llm'
+    ? slices.length
+    : Math.min(rankedBlocks.length, HIT_K_POOL_CAP)
+  if (test.hitMode !== 'llm') {
+    for (let i = 0; i < rankPoolSize; i++) {
+      const b = rankedBlocks[i]
+      const hit = test.hitMode === 'slice' ? isReferenceSlice(b, ref) : textSliceHit(b?.A || '', answerText)
+      if (hit) { hitRank = i + 1; break }
+    }
+  }
+
+  // 本次检索耗时拆分：总耗时（墙钟）− 嵌入 − 对话模型 = 本地检索计算（策略自身成本）；
+  // 嵌入 / 对话模型耗时由 retrievalServicesOf 的计时包装在调用现场累加（命中缓存的嵌入≈0）。
+  const totalMs = performance.now() - startTime
+  const timing: RetrievalTiming = {
+    totalMs: Math.round(totalMs),
+    embedMs: Math.round(bucket.embedMs),
+    llmMs: Math.round(bucket.llmMs),
+    localMs: Math.max(0, Math.round(totalMs - bucket.embedMs - bucket.llmMs)),
+    embedHits: bucket.embedHits,
+    embedMisses: bucket.embedMisses,
+  }
+
+  return { slices, avgScore, timeMs: timing.totalMs, timing, hitRank, rankPoolSize, agent, llmCalls: sr.meta.llmCalls || 0, toolCalls: agent?.steps.length || 0 }
 }
 
 
@@ -857,12 +1651,12 @@ async function performSearch(question: string, searchNum: number, algorithm: Sea
 /** 实际生效的判定模式：'llm' 仅对智能路由类策略有效，其它策略回退到 slice（有关联切片）或 text 口径 */
 const effectiveHitMode = (algorithm: string, ref?: TestCaseRef): 'slice' | 'text' | 'llm' => {
   if (test.hitMode !== 'llm') return test.hitMode
-  if (getStrategy(algorithm)?.kind === 'agentic') return 'llm'
+  if (kindOf(algorithm) === 'agentic') return 'llm'
   return hasGoldRef(ref) ? 'slice' : 'text'
 }
 
 /** 该策略当前是否支持大模型判定 */
-const llmJudgeAvailable = computed(() => getStrategy(test.currentAlgorithm)?.kind === 'agentic')
+const llmJudgeAvailable = computed(() => kindOf(test.currentAlgorithm) === 'agentic')
 
 /** 由对话模型判定「检索片段是否包含足以回答问题的内容」 */
 const judgeByLlm = async (question: string, answer: string, slices: TestResult['slices']): Promise<{ hit: boolean; rank: number; reason: string; error?: string }> => {
@@ -890,17 +1684,20 @@ const judgeByLlm = async (question: string, answer: string, slices: TestResult['
 // 执行测试（支持算法选择；ref 为该问题关联切片判定基准）
 const performTestChat = async (question: string, searchNum: number, algorithm: SearchAlgorithm, index?: number, answer?: string, ref?: TestCaseRef) => {
   try {
-    const { slices, avgScore, timeMs, agent, llmCalls, toolCalls } = await performSearch(question, searchNum, algorithm, answer, ref)
+    const { slices, avgScore, timeMs, timing, hitRank: poolHitRank, rankPoolSize, agent, llmCalls, toolCalls } = await performSearch(question, searchNum, algorithm, answer, ref)
 
     // 大模型判定（仅智能路由类策略）：在检索计时之外调用，避免判定耗时混入检索时间
     let llmJudge: TestResult['llmJudge']
     let judgeCalls = 0
+    let hitRank = poolHitRank
     if (effectiveHitMode(algorithm, ref) === 'llm' && slices.length) {
       const j = await judgeByLlm(question, answer || '', slices)
       judgeCalls = 1
       llmJudge = j
       // 仅标记「最前命中位次」那一片（与切片命中口径一致：命中数=1），判定失败时不标记以避免误判为未命中
       if (!j.error) slices.forEach((s, i) => { s.llmHit = !!j.hit && i + 1 === j.rank })
+      // Hit@K（大模型判定口径）：命中位次取模型给出的最前命中位次（只可能落在被呈现的 searchNum 条内）
+      hitRank = (!j.error && j.hit) ? j.rank : 0
     }
 
     const result: TestResult = {
@@ -910,6 +1707,9 @@ const performTestChat = async (question: string, searchNum: number, algorithm: S
       slices: slices,
       avgScore: avgScore,
       recallTimeMs: timeMs,
+      timing,
+      hitRank,
+      rankPoolSize,
       agent,
       llmJudge,
       llmCalls: llmCalls + judgeCalls,
@@ -1075,6 +1875,9 @@ const generateRankAnalysis = (result: TestResult) => {
     hitDetails,
     timestamp: result.timestamp,
     timeMs: result.recallTimeMs || 0,
+    timing: result.timing,
+    hitRank: result.hitRank || 0,
+    rankPoolSize: result.rankPoolSize || 0,
     agent: result.agent,
     llmCalls: result.llmCalls || 0,
     toolCalls: result.toolCalls || 0,
@@ -1460,6 +2263,8 @@ const runPrewarm = async () => {
   }
   prewarmRunningItemKey.value = ''
   allTestProgressText.value = store.locales=='zh' ? '预热中（向量化准备，不计入检索时间）...' : 'Pre-warming (index vectorization, not counted into retrieval)...'
+  // 工具栏已不再显示进度/状态，预热进度同样上报到底部状态栏
+  emit('updateLiveState', allTestProgressText.value)
   const times: Record<string, number> = {}
   const started = performance.now()
   const ingestServices = kbAi.buildIngestionServices(kbSpec())
@@ -1467,13 +2272,14 @@ const runPrewarm = async () => {
   const embedBatchFn = async (texts: string[]) => ingestServices.embedBatch(texts)
   const streamChatFn = async (messages: any[], onChunk: (c: string) => void) =>
     ingestServices.streamChat(messages, onChunk)
-  // 标记当前处理项；原语 onProgress 回调更新该项的 index/total/detail
+  // 标记当前处理项；原语 onProgress 回调更新该项的 index/total/detail，并同步到底部状态栏
   const onItemProgress = (key: string) => (msg: string) => {
     const st = prewarmItemStates[key]
     if (!st) return
     const m = msg.match(/(\d+)\s*\/\s*(\d+)/)
     if (m) { st.index = +m[1]; st.total = +m[2] }
     st.detail = msg
+    emit('updateLiveState', msg)
   }
   // summarize_file 的摄取上下文（摘要生成 / 摘要向量缓存共用）
   const buildSummaryCtx = (key: string): IngestionContext => ({
@@ -1538,6 +2344,8 @@ const runPrewarm = async () => {
     prewarmRunning.value = false
     prewarmRunningItemKey.value = ''
     allTestProgressText.value = ''
+    // 预热结束：清掉底部状态栏的预热进度行（随后的批测循环会重新占用该行）
+    emit('updateLiveState', '')
   }
 }
 
@@ -1546,9 +2354,10 @@ const runPrewarm = async () => {
 let _fileWarmFailed = false
 const ensureStrategyChannelsReady = async (algoIds?: string[]) => {
   // 仅当「本次要测试的策略」本身用到 file_score 才自动补齐文件摘要向量，
-  // 避免单测相似度等纯切片策略也被其它启用策略（文件增强/本体/多跳）的文件依赖误触发
+  // 避免单测相似度等纯切片策略也被其它启用策略（文件增强/本体/多跳）的文件依赖误触发。
+  // algoIds 可能是消融变体 id → 用 defOf 解析（变体定义里同样带 steps / file_score）
   const defs = (algoIds && algoIds.length)
-    ? getEnabledStrategies().filter(d => algoIds.includes(d.id))
+    ? algoIds.map(id => defOf(id)).filter(Boolean) as StrategyDef[]
     : getEnabledStrategies()
   const needFile = defs.some((def: any) =>
     (def?.steps || []).some((s: any) => s?.primitive === 'file_score'))
@@ -1683,6 +2492,10 @@ const runBatchTest = async () => {
 
   // 先补齐切片向量再计时开测（向量化耗时不计入检索时间）
   if (!(await ensureTestVectors())) return
+  // 评测准备（都不计入检索计时）：1) 快照本体上下文与实体→切片索引（整轮复用，避免每题每策略重建）；
+  // 2) 批量向量化本次全部问题（一次请求多条）→ 同一问题在后续每次检索都命中缓存，不再请求嵌入模型
+  beginRunScope()
+  await prewarmTestQueries()
   if (test.hitMode === 'llm' && !llmJudgeAvailable.value) {
     emit('updateState', store.locales=='zh'
       ? `大模型判定仅对智能路由类策略生效：当前策略「${getAlgorithmLabel(test.currentAlgorithm)}」将按切片/答案口径判定`
@@ -1712,12 +2525,15 @@ const runBatchTest = async () => {
 
   // 仅当本次被测策略需要 file 通道时，自动对文件自带摘要向量化补齐（幂等、失败不阻断）
   await ensureStrategyChannelsReady([test.currentAlgorithm])
-  
+
+  // 检索循环开始：进度/状态从这里起上报到底部状态栏（预热阶段的状态由预热流程自己上报，避免被顶掉）
+  batchLoopActive.value = true
   for (let i = 0; i < test.questions.length; i++) {
     // 暂停/停止：在问题之间生效（已测结果保留）
     if (!(await waitWhilePaused())) break
     const question = test.questions[i]?.trim()
     const answer = test.answers && test.answers[i] ? test.answers[i].trim() : ''
+    allTestProgressText.value = `${getAlgorithmLabel(test.currentAlgorithm)} ${i + 1}/${test.questions.length}`
     
     if (!question || isJunkQuestion(question)) {
       test.questionStatus[i] = {
@@ -1804,6 +2620,9 @@ const runBatchTest = async () => {
     
     test.progress = ((i + 1) / test.questions.length) * 100
   }
+  batchLoopActive.value = false
+  allTestProgressText.value = ''
+  endRunScope()
   
   const aborted = batchCtl.aborted
   batchRunKind.value = ''
@@ -1855,7 +2674,14 @@ const allStrategyStats = ref<Array<{
   recallRate: number
   avgHitRate: number
   avgFirstRank: number
+  /** 平均检索墙钟耗时（毫秒）：含本次实际发生的嵌入与对话模型调用。
+   *  批量测试已批量向量化问题，故此处嵌入耗时≈0，是「热缓存」耗时；与配置相关的横向对比请用 onlineTimeMs */
   avgTimeMs: number
+  /** 在线延迟（毫秒，中位数）：本地检索计算 + 冷启动单条嵌入延迟 + 对话模型耗时。
+   *  即「一次真实用户提问（查询必须现嵌入一次）该策略要多久」——与是否命中问题向量缓存无关，跨批次可比 */
+  onlineTimeMs: number
+  /** 在线延迟 p90（毫秒）：尾延迟，看最慢那批问题的体验（均值/中位数之外的第三个数） */
+  onlineP90Ms: number
   hitAt1: number
   mrr: number
   completeRate: number
@@ -1868,10 +2694,23 @@ const allStrategyStats = ref<Array<{
   avgFallbackCalls?: number
   /** 工具调用分布（工具名 → 平均次数/题），用于消融实验确认工具真被调用 */
   toolDistribution: Record<string, number>
+  /** 耗时拆分（每题均值，毫秒）：本地检索计算 / 嵌入 / 对话模型（三者相加 = avgTimeMs） */
+  avgLocalMs: number
+  avgEmbedMs: number
+  avgLlmMs: number
+  /** 检索阶段嵌入缓存的命中率（0~1）：越接近 1 说明批量预嵌入/缓存覆盖越完整 */
+  embedHitRate: number
+  /** 命中率曲线：Hit@1..Hit@K（下标 k-1 = Hit@k，-1 = 该 K 无有效分母/无数据）。
+   *  与 Hit@1 同源（关联切片身份 / 参考答案文本 / 大模型判定），但统计到「完整排名池」深度（默认跟随切片数量） */
+  hitAtK: number[]
+  /** 每个 K 的有效问题数（排名池深度 < K 的问题不计入该 K：如某策略只返回 5 条时 Hit@20 无意义） */
+  hitKDenom: number[]
+  /** Hit@K 的 K 上限（= hitAtK.length） */
+  hitKMax: number
   /** 已完成重复轮数（>1 时各指标附标准差） */
   runs: number
   /** 重复运行的标准差（仅 runs>1 有意义；缺失表示未重复） */
-  std?: Partial<Record<'recallRate' | 'avgHitRate' | 'hitAt1' | 'mrr' | 'completeRate' | 'avgFirstRank' | 'avgTimeMs' | 'avgLlmCalls' | 'avgToolCalls', number>>
+  std?: Partial<Record<'recallRate' | 'avgHitRate' | 'hitAt1' | 'mrr' | 'completeRate' | 'avgFirstRank' | 'avgTimeMs' | 'onlineTimeMs' | 'avgLlmCalls' | 'avgToolCalls', number>>
 }>>([])
 
 /** 单轮（一次完整跑完全部问题）的策略汇总：重复运行时按轮聚合，得到均值±标准差 */
@@ -1883,6 +2722,9 @@ interface StrategyRunStat {
   completeRate: number
   avgFirstRank: number
   avgTimeMs: number
+  onlineTimeMs: number
+  /** 本轮 Hit@1..Hit@K（重复运行时按 K 求均值±标准差，用于曲线误差带） */
+  hitAtK?: number[]
   avgLlmCalls: number
   avgToolCalls: number
 }
@@ -1896,6 +2738,63 @@ const stdOf = (list: number[]): number | undefined => {
   const m = meanOf(list)
   return Math.sqrt(list.reduce((s, x) => s + (x - m) * (x - m), 0) / (list.length - 1))
 }
+/** 中位数（偶数个取中间两数均值）：耗时分布长尾（个别题触发模型换载/长回答），中位数比均值更稳健 */
+const medianOf = (list: number[]): number => {
+  if (!list.length) return 0
+  const s = [...list].sort((a, b) => a - b)
+  const mid = s.length >> 1
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+}
+/** 分位数（线性插值）：p90 反映尾延迟（最慢那批问题的体验），用于提示均值是否被长尾拉高 */
+const quantileOf = (list: number[], q: number): number => {
+  if (!list.length) return 0
+  const s = [...list].sort((a, b) => a - b)
+  const pos = (s.length - 1) * q
+  const lo = Math.floor(pos), hi = Math.ceil(pos)
+  return lo === hi ? s[lo] : s[lo] + (s[hi] - s[lo]) * (pos - lo)
+}
+
+/**
+ * 某次检索的「在线延迟」（毫秒）：本地计算 + 对话模型 + 该次查询必付的单条嵌入延迟。
+ * 批量测试已批量向量化问题，检索阶段对查询文本的嵌入基本命中缓存（测得的嵌入耗时≈0），若直接用墙钟
+ * 时间会把「用户单次提问必须现嵌入一次查询」这一固定成本算没（同时也会让不同批次不可比）。口径：
+ *  - 本次检索发生过嵌入缓存命中（embedHits>0）→ 说明查询向量是复用的，补上 coldEmbedMs 作为那次嵌入；
+ *  - 未命中（如单题测试）→ 查询嵌入的时间已包含在墙钟里，直接采用。
+ * 注意：命中缓存的实际耗时≈0，所以这里等价于「墙钟 + 一次单条嵌入」；智能路由等自行发起子查询嵌入的
+ * 策略，其子查询嵌入是真实未命中（时间已含在墙钟内），不会被这一步重复计入。
+ * 无冷启动测量值（恢复的旧快照、单条嵌入失败）时退化为墙钟时间。
+ */
+const onlineTimeOf = (r: { timeMs?: number; timing?: RetrievalTiming }): number => {
+  const total = r.timeMs || 0
+  if (!coldEmbedMs.value) return total
+  return (r.timing?.embedHits || 0) > 0 ? total + coldEmbedMs.value : total
+}
+
+/**
+ * 由「位次记录」算 Hit@K 曲线（K=1..kMax）：
+ *  - 分子：hitRank 在 1..K 内的题数（hitRank=完整排名池里的最前命中位次；大模型判定=模型给出位次）；
+ *  - 分母：排名池深度 ≥ K 的题数（某题/某策略只排了 5 条时，Hit@20 无意义，不计入该 K 的分母）；
+ *  - 返回值 -1 表示该 K 没有有效分母（界面/导出显示 '-'，不要当成 0%）。
+ */
+const hitKCurve = (rows: Array<{ hitRank?: number; rankPoolSize?: number }>, kMax: number): { hitAtK: number[]; denom: number[] } => {
+  const hitAtK: number[] = []
+  const denom: number[] = []
+  const K = Math.max(1, Math.min(HIT_K_POOL_CAP, Math.round(kMax) || 1))
+  for (let k = 1; k <= K; k++) {
+    let d = 0, n = 0
+    for (const r of rows) {
+      const pool = r.rankPoolSize || 0
+      if (pool < k) continue
+      d++
+      const rank = r.hitRank || 0
+      if (rank > 0 && rank <= k) n++
+    }
+    denom.push(d)
+    hitAtK.push(d > 0 ? n / d : -1)
+  }
+  return { hitAtK, denom }
+}
+
 /** 指标展示：有标准差时「均值 ± 标准差」 */
 const fmtStat = (mean: number, std: number | undefined, scale = 100, digits = 1): string => {
   const base = (mean * scale).toFixed(digits)
@@ -1917,6 +2816,8 @@ const displayStats = computed(() => {
       avgHitRate: g.avgHitRate,
       avgFirstRank: g.avgFirstRank,
       avgTimeMs: s.avgTimeMs,
+      onlineTimeMs: s.onlineTimeMs,
+      onlineP90Ms: s.onlineP90Ms,
       hitAt1: g.hitAt1,
       mrr: g.mrr,
       completeRate: g.completeRate,
@@ -1925,6 +2826,13 @@ const displayStats = computed(() => {
       avgToolCalls: s.avgToolCalls,
       avgFallbackCalls: s.avgFallbackCalls,
       toolDistribution: s.toolDistribution,
+      avgLocalMs: s.avgLocalMs,
+      avgEmbedMs: s.avgEmbedMs,
+      avgLlmMs: s.avgLlmMs,
+      embedHitRate: s.embedHitRate,
+      hitAtK: s.hitAtK,
+      hitKDenom: s.hitKDenom,
+      hitKMax: s.hitKMax,
       runs: s.runs,
       std: undefined as typeof s.std,
     }
@@ -1942,8 +2850,35 @@ const allStrategySliceResults = ref<Array<{
   slices: TestResult['slices']
 }>>([])
 
-// 批量测试所有策略时的当前进度文本（策略 + 问题序号）
+// 批量测试进行中的「当前项」文本（策略 + 问题序号 / 轮次），由运行循环每题更新
 const allTestProgressText = ref('')
+
+/**
+ * 检索循环是否已真正开始（预热/就绪处理阶段为 false）。
+ * 原因：批量测试的进度上报到底部状态栏，而预热阶段的状态栏消息由预热流程自己 emit，
+ * 只用 test.isRunning 判断会让每秒刷新的进度把预热进度顶掉。
+ */
+const batchLoopActive = ref(false)
+
+/**
+ * 批量测试的底部状态栏文本（工具栏不再显示进度/状态，避免挤占按钮空间）：
+ * 第一行 = 核心进度（百分比 + 暂停 + 当前策略/题号），第二行（换行后）= 时间信息，
+ * 由父级状态栏按「正文 + detail」两段渲染（完整文本也在悬停 title 里）。
+ */
+const batchLiveText = computed(() => {
+  if (!test.isRunning || !batchLoopActive.value) return ''
+  const zh = store.locales == 'zh'
+  const pct = `${(Number(test.progress) || 0).toFixed(0)}%`
+  const head = [zh ? `批量测试 ${pct}` : `Batch ${pct}`, batchCtl.paused ? (zh ? '已暂停' : 'paused') : '', allTestProgressText.value]
+    .filter(Boolean).join(' · ')
+  const tail = [
+    elapsedText.value ? (zh ? `已用 ${elapsedText.value}` : `elapsed ${elapsedText.value}`) : '',
+    etaText.value ? (zh ? `剩 ${etaText.value}` : `eta ${etaText.value}`) : '',
+  ].filter(Boolean).join(' · ')
+  return tail ? `${head}\n${tail}` : head
+})
+// 运行进度实时上报底部状态栏（运行结束文本变空 → 清空该行）
+watch(batchLiveText, (v) => emit('updateLiveState', v))
 
 // 展开查看位次明细的策略 id（点击汇总行切换）
 const expandedStrategy = ref('')
@@ -1951,9 +2886,10 @@ const expandedStrategyLabel = computed(() =>
   allStrategyStats.value.find(s => s.strategyId === expandedStrategy.value)?.label || expandedStrategy.value)
 const strategyDetailRows = computed(() =>
   rankAnalysisResults.value.filter(r => r.algorithm === expandedStrategy.value))
-const toggleStrategyDetail = (id: string) => {
-  expandedStrategy.value = expandedStrategy.value === id ? '' : id
-}
+/** 打开某策略/变体的位次明细弹出面板（点击策略召回对比行） */
+const openStrategyDetail = (id: string) => { expandedStrategy.value = id }
+/** 关闭位次明细弹出面板 */
+const closeStrategyDetail = () => { expandedStrategy.value = '' }
 
 // 召回完整性：成分命中数（x/y）与徽标（完整/部分/缺失）。
 // 对复合问题（参考答案含多个 | 成分）而言：hitRate=1 需全部成分所在的切片都被检索到 = 召回完整。
@@ -1995,6 +2931,17 @@ const updateStrategyStats = () => {
     sumToolCalls: number
     sumFallbackCalls: number
     toolCalls: Record<string, number>
+    /** 耗时拆分累加（本地检索 / 嵌入 / 对话模型，毫秒） */
+    sumLocalMs: number
+    sumEmbedMs: number
+    sumLlmMs: number
+    /** 检索阶段嵌入缓存命中 / 未命中次数 */
+    embedHits: number
+    embedMisses: number
+    /** 每题在线延迟（求中位数 / p90）：耗时分布长尾，中位数比均值更稳健 */
+    onlineList: number[]
+    /** Hit@K 用：逐题的「完整排名池最前命中位次」与池深度（随后统一按 K 统计） */
+    hits: Array<{ hitRank: number; rankPoolSize: number }>
     single: ReturnType<typeof mkGroup>
     complex: ReturnType<typeof mkGroup>
   }>()
@@ -2006,6 +2953,8 @@ const updateStrategyStats = () => {
       testedCount: 0, hitCount: 0, sumHitRate: 0, sumFirstRank: 0,
       sumTimeMs: 0, rankCount: 0, hit1Count: 0, sumMRR: 0, completeCount: 0,
       sumLlmCalls: 0, sumToolCalls: 0, sumFallbackCalls: 0, toolCalls: {},
+      sumLocalMs: 0, sumEmbedMs: 0, sumLlmMs: 0, embedHits: 0, embedMisses: 0,
+      onlineList: [], hits: [],
       single: mkGroup(), complex: mkGroup(),
     }
     // 复合问题 = 参考答案含多个 | 成分（须综合多切片）
@@ -2016,6 +2965,17 @@ const updateStrategyStats = () => {
     const hr = r.hitRate || 0
     cur.sumHitRate += hr; g.sumHitRate += hr
     cur.sumTimeMs += r.timeMs || 0
+    // 耗时拆分：有 timing 用实测拆分；恢复的旧数据（无 timing）退化为「全部算本地计算」
+    const tt = r.timing
+    cur.sumEmbedMs += tt?.embedMs || 0
+    cur.sumLlmMs += tt?.llmMs || 0
+    cur.sumLocalMs += tt ? tt.localMs : (r.timeMs || 0)
+    cur.embedHits += tt?.embedHits || 0
+    cur.embedMisses += tt?.embedMisses || 0
+    // Hit@K：逐题记录「完整排名池里的最前命中位次 + 池深度」，随后统一按 K=1..hitKCap 统计
+    cur.hits.push({ hitRank: r.hitRank || 0, rankPoolSize: r.rankPoolSize || 0 })
+    // 在线延迟：把被缓存掉的嵌入耗时换回「冷启动单条嵌入延迟」（真实一次提问必须现嵌入一条查询）
+    cur.onlineList.push(onlineTimeOf(r))
     // 成本：对话模型调用次数 + 工具调用分布（工具调用用于消融实验核对「工具是否真被调用」）
     cur.sumLlmCalls += r.llmCalls || 0
     // 工具分布只统计「模型自己调用的工具」；系统预取/系统补检索/模型决策不计入（补检索单列，见 avgFallbackCalls）
@@ -2058,6 +3018,8 @@ const updateStrategyStats = () => {
       avgHitRate: a.testedCount > 0 ? a.sumHitRate / a.testedCount : 0,
       avgFirstRank: a.rankCount > 0 ? a.sumFirstRank / a.rankCount : -1,
       avgTimeMs: a.testedCount > 0 ? a.sumTimeMs / a.testedCount : 0,
+      onlineTimeMs: medianOf(a.onlineList),
+      onlineP90Ms: quantileOf(a.onlineList, 0.9),
       hitAt1: a.testedCount > 0 ? a.hit1Count / a.testedCount : 0,
       mrr: a.testedCount > 0 ? a.sumMRR / a.testedCount : 0,
       completeRate: a.testedCount > 0 ? a.completeCount / a.testedCount : 0,
@@ -2065,6 +3027,16 @@ const updateStrategyStats = () => {
       avgLlmCalls: a.testedCount > 0 ? a.sumLlmCalls / a.testedCount : 0,
       avgToolCalls: a.testedCount > 0 ? a.sumToolCalls / a.testedCount : 0,
       avgFallbackCalls: a.testedCount > 0 ? a.sumFallbackCalls / a.testedCount : 0,
+      avgLocalMs: a.testedCount > 0 ? a.sumLocalMs / a.testedCount : 0,
+      avgEmbedMs: a.testedCount > 0 ? a.sumEmbedMs / a.testedCount : 0,
+      avgLlmMs: a.testedCount > 0 ? a.sumLlmMs / a.testedCount : 0,
+      // 无 timing 数据（旧快照）时给 -1 → 界面显示 '-'，避免误读为「0% 命中」
+      embedHitRate: (a.embedHits + a.embedMisses) > 0 ? a.embedHits / (a.embedHits + a.embedMisses) : -1,
+      // Hit@K 曲线（Hit@1..Hit@K）：分子=池内最前命中位次 ≤ K 的题数，分母=排名池深度 ≥ K 的题数
+      ...(() => {
+        const curve = hitKCurve(a.hits, hitKCap.value)
+        return { hitAtK: curve.hitAtK, hitKDenom: curve.denom, hitKMax: curve.hitAtK.length }
+      })(),
       // 工具分布按「平均次数/题」归一，便于消融实验直接读「该工具平均每题被调用几次」
       toolDistribution: Object.fromEntries(
         Object.entries(a.toolCalls as Record<string, number>).map(([k, v]) => [k, a.testedCount > 0 ? v / a.testedCount : 0]),
@@ -2084,6 +3056,11 @@ const updateStrategyStats = () => {
   allStrategyStats.value = stats.map(s => withRunStd(s))
 }
 
+// Hit@K 上限改变：位次是按「完整排名池」（最多 100 位）记录的，所以直接重算曲线即可，无需重跑测试
+watch(() => test.hitKMax, () => {
+  if (!test.isRunning && !restoringTestData && rankAnalysisResults.value.length) updateStrategyStats()
+})
+
 /**
  * 把某策略「刚跑完的这一轮」汇总入 strategyRuns（重复运行时用于均值±标准差）。
  * 必须在跑完该策略全部问题后调用：此时 rankAnalysisResults 中该策略的行只属于本轮。
@@ -2102,6 +3079,10 @@ const snapshotStrategyRun = (strategyId: string) => {
     completeRate: rows.filter(r => (r.hitRate || 0) >= 1).length / rows.length,
     avgFirstRank: ranked.length ? sumFirst / ranked.length : -1,
     avgTimeMs: rows.reduce((s, r) => s + (r.timeMs || 0), 0) / rows.length,
+    // 与展示口径一致：在线延迟取该轮全部问题的中位数（对长尾更稳健）
+    onlineTimeMs: medianOf(rows.map(r => onlineTimeOf(r))),
+    // 本轮 Hit@K 曲线（重复运行时在 withRunStd 里按 K 求均值±标准差，供曲线画误差带）
+    hitAtK: hitKCurve(rows.map(r => ({ hitRank: r.hitRank, rankPoolSize: r.rankPoolSize })), hitKCap.value).hitAtK,
     avgLlmCalls: rows.reduce((s, r) => s + (r.llmCalls || 0), 0) / rows.length,
     avgToolCalls: rows.reduce((s, r) => s + (r.toolCalls || 0), 0) / rows.length,
   }
@@ -2113,7 +3094,19 @@ const snapshotStrategyRun = (strategyId: string) => {
 /** 用各轮汇总覆盖展示指标为均值 + 标准差（仅 1 轮时原样返回） */
 const withRunStd = (s: (typeof allStrategyStats.value)[number]) => {
   const runs = strategyRuns.value[s.strategyId] || []
-  if (runs.length < 2) return { ...s, runs: runs.length || 1 }
+  // Hit@K：多轮时按 K 求各轮均值（曲线用均值；某轮缺该 K 的取值则不参与该 K 的平均）
+  const hitKMean = ((): number[] => {
+    const base = s.hitAtK || []
+    if (runs.length < 2) return base
+    const K = Math.max(base.length, ...runs.map(r => r.hitAtK?.length || 0))
+    const out: number[] = []
+    for (let k = 0; k < K; k++) {
+      const vals = runs.map(r => r.hitAtK?.[k]).filter((v): v is number => typeof v === 'number' && v >= 0)
+      out.push(vals.length ? meanOf(vals) : (base[k] ?? -1))
+    }
+    return out
+  })()
+  if (runs.length < 2) return { ...s, runs: runs.length || 1, hitAtK: hitKMean }
   const pick = (fn: (r: StrategyRunStat) => number) => ({
     mean: meanOf(runs.map(fn)),
     std: stdOf(runs.map(fn)),
@@ -2125,6 +3118,8 @@ const withRunStd = (s: (typeof allStrategyStats.value)[number]) => {
   const complete = pick(r => r.completeRate)
   const firstRank = pick(r => (r.avgFirstRank > 0 ? r.avgFirstRank : 0))
   const time = pick(r => r.avgTimeMs)
+  // 旧快照（本次改动前保存的 .kb）没有 onlineTimeMs：退回该轮的平均墙钟，避免出现 NaN
+  const online = pick(r => r.onlineTimeMs || r.avgTimeMs || 0)
   const llm = pick(r => r.avgLlmCalls)
   const tools = pick(r => r.avgToolCalls)
   return {
@@ -2136,6 +3131,8 @@ const withRunStd = (s: (typeof allStrategyStats.value)[number]) => {
     completeRate: complete.mean,
     avgFirstRank: firstRank.mean > 0 ? firstRank.mean : -1,
     avgTimeMs: time.mean,
+    onlineTimeMs: online.mean,
+    hitAtK: hitKMean,
     avgLlmCalls: llm.mean,
     avgToolCalls: tools.mean,
     runs: runs.length,
@@ -2147,6 +3144,7 @@ const withRunStd = (s: (typeof allStrategyStats.value)[number]) => {
       completeRate: complete.std,
       avgFirstRank: firstRank.std,
       avgTimeMs: time.std,
+      onlineTimeMs: online.std,
       avgLlmCalls: llm.std,
       avgToolCalls: tools.std,
     },
@@ -2312,6 +3310,33 @@ const toolDistText = (dist: Record<string, number>, fallback = 0): string => {
   return [main, fb].filter(Boolean).join(' · ') || (store.locales=='zh' ? '本次未调用检索工具' : 'no retrieval tools used')
 }
 
+/**
+ * 「在线延迟」单元格悬停说明：把耗时拆成「策略自身成本 / 嵌入 / 对话模型」三段，并给出热缓存下的实测墙钟，
+ * 让「批量向量化省掉了多少、策略本身多贵、模型多贵」一眼可辨（而不是一个含义模糊的总毫秒数）。
+ */
+const timeBreakdownTitle = (s: any): string => {
+  const zh = store.locales == 'zh'
+  const ms = (n: number) => `${Math.round(n || 0)} ms`
+  const hit = s.embedHitRate >= 0 ? `${(s.embedHitRate * 100).toFixed(1)}%` : '-'
+  const cold = coldEmbedMs.value > 0 ? ms(coldEmbedMs.value) : (zh ? '未测量' : 'not measured')
+  const batch = embedRunStats.questions > 0
+    ? (zh
+        ? `批量预嵌入：${embedRunStats.questions} 题 / ${embedRunStats.requests} 次请求，摊销 ${embedRunStats.amortizedMs.toFixed(1)} ms/题`
+        : `Batch pre-embed: ${embedRunStats.questions} q / ${embedRunStats.requests} req, ${embedRunStats.amortizedMs.toFixed(1)} ms/q amortized`)
+    : (zh ? '本次未做批量预嵌入（问题数 < 2 或已全部命中缓存）' : 'no batch pre-embed this run')
+  return zh
+    ? `在线延迟（每题中位数）：${ms(s.onlineTimeMs)}（p90 ${ms(s.onlineP90Ms)}）\n`
+      + `定义：一次真实用户提问（查询必须现嵌入一次）在该策略下的检索延迟 = 实测检索墙钟 + 单条查询嵌入 ${cold}\n`
+      + `（批量向量化把「查询嵌入」移到了评测准备阶段，所以墙钟里不含它；这里补回来，跨批次/开关缓存都可比）\n`
+      + `三段均值参考：本地检索计算 ${ms(s.avgLocalMs)}｜对话模型 ${ms(s.avgLlmMs)}｜本次实测嵌入 ${ms(s.avgEmbedMs)}\n`
+      + `热缓存实测墙钟（均值）：${ms(s.avgTimeMs)}；检索阶段嵌入缓存命中率 ${hit}\n${batch}`
+    : `Online latency (per-question median): ${ms(s.onlineTimeMs)} (p90 ${ms(s.onlineP90Ms)})\n`
+      + `Definition: retrieval latency for one real user query (the query must be embedded once) = measured wall clock + one query embed ${cold}\n`
+      + `(batch pre-embedding moved the query embed into the preparation phase, so the wall clock excludes it; adding it back keeps runs comparable)\n`
+      + `Component means: local retrieval ${ms(s.avgLocalMs)} | chat model ${ms(s.avgLlmMs)} | measured embed ${ms(s.avgEmbedMs)}\n`
+      + `Measured wall clock under hot cache (mean): ${ms(s.avgTimeMs)}; retrieval-phase embed cache hit rate ${hit}\n${batch}`
+}
+
 // ==================== 测试结果随 .kb 保存/加载 ====================
 // 开启「处理配置 → 保存测试结果到 KB 文件」后：批量/单题测试的检索结果、位次分析、策略召回对比、
 // 检索过程（智能路由工具轨迹）都会随 .kb 落盘，重新加载即可复现对比数据（不重跑），便于论文/复现实验。
@@ -2327,6 +3352,9 @@ const emitTestData = () => {
       repeat: Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1)),
       hitMode: test.hitMode,
       matchMode: test.matchMode,
+      hitKMax: Math.max(0, parseInt(String(test.hitKMax)) || 0),
+      // 消融实验配置（策略参数变体）：随 .kb 一起保存，重新加载后变体标签/统计仍可解析（复现实验）
+      ablation: JSON.parse(JSON.stringify(ablation.runs)),
     },
     testResults: testResults.value,
     rankAnalysisResults: rankAnalysisResults.value,
@@ -2345,6 +3373,9 @@ const restoreTestData = async (data: any) => {
   if (st.repeat) test.repeat = Math.max(1, Math.min(5, Number(st.repeat) || 1))
   if (st.hitMode === 'slice' || st.hitMode === 'text' || st.hitMode === 'llm') test.hitMode = st.hitMode
   if (st.matchMode === 'precise' || st.matchMode === 'fuzzy') test.matchMode = st.matchMode
+  if (st.hitKMax !== undefined) test.hitKMax = Math.max(0, Math.min(HIT_K_POOL_CAP, Number(st.hitKMax) || 0))
+  // 消融配置：恢复后变体标签/统计分组才能解析（老快照无该字段则保留当前面板配置）
+  if (Array.isArray(st.ablation)) ablation.runs = st.ablation.filter((r: any) => r?.id && r?.strategyId)
   testResults.value = Array.isArray(data.testResults) ? data.testResults : []
   rankAnalysisResults.value = Array.isArray(data.rankAnalysisResults) ? data.rankAnalysisResults : []
   allStrategyStats.value = Array.isArray(data.allStrategyStats) ? data.allStrategyStats : []
@@ -2382,6 +3413,10 @@ const runAllStrategyTest = async () => {
 
   // 先补齐切片向量再计时开测（向量化耗时不计入检索时间）
   if (!(await ensureTestVectors())) return
+  // 评测准备（都不计入检索计时）：快照本体/实体索引 + 批量向量化全部问题。
+  // 批量预嵌入在「全部策略」测试里收益最大：同一问题原本会被 策略数 × 重复轮数 次重复嵌入。
+  beginRunScope()
+  await prewarmTestQueries()
   if (test.hitMode === 'llm') {
     emit('updateState', store.locales=='zh'
       ? '大模型判定已启用：仅智能路由类策略按大模型判定，其余策略按切片/答案口径判定'
@@ -2395,20 +3430,24 @@ const runAllStrategyTest = async () => {
   startTestClock()
   initFileSummaries()
 
-  // 全部启用策略对应管线就绪（当前自动覆盖：文件自带摘要向量化；本体/社区/Q 由父级建库管线提供）
-  await ensureStrategyChannelsReady()
+  // 执行清单：有启用的消融变体 → 逐变体跑（同一策略的不同参数各占一行）；否则退回「每个启用策略跑一次」。
+  // 与策略配置面板里的「将执行」预览同源（batchRunPreview），避免预览与实际执行不一致。
+  const runList: Array<{ id: string; label: string; searchNum?: number }> =
+    batchRunPreview.value.map(p => ({ id: p.id, label: p.label, searchNum: p.searchNum }))
+
+  // 全部启用策略（含消融变体）对应管线就绪（当前自动覆盖：文件自带摘要向量化；本体/社区/Q 由父级建库管线提供）
+  await ensureStrategyChannelsReady(runList.map(r => r.id))
 
   // 已配置预热且未执行 → 先预热（时间单独计时，不计入检索时间）
   if (!prewarmDone.value && (prewarm.summary || prewarm.summaryVec || prewarm.sliceVec || prewarm.questionVec || prewarm.entity || prewarm.community)) {
     await runPrewarm()
   }
 
-  const strategies = algorithmOptions.value
   const searchNum = parseInt(test.searchNum.toString())
   const rows = test.questions.map((q, i) => ({ question: q?.trim(), answer: test.answers?.[i]?.trim() || '' }))
   // 重复次数：同一批问题重复跑 N 轮（各轮独立汇总，用于均值±标准差；默认 1=不重复）
   const repeat = Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1))
-  const totalRuns = strategies.length * rows.length * repeat
+  const totalRuns = runList.length * rows.length * repeat
   let done = 0
 
   // 新一次「全部策略」测试：自动清空上一次结果/位次/统计，只保留本次
@@ -2416,29 +3455,31 @@ const runAllStrategyTest = async () => {
   strategyRuns.value = {}
 
   let abortedRuns = false
+  // 检索循环开始：进度/状态从这里起上报到底部状态栏（前面的预热阶段由预热流程自己上报状态）
+  batchLoopActive.value = true
   for (let rep = 0; rep < repeat && !abortedRuns; rep++) {
-    for (const algo of strategies) {
+    for (const algo of runList) {
+      // 变体可自带切片数 K（消融「K 值」用）；留空则跟随面板的切片数量
+      const algoSearchNum = algo.searchNum ? Math.max(1, Math.min(100, parseInt(String(algo.searchNum)) || searchNum)) : searchNum
       for (let i = 0; i < rows.length; i++) {
         // 暂停/停止：在问题之间生效（已测结果与统计保留）
         if (!(await waitWhilePaused())) { abortedRuns = true; break }
         const { question, answer } = rows[i]
+        allTestProgressText.value = `${algo.label} ${i + 1}/${rows.length}${repeat > 1 ? ` (${rep + 1}/${repeat})` : ''}`
         if (!question || isJunkQuestion(question)) { done++; continue }
-        allTestProgressText.value = store.locales=='zh'
-          ? `策略「${algo.label}」· ${i + 1}/${rows.length}${repeat > 1 ? `（第 ${rep + 1}/${repeat} 轮）` : ''}`
-          : `Strategy "${algo.label}" · ${i + 1}/${rows.length}${repeat > 1 ? ` (run ${rep + 1}/${repeat})` : ''}`
         let slices: TestResult['slices'] = []
         try {
           test.questionStatus[i] = {
             text: store.locales=='zh' ? `测试中 [${algo.label}]...` : `Testing [${algo.label}]...`,
-            color: '#FF9800', icon: 'fa fa-spinner fa-spin', algorithm: algo.value
+            color: '#FF9800', icon: 'fa fa-spinner fa-spin', algorithm: algo.id
           }
-          slices = await performTestChat(question, searchNum, algo.value, i, answer, test.refs?.[i]) || []
+          slices = await performTestChat(question, algoSearchNum, algo.id, i, answer, test.refs?.[i]) || []
         } catch (error) {
-          console.error(`策略 ${algo.value} 问题 ${i + 1} 测试失败:`, error)
+          console.error(`策略 ${algo.id} 问题 ${i + 1} 测试失败:`, error)
         }
         // 累积该策略×问题的切片明细（只存 id/元数据，正文按 id 回源；直接引用返回数组，不再深拷贝）
         allStrategySliceResults.value.push({
-          strategyId: algo.value,
+          strategyId: algo.id,
           label: algo.label,
           question,
           answer,
@@ -2450,7 +3491,7 @@ const runAllStrategyTest = async () => {
         test.progress = Math.round((done / totalRuns) * 100)
       }
       // 本轮该策略已跑完全部问题：汇总本轮指标（重复运行时用于均值±标准差）
-      snapshotStrategyRun(algo.value)
+      snapshotStrategyRun(algo.id)
       // 每测完一个策略，立即刷新「策略召回对比」，让该策略数据实时可见
       updateStrategyStats()
       // 每跑完一个策略即刷新 .kb 快照（中途保存也能拿到已完成部分）
@@ -2459,6 +3500,8 @@ const runAllStrategyTest = async () => {
       if (abortedRuns) break
     }
   }
+  batchLoopActive.value = false
+  endRunScope()
 
   // 聚合每个策略的召回统计（与单测/批测共用同一聚合逻辑）
   updateStrategyStats()
@@ -2481,9 +3524,49 @@ const runAllStrategyTest = async () => {
 
   const best = allStrategyStats.value[0]
   emit('updateState', store.locales=='zh'
-    ? `全部策略测试完成：共 ${allStrategyStats.value.length} 个策略${repeat > 1 ? `（每策略 ${repeat} 轮，指标为均值±标准差）` : ''}，最优「${best?.label}」召回 ${best ? (best.recallRate*100).toFixed(1) : 0}%`
-    : `All strategies tested: ${allStrategyStats.value.length} strategies${repeat > 1 ? ` (${repeat} runs each, mean±std)` : ''}, best "${best?.label}" recall ${best ? (best.recallRate*100).toFixed(1) : 0}%`)
+    ? `全部策略测试完成：共 ${allStrategyStats.value.length} 个策略/变体${repeat > 1 ? `（每项 ${repeat} 轮，指标为均值±标准差）` : ''}，最优「${best?.label}」召回 ${best ? (best.recallRate*100).toFixed(1) : 0}%`
+    : `All strategies/variants tested: ${allStrategyStats.value.length} rows${repeat > 1 ? ` (${repeat} runs each, mean±std)` : ''}, best "${best?.label}" recall ${best ? (best.recallRate*100).toFixed(1) : 0}%`)
 }
+
+/**
+ * Hit@K 曲线表（宽格式，行=K、列=每个策略/变体）：上半部是 Hit@K(%)，下半部是各 K 的有效题数分母。
+ * 直接插入 Excel 折线图即可得到 Hit@K 曲线；长表（策略,K,Hit@K）可用「转置」或逐列选取。
+ */
+const hitKSheetRows = (): any[][] => {
+  const stats = allStrategyStats.value
+  const K = stats.reduce((m, s) => Math.max(m, s.hitKMax || s.hitAtK?.length || 0), 0)
+  if (!stats.length || K <= 0) return [['Hit@K', store.locales == 'zh' ? '暂无数据' : 'no data']]
+  const header = ['K', ...stats.map(s => s.label)]
+  const pct: any[][] = [header]
+  const long: any[][] = [['策略', '策略ID', 'K', 'Hit@K(%)', '有效题数']]
+  for (let k = 1; k <= K; k++) {
+    pct.push([k, ...stats.map(s => {
+      const v = s.hitAtK?.[k - 1]
+      return (typeof v === 'number' && v >= 0) ? +(v * 100).toFixed(1) : '-'
+    })])
+    for (const s of stats) {
+      const v = s.hitAtK?.[k - 1]
+      long.push([s.label, s.strategyId, k, (typeof v === 'number' && v >= 0) ? +(v * 100).toFixed(1) : '-', s.hitKDenom?.[k - 1] ?? '-'])
+    }
+  }
+  return [
+    [store.locales == 'zh' ? 'Hit@K(%)：行=K（位次截断），列=策略/变体' : 'Hit@K(%) rows = K, columns = strategy/variant'],
+    ...pct,
+    [],
+    [store.locales == 'zh' ? '有效题数（排名池深度 ≥ K 的题数；深度不足的题不计入该 K）' : 'Valid question count (rank pool depth >= K)'],
+    ...pct.map((row, i) => i === 0
+      ? ['K', ...stats.map(s => s.label)]
+      : [row[0], ...stats.map(s => s.hitKDenom?.[Number(row[0]) - 1] ?? '-')]),
+    [],
+    [store.locales == 'zh' ? '长表（便于用 pandas/ggplot 画图）' : 'Long format (for pandas/ggplot)'],
+    ...long,
+  ]
+}
+
+// ==================== Hit@K（仅统计数据与导出，不在界面画图） ====================
+// 曲线不再在面板里可视化：导出 Excel 的「Hit@K曲线」工作表同时含
+// 宽表（行=K、列=策略）与长表（策略,K,Hit@K,有效题数），可直接用 Excel/pandas 自行画图。
+// K 上限由工具栏的「K」输入控制（0=跟随切片数量），统计口径见 hitKCurve()。
 
 // 导出策略召回对比到 Excel（汇总 + 明细两个工作表）
 const exportAllStrategyStats = async () => {
@@ -2495,7 +3578,7 @@ const exportAllStrategyStats = async () => {
   try {
     // 汇总表（按 策略 × 分组 展开：全部 / 单切片 / 复合，便于论文分组对比）
     const summary: any[][] = [
-      ['策略', '策略ID', '分组', '重复轮数', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '平均时间(ms)', '模型调用/题', '工具调用/题', '工具分布']
+      ['策略', '策略ID', '分组', '重复轮数', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '在线延迟(ms,中位数)', '在线延迟p90(ms)', '热缓存耗时(ms,均值)', '本地计算(ms)', '嵌入(ms)', '对话模型(ms)', '嵌入缓存命中率', '模型调用/题', '工具调用/题', '工具分布']
     ]
     for (const s of allStrategyStats.value) {
       const groups: Array<{ key: string, g: any }> = [
@@ -2517,7 +3600,14 @@ const exportAllStrategyStats = async () => {
           g.testedCount > 0 ? g.mrr.toFixed(3) : '-',
           g.testedCount > 0 ? (g.completeRate * 100).toFixed(1) + '%' : '-',
           g.avgFirstRank > 0 ? g.avgFirstRank.toFixed(1) : '-',
+          // 耗时口径：在线延迟（中位，含单条冷嵌入）= 与真实单次提问可比；热缓存耗时=本次批量实测墙钟
+          s.onlineTimeMs > 0 ? Math.round(s.onlineTimeMs) : '-',
+          s.onlineP90Ms > 0 ? Math.round(s.onlineP90Ms) : '-',
           s.avgTimeMs > 0 ? Math.round(s.avgTimeMs) : '-',
+          Math.round(s.avgLocalMs || 0),
+          Math.round(s.avgEmbedMs || 0),
+          Math.round(s.avgLlmMs || 0),
+          s.embedHitRate >= 0 ? (s.embedHitRate * 100).toFixed(1) + '%' : '-',
           s.avgLlmCalls > 0 ? s.avgLlmCalls.toFixed(2) : '-',
           s.avgToolCalls > 0 ? s.avgToolCalls.toFixed(2) : '-',
           s.avgToolCalls > 0 ? toolDistText(s.toolDistribution) : '-'
@@ -2547,21 +3637,24 @@ const exportAllStrategyStats = async () => {
 
     // 明细表
     const detail: any[][] = [
-      ['策略', '策略ID', '问题', '参考答案', '是否命中', '答案命中率', '最优位次', '命中切片数', '召回时间(ms)']
+      ['策略', '策略ID', '问题', '参考答案', '是否命中', '答案命中率', '最优位次', '池内位次(Hit@K用)', '排名池深度', '命中切片数', '召回时间(ms)', '策略参数']
     ]
     const sorted = [...rankAnalysisResults.value].sort((a, b) =>
       a.algorithm.localeCompare(b.algorithm) || a.question.localeCompare(b.question))
     for (const r of sorted) {
       detail.push([
-        algorithmOptions.value.find(a => a.value === r.algorithm)?.label || r.algorithm,
+        labelOf(r.algorithm),
         r.algorithm,
         r.question,
         r.answer,
         r.foundCount > 0 ? '是' : '否',
         ((r.hitRate || 0) * 100).toFixed(1) + '%',
         r.firstRank > 0 ? r.firstRank : '-',
+        r.hitRank ? r.hitRank : (r.hitRank === 0 ? '未命中' : '-'),
+        r.rankPoolSize ?? '-',
         r.foundCount,
-        r.timeMs ? Math.round(r.timeMs) : '-'
+        r.timeMs ? Math.round(r.timeMs) : '-',
+        variantParamSummary(r.algorithm)
       ])
     }
 
@@ -2571,11 +3664,13 @@ const exportAllStrategyStats = async () => {
     ws2['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 30 }, { wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }]
     const ws3 = XLSX.utils.aoa_to_sheet(significance)
     ws3['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 10 }, { wch: 20 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }]
+    const ws4 = XLSX.utils.aoa_to_sheet(hitKSheetRows())
 
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws1, '策略召回对比')
     XLSX.utils.book_append_sheet(wb, ws2, '明细')
     XLSX.utils.book_append_sheet(wb, ws3, '配对显著性')
+    XLSX.utils.book_append_sheet(wb, ws4, 'Hit@K曲线')
 
     const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
     XLSX.writeFile(wb, `strategy_recall_${timestamp}.xlsx`)
@@ -2598,7 +3693,7 @@ const exportAllTestData = async () => {
   try {
     // 表1：策略召回对比汇总（按 策略 × 分组 展开：全部 / 单切片 / 复合）
     const summary: any[][] = [
-      ['策略', '策略ID', '分组', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '平均时间(ms)', '模型调用/题', '工具调用/题', '工具分布']
+      ['策略', '策略ID', '分组', '测试问题数', '命中问题数', '召回率', '答案命中率', 'Hit@1', 'MRR', '完整率', '平均位次', '在线延迟(ms,中位数)', '在线延迟p90(ms)', '热缓存耗时(ms,均值)', '本地计算(ms)', '嵌入(ms)', '对话模型(ms)', '嵌入缓存命中率', '模型调用/题', '工具调用/题', '工具分布']
     ]
     for (const s of allStrategyStats.value) {
       const groups: Array<{ key: string, g: any }> = [
@@ -2619,7 +3714,13 @@ const exportAllTestData = async () => {
           g.testedCount > 0 ? g.mrr.toFixed(3) : '-',
           g.testedCount > 0 ? (g.completeRate * 100).toFixed(1) + '%' : '-',
           g.avgFirstRank > 0 ? g.avgFirstRank.toFixed(1) : '-',
+          s.onlineTimeMs > 0 ? Math.round(s.onlineTimeMs) : '-',
+          s.onlineP90Ms > 0 ? Math.round(s.onlineP90Ms) : '-',
           s.avgTimeMs > 0 ? Math.round(s.avgTimeMs) : '-',
+          Math.round(s.avgLocalMs || 0),
+          Math.round(s.avgEmbedMs || 0),
+          Math.round(s.avgLlmMs || 0),
+          s.embedHitRate >= 0 ? (s.embedHitRate * 100).toFixed(1) + '%' : '-',
           s.avgLlmCalls > 0 ? s.avgLlmCalls.toFixed(2) : '-',
           s.avgToolCalls > 0 ? s.avgToolCalls.toFixed(2) : '-',
           s.avgToolCalls > 0 ? toolDistText(s.toolDistribution) : '-'
@@ -2629,13 +3730,13 @@ const exportAllTestData = async () => {
 
     // 表2：位次明细
     const detail: any[][] = [
-      ['策略', '策略ID', '问题', '参考答案', '是否命中', '答案命中率', '最优位次', '命中切片数', '召回时间(ms)', '模型调用', '工具调用', '判定方式', '大模型判定理由']
+      ['策略', '策略ID', '问题', '参考答案', '是否命中', '答案命中率', '最优位次', '命中切片数', '召回时间(ms)', '在线延迟(ms)', '本地计算(ms)', '嵌入(ms)', '对话模型(ms)', '池内位次(Hit@K用)', '排名池深度', '模型调用', '工具调用', '判定方式', '大模型判定理由']
     ]
     const sorted = [...rankAnalysisResults.value].sort((a, b) =>
       a.algorithm.localeCompare(b.algorithm) || a.question.localeCompare(b.question))
     for (const r of sorted) {
       detail.push([
-        algorithmOptions.value.find(a => a.value === r.algorithm)?.label || r.algorithm,
+        labelOf(r.algorithm),
         r.algorithm,
         r.question,
         r.answer,
@@ -2644,6 +3745,12 @@ const exportAllTestData = async () => {
         r.firstRank > 0 ? r.firstRank : '-',
         r.foundCount,
         r.timeMs ? Math.round(r.timeMs) : '-',
+        Math.round(onlineTimeOf(r)),
+        r.timing ? Math.round(r.timing.localMs) : '-',
+        r.timing ? Math.round(r.timing.embedMs) : '-',
+        r.timing ? Math.round(r.timing.llmMs) : '-',
+        r.hitRank ? r.hitRank : (r.hitRank === 0 ? '未命中' : '-'),
+        r.rankPoolSize ?? '-',
         r.llmCalls || 0,
         r.toolCalls || 0,
         r.refMode === 'llm' ? (store.locales=='zh' ? '大模型判定' : 'LLM judge') : (r.refMode === 'slice' ? (store.locales=='zh' ? '切片命中' : 'Slice hit') : (store.locales=='zh' ? '答案命中' : 'Answer hit')),
@@ -2711,12 +3818,14 @@ const exportAllTestData = async () => {
     ws3['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 30 }, { wch: 10 }, { wch: 8 }, { wch: 20 }, { wch: 50 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 20 }, { wch: 12 }]
     const ws4 = XLSX.utils.aoa_to_sheet(significance)
     ws4['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 10 }, { wch: 20 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }]
+    const ws5 = XLSX.utils.aoa_to_sheet(hitKSheetRows())
 
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws1, '策略召回对比')
     XLSX.utils.book_append_sheet(wb, ws2, '位次明细')
     XLSX.utils.book_append_sheet(wb, ws3, '切片明细')
     XLSX.utils.book_append_sheet(wb, ws4, '配对显著性')
+    XLSX.utils.book_append_sheet(wb, ws5, 'Hit@K曲线')
 
     const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
     XLSX.writeFile(wb, `strategy_test_all_${timestamp}.xlsx`)
@@ -2796,16 +3905,13 @@ const formatPercent = (value: number) => {
   return (value * 100).toFixed(1) + '%'
 }
 
-// 获取算法标签
-const getAlgorithmLabel = (algo: SearchAlgorithm) => {
-  const option = algorithmOptions.value.find(o => o.value === algo)
-  return option ? option.label : algo
-}
+// 获取算法标签（消融变体优先：变体标签里带覆盖参数摘要，图表与导出可直接用）
+const getAlgorithmLabel = (algo: SearchAlgorithm) => labelOf(algo)
 
 // 该策略是否启用 问题增强(Q) / 文件摘要 通道（仅启用对应通道的策略才展示「通道缺失·切片分兜底」标记，
 // 避免 similarity 等纯切片策略也把 dense 的 hasQ=false 误标为「无关联问题」）
 const channelFlagsOf = (algo: string): { qOn: boolean; fOn: boolean } => {
-  const def = getEnabledStrategies().find(s => s.id === algo)
+  const def = defOf(algo)
   const steps: any[] = ((def?.steps || []) as any[])
   const denseStep = steps.find((st: any) => st?.primitive === 'dense_score')
   const qOn = Number(denseStep?.params?.summaryWeight ?? props.model?.summaryWeight ?? 0.7) > 0
@@ -2823,6 +3929,8 @@ const isJunkQuestion = (q: string) => /#attachment:/i.test(q.trim() || '')
 // 组件挂载时初始化
 onMounted(() => {
   initFileSummaries()
+  // 消融实验配置：先读本地保存的（.kb 里若带配置，下面的 restoreTestData 会覆盖）
+  loadAblationLocal()
   // 若 .kb 已保存测试用例，恢复它们（连同关联切片 refs）
   if (props.testCases?.questions?.length) {
     test.questions = [...props.testCases.questions]
@@ -3216,17 +4324,45 @@ const clearTestCases = () => {
           </div>
         </template>
         <div v-else class="kt-btn" @click="runAllStrategyTest" :disabled="test.isRunning"
-             :title="store.locales=='zh' ? '批量测试所有策略：每个策略跑一遍全部问题，统计召回准确率' : 'Test all strategies: run all questions for every strategy'">
+             :title="store.locales=='zh'
+               ? (ablationEnabledVariants.length
+                 ? `批量测试所有配置：${ablationEnabledVariants.length} 个消融组（策略/变体）各跑一遍全部问题，统计召回率与 Hit@K`
+                 : '批量测试所有策略：每个策略跑一遍全部问题，统计召回准确率（如需参数消融，先在批量面板配置消融组）')
+               : (ablationEnabledVariants.length
+                 ? `Test all configured groups: ${ablationEnabledVariants.length} ablation group(s) over all questions`
+                 : 'Test all strategies: run all questions for every strategy')">
           <i class="fa fa-play"></i>
         </div>
         <!-- 重复次数（仅「全部策略」批量生效）：同批问题重复 N 轮，各指标以均值±标准差呈现 -->
         <input v-model="test.repeat" type="number" min="1" max="5" class="kt-input" style="width:42px;"
                :disabled="test.isRunning"
                :title="store.locales=='zh' ? '重复次数（仅「批量测试所有策略」生效）：同一批问题重复跑 N 轮，指标以均值±标准差呈现，用于判断策略差异是否稳定（默认 1）' : 'Repeat count (all-strategy test only): run the same questions N times and report mean ± std (default 1)'"/>
+        <!-- Hit@K 统计的 K 上限（仅影响导出的「Hit@K曲线」工作表；界面上不画曲线，导出后用 Excel 自行处理） -->
+        <input v-model="test.hitKMax" type="number" min="0" :max="HIT_K_POOL_CAP" class="kt-input" style="width:42px;"
+               :disabled="test.isRunning"
+               :title="store.locales=='zh'
+                 ? `Hit@K 统计的 K 上限（导出 Excel 的「Hit@K曲线」工作表用）：0=跟随切片数量（当前 ${test.searchNum}）；填 1~${HIT_K_POOL_CAP} 可统计更深的召回位次（需重新跑批量测试才有对应数据；改数值后已有的位次数据可直接重算）`
+                 : `K cap for the exported Hit@K sheet: 0 = follow the slice count (now ${test.searchNum}); 1..${HIT_K_POOL_CAP} for deeper ranks (re-run to collect deeper data)`" />
         <!-- 清空批量测试结果 -->
         <div class="kt-btn" @click="clearAllResults" :disabled="test.isRunning || prewarmRunning"
              :title="store.locales=='zh' ? '清空批量测试结果 / 位次 / 统计（释放内存）' : 'Clear batch results / stats (free memory)'">
           <i class="fa fa-eraser"></i>
+        </div>
+        <!-- 策略配置（消融实验）：组列表 / 参数 / 将执行清单都在弹出面板里 -->
+        <div class="kt-btn" :class="{ on: configPanelOpen }" @click="openConfigPanel()"
+             :title="store.locales=='zh'
+               ? `策略配置（消融实验）：配置 ${ablation.runs.length} 组（启用 ${ablationEnabledVariants.length} 组）、设置各组策略参数，并预览「批量测试所有策略」将执行哪些策略/组`
+               : `Strategy config (ablation): ${ablation.runs.length} group(s), ${ablationEnabledVariants.length} enabled; tune params and preview what the batch run will test`">
+          <i class="fa fa-flask"></i>
+        </div>
+        <!-- 配对显著性检验（同一批问题、与基线配对做 McNemar / Wilcoxon）：内容较宽，放入弹出面板 -->
+        <div class="kt-btn" :class="{ on: sigPanelOpen }"
+             :style="{ opacity: allStrategyStats.length ? 1 : .45 }"
+             @click="allStrategyStats.length && (sigPanelOpen = true)"
+             :title="store.locales=='zh'
+               ? '配对显著性检验：同一批问题下与基线配对，命中差异用 McNemar 精确检验、位次差异用 Wilcoxon 符号秩检验（需先跑测试）'
+               : 'Paired significance: McNemar (hits) + Wilcoxon signed-rank (ranks) vs the baseline (run a test first)'">
+          <i class="fa fa-balance-scale"></i>
         </div>
         <!-- 预热入口（仅当有可勾选项时显示）：摘要生成 / 各类向量缓存都在浮层里操作 -->
         <div v-if="availablePrewarmItems.length > 0" class="kt-btn"
@@ -3234,7 +4370,6 @@ const clearTestCases = () => {
              @click="prewarmPanelOpen = !prewarmPanelOpen"
              :title="store.locales=='zh' ? '预热 / 向量缓存：生成缺失摘要、补齐各类向量（已有数据自动跳过，耗时不计入检索）' : 'Pre-warm / vector caches: generate missing summaries, fill missing vectors (existing data is skipped)'">
           <i class="fa" :class="prewarmRunning ? 'fa-spinner fa-spin' : 'fa-fire'"></i>
-          <span v-if="prewarmEnabledItems.length" class="pw-badge">{{ prewarmEnabledItems.length }}</span>
         </div>
         <!-- 导出（固定放最右：margin-left:auto 吸收左侧剩余空间，与操作按钮自然分隔） -->
         <div class="kt-btn" style="margin-left:auto;" @click="exportAllTestData" :disabled="isExporting" :title="store.locales=='zh'?'导出全部测试数据（汇总+位次+切片明细）':'Export all test data (summary+rank+slices)'">
@@ -3284,20 +4419,9 @@ const clearTestCases = () => {
         <input v-model="test.searchNum" type="number" class="kt-input" style="width:42px;" :title="store.locales=='zh'?'切片数量':'Slice Count'"/>
       </template>
       
-      <!-- 进度 / 计数 -->
-      <template v-if="test.isRunning">
-        <span class="kt-spacer"></span>
-        <span class="kt-progress" style="flex:0 1 200px;width:auto;max-width:200px;"><span class="kt-progress-fill" :style="{ width: test.progress + '%', backgroundColor: '#4CAF50' }"></span></span>
-        <span class="kt-label">{{ test.progress.toFixed(0) }}%</span>
-        <span class="kt-label" :title="store.locales=='zh' ? '已运行时间' : 'Elapsed'"><i class="fa fa-clock-o"></i> {{ elapsedText }}</span>
-        <span class="kt-label" :title="store.locales=='zh' ? '预计剩余（按当前进度推算）' : 'Estimated remaining'"><i class="fa fa-hourglass-half"></i> {{ etaText }}</span>
-        <!-- 已暂停：等当前问题跑完后停下，可继续 / 停止 -->
-        <span v-if="batchCtl.paused" class="kt-label" style="color:#FF9800;">
-          <i class="fa fa-pause"></i> {{ store.locales=='zh' ? '已暂停' : 'Paused' }}
-        </span>
-        <span v-if="allTestProgressText" class="kt-label">{{ allTestProgressText }}</span>
-      </template>
-      <span v-else class="kt-label" style="margin-left:auto;font-size:12px;">
+      <!-- 已测/总题数（仅空闲时显示；运行中的进度/耗时/当前策略与题号都在下方状态栏，见 batchLiveText） -->
+      <span v-if="!test.isRunning" class="kt-label" style="margin-left:auto;font-size:12px;"
+            :title="store.locales=='zh' ? '已测问题数 / 问题总数（运行中的进度与预计剩余见底部状态栏）' : 'Tested / total questions (live progress shows in the status bar)'">
         {{ testResults.filter(Boolean).length }} / {{ test.questions.length }}
       </span>
     </div>
@@ -3523,6 +4647,8 @@ const clearTestCases = () => {
     <!-- 批量测试面板页面（批量测试 / 预热 / 用例管理 / 策略召回对比；顶部按钮见工具栏） -->
     <div v-if="activeTab === 'batch'" style="flex:1;border-radius:5px;padding:5px;display:flex;flex-direction:column;overflow:hidden;">
       <div class="scoll" style="flex:1;overflow:auto;">
+        <!-- ===== 策略配置（消融实验）：全部在工具栏「烧瓶」按钮打开的弹出面板里（此处不占内容区） ===== -->
+
         <!-- 策略召回对比 -->
         <div class="as-detail">
           <div class="as-detail-title">
@@ -3550,7 +4676,12 @@ const clearTestCases = () => {
                 <th style="text-align:center;">MRR</th>
                 <th style="text-align:center;">{{ store.locales=='zh' ? '完整率' : 'Complete' }}</th>
                 <th style="text-align:center;">{{ store.locales=='zh' ? '平均位次' : 'Avg Rank' }}</th>
-                <th style="text-align:center;">{{ store.locales=='zh' ? '平均时间' : 'Avg Time' }}</th>
+                <th style="text-align:center;"
+                    :title="store.locales=='zh'
+                      ? '在线延迟/题（中位数，括号内为轮间标准差）：一次真实用户提问（查询必须现嵌入一次）在该策略下的检索延迟 = 实测检索墙钟 + 单条查询嵌入延迟。批量向量化把「查询嵌入」移到了评测准备阶段，这里补回来，故与是否命中问题向量缓存无关、跨批次可比。悬停单元格看三段拆分（本地计算/嵌入/对话模型）、p90 尾延迟与嵌入缓存命中率'
+                      : 'Online latency per question (median ± std across rounds) = local retrieval + one cold query embed + chat-model time — what a single real user query costs; independent of the question-vector cache. Hover a cell for the breakdown'">
+                  {{ store.locales=='zh' ? '在线延迟/题' : 'Online/Qs' }}
+                </th>
                 <th style="text-align:center;"
                     :title="store.locales=='zh' ? '平均对话模型调用次数/题（成本）：Agentic 的工具轮与最终作答、社区 Map-Reduce 均计入' : 'Avg LLM calls per question (cost): agentic tool rounds + final answer, community map-reduce included'">
                   {{ store.locales=='zh' ? '模型调用/题' : 'LLM/Qs' }}
@@ -3564,8 +4695,8 @@ const clearTestCases = () => {
             <tbody>
               <tr v-for="(s, idx) in displayStats" :key="s.strategyId"
                   :class="{ 'as-best': idx === 0, expanded: expandedStrategy === s.strategyId }"
-                  @click="toggleStrategyDetail(s.strategyId)"
-                  :title="store.locales=='zh' ? '点击查看位次明细' : 'Click to view rank detail'">
+                  @click="openStrategyDetail(s.strategyId)"
+                  :title="store.locales=='zh' ? '点击查看位次明细（弹出面板）' : 'Click to view rank detail (panel)'">
                 <td>{{ idx === 0 ? '🏆 ' : '' }}{{ s.label }}<span v-if="s.runs > 1" class="ae-note"> ·{{ s.runs }}{{ store.locales=='zh' ? '轮' : 'runs' }}</span></td>
                 <td style="text-align:center;">{{ s.hitCount }}/{{ s.testedCount }}</td>
                 <td style="text-align:center;font-weight:bold;"
@@ -3584,7 +4715,11 @@ const clearTestCases = () => {
                 <td style="text-align:center;">
                   {{ s.avgFirstRank>0 ? fmtStat(s.avgFirstRank, s.std?.avgFirstRank, 1, 2) : '-' }}
                 </td>
-                <td style="text-align:center;">{{ s.avgTimeMs > 0 ? fmtStat(s.avgTimeMs, s.std?.avgTimeMs, 1, 0) + ' ms' : '-' }}</td>
+                <!-- 在线延迟（中位数）：含单条冷嵌入，跨批次可比；悬停看 本地/嵌入/模型 拆分与热缓存实测耗时 -->
+                <td style="text-align:center;"
+                    :title="timeBreakdownTitle(s)">
+                  {{ s.onlineTimeMs > 0 ? fmtStat(s.onlineTimeMs, s.std?.onlineTimeMs, 1, 0) + ' ms' : '-' }}
+                </td>
                 <td style="text-align:center;"
                     :title="store.locales=='zh' ? (s.avgLlmCalls > 0 ? `平均每题 ${s.avgLlmCalls.toFixed(2)} 次对话模型调用` : '本题集未产生对话模型调用') : `avg ${s.avgLlmCalls.toFixed(2)} LLM calls per question`">
                   {{ s.avgLlmCalls > 0 ? fmtStat(s.avgLlmCalls, s.std?.avgLlmCalls, 1, 2) : '-' }}
@@ -3605,107 +4740,386 @@ const clearTestCases = () => {
               ? '「模型调用/题」= 平均对话模型调用次数（Agentic 含工具轮与作答；本体增强的 LLM 兜底实体链接也会计入）；「工具/题」= 模型自己发起检索工具的次数，0* 表示模型全程未调工具、仅由系统按可用通道补检索（括号内为补检索次数/题，悬停可见工具分布与提示）'
               : '"LLM/Qs" = avg chat-model calls per question (agentic tool rounds + answer; ontology LLM entity-link fallback counts too); "Tools/Qs" = tool calls the model itself issued — 0* means the model never called a tool and only the deterministic fallback ran (the number in brackets is fallback calls per question; hover for the tool mix)' }}
           </div>
-          <div v-if="allStrategyStats.length > 1" class="as-detail" style="margin-top:8px;">
-            <div class="as-detail-title">
-              <i class="fa fa-balance-scale"></i> {{ store.locales=='zh' ? '配对显著性检验' : 'Paired significance' }}
-              <span class="as-group-tabs">
-                <span class="ae-note">{{ store.locales=='zh' ? '基线' : 'Baseline' }}</span>
-                <select v-model="sigBaseline" class="kt-select" style="width:auto;max-width:170px;">
-                  <option v-for="s in allStrategyStats" :key="s.strategyId" :value="s.strategyId">{{ s.label }}</option>
-                </select>
-              </span>
+
+          <!-- Hit@K 曲线：不在界面里画图（导出 Excel 的「Hit@K曲线」工作表里自带宽表 + 长表，方便自行画图/统计） -->
+          <!-- 配对显著性检验已移到弹出面板（工具栏「天平」按钮打开），此处不再内联展示 -->
+          <!-- 位次明细：点击策略行 → 弹出面板查看（见下方 tm-dlg-rank） -->
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 位次明细面板（弹出层）：点击策略召回对比里的某一行打开 =====
+         z-index 950：低于「智能路由检索过程」弹层（tm-overlay = 1000），
+         这样在明细里点「检索过程」时，过程面板能正常盖在它之上 -->
+    <div v-if="expandedStrategy" class="tm-dlg-overlay tm-dlg-rank" @mousedown.self="closeStrategyDetail">
+      <div class="tm-dlg tm-rank-modal">
+        <div class="tm-dlg-head">
+          <i class="fa fa-list"></i>
+          <span class="tm-dlg-title">{{ store.locales=='zh' ? '位次明细' : 'Rank detail' }}</span>
+          <span class="ae-note ellipsis" style="max-width:380px;" :title="expandedStrategyLabel">{{ expandedStrategyLabel }}</span>
+          <span class="ae-note">({{ strategyDetailRows.length }} {{ store.locales=='zh' ? '条' : 'rows' }})</span>
+          <span style="flex:1"></span>
+          <div class="kt-btn" :title="store.locales=='zh' ? '关闭' : 'Close'" @click="closeStrategyDetail"><i class="fa fa-times"></i></div>
+        </div>
+
+        <div class="tm-dlg-body scoll">
+          <table class="as-table as-detail-table">
+            <thead>
+              <tr>
+                <th style="width:28px;">#</th>
+                <th>{{ store.locales=='zh' ? '问题' : 'Question' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '完整性' : 'Completeness' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '答案命中率' : 'HitRate' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '最优位次' : 'Best Rank' }}</th>
+                <th style="text-align:center;"
+                    :title="store.locales=='zh' ? '在线延迟（本地计算 + 单条冷嵌入 + 对话模型）｜悬停看该题的三段拆分与热缓存实测耗时' : 'Online latency (local + one cold embed + LLM); hover for the per-question breakdown'">
+                  {{ store.locales=='zh' ? '在线延迟' : 'Online' }}
+                </th>
+                <th style="text-align:center;width:74px;">{{ store.locales=='zh' ? '检索过程' : 'Trace' }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(r, i) in strategyDetailRows" :key="i">
+                <td style="text-align:center;">{{ i + 1 }}</td>
+                <td :title="r.question">{{ r.question }}</td>
+                <td style="text-align:center;font-weight:bold;" :style="{ color: completenessBadge(r).color }">
+                  {{ completenessBadge(r).label }} <span style="opacity:.7;font-weight:400;">({{ completenessBadge(r).text }})</span>
+                </td>
+                <td style="text-align:center;">{{ ((r.hitRate||0)*100).toFixed(0) }}%</td>
+                <td style="text-align:center;">{{ r.firstRank>0 ? r.firstRank : '-' }}</td>
+                <td style="text-align:center;"
+                    :title="store.locales=='zh'
+                      ? `在线延迟 ${Math.round(onlineTimeOf(r))} ms = 实测墙钟 ${formatTime(r.timeMs)}${r.timing && r.timing.embedHits > 0 && coldEmbedMs > 0 ? ` + 单条查询嵌入 ${Math.round(coldEmbedMs)}（本次命中缓存，未计入墙钟）` : ''}\n本地计算 ${r.timing ? Math.round(r.timing.localMs) : '-'} / 嵌入（实测）${r.timing ? Math.round(r.timing.embedMs) : '-'} / 对话模型 ${r.timing ? Math.round(r.timing.llmMs) : '-'} ms；嵌入缓存命中 ${r.timing?.embedHits ?? 0} 次`
+                      : `Online ${Math.round(onlineTimeOf(r))} ms = wall clock ${formatTime(r.timeMs)}${r.timing && r.timing.embedHits > 0 && coldEmbedMs > 0 ? ` + one cached query embed ${Math.round(coldEmbedMs)}` : ''}\nlocal ${r.timing ? Math.round(r.timing.localMs) : '-'} / embed ${r.timing ? Math.round(r.timing.embedMs) : '-'} / LLM ${r.timing ? Math.round(r.timing.llmMs) : '-'} ms; embed cache hits ${r.timing?.embedHits ?? 0}`">
+                  {{ formatTime(onlineTimeOf(r)) }}
+                </td>
+                <!-- 智能路由：回看该问题的工具调用过程（其它策略无该数据） -->
+                <td style="text-align:center;">
+                  <span v-if="r.agent" class="tm-trace-btn" @click="openAgentTrace(r)"
+                        :title="store.locales=='zh'
+                          ? `查看智能路由检索过程：检索步骤 ${agentRetrievalStepCount(r.agent)} 步 / 模型调用 ${r.agent.llmCalls} 次`
+                          : `View agentic trace: ${agentRetrievalStepCount(r.agent)} step(s), ${r.agent.llmCalls} LLM call(s)`">
+                    <i class="fa fa-random"></i>{{ agentRetrievalStepCount(r.agent) }}
+                  </span>
+                  <span v-else style="color:var(--borderColor);">-</span>
+                </td>
+              </tr>
+              <tr v-if="!strategyDetailRows.length">
+                <td colspan="7" style="text-align:center;color:var(--borderColor);padding:16px;">
+                  {{ store.locales=='zh' ? '该策略暂无位次记录' : 'No rank rows for this strategy' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="tm-dlg-foot">
+          <span class="ae-note">{{ store.locales=='zh' ? '「在线延迟」= 本地计算 + 单条查询嵌入 + 对话模型；悬停单元格看拆分' : 'Online = local + one query embed + LLM; hover a cell for the breakdown' }}</span>
+          <span style="flex:1"></span>
+          <div class="kt-btn ok" @click="closeStrategyDetail"><i class="fa fa-check"></i><span class="pw-run-label">{{ store.locales=='zh' ? '关闭' : 'Close' }}</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 配对显著性检验面板（弹出层）：与基线配对做 McNemar / Wilcoxon ===== -->
+    <div v-if="sigPanelOpen" class="tm-dlg-overlay" @mousedown.self="sigPanelOpen = false">
+      <div class="tm-dlg tm-sig-modal">
+        <div class="tm-dlg-head">
+          <i class="fa fa-balance-scale"></i>
+          <span class="tm-dlg-title">{{ store.locales=='zh' ? '配对显著性检验' : 'Paired significance' }}</span>
+          <span class="ae-note">{{ store.locales=='zh' ? `共 ${pairedComparisons.length} 个对比策略` : `${pairedComparisons.length} comparison(s)` }}</span>
+          <span style="flex:1"></span>
+          <div class="kt-btn" :title="store.locales=='zh' ? '关闭' : 'Close'" @click="sigPanelOpen = false"><i class="fa fa-times"></i></div>
+        </div>
+
+        <div class="tm-dlg-body scoll">
+        <div class="tm-abl-base">
+          <label class="tm-abl-field" :title="store.locales=='zh' ? '选择配对基线：其余策略/变体都与它做同题配对检验' : 'Baseline for paired tests'">
+            <span>{{ store.locales=='zh' ? '基线' : 'Baseline' }}</span>
+            <select v-model="sigBaseline" class="kt-select" style="width:auto;max-width:200px;">
+              <option v-for="s in allStrategyStats" :key="s.strategyId" :value="s.strategyId">{{ s.label }}</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="ae-note" style="line-height:1.5;">
+          {{ store.locales=='zh'
+            ? '同一批问题、同一判定基准下与基线配对：命中差异用 McNemar 精确检验（b=基线命中/对比未命中，c=反之），位次差异用 Wilcoxon 符号秩检验（未命中记 K+1）；p<0.05 视为显著'
+            : 'Paired on the same questions vs the baseline: McNemar exact test for hit differences (b = baseline hit & other miss, c = vice versa), Wilcoxon signed-rank for ranks (miss = K+1); p<0.05 = significant' }}
+        </div>
+
+          <div v-if="!pairedComparisons.length" class="as-empty">
+            <i class="fa fa-info-circle"></i>
+            {{ store.locales=='zh' ? '暂无可配对数据（需至少两个策略/变体各有判定记录）' : 'No paired data yet (need two strategies/variants with judgements)' }}
+          </div>
+          <table v-else class="as-table as-detail-table">
+            <thead>
+              <tr>
+                <th>{{ store.locales=='zh' ? '对比策略' : 'Strategy' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '共同题' : 'Paired' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '命中变化' : 'Δ Recall' }}</th>
+                <th style="text-align:center;">b/c</th>
+                <th style="text-align:center;">McNemar</th>
+                <th style="text-align:center;">Wilcoxon</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '位次变化' : 'Δ Rank' }}</th>
+                <th style="text-align:center;">{{ store.locales=='zh' ? '结论' : 'Verdict' }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="c in pairedComparisons" :key="c.strategyId">
+                <td>{{ c.label }}</td>
+                <td style="text-align:center;">{{ c.n }}</td>
+                <td style="text-align:center;font-weight:bold;" :style="{ color: deltaColor(c.deltaRecall) }">
+                  {{ c.deltaRecall > 0 ? '+' : '' }}{{ (c.deltaRecall * 100).toFixed(1) }}%
+                </td>
+                <td style="text-align:center;" :title="store.locales=='zh' ? 'b/c（基线命中而对比未命中 / 反之）' : 'b/c (baseline-only hits / other-only hits)'">
+                  {{ c.baseOnly }}/{{ c.otherOnly }}
+                </td>
+                <td style="text-align:center;" :style="{ color: c.mcnemarP < 0.05 ? '#4CAF50' : 'var(--borderColor)', fontWeight: c.mcnemarP < 0.05 ? 700 : 400 }">
+                  {{ pText(c.mcnemarP) }}
+                </td>
+                <td style="text-align:center;" :style="{ color: c.wilcoxonP < 0.05 ? '#4CAF50' : 'var(--borderColor)', fontWeight: c.wilcoxonP < 0.05 ? 700 : 400 }">
+                  {{ pText(c.wilcoxonP) }}
+                </td>
+                <td style="text-align:center;" :style="{ color: deltaColor(-c.rankDelta) }">
+                  {{ c.rankDelta > 0 ? '+' : '' }}{{ c.rankDelta.toFixed(2) }}
+                </td>
+                <td style="text-align:center;font-weight:bold;" :style="{ color: verdictColor(c.verdict) }">
+                  {{ verdictLabel(c.verdict) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="tm-dlg-foot">
+          <span class="ae-note">{{ store.locales=='zh' ? '想补充对比项？在「策略配置」里增加消融组后重跑批量测试即可' : 'Add ablation groups in Strategy config and re-run to extend the comparison' }}</span>
+          <span style="flex:1"></span>
+          <div class="kt-btn ok" @click="sigPanelOpen = false"><i class="fa fa-check"></i><span class="pw-run-label">{{ store.locales=='zh' ? '关闭' : 'Close' }}</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 策略配置面板（弹出层）：左侧策略组导航 + 右侧详细配置；底部为操作与检索次数 ===== -->
+    <div v-if="configPanelOpen" class="tm-dlg-overlay" @mousedown.self="closeConfigPanel">
+      <div class="tm-dlg tm-abl-modal">
+        <div class="tm-dlg-head">
+          <i class="fa fa-flask"></i>
+          <span class="tm-dlg-title">{{ store.locales=='zh' ? '策略配置（消融实验）' : 'Strategy config (ablation)' }}</span>
+          <span class="ae-note">
+            {{ store.locales=='zh'
+              ? `${ablation.runs.length} 组 · 启用 ${ablationEnabledVariants.length} 组`
+              : `${ablation.runs.length} group(s) · ${ablationEnabledVariants.length} enabled` }}
+          </span>
+          <span style="flex:1"></span>
+          <div class="kt-btn" :title="store.locales=='zh' ? '关闭' : 'Close'" @click="closeConfigPanel"><i class="fa fa-times"></i></div>
+        </div>
+
+        <div class="tm-dlg-body">
+        <!-- 左右布局：左侧=已配置/启用的策略组导航，右侧=选中组的详细配置 -->
+        <div class="tm-abl-split">
+          <!-- 左：导航（组管理按钮 + 组列表；勾选框即该组是否参与批量测试） -->
+          <div class="tm-abl-nav">
+            <div class="tm-abl-nav-acts">
+              <div class="kt-btn" @click="addAblationRun()" :title="store.locales=='zh' ? '新增一组（默认选第一个启用策略）' : 'Add a group'"><i class="fa fa-plus"></i></div>
+              <div class="kt-btn" @click="addDefaultAblationSet()" :title="store.locales=='zh' ? '按启用策略铺开：为每个启用策略各建一组（默认参数=基线）' : 'One group per enabled strategy (baselines)'"><i class="fa fa-th-list"></i></div>
+              <div class="kt-btn" @click="setAblationEnabled(true)" :title="store.locales=='zh' ? '全启用' : 'Enable all'"><i class="fa fa-check-square-o"></i></div>
+              <div class="kt-btn" @click="setAblationEnabled(false)" :title="store.locales=='zh' ? '全停用（回到「每个启用策略跑一次」）' : 'Disable all'"><i class="fa fa-square-o"></i></div>
+              <div class="kt-btn" @click="clearAblationRuns()" :title="store.locales=='zh' ? '清空所有组（只清配置，不动已有测试结果）' : 'Clear all groups (config only)'"><i class="fa fa-trash-o"></i></div>
             </div>
-            <div class="ae-note" style="margin:2px 0 5px;">
-              {{ store.locales=='zh'
-                ? '同一批问题、同一判定基准下与基线配对：命中差异用 McNemar 精确检验（b=基线命中/对比未命中，c=反之），位次差异用 Wilcoxon 符号秩检验（未命中记 K+1）；p<0.05 视为显著'
-                : 'Paired on the same questions vs the baseline: McNemar exact test for hit differences (b = baseline hit & other miss, c = vice versa), Wilcoxon signed-rank for ranks (miss = K+1); p<0.05 = significant' }}
+            <div class="tm-abl-nav-list scoll">
+              <div v-for="run in ablation.runs" :key="run.id" class="tm-abl-nav-item"
+                   :class="{ on: run.id === ablationEditRunId, off: !run.enabled }"
+                   :title="ablationAutoLabel(run)" @click="ablationEditRunId = run.id">
+                <input type="checkbox" v-model="run.enabled" @click.stop
+                       :title="store.locales=='zh' ? '该组是否参与批量测试' : 'Include in the batch run'" />
+                <div class="tm-abl-nav-txt">
+                  <div class="nm">{{ ablationBaseLabel(run) }}</div>
+                  <div class="sub" v-if="ablationOverrideCount(run)">{{ ablationOverrideText(run) }}</div>
+                  <div class="sub none" v-else>{{ store.locales=='zh' ? '默认参数（基线）' : 'defaults (baseline)' }}</div>
+                </div>
+                <span v-if="run.searchNum" class="tm-abl-nav-k">K{{ run.searchNum }}</span>
+              </div>
+              <div v-if="!ablation.runs.length" class="ae-note" style="line-height:1.5;padding:4px;">
+                {{ store.locales=='zh'
+                  ? '暂无消融组。点上方「铺开」（每个启用策略一组）或「+」新增一组；不配置时批量测试按每个启用策略的默认参数各跑一次。'
+                  : 'No groups yet. Use the buttons above; with none configured every enabled strategy runs once with defaults.' }}
+              </div>
+              <!-- 未配置的启用策略：点一下即为它新增一组（默认参数=基线），左栏因此始终能看到「启用了哪些策略」 -->
+              <template v-if="ablationStrategiesWithoutGroup.length">
+                <div class="tm-abl-nav-sec">{{ store.locales=='zh' ? '未配置的启用策略（点击新增一组）' : 'enabled strategies without a group (click to add)' }}</div>
+                <div v-for="opt in ablationStrategiesWithoutGroup" :key="'ng-' + opt.value" class="tm-abl-nav-item add"
+                     :title="store.locales=='zh' ? `为「${opt.label}」新增一组消融配置（默认参数）` : `Add a group for ${opt.label} (defaults)`"
+                     @click="addAblationRunFor(opt.value)">
+                  <i class="fa fa-plus"></i>
+                  <div class="tm-abl-nav-txt">
+                    <div class="nm">{{ opt.label }}</div>
+                    <div class="sub none">{{ store.locales=='zh' ? '默认参数' : 'defaults' }}</div>
+                  </div>
+                </div>
+              </template>
             </div>
-            <div v-if="!pairedComparisons.length" class="as-empty">
-              <i class="fa fa-info-circle"></i>
-              {{ store.locales=='zh' ? '暂无可配对数据（需至少两个策略各有判定记录）' : 'No paired data yet (need two strategies with judgements)' }}
-            </div>
-            <table v-else class="as-table as-detail-table">
-              <thead>
-                <tr>
-                  <th>{{ store.locales=='zh' ? '对比策略' : 'Strategy' }}</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '共同题' : 'Paired' }}</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '命中变化' : 'Δ Recall' }}</th>
-                  <th style="text-align:center;">b/c</th>
-                  <th style="text-align:center;">McNemar</th>
-                  <th style="text-align:center;">Wilcoxon</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '位次变化' : 'Δ Rank' }}</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '结论' : 'Verdict' }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in pairedComparisons" :key="c.strategyId">
-                  <td>{{ c.label }}</td>
-                  <td style="text-align:center;">{{ c.n }}</td>
-                  <td style="text-align:center;font-weight:bold;" :style="{ color: deltaColor(c.deltaRecall) }">
-                    {{ c.deltaRecall > 0 ? '+' : '' }}{{ (c.deltaRecall * 100).toFixed(1) }}%
-                  </td>
-                  <td style="text-align:center;" :title="store.locales=='zh' ? 'b/c（基线命中而对比未命中 / 反之）' : 'b/c (baseline-only hits / other-only hits)'">
-                    {{ c.baseOnly }}/{{ c.otherOnly }}
-                  </td>
-                  <td style="text-align:center;" :style="{ color: c.mcnemarP < 0.05 ? '#4CAF50' : 'var(--borderColor)', fontWeight: c.mcnemarP < 0.05 ? 700 : 400 }">
-                    {{ pText(c.mcnemarP) }}
-                  </td>
-                  <td style="text-align:center;" :style="{ color: c.wilcoxonP < 0.05 ? '#4CAF50' : 'var(--borderColor)', fontWeight: c.wilcoxonP < 0.05 ? 700 : 400 }">
-                    {{ pText(c.wilcoxonP) }}
-                  </td>
-                  <td style="text-align:center;" :style="{ color: deltaColor(-c.rankDelta) }">
-                    {{ c.rankDelta > 0 ? '+' : '' }}{{ c.rankDelta.toFixed(2) }}
-                  </td>
-                  <td style="text-align:center;font-weight:bold;" :style="{ color: verdictColor(c.verdict) }">
-                    {{ verdictLabel(c.verdict) }}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
           </div>
 
-          <!-- 位次明细（点击策略行展开） -->
-          <div v-if="expandedStrategy" class="as-detail">
-            <div class="as-detail-title">
-              <i class="fa fa-list"></i> {{ store.locales=='zh' ? '位次明细 · ' : 'Rank detail · ' }}{{ expandedStrategyLabel }}
-              <span class="ae-note">({{ strategyDetailRows.length }} {{ store.locales=='zh' ? '条' : 'rows' }})</span>
-            </div>
-            <table class="as-table as-detail-table">
-              <thead>
-                <tr>
-                  <th style="width:28px;">#</th>
-                  <th>{{ store.locales=='zh' ? '问题' : 'Question' }}</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '完整性' : 'Completeness' }}</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '答案命中率' : 'HitRate' }}</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '最优位次' : 'Best Rank' }}</th>
-                  <th style="text-align:center;">{{ store.locales=='zh' ? '召回时间' : 'Recall Time' }}</th>
-                  <th style="text-align:center;width:74px;">{{ store.locales=='zh' ? '检索过程' : 'Trace' }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(r, i) in strategyDetailRows" :key="i">
-                  <td style="text-align:center;">{{ i + 1 }}</td>
-                  <td :title="r.question">{{ r.question }}</td>
-                  <td style="text-align:center;font-weight:bold;" :style="{ color: completenessBadge(r).color }">
-                    {{ completenessBadge(r).label }} <span style="opacity:.7;font-weight:400;">({{ completenessBadge(r).text }})</span>
-                  </td>
-                  <td style="text-align:center;">{{ ((r.hitRate||0)*100).toFixed(0) }}%</td>
-                  <td style="text-align:center;">{{ r.firstRank>0 ? r.firstRank : '-' }}</td>
-                  <td style="text-align:center;">{{ formatTime(r.timeMs) }}</td>
-                  <!-- 智能路由：回看该问题的工具调用过程（其它策略无该数据） -->
-                  <td style="text-align:center;">
-                    <span v-if="r.agent" class="tm-trace-btn" @click="openAgentTrace(r)"
-                          :title="store.locales=='zh'
-                            ? `查看智能路由检索过程：检索步骤 ${agentRetrievalStepCount(r.agent)} 步 / 模型调用 ${r.agent.llmCalls} 次`
-                            : `View agentic trace: ${agentRetrievalStepCount(r.agent)} step(s), ${r.agent.llmCalls} LLM call(s)`">
-                      <i class="fa fa-random"></i>{{ agentRetrievalStepCount(r.agent) }}
-                    </span>
-                    <span v-else style="color:var(--borderColor);">-</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <!-- 右：选中组的详细配置 -->
+          <div class="tm-abl-detail scoll">
+        <!-- 选中组的参数（无选中时提示从左侧列表点击） -->
+        <div v-if="ablationEditRun" class="tm-abl-edit">
+          <div class="tm-abl-base">
+            <label class="tm-abl-field">
+              <span>{{ store.locales=='zh' ? '策略' : 'Strategy' }}</span>
+              <select v-model="ablationEditRun.strategyId" class="kt-select" style="width:150px;">
+                <option v-for="opt in algorithmOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+            </label>
+            <label class="tm-abl-field">
+              <span>{{ store.locales=='zh' ? '标签' : 'Label' }}</span>
+              <input v-model="ablationEditRun.label" class="kt-input" style="width:190px;"
+                     :placeholder="ablationAutoLabel(ablationEditRun)"
+                     :title="store.locales=='zh' ? '留空则用自动标签（策略名 + 覆盖参数摘要），图表图例直接用它' : 'Empty = auto label from overridden params'" />
+            </label>
+            <label class="tm-abl-field" :title="store.locales=='zh' ? '该组的切片数 K（留空=跟随工具栏「切片数量」）；也是该组 Hit@K 曲线的上限' : 'Top-K for this group (empty = follow toolbar)'">
+              <span>{{ store.locales=='zh' ? '切片数 K' : 'Top-K' }}</span>
+              <input :value="ablationEditRun.searchNum" @input="setAblationSearchNum(ablationEditRun, ($event.target as HTMLInputElement).value)"
+                     type="number" min="1" max="100" class="kt-input" style="width:60px;" placeholder="—" />
+            </label>
+            <label class="tm-abl-field" :title="store.locales=='zh' ? '该组是否参与「批量测试所有策略」' : 'Include in the batch run'">
+              <span>{{ store.locales=='zh' ? '启用' : 'Enabled' }}</span>
+              <input type="checkbox" v-model="ablationEditRun.enabled" />
+            </label>
           </div>
+
+        <!-- 参数覆盖：留空/未勾选 = 跟随策略默认值（占位符显示默认值） -->
+        <div class="tm-abl-params-wrap">
+          <div class="tm-abl-params">
+            <!-- 实体链接 LLM 兜底：影响本体/多跳/智能路由的实体匹配（关闭可显著提速） -->
+            <label v-if="ablationHasPrimitive(ablationEditRun, 'entity_link') || ablationAgentic(ablationEditRun) || ablationHasPrimitive(ablationEditRun, 'graph_hop')"
+                   class="tm-abl-field" :title="store.locales=='zh' ? '实体链接的 LLM 兜底匹配（关闭后只用嵌入模型做实体匹配，评测更快、更稳定）' : 'LLM fallback for entity linking'">
+              <span>{{ store.locales=='zh' ? '实体LLM兜底' : 'entLLM' }}</span>
+              <input type="checkbox" :checked="ablationConfigOn(ablationEditRun, 'entityLinkLlm')"
+                     @change="setAblationConfigBool(ablationEditRun, 'entityLinkLlm', ($event.target as HTMLInputElement).checked)" />
+            </label>
+            <!-- 步骤参数（按策略定义自动列出该策略真正用到的原语参数） -->
+            <span v-for="st in ablationStepsOf(ablationEditRun)" v-show="st.fields.length" :key="st.key"
+                  class="tm-abl-field tm-abl-step" :title="st.primitive">
+              <span class="tm-abl-prim">{{ st.primitive }}</span>
+              <template v-for="f in st.fields" :key="st.key + '.' + f.key">
+                <span class="tm-abl-sub">{{ store.locales=='zh' ? f.label : f.labelEn }}</span>
+                <select v-if="f.type === 'select'" class="kt-select"
+                        :value="ablationStepParamVal(ablationEditRun, st.key, f.key) ?? f.current"
+                        @change="setAblationStepParam(ablationEditRun, st.key, f.key, ($event.target as HTMLSelectElement).value)">
+                  <option v-for="o in f.options" :key="o.value" :value="o.value">{{ store.locales=='zh' ? o.label : (o.labelEn || o.label) }}</option>
+                </select>
+                <input v-else-if="f.type === 'checkbox'" type="checkbox"
+                       :checked="ablationStepParamVal(ablationEditRun, st.key, f.key) ?? !!f.current"
+                       @change="setAblationStepParam(ablationEditRun, st.key, f.key, ($event.target as HTMLInputElement).checked)" />
+                <input v-else type="number" class="kt-input" :min="f.min" :max="f.max" :step="f.step"
+                       :value="ablationStepParamVal(ablationEditRun, st.key, f.key)" :placeholder="String(st.base[f.key] ?? f.current ?? '')"
+                       :title="store.locales=='zh' ? (f.tip || `默认 ${st.base[f.key] ?? f.current ?? '-'}（留空=用默认）`) : (f.tipEn || `default ${st.base[f.key] ?? f.current ?? '-'}`)"
+                       @input="setAblationStepParam(ablationEditRun, st.key, f.key, ($event.target as HTMLInputElement).value)" />
+              </template>
+            </span>
+            <!-- 智能路由策略级参数 -->
+            <template v-if="ablationAgentic(ablationEditRun)">
+              <label class="tm-abl-field" :title="store.locales=='zh' ? '最大工具轮次上限（默认 5）' : 'Max tool rounds'">
+                <span>{{ store.locales=='zh' ? '最大轮次' : 'rounds' }}</span>
+                <input type="number" min="1" max="10" step="1" class="kt-input"
+                       :value="ablationPatchVal(ablationEditRun, 'maxRounds')" placeholder="5"
+                       @input="setAblationPatchVal(ablationEditRun, 'maxRounds', ($event.target as HTMLInputElement).value === '' ? '' : Number(($event.target as HTMLInputElement).value))" />
+              </label>
+              <label class="tm-abl-field" :title="store.locales=='zh' ? '工具内部候选切片数（默认跟随设置）' : 'Tool candidate pool size'">
+                <span>{{ store.locales=='zh' ? '工具候选' : 'toolTopN' }}</span>
+                <input type="number" min="1" max="100" step="1" class="kt-input"
+                       :value="ablationPatchVal(ablationEditRun, 'agentToolTopN')" :placeholder="ablationConfigDefault('agentToolTopN')"
+                       @input="setAblationPatchVal(ablationEditRun, 'agentToolTopN', ($event.target as HTMLInputElement).value === '' ? '' : Number(($event.target as HTMLInputElement).value))" />
+              </label>
+              <label class="tm-abl-field" :title="store.locales=='zh' ? '最终重排里子查询分的权重（0=只用原始问题）' : 'Sub-query re-rank weight'">
+                <span>{{ store.locales=='zh' ? '子查询权重' : 'subQ' }}</span>
+                <input type="number" min="0" max="1" step="0.05" class="kt-input"
+                       :value="ablationPatchVal(ablationEditRun, 'agentSubQueryWeight')" :placeholder="ablationConfigDefault('agentSubQueryWeight')"
+                       @input="setAblationPatchVal(ablationEditRun, 'agentSubQueryWeight', ($event.target as HTMLInputElement).value === '' ? '' : Number(($event.target as HTMLInputElement).value))" />
+              </label>
+              <label class="tm-abl-field" :title="store.locales=='zh' ? '模型未调用工具时，系统是否按可用通道补一次确定性召回（关掉=纯 LLM 路由消融）' : 'Deterministic fallback recall'">
+                <span>{{ store.locales=='zh' ? '系统补检索' : 'fallback' }}</span>
+                <input type="checkbox" :checked="ablationPatchVal(ablationEditRun, 'agentFallback') === '' ? true : !!ablationPatchVal(ablationEditRun, 'agentFallback')"
+                       @change="setAblationPatchVal(ablationEditRun, 'agentFallback', ($event.target as HTMLInputElement).checked)" />
+              </label>
+              <label v-for="tool in AGENT_TOOL_KEYS" :key="'tool-' + ablationEditRun.id + tool.key"
+                     class="tm-abl-field tm-abl-tool" :title="store.locales=='zh' ? tool.desc : tool.descEn">
+                <input type="checkbox" :checked="ablationToolOn(ablationEditRun, tool.key)"
+                       @change="setAblationTool(ablationEditRun, tool.key, ($event.target as HTMLInputElement).checked)" />
+                <span>{{ tool.key }}</span>
+              </label>
+            </template>
+            <!-- 混合策略通道开关与候选上限 -->
+            <template v-if="ablationHybrid(ablationEditRun)">
+              <label v-for="ch in CHANNEL_KEYS" :key="'ch-' + ablationEditRun.id + ch.key"
+                     class="tm-abl-field tm-abl-tool" :title="store.locales=='zh' ? ch.desc : ch.descEn">
+                <input type="checkbox" :checked="ablationChannelOn(ablationEditRun, ch.key)"
+                       @change="setAblationChannel(ablationEditRun, ch.key, ($event.target as HTMLInputElement).checked)" />
+                <span>{{ ch.key }}</span>
+              </label>
+              <label v-for="ch in CHANNEL_KEYS" :key="'chn-' + ablationEditRun.id + ch.key" class="tm-abl-field"
+                     :title="store.locales=='zh' ? `${ch.key} 通道候选切片上限（留空=策略默认）` : `${ch.key} candidate cap`">
+                <span>{{ ch.key }}·topN</span>
+                <input type="number" min="1" max="50" step="1" class="kt-input"
+                       :value="ablationChannelTopN(ablationEditRun, ch.key)" placeholder="—"
+                       @input="setAblationChannelTopN(ablationEditRun, ch.key, ($event.target as HTMLInputElement).value)" />
+              </label>
+              <label class="tm-abl-field" :title="store.locales=='zh' ? '统一排序口径：cosine=余弦重排 / rrf=排名融合' : 'Unified rerank metric'">
+                <span>{{ store.locales=='zh' ? '排序口径' : 'rerank' }}</span>
+                <select class="kt-select" :value="(ablationEditRun.defPatch as any)?.rerank?.metric ?? ''"
+                        @change="setAblationRerank(ablationEditRun, 'metric', ($event.target as HTMLSelectElement).value)">
+                  <option value="">{{ store.locales=='zh' ? '默认' : 'default' }}</option>
+                  <option value="cosine">cosine</option>
+                  <option value="rrf">rrf</option>
+                </select>
+              </label>
+              <label class="tm-abl-field" :title="store.locales=='zh' ? '融合后保留的候选上限' : 'rerank topK'">
+                <span>topK</span>
+                <input type="number" min="1" max="100" step="1" class="kt-input"
+                       :value="(ablationEditRun.defPatch as any)?.rerank?.topK" placeholder="10"
+                       @input="setAblationRerank(ablationEditRun, 'topK', ($event.target as HTMLInputElement).value)" />
+              </label>
+            </template>
+            <span v-if="ablationOverrideCount(ablationEditRun) === 0" class="ae-note">
+              {{ store.locales=='zh' ? '当前 = 策略默认参数（该组将作为基线行）' : 'Currently strategy defaults (baseline row)' }}
+            </span>
+          </div>
+          <div class="ae-note" style="margin-top:6px;">
+            {{ store.locales=='zh'
+              ? '留空 / 不勾选 = 跟随策略默认值（占位符就是默认值）；自动标签与实际参数同步变化，修改后无需手动改标签。'
+              : 'Empty / unchecked = follow the strategy default (placeholder shows it); the auto label follows the params.' }}
+          </div>
+        </div>
+          </div>
+          <div v-else class="ae-note" style="padding:10px 0;">
+            <!-- 未选中任何组：提示从左侧导航选择 -->
+            {{ store.locales=='zh' ? '从左侧选择一个策略组，即可在这里设置它的参数。' : 'Pick a group on the left to edit its params here.' }}
+          </div>
+          </div>
+        </div>
+        </div>
+
+        <!-- 操作：复制 / 重置 / 删除该组；右侧「检索次数」+ 完成（次数即批量测试将执行的检索总数） -->
+        <div class="tm-dlg-foot">
+          <template v-if="ablationEditRun">
+            <div class="kt-btn" :title="store.locales=='zh' ? '复制该组（新 id，便于只改一个参数做对照）' : 'Duplicate group'"
+                 @click="duplicateAblationRun(ablationEditRun)"><i class="fa fa-copy"></i><span class="pw-run-label">{{ store.locales=='zh' ? '复制该组' : 'Copy' }}</span></div>
+            <div class="kt-btn" :title="store.locales=='zh' ? '清空该组所有参数覆盖（保留策略/标签/启用）' : 'Reset overrides'"
+                 @click="resetAblationRun(ablationEditRun)"><i class="fa fa-undo"></i><span class="pw-run-label">{{ store.locales=='zh' ? '重置参数' : 'Reset' }}</span></div>
+            <div class="kt-btn" :title="store.locales=='zh' ? '删除该组' : 'Delete group'"
+                 @click="removeAblationRun(ablationEditRun.id)"><i class="fa fa-trash-o"></i><span class="pw-run-label">{{ store.locales=='zh' ? '删除该组' : 'Delete' }}</span></div>
+          </template>
+          <span style="flex:1"></span>
+          <span class="ae-note" :title="store.locales=='zh'
+                  ? `批量测试所有策略将执行 ${batchRunPreview.length} 项（策略/消融组）× ${test.questions.length} 题 × ${Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1))} 轮`
+                  : `${batchRunPreview.length} item(s) × ${test.questions.length} questions × ${Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1))} round(s)`">
+            {{ store.locales=='zh'
+              ? `共 ${batchRunPreview.length * test.questions.length * Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1))} 次检索`
+              : `${batchRunPreview.length * test.questions.length * Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1))} retrievals` }}
+          </span>
+          <div class="kt-btn ok" @click="closeConfigPanel"><i class="fa fa-check"></i><span class="pw-run-label">{{ store.locales=='zh' ? '完成' : 'Done' }}</span></div>
         </div>
       </div>
     </div>
@@ -4164,13 +5578,112 @@ const clearTestCases = () => {
 .pw-actions { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--borderColor); padding-top: 8px; flex: none; }
 .pw-actions .kt-btn { width: auto; min-width: 29px; padding: 0 8px; }
 .pw-run-label { margin-left: 5px; font-size: 12px; }
-.pw-badge {
-  position: absolute; top: -4px; right: -4px; min-width: 13px; height: 13px;
-  padding: 0 3px; border-radius: 7px; background: var(--fontActiveColor); color: #fff;
-  font-size: 9px; line-height: 13px; text-align: center;
-}
 .kt-btn { position: relative; }
 .kt-disabled { opacity: .5; pointer-events: none; }
+
+/* ===== 策略配置面板 / 消融组列表（弹层内：固定列宽 + 输入框不再溢出单元格） ===== */
+.tm-abl-table { table-layout: fixed; }
+.tm-abl-table tbody tr { cursor: pointer; }
+.tm-abl-table td { vertical-align: middle; }
+/* 关键：kt-input/kt-select 是 content-box，width:100% 时会因 padding+border 溢出单元格 → 统一 border-box */
+.tm-abl-table input, .tm-abl-table select { box-sizing: border-box; max-width: 100%; }
+.tm-abl-table .kt-select { min-width: 0; }
+.tm-abl-table input[type="number"], .tm-abl-table input[type="text"] { height: 22px; }
+.tm-abl-table input[type="checkbox"] { vertical-align: middle; margin: 0 2px; }
+/* 选中行（下方参数区正在编辑该组） */
+.tm-abl-table tbody tr.tm-abl-sel { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
+.tm-abl-ovr { font-size: 10px; color: var(--fontActiveColor); word-break: break-word; }
+.tm-abl-ovr.none { color: var(--borderColor); }
+.tm-abl-edit { border-top: 1px solid var(--borderColor); padding-top: 6px; flex: none; }
+.tm-abl-params-wrap { padding: 2px 0; }
+.tm-abl-base { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.tm-abl-params { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.tm-abl-field { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; white-space: nowrap; }
+.tm-abl-field > span { opacity: .72; }
+.tm-abl-field .kt-input { width: 46px; height: 20px; padding: 0 3px; font-size: 10px; }
+.tm-abl-field .kt-select { height: 20px; min-width: 0; padding: 0 2px; }
+.tm-abl-step { border-left: 2px solid var(--fontActiveColor); padding-left: 4px; }
+.tm-abl-prim { color: var(--fontActiveColor); font-size: 9px; }
+.tm-abl-sub { opacity: .6; }
+.tm-abl-tool { background: color-mix(in srgb, var(--fontColor) 4%, transparent); border-radius: 3px; padding: 0 3px; }
+.tm-abl-btn {
+  width: 20px; height: 18px; margin-right: 2px; cursor: pointer; font-size: 10px;
+  background: none; border: 1px solid var(--borderColor); border-radius: 3px; color: inherit;
+}
+.tm-abl-btn:hover { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+/* ===== 弹出面板通用样式（对齐 questionView 的 qb-pick-overlay / qb-pick-dialog） ===== */
+.tm-dlg-overlay {
+  position: fixed; inset: 0; z-index: 1200;
+  background: rgba(0, 0, 0, .35);
+  display: flex; align-items: center; justify-content: center;
+}
+.tm-dlg {
+  display: flex; flex-direction: column;
+  width: min(850px, calc(92vw / var(--ui-zoom, 1)));
+  max-height: min(720px, calc(90vh / var(--ui-zoom, 1)));
+  background: var(--backgroundColor);
+  border: 1px solid var(--borderColor); border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden;
+}
+.tm-dlg-head {
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  border-bottom: 1px solid var(--borderColor); font-size: 12px; flex-shrink: 0;
+}
+.tm-dlg-head > i { color: #42A5F5; }
+.tm-dlg-title { font-weight: 600; color: var(--fontColor); }
+.tm-dlg-body {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; overflow: hidden; min-height: 0; flex: 1;
+}
+.tm-dlg-body.scoll { overflow: auto; }
+.tm-dlg-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  padding: 6px 8px; border-top: 1px solid var(--borderColor); flex-shrink: 0;
+}
+.tm-dlg-foot .kt-btn { padding: 0 12px; }
+/* 策略配置：左右布局（左=策略组导航，右=详细配置）；宽度比通用面板略宽 */
+.tm-dlg.tm-abl-modal { width: min(920px, calc(94vw / var(--ui-zoom, 1))); }
+.tm-dlg.tm-sig-modal { width: min(880px, calc(92vw / var(--ui-zoom, 1))); }
+/* 位次明细：与其它面板同风格；层级低于 tm-overlay(1000)，让「检索过程」弹层能盖在它之上 */
+.tm-dlg.tm-rank-modal { width: min(900px, calc(94vw / var(--ui-zoom, 1))); }
+.tm-dlg-overlay.tm-dlg-rank { z-index: 950; }
+.tm-abl-split { flex: 1 1 0%; min-height: 300px; display: flex; gap: 8px; min-width: 0; }
+.tm-abl-nav {
+  width: 266px; flex: none; display: flex; flex-direction: column; gap: 4px;
+  border-right: 1px solid var(--borderColor); padding-right: 8px; min-height: 0;
+}
+.tm-abl-nav-acts { display: flex; gap: 4px; flex: none; }
+.tm-abl-nav-list { flex: 1 1 0%; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 3px; }
+.tm-abl-nav-item {
+  display: flex; align-items: center; gap: 5px; padding: 3px 5px; cursor: pointer;
+  border: 1px solid transparent; border-radius: 5px;
+}
+.tm-abl-nav-item:hover { background: color-mix(in srgb, var(--fontColor) 6%, transparent); }
+.tm-abl-nav-item.on { border-color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent); }
+.tm-abl-nav-item.off { opacity: .5; }
+.tm-abl-nav-txt { min-width: 0; flex: 1; }
+.tm-abl-nav-item .nm { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-abl-nav-item .sub { font-size: 9px; color: var(--fontActiveColor); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-abl-nav-item .sub.none { color: var(--borderColor); }
+.tm-abl-nav-item.add { opacity: .72; border-style: dashed; border-color: var(--borderColor); }
+.tm-abl-nav-item.add > i { font-size: 9px; color: var(--borderColor); }
+.tm-abl-nav-sec { font-size: 9px; color: var(--borderColor); margin: 6px 0 2px; }
+.tm-abl-nav-k {
+  flex: none; font-size: 9px; padding: 0 4px; border-radius: 8px;
+  border: 1px solid var(--borderColor); color: var(--borderColor);
+}
+.tm-abl-detail { flex: 1; min-width: 0; overflow: auto; }
+
+/* 批量测试「将执行」预览（策略配置面板 + 面板内联摘要共用） */
+.tm-run-preview { display: flex; flex-wrap: wrap; gap: 3px 5px; padding: 2px 0 4px; }
+.tm-run-chip {
+  display: inline-flex; align-items: center; gap: 3px; max-width: 260px;
+  padding: 1px 6px; border: 1px solid var(--borderColor); border-radius: 9px;
+  font-size: 10px; color: var(--fontColor); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tm-run-chip > i { opacity: .65; font-size: 9px; }
+/* 消融组（非默认策略）用高亮色，一眼区分「基线策略」与「参数变体」 */
+.tm-run-chip.variant { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
 
 /* ===== 切片 / 关联切片查看模态框 ===== */
 .tm-overlay {
