@@ -52,6 +52,21 @@ export function capabilityMode(id: CapabilityId): CapabilityMode {
   return getPlatform().capabilities.mode(id)
 }
 
+/**
+ * 是否「局域网访客网页」：页面由桌面主机的局域网共享服务投递（主机注入了 `__AIKM_HOST__`）。
+ *
+ * 与「无 ipcRenderer」不等价：**安卓壳**也没有 ipcRenderer，但它是本地应用（有真实文件系统、
+ * 有渲染层智能体循环），不该按访客降级（例如把知识库退化成上传文件、智能体交给主机）。
+ * 因此能力/界面判定请用本函数，而不是「有没有 ipcRenderer」。
+ */
+export function isHostGuestRuntime(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    !(window as any).ipcRenderer &&
+    !!(window as any).__AIKM_HOST__
+  )
+}
+
 /** 能力是否可用 */
 export function hasCapability(id: CapabilityId): boolean {
   return getPlatform().capabilities.has(id)

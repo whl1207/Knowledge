@@ -487,6 +487,7 @@ import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset, resetBuiltinAgentPreset
 import { deepSeekStyleOf, normalizeLlmTypeList } from '@/shared/llmSources'
 import { getPlatform, hasCapability } from '@/platform'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useMobileBackScreen } from '@/composables/useBackLayer'
 
 const store = usestore()
 
@@ -495,6 +496,9 @@ const store = usestore()
 // true = 预设列表屏，false = 编辑屏；宽窗口下两者并排，本状态无意义。
 const isTallLayout = useTallLayout()
 const showNavScreen = ref(true)
+
+// 安卓返回手势：细长窗口下本面板是「列表 ⇄ 内容」两屏，内容屏按返回回到列表（见 composables/useBackLayer）
+useMobileBackScreen('settings:agentpreset', isTallLayout, showNavScreen)
 
 // ====== 搜索 ======
 const presetKeyword = ref('')

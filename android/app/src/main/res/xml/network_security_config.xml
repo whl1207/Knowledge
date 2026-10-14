@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  允许明文 HTTP：本应用是「本地优先」，模型来源经常是 http://192.168.x.x:11434（局域网 Ollama）、
+  http://10.0.2.2:11434（模拟器里的宿主机）或自建网关。Android 9 起默认禁止明文流量，
+  不开这个开关时这些请求会直接 `Failed to fetch`（连提示都没有），因此在应用内显式放行。
+
+  安全边界说明：放行的只是**网络层是否允许明文**，不代表应用会主动把数据发到外网——
+  请求目标完全由用户配置的模型来源 / 搜索源决定；HTTPS 站点不受影响。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

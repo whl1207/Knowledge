@@ -133,10 +133,35 @@ function toOpenAiTools(tools: any[] = []): any[] | undefined {
         name: String(t.name),
         description: String(t.description || ''),
         parameters:
-          t.inputSchema && Object.keys(t.inputSchema).length ? t.inputSchema : { type: 'object', properties: {} },
+          t.inputSchema && Object.keys(t.inputSchema).length
+            ? flattenSchemaTypes(t.inputSchema)
+            : { type: 'object', properties: {} },
       },
     }))
   return list.length ? list : undefined
+}
+
+/**
+ * 把 JSON Schema 里的「类型数组」（`type: ["number", "null"]` 这种联合类型）压成单类型。
+ *
+ * 上游文档技能的工具就有这种 schema（insert_chart / edit_chart 的 values 是 `["number","null"]`），
+ * 而 LM Studio 的推理引擎遇到类型数组会直接返回 500（日志：`NotImplemented: map: filter-mapping
+ * not implemented`）——请求整条失败、编辑器只能显示「AI 没有返回内容」。实测压平后同一份请求
+ * 恢复正常。只改发给模型的结构，不改工具本身的校验与执行。
+ */
+function flattenSchemaTypes(node: any): any {
+  if (Array.isArray(node)) return node.map(flattenSchemaTypes)
+  if (!node || typeof node !== 'object') return node
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(node)) {
+    if (key === 'type' && Array.isArray(value)) {
+      const single = value.find((t) => typeof t === 'string' && t !== 'null') ?? value[0]
+      if (typeof single === 'string' && single) out.type = single
+      continue
+    }
+    out[key] = flattenSchemaTypes(value)
+  }
+  return out
 }
 
 function safeJson(v: unknown): string {
@@ -196,6 +221,9 @@ async function streamOpenAiCompatible(
   const toolAcc = new Map<number, { id: string; name: string; args: string }>()
   let stopReason: string | undefined
   let usage: { inputTokens?: number; outputTokens?: number } | undefined
+  /** 可解析的 `data:` 行数；为 0 说明服务其实没在流式说话（见下方报错） */
+  let dataLines = 0
+  let rawHead = ''
 
   while (true) {
     const { done, value } = await reader.read()
@@ -206,15 +234,26 @@ async function streamOpenAiCompatible(
       const line = buf.slice(0, nl).trim()
       buf = buf.slice(nl + 1)
       nl = buf.indexOf('\n')
-      if (!line.startsWith('data:')) continue
+      if (!line.startsWith('data:')) {
+        if (!rawHead) rawHead = line.slice(0, 200)
+        continue
+      }
       const payload = line.slice(5).trim()
       if (!payload || payload === '[DONE]') continue
       let json: any
       try {
         json = JSON.parse(payload)
       } catch {
+        if (!rawHead) rawHead = payload.slice(0, 200)
         continue
       }
+      // 有的服务把错误也塞进 SSE（LM Studio 引擎报错就是 `event: error` + `data:{"error":{…}}`）：
+      // 不识别就会被当成「正常结束但没内容」，编辑器只显示「AI 没有返回内容」，真实原因全丢了
+      if (json.error) {
+        const raw = typeof json.error === 'string' ? json.error : json.error?.message || JSON.stringify(json.error)
+        throw new Error(`模型服务返回错误：${String(raw).slice(0, 300)}`)
+      }
+      dataLines++
       const choice = json.choices?.[0]
       const delta = choice?.delta || {}
       if (typeof delta.content === 'string' && delta.content) cb.onDelta(delta.content)
@@ -235,6 +274,15 @@ async function streamOpenAiCompatible(
         usage = { inputTokens: json.usage.prompt_tokens, outputTokens: json.usage.completion_tokens }
       }
     }
+  }
+
+  // HTTP 200 但整条流里没有一条可解析的 data 行：本地推理服务（LM Studio 等）遇到
+  // 未知端点 / 未知模型时会返回 200 + JSON 错误体（如 `{"error":"Unexpected endpoint…"}`），
+  // 直接当成功会让编辑器只显示「AI 没有返回内容」，看不到真正的原因
+  if (dataLines === 0) {
+    // LM Studio 的错误体常常没有结尾换行，留在 buf 里，一并带出（否则报错没有线索）
+    const detail = (rawHead || buf).replace(/\s+/g, ' ').trim().slice(0, 200)
+    throw new Error(`模型服务未返回流式响应${detail ? `：${detail}` : ''}`)
   }
 
   for (const [, tc] of [...toolAcc.entries()].sort((a, b) => a[0] - b[0])) {
@@ -274,6 +322,8 @@ async function streamOllama(
   const decoder = new TextDecoder()
   let buf = ''
   let usage: { inputTokens?: number; outputTokens?: number } | undefined
+  let lines = 0
+  let rawHead = ''
 
   while (true) {
     const { done, value } = await reader.read()
@@ -289,8 +339,12 @@ async function streamOllama(
       try {
         json = JSON.parse(line)
       } catch {
+        if (!rawHead) rawHead = line.slice(0, 200)
         continue
       }
+      lines++
+      // Ollama 的失败也是 200 + `{"error":"model … not found"}`：不拦就会静默变成「没有返回内容」
+      if (json.error) throw new Error(`模型服务返回错误：${String(json.error).slice(0, 200)}`)
       const msg = json.message || {}
       if (typeof msg.content === 'string' && msg.content) cb.onDelta(msg.content)
       if (typeof msg.thinking === 'string' && msg.thinking && cb.onReasoning) cb.onReasoning(msg.thinking)
@@ -314,6 +368,10 @@ async function streamOllama(
         if (json.done_reason && cb.onStopReason) cb.onStopReason(normalizeStopReason(json.done_reason) || 'stop')
       }
     }
+  }
+  if (lines === 0) {
+    const detail = (rawHead || buf).replace(/\s+/g, ' ').trim().slice(0, 200)
+    throw new Error(`模型服务未返回流式响应${detail ? `：${detail}` : ''}`)
   }
   cb.onDone()
 }

@@ -552,8 +552,10 @@ export interface MetricSpec {
 export interface AggregateOptions {
   where?: WhereCond[]
   match?: 'all' | 'any'
-  groupBy?: string | number
-  metrics: MetricSpec[]
+  /** 分组列；传数组 = 多字段分组（如 ['城市','渠道']），用于多条件下的频率统计 */
+  groupBy?: string | number | (string | number)[]
+  /** 指标；**可省略**——省略时只输出每组行数与占比（即频次统计） */
+  metrics?: MetricSpec[]
   headerRow?: number
   sortBy?: string
   sortDir?: 'asc' | 'desc'
@@ -561,12 +563,26 @@ export interface AggregateOptions {
   maxScanRows?: number
 }
 
-/** 分组聚合：按列分组（省略则整体一行），逐指标计算 sum/avg/count/distinct/min/max/countblank */
-export function aggregateRows(wb: xlsx.WorkBook, sheetName: string, opts: AggregateOptions): { sheet: string; groups: Record<string, any>[]; scanned: number; note?: string } {
+/** 输出字段别名（模型常按语义或英文名指代「行数 / 占比」） */
+const AGG_SORT_ALIAS: Record<string, string> = {
+  count: '行数', rowcount: '行数', row_count: '行数', rows: '行数', freq: '行数', frequency: '行数', times: '行数',
+  行数: '行数', 频次: '行数', 频率: '行数', 次数: '行数', 计数: '行数', 数量: '行数',
+  percent: '占比(%)', percentage: '占比(%)', pct: '占比(%)', ratio: '占比(%)', share: '占比(%)',
+  占比: '占比(%)', 比例: '占比(%)', 百分比: '占比(%)',
+}
+
+/**
+ * 分组聚合：按列分组（支持多列；省略则整体一行），逐指标计算 sum/avg/count/distinct/min/max/countblank。
+ * metrics 省略即「频次统计」：只输出每组行数与占比，配合 sortBy:'行数' + limit 可一步得到频率最高的值。
+ */
+export function aggregateRows(
+  wb: xlsx.WorkBook,
+  sheetName: string,
+  opts: AggregateOptions,
+): { sheet: string; header: string[]; groups: Record<string, any>[]; scanned: number; note?: string } {
   const ws = wb.Sheets[sheetName]
   const metrics = (opts.metrics || []).filter(m => m && m.fn)
-  if (!ws) return { sheet: sheetName, groups: [], scanned: 0, note: `工作表「${sheetName}」不存在` }
-  if (!metrics.length) return { sheet: sheetName, groups: [], scanned: 0, note: 'metrics 不能为空（如 [{column:"金额",fn:"sum"}]）' }
+  if (!ws) return { sheet: sheetName, header: [], groups: [], scanned: 0, note: `工作表「${sheetName}」不存在` }
   const headerRow = Math.max(1, Math.floor(Number(opts.headerRow) || 1))
   const headerM = cellMatrix(ws, { startRow: headerRow, endRow: headerRow, maxCells: 2000 })
   const headers = (headerM.text[0] || []).map((h, i) => String(h || '').trim() || colLetter(headerM.startCol + i))
@@ -574,25 +590,28 @@ export function aggregateRows(wb: xlsx.WorkBook, sheetName: string, opts: Aggreg
     const ref = resolveColumn(ws, c, headerRow)
     return ref ? ref.index : -1
   }
-  const groupIdx = opts.groupBy !== undefined ? colOf(opts.groupBy) : -1
-  if (opts.groupBy !== undefined && groupIdx <= 0) {
-    return { sheet: sheetName, groups: [], scanned: 0, note: `分组列「${opts.groupBy}」未找到` }
+  const groupWants = opts.groupBy === undefined ? [] : (Array.isArray(opts.groupBy) ? opts.groupBy : [opts.groupBy]).filter(g => g !== undefined && g !== null && String(g) !== '')
+  const groupIdx = groupWants.map(colOf)
+  // 列名给错时直接回报「可用列」，模型无需再调 list_sheets 就能自纠一次
+  if (groupIdx.some(i => i <= 0)) {
+    const bad = groupWants.filter((_, i) => groupIdx[i] <= 0).map(String)
+    return { sheet: sheetName, header: headers, groups: [], scanned: 0, note: `分组列未找到：${bad.join('、')}；可用列：${headers.join('、')}` }
   }
   const prepared = metrics.map(m => ({ spec: m, idx: colOf(m.column), name: m.as || `${m.fn}_${typeof m.column === 'number' ? colLetter(m.column) : m.column}` }))
   const badCols = prepared.filter(p => p.idx <= 0).map(p => String(p.spec.column))
-  if (badCols.length) return { sheet: sheetName, groups: [], scanned: 0, note: `指标列未找到：${badCols.join('、')}` }
+  if (badCols.length) return { sheet: sheetName, header: headers, groups: [], scanned: 0, note: `指标列未找到：${badCols.join('、')}；可用列：${headers.join('、')}` }
 
   const m = cellMatrix(ws, { startRow: headerRow + 1, maxScanRows: opts.maxScanRows ?? 20000 })
   const startCol = m.startCol
   const conds = (opts.where || []).map(w => ({ ...w, idx: colOf(w.column) })).filter(c => c.idx > 0)
   const wantAll = (opts.match || 'all') !== 'any'
 
-  interface Acc { key: string; count: number; nums: Map<number, number>; distinct: Map<number, Set<string>>; blanks: Map<number, number>; sum: Map<number, number>; min: Map<number, number>; max: Map<number, number> }
+  interface Acc { vals: string[]; count: number; nums: Map<number, number>; distinct: Map<number, Set<string>>; blanks: Map<number, number>; sum: Map<number, number>; min: Map<number, number>; max: Map<number, number> }
   const groups = new Map<string, Acc>()
-  const ensure = (key: string): Acc => {
+  const ensure = (key: string, vals: string[]): Acc => {
     let g = groups.get(key)
     if (!g) {
-      g = { key, count: 0, nums: new Map(), distinct: new Map(), blanks: new Map(), sum: new Map(), min: new Map(), max: new Map() }
+      g = { vals, count: 0, nums: new Map(), distinct: new Map(), blanks: new Map(), sum: new Map(), min: new Map(), max: new Map() }
       prepared.forEach((_, i) => g!.distinct.set(i, new Set()))
       groups.set(key, g)
     }
@@ -612,8 +631,8 @@ export function aggregateRows(wb: xlsx.WorkBook, sheetName: string, opts: Aggreg
     // 全空行不计入统计
     if (rawRow.every(v => v === null || v === undefined || String(v).trim() === '')) continue
     scanned++
-    const key = groupIdx > 0 ? (textRow[groupIdx - startCol] || '(空)') : '(全部)'
-    const g = ensure(key)
+    const vals = groupIdx.map(gi => textRow[gi - startCol] || '(空)')
+    const g = ensure(vals.join('\u0001'), vals)
     g.count++
     prepared.forEach((p, pi) => {
       const rv = rawRow[p.idx - startCol]
@@ -635,8 +654,9 @@ export function aggregateRows(wb: xlsx.WorkBook, sheetName: string, opts: Aggreg
   const round = (n: number) => Math.round(n * 1e6) / 1e6
   const out = Array.from(groups.values()).map(g => {
     const o: Record<string, any> = {}
-    if (groupIdx > 0) o[`分组_${headers[groupIdx - startCol] || colLetter(groupIdx)}`] = g.key
+    groupIdx.forEach((gi, i) => { o[`分组_${headers[gi - startCol] || colLetter(gi)}`] = g.vals[i] })
     o['行数'] = g.count
+    if (groupIdx.length) o['占比(%)'] = scanned ? round((g.count / scanned) * 100) : 0
     prepared.forEach((p, pi) => {
       const nums = g.nums.get(pi) || 0
       switch (p.spec.fn) {
@@ -652,23 +672,28 @@ export function aggregateRows(wb: xlsx.WorkBook, sheetName: string, opts: Aggreg
     return o
   })
 
-  if (opts.sortBy) {
+  const outKeys = out.length ? Object.keys(out[0]) : []
+  const sortKey = opts.sortBy !== undefined && String(opts.sortBy).trim() ? (AGG_SORT_ALIAS[String(opts.sortBy).trim().toLowerCase()] || String(opts.sortBy)) : undefined
+  // 排序字段不存在时不再静默按默认顺序返回，而是明确告知可用字段（模型据此可一次自纠）
+  const sortUsable = !!sortKey && outKeys.includes(sortKey)
+  if (sortUsable) {
     const dir = (opts.sortDir || 'desc') === 'asc' ? 1 : -1
-    const key = opts.sortBy
+    const key = sortKey!
     out.sort((a, b) => {
       const na = toNumber(a[key]), nb = toNumber(b[key])
       if (na !== null && nb !== null) return (na - nb) * dir
       const sa = String(a[key] ?? ''), sb = String(b[key] ?? '')
       return (sa === sb ? 0 : sa < sb ? -1 : 1) * dir
     })
-  } else if (groupIdx > 0) {
+  } else if (groupIdx.length) {
     out.sort((a, b) => String(Object.values(a)[0]).localeCompare(String(Object.values(b)[0])))
   }
   const limit = Math.max(1, Math.min(500, Math.floor(Number(opts.limit) || 200)))
   const trimmed = out.slice(0, limit)
   const notes: string[] = []
   if (opts.groupBy === undefined) notes.push('未指定 groupBy，为整表汇总')
+  if (sortKey && !sortUsable) notes.push(`排序字段「${opts.sortBy}」不在输出字段中，已按默认顺序返回；可用字段：${outKeys.join('、')}`)
   if (m.truncated && m.note) notes.push(m.note)
   if (out.length > trimmed.length) notes.push(`分组数 ${out.length} 超过上限 ${limit}，仅返回前 ${limit} 组`)
-  return { sheet: sheetName, groups: trimmed, scanned, note: notes.length ? notes.join('；') : undefined }
+  return { sheet: sheetName, header: headers, groups: trimmed, scanned, note: notes.length ? notes.join('；') : undefined }
 }

@@ -28,7 +28,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { createRequire } from 'node:module'
+import { createRequire, isBuiltin } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -199,7 +199,37 @@ async function bundleMain(name, outDir) {
           )
         },
       },
+      /**
+       * 回归护栏：每个裸导入都必须是「已解析到文件」（即将被内联），
+       * 一旦被外部化（vite 的 SSR 默认行为）就立即构建失败 —— 那种产物在打包后必炸。
+       */
+      {
+        name: 'aikm-no-external-runtime-deps',
+        enforce: 'pre',
+        async resolveId(id, importer) {
+          if (id[0] === '.' || id[0] === '\0' || id.includes('?') || path.isAbsolute(id)) return null
+          if (id === 'electron' || id.startsWith('node:') || isBuiltin(id)) return null
+          const resolved = await this.resolve(id, importer, { skipSelf: true })
+          if (resolved && resolved.external) {
+            throw new Error(
+              `依赖 "${id}" 被外部化（require 会留在产物里）。` +
+                `打包后 resources/office 下没有 node_modules，加载编辑器会直接 Cannot find module —— ` +
+                `请保留上面 build 配置里的 ssr.noExternal: true`,
+            )
+          }
+          return null
+        },
+      },
     ],
+    /**
+     * SSR 构建默认把 node_modules 依赖全部外部化，产物里就会留下
+     * `require('undici')` / `import('pdfjs-dist/…')` 这类裸模块引用。
+     * 开发态能解析是因为 resources/office/<editor>/main 向上能找到项目根的 node_modules；
+     * 打包后产物在 <app>/resources/office 下（asar 之外），向上只有 resources/ 与 <app>/，
+     * 那里没有 node_modules，于是 require 立刻抛 "Cannot find module"。
+     * 故这里显式要求除 electron 与 node 内建外的依赖全部内联，保证产物真正自包含。
+     */
+    ssr: { noExternal: true },
     build: {
       ssr: true,
       target: 'node22',

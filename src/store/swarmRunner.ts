@@ -470,8 +470,8 @@ async function executeAgent(agentIdx: number, prompt: string, opts: AgentRunOpts
   const st = agentRunStates.value[agentIdx]
   if (st && st.status === 'retrieving') st.status = 'thinking'
 
-  // 兜底路径（无桌面 agent 循环）
-  if (!window.dsh?.agent || !agentBridge.available) {
+  // 兜底路径（本环境没有任何智能体循环：桌面 IPC / 主机桥 / 渲染层循环都不可用）
+  if (!agentBridge.available) {
     try {
       const onStream = (chunk: string) => {
         if (msg) msg.content += chunk

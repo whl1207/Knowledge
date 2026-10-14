@@ -94,6 +94,10 @@ interface EditorAdapter {
    * 创建视图后要执行的「界面精简脚本」（在编辑器渲染层里跑一次）。
    * 用途：隐藏上游自带、与 AI-KM 重复或不需要的 UI（如 Ribbon 上的 Genspark 品牌入口）。
    * 只做「隐藏/改名」，不改功能，因此上游升级时脚本失效也只是恢复原样，不会报错。
+   *
+   * 顺带隐藏上游 Ribbon 上的「一次性 AI 快捷操作」（AI 总结 / AI 润色 / AI 排版 / 表格检查 /
+   * PPT 美化…）：它们与宿主 AI 助手面板重复，只保留一个「打开 AI 助手」入口，并给该入口补一个
+   * 中性图标（见 aikmAiIconCss）。
    */
   hideUiScript?: string
 }
@@ -140,9 +144,36 @@ const BRAND_CLEANUP_SCRIPT = `(() => {
     }
     const marks = Array.from(document.querySelectorAll(MARKS))
     for (const mark of marks) {
+      // 品牌图标被藏掉后图标位会空着：在「AI 入口」的图标位补一个中性图标（.aikm-ai-icon 的样式
+      // 由主进程 insertCSS 注入，见 aikmAiIconCss）。预设提示词按钮不需要（它们整颗隐藏，且自己带图标）
+      const aiHost = mark.closest('button, [role="button"], .ai-rail, .expand-copilot')
+      if (aiHost && !aiHost.querySelector('.ai-feature-icon') && !aiHost.querySelector('.aikm-ai-icon')) {
+        const icon = document.createElement('i')
+        icon.className = 'aikm-ai-icon'
+        icon.setAttribute('aria-hidden', 'true')
+        mark.parentElement.insertBefore(icon, mark.nextSibling)
+        hits.push('ai-icon')
+      }
       if (mark.style.display === 'none') continue
       mark.style.display = 'none'
       hits.push('mark')
+    }
+    // 一次点击式 AI 快捷操作（AI 总结 / AI 润色 / AI 排版 / 表格检查 / PPT 美化 / 事实核查 / 配图…）
+    // 与 AI 助手面板重复 —— 它们只是预先写好的提示词，只保留「打开 AI 助手」这一个入口：
+    //   · Ribbon：入口那颗不含 .ai-feature-icon（预设颗都有），其余整颗隐藏；
+    //   · PPT 舞台工具条：同一组预设改用 .stage-ai-btn，按「不含品牌图标」判定为预设（连分隔线一起藏）
+    const hideEntry = (el) => {
+      if (!el || el.style.display === 'none') return
+      el.style.display = 'none'
+      hits.push('ai-preset')
+    }
+    for (const el of document.querySelectorAll('button.ai-entry')) {
+      if (el.querySelector('.ai-feature-icon')) hideEntry(el)
+    }
+    for (const bar of document.querySelectorAll('.stage-ai-bar')) {
+      const presets = Array.from(bar.querySelectorAll('.stage-ai-btn')).filter((b) => !b.querySelector(MARKS))
+      presets.forEach(hideEntry)
+      if (presets.length) for (const divider of bar.querySelectorAll('.stage-ai-divider')) hideEntry(divider)
     }
     // 按**文本节点**改名（整文档遍历，代价远低于 querySelectorAll + textContent 逐元素取文本）：
     // 品牌字样所在容器各版本不同，且常常与图标同级（如 Excel 的 .ai-panel-title = [svg, 'Genspark']），
@@ -155,7 +186,7 @@ const BRAND_CLEANUP_SCRIPT = `(() => {
     }
     for (const mark of marks) {
       const host = mark.closest(ICON_HOSTS) || mark.parentElement
-      if (!host || host.querySelector('.aikm-brand-fallback, .ai-rail-text')) continue
+      if (!host || host.querySelector('.aikm-brand-fallback, .ai-rail-text, .aikm-ai-icon')) continue
       if (hiddenSelfOrAncestor(host)) continue
       if ((host.innerText || '').trim() !== '') continue
       const span = document.createElement('span')
@@ -582,6 +613,54 @@ function notifyHost(entry: ViewEntry | null | undefined, event: string, filePath
   hostWindow.webContents.send('office:event', { viewId, type, event, filePath: filePath || entry.filePath })
 }
 
+/**
+ * 「AI 图标」的图标字体 CSS（编辑器渲染层用 insertCSS 注入）。
+ *
+ * 编辑器渲染层自带图标全是内联 SVG，没有图标字体；品牌图标被藏掉后 AI 入口的图标位就空了。
+ * AI-KM 界面本身用 Font Awesome，这里复用随应用打包的同一份字体（base64 内联；编辑器页面的
+ * CSP 是 `font-src 'self' data:`，data: 字体放行），图标风格与宿主一致。
+ * 读不到字体（被裁剪的构建产物）时返回空串：AI 入口只剩文字，不影响功能。
+ */
+let aiIconCss: string | undefined
+
+function aikmAiIconCss(): string {
+  if (aiIconCss !== undefined) return aiIconCss
+  aiIconCss = ''
+  const rel = path.join('font-awesome', 'fonts', 'fontawesome-webfont.woff2')
+  for (const base of [path.join(app.getAppPath(), 'dist'), path.join(app.getAppPath(), 'public')]) {
+    try {
+      const base64 = fs.readFileSync(path.join(base, rel)).toString('base64')
+      // \f0d0 = Font Awesome 的 fa-magic（AI-KM 自己的「AI 动作」按钮也用这个图标）
+      aiIconCss = `@font-face{font-family:'AIKMIconFont';src:url(data:font/woff2;base64,${base64}) format('woff2');font-weight:normal;font-style:normal}
+.aikm-ai-icon{display:inline-block !important;font-family:'AIKMIconFont' !important;font-style:normal !important;font-weight:normal !important;font-size:18px !important;line-height:1 !important;color:inherit;text-rendering:auto;-webkit-font-smoothing:antialiased}
+.aikm-ai-icon::before{content:'\\f0d0'}`
+      return aiIconCss
+    } catch {
+      /* 换下一个候选目录 */
+    }
+  }
+  console.warn('[office] 未找到图标字体 font-awesome，AI 入口只显示文字')
+  return aiIconCss
+}
+
+/** 向编辑器渲染层注入图标字体并执行界面精简脚本（两者都只影响编辑器自己的页面） */
+async function simplifyEditorUi(entry: ViewEntry, script: string) {
+  const wc = entry.view.webContents
+  if (wc.isDestroyed()) return
+  try {
+    const css = aikmAiIconCss()
+    if (css) await wc.insertCSS(css, { cssOrigin: 'user' })
+  } catch (e) {
+    console.warn(`[office] ${entry.viewId} 图标字体注入失败:`, (e as Error)?.message || e)
+  }
+  if (wc.isDestroyed()) return
+  try {
+    await wc.executeJavaScript(script, true)
+  } catch (e) {
+    console.warn(`[office] ${entry.viewId} 界面精简脚本失败:`, (e as Error)?.message || e)
+  }
+}
+
 /** 把视图放在宿主窗口的最上层并占满占位区 */
 function applyBounds(entry: ViewEntry) {
   if (entry.view.webContents.isDestroyed()) return
@@ -622,14 +701,11 @@ function attachView(entry: ViewEntry) {
   applyBounds(entry)
   state.views.set(entry.viewId, entry)
 
-  // 界面精简：编辑器加载完成后跑一次（如隐藏 Ribbon 上的 Genspark 品牌入口）
+  // 界面精简：编辑器加载完成后跑一次（如隐藏 Ribbon 上的 Genspark 品牌入口、在 AI 入口补图标）
   const adapterForView = ADAPTERS[entry.type]
   if (adapterForView.hideUiScript) {
     entry.view.webContents.once('did-finish-load', () => {
-      if (entry.view.webContents.isDestroyed()) return
-      entry.view.webContents
-        .executeJavaScript(adapterForView.hideUiScript!, true)
-        .catch((e) => console.warn(`[office] ${entry.viewId} 界面精简脚本失败:`, e?.message || e))
+      void simplifyEditorUi(entry, adapterForView.hideUiScript!)
     })
   }
 

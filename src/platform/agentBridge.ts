@@ -16,6 +16,8 @@ import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUs
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
 import { lanAgentTransport } from '@/platform/lanAgentClient'
+import { rendererAgentTransport } from '@/platform/rendererAgent'
+import { isHostGuestRuntime } from '@/platform'
 
 /**
  * 传输层：桌面端 = `window.dsh.agent`（IPC），网页端（局域网共享）= `/api/agent/*`（HTTP + SSE）。
@@ -38,16 +40,23 @@ interface AgentTransport {
   revokeConcurrency?(scopeId: string): Promise<{ success: boolean }>
 }
 
-/** 网页端（局域网共享）判定：无 ipcRenderer 即浏览器访客 */
-function isBrowserGuest(): boolean {
+/** 网页端（无窗口壳）判定：安卓壳 / 局域网访客 / 本地浏览器都属于这一类（都能跑渲染层智能体循环） */
+function isBrowserRuntime(): boolean {
   return typeof window !== 'undefined' && !(window as any).ipcRenderer
 }
 
-/** 解析当前环境的智能体传输层（桌面 IPC 优先；浏览器回退到主机 HTTP 桥） */
+/**
+ * 解析当前环境的智能体传输层：
+ * 1. 桌面端 → 主进程（`window.dsh.agent`，IPC）；
+ * 2. 局域网访客网页（主机注入了 `__AIKM_HOST__`）→ 主机（`/api/agent/*`，HTTP + SSE）；
+ * 3. 其余（**安卓壳 / 本地浏览器**）→ **渲染层智能体循环**（`platform/rendererAgent`）：
+ *    没有主进程可依托，就在页面里跑循环，用平台能力（文件端口 / 检索 / 联网）执行工具。
+ */
 function resolveTransport(): AgentTransport | null {
   const dsh = (window as any)?.dsh?.agent
   if (dsh) return dsh as AgentTransport
-  if (isBrowserGuest()) return lanAgentTransport as unknown as AgentTransport
+  if (isHostGuestRuntime()) return lanAgentTransport as unknown as AgentTransport
+  if (isBrowserRuntime()) return rendererAgentTransport() as unknown as AgentTransport
   return null
 }
 
@@ -195,7 +204,7 @@ class AgentBridge {
   private dshAgent(): AgentTransport {
     const transport = this.transportOrNull()
     if (!transport) {
-      throw new Error('智能体不可用：桌面端需 window.dsh.agent，网页端需主机开启局域网共享')
+      throw new Error('智能体不可用：桌面端需 window.dsh.agent；安卓 / 网页端需能装载渲染层智能体循环')
     }
     return transport
   }

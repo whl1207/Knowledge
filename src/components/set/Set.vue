@@ -34,6 +34,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { LOCAL_STORAGE_LIMIT, MD_FILTERS, countEntries, formatBytes, lsTotalBytes, readLsJson, readStoredChats, saveTextFile, stampText } from '@/lib/settingsData'
 import { getPlatform, hasCapability } from '@/platform'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useMobileBackScreen } from '@/composables/useBackLayer'
+import { BACK_ORDER } from '@/platform/backLayers'
 
 const store = usestore()
 
@@ -43,6 +45,11 @@ const isTallLayout = useTallLayout()
 // 细长窗口下当前显示哪一屏：true = 设置分类列表，false = 设置内容；宽窗口下两者并排，本状态无意义。
 // 起手看分类列表（手机上这就是「设置首页」）；从别处跳转（工具 / MCP / 预设…）时直接进内容
 const showNavScreen = ref(true)
+
+// ==================== 安卓返回手势（本模块内的界面栈） ====================
+// 细长窗口下设置是「分类列表 ⇄ 设置内容」两屏；内容屏按返回回到分类列表
+// （等价于点左上角 ←）。已在分类列表时不抢，交给 App 的「关闭设置」层处理。
+useMobileBackScreen('settings:nav', isTallLayout, showNavScreen, BACK_ORDER.settingsNav)
 
 // standalone：本组件作为「设置」独立子窗口的根组件渲染（窗口无系统标题栏，顶栏即拖动区）
 // initialNav：独立窗口首次打开时要定位的设置分类（主进程经 #/settings-window?nav=xxx 传入）

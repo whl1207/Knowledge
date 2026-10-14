@@ -16,6 +16,7 @@ import { ref, type Ref } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { agentBridge } from '@/platform/agentBridge'
+import { isHostGuestRuntime } from '@/platform'
 import { chatsRef } from '@/store/chats'
 // 运行中「引导」：集群成员（发言中的 agent 会话）也接受 steer，其会话 id 记在 swarmState
 import { agentRunStates, running as swarmRunning, swarmRunChatId } from '@/store/swarmState'
@@ -572,8 +573,11 @@ export function useAgentRun(deps: AgentRunDeps) {
     return message ? `${fileContext}\n\n${message}` : fileContext
   }
 
-  /** 是否网页端（局域网共享，无 ipcRenderer）：智能体循环跑在主机，能力由主机白名单决定 */
-  const isLanGuest = typeof window !== 'undefined' && !(window as any).ipcRenderer
+  /**
+   * 是否「局域网访客网页」（智能体循环跑在主机，能力由主机白名单决定）。
+   * 与「无 ipcRenderer」不等价：安卓壳也没有 ipcRenderer，但它在页面里跑本地智能体循环。
+   */
+  const isLanGuest = isHostGuestRuntime()
 
   /** 创建 agent 会话并接入聊天（公共流程：创建 → 占位消息 → 订阅 → 发送） */
   const startAgentSessionInChat = async (
@@ -582,7 +586,7 @@ export function useAgentRun(deps: AgentRunDeps) {
     images?: Array<string | Uint8Array | ArrayBuffer>,
   ) => {
     if (!agentBridge.available) {
-      ElMessage.error(store.locales == 'zh' ? '智能体功能需要桌面版或主机侧局域网共享' : 'Agent Loop requires the desktop app or host LAN sharing')
+      ElMessage.error(store.locales == 'zh' ? '智能体当前不可用（环境缺少执行智能体循环的能力）' : 'Agent Loop is unavailable in this environment')
       return null
     }
     const chat = getCurrentChat()

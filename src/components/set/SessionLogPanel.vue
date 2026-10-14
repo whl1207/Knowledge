@@ -198,6 +198,7 @@ import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { SessionEvent, DerivedMessage, SessionLogIntegrity } from '@/types/session-log'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useMobileBackScreen } from '@/composables/useBackLayer'
 
 const props = defineProps<{ sessionId?: string; hideHeader?: boolean }>()
 
@@ -209,6 +210,9 @@ const isZh = computed(() => store.locales !== 'en')
 // true = 会话列表屏，false = 详情屏；宽窗口下两者并排，本状态无意义。
 const isTallLayout = useTallLayout()
 const showNavScreen = ref(true)
+
+// 安卓返回手势：细长窗口下本面板是「列表 ⇄ 内容」两屏，内容屏按返回回到列表（见 composables/useBackLayer）
+useMobileBackScreen('settings:sessionlog', isTallLayout, showNavScreen)
 
 type LogTab = 'events' | 'derive' | 'integrity'
 

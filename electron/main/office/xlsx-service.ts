@@ -15,7 +15,20 @@ import * as XR from './xlsx-reader'
 import * as XE from './xlsx-editor'
 
 const MAX_SESSIONS = 12 // 内存会话上限，超出淘汰最旧
-const MAX_OUT_CHARS = 30000 // 单次工具输出上限
+const MAX_OUT_CHARS = 30000 // 单次工具输出上限（硬顶，可由 maxChars 参数下调）
+/**
+ * 各工具的默认输出预算（字符）。
+ * 数据类工具默认远低于硬顶：一次调用吃掉整个上下文会让小窗口模型（如 32k）在 2~3 次调用后丢上下文，
+ * 因此默认只够「看清楚结果」，需要更多再显式加 limit / maxChars。
+ */
+const OUT_BUDGET: Record<string, number> = {
+  read_sheet: 12000,
+  query_rows: 6000,
+  aggregate: 6000,
+  search_cells: 5000,
+  list_sheets: 12000,
+  open_workbook: 12000,
+}
 
 // ---------------- 会话 ----------------
 
@@ -72,23 +85,50 @@ function normalizeArgs(name: string, raw: Record<string, any>): Record<string, a
 }
 
 /**
- * 解析会话：优先用传入的 workbookId；**未传时**回退到「按 path 命中的会话」或
- * 「唯一已打开的工作簿」。LLM 忘带会话 ID 是高频现象，回退可避免直接失败。
+ * 打开文件并建立会话（open_workbook 与「直接用 path 读取」共用）。
+ * 失败返回可直接回给模型的错误文本；成功返回会话。
  */
-function sessionOf(args: Record<string, any>): WorkbookSession | null {
+function openSession(rawPath: any): WorkbookSession | string {
+  const raw = normPath(String(rawPath || ''))
+  if (!raw) return '参数缺失：请提供 Excel 文件的 path 或先 open_workbook 拿到 workbookId'
+  const abs = path.isAbsolute(raw) ? raw : path.resolve(raw)
+  if (!fs.existsSync(abs)) return `文件不存在: ${abs}`
+  const ext = path.extname(abs).toLowerCase()
+  if (!['.xlsx', '.xlsm', '.xls', '.csv', '.tsv', '.txt'].includes(ext)) return `仅支持 .xlsx / .xlsm / .xls / .csv：${abs}`
+  let wb: WorkBook
+  try { wb = XR.readWorkbookFrom({ filePath: abs }) } catch (e: any) { return `打开失败: ${e?.message || String(e)}` }
+  let pkg: XE.XlsxPackage | null = null
+  if (ext === '.xlsx' || ext === '.xlsm') {
+    try { pkg = XE.loadXlsxPackage(abs) } catch { pkg = null }
+  }
+  const workbookId = randomUUID()
+  const session: WorkbookSession = { workbookId, path: abs, pkg, cache: { revision: 0, wb }, openedAt: Date.now(), lastUseAt: Date.now() }
+  sessions.set(workbookId, session)
+  capSessions()
+  return session
+}
+
+/**
+ * 解析会话（返回错误文本表示失败）：优先用传入的 workbookId；**未传时**回退到「按 path 命中的会话」、
+ * 「用 path 直接打开」或「唯一已打开的工作簿」。LLM 忘带会话 ID / 想一步出结果是高频现象，
+ * 回退可让「给路径 → 直接统计」在**一次调用**内完成（32k 这类小上下文窗口尤其重要）。
+ */
+function sessionOf(args: Record<string, any>): WorkbookSession | string {
   const id = String(arg(args, WB_ID_KEYS) || '')
   if (id) {
     const s = sessions.get(id)
     if (s) s.lastUseAt = Date.now()
-    return s || null
+    return s || sessionError(args)
   }
   const wantPath = normPath(String(arg(args, WB_PATH_KEYS) || ''))
   const all = Array.from(sessions.values())
-  const fallback = wantPath
-    ? all.find(s => s.path === wantPath || path.resolve(s.path) === path.resolve(wantPath))
-    : (all.length === 1 ? all[0] : null)
-  if (fallback) fallback.lastUseAt = Date.now()
-  return fallback || null
+  if (wantPath) {
+    const hit = all.find(s => s.path === wantPath || path.resolve(s.path) === path.resolve(wantPath))
+    if (hit) { hit.lastUseAt = Date.now(); return hit }
+    return openSession(wantPath)
+  }
+  if (all.length === 1) { all[0].lastUseAt = Date.now(); return all[0] }
+  return sessionError(args)
 }
 
 /**
@@ -102,9 +142,9 @@ function sessionError(args: Record<string, any>): string {
     ? `\n当前已打开的工作簿会话：\n${open.map(s => `- workbookId: ${s.workbookId}　路径: ${s.path}`).join('\n')}`
     : '\n当前没有任何已打开的工作簿会话。'
   if (!id) {
-    return `缺少 workbookId 参数：请先调用 open_workbook 获取 workbookId，并在后续调用中把它原样放进 args 传入。${list}`
+    return `缺少 workbookId 参数：可在本工具参数里直接给 path（会自动打开该文件），或先调用 open_workbook 获取 workbookId。${list}`
   }
-  return `workbookId「${id}」已失效（主进程重启、已被 close_workbook 关闭，或同时打开的工作簿超过 ${MAX_SESSIONS} 个被淘汰）。请重新 open_workbook 后再试。${list}`
+  return `workbookId「${id}」已失效（主进程重启、已被 close_workbook 关闭，或同时打开的工作簿超过 ${MAX_SESSIONS} 个被淘汰）。请重新 open_workbook（或直接传 path）后再试。${list}`
 }
 
 /** 从参数里按多别名取第一个非空值（兼容 LLM 命名方差） */
@@ -176,22 +216,50 @@ function needWritable(s: WorkbookSession): string | null {
   return null
 }
 
-function clip(text: string): string {
-  return text.length > MAX_OUT_CHARS
-    ? text.slice(0, MAX_OUT_CHARS) + `\n\n…（输出超长，已截断，共 ${text.length} 字符；请用 startRow/endRow 或 limit 缩小范围）`
+function clip(text: string, maxChars = MAX_OUT_CHARS): string {
+  const cap = Math.max(500, Math.min(MAX_OUT_CHARS, Math.floor(maxChars) || MAX_OUT_CHARS))
+  return text.length > cap
+    ? text.slice(0, cap) + `\n\n…（输出超长已截断，共 ${text.length} 字符；请用 limit / maxChars 缩小范围，或改用 aggregate 直接统计，避免占用上下文）`
     : text
+}
+
+/** 输出预算：优先取调用方传的 maxChars，否则用该工具默认值 */
+function outBudget(name: string, args: Record<string, any>): number {
+  const want = Number(arg(args, ['maxChars', 'max_chars', 'maxchars']))
+  if (Number.isFinite(want) && want > 0) return want
+  return OUT_BUDGET[name] || MAX_OUT_CHARS
+}
+
+/** 记录数组 → 紧凑制表符表格（字段名只出现一次，比逐行重复 key 的 JSON 少一半以上字符） */
+function compactTable(rows: Record<string, any>[]): string {
+  if (!rows.length) return '（无数据）'
+  const keys: string[] = []
+  for (const r of rows) for (const k of Object.keys(r || {})) if (!keys.includes(k)) keys.push(k)
+  const cell = (v: any) => (v === null || v === undefined ? '' : String(v).replace(/[\t\r\n]+/g, ' '))
+  return [keys.join('\t'), ...rows.map(r => keys.map(k => cell(r?.[k])).join('\t'))].join('\n')
+}
+
+/** 表头预览：结果自带列名，上下文被压缩/截断后模型也能自纠，不必再查一次 */
+function headerHint(header: string[]): string {
+  if (!header.length) return ''
+  const shown = header.slice(0, 40).join('、')
+  return `表头：${shown}${header.length > 40 ? `…（共 ${header.length} 列）` : ''}\n`
 }
 
 // ---------------- 工具定义 ----------------
 
 export function toolDefinitions(): any[] {
-  const wbId = { workbookId: { type: 'string', description: 'open_workbook 返回的会话 ID（workbookId / workbook_id / bookId 等价，任选其一）' }, workbook_id: { type: 'string', description: 'workbookId 的别名，任选其一' } }
+  const wbId = {
+    workbookId: { type: 'string', description: 'open_workbook 返回的会话 ID（workbookId / workbook_id / bookId 等价，任选其一）' },
+    workbook_id: { type: 'string', description: 'workbookId 的别名，任选其一' },
+    path: { type: 'string', description: 'Excel 文件绝对路径：**可代替 workbookId**（同一路径已有会话就直接用，没有就自动打开）——小上下文窗口下可省掉一次 open_workbook 调用；path / filePath / file_path 等价' },
+  }
   const sheet = { sheet: { type: 'string', description: '工作表名（省略 = 第一个工作表；大小写不敏感）' } }
   const sheetName = { name: { type: 'string', description: '工作表名' } }
   return [
     {
       name: 'open_workbook',
-      description: '打开本地 Excel 文件（.xlsx / .xlsm / .xls / .csv），返回 workbookId 与各工作表的规模、范围、表头预览。后续用 read_sheet / query_rows / aggregate 读取，用 set_cells / append_rows / add_sheet 等修改，save_workbook 写回。写回只替换改动过的部件（单元格样式、公式、图表、图片全部保留），保存前自动备份为 .bak。',
+      description: '打开本地 Excel 文件（.xlsx / .xlsm / .xls / .csv），返回 workbookId 与各工作表的规模、范围、表头预览（**表头已含在此结果里，一般无需再调 list_sheets**）。后续用 read_sheet / query_rows 读明细，用 aggregate 一步做统计（计数 / 求和 / 去重 / 频率，**别用 read_sheet 拉全量行再自己数**），用 set_cells / append_rows / add_sheet 等修改，save_workbook 写回。写回只替换改动过的部件（单元格样式、公式、图表、图片全部保留），保存前自动备份为 .bak。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -203,12 +271,12 @@ export function toolDefinitions(): any[] {
     },
     {
       name: 'list_sheets',
-      description: '列出已打开工作簿的全部工作表：名称、是否隐藏、行列数、数据范围、表头与前几行预览。',
-      inputSchema: { type: 'object', properties: { ...wbId }, required: ['workbookId'] },
+      description: '列出已打开工作簿（或按 path 直接打开的文件）的全部工作表：名称、是否隐藏、行列数、数据范围、表头与前几行预览。通常可省略——open_workbook 的结果已含表头。',
+      inputSchema: { type: 'object', properties: { ...wbId }, required: [] },
     },
     {
       name: 'read_sheet',
-      description: '读取工作表指定区域（行列均为 1-based；列可用列字母 A/AB 或序号）。默认输出 Markdown 表格（首行为表头），也可输出 JSON / CSV；支持只看公式（includeFormulas）。',
+      description: '读取工作表指定区域（行列均为 1-based；列可用列字母 A/AB 或序号）。默认输出 Markdown 表格（首行为表头），也可输出 JSON / CSV；支持只看公式（includeFormulas）。**明细很多时别用它拉全量（会占满上下文）**，统计类需求用 aggregate。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -222,9 +290,10 @@ export function toolDefinitions(): any[] {
           raw: { type: 'boolean', description: 'true = 原始值（数字/日期对象），false = Excel 显示文本（默认）' },
           includeFormulas: { type: 'boolean', description: 'true = 公式单元格输出 =公式 文本' },
           maxRows: { type: 'number', description: '最多返回行数（默认 200，最大 2000）' },
+          maxChars: { type: 'number', description: '本次输出字符预算（默认 12000，最大 30000）' },
           header: { type: 'boolean', description: 'markdown 格式下是否把首行当表头（默认 true）' },
         },
-        required: ['workbookId'],
+        required: [],
       },
     },
     {
@@ -240,13 +309,14 @@ export function toolDefinitions(): any[] {
           regex: { type: 'boolean', description: '是否按正则匹配（默认 false）' },
           ignoreCase: { type: 'boolean', description: '忽略大小写（默认 true）' },
           max: { type: 'number', description: '最多返回命中数（默认 50，最大 200）' },
+          maxChars: { type: 'number', description: '本次输出字符预算（默认 5000，最大 30000）' },
         },
-        required: ['workbookId', 'query'],
+        required: ['query'],
       },
     },
     {
       name: 'query_rows',
-      description: '按条件查询行（Excel 版筛选/排序）：where 支持多条件（eq/ne/gt/gte/lt/lte/contains/notcontains/startswith/endswith/empty/notempty/regex），可指定输出列、排序列、分页，返回「表头名 → 值」对象数组（默认最多扫描 2 万行，超出会截断并给出提示）。',
+      description: '按条件查询行（Excel 版筛选/排序）：where 支持多条件（eq/ne/gt/gte/lt/lte/contains/notcontains/startswith/endswith/empty/notempty/regex），可指定输出列、排序列、分页。返回紧凑制表符表格（首行字段名 + 行号列 __row；format=json 可要 JSON）。**只用来取明细**；统计 / 计数 / 去重数 / 频率请在一步里改用 aggregate（不要拉全量行自己数，会占满上下文）。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -266,29 +336,39 @@ export function toolDefinitions(): any[] {
             },
           },
           match: { type: 'string', enum: ['all', 'any'], description: '多条件关系，默认 all' },
-          columns: { type: 'array', items: { type: 'string' }, description: '只看这些列（省略 = 全部列）' },
+          columns: { type: 'array', items: { type: 'string' }, description: '只看这些列（省略 = 全部列）；只取需要的列可大幅省上下文' },
           sortBy: { type: 'string', description: '排序列（表头名 / 列字母 / 序号）' },
           sortDir: { type: 'string', enum: ['asc', 'desc'], description: '排序方向，默认 asc' },
           offset: { type: 'number', description: '跳过前 N 行（默认 0）' },
-          limit: { type: 'number', description: '最多返回行数（默认 200，最大 1000）' },
+          limit: { type: 'number', description: '最多返回行数（默认 100，最大 1000）' },
+          format: { type: 'string', enum: ['table', 'json'], description: '输出格式：table（默认，紧凑制表符表格）/ json' },
+          maxChars: { type: 'number', description: '本次输出字符预算（默认 6000，最大 30000）' },
           raw: { type: 'boolean', description: 'true = 原始值，false = 显示文本（默认）' },
           headerRow: { type: 'number', description: '表头所在行（默认 1）' },
         },
-        required: ['workbookId'],
+        required: [],
       },
     },
     {
       name: 'aggregate',
-      description: '分组统计：按某列分组（省略 groupBy = 整表汇总），逐指标计算 sum / avg / count / distinct / min / max / countblank，支持与 query_rows 相同的 where 过滤（同样默认最多扫描 2 万行）。',
+      description: '分组统计（一步出结果、省上下文的首选；**冷启动可只传 path，无需先 open_workbook**）：按一列或多列分组（groupBy 可传数组做「某几个字段条件下」的统计），逐指标算 sum/avg/count/distinct/min/max/countblank；metrics 可省略 = 只统计每组「行数 + 占比(%)」即频次。每组固定输出 分组_列名、行数、占比(%)。'
+        + '用法示例——①某条件下频率最高的值（单次调用即可回答）：{path:"D:/a.xlsx", groupBy:"城市", where:[{"column":"年份","op":"eq","value":2024}], sortBy:"行数", sortDir:"desc", limit:1}；'
+        + '②多字段条件的频率表：{groupBy:["城市","渠道"], sortBy:"行数", sortDir:"desc", limit:20}；'
+        + '③分组求和：{groupBy:"城市", metrics:[{"column":"金额","fn":"sum"}]}。'
+        + '列名写错会在结果里附上可用列，sortBy 可写 行数 / count / 占比 等别名。',
       inputSchema: {
         type: 'object',
         properties: {
           ...wbId,
           ...sheet,
-          groupBy: { type: 'string', description: '分组列（表头名 / 列字母 / 序号；省略 = 整表汇总）' },
+          groupBy: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '分组字段（数组）：单个字段写 ["城市"]，多个字段写 ["城市","渠道"]（也接受直接写字符串 "城市"）；省略 = 整表汇总',
+          },
           metrics: {
             type: 'array',
-            description: '指标数组，如 [{"column":"金额","fn":"sum","as":"总金额"}]',
+            description: '指标数组，如 [{"column":"金额","fn":"sum","as":"总金额"}]；**省略 = 只输出每组行数与占比**（频次统计）',
             items: {
               type: 'object',
               properties: {
@@ -301,12 +381,14 @@ export function toolDefinitions(): any[] {
           },
           where: { type: 'array', description: '统计前的筛选条件（同 query_rows）', items: { type: 'object' } },
           match: { type: 'string', enum: ['all', 'any'], description: '多条件关系，默认 all' },
-          sortBy: { type: 'string', description: '按输出字段排序（如 总金额）' },
+          sortBy: { type: 'string', description: '按输出字段排序，如 行数 / count（频次最高在前）、占比、总金额' },
           sortDir: { type: 'string', enum: ['asc', 'desc'], description: '排序方向，默认 desc' },
-          limit: { type: 'number', description: '最多返回分组数（默认 200，最大 500）' },
+          limit: { type: 'number', description: '最多返回分组数（默认 200，最大 500；只看 Top N 就传 N）' },
+          format: { type: 'string', enum: ['table', 'json'], description: '输出格式：table（默认，紧凑制表符表格）/ json' },
+          maxChars: { type: 'number', description: '本次输出字符预算（默认 6000，最大 30000）' },
           headerRow: { type: 'number', description: '表头所在行（默认 1）' },
         },
-        required: ['workbookId', 'metrics'],
+        required: [],
       },
     },
     {
@@ -417,36 +499,24 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
   const args = normalizeArgs(name, rawArgs)
   switch (name) {
     case 'open_workbook': {
-      const raw = normPath(String(arg(args, ['path', 'filePath', 'file_path']) || ''))
-      if (!raw) return '参数缺失：请提供 Excel 文件的 path'
-      const abs = path.isAbsolute(raw) ? raw : path.resolve(raw)
-      if (!fs.existsSync(abs)) return `文件不存在: ${abs}`
-      const ext = path.extname(abs).toLowerCase()
-      if (!['.xlsx', '.xlsm', '.xls', '.csv', '.tsv', '.txt'].includes(ext)) return `仅支持 .xlsx / .xlsm / .xls / .csv：${abs}`
-      let wb: WorkBook
-      try { wb = XR.readWorkbookFrom({ filePath: abs }) } catch (e: any) { return `打开失败: ${e?.message || String(e)}` }
-      let pkg: XE.XlsxPackage | null = null
-      if (ext === '.xlsx' || ext === '.xlsm') {
-        try { pkg = XE.loadXlsxPackage(abs) } catch (e: any) { pkg = null }
-      }
-      const workbookId = randomUUID()
-      sessions.set(workbookId, { workbookId, path: abs, pkg, cache: { revision: 0, wb }, openedAt: Date.now(), lastUseAt: Date.now() })
-      capSessions()
-      const meta = XR.workbookMeta(wb, abs)
-      return JSON.stringify({
-        workbookId,
+      const s = openSession(arg(args, ['path', 'filePath', 'file_path']))
+      if (typeof s === 'string') return s
+      const wb = currentWorkbook(s)
+      const meta = XR.workbookMeta(wb, s.path)
+      return clip(JSON.stringify({
+        workbookId: s.workbookId,
         name: meta.name,
-        path: abs,
+        path: s.path,
         sheetCount: meta.sheetCount,
         sheets: meta.sheets,
-        writable: !!pkg,
-        note: pkg ? undefined : '该格式只读（未保存写回能力）：如需修改请另存为 .xlsx',
-      }, null, 2)
+        writable: !!s.pkg,
+        note: s.pkg ? undefined : '该格式只读（未保存写回能力）：如需修改请另存为 .xlsx',
+      }, null, 2), outBudget('open_workbook', args))
     }
 
     case 'list_sheets': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const wb = currentWorkbook(s)
       const refs = s.pkg ? XE.listSheetRefs(s.pkg) : []
       const hidden = new Set(refs.filter(r => r.state === 'hidden' || r.state === 'veryHidden').map(r => r.name))
@@ -454,12 +524,12 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
         const meta = XR.sheetMeta(wb, n, { previewRows: 3 })
         return { index: i, name: n, hidden: hidden.has(n) || undefined, rows: meta?.rowCount ?? 0, cols: meta?.colCount ?? 0, range: meta?.range || '', header: meta?.header, preview: meta?.preview }
       })
-      return JSON.stringify({ path: s.path, sheetCount: sheets.length, sheets, dirty: s.pkg ? s.pkg.modified : false }, null, 2)
+      return clip(JSON.stringify({ path: s.path, sheetCount: sheets.length, sheets, dirty: s.pkg ? s.pkg.modified : false }, null, 2), outBudget('list_sheets', args))
     }
 
     case 'read_sheet': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const wb = currentWorkbook(s)
       const sheetName = resolveSheet(s, wb, arg(args, ['sheet', 'sheetName', 'sheet_name']))
       if (!sheetName) return `工作簿没有工作表`
@@ -497,20 +567,21 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
       const capped = rows.slice(0, maxRows)
       const truncated = rows.length > capped.length || m.truncated
       const rangeText = `${XE.numToCol(m.startCol)}${m.startRow}`
+      const budget = outBudget('read_sheet', args)
       if (format === 'json') {
-        return clip(JSON.stringify({ sheet: sheetName, startRow: m.startRow, startCol: m.startCol, rows: capped, truncated, note: m.note }, null, 2))
+        return clip(JSON.stringify({ sheet: sheetName, startRow: m.startRow, startCol: m.startCol, rows: capped, truncated, note: m.note }, null, 2), budget)
       }
       if (format === 'csv') {
-        return clip(`# 工作表「${sheetName}」起始单元格 ${rangeText}（${capped.length} 行）\n` + XR.rowsToCsv(capped))
+        return clip(`# 工作表「${sheetName}」起始单元格 ${rangeText}（${capped.length} 行）\n` + XR.rowsToCsv(capped), budget)
       }
       const header = arg(args, ['header']) !== false && (startRow === 1 || arg(args, ['header']) === true)
       const md = XR.rowsToMarkdown(capped, { header, startCol: m.startCol })
-      return clip(`工作表「${sheetName}」${rangeText} 起（返回 ${capped.length} 行 × ${capped[0]?.length ?? 0} 列${truncated ? '，已截断' : ''}）\n\n${md}${m.note ? `\n\n注：${m.note}` : ''}`)
+      return clip(`工作表「${sheetName}」${rangeText} 起（返回 ${capped.length} 行 × ${capped[0]?.length ?? 0} 列${truncated ? '，已截断' : ''}）\n\n${md}${m.note ? `\n\n注：${m.note}` : ''}`, budget)
     }
 
     case 'search_cells': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const wb = currentWorkbook(s)
       const q = String(arg(args, ['query', 'query_text', 'text', 'find']) || '')
       if (!q) return '缺少 query 参数'
@@ -521,12 +592,12 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
         ignoreCase: arg(args, ['ignoreCase', 'ignore_case']) !== false,
         max: Math.floor(Number(arg(args, ['max'])) || 50),
       })
-      return JSON.stringify({ query: q, total: res.total, returned: res.hits.length, truncated: res.truncated, hits: res.hits }, null, 2)
+      return clip(JSON.stringify({ query: q, total: res.total, returned: res.hits.length, truncated: res.truncated, hits: res.hits }), outBudget('search_cells', args))
     }
 
     case 'query_rows': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const wb = currentWorkbook(s)
       const sheetName = resolveSheet(s, wb, arg(args, ['sheet', 'sheetName', 'sheet_name']))
       if (!sheetName) return '工作簿没有工作表'
@@ -538,37 +609,48 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
         sortBy: arg(args, ['sortBy', 'sort_by', 'orderBy']),
         sortDir: String(arg(args, ['sortDir', 'sort_dir', 'order']) || 'asc').toLowerCase() === 'desc' ? 'desc' : 'asc',
         offset: Math.floor(Number(arg(args, ['offset', 'skip'])) || 0),
-        limit: Math.floor(Number(arg(args, ['limit'])) || 200),
+        limit: Math.floor(Number(arg(args, ['limit'])) || 100),
         raw: args.raw === true,
         headerRow: rowNum(arg(args, ['headerRow', 'header_row'])) || 1,
       })
-      return clip(JSON.stringify(res, null, 2))
+      const budget = outBudget('query_rows', args)
+      if (String(arg(args, ['format']) || 'table').toLowerCase() === 'json') return clip(JSON.stringify(res, null, 2), budget)
+      const lead = `工作表「${sheetName}」匹配 ${res.matched} 行，返回 ${res.returned} 行（offset ${res.offset}${res.truncated ? '，已截断' : ''}）`
+        + `｜workbookId=${s.workbookId}`
+        + (res.note ? `｜注：${res.note}` : '')
+      return clip(`${lead}\n${headerHint(res.header)}${compactTable(res.rows)}`, budget)
     }
 
     case 'aggregate': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const wb = currentWorkbook(s)
       const sheetName = resolveSheet(s, wb, arg(args, ['sheet', 'sheetName', 'sheet_name']))
       if (!sheetName) return '工作簿没有工作表'
       if (!wb.Sheets[sheetName]) return notFoundSheet(s, wb, arg(args, ['sheet']))
       const metrics = Array.isArray(args.metrics) ? args.metrics : []
+      const groupBy = arg(args, ['groupBy', 'group_by', 'group', 'groupByColumns'])
       const res = XR.aggregateRows(wb, sheetName, {
-        groupBy: arg(args, ['groupBy', 'group_by', 'group']),
+        groupBy,
         metrics,
         where: Array.isArray(args.where) ? args.where : undefined,
         match: args.match === 'any' ? 'any' : 'all',
-        sortBy: arg(args, ['sortBy', 'sort_by']),
-        sortDir: String(arg(args, ['sortDir', 'sort_dir']) || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc',
-        limit: Math.floor(Number(arg(args, ['limit'])) || 200),
+        sortBy: arg(args, ['sortBy', 'sort_by', 'orderBy']),
+        sortDir: String(arg(args, ['sortDir', 'sort_dir', 'order']) || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc',
+        limit: Math.floor(Number(arg(args, ['limit', 'topN', 'top_n', 'top'])) || 200),
         headerRow: rowNum(arg(args, ['headerRow', 'header_row'])) || 1,
       })
-      return clip(JSON.stringify(res, null, 2))
+      const budget = outBudget('aggregate', args)
+      if (String(arg(args, ['format']) || 'table').toLowerCase() === 'json') return clip(JSON.stringify(res, null, 2), budget)
+      const lead = `工作表「${sheetName}」${groupBy !== undefined ? '分组统计' : '整表汇总'}：${res.groups.length} 组（统计 ${res.scanned} 行）`
+        + `｜workbookId=${s.workbookId}`
+        + (res.note ? `｜注：${res.note}` : '')
+      return clip(`${lead}\n${headerHint(res.header)}${compactTable(res.groups)}`, budget)
     }
 
     case 'set_cells': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const ro = needWritable(s)
       if (ro) return ro
       const updates = Array.isArray(args.updates) ? args.updates : (Array.isArray(args.cells) ? args.cells : null)
@@ -585,7 +667,7 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
 
     case 'append_rows': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const ro = needWritable(s)
       if (ro) return ro
       const wb = currentWorkbook(s)
@@ -601,7 +683,7 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
 
     case 'add_sheet': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const ro = needWritable(s)
       if (ro) return ro
       const sheetName = String(arg(args, ['name', 'sheetName', 'sheet_name']) || '').trim()
@@ -616,7 +698,7 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
 
     case 'rename_sheet': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const ro = needWritable(s)
       if (ro) return ro
       const from = String(arg(args, ['sheet', 'sheetName', 'oldName', 'old_name']) || '').trim()
@@ -629,7 +711,7 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
 
     case 'delete_sheet': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const ro = needWritable(s)
       if (ro) return ro
       const sheetName = String(arg(args, ['sheet', 'sheetName', 'name']) || '').trim()
@@ -647,20 +729,14 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
       const res = XE.createWorkbookFile(abs, sheets, { overwrite: args.overwrite === true })
       if (!res.ok) return `新建失败: ${res.error}`
       // 自动打开为可编辑会话
-      try {
-        const wb = XR.readWorkbookFrom({ filePath: abs })
-        const workbookId = randomUUID()
-        sessions.set(workbookId, { workbookId, path: abs, pkg: XE.loadXlsxPackage(abs), cache: { revision: 0, wb }, openedAt: Date.now(), lastUseAt: Date.now() })
-        capSessions()
-        return JSON.stringify({ created: true, path: abs, workbookId, sheets: wb.SheetNames, note: '已创建并打开为会话，可继续用 set_cells / append_rows 编辑' }, null, 2)
-      } catch (e: any) {
-        return JSON.stringify({ created: true, path: abs, warning: `文件已创建，但打开会话失败：${e?.message || String(e)}` }, null, 2)
-      }
+      const s = openSession(abs)
+      if (typeof s === 'string') return JSON.stringify({ created: true, path: abs, warning: `文件已创建，但打开会话失败：${s}` }, null, 2)
+      return JSON.stringify({ created: true, path: abs, workbookId: s.workbookId, sheets: currentWorkbook(s).SheetNames, note: '已创建并打开为会话，可继续用 set_cells / append_rows 编辑' }, null, 2)
     }
 
     case 'save_workbook': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       const ro = needWritable(s)
       if (ro) return ro
       if (!s!.pkg!.modified) return JSON.stringify({ saved: false, path: s!.path, note: '没有未保存的修改，未写盘' }, null, 2)
@@ -672,7 +748,7 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
 
     case 'close_workbook': {
       const s = sessionOf(args)
-      if (!s) return sessionError(args)
+      if (typeof s === 'string') return s
       if (s.pkg && s.pkg.modified && arg(args, ['discard']) !== true) {
         return `工作簿有未保存的修改（${s.path}）。如需放弃修改请传 discard=true，或先调用 save_workbook。`
       }

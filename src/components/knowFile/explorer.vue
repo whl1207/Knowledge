@@ -112,6 +112,8 @@
   import { detectEditorKind, editorVisibleInView, FILE_EDITORS } from '@/components/knowFile/fileEditors'
   import { ElMessageBox, ElMessage } from 'element-plus'
   import { downloadRemoteFile } from '@/platform/remoteFs'
+  import { useBackLayer } from '@/composables/useBackLayer'
+  import { BACK_ORDER } from '@/platform/backLayers'
   
   import view_file from '@/components/knowFile/view/view_file.vue'
   import view_kanban from '@/components/knowFile/view/view_kanban.vue'
@@ -162,6 +164,25 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
   // 模糊搜索窗口显隐（类似设置界面，悬浮弹出）
   const searchOpen = ref(false);
+
+  // ==================== 安卓返回手势（本模块内的界面栈） ====================
+  // 本模块自己的可回退状态：① 模糊搜索浮窗 ② 细长窗口（手机竖屏）下打开的整屏文件树抽屉
+  // （等价于点抽屉左上角的 ←，或点文件夹 / 文件后自动收起）。
+  // 更靠内层的浮层（应用内文件窗口、设置）由各自 / App.vue 登记，优先级见 platform/backLayers。
+  useBackLayer(
+    'explorer',
+    BACK_ORDER.moduleNav,
+    () => {
+      if (store.mainPanel !== '知识管理') return false
+      if (store.settingsOpen || store.fileWindowOverlay) return false
+      if (searchOpen.value) return true
+      return isTallLayout.value && !!mode.value
+    },
+    () => {
+      if (searchOpen.value) { searchOpen.value = false; return }
+      closeDrawer()
+    },
+  );
 
   // 按 Esc 关闭搜索窗口
   const onSearchKeydown = (e: KeyboardEvent) => {

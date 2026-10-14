@@ -496,6 +496,7 @@ import { getPluginBridge } from '@/lib/plugin/bridge'
 import { getPlatform } from '@/platform'
 import { formatBytes } from '@/lib/settingsData'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useMobileBackScreen } from '@/composables/useBackLayer'
 import {
   PLUGIN_DATA_DIR,
   clearPluginData,
@@ -571,6 +572,9 @@ const selected = computed<PluginSnapshot | undefined>(() => plugins.value.find((
 //（与设置导航 / 知识管理文件树 / 模型来源同一套做法）。true = 列表屏，false = 详情屏
 const isTallLayout = useTallLayout()
 const showNavScreen = ref(true)
+
+// 安卓返回手势：细长窗口下本面板是「列表 ⇄ 内容」两屏，内容屏按返回回到列表（见 composables/useBackLayer）
+useMobileBackScreen('settings:plugin', isTallLayout, showNavScreen)
 
 const logText = ref('')
 const logLoading = ref(false)

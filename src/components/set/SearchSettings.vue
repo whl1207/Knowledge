@@ -10,6 +10,7 @@ import { ref, computed } from 'vue'
 import { getPlatform } from '@/platform'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useMobileBackScreen } from '@/composables/useBackLayer'
 import {
   WEB_SEARCH_PROVIDER_IDS,
   webSearchProviderMeta,
@@ -64,6 +65,9 @@ const currentMeta = computed(() => webSearchProviderMeta(selected.value, store.w
 //（与设置导航 / 知识管理文件树 / 模型来源同一套做法）。true = 来源列表屏，false = 配置屏
 const isTallLayout = useTallLayout()
 const showNavScreen = ref(true)
+
+// 安卓返回手势：细长窗口下本面板是「列表 ⇄ 内容」两屏，内容屏按返回回到列表（见 composables/useBackLayer）
+useMobileBackScreen('settings:search', isTallLayout, showNavScreen)
 
 /** 选中某个搜索源（细长窗口下同时进入整屏配置屏） */
 const selectSource = (id: string) => {

@@ -22,7 +22,8 @@
   import { lazyPanel as makeLazyPanel } from '@/lib/plugin/panels'
   import { useAllSlotEntries } from '@/lib/plugin/useSlots'
   import PluginSlot from '@/components/plugin/PluginSlot.vue'
-import { getPlatform, hasCapability } from '@/platform'
+import { getPlatform, hasCapability, isHostGuestRuntime } from '@/platform'
+import { runTopBackLayer, registerBackLayer, BACK_ORDER } from '@/platform/backLayers'
 import { useTallLayout } from '@/composables/useTallLayout'
 
   const lazyPanel = makeLazyPanel
@@ -49,7 +50,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (q < 0) return ''
     try { return new URLSearchParams(h.substring(q + 1)).get('nav') || '' } catch { return '' }
   })()
-  const isBrowser = typeof window !== 'undefined' && !(window as any).ipcRenderer // 浏览器模式（LAN 共享）
+  const isBrowser = isHostGuestRuntime() // 局域网访客网页（主机投递；安卓壳不算）
   // 安卓（Capacitor 壳）：没有窗口壳概念，设置改为整页展示（手机屏幕小，浮层对话框太挤）
   const isAndroid = getPlatform().kind === 'android'
   // 细长窗口（高宽比 > 16:9，如手机竖屏）：与主页 / 知识管理同一套整屏做法（见 useTallLayout）
@@ -153,7 +154,25 @@ import { useTallLayout } from '@/composables/useTallLayout'
     }
 
     // 安卓系统返回手势 / 返回键：交给渲染层的界面栈处理（见 handleAndroidBack）
-    if (isAndroid) unregisterBack = getPlatform().app.onBackPressed(handleAndroidBack)
+    if (isAndroid) {
+      unregisterBack = getPlatform().app.onBackPressed(handleAndroidBack)
+      // App 自己的两个浮层也登记为界面层（优先级见 BACK_ORDER）：设置浮层要盖住主面板里的
+      // 模块内导航（否则设置打开时按返回会先去动背后的聊天列表），但排在设置内部导航之后。
+      unregisterAppLayers.push(
+        registerBackLayer({
+          id: 'app:fileWindow',
+          order: BACK_ORDER.fileWindow,
+          canGoBack: () => !!store.fileWindowOverlay,
+          goBack: () => store.closeFileWindowOverlay(),
+        }),
+        registerBackLayer({
+          id: 'app:settings',
+          order: BACK_ORDER.settingsOverlay,
+          canGoBack: () => !!store.settingsOpen,
+          goBack: () => closeSetPanel(),
+        }),
+      )
+    }
 
     // 窗口缩放广播全局监听（Ctrl+Plus/Minus / 设置页调整），同步 store.UI.windowZoom
     // 注：只在根组件注册一次；平台层已用同一包装函数登记，退订可精确移除
@@ -229,6 +248,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
   onUnmounted(() => {
     unregisterBack?.()
     unregisterBack = null
+    for (const off of unregisterAppLayers.splice(0)) off()
   })
 
   // 主面板切换即落盘（mainPanel 只在主窗口有意义）：
@@ -387,14 +407,24 @@ import { useTallLayout } from '@/composables/useTallLayout'
   }
 
   /**
-   * 安卓系统返回手势 / 返回键的界面栈（渲染层状态，WebView 不知道）：
-   *   元素弹窗 → 应用内文件窗口 → 设置浮层 → 非主页则回主页 → 主页再按一次退出应用。
+   * 安卓系统返回手势 / 返回键（渲染层界面栈，系统与 WebView 都不知道）。
+   * 处理顺序（从内到外）：
+   *
+   * 1. 顶层 Element Plus 弹窗（确认框 / 抽屉，盖在所有内容之上）；
+   * 2. 各模块登记的界面层（`platform/backLayers`）：应用内文件窗口 → 设置内子面板 →
+   *    设置「分类列表 ⇄ 内容」→ 关闭设置 → 模块内导航（主页「聊天列表 ⇄ 对话」、
+   *    知识管理「文件树抽屉 ⇄ 视图」…），由各模块自己声明，见 composables/useBackLayer；
+   * 3. 主面板不是主页 → 回主页（安卓底部导航不一定常驻，返回手势是主要回退方式）；
+   * 4. 已在主页根 → 连按两次退出应用。
+   *
    * 返回 true 表示已处理（不退出应用）；false 表示交回系统默认（结束应用）。
    */
   const BACK_EXIT_MS = 2000
   let backExitUntil = 0
   /** 返回手势退订函数（安卓；组件卸载时解绑） */
   let unregisterBack: (() => void) | null = null
+  /** App 自己登记的界面层退订函数（见 onMounted 里的 app:fileWindow / app:settings） */
+  const unregisterAppLayers: Array<() => void> = []
 
   /** 关闭当前最上层的 Element Plus 弹窗（有的话）：返回是否真的点了关闭 */
   function closeTopDialog(): boolean {
@@ -413,15 +443,9 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
   function handleAndroidBack(): boolean {
     if (closeTopDialog()) return true
-    if (store.fileWindowOverlay) {
-      store.closeFileWindowOverlay()
-      return true
-    }
-    if (store.settingsOpen) {
-      closeSetPanel()
-      return true
-    }
-    // 主面板不是主页：先回主页（安卓上底部导航不一定常驻，返回手势是主要的回退方式）
+    // 各模块登记的界面层 + App 自己的两个浮层（谁的层更靠内谁先处理）
+    if (runTopBackLayer()) return true
+    // 主面板不是主页：先回主页
     if (store.mainPanel !== '主页') {
       store.mainPanel = '主页'
       return true
@@ -438,6 +462,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     })
     return true
   }
+
   // 应用内文件窗口（安卓 / 网页端）的重建键：只在**换文件 / 换视图**时重建（重新读盘、视图复位），
   // 同一文件再次打开（如文档里指向另一页的图表链接）只更新 page，由 FileWindow 自己换页。
   const fileWindowOverlayKey = computed(() => {

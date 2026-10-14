@@ -189,6 +189,7 @@ import { ElMessage } from 'element-plus'
 import { agentBridge, type AgentSessionView } from '@/platform/agentBridge'
 import type { JobInfo } from '../../../electron/main/job-registry'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useMobileBackScreen } from '@/composables/useBackLayer'
 
 const props = defineProps<{ sessionId?: string }>()
 
@@ -200,6 +201,9 @@ const isZh = computed(() => store.locales !== 'en')
 // true = 任务列表屏，false = 详情屏；宽窗口下两者并排，本状态无意义。
 const isTallLayout = useTallLayout()
 const showNavScreen = ref(true)
+
+// 安卓返回手势：细长窗口下本面板是「列表 ⇄ 内容」两屏，内容屏按返回回到列表（见 composables/useBackLayer）
+useMobileBackScreen('settings:agentconsole', isTallLayout, showNavScreen)
 
 // ---- agent 会话（agentBridge 实时视图；按会话聚合，一个会话一行） ----
 const sessions = ref<AgentSessionView[]>([])

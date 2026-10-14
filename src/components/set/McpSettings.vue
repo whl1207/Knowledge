@@ -268,6 +268,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { mcpManager } from '@/platform/mcpManager'
 import type { McpServerConfig, McpTool } from '@/types/mcp'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useMobileBackScreen } from '@/composables/useBackLayer'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -276,6 +277,9 @@ const zh = computed(() => store.locales === 'zh')
 //（与设置导航 / 知识管理文件树 / 模型来源同一套做法）。true = 服务列表屏，false = 配置屏
 const isTallLayout = useTallLayout()
 const showNavScreen = ref(true)
+
+// 安卓返回手势：细长窗口下本面板是「列表 ⇄ 内容」两屏，内容屏按返回回到列表（见 composables/useBackLayer）
+useMobileBackScreen('settings:mcp', isTallLayout, showNavScreen)
 
 // 徽标：内置本地服务（如浏览器 Agent）显示 LOCAL，否则显示传输类型大写
 const badgeOf = (s: McpServerConfig | undefined): string =>

@@ -151,7 +151,7 @@ onMounted(() => store.knowSyncNav())
 .toolbar-view-select {
   flex-shrink: 0;
   height: 26px;
-  max-width: 120px;
+  max-width: 60px;
   padding: 0 4px;
   box-sizing: border-box;
   border: 1px solid var(--borderColor);

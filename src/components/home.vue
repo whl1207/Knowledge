@@ -1088,6 +1088,9 @@ import type { EditDiffFilePreview } from '@/shared/editDiff'
 import type { ChatMode, RelevantBlock, ExecutionUnit, WorkflowUnit, UploadItem, ChatMessage, ChatConfig, Chat, RetrievalStats } from '@/types/chat'
 import { useChatModels } from '@/composables/useChatModels'
 import { useAgentRun } from '@/composables/useAgentRun'
+import { useBackLayer } from '@/composables/useBackLayer'
+import { BACK_ORDER } from '@/platform/backLayers'
+import { agentBridge } from '@/platform/agentBridge'
 // 集群模式（多 Agent 协作）：成员 = Agent 预设引用（改预设即改成员），执行复用集群运行时
 import { agents as swarmAgents, swarmMode, settings as swarmSettings, debateRounds as swarmDebateRounds, setSwarmRunChatId, running as swarmRunning, swarmRunChatId } from '@/store/swarmState'
 import { runSwarm, runNamedTask, stopSwarm } from '@/store/swarmRunner'
@@ -1101,12 +1104,13 @@ import { getSkillManager, type Skill } from '@/services/agentSkills'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as d3 from 'd3'
 import draggable from 'vuedraggable'
-import { getPlatform, hasCapability } from '@/platform'
+import { getPlatform, hasCapability, isHostGuestRuntime } from '@/platform'
 
 const store = usestore()
 
-// 浏览器模式（LAN 共享）：无 ipcRenderer，知识库退化为上传文件
-const isBrowser = typeof window !== 'undefined' && !(window as any).ipcRenderer
+// 局域网访客网页（主机投递）：知识库退化为上传文件、智能体交给主机执行。
+// ⚠️ 不能写成「无 ipcRenderer」——安卓壳也没有 ipcRenderer，但它有真实文件系统与本地智能体循环。
+const isBrowser = isHostGuestRuntime()
 
 /**
  * 网页端（局域网共享）：主机能力概览（GET /api/agent/info）。
@@ -1185,6 +1189,10 @@ const showSidebar = ref(false)  // 聊天列表侧边栏：初始不显示，由
 // 进入主页先看到整屏聊天列表，点某条对话进入整屏对话，对话区左上角 fa-bars 再回到列表（见样式 .narrow）
 const isNarrowLayout = useTallLayout()
 const showBranchView = ref(false)  // 分支树视图开关
+
+// ==================== 安卓返回手势（本模块内的界面栈） ====================
+// 见文件后段 `useBackLayer('home', …)`：细长窗口下主页是「整屏聊天列表 ⇄ 整屏对话」两屏，
+// 属于本模块自己的状态，因此由这里向系统返回手势声明「能否回退 / 怎么回退」。
 
 // 聊天列表搜索
 const searchActive = ref(false)
@@ -4080,8 +4088,8 @@ const onModeSelect = async (event: Event) => {
       chat.config.presetId = undefined
       workflowError.value = false
       saveChats()
-      if (!window.dsh?.agent && !isBrowser) {
-        ElMessage.warning(store.locales == 'zh' ? '智能体模式需要桌面版（window.dsh.agent 不可用）' : 'Agent mode requires the desktop app (window.dsh.agent unavailable)')
+      if (!agentBridge.available) {
+        ElMessage.warning(store.locales == 'zh' ? '当前环境无法运行智能体（缺少智能体循环）' : 'Agent mode is unavailable in this environment')
       } else if (!isBrowser && store.skillsPath) {
         // 预热技能目录（供 $技能名 / 技能列表 / help 自动识别）
         void loadSkills(false)
@@ -4102,8 +4110,8 @@ const onModeSelect = async (event: Event) => {
         chat.config.swarmOptions = { ...(chat.config.swarmOptions || {}), runMode: 'auto' }
       }
       saveChats()
-      if (!window.dsh?.agent) {
-        ElMessage.warning(store.locales == 'zh' ? '集群模式需要桌面版（window.dsh.agent 不可用）' : 'Swarm mode requires the desktop app (window.dsh.agent unavailable)')
+      if (!agentBridge.available) {
+        ElMessage.warning(store.locales == 'zh' ? '当前环境无法运行智能体集群（缺少智能体循环）' : 'Swarm mode is unavailable in this environment')
       } else if (!(store.agentPresets || []).length) {
         ElMessage.warning(store.locales == 'zh' ? '还没有 Agent 预设，请先在「设置 → 预设」中创建' : 'No agent presets yet — create one in Settings → Presets')
       } else if (store.skillsPath) {
@@ -4121,8 +4129,8 @@ const onModeSelect = async (event: Event) => {
       chat.config.presetId = undefined
       workflowError.value = false
       saveChats()
-      if (!window.dsh?.agent && !isBrowser) {
-        ElMessage.warning(store.locales == 'zh' ? '智能体模式需要桌面版（window.dsh.agent 不可用）' : 'Agent Loop mode requires the desktop app (window.dsh.agent unavailable)')
+      if (!agentBridge.available) {
+        ElMessage.warning(store.locales == 'zh' ? '当前环境无法运行智能体（缺少智能体循环）' : 'Agent Loop mode is unavailable in this environment')
       } else if (!isBrowser && store.skillsPath) {
         // 预热技能目录（供 $技能名 / 技能列表 / help 自动识别）
         void loadSkills(false)
@@ -4140,6 +4148,33 @@ const onModeSelect = async (event: Event) => {
 const showSwarmMemberPicker = ref(false)
 /** 引用失效的预设 id（预设被删/改名），UI 提示后一键清理 */
 const swarmMissingPresets = ref<string[]>([])
+
+// ==================== 安卓返回手势（本模块内的界面栈） ====================
+// 细长窗口（手机竖屏）下主页是「整屏聊天列表 ⇄ 整屏对话」两屏，属于本模块自己的状态，
+// 系统返回手势看不到，因此在这里声明：① 先关掉本页浮层（预设 / 集群成员 / 共享知识库 / 分支树）
+// ② 再看是否正处在某条对话 → 回到整屏聊天列表（等价于点对话区左上角的 fa-bars）。
+const closeHomeOverlays = (): boolean => {
+  if (showAgentPresetPicker.value) { showAgentPresetPicker.value = false; return true }
+  if (showSwarmMemberPicker.value) { showSwarmMemberPicker.value = false; return true }
+  if (showSharedKbPicker.value) { showSharedKbPicker.value = false; return true }
+  if (showBranchView.value) { showBranchView.value = false; return true }
+  return false
+}
+
+useBackLayer(
+  'home',
+  BACK_ORDER.moduleNav,
+  () => {
+    // 设置浮层 / 应用内文件窗口盖在上面时不抢（它们各自有更高的优先级，见 platform/backLayers）
+    if (store.settingsOpen || store.fileWindowOverlay) return false
+    if (closeHomeOverlays()) return true
+    return isNarrowLayout.value && !showSidebar.value
+  },
+  () => {
+    if (closeHomeOverlays()) return
+    showSidebar.value = true
+  },
+)
 
 /** 运行方式（写回对话 config，随对话保存）
  *  兼容旧存档：已删除的「群主撮合」档位回落为「全员响应」（否则下拉会因无对应 option 显示空白） */
@@ -5197,8 +5232,7 @@ const {
   reconcileAgentRuns,
   stopAgentsInChat,
   disposeAgentRun,
-} = useAgentRun({
-  getCurrentChat: () => currentChat.value,
+} = useAgentRun({  getCurrentChat: () => currentChat.value,
   saveChats,
   scrollToBottom,
   scheduleAutoScroll,

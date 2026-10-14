@@ -23,16 +23,27 @@ export interface OfficeAiConfig {
   provider: string
 }
 
-/** 基址 → 聊天端点（复用 AI-KM 已有的推导规则，兼容 GPUStack 等裸地址） */
-function chatEndpointOf(rawUrl: string): string {
-  const url = String(rawUrl || '').trim()
+/**
+ * 基址 → 聊天端点。拼法与 AI-KM 各来源自身的用法保持一致：
+ *  - GPUStack / 自定义来源 → AICore.buildCustomChatEndpoint（裸地址补 `/v1-openai/...`，见该函数注释）；
+ *  - LM Studio / OpenAI / DeepSeek → `<基址>/v1/chat/completions`（基址已带 `/v1` 时不再重复）。
+ *
+ * ⚠️ 不要把 GPUStack 的规则套到 LM Studio 上：LM Studio 只认 `/v1/chat/completions`，
+ * 打到 `/v1-openai/chat/completions` 时它会返回 **HTTP 200 + `{"error":"Unexpected endpoint…"}`**
+ * （不是 4xx），流式解析拿不到任何增量，编辑器就会显示「AI 没有返回内容」。
+ */
+function chatEndpointOf(rawUrl: string, provider: string): string {
+  const url = String(rawUrl || '').trim().replace(/\/+$/, '')
   if (!url) return ''
-  const viaUtil = (AIUtils as any)?.buildCustomChatEndpoint
-  if (typeof viaUtil === 'function') return String(viaUtil(url) || '')
-  const base = url.replace(/\/+$/, '')
-  if (/\/chat\/completions$/.test(base)) return base
-  if (/\/v1$/.test(base) || /\/v1-openai$/.test(base)) return `${base}/chat/completions`
-  return `${base}/v1/chat/completions`
+  if (/\/chat\/completions$/i.test(url) || /\/completions$/i.test(url)) return url
+  // 显式写成 GPUStack 风格基址的来源，仍按 /v1-openai 前缀补全（保持既有行为）
+  if (/\/v1-openai$/i.test(url)) return `${url}/chat/completions`
+  if (provider === 'gpustack' || provider === 'custom') {
+    const viaUtil = (AIUtils as any)?.buildCustomChatEndpoint
+    if (typeof viaUtil === 'function') return String(viaUtil(url) || '')
+    return `${url}/v1/chat/completions`
+  }
+  return `${url.replace(/\/v1$/i, '')}/v1/chat/completions`
 }
 
 /** 读取 AI-KM 当前模型连接信息；返回 null 表示当前来源不支持内嵌编辑器 */
@@ -64,7 +75,7 @@ export async function buildOfficeAiConfig(): Promise<OfficeAiConfig | null> {
     case 'lmstudio':
     case 'gpustack':
     case 'custom': {
-      const endpoint = chatEndpointOf(type === 'custom' ? cfg.api_url : cfg.base_url)
+      const endpoint = chatEndpointOf(type === 'custom' ? cfg.api_url : cfg.base_url, type)
       const model = String(cfg.model || '')
       if (!endpoint || !model) return null
       return { kind: 'openai', endpoint, apiKey: apiKey || 'not-needed', model, label: label(model), provider: type }
@@ -72,7 +83,7 @@ export async function buildOfficeAiConfig(): Promise<OfficeAiConfig | null> {
     case 'deepseek': {
       // 仅支持 Chat Completions 风格；Responses API 风格暂不接入
       if (deepSeekApiStyle(llm) !== 'chat') return null
-      const endpoint = chatEndpointOf(cfg.base_url)
+      const endpoint = chatEndpointOf(cfg.base_url, type)
       const model = String(cfg.model || '')
       if (!endpoint || !model) return null
       return { kind: 'openai', endpoint, apiKey: apiKey || 'not-needed', model, label: label(model), provider: 'deepseek' }
