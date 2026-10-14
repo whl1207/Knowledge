@@ -44,7 +44,7 @@ const emit = defineEmits<{
 <style scoped>
 .btm {
   min-width: 168px;
-  max-height: min(320px, 60vh);
+  max-height: min(320px, calc(60vh / var(--ui-zoom, 1)));
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--menuColor);

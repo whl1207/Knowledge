@@ -844,9 +844,9 @@ import { getPlatform, hasCapability } from '@/platform'
     z-index: 1000;
   }
   .ocr-dialog {
-    width: 70vw;
+    width: calc(70vw / var(--ui-zoom, 1));
     max-width: 800px;
-    height: 70vh;
+    height: calc(70vh / var(--ui-zoom, 1));
     background: var(--backgroundColor);
     border-radius: 10px;
     display: flex;

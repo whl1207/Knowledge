@@ -133,6 +133,8 @@ export interface AgentSessionView {
    */
   searchEvents: Array<{ kind: 'reasoning' | 'search' | 'open' | 'done'; at: number; text?: string; len?: number; query?: string; url?: string; results?: Array<{ title?: string; url?: string }> }>
   lastError?: string
+  /** 运行期非致命提示（如 max_tokens 截断后自动续跑）：与 lastError 分开，不参与"会话失败"判定 */
+  notice?: string
   disposed: boolean
   /** 本会话发出的最后一条完整 assistant 消息（供聊天区渲染） */
   lastAssistantContent: string
@@ -646,6 +648,10 @@ class AgentBridge {
         break
       case 'agent/inbox':
         view.inbox = ev.payload.pending
+        break
+      case 'agent/notice':
+        // 运行期非致命提示（如 max_tokens 截断后自动续跑）：只更新提示文案，不动执行状态
+        view.notice = ev.payload.message
         break
       case 'agent/error':
         view.lastError = ev.payload.message

@@ -6,11 +6,20 @@
         <slot name="head-left">
           <i class="fa fa-users"></i>
           <span>{{ zh ? '项目组' : 'Team' }}</span>
-          <span v-if="room" class="st-sub">
-            {{ room.members.length }} {{ zh ? '名成员' : 'members' }} · {{ episodeLabel }}
+          <span v-if="board" class="st-sub">
+            {{ board.members.length }} {{ zh ? '名成员' : 'members' }} · {{ episodeLabel }}
           </span>
         </slot>
       </div>
+      <!-- 回合切换器：回合结束后任务过程仍在（归档进历史），这里可以切回去回看 -->
+      <select
+        v-if="episodes.length > 1"
+        v-model="selectedEpisodeId"
+        class="st-ep-select"
+        :title="zh ? '切换查看各回合的任务过程（历史回合只读）' : 'Review the task board of a previous episode (read-only)'"
+      >
+        <option v-for="e in episodes" :key="e.id" :value="e.live ? '' : e.id">{{ episodeOptionLabel(e) }}</option>
+      </select>
       <div class="st-tabs">
         <button class="st-btn" :class="{ active: tab === 'msg' }" @click="setTab('msg')">
           {{ zh ? '消息' : 'Messages' }}
@@ -95,10 +104,17 @@
 
       <!-- 工作台（泳道 / 名册 / 任务 / 通信）——与「消息」并列，全宽显示 -->
       <div v-show="tab !== 'msg'" ref="panelEl" class="st-panel scoll">
+        <!-- 回看历史回合：数据来自归档快照，只读 -->
+        <div v-if="!isLiveBoard" class="st-review-bar">
+          <i class="fa fa-history"></i>
+          {{ zh ? '正在回看历史回合（只读）：任务板 / 泳道 / 通信 / 产出物都保留在这一回合里，可在顶部切换回当前回合。' : 'Reviewing a previous episode (read-only). Switch back with the selector above.' }}
+        </div>
         <!-- 泳道：任务依赖关系 + 智能体状态（借鉴 cc-haha 工作台） -->
         <template v-if="tab === 'lane'">
           <div v-if="!laneLayout" class="st-empty">
-            {{ zh ? 'Lead 拆解出任务后，这里会显示依赖泳道与成员状态。' : 'Task lanes appear once the Lead creates tasks.' }}
+            {{ isLiveBoard
+              ? (zh ? 'Lead 拆解出任务后，这里会显示依赖泳道与成员状态。' : 'Task lanes appear once the Lead creates tasks.')
+              : (zh ? '这一回合没有任务记录。' : 'No tasks recorded in this episode.') }}
           </div>
           <div v-else class="lane-wrap" :style="{ width: laneLayout.width + 'px', height: laneLayout.height + 'px' }">
             <svg class="lane-edges" :width="laneLayout.width" :height="laneLayout.height">
@@ -153,7 +169,7 @@
 
         <!-- 名册 -->
         <template v-else-if="tab === 'roster'">
-          <div v-for="mm in room?.members || []" :key="mm.idx" class="st-card">
+          <div v-for="mm in board?.members || []" :key="mm.idx" class="st-card">
             <div class="st-card-head">
               <span class="st-dot" :class="mm.status"></span>
               <span class="st-card-name">{{ mm.name }}</span>
@@ -192,9 +208,9 @@
               {{ zh ? `继续未完成任务（${unfinishedCount}）` : `Resume unfinished (${unfinishedCount})` }}
             </button>
           </div>
-          <div v-if="!(room?.tasks || []).length" class="st-empty">{{ zh ? '暂无任务' : 'No tasks' }}</div>
+          <div v-if="!(board?.tasks || []).length" class="st-empty">{{ zh ? '暂无任务' : 'No tasks' }}</div>
           <div
-            v-for="t in room?.tasks || []"
+            v-for="t in board?.tasks || []"
             :key="t.id"
             class="st-card st-clickable"
             :class="{ active: activeTaskId === t.id }"
@@ -207,12 +223,12 @@
                 v-if="t.assignee !== undefined"
                 class="st-avatar"
                 :style="{ background: memberColor(t.assignee) }"
-              >{{ (room?.members[t.assignee]?.name || '?').slice(0, 1) }}</span>
+              >{{ (board?.members[t.assignee]?.name || '?').slice(0, 1) }}</span>
               <span class="st-card-name">{{ t.id }} · {{ t.title }}</span>
               <span v-if="t.background" class="st-card-tag">{{ zh ? '后台' : 'bg' }}</span>
             </div>
             <div class="st-card-sub">
-              {{ t.assignee !== undefined ? (room?.members[t.assignee]?.name || '#' + t.assignee) : (zh ? '待认领' : 'unassigned') }}
+              {{ t.assignee !== undefined ? (board?.members[t.assignee]?.name || '#' + t.assignee) : (zh ? '待认领' : 'unassigned') }}
               <span v-if="t.deps.length"> · ← {{ t.deps.join(',') }}</span>
             </div>
             <div v-if="t.output" class="st-card-out">{{ t.output.slice(0, 200) }}</div>
@@ -256,8 +272,8 @@
               {{ zh ? `广播 ${commGraph.broadcastCount} 条` : `${commGraph.broadcastCount} broadcast(s)` }}
             </div>
           </div>
-          <div v-if="!(room?.messages || []).length" class="st-empty">{{ zh ? '暂无通信' : 'No messages' }}</div>
-          <div v-for="c in room?.messages || []" :key="c.id" class="st-card">
+          <div v-if="!(board?.messages || []).length" class="st-empty">{{ zh ? '暂无通信' : 'No messages' }}</div>
+          <div v-for="c in board?.messages || []" :key="c.id" class="st-card">
             <div class="st-card-head">
               <span class="st-card-name">{{ fromName(c.from) }} → {{ c.to === '*' ? (zh ? '全体' : 'all') : toName(c.to) }}</span>
               <span class="st-card-tag">{{ c.kind }}</span>
@@ -289,11 +305,13 @@
  * - **底部发送栏复用 home.vue 的输入框**（本组件不接管输入）。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { usestore } from '@/store'
 import { running as swarmRunning } from '@/store/swarmState'
 import { resumeSwarm } from '@/store/swarmRunner'
-import { roomOf, ensureRoom, buildMembers } from '@/store/swarmRoom'
+import { roomOf, ensureRoom, buildMembers, boardOf, episodeList, currentEpisodeId } from '@/store/swarmRoom'
 import { deriveMembers } from '@/composables/swarm/useSwarmMembers'
+import { workspaceRoot } from '@/lib/agent/promptContext'
 import { renderMarkdown } from '@/lib/markdown/render'
 import { ensureMermaidInit, getCachedSvg, renderMermaidSvg } from '@/lib/markdown/mermaid'
 import { useAllSlotEntries } from '@/lib/plugin/useSlots'
@@ -315,6 +333,18 @@ const extraTabs = useAllSlotEntries(SWARM_WORKBENCH_SLOT)
 const activeExtraTab = computed(() => extraTabs.value.find((t) => t.key === tab.value))
 
 const room = computed<SwarmRoom | null>(() => roomOf(props.chat?.id))
+/**
+ * 工作台当前展示的回合：
+ *  - '' = 正在进行的那个回合（默认，可续跑）；
+ *  - 其它 = 历史回合 id（只读回看任务过程）。
+ * 回合结束后泳道不会被清掉（endEpisode 只标记状态），新回合开始时上一回合归档进 history，
+ * 因此「跑完还能看过程」与「任务不跨回合累积」同时成立。
+ */
+const selectedEpisodeId = ref('')
+const episodes = computed(() => episodeList(room.value))
+const board = computed(() => boardOf(room.value, selectedEpisodeId.value))
+/** true = 看的是当前回合（可续跑）；false = 历史回看（只读） */
+const isLiveBoard = computed(() => board.value?.live !== false)
 const streamEl = ref<HTMLElement | null>(null)
 
 const visibleMessages = computed(() =>
@@ -322,11 +352,23 @@ const visibleMessages = computed(() =>
 )
 
 const episodeLabel = computed(() => {
-  const ep = room.value?.episode
+  const ep = board.value?.episode
   if (!ep) return zh.value ? '未开始' : 'idle'
-  if (ep.status === 'running') return zh.value ? '进行中' : 'running'
-  return ep.status === 'done' ? (zh.value ? '已结束' : 'done') : (zh.value ? '已中断' : 'aborted')
+  const base = ep.status === 'running'
+    ? (zh.value ? '进行中' : 'running')
+    : ep.status === 'done' ? (zh.value ? '已结束' : 'done') : (zh.value ? '已中断' : 'aborted')
+  return board.value?.live ? base : `${zh.value ? '回看' : 'review'} · ${base}`
 })
+
+/** 回合切换器的一项文案（回看历史回合用） */
+function episodeOptionLabel(e: { id: string; status: string; live: boolean; taskCount: number }): string {
+  const n = String(e.id).replace(/^ep/, '') || '?'
+  const st = e.status === 'running'
+    ? (zh.value ? '进行中' : 'running')
+    : e.status === 'done' ? (zh.value ? '已结束' : 'done') : (zh.value ? '已中断' : 'aborted')
+  const tail = e.taskCount ? ` · ${e.taskCount}${zh.value ? ' 个任务' : ' tasks'}` : ''
+  return `${zh.value ? '回合' : 'Episode'} ${n} · ${st}${tail}`
+}
 
 /** markdown 渲染（复用 home 的 renderMarkdown；按内容缓存，流式下命中率高） */
 const mdCache = new Map<string, string>()
@@ -356,11 +398,16 @@ function isStuck(m: { status?: string; lastActiveAt?: number }): boolean {
   return m.status === 'running' && !!m.lastActiveAt && now.value - m.lastActiveAt > STUCK_MS
 }
 
-/** 断点续跑：未完成任务数 + 继续 */
-const unfinishedCount = computed(
-  () => (room.value?.tasks || []).filter((t) => t.status !== 'done' && t.status !== 'cancelled').length,
+/** 断点续跑：未完成任务数 + 继续（只对「当前回合」成立；回看历史回合时不给续跑入口） */
+const unfinishedCount = computed(() =>
+  isLiveBoard.value
+    ? (board.value?.tasks || []).filter((t) => t.status !== 'done' && t.status !== 'cancelled').length
+    : 0,
 )
-const onResume = async (): Promise<void> => { await resumeSwarm(props.chat?.id) }
+const onResume = async (): Promise<void> => {
+  if (!isLiveBoard.value) return
+  await resumeSwarm(props.chat?.id)
+}
 
 /** 任务 ↔ 消息联动：点任务 → 跳消息页并高亮该任务气泡；点气泡任务标签 → 回任务页 */
 const activeTaskId = ref<string | null>(null)
@@ -399,7 +446,7 @@ const maxInflight = computed({
 
 /** 通信流：参与者之间的有向聚合（弧线 + 箭头，宽度随条数） */
 const commGraph = computed(() => {
-  const r = room.value
+  const r = board.value
   if (!r || !r.messages.length) return null
   const nodes: Array<{ key: string; label: string; x: number; y: number }> = []
   const push = (key: string, label: string) => {
@@ -453,13 +500,32 @@ const commGraph = computed(() => {
 
 /** 产出物：按任务过滤 / 用应用内视图打开 */
 function artifactsOf(taskId: string): Array<{ name: string; path: string; bytes: number }> {
-  return (room.value?.artifacts || []).filter((a) => a.taskId === taskId)
+  return (board.value?.artifacts || []).filter((a) => a.taskId === taskId)
 }
+
+/** 把产出物路径补成绝对路径（主进程给的本来就是绝对路径；这里只兜住相对路径的历史数据） */
+function absoluteArtifactPath(p: string): string {
+  if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/') || p.startsWith('\\\\')) return p
+  const root = workspaceRoot(store) || (store as any).roots?.[0] || ''
+  if (!root) return p
+  return `${String(root).replace(/[\\/]+$/, '')}/${p.replace(/^[\\/]+/, '')}`
+}
+
+/**
+ * 打开产出物：打开失败 / 文件已被删掉时给出明确提示。
+ * 以前这里 `catch {}` 把异常吞掉，用户看到的是「点了没反应」，无从判断原因。
+ */
 function openArtifact(path: string): void {
   if (!path) return
-  const p = String(path)
+  const p = absoluteArtifactPath(String(path))
   const ext = p.slice(p.lastIndexOf('.'))
-  try { store.openFileByMode({ path: p, type: 'file', extension: ext }) } catch { /* 忽略 */ }
+  try {
+    store.openFileByMode({ path: p, type: 'file', extension: ext })
+  } catch (e: any) {
+    ElMessage.error(zh.value
+      ? `打开失败：${e?.message || e}`
+      : `Open failed: ${e?.message || e}`)
+  }
 }
 
 /** 成员颜色（任务卡片头像点，与泳道/气泡无关，仅助于辨认） */
@@ -472,7 +538,7 @@ function memberColor(idx?: number): string {
 /** 任务 id → 标题（名册「当前任务」用） */
 function taskTitle(id?: string): string {
   if (!id) return ''
-  return room.value?.tasks.find((t) => t.id === id)?.title || id
+  return board.value?.tasks.find((t) => t.id === id)?.title || id
 }
 
 function who(m: any): string {
@@ -483,12 +549,12 @@ function who(m: any): string {
 function fromName(f: any): string {
   if (f === 'lead' || f === -1) return 'Lead'
   if (f === 'user') return zh.value ? '我' : 'You'
-  return room.value?.members[f]?.name || `#${f}`
+  return board.value?.members[f]?.name || `#${f}`
 }
 function toName(t: any): string {
   if (t === 'lead' || t === -1) return 'Lead'
   if (t === 'user') return zh.value ? '我' : 'You'
-  return room.value?.members[t]?.name || `#${t}`
+  return board.value?.members[t]?.name || `#${t}`
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +585,7 @@ function attachPanelRO(): void {
 }
 
 const laneLayout = computed(() => {
-  const r = room.value
+  const r = board.value
   if (!r || !r.tasks.length) return null
   const tasks = r.tasks
   const byId = new Map(tasks.map((t) => [t.id, t]))
@@ -630,8 +696,14 @@ onBeforeUnmount(() => {
   panelRO?.disconnect()
   if (nowTimer) clearInterval(nowTimer)
 })
-watch(() => props.chat?.id, ensure)
+watch(() => props.chat?.id, () => { selectedEpisodeId.value = ''; ensure() })
 watch(() => ((props.chat?.config?.swarmPresetIds) || []).join('|'), ensure)
+// 新回合开始（运行中会新开一个 episode）→ 自动切回「当前回合」，别停在上一回合的回看里
+watch(() => currentEpisodeId(room.value), (id, prev) => { if (id && id !== prev) selectedEpisodeId.value = '' })
+// 选中的历史回合若已不存在（例如被归档上限挤掉）→ 回到当前回合
+watch(episodes, (list) => {
+  if (selectedEpisodeId.value && !list.some((e) => e.id === selectedEpisodeId.value)) selectedEpisodeId.value = ''
+})
 // 切换页签后：重新测量宽度 + （回到消息页时）滚到底并补渲染 mermaid
 watch(tab, () => {
   void nextTick(() => {
@@ -711,6 +783,32 @@ watch(
   cursor: pointer;
 }
 .st-btn.active { border-color: var(--menuActiveColor); color: var(--fontActiveColor); }
+
+/* 回合切换器（回看历史回合的任务过程） */
+.st-ep-select {
+  flex: 0 0 auto;
+  max-width: 200px;
+  height: 22px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--borderColor);
+  background: transparent;
+  color: inherit;
+}
+/* 回看历史回合的只读提示条 */
+.st-review-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border: 1px solid var(--borderColor);
+  border-left: 3px solid var(--menuActiveColor);
+  border-radius: 4px;
+  opacity: 0.85;
+}
 
 .st-body-row { position: relative; flex: 1 1 auto; min-height: 0; }
 .st-stream { position: absolute; inset: 0; padding: 8px 14px; overflow: auto; }
@@ -917,8 +1015,8 @@ watch(
   100% { background: transparent; }
 }
 
-/* 产出物卡片 */
-.st-artifact-row { display: flex; margin: 6px 0; }
+/* 产出物卡片：长路径不能把「打开」按钮顶出可见区域（路径最多两行省略，按钮固定不压缩） */
+.st-artifact-row { display: flex; margin: 6px 0; min-width: 0; }
 .st-artifact {
   display: flex;
   align-items: center;
@@ -926,19 +1024,31 @@ watch(
   border: 1px solid var(--menuActiveColor);
   border-radius: 6px;
   padding: 6px 10px;
-  max-width: 82%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
-.st-artifact-main { min-width: 0; }
-.st-artifact-name { font-size: 13px; font-weight: 600; }
+.st-artifact-main { flex: 1 1 auto; min-width: 0; }
+.st-artifact-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .st-artifact-path {
   font-size: 11px;
   opacity: 0.6;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 340px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-all;
+  max-width: 100%;
 }
-.st-artifact-size { font-size: 11px; opacity: 0.7; }
+.st-artifact-size { font-size: 11px; opacity: 0.7; flex: 0 0 auto; }
+.st-artifact .st-btn { flex: 0 0 auto; white-space: nowrap; }
 .st-art-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .st-art-chip {
   font-size: 11px;

@@ -69,10 +69,38 @@ export interface SessionEventMap {
     callId: string
     name: string
     ok: boolean
+    /** 工具返回的**原文**（唯一事实源：UI / 审计 / 回放都读它） */
     value?: any
     error?: string
     /** UI 专用差异预览（不进模型上下文：deriveMessages 只序列化 value） */
     preview?: any
+    /**
+     * 模型可见的那一份文本（复刻 DSH 的 tool-result pruner）。
+     * 只有当原文超出预算、中段被掐掉时才存在：
+     * `deriveEntries` 优先用它，因此**超预算结果的模型上下文是裁剪版，落盘原文不变**。
+     * 它是 `value + error` 的纯函数（`@/shared/toolResultBudget` 的 `boundToolResult`），
+     * 确定性可重算，所以不需要为了"可重建"而放弃裁剪。
+     */
+    modelValue?: string
+    /** `modelValue` 相对原文丢弃的码点数（审计 / UI 展示；与 modelValue 同生共死） */
+    omittedChars?: number
+    /**
+     * 完整原文落盘的绝对路径（复刻 DSH 的 spill-policy）。
+     * 只有原文超过 `TOOL_RESULT_SPILL_THRESHOLD_CHARS` 时才存在：
+     * 此时 `modelValue` 是"头 + 尾 + 定位提示"，模型可用 `read_file` 打开该路径回读全文。
+     * 落在系统临时目录（缓存语义），文件可能被系统清理——此时 read_file 会给出明确的
+     * "文件不存在"，模型重跑一次工具即可，不影响正确性。
+     */
+    spillPath?: string
+    /**
+     * 本条结果对应的 `tool/call` 事件的 seq（复刻 DSH 的 `sourceEventSeqs`）。
+     *
+     * 为什么需要它：按 `callId` 做"最后一条结果胜出"的关联在单次执行下没问题，
+     * 但一旦同一个 `callId` 被写两次（崩溃后补写结果、将来并行执行时的重放），
+     * 谁对应哪次调用就说不清了。显式引用把关联从"位置推断"变成"事实引用"，
+     * 也为重放/幂等留出空间。旧日志没有这个字段，`deriveEntries` 会退回落到 callId 关联。
+     */
+    sourceEventSeqs?: number[]
   }
   'assistant/search-status': {
     status: string

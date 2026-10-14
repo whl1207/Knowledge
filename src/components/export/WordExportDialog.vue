@@ -214,8 +214,8 @@ const doExport = async () => {
   border: 1px solid var(--borderColor);
   border-radius: 8px;
   width: 460px;
-  max-width: 92vw;
-  max-height: 85vh;
+  max-width: calc(92vw / var(--ui-zoom, 1));
+  max-height: calc(85vh / var(--ui-zoom, 1));
   display: flex;
   flex-direction: column;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);

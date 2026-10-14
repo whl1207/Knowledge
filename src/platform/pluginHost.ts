@@ -135,6 +135,20 @@ function baseName(p: string): string {
   return norm.split('/').filter(Boolean).pop() || norm
 }
 
+/**
+ * 插件目录名（= 插件 id）。
+ *
+ * 安卓上 SAF 路径形如 `saf:<文件夹名>`：用户选中的那个文件夹本身就是一个授权根，
+ * 直接按 `/` 取末段拿到的是 `saf:retro-emulator`，会被判成非法 id
+ * （「目录名 "saf:retro-emulator" 不能作为插件 id」）。所以先剥掉平台前缀再取末段
+ * ——与 android/index.ts 的 displayNameOf 同一口径（那边只处理展示，这边是校验与安装）。
+ */
+function dirNameOf(p: string): string {
+  const norm = String(p || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  const raw = norm.startsWith('saf:') ? norm.slice('saf:'.length) : norm
+  return baseName(raw)
+}
+
 /** 读文本文件；读不到（含「不存在」）返回 null */
 async function readTextOrNull(path: string): Promise<string | null> {
   try {
@@ -224,7 +238,7 @@ export async function listPlugins(): Promise<{
 
   /** 目录名必须是合法插件 id（与桌面一致：中文 / 大写 / 空格目录跳过并回报） */
   const considerDir = async (dir: string, relDir: string) => {
-    const name = baseName(dir)
+    const name = dirNameOf(dir)
     if (!isValidPluginId(name)) {
       invalidNamedDirs.push(`${relDir}（目录名不能作为插件 id）`)
       return
@@ -246,17 +260,41 @@ export async function listPlugins(): Promise<{
     const children: any[] = Array.isArray(node.children) ? node.children : []
     const hasManifest = children.some((c) => c?.type === 'file' && baseName(c.path) === PLUGIN_MANIFEST_FILE)
     if (hasManifest) {
-      await considerDir(node.path, baseName(node.path))
+      await considerDir(node.path, dirNameOf(node.path))
       continue
     }
     for (const sub of children) {
       if (sub?.type !== 'folder') continue
-      await considerDir(sub.path, `${baseName(node.path)}/${baseName(sub.path)}`)
+      await considerDir(sub.path, `${dirNameOf(node.path)}/${dirNameOf(sub.path)}`)
     }
   }
 
   plugins.sort((a, b) => a.id.localeCompare(b.id))
+  // 安卓上 SAF 授权可能已经失效（换过授权文件夹 / 文件夹被移动或删除）：这时底层只会返回空，
+  // 用户看到的是「插件全没了」却没有任何原因。明确说一句，别让人以为插件丢了。
+  if (!plugins.length && customRoot && (await safRootMissing(rootDir))) {
+    invalidNamedDirs.push(
+      `${rootDir}（这个文件夹的授权已失效：安卓上换过授权文件夹，或文件夹被移动 / 删除——请点「选择插件目录」重新选一次）`,
+    )
+  }
   return { plugins, rootDir, customRoot, services: [], invalidNamedDirs }
+}
+
+/**
+ * 自定义插件目录是 SAF 路径、但它的授权根名已经不在原生授权清单里（= 授权失效）。
+ * 只在安卓上问一次原生侧；其它平台 / 问不到时按「没失效」处理（不打扰用户）。
+ */
+async function safRootMissing(rootDir: string): Promise<boolean> {
+  if (!String(rootDir || '').startsWith('saf:')) return false
+  try {
+    if (getPlatform().kind !== 'android') return false
+    const saf = await import('@/platform/android/saf')
+    if (!saf.safCache.rootNames.length) await saf.createSafFilesystemAdapter().refreshRoot().catch(() => {})
+    const name = String(rootDir).slice('saf:'.length).split('/')[0]
+    return !!name && saf.safCache.rootNames.length > 0 && saf.safCache.rootNames.indexOf(name) < 0
+  } catch {
+    return false
+  }
 }
 
 /** 读插件 client 半边入口源码（runtime 用 Blob URL 动态 import） */
@@ -275,7 +313,9 @@ export async function clientBundleOf(id: string): Promise<PluginClientBundle> {
 /** 把选中的目录内容复制进插件根目录（手机上的「从文件夹安装插件」） */
 async function installFromDir(sourceDir: string, replace: boolean): Promise<PluginSnapshot> {
   const fs = getPlatform().fs
-  const name = baseName(sourceDir)
+  // ⚠️ 安卓上 sourceDir 是 `saf:<文件夹名>`（用户选的文件夹 = 一个授权根）：
+  // 必须用 dirNameOf 剥掉前缀，否则会得到 `saf:retro-emulator` 这种非法 id
+  const name = dirNameOf(sourceDir)
   if (!isValidPluginId(name)) throw new Error(`目录名 "${name}" 不能作为插件 id（须小写字母 / 数字 / . _ -）`)
   const target = joinPath(pluginRootDir(), name)
   if (!replace && (await readTextOrNull(joinPath(target, PLUGIN_MANIFEST_FILE))) !== null) {
@@ -334,7 +374,8 @@ export function createLocalPluginHost(): PluginBridgeApi {
       const empty = { id: null, name: null, version: null, apiVersion: null, permissions: [] as string[] }
       const dir = String(spec || '').trim()
       if (!dir) return { ok: false, ...empty, problem: '缺少插件目录' }
-      const { snapshot, invalid } = await snapshotOf(dir, baseName(dir), baseName(dir))
+      const name = dirNameOf(dir) // 安卓 SAF：`saf:<文件夹名>` 才是目录名，别把前缀当 id
+      const { snapshot, invalid } = await snapshotOf(dir, name, name)
       if (!snapshot) return { ok: false, ...empty, problem: invalid || '无法解析清单' }
       return {
         ok: true,

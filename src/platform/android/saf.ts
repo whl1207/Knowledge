@@ -7,13 +7,14 @@
  * 而不是只能待在应用沙箱里。
  *
  * 路径约定（与原生侧、与文件树 UI 一致）：
- *   `saf:`                        → 已授权文件夹的根
- *   `saf:<根目录名>`               → 同上（根目录名只是给界面看的，等价于根）
- *   `saf:<根目录名>/sub/a.md`      → 根内的子路径（根目录名这一段会被忽略）
+ *   `saf:`                        → 最近一次授权的那个文件夹的根
+ *   `saf:<根目录名>`               → 同名授权文件夹的根
+ *   `saf:<根目录名>/sub/a.md`      → 那个授权文件夹里的子路径
  *
  * 为什么带根目录名：应用把路径当作工作区标识并按末段展示名称（如文件树/工作区列表），
- * 纯 `saf:` 在界面上无法辨认；因此渲染层用 `saf:<名字>` 作根路径，适配器在路由时
- * 识别并剥掉这段「根标记」。名字与授权不符时（用户换了文件夹）按普通子目录处理 —— 会解析失败并返回空，不会越界。
+ * 纯 `saf:` 在界面上无法辨认；因此渲染层用 `saf:<名字>` 作根路径，**原生按第一段选授权根**
+ * （多授权根：工作区、插件目录、插件自己读的游戏目录各拿各的，互不顶掉）。
+ * 名字不是已知授权根时按普通子目录处理（相对「最近一次授权的根」）——会解析失败并返回空，不会越界。
  */
 
 import { registerPlugin } from '@capacitor/core'
@@ -24,7 +25,8 @@ export const SAF_PREFIX = 'saf:'
 
 /** 原生插件的最小接口（与 SafFolderPlugin.java 的方法一一对应） */
 export interface SafFolderPluginApi {
-  getRoot(): Promise<{ granted: boolean; name: string; uri: string }>
+  /** 授权状态：name = 最近一次授权的根名；names = 全部已授权根名（多授权根） */
+  getRoot(): Promise<{ granted: boolean; name: string; uri: string; names?: string[] }>
   pickFolder(): Promise<{ name: string; uri: string }>
   clear(): Promise<void>
   readFile(opts: { path: string; mode?: 'text' | 'base64' }): Promise<{ data: string; size?: number }>
@@ -61,18 +63,18 @@ export function isSafPath(path: string): boolean {
 }
 
 /**
- * 把 SAF 路径拆成「是否 SAF + 相对授权根的子路径」。
- * `saf:` / `saf:<根名>` 都解析为根（`''`）。
+ * 把 SAF 路径拆成「是否 SAF + 交给原生的相对路径」。
+ *
+ * ⚠️ 这里**不再剥掉根名那一段**：安卓上应用会同时持有多个文件夹授权（工作区、插件目录、
+ * 插件自己要读的游戏 / 数据目录……），原生按 `saf:<根名>/sub` 的**第一段**路由到对应授权
+ * （见 SafFolderPlugin.pick）。早期只有一个授权根，渲染层会把根名剥掉再传，于是
+ * 「在别处又选了一个文件夹」就会把前一个授权的路径解析带偏——插件目录因此整片读空。
+ * 老形状（不含根名，或就是 `saf:`）按「最近一次授权的根」处理，原生两种都认。
  */
-export function splitSafPath(path: string, rootName = ''): { saf: boolean; rel: string } {
+export function splitSafPath(path: string): { saf: boolean; rel: string } {
   const raw = String(path || '')
   if (!raw.startsWith(SAF_PREFIX)) return { saf: false, rel: raw }
-  let rest = raw.slice(SAF_PREFIX.length).replace(/^\/+/, '')
-  if (!rest) return { saf: true, rel: '' }
-  const name = String(rootName || '')
-  if (name && rest === name) return { saf: true, rel: '' }
-  if (name && rest.startsWith(name + '/')) rest = rest.slice(name.length + 1)
-  return { saf: true, rel: rest }
+  return { saf: true, rel: raw.slice(SAF_PREFIX.length).replace(/^\/+/, '') }
 }
 
 /** 组装 SAF 路径（根 → `saf:<根名>`；子路径 → `saf:<根名>/rel`） */
@@ -83,89 +85,82 @@ export function joinSafPath(rootName: string, rel: string): string {
   return name ? `${SAF_PREFIX}${name}/${r}` : `${SAF_PREFIX}${r}`
 }
 
-/** 缓存的授权根名（适配器与界面共享；refreshRoot 更新） */
-export const safCache: { rootName: string } = { rootName: '' }
+/**
+ * 缓存的授权根（适配器与界面共享；refreshRoot 更新）：
+ * rootName = 最近一次授权的根（匿名 `saf:` 与界面展示都用它），rootNames = 全部已授权根名。
+ */
+export const safCache: { rootName: string; rootNames: string[] } = { rootName: '', rootNames: [] }
 
 /**
  * 用 SafFolder 插件实现文件适配器（与 Capacitor Filesystem 的适配面相同，
  * 因此上层 fsPortOf 逻辑完全不动，只是换了数据源）。
  *
- * `rootName()` 每次调用现取授权文件夹名，因此用户在系统界面换了文件夹后立即生效。
+ * 路径原样交给原生：`saf:<根名>/…` 由原生按名字选授权根，因此用户在任何一处重新选文件夹，
+ * 都不会再把别处的 `saf:<旧根名>/…` 解析带偏。授权状态由 refreshRoot() 现取现更新。
  */
-export function createSafFilesystemAdapter(
-  plugin: SafFolderPluginApi = SafFolder,
-  rootName: () => string = () => safCache.rootName,
-): SafFilesystemAdapter {
-  const split = (path: string) => splitSafPath(path, rootName())
+export function createSafFilesystemAdapter(plugin: SafFolderPluginApi = SafFolder): SafFilesystemAdapter {
+  const relOf = (path: string) => splitSafPath(path).rel
 
   return {
     async refreshRoot() {
       try {
         const r = await plugin.getRoot()
         safCache.rootName = r?.name || ''
+        const names = Array.isArray(r?.names) ? r.names.filter((n) => !!n) : []
+        safCache.rootNames = names.length ? names : safCache.rootName ? [safCache.rootName] : []
         return { granted: !!r?.granted, name: safCache.rootName }
       } catch {
         safCache.rootName = ''
+        safCache.rootNames = []
         return { granted: false, name: '' }
       }
     },
 
     async readFile({ path, encoding }) {
-      const { rel } = split(path)
       const mode = modeOf(encoding)
-      const r = await plugin.readFile({ path: rel, mode })
+      const r = await plugin.readFile({ path: relOf(path), mode })
       // 文本口径由原生侧解码（UTF-8）；二进制口径返回 base64，由端口按需解码
       return { data: String(r?.data ?? '') }
     },
 
     async writeFile({ path, data, encoding }) {
-      const { rel } = split(path)
-      await plugin.writeFile({ path: rel, data: String(data ?? ''), encoding: modeOf(encoding) === 'text' ? 'utf8' : 'base64' })
+      await plugin.writeFile({ path: relOf(path), data: String(data ?? ''), encoding: modeOf(encoding) === 'text' ? 'utf8' : 'base64' })
       return { uri: path }
     },
 
     async mkdir({ path }) {
-      const { rel } = split(path)
-      await plugin.mkdir({ path: rel })
+      await plugin.mkdir({ path: relOf(path) })
       return {}
     },
 
     async rmdir({ path }) {
-      const { rel } = split(path)
-      await plugin.remove({ path: rel })
+      await plugin.remove({ path: relOf(path) })
       return {}
     },
 
     async deleteFile({ path }) {
-      const { rel } = split(path)
-      await plugin.remove({ path: rel })
+      await plugin.remove({ path: relOf(path) })
       return {}
     },
 
     async rename({ from, to }) {
-      const src = split(from).rel
-      const dst = split(to).rel
-      await plugin.rename({ from: src, to: dst })
+      await plugin.rename({ from: relOf(from), to: relOf(to) })
       return { uri: to }
     },
 
     async copy({ from, to }) {
-      const src = split(from).rel
-      const dst = split(to).rel
-      await plugin.copy({ from: src, to: dst })
+      await plugin.copy({ from: relOf(from), to: relOf(to) })
       return { uri: to }
     },
 
     async stat({ path }) {
-      const { rel } = split(path)
-      const r = await plugin.stat({ path: rel })
+      const r = await plugin.stat({ path: relOf(path) })
       if (!r?.exists) throw new Error('路径不存在')
       return { type: r.type || 'file', size: r.size, mtime: r.mtime }
     },
 
     async readdir({ path }) {
-      const { rel } = split(path)
-      const r = await plugin.readdir({ path: rel })
+      const r = await plugin.readdir({ path: relOf(path) })
       return { files: Array.isArray(r?.files) ? r.files : [] }
     },
   }

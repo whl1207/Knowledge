@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch, defineAsyncComponent } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
@@ -48,6 +48,14 @@ const fileContent = ref('')
 const fileName = ref('')
 // 内容读取中（大文件读盘/远程拉取）：浏览视图据此显示「正在渲染」，而不是误报“文件无内容和数据”
 const contentLoading = ref(true)
+/**
+ * 本地文件读取失败的原因（空 = 读到了内容）。
+ *
+ * 为什么要单独记：读失败时 `fileContent` 也是空，浏览视图只会显示“文件无内容和数据”，
+ * 把真正的原因（路径不存在 / 窗口没拿到 IPC / 权限不足）吞掉——用户看到的是一个查不出原因的空窗口。
+ * 记下来后由本窗口渲染明确的错误态 + 「重试 / 用系统默认应用打开 / 复制路径」。
+ */
+const readError = ref('')
 
 // ---- 远程只读文件（rid/rel 参数存在时；内容走 HTTP 拉取，不读本地磁盘） ----
 const isRemoteFile = ref(false)
@@ -555,35 +563,115 @@ onMounted(async () => {
     return
   }
 
-  // 本地文件：从磁盘读取
+  // 本地文件：从磁盘读取（失败原因记进 readError，由本窗口渲染明确的错误态）
+  await loadLocalFile()
+})
+
+/** 窗口是否拿到了 preload 注入的 IPC（没有它 = 本地文件能力不可用） */
+function hasIpc(): boolean {
+  return typeof window !== 'undefined' && !!(window as any).ipcRenderer
+}
+
+/**
+ * 主进程 / 主机把「读失败」当**文本**返回（`Error reading file: …`）而不是抛异常。
+ * 这种返回值以前会被当成文件正文渲染（浏览视图显示一行英文错误），现在统一识别成失败。
+ */
+function readFailureText(text: unknown): string {
+  const s = String(text ?? '')
+  if (!s) return ''
+  if (s.startsWith('Error reading file: ')) return s.slice('Error reading file: '.length).trim()
+  if (s.startsWith('Error reading Excel file: ') || s.startsWith('Error reading HTML file:')) return s
+  return ''
+}
+
+/** 错误态下的补充提示：把「怎么救」直接写出来，避免又变成猜谜 */
+const readErrorHint = computed(() => {
+  if (!readError.value) return ''
+  const zh = store.locales == 'zh'
+  if (!hasIpc()) {
+    return zh
+      ? '本窗口没有拿到本地文件能力（网页 / 局域网访客模式，或开发期 preload 正在重建）。桌面版重开一次即可；网页版请改用桌面端打开本地文件。'
+      : 'This window has no local-file capability (web/guest mode, or the dev preload was being rebuilt). Reopen it from the desktop app; web builds cannot read local files.'
+  }
+  if (/ENOENT|no such file|找不到/i.test(readError.value)) {
+    return zh ? '该路径下已经没有这个文件（可能已被移动或删除）。' : 'The file no longer exists at this path (moved or deleted).'
+  }
+  if (/EPERM|EACCES|permission|拒绝访问/i.test(readError.value)) {
+    return zh ? '系统拒绝了访问（权限或占用）：确认文件没有被其它程序独占，或换一个位置再试。' : 'Access denied (permission or lock): check that no other program holds the file.'
+  }
+  return ''
+})
+
+/**
+ * 本地文件读盘（挂载时调用；错误态的「重试」也调用它）。
+ *
+ * 关键：**读失败与「文件本身就是空的」必须分开**——
+ *  - 读失败 → readError 有值 → 本窗口渲染错误态（含原因与重试），绝不落成“文件无内容和数据”；
+ *  - 读到空内容 → 才走原来的空文件处理（.md 落到源码编辑视图）。
+ * 之前两者混在一起：失败时浏览视图只显示一句“文件无内容和数据”，
+ * 真正的原因（路径没了 / 窗口没有 IPC / 被占用）全被吞掉。
+ */
+async function loadLocalFile(): Promise<void> {
+  readError.value = ''
   contentLoading.value = true
   try {
-    fileContent.value = await getPlatform().fs.readText(filePath.value)
-    // 空 .md（正文为空 / 仅空白，或**只有 YAML 头**）默认跳到源码编辑视图：
-    // 浏览视图对这类文件无内容可读，只会先闪一下「正在渲染」再落到空内容提示；
-    // 新建 / 待填写的文档直接用编辑视图才符合预期（用户显式选了其它视图时不干预）。
-    if (fileExt.value === '.md' && viewType.value === 'read' && mdBodyIsEmpty(fileContent.value)) {
-      viewType.value = 'edit'
-    }
-    // 空 Mermaid 图表（.mmd / .mermaid）同样没有可浏览的内容 → 直接进源码编辑（与空 .md 一致）
-    if (isMermaid.value && viewType.value === 'read' && !fileContent.value.trim()) {
-      viewType.value = 'edit'
+    const text = await getPlatform().fs.readText(filePath.value)
+    const failed = readFailureText(text)
+    if (failed) {
+      fileContent.value = ''
+      readError.value = failed
+    } else {
+      fileContent.value = text
+      // 空 .md（正文为空 / 仅空白，或**只有 YAML 头**）默认跳到源码编辑视图：
+      // 浏览视图对这类文件无内容可读，只会先闪一下「正在渲染」再落到空内容提示；
+      // 新建 / 待填写的文档直接用编辑视图才符合预期（用户显式选了其它视图时不干预）。
+      if (fileExt.value === '.md' && viewType.value === 'read' && mdBodyIsEmpty(text)) {
+        viewType.value = 'edit'
+      }
+      // 空 Mermaid 图表（.mmd / .mermaid）同样没有可浏览的内容 → 直接进源码编辑（与空 .md 一致）
+      if (isMermaid.value && viewType.value === 'read' && !String(text).trim()) {
+        viewType.value = 'edit'
+      }
     }
     const ext = filePath.value.substring(filePath.value.lastIndexOf('.'))
     // addTab 新建当前文件标签（清空历史后必然走新建分支，内部会从磁盘读 content）
     await store.addTab({ path: filePath.value, label: fileName.value, type: 'file', extension: ext })
-    const attributes = await getPlatform().fs.readMetadata(filePath.value)
-    if (store.data[store.index] && store.data[store.index].path === filePath.value) {
-      store.data[store.index].attributes = attributes
-      // 兜底：无论 addTab 走哪个分支，都确保当前 tab 内容与浏览视图(磁盘读取)一致
-      store.data[store.index].content = fileContent.value
+    if (!failed) {
+      const attributes = await getPlatform().fs.readMetadata(filePath.value)
+      if (store.data[store.index] && store.data[store.index].path === filePath.value) {
+        store.data[store.index].attributes = attributes
+        // 兜底：无论 addTab 走哪个分支，都确保当前 tab 内容与浏览视图(磁盘读取)一致
+        store.data[store.index].content = fileContent.value
+      }
     }
-  } catch (e) {
+  } catch (e: any) {
+    // 典型原因：窗口没拿到 IPC（开发期 preload 重建 / 网页·访客降级）或路径不可读
+    fileContent.value = ''
+    readError.value = String(e?.message || e)
     console.error('读取文件失败:', e)
   } finally {
     contentLoading.value = false
   }
-})
+}
+
+/** 错误态动作：交给系统默认应用打开（不依赖本窗口的读取能力） */
+function openReadErrorWithSystemApp(): void {
+  if (!filePath.value) return
+  getPlatform().shell.openWithSystemApp(filePath.value)
+}
+
+/** 错误态动作：复制路径（便于到资源管理器 / 其它工具里核对） */
+function copyReadErrorPath(): void {
+  const zh = store.locales == 'zh'
+  const p = filePath.value
+  if (!p) return
+  try {
+    void navigator.clipboard?.writeText(p)
+    ElMessage.success(zh ? '路径已复制' : 'Path copied')
+  } catch (e: any) {
+    ElMessage.error(zh ? `复制失败：${e?.message || e}` : `Copy failed: ${e?.message || e}`)
+  }
+}
 
 onBeforeUnmount(() => {
   unsubFileContent?.()
@@ -666,6 +754,29 @@ onBeforeUnmount(() => {
     <div v-else-if="isTask && !isRemoteFile" class="file-view">
       <PipelineScaffold :task-file-path="filePath" />
     </div>
+    <!-- 本地文件读取失败：给出真实原因 + 可操作按钮。
+         绝不能落成浏览视图的“文件无内容和数据”——那句话看不出是「读失败」还是「文件本来就空」，
+         会把路径不存在 / 窗口没拿到 IPC / 权限不足等原因全部吞掉（历史 bug）。 -->
+    <div v-else-if="!!readError" class="file-view">
+      <div class="file-read-error">
+        <i class="fa fa-exclamation-triangle fre-icon"></i>
+        <div class="fre-title">{{ store.locales=='zh' ? '文件读取失败' : 'Failed to read this file' }}</div>
+        <div class="fre-path" :title="filePath">{{ filePath }}</div>
+        <div class="fre-msg">{{ readError }}</div>
+        <div v-if="readErrorHint" class="fre-hint">{{ readErrorHint }}</div>
+        <div class="fre-actions">
+          <button class="fre-btn" @click="loadLocalFile">
+            <i class="fa fa-refresh"></i> {{ store.locales=='zh' ? '重试' : 'Retry' }}
+          </button>
+          <button class="fre-btn" @click="openReadErrorWithSystemApp">
+            <i class="fa fa-external-link"></i> {{ store.locales=='zh' ? '用系统默认应用打开' : 'Open with system app' }}
+          </button>
+          <button class="fre-btn" @click="copyReadErrorPath">
+            <i class="fa fa-copy"></i> {{ store.locales=='zh' ? '复制路径' : 'Copy path' }}
+          </button>
+        </div>
+      </div>
+    </div>
     <!-- Mermaid 图表（.mmd / .mermaid）：浏览视图渲染图；源码编辑仍走通用 Edit_Code（Monaco） -->
     <div v-else-if="isMermaid && viewType === 'read'" class="file-view">
       <Mermaid :path="filePath" :content="fileContent" />
@@ -700,7 +811,11 @@ onBeforeUnmount(() => {
 <style scoped>
 .file-window {
   width: 100%;
-  height: 100vh;
+  /* 满屏但不能用 100vh：安卓「窗口缩放」= 根元素 CSS zoom，vh 会被再乘一次 zoom，
+     文件窗口底部会超出屏幕（详见 src/style.css 里 html/body 那段注释）。
+     两个挂载点（独立窗口的 fixed 容器 / 应用内浮层 .file-window-overlay）高度都是确定的，
+     用百分比即可。 */
+  height: 100%;
   overflow: hidden;
   background: var(--backgroundColor);
   display: flex;
@@ -718,6 +833,54 @@ onBeforeUnmount(() => {
   cursor: move;
   -webkit-app-region: drag;
 }
+
+/* 本地文件读取失败态（替代原来的“文件无内容和数据”空提示） */
+.file-read-error {
+  margin: auto;
+  max-width: 640px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+.file-read-error .fre-icon { font-size: 26px; color: #f44336; }
+.file-read-error .fre-title { font-size: 15px; font-weight: 600; }
+.file-read-error .fre-path {
+  font-size: 11px;
+  opacity: 0.65;
+  word-break: break-all;
+  max-width: 100%;
+}
+.file-read-error .fre-msg {
+  font-size: 12px;
+  color: #f44336;
+  word-break: break-all;
+  max-width: 100%;
+  white-space: pre-wrap;
+}
+.file-read-error .fre-hint {
+  font-size: 12px;
+  opacity: 0.75;
+  line-height: 1.5;
+}
+.file-read-error .fre-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 6px; }
+.file-read-error .fre-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--fontColor);
+  background: transparent;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.file-read-error .fre-btn:hover { border-color: var(--menuActiveColor); color: var(--menuActiveColor); }
 .file-titlebar-title {
   flex: 1;
   font-size: 14px;
@@ -777,7 +940,7 @@ onBeforeUnmount(() => {
   left: 0;
   z-index: 3000;
   min-width: 120px;
-  max-height: 60vh;
+  max-height: calc(60vh / var(--ui-zoom, 1));
   overflow-y: auto;
   padding: 4px;
   border: 1px solid var(--borderColor);

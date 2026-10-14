@@ -3173,7 +3173,7 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: center;
   overflow: auto;
-  max-height: 70vh;
+  max-height: calc(70vh / var(--ui-zoom, 1));
 }
 
 .be-rendered :deep(.mermaid-wrapper svg) {

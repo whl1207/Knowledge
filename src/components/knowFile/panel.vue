@@ -1874,7 +1874,7 @@
   }
   .pf-pop {
     position: fixed; z-index: 501;
-    width: 300px; max-width: calc(100vw - 16px);
+    width: 300px; max-width: calc(100vw / var(--ui-zoom, 1) - 16px);
     background: var(--menuColor);
     border: 1px solid var(--borderColor); border-radius: 8px;
     box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
@@ -2115,7 +2115,7 @@
     border-radius: 4px;
     box-shadow: 0 2px 10px rgba(0, 0, 0, .25);
     pointer-events: none;
-    max-width: 60vw;
+    max-width: calc(60vw / var(--ui-zoom, 1));
   }
 
   /* 文件名：过长时换行显示，避免超出视口 */

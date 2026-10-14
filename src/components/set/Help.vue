@@ -2580,7 +2580,7 @@ const translations = {
         title: '运行方式（输入区下拉）',
         'auto-mention': { name: '全员响应', desc: '所有选中成员依次就任务作答；成员也可在回复里 @同事 追加协作。默认方式。' },
         debate: { name: '辩论', desc: '多个成员围绕任务多轮辩论，最后由群主中立总结，适合需要多方对比的决策类问题。' },
-        team: { name: '项目组（Lead 编排）', desc: '由第一位成员担任 Lead，自动把目标拆成任务、按依赖指派成员，结束时汇总交付；此模式顶部只有一行（左侧聊天名称、右侧工作台标签），消息、泳道、名册、任务、通信为并列标签且各自全宽；泳道按依赖层级竖向展示任务关系与成员状态；名册显示各成员 token / 工具次数 / 最后活动（超 90 秒无活动会提示可能卡住）；停止后可从任务页「继续未完成任务」；任务页可调并发闸门（1~8），点任务跳转到对应消息、点消息上的任务标签回到任务板；长产出用产出物落成文件（群聊显示可打开的卡片，任务卡带 📎 附件），不占上下文。' }
+        team: { name: '项目组（Lead 编排）', desc: '由第一位成员担任 Lead，自动把目标拆成任务、按依赖指派成员，结束时汇总交付；此模式顶部只有一行（左侧聊天名称、右侧工作台标签），消息、泳道、名册、任务、通信为并列标签且各自全宽；泳道按依赖层级竖向展示任务关系与成员状态；名册显示各成员 token / 工具次数 / 最后活动（超 90 秒无活动会提示可能卡住）；停止后可从任务页「继续未完成任务」；任务页可调并发闸门（1~8），点任务跳转到对应消息、点消息上的任务标签回到任务板；长产出用产出物落成文件（群聊显示可打开的卡片，任务卡带 📎 附件），不占上下文；回合结束后任务板 / 泳道 / 通信 / 产出物都保留（刷新或重启后仍在），顶部回合切换器可回看历史回合（只读）。' }
       }
     },
     browser: {
@@ -3680,7 +3680,7 @@ const translations = {
         title: 'Run Modes (input bar dropdown)',
         'auto-mention': { name: 'All respond', desc: 'Every selected member answers the task in turn; members may also @colleagues in their reply. Default.' },
         debate: { name: 'Debate', desc: 'Members debate the task over rounds, then the host gives a neutral summary. Best for comparing options.' },
-        team: { name: 'Team (Lead-led)', desc: 'The first member acts as Lead: it splits the goal into tasks, assigns them by dependency and delivers a summary. This mode has a single top row (chat name on the left, workbench tabs on the right); Messages, Flow, Roster, Tasks and Comm are full-width sibling tabs; the Flow view shows task dependencies and member status vertically; the Roster shows per-member tokens / tool count / last activity (a running member idle for over 90s is flagged); a stopped episode can be resumed from the Tasks tab; the Tasks tab also has a concurrency gate (1-8), and clicking a task jumps to its messages (and back); long outputs are saved as artifacts (openable card in the chat, 📎 chips on the task card) so full text stays out of context.' }
+        team: { name: 'Team (Lead-led)', desc: 'The first member acts as Lead: it splits the goal into tasks, assigns them by dependency and delivers a summary. This mode has a single top row (chat name on the left, workbench tabs on the right); Messages, Flow, Roster, Tasks and Comm are full-width sibling tabs; the Flow view shows task dependencies and member status vertically; the Roster shows per-member tokens / tool count / last activity (a running member idle for over 90s is flagged); a stopped episode can be resumed from the Tasks tab; the Tasks tab also has a concurrency gate (1-8), and clicking a task jumps to its messages (and back); long outputs are saved as artifacts (openable card in the chat, 📎 chips on the task card) so full text stays out of context; when an episode ends the task board, flow, comms and artifacts are kept (also across reloads), and the selector at the top lets you review earlier episodes (read-only).' }
       }
     },
     browser: {

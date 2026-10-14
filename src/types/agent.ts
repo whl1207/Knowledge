@@ -211,6 +211,7 @@ export type AgentEventType =
   | 'agent/todos' // 待办清单更新（update_todo 工具）
   | 'agent/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call）
   | 'agent/compaction' // 上下文压缩（旧轮次摘要）：start 事件 → 界面显示「正在压缩上下文…」
+  | 'agent/notice' // 非致命的运行期提示（如 max_tokens 截断后自动续跑 / 放弃续跑）
   | 'agent/error'
 
 /** 上下文压缩触发方式：自动（占用达阈值）/ 后端报超限后重试 / 手动 */
@@ -253,6 +254,12 @@ export interface AgentEventMap {
     /** 这些旧消息压缩前的估算 token */
     tokensBefore?: number
   }
+  /**
+   * 运行期提示（非致命，不打断 turn）。
+   * - `truncated-continue`：模型输出被 max_tokens 截断，已自动续跑；
+   * - `truncated-giveup`：连续截断达到上限，停止续跑（任务可能未完成，需要用户干预）。
+   */
+  'agent/notice': { kind: 'truncated-continue' | 'truncated-giveup'; message: string }
   'agent/error': { message: string }
 }
 

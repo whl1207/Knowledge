@@ -1216,7 +1216,7 @@ onBeforeUnmount(() => {
 }
 /* 封面内的胶囊观察窗：垂直居中；宽约封面的 56%（较窄）、宽>高、圆角半径=高度一半（两端半圆） */
 .tape-window {
-  --tw-h: clamp(64px, 15vh, 128px);
+  --tw-h: clamp(64px, calc(15vh / var(--ui-zoom, 1)), 128px);
   position: relative;
   flex: 0 0 auto;
   width: 56%;

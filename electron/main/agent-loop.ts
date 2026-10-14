@@ -21,7 +21,9 @@
 import { randomUUID } from 'node:crypto'
 import { AIUtils } from '@/shared/ai-core'
 import { toolRegistry } from '@/shared/toolRegistry'
+import { boundToolResult, buildSpillPreview, shouldSpill } from '@/shared/toolResultBudget'
 import { sessionLog } from './session-log'
+import { saveSpillText } from './tool-spill'
 import { jobRegistry } from './job-registry'
 import { browserAgentService } from './browser-agent'
 import { credentialStore } from './credentials'
@@ -43,20 +45,24 @@ import type { ToolResult, ToolExecutionContext } from '@/types/tool'
 import { brand, type ToolName, type AgentId } from '@/types/ids'
 import { runCodeFunctionSchema } from './code-sdk'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
+import { decideTruncationContinue } from '@/shared/truncation'
 // 上下文预算与压缩（P0）：与渲染层共用同一口径（详见 src/shared/contextBudget.ts）
 import {
   COMPACT_KEEP_TURNS,
+  COMPACT_MIN_DROP,
+  COMPACT_RETAIN_RATIO,
   COMPACT_SYSTEM_PROMPT,
   OVERFLOW_RETRY_LIMIT,
   buildCompactionPrompt,
   compactedContextMessage,
+  compactionBasisTokens,
   estimateMessagesTokens,
   estimateToolSchemaTokens,
   calibrateTokenScale,
   clampTokenScale,
   indexSummary,
   isContextOverflowError,
-  pickCompactionRange,
+  pickCompactionRangeByTokens,
   planAgentBudget,
   type BudgetMessage,
   type ContextBudget,
@@ -277,6 +283,15 @@ let remoteBackendMaxInflight = 2
 /** 可自托管的 OpenAI 兼容后端（本地/内网部署，受单机推理能力限制） */
 const SELFHOSTED_PROVIDERS = new Set(['ollama', 'lmstudio', 'custom'])
 
+/**
+ * `finish_reason=length` 时最多自动续跑几次（复刻 DSH 把 finish=max-tokens 当"下一步继续"的信号）。
+ *
+ * 为什么需要上限：模型在续跑时如果每轮都撞 max_tokens，会变成"无限续跑"。
+ * 取 3 是经验值：正常任务被截断后 1~2 轮内能收尾；连续 3 次说明单次输出根本装不下这个任务，
+ * 此时应当明确告知用户（而不是继续烧 token 或静默结束）。
+ */
+const MAX_LENGTH_CONTINUES = 3
+
 const backendInflight = new Map<string, number>()
 /**
  * 各编排运行（AgentBatch / AgentSwarm …）声明的期望并发：scopeId → 并发数。
@@ -383,6 +398,26 @@ class AgentImpl implements AgentControl {
    * 仅用于最终 tool_calls 丢参/截断时兜底（见 normalizeToolCalls），每 step 开始前清空。
    */
   private streamedArgs = new Map<string, string>()
+  /**
+   * 本 step 各工具调用对应的 `tool/call` 事件 seq（callId → seq），每 step 开始前清空。
+   * 落 `tool/result` 时写成 `sourceEventSeqs`，把"结果属于哪次调用"从位置推断变成事实引用
+   * （复刻 DSH 的 sourceEventSeqs；崩溃恢复补写时同样用它）。
+   */
+  private currentCallSeq = new Map<string, number>()
+  /**
+   * 本 step 已算出、已落盘的工具结果（callId → 结果）。
+   * step 中途抛错时由崩溃恢复逻辑补写（见 `runTurn` 的 catch：复刻 DSH 的 ToolCallRecovery）。
+   * 每 step 开始时重置——只为"当前这一步"补写，避免把上一步早已落盘的结果重复写一遍。
+   */
+  private stepResults = new Map<string, { name: string; ok: boolean; value?: any; error?: string; preview?: any }>()
+  /** 最近一次请求预算里生效的上下文窗口（供工具结果预算按窗口缩放；见 `pushToolResult`） */
+  private effectiveWindowTokens = 0
+  /** 最近一次请求预算里的预留输出 token（供压缩基准扣减；见 `compactionBasisTokens`） */
+  private lastBudgetReserve = 0
+  /** 已经补写过的 callId（同一 turn 内不重复补写） */
+  private recoveredResultIds = new Set<string>()
+  /** 已经广播给 UI 的 tool/result callId（补写时只对"从未广播过"的结果补发事件，避免重复） */
+  private emittedResultIds = new Set<string>()
   // 带图任务：user 消息序号（1 基）→ 图片 data URL 数组。
   // 图片只在内存里（会话日志只记数量），每次 buildMessages 按序号挂回对应消息；
   // 只保留最近 4 个带图任务，避免长会话/多次传图长期占内存。
@@ -629,6 +664,14 @@ class AgentImpl implements AgentControl {
     let owesWork = true
     let aborted = false
     let stepsInTurn = 0
+    // 本步已算出的工具结果（供崩溃恢复补写：见 catch 块的 ToolCallRecovery 逻辑）。
+    // 字段化是因为 `pushToolResult` 需要写入；每步开始时重置。
+    this.stepResults = new Map()
+    // 已补写过的 callId / 已广播给 UI 的结果：同一 turn 内的记账
+    this.recoveredResultIds = new Set()
+    this.emittedResultIds = new Set()
+    // max_tokens 截断续跑计数（复刻 DSH 把 finish=max-tokens 当"下一步继续"的信号；见 MAX_LENGTH_CONTINUES）
+    let lengthContinues = 0
     // 循环轮数：由渲染进程按唯一数据源（store.generalAgentMaxSteps / preset.maxSteps）注入；兜底同源默认值
     const maxSteps = this.options.maxSteps ?? DEFAULT_AGENT_MAX_STEPS
 
@@ -658,6 +701,9 @@ class AgentImpl implements AgentControl {
         const messages = await this.buildMessages(item, injected)
         // 本 step 的工具参数流式累积清零（最终 payload 丢参时按 callId 兜底用）
         this.streamedArgs.clear()
+        this.currentCallSeq.clear()
+        // 本 step 的结果集合清零（崩溃恢复只补写当前 step 的结果）
+        this.stepResults = new Map()
         const result = await this.runStepWithOverflowRetry(messages)
         item = null // 本 step 的输入已消费
 
@@ -705,11 +751,76 @@ class AgentImpl implements AgentControl {
         // 工具调用欠一次请求（继续下一 step 携带工具结果），
         // 或运行期间收到了 steer（转向下一 step）→ 继续
         const pendingSteer = this.claimPendingSteer()
-        owesWork = toolCallsCount > 0 || !!pendingSteer
+
+        // max_tokens 截断续跑（复刻 DSH：finish=max-tokens 时不结束 turn，而是再走一个 step）。
+        // 为什么需要：输出被 max_tokens 截断时 `toolCalls` 往往是空的，旧逻辑据此判定 turn 结束，
+        // 于是"任务做到一半被截断"被当成"任务做完了"——比报错更糟，因为没有任何信号。
+        // 判定抽在 @/shared/truncation 里（纯函数、有自测覆盖）。
+        const truncation = decideTruncationContinue({
+          finishReason: this.lastFinishReason,
+          contentChars: result.content.trim().length,
+          toolCallCount: toolCallsCount,
+          hasPendingSteer: !!pendingSteer,
+          continuesSoFar: lengthContinues,
+          maxContinues: MAX_LENGTH_CONTINUES,
+        })
+        if (truncation.shouldContinue) {
+          lengthContinues++
+          this.emit('agent/notice', {
+            kind: 'truncated-continue',
+            message: `模型输出被 max_tokens 截断，已自动续跑（第 ${lengthContinues}/${MAX_LENGTH_CONTINUES} 次）`,
+          })
+        } else if (truncation.gaveUp) {
+          // 达到上限仍被截断：明确告知（不静默），让用户知道任务可能不完整
+          const message = `模型输出连续 ${MAX_LENGTH_CONTINUES} 次被 max_tokens 截断，已停止续跑（任务可能未完成）。`
+            + '建议：调高 max_tokens / 换上下文窗口更大的模型，或把任务拆小。'
+          this.emit('agent/notice', { kind: 'truncated-giveup', message })
+          console.warn(`[agent] ${this.id} ${message}`)
+        }
+        // 一旦这一步不再被截断，额度复位（后续新的截断重新享有完整额度）
+        if (!truncation.truncated) lengthContinues = 0
+
+        // 续跑时不给新的 user 内容：被截断的那半截内容已在历史里（assistant 消息），
+        // 模型看到的历史本身就是"说到一半"，直接再请求即从断点继续。
+        owesWork = toolCallsCount > 0 || !!pendingSteer || truncation.shouldContinue
         item = pendingSteer
       }
     } catch (err: any) {
       aborted = this.turnController.signal.aborted
+      // 崩溃恢复（复刻 DSH 的 ToolCallRecovery）：step 中途抛错时，把本步**已经算出**但还没落盘的工具结果
+      // 补写进日志。为什么重要：日志是唯一事实源，`deriveEntries` 对"有 tool_call 没 tool_result"的
+      // 配对会填 `ERROR: 工具结果缺失（日志不完整）`——**这行字会发给模型**。
+      // 工具其实跑成功了、只是结果没来得及写盘，模型却被告知"结果缺失"，就会去重跑一遍有副作用的工具。
+      // 补写用 `sourceEventSeqs` 显式指向对应的 tool/call，因此即便同一 callId 被写两次也能说清归属。
+      try {
+        // 一次快照，避免循环内反复解析整份日志
+        const allEvents = sessionLog.readAll(this.id)
+        const callSeqByCleanId = new Map<string, number>()
+        for (const e of allEvents) {
+          if (e.type === 'tool/call') callSeqByCleanId.set(e.callId, e.seq)
+        }
+        for (const [callId, rec] of this.stepResults) {
+          if (this.recoveredResultIds.has(callId)) continue
+          this.recoveredResultIds.add(callId)
+          const callSeq = callSeqByCleanId.get(callId)
+          sessionLog.append(this.id, 'tool/result', {
+            callId,
+            name: rec.name,
+            ok: rec.ok,
+            value: rec.value,
+            error: rec.error,
+            preview: rec.preview,
+            ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
+          })
+          // 只对"从未广播过"的结果补发 UI 事件（原始路径已广播过的不要重复）
+          if (!this.emittedResultIds.has(callId)) {
+            this.emittedResultIds.add(callId)
+            this.emit('tool/result', { callId, name: rec.name, ok: rec.ok, value: rec.value, error: rec.error, preview: rec.preview })
+          }
+        }
+      } catch (recoveryError) {
+        console.error(`[agent] ${this.id} 工具结果补写失败（已放弃，历史可能出现悬空 tool_call）:`, recoveryError)
+      }
       if (!aborted) {
         const raw = err?.message || String(err)
         // 上下文超限且压缩后仍失败：给可操作提示，而不是一句原始 400
@@ -835,13 +946,17 @@ class AgentImpl implements AgentControl {
    */
   private requestBudget(entries: DerivedEntry[]): ContextBudget {
     const budget = this.toBudgetEntries(entries)
-    return planAgentBudget({
+    const planned = planAgentBudget({
       limit: this.options.contextLimit,
       entries: budget,
       schemaTokens: estimateToolSchemaTokens(this.visibleTools()),
       anchor: this.tokenAnchor,
       scale: this.tokenScale,
     })
+    // 记录生效窗口与预留输出：工具结果预算按窗口缩放，压缩基准按"窗口 − 预留 − schema"。
+    this.effectiveWindowTokens = planned.limit
+    this.lastBudgetReserve = planned.reserve
+    return planned
   }
 
   /** 派生条目 → 预算条目（附图按「真实 user 消息序号」折算张数；与请求消息一一对应） */
@@ -863,8 +978,14 @@ class AgentImpl implements AgentControl {
   }
 
   /**
-   * 上下文压缩：把「最近 COMPACT_KEEP_TURNS 轮之前」的旧轮次替换为一条结构化摘要
+   * 上下文压缩：把旧轮次替换为一条结构化摘要
    * （以 context/compaction 事件落盘，deriveMessages 自动应用；支持多级压缩）。
+   *
+   * 边界口径（复刻 DSH 的 `selectCompactableRange`）：
+   *  - **按 token 预算保留近期尾部**（`COMPACT_RETAIN_RATIO` × 窗口），不再用"保留 N 轮"：
+   *    重工具链路（一次 read_file 就是几万 token）用轮次口径压不动；
+   *  - 切点回退到**工具配对平衡**的位置，绝不把 assistant 的 tool_calls 与它的 tool 结果拆开；
+   *  - `COMPACT_KEEP_TURNS` 降级为安全阀（最近几轮即使预算允许也逐字保留）。
    *
    * 摘要由当前模型生成（一次无工具的独立会话，可在「设置 → 日志」审计）；
    * 摘要失败时退化为**无 LLM 的关键信息索引**，保证"绝不因超限中断"。
@@ -879,9 +1000,21 @@ class AgentImpl implements AgentControl {
         content: e.msg.content,
         toolCalls: e.msg.toolCalls,
       }))
-      const plan = pickCompactionRange(items, { keepTurns: COMPACT_KEEP_TURNS })
+      const plan = pickCompactionRangeByTokens(items, {
+        // 主口径：按比例保留近期尾部（复刻 DSH 的 retainRatio 0.16）
+        retainRatio: COMPACT_RETAIN_RATIO,
+        // 基准是**可用预算**（窗口 − 预留输出 − 工具 schema），不是原始窗口：
+        // 小窗口 + 多工具时 schema 占比可观，用原始窗口会高估余量、压缩迟迟不触发。
+        contextWindow: compactionBasisTokens({
+          limit: this.options.contextLimit,
+          reserve: this.lastBudgetReserve,
+          schemaTokens: estimateToolSchemaTokens(this.visibleTools()),
+        }),
+        // 安全阀：即使 token 预算允许，最近这几轮也逐字保留
+        keepTurns: COMPACT_KEEP_TURNS,
+      })
       if (!plan) {
-        console.warn(`[agent-compact] ${this.id} 可压缩内容不足（不足 ${COMPACT_KEEP_TURNS} 轮或轮次太少），跳过压缩`)
+        console.warn(`[agent-compact] ${this.id} 可压缩内容不足（不足 ${COMPACT_MIN_DROP} 条或轮次太少），跳过压缩`)
         return false
       }
       // 界面提示：摘要要额外发一次无工具 LLM 请求，不给提示时这一步看起来像卡住
@@ -890,6 +1023,16 @@ class AgentImpl implements AgentControl {
       const droppedItems = items.slice(plan.startIndex, plan.endIndex)
       const tokensBefore = estimateMessagesTokens(droppedItems)
       const summary = (await this.summarize(buildCompactionPrompt(droppedItems))) || indexSummary(droppedItems)
+      const replacement: BudgetMessage = { role: 'user', content: compactedContextMessage(summary) }
+      const tokensAfter = estimateMessagesTokens([replacement])
+      // 硬校验：替换必须**确实更小**（复刻 DSH 的 "summary is not smaller than the shadowed content"）。
+      // 没有这条，一旦摘要器返回比原文还长的文本，"压缩"反而会把上下文推得更高，
+      // 下一次请求立刻又触发压缩，形成越压越大的死循环。
+      if (tokensAfter >= tokensBefore) {
+        console.warn(`[agent-compact] ${this.id} 摘要未变小（${tokensBefore} → ${tokensAfter} tokens），放弃本次压缩`)
+        this.emit('agent/compaction', { phase: 'end', kind, ok: false })
+        return false
+      }
       const fromSeq = dropped[0]?.seq ?? entries[plan.startIndex].seq
       const toSeq = dropped[dropped.length - 1]?.seq ?? fromSeq
       sessionLog.append(this.id, 'context/compaction', {
@@ -897,7 +1040,7 @@ class AgentImpl implements AgentControl {
         toSeq,
         summary,
         tokensBefore,
-        tokensAfter: estimateMessagesTokens([{ role: 'user', content: compactedContextMessage(summary) }]),
+        tokensAfter,
         droppedMessages: dropped.length,
         kind,
         model: String((this.options.llmConfig?.model || this.options.config?.model || '') || '') || undefined,
@@ -1245,22 +1388,21 @@ class AgentImpl implements AgentControl {
       const error = `工具参数无法解析（${truncHint}，收到 ${rawText.length} 字符）：`
         + `原文开头「${head}」${tail ? `…结尾「${tail}」` : ''}。`
         + '请缩短一次提交的内容后重试（例如一次 run_code 只做少量步骤、大文件分段写入），并确保 JSON 字符串内的换行/引号已正确转义。'
-      sessionLog.append(this.id, 'tool/call', { callId, name, args: undefined, argsRawLen: rawText.length, step })
-      sessionLog.append(this.id, 'tool/result', { callId, name, ok: false, value: undefined, error })
+      const parseCallSeq = sessionLog.append(this.id, 'tool/call', { callId, name, args: undefined, argsRawLen: rawText.length, step }).seq
+      this.currentCallSeq.set(callId, parseCallSeq)
       this.emit('tool/call', { callId, name, args: undefined, argsParseFailed: true })
-      this.emit('tool/result', { callId, name, ok: false, value: undefined, error })
+      this.pushToolResult({ callId, name, ok: false, error, diagnostic: true })
       return
     }
 
-    sessionLog.append(this.id, 'tool/call', { callId, name, args, step })
+    const callSeq = sessionLog.append(this.id, 'tool/call', { callId, name, args, step }).seq
+    this.currentCallSeq.set(callId, callSeq)
     this.emit('tool/call', { callId, name, args })
 
       // 引擎级白名单守卫：即使模型试图调用未启用工具，也直接返回失败而不是执行
       const toolWhitelist = this.options.tools
       if (toolWhitelist !== null && Array.isArray(toolWhitelist) && !toolWhitelist.includes(name as any)) {
-        const result: ToolResult = { ok: false, error: `工具 ${name} 未启用（不在当前工具白名单中）` }
-        sessionLog.append(this.id, 'tool/result', { callId, name, ok: false, value: undefined, error: result.error })
-        this.emit('tool/result', { callId, name, ok: false, value: undefined, error: result.error })
+        this.pushToolResult({ callId, name, ok: false, error: `工具 ${name} 未启用（不在当前工具白名单中）`, diagnostic: true })
         return
       }
 
@@ -1271,8 +1413,7 @@ class AgentImpl implements AgentControl {
     if (this.options.toolsPresentation === 'code' && name !== 'run_code') {
       const error = `PTC（代码模式）下不能直接调用 ${name}：请把该调用写进 run_code 程序的 tools 里`
         + `（程序内 await tools.${name}({ ... })）`
-      sessionLog.append(this.id, 'tool/result', { callId, name, ok: false, value: undefined, error })
-      this.emit('tool/result', { callId, name, ok: false, value: undefined, error })
+      this.pushToolResult({ callId, name, ok: false, error, diagnostic: true })
       return
     }
 
@@ -1303,22 +1444,68 @@ class AgentImpl implements AgentControl {
       result = await toolRegistry.execute(name, args, this.ctx())
     }
 
+    this.pushToolResult({ callId, name, ok: result.ok, value: result.value, error: result.error, preview: result.preview })
+  }
+
+  /**
+   * 工具结果的**唯一收口**：有界化 →（必要时）落盘 → 落日志 + 广播事件。
+   *
+   * 复刻 DSH 的两层：`tool-result-pruner`（掐中段）+ `spill-policy`（超大结果落盘）。
+   * - `value` 仍是**原文**（会话日志是唯一事实源，UI / 审计 / 回放都读它）；
+   * - `modelValue` 是**模型可见的那一份**：
+   *     · 超过 16K 码点 → 掐中段（head + tail + 标记 + 续读提示）；
+   *     · 超过 200K 码点 → 完整原文写盘，模型只看头尾预览 + 落盘路径（可 read_file 回读）。
+   *   `deriveEntries` 优先用 modelValue，因此只影响模型上下文，不动落盘原文。
+   *
+   * @param result.diagnostic 引擎自己构造的短诊断（参数解析失败 / 白名单拦截 / PTC 拒绝）：
+   *   这类消息没有续读锚点，不套用工具专属提示（否则会指着一个不存在的 nextOffset）。
+   */
+  private pushToolResult(result: {
+    callId: string
+    name: string
+    ok: boolean
+    value?: any
+    error?: string
+    preview?: any
+    diagnostic?: boolean
+  }): void {
+    const { callId, name, ok, value, error, preview, diagnostic } = result
+    // 按**本会话窗口**缩放工具结果预算（小窗口的关键）：32K 下单条结果最多约 12% 窗口，
+    // 而不是固定 16K 字符（那会占到 1/3 窗口）。取值来自本轮请求预算的生效窗口。
+    // 取本轮请求预算的生效窗口；首步（预算尚未算过）回落到 options.contextLimit
+    const windowTokens = this.effectiveWindowTokens > 0 ? this.effectiveWindowTokens : Number(this.options.contextLimit) || undefined
+    const bounded = boundToolResult(name, ok, value, error, undefined, {
+      skipContinuationHint: !!diagnostic,
+      windowTokens,
+    })
+    let modelValue = bounded.model
+    let spillPath: string | undefined
+    if (bounded.pruned && shouldSpill(bounded.raw, windowTokens)) {
+      const ref = saveSpillText(this.id, `${name}.txt`, bounded.raw)
+      if (ref) {
+        modelValue = buildSpillPreview(bounded.raw, { path: ref.path, bytes: ref.bytes }, windowTokens).text
+        spillPath = ref.path
+      }
+      // ref 为 null（无临时目录 / 写盘失败）→ 保持第一层的有界结果，工具链不中断
+    }
+    // 显式记录"这条结果属于哪次调用"（复刻 DSH 的 sourceEventSeqs）：
+    // 同一 callId 被写两次（崩溃后补写、将来并行执行的重放）时，只有引用能说清归属。
+    const callSeq = this.currentCallSeq.get(callId)
     sessionLog.append(this.id, 'tool/result', {
       callId,
       name,
-      ok: result.ok,
-      value: result.value,
-      error: result.error,
-      preview: result.preview,
+      ok,
+      value,
+      error,
+      preview,
+      ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
+      ...(bounded.pruned ? { modelValue, omittedChars: bounded.omitted?.count } : {}),
+      ...(spillPath ? { spillPath } : {}),
     })
-    this.emit('tool/result', {
-      callId,
-      name,
-      ok: result.ok,
-      value: result.value,
-      error: result.error,
-      preview: result.preview,
-    })
+    // 记入本步结果集合：step 中途抛错时由崩溃恢复逻辑补写（见 runTurn 的 catch 块）
+    this.stepResults.set(callId, { name, ok, value, error, preview })
+    this.emit('tool/result', { callId, name, ok, value, error, preview })
+    this.emittedResultIds.add(callId)
   }
 
   private ctx(): ToolExecutionContext {
@@ -1327,6 +1514,8 @@ class AgentImpl implements AgentControl {
       sessionId: this.id,
       scope: this.options.scope,
       cwd: this.options.cwd,
+      // 本会话生效窗口：读取类工具据此定单次返回量（避免读了又被裁掉，见 tools.ts defaultReadWindowChars）
+      windowTokens: this.effectiveWindowTokens > 0 ? this.effectiveWindowTokens : Number(this.options.contextLimit) || undefined,
         // 当前 agent 的工具白名单（供 run_subagent 等工具继承父级配置）
         tools: this.options.tools,
         // 群成员注册表（swarm 注入；run_subagent(member) 以成员设定建子代理）

@@ -2679,9 +2679,9 @@ import { getPlatform, hasCapability } from '@/platform'
   z-index: 1000;
 }
 .ocr-modal-content {
-  width: 80vw;
+  width: calc(80vw / var(--ui-zoom, 1));
   max-width: 900px;
-  height: 80vh;
+  height: calc(80vh / var(--ui-zoom, 1));
   background: var(--backgroundColor);
   border-radius: 10px;
   display: flex;

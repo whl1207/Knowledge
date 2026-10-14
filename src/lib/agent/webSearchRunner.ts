@@ -147,6 +147,8 @@ function cleanSearchItems(items: any[]): WebSearchItem[] {
 interface SearchOutcome {
   items: WebSearchItem[]
   via: string
+  /** 源自带的总结正文（DeepSeek 官方搜索才有；渲染层不支持该源，故实际恒为空） */
+  answer?: string
 }
 
 /** 跨域提示：渲染层读不到结果页（HTML 抓取类搜索源都会走到这里） */
@@ -281,6 +283,10 @@ async function runSingleSearch(provider: ProviderId, query: string, cfg: WebSear
     case 'zhipu': return await searchZhipu(query, cfg)
     case 'tavily': return await searchTavily(query, cfg)
     case 'brave': return await searchBrave(query, cfg)
+    // DeepSeek 官方搜索走 api.deepseek.com 的 Anthropic 兼容端点，该端点不给浏览器放 CORS；
+    // 且它的鉴权与请求形状与其余源都不同 → 明确报"需要桌面端"，而不是抛一个难懂的跨域错误
+    case 'deepseek':
+      throw new Error(`搜索源「DeepSeek 官方搜索」在手机 / 网页端不可用（DeepSeek 的 Anthropic 兼容端点不允许跨域），请改用其它搜索源，或在桌面端使用${CORS_HINT}`)
     case 'bing':
     case 'baidu':
     case 'duckduckgo': return htmlScrapingSource(provider)
@@ -364,6 +370,7 @@ export async function runRendererWebSearch(rawQuery: string, rawCfg: any): Promi
           providers,
           via: outcome.via,
           results: toSearchItems(outcome.items, config.maxResults),
+          ...(outcome.answer ? { answer: outcome.answer } : {}),
           elapsedMs: Date.now() - started,
           attempts,
         }

@@ -2297,7 +2297,7 @@ ${inlinedHtml}
 
   .prep :deep(img) {
     max-width: 100%;
-    max-height: min(70vh, 600px);
+    max-height: min(calc(70vh / var(--ui-zoom, 1)), 600px);
     height: auto;
     display: block;
     margin: 0 auto;
@@ -2325,7 +2325,7 @@ ${inlinedHtml}
     width: 100%;
     height: auto;
     max-width: 100%;
-    max-height: min(70vh, 100%);
+    max-height: min(calc(70vh / var(--ui-zoom, 1)), 100%);
     object-fit: contain;
     overflow: hidden;
   }

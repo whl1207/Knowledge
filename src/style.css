@@ -9,6 +9,12 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+  /* 界面缩放倍数（安卓没有窗口壳，见 platform/android/index.ts 的 defaultZoom()：
+     它把倍数写到 <html> 的 zoom 与这个变量上；桌面由 Electron 改 zoomFactor，这里恒为 1）。
+     ⚠️ 用法：所有写死的视口单位都要折算成 `calc(NNvh / var(--ui-zoom, 1))`——
+     根元素带 zoom 时，后代里的 vh/vw 会被**再乘一次** zoom（100vh × 1.2 = 120vh），
+     不折算的话内容会超出屏幕、又被 overflow:hidden 裁掉（滚都滚不到）。 */
+  --ui-zoom: 1;
 }
 
 a {
@@ -28,7 +34,11 @@ html,
 body {
   margin: 0;
   min-width: 120px;
-  min-height: 100vh;
+  /* ⚠️ 这里**不能**用 100vh：安卓上没有窗口壳，「窗口缩放」是往 <html> 写 CSS zoom，
+     而根元素带 zoom 时 viewport 单位会被再乘一次 zoom（实测 100vh × 1.2 = 120vh），
+     多出来的部分被 overflow:hidden 直接裁掉、滚也滚不到（缩放 120% 就正好少 1/6 屏）。
+     改成百分比链（html → body → #app → .container）后，50%~200% 缩放都刚好一屏。 */
+  height: 100%;
   color:var(--fontColor);
   overflow: hidden;
   /* 覆盖 Element Plus useLockscreen：弹窗打开时会设置 body.style.width = calc(100% - 滚动条宽)，
@@ -449,20 +459,23 @@ p{
 #app {
   margin: 0 auto;
   color: var(--fontColor);
+  /* 撑满 body：下面 .container 的高度走百分比链，缩放（CSS zoom）下才不会超出一屏 */
+  height: 100%;
 }
 
 .container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 2px);
+  /* 高度必须走百分比（= 满屏），不能用 100vh：见 html/body 那段注释（根 zoom 下 vh 会被乘两次） */
+  height: 100%;
   overflow: hidden;
-  width:100vw - 2px;
+  width: 100%;
   background-color: var(--backgroundColor);
   border-radius: 0px;
 }
 .container {
   display: flex;
-  height: 100vh;
+  height: 100%;
   overflow: hidden;
   background-color: var(--backgroundColor);
 }
@@ -682,7 +695,7 @@ p{
   max-width: 560px !important;
 }
 .agent-question-box .el-message-box__message {
-  max-height: 42vh;
+  max-height: calc(42vh / var(--ui-zoom, 1));
   overflow-y: auto;
   width: 100%;
   box-sizing: border-box;
@@ -1450,7 +1463,7 @@ pre.hljs .hljs-formula { font-style: italic; }
   width: 100%;
   max-width: 100%;
   height: auto;
-  max-height: min(58vh, 560px);
+  max-height: min(calc(58vh / var(--ui-zoom, 1)), 560px);
   display: block;
   margin: 0 auto;
 }

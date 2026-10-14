@@ -227,6 +227,10 @@ export interface RenderDrawioOptions {
   maxPages?: number
   /** 读取图表失败时的原因说明（如「远程模式不支持内嵌图表」），仅用于日志与兜底提示 */
   emptyMessage?: string
+  /**
+   * 跳过落在该选择器内的占位卡片（如演示视图的隐藏量测台：它只需要占位高度，不必渲染真图）。
+   */
+  ignore?: string
 }
 
 /**
@@ -242,7 +246,9 @@ export async function renderDrawioFigures(
 ): Promise<void> {
   if (!root) return
   const zh = opts.zh !== false
-  const figures = Array.from(root.querySelectorAll<HTMLElement>(`.${DRAWIO_FIGURE_CLASS}`))
+  const figures = Array.from(root.querySelectorAll<HTMLElement>(`.${DRAWIO_FIGURE_CLASS}`)).filter(
+    (fig) => !opts.ignore || !fig.closest(opts.ignore),
+  )
   for (const fig of figures) {
     const body = fig.querySelector<HTMLElement>('.md-drawio-body')
     if (!body || body.dataset.drawioState !== 'pending') continue

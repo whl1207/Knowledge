@@ -20,6 +20,7 @@ export const WEB_SEARCH_PROVIDER_IDS = [
   'searxng',
   'bocha',
   'zhipu',
+  'deepseek',
   'tavily',
   'brave',
 ] as const
@@ -69,6 +70,8 @@ export interface WebSearchProviderConfig {
   engines?: string
   /** SearXNG 语言（auto / zh-CN / en） */
   language?: string
+  /** 模型名（仅 DeepSeek 官方搜索用：Anthropic 格式模型名；留空取内置默认） */
+  model?: string
 }
 
 /** 单次搜索的调用策略 */
@@ -194,6 +197,22 @@ export interface WebSearchConfig {
   bocha: WebSearchProviderConfig
   brave: WebSearchProviderConfig
   zhipu: WebSearchProviderConfig
+  /**
+   * DeepSeek 官方搜索（走 Anthropic 兼容 Messages 端点 + 服务端原生 `web_search` 工具）。
+   *
+   * `apiKey` 由渲染层解析后填入：优先复用**对话的 DeepSeek 凭据**（`apiKeyRef` → 明文），
+   * 也允许用户在本页单独填一份（便于对话用别的后端时仍能搜）。
+   * `apiHost` 与对话端点**相互独立**（对话可能是 chat/responses 样式，这里是 Anthropic 样式）。
+   */
+  deepseek: DeepSeekSearchConfig
+}
+
+/** DeepSeek 官方搜索的配置（apiHost / model 与对话配置相互独立） */
+export interface DeepSeekSearchConfig extends WebSearchProviderConfig {
+  /** 对话用别的后端时，是否复用 DeepSeek 对话的凭据（渲染层解析后填入 apiKey） */
+  reuseChatKey?: boolean
+  /** 服务端工具单次请求最多触发几次搜索（1~10） */
+  maxUses?: number
 }
 
 /** 单条搜索结果（web_search 工具返回值 / 设置页测试结果共用） */
@@ -214,6 +233,14 @@ export interface WebSearchRunResult {
   /** 实际通道：browser / html-fallback / html / json / api / merge */
   via: string
   results: WebSearchItem[]
+  /**
+   * 搜索源自带的**总结正文**（可选）。
+   *
+   * 只有 DeepSeek 官方搜索会产生：它的一次搜索本身就是"服务端跑工具 + 模型作答"的完整
+   * 模型调用，响应里的 `text` 块就是基于搜索结果写下的总结。其余搜索源只返回链接列表。
+   * 丢弃它就等于白付了那次模型调用的钱，因此原样回传给模型。
+   */
+  answer?: string
   elapsedMs: number
   /** 未命中或失败的源及其原因（回退模式下排查用） */
   attempts?: Array<{ provider: WebSearchProviderId; ok: boolean; error?: string }>
@@ -307,6 +334,20 @@ export const WEB_SEARCH_PROVIDERS: WebSearchProviderMeta[] = [
     docs: 'https://docs.bigmodel.cn/cn/guide/tools/web-search',
   },
   {
+    id: 'deepseek',
+    label: 'DeepSeek 官方搜索（服务端）',
+    labelEn: 'DeepSeek official search (server-side)',
+    needsKey: true,
+    needsHost: false,
+    zh: 'DeepSeek 服务端原生联网搜索：结果带标题 / 链接 / 引用片段，质量较高。'
+      + '默认复用对话的 DeepSeek 凭据（零额外配置）。注意：每次搜索是一次模型调用（计 token、延迟按 LLM 计），'
+      + '且只在桌面端可用。',
+    en: 'DeepSeek native server-side web search: results carry titles, links and cited excerpts. '
+      + 'Reuses the conversation DeepSeek credential by default (no extra setup). Note: each search is a model turn '
+      + '(tokens + LLM latency) and is available on desktop only.',
+    docs: 'https://api-docs.deepseek.com',
+  },
+  {
     id: 'tavily',
     label: 'Tavily（国际 API）',
     labelEn: 'Tavily (API)',
@@ -341,6 +382,13 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
   bocha: { apiKey: '', apiHost: 'https://api.bochaai.com' },
   brave: { apiKey: '', apiHost: 'https://api.search.brave.com' },
   zhipu: { apiKey: '', apiHost: 'https://open.bigmodel.cn/api/paas/v4', searchEngine: 'search_std' },
+  deepseek: {
+    apiKey: '',
+    // 与对话端点独立：对话是 chat/responses 样式，这里是 Anthropic 兼容样式
+    apiHost: 'https://api.deepseek.com/anthropic/v1',
+    reuseChatKey: true,
+    maxUses: 5,
+  },
 }
 
 /** 搜索源图标（Font Awesome 4 类名，设置页左列表用） */
@@ -353,6 +401,7 @@ const WEB_SEARCH_PROVIDER_ICONS: Record<string, string> = {
   zhipu: 'fa-magic',
   tavily: 'fa-bullseye',
   brave: 'fa-shield',
+  deepseek: 'fa-bolt',
 }
 
 /** 自定义源图标（内网源统一用插头图标） */
@@ -434,7 +483,25 @@ export function normalizeWebSearchConfig(raw: any): WebSearchConfig {
     bocha: pick('bocha'),
     brave: pick('brave'),
     zhipu: pick('zhipu'),
+    deepseek: normalizeDeepSeekSearchConfig(src.deepseek),
   }
+}
+
+/**
+ * 归一化 DeepSeek 搜索配置。
+ * apiHost 缺省用 **Anthropic 兼容**端点（注意与对话端点不同）；model 留空由 provider 取默认值。
+ */
+export function normalizeDeepSeekSearchConfig(raw: any): DeepSeekSearchConfig {
+  const base = DEFAULT_WEB_SEARCH_CONFIG.deepseek
+  const patch = raw && typeof raw === 'object' ? raw : {}
+  const out: DeepSeekSearchConfig = { ...base }
+  for (const key of ['apiKey', 'apiHost', 'model'] as const) {
+    if (typeof patch[key] === 'string' && patch[key].trim()) out[key] = patch[key]
+  }
+  if (typeof patch.reuseChatKey === 'boolean') out.reuseChatKey = patch.reuseChatKey
+  const uses = Number(patch.maxUses)
+  out.maxUses = Number.isFinite(uses) ? Math.min(10, Math.max(1, Math.round(uses))) : base.maxUses
+  return out
 }
 
 /** 自定义源 → 展示元信息（名称来自用户配置，说明按类型区分） */

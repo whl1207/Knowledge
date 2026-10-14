@@ -109,6 +109,8 @@ let lastBroadcastUiJson = ''
 let lastBroadcastLocale = ''
 // 上次下发主进程的搜索源配置（saveConfig 调用频繁，按序列化结果去重，避免重复 IPC）
 let lastAppliedWebSearchJson = ''
+/** DeepSeek 搜索凭据的签名（ref|inline）：变化时才重新走 IPC 解析 */
+let lastDeepSeekKeySig = ''
 
 // 是否持久化标签栏（data/index）：独立文件窗口设 false，避免把新窗口打开的标签写进共享 localStorage，
 // 导致主窗口重启后恢复出独立窗口产生的标签（标签栏只属于独立文件窗口，主窗口不渲染标签栏）
@@ -958,7 +960,13 @@ export const usestore = defineStore('data', {
          */
         openFileWindow(payload: OpenFileWindowPayload) {
             if (hasCapability('window.chrome')) {
-                getPlatform().window.openFileWindow(payload).catch(() => { /* 打不开时静默（与原行为一致） */ })
+                // 失败必须让用户看见：以前这里静默吞掉（点「打开」没反应又查不出原因）
+                getPlatform().window.openFileWindow(payload).catch((e: any) => {
+                    const zh = this.locales !== 'en'
+                    ElMessage.error(zh
+                        ? `打开文件窗口失败：${e?.message || e}`
+                        : `Failed to open the file window: ${e?.message || e}`)
+                })
                 return
             }
             this.fileWindowOverlay = { ...payload }
@@ -998,16 +1006,65 @@ export const usestore = defineStore('data', {
          * 把搜索源配置推给主进程（web_search 工具按该配置分发搜索源）。
          * 浏览器/LAN 模式无主进程（window.dsh 不可用）时静默跳过；
          * saveConfig 调用频繁，这里按序列化结果去重，仅在配置真变化时下发。
+         *
+         * **DeepSeek 官方搜索的凭据在这一步解析**：它明文只存主进程，
+         * 所以先按 `apiKeyRef`（或内联 api_key）解析成明文，随配置一起下发。
+         * 解析是异步的，因此关键字段（key/base_url/apiKeyRef）变化时才重新解析并推送。
          */
         applyWebSearchToMain() {
             const api = typeof window !== 'undefined' ? (window as any).dsh?.webSearch : null
             if (!api?.setConfig) return
+            const ds = (this.webSearch as any)?.deepseek || {}
+            const dsRef = String(ds.apiKeyRef || '')
+            const dsInlineKey = String(ds.apiKey || '')
+            // 关键字段签名：变了才需要重新解析凭据（避免每次 saveConfig 都走一次 IPC 解析）
+            const keySig = `${dsRef}|${dsInlineKey}`
+            const needResolve = keySig !== lastDeepSeekKeySig
+            if (needResolve) lastDeepSeekKeySig = keySig
+            const payload = { ...this.webSearch }
+            if (needResolve) {
+                this.resolveDeepSeekSearchKey(dsRef, dsInlineKey)
+                    .then((key) => {
+                        if (key) (payload as any).deepseek = { ...payload.deepseek, apiKey: key }
+                        // 清空去重标记：key 是异步解析出来的，同一份「非 key 字段」也要重新下发一次
+                        lastAppliedWebSearchJson = ''
+                        this.pushWebSearchConfig(api, payload)
+                    })
+                    .catch(() => {
+                        // 解析失败也照样下发一次（让主进程给出"未配置 Key"这类明确报错）
+                        lastDeepSeekKeySig = ''
+                        this.pushWebSearchConfig(api, payload)
+                    })
+                return
+            }
+            this.pushWebSearchConfig(api, payload)
+        },
+
+        /** 解析 DeepSeek 搜索用的 Key：凭据引用优先 → deepseek 对话配置的 apiKeyRef → 内联 key */
+        async resolveDeepSeekSearchKey(searchRef: string, inlineKey: string): Promise<string> {
+            if (inlineKey) return inlineKey
+            const resolve = (window as any)?.dsh?.credentials?.resolve
+            const names = [searchRef, String((this.AIconfig as any)?.llm?.deepseek?.apiKeyRef || '')]
+                .map((n) => String(n || '').trim())
+                .filter(Boolean)
+            for (const name of names) {
+                try {
+                    if (resolve) {
+                        const r = await resolve(name)
+                        if (r?.value) return String(r.value)
+                    }
+                } catch { /* 单个引用解析失败继续试下一个 */ }
+            }
+            return String((this.AIconfig as any)?.llm?.deepseek?.api_key || '')
+        },
+
+        /** 实际下发（按序列化去重，失败时清空标记以便下次重试） */
+        pushWebSearchConfig(api: any, payload: any) {
             try {
-                const json = JSON.stringify(this.webSearch)
+                const json = JSON.stringify(payload)
                 if (json === lastAppliedWebSearchJson) return
                 lastAppliedWebSearchJson = json
                 Promise.resolve(api.setConfig(JSON.parse(json))).catch((e: any) => {
-                    // 下发失败时清空去重标记，下次 saveConfig 会重试
                     lastAppliedWebSearchJson = ''
                     console.warn('[webSearch] 下发搜索源配置失败:', e)
                 })

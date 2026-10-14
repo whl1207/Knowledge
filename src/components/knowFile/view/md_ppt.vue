@@ -26,6 +26,7 @@
   import MermaidViewer from '@/components/MermaidViewer.vue'
   import { useSwipeNav } from '@/composables/useSwipeNav'
   import mermaid from 'mermaid'
+  import { ElMessage } from 'element-plus'
 import { getPlatform, hasCapability } from '@/platform'
 
   mermaid.initialize({
@@ -350,7 +351,12 @@ let unsubWatchedFile: (() => void) | null = null
    * @param sectionKey 来源段标识（运行期溢出兜底时按它收紧这一段的容量）
    * @param allowSplit 是否允许自动分页（智能切分模式开；`---` 模式尊重用户的显式分页，只挑布局）
    */
-  const buildSlideParts = async (renderedHtml: string, sectionKey: string, allowSplit: boolean): Promise<SlidePart[]> => {
+  const buildSlideParts = async (
+    renderedHtml: string,
+    sectionKey: string,
+    allowSplit: boolean,
+    headingInBreadcrumb: boolean,
+  ): Promise<SlidePart[]> => {
     const tmp = document.createElement('div')
     tmp.innerHTML = renderedHtml
     // 顶层子节点（排除浏览器隐式闭合 <p> 产生的空 <p>）
@@ -391,6 +397,12 @@ let unsubWatchedFile: (() => void) | null = null
       }))
     }
     const headingHtml = heading ? heading.outerHTML : ''
+    /**
+     * 图片页（整页只有图，没有正文）用的标题：
+     * 幻灯片最上方的面包屑已经写着这条标题了，页内再来一次是多余的 —— 去掉它图能大一圈。
+     * 标题不在面包屑里时（如没有 `#` 的 setext 标题、第一个标题之前的内容）仍然保留，否则标题就没了。
+     */
+    const imageHeadingHtml = headingInBreadcrumb ? '' : headingHtml
 
     // 没有图：纯文字页（文字过多就分页）
     if (!figures.length) {
@@ -417,7 +429,7 @@ let unsubWatchedFile: (() => void) | null = null
       const cols = chooseGridColumns(sizes, bodyTexts.length > 0)
       // 一图一页（例如 3 张与幻灯片同形的图）
       const imagePages: SlidePart[] = figures.map((f) => ({
-        html: headingHtml + imagePageHtml([f]),
+        html: imageHeadingHtml + imagePageHtml([f]),
         splittable: false,
       }))
       if (cols === 0) {
@@ -429,14 +441,18 @@ let unsubWatchedFile: (() => void) | null = null
       if (!allowSplit || fitsMixed) {
         return [{ html: multiPageHtml(heading, bodyTexts, grid, figuresFirst), splittable: allowSplit && mixedSplittable }]
       }
-      const gridPart: SlidePart = { html: multiPageHtml(heading, [], grid, true), splittable: false }
+      // 只有图的网格页也省掉页内标题（面包屑里已经有了）
+      const gridPart: SlidePart = {
+        html: multiPageHtml(headingInBreadcrumb ? null : heading, [], grid, true),
+        splittable: false,
+      }
       const textsOnly = textPages()
       return figuresFirst ? [gridPart, ...textsOnly] : [...textsOnly, gridPart]
     }
 
-    // 只有标题 + 一张图（正文为空）：图占满整页，标题留着做面包屑
+    // 只有标题 + 一张图（正文为空）：图占满整页（标题在面包屑里，页内不再重复）
     if (!bodyTexts.length) {
-      return [{ html: headingHtml + imagePageHtml(figures), splittable: false }]
+      return [{ html: imageHeadingHtml + imagePageHtml(figures), splittable: false }]
     }
 
     const shape = figureShapeOf(sizes[0])
@@ -458,7 +474,7 @@ let unsubWatchedFile: (() => void) | null = null
           },
         ]
       }
-      return [...textPages(), { html: headingHtml + imagePageHtml(figures), splittable: false }]
+      return [...textPages(), { html: imageHeadingHtml + imagePageHtml(figures), splittable: false }]
     }
 
     // 竖图 → 左右布局；宽图 → 上下布局；文字放不下则图文各占一页
@@ -470,7 +486,7 @@ let unsubWatchedFile: (() => void) | null = null
         },
       ]
     }
-    return [...textPages(), { html: headingHtml + imagePageHtml(figures), splittable: false }]
+    return [...textPages(), { html: imageHeadingHtml + imagePageHtml(figures), splittable: false }]
   }
 
   // 幻灯片面包屑路径列表
@@ -479,6 +495,8 @@ let unsubWatchedFile: (() => void) | null = null
   let slideTree = ref<any[]>([])
   // 树状导航开关
   let navOpen = ref(false)
+  /** 首次构建是否已完成：没完成时不要显示「无可演示内容」的空状态（否则开屏会闪一下） */
+  const buildFinished = ref(false)
   // 展平的树节点列表（递归拍平，用于模板循环）
   const flatTree = computed(() => {
     const flatten = (nodes: any[]): any[] => {
@@ -515,6 +533,24 @@ let unsubWatchedFile: (() => void) | null = null
     const i = Number(index)
     return (autoScales.value[i] || 1) * (fitScales.value[i] || 1)
   }
+
+  // ===== 隐藏量测台：翻页前先把这一页的字号量好 =====
+  // 估算系数只按字数算，铺不满或装不下都常见；而「显示之后再按实测调字号」会让页面明显伸缩一下。
+  // 所以这里放一块与真实幻灯片**同结构同尺寸**的隐藏量测台（见模板 .slide-wrapper.measure-wrapper），
+  // 目标页显示之前就在里面把字号逼近到位 → 页面一出来就是最终字号。
+  const measureWrapperRef = ref<HTMLElement | null>(null)
+  const measureBodyRef = ref<HTMLElement | null>(null)
+  const measureHtml = ref('')
+  const measureBreadcrumb = ref('')
+  /** 量测台里当前是第几页（字号跟着它的 fitScales 走，改一次就自动重排一次） */
+  const measureIndex = ref(-1)
+  const measureFontEm = computed(() => (measureIndex.value >= 0 ? slideFontEm(measureIndex.value) : 1))
+  /** 每页的实测系数是否已算好（fitScales 里的 1 既可能是默认值，也可能是「算出来正好是 1」） */
+  const fitReady = ref<boolean[]>([])
+  /** 内容构建代数：每次重建 +1，用于丢弃「量到一半内容被换掉」的结果 */
+  let buildGeneration = 0
+  /** 上次量测所用的基准（见 fitBasis / syncFitBasis） */
+  let fitBasisKey = ''
 
   const changeRatio = (mode: string) => {
     if (ratioMode.value === mode) return
@@ -595,17 +631,21 @@ let unsubWatchedFile: (() => void) | null = null
   /** 切换切分模式后重新初始化 */
   const toggleSplitMode = () => {
     splitMode.value = splitMode.value === 'smart' ? 'separator' : 'smart'
-    init()
-    showIndex.value = 0
-    nextTick(() => {
+    void (async () => {
+      await init()
+      showIndex.value = 0
+      // 重建后先把第 1 页量好，避免显示后再伸缩
+      await ensureFitScale(0)
+      await nextTick()
       renderMermaid()
       renderDrawio()
-    })
+    })()
   }
 
   // 全屏
   const toggleFullscreen = () => {
-    const el = document.querySelector('.ppt-container') as HTMLElement
+    // 用组件自己的容器：全局 querySelector 在多实例（应用内多窗口 / 分屏）时会全屏到别人身上
+    const el = pptContainerRef.value
     const after = () => setTimeout(() => refreshViewScale(), 60)
     if (!document.fullscreenElement) {
       el?.requestFullscreen?.()?.then?.(after)?.catch?.(() => {})
@@ -638,9 +678,13 @@ let unsubWatchedFile: (() => void) | null = null
     showThemeSettings.value = !showThemeSettings.value
     if (showThemeSettings.value) nextTick(() => updateThemePanelPos())
   }
-  /** 全屏切换后布局尺寸变化，面板需要重新贴回按钮上方 */
+  /** 全屏切换后布局尺寸变化，面板需要重新贴回按钮上方；同时开始 / 结束沉浸计时 */
   const repositionThemePanel = () => {
     if (showThemeSettings.value) setTimeout(() => updateThemePanelPos(), 80)
+  }
+  const onFullscreenChange = () => {
+    repositionThemePanel()
+    syncFullscreenChrome()
   }
 
   // 窗口/容器自适应系数：字号因子随可用区域缩放（与手动 zoomScale 相乘）。
@@ -650,7 +694,8 @@ let unsubWatchedFile: (() => void) | null = null
     nextTick(() => {
       const root = pptContainerRef.value
       if (!root) { viewScale.value = 1; return }
-      const wrapper = root.querySelector<HTMLElement>('.slide-wrapper')
+      // 用隐藏量测台（与真实幻灯片同尺寸，且总览打开时也在）作基准：可用区域大小不随总览开合跳变
+      const wrapper = measureWrapperRef.value || root.querySelector<HTMLElement>('.slide-wrapper')
       const el = (wrapper && wrapper.clientWidth) ? wrapper : root
       const w = el.clientWidth || root.clientWidth
       const h = el.clientHeight || root.clientHeight
@@ -660,8 +705,9 @@ let unsubWatchedFile: (() => void) | null = null
       // 幻灯片 em 基准（.slide 的内联 font-size 就是相对它算的）——字号保底要用
       const base = parseFloat(getComputedStyle(root).fontSize) || 0
       emBasePx.value = Number.isFinite(base) && base > 0 ? base : 16
-      // 容器尺寸变了（窗口缩放 / 全屏 / 目录展开）→ 重新按实测适配字号
+      // 容器尺寸变了（窗口缩放 / 全屏 / 目录展开）→ 基准变了，缓存作废，按实测重新适配字号
       scheduleLayoutPass(260)
+      scheduleFitPrefetch(360)
     })
   }
 
@@ -696,12 +742,29 @@ let unsubWatchedFile: (() => void) | null = null
     }, ANIMATION_DURATION)
   })
 
+  /**
+   * 主幻灯片元素（排除总览缩略图与隐藏量测台）。
+   *
+   * 隐藏量测台（见模板里的 .measure-wrapper / .measure-slide）与真实幻灯片同结构同尺寸，
+   * 所以凡是要「找当前真正显示的那一页」的地方都必须把它排除掉。
+   */
+  const currentSlideEl = (): HTMLElement | null =>
+    (pptContainerRef.value?.querySelector(
+      '.slide:not(.overview-slide-real):not(.measure-slide)',
+    ) as HTMLElement | null) || null
+
+  /** 主幻灯片的正文区（.slide-body：真正滚动 / 承载内容的那一层） */
+  const currentSlideBody = (): HTMLElement | null => {
+    const slide = currentSlideEl()
+    return (slide?.querySelector(':scope > .slide-body') as HTMLElement | null) || null
+  }
+
   // 获取当前幻灯片中可滚动的容器（在组件根元素范围内查找）
   const getScrollContainer = (): HTMLElement | null => {
     const root = pptContainerRef.value
     if (!root) return null
     // 排除总览网格中的 .overview-slide-real，只找主幻灯片的 .slide
-    const slide = root.querySelector('.slide:not(.overview-slide-real)') as HTMLElement | null
+    const slide = currentSlideEl()
     if (!slide) return null
     // 真正滚动的是 .slide-body（.slide 自身高度固定 100%，内容溢出由 body 承担）；没有则退回 .slide
     return (slide.querySelector(':scope > .slide-body') as HTMLElement | null) || slide
@@ -726,9 +789,13 @@ let unsubWatchedFile: (() => void) | null = null
       return
     }
     if (showOverview.value || animating.value) { wheelAccum = 0; return }
-    // 目录 / 主题面板内的滚动不参与翻页
+    // 目录 / 主题面板 / 总览 / 大图查看器内的滚动不参与翻页
+    // （查看器的 @wheel.prevent 只挡默认行为、不挡冒泡，漏掉它会在缩放图片时把页面翻走）
     const target = e.target as HTMLElement | null
-    if (target?.closest('.nav-panel, .theme-settings, .overview-grid')) { wheelAccum = 0; return }
+    if (target?.closest('.nav-panel, .theme-settings, .overview-grid, .mermaid-viewer-overlay')) {
+      wheelAccum = 0
+      return
+    }
     const el = getScrollContainer()
     if (!el) return
     const dy = normalizeWheel(e)
@@ -748,23 +815,97 @@ let unsubWatchedFile: (() => void) | null = null
     wheelAccum = 0
     wheelLockUntil = now + WHEEL_LOCK_MS
     e.preventDefault()
-    const next = showIndex.value + dir
+    const base = navTarget >= 0 ? navTarget : Number(showIndex.value)
+    const next = base + dir
     if (next < 0 || next > prepList.value.length - 1) return
-    showIndex.value = next
+    goToSlide(next)
   }
 
-  // 上一页 / 下一页（键盘、底部按钮、触屏滑动共用）
-  const goPrevSlide = () => { showIndex.value = Math.max(0, showIndex.value - 1) }
-  const goNextSlide = () => { showIndex.value = Math.min(prepList.value.length - 1, showIndex.value + 1) }
+  // 上一页 / 下一页（键盘、底部按钮、触屏滑动共用）：先算好目标页字号再切，见 stepSlide / goToSlide
+  const goPrevSlide = () => stepSlide(-1)
+  const goNextSlide = () => stepSlide(1)
 
-  // 键盘控制：上下键滚动当前页，左右键翻页
+  /**
+   * 当前焦点是否在「正在输入」的地方（输入框 / 文本域 / 下拉 / 可编辑块）。
+   *
+   * 演示视图的键盘监听挂在 window 上，不做这个判断就会把应用里搜索框、智能体输入框的方向键
+   * 一并抢走（与 md_mind / PdfViewer / view_image 等视图同一套判断）。
+   */
+  const isTypingTarget = (target: EventTarget | null): boolean => {
+    const el = target as HTMLElement | null
+    if (!el) return false
+    return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable
+  }
+
+  /** Mermaid 大图查看器是否开着（开着时键盘 / 滚轮都归它，不要翻页） */
+  const mermaidViewerOpen = () => !!mermaidViewerRef.value?.isOpen?.()
+
+  /** 焦点是否在可交互控件上（按钮 / 链接 / 输入）：空格、回车要留给它们自己 */
+  const isInteractiveTarget = (target: EventTarget | null): boolean =>
+    !!(target as HTMLElement | null)?.closest?.('button, a, input, textarea, select, [contenteditable="true"]')
+
+  /** Esc 的退让顺序：大图查看器 → 主题面板 → 总览 → 目录 → 退出全屏 */
+  const handleEscape = () => {
+    if (mermaidViewerOpen()) {
+      mermaidViewerRef.value?.close?.()
+      return
+    }
+    if (showThemeSettings.value) {
+      showThemeSettings.value = false
+      return
+    }
+    if (showOverview.value) {
+      showOverview.value = false
+      return
+    }
+    if (navOpen.value) {
+      navOpen.value = false
+      return
+    }
+    if (document.fullscreenElement) void document.exitFullscreen?.()?.catch?.(() => {})
+  }
+
+  // 键盘控制：上下键滚动当前页，左右 / 空格 / PageUp / PageDown 翻页，Home / End 首末页
   const handleKeydown = (e: KeyboardEvent) => {
-    if (e.key === 'ArrowLeft') {
+    // 有键盘动作就说明人在用：先把全屏里淡出的工具栏叫回来
+    wakeChrome()
+    // 输入框 / 文本域里打字：一概不接管（否则方向键会变成翻页，没法移动光标）
+    if (isTypingTarget(e.target)) return
+    // 大图查看器开着：只有 Esc（关掉它）交给这里，其余按键不动页面
+    if (mermaidViewerOpen()) {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        handleEscape()
+      }
+      return
+    }
+    if (e.key === 'Escape') {
+      handleEscape()
+      return
+    }
+    // Ctrl / ⌘ + 0：把缩放复位（看细节后一键回到正常排版）
+    if ((e.ctrlKey || e.metaKey) && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')) {
       e.preventDefault()
-      goPrevSlide()
-    } else if (e.key === 'ArrowRight') {
+      setZoom(1)
+      return
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return
+    // 翻页键：方向键、空格、回车、PageUp / PageDown（翻页笔与遥控器多发 PageUp / PageDown）
+    if (e.key === 'ArrowRight' || e.key === 'PageDown') {
       e.preventDefault()
       goNextSlide()
+    } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+      e.preventDefault()
+      goPrevSlide()
+    } else if ((e.key === ' ' || e.key === 'Spacebar' || e.key === 'Enter') && !isInteractiveTarget(e.target)) {
+      e.preventDefault()
+      goNextSlide()
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      goToSlide(0)
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      goToSlide(prepList.value.length - 1)
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       const el = getScrollContainer()
@@ -913,7 +1054,9 @@ let unsubWatchedFile: (() => void) | null = null
 
   // 从原始 markdown 解析标题并构建面包屑
   const init=async function(){
-    data=store.data[store.index]
+    // 没有激活文件（或标签被关掉）时也给个空对象：这样会走到「没有可演示的内容」的空状态，
+    // 而不是在这里抛异常、把整个视图停在空白上
+    data = store.data[store.index] || {}
     if(data.content==undefined) data.content=""
     // 内容真的换了：清掉上一份内容留下的「容量收紧 / 溢出重建」记录
     if (currentSourceKey() !== lastRenderedSourceKey) {
@@ -938,6 +1081,9 @@ let unsubWatchedFile: (() => void) | null = null
       autoScales.value = scales
       // 新的页集合：实测适配系数重新开始（访问到哪一页就为哪一页收敛）
       fitScales.value = new Array(slides.length).fill(1)
+      fitReady.value = new Array(slides.length).fill(false)
+      // 内容重建过：正在量测中的那一页作废（否则会拿旧内容的测量结果标记「已算好」）
+      buildGeneration += 1
       slideKeys = keys
       slideSplittable = splittables
       slideTree.value = buildTree(allHeadings)
@@ -998,6 +1144,7 @@ let unsubWatchedFile: (() => void) | null = null
           slideBreadcrumbs.value = ['']
           autoScales.value = [1]
           fitScales.value = [1]
+          fitReady.value = [false]
           slideKeys = ['cover']
           slideSplittable = [false]
         }
@@ -1040,12 +1187,8 @@ let unsubWatchedFile: (() => void) | null = null
             return `<div class="python-block-wrapper"><pre class="hljs scoll" data-lang="python"><code>${codeContent}</code></pre><div class="python-run-bar"><button class="python-run-btn" type="button" data-code="${encoded}"><i class="fa fa-play"></i> ${store.locales=='zh'?'运行 Python':'Run Python'}</button></div><div class="python-result" style="display:none"></div></div>`
           }
         )
-        // 智能排版：按图片长宽选布局（同形 → 图片独占一页 / 竖图 → 左右 / 宽图 → 上下），
-        // 文字过多时自动分页，一段可能变成多张幻灯片
-        const sectionKey = `${sectionIdx++}|${section.trim().slice(0, 48)}`
-        const parts = await buildSlideParts(renderedContent, sectionKey, allowSplit)
-
-        // 从原始文本第一行提取标题
+        // 从原始文本第一行提取标题：**先更新标题栈**，因为面包屑要在建页之前算出来
+        // （图片页据此判断「标题已在最上方的面包屑里」，从而省掉页内重复的标题）
         const firstLine = section.split('\n')[0].trim()
         const headingMatch = firstLine.match(/^(#{1,6})\s+(.+)$/)
         if (headingMatch) {
@@ -1064,6 +1207,11 @@ let unsubWatchedFile: (() => void) | null = null
         // 面包屑路径，直接用标题文本
         const breadcrumb = headingStack.map(h => h.text).join(' / ')
 
+        // 智能排版：按图片长宽选布局（同形 → 图片独占一页 / 竖图 → 左右 / 宽图 → 上下），
+        // 文字过多时自动分页，一段可能变成多张幻灯片
+        const sectionKey = `${sectionIdx++}|${section.trim().slice(0, 48)}`
+        const parts = await buildSlideParts(renderedContent, sectionKey, allowSplit, !!breadcrumb)
+
         for (const part of parts) {
           slides.push(part.html)
           keys.push(sectionKey)
@@ -1080,6 +1228,7 @@ let unsubWatchedFile: (() => void) | null = null
     commit()
     // 记录本次构建来源（路径+内容），供 refreshPpt 去重
     lastRenderedSourceKey = currentSourceKey()
+    buildFinished.value = true
   }
   // Mermaid 源文本规范化已迁移至 '@/lib/markdown/mermaid-normalize'（顶部 import 的 normalizeMermaidSource）
 
@@ -1135,12 +1284,16 @@ let unsubWatchedFile: (() => void) | null = null
   let mermaidIdCounter = 0
   // 已渲染图的 SVG 缓存（同一份源码不重复 render，翻页/回退时瞬时恢复）
   const mermaidSvgCache = new Map<string, string>()
-  // 渲染当前可见页面中所有 Mermaid 图表（render API；slide 用 v-if 每次进入都需重渲）
-  const renderMermaid = async () => {
+  /**
+   * 渲染指定容器里所有待渲染的 Mermaid。
+   * root 传幻灯片容器（跳过隐藏量测台）或量测台本身（导出 PDF 时要把图表真画出来）。
+   */
+  const renderMermaidIn = async (root: HTMLElement | null | undefined, opts: { ignore?: string } = {}) => {
     await nextTick()
-    const container = pptContainerRef.value
-    if (!container) return
-    const nodes = Array.from(container.querySelectorAll<HTMLElement>('.mermaid:not([data-processed])'))
+    if (!root) return
+    const nodes = Array.from(root.querySelectorAll<HTMLElement>('.mermaid:not([data-processed])')).filter(
+      (n) => !opts.ignore || !n.closest(opts.ignore),
+    )
     if (!nodes.length) return
     for (const node of nodes) {
       // 源码优先取隐藏的 .mermaid-src（fence 规则产出）；兼容旧结构回退取 textContent
@@ -1189,13 +1342,20 @@ let unsubWatchedFile: (() => void) | null = null
     }
   }
 
+  /** 渲染当前显示页里的 Mermaid（隐藏量测台里的留到导出时再画，避免每页画两遍） */
+  const renderMermaid = () => renderMermaidIn(pptContainerRef.value, { ignore: '.measure-wrapper' })
+
   /**
    * 内嵌图表（`![](图.drawio)`）渲染：把图表占位卡片填成 SVG。
    * 与 mermaid 同源——slide 用 v-if 每次进入都会重建，所以每次翻页 / 重建后都要重跑一次
    * （渲染器自带内容哈希缓存，同一份图表不会重复渲染）。
    */
   const renderDrawio = () => {
-    void renderDrawioFigures(pptContainerRef.value, { zh: store.locales === 'zh' }).then(() => {
+    void renderDrawioFigures(pptContainerRef.value, {
+      zh: store.locales === 'zh',
+      // 隐藏量测台里的图表占位不渲染（只用来量高度，真图由显示出来的那一页渲染）
+      ignore: '.measure-wrapper',
+    }).then(() => {
       // 图表填进占位后这页的高度才算最终确定 → 稍后统一跑「裁表格 + 溢出检查」
       scheduleLayoutPass(700)
     })
@@ -1207,8 +1367,7 @@ let unsubWatchedFile: (() => void) | null = null
    * 只裁「的确放不下」的那张表：按表的顶边到正文底边的实际空间算，页面被别的长内容占满时不裁。
    */
   const trimOverflowingTables = () => {
-    const slide = pptContainerRef.value?.querySelector<HTMLElement>('.slide:not(.overview-slide-real)')
-    const body = slide?.querySelector<HTMLElement>(':scope > .slide-body')
+    const body = currentSlideBody()
     if (!body || body.clientHeight < 60) return
     const bodyBottom = body.getBoundingClientRect().bottom
     const zh = store.locales === 'zh'
@@ -1260,8 +1419,7 @@ let unsubWatchedFile: (() => void) | null = null
     if (!slideSplittable[idx]) return
     const key = slideKeys[idx]
     if (!key || (sectionTighten.get(key) || 0) >= 1 || overflowRebuilds >= 2) return
-    const slide = pptContainerRef.value?.querySelector<HTMLElement>('.slide:not(.overview-slide-real)')
-    const body = slide?.querySelector<HTMLElement>(':scope > .slide-body')
+    const body = currentSlideBody()
     if (!body || body.clientHeight < 40) return
     // 图本身已占满整页（它就该独占一页）：拆文字救不了，这不是「文字溢出」
     const pageSizedFigure = Array.from(body.querySelectorAll<HTMLElement>('figure')).some(
@@ -1291,10 +1449,18 @@ let unsubWatchedFile: (() => void) | null = null
         return
       }
       trimOverflowingTables()
-      void autoFitCurrentSlide().then(() => {
-        trimOverflowingTables()
+      // 纯文字页的字号在翻页前就算好了 → 不再延期重排（否则页面显示约一秒后又伸缩一下，看起来像闪烁）；
+      // 含图 / 图表的页（图是显示后才填进占位的）以及没来得及预算的页，仍然要量一次收尾
+      syncFitBasis()
+      const body = currentSlideBody()
+      if (pageNeedsPostFit(body) || !fitReady.value[Number(showIndex.value)]) {
+        void autoFitCurrentSlide().then(() => {
+          trimOverflowingTables()
+          checkSlideOverflow()
+        })
+      } else {
         checkSlideOverflow()
-      })
+      }
     }, delay)
   }
 
@@ -1336,69 +1502,520 @@ let unsubWatchedFile: (() => void) | null = null
     })
 
   /**
-   * 按实测把当前页字号调到「刚好铺满」：估算系数只按字数算，偏保守时文字不大、
-   * 下方还留一段空白。这里量真实高度后微调（装得下就放大、溢出就缩小，0.7~2.6 倍），
-   * 最多迭代 6 次；Ctrl+滚轮放大看细节时不参与（那不是排版问题）。
+   * 量测基准：幻灯片可用盒子 + 比例 / 缩放 / 字号基准。
+   * 基准一变（窗口缩放、全屏、比例切换、目录开关、缩放比例），已算好的实测系数就都不作数了。
+   */
+  const fitBasis = () => {
+    const host = measureWrapperRef.value
+    const w = host?.clientWidth || 0
+    const h = host?.clientHeight || 0
+    return `${w}x${h}|${ratioMode.value}|${zoomScale.value.toFixed(2)}|${viewScale.value.toFixed(3)}|${emBasePx.value.toFixed(2)}`
+  }
+  /** 基准变了：缓存的实测系数全部作废，下次显示某页前重算（不强改当前页，避免无谓跳动） */
+  const syncFitBasis = () => {
+    const key = fitBasis()
+    if (key === fitBasisKey) return
+    fitBasisKey = key
+    fitReady.value = new Array(prepList.value.length).fill(false)
+    // 尺寸已经不是量它时的尺寸了：正在量测中的那一页也作废
+    buildGeneration += 1
+  }
+  /** 写某一页的适配系数（整体替换数组，保证响应式） */
+  const setFitScale = (index: number, value: number) => {
+    const arr = fitScales.value.slice()
+    arr[index] = value
+    fitScales.value = arr
+  }
+  /** 标记某页的实测系数已算好 */
+  const markFitReady = (index: number) => {
+    const arr = fitReady.value.slice()
+    arr[index] = true
+    fitReady.value = arr
+  }
+  /** 这一页显示之后高度还会变（图片 / drawio / mermaid 都是显示后才填进占位的）→ 字号得等它们 */
+  const pageNeedsPostFit = (body: HTMLElement | null) => !!body?.querySelector('figure, .mermaid, img')
+  /** 同上，但输入是渲染好的 HTML（预算字号时用，拿不到 DOM） */
+  const htmlHasLateFigure = (html: string) => /<figure|class="[^"]*mermaid|<img[\s>]/i.test(html)
+
+  /**
+   * 按实测把某一页字号逼近到「刚好铺满」（0.7~2.6 倍，最多 iterations 次）。
+   *
+   * bodyEl 既可以是隐藏量测台里的正文区（翻页前预排版），也可以是可见页的 —— 两者同结构同尺寸，
+   * 量法完全一样，所以共用这一份实现。
+   */
+  const fitBodyIteratively = async (
+    bodyEl: HTMLElement,
+    index: number,
+    opts: { allowGrow: boolean; resetFirst: boolean; iterations?: number; aggressive?: boolean },
+  ) => {
+    const iterations = opts.iterations ?? 6
+    // 先把之前可能过冲的系数收回来，再按实测逼近（避免上一轮留下的溢出一直存在）
+    if (opts.resetFirst && (fitScales.value[index] || 1) > 1) setFitScale(index, 1)
+    for (let i = 0; i < iterations; i++) {
+      await nextTick()
+      await nextFrame()
+      const h = bodyEl.clientHeight
+      if (!h) break
+      const overflowing = bodyEl.scrollHeight > h + 1
+      const used = overflowing ? bodyEl.scrollHeight : contentUsedHeight(bodyEl)
+      if (!used) break
+      const ratio = h / used
+      // 已经贴合（差 3% 以内）就收手：既不留明显空白，也不切掉最后一行
+      if (ratio >= 0.97 && ratio <= 1.01) break
+      if (!overflowing && !opts.allowGrow) break // 图占位时只缩小、不放大
+      const cur = fitScales.value[index] || 1
+      const raw = ratio * 0.99
+      /**
+       * 目标：内容高度 ≈ 可用高度。
+       * - 可见页（默认）：放大 / 缩小都限幅（0.8~1.15 / 0.75~0.95），单步幅度小 → 不会看着来回震荡；
+       * - 隐藏量测台（aggressive）：放手按实测比例走（0.62~1.6），过冲了下一轮就修回来。
+       *   稀疏页（整页只有一句话）用保守步子要迭代七八次才收敛，翻页会明显变慢。
+       */
+      const step = opts.aggressive
+        ? Math.min(1.6, Math.max(0.62, raw))
+        : overflowing
+          ? Math.min(0.95, Math.max(0.75, raw))
+          : Math.min(1.15, Math.max(0.8, raw))
+      const next = Math.max(0.7, Math.min(2.6, cur * step))
+      if (Math.abs(next - cur) < 0.012) break
+      setFitScale(index, next)
+    }
+    // 收尾保底：迭代结束仍溢出（步长限幅导致）就按实测比例再收一次，绝不留最后一行被切
+    await nextTick()
+    await nextFrame()
+    const hEnd = bodyEl.clientHeight
+    const overEnd = hEnd ? bodyEl.scrollHeight - hEnd : 0
+    if (overEnd > 1) {
+      const cur = fitScales.value[index] || 1
+      const next = Math.max(0.7, Math.min(2.6, cur * (hEnd / bodyEl.scrollHeight) * 0.99))
+      if (next < cur - 0.005) setFitScale(index, next)
+    }
+  }
+
+  /** 正在量测的页（预排版与可见页收尾不会同时对同一页动手） */
+  const fitBusy = new Set<number>()
+  /** 量测台只有一块：所有量测排队执行，避免两次量测互相把里面的内容换掉 */
+  let measureQueue: Promise<void> = Promise.resolve()
+  const measureExclusive = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = measureQueue.then(task, task)
+    measureQueue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  /**
+   * 在隐藏量测台里把第 index 页的字号适配算好。
+   *
+   * 这是「翻页不再伸缩」的关键：页面显示之前字号就已经是最终值，显示后不需要再调。
+   * 已经算过（且量测基准没变）直接返回；量不了（缩放看细节 / 总览打开）也不阻塞翻页。
+   */
+  const ensureFitScale = (index: number): Promise<void> => {
+    const i = Number(index)
+    if (!Number.isFinite(i) || i < 0 || i >= prepList.value.length) return Promise.resolve()
+    if (zoomScale.value !== 1 || showOverview.value) return Promise.resolve()
+    // 先看量测基准有没有变：变了就把缓存的实测系数作废，否则会拿「按旧尺寸算的」结果直接返回
+    syncFitBasis()
+    if (fitReady.value[i] || fitBusy.has(i)) return Promise.resolve()
+    return measureExclusive(async () => {
+      // 排队期间基准可能又变了（窗口缩放），进来再确认一次
+      syncFitBasis()
+      if (fitReady.value[i] || fitBusy.has(i) || i >= prepList.value.length) return
+      const body = measureBodyRef.value
+      if (!body) return
+      fitBusy.add(i)
+      const gen = buildGeneration
+      try {
+        const html = prepList.value[i] || ''
+        measureIndex.value = i
+        measureHtml.value = html
+        measureBreadcrumb.value = slideBreadcrumbs.value[i] || ''
+        // 量测台的字号跟着 fitScales[i] 走（见 measureFontEm），所以每次 setFitScale 都会重排
+        await nextTick()
+        await nextFrame()
+        // 含图 / 图表的页在量测台里只有占位（真图是显示后才填进去的）→ 只缩小、不放大；
+        // 剩下的偏差由显示后的实测收尾处理
+        const allowGrow = !htmlHasLateFigure(html)
+        // 先放开步子快速逼近，再用保守步子收到「刚好贴合」（都不在屏幕上，看不见过程）
+        await fitBodyIteratively(body, i, { allowGrow, resetFirst: false, iterations: 4, aggressive: true })
+        await fitBodyIteratively(body, i, { allowGrow, resetFirst: false, iterations: 3 })
+        // 量测台当时没有布局尺寸（视图被切到后台等）→ 这次量测无效：不标记「已算好」，
+        // 显示后的实测收尾照旧会兜住，文字也不会因为把 0 当成「刚好」而永远铺不满
+        if (body.clientHeight <= 0) {
+          console.warn('[PPT] 量测台没有布局尺寸，跳过本页字号预排版:', i + 1)
+          return
+        }
+        // 量测期间内容被重建过（改文件 / 换标签）→ 这次结果作废，别标记成已算好
+        if (gen === buildGeneration) markFitReady(i)
+      } finally {
+        fitBusy.delete(i)
+      }
+    })
+  }
+
+  /**
+   * 可见页的实测收尾：**只有**「含图 / 图表」或「没来得及预算」的页才需要跑。
+   * 纯文字页在翻页前已经量好，这里直接跳过 —— 否则页面显示约一秒后又为铺满而伸缩，看起来像闪烁。
    */
   let fitRunning = false
   const autoFitCurrentSlide = async (iterations = 6) => {
     if (fitRunning || showOverview.value || animating.value || zoomScale.value !== 1) return
-    const slide = pptContainerRef.value?.querySelector<HTMLElement>('.slide:not(.overview-slide-real)')
-    const body = slide?.querySelector<HTMLElement>(':scope > .slide-body')
+    const body = currentSlideBody()
     if (!body || body.clientHeight < 40) return
     const idx = Number(showIndex.value)
+    syncFitBasis()
     // 有整页图片 / 图表时不放大：图由容器定尺寸，放大文字只会把图挤小
-    const hasFigure = !!body.querySelector('figure')
+    const hasFigure = pageNeedsPostFit(body)
+    if (!hasFigure && (fitReady.value[idx] || fitBusy.has(idx))) return
     fitRunning = true
     try {
-      // 先把之前可能过冲的系数收回来，再按实测逼近（避免上一轮留下的溢出一直存在）
-      const current = fitScales.value[idx] || 1
-      if (current > 1) {
-        const arr = fitScales.value.slice()
-        arr[idx] = 1
-        fitScales.value = arr
-      }
-      for (let i = 0; i < iterations; i++) {
-        await nextTick()
-        await nextFrame()
-        const h = body.clientHeight
-        if (!h) break
-        const overflowing = body.scrollHeight > h + 1
-        const used = overflowing ? body.scrollHeight : contentUsedHeight(body)
-        if (!used) break
-        const ratio = h / used
-        // 已经贴合（差 3% 以内）就收手：既不留明显空白，也不切掉最后一行
-        if (ratio >= 0.97 && ratio <= 1.01) break
-        if (!overflowing && hasFigure) break // 图占位时只缩小、不放大
-        const cur = fitScales.value[idx] || 1
-        // 目标：内容高度 ≈ 可用高度。放大 / 缩小都限幅（0.8~1.15 / 0.75~0.95），
-        // 让迭代单调收敛，不会一步放大过头、下一步又缩回去来回震荡
-        const raw = ratio * 0.99
-        const step = overflowing ? Math.min(0.95, Math.max(0.75, raw)) : Math.min(1.15, Math.max(0.8, raw))
-        const next = Math.max(0.7, Math.min(2.6, cur * step))
-        if (Math.abs(next - cur) < 0.012) break
-        const arr = fitScales.value.slice()
-        arr[idx] = next
-        fitScales.value = arr
-      }
-      // 收尾保底：迭代结束仍溢出（步长限幅导致）就按实测比例再收一次，绝不留最后一行被切
-      await nextTick()
-      await nextFrame()
-      const hEnd = body.clientHeight
-      const overEnd = hEnd ? body.scrollHeight - hEnd : 0
-      if (overEnd > 1) {
-        const cur = fitScales.value[idx] || 1
-        const next = Math.max(0.7, Math.min(2.6, (cur * (hEnd / body.scrollHeight)) * 0.99))
-        if (next < cur - 0.005) {
-          const arr = fitScales.value.slice()
-          arr[idx] = next
-          fitScales.value = arr
-        }
-      }
+      await fitBodyIteratively(body, idx, { allowGrow: !hasFigure, resetFirst: true, iterations })
+      markFitReady(idx)
     } finally {
       fitRunning = false
     }
   }
+
+  // ===== 翻页：先把目标页的字号算好，再切过去 =====
+  /** 连续按键 / 滑动时以「最后一次请求的目标」为基准推进（预排版是异步的，不能等 showIndex 更新） */
+  let navTarget = -1
+  let navQueue: Promise<void> = Promise.resolve()
+
+  /** 翻到指定页（键盘 / 按钮 / 滚轮 / 滑动 / 目录共用）：先预算目标页字号，再显示 */
+  const goToSlide = (target: number) => {
+    const count = prepList.value.length
+    if (!count) return
+    const idx = Math.max(0, Math.min(count - 1, Math.round(Number(target) || 0)))
+    navTarget = idx
+    navQueue = navQueue
+      .then(async () => {
+        await ensureFitScale(idx)
+        if (navTarget === idx) navTarget = -1
+        showIndex.value = idx
+      })
+      .catch(() => {
+        /* 量测失败也要能翻页 */
+        showIndex.value = idx
+      })
+  }
+
+  /** 上一页 / 下一页：按最后一次请求的目标走，连按也能逐页推进 */
+  const stepSlide = (dir: 1 | -1) => {
+    const base = navTarget >= 0 ? navTarget : Number(showIndex.value)
+    goToSlide(base + dir)
+  }
+
+  /** 预取相邻页的字号：翻页时直接就有结果，不必等量测（用户翻页通常比量测慢得多） */
+  let fitPrefetchTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleFitPrefetch = (delay = 260) => {
+    if (fitPrefetchTimer) clearTimeout(fitPrefetchTimer)
+    fitPrefetchTimer = setTimeout(() => {
+      fitPrefetchTimer = null
+      void (async () => {
+        const cur = Number(showIndex.value)
+        // 当前页（重建 / 缩放后收尾）→ 下一页 → 上一页
+        for (const i of [cur, cur + 1, cur - 1]) await ensureFitScale(i)
+      })()
+    }, delay)
+  }
+
+  // ===== 全屏沉浸：空闲时淡出工具栏与进度条（鼠标一动就回来）=====
+  /** 空闲多久开始淡出 */
+  const CHROME_IDLE_MS = 2600
+  const isFullscreen = ref(false)
+  const chromeHidden = ref(false)
+  let chromeTimer: ReturnType<typeof setTimeout> | null = null
+  /** 唤醒工具栏并重新计时（鼠标移动 / 按键 / 切页时调用） */
+  const wakeChrome = () => {
+    chromeHidden.value = false
+    if (chromeTimer) clearTimeout(chromeTimer)
+    if (!isFullscreen.value) return
+    chromeTimer = setTimeout(() => {
+      // 面板 / 查看器开着时不淡出：用户正要操作它们
+      if (showOverview.value || showThemeSettings.value || navOpen.value || mermaidViewerOpen()) return
+      chromeHidden.value = true
+    }, CHROME_IDLE_MS)
+  }
+  /** 全屏状态变化：进入全屏开始计时，退出立刻恢复工具栏 */
+  const syncFullscreenChrome = () => {
+    isFullscreen.value = !!document.fullscreenElement
+    if (!isFullscreen.value) {
+      if (chromeTimer) {
+        clearTimeout(chromeTimer)
+        chromeTimer = null
+      }
+      chromeHidden.value = false
+      return
+    }
+    wakeChrome()
+  }
+
+  // ===== 跳页：点页码输入 / 点进度条 =====
+  const pageInputOpen = ref(false)
+  const pageInput = ref('')
+  const pageInputRef = ref<HTMLInputElement | null>(null)
+  const openPageInput = () => {
+    if (!prepList.value.length) return
+    pageInput.value = ''
+    pageInputOpen.value = true
+    void nextTick(() => pageInputRef.value?.focus())
+  }
+  const commitPageInput = () => {
+    const n = parseInt(pageInput.value, 10)
+    pageInputOpen.value = false
+    if (Number.isFinite(n) && n >= 1) goToSlide(Math.min(prepList.value.length, n) - 1)
+  }
+  /** 点进度条任意位置 → 跳到对应页 */
+  const seekByProgress = (e: MouseEvent) => {
+    const bar = e.currentTarget as HTMLElement | null
+    const n = prepList.value.length
+    if (!bar || n <= 1) return
+    const rect = bar.getBoundingClientRect()
+    if (!rect.width) return
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    goToSlide(Math.round(ratio * (n - 1)))
+  }
+
+  // ===== 导出幻灯片 PDF（一页一张）=====
+  const pdfBusy = ref(false)
+  /** 打印页尺寸（mm）：A4 横向，四边留 0；页面盒再小 1mm，避免四舍五入挤出空白页 */
+  const PDF_PAGE_W_MM = 296
+  const PDF_PAGE_H_MM = 209
+  const mmToPx = (mm: number) => (mm * 96) / 25.4
+
+  /**
+   * 导出页要用到的样式：把当前文档里的样式原样带上。
+   *
+   * 必须带上（至少是幻灯片正文用到的那部分）：导出文档若换了字体 / 字号口径，
+   * 同样的文字会变高 → 正文溢出量测时量好的框 → 打印时整块不绘制（详见打印层里关于
+   * 「滚动容器」的注释）。
+   */
+  const collectExportStyles = (): string => {
+    const parts: string[] = []
+    document.querySelectorAll('style').forEach((el) => {
+      const css = el.textContent || ''
+      if (css.trim()) parts.push(css)
+    })
+    if (!parts.length) console.warn('[PPT] 导出 PDF：没有取到样式，导出结果会比屏幕上朴素')
+    return parts.join('\n')
+  }
+
+  /**
+   * 把一页套成一份「单页打印文档」。
+   *
+   * 一页一份（而不是把整套放进一个 HTML）：Chromium 的打印分页会把「按页面尺寸缩放过的页面盒」
+   * 再拆开，页数翻好几倍且关不掉；单页文档只会打印成一页，稳定可靠（合并交给主进程）。
+   *
+   * 返回 [文档头, 页面片段, 文档尾]：样式只随「文档头」走一份，避免每页都重复几百 KB 的 CSS。
+   */
+  const buildSlidePdfHtml = (pages: Array<{ html: string; w: number; h: number }>): { head: string; slides: string[]; tail: string } => {
+    const pageW = mmToPx(PDF_PAGE_W_MM)
+    const pageH = mmToPx(PDF_PAGE_H_MM)
+    const themeClass = document.documentElement.className || ''
+    const bodyClass = document.body.className || ''
+    // 应用把主题变量写成 <html> 上的内联样式（--backgroundColor / --fontColor …）：
+    // 不带过去的话，导出文档里这些变量是空的，幻灯片会丢掉主题底色与文字颜色
+    const rootVars = document.documentElement.getAttribute('style') || ''
+    // 幻灯片字号是 em（相对 .ppt-container 的字号）：导出文档里必须给出同一个基准，否则排版会变。
+    // 字体也必须一致：导出文档若换一套字体，同样的文字会变高 → 正文溢出 → 打印时整块不绘制
+    // （见打印层里关于「滚动容器」的注释）
+    const slideStyle = currentSlideEl() ? getComputedStyle(currentSlideEl()!) : null
+    const baseFont = `${emBasePx.value || 16}px`
+    const fontFamily = slideStyle?.fontFamily || 'inherit'
+    const lineHeight = slideStyle?.lineHeight || '1.7'
+    const slides = pages.map((p) => {
+      const w = Math.max(1, p.w)
+      const h = Math.max(1, p.h)
+      const k = Math.min(pageW / w, pageH / h)
+      // .ppt-container[data-theme=...] 是各套幻灯片主题的作用域祖先（主题规则挂在它上面），必须带上
+      const themed = `<div class="ppt-container" data-theme="${pptTheme.value}" style="font-size:${baseFont};font-family:${fontFamily};line-height:${lineHeight};width:${w}px;height:${h}px;background:none">${p.html}</div>`
+      return (
+        `<section class="pdf-page"><div class="pdf-fit" style="width:${(w * k).toFixed(2)}px;height:${(h * k).toFixed(2)}px">` +
+        `<div class="pdf-raw" style="width:${w}px;height:${h}px;transform:scale(${k.toFixed(5)})">${themed}</div>` +
+        `</div></section>`
+      )
+    })
+    const head = `<!DOCTYPE html>
+<html class="${themeClass}" style="${md.utils.escapeHtml(rootVars)}">
+<head>
+<meta charset="utf-8">
+<title>${md.utils.escapeHtml(String(data?.label || 'slide'))}</title>
+<style>${collectExportStyles()}</style>
+<style>
+  /* 打印层：A4 横向、无边距，一页一张幻灯片。
+     这一层排在原样搬进来的 App 样式之后，用来压住应用外壳的
+     html/body{height:100%;overflow:hidden} 之类规则（不压住就会只剩一页）。 */
+  @page { size: A4 landscape; margin: 0; }
+  html, body {
+    margin: 0 !important; padding: 0 !important; background: #fff !important;
+    width: auto !important; height: auto !important; min-height: 0 !important;
+    max-height: none !important; overflow: visible !important;
+    display: block !important; position: static !important; float: none !important;
+  }
+  .pdf-page {
+    width: ${PDF_PAGE_W_MM}mm !important; height: ${PDF_PAGE_H_MM}mm !important;
+    min-height: 0 !important; max-height: none !important;
+    display: flex !important; flex-direction: row !important;
+    align-items: center !important; justify-content: center !important;
+    overflow: hidden !important; box-sizing: border-box !important;
+    position: static !important; margin: 0 !important; padding: 0 !important;
+    transform: none !important; visibility: visible !important; opacity: 1 !important;
+    break-after: page; page-break-after: always;
+  }
+  .pdf-page:last-child { break-after: auto !important; page-break-after: auto !important; }
+  /* 缩放后的盒子：绝对定位的原始尺寸内容按 transform 缩放（矢量内容不会糊） */
+  .pdf-fit {
+    position: relative !important; overflow: hidden !important;
+    display: block !important; margin: 0 !important; padding: 0 !important;
+    transform: none !important;
+  }
+  .pdf-raw {
+    position: absolute !important; top: 0 !important; left: 0 !important;
+    display: block !important; margin: 0 !important; padding: 0 !important;
+    transform-origin: top left !important;
+  }
+  /* ⚠️ 关键：打印文档里不能出现「内容溢出的滚动容器」。
+     Chromium 打印这种盒子时会整块不绘制（页面在、内容全空白，正是「导出的 PDF 全是空白页」的原因）。
+     幻灯片在屏幕上正是靠 .slide / .slide-body 滚动（overflow-y:auto + 固定高度），
+     所以导出时把它们改成「按内容撑开、不裁剪」；框高在 exportSlidesPdf 里已经按内容量好，
+     内容装得下就不会溢出，也就不会跨页拆分。 */
+  .pdf-raw .slide,
+  .pdf-raw .slide-body {
+    overflow: visible !important;
+    max-height: none !important;
+    min-height: 0 !important;
+  }
+  .pdf-raw .slide { height: 100% !important; }
+  .pdf-raw .slide-body { height: auto !important; }
+  /* 屏幕上的交互件不进 PDF */
+  .python-run-bar, .python-result, .mermaid-clickable::after { display: none !important; }
+</style>
+</head>
+<body class="${bodyClass}">
+`
+    return { head, slides, tail: '\n</body>\n</html>\n' }
+  }
+
+  /** 导出页的兜底尺寸（量不到量测台尺寸时用）：按当前比例给一个合理的幻灯片框 */
+  const pdfFallbackBox = () => {
+    const ratio = slideRatio()
+    return ratio >= 1 ? { w: 1280, h: Math.round(1280 / ratio) } : { w: Math.round(960 * ratio), h: 960 }
+  }
+
+  /**
+   * 量测台在导出时可能「没有布局尺寸」（视图处于隐藏 / 未布局状态时，clientWidth/Height 全是 0）。
+   * 那种情况下按 0 尺寸算出来的缩放比会大到离谱，PDF 会整本空白（页数正常、内容看不见），
+   * 所以这里必须判断并退回一个合理的幻灯片框。
+   */
+  const sanitizePdfBox = (w: number, h: number): { w: number; h: number; fallback: boolean } => {
+    const ok = (v: number, lo: number) => Number.isFinite(v) && v >= lo
+    if (ok(w, 200) && ok(h, 150) && w <= 20000 && h <= 20000) {
+      return { w: Math.round(w), h: Math.round(h), fallback: false }
+    }
+    return { ...pdfFallbackBox(), fallback: true }
+  }
+
+  /**
+   * 导出全部幻灯片为 PDF：逐页放进隐藏量测台（= 屏幕上的真实排版），
+   * 量出实际尺寸后按页缩放，交给主进程的打印通道（隐藏窗口 printToPDF）落盘。
+   */
+  const exportSlidesPdf = async () => {
+    const n = prepList.value.length
+    const stage = measureWrapperRef.value
+    if (!n || !stage || pdfBusy.value) return
+    const zh = store.locales === 'zh'
+    pdfBusy.value = true
+    if (n > 3) ElMessage.info(zh ? `正在排版 ${n} 页幻灯片…` : `Laying out ${n} slides…`)
+    try {
+      const pages: Array<{ html: string; w: number; h: number }> = []
+      /** 首页量到有效尺寸后固定用它（保证整本 PDF 尺寸一致）；量不到就整本用兜底尺寸 */
+      let lockedBox: { w: number; h: number } | null = null
+      for (let i = 0; i < n; i++) {
+        const html = prepList.value[i] || ''
+        measureIndex.value = i
+        measureHtml.value = html
+        measureBreadcrumb.value = slideBreadcrumbs.value[i] || ''
+        await nextTick()
+        await nextFrame()
+        const slideEl = stage.querySelector<HTMLElement>('.measure-slide')
+        if (!slideEl) continue
+        // 兜底：万一 Vue 没把这一页写进量测台（渲染时机问题），直接把内容同步进 DOM，别导出空页
+        const stageBody = slideEl.querySelector<HTMLElement>(':scope > .slide-body')
+        if (stageBody && html && stageBody.innerHTML !== html) stageBody.innerHTML = html
+        // 导出要真图：量测台平时跳过图表渲染，这里补上（同一份图表有缓存，通常很快）
+        await renderMermaidIn(stage)
+        await renderDrawioFigures(stage, { zh })
+        await nextTick()
+        await nextFrame()
+        const measured = sanitizePdfBox(slideEl.clientWidth, slideEl.clientHeight)
+        if (measured.fallback && lockedBox) {
+          // 开头能量、后面量不到了：多半是视图被切到后台（量测台不再参与布局）→ 宁可中止也别导出空白 PDF
+          console.warn('[PPT] 导出 PDF 中断：量测台失去尺寸', { page: i + 1 })
+          ElMessage.warning(
+            zh
+              ? '导出已中断：演示视图似乎被切到了后台，请保持它在最前面再试一次'
+              : 'Export stopped: keep the presentation view in the foreground and retry',
+          )
+          return
+        }
+        if (measured.fallback) {
+          console.warn('[PPT] 导出 PDF：量测台尺寸异常，整本改用兜底尺寸', { measuredW: slideEl.clientWidth, measuredH: slideEl.clientHeight })
+        }
+        if (!lockedBox) lockedBox = { w: measured.w, h: measured.h }
+        const w = lockedBox.w
+        const boxH = lockedBox.h
+        // 屏幕上需要滚动的页（内容比框高）：PDF 里把框加高，宁可比屏幕上略小也不丢内容。
+        // 注意溢出发生在 .slide-body 里（.slide 自己高度固定），所以要按 body 的溢出量补高度。
+        const bodyEl = slideEl.querySelector<HTMLElement>(':scope > .slide-body')
+        const bodyOverflow = bodyEl ? Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight) : 0
+        const slideOverflow = Math.max(0, slideEl.scrollHeight - slideEl.clientHeight)
+        // 内容最多按 3 倍框高导出（防止某页内容异常时把整页缩到看不见）；留 6px 余量，
+        // 免得四舍五入后差一点点又挤出一张空白页
+        const h = Math.min(boxH * 3, Math.max(boxH, boxH + bodyOverflow + slideOverflow) + 6)
+        pages.push({ html: slideEl.outerHTML, w, h })
+      }
+      if (!pages.length) return
+      // 内容自检：页面全空（例如量测台里没有内容）时不要静默导出一本空白 PDF
+      const textLen = pages.reduce((n, p) => {
+        const tmp = document.createElement('div')
+        tmp.innerHTML = p.html
+        return n + (tmp.textContent || '').replace(/\s+/g, '').length
+      }, 0)
+      if (!textLen && !pages.some((p) => /<(img|svg|figure)\b/i.test(p.html))) {
+        console.warn('[PPT] 导出 PDF：页面内容为空，已中止')
+        ElMessage.warning(zh ? '导出失败：没有取到幻灯片内容，请保持演示视图在前台后重试' : 'Export failed: no slide content captured')
+        return
+      }
+      const title = String(data?.label || data?.path || 'slides').replace(/\.[^.]+$/, '') || 'slides'
+      // 一页一份打印文档：交给宿主逐页打印再合并（一个文档里放多页会被 Chromium 的分页拆开）
+      const doc = buildSlidePdfHtml(pages)
+      const res: any = await getPlatform().host.docs.printSlidesPdf({
+        head: doc.head,
+        slides: doc.slides,
+        tail: doc.tail,
+        title,
+      })
+      if (res?.success) {
+        const count = Number(res.pages) || pages.length
+        ElMessage.success(zh ? `已导出 ${count} 页 PDF` : `Exported ${count} slides to PDF`)
+      } else if (res?.error && res.error !== '用户取消' && res.error !== 'not-supported') {
+        ElMessage.error(zh ? `导出 PDF 失败：${res.error}` : `PDF export failed: ${res.error}`)
+      } else if (res?.error === 'not-supported') {
+        ElMessage.warning(zh ? '当前环境不支持导出 PDF' : 'PDF export is not available here')
+      }
+    } catch (e: any) {
+      console.error('[PPT] 导出 PDF 失败:', e)
+      ElMessage.error(zh ? `导出 PDF 失败：${e?.message || e}` : `PDF export failed: ${e?.message || e}`)
+    } finally {
+      pdfBusy.value = false
+      // 量测台清空（否则导出用的那一页会一直留在隐藏层里，下次预排版也要重设）
+      measureIndex.value = -1
+      measureHtml.value = ''
+      measureBreadcrumb.value = ''
+    }
+  }
+
 
   /** 就地重建并停在原来那一页（按来源段键 + 节内页偏移定位；比例切换 / 溢出收紧后用） */
   const rebuildKeepingSlide = async (key?: string, partOffset = 0) => {
@@ -1406,14 +2023,18 @@ let unsubWatchedFile: (() => void) | null = null
     const offset = key ? partOffset : Math.max(0, Number(showIndex.value) - slideKeys.indexOf(cur))
     await init()
     const base = cur ? slideKeys.indexOf(cur) : -1
+    let target: number
     if (base >= 0) {
       // 本节页数（重建后可能变多）：停在同样的第 k 页
       let count = 0
       while (base + count < slideKeys.length && slideKeys[base + count] === cur) count += 1
-      showIndex.value = Math.min(base + offset, base + count - 1)
+      target = Math.min(base + offset, base + count - 1)
     } else {
-      showIndex.value = Math.max(0, Math.min(prepList.value.length - 1, Number(showIndex.value)))
+      target = Math.max(0, Math.min(prepList.value.length - 1, Number(showIndex.value)))
     }
+    // 重建后 fitScales 被清空：先把目标页量好再显示，避免出现「先按估算显示、随后又伸缩」
+    await ensureFitScale(target)
+    showIndex.value = target
     await nextTick()
     renderMermaid()
     renderDrawio()
@@ -1425,7 +2046,10 @@ let unsubWatchedFile: (() => void) | null = null
       void renderMermaid()
       renderDrawio()
     })
+    // 相邻页的字号提前算好，下一次翻页就不必等量测
+    scheduleFitPrefetch(260)
     scheduleLayoutPass(1000)
+    wakeChrome()
   })
   watch(showOverview, (ov: boolean) => { if (!ov) void nextTick(() => { void renderMermaid(); renderDrawio() }) })
 
@@ -1436,7 +2060,9 @@ let unsubWatchedFile: (() => void) | null = null
     if (currentSourceKey() === lastRenderedSourceKey) return
     const prevIndex = showIndex.value
     await init()
-    showIndex.value = Math.max(0, Math.min(prepList.value.length - 1, prevIndex))
+    const target = Math.max(0, Math.min(prepList.value.length - 1, prevIndex))
+    await ensureFitScale(target)
+    showIndex.value = target
     await nextTick()
     renderMermaid()
     renderDrawio()
@@ -1466,6 +2092,8 @@ let unsubWatchedFile: (() => void) | null = null
 
   onMounted(async ()=>{
     await init()
+    // 首页的字号先量好（此后每次翻页都会这样预先算好，显示出来即最终字号）
+    await ensureFitScale(showIndex.value)
     nextTick(() => {
       renderMermaid()
       renderDrawio()
@@ -1480,7 +2108,7 @@ let unsubWatchedFile: (() => void) | null = null
     })
     if (pptContainerRef.value) viewResizeObserver.observe(pptContainerRef.value)
     window.addEventListener('keydown', handleKeydown)
-    document.addEventListener('fullscreenchange', repositionThemePanel)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
     // 监听文件变更
     unsubWatchedFile = getPlatform().events.on('watchedFileChanged', handleFileChanged)
     // 启动文件监听
@@ -1493,7 +2121,8 @@ let unsubWatchedFile: (() => void) | null = null
   onBeforeUnmount(() => {
     if (viewResizeObserver) { viewResizeObserver.disconnect(); viewResizeObserver = null }
     window.removeEventListener('keydown', handleKeydown)
-    document.removeEventListener('fullscreenchange', repositionThemePanel)
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    if (chromeTimer) { clearTimeout(chromeTimer); chromeTimer = null }
     // 移除文件监听
     unsubWatchedFile?.()
     unsubWatchedFile = null
@@ -1503,7 +2132,8 @@ let unsubWatchedFile: (() => void) | null = null
 </script>
 
 <template >
-  <div class="ppt-container" ref="pptContainerRef" :data-theme="pptTheme" @wheel="handleWheel" @click="handleSlideLinkClick">
+  <div class="ppt-container" ref="pptContainerRef" :data-theme="pptTheme" :class="{ 'chrome-idle': chromeHidden }"
+       @wheel="handleWheel" @click="handleSlideLinkClick" @mousemove="wakeChrome">
     <!-- 总览网格 -->
     <div v-if="showOverview" class="overview-grid scoll">
       <div v-for="(item, index) in prepList" :key="index" class="overview-item" @click="showIndex = +index; showOverview = false">
@@ -1517,8 +2147,20 @@ let unsubWatchedFile: (() => void) | null = null
       </div>
     </div>
 
+    <!-- 空状态：空文件 / 非 Markdown 内容（构建完成却一页都没有）时给个明确提示，
+         否则整屏空白、页码显示 1/0，看不出发生了什么 -->
+    <div v-if="buildFinished && !prepList.length" class="ppt-empty">
+      <i class="fa fa-file-text-o"></i>
+      <div class="ppt-empty-title">{{ store.locales == 'zh' ? '这个文件没有可演示的内容' : 'Nothing to present in this file' }}</div>
+      <div class="ppt-empty-hint">{{
+        store.locales == 'zh'
+          ? '演示视图只处理 Markdown（.md）正文；空文件或纯元信息的文件不会有幻灯片。'
+          : 'The presentation view renders Markdown (.md) body text; empty files or metadata-only files produce no slides.'
+      }}</div>
+    </div>
+
     <!-- 幻灯片卡片 -->
-    <div v-if="!showOverview" class="slide-wrapper" :class="'ratio-' + ratioMode" :style="{ left: navOpen ? '260px' : '20px' }">
+    <div v-if="!showOverview && prepList.length" class="slide-wrapper" :class="'ratio-' + ratioMode" :style="{ left: navOpen ? '260px' : '20px' }">
       <div class="slide-container" :class="{ 'fs-container': ratioMode !== 'auto' }">
         <div v-for="(item, index) in prepList" :key="index">
           <div v-if="showIndex===index || (animating && index === prevIndex)" class="slide scoll"
@@ -1541,6 +2183,24 @@ let unsubWatchedFile: (() => void) | null = null
       </div>
     </div>
 
+    <!-- 隐藏量测台：与真实幻灯片同结构同尺寸，但不可见、不参与交互。
+         翻页前先把目标页放进来量出「要多大字号才铺满」，等页面真正显示时就已经是最终字号
+         （否则会先按估算显示、过一会儿再伸缩一下，看起来像闪烁）。 -->
+    <div ref="measureWrapperRef" class="slide-wrapper measure-wrapper" :class="'ratio-' + ratioMode"
+         :style="{ left: navOpen ? '260px' : '20px' }" aria-hidden="true">
+      <div class="slide-container" :class="{ 'fs-container': ratioMode !== 'auto' }">
+        <div>
+          <div class="slide scoll measure-slide" :style="{ fontSize: measureFontEm + 'em' }">
+            <div v-if="measureBreadcrumb" class="slide-breadcrumb">
+              <span class="breadcrumb-text">{{ measureBreadcrumb }}</span>
+              <span class="breadcrumb-filename">{{ (data?.label || '').replace(/\.md$/i, '') }}</span>
+            </div>
+            <div ref="measureBodyRef" class="slide-body scoll" v-html="measureHtml"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 树状导航面板 -->
     <div v-if="navOpen" class="nav-panel">
       <div class="nav-panel-header">
@@ -1551,7 +2211,7 @@ let unsubWatchedFile: (() => void) | null = null
         <template v-for="(node, idx) in flatTree" :key="idx">
           <div class="tree-node" :style="{ paddingLeft: (node.level - 1) * 16 + 8 + 'px' }"
                :class="{ 'tree-active': showIndex === node.slideIndex }"
-               @click="showIndex = +node.slideIndex">
+               @click="goToSlide(+node.slideIndex)">
             <span class="tree-dot"></span>
             <span class="tree-text">{{ node.text }}</span>
           </div>
@@ -1560,8 +2220,8 @@ let unsubWatchedFile: (() => void) | null = null
       </div>
     </div>
 
-    <!-- 底部工具栏（左：操作按钮 / 右：状态元素） -->
-    <div class="toolbar">
+    <!-- 底部工具栏（左：操作按钮 / 右：状态元素）；全屏演示时空闲会自动淡出（见 immersive） -->
+    <div class="toolbar" :class="{ 'chrome-hidden': chromeHidden }" @mousemove="wakeChrome">
       <div class="toolbar-inner">
         <!-- ===== 左侧：操作按钮 ===== -->
         <div class="tb-left">
@@ -1575,24 +2235,24 @@ let unsubWatchedFile: (() => void) | null = null
             <i class="fa fa-th"></i>
           </button>
 
-          <button class="tool-btn tool-btn-icon" @click="toggleFullscreen" title="全屏">
+          <button class="tool-btn tool-btn-icon" @click="toggleFullscreen" :title="store.locales=='zh'?'全屏':'Fullscreen'">
             <i class="fa fa-arrows-alt"></i>
           </button>
 
           <span class="toolbar-sep"></span>
 
           <!-- 比例选择 -->
-          <button class="tool-btn" :class="{ active: ratioMode === 'auto' }" @click="changeRatio('auto')" title="自动">自适应</button>
+          <button class="tool-btn" :class="{ active: ratioMode === 'auto' }" @click="changeRatio('auto')" :title="store.locales=='zh'?'自动':'Auto'">{{ store.locales=='zh'?'自适应':'Auto' }}</button>
           <button class="tool-btn" :class="{ active: ratioMode === '16:9' }" @click="changeRatio('16:9')" title="16:9">16:9</button>
           <button class="tool-btn" :class="{ active: ratioMode === '4:3' }" @click="changeRatio('4:3')" title="4:3">4:3</button>
 
           <span class="toolbar-sep"></span>
 
           <!-- 上一页 / 下一页 -->
-          <button class="nav-btn" @click="goPrevSlide" :disabled="showIndex===0">
+          <button class="nav-btn" @click="goPrevSlide" :disabled="!prepList.length || showIndex===0">
             <i class="fa fa-chevron-left"></i>
           </button>
-          <button class="nav-btn" @click="goNextSlide" :disabled="showIndex===prepList.length-1">
+          <button class="nav-btn" @click="goNextSlide" :disabled="!prepList.length || showIndex>=prepList.length-1">
             <i class="fa fa-chevron-right"></i>
           </button>
 
@@ -1603,6 +2263,12 @@ let unsubWatchedFile: (() => void) | null = null
             {{ splitModeLabel }}
           </button>
 
+          <!-- 导出幻灯片 PDF（一页一张，走主进程的打印通道） -->
+          <button class="tool-btn tool-btn-icon" @click="exportSlidesPdf" :disabled="!prepList.length || pdfBusy"
+                  :title="store.locales=='zh'?'导出 PDF（一页一张）':'Export PDF (one slide per page)'">
+            <i :class="pdfBusy ? 'fa fa-spinner fa-spin' : 'fa fa-file-pdf-o'"></i>
+          </button>
+
           <!-- 主题设置 -->
           <button ref="themeBtnRef" class="tool-btn tool-btn-icon" @click="toggleThemeSettings" :class="{ active: showThemeSettings }" :title="store.locales=='zh'?'主题':'Theme'">
             <i class="fa fa-cog"></i>
@@ -1611,22 +2277,35 @@ let unsubWatchedFile: (() => void) | null = null
 
         <!-- ===== 右侧：状态元素 ===== -->
         <div class="tb-right">
-          <!-- 缩放（状态 + 微调） -->
-          <button class="tool-btn zoom-btn" @click="zoomOut" :disabled="zoomScale <= 0.5" title="缩小">
+          <!-- 缩放（状态 + 微调）；Ctrl+滚轮或 Ctrl+0 复位 -->
+          <button class="tool-btn zoom-btn" @click="zoomOut" :disabled="zoomScale <= 0.5" :title="store.locales=='zh'?'缩小':'Zoom out'">
             <i class="fa fa-minus"></i>
           </button>
           <span class="zoom-label">{{ zoomPercent }}</span>
-          <button class="tool-btn zoom-btn" @click="zoomIn" :disabled="zoomScale >= 2" title="放大">
+          <button class="tool-btn zoom-btn" @click="zoomIn" :disabled="zoomScale >= 2" :title="store.locales=='zh'?'放大':'Zoom in'">
             <i class="fa fa-plus"></i>
           </button>
 
           <span class="toolbar-sep"></span>
 
-          <!-- 页码 -->
+          <!-- 页码：点一下可以直接跳到某一页 -->
           <span class="slide-indicator">
-            <span class="slide-current">{{showIndex+1}}</span>
-            <span class="slide-separator">/</span>
-            <span class="slide-total">{{prepList.length}}</span>
+            <template v-if="!pageInputOpen">
+              <span class="slide-current" role="button" tabindex="0"
+                    :title="store.locales=='zh'?'点击跳页':'Click to jump'"
+                    @click="openPageInput">{{ prepList.length ? showIndex + 1 : 0 }}</span>
+              <span class="slide-separator">/</span>
+              <span class="slide-total">{{prepList.length}}</span>
+            </template>
+            <template v-else>
+              <input ref="pageInputRef" v-model="pageInput" class="page-input" type="text" inputmode="numeric"
+                     :placeholder="String(showIndex + 1)"
+                     @keydown.enter.prevent="commitPageInput"
+                     @keydown.esc.prevent="pageInputOpen = false"
+                     @blur="pageInputOpen = false" />
+              <span class="slide-separator">/</span>
+              <span class="slide-total">{{prepList.length}}</span>
+            </template>
           </span>
 
           <span class="toolbar-sep"></span>
@@ -1655,8 +2334,8 @@ let unsubWatchedFile: (() => void) | null = null
       </div>
     </div>
 
-    <!-- 进度条 -->
-    <div class="progress-bar">
+    <!-- 进度条（点任意位置跳页；全屏空闲时与工具栏一起淡出） -->
+    <div class="progress-bar" :class="{ 'chrome-hidden': chromeHidden }" @click="seekByProgress" @mousemove="wakeChrome">
       <div class="progress-fill" :style="{width: prepList.length > 1 ? (showIndex/(prepList.length-1)*100)+'%' : '0%'}"></div>
     </div>
     <!-- Mermaid 图查看（放大/平移/导出，复用共享组件） -->
@@ -1674,6 +2353,45 @@ let unsubWatchedFile: (() => void) | null = null
     flex: 1;
     background: var(--backgroundColor);
     overflow: hidden;
+  }
+
+  /* 空状态：文件里没有可演示的内容 */
+  .ppt-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 0 40px;
+    text-align: center;
+    color: var(--fontColor);
+    opacity: 0.75;
+  }
+  .ppt-empty > i {
+    font-size: 40px;
+    opacity: 0.5;
+  }
+  .ppt-empty-title {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .ppt-empty-hint {
+    font-size: 13px;
+    max-width: 520px;
+    line-height: 1.6;
+    opacity: 0.8;
+  }
+
+  /* 全屏沉浸：空闲时工具栏 / 进度条淡出，鼠标也藏起来（鼠标一动就回来） */
+  .toolbar.chrome-hidden,
+  .progress-bar.chrome-hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .ppt-container.chrome-idle {
+    cursor: none;
   }
 
   /* 树状导航面板 */
@@ -1773,6 +2491,13 @@ let unsubWatchedFile: (() => void) | null = null
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+  /* 隐藏量测台：与真实幻灯片同结构同尺寸（.slide-wrapper + .slide-container + .slide），
+     但整体不可见、不可点、不参与交互 —— 只用于翻页前量出这一页需要多大字号 */
+  .slide-wrapper.measure-wrapper {
+    visibility: hidden;
+    pointer-events: none;
+    z-index: -1;
   }
   /* 总览网格 */
   .overview-grid {
@@ -2083,7 +2808,7 @@ let unsubWatchedFile: (() => void) | null = null
   }
   .slide :deep(img) {
     max-width: 100%;
-    max-height: 60vh;
+    max-height: calc(60vh / var(--ui-zoom, 1));
     height: auto;
     display: block;
     margin: 0 auto;
@@ -2410,6 +3135,7 @@ table{background-color:var(--backgroundColor)} 与 table tr:nth-child(odd){...}�
     user-select: none;
     white-space: nowrap;
     overflow: hidden;
+    transition: opacity 0.25s ease;
   }
 
   .toolbar-inner {
@@ -2484,6 +3210,25 @@ table{background-color:var(--backgroundColor)} 与 table tr:nth-child(odd){...}�
   .slide-current {
     font-weight: 700;
     color: var(--fontActiveColor);
+    cursor: pointer;
+    padding: 0 2px;
+    border-radius: 3px;
+  }
+  .slide-current:hover {
+    background: var(--menuActiveColor, rgba(127, 127, 127, 0.2));
+  }
+  /* 页码输入（点页码后出现） */
+  .page-input {
+    width: 44px;
+    height: 18px;
+    padding: 0 4px;
+    font-size: 12px;
+    text-align: center;
+    color: var(--fontColor);
+    background: var(--backgroundColor);
+    border: 1px solid var(--borderColor);
+    border-radius: 3px;
+    outline: none;
   }
   .slide-separator {
     color: var(--borderColor);
@@ -2493,7 +3238,7 @@ table{background-color:var(--backgroundColor)} 与 table tr:nth-child(odd){...}�
     opacity: 0.6;
   }
 
-  /* 进度条 */
+  /* 进度条（可点击跳页） */
   .progress-bar {
     position: absolute;
     bottom: 24px;
@@ -2501,6 +3246,8 @@ table{background-color:var(--backgroundColor)} 与 table tr:nth-child(odd){...}�
     right: 0;
     height: 3px;
     background: var(--borderColor);
+    cursor: pointer;
+    transition: opacity 0.25s ease;
   }
   .progress-fill {
     height: 100%;
@@ -3198,7 +3945,7 @@ table{background-color:var(--backgroundColor)} 与 table tr:nth-child(odd){...}�
     width: 100%;
     height: auto;
     max-width: 100%;
-    max-height: 50vh;
+    max-height: calc(50vh / var(--ui-zoom, 1));
     object-fit: contain;
     overflow: hidden;
   }
@@ -3247,9 +3994,10 @@ table{background-color:var(--backgroundColor)} 与 table tr:nth-child(odd){...}�
   width: auto;
   height: auto;
   max-width: 100%;
-  /* 必须用纯视口单位：写 min(60vh, 100%) 时百分比相对父高，而父高又由本 svg 决定（循环），
-     Chrome 会忽略该百分比 → 布局高用自然高、绘制时按 60vh 缩 → 容器被撑高、四周留白 ✗ */
-  max-height: 50vh;
+  /* 必须用视口单位：写 min(60vh, 100%) 时百分比相对父高，而父高又由本 svg 决定（循环），
+     Chrome 会忽略该百分比 → 布局高用自然高、绘制时按 60vh 缩 → 容器被撑高、四周留白 ✗
+     （除以 --ui-zoom 只是折算界面缩放，仍然是视口口径） */
+  max-height: calc(50vh / var(--ui-zoom, 1));
   object-fit: contain;
   overflow: hidden;
 }

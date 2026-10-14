@@ -306,12 +306,15 @@ async function toolReadFile(input: any, ctx: RendererToolContext): Promise<Rende
   return {
     ok: true,
     value: {
+      // 控制字段（路径 / 续读锚点）排在 content **之前**：超预算的 read_file 结果会被掐中段
+      // （read_file 走 headOnly 只保开头，见 shared/toolResultBudget.ts），把 nextOffset
+      // 放在尾部会在截断时丢失，模型就再也读不到后半篇。
       path: r.path,
+      truncated,
+      ...(truncated ? { nextOffset } : {}),
       content: slice,
       chars: text.length,
       lines: countTextLines(text),
-      truncated,
-      ...(truncated ? { nextOffset } : {}),
     },
   }
 }

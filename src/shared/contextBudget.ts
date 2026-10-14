@@ -32,8 +32,21 @@ export const CONTEXT_COMPACT_RATIO = 0.8
 /** 输出预留：max_tokens 之外的额外安全余量（按窗口比例计） */
 export const OUTPUT_RESERVE_RATIO = 0.08
 
-/** 压缩时逐字保留的最近用户轮次数 */
+/** 压缩时逐字保留的最近用户轮次数（token 预算不可用时的回退口径） */
 export const COMPACT_KEEP_TURNS = 3
+
+/**
+ * 压缩时逐字保留的近期上下文比例（**主口径**，对齐 DSH 的 `retainRatio: 0.16`）。
+ *
+ * 为什么主口径是 token 比例而不是"保留 N 轮"：
+ * 「3 轮」在"每轮只问一句话"和"每轮带 10 个工具结果"之间差两个数量级。
+ * 轮次口径会让后者在压缩后依然远超窗口，前者则白压了本可以保留的上下文。
+ * 按「窗口的固定比例」保留近期尾部，"还剩多少空间"才是可控的。
+ */
+export const COMPACT_RETAIN_RATIO = 0.16
+
+/** 压缩最少要丢掉多少条消息（否则不值得为一次摘要调用花一次 LLM 请求） */
+export const COMPACT_MIN_DROP = 2
 
 /** 溢出后「压缩 + 重放本 step」的最大次数 */
 export const OVERFLOW_RETRY_LIMIT = 2
@@ -243,6 +256,52 @@ export interface CompactionPlan {
   dropped: number
   /** 逐字保留的消息条数（含当前任务输入） */
   kept: number
+  /** 逐字保留尾部的估算 token（token 口径下才有；轮次口径为 undefined） */
+  retainedTokens?: number
+  /** 挑选口径（审计 / 日志用） */
+  basis?: 'tokens' | 'turns'
+}
+
+// ---------------------------------------------------------------------------
+// 工具配对平衡（复刻 DSH 的 tool-pairing balance）
+// ---------------------------------------------------------------------------
+
+/**
+ * 计算每个位置作为切点是否"配对平衡"。
+ *
+ * 消息序列里，assistant 发起的 `tool_calls` 必须与紧随其后的 `role: 'tool'` 结果**成对出现**：
+ * 在两者之间切开，就会得到"有 tool 结果、没有 tool 调用"（或反之）的历史，
+ * 严格校验的服务端会直接 400，宽松的本地后端则可能静默丢弃。
+ *
+ * 与 DSH 的差异：DSH 按"未应答 tool-call 计数归零"判断（可以跨多条 assistant 消息）；
+ * ai-km 的消息形态是 OpenAI 风格的**相邻配对**，因此这里用等价但更严的规则——
+ * 切点前一条不能是 tool 结果，切点后一条不能是 tool 结果。两者都保证了同一件事：
+ * 切完不会出现悬空的 tool 消息。
+ *
+ * @param items 消息序列
+ * @returns `balanced[i]` 表示"在下标 i 之前切开是安全的"（i ∈ [0, items.length]）
+ */
+export function computePairingBalance(items: readonly BudgetMessage[]): boolean[] {
+  const n = items?.length ?? 0
+  const balanced = new Array<boolean>(n + 1).fill(true)
+  if (n === 0) return balanced
+  const isToolResult = (i: number) => items[i]?.role === 'tool'
+  balanced[0] = true
+  for (let i = 1; i <= n; i++) {
+    // 切点前一条是 tool 结果 → 会把"调用 → 结果"拆开
+    if (isToolResult(i - 1)) { balanced[i] = false; continue }
+    // 切点后一条是 tool 结果 → 结果的前置调用被压掉，同样悬空
+    if (i < n && isToolResult(i)) { balanced[i] = false; continue }
+    balanced[i] = true
+  }
+  return balanced
+}
+
+/** 从 `from` 起的尾部估算 token（含 i 本身） */
+function tailTokensFrom(items: readonly BudgetMessage[], from: number): number {
+  let sum = 0
+  for (let i = from; i < items.length; i++) sum += estimateMessageTokens(items[i])
+  return sum
 }
 
 /**
@@ -251,13 +310,17 @@ export interface CompactionPlan {
  *  - 从末尾往前数 `keepTurns` 个 user 消息，它们及其之后的内容逐字保留；
  *  - 其余前段整体压缩（以 user 边界切分，不会留下悬空的 tool 消息）。
  * 无法形成有效区间（轮次不足 / 可丢消息太少）时返回 null。
+ *
+ * @deprecated 轮次口径对"每轮体积差异很大"的会话不可控，建议改用
+ * {@link pickCompactionRangeByTokens}（按 token 预算保留尾部）。本函数保留给
+ * 普通聊天等按轮次组织、且拿不到可靠窗口值的场景。
  */
 export function pickCompactionRange(
   items: readonly BudgetMessage[],
   opts: { keepTurns?: number; minDrop?: number } = {},
 ): CompactionPlan | null {
   const keepTurns = Math.max(1, Number(opts.keepTurns) || COMPACT_KEEP_TURNS)
-  const minDrop = Math.max(1, Number(opts.minDrop) || 2)
+  const minDrop = Math.max(1, Number(opts.minDrop) || COMPACT_MIN_DROP)
   if (!items?.length) return null
   const start = items[0]?.role === 'system' ? 1 : 0
   let seen = 0
@@ -272,7 +335,118 @@ export function pickCompactionRange(
   if (keepFrom <= start) return null
   const dropped = keepFrom - start
   if (dropped < minDrop) return null
-  return { startIndex: start, endIndex: keepFrom, dropped, kept: items.length - keepFrom }
+  return { startIndex: start, endIndex: keepFrom, dropped, kept: items.length - keepFrom, basis: 'turns' }
+}
+
+export interface TokenCompactionOptions {
+  /** 逐字保留尾部的 token 预算（优先；与 retainRatio/keepTurns 三选一） */
+  retainTokens?: number
+  /** 逐字保留尾部占**可用预算**的比例（`retainTokens` 缺省时用） */
+  retainRatio?: number
+  /**
+   * 比例口径的**基准**（tokens）：应当传"可用预算"而不是原始窗口。
+   *
+   * 可用预算 = 窗口 − 预留输出 − 工具 schema。传原始窗口会在小窗口 + 多工具时高估余量：
+   * 32K 窗口 + 41 个工具时 schema 就占 2.2K（6.9%），压缩却以为还有 20% 空间可留。
+   * 由调用方用 {@link compactionBasisTokens} 算好传进来。
+   */
+  contextWindow?: number
+  /** 保留的最近用户轮次下限（安全阀：即使 token 预算允许，也不要压掉最近这几轮） */
+  keepTurns?: number
+  /** 最少丢弃条数 */
+  minDrop?: number
+}
+
+/**
+ * 压缩比例口径的基准：**可用预算**（复刻 DSH 的
+ * `messageBudgetTokens = contextWindow − reservedCompletionTokens`，
+ * 再减掉它自己的 `headroomTokens`）。
+ *
+ * @param opts.limit 生效窗口
+ * @param opts.reserve 预留的输出 token
+ * @param opts.schemaTokens 工具 schema 的 token
+ * @returns 用于压缩比例换算的基准 token（下限 1，绝不返回 0/负数）
+ */
+export function compactionBasisTokens(opts: { limit?: number; reserve?: number; schemaTokens?: number }): number {
+  const limit = Number(opts.limit) > 0 ? Number(opts.limit) : FALLBACK_CONTEXT_WINDOW
+  const reserve = Math.max(0, Number(opts.reserve) || 0)
+  const schema = Math.max(0, Number(opts.schemaTokens) || 0)
+  return Math.max(1, limit - reserve - schema)
+}
+
+/**
+ * 按 **token 预算** 挑选可压缩区间（复刻 DSH 的 `selectCompactableRange`）。
+ *
+ * 语义：
+ *  1. 首条 system 永不压缩；
+ *  2. 从尾部往前累加估算 token，直到达到 `retainTokens` —— 这段逐字保留；
+ *  3. 把切点**再往前回退**到最近一个「工具配对平衡」的位置（不允许拆开
+ *     assistant tool_calls 与其 tool 结果）；
+ *  4. 同时满足 `keepTurns` 下限（安全阀）与 `minDrop` 下限，否则返回 null。
+ *
+ * 与回退口径的区别：不再用"压到几轮之前"决定边界，而是"尾部还剩多少 token"，
+ * 因此重工具链路（一次 read_file 就几万 token）不会因为"才 3 轮"而压不动。
+ *
+ * @param items 消息序列（system 在首位的形态）
+ * @param opts 预算选项；没有可用 token 预算时自动回退 `pickCompactionRange`
+ * @returns 压缩区间，或 null（无需 / 无法压缩）
+ */
+export function pickCompactionRangeByTokens(
+  items: readonly BudgetMessage[],
+  opts: TokenCompactionOptions = {},
+): CompactionPlan | null {
+  if (!items?.length) return null
+  const minDrop = Math.max(1, Number(opts.minDrop) || COMPACT_MIN_DROP)
+  const keepTurns = Math.max(1, Number(opts.keepTurns) || COMPACT_KEEP_TURNS)
+
+  // 解析 token 预算；拿不到有效预算就回退轮次口径（行为与改造前一致）
+  let retainTokens = Number(opts.retainTokens)
+  if (!(retainTokens > 0)) {
+    const ratio = Number(opts.retainRatio)
+    const window = Number(opts.contextWindow)
+    if (ratio > 0 && window > 0) retainTokens = Math.floor(window * ratio)
+  }
+  if (!(retainTokens > 0)) return pickCompactionRange(items, { keepTurns, minDrop })
+
+  const start = items[0]?.role === 'system' ? 1 : 0
+  if (start >= items.length) return null
+
+  // 1) 尾部 token 预算：从后往前累加到 retainTokens
+  let accumulated = 0
+  let keepFrom = items.length
+  for (let i = items.length - 1; i >= start; i--) {
+    accumulated += estimateMessageTokens(items[i])
+    keepFrom = i
+    if (accumulated >= retainTokens) break
+  }
+
+  // 2) keepTurns 安全阀：逐字保留的尾部至少要覆盖最近 keepTurns 个 user 消息
+  let seenUsers = 0
+  let turnFloor = items.length
+  for (let i = items.length - 1; i >= start; i--) {
+    if (items[i]?.role === 'user') {
+      seenUsers++
+      turnFloor = i
+      if (seenUsers >= keepTurns) break
+    }
+  }
+  if (seenUsers >= keepTurns) keepFrom = Math.min(keepFrom, turnFloor)
+
+  // 3) 配对平衡回退：不允许把 tool_calls 与它的 tool 结果切开
+  const balanced = computePairingBalance(items)
+  while (keepFrom > start && !balanced[keepFrom]) keepFrom--
+
+  if (keepFrom <= start) return null
+  const dropped = keepFrom - start
+  if (dropped < minDrop) return null
+  return {
+    startIndex: start,
+    endIndex: keepFrom,
+    dropped,
+    kept: items.length - keepFrom,
+    retainedTokens: tailTokensFrom(items, keepFrom),
+    basis: 'tokens',
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -780,6 +780,9 @@ async function defaultPickSafFolder(): Promise<{ name: string } | null> {
   const { SafFolder, safCache } = await import('@/platform/android/saf')
   const res = await SafFolder.pickFolder()
   safCache.rootName = res?.name || ''
+  // 新选的授权根立刻进清单：多授权根下每个 `saf:<名字>/…` 都按名字路由，界面提示也看这份清单
+  const name = safCache.rootName
+  if (name && safCache.rootNames.indexOf(name) < 0) safCache.rootNames = safCache.rootNames.concat([name])
   return res?.name ? { name: res.name } : null
 }
 
@@ -809,6 +812,14 @@ function makeWindowPort(deps: AndroidDeps): WindowPort {
  * 桌面由 Electron 主进程改 webContents.zoomFactor；没有主进程时用 CSS `zoom` 缩放根元素：
  * Chromium 的 CSS zoom 与页面缩放一样会重排布局（不是 transform 那种只放大不改布局），
  * 弹层挂在 body 上也会一起缩放，因此界面比例与桌面保持一致。
+ *
+ * ⚠️ 为什么不用 WebView 自带的缩放 API（`WebSettings.setInitialScale` / `setTextZoom`）：
+ * 它们都是**视觉缩放**（等价于双指捏合），布局宽度仍按 `width=device-width` 走，
+ * 于是页面只是被放大、右侧 / 下边溢出要横向拖动，而不是像桌面 zoomFactor 那样**重排**；
+ * `setTextZoom` 更是只放大文字。WebView 里能真正「重排式缩放」的只有 CSS zoom。
+ * 代价是根元素带 zoom 时**后代里的视口单位会被再乘一次 zoom**（100vh → 120vh）——
+ * 所以这里同时写一个 `--ui-zoom` 变量，各处写死的 `NNvh / NNvw` 统一用
+ * `calc(NNvh / var(--ui-zoom, 1))` 折算（见 src/style.css 顶部注释）。
  */
 function defaultZoom(): { get(): Promise<number>; set(factor: number): Promise<number> } {
   const clamp = (f: number) => {
@@ -820,8 +831,15 @@ function defaultZoom(): { get(): Promise<number>; set(factor: number): Promise<n
     try {
       const root = document.documentElement
       if (!root) return
-      if (factor === 1) root.style.removeProperty('zoom')
-      else root.style.setProperty('zoom', String(factor))
+      if (factor === 1) {
+        root.style.removeProperty('zoom')
+        root.style.removeProperty('--ui-zoom')
+        return
+      }
+      root.style.setProperty('zoom', String(factor))
+      // 供 CSS 折算视口单位：根元素带 zoom 时 `100vh` 实际是 `100vh × zoom`，
+      // 所以各处写死的 `NNvh / NNvw` 统一写 `calc(NNvh / var(--ui-zoom, 1))`（见 style.css 顶部注释）
+      root.style.setProperty('--ui-zoom', String(factor))
     } catch {
       /* 非 DOM 环境（自检）忽略 */
     }
@@ -871,7 +889,7 @@ async function defaultResolveSafUri(path: string): Promise<{ uri: string; name?:
     const { SafFolder, safCache: cache, createSafFilesystemAdapter } = await import('@/platform/android/saf')
     // 授权根名决定「saf:<根名>/…」怎么剥前缀（未预热时先问一次原生侧）
     if (!cache.rootName) await createSafFilesystemAdapter().refreshRoot().catch(() => {})
-    const rel = splitSafPath(path, cache.rootName).rel
+    const rel = splitSafPath(path).rel
     const r = await SafFolder.getUri({ path: rel })
     return r?.uri ? { uri: String(r.uri), name: String(r.name || '') } : null
   } catch {
@@ -1071,6 +1089,7 @@ const hostPort: HostPort = {
   docs: {
     async docxToMarkdown() { return { error: 'not-supported' } },
     async exportPdf() { return { success: false, error: 'not-supported' } },
+    async printSlidesPdf() { return { success: false, error: 'not-supported' } },
   },
   table: {
     async start() { return { success: false, error: 'not-supported' } },

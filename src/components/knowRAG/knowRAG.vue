@@ -7717,7 +7717,7 @@ onBeforeUnmount(() => {
         border: 1px solid var(--borderColor);
         border-radius: 8px;
         width: 450px;
-        max-width: 90vw;
+        max-width: calc(90vw / var(--ui-zoom, 1));
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
         animation: modalSlideIn 0.3s ease;
     }

@@ -139,7 +139,7 @@ onBeforeUnmount(() => {
   position: absolute;
   left: 100%;
   top: 0;
-  max-height: 60vh;
+  max-height: calc(60vh / var(--ui-zoom, 1));
   margin-left: 2px;
   padding: 4px;
   border: 1px solid var(--wf-border);

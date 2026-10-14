@@ -27,6 +27,7 @@ import type {
 import type { AgentId } from '@/types/ids'
 import { normalizeLlmType } from '@/shared/llmSources'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
+import { boundToolResult } from '@/shared/toolResultBudget'
 import {
   RENDERER_TOOL_NAMES, executeRendererTool, hostOnlyToolError, isRendererTool,
   rendererToolSchemas, type RendererToolContext,
@@ -509,14 +510,15 @@ class RendererAgent {
 
   private pushToolResult(callId: string, name: string, ok: boolean, value?: any, error?: string, preview?: any): void {
     this.fire('tool/result', { callId, name, ok, value, error, preview })
-    // 工具结果回灌模型（错误也回灌：让模型据此改写法，而不是卡死）
+    // 工具结果回灌模型（错误也回灌：让模型据此改写法，而不是卡死）。
+    // 超预算结果在此掐掉中段（复刻 DSH 的 tool-result pruner）：事件仍带原文（UI / 日志），
+    // 只有回灌模型的那一份变小。渲染层没有落盘日志，因此这里是**唯一**的裁剪点。
+    const bounded = boundToolResult(name, ok, value, error)
     this.history.push({
       role: 'tool',
       tool_call_id: callId,
       name,
-      content: ok
-        ? (typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 1))
-        : `ERROR: ${error || '工具执行失败'}`,
+      content: bounded.model,
     })
   }
 }

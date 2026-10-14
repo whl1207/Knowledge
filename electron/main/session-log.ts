@@ -387,13 +387,41 @@ class SessionLogStore {
    */
   deriveEntries(sessionId: string): DerivedEntry[] {
     const events = this.readAll(sessionId)
-    // 第一遍：收集 tool/call 与 tool/result 的配对关系
-    const toolResults = new Map<string, Extract<SessionEvent, { type: 'tool/result' }>>()
+    // 第一遍：收集 tool/call 与 tool/result 的配对关系。
+    //
+    // 两级关联（复刻 DSH 的 sourceEventSeqs 思路）：
+    //  1. **显式引用优先**：结果带 `sourceEventSeqs` 时，按"它引用的 call seq"绑定。
+    //     同一 callId 被写两次（崩溃后补写、将来并行执行的重放）时，只有引用能说清归属。
+    //  2. **callId 兜底**：仅当这份日志**完全没有**任何显式引用时（历史日志），
+    //     才退回"最后一条结果胜出"。
+    //
+    // 注意：不能在"某条调用查不到引用"时逐次退回 callId 关联——那会让**有引用**的日志
+    // 也被最后一次结果覆盖，显式引用就白写了（这一点是本模块自测抓出来的）。
+    const resultByCallSeq = new Map<number, Extract<SessionEvent, { type: 'tool/result' }>>()
+    const resultByCallId = new Map<string, Extract<SessionEvent, { type: 'tool/result' }>>()
+    let hasAnyExplicitSource = false
     for (const ev of events) {
-      if (ev.type === 'tool/result') {
-        toolResults.set(ev.callId, ev)
+      if (ev.type !== 'tool/result') continue
+      resultByCallId.set(ev.callId, ev)
+      if (ev.sourceEventSeqs?.length) {
+        hasAnyExplicitSource = true
+        for (const seq of ev.sourceEventSeqs) resultByCallSeq.set(seq, ev)
       }
     }
+    // callId → 该 callId 出现过的所有 tool/call seq（**按日志顺序，每个用一次**）。
+    //
+    // 为什么是队列而不是单值：assistant 消息里 `toolCalls[].id` 只保证"这一次请求内唯一"，
+    // 同一个 id 在不同 assistant 消息里完全可能重复出现。此时按"最后一次 tool/call"关联
+    // 会把所有同 id 的调用都指向最后一次，显式引用也就永远匹配不上（本模块自测抓出来的）。
+    // 正确做法是按**出现顺序**逐个消费：第 N 次遇到该 id 的 assistant 消息，对应第 N 个 tool/call。
+    const callSeqsById = new Map<string, number[]>()
+    for (const ev of events) {
+      if (ev.type !== 'tool/call') continue
+      const list = callSeqsById.get(ev.callId)
+      if (list) list.push(ev.seq)
+      else callSeqsById.set(ev.callId, [ev.seq])
+    }
+    const callCursorById = new Map<string, number>()
 
     // 第二遍：按顺序派生模型历史
     const entries: DerivedEntry[] = []
@@ -414,7 +442,14 @@ class SessionLogStore {
           entries.push({ seq: ev.seq, msg })
           // 把该 assistant 消息发起的工具调用展开为 tool 消息（模型可见）
           for (const call of ev.toolCalls || []) {
-            const res = toolResults.get(call.id)
+            // 按出现顺序消费该 callId 的 tool/call seq（同 id 复用也能对上）
+            const seqs = callSeqsById.get(call.id)
+            const cursor = callCursorById.get(call.id) ?? 0
+            const callSeq = seqs?.[cursor]
+            if (seqs && cursor < seqs.length) callCursorById.set(call.id, cursor + 1)
+            // 显式引用（本条 call 的 seq）优先；仅当日志完全没有引用时才退回 callId 兜底
+            const res = (callSeq === undefined ? undefined : resultByCallSeq.get(callSeq))
+              ?? (hasAnyExplicitSource ? undefined : resultByCallId.get(call.id))
             entries.push({
               seq: ev.seq,
               msg: {
@@ -423,7 +458,9 @@ class SessionLogStore {
                 name: call.name,
                 content: res
                   ? res.ok
-                    ? JSON.stringify(res.value ?? null)
+                    // modelValue：超预算结果的裁剪版（见 types/session-log.ts 与
+                    // shared/toolResultBudget.ts）。只在存在时优先，未裁剪时与旧口径逐字一致。
+                    ? (res.modelValue ?? JSON.stringify(res.value ?? null))
                     : `ERROR: ${res.error || '工具执行失败'}`
                   : 'ERROR: 工具结果缺失（日志不完整）',
               },

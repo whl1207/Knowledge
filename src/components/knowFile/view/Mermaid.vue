@@ -187,7 +187,7 @@ const openViewer = () => {
 .mmd-fail-src {
   margin: 0;
   padding: 8px 10px;
-  max-height: 40vh;
+  max-height: calc(40vh / var(--ui-zoom, 1));
   overflow: auto;
   font-size: 11px;
   line-height: 1.4;

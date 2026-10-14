@@ -2960,7 +2960,7 @@ defineExpose({
   left: 50%;
   transform: translateX(-50%);
   width: max-content;
-  max-width: min(70vw, 720px);
+  max-width: min(calc(70vw / var(--ui-zoom, 1)), 720px);
   background: rgba(0,0,0,.65);
   color: #fff;
   font-size: 12px;

@@ -6,7 +6,7 @@
     class="wf-dialog"
     :title="t('app.title')"
     width="640px"
-    top="6vh"
+    top="calc(6vh / var(--ui-zoom, 1))"
     append-to-body
     @update:model-value="$emit('update:modelValue', $event)"
   >

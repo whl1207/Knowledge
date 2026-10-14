@@ -1961,7 +1961,7 @@ onUnmounted(() => {
 .plugin-config-input {
   width: 100%;
   min-height: 170px;
-  max-height: 46vh;
+  max-height: calc(46vh / var(--ui-zoom, 1));
   box-sizing: border-box;
   padding: 8px;
   border: 1px solid var(--borderColor);

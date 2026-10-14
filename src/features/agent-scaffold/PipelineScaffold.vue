@@ -8571,8 +8571,8 @@ textarea:disabled {
   background: var(--backgroundColor);
   border-radius: 8px;
   width: 400px;
-  max-width: 90vw;
-  max-height: 80vh;
+  max-width: calc(90vw / var(--ui-zoom, 1));
+  max-height: calc(80vh / var(--ui-zoom, 1));
   display: flex;
   flex-direction: column;
   border: 1px solid var(--borderColor);
@@ -8595,9 +8595,9 @@ textarea:disabled {
 .modal-btn.danger { background: #f44336; color: white; border-color: #f44336; }
 
 /* ====== 行详情模态框 ====== */
-.row-detail-modal { width: 720px; max-width: 92vw; height: 82vh; max-height: 92vh; }
+.row-detail-modal { width: 720px; max-width: calc(92vw / var(--ui-zoom, 1)); height: calc(82vh / var(--ui-zoom, 1)); max-height: calc(92vh / var(--ui-zoom, 1)); }
 /* 注意：这类覆盖 .modal-content 默认尺寸的规则必须写在 .modal-content 之后，否则会被 400px 默认宽度盖掉 */
-.compare-preview-modal { width: 760px; max-width: 92vw; height: 76vh; max-height: 92vh; }
+.compare-preview-modal { width: 760px; max-width: calc(92vw / var(--ui-zoom, 1)); height: calc(76vh / var(--ui-zoom, 1)); max-height: calc(92vh / var(--ui-zoom, 1)); }
 .row-detail-title { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; max-width: 90%; }
 .row-detail-title > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-detail-body { display: flex; flex-direction: column; gap: 10px; }

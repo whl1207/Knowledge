@@ -4143,7 +4143,7 @@ const clearTestCases = () => {
 
 /* ===== 预热 / 向量缓存浮层 ===== */
 /* 高度自适应内容（覆盖 .tm-modal 的固定高度；内容多少就多高，超过视口才在表格内滚动） */
-.tm-modal.pw-modal { width: min(720px, 94vw); height: auto; max-height: 88vh; overflow: hidden; }
+.tm-modal.pw-modal { width: min(720px, calc(94vw / var(--ui-zoom, 1))); height: auto; max-height: calc(88vh / var(--ui-zoom, 1)); overflow: hidden; }
 .pw-modal .ae-head { flex: none; }
 .pw-table-wrap { overflow: auto; min-height: 0; flex: 0 1 auto; }
 .pw-table { font-size: 12px; }
@@ -4180,7 +4180,7 @@ const clearTestCases = () => {
 }
 .tm-modal {
   display: flex; flex-direction: column; gap: 8px;
-  width: min(860px, 92vw); height: min(80vh, 760px);
+  width: min(860px, calc(92vw / var(--ui-zoom, 1))); height: min(calc(80vh / var(--ui-zoom, 1)), 760px);
   background: var(--menuColor); border: 1px solid var(--borderColor); border-radius: 8px;
   padding: 10px 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, .3);
 }
@@ -4197,7 +4197,7 @@ const clearTestCases = () => {
 .tm-entry-scores { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 10px; margin: 4px 0 2px; }
 /* 总分：右对齐（相对本行其余分项） */
 .tm-entry-total { margin-left: auto; font-weight: 700; white-space: nowrap; }
-.tm-entry-body { max-height: 46vh; overflow: auto; margin-top: 4px; padding: 6px; border: 1px dashed var(--borderColor); border-radius: 4px; }
+.tm-entry-body { max-height: calc(46vh / var(--ui-zoom, 1)); overflow: auto; margin-top: 4px; padding: 6px; border: 1px dashed var(--borderColor); border-radius: 4px; }
 
 /* ===== 智能路由（Agentic）检索过程：行内按钮 + 轨迹模态框 ===== */
 .tm-trace-btn {
@@ -4205,7 +4205,7 @@ const clearTestCases = () => {
   display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
 }
 .tm-trace-btn:hover { text-decoration: underline; }
-.tm-trace-modal { width: min(760px, 92vw); height: min(80vh, 720px); }
+.tm-trace-modal { width: min(760px, calc(92vw / var(--ui-zoom, 1))); height: min(calc(80vh / var(--ui-zoom, 1)), 720px); }
 .tm-trace-sum {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   padding-bottom: 6px; border-bottom: 1px solid var(--borderColor); font-size: 10px; flex-shrink: 0;

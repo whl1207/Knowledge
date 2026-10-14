@@ -56,7 +56,6 @@ export interface MermaidViewerOpenOptions {
   /** 弹窗标题；缺省取源码首行 */
   title?: string
 }
-
 const visible = ref(false)
 const svg = ref('')
 const title = ref('')
@@ -173,7 +172,10 @@ const exportSvg = () => {
   downloadFile(dataUrl, `mermaid_${Date.now()}.svg`)
 }
 
-defineExpose({ open, close })
+/** 宿主（如演示视图）需要知道大图是否开着，好在开着时不接管键盘 / 滚轮 */
+const isOpen = () => visible.value
+
+defineExpose({ open, close, isOpen })
 </script>
 
 <style scoped>
@@ -191,10 +193,10 @@ defineExpose({ open, close })
   animation: mermaidViewerFadeIn 0.2s ease;
 }
 .mermaid-viewer-content {
-  width: 90vw;
-  height: 90vh;
+  width: calc(90vw / var(--ui-zoom, 1));
+  height: calc(90vh / var(--ui-zoom, 1));
   max-width: 1200px;
-  max-height: 90vh;
+  max-height: calc(90vh / var(--ui-zoom, 1));
   background-color: var(--backgroundColor, #1e1e1e);
   border-radius: 12px;
   display: flex;

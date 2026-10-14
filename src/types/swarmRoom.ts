@@ -119,6 +119,34 @@ export interface SwarmEpisode {
 // 房间
 // ---------------------------------------------------------------------------
 
+/**
+ * 一个**已结束回合**的快照。
+ *
+ * 为什么需要：回合结束后泳道/任务板/通信/产出物必须留着供回看——
+ * 「任务属于 Episode」，新回合不该和上一回合的任务混在一条泳道里，
+ * 但直接把上一回合清掉又等于把任务过程删了（用户明确要求保留）。
+ * 折中：新回合开始时把上一回合整体归档进 `SwarmRoom.history`，工作台可切换回看。
+ */
+export interface SwarmEpisodeSnapshot {
+  episode: SwarmEpisode
+  /** 该回合结束时的名册（含 token / 工具次数等活动指标） */
+  members: SwarmTeamMember[]
+  tasks: SwarmTask[]
+  messages: SwarmMessage[]
+  artifacts: SwarmArtifact[]
+}
+
+/** 工作台当前展示的回合视图（当前回合或历史回合，见 boardOf） */
+export interface SwarmBoard {
+  episode: SwarmEpisode | null
+  members: SwarmTeamMember[]
+  tasks: SwarmTask[]
+  messages: SwarmMessage[]
+  artifacts: SwarmArtifact[]
+  /** true = 正在进行的那个回合（可续跑）；false = 历史回看（只读） */
+  live: boolean
+}
+
 export interface SwarmRoom {
   chatId: string
   /** 名册（持久） */
@@ -130,6 +158,8 @@ export interface SwarmRoom {
   /** 本回合产生的产出物（post_artifact） */
   artifacts: SwarmArtifact[]
   episode: SwarmEpisode | null
+  /** 已结束回合的历史快照（新回合开始时归档上一回合；工作台可回看任务过程） */
+  history: SwarmEpisodeSnapshot[]
   /** 并发闸门（本地调度上限） */
   maxInflight: number
 }

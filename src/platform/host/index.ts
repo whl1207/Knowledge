@@ -491,6 +491,7 @@ const hostPort: HostPort = {
   docs: {
     async docxToMarkdown() { return { error: 'not-supported' } },
     async exportPdf() { return { success: false, error: 'not-supported' } },
+    async printSlidesPdf() { return { success: false, error: 'not-supported' } },
   },
   table: {
     async start() { return { success: false, error: 'not-supported' } },

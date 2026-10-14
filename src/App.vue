@@ -920,7 +920,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
 <style>
   /* 关闭前提醒：任务名可能较长/较多，允许换行并限宽，避免文案被截断或撑出屏幕 */
   .el-message.close-warn-message {
-    max-width: min(560px, 92vw);
+    max-width: min(560px, calc(92vw / var(--ui-zoom, 1)));
     height: auto;
     padding: 10px 14px;
     align-items: flex-start;

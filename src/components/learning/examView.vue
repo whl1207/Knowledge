@@ -1477,7 +1477,7 @@ const examSummary = computed(() => {
 /* ===== 真题仿写面板（mimic） ===== */
 .exam-mimic-hint { font-size: 11px; line-height: 1.6; color: var(--borderColor); padding: 2px 4px 6px; }
 .exam-mimic-src {
-  width: 100%; min-height: 130px; max-height: 40vh; resize: vertical; box-sizing: border-box;
+  width: 100%; min-height: 130px; max-height: calc(40vh / var(--ui-zoom, 1)); resize: vertical; box-sizing: border-box;
   background: var(--backgroundColor); color: var(--fontColor); font-size: 11px; line-height: 1.5;
   border: 1px solid var(--borderColor); border-radius: 4px; padding: 4px 6px;
 }
@@ -1494,7 +1494,7 @@ const examSummary = computed(() => {
 .exam-mimic-sum { font-size: 11px; line-height: 1.6; color: var(--fontColor); padding: 6px; margin-top: 4px; border: 1px dashed var(--borderColor); border-radius: 4px; }
 .exam-mimic-json {
   font-size: 10px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
-  max-height: 30vh; overflow: auto; margin: 4px 0 0; padding: 6px;
+  max-height: calc(30vh / var(--ui-zoom, 1)); overflow: auto; margin: 4px 0 0; padding: 6px;
   background: var(--menuColor); color: var(--fontColor); border-radius: 4px;
 }
 .exam-panel-btn {
@@ -1636,8 +1636,8 @@ const examSummary = computed(() => {
   border: 1px solid var(--borderColor);
   border-radius: 8px;
   width: 460px;
-  max-width: 90vw;
-  max-height: 80vh;
+  max-width: calc(90vw / var(--ui-zoom, 1));
+  max-height: calc(80vh / var(--ui-zoom, 1));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1702,7 +1702,7 @@ const examSummary = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  max-height: 40vh;
+  max-height: calc(40vh / var(--ui-zoom, 1));
   overflow-y: auto;
 }
 .exam-modal-item {

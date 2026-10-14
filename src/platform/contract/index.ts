@@ -458,8 +458,16 @@ export interface PythonApi {
 export interface DocConvertApi {
   /** .docx 字节（base64）→ Markdown（含图片落盘为 file:/// 引用） */
   docxToMarkdown(payload: { base64: string }): Promise<any>
-  /** 已渲染 HTML → PDF（宿主弹保存框并落盘） */
-  exportPdf(payload: { html: string; title: string }): Promise<{ success: boolean; path?: string; error?: string }>
+  /**
+   * 已渲染 HTML → PDF（宿主弹保存框并落盘）。
+   * `landscape` 传 true 时按横向纸张打印（幻灯片导出用；不传 = 沿用宿主默认的竖版）。
+   */
+  exportPdf(payload: { html: string; title: string; landscape?: boolean }): Promise<{ success: boolean; path?: string; error?: string }>
+  /**
+   * 幻灯片整本导出：`head` + 每页片段 + `tail` 拼成「一页一份」的打印 HTML，宿主逐页打印后合并成一个 PDF。
+   * （一页一份是为了绕开 Chromium 打印分页会把缩放页面盒再拆开的毛病；样式只随 head 走一份。）
+   */
+  printSlidesPdf(payload: { head: string; slides: string[]; tail: string; title: string }): Promise<{ success: boolean; path?: string; pages?: number; error?: string }>
 }
 
 /** 大表格分块读取协议（start → chunk* → done） */

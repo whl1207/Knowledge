@@ -965,7 +965,7 @@ function t(zh: string): string { return isEn.value ? zh : zh }
   position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 2000;
 }
 .dc-smart-entry-modal {
-  width: min(720px, calc(100vw - 32px)); background: var(--backgroundColor); border: 1px solid var(--borderColor); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); overflow: hidden;
+  width: min(720px, calc(100vw / var(--ui-zoom, 1) - 32px)); background: var(--backgroundColor); border: 1px solid var(--borderColor); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); overflow: hidden;
 }
 .dc-smart-entry-header {
   display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--borderColor); background: var(--menuColor);

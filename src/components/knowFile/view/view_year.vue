@@ -1401,7 +1401,7 @@ onBeforeUnmount(() => {
 .dialog-box {
   min-width: 260px;
   max-width: 400px;
-  max-height: 70vh;
+  max-height: calc(70vh / var(--ui-zoom, 1));
   background: var(--backgroundColor);
   border: 1px solid var(--borderColor);
   border-radius: 6px;

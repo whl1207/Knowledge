@@ -917,7 +917,7 @@ watch(() => props.items, () => { draggingRel.value = ''; dropRel.value = '' })
 }
 .bb-edit-modal {
   width: 420px;
-  max-width: 92vw;
+  max-width: calc(92vw / var(--ui-zoom, 1));
   box-sizing: border-box;
   background: var(--backgroundColor, #fff);
   border: 1px solid var(--borderColor);

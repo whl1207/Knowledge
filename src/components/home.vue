@@ -10825,7 +10825,7 @@ select {
 
 .full-size-image {
   max-width: 100%;
-  max-height: calc(90vh - 80px);
+  max-height: calc(90vh / var(--ui-zoom, 1) - 80px);
   border-radius: 5px;
   display: block;
   margin: 0 auto;

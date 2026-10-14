@@ -569,8 +569,8 @@ const cardTitle = (p: PpePage) => zh.value
   border: 1px solid var(--borderColor);
   border-radius: 8px;
   width: 980px;
-  max-width: 94vw;
-  height: 86vh;
+  max-width: calc(94vw / var(--ui-zoom, 1));
+  height: calc(86vh / var(--ui-zoom, 1));
   display: flex;
   flex-direction: column;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);

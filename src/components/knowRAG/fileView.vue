@@ -193,7 +193,7 @@ const fileChangeNameStyle = (file: any): Record<string, string> => {
   border-radius: 4px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, .25);
   pointer-events: none;
-  max-width: 60vw;
+  max-width: calc(60vw / var(--ui-zoom, 1));
 }
 .tooltip-name {
   white-space: normal;

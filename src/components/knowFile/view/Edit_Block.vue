@@ -799,7 +799,7 @@ onBeforeUnmount(async () => {
   padding: 4px 12px;
   border-radius: 8px;
   white-space: nowrap;
-  max-width: 70vw;
+  max-width: calc(70vw / var(--ui-zoom, 1));
   overflow: hidden;
   text-overflow: ellipsis;
   box-shadow: 0 2px 8px rgba(0,0,0,.25);

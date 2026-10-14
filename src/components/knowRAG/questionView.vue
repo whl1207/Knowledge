@@ -1227,7 +1227,7 @@ const generateComplex = async () => {
 .qb-chip-x:hover { color: #F56C6C; }
 /* ===== 参考切片选择模态框 ===== */
 .qb-pick-overlay { position: fixed; inset: 0; z-index: 1200; background: rgba(0, 0, 0, .35); display: flex; align-items: center; justify-content: center; }
-.qb-pick-dialog { display: flex; flex-direction: column; width: min(850px, 92vw); max-height: min(720px, 90vh); background: var(--backgroundColor); border: 1px solid var(--borderColor); border-radius: 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden; }
+.qb-pick-dialog { display: flex; flex-direction: column; width: min(850px, calc(92vw / var(--ui-zoom, 1))); max-height: min(720px, calc(90vh / var(--ui-zoom, 1))); background: var(--backgroundColor); border: 1px solid var(--borderColor); border-radius: 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden; }
 .qb-pick-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--borderColor); font-size: 12px; flex-shrink: 0; }
 .qb-pick-head > .fa-paperclip, .qb-pick-head > .fa-cog { color: #42A5F5; }
 .qb-pick-title { font-weight: 600; color: var(--fontColor); }

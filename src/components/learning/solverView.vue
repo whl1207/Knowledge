@@ -726,7 +726,7 @@ function clearAll() { turns.value = [] }
 .sv-input-area { flex-shrink: 0; padding: 0 6px 6px; }
 .sv-input-card { box-sizing: border-box; width: 100%; padding: 8px 10px 6px; border: 1px solid var(--borderColor, #d0d7de); border-radius: 10px; background: var(--backgroundColor, #fff); box-shadow: 0 10px 30px rgba(0, 0, 0, .07); transition: border-color .2s ease, box-shadow .2s ease; }
 .sv-input-card:focus-within { border-color: var(--menuActiveColor, #e5e5e5); box-shadow: 0 12px 34px rgba(0, 0, 0, .12); }
-.sv-textarea { width: 100%; box-sizing: border-box; resize: none; border: none; outline: none; background: transparent; color: var(--fontColor, #1f2328); font-family: inherit; font-size: 13px; line-height: 1.6; max-height: 30vh; }
+.sv-textarea { width: 100%; box-sizing: border-box; resize: none; border: none; outline: none; background: transparent; color: var(--fontColor, #1f2328); font-family: inherit; font-size: 13px; line-height: 1.6; max-height: calc(30vh / var(--ui-zoom, 1)); }
 .sv-controls { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
 .sv-kb-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--borderColor, #d0d7de); color: var(--fontColor, #1f2328); max-width: 40%; }
 .sv-kb-chip > i { color: var(--fontActiveColor, #0969da); }

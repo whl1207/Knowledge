@@ -597,6 +597,26 @@ const showKey = ref(false)
                 <option value="search_pro">{{ t('高阶（search_pro）', 'Advanced (search_pro)') }}</option>
               </select>
             </div>
+            <!-- DeepSeek 官方搜索：走 Anthropic 兼容 Messages + 服务端原生 web_search 工具 -->
+            <template v-if="currentMeta.id === 'deepseek'">
+              <div class="form-group ws-hint-row">
+                <label>{{ t('复用对话凭据', 'Reuse chat key') }}</label>
+                <input type="checkbox" v-model="store.webSearch.deepseek.reuseChatKey" @change="persist" />
+                <span class="ws-hint-inline">
+                  {{ t('留空上面的 Key 时，自动用「大模型 → DeepSeek」的凭据', 'When the key above is empty, use the DeepSeek chat credential') }}
+                </span>
+              </div>
+              <div class="form-group">
+                <label>{{ t('模型', 'Model') }}</label>
+                <input v-model="store.webSearch.deepseek.model"
+                       :placeholder="t('留空用默认（deepseek-v4-flash）', 'Empty = default (deepseek-v4-flash)')"
+                       @change="persist" />
+              </div>
+              <div class="ws-hint">
+                {{ t('每次搜索是一次模型调用（计 token、延迟按 LLM 计）；仅桌面端可用。',
+                     'Each search is a model turn (tokens + LLM latency); desktop only.') }}
+              </div>
+            </template>
           </template>
 
           <!-- 免 Key 源：Bing 可选中文改写，其余无需配置 -->

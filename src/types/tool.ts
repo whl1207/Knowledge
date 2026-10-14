@@ -28,6 +28,12 @@ export interface ToolExecutionContext {
   scope?: string
   /** 工作区根目录（读写类工具用于路径围栏） */
   cwd?: string
+  /**
+   * 本会话生效的上下文窗口（tokens）。
+   * 读取类工具据此决定单次返回量——返回值最终会被 `@/shared/toolResultBudget` 掐到窗口的
+   * 约 12%，读得比预算多只是白花 token（见 tools.ts 的 `defaultReadWindowChars`）。
+   */
+  windowTokens?: number
   /** 取消信号 */
   signal?: AbortSignal
   /** 额外上下文 */

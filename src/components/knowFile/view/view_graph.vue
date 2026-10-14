@@ -1342,7 +1342,7 @@ const expandAttribute=async function(indexParam:string|number,state:number){
     border-radius: 4px;
     box-shadow: 0 2px 10px rgba(0, 0, 0, .25);
     pointer-events: none;
-    max-width: 60vw;
+    max-width: calc(60vw / var(--ui-zoom, 1));
   }
 
   /* 节点名：过长时换行显示，避免超出视口 */

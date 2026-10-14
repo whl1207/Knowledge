@@ -1311,7 +1311,7 @@ onMounted(() => { load(); syncResetHeight() })
 .cfg-range-text { font-size: 10px; color: var(--fontColor); opacity: .8; min-width: 28px; }
 .sc-prompt-area {
   width: 100%; box-sizing: border-box; margin-top: 5px; padding: 5px 6px;
-  font-size: 11px; line-height: 1.5; resize: vertical; min-height: 90px; max-height: 40vh;
+  font-size: 11px; line-height: 1.5; resize: vertical; min-height: 90px; max-height: calc(40vh / var(--ui-zoom, 1));
   border: 1px solid var(--borderColor); border-radius: 4px;
   background: var(--backgroundColor); color: var(--fontColor);
   font-family: inherit;

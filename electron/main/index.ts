@@ -34,6 +34,7 @@ import { postgresService } from './postgres/postgres-service'
 import * as aiService from './ai-service'
 import { lmStudioCli } from './lmstudio-cli'
 import { sessionLog } from './session-log'
+import { cleanupSpillDirs } from './tool-spill'
 import { skillService, parseSkillMetadata } from './skill-service'
 import { registerNamespacedIpc, sendToAll } from './ipc-registry'
 import { registerCoreTools, setWebSearchConfig, getWebSearchConfig, runWebSearch } from './tools'
@@ -325,6 +326,14 @@ app.whenReady().then(async () => {
     console.warn('[clean-userdata-cache] 启动补清失败:', e)
   }
   await pythonService.initialize()
+  // 工具结果 spill 目录清扫（best-effort，只删形如 aikm-spill-XXXXXX 的旧临时目录）。
+  // spill 是缓存语义：过期即删，模型拿到"文件不存在"会重跑工具，不影响正确性。
+  try {
+    const removedSpills = cleanupSpillDirs()
+    if (removedSpills > 0) console.log(`[tool-spill] 启动清扫过期 spill 目录: ${removedSpills} 个`)
+  } catch (e) {
+    console.warn('[tool-spill] 启动清扫失败（忽略）:', e)
+  }
   // 凭据接缝（路线图 2.3）：加载主进程受保护的 credentials.json
   credentialStore.load()
   // PostgreSQL MCP：注入作者消歧持久缓存文件（跨会话复用，避免重复扫大表）
@@ -2110,7 +2119,8 @@ ipcMain.handle('saveTaskFileAuto', async (event, referencePath: string, content:
 });
 
 // 导出 PDF：隐藏窗口渲染 HTML → printToPDF → 保存
-ipcMain.handle('exportPdf', async (event, { html, title }: { html: string; title: string }) => {
+// landscape：幻灯片导出要横向纸张；不传 = 保持原来的竖版（md_read 等调用方不受影响）
+ipcMain.handle('exportPdf', async (event, { html, title, landscape }: { html: string; title: string; landscape?: boolean }) => {
   const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
     title: '导出 PDF',
     defaultPath: `${title || '文档'}.pdf`,
@@ -2137,7 +2147,8 @@ ipcMain.handle('exportPdf', async (event, { html, title }: { html: string; title
     await pdfWin.loadFile(tmpFile)
     const pdfData = await pdfWin.webContents.printToPDF({
       printBackground: true,
-      pageSize: 'A4'
+      pageSize: 'A4',
+      ...(landscape === true ? { landscape: true } : {})
     })
     pdfWin.destroy()
     pdfWin = null
@@ -3197,6 +3208,44 @@ ipcMain.handle('drawio-export-pdf', async (event, payload) => {
   } catch (e: any) {
     console.error('[drawio-pdf] 导出失败', e)
     return { canceled: false, error: String(e?.message || e) }
+  }
+})
+
+// ==================== 导出幻灯片 PDF（一页一张，逐页打印后合并）====================
+/**
+ * 为什么要「逐页单独打印再合并」，而不是把整套幻灯片放进一个 HTML：
+ * 一个文档里放 N 个「按页面尺寸缩放过的页面盒」时，Chromium 的打印分页会把这些盒子再拆开
+ * （页数翻好几倍，且单靠 CSS 关不掉）；而**单页文档**只会打印成一页，稳定可靠。
+ * 所以这里逐页 printToPDF，再用 pdf-lib 合并；页数 = 幻灯片数。
+ */
+ipcMain.handle('exportSlidesPdf', async (event, payload: { head: string; slides: string[]; tail: string; title?: string }) => {
+  const slides = Array.isArray(payload?.slides) ? payload.slides : []
+  if (!slides.length) return { success: false, error: '没有可导出的页' }
+  const head = String(payload?.head || '')
+  const tail = String(payload?.tail || '')
+  const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
+    title: '导出 PDF',
+    defaultPath: `${payload?.title || 'slides'}.pdf`,
+    filters: [{ name: 'PDF 文档', extensions: ['pdf'] }],
+  })
+  if (result.canceled || !result.filePath) return { success: false, error: '用户取消' }
+  try {
+    const { PDFDocument } = await import('pdf-lib')
+    const merged = await PDFDocument.create()
+    for (let i = 0; i < slides.length; i++) {
+      const bytes = await withPrintWindow(head + slides[i] + tail, (wc) =>
+        wc.printToPDF({ printBackground: true, pageSize: 'A4', landscape: true }),
+      )
+      const doc = await PDFDocument.load(asUint8(bytes), { ignoreEncryption: true })
+      const pages = await merged.copyPages(doc, doc.getPageIndices())
+      for (const p of pages) merged.addPage(p)
+    }
+    const out = await merged.save()
+    fs.writeFileSync(result.filePath, asUint8(out))
+    return { success: true, path: result.filePath, pages: merged.getPageCount() }
+  } catch (error: any) {
+    console.error('[exportSlidesPdf] 导出失败:', error)
+    return { success: false, error: String(error?.message || error) }
   }
 })
 

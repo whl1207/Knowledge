@@ -31,6 +31,9 @@ const CACHE_LIMIT = 32
 /** readFile IPC 读取失败时主进程返回的"错误文本"前缀（见 electron/main/index.ts） */
 const READ_ERROR_PREFIXES = ['Error reading file:', '不支持的文件格式', 'Error reading ']
 
+/** 离屏 iframe 的标记属性（也用于识别「焦点被离屏渲染器拿走」） */
+const OFFSCREEN_ATTR = 'data-drawio-offscreen'
+
 /** 单份图表最多内嵌渲染的页数（超过只渲染前 N 页并提示，其余请在编辑器里看） */
 export const MAX_DIAGRAM_PAGES = 10
 /** 切换页后等 graph 重排的兜底上限 */
@@ -131,6 +134,31 @@ function log(...args: unknown[]): void {
   console.warn('[drawioRender]', ...args)
 }
 
+/**
+ * 兜底：把被离屏 iframe 抢走的键盘焦点交还宿主。
+ *
+ * 离屏渲染器只是个"画图工具"，绝不能拿走宿主的键盘焦点：drawio 载入内容时会自己调
+ * `window.focus()`（开关是 EditorUi.noAutoFocus，见 onMessage 的 configure 分支），焦点一旦落进
+ * 这个视口外的 iframe，宿主的 window / document 就收不到 keydown 了 —— 演示视图（md_ppt）的
+ * 左右键翻页会直接"按不动"，搜索框等输入也会突然没反应。
+ *
+ * 正常路径下 noAutoFocus 已经关掉了这个行为，这里再加一道保险（drawio 版本差异 / 别的聚焦路径）。
+ * 只处理「焦点确实在离屏 iframe 上」的情况，不动用户自己的焦点；也不要调宿主 window.focus()
+ * （那会把应用窗口拉到前台，反而抢走用户正在用的其它窗口）。
+ */
+export function releaseStolenFocus(): void {
+  if (typeof document === 'undefined') return
+  const active = document.activeElement
+  if (!(active instanceof HTMLIFrameElement) || !active.hasAttribute(OFFSCREEN_ATTR)) return
+  try {
+    active.blur()
+    // 个别版本里 blur 元素不足以把焦点交回顶层文档，再对帧窗口要一次
+    active.contentWindow?.blur?.()
+  } catch {
+    /* 跨源取 contentWindow 会抛错：忽略即可 */
+  }
+}
+
 function buildSrc(): string {
   const url = new URL(DRAWIO_ASSET_DIR + 'index.html', document.baseURI)
   url.search = new URLSearchParams({
@@ -208,7 +236,16 @@ function onMessage(ev: MessageEvent): void {
     case 'configure':
       send({
         action: 'configure',
-        config: { useInternalClipboard: true, suppressNewWindows: true },
+        config: {
+          useInternalClipboard: true,
+          suppressNewWindows: true,
+          // 关掉 drawio 的「载入后自动聚焦」：它每次喂进内容都会执行
+          // `window.self===window.top || this.noAutoFocus || window.focus()`（fileLoaded /
+          // initializeEmbedMode），而我们是 iframe，于是它把键盘焦点从宿主文档抢到这个视口外的
+          // 离屏 iframe 里 —— 焦点一旦落进来，宿主的 window keydown 就再也收不到，
+          // 表现为演示视图（md_ppt）的左右键翻页「按不动」，直到用户重新点一下页面。
+          noAutoFocus: true,
+        },
       })
       break
     case 'init':
@@ -221,6 +258,8 @@ function onMessage(ev: MessageEvent): void {
         const p = pendingLoad
         pendingLoad = null
         window.clearTimeout(p.timer)
+        // 内容载入的同时 drawio 可能刚刚抢过焦点（见 releaseStolenFocus），这里立刻交还
+        releaseStolenFocus()
         p.resolve()
       }
       break
@@ -241,7 +280,7 @@ function createFrame(): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const el = document.createElement('iframe')
     el.setAttribute('aria-hidden', 'true')
-    el.setAttribute('data-drawio-offscreen', '1')
+    el.setAttribute(OFFSCREEN_ATTR, '1')
     el.tabIndex = -1
     // 放在视口外但保留真实尺寸：drawio 需要一个有布局尺寸的容器才能正常初始化
     el.style.cssText = 'position:fixed;left:-20000px;top:0;width:1280px;height:900px;border:0;pointer-events:none;'
@@ -486,11 +525,17 @@ export function renderDiagramPages(
     () => undefined,
     () => undefined,
   )
-  return run.catch((e) => {
-    // 只有超时才可能是渲染器卡死（XML 内容问题不该拖垮后续渲染）
-    if (e && (e as any).code === 'timeout') resetFrame()
-    throw e
-  })
+  return run
+    .then((pages) => {
+      // 渲染期间 drawio 可能又把焦点抢进离屏 iframe（见 releaseStolenFocus）→ 交还宿主
+      releaseStolenFocus()
+      return pages
+    })
+    .catch((e) => {
+      // 只有超时才可能是渲染器卡死（XML 内容问题不该拖垮后续渲染）
+      if (e && (e as any).code === 'timeout') resetFrame()
+      throw e
+    })
 }
 
 /** 图表 XML → 单张 SVG（带缓存；不指定 page 时取第 1 页） */

@@ -14,7 +14,7 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { BrowserWindow } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import * as PDFJS from 'pdfjs-dist'
 import xlsx from 'xlsx'
 import { toolRegistry, defineTool } from '@/shared/toolRegistry'
@@ -27,6 +27,13 @@ import { retrieveKnowledge } from '@/shared/kbRetrieval'
 import { keywordSearchBlocks } from '@/services/learningSearch'
 import { isBotChallengePage, extractDoiFromUrl, fetchDoiViaCrossref } from '@/shared/webFetchHelpers'
 import { computeEditDiff, makeEditDiffPreview, countTextLines, EDIT_DIFF_MAX_CHARS, type EditDiffFilePreview } from '@/shared/editDiff'
+import { toolResultBudgetForWindow } from '@/shared/toolResultBudget'
+import {
+  buildDeepSeekSearchRequest,
+  buildDeepSeekSearchUrl,
+  DEEPSEEK_SEARCH_DEFAULT_API_VERSION,
+  parseDeepSeekSearchResponse,
+} from '@/lib/agent/deepseekSearch'
 import { skillService } from './skill-service'
 import { requestAnswer, setAgentPlan, setAgentTodos, createAgent, getAgent, getAgentLastContent, disposeAgent, requestRendererTask } from './agent-loop'
 import { sessionLog } from './session-log'
@@ -38,6 +45,7 @@ import { excludeFromAppZoom } from './window-zoom'
 import { registerTeamTools } from './team-tools'
 import {
   normalizeWebSearchConfig,
+  normalizeDeepSeekSearchConfig,
   findWebSearchCustomSource,
   webSearchProviderMeta,
   type WebSearchConfig,
@@ -59,6 +67,23 @@ const TEXT_FULL_READ_MAX_BYTES = 16 * 1024 * 1024
 const MAX_READ_CHARS = 100 * 1024
 /** PDF / Word / Excel 单次返回字符数（默认窗口，沿用原有上限） */
 const DEFAULT_DOC_CHARS = 20000
+
+/**
+ * 单次读取的**默认**窗口（字符）：跟随该窗口下工具结果的有界预算（复刻 DSH 的 `read` 分页）。
+ *
+ * 为什么不能固定 100KB：这些字符最后会被 `toolResultBudget` 掐到该窗口的 ~12%，
+ * 在 32K 窗口下等于"读进来 100KB、只留下 6KB"——白读一次、白花一次 token，
+ * 还多占一轮上下文。让读取窗口跟着预算走，就没有这段浪费。
+ *
+ * 下限 25KB：窗口未知 / 很大时保持接近原先的手感，避免退化成频繁续读。
+ */
+const READ_WINDOW_FLOOR_CHARS = 25 * 1024
+
+/** 该会话窗口下 read_file 的默认读取窗口（字符） */
+function defaultReadWindowChars(windowTokens?: number): number {
+  const budgetChars = toolResultBudgetForWindow(windowTokens).thresholdChars
+  return Math.max(READ_WINDOW_FLOOR_CHARS, Math.min(MAX_READ_CHARS, budgetChars))
+}
 
 /**
  * 解析并校验路径：
@@ -217,7 +242,12 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
         return {
           ok: true,
           value: {
+            // 控制字段（路径 / 续读锚点）排在 content **之前**：超预算的 read_file 结果会被
+            // 掐中段（read_file 走 headOnly 只保开头，见 shared/toolResultBudget.ts），
+            // 把 nextOffset 放在 JSON 尾部会在截断时丢失，模型就再也读不到后半篇。
             path: input.path,
+            truncated: win.truncated,
+            nextOffset: win.nextOffset,
             content: win.content,
             size: stat.size,
             format: 'pdf',
@@ -247,7 +277,10 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
         return {
           ok: true,
           value: {
+            // 控制字段在前（理由同 PDF 分支：截断时 nextOffset 不能丢）
             path: input.path,
+            truncated: win.truncated,
+            nextOffset: win.nextOffset,
             content: win.content,
             size: stat.size,
             format: 'docx',
@@ -279,7 +312,10 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
         return {
           ok: true,
           value: {
+            // 控制字段在前（理由同 PDF 分支：截断时 nextOffset 不能丢）
             path: input.path,
+            truncated: win.truncated,
+            nextOffset: win.nextOffset,
             content: win.content,
             size: stat.size,
             format: ext === '.xlsx' ? 'xlsx' : 'xls',
@@ -318,21 +354,28 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
         },
       }
     }
-    // 普通文本：按「字符」窗口切片（默认窗口 = 首个 100KB 字节所含字符数，与旧行为一致）
+    // 普通文本：按「字符」窗口切片。
+    // 默认窗口 = min(首个 100KB 字节所含字符数, 该窗口下工具结果预算对应的读取量)——
+    // 后者见 `defaultReadWindowChars`：读得比预算多只会白花 token（返回值随后被掐到窗口 ~12%）。
     const buf = fs.readFileSync(abs)
     const { offset, limit } = parseReadWindow(input)
-    const win = sliceByCharWindow(buf.toString('utf-8'), offset, limit ?? defaultTextWindowChars(buf))
+    const win = sliceByCharWindow(
+      buf.toString('utf-8'),
+      offset,
+      limit ?? Math.min(defaultTextWindowChars(buf), defaultReadWindowChars(ctx.windowTokens)),
+    )
     return {
       ok: true,
       value: {
+        // 控制字段在前（理由同 PDF 分支：截断时 nextOffset 不能丢）
         path: input.path,
+        truncated: win.truncated,
+        nextOffset: win.nextOffset,
         content: win.content,
         size: stat.size,
         totalChars: win.totalChars,
         startOffset: win.startOffset,
         endOffset: win.endOffset,
-        truncated: win.truncated,
-        nextOffset: win.nextOffset,
         note: windowNote('文件', win, offset),
       },
     }
@@ -1432,6 +1475,12 @@ function cleanSearchItems(items: any[]): WebSearchItem[] {
 interface SearchOutcome {
   items: WebSearchItem[]
   via: string
+  /**
+   * 搜索源自带的**总结正文**（可选）。
+   * 目前只有 DeepSeek 官方搜索会产生：它的一次搜索本身就是"服务端跑工具 + 模型作答"的
+   * 完整模型调用，`text` 块就是基于搜索结果写下的总结。其余搜索源只返回链接列表。
+   */
+  answer?: string
 }
 
 /** Bing：隐藏浏览器渲染为主，HTML 解析兜底 */
@@ -1539,8 +1588,7 @@ async function searchZhipu(query: string, cfg: WebSearchConfig): Promise<SearchO
 }
 
 /** Tavily：POST /search（Bearer） */
-async function searchTavily(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
-  const host = String(cfg.tavily.apiHost || 'https://api.tavily.com').trim().replace(/\/+$/, '')
+async function searchTavily(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {  const host = String(cfg.tavily.apiHost || 'https://api.tavily.com').trim().replace(/\/+$/, '')
   const apiKey = String(cfg.tavily.apiKey || '').trim()
   if (!apiKey) throw new Error('未配置 Tavily API Key')
   const data = await fetchSearchJson(`${host}/search`, {
@@ -1731,6 +1779,61 @@ async function searchCustomSource(
   }
 }
 
+/**
+ * DeepSeek 官方搜索：走 **Anthropic 兼容 Messages 端点** + 服务端原生 `web_search` 工具。
+ *
+ * 三条与别的源不同的性质，都直接影响可用性判断：
+ *  1. **每次搜索是一次模型调用**（不是搜索 API 调用）——延迟与 token 成本按 LLM 计；
+ *  2. **只在桌面端可用**：`api.deepseek.com` 不给浏览器放 CORS，渲染层走不通；
+ *  3. **可能 200 但不触发搜索**——此时没有结果块，`parseDeepSeekSearchResponse` 会显式抛错，
+ *     而不是把它当成"0 条结果"（那会让模型以为"网上没有"）。
+ *
+ * 请求组装与响应解析在 `@/lib/agent/deepseekSearch`（纯函数，有自测覆盖）。
+ */
+async function searchDeepSeekOfficial(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
+  const ds = normalizeDeepSeekSearchConfig((cfg as any).deepseek)
+  const apiKey = String(ds.apiKey || '').trim()
+  if (!apiKey) throw new Error('未配置 DeepSeek API Key（可在「工具 → 搜索」填，或让对话使用 DeepSeek 以复用凭据）')
+
+  const url = buildDeepSeekSearchUrl(ds.apiHost)
+  const body = buildDeepSeekSearchRequest({
+    query,
+    model: ds.model,
+    maxUses: ds.maxUses,
+  })
+  // 鉴权两种口径都带上：Anthropic 原生用 x-api-key，Bearer 兼容更广（DSH 亦按 Anthropic 语义发送）
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'anthropic-version': DEEPSEEK_SEARCH_DEFAULT_API_VERSION,
+    'x-api-key': apiKey,
+    Authorization: `Bearer ${apiKey}`,
+    'User-Agent': `ai-km/${app.getVersion?.() || '0'}`,
+  }
+
+  let data: any
+  try {
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
+    const text = await res.text()
+    if (!res.ok) {
+      // 把服务端的错误正文带出来（401/403 = 凭据问题；429/5xx = 稍后重试）
+      throw new Error(`HTTP ${res.status}${text ? `：${text.slice(0, 300)}` : ''}`)
+    }
+    try {
+      data = JSON.parse(text)
+    } catch {
+      throw new Error('响应不是有效 JSON（端点可能不是 Anthropic 兼容 Messages 接口）')
+    }
+  } catch (e: any) {
+    throw new Error(`DeepSeek 搜索请求失败（端点 ${url}）：${e?.message || String(e)}`)
+  }
+
+  // 解析失败（没有结果块 / 服务端工具报错）会在此抛出，信息里带诊断 code
+  const parsed = parseDeepSeekSearchResponse(data, cfg.maxResults)
+  // answer = 服务端那一轮基于搜索结果写下的总结（可能为空）；一起带回给模型，
+  // 否则就等于白付了"服务端跑工具 + 模型作答"这次模型调用的钱
+  return { items: cleanSearchItems(parsed.items), via: 'deepseek-official', answer: parsed.answer }
+}
+
 /** 单个搜索源执行（Bing/百度 走查询改写；其余源保持原句） */
 async function runSingleSearch(
   provider: WebSearchProviderId,
@@ -1748,6 +1851,7 @@ async function runSingleSearch(
     case 'searxng': return searchSearxng(q, config)
     case 'bocha': return searchBocha(q, config)
     case 'zhipu': return searchZhipu(q, config)
+    case 'deepseek': return searchDeepSeekOfficial(q, config)
     case 'tavily': return searchTavily(q, config)
     case 'brave': return searchBrave(q, config)
     case 'bing':
@@ -1840,6 +1944,8 @@ export async function runWebSearch(rawQuery: string, cfg: WebSearchConfig = webS
           providers,
           via: outcome.via,
           results: toSearchItems(outcome.items, config.maxResults),
+          // 源自带的总结（目前只有 DeepSeek 官方搜索有）原样带回
+          ...(outcome.answer ? { answer: outcome.answer } : {}),
           elapsedMs: Date.now() - started,
           attempts,
         }
@@ -1866,6 +1972,8 @@ async function webSearch(input: any): Promise<ToolResult> {
         provider: r.provider,
         providers: r.providers,
         via: r.via,
+        // 源自带的总结（DeepSeek 官方搜索有）放在链接列表之前，便于模型先用结论再用来源
+        ...(r.answer ? { answer: r.answer } : {}),
         results: r.results,
       },
     }
