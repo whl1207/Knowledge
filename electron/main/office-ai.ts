@@ -25,6 +25,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { viewInfoOfWebContents } from './office-host'
 import { docxToMarkdown } from './office/docx-to-markdown'
+import { sessionLog } from './session-log'
 
 // ==================== 状态 ====================
 
@@ -376,6 +377,127 @@ async function streamOllama(
   cb.onDone()
 }
 
+// ==================== 会话事件日志 ====================
+
+/**
+ * 编辑器里的 AI 走的是**它自己的智能体循环**（GenOffice 的 agent-core + 文档技能），
+ * 不经 AI-KM 的 agent-loop / ai-service —— 桥接层只是「模型网关」。所以这里必须自己把
+ * 「模型可见的事实」按同一套事件写进 sessionLog，否则编辑器里的对话在「设置 → 日志」里
+ * 完全看不见（排查工具调用问题时只能去翻模型服务的日志）。
+ *
+ * 事件序列与 agent-loop 对齐：session/start → user/message → assistant/chunk（流式增量）
+ * → assistant/message（+ toolCalls）→ 下一轮补 tool/result → turn/end。
+ */
+interface OfficeChatLog {
+  /** 已写入日志的消息条数：每轮只补写新增的尾巴，避免重复落盘历史 */
+  logged: number
+  /** 面板重置对话时另开一条会话（否则日志里会出现重复轮次） */
+  epoch: number
+  turn: number
+}
+const chatLogs = new Map<string, OfficeChatLog>()
+
+/** 当前编辑器对话（文档 + 编辑器类型）的可读来源标签，写进 user/message.source */
+function chatSourceLabel(sender: WebContents): string {
+  const info = viewInfoOfWebContents(sender)
+  if (!info) return '内置编辑器'
+  const kind = { docs: 'Word', sheets: 'Excel', slides: 'PPT' }[info.type] || info.type
+  const name = info.filePath ? path.basename(info.filePath) : ''
+  return name ? `${kind} 编辑器 · ${name}` : `${kind} 编辑器`
+}
+
+/**
+ * 记录「本轮请求带来」的新消息（用户提问 / 上一轮的助手消息与工具结果），返回日志 id。
+ * 消息数组每轮都会把全部历史重发，所以只按条数补写尾巴；数组变短说明面板重置了对话。
+ */
+function logOfficeIncoming(sender: WebContents, baseId: string, cfg: OfficeAiConfig, system: string, messages: any[]): string {
+  const base = baseId.replace(/[^a-zA-Z0-9_-]/g, '_') || 'session'
+  let state = chatLogs.get(base)
+  if (!state) {
+    state = { logged: 0, epoch: 0, turn: 0 }
+    chatLogs.set(base, state)
+  }
+  if (messages.length < state.logged) {
+    sessionLog.append(state.epoch ? `${base}-${state.epoch}` : base, 'session/end', { status: 'disposed' })
+    state.epoch += 1
+    state.logged = 0
+  }
+  const logId = state.epoch ? `${base}-${state.epoch}` : base
+  if (state.logged === 0) {
+    sessionLog.append(logId, 'session/start', {
+      provider: cfg.provider,
+      model: cfg.model,
+      systemPrompt: system,
+      createdAt: Date.now(),
+    })
+  }
+  const source = chatSourceLabel(sender)
+  // 助手消息不从历史里记：它们都是我们自己上一轮流式回复的回声（模型网关只有一个出口），
+  // 已由 logOfficeReply 实时落盘；再从历史补一次就会重复。首次请求（logged === 0）例外，
+  // 例如主进程重启后面板带着完整历史重新发来，这时必须把历史补全。
+  const skipAssistant = state.logged > 0
+  for (const m of messages.slice(state.logged)) {
+    if (!m || typeof m !== 'object') continue
+    if (m.role === 'user') {
+      const images = Array.isArray(m.images) ? m.images.length : 0
+      sessionLog.append(logId, 'user/message', {
+        content: String(m.text ?? ''),
+        source,
+        ...(images ? { images } : {}),
+      })
+    } else if (m.role === 'assistant') {
+      if (skipAssistant) continue
+      const toolCalls = Array.isArray(m.toolCalls)
+        ? m.toolCalls.map((tc: any) => ({ id: String(tc?.id || ''), name: String(tc?.name || ''), arguments: tc?.input ?? {} }))
+        : []
+      sessionLog.append(logId, 'assistant/message', {
+        content: String(m.text ?? ''),
+        ...(toolCalls.length ? { toolCalls } : {}),
+        ...(m.reasoning ? { reasoning: String(m.reasoning) } : {}),
+      })
+    } else if (m.role === 'tool' && Array.isArray(m.results)) {
+      for (const r of m.results) {
+        sessionLog.append(logId, 'tool/result', {
+          callId: String(r?.id || r?.name || ''),
+          name: String(r?.name || ''),
+          ok: !r?.isError,
+          value: String(r?.output ?? '').slice(0, 200000),
+        })
+      }
+    }
+  }
+  state.logged = messages.length
+  state.turn += 1
+  sessionLog.append(logId, 'turn/start', { turn: state.turn })
+  return logId
+}
+
+/** 一轮流式结束：写完整助手消息 + turn/end（含错误原因，便于在日志里复盘） */
+function logOfficeReply(
+  logId: string,
+  state: { turn: number } | undefined,
+  text: string,
+  reasoning: string,
+  toolCalls: Array<{ id: string; name: string; arguments: any }>,
+  reason: 'completed' | 'cancelled' | 'error',
+  error?: string,
+): void {
+  if (text || reasoning || toolCalls.length) {
+    sessionLog.append(logId, 'assistant/message', {
+      content: text,
+      ...(toolCalls.length ? { toolCalls } : {}),
+      ...(reasoning ? { reasoning } : {}),
+    })
+  }
+  sessionLog.append(logId, 'turn/end', { turn: state?.turn ?? 0, reason, ...(error ? { error } : {}) })
+}
+
+/** 取得该日志会话的轮次状态（供 logOfficeReply 用） */
+function turnStateOf(baseId: string): { turn: number } | undefined {
+  const base = baseId.replace(/[^a-zA-Z0-9_-]/g, '_') || 'session'
+  return chatLogs.get(base)
+}
+
 // ==================== 通道注册 ====================
 
 /** 把 AiSettings 形状的配置给编辑器（模型选择器据此显示 AI-KM 当前模型） */
@@ -445,10 +567,14 @@ export function registerOfficeAiIpc() {
   ipcMain.handle('ai:chat', async (event, request: any) => {
     const cfg = state.ai
     if (!cfg) return { ok: false, error: '未配置模型：请先在 AI-KM 设置中启用一个模型' }
+    const system = request?.system || ''
+    const user = String(request?.user || '')
+    const chatBaseId = String(request?.requestId || `chat-${Date.now()}`)
+    const logId = logOfficeIncoming(event.sender, chatBaseId, cfg, system, [{ role: 'user', text: user }])
     let content = ''
     let failed = ''
     try {
-      await runStream(cfg, request?.system || '', [{ role: 'user', text: String(request?.user || '') }], [], undefined, event.sender, {
+      await runStream(cfg, system, [{ role: 'user', text: user }], [], undefined, event.sender, {
         onDelta: (t) => (content += t),
         onToolCall: () => {},
         onDone: () => {},
@@ -457,6 +583,7 @@ export function registerOfficeAiIpc() {
     } catch (e) {
       failed = (e as Error)?.message || String(e)
     }
+    logOfficeReply(logId, turnStateOf(chatBaseId), content, '', [], failed ? 'error' : 'completed', failed || undefined)
     return failed ? { ok: false, error: failed } : { ok: true, content }
   })
 
@@ -475,19 +602,43 @@ export function registerOfficeAiIpc() {
     const abort = new AbortController()
     state.streams.set(requestId, { abort, sender: event.sender })
 
+    // 会话日志：把这一轮（含上一轮的助手消息/工具结果）写进「设置 → 日志」能看到的事件流
+    const system = request?.system || ''
+    const messages = Array.isArray(request?.messages) ? request.messages : []
+    const logBaseId = String(request?.sessionId || requestId)
+    const logId = logOfficeIncoming(event.sender, logBaseId, cfg, system, messages)
+    const turnState = turnStateOf(logBaseId)
+    let loggedText = ''
+    let loggedReasoning = ''
+    const loggedToolCalls: Array<{ id: string; name: string; arguments: any }> = []
+
     const callbacks: StreamCallbacks = {
-      onDelta: (text) => push(event.sender, { requestId, type: 'delta', text }),
-      onReasoning: (text) => push(event.sender, { requestId, type: 'reasoning', text }),
-      onToolCall: (toolCall) => push(event.sender, { requestId, type: 'tool-call', toolCall }),
+      onDelta: (text) => {
+        loggedText += text
+        sessionLog.append(logId, 'assistant/chunk', { content: text })
+        push(event.sender, { requestId, type: 'delta', text })
+      },
+      onReasoning: (text) => {
+        loggedReasoning += text
+        push(event.sender, { requestId, type: 'reasoning', text })
+      },
+      onToolCall: (toolCall) => {
+        loggedToolCalls.push({ id: toolCall.id, name: toolCall.name, arguments: toolCall.input })
+        push(event.sender, { requestId, type: 'tool-call', toolCall })
+      },
       onUsage: (usage) => push(event.sender, { requestId, type: 'usage', usage }),
       onStopReason: () => {},
       onDone: () => {
         push(event.sender, { requestId, type: 'done' })
         state.streams.delete(requestId)
+        logOfficeReply(logId, turnState, loggedText, loggedReasoning, loggedToolCalls, 'completed')
       },
       onError: (message, code) => {
         push(event.sender, { requestId, type: 'error', error: message, errorCode: code as any })
         state.streams.delete(requestId)
+        // 用户点了停止（ai:stream-cancel）→ 记成 cancelled，与 AI-KM 自己的会话日志口径一致
+        const cancelled = abort.signal.aborted
+        logOfficeReply(logId, turnState, loggedText, loggedReasoning, loggedToolCalls, cancelled ? 'cancelled' : 'error', cancelled ? undefined : message)
       },
     }
 
@@ -496,8 +647,8 @@ export function registerOfficeAiIpc() {
 
     void runStream(
       cfg,
-      request?.system || '',
-      Array.isArray(request?.messages) ? request.messages : [],
+      system,
+      messages,
       Array.isArray(request?.tools) ? request.tools : [],
       request?.maxTokens,
       event.sender,
