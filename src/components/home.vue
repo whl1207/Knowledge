@@ -42,66 +42,88 @@
         <div class="chat-new-btn" @click="onToolbarNewChat" :title="store.locales == 'zh' ? '新建聊天' : 'New chat'">
           <i class="fa fa-plus"></i>
         </div>
+        <!-- 消息排列方式：按顺序 / 按工作区分组（搜索与新建的右侧） -->
+        <div
+          class="chat-new-btn chat-order-btn"
+          :class="{ active: chatOrderMode === 'workspace' }"
+          @click="toggleChatOrderMode"
+          :title="chatOrderTitle"
+        >
+          <i class="fa" :class="chatOrderMode === 'sequence' ? 'fa-list-ul' : 'fa-object-group'"></i>
+        </div>
       </div>
-      <!-- 普通聊天列表（vuedraggable 支持整行拖拽调整顺序） -->
+      <!-- 普通聊天列表（vuedraggable 支持整行拖拽调整顺序；按工作区分组时禁用拖动，改由分组头分隔）。
+           ⚠️ 拖动排序由 vuedraggable 实现，它要求 **#item 插槽的根上只有「每个条目一个节点」**：
+           插槽里不能再放 HTML 注释 / 额外兄弟节点（开发构建会保留注释 → 节点数多于列表长度 →
+           它会抛 "Item slot must have only one child" 并在 updated 钩子里崩成
+           "Cannot read properties of undefined (reading 'updated')"）。分组头只能作为**条目内部**
+           的 v-if 子节点（见下面 .chat-row-wrap 里那个 v-if）。 -->
       <draggable
-        v-model="rootChats"
-        item-key="chat.id"
+        v-model="chatListEntries"
+        item-key="key"
         class="chat-list scoll"
         :animation="150"
         ghost-class="chat-item-ghost"
+        :disabled="chatOrderMode !== 'sequence'"
       >
         <template #item="{ element }">
-          <div 
-            class="chat-item"
-            v-show="isChatMatched(element.chat)"
-            :class="{ 
-              active: activeRootIndex === element.originalIndex,
-              generating: isChatRunning(element.chat),
-              'has-background-execution': globalExecutionState.isExecuting && globalExecutionState.chatId === element.chat.id && currentChatIndex !== element.originalIndex,
-              'chat-retrieval': element.chat.mode === 'retrieval',
-              'chat-workflow': element.chat.mode === 'workflow',
-              'chat-agent': element.chat.mode === 'agent',
-              'chat-agent2': element.chat.mode === 'agent2',
-              'chat-swarm': element.chat.mode === 'swarm'
-            }"
-            @click="openChatFromList(element.originalIndex)"
-            @contextmenu.prevent="onSidebarContextMenu($event, element.originalIndex)"
-          >
-            <div class="chat-item-body">
-              <div class="chat-item-header">
-                <span class="chat-title">
-                  <div v-if="element.chat.mode === 'normal'" class="mode-icon" title="普通模式">
-                    <i class="fa fa-user-o"></i>
-                  </div>
-                  <div v-if="element.chat.mode === 'retrieval'" class="mode-icon" title="知识库模式">
-                    <i class="fa fa-book"></i>
-                  </div>
-                  <div v-else-if="element.chat.mode === 'workflow'" class="mode-icon" title="工作流模式">
-                    <i class="fa fa-stumbleupon"></i>
-                  </div>
-                  <div v-else-if="element.chat.mode === 'agent'" class="mode-icon" title="智能体（Agent 预设）">
-                    <i class="fa fa-user-circle"></i>
-                  </div>
-                  <div v-else-if="element.chat.mode === 'agent2'" class="mode-icon" title="智能体（通用）">
-                    <i class="fa fa-android"></i>
-                  </div>
-                  <div v-else-if="element.chat.mode === 'swarm'" class="mode-icon" title="集群（多智能体协作）">
-                    <i class="fa fa-users"></i>
-                  </div>
-                  {{ element.chat.title || `聊天 ${element.originalIndex + 1}` }}
-                </span>
-                <span class="chat-time">{{ getChatTimeText(element.chat) }}</span>
-                <div class="chat-item-right">
-                  <!-- 删除按钮 -->
-                  <div class="chat-actions" @click.stop="deleteChat(element.originalIndex)" title="删除聊天">
-                    <i class="fa fa-trash"></i>
-                  </div>
-                  <!-- 当前聊天的运行指示器（生成中 / 集群运行中 / 后台执行） -->
-                  <div v-if="isChatRunning(element.chat) || shouldShowBackgroundExecution(element.chat, element.originalIndex)" 
-                   class="execution-indicator" 
-                   :title="chatRunningTitle(element.chat)">
-                    <i class="fa fa-spinner fa-spin"></i>
+          <div class="chat-row-wrap">
+            <div v-if="element.head" class="chat-group-head" :title="element.head.workspace || (store.locales == 'zh' ? '未选择工作区' : 'No workspace')">
+              <i class="fa fa-folder-open-o"></i>
+              <span class="chat-group-name">{{ element.head.label }}</span>
+              <span class="chat-group-count">{{ element.head.count }}</span>
+            </div>
+            <div
+              class="chat-item"
+              v-show="isChatMatched(element.chat)"
+              :class="{ 
+                active: activeRootIndex === element.originalIndex,
+                generating: isChatRunning(element.chat),
+                'has-background-execution': globalExecutionState.isExecuting && globalExecutionState.chatId === element.chat.id && currentChatIndex !== element.originalIndex,
+                'chat-retrieval': element.chat.mode === 'retrieval',
+                'chat-workflow': element.chat.mode === 'workflow',
+                'chat-agent': element.chat.mode === 'agent',
+                'chat-agent2': element.chat.mode === 'agent2',
+                'chat-swarm': element.chat.mode === 'swarm'
+              }"
+              @click="openChatFromList(element.originalIndex)"
+              @contextmenu.prevent="onSidebarContextMenu($event, element.originalIndex)"
+            >
+              <div class="chat-item-body">
+                <div class="chat-item-header">
+                  <span class="chat-title">
+                    <div v-if="element.chat.mode === 'normal'" class="mode-icon" title="普通模式">
+                      <i class="fa fa-user-o"></i>
+                    </div>
+                    <div v-if="element.chat.mode === 'retrieval'" class="mode-icon" title="知识库模式">
+                      <i class="fa fa-book"></i>
+                    </div>
+                    <div v-else-if="element.chat.mode === 'workflow'" class="mode-icon" title="工作流模式">
+                      <i class="fa fa-stumbleupon"></i>
+                    </div>
+                    <div v-else-if="element.chat.mode === 'agent'" class="mode-icon" title="智能体（Agent 预设）">
+                      <i class="fa fa-user-circle"></i>
+                    </div>
+                    <div v-else-if="element.chat.mode === 'agent2'" class="mode-icon" title="智能体（通用）">
+                      <i class="fa fa-android"></i>
+                    </div>
+                    <div v-else-if="element.chat.mode === 'swarm'" class="mode-icon" title="集群（多智能体协作）">
+                      <i class="fa fa-users"></i>
+                    </div>
+                    {{ element.chat.title || `聊天 ${element.originalIndex + 1}` }}
+                  </span>
+                  <span class="chat-time">{{ getChatTimeText(element.chat) }}</span>
+                  <div class="chat-item-right">
+                    <!-- 删除按钮 -->
+                    <div class="chat-actions" @click.stop="deleteChat(element.originalIndex)" title="删除聊天">
+                      <i class="fa fa-trash"></i>
+                    </div>
+                    <!-- 当前聊天的运行指示器（生成中 / 集群运行中 / 后台执行） -->
+                    <div v-if="isChatRunning(element.chat) || shouldShowBackgroundExecution(element.chat, element.originalIndex)" 
+                     class="execution-indicator" 
+                     :title="chatRunningTitle(element.chat)">
+                      <i class="fa fa-spinner fa-spin"></i>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -189,6 +211,18 @@
             :disabled="isAnyExecuting"
           >
         </div>
+        <!-- 右侧栏开关（DSH 同款）：文件 / 终端 / 浏览器，配置按聊天各自保存；
+             样式与左侧 fa-bars 开关一致（纯图标，无边框 / 无盒底） -->
+        <div
+          class="dock-toggle-btn"
+          :class="{ active: dockState.open }"
+          @click="toggleDock"
+          :title="dockState.open
+            ? (store.locales=='zh' ? '收起右侧栏' : 'Hide side panel')
+            : (store.locales=='zh' ? '右侧栏：文件 / 终端 / 浏览器' : 'Side panel: Files / Terminal / Browser')"
+        >
+          <i class="fa fa-columns"></i>
+        </div>
       </div>
       
       <!-- 消息区域 -->
@@ -218,6 +252,15 @@
               class="chat-title-input"
               @change="saveChats"
             />
+            <!-- 右侧栏开关（项目组顶栏也要有；样式与左侧 fa-bars 开关一致） -->
+            <div
+              class="dock-toggle-btn"
+              :class="{ active: dockState.open }"
+              @click="toggleDock"
+              :title="store.locales=='zh' ? '右侧栏：文件 / 终端 / 浏览器' : 'Side panel: Files / Terminal / Browser'"
+            >
+              <i class="fa fa-columns"></i>
+            </div>
           </template>
         </SwarmTeamStream>
         <!-- 合并的消息显示（集群模式的成员汇报同为 chat.messages 消息，共用同一渲染） -->
@@ -801,6 +844,58 @@
             rows="3"
           ></textarea>
           <div class="input-controls">
+            <!-- 左下角：工作区选择（**每个聊天各自一份**；与 DSH 一样，工作区决定智能体的工作目录，
+                 并注入上下文；右侧栏「文件 / 终端」标签也定位到这里） -->
+            <div class="workspace-select-wrap">
+              <span
+                class="workspace-chip"
+                :class="{ empty: !chatWorkspacePath }"
+                :title="workspaceChipTitle"
+                @click.stop="toggleWorkspacePicker"
+              >
+                <i class="fa fa-folder-open-o"></i>
+                <span class="workspace-chip-name">{{ workspaceLabel }}</span>
+                <i class="fa fa-caret-down workspace-chip-caret"></i>
+              </span>
+              <div v-if="showWorkspacePicker" class="workspace-picker scoll" @click.stop>
+                <div class="workspace-picker-title">
+                  {{ store.locales == 'zh' ? '这个聊天的工作区（智能体的工作目录）' : 'This chat’s workspace (agent working directory)' }}
+                </div>
+                <!-- 跟随全局默认：清掉本聊天自己的选择 -->
+                <div
+                  class="workspace-picker-item"
+                  :class="{ active: followingDefaultWorkspace }"
+                  @click="followDefaultWorkspace"
+                >
+                  <i class="fa" :class="followingDefaultWorkspace ? 'fa-check-square-o' : 'fa-square-o'"></i>
+                  <span class="workspace-picker-name">{{ store.locales == 'zh' ? '跟随全局默认' : 'Follow global default' }}</span>
+                  <span class="workspace-picker-path">{{ defaultWorkspacePath || (store.locales == 'zh' ? '（未设置）' : '(none)') }}</span>
+                </div>
+                <div class="shared-kb-divider"></div>
+                <div
+                  v-for="w in workspaceList"
+                  :key="w"
+                  class="workspace-picker-item"
+                  :class="{ active: !followingDefaultWorkspace && w === chatWorkspaceOwn }"
+                  :title="w"
+                  @click="pickWorkspace(w)"
+                >
+                  <i class="fa" :class="(!followingDefaultWorkspace && w === chatWorkspaceOwn) ? 'fa-check-square-o' : 'fa-square-o'"></i>
+                  <span class="workspace-picker-name">{{ baseNameOf(w) }}</span>
+                  <span class="workspace-picker-path">{{ w }}</span>
+                  <i
+                    class="fa fa-times workspace-picker-remove"
+                    :title="store.locales == 'zh' ? '从工作区列表移除（不删除磁盘文件，也不影响聊天已选目录）' : 'Remove from the workspace list (does not delete files)'"
+                    @click.stop="removeWorkspacePath(w)"
+                  ></i>
+                </div>
+                <div class="shared-kb-divider"></div>
+                <div class="workspace-picker-item" @click="addWorkspaceFromDialog">
+                  <i class="fa fa-folder-open"></i>
+                  <span>{{ store.locales == 'zh' ? '打开文件夹…' : 'Open folder…' }}</span>
+                </div>
+              </div>
+            </div>
             <!-- 对话模式选择下拉框 -->
             <div class="mode-select-wrap">
               <!-- 已关联项（放在模式下拉**左侧**）：点击重新选择对应的知识库/工作流/Agent 预设 -->
@@ -1060,11 +1155,6 @@
                 </template>
                 <!-- 空闲：麦克风图标 -->
                 <i v-else :class="getASRIcon()"></i>
-                <!-- ASR 错误提示气泡 -->
-                <div v-if="asrErrorMessage" class="asr-error-tooltip">
-                  <i class="fa fa-exclamation-triangle"></i>
-                  {{ asrErrorMessage }}
-                </div>
               </div>
               <!-- 停止生成 / 发送：同一位置互斥（生成/执行中显示停止，空闲显示发送） -->
               <div 
@@ -1099,6 +1189,26 @@
         <div ref="d3TreeContainer" class="d3-tree-container" @contextmenu.prevent="onBranchPanelContextMenu($event)"></div>
       </div>
     </div>
+
+    <!-- 右侧栏（DSH 同款 dock）：文件 / 终端 / 浏览器；宽度、标签页与开关按聊天各自保存；
+         工作区也用这个聊天自己的（文件树根目录 / 终端 cwd 都跟随它） -->
+    <ChatDock
+      v-if="dockState.open"
+      :tabs="dockState.tabs"
+      :active-tab-id="dockState.activeTabId"
+      :width="dockState.width"
+      :narrow="isNarrowLayout"
+      :occluded="dockOccluded"
+      :chat-workspace="chatWorkspacePath"
+      :zh="store.locales == 'zh'"
+      @update:width="onDockResize"
+      @resize-end="onDockResizeEnd"
+      @activate="onDockActivate"
+      @add="onDockAddTab"
+      @close-tab="onDockCloseTab"
+      @close="closeDock"
+      @insert-text="insertDockText"
+    />
     
     <!-- 图片预览模态框 -->
     <div v-if="showImagePreview" class="image-preview-modal" @click="closeImagePreview">
@@ -1161,6 +1271,21 @@ import { chatHistoryForRequest, compactChat, shouldCompactChat } from '@/lib/age
 import { isContextOverflowError } from '@/shared/contextBudget'
 // 输入框草稿：按聊天各自保存（读写纯函数，自测见 chatDraft.selftest.ts）
 import { readChatDraft, writeChatDraft, resolveDraftChat, joinAsrText } from '@/shared/chatDraft'
+// 每个聊天自己的工作区 + 按工作区分组（读写纯函数，自测见 chatWorkspace.selftest.ts）
+import { groupByWorkspace, readChatWorkspace } from '@/shared/chatWorkspace'
+// 右侧栏（DSH 同款 dock）：标签页 / 宽度 / 当前标签的纯逻辑（自测见 chatDock.selftest.ts）
+import {
+  activateDockTab,
+  addDockTab,
+  closeDockTab,
+  defaultDockState,
+  normalizeDockState,
+  setDockOpen as setDockOpenState,
+  setDockWidth as setDockWidthState,
+  type ChatDockState,
+  type ChatDockTabKind,
+} from '@/shared/chatDock'
+import ChatDock from '@/components/home/ChatDock.vue'
 // PTC（Code Mode）：run_code 输出解析（返回值 / console 日志 / 程序内调用的工具）
 import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/agent/ptc'
 // 工作区根目录：与智能体工具的相对路径锚点（AgentOptions.cwd）保持同一来源
@@ -1278,6 +1403,250 @@ const inputText = computed<string>({
   },
 })
 
+// ==================== 右侧栏（DSH 同款 dock）：每个聊天各自一份 ====================
+// 与输入框草稿同一套做法：状态挂在 chat 上（chat.dock），随 chats 一起持久化。
+// 旧存档没有这个字段时，loadChatsFromStorage 会补上归一化后的默认值（收起 + 文件/终端/浏览器三个标签）。
+/** 兜底默认状态（正常路径不会用到：新聊天与旧存档都会在加载时写好 chat.dock） */
+const DOCK_FALLBACK_STATE = defaultDockState()
+const dockState = computed<ChatDockState>({
+  get: () => chats.value[currentChatIndex.value]?.dock ?? DOCK_FALLBACK_STATE,
+  set: (value: ChatDockState) => {
+    const chat = chats.value[currentChatIndex.value]
+    if (chat) chat.dock = value
+  },
+})
+
+/** 开关右侧栏（点头部图标） */
+const toggleDock = () => {
+  dockState.value = setDockOpenState(dockState.value, !dockState.value.open)
+  saveChats()
+}
+/** 收起右侧栏（标签条上的收起按钮 / 窄屏返回） */
+const closeDock = () => {
+  if (!dockState.value.open) return
+  dockState.value = setDockOpenState(dockState.value, false)
+  saveChats()
+}
+const onDockAddTab = (kind: ChatDockTabKind) => {
+  dockState.value = addDockTab(dockState.value, kind)
+  saveChats()
+}
+const onDockCloseTab = (id: string) => {
+  dockState.value = closeDockTab(dockState.value, id)
+  saveChats()
+}
+const onDockActivate = (id: string) => {
+  dockState.value = activateDockTab(dockState.value, id)
+}
+const onDockResize = (width: number) => {
+  dockState.value = setDockWidthState(dockState.value, width)
+}
+/** 拖宽结束才落盘（拖动过程只改内存，避免每移动一像素写一次 localStorage） */
+const onDockResizeEnd = () => saveChats()
+/**
+ * 右侧栏「浏览器」标签的遮挡判断：网页区是原生视图（永远画在 DOM 之上），
+ * 主窗口一出现盖住侧栏的浮层，就必须让它先藏起来，否则浮层会被压在网页下面。
+ * （Element Plus 的对话框 / 消息框挂在 body 上，由 BrowserAgentShell 自己观察 body 处理。）
+ */
+const dockOccluded = computed(() =>
+  !!store.settingsOpen
+  || !!store.fileWindowOverlay
+  || showImagePreview.value
+  || wordExportVisible.value
+  || contextMenuVisible.value
+  || sidebarContextMenuVisible.value
+)
+/** 右侧栏「文件」标签的「插入路径」：追加进当前聊天的输入框草稿 */
+const insertDockText = (text: string) => {
+  const current = inputText.value
+  inputText.value = current && !/\s$/.test(current) ? `${current} ${text}` : `${current}${text}`
+  void nextTick(() => {
+    const el = document.querySelector<HTMLTextAreaElement>('.message-input')
+    el?.focus()
+    el?.setSelectionRange(el.value.length, el.value.length)
+  })
+}
+
+// ==================== 工作区（输入框左下角）：**每个聊天各自一份** ====================
+// 与 DSH 同一套语义：工作区 = 智能体的工作目录。
+// - 每个聊天可以指向不同目录（chat.workspace）；切聊天不会互相改目录，切模块/重启也各自保留；
+// - 注入上下文：随 system prompt 写进「当前工作目录（工作区）」并作为 AgentOptions.cwd 交给工具做路径围栏
+//   （见 lib/agent/promptContext.assembleAgentSystemPrompt 的 workspace 入参 + useAgentRun 的 cwd）；
+// - 右侧栏「文件 / 终端」标签默认定位/开在这里（ChatDock 把 chatWorkspace 传下去）；
+// - `store.root`（全局默认工作区）仍然保留：聊天没选过就跟随它，知识管理等「不在聊天里」的界面也继续用它。
+const showWorkspacePicker = ref(false)
+/** 当前聊天**自己**选的工作区（空串 = 跟随全局默认） */
+const chatWorkspaceOwn = computed(() => String(chats.value[currentChatIndex.value]?.workspace || '').trim())
+/** 当前聊天实际生效的工作区（自己选过就用自己的，否则用全局默认） */
+const chatWorkspacePath = computed(() => readChatWorkspace(chats.value[currentChatIndex.value], store.root))
+/** 全局默认工作区（聊天没选过时的兜底） */
+const defaultWorkspacePath = computed(() => String(store.root || '').trim())
+/** 是否跟随默认（用于浮层里给「跟随默认」打勾） */
+const followingDefaultWorkspace = computed(() => !chatWorkspaceOwn.value)
+/** 可选的路径集合：工作区注册表 + 本聊天的 + 全局默认（去重，保序） */
+const workspaceList = computed<string[]>(() => {
+  const out: string[] = []
+  const push = (p: any) => {
+    const v = String(p || '').trim()
+    if (v && !out.includes(v)) out.push(v)
+  }
+  ;(Array.isArray(store.roots) ? store.roots : []).forEach(push)
+  push(chatWorkspaceOwn.value)
+  push(defaultWorkspacePath.value)
+  return out
+})
+/** 路径末段（展示用） */
+const baseNameOf = (p: string): string => {
+  const parts = String(p || '').replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : String(p || '')
+}
+const workspaceLabel = computed(() => {
+  const p = chatWorkspacePath.value
+  if (p) return baseNameOf(p)
+  return store.locales == 'zh' ? '选择工作区' : 'Choose workspace'
+})
+const workspaceChipTitle = computed(() => {
+  const own = chatWorkspaceOwn.value
+  const eff = chatWorkspacePath.value
+  const zh = store.locales == 'zh'
+  if (!eff) return zh ? '这个聊天还没有工作区：点这里选择（会注入智能体上下文）' : 'No workspace for this chat yet — click to choose (injected into the agent context)'
+  const tail = zh
+    ? (own ? '（这个聊天专用）' : '（跟随全局默认）')
+    : (own ? ' (this chat only)' : ' (following the global default)')
+  return (zh ? '这个聊天的工作区（智能体工作目录，会注入上下文）：' : 'This chat’s workspace (agent working directory, injected into context): ') + eff + tail
+})
+const toggleWorkspacePicker = () => {
+  showWorkspacePicker.value = !showWorkspacePicker.value
+  if (showWorkspacePicker.value) {
+    // 与同一行的其它浮层互斥，避免叠在一起
+    showAgentPresetPicker.value = false
+    showSharedKbPicker.value = false
+    showSwarmMemberPicker.value = false
+  }
+}
+/** 把某个路径设为**这个聊天**的工作区（不动全局默认） */
+const setChatWorkspace = (path: string) => {
+  const chat = chats.value[currentChatIndex.value]
+  if (!chat) return
+  chat.workspace = String(path || '').trim() || undefined
+  showWorkspacePicker.value = false
+  saveChats()
+}
+/**
+ * 把路径登记进「工作区列表」（供所有聊天选用），但**不改变全局默认工作区**。
+ * store.addRoot 会把全局当前项也切过去，而「当前工作区」现在是每个聊天自己的，
+ * 所以这里登记完再把全局默认改回原来的值。
+ */
+const registerWorkspacePath = (path: string) => {
+  if (!path || (store.roots || []).includes(path)) return
+  const prev = String(store.root || '').trim()
+  store.addRoot(path)
+  if (prev && prev !== path) store.setActiveRoot(prev)
+}
+const pickWorkspace = (path: string) => {
+  if (!path) return
+  registerWorkspacePath(path)
+  setChatWorkspace(path)
+  const zh = store.locales == 'zh'
+  ElMessage.success(zh ? `这个聊天的工作区已切换为：${baseNameOf(path)}` : `Workspace for this chat: ${baseNameOf(path)}`)
+}
+const followDefaultWorkspace = () => {
+  setChatWorkspace('')
+  const zh = store.locales == 'zh'
+  ElMessage.success(zh ? '已改为跟随全局默认工作区' : 'Following the global default workspace')
+}
+const addWorkspaceFromDialog = async () => {
+  showWorkspacePicker.value = false
+  try {
+    const dir = await getPlatform().dialog.pickDirectory()
+    if (!dir) return
+    const isNew = !(store.roots || []).includes(dir)
+    registerWorkspacePath(dir)
+    setChatWorkspace(dir) // 打开文件夹的意图就是「这个聊天在这里干活」
+    if (isNew) ElMessage.success(store.locales == 'zh' ? '已添加工作区' : 'Workspace added')
+  } catch { /* 取消 / 当前环境不支持原生选择框：忽略 */ }
+}
+const removeWorkspacePath = (path: string) => {
+  store.removeRoot(path)
+}
+
+// ==================== 聊天列表排列方式（顺序 / 按工作区分组） ====================
+/** 排列方式的持久化键（全局偏好：与具体聊天无关） */
+const CHAT_ORDER_KEY = 'ai-chats-order'
+const chatOrderMode = ref<'sequence' | 'workspace'>(readChatOrderMode())
+function readChatOrderMode(): 'sequence' | 'workspace' {
+  try {
+    return localStorage.getItem(CHAT_ORDER_KEY) === 'workspace' ? 'workspace' : 'sequence'
+  } catch { return 'sequence' }
+}
+watch(chatOrderMode, (v) => {
+  try { localStorage.setItem(CHAT_ORDER_KEY, v) } catch { /* 隐私模式等忽略 */ }
+})
+const chatOrderTitle = computed(() => {
+  const zh = store.locales == 'zh'
+  return chatOrderMode.value === 'sequence'
+    ? (zh ? '消息排列：按顺序（点击改为按工作区分组）' : 'Order: by sequence (click to group by workspace)')
+    : (zh ? '消息排列：按工作区分组（点击改回按顺序）' : 'Order: grouped by workspace (click to go back to sequence)')
+})
+const toggleChatOrderMode = () => {
+  chatOrderMode.value = chatOrderMode.value === 'sequence' ? 'workspace' : 'sequence'
+}
+
+/**
+ * 侧边栏渲染用的条目表（也是 draggable 的 v-model）：
+ * - 顺序模式：纯聊天行，与拖动排序一一对应；
+ * - 分组模式：按工作区排好序，并在**每组第一条**上挂一个 `head`（分组头信息）；
+ *   此模式下禁用拖动（跨组拖动语义不清），所以条目表不会被写回。
+ *
+ * ⚠️ 每个条目都必须永远带 `chat` 与 `originalIndex`（行模板直接读它们），
+ * 且 **#item 插槽根上只能有这一个元素**（vuedraggable 的硬要求）。
+ */
+interface ChatListEntry {
+  /** draggable 的 item-key 用（聊天 id 的字符串形式） */
+  key: string
+  chat: Chat
+  originalIndex: number
+  /** 分组头信息（仅分组模式、且仅每组第一条有） */
+  head?: { workspace: string; label: string; count: number }
+}
+
+const chatListEntries = computed<ChatListEntry[]>({
+  get: () => {
+    const flat = chats.value
+      .map((chat, idx) => ({ chat, originalIndex: idx }))
+      .filter((it) => !it.chat.parentId)
+    const asEntry = (it: { chat: Chat; originalIndex: number }): ChatListEntry =>
+      ({ key: String(it.chat.id), chat: it.chat, originalIndex: it.originalIndex })
+
+    if (chatOrderMode.value === 'sequence') return flat.map(asEntry)
+
+    // 分组模式：搜索时先筛掉不匹配的聊天，空分组自然消失
+    const visible = searchQuery.value.trim() ? flat.filter((it) => isChatMatched(it.chat)) : flat
+    const groups = groupByWorkspace(
+      visible,
+      (it) => readChatWorkspace(it.chat, store.root),
+      {
+        emptyLabel: store.locales == 'zh' ? '未选择工作区' : 'No workspace',
+        order: Array.isArray(store.roots) ? store.roots : [],
+      },
+    )
+    const out: ChatListEntry[] = []
+    for (const g of groups) {
+      g.items.forEach((it, i) => {
+        out.push({
+          ...asEntry(it),
+          head: i === 0 ? { workspace: g.workspace, label: g.label, count: g.items.length } : undefined,
+        })
+      })
+    }
+    return out
+  },
+  set: (list) => {
+    // 只有顺序模式会写回（分组模式已禁用拖动）；条目表与 rootChats 形状一致，直接交给它排序
+    rootChats.value = list.map((e) => ({ chat: e.chat, originalIndex: e.originalIndex }))
+  },
+})
+
 const showSidebar = ref(false)  // 聊天列表侧边栏：初始不显示，由聊天标题左侧的 fa-bars 开关展开
 // 细长布局（高宽比 > 16:9，典型如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换——
 // 进入主页先看到整屏聊天列表，点某条对话进入整屏对话，对话区左上角 fa-bars 再回到列表（见样式 .narrow）
@@ -1331,8 +1700,14 @@ const autoScrollEnabled = ref(true)
 // ASR 语音输入状态
 const isASRRecording = ref(false)
 const isASRProcessing = ref(false)
-const asrErrorMessage = ref('')
-let asrErrorTimer: any = null
+/**
+ * 语音输入的出错 / 缺配置提示：统一用 ElMessage（顶部提示条），
+ * 不在麦克风按钮旁边挂红色气泡——错误显示只保留这一条通道（与全局语音输入一致）。
+ */
+const asrWarn = (message: string) => {
+  console.warn('[ASR] 语音输入:', message)
+  ElMessage({ type: 'warning', duration: 6000, showClose: true, message })
+}
 let asrManagerInstance: any = null
 // funasr-online 流式：实时 partial 写入输入框。记录录音开始时的输入为 base，partial 追加在其后；
 // 每完成一句（VAD/停止）把 base 前滚，避免覆盖用户已输入内容，也支持多句连续
@@ -3953,17 +4328,11 @@ onMounted(async () => {
         }
       },
       onError: (error: string) => {
-        console.error('[ASR] 语音输入错误:', error)
         isASRRecording.value = false
         isASRProcessing.value = false
         asrPartialFill = false
-        // 显示错误信息 5 秒后自动清除
-        asrErrorMessage.value = error
-        if (asrErrorTimer) clearTimeout(asrErrorTimer)
-        asrErrorTimer = setTimeout(() => {
-          asrErrorMessage.value = ''
-          asrErrorTimer = null
-        }, 5000)
+        // 语音输入的错误 / 缺配置统一用 ElMessage 提示（不在输入框旁边挂红色气泡）
+        asrWarn(error)
       }
     })
 
@@ -3971,21 +4340,11 @@ onMounted(async () => {
     asrManagerInstance.warmup?.().catch(() => {})
 
     // 不预加载模型，点击录音按钮后再加载
-    
-    // ASR 管理器就绪后再注册快捷键和监听器
-    if (hasCapability('shell.globalShortcut')) {
-      // 监听 ASR 全局快捷键（来自宿主主进程）
-      getPlatform().events.on('asr-shortcut-toggle', () => {
-        if (isASRRecording.value) {
-          stopASR()
-        } else {
-          startASR()
-        }
-      })
-      
-      // 注册 ASR 快捷键
-      registerASRShortcut()
-    }
+
+    // 注意：这里**不再**监听 / 注册 ASR 全局快捷键。
+    // 全局语音输入已收敛为一处（App.vue → services/asr/globalVoice.ts）：热键由它统一接管，
+    // 按录音开始时的焦点决定落点（聊天输入框 / 搜索框 / 设置字段…），并统一显示提示浮层。
+    // 本组件保留自己的麦克风按钮（按钮走的是本组件这套「按聊天草稿」的输入逻辑，二者互不干扰）。
   })
 })
 
@@ -4021,14 +4380,12 @@ onBeforeUnmount(() => {
   unsubAgentStepEvents?.()
   unsubAgentStepEvents = null
   
-  // 清理 ASR
+  // 清理 ASR（本组件自己的麦克风按钮用的实例）
   if (asrManagerInstance) {
     asrManagerInstance.destroy()
     asrManagerInstance = null
   }
-  if (hasCapability('shell.globalShortcut')) {
-    getPlatform().shell.unregisterShortcut().catch(() => {})
-  }
+  // 全局快捷键由 App.vue 的全局语音输入负责注销（切模块 / 换面板都不该让热键失效）
 })
 
 // ==================== 技能相关函数 ====================
@@ -4678,6 +5035,8 @@ const closeHomeOverlays = (): boolean => {
   if (showSwarmMemberPicker.value) { showSwarmMemberPicker.value = false; return true }
   if (showSharedKbPicker.value) { showSharedKbPicker.value = false; return true }
   if (showBranchView.value) { showBranchView.value = false; return true }
+  // 窄屏下右侧栏是整屏二级界面（文件 / 终端 / 浏览器）：返回手势先退出它，再回聊天列表
+  if (isNarrowLayout.value && dockState.value.open) { closeDock(); return true }
   return false
 }
 
@@ -4836,6 +5195,11 @@ const handleSwarmMode = async (message: string) => {
 
 // 点击模式选择区域外部时关闭 Agent 预设 / 共享知识库 / 集群成员 浮层
 const onDocMouseDownForPresetPicker = (e: MouseEvent) => {
+  // 工作区浮层独立判断（它不在 .mode-select-wrap 里）
+  if (showWorkspacePicker.value) {
+    const wsWrap = document.querySelector('.workspace-select-wrap') as HTMLElement | null
+    if (!wsWrap || !wsWrap.contains(e.target as Node)) showWorkspacePicker.value = false
+  }
   if (!showAgentPresetPicker.value && !showSharedKbPicker.value && !showSwarmMemberPicker.value) return
   const wrap = document.querySelector('.mode-select-wrap') as HTMLElement | null
   if (wrap && !wrap.contains(e.target as Node)) {
@@ -5139,6 +5503,9 @@ const loadChatsFromStorage = () => {
           chat.config.retrievalStrategy = 'similarity'
         }
         if (chat.isGenerating === undefined) chat.isGenerating = false
+        // 右侧栏（每聊天独立）：旧存档没有这个字段 → 归一化补上默认值（收起 + 文件/终端/浏览器）
+        // 归一化同时清掉脏数据（未知标签类型、重复 id、越界宽度），避免存档把界面搞坏
+        chat.dock = normalizeDockState(chat.dock)
         
         // 兼容旧数据 - 使用类型断言处理可能的旧字段
         chat.messages.forEach((msg: any) => {
@@ -5241,7 +5608,9 @@ function createNewChatData(): Chat {
     createdAt: Date.now(),
     online: false,
     isGenerating: false,
-    mode: 'normal'  // 默认普通模式
+    mode: 'normal',  // 默认普通模式
+    // 右侧栏（每聊天独立）：新聊天默认备好 文件/终端/浏览器 三个标签，但初始收起
+    dock: defaultDockState(),
   }
 }
 
@@ -8059,19 +8428,8 @@ async function stopASR() {
   isASRProcessing.value = false
 }
 
-// 注册/更新 ASR 全局快捷键
-async function registerASRShortcut() {
-  if (hasCapability('shell.globalShortcut') && store.AIconfig.asr.shortcut) {
-    try {
-      const result = await getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut)
-      if (!result.success) {
-        console.warn('[ASR] 注册全局快捷键失败:', result.error)
-      }
-    } catch (error) {
-      console.warn('[ASR] 注册全局快捷键出错:', error)
-    }
-  }
-}
+// 注册/更新 ASR 全局快捷键：已收敛到全局语音输入（services/asr/globalVoice.ts），
+// 本组件不再注册，避免两个入口抢同一个热键 / 重复开麦克风。
 
 const toggleSidebar = () => {
   // 细长布局：列表与对话各占满整屏，bars 只承担「回到聊天列表」这一个方向
@@ -8729,6 +9087,8 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   position: relative;
   /* 聊天列表侧栏展开宽度（窄屏在媒体查询里改这个变量） */
   --chat-sidebar-w: 220px;
+  /* 顶部三条栏统一行高：侧栏工具栏（搜索 / 新建）/ 聊天头部（标题 / 模型）/ 右侧栏标签条 */
+  --topbar-h: 40px;
 }
 
 /* ====== 拖入文件提示 ====== */
@@ -8760,6 +9120,85 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .drop-files-hint-card i { font-size: 26px; color: var(--fontActiveColor); }
 .drop-files-hint-sub { font-size: 11px; opacity: 0.65; text-align: center; }
 
+/* ====== 工作区选择（输入框左下角）：与模式胶囊同一套观感 ====== */
+.workspace-select-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+.workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 190px;
+  height: 29px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.workspace-chip:hover { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+.workspace-chip.empty { color: var(--borderColor); font-style: italic; }
+.workspace-chip i { font-size: 11px; flex-shrink: 0; }
+.workspace-chip-name { overflow: hidden; text-overflow: ellipsis; }
+.workspace-chip-caret { font-size: 10px; opacity: 0.6; }
+.workspace-picker {
+  position: absolute;
+  left: 0;
+  bottom: 32px;
+  z-index: 40;
+  min-width: 240px;
+  max-width: 420px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background: var(--menuColor);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.16);
+}
+.workspace-picker-title {
+  padding: 5px 8px 6px;
+  font-size: 11px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.workspace-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--fontColor);
+  min-width: 0;
+}
+.workspace-picker-item:hover { background: var(--menuActiveColor); color: var(--fontActiveColor); }
+.workspace-picker-item.active { color: var(--fontActiveColor); }
+.workspace-picker-name { flex-shrink: 0; }
+.workspace-picker-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  opacity: 0.5;
+}
+.workspace-picker-remove { opacity: 0; font-size: 11px; padding: 2px; }
+.workspace-picker-item:hover .workspace-picker-remove { opacity: 0.6; }
+.workspace-picker-remove:hover { opacity: 1 !important; color: #e81123; }
+
 /* ====== 分支按钮样式 ====== */
 .branch-btn:hover {
   background-color: var(--menuActiveColor);
@@ -8769,6 +9208,42 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   background-color: var(--menuActiveColor);
   color: var(--fontActiveColor);
   border-color: var(--fontActiveColor);
+}
+
+/* ====== 右侧栏开关（chat-header 最右侧）：与左侧 fa-bars 开关完全同一套样式（无边框、无盒底，
+   只有悬停底色与图标本身） ====== */
+.dock-toggle-btn {
+  margin: 0 0 0 2px;
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background-color: transparent;
+  color: var(--fontColor);
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background-color .15s ease, color .15s ease;
+  /* 头部是横向滚动容器：贴右 + sticky，保证窗口再窄、元素再多也点得到这个开关。
+     底色跟随头部背景（不透明），滚动时压在下面经过的内容之上不糊。 */
+  margin-left: auto;
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background-color: var(--backgroundColor);
+}
+.dock-toggle-btn:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+.dock-toggle-btn.active {
+  color: var(--fontActiveColor);
+  background-color: var(--menuActiveColor);
 }
 
 /* ====== 分支图面板 - D3 树状图 ====== */
@@ -8832,14 +9307,14 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   flex-shrink: 0;
 }
 
-/* 侧边栏顶部工具栏：搜索 + 新建聊天
-   与右侧 .chat-header 同一行高（40px 内容 + 1px 边框），控件垂直居中对齐 */
+/* 顶部三条栏同一行高（--topbar-h，定义在 .ai-chat-container 上）：
+   侧栏工具栏（搜索 + 新建聊天）/ 聊天头部（标题 + 模型）/ 右侧栏标签条 —— 三条对齐才协调 */
 .chat-toolbar {
   display: flex;
   align-items: center;
   gap: 4px;
   box-sizing: border-box;
-  height: 43px;
+  height: var(--topbar-h);
   padding: 0 5px;
   border-bottom: 1px solid var(--borderColor);
   flex-shrink: 0;
@@ -8976,6 +9451,34 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 }
 .chat-item-ghost {
   opacity: 0.4;
+}
+/* 顺序 / 分组两种排列共用一份行模板：拖动幽灵类落在行外层包装上 */
+.chat-item-ghost > .chat-item {
+  opacity: 0.4;
+}
+
+/* 按工作区分组时的分组头（文件夹名 + 该组条数；完整路径在 title 上） */
+.chat-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 2px;
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: var(--fontColor);
+  opacity: 0.72;
+  user-select: none;
+  cursor: default;
+}
+.chat-group-head > i { font-size: 11px; color: #f0b429; flex-shrink: 0; }
+.chat-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-group-count { font-size: 10px; opacity: 0.7; flex-shrink: 0; }
+
+/* 排列方式切换（按工作区分组时高亮） */
+.chat-order-btn.active {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+  background-color: var(--menuActiveColor);
 }
 
 .chat-item.active {
@@ -9368,8 +9871,10 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  height: 40px;
-  width: calc(100% - 10px);
+  box-sizing: border-box;
+  /* 与侧栏工具栏 / 右侧栏标签条同一行高（--topbar-h） */
+  height: var(--topbar-h);
+  width: calc(100%);
   overflow-x: auto;
   overflow-y: hidden;
   white-space: nowrap;
@@ -10150,7 +10655,8 @@ select {
 }
 
 .message-content :deep(.mermaid-clickable)::after {
-  font-family: 'FontAwesome';
+  font-family: 'Font Awesome 5 Free';
+  font-weight: 900;
   content: '\f002';
   position: absolute;
   top: 4px;
@@ -12402,46 +12908,7 @@ select {
   100% { height: 4px; }
 }
 
-/* ASR 错误提示气泡 */
-.asr-error-tooltip {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  background-color: #e74c3c;
-  color: var(--fontColor);
-  font-size: 11px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  white-space: nowrap;
-  z-index: 100;
-  animation: asr-error-fadein 0.2s ease;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-  pointer-events: none;
-  max-width: 280px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.asr-error-tooltip::after {
-  content: '';
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-top-color: #e74c3c;
-}
-
-.asr-error-tooltip i {
-  margin-right: 4px;
-  font-size: 10px;
-}
-
-@keyframes asr-error-fadein {
-  from { opacity: 0; transform: translateX(-50%) translateY(5px); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
+/* ASR 出错 / 缺配置的提示已统一改为 ElMessage（见 asrWarn），这里不再有红色气泡样式 */
 
 .asr-button.asr-recording {
   animation: asr-pulse 1.2s ease-in-out infinite;

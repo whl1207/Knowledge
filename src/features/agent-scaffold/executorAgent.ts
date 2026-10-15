@@ -287,10 +287,13 @@ export class AgentExecutor implements PipelineExecutor {
 
       const c = this.completers.get(view.id)
       if (!c) return
-      // 交互提问：批量模式无人在线，自动取消并判失败
-      if (view.pendingQuestion) {
+      // 交互提问 / 计划评审：批量模式无人在线，自动取消并判失败
+      if (view.pendingQuestion || view.pendingPlanReview) {
         agentBridge.cancel(view.id, 'user').catch(() => {})
-        c.resolve({ ok: false, error: 'Agent 需要交互提问，批量模式已自动取消该任务' })
+        c.resolve({
+          ok: false,
+          error: view.pendingPlanReview ? 'Agent 请求计划评审，批量模式已自动取消该任务' : 'Agent 需要交互提问，批量模式已自动取消该任务',
+        })
         this.completers.delete(view.id)
         return
       }

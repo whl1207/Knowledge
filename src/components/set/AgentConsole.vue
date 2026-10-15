@@ -73,16 +73,57 @@
               </span>
             </div>
 
+            <!-- 计划评审（exit_plan_mode）：批准 / 继续完善（可附反馈）/ 关闭 -->
+            <div v-if="selectedSession.pendingPlanReview" class="ac-review">
+              <div class="ac-question-text">
+                <i class="fa fa-hand-paper-o"></i>
+                {{ isZh ? '计划待评审（批准后智能体才开始执行）' : 'Plan awaiting review' }}
+              </div>
+              <pre class="ac-plan-text scoll">{{ selectedSession.pendingPlanReview.plan }}</pre>
+              <input v-model="reviewFeedback" class="ac-input" :placeholder="isZh ? '反馈（选「继续完善」时告诉它要改什么）' : 'Feedback (for Keep planning)'" />
+              <div class="ac-question-row">
+                <button class="ac-btn" @click="onPlanReview('dismiss')">{{ isZh ? '关闭' : 'Close' }}</button>
+                <button class="ac-btn" @click="onPlanReview('keep')">{{ isZh ? '继续完善' : 'Keep planning' }}</button>
+                <button class="ac-btn ac-btn-primary" @click="onPlanReview('approve')">{{ isZh ? '批准执行' : 'Approve' }}</button>
+              </div>
+            </div>
+
             <div v-if="selectedSession.pendingQuestion" class="ac-question">
               <div class="ac-question-text">
                 <i class="fa fa-question-circle"></i>
                 {{ selectedSession.pendingQuestion.question }}
               </div>
-              <div class="ac-question-row">
-                <input v-model="answerInput" class="ac-input" :placeholder="isZh ? '输入回答...' : 'Type your answer...'"
+              <!-- 结构化问题：选项（单选 / 多选）+ 自定义回答；留空且不选 = 跳过该题 -->
+              <div v-for="q in consoleQuestions" :key="q.id" class="ac-q">
+                <div class="ac-q-title">
+                  <span v-if="q.header" class="ac-q-header">{{ q.header }}</span>
+                  {{ q.question }}
+                  <span v-if="q.multiSelect" class="ac-q-hint">{{ isZh ? '（可多选）' : ' (multi)' }}</span>
+                </div>
+                <label v-for="o in q.options || []" :key="o.label" class="ac-q-opt">
+                  <input
+                    :type="q.multiSelect ? 'checkbox' : 'radio'"
+                    :name="'ac-q-' + q.id"
+                    :value="o.label"
+                    v-model="pickOf(q.id).multi"
+                    v-if="q.multiSelect"
+                  />
+                  <input
+                    v-else
+                    type="radio"
+                    :name="'ac-q-' + q.id"
+                    :value="o.label"
+                    v-model="pickOf(q.id).single"
+                  />
+                  <span>{{ o.label }}</span>
+                  <span v-if="o.description" class="ac-q-desc">{{ o.description }}</span>
+                </label>
+                <input v-model="pickOf(q.id).custom" class="ac-input" :placeholder="isZh ? '自定义回答（可选；不选也不填 = 跳过）' : 'Custom answer (optional)'"
                   @keydown.enter="onAnswer" />
-                <button class="ac-btn ac-btn-primary" :disabled="!answerInput.trim()" @click="onAnswer">
-                  {{ isZh ? '回答' : 'Answer' }}
+              </div>
+              <div class="ac-question-row">
+                <button class="ac-btn ac-btn-primary" @click="onAnswer">
+                  {{ isZh ? '提交回答' : 'Answer' }}
                 </button>
               </div>
             </div>
@@ -183,10 +224,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, reactive, watch, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import { agentBridge, type AgentSessionView } from '@/platform/agentBridge'
+import { questionsOf } from '@/store/askUser'
+import type { AskUserAnswer, AskUserQuestion } from '@/types/agent'
 import type { JobInfo } from '../../../electron/main/job-registry'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { useMobileBackScreen } from '@/composables/useBackLayer'
@@ -212,7 +255,6 @@ const jobs = ref<JobInfo[]>([])
 
 // ---- 选中与详情交互 ----
 const selectedKey = ref('')
-const answerInput = ref('')
 const steerInput = ref('')
 const injectInput = ref('')
 const toolOpen = ref<Record<string, boolean>>({})
@@ -287,7 +329,6 @@ const selectedJob = computed<JobInfo | null>(() => {
 
 function selectTask(row: TaskRow): void {
   selectedKey.value = row.key
-  answerInput.value = ''
   toolOpen.value = {}
   showNavScreen.value = false   // 细长窗口：点任务即从整屏列表切到整屏详情
 }
@@ -363,12 +404,58 @@ async function onDispose(): Promise<void> {
 }
 
 // ====== 详情交互（ask_user / steer / inject） ======
+/** 当前待答问题的结构化清单（旧式纯文本 payload 合成单题） */
+const consoleQuestions = computed<AskUserQuestion[]>(() => {
+  const pq = selectedSession.value?.pendingQuestion
+  return pq ? questionsOf(pq) : []
+})
+/** 每题的编辑态：单选 single / 多选 multi / 自定义 custom（按需惰性创建，模板可安全访问） */
+const picks = reactive<Record<string, { single: string; multi: string[]; custom: string }>>({})
+/** 计划评审的反馈输入（exit_plan_mode 的「继续完善」） */
+const reviewFeedback = ref('')
+function pickOf(id: string) {
+  if (!picks[id]) picks[id] = { single: '', multi: [], custom: '' }
+  return picks[id]
+}
+watch(
+  () => selectedSession.value?.pendingQuestion?.askId,
+  () => {
+    for (const key of Object.keys(picks)) delete picks[key]
+    for (const q of consoleQuestions.value) picks[q.id] = { single: '', multi: [], custom: '' }
+  },
+  { immediate: true },
+)
 async function onAnswer(): Promise<void> {
   const v = selectedSession.value
-  if (!v?.pendingQuestion || !answerInput.value.trim()) return
-  await agentBridge.answer(v.id, v.pendingQuestion.askId, answerInput.value.trim())
-  answerInput.value = ''
+  if (!v?.pendingQuestion) return
+  const answers: AskUserAnswer[] = consoleQuestions.value.map((q) => {
+    const st = pickOf(q.id)
+    const selected = q.multiSelect ? st.multi.slice() : (st.single ? [st.single] : [])
+    const custom = String(st.custom || '').trim()
+    const answer: AskUserAnswer = { id: q.id, selected }
+    if (custom) answer.custom = custom
+    return answer
+  })
+  // 全空（既不选也不填）＝用户显式跳过全部：也照常提交，语义由「跳过」表达
+  await agentBridge.answer(v.id, v.pendingQuestion.askId, '', answers)
+  reviewFeedback.value = ''
 }
+
+/** 计划评审裁决（Approve / 继续完善 + 反馈 / 关闭）：与提问共用 agent:answer 通道 */
+async function onPlanReview(verdict: 'approve' | 'keep' | 'dismiss'): Promise<void> {
+  const v = selectedSession.value
+  const review = v?.pendingPlanReview
+  if (!v || !review) return
+  const feedback = String(reviewFeedback.value || '').trim()
+  await agentBridge.answer(
+    v.id,
+    review.reviewId,
+    verdict,
+    verdict === 'keep' && feedback ? [{ id: 'feedback', selected: [], custom: feedback }] : undefined,
+  )
+  reviewFeedback.value = ''
+}
+
 async function onSteer(): Promise<void> {
   const v = selectedSession.value
   if (!v || !steerInput.value.trim()) return
@@ -569,7 +656,18 @@ onBeforeUnmount(() => {
 .ac-error { color: #cf1322; font-size: 12px; }
 .ac-question { margin: 8px 12px; padding: 8px; border: 1px solid #ffd591; background: #fff7e6; border-radius: 6px; }
 .ac-question-text { margin-bottom: 6px; color: #d46b08; }
-.ac-question-row { display: flex; gap: 6px; }
+.ac-question-row { display: flex; gap: 6px; margin-top: 6px; }
+/* 结构化问题：标题 / 选项 / 自定义回答 */
+.ac-q { margin: 6px 0; padding-top: 6px; border-top: 1px dashed #ffd591; }
+.ac-q:first-of-type { border-top: none; padding-top: 0; }
+.ac-q-title { font-size: 12px; line-height: 1.6; margin-bottom: 4px; }
+.ac-q-header { font-size: 11px; padding: 0 5px; border-radius: 3px; background: #ffe7ba; margin-right: 4px; }
+.ac-q-hint { font-size: 11px; color: #d46b08; }
+.ac-q-opt { display: flex; align-items: baseline; gap: 5px; font-size: 12px; padding: 2px 0; cursor: pointer; }
+.ac-q-desc { font-size: 11px; color: #8c8c8c; }
+.ac-review { margin: 8px 12px; padding: 8px; border: 1px solid #91caff; background: #e6f4ff; border-radius: 6px; }
+.ac-review .ac-plan-text { max-height: 220px; overflow: auto; margin: 6px 0; padding: 6px 8px; background: #fff; border-radius: 4px; font-size: 12px; white-space: pre-wrap; }
+.ac-review .ac-question-row { margin-top: 6px; }
 .ac-steer-row { display: flex; gap: 5px; padding: 5px; border-bottom: 1px solid var(--borderColor); }
 .ac-input {
   flex: 1;

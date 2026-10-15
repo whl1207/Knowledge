@@ -15,7 +15,7 @@
           :disabled="disabled.includes(type)"
           @click="pick(type)"
         >
-          <span class="wf-picker__icon" :style="{ '--node-color': presentation(type).color }">{{ presentation(type).glyph }}</span>
+          <span class="wf-picker__icon" :style="{ '--node-color': presentation(type).color, '--node-glyph-weight': String(presentation(type).weight || 900) }">{{ presentation(type).glyph }}</span>
           <span class="wf-picker__label">{{ t(presentation(type).labelKey) }}</span>
           <span v-if="!isNodeImplemented(type)" class="wf-picker__tag">{{ t('picker.generic') }}</span>
           <span v-if="isPrivate(type)" class="wf-picker__tag is-private">{{ t('picker.local') }}</span>
@@ -141,7 +141,9 @@ function pick(type: string): void {
 
 .wf-picker__icon {
   flex: 0 0 14px;
-  font-family: FontAwesome;
+  /* 每节点字形：字族走 FA5，字重由节点类型注入（线框节点 400 / 实心 900，见 presentation.ts） */
+  font-family: 'Font Awesome 5 Free';
+  font-weight: var(--node-glyph-weight, 900);
   font-size: 12px;
   text-align: center;
   /* 主色由节点类型注入（--node-color），朝主题文字色靠拢保证深浅主题都可读 */

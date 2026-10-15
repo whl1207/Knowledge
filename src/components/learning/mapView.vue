@@ -58,6 +58,11 @@ function cycleType(it: LvmItem) {
           </span>
           <span class="lk-meta">
             <span class="lk-type" :title="tr('知识类型（点击图标可切换，影响复习节奏）', 'Knowledge type (click its icon to switch review pacing)')">[{{ typeLabel(it.type) }}]</span>
+            <!-- 质性门控标记：概念 / 设计型靠「用自己的话讲一遍」判定，不是刷正确率 -->
+            <span v-if="it.qualitativeGate" class="lk-qual"
+              :title="tr('概念 / 设计型：掌握不用正确率判，而是「用自己的话讲一遍」由模型判定', 'Concept / design: mastery is judged by explaining it in your own words, not by accuracy')">
+              <i class="fa fa-comments-o"></i>{{ tr('讲解判定', 'explain') }}
+            </span>
             {{ it.sliceCount }} {{ tr('切片', 'slices') }} · {{ it.qCount }} {{ tr('题', 'Q') }} · {{ it.attempts }} {{ tr('作答', 'answers') }}
             <span v-if="it.due" class="lk-due"> · {{ fmtDue(it.dueAt, store.locales === 'zh') }}</span>
           </span>
@@ -125,6 +130,8 @@ function cycleType(it: LvmItem) {
 .lk-prog-fill { height: 100%; border-radius: 3px; background: #9aa0a6; transition: width 0.3s; }
 .lk-prog.mastered .lk-prog-fill { background: #4CAF50; }
 .lk-prog.learning .lk-prog-fill { background: #FF9800; }
+/* 质性门控标记（概念 / 设计：讲解判定） */
+.lk-qual { font-size: 10px; color: var(--fontActiveColor, #0969da); white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; cursor: help; }
 .lk-stat { font-size: 11px; white-space: nowrap; }
 .lk-stat.mastered { color: #4CAF50; }
 .lk-stat.learning { color: #FF9800; }

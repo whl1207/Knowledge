@@ -580,6 +580,17 @@
                 </div>
               </div>
             </div>
+
+            <!-- 怎么用：按「我想做 X」组织，日常操作手册（与上面的机制说明互补） -->
+            <div class="content-card">
+              <h3>{{ t('learning.howtoTitle') }}</h3>
+              <div class="howto-list">
+                <div class="howto-item" v-for="k in learningHowto" :key="k">
+                  <div class="howto-q"><i class="fa fa-question-circle-o"></i> {{ t(`learning.howto.${k}.q`) }}</div>
+                  <div class="howto-a" v-html="t(`learning.howto.${k}.a`)"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1261,7 +1272,9 @@ const learningViews = ref([
   { id: 6, icon: 'fa-graduation-cap', key: 'exam' }
 ])
 // 学习核心机制步骤
-const learningSteps = ref([1, 2, 3, 4, 5, 6])
+const learningSteps = ref([1, 2, 3, 4, 5, 6, 7])
+// 学习模块「怎么用」条目（按"我想做 X"组织，与机制说明互补）
+const learningHowto = ref(['start', 'card', 'choice', 'judge', 'rate', 'qualitative', 'seen', 'rating', 'due', 'stale', 'skip'])
 
 // 设计参考的开源项目（仅借鉴设计思路，不复制代码）：项目名 + 简介 + 借用到本产品的要点
 const creditProjects = ref([
@@ -1271,15 +1284,21 @@ const creditProjects = ref([
     blurbZh: '“学习”模块（掌握式记忆与复习）的设计蓝图', blurbEn: 'Design blueprint of the Learning module (mastery & review)',
     pointsZh: [
       '掌握度引擎：对文件/实体按作答序列计算掌握度，90% 门控判定“已掌握”，低置信度封顶防止“蒙对即掌握”（learningCore.ts）',
-      '间隔复习 SRS：答对拉长间隔、连续答对跳档、答错缩短并重置（learningRecord.ts）',
+      '间隔复习 SRS：答对拉长间隔、连续答对跳档、答错缩短并重置；并复刻其「排定时间锚点」——同一天反复练同一组卡不会把到期日往后推（learningCore.ts / learningRecord.ts）',
+      '证据质量分级：区分「独立答对」与「看过答案/用了提示后答对」，后者按折扣计入、不足以判定为已掌握；四档自评（再来一次 / 有点难 / 记住了 / 很简单）驱动档位',
+      '三态判分：对 / 错 / **不判**——坏答案键、读不出来的作答、主观题一律返回「不判」转交自评，绝不判错（lib/learning/learningGrade.ts）',
+      '双门控与质性判定：概念 / 设计型不用正确率判，改为「用自己的话讲一遍」由模型判定（mastery_assess 的 Feynman 检查思路）',
       '错因归因与队列优先级：错题标注原因，近期/连续答错的对象优先复习',
-      '跳测与分型复习：可“声明已掌握”跳过已会内容；按 记忆/步骤/概念/设计 类型区分复习节奏'
+      '跳测与分型复习：可“声明已掌握”跳过已会内容，且与评测通过分开标记；按 记忆/步骤/概念/设计 类型区分复习节奏'
     ],
     pointsEn: [
       'Mastery engine: per-file/entity mastery from answer sequences, 90% gate for “mastered”, low-confidence caps to avoid one-shot guesses',
-      'Spaced repetition: correct lengthens, consecutive-correct jumps, misses shorten & reset',
+      'Spaced repetition: correct lengthens, consecutive-correct jumps, misses shorten & reset; plus its <strong>schedule anchor</strong> — repeating the same cards on one day never pushes the due date back',
+      'Evidence quality: “recalled independently” is separated from “answered after seeing the answer / using a hint”; the latter is discounted and cannot mark a point mastered, and four self-ratings (Again / Hard / Mastered / Easy) drive the step',
+      'Three-state grading: correct / wrong / <strong>not graded</strong> — a broken answer key, an unreadable answer or a subjective question returns “not graded” and hands over to self-assessment, never “wrong”',
+      'Two gates + qualitative judging: concept / design are not judged by accuracy but by explaining the point in your own words (the Feynman-check idea behind mastery_assess)',
       'Mistake reasoning & queue priority: tag causes; recent / consecutive misses review first',
-      'Test-out & typed review: claim mastered to skip; per-type pacing for memory/procedure/concept/design'
+      'Test-out & typed review: claim mastered to skip, tracked separately from an assessed pass; per-type pacing for memory/procedure/concept/design'
     ]
   },
   {
@@ -2166,7 +2185,7 @@ const translations = {
         qa: { title: '💬 问答系统', desc: '聊天面板在顶部下拉选择<strong>检索策略</strong>（内置：相似度 / 文件增强 / 问题增强 / 本体增强 / 多跳 / 社区 / Agentic 等，可在策略配置启停或自定义），并展示每次回答的佐证切片。可调匹配阈值、检索数量、余弦/BM25 混合权重等参数。若知识库尚未切片 / 向量化，直接提问会自动完成准备再检索。' },
         question: { title: '❓ 问题标签页', desc: '问题库入口：▶ 从切片提取「问题 + 答案」对（支持暂停 / 继续 / 停止，进度在底部状态栏；默认<strong>先推理、结束后统一补一次向量</strong>，避免 LM Studio 反复交替加载对话 / 嵌入模型，需要边推理边向量化可点 ⚡ 切换）；可手动添加、语义去重 / LLM 合并、Excel 导入导出、生成复合问题；⚖ 独立性评审可让大模型标出不能独立作答的问题（仅会话内，不合适计数显示在底部状态栏）；🗑 清空全部问题（需确认，切片与文件不受影响，测试页由问题库派生的用例一并清空）；列表每 40 条下滑加载。' },
         test: { title: '🧪 测试标签页', desc: '自动化评测：测试问题与参考答案来自「问题」页问题库（自动同步）；🔄 读取测试用例 可在设置中修改“测试用例上限”后按新上限重新派生问题；支持批量测试（当前 / 全部策略，均可在测试过程中<strong>暂停 / 继续 / 停止</strong>，停止后已测结果保留）、位次分析、导出 Excel。工具栏可直接选择<strong>评测用嵌入模型</strong>（来自当前模型来源，无需进入设置；选「跟随设置」即用设置里的嵌入模型，该选择随 .kb 保存，不改动设置值）。评测前若切片缺少向量（如精简模式保存的 .kb），会先自动补全向量再开测，避免总分显示为 0。工具栏 🔥 按钮打开<strong>「预热 / 向量缓存」浮层</strong>：一张表里逐项列出「批量生成摘要 + 摘要 / 切片 / 问题 / 实体向量缓存 + 社区报告」（勾选 / 状态 / 进度 / 耗时同列一处，不重复出现），勾选后执行。已有摘要（含 md 文件 frontmatter 里的「摘要」元信息）或向量会自动跳过、不重复生成，已就绪的项用主题色标出。工具栏数字框可设<strong>重复次数</strong>（仅「批量测试所有策略」生效）：同一批问题重复跑 N 轮，对比表各指标以<strong>均值 ± 标准差</strong>呈现；对比表另附<strong>成本列</strong>（模型调用 / 题、工具调用 / 题，悬停看工具分布）与<strong>配对显著性检验</strong>（选基线后给出命中差异的 McNemar p 与位次差异的 Wilcoxon p 及结论），均可导出 Excel。命中判定除「切片命中 / 答案命中」外，还可选<strong>「大模型判定」</strong>（仅智能路由类策略可用）：由对话模型对比检索片段与问题 / 参考答案，给出<strong>是否命中与最前命中位次</strong>（同义改写、答案分散也能判命中），判定调用计入「模型调用 / 题」成本、不计入检索时间，结果与理由可在「过程」里查看。智能路由的问题可在结果行点<strong>「过程」</strong>回看当次工具调用轨迹（轮次 / 工具 / 参数 / 返回）；在「设置 → 处理配置」勾选<strong>「保存测试结果到 KB 文件」</strong>后，这些结果随 .kb 落盘，重新加载即可查看 / 导出，无需重跑。' },
-        settings: { title: '⚙️ 设置标签页', desc: '三类配置：知识库配置（.kb 管理）、策略配置（自定义检索策略，见下）、处理配置（切片策略、问题去重、测试用例上限、本体推理描述词与批量大小、是否把向量 / 测试结果写入 KB 文件等）。模型来源统一跟随全局 AI 配置。' }
+        settings: { title: '⚙️ 设置标签页', desc: '三类配置：知识库配置（.kb 管理）、策略配置（自定义检索策略，见下）、处理配置（切片策略、问题去重、<strong>生成选择题选项</strong>、测试用例上限、本体推理描述词与批量大小、是否把向量 / 测试结果写入 KB 文件等）。其中「<strong>生成选择题选项</strong>」决定推理问题时是否一并产出 4 个选项（A–D）与正确答案标签：开启后问题库记录 <code>choiceMap</code>，<strong>学习</strong>模块的练习卡就是可点的选择题并按判分结果结算；关闭则只产出纯问答（问题库与以前完全一致）。也可在「策略配置 → 处理管线 → 问题语义增强」按策略单独设置（步骤级优先）。模型来源统一跟随全局 AI 配置。' }
       },
       qaModes: {
         title: '问答模式与内置策略',
@@ -2335,7 +2354,7 @@ const translations = {
           title: '🧰 工具',
           items: {
             tools: { name: '管理', desc: '逐工具开关：启用状态、沙箱偏好与审批要求（共 18 个）。' },
-            search: { name: '搜索', desc: '联网搜索源：Bing / 百度 / DuckDuckGo / SearXNG / 博查 / 智谱 / Tavily / Brave，可同时启用多个并选回退 / 聚合策略，也可添加自定义（内网）源。' },
+            search: { name: '搜索', desc: '联网搜索源：Bing / 百度 / DuckDuckGo / Firecrawl / SearXNG / 博查 / 智谱 / Tavily / Brave，可同时启用多个并选回退 / 聚合策略，也可添加自定义（内网）源。' },
             mcp: { name: 'MCP', desc: 'MCP 服务增删启停，预置 <strong>6 个内置服务</strong>（见下方专述）。' },
             toolregistry: { name: '注册表', desc: '只读查看主进程已注册的工具及其白名单状态。' }
           }
@@ -2399,7 +2418,7 @@ const translations = {
         overview: '智能体、批量任务与工作流「网络搜索」节点共用同一个 <strong>web_search</strong> 工具。默认使用<strong>免 Key 的 Bing 网页</strong>；在 设置 → 工具 → <strong>搜索</strong> 里可<strong>同时启用多个</strong>搜索源（左侧列表开关），并选多源策略：<strong>依次回退</strong>（按列表顺序逐个尝试，第一个有结果即用）/ <strong>并行聚合</strong>（全部执行后按 URL 去重合并）；还可用左侧 <strong>+</strong> 添加<strong>自定义（内网）源</strong>。改完立即生效、无需重启。',
         step1: {
           title: '免 Key 搜索源（开箱可用）',
-          desc: '<strong>Bing 网页</strong>（默认，长中文句会自动改写为关键词）、<strong>百度</strong>、<strong>DuckDuckGo</strong> 无需任何配置；前两者国内网络直连可用，DuckDuckGo 部分网络环境可能被拦截。'
+          desc: '<strong>Bing 网页</strong>（默认，长中文句会自动改写为关键词）、<strong>百度</strong>、<strong>DuckDuckGo</strong> 无需任何配置；前两者国内网络直连可用，DuckDuckGo 部分网络环境可能被拦截。另有 <strong>Firecrawl</strong>：不填 Key 即走官方免 Key 免费额度（按 IP 计量，约 1000 credits/月），额度用尽会给出提示；到 firecrawl.dev 申请免费 Key 填进来即可换用个人额度。'
         },
         step2: {
           title: '自建 / API Key 搜索源',
@@ -2570,7 +2589,7 @@ const translations = {
       steps: {
         title: '使用步骤',
         step1: { title: '准备 Agent 预设', desc: '先到「设置 → 智能体 → 预设」准备成员：每个预设包含角色系统提示、模型、温度与能力（工具 / 技能 / 知识库 / MCP）。集群成员即预设本身，不需要在集群里重复配置。' },
-        step2: { title: '在主页切到集群模式', desc: '主页输入区左下角的<strong>模式下拉</strong>选择「集群」，旁边会出现<strong>成员标签</strong>；点击后勾选参与本次任务的预设（<strong>勾选顺序 = 发言顺序</strong>），浮层底部可直接进入「管理预设...」。' },
+        step2: { title: '在主页切到集群模式', desc: '主页输入区左下角的<strong>模式下拉</strong>选择「集群」，旁边会出现<strong>成员标签</strong>；点击后勾选参与本次任务的预设（<strong>勾选顺序 = 发言顺序</strong>），浮层底部可直接进入「管理预设...」。', capabilities: ['📂 读取文件', '💻 执行代码', '🔎 联网搜索', '🗄️ 知识库', '🖥️ 浏览网页', '✍️ 写入文件', '🔌 MCP 服务', '🤖 技能'] },
         step3: { title: '选择运行方式', desc: '成员标签右侧的<strong>运行方式</strong>下拉提供三档：全员响应 / 辩论 / 项目组；该选项随对话保存。' },
         step4: { title: '发送任务 & @点名', desc: '在输入框输入任务并发送：不带 <code>@</code> 时按运行方式让成员参与；输入 <code>@成员名</code> 则<strong>只唤起该成员</strong>单独执行（不总结）。' },
         step5: { title: '查看过程与结果', desc: '成员汇报就是对话里的消息：正文按 Markdown 渲染，<strong>工具调用 / 思考过程以卡片形式内联</strong>（与智能体模式完全一致），可展开查看参数与结果；运行中可 ■ 停止，任务完成后会自动生成对话标题。' }
@@ -2639,8 +2658,8 @@ const translations = {
         desc: '在「知识处理」切片 / 向量化并保存生成 <code>.kb</code> 后，进入「学习」模块，在左下角状态栏选择该知识库即可开始。下拉会扫描 <strong>全部工作区及其子目录</strong>（工作区在 设置 → 通用 → 基础 → 路径设置 里管理），所以 <code>.kb</code> 不在当前工作区也能选到；同名库会补标所在目录。'
       },
       step2: {
-        title: '掌握度与门控',
-        desc: '每个文件按作答正确率计算掌握度（0–100%），达到 <strong>90%</strong> 门控即“已掌握”，答错会回退；未达标的对象保持“学习中”，可在地图随时练习。'
+        title: '掌握度与双门控',
+        desc: '掌握有<strong>两种门</strong>，走哪一种是知识类型决定的。<strong>量化门</strong>（记忆 / 步骤）：按近期加权正确率算掌握度，达到 <strong>90%</strong> 即“已掌握”，答错会回退。<strong>质性门</strong>（概念 / 设计）：这类知识“很少有唯一正确答案可以拿来比字符串”，所以不用正确率判——由你<strong>用自己的话讲一遍</strong>，再由模型判定是否足够（见第 7 步）。两种门都不会被“蒙对两次”越过：看过答案之后的「对」按折扣计入，不足以判定为已掌握。'
       },
       step3: {
         title: '分型间隔复习',
@@ -2657,6 +2676,57 @@ const translations = {
       step6: {
         title: '解析与真题仿写',
         desc: '练习卡底部有三个标签：<strong>答案</strong>（参考答案）、<strong>解析</strong>（流式逐字输出并实时渲染 Markdown：一句话核心 / 前置概念 / 分步推理 / 易混点 + 一张知识结构图，首次切到该标签时才生成）、<strong>参考切片</strong>（出处切片按 Markdown 渲染）；错题详情里也有同样的 AI 讲解。解析结果会随学习记录存入 <code>&lt;库名&gt;.learning</code>，再次打开直接显示、可用页脚「重新生成」刷新。学习模块里的 Markdown 排版与主页一致。解析与图内标签<strong>优先用中文</strong>，只有知识库正文本身是英文（或界面切到英文）时才用英文。考试的<strong>真题仿写</strong>可导入或粘贴一份真题，先分析其题型配比与措辞风格（风格档案按知识库保存在本机），再按这个风格仿写新题。'
+      },
+      step7: {
+        title: '质性判定与四档评分',
+        desc: '练习卡按题目情况分三条路结算。<strong>① 判得出分的题</strong>：问题库给了独立答案的，先作答（<strong>选择题直接点选项</strong>——选项由「处理配置 → 生成选择题选项」在推理问题时一并产出），再点<strong>检查并揭示答案</strong>。这一步是<strong>本地字符串判分、不调模型</strong>：<strong>选择题</strong>按选项标签判对错；<strong>文本题只判「像对」，拿不准一律不判</strong>（措辞差异证明不了答错），想拿到明确结论就点<strong>请 AI 判分</strong>让模型按语义复核。<strong>② 判不了分的题</strong>（只有来源切片、没有答案键）：直接自评。<strong>③ 概念 / 设计型</strong>：写一段「用自己的话讲一遍」，交给模型判定讲解是否足够，并给一句<strong>“讲对了什么 / 缺什么”</strong>的短评。<strong>四档评分（再来一次 / 有点难 / 记住了 / 很简单）随时可点，不必先作答</strong>——它是兜底出口；一旦有了裁决就不再显示（不做改判）。「有点难」只按当前档重排不推进，「很简单」多进一档，「再来一次」当场重排到本轮但不掉档（真的忘了、隔了几天再错才会降档）。'
+      },
+      howtoTitle: '怎么用（日常操作）',
+      howto: {
+        start: {
+          q: '怎么开始一次练习？',
+          a: '先在「知识处理」把文档切片 / 向量化并<strong>保存为 <code>.kb</code></strong>，再进入「学习」模块，在<strong>左下角状态栏选库</strong>（下拉会扫描全部工作区，库不在当前工作区也能选到）。然后在地图点某个文件卡片上的练习图标，或到<strong>复习</strong>标签页对到期的对象一键开练。<br><strong>没有知识库也能练</strong>：问题不足时会自动按切片生成「请用自己的话复述本切片要点」的复述题。'
+        },
+        card: {
+          q: '练习卡上三个按钮 / 标签怎么配合？',
+        a: '顶部 <strong>答案区</strong> 开关控制下方参考答案整块显示还是隐藏（自测时先隐藏）。下方三个标签：<strong>答案</strong>（参考答案或来源切片）、<strong>解析</strong>（按需调用模型生成图文讲解，首次切到才生成）、<strong>参考切片</strong>（出处原文）。<br>题面下方是<strong>作答行</strong>：判得出分的题会先让你写答案，再点「检查并揭示答案」。'
+      },
+      choice: {
+        q: '怎么做题才有选项可点（选择题）？',
+        a: '选项由<strong>问题生成</strong>时一并产出，所以在「知识处理」里开开关：<strong>处理配置 → 生成选择题选项</strong>（默认开）。开启后重新推理问题，题库里每条问题会带上 <code>choiceMap</code>（4 个选项 A–D + 正确选项标签），学习模块的练习卡就会显示成<strong>可点的选项</strong>，并按判分结果结算。<br>也可以按策略单独设：<strong>策略配置 → 处理管线 → 问题语义增强</strong> 步骤上勾「生成选择题选项」，步骤级设置优先于全局。<br><strong>只对之后新推理的问题生效</strong>，已有问题不受影响；想让老问题也变选择题，清空问题库重新推理即可。'
+      },
+      judge: {
+        q: '点「检查并揭示答案」是谁在判分？为什么没写答案也不说我错？',
+        a: '这一步是<strong>本地字符串判分，不调用大模型</strong>（所以即时、免费、离线可用）。它只做三件事：折叠空白/大小写/全角 → 全等比对 → 短答相似度或关键词命中率。<br><strong>只有选择题会给出「需要再来一次」</strong>——选项唯一可枚举，判错是有依据的。文本题（填空 / 简答 / 开放）<strong>只能证明「像是答对了」，证明不了「答错了」</strong>：措辞、同义词、语序不同都会让相似度掉下来。所以文本题拿不准时一律<strong>不判</strong>，显示「判不了分」并让你自评，而不是替你下一个系统没有依据的结论。<strong>没写答案也算「没作答」而不是「答错」</strong>，同样不判。'
+      },
+      rate: {
+        q: '文本题想要一个真正的判定怎么办？',
+        a: '点练习卡上的<strong>请 AI 判分</strong>：把题目、参考答案、你的作答与来源切片交给模型，按<strong>语义</strong>判断意思是否一致，并给一句差在哪的说明。<br>它是<strong>可选动作</strong>：即时判定免费且不需要模型，只有你想要一个明确结论时才花这一次调用。模型如果觉得信息不足、或参考答案本身有歧义，会主动说「说不清」——这时同样退回自评，<strong>不会硬判</strong>。'
+      },
+      qualitative: {
+        q: '「用自己的话讲一遍」怎么算通过？',
+        a: '在作答框里写下你的讲解，点<strong>提交讲解，请老师判定</strong>。模型只看<strong>内容对不对、要点全不全</strong>，不看表达是否流畅、术语是否与原文逐字一致——用自己的措辞、举自己的例子讲对了就算过；但和原文<strong>矛盾</strong>、把两个概念<strong>搞混</strong>、或整段<strong>照抄原文</strong>不算过。判定后会给出通过与否和一句短评。'
+      },
+      seen: {
+        q: '看过答案之后再答对，算掌握吗？',
+        a: '<strong>不按独立回忆记账。</strong>两条路径都会被记下来：① 作答前展开过答案区或解析；② 点「检查并揭示答案」时<strong>手上没有作答</strong>（只是把答案摊开看）。这两种情况答对仍计入复习，但掌握度按折扣折算，<strong>不足以单独判定为已掌握</strong>——想看效果，把答案区隐藏后再作答即可（隐藏作答是完全独立的，不计提示）。头部出现橙色「已计提示」即表示本次走了这条路径。'
+      },
+      rating: {
+        q: '四档评分（再来一次 / 有点难 / 记住了 / 很简单）什么时候能点？',
+        a: '<strong>随时都能点，不必先作答</strong>——它是兜底出口，不该让人卡在卡上（本来就记得的题、判不出分的题、不想写答案只想标一下的题，都该能直接过）。<br>用法：<strong>再来一次</strong>＝本轮再练一遍，<strong>有点难</strong>＝我需要提示，<strong>记住了</strong>＝过几天再复习，<strong>很简单</strong>＝我很有把握。<br>一旦已经有了裁决（选择题判出对错、或 AI 复核给了结论），四档就不再显示：那种情况按裁决结算，不做改判——自评能覆盖判分的话，掌握度就不可信了。'
+      },
+      due: {
+        q: '「复习」标签页里的到期是怎么定的？',
+        a: '每个对象有独立的复习计划：答对拉长间隔（连续对 2 次跳两档），答错缩短。「有点难」不推进档位，「很简单」多进一档。<br>同一天里<strong>反复练同一组卡不会把到期日往后推</strong>——重复练习只算“今天已经练过了”，到期日按上次排定的时间算。<strong>练习本身不受到期限制</strong>，任何时候都能手动刷题。'
+      },
+      stale: {
+        q: '改了知识库，之前的学习记录会怎样？',
+        a: '知识库更新后，对应对象会被标记<strong>过期</strong>（记录保留不删）。可以一键「清除过期标记」（当作新内容重新开始复习），或「清空重学」把该对象的作答与掌握度重置。<strong>质性判定结果会随重置一起清掉</strong>，避免过期的“已通过”一直开着门。'
+      },
+        skip: {
+          q: '已经完全会了，能跳过吗？',
+          a: '能。地图卡片上的<strong>声明已掌握（跳测）</strong>就是给这种情况用的：跳过已会内容、让路线往前走。它与<strong>评测通过是两种来源</strong>，界面上分开标记，声明不会冒充评测结果；之后如果实际作答开始出错，评测掌握度会接管判定。'
+        }
       }
     },
     footer: {
@@ -3267,7 +3337,7 @@ const translations = {
         qa: { title: '💬 Q&A System', desc: 'The chat panel lets you pick a <strong>retrieval strategy</strong> from the top dropdown (built-ins include Similarity / File Enhance / Question Enhance / Ontology Enhance / Multi-hop / Community / Agentic, configurable in Strategy Config) and shows the evidence chunks behind each answer. Adjustable match threshold, retrieval count, cosine/BM25 hybrid weights. If the KB is not sliced / vectorized yet, asking a question will automatically prepare it and then retrieve.' },
         question: { title: '❓ Questions Tab', desc: 'Question-bank hub: ▶ extract "question + answer" pairs from slices (pause / resume / stop; progress in the bottom status bar; by default it <strong>reasons first and runs one unified embedding pass afterwards</strong> to avoid LM Studio repeatedly swapping the chat/embedding models — click ⚡ to embed right after each call instead); manual add, semantic dedup / LLM merge, Excel import-export, compound questions. ⚖ Independence review lets the LLM flag questions that cannot be answered independently (session-only; the unsuitable count shows in the bottom status bar). 🗑 Clear all questions (asks for confirmation; slices & files are untouched, and test cases derived from the bank are cleared too). The list lazy-loads 40 per scroll.' },
         test: { title: '🧪 Test Tab', desc: 'Automated evaluation: test questions & reference answers auto-sync from the Questions tab. 🔄 Read Test Cases re-derives questions from the question bank after you change the max limit in settings. Supports batch testing (current / all strategies — both can be <strong>paused / resumed / stopped</strong> while running, keeping tested results), rank analysis, and Excel export. The toolbar also lets you pick an <strong>evaluation embedding model</strong> from the current AI source (no need to open Settings; "Follow settings" uses the Settings embed model, and the choice is saved with the .kb without changing the setting value). If slices have no vectors (e.g. a KB saved in slim mode), vectors are filled in before the test runs so scores are not all 0. The toolbar\'s 🔥 button opens a <strong>"Pre-warm / Vector caches" popup</strong>: one table lists "generate summaries" plus summary / slice / question / entity vector caching (and community reports) with tick / status / progress / time in the same row (no duplicates). Existing summaries (including the 摘要 metadata in md frontmatter) or vectors are skipped instead of regenerated, and ready items are shown in the theme color. A toolbar number box sets a <strong>repeat count</strong> (all-strategy test only): the same question set is run N times and metrics are shown as <strong>mean ± std</strong>. The comparison table also shows <strong>cost columns</strong> (LLM calls / question, tool calls / question — hover for the tool mix) and a <strong>paired significance test</strong> (pick a baseline to get McNemar p for hit differences and Wilcoxon p for rank differences, plus a verdict); everything is exported to Excel. Besides Slice hit / Answer hit, the hit rule can be <strong>"LLM Judge"</strong> (agentic strategies only): the chat model compares the retrieved snippets with the question and reference answer and returns <strong>hit + best matching rank</strong> (paraphrases or spread-out answers still count); judge calls count toward the "LLM calls / question" cost but not toward retrieval time, and the verdict plus reason are visible in the trace. For agentic strategies, click <strong>"Trace"</strong> in a result row to review that run\'s tool-call timeline (round / tool / args / output). Tick <strong>"Save Test Results into KB File"</strong> under Settings → Processing to persist all of this in the .kb, so reloading shows and exports it without re-running.' },
-        settings: { title: '⚙️ Settings Tab', desc: 'Three groups: KB config (.kb management), Strategy Config (custom retrieval strategies, below), and Processing Config (slice strategy, question dedup, test-case limit, ontology prompts & batch size, whether vectors / test results are written into the KB file, etc.). Models follow the global AI configuration.' }
+        settings: { title: '⚙️ Settings Tab', desc: 'Three groups: KB config (.kb management), Strategy Config (custom retrieval strategies, below), and Processing Config (slice strategy, question dedup, <strong>Generate Choice Options</strong>, test-case limit, ontology prompts & batch size, whether vectors / test results are written into the KB file, etc.). <strong>Generate Choice Options</strong> decides whether reasoning also produces four options (A–D) plus the correct label per question: with it on, the bank records a <code>choiceMap</code> and the <strong>Learning</strong> module practice card becomes clickable multiple choice that settles on the graded verdict; with it off only plain Q&A is produced (the bank is exactly as before). It can also be set per strategy under Strategy Config → Ingestion Pipeline → Question Semantic Enhance (the step-level setting wins). Models follow the global AI configuration.' }
       },
       qaModes: {
         title: 'Q&A Modes & Built-in Strategies',
@@ -3436,7 +3506,7 @@ const translations = {
           title: '🧰 Tools',
           items: {
             tools: { name: 'Tools', desc: 'Per-tool switches: enablement, sandbox preference and approval (18 tools).' },
-            search: { name: 'Search', desc: 'Web search source: Bing / Baidu / DuckDuckGo / SearXNG / Bocha / Zhipu / Tavily / Brave — enable several, add custom LAN sources, and pick fallback / merge strategy.' },
+            search: { name: 'Search', desc: 'Web search source: Bing / Baidu / DuckDuckGo / Firecrawl / SearXNG / Bocha / Zhipu / Tavily / Brave — enable several, add custom LAN sources, and pick fallback / merge strategy.' },
             mcp: { name: 'MCP', desc: 'Manage MCP servers; <strong>6 built-in servers</strong> are pre-installed (detailed below).' },
             toolregistry: { name: 'Registry', desc: 'Read-only view of the registered tools and their whitelist state.' }
           }
@@ -3500,7 +3570,7 @@ const translations = {
         overview: 'Agents, batch runs and the workflow web-search node share the same <strong>web_search</strong> tool. By default it uses <strong>keyless Bing web search</strong>; in Settings → Tools → <strong>Search</strong> you can <strong>enable several sources at once</strong> (toggles in the left list) and pick a strategy: <strong>Fallback</strong> (try sources in list order until one returns results) or <strong>Merge</strong> (query all enabled sources and merge by URL). The <strong>+</strong> button adds <strong>custom (LAN) sources</strong>. Changes take effect immediately, no restart.',
         step1: {
           title: 'Keyless sources (ready to use)',
-          desc: '<strong>Bing</strong> (default; long Chinese questions are rewritten into keywords), <strong>Baidu</strong> and <strong>DuckDuckGo</strong> need no configuration. The first two work on mainland networks; DuckDuckGo may be blocked on some networks.'
+          desc: '<strong>Bing</strong> (default; long Chinese questions are rewritten into keywords), <strong>Baidu</strong> and <strong>DuckDuckGo</strong> need no configuration. The first two work on mainland networks; DuckDuckGo may be blocked on some networks. <strong>Firecrawl</strong> also runs with an empty key on the official keyless free tier (metered per IP, ~1,000 credits/month) and tells you when the quota runs out; add a free key from firecrawl.dev to use your own quota.'
         },
         step2: {
           title: 'Self-hosted / API key sources',
@@ -3740,8 +3810,8 @@ const translations = {
         desc: 'After slicing / vectorizing and saving a <code>.kb</code> in Knowledge Processing, open Learning and pick that KB at the top-right. The dropdown scans <strong>every workspace and its subfolders</strong> (manage workspaces in Settings → General → Basic → Path Settings), so a <code>.kb</code> outside the current workspace still shows up; duplicates get their folder appended.'
       },
       step2: {
-        title: 'Mastery & gate',
-        desc: 'Each file derives mastery (0–100%) from answer accuracy; <strong>90%</strong> clears the gate = “mastered”, while misses pull it back. Unfinished items stay “learning” and can be practiced anytime on the map.'
+        title: 'Mastery & the two gates',
+        desc: 'There are <strong>two gates</strong>, and the knowledge type decides which one applies. The <strong>quantitative gate</strong> (memory / procedure) derives mastery from recency-weighted accuracy: <strong>90%</strong> clears it and misses pull it back. The <strong>qualitative gate</strong> (concept / design) is not judged by accuracy at all — these objectives “rarely have a single canonical right answer to match against”, so you <strong>explain it in your own words</strong> and the model judges whether that is sufficient (see step 7). Neither gate can be passed by guessing twice: a correct answer given after seeing the answer is discounted and cannot mark the point mastered.'
       },
       step3: {
         title: 'Typed spaced repetition',
@@ -3758,6 +3828,57 @@ const translations = {
       step6: {
         title: 'Explain & mimic exam',
         desc: 'A practice card has three tabs at the bottom: <strong>Answer</strong>, <strong>Explain</strong> (streamed live as Markdown; AI breaks the point into core idea / prerequisites / step-by-step reasoning / common confusions plus a knowledge map) and <strong>Slices</strong> (source slices rendered as Markdown); mistake details offer the same AI explain. All learning-module Markdown uses the same typography as Home, and explanations/diagram labels prefer Chinese, switching to English only when the KB itself is English (or the UI is in English). <strong>Mimic exam</strong> lets you import or paste a real exam, analyzes its question mix and wording style (profile stored locally per KB), then writes new questions in that style.'
+      },
+      step7: {
+        title: 'Qualitative judging & the four ratings',
+        desc: 'A practice card settles along one of three paths. <strong>① Auto-gradable</strong>: when the question bank supplied a standalone answer, answer first (<strong>choice questions are clicked directly</strong> — the options are produced during question generation via Processing Configuration → Generate Choice Options), then press <strong>Check and reveal answer</strong>. That step is <strong>local string matching with no model call</strong>: <strong>choice questions</strong> are graded right/wrong by option label, while <strong>free text is only ever proved a likely match and is left ungraded when inconclusive</strong> (wording differences prove nothing). For a definite verdict, press <strong>Let AI grade it</strong> to have the model check the meaning. <strong>② Not gradeable</strong> (source slice only, no answer key): self-assessment directly. <strong>③ Concept / design</strong>: write a short explanation in your own words and the model judges whether it is sufficient, with a one-line <strong>“what was right / what is missing”</strong>. <strong>The four ratings (Again / Hard / Mastered / Easy) are available at any time, with no answer required</strong> — they are the fallback exit; once a verdict exists they disappear (no overrule). “Hard” reschedules at the current step without advancing, “Easy” advances an extra step, and “Again” re-queues it this round without dropping the interval.'
+      },
+      howtoTitle: 'How to use it (day to day)',
+    howto: {
+      start: {
+        q: 'How do I start a practice session?',
+        a: 'First slice / vectorize your documents in Knowledge Processing and <strong>save a <code>.kb</code></strong>, then open Learning and <strong>pick that KB in the bottom-left status bar</strong> (the dropdown scans every workspace, so a KB outside the current one still shows up). Then either click the practice icon on a file card in the map, or open <strong>Review</strong> and start a due session in one click.<br><strong>You can practice without a question bank too</strong>: when questions run short it falls back to “summarize this slice in your own words”.'
+      },
+      card: {
+        q: 'How do the buttons and tabs on a practice card fit together?',
+        a: 'The <strong>Answer area</strong> switch at the top shows or hides the reference answer block (hide it first when self-testing). The three tabs below are <strong>Answer</strong>, <strong>Explain</strong> (generated on demand the first time you open the tab) and <strong>Slices</strong> (the source text).<br>Under the question stem is the <strong>answer row</strong>: auto-gradable questions ask you to write your answer first, then press “Check and reveal answer”.'
+      },
+      choice: {
+        q: 'How do I get clickable options (multiple-choice practice)?',
+        a: 'Options are produced when the questions are <strong>generated</strong>, so the switch lives in Knowledge Processing: <strong>Processing Configuration → Generate Choice Options</strong> (on by default). With it on, re-reason the questions and each bank entry gains a <code>choiceMap</code> (four options A–D plus the correct label); practice cards in the Learning module then render as <strong>clickable options</strong> and settle on the graded verdict.<br>You can also set it per strategy: <strong>Strategy Configuration → Ingestion Pipeline → Question Semantic Enhance</strong> has a “Generate choice options” checkbox, and the step-level setting wins over the global one.<br>It applies only to questions reasoned <strong>from now on</strong>; existing questions are untouched. To convert old ones, clear the question bank and re-reason.'
+      },
+      judge: {
+        q: 'Who grades when I press “Check and reveal answer”? Why am I not marked wrong with a blank answer?',
+        a: 'That step is <strong>local string matching — no model call</strong> (hence instant, free and offline). It does exactly three things: fold whitespace / case / full-width characters → compare for equality → similarity or keyword-hit ratio.<br><strong>Only choice questions ever say “Needs another try”</strong> — their options are enumerable, so a wrong verdict has a basis. Free-text answers (fill-in / short / open) can only prove a likely <em>match</em>, never a <em>mismatch</em>: wording, synonyms and word order all push similarity down. So free text that is inconclusive is simply <strong>left ungraded</strong>, with self-assessment offered, instead of the system asserting something it cannot support. <strong>A blank answer counts as “not answered”, not as “wrong”</strong>, and is likewise left ungraded.'
+      },
+      rate: {
+        q: 'How do I get a real verdict on a free-text answer?',
+        a: 'Press <strong>Let AI grade it</strong> on the practice card: the question, the reference answer, your answer and the source slice go to the model, which judges whether the <strong>meaning</strong> matches and says in one line where it differs.<br>It is <strong>optional</strong>: the instant check is free and needs no model, so you spend a call only when you actually want a definite verdict. If the model finds the answer too thin, or the reference itself ambiguous, it will say so — and that also falls back to self-assessment rather than forcing a verdict.'
+      },
+      qualitative: {
+        q: 'What counts as passing “explain it in your own words”?',
+        a: 'Write your explanation and press <strong>Submit explanation for judging</strong>. The model judges only whether the <strong>content is right and the key points are covered</strong> — not fluency, and not whether your wording matches the source. Your own phrasing or your own example that is correct passes; a claim that <strong>contradicts</strong> the source, a <strong>mix-up</strong> between two concepts, or a passage <strong>copied verbatim</strong> does not. You get a pass/fail plus a one-line note.'
+      },
+      seen: {
+        q: 'If I look at the answer first, does a correct answer still count?',
+        a: '<strong>Not as independent recall.</strong> Two paths are recorded: ① you opened the answer area or the explanation before answering, or ② you pressed “Check and reveal answer” with <strong>nothing written</strong> (i.e. you just spread the answer open). In both, a correct answer still counts for review, but mastery is discounted and it <strong>cannot mark the point mastered on its own</strong>. Hide the answer area and answer from memory for a fully independent attempt. An orange “hinted” badge appears whenever this path was taken.'
+      },
+      rating: {
+        q: 'When can I press the four ratings (Again / Hard / Mastered / Easy)?',
+        a: 'Any time — <strong>no answer required first</strong>. They are the fallback exit and should never leave you stuck on a card (a question you already know, one that cannot be graded, or one you just want to mark without typing, should all be able to move on).<br><strong>Again</strong> = practice again this round, <strong>Hard</strong> = I needed a hint, <strong>Mastered</strong> = review in a few days, <strong>Easy</strong> = I knew it confidently.<br>Once a verdict exists (a choice question graded right/wrong, or an AI review that reached a conclusion) the ratings disappear: those settle on the verdict, with no overrule — if self-rating could override grading, mastery would not mean anything.'
+      },
+      due: {
+        q: 'How are the due dates in Review decided?',
+        a: 'Each object keeps its own schedule: correct answers lengthen the interval (two in a row advances two steps) and misses shorten it. “Hard” does not advance the step; “Easy” advances one extra.<br>Repeating the same set of cards on one day <strong>never pushes the due date back</strong> — repeat practice only records that you practised today, while the due date is computed from when it was last scheduled. <strong>Practice itself is not due-gated</strong>: drill anytime.'
+      },
+      stale: {
+        q: 'What happens to my records when I change the knowledge base?',
+        a: 'After a KB update the affected objects are marked <strong>stale</strong> (records are kept, not deleted). You can clear the stale mark (treating it as fresh content), or reset to relearn, which wipes that object’s answers and mastery. A reset <strong>also clears its qualitative verdict</strong>, so an outdated “passed” cannot keep the gate open.'
+      },
+      skip: {
+        q: 'Can I skip content I already know?',
+        a: 'Yes — <strong>Claim mastered (test-out)</strong> on a map card is exactly for that: it skips known content and lets the route move on. It is tracked as a <strong>different source</strong> from an assessed pass and is labelled separately in the UI, so a claim never impersonates a verdict. If your actual answers start going wrong later, assessed mastery takes over.'
+      }
       }
     },
     footer: {
@@ -4196,6 +4317,15 @@ const translations = {
   flex-shrink: 0;
   margin-top: 1px;
 }
+
+/* 学习模块「怎么用」清单：一问一答，问题加粗、答案缩进 */
+.howto-list { display: flex; flex-direction: column; gap: 10px; }
+.howto-item { padding-bottom: 9px; border-bottom: 1px dashed var(--borderColor); }
+.howto-item:last-child { padding-bottom: 0; border-bottom: none; }
+.howto-q { font-weight: 600; font-size: 13px; display: flex; align-items: baseline; gap: 6px; margin-bottom: 3px; }
+.howto-q i { color: var(--fontActiveColor); font-size: 12px; flex-shrink: 0; }
+.howto-a { font-size: 12.5px; line-height: 1.72; padding-left: 18px; color: var(--fontColor); }
+.howto-a code { padding: 1px 4px; border-radius: 3px; background: var(--menuColor); }
 
 .guide-content strong {
   display: block;

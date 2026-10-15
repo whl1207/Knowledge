@@ -1,5 +1,6 @@
 /** 学习模块共享类型（P1） */
 import type { KbType } from '@/services/learningCore'
+import type { PracticeOption, PracticeQType } from '@/lib/learning/learningGrade'
 
 /** 学习地图/总览用到的对象视图模型（由 learning.vue 由 LData.objects 派生） */
 export interface LvmItem {
@@ -15,6 +16,8 @@ export interface LvmItem {
   dueAt: number          // 到期时间戳（未到期为 0）
   stale?: boolean
   learnerClaimed?: boolean // 声明已掌握（跳测）
+  /** 走质性门控（概念 / 设计）：靠「用自己的话讲一遍」判定，不是刷正确率（P1-2） */
+  qualitativeGate?: boolean
 }
 
 /** 学习地图 · 实体轴视图模型（由文件作答经 entityNames/entityToBlocks 投影） */
@@ -41,4 +44,26 @@ export interface PracticeItem {
   filePath: string
   blockId: any
   entityNames: string[]
+  // ==================== 判分（P1） ====================
+  /**
+   * 题型，决定怎么判。缺省按 'short'。
+   * `qualitative` 是「用自己的话讲一遍」，永远不由字符串判分（留给 LLM 质性门控）。
+   */
+  qType?: PracticeQType
+  /**
+   * **可判分的期望答案** —— 只来自问题库的独立答案（`extraAnswer`），
+   * **绝不**用来源切片正文冒充（那样等于把原文当答案，判出来必然无意义）。
+   * 为空的题：`isAutoGradable` 返回 false，UI 直接走四档自评。
+   */
+  expectedAnswer?: string
+  /** 选择题的选项表（标签 → 正文）；本仓库的题库暂不产出，保留给导入/考试复用 */
+  choiceMap?: Record<string, PracticeOption['body']> | null
+  /**
+   * 可选的「先测后教」提示文本（题面下的一行引导），用于无答案的复述题
+   */
+  hint?: string
+  /** 质性判定：学习者的讲解原文（由 practiceView 回填，父级落盘为证据） */
+  explanation?: string
+  /** 质性判定：模型短评（讲对了什么 / 缺什么） */
+  feedback?: string
 }

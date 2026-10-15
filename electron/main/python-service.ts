@@ -1,5 +1,6 @@
 // src/main/python-service.ts
 import { exec } from 'child_process'
+import { logInfo } from './log'
 import { promisify } from 'util'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -1377,7 +1378,7 @@ except Exception as e:
    * 日志记录辅助函数
    */
   private log(...args: any[]): void {
-    console.log('[PythonService]', ...args)
+    logInfo('PythonService', args.map((a) => String(a)).join(' '))
   }
 }
 

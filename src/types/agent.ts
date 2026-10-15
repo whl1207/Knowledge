@@ -64,6 +64,19 @@ export interface AgentOptions {
    */
   seedHistory?: Array<{ role: 'user' | 'assistant'; content: string }>
   /**
+   * 执行计划 / 待办清单的恢复种子（重开聊天时由渲染层从聊天存档带出）。
+   * 会经 setPlan / setTodos 写入本会话日志（`plan/write` / `todo/write`），
+   * 因此恢复后的会话依旧「只记日志、回放即得状态」。
+   */
+  seedPlan?: string | null
+  seedTodos?: TodoItem[]
+  /**
+   * 上一轮计划评审的裁决（进程重启后用户回答那条被恢复的评审时产生）。
+   * 会作为一条**已记录**的 user 消息注入新会话：批准 → 按计划执行；
+   * 继续完善 → 按反馈修订后重新提交；关闭 → 先说明现状等指示。
+   */
+  seedPlanDecision?: { verdict: 'approve' | 'keep' | 'dismiss' | 'cancelled' | (string & {}); feedback?: string; plan?: string }
+  /**
    * 任务附图（初始任务要一起交给模型的多模态图片）。
    * **必须是 JSON 可序列化的字符串**（data URL 或裸 base64）——`agentBridge.sanitizeOptions`
    * 会 `JSON.parse(JSON.stringify(options))`，Uint8Array / ArrayBuffer 会被破坏成普通对象。
@@ -208,6 +221,7 @@ export type AgentEventType =
   | 'agent/question' // 等待用户回答（ask_user 工具；用 agent:answer 回复）
   | 'agent/renderer-task' // 主进程工具请求渲染层执行浏览器侧任务（如 Word 导出：claim 抢占 → result 回传）
   | 'agent/plan' // 执行计划更新（update_plan 工具）
+  | 'agent/plan-review' // 计划评审请求（exit_plan_mode 工具；用 agent:answer 回裁决）
   | 'agent/todos' // 待办清单更新（update_todo 工具）
   | 'agent/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call）
   | 'agent/compaction' // 上下文压缩（旧轮次摘要）：start 事件 → 界面显示「正在压缩上下文…」
@@ -238,10 +252,27 @@ export interface AgentEventMap {
   /** preview：UI 专用差异预览（不进模型上下文，见 ToolResult.preview） */
   'tool/result': { callId: string; name: string; ok: boolean; value?: any; error?: string; preview?: any }
   'agent/tool-args': { callId: string; name: string; argsFragment: string }
-  'agent/question': { askId: string; question: string }
+  'agent/question': {
+    askId: string
+    /**
+     * 纯文本摘要（结构化问题拼成的一段话）：日志 / 兼容旧界面用。
+     *
+     * 语义注意：这是**挂起等待回答**，不结束本 turn —— 收到它就回答（`agent:answer`），
+     * 回答会作为工具结果回到同一个 turn 继续执行；不要当作回合结束信号。
+     */
+    question: string
+    /** 结构化问题（DSH ask_user_question 契约）；老式纯文本提问时为空 */
+    questions?: AskUserQuestion[]
+  }
   /** 渲染层任务：taskId 由主进程生成；kind 决定渲染层处理器（如 export_word）；payload 为任务参数 */
   'agent/renderer-task': { taskId: string; kind: string; payload: any }
   'agent/plan': { plan: string | null }
+  /**
+   * 计划评审请求（exit_plan_mode）：**挂起等待用户裁决，不结束本 turn**。
+   * 用 `agent:answer` 回复：`message` = 'approve' | 'keep' | 'dismiss'，
+   * `answers[0].custom` = 「继续完善」时的反馈文本。
+   */
+  'agent/plan-review': { reviewId: string; plan: string }
   'agent/todos': { todos: TodoItem[] }
   'agent/search-status': { status: string; query?: string; results?: Array<{ title?: string; url?: string }>; action?: any }
   /** phase='start' 表示开始生成摘要；phase='end' 表示结束（ok=false 表示压缩未生效，保持原历史） */
@@ -295,6 +326,49 @@ export interface TodoItem {
   status: TodoStatus
 }
 
+/**
+ * ask_user 的一个选项（对齐 DSH ask_user_question 的 options 项）。
+ * 若推荐某项，请把它放在第一位并在 label 末尾加 "(Recommended)"。
+ */
+export interface AskUserOption {
+  /** 面向用户的简短标签 */
+  label: string
+  /** 一句话说明取舍或影响 */
+  description?: string
+}
+
+/**
+ * ask_user 的一个问题（对齐 DSH ask_user_question 的 questions 项）。
+ * - `options` 缺省 = 纯文本提问（用户自由填写）；
+ * - `header` 是短标题（如「确认」「选择模式」），用于界面分组；
+ * - `multiSelect` = true 时用户可多选（默认单选）。
+ */
+export interface AskUserQuestion {
+  /** 稳定 id：回答会按 id 回填，模型据此对号入座 */
+  id: string
+  /** 具体问题 */
+  question: string
+  /** 可选短标题（界面展示） */
+  header?: string
+  /** 可选选项清单 */
+  options?: AskUserOption[]
+  /** 是否多选（默认 false） */
+  multiSelect?: boolean
+}
+
+/**
+ * ask_user 的单题回答（对齐 DSH 的回答载荷）。
+ * `selected` 为空且无 `custom` = 用户显式跳过该题（不是「未回答」）。
+ */
+export interface AskUserAnswer {
+  /** 对应的问题 id */
+  id: string
+  /** 选中的选项 label 列表 */
+  selected: string[]
+  /** 自定义回答（自由文本；跳过的题没有它） */
+  custom?: string
+}
+
 /** 执行计划（update_plan 工具维护的文本计划） */
 export interface PlanState {
   plan: string | null
@@ -306,6 +380,11 @@ export interface AgentStateView extends AgentSummary {
   step: number
   plan: string | null
   todos: TodoItem[]
+  /**
+   * 仍待用户裁决的计划评审（exit_plan_mode）。
+   * 会话已销毁时由**日志折叠**得出（进程重启后仍在）——界面据此恢复那条未完成的决策。
+   */
+  pendingPlanReview?: { reviewId: string; plan: string } | null
   lastError?: string
   /** 最近一次 assistant 完整内容（供工作流智能体节点取最终结果） */
   lastAssistantContent?: string

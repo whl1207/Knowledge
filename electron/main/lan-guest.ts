@@ -954,7 +954,8 @@ export async function handleLanAgentApi(
       if (route === '/answer') {
         const askId = String(body?.askId || '')
         if (!askId) { fail(400, '缺少 askId'); return true }
-        const ok = agentLoop.resolveAnswer(session.id, askId, String(body?.message ?? ''))
+        const answers = Array.isArray(body?.answers) ? body.answers : undefined
+        const ok = agentLoop.resolveAnswer(session.id, askId, String(body?.message ?? ''), answers)
         if (!ok) { fail(404, '未找到待回答的问题'); return true }
         json(200, { ok: true })
         return true

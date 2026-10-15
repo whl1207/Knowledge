@@ -14,6 +14,8 @@ import { ipcMain, BrowserWindow, app, type IpcMainInvokeEvent } from 'electron'
 import * as path from 'node:path'
 import * as fs from 'node:fs'
 import { IPCError, toIpcError, type IpcResponse } from '@/types/ipc'
+// 开发模式判定（唯一来源；见 run-mode.ts）
+import { DEV_SERVER_URL } from './run-mode'
 import * as aiService from './ai-service'
 import * as agentLoop from './agent-loop'
 import { sessionLog } from './session-log'
@@ -188,11 +190,16 @@ export function registerNamespacedIpc(): void {
     return state
   })
   registerIpc('agent:answer', (payload) => {
-    const { id, askId, message } = payload || {}
-    if (!id || !askId || message === undefined) {
-      throw new IPCError('INVALID_ARGUMENT', '缺少 id/askId/message')
+    const { id, askId, message, answers } = payload || {}
+    if (!id || !askId) {
+      throw new IPCError('INVALID_ARGUMENT', '缺少 id/askId')
     }
-    const ok = agentLoop.resolveAnswer(id, askId, String(message))
+    // message 是旧式纯文本回答；answers 是结构化回答批（DSH answer batch）。
+    // 两者都没有 = 用户直接取消（由调用方走 agent:cancel），这里不产生回答。
+    if (message === undefined && !Array.isArray(answers)) {
+      throw new IPCError('INVALID_ARGUMENT', '缺少 message 或 answers')
+    }
+    const ok = agentLoop.resolveAnswer(id, askId, message === undefined ? '' : String(message), Array.isArray(answers) ? answers : undefined)
     if (!ok) throw new IPCError('NOT_FOUND', `未找到待回答的问题: ${askId}`)
     return { success: true }
   })
@@ -359,7 +366,8 @@ export function registerNamespacedIpc(): void {
 
 /** 软件根目录下的界面配置文件路径（生产=exe 所在目录；开发=项目根目录） */
 function getInterfaceConfigPath(): string {
-  const rootDir = process.env.VITE_DEV_SERVER_URL
+  // 用 run-mode 的判定（打包版不会被环境里残留的 dev 地址带偏到项目根目录）
+  const rootDir = DEV_SERVER_URL
     ? path.join(__dirname, '../..') // electron/main → 项目根
     : path.dirname(app.getPath('exe'))
   return path.join(rootDir, 'interface-config.json')

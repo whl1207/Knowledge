@@ -50,7 +50,7 @@ function writeAndDerive(opts: {
   spillPath?: string
 }): { modelContent: string; rawValue: unknown } {
   const callId = 'call-1'
-  sessionLog.append(opts.sessionId, 'session/start', { systemPrompt: 'SYS' })
+  sessionLog.append(opts.sessionId, 'session/start', { systemPrompt: 'SYS', createdAt: Date.now() })
   sessionLog.append(opts.sessionId, 'user/message', { content: '读一下这个文件' })
   sessionLog.append(opts.sessionId, 'assistant/message', {
     content: '',
@@ -79,7 +79,7 @@ export function runSessionLogSelfTest(): SessionLogCase[] {
   // 0. 前置：日志目录真的落在自测临时目录里（否则会污染真实用户数据）
   {
     const dir = process.env.AIMK_SELFTEST_USERDATA
-    const wrote = sessionLog.append(newSession(), 'session/start', { systemPrompt: 'x' })
+    const wrote = sessionLog.append(newSession(), 'session/start', { systemPrompt: 'x', createdAt: Date.now() })
     const okDir = !!dir && fs.existsSync(dir)
     add('前置：日志写入自测临时目录（不污染真实 userData）', okDir, dir || '(AIMK_SELFTEST_USERDATA 未设置)')
     add('前置：append 返回带 seq 的事件', typeof wrote?.seq === 'number' && wrote.seq >= 1)

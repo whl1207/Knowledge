@@ -1,4 +1,4 @@
-/**
+﻿/**
  * swarmRunner.ts — 集群运行器（统一 agent 循环 + 策略调度 + 会话日志）
  *
  * 每个 Agent 通过 agentBridge 跑在主进程 agent-loop 上，
@@ -17,11 +17,13 @@
  */
 
 import { computed } from 'vue'
-import { ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { agentBridge, type AgentSessionView } from '@/platform/agentBridge'
 import { assembleAgentSystemPrompt, buildMcpServersContext, ensureAgentSkills, workspaceRoot } from '@/lib/agent/promptContext'
-import { renderQuestionMarkdown, escapeHtml } from '@/lib/markdown/render'
+// ask_user 结构化问答：弹窗排队在 store/askUser（渲染由全局 AskUserHost 承担）
+import { requestUserAnswers, questionsOf, dismissAsk } from '@/store/askUser'
+// exit_plan_mode 计划评审：弹窗排队在 store/planReview（渲染由全局 PlanReviewHost 承担）
+import { requestPlanReview, dismissPlanReview } from '@/store/planReview'
 import { toolsFromCapabilities } from '@/lib/agent/capabilities'
 import { applyToolPresentation } from '@/lib/agent/presentation'
 import { presetPresentation } from '@/lib/agent/ptc'
@@ -48,7 +50,7 @@ import type { SwarmRoom } from '@/types/swarmRoom'
 // 消息写入对话（与普通/智能体模式同一套消息与渲染）
 import { pushMemberMessage, pushUserTaskMessage, pushSystemMessage, pushSwarmMessage, finishMemberMessage, swarmRunChat } from '@/composables/swarm/useSwarmChat'
 // 会话视图 → 消息投影（与 useAgentRun 共用同一实现，工具调用/思考样式天然一致）
-import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos } from '@/lib/agent/projection'
+import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos, projectPlan, projectPlanReview } from '@/lib/agent/projection'
 import type { ChatMessage } from '@/types/chat'
 import { resolveSwarmStrategy, type SwarmRuntimeContext, type AgentRunOpts } from '@/lib/agent/swarmStrategies'
 import { getPlatform } from '@/platform'
@@ -256,6 +258,9 @@ function waitForBridgeCompletion(
     let sawRunning = false
     let settled = false
     const handledAsks = new Set<string>()
+    let openAskId: string | null = null
+    const handledReviews = new Set<string>()
+    let openReviewId: string | null = null
     /** 已收集来源的 kb_search 调用 */
     const processedKb = new Set<string>()
     /** 项目组：已计入活动的工具调用 id（防重复计数） */
@@ -300,7 +305,7 @@ function waitForBridgeCompletion(
         projectKbInfo(msg, v, processedKb)
         projectUsage(msg, v)
       }
-      if (alive() && chat) projectTodos(chat, v)
+      if (alive() && chat) { projectTodos(chat, v); projectPlan(chat, v); projectPlanReview(chat, v) }
       // 项目组工作台活动指标：工具次数 / 累计 token（对齐 cc-haha 活动面板）
       if (alive() && settings.value?.collabMode === 'team') {
         const r = roomOf(swarmRunChatId.value || '')
@@ -345,24 +350,39 @@ function waitForBridgeCompletion(
         if (runningTool) { st.status = 'tool'; st.detail = `调用工具: ${runningTool.name}` }
         else { st.status = 'thinking'; st.detail = '' }
       }
-      // ask_user 提问：弹窗收集回答（对齐预设行为；按 askId 去重）
+      // ask_user 提问：结构化弹窗收集回答（全局 AskUserHost；按 askId 去重）
       if (alive() && v.pendingQuestion && !handledAsks.has(v.pendingQuestion.askId)) {
         handledAsks.add(v.pendingQuestion.askId)
         if (st) { st.status = 'tool'; st.detail = '等待用户回答' }
         const name = agents.value[agentIdx]?.name || `Agent ${agentIdx + 1}`
-        const questionHtml =
-          `<div class="agent-question-markdown"><strong>${escapeHtml(name)}</strong>：${renderQuestionMarkdown(v.pendingQuestion.question)}</div>`
-        ElMessageBox.prompt(questionHtml, store.locales === 'en' ? 'Agent asks' : 'Agent 提问', {
-          dangerouslyUseHTMLString: true,
-          customClass: 'agent-question-box',
-          confirmButtonText: store.locales === 'en' ? 'Send' : '发送',
-          cancelButtonText: store.locales === 'en' ? 'Cancel' : '取消',
-          inputPlaceholder: store.locales === 'en' ? 'Type your answer...' : '请输入你的回答...',
+        const askId = v.pendingQuestion.askId
+        openAskId = askId
+        requestUserAnswers({
+          askId,
+          source: name,
+          questions: questionsOf(v.pendingQuestion),
+          onCancel: () => { void agentBridge.cancel(view.id, 'user') },
         })
-          .then(({ value }) => agentBridge.answer(view.id, v.pendingQuestion!.askId, value || ''))
-          .catch(() => agentBridge.cancel(view.id, 'user'))
+          .then((answers) => agentBridge.answer(view.id, askId, '', answers))
+          .catch(() => { /* 已在 onCancel 里收口（中止 turn） */ })
+          .finally(() => { if (openAskId === askId) openAskId = null })
       }
-      if (v.status === 'idle' && sawRunning && !v.pendingQuestion) {
+      // agent 侧已收口（turn 被中止 / 别处已回答）：清理仍挂着的弹窗
+      if (openAskId && !v.pendingQuestion) { dismissAsk(openAskId); openAskId = null }
+      // exit_plan_mode 计划评审：弹窗等裁决（Approve / 继续完善 / 关闭）
+      if (alive() && v.pendingPlanReview && !handledReviews.has(v.pendingPlanReview.reviewId)) {
+        handledReviews.add(v.pendingPlanReview.reviewId)
+        const r = v.pendingPlanReview
+        const name = agents.value[agentIdx]?.name || `Agent ${agentIdx + 1}`
+        openReviewId = r.reviewId
+        requestPlanReview({ reviewId: r.reviewId, source: name, plan: r.plan })
+          .then(({ verdict, feedback }) =>
+            agentBridge.answer(view.id, r.reviewId, verdict, feedback ? [{ id: 'feedback', selected: [], custom: feedback }] : undefined))
+          .catch(() => { /* 评审已失效 */ })
+          .finally(() => { if (openReviewId === r.reviewId) openReviewId = null })
+      }
+      if (openReviewId && !v.pendingPlanReview) { dismissPlanReview(openReviewId); openReviewId = null }
+      if (v.status === 'idle' && sawRunning && !v.pendingQuestion && !v.pendingPlanReview) {
         finish(() => {
           const final = v.lastAssistantContent || (msg ? msg.content : '')
           if (alive()) {

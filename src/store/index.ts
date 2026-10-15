@@ -576,6 +576,10 @@ export const usestore = defineStore('data', {
                 punctMode: 'none' as 'none' | 'local' | 'llm',
                 puncDir: '', // 本地标点模型目录（ct-punc onnx 目录；punctMode=local 时使用）
                 shortcut: 'Ctrl+Shift+Space',
+                // 常驻悬浮麦克风按钮（右下角小圆钮，点一下就开始语音输入；可关掉，见语音输入设置）
+                floatButton: true,
+                // 悬浮麦克风位置（距右下角的像素偏移；拖动后记住）
+                floatPos: { right: 14, bottom: 84 } as { right?: number; bottom?: number },
                 // Whisper API 配置（OpenAI 兼容）
                 whisper: {
                     url: 'https://api.openai.com/v1/audio/transcriptions',

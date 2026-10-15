@@ -1,4 +1,4 @@
-/**
+﻿/**
  * builtinAgentPresets.ts — 出厂自带的 Agent 预设（内置项）
  *
  * 除「通用智能体」（未绑定预设时的默认自主入口，见 AgentPreset.vue 的 __general__ 虚拟项）外，
@@ -175,12 +175,12 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       updateTodo: true,
       knowledgeBaseFiles: [],
       enabledTools: [
-        'ask_user', 'update_plan', 'update_todo',
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'search_files', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'skill',
+        'run_subagent', 'job_output', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -232,7 +232,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       updateTodo: true,
       knowledgeBaseFiles: [],
       enabledTools: [
-        'ask_user', 'update_plan', 'update_todo',
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'search_files', 'list_dir',
         'write_file', 'replace_in_file',
         'run_python',
@@ -294,12 +294,12 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       updateTodo: true,
       knowledgeBaseFiles: [],
       enabledTools: [
-        'ask_user', 'update_plan', 'update_todo',
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'search_files', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'skill',
+        'run_subagent', 'job_output', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -362,13 +362,13 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       updateTodo: true,
       knowledgeBaseFiles: [],
       enabledTools: [
-        'ask_user', 'update_plan', 'update_todo',
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'mcp_call',
         'read_file', 'search_files', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'skill',
+        'run_subagent', 'job_output', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -468,7 +468,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       {
         id: 'dsh-plan',
         title: '规划与委派',
-        text: '多步任务先用 update_plan 列出简短计划（每步一句话，恰好一个 in_progress）、用 update_todo 维护清单，执行中逐步更新。彼此独立的调研或子任务交给 run_subagent 并行处理，并在派单里写清它是只读还是可写、要交回什么。',
+        text: '多步任务先用 update_plan 列出简短计划（每步一句话）、用 update_todo 维护清单（正在做的那一项保持 running，同一时刻只留一项），执行中逐步更新。彼此独立的调研或子任务交给 run_subagent 并行处理（需要同时推进时用 run_in_background + job_output），并在派单里写清它是只读还是可写、要交回什么。',
       },
       {
         id: 'dsh-guards',
@@ -514,12 +514,12 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       updateTodo: true,
       knowledgeBaseFiles: [],
       enabledTools: [
-        'ask_user', 'update_plan', 'update_todo',
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'search_files', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'skill',
+        'run_subagent', 'job_output', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -547,7 +547,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       '- 不确定的 API、路径、依赖先读文件或搜索确认，绝不猜测或编造。',
       '',
       '工作方式：',
-      '1. 非平凡的多步任务先用 update_plan 制定简短计划（每步一句话，恰好一个 in_progress），用 update_todo 维护任务清单，执行中逐步更新。',
+      '1. 非平凡的多步任务先用 update_plan 制定简短计划（每步一句话），用 update_todo 维护任务清单（正在做的那一项保持 running，同一时刻只留一项），执行中逐步更新。',
       '2. 结束回合前把任务完全解决，不交付半成品、也不留给用户"你应该能猜到"的改动。',
       '3. 改动精准、最小：优先 replace_in_file / multi_replace，保持原有代码风格；新建文件才用 write_file。',
       '4. 用补丁式思维改代码：先看清上下文再替换，且替换必须唯一、可复现。',
@@ -578,12 +578,12 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
       updateTodo: true,
       knowledgeBaseFiles: [],
       enabledTools: [
-        'ask_user', 'update_plan', 'update_todo',
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'search_files', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'shell', 'run_python',
         'web_search', 'web_fetch',
-        'run_subagent', 'skill',
+        'run_subagent', 'job_output', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,

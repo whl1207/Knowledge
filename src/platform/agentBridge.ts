@@ -12,7 +12,7 @@
  * 列表，执行细节（循环/工具/状态）都在 agent 循环 + 本桥接层。
  */
 
-import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUsage, TodoItem, AgentCompactionKind } from '@/types/agent'
+import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUsage, TodoItem, AgentCompactionKind, AskUserAnswer, AskUserQuestion } from '@/types/agent'
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
 import { lanAgentTransport } from '@/platform/lanAgentClient'
@@ -29,7 +29,7 @@ interface AgentTransport {
   steer(id: string, content: string): Promise<{ success: boolean; reason?: string }>
   inject(id: string, content: string): Promise<{ success: boolean }>
   cancel(id: string, cause?: string, keepInbox?: boolean): Promise<{ success: boolean }>
-  answer(id: string, askId: string, message: string): Promise<{ success: boolean }>
+  answer(id: string, askId: string, message?: string, answers?: AskUserAnswer[]): Promise<{ success: boolean }>
   dispose(id: string): Promise<{ success: boolean }>
   list(): Promise<any[]>
   state(id: string): Promise<AgentStateView>
@@ -122,7 +122,9 @@ export interface AgentSessionView {
   /** 最近一个 turn 的步骤时间线 */
   steps: StepView[]
   currentStream: string
-  pendingQuestion: { askId: string; question: string } | null
+  pendingQuestion: { askId: string; question: string; questions?: AskUserQuestion[] } | null
+  /** 待评审的计划（exit_plan_mode）：挂起等待用户裁决，不结束 turn */
+  pendingPlanReview: { reviewId: string; plan: string } | null
   /** 服务端联网搜索状态（deepseek-responses web_search_call 投影；仅 UI 展示） */
   searchStatus: { status: string; query?: string; results?: Array<{ title?: string; url?: string }>; visitedUrls?: string[] } | null
   /** 上下文压缩状态（旧轮次摘要；start 事件到达后对话时间线显示「正在压缩上下文…」） */
@@ -188,6 +190,7 @@ function createView(id: string, label?: string): AgentSessionView {
     steps: [],
     currentStream: '',
     pendingQuestion: null,
+    pendingPlanReview: null,
     searchStatus: null,
     compaction: { seq: 0, phase: 'idle', kind: 'auto' },
     searchEvents: [],
@@ -281,6 +284,18 @@ class AgentBridge {
     return view
   }
 
+  /**
+   * 拉一次会话状态快照（**不建立视图**）。
+   *
+   * 与 `restore()` 的区别：会话可能早已结束（进程重启后的旧会话），此时主进程会
+   * 从**日志折叠**出 plan / todos / 待裁决的计划评审；调用方只想读这份事实，
+   * 不希望因此往 sessions 里塞一个假视图。拉不到（会话与日志都不在）返回 undefined。
+   */
+  async fetchState(id: string): Promise<AgentStateView | undefined> {
+    this.ensureSubscribed()
+    return await this.dshAgent().state(id).catch(() => undefined)
+  }
+
   /** 页面刷新后恢复一个仍存活的 agent（从主进程拉状态） */
   async restore(id: string): Promise<AgentSessionView | undefined> {
     this.ensureSubscribed()
@@ -359,11 +374,13 @@ class AgentBridge {
     await this.dshAgent().cancel(id, cause, keepInbox)
   }
 
-  async answer(id: string, askId: string, message: string): Promise<void> {
-    await this.dshAgent().answer(id, askId, message)
+  async answer(id: string, askId: string, message?: string, answers?: AskUserAnswer[]): Promise<void> {
+    await this.dshAgent().answer(id, askId, message, answers)
     const view = this.sessions.get(id)
     if (view) {
+      // 提问与计划评审共用这条通道：清了就不会再弹同一个
       view.pendingQuestion = null
+      view.pendingPlanReview = null
       this.notify(id)
     }
   }
@@ -442,8 +459,11 @@ class AgentBridge {
     switch (ev.type) {
       case 'agent/status':
         view.status = ev.payload.status
-        // turn 结束（idle）时清理挂起的提问状态（取消/异常路径的兜底）
-        if (ev.payload.status === 'idle') view.pendingQuestion = null
+        // turn 结束（idle）时清理挂起的提问 / 计划评审状态（取消、异常路径的兜底）
+        if (ev.payload.status === 'idle') {
+          view.pendingQuestion = null
+          view.pendingPlanReview = null
+        }
         // 不在运行：step 边界信号失效（避免用陈旧信号投递）
         if (ev.payload.status !== 'running') view.stepSettled = false
         break
@@ -628,7 +648,10 @@ class AgentBridge {
         }
         break
       case 'agent/question':
-        view.pendingQuestion = { askId: ev.payload.askId, question: ev.payload.question }
+        view.pendingQuestion = { askId: ev.payload.askId, question: ev.payload.question, questions: ev.payload.questions }
+        break
+      case 'agent/plan-review':
+        view.pendingPlanReview = { reviewId: ev.payload.reviewId, plan: ev.payload.plan }
         break
       case 'agent/plan':
         view.plan = ev.payload.plan

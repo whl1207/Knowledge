@@ -64,6 +64,8 @@ export type CapabilityId =
   | 'llm.hosted'
   /** 浏览器 Agent（桌面为独立窗口 + 主进程 WebContentsView 控制；其它环境无此子系统） */
   | 'browserAgent'
+  /** 终端（桌面：主进程 node-pty 真 PTY；其它环境无 TTY，入口按能力隐藏） */
+  | 'terminal'
   /** 语音合成 / 朗读（桌面为本地 ONNX 合成 WAV；安卓为系统 TTS 直接朗读；不支持时为 none） */
   | 'host.tts'
 
@@ -359,6 +361,9 @@ export type AppEventChannel =
   | 'lan:request-guest-policy'
   | 'browser-agent:event'
   | 'browser-agent:toast'
+  /** 终端输出 / 退出（主进程 → 渲染层；见 TerminalPort） */
+  | 'terminal:data'
+  | 'terminal:exit'
   | 'file-content-changed'
   | 'file-window-set-page'
   | 'watchedFileChanged'
@@ -541,6 +546,8 @@ export type BrowserAgentMethod =
   | 'bookmark-mkdir' | 'bookmark-move' | 'bookmark-reorder' | 'bookmark-rename-folder'
   | 'remove-bookmark-folder' | 'clear-bookmark-folder' | 'import-bookmarks' | 'export-bookmarks'
   | 'favicon-batch' | 'cache-info' | 'clear-cache'
+  /** 停靠到主页右侧栏（原生网页视图挂到主窗口，位置由渲染层上报的矩形决定） */
+  | 'attach-dock' | 'set-dock-rect' | 'set-dock-visible' | 'detach-dock' | 'is-docked' | 'close'
 
 /**
  * 浏览器 Agent（桌面专属子系统）。
@@ -548,6 +555,34 @@ export type BrowserAgentMethod =
  */
 export interface BrowserAgentPort {
   call(method: BrowserAgentMethod, payload?: any): Promise<any>
+}
+
+/** 终端宿主机方法名（新增时在此登记） */
+export type TerminalMethod = 'create' | 'write' | 'resize' | 'kill'
+
+/**
+ * 终端（桌面专属：主进程 node-pty 真 PTY）。
+ *
+ * 渲染层只负责「终端界面」：输出经 `events.on('terminal:data')` 推送、退出经 `terminal:exit`，
+ * 键盘输入 / 尺寸变化 / 关闭分别调用 write / resize / kill。
+ * 无此能力的环境（安卓 / 纯网页 / 远端宿主）`call` 一律 reject，调用方按「终端不可用」提示。
+ */
+export interface TerminalPort {
+  /**
+   * create：起一个 shell 会话（id 由渲染层给，等于「终端」标签 id）。
+   * 返回 `{ ok, id?, shell?, cwd?, error? }`；不看安全策略（命令由用户自己输入），
+   * 只有环境不支持（无 PTY）或 node-pty 不可用时才失败。
+   */
+  call(
+    method: TerminalMethod,
+    payload?: {
+      id?: string
+      data?: string
+      cols?: number
+      rows?: number
+      cwd?: string
+    },
+  ): Promise<any>
 }
 
 export interface PlatformCapabilities {
@@ -571,4 +606,5 @@ export interface Platform {
   readonly host: HostPort
   readonly llm: LlmPort
   readonly browserAgent: BrowserAgentPort
+  readonly terminal: TerminalPort
 }

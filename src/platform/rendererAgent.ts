@@ -22,12 +22,14 @@
 
 import type {
   AgentEvent, AgentEventMap, AgentEventType, AgentOptions, AgentStateView,
-  AgentStatus, AgentSummary, TodoItem,
+  AgentStatus, AgentSummary, TodoItem, AskUserAnswer, AskUserQuestion,
 } from '@/types/agent'
 import type { AgentId } from '@/types/ids'
 import { normalizeLlmType } from '@/shared/llmSources'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { boundToolResult } from '@/shared/toolResultBudget'
+import { askQuestionsDigest, coerceAskAnswers } from '@/shared/agentAsk'
+import { PLAN_REVIEW_ID_PREFIX, isPlanReviewId, parsePlanReviewReply, type PlanReviewOutcome } from '@/shared/agentPlanReview'
 import {
   RENDERER_TOOL_NAMES, executeRendererTool, hostOnlyToolError, isRendererTool,
   rendererToolSchemas, type RendererToolContext,
@@ -124,7 +126,9 @@ class RendererAgent {
   private lastError?: string
   private lastAssistantContent = ''
   private lastFinishReason = ''
-  private pendingQuestion: { askId: string; resolve: (answer: string) => void } | null = null
+  private pendingQuestion: { askId: string; questions: AskUserQuestion[]; resolve: (answers: AskUserAnswer[]) => void } | null = null
+  /** 计划评审挂起（exit_plan_mode；与提问共用回答通道） */
+  private pendingPlanReview: { reviewId: string; plan: string; resolve: (outcome: PlanReviewOutcome) => void } | null = null
   private streamedArgs = new Map<string, string>()
   /** 会话历史（模型可见；与主进程「模型可见即已记录」同一口径） */
   private history: any[] = []
@@ -191,22 +195,40 @@ class RendererAgent {
     if (this.status !== 'running' && this.status !== 'stopping') void this.drive()
   }
 
-  answer(askId: string, message: string): boolean {
+  answer(askId: string, message: string, answers?: AskUserAnswer[]): boolean {
+    // 计划评审与提问共用回答通道（id 前缀 review-）
+    if (isPlanReviewId(askId)) {
+      if (!this.pendingPlanReview || this.pendingPlanReview.reviewId !== askId) return false
+      const pending = this.pendingPlanReview
+      this.pendingPlanReview = null
+      pending.resolve(parsePlanReviewReply(message, answers))
+      return true
+    }
     if (!this.pendingQuestion || this.pendingQuestion.askId !== askId) return false
     const pending = this.pendingQuestion
     this.pendingQuestion = null
-    pending.resolve(message)
+    // 结构化回答优先；只有纯文本时落到第一题的自定义回答上（旧界面 / 旧客户端）
+    const batch = Array.isArray(answers) && answers.length
+      ? coerceAskAnswers(answers, pending.questions)
+      : coerceAskAnswers([{ id: pending.questions[0]?.id, selected: [], custom: message }], pending.questions)
+    pending.resolve(batch)
     return true
   }
 
   async cancel(): Promise<void> {
     if (this.status === 'running') this.setStatus('stopping')
     this.turnController?.abort()
-    // 挂起的提问用「已取消」收口，避免工具永久等待
+    // 挂起的提问 / 计划评审用「跳过 / 关闭」收口，避免工具永久等待
+    // （工具侧看到 skipped / dismiss 即知用户取消了本轮；turn 同时被 abort）
     if (this.pendingQuestion) {
       const pending = this.pendingQuestion
       this.pendingQuestion = null
-      pending.resolve('（用户取消了本次提问）')
+      pending.resolve(coerceAskAnswers([], pending.questions))
+    }
+    if (this.pendingPlanReview) {
+      const pending = this.pendingPlanReview
+      this.pendingPlanReview = null
+      pending.resolve({ verdict: 'dismiss' })
     }
     // 等待驱动器退出（最多 5s，避免界面卡在「停止中」）
     await Promise.race([
@@ -464,19 +486,29 @@ class RendererAgent {
       kbTopK: this.options.kbTopK,
       retrieval: (this.options as any).retrieval,
       signal: this.turnController?.signal,
-      askUser: (question: string) => this.askUser(question),
+      askUser: (questions) => this.askUser(questions),
+      reviewPlan: (plan) => this.reviewPlan(plan),
       setPlan: (plan) => this.setPlan(plan),
       setTodos: (todos) => this.setTodos(todos),
       getTodos: () => this.todos,
     }
   }
 
-  /** 提问：发出 agent/question 事件并挂起，直到 answer()/cancel() 收口 */
-  private askUser(question: string): Promise<string> {
+  /** 提问：发出 agent/question 事件并挂起，直到 answer()/cancel() 收口（回答为结构化批次） */
+  private askUser(questions: AskUserQuestion[]): Promise<AskUserAnswer[]> {
     const askId = `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-    return new Promise<string>((resolve) => {
-      this.pendingQuestion = { askId, resolve }
-      this.fire('agent/question', { askId, question })
+    return new Promise<AskUserAnswer[]>((resolve) => {
+      this.pendingQuestion = { askId, questions, resolve }
+      this.fire('agent/question', { askId, question: askQuestionsDigest(questions), questions })
+    })
+  }
+
+  /** 计划评审（exit_plan_mode）：发出 agent/plan-review 事件并挂起，直到 answer() 回裁决 */
+  private reviewPlan(plan: string): Promise<PlanReviewOutcome> {
+    const reviewId = `${PLAN_REVIEW_ID_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    return new Promise<PlanReviewOutcome>((resolve) => {
+      this.pendingPlanReview = { reviewId, plan, resolve }
+      this.fire('agent/plan-review', { reviewId, plan })
     })
   }
 
@@ -582,10 +614,10 @@ class RendererAgentTransport {
     return { success: true }
   }
 
-  async answer(id: string, askId: string, message: string): Promise<{ success: boolean }> {
+  async answer(id: string, askId: string, message?: string, answers?: AskUserAnswer[]): Promise<{ success: boolean }> {
     const agent = this.sessions.get(id)
     if (!agent) return { success: false }
-    return { success: agent.answer(askId, message) }
+    return { success: agent.answer(askId, message ?? '', answers) }
   }
 
   async dispose(id: string): Promise<{ success: boolean }> {

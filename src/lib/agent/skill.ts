@@ -67,13 +67,16 @@ export function buildSkillSystemPrompt(
   const tools = enabledTools ?? [...SKILL_AGENT_DEFAULT_TOOLS]
   const usageLines: string[] = []
   if (toolEnabled(tools, 'update_plan')) {
-    usageLines.push('- 开始复杂多步任务前，先用 update_plan 规划步骤。')
+    usageLines.push('- 开始复杂多步任务前，先用 update_plan 规划步骤（计划展示给用户；任务完成或计划作废时传空字符串清空）。')
+  }
+  if (toolEnabled(tools, 'exit_plan_mode')) {
+    usageLines.push('- 改动大、不可逆或方向需要用户拍板的任务：计划写好（必要时先只读调研）后调用 exit_plan_mode 提交评审，用户批准后再动手；被要求「继续完善」时按反馈修订后重新提交。')
   }
     if (toolEnabled(tools, 'update_todo')) {
-      usageLines.push('- 执行中每完成一步用 update_todo 维护任务清单。')
+      usageLines.push('- 用 update_todo 维护任务清单：正在做的那一项标 running（同一时刻只留一项），完成即标 done，全部完成后传空数组清除。')
     }
   if (toolEnabled(tools, 'ask_user')) {
-    usageLines.push('- 需要用户补充信息时，使用 ask_user 提问，不要直接输出问题。')
+    usageLines.push('- 需要用户补充信息时用 ask_user 提问（不要直接输出问题）：能穷举选项就用 questions + options（可 multi_select 多选、推荐项放第一位并加 "(Recommended)"），一次可问多题，每题都留了自定义回答位。')
   }
   usageLines.push('- 需要引用本地资料时用 read_file / search_files / kb_search；需要执行代码时用 run_python；需要联网时用 web_search + web_fetch。')
   usageLines.push('- read_file 单次返回有上限：返回 truncated=true 时要用 offset=nextOffset 继续读，直到 truncated=false 才算读完（读长文档 / 大文件时必须续读）。')
@@ -185,8 +188,9 @@ export function buildToolUsageContext(enabledTools?: readonly string[] | null): 
   const toolList: string[] = []
   if (toolEnabled(tools, 'list_dir')) toolList.push('   - list_dir：列出目录内容（用户问"某个盘/文件夹里有什么"时优先用它）')
     if (toolEnabled(tools, 'update_plan')) toolList.push('   - update_plan：制定/更新执行计划')
+    if (toolEnabled(tools, 'exit_plan_mode')) toolList.push('   - exit_plan_mode：把计划提交用户评审（Approve / 继续完善）')
     if (toolEnabled(tools, 'update_todo')) toolList.push('   - update_todo：维护任务清单')
-    if (toolEnabled(tools, 'ask_user')) toolList.push('   - ask_user：信息不足时向用户提问')
+    if (toolEnabled(tools, 'ask_user')) toolList.push('   - ask_user：向用户提问（支持单选 / 多选 / 多题 / 自定义回答）')
   if (toolEnabled(tools, 'read_file') || toolEnabled(tools, 'write_file')) toolList.push(READ_FILE_HINT)
   if (toolEnabled(tools, 'replace_in_file') || toolEnabled(tools, 'multi_replace')) toolList.push(REPLACE_TOOLS_HINT)
   if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容')
@@ -197,7 +201,7 @@ export function buildToolUsageContext(enabledTools?: readonly string[] | null): 
   if (toolEnabled(tools, 'skill')) toolList.push('   - skill：加载并执行已安装技能')
   if (toolEnabled(tools, 'mcp_call')) toolList.push('   - mcp_call：调用已启用的 MCP 服务')
   if (toolEnabled(tools, 'shell')) toolList.push('   - shell：执行 Shell 命令（需完全访问）')
-  if (toolEnabled(tools, 'run_subagent')) toolList.push('   - run_subagent：派生子智能体')
+  if (toolEnabled(tools, 'run_subagent')) toolList.push('   - run_subagent：派生子代理独立完成子任务（可后台运行，用 job_output 收集结果、job_kill 停止）')
   if (toolList.length === 0) return ''
   return ['你可以使用以下工具：', ...toolList].join('\n')
 }
@@ -274,7 +278,7 @@ export function buildAutonomousSystemPrompt(
   if (toolEnabled(tools, 'skill')) toolList.push('   - skill：加载并执行已安装技能')
     if (toolEnabled(tools, 'mcp_call')) toolList.push('   - mcp_call：调用已启用的 MCP 服务')
     if (toolEnabled(tools, 'shell')) toolList.push('   - shell：执行 Shell 命令（需完全访问）')
-    if (toolEnabled(tools, 'run_subagent')) toolList.push('   - run_subagent：派生子智能体')
+    if (toolEnabled(tools, 'run_subagent')) toolList.push('   - run_subagent：派生子代理独立完成子任务（可后台运行，用 job_output 收集结果、job_kill 停止）')
   // 已安装技能库：让自主规划模式的 agent 也知道可用技能，用户询问技能时可自主回答
   const skillLib = Array.isArray(installedSkills) && installedSkills.length > 0
     ? [
@@ -286,7 +290,7 @@ export function buildAutonomousSystemPrompt(
   return [
     '你是一个自主规划执行任务的智能体（Agent），可以调用工具访问本地文件系统与网络。',
     '对用户提出的任务，请：',
-    ...(toolEnabled(tools, 'update_plan') ? ['1. 先用 update_plan 制定执行计划；'] : []),
+    ...(toolEnabled(tools, 'update_plan') ? ['1. 先用 update_plan 制定简短执行计划（展示给用户；计划作废时清空）；'] : []),
     ...(toolList.length ? ['2. 逐步执行，可用的工具包括：', ...toolList] : []),
     // removed
     // removed
@@ -295,8 +299,8 @@ export function buildAutonomousSystemPrompt(
     // removed
     // removed
     // removed
-    ...(toolEnabled(tools, 'ask_user') ? ['3. 信息不足时用 ask_user 向用户提问；'] : []),
-    ...(toolEnabled(tools, 'update_todo') ? ['4. 用 update_todo 维护任务清单，全部完成后传空数组清除。'] : []),
+    ...(toolEnabled(tools, 'ask_user') ? ['3. 信息不足时用 ask_user 向用户提问（能穷举选项就给 options，可多选 / 多题；每题都可自定义回答）；'] : []),
+    ...(toolEnabled(tools, 'update_todo') ? ['4. 用 update_todo 维护任务清单：正在做的那一项标 running（同一时刻只留一项），完成即标 done，全部完成后传空数组清除。'] : []),
     skillLib,
     '最后给出结构化、完整的最终回答。',
     ctx,

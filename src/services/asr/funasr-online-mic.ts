@@ -11,6 +11,15 @@ import { FunasrOnlineRuntime } from '@/services/asr/funasr-online'
 import { loadFunasrOnline } from '@/services/asr/funasr-online-ipc'
 
 const STEP = 9600 // 600ms @16k
+/** 能量（RMS）阈值：超过算「有声」 */
+const VAD_RMS = 0.02
+/**
+ * 这一段至少要累计这么多毫秒的**有声**音频才值得断句送识别。
+ * 没有这道闸时：环境噪声里的一次呼吸 / 敲键（几毫秒过阈值）也会触发断句，
+ * 而流式模型对这类噪声常解码成「嗯。」→ 一直按住就会不停往输入框里写「嗯。嗯。嗯。」。
+ * 与 Qwen3 分段会话的 minVoiceMs 保持同一套口径（那边默认 200ms）。
+ */
+const MIN_VOICED_MS = 200
 
 export interface FunasrMicEvents {
   onPartial?: (text: string, isFinal: boolean) => void
@@ -52,6 +61,7 @@ export class FunasrOnlineMicSession {
   private vadSilenceMs: number
   private lastVoiceAt = 0
   private everVoiced = false
+  private voicedMs = 0 // 本句累计「有声」时长（低于 MIN_VOICED_MS 不触发断句）
   private finalizing = false
 
   // 音频采集图（常驻复用）
@@ -173,14 +183,20 @@ export class FunasrOnlineMicSession {
     }
     if (idx > 0) this.pending16 = this.pending16.slice(idx)
 
-    // 能量 VAD：更新有声时间；说过话且停顿足够 → 自动断句
+    // 能量 VAD：更新有声时间；说过话、且这段确实有足够有声时长、且停顿足够 → 自动断句
     if (this.vad) {
       const now = performance.now()
       const rms = this.rmsOf(block)
-      if (rms > 0.02) {
+      if (rms > VAD_RMS) {
         this.lastVoiceAt = now
         this.everVoiced = true
-      } else if (this.everVoiced && !this.finalizing && now - this.lastVoiceAt > this.vadSilenceMs) {
+        this.voicedMs += (block.length / 16000) * 1000
+      } else if (
+        this.everVoiced &&
+        !this.finalizing &&
+        this.voicedMs >= MIN_VOICED_MS &&
+        now - this.lastVoiceAt > this.vadSilenceMs
+      ) {
         this.autoFinalize()
       }
     }
@@ -231,6 +247,7 @@ export class FunasrOnlineMicSession {
         this.lastUtterancePcm = this.uttPcm // 供 stop 时离线精修
         this.uttPcm = new Float32Array(0)
         this.everVoiced = false
+        this.voicedMs = 0
         this.lastVoiceAt = 0
         if (auto) {
           this.ev.onUtteranceFinal?.(full)
@@ -266,6 +283,7 @@ export class FunasrOnlineMicSession {
       this.uttPcm = new Float32Array(0)
       this.lastUtterancePcm = new Float32Array(0)
       this.everVoiced = false
+      this.voicedMs = 0
       this.lastVoiceAt = 0
       this.finalizing = false
       this.err = null
@@ -302,6 +320,7 @@ export class FunasrOnlineMicSession {
     this.accText = ''
     this.uttPcm = new Float32Array(0)
     this.everVoiced = false
+    this.voicedMs = 0
     this.lastVoiceAt = 0
     this.ev.onStatus?.('idle')
   }

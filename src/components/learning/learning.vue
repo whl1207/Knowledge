@@ -17,14 +17,16 @@ import { workspaceRoots } from '@/services/workspaceScan'
 import {
   emptyLData, loadLData, saveLData, syncObjectsWithKb,
   recordAttempt, clearObject, clearStale, objectMastery, wrongAttempts,
-  trendStats, streakDays, claimMastered, tagAttemptErr,
+  trendStats, streakDays, claimMastered, tagAttemptErr, attemptQuality,
+  recordQualitativeCheck, objectStatus, objectGateMastery, gateKindOfObject,
   setExplain, clearExplain,
   type LData, type LAttempt, type ErrType, type LExplainKind, type LExplainEntry,
 } from '@/services/learningRecord'
 import {
   computeMastery, MASTERY_GATE,
-  type KbType, guessKbType, kbTypeLabel,
+  type KbType, guessKbType, kbTypeLabel, type SrsRating,
 } from '@/services/learningCore'
+import { classifyPracticeType } from '@/lib/learning/learningGrade'
 import type { LvmItem, PracticeItem, EntityItem } from '@/components/learning/types'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { detectContentLanguage } from '@/services/learningPrompt'
@@ -241,8 +243,9 @@ const vm = computed<LvmItem[]>(() => {
   for (const key of Object.keys(ldata.value.objects)) {
     const o = ldata.value.objects[key]
     const meta = metaMap.value[key]
-    const mastery = o.claimMastered ? 1 : objectMastery(o)
-    const status = o.claimMastered || mastery >= MASTERY_GATE ? 'mastered' : mastery <= 0 ? 'new' : 'learning'
+    // 双门控口径：质性通过映射为 1（display_mastery），状态与地图配色同源
+    const mastery = o.claimMastered ? 1 : objectGateMastery(o)
+    const status = objectStatus(o)
     const due = !o.claimMastered && !!o.attempts.length && !o.stale && o.srs.dueAt <= now()
     out.push({
       key,
@@ -257,6 +260,7 @@ const vm = computed<LvmItem[]>(() => {
       dueAt: due ? o.srs.dueAt : 0,
       stale: o.stale,
       learnerClaimed: o.claimMastered || undefined,
+      qualitativeGate: gateKindOfObject(o) === 'qualitative',
     })
   }
   return out
@@ -359,7 +363,8 @@ const entityVM = computed<EntityItem[]>(() => {
     const fileSet = new Set<string>()
     for (const b of present) fileSet.add(fileKeyOf(b))
     const mine = all.filter(x => x.a.entityNames.includes(en.entityName))
-    const mastery = computeMastery(mine.map((x: any) => x.a.ok))
+    // 按证据质量折算：与 fileSummary / 地图口径一致（看过答案的「对」不计满值）
+    const mastery = computeMastery(mine.map((x: any) => attemptQuality(x.a) >= 0.5))
     const status: EntityItem['status'] = mastery <= 0 ? 'new' : mastery >= MASTERY_GATE ? 'mastered' : 'learning'
     const due = mine.length > 0 && mine.some((x: any) => x.o.attempts.length > 0 && !x.o.stale && x.o.srs.dueAt <= nowMs)
     out.push({ name: en.entityName, label: en.entityName, blockCount: present.length, fileCount: fileSet.size, attempts: mine.length, mastery, status, due })
@@ -452,9 +457,21 @@ function makeItems(blocks: any[], max = 10): PracticeItem[] {
       if (!content) continue
       refs.push({ label: r.label || b?.label || String(r.blockId), content })
     }
+    // 选择题（问题库开了「生成选择题选项」）：选项进 choiceMap，走确定性判分
+    const cm = (q.choiceMap && typeof q.choiceMap === 'object' && Object.keys(q.choiceMap).length)
+      ? q.choiceMap as Record<string, string>
+      : null
+    const multi = !!cm && String(exAns || '').includes(',')
+    // 参考答案：选择题把标签翻成"标签. 正文"，读起来才有意义
+    const backText = cm && exAns
+      ? String(exAns).split(',').map(l => {
+          const k = String(l).trim().toUpperCase()
+          return cm[k] ? `${k}. ${cm[k]}` : k
+        }).join('  ·  ')
+      : (exAns || refs[0]?.content || '')
     chosen.push({
       q: q.text,
-      back: exAns || refs[0]?.content || '',
+      back: backText,
       hasAnswer: !!exAns,
       // 参考切片始终保留：练习卡第三个标签「参考切片」用 block_md 渲染出处
       slices: refs,
@@ -462,6 +479,11 @@ function makeItems(blocks: any[], max = 10): PracticeItem[] {
       filePath: f,
       blockId: q.srcBlockId,
       entityNames: entityNamesOf(q.srcBlockId),
+      // 判分（P1）：只有问题库自带的独立答案才能当"钥匙"；来源切片正文不能冒充
+      expectedAnswer: exAns || undefined,
+      // 选择题按选项标签集合判分；否则按题干/答案长度推断短答或开放题
+      qType: cm ? (multi ? 'multi' : 'choice') : classifyPracticeType(q.text, exAns),
+      choiceMap: cm,
     })
   }
   // 兜底：问题不足时按切片「复述」补足（保证无问题库的知识库仍可练习）
@@ -476,6 +498,9 @@ function makeItems(blocks: any[], max = 10): PracticeItem[] {
         filePath: fileKeyOf(b),
         blockId: b.id,
         entityNames: entityNamesOf(b.id),
+        // 复述题没有独立答案 → 定性题，永不由字符串判分（交给学习者自评）
+        qType: 'qualitative',
+        hint: tr('先说一遍，再对照来源切片', 'Say it first, then compare with the source slice'),
       })
     }
   }
@@ -550,19 +575,60 @@ function onExamGraded(rows: { q: string; ok: boolean; score: number; blockId: an
     recordAttempt(ldata.value, r.filePath, {
       q: r.q, ok: r.ok, score: r.score, at: Date.now(), src: 'exam',
       blockId: r.blockId, filePath: r.filePath, entityNames: entityNamesOf(r.blockId),
+      // 考试是闭卷独立作答：无提示、独立完成（显式写入，避免被缺省值语义变化影响）
+      independent: true, hintsUsed: 0,
     })
     n++
   }
   if (n) { scheduleSave(); liveMsg.value = tr(`已计入 ${n} 题到对应文件的学习对象`, `Tracked ${n} answers into their file learning objects`) }
 }
 
-function onPracticeResult(ok: boolean) {
+/** 完成本组时的汇总（练习结算路径共用） */
+function finishGroupIfDone() {
+  const p = practice.value
+  if (!p) return
+  if (p.idx >= p.items.length) {
+    const wrongN = p.idx - p.ok
+    stateMsg.value = tr(
+      `本组完成：${p.idx} 题 · 答对 ${p.ok} · 待加强 ${wrongN}`,
+      `Done: ${p.idx} Q · correct ${p.ok} · to review ${wrongN}`
+    )
+  }
+}
+
+/**
+ * 练习作答回传。
+ *
+ * - 质性知识点（concept / design）走**另一条路**：不由正确率判分，而是把"用自己的话
+ *   讲一遍"交给模型判定，结果由 `recordQualitativeCheck` 落 `qualitativePass`；
+ * - `rating` 四档评分（P1）：判得出分的题由判分结果直接给 good / again，学习者无从改判；
+ *   判不了分的题由学习者自评。缺省按 ok 反推，旧调用点行为不变。
+ * - `independent` / `hintsUsed` 由 practiceView 判定（是否展开过答案区），是**证据质量**的输入：
+ *   展开过答案之后的「记得」不算独立回忆，掌握度要按提示成本折算（对齐 DeepTutor 的
+ *   `QuizAttempt.independent` 与 `LearningEvidence.hints_used`）。
+ */
+function onPracticeResult(ok: boolean, independent = true, hintsUsed = 0, rating?: SrsRating) {
   const p = practice.value
   if (!p || !ldata.value) return
   const it = p.items[p.idx]
   if (!it) return
   const o = ldata.value.objects[it.objKey]
-  const wasMastered = !!o?.masteredAt
+  const wasMastered = objectStatus(o || {}) === 'mastered'
+  // 质性判定：记录判定结果与讲解原文，不进加权正确率（质性门控读 qualitativePass）
+  if (it.qType === 'qualitative') {
+    const m = recordQualitativeCheck(ldata.value, it.objKey, {
+      passed: ok,
+      explanation: it.explanation,
+      feedback: it.feedback,
+      lang: contentLang.value,
+    })
+    scheduleSave()
+    if (!wasMastered && ok) liveMsg.value = tr(`🎉 已掌握「${o?.label || ''}」`, `Mastered "${o?.label || ''}"`)
+    if (ok) p.ok += 1
+    p.idx += 1
+    finishGroupIfDone()
+    return m
+  }
   const attempt: Omit<LAttempt, 'id'> = {
     q: it.q,
     ok,
@@ -575,6 +641,11 @@ function onPracticeResult(ok: boolean) {
     // 答案快照：错题本直接读此，不再依赖切片现状；旧记录无此字段时回退来源切片正文
     answer: it.back,
     hasAnswer: !!it.hasAnswer,
+    // 证据质量输入：看过答案/解析的作答不能算独立完成
+    independent: !!independent,
+    hintsUsed: independent ? 0 : Math.max(0, Number(hintsUsed) || 0),
+    // 四档评分：决定 SRS 档位（hard 不推进 / easy 多进一档 / again 视为失败）
+    rating: rating || (ok ? 'good' : 'again'),
   }
   const m = recordAttempt(ldata.value, it.objKey, attempt)
   scheduleSave()
@@ -583,14 +654,9 @@ function onPracticeResult(ok: boolean) {
   }
   if (ok) p.ok += 1
   p.idx += 1
-  if (p.idx >= p.items.length) {
-    const wrongN = p.idx - p.ok
-    stateMsg.value = tr(
-      `本组完成：${p.idx} 题 · 答对 ${p.ok} · 待加强 ${wrongN}`,
-      `Done: ${p.idx} Q · correct ${p.ok} · to review ${wrongN}`
-    )
-  }
+  finishGroupIfDone()
 }
+
 function closePractice() {
   flushSave()
   const from = practice.value?.from

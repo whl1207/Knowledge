@@ -13,6 +13,7 @@
  */
 
 import { IPCError } from '@/types/ipc'
+import { logInfo } from './log'
 
 /** 变更类操作清单（新增变更操作必须登记在这里，避免漏掉审批） */
 export const PLUGIN_MUTATING_ACTIONS = ['enable', 'disable', 'reload', 'uninstall', 'setConfig'] as const
@@ -30,7 +31,7 @@ export function isPluginMutatingAction(action: string): action is PluginMutating
  */
 export function requirePluginApproval(payload: { confirm?: unknown } | undefined, action: string): void {
   if (payload?.confirm === true) {
-    console.log(`[plugin-approval] [audit] ${action}（用户已确认）`)
+    logInfo('main', `[plugin-approval] [audit] ${action}（用户已确认）`)
     return
   }
   throw new IPCError(

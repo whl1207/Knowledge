@@ -12,7 +12,7 @@
  * 只需要「面板清单 / 标题」这类查询时，请 import panelRegistry.ts。
  */
 
-import { defineAsyncComponent, h, type Component } from 'vue'
+import { defineAsyncComponent, defineComponent, h, type Component } from 'vue'
 import { coreSlot, declareCoreSlots } from './slots'
 import { SLOT_META_CORE, SLOT_META_KEEP_ALIVE } from '@/shared/pluginSlots'
 import { PANEL_MAIN_SLOT } from './coreSlots'
@@ -29,9 +29,23 @@ export const asyncPanelLoading = () =>
     [h('i', { class: 'fa fa-spinner fa-spin', style: 'font-size:16px;' })],
   )
 
-/** 按需加载的面板组件（重型依赖只在打开对应面板时才加载） */
-export function lazyPanel(loader: () => Promise<any>): Component {
-  return defineAsyncComponent({ loader, loadingComponent: asyncPanelLoading as any })
+/**
+ * 按需加载的面板组件（重型依赖只在打开对应面板时才加载）。
+ *
+ * keepAliveName：需要保活时传入，会额外包一层**具名**组件。
+ * 为什么不能直接把 async 组件交给 KeepAlive 的 include 匹配：KeepAlive 对 async 包装组件
+ * 取的是 `__asyncResolved.name`（要等分包加载完成、且必须与 include 名完全一致）才命中；
+ * 包一层具名组件后，名字在**任何时刻**都稳定可匹配 → 切走时一定进缓存，切回即恢复（不重新 init）。
+ */
+export function lazyPanel(loader: () => Promise<any>, keepAliveName?: string): Component {
+  const inner = defineAsyncComponent({ loader, loadingComponent: asyncPanelLoading as any })
+  if (!keepAliveName) return inner
+  return defineComponent({
+    name: keepAliveName,
+    setup() {
+      return () => h(inner)
+    },
+  })
 }
 
 interface BuiltinPanelSpec {
@@ -69,7 +83,7 @@ const BUILTIN_PANELS: BuiltinPanelSpec[] = [
     titleEn: 'Knowledge Processing',
     icon: 'fa fa-stack-overflow',
     order: 30,
-    component: lazyPanel(() => import('@/components/knowRAG/knowRAG.vue')),
+    component: lazyPanel(() => import('@/components/knowRAG/knowRAG.vue'), 'Knowledge'),
     // 切换主面板时知识处理不销毁，切片/构建等后台任务继续
     keepAlive: 'Knowledge',
   },
@@ -79,7 +93,7 @@ const BUILTIN_PANELS: BuiltinPanelSpec[] = [
     titleEn: 'Learning',
     icon: 'fa fa-graduation-cap',
     order: 40,
-    component: lazyPanel(() => import('@/components/learning/learning.vue')),
+    component: lazyPanel(() => import('@/components/learning/learning.vue'), 'Learning'),
     // 切换主面板时学习模块不销毁，练习/考试作答状态保留
     keepAlive: 'Learning',
   },

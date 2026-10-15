@@ -3,6 +3,7 @@ import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
 import { defineConfig } from 'vite'
+import type { RollupOptions } from 'rollup'
 import vue from '@vitejs/plugin-vue'
 import electron from 'vite-plugin-electron/simple'
 import pkg from './package.json'
@@ -14,18 +15,35 @@ const srcAlias = {
   '@': fileURLToPath(new URL('./src', import.meta.url)),
 }
 
+// 构建告警过滤：只静音下面这三类**已知且无法在本仓库修掉**的告警，其余一律照常输出。
+// 1) Rollup「dynamic import will not move module into another chunk」——
+//    store/index.ts、services/ai-utils.ts、@capacitor/core 等既被大量静态导入、又被少量动态导入
+//    （打断循环依赖 / 按需加载），Rollup 会把上百个静态导入方一次性列出来，一次构建刷十几屏；
+// 2) vite-plugin-electron 的 preload 默认配置带 rolldown 时代的 `platform`（input）与
+//    `codeSplitting`（output）；Vite 7 走 Rollup，会把这两个键报成 Unknown input/output options。
+//    只按**具体键名**过滤，避免掩盖我们自己配置里的拼写错误。
+const IGNORED_ROLLUP_WARNINGS = [
+  'dynamic import will not move module into another chunk',
+  'Unknown input options: platform',
+  'Unknown output options: codeSplitting',
+]
+const onRollupWarn: NonNullable<RollupOptions['onwarn']> = (warning, warn) => {
+  const msg = String(warning?.message || '')
+  if (IGNORED_ROLLUP_WARNINGS.some((m) => msg.includes(m))) return
+  warn(warning)
+}
+
 // TTS worker：主进程构建完成后用 esbuild 单独打包成 Node ESM 文件
 // （vite 把 new Worker(new URL()) 当 Web Worker 处理，故不能走 vite worker）
+// 成功时不打印任何东西（脚本自身也只在有警告/错误时输出）；失败才把细节抛出来。
 const ttsWorkerPlugin = {
   name: 'tts-worker-build',
   closeBundle() {
-    console.log('[TTSWORKER] closeBundle fired')
     try {
       const script = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scripts', 'build-tts-worker.mjs')
       execSync(`node "${script}"`, { stdio: 'inherit' })
-      console.log('[TTSWORKER] done')
     } catch (err) {
-      console.error('[TTSWORKER] build failed:', (err as Error)?.message)
+      console.error('[tts-worker] build failed:', (err as Error)?.message)
     }
   },
 }
@@ -49,6 +67,10 @@ export default defineConfig(({ command }) => {
     },
     build: {
       chunkSizeWarningLimit: 1500, // 将警告阈值提高到 1500KB（默认是 500KB）
+      rollupOptions: {
+        // 渲染层同样过滤「dynamic import will not move module…」（见 onRollupWarn 说明）
+        onwarn: onRollupWarn,
+      },
     },
     // ASR ONNX 推理 Web Worker（asr-onnx-worker.ts）需要 ESM 格式：
     // worker 内动态 import('onnxruntime-web/wasm') 会触发代码分割，
@@ -79,11 +101,15 @@ export default defineConfig(({ command }) => {
           vite: {
             // 主进程单独构建（configFile: false），别名需在此重复声明
             resolve: { alias: srcAlias },
+            // 这里只跑主进程的打包：成功时的「building… / watching… / 产物大小表」对日常开发没有信息量，
+            // 只保留警告与错误（渲染层 dev server 仍照常打印自己的地址等信息）。
+            logLevel: 'warn',
             build: {
               sourcemap,
               minify: isBuild,
               outDir: 'dist-electron/main',
               rollupOptions: {
+                onwarn: onRollupWarn,
                 plugins: [ttsWorkerPlugin],
                 // Some third-party Node.js libraries may not be built correctly by Vite, especially `C/C++` addons, 
                 // we can use `external` to exclude them to ensure they work correctly.
@@ -120,11 +146,14 @@ export default defineConfig(({ command }) => {
           vite: {
             // preload 单独构建（configFile: false），别名需在此重复声明
             resolve: { alias: srcAlias },
+            // 同主进程：只留警告与错误，避免 dev 下重复打印「building… / watching…」
+            logLevel: 'warn',
             build: {
               sourcemap: sourcemap ? 'inline' : undefined, // #332
               minify: isBuild,
               outDir: 'dist-electron/preload',
               rollupOptions: {
+                onwarn: onRollupWarn,
                 external: Object.keys('dependencies' in pkg ? pkg.dependencies : {}),
               },
             },

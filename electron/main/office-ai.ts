@@ -21,6 +21,7 @@
  * 会话模型耦合在一起；这里的实现约 150 行且完全受控。
  */
 import { ipcMain, nativeTheme, type WebContents } from 'electron'
+import { logInfo } from './log'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { viewInfoOfWebContents } from './office-host'
@@ -60,7 +61,7 @@ export function setOfficeAiConfig(cfg: OfficeAiConfig | null) {
     return
   }
   state.ai = cfg
-  console.log(`[office-ai] 模型已接入：${cfg.provider} · ${cfg.model}`)
+  logInfo('main', `[office-ai] 模型已接入：${cfg.provider} · ${cfg.model}`)
 }
 
 /** 渲染层推送界面环境（主题 / 语言） */

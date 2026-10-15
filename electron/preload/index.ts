@@ -151,9 +151,12 @@ const dsh = {
     state(id: string): Promise<import('@/types/agent').AgentStateView> {
       return invokeIpc('agent:state', { id })
     },
-    /** 回答 agent 的 ask_user 问题（agent/question 事件附带 askId） */
-    answer(id: string, askId: string, message: string): Promise<{ success: boolean }> {
-      return invokeIpc('agent:answer', { id, askId, message })
+    /**
+     * 回答 agent 的 ask_user 问题（agent/question 事件附带 askId）。
+     * answers = 结构化回答批（每题一条 `{ id, selected, custom? }`）；message 是旧式纯文本回答。
+     */
+    answer(id: string, askId: string, message?: string, answers?: any[]): Promise<{ success: boolean }> {
+      return invokeIpc('agent:answer', { id, askId, message, answers })
     },
     /** 渲染层任务：抢占执行权（agent/renderer-task 事件；返回 true 表示本窗口负责执行） */
     claimRendererTask(id: string, taskId: string): Promise<{ claimed: boolean }> {

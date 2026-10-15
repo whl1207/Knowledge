@@ -15,13 +15,16 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { app, BrowserWindow } from 'electron'
-import * as PDFJS from 'pdfjs-dist'
+// 主进程是 Node 环境：pdfjs 必须用 legacy 构建（现代构建会在导入时警告并要求换 legacy）
+import * as PDFJS from 'pdfjs-dist/legacy/build/pdf.mjs'
 import xlsx from 'xlsx'
 import { toolRegistry, defineTool } from '@/shared/toolRegistry'
 import type { ToolResult, ToolExecutionContext } from '@/types/tool'
 import { pythonService } from './python-service'
 import { docxToMarkdown } from './office/docx-to-markdown'
 import { shellService } from './shell-service'
+import { trustedPythonService } from './trusted-python-service'
+import { logInfo } from './log'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
 import { retrieveKnowledge } from '@/shared/kbRetrieval'
 import { keywordSearchBlocks } from '@/services/learningSearch'
@@ -35,7 +38,12 @@ import {
   parseDeepSeekSearchResponse,
 } from '@/lib/agent/deepseekSearch'
 import { skillService } from './skill-service'
-import { requestAnswer, setAgentPlan, setAgentTodos, createAgent, getAgent, getAgentLastContent, disposeAgent, requestRendererTask } from './agent-loop'
+import { requestQuestions, requestPlanReview, setAgentPlan, setAgentTodos, getAgentTodos, createAgent, getAgent, disposeAgent, awaitAgentTurn, requestRendererTask } from './agent-loop'
+import { jobRegistry } from './job-registry'
+import { parseTodoList } from '@/shared/agentTodo'
+import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
+import { planReviewMessage } from '@/shared/agentPlanReview'
+import type { TodoItem } from '@/types/agent'
 import { sessionLog } from './session-log'
 import { mcpService } from './mcp-service'
 import { browserAgentService } from './browser-agent'
@@ -54,6 +62,11 @@ import {
   type WebSearchProviderId,
   type WebSearchRunResult,
 } from '@/shared/webSearch'
+import {
+  buildFirecrawlSearchRequest,
+  firecrawlErrorMessage,
+  parseFirecrawlSearchResponse,
+} from '@/shared/webSearchFirecrawl'
 
 // ---------------------------------------------------------------------------
 // 路径围栏
@@ -254,8 +267,6 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
             totalChars: win.totalChars,
             startOffset: win.startOffset,
             endOffset: win.endOffset,
-            truncated: win.truncated,
-            nextOffset: win.nextOffset,
             note: windowNote('PDF 文本', win, offset),
           },
         }
@@ -287,8 +298,6 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
             totalChars: win.totalChars,
             startOffset: win.startOffset,
             endOffset: win.endOffset,
-            truncated: win.truncated,
-            nextOffset: win.nextOffset,
             note: windowNote('Word 文本', win, offset),
           },
         }
@@ -322,8 +331,6 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
             totalChars: win.totalChars,
             startOffset: win.startOffset,
             endOffset: win.endOffset,
-            truncated: win.truncated,
-            nextOffset: win.nextOffset,
             note: windowNote('Excel 文本', win, offset),
           },
         }
@@ -813,8 +820,9 @@ async function runPython(input: any, ctx: ToolExecutionContext): Promise<ToolRes
 }
 
 // trusted 模式走完整访问服务（与 executePython IPC 一致）
+// 静态导入即可：该服务在 index.ts 里本来就是静态导入的（模块必然已加载），
+// 这里用动态 import 只会让打包器报「dynamic import will not move module into another chunk」。
 async function trustedPythonExecute(code: string, cwd?: string) {
-  const { trustedPythonService } = await import('./trusted-python-service')
   return trustedPythonService.executeCode(code, '', cwd)
 }
 
@@ -1023,31 +1031,118 @@ async function loadSkill(input: any, ctx: ToolExecutionContext): Promise<ToolRes
 // 交互与状态工具（依赖 agent 循环的接缝）
 // ---------------------------------------------------------------------------
 
-/** ask_user：向用户提问，等待渲染进程经 agent:answer 回复 */
+/**
+ * ask_user：向用户提问，等待渲染进程经 agent:answer 回复（结构化回答批）。
+ *
+ * 契约参照 DSH `ask_user_question`：一次可问多题，每题可给选项（单选 / 多选）并留自定义回答；
+ * 回答按问题 id 回填 `{ id, selected: string[], custom? }`，跳过的题 selected 为空且无 custom。
+ */
 async function askUser(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const question = String(input?.question ?? '')
-  if (!question) return { ok: false, error: 'question 参数必填' }
   if (!ctx.agentId) return { ok: false, error: 'ask_user 只能在 agent 循环内使用' }
+  const parsed = parseAskQuestions(input)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  const { questions, legacy } = parsed
   try {
-    const answer = await requestAnswer(ctx.agentId, question)
-    return { ok: true, value: { answer } }
+    const answers = await requestQuestions(ctx.agentId, questions)
+    return {
+      ok: true,
+      value: {
+        ...askAnswersToModel(questions, answers, legacy),
+        summary: askAnswersText(questions, answers),
+      },
+    }
   } catch (e: any) {
     return { ok: false, error: e?.message || '用户未回答' }
   }
 }
 
-/** update_plan：创建/更新执行计划（随 agent/plan 事件广播给 UI） */
-async function updatePlan(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const plan = typeof input?.plan === 'string' && input.plan.trim() ? input.plan.trim() : null
-  if (ctx.agentId) setAgentPlan(ctx.agentId, plan)
-  return { ok: true, value: { plan } }
+/**
+ * exit_plan_mode：把完整计划提交给用户评审（对齐 DSH 计划模式的核心闭环）。
+ *
+ * 语义（与 DSH 一致）：
+ * - **批准** → 返回成功 `{ approved: true, plan }`，表示可以开始执行；
+ * - **继续完善** → 返回**失败**并把用户反馈带回（模型据此修订后重新提交）；
+ * - **关闭评审** → 返回**失败**并说明用户接手（模型不要擅自继续推进）。
+ */
+async function exitPlanMode(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  if (!ctx.agentId) return { ok: false, error: 'exit_plan_mode 只能在 agent 会话内使用' }
+  const raw = input?.plan
+  if (raw !== undefined && typeof raw !== 'string') {
+    return { ok: false, error: 'plan 必须是字符串（Markdown 文本；通常 update_plan 里已经写过一份）' }
+  }
+  const plan = typeof raw === 'string' ? raw.trim() : ''
+  if (!plan) return { ok: false, error: 'plan 参数必填：请提交完整计划（Markdown，从标题开始书写）供用户评审' }
+  if (plan.length > PLAN_MAX_CHARS) {
+    return { ok: false, error: `计划过长（${plan.length} 字符，上限 ${PLAN_MAX_CHARS}）：评审的是步骤与关键决策，细节请写进工作区文件` }
+  }
+  // 提交评审的计划同时成为"当前计划"（UI 与后续步骤都看这一份；落盘 plan/write）
+  setAgentPlan(ctx.agentId, plan)
+  try {
+    const outcome = await requestPlanReview(ctx.agentId, plan)
+    const verdict = planReviewMessage(outcome)
+    if (verdict.ok) return { ok: true, value: { approved: true, plan, message: verdict.text } }
+    return { ok: false, error: verdict.text }
+  } catch (e: any) {
+    return { ok: false, error: `计划评审未完成：${e?.message || '已取消'}` }
+  }
 }
 
-/** update_todo：维护结构化待办清单（随 agent/todos 事件广播给 UI） */
+/** 计划文本上限（字符）：计划是给人看的执行摘要，不是长文正文 */
+const PLAN_MAX_CHARS = 20000
+
+/**
+ * update_plan：创建/更新执行计划（随 agent/plan 事件广播给 UI）。
+ *
+ * 参照 DSH 计划模式的工具逻辑：
+ * - 计划是**人看的 Markdown**（`# 标题` + 步骤列表），由 UI 原样展示；
+ * - 传空字符串 = 清除计划（任务完成或计划作废时调用，避免旧计划留在界面上误导用户）；
+ * - 写入前做规模校验并 fail-loud，超长计划直接拒绝而不是塞进 UI。
+ */
+async function updatePlan(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  if (!ctx.agentId) return { ok: false, error: 'update_plan 只能在 agent 会话内使用' }
+  const raw = input?.plan
+  if (raw !== undefined && typeof raw !== 'string') {
+    return { ok: false, error: 'plan 必须是字符串（Markdown 文本；传空字符串清除计划）' }
+  }
+  const plan = typeof raw === 'string' ? raw.trim() : ''
+  if (plan.length > PLAN_MAX_CHARS) {
+    return {
+      ok: false,
+      error: `计划过长（${plan.length} 字符，上限 ${PLAN_MAX_CHARS}）：计划只列步骤与关键约束，细节请写进工作区文件`,
+    }
+  }
+  setAgentPlan(ctx.agentId, plan || null)
+  if (!plan) {
+    return { ok: true, value: { plan: null, cleared: true, message: '执行计划已清除。' } }
+  }
+  const steps = plan.split('\n').filter((l) => /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(l)).length
+  return {
+    ok: true,
+    value: {
+      plan,
+      cleared: false,
+      chars: plan.length,
+      steps,
+      message: `执行计划已更新（${plan.length} 字符${steps ? `，约 ${steps} 个步骤` : ''}），已展示给用户；执行过程中请在有变化时继续调用本工具保持计划最新。`,
+    },
+  }
+}
+
+/**
+ * update_todo：维护结构化待办清单（随 agent/todos 事件广播给 UI）。
+ *
+ * 参照 DSH `todo_write` 的工具逻辑：整表替换 + 写入前强校验 + 单活跃项 + 返回计数。
+ * 校验失败一律 fail-loud（返回 ok:false 让模型重写），避免脏数据进 UI / 存档。
+ */
 async function updateTodo(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const todos = Array.isArray(input?.todos) ? input.todos : []
-  if (ctx.agentId) setAgentTodos(ctx.agentId, todos)
-  return { ok: true, value: { count: todos.length } }
+  if (!ctx.agentId) return { ok: false, error: 'update_todo 只能在 agent 会话内使用' }
+  const parsed = parseTodoList(input?.todos, getAgentTodos(ctx.agentId))
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  setAgentTodos(ctx.agentId, parsed.todos)
+  return {
+    ok: true,
+    value: { todos: parsed.todos, counts: parsed.counts, cleared: parsed.cleared, message: parsed.message },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1233,7 @@ async function searchFiles(input: any, ctx: ToolExecutionContext): Promise<ToolR
 //
 // web_search 支持多搜索源（设置页「工具 → 搜索」切换）：
 // - 免 Key：bing（默认，隐藏浏览器渲染）/ baidu / duckduckgo
+// - 免 Key 的搜索 API：firecrawl（不填 Key 走官方免费额度，填了换用自己的额度）
 // - 自建：searxng（实例地址 + JSON 接口）
 // - API Key：bocha 博查 / zhipu 智谱 / tavily / brave
 // 配置由渲染进程经 IPC（webSearch:set-config）注入，默认保持原 Bing 行为不变。
@@ -1604,6 +1700,40 @@ async function searchTavily(query: string, cfg: WebSearchConfig): Promise<Search
   }
 }
 
+/**
+ * Firecrawl（免 Key 可用）：POST `<host>/v2/search`。
+ *
+ * 与其它 API 源的关键差别：**apiKey 可以留空**——留空时不发 `Authorization` 头，
+ * 走 Firecrawl 官方的免 Key 免费额度（按 **IP** 计量，约 1000 credits/月、一次搜索约 2 credits）；
+ * 填了 Key 则用 Bearer 发出、换用用户自己的额度（官方正好收这个头）。
+ * 因此这里**绝不能**像别的源那样在缺 Key 时抛错。
+ *
+ * 请求组装 / 响应解析 / 错误翻译都是纯函数，放在 `@/shared/webSearchFirecrawl`
+ * （渲染层用同一份，避免两端行为漂移）。
+ */
+async function searchFirecrawl(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
+  const apiKey = String(cfg.firecrawl.apiKey || '').trim()
+  const req = buildFirecrawlSearchRequest({
+    query,
+    maxResults: cfg.maxResults,
+    apiHost: cfg.firecrawl.apiHost,
+    apiKey,
+  })
+  let data: any
+  try {
+    data = await fetchSearchJson(req.url, {
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+    })
+    const items = parseFirecrawlSearchResponse(data, cfg.maxResults)
+    if (!items.length) throw new Error('Firecrawl 未返回可用结果')
+    return { items, via: 'api' }
+  } catch (e: any) {
+    throw new Error(firecrawlErrorMessage(e, !!apiKey))
+  }
+}
+
 /** Brave Search：GET /res/v1/web/search（X-Subscription-Token） */
 async function searchBrave(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
   const host = String(cfg.brave.apiHost || 'https://api.search.brave.com').trim().replace(/\/+$/, '')
@@ -1854,6 +1984,7 @@ async function runSingleSearch(
     case 'deepseek': return searchDeepSeekOfficial(q, config)
     case 'tavily': return searchTavily(q, config)
     case 'brave': return searchBrave(q, config)
+    case 'firecrawl': return searchFirecrawl(q, config)
     case 'bing':
     default: return searchBingWeb(q)
   }
@@ -2287,56 +2418,249 @@ async function mcpCall(input: any, ctx: ToolExecutionContext): Promise<ToolResul
 
 // ---------------------------------------------------------------------------
 // 子代理接缝（路线图 2.6：ctx.subagents 的 in-process provider）
-// 模型可用 run_subagent 派生一个独立的 agent 会话执行子任务（复用 agent 循环），
-// 等待其完成并取回最终输出；父 agent 销毁时子代理一并销毁。
+//
+// 模型可用 run_subagent 派生一个独立的 agent 会话执行子任务（复用 agent 循环）。
+// 工具逻辑参照 DSH 的 @deepseek-ai/dsh-tool-subagent：
+// - **前台默认**：等待子代理本轮收敛后取回最终输出；`run_in_background: true` 则
+//   立即返回 jobId，父 Agent 继续干活，稍后用 `job_output` 收集、`job_kill` 停止；
+// - **递归预算**：子代理深度逐层 +1，超过上限直接拒绝（DSH 的 assertSubagentMaxDepth）；
+// - **能力继承**：默认继承调用方的工具白名单与沙箱/MCP/知识库配置，并剔除
+//   `run_subagent` 自身（无深度预算的旧实现靠"禁止递归"，现在两者都有）；
+// - **中止可解释**：超时 / 父级取消都返回「已中止 + 中止前的部分输出」，
+//   绝不把部分结果当成功（DSH 的 stopReasonError + partial output）。
 // ---------------------------------------------------------------------------
+
+/** 子代理嵌套深度上限（根 agent = 0）。超过即拒绝，防止自我复制式递归。 */
+const SUBAGENT_MAX_DEPTH = 3
+/** 单个子代理默认超时（10 分钟）与上限（1 小时） */
+const SUBAGENT_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
+const SUBAGENT_MAX_TIMEOUT_MS = 60 * 60 * 1000
+/** 运行期 job 记录：jobId → 子代理会话（供 job_output / job_kill 定位真实 agent） */
+const subagentJobs = new Map<string, { childId: string; label: string; owner: string; startedAt: number }>()
+
+function clampSubagentTimeout(v: unknown): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return SUBAGENT_DEFAULT_TIMEOUT_MS
+  return Math.min(SUBAGENT_MAX_TIMEOUT_MS, Math.max(5000, Math.round(n)))
+}
+
+/**
+ * 解析子代理的工具白名单。
+ *
+ * 一层委派默认就够，因此继承来的白名单一律剔除 `run_subagent`（避免"子代理再开子代理"
+ * 的意外分支）；需要多层委派时调用方在 `tools` 里显式写出 `run_subagent`，
+ * 由深度预算（SUBAGENT_MAX_DEPTH）兜住上限。
+ */
+function resolveChildTools(input: any, ctx: ToolExecutionContext): string[] {
+  if (Array.isArray(input?.tools)) return input.tools.map(String).filter(Boolean)
+  const parentTools = (ctx as any).tools
+  if (Array.isArray(parentTools)) return parentTools.map(String).filter((t) => t !== 'run_subagent')
+  if (parentTools === null) {
+    // 父级 = 全部工具：按该作用域可见的工具清单物化（等价继承，且能去掉 run_subagent）
+    return toolRegistry.list(ctx.scope).map((d) => String(d.name)).filter((t) => t !== 'run_subagent')
+  }
+  return ['read_file', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files', 'run_python', 'kb_search', 'web_search', 'web_fetch', 'ask_user', 'update_plan', 'update_todo']
+}
+
+/** 子代理默认系统提示（无 systemPrompt / member 时用） */
+const SUBAGENT_DEFAULT_SYSTEM_PROMPT =
+  '你是一个子代理（subagent），负责独立完成父任务分配给你的子任务：自己做调研、自己动手改文件，' +
+  '最后直接输出可被父代理采用的结果（结论 + 依据 + 涉及的文件路径）。不要反问父代理，信息不足时按最合理的假设推进并说明假设。'
 
 async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const prompt = String(input?.prompt ?? '')
-  if (!prompt.trim()) return { ok: false, error: 'prompt 参数必填（子任务描述）' }
+  if (!prompt.trim()) return { ok: false, error: 'prompt 参数必填（子任务的完整描述）' }
   const parentId = ctx.agentId || ctx.sessionId
   if (!parentId) return { ok: false, error: 'run_subagent 只能在 agent 会话内使用' }
 
-  // 通用子代理：不注入群成员身份。群成员之间协作请用 @点名（见 swarmStrategies.buildMemberPrompt）；
-  // run_subagent 仅用于委派临时的通用子任务（不占用成员身份、不入群，结果由父 Agent 自行综合）。
-  const fallbackTools = ['read_file', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files', 'run_python', 'kb_search', 'web_search', 'web_fetch', 'ask_user', 'update_plan', 'update_todo']
-  let baseTools: string[]
-  if (Array.isArray(input?.tools)) baseTools = input.tools.map(String)
-  else if (Array.isArray((ctx as any).tools)) baseTools = (ctx as any).tools
-  else baseTools = fallbackTools
-  // 通用子代理不再派生下一级（过滤 run_subagent 防递归）
-  const childTools = baseTools.filter((t: string) => t !== 'run_subagent')
+  // ---- 群成员身份（AgentSwarm 注入 ctx.swarmMembers；缺省 = 通用子代理）----
+  const memberName = String(input?.member ?? '').trim()
+  const members: Record<string, any> | undefined = (ctx as any).swarmMembers
+  let member: any
+  if (memberName) {
+    if (!members || typeof members !== 'object') {
+      return {
+        ok: false,
+        error: `member="${memberName}" 不可用：当前会话没有群成员名册。群内协作请直接 @点名（由群聊调度），` +
+          'run_subagent 只用于委派临时的通用子任务（不要传 member）。',
+      }
+    }
+    member = members[memberName]
+    if (!member) {
+      const names = Object.keys(members)
+      return { ok: false, error: `未找到群成员 "${memberName}"${names.length ? `；可用成员：${names.join('、')}` : ''}` }
+    }
+  }
+
+  // ---- 递归预算（DSH maxDepth 语义）----
+  const depth = Number((ctx as any).swarmDepth) || 0
+  if (depth >= SUBAGENT_MAX_DEPTH) {
+    return {
+      ok: false,
+      error: `子代理嵌套深度已达上限（${SUBAGENT_MAX_DEPTH} 层，当前第 ${depth + 1} 层）：请把剩下的工作在本层完成，不要再派生下一级`,
+    }
+  }
+
+  const childTools = resolveChildTools(input, ctx)
+
+  const labelBase = String(input?.description ?? '').trim() || prompt.replace(/\s+/g, ' ').slice(0, 24)
+  const label = memberName ? `subagent:${memberName}` : `subagent:${labelBase}`
 
   const child = createAgent({
-    systemPrompt: input?.systemPrompt
-      ? String(input.systemPrompt)
-      : '你是一个子代理（subagent），负责独立完成父任务分配给你的子任务。完成后直接输出最终结果。',
-    provider: input?.provider || 'ollama',
-    config: input?.config,
-    llmConfig: input?.llmConfig,
-    tools: childTools,
-    cwd: ctx.cwd,
-    label: `subagent:${parentId}`,
-    maxSteps: typeof input?.maxSteps === 'number' ? input.maxSteps : 10,
-    sandboxMode: (ctx as any).sandboxMode,
-    mcpServerIds: (ctx as any).mcpServerIds,
-    mcpServerConfigs: (ctx as any).mcpServerConfigs,
-    mcpEquipmentIds: (ctx as any).mcpEquipmentIds,
-    kbPaths: (ctx as any).kbPaths,
+    systemPrompt: String(input?.systemPrompt || member?.systemPrompt || SUBAGENT_DEFAULT_SYSTEM_PROMPT),
+    provider: input?.provider || member?.provider || 'ollama',
+    config: input?.config ?? member?.config,
+    llmConfig: input?.llmConfig ?? member?.llmConfig,
+    tools: Array.isArray(input?.tools) ? childTools : (member?.tools ?? childTools),
+    cwd: member?.cwd || ctx.cwd,
+    label,
+    maxSteps: Math.min(50, Math.max(1, Number(input?.maxSteps ?? member?.maxSteps) || 10)),
+    sandboxMode: (ctx as any).sandboxMode ?? member?.sandboxMode,
+    mcpServerIds: (ctx as any).mcpServerIds ?? member?.mcpServerIds,
+    mcpServerConfigs: (ctx as any).mcpServerConfigs ?? member?.mcpServerConfigs,
+    mcpEquipmentIds: (ctx as any).mcpEquipmentIds ?? member?.mcpEquipmentIds,
+    kbPaths: (ctx as any).kbPaths ?? member?.kbPaths,
+    kbTopK: (ctx as any).kbTopK,
     parentId,
+    // 递归预算：子代理再派生子代理时据此拒绝
+    swarmDepth: depth + 1,
+    swarmChain: [...((ctx as any).swarmChain || []), memberName].filter(Boolean),
   })
 
+  const timeoutMs = clampSubagentTimeout(input?.timeout_ms ?? input?.timeoutMs)
+  const background = input?.run_in_background === true
+  // 后台模式必须能收结果：调用方白名单里没有 job_output 时，jobId 交出去也收不回来——
+  // 直接拒绝并给出两条可走的路，而不是让模型拿到一个永远收不到结果的句柄。
+  if (background) {
+    const callerTools = (ctx as any).tools
+    if (Array.isArray(callerTools) && !callerTools.includes('job_output')) {
+      return {
+        ok: false,
+        error: 'run_in_background 需要 job_output 工具来收集结果，但当前会话的工具白名单里没有它：' +
+          '请改用前台模式（去掉 run_in_background，直接等它返回），或先在工具管理里启用 job_output / job_kill。',
+      }
+    }
+  }
+
+  // ---- 后台模式：登记 job 后立即返回，父 Agent 继续干活 ----
+  if (background) {
+    const job = jobRegistry.start('subagent', parentId, label, { progress: null, detail: '后台子代理运行中' })
+    subagentJobs.set(job.id, { childId: child.id, label, owner: parentId, startedAt: Date.now() })
+    void (async () => {
+      try {
+        const r = await awaitAgentTurn(child.id, prompt, { timeoutMs, source: 'subagent' })
+        if (r.ok) {
+          jobRegistry.complete(job.id, { agentId: child.id, output: r.output })
+        } else {
+          jobRegistry.fail(job.id, [r.error, r.output ? `已产出的部分输出：\n${r.output}` : ''].filter(Boolean).join('\n'))
+        }
+      } catch (e: any) {
+        jobRegistry.fail(job.id, `子代理执行失败: ${e?.message || String(e)}`)
+      } finally {
+        subagentJobs.delete(job.id)
+        await disposeAgent(child.id)
+      }
+    })()
+    return {
+      ok: true,
+      value: {
+        kind: 'background',
+        jobId: job.id,
+        agentId: child.id,
+        message: `后台子代理已启动（jobId=${job.id}）。继续你的工作，需要结果时用 job_output(job_id="${job.id}") 收集（可传 wait:true 阻塞等待）；不再需要时用 job_kill 停止。`,
+      },
+    }
+  }
+
+  // ---- 前台模式：等本轮收敛，超时/取消都带上部分输出 ----
   try {
-    child.send(prompt, 'subagent')
-    await child.whenIdle()
-    // 子代理最终输出：直接读会话维护的 lastContent（比日志重建可靠，避免 output 为空）
-    const output = getAgentLastContent(child.id)
-    return { ok: true, value: { agentId: child.id, output } }
+    const r = await awaitAgentTurn(child.id, prompt, { timeoutMs, signal: ctx.signal, source: 'subagent' })
+    const partial = r.output.trim()
+    if (!r.ok) {
+      const head = r.error || '子代理未正常完成'
+      return {
+        ok: false,
+        error: partial ? `${head}\n\n子代理中止前已产出的部分输出（可作为不完整结果参考）：\n${partial}` : head,
+      }
+    }
+    if (!partial) {
+      return { ok: false, error: '子代理没有产出任何文本结果（可能只调用了工具就结束了）：请把任务描述写得更具体，或在 prompt 中要求它直接给出结论' }
+    }
+    return {
+      ok: true,
+      value: {
+        kind: 'foreground',
+        agentId: child.id,
+        output: partial,
+        ...(memberName ? { member: memberName } : {}),
+      },
+    }
   } catch (e: any) {
     return { ok: false, error: `子代理执行失败: ${e?.message || String(e)}` }
   } finally {
     await disposeAgent(child.id)
   }
+}
+
+// ---------------------------------------------------------------------------
+// 后台任务工具（job_output / job_kill）
+//
+// 对应 DSH 的 @deepseek-ai/dsh-tool-jobs：后台子代理（run_in_background）启动后，
+// 用 job_output 收集结果（可选阻塞等待）、job_kill 停止。job 记录与任务面板同源
+// （job-registry），因此界面上也能看到进度。
+// ---------------------------------------------------------------------------
+
+/** job_output：读取后台任务状态与结果（wait=true 时阻塞等待其结束） */
+async function jobOutput(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const jobId = String(input?.job_id ?? input?.jobId ?? '').trim()
+  if (!jobId) return { ok: false, error: 'job_id 参数必填（run_subagent 返回的 jobId）' }
+  const job = jobRegistry.get(jobId)
+  if (!job) return { ok: false, error: `未找到后台任务 ${jobId}（可能已完成并被清理，或只属于其它会话）` }
+
+  const wait = input?.wait === true
+  const timeoutMs = Math.min(30 * 60 * 1000, Math.max(1000, Number(input?.timeout_ms) || 5 * 60 * 1000))
+  const deadline = Date.now() + timeoutMs
+  while (wait && job.status === 'running' && Date.now() < deadline) {
+    if (ctx.signal?.aborted) break
+    await new Promise((r) => setTimeout(r, 200))
+    const fresh = jobRegistry.get(jobId)
+    if (!fresh) return { ok: false, error: `后台任务 ${jobId} 已被清理` }
+    Object.assign(job, fresh)
+  }
+
+  return {
+    ok: true,
+    value: {
+      jobId: job.id,
+      kind: job.kind,
+      status: job.status,
+      progress: job.progress,
+      detail: job.detail,
+      result: job.result,
+      error: job.error,
+      ...(job.status === 'running'
+        ? { message: `任务仍在运行（${Math.round((Date.now() - job.createdAt) / 1000)}s）：稍后再用 job_output(job_id="${job.id}", wait=true) 收集结果。` }
+        : {}),
+    },
+  }
+}
+
+/** job_kill：停止一个后台任务（子代理任务会同时取消其 agent 会话） */
+async function jobKill(input: any, _ctx: ToolExecutionContext): Promise<ToolResult> {
+  const jobId = String(input?.job_id ?? input?.jobId ?? '').trim()
+  if (!jobId) return { ok: false, error: 'job_id 参数必填' }
+  const job = jobRegistry.get(jobId)
+  if (!job) return { ok: false, error: `未找到后台任务 ${jobId}` }
+  if (job.status !== 'running') return { ok: true, value: { jobId, status: job.status, killed: false, message: `任务已结束（${job.status}），无需停止` } }
+
+  jobRegistry.cancel(jobId, '已被 job_kill 停止')
+  const entry = subagentJobs.get(jobId)
+  if (entry) {
+    subagentJobs.delete(jobId)
+    const child = getAgent(entry.childId)
+    if (child) child.cancel('job-killed')
+  }
+  return { ok: true, value: { jobId, status: 'cancelled', killed: true, message: '已请求停止；它派生的下级子代理会继续运行到结束。' } }
 }
 
 // ---------------------------------------------------------------------------
@@ -2554,20 +2878,45 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('run_subagent', '派生一个独立的子代理会话执行子任务（复用 agent 循环），等待其完成后返回最终输出。支持 member=<群成员名> 以该成员的设定（角色/模型/工具/知识库）执行（AgentSwarm 群成员化，结果会以该成员名义汇报）；子代理默认白名单不含 run_subagent（防递归）。', runSubagent, {
+    defineTool('run_subagent', '派生子代理：一个独立的 agent 会话，在它自己的上下文里完成你交给它的子任务，你只拿到它的最终结果（看不到中间步骤），因此不会占用你的上下文。适合可独立完成、边界清晰的调研 / 实现 / 分析；彼此独立的子任务可以在同一条消息里发起多次调用。默认等待其完成后返回结果（run_in_background=true 则立即返回 jobId，用 job_output 收集、job_kill 停止；后台模式需已启用 job_output）。派单请写清：要它做什么、交付什么形态的结果、是只读调研还是可以改文件。子代理逐层继承你的工具白名单（默认不含 run_subagent；需要多层委派时在 tools 里显式列出），嵌套深度上限 3 层，超时会中止并返回已产出的部分输出。', runSubagent, {
       inputSchema: {
         type: 'object',
         properties: {
-          prompt: { type: 'string', description: '子任务描述（发给子代理的首条消息）' },
-          member: { type: 'string', description: '可选，群成员名（AgentSwarm 团队成员；缺省为通用子代理）' },
-          systemPrompt: { type: 'string', description: '可选，子代理系统提示词；缺省用通用子代理提示' },
-          provider: { type: 'string', description: '可选，LLM provider；缺省 ollama（member 时用成员自身的 provider/model）' },
-          config: { type: 'object', description: '可选，provider 配置（含 api_key 或 apiKeyRef）' },
-          llmConfig: { type: 'object', description: '可选，通用 LLM 配置' },
-          maxSteps: { type: 'number', description: '可选，子代理单 turn 最大 step 数（默认 10）' },
-          tools: { type: 'array', items: { type: 'string' }, description: '可选，子代理工具白名单；缺省用默认子代理工具集' },
+          description: { type: 'string', description: '3-5 个词的短标签，用于界面展示（如「调研 DSH 工具系统」）' },
+          prompt: { type: 'string', description: '子任务的完整描述：它看不到你的对话上下文，必须自带全部必要信息（目标、约束、交付形态、涉及路径）' },
+          member: { type: 'string', description: '可选。群成员名（AgentSwarm 群聊场景下以该成员的角色/模型/工具/知识库执行；无群成员名册时会报错）' },
+          systemPrompt: { type: 'string', description: '可选。子代理系统提示词；缺省用通用子代理提示（member 时用成员设定）' },
+          provider: { type: 'string', description: '可选。LLM provider；缺省继承调用方（member 时用成员的 provider）' },
+          config: { type: 'object', description: '可选。provider 配置' },
+          llmConfig: { type: 'object', description: '可选。通用 LLM 配置' },
+          maxSteps: { type: 'number', description: '可选。子代理单轮最大 step 数（默认 10，上限 50）' },
+          tools: { type: 'array', items: { type: 'string' }, description: '可选。子代理工具白名单；缺省继承调用方白名单（不含 run_subagent）' },
+          run_in_background: { type: 'boolean', description: '可选。true = 后台运行并立即返回 jobId（默认 false：等待子代理完成后返回结果）' },
+          timeout_ms: { type: 'number', description: '可选。子代理超时毫秒数（默认 600000，即 10 分钟；上限 1 小时）。超时会中止并返回已产出的部分输出' },
         },
         required: ['prompt'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('job_output', '收集后台任务（run_subagent run_in_background=true 启动的子代理）的状态与结果。默认立即返回当前状态；wait=true 时阻塞等待到任务结束（或超时）。任务结束前只能拿到状态，结束后 result 里是子代理的最终输出。', jobOutput, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          job_id: { type: 'string', description: 'run_subagent 返回的 jobId' },
+          wait: { type: 'boolean', description: '可选。true = 阻塞等待任务结束（默认 false，立即返回状态）' },
+          timeout_ms: { type: 'number', description: '可选。wait=true 时最多等待多少毫秒（默认 300000，即 5 分钟）' },
+        },
+        required: ['job_id'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('job_kill', '停止一个后台任务（后台子代理）。调用后立即返回，不等待它真正停下；已产出的结果不再返回。', jobKill, {
+      inputSchema: {
+        type: 'object',
+        properties: { job_id: { type: 'string', description: '要停止的 jobId' } },
+        required: ['job_id'],
       },
     }),
   )
@@ -2611,39 +2960,82 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('ask_user', '向用户提问并等待回答。需要补充信息或澄清需求时使用；回答会作为工具结果返回。', askUser, {
+    defineTool('exit_plan_mode', '把已完成的计划提交给用户评审（Approve / 继续完善）。改动大、不可逆、或方向需要用户拍板的任务，先用 update_plan 画出计划，再用本工具请求批准；用户批准后才开始动手。计划要用 Markdown 从标题开始书写、步骤各占一行。若用户选择「继续完善」，工具会失败并带回反馈，请据此修订后重新提交。', exitPlanMode, {
       inputSchema: {
         type: 'object',
-        properties: { question: { type: 'string', description: '要问用户的问题' } },
-        required: ['question'],
-      },
-    }),
-  )
-  toolRegistry.register(
-    defineTool('update_plan', '创建或更新当前任务的执行计划。开始复杂多步任务前先用它规划步骤；执行中情况变化时更新计划。', updatePlan, {
-      inputSchema: {
-        type: 'object',
-        properties: { plan: { type: 'string', description: '完整计划文本（传空字符串清除计划）' } },
+        properties: { plan: { type: 'string', description: '完整计划文本（Markdown，建议从标题开始；通常与 update_plan 提交的一致）' } },
         required: ['plan'],
       },
     }),
   )
   toolRegistry.register(
-    defineTool('update_todo', '维护结构化的待办清单（任务状态机）。开始任务前先规划所有步骤；每完成一步就把对应项置为 done，正在做的置为 running，无法完成的置为 cancelled；每次调用必须传入完整清单，完成后传空数组清除。', updateTodo, {
+    defineTool('ask_user', '向用户提问并等待回答（用户回答会作为工具结果返回）。需要确认、做选择、或缺少关键信息时使用；能从工作区推断的不要问。一次可问多题：每题给 options 就是选择题（multi_select=true 可多选），不给 options 就是自由填写；每题都允许用户补充自定义回答，用户也可以跳过某题（该题返回空 selected 且无 custom）。选择题请把推荐项放第一位并在 label 末尾加 "(Recommended)"。用面向用户的说法，不要提内部名称或背景工作。', askUser, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: '旧式单问：一个自由填写的问题文本（与 questions 二选一）' },
+          questions: {
+            type: 'array',
+            description: '要问用户的问题清单（按顺序展示；最多 8 题）',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', description: '本题的稳定 id（同一批内唯一，回答按它回填）' },
+                question: { type: 'string', description: '具体要问的问题' },
+                header: { type: 'string', description: '可选短标题，如「确认」「选择模式」' },
+                options: {
+                  type: 'array',
+                  description: '可选选项；不给出就是自由填写题（推荐项放第一位并加 "(Recommended)"）',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      label: { type: 'string', description: '面向用户的简短选项标签' },
+                      description: { type: 'string', description: '可选，一句话说明取舍或影响' },
+                    },
+                    required: ['label'],
+                  },
+                },
+                multi_select: { type: 'boolean', description: '是否允许选择多个选项（默认 false = 单选）' },
+              },
+              required: ['id', 'question'],
+            },
+          },
+        },
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('update_plan', '为当前任务制定/更新执行计划（Markdown，会展示给用户）。步骤各占一行、每步一句话；新的信息推翻原计划时就更新它，任务完成或计划作废时传空字符串清除。计划只是给人看的摘要，正文与长内容请写进工作区文件。', updatePlan, {
+      inputSchema: {
+        type: 'object',
+        properties: { plan: { type: 'string', description: '完整计划文本（Markdown；传空字符串清除计划）' } },
+        required: ['plan'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('update_todo', '记录并更新任务清单，用于规划多步工作并展示进度（单步的琐碎任务不必使用）。开工前先为每个具体步骤建一项；工作进行中让正在做的那一项保持 running（同一时刻最多一项）；每完成一步立即置为 done，做不了就置为 cancelled。每次调用必须传入**完整清单**（整表替换，未列出的项会被移除），全部完成后传空数组清除。', updateTodo, {
       inputSchema: {
         type: 'object',
         properties: {
           todos: {
             type: 'array',
-            description: '完整待办清单（按 title 去重合并，未传入的项将被移除）',
+            description: '完整任务清单（整表替换；清空传 []）',
             items: {
               type: 'object',
+              additionalProperties: false,
               properties: {
-                title: { type: 'string' },
-                detail: { type: 'string' },
-                status: { type: 'string', enum: ['pending', 'running', 'done', 'cancelled'] },
+                content: { type: 'string', description: '任务内容 —— 一句简短的祈使句（同一清单内不可重复）' },
+                status: {
+                  type: 'string',
+                  enum: ['pending', 'running', 'done', 'cancelled'],
+                  description: 'pending（未开始）| running（进行中，同一时刻最多一项）| done（已完成）| cancelled（已放弃、不再做）',
+                },
+                detail: { type: 'string', description: '可选。细节或验收标准（展示用，不影响状态机）' },
               },
-              required: ['title', 'status'],
+              required: ['content', 'status'],
             },
           },
         },
@@ -2695,5 +3087,5 @@ export function registerCoreTools(): void {
   // Agent Teams 协议工具（群聊 = Agent Teams）：主进程只转发，语义在渲染层
   registerTeamTools()
 
-  console.log(`[tools] ${toolRegistry.snapshot().length} core tools registered`)
+  logInfo('tools', `${toolRegistry.snapshot().length} core tools registered`)
 }

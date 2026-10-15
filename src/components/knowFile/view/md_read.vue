@@ -2798,7 +2798,8 @@ ${inlinedHtml}
     position: relative;
   }
   :deep(.mermaid-clickable::after) {
-    font-family: 'FontAwesome';
+    font-family: 'Font Awesome 5 Free';
+    font-weight: 900;
     content: '\f002';
     position: absolute;
     top: 4px;

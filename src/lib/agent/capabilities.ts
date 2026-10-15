@@ -27,7 +27,7 @@ export interface CapabilityToolSlot {
 
 export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'askUser', defaultOn: true, tools: ['ask_user'] },
-  { key: 'updatePlan', defaultOn: true, tools: ['update_plan'] },
+  { key: 'updatePlan', defaultOn: true, tools: ['update_plan', 'exit_plan_mode'] },
   { key: 'updateTodo', defaultOn: true, tools: ['update_todo'] },
   { key: 'mcpAccess', tools: ['mcp_call'] },
   { key: 'accessKnowledgeBase', needsKnowledgeFiles: true, tools: ['kb_search'] },
@@ -38,7 +38,7 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'runShell', tools: ['shell'] },
   { key: 'webSearch', tools: ['web_search', 'web_fetch'] },
   { key: 'browseWebsites', tools: ['web_fetch'] },
-  { key: 'runSubagent', tools: ['run_subagent'] },
+  { key: 'runSubagent', tools: ['run_subagent', 'job_output', 'job_kill'] },
   { key: 'skills', tools: ['skill'] },
 ]
 
@@ -99,6 +99,9 @@ export function toolsFromCapabilities(caps: any, opts: { includeMcp?: boolean } 
     // 兼容旧路径（图谱等直接置 accessKnowledgeBase=true 并关联文件、未同步工具集）：
     // 只要“访问知识库能力 + 已关联文件”成立即注入 kb_search，避免模型检索失效
     if (hasKb && caps.accessKnowledgeBase && !set.has('kb_search')) set.add('kb_search')
+    // 子代理整族一起开：run_subagent 的后台模式要靠 job_output 收结果、job_kill 停止，
+    // 只开 run_subagent 会让模型拿到一个永远收不到结果的 jobId。
+    if (set.has('run_subagent')) { set.add('job_output'); set.add('job_kill') }
     if (opts.includeMcp === false) set.delete('mcp_call')
     return withPluginTools(Array.from(set))
   }

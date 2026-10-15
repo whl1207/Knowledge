@@ -78,6 +78,8 @@ export const LAN_GUEST_DANGEROUS_TOOLS: ReadonlySet<string> = new Set([
   'shell',
   'run_code',
   'run_subagent',
+  'job_output',
+  'job_kill',
   'mcp_call',
   'skill',
   'export_word',

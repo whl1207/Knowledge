@@ -12,6 +12,8 @@
  * `electron/main/session-log.ts`。
  */
 
+import type { TodoItem } from '@/types/agent'
+
 // ---------------------------------------------------------------------------
 // 事件目录
 // ---------------------------------------------------------------------------
@@ -32,6 +34,10 @@ export type SessionEventType =
   | 'assistant/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call，仅 UI 保真）
   | 'context/compaction' // 上下文压缩（旧轮次摘要；deriveMessages 据此替换被覆盖区间）
   | 'agent/status' // agent 生命周期状态（idle/running/stopping/disposed）
+  | 'plan/write' // 执行计划整值写入（update_plan / exit_plan_mode；最后一条胜出）
+  | 'todo/write' // 待办清单整值写入（update_todo；最后一条胜出）
+  | 'plan/review' // 计划评审开启（exit_plan_mode 提交，等待用户裁决）
+  | 'plan/review-result' // 计划评审裁决（批准 / 继续完善 / 关闭 / 取消）
 
 /** 每个事件的载荷 */
 export interface SessionEventMap {
@@ -128,6 +134,27 @@ export interface SessionEventMap {
     model?: string
   }
   'agent/status': { status: string }
+  /**
+   * 执行计划写入（整值替换，最后一条胜出）。`plan=null` = 清除计划。
+   * 单一写入口：`AgentImpl.setPlan()`（update_plan / exit_plan_mode 工具都经过它）。
+   */
+  'plan/write': { plan: string | null }
+  /**
+   * 待办清单写入（整值替换，最后一条胜出）。`todos=[]` = 清单已清空。
+   * 单一写入口：`AgentImpl.setTodos()`（update_todo 工具）。
+   */
+  'todo/write': { todos: TodoItem[] }
+  /**
+   * 计划评审开启（exit_plan_mode 提交）。落盘的意义：进程重启后「待评审」仍然是
+   * 日志折叠出来的事实（`pendingReview`），界面据此恢复那条未完成的决策，
+   * 而不是当成"从没提过评审"。
+   */
+  'plan/review': { reviewId: string; plan: string }
+  /**
+   * 计划评审裁决。`verdict`：approve（批准）/ keep（继续完善）/ dismiss（用户接手）/
+   * cancelled（turn 被取消或会话销毁时收口）。`feedback` 仅 keep 时有。
+   */
+  'plan/review-result': { reviewId: string; verdict: string; feedback?: string }
 }
 
 /** 事件基础字段：顺序号 + 时间戳 + 归属会话 */

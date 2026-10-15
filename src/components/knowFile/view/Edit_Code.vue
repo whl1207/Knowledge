@@ -1998,9 +1998,16 @@ const currentLanguage = ref('markdown')
 const asrManager = ref<ReturnType<typeof createASRManager> | null>(null)
 const isASRRecording = ref(false)
 const isASRProcessing = ref(false)
-const asrErrorMessage = ref('')
 const asrLivePreview = ref('') // funasr 流式：边说边看的实时文本
-let asrErrorTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 语音输入的出错 / 缺配置提示：统一用 ElMessage（顶部提示条），
+ * 不在状态栏麦克风旁边挂红色气泡——错误显示只保留这一条通道（与全局语音输入一致）。
+ */
+const asrWarn = (message: string) => {
+  console.warn('[ASR] 语音输入:', message)
+  ElMessage({ type: 'warning', duration: 6000, showClose: true, message })
+}
 
 // ---- 语音会话锚点（代码编辑器目标）----
 // 录音开始时把编辑器光标位置锁定为锚点；会话内每一句都连续插在锚点之后并推进。
@@ -2054,13 +2061,10 @@ const initASR = (): NonNullable<typeof asrManager.value> | null => {
         }
       },
       onError: (error: string) => {
-        console.error('[ASR] 语音输入错误:', error)
         isASRRecording.value = false
         isASRProcessing.value = false
         endASRSession()
-        asrErrorMessage.value = error
-        if (asrErrorTimer) clearTimeout(asrErrorTimer)
-        asrErrorTimer = setTimeout(() => { asrErrorMessage.value = '' }, 5000)
+        asrWarn(error)
       }
     })
     return asrManager.value
@@ -2303,7 +2307,6 @@ onBeforeUnmount(async () => {
       asrManager.value = null
     }
     endASRSession()
-    if (asrErrorTimer) clearTimeout(asrErrorTimer)
     if (statusBarTimer) {
         clearTimeout(statusBarTimer)
         statusBarTimer = null
@@ -2751,9 +2754,6 @@ defineExpose({
         <div v-if="isASRRecording || isASRProcessing" class="asr-wave-wrap" @click="toggleASR" :title="getASRTitle()">
           <span v-for="i in 5" :key="i" class="asr-wave-dot" :style="{ animationDelay: (i * 0.15) + 's' }"></span>
           <div v-if="asrLivePreview" class="asr-wave-live" title="实时识别">{{ asrLivePreview }}</div>
-          <div v-if="asrErrorMessage" class="asr-wave-err">
-            <i class="fa fa-exclamation-triangle"></i> {{ asrErrorMessage }}
-          </div>
         </div>
     </div>
     <div v-else class="unsupported-file">
@@ -2976,32 +2976,7 @@ defineExpose({
   pointer-events: none;
 }
 
-/* 错误气泡 */
-.asr-wave-err {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  width: max-content;
-  max-width: 260px;
-  background: #e74c3c;
-  color: #fff;
-  font-size: 11px;
-  line-height: 1.4;
-  padding: 4px 10px;
-  border-radius: 6px;
-  white-space: normal;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-  pointer-events: none;
-  animation: asr-err-in 0.2s ease;
-}
-.asr-wave-err i { margin-right: 4px; font-size: 10px; }
-@keyframes asr-err-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
+/* 语音输入的出错 / 缺配置提示统一改为 ElMessage（见 asrWarn），这里不再有红色气泡样式 */
 
 /* 右键菜单中语音输入录制时高亮 */
 .asr-menu-recording {

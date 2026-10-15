@@ -9,6 +9,7 @@
 // 触发 "v3Schema.safeParse is not a function" 导致 MCP 工具调用崩溃。
 // 因此这里用「变量拼接 + @vite-ignore 的动态 import」在运行时从 node_modules 加载真实 SDK。
 import { randomUUID } from 'node:crypto'
+import { logInfo } from './log'
 import { browserAgentService } from './browser-agent'
 import { officeService } from './office/office-service'
 import { drawioService } from './drawio/drawio-service'
@@ -214,7 +215,7 @@ class McpRuntimeService {
       transport.stderr?.on('data', (data: Buffer) => {
         const msg = data.toString().trim()
         if (msg) {
-          console.log(`[mcp:${config.name || 'stdio'}] stderr:`, msg)
+          logInfo('mcp', `stderr(${config.name || 'stdio'}): ${msg}`)
           onStderr?.(msg)
         }
       })

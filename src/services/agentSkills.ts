@@ -138,12 +138,15 @@ export const AGENT_TOOL_REGISTRY: AgentToolInfo[] = [
   { name: 'shell', labelZh: '执行命令', labelEn: 'Shell', icon: 'fa-terminal', description: '执行 shell 命令（仅「完全访问」可用，需批准）', sandboxPreference: 'full-access', approvalRequirement: 'on-request', defaultEnabled: true },
   { name: 'kb_search', labelZh: '知识库检索', labelEn: 'KB Search', icon: 'fa-database', description: '从本地知识库文件（.kb）检索相关切片（RAG）', sandboxPreference: 'readonly', approvalRequirement: 'auto', defaultEnabled: true },
   { name: 'skill', labelZh: '加载技能', labelEn: 'Load Skill', icon: 'fa-cubes', description: '加载已安装技能的完整定义（内容与资源清单），按技能流程执行任务', sandboxPreference: 'readonly', approvalRequirement: 'auto', defaultEnabled: true },
-  { name: 'run_subagent', labelZh: '子代理', labelEn: 'Subagent', icon: 'fa-sitemap', description: '派生子代理会话独立执行子任务（in-process，复用 agent 循环）', sandboxPreference: 'none', approvalRequirement: 'on-request', defaultEnabled: true },
+  { name: 'run_subagent', labelZh: '子代理', labelEn: 'Subagent', icon: 'fa-sitemap', description: '派生子代理会话独立执行子任务（可前台等待，也可后台运行后用 job_output 收集）；逐层继承工具白名单，深度上限 3 层', sandboxPreference: 'none', approvalRequirement: 'on-request', defaultEnabled: true },
+  { name: 'job_output', labelZh: '收集后台任务', labelEn: 'Job Output', icon: 'fa-tasks', description: '读取后台子代理任务的状态与最终结果（wait=true 可阻塞等待）', sandboxPreference: 'none', approvalRequirement: 'auto', defaultEnabled: true },
+  { name: 'job_kill', labelZh: '停止后台任务', labelEn: 'Job Kill', icon: 'fa-stop-circle-o', description: '停止一个后台子代理任务（不等待其真正停下）', sandboxPreference: 'none', approvalRequirement: 'on-request', defaultEnabled: true },
   { name: 'export_word', labelZh: '导出 Word', labelEn: 'Export Word', icon: 'fa-file-word-o', description: '把 Markdown（内容或 .md 文件路径）导出为 .docx，可指定模板与保存位置（复用统一导出管线）', sandboxPreference: 'workspace-write', approvalRequirement: 'on-request', defaultEnabled: false },
     { name: 'mcp_call', labelZh: 'MCP 调用', labelEn: 'MCP Call', icon: 'fa-plug', description: '通过 MCP 服务调用外部工具/装备控制（需在预设或上下文中配置 MCP 服务）', sandboxPreference: 'none', approvalRequirement: 'on-request', defaultEnabled: false },
-  { name: 'ask_user', labelZh: '询问用户', labelEn: 'Ask User', icon: 'fa-question-circle-o', description: '向用户提问并等待回答', sandboxPreference: 'none', approvalRequirement: 'auto', defaultEnabled: true },
-  { name: 'update_plan', labelZh: '更新计划', labelEn: 'Update Plan', icon: 'fa-list-alt', description: '创建/更新执行计划', sandboxPreference: 'none', approvalRequirement: 'auto', defaultEnabled: true },
-  { name: 'update_todo', labelZh: '任务清单', labelEn: 'Update Todo', icon: 'fa-tasks', description: '维护结构化任务清单', sandboxPreference: 'none', approvalRequirement: 'auto', defaultEnabled: true },
+  { name: 'ask_user', labelZh: '询问用户', labelEn: 'Ask User', icon: 'fa-question-circle-o', description: '向用户提问并等待回答：支持单选 / 多选 / 多题，每题可留自定义回答', sandboxPreference: 'none', approvalRequirement: 'auto', defaultEnabled: true },
+  { name: 'update_plan', labelZh: '更新计划', labelEn: 'Update Plan', icon: 'fa-list-alt', description: '创建/更新执行计划（Markdown，展示给用户；传空字符串清除）', sandboxPreference: 'none', approvalRequirement: 'auto', defaultEnabled: true },
+  { name: 'exit_plan_mode', labelZh: '计划评审', labelEn: 'Review Plan', icon: 'fa-check-square-o', description: '把计划提交用户评审：Approve 后开始执行，选「继续完善」则带回反馈要求修订', sandboxPreference: 'none', approvalRequirement: 'on-request', defaultEnabled: true },
+  { name: 'update_todo', labelZh: '任务清单', labelEn: 'Update Todo', icon: 'fa-tasks', description: '维护任务清单（整表替换 + 写入前校验：非空/不重复/同时最多一项 running）', sandboxPreference: 'none', approvalRequirement: 'auto', defaultEnabled: true },
 ]
 
 // 技能管理器类

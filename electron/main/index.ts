@@ -9,12 +9,20 @@ import { Worker } from 'worker_threads'
 import yaml from 'js-yaml'
 import mammoth from "mammoth"
 import { docxToMarkdown } from './office/docx-to-markdown'
-import { asUint8 } from './buffer-view'
+import { asNodeBytes, asUint8 } from './buffer-view'
 import xlsx from 'xlsx'
-import * as PDFJS from 'pdfjs-dist'
+// PDF 文本提取：主进程是 Node 环境，必须用 pdfjs 的 **legacy 构建**
+// （现代构建面向浏览器，在 Node 里会在导入时打印 "Warning: Please use the `legacy` build…"）
+import * as PDFJS from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { pythonService } from './python-service'
 import { trustedPythonService } from './trusted-python-service'
 import { shellService } from './shell-service'
+// 主进程控制台日志（默认安静；见 log.ts）：INFO 级不输出，warn/error 一行、不带堆栈噪声
+import { isVerbose, logInfo, logWarn } from './log'
+// 开发模式判定 / 产物路径 / preload 解析（唯一来源：打包版不会被残留的 dev 地址带偏）
+import { DEV_SERVER_URL, DIST_DIR, DIST_ELECTRON_DIR, INDEX_HTML, PUBLIC_DIR, resolvePreload } from './run-mode'
+// 右侧栏「终端」标签的后端：真 PTY（node-pty，见 terminal-service.ts）
+import { disposeAllTerminals, registerTerminalIpc } from './terminal-service'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
 import { credentialStore } from './credentials'
 import { flowAwareExt } from './file-ext'
@@ -84,15 +92,22 @@ globalThis.__dirname = dirname(__filename)
 
 // The built directory structure
 // 用类型确定的局部常量（string）替代 process.env.*（类型为 string | undefined）传给 join()
-const distElectron = join(__dirname, '..')
-const distDir = join(distElectron, '../dist')
-const publicDir = process.env.VITE_DEV_SERVER_URL ? join(distElectron, '../public') : distDir
+// ⚠️ 开发模式判定与产物路径统一在 run-mode.ts（打包版不会被环境变量里的 dev server 地址带偏）
+const distElectron = DIST_ELECTRON_DIR
+const distDir = DIST_DIR
+const publicDir = PUBLIC_DIR
 process.env.DIST_ELECTRON = distElectron
 process.env.DIST = distDir
 process.env.VITE_PUBLIC = publicDir
 
 // Disable GPU Acceleration for Windows 7
 if (release().startsWith('6.1')) app.disableHardwareAcceleration()
+
+// Chromium 自己的控制台输出默认压到只留 FATAL：
+// 驱动/合成相关的 ERROR 噪声（如 `ui\gl\direct_composition_support.cc: AMD VideoProcessorGetOutputExtension failed`）
+// 对用户没有意义，却会在每次启动时刷一行；需要排查看 `AIKM_VERBOSE=1`（此时不限制 Chromium 日志级别）。
+// 注意必须在 app ready 之前设置。
+if (!isVerbose()) app.commandLine.appendSwitch('log-level', '3')
 
 // Set application name for Windows 10+ notifications
 if (process.platform === 'win32') app.setAppUserModelId(app.getName())
@@ -102,7 +117,7 @@ if (process.platform === 'win32') app.setAppUserModelId(app.getName())
 // 开发版使用独立的 userData 目录（<app 名>-dev），这样「npm run dev」
 // 启动的实例与打包安装的实例可以同时运行，且各自的设置、缓存、
 // 窗口状态（window-bounds.json）互不干扰。
-const IS_DEV = !!process.env.VITE_DEV_SERVER_URL
+const IS_DEV = !!DEV_SERVER_URL
 if (IS_DEV) {
   app.setPath('userData', path.join(app.getPath('appData'), `${app.getName()}-dev`))
 }
@@ -115,16 +130,10 @@ if (!app.requestSingleInstanceLock()) {
 const boundsFilePath = path.join(app.getPath('userData'), 'window-bounds.json');
 
 let win: BrowserWindow | null = null
-// preload 构建产物可能是 index.mjs（ESM）或 index.cjs（CJS）：
-// vite-plugin-electron 在「开发模式」输出 .mjs，而打包构建（isBuild）通常输出 .cjs。
-// 若固定引用 index.mjs，打包后 preload 加载失败 → window.ipcRenderer 不存在
-// → 所有 IPC（加载工作区项目等）失效，导致项目视图（树状图/瀑布流/日历）全空。
-// 这里按实际存在的产物选择路径。
-const preloadMjs = join(__dirname, '../preload/index.mjs')
-const preloadCjs = join(__dirname, '../preload/index.cjs')
-const preload = fs.existsSync(preloadMjs) ? preloadMjs : preloadCjs
-const url: string = process.env.VITE_DEV_SERVER_URL || ''
-const indexHtml = join(distDir, 'index.html')
+// preload 产物路径按实际存在的选，并在缺失时大声报错（否则渲染层会静默变成「网页模式」）。
+// 每次创建窗口时现算：dev 期间产物可能正在被重写，不要在模块加载时把结果固化。
+const url: string = DEV_SERVER_URL
+const indexHtml = INDEX_HTML
 
 // ==================== 启动参数解析 ====================
 // 支持 --browser[=<url>] 或 --browser <url>：直接启动「浏览器 Agent」窗口（不进入软件本体）。
@@ -233,7 +242,7 @@ async function createWindow() {
     // 渲染层通过 -webkit-app-region: drag 的顶栏（panel-header）实现窗口拖动。
     ...(process.platform === 'linux' ? { frame: false } : { titleBarStyle: 'hidden' }),
     webPreferences: {
-      preload,
+      preload: resolvePreload(),
       webSecurity: false,
       // 折叠到托管区后窗口不可见：Chromium 默认会节流后台窗口的定时器，
       // 会让渲染层驱动的后台任务（智能体循环 / 采集 / 工作流）变慢，也让托盘任务进度停止更新
@@ -257,7 +266,7 @@ async function createWindow() {
   globalShortcut.register('CommandOrControl+=', () => { stepZoom(0.1) })
   globalShortcut.register('CommandOrControl+-', () => { stepZoom(-0.1) })
   
-  if (process.env.VITE_DEV_SERVER_URL) {
+  if (DEV_SERVER_URL) {
     win.loadURL(url)
     win.webContents.openDevTools({ mode: 'undocked' })
   } else {
@@ -320,17 +329,18 @@ app.whenReady().then(async () => {
     if (fs.existsSync(cacheCleanPendingPath())) {
       const r = await cleanUserDataCache(false)
       if (!r.failed.length) fs.rmSync(cacheCleanPendingPath(), { force: true })
-      console.log(`[clean-userdata-cache] 启动补清缓存: 释放 ${r.freed} 字节, 遗留 ${r.failed.length} 个目录`)
+      logInfo('userdata-cache', `startup sweep: freed ${r.freed} B, removed ${r.removed.length}, still locked ${r.failed.length}`
+        + (r.failed.length ? ` [${r.failed.join(', ')}]` : ''))
     }
   } catch (e) {
-    console.warn('[clean-userdata-cache] 启动补清失败:', e)
+    logWarn('userdata-cache', 'startup sweep failed', e)
   }
   await pythonService.initialize()
   // 工具结果 spill 目录清扫（best-effort，只删形如 aikm-spill-XXXXXX 的旧临时目录）。
   // spill 是缓存语义：过期即删，模型拿到"文件不存在"会重跑工具，不影响正确性。
   try {
     const removedSpills = cleanupSpillDirs()
-    if (removedSpills > 0) console.log(`[tool-spill] 启动清扫过期 spill 目录: ${removedSpills} 个`)
+    if (removedSpills > 0) logInfo('tool-spill', `startup sweep removed ${removedSpills} stale spill dir(s)`)
   } catch (e) {
     console.warn('[tool-spill] 启动清扫失败（忽略）:', e)
   }
@@ -385,7 +395,7 @@ app.whenReady().then(async () => {
   })
   // 把内置 MCP 服务（Office Word / 浏览器 Agent）暴露为 Streamable HTTP（供其他软件连接，需本应用保持运行）
   const mcpExposePort = Number(process.env.MCP_EXPOSE_PORT) || MCP_EXPOSE_PORT
-  mcpExposeServer.start(mcpExposePort).catch((err) => console.error('[mcp-expose] start error', err))
+  mcpExposeServer.start(mcpExposePort).catch((err) => logWarn('mcp-expose', 'start failed (MCP endpoint unavailable)', err))
   // 页面发起的下载（drawio 内嵌编辑器的导出兜底）：默认会静默进系统下载目录，这里改为落到图表目录并提示
   setupDownloadFallback()
   // AI 会话事件广播：流式 chunk / 完成 / 错误推送给所有窗口（ai-utils 按 requestId 过滤）
@@ -421,6 +431,8 @@ app.on('window-all-closed', () => {
 // 应用开始退出：此后不再把「关闭主窗口」拦截为折叠到托管区
 app.on('before-quit', () => {
   trayService.markQuitting()
+  // 终端会话是真的 shell 进程：退出前一律结束，避免留下孤儿进程
+  disposeAllTerminals()
 })
 
 app.on('second-instance', (_event, commandLine) => {
@@ -494,13 +506,13 @@ app.on('will-quit', () => {
 ipcMain.handle('open-win', (_, arg) => {
   const childWindow = new BrowserWindow({
     webPreferences: {
-      preload,
+      preload: resolvePreload(),
       nodeIntegration: true,
       contextIsolation: false,
     },
   })
 
-  if (process.env.VITE_DEV_SERVER_URL) {
+  if (DEV_SERVER_URL) {
     childWindow.loadURL(`${url}#${arg}`)
   } else {
     childWindow.loadFile(indexHtml, { hash: arg })
@@ -616,7 +628,7 @@ function openFileWindow(opts: {
     show: false,
     backgroundColor: themeBackgroundColor,
     webPreferences: {
-      preload,
+      preload: resolvePreload(),
       nodeIntegration: true,
       contextIsolation: false,
       webSecurity: false
@@ -668,7 +680,7 @@ function openFileWindow(opts: {
   if (opts.remoteRel) hash += `&rel=${encodeURIComponent(opts.remoteRel)}`
   if (opts.label) hash += `&label=${encodeURIComponent(opts.label)}`
   if (opts.page != null && opts.page !== '') hash += `&page=${encodeURIComponent(String(opts.page))}`
-  if (process.env.VITE_DEV_SERVER_URL) {
+  if (DEV_SERVER_URL) {
     childWindow.loadURL(`${url}#${hash}`)
   } else {
     childWindow.loadFile(indexHtml, { hash })
@@ -747,7 +759,7 @@ function pickDefaultView(filePath: string): string {
 function openFilesWithApp(files: string[]) {
   const list = (files || []).filter(isRealFile).slice(0, MAX_OPEN_FILES)
   if (!list.length) return
-  console.log('[open-file] 待打开文件:', list.join(' | '))
+  logInfo('open-file', `pending files: ${list.join(' | ')}`)
   // 主窗口已存在时前置（启动过程中主窗口尚未 ready-to-show，由它自己显示，这里不抢显示）
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore()
@@ -842,7 +854,7 @@ function createSettingsWindow(nav = '', anchor?: BrowserWindow | null): BrowserW
     show: false,
     backgroundColor: themeBackgroundColor,
     webPreferences: {
-      preload,
+      preload: resolvePreload(),
       webSecurity: false,
     },
   })
@@ -867,7 +879,7 @@ function createSettingsWindow(nav = '', anchor?: BrowserWindow | null): BrowserW
   })
   // 首次定位通过 hash 传入（渲染进程 setup 阶段即可读取，无 IPC 时序问题）
   const hash = nav ? `/settings-window?nav=${encodeURIComponent(nav)}` : '/settings-window'
-  if (process.env.VITE_DEV_SERVER_URL) {
+  if (DEV_SERVER_URL) {
     w.loadURL(`${url}#${hash}`)
   } else {
     w.loadFile(indexHtml, { hash })
@@ -990,6 +1002,41 @@ ipcMain.handle('browser-agent:set-rail', async (_e, payload: { open?: boolean; w
 ipcMain.handle('browser-agent:set-compact', async (_e, payload: { compact?: boolean } = {}) => {
   browserAgentService.setCompact(!!payload?.compact)
   return { ok: true }
+})
+
+// ==================== 浏览器停靠（主页右侧栏「浏览器」标签） ====================
+// 原生 WebContentsView 挂到**主窗口**上，位置由侧栏里的渲染层上报（与 Office 编辑器同一套做法：
+// 渲染层给 getBoundingClientRect 的 CSS px，主进程按该窗口的 zoomFactor 换算成 DIP）。
+ipcMain.handle('browser-agent:attach-dock', async (event) => {
+  try {
+    const host = BrowserWindow.fromWebContents(event.sender)
+    if (!host) return { ok: false, error: '宿主窗口不可用' }
+    const res = browserAgentService.attachDock(host)
+    return res.ok ? { ok: true, data: browserAgentService.stateSnapshot } : res
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) }
+  }
+})
+ipcMain.handle('browser-agent:set-dock-rect', async (event, payload: { rect?: any } = {}) => {
+  const r = payload?.rect
+  const rect = r && ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(Number(r[k])))
+    ? { x: Number(r.x), y: Number(r.y), width: Number(r.width), height: Number(r.height) }
+    : null
+  // 渲染层给的是 CSS px，必须按窗口缩放换算（缩放≠100% 时否则会错位）
+  const zoom = typeof event.sender.getZoomFactor === 'function' ? event.sender.getZoomFactor() : 1
+  browserAgentService.setDockRect(rect, zoom)
+  return { ok: true }
+})
+ipcMain.handle('browser-agent:set-dock-visible', async (_e, payload: { visible?: boolean } = {}) => {
+  browserAgentService.setDockVisible(!!payload?.visible)
+  return { ok: true }
+})
+ipcMain.handle('browser-agent:detach-dock', async () => {
+  browserAgentService.detachDock()
+  return { ok: true }
+})
+ipcMain.handle('browser-agent:is-docked', async () => {
+  return { ok: true, data: { docked: browserAgentService.isDocked() } }
 })
 ipcMain.handle('browser-agent:close', async () => {
   browserAgentService.close()
@@ -1174,7 +1221,10 @@ function dirSize(dir: string): number {
 /** 仅清理缓存目录：先让 Chromium 自清 HTTP 磁盘缓存（能删除它自己仍在占用的条目/句柄，避免 EPERM），
  *  再删除其余目录。返回释放字节数 / 成功与失败目录。
  *  includeDocxMedia：是否同时清理 Word 预览图片缓存（docx-media）。手动「清理缓存」时为 true；
- *  启动补清（针对上次被进程占用的 Chromium 目录）为 false —— 否则重启后已恢复的 Word 标签页图片会失效。 */
+ *  启动补清（针对上次被进程占用的 Chromium 目录）为 false —— 否则重启后已恢复的 Word 标签页图片会失效。
+ *
+ *  注意：**不在这里打日志**。Cache / Dictionaries / Shared Dictionary 被 Chromium 自己占着而删不掉
+ *  在 Windows 上是常态（EPERM），逐目录 console.warn 会把启动日志刷满堆栈；失败目录由调用方汇总成一行。 */
 async function cleanUserDataCache(includeDocxMedia = true): Promise<{ freed: number; removed: string[]; failed: string[] }> {
   const base = app.getPath('userData')
   const removed: string[] = []
@@ -1191,9 +1241,8 @@ async function cleanUserDataCache(includeDocxMedia = true): Promise<{ freed: num
       fs.rmSync(dir, { recursive: true, force: true })
       removed.push(name)
       freed += size
-    } catch (e) {
+    } catch {
       failed.push(name)
-      console.warn(`[clean-userdata-cache] 清理 ${name} 失败（将在重启后补清）:`, e)
     }
   }
   // 重建已删除的空目录，避免个别依赖目录存在的组件异常（docx-media 下次转换时会自动重建）
@@ -1228,6 +1277,8 @@ ipcMain.handle('clean-userdata-cache', async () => {
     if (res.failed && res.failed.length) {
       try { fs.writeFileSync(cacheCleanPendingPath(), new Date().toISOString(), 'utf8') } catch { /* ignore */ }
     }
+    logInfo('userdata-cache', `manual cleanup: removed ${res.removed.length}`
+      + (res.failed.length ? `, locked ${res.failed.length} [${res.failed.join(', ')}] (retry at next launch)` : ''))
     return { ok: true, freed: Math.max(0, before - after), removed: res.removed, failed: res.failed }
   } catch (e: any) {
     return { ok: false, error: String(e?.message || e) }
@@ -1286,13 +1337,13 @@ function getWinBySender(senderId: number): BrowserWindow | null {
   // 优先匹配主窗口
   if (win && !win.isDestroyed()) {
     if (win.webContents.id === senderId) {
-      console.log('[getWinBySender] → mainWindow', senderId)
+      logInfo('getWinBySender', `-> mainWindow ${senderId}`)
       return win
     }
   }
   // fallback: 按 id 遍历所有窗口
   const found = BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && w.webContents.id === senderId)
-  console.log('[getWinBySender] fallback:', senderId, found ? 'found' : 'null')
+  logInfo('getWinBySender', `fallback ${senderId} ${found ? 'found' : 'null'}`)
   return found || win
 }
 
@@ -1536,7 +1587,7 @@ ipcMain.handle('getDirectoryTree', (event, folderPath) => {
   if (folderPath) {
     const tree = [getDirectoryTree(folderPath)];
     fs.watchFile(folderPath, (curr: any, prev: any) => {
-      console.log("文件变化")
+      // （原「文件变化」调试打印已删：每次都刷一行且没有信息量）
     })
     return tree;
   }
@@ -1875,7 +1926,7 @@ ipcMain.handle('exportDocx', async (_event, payload) => {
     const target = path.isAbsolute(raw) ? raw : path.join(app.getPath('downloads'), raw)
     const finalPath = overwrite ? target : uniqueFilePath(target)
     writeExportFile(finalPath, undefined, base64)
-    console.log('[export-docx] 已保存到', finalPath)
+    logInfo('export-docx', `saved: ${finalPath}`)
     return { ok: true, path: finalPath }
   } catch (error: any) {
     console.error('[export-docx] 写盘失败', error)
@@ -2523,14 +2574,14 @@ const trashOrDelete = async (targetPath: string): Promise<boolean> => {
 
 ipcMain.handle('deleteFile', async (event, filePath) => {
   try {
-    console.log(`[主进程] 收到删除文件请求: ${filePath}`)
+    logInfo('main', `delete-file requested: ${filePath}`)
     if (await trashOrDelete(filePath)) {
-      console.log(`[主进程] 文件已移入回收站: ${filePath}`)
+      logInfo('main', `moved to trash: ${filePath}`)
       return true
     }
     // 退回永久删除
     fs.unlinkSync(filePath)
-    console.log(`[主进程] 文件删除成功: ${filePath}`)
+    logInfo('main', `file deleted: ${filePath}`)
     return true;
   } catch (err) {
     console.error(`[主进程] 删除文件失败: ${filePath}`, err);
@@ -3118,9 +3169,9 @@ function setupDownloadFallback(): void {
       console.warn('[download] setSavePath 失败，改用 Electron 默认行为', e)
       return
     }
-    console.log('[download] 保存到', target)
+    logInfo('download', `saved: ${target}`)
     item.once('done', (_e: any, state: string) => {
-      console.log(`[download] ${state} -> ${target}`)
+      logInfo('download', `${state} -> ${target}`)
       if (state === 'completed' && webContents && !webContents.isDestroyed()) {
         webContents.send('app-download-done', { path: target, name })
       }
@@ -3249,7 +3300,8 @@ ipcMain.handle('exportSlidesPdf', async (event, payload: { head: string; slides:
       for (const p of pages) merged.addPage(p)
     }
     const out = await merged.save()
-    fs.writeFileSync(result.filePath, asUint8(out))
+    // pdf-lib 给的是 Uint8Array；写盘走 asNodeBytes 的类型垫片（@types/node 20 与 TS 6 的泛型 Buffer 仍互不兼容）
+    fs.writeFileSync(result.filePath, asNodeBytes(out))
     return { success: true, path: result.filePath, pages: merged.getPageCount() }
   } catch (error: any) {
     console.error('[exportSlidesPdf] 导出失败:', error)
@@ -3530,7 +3582,7 @@ ipcMain.handle('listPythonPackagesWithEnvironment', async (event, environment = 
 })
 
 ipcMain.handle('executePython', async (event, params) => {
-  console.log('[主进程] 收到 executePython 请求')
+  logInfo('main', 'executePython requested')
   
   try {
     if (!params) {
@@ -3543,7 +3595,7 @@ ipcMain.handle('executePython', async (event, params) => {
     }
     
     const { code, environment, cwd } = params
-    console.log(`[主进程] 环境: ${environment}, 代码长度: ${code?.length || 0}`)
+    logInfo('main', `executePython: env=${environment ?? null} codeChars=${code?.length || 0}`)
     
     if (!code || typeof code !== 'string') {
       return {
@@ -3558,14 +3610,14 @@ ipcMain.handle('executePython', async (event, params) => {
     const policy = resolvePolicy(environment, { workspaceRoot: cwd })
     const sandboxMode = policy.mode
     
-    console.log(`[主进程] 沙箱模式: ${sandboxMode}（enforcement: ${policy.enforcement}）`)
+    logInfo('main', `python sandbox: mode=${sandboxMode} enforcement=${policy.enforcement}`)
     try {
       // trusted → 直接执行；safe/workspace → 安全检查（workspace 放行文件写入与网络）
       const result = sandboxMode === 'trusted'
         ? await trustedPythonService.executeCode(code, '', cwd)
         : await pythonService.executeCode(code, '', cwd, sandboxMode)
       
-      console.log(`[主进程] ${sandboxMode} 环境执行完成:`, {
+      logInfo('main', `${sandboxMode} python finished`, {
         success: result.success,
         outputLength: result.output?.length || 0,
         error: result.error?.substring(0, 100) || '无错误'
@@ -3604,7 +3656,7 @@ ipcMain.handle('executePython', async (event, params) => {
 })
 
 ipcMain.handle('executeShell', async (event, params) => {
-  console.log('[主进程] 收到 executeShell 请求')
+  logInfo('main', 'executeShell requested')
   try {
     const { command, cwd, environment } = params || {}
     if (!command || typeof command !== 'string') {
@@ -3619,7 +3671,7 @@ ipcMain.handle('executeShell', async (event, params) => {
       return { success: false, error: msg, sandbox: policy, denied: true }
     }
     const result = await shellService.executeCommand(command, cwd)
-    console.log('[主进程] shell 执行完成:', {
+    logInfo('main', 'shell finished', {
       success: result.success,
       stdoutLength: result.stdout?.length || 0,
       stderrLength: result.stderr?.length || 0,
@@ -3637,6 +3689,11 @@ ipcMain.handle('executeShell', async (event, params) => {
     return { success: false, error: `shell 执行异常: ${error.message}` }
   }
 })
+
+// ==================== 终端（主页右侧栏「终端」标签：真 PTY） ====================
+// 与上面的 executeShell 不同：终端是人自己敲命令的交互界面，**不看安全策略**，任何档位都放行；
+// 走 node-pty 提供 TTY：交互式程序、颜色、Ctrl+C 都正常。通道 terminal:create/write/resize/kill（见 terminal-service.ts）
+registerTerminalIpc()
 
 // ==================== 工作区文本搜索（供 agent search_files 工具，借鉴 Codex code_search / grep） ====================
 // 默认跳过依赖/构建/版本控制目录，避免搜索结果被污染
@@ -3872,7 +3929,7 @@ ipcMain.handle('executeSkillScript', async (event, skillPath, scriptName, args =
 })
 
 ipcMain.handle('writeFile', async (event, filePath, content) => {
-  console.log(`[主进程] 收到写入文件请求: ${filePath}`)
+  logInfo('main', `write-file requested: ${filePath}`)
   
   try {
     if (!filePath) {
@@ -3881,13 +3938,13 @@ ipcMain.handle('writeFile', async (event, filePath, content) => {
     
     const directory = path.dirname(filePath)
     if (!fs.existsSync(directory)) {
-      console.log(`[主进程] 目录不存在，创建目录: ${directory}`)
+      logInfo('main', `creating directory: ${directory}`)
       fs.mkdirSync(directory, { recursive: true })
     }
     
     fs.writeFileSync(filePath, content, 'utf8')
     
-    console.log(`[主进程] 文件写入成功: ${filePath}`)
+    logInfo('main', `file written: ${filePath}`)
     return {
       success: true,
       path: filePath
@@ -3922,7 +3979,7 @@ ipcMain.handle('ensureDir', async (event, dirPath) => {
   try {
     if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true })
-      console.log(`[主进程] 目录创建成功: ${dirPath}`)
+      logInfo('main', `directory created: ${dirPath}`)
     }
     return { success: true }
   } catch (error: any) {
@@ -4184,8 +4241,12 @@ ipcMain.handle('registerASRShortcut', async (event, shortcut: string) => {
       .replace('Win', 'CommandOrControl')
     
     const success = globalShortcut.register(electronShortcut, () => {
-      // 按下快捷键时，通知渲染进程切换 ASR 状态
-      win?.webContents.send('asr-shortcut-toggle')
+      // 按下快捷键时，通知渲染进程切换 ASR 状态。
+      // 投递给「当前聚焦的那个窗口」：全局语音输入在每个窗口各自初始化，谁在前台就把热键给谁
+      // （于是在设置窗口 / 文件窗口 / 浏览器 Agent 窗口里也能直接说话输入当前焦点所在的输入框），
+      // 没有聚焦窗口时退回主窗口。
+      const target = BrowserWindow.getFocusedWindow() || win
+      target?.webContents?.send('asr-shortcut-toggle')
     })
     
     if (success) {
@@ -4203,7 +4264,7 @@ ipcMain.handle('registerASRShortcut', async (event, shortcut: string) => {
 ipcMain.handle('unregisterASRShortcut', async () => {
   if (registeredASRShortcut) {
     globalShortcut.unregister(registeredASRShortcut)
-    console.log('[ASR] 全局快捷键已注销:', registeredASRShortcut)
+    logInfo('ASR', `global shortcut unregistered: ${registeredASRShortcut}`)
     registeredASRShortcut = null
   }
   return { success: true }
@@ -4745,7 +4806,7 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
             }
           }
         }
-        console.log('[lan-server] 代理请求:', rawUrl, '→', targetUrl)
+        logInfo('lan-server', `proxy request: ${rawUrl} -> ${targetUrl}`)
         if (!targetUrl) {
           res.statusCode = 400
           res.end(JSON.stringify({ error: 'Missing "url" parameter' }))
@@ -4761,7 +4822,7 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
             const targetPort = target.port || (target.protocol === 'https:' ? 443 : 80)
             const body = Buffer.concat(bodyChunks)
 
-            console.log('[lan-server] 代理:', req.method, targetUrl, 'body:', body.length, 'bytes')
+            logInfo('lan-server', `proxy: ${req.method} ${targetUrl} body=${body.length} bytes`)
 
             // 网页端提问日志：识别聊天类请求 → 新建会话并记录用户问题
             // （web 无桌面主进程会话，经 /__proxy 代理的聊天在此落 sessionLog，供「设置→日志」检视）
@@ -4821,7 +4882,7 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
               method: req.method,
               headers: forwardHeaders,
             }, (proxyRes) => {
-              console.log('[lan-server] 代理响应状态:', proxyRes.statusCode)
+              logInfo('lan-server', `proxy response: ${proxyRes.statusCode}`)
               res.statusCode = proxyRes.statusCode || 200
               const hopByHop = ['transfer-encoding', 'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade']
               for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
@@ -4951,7 +5012,7 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
       // 端口被占用时自动顺延，使开发版与打包版可以各自启动局域网共享
       if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE' && lanServerPort < port + 20) {
         lanServerPort += 1
-        console.log(`[lan-server] 端口 ${lanServerPort - 1} 被占用，自动切换到 ${lanServerPort}`)
+        logInfo('lan-server', `port ${lanServerPort - 1} busy, switched to ${lanServerPort}`)
         try {
           lanServer!.listen(lanServerPort, '0.0.0.0', () => {
             notifyLanServerStatus()
@@ -5039,8 +5100,12 @@ ipcMain.handle('lan:setGuest', async (_e, payload?: any) => {
   // 访客可用智能体档案（渲染层组装：预设提示词/工具/知识库/MCP），主进程据此叠加盟客策略限制。
   // ⚠️ 仅在 payload 明确带 agents 时才覆盖：局部下发（旧版本渲染层）不能把清单清空。
   if (payload && Object.prototype.hasOwnProperty.call(payload, 'agents')) setLanGuestAgents(payload.agents)
-  // 诊断日志：网页端能不能用智能体模式完全取决于这条策略是否到位
-  console.log(`[lan-guest] 访客策略已更新: modes=[${p.modes.join(',')}] tools=${Array.isArray(p.tools) ? p.tools.length : '默认集'} maxSteps=${p.maxSteps} maxConcurrent=${p.maxConcurrent} 令牌=${p.requireToken ? '需要' : '不需要'} 预设=${Array.isArray(payload?.agents) ? payload.agents.map((a: any) => a?.name).join('/') || '无' : '无'} 模型=${payload?.llm?.provider || '-'}/${payload?.llm?.config?.model || '来源默认'}`)
+  // 诊断日志（默认静默，AIKM_VERBOSE=1 输出）：网页端能不能用智能体模式完全取决于这条策略是否到位
+  logInfo('lan-guest', `guest policy updated: modes=[${p.modes.join(',')}]`
+    + ` tools=${Array.isArray(p.tools) ? p.tools.length : 'default'} maxSteps=${p.maxSteps} maxConcurrent=${p.maxConcurrent}`
+    + ` token=${p.requireToken ? 'required' : 'not required'}`
+    + ` agents=${Array.isArray(payload?.agents) ? payload.agents.map((a: any) => a?.name).join('/') || 'none' : 'none'}`
+    + ` model=${payload?.llm?.provider || '-'}/${payload?.llm?.config?.model || 'source default'}`)
   // 回推生效状态：设置页「主机当前生效」直接照它显示（挂载时也会主动拉一次）
   broadcastLanGuestState()
   return { success: true, policy: p }

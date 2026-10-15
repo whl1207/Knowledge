@@ -1,5 +1,6 @@
 // src/main/trusted-python-service.ts
 import { exec } from 'child_process'
+import { logInfo } from './log'
 import { promisify } from 'util'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -246,7 +247,7 @@ export class TrustedPythonService {
       const exists = fs.existsSync(absolutePath)
       const stats = exists ? fs.statSync(absolutePath) : null
       
-      console.log(`检查脚本文件:
+      logInfo('main', `检查脚本文件:
       原始路径: ${scriptPath}
       绝对路径: ${absolutePath}
       文件存在: ${exists}
@@ -295,7 +296,7 @@ export class TrustedPythonService {
       }).join(' ')
       
       const command = `${this.pythonCommand} "${escapedPath}" ${argsStr}`
-      console.log('执行命令:', command)
+      logInfo('TrustedPythonService', `run command: ${command}`)
       
       // 创建带有 UTF-8 编码的环境变量
       const env = {
@@ -419,7 +420,7 @@ export class TrustedPythonService {
    * 日志记录辅助函数
    */
   private log(...args: any[]): void {
-    console.log('[TrustedPythonService]', ...args)
+    logInfo('TrustedPythonService', args.map((a) => String(a)).join(' '))
   }
 }
 

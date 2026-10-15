@@ -6,7 +6,7 @@
 
     <template v-else>
       <header class="wf-props__head">
-        <span class="wf-props__icon" :style="{ '--node-color': presentation.color }">{{ presentation.glyph }}</span>
+        <span class="wf-props__icon" :style="{ '--node-color': presentation.color, '--node-glyph-weight': String(presentation.weight || 900) }">{{ presentation.glyph }}</span>
         <div class="wf-props__titles">
           <div class="wf-props__type">{{ typeLabel }}</div>
           <div class="wf-props__id">{{ nodeId }}</div>
@@ -277,7 +277,9 @@ function setRetry(key: string, value: unknown): void {
 }
 
 .wf-props__icon {
-  font-family: FontAwesome;
+  /* 每节点字形：字族走 FA5，字重由节点类型注入（线框节点 400 / 实心 900，见 presentation.ts） */
+  font-family: 'Font Awesome 5 Free';
+  font-weight: var(--node-glyph-weight, 900);
   font-size: 15px;
   /* 主色由节点类型注入（--node-color），朝主题文字色靠拢保证可读 */
   color: color-mix(in srgb, var(--node-color, var(--wf-text-dim)) 82%, var(--wf-text));

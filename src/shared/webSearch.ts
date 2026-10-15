@@ -6,6 +6,7 @@
  *
  * 搜索源分类：
  * - 免 Key（本地渲染/公开接口）：bing（默认）/ baidu / duckduckgo
+ * - 免 Key 的搜索 API：firecrawl（无 Key 走官方免费额度；填了 Key 换用自己的额度，可选）
  * - 自建实例：searxng（需实例地址）
  * - API Key：tavily（国际）/ bocha 博查（国内）/ brave（国际）/ zhipu 智谱（国内）
  * - 自定义源（`config.customs`，源 id 形如 `cs:<自定义 id>`）：内网 SearXNG 兼容实例、
@@ -17,6 +18,7 @@ export const WEB_SEARCH_PROVIDER_IDS = [
   'bing',
   'baidu',
   'duckduckgo',
+  'firecrawl',
   'searxng',
   'bocha',
   'zhipu',
@@ -60,7 +62,7 @@ export type WebSearchProviderId = string
 
 /** 单个搜索源的端点配置（不同源使用的字段不同，多余的字段被忽略） */
 export interface WebSearchProviderConfig {
-  /** API Key（tavily / bocha / brave / zhipu 必填） */
+  /** API Key（tavily / bocha / brave / zhipu 必填；firecrawl 可留空 = 走官方免 Key 额度） */
   apiKey?: string
   /** 接口地址（可留空用默认值；自建实例必填） */
   apiHost?: string
@@ -192,6 +194,7 @@ export interface WebSearchConfig {
   rewriteZhQuery: boolean
   /** 自定义（内网）搜索源列表 */
   customs: WebSearchCustomSource[]
+  firecrawl: WebSearchProviderConfig
   searxng: WebSearchProviderConfig
   tavily: WebSearchProviderConfig
   bocha: WebSearchProviderConfig
@@ -304,6 +307,18 @@ export const WEB_SEARCH_PROVIDERS: WebSearchProviderMeta[] = [
     en: 'Privacy-friendly and keyless; tries the HTML endpoint first and falls back to a hidden browser (may be blocked on some networks).',
   },
   {
+    id: 'firecrawl',
+    label: 'Firecrawl（免 Key 可用）',
+    labelEn: 'Firecrawl (keyless)',
+    needsKey: false,
+    needsHost: false,
+    zh: 'Firecrawl 的 v2 搜索接口：不填 Key 即可用，走官方免 Key 免费额度（按 IP 计量，约 1000 credits/月）；'
+      + '申请自己的免费 Key 填进来可换用自己的额度、避免与他人共享 IP 限流。结果带标题 / 链接 / 摘要，响应快、不依赖网页渲染。',
+    en: 'Firecrawl v2 search: works with no API key on the official keyless free tier (metered per IP, ~1,000 credits/month). '
+      + 'Add your own free key to use your own quota and avoid shared-IP rate limits. Returns titles, links and descriptions without page rendering.',
+    docs: 'https://firecrawl.dev',
+  },
+  {
     id: 'searxng',
     label: 'SearXNG（自建实例）',
     labelEn: 'SearXNG (self-hosted)',
@@ -377,6 +392,7 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
   maxResults: 8,
   rewriteZhQuery: true,
   customs: [],
+  firecrawl: { apiKey: '', apiHost: 'https://api.firecrawl.dev' },
   searxng: { apiHost: 'http://localhost:8080', engines: '', language: 'auto' },
   tavily: { apiKey: '', apiHost: 'https://api.tavily.com' },
   bocha: { apiKey: '', apiHost: 'https://api.bochaai.com' },
@@ -396,6 +412,7 @@ const WEB_SEARCH_PROVIDER_ICONS: Record<string, string> = {
   bing: 'fa-windows',
   baidu: 'fa-paw',
   duckduckgo: 'fa-user-secret',
+  firecrawl: 'fa-fire',
   searxng: 'fa-server',
   bocha: 'fa-cubes',
   zhipu: 'fa-magic',
@@ -478,6 +495,7 @@ export function normalizeWebSearchConfig(raw: any): WebSearchConfig {
     maxResults,
     rewriteZhQuery: typeof src.rewriteZhQuery === 'boolean' ? src.rewriteZhQuery : DEFAULT_WEB_SEARCH_CONFIG.rewriteZhQuery,
     customs,
+    firecrawl: pick('firecrawl'),
     searxng: pick('searxng'),
     tavily: pick('tavily'),
     bocha: pick('bocha'),

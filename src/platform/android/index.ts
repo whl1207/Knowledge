@@ -19,7 +19,7 @@
 
 import { Capacitor } from '@capacitor/core'
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem'
-import { SAF_PREFIX, isSafPath, splitSafPath, safCache, type SafFilesystemAdapter } from '@/platform/android/saf'
+import { SAF_PREFIX, SafFolder, createSafFilesystemAdapter, isSafPath, splitSafPath, safCache, type SafFilesystemAdapter } from '@/platform/android/saf'
 import { createShareAdapter } from '@/platform/android/share'
 import { createSpeechApi } from '@/platform/android/speech'
 import type {
@@ -39,6 +39,7 @@ import type {
   TtsApi,
   WatchPort,
   WindowPort,
+  TerminalPort,
 } from '@/platform/contract'
 
 /**
@@ -112,7 +113,6 @@ function defaultSafAdapter(): Promise<SafFilesystemAdapter | null> {
   if (!safAdapterPromise) {
     safAdapterPromise = (async () => {
       try {
-        const { createSafFilesystemAdapter } = await import('@/platform/android/saf')
         const adapter = createSafFilesystemAdapter()
         // 预热授权根名：路径解析（`saf:<根名>/…`）与界面展示都依赖它
         await adapter.refreshRoot()
@@ -840,9 +840,8 @@ function makeDialogPort(deps: AndroidDeps): DialogPort {
   }
 }
 
-/** 默认的 SAF 选择实现（动态引入，未打包插件时不影响其它平台） */
+/** 默认的 SAF 选择实现（用文件顶部同一个静态导入；本文件只在安卓后端被加载，不需要再动态引入） */
 async function defaultPickSafFolder(): Promise<{ name: string } | null> {
-  const { SafFolder, safCache } = await import('@/platform/android/saf')
   const res = await SafFolder.pickFolder()
   safCache.rootName = res?.name || ''
   // 新选的授权根立刻进清单：多授权根下每个 `saf:<名字>/…` 都按名字路由，界面提示也看这份清单
@@ -951,9 +950,8 @@ async function applyImmersive(hidden: boolean): Promise<boolean> {
 /** 默认的「路径 → 可共享 uri」解析（saf: 走 SAF document uri，其余走 Capacitor 的 file:// uri） */
 async function defaultResolveSafUri(path: string): Promise<{ uri: string; name?: string } | null> {
   try {
-    const { SafFolder, safCache: cache, createSafFilesystemAdapter } = await import('@/platform/android/saf')
     // 授权根名决定「saf:<根名>/…」怎么剥前缀（未预热时先问一次原生侧）
-    if (!cache.rootName) await createSafFilesystemAdapter().refreshRoot().catch(() => {})
+    if (!safCache.rootName) await createSafFilesystemAdapter().refreshRoot().catch(() => {})
     const rel = splitSafPath(path).rel
     const r = await SafFolder.getUri({ path: rel })
     return r?.uri ? { uri: String(r.uri), name: String(r.name || '') } : null
@@ -1197,6 +1195,11 @@ const browserAgentPort: BrowserAgentPort = {
   async call() { throw new Error('not-supported') },
 }
 
+/** 安卓没有可用的 PTY（也没有 node-pty）：终端标签按能力隐藏 */
+const terminalPort: TerminalPort = {
+  async call() { return { ok: false, error: 'not-supported' } },
+}
+
 /** 构造安卓后端（依赖可注入，默认使用真实 Capacitor 插件 / SAF 插件） */
 export function createAndroidPlatform(deps: AndroidDeps = {}): Platform {
   const fs = makeAdapter(deps)
@@ -1216,5 +1219,6 @@ export function createAndroidPlatform(deps: AndroidDeps = {}): Platform {
     host,
     llm: llmPort,
     browserAgent: browserAgentPort,
+    terminal: terminalPort,
   }
 }

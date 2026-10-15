@@ -22,6 +22,7 @@ import * as path from 'node:path'
 import { createRequire } from 'node:module'
 import { IPCError } from '@/types/ipc'
 import { registerIpc, sendToAll } from './ipc-registry'
+import { logInfo, logWarn } from './log'
 import { asUint8 } from './buffer-view'
 
 const require = createRequire(import.meta.url)
@@ -148,9 +149,9 @@ async function scanBuiltin(): Promise<void> {
       const { meta, size } = await readMeta(file)
       const src = sourceFromMeta(file, 'builtin', id, meta, size)
       sourcesById.set(id, src)
-      console.log(`[map-tiles] 发现内置地图包: ${src.name} (${(size / 1048576).toFixed(1)} MB, z${src.minZoom}~z${src.maxZoom})`)
+      logInfo('map-tiles', `builtin map pack: ${src.name} (${(size / 1048576).toFixed(1)} MB, z${src.minZoom}~z${src.maxZoom})`)
     } catch (err: any) {
-      console.warn(`[map-tiles] 内置包 ${f} 解析失败，跳过:`, err?.message || err)
+      logWarn('map-tiles', `builtin pack ${f} unreadable, skipped`, err?.message || err)
     }
   }
 }
@@ -225,7 +226,7 @@ export async function initMapTiles(publicMapsDir: string): Promise<void> {
   indexFile = path.join(userDir, 'index.json')
   await scanBuiltin()
   await loadUserRegistry()
-  console.log(`[map-tiles] 初始化完成，共 ${sourcesById.size} 个地图源`)
+  logInfo('map-tiles', `initialized, ${sourcesById.size} map source(s)`)
 }
 
 // ==================== 瓦片读取 ====================

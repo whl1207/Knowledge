@@ -8,6 +8,7 @@
 import type { DslDocument } from '@/features/workflow/dsl/types'
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
+import type { ChatDockState } from '@/shared/chatDock'
 
 /** 聊天模式（每条聊天独立）
  *  code = 旧「主页 PTC 模式」（已下线，存档载入时迁移为 agent + 内置「PTC 智能体」预设，见 home.vue loadChatsFromStorage） */
@@ -235,6 +236,16 @@ export interface Chat {
    * 随 chats 一起持久化，因此切模块 / 重启后草稿仍在。
    */
   draft?: string
+  /**
+   * 这个聊天自己的**激活工作区**（智能体的工作目录；空 = 跟随全局默认工作区 store.root）。
+   * 每个聊天可以不同：切聊天不会互相改目录。见 shared/chatWorkspace.ts。
+   */
+  workspace?: string
+  /**
+   * 右侧栏（DSH 同款 dock）：**每个聊天各自保存**开关 / 宽度 / 标签页集合 / 当前标签。
+   * 标签类型为 文件 / 终端 / 浏览器（见 shared/chatDock.ts）。随 chats 一起持久化。
+   */
+  dock?: ChatDockState
   mode: ChatMode // 每个聊天的独立模式
   // 分支对话相关
   parentId?: string // 父聊天 ID，根聊天为 undefined
@@ -242,6 +253,26 @@ export interface Chat {
   branchLabel?: string // 分支节点显示标签（从分支消息提取）
   /** 智能体（agent2）模式的执行展示：当前任务的待办清单（update_todo 维护） */
   agentTodos?: TodoItem[]
+  /**
+   * 智能体模式的执行计划（update_plan / exit_plan_mode 维护）。
+   * 与 agentTodos 一起随聊天存档落盘：重开聊天时作为 `seedPlan` 交回新会话，
+   * 使「只记日志、最后一条胜出」的状态在跨进程后依旧延续（见 agentPlanState.ts）。
+   */
+  agentPlan?: string | null
+  /**
+   * 待用户裁决的计划评审（exit_plan_mode）——**聊天存档级的恢复源**。
+   *
+   * 进程重启后主进程的挂起评审已经消失，但这条记录还在：界面据此把弹窗重新摆出来，
+   * 用户的选择会补记进会话日志（`plan/review-result`），并作为 `planDecision`
+   * 交给下一次开场的新会话。回答后本字段清空。
+   */
+  pendingPlanReview?: { reviewId: string; plan: string; sessionId: string } | null
+  /**
+   * 「补答的评审裁决」：会话已经结束、用户事后才回答的那条决策。
+   * 下一次创建 agent 会话时作为 `seedPlanDecision` 注入（写成一条已记录的 user 消息），
+   * 注入后即清空——避免每轮重复投递同一条裁决。
+   */
+  planDecision?: { verdict: string; feedback?: string; plan?: string }
   /** 智能体模式最近一次工具调用快照（供输入区右侧展示；null 表示无） */
   agentLastTool?: { name: string; status: string; summary?: string } | null
 }

@@ -6,7 +6,7 @@
  * 因此 attempt 只存一份于其所属文件对象；实体轴（P2）由同一份 attempt 经
  * entityNames/blockId 投影聚合。
  */
-import { computeMastery, initSrs, isSrsDue, KbType, Lsrs, MASTERY_GATE, srsNext, uid } from '@/services/learningCore'
+import { computeMasteryFromEvidence, displayMastery, evidenceQuality, gateKindOf, initSrs, isSrsDue, isGatePassed, KbType, Lsrs, MASTERY_GATE, masterySource, objectStatusOf, QUALITY_PASS, ratingIsSuccess, srsNext, uid, type GateKind, type SrsRating } from '@/services/learningCore'
 import { getPlatform, hasCapability } from '@/platform'
 
 export type AttemptSrc = 'self' | 'exam' | 'review'
@@ -28,6 +28,30 @@ export interface LAttempt {
   answer?: string
   /** answer 是否来自问题库生成答案（true=独立答案+出处切片；false/缺省=answer 即切片正文） */
   hasAnswer?: boolean
+  /**
+   * 是否**未看答案、未用提示**独立完成（P0，对齐 DeepTutor 的 QuizAttempt.independent）。
+   * 缺省 = true：旧记录一律按独立完成处理，因此历史掌握度不会因升级而掉分。
+   * 看过答案区才作答 / 点过「解析」的，应传 false。
+   */
+  independent?: boolean
+  /** 本题用掉的提示数 / 看过答案的次数（P0，对齐 LearningEvidence.hints_used）。缺省 0 */
+  hintsUsed?: number
+  /**
+   * 四档评分（P1，对齐 DeepTutor `services/practice/scheduler.py` 的 Rating）。
+   *
+   * 判得出分的题由判分结果直接给 `good` / `again`（学习者无从改判）；
+   * 判不了分的题由学习者自评。缺省 = 由 `ok` 反推（good / again），
+   * 因此旧调用点与旧记录的行为完全不变。
+   */
+  rating?: SrsRating
+  /**
+   * 这次作答属于**质性**门控（concept/design 的 Feynman 检查）。
+   *
+   * 为什么必须标出来：质性知识点不用正确率判掌握，所以这类作答
+   * **不参与** `objectMastery` 的加权正确率 —— 否则"讲了三遍都判没过"会把
+   * 分数拉到 0，而分数对质性门控本来就不该有影响。
+   */
+  qualitative?: boolean
 }
 
 export interface LObject {
@@ -44,6 +68,26 @@ export interface LObject {
   lastPracticedAt?: number
   /** 学习者声明已掌握（跳测/压缩已会内容，与作答证据式掌握分开） */
   claimMastered?: boolean
+  /**
+   * 质性门控的判定记录（P1-2，对齐 DeepTutor 的 `qualitative_mastery`）：
+   * `concept` / `design` 型知识点由导师判定"用自己的话讲一遍"是否足够，
+   * **bool 而不是分数**。学习者声明用 `claimMastered`，两者绝不混。
+   */
+  qualitativePass?: boolean
+  /** 最近一次质性判定（含模型短评），供错题本/地图展示 */
+  qualitative?: QualitativeEvidence
+}
+
+/** 一次质性判定（Feynman 检查）的证据 */
+export interface QualitativeEvidence {
+  passed: boolean
+  /** 学习者的讲解原文 */
+  explanation?: string
+  /** 模型短评（强在哪 / 缺什么） */
+  feedback?: string
+  at: number
+  /** 生成时用的语言 */
+  lang?: 'zh' | 'en'
 }
 
 export interface DayStat { ok: number; total: number }
@@ -254,10 +298,21 @@ export function recordAttempt(
   const full: LAttempt = { id: uid('a'), ...attempt }
   o.attempts.push(full)
   if (o.attempts.length > MAX_ATTEMPTS) o.attempts = o.attempts.slice(-MAX_ATTEMPTS)
-  o.srs = srsNext(o.srs, full.ok, now, o.type)
+  const noOf = attemptNumbers(o.attempts)
+  // SRS 与掌握度用**同一个**证据质量分（对齐 DeepTutor：quality < 0.5 在那里就是 lapse）。
+  // 于是"看了答案才答对"不会把复习间隔拉长——没能独立回忆起来，就不该拿到更长的间隔。
+  const q = evidenceQuality(evidenceInputOf(full, noOf[noOf.length - 1]))
+  // 四档评分决定档位：'hard' 不推进、'easy' 多进一档、'again' 视为失败
+  // （同会话窗口内不会掉档，见 srsNext 的同会话分支）
+  const rating: SrsRating = full.rating || (full.ok ? 'good' : 'again')
+  o.srs = srsNext(o.srs, q >= QUALITY_PASS && ratingIsSuccess(rating), now, o.type, rating)
   o.lastPracticedAt = now
-  const m = computeMastery(o.attempts.map(a => a.ok))
-  if (!o.masteredAt && m >= MASTERY_GATE) o.masteredAt = now
+  // 掌握度按证据质量折算：看过答案/用提示之后的「对」不足以推开 0.9 的门。
+  // 质性作答不进加权正确率（质性门控读 qualitativePass，不读分数）。
+  // `masteredAt` 只在**量化**知识点上落：它表示"作答证据已过 0.9"，质性走的是另一条门。
+  const m = objectMastery(o)
+  const qualitativeGate = gateKindOfObject(o) === 'qualitative'
+  if (!o.masteredAt && !qualitativeGate && m >= MASTERY_GATE) o.masteredAt = now
 
   data.meta.totalPractice += 1
   if (full.ok) data.meta.totalCorrect += 1
@@ -279,9 +334,137 @@ export function recordAttempt(
   return m
 }
 
-/** 对象掌握度（派生，不落盘） */
+/**
+ * 一次作答的**证据质量**（0..1）：答错=0；独立答对=1；看过答案/用提示/反复重试后答对 < 0.5
+ * —— 也就是**推不开任何一档的掌握度门**。缺省字段（旧记录）按独立、零提示、第 1 次处理 → 恒为 1。
+ *
+ * @param attemptNo 这是对同一题的第几次尝试（1 起）；调用方按已落盘的 attempts 计数传入
+ */
+export function attemptQuality(a: LAttempt, attemptNo = 1): number {
+  return evidenceQuality(evidenceInputOf(a, attemptNo))
+}
+
+/** `LAttempt` → 证据质量输入（缺省值在这里收敛成一处，避免调用方各写一套） */
+function evidenceInputOf(a: LAttempt, attemptNo = 1) {
+  return {
+    ok: a.ok,
+    independent: a.independent,
+    hintsUsed: a.hintsUsed,
+    attemptNo,
+  }
+}
+
+/**
+ * 该对象是否有**可判分的答案键**（问题库给了独立答案）。
+ * 只用于"这道题能不能自动判分"，**不**参与门控判定（门只看知识类型）。
+ */
+export function hasAnswerKey(o: LObject): boolean {
+  return o.attempts.some(a => a.hasAnswer === true && !!String(a.answer || '').trim())
+}
+
+/** 该对象走哪种门（量化 / 质性）：只看知识类型 */
+export function gateKindOfObject(o: LObject): GateKind {
+  return gateKindOf(o.type)
+}
+
+/**
+ * 对象掌握度（派生，不落盘）：按证据质量折算后再走 `computeMastery`。
+ *
+ * **质性作答被排除**：它们不提供正确率证据（见 `LAttempt.qualitative`）。
+ */
 export function objectMastery(o: LObject): number {
-  return computeMastery(o.attempts.map(a => a.ok))
+  const items = o.attempts.filter(a => !a.qualitative)
+  const noOf = attemptNumbers(items)
+  return computeMasteryFromEvidence(items.map((a, i) => evidenceInputOf(a, noOf[i])))
+}
+
+/** 用于**门控**的掌握度：质性通过映射为 1，其余按证据质量加权正确率 */
+export function objectGateMastery(o: LObject): number {
+  return displayMastery(objectMastery(o), o.qualitativePass, gateKindOfObject(o) === 'qualitative')
+}
+
+/** 对象状态（地图/总览/图谱统一口径，含双门控与来源区分） */
+export function objectStatus(o: LObject): 'new' | 'learning' | 'mastered' {
+  return objectStatusOf({
+    mastery: objectMastery(o),
+    qualitativePass: o.qualitativePass,
+    qualitativeGate: gateKindOfObject(o) === 'qualitative',
+    masteredAt: o.masteredAt,
+    claimMastered: o.claimMastered,
+  })
+}
+
+/** 掌握来源：`system`（评测通过）/ `learner`（学习者声明）/ `''`（未过门） */
+export function objectMasterySource(o: LObject): 'system' | 'learner' | '' {
+  return masterySource({
+    mastery: objectMastery(o),
+    qualitativePass: o.qualitativePass,
+    qualitativeGate: gateKindOfObject(o) === 'qualitative',
+    masteredAt: o.masteredAt,
+    claimMastered: o.claimMastered,
+  })
+}
+
+/**
+ * 记录一次**质性判定**（P1-2，对齐 DeepTutor `record_qualitative_for_path`）。
+ *
+ * - 判定结果落 `qualitativePass` + `qualitative`（含模型短评），并写一条 `qualitative` 作答；
+ * - 通过时**不**走 `masteredAt`（那是量化口径的标记），门控由 `isGatePassed` 读 `qualitativePass`；
+ * - SRS 仍按结果推进（判过 → 成功；判不过 → 失败），所以"没过"会在几天后被重新安排。
+ */
+export function recordQualitativeCheck(
+  data: LData,
+  objKey: string,
+  verdict: { passed: boolean; explanation?: string; feedback?: string; lang?: 'zh' | 'en' },
+  now = Date.now(),
+): number {
+  const o = data.objects[objKey]
+  if (!o) return 0
+  o.qualitativePass = !!verdict.passed
+  o.qualitative = {
+    passed: !!verdict.passed,
+    explanation: String(verdict.explanation || '').trim() || undefined,
+    feedback: String(verdict.feedback || '').trim() || undefined,
+    at: now,
+    lang: verdict.lang,
+  }
+  recordAttempt(data, objKey, {
+    q: String(verdict.explanation || '').trim() || '（质性检查：用自己的话讲一遍）',
+    ok: !!verdict.passed,
+    score: verdict.passed ? 100 : 0,
+    at: now,
+    src: 'self',
+    blockId: o.key,
+    filePath: o.key,
+    entityNames: [],
+    hasAnswer: false,
+    // 质性判定：不参与加权正确率，但参与 SRS 与作答历史
+    qualitative: true,
+    rating: verdict.passed ? 'good' : 'again',
+    independent: true,
+    hintsUsed: 0,
+  })
+  return data.objects[objKey] ? objectMastery(data.objects[objKey]) : 0
+}
+
+/** 某次作答是「对同一题的第几次尝试」（1 起）：按 blockId 分组、按落盘顺序计数 */
+export function attemptNoOf(attempts: LAttempt[], index: number): number {
+  return attemptNumbers(attempts)[index] ?? 1
+}
+
+/**
+ * 一次扫描算出每个下标对应「第几次尝试」（1 起）。
+ * 不用在循环里对每个下标都重扫一遍前缀：attempts 上限 40，但这条路径每次作答都会走。
+ */
+function attemptNumbers(attempts: LAttempt[]): number[] {
+  const seen: Record<string, number> = {}
+  const out: number[] = new Array(attempts.length)
+  for (let i = 0; i < attempts.length; i++) {
+    const k = String(attempts[i]?.blockId)
+    seen[k] = (seen[k] || 0) + 1
+    out[i] = seen[k]
+  }
+  return out
 }
 
 export function clearObject(data: LData, key: string, now = Date.now()): void {
@@ -294,6 +477,9 @@ export function clearObject(data: LData, key: string, now = Date.now()): void {
   o.masteredAt = undefined
   o.lastPracticedAt = undefined
   o.claimMastered = false
+  // 质性判定是"这一遍讲清楚了"的证据，重学时要一起清掉，否则过期的通过会一直开着门
+  o.qualitativePass = undefined
+  o.qualitative = undefined
   data.updatedAt = now
 }
 

@@ -20,7 +20,10 @@
 
 import { getPlatform } from '@/platform'
 import { computeEditDiff, makeEditDiffPreview, countTextLines, type EditDiffFilePreview } from '@/shared/editDiff'
-import type { TodoItem } from '@/types/agent'
+import { parseTodoList } from '@/shared/agentTodo'
+import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
+import { planReviewMessage, type PlanReviewOutcome } from '@/shared/agentPlanReview'
+import type { TodoItem, AskUserAnswer, AskUserQuestion } from '@/types/agent'
 
 export interface RendererToolResult {
   ok: boolean
@@ -37,8 +40,10 @@ export interface RendererToolContext {
   kbTopK?: number
   retrieval?: any
   signal?: AbortSignal
-  /** ask_user：向用户提问并等待回答（由 agent 循环实现） */
-  askUser: (question: string) => Promise<string>
+  /** ask_user：向用户提问并等待结构化回答（由 agent 循环实现） */
+  askUser: (questions: AskUserQuestion[]) => Promise<AskUserAnswer[]>
+  /** exit_plan_mode：提交计划请用户评审（由 agent 循环实现） */
+  reviewPlan: (plan: string) => Promise<PlanReviewOutcome>
   setPlan: (plan: string | null) => void
   setTodos: (todos: TodoItem[]) => void
   getTodos: () => TodoItem[]
@@ -53,7 +58,7 @@ export const RENDERER_TOOL_NAMES = [
   'read_file', 'write_file', 'replace_in_file', 'multi_replace',
   'list_dir', 'search_files', 'kb_search',
   'web_fetch', 'web_search',
-  'ask_user', 'update_plan', 'update_todo',
+  'ask_user', 'update_plan', 'update_todo', 'exit_plan_mode',
 ] as const
 
 export type RendererToolName = (typeof RENDERER_TOOL_NAMES)[number]
@@ -70,6 +75,8 @@ const HOST_ONLY_HINTS: Record<string, string> = {
   run_python: '执行 Python 需要桌面端（手机 / 网页没有本地运行时）',
   shell: '执行 shell 命令需要桌面端',
   run_subagent: '派生子代理需要桌面端',
+  job_output: '后台任务（子代理）需要桌面端',
+  job_kill: '后台任务（子代理）需要桌面端',
   mcp_call: 'MCP 调用需要桌面端或主机',
   skill: '技能库需要桌面端（技能在文件系统里，手机端请改用 read_file 直接读技能目录）',
   run_code: '代码模式（PTC）需要桌面端的工具注册表',
@@ -149,28 +156,59 @@ const SCHEMAS: Record<string, any> = {
   web_search: fn('web_search', '搜索互联网，返回标题 / 链接 / 摘要列表。', {
     query: str('搜索关键词'),
   }, ['query']),
-  ask_user: fn('ask_user', '向用户提问并等待回答。需要补充信息或澄清需求时使用；回答会作为工具结果返回。', {
-    question: str('要问用户的问题'),
-  }, ['question']),
-  update_plan: fn('update_plan', '创建或更新当前任务的执行计划（Markdown 文本）。', {
-    plan: str('计划内容；传空字符串清除'),
-  }, ['plan']),
-  update_todo: fn('update_todo', '维护结构化待办清单（每次必须传入完整清单）。', {
-    todos: {
+  ask_user: fn('ask_user', '向用户提问并等待回答（回答会作为工具结果返回）。需要确认、做选择、或缺少关键信息时使用。一次可问多题：每题给 options 就是选择题（multi_select=true 可多选），不给 options 就是自由填写；每题都允许用户补充自定义回答，也可跳过某题（返回空 selected 且无 custom）。推荐项放第一位并在 label 末尾加 "(Recommended)"。', {
+    question: str('旧式单问：一个自由填写的问题文本（与 questions 二选一）'),
+    questions: {
       type: 'array',
-      description: '完整待办清单（顺序即展示顺序）',
+      description: '要问用户的问题清单（按顺序展示；最多 8 题）',
       items: {
         type: 'object',
+        additionalProperties: false,
         properties: {
-          id: str('唯一 id（稳定不变）'),
-          title: str('标题'),
-          detail: str('细节说明（可选）'),
-          status: { type: 'string', enum: ['pending', 'running', 'done', 'cancelled'] },
+          id: str('本题的稳定 id（同一批内唯一，回答按它回填）'),
+          question: str('具体要问的问题'),
+          header: str('可选短标题，如「确认」「选择模式」'),
+          options: {
+            type: 'array',
+            description: '可选选项；不给出就是自由填写题',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                label: str('面向用户的简短选项标签'),
+                description: str('可选，一句话说明取舍或影响'),
+              },
+              required: ['label'],
+            },
+          },
+          multi_select: { type: 'boolean', description: '是否允许多选（默认 false = 单选）' },
         },
-        required: ['id', 'title', 'status'],
+        required: ['id', 'question'],
+      },
+    },
+  }),
+  update_plan: fn('update_plan', '为当前任务制定/更新执行计划（Markdown，会展示给用户）。步骤各占一行、每步一句话；计划变化时更新它，任务完成或作废时传空字符串清除。计划只是给人看的摘要，长内容请写进文件。', {
+    plan: str('完整计划文本（Markdown；传空字符串清除计划）'),
+  }, ['plan']),
+  update_todo: fn('update_todo', '记录并更新任务清单，用于规划多步工作并展示进度（单步琐碎任务不必使用）。开工前为每个具体步骤建一项；正在做的那一项保持 running（同一时刻最多一项）；每完成一步立即置为 done，做不了置为 cancelled。每次调用必须传入完整清单（整表替换，未列出的项会被移除），全部完成后传空数组清除。', {
+    todos: {
+      type: 'array',
+      description: '完整任务清单（整表替换；清空传 []）',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          content: str('任务内容 —— 一句简短的祈使句（同一清单内不可重复）'),
+          status: { type: 'string', enum: ['pending', 'running', 'done', 'cancelled'], description: 'pending（未开始）| running（进行中，同一时刻最多一项）| done（已完成）| cancelled（已放弃）' },
+          detail: str('可选。细节或验收标准（展示用）'),
+        },
+        required: ['content', 'status'],
       },
     },
   }, ['todos']),
+  exit_plan_mode: fn('exit_plan_mode', '把已完成的计划提交给用户评审（Approve / 继续完善）。改动大、不可逆、或方向需要用户拍板的任务，先用 update_plan 画出计划，再用本工具请求批准；批准后才开始动手。用户选择「继续完善」时本工具会失败并带回反馈，请修订后重新提交。', {
+    plan: str('完整计划文本（Markdown，建议从标题开始）'),
+  }, ['plan']),
 }
 
 /** 按白名单取工具 schema（过滤掉本层不支持的，避免模型调用必然失败的工具） */
@@ -652,30 +690,53 @@ async function toolWebSearch(input: any): Promise<RendererToolResult> {
 // ---------------------------------------------------------------------------
 
 async function toolAskUser(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
-  const question = String(input?.question ?? '').trim()
-  if (!question) return { ok: false, error: 'question 参数必填' }
-  const answer = await ctx.askUser(question)
-  return { ok: true, value: { question, answer } }
+  const parsed = parseAskQuestions(input)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  const { questions, legacy } = parsed
+  const answers = await ctx.askUser(questions)
+  return {
+    ok: true,
+    value: {
+      ...askAnswersToModel(questions, answers, legacy),
+      summary: askAnswersText(questions, answers),
+    },
+  }
 }
 
 async function toolUpdatePlan(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
-  const plan = String(input?.plan ?? '').trim()
+  const raw = input?.plan
+  if (raw !== undefined && typeof raw !== 'string') {
+    return { ok: false, error: 'plan 必须是字符串（Markdown 文本；传空字符串清除计划）' }
+  }
+  const plan = typeof raw === 'string' ? raw.trim() : ''
+  if (plan.length > 20000) {
+    return { ok: false, error: `计划过长（${plan.length} 字符，上限 20000）：计划只列步骤与关键约束，细节请写进文件` }
+  }
   ctx.setPlan(plan || null)
-  return { ok: true, value: { plan: plan || null } }
+  const steps = plan ? plan.split('\n').filter((l) => /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(l)).length : 0
+  return plan
+    ? { ok: true, value: { plan, cleared: false, chars: plan.length, steps, message: `执行计划已更新（${plan.length} 字符${steps ? `，约 ${steps} 个步骤` : ''}），已展示给用户。` } }
+    : { ok: true, value: { plan: null, cleared: true, message: '执行计划已清除。' } }
 }
 
 async function toolUpdateTodo(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
-  const raw = Array.isArray(input?.todos) ? input.todos : null
-  if (!raw) return { ok: false, error: 'todos 参数必填（数组；清空传空数组）' }
-  const allowed = new Set(['pending', 'running', 'done', 'cancelled'])
-  const todos: TodoItem[] = raw.map((t: any, i: number) => ({
-    id: String(t?.id || `todo-${i + 1}`),
-    title: String(t?.title || ''),
-    detail: t?.detail ? String(t.detail) : undefined,
-    status: allowed.has(String(t?.status)) ? String(t.status) as TodoItem['status'] : 'pending',
-  }))
-  ctx.setTodos(todos)
-  return { ok: true, value: { count: todos.length, todos } }
+  const parsed = parseTodoList(input?.todos, ctx.getTodos())
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  ctx.setTodos(parsed.todos)
+  return { ok: true, value: { todos: parsed.todos, counts: parsed.counts, cleared: parsed.cleared, message: parsed.message } }
+}
+
+async function toolExitPlanMode(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
+  const plan = String(input?.plan ?? '').trim()
+  if (!plan) return { ok: false, error: 'plan 参数必填：请提交完整计划（Markdown，从标题开始书写）供用户评审' }
+  if (plan.length > 20000) {
+    return { ok: false, error: `计划过长（${plan.length} 字符，上限 20000）：评审的是步骤与关键决策，细节请写进文件` }
+  }
+  // 评审的计划同时成为"当前计划"（界面与后续步骤都看这一份）
+  ctx.setPlan(plan)
+  const outcome = await ctx.reviewPlan(plan)
+  const verdict = planReviewMessage(outcome)
+  return verdict.ok ? { ok: true, value: { approved: true, plan, message: verdict.text } } : { ok: false, error: verdict.text }
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +764,7 @@ export async function executeRendererTool(
       case 'ask_user': return await toolAskUser(input, ctx)
       case 'update_plan': return await toolUpdatePlan(input, ctx)
       case 'update_todo': return await toolUpdateTodo(input, ctx)
+      case 'exit_plan_mode': return await toolExitPlanMode(input, ctx)
       default: return { ok: false, error: hostOnlyToolError(name) }
     }
   } catch (e: any) {

@@ -16,7 +16,7 @@
  */
 
 import { LAN_AGENT_API_BASE, LAN_GUEST_TOKEN_HEADER, LAN_GUEST_TOKEN_KEY } from '@/shared/lanGuest'
-import type { AgentEvent, AgentOptions, AgentStateView, AgentSummary } from '@/types/agent'
+import type { AgentEvent, AgentOptions, AgentStateView, AgentSummary, AskUserAnswer } from '@/types/agent'
 
 /** 主机侧能力概览（/api/agent/info） */
 export interface LanAgentInfo {
@@ -247,8 +247,8 @@ export const lanAgentTransport = {
     return postJson<{ success: boolean }>('/cancel', { id, cause, keepInbox })
   },
 
-  answer(id: string, askId: string, message: string): Promise<{ success: boolean }> {
-    return postJson<{ success: boolean }>('/answer', { id, askId, message })
+  answer(id: string, askId: string, message?: string, answers?: AskUserAnswer[]): Promise<{ success: boolean }> {
+    return postJson<{ success: boolean }>('/answer', { id, askId, message, answers })
   },
 
   async dispose(id: string): Promise<{ success: boolean }> {

@@ -21,9 +21,12 @@ import { chatsRef } from '@/store/chats'
 // 运行中「引导」：集群成员（发言中的 agent 会话）也接受 steer，其会话 id 记在 swarmState
 import { agentRunStates, running as swarmRunning, swarmRunChatId } from '@/store/swarmState'
 import { toolsFromCapabilities } from '@/lib/agent/capabilities'
-import { renderQuestionMarkdown, escapeHtml } from '@/lib/markdown/render'
+// ask_user 结构化问答：弹窗排队在 store/askUser（渲染由全局 AskUserHost 承担）
+import { requestUserAnswers, questionsOf, dismissAsk } from '@/store/askUser'
+// exit_plan_mode 计划评审：弹窗排队在 store/planReview（渲染由全局 PlanReviewHost 承担）
+import { requestPlanReview, dismissPlanReview, hasPlanReview } from '@/store/planReview'
 // 会话视图 → 消息投影（与集群模式共用同一实现，保证工具调用/思考/来源样式一致）
-import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos } from '@/lib/agent/projection'
+import { projectStepsToUnits, projectKbInfo, projectUsage, projectTodos, projectPlan, projectPlanReview } from '@/lib/agent/projection'
 import { estimateAgentSeedTokens, resolveLimitFor, getTokenScale, rememberTokenScale, tokenScaleKey } from '@/lib/contextUsage'
 import {
   buildSkillAgentOptions,
@@ -33,6 +36,8 @@ import {
   parseSkillIntent,
 } from '@/lib/agent/skill'
 import { assembleAgentSystemPrompt, buildMcpServersContext, ensureAgentSkills } from '@/lib/agent/promptContext'
+// 每个聊天自己的激活工作区（智能体 cwd / 提示词里的当前工作目录都用它；未选过回落到 store.root）
+import { readChatWorkspace } from '@/shared/chatWorkspace'
 // 工具呈现方式：PTC = 补 run_code 白名单 + 系统提示叠加 tools:sdk 段（统一实现在 lib/agent/presentation）
 import { applyToolPresentation } from '@/lib/agent/presentation'
 import { presetPresentation } from '@/lib/agent/ptc'
@@ -85,6 +90,11 @@ export function useAgentRun(deps: AgentRunDeps) {
    * 使 A 推理时切到 B 启动新会话，A 的流式更新仍持续投影到 A 的 assistantMsg。
    */
   const agentChatUnsubs = new Map<string, () => void>()
+  /**
+   * 已恢复到弹窗的「补答评审」（reviewId）。进程重启后聊天存档里仍挂着的那条评审
+   * 只需要被重新摆出来一次：用户裁决后写日志 + 记进 planDecision，就不该再弹。
+   */
+  const restoredReviewIds = new Set<string>()
   /** 组件卸载时统一退订（由 home.vue 调用） */
   const disposeAgentRun = () => {
     for (const unsub of agentChatUnsubs.values()) unsub()
@@ -137,6 +147,9 @@ export function useAgentRun(deps: AgentRunDeps) {
     let sawRunning = false // 是否进入过 running（防止 send 前初始 idle 误判结束）
     const processedKb = new Set<string>() // 已收集来源的 kb_search 调用
     const handledAsks = new Set<string>() // 已弹窗的 ask_user 提问（按 askId 去重）
+    let openAskId: string | null = null // 当前弹窗对应的 askId（agent 收口后据此清理弹窗）
+    const handledReviews = new Set<string>() // 已弹窗的计划评审（按 reviewId 去重）
+    let openReviewId: string | null = null // 当前计划评审弹窗对应的 reviewId
     // 服务端搜索事件队列消费（按返回时间推进 UI，事件到达即处理，天然流式、不丢）：
     let consumedSearchEvents = 0 // 已消费的事件数
     let openReasoningId: string | null = null // 当前 running 的思考段单元 id
@@ -188,28 +201,27 @@ export function useAgentRun(deps: AgentRunDeps) {
             ? '上下文占用较高，已自动压缩较早的对话（原消息仍保留）'
             : 'Context was getting long — earlier turns were summarized (original messages are kept).'))
       }
-      // ask_user 提问：弹窗收集回答（对齐 Swarm 预设行为；按 askId 去重）。
+      // ask_user 提问：结构化弹窗收集回答（全局唯一宿主 AskUserHost；按 askId 去重）。
       // 主进程 ask_user 工具会挂起等待 agent:answer 回复，若不弹窗该工具永远不返回，
       // 会话结束时其 tool/result 缺失 → 日志显示「工具结果缺失」。
-      // 问题内容做 markdown 渲染（dangerouslyUseHTMLString + 自定义样式类）。
+      // 支持单选 / 多选 / 多题 / 自定义回答（见 components/agent/AskUserDialog.vue）。
       if (v.pendingQuestion && !handledAsks.has(v.pendingQuestion.askId)) {
         handledAsks.add(v.pendingQuestion.askId)
         const q = v.pendingQuestion
         const name = assistantMsg.model ? '' : (store.locales == 'zh' ? '智能体' : 'Agent')
-        const questionHtml =
-          `<div class="agent-question-markdown">${name ? `<strong>${escapeHtml(name)}</strong>：` : ''}${renderQuestionMarkdown(q.question)}</div>`
-        ElMessageBox.prompt(questionHtml, store.locales == 'zh' ? '智能体提问' : 'Agent asks', {
-          dangerouslyUseHTMLString: true,
-          customClass: 'agent-question-box',
-          confirmButtonText: store.locales == 'zh' ? '发送' : 'Send',
-          cancelButtonText: store.locales == 'zh' ? '取消' : 'Cancel',
-          inputPlaceholder: store.locales == 'zh' ? '请输入你的回答...' : 'Type your answer...',
+        openAskId = q.askId
+        requestUserAnswers({
+          askId: q.askId,
+          source: name,
+          questions: questionsOf(q),
+          onCancel: () => { void agentBridge.cancel(viewId, 'user') },
         })
-          .then(({ value }) => agentBridge.answer(viewId, q.askId, value || ''))
-          .catch(() => agentBridge.cancel(viewId, 'user'))
+          .then((answers) => agentBridge.answer(viewId, q.askId, '', answers))
+          .catch(() => { /* 已在 onCancel 里收口（中止 turn） */ })
+          .finally(() => { if (openAskId === q.askId) openAskId = null })
       }
       projectTodos(chatRef ?? getCurrentChat(), v)
-      // 服务端联网搜索（deepseek-responses）→ 消费 searchEvents 事件队列（按返回时间推进 UI）：
+      projectPlan(chatRef ?? getCurrentChat(), v)      // 服务端联网搜索（deepseek-responses）→ 消费 searchEvents 事件队列（按返回时间推进 UI）：
       // reasoning 更新思考段，search/open/done 封口思考段并插入搜索/访问/结果单元，严格交错
       // （事件队列独立于 searchStatus：搜索前的推理事件也在此消费）
       if (v.searchEvents && v.searchEvents.length > consumedSearchEvents) {
@@ -353,10 +365,33 @@ export function useAgentRun(deps: AgentRunDeps) {
         assistantMsg.content = v.lastAssistantContent
         assistantMsg.streaming = false
       }
+      // exit_plan_mode 计划评审：弹窗等用户裁决（Approve / 继续完善 / 关闭），
+      // 裁决经同一条 agent:answer 通道回传（message = 裁决，answers[0].custom = 反馈）。
+      projectPlanReview(chatRef ?? getCurrentChat(), v)
+      if (v.pendingPlanReview && !handledReviews.has(v.pendingPlanReview.reviewId)) {
+        handledReviews.add(v.pendingPlanReview.reviewId)
+        const r = v.pendingPlanReview
+        const who = assistantMsg.model ? '' : (store.locales == 'zh' ? '智能体' : 'Agent')
+        openReviewId = r.reviewId
+        requestPlanReview({ reviewId: r.reviewId, source: who, plan: r.plan })
+          .then(({ verdict, feedback }) =>
+            agentBridge.answer(viewId, r.reviewId, verdict, feedback ? [{ id: 'feedback', selected: [], custom: feedback }] : undefined))
+          .catch(() => { /* 评审已失效（turn 被中止 / 别处已裁决） */ })
+          .finally(() => { if (openReviewId === r.reviewId) openReviewId = null })
+      }
+      if (openReviewId && !v.pendingPlanReview) {
+        dismissPlanReview(openReviewId)
+        openReviewId = null
+      }
+      // agent 侧已收口（turn 被中止 / 别处已回答）：丢掉还没人提交的弹窗，避免它一直挂着
+      if (openAskId && !v.pendingQuestion) {
+        dismissAsk(openAskId)
+        openAskId = null
+      }
       // 结束判定：只要“已开始运行 + 进入 idle + 无挂起提问 + 消息仍标记执行中”即视为结束。
       // 不再要求“至少一条真实输出/工具时间线”——若智能体启动即报错/超时且无任何产出，
       // 也必须立即清理转圈并解锁聊天，否则该聊天会因 isExecuting/isGenerating 残留而永久卡死。
-      const finalReplyDone = v.status === 'idle' && sawRunning && !v.pendingQuestion && assistantMsg.isExecuting
+      const finalReplyDone = v.status === 'idle' && sawRunning && !v.pendingQuestion && !v.pendingPlanReview && assistantMsg.isExecuting
       if (finalReplyDone) {
         assistantMsg.isExecuting = false
         assistantMsg.streaming = false
@@ -412,6 +447,56 @@ export function useAgentRun(deps: AgentRunDeps) {
       }
     })
     agentChatUnsubs.set(viewId, unsub)
+  }
+
+  /**
+   * 恢复「进程结束后仍在等待裁决」的计划评审（exit_plan_mode）。
+   *
+   * 主进程的挂起评审随进程消失，但两处事实还在：聊天存档的 `pendingPlanReview`
+   * 与会话日志里缺失裁决的 `plan/review`。于是把弹窗重新摆给用户：
+   *  - 会话还活着 → 常规 agent:answer，工具当场拿到裁决继续跑；
+   *  - 会话已结束 → 主进程把裁决**补记**进日志（resolveAnswer 的兜底分支），
+   *    同时把决策存进聊天存档，由下一次开场作为种子交给新会话
+   *    （AgentOptions.seedPlanDecision，写成一条已记录的 user 消息）。
+   *
+   * 由 reconcileAgentRuns 在启动 / 周期对账时调用，只对**当前聊天**生效：
+   * 别的聊天里的待评审不会突然抢占界面，等用户切过去再问。
+   */
+  const restorePendingPlanReview = async () => {
+    const chat = getCurrentChat() as any
+    const pending = chat?.pendingPlanReview
+    if (!pending?.reviewId || !pending.sessionId) return
+    if (restoredReviewIds.has(pending.reviewId) || hasPlanReview(pending.reviewId)) return
+    restoredReviewIds.add(pending.reviewId)
+    // 先与会话事实对账（日志折叠的待评审才是权威）：已裁决过就把存档标记清掉，不再打扰用户
+    try {
+      const authoritative = await agentBridge.fetchState(pending.sessionId)
+      if (authoritative && !authoritative.pendingPlanReview) {
+        if (chat.pendingPlanReview?.reviewId === pending.reviewId) chat.pendingPlanReview = null
+        saveChats?.()
+        return
+      }
+    } catch {
+      // 会话日志不可用（已清理 / 非桌面端）：退回聊天存档，照常问
+    }
+    const who = store.locales == 'zh' ? '智能体' : 'Agent'
+    requestPlanReview({ reviewId: pending.reviewId, source: who, plan: pending.plan })
+      .then(async ({ verdict, feedback }) => {
+        const answers = feedback ? [{ id: 'feedback', selected: [], custom: feedback }] : undefined
+        const live = agentBridge.get(pending.sessionId)
+        const sessionAlive = !!live && live.status !== 'disposed'
+        try {
+          await agentBridge.answer(pending.sessionId, pending.reviewId, verdict, answers)
+        } catch {
+          // 会话已不在（补记也失败）：不影响把决策留给下一轮
+        }
+        if (!sessionAlive) {
+          chat.planDecision = { verdict, feedback: feedback || undefined, plan: pending.plan }
+        }
+        if (chat.pendingPlanReview?.reviewId === pending.reviewId) chat.pendingPlanReview = null
+        saveChats?.()
+      })
+      .catch(() => { /* 界面被别处收起：保留存档，下次再问 */ })
   }
 
   /**
@@ -479,7 +564,11 @@ export function useAgentRun(deps: AgentRunDeps) {
         )
         if (!hadOutput) {
           const err = view?.lastError
-          msg.content = force && !err
+          // 还挂着计划评审（等用户裁决）时别说成"被中断"：它是在等人，不是在出错
+          const awaitingReview = Boolean((chat as any).pendingPlanReview)
+          msg.content = awaitingReview
+            ? (store.locales == 'zh' ? '（等待计划评审）' : '(Awaiting plan review)')
+            : force && !err
             ? (store.locales == 'zh' ? '（已手动停止）' : '(Stopped by user)')
             : err
               ? (store.locales == 'zh' ? `（执行出错：${err}）` : `(Execution error: ${err})`)
@@ -495,6 +584,8 @@ export function useAgentRun(deps: AgentRunDeps) {
       saveChats()
       clearStepIndicator?.()
     }
+    // 兜底：把「进程结束后仍在等裁决」的计划评审重新摆出来（当前聊天，只弹一次）
+    void restorePendingPlanReview()
   }
 
   /** 手动停止某聊天里所有执行中的智能体会话：
@@ -612,6 +703,8 @@ export function useAgentRun(deps: AgentRunDeps) {
         tokenScale,
         ...(taskImages.length ? { taskImages } : {}),
       })
+      // 上一轮「进程重启后补答」的评审裁决已经写进新会话日志，聊天存档里的待交付标记可以清了
+      if ((chat as any).planDecision) (chat as any).planDecision = undefined
       agentSessionId.value = view.id
       const assistantMsg: ChatMessage = {
         role: 'assistant', content: '', timestamp: Date.now(),
@@ -686,6 +779,7 @@ export function useAgentRun(deps: AgentRunDeps) {
       // 访客选用的智能体（主机「协作 → 权限」开放的预设；默认通用智能体）
       guestAgentId: chat.config.guestAgentId || 'general',
       seedHistory: buildSeedHistory(chat),
+      ...planTodoSeed(chat),
     }
     await startAgentSessionInChat(options, withFileAttachments(content, fileAttachments), images)
   }
@@ -761,13 +855,15 @@ export function useAgentRun(deps: AgentRunDeps) {
           skillBaseDir: skill.path || skill.baseDir,
           // 工具 cwd 恒为用户工作区（技能自带资源用 read_file/list_dir/search_files 的 skill 参数寻址，
           // 不再把 cwd 切到技能库——否则「工作区有哪些文件」会答成技能目录）
-          cwd: store.root || undefined,
+          // 工作区是**每个聊天自己的**（chat.workspace；没选过就跟随全局默认 store.root）
+          cwd: readChatWorkspace(chat, store.root) || undefined,
           provider,
           config,
           llmConfig,
           userInput,
           tools: store.agentTools === null ? undefined : store.agentTools,
           seedHistory: buildSeedHistory(chat),
+          ...planTodoSeed(chat),
           sandboxMode: store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe'),
         }),
         // 循环轮数：唯一数据源 = 「智能体预设 → 通用智能体」的 store.generalAgentMaxSteps
@@ -791,6 +887,8 @@ export function useAgentRun(deps: AgentRunDeps) {
         tools: toolsForMcp,
         enabledSkills: installedSkills,
         mcpContext: mcpCtx,
+        // 每个聊天自己的激活工作区（没选过 → 组装函数回落到 store.root）
+        workspace: readChatWorkspace(chat, ''),
       })
       options = {
         systemPrompt: assembled.systemPrompt,
@@ -803,6 +901,7 @@ export function useAgentRun(deps: AgentRunDeps) {
         // 循环轮数：唯一数据源 = 「智能体预设 → 通用智能体」的 store.generalAgentMaxSteps
         maxSteps: normalizeAgentMaxSteps(store.generalAgentMaxSteps),
         seedHistory: buildSeedHistory(chat),
+        ...planTodoSeed(chat),
         sandboxMode: store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe'),
         disabledSkills: store.disabledSkills || [],
         // MCP 配置（mcp_call 工具读取）：智能体模式自动携带已启用的 MCP 服务
@@ -833,8 +932,8 @@ export function useAgentRun(deps: AgentRunDeps) {
         skillFiles,
         skillFileCount: skill?.fileCount,
         skillBaseDir: skill?.path || skill?.baseDir,
-        // 同上：cwd 恒为用户工作区，技能资源靠 skill 参数
-        cwd: store.root || undefined,
+        // 同上：cwd 恒为用户工作区（每个聊天自己的，未选过则全局默认），技能资源靠 skill 参数
+        cwd: readChatWorkspace(chat, store.root) || undefined,
         provider,
         config,
         llmConfig,
@@ -859,6 +958,20 @@ export function useAgentRun(deps: AgentRunDeps) {
       .slice(0, -1)
       .filter((m): m is ChatMessage & { role: 'user' | 'assistant' } => m.role === 'user' || m.role === 'assistant')
       .map((m) => ({ role: m.role, content: m.content }))
+
+  /**
+   * 计划 / 待办的恢复种子（来自聊天存档这份「跨会话事实源」）。
+   *
+   * 会话内的事实源是会话日志（plan/write、todo/write，最后一条胜出）；
+   * 聊天存档负责把它们带过进程与聊天切换。新会话收到种子后用
+   * setPlan / setTodos 写入自己的日志，于是「回放日志即得当前状态」始终成立。
+   */
+  const planTodoSeed = (chat: Chat) => ({
+    ...(typeof chat.agentPlan === 'string' && chat.agentPlan.trim() ? { seedPlan: chat.agentPlan } : {}),
+    ...(Array.isArray(chat.agentTodos) && chat.agentTodos.length ? { seedTodos: chat.agentTodos } : {}),
+    // 进程结束后用户补答的那条评审裁决：交给新会话（写成一条已记录的 user 消息）
+    ...(chat.planDecision ? { seedPlanDecision: chat.planDecision } : {}),
+  })
 
   /** 已启用的技能（排除技能管理中关闭的；按需注入智能体） */
   const getEnabledSkills = () => {
@@ -914,6 +1027,8 @@ export function useAgentRun(deps: AgentRunDeps) {
       // 指令段内 {{model}}/{{provider}} 用实际生效值（右上角改过则跟随右上角），而非预设存档值
       model: chat.config.model || preset.model,
       provider: chat.config.llmType || preset.llmType || store.AIconfig.llm.type,
+      // 每个聊天自己的激活工作区（没选过 → 组装函数回落到 store.root）
+      workspace: readChatWorkspace(chat, ''),
     })
     const systemPrompt = assembled.systemPrompt
     const tools = assembled.tools
@@ -949,6 +1064,7 @@ export function useAgentRun(deps: AgentRunDeps) {
       maxSteps: resolveAgentMaxSteps(preset.maxSteps, store.generalAgentMaxSteps),
       // 预设默认继承聊天上下文；可在预设配置中关闭
       seedHistory: preset.seedHistory !== false ? buildSeedHistory(chat) : undefined,
+      ...planTodoSeed(chat),
       sandboxMode: store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe'),
       disabledSkills: store.disabledSkills || [],
     }

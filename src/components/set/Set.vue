@@ -1721,6 +1721,8 @@ onBeforeUnmount(() => {
 }
 
 .settings-close {
+  /* 独立窗口的顶栏整条是窗口拖动区，按钮需 no-drag 才能点击（同 .settings-back / .settings-winbtn） */
+  -webkit-app-region: no-drag;
   width: 26px;
   height: 26px;
   border-radius: 5px;

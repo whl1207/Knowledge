@@ -19,7 +19,8 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { BrowserWindow, dialog, ipcMain } from 'electron'
-import * as PDFJS from 'pdfjs-dist'
+// 主进程是 Node 环境：pdfjs 必须用 legacy 构建（现代构建会在导入时警告并要求换 legacy）
+import * as PDFJS from 'pdfjs-dist/legacy/build/pdf.mjs'
 import xlsx from 'xlsx'
 import { IPCError } from '@/types/ipc'
 import { pluginHost } from './plugin-host'

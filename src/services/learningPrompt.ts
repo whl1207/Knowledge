@@ -147,8 +147,284 @@ export function explainPrompt(zh: boolean, question: string, slice: string): str
  * 图解讲解：要求模型输出「一句话核心 + 前置概念 + 分步说明 + 易混点 + 一张 mermaid 图」的 Markdown。
  * mermaid 图约定用 flowchart（方框节点 + 带引号标签），降低解析失败概率。
  */
-export function diagramPrompt(zh: boolean, question: string, slice: string): string {
+/**
+ * 质性判定的提示词（P1-2，对齐 DeepTutor 的 `mastery_assess`「Feynman 式检查」）。
+ *
+ * 用于 `concept` / `design` 型知识点：**不由字符串判分**，而是让学习者用自己的话讲一遍，
+ * 再由模型判断这段讲解是否"正确且完整到足以算掌握"。判定结果是一个 bool + 一句短评。
+ *
+ * 三个刻意的约束（都来自参照实现的取舍）：
+ * - **只输出 JSON**，便于确定性解析；解析失败一律视为"没判"而不是"判错"（调用方负责）；
+ * - **要求给出「缺什么」**：短评不是客套，是要能指导下一步复习；
+ * - **不许因为表述方式不同就判不过**：这是质性门控存在的理由本身
+ *   （"rarely a single canonical right answer to match against"），
+ *   所以明确要求"用自己的话、与切片不同的措辞也算过"。
+ */
+export function qualitativeAssessPrompt(
+  zh: boolean,
+  question: string,
+  answer: string,
+  slice: string,
+): string {
   if (zh) {
+    return `你是掌握式学习的判定老师。学习者用自己的话讲解了一个「概念 / 设计」型知识点，请你判断这段讲解是否**正确且完整到足以算掌握**。
+
+【要讲清的知识点】
+${question}
+
+【学习者用自己的话讲解】
+${answer || '(学习者没有写任何内容)'}
+
+【权威依据（切片原文）】
+${slice || '(无切片原文)'}
+
+判定标准（严格按此，不要加码）：
+1. **只看内容对不对、要点全不全**，不看表达是否流畅、术语是否与切片逐字一致。
+   学习者用自己的措辞、举自己的例子、换个说法讲对了 —— 算过。
+2. 讲解里出现与切片**矛盾**的结论、或把两个概念搞混 —— 不算过。
+3. 只复述了切片原文而没有体现出理解（例如整段照抄）—— 不算过。
+4. 完全空白、或只说"我会了/我不确定"这类没有内容的话 —— 不算过。
+
+只输出一个 JSON 对象，不要任何解释、前后缀或代码块标记：
+{"passed": true 或 false, "feedback": "一到两句话：讲对了什么、缺了什么（缺什么要具体到下一个该补的点）"}
+
+注意：feedback 用中文；passed 必须是布尔值（true/false），不要写成字符串。`
+  }
+  return `You are the mastery gate for a "concept / design" objective. The learner explained it in their own words; decide whether that explanation is correct and complete **enough to count as mastery**.
+
+[Objective]
+${question}
+
+[Learner's explanation, in their own words]
+${answer || '(the learner wrote nothing)'}
+
+[Authoritative source (slice text)]
+${slice || '(no slice text)'}
+
+Rules (apply exactly; do not raise the bar):
+1. Judge only whether the content is right and the key points are covered — not fluency, and not whether the wording matches the source. A correct explanation in the learner's own words, with their own example, PASSES.
+2. A claim that CONTRADICTS the source, or a confusion between two concepts — does NOT pass.
+3. Pure restatement with no sign of understanding (e.g. the source pasted verbatim) — does NOT pass.
+4. Empty, or content-free ("I get it" / "not sure") — does NOT pass.
+
+Output ONLY a JSON object, with no explanation, prefix, suffix or code fence:
+{"passed": true or false, "feedback": "one or two sentences: what was right, and what is missing (be specific about the next thing to fix)"}
+
+feedback must be in English; passed must be a boolean, not a string.`
+}
+
+/**
+ * 容错解析质性判定结果。**返回 null 表示"没判出来"**（解析失败 / 模型没给结论），
+ * 调用方必须把它当作"没有裁决"处理 —— 绝不当作"判不过"。
+ */
+export function parseQualitativeVerdict(raw: unknown): { passed: boolean; feedback: string } | null {
+  const text = String(raw ?? '').trim()
+  if (!text) return null
+  // 容错：模型可能包一层 ```json 代码块，或前后带一句解释 —— 抠出第一个 JSON 对象
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  let obj: any
+  try {
+    obj = JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return null
+  }
+  if (!obj || typeof obj !== 'object') return null
+  const raw2 = (obj as any).passed
+  let passed: boolean
+  if (typeof raw2 === 'boolean') passed = raw2
+  else if (typeof raw2 === 'string') {
+    const v = raw2.trim().toLowerCase()
+    if (v === 'true' || v === 'yes' || v === '通过') passed = true
+    else if (v === 'false' || v === 'no' || v === '不通过') passed = false
+    else return null
+  } else return null
+  const feedback = String((obj as any).feedback ?? (obj as any).comment ?? (obj as any).reason ?? '').trim()
+  return { passed, feedback }
+}
+
+/**
+ * 问题生成提示词（P1-3）：**生成选择题选项**开关打开时用它替换默认的纯问答提示词。
+ *
+ * 为什么整份替换而不是加一句"顺便给选项"：输出格式必须**唯一**。
+ * 如果同一批输出里既有带选项的题又有纯问答题，解析器在遇到 `答案：` 时无从判断
+ * 它属于上一题的选项还是新一条问答 —— 格式歧义迟早会变成数据错乱。
+ * 所以由使用者按知识库选一种格式，提示词与解析器各自只有一个分支。
+ *
+ * 输出契约（解析器 `parseQuestionAnswerPairs` 按此实现，改动必须同步）：
+ * ```
+ * 问题：<题干>
+ * 选项A：<正文>
+ * 选项B：<正文>
+ * 选项C：<正文>
+ * 选项D：<正文>
+ * 答案：B
+ * ---
+ * ```
+ * `答案：` 里必须写**选项字母**（可多选，逗号分隔），这样判分能按标签集合比较，
+ * 而不是比"这段文字像不像"。
+ */
+export function choiceQuestionPrompt(zh: boolean): string {
+  if (zh) {
+    return `请阅读下面的资料，针对资料内容提出若干**单项选择题**。严格遵循以下格式，每题一个区块，区块之间用一行 --- 分隔：
+
+问题：<题干，只写问题本身，不要把选项写进题干>
+选项A：<选项正文>
+选项B：<选项正文>
+选项C：<选项正文>
+选项D：<选项正文>
+答案：<正确选项的字母，只能是 A / B / C / D 中的一个>
+---
+问题：<下一题题干>
+选项A：…
+答案：…
+---
+
+要求：
+1) 每题**恰好 4 个选项**，字母固定为 A、B、C、D，不要增删、不要用别的字母；
+2) 干扰项要**似是而非**（与正确项同层级、同类型，常见误解），不要一眼就能排除的凑数项；
+3) 题目必须【仅依据资料内容】即可确定唯一正确答案；禁止"计算…/求…的值"这类需要公式计算或资料外数据的题；
+4) 题干直接提问、干净简洁，不要"根据提供的资料"这类引导前缀，不要把选项内容写进题干；
+5) 答案行只写字母（如 答案：B），**不要**写选项正文、不要写解释；
+6) 不要编号、不要标题、不要分组、不要任何解释或前后缀；资料无法支撑题目时就不要出这道题。
+
+资料如下：`
+  }
+  return `Read the following information and write several **single-choice questions** about it. Follow this format exactly, one block per question, with a line containing only --- between blocks:
+
+Question: <stem only, never put the options in the stem>
+OptionA: <option text>
+OptionB: <option text>
+OptionC: <option text>
+OptionD: <option text>
+Answer: <the letter of the correct option — exactly one of A / B / C / D>
+---
+Question: <next stem>
+OptionA: ...
+Answer: ...
+---
+
+Rules:
+1) Exactly **4 options** per question, labelled A, B, C, D — never add, remove or relabel;
+2) Distractors must be **plausible** (same level and kind as the key, reflecting common misconceptions), not obvious filler;
+3) The question must be answerable SOLELY from the information, with exactly one correct option. FORBIDDEN: calculation questions ("calculate...", "what is the value of...") or anything needing outside data;
+4) Ask directly and cleanly; do not prefix with "According to the text" and do not repeat the options in the stem;
+5) The Answer line contains ONLY the letter (e.g. Answer: B) — no option text, no explanation;
+6) No numbering, headings, grouping labels, explanations or any prefix/suffix. Skip a question the material cannot support.
+
+The information is as follows:`
+}
+
+/**
+ * AI 复核判分提示词（P1-4）：学习者主动点「请 AI 判分」时才调用。
+ *
+ * 为什么要有它，而不是让字符串判分更聪明：字符串判分**只能证明"像是答对了"**，
+ * 证明不了"答错了"——措辞、同义词、语序都会让相似度掉下来。所以默认口径是
+ * "拿不准就不判、交给自评"（见 lib/learning/learningGrade.ts 的 `allowTextWrong`）。
+ * 而学习者想知道"我这句到底算不算对"时，唯一有依据的回答方式就是让模型看语义。
+ *
+ * 三条刻意的约束：
+ * - **只判语义是否一致**，不要求措辞与参考答案相同（这是它与字符串判分的分工）；
+ * - **返回 null 的诚实出口**：模型说不清就让它给 `"correct": null`，前端退回自评，
+ *   而不是逼它二选一（逼出来的裁决就是假裁决）；
+ * - 参考答案只是**参考**：模型要判"意思是否站得住"，不是"和标准答案的字面距离"。
+ */
+export function aiGradePrompt(
+  zh: boolean,
+  question: string,
+  expected: string,
+  answer: string,
+  slice: string,
+): string {
+  if (zh) {
+    return `你是判分老师。请判断学习者的作答在**语义上**是否与参考答案一致。只输出 JSON。
+
+【题目】
+${question}
+
+【参考答案】
+${expected || '(未提供参考答案)'}
+
+【学习者的作答】
+${answer || '(没有作答)'}
+
+【权威依据（切片原文）】
+${slice || '(无切片原文)'}
+
+判定要求：
+1. **只看意思是否一致**，不看措辞、语序、详略是否与参考答案相同。
+   学习者用自己的说法把同一个意思讲对了 —— 算对。
+2. 与参考答案**矛盾**、或把两个概念搞混 —— 算错。
+3. 作答为空、或只是"我不会/不确定"这类没有内容的回答 —— 算错。
+4. **说不清就别说**：如果这段作答信息不足、或答案本身有歧义，让 correct 为 null
+   （前端会退回让学习者自评）。**不要为了给出结论而硬判。**
+
+只输出一个 JSON 对象，不要解释、前后缀或代码块标记：
+{"correct": true 或 false 或 null, "reason": "一到两句：为什么算对/算错（指出差在哪）"}
+reason 用中文；correct 必须是布尔值或 null，不要写成字符串。`
+  }
+  return `You are grading a learner's answer. Decide whether it is **semantically** equivalent to the reference. Output JSON only.
+
+[Question]
+${question}
+
+[Reference answer]
+${expected || '(no reference answer provided)'}
+
+[Learner's answer]
+${answer || '(no answer given)'}
+
+[Authoritative source (slice text)]
+${slice || '(no slice text)'}
+
+Rules:
+1. Judge only whether the **meaning** matches — not whether the wording, word order or level of detail matches the reference. A correct statement in the learner's own words PASSES.
+2. A claim that CONTRADICTS the reference, or a confusion between two concepts, FAILS.
+3. An empty answer, or content-free text ("I don't know" / "not sure"), FAILS.
+4. **If you cannot tell, say so**: when the answer is too thin or the reference itself is ambiguous, set correct to null (the UI then falls back to self-assessment). **Never force a verdict just to produce one.**
+
+Output ONLY a JSON object, with no explanation, prefix, suffix or code fence:
+{"correct": true or false or null, "reason": "one or two sentences: why it passes or fails, and where it differs"}
+
+reason must be in English; correct must be a boolean or null, not a string.`
+}
+
+/**
+ * 容错解析 AI 复核结果。
+ *
+ * **返回 `null` = "没判出来或模型主动不判"**，调用方退回四档自评。
+ * 注意这里与 `parseQualitativeVerdict` 的关键差别：本函数允许模型显式返回
+ * `"correct": null`（说不清），这**同样**落回 `null`，两条路都被当成"没有裁决"。
+ */
+export function parseAiGrade(raw: unknown): { correct: boolean; reason: string } | null {
+  const text = String(raw ?? '').trim()
+  if (!text) return null
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  let obj: any
+  try {
+    obj = JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return null
+  }
+  if (!obj || typeof obj !== 'object') return null
+  const rawVal = (obj as any).correct ?? (obj as any).isCorrect ?? (obj as any).is_correct
+  let correct: boolean
+  if (typeof rawVal === 'boolean') correct = rawVal
+  else if (typeof rawVal === 'string') {
+    const v = rawVal.trim().toLowerCase()
+    if (v === 'true' || v === 'yes' || v === '对' || v === '正确') correct = true
+    else if (v === 'false' || v === 'no' || v === '错' || v === '错误') correct = false
+    // 字符串 "null" / 其它 → 视为"没判"
+    else return null
+  } else return null
+  const reason = String((obj as any).reason ?? (obj as any).feedback ?? (obj as any).comment ?? '').trim()
+  return { correct, reason }
+}
+
+export function diagramPrompt(zh: boolean, question: string, slice: string): string {  if (zh) {
     return `你是知识讲解老师。请把下面这道题涉及的知识点讲成「图文结合」的复习材料，只输出 Markdown，不要任何前后缀解释。
 
 题目：${question}

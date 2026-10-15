@@ -3,6 +3,8 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
 import { getPlatform, hasCapability } from '@/platform'
+// 全局语音输入的运行状态（热键注册形式 / 引擎自检 / 最近一次触发）——用于本页的排查行
+import { voiceState, retryVoiceShortcut } from '@/services/asr/globalVoice'
 
 const store = usestore()
 
@@ -217,10 +219,7 @@ function captureShortcut(event: KeyboardEvent) {
   if (parts.length > 0) {
     store.AIconfig.asr.shortcut = parts.join('+')
     store.saveConfig()
-    // 通知主进程更新快捷键
-    if (hasCapability('shell.globalShortcut')) {
-      getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut).catch(() => {})
-    }
+    // 注册由全局语音输入按焦点负责（见文件末尾说明），这里不直接调宿主
   }
 }
 
@@ -228,10 +227,39 @@ function captureShortcut(event: KeyboardEvent) {
 function resetShortcut() {
   store.AIconfig.asr.shortcut = 'Ctrl+Shift+Space'
   store.saveConfig()
-  if (hasCapability('shell.globalShortcut')) {
-    getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut).catch(() => {})
-  }
+  // 同上：注册由全局语音输入按焦点负责
 }
+
+/** 悬浮麦克风开关（关掉后可用同一处重新打开） */
+function setFloatButton(on: boolean) {
+  store.AIconfig.asr.floatButton = on
+  store.saveConfig()
+}
+
+/**
+ * 状态行里的快捷键部分：把「系统级快捷键是否注册成功 / 实际生效的是哪一组」说清楚。
+ * 「按了没反应」时这一行就是判断依据：没有「上次触发」= 按键根本没进到软件。
+ */
+const shortcutStatusText = computed(() => {
+  const zh = store.locales === 'zh'
+  const configured = voiceState.shortcutDisplay || (zh ? '未设置' : 'none')
+  if (!hasCapability('shell.globalShortcut')) {
+    return zh ? `快捷键 ${configured}（本环境无系统级快捷键）` : `shortcut ${configured} (no global shortcut here)`
+  }
+  if (voiceState.hostShortcut === 'ok') {
+    const active = voiceState.hostShortcutActive || configured
+    const fellBack = voiceState.hostShortcutActive && voiceState.hostShortcutActive !== voiceState.shortcutDisplay
+    return fellBack
+      ? (zh ? `快捷键 ${configured} 注册失败，已临时改用 ${active}` : `${configured} failed; using ${active} instead`)
+      : (zh ? `快捷键 ${active} 已注册` : `shortcut ${active} registered`)
+  }
+  if (voiceState.hostShortcut === 'failed') {
+    return zh
+      ? `快捷键 ${configured} 注册失败${voiceState.hostShortcutError ? '：' + voiceState.hostShortcutError : ''}`
+      : `${configured} failed to register${voiceState.hostShortcutError ? ': ' + voiceState.hostShortcutError : ''}`
+  }
+  return zh ? `快捷键 ${configured}（注册结果未返回）` : `shortcut ${configured} (no result yet)`
+})
 
 // 选择 ONNX 模型文件
 async function selectOnnxModel() {
@@ -269,12 +297,10 @@ async function selectOnnxModel() {
   }
 }
 
-// 组件挂载时注册 ASR 快捷键（后台录音快捷键由 home.vue 全局注册，这里作为设置页打开时的兜底）
-onMounted(() => {
-  if (window.ipcRenderer && store.AIconfig.asr.shortcut) {
-    getPlatform().shell.registerShortcut(store.AIconfig.asr.shortcut).catch(() => {})
-  }
-})
+// 快捷键的注册 / 注销统一由全局语音输入（services/asr/globalVoice.ts）按窗口焦点负责：
+// 窗口在前台时故意不注册（按键进窗口，能识别「按住 / 松开」），切到后台才注册系统级快捷键。
+// 这里不再自己注册，否则会把前台那条更准的路径顶掉（Windows 上系统级快捷键按住会不停重复触发）。
+onMounted(() => {})
 
 onBeforeUnmount(() => {
   // 销毁测试管理器，避免麦克风/会话泄漏
@@ -331,6 +357,40 @@ onBeforeUnmount(() => {
             :title="store.locales=='zh'?'重置快捷键' : 'Reset shortcut'">
           <i class="fa fa-undo"></i>
         </div>
+      </div>
+    </div>
+
+    <!-- 悬浮麦克风：单独一行，样式与下方「选项」一致 -->
+    <div class="form-group">
+      <label>{{ store.locales=='zh'?'悬浮麦克风' : 'Floating Mic' }}</label>
+      <div class="checkbox-group">
+        <label class="checkbox-label" style="width: 100%">
+          <input type="checkbox" :checked="store.AIconfig.asr.floatButton !== false"
+                 @change="setFloatButton(($event.target as HTMLInputElement).checked)" />
+          {{ store.locales=='zh'?'显示悬浮麦克风（右下角小圆钮，可拖动，点一下就能语音输入）' : 'Show the floating mic (bottom-right button, draggable; click to dictate)' }}
+        </label>
+      </div>
+    </div>
+
+    <!-- 状态：配置自检 + 系统级快捷键注册情况 + 最近一次触发（按了没反应时看这一行） -->
+    <div class="form-group">
+      <label>{{ store.locales=='zh'?'状态' : 'Status' }}</label>
+      <div class="asr-diag">
+        {{
+          (voiceState.ready
+            ? (store.locales=='zh'?'引擎配置：已就绪' : 'Engine config: ready')
+            : (store.locales=='zh'?'引擎配置：还缺必填项（见下方对应引擎的参数）' : 'Engine config: missing required fields'))
+          + ' · '
+          + shortcutStatusText
+          + ' · '
+          + (voiceState.lastTrigger
+            ? (store.locales=='zh'?'上次触发：' : 'last trigger: ') + voiceState.lastTrigger
+            : (store.locales=='zh'?'上次触发：无（按下快捷键没有到达软件）' : 'last trigger: none (the shortcut never reached the app)'))
+        }}
+      </div>
+      <div class="button" style="width:auto;padding:0 8px;margin-left:6px;" @click="retryVoiceShortcut()"
+           :title="store.locales=='zh'?'重新注册系统级快捷键' : 'Re-register the global shortcut'">
+        <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'重试注册' : 'Retry' }}
       </div>
     </div>
 
@@ -595,7 +655,7 @@ onBeforeUnmount(() => {
     </div>
     <!-- 使用方法 -->
     <div class="config-description usage-guide">
-      {{ store.locales=='zh'?'使用方法：① 选择识别引擎并配置下方相应参数；② 设置快捷按键；③ 按住快捷键说话即可识别（应用在后台也可用）；④ 点击上方「按住说话测试」可验证效果。' : 'How to use: 1) Choose an ASR engine and configure the options below; 2) Set the shortcut key; 3) Press and hold the shortcut to talk (works even when the app is in background); 4) Click the "Hold to Test" button above to verify.' }}
+      {{ store.locales=='zh'?'使用方法：① 选择识别引擎并配置下方相应参数；② 设置快捷按键；③ 把光标点进任意能输入文字的地方（聊天输入框 / 搜索框 / 设置项 / 代码编辑器…），按住快捷键说话、松开即识别（短按 = 切换持续收音；应用在后台时按一次开始、再按一次结束），识别结果会直接写进那个输入框（设置窗口里同样可用），屏幕下方会出现统一的「正在语音输入」提示，显示落点与实时文字（Esc 放弃，没有可写入的输入框时会自动复制到剪贴板）；④ 点击上方「按住说话测试」可验证效果。' : 'How to use: 1) Choose an ASR engine and configure the options below; 2) Set the shortcut key; 3) Put the caret in any text field (chat composer / search box / a settings field / the code editor…), hold the shortcut and speak, then release to transcribe (a short tap toggles continuous listening; in the background press once to start and again to finish) — the result is typed straight into that field (the settings window works too), with one shared “Listening…” indicator at the bottom showing the target and live text (Esc cancels; when there is nothing to type into, the result is copied to the clipboard); 4) Click the "Hold to Test" button above to verify.' }}
     </div>
   </div>
 </template>
@@ -647,6 +707,16 @@ onBeforeUnmount(() => {
 
 .form-group:last-child {
   margin-bottom: 0;
+}
+
+/* 状态行（引擎自检 / 快捷键注册 / 最近一次触发） */
+.asr-diag {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  opacity: 0.75;
+  word-break: break-word;
 }
 
 .form-group label {

@@ -8,7 +8,7 @@
  * | 搜索源 | 渲染层可用性 |
  * | --- | --- |
  * | SearXNG / 自定义 JSON 源 | 可用（自建服务，同源或已开跨域时最稳） |
- * | Tavily / Brave / 博查 / 智谱 | 可用（HTTP API，需服务端允许跨域；被拦时给出提示） |
+ * | Tavily / Brave / 博查 / 智谱 / Firecrawl | 可用（HTTP API，需服务端允许跨域；被拦时给出提示） |
  * | Bing / 百度 / DuckDuckGo | 结果页不允许跨域读取，渲染层会失败并提示改用 API 源或连桌面主机 |
  *
  * 语义与主进程一致：`fallback`（按顺序逐个回退）/ `merge`（并行聚合去重）、结果条数上限、
@@ -22,6 +22,11 @@ import {
   type WebSearchItem,
   type WebSearchRunResult,
 } from '@/shared/webSearch'
+import {
+  buildFirecrawlSearchRequest,
+  firecrawlErrorMessage,
+  parseFirecrawlSearchResponse,
+} from '@/shared/webSearchFirecrawl'
 
 /** ProviderId 是联合类型，这里按字符串处理以避免与内置清单耦合 */
 type ProviderId = string
@@ -253,6 +258,33 @@ async function searchTavily(query: string, cfg: WebSearchConfig): Promise<Search
   }
 }
 
+/**
+ * Firecrawl（免 Key 可用）：POST `<host>/v2/search`。
+ *
+ * 请求组装 / 响应解析 / 错误翻译与主进程**共用同一份纯函数**
+ * （`@/shared/webSearchFirecrawl`），这里只负责发请求。接口已开跨域
+ * （`Access-Control-Allow-Origin: *`，允许 `content-type, authorization`），
+ * 因此手机 / 网页端同样可用——与 HTML 抓取类搜索源不同，不需要桌面端。
+ */
+async function searchFirecrawl(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
+  const apiKey = String(cfg.firecrawl.apiKey || '').trim()
+  const req = buildFirecrawlSearchRequest({
+    query,
+    maxResults: cfg.maxResults,
+    apiHost: cfg.firecrawl.apiHost,
+    apiKey,
+  })
+  let data: any
+  try {
+    data = await fetchJson(req.url, { method: req.method, headers: req.headers, body: req.body })
+    const items = parseFirecrawlSearchResponse(data, cfg.maxResults)
+    if (!items.length) throw new Error('Firecrawl 未返回可用结果')
+    return { items, via: 'api' }
+  } catch (e: any) {
+    throw new Error(firecrawlErrorMessage(e, !!apiKey))
+  }
+}
+
 async function searchBrave(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
   const host = normalizeCustomHost(cfg.brave.apiHost || 'https://api.search.brave.com')
   const apiKey = String(cfg.brave.apiKey || '').trim()
@@ -283,6 +315,7 @@ async function runSingleSearch(provider: ProviderId, query: string, cfg: WebSear
     case 'zhipu': return await searchZhipu(query, cfg)
     case 'tavily': return await searchTavily(query, cfg)
     case 'brave': return await searchBrave(query, cfg)
+    case 'firecrawl': return await searchFirecrawl(query, cfg)
     // DeepSeek 官方搜索走 api.deepseek.com 的 Anthropic 兼容端点，该端点不给浏览器放 CORS；
     // 且它的鉴权与请求形状与其余源都不同 → 明确报"需要桌面端"，而不是抛一个难懂的跨域错误
     case 'deepseek':

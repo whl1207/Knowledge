@@ -38,6 +38,13 @@ export function getPlatform(): Platform {
     } else {
       const info = hostRuntime()
       cached = info ? createHostPlatform(info) : browserPlatform
+      // 在 Electron 窗口里却拿不到 ipcRenderer：几乎总是 preload 没加载（产物缺失 / 路径不对），
+      // 此时整个界面会静默退化成「网页模式」（没有窗口壳与桌面能力）。这里明确报出来，
+      // 否则只能看到「软件变成了网页版」这种没有线索的现象。
+      if (!info && typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent || '')) {
+        console.error('[platform] 运行在 Electron 窗口里，但 window.ipcRenderer 不存在 —— preload 没有加载成功，'
+          + '界面将退化为网页模式。请检查 dist-electron/preload/index.mjs（或 .cjs）是否存在，必要时重新 npm run build:web。')
+      }
     }
   }
   return cached

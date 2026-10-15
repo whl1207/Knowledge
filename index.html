@@ -6,7 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob: data:;" />
     <title>AI-KM</title>
-    <link rel="stylesheet" type="text/css" href="/font-awesome/css/font-awesome.min.css">
+    <!--
+      图标字体：Font Awesome 5.15.4（见 public/font-awesome/README.md）
+      v4-shims 这一行**不能删**：全应用有 91 个 FA4 特有的名字（fa-refresh / fa-file-text-o /
+      fa-circle-o 等）合计 849 处，在 FA5 原生表里不存在，只靠别名表撑着；漏了会静默变成空白。
+      顺序也固定：all → v4-shims（别名要覆盖在基础样式之后）→ 动画库。
+    -->
+    <link rel="stylesheet" type="text/css" href="/font-awesome/css/all.min.css">
+    <link rel="stylesheet" type="text/css" href="/font-awesome/css/v4-shims.min.css">
     <link rel="stylesheet" href="/font-awesome/css/font-awesome-animation.min.css">
     <link rel="stylesheet" href="/iconfont/iconfont.css">
   </head>

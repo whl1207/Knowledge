@@ -39,6 +39,7 @@ import { PluginEventBus, PluginServiceRegistry, createPluginContext } from '@/sh
 import { checkApiVersion, isManifestFailure, parseManifest, PLUGIN_MANIFEST_FILE, PLUGIN_MANIFEST_KEY } from '@/shared/pluginManifest'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { shellService } from './shell-service'
+import { isVerbose, logInfo, logWarn } from './log'
 import { isShellAllowed, resolvePolicy } from './sandbox-policy'
 import { createPluginToolRegistrar } from './plugin-tools'
 import { clearGrants } from './plugin-grants'
@@ -221,9 +222,8 @@ class PluginHost {
       // 4) 装载新目录的插件 + 重建 watcher
       await this.dispatchPending()
       if (this.initialized) this.startWatcher()
-      console.log(
-        `[plugin-host] 插件目录已切换：${this.pluginsRoot()}（已加载 ${this.list().filter((s) => s.status === 'active').length}/${this.records.size}）`,
-      )
+      logInfo('plugin-host', `plugins root switched to ${this.pluginsRoot()}`
+        + ` (active ${this.list().filter((s) => s.status === 'active').length}/${this.records.size})`)
       return this.pluginsRoot()
     })
   }
@@ -261,7 +261,7 @@ class PluginHost {
       const legacy = path.join(this.pluginsRoot(), STATE_FILE)
       if (!fs.existsSync(this.stateFilePath()) && fs.existsSync(legacy)) {
         fs.copyFileSync(legacy, this.stateFilePath())
-        console.log(`[plugin-host] 已迁移插件状态文件：${legacy} → ${this.stateFilePath()}`)
+        logInfo('plugin-host', `migrated plugin state file: ${legacy} -> ${this.stateFilePath()}`)
       }
     } catch (e) {
       console.warn('[plugin-host] 迁移插件状态文件失败（忽略）:', e)
@@ -402,7 +402,8 @@ class PluginHost {
     this.initialized = true
 
     const active = this.list().filter((s) => s.status === 'active').length
-    console.log(`[plugin-host] 插件根目录: ${this.pluginsRoot()}（已加载 ${active}/${this.records.size}）`)  }
+    logInfo('plugin-host', `plugins root: ${this.pluginsRoot()} (active ${active}/${this.records.size})`)
+  }
 
   /** 全量卸载（应用退出时调用） */
   async dispose(): Promise<void> {
@@ -1369,9 +1370,10 @@ class PluginHost {
     rec.logs.push(line)
     if (rec.logs.length > LOG_LIMIT) rec.logs.splice(0, rec.logs.length - LOG_LIMIT)
     const prefix = `[plugin:${rec.id}]`
+    // 控制台只留 warn / error（INFO 级插件日志在「插件管理」面板里看；AIKM_VERBOSE=1 可放开）
     if (level === 'error') console.error(prefix, message)
     else if (level === 'warn') console.warn(prefix, message)
-    else console.log(prefix, message)
+    else if (isVerbose()) console.log(prefix, message)
     this.emit({ type: 'plugin/log', id: rec.id, line })
   }
 
@@ -1449,9 +1451,9 @@ class PluginHost {
       this.dirtyRoot = false
       try {
         await this.rescan()
-        console.log('[plugin-host] 检测到插件目录变化，已重新扫描')
+        logInfo('plugin-host', 'plugin root changed, rescanned')
       } catch (e) {
-        console.warn('[plugin-host] 自动重新扫描失败:', e)
+        logWarn('plugin-host', 'auto rescan failed', e)
       }
     }
     const ids = Array.from(this.dirty)
@@ -1468,15 +1470,15 @@ class PluginHost {
         }
         this.records.delete(rec.id)
         this.emit({ type: 'plugin/changed', id: rec.id, snapshot: null })
-        console.log(`[plugin-host] 插件目录已消失，已移除插件 ${rec.id}`)
+        logInfo('plugin-host', `plugin folder gone, removed ${rec.id}`)
         continue
       }
       if (rec.status === 'disabled') continue
       try {
         await this.reload(rec.id)
-        console.log(`[plugin-host] 检测到改动，已重载插件 ${rec.id}`)
+        logInfo('plugin-host', `change detected, reloaded ${rec.id}`)
       } catch (e) {
-        console.warn(`[plugin-host] 热重载失败 ${rec.id}:`, e)
+        logWarn('plugin-host', `hot reload failed ${rec.id}`, e)
       }
     }
   }

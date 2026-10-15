@@ -102,6 +102,10 @@ const providerSub = (id: string) => {
   if (meta.needsKey) {
     return String(store.webSearch?.[id]?.apiKey || '').trim() ? t('已配置 Key', 'Key set') : t('未配置 Key', 'No key')
   }
+  // Firecrawl 免 Key 也能用，但填了 Key 说明换成了自己的额度，值得在列表上标出来
+  if (id === 'firecrawl') {
+    return String(store.webSearch?.firecrawl?.apiKey || '').trim() ? t('已配置 Key', 'Key set') : t('免 Key', 'Keyless')
+  }
   return t('免 Key', 'Keyless')
 }
 
@@ -566,6 +570,33 @@ const showKey = ref(false)
             <div class="ws-hint">
               {{ t('需在实例的 settings.yml 中开启 JSON 输出（search.formats 含 json），否则接口会返回 403。',
                    'Enable JSON output in settings.yml (search.formats must include json), otherwise the API returns 403.') }}
+            </div>
+          </template>
+
+          <!-- Firecrawl：免 Key 即可用；Key 可选（填了换用自己的额度），接口地址可自定义（代理/网关） -->
+          <template v-else-if="currentMeta.id === 'firecrawl'">
+            <div class="form-group">
+              <label>API Key</label>
+              <div class="input-with-button">
+                <input
+                  v-model="store.webSearch.firecrawl.apiKey"
+                  :type="showKey ? 'text' : 'password'"
+                  :placeholder="t('可留空：留空走官方免 Key 免费额度', 'Optional — leave empty to use the keyless free tier')"
+                  @change="persist"
+                />
+                <div class="button" style="width:auto;padding:0 8px;" @click="showKey = !showKey"
+                     :title="showKey ? t('隐藏', 'Hide') : t('显示', 'Show')">
+                  <i class="fa" :class="showKey ? 'fa-eye-slash' : 'fa-eye'"></i>
+                </div>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>{{ t('接口地址', 'API host') }}</label>
+              <input v-model="store.webSearch.firecrawl.apiHost" @change="persist" />
+            </div>
+            <div class="ws-hint">
+              {{ t('留空 Key 就能用：走 Firecrawl 官方免 Key 免费额度（按 IP 计量，约 1000 credits/月）；额度用尽会提示，稍后自动恢复。到 firecrawl.dev 申请免费 Key 填进来即可换用个人额度，避免与他人共享 IP 被限流。',
+                   'Works with an empty key: the official keyless free tier (metered per IP, ~1,000 credits/month). When the quota runs out you get a clear notice and it recovers later. Add your own free key from firecrawl.dev to use your own quota and avoid shared-IP limits.') }}
             </div>
           </template>
 

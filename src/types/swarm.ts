@@ -31,7 +31,7 @@ export interface SwarmCapabilities {
   updateTodo: boolean         // 任务清单 → update_todo
   accessKnowledgeBase: boolean // 访问知识库 → kb_search
   runShell: boolean           // Shell 命令 → shell
-  runSubagent: boolean        // 子智能体 → run_subagent
+  runSubagent: boolean        // 子智能体 → run_subagent（含后台任务的 job_output / job_kill）
   skills: boolean             // 技能库 → skill（按需加载已安装技能）
   /** MCP 控制 → mcp_call */
   mcpAccess: boolean

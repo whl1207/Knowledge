@@ -13,22 +13,18 @@ import { join, dirname, basename, relative, isAbsolute } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as fs from 'node:fs'
 import { onGlobalZoomApplied } from './window-zoom'
+// 开发模式判定 / 产物路径 / preload 解析（唯一来源：与 index.ts 共用，打包版不会被 dev 地址带偏）
+import { DEV_SERVER_URL, DIST_DIR, DIST_ELECTRON_DIR, INDEX_HTML, PUBLIC_DIR, resolvePreload } from './run-mode'
 
-// ---------------- 打包路径（与 electron/main/index.ts 保持同构） ----------------
+// ---------------- 打包路径（与 electron/main/index.ts 同源：统一走 run-mode.ts） ----------------
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
-const distElectron = join(__dirname, '..')
-const distDir = join(distElectron, '../dist')
-const publicDir = process.env.VITE_DEV_SERVER_URL ? join(distElectron, '../public') : distDir
-const IS_DEV = !!process.env.VITE_DEV_SERVER_URL
-const url: string = process.env.VITE_DEV_SERVER_URL || ''
-const indexHtml = join(distDir, 'index.html')
+const distElectron = DIST_ELECTRON_DIR
+const distDir = DIST_DIR
+const publicDir = PUBLIC_DIR
+const url: string = DEV_SERVER_URL
+const indexHtml = INDEX_HTML
 const icon = join(publicDir, 'favicon.ico')
-
-// preload 构建产物可能是 index.mjs（ESM）或 index.cjs（CJS），按实际存在选择
-const preloadMjs = join(__dirname, '../preload/index.mjs')
-const preloadCjs = join(__dirname, '../preload/index.cjs')
-const preload = fs.existsSync(preloadMjs) ? preloadMjs : (fs.existsSync(preloadCjs) ? preloadCjs : undefined)
 
 // Vue 壳顶部两栏高度：标签栏 + 地址/导航栏；WebContentsView 从该高度之下布局
 export const TAB_BAR_H = 36
@@ -170,9 +166,46 @@ class BrowserAgentService {
   /** favicon 缓存：host -> dataURL（内存缓存；首拉后写入 userData/browser-favicons 落盘，跨会话复用） */
   private faviconCache = new Map<string, string>()
 
+  /**
+   * 停靠宿主（主页右侧栏「浏览器」标签）：网页视图挂到**主窗口**，位置由渲染层上报的矩形决定
+   * （与 office-host 同一套做法：渲染层报 CSS px 矩形，主进程按窗口缩放换算成 DIP；
+   *  原生视图永远画在 DOM 之上，所以渲染层还要在浮层打开时把它藏起来）。
+   * 未停靠时为 null —— 此时所有行为与改造前完全一致（独立窗口 + 按自身窗口尺寸排版）。
+   */
+  private dockHost: {
+    win: BrowserWindow
+    rect: { x: number; y: number; width: number; height: number } | null
+    visible: boolean
+  } | null = null
+
+  /** 承载网页视图的宿主窗口：停靠时是主窗口，否则是浏览器独立窗口 */
+  private get hostWindow(): BrowserWindow | null {
+    const docked = this.dockHost?.win
+    if (docked && !docked.isDestroyed()) return docked
+    return this.win
+  }
+
+  /** 壳 UI（标签栏 / 地址栏 / 侧栏）所在的 webContents：停靠与独立窗口可能同时存在，状态两边都推 */
+  private shellTargets(): WebContents[] {
+    const out: WebContents[] = []
+    const push = (wc?: WebContents | null) => {
+      if (wc && !wc.isDestroyed() && !out.includes(wc)) out.push(wc)
+    }
+    push((this.win as any)?.webContents)
+    push((this.dockHost?.win as any)?.webContents)
+    return out
+  }
+
   // ===================== 窗口 =====================
   /** 确保壳窗口 + 标签页存在（惰性创建；已存在则聚焦）。homeUrl 仅手动打开时传入（默认首页，仅作用于新建窗口的首个标签） */
   ensureWindow(homeUrl = ''): BrowserWindow {
+    // 已停靠在主页右侧栏：不再开独立窗口（同一个标签集合只有一个宿主，避免两处抢同一个 WebContentsView）
+    const docked = this.dockHost?.win
+    if (docked && !docked.isDestroyed()) {
+      this.layout()
+      this.pushState()
+      return docked
+    }
     if (this.win && !this.win.isDestroyed()) {
       if (!this.win.isVisible()) this.win.show()
       this.win.focus()
@@ -193,20 +226,21 @@ class BrowserAgentService {
       // 与主应用一致的自定义标题栏：无系统边框/标题栏，拖动与窗口按钮由 Vue 壳顶栏提供
       ...(process.platform === 'linux' ? { frame: false } : { titleBarStyle: 'hidden' }),
       webPreferences: {
-        preload,
+        preload: resolvePreload(),
         contextIsolation: true,
         nodeIntegration: false,
         webSecurity: false,
       },
     })
     this.win = win
+    // 独立窗口关闭时清理的是**窗口自己的**状态；停靠模式下的视图不在这里（见 detachDock）
 
     // 全局窗口缩放变化时重排原生视图（壳被缩放后，栏高/侧栏宽的 CSS px 需按 zoom 换算成 DIP）
     if (!this.zoomLayoutHooked) {
       this.zoomLayoutHooked = true
       onGlobalZoomApplied(() => this.layout())
     }
-    if (IS_DEV) {
+    if (url) {
       win.loadURL(`${url}#/browser-agent`)
     } else {
       win.loadFile(indexHtml, { hash: '/browser-agent' })
@@ -234,12 +268,15 @@ class BrowserAgentService {
     win.on('resize', () => this.layout())
     win.on('close', () => {
       this.sideRailW = 0
-      for (const [, view] of this.views) {
-        try { view.webContents.stop() } catch { /* ignore */ }
+      // 停靠模式下的视图挂在主窗口上，**不能**跟着独立窗口一起清掉
+      if (!this.dockHost) {
+        for (const [, view] of this.views) {
+          try { view.webContents.stop() } catch { /* ignore */ }
+        }
+        this.views.clear()
+        this.tabs = []
+        this.activeTabId = null
       }
-      this.views.clear()
-      this.tabs = []
-      this.activeTabId = null
       this.win = null
     })
 
@@ -260,7 +297,8 @@ class BrowserAgentService {
         allowRunningInsecureContent: false,
       },
     })
-    this.win?.contentView.addChildView(view)
+    // 挂到当前宿主窗口：停靠时是主窗口，否则是浏览器独立窗口
+    this.hostWindow?.contentView.addChildView(view)
     // 事件 → 更新该标签 meta 并广播；导航完成后重新注入主题化滚动条（导航会清除旧注入）
     const wc = view.webContents
     // 伪装为纯净桌面 Chrome：去掉 UA 里的应用名(dev=knowledge / 打包=AI-KM)与 Electron 私有标识。
@@ -368,8 +406,29 @@ class BrowserAgentService {
   }
 
   /** 布局所有标签视图：同一内容区，仅激活可见；空白（未导航）标签隐藏原生视图 → 露出壳的书签首页
-   *  右侧设置栏展开时（sideRailW>0）网页区宽度让出侧栏宽度，供壳的 DOM 侧栏与原生网页并排 */
+   *  右侧设置栏展开时（sideRailW>0）网页区宽度让出侧栏宽度，供壳的 DOM 侧栏与原生网页并排
+   *  **停靠模式**（主页右侧栏）：位置完全由渲染层上报的矩形决定（侧栏/地址栏都在 dock 的 DOM 里，
+   *  所以不再用 sideRailW / navHidden 这两套窗口内偏移） */
   private layout() {
+    // —— 停靠模式：按上报矩形摆放（矩形已是 DIP；未上报或不可见时一律隐藏）——
+    if (this.dockHost && !this.dockHost.win.isDestroyed()) {
+      const rect = this.dockHost.visible ? this.dockHost.rect : null
+      for (const tab of this.tabs) {
+        const view = this.views.get(tab.id)
+        if (!view) continue
+        if (!rect) { view.setVisible(false); continue }
+        view.setBounds({
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.max(0, Math.round(rect.width)),
+          height: Math.max(0, Math.round(rect.height)),
+        })
+        const isBare = !tab.url && !tab.loading
+        view.setVisible(tab.id === this.activeTabId && !isBare)
+      }
+      return
+    }
+
     if (!this.win || this.win.isDestroyed()) return
     const [w, h] = this.win.getContentSize()
     // ⚠️ 全局窗口缩放（window-zoom.ts）只作用于壳页面：壳里的 CSS px × zoom = 窗口 DIP。
@@ -390,7 +449,8 @@ class BrowserAgentService {
 
   /** 壳页面的当前 zoomFactor（1 = 100%）；用于把壳的 CSS px 尺寸换算成窗口 DIP */
   private shellZoom(): number {
-    const wc = this.win?.webContents
+    // 停靠时以主窗口的缩放为准（矩形是从主窗口的渲染层报上来的）
+    const wc = (this.dockHost?.win ?? this.win)?.webContents
     const z = wc && !wc.isDestroyed() ? wc.zoomFactor : 1
     return Number.isFinite(z) && z > 0 ? z : 1
   }
@@ -403,9 +463,107 @@ class BrowserAgentService {
     this.layout()
   }
 
+  // ===================== 停靠宿主（主页右侧栏「浏览器」标签） =====================
+
+  /**
+   * 把浏览器停靠到宿主窗口（主窗口）：
+   * - 若独立窗口开着 → 先关掉它（同一个标签集合只允许一个宿主，避免两处抢同一个 WebContentsView）；
+   * - 已有视图重新挂到主窗口上（标签集合保持不变 → 侧栏里直接接着用）；
+   * - 矩形/可见性由渲染层随后上报（见 setDockRect / setDockVisible）。
+   */
+  attachDock(hostWindow: BrowserWindow): { ok: boolean; error?: string } {
+    if (!hostWindow || hostWindow.isDestroyed()) return { ok: false, error: '宿主窗口不可用' }
+    if (this.dockHost?.win === hostWindow) {
+      this.layout()
+      this.pushState()
+      return { ok: true }
+    }
+
+    // 1) 独立窗口正在用同一个视图集合：先把视图**摘下来**再关窗口
+    //    （否则窗口关闭会顺手清掉 views/tabs，侧栏就空了）
+    const old = this.win
+    const carried: WebContentsView[] = []
+    if (old && !old.isDestroyed()) {
+      for (const [, view] of this.views) {
+        try { old.contentView.removeChildView(view) } catch { /* 不在该窗口上时忽略 */ }
+        carried.push(view)
+      }
+    }
+
+    // 2) 先认下停靠宿主：这样随后的 old.close() 事件不会清空标签集合
+    this.dockHost = { win: hostWindow, rect: null, visible: false }
+    if (old && !old.isDestroyed()) {
+      this.win = null
+      try { old.close() } catch { /* 忽略 */ }
+    }
+
+    // 3) 视图改挂到主窗口；顺手丢掉已经不行的视图（内容进程没了就没法再显示）
+    const deadTabs: string[] = []
+    for (const [id, view] of this.views) {
+      if (view.webContents.isDestroyed()) { deadTabs.push(id); continue }
+      try { hostWindow.contentView.addChildView(view) } catch { /* 已在宿主上时忽略 */ }
+    }
+    for (const id of deadTabs) {
+      this.views.delete(id)
+      this.tabs = this.tabs.filter((t) => t.id !== id)
+    }
+    if (!this.tabs.length) void this.addTab()
+
+    hostWindow.once('closed', () => { this.detachDock() })
+    this.layout()
+    this.pushState()
+    return { ok: true }
+  }
+
+  /** 渲染层上报网页区矩形（CSS px）；主进程按宿主窗口缩放换算成 DIP */
+  setDockRect(rect: { x: number; y: number; width: number; height: number } | null, zoom?: number): void {
+    if (!this.dockHost) return
+    const z = Number.isFinite(Number(zoom)) && Number(zoom) > 0 ? Number(zoom) : this.shellZoom()
+    this.dockHost.rect = rect
+      ? { x: rect.x * z, y: rect.y * z, width: rect.width * z, height: rect.height * z }
+      : null
+    this.layout()
+  }
+
+  /** 渲染层告诉主进程「现在能不能看见」（切标签 / 关右侧栏 / 有浮层盖住 → false，原生视图必须让开） */
+  setDockVisible(visible: boolean): void {
+    if (!this.dockHost) return
+    this.dockHost.visible = !!visible
+    this.layout()
+  }
+
+  /**
+   * 解除停靠：网页视图从主窗口摘下来（**保留标签与会话**，下次再停靠直接接着用）。
+   * 关右侧栏、切聊天、离开主页都会走这里 —— 不销毁 WebContentsView，避免标签被清空。
+   */
+  detachDock(): void {
+    const host = this.dockHost?.win
+    this.dockHost = null
+    if (host && !host.isDestroyed()) {
+      for (const [, view] of this.views) {
+        try { host.contentView.removeChildView(view) } catch { /* 已经不在宿主上时忽略 */ }
+      }
+    }
+    for (const [, view] of this.views) {
+      try { view.setVisible(false) } catch { /* 忽略 */ }
+      // 摘下来之后没人看：停掉正在进行的加载，避免看不见的页面一直占着网络/CPU
+      try { view.webContents.stop() } catch { /* 忽略 */ }
+    }
+  }
+
+  /** 当前是否停靠在主页右侧栏（渲染层据此决定显示「已停靠」还是「独立窗口打开」） */
+  isDocked(): boolean {
+    return !!this.dockHost
+  }
+
   close() {
     this.cancelAgentRecycle()
     this.sideRailW = 0
+    // 停靠模式：不能关主窗口，也不清标签 —— 只把视图摘下来
+    if (this.dockHost) {
+      this.detachDock()
+      return
+    }
     if (this.win && !this.win.isDestroyed()) this.win.close()
     this.views.clear()
     this.tabs = []
@@ -442,7 +600,7 @@ class BrowserAgentService {
    * @returns 实际关闭的标签数
    */
   recycleAgentTabs(): number {
-    if (this.agentActive || !this.win || this.win.isDestroyed()) return 0
+    if (this.agentActive || !this.hostWindow || this.hostWindow.isDestroyed()) return 0
     const now = Date.now()
     const doomed: string[] = []
     for (const t of this.tabs) {
@@ -465,7 +623,7 @@ class BrowserAgentService {
    * @returns 实际关闭的标签数
    */
   recycleOwnerTabs(owner: string): number {
-    if (!owner || !this.win || this.win.isDestroyed()) return 0
+    if (!owner || !this.hostWindow || this.hostWindow.isDestroyed()) return 0
     const doomed = this.tabs
       .filter((t) => t.agent && t.owner === owner && t.id !== this.activeTabId)
       .map((t) => t.id)
@@ -485,7 +643,7 @@ class BrowserAgentService {
    * @returns 实际关闭的标签数
    */
   private recycleOverflowAgentTabs(): number {
-    if (!this.win || this.win.isDestroyed()) return 0
+    if (!this.hostWindow || this.hostWindow.isDestroyed()) return 0
     const agentCount = this.tabs.filter(t => t.agent).length
     if (agentCount <= AGENT_TAB_CAP) return 0
     const now = Date.now()
@@ -514,15 +672,16 @@ class BrowserAgentService {
   private toast(msg: string) {
     this.sendToShell('browser-agent:toast', { message: String(msg).slice(0, 2000) })
   }
+  /** 推给壳 UI：停靠（主窗口）与独立窗口可能同时存在，两边都推，谁在显示谁就用 */
   private sendToShell(channel: string, payload: unknown) {
-    if (this.win && !this.win.isDestroyed() && !this.win.webContents.isDestroyed()) {
-      this.win.webContents.send(channel, payload)
+    for (const wc of this.shellTargets()) {
+      try { wc.send(channel, payload) } catch { /* 窗口正在关闭：忽略 */ }
     }
   }
 
   /** 新增标签页（可带初始 URL）；新建后自动激活。opts.agent=true 表示由 AI 会话创建；opts.owner=创建它的会话 id */
   async addTab(rawUrl?: string, opts?: { agent?: boolean; owner?: string }) {
-    if (!this.win || this.win.isDestroyed()) return
+    if (!this.hostWindow || this.hostWindow.isDestroyed()) return
     const view = this.createTabView()
     const id = `tab-${Date.now()}-${this.seq++}`
     this.views.set(id, view)
@@ -575,7 +734,7 @@ class BrowserAgentService {
     const view = this.views.get(id)
     if (view) {
       try {
-        if (this.win && !this.win.isDestroyed()) this.win.contentView.removeChildView(view)
+        if (this.hostWindow && !this.hostWindow.isDestroyed()) this.hostWindow.contentView.removeChildView(view)
         view.webContents.stop()
         view.webContents.close()
       } catch { /* ignore */ }
@@ -645,7 +804,7 @@ class BrowserAgentService {
   async openFile(filePath: string): Promise<void> {
     if (!filePath) throw new Error('缺少文件路径')
     const fileUrl = pathToFileURL(filePath).href
-    if (this.win && !this.win.isDestroyed()) {
+    if (this.hostWindow && !this.hostWindow.isDestroyed()) {
       // 已有浏览器窗口：聚焦并在当前窗口新建标签页加载该文件
       this.ensureWindow()
       await this.addTab(fileUrl)
@@ -662,7 +821,7 @@ class BrowserAgentService {
   async openUrl(rawUrl: string): Promise<void> {
     const url = normalizeUrl(rawUrl)
     if (!url || url === 'about:blank') throw new Error('缺少 URL')
-    if (this.win && !this.win.isDestroyed()) {
+    if (this.hostWindow && !this.hostWindow.isDestroyed()) {
       this.ensureWindow()
       await this.addTab(url)
     } else {
@@ -847,8 +1006,8 @@ class BrowserAgentService {
     // 工具名校验必须早于窗口创建：MCP 客户端可能发来本服务不存在的工具名（如集群控制的 list_agents），
     // 若无条件 ensureWindow 会把浏览器窗口无端弹出（现象：打开含 Web Agent 的预设/客户端探测工具时跳窗）
     if (!this.knownToolNames().has(String(toolName || ''))) throw new Error(`未知工具: ${toolName}`)
-    // AI 首次调用而窗口尚未创建 → 自动创建（M0：浏览器 Agent 独立窗口）
-    if (!this.win || this.win.isDestroyed()) this.ensureWindow()
+    // AI 首次调用而宿主尚未创建 → 自动创建（独立窗口）；已停靠在主页右侧栏时宿主就是主窗口，不再新建
+    if (!this.hostWindow || this.hostWindow.isDestroyed()) this.ensureWindow()
     const owner = typeof opts?.owner === 'string' && opts.owner.trim() ? opts.owner.trim() : null
     this.agentOwner = owner
     this.agentActive = true
@@ -885,7 +1044,7 @@ class BrowserAgentService {
         case 'browser_eval':
           return await this.evalJs(String(args?.code || ''))
         case 'browser_list_tabs': {
-          if (!this.win || this.win.isDestroyed()) return '浏览器窗口未打开'
+          if (!this.hostWindow || this.hostWindow.isDestroyed()) return '浏览器窗口未打开'
           if (!this.tabs.length) return '暂无标签页'
           return this.tabs.map((t, i) => {
             const flag = t.id === this.activeTabId ? '●' : '○'
@@ -1162,8 +1321,9 @@ class BrowserAgentService {
       let n = 1
       while (fs.existsSync(savePath) && n < 1000) savePath = join(baseDir, `${fileBase}-${n++}.html`)
     } else {
-      if (!this.win || this.win.isDestroyed()) return { ok: false, error: '窗口不可用' }
-      const res = await dialog.showSaveDialog(this.win, {
+      const host = this.hostWindow
+      if (!host || host.isDestroyed()) return { ok: false, error: '窗口不可用' }
+      const res = await dialog.showSaveDialog(host, {
         title: mode === 'full' ? 'Save full HTML' : 'Save HTML',
         defaultPath: `${fileBase}.html`,
         filters: [{ name: 'HTML', extensions: ['html', 'htm'] }],

@@ -55,6 +55,14 @@ export interface KbQuestion {
   note?: string
   /** 外部参考答案文本（手动添加 / Excel 导入的问题，不来自切片；可含 | 多段） */
   extraAnswer?: string
+  /**
+   * 选择题选项（P1-3）：标签 → 选项正文，如 `{ A: "…", B: "…" }`。
+   *
+   * 由「知识处理 → 处理配置 → 生成选择题选项」开关控制：打开时问题生成会一并产出选项，
+   * 且 `extraAnswer` 存的是**正确选项标签**（如 `"B"`），学习模块据此走确定性判分。
+   * 关闭（默认）时为 undefined，问题库与以前完全一致。
+   */
+  choiceMap?: Record<string, string>
 }
 
 /** 去重/合并过程产生的审核记录（供「审核与修改」面板逐条通过 / 撤销） */
@@ -132,14 +140,36 @@ export interface QuestionAnswerPair {
   text: string
   /** 该问题的答案（与 text 分开存储，独立字段；空表示切不出答案） */
   answer?: string
+  /**
+   * 选择题选项（P1-3）：标签 → 选项正文，如 `{ A: "…", B: "…" }`。
+   *
+   * 开关「生成选择题选项」打开时由问题生成一并产出；关闭时为 undefined（纯问答，行为与以前一致）。
+   * 有 `choiceMap` 时 `answer` 存的是**正确选项的标签**（如 `"B"`），
+   * 练习卡据此走确定性判分（标签集合比较），而不是模糊文本比对。
+   */
+  choiceMap?: Record<string, string>
 }
 
 const QA_LABEL_RE = /^\s*(?:\*{1,2}\s*)?(?:\[?\s*[\-–—]?\s*\d*[\.、\)\s]*)?(问题|问|Question|答案|答|Answer|Q|A)\s*\d*\s*[:：]\s*(.*)$/i
 const QA_MARK_RE = /(?:问题|问|答案|答|Question|Answer|Q|A)\s*\d*\s*[:：]/i
+/**
+ * 选项行：`选项A：正文` / `A. 正文` / `A) 正文` / `A、正文`。
+ *
+ * 两种写法都认是因为提示词用了前者（明确、不与正文混淆），而模型很爱顺手写成后者。
+ * 只认**单个大写字母**标签（最多 A-Z 一位），避免把正文里以字母开头的句子当成选项。
+ */
+const OPTION_LABEL_RE = /^\s*(?:\*{1,2}\s*)?(?:选项\s*)?([A-Za-z])\s*(?:[:：.)、]|\s)\s*(\S.*)$/
+/** 纯标签行：只有选项字母，没有正文（模型偶尔把正文写在下一行） */
+const OPTION_BARE_RE = /^\s*(?:\*{1,2}\s*)?(?:选项\s*)?([A-Za-z])\s*[:：.]?\s*$/
+/** 用作区块分隔的行（`---` / `***` / `===`） */
+const BLOCK_SEP_RE = /^\s*(?:[-*_=]\s*){3,}$/
 
 /**
  * 解析「问题/答案」成对输出（reasoning 提取问题 + 答案）：
  * - 识别行首标签（问题/问/Q/Question/答案/答/A/Answer）：问题行开新条目，答案行挂到当前条目；
+ * - **选择题**：`选项A：正文`（或 `A. 正文`）行进 `choiceMap`；`答案：` 里的**标签**归一成
+ *   `A` / `A,C` 形态存进 `answer`，于是判分能按标签集合比较（见 lib/learning/learningGrade.ts）；
+ * - `---` / `***` / `===` 分隔行用于结束一个选择题区块（提示词约定），普通问答不受影响；
  * - 无标签行作为前一块的续行（问题文本换行/答案多行）拼入对应字段；
  * - 问题与答案分别存入 { text } 与 { answer }，两个独立字段、互不拼接；
  * - 全文无 Q/A 标签时退化为旧格式（每行一个问题，无答案）。
@@ -148,15 +178,26 @@ export function parseQuestionAnswerPairs(raw: string): QuestionAnswerPair[] {
   const src = (raw || '').trim()
   if (!src) return []
   const lines = src.split(/\r?\n/)
-  // 无 Q/A 标签 → 旧模板（纯问题列表，无答案）
+  // 无 Q/A 标签 → 旧模板（纯问题列表，无问题标签）；此时也可能带选项行，一并解析
   if (!lines.some((l) => QA_MARK_RE.test(l))) {
+    const withOptions = parseOptionBlocks(lines)
+    if (withOptions.length) return withOptions
     return splitQuestionText(src).map((t) => ({ text: t }))
   }
   const out: QuestionAnswerPair[] = []
   let cur: QuestionAnswerPair | null = null
-  let prevKind: 'q' | 'a' | null = null
+  let prevKind: 'q' | 'a' | 'o' | null = null
+  /** 上一行是"只有标签、正文在下一行"的选项：待补正文 */
+  let pendingLabel: string | null = null
   const clean = (s: string) => s.replace(/\*\*/g, '').trim()
+  const closeCur = () => { if (cur && (cur.text || '').trim()) out.push(cur); cur = null; pendingLabel = null }
   for (const line of lines) {
+    // 区块分隔：结束当前条目，下一行开新条目
+    if (BLOCK_SEP_RE.test(line)) {
+      closeCur()
+      prevKind = null
+      continue
+    }
     const m = QA_LABEL_RE.exec(line)
     if (m) {
       const label = m[1].toLowerCase()
@@ -166,21 +207,138 @@ export function parseQuestionAnswerPairs(raw: string): QuestionAnswerPair[] {
         if (cur) out.push(cur)
         cur = { text: body || '' }
         prevKind = 'q'
+        pendingLabel = null
       } else {
         // 答案行：无前置问题（孤儿答案）则忽略
         if (!cur) { prevKind = 'a'; continue }
-        cur.answer = body ? (cur.answer ? `${cur.answer}\n${body}` : body) : cur.answer
+        // 裸单字母（`A` 这种）：**只有当它确实是本题的选项标签**时才当答案 ——
+        // 否则它多半是正文里的一个字母（列表项、变量名），当答案会同时丢掉问题正文
+        if (!body && !(cur.choiceMap && cur.choiceMap[label.toUpperCase()] !== undefined)) {
+          prevKind = 'a'
+          continue
+        }
+        cur.answer = normalizeChoiceAnswer(body, cur.choiceMap) || cur.answer
         prevKind = 'a'
       }
-    } else {
-      const body = clean(line)
-      if (!body || !cur) continue
-      // 无标签续行：前一块是答案则并入答案，否则并入问题文本
-      if (prevKind === 'a') cur.answer = cur.answer ? `${cur.answer}\n${body}` : body
-      else cur.text = cur.text ? `${cur.text} ${body}` : body
+      continue
     }
+    // 选项行：仅在已有当前问题时才当选项（孤立选项行忽略，避免误吞正文）
+    if (cur) {
+      const om = OPTION_LABEL_RE.exec(line)
+      const ob = OPTION_BARE_RE.exec(line)
+      if (om) {
+        addOption(cur, om[1], clean(om[2]))
+        prevKind = 'o'
+        pendingLabel = null
+        continue
+      }
+      if (ob) {
+        addOption(cur, ob[1], '')
+        prevKind = 'o'
+        pendingLabel = ob[1].trim().toUpperCase()
+        continue
+      }
+    }
+    const body = clean(line)
+    if (!body || !cur) continue
+    // 选项正文写在下一行（`A` 单独一行）
+    if (pendingLabel && cur.choiceMap) {
+      cur.choiceMap[pendingLabel] = body
+      pendingLabel = null
+      continue
+    }
+    // 无标签续行：前一块是答案则并入答案，否则并入问题文本
+    if (prevKind === 'a') cur.answer = cur.answer ? `${cur.answer}\n${body}` : body
+    else cur.text = cur.text ? `${cur.text} ${body}` : body
   }
-  if (cur && (cur.text || '').trim()) out.push(cur)
+  closeCur()
+  return out
+}
+
+/** 往当前条目的 choiceMap 里塞一个选项（同标签后者覆盖，正文为空的先占位由续行补） */
+function addOption(q: QuestionAnswerPair, label: string, body: string): void {
+  const L = String(label || '').trim().toUpperCase()
+  if (!L) return
+  if (!q.choiceMap) q.choiceMap = {}
+  q.choiceMap[L] = body
+}
+
+/**
+ * 把答案归一成**选项标签**形态。
+ *
+ * 模型常把 `答案：` 写成选项正文而不是标签；只要正文能唯一对应到某个选项，
+ * 就换成它的标签 —— 这样判分才能走"标签集合比较"，而不是"这段文字像不像"。
+ * 认不出来（或本来就没有选项）时原样返回。
+ */
+export function normalizeChoiceAnswer(answer: string, choiceMap?: Record<string, string> | null): string {
+  const raw = String(answer || '').trim()
+  if (!raw) return ''
+  if (!choiceMap || !Object.keys(choiceMap).length) return raw
+  const fold = (s: string) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+  const keys = Object.keys(choiceMap)
+  const f = fold(raw)
+  // 已经是标签（或逗号分隔的标签集合）；也认「选项B」这种带前缀的写法
+  const stripPrefix = (s: string) => String(s || '').replace(/^\s*选\s*项\s*/i, '').trim()
+  const parts = raw.split(/[,;，；\s]+/).map(stripPrefix).filter(Boolean)
+  if (parts.length && parts.every(p => keys.includes(p.toUpperCase()))) {
+    return parts.map(p => p.toUpperCase()).join(',')
+  }
+  // 正文整体匹配
+  for (const k of keys) if (fold(choiceMap[k]) === f) return k
+  // 「A. 正文」/「A) 正文」形态
+  const m = OPTION_LABEL_RE.exec(raw)
+  if (m && keys.includes(m[1].toUpperCase()) && fold(m[2]) === fold(choiceMap[m[1].toUpperCase()])) {
+    return m[1].toUpperCase()
+  }
+  // 多个正文用分隔符拼接
+  const bodies = raw.split(/[,;，；|]+/).map(s => fold(s)).filter(Boolean)
+  if (bodies.length > 1) {
+    const hits = bodies.map(b => keys.find(k => fold(choiceMap[k]) === b)).filter(Boolean) as string[]
+    if (hits.length === bodies.length) return hits.join(',')
+  }
+  return raw
+}
+
+/**
+ * 无问题标签时的兜底：按「选项行」把纯问题列表切成带选项的条目。
+ * 返回空数组表示"没有可识别的选项区块"，交给旧逻辑处理。
+ */
+function parseOptionBlocks(lines: string[]): QuestionAnswerPair[] {
+  const out: QuestionAnswerPair[] = []
+  let cur: QuestionAnswerPair | null = null
+  /** 上一行是"只有标签、正文在下一行"的选项：待补正文 */
+  let pendingLabel: string | null = null
+  const clean = (s: string) => s.replace(/\*\*/g, '').trim()
+  const flush = () => { if (cur && cur.choiceMap) out.push(cur); cur = null; pendingLabel = null }
+  for (const line of lines) {
+    if (BLOCK_SEP_RE.test(line)) { flush(); continue }
+    const om = OPTION_LABEL_RE.exec(line)
+    const ob = OPTION_BARE_RE.exec(line)
+    if (om) {
+      if (!cur) cur = { text: '' }
+      addOption(cur, om[1], clean(om[2]))
+      pendingLabel = null
+      continue
+    }
+    if (ob) {
+      if (!cur) cur = { text: '' }
+      addOption(cur, ob[1], '')
+      pendingLabel = ob[1].trim().toUpperCase()
+      continue
+    }
+    const body = clean(line)
+    if (!body) continue
+    // 选项正文写在下一行
+    if (pendingLabel && cur?.choiceMap) {
+      cur.choiceMap[pendingLabel] = body
+      pendingLabel = null
+      continue
+    }
+    if (cur && cur.choiceMap) { flush(); cur = { text: body }; continue }
+    if (!cur) cur = { text: body }
+    else cur.text = cur.text ? `${cur.text} ${body}` : body
+  }
+  flush()
   return out
 }
 

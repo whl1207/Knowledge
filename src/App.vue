@@ -22,6 +22,14 @@
   import { lazyPanel as makeLazyPanel } from '@/lib/plugin/panels'
   import { useAllSlotEntries } from '@/lib/plugin/useSlots'
   import PluginSlot from '@/components/plugin/PluginSlot.vue'
+  // ask_user 结构化问答弹窗宿主（全局唯一：所有入口都经 store/askUser 排队）
+  import AskUserHost from '@/components/agent/AskUserHost.vue'
+  // exit_plan_mode 计划评审弹窗宿主（全局唯一：所有入口都经 store/planReview 排队）
+  import PlanReviewHost from '@/components/agent/PlanReviewHost.vue'
+  // 全局语音输入：**唯一**的视觉提示（状态与识别全在 services/asr/globalVoice.ts）；
+  // 这里只负责挂载一次 + 初始化，各模块不需要接任何东西
+  import VoiceInputOverlay from '@/components/voice/VoiceInputOverlay.vue'
+  import { initGlobalVoice, disposeGlobalVoice } from '@/services/asr/globalVoice'
   // 插件面板全屏时请求隐藏宿主外壳（顶栏 / 左侧导航 / 底部导航）：见 lib/plugin/panelChrome.ts
   import { panelChromeHidden, resetPanelChrome } from '@/lib/plugin/panelChrome'
 import { getPlatform, hasCapability, isHostGuestRuntime } from '@/platform'
@@ -158,24 +166,29 @@ import { useTallLayout } from '@/composables/useTallLayout'
   let titleResizeObserver: ResizeObserver | null = null
 
   /**
-   * 重新判断标题是否放得下。标题是 `left:50%` 居中的绝对定位元素，两侧都要让得开：
+   * 重新判断标题是否放得下。标题是 `left:50%` 居中的绝对定位元素（包含块 = `.panel-header`），两侧都要让得开：
    * - 左侧：导航按钮行的自然右边缘 = `offsetLeft + scrollWidth`（scrollWidth 不受收缩与横向滚动影响）；
    * - 右侧：窗口控制按钮组的最左边缘（跳过导航行 / 占位区 / 标题自己；display:none 的按钮不参与，否则 offsetLeft 为 0 会误判）；
    * - 标题用 `visibility` 隐藏而不是 `display:none`，隐藏后仍能测出宽度，窗口变宽 / 插件停用会自动恢复。
+   * 所有比较对象都相对同一个 offsetParent `.panel-header`（它 position:relative、无边框无内边距），
    * 坐标全部用布局像素（offsetLeft / offsetWidth / clientWidth），不混用 getBoundingClientRect，
    * 以免窗口缩放（Ctrl +/-）下两套单位不一致。
    */
   function syncTitleVisibility() {
-    const header = mainPanelRef.value
+    // 注意：按钮行、标题、右侧按钮都是 .panel-header 的子元素（.mainPanel 只有 .panel-header 一个子节点），
+    // 而且 .panel-header 有 position:relative，是它们的 offsetParent。所以基准必须是 .panel-header，
+    // 否则 controlLeft 会把 .panel-header 自己（offsetLeft = 自己的 margin-left）当成最右侧按钮导致永远隐藏。
+    const header = mainPanelRef.value?.querySelector<HTMLElement>('.panel-header') ?? null
     const nav = panelNavRef.value
     const title = panelTitleRef.value
     if (!header || !nav || !title) {
       titleHidden.value = false
       return
     }
-    const half = header.clientWidth / 2
-    const titleLeft = half - title.offsetWidth / 2
-    const titleRight = half + title.offsetWidth / 2
+    // 标题是 `left:50%` + `translate(-50%)`：offsetLeft 是「未加 transform 的左边缘」，
+    // 而 transform 不参与 offsetLeft/offsetWidth，所以视觉左右边缘要各自再让开自身的半个宽度。
+    const titleLeft = title.offsetLeft - title.offsetWidth / 2
+    const titleRight = title.offsetLeft + title.offsetWidth / 2
     const navRight = nav.offsetLeft + nav.scrollWidth
     let controlLeft = header.clientWidth
     for (const el of Array.from(header.children) as HTMLElement[]) {
@@ -226,6 +239,9 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
     // 独立窗口也需要加载配置（主题等；loadConfig 为同步动作，返回后 store.lan 已就绪）
     store.loadConfig()
+    // 全局语音输入（唯一入口：热键 + 唯一 ASR 实例 + 唯一浮层状态；见 services/asr/globalVoice.ts）。
+    // 每个窗口都初始化：主进程会把热键投递给**当前聚焦的那个窗口**，于是在设置窗口里也能直接说话输入。
+    initGlobalVoice(store)
     // 局域网共享：启动即把「访客权限策略 + 主机模型」下发给主进程（见函数注释）
     void syncLanGuestPolicyAtStartup()
     // 主进程主动来拉（它每次重启都回到默认策略，而本窗口不会再挂载一次）→ 收到就重新下发
@@ -350,6 +366,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     for (const off of unregisterAppLayers.splice(0)) off()
     titleResizeObserver?.disconnect()
     titleResizeObserver = null
+    // 释放全局语音输入：注销快捷键、拆监听、销毁麦克风采集图
+    disposeGlobalVoice()
   })
 
   // 主面板切换即落盘（mainPanel 只在主窗口有意义）：
@@ -758,6 +776,14 @@ import { useTallLayout } from '@/composables/useTallLayout'
       :label="store.fileWindowOverlay.label"
     />
   </div>
+
+  <!-- ask_user 结构化问答弹窗（全局唯一宿主：聊天 / 集群 / 控制台 / 工作流共用） -->
+  <AskUserHost />
+  <!-- exit_plan_mode 计划评审弹窗（全局唯一宿主：Approve / 继续完善 / 关闭） -->
+  <PlanReviewHost />
+  <!-- 全局语音输入提示（唯一的视觉元素：录音波形 / 实时文字 / 落点 / 结束与取消）。
+       放在所有窗口模式之外：主界面、文件窗口、浏览器 Agent 窗口、设置独立窗口共用同一个浮层 -->
+  <VoiceInputOverlay />
 </template>
 
 <style scoped>
@@ -882,8 +908,11 @@ import { useTallLayout } from '@/composables/useTallLayout'
     cursor: move;
   }
 
-  /* 顶栏图标按钮（导航按钮 / 右侧按钮）：除导航按钮行容器外统一 30×30 */
-  .panel-header div:not(.panel-nav) {
+  /* 顶栏图标按钮（导航按钮 / 右侧按钮）：除导航按钮行容器、居中标题与弹性占位区外统一 30×30。
+     不能只写 :not(.panel-nav)：`:not()` 会把 .panel-nav 的类选择器权重算进来（0,2,1），
+     高于 .panel-header .compact-title（0,2,0），于是 width:30px 会盖掉标题的 width:auto，
+     标题被压成 30px 宽（12px 字号下只能看到两个字）。同理 hover 背景也会糊到标题和空白拖拽区上。 */
+  .panel-header div:not(.panel-nav):not(.compact-title):not(.panel-title-spacer) {
     width: 30px;
     height: 30px;
     line-height: 30px;
@@ -896,23 +925,24 @@ import { useTallLayout } from '@/composables/useTallLayout'
     transition: all 0.25s ease;
   }
 
-  .panel-header div:not(.panel-nav):hover {
+  .panel-header div:not(.panel-nav):not(.compact-title):not(.panel-title-spacer):hover {
     color: var(--fontActiveColor);
     background-color: var(--menuActiveColor);
   }
 
-  .panel-header div:not(.panel-nav).active {
+  .panel-header div:not(.panel-nav):not(.compact-title):not(.panel-title-spacer).active {
     color: var(--fontActiveColor);
     background-color: var(--menuActiveColor);
   }
 
-  /* 拖拽区域 */
-  .panel-header div[style*="drag"] {
+  /* 拖拽区域（左侧/下方布局里声明了 app-region: drag 的拖拽条）：
+     居中标题也带 drag（它就是拖动区），但它不是拖拽条，不能跟着变半透明，因此排除掉 */
+  .panel-header div[style*="drag"]:not(.compact-title) {
     cursor: move;
     opacity: 0.3;
   }
 
-  .panel-header div[style*="drag"]:hover {
+  .panel-header div[style*="drag"]:not(.compact-title):hover {
     background-color: transparent;
   }
 

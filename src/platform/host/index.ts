@@ -25,6 +25,7 @@ import type {
   ShellPort,
   WatchPort,
   WindowPort,
+  TerminalPort,
 } from '@/platform/contract'
 
 /** 主机注入的运行时信息（见 withHostRuntime） */
@@ -545,6 +546,11 @@ const browserAgentPort: BrowserAgentPort = {
   async call() { throw new Error('not-supported') },
 }
 
+/** 远端宿主没有交互终端（终端是本地宿主进程的能力） */
+const terminalPort: TerminalPort = {
+  async call() { return { ok: false, error: 'not-supported' } },
+}
+
 /** 构造局域网主机后端 */
 export function createHostPlatform(info: HostRuntimeInfo): Platform {
   return {
@@ -560,5 +566,6 @@ export function createHostPlatform(info: HostRuntimeInfo): Platform {
     host: hostPort,
     llm: llmPort,
     browserAgent: browserAgentPort,
+    terminal: terminalPort,
   }
 }

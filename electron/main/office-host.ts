@@ -17,6 +17,7 @@
  * 4. 类型差异全部集中在 ADAPTERS 表，宿主逻辑与类型无关。
  */
 import { app, ipcMain, protocol, net, BrowserWindow, WebContentsView, type WebContents } from 'electron'
+import { logInfo } from './log'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -608,7 +609,7 @@ function ensureBundle(type: EditorType): any {
   }
 
   state.bundles.set(type, mod)
-  console.log(`[office] ${type} 编辑器内核已就绪（${adapter.label}）`)
+  logInfo('main', `[office] ${type} 编辑器内核已就绪（${adapter.label}）`)
   return mod
 }
 
@@ -652,13 +653,16 @@ let aiIconCss: string | undefined
 function aikmAiIconCss(): string {
   if (aiIconCss !== undefined) return aiIconCss
   aiIconCss = ''
-  const rel = path.join('font-awesome', 'fonts', 'fontawesome-webfont.woff2')
+  // Font Awesome 5：实心字形文件是 webfonts/fa-solid-900.woff2
+  // （FA4 时代是 fonts/fontawesome-webfont.woff2，字族名也从 FontAwesome 改成了 Font Awesome 5 Free）
+  const rel = path.join('font-awesome', 'webfonts', 'fa-solid-900.woff2')
   for (const base of [path.join(app.getAppPath(), 'dist'), path.join(app.getAppPath(), 'public')]) {
     try {
       const base64 = fs.readFileSync(path.join(base, rel)).toString('base64')
       // \f0d0 = Font Awesome 的 fa-magic（AI-KM 自己的「AI 动作」按钮也用这个图标）
-      aiIconCss = `@font-face{font-family:'AIKMIconFont';src:url(data:font/woff2;base64,${base64}) format('woff2');font-weight:normal;font-style:normal}
-.aikm-ai-icon{display:inline-block !important;font-family:'AIKMIconFont' !important;font-style:normal !important;font-weight:normal !important;font-size:18px !important;line-height:1 !important;color:inherit;text-rendering:auto;-webkit-font-smoothing:antialiased}
+      // 该码位在 FA4 与 FA5 里相同；字重声明为 900，与 FA5 的实心字形一致
+      aiIconCss = `@font-face{font-family:'AIKMIconFont';src:url(data:font/woff2;base64,${base64}) format('woff2');font-weight:900;font-style:normal}
+.aikm-ai-icon{display:inline-block !important;font-family:'AIKMIconFont' !important;font-style:normal !important;font-weight:900 !important;font-size:18px !important;line-height:1 !important;color:inherit;text-rendering:auto;-webkit-font-smoothing:antialiased}
 .aikm-ai-icon::before{content:'\\f0d0'}`
       return aiIconCss
     } catch {
@@ -799,7 +803,7 @@ function attachView(entry: ViewEntry) {
   // （Excel「打开是空表」这类问题只能从渲染层日志看出来；稳定后可移除）
   entry.view.webContents.on('console-message', (_e, level, message, line, source) => {
     if (level >= 2 || /error|fail|empty|workbook|queued/i.test(message)) {
-      console.log(`[office:${entry.viewId}] ${message} (${String(source).split('/').pop()}:${line})`)
+      logInfo('main', `[office:${entry.viewId}] ${message} (${String(source).split('/').pop()}:${line})`)
     }
   })
   entry.view.webContents.on('did-fail-load', (_e, code, desc, url) => {
@@ -1012,7 +1016,7 @@ export async function openInWindow(hostWindow: BrowserWindow, filePath: string):
   }
   attachView(entry)
   showView(entry)
-  console.log(`[office] 打开 ${entry.viewId} → ${filePath}`)
+  logInfo('main', `[office] 打开 ${entry.viewId} → ${filePath}`)
   return { ok: true, viewId: entry.viewId, type, filePath }
 }
 

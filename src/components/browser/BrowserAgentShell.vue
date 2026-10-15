@@ -5,7 +5,7 @@
            右侧可展开「设置」停靠栏（收起时网页占满整宽；展开时主进程让出右栏宽度，DOM 侧栏与原生网页并排不遮挡）。
      壳通过 browser-agent:* IPC 与主进程 browser-agent.ts 交互（标签增删/切换、导航、状态、停靠栏）。 -->
 <template>
-  <div class="browser-agent-shell">
+  <div ref="shellRef" class="browser-agent-shell" :class="{ embedded: !!embedded, 'embedded-hidden': !!embedded && !paneVisible }">
     <!-- ====== ① 标签栏（36px，与主进程 TAB_BAR_H 一致；无边框窗口拖动区） ====== -->
     <div class="ba-tabbar">
       <div
@@ -40,8 +40,8 @@
       </button>
       <div class="ba-flex"></div>
 
-      <!-- 自绘窗口控制（无边框，仿主应用风格） -->
-      <div class="ba-win-btns">
+      <!-- 自绘窗口控制（无边框，仿主应用风格）；停靠在主页右侧栏时没有窗口，整块隐藏 -->
+      <div v-if="!embedded" class="ba-win-btns">
         <button class="ba-win-btn" :title="zh ? '最小化' : 'Minimize'" @click="minimizeWindow">
           <i class="fa fa-window-minimize"></i>
         </button>
@@ -103,7 +103,7 @@
     <!-- ====== ③ 内容区：左侧网页/页面占位 + 右侧「设置」停靠栏（DOM）。原生网页视图仅覆盖左侧；展开停靠栏时主进程让出右栏宽度 → 二者并排互不遮挡 ====== -->
     <div class="ba-body">
       <!-- 左侧：页面内容（新标签搜索首页等 DOM 在原生视图隐藏/空白时露出；有 URL 时由原生视图承载） -->
-      <div class="ba-main">
+      <div ref="mainRef" class="ba-main">
         <div class="ba-page">
           <!-- 新标签页（收藏夹网格）：整页就是收藏夹 grid——全部平铺、不折叠；搜索已并入顶部地址栏，页内不再放任何搜索/提示条 -->
           <div v-if="activeTab && !state.url && newTabIsBookmarks" class="ba-home">
@@ -335,6 +335,25 @@ import { BROWSER_SEARCH_ENGINES, browserSearchEngine, browserSearchEngineLabel, 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
 
+/**
+ * 停靠模式（主页右侧栏「浏览器」标签）：
+ * - 不再整窗铺满（CSS .embedded 改为填满侧栏）；
+ * - 没有窗口控制按钮 / 拖动区；
+ * - 网页区位置改由本组件把 .ba-main 的矩形上报给主进程（原生 WebContentsView 挂在**主窗口**上）；
+ * - 切标签 / 关侧栏 / 有浮层盖住时必须把原生视图藏起来（它永远画在 DOM 之上）。
+ */
+const props = withDefaults(defineProps<{
+  /** 停靠在主页右侧栏中渲染（而非独立窗口） */
+  embedded?: boolean
+  /** 本标签在侧栏里是否可见（切走的标签要把原生视图藏起来） */
+  paneActive?: boolean
+  /** 主窗口里有浮层（设置 / 文件窗口 / 聊天弹窗）盖住侧栏 → 也要藏起来 */
+  occluded?: boolean
+}>(), { embedded: false, paneActive: true, occluded: false })
+
+/** 原生网页视图当前是否应当可见：侧栏标签在前台 + 没有浮层遮盖 */
+const paneVisible = computed(() => !props.embedded || (!!props.paneActive && !props.occluded))
+
 interface TabMeta {
   id: string
   title: string
@@ -409,6 +428,8 @@ const agentBusyDot = computed(() =>
 )
 
 const syncRail = async () => {
+  // 停靠模式：网页区位置由 .ba-main 的矩形上报决定（侧栏宽度天然被排除），不需要再通知主进程
+  if (props.embedded) return
   await invoke('browser-agent:set-rail', { open: railOpen.value, width: SIDE_RAIL_W }).catch(() => {})
 }
 
@@ -466,13 +487,18 @@ const COMPACT_W = 760 // 窄窗口阈值（px）
 const COMPACT_H = 520 // 矮窗口阈值（px）
 const compactNav = ref(false)
 const measureCompact = () => {
-  const w = window.innerWidth || 0
-  const h = window.innerHeight || 0
+  // 停靠模式：按侧栏自身的尺寸判断（窗口尺寸没意义）
+  const rect = props.embedded ? shellRef.value?.getBoundingClientRect() : null
+  const w = rect ? rect.width : (window.innerWidth || 0)
+  const h = rect ? rect.height : (window.innerHeight || 0)
   compactNav.value = (w > 0 && w < COMPACT_W) || (h > 0 && h < COMPACT_H)
 }
 const onWinResize = () => { measureCompact() }
-// 紧凑状态变化 → 通知主进程调整网页视图顶部高度
-watch(compactNav, (c) => { void invoke('browser-agent:set-compact', { compact: c }).catch(() => {}) })
+// 紧凑状态变化 → 通知主进程调整网页视图顶部高度（停靠模式下位置完全由矩形上报决定，不需要通知）
+watch(compactNav, (c) => {
+  if (props.embedded) return
+  void invoke('browser-agent:set-compact', { compact: c }).catch(() => {})
+})
 
 const applyState = (s: any) => {
   if (!s) return
@@ -1071,16 +1097,81 @@ watch(() => (store.UI?.browserSaveDir || '').trim(), () => { void refreshBookmar
 /** 宿主事件退订句柄（挂载时登记，卸载时统一释放） */
 const unsubBrowserEvents: Array<() => void> = []
 
+// ===================== 停靠模式：位置上报 / 可见性 / 浮层遮挡 =====================
+const shellRef = ref<HTMLElement | null>(null)
+const mainRef = ref<HTMLElement | null>(null)
+let dockObserver: ResizeObserver | null = null
+let dockRaf = 0
+let bodyObserver: MutationObserver | null = null
+/** 主窗口里是否有盖住侧栏的 Element Plus 浮层（对话框 / 消息框） */
+const externalOverlayOpen = ref(false)
+
+/** 把网页区（.ba-main）的矩形报给主进程：原生 WebContentsView 要正好铺在这里 */
+const pushDockRect = () => {
+  if (!props.embedded) return
+  if (dockRaf) return
+  dockRaf = requestAnimationFrame(() => {
+    dockRaf = 0
+    const el = mainRef.value
+    if (!el) { void invoke('browser-agent:set-dock-rect', { rect: null }).catch(() => {}); return }
+    const r = el.getBoundingClientRect()
+    void invoke('browser-agent:set-dock-rect', {
+      // 主进程会再乘窗口缩放（CSS px × zoom = DIP）
+      rect: { x: r.left, y: r.top, width: r.width, height: r.height },
+    }).catch(() => {})
+  })
+}
+
+/** 页面可见性交回主进程：不可见时它必须 setVisible(false)，否则原生视图会盖住界面 */
+const pushDockVisible = () => {
+  if (!props.embedded) return
+  void invoke('browser-agent:set-dock-visible', {
+    visible: paneVisible.value && !externalOverlayOpen.value,
+  }).catch(() => {})
+  pushDockRect()
+}
+
+/** 盯着 body 子节点：Element Plus 的 .el-overlay / 消息框是挂在 body 上的（不常变，代价很低） */
+const watchBodyOverlays = () => {
+  if (typeof document === 'undefined') return
+  const sync = () => {
+    const next = !!document.querySelector('.el-overlay, .el-message-box__wrapper, .el-dialog__wrapper')
+    if (next === externalOverlayOpen.value) return
+    externalOverlayOpen.value = next
+    pushDockVisible()
+  }
+  sync()
+  bodyObserver = new MutationObserver(sync)
+  bodyObserver.observe(document.body, { childList: true })
+}
+
+watch(paneVisible, () => pushDockVisible())
+watch(() => props.occluded, () => pushDockVisible())
+
 onMounted(async () => {
   unsubBrowserEvents.push(getPlatform().events.on('browser-agent:event', onEvent))
   unsubBrowserEvents.push(getPlatform().events.on('theme-changed', onThemeChanged))
   unsubBrowserEvents.push(getPlatform().events.on('browser-agent:toast', onToastEvent))
   window.addEventListener('resize', onWinResize)
+  window.addEventListener('resize', pushDockRect)
   measureCompact()
   sendBrowserTheme()
   // 独立窗口启动即同步可能已配置好的浏览器偏好，并确保右侧停靠栏为收起初始态
   syncBrowserPrefs()
-  void invoke('browser-agent:set-rail', { open: false }).catch(() => {})
+
+  if (props.embedded) {
+    // 停靠：把（可能已存在的）标签视图挂到主窗口，并把矩形交回主进程
+    await invoke('browser-agent:attach-dock').catch(() => {})
+    if (mainRef.value && typeof ResizeObserver !== 'undefined') {
+      dockObserver = new ResizeObserver(() => { measureCompact(); pushDockRect() })
+      dockObserver.observe(mainRef.value)
+    }
+    watchBodyOverlays()
+    pushDockVisible()
+  } else {
+    void invoke('browser-agent:set-rail', { open: false }).catch(() => {})
+  }
+
   void refreshBookmarks()
   try {
     const res = await invoke('browser-agent:state')
@@ -1090,7 +1181,13 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   for (const off of unsubBrowserEvents.splice(0)) { try { off() } catch { /* 忽略 */ } }
   window.removeEventListener('resize', onWinResize)
+  window.removeEventListener('resize', pushDockRect)
   if (bmAutoTimer) { clearInterval(bmAutoTimer); bmAutoTimer = null }
+  dockObserver?.disconnect(); dockObserver = null
+  bodyObserver?.disconnect(); bodyObserver = null
+  if (dockRaf) { cancelAnimationFrame(dockRaf); dockRaf = 0 }
+  // 离开侧栏：把原生视图从主窗口摘下来（标签与会话保留，下次停靠直接接着用）
+  if (props.embedded) void invoke('browser-agent:detach-dock').catch(() => {})
 })
 </script>
 
@@ -1101,9 +1198,23 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   background: var(--backgroundColor, #ffffff);
-  color: var(--fontColor);
-  overflow: hidden;
+  color: var(--fontColor);  overflow: hidden;
 }
+
+/* ====== 停靠模式（主页右侧栏「浏览器」标签）：填满侧栏，不铺满窗口 ====== */
+.browser-agent-shell.embedded {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+}
+/* 原生网页视图在 DOM 之上：本面板被切走 / 被浮层盖住时整块让位（避免遮住别的界面） */
+.browser-agent-shell.embedded.embedded-hidden { visibility: hidden; }
+/* 侧栏里没有系统窗口：标签栏不再是拖动区 */
+.browser-agent-shell.embedded .ba-tabbar { -webkit-app-region: no-drag; }
+/* 窄侧栏（默认 360px 左右）下按紧凑模式排版：只留标签栏 + 地址栏，工具按钮换行交给 .ba-navbar 自身滚动 */
+.browser-agent-shell.embedded .ba-navbar { padding: 0 4px; gap: 4px; }
+.browser-agent-shell.embedded .ba-tab { flex: 0 1 120px; max-width: 150px; }
 /* ====== ① 标签栏：36px，与主进程 TAB_BAR_H 一致 ====== */
 .ba-tabbar {
   height: 36px;

@@ -118,6 +118,10 @@
                   <span v-for="f in paramFields(step.primitive)" :key="f.key" class="sc-param">
                     <label class="sc-param-label">{{ t(f.label, f.labelEn) }}:</label>
                     <input v-if="f.type === 'text'" type="text" v-model="step.params[f.key]" class="sc-inline-input sc-param-text" :placeholder="t(f.placeholder || '', f.placeholderEn || '')" />
+                    <label v-else-if="f.type === 'checkbox'" class="preset-checkbox sc-param-check" :title="t(f.hint || '', f.hintEn || '')">
+                      <input type="checkbox" v-model="step.params[f.key]" />
+                      <span>{{ t(f.checkLabel || '', f.checkLabelEn || '') }}</span>
+                    </label>
                   </span>
                 </span>
                 <span class="sc-step-ops">
@@ -532,7 +536,7 @@ const ingestionPrimitives = Object.entries(PRIMITIVE_META)
   }, {})
 
 // 原语参数定义（type: 'number' | 'select' | 'text' | 'checkbox'）
-const PARAM_FIELDS: Record<string, Array<{ key: string; label: string; labelEn: string; type: 'number' | 'select' | 'text' | 'checkbox'; min?: number; max?: number; step?: number; placeholder?: string; placeholderEn?: string; options?: Array<{ value: string; label: string; labelEn?: string }> }>> = {
+const PARAM_FIELDS: Record<string, Array<{ key: string; label: string; labelEn: string; type: 'number' | 'select' | 'text' | 'checkbox'; min?: number; max?: number; step?: number; placeholder?: string; placeholderEn?: string; /** checkbox 用：勾选项自身的文案与悬停说明 */ checkLabel?: string; checkLabelEn?: string; hint?: string; hintEn?: string; options?: Array<{ value: string; label: string; labelEn?: string }> }>> = {
   dense_score: [
     { key: 'summaryWeight', label: '增强权重', labelEn: 'Enhance', type: 'number', min: 0, max: 1, step: 0.05 },
   ],
@@ -559,6 +563,13 @@ const PARAM_FIELDS: Record<string, Array<{ key: string; label: string; labelEn: 
       key: 'processPrompt', label: '问题生成提示词', labelEn: 'Prompt', type: 'text',
       placeholder: '请阅读下面的资料，列出这些资料能够解答的若干问题。只输出问题本身，每行一个，不要编号/标题/分组/解释...',
       placeholderEn: 'Read the info and list several questions it can answer. Output only questions, one per line, no numbering/headings...',
+    },
+    {
+      // 步骤级开关：本步骤产出选择题选项（全局默认在「处理配置 → 生成选择题选项」）
+      key: 'choiceQuestionPrompt', label: '选择题', labelEn: 'Choices', type: 'checkbox',
+      checkLabel: '生成选择题选项', checkLabelEn: 'Generate choice options',
+      hint: '本步骤改为生成选择题（每题 4 个选项 A–D + 正确答案标签），而不是纯问答；同时「问题生成提示词」会被选择题提示词替换。关闭则跟随「处理配置 → 生成选择题选项」。',
+      hintEn: 'This step generates choice questions (4 options A–D plus the correct label) instead of plain Q&A; the Prompt above is then replaced by the built-in choice prompt. Off = follow Processing Configuration → Generate Choice Options.',
     },
   ],
   summarize_file: [

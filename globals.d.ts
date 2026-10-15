@@ -28,7 +28,11 @@ interface Window {
       dispose(id: string): Promise<{ success: boolean }>
       tools(agentId?: string, scope?: string): Promise<{ name: string; description: string }[]>
       state(id: string): Promise<import('./src/types/agent').AgentStateView>
-      answer(id: string, askId: string, message: string): Promise<{ success: boolean }>
+      /**
+       * 回答 agent 的 ask_user 问题。
+       * answers = 结构化回答批（每题 `{ id, selected: string[], custom? }`）；message = 旧式纯文本回答。
+       */
+      answer(id: string, askId: string, message?: string, answers?: import('./src/types/agent').AskUserAnswer[]): Promise<{ success: boolean }>
       /** 渲染层任务接缝：抢占执行权（agent/renderer-task 事件；agentId + taskId） */
       claimRendererTask(id: string, taskId: string): Promise<{ claimed: boolean }>
       /** 渲染层任务接缝：回传执行结果 */

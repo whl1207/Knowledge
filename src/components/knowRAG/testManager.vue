@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, reactive, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, reactive, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import block_md from '@/components/block_md.vue'
 import * as XLSX from 'xlsx'
 import {usestore} from '@/store'
@@ -4030,6 +4030,21 @@ onMounted(() => {
   }
   // 若 .kb 已保存测试结果（处理配置勾选「保存测试结果到 KB 文件」），恢复位次/策略对比/检索过程
   if (props.testData) restoreTestData(props.testData)
+})
+
+/**
+ * 面板被销毁（keep-alive 未命中 / 窗口关闭）时收尾：
+ * 批量测试的结果属于本实例，实例销毁后继续跑只会白烧 CPU（结果无处可去）→ 直接中止；
+ * 同时注销后台任务登记，避免托盘/关闭提示里留下「评测仍在运行」的假状态。
+ * 注：正常切模块（保活生效）不会走到这里，测试继续在后台跑。
+ */
+onBeforeUnmount(() => {
+  if (test.isRunning) {
+    console.warn('[评测] 面板被销毁：中止仍在运行的批量测试（测试结果已随实例销毁，面板重挂后会从快照恢复已完成部分）')
+    batchCtl.aborted = true
+    batchLoopActive.value = false
+  }
+  endGlobalTestRun()
 })
 
 // 从 .kb 加载恢复测试结果（同一次会话内换库/重新打开 .kb 时也会触发；空值不覆盖已有结果）

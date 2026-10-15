@@ -55,6 +55,26 @@ $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
 npm install --registry=https://registry.npmmirror.com
 ```
 
+Running from an Electron-based host (some IDEs / agent harnesses / CI images) — these set `ELECTRON_RUN_AS_NODE=1` for their
+own child processes, which makes `electron` behave as plain Node, so the app dies with
+`SyntaxError: The requested module 'electron' does not provide an export named 'BrowserWindow'`.
+Both scripts below clear that variable before starting Electron, so simply use them:
+
+```bash
+npm run dev      # dev server + Electron (clears the variable for vite and the app it spawns)
+npm run build:web && npm start   # run the built app
+```
+
+### Logs
+
+Quiet by default, so a normal run/build only shows what is actionable:
+
+| What | Default | How to see everything |
+|:---|:---|:---|
+| App startup log (plugins, map packs, MCP endpoints, cache sweeps, Chromium GPU chatter) | INFO lines and Chromium `ERROR` chatter are silenced; warn/error stay | `AIKM_VERBOSE=1 npm run dev` (also re-enables Chromium's own log levels) |
+| `vite build` output | rolls up the file-size table (hundreds of asset lines) plus any warning | `npx vite build --logLevel warn` for warnings/errors only |
+| Chromium / Rollup warnings known to be unfixable here (dynamic-import notices, vite-plugin-electron's rolldown-era `platform` / `codeSplitting` keys) | filtered in `vite.config.ts` (`onRollupWarn`, key-by-key) | edit `IGNORED_ROLLUP_WARNINGS` |
+
 ### Build
 
 | Command | Output |
@@ -88,7 +108,7 @@ The APK version (`versionName` / `versionCode`) is derived from `package.json` i
 
 **Back gesture layers.** The gesture is a system event but the UI stack lives in each module's own state, so modules declare their own layer in `src/platform/backLayers.ts` (via `composables/useBackLayer`): `app:fileWindow` (50) → settings sub-panels `settings:<panel>` (45) → `settings:nav` (43) → `app:settings` (40) → module navigation `home` / `explorer` (10) → App fallback (back to Home, then press twice to exit). `runTopBackLayer()` asks layers from innermost to outermost and stops at the first that can go back, so overlays always close before the page behind them changes.
 
-**Agents run locally on Android / the web.** When there is no desktop main process (`window.dsh.agent`) and no LAN host (`__AIKM_HOST__`), `platform/agentBridge` falls back to `platform/rendererAgent` — a renderer-side agent loop (turn/step events, streaming, tool calls, steer/inject, `ask_user`, plan/todos) whose tools live in `lib/agent/rendererTools.ts`: `list_dir` / `read_file` / `search_files` / `write_file` / `replace_in_file` / `multi_replace` (platform file port, so SAF-granted folders work), `kb_search`, `web_fetch` / `web_search` (`lib/agent/webSearchRunner.ts`, HTTP-only) and `ask_user` / `update_plan` / `update_todo`. Host-only tools (`run_python`, `shell`, `run_subagent`, `mcp_call`, `skill`, PTC `run_code`) are not exposed and answer with an explicit “unavailable here” message if the model calls them anyway.
+**Agents run locally on Android / the web.** When there is no desktop main process (`window.dsh.agent`) and no LAN host (`__AIKM_HOST__`), `platform/agentBridge` falls back to `platform/rendererAgent` — a renderer-side agent loop (turn/step events, streaming, tool calls, steer/inject, `ask_user`, plan/todos) whose tools live in `lib/agent/rendererTools.ts`: `list_dir` / `read_file` / `search_files` / `write_file` / `replace_in_file` / `multi_replace` (platform file port, so SAF-granted folders work), `kb_search`, `web_fetch` / `web_search` (`lib/agent/webSearchRunner.ts`, HTTP-only) and `ask_user` (single/multi choice, several questions, free-form answers) / `update_plan` / `exit_plan_mode` (human plan review) / `update_todo`. Host-only tools (`run_python`, `shell`, `run_subagent`, `mcp_call`, `skill`, PTC `run_code`) are not exposed and answer with an explicit “unavailable here” message if the model calls them anyway.
 
 Cleartext HTTP is allowed on Android (`res/xml/network_security_config.xml`) so LAN model endpoints such as `http://192.168.x.x:11434` work.
 

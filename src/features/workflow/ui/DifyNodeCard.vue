@@ -17,7 +17,7 @@
     <Handle v-if="isContainer" id="source" type="source" :position="Position.Right" />
 
     <div class="dify-node__header">
-      <span class="dify-node__icon">{{ glyph }}</span>
+      <span class="dify-node__icon" :style="{ '--node-glyph-weight': glyphWeight }">{{ glyph }}</span>
       <span class="dify-node__title" :title="title">{{ title }}</span>
       <!-- 容器（迭代 / 循环）没有正文行，副标题与标题同行显示，避免挤占内部子节点 -->
       <span v-if="isContainer && summaryText" class="dify-node__inline" :title="summaryText">{{ summaryText }}</span>
@@ -87,6 +87,8 @@ const dsl = computed(() => props.data.dsl)
 const nodeType = computed(() => String(dsl.value.type))
 const presentation = computed(() => getNodePresentation(nodeType.value))
 const glyph = computed(() => presentation.value.glyph)
+// FA5 用字重区分线框(400)/实心(900)字形：原 FA4 的 `-o` 图标在 FA5 里与实心同码位，只能靠字重
+const glyphWeight = computed(() => String(presentation.value.weight || 900))
 const color = computed(() => presentation.value.color)
 const title = computed(() => dsl.value.title || nodeType.value)
 const typeLabel = computed(() => {
@@ -178,7 +180,8 @@ function onResizeStart(event: PointerEvent): void {
   height: 16px;
   line-height: 16px;
   text-align: center;
-  font-family: FontAwesome;
+  font-family: 'Font Awesome 5 Free';
+  font-weight: 900;
   font-size: 11px;
   color: var(--node-accent);
   cursor: nwse-resize;
@@ -186,7 +189,8 @@ function onResizeStart(event: PointerEvent): void {
 }
 
 .dify-node__resize::before {
-  content: '\f065';
+  /* FA5：fa-expand 的码位由 \f065 改为 fa-expand-alt 的 \f424 */
+  content: '\f424';
 }
 
 .dify-node__resize:hover {
@@ -212,7 +216,13 @@ function onResizeStart(event: PointerEvent): void {
 }
 
 .dify-node__icon {
-  font-family: FontAwesome;
+  /*
+   * 节点图标是**每节点字形**：字重由节点类型注入（`.far` 一类线框节点要 400，
+   * 实心节点要 900）。FA5 把 FA4 的 `-o` 线框变体与实心变体合并成同一个码位，
+   * 只靠字重区分 —— 所以这里不能写死字重。
+   */
+  font-family: 'Font Awesome 5 Free';
+  font-weight: var(--node-glyph-weight, 900);
   font-size: 13px;
   color: var(--node-accent);
 }

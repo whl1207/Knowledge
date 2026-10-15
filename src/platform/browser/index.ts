@@ -23,6 +23,7 @@ import type {
   ShellPort,
   WatchPort,
   WindowPort,
+  TerminalPort,
 } from '@/platform/contract'
 
 const IPC_UNAVAILABLE = 'IPC 不可用（请在 Electron 中运行）'
@@ -221,6 +222,11 @@ const browserAgentPort: BrowserAgentPort = {
   async call() { throw new Error('not-supported') },
 }
 
+/** 纯网页没有本地终端（无 PTY）：终端标签按能力隐藏 */
+const terminalPort: TerminalPort = {
+  async call() { return { ok: false, error: 'not-supported' } },
+}
+
 export const browserPlatform: Platform = {
   kind: 'browser',
   capabilities,
@@ -234,4 +240,5 @@ export const browserPlatform: Platform = {
   host: hostPort,
   llm: llmPort,
   browserAgent: browserAgentPort,
+  terminal: terminalPort,
 }

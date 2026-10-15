@@ -6,6 +6,8 @@
  * 在各模式下渲染数据完全一致（即样式与交互天然一致，不需要第二套 UI）。
  */
 
+import { coerceTodoList } from '@/shared/agentTodo'
+
 /** 步骤时间线投影结果 */
 export interface StepProjectionResult {
   /** 本批次中最后一个工具单元（供输入区「最近工具」快照） */
@@ -156,23 +158,57 @@ export function projectUsage(msg: any, v: any): void {
 
 /**
  * 待办清单（update_todo 维护）→ `chat.agentTodos`。
- * 兜底：保留用户手动确认的状态（done/cancelled），避免 agent 之后发来的全量 todo 覆盖本地已确认状态。
+ *
+ * 两层兜底：
+ * - **状态归一**：旧版本把模型原始状态直接落盘（可能含 `in_progress` / `completed`），
+ *   这里统一经 `coerceTodoList` 归一，避免界面出现无法识别的状态；
+ * - **本地已确认状态优先**：用户手动勾选的 done / cancelled 不被 agent 之后发来的
+ *   全量清单覆盖（同一条（同 id）以本地为准）。
  */
 export function projectTodos(ownerChat: any, v: any): void {
   if (!Array.isArray(v.todos) || !ownerChat) return
-  const existingMap = new Map((ownerChat.agentTodos || []).map((t: any) => [String(t.id), t]))
-  ownerChat.agentTodos = v.todos.map((t: any) => {
-    const id = String(t.id || t.title || Math.random().toString(36).slice(2))
-    const existing: any = existingMap.get(id)
-    const next = {
-      id,
-      title: t.title || t.name || '',
-      status: t.status || 'pending',
-      detail: t.detail,
-    }
+  const prev: any[] = Array.isArray(ownerChat.agentTodos) ? ownerChat.agentTodos : []
+  const existingMap = new Map(prev.map((t: any) => [String(t.id), t]))
+  const prevByText = new Map(prev.map((t: any) => [String(t.title || '').trim(), t]))
+  ownerChat.agentTodos = coerceTodoList(v.todos, prev).map((t: any) => {
+    const existing: any = existingMap.get(String(t.id)) || prevByText.get(String(t.title || '').trim())
     if (existing && (existing.status === 'done' || existing.status === 'cancelled')) {
-      next.status = existing.status
+      return { ...t, status: existing.status }
     }
-    return next
+    return t
   })
+}
+
+/**
+ * 执行计划（update_plan / exit_plan_mode 维护）→ `chat.agentPlan`。
+ *
+ * 与待办清单同样随聊天存档落盘：会话日志是会话内的事实源，
+ * 聊天存档是跨会话的事实源；重开聊天时后者作为 seed 回到新会话（再落盘一条 plan/write）。
+ */
+export function projectPlan(ownerChat: any, v: any): void {
+  if (!ownerChat) return
+  if (typeof v.plan === 'string') ownerChat.agentPlan = v.plan
+  else if (v.plan === null) ownerChat.agentPlan = null
+}
+
+/**
+ * 计划评审（exit_plan_mode）→ `chat.pendingPlanReview`（聊天存档级的恢复源）。
+ *
+ * - 会话里有挂起评审 → 记下 reviewId / plan / 会话 id（进程被杀也不会丢）；
+ * - 评审已被回答或取消 → 清掉本地标记（决策由调用方另行记入 `chat.planDecision`）。
+ */
+export function projectPlanReview(ownerChat: any, v: any): void {
+  if (!ownerChat) return
+  const review = v?.pendingPlanReview
+  if (review) {
+    ownerChat.pendingPlanReview = {
+      reviewId: String(review.reviewId || ''),
+      plan: String(review.plan || ''),
+      sessionId: String(v?.id || ''),
+    }
+    return
+  }
+  if (ownerChat.pendingPlanReview && ownerChat.pendingPlanReview.sessionId === String(v?.id || '')) {
+    ownerChat.pendingPlanReview = null
+  }
 }

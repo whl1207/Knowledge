@@ -49,9 +49,12 @@ export function workspaceRoot(store: any): string {
 /**
  * 工作区提示文本（追加到 system prompt 用；未设置工作区返回 ''）。
  * 注意：AgentOptions.cwd 只做工具路径围栏，模型看不到；必须写进提示词才算「组装到上下文」。
+ *
+ * @param workspace 可选的覆盖值：**每个聊天自己的激活工作区**（见 shared/chatWorkspace.ts）；
+ *                  缺省用全局默认工作区 store.root。
  */
-export function buildWorkspaceHint(store: any, locales?: string): string {
-  const root = workspaceRoot(store)
+export function buildWorkspaceHint(store: any, locales?: string, workspace?: string): string {
+  const root = String(workspace ?? '').trim() || workspaceRoot(store)
   if (!root) return ''
   return (locales ?? store?.locales) === 'en'
     ? `\nCurrent working directory (workspace): ${root}`
@@ -204,6 +207,8 @@ export interface AssembleAgentPromptInput {
   provider?: string
   /** 是否注入工作区提示（默认 true；false 时仍返回 cwd） */
   includeWorkspaceHint?: boolean
+  /** 覆盖工作区：**每个聊天自己的激活工作区**（缺省用全局默认 store.root） */
+  workspace?: string
 }
 
 export interface AssembleAgentPromptResult {
@@ -247,7 +252,7 @@ export function assembleAgentSystemPrompt(input: AssembleAgentPromptInput): Asse
   // 全选 → 启用 skill 工具（与指令段模式无关，须在渲染前生效，{{toolUsage}} 才会包含 skill）
   if (allSkillsSelected && !tools.includes('skill')) tools.push('skill')
 
-  const cwdHintText = input.includeWorkspaceHint === false ? '' : buildWorkspaceHint(store, locales)
+  const cwdHintText = input.includeWorkspaceHint === false ? '' : buildWorkspaceHint(store, locales, input.workspace)
   const usedSections = !!preset
     && preset.loopPromptMode === 'sections'
     && Array.isArray(preset.loopSections)
@@ -256,7 +261,7 @@ export function assembleAgentSystemPrompt(input: AssembleAgentPromptInput): Asse
   const resolveSkill: PromptSkillResolver = input.resolveSkill
     ?? ((key: string) => (input.enabledSkills || []).find((s) => s.path === key || s.name === key))
 
-  let cwd: string | undefined = workspaceRoot(store) || undefined
+  let cwd: string | undefined = String(input.workspace ?? '').trim() || workspaceRoot(store) || undefined
   let systemPrompt: string
   // 勾选了但解析不到的技能（技能目录变更 / 技能改名后 preset.selectedSkills 里的旧路径即会落这里）
   const unresolvedSkills: string[] = []

@@ -331,6 +331,15 @@ const configItems = computed<ConfigItem[]>(() => [
   },
   {
     group: 'process',
+    key: 'questionChoiceOptions',
+    label: '生成选择题选项',
+    labelEn: 'Generate Choice Options',
+    type: 'checkbox',
+    description: '推理问题时一并生成**选择题选项**（每题 4 个选项 A–D 与正确答案标签），而不是只生成纯问答。打开后：① 问题生成改用选择题提示词（每题一个区块，选项行 + 答案字母，要求干扰项似是而非）；② 问题库记录 <code>choiceMap</code>，正确答案存为选项标签；③ <strong>学习模块</strong>的练习卡据此走<strong>确定性判分</strong>（先写答案 → 检查并揭示 → 按裁决结算），而不是四档自评。仅对<strong>之后新推理的问题</strong>生效，已推理的问题不受影响（需清空重推理）。',
+    descriptionEn: 'Also generate **choice options** when reasoning questions (4 options A–D plus the correct label per question) instead of plain Q&A. When on: ① question generation switches to the choice prompt (one block per question, option lines plus an answer letter, with plausible distractors); ② each question record keeps a <code>choiceMap</code> with the correct answer stored as an option label; ③ the **Learning** module grades such cards **deterministically** (write your answer → check and reveal → settle on the verdict) instead of using the four self-ratings. Applies only to questions reasoned **from now on**; existing questions are untouched (clear and re-reason to convert).'
+  },
+  {
+    group: 'process',
     key: 'maxTestCases',
     label: '测试用例上限',
     labelEn: 'Max Test Cases',

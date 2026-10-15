@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto'
 import { officeService } from './office/office-service'
 import { browserAgentService } from './browser-agent'
 import { drawioService } from './drawio/drawio-service'
+import { logInfo } from './log'
 import { literatureService } from './literature/literature-service'
 import { postgresService } from './postgres/postgres-service'
 import { pluginDevService } from './plugin-dev/plugin-dev-service'
@@ -122,7 +123,7 @@ class McpExposeService {
       this.httpServer!.listen(port, '127.0.0.1', () => resolve())
     })
     this.started = true
-    console.log(`[mcp-expose] MCP listening on http://127.0.0.1:${port}${MCP_EXPOSE_ENDPOINTS.map(e => e.path).join(' ')}`)
+    logInfo('mcp-expose', `MCP listening on http://127.0.0.1:${port}${MCP_EXPOSE_ENDPOINTS.map(e => e.path).join(' ')}`)
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

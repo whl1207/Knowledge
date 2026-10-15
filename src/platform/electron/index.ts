@@ -20,6 +20,7 @@ import type {
   ShellPort,
   WatchPort,
   WindowPort,
+  TerminalPort,
 } from '@/platform/contract'
 
 /** preload 暴露的 ipcRenderer（见 electron/preload/index.ts）；非 Electron 环境为 undefined */
@@ -55,6 +56,8 @@ const MODES: Record<CapabilityId, CapabilityMode> = {
   'skills.store': 'local',
   'llm.hosted': 'local',
   browserAgent: 'local',
+  // 桌面终端走主进程 node-pty（真 PTY）
+  terminal: 'local',
   // 桌面语音走本地 ONNX 合成（sherpa-onnx），不需要系统 TTS
   'host.tts': 'local',
   // 桌面没有系统分享面板：分享入口按能力隐藏
@@ -836,6 +839,15 @@ const browserAgentPort: BrowserAgentPort = {
   },
 }
 
+/** 终端：桌面专属（主进程 node-pty 真 PTY；输出走 events 总线的 terminal:data / terminal:exit） */
+const terminalPort: TerminalPort = {
+  async call(method, payload) {
+    const api = ipc()
+    if (!api?.invoke) return { ok: false, error: 'not-supported' }
+    return api.invoke(`terminal:${method}`, payload)
+  },
+}
+
 export const electronPlatform: Platform = {
   kind: 'electron',
   capabilities,
@@ -849,4 +861,5 @@ export const electronPlatform: Platform = {
   host: hostPort,
   llm: llmPort,
   browserAgent: browserAgentPort,
+  terminal: terminalPort,
 }

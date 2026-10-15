@@ -14,3 +14,10 @@
  * 后续：等 @types/node 升到 22+（Buffer 自身带泛型参数）后，可删除本文件与全部调用点。
  */
 export const asUint8 = (buf: Buffer): Uint8Array => buf as unknown as Uint8Array
+
+/**
+ * 反向垫片：把 `Uint8Array`（例如 pdf-lib `save()` 的产物、`Response.arrayBuffer()` 的视图）
+ * 交给 `fs.writeFileSync` / `writeFile` 这类**只声明接受 Buffer** 的 Node API。
+ * 同样只是类型层转换，运行时是同一个对象。
+ */
+export const asNodeBytes = (bytes: Uint8Array): Buffer => bytes as unknown as Buffer

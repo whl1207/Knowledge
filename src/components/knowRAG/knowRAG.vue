@@ -24,6 +24,9 @@ import {
 } from '@/shared/kbQuestions'
 import type { KbQuestion, QuestionAnswerRef } from '@/shared/kbQuestions'
 
+// 问题生成提示词（「生成选择题选项」开关打开时用 choiceQuestionPrompt 整份替换纯问答提示词）
+import { choiceQuestionPrompt } from '@/services/learningPrompt'
+
 import { getDocument } from 'pdfjs-dist'
 // pdf.js 运行时资源（worker / CMap / 标准字体）：统一在 @/lib/pdfjs 配置，缺 CMap 会导致整段文字不渲染
 import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
@@ -50,6 +53,7 @@ import { isPdfFile, isWordFile, isImageFile, isMediaFile, stripFrontmatter, mdPa
 // 检索基础：余弦相似度等（单一实现，父壳与 headless/子组件共享）
 import { cosineSimilarity } from '@/shared/kbRetrieval'
 import { matchSliceKeyword } from '@/shared/kbSliceSearch'
+import { kbTestSnapshot } from '@/store/kbTestSnapshot'
 
 const ontologyData = ref<{
   nodes: any[],
@@ -97,7 +101,9 @@ interface KbTestData {
     allStrategySliceResults?: any[]
     strategyRuns?: Record<string, any[]>
 }
-const testData = ref<KbTestData | null>(null)
+// 测试结果快照：放在模块级（@/store/kbTestSnapshot）而不是组件内 ref ——
+// 面板被销毁重挂时组件内 ref 会重置，但模块级快照还在，重挂后由 testManager 自动恢复测试数据
+const testData = kbTestSnapshot as any
 const onTestDataChange = (data: KbTestData) => { testData.value = data || null }
 
 let idCounters = {
@@ -138,7 +144,14 @@ const selectedFileIndex = ref(-1) as any
 let documents = ref([{name:'全部'}]) as any
 let documentName = ref("全部") as any
 let blocks = ref([]) as any
-let viewMode = ref('qa')
+/**
+ * 会话内「上次停留的标签页」与「上次成功加载的知识库(.kb)路径」（模块级，跨组件重挂存活）：
+ * 面板若被销毁重挂（KeepAlive 未命中 / 窗口重载），init 会优先把它重新打开并把视图切回原标签页，
+ * 而不是回退到「自动知识库」——那会清空已加载的切片 / 问题库 / 文件摘要（表现为「切回来数据没了」）。
+ */
+let lastViewMode: string = 'qa'
+let lastLoadedKbPath: string | null = null
+let viewMode = ref(lastViewMode || 'qa')
 let prompt = ref("")
 let result = ref(store.locales=="zh"
     ? `### 👋 欢迎使用知识库问答
@@ -474,6 +487,12 @@ let model = ref({
     questionDedupEnabled: true,
     questionDedupThreshold: 0.85,
     questionMergeEnabled: true,
+    /**
+     * 推理问题时一并生成**选择题选项**（每组 4 个 A–D + 正确答案标签）。
+     * 打开后问题生成改用选择题提示词，问题库记录 choiceMap，
+     * 学习模块据此走确定性判分而不是四档自评。见 docs/设计决策记录.md §五「学习模块 P1-3」。
+     */
+    questionChoiceOptions: true,
     mdsIterations: 50,
     mdsEpsilon: 0.1,
     pcaComponents: 2,
@@ -1073,6 +1092,8 @@ watch(() => sliceSearchKeyword.value, () => {
 
 // 切回切片视图时，若可视区放大而切片不足，自动补足（等 DOM 渲染后再判断高度）
 watch(() => viewMode.value, (v) => {
+    // 记住停留的标签页：组件重挂后 init 会恢复到这里（例如切回来仍是「测试」）
+    if (v) lastViewMode = v
     if (v === 'slice') {
         nextTick(() => fillViewportIfShort())
     }
@@ -1111,6 +1132,8 @@ const pushQuestion = (q: Partial<KbQuestion> & { text: string }, prepend = false
     note: q.note,
     // 答案与问题分开存储（手动/导入/推理生成），必须透传否则入库即丢失
     extraAnswer: q.extraAnswer,
+    // 选择题选项也必须透传（同一类错误：字段复制式构造，漏了就静默丢）
+    choiceMap: q.choiceMap,
   }
   if (prepend) questionBank.value.unshift(full)
   else questionBank.value.push(full)
@@ -1118,7 +1141,14 @@ const pushQuestion = (q: Partial<KbQuestion> & { text: string }, prepend = false
 }
 
 /** 批量替换某切片推理产生的问题（重推理时调用；问题只入问题库，不写切片；answers 与 texts 对齐，存入 extraAnswer） */
-const replaceBlockReasonedQuestions = (block: any, texts: string[], vecs: (number[] | undefined)[], answers?: (string | undefined)[]) => {
+const replaceBlockReasonedQuestions = (
+  block: any,
+  texts: string[],
+  vecs: (number[] | undefined)[],
+  answers?: (string | undefined)[],
+  /** 选择题选项（下标与 texts 对齐）；「生成选择题选项」关闭时为 undefined */
+  choiceMaps?: (Record<string, string> | undefined)[],
+) => {
   const blockId = block?.id
   if (!blockId) return
   // 仅移除该块「推理产生」的问题（含已合并进别的答案的），保留手动/导入等其他来源
@@ -1129,6 +1159,7 @@ const replaceBlockReasonedQuestions = (block: any, texts: string[], vecs: (numbe
     const t = (text || '').trim()
     if (!t) return
     const ans = answers?.[k]
+    const cm = choiceMaps?.[k]
     pushQuestion({
       text: t,
       qVector: vecs?.[k] || undefined,
@@ -1138,6 +1169,8 @@ const replaceBlockReasonedQuestions = (block: any, texts: string[], vecs: (numbe
       answerBlocks: [{ blockId, filePath, label }],
       // LLM 顺带生成的答案与问题分开存储（见 KbQuestion.extraAnswer）
       extraAnswer: ans || undefined,
+      // 选择题选项：有它时 extraAnswer 存的是正确选项**标签**，学习模块据此确定性判分
+      choiceMap: cm && Object.keys(cm).length ? cm : undefined,
       origin: 'reasoned',
       status: 'kept',
       createdAt,
@@ -3177,15 +3210,23 @@ const generateFileSummaries = async () => {
 
 const reasoning = async function(i: number) {
     let qBuffer = ''
-    let history = [{role: 'user', content: model.value.processPrompt + blocks.value[i].A}];
+    // 「生成选择题选项」打开 → 换用选择题提示词；否则沿用可自定义的纯问答提示词。
+    // 两份提示词是**整份替换**而不是追加：输出格式必须唯一，否则解析器分不清
+    // 一个「答案：」属于上一题的选项还是新一条问答。
+    const ingestPrompt = getConfiguredIngestPrompt('processPrompt')
+    const basePrompt = ingestPrompt || model.value.processPrompt
+    const prompt = wantsChoiceQuestions() ? choiceQuestionPrompt(store.locales === 'zh') : basePrompt
+    let history = [{role: 'user', content: prompt + blocks.value[i].A}];
     try {
         await kbStreamChat(history, (chunk) => { qBuffer += chunk }, { think: false });
         const qText = (qBuffer || '').trim();
         if (!qText) throw new Error("推理结果为空");
         // 解析“问题 + 答案”成对（答案缺省时兼容旧纯问题列表）；问题→text、答案→extraAnswer 分开存储
+        // 选择题：选项→choiceMap（下标与 texts 对齐），答案已归一成选项标签
         const pairs = parseQuestionAnswerPairs(qText)
         const texts = pairs.map(p => p.text).filter(Boolean)
         const answers = pairs.map(p => p.answer)
+        const choiceMaps = pairs.map(p => p.choiceMap)
         let vecs: (number[] | undefined)[] = []
         // 「提取时立即向量化」关闭（默认）时不在此嵌入：LM Studio 等单服务下对话/嵌入模型不能同时常驻，
         // 每条都换载模型会拖垮速度；改为全部推理结束后统一补一次（见 extractQuestionsWithProgress）
@@ -3195,7 +3236,7 @@ const reasoning = async function(i: number) {
                 vecs = texts.map((_, k) => embs?.[k])
             } catch (e) { console.warn('独立问题向量化失败', e) }
         }
-        replaceBlockReasonedQuestions(blocks.value[i], texts, vecs, answers)
+        replaceBlockReasonedQuestions(blocks.value[i], texts, vecs, answers, choiceMaps)
         try { scheduleRefreshAtlas(120) } catch (e) {}
     } catch (error) {
         console.error("处理失败:", error);
@@ -3328,6 +3369,17 @@ const getConfiguredIngestPrompt = (key: 'processPrompt' | 'fileSummaryPrompt'): 
     }
     return ''
 }
+
+/** 当前策略的 semantic_enhance 步骤是否显式要求生成选择题选项（未设置时跟随全局开关） */
+const stepWantsChoice = (): boolean | null => {
+    const def = getStrategies().find(s => s.id === queryMethod.value)
+    const st = def?.ingestionSteps?.find(s => 'choiceQuestionPrompt' in (s.params || {}))
+    if (!st) return null
+    return !!st.params.choiceQuestionPrompt
+}
+
+/** 本次问题推理是否产出选择题选项：步骤级设置优先，否则用全局「处理配置」开关 */
+const wantsChoiceQuestions = (): boolean => stepWantsChoice() ?? !!model.value.questionChoiceOptions
 
 const runStrategyIngestion = async (strategyId?: string) => {
     const sid = strategyId || queryMethod.value
@@ -3866,7 +3918,7 @@ const runIncrementalUpdate = async () => {
             setPrepStep(2, 'running', zh('生成变更文件的摘要...', 'Summarizing changed files...'))
             const ingestCtx: IngestionContext = {
                 blocks: blocks.value as any,
-                config: { url: model.value.url, embed: model.value.embed, chat: model.value.chat, process: model.value.process, processPrompt: model.value.processPrompt, fileSummaryPrompt: getConfiguredIngestPrompt('fileSummaryPrompt') || undefined, think: model.value.think },
+                config: { url: model.value.url, embed: model.value.embed, chat: model.value.chat, process: model.value.process, processPrompt: getConfiguredIngestPrompt('processPrompt') || model.value.processPrompt, fileSummaryPrompt: getConfiguredIngestPrompt('fileSummaryPrompt') || undefined, think: model.value.think },
                 services: kbAi.buildIngestionServices(buildKbSpec(), {
                     // 推理摘要写回文件 frontmatter（持久化）
                     syncFileSummary: (fp: string, s: string) => syncFileSummaryToFrontmatter(fp, s),
@@ -4628,6 +4680,8 @@ const loadKnowledgeBases = async function(index?: number) {
 
     // 自动知识库：使用当前文件夹自动切片/向量化构建的数据（问答时自动准备，也可手动处理）
     if ((kbFile as any).auto) {
+        // 用户明确切回自动知识库：清掉「上次加载的 .kb」记忆，避免下次重挂又把它拉回来
+        lastLoadedKbPath = null
         // 重新选择自动知识库时，清除所有切片/文件摘要/本体/社区/报告/测试用例等，与初始化进入模块一致
         resetKbState()
         // 刷新当前文件夹文件列表（不切块），等同 init 入口行为
@@ -4691,6 +4745,8 @@ const loadKnowledgeBases = async function(index?: number) {
         
         blocks.value = saveData.blocks
         isKbLoaded.value = true
+        // 记住本次成功加载的 .kb：面板重挂时 init 会优先把它重新打开（而不是回退到自动知识库）
+        lastLoadedKbPath = kbFile.path
         resetScrollLoad()
         
         if (saveData.config.embedModel) {
@@ -5011,8 +5067,25 @@ const init = async function(skipFolderLoad = false) {
 
     await scanKnowledgeBases()
     await getModel()
-    // 默认进入问答模块（loadFolderFiles 默认会切到文件视图，这里恢复）
-    viewMode.value = 'qa'
+    // 组件重挂（保活未命中/窗口重载）：优先恢复上次加载的知识库与停留的标签页，
+    // 否则会回退到「自动知识库」并把已加载的切片/问题库/文件摘要清空（用户看到的就是「数据没了」）
+    if (!skipFolderLoad && lastLoadedKbPath && knowledgeBases.value.some((k: any) => k.path === lastLoadedKbPath)) {
+        try {
+            // 快照兜底：.kb 里可能没存测试结果（未开启「保存测试结果到 KB 文件」），
+            // 但模块级快照里有 → 别让 openKbByPath 里的赋值把它清成 null
+            const snapshotBefore = testData.value
+            await openKbByPath(lastLoadedKbPath)
+            if (!testData.value && snapshotBefore) testData.value = snapshotBefore
+            // openKbByPath 会把视图切到问答：恢复到上次停留的标签页（例如「测试」）
+            viewMode.value = lastViewMode || 'qa'
+            return
+        } catch (e) {
+            console.warn('[knowRAG] 恢复上次知识库失败，回退到默认视图:', e)
+        }
+    }
+    // 默认进入问答模块（loadFolderFiles 默认会切到文件视图，这里恢复）；
+    // 外部刚打开 .kb 的流程（skipFolderLoad）保持原行为进问答，其余情况回到上次停留的标签页
+    viewMode.value = skipFolderLoad ? 'qa' : (lastViewMode || 'qa')
 }
 
 const atlasModuleRef = ref()
@@ -6550,6 +6623,9 @@ const handleModalKeydown = (event: KeyboardEvent) => {
 }
 
 onMounted(async () => {
+    // 生命周期诊断（保活排查）：这三条日志能一眼看出「切模块是否把本面板销毁了」——
+    // 切走时若打印「组件被卸载」，说明保活没生效，切片/问题库/测试结果会被 init 重置。
+    console.log('[知识处理] 首次挂载（走 init：加载工作区/扫描知识库）')
     // 外部打开（文件关联双击 .kb / 知识管理双击 .kb）：**优先处理**，不等 init。
     // init 内含工作区文件扫描（loadFolderFiles），工作区大或含大文件时会非常慢，
     // 排在它后面会导致「知识处理模块打开了，但目标知识库很久/一直没加载」。
@@ -6571,6 +6647,7 @@ onMounted(async () => {
 
 // KeepAlive 缓存：切回本面板时恢复 Atlas 视图（首次挂载由 onMounted 走 init，这里不重复初始化）
 onActivated(() => {
+    console.log('[知识处理] 从缓存恢复（keep-alive 生效：切片/问题/测试结果保留）')
     // 兜底：初始化已完成而仍有待打开标记（如面板在后台时收到「打开 .kb」请求）→ 补做加载
     if (kbInitDone && store.kbPathToOpen) openExternalKb()
     if (viewMode.value === 'atlas' && atlasModuleRef.value) {
@@ -6582,12 +6659,15 @@ onActivated(() => {
 
 // KeepAlive 缓存：切走本面板时清理 Atlas 释放资源（后台任务如切片/构建不受影响）
 onDeactivated(() => {
+    console.log('[知识处理] 已切走并留在缓存（后台任务继续，切回即恢复）')
     if (atlasModuleRef.value) {
         atlasModuleRef.value.cleanupAtlas()
     }
 })
 
 onBeforeUnmount(() => {
+    // 走到这里说明本面板被销毁（保活失效）：切片/问题库/测试结果会随 init 重置
+    console.warn('[知识处理] 组件被卸载 → 模块状态（切片/问题库/测试结果）将被重置')
     if (atlasModuleRef.value) {
         atlasModuleRef.value.cleanupAtlas()
     }
@@ -7760,7 +7840,8 @@ onBeforeUnmount(() => {
     
     .modal-header h3::before {
         content: '\f067';
-        font-family: FontAwesome;
+        font-family: 'Font Awesome 5 Free';
+        font-weight: 900;
         color: var(--fontActiveColor);
         font-size: 12px;
     }

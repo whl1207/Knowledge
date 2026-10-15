@@ -171,16 +171,19 @@ export const agentExecutor: WorkflowNodeExecutor = {
             }
           }
 
-          if (v.pendingQuestion) {
+          if (v.pendingQuestion || v.pendingPlanReview) {
             // 工作流是单次运行，没有人在线回答：直接取消，避免整条流程悬挂
-            ctx.log('warning', `智能体请求人工输入，但工作流运行期无人应答，已取消本次提问：${v.pendingQuestion.question}`)
+            const what = v.pendingPlanReview
+              ? `计划评审（exit_plan_mode）：${String(v.pendingPlanReview.plan || '').slice(0, 120)}`
+              : `人工输入：${v.pendingQuestion?.question ?? ''}`
+            ctx.log('warning', `智能体请求${what}，但工作流运行期无人应答，已取消本次请求`)
             void agentBridge.cancel(view.id, 'user').catch(() => { /* 已收敛 */ })
           }
           if (v.lastError) {
             finish(() => reject(new Error(v.lastError!)))
             return
           }
-          if (v.status === 'idle' && sawRunning && !v.pendingQuestion) {
+          if (v.status === 'idle' && sawRunning && !v.pendingQuestion && !v.pendingPlanReview) {
             finish(() => resolve(v.lastAssistantContent || streamed || ''))
           }
         })

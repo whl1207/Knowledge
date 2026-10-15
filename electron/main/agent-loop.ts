@@ -19,6 +19,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { logInfo } from './log'
 import { AIUtils } from '@/shared/ai-core'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { boundToolResult, buildSpillPreview, shouldSpill } from '@/shared/toolResultBudget'
@@ -39,11 +40,15 @@ import type {
   AgentSummary,
   AgentStateView,
   TodoItem,
+  AskUserQuestion,
+  AskUserAnswer,
 } from '@/types/agent'
 import type { DerivedMessage, DerivedEntry } from '@/types/session-log'
 import type { ToolResult, ToolExecutionContext } from '@/types/tool'
 import { brand, type ToolName, type AgentId } from '@/types/ids'
 import { runCodeFunctionSchema } from './code-sdk'
+import { askQuestionsDigest, coerceAskAnswers } from '@/shared/agentAsk'
+import { PLAN_REVIEW_ID_PREFIX, parsePlanReviewReply, isPlanReviewId, type PlanReviewOutcome } from '@/shared/agentPlanReview'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { decideTruncationContinue } from '@/shared/truncation'
 // 上下文预算与压缩（P0）：与渲染层共用同一口径（详见 src/shared/contextBudget.ts）
@@ -111,7 +116,7 @@ function dispatchEvent(ev: AgentEvent): void {
   }
 }
 
-/** 向指定 agent 广播事件（供模块级函数使用，如 requestAnswer） */
+/** 向指定 agent 广播事件（供模块级函数使用，如 requestQuestions） */
 function emitTo<K extends AgentEventType>(agentId: string, type: K, payload: AgentEventMap[K]): void {
   dispatchEvent({ agentId: agentId as any, type, payload } as AgentEvent)
 }
@@ -462,6 +467,26 @@ class AgentImpl implements AgentControl {
         source: 'seed',
       })
     }
+    // 计划 / 待办恢复（重开聊天时由渲染层从聊天存档带出）：
+    // 走 setPlan/setTodos → 同样以 `plan/write` / `todo/write` 落盘，
+    // 于是**本会话的日志自洽**（回放即得当前状态），不依赖上一段会话的日志。
+    if (options.seedPlan) this.setPlan(String(options.seedPlan))
+    if (Array.isArray(options.seedTodos) && options.seedTodos.length) this.setTodos(options.seedTodos)
+    // 上一轮评审的裁决（进程重启后用户回答的那条）：作为一条**已记录**的用户可见消息
+    // 注入本会话，使模型知道"那份计划已经批了 / 还要改"——否则裁决只是躺着不动。
+    if (options.seedPlanDecision) this.seedPlanDecision(options.seedPlanDecision)
+  }
+
+  /** 把上次评审的裁决写成一条落盘的 user 消息（模型可见即已记录） */
+  private seedPlanDecision(decision: { verdict: string; feedback?: string; plan?: string }): void {
+    const planExcerpt = String(decision.plan || '').trim().slice(0, 2000)
+    const planPart = planExcerpt ? `\n\n（上次提交的计划）\n${planExcerpt}` : ''
+    const text = decision.verdict === 'approve'
+      ? `【计划已获批】用户批准了你上一轮提交的执行计划，请按该计划继续执行；执行中用 update_todo 维护进度。${planPart}`
+      : decision.verdict === 'keep'
+        ? `【计划待完善】用户要求继续完善上一轮提交的计划，尚未批准${decision.feedback ? `。反馈：${decision.feedback}` : '（未留下文字反馈）'}。请据此修订后用 exit_plan_mode 重新提交，在此之前不要开始执行。${planPart}`
+        : `【评审已关闭】用户关闭了上一轮的计划评审（既未批准也未反馈）：请先简要说明当前理解与待确认的问题，等用户指示后再继续。${planPart}`
+    sessionLog.append(this.id, 'user/message', { content: text, source: 'plan-review' })
   }
 
   get status(): AgentStatus {
@@ -654,6 +679,10 @@ class AgentImpl implements AgentControl {
     this.stepInTurn = 0
     sessionLog.append(this.id, 'turn/start', { turn })
     this.emit('agent/turn-start', { turn })
+    // 清单的回合边界收口（对齐 DSH todo 投影的 turn/start 语义）：上一轮已全部收口的
+    // 清单不带进新任务——旧清单留在界面上会被误读成本轮计划；仍有未完成项时保留
+    // （用户可能正接着上一轮继续做）。
+    this.settleTodosAtTurnStart()
 
     // 后台任务身份（路线图 2.4）：每个 turn 一个 job，owner = agent id
     const job = jobRegistry.start('agent', this.id, `Agent turn ${turn}`, { progress: 0, detail: '开始处理' })
@@ -1194,7 +1223,7 @@ class AgentImpl implements AgentControl {
         },
         onReasoning: (text: string) => {
           reasoning = text
-          console.log('[agent-reasoning]', this.id, text.length)
+          logInfo('agent-reasoning', `id=${this.id} chars=${text.length}`)
           // 思维链流式：把全量累积文本广播给渲染进程（前端按 step 时间线插入思考单元）
           this.emit('assistant/reasoning', { text })
         },
@@ -1574,10 +1603,15 @@ class AgentImpl implements AgentControl {
     }
   }
 
-  // ---------------- plan / todos（update_plan、update_todo 工具） ----------------
+  // ---------------- plan / todos（update_plan、update_todo、exit_plan_mode 工具） ----------------
 
+  /**
+   * 设置执行计划。**唯一写入口**：先落盘（`plan/write`，整值替换、最后一条胜出），
+   * 再广播给 UI——内存状态是日志投影的缓存，不是第二个事实源。
+   */
   setPlan(plan: string | null): void {
     this._plan = plan
+    sessionLog.append(this.id, 'plan/write', { plan })
     this.emit('agent/plan', { plan })
   }
 
@@ -1585,9 +1619,21 @@ class AgentImpl implements AgentControl {
     return this._todos
   }
 
+  /** 设置待办清单（唯一写入口：落盘 `todo/write` → 广播）。 */
   setTodos(todos: TodoItem[]): void {
     this._todos = Array.isArray(todos) ? todos : []
+    sessionLog.append(this.id, 'todo/write', { todos: this._todos })
     this.emit('agent/todos', { todos: this._todos })
+  }
+
+  /**
+   * 回合开始时的清单收口：整张清单都已收口（done / cancelled）时清空并广播；
+   * 仍有 pending / running 项则原样保留（跨轮继续的任务不该被抹掉）。
+   */
+  private settleTodosAtTurnStart(): void {
+    if (!this._todos.length) return
+    if (this._todos.some((t) => t.status === 'pending' || t.status === 'running')) return
+    this.setTodos([])
   }
 
   setError(message: string): void {
@@ -1711,12 +1757,18 @@ export function listAgentTools(agentId: string, scope?: string): { name: ToolNam
 
 // ---------------------------------------------------------------------------
 // ask_user 问答接缝（对齐 DSH user-questions seam）
+//
+// 一次可以有多个问题（单选 / 多选 / 自由文本），回答按问题 id 回填：
+// 渲染进程弹窗收集后经 agent:answer 回传 `answers`（DSH 的 answer batch）。
 // ---------------------------------------------------------------------------
 
 interface PendingQuestion {
   askId: string
+  /** 纯文本摘要（日志 / 兼容旧界面） */
   question: string
-  resolve: (answer: string) => void
+  /** 结构化问题（DSH ask_user_question 契约） */
+  questions: AskUserQuestion[]
+  resolve: (answers: AskUserAnswer[]) => void
   reject: (reason?: any) => void
 }
 
@@ -1724,39 +1776,159 @@ const pendingQuestions = new Map<string, Map<string, PendingQuestion>>()
 
 /**
  * 请求用户回答（ask_user 工具调用）。返回的 Promise 挂起，直到渲染进程
- * 通过 agent:answer IPC 回复；agent dispose 时 reject 全部挂起问题。
+ * 通过 agent:answer IPC 回复；agent dispose / 取消时 reject 全部挂起问题。
+ *
+ * @param agentId 归属会话
+ * @param questions 结构化问题（≥1 题）
+ * @param digest 纯文本摘要（事件载荷的 question 字段）
  */
-export function requestAnswer(agentId: string, question: string): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
+export function requestQuestions(agentId: string, questions: AskUserQuestion[], digest?: string): Promise<AskUserAnswer[]> {
+  return new Promise<AskUserAnswer[]>((resolve, reject) => {
     const askId = `ask-${randomUUID()}`
     let map = pendingQuestions.get(agentId)
     if (!map) {
       map = new Map()
       pendingQuestions.set(agentId, map)
     }
-    map.set(askId, { askId, question, resolve, reject })
-    emitTo(agentId, 'agent/question', { askId, question })
+    map.set(askId, { askId, question: digest || '', questions, resolve, reject })
+    emitTo(agentId, 'agent/question', {
+      askId,
+      question: digest || askQuestionsDigest(questions),
+      questions,
+    })
   })
 }
 
 /** 渲染进程回复问题（agent:answer） */
-export function resolveAnswer(agentId: string, askId: string, answer: string): boolean {
+export function resolveAnswer(agentId: string, askId: string, answer: string, answers?: AskUserAnswer[]): boolean {
+  if (isPlanReviewId(askId)) {
+    // 计划评审走同一条通道（id 前缀 review-）：message 是裁决，answers[0].custom 是反馈。
+    // 会话还活着 → 交给挂起的工具；已经结束（进程重启后恢复的那条）→ 补记裁决进日志。
+    return resolvePlanReview(agentId, askId, answer, answers)
+      || recordPlanReviewForFinishedSession(agentId, askId, answer, answers)
+  }
   const map = pendingQuestions.get(agentId)
   const p = map?.get(askId)
   if (!p) return false
   map!.delete(askId)
-  p.resolve(answer)
+  // 优先用结构化回答；只有纯文本回答时，落到第一题的自定义回答上（旧界面 / 旧客户端）
+  const batch = Array.isArray(answers) && answers.length
+    ? coerceAskAnswers(answers, p.questions)
+    : coerceAskAnswers([{ id: p.questions[0]?.id, selected: [], custom: answer }], p.questions)
+  p.resolve(batch)
   return true
 }
 
-/** 销毁 agent 时 reject 全部挂起问题（防止悬挂 Promise） */
+/** 销毁 / 取消时 reject 全部挂起问题（防止悬挂 Promise） */
 function rejectPendingQuestions(agentId: string, reason: string): void {
   const map = pendingQuestions.get(agentId)
-  if (!map) return
-  for (const p of map.values()) {
-    p.reject(new Error(reason))
+  if (map) {
+    for (const p of map.values()) {
+      p.reject(new Error(reason))
+    }
+    pendingQuestions.delete(agentId)
   }
-  pendingQuestions.delete(agentId)
+  const reviews = pendingPlanReviews.get(agentId)
+  if (reviews) {
+    // 先落一条 cancelled 裁决（否则重启后那条评审会"复活"成永远待裁决），再 reject
+    settlePlanReviews(agentId, 'cancelled')
+    for (const r of reviews.values()) {
+      r.reject(new Error(reason))
+    }
+    pendingPlanReviews.delete(agentId)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 计划评审接缝（对齐 DSH 计划模式的 exit_plan_mode）
+//
+// 与 ask_user 共用同一条回答通道（agent:answer）：`message` 携带裁决
+// （'approve' / 'keep' / 'dismiss'），`answers[0].custom` 携带「继续完善」的反馈。
+// 契约（取值与解析）在 @/shared/agentPlanReview，主进程与手机/网页端共用。
+// ---------------------------------------------------------------------------
+
+interface PendingPlanReview {
+  reviewId: string
+  plan: string
+  resolve: (outcome: PlanReviewOutcome) => void
+  reject: (reason?: any) => void
+}
+
+const pendingPlanReviews = new Map<string, Map<string, PendingPlanReview>>()
+
+/**
+ * 请用户评审一份计划（exit_plan_mode 工具调用）。
+ * 返回的 Promise 挂起，直到渲染进程经 agent:answer 回复裁决；取消 / 销毁时 reject。
+ *
+ * **落盘**：开启与裁决各写一条事件（`plan/review` / `plan/review-result`），
+ * 因此"待评审"是日志折叠出来的事实——进程重启后仍能被恢复，而不是凭空消失。
+ */
+export function requestPlanReview(agentId: string, plan: string): Promise<PlanReviewOutcome> {
+  return new Promise<PlanReviewOutcome>((resolve, reject) => {
+    const reviewId = `${PLAN_REVIEW_ID_PREFIX}${randomUUID()}`
+    let map = pendingPlanReviews.get(agentId)
+    if (!map) {
+      map = new Map()
+      pendingPlanReviews.set(agentId, map)
+    }
+    map.set(reviewId, { reviewId, plan, resolve, reject })
+    sessionLog.append(agentId, 'plan/review', { reviewId, plan })
+    emitTo(agentId, 'agent/plan-review', { reviewId, plan })
+  })
+}
+
+/** 解析一条计划评审回复（agent:answer 上的 review-* id） */
+function resolvePlanReview(agentId: string, reviewId: string, message: string, answers?: AskUserAnswer[]): boolean {
+  const map = pendingPlanReviews.get(agentId)
+  const p = map?.get(reviewId)
+  if (!p) return false
+  map!.delete(reviewId)
+  const outcome = parsePlanReviewReply(message, answers)
+  sessionLog.append(agentId, 'plan/review-result', {
+    reviewId,
+    verdict: outcome.verdict,
+    ...(outcome.feedback ? { feedback: outcome.feedback } : {}),
+  })
+  p.resolve(outcome)
+  return true
+}
+
+/**
+ * 为**已经结束的会话**补记一条评审裁决（进程重启后，用户回答那条被恢复的待评审）。
+ *
+ * 为什么允许：原来的 turn 已经不存在了，但"用户批准 / 要求继续完善"仍是事实，
+ * 必须落到日志，否则界面会永远展示一条没人管的待评审。裁决同时由渲染层记进聊天存档，
+ * 在下一次开场时作为种子交给新会话（见 AgentOptions.seedPlanDecision）。
+ *
+ * @returns 是否记入了一条有效裁决（false = 该会话没挂着这条评审）
+ */
+function recordPlanReviewForFinishedSession(
+  sessionId: string,
+  reviewId: string,
+  message: string,
+  answers?: AskUserAnswer[],
+): boolean {
+  const state = sessionLog.projectAgentState(sessionId)
+  if (!state.pendingReview || state.pendingReview.reviewId !== reviewId) return false
+  const outcome = parsePlanReviewReply(message, answers)
+  sessionLog.append(sessionId, 'plan/review-result', {
+    reviewId,
+    verdict: outcome.verdict,
+    ...(outcome.feedback ? { feedback: outcome.feedback } : {}),
+  })
+  return true
+}
+
+/**
+ * 会话取消 / 销毁时把挂起的评审收口（写 `cancelled` 裁决）。
+ * 否则那条评审会永远停在"待评审"，重启后被当成未完成的决策重新弹出来。
+ */
+function settlePlanReviews(agentId: string, verdict: string): void {
+  const map = pendingPlanReviews.get(agentId)
+  if (!map || map.size === 0) return
+  for (const r of map.values()) {
+    sessionLog.append(agentId, 'plan/review-result', { reviewId: r.reviewId, verdict })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1834,9 +2006,36 @@ function rejectPendingRendererTasks(agentId: string, reason: string): void {
 // 管理器对外扩展（供 tools.ts 的工具实现调用）
 // ---------------------------------------------------------------------------
 
-/** 读取 agent 完整状态（agent:state） */
+/**
+ * 读取 agent 完整状态（agent:state）。
+ *
+ * 会话还活着 → 内存状态；会话已销毁 → **从日志回放**计划与待办
+ * （`plan/write` / `todo/write` 最后一条胜出）。这样"执行完毕的会话"在
+ * 控制台 / 审计里仍能看到最终计划与清单，而不是一片空白。
+ */
 export function getAgentState(id: string): AgentStateView | undefined {
-  return agents.get(id)?.toStateView()
+  const live = agents.get(id)?.toStateView()
+  if (live) {
+    // 活着时以内存里的挂起评审为准（日志里的 `plan/review` 与它一一对应）
+    const review = pendingPlanReviews.get(id)?.values().next().value as PendingPlanReview | undefined
+    if (review) live.pendingPlanReview = { reviewId: review.reviewId, plan: review.plan }
+    return live
+  }
+  const replay = sessionLog.projectAgentState(id)
+  if (!replay.plan && !replay.todos.length && !replay.pendingReview) return undefined
+  const state: AgentStateView = {
+    id: id as AgentId,
+    status: 'disposed',
+    provider: '',
+    pendingInbox: 0,
+    turn: 0,
+    step: 0,
+    plan: replay.plan,
+    todos: replay.todos,
+  }
+  // 进程重启后仍挂着的评审：界面据此恢复那条未完成的决策
+  if (replay.pendingReview) state.pendingPlanReview = { ...replay.pendingReview }
+  return state
 }
 
 /** 读取 agent 最近一次 assistant 完整内容（工具/工作流取结果用：比从日志重建更可靠） */
@@ -1877,6 +2076,89 @@ export async function runAgentAndAwait(
   return { content, error: state.lastError, timedOut, turn: state.turn }
 }
 
+/** 子代理一次性执行的结果（中止时 output 是中止前的部分输出，不冒充成功） */
+export interface AgentTurnOutcome {
+  /** 是否正常收敛（无超时、无取消、无运行期错误） */
+  ok: boolean
+  /** 本轮最终助手文本（中止时是中止前的部分输出） */
+  output: string
+  /** 运行期错误（agent/error 记录的最后一条） */
+  error?: string
+  timedOut: boolean
+  cancelled: boolean
+  /** 本轮 turn 序号（0 = 从未开始） */
+  turn: number
+}
+
+/**
+ * 子代理一次性执行：投递 prompt → 等这一轮 turn 收敛 → 返回最终助手文本。
+ *
+ * 为什么不能直接 `send()` + `whenIdle()`：`send()` 只把输入投进 inbox，驱动器还没把状态
+ * 切到 running，此刻 `whenIdle()` 会**立即解析**（拿到空的 lastContent）——这是
+ * `runOnce()` 注释里记录的同一个坑。这里改用「turn 序号前进 + 回到 idle」判定收敛，
+ * 并支持超时与父级取消（保留中止前的部分输出，供父 Agent 判断已完成了多少）。
+ *
+ * 不销毁会话：调用方自行决定 `disposeAgent`（后台任务由收集/取消时机决定）。
+ */
+export async function awaitAgentTurn(
+  agentId: string,
+  prompt: string,
+  opts: { timeoutMs?: number; signal?: AbortSignal; source?: string } = {},
+): Promise<AgentTurnOutcome> {
+  const agent = agents.get(agentId)
+  if (!agent) {
+    return { ok: false, output: '', error: '子代理会话不存在（可能已被销毁）', timedOut: false, cancelled: false, turn: 0 }
+  }
+  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || 10 * 60 * 1000)
+  const before = agent.currentTurn
+  agent.send(prompt, opts.source || 'subagent')
+
+  // 1) 先等驱动器真正接手（状态离开 idle 或 turn 序号前进），最多 10s
+  const startDeadline = Date.now() + 10_000
+  while (agent.status !== 'disposed' && agent.status === 'idle' && agent.currentTurn <= before && Date.now() < startDeadline) {
+    await new Promise((r) => setTimeout(r, 10))
+  }
+
+  // 2) 等本轮收敛；期间响应超时与父级取消
+  let timedOut = false
+  let cancelled = false
+  const started = Date.now()
+  while (agent.status !== 'disposed') {
+    if (agent.currentTurn > before && agent.status === 'idle') break
+    if (opts.signal?.aborted) {
+      cancelled = true
+      agent.cancel('parent-cancelled')
+      break
+    }
+    if (Date.now() - started > timeoutMs) {
+      timedOut = true
+      agent.cancel('timeout')
+      break
+    }
+    await new Promise((r) => setTimeout(r, 60))
+  }
+
+  // 3) 被中止时等它真正收口（有界），以便拿到中止前的部分输出
+  if (timedOut || cancelled) {
+    const settleDeadline = Date.now() + 5000
+    while (agent.status !== 'disposed' && agent.status !== 'idle' && Date.now() < settleDeadline) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+
+  const state = agent.toStateView()
+  const output = agent.lastContent || ''
+  const error = state.lastError
+  return {
+    ok: !timedOut && !cancelled && !error,
+    output,
+    error: error || (timedOut ? `子代理超时（${Math.round(timeoutMs / 1000)}s）` : cancelled ? '父级已取消，子代理被中止' : undefined),
+    timedOut,
+    cancelled,
+    turn: state.turn,
+  }
+}
+
 /** update_plan 工具：设置执行计划并广播 */
 export function setAgentPlan(agentId: string, plan: string | null): boolean {
   const agent = agents.get(agentId)
@@ -1891,4 +2173,10 @@ export function setAgentTodos(agentId: string, todos: TodoItem[]): boolean {
   if (!agent) return false
   agent.setTodos(todos)
   return true
+}
+
+/** 读取 agent 当前待办清单（update_todo 校验/合并、工作流取状态时用） */
+export function getAgentTodos(agentId: string): TodoItem[] {
+  const agent = agents.get(agentId)
+  return agent ? agent.getTodos() : []
 }

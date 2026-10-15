@@ -28,6 +28,7 @@ import {
   type SessionLogIntegrity,
   type SessionEventMap,
 } from '@/types/session-log'
+import { foldPlanTodoEvents, type PlanTodoState } from '@/shared/agentPlanState'
 
 // ---------------------------------------------------------------------------
 // 工具函数
@@ -365,13 +366,25 @@ class SessionLogStore {
   }
 
   /**
+   * 计划 / 待办的计划式投影（对齐 DSH session projection 的**最后一条胜出**）：
+   * 折叠 `plan/write` / `todo/write` 事件，得到该会话当前的执行计划与待办清单。
+   *
+   * 用途：会话已销毁时 UI 仍能显示最后的计划 / 清单（`getAgentState` 的日志回退），
+   * 以及审计 / 导出时不必去猜内存状态。
+   */
+  projectAgentState(sessionId: string): PlanTodoState {
+    return foldPlanTodoEvents(this.readAll(sessionId))
+  }
+
+  /**
    * 从事件流派生模型历史消息（对齐 DSH deriveMessages）。
    * 规则：
    * - `user/message` → user 消息；
    * - `assistant/message` → assistant 消息（含 toolCalls）；
    * - `tool/call` + `tool/result` → 配对的 tool 消息（失败转 ERROR 文本）；
    * - `session/start.systemPrompt` → 首条 system 消息；
-   * - `assistant/chunk` 不参与派生（仅 UI 保真）。
+   * - `assistant/chunk` 不参与派生（仅 UI 保真）；
+   * - `plan/write` / `todo/write` 不参与派生（会话状态，不是模型消息）。
    */
   deriveMessages(sessionId: string): DerivedMessage[] {
     return this.deriveEntries(sessionId).map((e) => e.msg)

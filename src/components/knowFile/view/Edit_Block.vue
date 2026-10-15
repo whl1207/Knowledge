@@ -481,9 +481,16 @@ const pasteText = async () => {
 const asrManager = ref<ReturnType<typeof createASRManager> | null>(null)
 const isASRRecording = ref(false)
 const isASRProcessing = ref(false)
-const asrErrorMessage = ref('')
 const asrLivePreview = ref('') // funasr 流式：边说边看的实时文本
-let asrErrorTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 语音输入的出错 / 缺配置提示：统一用 ElMessage（顶部提示条），
+ * 不在状态栏麦克风旁边挂红色气泡——错误显示只保留这一条通道（与全局语音输入一致）。
+ */
+const asrWarn = (message: string) => {
+    console.warn('[ASR] 语音输入:', message)
+    ElMessage({ type: 'warning', duration: 6000, showClose: true, message })
+}
 
 /** 初始化 ASR 管理器，成功返回管理器实例，失败返回 null */
 const initASR = (): NonNullable<typeof asrManager.value> | null => {
@@ -520,12 +527,9 @@ const initASR = (): NonNullable<typeof asrManager.value> | null => {
                 }
             },
             onError: (error: string) => {
-                console.error('[ASR] 语音输入错误:', error)
                 isASRRecording.value = false
                 isASRProcessing.value = false
-                asrErrorMessage.value = error
-                if (asrErrorTimer) clearTimeout(asrErrorTimer)
-                asrErrorTimer = setTimeout(() => { asrErrorMessage.value = '' }, 5000)
+                asrWarn(error)
             }
         })
         return asrManager.value
@@ -636,7 +640,6 @@ onBeforeUnmount(async () => {
         if (isASRRecording.value) asrManager.value.abort()
         asrManager.value = null
     }
-    if (asrErrorTimer) clearTimeout(asrErrorTimer)
 })
 </script>
 
@@ -691,9 +694,6 @@ onBeforeUnmount(async () => {
         <div v-if="isASRRecording || isASRProcessing" class="asr-wave-wrap" @click="toggleASR" :title="getASRTitle()">
             <span v-for="i in 5" :key="i" class="asr-wave-dot" :style="{ animationDelay: (i * 0.15) + 's' }"></span>
             <div v-if="asrLivePreview" class="asr-wave-live" title="实时识别">{{ asrLivePreview }}</div>
-            <div v-if="asrErrorMessage" class="asr-wave-err">
-                <i class="fa fa-exclamation-triangle"></i> {{ asrErrorMessage }}
-            </div>
         </div>
 
     </div>
@@ -807,29 +807,7 @@ onBeforeUnmount(async () => {
   pointer-events: none;
 }
 
-.asr-wave-err {
-    position: absolute;
-    bottom: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
-    background: #e74c3c;
-    color: #fff;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    white-space: nowrap;
-    max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-    pointer-events: none;
-    animation: asr-err-in 0.2s ease;
-}
-.asr-wave-err i { margin-right: 4px; font-size: 10px; }
-@keyframes asr-err-in {
-    from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
+/* 语音输入的出错 / 缺配置提示统一改为 ElMessage（见 asrWarn），这里不再有红色气泡样式 */
 
 .asr-menu-recording {
     color: var(--fontActiveColor) !important;

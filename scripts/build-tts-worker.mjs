@@ -25,7 +25,6 @@ await build({
   external: ['sherpa-onnx-node', 'electron'],
   outfile: path.join(outDir, 'tts-worker.js'),
   sourcemap: false,
-  logLevel: 'info',
+  // 只在有警告/错误时说话：成功路径不必往构建日志里塞「xxx kb / Done in 6ms」
+  logLevel: 'warning',
 })
-
-console.log('[tts-worker] DONE')
