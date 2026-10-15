@@ -31,18 +31,29 @@
     </PluginBoundary>
   </template>
 
-  <!-- 单条目（keyed / single / chain） -->
-  <PluginBoundary v-else-if="singleComponent" :key="singleKey" :label="singleLabel">
+  <!-- 单条目（keyed / single / chain）
+       ⚠️ 保活的三个关键点（少一个「声明了 keepAlive 的面板」就会被销毁、状态丢失）：
+        1) PluginBoundary **不能**带 :key —— 面板切换时 key 变化会重建边界，
+           而 KeepAlive 卸载会把缓存实例全部 unmount；
+        2) KeepAlive 必须**常驻**（不能按当前面板是否声明 keepAlive 来 v-if），
+           否则切到普通面板时它被卸载，缓存同样被清空；
+        3) include 必须是「所有声明了 keepAlive 的面板名」的**全集**，
+           否则切到另一个面板时 include 变化会触发 pruneCache，把刚缓存的面板清掉。
+       缓存键用「面板 key + 重试次数」：不同面板各占一个缓存槽，切回即恢复。 -->
+  <PluginBoundary v-else-if="singleComponent" :label="singleLabel" :entry-key="singleKey">
     <template #default="{ attempt }">
-      <KeepAlive v-if="singleKeepAlive" :include="singleKeepAlive">
-        <component :is="singleComponent" :key="attempt" v-bind="singleProps" />
+      <!-- KeepAlive 内必须恰好一个子节点：分支说明写在这里（注释也会被算作子节点，故不能放进 KeepAlive 内） -->
+      <KeepAlive v-if="keepAliveInclude" :include="keepAliveInclude">
+        <component v-if="isCoreEntry" :is="singleComponent" :key="`${singleKey}|${attempt}`" v-bind="singleProps" />
+        <div v-else-if="isMainPanel" class="plugin-panel-scroll scoll">
+          <component :is="singleComponent" :key="`${singleKey}|${attempt}`" v-bind="singleProps" />
+        </div>
+        <component v-else :is="singleComponent" :key="`${singleKey}|${attempt}`" v-bind="singleProps" />
       </KeepAlive>
-      <!-- 主面板位置的「插件面板」套一层滚动容器：面板内容超过可视高度时出现滚动条，
-           内置面板（meta.core）保持原样，避免影响既有布局；scoll = 应用统一的细滚动条样式 -->
       <div v-else-if="isMainPanel && !isCoreEntry" class="plugin-panel-scroll scoll">
-        <component :is="singleComponent" :key="attempt" v-bind="singleProps" />
+        <component :is="singleComponent" :key="`${singleKey}|${attempt}`" v-bind="singleProps" />
       </div>
-      <component v-else :is="singleComponent" :key="attempt" v-bind="singleProps" />
+      <component v-else :is="singleComponent" :key="`${singleKey}|${attempt}`" v-bind="singleProps" />
     </template>
   </PluginBoundary>
 </template>
@@ -50,7 +61,7 @@
 <script setup lang="ts">
 import { computed, provide, type Component } from 'vue'
 import PluginBoundary from './PluginBoundary.vue'
-import { useResolvedSlot, useSlotEntries } from '@/lib/plugin/useSlots'
+import { useAllSlotEntries, useResolvedSlot, useSlotEntries } from '@/lib/plugin/useSlots'
 import { slotRegistry, type SlotDefinition } from '@/lib/plugin/slots'
 import { SLOT_META_CORE, SLOT_META_KEEP_ALIVE, SLOT_META_PASS_OWNER, SLOT_OWNER_KEY } from '@/shared/pluginSlots'
 import { PANEL_MAIN_SLOT } from '@/lib/plugin/coreSlots'
@@ -75,6 +86,8 @@ const isMainPanel = computed(() => props.name === PANEL_MAIN_SLOT)
 // 注意不要用 entriesAll：那是「列清单/诊断」用的全量视图，会把限定到其它页面的条目也渲染出来
 // （实测踩坑：settings.card 的 meta.target='view' 卡片曾泄漏到商店页）。
 const entries = useSlotEntries(props.name, () => props.owner)
+/** 槽位全部条目（不过滤 owner）：用于汇总 keepAlive include 名单 */
+const allEntries = useAllSlotEntries(props.name, () => props.owner)
 const resolved = useResolvedSlot(props.name, () => props.owner)
 
 // 槽位 owner 注入（组件内 inject(SLOT_OWNER_KEY) 可读，无需声明 props）
@@ -87,9 +100,19 @@ const singleEntry = computed<SlotDefinition | null>(() => (isMulti.value ? null 
 const singleComponent = computed<Component | null>(() => (singleEntry.value?.component as Component) ?? null)
 const singleKey = computed(() => singleEntry.value?.key ?? 'none')
 const singleLabel = computed(() => singleEntry.value?.titleZh || singleEntry.value?.key || '')
-const singleKeepAlive = computed(() => {
-  const name = singleEntry.value?.meta?.[SLOT_META_KEEP_ALIVE]
-  return typeof name === 'string' && name ? name : undefined
+/**
+ * KeepAlive 的 include 名单 = 该槽位**所有**条目声明的 keepAlive 名（全集）。
+ * 必须是全集：若只传当前面板的名字，切到另一个面板时 include 变化会触发 KeepAlive 的 pruneCache，
+ * 把刚缓存的面板整批卸载（这正是「切走再切回，测试数据没了」的根因之一）。
+ * 名单里没有的条目（主页 / 知识管理 / 未声明保活的插件面板）保持原来的「切走即销毁」行为。
+ */
+const keepAliveInclude = computed<string[] | undefined>(() => {
+  const names: string[] = []
+  for (const def of allEntries.value) {
+    const n = def.meta?.[SLOT_META_KEEP_ALIVE]
+    if (typeof n === 'string' && n && !names.includes(n)) names.push(n)
+  }
+  return names.length ? names : undefined
 })
 const singleProps = computed<Record<string, unknown>>(() =>
   singleEntry.value ? componentProps(singleEntry.value) : {},

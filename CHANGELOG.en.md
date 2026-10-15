@@ -21,6 +21,7 @@
 - **Settings merge: “General → Features” moved into “General → Basic”**: the module switches and the Knowledge Management view now live on the Basic page; the old entry point (`?nav=features`) and plugin cards targeting `features` still work.
 - **“General → Data” no longer lists “Legacy todos & notes”**: that historical category is gone from the data inventory and from per-category export/import.
 - **File associations completed for Linux / macOS**: on Linux the association actually works after a `.deb` install (the desktop entry declares the MIME types and mimeapps.list is written with the real desktop-entry name); the macOS build now appears in the “Open with” list without claiming the system default, and the settings page text was updated.
+- **Each chat keeps its own composer content**: switching chats (and switching modules or restarting the app) no longer shares one input box — unfinished text stays in its own chat and comes back when you return to it.
 
 ### Fixed
 

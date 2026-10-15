@@ -50,6 +50,7 @@ import { isPdfFile, isWordFile, isImageFile, isMediaFile, stripFrontmatter, mdPa
 // 检索基础：余弦相似度等（单一实现，父壳与 headless/子组件共享）
 import { cosineSimilarity } from '@/shared/kbRetrieval'
 import { matchSliceKeyword } from '@/shared/kbSliceSearch'
+import { kbTestViewRequest } from '@/store/kbTestRun'
 
 const ontologyData = ref<{
   nodes: any[],
@@ -1083,6 +1084,9 @@ watch(() => viewMode.value, (v) => {
         scheduleFileViewChangeCheck()
     }
 })
+
+// 全局「知识库评测」进度条点击 → 跳到「测试」标签页（App.vue 负责把主面板切到「知识处理」）
+watch(kbTestViewRequest, () => { viewMode.value = 'test' })
 
 // ==================== 问题库（Question Bank，一等实体） ====================
 // 方案 A：问题只存问题库（每条独立文本 + qVector + 关联切片引用 answerBlocks/srcBlockId）；

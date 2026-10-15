@@ -9,6 +9,8 @@ import { computeBM25Score } from '@/shared/graphrag/search'
 import { INGESTION_PRIMITIVES, prewarmEntityVectors, entityVectorCacheStats } from '@/shared/graphrag/primitives'
 import type { RetrievalContext, IngestionContext } from '@/shared/graphrag/primitives'
 import { cosineSimilarity } from '@/shared/kbRetrieval'
+import { reportKbTestRun, clearKbTestRun } from '@/store/kbTestRun'
+import { setRunningTask } from '@/store/runningTasks'
 import * as kbAi from '@/shared/kbAiClient'
 const store=usestore()
 
@@ -2537,6 +2539,10 @@ const runBatchTest = async () => {
   test.isRunning = true
   test.progress = 0
   startTestClock()
+  // 全局运行态：登记后台任务（关闭窗口会提示）+ 底角进度条（切到任何模块都能看到，点击跳回本页）
+  beginGlobalTestRun(store.locales=='zh'
+    ? `批量测试（当前策略）· ${getAlgorithmLabel(test.currentAlgorithm)}`
+    : `Batch test (current strategy) · ${getAlgorithmLabel(test.currentAlgorithm)}`, test.questions.length)
   
   initFileSummaries()
   
@@ -2664,6 +2670,7 @@ const runBatchTest = async () => {
   batchRunKind.value = ''
   resetBatchCtl()
   test.isRunning = false
+  endGlobalTestRun()
   lastUpdateTime.value = new Date().toLocaleTimeString()
   // 实时刷新策略召回对比：批测单个策略完成后该策略出现一行数据
   updateStrategyStats()
@@ -2913,8 +2920,46 @@ const batchLiveText = computed(() => {
   ].filter(Boolean).join(' · ')
   return tail ? `${head}\n${tail}` : head
 })
+// ===== 全局运行态（模块级单例）：底角进度条 + 后台任务登记（避免误关窗口杀掉长时间评测） =====
+const KB_TEST_TASK_ID = 'kb:test'
+const globalTestRunTotal = ref(0)
+/** 开始一轮批量测试：登记后台任务 + 置全局运行态（切到任何模块都能看到进度） */
+const beginGlobalTestRun = (label: string, total: number) => {
+  globalTestRunTotal.value = Math.max(0, total)
+  reportKbTestRun({ running: true, text: label, detail: '', progress: 0 })
+  setRunningTask(KB_TEST_TASK_ID, {
+    kind: 'other',
+    labelZh: '知识库评测', labelEn: 'KB evaluation',
+    progress: { done: 0, total: globalTestRunTotal.value, etaMs: null },
+  })
+}
+/** 结束一轮批量测试：注销后台任务 + 清空全局运行态 */
+const endGlobalTestRun = () => {
+  globalTestRunTotal.value = 0
+  clearKbTestRun()
+  setRunningTask(KB_TEST_TASK_ID, null)
+}
+
 // 运行进度实时上报底部状态栏（运行结束文本变空 → 清空该行）
-watch(batchLiveText, (v) => emit('updateLiveState', v))
+watch(batchLiveText, (v) => {
+  emit('updateLiveState', v)
+  // 同时上报全局运行态：切到任何模块都能在底角看到进度（App.vue 画进度条，点击可跳回本页）
+  if (!v) return
+  const [head, tail] = String(v).split('\n')
+  const pct = Number(test.progress) || 0
+  const total = globalTestRunTotal.value || 0
+  const done = total ? Math.round((pct / 100) * total) : 0
+  const etaMs = (pct > 0 && testStartedAt.value)
+    ? Math.max(0, Math.round((Date.now() - testStartedAt.value) * (100 - pct) / pct))
+    : null
+  reportKbTestRun({ running: true, text: head || '', detail: tail || '', progress: pct })
+  setRunningTask(KB_TEST_TASK_ID, {
+    kind: 'other',
+    labelZh: '知识库评测', labelEn: 'KB evaluation',
+    progress: { done, total, etaMs },
+  })
+})
+
 
 // 展开查看位次明细的策略 id（点击汇总行切换）
 const expandedStrategy = ref('')
@@ -3465,6 +3510,8 @@ const runAllStrategyTest = async () => {
   test.progress = 0
   startTestClock()
   initFileSummaries()
+  // 全局运行态：登记后台任务（关闭窗口会提示）+ 底角进度条（切到任何模块都能看到，点击跳回本页）
+  beginGlobalTestRun(store.locales=='zh' ? '批量测试所有策略' : 'Test all strategies', 0)
 
   // 执行清单：有启用的消融变体 → 逐变体跑（同一策略的不同参数各占一行）；否则退回「每个启用策略跑一次」。
   // 与策略配置面板里的「将执行」预览同源（batchRunPreview），避免预览与实际执行不一致。
@@ -3484,6 +3531,8 @@ const runAllStrategyTest = async () => {
   // 重复次数：同一批问题重复跑 N 轮（各轮独立汇总，用于均值±标准差；默认 1=不重复）
   const repeat = Math.max(1, Math.min(5, parseInt(String(test.repeat)) || 1))
   const totalRuns = runList.length * rows.length * repeat
+  // 总检索次数已知：补全全局运行态的总量（底角进度条与托盘提示按它算百分比/剩余时间）
+  globalTestRunTotal.value = totalRuns
   let done = 0
 
   // 新一次「全部策略」测试：自动清空上一次结果/位次/统计，只保留本次

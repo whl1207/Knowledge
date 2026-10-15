@@ -107,9 +107,9 @@
         <div class="ba-page">
           <!-- 新标签页（收藏夹网格）：整页就是收藏夹 grid——全部平铺、不折叠；搜索已并入顶部地址栏，页内不再放任何搜索/提示条 -->
           <div v-if="activeTab && !state.url && newTabIsBookmarks" class="ba-home">
-            <!-- 收藏夹快捷入口：文件夹形式（顶层 → 点击进入下一级文件夹/书签）；全部展示，超高时本区滚动 -->
-            <div class="ba-home-bookmarks scoll">
-              <!-- 当前所在文件夹导航（根目录不显示；空文件夹时也要能返回） -->
+            <!-- 收藏夹快捷入口：文件夹形式（顶层 → 点击进入下一级文件夹/书签）；全部展示，超高时本区滚动
+                 头部仅保留「返回上一级 / 当前文件夹」；显示方式由 Ctrl+滚轮决定（缩小到下限即列表，往上滚回网格） -->
+            <div class="ba-home-bookmarks scoll" @wheel="onHomeWheel">
               <div v-if="homePath.length" class="ba-home-bm-nav">
                 <span class="ba-home-bm-back" @click="homeUp"><i class="fa fa-arrow-left"></i>{{ zh ? ' 返回' : ' Back' }}</span>
                 <span class="ba-home-bm-crumb" :title="currentDirRel"><i class="fa fa-folder-open-o"></i>{{ currentDirName }}</span>
@@ -117,6 +117,56 @@
               <div v-if="!homeBookmarks.length" class="ba-home-bm-empty">
                 <template v-if="homePath.length"><i class="fa fa-folder-open-o"></i>&nbsp;{{ zh ? '该文件夹为空' : 'This folder is empty' }}</template>
                 <template v-else>{{ zh ? '暂无收藏：在任意网页点顶部 ⭐ 即可收藏，之后会显示在这里' : 'No bookmarks yet: click the ⭐ on any page, they will show up here' }}</template>
+              </div>
+              <div v-else-if="homeViewMode === 'list'" class="ba-home-bm-list">
+                <div
+                  v-for="b in homeBookmarks"
+                  :key="b.rel"
+                  class="ba-home-bm-row"
+                  :class="{ dir: b.kind === 'dir' }"
+                  :title="b.kind === 'dir' ? `${b.title}（${zh ? '文件夹，点击进入' : 'folder, click to open'}）` : `${b.title}\n${b.url}`"
+                  @click="homeTileClick(b)"
+                  @contextmenu.prevent.stop="openItemCtx(b)"
+                >
+                  <span class="ba-home-row-icon ba-home-iconbox" :style="iconBoxStyle">
+                    <i v-if="b.kind === 'dir'" class="fa fa-folder ba-home-bm-folder"></i>
+                    <img
+                      v-else-if="favImgSrc(b)"
+                      class="ba-home-bm-img"
+                      :src="favImgSrc(b)"
+                      draggable="false"
+                      alt=""
+                      @error="onHomeFavError(b)"
+                    />
+                    <span v-else class="ba-home-bm-avatar" :style="{ color: avatarColor(b.host, b.title) }">{{ avatarLetter(b) }}</span>
+                  </span>
+                  <span class="ba-home-row-name" :title="b.title">{{ b.title }}</span>
+                  <span class="ba-home-row-host">{{ b.kind === 'dir' ? (zh ? '文件夹' : 'Folder') : b.host }}</span>
+                  <!-- 列表行右侧：文件夹 → 删除；普通书签 → 编辑；离线整页快照 → 删除 -->
+                  <span class="ba-home-row-actions">
+                    <template v-if="b.kind === 'dir'">
+                      <button
+                        class="ba-home-row-btn"
+                        :title="zh ? '删除该文件夹（含内部书签）' : 'Delete this folder (with its bookmarks)'"
+                        @click.stop="deleteHomeDir(b)"
+                      ><i class="fa fa-trash-o"></i></button>
+                    </template>
+                    <template v-else-if="b.kind === 'file'">
+                      <button
+                        v-if="!isSnapshotBm(b)"
+                        class="ba-home-row-btn edit"
+                        :title="zh ? '编辑标题/地址' : 'Edit title / URL'"
+                        @click.stop="editHomeBm(b)"
+                      ><i class="fa fa-pencil"></i></button>
+                      <button
+                        v-else
+                        class="ba-home-row-btn"
+                        :title="zh ? '删除该离线快照' : 'Delete this snapshot'"
+                        @click.stop="deleteHomeBm(b)"
+                      ><i class="fa fa-trash-o"></i></button>
+                    </template>
+                  </span>
+                </div>
               </div>
               <div v-else class="ba-home-bm-grid" :style="gridStyle">
                 <div
@@ -150,21 +200,22 @@
                       @click.stop="deleteHomeBm(b)"
                     ><i class="fa fa-trash-o"></i></button>
                   </template>
-                  <span class="ba-home-bm-icon">
-                    <i v-if="b.kind === 'dir'" class="fa fa-folder ba-home-bm-folder"></i>
-                    <template v-else>
-                      <img
-                        v-if="favImgSrc(b)"
-                        class="ba-home-bm-img"
-                        :src="favImgSrc(b)"
-                        draggable="false"
-                        alt=""
-                        @error="onHomeFavError(b)"
-                      />
-                      <span v-else class="ba-home-bm-avatar" :style="{ backgroundColor: avatarColor(b.host) }">{{ avatarLetter(b) }}</span>
-                    </template>
+                  <span v-if="b.kind === 'dir'" class="ba-home-bm-icon ba-home-iconbox" :style="iconBoxStyle">
+                    <i class="fa fa-folder ba-home-bm-folder"></i>
                   </span>
-                  <span class="ba-home-bm-name">{{ b.title }}</span>
+                  <!-- 普通书签：有真实 favicon 显示图标；没有则用 **标题首字** 居中占位（代替图标），完整标题仍在图标下方 -->
+                  <span v-else class="ba-home-bm-icon ba-home-iconbox" :style="iconBoxStyle">
+                    <img
+                      v-if="favImgSrc(b)"
+                      class="ba-home-bm-img"
+                      :src="favImgSrc(b)"
+                      draggable="false"
+                      alt=""
+                      @error="onHomeFavError(b)"
+                    />
+                    <span v-else class="ba-home-bm-avatar" :style="{ color: avatarColor(b.host, b.title) }">{{ avatarLetter(b) }}</span>
+                  </span>
+                  <span class="ba-home-bm-name" :style="{ fontSize: fileNameFontSize }" :title="b.title">{{ b.title }}</span>
                 </div>
               </div>
             </div>
@@ -689,16 +740,17 @@ watch(() => bmItems.value, () => {
   if (rel && !(bmItems.value || []).some(i => i.kind === 'dir' && i.rel === rel)) homePath.value = []
 })
 
-// 站点首字母（无则用标题首字符）作为图标字母
+// 站点首字母（无则用标题首字符）：无 favicon 时在图标位居中显示 **只有这一个字**
 const avatarLetter = (b: HomeBm) => {
   const c = (b.host || b.title || '').trim().charAt(0)
   return (c || '★').toUpperCase()
 }
 const BM_PALETTE = ['#d97757', '#4a90c4', '#56a35f', '#a35fc0', '#c48a3f', '#4fa8a0', '#c46086', '#7a8ab5', '#5b8db8', '#b8724f']
-// 按域名哈希取稳定配色
-const avatarColor = (host: string) => {
+// 按域名哈希取稳定配色（无域名时按标题取，避免出现无色块）
+const avatarColor = (host: string, title = '') => {
+  const key = host || title
   let h = 0
-  for (let i = 0; i < host.length; i++) h = (h * 31 + host.charCodeAt(i)) >>> 0
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
   return BM_PALETTE[h % BM_PALETTE.length]
 }
 // 点击收藏 → 新标签页打开
@@ -884,9 +936,77 @@ watch([homeVisible, homePath, homeBookmarks], () => { if (homeVisible.value) voi
 /** 新标签页内容模式（设置 → 浏览器 → 新标签页）：bookmarks=收藏夹网格 / blank=空白页 */
 const newTabIsBookmarks = computed(() => String(store.UI?.browserNewTab ?? 'bookmarks') !== 'blank')
 /** 每行书签数（0=自动，交给 CSS auto-fill 按窗口宽度铺满） */
-const gridStyle = computed(() => {
+const gridColsPref = computed(() => {
   const n = Math.floor(Number(store.UI?.browserGridCols) || 0)
-  return n >= 3 && n <= 12 ? { gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` } : {}
+  return n >= 3 && n <= 12 ? n : 0
+})
+
+// ===== 新标签页显示方式：网格 / 列表 + 图标尺寸（与「文件视图」同一套交互：Ctrl+滚轮无级调整） =====
+// 尺寸为连续 px 值；小于下限即等同列表视图（与 view_file.vue 的 ICON_SCALE_MIN/MAX 一致）
+const HOME_SCALE_MIN = 56
+const HOME_SCALE_MAX = 220
+const HOME_MODE_KEY = 'browserhome-mode'
+const HOME_SCALE_KEY = 'browserhome-scale'
+let savedHomeMode = ''
+let savedHomeScale = NaN
+try {
+  savedHomeMode = localStorage.getItem(HOME_MODE_KEY) || ''
+  savedHomeScale = Number(localStorage.getItem(HOME_SCALE_KEY))
+} catch { /* localStorage 不可用时用默认值 */ }
+// 新标签页默认「列表」（紧凑）；只有 Ctrl+滚轮往上滚放大过才会记成 grid
+const homeViewMode = ref<'grid' | 'list'>(savedHomeMode === 'grid' ? 'grid' : 'list')
+const homeIconScale = ref(
+  Number.isFinite(savedHomeScale) && savedHomeScale > 0
+    ? Math.max(HOME_SCALE_MIN, Math.min(HOME_SCALE_MAX, Math.round(savedHomeScale)))
+    : 92
+)
+// 列表模式下也把尺寸归一到下限以内：保证「Ctrl+滚轮往上滚一点就能回到网格」的手感一致
+if (homeViewMode.value === 'list' && homeIconScale.value > HOME_SCALE_MIN) homeIconScale.value = HOME_SCALE_MIN
+watch(homeViewMode, (v) => { try { localStorage.setItem(HOME_MODE_KEY, v) } catch { /* 忽略 */ } })
+watch(homeIconScale, (v) => { try { localStorage.setItem(HOME_SCALE_KEY, String(v)) } catch { /* 忽略 */ } })
+/**
+ * Ctrl+滚轮无级调整图标大小（与文件视图 `onContainerWheel` 同算法）：
+ * 每格滚轮 deltaY≈100 → 8px；缩到下限以下自动切列表，往上滚回网格。
+ * 普通滚轮不拦截（交给收藏区自身滚动）。
+ */
+const onHomeWheel = (e: WheelEvent) => {
+  if (!e.ctrlKey && !e.metaKey) return
+  e.preventDefault()
+  let s = homeViewMode.value === 'list' ? HOME_SCALE_MIN - 8 : homeIconScale.value
+  s += -e.deltaY / 100 * 8
+  if (s < HOME_SCALE_MIN) {
+    homeViewMode.value = 'list'
+  } else {
+    homeViewMode.value = 'grid'
+    homeIconScale.value = Math.max(HOME_SCALE_MIN, Math.min(HOME_SCALE_MAX, Math.round(s)))
+  }
+}
+/** 图标盒子（网格格子 / 列表行共用）：正方形，圆角随尺寸等比缩放 */
+const iconBoxStyle = computed(() => {
+  const s = Math.max(HOME_SCALE_MIN, Math.min(HOME_SCALE_MAX, Math.round(homeIconScale.value)))
+  return {
+    width: `${s}px`,
+    height: `${s}px`,
+    borderRadius: `${Math.max(4, Math.round(s * 0.18))}px`,
+    '--ba-icon-size': `${s}px`,
+  } as Record<string, string>
+})
+/** 文件名/书签名文字大小（小图标 9px → 大图标 13px，与文件视图同一区间） */
+const fileNameFontSize = computed(() => {
+  const s = homeIconScale.value
+  if (s <= 64) return '9px'
+  if (s >= 160) return '13px'
+  return '11px'
+})
+/** 网格：固定「每行 N 个」优先（用户设置），否则按图标尺寸 auto-fill（未设置时与旧版 104px 视觉一致） */
+const gridStyle = computed(() => {
+  const cols = gridColsPref.value
+  if (cols) return { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: '8px' }
+  const tile = Math.round(homeIconScale.value)
+  return {
+    gridTemplateColumns: `repeat(auto-fill, minmax(${Math.max(96, tile + 8)}px, 1fr))`,
+    gap: homeIconScale.value >= 160 ? '8px' : '6px',
+  }
 })
 watch(homeVisible, async (v) => {
   if (!v) return
@@ -1344,6 +1464,7 @@ onBeforeUnmount(() => {
   text-align: center;
   padding: 14px 0;
 }
+/* 新标签页工具条样式已随「网格/列表切换开关」一并移除；显示方式由 Ctrl+滚轮决定 */
 .ba-home-bm-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
@@ -1366,36 +1487,44 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--fontColor) 5%, transparent);
   border-color: var(--borderColor);
 }
-.ba-home-bm-icon {
+/* 加载完成前先用旧版 46px 兜底（:style 里的内联宽高会覆盖它） */
+.ba-home-iconbox {
+  --ba-icon-size: 46px;
   position: relative;
-  width: 46px;
-  height: 46px;
+  width: var(--ba-icon-size);
+  height: var(--ba-icon-size);
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 .ba-home-bm-img {
-  width: 46px;
-  height: 46px;
+  width: 100%;
+  height: 100%;
   box-sizing: border-box;
-  border-radius: 12px;
-  padding: 4px;
+  border-radius: max(6px, calc(var(--ba-icon-size) * .18));
+  padding: 2px;
   background: color-mix(in srgb, var(--menuColor) 80%, #fff);
   object-fit: contain;
 }
+/* 无 favicon 时的「标题首字」占位：单个字居中在图标位，字号取盒子 44%（与图标同量级） */
 .ba-home-bm-avatar {
-  width: 46px;
-  height: 46px;
-  border-radius: 12px;
+  width: 100%;
+  height: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 19px;
+  font-size: calc(var(--ba-icon-size) * .44);
   font-weight: 600;
-  color: #fff;
+  line-height: 1;
   user-select: none;
-  flex-shrink: 0;
+}
+/* 文件夹图标与 favicon 视觉量级对齐：取盒子尺寸 62%（原来固定较小倍率，显得过小） */
+.ba-home-bm-folder {
+  font-size: calc(var(--ba-icon-size) * .62);
+  line-height: 1;
+  color: #f0b429;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .18));
 }
 .ba-home-bm-name {
   font-size: 11px;
@@ -1430,6 +1559,98 @@ onBeforeUnmount(() => {
 .ba-home-bm-item:hover .ba-home-bm-del { display: inline-flex; }
 .ba-home-bm-del:hover { background: #e81123; color: #fff; }
 .ba-home-bm-del.edit:hover { background: #1971c2; color: #fff; }
+
+/* ====== 新标签页·列表视图（紧凑单行：小图标 + 名称 + 域名 + 悬浮操作） ====== */
+.ba-home-bm-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  overflow: hidden;
+}
+/* 列表行图标固定 18px 小图标（列表模式不受 Ctrl+滚轮尺寸影响，保证行高紧凑稳定） */
+.ba-home-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px !important;
+  height: 18px !important;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+/* 列表行图标固定 18px 小图标（列表模式不受 Ctrl+滚轮尺寸影响，保证行高紧凑稳定） */
+.ba-home-row-icon > .ba-home-bm-img {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  padding: 1px;
+}
+.ba-home-row-icon > .ba-home-bm-avatar {
+  font-size: 12px;
+  font-weight: 600;
+}
+.ba-home-row-icon > .ba-home-bm-folder {
+  font-size: 13px;
+}
+.ba-home-bm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: 2px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--borderColor) 45%, transparent);
+  cursor: pointer;
+  color: var(--fontColor);
+  font-size: 12px;
+  line-height: 1.3;
+  transition: background .12s;
+  min-width: 0;
+}
+.ba-home-bm-row:last-child { border-bottom: none; }
+.ba-home-bm-row:hover { background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent); }
+.ba-home-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ba-home-row-host {
+  flex: 0 1 30%;
+  min-width: 0;
+  text-align: right;
+  font-size: 10px;
+  opacity: .45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ba-home-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  width: 17px;
+  justify-content: flex-end;
+}
+.ba-home-row-btn {
+  width: 16px;
+  height: 16px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(40, 40, 40, .55);
+  color: #fff;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background .12s;
+}
+.ba-home-bm-row:hover .ba-home-row-btn { display: inline-flex; }
+.ba-home-row-btn:hover { background: #e81123; }
+.ba-home-row-btn.edit:hover { background: #1971c2; }
 
 /* 编辑书签模态框 */
 .ba-bm-edit-overlay {
@@ -1570,11 +1791,6 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ba-home-bm-folder {
-  font-size: 30px;
-  color: #f0b429;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .18));
-}
 .ba-star-btn.on { color: #f0b429; }
 
 /* ====== 自适应布局：窗口变窄时标签 / 导航栏 / 新标签页提示缩小；小窗书签去图标只显名称 ====== */
@@ -1592,8 +1808,8 @@ onBeforeUnmount(() => {
   .ba-addr-input { font-size: 11px; }
   .ba-addr-badge { display: none; } /* 窄窗：引擎徽标让位给输入内容（placeholder 已写明引擎） */
   .ba-home { padding: 12px 12px 14px; }
-  /* 小窗：书签去图标 → 纯名称 grid（更紧凑，更多可排一行） */
-  .ba-home-bm-icon { display: none; }
+  /* 小窗：网格模式去图标 → 纯名称（更紧凑，更多可排一行）；列表模式仍保留图标（列表本就窄） */
+  .ba-home-bm-grid .ba-home-bm-icon { display: none; }
   .ba-home-bm-grid { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
   /* 名称标签用背景框框住（胶囊/标签感） */
   .ba-home-bm-item {
@@ -1609,6 +1825,7 @@ onBeforeUnmount(() => {
     background: color-mix(in srgb, var(--fontActiveColor) 10%, var(--menuColor));
   }
   .ba-home-bm-name { font-size: 11px; }
+  .ba-home-row-host { display: none; } /* 窄窗列表：域名让位给名称 */
 }
 @media (max-width: 520px) {
   .ba-tab { flex-basis: 84px; }

@@ -21,16 +21,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onErrorCaptured, ref } from 'vue'
+import { computed, onErrorCaptured, ref, watch } from 'vue'
 import { usestore } from '@/store'
 
-const props = defineProps<{ label?: string }>()
+const props = defineProps<{
+  label?: string
+  /** 当前渲染条目的 key：切换面板时用它清掉上一次的错误态（本组件不再随面板 key 重建，
+   *  否则会连带销毁内部 KeepAlive 的缓存 —— 见 PluginSlot 的说明） */
+  entryKey?: string
+}>()
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
 
 const error = ref('')
 /** 每次重试自增 → 调用方把它作为子组件 key，强制重建 */
 const attempt = ref(0)
+
+// 面板切换：清空上一次的错误提示（注意**不能**动 attempt —— 它是缓存键的一部分，
+// 变了会让切回时的 KeepAlive 缓存对不上，导致面板被重建、状态丢失）
+watch(() => props.entryKey, () => { error.value = '' })
 
 onErrorCaptured((err: unknown) => {
   error.value = err instanceof Error ? (err.stack || err.message) : String(err)

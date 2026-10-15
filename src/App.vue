@@ -8,6 +8,7 @@
   //  - runningTaskNames：各脚手架自行登记（见 store/runningTasks.ts）
   import { globalExecutionStateRef, chatsRef } from '@/store/chats'
   import { runningTaskNames, runningTaskList } from '@/store/runningTasks'
+  import { kbTestRun, requestKbTestView } from '@/store/kbTestRun'
   import { formatTaskProgressDetail } from '@/utils/taskProgress'
   import { running as swarmRunning } from '@/store/swarmState'
   // 局域网访客权限默认策略（启动时下发给主进程；见 syncLanGuestPolicyAtStartup）
@@ -370,6 +371,16 @@ import { useTallLayout } from '@/composables/useTallLayout'
   function maximizeWindow() {
     isMaximized.value=!isMaximized.value
     getPlatform().window.toggleMaximize();
+  }
+
+  /**
+   * 点击全局「知识库评测」进度条：切到「知识处理」模块，并把视图定位到「测试」标签。
+   * 评测跑在「知识处理」面板里，切到别的模块后看不到进度/数据，这个入口让用户一键回到测试页
+   * （面板本身由 KeepAlive 保活，切回后测试数据与运行进度都还在）。
+   */
+  function gotoKbTestRun() {
+    if (store.mainPanel !== '知识处理') store.mainPanel = '知识处理'
+    requestKbTestView()
   }
 
   // ============ 关闭保护：后台仍有任务在运行时先提醒 ============
@@ -744,6 +755,16 @@ import { useTallLayout } from '@/composables/useTallLayout'
     </div>
   </div> <!-- /.container (v-else) -->
 
+  <!-- 知识库评测（批量测试）全局进度：切到任何模块都能看到；点击回到「知识处理 → 测试」。
+       面板本身由 KeepAlive 保活，切回后测试数据与运行进度都还在。 -->
+  <div v-if="kbTestRun.running" class="kb-test-chip" @click="gotoKbTestRun"
+       :title="`${kbTestRun.text}${kbTestRun.detail ? ' · ' + kbTestRun.detail : ''}`">
+    <i class="fa fa-flask fa-spin"></i>
+    <span class="kb-test-chip-text">{{ kbTestRun.text || (store.locales === 'zh' ? '知识库评测运行中' : 'KB evaluation running') }}</span>
+    <span class="kb-test-chip-pct">{{ Math.round(kbTestRun.progress) }}%</span>
+    <span v-if="kbTestRun.detail" class="kb-test-chip-detail">{{ kbTestRun.detail }}</span>
+  </div>
+
   <!-- 应用内文件窗口（安卓 / 网页端等没有窗口壳的环境）：与设置浮层同样盖在主界面上方，
        使「打开文件」在这些平台上有可见反馈（原先独立窗口调用是空操作 → 点了没反应）。 -->
   <div v-if="store.fileWindowOverlay" class="file-window-overlay">
@@ -761,6 +782,32 @@ import { useTallLayout } from '@/composables/useTallLayout'
 </template>
 
 <style scoped>
+  /* 知识库评测全局进度条（底角）：切到任何模块都能看到评测还在跑，点击回到测试页 */
+  .kb-test-chip {
+    position: fixed;
+    right: 14px;
+    bottom: 34px;
+    z-index: 900;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: min(420px, 70vw);
+    padding: 5px 10px;
+    background: var(--menuColor, #fff);
+    border: 1px solid var(--borderColor, #ddd);
+    border-radius: 16px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .18);
+    font-size: 11px;
+    color: var(--fontColor, #333);
+    cursor: pointer;
+    user-select: none;
+  }
+  .kb-test-chip:hover { border-color: var(--fontActiveColor, #42A5F5); color: var(--fontActiveColor, #42A5F5); }
+  .kb-test-chip > i { color: #42A5F5; }
+  .kb-test-chip-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kb-test-chip-pct { font-weight: 600; color: #42A5F5; flex-shrink: 0; }
+  .kb-test-chip-detail { color: var(--borderColor, #999); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; }
+
   /* 应用内文件窗口浮层（单窗口环境）：铺满主界面，叠在设置浮层之下（设置 1500）、
      Element Plus 弹窗（2000+）之上——文件窗口里的确认框 / 提示仍需可见。 */
   .file-window-overlay {

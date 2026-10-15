@@ -1159,6 +1159,8 @@ import { md, renderMarkdown, highlightCodeHtml, normalizeMermaidSource } from '@
 // 上下文压缩（P0）：普通聊天发送前预算检查 + 旧轮次摘要 + 溢出后自动压缩重试
 import { chatHistoryForRequest, compactChat, shouldCompactChat } from '@/lib/agent/chatCompact'
 import { isContextOverflowError } from '@/shared/contextBudget'
+// 输入框草稿：按聊天各自保存（读写纯函数，自测见 chatDraft.selftest.ts）
+import { readChatDraft, writeChatDraft, resolveDraftChat, joinAsrText } from '@/shared/chatDraft'
 // PTC（Code Mode）：run_code 输出解析（返回值 / console 日志 / 程序内调用的工具）
 import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/agent/ptc'
 // 工作区根目录：与智能体工具的相对路径锚点（AgentOptions.cwd）保持同一来源
@@ -1262,7 +1264,19 @@ const currentChatIndex = currentChatIndexRef
 watch(currentChatIndex, (idx) => {
   localStorage.setItem('ai-chats-index', String(idx))
 })
-const inputText = ref<string>('')
+/**
+ * 输入框内容：**按聊天分别保存**（与 DSH 一致——每个聊天栏管理自己的输入框）。
+ * - 读：当前聊天自己的草稿 `chat.draft`；
+ * - 写：写回当前聊天的草稿（切换聊天时自然就换成那一栏的内容，互不覆盖）；
+ * - 草稿挂在 chat 上，随 chats 一起进 localStorage，切模块 / 重启后仍然在。
+ * 用计算属性而不是 ref：原有 20 多处 `inputText.value = …` / `v-model` 全部无需改动。
+ */
+const inputText = computed<string>({
+  get: () => readChatDraft(chats.value, currentChatIndex.value),
+  set: (value: string) => {
+    writeChatDraft(chats.value, currentChatIndex.value, value)
+  },
+})
 
 const showSidebar = ref(false)  // 聊天列表侧边栏：初始不显示，由聊天标题左侧的 fa-bars 开关展开
 // 细长布局（高宽比 > 16:9，典型如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换——
@@ -1324,6 +1338,20 @@ let asrManagerInstance: any = null
 // 每完成一句（VAD/停止）把 base 前滚，避免覆盖用户已输入内容，也支持多句连续
 let asrPartialFill = false
 let asrBaseText = ''
+// 语音输入的归属聊天：进入录音时锁定当时所在的聊天。输入框内容已按聊天分开，
+// 录音过程中切到别的聊天时，识别结果仍写回原来那一栏，不会落到刚打开的新聊天里。
+let asrTargetChatId = ''
+
+/** 语音识别结果的写入目标：录音开始时的那个聊天（找不到时退回当前聊天） */
+const asrTargetChat = (): any => resolveDraftChat(chats.value, asrTargetChatId, currentChatIndex.value)
+
+/** 把识别文本写进目标聊天的草稿（输入框显示的就是当前聊天的草稿），返回写入后的草稿 */
+const applyAsrText = (text: string): string => {
+  const chat = asrTargetChat()
+  if (!chat) return text
+  chat.draft = text
+  return chat.draft
+}
 // ASR 配置跨窗口同步：设置独立窗口保存后，主窗口会整份重载配置（AIconfig 被替换成新对象），
 // 而 ASR 管理器持有的是**创建时的旧对象引用** → 录音时读不到刚设置的模型路径 / 模型目录
 // （现象：设置完语音输入必须重启才能用）。这里在 ASR 配置真正变化时把最新配置推给已有管理器。
@@ -1973,6 +2001,9 @@ const dispatchQueuedItem = async (chatId: string, item: PendingQueueItem) => {
   if (!chat) return
   const idx = chats.value.indexOf(chat)
   if (idx >= 0 && currentChatIndex.value !== idx) currentChatIndex.value = idx
+  // 队列条目只是「借用」输入区发送：先记下该聊天自己的草稿，发完再放回去
+  // （草稿是按聊天分开的，不能因为发一条排队消息就把用户正在写的内容吞掉）
+  const draftBeforeDispatch = chat.draft ?? ''
   inputText.value = item.text
   currentUploads.value = (item.fileAttachments || []).map((f) => ({
     kind: 'file' as const,
@@ -2005,6 +2036,8 @@ const dispatchQueuedItem = async (chatId: string, item: PendingQueueItem) => {
     default:
       await sendChatMessage(item.text)
   }
+  // 发送路径清空了输入区（即该聊天的草稿）：把用户原本的草稿还原回那一栏
+  if (!chat.draft) chat.draft = draftBeforeDispatch
 }
 
 /** 输入区键盘：Enter=排队，Ctrl/Cmd+Enter=插队，Shift+Enter=换行（都在下一个 step 边界生效，不打断本轮） */
@@ -3887,21 +3920,19 @@ onMounted(async () => {
         if (!result.isFinal) {
           // 流式 partial（funasr-online）：base + 当前句实时文本
           if (asrPartialFill) {
-            inputText.value = asrBaseText + result.text
+            applyAsrText(asrBaseText + result.text)
           }
           return
         }
         if (asrPartialFill) {
           // 本句完成：base + 最终文本，并作为下一句的 base（VAD 多句/停止都走这里）
-          inputText.value = asrBaseText + result.text
-          asrBaseText = inputText.value
+          asrBaseText = applyAsrText(asrBaseText + result.text)
         } else {
-          if (inputText.value && !inputText.value.endsWith(' ')) {
-            inputText.value += ' '
-          }
-          inputText.value += result.text
+          // 非流式：接着已有草稿往后写（连续两句之间补空格）
+          applyAsrText(joinAsrText(asrTargetChat()?.draft ?? '', result.text))
         }
-        if (store.AIconfig.asr.autoSend) {
+        // 识别结果写回的是「进入录音时那个聊天」的草稿；只有在那个聊天还开着时才自动发送
+        if (store.AIconfig.asr.autoSend && (!asrTargetChatId || currentChat.value?.id === asrTargetChatId)) {
           setTimeout(() => sendMessage(), 100)
         }
       },
@@ -5258,6 +5289,8 @@ const switchChat = async (index: number) => {
   if (currentChatIndex.value === index) return
   
   currentChatIndex.value = index
+  // 输入框内容按聊天各自保存：切走的这一栏草稿即时落盘（重启后仍在，不必等下一次发送）
+  saveChats()
   
   // 切换聊天时，如果新聊天没有分支则隐藏分支面板
   if (showBranchView.value && !hasBranches.value) {
@@ -8005,9 +8038,11 @@ function startASR() {
   
   // 流式引擎（funasr-online；或 Qwen3-ASR 的分段准流式）：
   // 记录录音开始时的输入为 base（后续片段追加其后，不覆盖已输入）
+  // 输入框内容按聊天分开：这里同时锁定「本次录音写回哪个聊天」
+  asrTargetChatId = currentChat.value?.id ?? ''
   asrPartialFill = store.AIconfig.asr.type === 'funasr-online'
     || (store.AIconfig.asr.type === 'qwen3-asr' && store.AIconfig.asr.qwen3.mode === 'segment')
-  if (asrPartialFill) asrBaseText = inputText.value
+  if (asrPartialFill) asrBaseText = currentChat.value?.draft ?? ''
   asrManagerInstance.start()
 }
 

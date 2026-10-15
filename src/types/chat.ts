@@ -230,6 +230,11 @@ export interface Chat {
   isGenerating?: boolean
   /** 当前生成中的主进程 AI 会话 id（切模块/中断后重进续接） */
   activeRequestId?: string
+  /**
+   * 输入框草稿：**每个聊天各自保存**（DSH 同款——切走再切回来，输入框里还是自己没发完的内容）。
+   * 随 chats 一起持久化，因此切模块 / 重启后草稿仍在。
+   */
+  draft?: string
   mode: ChatMode // 每个聊天的独立模式
   // 分支对话相关
   parentId?: string // 父聊天 ID，根聊天为 undefined
