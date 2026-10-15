@@ -13,6 +13,7 @@ import type { FileSortKey } from '@/lib/knowFile/fileSort'
 import { DEFAULT_AGENT_MAX_STEPS, normalizeAgentMaxSteps } from '@/shared/agent-loop-rounds'
 import { ensureBuiltinAgentPresets, refreshBuiltinAgentPresets, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 import { normalizeWebSearchConfig, newWebSearchCustomSource, toCustomProviderId, type WebSearchConfig, type WebSearchCustomSource } from '@/shared/webSearch'
+import { BROWSER_SEARCH_ENGINES, DEFAULT_BROWSER_SEARCH_ENGINE } from '@/shared/browserSearch'
 import { migrateLegacyContextWindow } from '@/lib/contextUsage'
 import { deepSeekConfig, deepSeekStyleOf, migrateDeepSeekMerge, normalizeLlmType, normalizeLlmTypeList, DEEPSEEK_LEGACY_TYPE } from '@/shared/llmSources'
 // 局域网访客（网页端）能力白名单：默认只读策略 + 旧存档归一化见 src/shared/lanGuest.ts
@@ -361,12 +362,22 @@ export const usestore = defineStore('data', {
             //   这里仅镜像一份供界面显示与关闭提醒判定，设置页改动经 IPC 下发主进程落盘
             browserHomeUrl: '', // 浏览器 Agent 默认首页（仅手动打开浏览器时首个标签加载）
             browserSaveDir: '', // 浏览器保存文件夹（离线保存网页 + 收藏书签落盘目录；留空=当前工作区根目录）
+            browserNewTab: 'bookmarks' as string, // 新标签页内容：bookmarks=收藏夹网格（默认）/ blank=空白页（宽松类型：模板 select 绑定）
+            browserSearchEngine: 'bing', // 地址栏搜索使用的引擎（bing/google/baidu/sogou/duckduckgo/custom，见 shared/browserSearch.ts）
+            browserSearchTemplate: '', // 自定义搜索 URL 模板（含 {q} 占位符；仅 browserSearchEngine='custom' 时生效）
+            browserGridCols: 0, // 新标签页收藏夹网格每行书签数（0=按窗口宽度自动）
+            browserAllowEval: false, // 允许 AI 调用 browser_eval 执行任意 JS（默认关闭；改后即刻下发主进程）
+            browserClipDir: '网页剪藏', // 「保存 Markdown 到知识库」落点：知识库根目录下的子文件夹（留空=直接存根目录）
+            browserClipFrontMatter: true, // Markdown 剪藏是否附带 YAML front matter（标题/来源/时间，便于知识库视图识别）
             wordExportStylePath: '', // Word 导出样式文件（.docx，可选；留空则用内置默认样式）
             wordExportTemplate: 'gongwen', // Word 导出模板：gongwen=公文(GB/T 9704-2012)/cn=中文论文/en=英文论文(APA)/custom=自定义 .docx
             // 文字对齐模式（仅作用于「浏览视图」md_read 与「可视编辑渲染态」BlockEditor 两处）：
             //  - justify（默认）：用 CSS text-align: justify，浏览器原生两端对齐，不跑排版引擎
             //  - kp：开启 Knuth–Plass（K-P）最优断行 + 逐行拉伸的精细排版（长文首次渲染略慢）
             textAlignMode: 'justify' as 'justify' | 'kp',
+            // 空导航提醒：全部功能关闭且没有插件面板时，主界面没有可用页面 →
+            // 显示提醒（含一键恢复 / 前往设置）；可在「设置 → 通用 → 基础」里关掉
+            emptyNavNotice: true as boolean,
         }, // 主题颜色
         AIconfig: {
             // 大模型配置
@@ -1565,12 +1576,34 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.browserHomeUrl !== 'string') this.UI.browserHomeUrl = ''
                 // 旧存档可能缺少 browserSaveDir，兜底为空（浏览器保存到当前工作区根目录）
                 if (typeof this.UI.browserSaveDir !== 'string') this.UI.browserSaveDir = ''
+                // 旧存档可能缺少新标签页内容设置，兜底为「收藏夹网格」
+                if (this.UI.browserNewTab !== 'bookmarks' && this.UI.browserNewTab !== 'blank') this.UI.browserNewTab = 'bookmarks'
+                // 旧存档可能缺少地址栏搜索引擎，兜底为必应；引擎名表外（含历史拼写）一律归一化
+                if (typeof this.UI.browserSearchEngine !== 'string' || !BROWSER_SEARCH_ENGINES.some(e => e.id === this.UI.browserSearchEngine)) {
+                    this.UI.browserSearchEngine = DEFAULT_BROWSER_SEARCH_ENGINE
+                }
+                // 旧存档可能缺少自定义搜索模板，兜底为空（自定义引擎未填时地址栏回退必应）
+                if (typeof this.UI.browserSearchTemplate !== 'string') this.UI.browserSearchTemplate = ''
+                // 旧存档可能缺少收藏夹网格列数，兜底为 0（自动）；只接受 0 或 3~12 的整数
+                if (typeof this.UI.browserGridCols !== 'number' || !isFinite(this.UI.browserGridCols) || this.UI.browserGridCols < 0 || this.UI.browserGridCols > 12) {
+                    this.UI.browserGridCols = 0
+                } else {
+                    this.UI.browserGridCols = Math.floor(this.UI.browserGridCols)
+                }
+                // 旧存档可能缺少「允许 AI 执行 JS」持久化开关，兜底为关闭（安全默认）
+                if (typeof this.UI.browserAllowEval !== 'boolean') this.UI.browserAllowEval = false
+                // 旧存档可能缺少 Markdown 剪藏目录，兜底为「网页剪藏」
+                if (typeof this.UI.browserClipDir !== 'string') this.UI.browserClipDir = '网页剪藏'
+                // 旧存档可能缺少 front matter 开关，兜底为开启
+                if (typeof this.UI.browserClipFrontMatter !== 'boolean') this.UI.browserClipFrontMatter = true
                 // 旧存档可能缺少 wordExportStylePath，兜底为空（导出用内置默认样式）
                 if (typeof this.UI.wordExportStylePath !== 'string') this.UI.wordExportStylePath = ''
                 // 旧存档可能缺少 wordExportTemplate，兜底为公文模板
                 if (typeof this.UI.wordExportTemplate !== 'string' || ['gongwen', 'cn', 'en', 'custom'].indexOf(this.UI.wordExportTemplate) === -1) this.UI.wordExportTemplate = 'gongwen'
                 // 旧存档可能缺少 textAlignMode，兜底为浏览器原生两端对齐
                 if (this.UI.textAlignMode !== 'justify' && this.UI.textAlignMode !== 'kp') this.UI.textAlignMode = 'justify'
+                // 旧存档可能缺少 emptyNavNotice（空导航提醒），兜底为开启
+                if (typeof this.UI.emptyNavNotice !== 'boolean') this.UI.emptyNavNotice = true
                 // 主题名归一化：旧存档里的 '浅蓝色' 等表外名称 → '浅蓝'（否则主题下拉框空白、changeTheme 失效）
                 normalizeThemeName(this.UI)
                 this.setTheme()
@@ -2319,9 +2352,17 @@ export const usestore = defineStore('data', {
                     closeToTray: this.UI.closeToTray,
                     browserHomeUrl: this.UI.browserHomeUrl,
                     browserSaveDir: this.UI.browserSaveDir,
+                    browserNewTab: this.UI.browserNewTab,
+                    browserSearchEngine: this.UI.browserSearchEngine,
+                    browserSearchTemplate: this.UI.browserSearchTemplate,
+                    browserGridCols: this.UI.browserGridCols,
+                    browserAllowEval: this.UI.browserAllowEval,
+                    browserClipDir: this.UI.browserClipDir,
+                    browserClipFrontMatter: this.UI.browserClipFrontMatter,
                     wordExportStylePath: this.UI.wordExportStylePath,
                     wordExportTemplate: this.UI.wordExportTemplate || 'gongwen',
-                    textAlignMode: this.UI.textAlignMode === 'kp' ? 'kp' : 'justify'
+                    textAlignMode: this.UI.textAlignMode === 'kp' ? 'kp' : 'justify',
+                    emptyNavNotice: this.UI.emptyNavNotice !== false,
                 }
             }
             this.setTheme()

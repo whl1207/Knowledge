@@ -7,6 +7,26 @@
 
 ---
 
+## 2026-10-15
+
+### Added
+
+- **Empty-navbar notice**: when every feature is off and no plugin panel is enabled, the main window shows a notice with “Restore default nav” and “Open settings” (the notice can be turned off under Settings → General → Basic).
+- **Browser “Save Markdown to knowledge base”**: a new page action in the browser side panel turns the current article into Markdown inside the knowledge base (default `网页剪藏` subfolder, changeable to any subfolder or the root; the YAML header can be turned off).
+
+### Improved
+
+- **The browser's new tab is now a full-page bookmark grid**: the in-page search box and the “Show all” collapse are gone — a new tab shows every bookmark at once (folders still open on click, overflow scrolls in place); search moved into the address bar, where URLs open directly, keywords use the selected engine, and the bar names the current engine.
+- **Browser settings panel completed**: new-tab content (bookmark grid / blank page), address-bar search engine (with a custom URL template), bookmarks per row, the Markdown clip folder and YAML-header switch, plus a persisted “Allow AI to run JavaScript”; clearing the cache now asks for confirmation.
+- **Settings merge: “General → Features” moved into “General → Basic”**: the module switches and the Knowledge Management view now live on the Basic page; the old entry point (`?nav=features`) and plugin cards targeting `features` still work.
+- **“General → Data” no longer lists “Legacy todos & notes”**: that historical category is gone from the data inventory and from per-category export/import.
+- **File associations completed for Linux / macOS**: on Linux the association actually works after a `.deb` install (the desktop entry declares the MIME types and mimeapps.list is written with the real desktop-entry name); the macOS build now appears in the “Open with” list without claiming the system default, and the settings page text was updated.
+
+### Fixed
+
+- **Top-bar icons covered the title once many plugin panels existed**: the nav-button row now scrolls horizontally (it no longer stretches the top bar) and the title is measured — it auto-hides when it no longer fits next to the buttons or the window controls, and comes back when the window grows or a plugin is disabled.
+- **Main window stuck on Home when only one plugin panel is left**: with every feature off it now switches to that plugin panel; when the current panel is turned off or its plugin is uninstalled it only falls back to a panel that is still visible instead of a hidden Home (the Android back gesture likewise returns to the first visible panel).
+
 ## 2026-09-24
 
 ### Added

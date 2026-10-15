@@ -37,6 +37,8 @@ export const VIEW_TOP = TAB_BAR_H + NAV_BAR_H
 
 /** 单次返回给模型的正文/HTML 默认上限（可经 MCP 工具 schema 的 maxChars 参数覆盖；不传时默认 30000 字符） */
 const DEFAULT_MAX_TEXT = 30000
+/** Markdown 剪藏落盘上限：保存到知识库属于本地文件操作，不受模型上下文限制，故给远高于 DEFAULT_MAX_TEXT 的上限 */
+const SAVE_MARKDOWN_MAX_CHARS = 400_000
 /**
  * 截图压缩目标：截图结果以**文本**（base64 dataUrl）回传给模型，字符数直接决定上下文占用，
  * 原尺寸 PNG 一张常有 1~3MB（base64 后 130 万+ 字符）→ 一步就把上下文撑爆。
@@ -1191,6 +1193,73 @@ class BrowserAgentService {
     } catch (err: any) {
       return { ok: false, error: err?.message || String(err) }
     }
+  }
+
+  /**
+   * 把激活标签保存为 Markdown 落到「知识库」（工作区）：
+   *   正文走 extractMarkdown（与 browser_extract_markdown 同一套净化 + turndown 流程，
+   *   链接绝对化、图片转 alt 文字），可选附带 YAML front matter（title / source / clipped），
+   *   写入 root/subdir（默认子目录由调用方传入，留空=知识库根目录），文件名取页面标题并自动避重名。
+   *   —— 这是「页面操作 → 保存 Markdown 到知识库」的落盘实现，供壳 UI 直接调用（不经过 AI）。
+   */
+  async saveActivePageAsMarkdown(opts: { root?: string; subdir?: string; frontMatter?: boolean } = {}): Promise<{
+    ok: boolean; path?: string; rel?: string; dir?: string; length?: number; error?: string
+  }> {
+    const root = String(opts?.root || '').trim()
+    if (!root) return { ok: false, error: '未设置知识库目录（请先打开工作区，或在浏览器设置 → 收藏夹里选择文件夹）' }
+    let md: { url: string; title: string; markdown: string; length: number }
+    try {
+      // 落盘不受 AI 上下文长度限制：给一个足够大的上限（extractMarkdown 默认只取 30000 字符）
+      md = await this.extractMarkdown(SAVE_MARKDOWN_MAX_CHARS)
+    } catch (err: any) {
+      return { ok: false, error: err?.message || String(err) }
+    }
+    const body = String(md.markdown || '').trim()
+    if (!body) return { ok: false, error: '未提取到正文（页面可能为空或尚未加载完成）' }
+    // 子目录名清洗：按层级拆开逐段清洗（去掉路径分隔符与 Windows 非法字符、丢弃 . 与 ..），
+    // 既允许「网页剪藏/2026」这类多级目录，又保证不会越界写到知识库之外
+    const subSegs = String(opts?.subdir ?? '')
+      .split(/[\\/]+/)
+      .map(s => s.replace(/[*?"<>|:]+/g, '-').replace(/^\.+$/, '').trim())
+      .filter(Boolean)
+    const dir = subSegs.length ? join(root, ...subSegs) : root
+    try { fs.mkdirSync(dir, { recursive: true }) } catch { /* 已存在/无权限时由写入报错 */ }
+    const title = String(md.title || '').trim()
+    const base = this.safeSlug(title) || this.safeSlug(String(md.url || '')) || 'web-clip'
+    let file = join(dir, `${base}.md`)
+    let n = 2
+    while (fs.existsSync(file) && n < 1000) file = join(dir, `${base}-${n++}.md`)
+    const content = (opts?.frontMatter === false ? '' : this.markdownFrontMatter(title, String(md.url || ''))) + body + '\n'
+    try {
+      fs.writeFileSync(file, content, 'utf8')
+    } catch (err: any) {
+      return { ok: false, error: err?.message || String(err) }
+    }
+    return {
+      ok: true,
+      path: file,
+      rel: relative(root, file).split(/[\\/]/).join('/'),
+      dir,
+      length: content.length,
+    }
+  }
+
+  /** Markdown 剪藏的 YAML front matter（标题/来源/时间；值一律双引号包裹并转义） */
+  private markdownFrontMatter(title: string, sourceUrl: string): string {
+    const d = new Date()
+    const p = (x: number) => String(x).padStart(2, '0')
+    const clipped = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    const q = (s: string) => `"${String(s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    return [
+      '---',
+      `title: ${q(title || sourceUrl || '网页剪藏')}`,
+      `source: ${q(sourceUrl)}`,
+      `clipped: ${q(clipped)}`,
+      'type: web-clip',
+      '---',
+      '',
+      '',
+    ].join('\n')
   }
 
   /** 打开激活标签的开发者工具（独立窗口模式） */

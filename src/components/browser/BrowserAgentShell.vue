@@ -66,17 +66,18 @@
         <i class="fa" :class="state.loading ? 'fa-times' : 'fa-refresh'"></i>
       </button>
 
-      <!-- 地址栏 -->
-      <div class="ba-addr">
-        <i class="fa ba-addr-icon" :class="isSecure ? 'fa-lock' : 'fa-globe'"></i>
+      <!-- 地址栏（搜索栏已并入地址栏：网址直接打开，关键词用所选引擎搜索） -->
+      <div class="ba-addr" :class="{ searching: addrIsSearch }" :title="addrTitle">
+        <i class="fa ba-addr-icon" :class="addrIsSearch ? 'fa-search' : (isSecure ? 'fa-lock' : 'fa-globe')"></i>
         <input
           ref="addrInput"
           v-model="urlInput"
           class="ba-addr-input"
           spellcheck="false"
-          :placeholder="zh ? '输入网址，回车打开（支持 https:// 或裸域名）' : 'Enter URL and press Enter'"
+          :placeholder="addrPlaceholder"
           @keydown.enter="navigate()"
         />
+        <span v-if="addrIsSearch" class="ba-addr-badge">{{ engineLabel }}</span>
         <span v-if="state.loading" class="ba-addr-loading"><i class="fa fa-spinner fa-spin"></i></span>
       </div>
 
@@ -104,23 +105,10 @@
       <!-- 左侧：页面内容（新标签搜索首页等 DOM 在原生视图隐藏/空白时露出；有 URL 时由原生视图承载） -->
       <div class="ba-main">
         <div class="ba-page">
-          <!-- 新标签搜索首页：搜索框固定顶部 + 下方收藏夹 grid（随窗口大小限量 / 可展开全部） -->
-          <div v-if="activeTab && !state.url" ref="homeEl" class="ba-home">
-            <div class="ba-search-home">
-              <div class="ba-search-box">
-                <i class="fa fa-search ba-search-ic"></i>
-                <input
-                  ref="homeSearchInput"
-                  v-model="homeQuery"
-                  class="ba-search-input"
-                  spellcheck="false"
-                  :placeholder="zh ? '在 Bing 中搜索，或输入网址直接打开' : 'Search Bing, or type a URL to open'"
-                  @keydown.enter="searchHome()"
-                />
-              </div>
-            </div>
-            <!-- 收藏夹快捷入口：文件夹形式（顶层 → 点击进入下一级文件夹/书签）；超出可在底部展开全部 -->
-            <div ref="bmBoxEl" class="ba-home-bookmarks scoll">
+          <!-- 新标签页（收藏夹网格）：整页就是收藏夹 grid——全部平铺、不折叠；搜索已并入顶部地址栏，页内不再放任何搜索/提示条 -->
+          <div v-if="activeTab && !state.url && newTabIsBookmarks" class="ba-home">
+            <!-- 收藏夹快捷入口：文件夹形式（顶层 → 点击进入下一级文件夹/书签）；全部展示，超高时本区滚动 -->
+            <div class="ba-home-bookmarks scoll">
               <!-- 当前所在文件夹导航（根目录不显示；空文件夹时也要能返回） -->
               <div v-if="homePath.length" class="ba-home-bm-nav">
                 <span class="ba-home-bm-back" @click="homeUp"><i class="fa fa-arrow-left"></i>{{ zh ? ' 返回' : ' Back' }}</span>
@@ -130,63 +118,59 @@
                 <template v-if="homePath.length"><i class="fa fa-folder-open-o"></i>&nbsp;{{ zh ? '该文件夹为空' : 'This folder is empty' }}</template>
                 <template v-else>{{ zh ? '暂无收藏：在任意网页点顶部 ⭐ 即可收藏，之后会显示在这里' : 'No bookmarks yet: click the ⭐ on any page, they will show up here' }}</template>
               </div>
-              <template v-else>
-                <div class="ba-home-bm-grid">
-                  <div
-                    v-for="b in visibleHomeBookmarks"
-                    :key="b.rel"
-                    class="ba-home-bm-item"
-                    :class="{ dir: b.kind === 'dir' }"
-                    :title="b.kind === 'dir' ? `${b.title}（${zh ? '文件夹，点击进入' : 'folder, click to open'}）` : `${b.title}\n${b.url}`"
-                    @click="homeTileClick(b)"
-                    @contextmenu.prevent.stop="openItemCtx(b)"
-                  >
-                    <!-- 悬浮右上角：文件夹 → 删除；普通书签 → 编辑；离线整页快照 → 删除 -->
-                    <template v-if="b.kind === 'dir'">
-                      <button
-                        class="ba-home-bm-del"
-                        :title="zh ? '删除该文件夹（含内部书签）' : 'Delete this folder (with its bookmarks)'"
-                        @click.stop="deleteHomeDir(b)"
-                      ><i class="fa fa-trash-o"></i></button>
+              <div v-else class="ba-home-bm-grid" :style="gridStyle">
+                <div
+                  v-for="b in homeBookmarks"
+                  :key="b.rel"
+                  class="ba-home-bm-item"
+                  :class="{ dir: b.kind === 'dir' }"
+                  :title="b.kind === 'dir' ? `${b.title}（${zh ? '文件夹，点击进入' : 'folder, click to open'}）` : `${b.title}\n${b.url}`"
+                  @click="homeTileClick(b)"
+                  @contextmenu.prevent.stop="openItemCtx(b)"
+                >
+                  <!-- 悬浮右上角：文件夹 → 删除；普通书签 → 编辑；离线整页快照 → 删除 -->
+                  <template v-if="b.kind === 'dir'">
+                    <button
+                      class="ba-home-bm-del"
+                      :title="zh ? '删除该文件夹（含内部书签）' : 'Delete this folder (with its bookmarks)'"
+                      @click.stop="deleteHomeDir(b)"
+                    ><i class="fa fa-trash-o"></i></button>
+                  </template>
+                  <template v-else-if="b.kind === 'file'">
+                    <button
+                      v-if="!isSnapshotBm(b)"
+                      class="ba-home-bm-del edit"
+                      :title="zh ? '编辑标题/地址' : 'Edit title / URL'"
+                      @click.stop="editHomeBm(b)"
+                    ><i class="fa fa-pencil"></i></button>
+                    <button
+                      v-else
+                      class="ba-home-bm-del"
+                      :title="zh ? '删除该离线快照' : 'Delete this snapshot'"
+                      @click.stop="deleteHomeBm(b)"
+                    ><i class="fa fa-trash-o"></i></button>
+                  </template>
+                  <span class="ba-home-bm-icon">
+                    <i v-if="b.kind === 'dir'" class="fa fa-folder ba-home-bm-folder"></i>
+                    <template v-else>
+                      <img
+                        v-if="favImgSrc(b)"
+                        class="ba-home-bm-img"
+                        :src="favImgSrc(b)"
+                        draggable="false"
+                        alt=""
+                        @error="onHomeFavError(b)"
+                      />
+                      <span v-else class="ba-home-bm-avatar" :style="{ backgroundColor: avatarColor(b.host) }">{{ avatarLetter(b) }}</span>
                     </template>
-                    <template v-else-if="b.kind === 'file'">
-                      <button
-                        v-if="!isSnapshotBm(b)"
-                        class="ba-home-bm-del edit"
-                        :title="zh ? '编辑标题/地址' : 'Edit title / URL'"
-                        @click.stop="editHomeBm(b)"
-                      ><i class="fa fa-pencil"></i></button>
-                      <button
-                        v-else
-                        class="ba-home-bm-del"
-                        :title="zh ? '删除该离线快照' : 'Delete this snapshot'"
-                        @click.stop="deleteHomeBm(b)"
-                      ><i class="fa fa-trash-o"></i></button>
-                    </template>
-                    <span class="ba-home-bm-icon">
-                      <i v-if="b.kind === 'dir'" class="fa fa-folder ba-home-bm-folder"></i>
-                      <template v-else>
-                        <img
-                          v-if="favImgSrc(b)"
-                          class="ba-home-bm-img"
-                          :src="favImgSrc(b)"
-                          draggable="false"
-                          alt=""
-                          @error="onHomeFavError(b)"
-                        />
-                        <span v-else class="ba-home-bm-avatar" :style="{ backgroundColor: avatarColor(b.host) }">{{ avatarLetter(b) }}</span>
-                      </template>
-                    </span>
-                    <span class="ba-home-bm-name">{{ b.title }}</span>
-                  </div>
+                  </span>
+                  <span class="ba-home-bm-name">{{ b.title }}</span>
                 </div>
-                <div v-if="moreHomeBmCount > 0" class="ba-home-bm-more" @click="homeBmExpanded = !homeBmExpanded">
-                  <i class="fa" :class="homeBmExpanded ? 'fa-angle-up' : 'fa-angle-down'"></i>
-                  <span>{{ homeBmExpanded ? (zh ? '收起' : 'Collapse') : (zh ? `展开全部（还有 ${moreHomeBmCount} 个）` : `Show all (${moreHomeBmCount} more)`) }}</span>
-                </div>
-              </template>
+              </div>
             </div>
           </div>
+          <!-- 新标签页（空白页）：设置里选「空白页」时什么都不显示（搜索用顶部地址栏） -->
+          <div v-else-if="activeTab && !state.url" class="ba-home ba-home-blank"></div>
         <!-- 无任何标签时的空态（极少见） -->
         <div v-else-if="!state.url" class="ba-empty">
           <i class="fa fa-globe" style="font-size: 34px;"></i>
@@ -215,13 +199,12 @@
               <BrowserRailSettings
                 :chip="agentChip"
                 :url="state.url"
-                :allow-eval="state.allowEval"
                 :active="railOpen && railView === 'settings'"
                 :on-open-external="openExternal"
                 :on-save-page="savePage"
+                :on-save-markdown="saveMarkdown"
                 :on-recycle="recycleAgentTabs"
                 :on-devtools="openDevtools"
-                :on-toggle-eval="toggleEval"
               />
             </template>
             <!-- 收藏夹面板（独立模块：BrowserBookmarksPanel） -->
@@ -296,6 +279,7 @@ import { ElMessageBox } from 'element-plus'
 import BrowserRailSettings from '@/components/browser/BrowserRailSettings.vue'
 import BrowserBookmarksPanel from '@/components/browser/BrowserBookmarksPanel.vue'
 import { getPlatform } from '@/platform'
+import { BROWSER_SEARCH_ENGINES, browserSearchEngine, browserSearchEngineLabel, buildBrowserSearchUrl } from '@/shared/browserSearch'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -395,8 +379,8 @@ const openRail = async (view: 'settings' | 'bookmarks') => {
 const toggleSettings = () => openRail('settings')
 const toggleBookmarks = () => openRail('bookmarks')
 
-// 从主窗口最近写入的 localStorage 同步浏览器偏好（默认页/保存文件夹），
-// 避免主窗口「设置 → 基础 → 浏览器」改动后本独立窗口仍读到旧值
+// 从主窗口最近写入的 localStorage 同步浏览器偏好（主页/新标签页/搜索/收藏夹/剪藏/AI 开关），
+// 避免主窗口「设置 → 其他 → 浏览器」改动后本独立窗口仍读到旧值
 const syncBrowserPrefs = () => {
   try {
     const raw = localStorage.getItem('UI')
@@ -405,9 +389,20 @@ const syncBrowserPrefs = () => {
       if (ui && typeof ui === 'object') {
         if (typeof ui.browserHomeUrl === 'string') store.UI.browserHomeUrl = ui.browserHomeUrl
         if (typeof ui.browserSaveDir === 'string') store.UI.browserSaveDir = ui.browserSaveDir
+        if (ui.browserNewTab === 'bookmarks' || ui.browserNewTab === 'blank') store.UI.browserNewTab = ui.browserNewTab
+        if (typeof ui.browserSearchEngine === 'string' && BROWSER_SEARCH_ENGINES.some(e => e.id === ui.browserSearchEngine)) {
+          store.UI.browserSearchEngine = ui.browserSearchEngine
+        }
+        if (typeof ui.browserSearchTemplate === 'string') store.UI.browserSearchTemplate = ui.browserSearchTemplate
+        if (typeof ui.browserGridCols === 'number' && isFinite(ui.browserGridCols)) store.UI.browserGridCols = ui.browserGridCols
+        if (typeof ui.browserAllowEval === 'boolean') store.UI.browserAllowEval = ui.browserAllowEval
+        if (typeof ui.browserClipDir === 'string') store.UI.browserClipDir = ui.browserClipDir
+        if (typeof ui.browserClipFrontMatter === 'boolean') store.UI.browserClipFrontMatter = ui.browserClipFrontMatter
       }
     }
   } catch { /* 忽略 */ }
+  // AI 执行 JS 开关的真实状态在主进程：同步配置后按配置文件重置（浏览器窗口可能先于设置页启动）
+  void syncAllowEvalToMain()
 }
 
 // 浏览器 Agent 是桌面专属子系统（独立窗口 + 主进程 WebContentsView）；
@@ -464,13 +459,13 @@ const sendBrowserTheme = () => {
   }).catch(() => {})
 }
 
-// 激活标签变化时同步地址栏文本；切到空白（新）标签 → 自动聚焦首页搜索框
+// 激活标签变化时同步地址栏文本（新标签页无搜索框：地址栏即搜索入口，聚焦地址栏）
 watch(() => state.activeTabId, async () => {
   const tab = activeTab.value
   urlInput.value = tab?.url || ''
   if (tab && !tab.url && !tab.loading) {
     await nextTick()
-    homeSearchInput.value?.focus()
+    addrInput.value?.focus()
   }
 })
 
@@ -537,7 +532,7 @@ const recycleAgentTabs = async () => {
 }
 
 // 判定是否像“标准链接”：含 scheme / file / localhost-IP / 点分域名（含端口/路径）。
-// 否则视为搜索词 → Bing 搜索
+// 否则视为搜索词 → 用「设置 → 浏览器 → 搜索」里选定的引擎搜索
 const isLikelyUrl = (raw: string): boolean => {
   const v = raw.trim()
   if (!v) return false
@@ -548,29 +543,32 @@ const isLikelyUrl = (raw: string): boolean => {
   if (/^[\w-]+(\.[\w-]+)+(:\d+)?(\/.*)?$/.test(v)) return true
   return false
 }
+// ===== 地址栏即搜索栏：关键词 → 所选引擎；网址 → 直接打开 =====
+const engineLabel = computed(() => browserSearchEngineLabel(store.UI?.browserSearchEngine, zh.value))
+/** 地址栏当前输入看起来是关键词（非网址）→ 显示搜索图标 + 引擎徽标，提示将走搜索 */
+const addrIsSearch = computed(() => !!urlInput.value.trim() && !isLikelyUrl(urlInput.value))
+const addrPlaceholder = computed(() => zh.value
+  ? `输入网址打开，或输入关键词用 ${engineLabel.value} 搜索`
+  : `Enter a URL, or keywords to search with ${engineLabel.value}`)
+const addrTitle = computed(() => zh.value
+  ? `地址栏：网址直接打开；关键词用「${engineLabel.value}」搜索（可在右侧 ⚙ → 浏览器设置中更换引擎）`
+  : `Address bar: URLs open directly; keywords search with ${engineLabel.value} (change it in ⚙ → Browser settings)`)
+
 const navigate = async () => {
-  let u = urlInput.value.trim()
-  if (!u) return
-  // 非标准链接格式（纯关键词 / 句子）→ 交给 Bing 搜索
-  if (!isLikelyUrl(u)) {
-    u = `https://www.bing.com/search?q=${encodeURIComponent(u)}`
-  }
+  const u0 = urlInput.value.trim()
+  if (!u0) return
+  // 非标准链接格式（纯关键词 / 句子）→ 交给所选搜索引擎
+  const u = isLikelyUrl(u0)
+    ? u0
+    : buildBrowserSearchUrl(u0, store.UI?.browserSearchEngine, store.UI?.browserSearchTemplate)
   await invoke('browser-agent:navigate', { url: u }).catch(() => {})
-}
-// 首页搜索框：URL 直接打开；其他内容默认用 Bing 搜索
-const homeQuery = ref('')
-const homeSearchInput = ref<HTMLInputElement | null>(null)
-const searchHome = async () => {
-  let q = homeQuery.value.trim()
-  if (!q) return
-  if (!isLikelyUrl(q)) q = `https://www.bing.com/search?q=${encodeURIComponent(q)}`
-  homeQuery.value = ''
-  await invoke('browser-agent:navigate', { url: q }).catch(() => {})
 }
 const action = async (a: string) => {
   await invoke('browser-agent:action', { action: a }).catch(() => {})
 }
-const toggleEval = async (v: boolean) => {
+/** 把「允许 AI 执行 JS」持久化设置下发给主进程（browser_eval 开关由主进程持有，重启后需重新同步） */
+const syncAllowEvalToMain = async () => {
+  const v = store.UI?.browserAllowEval === true
   state.allowEval = v
   await invoke('browser-agent:set-eval', { enabled: v }).catch(() => {})
 }
@@ -636,7 +634,7 @@ const isBookmarked = computed(() => !!state.url && bmItems.value.some(b => b.kin
 const toggleBookmark = async () => {
   if (!state.url) return
   const dir = browserBaseDir()
-  if (!dir) { showToast(zh.value ? '请先添加工作区或设置「浏览器保存文件夹」' : 'Add a workspace folder or set a browser save folder', 'err'); return }
+  if (!dir) { showToast(zh.value ? '请先添加工作区，或在「浏览器设置 → 收藏夹」里选择文件夹' : 'Add a workspace folder or pick one under “Browser settings → Folder”', 'err'); return }
   const hit = bmItems.value.find(b => b.kind === 'file' && b.url === state.url)
   if (hit) {
     const r = await invoke('browser-agent:remove-bookmark', { root: dir, path: hit.path }).catch(() => null)
@@ -679,10 +677,10 @@ const currentDirName = computed(() => {
   const item = (bmItems.value || []).find(i => i.kind === 'dir' && i.rel === rel)
   return (item && (item.title || item.name)) || homePath.value[homePath.value.length - 1] || ''
 })
-const homeUp = () => { homePath.value = homePath.value.slice(0, -1); homeBmExpanded.value = false }
+const homeUp = () => { homePath.value = homePath.value.slice(0, -1) }
 // 点击格子：文件夹 → 进入下一级；书签 → 新标签页打开
 const homeTileClick = (b: HomeBm) => {
-  if (b.kind === 'dir') { homePath.value = b.rel.split('/'); homeBmExpanded.value = false }
+  if (b.kind === 'dir') homePath.value = b.rel.split('/')
   else openBookmark(b)
 }
 // 目录被删除 / 收藏位置切换后，若当前所在文件夹已不存在 → 回到顶层
@@ -835,7 +833,6 @@ const closeFldCtx = () => { fldCtxVisible.value = false; fldCtxErr.value = '' }
 const enterFldCtx = () => {
   if (!fldCtxRel.value) return
   homePath.value = fldCtxRel.value.split('/')
-  homeBmExpanded.value = false
   closeFldCtx()
 }
 const copyFldCtxPath = async () => {
@@ -883,75 +880,22 @@ const ensureHomeFavs = async () => {
 }
 watch([homeVisible, homePath, homeBookmarks], () => { if (homeVisible.value) void ensureHomeFavs() }, { immediate: true })
 
-// ===== 新标签页书签按可用空间限量展示（窗口过小时搜索框不被挤出；可展开全部） =====
-const homeEl = ref<HTMLElement | null>(null)
-const bmBoxEl = ref<HTMLElement | null>(null)
-const homeW = ref(0)
-const homeH = ref(0)
-const bmBoxH = ref(0)
-const bmW = ref(0)
-const homeBmExpanded = ref(false)
-// 列数直接读取 CSS 网格实际列数（随窗口与媒体查询变化），保证与 auto-fill 一致、不会多算而换行
-const homeCols = ref(1)
-const fallbackCols = () => Math.max(1, Math.floor(((bmW.value || homeW.value || 600) + 8) / 112))
-const measureGridCols = () => {
-  const grid = bmBoxEl.value?.querySelector<HTMLElement>('.ba-home-bm-grid')
-  if (!grid) { homeCols.value = fallbackCols(); return }
-  const tpl = getComputedStyle(grid).gridTemplateColumns || ''
-  if (!tpl || tpl === 'none') { homeCols.value = fallbackCols(); return }
-  const cols = tpl.split(' ').filter(s => s.trim()).length
-  if (cols > 0) homeCols.value = cols
-}
-const homeColumns = computed(() => homeCols.value)
-// 窗口较小时只显示一行（按整页高度判定），第 N+1 个收进「展开全部」
-const homeSmall = computed(() => {
-  const h = homeH.value || (typeof window !== 'undefined' ? window.innerHeight : 0) || 800
-  return h < 560
+// ===== 新标签页：整页收藏夹 grid（全部平铺、不折叠） =====
+/** 新标签页内容模式（设置 → 浏览器 → 新标签页）：bookmarks=收藏夹网格 / blank=空白页 */
+const newTabIsBookmarks = computed(() => String(store.UI?.browserNewTab ?? 'bookmarks') !== 'blank')
+/** 每行书签数（0=自动，交给 CSS auto-fill 按窗口宽度铺满） */
+const gridStyle = computed(() => {
+  const n = Math.floor(Number(store.UI?.browserGridCols) || 0)
+  return n >= 3 && n <= 12 ? { gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` } : {}
 })
-const homeMaxRows = computed(() => {
-  if (homeSmall.value) return 1
-  const h = homeH.value || (typeof window !== 'undefined' ? Math.max(0, window.innerHeight - 160) : 0) || 400
-  // 用整页高度估可用行数（书签区会收缩为内容高度，clientHeight 不代表可用空间）
-  const avail = Math.max(bmBoxH.value || 0, Math.max(0, h - 150))
-  return Math.max(1, Math.min(8, Math.floor(avail / 112))) // 每行约 112px；最多 8 行
-})
-const homeBmLimit = computed(() => homeColumns.value * homeMaxRows.value)
-const moreHomeBmCount = computed(() => Math.max(0, homeBookmarks.value.length - homeBmLimit.value))
-const visibleHomeBookmarks = computed(() => {
-  const all = homeBookmarks.value
-  if (homeBmExpanded.value || homeBmLimit.value <= 0) return all
-  return all.slice(0, homeBmLimit.value)
-})
-// 测量新标签页容器尺寸（ResizeObserver 随窗口缩放自动更新）
-const measureHome = () => {
-  const home = homeEl.value
-  if (home) { homeW.value = home.clientWidth; homeH.value = home.clientHeight }
-  const bm = bmBoxEl.value
-  if (bm) { bmW.value = bm.clientWidth; bmBoxH.value = bm.clientHeight }
-  measureGridCols()
-}
-let homeObs: ResizeObserver | null = null
 watch(homeVisible, async (v) => {
-  if (v) {
-    // 每次切到新标签页都回到收藏夹顶层并刷新：避免停在某个子文件夹里，
-    // 导致刚收藏的“顶层页面”在新标签页下方看不到（像没识别到）。
-    homePath.value = []
-    homeBmExpanded.value = false
-    void refreshBookmarks()
-    await nextTick()
-    measureHome()
-    if (!homeObs && homeEl.value) {
-      homeObs = new ResizeObserver(() => measureHome())
-      homeObs.observe(homeEl.value)
-    }
-  } else {
-    if (homeObs) { homeObs.disconnect(); homeObs = null }
-  }
+  if (!v) return
+  // 每次切到新标签页都回到收藏夹顶层并刷新：避免停在某个子文件夹里，
+  // 导致刚收藏的“顶层页面”在新标签页下方看不到（像没识别到）。
+  homePath.value = []
+  void refreshBookmarks()
+  await nextTick()
 }, { immediate: true })
-// 收藏增删后（grid 出现/变化）重新测量列数
-watch(() => bmItems.value.length, async () => {
-  if (homeVisible.value) { await nextTick(); measureHome() }
-})
 
 // 保存当前页（整体离线 HTML）到浏览器落盘目录；无可用目录时由主进程弹保存对话框
 const savePage = async (mode: 'link' | 'full') => {
@@ -967,6 +911,27 @@ const savePage = async (mode: 'link' | 'full') => {
   }
 }
 const openDevtools = async () => { await invoke('browser-agent:devtools').catch(() => {}) }
+
+/**
+ * 页面操作「保存 Markdown 到知识库」：主进程净化正文 → turndown 转 Markdown，
+ * 落到「知识库根目录 / 剪藏子目录（设置可改）」；返回相对路径并提示，便于在知识管理里找到。
+ */
+const saveMarkdown = async () => {
+  if (!state.url) return
+  const root = browserBaseDir()
+  if (!root) {
+    showToast(zh.value ? '请先添加工作区，或在「浏览器设置 → 收藏夹」里选择文件夹' : 'Add a workspace or pick a folder under “Browser settings → Folder”', 'err')
+    return
+  }
+  const subdir = String(store.UI?.browserClipDir ?? '').trim()
+  const frontMatter = store.UI?.browserClipFrontMatter !== false
+  const res = await invoke('browser-agent:save-markdown', { root, subdir, frontMatter }).catch(() => null)
+  if (res?.ok) {
+    showToast(zh.value ? `已保存到知识库：${res.rel || res.path}` : `Saved to knowledge base: ${res.rel || res.path}`)
+  } else {
+    showToast(res?.error || (zh.value ? '保存失败' : 'Save failed'), 'err')
+  }
+}
 
 // ===== 收藏夹自动刷新：停靠栏「收藏夹」打开期间定时拉取，文件夹内文件变化时及时更新 =====
 let bmAutoTimer: ReturnType<typeof setInterval> | null = null
@@ -1174,7 +1139,10 @@ onBeforeUnmount(() => {
   -webkit-app-region: no-drag;
 }
 .ba-addr:focus-within { border-color: var(--fontActiveColor); }
+/* 输入内容看起来是关键词（将走搜索）时：图标切为放大镜 + 右侧显示当前引擎名 */
+.ba-addr.searching { border-color: color-mix(in srgb, var(--fontActiveColor) 45%, var(--borderColor)); }
 .ba-addr-icon { flex-shrink: 0; font-size: 11px; color: var(--fontColor); opacity: .6; }
+.ba-addr.searching .ba-addr-icon { color: var(--fontActiveColor); opacity: .9; }
 .ba-addr-input {
   flex: 1;
   min-width: 0;
@@ -1183,6 +1151,18 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--fontColor);
   font-size: 12px;
+}
+.ba-addr-badge {
+  flex-shrink: 0;
+  max-width: 96px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
+  color: var(--fontActiveColor);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ba-addr-loading { flex-shrink: 0; font-size: 11px; color: var(--fontActiveColor); }
 /* 设置按钮（顶部常驻）：开启时强调色高亮；AI 忙碌时右上角小红点提示（侧栏内有完整状态行） */
@@ -1333,61 +1313,27 @@ onBeforeUnmount(() => {
 .ba-star-btn.on i { color: #f0b429; }
 .ba-star-btn:hover i { color: #f0b429; }
 
-/* ====== 新标签搜索首页（默认 Bing）：搜索框 + 书签整体垂直居中 ====== */
+/* ====== 新标签页：整页收藏夹 grid（无搜索框、无提示条，搜索并入地址栏；不折叠，全部平铺） ====== */
 .ba-home {
   flex: 1;
   min-height: 0;
-  overflow: hidden; /* 滚动交给书签区 */
-  padding: 18px 28px;
+  overflow: hidden; /* 滚动交给下方书签区 */
+  padding: 14px 22px 16px;
   display: flex;
   flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+/* 空白页模式：什么都不显示 */
+.ba-home-blank {
   align-items: center;
-  justify-content: center; /* 大窗/小窗都垂直居中 */
+  justify-content: center;
 }
-.ba-search-home {
-  flex: 0 0 auto; /* 固定顶部，不被下方书签挤走 */
-  width: 100%;
-  max-width: 620px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 18px;
-}
-.ba-search-box {
-  width: 100%;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 14px;
-  border: 1px solid var(--borderColor);
-  border-radius: 22px;
-  background: var(--menuColor);
-  transition: border-color .15s, box-shadow .15s;
-}
-.ba-search-box:focus-within {
-  border-color: var(--fontActiveColor);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fontActiveColor) 16%, transparent);
-}
-.ba-search-ic { flex-shrink: 0; font-size: 13px; color: var(--fontColor); opacity: .5; }
-.ba-search-input {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--fontColor);
-  font-size: 14px;
-}
-/* 收藏夹 grid 快捷入口：随内容收缩，超高才在内部滚动（整体垂直居中不被挤出） */
+/* 收藏夹 grid：占满剩余高度，超出时本区滚动（不再限量、不再“展开全部”） */
 .ba-home-bookmarks {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-height: 0;
   width: 100%;
-  max-width: calc(97%);
-  margin-top: 8px;
-  max-height: calc(100% - 80px);
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -1589,29 +1535,6 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 展开/收起更多收藏 */
-.ba-home-bm-more {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  margin: 6px auto 2px;
-  padding: 4px 14px;
-  border: 1px solid var(--borderColor);
-  border-radius: 14px;
-  font-size: 11px;
-  color: var(--fontColor);
-  opacity: .7;
-  cursor: pointer;
-  width: max-content;
-  transition: all .15s;
-}
-.ba-home-bm-more:hover {
-  color: var(--fontActiveColor);
-  border-color: var(--fontActiveColor);
-  opacity: 1;
-  background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent);
-}
 /* 文件夹内导航（返回上一级 / 当前文件夹名） */
 .ba-home-bm-nav {
   display: flex;
@@ -1654,7 +1577,7 @@ onBeforeUnmount(() => {
 }
 .ba-star-btn.on { color: #f0b429; }
 
-/* ====== 自适应布局：窗口变窄时标签 / 导航 / 新标签搜索框缩小；小窗书签去图标只显名称 ====== */
+/* ====== 自适应布局：窗口变窄时标签 / 导航栏 / 新标签页提示缩小；小窗书签去图标只显名称 ====== */
 @media (max-width: 900px) {
   .ba-tab { flex: 0 1 132px; padding: 0 5px 0 7px; font-size: 11px; }
   .ba-tab-close { width: 13px; height: 13px; }
@@ -1667,11 +1590,8 @@ onBeforeUnmount(() => {
   .ba-btn { width: 25px; height: 25px; font-size: 11px; }
   .ba-addr { height: 25px; padding: 0 8px; }
   .ba-addr-input { font-size: 11px; }
-  .ba-home { padding: 12px 12px 18px; }
-  .ba-search-home { max-width: 480px; gap: 12px; }
-  .ba-search-box { height: 30px; border-radius: 15px; padding: 0 12px; width:calc(100% - 80px) }
-  .ba-search-input { font-size: 12px; }
-  .ba-search-ic { font-size: 11px; }
+  .ba-addr-badge { display: none; } /* 窄窗：引擎徽标让位给输入内容（placeholder 已写明引擎） */
+  .ba-home { padding: 12px 12px 14px; }
   /* 小窗：书签去图标 → 纯名称 grid（更紧凑，更多可排一行） */
   .ba-home-bm-icon { display: none; }
   .ba-home-bm-grid { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
@@ -1692,8 +1612,6 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 520px) {
   .ba-tab { flex-basis: 84px; }
-  .ba-search-home { max-width: 360px; }
-  .ba-search-box { height: 28px; border-radius: 14px; }
   .ba-home-bm-grid { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); }
   .ba-home-bm-item { padding: 5px 6px; }
   .ba-home-bm-name { font-size: 10px; }

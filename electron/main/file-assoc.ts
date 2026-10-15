@@ -10,8 +10,15 @@
  *        OpenWithProgids —— 后者不受 Windows UserChoice 保护限制，是可靠生效的方式。
  *      · Windows 8+ 若用户曾用「打开方式 → 始终使用」选定过默认程序，系统会记录
  *        UserChoice 并优先于我们的注册；这种情况会读取出来在前端提示，程序无法覆盖。
- *  - Linux：读写 ~/.config/mimeapps.list（XDG 规范），配合安装包提供的 AI-KM.desktop。
- *  - macOS：不支持程序化修改，返回提示（由用户在「访达 → 显示简介 → 打开方式」设置）。
+ *  - Linux：读写 ~/.config/mimeapps.list（XDG 规范），配合安装包提供的桌面条目
+ *      （deb 装到 /usr/share/applications/<executableName>.desktop，Linux 上 executableName
+ *      默认是产品名小写 → ai-km.desktop；旧版 / 手工安装可能是 AI-KM.desktop，两者都探测）。
+ *      ⚠️ 桌面条目必须在 MimeType 里声明类型（见 package.json：标准类型走 build.linux.mimeTypes，
+ *      两个自定义类型走 build.linux.fileAssociations[].mimeType，后者顺带装上 mime-info 定义），
+ *      否则桌面环境不认这个处理程序，写 mimeapps.list 也不会生效。
+ *  - macOS：不支持程序化修改，返回提示（由用户在「访达 → 显示简介 → 打开方式」设置）；
+ *      安装包在 Info.plist 里声明 CFBundleDocumentTypes（package.json 的 build.mac.fileAssociations，
+ *      rank=Alternate，不抢系统默认程序），AI-KM 因此会出现在「打开方式」列表里，双击经 open-file 事件送达。
  */
 
 import { app, ipcMain } from 'electron'
@@ -64,8 +71,10 @@ export const FILE_ASSOC_ENTRIES: FileAssocEntry[] = [
   { key: 'excalidraw', labelZh: 'Excalidraw 白板', labelEn: 'Excalidraw drawing', exts: ['excalidraw'], progId: 'Excalidraw Drawing', desc: 'Excalidraw Whiteboard Drawing', mime: 'application/x-excalidraw' },
 ]
 
-/** Linux 下安装包提供的桌面条目名（electron-builder 用 executableName，即 AI-KM.desktop） */
-const DESKTOP_FILE_NAME = 'AI-KM.desktop'
+/** Linux 下安装包的桌面条目名（electron-builder 用 executableName，Linux 默认 = 产品名小写） */
+const DESKTOP_FILE_NAMES = ['ai-km.desktop', 'AI-KM.desktop']
+/** 桌面条目可能出现的目录（系统级 + 用户级） */
+const DESKTOP_DIRS = ['/usr/share/applications', '/usr/local/share/applications']
 
 export interface FileAssocEntryState {
   /** 当前关联级别 */
@@ -300,16 +309,20 @@ function splitList(v: string): string[] {
   return v.split(';').map(s => s.trim()).filter(Boolean)
 }
 
-async function linuxIsDesktopEntryInstalled(): Promise<boolean> {
-  const candidates = [
-    path.join('/usr/share/applications', DESKTOP_FILE_NAME),
-    path.join('/usr/local/share/applications', DESKTOP_FILE_NAME),
-    path.join(os.homedir(), '.local/share/applications', DESKTOP_FILE_NAME),
-  ]
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return true } catch { /* ignore */ }
+/**
+ * 找出实际安装的桌面条目名（写 mimeapps.list 时必须用它，写错名字关联就不生效）。
+ * electron-builder 的 deb 把桌面条目装成 `/usr/share/applications/<executableName>.desktop`，
+ * 而 Linux 上 executableName 默认是**产品名小写**（ai-km.desktop）；手工安装 / 旧版也可能是
+ * 产品名原样（AI-KM.desktop）。两个名字都探测一遍，返回找到的那个。
+ */
+async function linuxDesktopFileName(): Promise<string | null> {
+  const dirs = [...DESKTOP_DIRS, path.join(os.homedir(), '.local/share/applications')]
+  for (const name of DESKTOP_FILE_NAMES) {
+    for (const dir of dirs) {
+      try { if (fs.existsSync(path.join(dir, name))) return name } catch { /* ignore */ }
+    }
   }
-  return false
+  return null
 }
 
 async function linuxReadMimeStates(): Promise<IniSections> {
@@ -320,15 +333,15 @@ async function linuxReadMimeStates(): Promise<IniSections> {
   }
 }
 
-function linuxStateOf(sections: IniSections, mime: string): FileAssocMode {
+function linuxStateOf(sections: IniSections, mime: string, desktop: string): FileAssocMode {
   const def = splitList(sections.get('Default Applications')?.get(mime) || '')
-  if (def[0] === DESKTOP_FILE_NAME || def.includes(DESKTOP_FILE_NAME)) return 'default'
+  if (def[0] === desktop || def.includes(desktop)) return 'default'
   const added = splitList(sections.get('Added Associations')?.get(mime) || '')
-  if (added.includes(DESKTOP_FILE_NAME)) return 'openwith'
+  if (added.includes(desktop)) return 'openwith'
   return 'none'
 }
 
-async function linuxSetMode(mime: string, mode: FileAssocMode): Promise<void> {
+async function linuxSetMode(mime: string, mode: FileAssocMode, desktop: string): Promise<void> {
   const file = mimeAppsPath()
   let sections: IniSections
   try {
@@ -346,15 +359,15 @@ async function linuxSetMode(mime: string, mode: FileAssocMode): Promise<void> {
     else sec.delete(mime)
   }
 
-  const defList = splitList(get('Default Applications').get(mime) || '').filter(x => x !== DESKTOP_FILE_NAME)
-  const addList = splitList(get('Added Associations').get(mime) || '').filter(x => x !== DESKTOP_FILE_NAME)
+  const defList = splitList(get('Default Applications').get(mime) || '').filter(x => x !== desktop)
+  const addList = splitList(get('Added Associations').get(mime) || '').filter(x => x !== desktop)
 
   if (mode === 'default') {
-    setList('Default Applications', [DESKTOP_FILE_NAME, ...defList])
-    setList('Added Associations', [DESKTOP_FILE_NAME, ...addList])
+    setList('Default Applications', [desktop, ...defList])
+    setList('Added Associations', [desktop, ...addList])
   } else if (mode === 'openwith') {
     setList('Default Applications', defList)
-    setList('Added Associations', [DESKTOP_FILE_NAME, ...addList])
+    setList('Added Associations', [desktop, ...addList])
   } else {
     setList('Default Applications', defList)
     setList('Added Associations', addList)
@@ -414,11 +427,12 @@ export async function getFileAssocState(): Promise<FileAssocState> {
   }
 
   if (platform === 'linux') {
-    const installed = await linuxIsDesktopEntryInstalled()
+    const desktop = await linuxDesktopFileName()
+    const installed = desktop !== null
     const sections = await linuxReadMimeStates()
     const states: Record<string, FileAssocEntryState> = {}
     for (const e of FILE_ASSOC_ENTRIES) {
-      states[e.key] = { mode: e.mime ? linuxStateOf(sections, e.mime) : 'none' }
+      states[e.key] = { mode: e.mime && desktop ? linuxStateOf(sections, e.mime, desktop) : 'none' }
     }
     return {
       ...base,
@@ -454,8 +468,9 @@ export async function setFileAssoc(key: string, mode: FileAssocMode): Promise<vo
 
   if (process.platform === 'linux') {
     if (!entry.mime) throw new Error('该类型在 Linux 上不支持由本软件设置默认打开方式')
-    if (!(await linuxIsDesktopEntryInstalled())) throw new Error('未找到 AI-KM.desktop（请使用 deb 安装版）')
-    await linuxSetMode(entry.mime, mode)
+    const desktop = await linuxDesktopFileName()
+    if (!desktop) throw new Error('未找到桌面条目（ai-km.desktop / AI-KM.desktop），请使用 .deb 安装版')
+    await linuxSetMode(entry.mime, mode, desktop)
     return
   }
 

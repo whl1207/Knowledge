@@ -43,7 +43,7 @@ export const CORE_PLUGIN_SLOTS: readonly CorePluginSlotDef[] = [
   {
     name: 'settings.card',
     kind: 'list',
-    desc: '设置卡片：往**已有**设置页里插一块卡片（meta.target 指定设置页 id，如 "view" / "features"）',
+    desc: '设置卡片：往**已有**设置页里插一块卡片（meta.target 指定设置页 id，如 "view"；旧 id "features" 已并入 "view"，仍可用）',
     requires: ['component', 'meta.target'],
   },
   {

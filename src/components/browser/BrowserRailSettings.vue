@@ -1,10 +1,9 @@
 <!-- src/components/browser/BrowserRailSettings.vue
      浏览器右侧停靠栏「设置」面板（独立模块，从 BrowserAgentShell 分离）：
        - 当前标签 AI 状态行（浏览 / AI / 操作中）
-       - 页面操作：在系统浏览器打开 / 保存整页 / 回收 AI 会话标签 / 控制台
-       - AI 控制：允许执行 JS（browser_eval）开关
-       - 浏览器设置（BrowserSettingsPanel：默认页面 / 保存文件夹）
-       - 缓存管理：显示浏览器缓存大小 + 一键清理（主进程 browser-agent:cache-info / clear-cache）
+       - 页面操作：在系统浏览器打开 / 保存整页 / 保存 Markdown 到知识库 / 回收 AI 会话标签 / 控制台
+       - 浏览器设置（BrowserSettingsPanel：主页 / 新标签页 / 搜索 / 收藏夹 / 剪藏 / AI 执行 JS）
+       - 缓存管理：显示浏览器缓存大小 + 一键清理（带确认；主进程 browser-agent:cache-info / clear-cache）
      面板状态/动作经 props 注入；缓存信息自行经 IPC 查询（active 变为 true 时自动刷新）。 -->
 <template>
   <div class="browser-rail-settings">
@@ -20,9 +19,13 @@
       <i class="fa fa-external-link"></i>
       <span>{{ zh ? '在系统浏览器打开' : 'Open in system browser' }}</span>
     </button>
-    <button class="ba-rail-row" :disabled="!url" :title="zh ? '整体保存当前页（含图片/样式等资源），存到「浏览器设置 → 保存文件夹」' : 'Save current page with resources into the browser save folder'" @click="onSavePage?.('full')">
+    <button class="ba-rail-row" :disabled="!url" :title="zh ? '整体保存当前页（含图片/样式等资源），存到「浏览器设置 → 收藏夹文件夹」' : 'Save current page with resources into the bookmark folder set in Browser settings'" @click="onSavePage?.('full')">
       <i class="fa fa-download"></i>
       <span>{{ zh ? '保存整页（离线 HTML）' : 'Save full page (offline HTML)' }}</span>
+    </button>
+    <button class="ba-rail-row" :disabled="!url" :title="zh ? `提取正文转为 Markdown 存入知识库（默认子文件夹：${clipDir || '知识库根目录'}，可在下方浏览器设置中修改）` : `Extract the article as Markdown into the knowledge base (folder: ${clipDir || 'knowledge base root'}, configurable below)`" @click="onSaveMarkdown?.()">
+      <i class="fa fa-file-text-o"></i>
+      <span>{{ zh ? '保存 Markdown 到知识库' : 'Save Markdown to knowledge base' }}</span>
     </button>
     <button class="ba-rail-row" :title="zh ? '回收 AI 会话产生的标签页（保留正在查看的标签）' : 'Recycle AI session tabs (keep the one you are viewing)'" @click="onRecycle?.()">
       <i class="fa fa-eraser"></i>
@@ -33,20 +36,7 @@
       <span>{{ zh ? '控制台（DevTools）' : 'Console (DevTools)' }}</span>
     </button>
 
-    <!-- AI 控制 -->
-    <div class="ba-rail-sec">{{ zh ? 'AI 控制' : 'AI control' }}</div>
-    <div class="ba-rail-switch-row"
-      :title="zh ? (allowEval ? '已允许 AI 调用 browser_eval 执行任意 JS（点击关闭）' : '允许 AI 调用 browser_eval 在页面中执行任意 JavaScript（默认关闭，点击开启）') : (allowEval ? 'Allow browser_eval (arbitrary JS) - click to disable' : 'Allow AI to call browser_eval (arbitrary JS on the page) - click to enable')">
-      <div class="ba-rail-switch-info">
-        <span class="ba-rail-switch-name">{{ zh ? '允许执行 JS' : 'Allow JavaScript' }}</span>
-        <span class="ba-rail-switch-desc">{{ zh ? 'browser_eval（默认关闭，风险操作）' : 'browser_eval (off by default, risky)' }}</span>
-      </div>
-      <div class="ba-rail-switch" :class="{ on: allowEval }" @click="onToggleEval?.(!allowEval)">
-        <span class="ba-rail-switch-knob"></span>
-      </div>
-    </div>
-
-    <!-- 浏览器设置（默认页面 / 保存文件夹） -->
+    <!-- 浏览器设置（主页 / 新标签页 / 搜索 / 收藏夹 / 剪藏 / AI 执行 JS 等） -->
     <div class="ba-rail-sec">{{ zh ? '浏览器设置' : 'Browser settings' }}</div>
     <div class="ba-rail-settings">
       <BrowserSettingsPanel compact />
@@ -73,6 +63,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted } from 'vue'
 import { usestore } from '@/store'
+import { ElMessageBox } from 'element-plus'
 import BrowserSettingsPanel from '@/components/browser/BrowserSettingsPanel.vue'
 import { getPlatform } from '@/platform'
 
@@ -84,20 +75,22 @@ export interface ChipInfo { cls: string; icon: string; text: string; title: stri
 const props = withDefaults(defineProps<{
   chip: ChipInfo
   url: string
-  allowEval: boolean
   /** 面板是否可见（= 停靠栏展开且为设置视图）；变为 true 时刷新缓存大小 */
   active?: boolean
   onOpenExternal?: () => void
   onSavePage?: (mode: 'link' | 'full') => void
+  /** 页面操作：把当前页正文转 Markdown 存入知识库 */
+  onSaveMarkdown?: () => void
   onRecycle?: () => void
   onDevtools?: () => void
-  onToggleEval?: (v: boolean) => void
 }>(), {
   chip: () => ({ cls: 'plain', icon: 'fa-globe', text: '', title: '' }),
   url: '',
-  allowEval: false,
   active: false,
 })
+
+/** Markdown 剪藏落点子目录（提示文案用；实际落点由 BrowserAgentShell 传给主进程） */
+const clipDir = computed(() => String(store.UI.browserClipDir ?? '').trim())
 
 // ===== 缓存管理 =====
 const invoke = (method: string, payload?: any) =>
@@ -123,6 +116,16 @@ const refreshCacheInfo = async () => {
 }
 const doClearCache = async () => {
   if (cacheBusy.value) return
+  // 先确认再清（缓存可重建，但仍避免误点后页面全部重新加载）
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? `确定清理浏览器网页缓存吗？当前占用 ${cacheText.value}。清理不影响收藏、书签与登录状态，但之后页面首次加载会变慢。`
+        : `Clear the browser web cache? Current usage: ${cacheText.value}. Bookmarks and logins are kept; pages will reload their resources afterwards.`,
+      zh.value ? '清理浏览器缓存' : 'Clear browser cache',
+      { confirmButtonText: zh.value ? '清理' : 'Clear', cancelButtonText: zh.value ? '取消' : 'Cancel', type: 'warning' }
+    )
+  } catch { return }
   cacheBusy.value = true
   clearedText.value = ''
   const res = await invoke('browser-agent:clear-cache').catch(() => null)
@@ -207,42 +210,6 @@ onMounted(() => { void refreshCacheInfo() })
 .ba-rail-row:hover { background: color-mix(in srgb, var(--fontColor) 7%, transparent); }
 .ba-rail-row:disabled { opacity: .35; cursor: default; }
 .ba-rail-row:disabled:hover { background: transparent; }
-/* 开关行（允许执行 JS） */
-.ba-rail-switch-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--borderColor);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--fontColor) 3%, transparent);
-  cursor: pointer;
-}
-.ba-rail-switch-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.ba-rail-switch-name { font-size: 13px; color: var(--fontColor); }
-.ba-rail-switch-desc { font-size: 11px; color: var(--fontColor); opacity: .55; line-height: 1.3; }
-.ba-rail-switch {
-  flex: 0 0 auto;
-  width: 34px;
-  height: 18px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--fontColor) 22%, transparent);
-  position: relative;
-  transition: background .15s;
-}
-.ba-rail-switch.on { background: var(--fontActiveColor); }
-.ba-rail-switch-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  transition: left .15s;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
-}
-.ba-rail-switch.on .ba-rail-switch-knob { left: 18px; }
 /* 浏览器设置（内嵌 BrowserSettingsPanel compact） */
 .ba-rail-settings {
   border: 1px solid var(--borderColor);

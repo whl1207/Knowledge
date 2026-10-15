@@ -20,6 +20,7 @@ import PluginDevPanel from '@/components/set/PluginDevPanel.vue'
 import PluginSlot from '@/components/plugin/PluginSlot.vue'
 import { useAllSlotEntries } from '@/lib/plugin/useSlots'
 import { SETTINGS_CARD_SLOT, SETTINGS_TAB_SLOT } from '@/lib/plugin/coreSlots'
+import { panelKeys } from '@/lib/plugin/panelRegistry'
 import { SLOT_META_GROUP } from '@/shared/pluginSlots'
 import BrowserSettingsPanel from '@/components/browser/BrowserSettingsPanel.vue'
 import AgentConsole from '@/components/set/AgentConsole.vue'
@@ -72,7 +73,6 @@ const navTree = ref<NavItem[]>([
     title_en: 'General',
     children: [
       { id: 'view', icon: 'fa fa-eye', title_zh: '基础', title_en: 'Basic' },
-      { id: 'features', icon: 'fa fa-th-large', title_zh: '功能', title_en: 'Features' },
       { id: 'data', icon: 'fa fa-database', title_zh: '数据', title_en: 'Data' },
       { id: 'fileassoc', icon: 'fa fa-link', title_zh: '关联', title_en: 'Associations' },
       { id: 'other', icon: 'fa fa-ellipsis-h', title_zh: '其他', title_en: 'Other' },
@@ -225,9 +225,10 @@ const findGroupByChild = (childId: string): string | undefined => {
 // 应用导航定位（供 store.settingsNav 跳转 / 独立窗口首次定位 / 独立窗口再次跳转共用）
 const applyNav = (nav: string) => {
   if (!nav) return
-  activeNav.value = nav
+  // 旧链接兼容：'features'（功能）已并入 'view'（基础）——历史 ?nav=features / 插件卡片 target 仍然落到基础页
+  activeNav.value = nav === 'features' ? 'view' : nav
   // 跳转后只展开目标项所属分组
-  const groupId = findGroupByChild(nav)
+  const groupId = findGroupByChild(activeNav.value)
   expandedGroups.value = groupId ? new Set([groupId]) : new Set()
   // 细长窗口：跳转即进内容屏（用户是从别处被带到这一个设置页的，不该停在分类列表）
   if (isTallLayout.value) showNavScreen.value = false
@@ -380,6 +381,26 @@ const navSwitches = computed(() => {
     ? { ...p, on: store.isExtraVisible(p.key), toggle: () => store.toggleExtra(p.key) }
     : { ...p, on: store.isNavVisible(p.key), toggle: () => store.toggleNav(p.key) }))
 })
+
+/** 注册表里是否还有可见的主面板（内置四个模块 + 插件面板；插件面板在「插件 → 管理」里启停，不在此页关闭） */
+const anyVisiblePanel = () => panelKeys().some(k => store.isNavVisible(k))
+
+/**
+ * 功能开关点击：先切换，再判断「一个可用页面都不剩」——全部内置模块被关闭且没有插件面板时，
+ * 主界面会进入空导航状态（App.vue 显示空导航提醒，可用 store.UI.emptyNavNotice 关掉），
+ * 设置页这里立刻给出一次同样的提醒，避免用户在独立设置窗口里看不出后果。
+ */
+const toggleNavSwitch = (sw: { key: string; label: string; toggle: () => void }) => {
+  sw.toggle()
+  if (anyVisiblePanel()) return
+  if (store.UI.emptyNavNotice === false) return
+  ElMessage.warning({
+    message: store.locales === 'zh'
+      ? '所有主界面功能都已关闭，且没有启用的插件面板：主界面已没有可用页面。请重新开启一个模块，或在「插件 → 管理」中启用插件。'
+      : 'All main-panel features are off and no plugin panel is enabled, so the main window has no usable page. Turn a module back on, or enable a plugin under Plugins → Manage.',
+    duration: 6000,
+  })
+}
 
 // 自定义主题色配置（设置页「自定义」主题色卡：色块 + 名称 + 十六进制值）
 // UIColorKey 限定为 store.UI 中可编辑的 6 个颜色键，保证 store.UI[key] 索引类型安全
@@ -537,7 +558,6 @@ const localDataSummary = (): string => {
   const msgCount = chats.reduce((n: number, c: any) => n + (Array.isArray(c?.messages) ? c.messages.length : 0), 0)
   const parts = [
     zh ? `聊天 ${chats.length} 个会话（${msgCount} 条消息）` : `chats: ${chats.length} (${msgCount} messages)`,
-    zh ? `旧版待办 ${countEntries(readLsJson('todo-entries-v1'))} 条` : `legacy todos: ${countEntries(readLsJson('todo-entries-v1'))}`,
     zh ? `Agent 预设 ${countEntries(readLsJson('agentPresets'))} 个` : `agent presets: ${countEntries(readLsJson('agentPresets'))}`,
     zh ? `MCP ${countEntries(readLsJson('mcpServers'))} 个` : `MCP servers: ${countEntries(readLsJson('mcpServers'))}`,
   ]
@@ -1373,10 +1393,8 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- 功能（通用/功能）：模块开关（导航与模块）与模块子开关（知识管理视图与布局） -->
-      <div v-if="activeNav === 'features'" class="settings-section">
+        <!-- 导航与模块（原「通用 → 功能」页，2026-10 合并进「基础」）：模块开关 + 模块子开关（知识管理视图与布局） -->
         <div class="settings-group">
           <h3>{{ store.locales=='zh' ? '导航与模块' : 'Navigation & Modules' }}</h3>
           <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
@@ -1399,17 +1417,28 @@ onBeforeUnmount(() => {
                 class="nav-switch-toggle"
                 :class="{ on: sw.on }"
                 :title="sw.on ? (store.locales=='zh' ? '点击隐藏' : 'Click to hide') : (store.locales=='zh' ? '点击显示' : 'Click to show')"
-                @click="sw.toggle()"
+                @click="toggleNavSwitch(sw)"
               >
                 <span class="nav-switch-knob"></span>
               </div>
             </div>
           </div>
+          <!-- 空导航提醒：全部功能关闭且没有插件面板时，主界面没有任何可用页面——由 App.vue 显示提醒 -->
+          <div class="form-group">
+            <label>{{ store.locales=='zh' ? '空导航提醒' : 'Empty Navbar Notice' }}</label>
+            <select v-model="store.UI.emptyNavNotice" class="layout-select" @change="store.saveConfig()"
+                    :title="store.locales=='zh'
+                      ? '全部功能关闭且没有启用任何插件面板时，主界面没有可用页面：开启则显示提示（含一键恢复与前往设置的入口），关闭则什么都不显示。'
+                      : 'When every feature is off and no plugin panel is enabled, the main window has no usable page: show a notice (with one-click restore and a link to settings) or show nothing.'">
+              <option :value="true">{{ store.locales=='zh' ? '显示提醒' : 'Show notice' }}</option>
+              <option :value="false">{{ store.locales=='zh' ? '不提醒' : 'No notice' }}</option>
+            </select>
+          </div>
           <!-- 知识管理（模块子开关）：仅知识管理模块开启时显示（主窗口右侧的视图，单选） -->
           <div v-if="store.isNavVisible('知识管理')" class="settings-group">
             <h3>{{ store.locales=='zh' ? '知识管理' : 'Knowledge Management' }}</h3>
             <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-              ? '知识管理主窗口右侧显示的视图（单选，一次只显示一个）：文件 / 看板 / 表格 / 图谱 / 地图 / 日历。文件本身一律在独立窗口打开，那边的可用视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）按文件类型决定，不在此配置；预览远程文件时会自动切到「浏览」。需先在上方开启「知识管理」；浏览器相关设置（默认页面 / 保存文件夹）在「其他 → 浏览器」。'
+              ? '知识管理主窗口右侧显示的视图（单选，一次只显示一个）：文件 / 看板 / 表格 / 图谱 / 地图 / 日历。文件本身一律在独立窗口打开，那边的可用视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）按文件类型决定，不在此配置；预览远程文件时会自动切到「浏览」。需先在上方开启「知识管理」；浏览器相关设置（主页 / 新标签页 / 搜索 / 收藏夹 / Markdown 剪藏）在「其他 → 浏览器」。'
               : 'The view shown on the right of the main window (single choice — one view at a time): Files / Kanban / Table / Graph / Map / Year Calendar. Files themselves always open in their own window, where the available views (Browse / Source / Visual / Mind Map / Presentation) follow the file type; previewing a remote file switches to Browse automatically. Requires Knowledge Management enabled above; browser-related settings (home page / save folder) live under Other → Browser.' }}</div>
             <div class="nav-switch-list">
               <div
@@ -1447,8 +1476,8 @@ onBeforeUnmount(() => {
         <div class="settings-group">
           <h3>{{ store.locales=='zh' ? '浏览器' : 'Browser' }}</h3>
           <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-            ? '浏览器 Agent 模块设置：「浏览器默认页面」仅从知识管理面板手动打开浏览器时作为首个标签加载（AI 调用不受影响）；「保存文件夹」用于离线保存整页与收藏书签，留空则使用当前工作区根目录。浏览器的页面操作 / AI 控制等选项折叠在浏览器窗口顶部 ⚙ 的右侧设置栏中。'
-            : 'Browser Agent module settings: the home page loads as the first tab only when the browser is opened manually from Knowledge Management (AI calls are unaffected); the save folder is used by “Save full page” and bookmarks, falling back to the active workspace root when empty. More page/AI options are folded into the ⚙ side panel inside the browser window.' }}</div>
+            ? '浏览器 Agent 模块设置：「浏览器主页」仅从知识管理面板手动打开浏览器时作为首个标签加载（AI 调用不受影响）；「收藏夹」文件夹用于离线保存整页与收藏书签，留空则使用当前工作区根目录；新标签页默认整页显示收藏夹网格（可改为空白页），搜索栏已并入地址栏，关键词用所选引擎搜索；「保存 Markdown 到知识库」会把当前页正文转 Markdown 存到知识库根目录下的剪藏子文件夹。'
+            : 'Browser Agent module settings: the home page loads as the first tab only when the browser is opened manually from Knowledge Management (AI calls are unaffected); the bookmark folder is used by “Save full page” and bookmarks, falling back to the active workspace root when empty. A new tab shows the bookmark grid (switchable to a blank page); search lives in the address bar with the selected engine. “Save Markdown to knowledge base” clips the article into a subfolder of the knowledge base root.' }}</div>
           <BrowserSettingsPanel />
         </div>
         <!-- ② Word 导出 -->
@@ -1635,6 +1664,8 @@ onBeforeUnmount(() => {
 
       <!-- 插件贡献的设置卡片（settings.card 槽位；list + meta.target 归属到具体设置页） -->
       <PluginSlot :name="SETTINGS_CARD_SLOT" :owner="activeNav" />
+      <!-- 兼容旧 target：'features'（功能）已并入 'view'（基础），插件卡片写 target:'features' 仍在基础页显示 -->
+      <PluginSlot v-if="activeNav === 'view'" :name="SETTINGS_CARD_SLOT" owner="features" />
     </div>
     </div>
   </div>

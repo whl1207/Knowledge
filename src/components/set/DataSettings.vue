@@ -49,14 +49,11 @@ const dataRows = computed(() => {
   const msgCount = chats.reduce((n: number, c: any) => n + (Array.isArray(c?.messages) ? c.messages.length : 0), 0)
   const presetCount = countEntries(readLsJson('agentPresets'))
   const mcpCount = countEntries(readLsJson('mcpServers'))
-  const todoCount = countEntries(readLsJson('todo-entries-v1'))
   const cfgKeys = BACKUP_KEYS.filter(k => localStorage.getItem(k) !== null)
   return [
     { key: 'chats', icon: 'fa fa-comments-o', label: zh() ? '聊天记录' : 'Chats',
       count: `${chats.length} ${zh() ? '个会话' : 'chats'} · ${msgCount} ${zh() ? '条消息' : 'messages'}`,
       bytes: lsSizeOf(['ai-chats', 'ai-chats-index']), nav: '', io: true, clear: false, openFolder: '' },
-    { key: 'todo', icon: 'fa fa-history', label: zh() ? '旧版待办与随手记' : 'Legacy todos & notes',
-      count: `${todoCount} ${zh() ? '条' : 'items'}`, bytes: lsSizeOf(['todo-entries-v1']), nav: '', io: true, clear: false, openFolder: '' },
     { key: 'presets', icon: 'fa fa-address-book-o', label: zh() ? 'Agent 预设' : 'Agent presets',
       count: `${presetCount} ${zh() ? '个' : 'items'}`, bytes: lsSizeOf(['agentPresets']), nav: 'agentpreset', io: true, clear: false, openFolder: '' },
     { key: 'mcp', icon: 'fa fa-plug', label: zh() ? 'MCP 服务' : 'MCP servers',
@@ -198,8 +195,8 @@ onMounted(refresh)
     <div class="settings-group">
       <h3>{{ zh() ? '使用总览' : 'Overview' }}</h3>
       <div class="config-description" style="margin:0 0 8px 2px;">{{ zh()
-        ? '本机数据（聊天 / 待办 / Agent 预设 / MCP / 会话日志 / 配置）的数量与占用；工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。'
-        : 'Counts and sizes of local data (chats, todos, agent presets, MCP, session logs, config). Workspace files such as knowledge bases, workflows and data canvases are not included (see Knowledge Management).' }}</div>
+        ? '本机数据（聊天 / Agent 预设 / MCP / 会话日志 / 配置）的数量与占用；工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。'
+        : 'Counts and sizes of local data (chats, agent presets, MCP, session logs, config). Workspace files such as knowledge bases, workflows and data canvases are not included (see Knowledge Management).' }}</div>
       <!-- 本地存储占用（与「其他 → 系统状态」同一口径；占用统计的刷新在下方「刷新」按钮） -->
       <div class="form-group">
         <label>{{ zh() ? '本地存储' : 'Local Storage' }}</label>

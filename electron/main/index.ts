@@ -1053,6 +1053,14 @@ ipcMain.handle('browser-agent:save-page', async (_e, payload: { mode?: string; r
   const mode = payload?.mode === 'full' ? 'full' : 'link'
   return browserAgentService.saveActivePage(mode, payload?.root || undefined)
 })
+// 页面操作「保存 Markdown 到知识库」：正文净化 + turndown 转 Markdown，落到 知识库根/subdir（默认子目录名由渲染层传入）
+ipcMain.handle('browser-agent:save-markdown', async (_e, payload: { root?: string; subdir?: string; frontMatter?: boolean } = {}) => {
+  return browserAgentService.saveActivePageAsMarkdown({
+    root: payload?.root,
+    subdir: payload?.subdir,
+    frontMatter: payload?.frontMatter !== false,
+  })
+})
 ipcMain.handle('browser-agent:devtools', async () => {
   browserAgentService.openDevTools()
   return { ok: true }

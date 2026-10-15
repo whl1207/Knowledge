@@ -197,7 +197,7 @@ export const importChats = async (zh = true, onDone?: () => void) => {
   }
 }
 
-// ================ 按类导出 / 导入（预设 / MCP / 旧版待办 / 界面与模型配置） ================
+// ================ 按类导出 / 导入（预设 / MCP / 界面与模型配置） ================
 
 /** 配置类存档键（界面 + AI 配置 + 预设 + MCP 等；聊天记录体积大，由「导出聊天」单独备份，这里不重复） */
 export const BACKUP_KEYS = [
@@ -216,7 +216,6 @@ export type DataIoDef = { keys: string[]; kind: string; zh: string; en: string }
 export const DATA_IO: Record<string, DataIoDef> = {
   presets: { keys: ['agentPresets'], kind: 'agent-presets', zh: 'Agent 预设', en: 'Agent presets' },
   mcp: { keys: ['mcpServers'], kind: 'mcp-servers', zh: 'MCP 服务', en: 'MCP servers' },
-  todo: { keys: ['todo-entries-v1'], kind: 'todo-entries', zh: '旧版待办与随手记', en: 'Legacy todos & notes' },
   config: { keys: BACKUP_KEYS, kind: 'backup', zh: '界面与模型配置', en: 'UI & model config' },
 }
 

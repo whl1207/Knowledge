@@ -17,9 +17,6 @@ import { PANEL_MAIN_SLOT } from './coreSlots'
 /** 内置主面板 key（顺序即默认导航顺序；勿改字符串） */
 export const BUILTIN_PANEL_KEYS = ['主页', '知识管理', '知识处理', '学习'] as const
 
-/** 兜底面板：当前面板不可用（所属插件被停用 / 卸载）时切到这里 */
-export const FALLBACK_PANEL_KEY = '主页'
-
 /**
  * 内置主面板的历史标题文案（与迁移前 App.vue 的 switch 完全一致，
  * 含英文小写 'home' 这类既有文案）——保证内置面板零行为变化。
@@ -69,10 +66,18 @@ export function panelHeaderText(key: string, zh: boolean): string {
   return panelTitleOf(key, zh)
 }
 
-/** 当前面板已不可用（所属插件被停用/卸载）→ 返回应切换到的兜底面板；无需切换返回 null */
+/**
+ * 当前面板不可用时，返回应切换到的面板；无需切换（或压根没有可用面板）返回 null。
+ *
+ * 「不可用」= 不在注册表里（所属插件被停用 / 卸载 / 尚未注册完）**或被功能开关关掉**。
+ * ⚠️ 兜底只认「可见」的面板：没有任何可见面板时返回 null（保持当前面板不动），
+ * 由 App.vue 的空导航提醒兜底。历史 bug：这里曾无条件回退到内置「主页」，
+ * 于是「所有功能都关掉、只留一个插件面板」时，启动早期插件尚未注册，兜底先把面板设成
+ * 被关掉的「主页」，插件注册完后「主页在注册表里」又让本函数返回 null，就再也纠正不回来了
+ * （现象：一直停在主页，而不是切到唯一的插件面板）。
+ */
 export function fallbackPanelFor(current: string, isVisible: (key: string) => boolean): string | null {
   const keys = panelKeys()
-  if (keys.includes(current)) return null
-  const first = keys.find((k) => isVisible(k))
-  return first ?? (keys.includes(FALLBACK_PANEL_KEY) ? FALLBACK_PANEL_KEY : null)
+  if (keys.includes(current) && isVisible(current)) return null
+  return keys.find((k) => k !== current && isVisible(k)) ?? null
 }

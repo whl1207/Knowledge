@@ -1411,7 +1411,8 @@ const browserFeatures = ref([
   { id: 2, icon: '🤖', key: 'aiTab' },
   { id: 3, icon: '⭐', key: 'bookmarks' },
   { id: 4, icon: '💾', key: 'save' },
-  { id: 5, icon: '🛠️', key: 'panel' }
+  { id: 5, icon: '📝', key: 'clip' },
+  { id: 6, icon: '🛠️', key: 'panel' }
 ])
 
 // 浏览器章节「使用步骤」（文案来自国际化数据；显式数组类型，模板 v-for 索引方可参与运算）
@@ -1444,7 +1445,6 @@ const ragViewItems = ref([
 const settingGroups = ref([
   { groupKey: 'basic', children: [
     { icon: 'fa-eye', key: 'view' },
-    { icon: 'fa-th-large', key: 'features' },
     { icon: 'fa-database', key: 'data' },
     { icon: 'fa-link', key: 'fileassoc' },
     { icon: 'fa-ellipsis-h', key: 'other' }
@@ -2296,16 +2296,15 @@ const translations = {
     settings: {
       overview: {
         title: '设置总览',
-        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 模型 / 凭据 / 关联 / 其他）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / MCP / 注册表）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体预设 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
+        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 数据 / 关联 / 其他）、<strong>模型</strong>（来源 / 嵌入 / 凭据）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / MCP / 注册表）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体预设 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
       },
       groups: {
         basic: {
           title: '🧭 通用',
           items: {
-            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文字对齐</strong>（两端对齐 / K-P 最优断行）/ <strong>关闭按钮行为</strong> / <strong>配置随软件分发</strong>，以及路径与常用操作。' },
-            features: { name: '功能', desc: '主界面导航栏的入口开关（顶层模块：主页 / 知识管理 / 知识处理 / 学习，以及<strong>浏览器 Agent</strong> 的地球图标——关掉后导航栏不再显示它，AI 与知识管理面板仍可打开浏览器），以及知识管理主窗口右侧显示的<strong>视图</strong>（文件 / 看板 / 表格 / 图谱 / 地图 / 日历，单选一次只显示一个；预览远程文件时自动切到「浏览」）。' },
-            data: { name: '数据', desc: '本机数据总览：本地存储占用、数据目录（可打开所在文件夹）与可清理缓存，<strong>配置备份</strong>可一键导出 / 导入全部配置；数据清单逐类列出聊天记录 / 旧版待办与随手记 / Agent 预设 / MCP / 会话日志 / 配置的数量与占用，每类可导出 / 导入（会话日志可清空或打开所在文件夹），并可直接前往对应设置页。只统计本机数据，工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。' },
-            fileassoc: { name: '关联', desc: '按文件类型设置系统默认打开方式，可一键设置 / 全部取消。' },
+            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文字对齐</strong>（两端对齐 / K-P 最优断行）/ <strong>关闭按钮行为</strong> / <strong>配置随软件分发</strong>，路径与常用操作，以及<strong>导航与模块</strong>开关：主界面导航栏的入口（顶层模块：主页 / 知识管理 / 知识处理 / 学习，以及<strong>浏览器 Agent</strong> 的地球图标——关掉后导航栏不再显示它，AI 与知识管理面板仍可打开浏览器）与知识管理主窗口右侧显示的<strong>视图</strong>（文件 / 看板 / 表格 / 图谱 / 地图 / 日历，单选一次只显示一个；预览远程文件时自动切到「浏览」）。全部关闭且没有插件面板时主界面会显示<strong>空导航提醒</strong>（可在此关闭提醒）。' },
+            data: { name: '数据', desc: '本机数据总览：本地存储占用、数据目录（可打开所在文件夹）与可清理缓存，<strong>配置备份</strong>可一键导出 / 导入全部配置；数据清单逐类列出聊天记录 / Agent 预设 / MCP / 会话日志 / 配置的数量与占用，每类可导出 / 导入（会话日志可清空或打开所在文件夹），并可直接前往对应设置页。只统计本机数据，工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。' },
+            fileassoc: { name: '关联', desc: '按文件类型设置系统默认打开方式，可一键设置 / 全部取消：Windows 写当前用户注册表，Linux 写 ~/.config/mimeapps.list（需 .deb 安装版提供的桌面条目，AppImage / 免安装版要先做桌面集成）；macOS 不允许软件自行修改，安装版会出现在「打开方式」列表里，请在「访达 → 显示简介 → 打开方式」中设置。' },
             other: { name: '其他', desc: '系统状态（Python 检测与<strong>安全策略</strong>：只读安全 / 工作区写入 / 完全访问三档，决定智能体执行代码、命令与联网的权限，改完对所有窗口立即生效并保留）、浏览器、Word 导出与离线地图包（MBTiles）。' }
           }
         },
@@ -2586,32 +2585,34 @@ const translations = {
     browser: {
       overview: {
         title: '什么是浏览器？',
-        description: '浏览器是一个<strong>独立窗口的内置网页浏览器</strong>（与知识管理分离）：支持多标签、收藏书签与离线保存整页；更关键的是它能<strong>被 AI 直接操作</strong>——智能体可以在其中打开网页、抓取正文、填写表单与点击，把网页变成可被 AI 使用的信息源。'
+        description: '浏览器是一个<strong>独立窗口的内置网页浏览器</strong>（与知识管理分离）：支持多标签、收藏书签（新标签页就是收藏夹网格）、离线保存整页、正文转 Markdown 存进知识库；更关键的是它能<strong>被 AI 直接操作</strong>——智能体可以在其中打开网页、抓取正文、填写表单与点击，把网页变成可被 AI 使用的信息源。'
       },
       features: {
         title: '能力一览',
-        tabs: { name: '多标签浏览', desc: '标签可拖拽排序、悬浮关闭；地址栏支持输入网址或搜索关键词，自动补全与加载状态均有提示。' },
+        tabs: { name: '多标签浏览', desc: '标签可拖拽排序、悬浮关闭；<strong>搜索栏就是地址栏</strong>——输入网址直接打开、输入关键词用所选引擎搜索（地址栏会提示当前引擎），自动补全与加载状态均有提示。' },
         aiTab: { name: 'AI 会话标签', desc: '智能体打开网页时使用带机器人标记的「AI 会话标签」，与你的手动标签区分；空闲后自动回收，点一下即接管保留。' },
-        bookmarks: { name: '收藏书签', desc: '收藏常用页面，书签落盘到「浏览器设置 → 保存文件夹」目录，书签面板可快速打开、编辑与删除。' },
+        bookmarks: { name: '收藏书签', desc: '收藏常用页面，书签落盘到「浏览器设置 → 收藏夹文件夹」目录；<strong>新标签页整页就是收藏夹网格</strong>（文件夹点进去下钻，全部平铺、不折叠），书签面板可快速打开、编辑与删除。' },
         save: { name: '离线保存整页', desc: '把当前页（含图片、样式等资源）整体保存为离线 HTML，便于归档与后续阅读。' },
-        panel: { name: '右侧设置停靠栏', desc: '查看当前标签的 AI 状态（浏览 / AI / 操作中），并执行：在系统浏览器打开、保存整页、回收 AI 会话标签、控制台、允许执行 JS、缓存清理。' }
+        clip: { name: '保存 Markdown 到知识库', desc: '把当前页正文转成干净的 Markdown（保留链接）存进知识库，默认落在根目录的 <code>网页剪藏</code> 子文件夹（可在设置里改），文件带标题 / 来源 / 时间的 YAML 头，可直接在知识管理里阅读、检索与做知识处理。' },
+        panel: { name: '右侧设置停靠栏', desc: '查看当前标签的 AI 状态（浏览 / AI / 操作中），并执行：在系统浏览器打开、保存整页、保存 Markdown 到知识库、回收 AI 会话标签、控制台、缓存清理（清理前会确认）。' }
       },
       steps: {
         title: '使用步骤',
         items: [
           { title: '打开浏览器', desc: '从浏览器入口打开<strong>独立窗口</strong>；或在对话中提出需要访问网页的请求时由 AI 自动调起。' },
-          { title: '浏览与检索', desc: '在地址栏输入网址或关键词回车；顶部 ➕ 新建标签，标签可拖拽排序、点击 ✕ 关闭。' },
+          { title: '浏览与检索', desc: '在地址栏输入网址或关键词回车（关键词走「浏览器设置 → 搜索」里选的引擎）；顶部 ➕ 新建标签，标签可拖拽排序、点击 ✕ 关闭。' },
           { title: '让 AI 操作网页', desc: '在对话里让智能体打开 / 读取某个网页（例如“打开这个页面并摘取要点”），智能体会在 AI 会话标签中操作并把结果带回对话。' },
-          { title: '收藏与保存', desc: '用 ⭐ 收藏当前页；需要归档时点右侧设置栏的「保存整页（离线 HTML）」。' }
+          { title: '收藏与保存', desc: '用 ⭐ 收藏当前页（之后在新标签页的收藏夹网格里直接点开）；需要归档时点右侧设置栏的「保存整页（离线 HTML）」或「保存 Markdown 到知识库」。' }
         ]
       },
       tips: {
         title: '使用要点',
         items: [
-          '「浏览器设置」中有<strong>默认页面</strong>（手动打开时首个标签加载，AI 调用不受影响）与<strong>保存文件夹</strong>（书签与离线页的落盘目录，留空 = 当前工作区根目录）。',
-          '出于安全考虑，<strong>允许 AI 执行 JS</strong>（browser_eval）默认关闭，可在右侧设置栏按需开启。',
+          '「浏览器设置」里有<strong>主页</strong>（手动打开时首个标签加载，AI 调用不受影响）、<strong>新标签页内容</strong>（收藏夹网格 / 空白页）、<strong>搜索引擎</strong>（必应 / Google / 百度 / 搜狗 / DuckDuckGo / 自定义 URL 模板）、<strong>收藏夹文件夹</strong>（书签与离线页的落盘目录，留空 = 当前工作区根目录）、<strong>每行书签数</strong>、<strong>Markdown 剪藏目录与 YAML 头开关</strong>与<strong>允许 AI 执行 JS</strong>（会保存，重启后仍生效）。',
+          '出于安全考虑，<strong>允许 AI 执行 JS</strong>（browser_eval）默认关闭，可在「浏览器设置」里按需开启。',
           'AI 会话标签会<strong>空闲自动回收</strong>以免堆积；想保留某个页面就点一下该标签。',
-          '缓存管理位于右侧设置栏底部，可查看缓存大小并一键清理。',
+          '「保存 Markdown 到知识库」默认存到知识库根目录的 <code>网页剪藏</code> 子文件夹（可改成别的子目录或直接存根目录）。',
+          '缓存管理位于右侧设置栏底部，可查看缓存大小并一键清理（清理前会确认）。',
           '浏览器 Agent 同时是<strong>内置 MCP 服务（builtin-browser）</strong>：智能体通过 browser_* 工具导航、新建 / 切换 / 关闭标签、读取正文（文本 / Markdown / HTML）、点击、输入、滚动与截图，可在「设置 → 工具 → MCP」中开关与查看函数。截图返回的是<strong>压缩后的 JPEG</strong>（最长边 1024），避免一张大图把模型上下文挤爆。同页还有 <strong>drawio 内置服务（builtin-drawio）</strong>：智能体用 44 个 drawio_* 工具直接创建、查看、修改、布局与导出本地 .drawio 图表。',
           '知识管理中的 <strong>.html / .htm</strong> 本地网页默认交给<strong>内置浏览器</strong>打开渲染（双击 / 搜索 / 各视图点开，与「打开文件」一致），AI 还能继续对其操作、提取正文；要看文件视图预览或改源码，走右键「打开 → 选对应视图」。'
         ]
@@ -3396,16 +3397,15 @@ const translations = {
     settings: {
       overview: {
         title: 'Settings Overview',
-        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / LLM / Credentials / Associations / Other), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / MCP / Registry), <strong>Plugins</strong> (Manage / Store / Develop), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) the nav and the content each fill the screen and switch in place (the category list uses piano-key rows; ← returns to the categories). List-style panels inside Settings — model sources, search sources, MCP, plugin management, skill management / store, and the agent presets / console / session log — behave the same way: a full-screen list and a full-screen detail pane. Skill Management and the Skill Store drill down one screen at a time (skills → file tree → file editor; store: skill grid ⇄ source list ⇄ skill detail), with ← on each screen to go back one level.'
+        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / Data / Associations / Other), <strong>Models</strong> (Sources / Embedding / Credentials), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / MCP / Registry), <strong>Plugins</strong> (Manage / Store / Develop), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) the nav and the content each fill the screen and switch in place (the category list uses piano-key rows; ← returns to the categories). List-style panels inside Settings — model sources, search sources, MCP, plugin management, skill management / store, and the agent presets / console / session log — behave the same way: a full-screen list and a full-screen detail pane. Skill Management and the Skill Store drill down one screen at a time (skills → file tree → file editor; store: skill grid ⇄ source list ⇄ skill detail), with ← on each screen to go back one level.'
       },
       groups: {
         basic: {
           title: '🧭 General',
           items: {
-            view: { name: 'Basic', desc: 'Language / theme / window zoom / <strong>text alignment</strong> (browser justify vs Knuth\u2013Plass optimal) / <strong>close button behavior</strong> / <strong>portable config</strong>, plus paths and common actions.' },
-            features: { name: 'Features', desc: 'Switches for the main navbar entries (top-level modules: Home / Knowledge / Knowledge Processing / Learning, plus the <strong>Browser Agent</strong> globe icon — hiding it removes the icon from the navbar, while the AI and the Knowledge Management panel can still open the browser) and the <strong>view</strong> shown on the right of Knowledge Management (Files / Kanban / Table / Graph / Map / Year Calendar — single choice, one view at a time; previewing a remote file switches to Browse automatically).' },
-            data: { name: 'Data', desc: 'Local data overview: local storage usage, the data folder (openable) and cleanable cache; <strong>Config Backup</strong> exports / imports all config in one click. The inventory lists counts & sizes for chats / legacy todos & notes / agent presets / MCP / session logs / config — each row can be exported / imported (session logs can be cleared or opened in the file manager) and jumps to the related settings page. Only local data is counted; workspace files such as knowledge bases, workflows and Data Canvas are not included (check Knowledge Management for those).' },
-            fileassoc: { name: 'Associations', desc: 'Set the system default app per file type; one-click set all / clear all.' },
+            view: { name: 'Basic', desc: 'Language / theme / window zoom / <strong>text alignment</strong> (browser justify vs Knuth\u2013Plass optimal) / <strong>close button behavior</strong> / <strong>portable config</strong>, plus paths, common actions and the <strong>Navigation &amp; Modules</strong> switches: the main navbar entries (top-level modules: Home / Knowledge / Knowledge Processing / Learning, plus the <strong>Browser Agent</strong> globe icon — hiding it removes the icon from the navbar, while the AI and the Knowledge Management panel can still open the browser) and the <strong>view</strong> shown on the right of Knowledge Management (Files / Kanban / Table / Graph / Map / Year Calendar — single choice, one view at a time; previewing a remote file switches to Browse automatically). When everything is off and no plugin panel exists, the main window shows an <strong>empty-navbar notice</strong> (which can be turned off here).' },
+            data: { name: 'Data', desc: 'Local data overview: local storage usage, the data folder (openable) and cleanable cache; <strong>Config Backup</strong> exports / imports all config in one click. The inventory lists counts & sizes for chats / agent presets / MCP / session logs / config — each row can be exported / imported (session logs can be cleared or opened in the file manager) and jumps to the related settings page. Only local data is counted; workspace files such as knowledge bases, workflows and Data Canvas are not included (check Knowledge Management for those).' },
+            fileassoc: { name: 'Associations', desc: 'Set the system default app per file type; one-click set all / clear all. Windows writes the current-user registry; Linux writes ~/.config/mimeapps.list (needs the desktop entry shipped by the .deb — AppImage/portable builds need desktop integration first). macOS does not let apps change the default: the installed build appears in the "Open with" list, and you set it in Finder → Get Info → Open with.' },
             other: { name: 'Other', desc: 'System status (Python check and <strong>Security Policy</strong>: read-only / workspace-write / full-access, which decides whether the agent may run code, shell commands and network calls — applied to every window immediately and kept after restart), browser settings, Word export and offline maps (MBTiles).' }
           }
         },
@@ -3686,32 +3686,34 @@ const translations = {
     browser: {
       overview: {
         title: 'What is the Browser?',
-        description: 'The browser is a <strong>built-in web browser in its own window</strong> (separate from Knowledge Management): multi-tab browsing, bookmarks and offline page saving — and crucially it can be <strong>driven by AI</strong>. Agents can open pages, extract content, fill forms and click, turning the web into a usable information source.'
+        description: 'The browser is a <strong>built-in web browser in its own window</strong> (separate from Knowledge Management): multi-tab browsing, bookmarks (a new tab is the bookmark grid), offline page saving and article-to-Markdown clipping into the knowledge base — and crucially it can be <strong>driven by AI</strong>. Agents can open pages, extract content, fill forms and click, turning the web into a usable information source.'
       },
       features: {
         title: 'Capabilities',
-        tabs: { name: 'Multi-tab browsing', desc: 'Tabs can be reordered by drag and closed on hover; the address bar accepts URLs or search keywords.' },
+        tabs: { name: 'Multi-tab browsing', desc: 'Tabs can be reordered by drag and closed on hover; <strong>the search box is the address bar</strong> — URLs open directly, keywords use the selected engine (the bar names it), with loading state shown.' },
         aiTab: { name: 'AI session tabs', desc: 'Pages opened by agents use a separate “AI session tab” (marked with a robot icon) and are recycled when idle — click the tab to keep it.' },
-        bookmarks: { name: 'Bookmarks', desc: 'Bookmark pages; they are stored in the “Browser settings → Save folder” directory and can be re-opened, edited or removed from the bookmarks panel.' },
+        bookmarks: { name: 'Bookmarks', desc: 'Bookmark pages; they are stored in the “Browser settings → Bookmark folder” directory, and <strong>a new tab is the whole bookmark grid</strong> (folders open on click, everything laid out at once, no collapsing).' },
         save: { name: 'Save full page', desc: 'Save the current page (including images and styles) as offline HTML for archiving and later reading.' },
-        panel: { name: 'Right settings rail', desc: 'Shows the current tab AI state (browsing / AI / acting) and offers: open in system browser, save full page, recycle AI tabs, console, allow JS execution, cache cleanup.' }
+        clip: { name: 'Save Markdown to knowledge base', desc: 'Turn the current article into clean Markdown (links kept) inside the knowledge base, by default in a <code>网页剪藏</code> subfolder of the root (configurable); the file carries a YAML header with title / source / time and can be read, searched and processed in Knowledge Management.' },
+        panel: { name: 'Right settings rail', desc: 'Shows the current tab AI state (browsing / AI / acting) and offers: open in system browser, save full page, save Markdown to knowledge base, recycle AI tabs, console, cache cleanup (with a confirmation).' }
       },
       steps: {
         title: 'How to Use',
         items: [
           { title: 'Open the browser', desc: 'Open the <strong>dedicated window</strong> from the browser entry, or let the AI launch it automatically when a conversation needs a web page.' },
-          { title: 'Browse & search', desc: 'Type a URL or keywords in the address bar and press Enter; use ➕ for a new tab, drag to reorder, click ✕ to close.' },
+          { title: 'Browse & search', desc: 'Type a URL or keywords in the address bar and press Enter (keywords use the engine set under “Browser settings → Search”); use ➕ for a new tab, drag to reorder, click ✕ to close.' },
           { title: 'Let AI drive pages', desc: 'Ask the agent to open / read a page (e.g. “open this page and extract the key points”); it works in an AI session tab and brings results back to the conversation.' },
-          { title: 'Bookmark & save', desc: 'Use ⭐ to bookmark the current page; click “Save full page (offline HTML)” in the right rail to archive it.' }
+          { title: 'Bookmark & save', desc: 'Use ⭐ to bookmark the current page (it then opens straight from the new-tab grid); archive it with “Save full page (offline HTML)” or “Save Markdown to knowledge base” in the right rail.' }
         ]
       },
       tips: {
         title: 'Notes',
         items: [
-          'Browser settings include a <strong>home page</strong> (loaded on the first tab when opened manually; AI calls unaffected) and a <strong>save folder</strong> (where bookmarks and offline pages go; empty = current workspace root).',
-          'For safety, <strong>allowing AI to run JS</strong> (browser_eval) is off by default; enable it in the right rail when needed.',
+          'Browser settings include a <strong>home page</strong> (loaded on the first tab when opened manually; AI calls unaffected), <strong>new-tab content</strong> (bookmark grid / blank page), the <strong>search engine</strong> (Bing / Google / Baidu / Sogou / DuckDuckGo / custom URL template), the <strong>bookmark folder</strong> (where bookmarks and offline pages go; empty = current workspace root), <strong>bookmarks per row</strong>, the <strong>Markdown clip folder and YAML-header switch</strong>, and <strong>allow AI to run JS</strong> (persisted across restarts).',
+          'For safety, <strong>allowing AI to run JS</strong> (browser_eval) is off by default; enable it in Browser settings when needed.',
           'AI session tabs are <strong>recycled when idle</strong> to avoid clutter; click a tab to keep it.',
-          'Cache management sits at the bottom of the right rail — inspect the cache size and clear it in one click.',
+          '“Save Markdown to knowledge base” writes into a <code>网页剪藏</code> subfolder of the knowledge base root by default (change it to another subfolder or the root itself).',
+          'Cache management sits at the bottom of the right rail — inspect the cache size and clear it in one click (with a confirmation).',
           'The Browser Agent is also a <strong>built-in MCP server (builtin-browser)</strong>: agents drive it via browser_* tools (navigate, new / switch / close tabs, read text / Markdown / HTML, click, type, scroll, screenshot). Screenshots come back as <strong>compressed JPEG</strong> (max side 1024) so a single image cannot blow up the model context. Manage it under Settings → Tools → MCP. The <strong>drawio (builtin-drawio)</strong> built-in server likewise lets agents create, inspect, edit, lay out and export local .drawio diagrams through 44 drawio_* tools.',
           'Local <strong>.html / .htm</strong> pages in Knowledge Management open in the <strong>built-in browser</strong> by default (double-click / search / any view, same as “Open File”), where AI can keep operating on them or extract text; use the right-click “Open → pick a view” menu to preview them in a file view or edit the source.'
         ]

@@ -1765,7 +1765,9 @@ const generateRankAnalysis = (result: TestResult) => {
   if (llmMode && (!result.llmJudge || result.llmJudge.error)) return
 
   // 关联切片基准：解析每个关联切片（id → blocks 中切片 → 展示名与身份键）
-  const blocksById = new Map((props.blocks || []).map((b: any) => [b.id, b]))
+  // 复用组件级 blocksByIdMap（computed 已缓存）：原来每题都重建一次 O(切片数) 的 Map，
+  // 616 题 × 多策略时是白白的固定开销
+  const blocksById = blocksByIdMap.value
   const goldRefs = goldMode
     ? (ref?.blockIds || []).map(id => {
         const b = blocksById.get(id)
@@ -2459,6 +2461,34 @@ const waitWhilePaused = async (): Promise<boolean> => {
   return !batchCtl.aborted
 }
 
+// ===== 主线程让出（批量测试期间保持界面可刷新/可点击） =====
+// 为什么必须显式让出：批量测试在「纯本地策略」（相似度/问题增强/文件增强/本体/混合等）下，
+// 查询向量命中的是内存缓存 —— 一次检索里已经没有任何真实 I/O await（嵌入不再走网络、也没有对话调用），
+// 整轮循环就变成了「一个接一个的微任务」，浏览器的渲染步骤永远排不上队：
+// 表现就是进度不动、界面像卡死（其实还在算）。用 MessageChannel 做宏任务让出，
+// 没有 setTimeout(0) 的 4ms 最小间隔，开销可忽略。
+const _yieldChannel: MessageChannel | null = typeof MessageChannel !== 'undefined' ? new MessageChannel() : null
+const _yieldWaiters: Array<() => void> = []
+if (_yieldChannel) {
+  _yieldChannel.port1.onmessage = () => { _yieldWaiters.shift()?.() }
+}
+/** 让出主线程一帧：宏任务边界，浏览器得以重绘、处理点击（暂停/停止按钮因此才点得动） */
+const yieldToUi = (): Promise<void> => new Promise<void>(resolve => {
+  if (!_yieldChannel) { setTimeout(resolve, 0); return }
+  _yieldWaiters.push(resolve)
+  _yieldChannel.port2.postMessage(null)
+})
+
+/** 循环进度日志（每 25 题或每 10 秒一条，最后一条必打）：控制台能看到「在推进 / 卡在哪」 */
+let _loopLogAt = 0
+let _loopLogDone = -1
+const logLoopProgress = (done: number, total: number, label: string) => {
+  if (done !== total && done - _loopLogDone < 25 && Date.now() - _loopLogAt < 10000) return
+  _loopLogAt = Date.now()
+  _loopLogDone = done
+  console.log(`[评测] 进度 ${done}/${total} · ${label}`)
+}
+
 const pauseBatchTest = () => {
   if (!test.isRunning || batchCtl.paused) return
   batchCtl.paused = true
@@ -2528,12 +2558,15 @@ const runBatchTest = async () => {
 
   // 检索循环开始：进度/状态从这里起上报到底部状态栏（预热阶段的状态由预热流程自己上报，避免被顶掉）
   batchLoopActive.value = true
+  // 先让出一帧：让「0% + 当前策略」先画出来，否则第一个问题的本地计算会直接顶住首帧
+  await yieldToUi()
   for (let i = 0; i < test.questions.length; i++) {
     // 暂停/停止：在问题之间生效（已测结果保留）
     if (!(await waitWhilePaused())) break
     const question = test.questions[i]?.trim()
     const answer = test.answers && test.answers[i] ? test.answers[i].trim() : ''
     allTestProgressText.value = `${getAlgorithmLabel(test.currentAlgorithm)} ${i + 1}/${test.questions.length}`
+    logLoopProgress(i, test.questions.length, getAlgorithmLabel(test.currentAlgorithm))
     
     if (!question || isJunkQuestion(question)) {
       test.questionStatus[i] = {
@@ -2619,7 +2652,10 @@ const runBatchTest = async () => {
     }
     
     test.progress = ((i + 1) / test.questions.length) * 100
+    // 每题让出一次主线程：纯本地策略整轮无真实 I/O await，不让出会让浏览器无法重绘（表现为卡死）
+    await yieldToUi()
   }
+  logLoopProgress(test.questions.length, test.questions.length, getAlgorithmLabel(test.currentAlgorithm))
   batchLoopActive.value = false
   allTestProgressText.value = ''
   endRunScope()
@@ -3457,6 +3493,8 @@ const runAllStrategyTest = async () => {
   let abortedRuns = false
   // 检索循环开始：进度/状态从这里起上报到底部状态栏（前面的预热阶段由预热流程自己上报状态）
   batchLoopActive.value = true
+  // 先让出一帧：让首帧状态（0% + 将执行的清单）先画出来
+  await yieldToUi()
   for (let rep = 0; rep < repeat && !abortedRuns; rep++) {
     for (const algo of runList) {
       // 变体可自带切片数 K（消融「K 值」用）；留空则跟随面板的切片数量
@@ -3466,7 +3504,8 @@ const runAllStrategyTest = async () => {
         if (!(await waitWhilePaused())) { abortedRuns = true; break }
         const { question, answer } = rows[i]
         allTestProgressText.value = `${algo.label} ${i + 1}/${rows.length}${repeat > 1 ? ` (${rep + 1}/${repeat})` : ''}`
-        if (!question || isJunkQuestion(question)) { done++; continue }
+        logLoopProgress(done, totalRuns, `${algo.label} · ${i + 1}/${rows.length}`)
+        if (!question || isJunkQuestion(question)) { done++; await yieldToUi(); continue }
         let slices: TestResult['slices'] = []
         try {
           test.questionStatus[i] = {
@@ -3489,6 +3528,8 @@ const runAllStrategyTest = async () => {
         })
         done++
         test.progress = Math.round((done / totalRuns) * 100)
+        // 每题让出一次主线程：纯本地策略整轮无真实 I/O await，不让出会让浏览器无法重绘（表现为卡死）
+        await yieldToUi()
       }
       // 本轮该策略已跑完全部问题：汇总本轮指标（重复运行时用于均值±标准差）
       snapshotStrategyRun(algo.id)
@@ -3500,6 +3541,7 @@ const runAllStrategyTest = async () => {
       if (abortedRuns) break
     }
   }
+  logLoopProgress(totalRuns, totalRuns, store.locales == 'zh' ? '全部策略完成' : 'all strategies done')
   batchLoopActive.value = false
   endRunScope()
 

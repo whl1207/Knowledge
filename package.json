@@ -269,12 +269,141 @@
       "icon": "build/icons",
       "category": "Utility",
       "maintainer": "whl",
-      "artifactName": "${productName}-Linux-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-Linux-${version}-${arch}.${ext}",
+      "mimeTypes": [
+        "text/markdown",
+        "text/plain",
+        "application/json",
+        "text/html",
+        "text/css",
+        "application/xml",
+        "application/x-yaml",
+        "application/toml",
+        "text/csv"
+      ],
+      "fileAssociations": [
+        {
+          "ext": "kb",
+          "name": "AI-KM Knowledge Base",
+          "description": "AI-KM Knowledge Base",
+          "mimeType": "application/x-aikm-kb"
+        },
+        {
+          "ext": "excalidraw",
+          "name": "Excalidraw Drawing",
+          "description": "Excalidraw Whiteboard Drawing",
+          "mimeType": "application/x-excalidraw"
+        }
+      ]
     },
     "mac": {
       "icon": "build/icons/512x512.png",
       "category": "public.app-category.productivity",
-      "artifactName": "AI-KM_Mac_${version}_${arch}.${ext}"
+      "artifactName": "AI-KM_Mac_${version}_${arch}.${ext}",
+      "fileAssociations": [
+        {
+          "ext": ["kb"],
+          "name": "AI-KM Knowledge Base",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["md", "markdown", "mdown", "mkd"],
+          "name": "Markdown Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["txt", "log"],
+          "name": "Plain Text Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["json", "jsonc"],
+          "name": "JSON Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["html", "htm"],
+          "name": "HTML Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["css", "scss", "less"],
+          "name": "Stylesheet",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["xml"],
+          "name": "XML Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["yaml", "yml"],
+          "name": "YAML Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["toml"],
+          "name": "TOML Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["csv"],
+          "name": "CSV Document",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["ts", "tsx", "vue"],
+          "name": "TypeScript Source File",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["java", "c", "h", "cpp", "hpp", "cs", "go", "rs", "sql"],
+          "name": "Source Code File",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["excalidraw"],
+          "name": "Excalidraw Drawing",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["drawio", "dio"],
+          "name": "draw.io Diagram",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["flow", "workflow"],
+          "name": "AI-KM Workflow",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["data"],
+          "name": "AI-KM Data Canvas",
+          "role": "Editor",
+          "rank": "Alternate"
+        },
+        {
+          "ext": ["mmd", "mermaid"],
+          "name": "Mermaid Diagram",
+          "role": "Editor",
+          "rank": "Alternate"
+        }
+      ]
     }
   },
   "devDependencies": {

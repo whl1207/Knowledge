@@ -135,12 +135,12 @@ const notices = computed(() => {
   if (info.value && !info.value.supported) {
     const text = rc === 'macos'
       ? (zh.value
-        ? 'macOS 不支持在软件内修改默认打开方式：请在「访达」中右键文件 → 显示简介 → 打开方式，选择 AI-KM 后点「全部更改」。'
-        : 'macOS does not allow apps to change the default handler: in Finder, right-click the file → Get Info → Open with, pick AI-KM, then click "Change All".')
+        ? 'macOS 不允许软件自己改默认打开方式：安装版已在 Info.plist 里声明这些文件类型，因此会出现在「打开方式」列表中（不抢系统默认程序）。请在「访达」中右键文件 → 显示简介 → 打开方式，选择 AI-KM 后点「全部更改」。'
+        : 'macOS does not allow apps to change the default handler themselves. The installed build declares these file types in Info.plist, so AI-KM does appear in the "Open with" list (without claiming the system default). In Finder, right-click the file → Get Info → Open with, pick AI-KM, then click "Change All".')
       : rc === 'no-desktop-entry'
         ? (zh.value
-          ? '未检测到 AI-KM.desktop 桌面条目：请使用 .deb 安装版；AppImage / 免安装版需先创建桌面快捷方式。'
-          : 'No AI-KM.desktop entry found: please use the .deb package; AppImage/portable builds need a desktop shortcut first.')
+          ? '未检测到桌面条目（ai-km.desktop / AI-KM.desktop）：Linux 上的文件关联需要安装包提供的桌面条目声明 MIME 类型，请使用 .deb 安装版；AppImage / 免安装版需先做桌面集成（如 AppImageLauncher / 手动安装 .desktop）。'
+          : 'No desktop entry found (ai-km.desktop / AI-KM.desktop): on Linux the association needs a desktop entry that declares the MIME types, so please use the .deb package; AppImage/portable builds need desktop integration first (e.g. AppImageLauncher or installing the .desktop manually).')
         : (zh.value ? '当前平台不支持在软件内设置默认打开方式。' : 'Setting the default app is not supported on this platform.')
     out.push({ type: 'warn', icon: 'fa-info-circle', text })
   }

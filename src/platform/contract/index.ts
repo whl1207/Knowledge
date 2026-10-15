@@ -536,7 +536,7 @@ export interface LlmPort {
 export type BrowserAgentMethod =
   | 'open' | 'open-file' | 'open-url' | 'set-theme' | 'devtools'
   | 'state' | 'add-tab' | 'switch-tab' | 'close-tab' | 'move-tab' | 'recycle-agent-tabs'
-  | 'navigate' | 'action' | 'set-eval' | 'set-rail' | 'set-compact' | 'save-page'
+  | 'navigate' | 'action' | 'set-eval' | 'set-rail' | 'set-compact' | 'save-page' | 'save-markdown'
   | 'list-bookmarks' | 'save-bookmark' | 'update-bookmark' | 'remove-bookmark'
   | 'bookmark-mkdir' | 'bookmark-move' | 'bookmark-reorder' | 'bookmark-rename-folder'
   | 'remove-bookmark-folder' | 'clear-bookmark-folder' | 'import-bookmarks' | 'export-bookmarks'

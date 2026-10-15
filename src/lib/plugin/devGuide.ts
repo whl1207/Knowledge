@@ -222,8 +222,8 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
   },
   {
     name: 'ctx.slots.register("settings.card", { key, component, meta: { target: "view" } })',
-    descZh: '往**已有**设置页里插一块卡片。**meta.target 必填**，取值是内置设置页 id（view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help），也可写数组同时插多页（{ target: ["view", "features"] }）；**不写 target 会出现在所有设置页**（包括插件商店这类不相干的页面）。',
-    descEn: 'Inject a card into an **existing** settings page. **meta.target is mandatory** and takes a built-in settings page id (view / features / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help), or an array to inject into several pages ({ target: ["view", "features"] }); **without target the card shows up on every settings page** (including unrelated ones such as the plugin store).',
+    descZh: '往**已有**设置页里插一块卡片。**meta.target 必填**，取值是内置设置页 id（view / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help；旧 id features 已并入 view，写 features 也会显示在基础页），也可写数组同时插多页（{ target: ["view", "data"] }）；**不写 target 会出现在所有设置页**（包括插件商店这类不相干的页面）。',
+    descEn: 'Inject a card into an **existing** settings page. **meta.target is mandatory** and takes a built-in settings page id (view / data / fileassoc / other / llm / llm-embed / credentials / share / collab / perm / tts / asr / tools / search / mcp / toolregistry / plugin / plugin-store / plugin-dev / agentskill / agentskill-store / agentpreset / agentconsole / sessionlog / help; the old id "features" was merged into "view" and still lands on the Basic page), or an array to inject into several pages ({ target: ["view", "data"] }); **without target the card shows up on every settings page** (including unrelated ones such as the plugin store).',
   },
   {
     name: 'ctx.shortcuts.register("Ctrl+Shift+H", handler, { descriptionZh, descriptionEn })',
@@ -562,7 +562,7 @@ ${CONSTRAINTS_ZH}
    · order 只影响同一分组内的排序（小的在前）；titleZh / titleEn / icon 决定导航项的文字与图标。
 2) settings.card（往**已有**设置页里插一张卡片，可选）：
    ctx.slots.register('settings.card', { key: 'plugin-<插件 id>-card', component: Card, meta: { target: 'view' } })
-   · **必须写 meta.target**（要插到哪个设置页的 id，上面那份内置设置页 id 清单），也可以写数组同时插多页（如 { target: ['view', 'features'] }）；**不写 target 会出现在所有设置页**（包括插件商店那种不相干的页面）。
+   · **必须写 meta.target**（要插到哪个设置页的 id，上面那份内置设置页 id 清单），也可以写数组同时插多页（如 { target: ['view', 'data'] }）；**不写 target 会出现在所有设置页**（包括插件商店那种不相干的页面）。
    · 卡片是「list」槽位：多个插件的卡片按 order 依次排列，适合放一小块说明或几个开关；复杂配置还是用 settings.tab。
 3) 两个半边都不需要改：配置界面完全由你绘制，宿主只提供「位置」。
 
@@ -674,7 +674,7 @@ ${CONSTRAINTS_EN}
    · order only sorts inside the same group (ascending); titleZh / titleEn / icon drive the nav entry.
 2) settings.card (inject a card into an **existing** settings page, optional):
    ctx.slots.register('settings.card', { key: 'plugin-<plugin id>-card', component: Card, meta: { target: 'view' } })
-   · **meta.target is mandatory** (the settings page id from the built-in list above) and may be an array to inject into several pages ({ target: ['view', 'features'] }); **without target the card appears on every settings page** (including unrelated ones such as the plugin store).
+   · **meta.target is mandatory** (the settings page id from the built-in list above) and may be an array to inject into several pages ({ target: ['view', 'data'] }); **without target the card appears on every settings page** (including unrelated ones such as the plugin store).
    · It is a “list” slot: cards from different plugins are ordered by order; a small note or a couple of toggles fit well — use settings.tab for real configuration.
 3) Neither half needs changes: the host only provides the position, you draw the whole UI.
 

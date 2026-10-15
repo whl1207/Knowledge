@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import {ref, onMounted, onUnmounted, computed, watch, h, defineAsyncComponent} from 'vue'
+  import {ref, onMounted, onUnmounted, computed, watch, nextTick, h, defineAsyncComponent} from 'vue'
   import {usestore} from '@/store'
   import { ElMessage } from 'element-plus'
   // 后台运行态（均为模块级 ref，跨组件卸载存活）：
@@ -111,19 +111,109 @@ import { useTallLayout } from '@/composables/useTallLayout'
   })
 
   /**
-   * 当前主面板已不可用 → 切到第一个可见面板。两种触发场景：
+   * 当前主面板不可用 → 切到第一个「可见」面板。三类触发场景：
    * 1) 存档里的 mainPanel 指向的面板已不存在（插件被卸载后重启）；
-   * 2) 使用中插件被停用 / 重载（槽位条目被撤销）。
-   * 因此同时观察「面板清单」与「mainPanel」本身，并在 setup 阶段立即校验一次。
+   * 2) 使用中插件被停用 / 重载（槽位条目被撤销）；
+   * 3) 功能开关把当前面板（或其它面板）关掉——含在设置独立窗口里改的情况（主窗口经
+   *    settings-config-changed 重载 hiddenNavs，但 mainPanel 是主窗口自身的运行态、不会被带走，
+   *    所以必须把可见性也纳入监听，否则会停在一个已经隐藏的面板上）。
+   * 没有任何可见面板时 fallbackPanelFor 返回 null：保持当前面板不动，由下方空导航提醒兜底
+   * （插件可能只是还没注册完，等它注册好本监听会再跑一次）。
    */
-  const panelKeySignature = computed(() => panelSlotEntries.value.map((d) => d.key).join('\u0000'))
+  const panelVisibilitySignature = computed(
+    () =>
+      `${panelSlotEntries.value.map((d) => d.key).join('\u0000')}\u0001${store.hiddenNavs.join('\u0000')}\u0001${store.mainPanel}`,
+  )
   watch(
-    () => `${panelKeySignature.value}\u0001${store.mainPanel}`,
+    panelVisibilitySignature,
     () => {
       const next = fallbackPanelFor(store.mainPanel, (key) => store.isNavVisible(key))
       if (next && next !== store.mainPanel) store.mainPanel = next
     },
     { immediate: true },
+  )
+
+  /**
+   * 空导航：所有主面板都被关掉（插件面板也没有）→ 主界面没有任何可用页面。
+   * 显示提醒（含「恢复默认导航」与「打开设置」），可用设置 → 通用 → 基础 → 空导航提醒 关掉。
+   */
+  const showEmptyNavNotice = computed(() => !navButtons.value.length && store.UI.emptyNavNotice !== false)
+
+  /** 一键恢复：把内置模块与其它入口全部重新打开，并回到主页 */
+  const restoreDefaultNavs = () => {
+    store.hiddenNavs = []
+    store.hiddenExtras = []
+    store.mainPanel = '主页'
+    store.saveConfig()
+  }
+
+  // ============ 顶栏标题自动隐藏（插件面板多了顶到标题时） ============
+  // 顶栏是「导航按钮行 + 绝对定位的居中标题」并排：插件贡献的面板按钮一多，按钮行右边缘
+  // 就会越过标题左边缘，图标压在标题文字上。这里按实际宽度判断——放不下就隐藏标题。
+  const mainPanelRef = ref<HTMLElement | null>(null)
+  const panelNavRef = ref<HTMLElement | null>(null)
+  const panelTitleRef = ref<HTMLElement | null>(null)
+  /** 标题放不下（被插件按钮顶到）→ 隐藏标题文字，只留图标 */
+  const titleHidden = ref(false)
+  let titleResizeObserver: ResizeObserver | null = null
+
+  /**
+   * 重新判断标题是否放得下。标题是 `left:50%` 居中的绝对定位元素，两侧都要让得开：
+   * - 左侧：导航按钮行的自然右边缘 = `offsetLeft + scrollWidth`（scrollWidth 不受收缩与横向滚动影响）；
+   * - 右侧：窗口控制按钮组的最左边缘（跳过导航行 / 占位区 / 标题自己；display:none 的按钮不参与，否则 offsetLeft 为 0 会误判）；
+   * - 标题用 `visibility` 隐藏而不是 `display:none`，隐藏后仍能测出宽度，窗口变宽 / 插件停用会自动恢复。
+   * 坐标全部用布局像素（offsetLeft / offsetWidth / clientWidth），不混用 getBoundingClientRect，
+   * 以免窗口缩放（Ctrl +/-）下两套单位不一致。
+   */
+  function syncTitleVisibility() {
+    const header = mainPanelRef.value
+    const nav = panelNavRef.value
+    const title = panelTitleRef.value
+    if (!header || !nav || !title) {
+      titleHidden.value = false
+      return
+    }
+    const half = header.clientWidth / 2
+    const titleLeft = half - title.offsetWidth / 2
+    const titleRight = half + title.offsetWidth / 2
+    const navRight = nav.offsetLeft + nav.scrollWidth
+    let controlLeft = header.clientWidth
+    for (const el of Array.from(header.children) as HTMLElement[]) {
+      if (el.classList.contains('panel-nav') || el.classList.contains('panel-title-spacer') || el.classList.contains('compact-title')) continue
+      if (!el.offsetWidth) continue
+      controlLeft = Math.min(controlLeft, el.offsetLeft)
+    }
+    titleHidden.value = navRight + 6 > titleLeft || titleRight + 6 > controlLeft
+  }
+
+  // 按钮数量（插件启停 / 功能开关）/ 标题文字（含自定义标题、语言）/ 导航布局 / 全屏隐藏外壳
+  watch(
+    () => [
+      navButtons.value.map((b) => b.key).join('|'),
+      panelTitle.value,
+      store.UI.navLayout,
+      panelChromeHidden.value,
+    ],
+    () => nextTick(syncTitleVisibility),
+  )
+
+  /**
+   * 当前面板切换时把它的按钮滚进可视区：
+   * 插件多到按钮行横向滚动时，否则会出现「切到了某个面板，却看不到高亮的按钮」。
+   * 只改按钮行自己的 scrollLeft，不用 scrollIntoView（后者会连带滚动祖先容器）。
+   */
+  watch(
+    () => store.mainPanel,
+    () => nextTick(() => {
+      const nav = panelNavRef.value
+      const btn = nav?.querySelector<HTMLElement>('.active')
+      if (!nav || !btn) return
+      const gap = 5
+      const left = btn.offsetLeft - nav.offsetLeft
+      const right = left + btn.offsetWidth
+      if (left - gap < nav.scrollLeft) nav.scrollLeft = Math.max(left - gap, 0)
+      else if (right + gap > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = right + gap - nav.clientWidth
+    }),
   )
 
   onMounted(async () => {
@@ -243,6 +333,13 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
     // 启动时自动检测AI连接状态，避免每次都要打开设置页面才能加载模型配置
     store.getAIconfig()
+    // 顶栏标题自动隐藏：顶栏宽度变化（窗口缩放 / 侧栏开合 / 全屏外壳收起）都要重新判断，
+    // 用 ResizeObserver 盯住顶栏本身（比监听 window.resize 更全，且不受窗口壳差异影响）
+    if (mainPanelRef.value && typeof ResizeObserver !== 'undefined') {
+      titleResizeObserver = new ResizeObserver(() => syncTitleVisibility())
+      titleResizeObserver.observe(mainPanelRef.value)
+    }
+    syncTitleVisibility()
     // 注：文件树不再在启动时预加载，store.tree 仅在打开「知识管理」模块时由 panel.vue 加载，
     // 避免大工作区启动即全量扫描拖慢启动（view_graph/view_map 与该模块同渲染，数据就绪后 watch 自动更新）
   })
@@ -251,6 +348,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     unregisterBack?.()
     unregisterBack = null
     for (const off of unregisterAppLayers.splice(0)) off()
+    titleResizeObserver?.disconnect()
+    titleResizeObserver = null
   })
 
   // 主面板切换即落盘（mainPanel 只在主窗口有意义）：
@@ -445,13 +544,24 @@ import { useTallLayout } from '@/composables/useTallLayout'
     return false
   }
 
+  /**
+   * 返回手势 / 返回键的「根面板」：主页可见时就是主页（原有行为）；
+   * 主页被功能开关关掉时改用第一个可见面板，否则「先回主页」会把用户卡在看不见的主页上，
+   * 连按两次退出的判定也永远不成立。
+   */
+  function backRootPanel(): string {
+    if (store.isNavVisible('主页')) return '主页'
+    return navButtons.value[0]?.key || '主页'
+  }
+
   function handleAndroidBack(): boolean {
     if (closeTopDialog()) return true
     // 各模块登记的界面层 + App 自己的两个浮层（谁的层更靠内谁先处理）
     if (runTopBackLayer()) return true
-    // 主面板不是主页：先回主页
-    if (store.mainPanel !== '主页') {
-      store.mainPanel = '主页'
+    // 主面板不是根面板：先回根面板
+    const root = backRootPanel()
+    if (store.mainPanel !== root) {
+      store.mainPanel = root
       return true
     }
     // 已在主页根：连按两次才退出（与系统习惯一致，避免误退出）
@@ -522,22 +632,26 @@ import { useTallLayout } from '@/composables/useTallLayout'
     <!-- 右侧内容区：顶栏 + 主内容 -->
     <div class="main-column">
       <!-- 上方面板（顶栏）：网页模式同样显示，仅窗口控制按钮与浏览器 Agent 入口按能力隐藏 -->
-      <div class="mainPanel">
+      <div class="mainPanel" ref="mainPanelRef">
         <div class="panel-header" :class="{ 'panel-header-compact': isCompactTop }">
           <template v-if="!isCompactTop">
             <!-- 顶部导航布局（默认）：导航按钮 + 标题 + 右侧按钮
-                 按钮来源 = panel.main 槽位注册表（内置 4 个 + 插件贡献），顺序由 order 决定 -->
-            <div
-              v-for="btn in navButtons"
-              :key="btn.key"
-              :class="{ active: store.mainPanel == btn.key }"
-              @click="store.mainPanel = btn.key"
-              :title="btn.title"
-            ><i :class="btn.icon"></i></div>
+                 按钮来源 = panel.main 槽位注册表（内置 4 个 + 插件贡献），顺序由 order 决定；
+                 插件按钮多到顶住标题时，本行自己横向滚动、标题自动隐藏（见 syncTitleVisibility） -->
+            <div class="panel-nav" ref="panelNavRef">
+              <div
+                v-for="btn in navButtons"
+                :key="btn.key"
+                :class="{ active: store.mainPanel == btn.key }"
+                @click="store.mainPanel = btn.key"
+                :title="btn.title"
+              ><i :class="btn.icon"></i></div>
+            </div>
             <!-- 弹性占位：将右侧按钮推到右端，同时作为顶栏可拖拽空白 -->
             <div class="panel-title-spacer" style="flex:1;"></div>
-            <!-- 标题水平居中（各面板一致：仅文本，无图标） -->
-            <div class="compact-title" style="font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
+            <!-- 标题水平居中（各面板一致：仅文本，无图标）；放不下（被插件图标顶到）时隐藏 -->
+            <div class="compact-title" :class="{ 'title-hidden': titleHidden }" ref="panelTitleRef"
+                 style="font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
             <!-- 浏览器 Agent 入口：需要独立窗口 + 主进程 WebContentsView，网页模式不可用 -->
             <div v-if="store.isExtraVisible('agent') && hasCapability('window.chrome')" class="nav-narrow-hide" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
@@ -569,7 +683,30 @@ import { useTallLayout } from '@/composables/useTallLayout'
       
       <!-- 中间内容区域：面板由 panel.main 槽位解析（内置面板与插件面板走同一条路径） -->
       <div class="main">
-        <PluginSlot :name="PANEL_MAIN_SLOT" :owner="store.mainPanel" />
+        <!-- 空导航（所有功能关闭且没有插件面板）：给明确提醒 + 一键恢复 / 前往设置，而不是一片空白 -->
+        <div v-if="showEmptyNavNotice" class="empty-nav-notice">
+          <i class="fa fa-compass empty-nav-icon"></i>
+          <div class="empty-nav-title">{{ store.locales === 'en' ? 'No page available' : '没有可用的页面' }}</div>
+          <div class="empty-nav-text">
+            {{ store.locales === 'en'
+              ? 'All main-panel features are turned off and no plugin panel is enabled, so the main window has nothing to show. Turn a module back on under Settings → General → Basic → Navigation & Modules, or enable a plugin under Plugins → Manage.'
+              : '所有主界面功能都已关闭，且没有启用的插件面板，主界面没有可显示的页面。请在「设置 → 通用 → 基础 → 导航与模块」中重新开启一个模块，或在「插件 → 管理」中启用插件。' }}
+          </div>
+          <div class="empty-nav-actions">
+            <div class="button" @click="restoreDefaultNavs" :title="store.locales === 'en' ? 'Re-enable Home / Knowledge / Knowledge Processing / Learning and the Browser Agent entry' : '重新开启 主页 / 知识管理 / 知识处理 / 学习 与浏览器 Agent 入口'">
+              <i class="fa fa-undo"></i> {{ store.locales === 'en' ? 'Restore default nav' : '恢复默认导航' }}
+            </div>
+            <div class="button" @click="store.openSettings()" :title="store.locales === 'en' ? 'Open settings' : '打开设置'">
+              <i class="fa fa-cogs"></i> {{ store.locales === 'en' ? 'Open settings' : '打开设置' }}
+            </div>
+          </div>
+          <div class="empty-nav-hint">
+            {{ store.locales === 'en'
+              ? 'This notice can be turned off under Settings → General → Basic → Empty Navbar Notice.'
+              : '该提醒可在「设置 → 通用 → 基础 → 空导航提醒」中关闭。' }}
+          </div>
+        </div>
+        <PluginSlot v-else :name="PANEL_MAIN_SLOT" :owner="store.mainPanel" />
       </div>
     </div>
 
@@ -745,7 +882,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     cursor: move;
   }
 
-  .panel-header div {
+  /* 顶栏图标按钮（导航按钮 / 右侧按钮）：除导航按钮行容器外统一 30×30 */
+  .panel-header div:not(.panel-nav) {
     width: 30px;
     height: 30px;
     line-height: 30px;
@@ -758,12 +896,12 @@ import { useTallLayout } from '@/composables/useTallLayout'
     transition: all 0.25s ease;
   }
 
-  .panel-header div:hover {
+  .panel-header div:not(.panel-nav):hover {
     color: var(--fontActiveColor);
     background-color: var(--menuActiveColor);
   }
 
-  .panel-header div.active {
+  .panel-header div:not(.panel-nav).active {
     color: var(--fontActiveColor);
     background-color: var(--menuActiveColor);
   }
@@ -778,15 +916,43 @@ import { useTallLayout } from '@/composables/useTallLayout'
     background-color: transparent;
   }
 
-  /* 设置按钮 */
-  .panel-header div:last-child {
+  /* 设置按钮（只认顶栏的直接子元素：导航按钮行里的最后一个按钮不算） */
+  .panel-header > div:last-child {
     margin-top: auto;
     margin-bottom: 5px;
   }
 
-  /* 顶栏按钮保持可点击（标题与占位拖拽区除外） */
-  .panel-header > div:not(.compact-title):not(.panel-title-spacer) {
+  /* 顶栏按钮保持可点击（标题、占位拖拽区与导航按钮行除外），且固定尺寸不被压缩 */
+  .panel-header > div:not(.compact-title):not(.panel-title-spacer):not(.panel-nav) {
     -webkit-app-region: no-drag;
+    flex: 0 0 auto;
+  }
+
+  /* 导航按钮行（内置模块 + 插件面板）：插件多时本行横向滚动而不撑破顶栏
+     （滚动条隐藏；鼠标滚轮 / 触控板横向滚动即可看到后面的按钮），
+     同时由 syncTitleVisibility() 判断标题放不下就隐藏（见 .title-hidden） */
+  .panel-header .panel-nav {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    height: 100%;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    /* 按钮行必须声明为可交互区：否则整块继承顶栏的 app-region: drag，点击被系统拖拽吞掉 */
+    -webkit-app-region: no-drag;
+  }
+  .panel-header .panel-nav::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+  /* 导航按钮固定 30px 宽、不参与压缩：空间不够时由上面的容器横向滚动（而不是把图标挤扁） */
+  .panel-header .panel-nav > div {
+    flex: 0 0 30px;
   }
   /* 标题水平居中（顶部/左侧/下方布局通用，避免右侧按钮占位导致标题偏左） */
   .panel-header .compact-title {
@@ -803,6 +969,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
   .panel-header .compact-title:hover {
     background-color: transparent;
     color: var(--fontColor);
+  }
+  /* 标题放不下（被插件图标顶到）时只隐藏文字：保留宽度测量，窗口变宽 / 插件停用后自动恢复 */
+  .panel-header .compact-title.title-hidden {
+    visibility: hidden;
   }
   /* 左侧/下方布局：右侧窗口按钮靠右 */
   .panel-header-compact {
@@ -925,6 +1095,69 @@ import { useTallLayout } from '@/composables/useTallLayout'
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /* ====== 空导航提醒（所有功能关闭且没有插件面板时） ====== */
+  .empty-nav-notice {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 20px;
+    text-align: center;
+    color: var(--fontColor);
+    background-color: var(--backgroundColor);
+    overflow: auto;
+  }
+  .empty-nav-notice .empty-nav-icon {
+    font-size: 34px;
+    opacity: 0.35;
+    margin-bottom: 2px;
+  }
+  .empty-nav-notice .empty-nav-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--fontActiveColor);
+  }
+  .empty-nav-notice .empty-nav-text {
+    max-width: 460px;
+    font-size: 12px;
+    line-height: 1.6;
+    opacity: 0.8;
+  }
+  .empty-nav-notice .empty-nav-actions {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .empty-nav-notice .empty-nav-actions .button {
+    width: auto;
+    padding: 6px 12px;
+    border: 1px solid var(--borderColor);
+    border-radius: 5px;
+    background-color: var(--menuColor);
+    color: var(--fontColor);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 13px;
+    transition: all 0.2s ease;
+  }
+  .empty-nav-notice .empty-nav-actions .button:hover {
+    background-color: var(--menuActiveColor);
+    color: var(--fontActiveColor);
+  }
+  .empty-nav-notice .empty-nav-hint {
+    font-size: 10px;
+    opacity: 0.55;
+    margin-top: 2px;
   }
 </style>
 
