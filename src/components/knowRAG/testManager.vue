@@ -9,7 +9,6 @@ import { computeBM25Score } from '@/shared/graphrag/search'
 import { INGESTION_PRIMITIVES, prewarmEntityVectors, entityVectorCacheStats } from '@/shared/graphrag/primitives'
 import type { RetrievalContext, IngestionContext } from '@/shared/graphrag/primitives'
 import { cosineSimilarity } from '@/shared/kbRetrieval'
-import { reportKbTestRun, clearKbTestRun } from '@/store/kbTestRun'
 import { setRunningTask } from '@/store/runningTasks'
 import * as kbAi from '@/shared/kbAiClient'
 const store=usestore()
@@ -2539,10 +2538,8 @@ const runBatchTest = async () => {
   test.isRunning = true
   test.progress = 0
   startTestClock()
-  // 全局运行态：登记后台任务（关闭窗口会提示）+ 底角进度条（切到任何模块都能看到，点击跳回本页）
-  beginGlobalTestRun(store.locales=='zh'
-    ? `批量测试（当前策略）· ${getAlgorithmLabel(test.currentAlgorithm)}`
-    : `Batch test (current strategy) · ${getAlgorithmLabel(test.currentAlgorithm)}`, test.questions.length)
+  // 后台任务登记：关闭窗口会提示「知识库评测仍在运行」，托盘悬停也能看到进度
+  beginGlobalTestRun(test.questions.length)
   
   initFileSummaries()
   
@@ -2920,39 +2917,38 @@ const batchLiveText = computed(() => {
   ].filter(Boolean).join(' · ')
   return tail ? `${head}\n${tail}` : head
 })
-// ===== 全局运行态（模块级单例）：底角进度条 + 后台任务登记（避免误关窗口杀掉长时间评测） =====
+// ===== 后台任务登记：批量测试运行期间登记为「后台运行任务」=====
+// 界面上的进度只走底部状态栏（updateLiveState）；这里登记只为「关闭窗口前提醒」与托盘悬停提示，
+// 避免几十分钟的评测被误关窗口静默杀掉。
 const KB_TEST_TASK_ID = 'kb:test'
 const globalTestRunTotal = ref(0)
-/** 开始一轮批量测试：登记后台任务 + 置全局运行态（切到任何模块都能看到进度） */
-const beginGlobalTestRun = (label: string, total: number) => {
+/** 开始一轮批量测试：登记后台任务（总检索次数已知时会再次更新） */
+const beginGlobalTestRun = (total: number) => {
   globalTestRunTotal.value = Math.max(0, total)
-  reportKbTestRun({ running: true, text: label, detail: '', progress: 0 })
   setRunningTask(KB_TEST_TASK_ID, {
     kind: 'other',
     labelZh: '知识库评测', labelEn: 'KB evaluation',
     progress: { done: 0, total: globalTestRunTotal.value, etaMs: null },
   })
 }
-/** 结束一轮批量测试：注销后台任务 + 清空全局运行态 */
+/** 结束一轮批量测试：注销后台任务 */
 const endGlobalTestRun = () => {
   globalTestRunTotal.value = 0
-  clearKbTestRun()
   setRunningTask(KB_TEST_TASK_ID, null)
 }
 
 // 运行进度实时上报底部状态栏（运行结束文本变空 → 清空该行）
 watch(batchLiveText, (v) => {
   emit('updateLiveState', v)
-  // 同时上报全局运行态：切到任何模块都能在底角看到进度（App.vue 画进度条，点击可跳回本页）
+  // 同时更新后台任务登记（界面上不显示，只用于「关闭窗口前提醒」与托盘悬停提示：
+  // 避免几十分钟的评测被误关窗口杀掉）
   if (!v) return
-  const [head, tail] = String(v).split('\n')
   const pct = Number(test.progress) || 0
   const total = globalTestRunTotal.value || 0
   const done = total ? Math.round((pct / 100) * total) : 0
   const etaMs = (pct > 0 && testStartedAt.value)
     ? Math.max(0, Math.round((Date.now() - testStartedAt.value) * (100 - pct) / pct))
     : null
-  reportKbTestRun({ running: true, text: head || '', detail: tail || '', progress: pct })
   setRunningTask(KB_TEST_TASK_ID, {
     kind: 'other',
     labelZh: '知识库评测', labelEn: 'KB evaluation',
@@ -3511,7 +3507,7 @@ const runAllStrategyTest = async () => {
   startTestClock()
   initFileSummaries()
   // 全局运行态：登记后台任务（关闭窗口会提示）+ 底角进度条（切到任何模块都能看到，点击跳回本页）
-  beginGlobalTestRun(store.locales=='zh' ? '批量测试所有策略' : 'Test all strategies', 0)
+  beginGlobalTestRun(0)
 
   // 执行清单：有启用的消融变体 → 逐变体跑（同一策略的不同参数各占一行）；否则退回「每个启用策略跑一次」。
   // 与策略配置面板里的「将执行」预览同源（batchRunPreview），避免预览与实际执行不一致。
