@@ -50,6 +50,7 @@ import { runCodeFunctionSchema } from './code-sdk'
 import { askQuestionsDigest, coerceAskAnswers } from '@/shared/agentAsk'
 import { PLAN_REVIEW_ID_PREFIX, parsePlanReviewReply, isPlanReviewId, type PlanReviewOutcome } from '@/shared/agentPlanReview'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
+import { normalizeAgentRunResult, type AgentRunResult } from '@/lib/plugin/agentContract'
 import { decideTruncationContinue } from '@/shared/truncation'
 // 上下文预算与压缩（P0）：与渲染层共用同一口径（详见 src/shared/contextBudget.ts）
 import {
@@ -709,7 +710,7 @@ class AgentImpl implements AgentControl {
         if (this.turnController.signal.aborted) break
         if (stepsInTurn >= maxSteps) {
           // 防死循环：达到单 turn step 上限（fail-loud，不静默截断）
-          const message = `达到单个 turn 的最大 step 数（${maxSteps}），已停止`
+          const message = stepLimitMessage(maxSteps)
           sessionLog.append(this.id, 'agent/status', { status: 'error' })
           this.emit('agent/error', { message })
           this.setError(message)
@@ -1117,9 +1118,33 @@ class AgentImpl implements AgentControl {
     }
     const defs = toolRegistry.list(this.options.scope)
     const whitelist = this.options.tools
-    let selected = whitelist === null
-      ? defs
-      : defs.filter((d) => whitelist?.includes(d.name))
+    /**
+     * ⚠️ 关键：白名单里的工具**未必在本会话 scope 的可见集里**。
+     *
+     * `list(scope)` 返回「全局层 + 该 scope 层」，而**插件工具注册在 `plugin:<插件 id>` 这一层**
+     * （见 electron/main/plugin-tools.ts）。`get(name, scope)` 同样只有两跳（该 scope 层 → 全局层），
+     * 也够不到插件层。结果是：用户在预设/工具管理里勾了插件工具，白名单里有名字，
+     * 但**一个都进不了发给模型的工具清单**，调用也只会得到「未知工具」——
+     * 表现就是"勾了却完全用不上"，而且从界面上完全看不出原因。
+     *
+     * 因此白名单存在时，按名字做一次**跨层解析**（`getAnywhere`：全局 → 各 scope 层）。
+     * 只做解析、不放宽判权：能不能执行仍由本会话白名单（下面的引擎守卫）与插件宿主决定。
+     * 解析不到的（拼错 / 插件已卸载）保持"不存在"，依旧 fail-loud。
+     */
+    let selected: any[]
+    // 只有**显式数组**才算白名单；null / undefined 都表示"不限制"（与 run_subagent 的
+    // `tools: null` 语义、以及这里历史上对 null 的处理保持一致）
+    if (!Array.isArray(whitelist)) {
+      selected = defs
+    } else {
+      const byName = new Map<string, any>()
+      for (const name of whitelist) {
+        const n = String(name)
+        const found = toolRegistry.get(n, this.options.scope) || toolRegistry.getAnywhere(n)
+        if (found) byName.set(n, found)
+      }
+      selected = Array.from(byName.values())
+    }
     // 联网搜索：DeepSeek Responses API 已移除服务端 web_search（官方兼容表：内置工具一律忽略），
     // 因此不再为 deepseek-responses 隐藏本地 web_search / web_fetch —— 所有后端的联网搜索
     // 统一由本地工具层提供（能力插槽仍通过 tools 白名单生效）
@@ -2159,7 +2184,70 @@ export async function awaitAgentTurn(
   }
 }
 
-/** update_plan 工具：设置执行计划并广播 */
+/**
+ * 「撞到单个 turn 步数上限」的**唯一**文案构造器。
+ *
+ * 为什么抽出来：`ctx.agent.run` 要把这种终止归成 `termination: 'maxSteps'`（而不是笼统的 `error`），
+ * 而循环里报的是文案。两边共用本函数就能做**精确比对**，不必去模糊匹配一句中文
+ * （文案改了这里改一处，比对自动跟着变）。
+ */
+export function stepLimitMessage(maxSteps: number): string {
+  return `达到单个 turn 的最大 step 数（${maxSteps}），已停止`
+}
+
+/**
+ * 委派执行（`ctx.agent.run` 的主进程侧）：创建**独立会话** → 跑一轮 → **无论成败都在 finally 里销毁** →
+ * 归一成插件可见的结果。
+ *
+ * 三条纪律：
+ * 1. **只紧不松**：不论调用方在 options 里传了什么 `maxSteps`，一律用宿主裁定后的 `budget.maxSteps`；
+ * 2. **返回前一定 dispose**（对齐 DSH「前台调用…在返回前总会等待 `run.dispose()`」）。
+ *    注意 `runAgentAndAwait` 把 `disposeAgent` 放在 `try/finally` **之后**，轮询抛错就会漏掉 ——
+ *    这里必须放 `finally` 里；
+ * 3. **失败也要把中止前的部分输出带回**（`awaitAgentTurn` 已有 5s 收口等待），
+ *    由 `normalizeAgentRunResult` 统一判定 `ok`，本函数不自己判。
+ *
+ * 不碰父会话：新建独立 agent（`label` 打上 `plugin:<id>` 便于用户辨认），不 resume 用户既有会话。
+ */
+export async function runDelegatedAgent(
+  options: AgentOptions,
+  input: string,
+  budget: { timeoutMs: number; maxSteps: number },
+  pluginId: string,
+  signal?: AbortSignal,
+): Promise<AgentRunResult> {
+  const agent = createAgent({
+    ...options,
+    maxSteps: budget.maxSteps,
+    label: options.label || `plugin:${pluginId}`,
+    scope: options.scope || `plugin:${pluginId}`,
+  })
+  try {
+    const outcome = await awaitAgentTurn(agent.id, input, {
+      timeoutMs: budget.timeoutMs,
+      source: `plugin:${pluginId}`,
+      ...(signal ? { signal } : {}),
+    })
+    // 撞步数上限时循环报的是固定文案 → 精确比对一次，归成 maxSteps（比 'error' 对作者更有用）
+    const isStepLimit = outcome.error === stepLimitMessage(budget.maxSteps)
+    return normalizeAgentRunResult({
+      output: outcome.output,
+      error: outcome.error,
+      timedOut: outcome.timedOut,
+      cancelled: outcome.cancelled,
+      turn: outcome.turn,
+      ...(isStepLimit ? { termination: 'maxSteps' as const } : {}),
+    })
+  } finally {
+    try {
+      await disposeAgent(agent.id)
+    } catch (e) {
+      console.warn(`[plugin-agent] dispose 失败（${pluginId}）:`, e)
+    }
+  }
+}
+
+/** `update_plan` 工具：设置执行计划并广播 */
 export function setAgentPlan(agentId: string, plan: string | null): boolean {
   const agent = agents.get(agentId)
   if (!agent) return false

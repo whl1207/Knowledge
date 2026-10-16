@@ -262,7 +262,11 @@ export function registerNamespacedIpc(): void {
 
   // ---------------- tools:*（统一工具注册表） ----------------
   registerIpc('tools:list', (payload) => {
-    return toolRegistry.snapshot(payload?.scope)
+    // 不传 scope = 「设置 → 工具 → 注册表」要看**全部层**（含 plugin:<id>）。
+    // 以前这里是 toolRegistry.snapshot(undefined)，而 snapshot/list 不给 scope 时**只返回全局层**，
+    // 于是注册表面板永远看不到任何插件工具 —— 插件注册成功了也显示不出来（实测踩过）。
+    // 传了 scope 的调用方（按 scope 列工具）语义不变。
+    return payload?.scope ? toolRegistry.snapshot(payload.scope) : toolRegistry.snapshotAll()
   })
   registerIpc('tools:execute', async (payload) => {
     const { name, input, ctx } = payload || {}

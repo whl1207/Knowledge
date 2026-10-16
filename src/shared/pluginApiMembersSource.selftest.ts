@@ -54,6 +54,7 @@ const MAPS: InterfaceMap[] = [
   { member: 'llm', file: 'src/lib/plugin/llm.ts', iface: 'PluginLlmApi', half: 'client' },
   { member: 'tts', file: 'src/lib/plugin/tts.ts', iface: 'PluginTtsApi', half: 'client' },
   { member: 'locale', file: 'src/lib/plugin/locale.ts', iface: 'PluginLocaleApi', half: 'client' },
+  { member: 'agent', file: 'src/lib/plugin/agent.ts', iface: 'PluginAgentApi', half: 'client' },
   // 注：ctx.slots / ctx.vue / ctx.on / ctx.effect / ctx.notify / ctx.plugin / ctx.config 的形状
   // 在 `src/lib/plugin/runtime.ts` 的 ClientPluginContext 里是**内联类型**（没有具名 interface），
   // 源码级比对无从下手。要覆盖它们，先把 ClientPluginContext 的对应字段抽成具名 interface。

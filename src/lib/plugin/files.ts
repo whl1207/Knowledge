@@ -63,6 +63,31 @@ export interface PluginFilesApi {
   pickFiles(options?: { accept?: 'pdf' | 'text' | 'any'; multiple?: boolean }): Promise<{ cancelled: boolean; files: PluginPickedFile[] }>
   /** 打开文件夹选择框（法规库这类用途） */
   pickDirectory(): Promise<{ cancelled: boolean; dir: PluginPickedDir | null }>
+  /**
+   * 选一个**可写**文件夹 —— 这是"能写文件"的**唯一来源**。
+   *
+   * 用户亲手点（对话框标题与按钮都写明这是允许写入），授权落在主进程、跨重启有效，
+   * 可在「设置 → 插件 → 数据」里看到模式并撤销。同一个目录先以只读选过、再这样选一次
+   * 会**升级为可写**（反之不会降级 —— 要降级就先撤销再选）。
+   *
+   * 仅桌面端：网页 / 移动端没有主进程授权存储，调用会抛错（不会假装"用户取消了"）。
+   */
+  pickWritableDirectory(options?: { title?: string }): Promise<{ cancelled: boolean; dir: PluginPickedDir | null }>
+  /**
+   * 写文本（覆盖式；父目录会自动创建）。**只能在"可写"授权目录内**。
+   *
+   * - 只读授权下写入会被拒绝，错误里会说明"该路径是以只读方式授权的"；
+   * - 授权范围之外（含兄弟目录、写死的绝对路径）一律拒绝；
+   * - 返回实际写入的绝对路径与字节数。
+   */
+  writeText(path: string, text: string): Promise<{ path: string; bytes: number }>
+  /**
+   * 删除文件 / **空**目录（只认可写授权）。
+   *
+   * 刻意**不做递归删除**：要清掉一棵子树请逐层删 —— 一句调用带走用户整个授权目录太危险。
+   * 目录非空时会抛错。
+   */
+  remove(path: string): Promise<{ removed: boolean; missing?: boolean }>
   /** 列目录（一层） */
   list(dir: string): Promise<{ dir: string; entries: PluginDirEntry[] }>
   /** 读文本（.pdf 自动走 PDF 文本提取，返回 pages） */
@@ -309,6 +334,31 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
       if (!dir) return { cancelled: true, dir: null }
       const name = String(dir).replace(/\\/g, '/').replace(/\/+$/, '').split('/').filter(Boolean).pop() || String(dir)
       return { cancelled: false, dir: { path: dir, name } }
+    },
+
+    async pickWritableDirectory(options) {
+      guard()
+      if (!(typeof window !== 'undefined' && aikmDsh?.plugin?.files)) {
+        throw new Error('当前平台不支持可写文件夹授权（授权由桌面端主进程保存；安卓 / 网页端请改用 OPFS 或平台文件能力）')
+      }
+      return ipc().pickWritableDirectory({ id: deps.pluginId, ...(options?.title ? { title: options.title } : {}) })
+    },
+
+    async writeText(path, text) {
+      guard()
+      if (!(typeof window !== 'undefined' && aikmDsh?.plugin?.files)) {
+        throw new Error('当前平台不支持写文件（需要桌面端）')
+      }
+      if (typeof text !== 'string') throw new Error('ctx.files.writeText(path, text) 的 text 必须是字符串')
+      return ipc().writeText({ id: deps.pluginId, path, text })
+    },
+
+    async remove(path) {
+      guard()
+      if (!(typeof window !== 'undefined' && aikmDsh?.plugin?.files)) {
+        throw new Error('当前平台不支持删除文件（需要桌面端）')
+      }
+      return ipc().remove({ id: deps.pluginId, path })
     },
 
     async list(dir) {

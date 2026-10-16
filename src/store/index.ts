@@ -721,7 +721,12 @@ export const usestore = defineStore('data', {
             builtin?: boolean
             /** 预设标签（用于预设面板 / 集群配置面板按名称和标签搜索） */
             tags: string[]
+            /**
+             * 模型来源：'' = **跟随默认**（读全局「设置 → 模型」的当前来源，换来源 / 换环境后无需重配）。
+             * 判定统一走 shared/llmSources 的 presetFollowsDefaultLlm / resolvePresetLlmType，勿各自写 `||` 回退。
+             */
             llmType: string
+            /** 模型名：**跟随默认**时为空（由来源配置里的模型兜底） */
             model: string
             systemPrompt: string
             temperature: number

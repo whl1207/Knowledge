@@ -487,6 +487,13 @@
               <div v-for="g in fileGrants" :key="g.path" class="plugin-data-row">
                 <i class="fa" :class="g.exists ? (g.isDir ? 'fa-folder-open-o' : 'fa-file-o') : 'fa-unlink'"></i>
                 <span class="plugin-data-name" :title="g.path">{{ g.path }}</span>
+                <span
+                  class="plugin-data-mode"
+                  :class="{ writable: g.mode === 'write' }"
+                  :title="g.mode === 'write'
+                    ? (zh ? '可写：该插件能在其中创建 / 覆盖 / 删除文件' : 'Writable: the plugin may create / overwrite / delete files inside')
+                    : (zh ? '只读：该插件只能读；写入会被拒绝' : 'Read-only: the plugin may read; writes are refused')"
+                >{{ g.mode === 'write' ? (zh ? '可写' : 'write') : (zh ? '只读' : 'read') }}</span>
                 <span class="plugin-data-size">
                   {{ g.exists ? (g.isDir ? (zh ? '文件夹' : 'folder') : zh ? '文件' : 'file') : zh ? '已不存在' : 'missing' }}
                 </span>
@@ -497,18 +504,82 @@
                 ></i>
               </div>
             </div>
-            <div v-if="fileGrants.length" class="detail-note" style="margin-top: 6px">
+            <div v-if="grantsSupported" class="detail-note" style="margin-top: 6px">
               <span>
                 {{ zh
-                  ? '只有你亲自选过的路径能被这个插件读取；撤销只影响这个插件，不会动磁盘上的文件。'
-                  : 'Only paths you picked can be read by this plugin; revoking only affects this plugin and never touches your files.' }}
+                  ? '只有你亲自选过的路径能被这个插件读写。「只读」授权下写入一律被拒；要让它写，得单独授权一个「可写」文件夹。撤销只影响这个插件，不会动磁盘上的文件。'
+                  : 'Only paths you picked can be read/written by this plugin. Writes are refused under a read-only grant — grant a writable folder for that. Revoking only affects this plugin and never touches your files.' }}
               </span>
               <button
+                class="small-btn"
+                style="margin-left: 6px"
+                :disabled="!selectedHasFs"
+                @click="pickWritableForSelected"
+                :title="selectedHasFs
+                  ? (zh ? '选一个允许该插件写入的文件夹（可在其中创建 / 覆盖 / 删除文件）' : 'Pick a folder this plugin may write into')
+                  : (zh ? '该插件没有声明 fs 权限，不能授权写入' : 'The plugin does not declare fs, so writing cannot be granted')"
+              >{{ zh ? '允许写入某文件夹…' : 'Allow writing to…' }}</button>
+              <button
+                v-if="fileGrants.length"
                 class="small-btn danger"
                 style="margin-left: 6px"
                 @click="revokeAllGrants"
                 :title="zh ? '撤销这个插件记住的全部路径' : 'Revoke every remembered path of this plugin'"
               >{{ zh ? '全部撤销' : 'Revoke all' }}</button>
+            </div>
+            <!-- 委派智能体：同意状态 + 用量 + 撤销入口。
+                 没有这块，主进程确认框里那句「可在插件 → 数据里改回来」就是空头承诺。 -->
+            <div class="detail-row">
+              <span class="detail-k">{{ zh ? '委派智能体' : 'Agent delegation' }}</span>
+              <span class="detail-v">
+                <template v-if="!agentSupported">
+                  {{ zh ? '当前没有连接到主进程（或本平台不支持），看不到委派状态。' : 'Not connected to the main process (or unsupported here), so delegation is not visible.' }}
+                </template>
+                <template v-else-if="!agentStatus">
+                  {{ zh ? '读取中…' : 'Loading…' }}
+                </template>
+                <template v-else>
+                  <b>{{
+                    agentStatus.consent === 'allow'
+                      ? (zh ? '已允许' : 'Allowed')
+                      : agentStatus.consent === 'deny'
+                        ? (zh ? '已拒绝' : 'Denied')
+                        : (zh ? '每次询问' : 'Ask every time')
+                  }}</b>
+                  <span class="detail-note">
+                    {{ zh
+                      ? `本小时已用 ${agentStatus.callsInWindow} 次，正在跑 ${agentStatus.inFlight} 个（并发上限 1、每小时 20 次）`
+                      : `${agentStatus.callsInWindow} call(s) this hour, ${agentStatus.inFlight} running (cap: 1 concurrent, 20/hour)` }}
+                  </span>
+                </template>
+              </span>
+            </div>
+            <div v-if="agentSupported && agentStatus" class="detail-note" style="margin-top: 6px">
+              <span>
+                {{ zh
+                  ? '插件调用你配置的模型时要花你的额度，所以首次会弹框确认；这里可以随时改回「每次都问」或直接拒绝。委派出的智能体拿不到文件 / 命令类工具。'
+                  : 'A plugin spends your model quota when it delegates, so the first call asks you; you can revert to asking every time or deny outright here. The delegated agent gets no file/shell tools.' }}
+              </span>
+              <button
+                v-if="agentStatus.consent !== 'ask'"
+                class="small-btn"
+                style="margin-left: 6px"
+                @click="setAgentConsent('ask')"
+                :title="zh ? '以后每次都重新弹框询问' : 'Ask again on every call'"
+              >{{ zh ? '撤销同意' : 'Revoke consent' }}</button>
+              <button
+                v-if="agentStatus.consent !== 'deny'"
+                class="small-btn danger"
+                style="margin-left: 6px"
+                @click="setAgentConsent('deny')"
+                :title="zh ? '不再询问，直接拒绝这个插件的委派' : 'Refuse this plugin’s delegations without asking'"
+              >{{ zh ? '改为拒绝' : 'Deny' }}</button>
+              <button
+                class="small-btn"
+                style="margin-left: 6px"
+                @click="resetAgentBudget"
+                :title="zh ? '把本小时的调用计数归零' : 'Reset the hourly call counter'"
+              >{{ zh ? '重置额度' : 'Reset budget' }}</button>
             </div>
           </div>
         </div>
@@ -540,13 +611,19 @@ import {
   clearPluginData,
   clearPluginGrants,
   collectAllPluginData,
+  collectPluginAgentStatus,
   collectPluginData,
   collectPluginGrants,
+  pluginAgentSupported,
   pluginDataFilesSupported,
   pluginFileGrantsSupported,
   pluginLsPrefix,
+  pickWritableFolderForPlugin,
   removePluginDataEntry,
+  resetPluginAgentUsage,
   revokePluginGrant,
+  setPluginAgentConsent,
+  type PluginAgentStatus,
   type PluginDataEntry,
   type PluginDataSummary,
   type PluginGrantEntry,
@@ -681,6 +758,9 @@ const pluginData = ref<Record<string, PluginDataSummary>>({})
 // ---- 文件授权（用户在该插件里选过的路径，跨重启有效）：同分组里展示与撤销 ----
 const fileGrants = ref<PluginGrantEntry[]>([])
 const grantsSupported = ref(true)
+/** 委派智能体的同意与用量（「插件 → 数据」展示 + 撤销入口） */
+const agentStatus = ref<PluginAgentStatus | null>(null)
+const agentSupported = ref(true)
 /**
  * 界面半边的装载结果（渲染层内存态，主进程快照里没有）：
  * 主进程显示 active 不代表界面半边装上了 —— 常见于界面半边代码写错，
@@ -755,6 +835,7 @@ const PERMISSION_HINTS: Record<string, [string, string]> = {
   shell: ['执行命令（仍受 trusted 沙箱策略约束）', 'Run shell commands (still bound by the trusted sandbox policy)'],
   net: ['发起网络请求', 'Make network requests'],
   agent: ['读取会话日志（只读）', 'Read session logs (read-only)'],
+  'agent.run': ['调用你配置的模型跑一次独立智能体会话（消耗额度；受宿主预算与首次调用确认约束，委派出的智能体拿不到文件 / 命令类工具）', 'Run one isolated agent session on your configured model (consumes quota; bounded by host budget and a first-use confirmation, and the delegated agent gets no file/shell tools)'],
   llm: ['调用你配置的大模型来源（会消耗额度 / 算力）', 'Call your configured model sources (consumes quota / compute)'],
 }
 
@@ -870,8 +951,103 @@ const refreshGrants = async (id: string) => {
   }
 }
 
-const revokeGrantEntry = async (entry: PluginGrantEntry) => {
+// ---------------------------------------------------------------------------
+// 委派智能体（ctx.agent.run）：同意状态与用量的展示 + 撤销入口
+//
+// 为什么这里必须有撤销入口：主进程的首次调用确认框里写着「拒绝后可在插件 → 数据里改回来」。
+// 没有这个入口，那句话就是空头承诺 —— 用户点了拒绝就再也找不到地方改。
+// 同意本身由主进程弹框写入，这里只是让用户能**撤销**或**改成拒绝**。
+// ---------------------------------------------------------------------------
+const refreshAgent = async (id: string) => {
+  if (!pluginAgentSupported()) {
+    agentSupported.value = false
+    agentStatus.value = null
+    return
+  }
+  agentSupported.value = true
+  agentStatus.value = await collectPluginAgentStatus(id)
+}
+
+const setAgentConsent = async (consent: 'allow' | 'ask' | 'deny') => {
   const p = selected.value
+  if (!p) return
+  const label = consent === 'ask' ? (zh.value ? '撤销同意' : 'Revoke consent') : zh.value ? '改为拒绝' : 'Switch to deny'
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? `${label}：插件「${p.name}」以后调用智能体时的处理方式？\n`
+          + (consent === 'ask'
+            ? '撤销后，它下次调用会重新弹确认框问你。'
+            : '改为拒绝后，它的调用会直接返回「用户未允许」，不会再问你（随时可以在这里改回「每次都问」）。')
+        : `${label} for “${p.name}”?\n`
+          + (consent === 'ask'
+            ? 'It will ask you again on the next call.'
+            : 'Its calls will be refused without asking you again (revertible here at any time).'),
+      zh.value ? '委派智能体' : 'Agent delegation',
+      { type: 'warning', confirmButtonText: zh.value ? '确定' : 'OK', cancelButtonText: zh.value ? '取消' : 'Cancel' },
+    )
+  } catch {
+    return
+  }
+  const ok = await setPluginAgentConsent(p.id, consent)
+  if (ok) {
+    ElMessage.success(zh.value ? '已更新' : 'Updated')
+    await refreshAgent(p.id)
+  } else {
+    ElMessage.error(zh.value ? '更新失败（可能未连接到主进程）' : 'Update failed (main process not reachable?)')
+  }
+}
+
+const resetAgentBudget = async () => {
+  const p = selected.value
+  if (!p) return
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? `重置「${p.name}」的委派用量？\n把本小时的调用计数归零（并发上限不受影响）。`
+        : `Reset the delegation usage of “${p.name}”?\nThe hourly call counter goes back to zero (the concurrency cap is unaffected).`,
+      zh.value ? '委派额度' : 'Delegation budget',
+      { type: 'warning', confirmButtonText: zh.value ? '确定' : 'OK', cancelButtonText: zh.value ? '取消' : 'Cancel' },
+    )
+  } catch {
+    return
+  }
+  const ok = await resetPluginAgentUsage(p.id)
+  if (ok) {
+    ElMessage.success(zh.value ? '已重置' : 'Reset')
+    await refreshAgent(p.id)
+  } else {
+    ElMessage.error(zh.value ? '重置失败（可能未连接到主进程）' : 'Reset failed (main process not reachable?)')
+  }
+}
+
+/** 当前选中的插件是否声明了 fs（没声明就不能授权读写文件） */
+const selectedHasFs = computed(() => (selected.value?.permissions ?? []).includes('fs'))
+
+/**
+ * 选一个**可写**文件夹授权给当前插件。
+ *
+ * 与插件自己调 `ctx.files.pickWritableDirectory()` 是同一条通道 —— 选哪个文件夹是**用户在对话框里
+ * 亲手点的**，所以从设置页代它发起不会放宽任何东西；这里只是让用户多一个更顺手的入口。
+ */
+const pickWritableForSelected = async () => {
+  const p = selected.value
+  if (!p) return
+  if (!selectedHasFs.value) {
+    ElMessage.warning(zh.value ? '该插件没有声明 fs 权限，不能授权写入' : 'The plugin does not declare fs, so writing cannot be granted')
+    return
+  }
+  const res = await pickWritableFolderForPlugin(p.id)
+  if (!res) {
+    ElMessage.error(zh.value ? '当前环境不支持可写授权（需要桌面端）' : 'Writable grants need the desktop app')
+    return
+  }
+  if (res.cancelled) return
+  ElMessage.success(zh.value ? `已授权可写：${res.path}` : `Writable: ${res.path}`)
+  await refreshGrants(p.id)
+}
+
+const revokeGrantEntry = async (entry: PluginGrantEntry) => {  const p = selected.value
   if (!p) return
   try {
     await ElMessageBox.confirm(
@@ -1318,7 +1494,7 @@ const loadDetail = async (p: PluginSnapshot | undefined) => {
   dataSummary.value = null
   fileGrants.value = []
   if (!p) return
-  await Promise.all([loadConfig(p), loadLogs(p), refreshData(p.id), refreshGrants(p.id)])
+  await Promise.all([loadConfig(p), loadLogs(p), refreshData(p.id), refreshGrants(p.id), refreshAgent(p.id)])
 }
 
 // 列表变化（首次加载 / 搜索过滤 / 插件被移除）后保证选中项始终有效：
@@ -2178,6 +2354,20 @@ onUnmounted(() => {
 .plugin-data-size {
   opacity: 0.7;
   flex-shrink: 0;
+}
+/* 授权的模式徽章：只读低调、可写用绿色（与「生效 / 已启用」同一套颜色语言） */
+.plugin-data-mode {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  font-size: 10px;
+  opacity: 0.75;
+}
+.plugin-data-mode.writable {
+  border-color: #16a34a;
+  color: #16a34a;
+  opacity: 1;
 }
 .plugin-data-del {
   cursor: pointer;

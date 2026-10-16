@@ -66,11 +66,13 @@ export const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或�
    swarm.workbench.tab（集群工作台页签）、chat.message.actions（聊天消息级按钮）。
    settings.tab 的 key 就是设置页 id（用 plugin-<插件 id> 前缀，别占用内置页 id），**meta.group 只能填已存在的一级分组 id（省略即内置「插件」分组，填不存在的 id 会多出一个同名「插件」一级菜单）**；
    settings.card 的 meta.target 必填（内置设置页 id），不写会出现在所有设置页。细节与完整示例见「设置页签 / 设置卡片模板」一节。
-5. 用到宿主能力必须声明 permissions（可用：fs / shell / net / agent / llm）；未声明就调用会直接抛错。
+5. 用到宿主能力必须声明 permissions（清单见 plugin_dev_host）；未声明就调用会直接抛错。
    启用插件时软件会把申请的权限列给用户确认，所以不要多申请。
    **fs 不等于能读任意路径**：只能读「用户在该插件里选过」的文件 / 文件夹，选过一次就记住
    （跨重启有效，可在「插件 → 数据」撤销）。所以流程必须是 pickFiles() / pickDirectory() 让用户选一次 →
    把路径存进 localStorage（键名带 aikm.plugin.<插件 id>. 前缀）→ 之后直接读；**写死绝对路径一定读不到**（报「未授权访问」）。
+   **写文件要用户单独授权一个「可写」文件夹**（ctx.files.pickWritableDirectory()，或设置页的「允许写入某文件夹…」）：
+   只读授权下写入一律被拒，越界（兄弟目录 / 写死的绝对路径）也一律拒绝；ctx.host.writeFile 只能写**插件自己的目录**。
 6. 界面半边（client.entry 指向的文件）必须是**单文件 ESM 且没有任何 import/require**：
    宿主把源码包成 Blob URL 再 import，裸模块名（比如 'vue'）在 Blob 模块里无法解析。
    Vue 运行时由宿主注入：apply(ctx) 里从 ctx.vue 取 { h, defineComponent, ref, computed, watch, onMounted, onUnmounted, nextTick } 等。
@@ -125,7 +127,7 @@ export const CONSTRAINTS_EN = `[Hard constraints the host enforces]
    swarm.workbench.tab (swarm workbench tab), chat.message.actions (per-message buttons).
    A settings.tab key is the settings page id (prefix it with plugin-<plugin id>, never reuse a built-in page id) and **meta.group may only be an existing top-level group id (omit it for the built-in Plugins group; a non-existent id adds a second “Plugins” top-level menu)**;
    settings.card requires meta.target (a built-in settings page id) — without it the card appears on every settings page. See the “Settings tab / card template” section for the full example.
-5. Host capabilities require permissions (fs / shell / net / agent / llm); calling without declaring throws. Users must confirm the requested
+5. Host capabilities require permissions (the full list is in plugin_dev_host's output — it is generated from what this build actually supports); calling without declaring throws. Users must confirm the requested
    permissions when enabling the plugin, so ask only for what you need.
    **fs does not mean “any path”**: only files/folders the user picked *inside that plugin* are readable, and a pick is remembered
    (it survives a restart; the user can revoke it under Plugins → Data). So the flow is pickFiles() / pickDirectory() → store the path in
@@ -241,7 +243,7 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'One-shot model call (permission llm); use sources() / current() / models(source) to build pickers.',
   },
   {
-    name: 'ctx.files.pickFiles / pickDirectory / list / readText / readBase64 / readBytes / readSheet / renderPdfPage / openInApp',
+    name: 'ctx.files.pickFiles / pickDirectory / pickWritableDirectory / list / readText / readBase64 / readBytes / readSheet / renderPdfPage / openInApp / writeText / remove',
     descZh: '文件能力（权限 fs）。**这些方法全部返回 Promise，必须 await**；返回形状：pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] }（**取消时 cancelled=true，不抛错**，路径取 files[0].path）；readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] }（.xlsx/.xls/.csv，**界面半边没有 SheetJS，读表就用它**）；readText(path) → { text, pages, pdf }（PDF 自动提取正文）；readBase64(path) → { base64, size }；**readBytes(path) → { bytes: Uint8Array, size }**（几十 MB 的大文件——ROM / 模型——用它：走 base64 会多 1/3 体积、还要在 JS 里编码再解码一遍，安卓上明显更慢）；list(dir) → { dir, entries: [{ name, path, isDir, size }] }（**一次最多 500 项**）；renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }。只能访问用户在该插件里**选过**的路径，选过一次会记住（跨重启有效，用户可在「插件 → 数据」撤销）。',
     descEn: 'File capability (permission fs). **Every method returns a Promise — always await.** Shapes: pickFiles({ accept: "any"|"pdf"|"text", multiple }) → { cancelled, files: [{ path, name, size }] } (**cancellation sets cancelled=true, it does not throw**; take files[0].path); readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } (.xlsx/.xls/.csv — **the UI half has no SheetJS, use this**); readText(path) → { text, pages, pdf }; readBase64(path) → { base64, size }; **readBytes(path) → { bytes: Uint8Array, size }** (use it for tens-of-MB files — ROMs, models — base64 costs a third more bytes plus an encode and a decode in JS, which is noticeably slower on Android); list(dir) → { dir, entries: [{ name, path, isDir, size }] } (**at most 500 entries at a time**); renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, … }. Only paths the user picked for this plugin are readable, and a pick is remembered (it survives a restart; the user can revoke it under Plugins → Data).',
   },
@@ -256,6 +258,19 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Read-only list of configured agent presets (id / name) so users can pick a role.',
   },
   {
+    name: 'ctx.agent.available / reason / presets() / run(presetId, input, opts) / cancelAll()',
+    descZh: '委派智能体（界面半边专有）：按用户配好的**预设**跑一次独立会话，返回 { ok, termination, output, error?, turn, usage? }。'
+      + '需要 permissions: [\'agent.run\']（与只读的 \'agent\' 是**两件事**，不能互相顶替），且**只在桌面端可用**（网页 / 移动端 available=false，用 reason 说明）。'
+      + 'opts 可申请 timeoutMs / maxSteps，并可用 systemPrompt、tools、mcpServerIds **覆盖**预设的系统提示词 / 工具白名单 / MCP 服务（按 id 引用用户已配置并启用的服务）。'
+      + '**模型与密钥不可选**（provider / model 一律来自预设）；覆盖只是**申请** —— 工具由宿主按你的权限裁剪，默认不给文件 / MCP 工具。'
+      + '**只有 termination === \'completed\' 才算成功**（ok 由它决定）；失败时 output 是中止前的部分输出。'
+      + '\n  预算 / 权限被拒 / 委派拿不到工具的原因与做法，见 plugin_dev_faq。',
+    descEn: 'Delegate to an agent (UI half only): run one isolated session using a user-configured **preset**, returning '
+      + '{ ok, termination, output, error?, turn, usage? }. Requires permissions: [\'agent.run\'] (a **different** thing from the read-only \'agent\'), '
+      + 'and is **desktop-only** (on web/mobile available=false with a reason). Only termination === \'completed\' counts as success; '
+      + 'on failure output is the partial text captured before the stop. See plugin_dev_faq for budget / denial / tool-stripping details.',
+  },
+  {
     name: '界面半边：ctx.config / ctx.log / ctx.notify(message) / ctx.on / ctx.effect',
     descZh: '配置（设置页可编辑 JSON）、日志、轻提示、事件订阅、副作用登记（返回清理函数）。**ctx.notify(message) 只接受字符串**——传 ref / 对象进去，用户看到的提示就是 "[object Object]"（先取 .value 再传）。界面半边没有 storage，要持久化就用 localStorage（键名带插件 id 前缀）。',
     descEn: 'Config (editable JSON in settings), logs, toasts, event subscription, side-effect registration (returns a disposer). **ctx.notify(message) only accepts a string** — pass a ref or an object and the toast reads "[object Object]" (read .value first). The UI half has no storage — persist via localStorage with a plugin-id-prefixed key.',
@@ -266,9 +281,14 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Private key/value storage (userData/plugins-data/<plugin id>/storage.json).',
   },
   {
-    name: '主进程半边：ctx.tool({ name, description, inputSchema, handler })',
-    descZh: '给智能体加一个工具（scope = plugin:<id>，出现在「设置 → 工具 → 注册表」，禁用插件即消失）。',
-    descEn: 'Add an agent tool (scope = plugin:<id>, listed in Settings → Tools → Registry, disappears when disabled).',
+    name: '主进程半边：ctx.tool({ name, description, inputSchema, handler, requiresApproval })',
+    descZh: '给智能体加一个工具（scope = plugin:<id>，出现在「设置 → 工具 → 注册表」，禁用插件即消失）。'
+      + '**声明了 fs / shell 权限的插件，其工具默认需要用户确认**（requiresApproval 默认 true）：'
+      + '用户在「插件 → 权限 → 工具审批」里选"每次询问 / 已允许 / 已拒绝"；'
+      + '被拒绝时工具调用会返回 `{ ok: false, error }`（不是抛异常），所以你的 handler 不必处理它，但**不要假设工具一定被执行**。',
+    descEn: 'Add an agent tool (scope = plugin:<id>; listed in Settings → Tools → Registry; disappears when disabled). '
+      + '**Plugins that declare fs / shell get user confirmation by default** (requiresApproval defaults to true): the user picks ask / allow / deny under Plugins → Permissions → Tool approval. '
+      + 'A denial comes back as `{ ok: false, error }` (not a thrown error), so never assume your handler ran.',
   },
   {
     name: '主进程半边：ctx.service(name, value) / export const inject = [...]',
@@ -276,9 +296,9 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Provide or depend on services from the host or other plugins.',
   },
   {
-    name: '主进程半边：ctx.host.runShell(command, { cwd }) / ctx.host.fetch(url, init) / ctx.host.sessions.list()',
-    descZh: '分别需要 shell / net / agent 权限。',
-    descEn: 'Require the shell / net / agent permissions respectively.',
+    name: '主进程半边：ctx.host.granted.{list, readText, writeText, listDir, remove} / ctx.host.runShell(command, { cwd }) / ctx.host.fetch(url, init) / ctx.host.sessions.list()',
+    descZh: '`ctx.host.granted.*` = **用户授权过的路径**内的读写（需 fs 权限）：授权目录覆盖其子树，**写只认"可写"授权**（只读授权下写入被拒，错误里会说明），越界一律拒绝；`ctx.host.readFile / writeFile / listDir` 只能碰**插件自己的目录**，别拿它当万能写。runShell / fetch / sessions 分别需要 shell / net / agent 权限。',
+    descEn: '`ctx.host.granted.*` reads/writes inside the **paths the user granted** (needs fs): a granted folder covers its subtree and **writes require a writable grant** (a read-only grant refuses writes with an explanatory error); anything outside is rejected. `ctx.host.readFile / writeFile / listDir` only touch **the plugin’s own folder**. runShell / fetch / sessions need the shell / net / agent permissions.',
   },
 ]
 
@@ -301,6 +321,71 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
     qEn: 'ctx.llm / ctx.files complain the llm/fs permission is missing.',
     aZh: '把权限加进 permissions 数组，然后回「插件 → 管理」点重载（权限是加载时按清单判定的）。',
     aEn: 'Add it to the permissions array and hit Reload in Plugins → Manage (permissions are resolved from the manifest at load time).',
+  },
+  {
+    qZh: 'ctx.agent.run 报「未声明 agent.run 权限」/ 明明声明了 agent 却还是被拒 / available 是 false',
+    qEn: 'ctx.agent.run says the agent.run permission is missing, or declares agent and is still refused, or available is false.',
+    aZh: '三个不同的原因，分开查：'
+      + '\n  ① 权限：`agent.run` 与只读的 `agent`（读会话日志）是**两个独立权限**，声明了后者不等于能跑前者——'
+      + '这是刻意的，否则老插件会静默获得"花你钱"的能力。要跑就在 permissions 里单独加 `"agent.run"`，然后重载插件。'
+      + '\n  ② 平台：委派**只在桌面端可用**。网页 / 移动端的本地宿主没有主进程来执行预算，所以 `available === false`，'
+      + '`reason` 会写明原因。插件应当判断 available，并在界面上给用户一句人话，不要直接抛错。'
+      + '\n  ③ 用户没允许：首次调用会弹一个主进程对话框（允许 / 每次都问 / 拒绝）。用户选「拒绝」后，'
+      + '返回的是 `{ ok: false, termination: \'consent-denied\' }` —— **不是异常**，别当成 bug；'
+      + '用户可以在「插件 → 数据」里改回来。',
+    aEn: 'Three distinct causes — check them separately: (1) `agent.run` and the read-only `agent` (session logs) are **separate permissions**; declaring the latter does not grant the former (deliberate, so existing plugins do not silently gain the ability to spend your quota). Add `"agent.run"` and reload. '
+      + '(2) Delegation is **desktop-only**: on web/mobile there is no main process to enforce the budget, so `available === false` and `reason` explains it — check availability and show the user a sentence instead of throwing. '
+      + '(3) The user has not allowed it: the first call shows a main-process dialog (allow / ask every time / deny). A refusal returns `{ ok: false, termination: \'consent-denied\' }` — that is a **result, not an exception**; the user can revert it under Plugins → Data.',
+  },
+  {
+    qZh: 'ctx.agent.run 报预算错（并发 / 每小时次数），或者跑得比我要的步数少',
+    qEn: 'ctx.agent.run hits a budget error (concurrency / hourly cap), or runs fewer steps than requested.',
+    aZh: '预算**由宿主裁定，只紧不松**，插件只能申请更小的值：'
+      + '\n  · timeoutMs 默认 10 分钟、上限 30 分钟；maxSteps 默认 20、上限 60，且与预设自己的步数上限取 min；'
+      + '\n  · 每个插件最多同时 1 个委派、每小时 20 次（本窗口内计数，跨重启保留）——超了会**抛错**，不会静默降级；'
+      + '\n  · 所以"我要 500 步"不会给你 500 步。真要更多，请用户到「插件 → 数据」里看用量，或把长任务拆成多次、'
+      + '并在界面里给进度提示（每次委派都是一次独立会话，没有跨会话记忆）。',
+    aEn: 'The budget is **host-decided and only tightens** — a plugin can only ask for less: timeoutMs 10 min default / 30 max; maxSteps 20 default / 60 max, and min() with the preset\'s own cap; at most 1 concurrent delegation and 20 calls per hour per plugin (counted in a window, persisted across restarts). Exceeding them **throws** rather than silently degrading, so asking for 500 steps will not give you 500. For long work, split it into several calls and show progress in the UI (each delegation is an isolated session with no cross-session memory).',
+  },
+  {
+    qZh: '插件怎么才能写文件 / 报「只读授权不能写入」或「未授权访问」',
+    qEn: 'How can a plugin write files — or why do I get “read-only grant cannot write” / “unauthorized”?',
+    aZh: '写文件只有一条路，且**必须用户亲手授权**：'
+      + '① 让用户在「设置 → 插件 → 管理 → 该插件 → 文件授权」点「允许写入某文件夹…」（或插件自己调 `ctx.files.pickWritableDirectory()` 弹目录选择框）——'
+      + '**用户没点过，插件就永远写不了**；'
+      + '② 然后写：界面半边用 `await ctx.files.writeText(path, text)`，主进程半边的工具用 `ctx.host.granted.writeText(path, content)`（都要 `fs` 权限）。'
+      + '\n  三种报错分别对应：**「只读授权不能写入」**= 这个目录当初是以"只读"选的，要写就让用户重新以可写方式选一次（会升级）；'
+      + '**「未授权访问」**= 路径不在任何授权目录内（含兄弟目录、写死的绝对路径）；'
+      + '**「插件未声明 fs 权限」**= 清单里没写 `fs`。'
+      + '\n  `ctx.host.writeFile` 只能写**插件自己的目录**（userData 下的插件数据目录），不能拿它写用户工作区。'
+      + '删除用 `remove`，但它**不做递归删除**（空目录才能删）。',
+    aEn: 'There is exactly one path, and the user must grant it by hand: (1) the user clicks “Allow writing to…” under Settings → Plugins → Manage → the plugin → File access (or the plugin calls `ctx.files.pickWritableDirectory()` to open the folder picker) — **without that click a plugin can never write**; (2) then write with `await ctx.files.writeText(path, text)` (UI half) or `ctx.host.granted.writeText(path, content)` (main-half tools); both need the `fs` permission. '
+      + 'The three errors mean: “read-only grant cannot write” = that folder was granted read-only, ask the user to pick it as writable again (it upgrades); “unauthorized” = the path is outside every granted folder (siblings and hard-coded absolute paths included); “plugin does not declare fs” = add it to the manifest. '
+      + '`ctx.host.writeFile` only writes **the plugin’s own folder**, never the user workspace. `remove` deletes files / empty folders only — it never recurses.',
+  },
+  {
+    qZh: '想让被委派的智能体读文件 / 用 MCP 服务',
+    qEn: 'The delegated agent should read files or use MCP servers.',
+    aZh: '默认**不给**（防止"零权限插件 → 委派一个能读文件的预设 → 拿回任意文件"）。'
+      + '要放开得让用户在「设置 → 插件 → 权限」里给**你这个插件**勾上「文件工具」或「MCP」——文件工具还需要你自己声明 `fs` 权限（双条件）。'
+      + '你也可以在 `ctx.agent.run` 的 opts 里用 `tools` / `mcpServerIds` 申请，但宿主仍按上面的开关裁剪，裁掉了什么可以在插件日志里看到。'
+      + '命令执行 / 代码执行 / 技能 / 递归委派**永不放宽**：要做这些请让插件自己声明 `shell` 权限走 `ctx.host.runShell`。',
+    aEn: 'Not granted by default (this blocks “zero-permission plugin → delegates to a preset with read_file → reads anything”). '
+      + 'The user must tick “File tools” or “MCP” for **your plugin** under Settings → Plugins → Permissions — and file tools additionally require you to declare `fs` (two conditions). '
+      + 'You may request them via `tools` / `mcpServerIds` in `ctx.agent.run` opts, but the host still clips by those switches; what got clipped shows up in the plugin log. '
+      + 'Shell / code execution / skills / recursive delegation are **never** relaxed — declare the `shell` permission and use `ctx.host.runShell` instead.',
+  },
+  {
+    qZh: '想让被委派的智能体读文件 / 用 MCP，或者它为什么没有 read_file / shell？',
+    qEn: 'The delegated agent should read files / use MCP — or why does it lack read_file / shell?',
+    aZh: '默认**不给**（否则"零权限插件 → 委派能读文件的预设 → 拿回任意文件"就成立）。'
+      + '要放开：让用户在「设置 → 插件 → 权限」给**你这个插件**勾「文件工具」或「MCP」；文件工具还需你声明 `fs`（双条件）。'
+      + 'opts 可用 `tools` / `mcpServerIds`（按 id 引用用户已启用的服务）申请，但宿主仍按开关裁剪（裁了什么看插件日志）。'
+      + '命令 / 代码 / 技能 / 递归委派**永不放宽**：自己声明 `shell` 走 `ctx.host.runShell`，读自己目录用 `ctx.files`。',
+    aEn: 'Not granted by default (otherwise “zero-permission plugin → delegates to a preset with read_file → reads anything” would hold). '
+      + 'The user must tick “File tools” or “MCP” for **your plugin** under Settings → Plugins → Permissions; file tools additionally require you to declare `fs` (two conditions). '
+      + 'You may request them via `tools` / `mcpServerIds` in opts (MCP by id, referencing the servers the user configured and enabled), but the host still clips by those switches — the plugin log shows what was clipped. '
+      + 'Shell / code execution / skills / recursive delegation are **never** relaxed: declare the `shell` permission and use `ctx.host.runShell` (a separate approval), and read your own files with `ctx.files`.',
   },
   {
     qZh: '界面样式错乱 / 深色主题下白底白字',
@@ -429,7 +514,8 @@ ${CONSTRAINTS_ZH}
 - ctx.files（需要 fs 权限，**全部是异步，必须 await**）：{ available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] }（取消时 cancelled=true 且不抛错，路径取 files[0].path）, pickDirectory() → { cancelled, dir: { path, name } }, list(dir) → { entries: [{ name, path, isDir, size }] }, readText(path) → { text, pages, pdf }, readBase64(path) → { base64, size }, readBytes(path) → { bytes: Uint8Array, size }（几十 MB 的大文件用它，别走 base64）, readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] }（.xlsx/.xls/.csv，界面半边没有 SheetJS）, renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
 - ctx.app.agentPresets() → [{ id, name }]；ctx.app.setChromeHidden(hidden) → 请求隐藏 / 恢复宿主外壳（顶栏 + 导航栏），插件面板全屏时用（切面板或卸载时宿主会自动恢复）
 主进程半边 apply(ctx)：
-- export const inject = ['tools']（要用工具注册表时必须声明）
+- export const inject = ['tools']（要用工具注册表**视图**时声明；它只有 register / list / get 元数据，
+  **没有 execute** —— 执行宿主工具只能由智能体循环发起，与 DSH 工具服务的公开面一致）
 - ctx.tool({ name, description, inputSchema, handler })：inputSchema 是 JSON Schema；handler(input) 返回可 JSON 序列化的结果
 - ctx.service(name, value)、ctx.on(type, listener)、ctx.effect(fn)、ctx.storage.{get,set,delete}
 - ctx.log.*、ctx.host.notify(message)、ctx.host.runShell(command, { cwd })、ctx.host.fetch(url, init)、ctx.host.sessions.list()
@@ -473,7 +559,8 @@ UI half apply(ctx):
 - ctx.files (needs the fs permission; **every method is async — always await**): { available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] } (cancellation sets cancelled=true and does not throw; take files[0].path), pickDirectory() → { cancelled, dir: { path, name } }, list(dir) → { entries: [{ name, path, isDir, size }] }, readText(path) → { text, pages, pdf }, readBase64(path) → { base64, size }, readBytes(path) → { bytes: Uint8Array, size } (for tens-of-MB files — skip base64), readSheet(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } (.xlsx/.xls/.csv — the UI half has no SheetJS), renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
 - ctx.app.agentPresets() → [{ id, name }]; ctx.app.setChromeHidden(hidden) → ask the host to hide/restore its own chrome (top bar + nav bars) while a plugin panel goes fullscreen (the host restores it on panel switch or unload)
 Main-process half apply(ctx):
-- export const inject = ['tools'] (required when using the tool registry)
+- export const inject = ['tools'] (declare it when you need the tool-registry **view**: it only offers
+  register / list / metadata — **no execute**. Running host tools is the agent loop's job, matching DSH's tool-service surface)
 - ctx.tool({ name, description, inputSchema, handler }): inputSchema is JSON Schema; handler(input) returns JSON-serialisable data
 - ctx.service(name, value), ctx.on(type, listener), ctx.effect(fn), ctx.storage.{get,set,delete}
 - ctx.log.*, ctx.host.notify(message), ctx.host.runShell(command, { cwd }), ctx.host.fetch(url, init), ctx.host.sessions.list()
@@ -1024,6 +1111,59 @@ export function apply(ctx) {
 }
 
 装好后：把文件夹放进插件目录 →「设置 → 插件 → 管理」点启用 → 左侧导航出现「我的插件」。`
+
+/**
+ * 主进程半边的最小示例（挂在 `plugin_dev_api_main` 这个话题上）。
+ *
+ * 为什么单独拆出来：`api` 话题原本把两个半边的成员表与示例塞在一起，体量超了
+ * plugin-smoke 的「单次不超过 <话题预算> 字」预算（小模型一次吃不下；预算数由
+ * `src/shared/toolResultBudget.ts` 的截断阈值推导，不是手调的数）。按半边拆开后，
+ * 写界面半边的人不必读主进程那一套，反之亦然 —— 而"两半边 ctx 串用"本来就是这个
+ * 项目最常见的错法（见 src/shared/pluginApiMembers.ts 的 *_CTX_ABSENT 表）。
+ */
+export const PLUGIN_DEV_MINIMAL_MAIN_ZH = `目录（同一个插件可以同时有界面半边与主进程半边）：
+my-plugin/
+├── package.json
+├── client.mjs        （界面半边，可选）
+└── index.mjs         （主进程半边，本话题讲这个）
+
+package.json（在主进程半边里要声明 "main"）：
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "aikm": {
+    "id": "my-plugin",
+    "name": "我的插件",
+    "version": "1.0.0",
+    "apiVersion": "^1",
+    "main": "index.mjs",
+    "inject": ["tools"],
+    "permissions": ["shell"],
+    "declares": { "tools": ["my_plugin_ping"] }
+  }
+}
+
+index.mjs（注册一个给智能体用的工具）：
+export const inject = ['tools']
+
+export function apply(ctx) {
+  ctx.tool({
+    name: 'my_plugin_ping',
+    description: '示例工具：回显一段文本',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+    handler: async (input) => ({ ok: true, value: { echo: String(input?.text ?? '') } }),
+  })
+  ctx.log.info('插件已激活')
+}
+
+要点：
+- 主进程半边的代码与宿主同进程、**不受工作区沙箱约束**；清单里的 permissions 是给用户看的声明与判权依据，不是沙箱。
+- 工具名必须带插件前缀（如 my_plugin_），与宿主已有工具重名会**直接装载失败**。
+- handler 必须返回 { ok, value?, error? }；抛异常会被宿主统一转成 { ok: false }。
+- 声明了 fs / shell 权限的插件，其工具默认需要用户审批（requiresApproval）。**这条是执行的**：
+  审批在 toolRegistry 的 pre-execute 阶段拦（所有执行入口都汇聚在那里），三态由用户在
+  「插件 → 权限 → 工具审批」控制，默认 ask；没有可用窗口询问时按**拒绝**处理（fail-closed）。
+  被拒时工具返回 { ok: false, error }，不抛异常。`
 
 export const PLUGIN_DEV_MINIMAL_EN = `Folder (the folder name must equal the id):
 my-plugin/

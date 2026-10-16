@@ -321,6 +321,8 @@ export async function removePluginDataEntry(id: string, entry: PluginDataEntry):
 // ---------------------------------------------------------------------------
 export interface PluginGrantEntry {
   path: string
+  /** `read` = 只读；`write` = 可写（可在其中创建 / 覆盖 / 删除文件） */
+  mode: 'read' | 'write'
   isDir: boolean
   exists: boolean
 }
@@ -337,15 +339,33 @@ export function pluginFileGrantsSupported(): boolean {
   return grantsBridge() !== null
 }
 
-/** 该插件记住的、可以被读取的文件 / 文件夹（跨重启有效） */
+/** 该插件记住的、可以被读取的文件 / 文件夹（跨重启有效；含模式） */
 export async function collectPluginGrants(id: string): Promise<PluginGrantEntry[]> {
   const files = grantsBridge()
   if (!files) return []
   try {
     const res = await files.grants({ id })
-    return Array.isArray(res?.entries) ? res.entries : []
+    const rows = Array.isArray(res?.entries) ? res.entries : []
+    return rows.map((r) => ({ ...r, mode: r?.mode === 'write' ? 'write' : 'read' }))
   } catch {
     return []
+  }
+}
+
+/**
+ * 为用户选一个**可写**文件夹（授权该插件在其中创建 / 覆盖 / 删除文件）。
+ *
+ * 这条通道与插件自己调 `ctx.files.pickWritableDirectory()` 是同一条 —— 选谁是**用户在对话框里亲手点的**，
+ * 所以从设置页代它发起并不会放宽任何东西（写权限的唯一来源始终是用户的那一次点击）。
+ */
+export async function pickWritableFolderForPlugin(id: string): Promise<{ cancelled: boolean; path: string } | null> {
+  const files = grantsBridge()
+  if (!files || typeof files.pickWritableDirectory !== 'function') return null
+  try {
+    const res = await files.pickWritableDirectory({ id })
+    return { cancelled: res?.cancelled === true, path: String(res?.dir?.path ?? '') }
+  } catch {
+    return null
   }
 }
 
@@ -414,5 +434,173 @@ export async function clearPluginData(id: string): Promise<{ keys: number; files
   } catch {
     /* 撤销失败就保持原样 */
   }
+  // 同理收回委派同意：用户点「清空全部数据」的意图是让这个插件回到干净状态，
+  // 留着「允许它花我的模型额度」会造成"我明明清过它"的意外。
+  try {
+    await setPluginAgentConsent(id, 'ask')
+  // 工具审批也回到"每次询问"：清空数据后不该继续继承"已允许这个插件调工具"
+  await setPluginToolApproval(id, 'ask')
+  } catch {
+    /* 撤销失败就保持原样 */
+  }
   return { keys: keys.length, files }
+}
+
+// ---------------------------------------------------------------------------
+// 委派智能体（ctx.agent.run）：同意状态与用量
+//
+// 同意由**主进程弹出的对话框**写入 —— 插件与渲染层都没有办法替用户回答
+// （见 electron/main/plugin-agent-consent.ts 的说明）。这里只负责在「插件 → 数据」里
+// **展示**与**撤销**，所以改写走的通道要求 `confirm: true`（同 plugin-grants 的口径）。
+// ---------------------------------------------------------------------------
+export type PluginAgentConsent = 'allow' | 'ask' | 'deny'
+
+export interface PluginAgentStatus {
+  /** `ask` = 每次调用都问（默认）；`allow` = 以后不再问；`deny` = 拒绝 */
+  consent: PluginAgentConsent
+  /** 当前在飞的委派数 */
+  inFlight: number
+  /** 本小时窗口内已发起的委派数 */
+  callsInWindow: number
+}
+
+/** 委派状态桥（桌面版才有：网页 / 移动端的本地宿主没有主进程来执行预算） */
+function agentBridge(): PluginBridgeApi | null {
+  const api = getPluginBridge()
+  return api && typeof api.agentStatus === 'function' ? api : null
+}
+
+/** 环境是否支持查看 / 撤销插件委派（桌面版才有） */
+export function pluginAgentSupported(): boolean {
+  return agentBridge() !== null
+}
+
+/** 该插件的委派同意与用量（读不到返回 null，调用方按"看不到"处理） */
+export async function collectPluginAgentStatus(id: string): Promise<PluginAgentStatus | null> {
+  const api = agentBridge()
+  if (!api?.agentStatus) return null
+  try {
+    const res = await api.agentStatus({ pluginId: id })
+    return {
+      consent: res?.consent === 'allow' || res?.consent === 'deny' ? res.consent : 'ask',
+      inFlight: Number(res?.inFlight) || 0,
+      callsInWindow: Number(res?.callsInWindow) || 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 改写同意（撤销 = 'ask'，改为拒绝 = 'deny'，以后不再询问 = 'allow'）；失败返回 false */
+export async function setPluginAgentConsent(id: string, consent: PluginAgentConsent): Promise<boolean> {
+  const api = agentBridge()
+  if (!api?.setAgentConsent) return false
+  try {
+    const res = await api.setAgentConsent({ pluginId: id, consent, confirm: true })
+    return res?.consent === consent
+  } catch {
+    return false
+  }
+}
+
+/** 改写某插件的**工具审批**三态（需 confirm）；失败返回 false */
+export async function setPluginToolApproval(id: string, state: PluginAgentConsent): Promise<boolean> {
+  const api = agentBridge()
+  if (!api?.setToolApproval) return false
+  try {
+    const res = await api.setToolApproval({ pluginId: id, state, confirm: true })
+    return res?.state === state
+  } catch {
+    return false
+  }
+}
+
+/** 重置用量（撞了每小时上限时不必干等窗口滑过）；失败返回 false */
+export async function resetPluginAgentUsage(id: string): Promise<boolean> {
+  const api = agentBridge()
+  if (!api?.resetAgentUsage) return false
+  try {
+    const res = await api.resetAgentUsage({ pluginId: id, confirm: true })
+    return res?.cleared === true
+  } catch {
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 「插件权限」页签：一张表看全部插件的权限 / 同意 / 额度 / 用量 / 放宽
+// ---------------------------------------------------------------------------
+
+/** 一行 = 一个已装插件 */
+export interface PluginAgentOverviewRow {
+  pluginId: string
+  name: string
+  status: string
+  permissions: string[]
+  /** 是否声明了 agent.run（没声明的话这一行的额度 / 放宽都无意义） */
+  agentRunDeclared: boolean
+  consent: PluginAgentConsent
+  inFlight: number
+  callsInWindow: number
+  limits: PluginAgentLimits
+  relax: { fs: boolean; mcp: boolean }
+  /** 用户是否调过（用来区分"默认"与"已自定义"） */
+  customized: boolean
+  /** 工具审批三态（声明了 fs / shell 的插件，其工具默认要用户确认） */
+  toolApproval: PluginAgentConsent
+  /** 该插件里**需要审批**的工具名（为空 = 它没有这类工具，这一列无意义） */
+  approvalTools: string[]
+}
+
+export interface PluginAgentLimits {
+  concurrency: number
+  callsPerHour: number
+}
+
+/** 总览（拿不到返回空数组：网页 / 移动端没有主进程执行预算，这一页本就无意义） */
+export async function collectPluginAgentOverview(): Promise<PluginAgentOverviewRow[]> {
+  const api = agentBridge()
+  if (!api?.agentOverview) return []
+  try {
+    const res = await api.agentOverview()
+    const rows = Array.isArray(res?.rows) ? res.rows : []
+    return rows.map((r) => {
+      const row = (r ?? {}) as Record<string, any>
+      return {
+        pluginId: String(row.pluginId ?? ''),
+        name: String(row.name ?? row.pluginId ?? ''),
+        status: String(row.status ?? ''),
+        permissions: Array.isArray(row.permissions) ? row.permissions.map((p: unknown) => String(p)) : [],
+        agentRunDeclared: row.agentRunDeclared === true,
+        consent: row.consent === 'allow' || row.consent === 'deny' ? row.consent : 'ask',
+        inFlight: Number(row.inFlight) || 0,
+        callsInWindow: Number(row.callsInWindow) || 0,
+        limits: {
+          concurrency: Number(row.limits?.concurrency) || 1,
+          callsPerHour: Number(row.limits?.callsPerHour) || 20,
+        },
+        relax: { fs: row.relax?.fs === true, mcp: row.relax?.mcp === true },
+        customized: row.customized === true,
+        toolApproval: row.toolApproval === 'allow' || row.toolApproval === 'deny' ? row.toolApproval : 'ask',
+        approvalTools: Array.isArray(row.approvalTools) ? row.approvalTools.map((t: unknown) => String(t)) : [],
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+/** 写额度 / 放宽开关（需 confirm；唯一能放开文件 / MCP 工具的入口）；失败返回 false */
+export async function setPluginAgentConfig(
+  id: string,
+  patch: { limits?: Partial<PluginAgentLimits>; relax?: { fs?: boolean; mcp?: boolean }; reset?: boolean },
+): Promise<boolean> {
+  const api = agentBridge()
+  if (!api?.setAgentConfig) return false
+  try {
+    await api.setAgentConfig({ pluginId: id, ...patch, confirm: true } as never)
+    return true
+  } catch {
+    return false
+  }
 }

@@ -51,6 +51,39 @@ export function llmSourceLabel(type?: string | null): string {
   return LLM_SOURCE_LABELS[t] || (t ? t.charAt(0).toUpperCase() + t.slice(1) : '')
 }
 
+// ---------------------------------------------------------------------------
+// 「跟随默认」：智能体预设可以把自己的模型来源设为「跟随全局默认」
+//
+// 痛点：预设把来源 / 模型**写死**后，用户在「设置 → 模型」里换了来源（或换一台机器 /
+// 换一个环境）还得逐个预设重配。让预设不绑定具体来源即可：运行到哪儿都读当时的全局配置。
+//
+// 表示法：预设的 llmType / model 为空（历史上一直就是「未配置 → 回退全局」的语义），
+// 本模块把它显式化为一个可判定的状态，供 UI 与各执行入口共用同一判定。
+// ---------------------------------------------------------------------------
+
+/** 预设来源下拉里「跟随默认」档位的哨兵值（**不写进预设数据**，只存在于界面下拉） */
+export const FOLLOW_DEFAULT_LLM = '__follow__'
+
+/** 预设是否跟随全局默认模型（llmType 为空 / 等于哨兵值；model 一律视为跟随） */
+export function presetFollowsDefaultLlm(preset: any): boolean {
+  const type = String(preset?.llmType ?? '').trim()
+  return !type || type === FOLLOW_DEFAULT_LLM
+}
+
+/**
+ * 预设 → 实际生效的来源键：跟随默认（或未配置）时取全局当前来源，否则用预设自己的来源。
+ * 各执行入口（聊天 / 工作流 / 集群 / 批量 / 插件委派）都应经此解析，勿各写一份 `||` 链。
+ */
+export function resolvePresetLlmType(preset: any, store: any): string {
+  if (!presetFollowsDefaultLlm(preset)) return normalizeLlmType(preset.llmType)
+  return normalizeLlmType(store?.AIconfig?.llm?.type || '')
+}
+
+/** 预设 → 实际生效的模型名：跟随默认时为空（由来源配置里的模型兜底） */
+export function resolvePresetModel(preset: any): string {
+  return presetFollowsDefaultLlm(preset) ? '' : String(preset?.model ?? '').trim()
+}
+
 /**
  * 归一来源键列表：合并历史别名并去重（保序）。
  * 用于 llm.types 与各处硬编码来源清单，保证列表里不再出现 'deepseek-responses'。

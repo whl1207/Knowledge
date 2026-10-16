@@ -25,7 +25,7 @@ import xlsx from 'xlsx'
 import { IPCError } from '@/types/ipc'
 import { pluginHost } from './plugin-host'
 import { requirePluginApproval } from './plugin-approval'
-import { addGrant, clearGrants, grantPaths, listGrants, revokeGrant } from './plugin-grants'
+import { addGrant, assertAccess, clearGrants, listGrants, revokeGrant } from './plugin-grants'
 
 /** 读表格的上限（避免大表把主进程内存打满；插件侧据此也能判断是否被截断） */
 const SHEET_MAX_BYTES = 32 * 1024 * 1024
@@ -50,18 +50,19 @@ function readPluginId(payload: unknown): string {
   return id
 }
 
-/** 路径是否落在该插件被授权的范围内（自身或某授权文件夹的子项） */
+/**
+ * 读：路径是否落在该插件被授权的范围内（只读或可写授权都算）。
+ *
+ * 判定在 `plugin-grants.assertAccess` → 纯函数 `src/shared/pluginGrantPaths.ts`（读 / 写共用一处，
+ * 不会各写一份 startsWith；且按**路径段**比较，`/a/bc` 不会让 `/a/bcd` 通过）。
+ */
 function assertAllowed(pluginId: string, target: string): void {
-  const resolved = path.resolve(target)
-  for (const root of grantPaths(pluginId)) {
-    if (resolved === root) return
-    const prefix = root.endsWith(path.sep) ? root : root + path.sep
-    if (resolved.startsWith(prefix)) return
-  }
-  throw new IPCError(
-    'PERMISSION_DENIED',
-    `未授权访问：${resolved}（只能访问你在该插件里选择过的文件 / 文件夹）`,
-  )
+  assertAccess(pluginId, target, 'read')
+}
+
+/** 写：**只认可写授权**（只读授权一律拒绝，理由由 assertAccess 说清） */
+function assertWritable(pluginId: string, target: string): void {
+  assertAccess(pluginId, target, 'write')
 }
 
 function asIpcError(error: unknown): IPCError {
@@ -133,6 +134,83 @@ export function registerPluginFilesIpc(): void {
       const dir = result.filePaths[0]
       addGrant(pluginId, dir)
       return { cancelled: false, dir: { path: dir, name: path.basename(dir) } }
+    } catch (error) {
+      throw asIpcError(error)
+    }
+  })
+
+  /**
+   * 选一个**可写**文件夹（授权模式 write：可在其中创建 / 覆盖 / 删除文件）。
+   *
+   * 与只读的 `pick-dir` 分开是刻意的：
+   * - 用户点的时候就知道自己在给"写"的权限（标题与按钮都写明）；
+   * - 插件**没有**别的办法把自己变成可写 —— 这是唯一入口；
+   * - 同一个目录先以只读选过、再以可写选一次 → 升级为 write（`addGrant` 只升不降）。
+   */
+  ipcMain.handle('plugin:files:pick-writable', async (event, payload: { id?: string; title?: string } = {}) => {
+    try {
+      const pluginId = readPluginId(payload)
+      requireFsPermission(pluginId)
+      const parent = windowOf(event)
+      const options: Electron.OpenDialogOptions = {
+        properties: ['openDirectory', 'createDirectory'],
+        title: String(payload?.title ?? '').trim() || '选择一个允许该插件写入的文件夹',
+        buttonLabel: '允许写入此文件夹',
+      }
+      const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
+      if (result.canceled || !result.filePaths.length) return { cancelled: true, dir: null }
+      const dir = result.filePaths[0]
+      addGrant(pluginId, dir, 'write')
+      return { cancelled: false, dir: { path: dir, name: path.basename(dir), mode: 'write' as const } }
+    } catch (error) {
+      throw asIpcError(error)
+    }
+  })
+
+  /**
+   * 写文本（覆盖式）。父目录会自动创建。
+   * **只认可写授权** —— 只读授权下写入一律拒绝。
+   */
+  ipcMain.handle('plugin:files:write-text', async (_event, payload: { id?: string; path?: string; text?: string } = {}) => {
+    try {
+      const pluginId = readPluginId(payload)
+      requireFsPermission(pluginId)
+      const target = String(payload?.path ?? '').trim()
+      if (!target) throw new IPCError('INVALID_INPUT', '缺少写入路径')
+      if (typeof payload?.text !== 'string') throw new IPCError('INVALID_INPUT', 'text 必须是字符串')
+      assertWritable(pluginId, target)
+      const abs = path.resolve(target)
+      await fs.mkdir(path.dirname(abs), { recursive: true })
+      await fs.writeFile(abs, payload.text, 'utf8')
+      return { path: abs, bytes: Buffer.byteLength(payload.text, 'utf8') }
+    } catch (error) {
+      throw asIpcError(error)
+    }
+  })
+
+  /**
+   * 删除文件 / 空目录（**只认可写授权**）。
+   *
+   * 刻意**不做递归删除**：`remove` 的作用是"删掉我刚写的那个文件"，
+   * 而递归删除一个用户授权目录会把整棵子树带走 —— 那种破坏性操作不该由插件的一句话完成。
+   * 目录非空时报错并说明，要删就先逐个删里面。
+   */
+  ipcMain.handle('plugin:files:remove', async (_event, payload: { id?: string; path?: string } = {}) => {
+    try {
+      const pluginId = readPluginId(payload)
+      requireFsPermission(pluginId)
+      const target = String(payload?.path ?? '').trim()
+      if (!target) throw new IPCError('INVALID_INPUT', '缺少删除路径')
+      assertWritable(pluginId, target)
+      const abs = path.resolve(target)
+      const stat = await fs.stat(abs).catch(() => null)
+      if (!stat) return { removed: false, missing: true }
+      if (stat.isDirectory()) {
+        await fs.rmdir(abs) // 非空会抛错，正是我们要的
+      } else {
+        await fs.unlink(abs)
+      }
+      return { removed: true }
     } catch (error) {
       throw asIpcError(error)
     }

@@ -52,6 +52,8 @@ import { setAgentBroadcast } from './agent-loop'
 // 插件宿主（P0）：插件工具必须在建窗口/建会话之前注册好，见 app.whenReady
 import { initPluginHost, registerPluginIpc } from './plugin-ipc'
 import { registerPluginFilesIpc } from './plugin-files'
+import { registerPluginAgentIpc } from './plugin-agent'
+import { registerPluginToolApproval, registerPluginToolApprovalIpc } from './plugin-tool-approval'
 import { pluginHost } from './plugin-host'
 // 局域网访客（网页端）主机侧执行层（P3 令牌/并发 + P4 智能体桥，见该文件头注释）
 import {
@@ -370,6 +372,11 @@ app.whenReady().then(async () => {
   // 保证「首个 agent 会话就能看到插件工具」；加载失败不阻断启动（降级为无插件）。
   registerPluginIpc()
   registerPluginFilesIpc()
+  registerPluginAgentIpc()
+  // 插件工具的审批执行点（pre-execute 门禁）：声明了 fs / shell 的插件，其工具默认要用户确认。
+  // 必须在插件宿主起来之后注册 —— 它按工具名归因到已装插件。
+  registerPluginToolApproval()
+  registerPluginToolApprovalIpc()
   await initPluginHost().catch((e) => console.error('[plugin] 宿主初始化失败（降级为无插件）:', e))
   // 本地 ONNX TTS（Kokoro / Piper）主进程服务
   registerTtsIpc()

@@ -31,6 +31,8 @@ export const IpcErrorCode = {
   PLUGIN_LOAD_FAILED: 'PLUGIN_LOAD_FAILED',
   /** 插件要求的宿主 API 版本与当前宿主不匹配 */
   API_VERSION_MISMATCH: 'API_VERSION_MISMATCH',
+  /** 插件委派智能体超出预算（并发 / 每小时调用数上限） */
+  PLUGIN_AGENT_BUDGET: 'PLUGIN_AGENT_BUDGET',
 } as const
 
 export type IpcErrorCodeValue = (typeof IpcErrorCode)[keyof typeof IpcErrorCode]

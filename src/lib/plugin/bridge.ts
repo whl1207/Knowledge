@@ -14,6 +14,7 @@
  */
 
 import type { PluginDataFileStat, PluginEvent, PluginLogLine, PluginSnapshot } from '@/types/plugin'
+import type { AgentRunResult } from '@/lib/plugin/agentContract'
 import { createLocalPluginHost, localPluginHostAvailable } from '@/platform/pluginHost'
 import { aikmDsh } from '@/lib/aikmIpc'
 
@@ -69,13 +70,67 @@ export interface PluginBridgeApi {
    * 「设置 → 插件 → 数据」里展示与撤销，落盘实现见 electron/main/plugin-grants.ts。
    */
   files: {
-    grants(options: { id: string }): Promise<{ id: string; entries: Array<{ path: string; isDir: boolean; exists: boolean }> }>
+    grants(options: { id: string }): Promise<{ id: string; entries: Array<{ path: string; mode: 'read' | 'write'; isDir: boolean; exists: boolean }> }>
     /** 撤销一条授权（需 confirm） */
     revokeGrant(options: { id: string; path: string; confirm?: boolean }): Promise<{ removed: boolean }>
     /** 清掉某个插件的全部授权（需 confirm） */
     clearGrants(options: { id: string; confirm?: boolean }): Promise<{ removed: boolean }>
+    /**
+     * 为用户选一个**可写**文件夹（授权模式 write）。设置页用它代插件发起 ——
+     * 与插件自己调 `ctx.files.pickWritableDirectory()` 是同一条通道，选谁是用户在对话框里亲手点的。
+     */
+    pickWritableDirectory(options: { id: string; title?: string }): Promise<{
+      cancelled: boolean
+      dir: { path: string; name: string; mode?: 'write' } | null
+    }>
   }
   clientBundle(id: string): Promise<PluginClientBundle>
+  /**
+   * 插件委派智能体（`ctx.agent.run` 的主进程侧）。
+   *
+   * **可选能力**：只有 Electron 桌面端的宿主提供。安卓 / 局域网网页端用的是渲染层本地宿主
+   * （`src/platform/pluginHost.ts`），那里没有主进程可执行预算，所以故意不实现它 ——
+   * `ctx.agent.available` 在这些平台为 `false`。
+   * 宁可"不可用"，也不要"可用但预算无人执行"（见设计 §8.5 的 N3）。
+   */
+  agentRun?(args: {
+    pluginId: string
+    presetId: string
+    presetName?: string
+    presetMaxSteps?: number
+    input: string
+    budget?: { timeoutMs?: number; maxSteps?: number; maxTokens?: number }
+    options: unknown
+  }): Promise<AgentRunResult>
+  /** 各插件的委派用量快照（设置页展示；只读；同为桌面端可选能力） */
+  agentUsage?(): Promise<Record<string, { inFlight: number; callsInWindow: number }>>
+  /** 取消某插件全部在飞委派（插件面板的「停止」按钮；同为桌面端可选能力） */
+  agentCancel?(args: { pluginId: string }): Promise<{ cancelled: number }>
+  /** 某插件的委派状态（同意 + 用量）；设置页「插件 → 数据」用（只读） */
+  agentStatus?(args: { pluginId: string }): Promise<{ consent: 'allow' | 'ask' | 'deny'; inFlight: number; callsInWindow: number }>
+  /** 改写委派同意（需 confirm；撤销 = 'ask'，改为拒绝 = 'deny'） */
+  setAgentConsent?(args: {
+    pluginId: string
+    consent: 'allow' | 'ask' | 'deny'
+    confirm?: boolean
+  }): Promise<{ consent: 'allow' | 'ask' | 'deny' }>
+  /** 重置某插件的委派用量（需 confirm） */
+  resetAgentUsage?(args: { pluginId: string; confirm?: boolean }): Promise<{ cleared: boolean }>
+  /** 「插件权限」页签的总览（每插件一行；只读） */
+  agentOverview?(): Promise<{ rows: unknown[]; limits: unknown }>
+  /** 写某插件的委派额度与 D5 放宽开关（需 confirm） */
+  setAgentConfig?(args: {
+    pluginId: string
+    limits?: { concurrency?: number; callsPerHour?: number }
+    relax?: { fs?: boolean; mcp?: boolean }
+    confirm?: boolean
+  }): Promise<unknown>
+  /** 改写某插件的**工具审批**三态（需 confirm） */
+  setToolApproval?(args: {
+    pluginId: string
+    state: 'allow' | 'ask' | 'deny'
+    confirm?: boolean
+  }): Promise<{ pluginId: string; state: 'allow' | 'ask' | 'deny' }>
   /** 重新扫描插件目录（可选能力：渲染层宿主用它刷新列表） */
   rescan?(confirm?: boolean): Promise<{
     plugins: PluginSnapshot[]

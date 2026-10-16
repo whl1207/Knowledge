@@ -23,7 +23,7 @@ import {
 import { SKILL_AGENT_DEFAULT_TOOLS } from '@/lib/agent/skill'
 import { getSkillManager } from '@/services/agentSkills'
 import { resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
-import { normalizeLlmType, resolveLlmSource } from '@/shared/llmSources'
+import { normalizeLlmType, resolveLlmSource, resolvePresetLlmType, resolvePresetModel } from '@/shared/llmSources'
 
 /** 调用方（节点 / 任务）级的模型覆盖；`provider` 为空 = 跟随预设，其次跟随全局 */
 export interface AgentModelOverride {
@@ -90,11 +90,13 @@ export async function buildPresetAgentOptions(input: PresetAgentOptionsInput): P
   // 无人应答的运行剔除 ask_user，避免 agent 卡在提问上（与批量同一策略）
   if (input.interactive === false) tools = tools.filter((tool) => tool !== 'ask_user')
 
-  // —— 生效模型：节点覆盖 > 预设 > 全局 ——
+  // —— 生效模型：节点覆盖 > 预设 > 全局（预设「跟随默认」时来源与模型都取全局当前值）——
   const overrideProvider = String(input.model?.provider || '').trim()
   const overrideModel = String(input.model?.name || '').trim()
-  const effProvider = overrideProvider || String(preset?.llmType || '').trim() || String(llm.type || '')
-  const effModel = overrideModel || (overrideProvider ? '' : String(preset?.model || '').trim())
+  const presetProvider = resolvePresetLlmType(preset, store)
+  const presetModel = resolvePresetModel(preset)
+  const effProvider = overrideProvider || presetProvider || String(llm.type || '')
+  const effModel = overrideModel || (overrideProvider ? '' : presetModel)
   const nodeParams: Record<string, unknown> = input.model?.completion_params || {}
   const temperature = typeof nodeParams.temperature === 'number'
     ? nodeParams.temperature

@@ -41,10 +41,12 @@ export const CLIENT_CTX_MEMBERS: PluginCtxMembers = {
   locale: ['language', 'languageRef', 't', 'pick', 'ref', 'fixed'],
   llm: ['available', 'reason', 'sources', 'current', 'models', 'chat'],
   files: [
-    'available', 'reason', 'pickFiles', 'pickDirectory', 'list', 'readText', 'readBase64',
-    'readBytes', 'readSheet', 'renderPdfPage', 'openInApp',
+    'available', 'reason', 'pickFiles', 'pickDirectory', 'pickWritableDirectory', 'list', 'readText', 'readBase64',
+    'readBytes', 'readSheet', 'renderPdfPage', 'openInApp', 'writeText', 'remove',
   ],
   app: ['info', 'agentPresets', 'setChromeHidden', 'chromeHidden'],
+  // 委派智能体（界面半边专有）：需 permissions: ['agent.run']，且只在桌面端可用
+  agent: ['available', 'reason', 'presets', 'run', 'cancelAll'],
   tts: ['available', 'reason', 'speak', 'stop'],
   shortcuts: ['register', 'list'],
   slots: ['register', 'declare', 'entries'],
@@ -80,7 +82,7 @@ export const MAIN_CTX_MEMBERS: PluginCtxMembers = {
   getService: null, // (name) => impl | undefined
   on: null, // (type, listener) => disposer
   effect: null, // (fn) => disposer
-  host: ['readFile', 'writeFile', 'listDir', 'runShell', 'fetch', 'sessions', 'notify'],
+  host: ['readFile', 'writeFile', 'listDir', 'runShell', 'fetch', 'sessions', 'granted', 'notify'],
   storage: ['get', 'set', 'delete', 'keys'],
   log: ['debug', 'info', 'warn', 'error'],
 }

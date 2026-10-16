@@ -44,7 +44,7 @@ import { presetPresentation } from '@/lib/agent/ptc'
 import type { Chat, ChatMessage, UploadItem } from '@/types/chat'
 import type { AgentOptions } from '@/types/agent'
 import { normalizeAgentMaxSteps, resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
-import { normalizeLlmType, resolveLlmSource } from '@/shared/llmSources'
+import { normalizeLlmType, resolveLlmSource, resolvePresetLlmType, resolvePresetModel } from '@/shared/llmSources'
 import { AIUtils } from '@/shared/ai-core'
 import { prepareImageDataUrl } from '@/lib/image/prepareImage'
 
@@ -1024,9 +1024,10 @@ export function useAgentRun(deps: AgentRunDeps) {
       },
       disabledSkills: store.disabledSkills || [],
       mcpContext: mcpCtx,
-      // 指令段内 {{model}}/{{provider}} 用实际生效值（右上角改过则跟随右上角），而非预设存档值
-      model: chat.config.model || preset.model,
-      provider: chat.config.llmType || preset.llmType || store.AIconfig.llm.type,
+      // 指令段内 {{model}}/{{provider}} 用实际生效值（右上角改过则跟随右上角），而非预设存档值。
+      // 预设「跟随默认」时 llmType / model 为空 → 直接落到全局当前来源与模型。
+      model: chat.config.model || resolvePresetModel(preset) || undefined,
+      provider: resolvePresetLlmType(preset, store) || chat.config.llmType || undefined,
       // 每个聊天自己的激活工作区（没选过 → 组装函数回落到 store.root）
       workspace: readChatWorkspace(chat, ''),
     })
@@ -1043,8 +1044,12 @@ export function useAgentRun(deps: AgentRunDeps) {
 
     // 执行跟随聊天右上角选择的模型来源/种类：选中预设时已把预设模型写入聊天配置，
     // 此后右上角再改动即改聊天配置，智能体执行使用变化后的来源/模型（预设字段仅作回退）。
-    const llmType = chat.config.llmType || preset.llmType || store.AIconfig.llm.type
+    // 预设「跟随默认」时聊天配置里没有具体值 → 直接读全局当前来源与模型（换来源后自动跟上）。
+    const llmType = chat.config.llmType || resolvePresetLlmType(preset, store) || store.AIconfig.llm.type
     const { provider, config, llmConfig } = buildAgentProviderConfig(llmType)
+    // 模型：非跟随档用预设自己的模型；跟随档留空（由该来源配置里的模型兜底）
+    const presetModel = resolvePresetModel(preset)
+    if (presetModel) config.model = presetModel
 
     const options: AgentOptions = {
       systemPrompt: presented.systemPrompt,

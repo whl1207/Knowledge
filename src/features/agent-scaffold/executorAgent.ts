@@ -21,7 +21,7 @@ import { toolsFromCapabilities } from '@/lib/agent/capabilities'
 import { applyToolPresentation } from '@/lib/agent/presentation'
 import { presetPresentation } from '@/lib/agent/ptc'
 import { normalizeAgentMaxSteps, resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
-import { resolveLlmSource, normalizeLlmType } from '@/shared/llmSources'
+import { resolveLlmSource, normalizeLlmType, resolvePresetLlmType, resolvePresetModel } from '@/shared/llmSources'
 import { renderTemplate, buildStructuredOutputInstruction } from './render'
 import { tryParseJson } from './parsers'
 import type {
@@ -72,7 +72,7 @@ export function batchMcpServers(config: BatchConfig, store: any): any[] {
 /**
  * 解析最终生效的 LLM 后端类型（UI 与运行时共用，保证一致）：
  * - `''`        = 跟随全局设置（store.AIconfig.llm.type）
- * - `'agent'`   = 跟随智能体（预设）设置；预设未配置时回退全局
+ * - `'agent'`   = 跟随智能体（预设）设置；预设「跟随默认」或未配置时回退全局
  * - 其它值      = 显式后端 id（兼容旧任务文件里保存的显式选择）
  */
 export function effectiveLlmType(config: Pick<BatchConfig, 'llmType' | 'presetId'>, store: any): string {
@@ -81,7 +81,8 @@ export function effectiveLlmType(config: Pick<BatchConfig, 'llmType' | 'presetId
     const preset = config.presetId
       ? (store?.agentPresets || []).find((p: any) => p.id === config.presetId)
       : undefined
-    return normalizeLlmType(preset?.llmType || store?.AIconfig?.llm?.type || '')
+    // 预设「跟随默认」→ 直接取全局当前来源（resolvePresetLlmType 已含该判定）
+    return resolvePresetLlmType(preset, store) || normalizeLlmType(store?.AIconfig?.llm?.type || '')
   }
   if (explicit) return normalizeLlmType(explicit)
   return normalizeLlmType(store?.AIconfig?.llm?.type || '')
@@ -127,11 +128,11 @@ export async function buildBatchAgentOptions(row: BatchRow, config: BatchConfig,
     ? excludeBatchTools(config.toolsOverride.split(',').map((t) => t.trim()).filter(Boolean))
     : null
 
-  // ---- 模型/后端解析：''=全局；'agent'=预设智能体（后端与模型都跟预设，预设未配置则回退全局）----
+  // ---- 模型/后端解析：''=全局；'agent'=预设智能体（后端与模型都跟预设，预设「跟随默认」/未配置则回退全局）----
   const effLlmType = effectiveLlmType(config, store)
-  // 模型：批量级显式填写优先；「跟随智能体设置」时使用预设自带模型
+  // 模型：批量级显式填写优先；「跟随智能体设置」时使用预设自带模型（预设跟随默认 → 空，由全局模型兜底）
   const effModel = String(config.model || '').trim()
-    || (String(config.llmType || '').trim() === 'agent' ? String(preset?.model || '').trim() : '')
+    || (String(config.llmType || '').trim() === 'agent' ? resolvePresetModel(preset) : '')
   let provider = buildProvider(store, effLlmType || undefined)
   if (effModel) provider = { ...provider, config: { ...provider.config, model: effModel } }
   // 说明：DeepSeek Responses API 已移除服务端 web_search（官方兼容表：内置工具一律忽略），

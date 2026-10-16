@@ -514,7 +514,13 @@ export function createLocalPluginHost(): PluginBridgeApi {
 
     files: {
       async grants(options) {
-        return { id: options.id, entries: grantsOf(options.id).map((g) => ({ ...g, exists: true })) }
+        // 本地宿主（安卓 / 网页端）没有主进程授权存储：这里记住的路径一律**只读**
+        return { id: options.id, entries: grantsOf(options.id).map((g) => ({ ...g, mode: 'read' as const, exists: true })) }
+      },
+      async pickWritableDirectory(): Promise<{ cancelled: boolean; dir: { path: string; name: string } | null }> {
+        // fail-loud：可写授权需要主进程的授权存储。不能返回 { cancelled: true } 假装是用户取消了 ——
+        // 那会让插件作者以为"用户点了取消"，而不是"这个平台根本没有这条能力"。
+        throw new Error('当前平台不支持可写文件夹授权（授权由桌面端主进程保存）')
       },
       async revokeGrant(options) {
         const next = grantsOf(options.id).filter((g) => g.path !== options.path)

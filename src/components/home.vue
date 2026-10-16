@@ -1251,7 +1251,7 @@ import { hashContent, renderMermaidSvgLenient, getCachedSvgLenient, clearMermaid
 import MermaidViewer from '@/components/MermaidViewer.vue'
 import WordExportDialog from '@/components/export/WordExportDialog.vue'
 import { AIUtils } from '@/services/ai-utils'
-import { deepSeekStyleOf, normalizeLlmType, resolveLlmSource } from '@/shared/llmSources'
+import { deepSeekStyleOf, normalizeLlmType, presetFollowsDefaultLlm, resolveLlmSource } from '@/shared/llmSources'
 import { BUILTIN_AGENT_PRESET_IDS, builtinPresetDefaultsFromStore, ensureBuiltinAgentPresets } from '@/shared/builtinAgentPresets'
 import {
   estimateChatContextTokens,
@@ -2741,7 +2741,8 @@ const selectAgentItem = (item: { id: string; preset?: any }) => {
 }
 
 const availableModels = computed(() => {
-  const llmType = currentChat.value.config.llmType
+  // 预设「跟随默认」时聊天配置里的来源为空 → 用实际生效的来源取候选模型
+  const llmType = effectiveChatModelValue.value.provider || currentChat.value.config.llmType
   const config = store.AIconfig.llm
   let list: any[] = []
 
@@ -2787,8 +2788,8 @@ const availableModels = computed(() => {
       const enabled = (sources as any[])
         .map((s, i) => ({ s, i }))
         .filter(({ s }) => !store.isLlmSourceDisabled('custom', s?.id))
-      let idx = typeof currentChat.value.config.customSourceIndex === 'number'
-        ? currentChat.value.config.customSourceIndex
+      let idx = typeof effectiveChatModelValue.value.customSourceIndex === 'number'
+        ? (effectiveChatModelValue.value.customSourceIndex as number)
         : (c?.activeIndex ?? 0)
       if (sources.length && !enabled.some(({ i }) => i === idx)) idx = enabled[0]?.i ?? c?.activeIndex ?? 0
       const src = sources[idx]
@@ -2801,7 +2802,7 @@ const availableModels = computed(() => {
 
   // 已选模型不在列表时置顶补入：保证右上角「模型种类」始终能显示/保持当前聊天所选模型
   // （选中预设或切换来源后，即使该来源模型列表尚未拉取，下拉框也能跟随显示所选模型）
-  const currentModel = currentChat.value.config.model
+  const currentModel = effectiveChatModelValue.value.model || currentChat.value.config.model
   if (currentModel && !list.includes(currentModel)) list = [currentModel, ...list]
   return list
 })
@@ -4516,16 +4517,24 @@ const selectGeneralAgent = () => {
 
 /** 选择预设：切换当前聊天为 Agent 预设模式，并应用预设的模型配置。
  *  写回聊天配置 → 右上角「模型来源/模型种类」随预设一起更新；
- *  之后在右上角改动来源/模型时，执行以右上角（聊天配置）为准。 */
+ *  之后在右上角改动来源/模型时，执行以右上角（聊天配置）为准。
+ *  预设「跟随默认」时不写具体来源 / 模型（留空 = 跟随全局），否则换全局模型后会被存档里的旧值钉住。 */
 const selectAgentPreset = (preset: any) => {
   currentChat.value.mode = 'agent'
   currentChat.value.config.presetId = preset.id
-  const presetType = normalizeLlmType(preset.llmType) || currentChat.value.config.llmType || store.AIconfig.llm.type
-  currentChat.value.config.llmType = presetType
-  currentChat.value.config.model = preset.model || ''
-  // 预设本身不绑定具体自定义来源（跟随全局激活来源）：切到 custom 预设时让右上角跟随该来源
-  if (presetType === 'custom') {
-    currentChat.value.config.customSourceIndex = store.AIconfig.llm.custom?.activeIndex ?? 0
+  const followsDefault = presetFollowsDefaultLlm(preset)
+  if (followsDefault) {
+    currentChat.value.config.llmType = ''
+    currentChat.value.config.model = ''
+    currentChat.value.config.customSourceIndex = undefined
+  } else {
+    const presetType = normalizeLlmType(preset.llmType) || currentChat.value.config.llmType || store.AIconfig.llm.type
+    currentChat.value.config.llmType = presetType
+    currentChat.value.config.model = preset.model || ''
+    // 预设本身不绑定具体自定义来源（跟随全局激活来源）：切到 custom 预设时让右上角跟随该来源
+    if (presetType === 'custom') {
+      currentChat.value.config.customSourceIndex = store.AIconfig.llm.custom?.activeIndex ?? 0
+    }
   }
   currentChat.value.config.temperature = typeof preset.temperature === 'number' ? preset.temperature : currentChat.value.config.temperature
   // 清除其他模式配置
@@ -5513,8 +5522,12 @@ const loadChatsFromStorage = () => {
 
         // DeepSeek 单来源迁移：旧聊天绑定的历史别名 'deepseek-responses' → 'deepseek'
         // （接口样式跟随当前设置的 deepseek.api_style；缺失时回退当前全局来源）
+        // 注意：**空来源不再补成具体来源** —— 空是「跟随全局 / 跟随预设默认」的语义
+        // （见 shared/llmSources 的 presetFollowsDefaultLlm），
+        // 补上当时的全局来源会把后续换来源钉死在聊天存档里。读取处用
+        // effectiveChatModelValue / chatModelContext 解析生效值，不依赖这里的兜底。
         if (chat.config) {
-          chat.config.llmType = normalizeLlmType(chat.config.llmType) || store.AIconfig.llm.type
+          chat.config.llmType = normalizeLlmType(chat.config.llmType)
         }
         
         if (chat.online === undefined) chat.online = false
@@ -5952,12 +5965,60 @@ const enabledLlmTypeOptions = computed(() => {
   return { types, customEnabled }
 })
 
+/**
+ * 当前聊天绑定的 Agent 预设（仅 agent 模式）。
+ * 预设的「跟随默认」表示来源与模型都读全局「设置 → 模型」的当前值 → 之后换来源 / 换环境无需重配预设。
+ * 判定与解析统一走 shared/llmSources，勿在此另写一套 `||` 回退。
+ */
+const chatPreset = computed<any>(() => {
+  const chat = currentChat.value
+  if (!chat || chat.mode !== 'agent' || !chat.config?.presetId) return null
+  return (store.agentPresets || []).find((p: any) => p.id === chat.config.presetId) || null
+})
+const chatFollowsPresetDefault = computed(() =>
+  !!chatPreset.value && presetFollowsDefaultLlm(chatPreset.value))
+
+/**
+ * 本聊天实际生效的来源 / 模型：
+ * - 跟随默认的预设：来源与模型都取全局当前值（**不读回退值**，否则换全局模型后仍走存档里的旧模型）；
+ * - 绑定来源的预设：聊天右上角优先（未选时用预设自己的值）；
+ * - 无预设（通用智能体 / 普通对话）：聊天配置优先，空则回退全局。
+ */
+const effectiveChatModelValue = computed<{ provider: string; model: string; customSourceIndex?: number }>(() => {
+  const cfg: any = currentChat.value?.config || {}
+  const preset: any = chatPreset.value
+  if (preset && presetFollowsDefaultLlm(preset)) {
+    // 模型名取全局当前来源的模型，仅用于「显示 / 是否已选模型」；请求仍由该来源的配置兜底
+    const type = normalizeLlmType(String(store.AIconfig.llm.type || ''))
+    const customIndex = store.AIconfig.llm.custom?.activeIndex ?? 0
+    return {
+      provider: type,
+      model: String(getDefaultModel(type, customIndex) || ''),
+      customSourceIndex: customIndex,
+    }
+  }
+  return {
+    provider: normalizeLlmType(String(cfg.llmType || preset?.llmType || store.AIconfig.llm.type || '')),
+    // 绑定来源但没选模型的预设：用预设自己的模型兜底
+    model: String(cfg.model || preset?.model || ''),
+    customSourceIndex: typeof cfg.customSourceIndex === 'number' ? cfg.customSourceIndex : undefined,
+  }
+})
+
+/** 当前聊天是否是「智能体 / 技能」模式：这些模式下预设未选模型时不该拦住发送 */
+const isAgentLikeMode = computed(() =>
+  ['agent', 'agent2', 'skill'].includes(String(currentChat.value?.mode || '')))
+
 /** 模型来源下拉值：custom 编码为 `custom:<来源索引>`，从而把每个自定义来源作为独立选项 */
 const llmTypeSelectModel = computed<string>({
   get: () => {
     const cfg = currentChat.value?.config
     if (!cfg) return ''
-    if (cfg.llmType === 'custom') {
+    // 预设「跟随默认」：来源显示全局当前来源（cfg.llmType 在跟随档下为空）
+    const effectiveType = chatFollowsPresetDefault.value
+      ? normalizeLlmType(String(store.AIconfig.llm.type || ''))
+      : cfg.llmType
+    if (effectiveType === 'custom') {
       const sources = store.AIconfig.llm.custom?.sources || []
       const enabledIdx = (sources as any[])
         .map((s, i) => ({ s, i }))
@@ -5972,7 +6033,7 @@ const llmTypeSelectModel = computed<string>({
       }
       return `custom:${idx}`
     }
-    return cfg.llmType
+    return effectiveType
   },
   set: (val: string) => {
     const chat = currentChat.value
@@ -6021,7 +6082,10 @@ const sendMessage = async (opts?: { forceNewTurn?: boolean }) => {
   // 网页端（局域网共享）智能体模式：模型与工具全由主机提供，不再要求本端选模型 / 连接可用
   const isHostAgentMode = isBrowser && (currentChat.value.mode === 'agent' || currentChat.value.mode === 'agent2' || currentChat.value.mode === 'skill')
 
-  if (!isHostAgentMode && !currentChat.value.config.model) {
+  // 「智能体 / 技能」模式下预设可「跟随默认」：此时聊天配置里没有具体模型，
+  // 但全局来源的模型依然可用（见 effectiveChatModelValue）→ 只要有生效模型就允许发送
+  const requiredModel = isAgentLikeMode.value ? effectiveChatModelValue.value.model : currentChat.value.config.model
+  if (!isHostAgentMode && !requiredModel) {
     console.log('请先选择模型')
     return
   }
@@ -7547,15 +7611,12 @@ const getTokenTooltip = (message: ChatMessage): string => {
  * 分母（如上一轮 Ollama 的 131072 被用到 DeepSeek 聊天上）。
  */
 const chatModelContext = computed(() => {
-  const chat = currentChat.value
-  const cfg: any = chat?.config || {}
-  const preset = (chat?.mode === 'agent' && cfg.presetId)
-    ? store.agentPresets.find((p: any) => p.id === cfg.presetId)
-    : null
+  // 跟随默认的预设：来源与模型一律取全局当前值（换全局模型后仍自动跟随，不会被聊天存档里的旧值钉住）
+  const eff = effectiveChatModelValue.value
   return {
-    provider: normalizeLlmType(String(cfg.llmType || preset?.llmType || store.AIconfig.llm.type || '')),
-    model: String(cfg.model || preset?.model || ''),
-    customSourceIndex: typeof cfg.customSourceIndex === 'number' ? cfg.customSourceIndex : undefined,
+    provider: eff.provider,
+    model: eff.model,
+    customSourceIndex: eff.customSourceIndex,
   }
 })
 /** 真实窗口探测结果存在模块级 Map（跨聊天/跨模型缓存），Map 非响应式 → 用该 tick 通知分母重算 */
@@ -8537,15 +8598,21 @@ const switchToBranchChat = (node: BranchTreeNode) => {
 }
 
 const getModelDisplayName = (config: ChatConfig): string => {
-  if (config.model) {
-    const name = config.model.length > 20 ? config.model.substring(0, 20) + '...' : config.model
+  // 智能体模式下预设可「跟随默认」：那时聊天配置里没有具体来源 / 模型，
+  // 显示与请求都用实际生效值（全局当前来源与模型）
+  const eff = isAgentLikeMode.value ? effectiveChatModelValue.value : null
+  const model = eff?.model || config.model
+  const llmType = eff?.provider || config.llmType
+  const customIdx = eff?.customSourceIndex ?? config.customSourceIndex
+  if (model) {
+    const name = model.length > 20 ? model.substring(0, 20) + '...' : model
     // 自定义来源：来源名 / 模型名（如 GPUStack / model），多来源下可区分
-    if (config.llmType === 'custom') {
-      return `${getCustomSourceNameByIndex(config.customSourceIndex)} / ${name}`
+    if (llmType === 'custom') {
+      return `${getCustomSourceNameByIndex(customIdx)} / ${name}`
     }
     return name
   }
-  return getLlmTypeDisplayName(config.llmType, config.customSourceIndex) + (store.locales == 'zh' ? ' (未选择)' : ' (not selected)')
+  return getLlmTypeDisplayName(llmType, customIdx) + (store.locales == 'zh' ? ' (未选择)' : ' (not selected)')
 }
 
 /** 自定义来源显示名（默认名回退） */

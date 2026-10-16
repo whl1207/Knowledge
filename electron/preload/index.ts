@@ -86,18 +86,24 @@ const api = {
  * 这里在**唯一出口**统一 JSON 往返一次，所有命名空间通道的入参都保证
  * 是纯 JSON 数据（这些通道本来就只承载 JSON 语义）。
  */
-function toPlain(payload: unknown): unknown {
+function toPlain(payload: unknown, channel?: string): unknown {
   if (payload === undefined) return undefined
   try {
     return JSON.parse(JSON.stringify(payload))
   } catch (e) {
-    console.warn('[preload] payload 无法 JSON 序列化，原样发送:', e)
+    // 兜底原样发送（保持既有行为：别的通道可能依赖它），但**必须点名通道**——
+    // 否则这次序列化失败会在 ipcRenderer.invoke 那里变成一句
+    // `An object could not be cloned.`，完全看不出是哪个通道、为什么（真实事故）。
+    console.warn(
+      `[preload] ${channel ? `通道 ${channel} 的` : ''}payload 无法 JSON 序列化，原样发送（Electron 可能会报 "could not be cloned"）:`,
+      e instanceof Error ? `${e.name}: ${e.message}` : e,
+    )
     return payload
   }
 }
 
 function invokeIpc<T = any>(channel: string, payload?: unknown): Promise<T> {
-  return ipcRenderer.invoke(channel, toPlain(payload)).then((res: any) => {
+  return ipcRenderer.invoke(channel, toPlain(payload, channel)).then((res: any) => {
     if (res && typeof res === 'object' && 'ok' in res) {
       if (res.ok) return res.data as T
       const err: any = new Error(res.error?.message || 'IPC 调用失败')
@@ -471,6 +477,62 @@ const dsh = {
     clientBundle(id: string): Promise<{ entry: string; code: string }> {
       return invokeIpc('plugin:client-bundle', { id })
     },
+    /**
+     * 插件委派智能体（`ctx.agent.run` 的主进程侧）。
+     * 判权 / 同意 / 预算 / D5 工具裁剪 / 步数裁定**全在主进程**；这里只是通道。
+     */
+    agentRun(args: {
+      pluginId: string
+      presetId: string
+      presetName?: string
+      presetMaxSteps?: number
+      input: string
+      budget?: { timeoutMs?: number; maxSteps?: number; maxTokens?: number }
+      options: unknown
+    }): Promise<import('@/lib/plugin/agentContract').AgentRunResult> {
+      return invokeIpc('plugin:agent-run', args)
+    },
+    /** 各插件的委派用量快照（设置页展示；只读） */
+    agentUsage(): Promise<Record<string, { inFlight: number; callsInWindow: number }>> {
+      return invokeIpc('plugin:agent-usage')
+    },
+    /** 取消某插件全部在飞委派（插件面板的「停止」按钮） */
+    agentCancel(args: { pluginId: string }): Promise<{ cancelled: number }> {
+      return invokeIpc('plugin:agent-cancel', args)
+    },
+    /** 某插件的委派状态（同意 + 用量）；「插件 → 数据」用（只读，不需要审批） */
+    agentStatus(args: { pluginId: string }): Promise<{ consent: 'allow' | 'ask' | 'deny'; inFlight: number; callsInWindow: number }> {
+      return invokeIpc('plugin:agent:status', args)
+    },
+    /** 改写委派同意（需 confirm；撤销 = 'ask'，改为拒绝 = 'deny'，以后不再询问 = 'allow'） */
+    setAgentConsent(args: {
+      pluginId: string
+      consent: 'allow' | 'ask' | 'deny'
+      confirm?: boolean
+    }): Promise<{ consent: 'allow' | 'ask' | 'deny' }> {
+      return invokeIpc('plugin:agent:consent-set', args)
+    },
+    /** 重置某插件的委派用量（需 confirm；撞了每小时上限时不必干等窗口滑过） */
+    resetAgentUsage(args: { pluginId: string; confirm?: boolean }): Promise<{ cleared: boolean }> {
+      return invokeIpc('plugin:agent:reset-usage', args)
+    },
+    /** 「插件权限」页签的总览：每个已装插件一行（只读） */
+    agentOverview(): Promise<{ rows: unknown[]; limits: unknown }> {
+      return invokeIpc('plugin:agent:overview')
+    },
+    /** 写某插件的委派额度与 D5 放宽开关（需 confirm；这是唯一能放开文件 / MCP 工具的入口） */
+    setAgentConfig(args: {
+      pluginId: string
+      limits?: { concurrency?: number; callsPerHour?: number }
+      relax?: { fs?: boolean; mcp?: boolean }
+      confirm?: boolean
+    }): Promise<unknown> {
+      return invokeIpc('plugin:agent:config-set', args)
+    },
+    /** 改写某插件的**工具审批**三态（需 confirm；声明了 fs / shell 的插件，其工具默认要用户确认） */
+    setToolApproval(args: { pluginId: string; state: 'allow' | 'ask' | 'deny'; confirm?: boolean }): Promise<{ pluginId: string; state: 'allow' | 'ask' | 'deny' }> {
+      return invokeIpc('plugin:tool-approval-set', args)
+    },
     /** 从本地文件夹安装插件（P2：主进程弹目录选择框）；replace=true 表示覆盖同名插件 */
     install(options?: { confirm?: boolean; replace?: boolean }): Promise<{
       cancelled: boolean
@@ -542,6 +604,21 @@ const dsh = {
         dir: { path: string; name: string } | null
       }> {
         return ipcRenderer.invoke('plugin:files:pick-dir', options)
+      },
+      /** 选一个**可写**文件夹（写权限的唯一来源；授权模式 write，跨重启有效） */
+      pickWritableDirectory(options: { id: string; title?: string }): Promise<{
+        cancelled: boolean
+        dir: { path: string; name: string; mode?: 'write' } | null
+      }> {
+        return ipcRenderer.invoke('plugin:files:pick-writable', options)
+      },
+      /** 写文本（只能落在**可写**授权目录内；父目录自动创建） */
+      writeText(options: { id: string; path: string; text: string }): Promise<{ path: string; bytes: number }> {
+        return ipcRenderer.invoke('plugin:files:write-text', options)
+      },
+      /** 删除文件 / 空目录（只认可写授权；不做递归删除） */
+      remove(options: { id: string; path: string }): Promise<{ removed: boolean; missing?: boolean }> {
+        return ipcRenderer.invoke('plugin:files:remove', options)
       },
       list(options: { id: string; path: string }): Promise<{
         dir: string

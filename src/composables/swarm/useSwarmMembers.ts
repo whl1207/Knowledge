@@ -16,6 +16,7 @@
 
 import { usestore } from '@/store'
 import { syncCapabilityBooleans, toolsFromCapabilities } from '@/lib/agent/capabilities'
+import { resolvePresetLlmType, resolvePresetModel } from '@/shared/llmSources'
 import type { SwarmAgent, SwarmCapabilities } from '@/types/swarm'
 
 /**
@@ -63,8 +64,10 @@ export function presetToMember(preset: any, idx = 0): SwarmAgent {
     name: preset?.name || `Agent ${idx + 1}`,
     // 角色设定已并入预设的 systemPrompt（预设侧不再有 role 字段）
     role: '',
-    llmType: preset?.llmType || store.AIconfig.llm.type,
-    model: preset?.model || '',
+    // 预设「跟随默认」时来源取全局当前值、模型留空（运行时由来源配置兜底）；
+    // 成员每次都由预设派生，因此全局换来源 / 换模型后成员立刻跟上
+    llmType: resolvePresetLlmType(preset, store) || store.AIconfig.llm.type,
+    model: resolvePresetModel(preset),
     systemPrompt: preset?.systemPrompt || '',
     temperature: typeof preset?.temperature === 'number' ? preset.temperature : 0.7,
     capabilities: normalizePresetCaps(preset?.capabilities),

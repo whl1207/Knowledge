@@ -7,7 +7,11 @@
         <h3>{{ store.locales === 'zh' ? '统一工具注册表' : 'Unified Tool Registry' }}</h3>
         <div class="registry-head">
           <div class="registry-head-info">
-            <span class="registry-head-title">{{ store.locales === 'zh' ? `已注册（${registryTools.length}）` : `Registered (${registryTools.length})` }}</span>
+            <span class="registry-head-title">
+              {{ store.locales === 'zh'
+                ? (isFiltered ? `匹配 ${filteredTools.length} / ${registryTools.length}` : `已注册（${registryTools.length}）`)
+                : (isFiltered ? `${filteredTools.length} / ${registryTools.length} matched` : `Registered (${registryTools.length})`) }}
+            </span>
             <span v-if="disabledCount > 0" class="registry-head-disabled" :title="disabledSummaryHint">
               {{ store.locales === 'zh' ? `· 已禁用 ${disabledCount}` : `· ${disabledCount} disabled` }}
             </span>
@@ -18,7 +22,7 @@
             </span>
           </div>
           <div class="registry-actions">
-            <div class="button icon-btn" @click="loadRegistry" :title="store.locales === 'zh' ? '刷新' : 'Refresh'">
+            <div class="button icon-btn" @click="refreshAndRefocus" :title="store.locales === 'zh' ? '刷新' : 'Refresh'">
               <i class="fa fa-refresh"></i>
             </div>
           </div>
@@ -30,35 +34,80 @@
         {{ store.locales === 'zh' ? '注册表仅桌面版可用（桌面 IPC 不可用）' : 'Registry requires the desktop app (desktop IPC unavailable)' }}
       </div>
 
-      <div v-else class="registry-list">
-        <div v-for="tool in registryTools" :key="tool.name" class="registry-item" :class="{ 'is-disabled': isToolDisabled(tool.name) }">
-          <div class="registry-info">
-            <div class="registry-name-row">
-              <code class="registry-key">{{ tool.name }}</code>
-              <span class="registry-badge" :class="tool.hasInputSchema ? 'has-schema' : 'no-schema'">
-                {{ tool.hasInputSchema ? (store.locales === 'zh' ? '有参数 schema' : 'Has schema') : (store.locales === 'zh' ? '无参数 schema' : 'No schema') }}
-              </span>
-              <span v-if="tool.scope" class="registry-badge scope-badge">
-                <i class="fa fa-sitemap"></i> {{ tool.scope }}
-              </span>
-              <span v-else class="registry-badge scope-badge">
-                <i class="fa fa-globe"></i> {{ store.locales === 'zh' ? '全局' : 'Global' }}
-              </span>
-              <span v-if="isToolDisabled(tool.name)" class="registry-badge disabled-badge" :title="disabledBadgeHint">
-                <i class="fa fa-eye-slash"></i> {{ store.locales === 'zh' ? '已禁用' : 'Disabled' }}
-              </span>
-            </div>
-            <div class="registry-desc" :title="tool.description">{{ tool.description }}</div>
+      <div v-else-if="registryLoading" class="registry-unavailable">
+        <i class="fa fa-spinner fa-spin"></i>
+        {{ store.locales === 'zh' ? '正在读取工具注册表…' : 'Loading tool registry…' }}
+      </div>
+
+      <template v-else>
+        <!-- 搜索行：注册表动辄上百条（插件工具一多更难找），按名字 / 描述 / 作用域过滤 -->
+        <div class="registry-search-row">
+          <div class="registry-search-box">
+            <i class="fa fa-search registry-search-icon"></i>
+            <input
+              ref="searchInput"
+              v-model="searchText"
+              class="registry-search-input"
+              type="text"
+              :placeholder="store.locales === 'zh'
+                ? '搜索工具名 / 描述 / 作用域（如 mathproof、plugin: 前缀）'
+                : 'Search name / description / scope (e.g. mathproof, plugin:)'"
+              @keydown.esc="searchText = ''"
+            />
+            <i
+              v-if="searchText"
+              class="fa fa-times-circle registry-search-clear"
+              :title="store.locales === 'zh' ? '清空' : 'Clear'"
+              @click="clearSearch"
+            ></i>
+          </div>
+          <div
+            class="button icon-btn"
+            :class="{ 'is-active': onlyPluginTools }"
+            :title="store.locales === 'zh' ? '只看插件注册的工具（scope = plugin:…）' : 'Only plugin-provided tools (scope = plugin:…)'"
+            @click="onlyPluginTools = !onlyPluginTools"
+          >
+            <i class="fa fa-puzzle-piece"></i>
           </div>
         </div>
-      </div>
+
+        <div v-if="!filteredTools.length" class="registry-unavailable">
+          <i class="fa fa-search"></i>
+          {{ store.locales === 'zh'
+            ? `没有匹配的工具（共已注册 ${registryTools.length} 个）`
+            : `No matching tool (${registryTools.length} registered in total)` }}
+        </div>
+
+        <div v-else class="registry-list">
+          <div v-for="tool in filteredTools" :key="tool.name" class="registry-item" :class="{ 'is-disabled': isToolDisabled(tool.name) }">
+            <div class="registry-info">
+              <div class="registry-name-row">
+                <code class="registry-key">{{ tool.name }}</code>
+                <span class="registry-badge" :class="tool.hasInputSchema ? 'has-schema' : 'no-schema'">
+                  {{ tool.hasInputSchema ? (store.locales === 'zh' ? '有参数 schema' : 'Has schema') : (store.locales === 'zh' ? '无参数 schema' : 'No schema') }}
+                </span>
+                <span v-if="tool.scope" class="registry-badge scope-badge">
+                  <i class="fa fa-sitemap"></i> {{ tool.scope }}
+                </span>
+                <span v-else class="registry-badge scope-badge">
+                  <i class="fa fa-globe"></i> {{ store.locales === 'zh' ? '全局' : 'Global' }}
+                </span>
+                <span v-if="isToolDisabled(tool.name)" class="registry-badge disabled-badge" :title="disabledBadgeHint">
+                  <i class="fa fa-eye-slash"></i> {{ store.locales === 'zh' ? '已禁用' : 'Disabled' }}
+                </span>
+              </div>
+              <div class="registry-desc" :title="tool.description">{{ tool.description }}</div>
+            </div>
+          </div>
+        </div>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { aikmDsh } from '@/lib/aikmIpc'
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { usestore } from '@/store'
 import { SKILL_AGENT_DEFAULT_TOOLS } from '@/lib/agent/skill'
 import { AGENT_TOOL_REGISTRY } from '@/services/agentSkills'
@@ -67,6 +116,40 @@ const store = usestore()
 
 const registryTools = ref<Array<{ name: string; description: string; hasInputSchema: boolean; scope?: string }>>([])
 const registryUnavailable = ref(false)
+/**
+ * 加载中标记。**必须有**：registryUnavailable 初值是 false，而列表为空时渲染的是"暂无工具"，
+ * 所以不标加载中的话，面板每次打开 / 每次点刷新都会先闪一下"没有工具"——看起来像注册表是空的。
+ */
+const registryLoading = ref(true)
+
+// ---- 搜索 / 过滤（注册表动辄上百条，插件一多就翻不动）----
+
+const searchText = ref('')
+const onlyPluginTools = ref(false)
+const searchInput = ref<HTMLInputElement | null>(null)
+/** 刷新后把焦点还给搜索框：用户的动作多半是"先搜、再点刷新看最新" */
+const refocusSearch = ref(false)
+
+const normalizedQuery = computed(() => searchText.value.trim().toLowerCase())
+/** 按空白分词：每个词都得命中一处，`math proof` 这类多词查询才有用 */
+const queryTerms = computed(() => (normalizedQuery.value ? normalizedQuery.value.split(/\s+/) : []))
+const isFiltered = computed(() => queryTerms.value.length > 0 || onlyPluginTools.value)
+
+const filteredTools = computed(() => {
+  let list = registryTools.value
+  if (onlyPluginTools.value) list = list.filter((t) => String(t.scope || '').startsWith('plugin:'))
+  const terms = queryTerms.value
+  if (!terms.length) return list
+  return list.filter((t) => {
+    const hay = `${t.name} ${t.description || ''} ${t.scope || ''}`.toLowerCase()
+    return terms.every((k) => hay.includes(k))
+  })
+})
+
+const clearSearch = () => {
+  searchText.value = ''
+  void nextTick(() => searchInput.value?.focus())
+}
 
 /** 始终启用的引擎核心工具（注册表中此类不受白名单影响） */
 const alwaysOnTools = new Set(AGENT_TOOL_REGISTRY.filter((t) => t.alwaysOn).map((t) => t.name))
@@ -123,15 +206,32 @@ const disabledBadgeHint = computed(() => store.locales === 'zh'
 const loadRegistry = async () => {
   if (!aikmDsh?.tools) {
     registryUnavailable.value = true
+    registryLoading.value = false
     return
   }
+  registryLoading.value = true
   try {
     registryTools.value = await aikmDsh.tools.list()
     registryUnavailable.value = false
   } catch (e: any) {
     console.error('[ToolRegistryPanel] 加载工具注册表失败:', e)
     registryUnavailable.value = true
+  } finally {
+    registryLoading.value = false
+    if (refocusSearch.value) {
+      refocusSearch.value = false
+      void nextTick(() => searchInput.value?.focus())
+    }
   }
+}
+
+/**
+ * 刷新按钮的入口：点了刷新就把焦点留在搜索框（用户多半是"搜完再刷一次看最新"），
+ * 否则焦点会丢失、要重新用鼠标点一次输入框。
+ */
+const refreshAndRefocus = () => {
+  refocusSearch.value = true
+  void loadRegistry()
 }
 
 onMounted(loadRegistry)
@@ -245,6 +345,66 @@ onMounted(loadRegistry)
   font-size: 12px;
   border: 1px dashed var(--borderColor);
   border-radius: 5px;
+}
+/* 搜索行：与列表同宽，不撑高（列表自己 flex:1 + overflow 滚动） */
+.registry-search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px 0;
+  flex-shrink: 0;
+}
+.registry-search-box {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.registry-search-icon {
+  position: absolute;
+  left: 7px;
+  font-size: 11px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+/* 原生 input 必须自带前景/背景色：应用全局样式给的是 31px 高、calc(100% - 10px) 宽，
+   深色主题下不设颜色就会白底白字（插件开发指南里记的同一条坑） */
+.registry-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 26px;
+  margin: 0;
+  padding: 0 22px 0 24px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  line-height: normal;
+}
+.registry-search-input::placeholder {
+  color: var(--fontColor);
+  opacity: 0.42;
+}
+.registry-search-input:focus {
+  outline: none;
+  border-color: var(--fontActiveColor);
+}
+.registry-search-clear {
+  position: absolute;
+  right: 6px;
+  font-size: 12px;
+  opacity: 0.5;
+  cursor: pointer;
+}
+.registry-search-clear:hover {
+  opacity: 0.9;
+}
+/* 图标按钮的激活态（只看插件工具） */
+.icon-btn.is-active {
+  color: var(--fontActiveColor);
+  border: 1px solid var(--fontActiveColor);
 }
 .registry-list {
   flex: 1;

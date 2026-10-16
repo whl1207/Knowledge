@@ -11,6 +11,7 @@
 
 ### Improved
 
+- **An agent preset's source can now be set to "Follow default"**: the preset binds no source or model and uses whatever Settings → Model currently has, so switching sources or moving to another environment (new machine, new API key) no longer means editing every preset; built-in presets ship in that mode (and "Restore default" returns to it).
 - **The home chat list sidebar is now a fixed 220px wide**: narrow windows no longer squeeze it to 150px — once the window gets too narrow the home page switches straight to phone mode (list and conversation each take the full screen).
 
 ### Fixed

@@ -7,7 +7,7 @@
 // （装机后的软件里没有 src/，模型找不到会满盘 read_file / search_files / shell）。
 //
 // 设计要点：
-// - **按主题拆成 6 个短工具**（host / constraints / manifest / api / faq / templates），
+// - **按主题拆成 7 个短工具**（host / constraints / manifest / api / api-main / faq / templates），
 //   单次只回几百到几千字：体量小的模型一次吃不下几千字，按需取用才用得动。
 // - 与 office / drawio / literature / postgres 同构：主进程内 SDK Server over InMemoryTransport；
 //   打包主进程时不能静态内联 MCP SDK（zod v4 内联损坏），一律 @vite-ignore 运行时加载。
@@ -15,7 +15,7 @@
 //   本文件只负责「包装成 MCP 工具 + 提供传输」。
 // - 对外 HTTP 暴露由 mcp-expose.ts 挂到 /mcp/builtin-plugin-dev（外部 MCP 客户端可直连）。
 
-import { PLUGIN_DEV_TOOL_SPECS, pluginDevTopic } from '../plugin-dev-guide'
+import { PLUGIN_DEV_TEMPLATE_KEYS, PLUGIN_DEV_TOOL_SPECS, pluginDevTopic } from '../plugin-dev-guide'
 import { checkPluginDir } from './plugin-dev-check'
 
 // ---------------- 运行时懒加载 MCP Server SDK ----------------
@@ -67,8 +67,10 @@ export function toolDefinitions(): any[] {
             properties: {
               key: {
                 type: 'string',
-                enum: ['general', 'panel', 'chart', 'tool', 'llm-files', 'fix', 'usage', 'all'],
-                description: '要取正文的模板 key（缺省只返回模板目录 + 安装步骤）；all 返回全部模板（较长）。',
+                // 从 PLUGIN_DEV_TEMPLATE_KEYS 派生（原先手写一份，已经漏了 settings ——
+                // 那个 key 实际能用、却没被 schema 广告）。同一份事实不许写两遍。
+                enum: [...PLUGIN_DEV_TEMPLATE_KEYS],
+                description: '要取正文的模板 key（缺省只返回模板目录 + 安装步骤）；minimal = 最小可运行示例，all 返回全部模板（较长）。',
               },
             },
           }

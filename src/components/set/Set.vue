@@ -18,6 +18,7 @@ import ToolRegistryPanel from '@/components/set/ToolRegistryPanel.vue'
 import PluginManagement from '@/components/set/PluginManagement.vue'
 import PluginStorePanel from '@/components/set/PluginStorePanel.vue'
 import PluginDevPanel from '@/components/set/PluginDevPanel.vue'
+import PluginPermissionsPanel from '@/components/set/PluginPermissionsPanel.vue'
 import PluginSlot from '@/components/plugin/PluginSlot.vue'
 import { useAllSlotEntries } from '@/lib/plugin/useSlots'
 import { SETTINGS_CARD_SLOT, SETTINGS_TAB_SLOT } from '@/lib/plugin/coreSlots'
@@ -135,6 +136,7 @@ const navTree = ref<NavItem[]>([
     title_en: 'Plugins',
     children: [
       { id: 'plugin', icon: 'fa fa-puzzle-piece', title_zh: '管理', title_en: 'Manage' },
+      { id: 'plugin-perms', icon: 'fa fa-shield', title_zh: '权限', title_en: 'Permissions' },
       { id: 'plugin-store', icon: 'fa fa-shopping-cart', title_zh: '商店', title_en: 'Store' },
       { id: 'plugin-dev', icon: 'fa fa-code', title_zh: '开发', title_en: 'Develop' }
     ]
@@ -1653,6 +1655,11 @@ onBeforeUnmount(() => {
       <!-- 插件商店（P2 预留占位：在线分发通道后续版本提供，当前只说明本地安装方式） -->
       <div v-if="activeNav === 'plugin-store'" class="settings-section">
         <PluginStorePanel />
+      </div>
+
+      <!-- 插件权限（一张表：声明权限 / 委派同意 / 并发与每小时额度 / 用量 / D5 放宽开关） -->
+      <div v-if="activeNav === 'plugin-perms'" class="settings-section">
+        <PluginPermissionsPanel />
       </div>
 
       <!-- 插件开发（把可复制的指令粘给大模型即可写插件；含清单 / 槽位 / API 速查与排障提示词） -->

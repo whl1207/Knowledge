@@ -34,9 +34,16 @@
             </div>
             <div class="tool-info">
               <div class="tool-name-row">
-                <span class="tool-name">{{ store.locales === 'zh' ? tool.labelZh : tool.labelEn }}</span>
-                <code class="tool-key">{{ tool.name }}</code>
+                <span class="tool-name">{{ tool.srcKind === 'plugin' ? tool.name : (store.locales === 'zh' ? tool.labelZh : tool.labelEn) }}</span>
+                <code v-if="tool.srcKind !== 'plugin'" class="tool-key">{{ tool.name }}</code>
                 <span v-if="tool.alwaysOn" class="tool-badge always-on">{{ store.locales === 'zh' ? '核心' : 'Core' }}</span>
+                <!-- 来源标识：来自某个插件（默认关闭，勾选后通用智能体才能调用） -->
+                <span v-if="tool.srcKind === 'plugin'" class="tool-badge plugin-src"
+                  :title="store.locales === 'zh'
+                    ? `由插件「${tool.srcLabel}」提供；默认关闭，需要在这里勾选后通用智能体才能调用`
+                    : `Provided by plugin “${tool.srcLabel}”; off by default — tick it here so the general agent can call it`">
+                  <i class="fa fa-puzzle-piece"></i> {{ tool.srcLabel }}
+                </span>
               </div>
               <div class="tool-desc">{{ tool.description }}</div>
               <div class="tool-meta">
@@ -66,10 +73,20 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { usestore } from '@/store'
-import { getSkillManager, AGENT_TOOL_REGISTRY, type AgentToolInfo } from '@/services/agentSkills'
+import { getSkillManager } from '@/services/agentSkills'
+import { computeEnabledTools, persistableToolNames, whitelistToolRows, type WhitelistToolRow } from '@/lib/agent/toolWhitelist'
 
 const store = usestore()
 const skillManager = getSkillManager(store)
+
+/**
+ * 工具行 = 静态注册表 + **插件工具**（后者带来源标识，见 lib/agent/toolWhitelist.ts）。
+ *
+ * 为什么必须并进来（方案 B）：插件工具改为"显式勾选才生效"后，**没有选任何预设的通用智能体**
+ * 只受这份全局白名单约束 —— 而这里以前只认静态表 AGENT_TOOL_REGISTRY，于是插件工具
+ * 既不显示、还会被当成非法名**过滤掉**，用户在这里根本没有办法让通用智能体用上插件工具。
+ */
+const allRows = computed<WhitelistToolRow[]>(() => whitelistToolRows())
 
 // 工具列表头部完整说明（悬停提示）
 const toolHeadHint = computed(() => {
@@ -78,37 +95,26 @@ const toolHeadHint = computed(() => {
     : 'Configure the global default tool whitelist for the Agent Loop mode: unset = all default tools, all off = no tools callable, list = only listed tools.\nAsk User / Update Plan / Update Todo can also be toggled here.\n"Agent Preset" mode uses each preset\'s own capability slots, unaffected by this whitelist.\nPTC (programmatic call) mode enables run_code automatically (a presentation tool, not configured here); the capabilities available to its in-program SDK = this whitelist. The same holds when a preset\'s presentation is set to PTC (run_code is enabled automatically; the in-program SDK exposes the tools that preset enables).'
 })
 
-const tools = ref<AgentToolInfo[]>(AGENT_TOOL_REGISTRY)
+const tools = computed<WhitelistToolRow[]>(() => allRows.value)
 
 // 当前启用集合（响应式）
 const enabledSet = ref<Set<string>>(new Set())
 
-// 加载当前启用的工具（优先 store 持久化配置，其次注册表默认）
+// 加载当前启用的工具（优先 store 持久化配置，其次注册表默认）；规则见 lib/agent/toolWhitelist.ts
 const loadEnabled = () => {
-  const stored = store.agentTools
-  if (Array.isArray(stored)) {
-    // null=未配置使用默认；[]=全部关闭；[names]=仅启用列表中工具；始终合并 alwaysOn
-    const valid = stored.filter(n => AGENT_TOOL_REGISTRY.some(t => t.name === n))
-    const alwaysOn = AGENT_TOOL_REGISTRY.filter(t => t.alwaysOn).map(t => t.name)
-    enabledSet.value = new Set([...new Set([...valid, ...alwaysOn])])
-  } else {
-    enabledSet.value = new Set(AGENT_TOOL_REGISTRY.filter(t => t.defaultEnabled || t.alwaysOn).map(t => t.name))
-  }
+  enabledSet.value = computeEnabledTools(store.agentTools, allRows.value)
 }
 
-// 持久化当前启用集合到 store
+// 持久化当前启用集合到 store（alwaysOn 不落盘；插件工具要落盘，否则重启即丢）
 const persist = () => {
-  // 仅保存非 alwaysOn 的用户配置（alwaysOn 始终包含，无需持久化）
-  const names = AGENT_TOOL_REGISTRY
-    .filter(t => !t.alwaysOn && enabledSet.value.has(t.name))
-    .map(t => t.name)
+  const names = persistableToolNames(enabledSet.value, allRows.value)
   store.agentTools = names
   store.saveConfig()
   // 同步到 SkillManager 单例
   skillManager.setEnabledTools(names)
 }
 
-const toggleTool = (tool: AgentToolInfo) => {
+const toggleTool = (tool: WhitelistToolRow) => {
   if (tool.alwaysOn) return
   const next = new Set(enabledSet.value)
   if (next.has(tool.name)) {
@@ -133,7 +139,7 @@ const restoreDefault = () => {
   loadEnabled()
 }
 
-const sandboxLabel = (tool: AgentToolInfo): string => {
+const sandboxLabel = (tool: WhitelistToolRow): string => {
   const zh = store.locales === 'zh'
   switch (tool.sandboxPreference) {
     case 'readonly': return zh ? '只读' : 'Read-only'
@@ -143,7 +149,7 @@ const sandboxLabel = (tool: AgentToolInfo): string => {
   }
 }
 
-const approvalLabel = (tool: AgentToolInfo): string => {
+const approvalLabel = (tool: WhitelistToolRow): string => {
   const zh = store.locales === 'zh'
   switch (tool.approvalRequirement) {
     case 'on-request': return zh ? '请求时询问' : 'On Request'
@@ -158,6 +164,11 @@ onMounted(() => {
 
 // store.agentTools 被外部修改时同步 UI
 watch(() => store.agentTools, () => {
+  loadEnabled()
+})
+
+// 插件工具名单变化（启用/停用插件）时重新裁决：停用后它的工具要从列表与启用集里消失
+watch(allRows, () => {
   loadEnabled()
 })
 </script>
@@ -286,6 +297,13 @@ watch(() => store.agentTools, () => {
   font-size: 9px; padding: 0 5px; border-radius: 3px;
   background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
   color: var(--fontActiveColor);
+}
+/* 插件来源徽标：同样用主题变量，深色下不依赖反色 */
+.tool-badge.plugin-src {
+  display: inline-flex; align-items: center; gap: 3px;
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: 1px solid var(--fontActiveColor);
+  background: transparent;
 }
 .tool-desc { font-size: 10px; opacity: 0.75; margin-top: 1px; }
 .tool-meta { display: flex; gap: 10px; margin-top: 2px; }

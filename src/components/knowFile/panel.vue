@@ -837,47 +837,44 @@
     await refreshTreeAndViews()
   };
 
-  // 创建文件对话框状态
-  const createDialogVisible = ref(false)
-  const createFileType = ref<NewFileTypeKey>('md')
-  const createFileName = ref('')
-
-  // 通过弹窗创建文件（单框：选择类型 + 输入文件名；「新建」子菜单会带入所选类型）
-  const promptCreateFile = (fileType: NewFileTypeKey = 'md') => {
+  // 通过弹窗创建文件（**只从「新建」子菜单进来**，类型必带；工具栏 ＋ 已去掉）。
+  // 与「文件」视图的 createNewFile（view_file.vue）**完全同一套**：类型在菜单里选好，
+  // 弹窗只问文件名（ElMessageBox.prompt）——两处外观/文案/校验保持一致。
+  const promptCreateFile = async (fileType: NewFileTypeKey) => {
     if (!store.root) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
-    createFileType.value = fileType
-    createFileName.value = ''
-    createDialogVisible.value = true
+    const zh = store.locales === 'zh'
+    const def = newFileType(fileType) || NEW_FILE_TYPES[0]
+    try {
+      const { value } = await ElMessageBox.prompt(zh ? '请输入文件名:' : 'Enter file name:', zh ? `新建 ${def.labelZh}` : `New ${def.labelEn}`, {
+        confirmButtonText: zh ? '确定' : 'OK',
+        cancelButtonText: zh ? '取消' : 'Cancel',
+        inputPattern: /.+/,
+        inputErrorMessage: zh ? '名称不能为空' : 'Name cannot be empty'
+      })
+      const name = String(value ?? '').trim()
+      if (!name) return
+      await createFile(name, def.key)
+    } catch { /* 用户取消 */ }
   };
 
-  // 确认创建文件
-  const confirmCreateFile = async () => {
-    const name = createFileName.value.trim()
-    if (!name) {
-      ElMessage.warning(store.locales === 'zh' ? '文件名不能为空' : 'File name cannot be empty');
-      return
-    }
-    createDialogVisible.value = false
-    await createFile(name, createFileType.value)
-  };
-
-  // 通过弹窗创建文件夹
+  // 通过弹窗创建文件夹（与「文件」视图 createNewFolder 同一套文案/校验）
   const promptCreateFolder = async () => {
     if (!store.root) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
+    const zh = store.locales === 'zh'
     try {
-      const { value: folderName } = await ElMessageBox.prompt('请输入文件夹名称:', '创建文件夹', {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
+      const { value: folderName } = await ElMessageBox.prompt(zh ? '请输入文件夹名称:' : 'Enter folder name:', zh ? '新建文件夹' : 'New Folder', {
+        confirmButtonText: zh ? '确定' : 'OK',
+        cancelButtonText: zh ? '取消' : 'Cancel',
         inputPattern: /.+/,
-        inputErrorMessage: '文件夹名称不能为空'
+        inputErrorMessage: zh ? '名称不能为空' : 'Name cannot be empty'
       })
-      const trimmed = folderName.trim()
+      const trimmed = String(folderName ?? '').trim()
       if (!trimmed) return
       await createFolder(trimmed)
     } catch { /* 用户取消 */ }
@@ -1373,10 +1370,9 @@
     treeRef.value!.filter(val)
   })
 
-  // 暴露方法给父组件
+  // 暴露方法给父组件（新建文件只走文件树右键「新建」，不再往外暴露创建入口）
   defineExpose({
-    refreshTree,
-    promptCreateFile
+    refreshTree
   });
 </script>
 
@@ -1395,7 +1391,7 @@
             <i class="fa fa-times-circle"></i>
           </div>
         </div>
-        <!-- 面板顶部 4 按钮组（来自 explorer 的 toolbar slot；与搜索框同一行） -->
+        <!-- 面板顶部按钮组（来自 explorer 的 toolbar slot；与搜索框同一行） -->
         <slot name="toolbar" />
       </div>
       <div class="tree-scroll scoll">
@@ -1627,33 +1623,8 @@
       <div v-if="tooltipData.mtime">{{ store.locales=='zh'?'修改时间':'Modified' }}: {{ formatTime(tooltipData.mtime) }}</div>
     </div>
 
-    <!-- 创建文件对话框（类型 + 文件名，紧凑弹窗，样式参照集群「编辑 Agent」） -->
-    <Teleport to="body">
-      <div v-if="createDialogVisible" class="pf-overlay" @click="createDialogVisible = false"></div>
-      <div v-if="createDialogVisible" class="pf-pop">
-        <div class="pf-head">
-          <span class="pf-title"><i class="fa fa-file-text-o"></i> {{ store.locales=='zh'?'创建文件':'Create File' }}</span>
-          <button class="pf-close" @click="createDialogVisible = false" :title="store.locales=='zh'?'关闭':'Close'"><i class="fa fa-times"></i></button>
-        </div>
-        <div class="pf-body">
-          <div class="pf-types">
-            <div v-for="t in NEW_FILE_TYPES" :key="t.key" class="pf-type" :class="{ on: createFileType === t.key }"
-                 @click="createFileType = t.key"><i :class="t.icon"></i> {{ store.locales=='zh' ? t.labelZh : t.labelEn }}</div>
-          </div>
-          <input
-            v-model="createFileName"
-            class="pf-input"
-            :placeholder="store.locales=='zh'?'请输入文件名':'Enter file name'"
-            @keyup.enter="confirmCreateFile"
-            @keyup.esc="createDialogVisible = false"
-          />
-        </div>
-        <div class="pf-actions">
-          <button class="pf-btn pf-cancel" @click="createDialogVisible = false">{{ store.locales=='zh'?'取消':'Cancel' }}</button>
-          <button class="pf-btn pf-ok" @click="confirmCreateFile">{{ store.locales=='zh'?'创建':'Create' }}</button>
-        </div>
-      </div>
-    </Teleport>
+    <!-- 创建文件：不再自带弹窗——右键「新建 → 类型」之后走 view_file.vue 那套
+         ElMessageBox.prompt（见 promptCreateFile），与「文件」视图外观/文案/校验完全一致 -->
 
     <!-- 添加远程工作区对话框（紧凑弹窗，样式参照集群「编辑 Agent」） -->
     <Teleport to="body">
@@ -1894,31 +1865,10 @@
   }
   .pf-close:hover { color: #f44336; border-color: #f44336; }
   .pf-body { display: flex; flex-direction: column; gap: 5px; }
-  .pf-types { display: flex; gap: 3px; }
-  .pf-type {
-    flex: 1; padding: 4px 4px; font-size: 10px;
-    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-    border: 1px solid var(--borderColor); border-radius: 4px;
-    background: var(--backgroundColor); color: var(--fontColor); opacity: .75;
-    cursor: pointer; transition: all .12s;
-  }
-  .pf-type i { font-size: 10px; }
-  .pf-type:hover { opacity: 1; color: var(--fontActiveColor); }
-  .pf-type.on {
-    opacity: 1; color: var(--fontActiveColor); font-weight: 600;
-    border-color: var(--borderColor);
-    background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
-  }
-  .pf-input {
-    width: 100%; box-sizing: border-box;
-    font-size: 11px; line-height: 1.5;
-    border: 1px solid var(--borderColor); border-radius: 4px;
-    background: var(--backgroundColor); color: var(--fontColor);
-    padding: 5px 6px; outline: none; margin: 0px
-  }
-  .pf-input:focus { border-color: var(--fontActiveColor); }
   .pf-actions { display: flex; gap: 4px; justify-content: flex-end; }
   .pf-btn {
+    /* 全局别的组件里有 button{width:100%} 这类规则，这里写死宽度免得按钮被撑满整行 */
+    width: auto; flex: none;
     padding: 3px 10px; font-size: 11px;
     border: 1px solid var(--borderColor); border-radius: 4px;
     background: var(--backgroundColor); color: var(--fontColor);

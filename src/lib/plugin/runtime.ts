@@ -21,9 +21,11 @@ import { createPluginLocaleApi, type PluginLocaleApi } from './locale'
 import { createPluginLlmApi, type PluginLlmApi } from './llm'
 import { createPluginFilesApi, releasePluginPdfCache, type PluginFilesApi } from './files'
 import { createPluginAppApi, type PluginAppApi } from './appApi'
+import { createPluginAgentApi, type PluginAgentApi } from './agent'
+import { listPluginAgentPresets, resolvePluginAgentPreset } from './agentPresetOptions'
 import { createPluginTtsApi, type PluginTtsApi } from './tts'
 import { PluginShortcutService, type ShortcutRecord } from './shortcuts'
-import { setPluginToolNames } from '@/lib/agent/capabilities'
+import { setPluginDeclaredToolNames, setPluginToolNames } from '@/lib/agent/capabilities'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import type { PluginLogLevel, PluginSnapshot, PluginStatus } from '@/types/plugin'
@@ -108,6 +110,20 @@ export interface ClientPluginContext {
   readonly files: PluginFilesApi
   /** 应用信息（只读）：名称 / 版本 / 语言、预设智能体清单 */
   readonly app: PluginAppApi
+  /**
+   * 委派智能体：按一个**用户已配置好的预设**跑一次独立会话，拿回文本结果。
+   *
+   * 需要清单声明 `permissions: ['agent.run']`（与只读的 `'agent'` 是两件事，见 `PluginPermission` 注释），
+   * 且**只在桌面端可用**（网页 / 移动端的本地宿主没有主进程可执行预算，`available` 为 false）。
+   *
+   * 边界（作者必须知道）：
+   * - **不能选模型**：provider / 密钥都来自用户配置的预设，插件拿不到（防止"插件自带 key"绕过用户设置）；
+   * - **预算由宿主裁定**：墙钟 / 步数 / 并发 / 每小时次数只紧不松，宿主还会裁掉被削项；
+   * - **拿不到文件 / 命令类工具**：委派出的 agent 的工具白名单由宿主裁剪，fs / shell / MCP / 技能都不给；
+   * - **首次调用由主进程弹框确认**，用户可「允许 / 每次都问 / 拒绝」；
+   * - 只能跑**界面半边**（主进程半边的 `ctx.tool` 无法委派，原因见本文件顶部与设计 §8.5）。
+   */
+  readonly agent: PluginAgentApi
   /**
    * 语音能力：把一段文本交给应用自己的 TTS 念出来（引擎 / 音色 / 语速由「设置 → 语音」决定）。
    * 不需要声明权限，但 `available` 为 false 时要用 `reason` 给出可读提示。
@@ -222,6 +238,15 @@ export function pluginDescription(id: string): string {
 }
 
 /**
+ * 工具名 → 它所在的作用域（`plugin:<插件 id>`）。
+ *
+ * 为什么要单独一份：「智能体预设 → 工具」页要**在工具名右侧标出它来自哪个插件**
+ * （这是用户明确要求的可辨识性），而那里只有工具名、没有 scope。
+ * 与 `pluginDisplayNames` 同一时机填充，随插件启停即时更新。
+ */
+export const pluginToolScopes = ref<Record<string, string>>({})
+
+/**
  * 插件状态表（id → status）与两个计数：启动器面板底部状态栏要显示「共 N 个插件 / 已启用 M 个」。
  *
  * 为什么不用「面板条目数」代替：那是**面板**数量（一个插件可能有多个面板，也可能一个都没有），
@@ -324,6 +349,14 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
       log: deps.log,
     }),
     app: createPluginAppApi(),
+    agent: createPluginAgentApi({
+      pluginId: snapshot.id,
+      permitted: (snapshot.permissions ?? []).includes('agent.run'),
+      log: deps.log,
+      bridge: () => getPluginBridge(),
+      resolvePreset: resolvePluginAgentPreset,
+      listPresets: listPluginAgentPresets,
+    }),
     tts: createPluginTtsApi({ pluginId: snapshot.id, log: deps.log }),
     shortcuts: {
       register: (binding, handler, options) =>
@@ -540,11 +573,23 @@ async function doSync(): Promise<void> {
   pluginStatuses.value = statuses
 
   // 1) 插件工具同步（已激活插件的工具 → 智能体可见集）
+  //    同时记下「工具名 → 作用域」：预设的工具页要标出每个工具来自哪个插件
   const toolNames: string[] = []
+  const declaredToolNames: string[] = []
+  const toolScopes: Record<string, string> = {}
   for (const p of plugins) {
-    if (p.status === 'active') for (const name of p.tools ?? []) toolNames.push(name)
+    const active = p.status === 'active'
+    for (const name of p.tools ?? []) {
+      // 作用域与"声明过"对所有列出了工具的插件都记（含未启用/失败的），
+      // 这样预设页能显示"来源：X（当前不可用）"，运行时也能把残留名字剔除干净
+      toolScopes[String(name)] = `plugin:${p.id}`
+      declaredToolNames.push(String(name))
+      if (active) toolNames.push(String(name))
+    }
   }
   setPluginToolNames(toolNames)
+  setPluginDeclaredToolNames(declaredToolNames)
+  pluginToolScopes.value = toolScopes
 
   // 2) 卸载：不再需要（禁用 / 卸载 / 加载失败 / 不再有 client 半边）的插件，
   //    以及主进程重新装载过的（loadedAt 变了）——否则改完界面半边点「重新载入」界面不会更新

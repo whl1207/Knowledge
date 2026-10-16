@@ -118,6 +118,32 @@ export class ToolRegistry {
     return this.global.get(n)
   }
 
+  /**
+   * 按名在**任意层**查找工具（全局层优先，其次各 scope 层）。
+   *
+   * 为什么必须补这个方法：`get(name, scope)` 只有两跳 —— **该 scope 层 → 全局层**。
+   * 而**插件工具注册在 `plugin:<插件 id>` 这一层**（见 electron/main/plugin-tools.ts），
+   * 于是从一个普通 agent 会话（scope 是 preset/agent id）**永远解析不到插件工具**：
+   *   - 「设置 → 工具 → 注册表」能列出它们（走 snapshotAll），用户勾得上；
+   *   - 但发给模型的工具清单（agent-loop 的 visibleTools）解析不出来 → 一个都进不去；
+   *   - 执行侧同理 → 调用只会得到「未知工具」。
+   * 表现就是"勾了却完全用不上"（实测踩到，且极难从界面看出原因）。
+   *
+   * 语义边界：这里只做**解析**，不做判权。插件工具本来就只有"插件被启用且用户在白名单里
+   * 显式勾选"两条都成立时才会被调用方拿着名字来这里查找，所以按名解析是安全的；
+   * 真正能不能执行仍由调用方的白名单（引擎守卫）与插件宿主的判权决定。
+   */
+  getAnywhere(name: string): ToolDefinition | undefined {
+    const n = name as ToolName
+    const g = this.global.get(n)
+    if (g) return g
+    for (const layer of this.scoped.values()) {
+      const d = layer.get(n)
+      if (d) return d
+    }
+    return undefined
+  }
+
   /** 列出可见工具（合并作用域层 + 全局层，按名排序） */
   list(scope?: string): ToolDefinition[] {
     const byName = new Map<ToolName, ToolDefinition>()
@@ -140,6 +166,32 @@ export class ToolRegistry {
       scope,
       hasInputSchema: !!d.inputSchema,
     }))
+  }
+
+  /**
+   * 列出**所有层**可见的工具（全局层 + 每一个 scope 层），供「设置 → 工具 → 注册表」展示。
+   *
+   * 为什么需要它：`list()` 不给 scope 时**只返回全局层**，于是注册表面板（它不带 scope 调用）
+   * 只看得到内置工具，**所有插件工具都不可见**——而面板的说明文字恰恰写着"实际注册的工具
+   * （含作用域）"。结果是：插件工具到底有没有注册成功，在这个诊断面板里根本看不出来
+   * （实测踩过：插件明明已装载、8 个工具都在 scope 层，面板却一个都不显示）。
+   *
+   * 每条带上它真实所在的 `scope`（全局层为 undefined），同名时以**先出现的 scope 层**为准
+   * （与 `list(scope)` 的"scope 层优先"一致），再补上全局层里没被遮蔽的工具。
+   */
+  snapshotAll(): ToolRegistrySnapshot[] {
+    const byName = new Map<ToolName, ToolRegistrySnapshot>()
+    for (const [scope, layer] of this.scoped) {
+      for (const [name, def] of layer) {
+        if (byName.has(name)) continue
+        byName.set(name, { name: def.name, description: def.description, scope, hasInputSchema: !!def.inputSchema })
+      }
+    }
+    for (const [name, def] of this.global) {
+      if (byName.has(name)) continue
+      byName.set(name, { name: def.name, description: def.description, hasInputSchema: !!def.inputSchema })
+    }
+    return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name))
   }
 
   // ---------------- 管线钩子 ----------------
@@ -179,7 +231,10 @@ export class ToolRegistry {
    * - 支持 AbortSignal（ctx.signal），handler 自行响应取消。
    */
   async execute(name: string, input: any, ctx: ToolExecutionContext = {}): Promise<ToolResult> {
-    const def = this.get(name, ctx.scope)
+    // 先按调用方 scope 解析，再**跨层兜底** —— 插件工具在 `plugin:<id>` 层，
+    // 而调用方 scope 是 preset/agent id，两跳的 get() 够不到它（否则会出现
+    // "工具已经列给模型了、模型一调用却报未知工具"这种自相矛盾的状态）。
+    const def = this.get(name, ctx.scope) || this.getAnywhere(name)
     if (!def) {
       const result: ToolResult = { ok: false, error: `未知工具: ${name}` }
       this.emitter.emit({ type: 'tool/error', name: name as ToolName, error: result.error! })

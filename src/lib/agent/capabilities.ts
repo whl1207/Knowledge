@@ -49,20 +49,38 @@ export const slotToolsOf = (key: string): string[] =>
   CAPABILITY_TOOL_SLOTS.find((s) => s.key === key)?.tools || []
 
 // ---------------------------------------------------------------------------
-// 插件工具（动态附加）
+// 插件工具（**显式勾选才生效**）
 //
 // 插件注册的工具在**主进程**工具注册表里（作用域 `plugin:<id>`），渲染层无法自行枚举，
-// 因此由渲染层在插件状态变化时（见 src/lib/agent/pluginTools.ts）把「已激活插件注册的工具名」
-// 推到这里。toolsFromCapabilities 会把它们**追加**到能力槽推导出的列表末尾：
-// - 只影响运行时可见集，**不写入** caps.enabledTools（停用插件即刻失效，不会留脏数据）；
-// - 用户要停用某个插件工具，直接把插件停用即可（或后续在工具管理里逐工具关闭）。
+// 因此由渲染层在插件状态变化时（见 src/lib/plugin/runtime.ts）把「已激活插件注册的工具名」
+// 推到这里，供预设界面列出来源与勾选状态。
+//
+// ⚠️ 这里的语义在 2026-10 由「自动追加」改为「显式勾选」（方案 B）：
+//   - 以前：`toolsFromCapabilities` 会把已激活插件的工具**无条件追加**到白名单末尾，
+//     于是用户在预设里既看不到、也关不掉插件工具，只能整体停用插件；
+//   - 现在：预设的 `enabledTools` 是**唯一权威**。插件工具与内置工具一视同仁——
+//     没勾就没有，勾了才有。插件新装/新加的工具**不会**自动进入任何预设，
+//     需要用户在预设的工具页里显式勾选（界面上会标出"来自哪个插件"）。
 // ---------------------------------------------------------------------------
 
 let pluginToolNames: string[] = []
+/**
+ * 「所有已加载插件声明过的工具」——**含未启用 / 加载失败 / 已停用的插件**。
+ *
+ * 为什么要与 `pluginToolNames`（只含已激活）分开：判定"这个名字属于插件"与判定"它现在可用"
+ * 是两件事。若只用已激活名单，插件一停用我们就认不出它那些工具是插件工具了，
+ * **预设里残留的工具名会被当作内置工具放行**，继续暴露给模型（实测：新自测抓到了这条）。
+ */
+let pluginDeclaredToolNames: string[] = []
 
 /** 更新「当前已激活插件注册的工具名」（由渲染层同步；空数组即清空） */
 export function setPluginToolNames(names: string[]): void {
   pluginToolNames = Array.isArray(names) ? names.filter((n) => typeof n === 'string' && n.trim() !== '') : []
+}
+
+/** 更新「插件声明过的全部工具名」（含未启用插件）；不设则退回已激活名单，旧调用点行为不退化 */
+export function setPluginDeclaredToolNames(names: string[]): void {
+  pluginDeclaredToolNames = Array.isArray(names) ? names.filter((n) => typeof n === 'string' && n.trim() !== '') : []
 }
 
 /** 当前已激活插件提供的工具名（只读快照） */
@@ -70,14 +88,32 @@ export function getPluginToolNames(): string[] {
   return pluginToolNames.slice()
 }
 
-/** 把插件工具追加到基础列表末尾（去重；不改动基础列表本身） */
+/** 插件声明过的全部工具名（含未启用插件）；没有单独设置过时 = 已激活名单 */
+export function getPluginDeclaredToolNames(): string[] {
+  return (pluginDeclaredToolNames.length ? pluginDeclaredToolNames : pluginToolNames).slice()
+}
+
+/** 某工具是不是插件提供的（判定用「声明过」而不是「当前激活」，否则停用后会漏判） */
+export function isPluginTool(name: string): boolean {
+  return getPluginDeclaredToolNames().includes(String(name))
+}
+
+/**
+ * 对预设声明的工具集做净化：**只有仍然可用的插件工具才留下**。
+ *
+ * 1. 插件工具必须同时"在激活名单里"——插件停用/卸载后，预设里残留的名字要剔除，
+ *    否则模型会看到一堆调不通的工具名；
+ * 2. 内置工具原样保留、顺序不变。
+ *
+ * 为什么收敛在这一处：`toolsFromCapabilities` 是运行时白名单的**统一入口**
+ * （预设 / 集群 / 工作流节点 / 局域网访客都走它），只有在这里收口才能保证
+ * "界面勾了什么 = 运行时能用什么"。
+ */
 function withPluginTools(base: string[]): string[] {
-  if (!pluginToolNames.length) return base
-  const out = base.slice()
-  for (const name of pluginToolNames) {
-    if (!out.includes(name)) out.push(name)
-  }
-  return out
+  if (!base.length) return base
+  const active = new Set(pluginToolNames)
+  const declared = new Set(getPluginDeclaredToolNames())
+  return base.filter((name) => (declared.has(name) ? active.has(name) : true))
 }
 
 /**
@@ -127,11 +163,16 @@ export function toolsFromCapabilities(caps: any, opts: { includeMcp?: boolean } 
 
 /** 读取某 agent/preset 的有效工具集（逐工具优先；旧模式由能力槽推导）。只读不落盘 */
 export function effectiveToolsOf(caps: any): string[] {
-  if (caps && Array.isArray(caps.enabledTools)) return caps.enabledTools.slice()
   return toolsFromCapabilities(caps)
 }
 
-/** 某工具当前是否启用 */
+/**
+ * 某工具当前是否启用。
+ *
+ * ⚠️ 这里必须走 `toolsFromCapabilities` 而不是直接 `caps.enabledTools.includes(tool)`：
+ * 前者才会应用"插件工具必须仍然存在"这条剔除规则。否则插件卸载后，预设界面会把一个
+ * 已经不可用的工具显示成"开着"，用户点它一下就写进 `enabledTools`，接着又"显示开、实际调不到"。
+ */
 export function toolOn(caps: any, tool: string): boolean {
   return effectiveToolsOf(caps).includes(tool)
 }

@@ -35,6 +35,7 @@ import type {
   PluginStatus,
   PluginStorage,
 } from '@/types/plugin'
+import type { ToolDefinition } from '@/types/tool'
 import { PluginEventBus, PluginServiceRegistry, createPluginContext } from '@/shared/pluginContext'
 import { checkApiVersion, isManifestFailure, parseManifest, PLUGIN_MANIFEST_FILE, PLUGIN_MANIFEST_KEY } from '@/shared/pluginManifest'
 import { toolRegistry } from '@/shared/toolRegistry'
@@ -42,7 +43,11 @@ import { shellService } from './shell-service'
 import { isVerbose, logInfo, logWarn } from './log'
 import { isShellAllowed, resolvePolicy } from './sandbox-policy'
 import { createPluginToolRegistrar } from './plugin-tools'
-import { clearGrants } from './plugin-grants'
+import { assertAccess, clearGrants, listGrants } from './plugin-grants'
+import { abortPluginRuns, clearUsage } from './plugin-agent-budget'
+import { clearConsent } from './plugin-agent-consent'
+import { clearAgentConfig } from './plugin-agent-config'
+import { clearToolApproval } from './plugin-tool-approval-store'
 
 /** 日志参数 → 文本（字符串原样；其它尽量 JSON，失败退回 String） */
 function fmtLogArg(a: unknown): string {
@@ -118,6 +123,21 @@ export interface PluginHostInitOptions {
    * 属于「装配」而非「宿主」，注入可让宿主保持无副作用、可单测。
    */
   builtinServices?: Record<string, unknown>
+}
+
+/**
+ * 工具定义的**只读元数据**：剥掉 `handler` 等可执行字段。
+ *
+ * 这一步是安全关键：只要把原始 `ToolDefinition` 交出去，插件就能 `def.handler(input, ctx)`
+ * 直接执行它 —— 那只是换了个名字的 `execute`，"只读视图"就白做了。
+ */
+function toolMeta(def: ToolDefinition): Record<string, unknown> {
+  return {
+    name: def.name,
+    description: def.description,
+    inputSchema: def.inputSchema,
+    requiresApproval: def.requiresApproval === true,
+  }
 }
 
 class PluginHost {
@@ -557,6 +577,14 @@ class PluginHost {
       this.removeConfig(rec.id)
       // 卸载就把「这个插件记住的文件授权」一起清掉（换一个同名插件不该继承旧授权）
       clearGrants(rec.id)
+      // 同理清掉委派用量与同意状态：否则重装同名插件会**继承上一份代码的额度与"允许"**
+      // （那等于用一个已删插件的授权给新插件背书）。用量清掉也顺带把限速窗口归零。
+      clearUsage(rec.id)
+      clearConsent(rec.id)
+      // 委派额度与"放宽文件 / MCP 工具"的开关同样归零：新插件不该继承上一份代码被放宽的权限
+      clearAgentConfig(rec.id)
+      // 工具审批状态同理：同名重装不该继承"已允许这个插件调工具"
+      clearToolApproval(rec.id)
       this.saveState()
       this.emit({ type: 'plugin/changed', id: rec.id, snapshot: null })
 
@@ -1063,6 +1091,16 @@ class PluginHost {
         permissions: rec.manifest.permissions ?? [],
         log,
       })
+      /** 注册一个插件工具（`ctx.tool` 与 `getService('tools').register` 走同一条路，作用域 / 审批映射一致） */
+      const registerPluginTool = (def: ToolDefinition) => {
+        const off = registrar(def)
+        rec.tools.push(def.name)
+        return () => {
+          off()
+          rec.tools = rec.tools.filter((n) => n !== def.name)
+        }
+      }
+      const hostApi = this.createHostApi(rec)
       const handle = createPluginContext({
         id: rec.id,
         name: rec.manifest.name,
@@ -1078,18 +1116,13 @@ class PluginHost {
               rec.services = rec.services.filter((n) => n !== name)
             }
           },
-          get: (name) => this.services.get(name),
+          // ⚠️ 两个内置服务必须**按插件特化**，不能把宿主原件给出去（详见 pluginServiceView 的注释）
+          get: <T = unknown,>(name: string) =>
+            this.pluginServiceView(rec, name, { registerPluginTool, hostApi }) as T,
         },
-        registerTool: (def) => {
-          const off = registrar(def)
-          rec.tools.push(def.name)
-          return () => {
-            off()
-            rec.tools = rec.tools.filter((n) => n !== def.name)
-          }
-        },
+        registerTool: registerPluginTool,
         subscribeHostEvent: (type, listener) => this.events.on(type, listener),
-        host: this.createHostApi(rec),
+        host: hostApi,
         storage: this.createStorage(rec),
         log,
       })
@@ -1139,6 +1172,14 @@ class PluginHost {
   private async unloadPlugin(rec: PluginRecord, reason: string): Promise<void> {
     // 作废进行中的加载（其 await 返回后会看到 epoch 变化并放弃/回滚）
     rec.epoch++
+    // 先取消该插件**在飞的委派**（ctx.agent.run）：否则插件没了，模型还在跑、钱还在烧。
+    // 放在最前面：取消要早于下面的 dispose，让委派有机会在收口窗口里拿到部分输出。
+    try {
+      const aborted = abortPluginRuns(rec.id)
+      if (aborted) this.log(rec, 'info', `已取消 ${aborted} 个在飞委派（${reason}）`)
+    } catch (e) {
+      this.log(rec, 'warn', `取消在飞委派失败：${e instanceof Error ? e.message : String(e)}`)
+    }
     const wasActive = rec.status === 'active' || rec.status === 'failed'
     if (rec.dispose) {
       try {
@@ -1250,6 +1291,66 @@ class PluginHost {
   // 宿主能力（权限判定见 docs/plan 的 §五 安全模型）
   // ---------------------------------------------------------------------------
 
+  /**
+   * 插件看到的**服务视图**。
+   *
+   * `tools` / `shell` 两个内置服务**必须按插件特化**，不能把宿主原件交出去：
+   *
+   * - `tools` 若给原件（`ToolRegistry`），插件拿到 `execute()` 就能执行**任意宿主工具**
+   *   （read_file / write_file / shell / mcp_call / run_subagent…），绕过自己声明的权限与
+   *   "用户亲自选过的路径"这套文件授权；而 `get()` 还会把 `handler` 一起给出，等于第二个 `execute`。
+   *   所以改成**只读视图**：能注册自己的工具、能看元数据（名称 / 说明 / schema / 审批标记），
+   *   **没有 execute，也不含 handler**。这与 DSH 的公开面一致 —— 它的 `ctx.tools` 只有
+   *   `register` / `presentAs` / `restrict`，执行只由 agent loop 的流水线发起。
+   * - `shell` 若给原件（`ShellService`），其 `executeCommand` 是裸 `execAsync`：不看 `shell` 权限、
+   *   也不看 trusted 策略。改成**转发到 `ctx.host.runShell` 的同一实现**（判权 + 判策略）。
+   *
+   * 只特化这两个名字；其余服务（sessionLog / jobs / 插件自己 provide 的）原样透出。
+   */
+  private pluginServiceView(
+    rec: PluginRecord,
+    name: string,
+    deps: { registerPluginTool: (def: ToolDefinition) => () => void; hostApi: PluginHostApi },
+  ): unknown {
+    if (name === 'tools') {
+      const ownScope = `plugin:${rec.id}`
+      return {
+        /** 注册一个工具（与 `ctx.tool` 同一实现：作用域 `plugin:<id>`、审批映射一致） */
+        register: (def: ToolDefinition) => deps.registerPluginTool(def),
+        /** 本插件已注册工具的**只读元数据**（不含 handler） */
+        list: () =>
+          rec.tools
+            .map((n) => toolRegistry.get(n, ownScope))
+            .filter((d): d is ToolDefinition => !!d)
+            .map(toolMeta),
+        /** 按名字取本插件某个工具的元数据（不含 handler） */
+        get: (toolName: string) => {
+          const def = toolRegistry.get(String(toolName), ownScope)
+          return def ? toolMeta(def) : undefined
+        },
+      }
+    }
+    if (name === 'shell') {
+      return {
+        /** 与 `ctx.host.runShell` 同一实现：判 `shell` 权限 + 判 trusted 策略（fail-closed） */
+        executeCommand: (command: string, opts?: { policy?: string; cwd?: string }) =>
+          deps.hostApi.runShell(command, opts),
+      }
+    }
+    return this.services.get(name)
+  }
+
+  /**
+   * 校验"这个路径在这个插件的授权范围内"，通过则返回绝对路径。
+   * 判定本身在 `plugin-grants.assertAccess` → 纯函数（读 / 写共用一处，不会分叉）。
+   */
+  private requireGrantedPath(pluginId: string, target: string, need: 'read' | 'write'): string {
+    const raw = String(target ?? '').trim()
+    if (!raw) throw new IPCError('INVALID_ARGUMENT', '缺少路径')
+    assertAccess(pluginId, raw, need)
+    return path.resolve(raw)
+  }
+
   private createHostApi(rec: PluginRecord): PluginHostApi {
     const permissions = rec.manifest?.permissions ?? []
     const has = (p: PluginPermission) => permissions.includes(p)
@@ -1310,6 +1411,59 @@ class PluginHost {
             events: Number(s.events ?? 0),
             lastTs: Number(s.lastTs ?? 0),
           }))
+        },
+      },
+      /**
+       * 用户**授权过**的路径内的读写 —— 插件的工具要写用户的真实文件就走这里
+       * （界面半边是 `ctx.files.writeText`，两处走同一套 `assertAccess` 判定）。
+       */
+      granted: {
+        list: async () => {
+          if (!has('fs')) deny('fs', '访问你授权的文件')
+          return listGrants(rec.id)
+        },
+        readText: async (target: string, opts?: { maxBytes?: number }) => {
+          if (!has('fs')) deny('fs', '访问你授权的文件')
+          const abs = this.requireGrantedPath(rec.id, target, 'read')
+          const stat = await fs.promises.stat(abs).catch(() => null)
+          if (!stat || !stat.isFile()) throw new IPCError('INVALID_ARGUMENT', `不是文件：${abs}`)
+          const max = Math.max(1024, Number(opts?.maxBytes) || 8 * 1024 * 1024)
+          if (stat.size > max) throw new IPCError('INVALID_ARGUMENT', `文件过大（${stat.size} > ${max} 字节）`)
+          const text = await fs.promises.readFile(abs, 'utf8')
+          return { path: abs, text, size: stat.size }
+        },
+        writeText: async (target: string, content: string) => {
+          if (!has('fs')) deny('fs', '写入你授权的文件')
+          if (typeof content !== 'string') throw new IPCError('INVALID_ARGUMENT', 'content 必须是字符串')
+          const abs = this.requireGrantedPath(rec.id, target, 'write')
+          await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+          await fs.promises.writeFile(abs, content, 'utf8')
+          this.log(rec, 'info', `[audit] 写入授权目录：${abs}（${Buffer.byteLength(content, 'utf8')} 字节）`)
+          return { path: abs, bytes: Buffer.byteLength(content, 'utf8') }
+        },
+        listDir: async (dir: string) => {
+          if (!has('fs')) deny('fs', '访问你授权的文件')
+          const abs = this.requireGrantedPath(rec.id, dir, 'read')
+          const entries = await fs.promises.readdir(abs, { withFileTypes: true })
+          const rows = []
+          for (const entry of entries.slice(0, 500)) {
+            const full = path.join(abs, entry.name)
+            const stat = await fs.promises.stat(full).catch(() => null)
+            rows.push({ name: entry.name, path: full, isDir: entry.isDirectory(), size: stat ? stat.size : 0 })
+          }
+          rows.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
+          return rows
+        },
+        remove: async (target: string) => {
+          if (!has('fs')) deny('fs', '删除你授权的文件')
+          const abs = this.requireGrantedPath(rec.id, target, 'write')
+          const stat = await fs.promises.stat(abs).catch(() => null)
+          if (!stat) return { removed: false, missing: true }
+          // 不做递归删除：目录非空时 rmdir 抛错，正是我们要的（防止一句话带走整棵子树）
+          if (stat.isDirectory()) await fs.promises.rmdir(abs)
+          else await fs.promises.unlink(abs)
+          this.log(rec, 'warn', `[audit] 删除授权目录内的文件：${abs}`)
+          return { removed: true }
         },
       },
       notify: (message: string) => {

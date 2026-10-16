@@ -22,6 +22,7 @@ import {
   CONSTRAINTS_ZH,
   PLUGIN_DEV_FAQ,
   PLUGIN_DEV_FACTS,
+  PLUGIN_DEV_MINIMAL_MAIN_ZH,
   PLUGIN_DEV_MINIMAL_ZH,
   PLUGIN_DEV_SECTIONS,
   PLUGIN_DEV_USAGE_ZH,
@@ -29,11 +30,11 @@ import {
 import { pluginHost } from './plugin-host'
 
 /** 话题名（= MCP 工具名去掉 plugin_dev_ 前缀） */
-export const PLUGIN_DEV_TOPICS = ['host', 'constraints', 'manifest', 'api', 'faq', 'templates'] as const
+export const PLUGIN_DEV_TOPICS = ['host', 'constraints', 'manifest', 'api', 'api-main', 'faq', 'templates'] as const
 export type PluginDevTopic = (typeof PLUGIN_DEV_TOPICS)[number]
 
 /** 模板话题可单独取用的小节（key 与 devGuide 的 PLUGIN_DEV_SECTIONS 一致） */
-export const PLUGIN_DEV_TEMPLATE_KEYS = ['general', 'panel', 'settings', 'chart', 'tool', 'llm-files', 'fix', 'usage', 'all'] as const
+export const PLUGIN_DEV_TEMPLATE_KEYS = ['general', 'panel', 'settings', 'chart', 'tool', 'llm-files', 'fix', 'minimal', 'usage', 'all'] as const
 
 // ---------------------------------------------------------------------------
 // 各话题正文
@@ -100,17 +101,44 @@ export function topicManifest(): string {
   ].join('\n')
 }
 
-/** 宿主 API 速查（界面半边 + 主进程半边）+ 最小可运行示例 */
+/** 主进程半边的成员标记（事实表里用统一前缀区分两半边） */
+const MAIN_HALF_PREFIX = '主进程半边：'
+
+/**
+ * 宿主 API 速查 —— **界面半边**（纯名表，不含示例）。
+ *
+ * 两次瘦身的记录（都为了 plugin-smoke 的「单次不超过话题预算」——预算数由
+ * `src/shared/toolResultBudget.ts` 的截断阈值推导，见 smoke.mts 的 topicCharBudget）：
+ *  1. 按半边拆成 `api` / `api-main` —— 两半边的 ctx 串用是本项目最常见的错法，拆开各读各的；
+ *  2. 示例再挪去 `plugin_dev_templates {key:"minimal"}` —— 实测界面半边事实表本身就 ≈3800 字，
+ *     把 989 字的示例留在话题里只能压到 4450（离上限只剩 50 字，下次加一条事实就又红）。
+ *     示例本来就是"可照抄的正文"，归 templates 才合它的设计前提。
+ */
 export function topicApi(): string {
-  const facts = PLUGIN_DEV_FACTS.filter((f) => !f.name.startsWith('package.json'))
+  const facts = PLUGIN_DEV_FACTS.filter((f) => !f.name.startsWith('package.json') && !f.name.startsWith(MAIN_HALF_PREFIX))
     .map((f) => `- ${f.name}\n  ${f.descZh}`)
     .join('\n')
   return [
-    '【宿主 API 速查（照抄名字，不要臆造）】',
+    '【宿主 API 速查 · 界面半边（client.mjs；照抄名字，不要臆造）】',
+    '（主进程半边（index.mjs）另有 `plugin_dev_api_main`，两半边的 ctx 不能混用）',
     facts,
     '',
-    '【最小可运行示例（与仓库 examples/plugins/hello-panel 一致）】',
-    PLUGIN_DEV_MINIMAL_ZH,
+    '最小可运行示例（package.json + client.mjs 全文）：取 `plugin_dev_templates` 的 key="minimal"。',
+  ].join('\n')
+}
+
+/** 宿主 API 速查 —— **主进程半边**（名表 + 一段最小示例，主半边事实表很短，留得下） */
+export function topicApiMain(): string {
+  const facts = PLUGIN_DEV_FACTS.filter((f) => f.name.startsWith(MAIN_HALF_PREFIX))
+    .map((f) => `- ${f.name}\n  ${f.descZh}`)
+    .join('\n')
+  return [
+    '【宿主 API 速查 · 主进程半边（index.mjs；照抄名字，不要臆造）】',
+    '（界面半边（client.mjs）另有 `plugin_dev_api`，两半边的 ctx 不能混用）',
+    facts,
+    '',
+    '【主进程半边最小可运行示例（注册一个工具给智能体用）】',
+    PLUGIN_DEV_MINIMAL_MAIN_ZH,
   ].join('\n')
 }
 
@@ -131,19 +159,27 @@ export function topicTemplates(key?: string): string {
     return [
       '【可照抄的开发模板（用 plugin_dev_templates 的 key 参数取正文，一次只取一个）】',
       index,
+      '- minimal：最小可运行示例（package.json + client.mjs 全文，第一次写插件从它开始）',
       '- usage：安装、启用与调试步骤',
       '',
       topicUsage(),
     ].join('\n')
   }
   if (k === 'usage') return topicUsage()
+  // 示例原在 plugin_dev_api 话题里；因界面半边事实表本身 ≈4000 字、话题预算见上，挪到这里
+  if (k === 'minimal') {
+    return [
+      '【最小可运行示例（目录 + package.json + client.mjs；照抄即可跑）】',
+      PLUGIN_DEV_MINIMAL_ZH,
+    ].join('\n')
+  }
   if (k === 'all') {
     const all = PLUGIN_DEV_SECTIONS.map((s) => `### ${s.titleZh}（key: ${s.key}）\n（${s.descZh}）\n\n${s.bodyZh}`).join('\n\n---\n\n')
     return ['【全部开发模板】', '', all, '', topicUsage()].join('\n')
   }
   const section = PLUGIN_DEV_SECTIONS.find((s) => s.key === k)
   if (!section) {
-    const keys = [...PLUGIN_DEV_SECTIONS.map((s) => s.key), 'usage', 'all'].join(' / ')
+    const keys = [...PLUGIN_DEV_SECTIONS.map((s) => s.key), 'minimal', 'usage', 'all'].join(' / ')
     return `没有叫「${k}」的模板。可用 key：${keys}`
   }
   return [`### ${section.titleZh}（key: ${section.key}）`, `（${section.descZh}）`, '', section.bodyZh].join('\n')
@@ -161,6 +197,7 @@ export function pluginDevTopic(topic: string, arg?: string): string {
     case 'constraints': return topicConstraints()
     case 'manifest': return topicManifest()
     case 'api': return topicApi()
+    case 'api-main': return topicApiMain()
     case 'faq': return topicFaq()
     case 'templates': return topicTemplates(arg)
     default: return `未知话题「${topic}」。可用：${PLUGIN_DEV_TOPICS.join(' / ')}`
@@ -204,7 +241,12 @@ export const PLUGIN_DEV_TOOL_SPECS: readonly PluginDevToolSpec[] = [
   {
     name: 'plugin_dev_api',
     topic: 'api',
-    description: '读取宿主 API 速查（界面半边与主进程半边两套 ctx 方法：slots / shortcuts / llm / files / app / tts / config / log / notify / effect / storage / tool / service / shell / net / sessions）以及一份最小可运行示例（package.json + client.mjs 全文）。写代码时取这一条。',
+    description: '读取**界面半边**（client.mjs）的宿主 API 速查（slots / shortcuts / llm / files / app / tts / locale / config / log / notify / on / effect）以及界面半边的最小可运行示例（package.json + client.mjs 全文）。写界面半边代码时取这一条；主进程半边取 plugin_dev_api_main（两半边 ctx 不能混用）。',
+  },
+  {
+    name: 'plugin_dev_api_main',
+    topic: 'api-main',
+    description: '读取**主进程半边**（index.mjs）的宿主 API 速查（tool / service / getService / storage / host：readFile / writeFile / listDir / runShell / fetch / sessions.list / notify）以及主进程半边的最小可运行示例（清单里的 main / inject / permissions / declares.tools 与一段注册工具的 index.mjs 全文），并说明"与宿主同进程、不受工作区沙箱约束""工具名必须带前缀""handler 必须返回 { ok, value?, error? }"。写工具 / 后台能力时取这一条。',
   },
   {
     name: 'plugin_dev_faq',
@@ -215,7 +257,7 @@ export const PLUGIN_DEV_TOOL_SPECS: readonly PluginDevToolSpec[] = [
     name: 'plugin_dev_templates',
     topic: 'templates',
     keyParam: true,
-    description: '读取可照抄的开发模板目录与「安装、启用、调试步骤」。默认只回目录（很短）；要正文时传 key，一次取一个：general（通用开发指令）、panel（界面插件：面板 + 设置页签 + 快捷键）、settings（设置页签 / 设置卡片：配置项放进「设置 → 插件」，含分组与设置页 id 清单、完整设置组件骨架）、chart（图表面板：canvas 饼图 / 柱状图 + 数据变化重画）、tool（给智能体加工具）、llm-files（大模型与文件能力）、fix（排障指令）、usage（安装步骤）、all（全部，较长）。',
+    description: '读取可照抄的开发模板目录与「安装、启用、调试步骤」。默认只回目录（很短）；要正文时传 key，一次取一个：minimal（最小可运行示例：目录 + package.json + client.mjs 全文，第一次写插件从它开始）、general（通用开发指令）、panel（界面插件：面板 + 设置页签 + 快捷键）、settings（设置页签 / 设置卡片：配置项放进「设置 → 插件」，含分组与设置页 id 清单、完整设置组件骨架）、chart（图表面板：canvas 饼图 / 柱状图 + 数据变化重画）、tool（给智能体加工具）、llm-files（大模型与文件能力）、fix（排障指令）、usage（安装步骤）、all（全部，较长）。',
   },
   {
     name: 'plugin_dev_check',

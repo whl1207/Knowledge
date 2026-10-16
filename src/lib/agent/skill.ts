@@ -10,6 +10,17 @@
 
 import type { AgentOptions } from '@/types/agent'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
+import { getPluginDeclaredToolNames, getPluginToolNames } from './capabilities'
+
+/**
+ * 自测出口：把 capabilities 的模块实例暴露出来，供 `_probe/prompt-tools.check.mjs`
+ * 在同一份实例上设置"已激活插件工具名单"，从而验证 `buildToolUsageContext` 真的会把它们列出来。
+ *
+ * 为什么需要它：打包成单文件后 capabilities 被内联进本模块，探针脚本另起一个 bundle
+ * 拿到的是**另一个实例**，模块级状态不共享 —— 没有这个出口就只能做源码级正则断言（弱得多）。
+ * 宿主按名字导入函数，多这一个导出对运行没有任何影响。
+ */
+export { setPluginToolNames as __setPluginToolNamesForTest } from './capabilities'
 
 // ---------------------------------------------------------------------------
 // 技能 Agent 默认工具集
@@ -202,6 +213,23 @@ export function buildToolUsageContext(enabledTools?: readonly string[] | null): 
   if (toolEnabled(tools, 'mcp_call')) toolList.push('   - mcp_call：调用已启用的 MCP 服务')
   if (toolEnabled(tools, 'shell')) toolList.push('   - shell：执行 Shell 命令（需完全访问）')
   if (toolEnabled(tools, 'run_subagent')) toolList.push('   - run_subagent：派生子代理独立完成子任务（可后台运行，用 job_output 收集结果、job_kill 停止）')
+  // 插件提供的工具：上面那串是按内置工具名硬编码的，因此**插件工具必须在这里兜底列出**，
+  // 否则"用户勾了插件工具、模型却完全不知道它存在"——勾选等于白勾。
+  // 实测踩过：预设里勾了 8 个 mathproof_*，系统提示词的可用工具清单里一个都没有，
+  // 模型因此回答"我没有这些工具"（它没撒谎，是提示词没告诉它）。
+  //
+  // ⚠️ 判定用 **declared（声明过）** 而不是 active（当前激活）：两者相同时结果一致，
+  // 但渲染层"把已激活插件工具同步过来"与"建这个会话"之间存在**竞态**——同步晚一步，
+  // active 就是空的，工具会在提示词里凭空消失。用 declared 判定只影响"要不要列出这条"，
+  // 不会放宽实际可用性（真正能不能调用由运行时白名单 + 引擎守卫决定）。
+  const declaredPlugins = getPluginDeclaredToolNames()
+  const activePlugins = new Set(getPluginToolNames())
+  const pluginLines = declaredPlugins
+    .filter((n) => toolEnabled(tools, n))
+    .map((n) => (activePlugins.has(n)
+      ? `   - ${n}：由插件提供（详见「设置 → 工具 → 注册表」中 scope 为 plugin: 的条目）`
+      : `   - ${n}：由插件提供，但该插件当前未启用（勾了它也不会生效；请到「设置 → 插件」启用对应插件）`))
+  toolList.push(...pluginLines)
   if (toolList.length === 0) return ''
   return ['你可以使用以下工具：', ...toolList].join('\n')
 }

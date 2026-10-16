@@ -163,6 +163,48 @@ export interface AikmDshApi {
     setConfig(id: string, patch: Record<string, unknown>, confirm?: boolean): Promise<Record<string, unknown>>
     logs(id: string): Promise<import('@/types/plugin').PluginLogLine[]>
     /**
+     * 插件委派智能体（`ctx.agent.run` 的主进程侧）。
+     * 判权 / 首次同意 / 预算 / D5 工具裁剪 / 步数裁定全在主进程；渲染层只是通道。
+     */
+    agentRun(args: {
+      pluginId: string
+      presetId: string
+      presetName?: string
+      presetMaxSteps?: number
+      input: string
+      budget?: { timeoutMs?: number; maxSteps?: number; maxTokens?: number }
+      options: unknown
+    }): Promise<import('@/lib/plugin/agentContract').AgentRunResult>
+    /** 各插件的委派用量快照（设置页展示；只读） */
+    agentUsage(): Promise<Record<string, { inFlight: number; callsInWindow: number }>>
+    /** 取消某插件全部在飞委派（插件面板的「停止」按钮） */
+    agentCancel(args: { pluginId: string }): Promise<{ cancelled: number }>
+    /** 某插件的委派状态（同意 + 用量）；只读 */
+    agentStatus(args: { pluginId: string }): Promise<{ consent: 'allow' | 'ask' | 'deny'; inFlight: number; callsInWindow: number }>
+    /** 改写委派同意（需 confirm） */
+    setAgentConsent(args: {
+      pluginId: string
+      consent: 'allow' | 'ask' | 'deny'
+      confirm?: boolean
+    }): Promise<{ consent: 'allow' | 'ask' | 'deny' }>
+    /** 重置某插件的委派用量（需 confirm） */
+    resetAgentUsage(args: { pluginId: string; confirm?: boolean }): Promise<{ cleared: boolean }>
+    /** 「插件权限」页签的总览（每插件一行；只读） */
+    agentOverview(): Promise<{ rows: unknown[]; limits: unknown }>
+    /** 写某插件的委派额度与 D5 放宽开关（需 confirm） */
+    setAgentConfig(args: {
+      pluginId: string
+      limits?: { concurrency?: number; callsPerHour?: number }
+      relax?: { fs?: boolean; mcp?: boolean }
+      confirm?: boolean
+    }): Promise<unknown>
+    /** 改写某插件的**工具审批**三态（需 confirm） */
+    setToolApproval(args: {
+      pluginId: string
+      state: 'allow' | 'ask' | 'deny'
+      confirm?: boolean
+    }): Promise<{ pluginId: string; state: 'allow' | 'ask' | 'deny' }>
+    /**
     * 渲染层半边的日志上报（界面扩展装载失败 / 插件 warn·error）→ 落进插件日志缓冲。
     * 与 preload 的 `dsh.plugin.clientLog` 一致；只读语义的追加，不需要审批。
     */
@@ -182,10 +224,15 @@ export interface AikmDshApi {
     files: {
       grants(options: { id: string }): Promise<{
         id: string
-        entries: Array<{ path: string; isDir: boolean; exists: boolean }>
+        entries: Array<{ path: string; mode: 'read' | 'write'; isDir: boolean; exists: boolean }>
       }>
       revokeGrant(options: { id: string; path: string; confirm?: boolean }): Promise<{ removed: boolean }>
       clearGrants(options: { id: string; confirm?: boolean }): Promise<{ removed: boolean }>
+      /** 为用户选一个**可写**文件夹（写权限的唯一来源；授权模式 write） */
+      pickWritableDirectory(options: { id: string; title?: string }): Promise<{
+        cancelled: boolean
+        dir: { path: string; name: string; mode?: 'write' } | null
+      }>
     }
     /** 渲染层半边的 bundle 源码（P1：渲染层用 Blob URL 动态 import） */
     clientBundle(id: string): Promise<{ entry: string; code: string }>

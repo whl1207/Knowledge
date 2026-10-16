@@ -23,8 +23,16 @@ import type { ToolDefinition, ToolRegistryEventMap } from '@/types/tool'
  */
 export const PLUGIN_HOST_API_VERSION = 1
 
-/** 插件权限类别：声明即向用户公开，未声明则对应宿主能力直接拒绝 */
-export type PluginPermission = 'fs' | 'shell' | 'net' | 'agent' | 'llm'
+/**
+ * 插件权限类别：声明即向用户公开，未声明则对应宿主能力直接拒绝。
+ *
+ * ⚠️ `'agent'` 与 `'agent.run'` 是**两件事**，别合并：
+ * - `'agent'`：只读会话日志摘要（`ctx.host.sessions.list()`，**主进程半边**能力）；
+ * - `'agent.run'`：调一次受预算约束的委派智能体（`ctx.agent.run()`，**界面半边**能力）。
+ * 若把 `'agent'` 扩成"可读可跑"，所有已声明它的老插件会**静默获得烧钱能力**，
+ * 违背"声明即合同"。新增独立权限是加法：老插件行为一个字节不变。
+ */
+export type PluginPermission = 'fs' | 'shell' | 'net' | 'agent' | 'agent.run' | 'llm'
 
 /**
  * 插件运行态（对齐 Cordis fiber 状态机的可见投影）。
@@ -178,6 +186,29 @@ export interface PluginHostApi {
   /** 会话日志只读视图：需声明 `agent` 权限 */
   sessions: {
     list(): Promise<Array<{ id: string; events: number; lastTs: number }>>
+  }
+  /**
+   * **用户授权过的路径**内的读写（需声明 `fs` 权限）。
+   *
+   * 与上面的 `readFile` / `writeFile` 的区别：那两个被**限制在插件自己的目录内**；
+   * 这里能碰用户的真实文件，但**只在你亲自选过的路径内**，而且：
+   * - 只读授权只能读；**写只认可写授权**（用户以"可写文件夹"方式授权过才成立）；
+   * - 目录授权覆盖其子树；**按路径段**比较（授权 `/a/b` 不会放行 `/a/bc`）；
+   * - 越界 / 只读写入都会抛错，错误信息里说清是哪种。
+   *
+   * 插件工具的写入走这里；界面半边写文件用 `ctx.files.writeText`（同一套授权校验）。
+   */
+  granted: {
+    /** 本插件被授权的路径与模式（只读 / 可写），以及现在是否还在 */
+    list(): Promise<Array<{ path: string; mode: 'read' | 'write'; isDir: boolean; exists: boolean }>>
+    /** 读授权范围内的文本文件（PDF 请用界面半边的 ctx.files.readText） */
+    readText(path: string, options?: { maxBytes?: number }): Promise<{ path: string; text: string; size: number }>
+    /** 写文本（覆盖式；父目录自动创建）。**只认可写授权** */
+    writeText(path: string, content: string): Promise<{ path: string; bytes: number }>
+    /** 列目录（一层；需在授权范围内） */
+    listDir(dir: string): Promise<Array<{ name: string; path: string; isDir: boolean; size: number }>>
+    /** 删除文件 / **空**目录（只认可写授权；不做递归删除） */
+    remove(path: string): Promise<{ removed: boolean; missing?: boolean }>
   }
   /** 向用户提示（广播到渲染层，主窗口弹出提示） */
   notify(message: string): void

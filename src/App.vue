@@ -344,11 +344,27 @@ import { useTallLayout } from '@/composables/useTallLayout'
   /**
    * 点启动器：在主面板位置显示插件网格（不切换 mainPanel，关掉后仍在原面板）。
    * 点网格里的插件 → 以子窗口形态打开（桌面）/ 应用内浮层（浏览器、安卓）。
-   * 关闭网格由「切换主面板」（见 watch(() => store.mainPanel)）或再点一次启动器完成。
+   * 关闭网格由「点任一主面板导航按钮」（见 selectPanel）或再点一次启动器完成。
    */
   function togglePluginLauncher() {
     store.pluginLauncherOpen = !store.pluginLauncherOpen
     nextTick(syncNavOverflow)
+  }
+
+  /**
+   * 点导航按钮切主面板（顶栏 / 左侧 / 底部三处导航共用同一个入口）。
+   *
+   * ⚠️ 模板里不能直接写 `store.mainPanel = btn.key`：收起「插件网格」挂在
+   * `watch(() => store.mainPanel)` 上，而 watch **只在值真的变化时**才触发。
+   * 已经在某个面板上再点它一次（最常见：点开插件启动器后点「主页」想回主页）值时没变，
+   * 网格就不会收 —— 表现为「按钮悬浮有样式、点了没反应」（网格只是导航栏的入口页，
+   * 它并不改 mainPanel，所以「当前面板」和「看到的页面」会一直对不上）。
+   * 因此把「切面板」和「收网格」绑在同一个入口上，值没变时也照样收网格。
+   */
+  function selectPanel(key: string) {
+    // 先收网格再切面板：两处都在同一个 tick 内完成，不会先渲染网格再切走
+    if (store.pluginLauncherOpen) store.pluginLauncherOpen = false
+    store.mainPanel = key
   }
 
   /**
@@ -827,7 +843,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
         class="side-nav-item"
         :class="{ active: store.mainPanel == btn.key }"
         :data-core-key="btn.key"
-        @click="store.mainPanel = btn.key"
+        @click="selectPanel(btn.key)"
         :title="btn.title"
       >
         <i :class="btn.icon"></i>
@@ -840,7 +856,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
         class="side-nav-item"
         :class="{ active: store.mainPanel == btn.key }"
         :data-plugin-key="btn.key"
-        @click="store.mainPanel = btn.key"
+        @click="selectPanel(btn.key)"
         :title="btn.title"
       >
         <i :class="btn.icon"></i>
@@ -888,7 +904,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
                 :key="btn.key"
                 :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen }"
                 :data-core-key="btn.key"
-                @click="store.mainPanel = btn.key"
+                @click="selectPanel(btn.key)"
                 :title="btn.title"
               ><i :class="btn.icon"></i></div>
 
@@ -902,7 +918,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
                   :key="btn.key"
                   :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen }"
                   :data-plugin-key="btn.key"
-                  @click="store.mainPanel = btn.key"
+                  @click="selectPanel(btn.key)"
                   :title="btn.title"
                 ><i :class="btn.icon"></i></div>
               </div>
@@ -999,7 +1015,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
         class="bottom-nav-item"
         :class="{ active: store.mainPanel == btn.key }"
         :data-core-key="btn.key"
-        @click="store.mainPanel = btn.key"
+        @click="selectPanel(btn.key)"
         :title="btn.title"
       >
         <i :class="btn.icon"></i>
@@ -1012,7 +1028,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
         class="bottom-nav-item"
         :class="{ active: store.mainPanel == btn.key }"
         :data-plugin-key="btn.key"
-        @click="store.mainPanel = btn.key"
+        @click="selectPanel(btn.key)"
         :title="btn.title"
       >
         <i :class="btn.icon"></i>

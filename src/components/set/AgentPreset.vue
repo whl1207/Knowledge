@@ -192,20 +192,32 @@
             <div class="cfg-row"><label>{{ store.locales === 'en' ? 'Name' : '名称' }}</label><input v-model="selected.name" :placeholder="store.locales === 'en' ? 'Agent Name' : 'Agent 名称'" /></div>
             <div class="cfg-row">
               <label>{{ store.locales === 'en' ? 'Source' : '来源' }}</label>
-              <select v-model="selected.llmType" @change="onLlmTypeChange">
+              <select v-model="sourceValue" @change="onLlmTypeChange">
+                <!-- 跟随默认：不绑定具体来源，运行时读「设置 → 模型」的当前来源（换来源 / 换环境无需重配） -->
+                <option :value="FOLLOW_DEFAULT_LLM">{{ store.locales === 'en' ? 'Follow default' : '跟随默认' }}</option>
                 <option v-for="t in llmTypes" :key="t" :value="t">{{ llmTypeLabel(t) }}</option>
               </select>
             </div>
             <div class="cfg-row">
               <label>{{ store.locales === 'en' ? 'Model' : '模型' }}</label>
-              <select v-model="selected.model" style="flex:1;min-width:0">
-                <option value="">{{ store.locales === 'en' ? '-- Select Model --' : '-- 选择模型 --' }}</option>
+              <select v-model="selected.model" style="flex:1;min-width:0" :disabled="sourceFollowsDefault">
+                <option value="">{{ sourceFollowsDefault
+                  ? (store.locales === 'en' ? '-- Follow default source model --' : '-- 跟随默认来源的模型 --')
+                  : (store.locales === 'en' ? '-- Select Model --' : '-- 选择模型 --') }}</option>
                 <option v-for="m in getModelsForAgent(selected)" :key="m" :value="m">{{ m }}</option>
               </select>
               <div class="button" style="width:30px;margin:0px;padding:4px 0px;flex-shrink:0" @click="refreshAgentModels()"
                   :title="store.locales === 'en' ? 'Refresh model list of this source' : '刷新该来源的模型列表'">
                 <i class="fa" :class="modelListLoading ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
               </div>
+            </div>
+            <div v-if="sourceFollowsDefault" class="cfg-row">
+              <span class="preset-follow-hint">
+                <i class="fa fa-refresh"></i>
+                {{ store.locales === 'en'
+                  ? 'This preset uses whatever source / model is current in Settings → Model, so switching source or moving to another environment needs no reconfiguration here.'
+                  : '该预设跟随「设置 → 模型」里的当前来源与模型：之后换来源、换环境都无需再回来改这里。' }}
+              </span>
             </div>
             <div class="cfg-row">
               <label>{{ store.locales === 'en' ? 'Temp' : '温度' }}</label>
@@ -255,9 +267,17 @@
                   @click="togglePresetTool(t.name)">
                   <span class="preset-tool-icon"><i class="fa" :class="t.icon"></i></span>
                   <span class="preset-tool-info">
-                    <span class="preset-tool-name">{{ store.locales === 'zh' ? t.labelZh : t.labelEn }}</span>
-                    <code class="preset-tool-key">{{ t.name }}</code>
-                    <span v-if="store.locales === 'zh'" class="preset-tool-desc">{{ t.description }}</span>
+                    <span class="preset-tool-name">{{ t.srcKind === 'plugin' ? t.name : (store.locales === 'zh' ? t.labelZh : t.labelEn) }}</span>
+                    <!-- 来源标识：内置 / 来自某个插件（用户要求：工具名右侧能看出它是内置还是插件给的） -->
+                    <span class="preset-tool-src" :class="t.srcKind"
+                      :title="t.srcKind === 'plugin'
+                        ? (store.locales === 'zh' ? `由插件「${t.srcLabelZh}」提供` : `Provided by plugin “${t.srcLabelEn}”`)
+                        : (store.locales === 'zh' ? '应用内置工具' : 'Built-in tool')">
+                      <i class="fa" :class="t.srcKind === 'plugin' ? 'fa-puzzle-piece' : 'fa-cube'"></i>
+                      {{ t.srcKind === 'plugin' ? t.srcLabelZh : (store.locales === 'zh' ? t.srcLabelZh : t.srcLabelEn) }}
+                    </span>
+                    <code v-if="t.srcKind !== 'plugin'" class="preset-tool-key">{{ t.name }}</code>
+                    <span v-if="t.srcKind !== 'plugin' && store.locales === 'zh'" class="preset-tool-desc">{{ t.description }}</span>
                   </span>
                   <span class="preset-tool-toggle" :class="{ on: t.on }"><i class="preset-toggle-knob"></i></span>
                 </div>
@@ -265,8 +285,8 @@
               <div class="preset-tools-hint">
                 <i class="fa fa-info-circle"></i>
                 {{ store.locales === 'en'
-                  ? 'Each tool toggles independently (same granularity as Tool Management) and is persisted per tool. Writing = write_file / replace_in_file / multi_replace; reading = read_file / search_files; web = web_search / web_fetch. Enabling KB / MCP / Skill opens their config tabs.'
-                  : '每个工具独立开关并精确持久化（与「工具管理」同粒度）。写入文件 = write_file / replace_in_file / multi_replace；读取文件 = read_file / search_files；网页 = web_search / web_fetch。开启 知识库 / MCP / 技能 后可在对应页配置。' }}
+                  ? 'Each tool toggles independently (same granularity as Tool Management) and is persisted per tool. Writing = write_file / replace_in_file / multi_replace; reading = read_file / search_files; web = web_search / web_fetch. Enabling KB / MCP / Skill opens their config tabs. Plugin tools (marked with a puzzle icon and the plugin name) are NOT enabled by default — tick them here to let this preset call them.'
+                  : '每个工具独立开关并精确持久化（与「工具管理」同粒度）。写入文件 = write_file / replace_in_file / multi_replace；读取文件 = read_file / search_files；网页 = web_search / web_fetch。开启 知识库 / MCP / 技能 后可在对应页配置。带拼图图标与插件名的工具由插件提供，**默认不勾选**——要让这个预设能用它，在这里勾上。' }}
               </div>
             </div>
           </div>
@@ -475,7 +495,8 @@ import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import draggable from 'vuedraggable'
 import { mcpManager } from '@/platform/mcpManager'
-import { toolsFromCapabilities, setToolEnabled, toolOn } from '@/lib/agent/capabilities'
+import { toolsFromCapabilities, setToolEnabled, toolOn, getPluginToolNames } from '@/lib/agent/capabilities'
+import { pluginDisplayName, pluginToolScopes } from '@/lib/plugin/runtime'
 import { AGENT_TOOL_REGISTRY, type AgentToolInfo } from '@/services/agentSkills'
 import {
   scanAgentPresets, writeAgentPreset, removeAgentPreset, agentFilePath,
@@ -484,7 +505,7 @@ import {
 import { renderLoopSections } from '@/lib/agent/skill'
 import { AGENT_MAX_STEPS_MAX, DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset, resetBuiltinAgentPreset, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
-import { deepSeekStyleOf, normalizeLlmTypeList } from '@/shared/llmSources'
+import { FOLLOW_DEFAULT_LLM, deepSeekStyleOf, normalizeLlmTypeList, presetFollowsDefaultLlm } from '@/shared/llmSources'
 import { getPlatform, hasCapability } from '@/platform'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { useMobileBackScreen } from '@/composables/useBackLayer'
@@ -623,11 +644,52 @@ const defaultCapabilities = (): AgentPresetCapabilities => ({
   knowledgeBaseFiles: [],
 })
 
-// 工具标签页：逐真实工具行（数据源 AGENT_TOOL_REGISTRY，与「工具管理」面板同粒度）
-type ToolRow = AgentToolInfo & { on: boolean }
-const toolRows = computed<ToolRow[]>(() =>
-  AGENT_TOOL_REGISTRY.map((t) => ({ ...t, on: toolOn(selected.value?.capabilities, t.name) }))
-)
+// 工具标签页：逐真实工具行（内置来自 AGENT_TOOL_REGISTRY；插件来自已激活插件同步过来的名单）
+// 每行带 **来源**：内置，或某个插件（方案 B：插件工具与内置工具一视同仁，勾了才生效）
+type ToolRow = AgentToolInfo & { on: boolean; srcKind: 'builtin' | 'plugin'; srcLabelZh: string; srcLabelEn: string }
+
+/** `plugin:math-proof-graph` → `math-proof-graph`；非插件 scope 返回空串 */
+const pluginNameOfScope = (scope: unknown): string => {
+  const s = String(scope || '')
+  return s.startsWith('plugin:') ? (s.slice('plugin:'.length).split('/')[0] || '') : ''
+}
+
+/** 已激活插件提供的工具行（名字与来源都来自渲染层同步的名单） */
+const pluginToolRows = computed<ToolRow[]>(() => {
+  const caps: any = selected.value?.capabilities
+  const scopes = pluginToolScopes.value
+  return getPluginToolNames().map((name) => {
+    const pid = pluginNameOfScope(scopes[name])
+    // 插件清单里的 aikm.name 就是它唯一的显示名（插件名没有中英两套），中英界面都显示它
+    const zh = pluginDisplayName(pid)
+    return {
+      // 插件工具没有静态展示元数据：标签留空，界面直接显示工具名本身
+      name,
+      labelZh: '',
+      labelEn: '',
+      icon: 'fa-puzzle-piece',
+      description: '',
+      sandboxPreference: 'none',
+      approvalRequirement: 'on-request',
+      defaultEnabled: false,
+      on: toolOn(caps, name),
+      srcKind: 'plugin',
+      srcLabelZh: zh,
+      srcLabelEn: zh,
+    } as ToolRow
+  })
+})
+
+const toolRows = computed<ToolRow[]>(() => [
+  ...AGENT_TOOL_REGISTRY.map((t) => ({
+    ...t,
+    on: toolOn(selected.value?.capabilities, t.name),
+    srcKind: 'builtin' as const,
+    srcLabelZh: '内置',
+    srcLabelEn: 'Built-in',
+  })),
+  ...pluginToolRows.value,
+])
 
 /** 逐工具开关；关闭 kb_search / mcp_call 时联动清空已关联项（对齐旧 onCapToggle 行为） */
 const togglePresetTool = (tool: string) => {
@@ -683,10 +745,25 @@ const customSourceName = (): string => {
   const name = src && src.name
   return (name && String(name).trim()) ? String(name).trim() : (store.locales === 'en' ? 'Custom' : '自定义')
 }
+/** 当前预设是否「跟随默认」（来源 / 模型都读全局配置） */
+const sourceFollowsDefault = computed(() => presetFollowsDefaultLlm(selected.value))
+/**
+ * 来源下拉的取值：跟随默认显示哨兵档位（空串是历史数据里的「未配置」，两者都归到该档）。
+ * 写回时**只往预设里写空串 / 具体来源键**，哨兵值不落盘。
+ */
+const sourceValue = computed<string>({
+  get: () => (sourceFollowsDefault.value ? FOLLOW_DEFAULT_LLM : String(selected.value?.llmType || '')),
+  set: (v: string) => {
+    if (!selected.value) return
+    selected.value.llmType = v === FOLLOW_DEFAULT_LLM ? '' : v
+  },
+})
 const getModelsForAgent = (agent: AgentPreset): string[] => {
   const cfg = store.AIconfig.llm
   if (!cfg) return []
-  const type = agent.llmType || cfg.type
+  // 跟随默认：来源与模型都读全局，模型候选也用全局来源的列表
+  const follow = presetFollowsDefaultLlm(agent)
+  const type = follow ? String(cfg.type || '') : (agent.llmType || cfg.type)
   let list: string[] = []
   switch (type) {
     case 'ollama':
@@ -731,7 +808,8 @@ const getModelsForAgent = (agent: AgentPreset): string[] => {
     default: return []
   }
   // 合并当前预设已保存的模型名（可能不在候选列表，如手填/custom），保证下拉能显示已选值
-  const saved = String(agent?.model || '').trim()
+  // 跟随默认时预设不持有模型 → 不合并，避免残留旧模型名让人以为还在绑定
+  const saved = follow ? '' : String(agent?.model || '').trim()
   if (saved && !list.includes(saved)) list = [saved, ...list]
   return list.filter(Boolean)
 }
@@ -916,8 +994,8 @@ const resetSelectedToDefault = async () => {
   try {
     await ElMessageBox.confirm(
       store.locales === 'en'
-        ? `Restore “${p.name}” to factory settings? Everything you edited on this preset (name / model / prompt / tools / skills / MCP / loop sections) will be replaced by the built-in defaults.`
-        : `把「${p.name}」恢复为出厂默认？你在这个预设上改过的名称 / 模型 / 系统提示 / 工具 / 技能 / MCP / 指令段都会被内置默认值替换。`,
+        ? `Restore “${p.name}” to factory settings? Everything you edited on this preset (name / model / prompt / tools / skills / MCP / loop sections) will be replaced by the built-in defaults. Its source goes back to “Follow default” too.`
+        : `把「${p.name}」恢复为出厂默认？你在这个预设上改过的名称 / 模型 / 系统提示 / 工具 / 技能 / MCP / 指令段都会被内置默认值替换，来源也会恢复为「跟随默认」。`,
       store.locales === 'en' ? 'Restore built-in preset' : '恢复内置预设',
       {
         type: 'warning',
@@ -1180,11 +1258,10 @@ const addPreset = async () => {
     id: genId(),
     name: store.locales === 'en' ? 'New Agent' : '新 Agent',
     tags: [],
-    llmType: store.AIconfig.llm.type,
-    // 默认跟随全局当前模型（DeepSeek 按当前接口样式取对应配置块）
-    model: String(deepSeekStyleOf(store.AIconfig.llm.type, store.AIconfig.llm.deepseek) === 'responses'
-      ? (store.AIconfig.llm as any).deepseekResponses?.model
-      : (store.AIconfig.llm as any)[store.AIconfig.llm.type]?.model || ''),
+    // 默认「跟随默认」：不绑定来源与模型，运行时读全局「设置 → 模型」的当前值
+    // （换来源 / 换环境后无需回头逐个改预设；想钉死某个来源时在「通用」页手动选）
+    llmType: '',
+    model: '',
     systemPrompt: '',
     temperature: 0.7,
     kbTopK: 3,
@@ -1332,7 +1409,8 @@ const modelListLoading = ref(false)
  * 因此切换来源时必须主动拉一次，否则本模块的模型下拉会是空的。
  */
 const refreshAgentModels = async (type?: string) => {
-  const t = type || selected.value?.llmType || store.AIconfig.llm.type
+  // 跟随默认时按全局当前来源拉取候选模型（预设自身没有来源可拉）
+  const t = type || (sourceFollowsDefault.value ? store.AIconfig.llm.type : selected.value?.llmType) || store.AIconfig.llm.type
   if (!t || modelListLoading.value) return
   modelListLoading.value = true
   try {
@@ -1343,13 +1421,16 @@ const refreshAgentModels = async (type?: string) => {
     modelListLoading.value = false
   }
 }
-/** 修改来源时清空模型，并自动拉取该来源的候选模型（否则下拉为空） */
+/**
+ * 修改来源：清空已选模型并自动拉取该来源的候选模型（否则下拉为空）。
+ * 切到「跟随默认」时模型一并清空（跟随档不持有模型，由全局配置兜底）。
+ */
 const onLlmTypeChange = () => {
   if (selected.value) selected.value.model = ''
   refreshAgentModels()
 }
 // 切换预设/来源后，候选列表为空时自动拉一次（已拉取过的不重复请求）
-watch(() => [selected.value?.id, selected.value?.llmType], () => {
+watch(() => [selected.value?.id, selected.value?.llmType, store.AIconfig.llm.type], () => {
   if (selected.value && getModelsForAgent(selected.value).length === 0) refreshAgentModels()
 })
 
@@ -1692,6 +1773,16 @@ onMounted(async () => {
 }
 .preset-tool-name { font-size: 11px; color: var(--fontColor); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preset-tool-item.on .preset-tool-name { color: var(--fontActiveColor); font-weight: 600; }
+/* 来源标识：内置（fa-cube）/ 来自某个插件（fa-puzzle-piece）——用户要求工具名旁能看出处 */
+.preset-tool-src {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 9px; line-height: 1.5; padding: 0 4px; border-radius: 3px;
+  align-self: flex-start; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.preset-tool-src.builtin { color: var(--fontColor); opacity: 0.45; border: 1px solid var(--borderColor); }
+.preset-tool-src.plugin { color: var(--fontActiveColor); border: 1px solid var(--fontActiveColor); }
+.preset-tool-src.plugin i { font-size: 9px; }
 /* 工具/技能卡片信息区（参照工具管理面板 tool-info：名称 + 工具 key + 介绍） */
 .preset-tool-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .preset-tool-key {
@@ -1792,6 +1883,11 @@ onMounted(async () => {
   background: var(--backgroundColor); color: var(--fontColor); padding: 2px 6px; font-size: 12px;
 }
 .exec-config-hint { font-size: 10px; opacity: 0.55; }
+/* 「跟随默认」提示（来源 / 模型两行下方的一行说明） */
+.preset-follow-hint {
+  font-size: 10px; opacity: 0.6; display: inline-flex; align-items: center; gap: 4px;
+  line-height: 1.5; margin-left: 2px;
+}
 .exec-config-check { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; cursor: pointer; }
 .exec-config-check input { accent-color: #409eff; cursor: pointer; }
 

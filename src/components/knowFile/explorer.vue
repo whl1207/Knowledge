@@ -15,7 +15,7 @@
                 <i class="fa fa-arrow-left"></i>
               </div>
             </template>
-            <!-- 面板顶部按钮组：工作区 / 打开文件 / 搜索 / 创建文件 -->
+            <!-- 面板顶部按钮组：工作区 / 打开文件 / 搜索（新建文件走文件树右键「新建」，两处不再各留一个入口） -->
             <template #toolbar>
               <div class="panel-home">
                 <div class="panel-home-btn" @click="openFolderDialog" :title="store.locales=='zh'?'添加工作区':'Add Workspace'">
@@ -26,9 +26,6 @@
                 </div>
                 <div class="panel-home-btn" :class="{active:searchOpen}" @click="searchOpen=!searchOpen" v-if="store.root!=''" :title="store.locales=='zh'?'搜索':'Search'">
                   <i class="fa fa-search"></i>
-                </div>
-                <div class="panel-home-btn" v-if="store.root!=''" @click="panelRef?.promptCreateFile()" :title="store.locales=='zh'?'创建文件':'Create File'">
-                  <i class="fa fa-plus"></i>
                 </div>
               </div>
             </template>
@@ -477,7 +474,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     overflow: hidden; /* 防止整体溢出 */
   }
 
-  /* 面板顶部 4 按钮组（工作区 / 打开文件 / 搜索 / 创建文件）：与搜索框同一行（见 panel.vue 的 .tree-toolbar） */
+  /* 面板顶部 3 按钮组（工作区 / 打开文件 / 搜索）：与搜索框同一行（见 panel.vue 的 .tree-toolbar） */
   .panel-home {
 
     display: flex;
