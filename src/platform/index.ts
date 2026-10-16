@@ -39,12 +39,17 @@ export function getPlatform(): Platform {
     } else {
       const info = hostRuntime()
       cached = info ? createHostPlatform(info) : browserPlatform
-      // 在 Electron 窗口里却拿不到 ipcRenderer：几乎总是 preload 没加载（产物缺失 / 路径不对），
-      // 此时整个界面会静默退化成「网页模式」（没有窗口壳与桌面能力）。这里明确报出来，
-      // 否则只能看到「软件变成了网页版」这种没有线索的现象。
+      // 在 Electron 窗口里却拿不到 ipcRenderer：几乎总是 preload 没加载（产物缺失 / 路径不对 /
+      // 这份文档压根没执行 preload），此时整个界面会静默退化成「网页模式」（没有窗口壳与桌面能力）。
+      // 这里明确报出来，否则只能看到「软件变成了网页版」这种没有线索的现象。
+      // 注意 dev 下还有一种「产物完全正常、只是这份文档没跑 preload」的情况：DevTools（或任何 CDP 客户端）
+      // 抢在首个文档提交之前碰了该帧的初始空文档，Electron ≤42 会把这份文档的 preload 整个跳过
+      // （见 electron/main/preload-guard.ts）。主进程收到 preload 就绪握手后不会有这条报错；
+      // 没收到则会自动 reload 一次。
       if (!info && typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent || '')) {
         console.error('[platform] 运行在 Electron 窗口里，但拿不到宿主 IPC 桥（aikmIpcAvailable() 为 false）—— preload 没有加载成功，'
-          + '界面将退化为网页模式。请检查 dist-electron/preload/index.mjs（或 .cjs）是否存在，必要时重新 npm run build:web。')
+          + '界面将退化为网页模式。请检查 dist-electron/preload/index.cjs 是否存在（必要时重新 npm run build:web）；'
+          + '若产物正常且开着 DevTools / 连着 CDP，多半是「首个文档未执行 preload」这个已知竞态，重载窗口即可恢复。')
       }
     }
   }

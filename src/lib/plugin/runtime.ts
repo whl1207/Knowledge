@@ -15,6 +15,7 @@
  */
 
 import { declareCoreSlots, coreSlotScope, slotRegistry, type SlotDefinition } from './slots'
+import { ClientEventBus } from './clientEventBus'
 import { getPluginBridge, type PluginBridgeApi, type PluginClientBundle } from './bridge'
 import { createPluginLocaleApi, type PluginLocaleApi } from './locale'
 import { createPluginLlmApi, type PluginLlmApi } from './llm'
@@ -160,39 +161,23 @@ interface ClientPluginHandle {
 
 // ---------------------------------------------------------------------------
 // 渲染层事件总线（插件之间 / 插件与外壳之间的轻量通信）
+//
+// 实现抽到 src/lib/plugin/clientEventBus.ts：那里没有 Vue / 平台依赖，可以被 Node 下的
+// 自测直接实例化，从而**行为级**验证「重载不加监听器」这个不变式（见同目录 .selftest.ts）。
 // ---------------------------------------------------------------------------
-
-class ClientEventBus {
-  private listeners = new Map<string, Set<(payload: unknown) => void>>()
-
-  on(type: string, listener: (payload: unknown) => void): () => void {
-    let set = this.listeners.get(type)
-    if (!set) {
-      set = new Set()
-      this.listeners.set(type, set)
-    }
-    set.add(listener)
-    return () => {
-      set?.delete(listener)
-    }
-  }
-
-  emit(type: string, payload: unknown): void {
-    const set = this.listeners.get(type)
-    if (!set) return
-    for (const listener of Array.from(set)) {
-      try {
-        listener(payload)
-      } catch (e) {
-        console.error(`[plugin-runtime] 事件监听器异常 (${type}):`, e)
-      }
-    }
-  }
-}
 
 const bus = new ClientEventBus()
 
-/** 渲染层插件事件（供插件订阅；外壳也在这条总线上广播 plugin/changed） */
+/**
+ * 渲染层插件事件（供插件订阅）。
+ *
+ * 这条总线上由**外壳**发出的只有 `plugin/loaded` 与 `plugin/unloaded`；
+ * `plugin/changed` **不**在这里 —— 它走主进程 IPC（`bridge.onEvent`，见 initPluginRuntime），
+ * 外壳收到后自己触发同步。两件事别混：前者是"给插件听的事件"，后者是"给外壳的指令"。
+ *
+ * ⚠️ 插件不要直接 import 本模块（客户端 bundle 是单文件 ESM，本来也 import 不了）：
+ * 走 `ctx.on` 才能拿到 disposer 托管，否则监听器会跨重载累积。
+ */
 export const clientPluginEvents = {
   on: (type: string, listener: (payload: unknown) => void) => bus.on(type, listener),
 }

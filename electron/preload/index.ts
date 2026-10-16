@@ -629,6 +629,18 @@ try {
 // @ts-ignore
 ;(window as any).__aikmClaimIpcBridge = claimIpcBridge
 
+// ---------------------------------------------------------------------------
+// preload 就绪握手（宿主侧的自救依据，见 electron/main/preload-guard.ts）
+// ---------------------------------------------------------------------------
+// 这一句必须在**本脚本确实执行完**的前提下才会发出：主进程据此判断某个窗口这一份文档到底有没有
+// 跑过 preload。没有它，「preload 被 Electron 静默跳过」就只能靠渲染层的报错反推（渲染层拿不到
+// 桥时是静默降级成网页模式的，见 src/platform/index.ts）。
+try {
+  ipcRenderer.send('preload:loaded')
+} catch {
+  /* 极端情况下（IPC 不可用）握手失败即可，不影响 preload 本身 */
+}
+
 // --------- Preload scripts loading ---------
 function domReady(condition: DocumentReadyState[] = ['complete', 'interactive']) {
   return new Promise((resolve) => {

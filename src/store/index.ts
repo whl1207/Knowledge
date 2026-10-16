@@ -29,6 +29,7 @@ import type { OpenFileWindowPayload, OpenPluginPanelPayload } from '@/platform/c
 // 语音输入默认快捷键 / 迁移判定：唯一来源（见 src/shared/asrShortcut.ts）
 import { DEFAULT_ASR_SHORTCUT, needsShortcutMigration } from '@/shared/asrShortcut'
 import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
+import { migrateLlmKeys } from '@/lib/llmCredentials'
 declare global {
   interface Window {
     _refreshTimer: NodeJS.Timeout | null;
@@ -260,6 +261,11 @@ export function normalizeThemeName(ui: any): boolean {
 // 确保恢复结果与初始默认完全一致，不受后续 loadConfig 合并/用户修改影响
 let DEFAULT_AIconfig: any = null
 let _aiConfigCaptured = false
+/**
+ * `secureLlmCredentials()` 的重入闸。
+ * 该动作用 `this.saveConfig()` 落盘，而 saveConfig 末尾又会调它 —— 没有闸会变成递归。
+ */
+let securingLlmKeys = false
 export const usestore = defineStore('data', {
     // 创建state
     state: () => {
@@ -1301,6 +1307,9 @@ export const usestore = defineStore('data', {
             // （AI 模型来源/工具开关/MCP/Agent 预设等不在 UI 广播范围内，主窗口内存不会自动更新）
             broadcastSettingsChanged(uiJson, locale)
             // 注意：图片附件不保存到localStorage，因为可能很大
+            // 顺手把内联的模型 API Key 搬进主进程凭据库（否则明文会留在 localStorage 里被插件读走）；
+            // 无需等待：本函数保持同步，搬完由 secureLlmCredentials 自己再落盘一次。
+            void this.secureLlmCredentials()
         },
 
         /**
@@ -1808,6 +1817,8 @@ export const usestore = defineStore('data', {
 
             // 迁移结果统一落盘（此时 llmSourceStatus / llmDisabledSources 已读入内存，不会被覆盖）
             if (needPersist) this.saveConfig()
+            // 老装机升级：把历史遗留的内联 API Key 搬进主进程凭据库（幂等；浏览器/安卓无凭据接缝则不动）
+            void this.secureLlmCredentials()
         },
 
         // ================ MCP 服务管理 ================
@@ -3192,6 +3203,40 @@ export const usestore = defineStore('data', {
             } catch (e) {
                 console.error('[ASR] LLM 标点校验失败，返回原文:', e)
                 return text
+            }
+        },
+
+        /**
+         * 把内联在 `AIconfig` 里的模型 API Key 搬进主进程凭据库（实现见 src/lib/llmCredentials.ts）。
+         *
+         * 动机：`AIconfig` 整份落在 localStorage，而界面半边插件与宿主**同 realm** —— 它能直接
+         * `localStorage.getItem('AIconfig')` 读走明文再用 `fetch` 外带，`net` / `llm` 权限都拦不住
+         * 环境网络能力。搬走后 localStorage 里只剩 `apiKeyRef`，明文只在主进程 credentials.json。
+         *
+         * 三条安全约束（别简化掉）：
+         *  1. **只在有凭据接缝时执行**：浏览器 / 安卓没有 `aikmDsh.credentials`，整体跳过 ——
+         *     宁可明文留着，也绝不为了这个不变式把用户的密钥弄丢；
+         *  2. **先写成功才清明文**：`migrateLlmKeys` 里写失败就地保留原状（fail-open），
+         *     不会出现"ref 指向不存在的凭据、明文又被清掉"这种不可恢复状态；
+         *  3. **幂等**：没有明文时一次遍历就返回；有重入闸，因为落盘会回调 saveConfig 再调回本函数。
+         */
+        async secureLlmCredentials(): Promise<{ migrated: number; failed: number }> {
+            if (securingLlmKeys) return { migrated: 0, failed: 0 }
+            const credentials = aikmDsh?.credentials
+            if (typeof credentials?.set !== 'function') return { migrated: 0, failed: 0 }
+            securingLlmKeys = true
+            try {
+                const r = await migrateLlmKeys(this.AIconfig, {
+                    set: (name: string, value: string) => credentials.set(name, value),
+                })
+                if (r.errors.length) {
+                    // 明确说清"没有丢密钥"，否则看到这条日志的人会以为数据坏了
+                    console.warn('[store] 部分 API Key 未能搬入凭据库（明文已保留，未丢密钥）:', r.errors)
+                }
+                if (r.migrated) this.saveConfig()
+                return { migrated: r.migrated, failed: r.failed }
+            } finally {
+                securingLlmKeys = false
             }
         },
 

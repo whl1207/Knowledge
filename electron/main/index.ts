@@ -21,6 +21,8 @@ import { shellService } from './shell-service'
 import { isVerbose, logInfo, logWarn } from './log'
 // 开发模式判定 / 产物路径 / preload 解析（唯一来源：打包版不会被残留的 dev 地址带偏）
 import { DEV_SERVER_URL, DIST_DIR, DIST_ELECTRON_DIR, INDEX_HTML, PUBLIC_DIR, resolvePreload } from './run-mode'
+// 「这份文档到底跑没跑 preload」的握手 + 自助恢复（Electron ≤42 的 DevTools/初始空文档竞态，见该文件头注释）
+import { guardPreload } from './preload-guard'
 // 右侧栏「终端」标签的后端：真 PTY（node-pty，见 terminal-service.ts）
 import { disposeAllTerminals, registerTerminalIpc } from './terminal-service'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
@@ -249,6 +251,8 @@ async function createWindow() {
       backgroundThrottling: false
     },
   })
+  // 「首份文档必须跑过 preload」的兜底：没跑就重载一次（Electron ≤42 已知行为，见该文件头注释）
+  guardPreload(win)
 
   
   if (process.platform === 'linux') {
@@ -269,7 +273,16 @@ async function createWindow() {
   
   if (DEV_SERVER_URL) {
     win.loadURL(url)
-    win.webContents.openDevTools({ mode: 'undocked' })
+    // ⚠️ 千万不要在 loadURL() 之后**紧接着** openDevTools()：DevTools 附着时会做 Runtime.enable，
+    // 那会在「首个文档提交之前」给该帧的初始空文档创建脚本上下文，而 Electron ≤42 会因此把这份空文档
+    // 上的 preload 用掉并把帧标成已注入 —— 真正提交的文档就再也不会执行 preload，渲染层拿不到 IPC 桥，
+    // 界面静默退化成网页模式（重新加载一次才好）。
+    // 等首个文档提交（did-navigate 只对「已提交的主框架导航」触发，初始空文档不会触发）之后再开，
+    // 时序上就绕开了这个坑。兜底另见 preload-guard.ts。
+    const devWin = win
+    devWin.webContents.once('did-navigate', () => {
+      if (!devWin.isDestroyed()) devWin.webContents.openDevTools({ mode: 'undocked' })
+    })
   } else {
     win.loadFile(indexHtml)
   }
@@ -512,6 +525,7 @@ ipcMain.handle('open-win', (_, arg) => {
       contextIsolation: false,
     },
   })
+  guardPreload(childWindow)
 
   if (DEV_SERVER_URL) {
     childWindow.loadURL(`${url}#${arg}`)
@@ -635,6 +649,7 @@ function openFileWindow(opts: {
       webSecurity: false
     },
   })
+  guardPreload(childWindow)
   // 登记到映射表（同一路径的多个视图各自一个窗口），窗口关闭时清理
   if (byView) byView.set(viewKey, childWindow)
   else fileWindowsByPath.set(pathKey, new Map([[viewKey, childWindow]]))
@@ -860,6 +875,7 @@ function createSettingsWindow(nav = '', anchor?: BrowserWindow | null): BrowserW
     },
   })
   settingsWin = w
+  guardPreload(w)
   // 设置窗口内的外链（帮助页「设计参考」/ 更新日志、搜索设置等）走系统默认浏览器
   attachExternalLinkHandling(w)
   if (process.platform !== 'darwin') w.setMenuBarVisibility(false)
@@ -989,6 +1005,7 @@ function openPluginPanelWindow(opts: { key: string; title?: string; icon?: strin
     },
   })
   pluginPanelWindows.set(key, childWindow)
+  guardPreload(childWindow)
   attachExternalLinkHandling(childWindow)
 
   const childWcId = childWindow.webContents.id
