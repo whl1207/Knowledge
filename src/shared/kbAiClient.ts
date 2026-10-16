@@ -16,6 +16,7 @@
 
 import { AIUtils } from '@/services/ai-utils'
 import { deepSeekConfig, deepSeekStyleOf, normalizeLlmType } from '@/shared/llmSources'
+import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
 
 // ==================== 类型定义 ====================
 
@@ -114,7 +115,7 @@ export interface KbChatOptions {
 /** 仅当页面由局域网主机投递（同源有 /__proxy）时转发；Electron / 安卓壳 / 本地浏览器直连 */
 function resolveApiUrl(originalUrl: string): string {
   if (typeof window === 'undefined') return originalUrl
-  if ((window as any).ipcRenderer || (window as any).dsh) return originalUrl
+  if (aikmIpcAvailable()) return originalUrl
   if (!(window as any).__AIKM_HOST__) return originalUrl
   return `${window.location.origin}/__proxy?url=${encodeURIComponent(originalUrl)}`
 }
@@ -142,8 +143,8 @@ async function resolveApiKey(config: any): Promise<string> {
   const ref = config?.apiKeyRef
   if (typeof ref === 'string' && ref.trim()) {
     try {
-      if ((window as any).dsh?.credentials?.resolve) {
-        const res = await (window as any).dsh.credentials.resolve(ref.trim())
+      if (aikmDsh?.credentials?.resolve) {
+        const res = await aikmDsh.credentials.resolve(ref.trim())
         if (res?.value) return res.value
       }
     } catch (e) {

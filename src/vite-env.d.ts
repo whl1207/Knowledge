@@ -22,18 +22,14 @@ declare global {
   }
 }
 
-interface IpcRendererApi {
-  on(channel: string, listener: (event: any, ...args: any[]) => void): void
-  off(channel: string, ...omit: any[]): void
-  removeListener(channel: string, listener: (event: any, ...args: any[]) => void): void
-  removeAllListeners(channel: string): void
-  send(channel: string, ...args: any[]): void
-  invoke(channel: string, ...args: any[]): Promise<any>
-}
+/**
+ * 通用 IPC 桥的形状（preload 的 `api` 对象）。
+ *
+ * ⚠️ 它**不再挂在 window 上**——渲染层一律经 `src/lib/aikmIpc.ts` 导出的 `aikmIpc` 访问。
+ * 原因见该文件顶部注释（界面半边插件与宿主同 realm，通用桥挂 window 等于给出全部宿主能力）。
+ */
 
 interface Window {
-  // expose in the `electron/preload/index.ts`
-  ipcRenderer: IpcRendererApi
   // Excalidraw 静态资源（字体等）路径，相对 index.html 指向 dist 根目录
   EXCALIDRAW_ASSET_PATH?: string
 }

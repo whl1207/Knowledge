@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, onMounted, onBeforeUnmount, computed, watch, defineAsyncComponent } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
@@ -569,7 +570,7 @@ onMounted(async () => {
 
 /** 窗口是否拿到了 preload 注入的 IPC（没有它 = 本地文件能力不可用） */
 function hasIpc(): boolean {
-  return typeof window !== 'undefined' && !!(window as any).ipcRenderer
+  return typeof window !== 'undefined' && !!aikmIpcAvailable()
 }
 
 /**

@@ -1,5 +1,10 @@
 import { createApp } from 'vue'
 import App from '@/App.vue'
+import { aikmDsh, initAikmIpc } from '@/lib/aikmIpc'
+
+// 最早时机领取宿主 IPC 桥（一次性），把桥收进模块作用域 —— 之后 window 上不再有任何通用 IPC 入口，
+// 界面半边插件因此拿不到宿主通道。详见 src/lib/aikmIpc.ts 顶部注释。
+initAikmIpc()
 
 // Excalidraw 静态资源（字体/vendor）路径：指向 dist 根目录，dev 与 file:// 生产环境均可解析
 ;(window as any).EXCALIDRAW_ASSET_PATH = './'
@@ -73,7 +78,7 @@ import('@/platform/rendererTasks')
 // 插件宿主通知（ctx.host.notify → 主进程广播 plugin:notify）：仅在主窗口弹提示，
 // 设置/文件/浏览器等独立窗口不重复弹同一提示。
 if (!isAuxWindowHash(window.location.hash)) {
-  window.dsh?.plugin?.onEvent?.((ev) => {
+  aikmDsh?.plugin?.onEvent?.((ev) => {
     if (ev.type === 'plugin/notify') ElMessage.info(`[${ev.id}] ${ev.message}`)
   })
 }

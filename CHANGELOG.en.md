@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-10-16
+
+### Improved
+
+- **The home chat list sidebar is now a fixed 220px wide**: narrow windows no longer squeeze it to 150px — once the window gets too narrow the home page switches straight to phone mode (list and conversation each take the full screen).
+
+### Fixed
+
+- **Closing the window still warned that “KB evaluation” was running after a batch test finished**: an all-strategy test now unregisters its background task as soon as it ends (including manual stop or a failed preparation phase), so closing is no longer blocked and the tray stops listing a finished evaluation.
+
 ## 2026-10-15
 
 ### Added

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { onMounted, watch, onBeforeUnmount, ref, computed, watchEffect, nextTick } from 'vue'
 import { usestore } from '@/store'
 import * as monaco from 'monaco-editor'
@@ -103,24 +104,24 @@ watch([() => collab.status.value, () => collab.canEdit.value], () => {
 
 /** 确保协同服务已启动 */
 const ensureCollabServer = async (): Promise<boolean> => {
-    if (!window.dsh?.collab) {
+    if (!aikmDsh?.collab) {
         ElMessage.error(store.locales === 'zh' ? '协同服务不可用（请先在设置中开启）' : 'Collab service unavailable')
         return false
     }
     try {
-        const st = await window.dsh.collab.getStatus()
+        const st = await aikmDsh.collab.getStatus()
         if (st.running) {
             collabServerStatus.value = st
             return true
         }
-        const res = await window.dsh.collab.start({
+        const res = await aikmDsh.collab.start({
             port: store.collab.port,
             maxMembers: store.collab.maxMembers,
             permissionMode: store.collab.permissionMode,
         })
         if (res.success) {
             if (res.port) store.collab.port = res.port
-            const st2 = await window.dsh.collab.getStatus()
+            const st2 = await aikmDsh.collab.getStatus()
             collabServerStatus.value = st2
             return true
         }
@@ -157,7 +158,7 @@ const shareCurrentFile = async () => {
             store.collab.token = collab.roomToken.value
             store.saveConfig()
         }
-        const st = await window.dsh?.collab.getStatus()
+        const st = await aikmDsh?.collab.getStatus()
         if (st) collabServerStatus.value = st
         showCollabPanel.value = true
         ElMessage.success(store.locales === 'zh' ? '已开始共享，可复制加入地址' : 'Sharing started, copy the join link')
@@ -202,8 +203,8 @@ const leaveCollabSession = async () => {
     const wasHost = collab.isHost.value
     const rid = collab.roomId.value
     collab.leave()
-    if (wasHost && rid && window.dsh?.collab) {
-        await window.dsh.collab.closeRoom(rid).catch(() => {})
+    if (wasHost && rid && aikmDsh?.collab) {
+        await aikmDsh.collab.closeRoom(rid).catch(() => {})
     }
     showCollabPanel.value = false
 }
@@ -1818,8 +1819,8 @@ watch(() => store.data[store.index], async (newValue) => {
         const wasHost = collab.isHost.value
         const rid = collab.roomId.value
         collab.leave()
-        if (wasHost && rid && window.dsh?.collab) {
-            window.dsh.collab.closeRoom(rid).catch(() => {})
+        if (wasHost && rid && aikmDsh?.collab) {
+            aikmDsh.collab.closeRoom(rid).catch(() => {})
         }
         showCollabPanel.value = false
     }
@@ -1920,8 +1921,8 @@ onMounted(() => {
     }, 50)
 
     // 订阅协同服务状态（用于生成可复制的加入地址）
-    if (window.dsh?.collab) {
-        collabStatusUnsub = window.dsh.collab.onStatus((st: any) => {
+    if (aikmDsh?.collab) {
+        collabStatusUnsub = aikmDsh.collab.onStatus((st: any) => {
             collabServerStatus.value = st
         })
     }
@@ -2270,8 +2271,8 @@ onBeforeUnmount(async () => {
         const wasHost = collab.isHost.value
         const rid = collab.roomId.value
         collab.destroy()
-        if (wasHost && rid && window.dsh?.collab) {
-            await window.dsh.collab.closeRoom(rid).catch(() => {})
+        if (wasHost && rid && aikmDsh?.collab) {
+            await aikmDsh.collab.closeRoom(rid).catch(() => {})
         }
     }
     if (collabStatusUnsub) {

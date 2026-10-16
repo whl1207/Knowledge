@@ -866,6 +866,7 @@ function makeWindowPort(deps: AndroidDeps): WindowPort {
     setZoom: (factor) => zoom.set(factor),
     async restartApp() { /* 由系统重启 */ },
     async openFileWindow() { /* 单窗口，调用方应改为当前视图内打开 */ },
+    async openPluginPanelWindow() { return false /* 单窗口，调用方退回应用内浮层 */ },
     async toggleDevTools() { /* 无 */ },
   }
 }

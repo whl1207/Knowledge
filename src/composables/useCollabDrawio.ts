@@ -17,6 +17,7 @@
 import { ref, readonly } from 'vue'
 import { usestore } from '@/store'
 import type { CollabMember } from '@/types/collab'
+import { aikmDsh } from '@/lib/aikmIpc'
 
 /** 主进程 collab-service 发出的中文文案 → 英文（英文界面下避免中英混排） */
 const SERVER_MSG_EN: Record<string, string> = {
@@ -343,12 +344,12 @@ export function useCollabDrawio(): CollabDrawioController {
     opts: { token?: string; maxMembers?: number; permissionMode?: string; autoSaveSeconds?: number; name?: string } = {},
   ): Promise<boolean> {
     if (status.value !== 'idle') return false
-    if (!window.dsh?.collab) {
+    if (!aikmDsh?.collab) {
       error.value = t('协同服务不可用', 'Collaboration service unavailable')
       return false
     }
     try {
-      const res = await window.dsh.collab.shareFile(filePath, content, { ...opts, kind: 'drawio' })
+      const res = await aikmDsh.collab.shareFile(filePath, content, { ...opts, kind: 'drawio' })
       roomId.value = res.roomId
       roomToken.value = res.token || ''
       bridge = b

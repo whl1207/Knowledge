@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmIpc } from '@/lib/aikmIpc'
 import { ref, computed, watch, onMounted } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { deepSeekStyleOf, normalizeLlmType } from '@/shared/llmSources'
@@ -521,7 +522,7 @@ const scanKnowledgeBases = async () => {
   emit('updateState', t('正在扫描知识库文件...', 'Scanning knowledge base files...'))
 
   try {
-    const result = await window.ipcRenderer.invoke("getFilesRelation", props.store.root, 1)
+    const result = await aikmIpc.invoke("getFilesRelation", props.store.root, 1)
     if (!result) {
       knowledgeBases.value = []
       return

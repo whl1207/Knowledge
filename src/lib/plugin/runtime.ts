@@ -25,9 +25,10 @@ import { PluginShortcutService, type ShortcutRecord } from './shortcuts'
 import { setPluginToolNames } from '@/lib/agent/capabilities'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
-import type { PluginLogLevel, PluginSnapshot } from '@/types/plugin'
+import type { PluginLogLevel, PluginSnapshot, PluginStatus } from '@/types/plugin'
 // 宿主自带的 Vue 运行时：以 ctx.vue 交给插件，保证**单实例**（插件自带 vue 会导致响应式失效）
 import * as VueRuntime from 'vue'
+import { computed, ref } from 'vue'
 
 /**
  * 暴露给插件的 Vue API 子集。
@@ -195,6 +196,59 @@ const bus = new ClientEventBus()
 export const clientPluginEvents = {
   on: (type: string, listener: (payload: unknown) => void) => bus.on(type, listener),
 }
+
+// ---------------------------------------------------------------------------
+// 插件显示名注册表（导航收纳启动器用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 插件 id → 显示名（= 清单里的 `aikm.name`）。
+ *
+ * 槽位条目的 `owner` 只有 `plugin:<id>`（id 是 ASCII 目录名），而启动器卡片要显示
+ * 用户看得懂的中文插件名，因此每次同步插件清单时顺手记下这份映射。
+ * 挂在模块级 ref 上：插件窗口（独立渲染进程）与主窗口各自的运行时都会填自己那份。
+ */
+export const pluginDisplayNames = ref<Record<string, string>>({})
+
+/** 从槽位条目的 owner 取插件 id（`plugin:xxx` → `xxx`，非插件条目返回 ''） */
+export function pluginIdOfOwner(owner: unknown): string {
+  const raw = String(owner ?? '')
+  return raw.startsWith('plugin:') ? raw.slice('plugin:'.length) : ''
+}
+
+/** 插件显示名（没有记录时回退到 id 本身，便于用户对照插件目录） */
+export function pluginDisplayName(id: string): string {
+  if (!id) return ''
+  return pluginDisplayNames.value[id] || id
+}
+
+/**
+ * 插件 id → 插件描述（清单里的 `aikm.description`，可能为空）。
+ *
+ * 启动器网格的卡片用它做副标题：卡片标题是**面板名**，副标题给「这个插件是干什么的」
+ * （光重复一遍插件名对用户没有信息量，见 PluginLauncherGrid 的说明）。
+ */
+export const pluginDescriptions = ref<Record<string, string>>({})
+
+/** 插件描述（没有记录时返回空串，由调用方决定回退文案） */
+export function pluginDescription(id: string): string {
+  if (!id) return ''
+  return pluginDescriptions.value[id] || ''
+}
+
+/**
+ * 插件状态表（id → status）与两个计数：启动器面板底部状态栏要显示「共 N 个插件 / 已启用 M 个」。
+ *
+ * 为什么不用「面板条目数」代替：那是**面板**数量（一个插件可能有多个面板，也可能一个都没有），
+ * 与「插件有多少个、启用了几个」是两件事，混着显示会跟插件管理页对不上。
+ */
+export const pluginStatuses = ref<Record<string, PluginStatus>>({})
+/** 已识别的插件总数（含未启用） */
+export const pluginTotalCount = computed(() => Object.keys(pluginStatuses.value).length)
+/** 已启用的插件数（status === 'active'） */
+export const pluginEnabledCount = computed(
+  () => Object.values(pluginStatuses.value).filter((s) => s === 'active').length,
+)
 
 // ---------------------------------------------------------------------------
 // 宿主服务：文案 + 快捷键（进程内单例，所有插件共用）
@@ -424,13 +478,24 @@ let syncing: Promise<void> | null = null
 let syncPending = false
 let initialized = false
 
-/** 初始化渲染层插件运行时（入口调用一次；无插件桥时静默降级） */
+/**
+ * 初始化渲染层插件运行时（入口调用一次；无插件桥时静默降级）。
+ *
+ * 幂等：`initialized` 在**同步段**里置位（从判断到置位之间没有 await），所以并发/重复调用
+ * 都不可能走到第二次订阅 —— 这点上「每窗口一条订阅」是由构造保证的，不需要额外去重。
+ *
+ * ⚠️ 置位的位置有讲究：以前在 `getPluginBridge()` **之前**置位，于是「桥当时还不可用」
+ * 会把整个渲染层插件运行时**永久**卡死（之后桥出现了也不会再初始化）。现在只有真拿到桥才置位，
+ * 失败只是本次返回，下次调用仍可重试。
+ */
 export async function initPluginRuntime(): Promise<void> {
   if (initialized) return
-  initialized = true
-  declareCoreSlots()
+  declareCoreSlots() // 幂等（内部 coreScopes 非空即返回）
   const bridge = getPluginBridge()
   if (!bridge) return
+  initialized = true
+  // 每**窗口**一条订阅，与插件数量、启停、重载次数无关；它随窗口存活，故有意不保存 unsubscribe。
+  // 插件自身的订阅一律经 ctx.on（已由 disposer 托管，见 layoutClientPlugin 里的 track）。
   bridge.onEvent((ev) => {
     // 状态变化（启用 / 禁用 / 重载 / 卸载）后同步渲染层贡献
     if (ev.type === 'plugin/changed') void syncClientPlugins()
@@ -474,6 +539,20 @@ async function doSync(): Promise<void> {
     console.warn('[plugin-runtime] 拉取插件清单失败:', e)
     return
   }
+
+  // 0) 插件显示名 / 描述 / 状态（导航收纳启动器要按插件名分组、卡片给出插件用途，
+  //    底部状态栏还要显示「共 N 个 / 已启用 M 个」；槽位条目的 owner 只有 id）
+  const names: Record<string, string> = {}
+  const descs: Record<string, string> = {}
+  const statuses: Record<string, PluginStatus> = {}
+  for (const p of plugins) {
+    names[p.id] = p.name || p.id
+    descs[p.id] = p.description || ''
+    statuses[p.id] = p.status
+  }
+  pluginDisplayNames.value = names
+  pluginDescriptions.value = descs
+  pluginStatuses.value = statuses
 
   // 1) 插件工具同步（已激活插件的工具 → 智能体可见集）
   const toolNames: string[] = []

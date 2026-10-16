@@ -18,6 +18,7 @@ import type { PtcRunPreview } from '@/types/tool'
 import { lanAgentTransport } from '@/platform/lanAgentClient'
 import { rendererAgentTransport } from '@/platform/rendererAgent'
 import { isHostGuestRuntime } from '@/platform'
+import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
 
 /**
  * 传输层：桌面端 = `window.dsh.agent`（IPC），网页端（局域网共享）= `/api/agent/*`（HTTP + SSE）。
@@ -42,7 +43,7 @@ interface AgentTransport {
 
 /** 网页端（无窗口壳）判定：安卓壳 / 局域网访客 / 本地浏览器都属于这一类（都能跑渲染层智能体循环） */
 function isBrowserRuntime(): boolean {
-  return typeof window !== 'undefined' && !(window as any).ipcRenderer
+  return typeof window !== 'undefined' && !aikmIpcAvailable()
 }
 
 /**
@@ -53,7 +54,7 @@ function isBrowserRuntime(): boolean {
  *    没有主进程可依托，就在页面里跑循环，用平台能力（文件端口 / 检索 / 联网）执行工具。
  */
 function resolveTransport(): AgentTransport | null {
-  const dsh = (window as any)?.dsh?.agent
+  const dsh = aikmDsh?.agent
   if (dsh) return dsh as AgentTransport
   if (isHostGuestRuntime()) return lanAgentTransport as unknown as AgentTransport
   if (isBrowserRuntime()) return rendererAgentTransport() as unknown as AgentTransport
@@ -233,7 +234,7 @@ class AgentBridge {
   private dshAgent(): AgentTransport {
     const transport = this.transportOrNull()
     if (!transport) {
-      throw new Error('智能体不可用：桌面端需 window.dsh.agent；安卓 / 网页端需能装载渲染层智能体循环')
+      throw new Error('智能体不可用：桌面端需宿主 agent IPC（aikmDsh.agent）；安卓 / 网页端需能装载渲染层智能体循环')
     }
     return transport
   }

@@ -189,8 +189,9 @@ const BUILTIN_STRATEGIES: StrategyDef[] = [
       // 让本体增强与问题增强在同一基准分上对比，唯一差别是实体 boost，从而真正突出本体的增量贡献
       { primitive: 'dense_score', mode: 'set', params: { summaryWeight: 0.7 } },
       { primitive: 'file_score', mode: 'weighted', params: { weight: 0.3 } },
-      // minBaseScore：基础分低于阈值时 boost 不生效，避免实体命中的无关切片被乘性放大而挤出正确答案
-      { primitive: 'boost', mode: 'multiply', params: { source: 'entity', boostWeight: 1.5, minBaseScore: 0.2 } },
+      // minBaseScore 现解释为分位数(0-1)：只有当切片基础分不低于该题基础分的 60 分位时，
+      // 实体增强才生效。旧值 0.2 是绝对阈值，实测在本知识库上几乎无切片低于它，门槛失效。
+      { primitive: 'boost', mode: 'multiply', params: { source: 'entity', boostWeight: 1.5, minBaseScore: 0.6 } },
     ],
     // 本体策略：处理管线 = 问题语义增强 + 本体推理 + 文件语义增强（保证问题向量 / file_score 就绪）
     ingestionSteps: [
@@ -208,8 +209,9 @@ const BUILTIN_STRATEGIES: StrategyDef[] = [
       // 让多跳增强在问题增强基准之上叠加图谱 hop 扩展，评测公平且能体现图谱的增量贡献
       { primitive: 'dense_score', mode: 'set', params: { summaryWeight: 0.7 } },
       { primitive: 'file_score', mode: 'weighted', params: { weight: 0.3 } },
-      // minBaseScore：基础分低于阈值时 hop 提升不生效，避免远跳/文件内扩展的无关切片被放大
-      { primitive: 'boost', mode: 'multiply', params: { source: 'hop', boostWeight: 1.5, minBaseScore: 0.2 } },
+      // minBaseScore 现解释为分位数(0-1)：基础分低于该题 60 分位时 hop 提升不生效，
+      // 避免远跳/文件内扩展的无关切片被放大（旧绝对值 0.2 在本语料上等于无门槛）
+      { primitive: 'boost', mode: 'multiply', params: { source: 'hop', boostWeight: 1.5, minBaseScore: 0.6 } },
     ],
     // 多跳策略：处理管线 = 问题语义增强 + 本体推理 + 文件语义增强（保证问题向量 / file_score 就绪）
     ingestionSteps: [
@@ -402,9 +404,24 @@ async function runPipeline(def: StrategyDef, ctx: RetrievalContext, hooks: Strat
       const mode = step.mode || 'set'
       if (mode === 'multiply') {
         const out = new Map<string, number>()
-        // 相关性门槛：基础分低于 minBaseScore 时不允许乘性提升（mult 归 1），
+        // 相关性门槛：基础分低于门槛时不允许乘性提升（mult 归 1），
         // 避免实体/hop/社区命中的无关切片被放大而挤出真正相关的切片（结构增益纯净化）
-        const minBase = typeof step.params?.minBaseScore === 'number' ? step.params.minBaseScore : 0
+        //
+        // 改用「相对门槛」：绝对阈值（原 0.2）在不同语料上含义漂移——实测在运筹学
+        // 知识库上几乎没有任何切片低于 0.2，门槛形同虚设。minBaseScore 现在解释为
+        // 分位数（0-1），门槛取该题全部基础分的对应分位值，从而自适应语料与查询。
+        const rawMinBase = typeof step.params?.minBaseScore === 'number' ? step.params.minBaseScore : 0
+        let minBase = rawMinBase
+        if (rawMinBase > 0 && rawMinBase <= 1 && hasBaseScore) {
+          const vals = ctx.blocks
+            .map(b => scores.get(b.id) ?? 0)
+            .filter(v => v > 0)
+            .sort((a, b) => a - b)
+          if (vals.length) {
+            const pos = Math.min(vals.length - 1, Math.max(0, Math.floor(rawMinBase * (vals.length - 1))))
+            minBase = vals[pos]
+          }
+        }
         for (const b of ctx.blocks) {
           const id = b.id
           const base = hasBaseScore ? (scores.get(id) ?? 0) : 1

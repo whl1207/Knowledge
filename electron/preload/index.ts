@@ -42,6 +42,30 @@ const api = {
     const [channel, ...omit] = args
     return ipcRenderer.invoke(channel, ...omit)
   },
+  /**
+   * `removeListener` / `removeAllListeners`：`IpcRendererApi` 一直声明着这两个方法，
+   * 但本对象此前没实现（调用即 TypeError）。on/off 走的是一张包装函数表，这两条按同一张表实现，
+   * 保证「声明即事实」。
+   */
+  removeListener(...args: Parameters<typeof ipcRenderer.removeListener>) {
+    const [channel, listener] = args
+    const m = ipcWrapperRegistry.get(channel)
+    const wrapper = m?.get(listener as Function)
+    if (wrapper) {
+      ipcRenderer.removeListener(channel, wrapper)
+      m!.delete(listener as Function)
+      if (!m!.size) ipcWrapperRegistry.delete(channel)
+    }
+    return ipcRenderer
+  },
+  removeAllListeners(channel: string) {
+    const m = ipcWrapperRegistry.get(channel)
+    if (m) {
+      for (const wrapper of m.values()) ipcRenderer.removeListener(channel, wrapper)
+      ipcWrapperRegistry.delete(channel)
+    }
+    return ipcRenderer
+  },
 
   // You can expose other APTs you need here.
   // ...
@@ -570,19 +594,40 @@ const dsh = {
   },
 }
 
-// 使用 contextBridge 暴露（contextIsolation: true 时生效）
-try {
-  contextBridge.exposeInMainWorld('ipcRenderer', api)
-  contextBridge.exposeInMainWorld('dsh', dsh)
-} catch {
-  // contextIsolation: false 时 contextBridge 不可用，直接挂到 window
+// ---------------------------------------------------------------------------
+// IPC 桥的暴露方式：**一次性领取**，不再挂 `window.ipcRenderer` / `window.dsh`
+// ---------------------------------------------------------------------------
+//
+// 为什么必须这样：插件的「界面半边」由宿主把源码包成 Blob URL、在渲染进程**同一个 realm**
+// 里 import（src/lib/plugin/runtime.ts）。只要通用 IPC 桥挂在 window 上，任何界面半边插件
+// ——哪怕 aikm.permissions 一个都没声明——都能 `window.ipcRenderer.invoke('tools:execute', …)`
+// 拿到宿主全部工具（含 run_shell / 写文件），或 `window.dsh.credentials.resolve(…)` 读走凭据。
+// 清单里的 permissions 因此对界面半边形同虚设。
+//
+// 改成「一次性领取」后，桥只存在于渲染层模块作用域（src/lib/aikmIpc.ts 的闭包变量），
+// 插件代码既枚举不到全局名，也读不到别的模块的闭包 —— 领取入口在应用启动时即被焚掉。
+//
+// ⚠️ 不是沙箱：插件仍与宿主同进程、同文档。见 src/lib/aikmIpc.ts 的边界说明。
+let bridgeClaimed = false
+
+/** 一次性把桥交给渲染层；第二次调用起返回 null（插件装载发生在应用启动之后，拿不到） */
+function claimIpcBridge(): { ipcRenderer: typeof api; dsh: typeof dsh } | null {
+  if (bridgeClaimed) return null
+  bridgeClaimed = true
+  return { ipcRenderer: api, dsh }
 }
 
-// 直接暴露到 window（contextIsolation: false 时生效，兼容独立窗口）
+// contextIsolation: true（主窗口默认）→ 走 contextBridge 暴露给主世界
+try {
+  contextBridge.exposeInMainWorld('__aikmClaimIpcBridge', claimIpcBridge)
+} catch {
+  // contextIsolation: false 时 contextBridge 不可用，下面的直接赋值生效
+}
+
+// 直接挂在 preload 自己的 window 上：contextIsolation: false 的独立窗口靠这一条。
+// （contextIsolation: true 时这里写的是隔离世界的 window，主世界看不到，无副作用。）
 // @ts-ignore
-if (!window.ipcRenderer) { (window as any).ipcRenderer = api }
-// @ts-ignore
-if (!window.dsh) { (window as any).dsh = dsh }
+;(window as any).__aikmClaimIpcBridge = claimIpcBridge
 
 // --------- Preload scripts loading ---------
 function domReady(condition: DocumentReadyState[] = ['complete', 'interactive']) {

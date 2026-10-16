@@ -9,6 +9,7 @@
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import { rewriteMdLinkHref } from '@/lib/markdown/mdLinkPolicy'
+import { aikmIpc } from '@/lib/aikmIpc'
 
 /** 当前文档所在目录（含结尾 `/`），用于把相对链接解析成绝对路径 */
 export function currentDocDir(): string {
@@ -55,7 +56,7 @@ export async function openMdFileLink(
   // 打开前先确认目标存在（远程只读模式跳过校验）：否则会打开后只显示 `Error reading file: ENOENT`
   if (!opts.isRemote) {
     try {
-      const info = await (window as any).ipcRenderer?.invoke?.('getInf', targetPath)
+      const info = await aikmIpc?.invoke?.('getInf', targetPath)
       if (!info) {
         ElMessage.warning(store.locales === 'zh' ? `目标文件不存在：${targetPath}` : `File not found: ${targetPath}`)
         return true

@@ -2,6 +2,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
+// 语音输入默认快捷键的唯一来源（迁移/备选同源，见 src/shared/asrShortcut.ts）
+import { DEFAULT_ASR_SHORTCUT } from '@/shared/asrShortcut'
 import { getPlatform, hasCapability } from '@/platform'
 // 全局语音输入的运行状态（热键注册形式 / 引擎自检 / 最近一次触发）——用于本页的排查行
 import { voiceState, retryVoiceShortcut } from '@/services/asr/globalVoice'
@@ -223,11 +225,23 @@ function captureShortcut(event: KeyboardEvent) {
   }
 }
 
-// 重置快捷键
+// 重置快捷键（与 store 里的默认值、globalVoice 的备选组合保持一致）
 function resetShortcut() {
-  store.AIconfig.asr.shortcut = 'Ctrl+Shift+Space'
+  store.AIconfig.asr.shortcut = DEFAULT_ASR_SHORTCUT
   store.saveConfig()
   // 同上：注册由全局语音输入按焦点负责
+}
+
+/**
+ * 清空快捷键 = **不用系统级快捷键**（只保留悬浮麦克风）。
+ *
+ * 为什么必须有这一条：有些机器上「Ctrl+Shift+Space」这类组合会被别的软件或输入法占着，
+ * 注册永远失败，而原来的行为是「失败 → 自动退到备选 → 一直提示」，用户既关不掉也换不了。
+ * 清空后 `syncShortcut` 直接走「未设置」分支，不再注册、也不再提示。
+ */
+function clearShortcut() {
+  store.AIconfig.asr.shortcut = ''
+  store.saveConfig()
 }
 
 /** 悬浮麦克风开关（关掉后可用同一处重新打开） */
@@ -349,14 +363,23 @@ onBeforeUnmount(() => {
       <div class="shortcut-input">
         <input 
           v-model="store.AIconfig.asr.shortcut" 
-          :placeholder="store.locales=='zh'?'按住说话快捷键（如：Ctrl+Shift+Space）' : 'Push-to-talk shortcut (e.g. Ctrl+Shift+Space)'"
+          :placeholder="store.locales=='zh'?'按住说话快捷键（如：Ctrl+Shift+F9）' : 'Push-to-talk shortcut (e.g. Ctrl+Shift+F9)'"
           @keydown="captureShortcut"
           readonly
         />
         <div class="button" style="width:25px;" @click="resetShortcut" 
-            :title="store.locales=='zh'?'重置快捷键' : 'Reset shortcut'">
+            :title="store.locales=='zh'?'恢复默认快捷键' : 'Reset to default shortcut'">
           <i class="fa fa-undo"></i>
         </div>
+        <div class="button" style="width:25px;" @click="clearShortcut" 
+            :title="store.locales=='zh'?'清空（不用系统级快捷键，只留悬浮麦克风）' : 'Clear (no global shortcut; floating mic only)'">
+          <i class="fa fa-ban"></i>
+        </div>
+      </div>
+      <div class="field-hint">
+        {{ store.locales=='zh'
+          ? '点上面的输入框后直接按下想要的组合键即可改（建议用带功能键的组合，如 Ctrl+Shift+F9；Ctrl+Alt+* 在 Windows 上会与输入法冲突）。若这一组已被其它软件占用，下面状态行会提示注册失败 —— 换一组，或点「清空」不用快捷键。'
+          : 'Click the box and press the combination you want (prefer one with a function key, e.g. Ctrl+Shift+F9; Ctrl+Alt+* conflicts with IMEs on Windows). If another app already owns it, the status line below says so — pick another, or click “clear”.' }}
       </div>
     </div>
 
@@ -883,6 +906,14 @@ onBeforeUnmount(() => {
 
 .shortcut-input input::selection {
   background: transparent;
+}
+
+/* 快捷键说明（换一组 / 清空的用法）：小一号、淡一点，跟在输入行下面 */
+.field-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  opacity: 0.65;
 }
 
 .checkbox-group {

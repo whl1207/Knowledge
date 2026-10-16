@@ -39,9 +39,18 @@ export const PUBLIC_DIR = IS_DEV ? join(DIST_ELECTRON_DIR, '../public') : DIST_D
 /** 主窗口 / 附属窗口加载的页面 */
 export const INDEX_HTML = join(DIST_DIR, 'index.html')
 
+/**
+ * preload 产物候选路径。
+ *
+ * ⚠️ 顺序是 **.cjs 优先**：本项目 package.json 是 `"type": "module"`，而 preload 里是
+ * `require('electron')` 这类 CJS 写法 —— 产物若叫 `.mjs`，Electron 会按 ESM 解析并抛
+ * `ReferenceError: require is not defined in ES module scope`，**整个 preload 不执行**，
+ * 渲染层拿不到 `window.ipcRenderer`（表现为窗口 load 完不出首帧 → 只看到控制台没有窗口）。
+ * 产物格式由 vite.config.ts 的 preload.output 固定为 cjs + `.cjs` 扩展名。
+ */
 const PRELOAD_CANDIDATES = [
-  join(MODULE_DIR, '../preload/index.mjs'),
   join(MODULE_DIR, '../preload/index.cjs'),
+  join(MODULE_DIR, '../preload/index.mjs'),
 ]
 
 /**
@@ -53,7 +62,8 @@ export function resolvePreload(): string {
     try { if (fs.existsSync(p)) return p } catch { /* 忽略：继续试下一个 */ }
   }
   logError('preload', `missing — looked for ${PRELOAD_CANDIDATES.join(' | ')}. `
-    + 'The renderer cannot read window.ipcRenderer without it and will silently fall back to web mode. '
+    + 'The renderer cannot reach the host IPC bridge without it (it never sits on window; '
+    + 'the preload exposes a one-shot __aikmClaimIpcBridge) and will silently fall back to web mode. '
     + 'Rebuild with: npm run build:web')
   return PRELOAD_CANDIDATES[0]
 }

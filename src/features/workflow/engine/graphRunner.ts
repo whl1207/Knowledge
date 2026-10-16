@@ -14,6 +14,7 @@ import { getExecutor } from './nodes'
 import type { NodeExecutionContext, NodeRunRecord, RunEvent, WorkflowNodeExecutor } from './types'
 import type { VariablePool } from './variablePool'
 import { getPlatform } from '@/platform'
+import { aikmIpcOrNull } from '@/lib/aikmIpc'
 
 /** 容器入口节点：由容器执行器驱动，不参与常规调度 */
 export const CONTAINER_ENTRY_TYPES = ['iteration-start', 'loop-start', 'loop-end']
@@ -216,7 +217,7 @@ export async function executeGraph(params: GraphExecuteParams): Promise<GraphExe
     runSubgraph: (containerId, seed) => params.runSubgraph(containerId, seed),
     resolveContainerEntry: (containerId) => params.resolveContainerEntry(containerId),
     invokeIpc: (channel, payload) => {
-      const ipc = deps.store?.ipcRenderer ?? (globalThis as any).ipcRenderer ?? (globalThis as any).window?.ipcRenderer
+      const ipc = deps.store?.ipcRenderer ?? aikmIpcOrNull() ?? (globalThis as any).aikmIpcOrNull()
       if (!ipc?.invoke) throw new Error('IPC 不可用（当前环境没有 ipcRenderer）')
       return ipc.invoke(channel, payload)
     },

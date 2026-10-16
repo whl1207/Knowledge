@@ -1345,6 +1345,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmIpc } from '@/lib/aikmIpc'
 defineOptions({ name: 'PipelineScaffold' })
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
@@ -7043,7 +7044,7 @@ const saveTaskState = async () => {
 const saveTaskStateAs = async () => {
   if (isLoading.value) return
   if (rows.value.length === 0) { addLog('warning', en() ? 'No rows to save' : '没有可保存的行'); return }
-  if (!window.ipcRenderer?.invoke) { addLog('error', en() ? 'Save As requires the desktop app' : '另存为仅桌面版支持'); return }
+  if (!aikmIpc?.invoke) { addLog('error', en() ? 'Save As requires the desktop app' : '另存为仅桌面版支持'); return }
   // 先组装（此时状态文本仍为真实运行状态，避免把「保存中…」写入快照），再写盘
   setStatusHint('saving', en() ? 'Saving as…' : '另存中…')
   try {

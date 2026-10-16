@@ -17,96 +17,13 @@ import {
   isSafeRelativeEntry,
   parseManifest,
 } from '@/shared/pluginManifest'
+import { CLIENT_CTX_ABSENT, CLIENT_CTX_MEMBERS, MAIN_CTX_ABSENT, MAIN_CTX_MEMBERS, checkCtxUsage } from '@/shared/pluginApiMembers'
 import { pluginHost } from '../plugin-host'
 import { isValidPluginId } from '@/types/ids'
 
 /** 客户端半边源码的检查上限（超大文件只读前 512KB，足够判断 import / 模板 / 槽位注册） */
 const CLIENT_SOURCE_MAX = 512 * 1024
 
-/**
- * 界面半边 `ctx` 的**真实成员表**（与 `src/lib/plugin/runtime.ts` 的 ClientPluginContext 一一对应）。
- *
- * 为什么需要它：生成式插件最常见的翻车不是语法错，而是**臆造宿主 API**
- * （真实案例：`ctx.files.readFile(...)` + `ctx.service('office', …)` 想解析 Excel，
- * 运行到第一行就抛 "is not a function"，用户看到的就是「面板一直空白 / 图表不显示」）。
- * 静态比对一眼就能在**交付前**发现，不必等用户在界面上发现「什么都没发生」。
- *
- * 值 = 该成员下可用的子成员（`null` = 只读数据对象或函数，不逐个校验属性）。
- */
-const CLIENT_CTX_MEMBERS: Record<string, string[] | null> = {
-  plugin: null, // 只读快照 { id, name, version, dir }
-  config: null, // 只读快照（用户在「插件 → 配置」里保存的 JSON）
-  vue: [
-    'h', 'defineComponent', 'ref', 'shallowRef', 'reactive', 'computed', 'watch', 'watchEffect',
-    'onMounted', 'onUnmounted', 'onBeforeUnmount', 'nextTick', 'toRef', 'toRefs', 'markRaw',
-    'provide', 'inject', 'KeepAlive', 'Teleport', 'Transition', 'Fragment',
-  ],
-  locale: ['language', 'languageRef', 't', 'pick', 'ref', 'fixed'],
-  llm: ['available', 'reason', 'sources', 'current', 'models', 'chat'],
-  files: [
-    'available', 'reason', 'pickFiles', 'pickDirectory', 'list', 'readText', 'readBase64',
-    'readSheet', 'renderPdfPage', 'openInApp',
-  ],
-  app: ['info', 'agentPresets'],
-  tts: ['available', 'reason', 'speak', 'stop'],
-  shortcuts: ['register', 'list'],
-  slots: ['register', 'declare', 'entries'],
-  log: ['debug', 'info', 'warn', 'error'],
-  on: null, // (type, listener) => 取消订阅函数
-  effect: null, // (fn) => 登记副作用并自动清理
-  notify: null, // (message) => 轻提示
-}
-
-/**
- * 界面半边**不存在**的宿主能力 → 给出「正确做法」。
- * 这些名字（尤其 service / mcp / storage / host）是模型最容易臆造出来的，所以单独列出来报。
- */
-const CLIENT_CTX_ABSENT: Record<string, string> = {
-  service: '界面半边没有 ctx.service（也没法连 MCP 服务）：office / 浏览器 / drawio 这些 MCP 服务只按 mcp_call 给智能体调用。要在插件里做同类事情，请用 ctx 上已有的能力，或把功能做成**主进程半边**的工具（index.mjs + ctx.tool）让智能体调用',
-  mcp: '界面半边没有 ctx.mcp：MCP 服务只按 mcp_call 给智能体调用，插件不能直连',
-  host: '界面半边没有 ctx.host（那是主进程半边 index.mjs 的能力）',
-  storage: '界面半边没有 ctx.storage：设置存 localStorage（键名带 aikm.plugin.<插件 id>. 前缀），图片 / 存档等大文件放本机 OPFS 的 plugins/<插件 id>/',
-  tool: '界面半边没有 ctx.tool：注册工具要在**主进程半边** index.mjs 里写（export const inject = ["tools"]）',
-  shell: '界面半边没有 ctx.shell（执行命令是主进程半边的能力，且需要 shell 权限）',
-  fs: '界面半边没有 ctx.fs：文件能力在 ctx.files 上',
-}
-
-/** 检查源码里对 `ctx.*` 的引用，返回问题（空数组 = 没发现） */function checkCtxUsage(
-  code: string,
-  members: Record<string, string[] | null>,
-  absent: Record<string, string>,
-): string[] {
-  const problems: string[] = []
-  const seen = new Set<string>()
-  // 只认字面量 `ctx.x` / `ctx.x.y`；`ctx['files']`、把 ctx 赋给别的变量后再用 属已知盲区（报告末尾会说明）
-  const re = /\bctx\s*\.\s*([A-Za-z_$][\w$]*)(?:\s*\.\s*([A-Za-z_$][\w$]*))?/g
-  for (const match of code.matchAll(re)) {
-    const top = match[1]
-    const sub = match[2]
-    const key = `${top}.${sub ?? ''}`
-    if (seen.has(key)) continue
-    seen.add(key)
-
-    const reason = absent[top]
-    if (reason) {
-      // 同一个缺失成员只报一次
-      if (!seen.has(`!${top}`)) {
-        seen.add(`!${top}`)
-        problems.push(`用了宿主不存在的 ctx.${top} —— ${reason}`)
-      }
-      continue
-    }
-    if (!(top in members)) {
-      problems.push(`用了宿主不存在的 ctx.${top}（这里可用的只有：${Object.keys(members).join(' / ')}）`)
-      continue
-    }
-    const subs = members[top]
-    if (sub && subs && !subs.includes(sub)) {
-      problems.push(`ctx.${top} 没有 ${sub}（可用：${subs.join(' / ')}）`)
-    }
-  }
-  return problems
-}
 
 /** 界面半边：检查 `ctx.*` 用法 */
 function checkClientCtxUsage(code: string): string[] {
@@ -115,7 +32,7 @@ function checkClientCtxUsage(code: string): string[] {
 
 /** `ctx.files` 上返回 Promise 的成员：忘了 await 时读属性会得到 undefined */
 const ASYNC_FILES_MEMBERS = [
-  'pickFiles', 'pickDirectory', 'list', 'readText', 'readBase64', 'readSheet', 'renderPdfPage', 'openInApp',
+  'pickFiles', 'pickDirectory', 'list', 'readText', 'readBase64', 'readBytes', 'readSheet', 'renderPdfPage', 'openInApp',
 ]
 
 /**
@@ -209,34 +126,6 @@ function checkClientRuntimeTraps(code: string): string[] {
   return problems
 }
 
-/**
- * 主进程半边 `ctx` 的真实成员表（与 `src/types/plugin.ts` 的 PluginContext 一一对应）。
- * 界面半边那套（ctx.vue / ctx.files / ctx.slots）在这里**不存在**，反之亦然——两半边最容易互相串用。
- */
-const MAIN_CTX_MEMBERS: Record<string, string[] | null> = {
-  plugin: null,
-  config: null,
-  tool: null, // (def) => disposer
-  service: null, // (name, impl) => disposer
-  getService: null, // (name) => impl | undefined
-  on: null, // (type, listener) => disposer
-  effect: null, // (fn) => disposer
-  host: ['readFile', 'writeFile', 'listDir', 'runShell', 'fetch', 'sessions', 'notify'],
-  storage: ['get', 'set', 'delete', 'keys'],
-  log: ['debug', 'info', 'warn', 'error'],
-}
-
-/** 主进程半边写错时，把「那东西在界面半边」直接点出来（两半边互串是最常见的错法） */
-const MAIN_CTX_ABSENT: Record<string, string> = {
-  vue: '主进程半边没有 ctx.vue（那是界面半边的：ctx.vue / ctx.slots / ctx.locale / ctx.files 只在 client.mjs 里有）',
-  files: '主进程半边没有 ctx.files；读自己目录内的文件用 ctx.host.readFile / writeFile / listDir',
-  slots: '主进程半边没有 ctx.slots：界面贡献（面板 / 设置页签等）要在界面半边 client.mjs 里注册',
-  locale: '主进程半边没有 ctx.locale：中英文案在界面半边用 ctx.locale 处理',
-  llm: '主进程半边没有 ctx.llm（大模型能力在界面半边 client.mjs 上）',
-  tts: '主进程半边没有 ctx.tts（语音能力在界面半边 client.mjs 上）',
-  shortcuts: '主进程半边没有 ctx.shortcuts（全局快捷键在界面半边 client.mjs 上注册）',
-  notify: '主进程半边没有 ctx.notify；提示用户用 ctx.host.notify(message)',
-}
 
 /** 主进程半边：检查 `ctx.*` 用法 */
 function checkMainCtxUsage(code: string): string[] {

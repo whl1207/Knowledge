@@ -8,6 +8,7 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatsRef } from '@/store/chats'
 import { getPlatform, hasCapability } from '@/platform'
+import { aikmIpc, aikmIpcOrNull } from '@/lib/aikmIpc'
 
 /** 浏览器 localStorage 配额按 UTF-16 码元计（key + value 每字符 2 字节），Electron 上限约 100MB */
 export const LOCAL_STORAGE_LIMIT = 100 * 1024 * 1024 // 100MB
@@ -70,7 +71,7 @@ export const saveTextFile = async (
   filters: FileFilters,
   zh = true,
 ): Promise<string | null> => {
-  const ipc: any = (window as any).ipcRenderer
+  const ipc: any = aikmIpcOrNull()
   if (ipc?.invoke) {
     const target = await getPlatform().dialog.saveFile({ defaultPath: defaultName, filters })
     if (!target) return null
@@ -107,7 +108,7 @@ export const pickTextFileInBrowser = (): Promise<string> => new Promise((resolve
 
 /** 读取用户选中的文本文件内容（桌面版原生对话框 / 浏览器 file input） */
 export const pickTextFile = async (): Promise<string> => {
-  const ipc: any = (window as any).ipcRenderer
+  const ipc: any = aikmIpcOrNull()
   if (ipc?.invoke) {
     const res = await getPlatform().dialog.pickTextFile() // → { content, filePath }
     return res?.content != null ? String(res.content) : ''
@@ -140,7 +141,7 @@ export const writeStoredChats = (list: any[]) => {
   if (Array.isArray(chatsRef.value) && chatsRef.value.length) chatsRef.value = list
   window.dispatchEvent(new CustomEvent('ai-chats-changed'))
   // 独立设置窗口场景：通知其它窗口（主窗口）重新加载，否则主窗口下次 saveChats 会把导入结果覆盖掉
-  try { (window as any).ipcRenderer?.send?.('chats-changed') } catch { /* 忽略 */ }
+  try { aikmIpc?.send?.('chats-changed') } catch { /* 忽略 */ }
 }
 
 /** 导出文件名：ai-chats-YYYYMMDD-HHmmss.json */
@@ -291,7 +292,7 @@ export const importDataGroup = async (key: string, zh = true, onImported?: () =>
     try {
       const ui = readLsJson('UI')
       const locale = readLsJson('locales')
-      ;(window as any).ipcRenderer?.send?.('settings-config-changed', {
+      ;aikmIpc?.send?.('settings-config-changed', {
         ui: ui && typeof ui === 'object' ? ui : undefined,
         locales: locale === 'zh' || locale === 'en' ? locale : undefined,
       })

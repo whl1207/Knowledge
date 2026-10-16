@@ -201,6 +201,7 @@
 </template>
 
 <script setup>
+import { aikmIpc } from '@/lib/aikmIpc'
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch, defineAsyncComponent } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { usestore, parentPathOf } from '@/store';
@@ -1028,7 +1029,7 @@ const init = async function() {
   const dir = store.dataDir;
   if (dir) {
     try {
-      const list = await window.ipcRenderer.invoke("getFiles", dir, depth.value);
+      const list = await aikmIpc.invoke("getFiles", dir, depth.value);
       // 只显示 Markdown 文件（与甘特一致）：文件夹与图片 / 数据 / 代码等格式不参与日历
       data.value = (list || []).filter(f => f.type === 'file' && String(f.extension || '').toLowerCase() === '.md');
     } catch (e) {

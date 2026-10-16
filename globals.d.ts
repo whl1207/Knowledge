@@ -3,169 +3,26 @@ interface File {
   path: string
 }
 
-// 阶段一/二新增的命名空间 IPC 面（preload 暴露 window.dsh）
-// 类型经 import() 按需引用，避免把本文件变成模块（保持全局 augment 语义）
+/**
+ * 命名空间 IPC（preload 里的 `dsh` 对象）的形状。
+ *
+ * ⚠️ 它**不再挂在 window 上**：preload 只在 window 上暴露一次性的 `__aikmClaimIpcBridge()`，
+ * 渲染层一律经 `src/lib/aikmIpc.ts` 导出的 `aikmDsh` 访问（原因见该文件顶部注释）。
+ * 保留形状定义供该模块引用；再写 `window.dsh` 会被 vue-tsc 直接拦下。
+ *
+ * 类型经 import() 按需引用，避免把本文件变成模块（保持全局 augment 语义）。
+ */
+
+/**
+ * preload 暴露给渲染层的**一次性** IPC 桥领取入口（见 electron/preload/index.ts）。
+ * 由 `src/lib/aikmIpc.ts` 在应用启动时领取一次，随后自行焚毁；
+ * 除该模块外不要直接调用 —— 那会把桥重新暴露给同 realm 的插件代码。
+ */
 interface Window {
-  dsh?: {
-    sessionLog: {
-      list(): Promise<Array<{ id: string; events: number; lastTs: number }>>
-      search(keyword: string): Promise<Array<{ id: string; snippet: string }>>
-      events(requestId: string, opts?: { limit?: number; beforeSeq?: number }): Promise<import('./src/types/session-log').SessionEvent[]>
-      derive(requestId: string): Promise<import('./src/types/session-log').DerivedMessage[]>
-      integrity(requestId: string): Promise<import('./src/types/session-log').SessionLogIntegrity>
-      append(requestId: string, type: 'tool/result' | 'user/message', event: any): Promise<{ success: boolean }>
-      clearAll(): Promise<{ success: boolean }>
-      clearBefore(cutoffTs?: number): Promise<{ removed: number }>
-    }
-    agent: {
-      create(options: import('./src/types/agent').AgentOptions): Promise<{ id: string }>
-      send(id: string, content: string, source?: string, images?: string[]): Promise<{ success: boolean }>
-      /** 转向/引导：仅当该会话正在执行 turn 时受理；未受理时 reason='not-running' */
-      steer(id: string, content: string): Promise<{ success: boolean; reason?: string }>
-      inject(id: string, content: string): Promise<{ success: boolean }>
-      cancel(id: string, cause?: string, keepInbox?: boolean): Promise<{ success: boolean }>
-      list(): Promise<import('./src/types/agent').AgentSummary[]>
-      dispose(id: string): Promise<{ success: boolean }>
-      tools(agentId?: string, scope?: string): Promise<{ name: string; description: string }[]>
-      state(id: string): Promise<import('./src/types/agent').AgentStateView>
-      /**
-       * 回答 agent 的 ask_user 问题。
-       * answers = 结构化回答批（每题 `{ id, selected: string[], custom? }`）；message = 旧式纯文本回答。
-       */
-      answer(id: string, askId: string, message?: string, answers?: import('./src/types/agent').AskUserAnswer[]): Promise<{ success: boolean }>
-      /** 渲染层任务接缝：抢占执行权（agent/renderer-task 事件；agentId + taskId） */
-      claimRendererTask(id: string, taskId: string): Promise<{ claimed: boolean }>
-      /** 渲染层任务接缝：回传执行结果 */
-      rendererResult(id: string, taskId: string, result: { ok: boolean; value?: any; error?: string }): Promise<{ success: boolean }>
-      declareConcurrency(scopeId: string, concurrency: number): Promise<{ success: boolean }>
-      revokeConcurrency(scopeId: string): Promise<{ success: boolean }>
-      sdkDocs(scope?: string, whitelist?: string[]): Promise<string>
-      onEvent(cb: (ev: import('./src/types/agent').AgentEvent) => void): () => void
-    }
-    skills: {
-      list(roots?: string[]): Promise<any[]>
-      get(name: string): Promise<any>
-      refresh(): Promise<{ success: boolean }>
-      onChange(cb: (info: { kind: 'added' | 'removed' | 'changed'; names: string[] }) => void): () => void
-    }
-    tools: {
-      list(scope?: string): Promise<import('./src/types/tool').ToolRegistrySnapshot[]>
-      execute(name: string, input: any, ctx?: import('./src/types/tool').ToolExecutionContext): Promise<import('./src/types/tool').ToolResult>
-    }
-    jobs: {
-      list(): Promise<import('./electron/main/job-registry').JobInfo[]>
-      get(id: string): Promise<import('./electron/main/job-registry').JobInfo | null>
-      cancel(id: string, cause?: string): Promise<{ success: boolean }>
-      start(kind: string, owner: string, title: string): Promise<import('./electron/main/job-registry').JobInfo>
-      progress(id: string, progress: number | null, detail?: string): Promise<{ success: boolean }>
-      complete(id: string, result?: any): Promise<{ success: boolean }>
-      fail(id: string, error: string): Promise<{ success: boolean }>
-      onEvent(cb: (ev: import('./electron/main/job-registry').JobEvent) => void): () => void
-    }
-    credentials: {
-      list(): Promise<import('./electron/main/credentials').CredentialInfo[]>
-      set(name: string, value: string): Promise<import('./electron/main/credentials').CredentialInfo>
-      delete(name: string): Promise<{ success: boolean }>
-      resolve(name: string): Promise<{ value: string | null }>
-    }
-    tts: {
-      status(): Promise<{ available: boolean; version: string; error: string | null }>
-      load(payload: { engine: string; modelDir: string; lang?: string }): Promise<import('./electron/main/tts-service').TtsModelInfo>
-      synthesize(payload: { engine: string; modelDir: string; text: string; sid?: number; speed?: number; lang?: string }): Promise<Uint8Array>
-      dispose(): Promise<{ success: boolean }>
-    }
-    /** 联网搜索源（设置页「工具 → 搜索」；web_search 工具按该配置分发搜索源） */
-    webSearch: {
-      getConfig(): Promise<import('./src/shared/webSearch').WebSearchConfig>
-      setConfig(cfg: Partial<import('./src/shared/webSearch').WebSearchConfig>): Promise<import('./src/shared/webSearch').WebSearchConfig>
-      test(payload?: { query?: string; config?: Partial<import('./src/shared/webSearch').WebSearchConfig>; provider?: string }): Promise<import('./src/shared/webSearch').WebSearchTestResult>
-    }
-    interfaceConfig: {
-      save(config: Record<string, any>): Promise<{ success: boolean; path: string }>
-      load(): Promise<Record<string, any> | null>
-      path(): Promise<string>
-    }
-    collab: {
-      getStatus(): Promise<import('./src/types/collab').CollabStatus>
-      start(payload?: { port?: number; maxMembers?: number; permissionMode?: string; token?: string }): Promise<{ success: boolean; port?: number; error?: string }>
-      stop(): Promise<{ success: boolean }>
-      shareFile(
-        filePath: string,
-        content: string,
-        options?: { token?: string; maxMembers?: number; permissionMode?: string; autoSaveSeconds?: number; kind?: import('./src/types/collab').CollabKind },
-      ): Promise<import('./src/types/collab').CollabShareResult>
-      closeRoom(roomId: string): Promise<{ success: boolean }>
-      saveRoom(roomId: string): Promise<{ ok: boolean; error?: string }>
-      onStatus(cb: (status: import('./src/types/collab').CollabStatus) => void): () => void
-    }
-    remoteFs: {
-      start(payload?: { port?: number; rootDir?: string; token?: string }): Promise<{ success: boolean; port?: number; token?: string; error?: string }>
-      stop(): Promise<{ success: boolean }>
-      getStatus(): Promise<{ running: boolean; port: number; ips: string[]; rootDir: string; token: string; name: string }>
-      onStatus(cb: (status: { running: boolean; port: number; ips: string[]; rootDir: string; token: string; name: string }) => void): () => void
-    }
-    mapTiles: {
-      list(): Promise<import('./electron/main/map-tiles').MapTileSource[]>
-      add(): Promise<import('./electron/main/map-tiles').MapTileSource | null>
-      remove(id: string): Promise<boolean>
-      tile(payload: { id: string; z: number; x: number; y: number }): Promise<Uint8Array | null>
-      onChange(cb: (sources: import('./electron/main/map-tiles').MapTileSource[]) => void): () => void
-    }
-    /**
-     * 插件管理（P0 主进程插件宿主）。
-     * 变更类操作（enable/disable/reload/uninstall/setConfig）须传 confirm=true，
-     * 否则主进程返回 PERMISSION_DENIED 且不改变状态。
-     */
-    plugin: {
-      list(): Promise<{
-        plugins: import('./src/types/plugin').PluginSnapshot[]
-        rootDir: string
-        customRoot: boolean
-        services: string[]
-      }>
-      inspect(spec: string): Promise<{
-        ok: boolean
-        id: string | null
-        name: string | null
-        version: string | null
-        apiVersion: string | null
-        permissions: string[]
-        problem: string | null
-      }>
-      enable(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
-      /** 重新扫描插件目录（可发现放进子文件夹的新插件；会装载插件代码 → 需 confirm） */
-      rescan(confirm?: boolean): Promise<{
-        plugins: import('./src/types/plugin').PluginSnapshot[]
-        rootDir: string
-        customRoot: boolean
-        services: string[]
-      }>
-      disable(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
-      reload(id: string, confirm?: boolean): Promise<import('./src/types/plugin').PluginSnapshot>
-      uninstall(id: string, options?: { confirm?: boolean; deleteFiles?: boolean }): Promise<{ removed: boolean; deletedDir: boolean }>
-      getConfig(id: string): Promise<Record<string, unknown>>
-      setConfig(id: string, patch: Record<string, unknown>, confirm?: boolean): Promise<Record<string, unknown>>
-      logs(id: string): Promise<import('./src/types/plugin').PluginLogLine[]>
-      /** 渲染层半边的 bundle 源码（P1：渲染层用 Blob URL 动态 import） */
-      clientBundle(id: string): Promise<{ entry: string; code: string }>
-      /** 从本地文件夹安装插件（主进程弹目录选择框）；replace=true 表示覆盖同名插件 */
-      install(options?: { confirm?: boolean; replace?: boolean }): Promise<{
-        cancelled: boolean
-        snapshot: import('@/types/plugin').PluginSnapshot | null
-      }>
-      /**
-       * 从商店安装插件：url 指向共享目录的 `/fs/bundle?path=…&token=…`
-       * （或任意返回 `{ files: [{ path, text | base64 }] }` 的 HTTP 商店）。
-       */
-      installFromStore(options: { url: string; id?: string; replace?: boolean; confirm?: boolean }): Promise<import('./src/types/plugin').PluginSnapshot>
-      /** 选择插件目录（与技能目录同一交互）；不传 path 则由主进程弹目录选择框 */
-      setRoot(options?: { confirm?: boolean; path?: string }): Promise<{ cancelled: boolean; rootDir: string }>
-      /** 恢复默认插件目录（userData/plugins） */
-      resetRoot(options?: { confirm?: boolean }): Promise<{ cancelled: boolean; rootDir: string }>
-      openDir(id?: string): Promise<{ path: string }>
-      onEvent(cb: (ev: import('./src/types/plugin').PluginEvent) => void): () => void
-    }
-  }
+  __aikmClaimIpcBridge?: () => {
+    ipcRenderer: import('./src/types/ipcBridge').IpcRendererApi
+    dsh: import('./src/types/ipcBridge').AikmDshApi
+  } | null
 }
 
 declare module 'js-yaml' {

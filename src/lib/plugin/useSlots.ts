@@ -7,6 +7,7 @@
 
 import { computed, onUnmounted, ref, type ComputedRef, type Ref } from 'vue'
 import { slotRegistry, type SlotDefinition, type SlotSnapshot } from './slots'
+import { pluginOrderVersion } from './navOrder'
 
 type OwnerSource = Ref<unknown> | ComputedRef<unknown> | (() => unknown)
 
@@ -17,14 +18,22 @@ function readOwner(source?: OwnerSource): unknown {
   return (source as Ref<unknown>).value
 }
 
-/** 订阅注册表变化（组件卸载时自动退订），返回递增的版本号 ref */
+/**
+ * 订阅渲染层贡献的变化，返回递增的版本号 ref。
+ *
+ * 两类变化都会让「按 key 渲染的界面」需要重算：
+ *  1) 槽位注册表本身（插件启停 / 重载 / 卸载）；
+ *  2) **用户自定义的插件顺序**（插件管理里拖动排序）——顺序不是注册表变化，
+ *     但导航按钮与启动器网格都按它排，所以一并计入同一个版本号。
+ *     放在这里而不是各调用方各自 watch：调用方（App.vue / Set.vue / 插件窗口壳）不用改。
+ */
 export function useSlotVersion(): Ref<number> {
   const version = ref(0)
   const stop = slotRegistry.subscribe(() => {
     version.value++
   })
   onUnmounted(stop)
-  return version
+  return computed(() => version.value + pluginOrderVersion.value) as Ref<number>
 }
 
 /** 某槽位按 owner 解析出的条目（keyed 已分派；list 已排序） */

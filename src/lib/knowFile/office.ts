@@ -13,6 +13,7 @@
  * 渲染层只负责「占位元素的矩形」；编辑器是原生 WebContentsView，盖在占位区之上。
  */
 import { isElectronRuntime } from '@/platform/electron'
+import { aikmIpcOrNull } from '@/lib/aikmIpc'
 
 export type OfficeEditorType = 'docs' | 'sheets' | 'slides'
 
@@ -175,7 +176,7 @@ export function onOfficeEvent(handler: (e: OfficeEvent) => void): () => void {
 }
 
 function ipc(): any {
-  return typeof window !== 'undefined' ? (window as any).ipcRenderer : undefined
+  return typeof window !== 'undefined' ? aikmIpcOrNull() : undefined
 }
 
 export function isOfficeRuntime(): boolean {

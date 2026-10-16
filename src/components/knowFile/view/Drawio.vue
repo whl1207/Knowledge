@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmDsh, aikmIpc, aikmIpcAvailable } from '@/lib/aikmIpc'
 /**
  * Drawio.vue — draw.io 图表（.drawio / .dio / .drawio.xml，及内容像图表的 .xml）查看与编辑
  *
@@ -68,7 +69,7 @@ const dirty = ref(false)
 /** 导出桥的跨调用状态（window.print 兜底需要记住 EditorUi 实例） */
 const exportBridgeState: { ui?: any } = {}
 /** 是否存在 Electron IPC：局域网浏览器模式下没有，也就无法写盘 */
-const hasIpc = typeof window !== 'undefined' && !!(window as any).ipcRenderer
+const hasIpc = typeof window !== 'undefined' && !!aikmIpcAvailable()
 
 // ---- 协同编辑（局域网实时多人，走 drawio 官方 diff 协议）----
 const collab = useCollabDrawio()
@@ -234,7 +235,7 @@ const exportHost: DrawioExportHost = {
       ElMessage.warning(zh.value ? '当前环境无法导出（无 Electron 主进程）' : 'Export unavailable (no Electron main process)')
       return { canceled: true }
     }
-    const res = await (window as any).ipcRenderer
+    const res = await aikmIpc
       .invoke('drawio-export-save', {
         defaultPath: defaultExportPath(p.filename),
         title: zh.value ? '导出图表' : 'Export diagram',
@@ -260,7 +261,7 @@ const exportHost: DrawioExportHost = {
   },
   async pick(suggestedName) {
     if (!hasIpc) return null
-    const res = await (window as any).ipcRenderer
+    const res = await aikmIpc
       .invoke('drawio-export-pick', {
         defaultPath: defaultExportPath(suggestedName),
         title: zh.value ? '另存为' : 'Save as',
@@ -274,7 +275,7 @@ const exportHost: DrawioExportHost = {
   },
   async write(path, p) {
     if (!hasIpc) return false
-    const res = await (window as any).ipcRenderer
+    const res = await aikmIpc
       .invoke('drawio-export-write', {
         path,
         content: p.isBase64 ? undefined : p.data,
@@ -295,7 +296,7 @@ const exportHost: DrawioExportHost = {
       ElMessage.warning(zh.value ? '当前环境无法导出 PDF' : 'PDF export unavailable')
       return
     }
-    const res = await (window as any).ipcRenderer
+    const res = await aikmIpc
       .invoke('drawio-export-pdf', {
         defaultPath: defaultExportPath(p.filename),
         title: zh.value ? '导出为 PDF' : 'Export as PDF',
@@ -312,7 +313,7 @@ const exportHost: DrawioExportHost = {
   },
   async print(p) {
     if (!hasIpc) return
-    const res = await (window as any).ipcRenderer
+    const res = await aikmIpc
       .invoke('drawio-export-print', { defaultPath: defaultExportPath(p.filename), svg: p.svg, title: fileName.value })
       .catch((e: any) => {
         ElMessage.error((zh.value ? '打印失败: ' : 'Print failed: ') + (e?.message || e))
@@ -749,7 +750,7 @@ async function copyAsImage(scale: number) {
     if (!size) throw new Error(zh.value ? '无法识别图表尺寸' : 'Unknown diagram size')
     const n = clampScale(scale, size.w, size.h)
     const png = await drawioSvgToPngDataUrl(svg, n, size)
-    const res = await (window as any).ipcRenderer
+    const res = await aikmIpc
       .invoke('clipboard-write-image', {
         base64: png.slice(png.indexOf(',') + 1),
         // HTML 里给出显示尺寸（逻辑像素）：Word/PPT 按它排版，不会把 4 倍图放大 4 倍粘进来
@@ -833,7 +834,7 @@ const collabBridge: DrawioCollabBridge = {
 
 /** 共享/加入前的服务端准备：协同服务未启动则拉起 */
 async function ensureCollabServer(): Promise<boolean> {
-  const api = window.dsh?.collab
+  const api = aikmDsh?.collab
   if (!api) {
     ElMessage.error(zh.value ? '协同服务不可用（当前环境无 Electron 主进程）' : 'Collab service unavailable')
     return false
@@ -878,7 +879,7 @@ async function shareCurrentFile() {
   if (ok) {
     collabEditable.value = true
     if (!store.collab.token && collab.roomToken.value) store.collab.token = collab.roomToken.value
-    const api = window.dsh?.collab
+    const api = aikmDsh?.collab
     if (api) {
       try {
         collabServerStatus.value = await api.getStatus()
@@ -918,7 +919,7 @@ async function leaveCollabSession() {
   }
   collab.leave()
   collabEditable.value = true
-  const api = window.dsh?.collab
+  const api = aikmDsh?.collab
   if (wasHost && rid && api) {
     try {
       await api.closeRoom(rid)
@@ -1322,9 +1323,9 @@ onMounted(() => {
     })
   }
   // 订阅协同服务状态（用于生成可复制的加入地址）
-  if (window.dsh?.collab) {
-    window.dsh.collab.getStatus().then((st) => { collabServerStatus.value = st }).catch(() => { /* ignore */ })
-    collabStatusUnsub = window.dsh.collab.onStatus((st: any) => { collabServerStatus.value = st })
+  if (aikmDsh?.collab) {
+    aikmDsh.collab.getStatus().then((st) => { collabServerStatus.value = st }).catch(() => { /* ignore */ })
+    collabStatusUnsub = aikmDsh.collab.onStatus((st: any) => { collabServerStatus.value = st })
   }
 })
 

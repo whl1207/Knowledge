@@ -276,7 +276,7 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Provide or depend on services from the host or other plugins.',
   },
   {
-    name: '主进程半边：ctx.shell.runShell(command, { cwd }) / ctx.net.fetch(url, init) / ctx.sessions.list()',
+    name: '主进程半边：ctx.host.runShell(command, { cwd }) / ctx.host.fetch(url, init) / ctx.host.sessions.list()',
     descZh: '分别需要 shell / net / agent 权限。',
     descEn: 'Require the shell / net / agent permissions respectively.',
   },
@@ -432,7 +432,7 @@ ${CONSTRAINTS_ZH}
 - export const inject = ['tools']（要用工具注册表时必须声明）
 - ctx.tool({ name, description, inputSchema, handler })：inputSchema 是 JSON Schema；handler(input) 返回可 JSON 序列化的结果
 - ctx.service(name, value)、ctx.on(type, listener)、ctx.effect(fn)、ctx.storage.{get,set,delete}
-- ctx.log.*、ctx.host.notify(message)、ctx.shell.runShell(command, { cwd })、ctx.net.fetch(url, init)、ctx.sessions.list()
+- ctx.log.*、ctx.host.notify(message)、ctx.host.runShell(command, { cwd })、ctx.host.fetch(url, init)、ctx.host.sessions.list()
 
 【实现要求】
 1. 命名规则（**先定好，避免返工**）：插件**目录名必须等于清单 aikm.id**，且只能用 ASCII 小写字母/数字开头、只含 \`[a-z0-9._-]\`（例：my-plugin）。目录名带中文 / 大写 / 空格时宿主会**整目录跳过**（插件根本不会出现在列表里），只能改名重来——所以先给出英文 id 与目录名，再写文件。中文写进清单的 aikm.name（显示名）与界面文案。
@@ -476,7 +476,7 @@ Main-process half apply(ctx):
 - export const inject = ['tools'] (required when using the tool registry)
 - ctx.tool({ name, description, inputSchema, handler }): inputSchema is JSON Schema; handler(input) returns JSON-serialisable data
 - ctx.service(name, value), ctx.on(type, listener), ctx.effect(fn), ctx.storage.{get,set,delete}
-- ctx.log.*, ctx.host.notify(message), ctx.shell.runShell(command, { cwd }), ctx.net.fetch(url, init), ctx.sessions.list()
+- ctx.log.*, ctx.host.notify(message), ctx.host.runShell(command, { cwd }), ctx.host.fetch(url, init), ctx.host.sessions.list()
 
 [Implementation requirements]
 1. Naming rule (**settle this first to avoid rework**): the plugin folder name must equal the manifest’s aikm.id and be ASCII lowercase — starting with [a-z0-9] and containing only [a-z0-9._-] (e.g. my-plugin). A folder named in Chinese, with uppercase letters or spaces is skipped entirely by the host (the plugin never shows up in the list) and only a rename fixes it — so decide the English id and folder name before writing files. Chinese belongs in aikm.name (display name) and in the UI copy.

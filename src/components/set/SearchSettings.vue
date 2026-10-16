@@ -6,6 +6,7 @@
      - 多源策略：依次回退（按列表顺序逐个尝试，第一个有结果即用）/ 并行聚合（全部执行后按 URL 合并去重）。
      - 配置保存在 store.webSearch（localStorage `webSearchConfig`），每次变更自动下发主进程（webSearch:set-config）。 -->
 <script setup lang="ts">
+import { aikmDsh, aikmIpcOrNull } from '@/lib/aikmIpc'
 import { ref, computed } from 'vue'
 import { getPlatform } from '@/platform'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -32,7 +33,7 @@ const t = (zh: string, en: string): string => (store.locales === 'zh' ? zh : en)
 if (!store.webSearch) store.updateWebSearchConfig({})
 
 /** 是否有主进程（桌面版）可用：浏览器/LAN 模式下搜索源配置不下发也不可测试 */
-const hasMain = computed(() => !!((window as any).dsh?.webSearch?.setConfig))
+const hasMain = computed(() => !!(aikmDsh?.webSearch?.setConfig))
 
 /** 已启用的源（有序） */
 const enabledIds = computed<string[]>(() => Array.isArray(store.webSearch?.providers) ? store.webSearch.providers : [])
@@ -252,7 +253,7 @@ const buildPayload = (provider?: string) => ({
 
 /** 测试单个源（与启用状态无关） */
 const runTestSource = async (provider: string) => {
-  const api = (window as any).dsh?.webSearch
+  const api = aikmDsh?.webSearch
   if (!api?.test) {
     ElMessage.warning(t('浏览器模式下无法测试搜索（需桌面版）', 'Search test requires the desktop app'))
     return
@@ -279,7 +280,7 @@ const runTestSource = async (provider: string) => {
 
 /** 逐个测试全部启用源（并行聚合/回退策略下都能看到每个源各自的表现） */
 const runTestAll = async () => {
-  const api = (window as any).dsh?.webSearch
+  const api = aikmDsh?.webSearch
   if (!api?.test) {
     ElMessage.warning(t('浏览器模式下无法测试搜索（需桌面版）', 'Search test requires the desktop app'))
     return
@@ -318,7 +319,7 @@ const runTestAll = async () => {
 const openInBrowser = async (url?: string) => {
   const target = String(url || '').trim()
   if (!target) return
-  const ipc = (window as any).ipcRenderer
+  const ipc = aikmIpcOrNull()
   if (ipc?.invoke) {
     try {
       const r = await getPlatform().browserAgent.call('open-url', { url: target })

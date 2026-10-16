@@ -5,6 +5,7 @@ import { FunasrOnlineMicSession } from '@/services/asr/funasr-online-mic'
 import { Qwen3SegmentMicSession } from '@/services/asr/qwen3-stream-mic'
 import { runQwen3Gradio, toWav16k, type Qwen3GradioOptions } from '@/services/asr/qwen3-gradio'
 import { getPlatform, hasCapability } from '@/platform'
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 
 export type ASRType = 'whisper-api' | 'whisper-local' | 'onnx-whisper' | 'qwen3-asr' | 'funasr-online'
 
@@ -1936,7 +1937,7 @@ class FunasrOnlineRecognizer {
   }
 
   isSupported(): boolean {
-    return !!(navigator.mediaDevices?.getUserMedia) && !!(window as any).ipcRenderer
+    return !!(navigator.mediaDevices?.getUserMedia) && !!aikmIpcAvailable()
   }
 
   isModelReady(): boolean {

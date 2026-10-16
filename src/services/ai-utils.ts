@@ -16,6 +16,7 @@ import { AIUtils as AICore, normalizeReasoning, type ContextWindowProbe, type Lm
 import { deepSeekStyleOf, normalizeLlmType } from '@/shared/llmSources'
 
 import { getPlatform, hasCapability } from '@/platform'
+import { aikmDsh } from '@/lib/aikmIpc'
 
 // ==================== 平台 LLM 接缝 ====================
 
@@ -213,8 +214,8 @@ async function resolveApiKey(config: any): Promise<string> {
   const ref = config?.apiKeyRef
   if (typeof ref === 'string' && ref.trim()) {
     try {
-      if ((window as any).dsh?.credentials?.resolve) {
-        const res = await (window as any).dsh.credentials.resolve(ref.trim())
+      if (aikmDsh?.credentials?.resolve) {
+        const res = await aikmDsh.credentials.resolve(ref.trim())
         if (res?.value) return res.value
       }
     } catch (e) {

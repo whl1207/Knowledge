@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
 
   //加载视图组件
   import { usestore } from '@/store'
@@ -127,7 +128,7 @@
     curZoom.value = map.zoomLevel
     tooltipsOn.value = true
     if(store.root=="") return //如果未设定仓库和路径
-    data = await window.ipcRenderer.invoke("getFiles", store.dataDir, deep.value)
+    data = await aikmIpc.invoke("getFiles", store.dataDir, deep.value)
     //添加节点到地图
     data.forEach((item: any) => {
       if (!item.attributes?.纬度 || !item.attributes?.经度) return;
@@ -258,7 +259,7 @@
   }
   const loadMapTiles = async function (autoPickBuiltin = false) {
     try {
-      const list = (await window.dsh?.mapTiles?.list?.()) || []
+      const list = (await aikmDsh?.mapTiles?.list?.()) || []
       mapTileSources.value = list
       if (autoPickBuiltin && !navigator.onLine && map.source === '') pickOffline(list)
     } catch (e) {
@@ -270,8 +271,8 @@
     initMap()
     // 拉取 MBTiles 包；离线时自动选中内置包（watch(map.source) 会重建图层）
     loadMapTiles(true)
-    if (window.dsh?.mapTiles?.onChange) {
-      unsubMapTiles = window.dsh.mapTiles.onChange((list: any) => {
+    if (aikmDsh?.mapTiles?.onChange) {
+      unsubMapTiles = aikmDsh.mapTiles.onChange((list: any) => {
         mapTileSources.value = list || []
         if (!navigator.onLine) {
           if (map.source === '') pickOffline(list)

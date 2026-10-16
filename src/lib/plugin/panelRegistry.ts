@@ -13,6 +13,7 @@
 
 import { slotRegistry, type SlotDefinition } from './slots'
 import { PANEL_MAIN_SLOT } from './coreSlots'
+import { applyPluginOrder } from './navOrder'
 
 /** 内置主面板 key（顺序即默认导航顺序；勿改字符串） */
 export const BUILTIN_PANEL_KEYS = ['主页', '知识管理', '知识处理', '学习'] as const
@@ -28,9 +29,15 @@ const LEGACY_TITLE_TEXT: Record<string, { zh: string; en: string }> = {
   学习: { zh: '学习', en: 'Learning' },
 }
 
-/** 全部主面板条目（含插件贡献，已按 order 排序） */
+/**
+ * 全部主面板条目（含插件贡献）。
+ *
+ * 顺序 = 注册表 order（内置 10/20/30/40、插件各自声明）**再套一层用户在插件管理里拖出来的
+ * 插件顺序**（见 navOrder.ts）：用户拖过的插件按用户顺序排，没拖过的保持原位置。
+ * 导航按钮、启动器网格、插件子窗口的图标栏都走这里，因此三处顺序天然一致。
+ */
 export function panelEntries(): SlotDefinition[] {
-  return slotRegistry.entriesAll(PANEL_MAIN_SLOT)
+  return applyPluginOrder(slotRegistry.entriesAll(PANEL_MAIN_SLOT))
 }
 
 /**

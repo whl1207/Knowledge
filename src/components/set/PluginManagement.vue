@@ -75,36 +75,57 @@
           <span class="plugin-empty-clear" @click="keyword = ''">{{ zh ? '清除搜索' : 'Clear search' }}</span>
         </div>
         <template v-else>
-          <div
-            v-for="p in filteredPlugins"
-            :key="p.id"
-            class="plugin-nav-item"
-            :class="{ active: selectedId === p.id, disabled: !p.enabled }"
-            :title="`${p.name} · ${p.id}`"
-            @click="selectPlugin(p.id)"
+          <!-- 拖动排序（vuedraggable）：顺序 = 导航栏插件图标 / 启动器网格的顺序。
+               #item 插槽每条目**只能有一个根节点**（见 src/shared/draggableSlot.selftest.ts），
+               所以行本身必须是插槽唯一根元素，行内的把手/开关放在它里面。 -->
+          <draggable
+            v-model="draggablePlugins"
+            item-key="id"
+            class="plugin-nav-drag-list"
+            :animation="160"
+            ghost-class="plugin-nav-ghost"
+            chosen-class="plugin-nav-chosen"
+            :force-fallback="true"
+            :fallback-on-body="true"
+            :disabled="!canReorder"
           >
-            <div class="plugin-nav-top">
-              <span class="plugin-nav-icon" :class="`status-${p.status}`"><i :class="statusIcon(p.status)"></i></span>
-              <span class="plugin-nav-name">{{ p.name }}</span>
-              <span
-                class="plugin-nav-toggle"
-                :class="{ on: p.enabled }"
-                :title="p.enabled
-                  ? (zh ? '点击禁用（工具与界面元素立即消失）' : 'Click to disable (tools and UI elements disappear immediately)')
-                  : (zh ? '点击启用（会先展示权限并要求确认）' : 'Click to enable (shows permissions and asks for confirmation)')"
-                @click.stop="setEnabled(p, !p.enabled)"
-              ><span class="toggle-knob"></span></span>
-            </div>
-            <div class="plugin-nav-meta">
-              <span class="plugin-nav-status">
-                <i class="plugin-nav-dot" :class="`status-${p.status}`"></i>{{ statusLabel(p.status) }}
-              </span>
-              <span class="plugin-nav-badge">v{{ p.version }}</span>
-              <span v-if="p.tools.length" class="plugin-nav-tools" :title="zh ? '已注册的工具（scope = plugin:id）' : 'Registered tools (scope = plugin:id)'">
-                <i class="fa fa-wrench"></i>{{ p.tools.length }}
-              </span>
-            </div>
-          </div>
+            <template #item="{ element: p }">
+              <div
+                class="plugin-nav-item"
+                :class="{ active: selectedId === p.id, disabled: !p.enabled }"
+                :title="`${p.name} · ${p.id}`"
+                @click="selectPlugin(p.id)"
+              >
+                <div class="plugin-nav-top">
+                  <!-- 拖动把手：整行可拖，这里只是「可以拖」的视觉提示 -->
+                  <i
+                    v-if="canReorder"
+                    class="fa fa-bars plugin-nav-grip"
+                    :title="zh ? '按住拖动调整顺序（导航栏插件图标顺序随之变化）' : 'Drag to reorder (the navbar icon order follows)'"
+                  ></i>
+                  <span class="plugin-nav-icon" :class="`status-${p.status}`"><i :class="statusIcon(p.status)"></i></span>
+                  <span class="plugin-nav-name">{{ p.name }}</span>
+                  <span
+                    class="plugin-nav-toggle"
+                    :class="{ on: p.enabled }"
+                    :title="p.enabled
+                      ? (zh ? '点击禁用（工具与界面元素立即消失）' : 'Click to disable (tools and UI elements disappear immediately)')
+                      : (zh ? '点击启用（会先展示权限并要求确认）' : 'Click to enable (shows permissions and asks for confirmation)')"
+                    @click.stop="setEnabled(p, !p.enabled)"
+                  ><span class="toggle-knob"></span></span>
+                </div>
+                <div class="plugin-nav-meta">
+                  <span class="plugin-nav-status">
+                    <i class="plugin-nav-dot" :class="`status-${p.status}`"></i>{{ statusLabel(p.status) }}
+                  </span>
+                  <span class="plugin-nav-badge">v{{ p.version }}</span>
+                  <span v-if="p.tools.length" class="plugin-nav-tools" :title="zh ? '已注册的工具（scope = plugin:id）' : 'Registered tools (scope = plugin:id)'">
+                    <i class="fa fa-wrench"></i>{{ p.tools.length }}
+                  </span>
+                </div>
+              </div>
+            </template>
+          </draggable>
         </template>
       </div>
 
@@ -116,6 +137,12 @@
           </span>
           <span class="plugin-foot-icons">
             <i
+              v-if="orderCustomized"
+              class="fa fa-sort-amount-down plugin-foot-icon action"
+              :title="zh ? '导航顺序已自定义：恢复宿主默认顺序（各插件声明 order 的顺序）' : 'Custom nav order: reset to the host default order'"
+              @click="resetOrder"
+            ></i>
+            <i
               v-if="customRoot"
               class="fa fa-undo plugin-foot-icon action"
               :title="zh ? '恢复默认插件目录（用户数据目录下的 plugins）' : 'Reset to the default plugins folder (userData/plugins)'"
@@ -124,6 +151,17 @@
             <i v-if="services.length" class="fa fa-plug plugin-foot-icon" :title="servicesHint"></i>
             <i class="fa fa-exclamation-triangle plugin-safe-icon" :title="securityNotice"></i>
           </span>
+        </div>
+        <!-- 排序提示：拖动顺序 = 导航栏插件图标 / 启动器网格的顺序（用户明确问过这件事，写在界面上） -->
+        <div v-if="canReorder" class="plugin-order-hint">
+          <i class="fa fa-bars"></i>
+          <span>{{ zh
+            ? (orderCustomized
+              ? '已按你的拖动顺序排列：导航栏的插件图标与「全部插件」网格都按这个顺序显示'
+              : '按住插件行拖动可调整顺序；导航栏的插件图标顺序会跟着这个顺序走')
+            : (orderCustomized
+              ? 'Ordered as you dragged: navbar plugin icons and the “All plugins” grid follow it'
+              : 'Drag plugin rows to reorder; the navbar plugin icon order follows it') }}</span>
         </div>
         <div class="folder-path" :title="rootDir || (zh ? '未设置' : 'Not set')">
           <i class="fa fa-folder"></i> {{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}
@@ -514,6 +552,9 @@ import {
   type PluginGrantEntry,
 } from '@/lib/plugin/pluginData'
 import type { PluginSnapshot, PluginStatus, PluginLogLine, PluginEvent } from '@/types/plugin'
+import draggable from 'vuedraggable'
+// 插件顺序（拖动排序）：导航栏图标 / 启动器网格 / 插件子窗口图标栏都按这份顺序
+import { commitPluginOrder, sortPluginsByOrder, usePluginOrder } from '@/lib/plugin/navOrder'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -548,11 +589,19 @@ const servicesHint = computed(() => (zh.value
   ? `宿主可注入服务（插件 inject 后可用，共 ${services.value.length} 个）：\n${services.value.join('\n')}`
   : `Host services available for inject (${services.value.length}):\n${services.value.join('\n')}`))
 
-/** 搜索过滤后的插件列表（空关键词 = 全部） */
+/** 搜索过滤后的插件列表（空关键词 = 全部）
+ *  顺序 = 用户在插件管理里拖出来的插件顺序（见 lib/plugin/navOrder.ts）；
+ *  导航栏图标 / 启动器网格 / 插件子窗口图标栏都以这份顺序为准，三处一致。 */
 const filteredPlugins = computed(() => {
   const k = kw.value
-  if (!k) return plugins.value
-  return plugins.value.filter((p) => {
+  // ⚠️ 必须显式依赖 userOrder（响应式版本号）：`sortPluginsByOrder` 内部读的是 localStorage，
+  // 那是**非响应式**的 —— 不读这一行的话，拖完顺序落盘了，列表却不会重排，看起来就是「拖了没反应」。
+  const order = userOrder.value
+  void order
+  // 先按用户顺序排全量，再按关键词过滤：过滤只影响显示，不影响拖动时的落点计算
+  const sorted = sortPluginsByOrder(plugins.value)
+  if (!k) return sorted
+  return sorted.filter((p) => {
     const hay = [
       p.name, p.id, p.folder, p.relDir, p.description, p.error,
       (p.permissions || []).join(' '),
@@ -563,6 +612,52 @@ const filteredPlugins = computed(() => {
     return hay.includes(k)
   })
 })
+
+// ---------------------------------------------------------------------------
+// 拖动排序（vuedraggable：真实的拖拽投影 + 跟手动画）
+// ---------------------------------------------------------------------------
+// 为什么用 vuedraggable 而不是手写：
+//  - 手写 HTML5 dragstart/dragover 在 Electron 里收不到事件（窗口拖动区会吞掉，实测无效）；
+//  - 手写 pointer 事件虽然能落盘，但**没有跟手动画**（看不到被拖的块跟着鼠标），
+//    还容易出现「拖动时选中文字」。vuedraggable（内部 Sortable.js）自带：
+//    ghost 投影、跟手位移、animation 过渡，并且用 `handle`/`filter` 精确控制可拖区域。
+//  ⚠️ 它的 #item 插槽每个条目只能有一个根节点（见 src/shared/draggableSlot.selftest.ts）。
+//  ⚠️ `:force-fallback` 下跟着鼠标走的是 Sortable 克隆出来的 ghost（每次 mousemove 写 transform），
+//    所以 **ghost 上绝不能有 CSS transition**（否则永远落后鼠标约一个过渡时长）——
+//    见样式里 `.plugin-nav-chosen / .sortable-fallback` 那条规则，改样式时别把它删了。
+
+/** 响应式的用户顺序（拖动 / 恢复默认后底部提示与按钮要跟着变） */
+const userOrder = usePluginOrder()
+/**
+ * 是否允许拖动排序：列表里至少 2 个插件、且**没有搜索过滤**。
+ * 搜索时列表只显示命中的插件，拖动落点会牵扯到看不见的插件（用户没法预期），因此先关掉。
+ */
+const canReorder = computed(() => !kw.value && plugins.value.length > 1)
+
+/**
+ * 可拖动的插件列表（v-model 的目标）。
+ *
+ * 拖动结束后把**新顺序**落盘，并保持 v-model 的读写闭环：
+ *  - 读：`filteredPlugins`（已按用户顺序排好）；
+ *  - 写：把新顺序写进 localStorage 并 bump 版本号，`filteredPlugins` 随即重排，
+ *    用户看到的顺序与落盘的顺序永远是同一个。
+ */
+const draggablePlugins = computed<PluginSnapshot[]>({
+  get: () => filteredPlugins.value,
+  set: (next) => {
+    if (!canReorder.value) return
+    const ids = next.map((p) => p.id)
+    if (ids.length !== filteredPlugins.value.length) return
+    commitPluginOrder(ids.length ? ids : [], ids)
+  },
+})
+
+/** 顺序是否已被用户自定义（底部提示用；空 = 还是宿主顺序） */
+const orderCustomized = computed(() => userOrder.value.length > 0)
+/** 恢复宿主默认顺序（各插件声明 order 的顺序） */
+function resetOrder() {
+  commitPluginOrder([], [])
+}
 
 // ---- 左右布局：左侧导航的选中项 + 右侧详情（详情 / 配置 / 日志 / 数据同一页内展开） ----
 const selectedId = ref<string | null>(null)
@@ -1439,6 +1534,9 @@ onUnmounted(() => {
   border: 1px solid transparent;
   cursor: pointer;
   transition: all 0.12s;
+  /* 拖动排序时不能选中文字（手写 pointer 拖拽的另一个毛病） */
+  user-select: none;
+  -webkit-user-select: none;
 }
 .plugin-nav-item:hover {
   background: color-mix(in srgb, var(--fontColor) 6%, transparent);
@@ -1449,6 +1547,51 @@ onUnmounted(() => {
 }
 .plugin-nav-item.disabled {
   opacity: 0.55;
+}
+/* ===== 拖动排序（vuedraggable：跟手动画 + 投影） =====
+   .plugin-nav-chosen = 被拖起来的那一块（跟着鼠标走）
+   .plugin-nav-ghost  = 它在列表里留下的空位投影 */
+.plugin-nav-grip {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.3;
+  cursor: grab;
+}
+.plugin-nav-item:hover .plugin-nav-grip { opacity: 0.75; }
+.plugin-nav-drag-list {
+  /* 拖拽期间禁止列表内的文字选中（Sortable 也会加这个，双保险） */
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* ⚠️ 被拖起来的那一块**必须没有 transition**，否则拖动「不跟手、总比鼠标慢一点」。
+   原因：`:force-fallback` 下 Sortable 是克隆一个 ghost 丢到 body 上（position:fixed），
+   每次 mousemove 用 `transform: matrix(...)` 把它挪到鼠标位置；克隆体带着本行的类名，
+   于是 `.plugin-nav-item` 的 `transition: all .12s` 连 transform 一起过渡 ——
+   每个新位置都要花 120ms 动画过去，看上去就是「永远落后鼠标一点」。
+   Sortable 自己只在 ghost 上清掉**内联** transition（css(ghostEl,'transition','')），
+   盖不住这条类规则，所以必须在这里显式关掉。
+   选择器同时列上 Sortable 给 ghost 加的两个内部类（sortable-fallback / sortable-drag），
+   这样不依赖 vuedraggable 把 chosen-class 转发成 Sortable 的 chosenClass 也一定生效
+   （scoped 样式带 data-v 属性，克隆体会继承，因此不会外泄到别处）。
+   will-change: transform 让 ghost 单独一层，行内容重绘不再影响跟手。 */
+.plugin-nav-chosen,
+.plugin-nav-item.plugin-nav-chosen,
+.sortable-fallback,
+.sortable-drag {
+  transition: none;
+  will-change: transform;
+}
+.plugin-nav-chosen {
+  background: color-mix(in srgb, var(--fontActiveColor) 16%, var(--menuColor));
+  border-color: var(--fontActiveColor);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  cursor: grabbing;
+}
+.plugin-nav-ghost {
+  opacity: 0.35;
+  background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
+  border-style: dashed;
+  border-color: var(--fontActiveColor);
 }
 .plugin-nav-top {
   display: flex;
@@ -1634,6 +1777,20 @@ onUnmounted(() => {
 .plugin-foot-icon:hover {
   opacity: 1;
   color: var(--fontActiveColor);
+}
+/* 排序说明：一行小字，点明「拖动顺序 = 导航栏顺序」 */
+.plugin-order-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 4px 0 2px;
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: 0.65;
+}
+.plugin-order-hint i {
+  margin-top: 2px;
+  flex-shrink: 0;
 }
 
 /* ========== 右侧：内容区 ========== */

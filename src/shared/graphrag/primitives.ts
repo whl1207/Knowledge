@@ -23,6 +23,17 @@ import { buildQueryEntityMatchPrompt } from '@/shared/graphrag/prompts'
 // 改用模块级 Map 以「name + description」为 key 缓存，首次嵌入后后续查询直接命中。
 const entityVectorCache = new Map<string, number[] | undefined>()
 
+// ========== 实体链接参数（boost 选择性的关键） ==========
+// 语义实体链接的相似度下限。原值 0.26 在本知识库上会让每个查询匹配到 400+/531 个实体，
+// 即"几乎所有切片都被 boost"，增强退化为全局乘性放大、毫无区分度（实测净贡献 ≈ 0）。
+// 收紧后只保留真正与查询语义接近的实体。
+const ENTITY_SEMANTIC_MIN_SIM = 0.5
+// 语义通道最多保留多少个实体（防止长尾泛化概念混入 boost 集合）
+const ENTITY_SEMANTIC_TOPK = 3
+// 实体名最短长度：过滤掉「图」「基」「弧」「链」这类单/双字泛化概念，
+// 它们按子串规则几乎对任何查询都命中，是 boost 扩散的另一主因。
+const ENTITY_MIN_NAME_LEN = 3
+
 /** 清空实体向量缓存（本体重建/编辑后可调用，避免陈旧向量） */
 export function clearEntityVectorCache() {
   entityVectorCache.clear()
@@ -396,12 +407,14 @@ export async function entityLink(ctx: RetrievalContext): Promise<PrimitiveResult
         if (!vec) continue
         if (qv) {
           const sim = services.cosineSimilarity(qv, vec)
-          // 阈值从 0.32 放宽到 0.26：提升实体链接覆盖率（配合 boost 的 minBaseScore 门槛抑制假阳性误伤）
-          if (sim > 0.26) candidates.push({ name: e.name, confidence: sim })
+          // 阈值必须足够高：实测 0.26 时每个查询会匹配到 400+/531 个实体（95% 以上），
+          // 等于对全部切片做全局乘性放大，boost 彻底丧失选择性。
+          // 收紧到 ENTITY_SEMANTIC_MIN_SIM，并配合 top-k，只保留真正高置信的实体。
+          if (sim > ENTITY_SEMANTIC_MIN_SIM) candidates.push({ name: e.name, confidence: sim })
         }
       }
       candidates.sort((a, b) => b.confidence - a.confidence)
-      for (const c of candidates.slice(0, 6)) {
+      for (const c of candidates.slice(0, ENTITY_SEMANTIC_TOPK)) {
         if (!seen.has(c.name)) { seen.add(c.name); matched.push(c) }
       }
     } catch { /* 忽略语义匹配失败 */ }

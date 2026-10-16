@@ -97,6 +97,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { ref, computed, watch, nextTick, onBeforeUnmount, onMounted } from 'vue'
 import * as d3 from 'd3'
 import 'leaflet/dist/leaflet.css'
@@ -905,7 +906,7 @@ function ensureMbBaseSource(): Promise<any | null> {
   if (!mbBaseSource) {
     mbBaseSource = (async () => {
       try {
-        const list = (await window.dsh?.mapTiles?.list?.()) || []
+        const list = (await aikmDsh?.mapTiles?.list?.()) || []
         return pickPreferredMbSource(list)
       } catch {
         return null

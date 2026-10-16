@@ -2,6 +2,7 @@
        share = 共享（局域网共享 + 共享文件夹）｜ collab = 协同（协同文件编辑）｜ perm = 权限（局域网访客白名单）。
      状态与 IPC 调用集中在这里，避免三个子页各持一份（端口探测 / 服务启停 / 令牌生成）。 -->
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { buildLanEmbedPayload, buildLanLlmPayload } from '@/platform/lanKb'
@@ -160,8 +161,8 @@ const syncCollabEnabled = (running: boolean) => {
   }
 }
 
-if (window.dsh?.collab) {
-  window.dsh.collab.onStatus((status: any) => {
+if (aikmDsh?.collab) {
+  aikmDsh.collab.onStatus((status: any) => {
     collabServerRunning.value = status.running
     collabServerPort.value = status.port
     collabServerIPs.value = status.ips
@@ -170,9 +171,9 @@ if (window.dsh?.collab) {
 }
 
 const refreshCollabServerInfo = async () => {
-  if (!window.dsh?.collab) return
+  if (!aikmDsh?.collab) return
   try {
-    const info = await window.dsh.collab.getStatus()
+    const info = await aikmDsh.collab.getStatus()
     collabServerRunning.value = info.running
     collabServerPort.value = info.port
     collabServerIPs.value = info.ips
@@ -183,12 +184,12 @@ const refreshCollabServerInfo = async () => {
 }
 
 const startCollabServer = async () => {
-  if (!window.dsh?.collab) {
+  if (!aikmDsh?.collab) {
     ElMessage.error(t('协同服务不可用', 'Collab service unavailable'))
     return
   }
   try {
-    const result = await window.dsh.collab.start({
+    const result = await aikmDsh.collab.start({
       port: store.collab.port,
       maxMembers: store.collab.maxMembers,
       permissionMode: store.collab.permissionMode,
@@ -209,9 +210,9 @@ const startCollabServer = async () => {
 }
 
 const stopCollabServer = async () => {
-  if (!window.dsh?.collab) return
+  if (!aikmDsh?.collab) return
   try {
-    const result = await window.dsh.collab.stop()
+    const result = await aikmDsh.collab.stop()
     if (result.success) {
       ElMessage.success(t('协同服务已停止', 'Collab service stopped'))
       syncCollabEnabled(false)
@@ -235,8 +236,8 @@ const remoteFsRunning = ref(false)
 const remoteFsPort = ref(3347)
 const remoteFsIPs = ref<string[]>([])
 
-if (window.dsh?.remoteFs) {
-  window.dsh.remoteFs.onStatus((status: any) => {
+if (aikmDsh?.remoteFs) {
+  aikmDsh.remoteFs.onStatus((status: any) => {
     remoteFsRunning.value = status.running
     remoteFsPort.value = status.port
     remoteFsIPs.value = status.ips
@@ -244,9 +245,9 @@ if (window.dsh?.remoteFs) {
 }
 
 const refreshRemoteFsInfo = async () => {
-  if (!window.dsh?.remoteFs) return
+  if (!aikmDsh?.remoteFs) return
   try {
-    const info = await window.dsh.remoteFs.getStatus()
+    const info = await aikmDsh.remoteFs.getStatus()
     remoteFsRunning.value = info.running
     remoteFsPort.value = info.port
     remoteFsIPs.value = info.ips
@@ -264,7 +265,7 @@ const chooseRemoteFsRoot = async () => {
 }
 
 const startRemoteFsServer = async () => {
-  if (!window.dsh?.remoteFs) {
+  if (!aikmDsh?.remoteFs) {
     ElMessage.error(t('远程文件共享服务不可用', 'Remote FS service unavailable'))
     return
   }
@@ -273,7 +274,7 @@ const startRemoteFsServer = async () => {
     return
   }
   try {
-    const result = await window.dsh.remoteFs.start({
+    const result = await aikmDsh.remoteFs.start({
       port: store.remoteFs.port,
       rootDir: store.remoteFs.rootDir,
       token: store.remoteFs.token || undefined,
@@ -293,9 +294,9 @@ const startRemoteFsServer = async () => {
 }
 
 const stopRemoteFsServer = async () => {
-  if (!window.dsh?.remoteFs) return
+  if (!aikmDsh?.remoteFs) return
   try {
-    const result = await window.dsh.remoteFs.stop()
+    const result = await aikmDsh.remoteFs.stop()
     if (result.success) {
       store.remoteFs.enabled = false
       store.saveConfig()

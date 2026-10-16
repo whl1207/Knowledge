@@ -2556,8 +2556,24 @@ const runBatchTest = async () => {
     strategyRuns.value = next
   }
 
-  // 仅当本次被测策略需要 file 通道时，自动对文件自带摘要向量化补齐（幂等、失败不阻断）
-  await ensureStrategyChannelsReady([test.currentAlgorithm])
+  // 仅当本次被测策略需要 file 通道时，自动对文件自带摘要向量化补齐（幂等、失败不阻断）。
+  // 这一步在「登记后台任务」之后：万一抛错必须撤销登记，避免留下永远存在的「知识库评测」任务。
+  try {
+    await ensureStrategyChannelsReady([test.currentAlgorithm])
+  } catch (error) {
+    console.error('[评测] 批量测试准备阶段失败，已撤销后台任务登记：', error)
+    endRunScope()
+    batchLoopActive.value = false
+    allTestProgressText.value = ''
+    batchRunKind.value = ''
+    resetBatchCtl()
+    test.isRunning = false
+    endGlobalTestRun()
+    emit('updateState', store.locales=='zh'
+      ? `批量测试未能开始：${(error as any)?.message || error}`
+      : `Batch test could not start: ${(error as any)?.message || error}`)
+    return
+  }
 
   // 检索循环开始：进度/状态从这里起上报到底部状态栏（预热阶段的状态由预热流程自己上报，避免被顶掉）
   batchLoopActive.value = true
@@ -2940,9 +2956,12 @@ const endGlobalTestRun = () => {
 // 运行进度实时上报底部状态栏（运行结束文本变空 → 清空该行）
 watch(batchLiveText, (v) => {
   emit('updateLiveState', v)
-  // 同时更新后台任务登记（界面上不显示，只用于「关闭窗口前提醒」与托盘悬停提示：
+  // 实时文本变空 = 本轮批量测试已结束（正常完成 / 停止 / 提前退出）→ 立即注销后台任务登记。
+  // 这里是兜底：任何让实时文本清空的结束路径都必须撤销登记，否则「知识库评测」会一直留在
+  // 后台任务表里，测试跑完后关闭窗口仍被拦下（托盘也一直挂着假任务）。
+  if (!v) { endGlobalTestRun(); return }
+  // 运行中：更新后台任务登记（界面上不显示，只用于「关闭窗口前提醒」与托盘悬停提示：
   // 避免几十分钟的评测被误关窗口杀掉）
-  if (!v) return
   const pct = Number(test.progress) || 0
   const total = globalTestRunTotal.value || 0
   const done = total ? Math.round((pct / 100) * total) : 0
@@ -3514,12 +3533,30 @@ const runAllStrategyTest = async () => {
   const runList: Array<{ id: string; label: string; searchNum?: number }> =
     batchRunPreview.value.map(p => ({ id: p.id, label: p.label, searchNum: p.searchNum }))
 
-  // 全部启用策略（含消融变体）对应管线就绪（当前自动覆盖：文件自带摘要向量化；本体/社区/Q 由父级建库管线提供）
-  await ensureStrategyChannelsReady(runList.map(r => r.id))
+  // 从「登记后台任务」到「循环开始」之间的准备阶段（向量补齐 / 预热）可能抛错
+  //（如嵌入或对话模型配置异常）。此时测试并没有真正开跑，必须把「测试中」与后台任务登记一并撤销，
+  // 否则界面卡在「运行中」、后台任务表里永远留着「知识库评测」→ 关窗被误拦。
+  try {
+    // 全部启用策略（含消融变体）对应管线就绪（当前自动覆盖：文件自带摘要向量化；本体/社区/Q 由父级建库管线提供）
+    await ensureStrategyChannelsReady(runList.map(r => r.id))
 
-  // 已配置预热且未执行 → 先预热（时间单独计时，不计入检索时间）
-  if (!prewarmDone.value && (prewarm.summary || prewarm.summaryVec || prewarm.sliceVec || prewarm.questionVec || prewarm.entity || prewarm.community)) {
-    await runPrewarm()
+    // 已配置预热且未执行 → 先预热（时间单独计时，不计入检索时间）
+    if (!prewarmDone.value && (prewarm.summary || prewarm.summaryVec || prewarm.sliceVec || prewarm.questionVec || prewarm.entity || prewarm.community)) {
+      await runPrewarm()
+    }
+  } catch (error) {
+    console.error('[评测] 全部策略测试准备阶段失败，已撤销后台任务登记：', error)
+    endRunScope()
+    batchLoopActive.value = false
+    allTestProgressText.value = ''
+    batchRunKind.value = ''
+    resetBatchCtl()
+    test.isRunning = false
+    endGlobalTestRun()
+    emit('updateState', store.locales=='zh'
+      ? `全部策略测试未能开始：${(error as any)?.message || error}`
+      : `All-strategy test could not start: ${(error as any)?.message || error}`)
+    return
   }
 
   const searchNum = parseInt(test.searchNum.toString())
@@ -3599,6 +3636,9 @@ const runAllStrategyTest = async () => {
   batchRunKind.value = ''
   resetBatchCtl()
   test.isRunning = false
+  // 全部策略测试结束：注销后台任务登记（与「当前策略」路径一致，停止/中断也走这里）。
+  // 原先漏了这一步，「知识库评测」会永远留在后台任务表 → 测试跑完后关窗被误拦、托盘显示假任务。
+  endGlobalTestRun()
   allTestProgressText.value = ''
   lastUpdateTime.value = new Date().toLocaleTimeString()
 

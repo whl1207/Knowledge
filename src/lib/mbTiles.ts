@@ -7,6 +7,7 @@
  *  - mbTileToDataUrl(): Uint8Array → data URL（避免 Blob URL 生命周期泄漏）
  */
 import * as L from 'leaflet'
+import { aikmDsh } from '@/lib/aikmIpc'
 
 export interface MbTileSourceLike {
   id: string
@@ -35,8 +36,8 @@ const MbtilesTileLayerClass: any = (L as any).GridLayer.extend({
     img.style.width = '256px'
     img.style.height = '256px'
     img.src = o.placeholder || ''
-    if (window.dsh?.mapTiles?.tile) {
-      window.dsh.mapTiles
+    if (aikmDsh?.mapTiles?.tile) {
+      aikmDsh.mapTiles
         .tile({ id: o.srcId, z: coords.z, x: coords.x, y: coords.y })
         .then((buf: any) => {
           if (buf && buf.length) img.src = mbTileToDataUrl(buf, o.format)

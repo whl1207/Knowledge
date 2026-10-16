@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmIpc } from '@/lib/aikmIpc'
   import * as d3 from 'd3';
   import { onMounted,onBeforeUnmount,ref, computed, nextTick,watch } from 'vue'
   import { usestore } from '@/store'
@@ -346,7 +347,7 @@ import { getPlatform, hasCapability } from '@/platform'
   })
 
   const loadFile=async function(){
-    let { fileList, relationList } = await window.ipcRenderer.invoke("getFilesRelation", store.dataDir, deep.value);
+    let { fileList, relationList } = await aikmIpc.invoke("getFilesRelation", store.dataDir, deep.value);
     fileList=fileList.map((obj: any,index:number)  => {
       return proxyToRegular({ ...obj  });
     })

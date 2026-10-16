@@ -137,6 +137,10 @@ export function matchEntitiesFromQuery(
 ): string[] {
   const matchedNames: string[] = []
   const queryLower = query.toLowerCase()
+  // 拉丁词元（如 Kruskal / M / Prim），用于"实体名含拉丁词"的精确化匹配
+  const queryLatin = new Set(
+    (queryLower.match(/[a-z][a-z0-9\-]{1,}/g) || [])
+  )
 
   for (const [key, entity] of globalEntities.entries()) {
     const nameLower = entity.name.toLowerCase()
@@ -149,7 +153,7 @@ export function matchEntitiesFromQuery(
       continue
     }
 
-    // 子串匹配（查询包含实体名 或 实体名包含查询关键词）
+    // 子串匹配：查询包含实体名（实体名至少 2 字）
     if (queryLower.includes(nameLower) && nameLower.length >= 2) {
       if (!matchedNames.includes(entity.name)) {
         matchedNames.push(entity.name)
@@ -157,20 +161,21 @@ export function matchEntitiesFromQuery(
       continue
     }
 
-    // 关键词匹配：将查询拆词后匹配实体名的各个部分
-    const queryWords = queryLower.split(/[\s,，、.。:：;；！!？?]+/).filter(w => w.length >= 2)
-    const entityWords = nameLower.split(/[\s_\-]+/)
-
-    for (const qWord of queryWords) {
-      for (const eWord of entityWords) {
-        if (eWord.includes(qWord) || qWord.includes(eWord)) {
-          if (!matchedNames.includes(entity.name)) {
-            matchedNames.push(entity.name)
-          }
-          break
+    // 结构化名称的精确化匹配：实体名形如「Kruskal 法」「大 M 法」「0-1 规划」，
+    // 只有当其拉丁/数字词元**与**其中文词元都出现在查询中时才命中。
+    // 旧的按标点分词 + includes 双向包含规则会退化成"单字命中"
+    // （查询里的「图」「基」「弧」会命中「图解法」「基变量」「弧」等任意实体），
+    // 使 boost 集合扩散到与查询无关的切片，增强失去选择性。
+    const entityLatin = nameLower.match(/[a-z][a-z0-9\-]{1,}/g) || []
+    const entityCjk = nameLower.match(/[\u4e00-\u9fff]{2,}/g) || []
+    if (entityLatin.length > 0 && entityCjk.length > 0) {
+      const latinHit = entityLatin.some((t: string) => queryLatin.has(t))
+      const cjkHit = entityCjk.some((t: string) => queryLower.includes(t))
+      if (latinHit && cjkHit) {
+        if (!matchedNames.includes(entity.name)) {
+          matchedNames.push(entity.name)
         }
       }
-      if (matchedNames.includes(entity.name)) break
     }
   }
 

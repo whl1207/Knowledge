@@ -1,3 +1,4 @@
+import { aikmDsh } from '@/lib/aikmIpc'
 /**
  * rendererTasks.ts — 渲染层任务执行接缝（主进程工具的浏览器侧执行者）
  *
@@ -33,7 +34,7 @@ let subscribed = false
 /** 初始化渲染层任务订阅（幂等；入口调用一次） */
 export function initRendererTaskRunner(): void {
   if (subscribed) return
-  const api: any = (typeof window !== 'undefined') ? (window as any).dsh?.agent : null
+  const api: any = (typeof window !== 'undefined') ? aikmDsh?.agent : null
   if (!api?.onEvent || !api?.claimRendererTask || !api?.rendererResult) return
   subscribed = true
   api.onEvent((ev: any) => {
@@ -47,7 +48,7 @@ export function initRendererTaskRunner(): void {
 
 /** 抢任务 → 执行 → 回传结果（抢不到说明别的窗口已接管，直接返回） */
 async function runTask(agentId: string, req: RendererTaskRequest): Promise<void> {
-  const api: any = (window as any).dsh?.agent
+  const api: any = aikmDsh?.agent
   if (!api) return
   let claimed = false
   try {

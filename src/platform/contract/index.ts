@@ -248,6 +248,20 @@ export interface OpenFileWindowPayload {
   page?: string | number
 }
 
+/**
+ * 以「独立子窗口」打开一个插件主面板的载荷（与主进程 open-plugin-panel-window 同形）。
+ *
+ * `key` 是 `panel.main` 槽位条目的 key（= store.mainPanel 的取值，历史字符串如 '知识管理'），
+ * 子窗口自己会经插件运行时注册同名条目，因此只传 key 就够定位；
+ * `pluginId` / `title` 只用于窗口标题与兜底文案（拿不到注册表时仍能显示标题）。
+ */
+export interface OpenPluginPanelPayload {
+  key: string
+  pluginId?: string
+  title?: string
+  icon?: string
+}
+
 /** 窗口壳控制：不可用时为静默空操作（不抛错，避免标题栏按钮报错） */
 export interface WindowPort {
   minimize(): Promise<void>
@@ -264,6 +278,12 @@ export interface WindowPort {
   restartApp(): Promise<void>
   /** 以独立窗口打开文件（手机/浏览器应改为当前窗口路由或新标签页） */
   openFileWindow(payload: OpenFileWindowPayload): Promise<void>
+  /**
+   * 以独立子窗口打开插件主面板（桌面为真窗口；无窗口壳的浏览器 / 安卓端应拒绝，
+   * 调用方据此退回「应用内浮层」——见 store.openPluginPanel）。
+   * 返回是否真的打开了独立窗口。
+   */
+  openPluginPanelWindow(payload: OpenPluginPanelPayload): Promise<boolean>
   /** 开合开发者工具（桌面调试用；其它环境无操作） */
   toggleDevTools(): Promise<void>
 }

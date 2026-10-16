@@ -261,6 +261,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 import { computed, reactive, ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import { usestore } from '@/store'
 import { getPlatform, hasCapability } from '@/platform'
@@ -652,7 +653,7 @@ onMounted(async () => {
   if (servers.value.length) {
     selectedId.value = servers.value[0].id
   }
-  if (window.ipcRenderer) {
+  if (aikmIpcAvailable()) {
     unsubMcpStatus = getPlatform().events.on('mcp-status-changed', onStatusChanged)
     refreshAllStatus()
     // 内置服务对外暴露信息（说明区展示外部接入 URL / 配置示例）

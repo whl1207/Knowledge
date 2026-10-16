@@ -1,3 +1,4 @@
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 // src/shared/ai-core.ts
 // AI 请求执行 + 解析核心（渲染进程与主进程共享的单一数据源）
 //
@@ -23,7 +24,7 @@
  */
 function resolveApiUrl(originalUrl: string): string {
   if (typeof window === 'undefined') return originalUrl
-  if ((window as any).ipcRenderer || (window as any).dsh) return originalUrl
+  if (aikmIpcAvailable()) return originalUrl
   if (!(window as any).__AIKM_HOST__) return originalUrl
   return `${window.location.origin}/__proxy?url=${encodeURIComponent(originalUrl)}`
 }

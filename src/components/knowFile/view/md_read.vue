@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
   import { usestore } from '@/store'
   import { ref,watch,onMounted,onBeforeUnmount,computed,nextTick } from 'vue'
   import { ElMessage } from 'element-plus'
@@ -144,7 +145,7 @@ import { getPlatform, hasCapability } from '@/platform'
   })
 
   // 浏览器模式（LAN 共享）无法通过 file:// 加载本地文件，改用 srcdoc 渲染
-  const isBrowserMode = typeof window !== 'undefined' && !(window as any).ipcRenderer
+  const isBrowserMode = typeof window !== 'undefined' && !aikmIpcAvailable()
   // 本地 HTML 文件 → file:/// URL（相对资源/脚本可正常加载）
   const htmlSrc = computed(() => {
     const p = data.value.path

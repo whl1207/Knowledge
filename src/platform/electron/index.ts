@@ -22,10 +22,11 @@ import type {
   WindowPort,
   TerminalPort,
 } from '@/platform/contract'
+import { aikmIpcOrNull } from '@/lib/aikmIpc'
 
 /** preload 暴露的 ipcRenderer（见 electron/preload/index.ts）；非 Electron 环境为 undefined */
 function ipc(): any {
-  return (typeof window !== 'undefined') ? (window as any).ipcRenderer : undefined
+  return (typeof window !== 'undefined') ? aikmIpcOrNull() : undefined
 }
 
 /** 是否运行在 Electron 渲染进程（与既有代码一致的判定：preload 已注入 ipcRenderer） */
@@ -415,6 +416,13 @@ const windowPort: WindowPort = {
 
   async openFileWindow(payload) {
     await ipc()?.invoke('open-file-window', payload)
+  },
+
+  async openPluginPanelWindow(payload) {
+    const api = ipc()
+    if (!api?.invoke) return false
+    // 主进程未注册该通道（如开发时主进程未重启）时抛出：按「没打开」处理，调用方退回浮层
+    return !!await api.invoke('open-plugin-panel-window', payload)
   },
 
   async toggleDevTools() {

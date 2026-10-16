@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmIpc } from '@/lib/aikmIpc'
 /**
  * view_table.vue — 表格视图（知识管理「表格」全局视图）
  *
@@ -21,7 +22,7 @@ import { parseSearchQuery, matchSearchTerms, searchTextTerms, searchTextOf } fro
 
 const store = usestore()
 const zh = (): boolean => store.locales === 'zh'
-const ipc = (ch: string, ...args: any[]) => window.ipcRenderer.invoke(ch, ...args)
+const ipc = (ch: string, ...args: any[]) => aikmIpc.invoke(ch, ...args)
 
 // ============ 列类型 ============
 type ColType = 'text' | 'number' | 'date' | 'datetime' | 'checkbox' | 'color' | 'select' | 'tags'

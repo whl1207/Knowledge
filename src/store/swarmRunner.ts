@@ -1,4 +1,4 @@
-﻿/**
+/**
  * swarmRunner.ts — 集群运行器（统一 agent 循环 + 策略调度 + 会话日志）
  *
  * 每个 Agent 通过 agentBridge 跑在主进程 agent-loop 上，
@@ -43,6 +43,7 @@ import {
   swarmRunChatId,
   setSwarmRunChatId,
 } from '@/store/swarmState'
+import { aikmDsh } from '@/lib/aikmIpc'
 import { getSkillPrompt } from '@/composables/swarm/useSwarmAgents'
 import { ensureRoom, buildMembers, startEpisode, endEpisode, roomOf, setMemberSession, setMemberStatus, noteMemberTool, noteMemberTokens, pushMessage, addArtifact } from '@/store/swarmRoom'
 import { readyTaskIds, tasksSettled, describeBoard } from '@/lib/agent/teamProtocol'
@@ -423,14 +424,14 @@ function waitForBridgeCompletion(
 
 /** 后台任务进度上报 */
 function reportProgress() {
-  if (window.dsh?.jobs?.progress && activeSwarmJobId) {
+  if (aikmDsh?.jobs?.progress && activeSwarmJobId) {
     try {
       const total = agents.value.length
       const done = allAgentIndices().filter(i => {
         const s = agentRunStates.value[i]?.status
         return s === 'done' || s === 'error'
       }).length
-      window.dsh.jobs.progress(activeSwarmJobId, total > 0 ? Math.round((done / total) * 100) : null, `${done}/${total} ${store.locales === 'zh' ? 'Agent 完成' : 'agents done'}`)
+      aikmDsh.jobs.progress(activeSwarmJobId, total > 0 ? Math.round((done / total) * 100) : null, `${done}/${total} ${store.locales === 'zh' ? 'Agent 完成' : 'agents done'}`)
     } catch { /* 忽略 */ }
   }
 }
@@ -812,8 +813,8 @@ export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode, opt
   // 后台任务（swarm job）
   let swarmJob: string | null = null
   try {
-    if (window.dsh?.jobs?.start) {
-      const j = await window.dsh.jobs.start('swarm', 'swarm', `${store.locales === 'zh' ? '集群执行' : 'Swarm run'}: ${taskText.slice(0, 40)}`)
+    if (aikmDsh?.jobs?.start) {
+      const j = await aikmDsh.jobs.start('swarm', 'swarm', `${store.locales === 'zh' ? '集群执行' : 'Swarm run'}: ${taskText.slice(0, 40)}`)
       swarmJob = j.id
       setActiveSwarmJobId(j.id)
     }
@@ -873,8 +874,8 @@ export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode, opt
   } catch (err: any) {
     if (runEpoch.value === myEpoch) {
       addOutput('system', '错误', `${err?.message || err}`)
-      if (swarmJob && window.dsh?.jobs?.fail) {
-        try { window.dsh.jobs.fail(swarmJob, `${err?.message || err}`) } catch { /* 忽略 */ }
+      if (swarmJob && aikmDsh?.jobs?.fail) {
+        try { aikmDsh.jobs.fail(swarmJob, `${err?.message || err}`) } catch { /* 忽略 */ }
       }
     }
   } finally {
@@ -886,8 +887,8 @@ export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode, opt
     if (runEpoch.value !== myEpoch) return
     running.value = false
     scrollToBottom()
-    if (swarmJob && window.dsh?.jobs?.complete) {
-      try { window.dsh.jobs.complete(swarmJob, { mode: swarmMode.value }) } catch { /* 忽略 */ }
+    if (swarmJob && aikmDsh?.jobs?.complete) {
+      try { aikmDsh.jobs.complete(swarmJob, { mode: swarmMode.value }) } catch { /* 忽略 */ }
     }
     setActiveSwarmJobId(null)
   }
@@ -938,9 +939,9 @@ export const runNamedTask = async (indices: number[], prompt: string): Promise<v
 
   let swarmJob: string | null = null
   try {
-    if (window.dsh?.jobs?.start) {
+    if (aikmDsh?.jobs?.start) {
       const names = targets.map(i => agents.value[i]?.name || `Agent ${i + 1}`).join('、')
-      const j = await window.dsh.jobs.start('swarm', 'swarm', `${en ? '@named' : '@点名'}: ${names}: ${prompt.slice(0, 40)}`)
+      const j = await aikmDsh.jobs.start('swarm', 'swarm', `${en ? '@named' : '@点名'}: ${names}: ${prompt.slice(0, 40)}`)
       swarmJob = j.id
       setActiveSwarmJobId(j.id)
     }
@@ -956,8 +957,8 @@ export const runNamedTask = async (indices: number[], prompt: string): Promise<v
   } catch (err: any) {
     if (runEpoch.value === myEpoch) {
       addOutput('system', '错误', `${err?.message || err}`)
-      if (swarmJob && window.dsh?.jobs?.fail) {
-        try { window.dsh.jobs.fail(swarmJob, `${err?.message || err}`) } catch { /* 忽略 */ }
+      if (swarmJob && aikmDsh?.jobs?.fail) {
+        try { aikmDsh.jobs.fail(swarmJob, `${err?.message || err}`) } catch { /* 忽略 */ }
       }
     }
   } finally {
@@ -966,8 +967,8 @@ export const runNamedTask = async (indices: number[], prompt: string): Promise<v
     if (runEpoch.value !== myEpoch) return
     running.value = false
     scrollToBottom()
-    if (swarmJob && window.dsh?.jobs?.complete) {
-      try { window.dsh.jobs.complete(swarmJob, { mode: 'named' }) } catch { /* 忽略 */ }
+    if (swarmJob && aikmDsh?.jobs?.complete) {
+      try { aikmDsh.jobs.complete(swarmJob, { mode: 'named' }) } catch { /* 忽略 */ }
     }
     setActiveSwarmJobId(null)
   }

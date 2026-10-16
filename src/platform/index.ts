@@ -14,6 +14,7 @@ import { browserPlatform } from '@/platform/browser'
 import { electronPlatform, isElectronRuntime } from '@/platform/electron'
 import { createHostPlatform, hostRuntime } from '@/platform/host'
 import { createAndroidPlatform, isAndroidRuntime } from '@/platform/android'
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 
 let cached: Platform | null = null
 
@@ -42,7 +43,7 @@ export function getPlatform(): Platform {
       // 此时整个界面会静默退化成「网页模式」（没有窗口壳与桌面能力）。这里明确报出来，
       // 否则只能看到「软件变成了网页版」这种没有线索的现象。
       if (!info && typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent || '')) {
-        console.error('[platform] 运行在 Electron 窗口里，但 window.ipcRenderer 不存在 —— preload 没有加载成功，'
+        console.error('[platform] 运行在 Electron 窗口里，但拿不到宿主 IPC 桥（aikmIpcAvailable() 为 false）—— preload 没有加载成功，'
           + '界面将退化为网页模式。请检查 dist-electron/preload/index.mjs（或 .cjs）是否存在，必要时重新 npm run build:web。')
       }
     }
@@ -69,7 +70,7 @@ export function capabilityMode(id: CapabilityId): CapabilityMode {
 export function isHostGuestRuntime(): boolean {
   return (
     typeof window !== 'undefined' &&
-    !(window as any).ipcRenderer &&
+    !aikmIpcAvailable() &&
     !!(window as any).__AIKM_HOST__
   )
 }

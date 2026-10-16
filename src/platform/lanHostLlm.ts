@@ -14,6 +14,7 @@
  */
 
 import { LAN_GUEST_TOKEN_HEADER, LAN_GUEST_TOKEN_KEY, LAN_LLM_SOURCES_API } from '@/shared/lanGuest'
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 
 export interface LanHostLlmSources {
   llm: any
@@ -36,7 +37,7 @@ function readToken(): string {
  * 返回 null = 非网页端 / 主机未下发 / 请求失败（调用方保持现状，不报错）。
  */
 export async function fetchHostLlmSources(probe = true): Promise<LanHostLlmSources | null> {
-  if (typeof window === 'undefined' || (window as any).ipcRenderer) return null
+  if (typeof window === 'undefined' || aikmIpcAvailable()) return null
   const headers: Record<string, string> = {}
   const token = readToken()
   if (token) headers[LAN_GUEST_TOKEN_HEADER] = token

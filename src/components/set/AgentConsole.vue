@@ -224,6 +224,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { ref, computed, reactive, watch, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
@@ -374,9 +375,9 @@ async function refreshSessions(): Promise<void> {
   sessions.value = await agentBridge.refreshAll()
 }
 async function refreshJobs(): Promise<void> {
-  if (!window.dsh?.jobs) return
+  if (!aikmDsh?.jobs) return
   try {
-    jobs.value = (await window.dsh.jobs.list()) || []
+    jobs.value = (await aikmDsh.jobs.list()) || []
   } catch {
     jobs.value = []
   }
@@ -393,7 +394,7 @@ function onWindowFocus(): void {
 // ====== 取消 / 销毁 ======
 async function onCancelRow(row: TaskRow): Promise<void> {
   if (row.isAgent && row.agentId) await agentBridge.cancel(row.agentId, 'user')
-  else if (row.jobId && window.dsh?.jobs) await window.dsh.jobs.cancel(row.jobId, 'user')
+  else if (row.jobId && aikmDsh?.jobs) await aikmDsh.jobs.cancel(row.jobId, 'user')
 }
 async function onCancel(): Promise<void> {
   if (selectedSession.value) await agentBridge.cancel(selectedSession.value.id, 'user')
@@ -519,8 +520,8 @@ onMounted(async () => {
     if (idx >= 0) sessions.value[idx] = v
     else sessions.value.push(v)
   })
-  if (window.dsh?.jobs) {
-    unsubJobs = window.dsh.jobs.onEvent(() => refreshJobs())
+  if (aikmDsh?.jobs) {
+    unsubJobs = aikmDsh.jobs.onEvent(() => refreshJobs())
   }
   await refreshSessions()
   await refreshJobs()

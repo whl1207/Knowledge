@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmIpcOrNull } from '@/lib/aikmIpc'
 /**
  * PdfPageEditor.vue — PDF「页面管理」对话框（合并 / 删除 / 调整顺序 / 旋转）。
  *
@@ -35,7 +36,7 @@ const emit = defineEmits<{
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
-const ipc: any = (window as any)?.ipcRenderer
+const ipc: any = aikmIpcOrNull()
 
 /** 清单中的一页 */
 interface PpePage {

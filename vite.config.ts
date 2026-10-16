@@ -48,6 +48,24 @@ const ttsWorkerPlugin = {
   },
 }
 
+// 清理 preload 目录里历史遗留的 `index.mjs`（CJS 代码 + .mjs 扩展名，Electron 按 ESM 解析会直接失败）。
+// 必须在**新产物写完之后**删（closeBundle 晚于 writeBundle），否则先删再写失败就什么都没有了。
+const dropStalePreloadMjs = {
+  name: 'drop-stale-preload-mjs',
+  enforce: 'post' as const,
+  closeBundle() {
+    try {
+      const stale = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist-electron', 'preload', 'index.mjs')
+      if (fs.existsSync(stale)) {
+        fs.rmSync(stale, { force: true })
+        console.log('[preload] removed stale index.mjs (preload is built as CommonJS index.cjs)')
+      }
+    } catch (err) {
+      console.warn('[preload] failed to remove stale index.mjs:', (err as Error)?.message)
+    }
+  },
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ command }) => {
   fs.rmSync('dist-electron', { recursive: true, force: true })
@@ -148,6 +166,7 @@ export default defineConfig(({ command }) => {
             resolve: { alias: srcAlias },
             // 同主进程：只留警告与错误，避免 dev 下重复打印「building… / watching…」
             logLevel: 'warn',
+            plugins: [dropStalePreloadMjs],
             build: {
               sourcemap: sourcemap ? 'inline' : undefined, // #332
               minify: isBuild,
@@ -155,6 +174,15 @@ export default defineConfig(({ command }) => {
               rollupOptions: {
                 onwarn: onRollupWarn,
                 external: Object.keys('dependencies' in pkg ? pkg.dependencies : {}),
+                // ⚠️ preload 必须是 **CommonJS**，且扩展名必须是 .cjs：
+                // 本项目 package.json 是 `"type": "module"`，而 preload 里 `require('electron')` 是 CJS 写法；
+                // 一旦产物叫 `index.mjs`，Electron 就按 ESM 解析它 → `ReferenceError: require is not defined
+                // in ES module scope` → **整个 preload 不执行** → 渲染层拿不到 window.ipcRenderer。
+                // 后果不是报错，而是：窗口 load 完不出首帧（ready-to-show 不触发）→ 只看到控制台（DevTools）没有窗口。
+                output: {
+                  format: 'cjs',
+                  entryFileNames: '[name].cjs',
+                },
               },
             },
           },

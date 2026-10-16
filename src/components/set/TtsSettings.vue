@@ -1,5 +1,6 @@
 <!-- TtsSettings.vue - 语音合成（TTS）设置（从 Set.vue 拆分出的独立组件，样式自带，与设置页一致） -->
 <script setup lang="ts">
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 import { computed, ref, nextTick, onUnmounted } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
@@ -65,7 +66,7 @@ async function applyModelDirAndLoad(dir: string, showSuccess: boolean) {
 // 选择本地 ONNX 模型目录（Kokoro / Piper），选中后自动加载
 async function selectOnnxModelDir() {
   try {
-    if (!window.ipcRenderer) {
+    if (!aikmIpcAvailable()) {
       ElMessage.warning(store.locales === 'zh' ? '仅在 Electron 应用中可用' : 'Only available in Electron app')
       return
     }

@@ -138,6 +138,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
@@ -145,7 +146,7 @@ import { normalizeRemoteStoreUrl, parseStoreIndex, type RemoteStorePlugin } from
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
-const desktop = computed(() => typeof window !== 'undefined' && !!(window as any).ipcRenderer)
+const desktop = computed(() => typeof window !== 'undefined' && !!aikmIpcAvailable())
 
 interface StoreSource { name: string; url: string }
 
@@ -204,7 +205,7 @@ const loadSource = async (src: StoreSource) => {
 
 const refreshInstalled = async () => {
   try {
-    const res = await (window as any).dsh?.plugin?.list?.()
+    const res = await aikmDsh?.plugin?.list?.()
     installedIds.value = new Set((res?.plugins || []).map((p: any) => p.id))
   } catch { /* 列表不可用不影响商店浏览 */ }
 }
@@ -248,7 +249,7 @@ const removeSource = (src: StoreSource) => {
 
 /** 一键使用「本机正在共享的目录」：向主进程取真实运行状态（不信任可能过期的存档开关） */
 const useLocalShare = async () => {
-  const api = (window as any).dsh?.remoteFs
+  const api = aikmDsh?.remoteFs
   if (!api?.getStatus) {
     ElMessage.warning(zh.value ? '共享服务不可用（网页端没有本机共享）' : 'Share service unavailable')
     return
@@ -270,7 +271,7 @@ const useLocalShare = async () => {
 
 /** 安装：先把该插件申请的权限摆出来让用户确认，再交主进程下载 + 落盘 + 加载 */
 const install = async (p: RemoteStorePlugin) => {
-  const api = (window as any).dsh?.plugin
+  const api = aikmDsh?.plugin
   if (!api?.installFromStore) {
     ElMessage.error(zh.value ? '插件商店仅桌面版可用' : 'Plugin store requires the desktop app')
     return
@@ -321,7 +322,7 @@ const goManage = () => {
 
 const openDir = async () => {
   try {
-    await (window as any).dsh?.plugin?.openDir?.()
+    await aikmDsh?.plugin?.openDir?.()
   } catch (e: any) {
     ElMessage.error(e?.message || String(e))
   }

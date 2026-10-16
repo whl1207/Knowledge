@@ -27,7 +27,7 @@
 
       <div v-if="registryUnavailable" class="registry-unavailable">
         <i class="fa fa-info-circle"></i>
-        {{ store.locales === 'zh' ? '注册表仅桌面版可用（window.dsh.tools 不可用）' : 'Registry requires the desktop app (window.dsh.tools unavailable)' }}
+        {{ store.locales === 'zh' ? '注册表仅桌面版可用（桌面 IPC 不可用）' : 'Registry requires the desktop app (desktop IPC unavailable)' }}
       </div>
 
       <div v-else class="registry-list">
@@ -57,6 +57,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { ref, computed, onMounted } from 'vue'
 import { usestore } from '@/store'
 import { SKILL_AGENT_DEFAULT_TOOLS } from '@/lib/agent/skill'
@@ -120,12 +121,12 @@ const disabledBadgeHint = computed(() => store.locales === 'zh'
       : 'Registered, but not in the agent-loop default tool set (SKILL_AGENT_DEFAULT_TOOLS) → not exposed to the model by default (enable it explicitly in Settings → Tools)'))
 
 const loadRegistry = async () => {
-  if (!window.dsh?.tools) {
+  if (!aikmDsh?.tools) {
     registryUnavailable.value = true
     return
   }
   try {
-    registryTools.value = await window.dsh.tools.list()
+    registryTools.value = await aikmDsh.tools.list()
     registryUnavailable.value = false
   } catch (e: any) {
     console.error('[ToolRegistryPanel] 加载工具注册表失败:', e)

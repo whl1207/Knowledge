@@ -186,6 +186,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, computed, watch, onMounted } from 'vue'
 import { usestore } from '@/store'
 import { ElMessageBox } from 'element-plus'
@@ -380,7 +381,7 @@ const locPickTitle = computed(() => {
     : `${zh.value ? '书签位置：未设置，将保存到工作区根目录' : 'Bookmark folder: workspace root'}${tip}`
 })
 const pickSaveDir = async () => {
-  if (mutating.value || !window.ipcRenderer) return
+  if (mutating.value || !aikmIpcAvailable()) return
   const dir = await getPlatform().dialog.pickDirectory().catch(() => null)
   if (dir && typeof dir === 'string' && dir !== (store.UI?.browserSaveDir || '').trim()) {
     store.UI.browserSaveDir = dir

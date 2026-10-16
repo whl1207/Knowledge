@@ -83,6 +83,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { usestore } from '@/store'
@@ -162,7 +163,7 @@ const goManage = () => {
 
 const openDir = async () => {
   try {
-    await (window as any).dsh?.plugin?.openDir?.()
+    await aikmDsh?.plugin?.openDir?.()
   } catch (e: any) {
     ElMessage.error(e?.message || String(e))
   }

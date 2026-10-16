@@ -15,6 +15,7 @@ import * as Y from 'yjs'
 import { Awareness, encodeAwarenessUpdate, applyAwarenessUpdate } from 'y-protocols/awareness'
 import { uint8ToBase64, base64ToUint8 } from '@/lib/collab-codec'
 import type { CollabMember } from '@/types/collab'
+import { aikmDsh } from '@/lib/aikmIpc'
 
 export type CollabSessionStatus = 'idle' | 'connecting' | 'connected'
 
@@ -550,12 +551,12 @@ export function useCollabExcalidraw(): CollabExcalidrawController {
     opts: { token?: string; maxMembers?: number; permissionMode?: string; autoSaveSeconds?: number; name?: string } = {},
   ): Promise<boolean> {
     if (status.value !== 'idle') return false
-    if (!window.dsh?.collab) {
+    if (!aikmDsh?.collab) {
       error.value = '协同服务不可用'
       return false
     }
     try {
-      const res = await window.dsh.collab.shareFile(filePath, content, {
+      const res = await aikmDsh.collab.shareFile(filePath, content, {
         ...opts,
         kind: 'excalidraw',
       })

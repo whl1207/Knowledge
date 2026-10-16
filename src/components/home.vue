@@ -1234,6 +1234,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, computed, watch, nextTick, onMounted, onUpdated, onBeforeUnmount, type Ref } from 'vue'
 import { usestore } from '@/store'
 import { retrieveKnowledge, resolveStrategyId } from '@/shared/kbRetrieval'
@@ -1648,10 +1649,32 @@ const chatListEntries = computed<ChatListEntry[]>({
 })
 
 const showSidebar = ref(false)  // 聊天列表侧边栏：初始不显示，由聊天标题左侧的 fa-bars 开关展开
-// 细长布局（高宽比 > 16:9，典型如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换——
-// 进入主页先看到整屏聊天列表，点某条对话进入整屏对话，对话区左上角 fa-bars 再回到列表（见样式 .narrow）
-const isNarrowLayout = useTallLayout()
+// 手机模式（细长窗口「高宽比 > 16:9，典型如安卓竖屏」或窗口宽度过窄）：聊天列表与对话区不再并排，
+// 而是各自占满整屏互相切换——进入主页先看到整屏聊天列表，点某条对话进入整屏对话，对话区左上角
+// fa-bars 再回到列表（见样式 .narrow）。侧栏宽度固定 220px（--chat-sidebar-w）：窗口变窄不再把它
+// 压到 150px，而是直接切进这套整屏做法（原来的 150px 一档已去掉）。
+const isTallLayout = useTallLayout()
+/** 手机模式的宽度阈值：窗口宽度不超过它即整屏切换。
+    比样式里 @media (max-width: 768px) 断点更窄——640~768px 仍保留左右分栏（侧栏固定 220px），
+    媒体查询里的窄屏字号微调照旧生效，只是不再触发手机模式 */
+const MOBILE_MAX_WIDTH = 640
+const isMobileWidth = ref(false)
+const syncMobileWidth = (): void => {
+  if (typeof window === 'undefined') return
+  isMobileWidth.value = window.innerWidth <= MOBILE_MAX_WIDTH
+}
+const isNarrowLayout = computed(() => isTallLayout.value || isMobileWidth.value)
 const showBranchView = ref(false)  // 分支树视图开关
+
+onMounted(() => {
+  if (typeof window === 'undefined') return
+  window.addEventListener('resize', syncMobileWidth)
+  syncMobileWidth()
+})
+onBeforeUnmount(() => {
+  if (typeof window === 'undefined') return
+  window.removeEventListener('resize', syncMobileWidth)
+})
 
 // ==================== 安卓返回手势（本模块内的界面栈） ====================
 // 见文件后段 `useBackLayer('home', …)`：细长窗口下主页是「整屏聊天列表 ⇄ 整屏对话」两屏，
@@ -3852,7 +3875,7 @@ const toAbsoluteToolPath = (p: string): string => {
  */
 const openToolWrittenFile = (p: string) => {
   if (!p) return
-  if (!window.ipcRenderer) {
+  if (!aikmIpcAvailable()) {
     ElMessage.warning(store.locales == 'zh' ? '浏览器模式下无法打开本地文件' : 'Cannot open local files in browser mode')
     return
   }
@@ -4188,7 +4211,7 @@ onMounted(async () => {
     if (inputEl) composerResizeObserver.observe(inputEl)
   }
   window.addEventListener('resize', updateComposerShift)
-  // 细长布局（高宽比 > 16:9，如安卓竖屏）：列表/对话整屏切换；判定与窗口监听见 useTallLayout
+  // 手机模式（细长窗口或窄窗口）：列表/对话整屏切换；高宽比判定与窗口监听见 useTallLayout
   if (isFirstInit || chats.value.length === 0) {
     loadChatsFromStorage()
   }
@@ -5911,7 +5934,7 @@ const {
  */
 const onModelSelectRefresh = async () => {
   await refreshModels()
-  if (!window.ipcRenderer) {
+  if (!aikmIpcAvailable()) {
     try {
       const { syncHostLlmSources } = await import('@/platform/lanHostLlm')
       await syncHostLlmSources(store, true)
@@ -6817,7 +6840,7 @@ const toggleMsgThinkCollapsed = (msg: any) => {
 }
 const resumeActiveChat = async () => {
   // 仅 Electron 模式有主进程会话可续接；浏览器/LAN 模式无主进程，跳过
-  if (typeof window === 'undefined' || !window.ipcRenderer) return
+  if (typeof window === 'undefined' || !aikmIpcAvailable()) return
 
   // 定位生成中的聊天：当前聊天未在生成时，扫描其它聊天（上次切走时正在生成的）
   let chat = currentChat.value
@@ -8437,11 +8460,13 @@ const toggleSidebar = () => {
   showSidebar.value = isNarrowLayout.value ? true : !showSidebar.value
 }
 
-// ==================== 细长布局 ====================
+// ==================== 手机模式（细长窗口 / 窄窗口） ====================
 
-// 细长布局（高宽比 > 16:9，典型如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换。
-// 判定与窗口监听统一在 useTallLayout 里（与知识管理共用同一份）；进入时先给聊天列表（此时它就是
-// 「主页」），离开则按桌面习惯收起，切换点即 showSidebar（true = 整屏聊天列表，false = 整屏对话）
+// 手机模式（细长窗口「高宽比 > 16:9，典型如安卓竖屏」，或窗口宽度不超过 MOBILE_MAX_WIDTH）：
+// 聊天列表与对话区不再并排，而是各自占满整屏互相切换。高宽比判定与窗口监听统一在 useTallLayout 里
+// （与知识管理共用同一份），宽度判定在本组件里（侧栏固定 220px，不再按宽度压窄）；
+// 进入时先给聊天列表（此时它就是「主页」），离开则按桌面习惯收起，切换点即 showSidebar
+// （true = 整屏聊天列表，false = 整屏对话）
 watch(isNarrowLayout, (tall) => { showSidebar.value = tall }, { immediate: true })
 
 /** 从整屏聊天列表点开某条对话：细长布局下收起列表，让对话占满整屏 */
@@ -12695,9 +12720,9 @@ select {
   100% { box-shadow: 0 0 0 0 rgba(155, 89, 182, 0); }
 }
 
-/* 细长布局（高宽比 > 16:9，如安卓竖屏）：聊天列表与对话区不再并排，而是各自占满整屏互相切换——
-   进主页先看到整屏聊天列表，点某条对话进整屏对话，对话区左上角 fa-bars 再回到列表。
-   由 home.vue 按窗口高宽比切换 .narrow 类（不是宽度断点）。
+/* 手机模式（细长窗口「高宽比 > 16:9，如安卓竖屏」或窗口宽度过窄）：聊天列表与对话区不再并排，
+   而是各自占满整屏互相切换——进主页先看到整屏聊天列表，点某条对话进整屏对话，对话区左上角
+   fa-bars 再回到列表。由 home.vue 切换 .narrow 类（高宽比见 useTallLayout，宽度断点见 MOBILE_MAX_WIDTH）。
    宽度与内容都由 --chat-sidebar-w 推导，这里把它改成整屏宽即可；不加过渡，避免整屏切换时
    出现「列表滑动、对话已铺满」的半截画面。 */
 .ai-chat-container.narrow {
@@ -12712,13 +12737,9 @@ select {
   display: none;
 }
 
-/* 响应式调整 */
+/* 响应式调整：窄屏字号微调（与脚本里的手机模式阈值 MOBILE_MAX_WIDTH 是两件事，
+   这里只做尺寸微调，手机模式的整屏切换见 .narrow）；侧栏宽度保持 220px 不再变窄 */
 @media (max-width: 768px) {
-  .ai-chat-container {
-    /* 窄屏侧栏变窄；宽度与内容都由该变量推导（收起时不留空位） */
-    --chat-sidebar-w: 150px;
-  }
-  
   .step-indicator {
     font-size: 10px;
     padding: 4px 8px;

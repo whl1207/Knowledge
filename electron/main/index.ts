@@ -249,6 +249,7 @@ async function createWindow() {
       backgroundThrottling: false
     },
   })
+
   
   if (process.platform === 'linux') {
     win.setMenuBarVisibility(false)
@@ -942,6 +943,96 @@ ipcMain.handle('open-settings-window', (event, payload?: { nav?: string }) => {
     return { ok: true, created: true }
   } catch (err: any) {
     return { ok: false, error: String(err?.message || err) }
+  }
+})
+
+// ==================== 插件面板子窗口（导航栏插件图标收纳后的启动器入口） ====================
+//
+// 背景：插件多到导航栏放不下时，主窗口把插件图标收纳成 `fa fa-th-large` 启动器，
+// 点插件以「子窗口形态」打开 —— 这里就是那个子窗口。
+//
+// 与「文件独立窗口」同一套做法：渲染层经 `#/plugin-panel?id=<插件面板 key>` 定位，
+// 子窗口自己跑一份插件运行时（src/main.ts → initPluginRuntime），
+// 于是它自己就能注册出插件面板，主窗口不需要传组件、也不需要跨窗口传状态。
+// 每个插件面板一个窗口（重复打开只聚焦），关掉即销毁。
+const pluginPanelWindows = new Map<string, BrowserWindow>()
+
+function openPluginPanelWindow(opts: { key: string; title?: string; icon?: string }, anchor?: BrowserWindow | null): BrowserWindow | null {
+  const key = String(opts?.key || '').trim()
+  if (!key) return null
+
+  const exist = pluginPanelWindows.get(key)
+  if (exist && !exist.isDestroyed()) {
+    if (exist.isMinimized()) exist.restore()
+    exist.show()
+    exist.focus()
+    return exist
+  }
+  if (exist) pluginPanelWindows.delete(key)
+
+  const title = String(opts?.title || '').trim() || '插件'
+  const childWindow = new BrowserWindow({
+    title,
+    width: 1000,
+    height: 700,
+    minWidth: 420,
+    minHeight: 300,
+    icon: join(publicDir, 'favicon.ico'),
+    // 与主窗口 / 文件窗口一致：Linux 完全无边框，配合壳顶栏的 drag 区拖动
+    ...(process.platform === 'linux' ? { frame: false } : { titleBarStyle: 'hidden' }),
+    // 消除闪白：初始不显示，首帧渲染完成（ready-to-show）后再显示；后备背景用当前主题色
+    show: false,
+    backgroundColor: themeBackgroundColor,
+    webPreferences: {
+      preload: resolvePreload(),
+      webSecurity: false,
+    },
+  })
+  pluginPanelWindows.set(key, childWindow)
+  attachExternalLinkHandling(childWindow)
+
+  const childWcId = childWindow.webContents.id
+  childWindow.on('closed', () => {
+    trayService.forgetWindow(childWcId)
+    if (pluginPanelWindows.get(key) === childWindow) pluginPanelWindows.delete(key)
+  })
+
+  // 相对主窗口居中（主窗口已关时退回请求方窗口 / 屏幕）
+  const anchorWin = anchor && !anchor.isDestroyed() ? anchor : (win && !win.isDestroyed() ? win : null)
+  centerOverWindow(childWindow, anchorWin)
+
+  // 首帧渲染完成后显示窗口，避免加载期白屏；did-finish-load 兜底防止极端情况窗口不出现
+  childWindow.once('ready-to-show', () => {
+    centerOverWindow(childWindow, anchorWin)
+    if (!childWindow.isDestroyed()) childWindow.show()
+  })
+  childWindow.webContents.on('did-finish-load', () => {
+    if (!childWindow.isDestroyed() && !childWindow.isVisible()) childWindow.show()
+  })
+
+  // 面板 key 可能是中文（历史 key 如「知识管理」），一律 URL 编码后放进 hash，渲染层解码
+  let hash = `/plugin-panel?id=${encodeURIComponent(key)}`
+  if (opts?.title) hash += `&title=${encodeURIComponent(String(opts.title))}`
+  if (DEV_SERVER_URL) {
+    childWindow.loadURL(`${url}#${hash}`)
+  } else {
+    childWindow.loadFile(indexHtml, { hash })
+  }
+  return childWindow
+}
+
+ipcMain.handle('open-plugin-panel-window', async (event, payload?: { key?: string; pluginId?: string; title?: string; icon?: string }) => {
+  try {
+    const key = typeof payload?.key === 'string' ? payload.key : ''
+    if (!key) return false
+    const w = openPluginPanelWindow(
+      { key, title: payload?.title, icon: payload?.icon },
+      BrowserWindow.fromWebContents(event.sender),
+    )
+    return !!w && !w.isDestroyed()
+  } catch (err: any) {
+    logWarn('plugin-panel-window', 'open failed', err)
+    return false
   }
 })
 

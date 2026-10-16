@@ -1,5 +1,6 @@
 <!-- /knowRAG.vue -->
 <script setup lang="ts">
+import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
 defineOptions({ name: 'Knowledge' })
 import {onMounted,onBeforeUnmount,onActivated,onDeactivated,ref, nextTick,computed, watch, reactive} from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -2053,13 +2054,13 @@ const sliceOnly = async function(noSwitch?: boolean, onProgress?: (detail: strin
     // 后台任务（路线图 2.4）：知识库构建注册为 kb-build job，进度实时上报
     let kbJob: string | null = null
     try {
-        if (window.dsh?.jobs?.start) {
-            const j = await window.dsh.jobs.start('kb-build', 'kb-build', store.locales === 'zh' ? '知识库切片' : 'KB Slicing')
+        if (aikmDsh?.jobs?.start) {
+            const j = await aikmDsh.jobs.start('kb-build', 'kb-build', store.locales === 'zh' ? '知识库切片' : 'KB Slicing')
             kbJob = j.id
         }
     } catch { /* 无桌面环境时忽略 */ }
     try {
-        let { fileList } = await window.ipcRenderer.invoke("getFilesRelation", store.root, 3);
+        let { fileList } = await aikmIpc.invoke("getFilesRelation", store.root, 3);
         
         files.value = fileList
             .filter((obj: any) => obj.type === 'file' && !isKbSidecarFile(obj.path))
@@ -2244,11 +2245,11 @@ const sliceOnly = async function(noSwitch?: boolean, onProgress?: (detail: strin
                     : `Processing ${processed}/${totalMd} files, ${blocks.value.length} slices so far...`)
             }
             // 任务进度（路线图 2.4）：按已处理文件数上报
-            if (kbJob && window.dsh?.jobs?.progress) {
+            if (kbJob && aikmDsh?.jobs?.progress) {
                 try {
                     const done = files.value.filter((f: any) => (f.extension || '').toLowerCase() === '.md').length
                     const pct = done > 0 ? Math.min(99, Math.round(((i + 1) / done) * 100)) : null
-                    window.dsh.jobs.progress(kbJob, pct, `处理文件 ${i + 1}/${files.value.length}`)
+                    aikmDsh.jobs.progress(kbJob, pct, `处理文件 ${i + 1}/${files.value.length}`)
                 } catch { /* 忽略 */ }
             }
         }
@@ -2257,14 +2258,14 @@ const sliceOnly = async function(noSwitch?: boolean, onProgress?: (detail: strin
         scanSummaryStatus();
         
         if (!noSwitch) viewMode.value = 'slice'
-        if (kbJob && window.dsh?.jobs?.complete) {
-            try { window.dsh.jobs.complete(kbJob, { slices: blocks.value.length }) } catch { /* 忽略 */ }
+        if (kbJob && aikmDsh?.jobs?.complete) {
+            try { aikmDsh.jobs.complete(kbJob, { slices: blocks.value.length }) } catch { /* 忽略 */ }
         }
     } catch (globalError) {
         console.error("处理过程中发生全局错误:", globalError);
         kb_state.value = `处理失败`;
-        if (kbJob && window.dsh?.jobs?.fail) {
-            try { window.dsh.jobs.fail(kbJob, `处理失败: ${(globalError as any)?.message || globalError}`) } catch { /* 忽略 */ }
+        if (kbJob && aikmDsh?.jobs?.fail) {
+            try { aikmDsh.jobs.fail(kbJob, `处理失败: ${(globalError as any)?.message || globalError}`) } catch { /* 忽略 */ }
         }
     }
 }
@@ -3558,7 +3559,7 @@ const detectFileChanges = async (): Promise<{ added: string[]; modified: string[
     if (!store.root) { fileChanges.value = changes; return changes }
     let fileList: any[] = []
     try {
-        const r = await window.ipcRenderer.invoke("getFilesRelation", store.root, 3)
+        const r = await aikmIpc.invoke("getFilesRelation", store.root, 3)
         fileList = (r.fileList || []).filter((f: any) =>
             f.type === 'file' && (f.extension || '').toLowerCase() === '.md' && !f.path.toLowerCase().endsWith('.kb'))
     } catch { fileChanges.value = changes; return changes }
@@ -3614,7 +3615,7 @@ const fileChangeTotal = computed(() =>
 const refreshBuildManifest = async () => {
     if (!store.root) return
     try {
-        const r = await window.ipcRenderer.invoke("getFilesRelation", store.root, 3)
+        const r = await aikmIpc.invoke("getFilesRelation", store.root, 3)
         const fileList = (r.fileList || []).filter((f: any) =>
             f.type === 'file' && (f.extension || '').toLowerCase() === '.md')
         const old = buildManifest.value || {}
@@ -5017,7 +5018,7 @@ const scanKnowledgeBases = async function() {
     // 记录当前选中的知识库：重建列表后若它不在扫描结果里（如从外部打开的工作区外 .kb），需保留
     const prevSelected: any = knowledgeBases.value[selectedKbIndex.value]
     try {
-        const result = await window.ipcRenderer.invoke("getFilesRelation", store.root, 1)
+        const result = await aikmIpc.invoke("getFilesRelation", store.root, 1)
         if (!result) return
 
         const { fileList = [] } = result

@@ -21,6 +21,8 @@ import { computed, reactive, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getPlatform, hasCapability } from '@/platform'
 import { formatBinding, matchesKeyboardEvent, normalizeEventKey, parseBinding } from '@/lib/plugin/shortcuts'
+// 备选组合与默认值同源（见 src/shared/asrShortcut.ts），别在这里再写一份
+import { ASR_SHORTCUT_FALLBACKS } from '@/shared/asrShortcut'
 import { createASRManager, type ASRManager } from './manager'
 import {
   installVoiceTargetTracking,
@@ -353,7 +355,7 @@ const HOST_REPEAT_MS = 900
 /** 失败（缺配置 / 报错）后的冷却时间：这段时间内不再重试，避免按住时提示刷屏 */
 const START_COOLDOWN_MS = 1500
 /** 主快捷键被别的软件占用时的备选组合（按顺序尝试，第一个可用的生效） */
-const SHORTCUT_FALLBACKS = ['Ctrl+Alt+Space']
+const SHORTCUT_FALLBACKS = ASR_SHORTCUT_FALLBACKS
 
 let windowPressAt = 0
 let windowPressWasActive = false
@@ -469,18 +471,21 @@ async function syncShortcut(): Promise<void> {
     voiceState.hostShortcutError = ''
     voiceState.hostShortcutActive = used
     if (used !== shortcut) {
+      // ⚠️ 先说清「主键失败」再报当前生效的是哪一组 —— 提示里必须**同时**给出两组：
+      // 只写「已临时改用 X」时，用户从消息里根本看不出原来那组为什么没生效（曾以为是逻辑错）。
       warnOnce(`fallback:${shortcut}`, zh()
-        ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 被其它软件占用，已临时改用 ${formatBinding(used, isMacPlatform())}`
-        : `${formatBinding(shortcut, isMacPlatform())} is taken by another app — temporarily using ${formatBinding(used, isMacPlatform())}`)
+        ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 被其它软件占用，暂时改用 ${formatBinding(used, isMacPlatform())}（可在「设置 → 语音 → 输入」里自己换一组）`
+        : `${formatBinding(shortcut, isMacPlatform())} is taken by another app — temporarily using ${formatBinding(used, isMacPlatform())} (change it under Settings → Voice → ASR)`)
     }
     return
   }
+  // 连备选都没注册上：**不要**说「已临时改用」（那会让人以为能用）。把主键的失败原因报出来。
   voiceState.hostShortcut = 'failed'
   voiceState.hostShortcutError = res.error || (zh() ? '注册失败' : 'registration failed')
   voiceState.hostShortcutActive = ''
   warnOnce(`failed:${shortcut}`, zh()
-    ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 注册失败：${voiceState.hostShortcutError}。请换一个组合，或直接用右下角的悬浮麦克风。`
-    : `Could not register ${formatBinding(shortcut, isMacPlatform())}: ${voiceState.hostShortcutError}. Pick another combination, or use the floating mic at the bottom-right.`)
+    ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 注册失败（备选组合也不可用）：${voiceState.hostShortcutError}。请在「设置 → 语音 → 输入」里换一组，或点「清空」改用右下角的悬浮麦克风。`
+    : `Could not register ${formatBinding(shortcut, isMacPlatform())} (fallbacks unavailable too): ${voiceState.hostShortcutError}. Pick another combination under Settings → Voice → ASR, or clear it and use the floating mic at the bottom-right.`)
 }
 
 async function tryRegisterShortcut(accel: string): Promise<{ ok: boolean; error?: string }> {

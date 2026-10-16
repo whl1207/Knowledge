@@ -13,6 +13,7 @@
 import * as pdfjsLib from 'pdfjs-dist'
 import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
 import { getPlatform, hasCapability } from '@/platform'
+import { aikmDsh } from '@/lib/aikmIpc'
 
 export interface PluginPickedFile {
   path: string
@@ -97,7 +98,7 @@ interface FilesApiDeps {
 const pdfCache = new Map<string, Promise<{ data: Uint8Array; doc: any }>>()
 
 function ipc(): any {
-  const api = typeof window !== 'undefined' ? (window as any).dsh?.plugin?.files : null
+  const api = typeof window !== 'undefined' ? aikmDsh?.plugin?.files : null
   if (!api) throw new Error('插件文件能力不可用（仅桌面版提供）')
   return api
 }
@@ -119,7 +120,7 @@ function platformAvailable(): boolean {
 
 /** 桌面（Electron）由主进程提供插件文件服务；其它平台走渲染层平台实现 */
 function hasHostFiles(): boolean {
-  return typeof window !== 'undefined' && !!(window as any).dsh?.plugin?.files
+  return typeof window !== 'undefined' && !!aikmDsh?.plugin?.files
 }
 
 function acceptToMime(accept: string): string {
@@ -293,7 +294,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
       guard()
       const accept = options?.accept ?? 'any'
       const multiple = options?.multiple === true
-      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+      if (typeof window !== 'undefined' && aikmDsh?.plugin?.files) {
         return ipc().pick({ id: deps.pluginId, accept, multiple })
       }
       return platformPickFiles({ accept, multiple })
@@ -301,7 +302,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
 
     async pickDirectory() {
       guard()
-      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+      if (typeof window !== 'undefined' && aikmDsh?.plugin?.files) {
         return ipc().pickDirectory({ id: deps.pluginId })
       }
       const dir = await getPlatform().dialog.pickDirectory()
@@ -312,7 +313,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
 
     async list(dir) {
       guard()
-      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+      if (typeof window !== 'undefined' && aikmDsh?.plugin?.files) {
         return ipc().list({ id: deps.pluginId, path: dir })
       }
       const nodes = await getPlatform().fs.listTree(dir, 1)
@@ -327,7 +328,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
 
     async readText(filePath, options) {
       guard()
-      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+      if (typeof window !== 'undefined' && aikmDsh?.plugin?.files) {
         return ipc().readText({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
       }
       return platformReadText(filePath, options?.maxBytes)
@@ -335,7 +336,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
 
     async readBase64(filePath, options) {
       guard()
-      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+      if (typeof window !== 'undefined' && aikmDsh?.plugin?.files) {
         return ipc().readBase64({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
       }
       return platformReadBase64(filePath, options?.maxBytes)
@@ -344,7 +345,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
     async readBytes(filePath, options) {
       guard()
       const maxBytes = options?.maxBytes ?? 40 * 1024 * 1024
-      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+      if (typeof window !== 'undefined' && aikmDsh?.plugin?.files) {
         // 桌面：主进程给的仍是 base64（IPC 形状不变），这里就地解成字节
         const res = await ipc().readBase64({ id: deps.pluginId, path: filePath, maxBytes: options?.maxBytes })
         const b64 = String(res?.base64 ?? '')
@@ -360,7 +361,7 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
     async readSheet(filePath, options) {
       guard()
       void options
-      if (typeof window !== 'undefined' && (window as any).dsh?.plugin?.files) {
+      if (typeof window !== 'undefined' && aikmDsh?.plugin?.files) {
         return ipc().readSheet({
           id: deps.pluginId,
           path: filePath,

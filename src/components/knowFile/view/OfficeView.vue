@@ -29,6 +29,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmIpcOrNull } from '@/lib/aikmIpc'
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { usestore } from '@/store'
 import { buildOfficeAiConfig, officeEnvPayload } from '@/lib/knowFile/officeAi'
@@ -141,13 +142,13 @@ defineExpose({ setVisible })
 // ---- 向主进程推送 AI-KM 的能力（模型配置 / 主题 / 语言）----
 // 编辑器把模型当宿主能力：必须在它加载渲染层之前推好，否则它的模型选择器一开始是空的。
 function pushEnv() {
-  const api = (window as any).ipcRenderer
+  const api = aikmIpcOrNull()
   if (!api) return
   Promise.resolve(api.invoke('office:set-env', officeEnvPayload())).catch(() => {})
 }
 
 async function pushAiConfig() {
-  const api = (window as any).ipcRenderer
+  const api = aikmIpcOrNull()
   if (!api) return
   try {
     const cfg = await buildOfficeAiConfig()

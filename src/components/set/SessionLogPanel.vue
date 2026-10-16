@@ -193,6 +193,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -366,11 +367,11 @@ function toggleEvent(seq: number): void {
 
 /** 刷新会话列表；无选中会话时自动选中最近一个 */
 async function refreshSessions(): Promise<void> {
-  if (!window.dsh?.sessionLog) return
+  if (!aikmDsh?.sessionLog) return
   listLoading.value = true
   let list: Array<{ id: string; events: number; lastTs: number }> = []
   try {
-    list = await window.dsh.sessionLog.list()
+    list = await aikmDsh.sessionLog.list()
     sessions.value = list
     resetSessionRender()
   } catch (e: any) {
@@ -412,7 +413,7 @@ function resetContent(): void {
 /** 加载当前选中会话：重置并只加载当前 tab 所需数据 */
 async function loadSession(): Promise<void> {
   const id = sessionId.value.trim()
-  if (!id || !window.dsh?.sessionLog) return
+  if (!id || !aikmDsh?.sessionLog) return
   loadToken++
   resetContent()
   if (tab.value === 'events') await loadEventsPage(true)
@@ -427,14 +428,14 @@ async function loadSession(): Promise<void> {
  */
 async function loadEventsPage(reset: boolean): Promise<void> {
   const id = sessionId.value.trim()
-  if (!id || !window.dsh?.sessionLog) return
+  if (!id || !aikmDsh?.sessionLog) return
   if (loadingEvents.value) return
   if (!reset && !hasMoreEvents.value) return
   const token = loadToken
   loadingEvents.value = true
   try {
     const oldest = events.value.length ? events.value[0].seq : 0
-    const page = await window.dsh.sessionLog.events(id, {
+    const page = await aikmDsh.sessionLog.events(id, {
       limit: PAGE_EVENTS,
       beforeSeq: reset ? undefined : oldest > 0 ? oldest : undefined,
     })
@@ -453,12 +454,12 @@ async function loadEventsPage(reset: boolean): Promise<void> {
 /** 懒加载派生消息（一次取全量，渲染端分段展示） */
 async function ensureMessages(): Promise<void> {
   const id = sessionId.value.trim()
-  if (!id || !window.dsh?.sessionLog) return
+  if (!id || !aikmDsh?.sessionLog) return
   if (msgLoaded.value || msgLoading.value) return
   const token = loadToken
   msgLoading.value = true
   try {
-    const msgs = await window.dsh.sessionLog.derive(id)
+    const msgs = await aikmDsh.sessionLog.derive(id)
     if (token !== loadToken) return // 已切换会话
     messages.value = msgs
     msgLoaded.value = true
@@ -473,12 +474,12 @@ async function ensureMessages(): Promise<void> {
 /** 懒加载完整性校验 */
 async function ensureIntegrity(): Promise<void> {
   const id = sessionId.value.trim()
-  if (!id || !window.dsh?.sessionLog) return
+  if (!id || !aikmDsh?.sessionLog) return
   if (integrity.value || integrityLoading.value) return
   const token = loadToken
   integrityLoading.value = true
   try {
-    const res = await window.dsh.sessionLog.integrity(id)
+    const res = await aikmDsh.sessionLog.integrity(id)
     if (token === loadToken) integrity.value = res
   } catch (e: any) {
     console.error('[session-log-panel] 完整性校验失败:', e)
@@ -585,11 +586,11 @@ watch(keyword, (kw) => {
 
 /** 调用主进程全文检索（按 id 或聊天正文命中），填充 contentHits */
 async function runContentSearch(kw: string): Promise<void> {
-  if (!window.dsh?.sessionLog) return
+  if (!aikmDsh?.sessionLog) return
   const token = ++searchToken
   contentSearching.value = true
   try {
-    const res = await window.dsh.sessionLog.search(kw)
+    const res = await aikmDsh.sessionLog.search(kw)
     if (token !== searchToken) return // 关键字已变化/清空，丢弃过期结果
     const map: Record<string, string> = {}
     for (const r of res || []) map[r.id] = r.snippet || ''
@@ -607,9 +608,9 @@ async function runContentSearch(kw: string): Promise<void> {
 
 /** 清空全部会话事件日志（由外层 ac-header 的清空按钮触发） */
 async function clearAll(): Promise<void> {
-  if (!window.dsh?.sessionLog) return
+  if (!aikmDsh?.sessionLog) return
   try {
-    await window.dsh.sessionLog.clearAll()
+    await aikmDsh.sessionLog.clearAll()
   } catch (e: any) {
     console.error('[session-log-panel] 清空失败:', e)
   }
@@ -666,11 +667,11 @@ async function onClear(): Promise<void> {
 
 /** 按范围清理并刷新列表；若当前会话被清掉则自动改选最近会话 */
 async function clearByRange(cutoff: number | null): Promise<void> {
-  if (!window.dsh?.sessionLog) return
+  if (!aikmDsh?.sessionLog) return
   const prev = sessionId.value
   let removed = 0
   try {
-    const res = await window.dsh.sessionLog.clearBefore(cutoff ?? 0)
+    const res = await aikmDsh.sessionLog.clearBefore(cutoff ?? 0)
     removed = res?.removed ?? 0
   } catch (e: any) {
     console.error('[session-log-panel] 清理失败:', e)
@@ -695,11 +696,11 @@ async function clearByRange(cutoff: number | null): Promise<void> {
 
 /** 手动刷新：重取会话列表；保留当前选中并重载（拉到最新） */
 async function onRefresh(): Promise<void> {
-  if (!window.dsh?.sessionLog) return
+  if (!aikmDsh?.sessionLog) return
   const prev = sessionId.value
   listLoading.value = true
   try {
-    sessions.value = await window.dsh.sessionLog.list()
+    sessions.value = await aikmDsh.sessionLog.list()
     resetSessionRender()
   } catch (e: any) {
     console.error('[session-log-panel] 刷新失败:', e)

@@ -177,6 +177,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { usestore } from '@/store'
 import * as monaco from 'monaco-editor'
@@ -605,8 +606,8 @@ onMounted(async () => {
   }
   // 技能目录变更监听（skill-service watcher）：目录内 SKILL.md 增删改自动刷新
   // 列表；window.dsh 不存在（旧构建/独立窗口）时静默跳过
-  if (window.dsh?.skills?.onChange) {
-    skillChangeUnsubscribe = window.dsh.skills.onChange(() => {
+  if (aikmDsh?.skills?.onChange) {
+    skillChangeUnsubscribe = aikmDsh.skills.onChange(() => {
       if (store.skillsPath) loadSkillList()
     })
   }

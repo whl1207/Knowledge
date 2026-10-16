@@ -433,6 +433,7 @@ const windowPort: WindowPort = {
   async setZoom(factor) { return factor },
   async restartApp() { /* 无窗口壳 */ },
   async openFileWindow() { /* 网页端应改为当前窗口路由，由调用方降级 */ },
+  async openPluginPanelWindow() { return false /* 无窗口壳：调用方退回应用内浮层 */ },
   async toggleDevTools() { /* 无窗口壳 */ },
 }
 

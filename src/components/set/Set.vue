@@ -1,5 +1,6 @@
 <!-- src/components/set/set.vue -->
 <script setup lang="ts">
+import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { usestore, THEMES } from '@/store'
 import { deepSeekApiStyle } from '@/shared/llmSources'
@@ -839,7 +840,7 @@ const resetZoom = () => {
 // 主进程是唯一事实源（userData/app-behavior.json）：设置页只负责读写它，
 // 并把生效值回写到 store.UI.closeToTray（主窗口据此决定“有任务时是否二次确认”）。
 const syncCloseBehavior = async () => {
-  if (!window.ipcRenderer) return
+  if (!aikmIpcAvailable()) return
   try {
     const res = await getPlatform().app.getBehavior()
     if (res && typeof res.closeToTray === 'boolean') store.UI.closeToTray = res.closeToTray
@@ -851,7 +852,7 @@ const syncCloseBehavior = async () => {
 const applyCloseBehavior = async () => {
   const zh = store.locales === 'zh'
   const want = !!store.UI.closeToTray
-  if (!window.ipcRenderer) {
+  if (!aikmIpcAvailable()) {
     store.UI.closeToTray = false
     ElMessage.warning(zh ? '浏览器模式下无法折叠到托管区' : 'Not available in browser mode')
     return
@@ -931,14 +932,14 @@ let mbUnsub: (() => void) | null = null
 const fmtMbSize = (b: number) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1024).toFixed(0) + ' KB')
 const refreshMapTiles = async () => {
   try {
-    mbSources.value = (await window.dsh?.mapTiles?.list?.()) || []
+    mbSources.value = (await aikmDsh?.mapTiles?.list?.()) || []
   } catch (e) {
     mbSources.value = []
   }
 }
 const mountMapTile = async () => {
   try {
-    const added = await window.dsh?.mapTiles?.add?.()
+    const added = await aikmDsh?.mapTiles?.add?.()
     if (added) {
       await refreshMapTiles()
       ElMessage.success(store.locales === 'zh' ? `已挂载地图包：${added.name}` : `Mounted: ${added.name}`)
@@ -958,7 +959,7 @@ const unmountMapTile = async (id: string, name: string) => {
     return
   }
   try {
-    await window.dsh?.mapTiles?.remove?.(id)
+    await aikmDsh?.mapTiles?.remove?.(id)
     await refreshMapTiles()
     ElMessage.success(store.locales === 'zh' ? '已移除' : 'Removed')
   } catch (e: any) {
@@ -1032,8 +1033,8 @@ onMounted(async () => {
     // 局域网共享/协同/远程文件共享状态已在 CollabSettings 子组件内自行刷新
     // 刷新离线 MBTiles 地图包列表 + 订阅变化
     await refreshMapTiles()
-    if (window.dsh?.mapTiles?.onChange) {
-      mbUnsub = window.dsh.mapTiles.onChange((list: any) => { mbSources.value = list || [] })
+    if (aikmDsh?.mapTiles?.onChange) {
+      mbUnsub = aikmDsh.mapTiles.onChange((list: any) => { mbSources.value = list || [] })
     }
 })
 onBeforeUnmount(() => {

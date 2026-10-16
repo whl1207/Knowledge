@@ -4,6 +4,7 @@
 // 对外 API 与旧版保持一致（connect/disconnect/refreshTools/getTools/callTool/testConnection/isConnected/cleanup），
 // 使 WorkflowRunner 与 MCP 节点执行器无需大改即可使用。
 import type { McpServerConfig, McpTool } from '@/types/mcp'
+import { aikmIpc, aikmIpcAvailable } from '@/lib/aikmIpc'
 
 export type { McpTool }
 
@@ -30,8 +31,8 @@ function toPlain(value: any): any {
 
 // 兼容 window.ipcRenderer 缺失（纯浏览器预览环境）
 function invoke(channel: string, payload: any): Promise<any> {
-  if (window.ipcRenderer && typeof window.ipcRenderer.invoke === 'function') {
-    return window.ipcRenderer.invoke(channel, toPlain(payload))
+  if (aikmIpcAvailable() && typeof aikmIpc.invoke === 'function') {
+    return aikmIpc.invoke(channel, toPlain(payload))
   }
   return Promise.reject(new Error('IPC 不可用（请在 Electron 中运行）'))
 }

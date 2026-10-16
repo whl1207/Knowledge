@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmIpc } from '@/lib/aikmIpc'
 /**
  * view_kanban.vue — 看板视图（知识管理「看板」全局视图）
  *
@@ -101,7 +102,7 @@ const showFilterPanel = ref(false)
 const newStatusName = ref('')
 const newStatusIcon = ref(ICON_PRESETS[0])
 
-const ipc = (channel: string, ...args: any[]) => window.ipcRenderer.invoke(channel, ...args)
+const ipc = (channel: string, ...args: any[]) => aikmIpc.invoke(channel, ...args)
 
 // ============ 数据 ============
 const getData = async () => {

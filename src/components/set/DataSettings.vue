@@ -3,6 +3,7 @@
      只统计本机数据（localStorage + 应用数据目录），**不扫描工作区文件**（知识库 / 工作流等归「知识管理」）。
      导入导出与文件 IO 集中在 src/lib/settingsData.ts（「基础 → 常用操作」的导出 Markdown 也共用同一套工具）。 -->
 <script setup lang="ts">
+import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
@@ -69,7 +70,7 @@ const dataRows = computed(() => {
 /** 刷新统计：本机占用 / 可清理缓存 / 数据目录路径 / 会话日志会话数 */
 const refresh = async () => {
   lsBytes.value = lsTotalBytes()
-  const ipc: any = (window as any).ipcRenderer
+  const ipc: any = aikmIpcAvailable()
   if (!ipc?.invoke) {
     cacheBytes.value = 0
     dataDirPath.value = ''
@@ -79,14 +80,14 @@ const refresh = async () => {
   try { cacheBytes.value = (await getPlatform().app.userdataCacheInfo())?.bytes || 0 } catch { cacheBytes.value = 0 }
   try { dataDirPath.value = (await getPlatform().app.dataDirPath())?.path || '' } catch { /* 旧版本主进程无该通道：路径留空 */ }
   try {
-    const list = await (window as any).dsh?.sessionLog?.list?.()
+    const list = await aikmDsh?.sessionLog?.list?.()
     sessionLogCount.value = Array.isArray(list) ? list.length : null
   } catch { sessionLogCount.value = null }
 }
 
 /** 在系统文件管理器中打开本机数据目录（配置 / 缓存 / 会话日志所在位置） */
 const openDataDir = async () => {
-  const ipc: any = (window as any).ipcRenderer
+  const ipc: any = aikmIpcAvailable()
   if (!ipc?.invoke) {
     ElMessage.warning(zh() ? '浏览器模式下无法打开本机目录' : 'Not available in browser mode')
     return
@@ -102,7 +103,7 @@ const openDataDir = async () => {
 
 /** 在系统文件管理器中打开数据目录下的子目录（如会话日志 session-logs；仅桌面版） */
 const openDataSubDir = async (sub: string) => {
-  const ipc: any = (window as any).ipcRenderer
+  const ipc: any = aikmIpcAvailable()
   if (!ipc?.invoke) {
     ElMessage.warning(zh() ? '浏览器模式下无法打开本机目录' : 'Not available in browser mode')
     return
@@ -137,7 +138,7 @@ const cleanCache = async () => {
       zh() ? '提示' : 'Confirm',
       { confirmButtonText: zh() ? '清理' : 'Clean', cancelButtonText: zh() ? '取消' : 'Cancel', type: 'warning' }
     )
-    const ipc: any = (window as any).ipcRenderer
+    const ipc: any = aikmIpcAvailable()
     const res = await getPlatform().app.cleanUserdataCache()
     if (res?.ok) {
       ElMessage.success(zh() ? `已清理缓存 ${formatBytes(res.freed || 0)}` : `Cache cleaned: ${formatBytes(res.freed || 0)}`)
@@ -155,7 +156,7 @@ const cleanCache = async () => {
 
 /** 清空全部会话日志（智能体/会话的原始事件记录，仅桌面版） */
 const clearSessionLog = async () => {
-  if (!window.dsh?.sessionLog) {
+  if (!aikmDsh?.sessionLog) {
     ElMessage.warning(zh() ? '浏览器模式下无法清空会话日志' : 'Not available in browser mode')
     return
   }
@@ -167,7 +168,7 @@ const clearSessionLog = async () => {
       zh() ? '提示' : 'Confirm',
       { confirmButtonText: zh() ? '确定' : 'OK', cancelButtonText: zh() ? '取消' : 'Cancel', type: 'warning' }
     )
-    const res = await window.dsh.sessionLog.clearAll()
+    const res = await aikmDsh.sessionLog.clearAll()
     if (res?.success === false) throw new Error(zh() ? '清空失败' : 'clear failed')
     ElMessage.success(zh() ? '已清空全部会话日志' : 'All session logs cleared')
     await refresh()

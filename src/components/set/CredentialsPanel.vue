@@ -109,6 +109,7 @@
 </template>
 
 <script setup lang="ts">
+import { aikmDsh } from '@/lib/aikmIpc'
 import { ref, computed, onMounted } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
@@ -142,10 +143,10 @@ const startEdit = (name: string) => {
 }
 
 const refresh = async () => {
-  if (!window.dsh?.credentials) return
+  if (!aikmDsh?.credentials) return
   loading.value = true
   try {
-    creds.value = (await window.dsh.credentials.list()) || []
+    creds.value = (await aikmDsh.credentials.list()) || []
   } catch (e) {
     console.warn('[credentials] 拉取失败:', e)
   } finally {
@@ -154,7 +155,7 @@ const refresh = async () => {
 }
 
 const save = async () => {
-  if (!window.dsh?.credentials) return
+  if (!aikmDsh?.credentials) return
   const name = form.value.name.trim()
   const value = form.value.value.trim()
   if (!name || !value) {
@@ -163,7 +164,7 @@ const save = async () => {
   }
   saving.value = true
   try {
-    await window.dsh.credentials.set(name, value)
+    await aikmDsh.credentials.set(name, value)
     form.value = { name: '', value: '' }
     await refresh()
     nameInput.value?.focus()
@@ -176,9 +177,9 @@ const save = async () => {
 }
 
 const onDelete = async (name: string) => {
-  if (!window.dsh?.credentials) return
+  if (!aikmDsh?.credentials) return
   try {
-    await window.dsh.credentials.delete(name)
+    await aikmDsh.credentials.delete(name)
     await refresh()
     ElMessage.success(isZh.value ? '凭据已删除' : 'Credential deleted')
   } catch (e: any) {

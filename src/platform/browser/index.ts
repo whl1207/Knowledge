@@ -93,6 +93,7 @@ const windowPort: WindowPort = {
   async setZoom(factor) { return factor },
   async restartApp() { /* 无窗口壳 */ },
   async openFileWindow() { /* 多窗口在网页里应改为当前窗口路由或新标签页，由调用方降级 */ },
+  async openPluginPanelWindow() { return false /* 无窗口壳：调用方退回应用内浮层 */ },
   async toggleDevTools() { /* 无窗口壳 */ },
 }
 

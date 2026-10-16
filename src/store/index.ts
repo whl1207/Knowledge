@@ -25,7 +25,10 @@ import { ElMessage } from 'element-plus'
 // store → panels → home.vue → store 的循环依赖，实测会抛 "Cannot access 'usestore' before initialization"）
 import { panelKeys } from '@/lib/plugin/panelRegistry'
 import { getPlatform, hasCapability } from '@/platform'
-import type { OpenFileWindowPayload } from '@/platform/contract'
+import type { OpenFileWindowPayload, OpenPluginPanelPayload } from '@/platform/contract'
+// 语音输入默认快捷键 / 迁移判定：唯一来源（见 src/shared/asrShortcut.ts）
+import { DEFAULT_ASR_SHORTCUT, needsShortcutMigration } from '@/shared/asrShortcut'
+import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
 declare global {
   interface Window {
     _refreshTimer: NodeJS.Timeout | null;
@@ -158,11 +161,11 @@ export const GLOBAL_VIEW_KEYS = ['文件', '看板', '表格', '图谱', '地图
 export const DEFAULT_VIEW = GLOBAL_VIEW_KEYS[0]
 
 /**
- * 是否为独立窗口的哈希（设置 / 文件 / 浏览器窗口）。
+ * 是否为独立窗口的哈希（设置 / 文件 / 插件面板 / 浏览器窗口）。
  * 这些窗口不持有工作区、标签栏与主面板导航等主窗口状态，相关保存必须跳过。
  */
 export const isAuxWindowHash = (hash: string): boolean =>
-  /^#\/(settings-window|file-view|browser-agent)/.test(String(hash || ''))
+  /^#\/(settings-window|file-view|browser-agent|plugin-panel)/.test(String(hash || ''))
 if (typeof window !== 'undefined' && isAuxWindowHash(window.location?.hash)) persistWorkspace = false
 
 /** 单独写入「工作区」相关键（root / roots / path / remoteRoots） */
@@ -294,6 +297,17 @@ export const usestore = defineStore('data', {
         index: null as any, // 打开的文件序号
         view: [] as any, // 视图
         mainPanel: "主页" as any, // 主面板
+        /**
+         * 导航栏插件收纳启动器（fa fa-th-large）是否已点开：
+         * 为 true 时主内容区渲染「插件网格」而不是当前主面板（见 App.vue 的 plugin-launcher-active）。
+         * 只在主窗口有效，不持久化（每次启动都从当前主面板开始，避免重启后停在一个「入口页」）。
+         */
+        pluginLauncherOpen: false as boolean,
+        /**
+         * 单窗口环境（浏览器 / 安卓）以「应用内浮层」打开的插件面板参数：非空时 App.vue 渲染插件面板浮层。
+         * 桌面版一律走真正的独立子窗口，这里保持 null（见 openPluginPanel）。
+         */
+        pluginPanelOverlay: null as OpenPluginPanelPayload | null,
         settingsOpen: false as boolean,
         settingsNav: '' as string,
         // 单窗口环境（安卓 / 网页端）的应用内文件窗口参数：非空时 App.vue 以浮层渲染 FileWindow。
@@ -575,7 +589,7 @@ export const usestore = defineStore('data', {
                 // 标点校验模式（全局，对所有识别引擎生效）：none=无 / local=本地ct-punc / llm=大模型
                 punctMode: 'none' as 'none' | 'local' | 'llm',
                 puncDir: '', // 本地标点模型目录（ct-punc onnx 目录；punctMode=local 时使用）
-                shortcut: 'Ctrl+Shift+Space',
+                shortcut: DEFAULT_ASR_SHORTCUT,
                 // 常驻悬浮麦克风按钮（右下角小圆钮，点一下就开始语音输入；可关掉，见语音输入设置）
                 floatButton: true,
                 // 悬浮麦克风位置（距右下角的像素偏移；拖动后记住）
@@ -962,7 +976,7 @@ export const usestore = defineStore('data', {
                 window.dispatchEvent(new CustomEvent('ai-chats-cleared'))
                 // 独立设置窗口场景：通知其它窗口（主窗口）也重置内存，
                 // 否则主窗口下一次 saveChats 会把已清空的记录写回去
-                try { (window as any).ipcRenderer?.send?.('chats-changed') } catch { /* 忽略 */ }
+                try { aikmIpc?.send?.('chats-changed') } catch { /* 忽略 */ }
             }
         },
         
@@ -993,6 +1007,34 @@ export const usestore = defineStore('data', {
         },
 
         /**
+         * 打开一个插件主面板（`panel.main` 槽位条目）：
+         * - 桌面版：开一个真正的独立子窗口（每个插件面板一个，重复打开只聚焦），窗口里是
+         *   「插件自己的图标栏 + 插件面板」，与主窗口的插件面板走同一份注册表；
+         * - 浏览器 / 安卓（无窗口壳）：退回主窗口内的浮层（pluginPanelOverlay），
+         *   保证「点插件一定看得到东西」而不是静默无反应。
+         *
+         * 调用方：导航栏收纳后的启动器网格（App.vue）与插件窗口自己的图标栏。
+         */
+        async openPluginPanel(payload: OpenPluginPanelPayload) {
+            if (!payload?.key) return
+            if (hasCapability('window.chrome')) {
+                try {
+                    const opened = await getPlatform().window.openPluginPanelWindow(payload)
+                    if (opened) return
+                } catch (e: any) {
+                    // 通道不存在（主进程未重启）等：降级浮层，并留下可排查的日志
+                    console.warn('[openPluginPanel] 打开插件子窗口失败，回退窗口内浮层:', e)
+                }
+            }
+            this.pluginPanelOverlay = { ...payload }
+        },
+
+        /** 关闭应用内插件面板浮层（桌面版独立窗口由窗口自己关闭） */
+        closePluginPanelOverlay() {
+            this.pluginPanelOverlay = null
+        },
+
+        /**
          * 打开「设置」。
          * - 桌面版：打开独立「设置」子窗口（无系统标题栏，顶栏可拖动）；窗口已存在则聚焦并切换分类。
          * - 浏览器/LAN 模式（无 ipcRenderer）：退回主窗口内浮层（settingsOpen）。
@@ -1000,9 +1042,9 @@ export const usestore = defineStore('data', {
          */
         openSettings(nav = '') {
             if (nav) this.settingsNav = nav
-            if (typeof window !== 'undefined' && (window as any).ipcRenderer?.invoke) {
+            if (typeof window !== 'undefined' && aikmIpc?.invoke) {
                 try {
-                    ;(window as any).ipcRenderer
+                    ;aikmIpc
                         .invoke('open-settings-window', nav ? { nav } : {})
                         .catch((err: any) => {
                             // 主进程未注册该通道（如开发时主进程未重启）时回退到窗口内浮层，并留下日志便于排查
@@ -1027,7 +1069,7 @@ export const usestore = defineStore('data', {
          * 解析是异步的，因此关键字段（key/base_url/apiKeyRef）变化时才重新解析并推送。
          */
         applyWebSearchToMain() {
-            const api = typeof window !== 'undefined' ? (window as any).dsh?.webSearch : null
+            const api = typeof window !== 'undefined' ? aikmDsh?.webSearch : null
             if (!api?.setConfig) return
             const ds = (this.webSearch as any)?.deepseek || {}
             const dsRef = String(ds.apiKeyRef || '')
@@ -1058,7 +1100,7 @@ export const usestore = defineStore('data', {
         /** 解析 DeepSeek 搜索用的 Key：凭据引用优先 → deepseek 对话配置的 apiKeyRef → 内联 key */
         async resolveDeepSeekSearchKey(searchRef: string, inlineKey: string): Promise<string> {
             if (inlineKey) return inlineKey
-            const resolve = (window as any)?.dsh?.credentials?.resolve
+            const resolve = aikmDsh?.credentials?.resolve
             const names = [searchRef, String((this.AIconfig as any)?.llm?.deepseek?.apiKeyRef || '')]
                 .map((n) => String(n || '').trim())
                 .filter(Boolean)
@@ -1239,8 +1281,8 @@ export const usestore = defineStore('data', {
             localStorage.setItem('lan', JSON.stringify(this.lan))
             if (persistWorkspace) localStorage.setItem('remoteRoots', JSON.stringify(this.remoteRoots))
             // 界面配置随软件分发：开启时同步写入软件根目录（fire-and-forget，界面配置以该文件为准）
-            if (this.interfaceConfigMode && window.dsh?.interfaceConfig) {
-                window.dsh.interfaceConfig.save(this.gatherInterfaceConfig()).catch(() => {})
+            if (this.interfaceConfigMode && aikmDsh?.interfaceConfig) {
+                aikmDsh.interfaceConfig.save(this.gatherInterfaceConfig()).catch(() => {})
             }
             // UI / 语言变更广播到其它窗口（子窗口/文件窗口等），保证其即时应用（如 Word 导出模板、主题、语言等）
             // 复用 notify-theme-change → theme-changed 通道；接收方 applyThemeFromBroadcast 合并 UI + 语言
@@ -1563,6 +1605,14 @@ export const usestore = defineStore('data', {
                 // 迁移（上下文窗口上限）：历史全局单值 → 按迁移时激活来源下沉为来源级覆盖值。
                 // 全局值残留会让切换来源后的圆环分母沿用别的来源（如本地 8192 用到 DeepSeek 上）。
                 if (migrateLegacyContextWindow(this.AIconfig.llm)) needPersist = true
+
+                // 迁移（语音输入快捷键）：旧默认 Ctrl+Shift+Space 在不少机器上被别的软件占着，
+                // 注册永远失败 + 一直提示。存档里若仍是**旧默认值**（说明用户没改过）就换成新默认；
+                // 用户自己改过的组合一律不动。
+                if (needsShortcutMigration(this.AIconfig.asr?.shortcut)) {
+                    this.AIconfig.asr.shortcut = DEFAULT_ASR_SHORTCUT
+                    needPersist = true
+                }
             }
             if (localStorage.getItem('UI') !== null) {
                 this.UI = JSON.parse(localStorage.getItem('UI')!)
@@ -2317,9 +2367,9 @@ export const usestore = defineStore('data', {
         /** 启动时加载根目录界面配置（仅开关开启时生效；开启后界面以该文件为准） */
         async loadRemoteInterfaceConfig() {
             if (!this.interfaceConfigMode) return
-            if (!window.dsh?.interfaceConfig) return
+            if (!aikmDsh?.interfaceConfig) return
             try {
-                const cfg = await window.dsh.interfaceConfig.load()
+                const cfg = await aikmDsh.interfaceConfig.load()
                 if (cfg) this.applyInterfaceConfig(cfg)
             } catch (e) {
                 console.warn('加载根目录界面配置失败:', e)
@@ -2329,8 +2379,8 @@ export const usestore = defineStore('data', {
         /** 切换「界面配置随软件分发」开关；开启时把当前界面配置写入软件根目录 */
         async setInterfaceConfigMode(on: boolean) {
             this.interfaceConfigMode = on
-            if (on && window.dsh?.interfaceConfig) {
-                const res = await window.dsh.interfaceConfig.save(this.gatherInterfaceConfig())
+            if (on && aikmDsh?.interfaceConfig) {
+                const res = await aikmDsh.interfaceConfig.save(this.gatherInterfaceConfig())
                 this.saveConfig()
                 return res
             }
@@ -3154,8 +3204,8 @@ export const usestore = defineStore('data', {
             const ref = config?.apiKeyRef
             if (typeof ref === 'string' && ref.trim()) {
                 try {
-                    if (window.dsh?.credentials?.resolve) {
-                        const res = await window.dsh.credentials.resolve(ref.trim())
+                    if (aikmDsh?.credentials?.resolve) {
+                        const res = await aikmDsh.credentials.resolve(ref.trim())
                         if (res?.value) return res.value
                     }
                 } catch (e) {

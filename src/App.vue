@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
   import {ref, onMounted, onUnmounted, computed, watch, nextTick, h, defineAsyncComponent} from 'vue'
   import {usestore} from '@/store'
   import { ElMessage } from 'element-plus'
@@ -18,10 +19,20 @@
   // 面板本体渲染在下方模板的 <PluginSlot name="panel.main">，导航按钮由同一条目派生。
   // ⚠️ 查询走 vue-free 的 panelRegistry；panels.ts 负责注册内置面板（含静态组件 import）
   import { PANEL_MAIN_SLOT } from '@/lib/plugin/coreSlots'
-  import { fallbackPanelFor, panelHeaderText } from '@/lib/plugin/panelRegistry'
+  import { fallbackPanelFor, panelHeaderText, isBuiltinPanel } from '@/lib/plugin/panelRegistry'
   import { lazyPanel as makeLazyPanel } from '@/lib/plugin/panels'
   import { useAllSlotEntries } from '@/lib/plugin/useSlots'
   import PluginSlot from '@/components/plugin/PluginSlot.vue'
+  // 导航栏插件图标收纳（放不下就收成 fa fa-th-large 启动器）与启动器网格 / 插件子窗口壳
+  import { measureNavOverflow, type NavOverflowState } from '@/lib/plugin/navLauncher'
+  import {
+    pluginDescription,
+    pluginDisplayName,
+    pluginEnabledCount,
+    pluginIdOfOwner,
+    pluginTotalCount,
+  } from '@/lib/plugin/runtime'
+  import PluginLauncherGrid from '@/components/plugin/PluginLauncherGrid.vue'
   // ask_user 结构化问答弹窗宿主（全局唯一：所有入口都经 store/askUser 排队）
   import AskUserHost from '@/components/agent/AskUserHost.vue'
   // exit_plan_mode 计划评审弹窗宿主（全局唯一：所有入口都经 store/planReview 排队）
@@ -43,6 +54,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
   const FileWindow = lazyPanel(() => import('@/components/knowFile/FileWindow.vue'))
   // 浏览器模块独立于 knowFile：网页浏览、AI 会话、收藏/离线保存等均在独立窗口内完成
   const BrowserAgentShell = lazyPanel(() => import('@/components/browser/BrowserAgentShell.vue'))
+  // 插件面板子窗口壳（导航栏收纳后的启动器打开的窗口；网页/安卓端复用为应用内浮层）
+  const PluginPanelWindow = lazyPanel(() => import('@/components/plugin/PluginPanelWindow.vue'))
   // 设置浮层显隐由 store.settingsOpen 控制（浏览器/LAN 模式回退用），便于 AgentSwarm 等模块跳转
   // 桌面版设置走独立子窗口：其开合状态单独记录（settingsWindowOpen），仅用于导航按钮高亮——
   // 不能复用 store.settingsOpen，否则「窗口已打开」会同时点亮主窗口内的设置浮层
@@ -53,6 +66,22 @@ import { useTallLayout } from '@/composables/useTallLayout'
   const isFileWindow = ref(typeof window !== 'undefined' && window.location.hash.startsWith('#/file-view'))
   const isBrowserAgentWindow = ref(typeof window !== 'undefined' && window.location.hash.startsWith('#/browser-agent'))
   const isSettingsWindow = ref(typeof window !== 'undefined' && window.location.hash.startsWith('#/settings-window'))
+  // 插件面板子窗口（导航栏收纳后的启动器打开的窗口）：hash = #/plugin-panel?id=<面板 key>
+  // 同样在 setup 同步阶段判定：首帧即渲染插件壳，避免先闪一帧完整主界面
+  const isPluginPanelWindow = ref(typeof window !== 'undefined' && window.location.hash.startsWith('#/plugin-panel'))
+  /** 插件面板子窗口要显示的插件面板 key 与兜底标题（从 hash 解析，URL 解码） */
+  const pluginPanelWindowParams = (() => {
+    const hash = typeof window !== 'undefined' ? window.location.hash : ''
+    const q = hash.indexOf('?')
+    const out = { key: '', title: '' }
+    if (q < 0) return out
+    try {
+      const sp = new URLSearchParams(hash.substring(q + 1))
+      out.key = sp.get('id') || ''
+      out.title = sp.get('title') || ''
+    } catch { /* hash 异常时按空处理（壳里会提示没有可显示的插件面板） */ }
+    return out
+  })()
   // 设置独立窗口的初始导航分类：主进程以 #/settings-window?nav=xxx 传入（如从 AgentSwarm 跳「预设」）
   const settingsWindowNav = (() => {
     const h = typeof window !== 'undefined' ? window.location.hash : ''
@@ -77,7 +106,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
    * 的路径下，网页端拿到的是默认策略 → 看不到「智能体」模式（表现为「配置已经开了却没有」）。
    */
   const syncLanGuestPolicyAtStartup = async () => {
-    if (!window.ipcRenderer) return
+    if (!aikmIpcAvailable()) return
     try {
       const guest = store.lan?.guest || defaultLanGuestPolicy()
       // 单一入口：策略 + 主机模型 + 可用智能体档案一起下发
@@ -107,16 +136,42 @@ import { useTallLayout } from '@/composables/useTallLayout'
   // 主面板导航按钮（来源 = panel.main 槽位注册表：内置面板与插件面板同一份数据；
   // 功能开关：被隐藏的按钮不显示，见设置页「界面-功能开关」）
   const panelSlotEntries = useAllSlotEntries(PANEL_MAIN_SLOT)
-  const navButtons = computed(() => {
+
+  /**
+   * 可见的主面板按钮。`core` 标记内置面板：内置 4 个永远留在导航栏，
+   * 插件面板才会在放不下时被收进 `fa fa-th-large` 启动器。
+   * owner 只用于给启动器卡片标出「这是哪个插件的面板」（见 pluginDisplayName）。
+   */
+  const navButtonDefs = computed(() => {
     const zh = store.locales === 'zh'
     return panelSlotEntries.value
       .filter((def) => store.isNavVisible(def.key))
       .map((def) => ({
         key: def.key,
+        core: isBuiltinPanel(def.key),
         icon: def.icon || 'fa fa-puzzle-piece',
         title: (zh ? def.titleZh : def.titleEn) || def.titleZh || def.key,
+        pluginId: pluginIdOfOwner(def.owner),
       }))
   })
+
+  /** 全部可见按钮（内置 + 插件），导航栏按此渲染 */
+  const navButtons = computed(() => navButtonDefs.value)
+  /** 内置面板按钮（始终显示） */
+  const coreNavButtons = computed(() => navButtonDefs.value.filter((b) => b.core))
+  /** 插件面板按钮（可被整体收纳） */
+  const pluginNavButtons = computed(() => navButtonDefs.value.filter((b) => !b.core))
+  /** 启动器网格的卡片：一个插件面板一张卡（含所属插件名与描述） */
+  const launcherEntries = computed(() =>
+    pluginNavButtons.value.map((b) => ({
+      key: b.key,
+      icon: b.icon,
+      title: b.title,
+      pluginName: pluginDisplayName(b.pluginId),
+      // 卡片副标题：插件描述（面板名通常就等于插件名，副标题再用插件名等于写两遍同一句话）
+      description: pluginDescription(b.pluginId),
+    })),
+  )
 
   /**
    * 当前主面板不可用 → 切到第一个「可见」面板。三类触发场景：
@@ -210,6 +265,118 @@ import { useTallLayout } from '@/composables/useTallLayout'
     () => nextTick(syncTitleVisibility),
   )
 
+  // ============ 导航栏插件图标收纳（fa fa-th-large 启动器） ============
+  /**
+   * 插件图标一多，导航栏就放不下（顶栏会盖住标题、底部 / 左侧栏会丢按钮）。
+   * 这里的规则：
+   *  - 内置 4 个面板永远留在导航栏（不参与收纳）；
+   *  - 插件图标按**实际可用宽度**判定：放得下 → 照旧直接显示（点它切主面板，行为不变）；
+   *    放不下 → **一个都不显示**，只在导航栏留一个 `fa fa-th-large` 图标，点开在主面板用 grid
+   *    列出插件，再点具体插件以**子窗口**形态打开（见 store.openPluginPanel）。
+   * 判定逻辑在 lib/plugin/navLauncher.ts（vue-free，可单测），这里只负责量 DOM 与联动。
+   */
+  const sideNavRef = ref<HTMLElement | null>(null)
+  const bottomNavRef = ref<HTMLElement | null>(null)
+  const navOverflow = ref<NavOverflowState>({ hiddenCount: 0, launcherVisible: false, shownCount: 0, maxRowWidth: 0 })
+  let navResizeObserver: ResizeObserver | null = null
+
+  /**
+   * 真正渲染在导航栏里的插件按钮：**要么全显示、要么全不显示**。
+   *
+   * 收纳后一个都不渲染（导航栏上只留 `fa fa-th-large` 启动器）。用「过滤后的列表」而不是
+   * 在 `v-for` 上加 `v-if`：Vue 3 里同一元素上的 `v-if` 优先级高于 `v-for`，拿不到循环变量。
+   */
+  const visiblePluginNavButtons = computed(() =>
+    navOverflow.value.launcherVisible ? [] : pluginNavButtons.value,
+  )
+
+  /** 当前布局下「插件图标」所在的容器：顶栏 = .panel-nav；左/下导航 = 整个导航栏 */
+  function navOverflowHost(): HTMLElement | null {
+    if (isLeftNav.value) return sideNavRef.value
+    if (isBottomNav.value) return bottomNavRef.value
+    return panelNavRef.value
+  }
+
+  /**
+   * 重新量一次并写回判定结果。
+   *
+   * ⚠️ 两条「绝不能破」的约束（踩过一次，表现为**白屏 / 加载层不消失 / CPU 占满一个核**）：
+   *
+   * 1) **本函数写回的 `navOverflow` 不允许出现在任何 watch 的依赖里**。曾经把
+   *    `navOverflow.value.launcherVisible` 加进下面的 watch 源做「启动器出现后重量一次」，
+   *    于是形成闭环：write → watch 触发 → `nextTick(syncNavOverflow)` → write → …。
+   *    因为每一步都跨了一个微任务（`nextTick`），Vue 的「Maximum recursive updates」上限**拦不住**它，
+   *    主线程被无限刷新的刷新任务占满 —— 页面永远画不出首帧，外部连 DevTools 都进不去（求值一律超时）。
+   *    现在启动器出现后所需的那次重量由渲染后的 ResizeObserver 自然覆盖，不需要自己 watch 自己。
+   *
+   * 2) **值没变就不写**。判定结果变化会改变导航栏渲染（图标行 ↔ 聚合图标互换），
+   *    而 ResizeObserver 观察到容器尺寸变化又会进来量一次。结果稳定时必须提前返回，
+   *    否则「量 → 写 → 重排 → 再量」会一直循环下去，同样卡死主线程。
+   *
+   * 3) 判定所需的宽度**全部由 measureNavOverflow 自己量**，这里不碰 DOM、也不临时改样式。
+   *    曾经为了量到聚合状态下的图标行而「先临时 display:flex 再关掉」——那条路既依赖判定结果
+   *    又反过来影响结果（自引用），收起后就再也量不出「其实放得下」。现在聚合态改用内置图标当
+   *    步距样例、可用宽度从顶栏推算，见 lib/plugin/navLauncher.ts 的 availableWidthForPlugins。
+   */
+  function syncNavOverflow() {
+    const prev = navOverflow.value
+    const layout = isLeftNav.value ? 'left' : isBottomNav.value ? 'bottom' : 'top'
+    const next = measureNavOverflow(navOverflowHost(), layout, pluginNavButtons.value.length, prev.launcherVisible)
+    if (
+      prev.hiddenCount === next.hiddenCount
+      && prev.launcherVisible === next.launcherVisible
+      && prev.shownCount === next.shownCount
+      && prev.maxRowWidth === next.maxRowWidth
+    ) return
+    navOverflow.value = next
+  }
+
+  /**
+   * 拖动窗口边缘时防抖：ResizeObserver 在拖动过程中会连续触发，而导航栏在「图标行 ↔ 启动器」
+   * 之间切换又会反过来改变布局 —— 叠加起来就是拖动时图标不停闪。尺寸停稳后再量，只切一次。
+   */
+  let navResizeTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleSyncNavOverflow() {
+    if (navResizeTimer) clearTimeout(navResizeTimer)
+    navResizeTimer = setTimeout(() => { navResizeTimer = null; syncNavOverflow() }, 140)
+  }
+
+  /**
+   * 点启动器：在主面板位置显示插件网格（不切换 mainPanel，关掉后仍在原面板）。
+   * 点网格里的插件 → 以子窗口形态打开（桌面）/ 应用内浮层（浏览器、安卓）。
+   * 关闭网格由「切换主面板」（见 watch(() => store.mainPanel)）或再点一次启动器完成。
+   */
+  function togglePluginLauncher() {
+    store.pluginLauncherOpen = !store.pluginLauncherOpen
+    nextTick(syncNavOverflow)
+  }
+
+  /**
+   * 点启动器网格里的插件 → 以子窗口形态打开（桌面）/ 应用内浮层（浏览器、安卓）。
+   *
+   * ⚠️ 这里**不关闭**启动器面板：用户是从网格里挑插件的，开一个还会继续开下一个
+   * （对比「切主面板」才应该收起网格，见 watch(() => store.mainPanel)）。
+   * 子窗口是独立窗口，主窗口的网格留在原地正好当「插件入口页」用。
+   */
+  function openPluginPanel(key: string) {
+    const btn = pluginNavButtons.value.find((b) => b.key === key)
+    void store.openPluginPanel({ key, pluginId: btn?.pluginId, title: btn?.title, icon: btn?.icon })
+  }
+
+  // 输入变化 → 重新判定。⚠️ 这里**只放输入**（按钮数量 / 布局 / 语言 / 启动器开关 / 外壳显隐），
+  // 绝不能放判定结果本身（`navOverflow`）—— 否则就是「自己 watch 自己」的无限闭环，
+  // 见 syncNavOverflow 上方注释（真实的卡死原因）。
+  watch(
+    () => [
+      navButtons.value.map((b) => `${b.key}:${b.core ? 'c' : 'p'}`).join('|'),
+      store.UI.navLayout,
+      store.locales,
+      store.pluginLauncherOpen,
+      panelChromeHidden.value,
+    ],
+    () => nextTick(syncNavOverflow),
+  )
+
   /**
    * 当前面板切换时把它的按钮滚进可视区：
    * 插件多到按钮行横向滚动时，否则会出现「切到了某个面板，却看不到高亮的按钮」。
@@ -236,6 +403,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     isBrowserAgentWindow.value = window.location.hash.startsWith('#/browser-agent')
     // 检测是否在设置独立窗口中
     isSettingsWindow.value = window.location.hash.startsWith('#/settings-window')
+    // 检测是否在插件面板子窗口中
+    isPluginPanelWindow.value = window.location.hash.startsWith('#/plugin-panel')
 
     // 独立窗口也需要加载配置（主题等；loadConfig 为同步动作，返回后 store.lan 已就绪）
     store.loadConfig()
@@ -248,7 +417,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     getPlatform().events.on('lan:request-guest-policy', () => { void syncLanGuestPolicyAtStartup() })
     // 网页端（局域网访客）：向主机对齐模型来源（来源开关 / 地址 / 模型）——
     // 否则网页端用自己那份默认配置，会出现「主机能刷出的模型网页端刷不出来」「关掉的来源还在」
-    if (!window.ipcRenderer) {
+    if (!aikmIpcAvailable()) {
       void import('@/platform/lanHostLlm')
         .then((m) => m.syncHostLlmSources(store, true))
         .catch(() => { /* 主机不可达时保持默认配置 */ })
@@ -310,7 +479,23 @@ import { useTallLayout } from '@/composables/useTallLayout'
     // 后台任务列表里，托盘右键点它即可唤回该窗口；主进程按窗口分组，见 electron/main/tray-service.ts）
     watch(trayTasks, () => scheduleTrayPush(), { deep: true, immediate: true })
 
-    if (isFileWindow.value || isBrowserAgentWindow.value || isSettingsWindow.value) return // 独立窗口无需加载主界面数据
+    if (isFileWindow.value || isBrowserAgentWindow.value || isSettingsWindow.value || isPluginPanelWindow.value) return // 独立窗口无需加载主界面数据
+
+    // ============ 导航栏插件图标收纳：量一次 + 尺寸变化时重算 ============
+    // 挂载后先判定一次（此时插件条目可能还没注册完，插件运行时同步完成后上面的 watch 会再触发）；
+    // 之后用 ResizeObserver 盯住导航栏与顶栏（窗口缩放 / 拖动改宽 / 设置页改布局都会改变可用宽度）。
+    nextTick(() => {
+      syncNavOverflow()
+      if (typeof ResizeObserver === 'undefined') return
+      // 观察本身要防抖：拖动窗口边缘时观察者连续触发，而导航栏切换「图标行 ↔ 启动器」又会反过来
+      // 改变布局，两边叠加就是拖动时图标不停闪（见 scheduleSyncNavOverflow）。
+      navResizeObserver = new ResizeObserver(() => scheduleSyncNavOverflow())
+      // 观察三种布局下各自的容器：布局切换后没被观察的那个会重新挂载 —— 所以三个都观察
+      // （未挂载的 ref 为 null，直接跳过）。
+      for (const el of [sideNavRef.value, bottomNavRef.value, panelNavRef.value, mainPanelRef.value?.querySelector<HTMLElement>('.panel-header') ?? null]) {
+        if (el) navResizeObserver.observe(el)
+      }
+    })
 
     // ============ 文件类型关联（双击文件 / 系统「打开方式」） ============
     // 主进程把「需在主窗口内处理的文件请求」投递到这里（如 .kb 知识库 → 跳转「知识处理」）；
@@ -333,9 +518,9 @@ import { useTallLayout } from '@/composables/useTallLayout'
     }).catch(() => {})
 
     // 托盘（托管区）任务提示：订阅后台作业事件（带进度）+ 首次拉取运行中的作业
-    if (window.dsh?.jobs) {
-      window.dsh.jobs.onEvent((ev: any) => applyJobEvent(ev?.job))
-      window.dsh.jobs.list().then((list: any[]) => {
+    if (aikmDsh?.jobs) {
+      aikmDsh.jobs.onEvent((ev: any) => applyJobEvent(ev?.job))
+      aikmDsh.jobs.list().then((list: any[]) => {
         runningJobs.value = []
         for (const j of list || []) applyJobEvent(j)
       }).catch(() => {})
@@ -366,6 +551,9 @@ import { useTallLayout } from '@/composables/useTallLayout'
     for (const off of unregisterAppLayers.splice(0)) off()
     titleResizeObserver?.disconnect()
     titleResizeObserver = null
+    navResizeObserver?.disconnect()
+    navResizeObserver = null
+    if (navResizeTimer) { clearTimeout(navResizeTimer); navResizeTimer = null }
     // 释放全局语音输入：注销快捷键、拆监听、销毁麦克风采集图
     disposeGlobalVoice()
   })
@@ -377,7 +565,9 @@ import { useTallLayout } from '@/composables/useTallLayout'
   watch(() => store.mainPanel, (panel) => {
     // 换面板一定把外壳放回来：插件全屏时藏起了顶栏/导航栏，切走后不能让用户连导航都没有
     resetPanelChrome()
-    if (isSettingsWindow.value || isFileWindow.value || isBrowserAgentWindow.value) return
+    // 切主面板时收起「插件网格」：网格是导航栏收纳后的入口页，不是主面板本身
+    store.pluginLauncherOpen = false
+    if (isSettingsWindow.value || isFileWindow.value || isBrowserAgentWindow.value || isPluginPanelWindow.value) return
     try { localStorage.setItem('mainPanel', JSON.stringify(panel)) } catch { /* 写盘失败不影响使用 */ }
   })
 
@@ -619,20 +809,54 @@ import { useTallLayout } from '@/composables/useTallLayout'
   <!-- 设置独立窗口模式：Set 自身顶栏即拖动区（standalone 模式附带最小化/最大化/关闭窗口按钮） -->
   <SetPanel v-else-if="isSettingsWindow" standalone :initial-nav="settingsWindowNav" style="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;" />
 
+  <!-- 插件面板子窗口模式（导航栏收纳后的启动器打开的窗口；每个插件面板一个真窗口） -->
+  <PluginPanelWindow
+    v-else-if="isPluginPanelWindow"
+    :plugin-key="pluginPanelWindowParams.key"
+    style="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;"
+  />
+
   <!-- 主界面（仅当既不是文件窗口也不是浏览器 Agent 窗口时显示） -->
   <div v-else class="container" :class="{ 'side-nav-mode': isLeftNav, 'web-mode': isBrowser, 'android-mode': isAndroid, 'tall-mode': isTallLayout, 'chrome-hidden': panelChromeHidden }">
     <!-- 左侧导航栏（左侧布局模式显示：全部主面板按钮 + 设置；网页模式同样显示） -->
-    <div v-if="isLeftNav" class="side-nav">
+    <div v-if="isLeftNav" class="side-nav" ref="sideNavRef">
+      <!-- 内置面板：始终显示（不参与收纳） -->
       <div
-        v-for="btn in navButtons"
+        v-for="btn in coreNavButtons"
         :key="btn.key"
         class="side-nav-item"
         :class="{ active: store.mainPanel == btn.key }"
+        :data-core-key="btn.key"
         @click="store.mainPanel = btn.key"
         :title="btn.title"
       >
         <i :class="btn.icon"></i>
       </div>
+
+      <!-- 插件面板：放不下时**整体**收纳成下面的启动器（判定见 syncNavOverflow） -->
+      <div
+        v-for="btn in visiblePluginNavButtons"
+        :key="btn.key"
+        class="side-nav-item"
+        :class="{ active: store.mainPanel == btn.key }"
+        :data-plugin-key="btn.key"
+        @click="store.mainPanel = btn.key"
+        :title="btn.title"
+      >
+        <i :class="btn.icon"></i>
+      </div>
+
+      <!-- 收纳后的启动器：fa fa-th-large，点开在主面板用 grid 列出插件 -->
+      <div
+        v-if="navOverflow.launcherVisible"
+        class="side-nav-item nav-launcher"
+        :class="{ active: store.pluginLauncherOpen }"
+        @click="togglePluginLauncher"
+        :title="store.locales === 'en' ? 'All plugins' : '全部插件'"
+      >
+        <i class="fa fa-th-large"></i>
+      </div>
+
       <!-- 浏览器 Agent 独立窗口入口（非主面板，不切换 mainPanel；置于设置按钮左侧；可在「功能 → 导航与模块」里关掉） -->
       <div v-if="store.isExtraVisible('agent')" class="side-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
         <i class="fa fa-globe"></i>
@@ -655,15 +879,43 @@ import { useTallLayout } from '@/composables/useTallLayout'
           <template v-if="!isCompactTop">
             <!-- 顶部导航布局（默认）：导航按钮 + 标题 + 右侧按钮
                  按钮来源 = panel.main 槽位注册表（内置 4 个 + 插件贡献），顺序由 order 决定；
-                 插件按钮多到顶住标题时，本行自己横向滚动、标题自动隐藏（见 syncTitleVisibility） -->
+                 插件按钮多到放不下时收纳成 fa fa-th-large 启动器（见 syncNavOverflow），
+                 内置 4 个永远显示；标题被顶到时自动隐藏（见 syncTitleVisibility） -->
             <div class="panel-nav" ref="panelNavRef">
+              <!-- 内置面板：不参与收纳 -->
               <div
-                v-for="btn in navButtons"
+                v-for="btn in coreNavButtons"
                 :key="btn.key"
-                :class="{ active: store.mainPanel == btn.key }"
+                :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen }"
+                :data-core-key="btn.key"
                 @click="store.mainPanel = btn.key"
                 :title="btn.title"
               ><i :class="btn.icon"></i></div>
+
+              <!-- 插件面板：插件少时平铺在这里；放不下时整行隐藏，只留下面的聚合图标。
+                   ⚠️ 用 v-show（不是 v-if）：聚合时这一行只是 display:none，行容器与判定用的
+                   内置图标都还在，重量时不必临时改样式（判定全程只读 DOM，见 syncNavOverflow 第 3 条）。
+                   行上的 data-plugin-row 是给判定层认「这一行就是被判定对象」用的。 -->
+              <div v-show="!navOverflow.launcherVisible" class="panel-nav-plugins" data-plugin-row>
+                <div
+                  v-for="btn in visiblePluginNavButtons"
+                  :key="btn.key"
+                  :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen }"
+                  :data-plugin-key="btn.key"
+                  @click="store.mainPanel = btn.key"
+                  :title="btn.title"
+                ><i :class="btn.icon"></i></div>
+              </div>
+
+              <!-- 聚合图标：只在插件图标放不下时出现（此时上面那行整行收起）。
+                   nav-launcher 这个类名是给判定层排除「聚合图标」用的（决定平铺时它并不存在） -->
+              <div
+                v-if="navOverflow.launcherVisible"
+                class="nav-launcher"
+                :class="{ active: store.pluginLauncherOpen }"
+                @click="togglePluginLauncher"
+                :title="store.locales === 'en' ? 'All plugins' : '全部插件'"
+              ><i class="fa fa-th-large"></i></div>
             </div>
             <!-- 弹性占位：将右侧按钮推到右端，同时作为顶栏可拖拽空白 -->
             <div class="panel-title-spacer" style="flex:1;"></div>
@@ -701,8 +953,18 @@ import { useTallLayout } from '@/composables/useTallLayout'
       
       <!-- 中间内容区域：面板由 panel.main 槽位解析（内置面板与插件面板走同一条路径） -->
       <div class="main">
+        <!-- 插件收纳启动器：点开后主面板位置换成插件网格（grid 列出插件，点一张卡以子窗口打开） -->
+        <PluginLauncherGrid
+          v-if="store.pluginLauncherOpen"
+          :entries="launcherEntries"
+          :zh="store.locales !== 'en'"
+          :highlight="store.mainPanel"
+          :total-count="pluginTotalCount"
+          :enabled-count="pluginEnabledCount"
+          @select="openPluginPanel"
+        />
         <!-- 空导航（所有功能关闭且没有插件面板）：给明确提醒 + 一键恢复 / 前往设置，而不是一片空白 -->
-        <div v-if="showEmptyNavNotice" class="empty-nav-notice">
+        <div v-else-if="showEmptyNavNotice" class="empty-nav-notice">
           <i class="fa fa-compass empty-nav-icon"></i>
           <div class="empty-nav-title">{{ store.locales === 'en' ? 'No page available' : '没有可用的页面' }}</div>
           <div class="empty-nav-text">
@@ -729,17 +991,44 @@ import { useTallLayout } from '@/composables/useTallLayout'
     </div>
 
     <!-- 底部导航栏（底部布局模式显示：全部主面板按钮 + 设置；网页模式同样显示） -->
-    <div v-if="isBottomNav" class="bottom-nav">
+    <div v-if="isBottomNav" class="bottom-nav" ref="bottomNavRef">
+      <!-- 内置面板：始终显示（不参与收纳） -->
       <div
-        v-for="btn in navButtons"
+        v-for="btn in coreNavButtons"
         :key="btn.key"
         class="bottom-nav-item"
         :class="{ active: store.mainPanel == btn.key }"
+        :data-core-key="btn.key"
         @click="store.mainPanel = btn.key"
         :title="btn.title"
       >
         <i :class="btn.icon"></i>
       </div>
+
+      <!-- 插件面板：插件少时平铺；放不下时整行收起成下面的聚合图标 -->
+      <div
+        v-for="btn in visiblePluginNavButtons"
+        :key="btn.key"
+        class="bottom-nav-item"
+        :class="{ active: store.mainPanel == btn.key }"
+        :data-plugin-key="btn.key"
+        @click="store.mainPanel = btn.key"
+        :title="btn.title"
+      >
+        <i :class="btn.icon"></i>
+      </div>
+
+      <!-- 收纳后的启动器 -->
+      <div
+        v-if="navOverflow.launcherVisible"
+        class="bottom-nav-item nav-launcher"
+        :class="{ active: store.pluginLauncherOpen }"
+        @click="togglePluginLauncher"
+        :title="store.locales === 'en' ? 'All plugins' : '全部插件'"
+      >
+        <i class="fa fa-th-large"></i>
+      </div>
+
       <!-- 浏览器 Agent 独立窗口入口（非主面板；置于设置按钮左侧；可在「功能 → 导航与模块」里关掉） -->
       <div v-if="store.isExtraVisible('agent')" class="bottom-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
         <i class="fa fa-globe"></i>
@@ -775,6 +1064,16 @@ import { useTallLayout } from '@/composables/useTallLayout'
       :remote-rel="store.fileWindowOverlay.remoteRel"
       :label="store.fileWindowOverlay.label"
     />
+  </div>
+
+  <!-- 应用内插件面板浮层（浏览器 / 安卓等没有窗口壳的环境）：与文件窗口浮层同一做法，
+       保证「点插件 → 以子窗口形态打开」在这些平台上也有可见反馈（独立窗口调用是空操作）。 -->
+  <div v-if="store.pluginPanelOverlay" class="plugin-panel-overlay" @click="store.closePluginPanelOverlay()">
+    <div class="plugin-panel-dialog" @click.stop>
+      <div class="plugin-panel-dialog-close" @click="store.closePluginPanelOverlay()"
+           :title="store.locales === 'en' ? 'Close' : '关闭'"><i class="fa fa-times"></i></div>
+      <PluginPanelWindow :plugin-key="store.pluginPanelOverlay.key" overlay />
+    </div>
   </div>
 
   <!-- ask_user 结构化问答弹窗（全局唯一宿主：聊天 / 集群 / 控制台 / 工作流共用） -->
@@ -824,6 +1123,56 @@ import { useTallLayout } from '@/composables/useTallLayout'
     border-radius: 10px;
     overflow: hidden;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  }
+
+  /* 应用内插件面板浮层（浏览器 / 安卓）：铺满主界面、居中一个「子窗口」形状的对话框，
+     视觉上与桌面版真正的独立子窗口一致（顶栏 + 插件内容 + 右上关闭） */
+  .plugin-panel-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1450;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(0, 0, 0, 0.35);
+  }
+  .plugin-panel-dialog {
+    position: relative;
+    width: min(1100px, calc(100% - 40px));
+    height: min(760px, calc(100% - 40px));
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  }
+  /* 浮层里的「关闭」：叠在壳顶栏右上角（壳自己不带窗口按钮）。
+     浮层形态下壳顶栏**不渲染**启动器图标，所以这里不会和它抢位置。 */
+  .plugin-panel-dialog-close {
+    position: absolute;
+    top: 5px;
+    right: 6px;
+    z-index: 2;
+    width: 30px;
+    height: 30px;
+    line-height: 30px;
+    text-align: center;
+    border-radius: 5px;
+    font-size: 16px;
+    cursor: pointer;
+    color: var(--fontColor);
+  }
+  .plugin-panel-dialog-close:hover {
+    color: var(--fontActiveColor);
+    background-color: var(--menuActiveColor);
+  }
+  /* 安卓 / 细长窗口：浮层里的插件面板整页铺满（与设置浮层同一处理） */
+  .container.android-mode .plugin-panel-dialog,
+  .container.tall-mode .plugin-panel-dialog {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
   }
 
   /* 安卓 / 细长窗口（高宽比 > 16:9，如手机竖屏）：设置整页铺满（手机上浮层对话框太挤，
@@ -908,11 +1257,15 @@ import { useTallLayout } from '@/composables/useTallLayout'
     cursor: move;
   }
 
-  /* 顶栏图标按钮（导航按钮 / 右侧按钮）：除导航按钮行容器、居中标题与弹性占位区外统一 30×30。
+  /* 顶栏图标按钮（导航按钮 / 右侧按钮）：除导航按钮行容器、插件图标行、居中标题与弹性占位区外统一 30×30。
      不能只写 :not(.panel-nav)：`:not()` 会把 .panel-nav 的类选择器权重算进来（0,2,1），
      高于 .panel-header .compact-title（0,2,0），于是 width:30px 会盖掉标题的 width:auto，
-     标题被压成 30px 宽（12px 字号下只能看到两个字）。同理 hover 背景也会糊到标题和空白拖拽区上。 */
-  .panel-header div:not(.panel-nav):not(.compact-title):not(.panel-title-spacer) {
+     标题被压成 30px 宽（12px 字号下只能看到两个字）。同理 hover 背景也会糊到标题和空白拖拽区上。
+     ⚠️ `.panel-nav-plugins`（插件图标行）也必须排除：它是**容器**不是图标，被这条钉成 30px 宽后
+     行内十几个插件图标只剩最左边一个可见（其余被 overflow:hidden 裁掉）—— 表现为「后面的插件图标被遮住」。
+     该排除还顺带避免了 hover 背景糊到整行上。这一条的权重是 (0,4,1)，比下面
+     `.panel-header .panel-nav > .panel-nav-plugins`(0,3,0) 高，所以只能靠排除、不能靠覆盖。 */
+  .panel-header div:not(.panel-nav):not(.panel-nav-plugins):not(.compact-title):not(.panel-title-spacer) {
     width: 30px;
     height: 30px;
     line-height: 30px;
@@ -925,12 +1278,12 @@ import { useTallLayout } from '@/composables/useTallLayout'
     transition: all 0.25s ease;
   }
 
-  .panel-header div:not(.panel-nav):not(.compact-title):not(.panel-title-spacer):hover {
+  .panel-header div:not(.panel-nav):not(.panel-nav-plugins):not(.compact-title):not(.panel-title-spacer):hover {
     color: var(--fontActiveColor);
     background-color: var(--menuActiveColor);
   }
 
-  .panel-header div:not(.panel-nav):not(.compact-title):not(.panel-title-spacer).active {
+  .panel-header div:not(.panel-nav):not(.panel-nav-plugins):not(.compact-title):not(.panel-title-spacer).active {
     color: var(--fontActiveColor);
     background-color: var(--menuActiveColor);
   }
@@ -980,9 +1333,35 @@ import { useTallLayout } from '@/composables/useTallLayout'
     height: 0;
     display: none;
   }
-  /* 导航按钮固定 30px 宽、不参与压缩：空间不够时由上面的容器横向滚动（而不是把图标挤扁） */
+  /* 导航按钮固定 30px 宽、不参与压缩：空间不够时由上面的容器横向滚动（而不是把图标挤扁）。
+     注：这条也会命中插件图标行（它也是 .panel-nav 的直接 div 子元素），但下面
+     `.panel-nav > .panel-nav-plugins`（权重更高）会把 flex 改回「按内容取宽、不收缩」。 */
   .panel-header .panel-nav > div {
     flex: 0 0 30px;
+  }
+  /* 插件按钮行：与内置按钮同一行、同一间距。
+     插件少时**平铺**在导航栏里（一行排开）；放不下时整行收起，导航栏只留聚合图标。
+     ⚠️ 行容器是**容器**：宽度必须是内容宽（`width:auto` + 不收缩 `0 0 auto`）。
+     它曾被上面那条通用规则（`.panel-header div:not(...)`，权重 0,4,1）钉成 30px 宽，
+     于是十几个插件图标全被压在 30px 里裁掉 —— 已把该行从那条规则里排除（见上文注释），
+     这里再显式写死 `width:auto` 兜底：容器一旦被压窄，判定与渲染都会跟着错。 */
+  .panel-header .panel-nav > .panel-nav-plugins {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    width: auto;
+    overflow: hidden;
+    flex: 0 0 auto;
+  }
+  /* 行内的插件图标：固定 30px、不参与压缩。
+     ⚠️ 必须单独写：上面 `.panel-nav > div` 只命中 `.panel-nav` 的**直接**子元素，
+     行内图标是孙子节点，少了这条它们会被 flex 压扁、叠在一起。 */
+  .panel-header .panel-nav > .panel-nav-plugins > div {
+    flex: 0 0 30px;
+  }
+  /* 行内最后一个图标不留右间距：判定按「图标宽 + 右间距」算总宽，末位不留才不会多算一格 */
+  .panel-header .panel-nav > .panel-nav-plugins > div:last-child {
+    margin-right: 0;
   }
   /* 标题水平居中（顶部/左侧/下方布局通用，避免右侧按钮占位导致标题偏左） */
   .panel-header .compact-title {
@@ -1026,19 +1405,22 @@ import { useTallLayout } from '@/composables/useTallLayout'
     flex-direction: row;
   }
 
-  /* 左侧导航栏 */
+  /* 左侧导航栏。
+     用 `column-reverse` + `justify-content: flex-end`：条目视觉顺序与文档顺序一致，
+     但整块内容**贴底**排列 —— 插件太多、高度不够时，被裁掉的是最上面的插件图标，
+     底部紧邻设置按钮的启动器始终可见可点。 */
   .side-nav {
     width: 44px;
     flex-shrink: 0;
     height: 100%;
     min-height: 0;
     display: flex;
-    flex-direction: column;
+    flex-direction: column-reverse;
+    justify-content: flex-end;
     align-items: center;
     padding: 4px 2px;
     gap: 2px;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
     background-color: var(--menuColor);
     border-right: 1px solid var(--borderColor);
     user-select: none;
@@ -1109,6 +1491,12 @@ import { useTallLayout } from '@/composables/useTallLayout'
     background-color: var(--menuActiveColor);
   }
 
+  /* 插件收纳启动器（fa fa-th-large）：与普通导航按钮同样式，只是**不参与收缩 / 不被裁掉**——
+     布局放不下时它是被收纳插件的唯一入口，必须留在可视区 */
+  .side-nav > .side-nav-item.nav-launcher,
+  .bottom-nav > .bottom-nav-item.nav-launcher {
+    flex-shrink: 0;
+  }
   /* 右侧内容区（顶栏 + 主内容纵向排列） */
   .main-column {
     flex: 1;

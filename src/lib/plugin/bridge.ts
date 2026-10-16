@@ -2,7 +2,12 @@
  * bridge.ts — 渲染层访问插件宿主 IPC 的唯一入口
  *
  * 约定了「插件能力只有这些方法」：任何插件相关的 IPC 都从这里走，
- * 组件 / 插件代码不要直接摸 `window.dsh`（便于集中审计与将来换实现）。
+ * 组件 / 插件代码不要直接摸 IPC 桥（便于集中审计与将来换实现）。
+ *
+ * 注意：宿主 IPC 桥（`aikmDsh`）本身也只存在于 `src/lib/aikmIpc.ts` 的模块作用域里 ——
+ * preload 只暴露一次性的 `window.__aikmClaimIpcBridge()`，应用启动时领走即焚。
+ * 这是为了让**界面半边插件**拿不到通用 IPC 通道（它与宿主渲染进程同 realm，
+ * 否则一个零权限插件就能 `invoke('tools:execute', …)`）。不要在本模块之外重新把它挂回 window。
  *
  * 非 Electron 环境（浏览器 dev、局域网网页端、文件独立窗口的极端情况）返回 null，
  * 调用方据此静默降级。
@@ -10,6 +15,7 @@
 
 import type { PluginDataFileStat, PluginEvent, PluginLogLine, PluginSnapshot } from '@/types/plugin'
 import { createLocalPluginHost, localPluginHostAvailable } from '@/platform/pluginHost'
+import { aikmDsh } from '@/lib/aikmIpc'
 
 /** 客户端插件 bundle（主进程读取后经 IPC 传入，渲染层用 Blob URL 动态 import） */
 export interface PluginClientBundle {
@@ -93,7 +99,7 @@ export interface PluginBridgeApi {
 /** 取插件桥（不可用时返回 null） */
 export function getPluginBridge(): PluginBridgeApi | null {
   if (typeof window === 'undefined') return null
-  const api = (window as any).dsh?.plugin
+  const api = aikmDsh?.plugin
   if (api && typeof api.list === 'function') return api as PluginBridgeApi
   // 非 Electron 平台（安卓 / 局域网网页端）：用渲染层插件宿主（扫插件目录 + 装载界面半边）
   try {
@@ -112,5 +118,5 @@ let cachedLocalHost: PluginBridgeApi | null = null
 /** 当前用的是渲染层宿主（非 Electron）：界面据此调整文案（无插件工具 / 无主进程半边） */
 export function isLocalPluginHost(): boolean {
   if (typeof window === 'undefined') return false
-  return !(window as any).dsh?.plugin && localPluginHostAvailable()
+  return !aikmDsh?.plugin && localPluginHostAvailable()
 }
