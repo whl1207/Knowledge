@@ -43,6 +43,11 @@ export interface FileAssocEntry {
   desc: string
   /** Linux MIME 类型（缺省表示该类型在 Linux 上不支持由本软件设为默认） */
   mime?: string
+  /**
+   * 该类型的图标文件名（不含扩展名），资源在 resources/file-icons/<icon>.ico（写注册表用）
+   * 与同名 .png（设置页预览用）。各类型图标不同，双击前在资源管理器里就能分清是哪种文件。
+   */
+  icon: string
 }
 
 /**
@@ -55,21 +60,121 @@ export interface FileAssocEntry {
  * 否则「打开方式」列表会出现重复条目。
  */
 export const FILE_ASSOC_ENTRIES: FileAssocEntry[] = [
-  { key: 'kb', labelZh: '知识库文件', labelEn: 'Knowledge base', exts: ['kb'], progId: 'AI-KM Knowledge Base', desc: 'AI-KM Knowledge Base', mime: 'application/x-aikm-kb' },
-  { key: 'md', labelZh: 'Markdown 文档', labelEn: 'Markdown document', exts: ['md', 'markdown', 'mdown', 'mkd'], progId: 'Markdown Document', desc: 'Markdown Document', mime: 'text/markdown' },
-  { key: 'txt', labelZh: '纯文本', labelEn: 'Plain text', exts: ['txt', 'log'], progId: 'Plain Text Document', desc: 'Plain Text Document', mime: 'text/plain' },
-  { key: 'json', labelZh: 'JSON 文档', labelEn: 'JSON document', exts: ['json', 'jsonc'], progId: 'JSON Document', desc: 'JSON Document', mime: 'application/json' },
-  { key: 'html', labelZh: 'HTML 网页', labelEn: 'HTML document', exts: ['html', 'htm'], progId: 'HTML Document', desc: 'HTML Document', mime: 'text/html' },
-  { key: 'css', labelZh: '样式表（CSS/SCSS/LESS）', labelEn: 'Stylesheet (CSS/SCSS/LESS)', exts: ['css', 'scss', 'less'], progId: 'Stylesheet', desc: 'Stylesheet', mime: 'text/css' },
-  { key: 'xml', labelZh: 'XML 文档', labelEn: 'XML document', exts: ['xml'], progId: 'XML Document', desc: 'XML Document', mime: 'application/xml' },
-  { key: 'yaml', labelZh: 'YAML 配置', labelEn: 'YAML document', exts: ['yaml', 'yml'], progId: 'YAML Document', desc: 'YAML Document', mime: 'application/x-yaml' },
-  { key: 'toml', labelZh: 'TOML 配置', labelEn: 'TOML document', exts: ['toml'], progId: 'TOML Document', desc: 'TOML Document', mime: 'application/toml' },
-  { key: 'csv', labelZh: 'CSV 表格', labelEn: 'CSV document', exts: ['csv'], progId: 'CSV Document', desc: 'CSV Document', mime: 'text/csv' },
-  { key: 'pdf', labelZh: 'PDF 文档（可选）', labelEn: 'PDF document (optional)', exts: ['pdf'], progId: 'PDF Document', desc: 'PDF Document' },
-  { key: 'ts', labelZh: 'TypeScript / Vue 源码', labelEn: 'TypeScript / Vue source', exts: ['ts', 'tsx', 'vue'], progId: 'TypeScript Source File', desc: 'TypeScript / Vue Source File' },
-  { key: 'code', labelZh: '其他源码（Java/C/C++/C#/Go/Rust/SQL）', labelEn: 'Other source (Java/C/C++/C#/Go/Rust/SQL)', exts: ['java', 'c', 'h', 'cpp', 'hpp', 'cs', 'go', 'rs', 'sql'], progId: 'Source Code File', desc: 'Source Code File' },
-  { key: 'excalidraw', labelZh: 'Excalidraw 白板', labelEn: 'Excalidraw drawing', exts: ['excalidraw'], progId: 'Excalidraw Drawing', desc: 'Excalidraw Whiteboard Drawing', mime: 'application/x-excalidraw' },
+  { key: 'kb', labelZh: '知识库文件', labelEn: 'Knowledge base', exts: ['kb'], progId: 'AI-KM Knowledge Base', desc: 'AI-KM Knowledge Base', mime: 'application/x-aikm-kb', icon: 'kb' },
+  { key: 'md', labelZh: 'Markdown 文档', labelEn: 'Markdown document', exts: ['md', 'markdown', 'mdown', 'mkd'], progId: 'Markdown Document', desc: 'Markdown Document', mime: 'text/markdown', icon: 'md' },
+  { key: 'txt', labelZh: '纯文本', labelEn: 'Plain text', exts: ['txt', 'log'], progId: 'Plain Text Document', desc: 'Plain Text Document', mime: 'text/plain', icon: 'txt' },
+  { key: 'json', labelZh: 'JSON 文档', labelEn: 'JSON document', exts: ['json', 'jsonc'], progId: 'JSON Document', desc: 'JSON Document', mime: 'application/json', icon: 'json' },
+  { key: 'html', labelZh: 'HTML 网页', labelEn: 'HTML document', exts: ['html', 'htm'], progId: 'HTML Document', desc: 'HTML Document', mime: 'text/html', icon: 'html' },
+  { key: 'css', labelZh: '样式表（CSS/SCSS/LESS）', labelEn: 'Stylesheet (CSS/SCSS/LESS)', exts: ['css', 'scss', 'less'], progId: 'Stylesheet', desc: 'Stylesheet', mime: 'text/css', icon: 'css' },
+  { key: 'xml', labelZh: 'XML 文档', labelEn: 'XML document', exts: ['xml'], progId: 'XML Document', desc: 'XML Document', mime: 'application/xml', icon: 'xml' },
+  { key: 'yaml', labelZh: 'YAML 配置', labelEn: 'YAML document', exts: ['yaml', 'yml'], progId: 'YAML Document', desc: 'YAML Document', mime: 'application/x-yaml', icon: 'yaml' },
+  { key: 'toml', labelZh: 'TOML 配置', labelEn: 'TOML document', exts: ['toml'], progId: 'TOML Document', desc: 'TOML Document', mime: 'application/toml', icon: 'toml' },
+  { key: 'csv', labelZh: 'CSV 表格', labelEn: 'CSV document', exts: ['csv'], progId: 'CSV Document', desc: 'CSV Document', mime: 'text/csv', icon: 'csv' },
+  { key: 'pdf', labelZh: 'PDF 文档（可选）', labelEn: 'PDF document (optional)', exts: ['pdf'], progId: 'PDF Document', desc: 'PDF Document', icon: 'pdf' },
+  { key: 'ts', labelZh: 'TypeScript / Vue 源码', labelEn: 'TypeScript / Vue source', exts: ['ts', 'tsx', 'vue'], progId: 'TypeScript Source File', desc: 'TypeScript / Vue Source File', icon: 'ts' },
+  { key: 'code', labelZh: '其他源码（Java/C/C++/C#/Go/Rust/SQL）', labelEn: 'Other source (Java/C/C++/C#/Go/Rust/SQL)', exts: ['java', 'c', 'h', 'cpp', 'hpp', 'cs', 'go', 'rs', 'sql'], progId: 'Source Code File', desc: 'Source Code File', icon: 'code' },
+  { key: 'excalidraw', labelZh: 'Excalidraw 白板', labelEn: 'Excalidraw drawing', exts: ['excalidraw'], progId: 'Excalidraw Drawing', desc: 'Excalidraw Whiteboard Drawing', mime: 'application/x-excalidraw', icon: 'excalidraw' },
+  // 以下 4 类安装包也会注册（见 package.json build.fileAssociations），图标与打开方式同样在此管理
+  { key: 'drawio', labelZh: 'draw.io 图表', labelEn: 'draw.io diagram', exts: ['drawio', 'dio'], progId: 'draw.io Diagram', desc: 'draw.io Diagram', icon: 'drawio' },
+  { key: 'flow', labelZh: 'AI-KM 工作流', labelEn: 'AI-KM workflow', exts: ['flow', 'workflow'], progId: 'AI-KM Workflow', desc: 'AI-KM Workflow Diagram', icon: 'flow' },
+  { key: 'data', labelZh: 'AI-KM 数据画布', labelEn: 'AI-KM data canvas', exts: ['data'], progId: 'AI-KM Data Canvas', desc: 'AI-KM Data Canvas', icon: 'data' },
+  { key: 'mmd', labelZh: 'Mermaid 图表', labelEn: 'Mermaid diagram', exts: ['mmd', 'mermaid'], progId: 'Mermaid Diagram', desc: 'Mermaid Diagram Source File', icon: 'mmd' },
 ]
+
+// ==================== 类型图标资源 ====================
+
+/**
+ * 每个文件类型一张自己的图标（彩色文档 + 类型缩写，见 scripts/make-file-icons.py）。
+ * 注册表 DefaultIcon 指向这些 .ico；图标复制到 userData 后引用，因为：
+ *  - 免安装版的 exe / 资源在临时目录，路径每次运行都变；
+ *  - 安装目录可能被用户改到别处，userData 路径始终稳定。
+ */
+const ICON_DIR_NAME = 'file-icons'
+
+/** 随包分发的图标目录：打包后 <resources>/file-icons，开发时 <项目>/resources/file-icons */
+function bundledIconDir(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, ICON_DIR_NAME)
+    : path.join(app.getAppPath(), 'resources', ICON_DIR_NAME)
+}
+
+/** 图标落地目录（userData/file-icons）——写进注册表的就是这里的绝对路径 */
+function userIconDir(): string {
+  return path.join(app.getPath('userData'), ICON_DIR_NAME)
+}
+
+let iconDirCache: string | null = null
+
+/**
+ * 把图标复制到 userData（已存在且大小一致就跳过），返回落地目录。
+ * 源目录不存在时返回 ''（调用方退回软件图标）。
+ */
+export function ensureFileTypeIcons(): string {
+  if (iconDirCache) return iconDirCache
+  const src = bundledIconDir()
+  if (!fs.existsSync(src)) return ''
+  const dst = userIconDir()
+  try {
+    fs.mkdirSync(dst, { recursive: true })
+    for (const e of FILE_ASSOC_ENTRIES) {
+      for (const ext of ['.ico', '.png']) {
+        const from = path.join(src, e.icon + ext)
+        const to = path.join(dst, e.icon + ext)
+        if (!fs.existsSync(from)) continue
+        const a = fs.statSync(from)
+        const b = fs.existsSync(to) ? fs.statSync(to) : null
+        // 体积或修改时间不同就重拷（随版本更新的图标能落地）
+        if (!b || b.size !== a.size || b.mtimeMs < a.mtimeMs) fs.copyFileSync(from, to)
+      }
+    }
+    iconDirCache = dst
+    return dst
+  } catch (err) {
+    console.warn('[file-assoc] 复制文件类型图标失败:', err)
+    return ''
+  }
+}
+
+/** 某类型的 .ico 绝对路径（无可用图标时返回 ''） */
+function iconPathOf(entry: FileAssocEntry): string {
+  const dir = ensureFileTypeIcons()
+  if (!dir) return ''
+  const p = path.join(dir, entry.icon + '.ico')
+  return fs.existsSync(p) ? p : ''
+}
+
+/**
+ * DefaultIcon 的注册表值：图标文件 + 索引 0。
+ * 路径可能带空格 / 中文，必须加引号；拿不到图标时退回「软件自己的图标」。
+ */
+function defaultIconValue(entry: FileAssocEntry, exe: string): string {
+  const p = iconPathOf(entry)
+  return p ? `"${p}",0` : `${exe},0`
+}
+
+/** 用于比较的规范化：去引号 / 小写 / 去首尾空白 */
+function normalizeIconValue(v: string): string {
+  return String(v || '').toLowerCase().replace(/"/g, '').trim()
+}
+
+/** 设置页预览用的 PNG（data URL）：解 ICO 需要额外的解码器，直接读同名 PNG 更省事 */
+let iconUrlCache: Record<string, string> | null = null
+
+export function fileIconDataUrls(): Record<string, string> {
+  if (iconUrlCache) return iconUrlCache
+  const dir = ensureFileTypeIcons()
+  const out: Record<string, string> = {}
+  if (!dir) return out
+  for (const e of FILE_ASSOC_ENTRIES) {
+    try {
+      const buf = fs.readFileSync(path.join(dir, e.icon + '.png'))
+      out[e.key] = `data:image/png;base64,${buf.toString('base64')}`
+    } catch { /* 单个缺失不影响其它类型 */ }
+  }
+  // 一次运行内图标不会变，缓存起来避免每次读状态都重读 + 重编码
+  if (Object.keys(out).length) iconUrlCache = out
+  return out
+}
 
 /** Linux 下安装包的桌面条目名（electron-builder 用 executableName，Linux 默认 = 产品名小写） */
 const DESKTOP_FILE_NAMES = ['ai-km.desktop', 'AI-KM.desktop']
@@ -97,6 +202,8 @@ export interface FileAssocState {
   entries: FileAssocEntry[]
   /** key → 状态 */
   states: Record<string, FileAssocEntryState>
+  /** key → 该类型图标的 PNG data URL（Windows 才有；设置页在类型名前展示，一眼看出区别） */
+  icons?: Record<string, string>
 }
 
 // ==================== 通用子进程封装 ====================
@@ -168,7 +275,7 @@ $res | ConvertTo-Json -Compress -Depth 5
 }
 
 /** 设置单个扩展名的关联级别 */
-async function winSetMode(ext: string, entry: FileAssocEntry, mode: FileAssocMode, exe: string, extraArgs: string): Promise<void> {
+async function winSetMode(ext: string, entry: FileAssocEntry, mode: FileAssocMode, exe: string, extraArgs: string, icon: string): Promise<void> {
   const script = `
 $ext = $env:FA_EXT
 $prog = $env:FA_PROG
@@ -176,6 +283,7 @@ $mode = $env:FA_MODE
 $exe = $env:FA_EXE
 $desc = $env:FA_DESC
 $extra = $env:FA_EXTRA
+$icon = $env:FA_ICON
 $cu = [Microsoft.Win32.Registry]::CurrentUser
 $cls = $cu.CreateSubKey("Software\\Classes\\$ext")
 $bakName = $prog + '_backup'
@@ -209,7 +317,8 @@ if ($mode -eq 'none') {
   # ProgID 定义（可能与其它扩展名共用，保留不删）
   $pk = $cu.CreateSubKey("Software\\Classes\\$prog")
   $pk.SetValue('', $desc, 'String')
-  $pk.CreateSubKey('DefaultIcon').SetValue('', ($exe + ',0'), 'String')
+  # 每个类型用**自己的**图标（PDF 红色、Markdown 蓝色…），不再是统一的软件图标
+  $pk.CreateSubKey('DefaultIcon').SetValue('', $icon, 'String')
   $pk.CreateSubKey('shell').SetValue('', 'open', 'String')
   $pk.CreateSubKey('shell\\open').SetValue('', 'Open with AI-KM', 'String')
   $cmd = '"' + $exe + '" ' + $extra + '"%1"'
@@ -240,6 +349,7 @@ Write-Output 'ok'
     FA_EXE: exe,
     FA_DESC: entry.desc,
     FA_EXTRA: extraArgs,
+    FA_ICON: icon || `${exe},0`,
   })
   if (r.code !== 0 || !/ok/i.test(r.stdout)) {
     throw new Error((r.stderr || r.stdout || 'reg write failed').trim())
@@ -263,6 +373,109 @@ Write-Output 'ok'
 `.trim()
   const r = await runPowerShell(script, { FA_PROG: progId })
   if (r.code !== 0) throw new Error((r.stderr || r.stdout || 'reg cleanup failed').trim())
+}
+
+interface ProgIdInfo {
+  /** ProgID 键是否存在 */
+  exists: boolean
+  /** 当前 DefaultIcon 值 */
+  icon: string
+  /** 当前 shell\open\command 值 */
+  command: string
+}
+
+/** 批量读取 ProgID 的 DefaultIcon / 打开命令（一次 PowerShell，避免逐个启动进程） */
+async function winReadProgIds(progIds: string[]): Promise<Record<string, ProgIdInfo>> {
+  const script = `
+$list = $env:FA_PROGS | ConvertFrom-Json
+$cu = [Microsoft.Win32.Registry]::CurrentUser
+$res = [ordered]@{}
+foreach ($p in $list) {
+  $info = @{ exists = $false; icon = ''; command = '' }
+  $k = $cu.OpenSubKey("Software\\Classes\\$p")
+  if ($k -ne $null) {
+    $info.exists = $true
+    $di = $k.OpenSubKey('DefaultIcon')
+    if ($di -ne $null) { $info.icon = [string]$di.GetValue(''); $di.Close() }
+    $oc = $k.OpenSubKey('shell\\open\\command')
+    if ($oc -ne $null) { $info.command = [string]$oc.GetValue(''); $oc.Close() }
+    $k.Close()
+  }
+  $res[$p] = $info
+}
+$res | ConvertTo-Json -Compress -Depth 5
+`.trim()
+  const r = await runPowerShell(script, { FA_PROGS: JSON.stringify(progIds) })
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout || 'reg read failed').trim())
+  const raw = JSON.parse(r.stdout.trim() || '{}')
+  const out: Record<string, ProgIdInfo> = {}
+  for (const [prog, v] of Object.entries<any>(raw)) {
+    out[prog] = { exists: !!v?.exists, icon: String(v?.icon || ''), command: String(v?.command || '') }
+  }
+  return out
+}
+
+/** 批量改写 DefaultIcon（一次 PowerShell），末尾刷新 shell 图标缓存 */
+async function winWriteProgIcons(map: Record<string, string>): Promise<void> {
+  if (!Object.keys(map).length) return
+  const script = `
+$map = $env:FA_ICONS | ConvertFrom-Json
+$cu = [Microsoft.Win32.Registry]::CurrentUser
+foreach ($p in $map.PSObject.Properties) {
+  $k = $cu.CreateSubKey("Software\\Classes\\$($p.Name)\\DefaultIcon")
+  $k.SetValue('', [string]$p.Value, 'String')
+  $k.Close()
+}
+try {
+  Add-Type -Namespace AIKM -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, uint f, IntPtr a, IntPtr b);'
+  [AIKM.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+} catch { }
+Write-Output 'ok'
+`.trim()
+  const r = await runPowerShell(script, { FA_ICONS: JSON.stringify(map) })
+  if (r.code !== 0 || !/ok/i.test(r.stdout)) {
+    throw new Error((r.stderr || r.stdout || 'reg write failed').trim())
+  }
+}
+
+/**
+ * 把「已经关联到本软件」的文件类型的 DefaultIcon 校正为该类型自己的图标。
+ *
+ * 为什么需要：安装包 / 旧版设置页写入的 DefaultIcon 统一是 `<AI-KM.exe>,0`，于是所有
+ * 已关联类型在资源管理器里长得一样。启动时跑一次，用户不必手动把每个类型重设一遍。
+ *
+ * 只改「确实属于本软件」的 ProgID（打开命令指向本软件的可执行文件），且只在当前图标
+ * 为空 / 仍是软件图标 / 指向旧的 file-icons 时才改 —— 用户自己换过的图标不动。
+ */
+export async function syncFileTypeIcons(): Promise<void> {
+  if (process.platform !== 'win32') return
+  const dir = ensureFileTypeIcons()
+  if (!dir) {
+    console.warn('[file-assoc] 未找到文件类型图标资源，跳过图标同步')
+    return
+  }
+  const progIds = [...new Set(FILE_ASSOC_ENTRIES.map(e => e.progId))]
+  const info = await winReadProgIds(progIds)
+  const exeName = path.basename(process.execPath).toLowerCase()
+  const changes: Record<string, string> = {}
+
+  for (const e of FILE_ASSOC_ENTRIES) {
+    const st = info[e.progId]
+    if (!st?.exists) continue
+    // 打开命令不是本软件 → 同名 ProgID 属于别的程序，不碰
+    if (!st.command.toLowerCase().includes(exeName)) continue
+    const desired = defaultIconValue(e, process.execPath)
+    if (!desired.startsWith('"')) continue // 图标文件缺失，保持原样
+    const cur = normalizeIconValue(st.icon)
+    if (cur === normalizeIconValue(desired)) continue
+    const ours = !cur || cur.includes('\\file-icons\\') || cur.includes(exeName)
+    if (!ours) continue
+    changes[e.progId] = desired
+  }
+
+  if (!Object.keys(changes).length) return
+  await winWriteProgIcons(changes)
+  console.info(`[file-assoc] 已为 ${Object.keys(changes).length} 个文件类型设置各自的图标`)
 }
 
 // ==================== Linux（mimeapps.list） ====================
@@ -423,7 +636,14 @@ export async function getFileAssocState(): Promise<FileAssocState> {
       }
       states[e.key] = { mode, userChoice }
     }
-    return { ...base, supported: true, reasonCode: 'ok', supportsOpenWith: true, states }
+    return {
+      ...base,
+      supported: true,
+      reasonCode: 'ok',
+      supportsOpenWith: true,
+      states,
+      icons: fileIconDataUrls(),
+    }
   }
 
   if (platform === 'linux') {
@@ -457,9 +677,11 @@ export async function setFileAssoc(key: string, mode: FileAssocMode): Promise<vo
   if (process.platform === 'win32') {
     const { command, extraArgs, ok } = buildCommand()
     if (!ok) throw new Error('无法确定应用可执行文件路径')
+    // 该类型自己的图标（找不到时回退软件图标）
+    const icon = defaultIconValue(entry, command)
     // 逐扩展名写入（同一 ProgID 的所有扩展名保持一致；注册表键用带点的扩展名，如 .md）
     for (const ext of entry.exts) {
-      await winSetMode(`.${ext}`, entry, mode, command, extraArgs)
+      await winSetMode(`.${ext}`, entry, mode, command, extraArgs, icon)
     }
     // 全部取消关联后清理 ProgID 定义键（该键为本条目独占，不会影响其它类型）
     if (mode === 'none') await winDeleteProgId(entry.progId)

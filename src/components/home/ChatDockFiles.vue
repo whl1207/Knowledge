@@ -3,7 +3,8 @@
 
      交互（都只走已有的平台 fs 端口，不新增主进程能力）：
      - 文件夹：单击展开/收起（首次展开才去 listTree，depth=1）；
-     - 文件：单击用应用统一的打开方式打开（store.openFileByMode：桌面独立窗口 / 单窗口环境应用内浮层）；
+     - 文件：单击在当前右侧栏里以**文件标签**打开（复用文件窗口的多视图选择）；
+       特殊文件（.kb / .task / 本地 .html / 系统打开类）仍走应用统一调度，见 home.vue 的 open-file 处理；
      - 每行右侧「插入」：把相对路径以行内代码形式插进当前聊天的输入框（方便直接让智能体读这个文件）。
      过滤框只过滤**已加载**的节点（不触发全盘扫描）。 -->
 <template>
@@ -96,7 +97,11 @@ const props = defineProps<{
   /** 根目录：**当前聊天自己的工作区**（空 = 回落到全局默认 store.root） */
   rootPath?: string
 }>()
-const emit = defineEmits<{ (e: 'insert-text', text: string): void }>()
+const emit = defineEmits<{
+  (e: 'insert-text', text: string): void
+  /** 点了文件：交给宿主（home.vue）在当前右侧栏里以 file 标签打开（不再直接弹独立窗口） */
+  (e: 'open-file', payload: { path: string; view?: string; label?: string }): void
+}>()
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -235,15 +240,10 @@ function onRowClick(row: Row): void {
     if (next[row.node.path]) void loadChildren(row.node.path)
     return
   }
-  // 文件：走应用统一的打开方式（与文件视图 / 搜索面板一致）
+  // 文件：在**当前右侧栏**里以 file 标签打开（内容复用文件窗口的多视图选择）。
+  // 特殊文件（.kb / .task / .html / 系统打开类）仍由宿主按统一调度处理，见 home.vue。
   const name = fileNameOf(row.node.path)
-  const dot = name.lastIndexOf('.')
-  store.openFileByMode({
-    path: row.node.path,
-    label: row.node.label || name,
-    type: 'file',
-    extension: dot >= 0 ? name.substring(dot).toLowerCase() : '',
-  })
+  emit('open-file', { path: row.node.path, label: row.node.label || name })
 }
 
 /** 插入相对路径（行内代码形式，便于智能体直接读取） */

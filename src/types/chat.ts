@@ -60,6 +60,8 @@ export interface UploadItem {
   data: string | Uint8Array | ArrayBuffer // 图片数据(base64)或空字符串
   name: string
   size: number
+  /** 文件在磁盘上的真实路径（桌面端拖入 / 选择时记录；网页 / 安卓 / 虚拟来源为空） */
+  path?: string
   parsedContent?: string // 文件解析后的文本内容
   charCount?: number // 解析后的字符数
 }
@@ -104,6 +106,8 @@ export interface ChatMessage {
     name: string
     content: string
     charCount: number
+    /** 磁盘真实路径：智能体 / 集群模式只注入它，正文由模型用文件工具按需读取 */
+    path?: string
   }>
 
   tokenStats?: {
@@ -198,6 +202,13 @@ export interface ChatConfig {
   workflowData?: DslDocument
   /** Agent 预设模式：选中的预设 id（mode='agent' 时生效） */
   presetId?: string
+  /**
+   * 智能体预设「跟随默认」时，用户是否在聊天右上角手动改过来源 / 模型。
+   * false / 缺省 = 这个聊天跟随全局「设置 → 模型」的当前值（换来源后自动跟上）；
+   * true = 用户显式选过，聊天配置里的 llmType / model 就是这个聊天的覆盖值。
+   * 旧存档没有该字段 → 按「跟随全局」处理，避免历史遗留的 llmType / model 把全局换模型钉死。
+   */
+  llmPinned?: boolean
   /** 浏览器模式（LAN 共享）：选用的智能体（主机开放的 Agent 预设 id；'general'/空 = 通用智能体） */
   guestAgentId?: string
   /** 自定义来源：绑定的来源索引（llmType='custom' 时生效；缺省用设置页当前激活来源） */

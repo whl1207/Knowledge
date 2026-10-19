@@ -15,11 +15,32 @@ export interface ChatModelsDeps {
   saveChats: () => void
   /** customIndex 用于自定义来源（llmType='custom' 时取该来源默认模型） */
   getDefaultModel: (llmType: string, customIndex?: number) => string
+  /**
+   * 聊天实际生效的来源 / 模型（智能体预设「跟随默认」时来自全局，聊天配置里可能为空）。
+   * 连接检测 / 刷新用它，避免拿空配置去探测而报「请先选择模型」。缺省回退聊天配置。
+   */
+  getEffectiveLlm?: () => { provider: string; model: string; customSourceIndex?: number }
 }
 
 export function useChatModels(deps: ChatModelsDeps) {
   const store = usestore()
   const { getCurrentChat, saveChats, getDefaultModel } = deps
+
+  /**
+   * 连接检测 / 刷新使用的配置：优先用实际生效值（预设跟随默认 / 全局兜底），
+   * 只有没有生效值时回退聊天配置。返回浅拷贝，调用方不会写回存档。
+   */
+  const effectiveConfig = (): ChatConfig => {
+    const config = getCurrentChat().config
+    const eff = deps.getEffectiveLlm?.()
+    if (!eff) return config
+    return {
+      ...config,
+      llmType: eff.provider || config.llmType,
+      model: eff.model || config.model,
+      customSourceIndex: eff.customSourceIndex ?? config.customSourceIndex,
+    }
+  }
 
   // ---------------- 连接测试状态 ----------------
 
@@ -180,7 +201,7 @@ export function useChatModels(deps: ChatModelsDeps) {
 
   const checkCurrentModelConnection = async () => {
     const chat = getCurrentChat()
-    const config = chat.config
+    const config = effectiveConfig()
     if (!config.model) {
       chat.online = false
       return
@@ -202,7 +223,7 @@ export function useChatModels(deps: ChatModelsDeps) {
 
   const testCurrentModelConnection = async () => {
     const chat = getCurrentChat()
-    const config = chat.config
+    const config = effectiveConfig()
     if (!config.model) {
       setConnectionTestStatus(store.locales == 'zh' ? '请先选择模型' : 'Please select a model', false)
       return
@@ -241,7 +262,7 @@ export function useChatModels(deps: ChatModelsDeps) {
 
   const refreshModels = async () => {
     const chat = getCurrentChat()
-    const config = chat.config
+    const config = effectiveConfig()
     const customSnap = applyChatCustomConfig(config)
     try {
       await store.getAIconfig(config.llmType)

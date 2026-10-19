@@ -5,6 +5,7 @@ import { createASRManager } from '@/services/asr/manager'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BlockEditor from '@/components/knowFile/view/block/BlockEditor.vue'
 import { getPlatform, hasCapability } from '@/platform'
+import { droppedFilePath } from '@/platform/droppedFile'
 
 const store = usestore()
 
@@ -158,13 +159,13 @@ const reinitEditor = () => {
     })
 }
 
-// 保存内容（恢复 YAML frontmatter 后写入）
-const saveContent = () => {
-    if (!data.value) return
+// 保存内容（恢复 YAML frontmatter 后写入）。返回是否保存成功，供宿主在切标签 / 关窗前等待。
+const saveContent = (): Promise<boolean> => {
+    if (!data.value) return Promise.resolve(false)
     // 编辑器还没挂载时 getText() 返回空串，直接保存会把文件清空
     if (shouldShowEditor.value && !beRef.value) {
         console.warn('块编辑器尚未就绪，跳过本次保存')
-        return
+        return Promise.resolve(false)
     }
 
     try {
@@ -174,25 +175,38 @@ const saveContent = () => {
         // 保存成功后更新快照
         originalContentSnapshot = body
 
-        if (data.value.path) {
-            getPlatform().fs.saveText(data.value.path, data.value.content)
-                .then((success: boolean) => {
-                    if (success) {
-                        isDirty.value = false
-                        console.log('文件保存成功')
-                        // 通知其他窗口（独立窗口中的浏览/导图/演示等）刷新预览
-                        getPlatform().app.notifyFileChanged({ path: data.value.path, content: data.value.content }).catch(() => {})
-                    } else {
-                        console.warn('文件保存失败')
-                    }
-                })
-                .catch((error: any) => {
-                    console.error('保存失败:', error)
-                })
-        }
+        if (!data.value.path) return Promise.resolve(false)
+        return getPlatform().fs.saveText(data.value.path, data.value.content)
+            .then((success: boolean) => {
+                if (success) {
+                    isDirty.value = false
+                    console.log('文件保存成功')
+                    // 通知其他窗口（独立窗口中的浏览/导图/演示等）刷新预览
+                    getPlatform().app.notifyFileChanged({ path: data.value.path, content: data.value.content }).catch(() => {})
+                } else {
+                    console.warn('文件保存失败')
+                }
+                return !!success
+            })
+            .catch((error: any) => {
+                console.error('保存失败:', error)
+                return false
+            })
     } catch (error) {
         console.error('保存内容时出错:', error)
+        return Promise.resolve(false)
     }
+}
+
+/**
+ * 用户选择「不保存」时调用：把当前正文记为快照并清掉脏标记。
+ * 避免组件卸载流程（下面 onBeforeUnmount）再弹一次确认框。
+ */
+const discardUnsaved = () => {
+    try {
+        originalContentSnapshot = editor.getMarkdown()
+    } catch (e) { /* 编辑器未就绪时忽略 */ }
+    isDirty.value = false
 }
 
 // 更新编辑器内容（剥离 YAML frontmatter）
@@ -260,7 +274,8 @@ const onDropFiles = async (payload: { files: File[]; index: number }) => {
 
     const texts: string[] = []
     for (const file of payload.files) {
-        const filePath = (file as any).path || file.name
+        // Electron 32 起没有 File.path：经 preload 的 webUtils 取真实路径
+        const filePath = droppedFilePath(file) || file.name
         const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase()
         const isImage = imageExtensions.includes(ext)
         const fileName = filePath.replace(/\\/g, '/').split('/').pop() || 'file'
@@ -640,6 +655,13 @@ onBeforeUnmount(async () => {
         if (isASRRecording.value) asrManager.value.abort()
         asrManager.value = null
     }
+})
+
+// 暴露给父组件（FileWindow）：切换标签 / 关窗口前检查并保存 / 放弃未保存内容
+defineExpose({
+    hasUnsaved: () => isDirty.value,
+    saveContent,
+    discardUnsaved,
 })
 </script>
 

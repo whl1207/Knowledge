@@ -71,6 +71,20 @@ export function presetFollowsDefaultLlm(preset: any): boolean {
 }
 
 /**
+ * 聊天里的来源 / 模型是否应跟随全局当前值。
+ *
+ * 预设「跟随默认」时默认是跟随的；但用户在聊天右上角手动选过来源 / 模型
+ * （`config.llmPinned === true`）就应尊重这次显式选择，不能又被全局值盖掉。
+ * 旧存档没有 `llmPinned` → 视为未手动选择，继续跟随全局，避免历史遗留的
+ * llmType / model 把「换全局模型后自动跟上」破坏掉。
+ * 没有选中预设（通用智能体 / 普通对话）时返回 false：这些聊天以聊天配置为准。
+ */
+export function chatFollowsGlobalLlm(preset: any, config: any): boolean {
+  if (preset === null || preset === undefined) return false
+  return presetFollowsDefaultLlm(preset) && config?.llmPinned !== true
+}
+
+/**
  * 预设 → 实际生效的来源键：跟随默认（或未配置）时取全局当前来源，否则用预设自己的来源。
  * 各执行入口（聊天 / 工作流 / 集群 / 批量 / 插件委派）都应经此解析，勿各写一份 `||` 链。
  */

@@ -58,6 +58,8 @@ scripts/*
 !scripts/build-tts-worker.mjs
 !scripts/fetch-drawio-webapp.mjs
 !scripts/make-builtin-mbtiles.py
+# 文件关联的类型图标生成器（产物 resources/file-icons 随包分发，需要能重新生成）
+!scripts/make-file-icons.py
 !scripts/build-linux-all.sh
 !scripts/build-linux-all.cmd
 !scripts/collect-release.mjs

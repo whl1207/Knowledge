@@ -29,8 +29,13 @@ const props = withDefaults(
     searchTitle?: string
     /** 左侧文件树面板是否展开（决定开关按钮的图标与提示） */
     panelOpen?: boolean
+    /**
+     * 是否显示「视图选择」下拉：知识管理右侧改成标签栏后由标签负责切换视图，
+     * 不再需要这个下拉（传 false），避免两套入口对不上。
+     */
+    showViewSelect?: boolean
   }>(),
-  { search: '', searchable: true, placeholder: '', searchTitle: '', panelOpen: true }
+  { search: '', searchable: true, placeholder: '', searchTitle: '', panelOpen: true, showViewSelect: true }
 )
 const emit = defineEmits<{
   (e: 'update:search', value: string): void
@@ -52,8 +57,8 @@ const VIEW_NAME_EN: Record<string, string> = {
 }
 const viewName = (v: string) => (store.locales === 'zh' ? v : (VIEW_NAME_EN[v] || v))
 
-/** 是否显示视图选择：打开工作区即可用（文件一律在独立窗口打开，这份下拉管主窗口的视图） */
-const showViewSelect = computed(() => store.root !== '')
+/** 是否显示视图选择：打开工作区即可用（右侧标签栏出现后由宿主传 showViewSelect=false 关闭） */
+const showViewSelect = computed(() => props.showViewSelect !== false && store.root !== '')
 /** 可切换的视图清单：主窗口的全局视图（见 store 的 GLOBAL_VIEW_KEYS） */
 const viewsForGrid = computed(() =>
   showViewSelect.value ? store.viewList : []
@@ -151,7 +156,7 @@ onMounted(() => store.knowSyncNav())
 .toolbar-view-select {
   flex-shrink: 0;
   height: 26px;
-  max-width: 60px;
+  max-width: 104px;
   padding: 0 4px;
   box-sizing: border-box;
   border: 1px solid var(--borderColor);

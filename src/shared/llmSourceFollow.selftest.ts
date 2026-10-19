@@ -13,6 +13,7 @@
 
 import {
   FOLLOW_DEFAULT_LLM,
+  chatFollowsGlobalLlm,
   normalizeLlmType,
   presetFollowsDefaultLlm,
   resolvePresetLlmType,
@@ -63,6 +64,21 @@ export function runLlmSourceFollowSelfTest(): LlmSourceFollowCase[] {
   // 4. 哨兵值不得被当成来源键（曾担心它被写进预设再传给 resolveLlmSource）
   add('哨兵：normalizeLlmType 不认识它（故仅限界面使用）',
     normalizeLlmType(FOLLOW_DEFAULT_LLM) === FOLLOW_DEFAULT_LLM)
+
+  // 5. 聊天级显式覆盖：跟随默认的预设仍允许在右上角单独选来源 / 模型
+  //    （未手动选过 = 跟随全局；旧存档没有 llmPinned 也要继续跟随，不能被存档旧值钉住）
+  add('聊天：跟随默认 + 未手动选过 → 跟随全局',
+    chatFollowsGlobalLlm({ llmType: '' }, { llmType: 'deepseek', model: 'deepseek-chat' }) === true)
+  add('聊天：跟随默认 + 旧存档（无 llmPinned）→ 仍跟随全局',
+    chatFollowsGlobalLlm({ llmType: '' }, { llmType: 'ollama', model: 'qwen3' }) === true)
+  add('聊天：跟随默认 + 右上角手动选过 → 用聊天覆盖',
+    chatFollowsGlobalLlm({ llmType: '' }, { llmType: 'openai', model: 'gpt-4o', llmPinned: true }) === false)
+  add('聊天：绑定来源的预设不受 llmPinned 影响',
+    chatFollowsGlobalLlm({ llmType: 'openai' }, { llmPinned: false }) === false
+    && chatFollowsGlobalLlm({ llmType: 'openai' }, {}) === false)
+  add('聊天：null 预设不跟随；跟随预设缺配置按「未手动选」处理',
+    chatFollowsGlobalLlm(null, {}) === false
+    && chatFollowsGlobalLlm({ llmType: '' }, null) === true)
 
   return cases
 }

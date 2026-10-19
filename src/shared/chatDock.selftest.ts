@@ -22,9 +22,12 @@ import {
   closeDockTab,
   createDockTab,
   defaultDockState,
+  dockFileNameOf,
   dockTabTitle,
   normalizeDockState,
+  openFileDockTab,
   setDockOpen,
+  setDockTabView,
   setDockWidth,
   type ChatDockState,
 } from './chatDock'
@@ -190,6 +193,49 @@ export function runChatDockSelfTest(): ChatDockCase[] {
     add('命名：两个终端带序号', dockTabTitle(terminals[1], two.tabs, true) === '终端 2', dockTabTitle(terminals[1], two.tabs, true))
     const custom: ChatDockState = { ...s, tabs: [{ id: 'c', kind: 'browser', title: '预览' }], activeTabId: 'c' }
     add('命名：自定义名优先', dockTabTitle(custom.tabs[0], custom.tabs, true) === '预览')
+  }
+
+  // 10. 文件标签（home 右侧栏点击文件树里的文件后生成）
+  {
+    add('文件名：取路径最后一段', dockFileNameOf('D:\\notes\\a.md') === 'a.md' && dockFileNameOf('/home/u/b.txt') === 'b.txt')
+
+    const s0 = defaultDockState()
+    const s1 = openFileDockTab(s0, 'D:\\notes\\a.md', 'read', 8000)
+    add('文件标签：新建并自动展开 / 切过去', s1.open === true && s1.tabs.length === 1 && s1.tabs[0].kind === 'file')
+    add('文件标签：保存路径与视图', s1.tabs[0].path === 'D:\\notes\\a.md' && s1.tabs[0].view === 'read')
+    add('文件标签：标题 = 文件名', dockTabTitle(s1.tabs[0], s1.tabs, true) === 'a.md')
+    add('文件标签：不原地修改原状态', s0.tabs.length === 0)
+
+    // 同一文件再次打开：复用标签并更新视图，不新增
+    const s2 = openFileDockTab(s1, 'D:\\notes\\a.md', 'edit', 8001)
+    add('文件标签：同路径复用（不重复开）', s2.tabs.length === 1 && s2.tabs[0].view === 'edit', JSON.stringify(s2.tabs))
+
+    // 不同文件：追加
+    const s3 = openFileDockTab(s2, 'D:\\notes\\b.md', undefined, 8002)
+    add('文件标签：不同路径追加标签', s3.tabs.length === 2 && s3.activeTabId === s3.tabs[1].id)
+    add('文件标签：空路径不新增', openFileDockTab(s3, '   ').tabs.length === 2)
+
+    // 切视图写回
+    const s4 = setDockTabView(s3, s3.tabs[1].id, 'mindmap')
+    add('文件标签：切换视图写回标签', s4.tabs[1].view === 'mindmap', String(s4.tabs[1].view))
+    add('文件标签：同视图返回原对象', setDockTabView(s4, s4.tabs[1].id, 'mindmap') === s4)
+
+    // 归一化：file 标签必须有路径，同路径去重
+    const dirtyFile = normalizeDockState({
+      open: true,
+      tabs: [
+        { id: 'f1', kind: 'file', path: 'D:\\a.md', view: 'read' },
+        { id: 'f2', kind: 'file', path: 'D:\\a.md', view: 'edit' },
+        { id: 'f3', kind: 'file' },
+        { id: 't1', kind: 'terminal' },
+      ],
+    })
+    add('文件标签：归一化丢掉无路径 / 同路径重复', dirtyFile.tabs.map((t) => t.id).join(',') === 'f1,t1', dirtyFile.tabs.map((t) => t.id).join(','))
+    add('文件标签：归一化保留路径与视图', dirtyFile.tabs[0].path === 'D:\\a.md' && dirtyFile.tabs[0].view === 'read')
+
+    // 关掉文件标签后回落到相邻标签
+    const closed = closeDockTab({ ...s3, activeTabId: s3.tabs[1].id }, s3.tabs[1].id)
+    add('文件标签：关掉当前文件标签 → 落到左邻', closed.tabs.length === 1 && closed.activeTabId === closed.tabs[0].id)
   }
 
   return cases

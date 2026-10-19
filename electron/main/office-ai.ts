@@ -47,8 +47,16 @@ const state = {
   /** 渲染层推送的界面环境（编辑器要跟随宿主主题与语言） */
   locale: 'zh-CN',
   dark: nativeTheme.shouldUseDarkColors,
-  /** 编辑器内的 AI 面板偏好（上游会读；我们原样存取） */
-  aiPanelPrefs: {} as Record<string, unknown>,
+  /**
+   * 编辑器内的 AI 面板偏好（上游会读；这里原样存取，只把「默认展开」改成「默认收起」）。
+   *
+   * `openInNewDocs: false` —— 打开 Word / Excel / PPT 时左侧 AI 面板默认是**收起**的。
+   * 上游的默认值是 true，且会叠加 localStorage 里记住的上次状态（`aiPanelInitiallyOpen()`），
+   * 于是每个新文档一打开就把左侧一大块宽度交给 AI 面板；而 AI-KM 的文件窗口本身还有
+   * 标签栏 / 工具栏，正文区被挤得很窄。置 false 后上游的 `aiPanelInitiallyOpen()` 恒为收起，
+   * 用户仍可随时点 AI 入口展开，只是不再记住「上次是展开的」。
+   */
+  aiPanelPrefs: { openInNewDocs: false } as Record<string, unknown>,
   /** 进行中的流：requestId → 中止句柄 */
   streams: new Map<string, { abort: AbortController; sender: WebContents }>(),
   initialized: false,

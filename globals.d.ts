@@ -1,7 +1,6 @@
-// Electron adds a non-standard `path` property to File objects from drag-and-drop
-interface File {
-  path: string
-}
+// ⚠️ 不要再给 File 增补非标准的 `path` 属性：Electron 32 起 Chromium 已移除它，
+// 本项目运行在 Electron 42 上，拖入 / 选择的 File 只有文件名。
+// 取真实路径一律用 `src/platform/droppedFile.ts` 的 `droppedFilePath(file)`（preload 的 webUtils）。
 
 /**
  * 命名空间 IPC（preload 里的 `dsh` 对象）的形状。

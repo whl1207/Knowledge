@@ -1371,6 +1371,7 @@ import { createDragGuard } from '@/utils/clickGuard'
 import { deepSeekApiStyle, normalizeLlmType } from '@/shared/llmSources'
 import { AGENT_MAX_STEPS_MAX } from '@/shared/agent-loop-rounds'
 import { getPlatform, hasCapability } from '@/platform'
+import { droppedFilePath } from '@/platform/droppedFile'
 
 const store = usestore()
 const en = () => store.locales === 'en'
@@ -4154,12 +4155,14 @@ const handleDataFileImport = async (event: Event) => {
   tableLoading.value = true
   try {
     const file = input.files[0]
-    // 记录源表格路径（Electron 下 File.path 可用；浏览器环境只有文件名）
+    // 记录源表格路径（Electron 下经 preload 的 webUtils 取真实路径；
+    // Electron 32 起 File.path 已被移除，浏览器环境只有文件名）
     // 注意：先记下「上次的源表格路径」——同一个文件再次导入 = 重读（替换行 + 按指纹重挂结果），
     // 若改成追加，行数会翻倍（老行 + 新行），后面的增量对位就全乱了。
     const prevSourcePath = sourceTablePath.value
-    const sameSource = !!prevSourcePath && !!file.path && prevSourcePath === file.path && rows.value.length > 0
-    sourceTablePath.value = file.path || ''
+    const filePath = droppedFilePath(file)
+    const sameSource = !!prevSourcePath && !!filePath && prevSourcePath === filePath && rows.value.length > 0
+    sourceTablePath.value = filePath
     sourceTableName.value = file.name || ''
     let newRows: BatchRow[] = []
     if (sourceTablePath.value) {

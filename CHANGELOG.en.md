@@ -18,12 +18,15 @@
 - **Plugins can subscribe to observability events that belong to them**: calls to their own tools and output from delegations they started (including streaming deltas) are delivered to them, and other sessions and tools no longer leak in.
 - **The delegated agent's working directory can be chosen**: the plugin permissions page gains a working-directory dropdown (default: knowledge-base root) whose options are only the writable folders the user granted; relative paths resolve against it and writes stay inside it.
 - **New Settings → Tools → Fetch page**: `web_fetch`'s direct fetch / DeepSeek Fetch / virtual browser can each be toggled and dragged into a fallback order, with a URL box to test the chain.
+- **TTS can use a Qwen3-TTS deployed on GPUStack over the LAN**: Qwen3-TTS gains a Deployment choice — enter the GPUStack URL and API key and pick the model, and playback / audio export go through its OpenAI-compatible endpoint instead of a local service.
+- **Every associated file type now has its own icon**: PDF, Markdown, code, spreadsheets and the rest show distinct colours and labels in Explorer instead of the app icon; types already associated are switched over on startup, and the settings list shows each type's icon.
 
 ### Changed
 
 - **The DeepSeek search source now uses the official Search API**: one request returns structured results (no model turn), billed per successful request, also available on mobile / web, with an option to include page content in the results.
 - **The Knowledge Processing icon is now "layers"**: the old icon was Stack Overflow's brand logo and had nothing to do with the module.
 - **Shortcut-related hints now point to Settings → Models → ASR**: they still said the removed Settings → Speech → ASR, so following them led nowhere.
+- **Home chat-list order and sorting moved to a context menu**: right-click the list (blank area or a chat row) to switch between sequence and workspace grouping and to sort by last generated (default) or creation time; the toolbar toggle is gone, each row's timestamp follows the chosen basis, and a chat row's menu still ends with Delete Chat.
 
 ### Improved
 
@@ -33,6 +36,10 @@
 
 ### Fixed
 
+- **The model picker in Home no longer goes blank when an agent preset follows the default**: the source and model show the current global values, sending works, and a manual pick in the chat header stays with that chat.
+- **Agent / swarm modes now pass attachment paths only**: dropped Word / Excel / Markdown files no longer put their full text into the prompt; the model reads them on demand with file tools.
+- **The file-view child window now notices on-disk changes**: after an external edit, the status bar shows "File changed · Reload" and one click refreshes it instead of silently swapping the content.
+- **Dropping Word / Excel / Markdown into Home no longer reports "Failed to read"**: files lost their disk path after the runtime upgrade, so the real path is now retrieved through preload; Excel files can also be picked from the attach button.
 - **The speech shortcut was wrongly reported as an invalid key when only a file window was open**: with a file-association launch (no main window) the push-to-talk shortcut now registers and goes to the focused window.
 
 ## 2026-10-18

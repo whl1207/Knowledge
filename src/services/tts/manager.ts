@@ -2,12 +2,28 @@
 
 import { ElMessage } from 'element-plus'
 import { getPlatform, hasCapability } from '@/platform'
-import { qwen3Synthesize, qwen3ListVoices, resolveQwen3Transport, QWEN3_REFERENCE_VOICE, type Qwen3RequestConfig } from '@/services/tts/qwen3'
+import { qwen3Synthesize, qwen3ListVoices, resolveQwen3Transport, QWEN3_REFERENCE_VOICE, gpustackListModels, gpustackListVoices, type Qwen3RequestConfig } from '@/services/tts/qwen3'
 
 // TTS 配置（store 的 tts 对象）→ Qwen3 客户端参数
 function qwen3ConfigFrom(ttsConfig: any, timeoutMs: number): Qwen3RequestConfig {
     const q = ttsConfig?.qwen3 || {};
+    const gs = q.gpustack || {};
+    // GPUStack：地址 / 密钥 / 模型 / 音色都取 gpustack 子配置，不覆盖本地的 Qwen3-TTS 设置
+    if (q.deploy === 'gpustack') {
+        return {
+            deploy: 'gpustack',
+            base: gs.url || '',
+            apiKey: gs.apiKey,
+            model: gs.model,
+            voice: gs.voice,
+            lang: gs.lang || 'Auto',
+            responseFormat: gs.responseFormat,
+            speed: gs.speed ?? q.speed ?? ttsConfig?.rate,
+            timeoutMs,
+        };
+    }
     return {
+        deploy: 'local',
         base: ttsConfig?.url || '',
         protocol: q.protocol,
         voice: ttsConfig?.voice,
@@ -34,6 +50,7 @@ class AudioQueue {
     private nativeSpeaking = false; // 是否正在用宿主原生语音朗读（安卓系统 TTS）
     private lastHandledErrorIndex: number | null = null; // 防止同一错误被双触发重复消费队列
     private playingIndex: number | null = null; // 当前正在加载/播放的音频序号（onended/onerror 使用）
+    private qwen3ErrorShown = false; // Qwen3-TTS 合成失败只提示一次（避免逐句弹窗）
 
     constructor(ttsConfig: any, onStateChange?: (state: any) => void) {
         this.ttsConfig = ttsConfig;
@@ -628,10 +645,19 @@ class AudioQueue {
         return qwen3ConfigFrom(this.ttsConfig, timeoutMs);
     }
 
-    // 获取 Qwen3-TTS 音频（Gradio /do_job 或直连接口一次 POST，见 services/tts/qwen3.ts）
+    // 获取 Qwen3-TTS 音频（本地：Gradio /do_job 或直连接口；GPUStack：OpenAI 兼容 /audio/speech）
     private async fetchQwen3TTSAudio(text: string, index: number): Promise<string | null> {
-        if (!this.ttsConfig.url) {
-            console.error("[Qwen3-TTS] TTS URL 未配置");
+        const q = this.ttsConfig.qwen3 || {}
+        const isGpuStack = q.deploy === 'gpustack'
+        const url = isGpuStack ? String(q.gpustack?.url || '') : String(this.ttsConfig.url || '')
+        if (!url) {
+            console.error(`[Qwen3-TTS] ${isGpuStack ? 'GPUStack' : 'TTS'} 服务地址未配置`);
+            if (!this.qwen3ErrorShown) {
+                this.qwen3ErrorShown = true
+                ElMessage.error(isGpuStack
+                    ? '请先在「设置 → 语音」里填写 GPUStack 服务地址'
+                    : '请先在「设置 → 语音」里填写 Qwen3-TTS 服务地址')
+            }
             return null;
         }
         const startTime = Date.now();
@@ -641,8 +667,14 @@ class AudioQueue {
             console.log(`[Qwen3-TTS] 合成完成 (${index})，耗时 ${Date.now() - startTime}ms，${res.transport} · ${res.mime} · ${res.buffer.byteLength} bytes`);
             return URL.createObjectURL(new Blob([res.buffer], { type: res.mime || 'audio/wav' }));
         } catch (error: any) {
-            console.error(`[Qwen3-TTS] 获取音频失败 (${index}):`, error?.message || error);
-            console.error('[Qwen3-TTS] 请检查：1) 服务是否启动（Gradio 7862 / 直连接口 9880）2) 服务地址是否正确 3) 是否已在设置里选择音色');
+            const msg = error?.message || String(error)
+            console.error(`[Qwen3-TTS] 获取音频失败 (${index}):`, msg);
+            console.error('[Qwen3-TTS] 请检查：1) 服务是否启动 / 地址是否正确 2) 是否已在设置里选择模型与音色 3) GPUStack 的 API 密钥');
+            // 逐句合成会把同一个错误重复很多次：每轮播放只提示一次，其余留给控制台
+            if (!this.qwen3ErrorShown) {
+                this.qwen3ErrorShown = true
+                ElMessage.error(`语音合成失败：${msg}`)
+            }
             return null;
         }
     }
@@ -925,13 +957,15 @@ export class TTSManager {
         }
     }
 
-    // 测试 Qwen3-TTS 连接：探测接口类型（Gradio /do_job 或直连接口），顺带拉一次音色列表
+    // 测试 Qwen3-TTS 连接：本地探测接口类型（Gradio /do_job 或直连接口）；GPUStack 拉模型 + 音色列表
     async testQwen3TTSConnection(): Promise<{
         success: boolean;
         message: string;
         details?: any;
     }> {
         console.log(`[TTSManager] 测试Qwen3-TTS连接`);
+        const q = this.ttsConfig.qwen3 || {}
+        if (q.deploy === 'gpustack') return this.testGpuStackConnection(q.gpustack || {})
         if (!this.ttsConfig.url) {
             return {
                 success: false,
@@ -979,6 +1013,54 @@ export class TTSManager {
                 message: `连接失败：${message}`,
                 details: { error: String(error) }
             };
+        }
+    }
+
+    // GPUStack 连接测试：列模型（必选）+ 拉音色（可选，失败不影响连接结论）
+    private async testGpuStackConnection(gs: any): Promise<{
+        success: boolean;
+        message: string;
+        details?: any;
+    }> {
+        const url = String(gs?.url || '').trim()
+        if (!url) {
+            return { success: false, message: 'GPUStack 服务地址未配置（形如 http://192.168.1.10:8080）' }
+        }
+        try {
+            const listed = await gpustackListModels({ base: url, apiKey: gs?.apiKey })
+            const model = String(gs?.model || '').trim()
+            let voices: string[] = []
+            let voiceError = ''
+            if (model) {
+                try {
+                    voices = (await gpustackListVoices({ base: url, apiKey: gs?.apiKey, model })).items
+                } catch (e: any) {
+                    voiceError = e?.message || String(e)
+                }
+            }
+            const parts = ['连接成功 · GPUStack', `地址 ${listed.root}`, `${listed.items.length} 个模型`]
+            parts.push(model ? `当前模型 ${model}` : '尚未选择模型（请点「刷新模型」）')
+            if (voices.length) parts.push(`${voices.length} 个音色`)
+            if (voiceError) parts.push(`音色列表不可用：${voiceError.slice(0, 100)}`)
+            return {
+                success: true,
+                message: parts.join(' · '),
+                details: {
+                    transport: 'gpustack',
+                    base: listed.root,
+                    models: listed.items,
+                    model: model || undefined,
+                    voices,
+                    voiceError: voiceError || undefined,
+                }
+            }
+        } catch (error: any) {
+            console.error("[TTSManager] GPUStack 连接测试失败:", error)
+            return {
+                success: false,
+                message: `连接失败：${error?.message || String(error)}`,
+                details: { transport: 'gpustack', error: String(error) }
+            }
         }
     }
 
@@ -1065,7 +1147,9 @@ export class TTSManager {
 
     // 直接获取Qwen3-TTS音频（调试用：与播放队列同一条合成路径）
     private async fetchQwen3TTSAudioDirectly(text: string): Promise<string | null> {
-        if (!this.ttsConfig.url) return null;
+        const q = this.ttsConfig.qwen3 || {}
+        const url = q.deploy === 'gpustack' ? String(q.gpustack?.url || '') : String(this.ttsConfig.url || '')
+        if (!url) return null;
         try {
             const res = await qwen3Synthesize(qwen3ConfigFrom(this.ttsConfig, 180000), text);
             return URL.createObjectURL(new Blob([res.buffer], { type: res.mime || 'audio/wav' }));

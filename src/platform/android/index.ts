@@ -755,8 +755,33 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
       return r.success ? { ok: true, path: r.path } : { ok: false, error: r.error }
     },
 
-    async saveRemoteDownload() {
-      return { success: false, error: 'not-supported' }
+    /**
+     * 保存「远程工作区」下载的二进制内容到本地目录。
+     *
+     * 安卓没有桌面那样的主进程写盘：数据在前端已经是字节数组，这里直接转 base64，
+     * 复用与本地写盘完全相同的适配器（`fs.writeFile`），因此：
+     *  - 工作区在应用 Documents / 私有 data: 目录 → Capacitor Filesystem 写入；
+     *  - 工作区是 SAF 授权目录（`saf:<根名>/…`）→ 原生 SAF 插件写入。
+     * 父目录不存在时先递归创建（下载到新建子目录也能落盘）。
+     */
+    async saveRemoteDownload({ dir, name, data }) {
+      if (!String(name || '').trim()) return { success: false, error: '文件名无效' }
+      const target = joinRel(dir, name)
+      const rel = toRelativePath(target)
+      if (rel === null) return { success: false, error: '路径非法' }
+      if (!Array.isArray(data)) return { success: false, error: '内容无效' }
+      try {
+        const parent = parentOf(rel)
+        // `saf:` / `data:` 本身就是根：不要再对空前缀做 mkdir
+        if (parent && parent !== 'saf:' && parent !== 'data:') {
+          await fs.mkdir({ path: parent, directory: DOCS, recursive: true })
+        }
+        // 不传 encoding = 二进制写（两个后端都按 base64 解码后落盘）
+        await write(rel, bytesToBase64(new Uint8Array(data)))
+        return { success: true, path: rel }
+      } catch (e: any) {
+        return { success: false, error: String(e?.message || e) }
+      }
     },
 
     async setDownloadDirHint() { /* 下载目录由系统/浏览器管理 */ },
@@ -781,6 +806,8 @@ function capabilitiesOf(): PlatformCapabilities {
   const modes: Partial<Record<CapabilityId, CapabilityMode>> = {
     'fs.pathRead': 'local',
     'fs.pathWrite': 'local',
+    /** 远程工作区下载：写入当前工作区（Documents / data: / SAF 授权目录） */
+    'fs.remoteSave': 'local',
     /** 选文件夹（SAF）可用：应用据此打开用户自己的目录作为工作区 */
     'dialog.native': 'local',
     /** 用其它应用打开（Intent ACTION_VIEW，无可用应用时退化为分享面板） */

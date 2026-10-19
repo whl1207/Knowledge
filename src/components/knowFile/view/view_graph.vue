@@ -151,8 +151,8 @@ import { getPlatform, hasCapability } from '@/platform'
   
   // 打开节点（文件/文件夹）：与文件树面板（panel.vue）双击一致，
   // 文件统一交给 store.openFileByMode 调度——按「设置 → 文件操作」的打开方式打开，
-  // 并统一处理特殊类型（.kb → 知识处理、.task → Agent脚手架、.html → 内置浏览器、
-  // .flow / .data / .excalidraw / .drawio 走各自的文件视图、可执行与压缩包交系统应用），
+  // 并统一处理特殊类型（.kb → 知识处理、.task → Agent脚手架、
+  // .html / .flow / .data / .excalidraw / .drawio 走各自的文件视图、可执行与压缩包交系统应用），
   // 不再按扩展名分流到系统默认应用。
   const openNode = function(d: any) {
     if (!d.path) return

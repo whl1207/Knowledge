@@ -13,9 +13,16 @@
 //
 // 语言取值必须落在服务端的词表里（auto/chinese/english/...）。旧版本传 'zh' 会被服务端
 // 直接 500（ValueError: Unsupported languages: ['zh']），所以这里统一做映射，只发英文名。
+//
+// ③ GPUStack（局域网部署的 Qwen3-TTS）—— OpenAI 兼容接口：
+//    POST /v1-openai/audio/speech  {"model":"qwen3-tts","input":"...","voice":"...","response_format":"wav","speed":1}
+//    GET  /v1-openai/models         列出可用模型（GPUStack 的 /v1/models 是管理接口，不是这个）
+//    GET  /v1-openai/audio/voices?model=…   音色列表（部分后端没有，失败时前端回退成手动填写）
+//    新版 GPUStack 同时接受 /v1 作为别名，所以先试 /v1-openai，再回退 /v1。
 
 export type Qwen3Protocol = 'auto' | 'gradio' | 'api'
-export type Qwen3Transport = 'gradio' | 'api'
+export type Qwen3Deploy = 'local' | 'gpustack'
+export type Qwen3Transport = 'gradio' | 'api' | 'gpustack'
 export type Qwen3ModelType = '0.6B' | '1.7B'
 
 /** 语言下拉（值 = 服务端词表里的英文名，大小写不敏感；Gradio 用首字母大写） */
@@ -65,9 +72,17 @@ export function qwen3ApiLang(raw?: string): string {
 }
 
 export interface Qwen3RequestConfig {
-  /** 服务地址：Gradio(7862) 或直连接口(9880) 的根地址，可带 /gradio_api 或尾斜杠 */
+  /** 接入方式：local=本地/自建 Qwen3-TTS-AllinOne；gpustack=GPUStack 的 OpenAI 兼容接口 */
+  deploy?: Qwen3Deploy
+  /** 服务地址：本地是 Gradio(7862) / 直连接口(9880) 的根地址；GPUStack 是它的服务根地址 */
   base: string
   protocol?: Qwen3Protocol
+  /** GPUStack 的 API Key（Bearer；没开鉴权就留空） */
+  apiKey?: string
+  /** GPUStack 里部署的模型名（如 qwen3-tts） */
+  model?: string
+  /** GPUStack 返回的音频格式：wav / mp3 / opus / aac / flac / pcm */
+  responseFormat?: string
   /** 音色名（= 服务端 voices 目录里的文件名，如「珊瑚」） */
   voice?: string
   /** 语言：Auto / Chinese / …（大小写、zh 等别名都能识别） */
@@ -399,7 +414,13 @@ export async function qwen3ListVoices(cfg: Pick<Qwen3RequestConfig, 'base' | 'pr
  * auto：能找到 Gradio（/do_job）就用它 —— 网页服务的队列最稳，长时间合成也不会把探测卡住；
  *       找不到 Gradio 才用直连接口（一次 POST）。两者都没有就抛错。
  */
-export async function resolveQwen3Transport(cfg: Pick<Qwen3RequestConfig, 'base' | 'protocol' | 'timeoutMs'>): Promise<Qwen3Resolved> {
+export async function resolveQwen3Transport(cfg: Pick<Qwen3RequestConfig, 'base' | 'protocol' | 'timeoutMs' | 'deploy'>): Promise<Qwen3Resolved> {
+  // GPUStack：固定走 OpenAI 兼容接口，不做 Gradio 探测
+  if (cfg.deploy === 'gpustack') {
+    const base = normalizeGpuStackBase(cfg.base)
+    if (!base) throw new Error('未配置 GPUStack 服务地址（形如 http://192.168.1.10:8080）')
+    return { transport: 'gpustack', base, gradioBase: '', cached: false }
+  }
   const base = normalizeQwen3Base(cfg.base)
   if (!base) throw new Error('未配置服务地址（形如 http://127.0.0.1:7862）')
   const key = `${cfg.protocol || 'auto'}|${base}`
@@ -459,6 +480,152 @@ function qwen3PortRank(url: string): number {
 export function resetQwen3Cache(): void {
   PREFIX_CACHE.clear()
   RESOLVE_CACHE.clear()
+}
+
+// ============ GPUStack（局域网部署的 Qwen3-TTS，OpenAI 兼容接口） ============
+
+const GS_API_SUFFIX = /\/(v1-openai|v1)\/(audio\/(speech|voices)|models)\/?$/i
+
+/** 规范化 GPUStack 地址：容忍粘贴完整接口地址（含 /v1-openai/audio/speech、/v1、尾斜杠） */
+export function normalizeGpuStackBase(url: string): string {
+  let u = String(url || '').trim()
+  if (!u) return ''
+  if (!/^https?:\/\//i.test(u)) u = `http://${u}`
+  try {
+    const parsed = new URL(u)
+    let path = (parsed.pathname || '/').replace(/\/+$/, '')
+    path = path.replace(GS_API_SUFFIX, '')
+    path = path.replace(/\/audio\/(speech|voices)$/i, '')
+    path = path.replace(/\/(v1-openai|v1)$/i, '')
+    return parsed.origin + path
+  } catch {
+    return u.replace(/\/+$/, '')
+  }
+}
+
+/** GPUStack 的 OpenAI 兼容根：/v1-openai 为主路径，/v1 是它的别名（也兼容其它 OpenAI 实现） */
+export function gpuStackApiRoots(url: string): string[] {
+  const base = normalizeGpuStackBase(url)
+  if (!base) return []
+  return [`${base}/v1-openai`, `${base}/v1`]
+}
+
+function gpuStackHeaders(apiKey?: string, json = false): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (json) headers['Content-Type'] = 'application/json'
+  const key = String(apiKey || '').trim()
+  if (key) headers['Authorization'] = `Bearer ${key}`
+  return headers
+}
+
+export interface GpuStackListResult {
+  items: string[]
+  /** 实际可用的根地址（形如 http://host:port/v1-openai） */
+  root: string
+}
+
+/** 兼容 OpenAI（data[].id）、GPUStack 管理接口（items[].name）与纯字符串数组 */
+function parseModelIds(json: any): string[] {
+  const list = Array.isArray(json?.data) ? json.data
+    : Array.isArray(json?.models) ? json.models
+      : Array.isArray(json?.items) ? json.items
+        : Array.isArray(json) ? json
+          : []
+  const out: string[] = []
+  for (const item of list) {
+    const id = typeof item === 'string' ? item : (item?.id || item?.name || item?.model_name || '')
+    if (id) out.push(String(id))
+  }
+  return Array.from(new Set(out))
+}
+
+/** 兼容 voices / data / 纯数组，元素可为字符串或 {voice|voice_id|id|name} */
+function parseVoiceIds(json: any): string[] {
+  const list = Array.isArray(json?.voices) ? json.voices
+    : Array.isArray(json?.data) ? json.data
+      : Array.isArray(json) ? json
+        : []
+  const out: string[] = []
+  for (const item of list) {
+    if (typeof item === 'string') out.push(item)
+    else if (item && typeof item === 'object') {
+      const v = item.voice || item.voice_id || item.id || item.name
+      if (v) out.push(String(v))
+    }
+  }
+  return Array.from(new Set(out))
+}
+
+function errorDetailOf(raw: string): string {
+  const text = (raw || '').trim()
+  if (!text) return ''
+  try {
+    const json: any = JSON.parse(text)
+    return String(json?.error?.message || json?.error || json?.detail || json?.message || text).slice(0, 200)
+  } catch {
+    // 可能是一整页 HTML（贴错地址），只留开头
+    return text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
+  }
+}
+
+/** 列出 GPUStack 上的模型（用于下拉选择 TTS 模型） */
+export async function gpustackListModels(cfg: { base: string; apiKey?: string; timeoutMs?: number }): Promise<GpuStackListResult> {
+  const timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : 15_000
+  const roots = gpuStackApiRoots(cfg.base)
+  if (!roots.length) throw new Error('未配置 GPUStack 服务地址（形如 http://192.168.1.10:8080）')
+  const tried: string[] = []
+  let lastError: any = null
+  for (const root of roots) {
+    try {
+      const res = await fetchWithTimeout(`${root}/models`, { headers: gpuStackHeaders(cfg.apiKey) }, timeoutMs)
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '')
+        const hint = res.status === 401 || res.status === 403
+          ? '（API 密钥无效或无权限，请核对 GPUStack 的 API Key）'
+          : ''
+        lastError = new Error(`HTTP ${res.status}${hint}${detail ? ` - ${errorDetailOf(detail)}` : ''}`)
+        tried.push(`${root} → ${lastError.message}`)
+        continue
+      }
+      const json: any = await res.json().catch(() => null)
+      const items = parseModelIds(json)
+      if (!items.length) throw new Error('服务返回的模型列表为空（请先在 GPUStack 里部署 TTS 模型）')
+      return { items, root }
+    } catch (e: any) {
+      lastError = e
+      tried.push(`${root} → ${e?.message || String(e)}`)
+    }
+  }
+  throw new Error(`无法获取 GPUStack 模型列表：${lastError?.message || '未知错误'}（试过 ${tried.join(' / ')}）`)
+}
+
+/** 列出某个 TTS 模型的音色（部分后端不提供该接口，调用方应允许手动填写） */
+export async function gpustackListVoices(cfg: { base: string; apiKey?: string; model?: string; timeoutMs?: number }): Promise<GpuStackListResult> {
+  const timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : 15_000
+  const roots = gpuStackApiRoots(cfg.base)
+  if (!roots.length) throw new Error('未配置 GPUStack 服务地址（形如 http://192.168.1.10:8080）')
+  const model = String(cfg.model || '').trim()
+  const qs = model ? `?model=${encodeURIComponent(model)}` : ''
+  const tried: string[] = []
+  let lastError: any = null
+  for (const root of roots) {
+    try {
+      const res = await fetchWithTimeout(`${root}/audio/voices${qs}`, { headers: gpuStackHeaders(cfg.apiKey) }, timeoutMs)
+      if (!res.ok) {
+        lastError = new Error(`HTTP ${res.status}`)
+        tried.push(`${root} → HTTP ${res.status}`)
+        continue
+      }
+      const json: any = await res.json().catch(() => null)
+      const items = parseVoiceIds(json)
+      if (!items.length) throw new Error('服务返回的音色列表为空')
+      return { items, root }
+    } catch (e: any) {
+      lastError = e
+      tried.push(`${root} → ${e?.message || String(e)}`)
+    }
+  }
+  throw new Error(`该服务没有可用的音色列表接口（可直接手动填写音色名）：${lastError?.message || ''}${tried.length ? `（试过 ${tried.join(' / ')}）` : ''}`)
 }
 
 // ============ 合成 ============
@@ -555,6 +722,90 @@ async function synthesizeViaApi(cfg: Qwen3RequestConfig, base: string, text: str
   return { buffer, mime: mime || 'audio/wav', format: mimeToFormat(mime || 'audio/wav'), transport: 'api', base, voice, lang }
 }
 
+const GS_FORMATS = ['wav', 'mp3', 'opus', 'aac', 'flac', 'pcm']
+
+function normalizeResponseFormat(v: any): string {
+  const f = String(v || '').trim().toLowerCase()
+  return GS_FORMATS.includes(f) ? f : 'wav'
+}
+
+function formatToMime(fmt: string): string {
+  switch (fmt) {
+    case 'mp3': return 'audio/mpeg'
+    case 'opus': return 'audio/ogg'
+    case 'aac': return 'audio/aac'
+    case 'flac': return 'audio/flac'
+    case 'pcm': return 'audio/L16'
+    default: return 'audio/wav'
+  }
+}
+
+/**
+ * GPUStack 合成：一次 POST /audio/speech 直接拿音频。
+ * /v1-openai 优先，404/405 时回退 /v1（GPUStack 的别名，也兼容其它 OpenAI 实现）。
+ */
+async function synthesizeViaGpuStack(cfg: Qwen3RequestConfig, text: string): Promise<Qwen3SynthesisResult> {
+  const timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : 180_000
+  const base = normalizeGpuStackBase(cfg.base)
+  const roots = gpuStackApiRoots(cfg.base)
+  if (!base || !roots.length) throw new Error('未配置 GPUStack 服务地址（形如 http://192.168.1.10:8080）')
+  const model = String(cfg.model || '').trim()
+  if (!model) {
+    throw new Error('请先填写 GPUStack 里部署的 TTS 模型名称（如 qwen3-tts；可点「刷新模型」从服务端列表选择）')
+  }
+  const voice = String(cfg.voice || '').trim()
+  const fmt = normalizeResponseFormat(cfg.responseFormat)
+  const body: Record<string, any> = {
+    model,
+    input: text,
+    response_format: fmt,
+    speed: clampNumber(cfg.speed, 0.25, 4, 1.0),
+  }
+  // 有些 TTS 模型没有音色概念：不填就不发 voice 字段，让服务端用默认音色
+  if (voice) body.voice = voice
+  // 语言是 vLLM-Omni / Qwen3-TTS 的扩展参数：只有显式选定才发（Auto = 让服务端自动识别）
+  const lang = normalizeQwen3Lang(cfg.lang)
+  if (lang && lang !== 'Auto') body.language = lang
+
+  const tried: string[] = []
+  for (const root of roots) {
+    const res = await fetchWithTimeout(`${root}/audio/speech`, {
+      method: 'POST',
+      headers: { ...gpuStackHeaders(cfg.apiKey, true), Accept: 'audio/*' },
+      body: JSON.stringify(body),
+    }, timeoutMs)
+    if (res.status === 404 || res.status === 405) {
+      const detail = await res.text().catch(() => '')
+      tried.push(`${root} → HTTP ${res.status}${detail ? `（${errorDetailOf(detail)}）` : ''}`)
+      continue
+    }
+    const mime = (res.headers.get('content-type') || '').toLowerCase()
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`GPUStack 拒绝访问（HTTP ${res.status}）：请检查 API 密钥${detail ? `（${errorDetailOf(detail)}）` : ''}`)
+      }
+      // 4xx 常见于模型名不存在 / 音色名不被该模型接受；5xx 多是显存或后端异常
+      const hint = res.status >= 500
+        ? '（常见原因：模型还在加载、显存不足或后端异常）'
+        : '（请核对模型名称，以及该模型是否接受这个音色）'
+      throw new Error(`GPUStack 合成失败: HTTP ${res.status}${detail ? ` - ${errorDetailOf(detail)}` : ''}${hint}`)
+    }
+    if (mime.includes('application/json')) {
+      const json: any = await res.json().catch(() => null)
+      const msg = json?.error?.message || json?.error || json?.detail || JSON.stringify(json || {})
+      throw new Error(`GPUStack 返回错误: ${msg}`)
+    }
+    const buffer = await res.arrayBuffer()
+    if (!buffer.byteLength) throw new Error('GPUStack 返回空音频')
+    const mimeFmt = mimeToFormat(mime)
+    const format = mimeFmt === 'audio' ? fmt : mimeFmt
+    const resolvedMime = mime && !mime.includes('octet-stream') ? mime : formatToMime(fmt)
+    return { buffer, mime: resolvedMime, format, transport: 'gpustack', base: root, voice, lang: '' }
+  }
+  throw new Error(`在 GPUStack 上找不到可用的语音接口（试过 ${tried.join(' / ')}）。请确认地址是 GPUStack 服务地址，且模型已部署为 TTS`)
+}
+
 // 合成串行链：播放队列会边播边预取下一句，而服务端是单卡串行 —— 并发提交只会顶爆显存
 // （实测并发时服务端进程可能直接退出）。这里只做「排队」，某一句失败不影响后续句子。
 let synthChain: Promise<void> = Promise.resolve()
@@ -562,7 +813,7 @@ let synthChain: Promise<void> = Promise.resolve()
 /**
  * 合成一段语音（整段一次请求）。
  * 自动模式下：配置地址是 Gradio 就走 /do_job（按手册、支持音色/分段/并行/模型），
- * 是直连接口就走一次 POST；两者都不通时抛错。
+ * 是直连接口就走一次 POST；GPUStack 走 OpenAI 兼容 /audio/speech；都不通时抛错。
  */
 export function qwen3Synthesize(cfg: Qwen3RequestConfig, text: string): Promise<Qwen3SynthesisResult> {
   const run = () => runQwen3Synthesize(cfg, text)
@@ -576,6 +827,9 @@ async function runQwen3Synthesize(cfg: Qwen3RequestConfig, text: string): Promis
   if (!cleaned) throw new Error('合成文本为空')
   const lang = normalizeQwen3Lang(cfg.lang)
   const resolved = await resolveQwen3Transport(cfg)
+  if (resolved.transport === 'gpustack') {
+    return synthesizeViaGpuStack(cfg, cleaned)
+  }
   if (resolved.transport === 'gradio') {
     return synthesizeViaGradio(cfg, resolved.base, cleaned, lang)
   }

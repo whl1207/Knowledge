@@ -18,7 +18,7 @@
       </div>
     </div>
     <!-- 聊天列表侧边栏（收起时用宽度动画滑出，不再 v-show 直接消失） -->
-    <div class="chat-sidebar" :class="{ collapsed: !showSidebar }">
+    <div class="chat-sidebar" :class="{ collapsed: !showSidebar }" @contextmenu="onChatNavContextMenu">
       <!-- 顶部工具栏：搜索 + 新建聊天 -->
       <div class="chat-toolbar">
         <!-- 搜索框（展开状态） -->
@@ -41,15 +41,6 @@
         <!-- 新建聊天按钮 -->
         <div class="chat-new-btn" @click="onToolbarNewChat" :title="store.locales == 'zh' ? '新建聊天' : 'New chat'">
           <i class="fa fa-plus"></i>
-        </div>
-        <!-- 消息排列方式：按顺序 / 按工作区分组（搜索与新建的右侧） -->
-        <div
-          class="chat-new-btn chat-order-btn"
-          :class="{ active: chatOrderMode === 'workspace' }"
-          @click="toggleChatOrderMode"
-          :title="chatOrderTitle"
-        >
-          <i class="fa" :class="chatOrderMode === 'sequence' ? 'fa-list-ul' : 'fa-object-group'"></i>
         </div>
       </div>
       <!-- 普通聊天列表（vuedraggable 支持整行拖拽调整顺序；按工作区分组时禁用拖动，改由分组头分隔）。
@@ -87,7 +78,7 @@
                 'chat-swarm': element.chat.mode === 'swarm'
               }"
               @click="openChatFromList(element.originalIndex)"
-              @contextmenu.prevent="onSidebarContextMenu($event, element.originalIndex)"
+              @contextmenu.stop="onChatNavContextMenu($event, element.originalIndex)"
             >
               <div class="chat-item-body">
                 <div class="chat-item-header">
@@ -185,7 +176,7 @@
         </select>
         <select 
           v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
-          v-model="currentChat.config.model" 
+          v-model="chatModelSelectModel"
           @click="onModelSelectRefresh"
           class="model-select"
           :disabled="!availableModels.length || isAnyExecuting"
@@ -634,12 +625,53 @@
             </div>
           </template>
         </div>
-        <!-- 侧边栏右键菜单 -->
-        <div v-if="sidebarContextMenuVisible" class="context-menu-overlay" @click="hideSidebarContextMenu" @contextmenu.prevent="hideSidebarContextMenu"></div>
-        <div v-if="sidebarContextMenuVisible" class="context-menu" :style="{ left: sidebarContextMenuPos.x + 'px', top: sidebarContextMenuPos.y + 'px' }" @mouseleave="hideSidebarContextMenu">
-          <div class="context-menu-item" @click="deleteChatFromSidebarMenu">
-            <i class="fa fa-trash"></i> {{ store.locales=='zh' ? '删除聊天' : 'Delete Chat' }}
+        <!-- 聊天列表（消息导航栏）右键菜单：排列方式 + 排序。
+             视觉复用知识管理的紧凑右键菜单（style.css 的 .knowfile-menu 变体）：12px 字号 / 24px 行高 /
+             menuColor 底 / 圆角 hover；这里用 .chat-nav-menu 承载同一套数值，避免与主页普通菜单样式互相影响。 -->
+        <div v-if="chatNavMenuVisible" class="context-menu-overlay" @click="hideChatNavMenu" @contextmenu.prevent="hideChatNavMenu"></div>
+        <div
+          v-if="chatNavMenuVisible"
+          class="context-menu chat-nav-menu"
+          :style="{ left: chatNavMenuPos.x + 'px', top: chatNavMenuPos.y + 'px' }"
+          @mouseleave="hideChatNavMenu"
+        >
+          <div class="chat-nav-section">{{ store.locales == 'zh' ? '消息排列' : 'Message order' }}</div>
+          <div class="menu-item" :class="{ current: chatOrderMode === 'sequence' }" @click="setChatOrderMode('sequence')">
+            <i class="fa fa-list-ul"></i>
+            <span class="menu-label">{{ store.locales == 'zh' ? '按顺序（可拖动）' : 'By sequence (draggable)' }}</span>
+            <i v-if="chatOrderMode === 'sequence'" class="fa fa-check chat-nav-check"></i>
           </div>
+          <div class="menu-item" :class="{ current: chatOrderMode === 'workspace' }" @click="setChatOrderMode('workspace')">
+            <i class="fa fa-object-group"></i>
+            <span class="menu-label">{{ store.locales == 'zh' ? '按工作区分组' : 'Group by workspace' }}</span>
+            <i v-if="chatOrderMode === 'workspace'" class="fa fa-check chat-nav-check"></i>
+          </div>
+          <div class="menu-divider"></div>
+          <div class="chat-nav-section">{{ store.locales == 'zh' ? '排序' : 'Sort' }}</div>
+          <div class="menu-item" :class="{ current: chatSortMode === 'last' }" @click="setChatSortMode('last')">
+            <i class="fa fa-clock-o"></i>
+            <span class="menu-label">{{ store.locales == 'zh' ? '按最后生成时间' : 'Last generated' }}</span>
+            <i v-if="chatSortMode === 'last'" class="fa fa-check chat-nav-check"></i>
+          </div>
+          <div class="menu-item" :class="{ current: chatSortMode === 'created' }" @click="setChatSortMode('created')">
+            <i class="fa fa-calendar-o"></i>
+            <span class="menu-label">{{ store.locales == 'zh' ? '按创建时间' : 'Created time' }}</span>
+            <i v-if="chatSortMode === 'created'" class="fa fa-check chat-nav-check"></i>
+          </div>
+          <!-- 拖动排序后进入的自定义顺序（不在菜单里直接选，只用来解释当前状态） -->
+          <div v-if="chatSortMode === 'manual'" class="menu-item current" @click="hideChatNavMenu">
+            <i class="fa fa-hand-pointer-o"></i>
+            <span class="menu-label">{{ store.locales == 'zh' ? '自定义顺序（拖动调整）' : 'Custom order (dragged)' }}</span>
+            <i class="fa fa-check chat-nav-check"></i>
+          </div>
+          <!-- 在具体聊天行上右键时，菜单同时带上该行的「删除聊天」（与知识管理「文件菜单里带排序」一致） -->
+          <template v-if="chatNavMenuChatIndex !== null">
+            <div class="menu-divider"></div>
+            <div class="menu-item menu-danger" @click="deleteChatFromSidebarMenu">
+              <i class="fa fa-trash"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '删除聊天' : 'Delete Chat' }}</span>
+            </div>
+          </template>
         </div>
         <!-- 分支树右键菜单 -->
         <div v-if="branchContextMenuVisible" class="context-menu-overlay" @click="hideBranchContextMenu" @contextmenu.prevent="hideBranchContextMenu"></div>
@@ -1061,7 +1093,7 @@
                 type="file" 
                 ref="fileInput"
                 @change="handleFileUpload"
-                accept="image/*,.md,.docx,.pdf,.txt,.html,.htm,.json,.csv,.js,.py"
+                accept="image/*,.md,.docx,.pdf,.txt,.html,.htm,.json,.csv,.js,.py,.xlsx,.xls"
                 multiple
                 style="display: none;"
               />
@@ -1194,8 +1226,9 @@
          工作区也用这个聊天自己的（文件树根目录 / 终端 cwd 都跟随它） -->
     <ChatDock
       v-if="dockState.open"
-      :tabs="dockState.tabs"
-      :active-tab-id="dockState.activeTabId"
+      ref="chatDockRef"
+      :tabs="dockVisibleTabs"
+      :active-tab-id="dockVisibleActiveTabId"
       :width="dockState.width"
       :narrow="isNarrowLayout"
       :occluded="dockOccluded"
@@ -1208,6 +1241,8 @@
       @close-tab="onDockCloseTab"
       @close="closeDock"
       @insert-text="insertDockText"
+      @open-file="onDockOpenFile"
+      @tab-view-change="onDockTabViewChange"
     />
     
     <!-- 图片预览模态框 -->
@@ -1251,7 +1286,7 @@ import { hashContent, renderMermaidSvgLenient, getCachedSvgLenient, clearMermaid
 import MermaidViewer from '@/components/MermaidViewer.vue'
 import WordExportDialog from '@/components/export/WordExportDialog.vue'
 import { AIUtils } from '@/services/ai-utils'
-import { deepSeekStyleOf, normalizeLlmType, presetFollowsDefaultLlm, resolveLlmSource } from '@/shared/llmSources'
+import { chatFollowsGlobalLlm, deepSeekStyleOf, normalizeLlmType, presetFollowsDefaultLlm, resolveLlmSource } from '@/shared/llmSources'
 import { BUILTIN_AGENT_PRESET_IDS, builtinPresetDefaultsFromStore, ensureBuiltinAgentPresets } from '@/shared/builtinAgentPresets'
 import {
   estimateChatContextTokens,
@@ -1281,7 +1316,9 @@ import {
   closeDockTab,
   defaultDockState,
   normalizeDockState,
+  openFileDockTab,
   setDockOpen as setDockOpenState,
+  setDockTabView,
   setDockWidth as setDockWidthState,
   type ChatDockState,
   type ChatDockTabKind,
@@ -1299,6 +1336,7 @@ import { useAgentRun } from '@/composables/useAgentRun'
 import { useBackLayer } from '@/composables/useBackLayer'
 import { BACK_ORDER } from '@/platform/backLayers'
 import { agentBridge } from '@/platform/agentBridge'
+import { buildAgentAttachmentContext } from '@/shared/fileAttachmentContext'
 // 集群模式（多 Agent 协作）：成员 = Agent 预设引用（改预设即改成员），执行复用集群运行时
 import { agents as swarmAgents, swarmMode, settings as swarmSettings, debateRounds as swarmDebateRounds, setSwarmRunChatId, running as swarmRunning, swarmRunChatId } from '@/store/swarmState'
 import { runSwarm, runNamedTask, stopSwarm } from '@/store/swarmRunner'
@@ -1313,6 +1351,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import * as d3 from 'd3'
 import draggable from 'vuedraggable'
 import { getPlatform, hasCapability, isHostGuestRuntime } from '@/platform'
+import { droppedFilePath, isBinaryDocumentName } from '@/platform/droppedFile'
+import { isReadFailureText, readFailureReason } from '@/shared/readText'
 
 const store = usestore()
 
@@ -1417,27 +1457,117 @@ const dockState = computed<ChatDockState>({
   },
 })
 
+/** 右侧栏组件引用：切 / 关文件标签前问一下未保存内容（见 ChatDock.confirmLeaveActive） */
+const chatDockRef = ref<any>(null)
+/** 当前文件标签是否允许离开（没有未保存内容 / 用户已保存或选择不保存时返回 true） */
+async function dockConfirmLeave(): Promise<boolean> {
+  const r = await chatDockRef.value?.confirmLeaveActive?.()
+  return r !== false
+}
+
+// 切换主面板（主页 → 知识管理等）会卸载整个主页（连带右侧栏文件标签）：
+// 注册成全局守卫，App.vue 的 selectPanel 会先问一遍未保存内容。
+const unregisterLeaveGuard = store.registerLeaveGuard(dockConfirmLeave)
+
+/**
+ * 多窗口模式：右侧栏不再承载「文件标签」（文件一律独立窗口打开，与历史行为一致）。
+ * 单窗口模式下全部标签可见；切回单窗口时原来的文件标签恢复。
+ */
+const dockVisibleTabs = computed(() =>
+  store.singleWindowMode ? dockState.value.tabs : dockState.value.tabs.filter((t) => t.kind !== 'file'),
+)
+/** 过滤后仍然有效的当前标签（当前标签是被隐藏的文件标签时，落到第一个可见标签） */
+const dockVisibleActiveTabId = computed(() => {
+  const tabs = dockVisibleTabs.value
+  const id = dockState.value.activeTabId
+  return tabs.some((t) => t.id === id) ? id : tabs[0]?.id
+})
+
 /** 开关右侧栏（点头部图标） */
-const toggleDock = () => {
+const toggleDock = async () => {
+  if (!dockState.value.open && !(await dockConfirmLeave())) return
   dockState.value = setDockOpenState(dockState.value, !dockState.value.open)
   saveChats()
 }
 /** 收起右侧栏（标签条上的收起按钮 / 窄屏返回） */
-const closeDock = () => {
+const closeDock = async () => {
   if (!dockState.value.open) return
+  if (!(await dockConfirmLeave())) return
   dockState.value = setDockOpenState(dockState.value, false)
   saveChats()
 }
-const onDockAddTab = (kind: ChatDockTabKind) => {
+const onDockAddTab = async (kind: ChatDockTabKind) => {
+  if (!(await dockConfirmLeave())) return
   dockState.value = addDockTab(dockState.value, kind)
   saveChats()
 }
-const onDockCloseTab = (id: string) => {
+const onDockCloseTab = async (id: string) => {
+  // 只有关掉「当前正在编辑的文件」才需要问未保存；关别的标签不会卸载编辑器
+  if (id === dockState.value.activeTabId && !(await dockConfirmLeave())) return
+  const closing = dockState.value.tabs.find((t) => t.id === id)
   dockState.value = closeDockTab(dockState.value, id)
   saveChats()
+  // 关掉的是文件标签：同时从全局「已打开文件」列表移除（知识管理标签栏共用这份列表）。
+  // 别的聊天还开着同一个文件时保留，避免把那边正在看的标签一起关掉。
+  if (closing?.kind === 'file' && closing.path) {
+    const stillOpen = (chats.value || []).some((c: any) =>
+      (c?.dock?.tabs || []).some((t: any) => t?.kind === 'file' && t?.path === closing.path),
+    )
+    if (!stillOpen) {
+      // 有未保存内容时上面已经处理过（只在关当前标签时）；这里直接按路径关闭
+      store.closeTabByPath(closing.path)
+    }
+  }
 }
-const onDockActivate = (id: string) => {
+const onDockActivate = async (id: string) => {
+  if (id === dockState.value.activeTabId) return
+  if (!(await dockConfirmLeave())) return
   dockState.value = activateDockTab(dockState.value, id)
+}
+/**
+ * 文件树里点了文件：在当前右侧栏里以 file 标签打开。
+ * 特殊文件（.kb / .task / 本地 .html / 系统打开类）仍走 store 的统一调度，不生成标签。
+ */
+const onDockOpenFile = async (payload: { path: string; view?: string; label?: string }) => {
+  if (!payload?.path) return
+  const name = String(payload.label || payload.path).replace(/\\/g, '/').split('/').pop() || payload.path
+  const dot = name.lastIndexOf('.')
+  const data = {
+    path: payload.path,
+    label: name,
+    type: 'file',
+    extension: dot >= 0 ? name.substring(dot).toLowerCase() : '',
+  }
+  // 多窗口模式：与历史行为一致，右侧栏点文件仍然是独立窗口 / 浮层，不生成文件标签
+  if (!store.singleWindowMode) {
+    store.openFileByMode({ ...data, ...(payload.view ? { view: payload.view } : {}) })
+    return
+  }
+  if (!(await dockConfirmLeave())) return
+  if (store.openSpecialFile(data)) return
+  dockState.value = openFileDockTab(dockState.value, payload.path, payload.view)
+  saveChats()
+}
+// 单窗口模式下，store.openFileWindow 在主页会把文件请求转到这里：放进右侧栏的文件标签，
+// 而不是再叠一层全屏文件浮层（见 store.openFileWindow / homeOpenFileRequest）。
+watch(() => store.homeOpenFileRequest, (req) => {
+  if (!req?.payload?.path) return
+  void onDockOpenFile({
+    path: req.payload.path,
+    view: req.payload.view,
+    label: req.payload.label,
+  })
+})
+
+/** 文件标签里切换了视图：写回该标签，切走再回来仍沿用 */
+const onDockTabViewChange = (id: string, view: string) => {
+  const tab = dockState.value.tabs.find((t) => t.id === id)
+  dockState.value = setDockTabView(dockState.value, id, view)
+  saveChats()
+  // 同步到全局「已打开文件」列表：同一文件在知识管理标签里再打开时沿用最后选的视图
+  if (tab?.kind === 'file' && tab.path && typeof store.setFileTabView === 'function') {
+    store.setFileTabView(tab.path, view)
+  }
 }
 const onDockResize = (width: number) => {
   dockState.value = setDockWidthState(dockState.value, width)
@@ -1455,7 +1585,7 @@ const dockOccluded = computed(() =>
   || showImagePreview.value
   || wordExportVisible.value
   || contextMenuVisible.value
-  || sidebarContextMenuVisible.value
+  || chatNavMenuVisible.value
 )
 /** 右侧栏「文件」标签的「插入路径」：追加进当前聊天的输入框草稿 */
 const insertDockText = (text: string) => {
@@ -1571,7 +1701,7 @@ const removeWorkspacePath = (path: string) => {
   store.removeRoot(path)
 }
 
-// ==================== 聊天列表排列方式（顺序 / 按工作区分组） ====================
+// ==================== 聊天列表排列方式（顺序 / 按工作区分组）与排序 ====================
 /** 排列方式的持久化键（全局偏好：与具体聊天无关） */
 const CHAT_ORDER_KEY = 'ai-chats-order'
 const chatOrderMode = ref<'sequence' | 'workspace'>(readChatOrderMode())
@@ -1583,20 +1713,74 @@ function readChatOrderMode(): 'sequence' | 'workspace' {
 watch(chatOrderMode, (v) => {
   try { localStorage.setItem(CHAT_ORDER_KEY, v) } catch { /* 隐私模式等忽略 */ }
 })
-const chatOrderTitle = computed(() => {
-  const zh = store.locales == 'zh'
-  return chatOrderMode.value === 'sequence'
-    ? (zh ? '消息排列：按顺序（点击改为按工作区分组）' : 'Order: by sequence (click to group by workspace)')
-    : (zh ? '消息排列：按工作区分组（点击改回按顺序）' : 'Order: grouped by workspace (click to go back to sequence)')
+
+/**
+ * 排序方式（全局偏好，默认「最后生成时间」）：
+ * - last：最后生成时间倒序（最近有消息的排前面）；
+ * - created：创建时间倒序；
+ * - manual：用户拖动过聊天行后的自定义顺序（菜单里只作为当前状态展示，不在两个排序选项里）。
+ */
+type ChatSortMode = 'last' | 'created' | 'manual'
+const CHAT_SORT_KEY = 'ai-chats-sort'
+const chatSortMode = ref<ChatSortMode>(readChatSortMode())
+function readChatSortMode(): ChatSortMode {
+  try {
+    const v = localStorage.getItem(CHAT_SORT_KEY)
+    return v === 'created' || v === 'manual' ? v : 'last'
+  } catch { return 'last' }
+}
+watch(chatSortMode, (v) => {
+  try { localStorage.setItem(CHAT_SORT_KEY, v) } catch { /* 隐私模式等忽略 */ }
 })
-const toggleChatOrderMode = () => {
-  chatOrderMode.value = chatOrderMode.value === 'sequence' ? 'workspace' : 'sequence'
+
+/** 聊天列表（消息导航栏）右键菜单状态：排列方式 + 排序；在聊天行上右键时额外记住该行索引（菜单里带删除） */
+const chatNavMenuVisible = ref(false)
+const chatNavMenuPos = ref({ x: 0, y: 0 })
+const chatNavMenuChatIndex = ref<number | null>(null)
+const hideChatNavMenu = () => {
+  chatNavMenuVisible.value = false
+  chatNavMenuChatIndex.value = null
+}
+
+/**
+ * 「最后生成时间」：最后一条消息的时间。
+ * 助手消息在开始生成时就会写入 timestamp（占位消息），所以它同时代表最近一次生成活动；
+ * 空聊天退回创建时间，保证排序键始终有值。
+ */
+function chatLastGeneratedAt(chat: Chat): number {
+  const msgs = chat.messages || []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const t = Number(msgs[i]?.timestamp) || 0
+    if (t) return t
+  }
+  return Number(chat.createdAt) || 0
+}
+
+/** 按当前排序偏好排（新的在前）；manual 保持 chats 数组原顺序（拖动结果） */
+function sortByChatMode<T extends { chat: Chat }>(items: T[]): T[] {
+  const mode = chatSortMode.value
+  if (mode === 'manual') return items
+  const key = mode === 'created'
+    ? (chat: Chat) => Number(chat.createdAt) || 0
+    : (chat: Chat) => chatLastGeneratedAt(chat)
+  // Array.prototype.sort 是稳定的：同一时间戳保持数组里的相对顺序
+  return [...items].sort((a, b) => key(b.chat) - key(a.chat))
+}
+
+const setChatOrderMode = (mode: 'sequence' | 'workspace') => {
+  chatOrderMode.value = mode
+  hideChatNavMenu()
+}
+const setChatSortMode = (mode: 'last' | 'created') => {
+  chatSortMode.value = mode
+  hideChatNavMenu()
 }
 
 /**
  * 侧边栏渲染用的条目表（也是 draggable 的 v-model）：
- * - 顺序模式：纯聊天行，与拖动排序一一对应；
- * - 分组模式：按工作区排好序，并在**每组第一条**上挂一个 `head`（分组头信息）；
+ * - 先按当前排序偏好排（最后生成时间 / 创建时间 / 自定义顺序）；
+ * - 顺序模式：排好的聊天行，拖动后会切到「自定义顺序」；
+ * - 分组模式：按工作区排好序（组内保持排序结果），并在**每组第一条**上挂一个 `head`（分组头信息）；
  *   此模式下禁用拖动（跨组拖动语义不清），所以条目表不会被写回。
  *
  * ⚠️ 每个条目都必须永远带 `chat` 与 `originalIndex`（行模板直接读它们），
@@ -1613,9 +1797,12 @@ interface ChatListEntry {
 
 const chatListEntries = computed<ChatListEntry[]>({
   get: () => {
-    const flat = chats.value
-      .map((chat, idx) => ({ chat, originalIndex: idx }))
-      .filter((it) => !it.chat.parentId)
+    // 先按当前排序偏好排，再决定是顺序展示还是按工作区分组（组内同样是排好的顺序）
+    const flat = sortByChatMode(
+      chats.value
+        .map((chat, idx) => ({ chat, originalIndex: idx }))
+        .filter((it) => !it.chat.parentId),
+    )
     const asEntry = (it: { chat: Chat; originalIndex: number }): ChatListEntry =>
       ({ key: String(it.chat.id), chat: it.chat, originalIndex: it.originalIndex })
 
@@ -1644,6 +1831,12 @@ const chatListEntries = computed<ChatListEntry[]>({
   },
   set: (list) => {
     // 只有顺序模式会写回（分组模式已禁用拖动）；条目表与 rootChats 形状一致，直接交给它排序
+    const sameOrder =
+      list.length === chatListEntries.value.length &&
+      list.every((e, i) => e.key === chatListEntries.value[i]?.key)
+    if (sameOrder) return
+    // 用户手动拖动即视为「自定义顺序」：否则下一次按「最后生成时间」重排会把刚拖好的位置冲掉
+    if (chatSortMode.value !== 'manual') chatSortMode.value = 'manual'
     rootChats.value = list.map((e) => ({ chat: e.chat, originalIndex: e.originalIndex }))
   },
 })
@@ -1672,6 +1865,7 @@ onMounted(() => {
   syncMobileWidth()
 })
 onBeforeUnmount(() => {
+  unregisterLeaveGuard?.()
   if (typeof window === 'undefined') return
   window.removeEventListener('resize', syncMobileWidth)
 })
@@ -1856,11 +2050,6 @@ const isInputContextMenu = ref(false)
 /** 右键打开菜单时保存的用户选中文字 */
 const contextMenuSelectedText = ref('')
 
-// 侧边栏右键菜单状态
-const sidebarContextMenuVisible = ref(false)
-const sidebarContextMenuPos = ref({ x: 0, y: 0 })
-const sidebarContextMenuChatIndex = ref<number | null>(null)
-
 // 分支树右键菜单状态
 const branchContextMenuVisible = ref(false)
 const branchContextMenuPos = ref({ x: 0, y: 0 })
@@ -1874,24 +2063,30 @@ const hideContextMenu = () => {
   contextMenuSelectedText.value = ''
 }
 
-const hideSidebarContextMenu = () => {
-  sidebarContextMenuVisible.value = false
-  sidebarContextMenuChatIndex.value = null
-}
-
-const onSidebarContextMenu = (e: MouseEvent, index: number) => {
+/**
+ * 聊天列表（消息导航栏）右键：工具栏、列表空白处、聊天行都能打开「消息排列 + 排序」菜单。
+ * 在聊天行上右键时传入该行索引，菜单底部会多一项「删除聊天」；输入框保留系统粘贴菜单。
+ */
+const onChatNavContextMenu = (e: MouseEvent, chatIndex: number | null = null) => {
+  const target = e.target as HTMLElement | null
+  if (!target) return
+  if (chatIndex === null && target.closest('input, textarea, [contenteditable="true"]')) return
   e.preventDefault()
-  sidebarContextMenuChatIndex.value = index
-  sidebarContextMenuPos.value = {
-    x: Math.min(e.clientX, window.innerWidth - 200),
-    y: e.clientY
+  hideContextMenu()
+  branchContextMenuVisible.value = false
+  chatNavMenuChatIndex.value = chatIndex
+  chatNavMenuPos.value = {
+    x: Math.min(e.clientX, Math.max(8, window.innerWidth - 240)),
+    // 菜单最高约 240px（行上右键时多一项「删除聊天」）：贴着窗口底部右键时向上收，避免被裁掉
+    y: Math.min(e.clientY, Math.max(8, window.innerHeight - 260)),
   }
-  sidebarContextMenuVisible.value = true
+  chatNavMenuVisible.value = true
 }
 
 const onMessageContextMenu = (e: MouseEvent) => {
   if (currentChat.value.messages.length === 0) return
   e.preventDefault()
+  chatNavMenuVisible.value = false
   
   // 右键时保存用户选中的文字（点击菜单项后选中状态可能丢失）
   const sel = window.getSelection()
@@ -2029,6 +2224,7 @@ const pasteToInput = async () => {
 }
 
 const onInputContextMenu = (e: MouseEvent) => {
+  chatNavMenuVisible.value = false
   contextMenuPos.value = {
     x: Math.min(e.clientX, window.innerWidth - 200),
     y: e.clientY
@@ -2408,6 +2604,7 @@ const dispatchQueuedItem = async (chatId: string, item: PendingQueueItem) => {
     data: '',
     name: f.name,
     size: f.content.length,
+    path: f.path,
     parsedContent: f.content,
     charCount: f.charCount,
   }))
@@ -2505,6 +2702,7 @@ const editPendingItem = (id: string) => {
       data: '',
       name: f.name,
       size: f.content.length,
+      path: f.path,
       parsedContent: f.content,
       charCount: f.charCount,
     })),
@@ -2669,7 +2867,9 @@ const isSendButtonDisabled = computed(() => {
     (!canQueueInput && isSwarm && swarmRunning.value) ||
     (!inputText.value.trim() && currentUploads.value.length === 0) ||
     // 集群不要求顶层模型（各成员用自己预设的模型）
-    (!isSwarm && !hostAgent && !chat.config.model)
+    (!isSwarm && !hostAgent && !(isAgentLikeMode.value
+      ? effectiveChatModelValue.value.model
+      : chat.config.model))
   )
 })
 
@@ -3872,7 +4072,8 @@ const toAbsoluteToolPath = (p: string): string => {
 
 /**
  * 打开工具写入 / 改写的文件：与知识管理「打开」走同一套默认方式
- * （应用内独立窗口 + 对应视图；本地 .html/.htm 用内置浏览器；不支持应用内打开的交给系统默认应用）。
+ * （单窗口模式进主页右侧栏文件标签 / 知识管理标签；多窗口模式开独立窗口；
+ *   本地 .html/.htm 也走文件视图（浏览用 iframe 渲染），不再另开内置浏览器窗口）。
  */
 const openToolWrittenFile = (p: string) => {
   if (!p) return
@@ -3952,7 +4153,7 @@ const imageExtMap: Record<string, string> = {
 /** 判断是否为可解析的文档扩展名 */
 const isParseableFile = (fileName: string): boolean => {
   const ext = fileName.toLowerCase().split('.').pop()
-  return ['md', 'docx', 'pdf', 'txt', 'html', 'htm', 'json', 'csv', 'js', 'py', 'xlsx', 'kb'].includes(ext || '')
+  return ['md', 'docx', 'pdf', 'txt', 'html', 'htm', 'json', 'csv', 'js', 'py', 'xlsx', 'xls', 'kb'].includes(ext || '')
 }
 
 const handleFileUpload = async (event: Event) => {
@@ -3995,17 +4196,37 @@ const addFilesAsUploads = async (files: File[]) => {
           continue
         }
 
+        // 拖入的文件必须先拿到磁盘真实路径：Electron 32 起 Chromium 移除了非标准的
+        // `File.path`，只剩文件名；按文件名去读必然 ENOENT（见 platform/droppedFile.ts）。
+        const filePath = droppedFilePath(file)
         // 桌面端：经平台层读取并解析（docx / pdf / xlsx 等需宿主解析）；
-        // 网页端（局域网访客）：无读文件能力，只能读文本，.md/.txt/.kb 等可直接解析
+        // 无路径时（网页 / 安卓 / 虚拟文件来源）只能读文本：文本类直接 file.text()，
+        // 二进制文档明确提示 —— File.text() 会把 zip / PDF 字节按 UTF-8 解成乱码，不能当正文。
         let parsedContent = ''
-        if (hasCapability('fs.pathRead')) {
-          parsedContent = await getPlatform().fs.readText((file as any).path || file.name)
+        if (filePath && hasCapability('fs.pathRead')) {
+          try {
+            parsedContent = await getPlatform().fs.readText(filePath)
+          } catch (e: any) {
+            ElMessage.error(store.locales == 'zh'
+              ? `文件 ${file.name} 读取失败：${e?.message || '未知错误'}`
+              : `Failed to read ${file.name}: ${e?.message || 'unknown error'}`)
+            continue
+          }
+        } else if (isBinaryDocumentName(file.name)) {
+          ElMessage.warning(store.locales == 'zh'
+            ? `无法读取 ${file.name}：没有拿到文件的磁盘路径。请在桌面版中拖入，或先另存为 Markdown / PDF 后再上传。`
+            : `Cannot read ${file.name}: its disk path is unavailable. Drop it into the desktop app, or save it as Markdown / PDF first.`)
+          continue
         } else {
           parsedContent = await file.text()
         }
 
-        if (typeof parsedContent === 'string' && parsedContent.startsWith('Error reading file:')) {
-          ElMessage.error(`文件 ${file.name} 读取失败`)
+        if (isReadFailureText(parsedContent)) {
+          // 主进程把读失败当文本返回（Error reading file / Excel file …），不能当正文附上
+          const reason = readFailureReason(parsedContent)
+          ElMessage.error(store.locales == 'zh'
+            ? `文件 ${file.name} 读取失败：${reason}`
+            : `Failed to read ${file.name}: ${reason}`)
           continue
         }
 
@@ -4015,6 +4236,7 @@ const addFilesAsUploads = async (files: File[]) => {
           data: '',
           name: file.name,
           size: file.size,
+          path: filePath,
           parsedContent: parsedContent,
           charCount: charCount
         })
@@ -4091,7 +4313,7 @@ const routeDroppedFiles = async (files: File[]) => {
       if (isBrowser) {
         await addKbFiles(kbs)
       } else {
-        const p = (kbs[0] as any).path as string | undefined
+        const p = droppedFilePath(kbs[0])
         if (p) {
           chat.config.kbPath = p
           if (chat.config.kbTopK === undefined) chat.config.kbTopK = 5
@@ -4120,17 +4342,18 @@ const clearAllUploads = () => {
 const buildUserMessageFromUploads = (message: string): {
   content: string
   images: Array<string | Uint8Array | ArrayBuffer> | undefined
-  fileAttachments: Array<{ name: string; content: string; charCount: number }> | undefined
+  fileAttachments: Array<{ name: string; content: string; charCount: number; path?: string }> | undefined
 } => {
   const imageData: Array<string | Uint8Array | ArrayBuffer> = []
-  const fileAttachments: Array<{ name: string; content: string; charCount: number }> = []
+  const fileAttachments: Array<{ name: string; content: string; charCount: number; path?: string }> = []
 
   for (const item of currentUploads.value) {
     if (item.kind === 'file' && item.parsedContent) {
       fileAttachments.push({
         name: item.name,
         content: item.parsedContent,
-        charCount: item.charCount || item.parsedContent.length
+        charCount: item.charCount || item.parsedContent.length,
+        path: item.path
       })
     } else if (item.kind === 'image') {
       imageData.push(item.data)
@@ -4522,6 +4745,8 @@ const selectGeneralAgent = () => {
 const selectAgentPreset = (preset: any) => {
   currentChat.value.mode = 'agent'
   currentChat.value.config.presetId = preset.id
+  // 选中预设 = 以预设的模型配置为准；之前的聊天级手动覆盖一并失效
+  currentChat.value.config.llmPinned = false
   const followsDefault = presetFollowsDefaultLlm(preset)
   if (followsDefault) {
     currentChat.value.config.llmType = ''
@@ -5068,7 +5293,7 @@ const closeHomeOverlays = (): boolean => {
   if (showSharedKbPicker.value) { showSharedKbPicker.value = false; return true }
   if (showBranchView.value) { showBranchView.value = false; return true }
   // 窄屏下右侧栏是整屏二级界面（文件 / 终端 / 浏览器）：返回手势先退出它，再回聊天列表
-  if (isNarrowLayout.value && dockState.value.open) { closeDock(); return true }
+  if (isNarrowLayout.value && dockState.value.open) { void closeDock(); return true }
   return false
 }
 
@@ -5207,6 +5432,8 @@ const handleSwarmMode = async (message: string) => {
     return
   }
   applySwarmOptions()
+  // 附件只把路径交给成员（正文由成员用文件工具按需读取），不写进群聊「我」消息
+  const attachmentContext = buildAgentAttachmentContext(buildUserMessageFromUploads(message).fileAttachments)
   // 本次运行归属当前对话：成员汇报写入它的 messages（与其它模式同一套渲染/持久化）
   setSwarmRunChatId(currentChat.value.id)
   // 复用同一个输入框状态：任务先捕获到局部变量，再清空输入框（与其它模式一致）
@@ -5215,8 +5442,8 @@ const handleSwarmMode = async (message: string) => {
   // 技能目录可能尚未预热（本对话未切换过模式、或本次会话刚启动）；扫描成本低，发送前刷新一次
   if (store.skillsPath) void loadSkillList()
   const named = collectSwarmNamed(message)
-  if (named.length) await runNamedTask(named, message)
-  else await runSwarm(message)
+  if (named.length) await runNamedTask(named, message, { context: attachmentContext })
+  else await runSwarm(message, undefined, { context: attachmentContext })
   // 首次任务完成后自动生成对话标题（与其它模式一致）
   const chat = currentChat.value
   if (!chat.title?.trim()) {
@@ -5679,7 +5906,9 @@ function getDefaultModel(llmType: string, customIndex?: number): string {
   }
 }
 
-const createNewChat = () => {
+const createNewChat = async () => {
+  // 新建聊天会切走当前聊天（侧栏里的文件标签随之卸载）：先处理未保存内容
+  if (!(await dockConfirmLeave())) return
   currentUploads.value = []
   chats.value.push(createNewChatData())
   currentChatIndex.value = chats.value.length - 1
@@ -5692,7 +5921,11 @@ const switchChat = async (index: number) => {
   currentUploads.value = []
   
   if (currentChatIndex.value === index) return
-  
+
+  // 右侧栏有正在编辑的文件标签：先处理未保存内容（保存 / 不保存 / 取消）。
+  // 切聊天会卸载侧栏组件，不拦一下会把编辑器的改动直接丢掉。
+  if (!(await dockConfirmLeave())) return
+
   currentChatIndex.value = index
   // 输入框内容按聊天各自保存：切走的这一栏草稿即时落盘（重启后仍在，不必等下一次发送）
   saveChats()
@@ -5772,9 +6005,8 @@ const deleteChat = async (index: number) => {
 }
 
 const deleteChatFromSidebarMenu = async () => {
-  sidebarContextMenuVisible.value = false
-  const index = sidebarContextMenuChatIndex.value
-  sidebarContextMenuChatIndex.value = null
+  const index = chatNavMenuChatIndex.value
+  hideChatNavMenu()
   if (index !== null) {
     await deleteChat(index)
   }
@@ -5936,6 +6168,12 @@ const {
   getCurrentChat: () => currentChat.value,
   saveChats,
   getDefaultModel,
+  // 预设「跟随默认」时聊天配置里的 llmType / model 为空 → 连接检测用实际生效的全局值
+  getEffectiveLlm: () => ({
+    provider: effectiveChatModelValue.value.provider,
+    model: effectiveChatModelValue.value.model,
+    customSourceIndex: effectiveChatModelValue.value.customSourceIndex,
+  }),
 })
 
 /**
@@ -5977,17 +6215,21 @@ const chatPreset = computed<any>(() => {
 })
 const chatFollowsPresetDefault = computed(() =>
   !!chatPreset.value && presetFollowsDefaultLlm(chatPreset.value))
+/** 预设「跟随默认」且用户还没在聊天右上角手动选过来源 / 模型 → 这个聊天跟随全局当前值 */
+const chatFollowsGlobalModel = computed(() =>
+  chatFollowsGlobalLlm(chatPreset.value, currentChat.value?.config))
 
 /**
  * 本聊天实际生效的来源 / 模型：
- * - 跟随默认的预设：来源与模型都取全局当前值（**不读回退值**，否则换全局模型后仍走存档里的旧模型）；
+ * - 跟随默认且未手动改过：来源与模型都取全局当前值（**不读回退值**，否则换全局模型后仍走存档里的旧模型）；
+ * - 跟随默认但右上角手动选过（llmPinned）：用聊天配置里的显式覆盖；
  * - 绑定来源的预设：聊天右上角优先（未选时用预设自己的值）；
  * - 无预设（通用智能体 / 普通对话）：聊天配置优先，空则回退全局。
  */
 const effectiveChatModelValue = computed<{ provider: string; model: string; customSourceIndex?: number }>(() => {
   const cfg: any = currentChat.value?.config || {}
   const preset: any = chatPreset.value
-  if (preset && presetFollowsDefaultLlm(preset)) {
+  if (chatFollowsGlobalModel.value) {
     // 模型名取全局当前来源的模型，仅用于「显示 / 是否已选模型」；请求仍由该来源的配置兜底
     const type = normalizeLlmType(String(store.AIconfig.llm.type || ''))
     const customIndex = store.AIconfig.llm.custom?.activeIndex ?? 0
@@ -6014,10 +6256,13 @@ const llmTypeSelectModel = computed<string>({
   get: () => {
     const cfg = currentChat.value?.config
     if (!cfg) return ''
-    // 预设「跟随默认」：来源显示全局当前来源（cfg.llmType 在跟随档下为空）
-    const effectiveType = chatFollowsPresetDefault.value
+    // 预设「跟随默认」且未手动改过：来源显示全局当前来源（cfg.llmType 此时为空）；
+    // 手动改过（llmPinned）则显示聊天自己的覆盖值，选择才不会弹回全局。
+    const effectiveType = chatFollowsGlobalModel.value
       ? normalizeLlmType(String(store.AIconfig.llm.type || ''))
-      : cfg.llmType
+      : (cfg.llmType || (chatFollowsPresetDefault.value
+        ? normalizeLlmType(String(store.AIconfig.llm.type || ''))
+        : ''))
     if (effectiveType === 'custom') {
       const sources = store.AIconfig.llm.custom?.sources || []
       const enabledIdx = (sources as any[])
@@ -6045,10 +6290,49 @@ const llmTypeSelectModel = computed<string>({
       chat.config.llmType = val
       chat.config.customSourceIndex = undefined
     }
+    // 跟随默认的预设：这是用户在本聊天里的显式选择 → 之后不再被全局来源变化覆盖
+    chat.config.llmPinned = true
     onModelTypeChange()
   },
 })
 
+/**
+ * 模型种类下拉值。
+ * 「跟随默认」且未手动改过时，聊天配置里的 model 是空串（表示跟随全局），
+ * 不能直接 v-model 到它 —— 否则下拉会停在占位项 “select model”。
+ * 这里显示实际生效的全局模型；用户一旦选择，就把选择钉在这个聊天上（llmPinned）。
+ */
+const chatModelSelectModel = computed<string>({
+  get: () => {
+    const cfg = currentChat.value?.config
+    if (!cfg) return ''
+    if (chatFollowsGlobalModel.value) return effectiveChatModelValue.value.model
+    return String(cfg.model || '')
+  },
+  set: (val: string) => {
+    const chat = currentChat.value
+    if (!chat) return
+    const value = String(val || '')
+    // 跟随默认的聊天选回占位项 = 放弃本聊天的覆盖，重新跟随全局
+    if (!value && chatFollowsPresetDefault.value) {
+      chat.config.llmType = ''
+      chat.config.model = ''
+      chat.config.customSourceIndex = undefined
+      chat.config.llmPinned = false
+      saveChats()
+      return
+    }
+    // 首次手动选模型：把当前生效来源一并钉住，避免之后换全局来源时来源 / 模型错配
+    if (chatFollowsGlobalModel.value) {
+      const eff = effectiveChatModelValue.value
+      chat.config.llmType = eff.provider
+      chat.config.customSourceIndex = eff.customSourceIndex
+    }
+    chat.config.model = value
+    chat.config.llmPinned = true
+    saveChats()
+  },
+})
 
 // ==================== 发送消息 - 统一入口 ====================
 
@@ -9124,9 +9408,15 @@ const clearAgentTodos = () => {
   saveChats()
 }
 
-/** 聊天列表时间显示：刚刚 / X分钟前 / 今天HH:mm / 今年M月D日 / 往年YYYY年M月D日 */
+/**
+ * 聊天列表时间显示：刚刚 / X分钟前 / 今天HH:mm / 今年M月D日 / 往年YYYY年M月D日。
+ * 显示口径与排序口径一致 —— 按创建时间排序时显示创建时间，其余（默认 / 自定义顺序）显示最后生成时间，
+ * 否则按「最后生成时间」排好的列表里时间看起来是乱的。
+ */
 const getChatTimeText = (chat: Chat): string => {
-  const t = chat.createdAt || Date.now()
+  const t = chatSortMode.value === 'created'
+    ? (chat.createdAt || Date.now())
+    : (chatLastGeneratedAt(chat) || Date.now())
   const now = Date.now()
   const diff = now - t
   if (diff < 60 * 1000) {
@@ -9586,13 +9876,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .chat-group-head > i { font-size: 11px; color: #f0b429; flex-shrink: 0; }
 .chat-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-group-count { font-size: 10px; opacity: 0.7; flex-shrink: 0; }
-
-/* 排列方式切换（按工作区分组时高亮） */
-.chat-order-btn.active {
-  border-color: var(--fontActiveColor);
-  color: var(--fontActiveColor);
-  background-color: var(--menuActiveColor);
-}
 
 .chat-item.active {
   border-color: var(--fontActiveColor);
@@ -11588,7 +11871,7 @@ select {
   transition: all .15s;
   color: var(--fontColor);
 }
-/* 「打开」按钮（写入本地网页时出现在展开开关左侧）：用内置浏览器打开该网页 */
+/* 「打开」按钮（写入本地网页时出现在展开开关左侧）：按统一方式打开文件（标签 / 窗口） */
 .tool-box-open {
   display: inline-flex;
   align-items: center;
@@ -12989,6 +13272,83 @@ select {
   width: 16px;
   text-align: center;
   font-size: 13px;
+}
+
+/* --------------------------------------------------------------------------
+   聊天列表（消息导航栏）右键菜单：消息排列 + 排序
+   数值照抄知识管理的紧凑右键菜单（style.css 的 .knowfile-menu 变体）：
+   12px 字号 / 24px 行高 / 168px 起宽 / menuColor 底 / 4px 圆角 hover。
+   `.context-menu.chat-nav-menu` 用两个类名压过本组件通用的 .context-menu 规则。
+   -------------------------------------------------------------------------- */
+.context-menu.chat-nav-menu {
+  z-index: 100000;
+  min-width: 168px;
+  padding: 4px;
+  background-color: var(--menuColor);
+  font-size: 12px;
+  user-select: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+.chat-nav-menu .chat-nav-section {
+  padding: 2px 8px 4px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--fontColor);
+  opacity: 0.55;
+  user-select: none;
+}
+
+.chat-nav-menu .menu-item {
+  height: 24px;
+  padding: 0 8px;
+  gap: 6px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+.chat-nav-menu .menu-item:hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
+
+.chat-nav-menu .menu-item i {
+  width: 12px;
+  font-size: 11px;
+  opacity: 0.75;
+  text-align: center;
+}
+
+.chat-nav-menu .menu-item.current {
+  color: var(--fontActiveColor);
+  font-weight: 600;
+}
+
+/* 危险项（聊天行菜单里的「删除聊天」）：与知识管理一致，hover 变红 */
+.chat-nav-menu .menu-item.menu-danger:hover {
+  color: #e74c3c;
+}
+
+.chat-nav-menu .menu-item .chat-nav-check {
+  width: auto;
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.chat-nav-menu .menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-nav-menu .menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  padding: 0;
+  background: var(--borderColor);
+  border-radius: 0;
 }
 
 /* ASR 语音输入按钮 */

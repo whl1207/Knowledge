@@ -361,7 +361,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
    * 它并不改 mainPanel，所以「当前面板」和「看到的页面」会一直对不上）。
    * 因此把「切面板」和「收网格」绑在同一个入口上，值没变时也照样收网格。
    */
-  function selectPanel(key: string) {
+  async function selectPanel(key: string) {
+    // 切换主面板会卸载当前面板（主页右侧栏 / 知识管理的文件标签）：先让它们处理未保存内容，
+    // 用户取消就留在原面板（见 store.registerLeaveGuard / runLeaveGuards）
+    if (store.mainPanel !== key && !(await store.runLeaveGuards())) return
     // 先收网格再切面板：两处都在同一个 tick 内完成，不会先渲染网格再切走
     if (store.pluginLauncherOpen) store.pluginLauncherOpen = false
     store.mainPanel = key
@@ -708,7 +711,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
   let closeWarnUntil = 0
   let closeWarnTimer: ReturnType<typeof setTimeout> | null = null
 
-  function closeWindow() {
+  async function closeWindow() {
     // 关闭行为 = 折叠到托管区：窗口只是隐藏、后台任务继续运行，因此无需「任务运行中」二次确认
     if (!store.UI.closeToTray) {
       const running = collectRunningTasks()
@@ -730,6 +733,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
         return
       }
     }
+    // 文件标签里可能还有未保存内容：关窗前先让用户处理（保存 / 不保存 / 取消）
+    if (!(await store.runLeaveGuards())) return
     store.saveConfig()
     getPlatform().window.close()
   }
@@ -789,7 +794,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     // 主面板不是根面板：先回根面板
     const root = backRootPanel()
     if (store.mainPanel !== root) {
-      store.mainPanel = root
+      // 回主页同样要先处理文件标签的未保存内容（selectPanel 内部会跑守卫）
+      void selectPanel(root)
       return true
     }
     // 已在主页根：连按两次才退出（与系统习惯一致，避免误退出）
@@ -837,7 +843,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
   />
 
   <!-- 主界面（仅当既不是文件窗口也不是浏览器 Agent 窗口时显示） -->
-  <div v-else class="container" :class="{ 'side-nav-mode': isLeftNav, 'web-mode': isBrowser, 'android-mode': isAndroid, 'tall-mode': isTallLayout, 'chrome-hidden': panelChromeHidden }">
+  <div v-else class="container" :class="{ 'side-nav-mode': isLeftNav, 'web-mode': isBrowser, 'android-mode': isAndroid, 'tall-mode': isTallLayout, 'single-window-mode': store.singleWindowMode, 'chrome-hidden': panelChromeHidden }">
     <!-- 左侧导航栏（左侧布局模式显示：全部主面板按钮 + 设置；网页模式同样显示） -->
     <div v-if="isLeftNav" class="side-nav" ref="sideNavRef">
       <!-- 内置面板：始终显示（不参与收纳） -->
@@ -1088,7 +1094,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
   <!-- 应用内插件面板浮层（浏览器 / 安卓等没有窗口壳的环境）：与文件窗口浮层同一做法，
        保证「点插件 → 以子窗口形态打开」在这些平台上也有可见反馈（独立窗口调用是空操作）。 -->
-  <div v-if="store.pluginPanelOverlay" class="plugin-panel-overlay" @click="store.closePluginPanelOverlay()">
+  <div v-if="store.pluginPanelOverlay" class="plugin-panel-overlay" :class="{ 'single-window': store.singleWindowMode }" @click="store.closePluginPanelOverlay()">
     <div class="plugin-panel-dialog" @click.stop>
       <div class="plugin-panel-dialog-close" @click="store.closePluginPanelOverlay()"
            :title="store.locales === 'en' ? 'Close' : '关闭'"><i class="fa fa-times"></i></div>
@@ -1198,15 +1204,25 @@ import { useTallLayout } from '@/composables/useTallLayout'
   /* 安卓 / 细长窗口（高宽比 > 16:9，如手机竖屏）：设置整页铺满（手机上浮层对话框太挤，
      设置内部再按「分类列表 ⇄ 设置内容」整屏切换，见 Set.vue 的 .tall）；顶部的窗口按钮也不适用 */
   .container.android-mode .set-overlay,
-  .container.tall-mode .set-overlay {
+  .container.tall-mode .set-overlay,
+  /* 单窗口模式：设置也是一页（桌面同样如此），不再用居中对话框 */
+  .container.single-window-mode .set-overlay {
     background-color: transparent;
   }
   .container.android-mode .settings-panel,
-  .container.tall-mode .settings-panel {
+  .container.tall-mode .settings-panel,
+  .container.single-window-mode .settings-panel {
     width: 100%;
     height: 100%;
     border-radius: 0;
     box-shadow: none;
+  }
+  /* 单窗口模式：插件面板浮层同样整页铺满（与安卓 / 细长窗口一致）。
+     注意插件浮层挂在 .container 之外，所以类名挂在浮层自己身上。 */
+  .plugin-panel-overlay.single-window .plugin-panel-dialog {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
   }
     
   /* 插件请求全屏（ctx.app.setChromeHidden(true)）时：顶栏 / 左侧导航 / 底部导航整块收起来，
@@ -1425,18 +1441,19 @@ import { useTallLayout } from '@/composables/useTallLayout'
     flex-direction: row;
   }
 
-  /* 左侧导航栏。
-     用 `column-reverse` + `justify-content: flex-end`：条目视觉顺序与文档顺序一致，
-     但整块内容**贴底**排列 —— 插件太多、高度不够时，被裁掉的是最上面的插件图标，
-     底部紧邻设置按钮的启动器始终可见可点。 */
+  /* 左侧导航栏：**从上到下**按文档顺序排列（主页 → 知识管理 → … → 设置）。
+     ⚠️ 这里曾经用 `column-reverse` + `justify-content: flex-end` 想把整块内容贴底，
+     但 column-reverse 会连同**条目顺序**一起翻转（第一个条目跑到最下面），看起来就是导航栏反了。
+     现在改为正常 `column` + 贴顶排列：顺序与文档一致；插件放不下时仍由收纳逻辑
+     （fa fa-th-large 启动器）接管，不会把设置按钮挤出可视区。 */
   .side-nav {
     width: 44px;
     flex-shrink: 0;
     height: 100%;
     min-height: 0;
     display: flex;
-    flex-direction: column-reverse;
-    justify-content: flex-end;
+    flex-direction: column;
+    justify-content: flex-start;
     align-items: center;
     padding: 4px 2px;
     gap: 2px;

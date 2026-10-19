@@ -162,8 +162,9 @@ A few large assets are intentionally **not** in this repository. The app runs fi
 | `public/maps/*.mbtiles` (~30 MB) | Pack your own tile pyramid (`public/tiles/<z>/<x>/<y>.png`):<br>`python scripts/make-builtin-mbtiles.py --src public/tiles/6 --out public/maps/builtin.mbtiles --name "Offline basemap"`<br>*Python 3 standard library only; any `*.mbtiles` in that folder is picked up automatically* | Map view has no built-in offline basemap (you can still mount your own package in **Settings → General → Other → Offline map**) |
 | `public/drawio/` (~65 MB) | `node scripts/fetch-drawio-webapp.mjs` (add `--force` to re-download) | `.drawio` files cannot be opened / edited offline |
 | `public/excalidraw-assets-dev/` (~18 MB, dev only) | Dev-time Excalidraw assets | Whiteboard assets for `npm run dev` |
+| `resources/file-icons/*.ico` (committed, ~0.9 MB) | `python scripts/make-file-icons.py` (Pillow) after editing its `TYPES` table | Associated file types all fall back to the app icon in Explorer |
 
-`scripts/` follows the same policy: only the build/runtime helpers (`rename-unpacked`, `collect-release`, `build-tts-worker`, `fetch-drawio-webapp`, `make-builtin-mbtiles`, `build-linux-all.sh` + `build-linux-all.cmd`) are versioned; one-off diagnostics, test fixtures and benchmark data stay local.
+`scripts/` follows the same policy: only the build/runtime helpers (`rename-unpacked`, `collect-release`, `build-tts-worker`, `fetch-drawio-webapp`, `make-builtin-mbtiles`, `make-file-icons`, `build-linux-all.sh` + `build-linux-all.cmd`) are versioned; one-off diagnostics, test fixtures and benchmark data stay local.
 
 Type check the renderer before committing: `npx vue-tsc --noEmit -p tsconfig.json`.
 

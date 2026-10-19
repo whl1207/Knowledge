@@ -73,9 +73,42 @@ const qwen3Lang = computed({
   set: (v: string) => store.updateQwen3TTS({ lang: v }),
 })
 
+// ================== 接入方式：本地 Qwen3-TTS / GPUStack 局域网 ==================
+// local    = 本地或局域网里的 Qwen3-TTS-AllinOne（Gradio 7862 / FastAPI 9880）
+// gpustack = GPUStack 部署的 Qwen3-TTS（OpenAI 兼容 /v1-openai/audio/speech，可跨局域网）
+const qwen3Deploy = computed({
+  get: () => (store.AIconfig.tts.qwen3?.deploy === 'gpustack' ? 'gpustack' : 'local'),
+  set: (v: string) => store.updateQwen3TTS({ deploy: v === 'gpustack' ? 'gpustack' : 'local' }),
+})
+
+const gpustackConfig = computed<any>(() => store.AIconfig.tts.qwen3?.gpustack || {})
+
+// GPUStack 模型 / 音色下拉（当前值不在服务端列表里时先列出来，避免下拉变空白）
+const gpuStackModels = computed<string[]>(() => {
+  const list = (gpustackConfig.value.availableModels || []) as string[]
+  const models = Array.isArray(list) ? list.filter(Boolean) : []
+  const current = String(gpustackConfig.value.model || '').trim()
+  if (current && !models.includes(current)) return [current, ...models]
+  return models
+})
+const gpuStackVoices = computed<string[]>(() => {
+  const list = (gpustackConfig.value.availableVoices || []) as string[]
+  const voices = Array.isArray(list) ? list.filter(Boolean) : []
+  const current = String(gpustackConfig.value.voice || '').trim()
+  if (current && !voices.includes(current)) return [current, ...voices]
+  return voices
+})
+const gpuStackModelsLoading = computed(() => !!gpustackConfig.value.loadingModels)
+const gpuStackVoicesLoading = computed(() => !!gpustackConfig.value.loadingVoices)
+
 const qwen3Hint = computed(() => {
   const zh = store.locales === 'zh'
   const q = store.AIconfig.tts.qwen3 || {}
+  if (qwen3Deploy.value === 'gpustack') {
+    return zh
+      ? 'GPUStack：填服务地址（如 http://192.168.1.10:8080，粘贴 /v1-openai 也能识别）+ API 密钥，模型选 GPUStack 里部署的 Qwen3-TTS。请求走 OpenAI 兼容的 /v1-openai/audio/speech（自动回退 /v1），局域网内其它电脑也能连；音色列表部分后端不提供，可直接手填。'
+      : 'GPUStack: enter the server URL (e.g. http://192.168.1.10:8080; a pasted /v1-openai is fine) and API key, then pick the Qwen3-TTS model deployed in GPUStack. Requests use the OpenAI-compatible /v1-openai/audio/speech (falls back to /v1) over your LAN. Some backends have no voice list — type the voice name instead.'
+  }
   const transport = q.transport === 'gradio'
     ? (zh ? 'Gradio /do_job（网页服务）' : 'Gradio /do_job (web UI)')
     : q.transport === 'api'
@@ -96,11 +129,73 @@ async function refreshQwen3Voices(silent = false) {
   }
 }
 
-// 改地址 / 改协议：清掉接口探测缓存，重新拉一次音色（静默，失败只在设置里显示原因）
+async function refreshGpuStackModels(silent = false) {
+  if (gpuStackModelsLoading.value) return
+  const res = await store.loadGpuStackModels()
+  if (res.success) {
+    if (!silent) ElMessage.success(res.message)
+  } else if (!silent) {
+    ElMessage.error(res.message)
+  }
+}
+
+async function refreshGpuStackVoices(silent = false) {
+  if (gpuStackVoicesLoading.value) return
+  const res = await store.loadQwen3TTSVoices()
+  if (res.success) {
+    if (!silent) ElMessage.success(res.message)
+  } else if (!silent) {
+    ElMessage.error(res.message)
+  }
+}
+
+// 改地址 / 改协议 / 换接入方式：清掉接口探测缓存，并静默补拉一次列表
 function onQwen3EndpointChanged() {
   resetQwen3Cache()
   store.updateQwen3TTS({ transport: '' })
+  if (qwen3Deploy.value === 'gpustack') {
+    const gs = gpustackConfig.value
+    if (!gpuStackModels.value.length && !gs.loadingModels && !gs.modelsError) void refreshGpuStackModels(true)
+    return
+  }
   if (!qwen3Voices.value.length) void refreshQwen3Voices(true)
+}
+
+// 换接入方式：清缓存，补拉新方式需要的列表
+// （读事件里的值，避免 v-model 与 @change 的触发顺序影响判断）
+function onDeployChanged(ev?: Event) {
+  const mode = String((ev?.target as any)?.value || qwen3Deploy.value)
+  resetQwen3Cache()
+  store.updateQwen3TTS({ transport: '' })
+  if (mode === 'gpustack') {
+    const gs = gpustackConfig.value
+    if (!gpuStackModels.value.length && !gs.loadingModels && !gs.modelsError) void refreshGpuStackModels(true)
+    return
+  }
+  if (!qwen3Voices.value.length) void refreshQwen3Voices(true)
+}
+
+// GPUStack 地址变了：旧列表作废，重新拉模型（音色等选定模型后再拉）
+function onGpuStackEndpointChanged() {
+  resetQwen3Cache()
+  const gs = gpustackConfig.value
+  gs.availableModels = []
+  gs.availableVoices = []
+  gs.modelsError = ''
+  gs.voicesError = ''
+  store.updateQwen3TTS({ transport: '' })
+  store.saveConfig()
+  void refreshGpuStackModels(true)
+}
+
+// GPUStack 换模型：音色随模型变，清空后重拉
+function onGpuStackModelChanged() {
+  const gs = gpustackConfig.value
+  gs.availableVoices = []
+  gs.voicesError = ''
+  gs.voice = ''
+  store.updateQwen3TTS({})
+  if (String(gs.model || '').trim()) void refreshGpuStackVoices(true)
 }
 
 async function testQwen3Connection() {
@@ -111,8 +206,13 @@ async function testQwen3Connection() {
 
 // 切到 Qwen3-TTS 且列表为空时自动拉一次（失败后不反复重试，等用户点刷新）
 watch(() => store.AIconfig.tts.type, (type) => {
-  const q = store.AIconfig.tts.qwen3
   if (type !== 'Qwen3-TTS') return
+  if (qwen3Deploy.value === 'gpustack') {
+    const gs = gpustackConfig.value
+    if (!gpuStackModels.value.length && !gs.loadingModels && !gs.modelsError) void refreshGpuStackModels(true)
+    return
+  }
+  const q = store.AIconfig.tts.qwen3
   if (qwen3Voices.value.length || qwen3VoicesLoading.value || q?.voicesError) return
   void refreshQwen3Voices(true)
 }, { immediate: true })
@@ -445,19 +545,25 @@ async function synthRemote(text: string): Promise<{ buffer: ArrayBuffer; format:
   const zh = store.locales === 'zh'
   const cfg = store.AIconfig.tts
   const isQwen = cfg.type === 'Qwen3-TTS'
-  const base = (cfg.url || '').trim()
+  const q = cfg.qwen3 || {}
+  const gs = q.gpustack || ({} as any)
+  const isGpuStack = isQwen && q.deploy === 'gpustack'
+  const base = String(isGpuStack ? (gs.url || '') : (cfg.url || '')).trim()
   if (!base) throw new Error(zh ? '未配置 TTS 服务地址' : 'TTS service URL not configured')
   const cleaned = text.replace(/\s+/g, ' ').trim()
   if (isQwen) {
-    // Qwen3-TTS：按存储的接口配置合成（Gradio /do_job 或直连接口，自动探测）
-    const q = cfg.qwen3 || {}
+    // Qwen3-TTS：本地按接口协议自动探测（Gradio /do_job 或直连接口）；GPUStack 走 OpenAI 兼容 /audio/speech
     const res = await qwen3Synthesize({
+      deploy: isGpuStack ? 'gpustack' : 'local',
       base,
+      apiKey: gs.apiKey,
+      model: gs.model,
+      responseFormat: gs.responseFormat,
       protocol: q.protocol,
-      voice: cfg.voice,
-      lang: q.lang ?? cfg.language,
+      voice: isGpuStack ? gs.voice : cfg.voice,
+      lang: isGpuStack ? (gs.lang || 'Auto') : (q.lang ?? cfg.language),
       modelType: q.modelType,
-      speed: q.speed ?? cfg.rate,
+      speed: isGpuStack ? (gs.speed ?? q.speed ?? cfg.rate) : (q.speed ?? cfg.rate),
       chunkSize: q.chunkSize,
       batch: q.batch,
       timeoutMs: 180000,
@@ -639,8 +745,17 @@ onUnmounted(() => {
         <input type="number" v-model="store.AIconfig.tts.weight" min="0" max="1" step="0.1" :placeholder="store.locales=='zh'?'0-1之间的权重' : 'Weight between 0-1'"/>
       </div>
     </div>
-    <!-- Qwen3-TTS设置（Qwen3-TTS-AllinOne：Gradio 网页服务 7862 / FastAPI 直连接口 9880） -->
+    <!-- Qwen3-TTS设置：本地 Qwen3-TTS-AllinOne（Gradio 7862 / 直连 9880）或 GPUStack（OpenAI 兼容，局域网） -->
     <div v-if="store.AIconfig.tts.type === 'Qwen3-TTS'">
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'接入方式' : 'Deployment' }}</label>
+        <select v-model="qwen3Deploy" @change="onDeployChanged">
+          <option value="local">{{ store.locales=='zh'?'本地 / 自建 Qwen3-TTS（Gradio 7862 · 直连 9880）' : 'Local / self-hosted Qwen3-TTS (Gradio 7862 · API 9880)' }}</option>
+          <option value="gpustack">{{ store.locales=='zh'?'GPUStack（局域网 · OpenAI 兼容）' : 'GPUStack (LAN · OpenAI-compatible)' }}</option>
+        </select>
+      </div>
+
+      <template v-if="qwen3Deploy === 'local'">
       <div class="form-group">
         <label>{{ store.locales=='zh'?'服务地址' : 'Service URL' }}</label>
         <input v-model="store.AIconfig.tts.url" @change="onQwen3EndpointChanged"
@@ -771,6 +886,99 @@ onUnmounted(() => {
         <label></label>
         <div class="config-description qwen3-error" style="margin-left:0;">⚠ {{ store.AIconfig.tts.qwen3.voicesError }}</div>
       </div>
+      </template>
+
+      <!-- GPUStack：局域网部署的 Qwen3-TTS，走 OpenAI 兼容 /v1-openai/audio/speech -->
+      <template v-else>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'服务地址' : 'Server URL' }}</label>
+          <input v-model="gpustackConfig.url" @change="onGpuStackEndpointChanged"
+                 :title="store.locales=='zh'?'GPUStack 服务地址（可带 /v1-openai 或尾斜杠）；局域网填它的内网 IP，如 http://192.168.1.10:8080' : 'GPUStack server URL (a trailing /v1-openai or slash is fine); use the LAN IP, e.g. http://192.168.1.10:8080'"
+                 :placeholder="'http://192.168.1.10:8080'"/>
+        </div>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'API 密钥' : 'API Key' }}</label>
+          <input type="password" v-model="gpustackConfig.apiKey" @change="store.saveConfig"
+                 :title="store.locales=='zh'?'GPUStack 的 API Key（在 GPUStack 界面「API Key 管理」里生成）；没开鉴权就留空' : 'GPUStack API key (create it in GPUStack → API Key Management); leave empty if auth is off'"
+                 :placeholder="store.locales=='zh'?'没开鉴权可留空' : 'Leave empty if auth is off'"/>
+        </div>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'模型' : 'Model' }}</label>
+          <div class="input-with-button">
+            <select v-if="gpuStackModels.length" v-model="gpustackConfig.model" @change="onGpuStackModelChanged" style="flex:1; min-width:0;">
+              <option v-for="m in gpuStackModels" :key="m" :value="m">{{ m }}</option>
+            </select>
+            <input v-else v-model="gpustackConfig.model" @change="onGpuStackModelChanged"
+                   :placeholder="store.locales=='zh'?'如 qwen3-tts（点刷新从 GPUStack 列表选择）' : 'e.g. qwen3-tts (refresh to pick from GPUStack)'"/>
+            <div class="button" style="width:32px;" @click="refreshGpuStackModels(false)"
+                 :title="store.locales=='zh'?'从 /v1-openai/models 刷新模型列表' : 'Refresh models from /v1-openai/models'">
+              <i :class="gpuStackModelsLoading ? 'fa fa-spinner fa-spin' : 'fa fa-refresh'"></i>
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'音色' : 'Voice' }}</label>
+          <div class="input-with-button">
+            <select v-if="gpuStackVoices.length" v-model="gpustackConfig.voice" @change="store.saveConfig" style="flex:1; min-width:0;">
+              <option v-for="v in gpuStackVoices" :key="v" :value="v">{{ v }}</option>
+            </select>
+            <input v-else v-model="gpustackConfig.voice" @change="store.saveConfig"
+                   :placeholder="store.locales=='zh'?'留空 = 服务端默认音色，也可手填' : 'Empty = server default; or type a voice'"/>
+            <div class="button" style="width:32px;" @click="refreshGpuStackVoices(false)"
+                 :title="store.locales=='zh'?'从 /v1-openai/audio/voices 刷新音色（部分后端没有这个接口）' : 'Refresh voices from /v1-openai/audio/voices (not every backend has it)'">
+              <i :class="gpuStackVoicesLoading ? 'fa fa-spinner fa-spin' : 'fa fa-refresh'"></i>
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'语言' : 'Language' }}</label>
+          <select v-model="gpustackConfig.lang" @change="store.saveConfig">
+            <option v-for="l in qwen3Langs" :key="l.value" :value="l.value">{{ store.locales=='zh' ? l.zh : l.en }}</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'输出格式' : 'Format' }}</label>
+          <select v-model="gpustackConfig.responseFormat" @change="store.saveConfig">
+            <option value="wav">{{ store.locales=='zh'?'wav（兼容最好）' : 'wav (most compatible)' }}</option>
+            <option value="mp3">{{ store.locales=='zh'?'mp3（体积小）' : 'mp3 (smaller)' }}</option>
+            <option value="flac">flac</option>
+            <option value="opus">opus</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'语速' : 'Speed' }}</label>
+          <input type="range" min="0.25" max="4" step="0.05" v-model.number="gpustackConfig.speed" @change="store.saveConfig"/>
+          <span class="range-value">{{ (gpustackConfig.speed || 1).toFixed(2) }}</span>
+        </div>
+        <div class="form-group">
+          <label>{{ store.locales=='zh'?'连接' : 'Connection' }}</label>
+          <div class="button-group">
+            <div class="button" @click="testQwen3Connection" :title="store.locales=='zh'?'读取模型列表并拉一次音色列表' : 'Read the model list and fetch voices'">
+              <i class="fa fa-plug"></i> {{ store.locales=='zh'?'测试连接' : 'Test connection' }}
+            </div>
+            <div class="button" @click="refreshGpuStackModels(false)" :title="store.locales=='zh'?'刷新模型列表' : 'Refresh models'">
+              <i :class="gpuStackModelsLoading ? 'fa fa-spinner fa-spin' : 'fa fa-list'"></i> {{ store.locales=='zh'?'刷新模型' : 'Refresh models' }}
+            </div>
+            <div class="button" @click="refreshGpuStackVoices(false)" :title="store.locales=='zh'?'刷新音色列表' : 'Refresh voices'">
+              <i :class="gpuStackVoicesLoading ? 'fa fa-spinner fa-spin' : 'fa fa-refresh'"></i> {{ store.locales=='zh'?'刷新音色' : 'Refresh voices' }}
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label></label>
+          <div class="config-description" style="margin-left:0; line-height:1.5;">{{ qwen3Hint }}</div>
+        </div>
+        <!-- 模型 / 音色列表拉取失败的原因（静默自动拉取时也能看到） -->
+        <div v-if="gpustackConfig.modelsError" class="form-group">
+          <label></label>
+          <div class="config-description qwen3-error" style="margin-left:0;">⚠ {{ gpustackConfig.modelsError }}</div>
+        </div>
+        <div v-if="gpustackConfig.voicesError" class="form-group">
+          <label></label>
+          <div class="config-description qwen3-error" style="margin-left:0;">⚠ {{ gpustackConfig.voicesError }}</div>
+        </div>
+      </template>
     </div>
 
     <!-- 本地 ONNX TTS 设置（Kokoro / Piper，主进程 sherpa-onnx 离线合成） -->

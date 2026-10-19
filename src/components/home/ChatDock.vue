@@ -88,12 +88,20 @@
       </div>
 
       <template v-for="tab in tabs" :key="tab.id">
-        <div v-if="everActive.has(tab.id)" v-show="tab.id === activeTabId" class="dock-pane">
+        <!-- ⚠️ 文件标签只在**当前激活**时挂载：编辑器视图读的是全局「当前文件」
+             （store.data[store.index]），同时挂载两个文件会把内容互相覆盖。
+             工具页（文件树 / 终端 / 浏览器）仍用 everActive + v-show，切回来不丢状态。 -->
+        <div
+          v-if="tab.kind === 'file' ? tab.id === activeTabId : everActive.has(tab.id)"
+          v-show="tab.id === activeTabId"
+          class="dock-pane"
+        >
           <ChatDockFiles
             v-if="tab.kind === 'files'"
             :active="tab.id === activeTabId"
             :root-path="chatWorkspace"
             @insert-text="(t: string) => emit('insert-text', t)"
+            @open-file="(p: any) => emit('open-file', p)"
           />
           <ChatDockTerminal
             v-else-if="tab.kind === 'terminal'"
@@ -107,6 +115,14 @@
             :active="tab.id === activeTabId"
             :occluded="occluded"
           />
+          <!-- 文件标签：复用文件窗口（含多视图选择），见 ChatDockFile.vue -->
+          <ChatDockFile
+            v-else-if="tab.kind === 'file'"
+            :ref="setFilePaneRef"
+            :path="tab.path || ''"
+            :view="tab.view"
+            @update:view="(v: string) => emit('tab-view-change', tab.id, v)"
+          />
         </div>
       </template>
     </div>
@@ -118,6 +134,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ChatDockFiles from './ChatDockFiles.vue'
 import ChatDockTerminal from './ChatDockTerminal.vue'
 import ChatDockBrowser from './ChatDockBrowser.vue'
+import ChatDockFile from './ChatDockFile.vue'
 import {
   DOCK_TAB_KINDS,
   dockTabTitle,
@@ -147,6 +164,10 @@ const emit = defineEmits<{
   (e: 'close-tab', id: string): void
   (e: 'close'): void
   (e: 'insert-text', text: string): void
+  /** 文件树里点了某个文件：宿主把它作为 file 标签打开 */
+  (e: 'open-file', payload: { path: string; view?: string; label?: string }): void
+  /** 文件标签里切换了视图：宿主写回该标签的 view */
+  (e: 'tab-view-change', id: string, view: string): void
 }>()
 
 const zh = computed(() => props.zh)
@@ -154,6 +175,7 @@ const zh = computed(() => props.zh)
 function kindIcon(kind: ChatDockTabKind): string {
   if (kind === 'terminal') return 'fa-terminal'
   if (kind === 'browser') return 'fa-globe'
+  if (kind === 'file') return 'fa-file-text-o'
   return 'fa-folder-open-o'
 }
 function kindLabel(kind: ChatDockTabKind): string {
@@ -238,6 +260,28 @@ const onResizeDown = (e: PointerEvent) => {
 onBeforeUnmount(() => {
   if (resizeState) onResizeUp()
 })
+
+// ===== 文件标签的未保存守卫 =====
+// 同一时刻只会挂载一个文件标签（见模板注释），所以只留最近一次挂载的实例即可。
+// 用函数 ref 而不是 v-for 的数组 ref：卸载旧实例时传 null，这里忽略，避免把新实例覆盖掉。
+let activeFilePane: any = null
+function setFilePaneRef(el: any) {
+  if (el) activeFilePane = el
+}
+/**
+ * 宿主（home.vue）在切标签 / 关标签 / 收起侧栏前调用：
+ * 当前是文件标签时，让文件视图处理未保存内容（保存 / 不保存 / 取消）；
+ * 返回 false 表示用户取消，宿主应放弃本次切换。
+ */
+async function confirmLeaveActive(): Promise<boolean> {
+  const active = props.tabs.find((t) => t.id === props.activeTabId)
+  if (!active || active.kind !== 'file') return true
+  if (!activeFilePane) return true
+  const ok = await activeFilePane.confirmLeave?.()
+  return ok !== false
+}
+
+defineExpose({ confirmLeaveActive })
 </script>
 
 <style scoped>

@@ -74,6 +74,10 @@
       {
         "from": "resources/native",
         "to": "native"
+      },
+      {
+        "from": "resources/file-icons",
+        "to": "file-icons"
       }
     ],
     "compression": "maximum",

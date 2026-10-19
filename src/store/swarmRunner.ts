@@ -793,10 +793,14 @@ async function runEpisode(ctx: SwarmRuntimeContext, opts: { resume?: boolean } =
  * 发起一次集群运行。
  * @param rawTask 任务文本（由调用方从对话输入框捕获，集群不维护自己的输入状态）
  * @param modeOverride 本次临时覆盖的运行方式（缺省用集群默认模式）
+ * @param opts.context 仅注入给成员模型的附件路径（不写进群聊「我」消息）
  */
-export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode, opts: { resume?: boolean } = {}) => {
+export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode, opts: { resume?: boolean; context?: string } = {}) => {
   const taskText = String(rawTask || '').trim()
   if (!taskText || !canRun.value) return
+  // 智能体 / 集群模式的附件只给路径：成员需要时用自己的文件工具读取
+  const attachmentContext = String(opts.context || '').trim()
+  const agentTask = attachmentContext ? `${attachmentContext}\n\n${taskText}` : taskText
   // 本次运行所使用的模式：modeOverride 为本次临时覆盖（发送框），否则用默认模式
   const runMode = modeOverride ?? swarmMode.value
   // 本次运行所属代际：切换预案（runEpoch 递增）后，旧运行不再写当前集群 UI
@@ -836,7 +840,7 @@ export const runSwarm = async (rawTask: string, modeOverride?: SwarmRunMode, opt
 
   // 组装策略运行时上下文
   const ctx: SwarmRuntimeContext = {
-    task: taskText,
+    task: agentTask,
     selectedIndices: allIndices,
     mode: runMode,
     debateRounds: debateRounds.value,
@@ -914,9 +918,12 @@ export const resumeSwarm = async (chatId?: string): Promise<void> => {
 // 点名执行（@成员 → 直接唤起，不经管理器/策略；并行对点名人各自执行并汇报）
 // ---------------------------------------------------------------------------
 
-export const runNamedTask = async (indices: number[], prompt: string): Promise<void> => {
+export const runNamedTask = async (indices: number[], prompt: string, opts: { context?: string } = {}): Promise<void> => {
   const targets = [...new Set(indices)].filter(i => i >= 0 && i < agents.value.length)
   if (!prompt.trim() || running.value || targets.length === 0) return
+  // 附件路径只交给被点名的成员，群聊「我」消息仍只显示用户输入
+  const attachmentContext = String(opts.context || '').trim()
+  const agentPrompt = attachmentContext ? `${attachmentContext}\n\n${prompt}` : prompt
   const en = store.locales === 'en'
   // 本次点名所属运行代际：切换预案后不写当前集群 UI
   const myEpoch = runEpoch.value
@@ -953,7 +960,7 @@ export const runNamedTask = async (indices: number[], prompt: string): Promise<v
   addOutput('user', store.locales === 'en' ? 'You' : '我', prompt)
 
   try {
-    await Promise.all(targets.map(idx => executeAgent(idx, prompt, { stage: en ? 'Named' : '点名', role: 'worker' })))
+    await Promise.all(targets.map(idx => executeAgent(idx, agentPrompt, { stage: en ? 'Named' : '点名', role: 'worker' })))
   } catch (err: any) {
     if (runEpoch.value === myEpoch) {
       addOutput('system', '错误', `${err?.message || err}`)

@@ -34,7 +34,7 @@ export interface PendingQueueItem {
   /** 插队标记：Ctrl+Enter 入队 / 面板置顶，排在普通排队条目之前，且不入自动投递节流 */
   pinned?: boolean
   /** 附件 chips（与 ChatMessage.fileAttachments 同形状；内容为空表示只存展示） */
-  fileAttachments?: Array<{ name: string; content: string; charCount: number }>
+  fileAttachments?: Array<{ name: string; content: string; charCount: number; path?: string }>
   /** 图片（data URL；图片不落盘，重载后丢失） */
   images?: string[]
 }

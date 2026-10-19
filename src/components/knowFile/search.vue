@@ -3,6 +3,8 @@
   import {usestore} from '@/store'
 import { getPlatform, hasCapability } from '@/platform'
   const store=usestore()
+  /** 宿主（explorer）提供：右侧文件标签有未保存内容时先询问，返回 false 取消打开 */
+  const props = defineProps<{ guardLeave?: () => Promise<boolean> }>()
   let localResults=ref([]) as any
   let ifloading = ref(false)
   //搜索并过滤文件
@@ -10,10 +12,11 @@ import { getPlatform, hasCapability } from '@/platform'
   let timer = ref(null) as any
   // 注意：打开文件后**不关闭**搜索面板（不再向外抛事件），方便连续打开多个结果；
   // 关闭方式仍为右上角 ✕ / Esc / 点击浮层外空白处（见 explorer.vue）。
-  const open=(data:any)=>{
+  const open=async (data:any)=>{
     if (!data || !data.path) return
-    // 打开文件：一律在独立窗口打开（与文件树 / 看板 / 表格的打开方式一致）
-    // （文件夹则进入该目录）
+    // 先处理右侧文件标签的未保存内容（单窗口模式下搜索会切到新的文件标签）
+    if (props.guardLeave && !(await props.guardLeave())) return
+    // 打开文件：走应用统一调度（单窗口 → 右侧标签；多窗口 → 独立窗口）；文件夹则进入该目录
     store.openFileByMode({
       path: data.path,
       label: data.label,

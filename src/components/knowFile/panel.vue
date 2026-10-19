@@ -14,8 +14,23 @@
   
   const store = usestore()
 
+  const props = defineProps<{
+    /**
+     * 打开文件前的守卫（宿主 explorer 提供）：右侧有正在编辑的文件标签时，
+     * 先让用户处理未保存内容；返回 false 表示取消本次打开。
+     * 远程文件的单击预览由本组件直接改 store，所以必须在这里也守一次。
+     */
+    guardLeave?: () => Promise<boolean>
+  }>()
+
   /** 宿主（explorer.vue）用 node-opened 收起细长窗口下的整屏文件树抽屉 */
-  const emit = defineEmits<{ (e: 'node-opened'): void }>()
+  const emit = defineEmits<{
+    (e: 'node-opened', data?: any): void
+    /** 文件：由宿主在右侧标签栏里以文件标签打开（不再新开窗口） */
+    (e: 'open-file', payload: { data: any; view?: string }): void
+    /** 显式要求另开窗口 / 浮层（宿主先处理当前文件标签的未保存内容） */
+    (e: 'open-standalone', payload: any): void
+  }>()
 
   const filterText = ref('') //搜索并过滤文件
   const treeRef = ref<InstanceType<typeof ElTree>>() //树状图数据
@@ -49,15 +64,15 @@
   /** 打开文件 / 进入目录（单击即打开与双击打开共用同一套分发） */
   const openOrEnterNode = (data: any) => {
     // 通知宿主（explorer）：细长窗口下据此收起整屏文件树抽屉，把屏幕让给右侧视图
-    emit('node-opened')
+    emit('node-opened', data)
     // 按节点类型分发：
-    //  - 文件：走 store.openFileByMode（与文件视图 view_file.vue 一致）——.kb 知识库跳转知识处理、
-    //    系统打开类交系统应用；其余用文件窗口打开（桌面独立窗口 / 安卓应用内浮层），并按扩展名选择浏览/源码视图
+    //  - 文件：交给宿主在右侧**标签栏**里打开（标签内容复用文件窗口的多视图选择）。
+    //    特殊文件（.kb / .task / .html / 系统打开类）由 store.openFileInTab 统一识别处理。
     //  - 文件夹（含工作区根目录）：只让右侧各视图定位到该目录；树本身不展开 /
     //    折叠（展开 / 折叠点节点左侧箭头，这样双击不会出现先开后收的闪动）；
     //    也绝不能当文件标签打开（文件夹被 addTab 后编辑视图会按文件读取目录 → EISDIR 报错）
     if (data.type === 'file') {
-      store.openFileByMode(data)
+      emit('open-file', { data })
       return
     }
     // 目录可能属于**另一个工作区**（不在当前 root 下）：先把它所属的工作区设为当前工作区，
@@ -271,9 +286,22 @@
     }
   }
 
+  /** 打开远程文件标签：加入 store.data 后请求 explorer 把右侧标签切到它 */
+  async function addRemoteTab(tab: any) {
+    await store.addTab(tab)
+    store.focusFileTab(tab.path)
+  }
+
   /** 点击远程文件：读取内容并打开预览标签 */
   const clickRemoteNode = async (data: any, opts?: { preview?: boolean }) => {
     if (!data || data.type !== 'file') return
+    // 多窗口模式：与历史行为一致，远程文件直接开独立窗口 / 浮层，不在主窗口里塞预览标签
+    if (!store.singleWindowMode) {
+      openRemoteByMode(data)
+      return
+    }
+    // 单窗口模式：远程预览会切到新的文件标签，先处理当前文件标签的未保存内容
+    if (props.guardLeave && !(await props.guardLeave())) return
     const root = remoteRootOf(data)
     if (!root) return
     const rel = relOfRemoteNode(root, data)
@@ -287,7 +315,7 @@
       if (IMG_EXTS.includes(extLower) || extLower === '.pdf') {
         const content = await fetchFsRead(root, rel)
         if (content?.base64 || content?.text) {
-          store.addTab({
+          await addRemoteTab({
             path: remotePathOf(root, rel),
             label: data.label,
             type: 'file',
@@ -311,7 +339,7 @@
         if (content?.base64) {
           const md: any = await getPlatform().host.docs.docxToMarkdown({ base64: content.base64 })
           if (typeof md === 'string' && md) {
-            store.addTab({
+            await addRemoteTab({
               path: remotePathOf(root, rel),
               label: data.label,
               type: 'file',
@@ -337,7 +365,7 @@
         await promptDownloadRemote(root, rel, data.label)
         return
       }
-      store.addTab({
+      await addRemoteTab({
         path: remotePathOf(root, rel),
         label: data.label,
         type: 'file',
@@ -396,7 +424,7 @@
     const rel = relOfRemoteNode(root, data)
     if (!rel) return
     const label = (data.label || rel.replace(/\\/g, '/').split('/').pop() || 'file')
-    store.openFileWindow({
+    emit('open-standalone', {
       path: remotePathOf(root, rel),
       view: 'read',
       remoteRootId: root.id,
@@ -785,6 +813,7 @@
   // 通过路径打开文件（统一交给 store.openFileByMode：一律在新窗口打开；知识库 .kb 走知识处理）
   const openFile = async function(path: any) {
     if(path != null){
+      if (props.guardLeave && !(await props.guardLeave())) return
       // 系统打开类文件：直接用系统默认应用打开，不进入应用内预览/编辑
       const ext = String(path).substring(String(path).lastIndexOf('.')).toLowerCase()
       if (SYSTEM_OPEN_EXTS.includes(ext)) {
@@ -1332,9 +1361,18 @@
 
   document.addEventListener('click', hideContextMenuOnDocClick);
 
-  // 新窗口打开文件（桌面独立窗口 / 单窗口环境应用内浮层，统一走 store.openFileWindow）
+  /**
+   * 右键「打开」子菜单：在右侧**标签页**中按指定视图打开文件（默认双击也是标签页）。
+   * 想另开窗口 / 应用内浮层时走下面的「在新窗口打开」。
+   */
   const openInNewWindow = async (path: string, view: string) => {
-    store.openFileWindow({ path, view })
+    const node = contextMenu.value.node || { path, type: 'file' }
+    emit('open-file', { data: { ...node, path }, view })
+  }
+
+  /** 右键「操作 → 在新窗口打开」：显式走窗口 / 浮层（宿主先处理当前文件标签的未保存内容） */
+  const openInStandaloneWindow = async (path: string) => {
+    emit('open-standalone', { path, view: store.defaultViewForPath(path) })
   }
 
   const hideContextMenu = () => {
@@ -1357,9 +1395,9 @@
     return store.data.some((d: any) => d.path === path)
   }
 
-  // 判断该节点是否为当前激活的标签
+  // 判断该节点是否为当前激活的文件标签（视图标签激活时没有激活文件）
   const isActiveTab = (path: string) => {
-    return store.data[store.index]?.path === path
+    return store.knowActiveFileTabPath === path
   }
 
 
@@ -1571,6 +1609,11 @@
         <span style="flex:1">{{ store.locales=='zh'?'操作':'Actions' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
+          <li @click="openInStandaloneWindow(contextMenu.node.path); hideContextMenu()">
+            <i class="fa fa-window-restore"></i> {{ store.locales!='zh'
+              ? (store.singleWindowMode ? 'Open in window' : 'Open in new window')
+              : (store.singleWindowMode ? '在窗口中打开' : '在新窗口打开') }}
+          </li>
           <li @click="revealInFolder(contextMenu.node); hideContextMenu()">
             <i class="fa fa-folder-open-o"></i> {{ revealLabel }}
           </li>

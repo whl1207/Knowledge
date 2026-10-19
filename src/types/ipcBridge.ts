@@ -19,6 +19,11 @@ export interface IpcRendererApi {
   removeAllListeners(channel: string): void
   send(channel: string, ...args: any[]): void
   invoke(channel: string, ...args: any[]): Promise<any>
+  /**
+   * 拖入窗口的 File 的磁盘真实路径（非磁盘来源返回空串）。
+   * Electron 32 起 `File.path` 已被移除，只能经 preload 的 webUtils 取回。
+   */
+  getPathForFile(file: File): string
 }
 
 /** 命名空间 IPC（preload 的 `dsh` 对象） */

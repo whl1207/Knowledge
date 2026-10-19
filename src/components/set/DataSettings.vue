@@ -70,8 +70,7 @@ const dataRows = computed(() => {
 /** 刷新统计：本机占用 / 可清理缓存 / 数据目录路径 / 会话日志会话数 */
 const refresh = async () => {
   lsBytes.value = lsTotalBytes()
-  const ipc: any = aikmIpcAvailable()
-  if (!ipc?.invoke) {
+  if (!aikmIpcAvailable()) {
     cacheBytes.value = 0
     dataDirPath.value = ''
     sessionLogCount.value = null
@@ -87,8 +86,7 @@ const refresh = async () => {
 
 /** 在系统文件管理器中打开本机数据目录（配置 / 缓存 / 会话日志所在位置） */
 const openDataDir = async () => {
-  const ipc: any = aikmIpcAvailable()
-  if (!ipc?.invoke) {
+  if (!aikmIpcAvailable()) {
     ElMessage.warning(zh() ? '浏览器模式下无法打开本机目录' : 'Not available in browser mode')
     return
   }
@@ -103,8 +101,7 @@ const openDataDir = async () => {
 
 /** 在系统文件管理器中打开数据目录下的子目录（如会话日志 session-logs；仅桌面版） */
 const openDataSubDir = async (sub: string) => {
-  const ipc: any = aikmIpcAvailable()
-  if (!ipc?.invoke) {
+  if (!aikmIpcAvailable()) {
     ElMessage.warning(zh() ? '浏览器模式下无法打开本机目录' : 'Not available in browser mode')
     return
   }
@@ -138,7 +135,6 @@ const cleanCache = async () => {
       zh() ? '提示' : 'Confirm',
       { confirmButtonText: zh() ? '清理' : 'Clean', cancelButtonText: zh() ? '取消' : 'Cancel', type: 'warning' }
     )
-    const ipc: any = aikmIpcAvailable()
     const res = await getPlatform().app.cleanUserdataCache()
     if (res?.ok) {
       ElMessage.success(zh() ? `已清理缓存 ${formatBytes(res.freed || 0)}` : `Cache cleaned: ${formatBytes(res.freed || 0)}`)

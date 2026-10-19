@@ -5,18 +5,28 @@
  * 并且会被反复读写（开关、拖宽、加/关标签、切标签）。这些规则不依赖 Vue / DOM，
  * 抽成纯函数后可以直接跑自测（见 chatDock.selftest.ts），避免存档脏数据把界面搞坏。
  *
- * 与 DSH 一致：标签类型只有三种 —— 文件 / 终端 / 浏览器。
+ * 工具页与 DSH 一致：文件 / 终端 / 浏览器；另外新增 `file` 类型承载「具体文件」标签
+ * （点右侧栏文件树里的文件后生成，内容复用文件窗口的多视图选择）。
  */
 
-/** 标签类型：文件、终端、浏览器（与 DSH 右侧栏一致） */
-export type ChatDockTabKind = 'files' | 'terminal' | 'browser'
+/**
+ * 标签类型：
+ *  - files / terminal / browser：右侧栏的「工具页」（DSH 同款）；
+ *  - file：**具体文件**（点文件树里的文件后生成，标签标题 = 文件名，内容自带多视图切换）。
+ * 后三种是用户从「+」菜单手动新建的；file 只能由打开文件产生（见 openFileDockTab）。
+ */
+export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'file'
 
 export interface ChatDockTab {
   /** 标签唯一 id（同类型可以开多个，如两个终端） */
   id: string
   kind: ChatDockTabKind
-  /** 自定义显示名（留空 = 按类型 + 序号自动命名） */
+  /** 自定义显示名（留空 = 按类型 + 序号自动命名；file 标签按文件名） */
   title?: string
+  /** file 标签：要显示的文件路径（绝对路径 / 远程虚拟路径） */
+  path?: string
+  /** file 标签：当前视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示 / Office 编辑） */
+  view?: string
 }
 
 export interface ChatDockState {
@@ -35,18 +45,25 @@ export const DOCK_DEFAULT_WIDTH = 360
 export const DOCK_MIN_WIDTH = 260
 export const DOCK_MAX_WIDTH = 900
 
-/** 可用的标签类型（顺序 = 「+」菜单里的顺序） */
+/** 「+」菜单可新建的标签类型（顺序 = 菜单顺序；file 标签只能由打开文件产生，不在此列） */
 export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser']
 
 const KIND_LABELS: Record<ChatDockTabKind, { zh: string; en: string }> = {
   files: { zh: '文件', en: 'Files' },
   terminal: { zh: '终端', en: 'Terminal' },
   browser: { zh: '浏览器', en: 'Browser' },
+  file: { zh: '文件', en: 'File' },
 }
 
 /** 类型是否合法（存档里出现未知类型时按非法处理） */
 export function isDockTabKind(value: unknown): value is ChatDockTabKind {
-  return value === 'files' || value === 'terminal' || value === 'browser'
+  return value === 'files' || value === 'terminal' || value === 'browser' || value === 'file'
+}
+
+/** 路径最后一段（file 标签的默认标题） */
+export function dockFileNameOf(path: unknown): string {
+  const parts = String(path || '').replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : String(path || '')
 }
 
 /** 宽度夹取：NaN / 越界 / 存档脏值一律落回合法区间 */
@@ -100,16 +117,31 @@ export function normalizeDockState(raw: unknown): ChatDockState {
 
   const parsed: ChatDockTab[] = []
   const seen = new Set<string>()
+  const seenFilePaths = new Set<string>()
   for (const t of Array.isArray(src.tabs) ? src.tabs : []) {
     if (!t || typeof t !== 'object') continue
     const kind = (t as ChatDockTab).kind
     const id = String((t as ChatDockTab).id ?? '')
     if (!isDockTabKind(kind) || !id || seen.has(id)) continue
+    const path = typeof (t as ChatDockTab).path === 'string' ? (t as ChatDockTab).path!.trim() : ''
+    // file 标签必须带路径；同一路径不重复占两个标签
+    if (kind === 'file') {
+      if (!path || seenFilePaths.has(path)) continue
+      seenFilePaths.add(path)
+    }
     seen.add(id)
     const title = typeof (t as ChatDockTab).title === 'string' && (t as ChatDockTab).title!.trim()
       ? (t as ChatDockTab).title!.trim()
       : undefined
-    parsed.push({ id, kind, ...(title ? { title } : {}) })
+    const view = typeof (t as ChatDockTab).view === 'string' && (t as ChatDockTab).view!.trim()
+      ? (t as ChatDockTab).view!.trim()
+      : undefined
+    parsed.push({
+      id,
+      kind,
+      ...(title ? { title } : {}),
+      ...(kind === 'file' ? { path, ...(view ? { view } : {}) } : {}),
+    })
   }
   const tabs = isLegacySeededTabs(parsed) ? [] : parsed
 
@@ -127,6 +159,8 @@ export function dockTabTitle(tab: ChatDockTab, tabs: readonly ChatDockTab[] = []
   const custom = tab?.title?.trim()
   if (custom) return custom
   const kind: ChatDockTabKind = isDockTabKind(tab?.kind) ? tab.kind : 'files'
+  // file 标签：标题永远是文件名（同类型多开也无需序号）
+  if (kind === 'file') return dockFileNameOf(tab?.path) || (zh ? '文件' : 'File')
   const label = zh ? KIND_LABELS[kind].zh : KIND_LABELS[kind].en
   const sameKind = (tabs || []).filter((t) => t?.kind === kind)
   if (sameKind.length <= 1) return label
@@ -139,6 +173,40 @@ export function addDockTab(state: ChatDockState, kind: ChatDockTabKind, seed = D
   if (!isDockTabKind(kind)) return state
   const tab = createDockTab(kind, state.tabs, seed)
   return { ...state, open: true, tabs: [...state.tabs, tab], activeTabId: tab.id }
+}
+
+/**
+ * 在右侧栏打开一个文件：已有同路径的文件标签就切过去（并更新视图），否则新建一个 file 标签。
+ * 与「+」菜单新建工具页同一套状态：自动展开右侧栏、自动切到新标签。
+ */
+export function openFileDockTab(
+  state: ChatDockState,
+  path: string,
+  view?: string,
+  seed = Date.now(),
+): ChatDockState {
+  const clean = String(path || '').trim()
+  if (!clean) return state
+  const existing = state.tabs.find((t) => t.kind === 'file' && t.path === clean)
+  if (existing) {
+    const tabs = state.tabs.map((t) => (t.id === existing.id && view ? { ...t, view } : t))
+    return { ...state, open: true, tabs, activeTabId: existing.id }
+  }
+  const tab = createDockTab('file', state.tabs, seed)
+  const next: ChatDockTab = { id: tab.id, kind: 'file', path: clean, ...(view ? { view } : {}) }
+  return { ...state, open: true, tabs: [...state.tabs, next], activeTabId: next.id }
+}
+
+/** 记住某个 file 标签当前选择的视图（切换视图时由宿主写回） */
+export function setDockTabView(state: ChatDockState, id: string, view: string): ChatDockState {
+  if (!id || !view) return state
+  const index = state.tabs.findIndex((t) => t.id === id)
+  if (index < 0) return state
+  const tab = state.tabs[index]
+  if (tab.view === view) return state
+  const tabs = state.tabs.slice()
+  tabs[index] = { ...tab, view }
+  return { ...state, tabs }
 }
 
 /**

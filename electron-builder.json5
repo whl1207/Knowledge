@@ -35,6 +35,11 @@
     {
       "from": "resources/native",
       "to": "native"
+    },
+    {
+      // 文件关联用的各类型图标（DefaultIcon 指向其副本，见 electron/main/file-assoc.ts）
+      "from": "resources/file-icons",
+      "to": "file-icons"
     }
   ],
   "mac": {

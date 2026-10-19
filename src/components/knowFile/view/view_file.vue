@@ -10,6 +10,7 @@ import { isAudioExt, isVideoExt, extractAlbumArt } from '@/lib/knowFile/mediaMet
 // 文件系统变更：全局单例订阅 + 目录监听租约（见 lib/knowFile/fileWatch.ts）
 import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
 import { getPlatform, hasCapability, getRuntimeKind } from '@/platform'
+import { droppedFilePath } from '@/platform/droppedFile'
 
 // 获取数据
 const store = usestore()
@@ -847,15 +848,22 @@ const onContainerDrop = async function (e: DragEvent) {
   if (!files || !files.length) return
   const targetDir = store.path || store.root
   let n = 0
+  let unreadable = 0
   for (const f of Array.from(files)) {
-    const p = (f as any).path
-    if (!p) continue
+    // Electron 32 起没有 File.path：必须经 preload 的 webUtils 取真实路径
+    const p = droppedFilePath(f)
+    if (!p) { unreadable++; continue }
     const res = await getPlatform().fs.copyFile(p, targetDir)
     if (res && res.success) n++
   }
   if (n) {
     await getData()
     ElMessage.success(store.locales == 'zh' ? `已导入 ${n} 项` : `Imported ${n}`)
+  }
+  if (unreadable) {
+    ElMessage.warning(store.locales == 'zh'
+      ? `${unreadable} 个文件取不到磁盘路径（网页 / 虚拟文件来源），未导入`
+      : `${unreadable} file(s) had no disk path (web / virtual source) and were skipped`)
   }
 }
 const onDragEnd = function () {

@@ -44,6 +44,7 @@ import { presetPresentation } from '@/lib/agent/ptc'
 import type { Chat, ChatMessage, UploadItem } from '@/types/chat'
 import type { AgentOptions } from '@/types/agent'
 import { normalizeAgentMaxSteps, resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
+import { buildAgentAttachmentContext } from '@/shared/fileAttachmentContext'
 import { normalizeLlmType, resolveLlmSource, resolvePresetLlmType, resolvePresetModel } from '@/shared/llmSources'
 import { AIUtils } from '@/shared/ai-core'
 import { prepareImageDataUrl } from '@/lib/image/prepareImage'
@@ -652,15 +653,13 @@ export function useAgentRun(deps: AgentRunDeps) {
   }
 
   /**
-   * 上传的文本附件 → 任务前缀（与普通聊天 home.vue 同一格式）。
+   * 附件 → 任务前缀：智能体模式**只注入附件路径**（正文由模型用文件工具按需读取），
+   * 不再把 Word / Excel / Markdown 全文塞进 prompt（省 token，也避免同一内容读两遍）。
    * 仅进模型上下文，不写进聊天气泡正文（气泡另有附件 chips）。
    */
   const withFileAttachments = (message: string, fileAttachments?: ChatMessage['fileAttachments']): string => {
     if (!fileAttachments || fileAttachments.length === 0) return message
-    const fileBlocks = fileAttachments.map((f: any) =>
-      `[文件: ${f.name} (${f.charCount}字)]\n\`\`\`\n${f.content}\n\`\`\``
-    )
-    const fileContext = fileBlocks.join('\n\n')
+    const fileContext = buildAgentAttachmentContext(fileAttachments)
     return message ? `${fileContext}\n\n${message}` : fileContext
   }
 

@@ -1,4 +1,4 @@
-import { ipcRenderer, contextBridge } from 'electron'
+import { ipcRenderer, contextBridge, webUtils } from 'electron'
 import type { AgentEvent, AgentOptions, AgentSummary, AgentControl } from '@/types/agent'
 import type { SessionEvent, DerivedMessage, SessionLogIntegrity } from '@/types/session-log'
 import type { ToolRegistrySnapshot, ToolResult, ToolExecutionContext } from '@/types/tool'
@@ -66,6 +66,23 @@ const api = {
       ipcWrapperRegistry.delete(channel)
     }
     return ipcRenderer
+  },
+
+  /**
+   * 拖入窗口的 File 在磁盘上的真实路径（非磁盘来源返回空串）。
+   *
+   * 为什么必须由 preload 代取：Chromium 从 Electron 32 起移除了非标准的 `File.path`，
+   * 渲染层再也拿不到拖入文件的路径（只剩文件名）。没有真路径就只能按文件名去读，
+   * 主进程必然 ENOENT —— 这正是「Word / Excel / Markdown 拖进首页提示读取失败」的根因。
+   * `webUtils.getPathForFile` 只能看到渲染层的 File 对象，所以必须放在 preload 这一侧。
+   */
+  getPathForFile(file: File): string {
+    try {
+      return webUtils.getPathForFile(file) || ''
+    } catch {
+      // 跨 realm 传参异常 / 非磁盘来源：返回空串，由调用方走「无路径」兜底
+      return ''
+    }
   },
 
   // You can expose other APTs you need here.

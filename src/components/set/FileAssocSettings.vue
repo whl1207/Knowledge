@@ -22,9 +22,12 @@
       </div>
 
       <template v-else-if="info && info.supported">
-        <!-- 文件类型列表：一行 = label（类型名）+ 关联级别下拉 -->
+        <!-- 文件类型列表：一行 = 类型图标 + label（类型名）+ 关联级别下拉 -->
         <div class="form-group" v-for="e in info.entries" :key="e.key">
-          <label :title="labelTitle(e)">{{ zh ? e.labelZh : e.labelEn }}</label>
+          <label :title="labelTitle(e)">
+            <img v-if="iconOf(e.key)" class="fa-type-icon" :src="iconOf(e.key)" alt="" />
+            <span class="fa-type-name">{{ zh ? e.labelZh : e.labelEn }}</span>
+          </label>
           <select
             v-if="isSelectable(e)"
             class="layout-select"
@@ -81,13 +84,15 @@ const loading = ref(true)
 const busy = ref(false)
 const info = ref<any>(null)
 const states = ref<Record<string, { mode: string; userChoice?: string }>>({})
+/** key → 类型图标的 PNG data URL（主进程随状态一起下发，只有 Windows 有） */
+const icons = ref<Record<string, string>>({})
 /** 文件关联是应用壳能力（桌面主进程维护），网页端没有 */
 const hasIpc = hasCapability('app.shell')
 
 // ---------- 文案 ----------
 const intro = computed(() => zh.value
-  ? '选择哪些文件类型由本软件打开。安装版在安装时已注册这些类型（PDF 除外）；此处可随时调整（写入当前用户，无需管理员权限）。「设为默认」会让双击该类型文件直接在本软件的新窗口中打开。PDF 默认不关联，以免抢占系统 PDF 阅读器，需要时请在此手动选择。'
-  : 'Choose which file types open with this app. The installer already registers them (except PDF); you can adjust at any time (current-user scope, no admin rights). "Set as default" makes double-click open the file in a new app window. PDF is deliberately not associated by default so your system PDF reader stays in charge — pick it here if you want it.')
+  ? '选择哪些文件类型由本软件打开。安装版在安装时已注册这些类型（PDF 除外）；此处可随时调整（写入当前用户，无需管理员权限）。「设为默认」会让双击该类型文件直接在本软件的新窗口中打开。PDF 默认不关联，以免抢占系统 PDF 阅读器，需要时请在此手动选择。每个类型使用各自的图标（PDF 红色、Markdown 蓝色、代码深灰…），在资源管理器里一眼就能分清是哪种文件。'
+  : 'Choose which file types open with this app. The installer already registers them (except PDF); you can adjust at any time (current-user scope, no admin rights). "Set as default" makes double-click open the file in a new app window. PDF is deliberately not associated by default so your system PDF reader stays in charge — pick it here if you want it. Each type gets its own icon (red PDF, blue Markdown, dark code…), so files are easy to tell apart in Explorer.')
 
 const footer = computed(() => zh.value
   ? '提示：Windows 8 及以上版本中，若某类型已被用户通过「打开方式 → 始终使用此应用」选定过默认程序，系统会优先采用该选择（程序无法覆盖）——此时请右键文件 → 打开方式 → 选择其他应用 → AI-KM，并勾选「始终使用」。'
@@ -157,6 +162,7 @@ const extText = (e: any) => (e.exts || []).map((x: string) => '.' + x).join(' ')
 
 const stateOf = (key: string) => states.value[key] || { mode: 'none' }
 const modeOf = (key: string) => stateOf(key).mode || 'none'
+const iconOf = (key: string) => icons.value[key] || ''
 /** 该类型在当前平台是否可设置（Linux 上仅支持有 MIME 映射的类型） */
 const isSelectable = (e: any) => !!info.value?.supported && (info.value.platform !== 'linux' || !!e.mime)
 /** label 悬停提示：类型名 + 扩展名清单 */
@@ -168,6 +174,7 @@ const unsupportedText = computed(() => zh.value
 function applyState(data: any) {
   info.value = data
   states.value = { ...(data?.states || {}) }
+  icons.value = { ...(data?.icons || {}) }
 }
 
 async function load() {
@@ -267,13 +274,28 @@ onMounted(load)
 .form-group > * { margin: 0; }
 .form-group:last-child { margin-bottom: 0; }
 .form-group label {
-  width: 120px;
-  min-width: 120px;
+  width: 140px;
+  min-width: 140px;
   color: var(--fontColor);
   font-size: 14px;
   user-select: none;
   line-height: 1;
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+/* 类型图标：与资源管理器里的文件图标一致，方便核对哪个类型是哪个颜色 */
+.fa-type-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-right: 6px;
+  object-fit: contain;
+}
+.fa-type-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

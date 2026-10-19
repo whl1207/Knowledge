@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, globalShortcut, Menu, nativeImage, screen, net, session, clipboard } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, globalShortcut, Menu, nativeImage, screen, net, session, clipboard, type WebContents } from 'electron'
 import { release, networkInterfaces } from 'node:os'
 import { join, dirname, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -85,7 +85,7 @@ import { registerPythonAppIpc, disposePythonApps } from './python-app-service'
 import { registerCollabIpc, stopCollab } from './collab-service'
 import { registerRemoteFsIpc, stopRemoteFsAll } from './remote-fs-service'
 import { initMapTiles, registerMapTilesIpc } from './map-tiles'
-import { registerFileAssocIpc } from './file-assoc'
+import { registerFileAssocIpc, syncFileTypeIcons } from './file-assoc'
 import { getGlobalZoom, setGlobalZoom, stepZoom, excludeFromAppZoom } from './window-zoom'
 // 托盘（「托管区」）：关闭按钮行为（直接退出 / 折叠到托盘）+ 悬停显示后台任务数与进度
 import { trayService } from './tray-service'
@@ -396,6 +396,9 @@ app.whenReady().then(async () => {
   registerMapTilesIpc()
   // 文件关联（默认打开方式）读写：设置 → 其他 → 文件关联
   registerFileAssocIpc()
+  // 已关联类型的图标校正：安装包 / 旧版写入的 DefaultIcon 都是「软件图标」，这里换成
+  // 各类型自己的图标（PDF 红色、Markdown 蓝色…）。不阻塞启动，失败只记日志。
+  syncFileTypeIcons().catch((e) => console.warn('[file-assoc] 同步文件类型图标失败:', e))
   // 托盘（托管区）：读取「关闭按钮行为」配置 + 注册 app-behavior / tray:* IPC
   // （托盘图标本身随主窗口创建，见 createWindow；以 --browser 启动无主窗口时不建托盘）
   trayService.init({
@@ -1995,6 +1998,8 @@ ipcMain.handle('saveFileMetadata', async (event, filePath, metadata) => {
     const newContent = `---\n${yamlStr}---\n${rest}`
 
     fs.writeFileSync(filePath, newContent, 'utf8')
+    // 写 frontmatter 也是「自己改的」：不应在浏览视图弹「文件已修改」
+    markSelfWrite(filePath)
     return true
   } catch (error) {
     console.error('保存文件元数据失败:', error)
@@ -2901,7 +2906,9 @@ ipcMain.handle('readFile', async (event, filePath) => {
     return `Error reading file: ${e.message}`;
   }
   
-  const fileExtension = path.extname(filePath);
+  // 扩展名统一小写：Windows 上 .DOCX / .XLSX 很常见，原样比较会漏进「按纯文本读」分支，
+  // 把 zip 字节解成乱码（拖入/选择 Word、Excel 时表现为内容不对而不是报错）
+  const fileExtension = path.extname(filePath).toLowerCase();
   
   if (fileExtension == ".md" || fileExtension == "" || fileExtension == ".kb") {
     try {
@@ -3165,6 +3172,7 @@ ipcMain.handle('openAndReadFile', async (event, type) => {
 ipcMain.handle('saveFile', async (event, filePath, fileContent) => {
   try {
     fs.writeFileSync(filePath, fileContent);
+    markSelfWrite(filePath);
     return true;
   } catch (error) {
     console.error(error);
@@ -3177,6 +3185,7 @@ ipcMain.handle('writeFileBase64', async (event, filePath, base64) => {
   try {
     const pure = String(base64 || '').includes('base64,') ? String(base64).slice(String(base64).indexOf('base64,') + 7) : String(base64 || '')
     fs.writeFileSync(String(filePath), Buffer.from(pure, 'base64'));
+    markSelfWrite(String(filePath));
     return true;
   } catch (error) {
     console.error('[writeFileBase64]', error);
@@ -3189,6 +3198,7 @@ ipcMain.handle('writeFileBase64', async (event, filePath, base64) => {
 ipcMain.on('saveFileSync', (event, filePath, fileContent) => {
   try {
     fs.writeFileSync(String(filePath), String(fileContent ?? ''), 'utf8');
+    markSelfWrite(String(filePath));
     event.returnValue = true;
   } catch (error) {
     console.error('[saveFileSync] 写盘失败', error);
@@ -4099,6 +4109,7 @@ ipcMain.handle('writeFile', async (event, filePath, content) => {
     }
     
     fs.writeFileSync(filePath, content, 'utf8')
+    markSelfWrite(filePath)
     
     logInfo('main', `file written: ${filePath}`)
     return {
@@ -4124,6 +4135,7 @@ ipcMain.handle('writeBase64', async (event, filePath, base64) => {
     const directory = path.dirname(filePath)
     if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true })
     fs.writeFileSync(filePath, Buffer.from(String(base64 || ''), 'base64'))
+    markSelfWrite(filePath)
     return { success: true, path: filePath }
   } catch (error: any) {
     console.error(`[主进程] 写入二进制文件失败: ${filePath}`, error)
@@ -4275,48 +4287,145 @@ ipcMain.handle('stopWatching', async () => {
 
 // ==================== 单文件变更监听（用于预览自动刷新） ====================
 
-let fileWatcher: fs.FSWatcher | null = null
-let fileWatchPath: string | null = null
-let fileWatchTimeout: NodeJS.Timeout | null = null
+// ── 单文件变更监听（每个窗口可以各看各的文件） ──────────────────────────────
+// 旧实现只有**一个全局** watcher，而且事件只发给主窗口 `win`：
+// 用子窗口打开文件后，(1) 子窗口永远收不到变更事件，(2) 还会把主窗口正在看的文件监听顶掉。
+// 现改为「路径 → watcher + 订阅窗口集合」：同一文件被多个窗口打开时共享一个 watcher，
+// 事件按窗口各自订阅时传入的路径原样回传（渲染层用字符串比较匹配）。
+interface FileWatchSubscriber {
+  sender: WebContents
+  /** 订阅方传入的原始路径：通知时原样带回，避免大小写 / 相对路径写法不同导致匹配失败 */
+  requestPath: string
+}
+interface FileWatchEntry {
+  watcher: fs.FSWatcher
+  lastMtime: number
+  timer: NodeJS.Timeout | null
+  subscribers: Map<number, FileWatchSubscriber>
+}
+
+const fileWatchEntries = new Map<string, FileWatchEntry>()
+
+/**
+ * 应用自己刚写过的文件：watcher 看到这些变更时不再提示「文件已修改」。
+ * 否则在软件里编辑并保存（或保存标签 / 属性写 frontmatter）后，浏览视图会立刻弹出
+ * 「文件已修改，重新加载」——内容明明就是自己刚保存的。
+ */
+const recentSelfWrites = new Map<string, number>()
+const SELF_WRITE_GRACE_MS = 3000
+
+/** 路径归一（Windows 不区分大小写）：同一文件的不同写法共用一个 watcher */
+function fileWatchKey(filePath: string): string {
+  const resolved = path.resolve(filePath)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+/** 记录一次「应用自己写盘」（在写成功之后调用） */
+function markSelfWrite(filePath: string) {
+  try {
+    recentSelfWrites.set(fileWatchKey(filePath), Date.now())
+    if (recentSelfWrites.size > 200) {
+      const cutoff = Date.now() - SELF_WRITE_GRACE_MS
+      for (const [k, ts] of recentSelfWrites) if (ts < cutoff) recentSelfWrites.delete(k)
+    }
+  } catch { /* 路径异常不影响写盘本身 */ }
+}
+
+function isRecentSelfWrite(key: string): boolean {
+  const ts = recentSelfWrites.get(key)
+  if (!ts) return false
+  if (Date.now() - ts > SELF_WRITE_GRACE_MS) {
+    recentSelfWrites.delete(key)
+    return false
+  }
+  return true
+}
+
+function closeFileWatch(key: string) {
+  const entry = fileWatchEntries.get(key)
+  if (!entry) return
+  if (entry.timer) clearTimeout(entry.timer)
+  try { entry.watcher.close() } catch { /* 已关闭 */ }
+  fileWatchEntries.delete(key)
+}
+
+/** 退订某窗口在某个文件上的监听；没有订阅者了才真正关掉 watcher */
+function removeFileWatchSubscriber(key: string, id: number) {
+  const entry = fileWatchEntries.get(key)
+  if (!entry) return
+  entry.subscribers.delete(id)
+  if (entry.subscribers.size === 0) closeFileWatch(key)
+}
 
 ipcMain.handle('watchFile', async (event, filePath: string) => {
   try {
-    // 停止之前的监听
-    if (fileWatcher) {
-      fileWatcher.close()
-      fileWatcher = null
-    }
-    fileWatchPath = null
-
     if (!filePath || !fs.existsSync(filePath)) {
       return { success: false, error: '文件不存在' }
     }
 
-    // 记录文件的初始 mtime，避免保存时自己触发
-    let lastMtime = fs.statSync(filePath).mtimeMs
+    const key = fileWatchKey(filePath)
+    let entry = fileWatchEntries.get(key)
+    if (!entry) {
+      const created: FileWatchEntry = {
+        // 先占位，拿到 watcher 后再回填（回调里只引用 created）
+        watcher: null as unknown as fs.FSWatcher,
+        lastMtime: fs.statSync(filePath).mtimeMs,
+        timer: null,
+        subscribers: new Map(),
+      }
+      const onWatchEvent = (eventType: fs.WatchEventType) => {
+        // change = 原地保存；rename = 原子保存（写临时文件再改名）/ 删除。
+        // 原子保存如果不处理，Windows 上既收不到变更，watcher 也可能悄悄失效。
+        if (eventType !== 'change' && eventType !== 'rename') return
 
-    fileWatcher = fs.watch(filePath, (eventType) => {
-      if (eventType !== 'change') return
-
-      // 防抖
-      if (fileWatchTimeout) clearTimeout(fileWatchTimeout)
-      fileWatchTimeout = setTimeout(() => {
-        try {
-          if (!fs.existsSync(filePath)) return
-          const currentMtime = fs.statSync(filePath).mtimeMs
-          // 只有 mtime 变化才通知（避免重复触发）
-          if (currentMtime !== lastMtime) {
-            lastMtime = currentMtime
-            if (win && !win.isDestroyed()) {
-              win.webContents.send('watchedFileChanged', { path: filePath })
+        // 防抖
+        if (created.timer) clearTimeout(created.timer)
+        created.timer = setTimeout(() => {
+          created.timer = null
+          try {
+            if (!fs.existsSync(filePath)) return
+            const currentMtime = fs.statSync(filePath).mtimeMs
+            // 只有 mtime 变化才通知（避免重复触发）
+            if (currentMtime === created.lastMtime) return
+            created.lastMtime = currentMtime
+            // 自己刚保存的文件：只更新 mtime，不向各窗口发「外部变更」
+            if (isRecentSelfWrite(key)) return
+            for (const [id, sub] of [...created.subscribers]) {
+              if (sub.sender.isDestroyed()) {
+                created.subscribers.delete(id)
+                continue
+              }
+              sub.sender.send('watchedFileChanged', { path: sub.requestPath })
+            }
+            if (created.subscribers.size === 0) closeFileWatch(key)
+          } catch {
+            /* 文件在通知前被删除 / 被占用：忽略本次 */
+          } finally {
+            // 原子保存后原 watch 可能已经跟丢：重新挂到当前路径上，后续保存才收得到
+            if (eventType === 'rename' && fs.existsSync(filePath) && fileWatchEntries.get(key) === created) {
+              try {
+                created.watcher.close()
+              } catch { /* 已失效 */ }
+              try {
+                created.watcher = fs.watch(filePath, onWatchEvent)
+              } catch {
+                /* 重新挂失败：下次 watchFile 会重建 */
+              }
             }
           }
-        } catch (_) {}
-        fileWatchTimeout = null
-      }, 200)
-    })
+        }, 200)
+      }
+      created.watcher = fs.watch(filePath, onWatchEvent)
+      fileWatchEntries.set(key, created)
+      entry = created
+    }
 
-    fileWatchPath = filePath
+    const id = event.sender.id
+    if (!entry.subscribers.has(id)) {
+      // 窗口销毁时自动退订（同一窗口重复 watch 同一文件不会重复注册监听器）
+      event.sender.once('destroyed', () => removeFileWatchSubscriber(key, id))
+    }
+    entry.subscribers.set(id, { sender: event.sender, requestPath: filePath })
     return { success: true }
   } catch (error: any) {
     console.error('启动文件监听失败:', error)
@@ -4324,17 +4433,15 @@ ipcMain.handle('watchFile', async (event, filePath: string) => {
   }
 })
 
-ipcMain.handle('unwatchFile', async () => {
+ipcMain.handle('unwatchFile', async (event) => {
   try {
-    if (fileWatcher) {
-      fileWatcher.close()
-      fileWatcher = null
+    // 渲染层不传路径（历史上是全局单 watcher）：退订该窗口的**全部**订阅。
+    // 每个窗口同时只看一个文件，所以与旧语义一致，又不会误伤别的窗口。
+    const id = event.sender.id
+    for (const [key, entry] of [...fileWatchEntries]) {
+      entry.subscribers.delete(id)
+      if (entry.subscribers.size === 0) closeFileWatch(key)
     }
-    if (fileWatchTimeout) {
-      clearTimeout(fileWatchTimeout)
-      fileWatchTimeout = null
-    }
-    fileWatchPath = null
     return { success: true }
   } catch (error: any) {
     return { success: false, error: error.message }

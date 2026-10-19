@@ -1808,7 +1808,7 @@ const translations = {
           { title: '源码编辑', desc: 'Monaco 编辑器直接改 Markdown 原文（含 YAML 头），支持 AI 辅助与拖入图片 / 文件自动生成引用链接；<code>.py</code> / <code>.json</code> 等代码与数据文件也在这里以文本方式打开。' },
           { title: '可视编辑（块编辑）', desc: '块式富文本：输入 <code>/</code> 唤出块类型菜单，块手柄菜单的「转换为」可在标题 / 列表 / 表格 / 代码之间转换。' },
           { title: '思维导图 / 演示', desc: '导图按 Markdown 标题层级生成；演示把 Markdown 转成幻灯片（按 <code>---</code> 或智能切分分页，支持目录 / 全屏 / 主题切换）；两者在触屏上都可左右滑动翻页。' },
-          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>原地翻译</strong>；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）默认交给<strong>内置浏览器</strong>渲染。' },
+          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>原地翻译</strong>；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）在文件视图里用 iframe 渲染（浏览看效果、源码编辑改 HTML），与其它文件一样进标签页 / 窗口，不再另开内置浏览器。' },
           { title: 'Mermaid 图表（.mmd / .mermaid）', desc: '<strong>浏览</strong>视图把整份源码渲染成一张图，点图可放大 / 平移 / 导出 PNG、SVG；<strong>源码编辑</strong>视图改文本。渲染失败时原地显示错误与源码便于修正；空文件默认直接进源码编辑。' },
           { title: 'PDF 页面管理', desc: 'PDF 状态栏的「页面管理」把整份 PDF 拆成一页一张的缩略图：可把别的 PDF <strong>合并</strong>进来、勾选后<strong>删除</strong>整页、拖拽缩略图<strong>调整顺序</strong>、单页或整组<strong>旋转</strong>；确认后由 pdf-lib 重新组页，可覆盖原文件或另存为新 PDF（远程预览只能另存）。' }
         ]
@@ -2046,7 +2046,7 @@ const translations = {
         mindmap: { name: '思维导图', desc: '思维导图视图：按 Markdown 标题层级生成可缩放、可逐层折叠的导图（支持 LaTeX 公式渲染，独立成段的展示公式与带公式的正文段落都会成节点），节点文字宽度与展开层数可在状态栏调节；状态栏 ▶ 进入讲解模式后，可用 ← / → 或触屏左右滑动逐级下钻、回退；内嵌的 draw.io 图表（![](图.drawio)）会渲染成图片显示在节点里。' },
         files: { name: '文件', desc: '文件视图：网格 / 列表浏览当前目录（Ctrl+滚轮无级缩放图标，缩到最小即列表），支持多选、框选与键盘操作；音频 / 视频显示封面缩略图；状态栏可按 YAML 属性（含状态）筛选；右键菜单可打开 / 重命名 / 删除 / 复制 / 剪切 / 粘贴 / 在文件夹中显示 / 排序（名称 / 修改时间 / 大小 / 类型）/ 显示（文件名开关、宽高比），空白处右键还能排序、切换显示与新建 Markdown、Excalidraw、工作流等文件与文件夹。' },
         kanban: { name: '看板', desc: '看板任务管理：卡片 = 当前文件夹（顶部面包屑所指目录）里的一个 Markdown 文件，可按任意属性分列（默认 状态），点左下角状态栏的 + 打开新建面板（填名称即可，还可选择状态与开始 / 结束时间，三者都能留空，开始时间默认今天），新建后立刻出现在日历 / 甘特上、卡片拖到别的列即改该属性值、卡片显示起止时间且右侧日历图标（或右键「设置时间」）可设置开始 / 结束时间（时间文字本身不可点）且右键可设置颜色（预设色板随主题切换，浅色 / 深色主题各一套，也可用取色器自定义或清除）/ 重命名 / 归档 / 移入某个取值 / 删除；在别处改了文件的属性（表格视图、源码编辑、外部编辑器）后卡片会自动刷新；面板宽度放不下并排两列时列会自动改为上下摆放；状态栏的「筛选」按钮可按分组字段的取值多选筛选（每个取值带卡片数，取值多时自动换行并滚动），状态栏还可切换看板 / 列表、读取深度与「是否显示已归档」，并可在「状态分类」里编辑分类的顺序与图标（与日历共用）；只出现在文件里的取值会列在面板底部，可一键加入分类表参与排序' },
-        graph: { name: '图谱', desc: '文件关联图谱：目录层级与文件引用关系一图看清（目录内文件增删改后自动刷新；点击节点高亮其关联节点，拖动节点可手动调整布局；双击节点打开文件，与文件树一致——一律独立窗口打开并统一调度特殊文件）' },
+        graph: { name: '图谱', desc: '文件关联图谱：目录层级与文件引用关系一图看清（目录内文件增删改后自动刷新；点击节点高亮其关联节点，拖动节点可手动调整布局；双击节点打开文件，与文件树一致——在右侧标签页打开并统一调度特殊文件）' },
         calendar: { name: '日历', desc: '月视图 / 周视图 / 年视图 / 甘特图四合一：支持起止区间（跨天条目横跨每一天）、颜色与状态图标、内搜索、拖拽改期、日期格内新建（建在当前文件夹）；只显示 Markdown 文件，且仅 Markdown 可拖拽改期；条目上右键可 打开 / 重命名 / 设置时间 / 颜色（预设色板随主题切换，也可用取色器自定义或清除）/ 归档 / 复制文件路径 / 在文件夹中显示 / 删除（与看板卡片的菜单一致，弹出的日期列表里同样可用），状态栏的归档图标控制是否显示已归档条目（默认不显示）' },
         map: { name: '地图', desc: '按文件 YAML 里的 纬度 / 经度 属性在地图上打点（可一键只显示有经纬度的文件），点标记或右侧列表即可打开文件；地图不需要搜索，工具栏只显示路径。' },
         table: { name: '表格', desc: '一行 = 一个文件、一列 = 一个 YAML 属性的表格：默认只列 Markdown（可切「全部」，非 Markdown 整行只读），列按当前「深度」范围内的属性生成（改深度 / 换目录时列跟着变，不会留下整列空白的旧列；被收敛的属性可在「列」面板底部一键加回，面板「+」还能手动加列）；列头点击即排序（升 / 降 / 取消），列菜单可按取值筛选（含「未设置」）/ 指定编辑器类型 / 重命名属性 / 隐藏此列，列可拖拽换序与拖右边界调宽，列序 / 列宽 / 类型 / 排序 / 筛选都会记住；单元格按属性类型编辑（文本 / 数字 / 日期 / 日期时间 / 复选框 / 颜色 / 单选 / 标签，状态列直接用状态分类的取值与图标），支持方向键移动、Enter 编辑 / Esc 取消 / Delete 清空与整块粘贴 Excel 数据，行首勾选后可批量设置 / 删除属性或删除文件，行右键菜单可打开 / 进入文件夹 / 新窗口打开 / 在文件夹中显示 / 复制路径 / 新建同级 / 重命名 / 删除' },
@@ -2059,9 +2059,9 @@ const translations = {
       },
       features: {
         title: '核心功能',
-        step1: { title: '📂 文件浏览', desc: '左侧文件树展示目录结构。展开 / 折叠点节点左侧的箭头（单击不再开合）；桌面版点击 / 双击文件一律在独立窗口打开（可同时开多个窗口并排对照），安卓 / 网页端则在主界面上方以浮层窗口打开（与设置同一思路；安卓上单击文件即打开、单击文件夹即进入）；双击文件夹只让右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）定位到该目录。右键菜单按节点类型区分：文件上「打开」直接列出各视图、「操作」里是 打开所在位置 / 复制地址 / 系统打开；文件夹与空白处可在「新建」里建 文件夹 / Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架 / Word / Excel / PPT（Office 三种会写入一份空白文档骨架，建好即可打开编辑），并支持 复制 / 粘贴（剪贴板与「文件」视图共用）/ 重命名 / 删除。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下不再左右分栏：文件树变成<strong>整屏抽屉</strong>（工具栏最左的开关打开、左上角 ← 收起，点文件夹 / 文件后自动收起），右侧视图始终占满整屏。' },
+        step1: { title: '📂 文件浏览', desc: '左侧文件树展示目录结构。展开 / 折叠点节点左侧的箭头（单击不再开合）；点击 / 双击文件在<strong>右侧标签页</strong>打开（标签内可切换该文件的多视图；需要独立窗口时右键「在新窗口打开」），安卓 / 网页端同样在右侧标签页显示（安卓上单击文件即打开、单击文件夹即进入）；双击文件夹只让右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）定位到该目录。右键菜单按节点类型区分：文件上「打开」直接列出各视图、「操作」里是 在新窗口打开 / 打开所在位置 / 复制地址 / 系统打开；文件夹与空白处可在「新建」里建 文件夹 / Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架 / Word / Excel / PPT（Office 三种会写入一份空白文档骨架，建好即可打开编辑），并支持 复制 / 粘贴（剪贴板与「文件」视图共用）/ 重命名 / 删除。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下不再左右分栏：文件树变成<strong>整屏抽屉</strong>（工具栏最左的开关打开、左上角 ← 收起，点文件夹 / 文件后自动收起），右侧视图始终占满整屏；返回手势会先关掉当前文件标签，再收起抽屉。' },
         step2: { title: '🔄 多视图切换', desc: '同一个文件可切换不同视图查看：浏览（渲染）、源码编辑、可视编辑（块编辑/所见即所得）、思维导图、演示；<strong>Word / Excel / PPT</strong> 额外提供「<strong>Office 编辑</strong>」（内嵌真实办公套件，可原地编辑并保存为标准 Office 文件，默认即用该视图打开）。你可以在设置中开启/关闭不需要的视图。' },
-        step3: { title: '🔍 全文搜索', desc: '顶部搜索框支持按文件名和内容全文搜索，快速定位所需文件；结果双击在独立窗口打开，打开后搜索面板保持打开，可连续打开多个结果（按 Esc 或点右上角 ✕ 关闭）。' },
+        step3: { title: '🔍 全文搜索', desc: '顶部搜索框支持按文件名和内容全文搜索，快速定位所需文件；结果双击在右侧标签页打开，打开后搜索面板保持打开，可连续打开多个结果（按 Esc 或点右上角 ✕ 关闭）。' },
         step4: { title: '🏷️ 分类管理', desc: '支持按 YAML 属性（状态等）筛选文件、「看板」视图按属性分组并快速记录 / 拖拽改属性（卡片即 Markdown 文件）、「表格」视图按列查看与整理属性（排序 / 筛选 / 批量改值 / 整块粘贴，列按当前「深度」范围的属性生成）、日历视图的甘特模式跟踪项目进度、图谱展示文件关联关系，满足不同维度的管理需求。除「文件」视图外，日历 / 看板 / 表格 / 图谱 / 地图都跟随左侧当前目录取数据；它们与文件视图共用一条顶部工具栏（多视图并排时也只有一条）：最左侧的显示 / 隐藏左侧面板开关 + 视图选择 + 后退 / 前进 / 向上 / 刷新 + 可点击的路径面包屑 + 右侧搜索框（工具栏很窄时导航按钮与面包屑会自动收起，快捷键 Alt+← / Alt+→ / Backspace 仍可用），搜索框也是共用的，各视图语法一致（关键词匹配文件名 / 路径 / 属性值，另支持 状态:待办、优先级>2）；底部状态栏只放各视图自己的设置与计数。' }
       },
       smart: {
@@ -2089,24 +2089,24 @@ const translations = {
         }
       },
       openMode: {
-        title: '🪟 文件打开方式（独立窗口）',
-        overview: '知识管理里<strong>双击文件</strong>一律在<strong>独立窗口</strong>打开；原有的「窗口内打开」模式（主窗口标签栏、视图管理面板）已去掉：',
+        title: '🪟 文件打开方式（右侧标签页）',
+        overview: '单窗口模式下，知识管理右侧是一条<strong>标签栏</strong>：最左侧是一个固定的<strong>「视图」标签</strong>（6 类视图收在这一个标签里，用顶部工具栏的下拉切换，不再各占一个标签），打开的文件则作为<strong>可关闭的文件标签</strong>叠在右侧。标签条支持鼠标滚轮左右滚动与触摸左右滑动。双击文件默认在右侧标签页打开，不再弹独立窗口。多窗口模式下不显示标签栏，文件树点文件直接开独立窗口（与原来一致）：',
         newWindow: {
-          name: '🪟 独立窗口打开',
-          desc: '双击文件时在<strong>独立窗口</strong>中打开。窗口内可切换该文件类型支持的视图（如 Markdown 支持全部五种，CSV 只有浏览 + 源码编辑，工作流 / 数据画布 / 脚手架 / 图片 / 音视频 / PDF 固定单一视图，此时不显示视图下拉），窗口标题显示「文件名 - 视图」，<strong>鼠标悬停在标题栏文件名上会显示文件的绝对路径</strong>。没有正文的 Markdown（空文件，或只有 YAML 头、如看板新建的卡片）会<strong>默认打开「源码编辑」</strong>而不是空白的浏览视图。多个文件可同时在不同窗口中打开，<strong>并排对照</strong>互不影响主窗口。'
+          name: '🪟 右侧标签页打开',
+          desc: '双击文件时在<strong>右侧标签页</strong>中打开，标签标题是文件名，标签内左上角可切换该文件类型支持的视图（如 Markdown 支持全部五种，CSV 只有浏览 + 源码编辑，工作流 / 数据画布 / 脚手架 / 图片 / 音视频 / PDF 固定单一视图，此时不显示视图下拉）。没有正文的 Markdown（空文件，或只有 YAML 头、如看板新建的卡片）会<strong>默认打开「源码编辑」</strong>而不是空白的浏览视图。多个文件可同时作为多个标签打开，标签间的视图互不影响；右键文件 →「操作 → 在新窗口打开」仍可把它放进独立窗口（单窗口模式下为页面内浮层）。'
         },
         effect: {
           title: '🔧 对操作的影响',
           items: [
-            '<strong>双击打开位置</strong>：一律在独立窗口打开；主窗口只负责全局视图（文件 / 图谱 / 看板 / 日历 / 地图 / 表格）',
-            '<strong>标签栏</strong>：主窗口不再有标签栏，文件树面板顶部是「添加工作区 / 打开文件 / 搜索」按钮组（新建文件走文件树右键「新建」）',
-            '<strong>视图选择</strong>：主窗口在顶部工具栏（左侧折叠图标右侧）切换全局视图，文件窗口左上角切换该文件自己的视图',
-            '<strong>多文件对比</strong>：把多个文件放在不同窗口并排查看，各窗口的视图互不影响'
+            '<strong>双击打开位置</strong>：右侧文件标签；原来的 6 类视图收在一个不可关闭的「视图」标签里',
+            '<strong>标签栏</strong>：一个固定视图标签 + 若干文件标签同一行；放不下时用鼠标滚轮左右滚动，触摸屏直接左右滑动；文件标签可单独关闭，也可一键关闭全部文件标签',
+            '<strong>视图选择</strong>：切到视图标签后，用顶部工具栏的下拉在文件 / 看板 / 表格 / 图谱 / 地图 / 日历之间切换；文件标签内用左上角的视图切换器切换该文件自己的视图',
+            '<strong>多文件对比</strong>：在右侧标签之间切换即可来回对照；需要并排时用右键「在新窗口打开」'
           ]
         },
         note: {
           title: '📌 使用提示：',
-          text: '以下操作始终不变：右键文件时「打开」直接列出各视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示，按文件类型给出），打开文件所在位置 / 复制地址 / 系统打开在同级的「操作」里；知识库（.kb）文件一律跳转到知识处理（RAG）模块；脚手架（.task）一律在独立窗口里打开它的专属「脚手架」视图；本地网页（.html / .htm）一律用内置浏览器打开；远程文件单击仍是主窗口内的快速预览，双击才开独立窗口。'
+          text: '以下操作始终不变：右键文件时「打开」直接列出各视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示，按文件类型给出），打开文件所在位置 / 复制地址 / 系统打开在同级的「操作」里；知识库（.kb）文件一律跳转到知识处理（RAG）模块；脚手架（.task）一律打开它的专属「脚手架」视图；本地网页（.html / .htm）与普通文件一样进文件视图（浏览用 iframe 渲染，可切源码编辑）；远程文件在单窗口模式下单击即进右侧标签预览，多窗口模式下直接开窗口 / 浮层。'
         }
       },
       drawio: {
@@ -2363,7 +2363,7 @@ const translations = {
           items: {
             llm: { name: '来源', desc: '各 AI 来源的连接配置（地址 / 密钥 / 模型 / 接口样式 / 默认嵌入模型）、<strong>通用参数</strong>（温度 / 最大令牌 / 流式 / 推理强度）与<strong>上下文窗口</strong>（见下方专述）。左侧列表可点选查看任意来源，<strong>点「设为默认」才改变默认来源</strong>。' },
             'llm-embed': { name: '嵌入', desc: '<strong>嵌入兜底</strong>：当前来源不提供嵌入接口（如 DeepSeek / Anthropic）时，知识库建库与检索的向量化改用这里选的来源。' },
-            tts: { name: '合成', desc: '语音合成：音色 / 语速 / 引擎（含本地 Kokoro / Piper、Qwen3-TTS，可由软件直接启动本地服务），回复可<strong>自动朗读</strong>。' },
+            tts: { name: '合成', desc: '语音合成：音色 / 语速 / 引擎（含本地 Kokoro / Piper、Qwen3-TTS，可由软件直接启动本地服务；也支持局域网 GPUStack 部署的 Qwen3-TTS），回复可<strong>自动朗读</strong>。' },
             asr: { name: '输入', desc: '语音识别：本地 ONNX Whisper 或服务端引擎（Whisper API / Qwen3-ASR 网页服务），可自动断句。' },
             imagegen: { name: '生图', desc: 'Qwen-Image-Edit-2511 本地生图 / 改图：服务地址、安装目录（可由软件直接启动服务）、模型类型、尺寸、步数、Lora 与 token；可上传 0~3 张参考图试生成。' },
             credentials: { name: '凭据', desc: 'API Key 表格化管理，明文只存主进程，可被各来源的「凭据引用」使用。' }
@@ -2682,7 +2682,7 @@ const translations = {
           '「保存 Markdown 到知识库」默认存到知识库根目录的 <code>网页剪藏</code> 子文件夹（可改成别的子目录或直接存根目录）。',
           '缓存管理位于右侧设置栏底部，可查看缓存大小并一键清理（清理前会确认）。',
           '浏览器 Agent 同时是<strong>内置 MCP 服务（builtin-browser）</strong>：智能体通过 browser_* 工具导航、新建 / 切换 / 关闭标签、读取正文（文本 / Markdown / HTML）、点击、输入、滚动与截图，可在「设置 → 工具 → MCP」中开关与查看函数。截图返回的是<strong>压缩后的 JPEG</strong>（最长边 1024），避免一张大图把模型上下文挤爆。同页还有 <strong>drawio 内置服务（builtin-drawio）</strong>：智能体用 44 个 drawio_* 工具直接创建、查看、修改、布局与导出本地 .drawio 图表。',
-          '知识管理中的 <strong>.html / .htm</strong> 本地网页默认交给<strong>内置浏览器</strong>打开渲染（双击 / 搜索 / 各视图点开，与「打开文件」一致），AI 还能继续对其操作、提取正文；要看文件视图预览或改源码，走右键「打开 → 选对应视图」。'
+          '知识管理中的 <strong>.html / .htm</strong> 本地网页与普通文件一样在文件视图 / 标签页里打开：<strong>浏览</strong>视图用 iframe 渲染网页，<strong>源码编辑</strong>直接改 HTML；不再另开内置浏览器窗口（需要 AI 操作网页时仍可打开浏览器 Agent）。'
         ]
       }
     },
@@ -3276,7 +3276,7 @@ const translations = {
         },
         note: {
           title: '📌 Tip:',
-          text: 'The following stay unchanged: right-clicking a file lists its views directly under "Open" (Read / Source / Block Edit / Mind Map / Presentation, per file type), while Reveal in Folder / Copy Path / System live in the sibling "Actions" submenu; knowledge-base (.kb) files always jump to the Knowledge RAG module; scaffold (.task) files always open their dedicated “Scaffold” view in a separate window; local web pages (.html / .htm) always open in the built-in browser; single-clicking a remote file still previews it in the main window, and double-clicking opens a separate window.'
+          text: 'The following stay unchanged: right-clicking a file lists its views directly under "Open" (Read / Source / Block Edit / Mind Map / Presentation, per file type), while Reveal in Folder / Copy Path / System live in the sibling "Actions" submenu; knowledge-base (.kb) files always jump to the Knowledge RAG module; scaffold (.task) files always open their dedicated “Scaffold” view in a separate window; local web pages (.html / .htm) now open in the file view like any other file (Read renders them in an iframe, Source edits the HTML); remote files preview in the right-side tab in single-window mode and open a window / overlay in multi-window mode.'
         }
       },
       drawio: {
@@ -3533,7 +3533,7 @@ const translations = {
           items: {
             llm: { name: 'Sources', desc: 'Per-source connection settings (URL / key / model / API style / default embedding model), <strong>common parameters</strong> (temperature / max tokens / streaming / reasoning effort) and the <strong>context window</strong> (detailed below). Clicking a source only views it — press <strong>Set as default</strong> to change the default.' },
             'llm-embed': { name: 'Embedding', desc: '<strong>Embedding fallback</strong>: when the current source has no embedding endpoint (e.g. DeepSeek / Anthropic), KB building and retrieval embedding uses the source chosen here.' },
-            tts: { name: 'TTS', desc: 'Speech synthesis: voice / speed / engine (incl. local Kokoro / Piper and Qwen3-TTS, whose local service the app can start); replies can be <strong>auto-spoken</strong>.' },
+            tts: { name: 'TTS', desc: 'Speech synthesis: voice / speed / engine (incl. local Kokoro / Piper and Qwen3-TTS, whose local service the app can start — or a Qwen3-TTS deployed on GPUStack over the LAN); replies can be <strong>auto-spoken</strong>.' },
             asr: { name: 'ASR', desc: 'Speech recognition: local ONNX Whisper or a server engine (Whisper API / Qwen3-ASR web UI), auto punctuation.' },
             imagegen: { name: 'Image', desc: 'Local Qwen-Image-Edit-2511 generation / editing: service URL, install folder (the app can start the service), model type, size, steps, LoRA and token; try it with 0-3 reference images.' },
             credentials: { name: 'Credentials', desc: 'API keys managed as a table; plaintext stays in the main process and can be referenced by each source.' }
@@ -3852,7 +3852,7 @@ const translations = {
           '“Save Markdown to knowledge base” writes into a <code>网页剪藏</code> subfolder of the knowledge base root by default (change it to another subfolder or the root itself).',
           'Cache management sits at the bottom of the right rail — inspect the cache size and clear it in one click (with a confirmation).',
           'The Browser Agent is also a <strong>built-in MCP server (builtin-browser)</strong>: agents drive it via browser_* tools (navigate, new / switch / close tabs, read text / Markdown / HTML, click, type, scroll, screenshot). Screenshots come back as <strong>compressed JPEG</strong> (max side 1024) so a single image cannot blow up the model context. Manage it under Settings → Tools → MCP. The <strong>drawio (builtin-drawio)</strong> built-in server likewise lets agents create, inspect, edit, lay out and export local .drawio diagrams through 44 drawio_* tools.',
-          'Local <strong>.html / .htm</strong> pages in Knowledge Management open in the <strong>built-in browser</strong> by default (double-click / search / any view, same as “Open File”), where AI can keep operating on them or extract text; use the right-click “Open → pick a view” menu to preview them in a file view or edit the source.'
+          'Local <strong>.html / .htm</strong> pages open in the file view / its tab like any other file: <strong>Read</strong> renders the page in an iframe and <strong>Source</strong> edits the HTML — no separate built-in browser window is opened (the Browser Agent is still available when AI needs to operate on a page).'
         ]
       }
     },

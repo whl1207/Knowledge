@@ -3,7 +3,7 @@
 import { defineStore } from "pinia"
 import { nextTick, markRaw } from "vue"
 import { TTSManager, createTTSManager } from '@/services/tts/manager'
-import { normalizeQwen3Lang, qwen3ListVoices, resetQwen3Cache, QWEN3_REFERENCE_VOICE } from '@/services/tts/qwen3'
+import { normalizeQwen3Lang, qwen3ListVoices, resetQwen3Cache, QWEN3_REFERENCE_VOICE, gpustackListModels, gpustackListVoices } from '@/services/tts/qwen3'
 import { qwenImageInfo } from '@/services/image/qwenImage'
 import { AIUtils } from '@/services/ai-utils'
 import type { McpServerConfig } from '@/types/mcp'
@@ -52,19 +52,13 @@ export function markRawTree(tree: any[]): any[] {
   return markRaw(walk(tree))
 }
 // 主面板导航按钮 key 顺序（设置页「功能开关」据此隐藏/显示；当前面板被隐藏时自动跳到第一个可见面板）
-/** 本地网页（.html / .htm）：默认一律交给内置浏览器（浏览器 Agent）打开渲染，而不是文件视图 */
-function isLocalHtmlPath(p: any): boolean {
-    return /\.html?$/i.test(String(p || ''))
-}
-
-/** 用内置浏览器打开本地网页（浏览器 Agent 独立窗口；失败时提示，不静默失败） */
-function openLocalHtmlInBrowser(path: string, zh: boolean) {
-    if (!path) return
-    getPlatform().browserAgent.call('open-file', { path })
-        .then((r: any) => { if (r && r.ok === false) throw new Error(r.error || 'open failed') })
-        .catch((e: any) => {
-            ElMessage.error(zh ? `打开失败：${e?.message || e}` : `Open failed: ${e?.message || e}`)
-        })
+/**
+ * 默认窗口交互模式（见 UI.windowMode）。
+ * 有窗口壳的桌面默认「多窗口」（设置 / 文件 / 插件面板各自独立窗口，与历史行为一致）；
+ * 安卓、局域网网页等单页面环境没有窗口壳，默认「单窗口」（标签页 + 页面内浮层）。
+ */
+export function defaultWindowMode(): 'single' | 'multi' {
+    return hasCapability('window.chrome') ? 'multi' : 'single'
 }
 
 /**
@@ -131,6 +125,13 @@ let lastResolvedDeepSeekFetchKey = ''
 // 是否持久化标签栏（data/index）：独立文件窗口设 false，避免把新窗口打开的标签写进共享 localStorage，
 // 导致主窗口重启后恢复出独立窗口产生的标签（标签栏只属于独立文件窗口，主窗口不渲染标签栏）
 let persistTabs = true
+
+// 「切到某个文件标签」请求的递增序号（见 store.knowOpenFileRequest / focusFileTab）
+let knowFileRequestNonce = 0
+// 「在主页右侧栏打开文件」请求的递增序号（见 store.homeOpenFileRequest）
+let homeFileRequestNonce = 0
+// 离开界面守卫（见 registerLeaveGuard / runLeaveGuards）：模块级数组，不进响应式状态
+const leaveGuards: Array<() => boolean | Promise<boolean>> = []
 
 // 是否持久化主面板导航（mainPanel）：独立窗口（设置/文件/浏览器）设 false。
 // mainPanel 只在主窗口有意义，而独立窗口的 store 是「打开那一刻的快照」——
@@ -330,6 +331,23 @@ export const usestore = defineStore('data', {
         // 单窗口环境（安卓 / 网页端）的应用内文件窗口参数：非空时 App.vue 以浮层渲染 FileWindow。
         // 桌面版一律走真正的独立窗口，这里保持 null（见 openFileWindow）
         fileWindowOverlay: null as OpenFileWindowPayload | null,
+        /**
+         * 知识管理「把某个已打开的文件标签 activate」的请求（不持久化）。
+         * 文件树 / 各视图点击文件后，由 store 统一发这个请求；explorer 收到后把右侧标签切到该文件。
+         * nonce 保证「连续打开同一个文件」也会触发 watcher。
+         */
+        knowOpenFileRequest: null as { path: string; nonce: number } | null,
+        /**
+         * 知识管理右侧当前激活的**文件标签**路径（视图标签激活时为空串）。
+         * 文件树据此高亮「正在看的文件」；不持久化，由 explorer 维护。
+         */
+        knowActiveFileTabPath: '' as string,
+        /**
+         * 单窗口模式下「在主页右侧栏打开文件」的请求（不持久化）。
+         * 主页已经有文件标签的能力，因此单窗口模式里从主页打开文件时优先放进侧栏，
+         * 不再叠一层全屏文件浮层（避免两个文件视图同时争用 store.index）。
+         */
+        homeOpenFileRequest: null as { payload: OpenFileWindowPayload; nonce: number } | null,
         // 自定义标题（设置页「界面-自定义标题」；非空时顶部标题固定不变，不再随当前面板变化）
         customTitle: '',
         // 界面配置随软件分发：开启后界面配置保存到软件根目录 interface-config.json（便于整机分发），关闭则存 localStorage
@@ -390,6 +408,18 @@ export const usestore = defineStore('data', {
             fontActiveColor: "#03254d",
             windowZoom: 100, // 窗口缩放比例（百分比，50~200；由主进程 window-zoom.json 持久化）
             navLayout: 'top' as 'top' | 'left' | 'bottom', // 导航栏布局：top=顶部（默认）/ left=左侧 / bottom=下方
+            /**
+             * 窗口交互模式（统一「打开文件 / 设置 / 插件面板」的落点）：
+             *  - multi：多窗口（桌面默认）——设置、文件窗口、插件面板各开独立窗口；
+             *  - single：单窗口（安卓 / 网页默认，也可在桌面手动选择）——一切都在主窗口内完成：
+             *    文件进标签页、设置进页面内浮层、插件面板进页面内浮层。
+             *
+             * ⚠️ 初值固定为 'multi'，真正的默认值在 loadConfig 里按运行环境决定（见 defaultWindowMode）。
+             * 不能在模块初始化时调 getPlatform()：那会把平台后端**过早缓存**，
+             * 万一 preload / Capacitor 还没就绪，就会把整个窗口误判成 browser 后端（文件读取直接报
+             * “IPC 不可用”），子窗口尤其容易踩到。
+             */
+            windowMode: 'multi' as 'single' | 'multi',
             closeToTray: false, // 关闭按钮行为：false=直接退出（默认）/ true=折叠到托管区（托盘，后台任务继续运行）
             // ↑ 主进程是唯一事实源（userData/app-behavior.json，见 electron/main/tray-service.ts），
             //   这里仅镜像一份供界面显示与关闭提醒判定，设置页改动经 IPC 下发主进程落盘
@@ -579,16 +609,18 @@ export const usestore = defineStore('data', {
                 weight: 0.5,
                 // 助手回复生成完自动朗读（所有引擎通用；见 home.vue 的 completeAssistantReply）
                 autoSpeak: false,
-                // Qwen3-TTS 配置（Qwen3-TTS-AllinOne：Gradio 网页服务 7862 + FastAPI 直连接口 9880）
+                // Qwen3-TTS 配置（本地 Qwen3-TTS-AllinOne：Gradio 7862 + FastAPI 9880；或 GPUStack 的 OpenAI 兼容接口）
                 qwen3: {
+                    // 接入方式：local=本地/自建 Qwen3-TTS-AllinOne；gpustack=局域网 GPUStack
+                    deploy: 'local' as 'local' | 'gpustack',
                     available_voices: [] as string[], // 音色列表（来自 /update_voices）
                     connected: false, // 连接状态
                     speed: 1.0, // 语速（0.1 ~ 2.5）
                     pitch: 1.0, // 音调（Qwen3 服务端不支持，保留字段兼容旧存档）
                     // 接口协议：auto=按地址自动识别（Gradio → /do_job；直连接口 → 一次 POST）
                     protocol: 'auto' as 'auto' | 'gradio' | 'api',
-                    // 实际生效的接口（探测结果，仅展示用）：'' | 'gradio' | 'api'
-                    transport: '' as '' | 'gradio' | 'api',
+                    // 实际生效的接口（探测结果，仅展示用）：'' | 'gradio' | 'api' | 'gpustack'
+                    transport: '' as '' | 'gradio' | 'api' | 'gpustack',
                     // 语言类型（服务端词表：Auto / Chinese / English …；旧存档的 zh 会自动映射）
                     lang: 'Auto',
                     // 模型类型：0.6B 小参数 / 1.7B 大参数（Gradio /do_job）
@@ -597,6 +629,23 @@ export const usestore = defineStore('data', {
                     chunkSize: 200,
                     // 并行批次（显存小就改成 1，彻底串行）
                     batch: 8,
+                    // GPUStack（局域网）配置：OpenAI 兼容 /v1-openai/audio/speech
+                    gpustack: {
+                        url: '', // GPUStack 服务地址，如 http://192.168.1.10:8080
+                        apiKey: '', // API Key（没开鉴权就留空）
+                        model: '', // GPUStack 里部署的 TTS 模型名，如 qwen3-tts
+                        voice: '', // 音色（留空 = 用服务端默认音色）
+                        lang: 'Auto', // 语言（Auto = 让服务端自动识别；其它值按服务端词表发送）
+                        responseFormat: 'wav' as 'wav' | 'mp3' | 'opus' | 'aac' | 'flac' | 'pcm',
+                        speed: 1.0, // 语速（0.25 ~ 4）
+                        availableModels: [] as string[], // 服务端模型列表（/v1-openai/models）
+                        availableVoices: [] as string[], // 服务端音色列表（/v1-openai/audio/voices，可能没有）
+                        loadingModels: false,
+                        loadingVoices: false,
+                        modelsError: '',
+                        voicesError: '',
+                        connected: false, // GPUStack 连接状态（测试连接后回填）
+                    },
                     voicesLoading: false, // 音色列表拉取中
                     voicesError: '', // 最近一次拉取音色列表的错误
                     // Qwen3-TTS-AllinOne 的安装目录（含 py312 与 app.py）；软件据此拉起服务，不写死在代码里
@@ -971,7 +1020,10 @@ export const usestore = defineStore('data', {
         // 获取Qwen3-TTS可用声音列表
         qwen3TTSVoices: (state) => {
             if (state.AIconfig.tts.type === 'Qwen3-TTS') {
-                return state.AIconfig.tts.qwen3.available_voices;
+                const q = state.AIconfig.tts.qwen3
+                // GPUStack 的音色与本地服务各自独立
+                if (q?.deploy === 'gpustack') return q.gpustack?.availableVoices || []
+                return q.available_voices;
             }
             return [];
         },
@@ -985,6 +1037,12 @@ export const usestore = defineStore('data', {
         // 「甘特」已合并进「日历」视图（日历状态栏可切换 月视图 / 周视图 / 甘特图）
         // 「看板」= 按属性分组（默认 状态）的卡片看板：快速新建 / 拖拽改值 / 归档 / 状态筛选，取代了原看板实现
         viewList: () => [...GLOBAL_VIEW_KEYS],
+
+        /**
+         * 是否「单窗口交互」：用户选择单窗口，或当前环境根本没有窗口壳（安卓 / 局域网网页）。
+         * 打开文件 / 设置 / 插件面板的落点统一看这个值（见 openFileWindow / openSettings / openPluginPanel）。
+         */
+        singleWindowMode: (state) => state.UI.windowMode === 'single' || !hasCapability('window.chrome'),
 
         // 知识管理各视图的数据源目录（跟随文件视图当前目录，越出工作区则回退到工作区根）
         dataDir: (state) => dataDirOf(state),
@@ -1013,6 +1071,33 @@ export const usestore = defineStore('data', {
             );
         },
         
+        /**
+         * 注册「离开当前界面前的守卫」：浏览器式未保存提示（主页右侧栏文件标签 / 知识管理文件标签）。
+         * App.vue 切换主面板前会 await runLeaveGuards()，返回 false 就不切走。
+         * @returns 注销函数（组件卸载时调用）
+         */
+        registerLeaveGuard(fn: () => boolean | Promise<boolean>) {
+            if (typeof fn !== 'function') return () => {}
+            leaveGuards.push(fn)
+            return () => {
+                const i = leaveGuards.indexOf(fn)
+                if (i >= 0) leaveGuards.splice(i, 1)
+            }
+        },
+
+        /** 依次询问所有守卫；任一返回 false（用户取消）就返回 false */
+        async runLeaveGuards(): Promise<boolean> {
+            for (const fn of [...leaveGuards]) {
+                try {
+                    if ((await fn()) === false) return false
+                } catch (e) {
+                    // 守卫自身异常不应把人卡死在当前界面：记录后继续
+                    console.warn('[leave-guard] 守卫执行失败:', e)
+                }
+            }
+            return true
+        },
+
         // 重新缩放
         async resize() {
             await nextTick()
@@ -1061,7 +1146,7 @@ export const usestore = defineStore('data', {
          *   否则这些平台上的「打开文件」会静默无反应。
          */
         openFileWindow(payload: OpenFileWindowPayload) {
-            if (hasCapability('window.chrome')) {
+            if (hasCapability('window.chrome') && !this.singleWindowMode) {
                 // 失败必须让用户看见：以前这里静默吞掉（点「打开」没反应又查不出原因）
                 getPlatform().window.openFileWindow(payload).catch((e: any) => {
                     const zh = this.locales !== 'en'
@@ -1069,6 +1154,13 @@ export const usestore = defineStore('data', {
                         ? `打开文件窗口失败：${e?.message || e}`
                         : `Failed to open the file window: ${e?.message || e}`)
                 })
+                return
+            }
+            // 单窗口模式 + 当前就在主页：放进右侧栏的文件标签（主页本来就有这个能力）。
+            // .task 的脚手架视图需要整屏，仍走下面的全屏浮层。
+            // 与知识管理的处理一致：避免全屏文件浮层和主页文件标签同时挂载、争用 store.index。
+            if (this.singleWindowMode && this.mainPanel === '主页' && !isTaskFile(payload.path) && !payload.remoteRootId) {
+                this.homeOpenFileRequest = { payload: { ...payload }, nonce: ++homeFileRequestNonce }
                 return
             }
             this.fileWindowOverlay = { ...payload }
@@ -1090,7 +1182,7 @@ export const usestore = defineStore('data', {
          */
         async openPluginPanel(payload: OpenPluginPanelPayload) {
             if (!payload?.key) return
-            if (hasCapability('window.chrome')) {
+            if (hasCapability('window.chrome') && !this.singleWindowMode) {
                 try {
                     const opened = await getPlatform().window.openPluginPanelWindow(payload)
                     if (opened) return
@@ -1115,6 +1207,11 @@ export const usestore = defineStore('data', {
          */
         openSettings(nav = '') {
             if (nav) this.settingsNav = nav
+            // 单窗口模式：设置作为页面内浮层（桌面也如此），不再另开窗口
+            if (this.singleWindowMode) {
+                this.settingsOpen = true
+                return
+            }
             if (typeof window !== 'undefined' && aikmIpc?.invoke) {
                 try {
                     ;aikmIpc
@@ -1744,6 +1841,9 @@ export const usestore = defineStore('data', {
                     const qwen3Old: any = this.AIconfig.tts.qwen3
                     const merged: any = { ...DEFAULT_AIconfig.tts.qwen3, ...qwen3Old }
                     merged.lang = normalizeQwen3Lang(qwen3Old?.lang ?? this.AIconfig.tts.language)
+                    // GPUStack 子配置也要按默认补全（浅合并会让旧存档缺字段）
+                    merged.gpustack = { ...DEFAULT_AIconfig.tts.qwen3.gpustack, ...(qwen3Old?.gpustack || {}) }
+                    merged.deploy = qwen3Old?.deploy === 'gpustack' ? 'gpustack' : 'local'
                     delete merged.voices_url
                     this.AIconfig.tts.qwen3 = merged
                 }
@@ -1920,9 +2020,17 @@ export const usestore = defineStore('data', {
                 if (this.UI.textAlignMode !== 'justify' && this.UI.textAlignMode !== 'kp') this.UI.textAlignMode = 'justify'
                 // 旧存档可能缺少 emptyNavNotice（空导航提醒），兜底为开启
                 if (typeof this.UI.emptyNavNotice !== 'boolean') this.UI.emptyNavNotice = true
+                // 旧存档没有「窗口交互模式」：按运行环境给默认值（桌面多窗口 / 手机网页单窗口）
+                if (this.UI.windowMode !== 'single' && this.UI.windowMode !== 'multi') this.UI.windowMode = defaultWindowMode()
+                // 没有窗口壳的环境（安卓 / 局域网网页）无法多窗口：强制单窗口，避免设置页显示一个做不到的选项
+                if (!hasCapability('window.chrome')) this.UI.windowMode = 'single'
                 // 主题名归一化：旧存档里的 '浅蓝色' 等表外名称 → '浅蓝'（否则主题下拉框空白、changeTheme 失效）
                 normalizeThemeName(this.UI)
                 this.setTheme()
+            } else {
+                // 首次启动没有任何 UI 存档：窗口模式按运行环境取默认值（桌面多窗口 / 手机网页单窗口）
+                this.UI.windowMode = defaultWindowMode()
+                if (!hasCapability('window.chrome')) this.UI.windowMode = 'single'
             }
             if (localStorage.getItem('llmSourceStatus') !== null) {
                 const parsedStatus = JSON.parse(localStorage.getItem('llmSourceStatus')!)
@@ -2267,6 +2375,11 @@ export const usestore = defineStore('data', {
                 if (target && data.extension && !target.extension) {
                     target.extension = data.extension
                 }
+                // 再次打开同一文件时，把调用方指定的视图（如右键「打开 → 源码编辑」）写回标签，
+                // 标签栏据此恢复上次 / 指定的视图
+                if (target && typeof data.view === 'string' && data.view) {
+                    target.view = data.view
+                }
                 // 远程标签：同步 quickPreview 标记（再次单击预览→仍为预览；双击正式打开/窗口内打开→转为正式打开）
                 if (target && data && isRemote && typeof data.quickPreview === 'boolean') {
                     target.quickPreview = data.quickPreview
@@ -2280,40 +2393,41 @@ export const usestore = defineStore('data', {
             }
         },
 
-        /** 打开文件：一律用独立窗口打开（原「窗口内打开」模式已去掉）。
-            特殊类型不走文件视图：.kb → 知识处理；.task → 独立窗口的「脚手架」专属视图；本地 .html/.htm → 内置浏览器 */
-        openFileByMode(data: any) {
-            if (!data || !data.path) return
-            // 知识库(.kb)文件：无论何种文件操作模式，一律跳转到知识处理(knowRAG)模块加载
-            //（新窗口模式下 open-file-window 分支会跳过 addTab 的 .kb 跳转，这里统一兜底）
-            const isRemote = data.isRemote === true
-            if (!isRemote && String(data.path).toLowerCase().endsWith('.kb')) {
-                this.openKbFile(data.path)
-                return
+        /**
+         * 特殊文件统一调度（**不走文件视图**）：返回 true 表示已经处理完，调用方不要再打开标签 / 窗口。
+         *  - .kb  → 知识处理模块
+         *  - .task → 独立窗口的「脚手架」专属视图（先做归属校验）
+         *  - 可执行 / 压缩包 / 镜像等 → 系统默认应用
+         * 注意：本地 .html/.htm **不再**改走内置浏览器——它们和普通文件一样进文件视图 / 标签页，
+         * 浏览视图用 iframe 渲染网页、源码编辑改 HTML，这样才符合「文件都在窗口内打开」的统一交互。
+         */
+        openSpecialFile(data: any): boolean {
+            const p = String(data?.path || '')
+            if (!p) return true
+            const isRemote = data?.isRemote === true
+            if (!isRemote && p.toLowerCase().endsWith('.kb')) {
+                this.openKbFile(p)
+                return true
             }
-            // 脚手架任务(.task)文件：有专属「脚手架」视图，一律在独立窗口打开（先做归属校验，见 openTaskFileWindow）
-            if (!isRemote && isTaskFile(data.path)) {
-                void this.openTaskFileWindow(data.path)
-                return
+            if (!isRemote && isTaskFile(p)) {
+                void this.openTaskFileWindow(p)
+                return true
             }
-            // 本地网页(.html/.htm)：用内置浏览器（浏览器 Agent）打开渲染，不走文件视图
-            // （与「打开文件」对话框、AI 工具卡片的「打开」一致；想用文件视图看请走右键「新窗口打开」子菜单）
-            if (!isRemote && isLocalHtmlPath(data.path)) {
-                openLocalHtmlInBrowser(data.path, this.locales === 'zh')
-                return
-            }
-            const isFile = data.type === 'file' || (data.extension != null && data.extension !== '')
-            if (!isFile) return
-            // 默认以源码编辑视图打开（代码类 + 未识别/未知类型兜底为纯文本编辑）；
-            // 有专属浏览视图的类型（md/html/图片/音视频/pdf/excel/excalidraw）默认浏览视图
-            const ext = String(data.path).substring(String(data.path).lastIndexOf('.')).toLowerCase()
-            // 系统打开类（可执行/压缩包/镜像等）：直接交给系统默认应用，不进入应用内视图
+            const ext = p.substring(p.lastIndexOf('.')).toLowerCase()
             const SYSTEM_OPEN_EXTS = ['.exe', '.msi', '.dll', '.apk', '.dmg', '.deb', '.rpm', '.iso', '.appimage', '.run', '.bin', '.flatpak', '.snap', '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst']
             if (SYSTEM_OPEN_EXTS.includes(ext)) {
-                getPlatform().shell.openWithSystemApp(data.path)
-                return
+                getPlatform().shell.openWithSystemApp(p)
+                return true
             }
-            // 有专属浏览视图、默认以浏览打开的类型
+            return false
+        },
+
+        /**
+         * 文件的默认视图：有专属浏览视图的类型用「浏览」，其余（代码 / 未知类型）用「源码编辑」。
+         * 与打开文件窗口时的判定保持一致。
+         */
+        defaultViewForPath(path: string): string {
+            const ext = String(path || '').substring(String(path || '').lastIndexOf('.')).toLowerCase()
             const READ_EXTS = [
                 '.md', '.html', '.htm', '.docx', '.doc',
                 '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif',
@@ -2322,8 +2436,65 @@ export const usestore = defineStore('data', {
                 '.pdf', '.xlsx', '.xls', '.excalidraw', '.drawio', '.dio',
                 '.flow.yml', '.flow.yaml', '.data', '.mmd', '.mermaid'
             ]
-            const view = READ_EXTS.includes(ext) || isFlowDslPath(data.path) ? 'read' : 'edit'
-            this.openFileWindow({ path: data.path, view, page: data.page })
+            return READ_EXTS.includes(ext) || isFlowDslPath(path) ? 'read' : 'edit'
+        },
+
+        /**
+         * 把文件作为「打开标签」加入 store.data，并请求知识管理右侧标签栏切到它。
+         * 供知识管理文件树 / 各视图 / 首页右侧栏共用：单窗口交互的落点就是标签页，不再另开窗口。
+         * @returns 是否真的加入了一个文件标签（特殊类型如 .kb / .task / .html 返回 false）
+         */
+        async openFileInTab(data: any, view?: string): Promise<boolean> {
+            if (!data || !data.path) return false
+            if (this.openSpecialFile(data)) return false
+            const isFile = data.type === 'file' || (data.extension != null && data.extension !== '')
+            if (!isFile) return false
+            const name = String(data.label || data.path).replace(/\\/g, '/').split('/').pop() || String(data.path)
+            const dot = name.lastIndexOf('.')
+            // 只有调用方**明确**给了视图才写回标签；没给就让文件窗口按文件类型取默认视图，
+            // 这样「再次双击同一个文件」不会把用户切到的视图重置回默认。
+            const openView = view || data.view || ''
+            await this.addTab({
+                ...data,
+                path: data.path,
+                label: data.label || name,
+                type: 'file',
+                extension: data.extension || (dot >= 0 ? name.substring(dot).toLowerCase() : ''),
+                ...(openView ? { view: openView } : {}),
+            })
+            this.focusFileTab(data.path)
+            return true
+        },
+
+        /** 请求知识管理把某个已打开的文件标签切到前台（nonce 让同一路径也能再次触发） */
+        focusFileTab(path: string) {
+            if (!path) return
+            this.knowOpenFileRequest = { path, nonce: ++knowFileRequestNonce }
+        },
+
+        /**
+         * 打开文件：
+         *  - **单窗口模式**（安卓 / 网页 / 桌面手动选择）：知识管理里打开到右侧标签页；
+         *  - **多窗口模式**（桌面默认）：与历史行为一致，开独立窗口 / 应用内浮层。
+         * 特殊类型不走文件视图，见 openSpecialFile。
+         */
+        openFileByMode(data: any) {
+            if (!data || !data.path) return
+            if (this.openSpecialFile(data)) return
+            const isFile = data.type === 'file' || (data.extension != null && data.extension !== '')
+            if (!isFile) return
+            const requestedView = String(data.view || '')
+            // 单窗口 + 知识管理：文件显示在右侧标签页（可多标签覆盖视图，见 explorer.vue 的标签栏）。
+            // 视图交给标签 / 文件窗口自己决定默认值；只有调用方明确指定（右键「打开 → 某视图」）才覆盖。
+            if (this.singleWindowMode && this.mainPanel === '知识管理') {
+                void this.openFileInTab({ ...data }, requestedView)
+                return
+            }
+            this.openFileWindow({
+                path: data.path,
+                view: requestedView || this.defaultViewForPath(data.path),
+                page: data.page,
+            })
         },
 
         /** 打开知识库(.kb)文件：跳转到知识处理(knowRAG)模块并标记待加载文件 */
@@ -2376,6 +2547,15 @@ export const usestore = defineStore('data', {
             }
             // .task 的专属视图固定在「浏览」位置（文件窗口按扩展名识别为脚手架视图）
             this.openFileWindow({ path, view: 'read' })
+        },
+
+        /** 记住某个文件标签当前选择的视图（标签栏切换 / 重新打开时沿用） */
+        setFileTabView(filePath: string, view: string) {
+            if (!filePath || !view) return
+            const tab = this.data.find((d: any) => d && d.path === filePath)
+            if (!tab || tab.view === view) return
+            tab.view = view
+            this.saveConfig()
         },
 
         /** 根据路径关闭对应的标签页 */
@@ -2622,6 +2802,8 @@ export const usestore = defineStore('data', {
                 this.UI = { ...this.UI, ...cfg.UI }
                 // 分发的 interface-config.json 同样可能来自历史版本（theme='浅蓝色'）
                 normalizeThemeName(this.UI)
+                // 没有窗口壳的环境（安卓 / 网页）无法多窗口：即使分发的配置写了 multi 也按单窗口工作
+                if (!hasCapability('window.chrome')) this.UI.windowMode = 'single'
             }
             if (typeof cfg.customTitle === 'string') this.customTitle = cfg.customTitle
             if (Array.isArray(cfg.hiddenNavs)) this.hiddenNavs = this.migrateNavKeys(cfg.hiddenNavs)
@@ -2676,6 +2858,7 @@ export const usestore = defineStore('data', {
                     windowZoom: this.UI.windowZoom,
                     navLayout: this.UI.navLayout,
                     // ⚠️ changeTheme 会重建整个 UI 对象：新增的 UI 字段必须在这里带上，否则切主题就丢设置
+                    windowMode: this.UI.windowMode,
                     closeToTray: this.UI.closeToTray,
                     browserHomeUrl: this.UI.browserHomeUrl,
                     browserSaveDir: this.UI.browserSaveDir,
@@ -2854,7 +3037,7 @@ export const usestore = defineStore('data', {
             }
         },
         
-        // 测试Qwen3-TTS连接（顺带探测接口类型：Gradio /do_job 或 直连接口）
+        // 测试Qwen3-TTS连接（本地：探测接口类型；GPUStack：拉模型列表 + 音色列表）
         async testQwen3TTSConnection(): Promise<{
             success: boolean;
             message: string;
@@ -2872,10 +3055,24 @@ export const usestore = defineStore('data', {
                     message: 'TTS管理器未初始化' 
                 };
                 
+                const q = this.AIconfig.tts.qwen3
                 // 根据结果中的 success 字段设置连接状态
-                this.AIconfig.tts.qwen3.connected = result.success;
-                if (result.details?.transport === 'gradio' || result.details?.transport === 'api') {
-                    this.AIconfig.tts.qwen3.transport = result.details.transport;
+                q.connected = result.success;
+                const transport = result.details?.transport
+                if (transport === 'gradio' || transport === 'api' || transport === 'gpustack') {
+                    q.transport = transport;
+                }
+                // GPUStack：把这次拿到的模型 / 音色写回配置，下拉框立刻有值
+                if (q.deploy === 'gpustack' && q.gpustack) {
+                    const gs = q.gpustack
+                    gs.connected = result.success
+                    if (Array.isArray(result.details?.models)) gs.availableModels = result.details.models
+                    if (Array.isArray(result.details?.voices)) {
+                        gs.availableVoices = result.details.voices
+                        if (!gs.voice && result.details.voices.length) gs.voice = result.details.voices[0]
+                    }
+                    if (!gs.model && result.details?.model) gs.model = result.details.model
+                    if (result.success) this.saveConfig()
                 }
                 
                 return result;
@@ -2889,13 +3086,60 @@ export const usestore = defineStore('data', {
             }
         },
 
-        // 拉取 Qwen3-TTS 音色列表（走 Gradio /update_voices；「使用参考音频」需上传参考音频，列表里去掉）
+        // 拉取 GPUStack 上的模型列表（GPUStack 通常同时部署了大模型，TTS 模型排在最前并自动选中）
+        async loadGpuStackModels(): Promise<{
+            success: boolean;
+            message: string;
+            models?: string[];
+        }> {
+            const q = this.AIconfig.tts.qwen3
+            const gs: any = q?.gpustack
+            if (!gs) return { success: false, message: 'GPUStack 配置缺失，请重新打开设置页' }
+            if (!String(gs.url || '').trim()) {
+                return { success: false, message: '请先填写 GPUStack 服务地址（形如 http://192.168.1.10:8080）' }
+            }
+            if (gs.loadingModels) return { success: false, message: '正在获取模型列表…' }
+            gs.loadingModels = true
+            gs.modelsError = ''
+            try {
+                const res = await gpustackListModels({ base: gs.url, apiKey: gs.apiKey })
+                // 语音模型（名字里带 tts / speech / voice / audio）排前面，方便一眼找到
+                const ttsLike = res.items.filter(id => /tts|speech|voice|audio/i.test(id))
+                const rest = res.items.filter(id => !ttsLike.includes(id))
+                gs.availableModels = [...ttsLike, ...rest]
+                if (!gs.model) {
+                    if (ttsLike.length) gs.model = ttsLike[0]
+                    else if (res.items.length === 1) gs.model = res.items[0]
+                }
+                gs.connected = true
+                q.connected = true
+                q.transport = 'gpustack'
+                this.saveConfig()
+                return {
+                    success: true,
+                    message: res.items.length
+                        ? `已获取 ${res.items.length} 个模型${gs.model ? `（当前：${gs.model}）` : ''}`
+                        : '服务端没有已部署的模型',
+                    models: gs.availableModels,
+                }
+            } catch (error: any) {
+                const msg = error?.message || String(error)
+                gs.modelsError = msg
+                gs.connected = false
+                return { success: false, message: msg }
+            } finally {
+                gs.loadingModels = false
+            }
+        },
+
+        // 拉取 Qwen3-TTS 音色列表（本地走 Gradio /update_voices；GPUStack 走 /audio/voices，失败可手动填）
         async loadQwen3TTSVoices(): Promise<{
             success: boolean;
             message: string;
             voices?: string[];
         }> {
             const q = this.AIconfig.tts.qwen3;
+            if (q.deploy === 'gpustack') return this.loadGpuStackVoices();
             if (q.voicesLoading) return { success: false, message: '正在获取音色列表…' };
             q.voicesLoading = true;
             q.voicesError = '';
@@ -2926,6 +3170,39 @@ export const usestore = defineStore('data', {
                 return { success: false, message: msg };
             } finally {
                 q.voicesLoading = false;
+            }
+        },
+
+        // GPUStack 的音色列表（部分后端没有这个接口：失败时提示可直接手填音色名）
+        async loadGpuStackVoices(): Promise<{
+            success: boolean;
+            message: string;
+            voices?: string[];
+        }> {
+            const q = this.AIconfig.tts.qwen3
+            const gs: any = q?.gpustack
+            if (!gs) return { success: false, message: 'GPUStack 配置缺失，请重新打开设置页' }
+            if (!String(gs.url || '').trim()) {
+                return { success: false, message: '请先填写 GPUStack 服务地址（形如 http://192.168.1.10:8080）' }
+            }
+            if (gs.loadingVoices) return { success: false, message: '正在获取音色列表…' }
+            gs.loadingVoices = true
+            gs.voicesError = ''
+            try {
+                const res = await gpustackListVoices({ base: gs.url, apiKey: gs.apiKey, model: gs.model })
+                gs.availableVoices = res.items
+                // 当前音色不在列表里（或还没选）→ 自动落到第一个
+                if (!gs.voice || !res.items.includes(gs.voice)) gs.voice = res.items[0] || gs.voice || ''
+                gs.connected = true
+                q.connected = true
+                this.saveConfig()
+                return { success: true, message: `已获取 ${res.items.length} 个音色`, voices: res.items }
+            } catch (error: any) {
+                const msg = error?.message || String(error)
+                gs.voicesError = msg
+                return { success: false, message: msg }
+            } finally {
+                gs.loadingVoices = false
             }
         },
 
@@ -3025,8 +3302,9 @@ export const usestore = defineStore('data', {
         async ensurePythonAppReady(id: 'qwen3tts' | 'qwenImage'): Promise<void> {
             const cfg: any = id === 'qwen3tts' ? this.AIconfig.tts : this.AIconfig.image;
             const target: any = id === 'qwen3tts' ? cfg.qwen3 : cfg;
-            // Qwen3-TTS 只在「当前语音类型 = Qwen3-TTS」时才自动拉起
+            // Qwen3-TTS 只在「当前语音类型 = Qwen3-TTS」时才自动拉起；GPUStack 模式没有本地服务可拉
             if (id === 'qwen3tts' && cfg.type !== 'Qwen3-TTS') return;
+            if (id === 'qwen3tts' && target?.deploy === 'gpustack') return;
             if (!target?.autoStart || !String(target.installDir || '').trim()) return;
             const api = getPlatform().host.pythonApps?.[id];
             if (!api?.status) return;
@@ -3233,6 +3511,8 @@ export const usestore = defineStore('data', {
                     const qwen3Old: any = this.AIconfig.tts.qwen3
                     const merged: any = { ...DEFAULT_AIconfig.tts.qwen3, ...qwen3Old }
                     merged.lang = normalizeQwen3Lang(qwen3Old?.lang ?? this.AIconfig.tts.language)
+                    merged.gpustack = { ...DEFAULT_AIconfig.tts.qwen3.gpustack, ...(qwen3Old?.gpustack || {}) }
+                    merged.deploy = qwen3Old?.deploy === 'gpustack' ? 'gpustack' : 'local'
                     delete merged.voices_url
                     this.AIconfig.tts.qwen3 = merged
                 }

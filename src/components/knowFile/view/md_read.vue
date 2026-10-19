@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { aikmIpcAvailable } from '@/lib/aikmIpc'
   import { usestore } from '@/store'
   import { ref,watch,onMounted,onBeforeUnmount,computed,nextTick } from 'vue'
   import { ElMessage } from 'element-plus'
+  import { isReadFailureText, readFailureReason } from '@/shared/readText'
   import ImageZoom from '@/components/knowFile/view/view_image.vue' // 导入图片组件
 
   import MarkdownIt from 'markdown-it'
@@ -65,6 +65,8 @@ import { getPlatform, hasCapability } from '@/platform'
 
   const emit = defineEmits<{
     (e: 'update:path', path: string): void
+    /** 磁盘文件变更后用户点击「重新加载」：把最新正文交给 props 驱动的宿主同步（FileWindow 等） */
+    (e: 'reload', content: string): void
   }>()
 
   // ---- 阅读字号（.prep 正文基础字号，A-/A+ 调节，localStorage 记忆） ----
@@ -81,8 +83,22 @@ import { getPlatform, hasCapability } from '@/platform'
   // Word文档内容缓存
   const wordContent = ref('')
 
+  /**
+   * 外部变更后由本组件直接渲染的最新正文。
+   *
+   * 为什么需要：本组件的正文由宿主经 `props.content` 传入（FileWindow / explorer / 知识处理
+   * 文件预览都是这样）。点击「重新加载」后若只 `init()` 重渲染，读到的仍是宿主手里的旧 props；
+   * 这里保存刚读到的正文，保证即使宿主没有监听 `reload` 事件也能真的刷新。
+   * 宿主回写 props（内容相同）或切换文件时清空。
+   */
+  const liveContent = ref<string | null>(null)
+
+  /** 磁盘文件在外部被修改：状态栏常驻提示，点击后重新加载（不自动替换正文，避免打断阅读） */
+  const fileChanged = ref(false)
+  const reloadingFile = ref(false)
+
   const data = computed(() => {
-    const content = props.content ?? ''
+    const content = liveContent.value ?? props.content ?? ''
     const path = props.path ?? ''
     
     let extension = ''
@@ -144,13 +160,29 @@ import { getPlatform, hasCapability } from '@/platform'
     }
   })
 
-  // 浏览器模式（LAN 共享）无法通过 file:// 加载本地文件，改用 srcdoc 渲染
-  const isBrowserMode = typeof window !== 'undefined' && !aikmIpcAvailable()
+  /**
+   * HTML 预览用哪种方式加载：
+   *  - 页面本身是 file://（打包后的桌面版）→ 用 file:/// 的 src，HTML 里的相对资源 / 脚本能正常加载；
+   *  - 其它情况（LAN 网页端 / 开发期 http://localhost）→ 浏览器不允许 http 页面内嵌 file://，
+   *    改用 srcdoc 渲染正文，并注入 <base href="file:///目录/">，尽量让相对资源仍能解析。
+   */
+  const canUseFileIframe = typeof window !== 'undefined' && window.location.protocol === 'file:'
   // 本地 HTML 文件 → file:/// URL（相对资源/脚本可正常加载）
   const htmlSrc = computed(() => {
     const p = data.value.path
     if (!p) return ''
     return 'file:///' + p.replace(/\\/g, '/')
+  })
+  /** srcdoc 版：正文 + 指向文件所在目录的 <base>（已有 <base> 时不重复插入） */
+  const htmlSrcdoc = computed(() => {
+    const content = String(data.value.content || '')
+    const p = String(data.value.path || '')
+    if (!p) return content
+    const dir = ('file:///' + p.replace(/\\/g, '/').replace(/[^/]*$/, '')).replace(/"/g, '%22')
+    const base = `<base href="${dir}">`
+    if (/<base[\s>]/i.test(content)) return content
+    if (/<head[^>]*>/i.test(content)) return content.replace(/<head([^>]*)>/i, `<head$1>${base}`)
+    return base + content
   })
 
   let prep = ref("") //预览
@@ -1084,21 +1116,61 @@ ${inlinedHtml}
     }
   })
 
-  // 文件变更自动刷新（载荷统一按 unknown 收下再断言：宿主事件总线没有跨进程类型契约，见 platform/contract 的 EventsPort）
-  const handleFileChanged = async (payload: unknown) => {
+  // 切换文件：清掉「外部变更」状态与上一份本地覆盖（避免把旧文件的内容带到新文件）
+  watch(() => props.path, () => {
+    liveContent.value = null
+    fileChanged.value = false
+  })
+
+  // 宿主已回写同一条正文（点击重新加载后 FileWindow 更新 fileContent）：清掉本地覆盖，
+  // 让正文重新跟随 props；否则宿主后续再改内容会被 liveContent 一直盖住。
+  watch(() => props.content, (v) => {
+    if (liveContent.value !== null && v === liveContent.value) liveContent.value = null
+  })
+
+  // 文件在外部变更：只提示、不自动刷新。
+  // 自动替换正文有两个问题：① 用户可能正在阅读 / 选中，静默刷新会丢滚动位置；
+  // ② 子窗口（FileWindow）的正文由宿主 props 持有，旧实现只闪一句「已更新」但正文仍是旧的。
+  // 载荷统一按 unknown 收下再断言：宿主事件总线没有跨进程类型契约（见 platform/contract 的 EventsPort）。
+  const handleFileChanged = (payload: unknown) => {
     const changedPath = (payload as { path?: string } | null)?.path
     const cur = data.value
     if (!changedPath || !cur.path || cur.path !== changedPath) return
-    // 外部变更：底部状态栏短暂提示已自动刷新
-    flashFileChanged()
-    // 重新读取文件内容
-    const newContent = await getPlatform().fs.readText(cur.path)
-    if (props.path) {
-      // 通过 props 传入路径时，直接重新 init
+    // 只有底部状态栏支持的文档才提示（PDF / 图片等由各自组件处理，避免提示了却刷不动）
+    if (cur.isRemote || props.isRemote || !(cur.isMd || cur.isTxt || cur.isWord)) return
+    fileChanged.value = true
+  }
+
+  /** 点击状态栏提示：重新读盘并刷新（Word 走 init → loadWordContent 自己读盘并重新转换） */
+  const reloadChangedFile = async () => {
+    const cur = data.value
+    const target = cur.path
+    if (!target || reloadingFile.value) return
+    reloadingFile.value = true
+    try {
+      const text = await getPlatform().fs.readText(target)
+      if (isReadFailureText(text)) {
+        ElMessage.error(store.locales === 'zh'
+          ? `重新加载失败：${readFailureReason(text)}`
+          : `Reload failed: ${readFailureReason(text)}`)
+        return
+      }
+      // 同步宿主状态（store 是 explorer / 主面板的正文来源）
+      const curTab = store.data[store.index]
+      if (curTab && curTab.path === target) curTab.content = text
+      // props 驱动的宿主（FileWindow）据此回写自己的 fileContent
+      emit('reload', text)
+      // Word 的正文由 loadWordContent 从磁盘重读；其余文档直接渲染本次读到的内容
+      if (!cur.isWord) liveContent.value = text
+      fileChanged.value = false
       await init()
-    } else if (store.data[store.index]?.path === cur.path) {
-      store.data[store.index].content = newContent
-      await init()
+      ElMessage.success(store.locales === 'zh' ? '已重新加载' : 'Reloaded')
+    } catch (e: any) {
+      ElMessage.error(store.locales === 'zh'
+        ? `重新加载失败：${e?.message || '未知错误'}`
+        : `Reload failed: ${e?.message || 'unknown error'}`)
+    } finally {
+      reloadingFile.value = false
     }
   }
   
@@ -1437,6 +1509,8 @@ ${inlinedHtml}
 
   // ===== 底部状态栏 =====
   const showStatusbar = computed(() => {
+    // 文件被外部改空 / 改成空文件时也要能显示「文件已修改，重新加载」
+    if (fileChanged.value) return true
     const d = data.value
     if (d.isTxt || d.isMd) return d.content !== ''
     if (d.isWord) return wordContent.value !== ''
@@ -1483,15 +1557,6 @@ ${inlinedHtml}
     const c = prepRef.value
     if (!c) return
     c.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-
-  // 文件外部变更提示（自动刷新后短暂提示）
-  const fileChangedTip = ref(false)
-  let fileChangedTipTimer: ReturnType<typeof setTimeout> | null = null
-  const flashFileChanged = () => {
-    fileChangedTip.value = true
-    if (fileChangedTipTimer) clearTimeout(fileChangedTipTimer)
-    fileChangedTipTimer = setTimeout(() => { fileChangedTip.value = false }, 3000)
   }
 
   // ===== 左侧栏互斥工具（目录 / 标签 / 搜索） =====
@@ -1715,10 +1780,9 @@ ${inlinedHtml}
     unsubWatchedFile?.()
     unsubWatchedFile = null
     getPlatform().watch.unwatchFile()
-    // 停止 TTS 轮询 / 清理导出菜单监听 / 清理变更提示定时器 / 清理目录与对话面板拖拽
+    // 停止 TTS 轮询 / 清理导出菜单监听 / 清理目录与对话面板拖拽
     stopTtsPoll()
     document.removeEventListener('click', closeExportMenu)
-    if (fileChangedTipTimer) clearTimeout(fileChangedTipTimer)
     if (metaSyncTimer) clearTimeout(metaSyncTimer)
     onTocDragEnd()
     onChatDragEnd()
@@ -1880,8 +1944,8 @@ ${inlinedHtml}
       
       <!-- HTML 文件显示（iframe 渲染） -->
       <div v-if="data.isHtml" class="html-preview">
-        <iframe v-if="!isBrowserMode && htmlSrc" class="html-frame" :src="htmlSrc" :title="data.path" />
-        <iframe v-else class="html-frame" :srcdoc="data.content || ''" :title="data.path" />
+        <iframe v-if="canUseFileIframe && htmlSrc" class="html-frame" :src="htmlSrc" :title="data.path" />
+        <iframe v-else class="html-frame" :srcdoc="htmlSrcdoc" :title="data.path" />
       </div>
       
       <!-- Markdown 文件显示 -->
@@ -1956,11 +2020,19 @@ ${inlinedHtml}
       <span class="statusbar-sep"></span>
 
       <!-- 状态显示（右下角） -->
-      <!-- 文件外部变更提示（短暂显示） -->
-      <span v-if="fileChangedTip" class="statusbar-item md-sb-changed" :title="store.locales==='zh' ? '文件已在外部更新，已自动刷新' : 'File changed externally, reloaded'">
-        <i class="fa fa-refresh"></i>
-        <span>{{ store.locales==='zh' ? '已更新' : 'Updated' }}</span>
-      </span>
+      <!-- 文件外部变更：常驻提示，点击重新加载（不自动替换正文，避免打断阅读） -->
+      <button
+        v-if="fileChanged"
+        class="statusbar-btn md-sb-changed"
+        :disabled="reloadingFile"
+        @click="reloadChangedFile"
+        :title="store.locales==='zh' ? '文件已在外部修改，点击重新加载' : 'File changed on disk — click to reload'"
+      >
+        <i class="fa" :class="reloadingFile ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
+        <span>{{ reloadingFile
+          ? (store.locales==='zh' ? '正在加载…' : 'Reloading…')
+          : (store.locales==='zh' ? '文件已修改 · 重新加载' : 'File changed · Reload') }}</span>
+      </button>
 
       <!-- 当前章节 -->
       <span v-if="toc.length > 0" class="statusbar-item md-sb-section" :title="currentSectionText || (store.locales==='zh' ? '当前章节' : 'Current section')">

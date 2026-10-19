@@ -2,7 +2,7 @@
 import { aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, onMounted, onBeforeUnmount, computed, watch, defineAsyncComponent } from 'vue'
 import { usestore } from '@/store'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchFsRead, downloadRemoteFile } from '@/platform/remoteFs'
 import md_read from '@/components/knowFile/view/md_read.vue'
 import Edit_Code from '@/components/knowFile/view/Edit_Code.vue'
@@ -36,12 +36,25 @@ const store = usestore()
 const props = defineProps<{
   /** 应用内浮层模式：不读 URL hash、不接管主窗口的标签/标题等窗口级状态 */
   overlay?: boolean
+  /**
+   * 嵌入模式：作为宿主里的一块内容（主页右侧栏 / 知识管理右侧标签）渲染。
+   * 参数与浮层一样走 props；不接管 document.title、不写标签持久化、不渲染窗口按钮，
+   * 关闭由宿主处理；切换 / 关闭前由宿主调用 confirmLeave() 处理未保存内容。
+   */
+  embedded?: boolean
   path?: string
   view?: string
   page?: string | number
   remoteRootId?: string
   remoteRel?: string
   label?: string
+}>()
+
+const emit = defineEmits<{
+  /** 用户在视图切换器里选了另一个视图（宿主可写回标签状态） */
+  (e: 'update:view', view: string): void
+  /** 嵌入模式下请求关闭（当前由宿主标签的关闭按钮统一处理，保留给后续入口） */
+  (e: 'close'): void
 }>()
 
 const filePath = ref('')
@@ -230,12 +243,21 @@ const windowTitle = computed(() => {
   const viewName = isTask.value ? (store.locales === 'zh' ? '脚手架' : 'Scaffold') : viewLabel(viewType.value)
   return `${fileName.value} - ${viewName}`
 })
-// 视图切换、媒体切歌等文件名/视图变化时同步系统窗口标题
-watch(windowTitle, (t) => { if (!props.overlay) document.title = t }, { immediate: true })
+// 视图切换、媒体切歌等文件名/视图变化时同步系统窗口标题（只有真正的独立窗口才接管标题）
+watch(windowTitle, (t) => { if (!props.overlay && !props.embedded) document.title = t }, { immediate: true })
 
-// 应用内浮层：同一个实例被再次打开（如文档里指向另一页的图表链接）时直接换页，不重建
+// 应用内浮层 / 嵌入模式：同一个实例被再次打开（如文档里指向另一页的图表链接）时直接换页，不重建
 watch(() => props.page, (p) => {
-  if (props.overlay && p != null && p !== '') drawioPage.value = String(p)
+  if ((props.overlay || props.embedded) && p != null && p !== '') drawioPage.value = String(p)
+})
+
+// 嵌入模式：宿主切换标签 / 重新挂载时更新初始视图（只认可用视图，避免把 office 等不适用视图塞进来）
+watch(() => props.view, (v) => {
+  if (!props.embedded) return
+  const next = (v || '') as ViewType
+  if (next && VIEW_TYPES.includes(next) && availableViews.value.includes(next) && next !== viewType.value) {
+    viewType.value = next
+  }
 })
 
 function minimizeWindow() {
@@ -248,6 +270,11 @@ function maximizeWindow() {
 }
 
 function closeWindow() {
+  // 嵌入模式：关闭动作属于宿主标签（见 ChatDockFile / explorer），这里只发事件
+  if (props.embedded) {
+    emit('close')
+    return
+  }
   // 应用内浮层：只关浮层（主窗口的配置落盘与窗口关闭都交给主窗口自己）
   if (props.overlay) {
     store.closeFileWindowOverlay()
@@ -262,6 +289,18 @@ function onMediaPathChange(path: string) {
   if (!path) return
   filePath.value = path
   fileName.value = path.replace(/\\/g, '/').split('/').pop() || '文件'
+}
+
+/**
+ * 浏览视图在磁盘文件变更后点击「重新加载」：把最新正文回写本窗口。
+ * 本窗口的正文是本地 `fileContent`（props 驱动），不接这一步的话 md_read 只能自己临时显示新内容，
+ * 切到源码编辑 / 可视编辑 / 与文档对话仍会拿到旧正文。
+ */
+function onExternalReload(content: string) {
+  if (typeof content !== 'string') return
+  fileContent.value = content
+  const cur = store.data[store.index]
+  if (cur && cur.path === filePath.value) cur.content = content
 }
 
 // ---- 远程只读文件加载 / 下载（与 panel.vue clickRemoteNode 的逻辑保持一致） ----
@@ -384,8 +423,70 @@ function toggleViewMenu() {
 
 function selectView(v: ViewType) {
   viewMenuOpen.value = false
-  if (VIEW_TYPES.includes(v) && availableViews.value.includes(v)) viewType.value = v
+  if (VIEW_TYPES.includes(v) && availableViews.value.includes(v)) {
+    viewType.value = v
+    // 嵌入模式（主页右侧栏 / 知识管理标签）：宿主据此把视图写回标签，切走再回来沿用
+    if (props.embedded) emit('update:view', v)
+  }
 }
+
+// ===== 编辑器实例（未保存守卫用）=====
+// 只有「源码编辑 / 可视编辑」两个视图会有未保存内容：其它的浏览 / 导图 / 演示都是只读，
+// 专属编辑器（Excalidraw / Drawio / 数据画布 / 工作流）自己按需自动保存。
+const editCodeRef = ref<any>(null)
+const editBlockRef = ref<any>(null)
+
+/** 当前视图是否有未保存修改 */
+function hasUnsaved(): boolean {
+  if (viewType.value === 'edit') return editCodeRef.value?.hasUnsaved?.() === true
+  if (viewType.value === 'blockedit') return editBlockRef.value?.hasUnsaved?.() === true
+  return false
+}
+
+/** 保存当前编辑视图（返回是否保存成功） */
+async function saveActiveView(): Promise<boolean> {
+  try {
+    if (viewType.value === 'edit') return (await editCodeRef.value?.saveContent?.()) !== false
+    if (viewType.value === 'blockedit') return (await editBlockRef.value?.saveContent?.()) !== false
+    return true
+  } catch (e) {
+    console.warn('[file-window] 保存失败:', e)
+    return false
+  }
+}
+
+/**
+ * 宿主在关闭 / 切换这个文件前调用：有未保存内容时让用户选「保存 / 不保存 / 取消」。
+ * @returns true = 可以离开；false = 用户取消（宿主应放弃切换）
+ */
+async function confirmLeave(): Promise<boolean> {
+  if (!hasUnsaved()) return true
+  const zh = store.locales === 'zh'
+  try {
+    await ElMessageBox.confirm(
+      zh ? '这个文件有未保存的更改，要保存吗？' : 'This file has unsaved changes. Save it?',
+      zh ? '未保存的更改' : 'Unsaved changes',
+      {
+        confirmButtonText: zh ? '保存' : 'Save',
+        cancelButtonText: zh ? '不保存' : "Don't save",
+        distinguishCancelAndClose: true,
+        showClose: true,
+        type: 'warning',
+      },
+    )
+    return await saveActiveView()
+  } catch (action) {
+    // cancel = 不保存；close（右上角 × / Esc）= 取消离开
+    if (action === 'cancel') {
+      editCodeRef.value?.discardUnsaved?.()
+      editBlockRef.value?.discardUnsaved?.()
+      return true
+    }
+    return false
+  }
+}
+
+defineExpose({ confirmLeave, hasUnsaved, saveActiveView })
 
 /** 点到切换器之外 / 按 Esc 就收起下拉面板 */
 function closeViewMenuOnOutside(e: Event) {
@@ -464,10 +565,13 @@ onMounted(async () => {
     if (p) drawioPage.value = p
   })
 
+  // 参数来源：桌面独立窗口读 URL hash；应用内浮层 / 嵌入模式（主页右侧栏、知识管理标签）读 props
+  const overlay = props.overlay === true || props.embedded === true
+
   // 独立窗口使用独立 store：打开时从 localStorage 同步最新模型来源配置，
   // 避免自定义推理等使用主窗口修改前保存的旧来源（导致请求 URL 无效）
-  // 应用内浮层与主窗口共用 store，配置本来就是最新的，不做同步也不改持久化开关
-  if (!props.overlay) {
+  // 应用内浮层 / 嵌入模式与主窗口共用 store，配置本来就是最新的，不做同步也不改持久化开关
+  if (!overlay) {
     store.refreshAIconfigFromStorage()
 
     // 独立窗口不持久化标签：避免把新窗口打开的标签写进共享 localStorage，
@@ -475,8 +579,6 @@ onMounted(async () => {
     store.setPersistTabs(false)
   }
 
-  // 参数来源：桌面独立窗口读 URL hash；应用内浮层读 props（见 props 注释）
-  const overlay = props.overlay === true
   const hash = overlay ? '' : window.location.hash
   const params = new URLSearchParams(hash.replace(/^#\/file-view\?/, ''))
   const requestedView = (overlay ? props.view : params.get('view')) as ViewType | null
@@ -683,8 +785,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="file-window knowfile-menu">
-    <div class="file-titlebar">
+  <div class="file-window knowfile-menu" :class="{ embedded: props.embedded }">
+    <div class="file-titlebar" :class="{ 'titlebar-embedded': props.embedded }">
       <!-- 视图类型切换（按文件类型过滤；.excalidraw/代码/图片等固定单一视图，不显示）
            用自绘下拉而不是原生 <select>：标题栏是窗口拖动区，原生下拉面板在 Electron 里
            容易一移动鼠标就被系统拖动流程关掉（选项"一闪就没"），自绘面板不受此影响 -->
@@ -712,14 +814,15 @@ onBeforeUnmount(() => {
       </div>
       <div class="file-titlebar-title" :title="filePath">{{ titleText }}</div>
       <div class="file-titlebar-actions">
-        <!-- 最小化 / 最大化按钮只在有窗口壳的桌面版出现；应用内浮层（安卓 / 网页端）只有关闭 -->
-        <div v-if="!props.overlay && hasCapability('window.chrome')" @click="minimizeWindow" :title="store.locales=='zh'?'最小化':'Minimize'">
+        <!-- 最小化 / 最大化按钮只在有窗口壳的桌面版出现；应用内浮层（安卓 / 网页端）只有关闭；
+             嵌入模式没有窗口按钮、也没有自己的关闭按钮（关闭由宿主标签负责） -->
+        <div v-if="!props.overlay && !props.embedded && hasCapability('window.chrome')" @click="minimizeWindow" :title="store.locales=='zh'?'最小化':'Minimize'">
           <i class="fa fa-minus"></i>
         </div>
-        <div v-if="!props.overlay && hasCapability('window.chrome')" @click="maximizeWindow" :title="store.locales=='zh'?'最大化/还原':'Maximize/Restore'">
+        <div v-if="!props.overlay && !props.embedded && hasCapability('window.chrome')" @click="maximizeWindow" :title="store.locales=='zh'?'最大化/还原':'Maximize/Restore'">
           <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
         </div>
-        <div @click="closeWindow" class="file-close-btn" :title="store.locales=='zh'?'关闭':'Close'">
+        <div v-if="!props.embedded" @click="closeWindow" class="file-close-btn" :title="store.locales=='zh'?'关闭':'Close'">
           <i class="fa fa-times"></i>
         </div>
       </div>
@@ -783,7 +886,7 @@ onBeforeUnmount(() => {
       <Mermaid :path="filePath" :content="fileContent" />
     </div>
     <div v-else-if="viewType === 'read'" class="file-view">
-      <md_read :path="filePath" :content="fileContent" :loading="contentLoading" :is-remote="isRemoteFile" :remote-base64="remoteBase64" :remote-text="remoteText" @update:path="onMediaPathChange" />
+      <md_read :path="filePath" :content="fileContent" :loading="contentLoading" :is-remote="isRemoteFile" :remote-base64="remoteBase64" :remote-text="remoteText" @update:path="onMediaPathChange" @reload="onExternalReload" />
     </div>
     <div v-else-if="viewType === 'office'" class="file-view">
       <OfficeView
@@ -795,10 +898,10 @@ onBeforeUnmount(() => {
       />
     </div>
     <div v-else-if="viewType === 'edit'" class="file-view">
-      <Edit_Code />
+      <Edit_Code ref="editCodeRef" />
     </div>
     <div v-else-if="viewType === 'blockedit'" class="file-view">
-      <Edit_Block />
+      <Edit_Block ref="editBlockRef" />
     </div>
     <div v-else-if="viewType === 'mindmap'" class="file-view">
       <md_mind />
@@ -810,6 +913,15 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 嵌入模式（主页右侧栏 / 知识管理右侧标签）：没有窗口壳，左侧留一点内边距与标题栏留白 */
+.file-window.embedded .file-titlebar {
+  height: 32px;
+  padding: 2px 6px;
+}
+.file-window.embedded .file-titlebar-title {
+  font-size: 12px;
+}
+
 .file-window {
   width: 100%;
   /* 满屏但不能用 100vh：安卓「窗口缩放」= 根元素 CSS zoom，vh 会被再乘一次 zoom，
@@ -833,6 +945,11 @@ onBeforeUnmount(() => {
   user-select: none;
   cursor: move;
   -webkit-app-region: drag;
+}
+/* 嵌入模式：不是窗口拖动区（否则侧栏 / 标签里拖不动、还会把点击吞掉） */
+.file-titlebar.titlebar-embedded {
+  cursor: default;
+  -webkit-app-region: no-drag;
 }
 
 /* 本地文件读取失败态（替代原来的“文件无内容和数据”空提示） */

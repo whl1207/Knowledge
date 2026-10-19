@@ -876,6 +876,26 @@ const applyCloseBehavior = async () => {
   }
 }
 
+/**
+ * 窗口交互模式切换：保存并提示「下一次打开」的落点。
+ * 不强制关闭当前设置窗口——用户可能只是先改配置；桌面从单窗口切回多窗口后，
+ * 下一次打开设置就会回到独立窗口（见 store.openSettings）。
+ */
+const onWindowModeChange = () => {
+  const zh = store.locales === 'zh'
+  store.saveConfig()
+  const single = store.singleWindowMode
+  ElMessage.success(zh
+    ? (single
+      ? '已切换为单窗口模式：文件在标签页打开，设置与插件以页面内浮层显示'
+      : (hasCapability('window.chrome')
+        ? '已切换为多窗口模式：设置 / 插件面板 / 其它模块打开的文件各开独立窗口'
+        : '当前环境没有窗口壳，仍按单窗口方式工作'))
+    : (single
+      ? 'Single-window mode: files open in tabs, Settings and plugins appear in-page'
+      : 'Multi-window mode: Settings, plugin panels and files from other modules get their own windows'))
+}
+
 // 配置随软件分发（下拉：关闭 / 开启）：开启后界面配置保存到软件根目录 interface-config.json，便于整机分发
 const onPortableConfigChange = async (e: Event) => {
   const el = e.target as HTMLSelectElement
@@ -1275,6 +1295,17 @@ onBeforeUnmount(() => {
               <i class="fa" :class="isFullscreen ? 'fa-compress' : 'fa-expand'"></i>
             </div>
           </div>
+          <!-- 窗口交互模式：统一决定文件 / 设置 / 插件面板的打开落点（单页面环境推荐单窗口） -->
+          <div class="form-group">
+            <label>{{ store.locales=='zh'?'窗口模式' : 'Window Mode' }}</label>
+            <select v-model="store.UI.windowMode" class="layout-select" @change="onWindowModeChange"
+                    :title="store.locales=='zh'
+                      ? '单窗口模式：一切都在主窗口内完成——文件在标签页里打开（主页右侧栏 / 知识管理右侧只有一个视图标签 + 文件标签），设置与插件面板以页面内浮层显示，适合安卓、手机网页等单页面环境。多窗口模式：与原来一致——设置 / 插件面板 / 文件各开独立窗口，知识管理不显示标签栏，文件树点文件直接开窗口。安卓 / 网页端没有窗口壳，始终按单窗口方式工作。'
+                      : 'Single-window: everything stays inside the main window — files open in tabs (Home dock / Knowledge Management shows one view tab plus file tabs), Settings and plugin panels appear as in-page overlays; best for Android and single-page web builds. Multi-window: the original behaviour — Settings, plugin panels and files get their own windows, Knowledge Management shows no tab bar, and clicking a file opens a window. Android and web builds have no window chrome and always run single-window.'">
+              <option value="single">{{ store.locales=='zh'?'单窗口模式（标签页 / 页面内浮层）' : 'Single window (tabs / in-page overlays)' }}</option>
+              <option value="multi" :disabled="!hasCapability('window.chrome')">{{ store.locales=='zh'?'多窗口模式（独立窗口）' : 'Multi-window (separate windows)' }}</option>
+            </select>
+          </div>
           <div class="form-group">
             <label>{{ store.locales=='zh'?'主题' : 'Theme' }}</label>
             <!-- 主题选项由 THEMES 映射表生成（追加「自定义」），新增主题时下拉自动同步 -->
@@ -1439,8 +1470,8 @@ onBeforeUnmount(() => {
           <div v-if="store.isNavVisible('知识管理')" class="settings-group">
             <h3>{{ store.locales=='zh' ? '知识管理' : 'Knowledge Management' }}</h3>
             <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-              ? '知识管理主窗口右侧显示的视图（单选，一次只显示一个）：文件 / 看板 / 表格 / 图谱 / 地图 / 日历。文件本身一律在独立窗口打开，那边的可用视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）按文件类型决定，不在此配置；预览远程文件时会自动切到「浏览」。需先在上方开启「知识管理」；浏览器相关设置（主页 / 新标签页 / 搜索 / 收藏夹 / Markdown 剪藏）在「其他 → 浏览器」。'
-              : 'The view shown on the right of the main window (single choice — one view at a time): Files / Kanban / Table / Graph / Map / Year Calendar. Files themselves always open in their own window, where the available views (Browse / Source / Visual / Mind Map / Presentation) follow the file type; previewing a remote file switches to Browse automatically. Requires Knowledge Management enabled above; browser-related settings (home page / save folder) live under Other → Browser.' }}</div>
+              ? '单窗口模式下，知识管理右侧只有一个固定的「视图」标签（不可关闭）：在这个标签里用顶部工具栏的下拉切换文件 / 看板 / 表格 / 图谱 / 地图 / 日历，6 类视图不再各占一个标签。打开的文件作为可关闭的文件标签叠在右侧，标签内自带视图切换（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示，按文件类型决定），不在此配置；右键文件仍可「在新窗口打开」。多窗口模式不显示标签栏，文件树点文件直接开独立窗口，与原来一致。需先在上方开启「知识管理」；浏览器相关设置（主页 / 新标签页 / 搜索 / 收藏夹 / Markdown 剪藏）在「其他 → 浏览器」。'
+              : 'In single-window mode, Knowledge Management shows a single pinned “view” tab (cannot be closed): switch Files / Kanban / Table / Graph / Map / Year Calendar inside it with the toolbar dropdown — the six views no longer take one tab each. Opened files appear as closable file tabs on top of it, each with its own view switcher (Browse / Source / Visual / Mind Map / Presentation, depending on the file type); right-click a file to open it in a separate window instead. Multi-window mode hides the tab bar and opens files from the tree in their own windows, as before. Requires Knowledge Management enabled above; browser-related settings (home page / save folder) live under Other → Browser.' }}</div>
             <div class="nav-switch-list">
               <div
                 v-for="view in viewButtons"

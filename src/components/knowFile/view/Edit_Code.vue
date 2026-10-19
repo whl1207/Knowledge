@@ -20,6 +20,7 @@ import DocTocPanel from '@/components/knowFile/view/DocTocPanel.vue'
 import { extractMarkdownHeadings, flattenHeadingLevels, loadDocTocWidth, saveDocTocWidth, loadDocTocOpen, saveDocTocOpen, DOC_TOC_MIN_WIDTH, DOC_TOC_MAX_WIDTH } from '@/lib/markdown/toc'
 import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
 import { getPlatform, hasCapability } from '@/platform'
+import { droppedFilePath } from '@/platform/droppedFile'
 
 const store = usestore()
 
@@ -1699,8 +1700,9 @@ const handleEditorDrop = async (e: DragEvent) => {
 
     // 只处理单个文件拖入
     const file = files[0]
-    // Electron 中拖入的文件带有完整路径（file.path）
-    const filePath = (file as any).path || file.name
+    // Electron 32 起没有 File.path：经 preload 的 webUtils 取真实路径；
+    // 取不到时退回文件名（只能生成一个不带目录的相对链接）
+    const filePath = droppedFilePath(file) || file.name
 
     e.preventDefault()
     e.stopPropagation()
@@ -2318,10 +2320,25 @@ onBeforeUnmount(async () => {
     tocObserver = null
 })
 
+/**
+ * 用户选择「不保存」时调用：把当前编辑内容记为已保存快照并清掉脏标记。
+ * 组件随后会被卸载（切换标签 / 关窗口），这里只是避免卸载过程中 store 切换文件
+ * 又弹出一次未保存提示。
+ */
+const discardUnsaved = () => {
+    try {
+        const model = editor?.getModel()
+        savedContent = model?.getValue() || ''
+        savedVersion = model?.getAlternativeVersionId() ?? 0
+    } catch (e) { /* 编辑器未就绪时忽略 */ }
+    isDirty.value = false
+}
+
 // 暴露给父组件：独立窗口（FileWindow.vue）关闭前检查未保存状态 / 主动保存
 defineExpose({
     hasUnsaved: () => isDirty.value,
-    saveContent
+    saveContent,
+    discardUnsaved
 })
 </script>
 
