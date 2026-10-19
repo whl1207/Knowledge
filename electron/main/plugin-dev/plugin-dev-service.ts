@@ -7,7 +7,7 @@
 // （装机后的软件里没有 src/，模型找不到会满盘 read_file / search_files / shell）。
 //
 // 设计要点：
-// - **按主题拆成 7 个短工具**（host / constraints / manifest / api / api-main / faq / templates），
+// - **按主题拆成 8 个短工具**（host / constraints / manifest / api / api-caps / api-main / faq / templates），
 //   单次只回几百到几千字：体量小的模型一次吃不下几千字，按需取用才用得动。
 // - 与 office / drawio / literature / postgres 同构：主进程内 SDK Server over InMemoryTransport；
 //   打包主进程时不能静态内联 MCP SDK（zod v4 内联损坏），一律 @vite-ignore 运行时加载。

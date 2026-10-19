@@ -54,6 +54,9 @@
                 <th class="pp-th-icon" :title="zh ? '放宽被委派智能体的工具：文件 / MCP（需插件自己声明 fs；命令、代码、技能、递归委派不可放宽）' : 'Relax the delegated agent’s tools: files / MCP (needs the plugin to declare fs; shell, code, skills and recursion can never be relaxed)'">
                   <i class="fa fa-unlock-alt"></i>
                 </th>
+                <th class="pp-th-icon" :title="zh ? '工作目录：被委派的智能体在哪个目录里工作。相对路径按它解析，它同时是读写围栏 —— 所以只能从你授权过的「可写」文件夹里选（默认 = 知识库根）' : 'Working directory for the delegated agent. Relative paths resolve against it and it fences reads/writes, so you can only pick one of the folders you granted as writable (default = knowledge-base root)'">
+                  <i class="fa fa-folder-open-o"></i>
+                </th>
                 <th class="pp-th-icon" :title="zh ? '工具审批：声明了 fs / shell 的插件，其工具默认要你确认（点击图标切换）' : 'Tool approval: plugins declaring fs / shell ask by default (click the icon to cycle)'">
                   <i class="fa fa-shield"></i>
                 </th>
@@ -145,6 +148,22 @@
                   </button>
                 </td>
 
+                <!-- 工作目录：只能从"用户授权过的可写文件夹"里选 —— 它同时是 agent 的读写围栏 -->
+                <td class="pp-work">
+                  <select
+                    class="pp-work-select"
+                    :disabled="busy === row.pluginId"
+                    :value="row.workRoot"
+                    :title="workRootTitle(row)"
+                    @change="onWorkRoot(row, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="">{{ zh ? '默认（知识库根）' : 'Default (KB root)' }}</option>
+                    <option v-for="opt in workRootChoices(row)" :key="opt" :value="opt" :title="opt">
+                      {{ opt === row.workRoot && !row.workRootOptions.includes(opt) ? '⚠ ' : '' }}{{ baseName(opt) }}
+                    </option>
+                  </select>
+                </td>
+
                 <!-- 工具审批：图标即状态，点击循环切换；标题列出会被问的工具 -->
                 <td class="pp-center">
                   <button
@@ -208,12 +227,15 @@ const helpText = computed(() =>
     ? '这一页管的是「你授予了什么」——权限本身由插件清单声明，这里改不了。'
       + '三态图标：? 每次询问、✓ 已允许、⛔ 已拒绝，点一下切换（工具审批只管声明了 fs / shell 的插件，默认要问）。'
       + '额度＝并发 × 每小时（默认 1 / 20，上限 3 / 200），旁边是本小时已用，点 ↻ 重置。'
+      + '工作目录（文件夹图标）＝被委派智能体在哪个目录里工作：相对路径按它解析、写入也围在它里面，'
+      + '所以只能从你授权过的「可写」文件夹里选（默认 = 知识库根；⚠ 它不是沙箱，命令仍能离开该目录）。'
       + '两个放宽开关（文件 / MCP）默认关：文件还需插件自己声明 fs；MCP 只含你在「MCP 服务」里配置并启用的服务；'
       + '命令执行 / 代码执行 / 技能 / 递归委派不可放宽。'
       + '额度与开关都落在主进程、写入前要确认，卸载插件会一并清掉。'
     : 'This page is what you grant — the permissions themselves come from each plugin manifest and cannot be changed here. '
       + 'Tri-state icons: ? asks, ✓ allowed, ⛔ denied — click to cycle (tool approval only concerns plugins declaring fs / shell; they ask by default). '
       + 'Budget = concurrency × per hour (default 1 / 20, ceilings 3 / 200) with this hour’s usage beside it; click ↻ to reset. '
+      + 'Working directory (folder icon) = where the delegated agent runs: relative paths resolve against it and writes stay inside it, so it can only be one of the folders you granted as writable (default = KB root; ⚠ not a sandbox — commands can still leave it). '
       + 'The two relaxation toggles (file / MCP) are off by default: file also requires the plugin to declare fs; MCP only covers servers you configured and enabled; '
       + 'shell / code execution / skills / recursive delegation can never be relaxed. '
       + 'Budgets and switches live in the main process, every write asks for confirmation, and uninstalling a plugin clears them.',
@@ -419,6 +441,68 @@ const toolApprovalTitle = (row: PluginAgentOverviewRow) => {
     : `Tool approval: ${stateLabel(row.toolApproval)} (click for: ${nextLabel(row.toolApproval)})\nTools that ask: ${list}`
 }
 const cycleToolApproval = (row: PluginAgentOverviewRow) => onToolApproval(row, NEXT_STATE[row.toolApproval])
+
+/**
+ * 工作目录（被委派 agent 的 cwd）。
+ *
+ * 候选只有"用户授权过的**可写**文件夹"（主进程给的 `workRootOptions`）—— 因为这个目录同时是
+ * `read_file` / `write_file` 的围栏（`rendererTools.ts` 用 `resolvePath(input.path, ctx.cwd)`），
+ * 让插件或界面随便填一个路径就等于把围栏交出去。
+ *
+ * 授权被撤销后，旧值仍会出现在下拉里并带 ⚠（否则 select 的 value 匹配不上任何 option，会显示空白，
+ * 用户不知道发生了什么）。那种情况下**运行时会被主进程拒绝**（fail-loud，不悄悄退回默认）。
+ */
+const baseName = (p: string) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p)
+
+const workRootChoices = (row: PluginAgentOverviewRow): string[] => {
+  const list = [...row.workRootOptions]
+  if (row.workRoot && !list.includes(row.workRoot)) list.unshift(row.workRoot)
+  return list
+}
+
+const workRootTitle = (row: PluginAgentOverviewRow) => {
+  const stale = !!row.workRoot && !row.workRootOptions.includes(row.workRoot)
+  if (stale) {
+    return zh.value
+      ? `当前：${row.workRoot}\n⚠ 这个文件夹已经不在可写授权里了（授权被撤销？）—— 运行时会直接报错，请重新选一个或改回默认。`
+      : `Current: ${row.workRoot}\n⚠ This folder is no longer a writable grant (revoked?) — runs will fail until you pick another or revert to default.`
+  }
+  const head = row.workRoot
+    ? zh.value ? `当前：${row.workRoot}` : `Current: ${row.workRoot}`
+    : zh.value ? '当前：默认（知识库根）' : 'Current: default (KB root)'
+  const hint = row.workRootOptions.length
+    ? zh.value
+      ? `可选：${row.workRootOptions.join('、')}`
+      : `Options: ${row.workRootOptions.join(', ')}`
+    : zh.value
+      ? '还没有可选的文件夹：先到「插件 → 管理 → 该插件 → 文件授权」点「允许写入某文件夹…」'
+      : 'No folder to pick yet: first grant one under Plugins → Manage → this plugin → File access'
+  return `${head}\n${hint}`
+}
+
+const onWorkRoot = async (row: PluginAgentOverviewRow, value: string) => {
+  if (value === row.workRoot) return
+  const label = value ? baseName(value) : zh.value ? '默认（知识库根）' : 'default (KB root)'
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? `把「${row.name}」被委派智能体的工作目录改成：${label}？\n相对路径会按这个目录解析，写入也围在它里面。`
+        : `Set “${row.name}” delegated working directory to ${label}?\nRelative paths resolve against it and writes stay inside it.`,
+      zh.value ? '工作目录' : 'Working directory',
+      { type: 'warning', confirmButtonText: zh.value ? '确定' : 'OK', cancelButtonText: zh.value ? '取消' : 'Cancel' },
+    )
+  } catch {
+    return
+  }
+  busy.value = row.pluginId
+  try {
+    const ok = await setPluginAgentConfig(row.pluginId, { cwd: value })
+    if (ok) await reload()
+    else ElMessage.error(zh.value ? '更新失败（该文件夹必须在可写授权内）' : 'Update failed (the folder must be a writable grant)')
+  } finally {
+    busy.value = ''
+  }
+}
 
 const onConsent = async (row: PluginAgentOverviewRow, consent: 'allow' | 'ask' | 'deny') => {
   if (consent === row.consent) return
@@ -777,6 +861,26 @@ const onResetUsage = async (row: PluginAgentOverviewRow) => {
   opacity: 0.6;
   margin-left: 2px;
 }
+/* 工作目录下拉：唯一的 select（候选是动态的，没法用图标表达）。
+   深色适配沿用全局规则的口径：显式给背景与前景，否则原生弹层会是白底 + 继承来的白字。 */
+.pp-work-select {
+  width: 100%;
+  max-width: 150px;
+  height: 20px;
+  padding: 0 2px;
+  margin: 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background-color: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  box-sizing: border-box;
+}
+.pp-work-select option {
+  background-color: var(--backgroundColor);
+  color: var(--fontColor);
+}
+
 /* 动作列：贴住图标宽度（不占一整列的文字宽度），改了才出现内容 —— 没有留白 */
 .pp-ops {
   width: 1%;

@@ -12,13 +12,16 @@
                 ? (isFiltered ? `匹配 ${filteredTools.length} / ${registryTools.length}` : `已注册（${registryTools.length}）`)
                 : (isFiltered ? `${filteredTools.length} / ${registryTools.length} matched` : `Registered (${registryTools.length})`) }}
             </span>
+            <span v-if="scopeActive" class="registry-head-enabled">
+              {{ zh ? `· 启用 ${enabledCount}` : `· ${enabledCount} enabled` }}
+            </span>
             <span v-if="disabledCount > 0" class="registry-head-disabled" :title="disabledSummaryHint">
-              {{ store.locales === 'zh' ? `· 已禁用 ${disabledCount}` : `· ${disabledCount} disabled` }}
+              {{ zh ? `· ${disabledLabel} ${disabledCount}` : `· ${disabledCount} ${disabledLabel}` }}
             </span>
             <span class="registry-head-desc" :title="registryHeadHint">
-              {{ store.locales === 'zh'
-                ? '主进程 toolRegistry 实际注册的工具（运行时事实层）：Agent 循环 / PTC SDK / 工具类工作流节点由它分发执行；MCP 服务工具不在此列，须经 mcp_call 调用。'
-                : 'Tools actually registered in the main-process toolRegistry (runtime source of truth): the agent loop / PTC SDK / tool-based workflow nodes dispatch through it; MCP service tools are not listed here and must be called via mcp_call.' }}
+              {{ zh
+                ? '主进程 toolRegistry 实际注册的工具（运行时事实层）：Agent 循环 / PTC SDK / 工具类工作流节点由它分发执行；MCP 服务工具不在此列，须经 mcp_call 调用。启用状态默认不显示，用左侧下拉选口径。'
+                : 'Tools actually registered in the main-process toolRegistry (runtime source of truth): the agent loop / PTC SDK / tool-based workflow nodes dispatch through it; MCP service tools are not listed here and must be called via mcp_call. Enable state is hidden by default — pick a scope on the left.' }}
             </span>
           </div>
           <div class="registry-actions">
@@ -42,6 +45,17 @@
       <template v-else>
         <!-- 搜索行：注册表动辄上百条（插件工具一多更难找），按名字 / 描述 / 作用域过滤 -->
         <div class="registry-search-row">
+          <!-- 查看口径：默认不显示启用状态；也可按某个智能体预设 / 某个运行中的会话判 -->
+          <select v-model="scopeValue" class="registry-scope-select" :title="scopeSelectHint">
+            <option value="">{{ zh ? '不显示启用状态' : 'No enable state' }}</option>
+            <option value="global">{{ zh ? '全局默认（工具管理）' : 'Global default (Tools)' }}</option>
+            <optgroup v-if="scopeGroups.preset.length" :label="zh ? '智能体预设' : 'Agent presets'">
+              <option v-for="o in scopeGroups.preset" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </optgroup>
+            <optgroup v-if="scopeGroups.agent.length" :label="zh ? '运行中的会话' : 'Live sessions'">
+              <option v-for="o in scopeGroups.agent" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </optgroup>
+          </select>
           <div class="registry-search-box">
             <i class="fa fa-search registry-search-icon"></i>
             <input
@@ -71,6 +85,21 @@
           </div>
         </div>
 
+        <!-- 作用域说明（仅选中口径时显示）+ 会话清单加载中 / 预设里注册表缺失的名字 -->
+        <div v-if="scopeNote || sessionLoading || missingNames.length" class="registry-scope-note">
+          <template v-if="scopeNote">{{ scopeNote }}</template>
+          <template v-if="sessionLoading">
+            <i class="fa fa-spinner fa-spin"></i>
+            {{ zh ? '正在读取该会话的工具清单…' : 'Loading that session’s tool list…' }}
+          </template>
+          <span v-if="missingNames.length" class="registry-scope-missing">
+            <i class="fa fa-exclamation-triangle"></i>
+            {{ zh
+              ? `该口径启用但注册表里没有的工具 ${missingNames.length} 个：${missingNames.join('、')}（插件未加载 / 由渲染层实现）`
+              : `${missingNames.length} enabled tool(s) missing from the registry: ${missingNames.join(', ')} (plugin not loaded / renderer-side tool)` }}
+          </span>
+        </div>
+
         <div v-if="!filteredTools.length" class="registry-unavailable">
           <i class="fa fa-search"></i>
           {{ store.locales === 'zh'
@@ -93,7 +122,7 @@
                   <i class="fa fa-globe"></i> {{ store.locales === 'zh' ? '全局' : 'Global' }}
                 </span>
                 <span v-if="isToolDisabled(tool.name)" class="registry-badge disabled-badge" :title="disabledBadgeHint">
-                  <i class="fa fa-eye-slash"></i> {{ store.locales === 'zh' ? '已禁用' : 'Disabled' }}
+                  <i class="fa fa-eye-slash"></i> {{ disabledLabel }}
                 </span>
               </div>
               <div class="registry-desc" :title="tool.description">{{ tool.description }}</div>
@@ -107,12 +136,22 @@
 
 <script setup lang="ts">
 import { aikmDsh } from '@/lib/aikmIpc'
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { usestore } from '@/store'
 import { SKILL_AGENT_DEFAULT_TOOLS } from '@/lib/agent/skill'
 import { AGENT_TOOL_REGISTRY } from '@/services/agentSkills'
+import {
+  REGISTRY_SCOPE_NONE,
+  disabledNamesOf,
+  enabledNamesForScope,
+  missingNamesOf,
+  parseRegistryScope,
+  registryScopeOptions,
+  scopeTargetAlive,
+} from '@/lib/agent/toolRegistryView'
 
 const store = usestore()
+const zh = computed(() => store.locales === 'zh')
 
 const registryTools = ref<Array<{ name: string; description: string; hasInputSchema: boolean; scope?: string }>>([])
 const registryUnavailable = ref(false)
@@ -157,51 +196,158 @@ const alwaysOnTools = new Set(AGENT_TOOL_REGISTRY.filter((t) => t.alwaysOn).map(
 /** 是否已在「设置 → 工具管理」显式配置白名单（未配置 = 运行时回退默认可见集） */
 const whitelistConfigured = computed(() => Array.isArray(store.agentTools))
 
-/**
- * 当前生效的工具白名单（与 Agent 循环运行时同源）：
- *  - 已配置 → `store.agentTools`（`[]` = 全部关闭）
- *  - 未配置（null）→ 运行时回退 Agent 循环默认可见集 `SKILL_AGENT_DEFAULT_TOOLS`
- * 注意：Agent 预设用各自的能力槽；工作流 MCP 节点与 MCP 服务工具不受此白名单约束。
- */
-const enabledToolNames = computed<Set<string>>(() => {
-  const stored = store.agentTools
-  const base = Array.isArray(stored) ? stored : [...SKILL_AGENT_DEFAULT_TOOLS]
-  return new Set<string>([...base, ...alwaysOnTools])
+// ---------------------------------------------------------------------------
+// 查看作用域：默认**不判状态**（只看注册表事实），也可按「预设」或「运行中的会话」判
+//   - 全局：与通用智能体 / 技能触发 / 批量的运行时同源（store.agentTools，未配置回退默认集）
+//   - 预设：与预设运行时同源（能力槽 → 工具名）
+//   - 会话：主进程 agent:tools 返回的该会话**实际下发清单**
+// 判定的全部规则见 lib/agent/toolRegistryView.ts（纯逻辑，带自测）。
+// ---------------------------------------------------------------------------
+
+const scopeValue = ref<string>(REGISTRY_SCOPE_NONE)
+const scope = computed(() => parseRegistryScope(scopeValue.value))
+
+const presets = computed<Array<{ id: string; name?: string; capabilities?: unknown }>>(() => {
+  const list = (store as any).agentPresets
+  return Array.isArray(list) ? list : []
 })
 
-/** 该注册工具是否不在当前生效白名单内（= 已注册但未启用） */
-const isToolDisabled = (name: string): boolean => !enabledToolNames.value.has(name)
+/** 运行中的会话（agent:list；已结束的不列出也不选中） */
+const sessions = ref<Array<{ id: string; label?: string; status?: string }>>([])
 
-/** 已注册但未启用的数量（头部展示） */
-const disabledCount = computed(() => registryTools.value.filter((t) => isToolDisabled(t.name)).length)
+/** 选中的会话当前生效的工具清单（agent:tools）；null = 还没取到 → 不判状态 */
+const sessionToolNames = ref<string[] | null>(null)
+const sessionLoading = ref(false)
+
+const scopeGroups = computed(() => registryScopeOptions({
+  presets: presets.value,
+  agents: sessions.value,
+  zh: zh.value,
+}))
+
+/** 当前作用域的启用集；null = **不显示启用状态**（默认口径 / 目标已消失 / 会话清单未取到） */
+const enabledNames = computed<Set<string> | null>(() => enabledNamesForScope({
+  scope: scope.value,
+  globalStored: store.agentTools,
+  globalDefaultTools: SKILL_AGENT_DEFAULT_TOOLS,
+  globalAlwaysOn: [...alwaysOnTools],
+  presets: presets.value,
+  agentToolNames: sessionToolNames.value,
+}))
+
+const registeredNames = computed(() => registryTools.value.map((t) => t.name))
+const disabledNames = computed(() => disabledNamesOf(registeredNames.value, enabledNames.value))
+
+/** 该注册工具在当前作用域下是否未被启用（不判状态时恒为 false） */
+const isToolDisabled = (name: string): boolean => disabledNames.value.has(name)
+
+/** 是否正在按某个作用域判状态（默认口径为 false） */
+const scopeActive = computed(() => enabledNames.value !== null)
+
+const enabledCount = computed(() => (scopeActive.value
+  ? registeredNames.value.length - disabledNames.value.size
+  : 0))
+const disabledCount = computed(() => disabledNames.value.size)
+
+/** 未启用徽标文案：全局说「已禁用」，预设说「未启用」，会话说「不在本会话」（三种口径不是一回事） */
+const disabledLabel = computed(() => {
+  if (scope.value.kind === 'global') return zh.value ? '已禁用' : 'disabled'
+  if (scope.value.kind === 'agent') return zh.value ? '不在本会话' : 'not in session'
+  return zh.value ? '未启用' : 'off'
+})
+
+/** 预设口径下：预设声明了、但注册表里没有的名字（插件未加载 / 由渲染层实现） */
+const missingNames = computed(() => (scope.value.kind === 'preset'
+  ? missingNamesOf(enabledNames.value, registeredNames.value)
+  : []))
+
+const scopeSelectHint = computed(() => (zh.value
+  ? '查看口径（默认不显示启用状态）：\n'
+    + '· 不显示启用状态 —— 只看注册表事实（名字 / 参数 schema / 作用域）；\n'
+    + '· 全局默认 —— 按「设置 → 工具管理」的白名单判（通用智能体 / 技能触发 / 批量这条入口的默认）；\n'
+    + '· 智能体预设 —— 按该预设能力槽判（与预设运行时同源）；\n'
+    + '· 运行中的会话 —— 按该会话实际下发给模型的清单判（含跨层解析到的插件工具）。'
+  : 'View scope (enable state hidden by default):\n'
+    + '· No enable state — registry facts only (name / input schema / scope);\n'
+    + '· Global default — judged by the whitelist in Settings → Tools (default for the general agent / skill runs / batch);\n'
+    + '· Agent preset — judged by that preset\'s capability slots (same source as the preset runtime);\n'
+    + '· Live session — judged by what that session actually sends to the model (plugin tools resolved across layers).'))
+
+/** 作用域说明行（选中后显示；默认口径不显示，避免正文变长） */
+const scopeNote = computed(() => {
+  if (scope.value.kind === 'global') {
+    return zh.value
+      ? '全局口径：按「设置 → 工具管理」的白名单判定（未配置时按 Agent 循环默认集）。它只代表通用智能体 / 技能触发 / 批量这条入口的默认 —— Agent 预设、工作流节点、子代理各有自己的白名单。'
+      : 'Global scope: judged by the whitelist in Settings → Tools (agent-loop default set when unconfigured). This is only the default for the general agent / skill runs / batch — presets, workflow nodes and subagents have their own whitelists.'
+  }
+  if (scope.value.kind === 'preset') {
+    const p = presets.value.find((x) => x.id === scope.value.id)
+    const name = p?.name || scope.value.id
+    return zh.value
+      ? `预设口径：「${name}」能力槽产出的工具（与预设运行时同源）。未标出的工具在该预设下不会下发给模型。`
+      : `Preset scope: tools produced by “${name}” capability slots (same source as the preset runtime). Tools not marked here are not sent to the model under this preset.`
+  }
+  if (scope.value.kind === 'agent') {
+    const s = sessions.value.find((x) => x.id === scope.value.id)
+    const name = s?.label || scope.value.id.slice(0, 8)
+    return zh.value
+      ? `会话口径：「${name}」实际下发给模型的清单（scope 层 + 白名单，含跨层解析到的插件工具）。PTC（代码模式）会话下模型只见 run_code，但程序内 SDK 可用的正是这份清单。`
+      : `Session scope: what “${name}” actually sends to the model (scope layer + whitelist, plugin tools resolved across layers). In a PTC (code-mode) session the model only sees run_code, but this is exactly what the in-program SDK can call.`
+  }
+  return ''
+})
 
 const registryHeadHint = computed(() => {
   return store.locales === 'zh'
     ? '主进程 toolRegistry 实际注册的工具（运行时事实层，含作用域与参数 schema 信息）。\n'
       + '· 执行路径：Agent 循环、PTC（Code Mode）的 ctx SDK、工作流「网络搜索 / 智能体」等节点均经 toolRegistry.execute 走 pre-execute → execute → post-execute 管线分发；\n'
       + '· 不在注册表：MCP 服务（builtin-office / builtin-drawio / 外部服务）的工具只存在于 MCP 目录，须经 mcp_call 调用；\n'
-      + '· 灰化 + 「已禁用」：不在当前生效的工具白名单内（白名单 =「设置 → 工具管理」，未配置时按 Agent 循环默认可见集）。Agent 预设有各自的能力槽、工作流 MCP 节点不受该白名单限制，故此处只反映全局默认。'
+      + '· 启用状态：默认不显示（只看注册表事实：名字 / 参数 schema / 作用域）；在左侧下拉里选一个口径才有含义 —— 全局（「设置 → 工具管理」的白名单）、某个智能体预设（该预设能力槽）、或某个运行中的会话（它实际下发给模型的清单）。'
     : 'Tools actually registered in the main-process toolRegistry (runtime source of truth, incl. scope & input schema).\n'
       + '· Dispatch: the agent loop, the PTC (Code Mode) ctx SDK and tool-based workflow nodes (web search / agent) all execute via toolRegistry.execute through the pre-execute → execute → post-execute pipeline;\n'
       + '· Not listed: MCP service tools (builtin-office / builtin-drawio / external servers) live only in the MCP catalog and are reachable via mcp_call;\n'
-      + '· Grayed + Disabled: not in the active tool whitelist (Settings → Tools; when unconfigured the agent-loop default set applies). Agent presets use their own capability slots and workflow MCP nodes ignore this whitelist, so this reflects the global default only.'
+      + '· Enable state: hidden by default (registry facts only: name / input schema / scope); pick a scope on the left to make it meaningful — global (the whitelist in Settings → Tools), an agent preset (its capability slots), or a live session (what it actually sends to the model).'
 })
 
-const disabledSummaryHint = computed(() => store.locales === 'zh'
-  ? (whitelistConfigured.value
-      ? '已注册但未启用的数量（按「设置 → 工具管理」的全局白名单；Agent 预设有各自能力槽）'
-      : '已注册但不在 Agent 循环默认可见集内的数量（「设置 → 工具管理」尚未配置，运行时回退默认集）')
-  : (whitelistConfigured.value
-      ? 'Registered but not enabled (per the global whitelist in Settings → Tools; agent presets use their own slots)'
-      : 'Registered but not in the agent-loop default tool set (whitelist unconfigured → runtime falls back to the default set)'))
+const disabledSummaryHint = computed(() => {
+  if (scope.value.kind === 'agent') {
+    return zh.value
+      ? '该会话下没有下发给模型的工具（这是本会话的事，不是"被全局白名单禁用"）'
+      : 'Not sent to the model in this session (this is a per-session fact, not a global-whitelist decision)'
+  }
+  if (scope.value.kind === 'preset') {
+    return zh.value
+      ? '该预设没有启用的工具（由预设能力槽 / 逐工具勾选决定；Agent 预设不受「工具管理」的全局白名单影响）'
+      : 'Tools this preset does not enable (decided by its capability slots / per-tool ticks; presets ignore the global whitelist in Settings → Tools)'
+  }
+  return whitelistConfigured.value
+    ? (zh.value
+        ? '已注册但未启用的数量（按「设置 → 工具管理」的全局白名单；Agent 预设有各自能力槽）'
+        : 'Registered but not enabled (per the global whitelist in Settings → Tools; agent presets use their own slots)')
+    : (zh.value
+        ? '已注册但不在 Agent 循环默认可见集内的数量（「设置 → 工具管理」尚未配置，运行时回退默认集）'
+        : 'Registered but not in the agent-loop default tool set (whitelist unconfigured → runtime falls back to the default set)')
+})
 
-const disabledBadgeHint = computed(() => store.locales === 'zh'
-  ? (whitelistConfigured.value
-      ? '该工具已注册，但不在「设置 → 工具管理」的全局白名单内 → Agent 循环不会把它暴露给模型（仍可经 tools:execute IPC / mcp_call 调用）'
-      : '该工具已注册，但不在 Agent 循环默认可见集（SKILL_AGENT_DEFAULT_TOOLS）内 → 默认不暴露给模型（可在「设置 → 工具管理」中显式启用）')
-  : (whitelistConfigured.value
-      ? 'Registered, but not in the global whitelist (Settings → Tools) → the agent loop will not expose it to the model (still callable via the tools:execute IPC / mcp_call)'
-      : 'Registered, but not in the agent-loop default tool set (SKILL_AGENT_DEFAULT_TOOLS) → not exposed to the model by default (enable it explicitly in Settings → Tools)'))
+const disabledBadgeHint = computed(() => {
+  if (scope.value.kind === 'agent') {
+    return zh.value
+      ? '该工具已注册，但不在这个会话下发给模型的清单里：可能是本会话白名单没勾它，也可能是该会话的作用域看不到它（插件工具按名跨层解析）'
+      : 'Registered, but not in what this session sends to the model: either its whitelist excludes it, or the session scope cannot see it (plugin tools are resolved across layers by name)'
+  }
+  if (scope.value.kind === 'preset') {
+    return zh.value
+      ? '该工具已注册，但该预设没有启用它（预设能力槽 / 逐工具勾选）→ 该预设不会把它下发给模型'
+      : 'Registered, but this preset does not enable it (capability slots / per-tool ticks) → the preset will not send it to the model'
+  }
+  return whitelistConfigured.value
+    ? (zh.value
+        ? '该工具已注册，但不在「设置 → 工具管理」的全局白名单内 → Agent 循环不会把它暴露给模型（仍可经 tools:execute IPC / mcp_call 调用）'
+        : 'Registered, but not in the global whitelist (Settings → Tools) → the agent loop will not expose it to the model (still callable via the tools:execute IPC / mcp_call)')
+    : (zh.value
+        ? '该工具已注册，但不在 Agent 循环默认可见集（SKILL_AGENT_DEFAULT_TOOLS）内 → 默认不暴露给模型（可在「设置 → 工具管理」中显式启用）'
+        : 'Registered, but not in the agent-loop default tool set (SKILL_AGENT_DEFAULT_TOOLS) → not exposed to the model by default (enable it explicitly in Settings → Tools)')
+})
 
 const loadRegistry = async () => {
   if (!aikmDsh?.tools) {
@@ -225,6 +371,72 @@ const loadRegistry = async () => {
   }
 }
 
+/** 运行中的会话清单（agent:list）。桌面端没有该命名空间时静默留空（会话口径只是可选视角） */
+const loadSessions = async () => {
+  const api: any = (aikmDsh as any)?.agent
+  if (!api?.list) {
+    sessions.value = []
+    return
+  }
+  try {
+    const list = await api.list()
+    sessions.value = Array.isArray(list) ? list : []
+  } catch (e) {
+    console.warn('[ToolRegistryPanel] 读取运行中的会话失败:', e)
+  }
+}
+
+/**
+ * 选中的会话**实际下发给模型**的工具清单（agent:tools；主进程侧与 visibleTools 同源）。
+ * 写回前再确认一次仍选中同一个会话：快速切换下拉时旧请求不能覆盖新结果。
+ */
+const loadSessionTools = async (id: string) => {
+  const api: any = (aikmDsh as any)?.agent
+  const stillSelected = () => scope.value.kind === 'agent' && scope.value.id === id
+  if (!api?.tools || !id) {
+    sessionToolNames.value = null
+    return
+  }
+  sessionLoading.value = true
+  try {
+    const list = await api.tools(id)
+    if (!stillSelected()) return
+    sessionToolNames.value = Array.isArray(list) ? list.map((t: any) => String(t?.name ?? t)) : null
+  } catch (e) {
+    console.warn('[ToolRegistryPanel] 读取会话工具清单失败:', e)
+    if (stillSelected()) sessionToolNames.value = null
+  } finally {
+    if (stillSelected()) sessionLoading.value = false
+  }
+}
+
+// 切换口径：进入会话口径就取一次清单；离开时清空（回到"不判状态"）
+watch(scope, (s) => {
+  if (s.kind !== 'agent') {
+    sessionToolNames.value = null
+    sessionLoading.value = false
+    return
+  }
+  sessionToolNames.value = null
+  void loadSessionTools(s.id)
+})
+
+/**
+ * 会话清单轮询：agent 会随会话结束而消失，选中的目标没了就**回落默认口径** ——
+ * 否则面板会停在一个永远空的名单上（看起来像"这些工具全都没启用"）。
+ */
+const refreshSessions = async () => {
+  await loadSessions()
+  if (!scopeTargetAlive(scope.value, { presets: presets.value, agents: sessions.value })) {
+    scopeValue.value = REGISTRY_SCOPE_NONE
+    return
+  }
+  if (scope.value.kind === 'agent') void loadSessionTools(scope.value.id)
+}
+
+const SESSION_POLL_MS = 5000
+let sessionTimer: number | null = null
+
 /**
  * 刷新按钮的入口：点了刷新就把焦点留在搜索框（用户多半是"搜完再刷一次看最新"），
  * 否则焦点会丢失、要重新用鼠标点一次输入框。
@@ -232,9 +444,23 @@ const loadRegistry = async () => {
 const refreshAndRefocus = () => {
   refocusSearch.value = true
   void loadRegistry()
+  void refreshSessions()
 }
 
-onMounted(loadRegistry)
+onMounted(() => {
+  void loadRegistry()
+  void loadSessions()
+  if (typeof window !== 'undefined') {
+    sessionTimer = window.setInterval(() => { void refreshSessions() }, SESSION_POLL_MS)
+  }
+})
+
+onUnmounted(() => {
+  if (sessionTimer !== null) {
+    window.clearInterval(sessionTimer)
+    sessionTimer = null
+  }
+})
 </script>
 
 <style scoped>
@@ -305,6 +531,13 @@ onMounted(loadRegistry)
   flex-shrink: 0;
   opacity: 0.9;
 }
+.registry-head-enabled {
+  font-size: 10px;
+  font-weight: 600;
+  color: #4caf50;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 .registry-head-disabled {
   font-size: 10px;
   font-weight: 600;
@@ -360,6 +593,44 @@ onMounted(loadRegistry)
   min-width: 0;
   display: flex;
   align-items: center;
+}
+/* 查看口径下拉：原生 select 同样要自带前景/背景色（深色主题下不设就是白底白字） */
+.registry-scope-select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 210px;
+  height: 26px;
+  margin: 0;
+  padding: 0 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  line-height: normal;
+}
+.registry-scope-select:focus {
+  outline: none;
+  border-color: var(--fontActiveColor);
+}
+/* 作用域说明行：选中口径后才出现（默认口径不占正文空间） */
+.registry-scope-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 8px 0;
+  padding: 5px 7px;
+  border: 1px dashed var(--borderColor);
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+.registry-scope-missing {
+  color: #f39c12;
+  opacity: 0.95;
 }
 .registry-search-icon {
   position: absolute;

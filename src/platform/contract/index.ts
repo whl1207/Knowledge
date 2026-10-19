@@ -414,6 +414,8 @@ export interface HostPort {
   readonly skills: SkillsApi
   readonly web: HostWebApi
   readonly tts: TtsApi
+  /** 独立安装的本地 Python 应用（Qwen3-TTS / Qwen-Image-Edit）：只有桌面能拉起来 */
+  readonly pythonApps?: PythonAppsApi
 }
 
 /**
@@ -447,6 +449,36 @@ export interface TtsApi {
   voices(): Promise<Array<{ name: string; locale?: string; quality?: number; latency?: number; network?: boolean }>>
   /** 释放引擎资源（桌面 ONNX；安卓为系统引擎，一般不调） */
   dispose(): Promise<{ success: boolean }>
+}
+
+/**
+ * 独立安装的本地 Python 应用（桌面主进程负责拉起 / 停止）：
+ * - `qwen3tts`：Qwen3-TTS-AllinOne（Gradio 7862 + 直连接口 9880）
+ * - `qwenImage`：Qwen-Image-Edit-2511（Gradio 7861 + 内置 ComfyUI 8187）
+ * 只有桌面提供；安卓 / 网页没有这个字段，调用方判断 `?.` 后再用。
+ */
+export interface PythonAppApi {
+  /** 目录校验：找 app.py 与 py312\python.exe */
+  check(dir: string): Promise<{ ok: boolean; python?: string; appPy?: string; error?: string }>
+  /** 启动（已在本应用内运行 → alreadyRunning；已有外部服务在监听端口 → external） */
+  start(dir: string): Promise<{ ok: boolean; pid?: number; alreadyRunning?: boolean; external?: boolean; error?: string }>
+  /** 停止（只停本应用启动的进程） */
+  stop(): Promise<{ ok: boolean; error?: string }>
+  /** 运行状态 + 最近输出（设置页展示「启动中 / 失败原因」） */
+  status(): Promise<{
+    running: boolean
+    pid?: number
+    dir?: string
+    startedAt?: number
+    logTail?: string
+    lastExit?: { code: number | null; at: number } | null
+  }>
+}
+
+/** 可被桌面主进程管理的本地 Python 应用集合 */
+export interface PythonAppsApi {
+  qwen3tts?: PythonAppApi
+  qwenImage?: PythonAppApi
 }
 
 /** 局域网共享主机侧控制（设置页「协作 → 共享 / 权限」） */

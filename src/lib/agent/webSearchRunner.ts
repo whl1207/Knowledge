@@ -8,7 +8,7 @@
  * | 搜索源 | 渲染层可用性 |
  * | --- | --- |
  * | SearXNG / 自定义 JSON 源 | 可用（自建服务，同源或已开跨域时最稳） |
- * | Tavily / Brave / 博查 / 智谱 / Firecrawl | 可用（HTTP API，需服务端允许跨域；被拦时给出提示） |
+ * | Tavily / Brave / 博查 / 智谱 / Firecrawl / DeepSeek | 可用（HTTP API，需服务端允许跨域；被拦时给出提示） |
  * | Bing / 百度 / DuckDuckGo | 结果页不允许跨域读取，渲染层会失败并提示改用 API 源或连桌面主机 |
  *
  * 语义与主进程一致：`fallback`（按顺序逐个回退）/ `merge`（并行聚合去重）、结果条数上限、
@@ -27,6 +27,7 @@ import {
   firecrawlErrorMessage,
   parseFirecrawlSearchResponse,
 } from '@/shared/webSearchFirecrawl'
+import { runDeepSeekSearchApi } from '@/shared/deepseekApi'
 
 /** ProviderId 是联合类型，这里按字符串处理以避免与内置清单耦合 */
 type ProviderId = string
@@ -144,7 +145,13 @@ function cleanSearchItems(items: any[]): WebSearchItem[] {
     const title = String(it?.title || '').trim()
     const url = String(it?.url || '').trim()
     if (!title && !url) continue
-    out.push({ title, url, snippet: String(it?.snippet || '').trim() })
+    out.push({
+      title,
+      url,
+      snippet: String(it?.snippet || it?.summary || '').trim(),
+      ...(it?.summary ? { summary: String(it.summary).trim() } : {}),
+      ...(typeof it?.content === 'string' && it.content.trim() ? { content: it.content.trim().slice(0, 4000) } : {}),
+    })
   }
   return out
 }
@@ -152,8 +159,6 @@ function cleanSearchItems(items: any[]): WebSearchItem[] {
 interface SearchOutcome {
   items: WebSearchItem[]
   via: string
-  /** 源自带的总结正文（DeepSeek 官方搜索才有；渲染层不支持该源，故实际恒为空） */
-  answer?: string
 }
 
 /** 跨域提示：渲染层读不到结果页（HTML 抓取类搜索源都会走到这里） */
@@ -301,6 +306,27 @@ async function searchBrave(query: string, cfg: WebSearchConfig): Promise<SearchO
   }
 }
 
+/**
+ * DeepSeek 官方搜索（原生 Search API，`POST <base>/v1/tools/search`）。
+ *
+ * 与桌面端主进程共用 `@/shared/deepseekApi` 的请求组装 / 响应解析：纯 HTTP + Bearer，
+ * 只要能跨域就能在手机 / 网页端直接跑（被拦时按普通跨域失败提示）。
+ * `cfg.deepseek.apiKey` 由 store 的 `buildWebSearchPayload()` 解析后填入。
+ */
+async function searchDeepSeek(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
+  const ds: any = (cfg as any).deepseek || {}
+  const apiKey = String(ds.apiKey || '').trim()
+  if (!apiKey) throw new Error('未配置 DeepSeek API Key（可在「工具 → 搜索」填，或让对话使用 DeepSeek 以复用凭据）')
+  const items = await runDeepSeekSearchApi({
+    query,
+    maxResults: cfg.maxResults,
+    needContent: !!ds.needContent,
+    apiHost: ds.apiHost,
+    apiKey,
+  })
+  return { items: cleanSearchItems(items), via: 'deepseek-api' }
+}
+
 /** 解析结果页 HTML 的搜索源在渲染层无法使用（结果页不允许跨域读取） */
 function htmlScrapingSource(provider: ProviderId): SearchOutcome {
   throw new Error(`搜索源「${provider}」在手机 / 网页端不可用${CORS_HINT}`)
@@ -316,10 +342,8 @@ async function runSingleSearch(provider: ProviderId, query: string, cfg: WebSear
     case 'tavily': return await searchTavily(query, cfg)
     case 'brave': return await searchBrave(query, cfg)
     case 'firecrawl': return await searchFirecrawl(query, cfg)
-    // DeepSeek 官方搜索走 api.deepseek.com 的 Anthropic 兼容端点，该端点不给浏览器放 CORS；
-    // 且它的鉴权与请求形状与其余源都不同 → 明确报"需要桌面端"，而不是抛一个难懂的跨域错误
-    case 'deepseek':
-      throw new Error(`搜索源「DeepSeek 官方搜索」在手机 / 网页端不可用（DeepSeek 的 Anthropic 兼容端点不允许跨域），请改用其它搜索源，或在桌面端使用${CORS_HINT}`)
+    // DeepSeek 官方 Search 接口是纯 HTTP + Bearer；能否在渲染层直接跑取决于跨域，失败时按普通错误提示
+    case 'deepseek': return await searchDeepSeek(query, cfg)
     case 'bing':
     case 'baidu':
     case 'duckduckgo': return htmlScrapingSource(provider)
@@ -332,7 +356,8 @@ function toSearchItems(items: WebSearchItem[], maxResults: number): WebSearchIte
     title: it.title,
     url: it.url,
     snippet: it.snippet || '',
-    summary: it.snippet || '',
+    summary: it.summary || it.snippet || '',
+    ...(it.content ? { content: it.content } : {}),
   }))
 }
 
@@ -403,7 +428,6 @@ export async function runRendererWebSearch(rawQuery: string, rawCfg: any): Promi
           providers,
           via: outcome.via,
           results: toSearchItems(outcome.items, config.maxResults),
-          ...(outcome.answer ? { answer: outcome.answer } : {}),
           elapsedMs: Date.now() - started,
           attempts,
         }

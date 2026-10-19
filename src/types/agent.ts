@@ -294,6 +294,49 @@ export interface AgentEventMap {
   'agent/error': { message: string }
 }
 
+/**
+ * 插件的 `ctx.on(...)` 能收到的 agent 事件类型（**按作用域**：只发给委派这次 run 的那个插件）。
+ *
+ * 这份名单是**唯一权威**：`src/shared/pluginContext.ts` 的 `SCOPED_PLUGIN_EVENTS` 由它派生，
+ * 主机侧转发（`pluginHost.forwardAgentEvent`）也只认它 —— 不在名单里的事件不会流向插件。
+ *
+ * 与 DSH 的对应关系（同一套观测面，名字沿用 AI-KM 既有词汇）：
+ * - `assistant/chunk` ↔ 流式的 `text-delta`；`assistant/reasoning` ↔ `reasoning-delta`
+ * - `agent/tool-args` ↔ `tool-call-delta`（工具参数增量）
+ * - `agent/step-end.usage` ↔ `usage`；`agent/turn-end` / `agent/error` ↔ finish / error
+ * - `tool/call` / `tool/result` ↔ 工具调用与 `tools/result`
+ */
+export const AGENT_PLUGIN_EVENT_TYPES = [
+  'agent/status',
+  'agent/turn-start',
+  'agent/turn-end',
+  'agent/step-start',
+  'agent/step-end',
+  'agent/inbox',
+  'assistant/chunk',
+  'assistant/reasoning',
+  'assistant/message',
+  'tool/call',
+  'tool/result',
+  'agent/tool-args',
+  'agent/compaction',
+  'agent/notice',
+  'agent/error',
+] as const
+
+export type AgentPluginEventType = (typeof AGENT_PLUGIN_EVENT_TYPES)[number]
+
+/**
+ * 转发给插件时的载荷：**AI-KM 的原始载荷 + `agentId`**。
+ *
+ * 为什么必须带 agentId：一个插件可以同时跑多个预设的 run（并发上限内），作者得能分辨是哪一次。
+ * DSH 的事件载荷里同样带着 `agent: Agent`。
+ */
+export type AgentPluginEventMap = {
+  [K in AgentPluginEventType]: { agentId: AgentId } & AgentEventMap[K]
+}
+
+
 /** 广播给渲染进程的 agent 事件（相关联合：payload 随 type 收窄） */
 export type AgentEvent = {
   [K in AgentEventType]: {
@@ -303,13 +346,18 @@ export type AgentEvent = {
   }
 }[AgentEventType]
 
-/** 活跃 agent 摘要（agent:list 返回值） */
-export interface AgentSummary {
+/** 活跃 agent 摘要（agent:list 返回值） */export interface AgentSummary {
   id: AgentId
   status: AgentStatus
   provider: string
   label?: string
   pendingInbox: number
+  /**
+   * 该 agent 的工作目录（相对路径的围栏）。可观测性字段：
+   * 被委派的 agent 用的是**用户为插件选的根**（见「插件 → 权限 → 工作目录」），
+   * 排查"它在哪个目录里读写"时要看得到。
+   */
+  cwd?: string
 }
 
 // ---------------------------------------------------------------------------

@@ -12,8 +12,10 @@ import AgentPreset from '@/components/set/AgentPreset.vue'
 import LlmSettings from '@/components/set/LlmSettings.vue'
 import ToolSettings from '@/components/set/ToolSettings.vue'
 import SearchSettings from '@/components/set/SearchSettings.vue'
+import FetchSettings from '@/components/set/FetchSettings.vue'
 import TtsSettings from '@/components/set/TtsSettings.vue'
 import AsrSettings from '@/components/set/AsrSettings.vue'
+import ImageGenSettings from '@/components/set/ImageGenSettings.vue'
 import ToolRegistryPanel from '@/components/set/ToolRegistryPanel.vue'
 import PluginManagement from '@/components/set/PluginManagement.vue'
 import PluginStorePanel from '@/components/set/PluginStorePanel.vue'
@@ -81,8 +83,9 @@ const navTree = ref<NavItem[]>([
     ]
   },
   {
-    // 模型（一级分组）：来源（各来源连接配置）→ 嵌入（嵌入兜底）→ 凭据（API 密钥管理）
-    // 页面入口：来源 = LlmSettings（默认整页）；嵌入 = LlmSettings section="embed"；凭据 = CredentialsPanel
+    // 模型（一级分组）：来源（各来源连接配置）→ 嵌入（嵌入兜底）→ 合成（TTS）→ 输入（ASR）→ 生图 → 凭据
+    // 页面入口：来源 = LlmSettings（默认整页）；嵌入 = LlmSettings section="embed"；
+    //           合成 = TtsSettings；输入 = AsrSettings；生图 = ImageGenSettings；凭据 = CredentialsPanel
     id: 'llm-group',
     icon: 'fa fa-comments',
     title_zh: '模型',
@@ -90,6 +93,9 @@ const navTree = ref<NavItem[]>([
     children: [
       { id: 'llm', icon: 'fa fa-server', title_zh: '来源', title_en: 'Sources' },
       { id: 'llm-embed', icon: 'fa fa-cubes', title_zh: '嵌入', title_en: 'Embedding' },
+      { id: 'tts', icon: 'fa fa-volume-up', title_zh: '合成', title_en: 'TTS' },
+      { id: 'asr', icon: 'fa fa-microphone', title_zh: '输入', title_en: 'ASR' },
+      { id: 'imagegen', icon: 'fa fa-image', title_zh: '生图', title_en: 'Image' },
       { id: 'credentials', icon: 'fa fa-key', title_zh: '凭据', title_en: 'Credentials' },
     ]
   },
@@ -107,16 +113,6 @@ const navTree = ref<NavItem[]>([
     ]
   },
   {
-    id: 'ai-group',
-    icon: 'fa fa-volume-up',
-    title_zh: '语音',
-    title_en: 'Speech',
-    children: [
-      { id: 'tts', icon: 'fa fa-volume-up', title_zh: '合成', title_en: 'TTS' },
-      { id: 'asr', icon: 'fa fa-microphone', title_zh: '输入', title_en: 'ASR' }
-    ]
-  },
-  {
     id: 'service-group',
     icon: 'fa fa-server',
     title_zh: '工具',
@@ -124,6 +120,7 @@ const navTree = ref<NavItem[]>([
     children: [
       { id: 'tools', icon: 'fa fa-wrench', title_zh: '管理', title_en: 'Tools' },
       { id: 'search', icon: 'fa fa-search', title_zh: '搜索', title_en: 'Search' },
+      { id: 'fetch', icon: 'fa fa-cloud-download', title_zh: '抓取', title_en: 'Fetch' },
       { id: 'mcp', icon: 'fa fa-plug', title_zh: 'MCP', title_en: 'MCP' },
       { id: 'toolregistry', icon: 'fa fa-list-ul', title_zh: '注册表', title_en: 'Registry' }
     ]
@@ -376,7 +373,7 @@ const navSwitches = computed(() => {
   const panels: { key: string; icon: string; label: string }[] = [
     { key: '主页', icon: 'fa fa-home', label: zh ? '主页' : 'Home' },
     { key: '知识管理', icon: 'fa fa-book', label: zh ? '知识管理' : 'Knowledge Management' },
-    { key: '知识处理', icon: 'fa fa-stack-overflow', label: zh ? '知识处理' : 'Knowledge Processing' },
+    { key: '知识处理', icon: 'fa fa-layer-group', label: zh ? '知识处理' : 'Knowledge Processing' },
     { key: '学习', icon: 'fa fa-graduation-cap', label: zh ? '学习' : 'Learning' },
     { key: 'agent', icon: 'fa fa-globe', label: zh ? '浏览器 Agent' : 'Browser Agent' }
   ]
@@ -1403,6 +1400,18 @@ onBeforeUnmount(() => {
           <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
             ? '主界面导航栏显示的顶层模块（主页、知识管理、知识处理、学习）与其他入口（浏览器 Agent）。关闭某项即从导航栏隐藏；下方依赖它的子开关（知识管理视图等）也会随之不可用。'
             : 'Entries shown in the main navbar: top-level modules (Home, Knowledge, Knowledge Processing, Learning) and other entries (Browser Agent). Hiding one removes it from the navbar (left / top / bottom layouts alike), and its dependent sub-switches below become unavailable too.' }}</div>
+          
+          <!-- 空导航提醒：全部功能关闭且没有插件面板时，主界面没有任何可用页面——由 App.vue 显示提醒 -->
+          <div class="form-group">
+            <label>{{ store.locales=='zh' ? '空导航提醒' : 'Empty Navbar Notice' }}</label>
+            <select v-model="store.UI.emptyNavNotice" class="layout-select" @change="store.saveConfig()"
+                    :title="store.locales=='zh'
+                      ? '全部功能关闭且没有启用任何插件面板时，主界面没有可用页面：开启则显示提示（含一键恢复与前往设置的入口），关闭则什么都不显示。'
+                      : 'When every feature is off and no plugin panel is enabled, the main window has no usable page: show a notice (with one-click restore and a link to settings) or show nothing.'">
+              <option :value="true">{{ store.locales=='zh' ? '显示提醒' : 'Show notice' }}</option>
+              <option :value="false">{{ store.locales=='zh' ? '不提醒' : 'No notice' }}</option>
+            </select>
+          </div>
           <div class="nav-switch-list">
             <div
               v-for="sw in navSwitches"
@@ -1425,17 +1434,6 @@ onBeforeUnmount(() => {
                 <span class="nav-switch-knob"></span>
               </div>
             </div>
-          </div>
-          <!-- 空导航提醒：全部功能关闭且没有插件面板时，主界面没有任何可用页面——由 App.vue 显示提醒 -->
-          <div class="form-group">
-            <label>{{ store.locales=='zh' ? '空导航提醒' : 'Empty Navbar Notice' }}</label>
-            <select v-model="store.UI.emptyNavNotice" class="layout-select" @change="store.saveConfig()"
-                    :title="store.locales=='zh'
-                      ? '全部功能关闭且没有启用任何插件面板时，主界面没有可用页面：开启则显示提示（含一键恢复与前往设置的入口），关闭则什么都不显示。'
-                      : 'When every feature is off and no plugin panel is enabled, the main window has no usable page: show a notice (with one-click restore and a link to settings) or show nothing.'">
-              <option :value="true">{{ store.locales=='zh' ? '显示提醒' : 'Show notice' }}</option>
-              <option :value="false">{{ store.locales=='zh' ? '不提醒' : 'No notice' }}</option>
-            </select>
           </div>
           <!-- 知识管理（模块子开关）：仅知识管理模块开启时显示（主窗口右侧的视图，单选） -->
           <div v-if="store.isNavVisible('知识管理')" class="settings-group">
@@ -1588,6 +1586,11 @@ onBeforeUnmount(() => {
         <AsrSettings />
       </div>
 
+      <!-- 生图设置（独立组件 ImageGenSettings.vue） -->
+      <div v-if="activeNav === 'imagegen'" class="settings-section">
+        <ImageGenSettings />
+      </div>
+
       <!-- 帮助 -->
       <div v-if="activeNav === 'help'" class="settings-section">
         <div class="settings-group">
@@ -1620,6 +1623,11 @@ onBeforeUnmount(() => {
       <!-- 联网搜索源（web_search 工具使用的搜索源配置；多源开关 + 策略，布局同「模型」页） -->
       <div v-if="activeNav === 'search'" class="settings-section llm-section">
         <SearchSettings :store="store" />
+      </div>
+
+      <!-- 网页抓取通道（web_fetch 工具的抓取方式：直接访问 / DeepSeek Fetch / 虚拟浏览器，可各自开关并排序） -->
+      <div v-if="activeNav === 'fetch'" class="settings-section fetch-section">
+        <FetchSettings :store="store" />
       </div>
 
       <!-- 工具注册表（主进程统一注册表只读视图） -->
@@ -2090,6 +2098,16 @@ onBeforeUnmount(() => {
 }
 .llm-section :deep(.llm-settings),
 .llm-section :deep(.ws-settings) {
+  height: 100%;
+  min-height: 0;
+}
+
+/* 抓取设置（单页滚动，不需要左右分栏） */
+.fetch-section {
+  height: 100%;
+  min-height: 0;
+}
+.fetch-section :deep(.wf-settings) {
   height: 100%;
   min-height: 0;
 }

@@ -33,6 +33,32 @@ export const IpcErrorCode = {
   API_VERSION_MISMATCH: 'API_VERSION_MISMATCH',
   /** 插件委派智能体超出预算（并发 / 每小时调用数上限） */
   PLUGIN_AGENT_BUDGET: 'PLUGIN_AGENT_BUDGET',
+
+  // -------------------------------------------------------------------------
+  // 插件能力收敛（docs/plan/插件能力面向DSH风格收敛-设计方案（逐文件）.md）
+  // `ctx.fs` 的稳定错误码。插件按 code 分支，绝不解析 message 文案。
+  // -------------------------------------------------------------------------
+
+  /** 文件不存在 */
+  FS_NOT_FOUND: 'FS_NOT_FOUND',
+  /** 目标不是目录（该传文件的地方传了目录，或反之） */
+  FS_NOT_DIRECTORY: 'FS_NOT_DIRECTORY',
+  /** 目标不是文本（二进制 / 非 UTF-8） */
+  FS_NOT_TEXT: 'FS_NOT_TEXT',
+  /** 超过调用方声明的上限（**报错而不是截断**） */
+  FS_TOO_LARGE: 'FS_TOO_LARGE',
+  /** 版本不符：文件在读取之后被改过（或 presence 要求不满足） */
+  FS_STALE_VERSION: 'FS_STALE_VERSION',
+  /** 字面量编辑有歧义（命中 0 处或多处） */
+  FS_AMBIGUOUS_EDIT: 'FS_AMBIGUOUS_EDIT',
+  /** 先读后写策略：目标未被本会话读过 */
+  FS_NOT_OBSERVED: 'FS_NOT_OBSERVED',
+  /** 路径不在该插件的授权范围内 */
+  FS_NOT_GRANTED: 'FS_NOT_GRANTED',
+  /** 只读授权下尝试写入 */
+  FS_READ_ONLY_GRANT: 'FS_READ_ONLY_GRANT',
+  /** 文件能力其它失败（I/O 异常等） */
+  FS_FAILED: 'FS_FAILED',
 } as const
 
 export type IpcErrorCodeValue = (typeof IpcErrorCode)[keyof typeof IpcErrorCode]

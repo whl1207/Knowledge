@@ -206,6 +206,7 @@ export const BACKUP_KEYS = [
   'agentPresets', 'generalAgentMaxSteps', 'mcpServers', 'disabledSkills', 'skillStoreSources',
   'pluginStoreSources', 'agentTools',
   'webSearchConfig',
+  'webFetchConfig',
   'hiddenNavs', 'hiddenExtras', 'customTitle', 'interfaceConfigMode', 'collab', 'remoteFs', 'lan',
   'remoteRoots', 'mapConfig', 'locales', 'roots', 'root', 'path', 'skillsPath', 'treeSort',
   'view', 'mainPanel',

@@ -195,7 +195,12 @@ export interface RetrievalContext {
   relations: Array<{ source: string; target: string; type?: string }>
   entityToBlocksIndex: Map<string, Set<string>>
   communityReports?: any[]
-  communityResult?: { assignments?: Map<string, number>; count?: number }
+  communityResult?: {
+    assignments?: Map<string, number>
+    /** communityId → nodeId[]；社区落回切片需要它 */
+    communities?: Map<number, string[]>
+    count?: number
+  }
   /** 文件级摘要索引（方案B：独立于切片的文件粒度数据，file_score 消费） */
   fileIndex?: FileSummaryIndex
   /** 问题增强索引：blockId → 该切片关联的问题向量（Q 增强通道；问题只存问题库，不再写回切片） */
@@ -523,22 +528,52 @@ export async function communitySelect(ctx: RetrievalContext, params?: any, state
 
   const assign = ctx.communityResult?.assignments
   if (assign && assign.size > 0) {
-    const nameToId = new Map(ctx.entities.map(e => [e.name, e.id]))
-    const commIds = new Set<string>()
+    // 实体解析：种子名可能是 name / id / key 三者之一，统一映射到 nodeId。
+    // 旧实现只建了 name→id 一张表，且拿不到时直接退回名字本身去查 assignments，
+    // 对以 id 为键的 assignments 就会全部查不到。
+    const resolve = new Map<string, string>()
+    for (const e of ctx.entities) {
+      for (const k of [(e as any).id, (e as any).name, (e as any).key]) {
+        if (typeof k === 'string' && k) resolve.set(k.toLowerCase(), (e as any).id)
+      }
+    }
+    const commIds = new Set<number>()
     for (const n of seedNames) {
-      const id = nameToId.get(n) || n
+      const id = resolve.get(String(n).toLowerCase())
+      if (!id) continue
       const cid = assign.get(id)
-      if (cid !== undefined) commIds.add(String(cid))
+      if (typeof cid === 'number') commIds.add(cid)
     }
     if (commIds.size > 0) {
+      // 优先用 communities（communityId → nodeId[]）拿到完整成员，
+      // 避免靠 assignments 全表扫描（且能覆盖"同社区但未被 assignments 记录"的情况）
+      const byCommunity = ctx.communityResult?.communities
+      if (byCommunity && byCommunity.size) {
+        const memberIds = new Set<string>()
+        for (const cid of commIds) {
+          for (const mid of byCommunity.get(cid) || []) memberIds.add(mid)
+        }
+        const names = ctx.entities
+          .filter(e => memberIds.has((e as any).id))
+          .map(e => e.name)
+        if (names.length) return { communityEntities: names }
+      }
       const names = ctx.entities
-        .filter(e => commIds.has(String(assign.get(e.id))))
+        .filter(e => {
+          const cid = assign.get((e as any).id)
+          return typeof cid === 'number' && commIds.has(cid)
+        })
         .map(e => e.name)
       if (names.length) return { communityEntities: names }
     }
   }
 
   // 连通分量兜底
+  //
+  // 旧实现：当 assignments 缺失时用 BFS 取**整个连通分量**。实测该知识库 531 实体 /
+  // 640 关系下，连通分量会覆盖大半个实体图，等价于"全部实体" → boost 退化为对所有
+  // 切片乘同一因子，纯属放大噪声，且会让策略"看起来在工作"。
+  // 现改为：仅在连通分量足够小（<= maxComponentRatio 比例）时才作为社区使用，否则放弃。
   const adj = new Map<string, string[]>()
   for (const rel of ctx.relations) {
     if (!rel.source || !rel.target) continue
@@ -557,6 +592,12 @@ export async function communitySelect(ctx: RetrievalContext, params?: any, state
       if (!visited.has(nb)) { visited.add(nb); queue.push(nb) }
     }
   }
+  const MAX_COMPONENT_RATIO = 0.3
+  const totalEntities = Math.max(1, ctx.entities.length)
+  if (result.size / totalEntities > MAX_COMPONENT_RATIO) {
+    // 连通分量过大，不具备社区区分度，放弃本次社区选择
+    return { communityEntities: [] }
+  }
   return { communityEntities: Array.from(result) }
 }
 
@@ -568,11 +609,17 @@ export async function communitySelect(ctx: RetrievalContext, params?: any, state
  */
 export async function boost(
   ctx: RetrievalContext,
-  params: { source: 'entity' | 'hop' | 'community'; boostWeight?: number },
+  params: { source: 'entity' | 'hop' | 'community'; boostWeight?: number; asBonus?: boolean },
   state: PipelineState = {},
 ): Promise<PrimitiveResult> {
   const { entityToBlocksIndex, blocks } = ctx
-  const boostWeight = params.boostWeight ?? 1.5
+  // boostWeight 语义随 asBonus 变化：
+  //   asBonus=false（默认）：乘数，未命中的切片取 1（不改变）
+  //   asBonus=true         ：加性加分，未命中的切片取 0（配合 mode='weighted' 使用，
+  //                          避免未命中块被加一个常数偏移）
+  const asBonus = params.asBonus === true
+  const boostWeight = params.boostWeight ?? (asBonus ? 0.05 : 1.5)
+  const neutral = asBonus ? 0 : 1
   const blockBoost = new Map<string, number>()
   const detail: string[] = []
   const paths: string[] = state.paths || []
@@ -619,10 +666,13 @@ export async function boost(
         for (const id of bid) blockBoost.set(id, Math.max(blockBoost.get(id) || 0, boostWeight))
         detail.push(`${n}(×${boostWeight})`)
       } else {
-        // 兜底：文本匹配
+        // 兜底：文本匹配。要求实体名长度 >= 3，避免单字实体（"图"/"基"/"弧"）
+        // 命中几乎所有切片，把 boost 变成对全库乘同一因子。
+        const needle = n.toLowerCase()
+        if (needle.length < 3) continue
         for (const b of blocks) {
-          if ((b.A && b.A.toLowerCase().includes(n.toLowerCase())) ||
-              (b.Q && b.Q.toLowerCase().includes(n.toLowerCase()))) {
+          if ((b.A && b.A.toLowerCase().includes(needle)) ||
+              (b.Q && b.Q.toLowerCase().includes(needle))) {
             blockBoost.set(b.id, Math.max(blockBoost.get(b.id) || 0, boostWeight))
           }
         }
@@ -631,6 +681,10 @@ export async function boost(
   }
 
   const scores = new Map<string, number>()
+  // 加性加分模式下，为**全部**切片填 0，保证 weighted 融合只对命中块产生增量
+  if (asBonus) {
+    for (const b of blocks) scores.set(b.id, neutral)
+  }
   for (const [id, w] of blockBoost) scores.set(id, w)
   return {
     scores,

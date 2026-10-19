@@ -1,10 +1,17 @@
 <!-- TtsSettings.vue - 语音合成（TTS）设置（从 Set.vue 拆分出的独立组件，样式自带，与设置页一致） -->
 <script setup lang="ts">
 import { aikmIpcAvailable } from '@/lib/aikmIpc'
-import { computed, ref, nextTick, onUnmounted } from 'vue'
+import { computed, ref, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import { getPlatform, hasCapability } from '@/platform'
+import {
+  QWEN3_LANGS,
+  QWEN3_REFERENCE_VOICE,
+  normalizeQwen3Lang,
+  qwen3Synthesize,
+  resetQwen3Cache,
+} from '@/services/tts/qwen3'
 
 const store = usestore()
 
@@ -44,6 +51,172 @@ const localEngineHint = computed(() => {
   }
   return zh ? '当前环境没有可用的本地语音引擎。' : 'No local speech engine is available in this environment.'
 })
+
+// ================== Qwen3-TTS（Qwen3-TTS-AllinOne） ==================
+// 音色列表来自服务端 /update_voices（voices 目录里的 .pt 名字）；
+// 「使用参考音频」需要同时上传参考音频（本接入不提供上传，走网页服务添加），列表里过滤掉。
+const qwen3Voices = computed<string[]>(() => {
+  const list = (store.AIconfig.tts.qwen3?.available_voices || []) as string[]
+  const voices = Array.isArray(list) ? list.filter(v => v && v !== QWEN3_REFERENCE_VOICE) : []
+  if (!voices.length) return [] // 列表为空 → 退回手动输入框（不把旧的音色名冒充成列表）
+  // 当前音色还没进列表（换过地址 / 手动填过）→ 先列出来，别让下拉变空白
+  const current = String(store.AIconfig.tts.voice || '').trim()
+  if (current && current !== QWEN3_REFERENCE_VOICE && !voices.includes(current)) return [current, ...voices]
+  return voices
+})
+const qwen3VoicesLoading = computed(() => !!store.AIconfig.tts.qwen3?.voicesLoading)
+const qwen3Langs = QWEN3_LANGS
+
+// 语言：服务端只认 Auto/Chinese/… 词表（旧存档的 'zh' 会在这里被映射，直接发 'zh' 会被服务端 500）
+const qwen3Lang = computed({
+  get: () => normalizeQwen3Lang(store.AIconfig.tts.qwen3?.lang ?? store.AIconfig.tts.language),
+  set: (v: string) => store.updateQwen3TTS({ lang: v }),
+})
+
+const qwen3Hint = computed(() => {
+  const zh = store.locales === 'zh'
+  const q = store.AIconfig.tts.qwen3 || {}
+  const transport = q.transport === 'gradio'
+    ? (zh ? 'Gradio /do_job（网页服务）' : 'Gradio /do_job (web UI)')
+    : q.transport === 'api'
+      ? (zh ? '直连接口（一次 POST）' : 'Direct API (single POST)')
+      : (zh ? '未探测（点「测试连接」）' : 'Not probed (click "Test connection")')
+  return zh
+    ? `当前接口：${transport}。音色取自服务端 voices 目录；新增音色请在 Qwen3-TTS 网页服务（默认 http://127.0.0.1:7862）填写「输入音色名称」+ 参考音频后保存。`
+    : `Transport: ${transport}. Voices come from the server's voices folder; add one in the Qwen3-TTS web UI (default http://127.0.0.1:7862) with a name and a reference audio clip.`
+})
+
+async function refreshQwen3Voices(silent = false) {
+  if (qwen3VoicesLoading.value) return
+  const res = await store.loadQwen3TTSVoices()
+  if (res.success) {
+    if (!silent) ElMessage.success(res.message)
+  } else if (!silent) {
+    ElMessage.error(res.message)
+  }
+}
+
+// 改地址 / 改协议：清掉接口探测缓存，重新拉一次音色（静默，失败只在设置里显示原因）
+function onQwen3EndpointChanged() {
+  resetQwen3Cache()
+  store.updateQwen3TTS({ transport: '' })
+  if (!qwen3Voices.value.length) void refreshQwen3Voices(true)
+}
+
+async function testQwen3Connection() {
+  const res = await store.testQwen3TTSConnection()
+  if (res.success) ElMessage.success(res.message)
+  else ElMessage.error(res.message)
+}
+
+// 切到 Qwen3-TTS 且列表为空时自动拉一次（失败后不反复重试，等用户点刷新）
+watch(() => store.AIconfig.tts.type, (type) => {
+  const q = store.AIconfig.tts.qwen3
+  if (type !== 'Qwen3-TTS') return
+  if (qwen3Voices.value.length || qwen3VoicesLoading.value || q?.voicesError) return
+  void refreshQwen3Voices(true)
+}, { immediate: true })
+
+// 打开语音设置时同步一次「本地服务」运行状态（软件重启后状态不会自己回来）
+onMounted(() => {
+  void store.refreshQwen3ServiceStatus()
+})
+
+// ================== Qwen3-TTS 本地服务（安装目录 / 启动停止） ==================
+// Qwen3-TTS 是独立安装的 Python 程序（Gradio 7862 + FastAPI 9880）。桌面端按这里的
+// 「安装目录」直接拉起它，等价于手动双击「开始_自动启动接口服务.bat」，不用再开 cmd。
+const qwen3ServiceBusy = ref(false)
+const qwen3ServiceHint = ref('')
+const qwen3ServiceLog = ref('')
+
+const qwen3ServiceRunning = computed(() => !!store.AIconfig.tts.qwen3?.serviceRunning)
+const qwen3InstallDir = computed({
+  get: () => String(store.AIconfig.tts.qwen3?.installDir || ''),
+  set: (v: string) => { store.AIconfig.tts.qwen3.installDir = v },
+})
+const qwen3AutoStart = computed({
+  get: () => !!store.AIconfig.tts.qwen3?.autoStart,
+  set: (v: boolean) => store.updateQwen3TTS({ autoStart: v }),
+})
+
+// 选择安装目录（含 py312 与 app.py）
+async function pickQwen3InstallDir() {
+  try {
+    if (!aikmIpcAvailable()) {
+      ElMessage.warning(store.locales === 'zh' ? '仅在桌面应用中可用' : 'Only available in the desktop app')
+      return
+    }
+    const dir = await getPlatform().dialog.pickDirectory()
+    if (!dir) return
+    qwen3InstallDir.value = dir
+    await store.refreshQwen3ServiceStatus()
+  } catch (e: any) {
+    ElMessage.error((store.locales === 'zh' ? '选择目录失败: ' : 'Select folder failed: ') + (e?.message || e))
+  }
+}
+
+// 启动后轮询：进程状态 + 音色列表，直到服务可用（模型加载通常十几秒到一分钟）
+async function waitQwen3Ready(maxMs = 120000) {
+  const zh = store.locales === 'zh'
+  const started = Date.now()
+  while (Date.now() - started < maxMs) {
+    if (store.AIconfig.tts.qwen3.serviceRunning) {
+      const st = await store.refreshQwen3ServiceStatus()
+      // 进程已经退出（端口占用 / 依赖缺失）→ 直接给出日志尾
+      if (st && !st.running && st.lastExit) {
+        qwen3ServiceLog.value = (st as any).logTail || ''
+        qwen3ServiceHint.value = zh
+          ? `服务进程已退出（code ${st.lastExit.code ?? '-'}），详见下方日志`
+          : `Service process exited (code ${st.lastExit.code ?? '-'}); see logs below`
+        return
+      }
+    }
+    const res = await store.loadQwen3TTSVoices()
+    if (res.success) {
+      qwen3ServiceHint.value = zh ? `服务就绪 · ${res.message}` : `Ready · ${res.message}`
+      qwen3ServiceLog.value = ''
+      return
+    }
+    qwen3ServiceHint.value = zh ? '正在加载模型，等待服务就绪…' : 'Loading model, waiting for the service…'
+    await new Promise(r => setTimeout(r, 2500))
+  }
+  const st = await store.refreshQwen3ServiceStatus()
+  qwen3ServiceLog.value = (st as any)?.logTail || ''
+  qwen3ServiceHint.value = zh
+    ? '等待超时：服务可能还在加载模型，稍后点「刷新音色」再试'
+    : 'Timed out: the service may still be loading; try "Refresh voices" later'
+}
+
+async function startQwen3Service() {
+  if (qwen3ServiceBusy.value) return
+  qwen3ServiceBusy.value = true
+  qwen3ServiceLog.value = ''
+  qwen3ServiceHint.value = store.locales === 'zh' ? '正在启动服务…' : 'Starting service…'
+  try {
+    const res = await store.startQwen3Service(false)
+    qwen3ServiceHint.value = res.message
+    if (res.success) await waitQwen3Ready()
+    else {
+      const st = await store.refreshQwen3ServiceStatus()
+      qwen3ServiceLog.value = (st as any)?.logTail || ''
+    }
+  } finally {
+    qwen3ServiceBusy.value = false
+  }
+}
+
+async function stopQwen3Service() {
+  if (qwen3ServiceBusy.value) return
+  qwen3ServiceBusy.value = true
+  try {
+    const res = await store.stopQwen3Service(false)
+    qwen3ServiceHint.value = res.message
+    qwen3ServiceLog.value = ''
+    resetQwen3Cache()
+  } finally {
+    qwen3ServiceBusy.value = false
+  }
+}
 
 // 测试TTS功能
 const testTTS = () => {
@@ -268,26 +441,36 @@ async function synthOnnxChunk(text: string): Promise<Uint8Array | null> {
 }
 
 // indexTTS2 / Qwen3-TTS：整段一次请求远程服务，返回音频字节与格式
-async function synthRemote(text: string): Promise<{ buffer: ArrayBuffer; format: string }> {
+async function synthRemote(text: string): Promise<{ buffer: ArrayBuffer; format: string; mime?: string }> {
   const zh = store.locales === 'zh'
   const cfg = store.AIconfig.tts
   const isQwen = cfg.type === 'Qwen3-TTS'
   const base = (cfg.url || '').trim()
   if (!base) throw new Error(zh ? '未配置 TTS 服务地址' : 'TTS service URL not configured')
   const cleaned = text.replace(/\s+/g, ' ').trim()
-  const url = new URL(isQwen ? base.replace(/\/+$/, '') : base)
+  if (isQwen) {
+    // Qwen3-TTS：按存储的接口配置合成（Gradio /do_job 或直连接口，自动探测）
+    const q = cfg.qwen3 || {}
+    const res = await qwen3Synthesize({
+      base,
+      protocol: q.protocol,
+      voice: cfg.voice,
+      lang: q.lang ?? cfg.language,
+      modelType: q.modelType,
+      speed: q.speed ?? cfg.rate,
+      chunkSize: q.chunkSize,
+      batch: q.batch,
+      timeoutMs: 180000,
+    }, cleaned)
+    return { buffer: res.buffer, format: res.format, mime: res.mime }
+  }
+  // indexTTS2：GET 一次拿音频
+  const url = new URL(base)
   url.searchParams.set('text', cleaned)
   if (cfg.voice) url.searchParams.set('speaker', cfg.voice)
   if (cfg.language) url.searchParams.set('lang', cfg.language)
-  if (isQwen) {
-    const speed = (cfg as any).qwen3?.speed || cfg.rate || 1.0
-    if (speed !== 1.0) url.searchParams.set('speed', String(speed))
-    const pitch = (cfg as any).qwen3?.pitch || cfg.pitch || 1.0
-    if (pitch !== 1.0) url.searchParams.set('pitch', String(pitch))
-  } else {
-    if (cfg.emo) url.searchParams.set('emo', cfg.emo)
-    if (cfg.weight) url.searchParams.set('weight', String(cfg.weight))
-  }
+  if (cfg.emo) url.searchParams.set('emo', cfg.emo)
+  if (cfg.weight) url.searchParams.set('weight', String(cfg.weight))
   const res = await fetch(url.toString(), {
     headers: { Accept: 'audio/wav, audio/mpeg, audio/*' },
   })
@@ -340,7 +523,8 @@ async function generateAudio() {
       synthStatus.value = zh ? '正在请求 TTS 服务…' : 'Requesting TTS service…'
       await nextTick()
       const r = await synthRemote(text)
-      blob = new Blob([r.buffer], { type: r.format === 'wav' ? 'audio/wav' : r.format === 'mp3' ? 'audio/mpeg' : 'audio/*' })
+      const mime = r.mime || (r.format === 'wav' ? 'audio/wav' : r.format === 'mp3' ? 'audio/mpeg' : 'audio/*')
+      blob = new Blob([r.buffer], { type: mime })
       ext = r.format
     }
     const sizeKB = blob.size / 1024
@@ -395,11 +579,20 @@ onUnmounted(() => {
     <!-- TTS类型选择 -->
     <div class="form-group">
       <label>{{ store.locales=='zh'?'语音类型' : 'TTS Type' }}</label>
-      <select v-model="store.AIconfig.tts.type">
+      <select v-model="store.AIconfig.tts.type" @change="store.saveConfig">
         <option v-for="ttsType in ttsTypes" :key="ttsType.value" :value="ttsType.value">
           {{ getTTSLabel(ttsType.value) }}
         </option>
       </select>
+    </div>
+
+    <!-- 自动朗读：助手回复生成完后自动念出来（所有引擎通用；见 home.vue 的 completeAssistantReply） -->
+    <div class="form-group">
+      <label>{{ store.locales=='zh'?'自动朗读' : 'Auto speak' }}</label>
+      <label class="check-line">
+        <input type="checkbox" v-model="store.AIconfig.tts.autoSpeak" @change="store.saveConfig"/>
+        <span>{{ store.locales=='zh'?'助手回复生成完后自动朗读（只念当前会话）' : 'Speak assistant replies automatically (current chat only)' }}</span>
+      </label>
     </div>
 
     <!-- 本地TTS设置 -->
@@ -446,19 +639,137 @@ onUnmounted(() => {
         <input type="number" v-model="store.AIconfig.tts.weight" min="0" max="1" step="0.1" :placeholder="store.locales=='zh'?'0-1之间的权重' : 'Weight between 0-1'"/>
       </div>
     </div>
-    <!-- Qwen3-TTS设置 -->
+    <!-- Qwen3-TTS设置（Qwen3-TTS-AllinOne：Gradio 网页服务 7862 / FastAPI 直连接口 9880） -->
     <div v-if="store.AIconfig.tts.type === 'Qwen3-TTS'">
       <div class="form-group">
-        <label>{{ store.locales=='zh'?'TTS服务地址' : 'TTS Service URL' }}</label>
-        <input v-model="store.AIconfig.tts.url" :title="(store.locales=='zh'?'Qwen3-TTS服务地址，默认为http://localhost:9880/' : 'Qwen3-TTS service URL')" :placeholder="store.locales=='zh'?'请输入TTS服务地址' : 'Enter TTS service URL'"/>
+        <label>{{ store.locales=='zh'?'服务地址' : 'Service URL' }}</label>
+        <input v-model="store.AIconfig.tts.url" @change="onQwen3EndpointChanged"
+               :title="store.locales=='zh'?'Gradio 网页服务默认 http://127.0.0.1:7862；直连接口默认 http://127.0.0.1:9880' : 'Gradio web UI defaults to http://127.0.0.1:7862; direct API defaults to http://127.0.0.1:9880'"
+               :placeholder="'http://127.0.0.1:7862'"/>
+      </div>
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'接口协议' : 'Protocol' }}</label>
+        <select v-model="store.AIconfig.tts.qwen3.protocol" @change="onQwen3EndpointChanged">
+          <option value="auto">{{ store.locales=='zh'?'自动识别（按地址探测）' : 'Auto detect' }}</option>
+          <option value="gradio">{{ store.locales=='zh'?'Gradio 网页服务（/do_job）' : 'Gradio web UI (/do_job)' }}</option>
+          <option value="api">{{ store.locales=='zh'?'直连接口（一次 POST）' : 'Direct API (single POST)' }}</option>
+        </select>
       </div>
       <div class="form-group">
         <label>{{ store.locales=='zh'?'音色' : 'Voice' }}</label>
-        <input v-model="store.AIconfig.tts.voice" :title="store.locales=='zh'?'例如: mazhao, zh-CN-YunxiNeural 等' : 'Example: mazhao, zh-CN-YunxiNeural, etc.'" :placeholder="store.locales=='zh'?'请输入音色名称' : 'Enter voice name'"/>
+        <div class="input-with-button">
+          <select v-if="qwen3Voices.length" v-model="store.AIconfig.tts.voice" @change="store.saveConfig" style="flex:1; min-width:0;">
+            <option v-for="v in qwen3Voices" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <input v-else v-model="store.AIconfig.tts.voice" @change="store.saveConfig"
+                 :placeholder="store.locales=='zh'?'先点刷新拉取音色，或直接填写音色名' : 'Refresh to load voices, or type a voice name'"/>
+          <div class="button" style="width:32px;" @click="refreshQwen3Voices(false)"
+               :title="store.locales=='zh'?'刷新音色列表（/update_voices）' : 'Refresh voice list (/update_voices)'">
+            <i :class="qwen3VoicesLoading ? 'fa fa-spinner fa-spin' : 'fa fa-refresh'"></i>
+          </div>
+        </div>
       </div>
       <div class="form-group">
         <label>{{ store.locales=='zh'?'语言' : 'Language' }}</label>
-        <input v-model="store.AIconfig.tts.language" :placeholder="store.locales=='zh'?'例如: zh, en 等' : 'Example: zh, en, etc.'"/>
+        <select v-model="qwen3Lang">
+          <option v-for="l in qwen3Langs" :key="l.value" :value="l.value">{{ store.locales=='zh' ? l.zh : l.en }}</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'模型类型' : 'Model' }}</label>
+        <select v-model="store.AIconfig.tts.qwen3.modelType" @change="store.saveConfig">
+          <option value="0.6B">{{ store.locales=='zh'?'0.6B（小参数，更快）' : '0.6B (small, faster)' }}</option>
+          <option value="1.7B">{{ store.locales=='zh'?'1.7B（大参数，更好）' : '1.7B (large, better)' }}</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'语速' : 'Speed' }}</label>
+        <input type="range" min="0.5" max="2" step="0.05" v-model.number="store.AIconfig.tts.qwen3.speed" @change="store.saveConfig"/>
+        <span class="range-value">{{ (store.AIconfig.tts.qwen3.speed || 1).toFixed(2) }}</span>
+      </div>
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'分段大小' : 'Chunk size' }}</label>
+        <input type="number" min="100" max="900" step="50" v-model.number="store.AIconfig.tts.qwen3.chunkSize" @change="store.saveConfig"/>
+        <span class="config-description">{{ store.locales=='zh'?'越大上下文一致性越好，但可能爆显存' : 'Larger = better context, more VRAM' }}</span>
+      </div>
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'并行批次' : 'Batch size' }}</label>
+        <input type="number" min="1" max="32" step="1" v-model.number="store.AIconfig.tts.qwen3.batch" @change="store.saveConfig"/>
+        <span class="config-description">{{ store.locales=='zh'?'显存小就改 1（彻底串行）' : 'Set 1 to serialize on small VRAM' }}</span>
+      </div>
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'连接' : 'Connection' }}</label>
+        <div class="button-group">
+          <div class="button" @click="testQwen3Connection" :title="store.locales=='zh'?'探测接口并拉取音色列表' : 'Probe the transport and fetch voices'">
+            <i class="fa fa-plug"></i> {{ store.locales=='zh'?'测试连接' : 'Test connection' }}
+          </div>
+          <div class="button" @click="refreshQwen3Voices(false)" :title="store.locales=='zh'?'刷新音色列表' : 'Refresh voice list'">
+            <i :class="qwen3VoicesLoading ? 'fa fa-spinner fa-spin' : 'fa fa-refresh'"></i> {{ store.locales=='zh'?'刷新音色' : 'Refresh voices' }}
+          </div>
+        </div>
+      </div>
+
+      <!-- 本地服务：安装目录 + 启动/停止（等价于手动双击「开始_自动启动接口服务.bat」） -->
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'安装目录' : 'Install folder' }}</label>
+        <div class="input-with-button">
+          <input v-model="qwen3InstallDir" @change="store.saveConfig"
+                 :placeholder="'D:\\AI\\Qwen3-TTS-AllinOne'"
+                 :title="store.locales=='zh'?'Qwen3-TTS-AllinOne 的根目录（含 py312 与 app.py）' : 'Root folder of Qwen3-TTS-AllinOne (contains py312 and app.py)'"/>
+          <div class="button" style="width:32px;" @click="pickQwen3InstallDir" :title="store.locales=='zh'?'选择文件夹' : 'Select folder'">
+            <i class="fa fa-folder-open"></i>
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>{{ store.locales=='zh'?'本地服务' : 'Local service' }}</label>
+        <div class="button-group">
+          <div class="button" :class="{ active: qwen3ServiceRunning, disabled: qwen3ServiceBusy }" @click="startQwen3Service"
+               :title="store.locales=='zh'?'按上面的安装目录启动 Qwen3-TTS 服务（不用再开 cmd）' : 'Start the Qwen3-TTS service from the folder above (no cmd needed)'">
+            <i :class="qwen3ServiceBusy ? 'fa fa-spinner fa-spin' : 'fa fa-play'"></i>
+            {{ store.locales=='zh'?'启动服务' : 'Start service' }}
+          </div>
+          <div class="button" :class="{ disabled: qwen3ServiceBusy }" @click="stopQwen3Service"
+               :title="store.locales=='zh'?'停止本应用启动的服务' : 'Stop the service started by this app'">
+            <i class="fa fa-stop"></i> {{ store.locales=='zh'?'停止服务' : 'Stop service' }}
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label></label>
+        <div class="config-description" style="margin-left:0;">
+          {{ qwen3ServiceRunning
+            ? (store.locales=='zh'?'● 服务运行中（本应用启动）' : '● Service running (started by this app)')
+            : (store.locales=='zh'?'○ 本应用未启动服务（手动开的服务也能照常连接）' : '○ Service not started by this app (an external one still works)') }}
+        </div>
+      </div>
+      <div class="form-group">
+        <label></label>
+        <label class="check-line">
+          <input type="checkbox" v-model="qwen3AutoStart" @change="store.saveConfig"/>
+          <span>{{ store.locales=='zh'?'随软件启动自动拉起服务（首次会加载模型，较慢）' : 'Start the service with the app (model load takes a while)' }}</span>
+        </label>
+      </div>
+      <div v-if="qwen3ServiceHint || store.AIconfig.tts.qwen3.serviceError" class="form-group">
+        <label></label>
+        <div class="config-description" style="margin-left:0; line-height:1.5;"
+             :class="{ 'qwen3-error': !!(store.AIconfig.tts.qwen3.serviceError && !qwen3ServiceHint) }">
+          {{ qwen3ServiceHint || store.AIconfig.tts.qwen3.serviceError }}
+        </div>
+      </div>
+      <div v-if="qwen3ServiceLog" class="form-group qwen3-log-row">
+        <label></label>
+        <pre class="qwen3-log">{{ qwen3ServiceLog }}</pre>
+      </div>
+
+      <div class="form-group">
+        <label></label>
+        <div class="config-description" style="margin-left:0; line-height:1.5;">{{ qwen3Hint }}</div>
+      </div>
+      <!-- 音色列表拉取失败的原因（静默自动拉取时也能看到，不用非点刷新） -->
+      <div v-if="store.AIconfig.tts.qwen3.voicesError" class="form-group">
+        <label></label>
+        <div class="config-description qwen3-error" style="margin-left:0;">⚠ {{ store.AIconfig.tts.qwen3.voicesError }}</div>
       </div>
     </div>
 
@@ -697,6 +1008,57 @@ onUnmounted(() => {
   color: var(--fontColor);
   opacity: 0.7;
   margin-left: 5px;
+}
+
+/* Qwen3-TTS 音色列表拉取失败提示（比普通说明更显眼） */
+.config-description.qwen3-error {
+  opacity: 1;
+  color: #e6a23c;
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+/* 复选框 + 说明文字一行（自动朗读 / 随软件启动） */
+.check-line {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fontColor);
+  opacity: 0.85;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+}
+.check-line input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+/* Qwen3-TTS 服务启动日志（失败时看这里） */
+.form-group.qwen3-log-row {
+  align-items: flex-start;
+}
+.qwen3-log {
+  flex: 1;
+  min-width: 0;
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background-color: var(--menuColor);
+  color: var(--fontColor);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  opacity: 0.85;
 }
 
 /* 语音设置 */

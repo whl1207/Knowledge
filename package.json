@@ -1,6 +1,6 @@
 {
   "name": "knowledge",
-  "version": "6.10.14",
+  "version": "6.10.19",
   "main": "dist-electron/main/index.js",
   "description": "AI Knowledge management Software",
   "author": "whl",
@@ -41,7 +41,8 @@
     "office:build:docs": "node scripts/build-office.mjs --editors docs",
     "office:build:native": "node scripts/build-office.mjs --native-only --with-sheets-native",
     "test:plugin-smoke": "node scripts/plugin-smoke/run.mjs",
-    "test:selftest": "node scripts/run-selftests.mjs"
+    "test:selftest": "node scripts/run-selftests.mjs",
+    "check:plugin-migration": "node scripts/check-plugin-api-migration.mjs"
   },
   "build": {
     "appId": "com.whl.aikm",

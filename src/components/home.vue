@@ -6834,7 +6834,27 @@ const completeAssistantReply = (chatData: any, content: string, metadata?: any) 
     refreshRenderedMermaid()
     scheduleMermaidRender(true, 60)
   })
+
+  // 自动朗读（设置 → 语音 → 合成 → 自动朗读）：助手回复收尾后把正文交给 TTS 队列。
+  // 只念「当前正在看的会话」，后台会话完成不打扰；WeakSet 保证同一条消息只念一次
+  // （completeAssistantReply 可能被 resume / 幂等收尾调用多次）。
+  if (store.AIconfig.tts.autoSpeak) {
+    const spokenMsg = chatData.messages[chatData.messages.length - 1]
+    const sameChat = chatData?.id != null && currentChat.value?.id != null
+      ? chatData.id === currentChat.value.id
+      : chatData === currentChat.value
+    if (sameChat && spokenMsg?.role === 'assistant' && !autoSpokenMessages.has(spokenMsg)) {
+      const speakText = String(spokenMsg.content || '').trim()
+      if (speakText) {
+        autoSpokenMessages.add(spokenMsg)
+        store.tts(speakText)
+      }
+    }
+  }
 }
+
+// 已自动朗读过的消息（WeakSet：不落盘、不污染聊天记录）
+const autoSpokenMessages = new WeakSet<object>()
 
 // 重进模块时续接生成：用主进程按 requestId 缓冲的完整/部分回答恢复前端显示
 /**
@@ -8939,7 +8959,8 @@ const unitResultText = (unit: any): string => {
         return results.map((it: any, i: number) => {
           const title = it?.title || ''
           const url = it?.url || ''
-          const summary = it?.summary || it?.snippet || it?.text || ''
+          // 卡片只展示短摘要：summary 是给模型读的长摘要（DeepSeek 600~800 字），全塞进气泡会刷屏
+          const summary = it?.snippet || it?.summary || it?.text || ''
           const base = `${i + 1}. ${title}${url ? `\n   ${url}` : ''}`
           return summary ? `${base}\n   ${summary}` : base
         }).join('\n')

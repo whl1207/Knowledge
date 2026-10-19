@@ -837,6 +837,7 @@ const PERMISSION_HINTS: Record<string, [string, string]> = {
   agent: ['读取会话日志（只读）', 'Read session logs (read-only)'],
   'agent.run': ['调用你配置的模型跑一次独立智能体会话（消耗额度；受宿主预算与首次调用确认约束，委派出的智能体拿不到文件 / 命令类工具）', 'Run one isolated agent session on your configured model (consumes quota; bounded by host budget and a first-use confirmation, and the delegated agent gets no file/shell tools)'],
   llm: ['调用你配置的大模型来源（会消耗额度 / 算力）', 'Call your configured model sources (consumes quota / compute)'],
+  image: ['生图：调用你在「设置 → 模型 → 生图」里配置的服务（占用本地算力 / 队列；插件拿不到服务地址与 token）', 'Image generation: calls the service you configured under Settings → Models → Image (uses local compute / queue; the plugin never sees the URL or token)'],
 }
 
 const permissionHint = (permissions: string[]): string => {

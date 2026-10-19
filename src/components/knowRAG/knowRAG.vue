@@ -503,15 +503,22 @@ let model = ref({
     umapNeighbors: 15,
     umapMinDist: 0.1,
     umapSpread: 1.0,
-    summaryWeight: 0.0,
-    sliceWeight: 1.0,
+    // 基础通道权重：问题增强 0.7 + 切片 0.3。
+    // 0.7 来自参数网格实测（612 题，IN/LOO 两种协议）：sw=0.7 时 IN 95.1% / LOO 84.0%，
+    // 在「查询接近题库已有问题」与「查询换说法」两种场景下都稳健。
+    // 旧默认 0.0 会关闭问题增强通道，使所有策略退化为纯切片余弦检索。
+    summaryWeight: 0.7,
+    sliceWeight: 0.3,
     // 是否把向量数据写入 .kb 文件（false=精简模式：不存向量、KB 文件更小，首次问答按需重新向量化）
     saveVectors: true,
     // 是否把「测试页结果」写入 .kb 文件（默认 false=不写）：测试用例本来就会保存，这里额外保存
     // 检索结果/位次分析/策略召回对比/检索过程，重新加载即可复现对比数据（不重跑），代价是 KB 变大
     saveTestResults: false,
-    // BM25相关配置
-    bm25Enabled: false,
+    // BM25 相关配置（默认开启：实测在「查询换说法」场景下带来 +20pp）
+    // bm25Weight=0.3 由四格网格搜索确定：四格均值 84.2% 最高；
+    // 增大到 0.5 虽在 LOO 上更好（84.0%），但会让 IN 从 98.5% 掉到 95.1%、
+    // 合成集 IN 从 97.7% 掉到 80.4%，整体不划算。
+    bm25Enabled: true,
     bm25Weight: 0.3,
     bm25K1: 1.5,
     bm25B: 0.75,

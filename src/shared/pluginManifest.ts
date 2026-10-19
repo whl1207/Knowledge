@@ -22,7 +22,7 @@ export const PLUGIN_MANIFEST_KEY = 'aikm'
 export const PLUGIN_MANIFEST_FILE = 'package.json'
 
 /** 受支持的权限类别（与 PluginHostApi 各项判权一一对应） */
-export const SUPPORTED_PLUGIN_PERMISSIONS: readonly PluginPermission[] = ['fs', 'shell', 'net', 'agent', 'agent.run', 'llm']
+export const SUPPORTED_PLUGIN_PERMISSIONS: readonly PluginPermission[] = ['fs', 'shell', 'net', 'agent', 'agent.run', 'llm', 'image']
 
 export type ManifestProblem =
   | 'no-manifest'

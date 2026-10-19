@@ -1,37 +1,29 @@
 /**
- * plugin-files.ts — 插件文件能力 IPC（`plugin:files:*`）
+ * plugin-files.ts — 插件文件能力 IPC（`plugin:files:*` / `plugin:fs:*`）
  *
- * 为什么需要它：插件渲染层半边是 Blob URL 加载的单文件 ESM，**拿不到应用的文件读写链路**
- * （也不能 import 应用的 pdfjs）。合同审核这类"上传 → 预览 → 交给模型"的插件必须由宿主
- * 提供「选文件 / 选文件夹 / 列目录 / 读文本 / 提取 PDF 文本 / 读二进制」这几件事。
+ * **实现只有一份**：全部落在 `electron/main/plugin-fs.ts`（`createPluginFs`）。本文件只负责
+ * "从 IPC 载荷里取出插件 id 与授权状态 → 调实现 → 把结果/错误翻译成 IPC"。
+ * 收敛前的三套入口（界面 `ctx.files.*`、主进程 `ctx.host.readFile/*`、`ctx.host.granted.*`）
+ * 共用这一份实现，见 `docs/plan/插件能力面向DSH风格收敛-设计方案（逐文件）.md` §四。
  *
- * 安全模型（两层）：
- * 1. **权限**：只有清单声明了 `fs` 权限、且插件当前处于激活态的插件才能调用；
- * 2. **授权范围（capability allowlist）**：只允许访问"用户在该插件里亲自选过"的文件
- *    与文件夹（及其子项）。插件不能凭一个路径字符串读到任意位置——即使它拿到了路径。
- *    这份清单会**落盘**（见 plugin-grants.ts），所以「上次选的游戏目录 / 法规库目录」
- *    重启后照样能用；用户可在「设置 → 插件 → 数据」里逐条撤销，卸载插件会全部清掉。
+ * 安全模型（未改变）：
+ * 1. **权限**：只有清单声明了 `fs` 权限、且插件当前处于激活态才能调用；
+ * 2. **授权范围**：只允许"用户在该插件里亲自选过"的文件/文件夹（及子项），外加插件自己的目录。
+ *    清单落盘（`plugin-grants.ts`），重启有效，可在「设置 → 插件 → 数据」逐条撤销。
  *
- * PDF 文本提取用 pdfjs-dist（与 electron/main/index.ts 的 readPdf 同一套做法），
- * 视觉预览由**渲染层**用应用自带的 pdfjs 渲染成 PNG（见 src/lib/plugin/files.ts）。
+ * 旧通道（`plugin:files:*`）保留原样的载荷与返回形状（只多出可选字段），
+ * 新通道（`plugin:fs:stat` / `plugin:fs:edit-text`）承载版本与字面量编辑。
  */
 
 import { promises as fs } from 'node:fs'
-import path from 'node:path'
 import { BrowserWindow, dialog, ipcMain } from 'electron'
-// 主进程是 Node 环境：pdfjs 必须用 legacy 构建（现代构建会在导入时警告并要求换 legacy）
-import * as PDFJS from 'pdfjs-dist/legacy/build/pdf.mjs'
-import xlsx from 'xlsx'
 import { IPCError } from '@/types/ipc'
 import { pluginHost } from './plugin-host'
 import { requirePluginApproval } from './plugin-approval'
-import { addGrant, assertAccess, clearGrants, listGrants, revokeGrant } from './plugin-grants'
-
-/** 读表格的上限（避免大表把主进程内存打满；插件侧据此也能判断是否被截断） */
-const SHEET_MAX_BYTES = 32 * 1024 * 1024
-const SHEET_MAX_ROWS = 20000
-const SHEET_MAX_SHEETS = 20
-const SHEET_MAX_COLS = 200
+import { addGrant, clearGrants, listGrants, revokeGrant } from './plugin-grants'
+import { asFsError, createPluginFs } from './plugin-fs'
+import { fsPolicySnapshot, isFsPolicyEnabled, setFsPolicyEnabled } from './plugin-fs-policy'
+import type { FsEdit, PluginFsApi } from '@/shared/fsContract'
 
 /** 插件是否声明了 fs 权限（未声明一律拒绝） */
 function requireFsPermission(pluginId: string): void {
@@ -46,56 +38,43 @@ function requireFsPermission(pluginId: string): void {
 
 function readPluginId(payload: unknown): string {
   const id = String((payload as { id?: unknown })?.id ?? '').trim()
-  if (!id) throw new IPCError('INVALID_INPUT', '缺少插件 id')
+  if (!id) throw new IPCError('INVALID_ARGUMENT', '缺少插件 id')
   return id
 }
 
-/**
- * 读：路径是否落在该插件被授权的范围内（只读或可写授权都算）。
- *
- * 判定在 `plugin-grants.assertAccess` → 纯函数 `src/shared/pluginGrantPaths.ts`（读 / 写共用一处，
- * 不会各写一份 startsWith；且按**路径段**比较，`/a/bc` 不会让 `/a/bcd` 通过）。
- */
-function assertAllowed(pluginId: string, target: string): void {
-  assertAccess(pluginId, target, 'read')
-}
-
-/** 写：**只认可写授权**（只读授权一律拒绝，理由由 assertAccess 说清） */
-function assertWritable(pluginId: string, target: string): void {
-  assertAccess(pluginId, target, 'write')
+/** 按载荷构造该插件的文件能力（判权 + 目录由宿主快照决定，插件无法伪造） */
+function fsFor(payload: { id?: string }): PluginFsApi {
+  const pluginId = readPluginId(payload)
+  const snapshot = pluginHost.list().find((p) => p.id === pluginId)
+  if (!snapshot) throw new IPCError('PLUGIN_NOT_FOUND', `插件不存在：${pluginId}`)
+  if (!snapshot.enabled) throw new IPCError('PERMISSION_DENIED', `插件未启用：${pluginId}`)
+  return createPluginFs({
+    pluginId,
+    pluginDir: snapshot.dir,
+    hasPermission: snapshot.permissions.includes('fs'),
+  })
 }
 
 function asIpcError(error: unknown): IPCError {
-  if (error instanceof IPCError) return error
-  return new IPCError('PLUGIN_FILES_FAILED', error instanceof Error ? error.message : String(error))
+  return asFsError(error, 'FS_FAILED')
 }
 
-async function readPdfText(buffer: Buffer): Promise<{ text: string; pages: number }> {
-  const task = PDFJS.getDocument({ data: new Uint8Array(buffer) })
-  const doc = await task.promise
-  try {
-    const parts: string[] = []
-    for (let i = 1; i <= doc.numPages; i++) {
-      const page = await doc.getPage(i)
-      const content = await page.getTextContent()
-      const line = (content.items as Array<{ str?: string }>).map((it) => String(it?.str ?? '')).join('')
-      parts.push(line)
+/** 统一的处理包壳：把实现抛出的异常翻译成带 code 的 IPCError */
+function handle<T>(fn: (payload: any) => Promise<T> | T) {
+  return async (_event: unknown, payload: any = {}) => {
+    try {
+      return await fn(payload)
+    } catch (error) {
+      throw asIpcError(error)
     }
-    return { text: parts.join('\n\n'), pages: doc.numPages }
-  } finally {
-    await doc.destroy().catch(() => undefined)
   }
-}
-
-/** 取发起请求的窗口（用于对话框的父窗口） */
-function windowOf(event: Electron.IpcMainInvokeEvent): BrowserWindow | null {
-  return BrowserWindow.fromWebContents(event.sender)
 }
 
 export function registerPluginFilesIpc(): void {
   /** 选文件（返回绝对路径；同时把该文件加入该插件的授权范围） */
-  ipcMain.handle('plugin:files:pick', async (event, payload: { id?: string; accept?: string; multiple?: boolean } = {}) => {
-    try {
+  ipcMain.handle(
+    'plugin:files:pick',
+    handle(async (payload: { id?: string; accept?: string; multiple?: boolean }) => {
       const pluginId = readPluginId(payload)
       requireFsPermission(pluginId)
       const accept = String(payload?.accept ?? 'any')
@@ -105,53 +84,56 @@ export function registerPluginFilesIpc(): void {
           : accept === 'text'
             ? [{ name: 'Text', extensions: ['txt', 'md', 'json', 'csv'] }]
             : [{ name: 'All Files', extensions: ['*'] }]
-      const parent = windowOf(event)
-      const result = parent
-        ? await dialog.showOpenDialog(parent, { properties: payload?.multiple ? ['openFile', 'multiSelections'] : ['openFile'], filters })
-        : await dialog.showOpenDialog({ properties: payload?.multiple ? ['openFile', 'multiSelections'] : ['openFile'], filters })
-      if (result.canceled || !result.filePaths.length) return { cancelled: true, files: [] as Array<{ path: string; name: string; size: number }> }
-      const files = []
+      const parent = dialogParent()
+      const options: Electron.OpenDialogOptions = {
+        properties: payload?.multiple ? ['openFile', 'multiSelections'] : ['openFile'],
+        filters,
+      }
+      const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
+      if (result.canceled || !result.filePaths.length) {
+        return { cancelled: true, files: [] as Array<{ path: string; name: string; size: number }> }
+      }
+      const files: Array<{ path: string; name: string; size: number }> = []
       for (const filePath of result.filePaths) {
         addGrant(pluginId, filePath)
+        const name = filePath.split(/[\\/]/).pop() || filePath
         const stat = await fs.stat(filePath).catch(() => null)
-        files.push({ path: filePath, name: path.basename(filePath), size: stat ? stat.size : 0 })
+        files.push({ path: filePath, name, size: stat ? stat.size : 0 })
       }
       return { cancelled: false, files }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+    }),
+  )
 
   /** 选文件夹（返回绝对路径；该文件夹及其子项进入授权范围） */
-  ipcMain.handle('plugin:files:pick-dir', async (event, payload: { id?: string } = {}) => {
-    try {
+  ipcMain.handle(
+    'plugin:files:pick-dir',
+    handle(async (payload: { id?: string }) => {
       const pluginId = readPluginId(payload)
       requireFsPermission(pluginId)
-      const parent = windowOf(event)
+      const parent = dialogParent()
       const options: Electron.OpenDialogOptions = { properties: ['openDirectory'] }
       const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
       if (result.canceled || !result.filePaths.length) return { cancelled: true, dir: null }
       const dir = result.filePaths[0]
       addGrant(pluginId, dir)
-      return { cancelled: false, dir: { path: dir, name: path.basename(dir) } }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+      return { cancelled: false, dir: { path: dir, name: dir.split(/[\\/]/).filter(Boolean).pop() || dir } }
+    }),
+  )
 
   /**
-   * 选一个**可写**文件夹（授权模式 write：可在其中创建 / 覆盖 / 删除文件）。
+   * 选一个**可写**文件夹（授权模式 write：可在其中创建 / 覆盖 / 编辑 / 删除文件）。
    *
    * 与只读的 `pick-dir` 分开是刻意的：
    * - 用户点的时候就知道自己在给"写"的权限（标题与按钮都写明）；
    * - 插件**没有**别的办法把自己变成可写 —— 这是唯一入口；
    * - 同一个目录先以只读选过、再以可写选一次 → 升级为 write（`addGrant` 只升不降）。
    */
-  ipcMain.handle('plugin:files:pick-writable', async (event, payload: { id?: string; title?: string } = {}) => {
-    try {
+  ipcMain.handle(
+    'plugin:files:pick-writable',
+    handle(async (payload: { id?: string; title?: string }) => {
       const pluginId = readPluginId(payload)
       requireFsPermission(pluginId)
-      const parent = windowOf(event)
+      const parent = dialogParent()
       const options: Electron.OpenDialogOptions = {
         properties: ['openDirectory', 'createDirectory'],
         title: String(payload?.title ?? '').trim() || '选择一个允许该插件写入的文件夹',
@@ -161,161 +143,142 @@ export function registerPluginFilesIpc(): void {
       if (result.canceled || !result.filePaths.length) return { cancelled: true, dir: null }
       const dir = result.filePaths[0]
       addGrant(pluginId, dir, 'write')
-      return { cancelled: false, dir: { path: dir, name: path.basename(dir), mode: 'write' as const } }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+      return { cancelled: false, dir: { path: dir, name: dir.split(/[\\/]/).filter(Boolean).pop() || dir, mode: 'write' as const } }
+    }),
+  )
 
   /**
-   * 写文本（覆盖式）。父目录会自动创建。
-   * **只认可写授权** —— 只读授权下写入一律拒绝。
+   * 写文本（覆盖式）。父目录自动创建。
+   * **只认可写授权**（只读授权 → `FS_READ_ONLY_GRANT`；插件目录内除外）。
+   * 可选 `expectedVersion` / `presence`：给了就做乐观并发与存在性检查（省略 = 无条件，老行为不变）。
    */
-  ipcMain.handle('plugin:files:write-text', async (_event, payload: { id?: string; path?: string; text?: string } = {}) => {
-    try {
-      const pluginId = readPluginId(payload)
-      requireFsPermission(pluginId)
-      const target = String(payload?.path ?? '').trim()
-      if (!target) throw new IPCError('INVALID_INPUT', '缺少写入路径')
-      if (typeof payload?.text !== 'string') throw new IPCError('INVALID_INPUT', 'text 必须是字符串')
-      assertWritable(pluginId, target)
-      const abs = path.resolve(target)
-      await fs.mkdir(path.dirname(abs), { recursive: true })
-      await fs.writeFile(abs, payload.text, 'utf8')
-      return { path: abs, bytes: Buffer.byteLength(payload.text, 'utf8') }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+  ipcMain.handle(
+    'plugin:files:write-text',
+    handle(async (payload: { id?: string; path?: string; text?: string; expectedVersion?: string; presence?: string }) => {
+      const api = fsFor(payload)
+      const res = await api.writeText(String(payload?.path ?? '').trim(), String(payload?.text ?? ''), {
+        expectedVersion: typeof payload?.expectedVersion === 'string' ? payload.expectedVersion : undefined,
+        presence: (payload?.presence === 'mustExist' || payload?.presence === 'mustNotExist' ? payload.presence : 'any') as
+          | 'any'
+          | 'mustExist'
+          | 'mustNotExist',
+      })
+      return { path: res.path, bytes: res.bytes, version: res.version }
+    }),
+  )
 
   /**
    * 删除文件 / 空目录（**只认可写授权**）。
    *
    * 刻意**不做递归删除**：`remove` 的作用是"删掉我刚写的那个文件"，
    * 而递归删除一个用户授权目录会把整棵子树带走 —— 那种破坏性操作不该由插件的一句话完成。
-   * 目录非空时报错并说明，要删就先逐个删里面。
    */
-  ipcMain.handle('plugin:files:remove', async (_event, payload: { id?: string; path?: string } = {}) => {
-    try {
-      const pluginId = readPluginId(payload)
-      requireFsPermission(pluginId)
-      const target = String(payload?.path ?? '').trim()
-      if (!target) throw new IPCError('INVALID_INPUT', '缺少删除路径')
-      assertWritable(pluginId, target)
-      const abs = path.resolve(target)
-      const stat = await fs.stat(abs).catch(() => null)
-      if (!stat) return { removed: false, missing: true }
-      if (stat.isDirectory()) {
-        await fs.rmdir(abs) // 非空会抛错，正是我们要的
-      } else {
-        await fs.unlink(abs)
-      }
-      return { removed: true }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+  ipcMain.handle(
+    'plugin:files:remove',
+    handle(async (payload: { id?: string; path?: string; expectedVersion?: string }) => {
+      const api = fsFor(payload)
+      return await api.remove(String(payload?.path ?? '').trim(), {
+        expectedVersion: typeof payload?.expectedVersion === 'string' ? payload.expectedVersion : undefined,
+      })
+    }),
+  )
 
   /** 列目录（只列一层；需在授权范围内） */
-  ipcMain.handle('plugin:files:list', async (_event, payload: { id?: string; path?: string } = {}) => {
-    try {
-      const pluginId = readPluginId(payload)
-      requireFsPermission(pluginId)
-      const dir = String(payload?.path ?? '').trim()
-      if (!dir) throw new IPCError('INVALID_INPUT', '缺少目录路径')
-      assertAllowed(pluginId, dir)
-      const entries = await fs.readdir(dir, { withFileTypes: true })
-      const rows = []
-      for (const entry of entries.slice(0, 500)) {
-        const full = path.join(dir, entry.name)
-        const stat = await fs.stat(full).catch(() => null)
-        rows.push({ name: entry.name, path: full, isDir: entry.isDirectory(), size: stat ? stat.size : 0 })
-      }
-      rows.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
-      return { dir, entries: rows }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+  ipcMain.handle(
+    'plugin:files:list',
+    handle(async (payload: { id?: string; path?: string }) => {
+      const api = fsFor(payload)
+      return await api.listDir(String(payload?.path ?? '').trim())
+    }),
+  )
 
-  /** 读文本（PDF 会自动走文本提取） */
-  ipcMain.handle('plugin:files:read-text', async (_event, payload: { id?: string; path?: string; maxBytes?: number } = {}) => {
-    try {
-      const pluginId = readPluginId(payload)
-      requireFsPermission(pluginId)
-      const filePath = String(payload?.path ?? '').trim()
-      if (!filePath) throw new IPCError('INVALID_INPUT', '缺少文件路径')
-      assertAllowed(pluginId, filePath)
-      const buffer = await fs.readFile(filePath)
-      if (/\.pdf$/i.test(filePath)) {
-        const parsed = await readPdfText(buffer)
-        return { path: filePath, text: parsed.text, pages: parsed.pages, pdf: true }
-      }
-      const max = Math.max(1024, Math.min(Number(payload?.maxBytes) || 200_000, 2_000_000))
-      return { path: filePath, text: buffer.subarray(0, max).toString('utf8'), pages: 0, pdf: false }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+  /** 读文本（PDF 自动走文本提取；返回里带 `version`，供后续带版本写入） */
+  ipcMain.handle(
+    'plugin:files:read-text',
+    handle(async (payload: { id?: string; path?: string; maxBytes?: number }) => {
+      const api = fsFor(payload)
+      const res = await api.readText(String(payload?.path ?? '').trim(), { maxBytes: payload?.maxBytes })
+      return { ...res, pages: res.pages ?? 0, pdf: res.pdf === true }
+    }),
+  )
 
   /** 读二进制（base64，给渲染层的 pdfjs 渲染页面用） */
-  ipcMain.handle('plugin:files:read-base64', async (_event, payload: { id?: string; path?: string; maxBytes?: number } = {}) => {
-    try {
-      const pluginId = readPluginId(payload)
-      requireFsPermission(pluginId)
-      const filePath = String(payload?.path ?? '').trim()
-      if (!filePath) throw new IPCError('INVALID_INPUT', '缺少文件路径')
-      assertAllowed(pluginId, filePath)
-      const stat = await fs.stat(filePath)
-      const max = Math.max(1024, Math.min(Number(payload?.maxBytes) || 40 * 1024 * 1024, 80 * 1024 * 1024))
-      if (stat.size > max) throw new IPCError('PLUGIN_FILES_TOO_LARGE', `文件过大：${Math.round(stat.size / 1024 / 1024)}MB（上限 ${Math.round(max / 1024 / 1024)}MB）`)
-      const buffer = await fs.readFile(filePath)
-      return { path: filePath, base64: buffer.toString('base64'), size: stat.size }
-    } catch (error) {
-      throw asIpcError(error)
-    }
-  })
+  ipcMain.handle(
+    'plugin:files:read-base64',
+    handle(async (payload: { id?: string; path?: string; maxBytes?: number }) => {
+      const api = fsFor(payload)
+      return await api.readBase64(String(payload?.path ?? '').trim(), { maxBytes: payload?.maxBytes })
+    }),
+  )
 
   /**
    * 读表格（.xlsx / .xls / .csv → 每个工作表的表头 + 数据行）。
    *
    * 为什么需要它：插件界面半边是单文件 ESM、不能 import SheetJS，`readText` 对 xlsx 只会返回
-   * 二进制乱码；于是「读 Excel 画图」这类插件只能靠臆造 API（`ctx.files.readFile` / 调 office MCP）
-   * 而必然失败。这里复用主进程既有的 SheetJS（`read_file` 提取 Excel 用的同一套），
-   * 让「读表格」成为一条正经能力；权限与授权范围仍走 fs 权限 + 用户亲自选过的路径。
+   * 二进制乱码；于是「读 Excel 画图」这类插件只能靠臆造 API 而必然失败。
    */
-  ipcMain.handle('plugin:files:read-sheet', async (_event, payload: { id?: string; path?: string; maxRows?: number; maxSheets?: number } = {}) => {
-    try {
-      const pluginId = readPluginId(payload)
-      requireFsPermission(pluginId)
-      const filePath = String(payload?.path ?? '').trim()
-      if (!filePath) throw new IPCError('INVALID_INPUT', '缺少文件路径')
-      assertAllowed(pluginId, filePath)
-      if (!/\.(xlsx|xls|csv)$/i.test(filePath)) {
-        throw new IPCError('INVALID_INPUT', '仅支持 .xlsx / .xls / .csv（其它格式请用 readText）')
-      }
-      const stat = await fs.stat(filePath)
-      if (stat.size > SHEET_MAX_BYTES) {
-        throw new IPCError('PLUGIN_FILES_TOO_LARGE', `表格过大：${Math.round(stat.size / 1024 / 1024)}MB（上限 ${Math.round(SHEET_MAX_BYTES / 1024 / 1024)}MB）`)
-      }
-      const maxRows = Math.max(10, Math.min(Number(payload?.maxRows) || SHEET_MAX_ROWS, SHEET_MAX_ROWS))
-      const maxSheets = Math.max(1, Math.min(Number(payload?.maxSheets) || SHEET_MAX_SHEETS, SHEET_MAX_SHEETS))
-      const workbook = xlsx.read(await fs.readFile(filePath), { type: 'buffer' })
-      const names = workbook.SheetNames.slice(0, maxSheets)
-      const sheets = names.map((name) => {
-        const worksheet = workbook.Sheets[name]
-        const grid = worksheet ? (xlsx.utils.sheet_to_json(worksheet, { header: 1, defval: '', blankrows: false }) as unknown[][]) : []
-        const header = (Array.isArray(grid[0]) ? grid[0] : []).slice(0, SHEET_MAX_COLS).map((v) => String(v ?? '').trim())
-        const body = grid
-          .slice(1, maxRows + 1)
-          .map((row) => (Array.isArray(row) ? row.slice(0, SHEET_MAX_COLS) : []))
-        return { name, headers: header, rows: body, truncated: grid.length - 1 > maxRows }
+  ipcMain.handle(
+    'plugin:files:read-sheet',
+    handle(async (payload: { id?: string; path?: string; maxRows?: number; maxSheets?: number }) => {
+      const api = fsFor(payload)
+      return await api.sheet.read(String(payload?.path ?? '').trim(), {
+        maxRows: payload?.maxRows,
+        maxSheets: payload?.maxSheets,
       })
-      return { path: filePath, sheets, sheetCount: workbook.SheetNames.length }
-    } catch (error) {
-      throw asIpcError(error)
+    }),
+  )
+
+  // -------------------------------------------------------------------------
+  // 新通道：版本与字面量编辑（`ctx.fs` 的 stat / editText）
+  // -------------------------------------------------------------------------
+
+  /** 取状态与版本（不存在也返回 `{exists:false}`，不抛错） */
+  ipcMain.handle(
+    'plugin:fs:stat',
+    handle(async (payload: { id?: string; path?: string }) => {
+      const api = fsFor(payload)
+      return await api.stat(String(payload?.path ?? '').trim())
+    }),
+  )
+
+  /**
+   * 字面量编辑（读 → 校验版本 → 替换 → 原子写回）。
+   * 命中 0 处或多处 → `FS_AMBIGUOUS_EDIT`；版本不符 → `FS_STALE_VERSION`。
+   */
+  ipcMain.handle(
+    'plugin:fs:edit-text',
+    handle(async (payload: { id?: string; path?: string; edits?: FsEdit[]; expectedVersion?: string }) => {
+      const api = fsFor(payload)
+      return await api.editText(
+        String(payload?.path ?? '').trim(),
+        Array.isArray(payload?.edits) ? (payload.edits as FsEdit[]) : [],
+        { expectedVersion: typeof payload?.expectedVersion === 'string' ? payload.expectedVersion : undefined },
+      )
+    }),
+  )
+
+  /**
+   * 「先读后写」策略的读 / 写（设置页入口；默认关）。
+   * 读：只读快照（是否开启 + 本会话已观察的文件数）；写：需用户确认（与授权撤销同口径）。
+   */
+  ipcMain.handle('plugin:fs:policy-get', (_event, payload: { id?: string } = {}) => {
+    const pluginId = readPluginId(payload)
+    if (!pluginHost.list().some((p) => p.id === pluginId)) {
+      throw new IPCError('PLUGIN_NOT_FOUND', `插件不存在：${pluginId}`)
     }
+    const snap = fsPolicySnapshot()
+    return { id: pluginId, enabled: isFsPolicyEnabled(pluginId), observed: snap.observed[pluginId] ?? 0 }
   })
+
+  ipcMain.handle(
+    'plugin:fs:policy-set',
+    handle(async (payload: { id?: string; enabled?: boolean; confirm?: boolean }) => {
+      const pluginId = readPluginId(payload)
+      const enabled = payload?.enabled === true
+      requirePluginApproval(payload, `${enabled ? '开启' : '关闭'}插件 ${pluginId} 的「先读后写」策略`)
+      return { id: pluginId, enabled: setFsPolicyEnabled(pluginId, enabled) }
+    }),
+  )
 
   /**
    * 列出某个插件记住的文件授权（设置 → 插件 → 数据 里显示）。
@@ -333,7 +296,7 @@ export function registerPluginFilesIpc(): void {
   ipcMain.handle('plugin:files:revoke-grant', (_event, payload: { id?: string; path?: string; confirm?: boolean } = {}) => {
     const pluginId = readPluginId(payload)
     const target = String(payload?.path ?? '').trim()
-    if (!target) throw new IPCError('INVALID_INPUT', '缺少路径')
+    if (!target) throw new IPCError('INVALID_ARGUMENT', '缺少路径')
     requirePluginApproval(payload, `撤销插件 ${pluginId} 的文件授权`)
     return { removed: revokeGrant(pluginId, target) }
   })
@@ -344,4 +307,13 @@ export function registerPluginFilesIpc(): void {
     requirePluginApproval(payload, `清除插件 ${pluginId} 的全部文件授权`)
     return { removed: clearGrants(pluginId) }
   })
+}
+
+/** 取当前聚焦窗口作为对话框父窗口（无则用默认） */
+function dialogParent(): BrowserWindow | undefined {
+  try {
+    return BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+  } catch {
+    return undefined
+  }
 }

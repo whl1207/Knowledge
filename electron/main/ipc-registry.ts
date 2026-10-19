@@ -42,6 +42,11 @@ function toPlainJson(value: unknown): unknown {
   return JSON.parse(text)
 }
 
+/** 同上，供推送类通道使用（`plugin:event` 的载荷要先净化再 send，否则会撞克隆错误） */
+export function toPlainPayload(value: unknown): unknown {
+  return toPlainJson(value)
+}
+
 /** 注册一个命名空间通道；返回注销函数。重复注册直接抛错（fail-loud）。 */
 export function registerIpc(channel: string, handler: IpcHandler): () => void {
   if (handlers.has(channel)) {

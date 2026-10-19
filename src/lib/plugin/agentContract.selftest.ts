@@ -23,8 +23,10 @@ import {
   pickLlmConfig,
   pruneCallWindow,
   resolveAgentRunBudget,
+  resolveWorkRoot,
   toIpcSafe,
   untieredSlots,
+  withWorkRootHint,
 } from './agentContract'
 import type { PluginPermission } from '@/types/plugin'
 
@@ -365,6 +367,71 @@ export function runAgentContractSelfTest(): AgentContractCase[] {
       name: '折得动时返回等值但**不同身份**的纯数据副本（下游改它不会回写源对象）',
       ok: out !== src && JSON.stringify(out) === JSON.stringify(src) && out.nested !== src.nested,
       detail: `sameRef=${out === src} sameNested=${out.nested === src.nested}`,
+    })
+  }
+
+  // ---------------- 工作目录（被委派 agent 的 cwd） ----------------
+  {
+    const r = resolveWorkRoot({ incoming: '/kb', writableRoots: ['/grant'] })
+    cases.push({
+      name: '**没配置 → 原样透传调用方的默认**（面板出现之前的行为不许变）',
+      ok: r.cwd === '/kb' && r.source === 'default' && !r.error,
+      detail: JSON.stringify(r),
+    })
+  }
+  {
+    const r = resolveWorkRoot({ configured: '/grant/sub', incoming: '/kb', writableRoots: ['/grant'] })
+    cases.push({
+      name: '配置在可写授权内 → 用它（并覆盖传入的默认）',
+      ok: r.cwd === '/grant/sub' && r.source === 'configured' && !r.error,
+      detail: JSON.stringify(r),
+    })
+  }
+  {
+    const exact = resolveWorkRoot({ configured: '/grant', incoming: '/kb', writableRoots: ['/grant'] })
+    const nested = resolveWorkRoot({ configured: '/grant/a/b', incoming: '/kb', writableRoots: ['/grant/a'] })
+    cases.push({
+      name: '授权根本身、以及更深一层子目录都算命中（目录授权覆盖子树）',
+      ok: exact.cwd === '/grant' && !exact.error && nested.cwd === '/grant/a/b' && !nested.error,
+      detail: `${exact.cwd} / ${nested.cwd}`,
+    })
+  }
+  {
+    const outside = resolveWorkRoot({ configured: '/elsewhere', incoming: '/kb', writableRoots: ['/grant'] })
+    const revoked = resolveWorkRoot({ configured: '/grant', incoming: '/kb', writableRoots: [] })
+    const sibling = resolveWorkRoot({ configured: '/grant-x', incoming: '/kb', writableRoots: ['/grant'] })
+    cases.push({
+      name: '授权之外 / 授权被撤销 / 前缀相似的兄弟目录 → **报错且不回退默认**（悄悄换目录会让 agent 在没预期的位置读写）',
+      ok:
+        !outside.cwd && !!outside.error && outside.source === 'configured' &&
+        !revoked.cwd && !!revoked.error &&
+        !sibling.cwd && !!sibling.error && /未授权/.test(sibling.error),
+      detail: `outside=${!!outside.error} revoked=${!!revoked.error} sibling=${!!sibling.error}`,
+    })
+  }
+  {
+    const strict = resolveWorkRoot({ configured: 'C:/Data/Work', incoming: '', writableRoots: ['c:/data/work'] })
+    const loose = resolveWorkRoot({ configured: 'C:/Data/Work', incoming: '', writableRoots: ['c:/data/work'], caseInsensitive: true })
+    cases.push({
+      name: '大小写：严格模式不命中、平台忽略大小写时命中（调用方按平台传）',
+      ok: !strict.cwd && !!strict.error && loose.cwd === 'C:/Data/Work',
+      detail: `strict=${!!strict.error} loose=${loose.cwd}`,
+    })
+  }
+  {
+    const none = withWorkRootHint(undefined, '')
+    const withPrompt = withWorkRootHint('你是数学证明助手。', '/grant/sub')
+    const masked = withWorkRootHint('工作目录是 /tmp', '/grant/sub')
+    cases.push({
+      name: 'D1：cwd 必须由宿主写进系统提示（含路径 + 相对路径说明），且**追加在插件/预设提示之后**（盖不掉）',
+      ok:
+        none === '' &&
+        withPrompt.startsWith('你是数学证明助手。') &&
+        withPrompt.includes('/grant/sub') &&
+        /Working directory/.test(withPrompt) &&
+        /相对路径按这个目录解析/.test(withPrompt) &&
+        masked.indexOf('/tmp') < masked.lastIndexOf('/grant/sub'),
+      detail: withPrompt.split('\n').slice(-3).join(' / '),
     })
   }
 

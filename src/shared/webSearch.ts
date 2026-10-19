@@ -9,9 +9,12 @@
  * - 免 Key 的搜索 API：firecrawl（无 Key 走官方免费额度；填了 Key 换用自己的额度，可选）
  * - 自建实例：searxng（需实例地址）
  * - API Key：tavily（国际）/ bocha 博查（国内）/ brave（国际）/ zhipu 智谱（国内）
+ *   / deepseek（官方 Search 接口，见 https://api-docs.deepseek.com/zh-cn/guides/search）
  * - 自定义源（`config.customs`，源 id 形如 `cs:<自定义 id>`）：内网 SearXNG 兼容实例、
  *   通用 HTTP JSON 接口（内网 wiki / 搜索服务，字段可映射），用于局域网内网源。
  */
+
+import { normalizeDeepSeekApiHost } from './deepseekApi'
 
 /** 内置搜索源 id（顺序即设置页默认列表顺序） */
 export const WEB_SEARCH_PROVIDER_IDS = [
@@ -62,7 +65,7 @@ export type WebSearchProviderId = string
 
 /** 单个搜索源的端点配置（不同源使用的字段不同，多余的字段被忽略） */
 export interface WebSearchProviderConfig {
-  /** API Key（tavily / bocha / brave / zhipu 必填；firecrawl 可留空 = 走官方免 Key 额度） */
+  /** API Key（tavily / bocha / brave / zhipu / deepseek 必填；firecrawl 可留空 = 走官方免 Key 额度） */
   apiKey?: string
   /** 接口地址（可留空用默认值；自建实例必填） */
   apiHost?: string
@@ -72,8 +75,6 @@ export interface WebSearchProviderConfig {
   engines?: string
   /** SearXNG 语言（auto / zh-CN / en） */
   language?: string
-  /** 模型名（仅 DeepSeek 官方搜索用：Anthropic 格式模型名；留空取内置默认） */
-  model?: string
 }
 
 /** 单次搜索的调用策略 */
@@ -201,21 +202,23 @@ export interface WebSearchConfig {
   brave: WebSearchProviderConfig
   zhipu: WebSearchProviderConfig
   /**
-   * DeepSeek 官方搜索（走 Anthropic 兼容 Messages 端点 + 服务端原生 `web_search` 工具）。
+   * DeepSeek 官方搜索（走原生 **Search API**：`POST https://api.deepseek.com/v1/tools/search`）。
    *
    * `apiKey` 由渲染层解析后填入：优先复用**对话的 DeepSeek 凭据**（`apiKeyRef` → 明文），
    * 也允许用户在本页单独填一份（便于对话用别的后端时仍能搜）。
-   * `apiHost` 与对话端点**相互独立**（对话可能是 chat/responses 样式，这里是 Anthropic 样式）。
+   * `apiHost` 与对话端点**相互独立**（对话可能是 chat/responses 样式，这里是 DeepSeek API base）。
    */
   deepseek: DeepSeekSearchConfig
 }
 
-/** DeepSeek 官方搜索的配置（apiHost / model 与对话配置相互独立） */
+/** DeepSeek 官方搜索的配置（apiHost 与对话配置相互独立） */
 export interface DeepSeekSearchConfig extends WebSearchProviderConfig {
+  /** 凭据引用（主进程凭据库里的名字；优先于内联 apiKey） */
+  apiKeyRef?: string
   /** 对话用别的后端时，是否复用 DeepSeek 对话的凭据（渲染层解析后填入 apiKey） */
   reuseChatKey?: boolean
-  /** 服务端工具单次请求最多触发几次搜索（1~10） */
-  maxUses?: number
+  /** 是否让 Search 接口在 `content` 里返回网页正文（默认 false；体积大，按需开启） */
+  needContent?: boolean
 }
 
 /** 单条搜索结果（web_search 工具返回值 / 设置页测试结果共用） */
@@ -223,7 +226,10 @@ export interface WebSearchItem {
   title: string
   url: string
   snippet: string
+  /** 长摘要（部分源提供，如 DeepSeek Search 的 summary；供模型阅读） */
   summary?: string
+  /** 网页正文（仅在源显式要求返回正文时提供，如 DeepSeek 的 need_content；已截断） */
+  content?: string
 }
 
 /** 一次搜索的执行结果（工具内 / 设置页测试共用） */
@@ -233,17 +239,9 @@ export interface WebSearchRunResult {
   provider: WebSearchProviderId
   /** 本次参与搜索的源（顺序与配置一致） */
   providers: WebSearchProviderId[]
-  /** 实际通道：browser / html-fallback / html / json / api / merge */
+  /** 实际通道：browser / html-fallback / html / json / api / merge / deepseek-api … */
   via: string
   results: WebSearchItem[]
-  /**
-   * 搜索源自带的**总结正文**（可选）。
-   *
-   * 只有 DeepSeek 官方搜索会产生：它的一次搜索本身就是"服务端跑工具 + 模型作答"的完整
-   * 模型调用，响应里的 `text` 块就是基于搜索结果写下的总结。其余搜索源只返回链接列表。
-   * 丢弃它就等于白付了那次模型调用的钱，因此原样回传给模型。
-   */
-  answer?: string
   elapsedMs: number
   /** 未命中或失败的源及其原因（回退模式下排查用） */
   attempts?: Array<{ provider: WebSearchProviderId; ok: boolean; error?: string }>
@@ -350,17 +348,17 @@ export const WEB_SEARCH_PROVIDERS: WebSearchProviderMeta[] = [
   },
   {
     id: 'deepseek',
-    label: 'DeepSeek 官方搜索（服务端）',
-    labelEn: 'DeepSeek official search (server-side)',
+    label: 'DeepSeek 官方搜索（Search API）',
+    labelEn: 'DeepSeek official search (Search API)',
     needsKey: true,
     needsHost: false,
-    zh: 'DeepSeek 服务端原生联网搜索：结果带标题 / 链接 / 引用片段，质量较高。'
-      + '默认复用对话的 DeepSeek 凭据（零额外配置）。注意：每次搜索是一次模型调用（计 token、延迟按 LLM 计），'
-      + '且只在桌面端可用。',
-    en: 'DeepSeek native server-side web search: results carry titles, links and cited excerpts. '
-      + 'Reuses the conversation DeepSeek credential by default (no extra setup). Note: each search is a model turn '
-      + '(tokens + LLM latency) and is available on desktop only.',
-    docs: 'https://api-docs.deepseek.com',
+    zh: 'DeepSeek 自研搜索引擎的官方 Search 接口：一次请求直接返回结构化结果（标题 / 链接 / 短摘要 / 长摘要 / 可选正文），'
+      + '不是模型调用，延迟与费用都按请求次数计（每 1000 次成功请求约 5 元，QPS 5）。'
+      + '默认复用对话的 DeepSeek 凭据（零额外配置）；手机 / 网页端同样可用。',
+    en: 'The official Search API of DeepSeek’s own search engine: one request returns structured results '
+      + '(title / URL / snippet / summary / optional content) without a model turn, billed per successful request '
+      + '(about ¥5 per 1,000 requests, 5 QPS). Reuses the conversation DeepSeek credential by default and also works on mobile / web.',
+    docs: 'https://api-docs.deepseek.com/zh-cn/guides/search',
   },
   {
     id: 'tavily',
@@ -400,10 +398,10 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
   zhipu: { apiKey: '', apiHost: 'https://open.bigmodel.cn/api/paas/v4', searchEngine: 'search_std' },
   deepseek: {
     apiKey: '',
-    // 与对话端点独立：对话是 chat/responses 样式，这里是 Anthropic 兼容样式
-    apiHost: 'https://api.deepseek.com/anthropic/v1',
+    // 与对话端点独立：对话是 chat/responses 样式，这里是 Search / Fetch API 的 base
+    apiHost: 'https://api.deepseek.com',
     reuseChatKey: true,
-    maxUses: 5,
+    needContent: false,
   },
 }
 
@@ -507,18 +505,23 @@ export function normalizeWebSearchConfig(raw: any): WebSearchConfig {
 
 /**
  * 归一化 DeepSeek 搜索配置。
- * apiHost 缺省用 **Anthropic 兼容**端点（注意与对话端点不同）；model 留空由 provider 取默认值。
+ *
+ * `apiHost` 缺省用 **DeepSeek API base**（Search 接口挂在其下）；同时把旧版遗留的
+ * `https://api.deepseek.com/anthropic/v1`（Anthropic 兼容 Messages 端点）迁移成新 base —— 否则
+ * 升级后请求会打到不存在的 `/anthropic/v1/v1/tools/search`。
  */
 export function normalizeDeepSeekSearchConfig(raw: any): DeepSeekSearchConfig {
   const base = DEFAULT_WEB_SEARCH_CONFIG.deepseek
   const patch = raw && typeof raw === 'object' ? raw : {}
   const out: DeepSeekSearchConfig = { ...base }
-  for (const key of ['apiKey', 'apiHost', 'model'] as const) {
-    if (typeof patch[key] === 'string' && patch[key].trim()) out[key] = patch[key]
+  for (const key of ['apiKey', 'apiKeyRef'] as const) {
+    if (typeof patch[key] === 'string') out[key] = patch[key]
   }
+  out.apiHost = normalizeDeepSeekApiHost(
+    typeof patch.apiHost === 'string' && patch.apiHost.trim() ? patch.apiHost : base.apiHost,
+  )
   if (typeof patch.reuseChatKey === 'boolean') out.reuseChatKey = patch.reuseChatKey
-  const uses = Number(patch.maxUses)
-  out.maxUses = Number.isFinite(uses) ? Math.min(10, Math.max(1, Math.round(uses))) : base.maxUses
+  if (typeof patch.needContent === 'boolean') out.needContent = patch.needContent
   return out
 }
 

@@ -6,6 +6,13 @@
 // 这个工具让模型在交付前**自己**跑一遍宿主真实的校验逻辑（与设置页同一份 parseManifest），
 // 拿到可操作的清单并把问题改掉，再回报用户。
 //
+// 检查分三层：
+// 1. **清单与入口**：目录名 → 插件 id、aikm 清单（字段 / apiVersion / 槽位 / 权限 / 入口存在）；
+// 2. **静态契约**：两半边的 ctx 成员（表在 src/shared/pluginApiMembers.ts）与「能力 → 权限」交叉校验
+//    （用了 ctx.fs / ctx.llm / ctx.image / ctx.agent.run / ctx.host.runShell … 却没在清单里声明）；
+// 3. **静默陷阱**：漏 await、pickFiles 返回形状、ResizeObserver、locale 的 ref 当字符串、
+//    写错的事件类型（不报错但永远不触发）；老入口（ctx.files 读写 / ctx.host 读写）只给「建议迁移」提示。
+//
 // 只读：不写任何文件。
 
 import * as fs from 'node:fs'
@@ -18,6 +25,8 @@ import {
   parseManifest,
 } from '@/shared/pluginManifest'
 import { CLIENT_CTX_ABSENT, CLIENT_CTX_MEMBERS, MAIN_CTX_ABSENT, MAIN_CTX_MEMBERS, checkCtxUsage } from '@/shared/pluginApiMembers'
+import { PLUGIN_EVENT_TYPES } from '@/lib/plugin/events'
+import type { PluginPermission } from '@/types/plugin'
 import { pluginHost } from '../plugin-host'
 import { isValidPluginId } from '@/types/ids'
 
@@ -32,8 +41,44 @@ function checkClientCtxUsage(code: string): string[] {
 
 /** `ctx.files` 上返回 Promise 的成员：忘了 await 时读属性会得到 undefined */
 const ASYNC_FILES_MEMBERS = [
-  'pickFiles', 'pickDirectory', 'list', 'readText', 'readBase64', 'readBytes', 'readSheet', 'renderPdfPage', 'openInApp',
+  'pickFiles', 'pickDirectory', 'pickWritableDirectory', 'list', 'readText', 'readBase64', 'readBytes', 'readSheet',
+  'renderPdfPage', 'openInApp', 'writeText', 'remove',
 ]
+
+/** `ctx.fs` 上返回 Promise 的成员（两级成员 `sheet.read` 另行判断） */
+const ASYNC_FS_MEMBERS = ['stat', 'readText', 'readBytes', 'readBase64', 'listDir', 'writeText', 'editText', 'remove']
+
+/**
+ * 找出「调用了异步成员却没写 await」的成员名（同一成员只报一次，够定位了）。
+ * `.then(...)` 链式写法放行；取「当前语句」片段而不是整段代码，避免上一行的 await 误放行。
+ */
+function findMissingAwait(code: string, api: 'files' | 'fs', members: readonly string[]): string[] {
+  const missing: string[] = []
+  const beforeSegment = (at: number): string => {
+    const before = code.slice(0, at)
+    const segStart = Math.max(
+      0,
+      ...[';', '\n', '{', '}', '(', ',', '=>'].map((c) => before.lastIndexOf(c) + c.length),
+    )
+    return before.slice(segStart)
+  }
+  const callRe = new RegExp(`\\bctx\\s*\\.\\s*${api}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\(`, 'g')
+  for (const match of code.matchAll(callRe)) {
+    const member = match[1]
+    if (!members.includes(member) || missing.includes(member)) continue
+    if (/\bawait\b/.test(beforeSegment(match.index))) continue
+    const after = code.slice(match.index + match[0].length)
+    if (/^[^;\n]*\)\s*\.\s*(then|catch|finally)\s*\(/.test(after)) continue
+    missing.push(member)
+  }
+  // `ctx.fs.sheet.read(...)` 是唯一的两级成员：上面的正则只认到 `sheet(`
+  const sheetRe = /\bctx\s*\.\s*fs\s*\.\s*sheet\s*\.\s*read\s*\(/
+  const sheetAt = code.search(sheetRe)
+  if (api === 'fs' && sheetAt >= 0 && !missing.includes('sheet.read') && !/\bawait\b/.test(beforeSegment(sheetAt))) {
+    missing.push('sheet.read')
+  }
+  return missing
+}
 
 /**
  * 界面半边最容易踩的**运行时陷阱**（都来自真实翻车的插件）：
@@ -48,27 +93,15 @@ const ASYNC_FILES_MEMBERS = [
 function checkClientRuntimeTraps(code: string): string[] {
   const problems: string[] = []
 
-  // a) 异步成员没有 await
-  const missingAwait = new Set<string>()
-  const callRe = /\bctx\s*\.\s*files\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g
-  for (const match of code.matchAll(callRe)) {
-    const member = match[1]
-    if (!ASYNC_FILES_MEMBERS.includes(member) || missingAwait.has(member)) continue
-    const before = code.slice(0, match.index)
-    // 取「当前语句」片段（上一个分隔符之后），在里面找 await
-    const segStart = Math.max(
-      0,
-      ...[';', '\n', '{', '}', '(', ',', '=>'].map((c) => before.lastIndexOf(c) + c.length),
-    )
-    if (/\bawait\b/.test(before.slice(segStart))) continue
-    const after = code.slice(match.index + match[0].length)
-    // 允许 .then(...) / .catch(...) 链式写法
-    if (/^[^;\n]*\)\s*\.\s*(then|catch|finally)\s*\(/.test(after)) continue
-    missingAwait.add(member)
-  }
-  for (const member of missingAwait) {
+  // a) 异步成员没有 await（ctx.files 与 ctx.fs 都是 Promise）
+  for (const member of findMissingAwait(code, 'files', ASYNC_FILES_MEMBERS)) {
     problems.push(
       `ctx.files.${member}() 是**异步**的（返回 Promise），这里没写 await —— 直接读它的属性/长度只会得到 undefined（典型表现：面板报「文件为空」、或选了文件却没有任何反应）`,
+    )
+  }
+  for (const member of findMissingAwait(code, 'fs', ASYNC_FS_MEMBERS)) {
+    problems.push(
+      `ctx.fs.${member}() 是**异步**的（返回 Promise），这里没写 await —— 直接读 res.text / res.bytes / res.version 只会得到 undefined（典型表现：面板「没有数据」）`,
     )
   }
 
@@ -126,10 +159,116 @@ function checkClientRuntimeTraps(code: string): string[] {
   return problems
 }
 
+/** 界面半边的本地事件（外壳只发这两个，走渲染层总线，不受观测允许名单限制） */
+const LOCAL_PLUGIN_EVENTS = ['plugin/loaded', 'plugin/unloaded']
+
+/**
+ * 订阅的事件类型是否真的会触发。
+ *
+ * 背景：界面半边的 `ctx.on` 对**观测类型**走主进程转发（有允许名单），对其余类型走渲染层本地
+ * 总线（不报错）。所以把 `tool/call` 写成 `tools/call` 不会抛异常，而是**永远静默**——
+ * 这是最难查的一类问题。只对「看起来像观测事件」的名字（tool/ agent/ assistant/ 前缀）报警，
+ * 自定义的本地事件名无法静态判定，不制造误报。
+ */
+function checkClientEventTypes(code: string): string[] {
+  const problems: string[] = []
+  const allowed = new Set<string>([...PLUGIN_EVENT_TYPES, ...LOCAL_PLUGIN_EVENTS])
+  const seen = new Set<string>()
+  for (const match of code.matchAll(/ctx\s*\.\s*on\s*\(\s*['"`]([^'"`]+)['"`]/g)) {
+    const type = match[1]
+    if (allowed.has(type) || seen.has(type)) continue
+    seen.add(type)
+    if (!/^(tools?|agents?|assistant)\//.test(type)) continue
+    problems.push(
+      `订阅的事件类型 "${type}" 不在允许名单里：它**永远不会触发**（宿主不报错，所以很难查）。可订阅：${[...PLUGIN_EVENT_TYPES].join(' / ')}`,
+    )
+  }
+  return problems
+}
+
+/** 一条「能力 → 权限」规则：源码里用了该能力，清单就必须声明对应权限 */
+interface PermissionRule {
+  re: RegExp
+  permission: PluginPermission
+  /** 报错里给作者看的名字 */
+  label: string
+}
+
+/** 界面半边：能力 → 权限（与 src/shared/pluginCapabilities.ts 同一套对应关系） */
+const CLIENT_PERMISSION_RULES: readonly PermissionRule[] = [
+  { re: /\bctx\s*\.\s*fs\s*\./, permission: 'fs', label: 'ctx.fs' },
+  { re: /\bctx\s*\.\s*files\s*\./, permission: 'fs', label: 'ctx.files' },
+  { re: /\bctx\s*\.\s*llm\s*\./, permission: 'llm', label: 'ctx.llm' },
+  { re: /\bctx\s*\.\s*image\s*\./, permission: 'image', label: 'ctx.image' },
+  { re: /\bctx\s*\.\s*agents?\s*\./, permission: 'agent.run', label: 'ctx.agent / ctx.agents' },
+]
+
+/** 主进程半边：能力 → 权限（host.readFile/writeFile/listDir 不需要权限，granted.* 需要 fs） */
+const MAIN_PERMISSION_RULES: readonly PermissionRule[] = [
+  { re: /\bctx\s*\.\s*fs\s*\./, permission: 'fs', label: 'ctx.fs' },
+  { re: /\bctx\s*\.\s*host\s*\.\s*granted\s*\./, permission: 'fs', label: 'ctx.host.granted' },
+  { re: /\bctx\s*\.\s*host\s*\.\s*runShell\s*\(/, permission: 'shell', label: 'ctx.host.runShell' },
+  { re: /\bctx\s*\.\s*host\s*\.\s*fetch\s*\(/, permission: 'net', label: 'ctx.host.fetch' },
+  { re: /\bctx\s*\.\s*host\s*\.\s*sessions\s*\./, permission: 'agent', label: 'ctx.host.sessions' },
+]
+
+/**
+ * 交叉校验「代码用到的能力」与「清单声明的权限」。
+ *
+ * 为什么值得一条独立检查：未声明时能力 `available=false`、调用直接抛错，而作者往往先写代码
+ * 再补清单（或反过来），跑起来只看到「什么都没发生」或一句英文权限错误。
+ */
+function checkDeclaredPermissions(
+  code: string,
+  permissions: readonly string[],
+  rules: readonly PermissionRule[],
+  fileName: string,
+): string[] {
+  const problems: string[] = []
+  for (const rule of rules) {
+    if (!rule.re.test(code) || permissions.includes(rule.permission)) continue
+    problems.push(
+      `${fileName} 用了 ${rule.label}，但清单 permissions 里没有 "${rule.permission}"：未声明时该能力 available=false、调用直接抛错（把 "${rule.permission}" 加进 aikm.permissions 后重载插件）`,
+    )
+  }
+  return problems
+}
+
+/** 清单里声明的权限（校验失败时退回原始 aikm.permissions，好把问题一次列全） */
+function declaredPermissions(manifest: any, rawAikm: any): string[] {
+  const list = manifest?.permissions ?? rawAikm?.permissions
+  return Array.isArray(list) ? list.filter((p: unknown): p is string => typeof p === 'string') : []
+}
 
 /** 主进程半边：检查 `ctx.*` 用法 */
 function checkMainCtxUsage(code: string): string[] {
   return checkCtxUsage(code, MAIN_CTX_MEMBERS, MAIN_CTX_ABSENT)
+}
+
+/**
+ * 老入口 → 新入口的迁移提示（**不算错误**：老写法全部保留）。
+ *
+ * 为什么要报：`ctx.files` 的读写只是 `ctx.fs` 的别名，`ctx.host` 的读写是插件目录内的老入口。
+ * 不提示的话，新插件会继续照抄旧例，而 `ctx.fs` 的目标身份 / 版本 / 字面量编辑正是为此加的。
+ */
+function migrationHints(code: string, fileName: string): string[] {
+  const hints: string[] = []
+  if (/ctx\s*\.\s*files\s*\.\s*(?:readText|readBytes|readBase64|readSheet|list|writeText|remove)\s*\(/.test(code)) {
+    hints.push(
+      `${fileName}：ctx.files 的读写建议改用 ctx.fs（老写法仍可用）——ctx.fs 多了目标身份 resolve / 版本 stat / 字面量编辑 editText，且两个半边同形状；选择框（pickFiles / pickDirectory / pickWritableDirectory）与 renderPdfPage / openInApp 仍留在 ctx.files`,
+    )
+  }
+  if (/ctx\s*\.\s*host\s*\.\s*(?:readFile|writeFile|listDir|granted)\b/.test(code)) {
+    hints.push(
+      `${fileName}：ctx.host 的读写建议改用 ctx.fs（老入口仍可用）——插件目录内免授权、其余路径走用户授权，读写与界面半边同一套判定`,
+    )
+  }
+  if (/ctx\s*\.\s*llm\s*\.\s*chat\s*\(/.test(code) && !/\bschema\s*:/.test(code)) {
+    hints.push(
+      `${fileName}：需要结构化结果时给 ctx.llm.chat 传 schema（宿主负责要求 JSON + 解析 + 浅校验），可省掉自己写的容错解析；要边出边显示改用 ctx.llm.stream`,
+    )
+  }
+  return hints
 }
 
 /** 解析目标插件目录：允许「插件 id」（在插件目录下找）或绝对 / 相对路径 */
@@ -188,6 +327,8 @@ export async function checkPluginDir(dirArg: string): Promise<string> {
 function buildReport(dir: string, name: string): string {
   const lines: string[] = [`【插件自检：${dir}】`, '']
   const problems: string[] = []
+  /** 迁移提示（不算错误）：老入口仍可用，但新代码有更合适的样子 */
+  const hints: string[] = []
 
   // 0) 目录名本身必须是合法插件 id：中文 / 大写 / 空格会让宿主**静默跳过**整个文件夹
   //    （插件列表里根本不出现，用户只能看到「什么都没发生」），所以放在最前面报。
@@ -321,6 +462,31 @@ function buildReport(dir: string, name: string): string {
       lines.push('✓ 没有发现漏 await / 返回形状用错 / 观察器未断开 / ref 当字符串用')
     }
 
+    // 3b2b) 订阅的事件类型真的会触发吗（写错名字不报错，只是永远不来）
+    const eventProblems = checkClientEventTypes(stripped)
+    if (eventProblems.length) {
+      lines.push(`✗ 事件订阅（${eventProblems.length} 处）`)
+      problems.push(...eventProblems.map((p) => `${clientRel}：${p}`))
+    } else {
+      lines.push('✓ 订阅的事件类型都在允许名单内（或属于渲染层本地事件）')
+    }
+
+    // 3b2c) 能力 → 权限：未声明时 available=false 且调用抛错
+    const permProblems = checkDeclaredPermissions(
+      stripped,
+      declaredPermissions(manifest, rawAikm),
+      CLIENT_PERMISSION_RULES,
+      clientRel,
+    )
+    if (permProblems.length) {
+      lines.push(`✗ 用到的能力没有在清单里申请权限（${permProblems.length} 处）`)
+      problems.push(...permProblems)
+    } else {
+      lines.push('✓ 用到的能力都有对应的 permissions 声明')
+    }
+
+    hints.push(...migrationHints(stripped, clientRel))
+
     // 3b3) 写死的绝对路径：fs 权限不等于能读任意路径（只授权用户在该插件里亲自选过的文件）
     const absPath = stripped.match(/['"`]([A-Za-z]:[\\/][^'"`\n]*|\\\\[^'"`\n]*|\/(?:Users|home|mnt|opt|srv|var|tmp|Volumes)\/[^'"`\n]*)/)
     const hasPicker = /ctx\.files\s*\.\s*pick(?:Files|Directory)\s*\(/.test(stripped)
@@ -342,10 +508,31 @@ function buildReport(dir: string, name: string): string {
     } else {
       lines.push(`✓ ${mainRel} 用到的 ctx 成员都是主进程半边真实提供的`)
     }
+
+    // 3c2) 主进程半边同样要核对权限（granted.* → fs、runShell → shell、fetch → net、sessions → agent）
+    const mainPermProblems = checkDeclaredPermissions(
+      mainStripped,
+      declaredPermissions(manifest, rawAikm),
+      MAIN_PERMISSION_RULES,
+      mainRel,
+    )
+    if (mainPermProblems.length) {
+      lines.push(`✗ ${mainRel} 用到的能力没有在清单里申请权限（${mainPermProblems.length} 处）`)
+      problems.push(...mainPermProblems)
+    } else {
+      lines.push(`✓ ${mainRel} 用到的能力都有对应的 permissions 声明`)
+    }
+
+    hints.push(...migrationHints(mainStripped, mainRel))
   }
 
   // 检查盲区说明：只认字面量 ctx.x，别名 / 动态取值看不出来
   lines.push('（说明：以上 ctx 检查只识别字面量写法 ctx.x / ctx.x.y；把 ctx 赋给别的变量、或用 ctx["files"] 这类动态取值时看不出来。）')
+
+  if (hints.length) {
+    lines.push('', '【建议迁移（不算错误，老写法仍可用）】')
+    hints.forEach((h) => lines.push(`- ${h}`))
+  }
 
   lines.push('')
   if (!problems.length) {

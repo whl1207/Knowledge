@@ -3,6 +3,7 @@ import type { AgentEvent, AgentOptions, AgentSummary, AgentControl } from '@/typ
 import type { SessionEvent, DerivedMessage, SessionLogIntegrity } from '@/types/session-log'
 import type { ToolRegistrySnapshot, ToolResult, ToolExecutionContext } from '@/types/tool'
 import type { WebSearchConfig, WebSearchTestResult } from '@/shared/webSearch'
+import type { WebFetchConfig, WebFetchTestResult } from '@/shared/webFetch'
 import type { JobInfo, JobEvent } from '../main/job-registry'
 
 // --------- Expose some API to the Renderer process ---------
@@ -253,6 +254,19 @@ const dsh = {
     },
     test(payload?: { query?: string; config?: Partial<WebSearchConfig>; provider?: string }): Promise<WebSearchTestResult> {
       return invokeIpc('webSearch:test', payload || {})
+    },
+  },
+
+  /** 网页抓取通道（设置页「工具 → 抓取」；web_fetch 工具按该配置依次回退） */
+  webFetch: {
+    getConfig(): Promise<WebFetchConfig> {
+      return invokeIpc('webFetch:get-config')
+    },
+    setConfig(cfg: Partial<WebFetchConfig>): Promise<WebFetchConfig> {
+      return invokeIpc('webFetch:set-config', cfg)
+    },
+    test(payload?: { url?: string; config?: Partial<WebFetchConfig> }): Promise<WebFetchTestResult> {
+      return invokeIpc('webFetch:test', payload || {})
     },
   },
 
@@ -533,6 +547,26 @@ const dsh = {
     setToolApproval(args: { pluginId: string; state: 'allow' | 'ask' | 'deny'; confirm?: boolean }): Promise<{ pluginId: string; state: 'allow' | 'ask' | 'deny' }> {
       return invokeIpc('plugin:tool-approval-set', args)
     },
+    /**
+     * 订阅**观测事件**（工具调用 / agent 输出与流式增量）。
+     *
+     * 对齐 DSH 的 `ctx.remote.$on` + 声明式允许名单：`types` 必须在允许名单内，
+     * 未知类型会报错（不静默忽略）；而且只会收到**属于自己**的事件。
+     */
+    eventsSubscribe(args: { pluginId: string; types: string[] }): Promise<{ pluginId: string; types: string[] }> {
+      return invokeIpc('plugin:events:subscribe', args)
+    },
+    /** 退订（不传 types = 全退） */
+    eventsUnsubscribe(args: { pluginId: string; types?: string[] }): Promise<{ pluginId: string; types: string[] }> {
+      return invokeIpc('plugin:events:unsubscribe', args)
+    },
+    /**
+     * 接收推送的**观测事件**（载荷 `{ pluginId, type, payload }`；调用方按 pluginId 过滤）。
+     * 与上面的 `onEvent`（插件生命周期通知）不是一回事，刻意分开命名。
+     */
+    onScopedEvent(cb: (ev: { pluginId: string; type: string; payload: unknown }) => void): () => void {
+      return subscribe<{ pluginId: string; type: string; payload: unknown }>('plugin:event', cb)
+    },
     /** 从本地文件夹安装插件（P2：主进程弹目录选择框）；replace=true 表示覆盖同名插件 */
     install(options?: { confirm?: boolean; replace?: boolean }): Promise<{
       cancelled: boolean
@@ -613,12 +647,40 @@ const dsh = {
         return ipcRenderer.invoke('plugin:files:pick-writable', options)
       },
       /** 写文本（只能落在**可写**授权目录内；父目录自动创建） */
-      writeText(options: { id: string; path: string; text: string }): Promise<{ path: string; bytes: number }> {
+      writeText(options: {
+        id: string
+        path: string
+        text: string
+        /** 乐观并发：给了就要求版本匹配（省略 = 无条件覆盖，老行为） */
+        expectedVersion?: string
+        presence?: 'any' | 'mustExist' | 'mustNotExist'
+      }): Promise<{ path: string; bytes: number; version?: string | null }> {
         return ipcRenderer.invoke('plugin:files:write-text', options)
       },
       /** 删除文件 / 空目录（只认可写授权；不做递归删除） */
-      remove(options: { id: string; path: string }): Promise<{ removed: boolean; missing?: boolean }> {
+      remove(options: { id: string; path: string; expectedVersion?: string }): Promise<{ removed: boolean; missing?: boolean }> {
         return ipcRenderer.invoke('plugin:files:remove', options)
+      },
+      /** 取状态与版本（`ctx.fs.stat`；目标不存在时返回 `{ exists: false }` 而不是抛错） */
+      stat(options: { id: string; path: string }): Promise<import('@/shared/fsContract').FsStat> {
+        return ipcRenderer.invoke('plugin:fs:stat', options)
+      },
+      /** 字面量编辑（读 → 校验版本 → 替换 → 原子写回） */
+      editText(options: {
+        id: string
+        path: string
+        edits: import('@/shared/fsContract').FsEdit[]
+        expectedVersion?: string
+      }): Promise<import('@/shared/fsContract').FsEditResult> {
+        return ipcRenderer.invoke('plugin:fs:edit-text', options)
+      },
+      /** 「先读后写」策略：是否开启 + 本会话已观察的文件数（设置页只读快照） */
+      fsPolicyGet(options: { id: string }): Promise<{ id: string; enabled: boolean; observed: number }> {
+        return ipcRenderer.invoke('plugin:fs:policy-get', options)
+      },
+      /** 开启 / 关闭「先读后写」策略（需 confirm） */
+      fsPolicySet(options: { id: string; enabled: boolean; confirm?: boolean }): Promise<{ id: string; enabled: boolean }> {
+        return ipcRenderer.invoke('plugin:fs:policy-set', options)
       },
       list(options: { id: string; path: string }): Promise<{
         dir: string

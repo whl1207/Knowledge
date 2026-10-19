@@ -20,6 +20,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { logInfo } from './log'
+import { registerOwnedAgent, unregisterOwnedAgent } from './plugin-owned-agents'
 import { AIUtils } from '@/shared/ai-core'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { boundToolResult, buildSpillPreview, shouldSpill } from '@/shared/toolResultBudget'
@@ -44,7 +45,7 @@ import type {
   AskUserAnswer,
 } from '@/types/agent'
 import type { DerivedMessage, DerivedEntry } from '@/types/session-log'
-import type { ToolResult, ToolExecutionContext } from '@/types/tool'
+import type { ToolResult, ToolDefinition, ToolExecutionContext } from '@/types/tool'
 import { brand, type ToolName, type AgentId } from '@/types/ids'
 import { runCodeFunctionSchema } from './code-sdk'
 import { askQuestionsDigest, coerceAskAnswers } from '@/shared/agentAsk'
@@ -1109,13 +1110,14 @@ class AgentImpl implements AgentControl {
     }
   }
 
-  /** 无 LLM 兜底摘要：保留「谁说了什么 + 工具调用与关键参数」的可操作索引 */
-  private visibleTools(): any[] {
-    // PTC（Code Mode）：能力目录（options.tools）不变，但模型可见的工具
-    // schema 坍缩为单个 run_code——模型写程序用 ctx SDK 组合多步操作
-    if (this.options.toolsPresentation === 'code') {
-      return [runCodeFunctionSchema() as any]
-    }
+  /**
+   * 本会话生效的工具定义（**未做 PTC 坍缩**）：scope 层 + 白名单解析 + 跨层插件工具解析。
+   *
+   * 为什么单独抽成公开方法：`agent:tools`（「设置 → 工具 → 注册表」里选一个运行中的会话）
+   * 展示的正是这份清单，必须与下发给模型的那份**同源** —— 否则面板会显示一个模型根本拿不到的
+   * 集合，或反过来漏掉插件工具（历史实现两样都犯过，见 `listAgentTools`）。
+   */
+  visibleToolDefs(): ToolDefinition[] {
     const defs = toolRegistry.list(this.options.scope)
     const whitelist = this.options.tools
     /**
@@ -1131,13 +1133,13 @@ class AgentImpl implements AgentControl {
      * 只做解析、不放宽判权：能不能执行仍由本会话白名单（下面的引擎守卫）与插件宿主决定。
      * 解析不到的（拼错 / 插件已卸载）保持"不存在"，依旧 fail-loud。
      */
-    let selected: any[]
+    let selected: ToolDefinition[]
     // 只有**显式数组**才算白名单；null / undefined 都表示"不限制"（与 run_subagent 的
     // `tools: null` 语义、以及这里历史上对 null 的处理保持一致）
     if (!Array.isArray(whitelist)) {
       selected = defs
     } else {
-      const byName = new Map<string, any>()
+      const byName = new Map<string, ToolDefinition>()
       for (const name of whitelist) {
         const n = String(name)
         const found = toolRegistry.get(n, this.options.scope) || toolRegistry.getAnywhere(n)
@@ -1150,8 +1152,17 @@ class AgentImpl implements AgentControl {
     // 统一由本地工具层提供（能力插槽仍通过 tools 白名单生效）
     // run_code 是 PTC（Code Mode）专属呈现工具：仅在 toolsPresentation==='code' 时可见，
     // native 模式一律隐藏（fail-closed），避免 tools=null（全部工具）时泄漏到普通智能体
-    selected = selected.filter((d) => d.name !== 'run_code')
-    return selected.map((d) => ({
+    return selected.filter((d) => d.name !== 'run_code')
+  }
+
+  /** 无 LLM 兜底摘要：保留「谁说了什么 + 工具调用与关键参数」的可操作索引 */
+  private visibleTools(): any[] {
+    // PTC（Code Mode）：能力目录（options.tools）不变，但模型可见的工具
+    // schema 坍缩为单个 run_code——模型写程序用 ctx SDK 组合多步操作
+    if (this.options.toolsPresentation === 'code') {
+      return [runCodeFunctionSchema() as any]
+    }
+    return this.visibleToolDefs().map((d) => ({
       type: 'function',
       function: {
         name: d.name,
@@ -1613,6 +1624,8 @@ class AgentImpl implements AgentControl {
       provider: this.options.provider,
       label: this.options.label,
       pendingInbox: this.inbox.length,
+      // 工作目录一并给出：被委派的 agent 用它当相对路径围栏，排查"在哪读写"时要看得到
+      ...(this.options.cwd ? { cwd: this.options.cwd } : {}),
     }
   }
 
@@ -1771,13 +1784,24 @@ export async function disposeAgent(id: string): Promise<void> {
   }
 }
 
-/** 注册后生效的作用域工具名（供 UI 展示可见工具） */
+/**
+ * 某 agent 会话当前生效的工具清单（供 UI 展示：`agent:tools`，注册表面板「运行中的会话」用它）。
+ *
+ * 与 agent-loop 下发给模型的那份**同源**（`AgentImpl.visibleToolDefs`）：scope 层 + 白名单解析
+ * （含跨层插件工具）+ 未配置白名单 = 不限制。历史实现有两处偏差，都会让界面说反话：
+ *   1. 只认 `whitelist === null` 为"不限制"，而运行时用的是 `!Array.isArray`（undefined 同样宽松）
+ *      → `tools` 为 undefined 的会话被过滤成**空清单**；
+ *   2. 只在 `list(scope)` 里按名字找，插件工具（注册在 `plugin:<id>` 层）永远解析不到
+ *      → 用户在预设 / 白名单里勾了插件工具，这里却显示"没有"。
+ * agent 已销毁 / 不存在时退回该 scope 的可见集（scope 也不给则只有全局层）。
+ */
 export function listAgentTools(agentId: string, scope?: string): { name: ToolName; description: string }[] {
   const agent = agents.get(agentId)
-  const defs = toolRegistry.list(agent?.options.scope ?? scope)
-  const whitelist = agent?.options.tools
-  const selected = whitelist === null ? defs : defs.filter((d) => whitelist?.includes(d.name))
-  return selected.map((d) => ({ name: d.name, description: d.description }))
+  if (agent) return agent.visibleToolDefs().map((d) => ({ name: d.name, description: d.description }))
+  return toolRegistry
+    .list(scope)
+    .filter((d) => d.name !== 'run_code')
+    .map((d) => ({ name: d.name, description: d.description }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2222,6 +2246,9 @@ export async function runDelegatedAgent(
     label: options.label || `plugin:${pluginId}`,
     scope: options.scope || `plugin:${pluginId}`,
   })
+  // 登记归属：插件事件转发据此把 agent 输出**只发给拥有这次 run 的插件**
+  //（DSH 靠 Scoped<Agent> 做这件事；AI-KM 没有 isolate，所以显式记表）
+  registerOwnedAgent(agent.id, pluginId)
   try {
     const outcome = await awaitAgentTurn(agent.id, input, {
       timeoutMs: budget.timeoutMs,
@@ -2239,6 +2266,7 @@ export async function runDelegatedAgent(
       ...(isStepLimit ? { termination: 'maxSteps' as const } : {}),
     })
   } finally {
+    unregisterOwnedAgent(agent.id)
     try {
       await disposeAgent(agent.id)
     } catch (e) {

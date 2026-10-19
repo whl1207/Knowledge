@@ -5,6 +5,7 @@
  *  1. 内置清单 / 元信息 / 默认配置三张表必须同时加上它，否则设置页能列出却跑不了（或反之）；
  *  2. Firecrawl 与别的源相反——**Key 留空是合法状态**，归一化不能把它清掉、也不能要求必填；
  *  3. 旧存档（没有 firecrawl 字段、order 里没有它）必须能平滑补齐，且不打乱用户已有的排序。
+ * 另外钉住 DeepSeek 源从旧版 Anthropic 端点迁移到官方 Search API（base / need_content / 旧字段）。
  *
  * 用法（开发期）：
  *   import { runWebSearchSelfTest } from '@/shared/webSearch.selftest'
@@ -100,7 +101,36 @@ export function runWebSearchSelfTest(): WebSearchCase[] {
       && cfg.providers.includes(toCustomProviderId('c1')), JSON.stringify(cfg.providers))
   }
 
-  // 3. Firecrawl 的免 Key 报错映射与响应解析见 `webSearchFirecrawl.selftest.ts`
+  // 3. DeepSeek 源：新版走 Search API（不是旧的 Anthropic Messages 端点），旧存档要能迁移
+  {
+    const def = DEFAULT_WEB_SEARCH_CONFIG.deepseek
+    add('DeepSeek：默认 base 是官方 API（不是旧版 /anthropic）',
+      def.apiHost === 'https://api.deepseek.com', String(def.apiHost))
+    add('DeepSeek：默认复用对话凭据', def.reuseChatKey === true)
+    add('DeepSeek：默认不拉正文（need_content=false）', def.needContent === false)
+    add('DeepSeek：默认不带旧版字段（model / maxUses）',
+      (def as any).model === undefined && (def as any).maxUses === undefined)
+    const meta = webSearchProviderMeta('deepseek', DEFAULT_WEB_SEARCH_CONFIG)
+    add('DeepSeek：文档链接指向 Search 指南', String(meta.docs || '').includes('api-docs.deepseek.com'), String(meta.docs))
+
+    const migrated = normalizeWebSearchConfig({
+      providers: ['deepseek'],
+      deepseek: { apiHost: 'https://api.deepseek.com/anthropic/v1', apiKey: 'sk-old', model: 'deepseek-v4-flash', maxUses: 3 },
+    })
+    add('DeepSeek 迁移：旧 Anthropic base 被换成 Search API base',
+      migrated.deepseek.apiHost === 'https://api.deepseek.com', String(migrated.deepseek.apiHost))
+    add('DeepSeek 迁移：旧密钥保留', migrated.deepseek.apiKey === 'sk-old')
+    add('DeepSeek 迁移：need_content 默认补 false', migrated.deepseek.needContent === false)
+
+    const custom = normalizeWebSearchConfig({ deepseek: { apiHost: '', needContent: true, reuseChatKey: false } })
+    add('DeepSeek：need_content=true 被保留', custom.deepseek.needContent === true)
+    add('DeepSeek：reuseChatKey=false 被保留', custom.deepseek.reuseChatKey === false)
+    add('DeepSeek：base 留空回默认', custom.deepseek.apiHost === 'https://api.deepseek.com')
+    add('DeepSeek：自定义代理 base 保留',
+      normalizeWebSearchConfig({ deepseek: { apiHost: 'https://gw.example.com/ds' } }).deepseek.apiHost === 'https://gw.example.com/ds')
+  }
+
+  // 4. Firecrawl 的免 Key 报错映射与响应解析见 `webSearchFirecrawl.selftest.ts`
   //    （那部分是主进程 / 渲染层共用的纯函数，单独成套）
 
   return cases

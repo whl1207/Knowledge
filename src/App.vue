@@ -424,6 +424,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
     // 独立窗口也需要加载配置（主题等；loadConfig 为同步动作，返回后 store.lan 已就绪）
     store.loadConfig()
+    // Qwen3-TTS 本地服务：勾了「随软件启动」且填了安装目录时，启动即静默拉起（不用再手动开 cmd）
+    void store.ensureQwen3ServiceReady()
+    // 生图服务（Qwen-Image-Edit-2511）：同上
+    void store.ensurePythonAppReady('qwenImage')
     // 全局语音输入（唯一入口：热键 + 唯一 ASR 实例 + 唯一浮层状态；见 services/asr/globalVoice.ts）。
     // 每个窗口都初始化：主进程会把热键投递给**当前聚焦的那个窗口**，于是在设置窗口里也能直接说话输入。
     initGlobalVoice(store)

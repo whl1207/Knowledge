@@ -440,7 +440,7 @@
         <!-- 知识处理 RAG -->
         <section id="know-rag" class="help-section" v-show="activeSection === 'know-rag'">
           <div class="section-header">
-            <div class="section-icon"><i class="fa fa-stack-overflow"></i></div>
+            <div class="section-icon"><i class="fa fa-layer-group"></i></div>
             <div class="section-title-content">
               <h2>{{ t('sections.know-rag.title') }}</h2>
               <p class="section-desc">{{ t('sections.know-rag.subtitle') }}</p>
@@ -935,6 +935,37 @@
               </div>
             </div>
 
+            <!-- 网页抓取通道（web_fetch：直接访问 / DeepSeek Fetch / 虚拟浏览器） -->
+            <div class="content-card">
+              <h3>{{ t('settings.webFetchChannels.title') }}</h3>
+              <p v-html="t('settings.webFetchChannels.overview')"></p>
+              <div class="guide-step">
+                <span class="guide-number">1</span>
+                <div class="guide-content">
+                  <strong>{{ t('settings.webFetchChannels.step1.title') }}</strong>
+                  <p v-html="t('settings.webFetchChannels.step1.desc')"></p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">2</span>
+                <div class="guide-content">
+                  <strong>{{ t('settings.webFetchChannels.step2.title') }}</strong>
+                  <p v-html="t('settings.webFetchChannels.step2.desc')"></p>
+                </div>
+              </div>
+              <div class="guide-step">
+                <span class="guide-number">3</span>
+                <div class="guide-content">
+                  <strong>{{ t('settings.webFetchChannels.step3.title') }}</strong>
+                  <p v-html="t('settings.webFetchChannels.step3.desc')"></p>
+                </div>
+              </div>
+              <div class="example-box">
+                <div class="example-title">{{ t('settings.webFetchChannels.note.title') }}</div>
+                <p v-html="t('settings.webFetchChannels.note.text')"></p>
+              </div>
+            </div>
+
             <!-- 内置 MCP 服务（浏览器 Agent / Office Word+Excel / drawio 图表 / 文献检索 / PostgreSQL 查询） -->
             <div class="content-card">
               <h3>{{ t('settings.builtinMcp.title') }}</h3>
@@ -1222,7 +1253,7 @@ const sections = ref([
   { id: 'concepts', icon: 'fa-lightbulb-o' },
   { id: 'ai-chat', icon: 'fa-comment' },
   { id: 'knowledge', icon: 'fa-book' },
-  { id: 'know-rag', icon: 'fa-stack-overflow' },
+  { id: 'know-rag', icon: 'fa-layer-group' },
   { id: 'learning', icon: 'fa-graduation-cap' },
   { id: 'general-files', icon: 'fa-file-text-o' },
   { id: 'special-files', icon: 'fa-files-o' },
@@ -1471,6 +1502,9 @@ const settingGroups = ref([
   { groupKey: 'models', children: [
     { icon: 'fa-server', key: 'llm' },
     { icon: 'fa-cubes', key: 'llm-embed' },
+    { icon: 'fa-volume-up', key: 'tts' },
+    { icon: 'fa-microphone', key: 'asr' },
+    { icon: 'fa-image', key: 'imagegen' },
     { icon: 'fa-key', key: 'credentials' }
   ] },
   { groupKey: 'collabGroup', children: [
@@ -1478,13 +1512,10 @@ const settingGroups = ref([
     { icon: 'fa-users', key: 'collab' },
     { icon: 'fa-shield', key: 'perm' }
   ] },
-  { groupKey: 'speech', children: [
-    { icon: 'fa-volume-up', key: 'tts' },
-    { icon: 'fa-microphone', key: 'asr' }
-  ] },
   { groupKey: 'tools', children: [
     { icon: 'fa-wrench', key: 'tools' },
     { icon: 'fa-search', key: 'search' },
+    { icon: 'fa-cloud-download', key: 'fetch' },
     { icon: 'fa-plug', key: 'mcp' },
     { icon: 'fa-list-ul', key: 'toolregistry' }
   ] },
@@ -2315,7 +2346,7 @@ const translations = {
     settings: {
       overview: {
         title: '设置总览',
-        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 数据 / 关联 / 其他）、<strong>模型</strong>（来源 / 嵌入 / 凭据）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / MCP / 注册表）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体预设 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
+        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 数据 / 关联 / 其他）、<strong>模型</strong>（来源 / 嵌入 / 凭据）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / 抓取 / MCP / 注册表）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体预设 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
       },
       groups: {
         basic: {
@@ -2332,6 +2363,9 @@ const translations = {
           items: {
             llm: { name: '来源', desc: '各 AI 来源的连接配置（地址 / 密钥 / 模型 / 接口样式 / 默认嵌入模型）、<strong>通用参数</strong>（温度 / 最大令牌 / 流式 / 推理强度）与<strong>上下文窗口</strong>（见下方专述）。左侧列表可点选查看任意来源，<strong>点「设为默认」才改变默认来源</strong>。' },
             'llm-embed': { name: '嵌入', desc: '<strong>嵌入兜底</strong>：当前来源不提供嵌入接口（如 DeepSeek / Anthropic）时，知识库建库与检索的向量化改用这里选的来源。' },
+            tts: { name: '合成', desc: '语音合成：音色 / 语速 / 引擎（含本地 Kokoro / Piper、Qwen3-TTS，可由软件直接启动本地服务），回复可<strong>自动朗读</strong>。' },
+            asr: { name: '输入', desc: '语音识别：本地 ONNX Whisper 或服务端引擎（Whisper API / Qwen3-ASR 网页服务），可自动断句。' },
+            imagegen: { name: '生图', desc: 'Qwen-Image-Edit-2511 本地生图 / 改图：服务地址、安装目录（可由软件直接启动服务）、模型类型、尺寸、步数、Lora 与 token；可上传 0~3 张参考图试生成。' },
             credentials: { name: '凭据', desc: 'API Key 表格化管理，明文只存主进程，可被各来源的「凭据引用」使用。' }
           }
         },
@@ -2343,29 +2377,23 @@ const translations = {
             perm: { name: '权限', desc: '<strong>局域网访客白名单</strong>：允许的对话模式（默认仅普通 + 知识库）、<strong>可用智能体</strong>（通用智能体固定开放，可选开放 Agent 预设）、智能体工具（默认只读，技能由 <code>skill</code> 工具控制）、<strong>访客用的模型来源与模型</strong>（默认跟随主机当前来源）、并发与步数、<strong>文件访问</strong>（默认关闭；只读可浏览 / 预览 / 检索，可写另可新建 / 保存 / 删除，均限制在「共享」页设置的共享目录内）、沙箱级别与访问令牌（默认不需要）；网页端智能体由主机执行。' }
           }
         },
-        speech: {
-          title: '🗣️ 语音',
-          items: {
-            tts: { name: '合成', desc: '语音合成：音色 / 语速 / 引擎（含本地 Kokoro / Piper）。' },
-            asr: { name: '输入', desc: '语音识别：本地 ONNX Whisper 或服务端引擎（Whisper API / Qwen3-ASR 网页服务），可自动断句。' }
-          }
-        },
         tools: {
           title: '🧰 工具',
           items: {
             tools: { name: '管理', desc: '逐工具开关：启用状态、沙箱偏好与审批要求（共 18 个）。' },
-            search: { name: '搜索', desc: '联网搜索源：Bing / 百度 / DuckDuckGo / Firecrawl / SearXNG / 博查 / 智谱 / Tavily / Brave，可同时启用多个并选回退 / 聚合策略，也可添加自定义（内网）源。' },
+            search: { name: '搜索', desc: '联网搜索源：Bing / 百度 / DuckDuckGo / Firecrawl / SearXNG / 博查 / 智谱 / Tavily / Brave / DeepSeek 官方 Search，可同时启用多个并选回退 / 聚合策略，也可添加自定义（内网）源。' },
+            fetch: { name: '抓取', desc: '<strong>web_fetch 抓取通道</strong>：直接访问 / DeepSeek Fetch（官方 <code>POST /v1/tools/fetch</code>）/ 虚拟浏览器，三条通道各自开关、拖动排序即回退顺序，并可填 URL 直接测试当前通道链（见下方专述）。' },
             mcp: { name: 'MCP', desc: 'MCP 服务增删启停，预置 <strong>6 个内置服务</strong>（见下方专述）。' },
-            toolregistry: { name: '注册表', desc: '只读查看主进程已注册的工具及其白名单状态。' }
+            toolregistry: { name: '注册表', desc: '只读查看主进程<strong>实际注册</strong>的工具（名称 / 参数 schema / 作用域，含插件工具；MCP 服务工具不在此列）。<strong>启用状态默认不显示</strong>，用左侧下拉选口径：<strong>全局默认</strong>（「工具管理」的白名单）、某个<strong>智能体预设</strong>（该预设能力槽）、或某个<strong>运行中的会话</strong>（它实际下发给模型的清单）。选了口径后，不在其中的工具会灰化并标出「未启用 / 已禁用 / 不在本会话」；预设口径还会列出注册表里没有的工具（插件未加载 / 由渲染层实现）。' }
           }
         },
         plugin: {
           title: '🔌 插件',
           items: {
-            plugin: { name: '管理', desc: '本地插件（工具 / 界面扩展）的发现、启用停用、重载、日志、配置、详情与移除，行内动作都是图标按钮（悬停看说明）；标题栏下方的<strong>搜索框</strong>可按名称 / 插件 id / 文件夹 / 权限 / 工具 / 服务 / 描述 / 状态过滤列表（计数显示「匹配数 / 总数」），标题旁的 ⚠️ 图标悬停可看<strong>安全提示</strong>。插件既能给智能体加工具，也能加界面——主面板（自动出现在导航栏）、设置页签、设置卡片、集群工作台页签，还能注册全局快捷键、提供中英文案；本版新增两类宿主能力：<strong>调用大模型</strong>（可选来源与模型，权限 <code>llm</code>）与<strong>文件能力</strong>（选文件 / 选文件夹 / 列目录 / 读文本 / <strong>读表格 <code>readSheet</code></strong>（.xlsx/.xls/.csv，界面半边没有 SheetJS，插件读表用它）/ <strong>读二进制</strong> <code>readBase64</code> / PDF 文本提取与<strong>页面预览</strong>，权限 <code>fs</code>，且只能访问你在该插件里亲自选过的路径，<strong>选过一次就会记住（重启软件后不用重选）</strong>，可在「数据 → 文件授权」里逐条或一键撤销，卸载插件会一并清掉），另有只读的应用信息（预设智能体清单）与<strong>语音朗读</strong>（把一段文本交给应用自带 TTS 念出来，引擎与音色跟随「设置 → 语音」，无需权限）。可从文件夹安装插件包（<code>package.json</code> + <code>aikm</code> 清单），移除时可选择连磁盘文件一起删除；插件目录默认 <code>userData/plugins</code>，也可像技能那样指定到自己的文件夹。<strong>插件可以分文件夹存放</strong>：直接放在插件目录下、或按用途放进各级子文件夹都行（会扫描到第 4 层，插件自己的 <code>node_modules</code> / 隐藏目录不会被误认），列表里每个插件都标出它属于哪个文件夹；<strong>新写的插件会自动发现</strong>（约 1 秒内装载并出现在界面上，不必重启，也不必手动扫描），手动点目录栏的<strong>重新扫描</strong>（🔍+）可作为兜底。每个插件还有<strong>数据</strong>管理（🗄️ 图标）：能看到它占用了多少（设置存 localStorage、存档等大文件存本机 OPFS 的 <code>plugins/&lt;插件 id&gt;/</code>、插件私有数据存主进程的 <code>plugins-data/&lt;插件 id&gt;/</code>），列出每一项明细并可逐项或一键清除，占用不为零时列表里会直接显示大小。<strong>点「重新载入」会连界面半边一起重载</strong>（改完插件的界面代码不必重启软件）；界面半边装载失败时，插件卡片上会直接标出「界面半边装载失败」并给出原因，点「重新载入」即可重试。插件与主进程同进程运行、<strong>不受工作区沙箱保护</strong>，启用前会先列出它申请的权限并要求确认。' },
-            'plugin-perms': { name: '权限', desc: '一张表看清你<strong>授予</strong>了插件什么：<strong>声明权限</strong>（权限本身由插件清单决定，这一页改不了它）、<strong>委派同意</strong>、每插件可调的<strong>额度</strong>（并发 × 每小时，默认 1 / 20，上限 3 / 200；旁边是本小时已用，可一键重置）、<strong>工具审批</strong>（声明了 <code>fs</code> / <code>shell</code> 的插件，其工具默认要你确认——点状态图标在「每次询问 / 已允许 / 已拒绝」之间切换，悬停可看到哪些工具会问），以及<strong>放宽被委派智能体的工具面</strong>——默认关闭：打开「文件」（<strong>双条件</strong>，还需插件自己声明了 <code>fs</code>）或「MCP」（只含你在 MCP 服务里配置并启用的服务）之后，被委派的智能体才会拿到对应工具。命令执行 / 代码执行 / 技能 / 递归委派<strong>不可放宽</strong>（插件要做这些得自己声明对应权限）。额度与开关都落在主进程、写入前需确认，卸载插件会一并清掉。表头与状态都用图标，悬停看说明。' },
+            plugin: { name: '管理', desc: '本地插件（工具 / 界面扩展）的发现、启用停用、重载、日志、配置、详情与移除，行内动作都是图标按钮（悬停看说明）；标题栏下方的<strong>搜索框</strong>可按名称 / 插件 id / 文件夹 / 权限 / 工具 / 服务 / 描述 / 状态过滤列表（计数显示「匹配数 / 总数」），标题旁的 ⚠️ 图标悬停可看<strong>安全提示</strong>。插件既能给智能体加工具，也能加界面——主面板（自动出现在导航栏）、设置页签、设置卡片、集群工作台页签，还能注册全局快捷键、提供中英文案；插件可用的宿主能力：<strong>文件</strong>（<code>ctx.fs</code> 读文本 / 读表格 / 读二进制 / 写入（可带版本做乐观并发）/ 只改一处，<code>ctx.files</code> 选文件 / 选文件夹 / 选可写文件夹 / PDF 页面预览，权限 <code>fs</code>，且只能访问你在该插件里亲自选过的路径，<strong>选过一次就会记住（重启软件后不用重选）</strong>，可在「数据 → 文件授权」里逐条或一键撤销，卸载插件会一并清掉），另有<strong>大模型</strong>（<code>ctx.llm</code>：可选来源与模型、结构化输出、边出边显示，权限 <code>llm</code>）、<strong>委派智能体</strong>（<code>ctx.agent</code> / <code>ctx.agents</code>，权限 <code>agent.run</code>）、<strong>生图</strong>（<code>ctx.image</code>，权限 <code>image</code>）、只读的应用信息（预设智能体清单）与<strong>语音朗读</strong>（把一段文本交给应用自带 TTS 念出来，引擎与音色跟随「设置 → 语音」，无需权限）。可从文件夹安装插件包（<code>package.json</code> + <code>aikm</code> 清单），移除时可选择连磁盘文件一起删除；插件目录默认 <code>userData/plugins</code>，也可像技能那样指定到自己的文件夹。<strong>插件可以分文件夹存放</strong>：直接放在插件目录下、或按用途放进各级子文件夹都行（会扫描到第 4 层，插件自己的 <code>node_modules</code> / 隐藏目录不会被误认），列表里每个插件都标出它属于哪个文件夹；<strong>新写的插件会自动发现</strong>（约 1 秒内装载并出现在界面上，不必重启，也不必手动扫描），手动点目录栏的<strong>重新扫描</strong>（🔍+）可作为兜底。每个插件还有<strong>数据</strong>管理（🗄️ 图标）：能看到它占用了多少（设置存 localStorage、存档等大文件存本机 OPFS 的 <code>plugins/&lt;插件 id&gt;/</code>、插件私有数据存主进程的 <code>plugins-data/&lt;插件 id&gt;/</code>），列出每一项明细并可逐项或一键清除，占用不为零时列表里会直接显示大小。<strong>点「重新载入」会连界面半边一起重载</strong>（改完插件的界面代码不必重启软件）；界面半边装载失败时，插件卡片上会直接标出「界面半边装载失败」并给出原因，点「重新载入」即可重试。插件与主进程同进程运行、<strong>不受工作区沙箱保护</strong>，启用前会先列出它申请的权限并要求确认。' },
+            'plugin-perms': { name: '权限', desc: '一张表看清你<strong>授予</strong>了插件什么：<strong>声明权限</strong>（权限本身由插件清单决定，这一页改不了它）、<strong>委派同意</strong>、每插件可调的<strong>额度</strong>（并发 × 每小时，默认 1 / 20，上限 3 / 200；旁边是本小时已用，可一键重置）、<strong>工具审批</strong>（声明了 <code>fs</code> / <code>shell</code> 的插件，其工具默认要你确认——点状态图标在「每次询问 / 已允许 / 已拒绝」之间切换，悬停可看到哪些工具会问），以及<strong>工作目录</strong>（被委派智能体在哪个目录里工作：相对路径按它解析、写入也围在它里面，所以只能从你授权过的「可写」文件夹里选，默认 = 知识库根；<strong>它不是沙箱</strong>，命令仍能离开该目录），以及<strong>放宽被委派智能体的工具面</strong>——默认关闭：打开「文件」（<strong>双条件</strong>，还需插件自己声明了 <code>fs</code>）或「MCP」（只含你在 MCP 服务里配置并启用的服务）之后，被委派的智能体才会拿到对应工具。命令执行 / 代码执行 / 技能 / 递归委派<strong>不可放宽</strong>（插件要做这些得自己声明对应权限）。额度与开关都落在主进程、写入前需确认，卸载插件会一并清掉。表头与状态都用图标，悬停看说明。' },
             'plugin-store': { name: '商店', desc: '把<strong>共享目录</strong>当成插件来源：粘贴「协作 → 共享」里那条 <code>remote-fs://ip:port?token=…</code> 地址（或点「本机共享目录」）即可浏览其中的插件并一键安装，无需新协议——共享服务本来就是只读 + 令牌的 HTTP 服务，商店清单由它实时扫描生成（把插件 / 技能文件夹放进共享目录、可分类放子文件夹，不用手写索引文件）。安装前会列出该插件申请的权限并要求确认，装好后可在「管理」里启用 / 重载 / 卸载；同一地址也能加成技能商店的来源。' },
-            'plugin-dev': { name: '开发', desc: '写插件的地方：可以把「通用开发指令」整段复制给任意大模型（产出的文件放进插件目录就能启用），也可以<strong>直接在对话里选「插件开发智能体」</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>（7 个短工具：<code>plugin_dev_host</code> / <code>plugin_dev_constraints</code> / <code>plugin_dev_manifest</code> / <code>plugin_dev_api</code>（界面半边）/ <code>plugin_dev_api_main</code>（主进程半边）/ <code>plugin_dev_faq</code> / <code>plugin_dev_templates</code>；最小可运行示例用 templates 的 <code>minimal</code> 取），能按需分批拿到这份官方参考（约束 / 清单字段 / 槽位 / 宿主 API / 最小示例）与本机插件目录路径，不需要你手动粘贴，也不会去磁盘上找软件源码。<strong>插件文件夹命名规则在开发指令、模板、硬约束与本 MCP 服务里都会先说明</strong>：文件夹名必须等于清单 <code>aikm.id</code>，且只能用 ASCII 小写 <code>[a-z0-9._-]</code>；带中文 / 大写 / 空格的目录名会被宿主整目录跳过（列表里不出现，管理页会提示），中文写进 <code>aikm.name</code> 与界面文案。页内还有<strong>界面插件 / 设置页签与设置卡片 / 图表 / 工具插件 / 大模型与文件能力</strong>等多个模板（设置页签那节还给了可用的设置分组 id 与设置页 id 清单——分组写错会多出一个同名的「插件」一级菜单）、<strong>排障指令</strong>（把「插件 → 管理 → 日志」里的报错一起粘给模型让它改）、从零开始的最小可运行示例、清单 / 槽位 / API 速查表，以及「如何使用插件」的完整步骤（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载）。' }
+            'plugin-dev': { name: '开发', desc: '写插件的地方：可以把「通用开发指令」整段复制给任意大模型（产出的文件放进插件目录就能启用），也可以<strong>直接在对话里选「插件开发智能体」</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>（8 个短工具：<code>plugin_dev_host</code> / <code>plugin_dev_constraints</code> / <code>plugin_dev_manifest</code> / <code>plugin_dev_api</code>（界面半边基础）/ <code>plugin_dev_api_caps</code>（界面半边能力：<code>ctx.fs</code> 文件 / <code>ctx.llm</code> 模型 / <code>ctx.agent</code> 委派 / <code>ctx.image</code> 生图 / <code>ctx.tts</code> 语音）/ <code>plugin_dev_api_main</code>（主进程半边）/ <code>plugin_dev_faq</code> / <code>plugin_dev_templates</code>；最小可运行示例用 templates 的 <code>minimal</code> 取），能按需分批拿到这份官方参考（约束 / 清单字段 / 槽位 / 宿主 API / 最小示例）与本机插件目录路径，不需要你手动粘贴，也不会去磁盘上找软件源码。<strong>插件文件夹命名规则在开发指令、模板、硬约束与本 MCP 服务里都会先说明</strong>：文件夹名必须等于清单 <code>aikm.id</code>，且只能用 ASCII 小写 <code>[a-z0-9._-]</code>；带中文 / 大写 / 空格的目录名会被宿主整目录跳过（列表里不出现，管理页会提示），中文写进 <code>aikm.name</code> 与界面文案。页内还有<strong>界面插件 / 设置页签与设置卡片 / 图表 / 工具插件 / 大模型与文件能力</strong>等多个模板（设置页签那节还给了可用的设置分组 id 与设置页 id 清单——分组写错会多出一个同名的「插件」一级菜单）、<strong>排障指令</strong>（把「插件 → 管理 → 日志」里的报错一起粘给模型让它改）、从零开始的最小可运行示例、清单 / 槽位 / API 速查表，以及「如何使用插件」的完整步骤（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载）。' }
           }
         },
         skills: {
@@ -2431,7 +2459,27 @@ const translations = {
         },
         note: {
           title: '📌 使用提示：',
-          text: '列表<strong>从上到下就是尝试顺序</strong>（可<strong>直接拖动</strong>搜索源调整位置，回退策略下即优先级）；每个源可单独<strong>测试</strong>（与启用状态无关），「测试全部启用源」会<strong>逐个测试每个已启用源</strong>并展开各自结果与失败原因；左上角 ↺ 可<strong>重置</strong>全部搜索源配置（清空 Key / 恢复 Bing 单源）；<strong>返回条数</strong> 控制每次搜索结果数量（1~20）。页内文档与结果链接均用<strong>自带浏览器</strong>打开（不跳系统默认浏览器）。抓取具体网页（web_fetch）不受搜索源影响。'
+          text: '列表<strong>从上到下就是尝试顺序</strong>（可<strong>直接拖动</strong>搜索源调整位置，回退策略下即优先级）；每个源可单独<strong>测试</strong>（与启用状态无关），「测试全部启用源」会<strong>逐个测试每个已启用源</strong>并展开各自结果与失败原因；左上角 ↺ 可<strong>重置</strong>全部搜索源配置（清空 Key / 恢复 Bing 单源）；<strong>返回条数</strong> 控制每次搜索结果数量（1~20）。页内文档与结果链接均用<strong>自带浏览器</strong>打开（不跳系统默认浏览器）。抓取具体网页（web_fetch）与搜索源互不影响，其通道在「工具 → 抓取」单独配置。'
+        }
+      },
+      webFetchChannels: {
+        title: '🕸️ 网页抓取通道（web_fetch）',
+        overview: '智能体、批量任务与工作流共用 <strong>web_fetch</strong> 工具。在 设置 → 工具 → <strong>抓取</strong> 里三条通道可分别开关并<strong>拖动排序</strong>（列表从上到下即回退顺序）：<strong>直接访问 → DeepSeek Fetch → 虚拟浏览器</strong>。任一通道失败（HTTP 403 / 人机验证页 / 超时 / 空内容）就自动试下一个，全部失败才报错；右上角 ↺ 可恢复默认（清空 DeepSeek Key），底部可填 URL 直接<strong>测试当前通道链</strong>。',
+        step1: {
+          title: '直接访问（默认开启）',
+          desc: '内置 HTTP 客户端直接请求页面（带浏览器请求头）：HTML 转纯文本、识别 PDF 并用 pdfjs 提取正文，速度最快。遇到 403 / 验证页 / 空内容即算失败，交给下一通道。'
+        },
+        step2: {
+          title: 'DeepSeek Fetch（按需开启）',
+          desc: '调用 DeepSeek 官方 <code>POST /v1/tools/fetch</code>，由服务端抓取并返回 Markdown 正文，能处理一部分直接访问被拦的页面。需 API Key：可单独填，或开启「复用凭据」自动使用「工具 → 搜索」里的 DeepSeek Key / 凭据引用 / 对话的 DeepSeek 凭据。按成功请求次数计费（约 5 元 / 1000 次），QPS 5；403 = 目标站点拒绝抓取，404 = 没取到可用正文。'
+        },
+        step3: {
+          title: '虚拟浏览器（仅桌面端）',
+          desc: '用隐藏的 Chromium 窗口加载页面（真实执行 JS，可通过部分反爬 / 人机验证挑战）再提取正文；速度较慢、占用一个窗口。手机 / 网页端没有这条通道，会自动跳过并在全部失败时说明。'
+        },
+        note: {
+          title: '📌 使用提示：',
+          text: '抓取通道与搜索源<strong>完全独立</strong>：换搜索源不影响 web_fetch，反之亦然。DOI 链接在直接访问命中验证页时还会先尝试 Crossref 元数据；若所有通道都失败，也会再用 Crossref 兜底一次。'
         }
       },
       builtinMcp: {
@@ -2459,7 +2507,7 @@ const translations = {
         },
         pluginDev: {
           name: '插件开发参考（builtin-plugin-dev）',
-          desc: '把官方<strong>插件开发指南</strong>作为 MCP 服务提供，按主题拆成 <strong>7 个短工具</strong>（每次只回几百到三千字，小模型也吃得下）：<strong>plugin_dev_host</strong>（本机插件目录的<strong>绝对路径</strong> / 已装插件清单 / 数据放哪）、<strong>plugin_dev_constraints</strong>（15 条硬性约束，含「只准调用指南列出的宿主 API、界面 / 主进程两半边不能混用」与「canvas 2D 不认 CSS 变量」）、<strong>plugin_dev_manifest</strong>（<code>package.json</code> 清单字段 + 内置槽位 + 可直接照抄的清单）、<strong>plugin_dev_api</strong>（<strong>界面半边</strong> client.mjs 的 API 速查 + 最小可运行示例全文）、<strong>plugin_dev_api_main</strong>（<strong>主进程半边</strong> index.mjs 的 API 速查 + 注册工具的最小示例全文）、<strong>plugin_dev_faq</strong>（报错对照）、<strong>plugin_dev_templates</strong>（模板目录与安装步骤，正文用 <code>key</code> 逐取，如 <code>{"key":"panel"}</code>），另有 <strong>plugin_dev_check</strong>（自检：目录名能否作为插件 id、清单 / 入口文件、<strong>是否用了宿主不存在的 ctx 成员</strong>（如 ctx.service / ctx.files.readFile 会逐条报出并给出正解，两半边 ctx 串用也会报）、<strong>漏 await / 返回形状用错 / 观察器没断开 / 把 <code>ctx.locale</code> 的 ref 当字符串用（提示显示 <code>[object Object]</code>）</strong>这类「不报错但没数据」的陷阱，用宿主<strong>同一份</strong>校验逻辑，并返回<strong>宿主真实的加载状态与日志</strong>，含界面半边装载失败的原因）——内容与「设置 → 插件 → 开发」页同源。<strong>插件开发智能体</strong>默认已绑定本服务（经 mcp_call 调用）；其它智能体、工作流 MCP 节点、以及外部 MCP 客户端（<code>/mcp/builtin-plugin-dev</code>）都能用它，从而不必去磁盘上找软件源码。'
+          desc: '把官方<strong>插件开发指南</strong>作为 MCP 服务提供，按主题拆成 <strong>8 个短工具</strong>（每次只回几百到四千字，小模型也吃得下）：<strong>plugin_dev_host</strong>（本机插件目录的<strong>绝对路径</strong> / 已装插件清单 / 可申请的权限 / 数据放哪）、<strong>plugin_dev_constraints</strong>（15 条硬性约束，含「只准调用指南列出的宿主 API、界面 / 主进程两半边不能混用」「两套失败形态：<code>ctx.fs</code> 抛 <code>FS_*</code> 码，<code>ctx.image</code> / <code>ctx.llm.stream</code> / <code>ctx.agents</code> 看 ok / finish / termination」「用到的能力必须写进 permissions」与「canvas 2D 不认 CSS 变量」）、<strong>plugin_dev_manifest</strong>（<code>package.json</code> 清单字段 + 内置槽位 + 可直接照抄的清单）、<strong>plugin_dev_api</strong>（<strong>界面半边基础</strong> client.mjs 的 API 速查 + 最小可运行示例全文）、<strong>plugin_dev_api_caps</strong>（<strong>界面半边能力</strong>：<code>ctx.fs</code> 文件 / <code>ctx.llm</code> 模型与流 / <code>ctx.agent</code> 与 <code>ctx.agents</code> 委派 / <code>ctx.image</code> 生图 / <code>ctx.tts</code> 语音，含各自的权限与失败形态）、<strong>plugin_dev_api_main</strong>（<strong>主进程半边</strong> index.mjs 的 API 速查 + 注册工具的最小示例全文）、<strong>plugin_dev_faq</strong>（报错对照，含 <code>FS_*</code> 错误码与 <code>ok=false</code> 被当成成功）、<strong>plugin_dev_templates</strong>（模板目录与安装步骤，正文用 <code>key</code> 逐取，如 <code>{"key":"panel"}</code>，另有 <code>llm-files</code> / <code>image</code> 可照抄示例），另有 <strong>plugin_dev_check</strong>（自检：目录名能否作为插件 id、清单 / 入口文件、<strong>是否用了宿主不存在的 ctx 成员</strong>（如 ctx.service / ctx.files.readFile 会逐条报出并给出正解，两半边 ctx 串用也会报）、<strong>用到的能力是否申请了权限</strong>、<strong>订阅的事件类型是否真的会触发</strong>、<strong>漏 await / 返回形状用错 / 观察器没断开 / 把 <code>ctx.locale</code> 的 ref 当字符串用（提示显示 <code>[object Object]</code>）</strong>这类「不报错但没数据」的陷阱，用宿主<strong>同一份</strong>校验逻辑，并返回<strong>宿主真实的加载状态与日志</strong>，含界面半边装载失败的原因；老写法只给「建议迁移」提示）——内容与「设置 → 插件 → 开发」页同源。<strong>插件开发智能体</strong>默认已绑定本服务（经 mcp_call 调用）；其它智能体、工作流 MCP 节点、以及外部 MCP 客户端（<code>/mcp/builtin-plugin-dev</code>）都能用它，从而不必去磁盘上找软件源码。'
         },
         note: {
           title: '📌 使用提示：',
@@ -3468,7 +3516,7 @@ const translations = {
     settings: {
       overview: {
         title: 'Settings Overview',
-        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / Data / Associations / Other), <strong>Models</strong> (Sources / Embedding / Credentials), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / MCP / Registry), <strong>Plugins</strong> (Manage / Store / Develop), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) the nav and the content each fill the screen and switch in place (the category list uses piano-key rows; ← returns to the categories). List-style panels inside Settings — model sources, search sources, MCP, plugin management, skill management / store, and the agent presets / console / session log — behave the same way: a full-screen list and a full-screen detail pane. Skill Management and the Skill Store drill down one screen at a time (skills → file tree → file editor; store: skill grid ⇄ source list ⇄ skill detail), with ← on each screen to go back one level.'
+        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / Data / Associations / Other), <strong>Models</strong> (Sources / Embedding / Credentials), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / Fetch / MCP / Registry), <strong>Plugins</strong> (Manage / Store / Develop), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) the nav and the content each fill the screen and switch in place (the category list uses piano-key rows; ← returns to the categories). List-style panels inside Settings — model sources, search sources, MCP, plugin management, skill management / store, and the agent presets / console / session log — behave the same way: a full-screen list and a full-screen detail pane. Skill Management and the Skill Store drill down one screen at a time (skills → file tree → file editor; store: skill grid ⇄ source list ⇄ skill detail), with ← on each screen to go back one level.'
       },
       groups: {
         basic: {
@@ -3485,6 +3533,9 @@ const translations = {
           items: {
             llm: { name: 'Sources', desc: 'Per-source connection settings (URL / key / model / API style / default embedding model), <strong>common parameters</strong> (temperature / max tokens / streaming / reasoning effort) and the <strong>context window</strong> (detailed below). Clicking a source only views it — press <strong>Set as default</strong> to change the default.' },
             'llm-embed': { name: 'Embedding', desc: '<strong>Embedding fallback</strong>: when the current source has no embedding endpoint (e.g. DeepSeek / Anthropic), KB building and retrieval embedding uses the source chosen here.' },
+            tts: { name: 'TTS', desc: 'Speech synthesis: voice / speed / engine (incl. local Kokoro / Piper and Qwen3-TTS, whose local service the app can start); replies can be <strong>auto-spoken</strong>.' },
+            asr: { name: 'ASR', desc: 'Speech recognition: local ONNX Whisper or a server engine (Whisper API / Qwen3-ASR web UI), auto punctuation.' },
+            imagegen: { name: 'Image', desc: 'Local Qwen-Image-Edit-2511 generation / editing: service URL, install folder (the app can start the service), model type, size, steps, LoRA and token; try it with 0-3 reference images.' },
             credentials: { name: 'Credentials', desc: 'API keys managed as a table; plaintext stays in the main process and can be referenced by each source.' }
           }
         },
@@ -3496,27 +3547,21 @@ const translations = {
             perm: { name: 'Permissions', desc: '<strong>LAN guest whitelist</strong>: allowed chat modes, agent tools (read-only by default), concurrency and steps, <strong>file access</strong> (off by default; read-only lets guests browse / preview / search the shared folder set on the Sharing tab, read &amp; write also lets them create / save / delete inside it), sandbox level and access token.' }
           }
         },
-        speech: {
-          title: '🗣️ Speech',
-          items: {
-            tts: { name: 'TTS', desc: 'Speech synthesis: voice / speed / engine (incl. local Kokoro / Piper).' },
-            asr: { name: 'ASR', desc: 'Speech recognition: local ONNX Whisper or a server engine (Whisper API / Qwen3-ASR web UI), auto punctuation.' }
-          }
-        },
         tools: {
           title: '🧰 Tools',
           items: {
             tools: { name: 'Tools', desc: 'Per-tool switches: enablement, sandbox preference and approval (18 tools).' },
-            search: { name: 'Search', desc: 'Web search source: Bing / Baidu / DuckDuckGo / Firecrawl / SearXNG / Bocha / Zhipu / Tavily / Brave — enable several, add custom LAN sources, and pick fallback / merge strategy.' },
+            search: { name: 'Search', desc: 'Web search source: Bing / Baidu / DuckDuckGo / Firecrawl / SearXNG / Bocha / Zhipu / Tavily / Brave / DeepSeek official Search — enable several, add custom LAN sources, and pick fallback / merge strategy.' },
+            fetch: { name: 'Fetch', desc: '<strong>web_fetch channels</strong>: direct fetch / DeepSeek Fetch (official <code>POST /v1/tools/fetch</code>) / virtual browser — each can be toggled and dragged into a fallback order, with a URL box to test the current chain (detailed below).' },
             mcp: { name: 'MCP', desc: 'Manage MCP servers; <strong>6 built-in servers</strong> are pre-installed (detailed below).' },
-            toolregistry: { name: 'Registry', desc: 'Read-only view of the registered tools and their whitelist state.' }
+            toolregistry: { name: 'Registry', desc: 'Read-only view of the tools the main process <strong>actually registered</strong> (name / input schema / scope, plugin tools included; MCP service tools are not listed). The <strong>enable state is hidden by default</strong> — pick a scope in the dropdown on the left: <strong>global default</strong> (the whitelist in Tools), an <strong>agent preset</strong> (its capability slots), or a <strong>live session</strong> (what it actually sends to the model). Once a scope is picked, tools outside it are greyed and tagged “off / disabled / not in session”; the preset scope also lists enabled tools missing from the registry (plugin not loaded / renderer-side tool).' }
           }
         },
         plugin: {
           title: '🔌 Plugins',
           items: {
             plugin: { name: 'Manage', desc: 'Discovery, enable / disable, reload, logs, config, details and removal for local plugins — every row action is an icon button (hover for the hint); the <strong>search box</strong> under the title filters the list by name / plugin id / folder / permission / tool / service / description / status (the counter shows “matched / total”), and hovering the ⚠️ icon next to the title shows the <strong>security notice</strong>. A plugin can add agent tools <strong>and</strong> UI — a main panel (appears in the nav automatically), settings tabs, settings cards and swarm workbench tabs, plus global shortcuts and zh / en text. Two new host capabilities: <strong>model access</strong> (pick source and model, permission <code>llm</code>) and <strong>file access</strong> (pick files / folders, list directories, read text, <strong>read spreadsheets via <code>readSheet</code></strong> (.xlsx/.xls/.csv — the UI half has no SheetJS, so plugins read tables with it), <strong>read raw bytes</strong> via <code>readBase64</code>, extract PDF text and <strong>render PDF pages</strong>, permission <code>fs</code> — limited to paths you picked inside that plugin, for the current run only), plus read-only app info (agent preset list) and <strong>speech</strong> (hand text to the app’s own TTS; engine and voice follow Settings → Voice; no permission needed). Install a plugin package (a <code>package.json</code> plus an <code>aikm</code> manifest) from a folder, and optionally delete its files when removing it. The plugins folder defaults to <code>userData/plugins</code> but can be pointed at your own folder, like skills (changes reload automatically). <strong>Plugins may live in subfolders</strong>: put them directly in the plugins folder or group them by purpose in nested folders (up to 4 levels deep are scanned; a plugin’s own <code>node_modules</code> / hidden folders are never mistaken for plugins), and every row shows which folder it belongs to. <strong>Newly written plugins are discovered automatically</strong> (loaded and shown in the UI within about a second — no restart, no manual scan); the folder bar’s <strong>Rescan</strong> (🔍+) stays as a fallback. Every plugin also has <strong>data</strong> management (🗄️): see how much it uses (settings in localStorage, large files such as saves in the local OPFS <code>plugins/&lt;plugin id&gt;/</code>, and plugin-private data in the main process <code>plugins-data/&lt;plugin id&gt;/</code>), list every entry and delete them one by one or all at once — the list shows the size when it is not zero. <strong>Reload also re-loads the plugin’s UI half</strong> (no restart needed after editing its client code); if the UI half fails to load, the row is flagged “UI half failed” with the reason and Reload retries it. Plugins run in the main process and are <strong>not confined by the workspace sandbox</strong>; the permissions they request are listed before enabling.' },
-            'plugin-perms': { name: 'Permissions', desc: 'One table showing what you have <strong>granted</strong> each plugin: its <strong>declared permissions</strong> (the manifest decides those — this page cannot change them), <strong>delegation consent</strong>, per-plugin <strong>budget</strong> (concurrency × per hour, default 1 / 20, ceilings 3 / 200, with this hour’s usage beside it and a one-click reset), <strong>tool approval</strong> (plugins declaring <code>fs</code> / <code>shell</code> ask before their tools run — click the state icon to cycle ask / allowed / denied; hover to see which tools ask), and <strong>relaxation of the delegated agent’s tool surface</strong> — off by default: only after turning on “file” (<strong>two conditions</strong>: this toggle plus the plugin declaring <code>fs</code>) or “MCP” (limited to the servers you configured and enabled) will the delegated agent receive those tools. Shell / code execution / skills and recursive delegation can <strong>never</strong> be relaxed here (a plugin must declare those permissions itself). Limits and switches live in the main process, every write asks for confirmation, and uninstalling a plugin clears them. Headers and states are icons — hover for the label.' },
+            'plugin-perms': { name: 'Permissions', desc: 'One table showing what you have <strong>granted</strong> each plugin: its <strong>declared permissions</strong> (the manifest decides those — this page cannot change them), <strong>delegation consent</strong>, per-plugin <strong>budget</strong> (concurrency × per hour, default 1 / 20, ceilings 3 / 200, with this hour’s usage beside it and a one-click reset), <strong>tool approval</strong> (plugins declaring <code>fs</code> / <code>shell</code> ask before their tools run — click the state icon to cycle ask / allowed / denied; hover to see which tools ask), and <strong>working directory</strong> (where the delegated agent runs: relative paths resolve against it and writes stay inside it, so it can only be one of the folders you granted as writable — default = KB root; <strong>it is not a sandbox</strong>, commands can still leave it), and <strong>relaxation of the delegated agent’s tool surface</strong> — off by default: only after turning on “file” (<strong>two conditions</strong>: this toggle plus the plugin declaring <code>fs</code>) or “MCP” (limited to the servers you configured and enabled) will the delegated agent receive those tools. Shell / code execution / skills and recursive delegation can <strong>never</strong> be relaxed here (a plugin must declare those permissions itself). Limits and switches live in the main process, every write asks for confirmation, and uninstalling a plugin clears them. Headers and states are icons — hover for the label.' },
             'plugin-store': { name: 'Store', desc: 'Use a <strong>shared folder</strong> as a plugin source: paste the <code>remote-fs://ip:port?token=…</code> address shown under Collaboration → Share (or click “Local share”) to browse and one-click install the plugins inside. No new protocol involved — the share is already a read-only, token-guarded HTTP service, and the store index is scanned on the fly (drop plugin / skill folders into the shared folder, category subfolders included, no hand-written index needed). Installing always lists the requested permissions first; afterwards enable / reload / remove it under Manage. The same address also works as a skill-store source.' },
             'plugin-dev': { name: 'Develop', desc: 'Where you write plugins: copy the general development prompt to any model and drop the returned files into the plugins folder, or simply pick the <strong>“Plugin development agent”</strong> in chat — it is bound to the built-in MCP service <code>builtin-plugin-dev</code> (7 short tools: <code>plugin_dev_host</code> / <code>plugin_dev_constraints</code> / <code>plugin_dev_manifest</code> / <code>plugin_dev_api</code> (UI half) / <code>plugin_dev_api_main</code> (main-process half) / <code>plugin_dev_faq</code> / <code>plugin_dev_templates</code>; fetch the minimal runnable example with the <code>minimal</code> key), which fetches this same official reference (constraints, manifest fields, slots, host API, minimal example) plus your plugins-folder path in small on-demand pieces, with no manual pasting and no hunting for the app’s source on disk. <strong>The folder-naming rule is stated up front</strong> in the dev prompt, the templates, the hard constraints and this MCP service: the folder name must equal the manifest’s <code>aikm.id</code> and be ASCII lowercase <code>[a-z0-9._-]</code>; a folder named in Chinese, with uppercase letters or spaces is skipped entirely (it will not appear in the list — the manager says so), so put Chinese in <code>aikm.name</code> and the UI copy. Also includes UI-plugin / settings-tab-and-card / chart / tool / model-and-file templates (the settings section lists the valid settings-group and settings-page ids — a wrong group id adds a second top-level “Plugins” menu), a debugging prompt (paste the error from Plugins → Manage → Logs so the model can fix it), a minimal runnable example, a manifest / slot / API cheat sheet, and the full “how to use plugins” walkthrough (install → confirm permissions on enable → where panels, tools and shortcuts appear → config → troubleshooting → removal).' }
           }
@@ -3584,7 +3629,27 @@ const translations = {
         },
         note: {
           title: '📌 Tip:',
-          text: 'The list order <strong>is</strong> the attempt order — <strong>drag</strong> any source to reorder (it is the priority under Fallback). Each source can be <strong>tested individually</strong> (regardless of enable state), and “Test all enabled” runs <strong>every enabled source one by one</strong> and expands its results or failure reason. The ↺ button in the toolbar <strong>resets</strong> all search sources (clears keys, back to Bing only). <strong>Max results</strong> controls how many results each search returns (1–20). Doc and result links open in the <strong>built-in browser</strong> instead of the system browser. Page fetching (web_fetch) is unaffected by the search source.'
+          text: 'The list order <strong>is</strong> the attempt order — <strong>drag</strong> any source to reorder (it is the priority under Fallback). Each source can be <strong>tested individually</strong> (regardless of enable state), and “Test all enabled” runs <strong>every enabled source one by one</strong> and expands its results or failure reason. The ↺ button in the toolbar <strong>resets</strong> all search sources (clears keys, back to Bing only). <strong>Max results</strong> controls how many results each search returns (1–20). Doc and result links open in the <strong>built-in browser</strong> instead of the system browser. Page fetching (web_fetch) is independent of the search sources and is configured under Tools → Fetch.'
+        }
+      },
+      webFetchChannels: {
+        title: '🕸️ Web Fetch Channels (web_fetch)',
+        overview: 'Agents, batch runs and workflows share the <strong>web_fetch</strong> tool. Under Settings → Tools → <strong>Fetch</strong> the three channels can be toggled and <strong>dragged into order</strong> (top to bottom = fallback order): <strong>direct fetch → DeepSeek Fetch → virtual browser</strong>. When one fails (HTTP 403 / challenge page / timeout / empty body) the next is tried automatically, and an error is returned only when all fail. The ↺ button restores defaults (clears the DeepSeek key); the URL box at the bottom <strong>tests the current chain</strong>.',
+        step1: {
+          title: 'Direct fetch (on by default)',
+          desc: 'Requests the page with the built-in HTTP client (browser headers): HTML becomes plain text, PDFs are detected and parsed with pdfjs. Fastest. A 403 / challenge page / empty body counts as a failure and falls through to the next channel.'
+        },
+        step2: {
+          title: 'DeepSeek Fetch (enable when needed)',
+          desc: 'Calls the official DeepSeek <code>POST /v1/tools/fetch</code>: the server fetches the page and returns Markdown, handling some pages that block direct access. Requires an API key — enter one here, or turn on “reuse credentials” to use the DeepSeek key / credential ref from Tools → Search, then the chat DeepSeek credential. Billed per successful request (about ¥5 / 1,000), 5 QPS; 403 = the site refuses fetching, 404 = no usable content.'
+        },
+        step3: {
+          title: 'Virtual browser (desktop only)',
+          desc: 'Loads the page in a hidden Chromium window (runs JavaScript, gets past some bot challenges) and extracts the text. Slower and uses a window. Mobile / web has no such channel, so it is skipped automatically and mentioned when everything fails.'
+        },
+        note: {
+          title: '📌 Tip:',
+          text: 'Fetch channels and search sources are <strong>fully independent</strong>: changing a search source does not affect web_fetch, and vice versa. DOI links first try Crossref metadata when direct fetch hits a challenge page, and Crossref is also used as a last resort when every channel fails.'
         }
       },
       builtinMcp: {

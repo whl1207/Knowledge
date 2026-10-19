@@ -22,6 +22,7 @@
  */
 
 import { CAPABILITY_TOOL_SLOTS } from '@/lib/agent/capabilities'
+import { checkGrantAccess } from '@/shared/pluginGrantPaths'
 import type { PluginPermission } from '@/types/plugin'
 
 // ---------------------------------------------------------------------------
@@ -390,6 +391,42 @@ export function isAgentRunTermination(v: unknown): v is AgentRunTermination {
   return typeof v === 'string' && (TERMINATIONS as readonly string[]).includes(v)
 }
 
+// ---------------------------------------------------------------------------
+// 句柄层（`ctx.agents`）：能力收敛 P3
+// ---------------------------------------------------------------------------
+
+/**
+ * 句柄层的稳定错误码。
+ *
+ * 与 `termination` 的分工：`termination` 描述**一次运行怎么结束的**（结果里给），
+ * 这里描述**调用姿势不对**（抛错）。两者别混：拿句柄做不支持的事抛 `AGENT_UNSUPPORTED`，
+ * 而运行本身失败仍然是 `result.termination`。
+ */
+export const AGENT_ERROR_CODES = [
+  'AGENT_UNSUPPORTED',
+  'AGENT_DISPOSED',
+  'AGENT_NOT_FOUND',
+  'AGENT_BAD_REQUEST',
+] as const
+
+export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number]
+
+export function isAgentErrorCode(v: unknown): v is AgentErrorCode {
+  return typeof v === 'string' && (AGENT_ERROR_CODES as readonly string[]).includes(v)
+}
+
+/**
+ * 句柄流的终态分片。
+ *
+ * 为什么只有 `finish` 而没有 `text-delta`：委派运行跑在**主进程**，而增量文本走的是按作用域的
+ * 事件通道（`assistant/chunk`）。句柄拿不到「这条 IPC 对应哪个 agentId」的映射（`plugin:agent-run`
+ * 只返回终态），因此句柄**不假装能流式**——要增量请订阅 `ctx.on('assistant/chunk', …)`。
+ * 这条写清楚比给一个"看起来在流"的空壳诚实。
+ */
+export type AgentChunk =
+  | { type: 'status'; phase: 'running' | 'idle'; id: string }
+  | { type: 'finish'; id: string; result: AgentRunResult }
+
 /**
  * 把上游（agent-loop / 预算 / 同意）的原始结果归一成对插件可见的形状。
  * **`ok` 一律由 `termination` 决定**，不采信调用方传的 `ok` —— 这条统一在这里收口，
@@ -457,3 +494,79 @@ export function canStartCall(
   const kept = pruneCallWindow(timestamps, now, windowMs)
   return { ok: kept.length < limit, used: kept.length, limit, timestamps: kept }
 }
+
+// ---------------------------------------------------------------------------
+// 工作目录（被委派 agent 的 cwd）—— 「插件 → 权限」里用户为该插件选的根
+// ---------------------------------------------------------------------------
+
+export interface WorkRootInput {
+  /** 用户为该插件选的根（空 = 没选，用调用方给的默认） */
+  configured?: string
+  /** 调用方（渲染层）给的值：知识库根。没配根时原样透传 —— 与面板出现之前逐字节一致 */
+  incoming?: string
+  /** 该插件的**可写**文件授权根（只有落在这些根里才允许当工作目录） */
+  writableRoots: readonly string[]
+  caseInsensitive?: boolean
+}
+
+export interface WorkRootResolution {
+  /** 生效的 cwd（空串 = 没有可用值；`error` 有值时它是拒绝原因，而不是"用默认"） */
+  cwd: string
+  source: 'default' | 'configured'
+  /** 配了但不可用时的可读原因（调用方应当 fail-loud，而不是悄悄退回默认） */
+  error?: string
+}
+
+/**
+ * 决定被委派 agent 的工作目录。
+ *
+ * 与文件授权**同一套判定**（`checkGrantAccess` 的 `write` 语义），因为这个目录就是相对路径的围栏：
+ * `read_file` / `write_file` / `list_dir` 全按它解析（见 `rendererTools.ts` 的 `resolvePath(input.path, ctx.cwd)`）。
+ *
+ * 两条不许省：
+ * - **没配置 → 原样透传调用方给的默认**（不能因为"没配"就把 cwd 清空，那会改掉历史行为）；
+ * - **配置了但已不在可写授权内**（用户撤销了那个文件夹）→ 返回 `error`，**不要**退回默认：
+ *   悄悄换目录会让 agent 在用户没有预期的位置读写。
+ */
+export function resolveWorkRoot(input: WorkRootInput): WorkRootResolution {
+  const incoming = typeof input.incoming === 'string' ? input.incoming.trim() : ''
+  const configured = typeof input.configured === 'string' ? input.configured.trim() : ''
+  if (!configured) return { cwd: incoming, source: 'default' }
+  const access = checkGrantAccess(
+    configured,
+    input.writableRoots.map((root) => ({ path: root, mode: 'write' as const })),
+    'write',
+    input.caseInsensitive === true,
+  )
+  if (!access.ok) {
+    return {
+      cwd: '',
+      source: 'configured',
+      error:
+        `该插件的工作目录不可用：${configured}（${access.reason}）—— `
+        + '请到「设置 → 插件 → 权限」重新选一个，或先在文件授权里「允许写入某文件夹」',
+    }
+  }
+  return { cwd: configured, source: 'configured' }
+}
+
+/**
+ * 把生效的工作目录写进系统提示。
+ *
+ * 为什么必须写：`AgentOptions.cwd` **只做工具路径围栏，模型看不到**（`promptContext.ts:51` 的原话），
+ * 于是模型不知道自己在哪、只能猜相对路径 —— DSH 那边 cwd 是提示词变量，这里对齐它。
+ *
+ * 由**宿主**追加（不让插件或预设自己拼），所以插件没法用一段自造提示把它盖掉；而且写在最后，
+ * 预设里若也提了目录，以这里为准。
+ */
+export function withWorkRootHint(systemPrompt: string | undefined, cwd: string): string {
+  const base = typeof systemPrompt === 'string' ? systemPrompt.trimEnd() : ''
+  if (!cwd) return base
+  const hint = [
+    `[工作目录 / Working directory] ${cwd}`,
+    '相对路径按这个目录解析；不要在这个目录之外创建或修改文件。',
+    'Relative paths resolve against this directory; do not create or modify files outside it.',
+  ].join('\n')
+  return base ? `${base}\n\n${hint}` : hint
+}
+

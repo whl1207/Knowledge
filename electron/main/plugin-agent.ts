@@ -26,10 +26,12 @@ import { runDelegatedAgent } from './agent-loop'
 import { acquireSlot, releaseSlot, trackController, usageSnapshot, abortPluginRuns, clearUsage } from './plugin-agent-budget'
 import { resolveConsent, consentOf, setConsent, type AgentConsent } from './plugin-agent-consent'
 import { requirePluginApproval } from './plugin-approval'
-import { agentConfigOf, isAgentConfigCustomized, listAgentConfig, setAgentLimits, setAgentRelax, clearAgentConfig } from './plugin-agent-config'
+import { agentConfigOf, isAgentConfigCustomized, listAgentConfig, setAgentLimits, setAgentRelax, setAgentWorkRoot, clearAgentConfig } from './plugin-agent-config'
+import { CASE_INSENSITIVE_PATHS, assertAccess, listGrants, writableGrantPaths } from './plugin-grants'
+import fs from 'node:fs'
 import { approvalToolsOf } from './plugin-tool-approval'
 import { toolApprovalOf } from './plugin-tool-approval-store'
-import { normalizeAgentRunResult, resolveAgentRunBudget, delegableToolFilter, AGENT_RUN_LIMITS } from '@/lib/plugin/agentContract'
+import { normalizeAgentRunResult, resolveAgentRunBudget, delegableToolFilter, resolveWorkRoot, withWorkRootHint, AGENT_RUN_LIMITS } from '@/lib/plugin/agentContract'
 import type { AgentOptions } from '@/types/agent'
 
 /**
@@ -88,6 +90,17 @@ export function registerPluginAgentIpc(): void {
     //    否则会出现"先弹框问用户、用户点了允许、然后才发现 provider 缺失"这种糟糕顺序。
     const requested = pickOptions(payload?.options)
 
+    // 2.5) 工作目录（A + D1）也在这里定：它同样是"配置错了就该立刻说"的东西 ——
+    //      必须排在预算 / 弹框之前。授权可能在配置之后被撤销，所以这里**每次重算**。
+    const cfgEarly = agentConfigOf(pluginId)
+    const work = resolveWorkRoot({
+      configured: cfgEarly.workRoot,
+      incoming: typeof requested.cwd === 'string' ? requested.cwd : '',
+      writableRoots: writableGrantPaths(pluginId),
+      caseInsensitive: CASE_INSENSITIVE_PATHS,
+    })
+    if (work.error) throw new IPCError('PERMISSION_DENIED', work.error)
+
     // 3) 预算（先算出来，好在同意框里告知用户"最多几步 / 多久"）
     // 预设自己的步数上限由渲染层解析预设后带上来（主进程拿不到预设定义）；这里与插件申请取 min。
     const budget = resolveAgentRunBudget(payload?.budget, payload?.presetMaxSteps)
@@ -125,6 +138,18 @@ export function registerPluginAgentIpc(): void {
       const options: AgentOptions = { ...requested, tools: filtered.allowed }
       if (filtered.denied.length) {
         console.info(`[plugin-agent] ${pluginId} 委派工具被裁剪：${filtered.denied.join(', ')}`)
+      }
+
+      // 7) 应用工作目录（D1）：cwd 只做围栏、模型看不到（promptContext.ts:51），
+      //    所以必须由**宿主**把它写进系统提示 —— 插件自造的提示盖不掉它（追加在最后）。
+      if (work.cwd) {
+        options.cwd = work.cwd
+        options.systemPrompt = withWorkRootHint(options.systemPrompt, work.cwd)
+        if (work.source === 'configured') {
+          console.info(
+            `[plugin-agent] [audit] ${pluginId} 工作目录 = ${work.cwd}（用户配置；已写入系统提示）`,
+          )
+        }
       }
 
       return await runDelegatedAgent(options, input, budget, pluginId, controller.signal)
@@ -198,6 +223,15 @@ export function registerPluginAgentIpc(): void {
         callsInWindow: u.callsInWindow,
         limits: cfg.limits,
         relax: cfg.relax,
+        /**
+         * 被委派 agent 的**工作目录**（空串 = 默认，也就是知识库根）。
+         * 它同时是 read_file / write_file 的围栏，所以只能从下面的 `workRootOptions` 里选。
+         */
+        workRoot: cfg.workRoot,
+        /** 可选的候选根 = 该插件的**可写文件夹**授权（用户亲手授权的那些） */
+        workRootOptions: listGrants(p.id)
+          .filter((g) => g.mode === 'write' && g.isDir && g.exists)
+          .map((g) => g.path),
         /** 用户是否调过（面板据此显示"默认"） */
         customized: isAgentConfigCustomized(p.id),
         /** 工具审批三态（声明了 fs / shell 的插件，其工具默认要用户确认） */
@@ -223,9 +257,10 @@ export function registerPluginAgentIpc(): void {
 
     const hasLimits = payload?.limits !== undefined
     const hasRelax = payload?.relax !== undefined
+    const hasCwd = payload?.cwd !== undefined
     const wantsReset = payload?.reset === true
-    if (!hasLimits && !hasRelax && !wantsReset) {
-      throw new IPCError('INVALID_ARGUMENT', 'limits / relax / reset 至少要给一个')
+    if (!hasLimits && !hasRelax && !hasCwd && !wantsReset) {
+      throw new IPCError('INVALID_ARGUMENT', 'limits / relax / cwd / reset 至少要给一个')
     }
 
     if (wantsReset) {
@@ -235,13 +270,32 @@ export function registerPluginAgentIpc(): void {
     } else {
       if (hasLimits) setAgentLimits(pluginId, payload.limits)
       if (hasRelax) setAgentRelax(pluginId, payload.relax)
+      if (hasCwd) {
+        const target = String(payload.cwd ?? '').trim()
+        if (target) {
+          // 工作目录**必须**落在该插件的可写文件授权内：它同时是 read_file / write_file 的围栏，
+          // 所以"用户授权过哪个文件夹"就是它能当工作目录的全部范围（插件自己选不了别处）。
+          assertAccess(pluginId, target, 'write')
+          if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) {
+            throw new IPCError('INVALID_ARGUMENT', `工作目录必须是一个已存在的文件夹：${target}`)
+          }
+        }
+        setAgentWorkRoot(pluginId, target)
+      }
     }
     const cfg = agentConfigOf(pluginId)
     console.info(
       `[plugin-agent] [audit] ${pluginId} 额度=${cfg.limits.concurrency}/${cfg.limits.callsPerHour}` +
-        ` 放宽 fs=${cfg.relax.fs === true} mcp=${cfg.relax.mcp === true}${wantsReset ? '（已撤销自定义）' : ''}`,
+        ` 放宽 fs=${cfg.relax.fs === true} mcp=${cfg.relax.mcp === true}` +
+        ` 工作目录=${cfg.workRoot || '(默认：知识库根)'}${wantsReset ? '（已撤销自定义）' : ''}`,
     )
-    return { pluginId, limits: cfg.limits, relax: cfg.relax, customized: isAgentConfigCustomized(pluginId) }
+    return {
+      pluginId,
+      limits: cfg.limits,
+      relax: cfg.relax,
+      workRoot: cfg.workRoot,
+      customized: isAgentConfigCustomized(pluginId),
+    }
   })
 
   /**

@@ -12,6 +12,8 @@
 
 import type { PluginId } from '@/types/ids'
 import type { ToolDefinition } from '@/types/tool'
+import { AGENT_PLUGIN_EVENT_TYPES } from '@/types/agent'
+import type { PluginFsApi } from '@/shared/fsContract'
 import type {
   HostEventMap,
   PluginContext,
@@ -87,28 +89,88 @@ export class PluginServiceRegistry {
 // ---------------------------------------------------------------------------
 
 /**
+ * **按作用域分发**的事件类型（工具调用观测 + agent 输出观测）。
+ *
+ * DSH 用 `Scoped<Agent>` / isolate 让"agent 作用域的监听器只收到那个 agent"的事件；
+ * AI-KM 只有一条进程内总线、也没有 isolate，所以作用域过滤必须在这里自己做：
+ * 这些类型**只发给相关插件**（自己注册的工具、或自己委派出去的 run），其余事件
+ * （`plugin/loaded` 这类生命周期）对所有插件广播。
+ *
+ * 不这么做的后果很具体：`assistant/chunk` 会把你**在别的会话里**的对话内容推给每一个插件。
+ */
+export const SCOPED_PLUGIN_EVENTS: readonly string[] = [
+  // 工具管线（对齐 DSH tools/result + tools/pre-execute|execute|post-execute）
+  'tool/registered',
+  'tool/unregistered',
+  'tool/pre-execute',
+  'tool/post-execute',
+  'tool/error',
+  // agent 输出与状态（对齐 DSH agent/* 与 llm/stream 的逐块增量）——
+  // 名单**单一来源**在 `src/types/agent.ts` 的 AGENT_PLUGIN_EVENT_TYPES，这里只是接上
+  ...AGENT_PLUGIN_EVENT_TYPES,
+]
+
+/**
  * 最小类型化事件总线（宿主侧）。
  * 单个监听器抛异常只记日志，绝不让异常穿透——插件的一个错误监听器不得影响宿主与其他插件。
+ *
+ * 两种订阅：`on` 是**全局**（生命周期事件），`onScoped` 是**按插件**（工具 / agent 观测，
+ * 见 `SCOPED_PLUGIN_EVENTS`）。插件的 `ctx.on` 同时登记两边，由宿主按事件类型决定走哪条。
  */
 export class PluginEventBus {
   private listeners = new Map<string, Set<(ev: unknown) => void>>()
+  /** pluginId → 事件类型 → 监听器（按作用域分发用） */
+  private scoped = new Map<string, Map<string, Set<(ev: unknown) => void>>>()
 
   on<T extends keyof HostEventMap>(type: T, listener: (ev: HostEventMap[T]) => void): () => void {
-    const key = String(type)
-    let set = this.listeners.get(key)
+    return this.add(this.listeners, String(type), listener as (ev: unknown) => void)
+  }
+
+  /** 只发给某一个插件（`emitScoped` 的目标表） */
+  onScoped<T extends keyof HostEventMap>(pluginId: string, type: T, listener: (ev: HostEventMap[T]) => void): () => void {
+    const id = String(pluginId || '').trim()
+    if (!id) return () => undefined
+    let byType = this.scoped.get(id)
+    if (!byType) {
+      byType = new Map()
+      this.scoped.set(id, byType)
+    }
+    const off = this.add(byType, String(type), listener as (ev: unknown) => void)
+    return () => {
+      off()
+      // 空壳清理：插件卸载 / 全部退订后不留 map 项
+      if (!byType.size) this.scoped.delete(id)
+    }
+  }
+
+  private add(
+    table: Map<string, Set<(ev: unknown) => void>>,
+    key: string,
+    listener: (ev: unknown) => void,
+  ): () => void {
+    let set = table.get(key)
     if (!set) {
       set = new Set()
-      this.listeners.set(key, set)
+      table.set(key, set)
     }
-    const wrapped = listener as (ev: unknown) => void
-    set.add(wrapped)
+    set.add(listener)
     return () => {
-      set?.delete(wrapped)
+      set?.delete(listener)
     }
   }
 
   emit<T extends keyof HostEventMap>(type: T, ev: HostEventMap[T]): void {
-    const set = this.listeners.get(String(type))
+    this.dispatch(this.listeners.get(String(type)), type, ev)
+  }
+
+  /** 只发给该插件的按作用域监听器（工具 / agent 观测事件走这条） */
+  emitScoped<T extends keyof HostEventMap>(pluginId: string, type: T, ev: HostEventMap[T]): void {
+    const id = String(pluginId || '').trim()
+    if (!id) return
+    this.dispatch(this.scoped.get(id)?.get(String(type)), type, ev)
+  }
+
+  private dispatch(set: Set<(ev: unknown) => void> | undefined, type: unknown, ev: unknown): void {
     if (!set) return
     for (const listener of Array.from(set)) {
       try {
@@ -117,6 +179,11 @@ export class PluginEventBus {
         console.error(`[plugin] 事件监听器异常 (${String(type)}):`, e)
       }
     }
+  }
+
+  /** 卸载某插件时清理它的按作用域监听（disposer 已覆盖；此处兜底防泄漏） */
+  clearScoped(pluginId: string): void {
+    this.scoped.delete(String(pluginId || '').trim())
   }
 
   /** 卸载某插件时清理其全部监听（disposer 已覆盖；此处用于兜底统计） */
@@ -156,6 +223,8 @@ export interface PluginContextDeps {
     listener: (ev: HostEventMap[T]) => void,
   ) => () => void
   host: PluginHostApi
+  /** 文件能力（两侧同形状；主进程直接实现，渲染层经 IPC） */
+  fs: PluginFsApi
   storage: PluginStorage
   log: PluginLogger
 }
@@ -216,6 +285,7 @@ export function createPluginContext(deps: PluginContextDeps): PluginContextHandl
     },
 
     host: deps.host,
+    fs: deps.fs,
     storage: deps.storage,
     log: deps.log,
   }

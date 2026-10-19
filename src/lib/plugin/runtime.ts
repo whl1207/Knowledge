@@ -20,8 +20,12 @@ import { getPluginBridge, type PluginBridgeApi, type PluginClientBundle } from '
 import { createPluginLocaleApi, type PluginLocaleApi } from './locale'
 import { createPluginLlmApi, type PluginLlmApi } from './llm'
 import { createPluginFilesApi, releasePluginPdfCache, type PluginFilesApi } from './files'
+import { createPluginFsApi } from './fs'
 import { createPluginAppApi, type PluginAppApi } from './appApi'
 import { createPluginAgentApi, type PluginAgentApi } from './agent'
+import { createPluginAgentsApi, type PluginAgentsApi } from './agents'
+import { createPluginImageApi, type PluginImageApi } from './image'
+import { PLUGIN_EVENT_TYPES, createPluginEventsApi } from './events'
 import { listPluginAgentPresets, resolvePluginAgentPreset } from './agentPresetOptions'
 import { createPluginTtsApi, type PluginTtsApi } from './tts'
 import { PluginShortcutService, type ShortcutRecord } from './shortcuts'
@@ -29,6 +33,7 @@ import { setPluginDeclaredToolNames, setPluginToolNames } from '@/lib/agent/capa
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import type { PluginLogLevel, PluginSnapshot, PluginStatus } from '@/types/plugin'
+import type { PluginFsApi } from '@/shared/fsContract'
 // 宿主自带的 Vue 运行时：以 ctx.vue 交给插件，保证**单实例**（插件自带 vue 会导致响应式失效）
 import * as VueRuntime from 'vue'
 import { computed, ref } from 'vue'
@@ -108,6 +113,15 @@ export interface ClientPluginContext {
    * （选一次就记住、跨重启有效，可在「插件 → 数据」里撤销）。
    */
   readonly files: PluginFilesApi
+  /**
+   * 文件能力（**两个半边同形状**；`ctx.files` 的超集）。
+   *
+   * 与 `ctx.files` 的分工：选择框（pick*）与 `openInApp` 留在 `ctx.files`（那是用户交互），
+   * 读写与目录操作走 `ctx.fs`——多了「目标身份（`resolve`）」「版本（`stat` → `version`）」
+   * 与「字面量编辑（`editText`）」，写入可带 `expectedVersion` 做乐观并发。
+   * 契约见 `src/shared/fsContract.ts`；老代码继续用 `ctx.files` 不会坏。
+   */
+  readonly fs: PluginFsApi
   /** 应用信息（只读）：名称 / 版本 / 语言、预设智能体清单 */
   readonly app: PluginAppApi
   /**
@@ -124,6 +138,24 @@ export interface ClientPluginContext {
    * - 只能跑**界面半边**（主进程半边的 `ctx.tool` 无法委派，原因见本文件顶部与设计 §8.5）。
    */
   readonly agent: PluginAgentApi
+  /**
+   * 委派**句柄**层（与 `ctx.agent` 并存，不是替换）：`create()` 返回句柄，可 `whenIdle()` / `stream()` /
+   * `usage()` / 幂等 `dispose()`，并支持同时跑多个委派。
+   *
+   * 两条**有意不支持**（详见 `src/lib/plugin/agents.ts` 文件头）：
+   * - `followup / steer / inject`：现有委派是"一次请求一次响应"，跑完会话即销毁；
+   * - `stream()` 只产出终态：增量文本请订阅 `ctx.on('assistant/chunk', …)`（按作用域只给自己）。
+   */
+  readonly agents: PluginAgentsApi
+  /**
+   * 生图（权限 `image`）：`generate()` 返回可直接显示的图片 URL。
+   *
+   * 失败**不抛异常**——返回 `{ ok:false, code, error }`；取消（`signal` / `cancelAll`）是
+   * `code:'IMAGE_CANCELLED'`。服务地址、模型类型、token 都由用户在「设置 → 模型 → 生图」配置，
+   * 插件既拿不到 token，也决定不了"用哪个模型/服务"（与 `ctx.llm` 同一条边界）。
+   * 生成的图要不要落盘、落到哪，由插件自己用 `ctx.fs`（用户授权过的路径）决定。
+   */
+  readonly image: PluginImageApi
   /**
    * 语音能力：把一段文本交给应用自己的 TTS 念出来（引擎 / 音色 / 语速由「设置 → 语音」决定）。
    * 不需要声明权限，但 `available` 为 false 时要用 `reason` 给出可读提示。
@@ -333,6 +365,7 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
     }
   }
 
+  const eventsApi = createPluginEventsApi({ pluginId: snapshot.id, log: deps.log })
   const ctx: ClientPluginContext = {
     plugin: { id: snapshot.id, name: snapshot.name, version: snapshot.version, dir: snapshot.dir },
     config: snapshot.config ?? {},
@@ -348,6 +381,11 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
       permitted: (snapshot.permissions ?? []).includes('fs'),
       log: deps.log,
     }),
+    fs: createPluginFsApi({
+      pluginId: snapshot.id,
+      permitted: (snapshot.permissions ?? []).includes('fs'),
+      log: deps.log,
+    }),
     app: createPluginAppApi(),
     agent: createPluginAgentApi({
       pluginId: snapshot.id,
@@ -356,6 +394,19 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
       bridge: () => getPluginBridge(),
       resolvePreset: resolvePluginAgentPreset,
       listPresets: listPluginAgentPresets,
+    }),
+    agents: createPluginAgentsApi({
+      pluginId: snapshot.id,
+      permitted: (snapshot.permissions ?? []).includes('agent.run'),
+      log: deps.log,
+      bridge: () => getPluginBridge(),
+      resolvePreset: resolvePluginAgentPreset,
+      listPresets: listPluginAgentPresets,
+    }),
+    image: createPluginImageApi({
+      pluginId: snapshot.id,
+      permitted: (snapshot.permissions ?? []).includes('image'),
+      log: deps.log,
     }),
     tts: createPluginTtsApi({ pluginId: snapshot.id, log: deps.log }),
     shortcuts: {
@@ -387,7 +438,18 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
         return slotRegistry.entriesAll(slot)
       },
     },
-    on: (type, listener) => track(bus.on(type, listener)),
+    /**
+     * 订阅事件。**按类型分流**（与主进程半边同一套判定）：
+     * - 观测类（工具调用 / agent 输出与流式增量）→ 走主进程转发，**只收到属于自己的**那些
+     *   （对齐 DSH 的 `ctx.remote.$on` + 允许名单）；
+     * - 其余（`plugin/loaded` 这类渲染层本地事件）→ 走渲染层总线，行为不变。
+     */
+    on: (type, listener) =>
+      track(
+        PLUGIN_EVENT_TYPES.includes(String(type) as (typeof PLUGIN_EVENT_TYPES)[number])
+          ? eventsApi.on(String(type), listener)
+          : bus.on(type, listener),
+      ),
     effect: (fn) => {
       const cleanup = fn()
       if (typeof cleanup !== 'function') return () => {}

@@ -47,13 +47,14 @@ import { sessionLog } from './session-log'
 import { cleanupSpillDirs } from './tool-spill'
 import { skillService, parseSkillMetadata } from './skill-service'
 import { registerNamespacedIpc, sendToAll } from './ipc-registry'
-import { registerCoreTools, setWebSearchConfig, getWebSearchConfig, runWebSearch } from './tools'
+import { registerCoreTools, setWebSearchConfig, getWebSearchConfig, runWebSearch, setWebFetchConfig, getWebFetchConfig, runWebFetch } from './tools'
 import { setAgentBroadcast } from './agent-loop'
 // 插件宿主（P0）：插件工具必须在建窗口/建会话之前注册好，见 app.whenReady
 import { initPluginHost, registerPluginIpc } from './plugin-ipc'
 import { registerPluginFilesIpc } from './plugin-files'
 import { registerPluginAgentIpc } from './plugin-agent'
 import { registerPluginToolApproval, registerPluginToolApprovalIpc } from './plugin-tool-approval'
+import { attachPluginEventForwarding, registerPluginEventsIpc } from './plugin-events'
 import { pluginHost } from './plugin-host'
 // 局域网访客（网页端）主机侧执行层（P3 令牌/并发 + P4 智能体桥，见该文件头注释）
 import {
@@ -80,6 +81,7 @@ import {
 import { LAN_GUEST_COOKIE } from '@/shared/lanGuest'
 import { LAN_FS_PREFIX, handleLanFsRequest, lanFsCapability } from './lan-fs-api'
 import { registerTtsIpc, disposeTtsService } from './tts-service'
+import { registerPythonAppIpc, disposePythonApps } from './python-app-service'
 import { registerCollabIpc, stopCollab } from './collab-service'
 import { registerRemoteFsIpc, stopRemoteFsAll } from './remote-fs-service'
 import { initMapTiles, registerMapTilesIpc } from './map-tiles'
@@ -377,9 +379,15 @@ app.whenReady().then(async () => {
   // 必须在插件宿主起来之后注册 —— 它按工具名归因到已装插件。
   registerPluginToolApproval()
   registerPluginToolApprovalIpc()
+  // 插件观测事件的界面半边通道（对齐 DSH 的 ctx.remote.$on + 允许名单）：
+  // 订阅 + 把 scoped 事件推给订阅了它的窗口
+  registerPluginEventsIpc()
+  attachPluginEventForwarding()
   await initPluginHost().catch((e) => console.error('[plugin] 宿主初始化失败（降级为无插件）:', e))
   // 本地 ONNX TTS（Kokoro / Piper）主进程服务
   registerTtsIpc()
+  // 独立安装的本地 Python 应用（Qwen3-TTS / Qwen-Image-Edit）：按设置里的安装目录拉起 / 停止
+  registerPythonAppIpc()
   // 局域网协同文件编辑（WebSocket 服务器 + 房间管理）
   registerCollabIpc()
   // 局域网远程文件共享（HTTP 只读：目录列表 / 预览 / 下载）
@@ -428,6 +436,9 @@ app.whenReady().then(async () => {
   // Agent 循环事件广播：turn/step/tool/状态变化推送给所有窗口
   setAgentBroadcast((ev) => {
     sendToAll('agent:event', ev)
+    // 同一份事件再按**作用域**转发给插件：只发给委派这次 run 的那个插件
+    //（DSH 靠 Scoped<Agent> 做到"agent 作用域的监听器只收到那个 agent"；这里是它的显式版）
+    pluginHost.forwardAgentEvent(ev)
   })
   // 技能目录变更广播：skill-service 的 watcher 发现 added/removed/changed 后
   // 推送 skill:change，渲染进程增量刷新技能列表
@@ -516,6 +527,7 @@ app.on('will-quit', () => {
   mcpService.shutdown().catch((err) => console.error('[mcp] shutdown error', err))
   mcpExposeServer.close().catch((err) => console.error('[mcp-expose] close error', err))
   disposeTtsService()
+  disposePythonApps()
   stopCollab().catch(() => {})
   stopRemoteFsAll()
   // 插件宿主：卸载全部插件（撤销其注册与后台资源）
@@ -1546,6 +1558,35 @@ ipcMain.handle(
       }
     } catch (e: any) {
       return { success: false, error: e?.message || String(e), elapsedMs: Date.now() - started }
+    }
+  },
+)
+
+// ==================== 网页抓取通道配置（设置页「工具 → 抓取」） ====================
+// 与搜索源同一套模式：渲染进程把配置推给主进程（webFetch:set-config），web_fetch 按配置依次回退；
+// webFetch:test 供设置页「测试抓取」直接验证当前通道链（返回 success 而非 ok，避免被 IPC 信封误判）。
+ipcMain.handle('webFetch:get-config', () => getWebFetchConfig())
+
+ipcMain.handle('webFetch:set-config', (_event, cfg?: unknown) => setWebFetchConfig(cfg))
+
+ipcMain.handle(
+  'webFetch:test',
+  async (_event, payload?: { url?: string; config?: unknown }) => {
+    const url = String(payload?.url || '').trim() || 'https://example.com'
+    const cfg = payload && 'config' in payload ? setWebFetchConfig(payload.config) : getWebFetchConfig()
+    const started = Date.now()
+    try {
+      const r = await runWebFetch(url, cfg)
+      return {
+        success: true,
+        url: r.url,
+        via: r.via,
+        elapsedMs: Date.now() - started,
+        chars: r.length,
+        preview: r.text.slice(0, 500),
+      }
+    } catch (e: any) {
+      return { success: false, url, error: e?.message || String(e), elapsedMs: Date.now() - started }
     }
   },
 )
@@ -4344,7 +4385,14 @@ ipcMain.handle('registerASRShortcut', async (event, shortcut: string) => {
     registeredASRShortcut = null
   }
   
-  if (!shortcut || !win) return { success: false, error: '无效的快捷键' }
+  // 只校验快捷键**本身**，不要连主窗口一起要求：系统级快捷键注册根本不需要窗口。
+  // 踩过的坑：以文件关联（双击 .md / 图片等）启动时按设计**不建主窗口**（见 whenReady 里的
+  // needsMainWindow），只开「文件独立窗口」，win 恒为 null；而文件窗口的 App.vue 同样会
+  // initGlobalVoice → syncShortcut，于是这里的 `!win` 让主键和两组备选**全部**报
+  // 「无效的快捷键」——用户看到「注册失败（备选组合也不可用）：无效的快捷键」，
+  // 以为是组合冲突，实际组合是好的。同理适用于「主窗口已关、只剩文件窗口」的情形。
+  const accel = String(shortcut || '').trim()
+  if (!accel) return { success: false, error: '无效的快捷键' }
   
   try {
     // 将快捷键格式转换为 Electron 格式
@@ -4352,23 +4400,28 @@ ipcMain.handle('registerASRShortcut', async (event, shortcut: string) => {
     // 注意：Alt+Space 是 Windows 系统菜单快捷键，会造成冲突
     // Electron 的 globalShortcut 不支持按键弹起检测，
     // 所以使用按下/弹起切换模式
-    const electronShortcut = shortcut
+    const electronShortcut = accel
       .replace('Win', 'CommandOrControl')
     
     const success = globalShortcut.register(electronShortcut, () => {
       // 按下快捷键时，通知渲染进程切换 ASR 状态。
       // 投递给「当前聚焦的那个窗口」：全局语音输入在每个窗口各自初始化，谁在前台就把热键给谁
       // （于是在设置窗口 / 文件窗口 / 浏览器 Agent 窗口里也能直接说话输入当前焦点所在的输入框），
-      // 没有聚焦窗口时退回主窗口。
-      const target = BrowserWindow.getFocusedWindow() || win
+      // 没有聚焦窗口时退回主窗口；主窗口不存在（例如只开了文件窗口）则退回任意存活窗口 ——
+      // 否则按了没反应，反而像是注册失败。
+      const target = BrowserWindow.getFocusedWindow()
+        || (win && !win.isDestroyed() ? win : null)
+        || BrowserWindow.getAllWindows().find(w => !w.isDestroyed())
       target?.webContents?.send('asr-shortcut-toggle')
     })
     
     if (success) {
-      registeredASRShortcut = shortcut
+      registeredASRShortcut = accel
       return { success: true }
     } else {
-      return { success: false, error: '快捷键注册失败，可能与其他应用冲突' }
+      // register() 返回 false 有两种原因：被别的软件占用，或 Electron 不认这个按键名；
+      // 不写清「也可能是组合不受支持」时，用户只会反复换组合而找不到原因。
+      return { success: false, error: '快捷键注册失败，可能已被其它软件占用，或系统不支持该组合' }
     }
   } catch (error: any) {
     return { success: false, error: error.message }

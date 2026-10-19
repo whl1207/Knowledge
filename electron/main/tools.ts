@@ -32,11 +32,16 @@ import { isBotChallengePage, extractDoiFromUrl, fetchDoiViaCrossref } from '@/sh
 import { computeEditDiff, makeEditDiffPreview, countTextLines, EDIT_DIFF_MAX_CHARS, type EditDiffFilePreview } from '@/shared/editDiff'
 import { toolResultBudgetForWindow } from '@/shared/toolResultBudget'
 import {
-  buildDeepSeekSearchRequest,
-  buildDeepSeekSearchUrl,
-  DEEPSEEK_SEARCH_DEFAULT_API_VERSION,
-  parseDeepSeekSearchResponse,
-} from '@/lib/agent/deepseekSearch'
+  runDeepSeekSearchApi,
+  runDeepSeekFetchApi,
+} from '@/shared/deepseekApi'
+import {
+  normalizeWebFetchConfig,
+  normalizeDeepSeekFetchConfig,
+  enabledWebFetchChannels,
+  webFetchChannelMeta,
+  type WebFetchConfig,
+} from '@/shared/webFetch'
 import { skillService } from './skill-service'
 import { requestQuestions, requestPlanReview, setAgentPlan, setAgentTodos, getAgentTodos, createAgent, getAgent, disposeAgent, awaitAgentTurn, requestRendererTask } from './agent-loop'
 import { jobRegistry } from './job-registry'
@@ -1253,6 +1258,20 @@ export function getWebSearchConfig(): WebSearchConfig {
   return JSON.parse(JSON.stringify(webSearchConfig))
 }
 
+/** 当前生效的抓取通道配置（默认 direct + browser，与旧行为一致；setWebFetchConfig 覆盖） */
+let webFetchConfig: WebFetchConfig = normalizeWebFetchConfig(null)
+
+/** 注入抓取通道配置（IPC webFetch:set-config / 测试抓取共用），返回归一化后的配置 */
+export function setWebFetchConfig(cfg: unknown): WebFetchConfig {
+  webFetchConfig = normalizeWebFetchConfig(cfg)
+  return JSON.parse(JSON.stringify(webFetchConfig))
+}
+
+/** 读取当前抓取通道配置（深拷贝，避免调用方改动内部状态） */
+export function getWebFetchConfig(): WebFetchConfig {
+  return JSON.parse(JSON.stringify(webFetchConfig))
+}
+
 const SEARCH_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
 
@@ -1556,27 +1575,23 @@ async function fetchSearchJson(url: string, init: RequestInit = {}, timeoutMs = 
   }
 }
 
-/** 统一清洗结果（去空值、只保留 http(s) 链接） */
+/** 统一清洗结果（去空值、只保留 http(s) 链接；长摘要与正文一并保留供模型阅读） */
 function cleanSearchItems(items: any[]): WebSearchItem[] {
   return (Array.isArray(items) ? items : [])
     .map((it) => ({
       title: String(it?.title || '').trim(),
       url: String(it?.url || '').trim(),
-      snippet: String(it?.snippet || '').trim(),
+      snippet: String(it?.snippet || it?.summary || '').trim(),
+      ...(typeof it?.summary === 'string' && it.summary.trim() ? { summary: it.summary.trim() } : {}),
+      ...(typeof it?.content === 'string' && it.content.trim() ? { content: it.content.trim().slice(0, 4000) } : {}),
     }))
     .filter((it) => it.title && /^https?:/i.test(it.url))
 }
 
-/** 单次搜索产物：结果列表 + 实际通道（browser / html-fallback / html / json / api） */
+/** 单次搜索产物：结果列表 + 实际通道（browser / html-fallback / html / json / api / deepseek-api …） */
 interface SearchOutcome {
   items: WebSearchItem[]
   via: string
-  /**
-   * 搜索源自带的**总结正文**（可选）。
-   * 目前只有 DeepSeek 官方搜索会产生：它的一次搜索本身就是"服务端跑工具 + 模型作答"的
-   * 完整模型调用，`text` 块就是基于搜索结果写下的总结。其余搜索源只返回链接列表。
-   */
-  answer?: string
 }
 
 /** Bing：隐藏浏览器渲染为主，HTML 解析兜底 */
@@ -1910,58 +1925,29 @@ async function searchCustomSource(
 }
 
 /**
- * DeepSeek 官方搜索：走 **Anthropic 兼容 Messages 端点** + 服务端原生 `web_search` 工具。
+ * DeepSeek 官方搜索：走原生 **Search API**（`POST <base>/v1/tools/search`）。
  *
- * 三条与别的源不同的性质，都直接影响可用性判断：
- *  1. **每次搜索是一次模型调用**（不是搜索 API 调用）——延迟与 token 成本按 LLM 计；
- *  2. **只在桌面端可用**：`api.deepseek.com` 不给浏览器放 CORS，渲染层走不通；
- *  3. **可能 200 但不触发搜索**——此时没有结果块，`parseDeepSeekSearchResponse` 会显式抛错，
- *     而不是把它当成"0 条结果"（那会让模型以为"网上没有"）。
+ * 与旧实现（Anthropic 兼容 Messages + 服务端 `web_search` 工具）的关键区别：
+ *  1. **不再是一次模型调用**——直接返回结构化结果，延迟与费用都按请求次数计；
+ *  2. 手机 / 网页端也能用（纯 HTTP + Bearer，不依赖 Anthropic 端点）；
+ *  3. 空 `results` 是合法的“无匹配”，由上层按回退策略处理，而不是抛“服务端没触发搜索”。
  *
- * 请求组装与响应解析在 `@/lib/agent/deepseekSearch`（纯函数，有自测覆盖）。
+ * 请求组装 / 响应解析 / 错误翻译在 `@/shared/deepseekApi`（纯逻辑有自测覆盖）。
  */
 async function searchDeepSeekOfficial(query: string, cfg: WebSearchConfig): Promise<SearchOutcome> {
   const ds = normalizeDeepSeekSearchConfig((cfg as any).deepseek)
   const apiKey = String(ds.apiKey || '').trim()
   if (!apiKey) throw new Error('未配置 DeepSeek API Key（可在「工具 → 搜索」填，或让对话使用 DeepSeek 以复用凭据）')
 
-  const url = buildDeepSeekSearchUrl(ds.apiHost)
-  const body = buildDeepSeekSearchRequest({
+  const items = await runDeepSeekSearchApi({
     query,
-    model: ds.model,
-    maxUses: ds.maxUses,
+    maxResults: cfg.maxResults,
+    needContent: !!ds.needContent,
+    apiHost: ds.apiHost,
+    apiKey,
   })
-  // 鉴权两种口径都带上：Anthropic 原生用 x-api-key，Bearer 兼容更广（DSH 亦按 Anthropic 语义发送）
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'anthropic-version': DEEPSEEK_SEARCH_DEFAULT_API_VERSION,
-    'x-api-key': apiKey,
-    Authorization: `Bearer ${apiKey}`,
-    'User-Agent': `ai-km/${app.getVersion?.() || '0'}`,
-  }
-
-  let data: any
-  try {
-    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
-    const text = await res.text()
-    if (!res.ok) {
-      // 把服务端的错误正文带出来（401/403 = 凭据问题；429/5xx = 稍后重试）
-      throw new Error(`HTTP ${res.status}${text ? `：${text.slice(0, 300)}` : ''}`)
-    }
-    try {
-      data = JSON.parse(text)
-    } catch {
-      throw new Error('响应不是有效 JSON（端点可能不是 Anthropic 兼容 Messages 接口）')
-    }
-  } catch (e: any) {
-    throw new Error(`DeepSeek 搜索请求失败（端点 ${url}）：${e?.message || String(e)}`)
-  }
-
-  // 解析失败（没有结果块 / 服务端工具报错）会在此抛出，信息里带诊断 code
-  const parsed = parseDeepSeekSearchResponse(data, cfg.maxResults)
-  // answer = 服务端那一轮基于搜索结果写下的总结（可能为空）；一起带回给模型，
-  // 否则就等于白付了"服务端跑工具 + 模型作答"这次模型调用的钱
-  return { items: cleanSearchItems(parsed.items), via: 'deepseek-official', answer: parsed.answer }
+  // 官方结果带长摘要（summary）：原样保留，模型读依据比只看短摘要可靠
+  return { items: cleanSearchItems(items), via: 'deepseek-api' }
 }
 
 /** 单个搜索源执行（Bing/百度 走查询改写；其余源保持原句） */
@@ -1996,7 +1982,8 @@ function toSearchItems(items: WebSearchItem[], maxResults: number): WebSearchIte
     title: it.title,
     url: it.url,
     snippet: it.snippet || '',
-    summary: it.snippet || '',
+    summary: it.summary || it.snippet || '',
+    ...(it.content ? { content: it.content } : {}),
   }))
 }
 
@@ -2075,8 +2062,6 @@ export async function runWebSearch(rawQuery: string, cfg: WebSearchConfig = webS
           providers,
           via: outcome.via,
           results: toSearchItems(outcome.items, config.maxResults),
-          // 源自带的总结（目前只有 DeepSeek 官方搜索有）原样带回
-          ...(outcome.answer ? { answer: outcome.answer } : {}),
           elapsedMs: Date.now() - started,
           attempts,
         }
@@ -2103,8 +2088,6 @@ async function webSearch(input: any): Promise<ToolResult> {
         provider: r.provider,
         providers: r.providers,
         via: r.via,
-        // 源自带的总结（DeepSeek 官方搜索有）放在链接列表之前，便于模型先用结论再用来源
-        ...(r.answer ? { answer: r.answer } : {}),
         results: r.results,
       },
     }
@@ -2234,17 +2217,14 @@ async function parseXlsxFile(filePath: string): Promise<string> {
   return parts.join('\n\n')
 }
 
-async function webFetch(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const url = String(input?.url ?? '')
-  if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'url 参数必填（http/https）' }
-
-  // 目标可能为 DOI 链接（doi.org 或裸 DOI）：命中反爬验证页时可直接用 Crossref 降级获取元数据
-  const doi = extractDoiFromUrl(url)
-
-  // 通道 1：直接 fetch（快；带浏览器头提高通过率）
+/**
+ * 直接访问通道：HTTP 请求 + HTML 正文提取 / PDF 解析。
+ * 失败（HTTP 非 2xx / 超时 / 内容为空 / 反爬验证页）一律抛错，由上层决定是否回退。
+ * 命中反爬验证页且目标是 DOI 时，先试 Crossref 元数据（无需 Key），失败再抛错。
+ */
+async function fetchViaDirect(url: string, doi: string | null): Promise<{ text: string; via: string }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 20000)
-  let directError = ''
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -2256,60 +2236,129 @@ async function webFetch(input: any, ctx: ToolExecutionContext): Promise<ToolResu
         'Upgrade-Insecure-Requests': '1',
       },
     })
-    if (res.ok) {
-      // 先读二进制：既能用魔数识别 PDF，也可回退按 UTF-8 解码为 HTML
-      const buf = new Uint8Array(await res.arrayBuffer())
-      const ctype = (res.headers.get('content-type') || '').toLowerCase()
-      const isPdfUrl = /\.pdf($|\?)/i.test(url)
-      const isPdfMagic = buf.length >= 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46 // %PDF
-      if (ctype.includes('application/pdf') || isPdfUrl || isPdfMagic) {
-        // PDF 文档：用 pdfjs-dist 提取正文文本（不能按 HTML 文本解码，否则得到 %PDF 乱码）
-        try {
-          const pdfText = await parsePdfBytes(buf)
-          if (pdfText && pdfText.trim().length > 0) {
-            return { ok: true, value: { url, text: pdfText.slice(0, 20000), length: pdfText.length, via: 'pdf' } }
-          }
-          return { ok: false, error: 'PDF 解析结果为空（可能是扫描件/图片型 PDF，建议改用 OCR 或截图）' }
-        } catch (e: any) {
-          return { ok: false, error: `PDF 解析失败: ${e?.message || String(e)}` }
-        }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    // 先读二进制：既能用魔数识别 PDF，也可回退按 UTF-8 解码为 HTML
+    const buf = new Uint8Array(await res.arrayBuffer())
+    const ctype = (res.headers.get('content-type') || '').toLowerCase()
+    const isPdfUrl = /\.pdf($|\?)/i.test(url)
+    const isPdfMagic = buf.length >= 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46 // %PDF
+    if (ctype.includes('application/pdf') || isPdfUrl || isPdfMagic) {
+      // PDF 文档：用 pdfjs-dist 提取正文文本（不能按 HTML 文本解码，否则得到 %PDF 乱码）
+      let pdfText = ''
+      try {
+        pdfText = await parsePdfBytes(buf)
+      } catch (e: any) {
+        throw new Error(`PDF 解析失败: ${e?.message || String(e)}`)
       }
-      const html = new TextDecoder().decode(buf)
-      const text = extractTextFromHtml(html)
-      if (text.length > 50) {
-        // 检测到反爬验证页（人机验证/WAF/Cloudflare）：不当作成功内容返回
-        if (isBotChallengePage(text)) {
-          if (doi) {
-            const crossrefText = await fetchDoiViaCrossref(doi, controller.signal)
-            if (crossrefText) {
-              return { ok: true, value: { url, text: crossrefText.slice(0, 20000), length: crossrefText.length, via: 'crossref' } }
-            }
-          }
-          directError = '目标站点需要人机验证（验证页）'
-        } else {
-          return { ok: true, value: { url, text: text.slice(0, 20000), length: text.length, via: 'fetch' } }
-        }
-      } else {
-        directError = '页面内容为空'
+      if (!pdfText || !pdfText.trim()) {
+        throw new Error('PDF 解析结果为空（可能是扫描件/图片型 PDF，建议改用 OCR 或截图）')
       }
-    } else {
-      directError = `HTTP ${res.status}`
+      return { text: pdfText, via: 'pdf' }
     }
+    const html = new TextDecoder().decode(buf)
+    const text = extractTextFromHtml(html)
+    if (text.length <= 50) throw new Error('页面内容为空')
+    // 检测到反爬验证页（人机验证/WAF/Cloudflare）：不当作成功内容返回
+    if (isBotChallengePage(text)) {
+      if (doi) {
+        const crossrefText = await fetchDoiViaCrossref(doi, controller.signal)
+        if (crossrefText) return { text: crossrefText, via: 'crossref' }
+      }
+      throw new Error('目标站点需要人机验证（验证页）')
+    }
+    return { text, via: 'fetch' }
   } catch (e: any) {
-    directError = e?.name === 'AbortError' ? '请求超时' : `抓取失败: ${e?.message || String(e)}`
+    if (e?.name === 'AbortError') throw new Error('请求超时')
+    throw e
   } finally {
     clearTimeout(timer)
   }
+}
 
-  // 通道 2：反爬兜底 —— 直接 fetch 失败（403/超时/空内容/验证页）时用无头浏览器执行 JS 抓取
-  try {
-    const bodyText = await fetchViaBrowser(url)
-    if (bodyText && bodyText.length > 0 && !isBotChallengePage(bodyText)) {
-      return { ok: true, value: { url, text: bodyText.slice(0, 20000), length: bodyText.length, via: 'browser' } }
+/** DeepSeek Fetch 通道：官方接口在服务端抓取并返回 Markdown 正文 */
+async function fetchViaDeepSeek(url: string, config: WebFetchConfig): Promise<string> {
+  const ds = normalizeDeepSeekFetchConfig(config.deepseek)
+  const apiKey = String(ds.apiKey || '').trim()
+  if (!apiKey) {
+    throw new Error('未配置 DeepSeek API Key（可在「工具 → 抓取」填，或让对话使用 DeepSeek 以复用凭据）')
+  }
+  const page = await runDeepSeekFetchApi({ url, apiKey, apiHost: ds.apiHost })
+  return page.content
+}
+
+/**
+ * 执行一次网页抓取（web_fetch 工具与设置页「测试抓取」共用）。
+ *
+ * 按配置里的顺序依次尝试**已开启**的通道：direct → deepseek → browser（顺序可调）。
+ * 每个通道失败都只记下原因并继续；全部失败时抛错，错误信息里带每个通道的具体原因。
+ */
+export async function runWebFetch(
+  rawUrl: string,
+  cfg: WebFetchConfig = webFetchConfig,
+): Promise<{ url: string; text: string; length: number; via: string }> {
+  const url = String(rawUrl ?? '').trim()
+  if (!/^https?:\/\//i.test(url)) throw new Error('url 参数必填（http/https）')
+  const config = normalizeWebFetchConfig(cfg)
+  const channels = enabledWebFetchChannels(config)
+  if (!channels.length) throw new Error('抓取通道全部关闭：请在「工具 → 抓取」中至少开启一种')
+
+  // 目标可能为 DOI 链接（doi.org 或裸 DOI）：命中反爬验证页时可用 Crossref 降级获取元数据
+  const doi = extractDoiFromUrl(url)
+  const failures: string[] = []
+
+  for (const channel of channels) {
+    const label = webFetchChannelMeta(channel).label
+    try {
+      let text = ''
+      let via: string = channel
+      if (channel === 'direct') {
+        const r = await fetchViaDirect(url, doi)
+        text = r.text
+        via = r.via
+      } else if (channel === 'deepseek') {
+        text = await fetchViaDeepSeek(url, config)
+      } else {
+        text = await fetchViaBrowser(url)
+      }
+
+      const trimmed = String(text || '').trim()
+      if (!trimmed) throw new Error('返回内容为空')
+      // DeepSeek 返回的已经是服务端提取好的 Markdown，不做验证页特征匹配（避免正文误判）
+      if (channel !== 'deepseek' && isBotChallengePage(trimmed)) throw new Error('返回人机验证页')
+      return { url, text: trimmed.slice(0, 20000), length: trimmed.length, via }
+    } catch (e: any) {
+      failures.push(`${label}：${e?.message || String(e)}`)
     }
-    return { ok: false, error: `抓取失败: ${directError}` }
+  }
+
+  // 全通道失败后的最后兜底：DOI 目标用 Crossref 元数据（direct 关闭时也能救回来）
+  if (doi) {
+    try {
+      const crossrefText = await fetchDoiViaCrossref(doi)
+      if (crossrefText && crossrefText.trim()) {
+        return {
+          url,
+          text: crossrefText.slice(0, 20000),
+          length: crossrefText.length,
+          via: 'crossref',
+        }
+      }
+    } catch {
+      /* Crossref 也失败：保留下面的通道错误 */
+    }
+  }
+
+  throw new Error(`抓取失败 —— ${failures.join('；')}`)
+}
+
+async function webFetch(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const url = String(input?.url ?? '')
+  if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'url 参数必填（http/https）' }
+  try {
+    const r = await runWebFetch(url)
+    return { ok: true, value: { url: r.url, text: r.text, length: r.length, via: r.via } }
   } catch (e: any) {
-    return { ok: false, error: `抓取失败: ${directError}（浏览器兜底也失败: ${e?.message || String(e)}）` }
+    return { ok: false, error: e?.message || String(e) }
   }
 }
 
@@ -3075,7 +3124,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('web_fetch', '获取网页完整内容（自动过滤 HTML 标签）。用于 web_search 之后深入阅读具体页面并提取信息。', webFetch, {
+    defineTool('web_fetch', '获取网页完整内容（自动过滤 HTML 标签）。按设置页「工具 → 抓取」中开启的通道（直接访问 / DeepSeek Fetch / 虚拟浏览器）依次尝试并自动回退。用于 web_search 之后深入阅读具体页面并提取信息。', webFetch, {
       inputSchema: {
         type: 'object',
         properties: { url: { type: 'string', description: '要抓取的网页 URL' } },

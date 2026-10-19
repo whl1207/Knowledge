@@ -474,8 +474,8 @@ async function syncShortcut(): Promise<void> {
       // ⚠️ 先说清「主键失败」再报当前生效的是哪一组 —— 提示里必须**同时**给出两组：
       // 只写「已临时改用 X」时，用户从消息里根本看不出原来那组为什么没生效（曾以为是逻辑错）。
       warnOnce(`fallback:${shortcut}`, zh()
-        ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 被其它软件占用，暂时改用 ${formatBinding(used, isMacPlatform())}（可在「设置 → 语音 → 输入」里自己换一组）`
-        : `${formatBinding(shortcut, isMacPlatform())} is taken by another app — temporarily using ${formatBinding(used, isMacPlatform())} (change it under Settings → Voice → ASR)`)
+        ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 被其它软件占用，暂时改用 ${formatBinding(used, isMacPlatform())}（可在「设置 → 模型 → 输入」里自己换一组）`
+        : `${formatBinding(shortcut, isMacPlatform())} is taken by another app — temporarily using ${formatBinding(used, isMacPlatform())} (change it under Settings → Models → ASR)`)
     }
     return
   }
@@ -484,8 +484,8 @@ async function syncShortcut(): Promise<void> {
   voiceState.hostShortcutError = res.error || (zh() ? '注册失败' : 'registration failed')
   voiceState.hostShortcutActive = ''
   warnOnce(`failed:${shortcut}`, zh()
-    ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 注册失败（备选组合也不可用）：${voiceState.hostShortcutError}。请在「设置 → 语音 → 输入」里换一组，或点「清空」改用右下角的悬浮麦克风。`
-    : `Could not register ${formatBinding(shortcut, isMacPlatform())} (fallbacks unavailable too): ${voiceState.hostShortcutError}. Pick another combination under Settings → Voice → ASR, or clear it and use the floating mic at the bottom-right.`)
+    ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 注册失败（备选组合也不可用）：${voiceState.hostShortcutError}。请在「设置 → 模型 → 输入」里换一组，或点「清空」改用右下角的悬浮麦克风。`
+    : `Could not register ${formatBinding(shortcut, isMacPlatform())} (fallbacks unavailable too): ${voiceState.hostShortcutError}. Pick another combination under Settings → Models → ASR, or clear it and use the floating mic at the bottom-right.`)
 }
 
 async function tryRegisterShortcut(accel: string): Promise<{ ok: boolean; error?: string }> {

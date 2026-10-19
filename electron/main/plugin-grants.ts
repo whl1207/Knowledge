@@ -40,7 +40,7 @@ const MAX_PER_PLUGIN = 32
 const VERSION = 2
 
 /** Windows / macOS 的默认文件系统不区分大小写，路径判定要跟着走（Linux 严格） */
-const CASE_INSENSITIVE_PATHS = process.platform === 'win32' || process.platform === 'darwin'
+export const CASE_INSENSITIVE_PATHS = process.platform === 'win32' || process.platform === 'darwin'
 
 export interface PluginGrantEntry {
   path: string

@@ -2,6 +2,7 @@
 import { runStrategy, getStrategies } from '@/shared/graphrag/strategy'
 import type { AgentStep } from '@/shared/graphrag/strategy'
 import type { RetrievalContext } from '@/shared/graphrag/primitives'
+import { computeBM25Score } from '@/shared/graphrag/search'
 import * as kbAi from '@/shared/kbAiClient'
 import type { KbModelSpec, KbProvider } from '@/shared/kbAiClient'
 import { effectiveEmbedSpec } from '@/shared/kbAiClient'
@@ -664,10 +665,32 @@ function buildRetrievalContextFromKb(params: {
   }
 
   // communityResult.assignments: 数组 → Map（nodeId → communityId）
+  // communityResult.communities:  数组 → Map（communityId → nodeId[]）
+  // 两者都必须转换：社区策略的「切片落回」走的是 communities.get(comId)，
+  // 旧实现只转换了 assignments，导致 communities 恒为 undefined，
+  // 落回路径永远取不到社区成员、始终返回空结果。
   let assignments: Map<string, number> | undefined
   if (communityResult?.assignments) {
     assignments = new Map<string, number>()
     for (const a of communityResult.assignments) assignments.set(a.nodeId, a.comId)
+  }
+  let communities: Map<number, string[]> | undefined
+  if (communityResult?.communities) {
+    communities = new Map<number, string[]>()
+    const raw = communityResult.communities
+    if (Array.isArray(raw)) {
+      // .kb 存的是 [{ id, ids }, ...]
+      for (const c of raw) {
+        const cid = Number(c?.id)
+        const ids = c?.ids || c?.members || []
+        if (!Number.isNaN(cid) && Array.isArray(ids)) communities.set(cid, ids)
+      }
+    } else if (typeof raw === 'object') {
+      for (const [k, v] of Object.entries(raw)) {
+        const cid = Number(k)
+        if (!Number.isNaN(cid) && Array.isArray(v)) communities.set(cid, v as string[])
+      }
+    }
   }
 
   const summaryWeight = kbConfig?.summaryWeight ?? config.summaryWeight
@@ -679,7 +702,9 @@ function buildRetrievalContextFromKb(params: {
     relations,
     entityToBlocksIndex,
     communityReports,
-    communityResult: assignments ? { assignments, count: communityResult?.count } : undefined,
+    communityResult: (assignments || communities)
+      ? { assignments, communities, count: communityResult?.count }
+      : undefined,
     fileIndex: fileIndex || new Map<string, any>(),
     // 问题增强索引：.kb 问题库 → 关联切片（dense_score 问题增强分 max 池化）
     questionVectorsByBlock: computeBlockQuestionVectors(questions || []),
@@ -690,17 +715,27 @@ function buildRetrievalContextFromKb(params: {
       process: spec.process || embedModel,
       locale: 'zh',
       summaryWeight,
-      bm25Enabled: kbConfig?.bm25Enabled ?? false,
-      bm25Weight: 0.3,
-      bm25K1: 1.5,
-      bm25B: 0.75,
+      // BM25 开关与参数：优先读 searchConfig（与检索设置页同源，随 .kb 保存），
+      // 其次读顶层字段，最后回落到默认值。此前只读顶层 kbConfig.bm25Enabled 且默认 false，
+      // 而 .kb 实际把该开关存在 searchConfig 里 —— 导致界面上的设置永远不生效。
+      bm25Enabled: (kbConfig?.searchConfig?.bm25Enabled ?? kbConfig?.bm25Enabled ?? true) as boolean,
+      bm25Weight: (kbConfig?.searchConfig?.bm25Weight ?? kbConfig?.bm25Weight ?? 0.3) as number,
+      bm25K1: (kbConfig?.searchConfig?.bm25K1 ?? kbConfig?.bm25K1 ?? 1.5) as number,
+      bm25B: (kbConfig?.searchConfig?.bm25B ?? kbConfig?.bm25B ?? 0.75) as number,
       searchNum: config.topK,
       // 与知识库/测试页同源：这些开关随 .kb 保存，主页检索同样按它执行（避免同一策略在不同入口行为不一致）
       agentSubQueryWeight: kbConfig?.agentSubQueryWeight ?? 0.5,
       agentToolTopN: kbConfig?.agentToolTopN ?? 15,
       entityLinkLlm: kbConfig?.entityLinkLlm !== false,
     },
-    services: kbAi.buildRetrievalServices(spec, { cosineSimilarity, computeBM25: () => [] }, embedSpec),
+    // 接入真实 BM25 实现（computeBM25Score 已改为中英混排分词，对中文有效）。
+    // 旧实现注入 `() => []` 空数组，且该函数是 truthy 会覆盖默认实现，
+    // 导致即使 bm25Enabled=true，BM25 分数也恒为 0（静默失效）。
+    services: kbAi.buildRetrievalServices(
+      spec,
+      { cosineSimilarity, computeBM25: computeBM25Score },
+      embedSpec,
+    ),
   }
 }
 

@@ -25,17 +25,20 @@ AI-KM 插件宿主的**最小可用示例**：同时演示主进程半边（工�
 | `main` | | 主进程入口（相对插件目录）；与 `client` 至少一个 |
 | `client` | | 渲染层半边 `{ entry, inject? }`（单文件 ESM） |
 | `inject` | | 依赖的宿主服务名，未就绪时插件停在「等待依赖」 |
-| `permissions` | | `fs` / `shell` / `net` / `agent`（见下） |
+| `permissions` | | `fs` / `shell` / `net` / `agent` / `agent.run` / `llm` / `image`（见下） |
 | `declares` | | 声明式清单（工具名、界面槽位），仅用于展示与预检 |
 
 ## 权限
 
 | 权限 | 解锁的宿主能力 |
 |---|---|
-| `fs` | 使插件工具默认 `requiresApproval`（工具路径的审批 seam） |
+| `fs` | 文件能力：两个半边的 `ctx.fs`（插件目录内免授权，其余路径只认用户在该插件里选过的授权），以及工具路径的审批 seam（`requiresApproval`） |
 | `shell` | `ctx.host.runShell(cmd, { policy: 'trusted' })`（仍需显式传 trusted，与 `run_shell` 工具同一策略） |
 | `net` | `ctx.host.fetch(url)` |
 | `agent` | `ctx.host.sessions.list()`（会话日志只读视图） |
+| `agent.run` | `ctx.agent.run()` / `ctx.agents.*`（委派一次独立会话；与只读的 `agent` 是两件事，仅桌面端） |
+| `llm` | `ctx.llm.*`（对话 / 流式 / 结构化输出） |
+| `image` | `ctx.image.*`（生图；服务地址与 token 由用户在设置里配） |
 
 > ⚠️ 权限是**透明化与误操作防护**，不是沙箱：插件代码与宿主同进程运行（渲染层半边与主界面同文档），
 > 不受工作区沙箱保护。设置页会在启用前展示权限并要求确认。
@@ -50,7 +53,8 @@ export function apply(ctx) {
   ctx.getService(name)              // 读取服务
   ctx.on('tool/post-execute', fn)   // 订阅宿主事件
   ctx.effect(() => cleanup)         // 副作用 + 卸载清理
-  ctx.host.readFile / writeFile / listDir / runShell / fetch / sessions / notify
+  ctx.host.readFile / writeFile / listDir / runShell / fetch / sessions / granted / notify
+  ctx.fs.readText / readBytes / readBase64 / listDir / writeText / editText / stat / resolve / remove / sheet.read  // 与界面半边同形状
   ctx.storage.get / set / delete / keys
   ctx.log.debug / info / warn / error
   ctx.config                        // 用户在插件页「配置」里保存的 JSON
@@ -100,8 +104,15 @@ export function apply(ctx) {
 | `ctx.shortcuts.register(binding, handler, options)` | 注册全局快捷键（`options` 可带 `titleZh` / `titleEn` 说明，会显示在插件详情里） |
 | `ctx.shortcuts.list()` | 当前全部快捷键（含占位与来源） |
 | `ctx.locale` | `pick(dict)` → 随语言变化的 computed 字典；`ref(dict, key)` → 单键；`t(dict, key, params)` → 即时取词；`languageRef` / `language` |
-| `ctx.notify(message)` | 弹一条消息提示（跟随界面语言的文案由插件自己决定） |
-| `ctx.on` / `ctx.effect` / `ctx.log` / `ctx.config` | 订阅宿主事件 / 副作用清理 / 日志（`debug`~`error`）/ 用户在插件页保存的配置 |
+| `ctx.notify(message)` | 弹一条消息提示（跟随界面语言的文案由插件自己决定；**只接受字符串**） |
+| `ctx.fs` | 文件能力（权限 `fs`，两半边同形状）：`resolve` / `stat`（版本）/ `readText` / `readBytes` / `readBase64` / `listDir` / `writeText`（可带 `expectedVersion`）/ `editText` / `remove` / `sheet.read`；失败抛 `FS_*` 错误码 |
+| `ctx.files` | 选择框与预览（权限 `fs`）：`pickFiles` / `pickDirectory` / `pickWritableDirectory` / `renderPdfPage` / `openInApp`（读写是老别名的同义实现） |
+| `ctx.app` | `info()` / `agentPresets()` / `setChromeHidden(hidden)` / `chromeHidden()`（只读信息与全屏时的外壳控制） |
+| `ctx.llm` | 权限 `llm`：`available` / `reason` / `sources()` / `current()` / `models(source)` / `chat({ …, schema })` / `stream({ messages, schema })` |
+| `ctx.agent` / `ctx.agents` | 权限 `agent.run`（仅桌面端）：`run(presetId, input, opts)` / `create({ preset, input })` → 句柄（`whenIdle` / `result` / `usage` / `stream` / `cancel` / `dispose`） |
+| `ctx.image` | 权限 `image`：`info()` / `generate({ prompt, … })` / `cancelAll()`；**失败不抛**，看 `ok` / `code` |
+| `ctx.tts` | 语音朗读（无需权限）：`speak(text, { stopPrevious })` / `stop()` / `available` / `reason` |
+| `ctx.on` / `ctx.effect` / `ctx.log` / `ctx.config` | 订阅观测事件（只收到属于自己的工具 / 委派事件）/ 副作用清理 / 日志（`debug`~`error`）/ 用户在插件页保存的配置 |
 
 ### 可用槽位
 

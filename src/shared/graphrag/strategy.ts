@@ -248,11 +248,15 @@ const BUILTIN_STRATEGIES: StrategyDef[] = [
   {
     id: 'combo_dense_community', label: '稠密+社区', kind: 'pipeline', builtin: true,
     steps: [
-      // 增强权重=0：结构型策略不做问题语义增强，dense_score 纯用切片向量+BM25（避免依赖 semantic_enhance）
-      { primitive: 'dense_score', mode: 'set', params: { summaryWeight: 0 } },
+      // 与其它策略保持同一基础通道：问题增强 0.7 + 切片 0.3（不传 summaryWeight 即用全局默认，
+      // 且无关联问题的切片会自动把权重让渡给切片通道）。
+      // 旧实现写死 summaryWeight:0，等于关掉问题通道，使其系统性低于所有其它策略、无法公平比较。
+      { primitive: 'dense_score', mode: 'set' },
       { primitive: 'entity_link' },
       { primitive: 'community_select' },
-      { primitive: 'boost', mode: 'multiply', params: { source: 'community', boostWeight: 1.5 } },
+      // 加性加分而非乘性放大：结构覆盖集合较大时，单一乘性因子对排序中性甚至有害（已实测）。
+      // 模式用 weighted（等权相加），boostWeight 即该加性项的权重。
+      { primitive: 'boost', mode: 'weighted', params: { source: 'community', boostWeight: 0.05, asBonus: true } },
     ],
     ingestionSteps: [
       { primitive: 'extract_entities' },
@@ -580,19 +584,44 @@ async function runMapReduce(
   // 相关社区 → 社区内实体 → entityToBlocksIndex → 候选切片 → dense_score 打分 → sortedBlocks
   // 使社区策略也能产出切片级召回，与其他策略在同一评估基准上对比。
   hooks.onProgress?.(language === 'zh' ? '社区 → 切片落回...' : 'Community to slice fallback...')
-  const communityResult = ctx.communityResult as any
 
-  // 1) 收集相关社区的实体名
+  // 1) 收集相关社区的成员实体名
   const communityEntityNames = new Set<string>()
-  if (communityResult?.communities) {
-    for (const comId of usedComIds) {
-      const members = communityResult.communities.get?.(comId) || []
-      members.forEach((n: string) => communityEntityNames.add(n))
+  //
+  // 三个坑（旧实现全踩）：
+  //   a) usedComIds 来自报告的 communityId，类型是 string；而 communities/assignments 的键是 number
+  //   b) communities 的值是**实体 nodeId**（如 e1/e2），不是实体名 —— 必须经 entities 反查成 name，
+  //      否则 entityToBlocksIndex（按 name 建索引）永远查不到
+  //   c) communities 在旧链路里根本没被加载（kbRetrieval 只转换了 assignments）
+  const communityResult = ctx.communityResult as any
+  const usedComIdNums = new Set<number>()
+  for (const c of usedComIds) {
+    const n = Number(c)
+    if (!Number.isNaN(n)) usedComIdNums.add(n)
+  }
+  const id2name = new Map<string, string>()
+  for (const e of ctx.entities) {
+    const id = (e as any).id
+    const nm = (e as any).name
+    if (typeof id === 'string' && typeof nm === 'string') id2name.set(id, nm)
+  }
+  const addMember = (m: string) => {
+    const nm = id2name.get(m) || m
+    if (nm) communityEntityNames.add(nm)
+  }
+
+  const commMap = communityResult?.communities
+  if (commMap && typeof commMap.get === 'function') {
+    for (const comId of usedComIdNums) {
+      for (const m of commMap.get(comId) || []) addMember(m)
     }
   }
   if (communityEntityNames.size === 0 && communityResult?.assignments) {
-    for (const [nodeId, comId] of communityResult.assignments) {
-      if (usedComIds.has(comId)) communityEntityNames.add(nodeId)
+    const assign = communityResult.assignments
+    const iter: Iterable<[string, number]> =
+      typeof assign[Symbol.iterator] === 'function' ? assign : []
+    for (const [nodeId, comId] of iter) {
+      if (usedComIdNums.has(Number(comId))) addMember(nodeId)
     }
   }
 
@@ -602,16 +631,27 @@ async function runMapReduce(
     const bid = ctx.entityToBlocksIndex.get(name.toLowerCase())
     if (bid && bid.size) bid.forEach(id => candidateBlockIds.add(id))
   }
-  if (candidateBlockIds.size === 0) {
+  if (candidateBlockIds.size === 0 && communityEntityNames.size) {
+    // 文本兜底：要求实体名长度 >= 3，避免单字实体（"图"/"基"/"弧"）命中几乎所有切片。
+    // 旧实现无长度限制且逐片 includes，会把这个策略伪装成"正常但偏弱"。
     for (const b of ctx.blocks) {
-      if (b.A && [...communityEntityNames].some(n => b.A.includes(n))) candidateBlockIds.add(b.id)
+      const body = b.A || ''
+      if (body && [...communityEntityNames].some(n => n.length >= 3 && body.includes(n))) {
+        candidateBlockIds.add(b.id)
+      }
     }
   }
 
-  // 3) 在候选切片上做稠密打分（若无候选则退化为全库 dense_score）
-  const candidateBlocks = candidateBlockIds.size
-    ? ctx.blocks.filter(b => candidateBlockIds.has(b.id))
-    : ctx.blocks
+  // 3) 在候选切片上做稠密打分
+  // 若社区映射完全缺失，**不退化到全库**：全库 dense 与纯稠密策略无法区分，
+  // 评测时会表现为"策略正常但偏弱"，掩盖"社区数据未生成"这一真实原因。
+  if (candidateBlockIds.size === 0) {
+    hooks.onProgress?.(language === 'zh'
+      ? '社区未关联到任何切片（社区数据可能缺失），本策略跳过切片落回'
+      : 'No slices linked to communities (community data may be missing); skipping slice fallback')
+    return result
+  }
+  const candidateBlocks = ctx.blocks.filter(b => candidateBlockIds.has(b.id))
 
   if (candidateBlocks.length) {
     const subCtx: RetrievalContext = { ...ctx, blocks: candidateBlocks }
@@ -688,8 +728,20 @@ async function runHybrid(
   if (channels.dense !== false) channelRuns.push({
     name: 'dense',
     run: async () => {
-      const { evidence, sorted } = await retrieveTopContext(ctx, ctx.query, cap('dense', 8))
-      return { blocks: sorted, evidence: evidence.map(e => ({ ...e, method: 'dense' })) }
+      const { evidence, sorted, denseScores } = await retrieveTopContext(ctx, ctx.query, cap('dense', 8))
+      // 带上 subScore：让统一重排阶段保留「问题通道 + 切片 + BM25 + 文件」的融合分。
+      // 旧实现不带 subScore，重排时只剩纯切片余弦（rerankEvidenceAgainstQuery 的 sim 项），
+      // 等于把 BM25（权重 0.3）与问题通道（权重 0.7）全部丢弃 —— 这正是多路混合策略
+      // 在此前实测中明显低于纯问题增强的原因。
+      return {
+        blocks: sorted,
+        evidence: evidence.map(e => ({
+          ...e,
+          method: 'dense',
+          subQuery: ctx.query,
+          subScore: denseScores.get(e.id) ?? e.score,
+        })),
+      }
     },
   })
 

@@ -13,7 +13,27 @@
 
 import { AIUtils } from '@/services/ai-utils'
 import { LLM_SOURCE_KEYS, llmConfigByKey, llmSourceLabel, normalizeLlmType } from '@/shared/llmSources'
+import {
+  checkAgainstSchema,
+  classifyLlmError,
+  extractJson,
+  schemaInstruction,
+  toPlainMessages,
+  toChatMessages,
+  type ChatMessageInput,
+  type LlmChunk,
+  type LlmErrorCode,
+  type LlmMessage,
+  type LlmSchemaRequest,
+} from '@/shared/llmContract'
 import { usestore } from '@/store'
+
+/** 带稳定 code 的错误（插件按 code 分支，不解析文案） */
+function llmError(code: LlmErrorCode, message: string): Error {
+  const err = new Error(message) as Error & { code?: LlmErrorCode }
+  err.code = code
+  return err
+}
 
 /** 一个可用的模型来源（含该来源当前选中的模型） */
 export interface PluginLlmSourceInfo {
@@ -48,6 +68,11 @@ export interface PluginLlmChatRequest {
   /** 超时（默认 90s）；超时会 abort 请求并抛错 */
   timeoutMs?: number
   signal?: AbortSignal
+  /**
+   * 结构化输出：宿主负责"要求模型只输出 JSON + 解析 + 浅校验"，成功后结果在 `value` 里。
+   * 解析/校验失败会抛 `code === 'LLM_INVALID_OUTPUT'` 的错误（不会把半截文本当成功）。
+   */
+  schema?: LlmSchemaRequest
 }
 
 export interface PluginLlmChatResult {
@@ -55,6 +80,19 @@ export interface PluginLlmChatResult {
   source: string
   model: string
   elapsedMs: number
+  /** 给了 `schema` 且解析/校验成功时的结构化结果 */
+  value?: unknown
+}
+
+/**
+ * 流式请求：消息用**内容块**（与 `ctx.fs` 一样，形状对齐 DSH），其余参数与 `chat` 同义。
+ *
+ * 当前只支持文本块：含 `image` 会在流里以 `finish{code:'LLM_UNSUPPORTED_CONTENT'}` 结束
+ * （拼接 base64 进 prompt 只会让模型看到乱码，不如明确拒绝）。
+ */
+export interface PluginLlmStreamRequest extends Omit<PluginLlmChatRequest, 'messages' | 'schema'> {
+  messages: LlmMessage[]
+  schema?: LlmSchemaRequest
 }
 
 export interface PluginLlmModelList {
@@ -74,8 +112,17 @@ export interface PluginLlmApi {
   current(): { source: string; model: string }
   /** 拉取某来源的可用模型清单（本地服务可先拉清单再选模型） */
   models(source?: string): Promise<PluginLlmModelList>
-  /** 发起一次「一次性」对话（非流式），返回完整文本 */
+  /**
+   * 发起一次「一次性」对话（非流式），返回完整文本。
+   * 传了 `schema` 时宿主会要求模型只输出 JSON、解析并浅校验，结果放在 `value`。
+   */
   chat(request: PluginLlmChatRequest): Promise<PluginLlmChatResult>
+  /**
+   * 流式对话：产出 `block-start` / `text-delta` / `finish` 分片，**必然以 `finish` 结束**。
+   * `finish.kind` 是 `ok` / `error` / `aborted`；`error` 时带稳定 `code`（`LLM_*`）。
+   * 失败与取消**不抛异常**（与 `ctx.agent.run` 的 `termination` 同一套哲学）。
+   */
+  stream(request: PluginLlmStreamRequest): AsyncIterable<LlmChunk>
 }
 
 interface LlmApiDeps {
@@ -261,17 +308,21 @@ export function createPluginLlmApi(deps: LlmApiDeps): PluginLlmApi {
       const cfg: any = { ...configOf(source) }
       const model = String(request?.model || cfg.model || '').trim()
       if (!model) {
-        throw new Error(`来源「${labelOf(source)}」还没有选择模型：请先在插件里（或设置 → 模型）指定模型名`)
+        throw llmError('LLM_NO_MODEL', `来源「${labelOf(source)}」还没有选择模型：请先在插件里（或设置 → 模型）指定模型名`)
       }
       cfg.model = model
 
       const messages: PluginLlmMessage[] = []
       if (request?.system) messages.push({ role: 'system', content: String(request.system) })
-      for (const m of Array.isArray(request?.messages) ? request.messages : []) {
-        if (!m || !m.content) continue
-        messages.push({ role: String(m.role || 'user'), content: String(m.content) })
-      }
-      if (!messages.length) throw new Error('chat 需要至少一条消息')
+      // 内容块必须转成纯文本（直接 String(content) 会得到 "[object Object]" 发给模型）
+      const converted = toChatMessages(Array.isArray(request?.messages) ? (request.messages as ChatMessageInput[]) : [])
+      if (!converted.ok) throw llmError(converted.code, converted.message)
+      for (const m of converted.messages) messages.push({ role: m.role, content: m.content })
+      if (!messages.length) throw llmError('LLM_FAILED', 'chat 需要至少一条消息')
+
+      // 结构化输出：把约束写进最后一条 system 指令（不依赖 provider 私有参数）
+      const schema = request?.schema && typeof request.schema === 'object' ? request.schema : undefined
+      if (schema) messages.push({ role: 'system', content: schemaInstruction(schema) })
 
       const llmConfig: any = {
         stream: false,
@@ -298,17 +349,166 @@ export function createPluginLlmApi(deps: LlmApiDeps): PluginLlmApi {
 
       const startedAt = Date.now()
       try {
-        const text = await AIUtils.sendChat(source, cfg, llmConfig, messages as any, { signal: controller.signal })
-        return { text: String(text ?? '').trim(), source, model, elapsedMs: Date.now() - startedAt }
+        const text = String(
+          (await AIUtils.sendChat(source, cfg, llmConfig, messages as any, { signal: controller.signal })) ?? '',
+        ).trim()
+        const result: PluginLlmChatResult = { text, source, model, elapsedMs: Date.now() - startedAt }
+        if (!schema) return result
+        const parsed = extractJson(text)
+        if (!parsed.ok) {
+          throw llmError('LLM_INVALID_OUTPUT', `模型没有返回可解析的 JSON（${parsed.message}）`)
+        }
+        const checked = checkAgainstSchema(parsed.value, schema.schema ?? {})
+        if (!checked.ok) throw llmError('LLM_INVALID_OUTPUT', `模型返回的 JSON 不符合 schema：${checked.message}`)
+        return { ...result, value: parsed.value }
       } catch (e: any) {
-        const message = controller.signal.aborted && !external?.aborted
+        const timedOut = controller.signal.aborted && !external?.aborted
+        const message = timedOut
           ? `调用超时（${Math.round(timeoutMs / 1000)} 秒）`
           : (e?.message || String(e))
         deps.log.warn(`[plugin:${deps.pluginId}] 大模型调用失败（${labelOf(source)} / ${model}）：${message}`)
-        throw new Error(message)
+        // 已有 code 的（结构化输出失败等）原样抛出，别把分类盖掉
+        if (e && typeof e.code === 'string' && e.code.startsWith('LLM_')) throw e
+        throw llmError(classifyLlmError(e, controller.signal.aborted), message)
       } finally {
         clearTimeout(timer)
         if (external) external.removeEventListener('abort', forward)
+      }
+    },
+
+    /**
+     * 流式对话：把 `sendChat` 的 `onStream` 回调转成 `AsyncIterable`，并**保证以 `finish` 结束**。
+     *
+     * 关键约定（与 `ctx.agent.run` 同源）：
+     * - `aborted` / `error` 也是 `finish`，**不抛异常** —— 消费方用 `for await` 不必包 try；
+     * - `finish.text` 是结束时的完整文本：成功时是全部输出，失败时是**中止前拿到的部分**（不丢弃）；
+     * - 给了 `schema` 时先攒全文再解析（结构化输出不能边流边解析），成功才带 `value`。
+     */
+    stream(request: PluginLlmStreamRequest): AsyncIterable<LlmChunk> {
+      const queue: LlmChunk[] = []
+      // 用一个"信箱"对象而不是裸变量：跨闭包赋值时 TS 会把裸变量窄化成 null（never 不可调用）
+      const mailbox: { wake: (() => void) | null } = { wake: null }
+      let done = false
+      const push = (chunk: LlmChunk): void => {
+        queue.push(chunk)
+        const notify = mailbox.wake
+        mailbox.wake = null
+        notify?.()
+      }
+      const startedAt = Date.now()
+
+      // 立刻开始跑（返回的迭代器只是在消费队列）；错误一律转成 finish，不往外抛
+      void (async () => {
+        const source = resolveSource(request?.source)
+        const cfg: any = { ...configOf(source) }
+        const model = String(request?.model || cfg.model || '').trim()
+        const external = request?.signal
+        const controller = new AbortController()
+        const forward = () => controller.abort()
+        const timeoutMs = clampNumber(request?.timeoutMs, 1_000, 10 * 60_000, DEFAULT_TIMEOUT_MS)
+        const timer = setTimeout(() => controller.abort(), timeoutMs)
+        if (external) {
+          if (external.aborted) controller.abort()
+          else external.addEventListener('abort', forward, { once: true })
+        }
+        let text = ''
+        try {
+          if (!deps.permitted) throw llmError('LLM_FAILED', reason)
+          if (!model) throw llmError('LLM_NO_MODEL', `来源「${labelOf(source)}」还没有选择模型`)
+          cfg.model = model
+
+          const plain = toPlainMessages(Array.isArray(request?.messages) ? request.messages : [])
+          if (!plain.ok) throw llmError(plain.code, plain.message)
+          const messages: PluginLlmMessage[] = []
+          if (request?.system) messages.push({ role: 'system', content: String(request.system) })
+          for (const m of plain.messages) messages.push({ role: m.role, content: m.content })
+          if (!messages.length) throw llmError('LLM_FAILED', 'stream 需要至少一条消息')
+          const schema = request?.schema && typeof request.schema === 'object' ? request.schema : undefined
+          if (schema) messages.push({ role: 'system', content: schemaInstruction(schema) })
+
+          const llmConfig: any = {
+            stream: true,
+            temperature: clampNumber(request?.temperature, 0, 2, 0.8),
+            top_p: 0.9,
+            max_tokens: clampNumber(request?.maxTokens, 16, 16_384, 1024),
+            ...(typeof request?.think === 'boolean' ? { think: request.think } : {}),
+          }
+          if (source === 'ollama') {
+            llmConfig.options = { temperature: llmConfig.temperature, top_p: llmConfig.top_p, num_predict: llmConfig.max_tokens }
+            llmConfig.keep_alive = '5m'
+          }
+
+          push({ type: 'block-start', block: { kind: 'text' } })
+          const full = await AIUtils.sendChat(source, cfg, llmConfig, messages as any, {
+            signal: controller.signal,
+            onStream: (chunk: string) => {
+              const delta = String(chunk ?? '')
+              if (!delta) return
+              text += delta
+              push({ type: 'text-delta', text: delta })
+            },
+          })
+          // 有的来源在 onStream 之外才给出完整文本（或根本没回调）：以返回值为准补一段
+          const finalText = String(full ?? '')
+          if (finalText && finalText !== text) {
+            const rest = finalText.startsWith(text) ? finalText.slice(text.length) : finalText
+            if (rest) {
+              text = finalText
+              push({ type: 'text-delta', text: rest })
+            }
+          }
+
+          let value: unknown
+          if (schema) {
+            const parsed = extractJson(text)
+            if (!parsed.ok) throw llmError('LLM_INVALID_OUTPUT', `模型没有返回可解析的 JSON（${parsed.message}）`)
+            const checked = checkAgainstSchema(parsed.value, schema.schema ?? {})
+            if (!checked.ok) throw llmError('LLM_INVALID_OUTPUT', `模型返回的 JSON 不符合 schema：${checked.message}`)
+            value = parsed.value
+          }
+          push({ type: 'finish', kind: 'ok', text, ...(schema ? { value } : {}) })
+        } catch (e: any) {
+          const aborted = controller.signal.aborted
+          const timedOut = aborted && !external?.aborted
+          const message = timedOut ? `调用超时（${Math.round(timeoutMs / 1000)} 秒）` : (e?.message || String(e))
+          const code: LlmErrorCode = e && typeof e.code === 'string' && e.code.startsWith('LLM_')
+            ? (e.code as LlmErrorCode)
+            : classifyLlmError(e, aborted)
+          if (code !== 'LLM_ABORTED') {
+            deps.log.warn(`[plugin:${deps.pluginId}] 大模型流失败（${labelOf(source)} / ${model || '?'}）：${message}`)
+          }
+          push({
+            type: 'finish',
+            kind: aborted ? 'aborted' : 'error',
+            code,
+            message,
+            text,
+          })
+        } finally {
+          clearTimeout(timer)
+          if (external) external.removeEventListener('abort', forward)
+          done = true
+          const notify = mailbox.wake
+          mailbox.wake = null
+          notify?.()
+        }
+        void startedAt
+      })()
+
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            async next(): Promise<IteratorResult<LlmChunk>> {
+              for (;;) {
+                if (queue.length) return { value: queue.shift() as LlmChunk, done: false }
+                if (done) return { value: undefined, done: true }
+                await new Promise<void>((resolve) => {
+                  mailbox.wake = resolve
+                })
+              }
+            },
+          }
+        },
       }
     },
   }

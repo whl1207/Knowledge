@@ -101,7 +101,10 @@ const providerSub = (id: string) => {
     return host ? host.replace(/^https?:\/\//, '') : t('未填实例地址', 'No instance URL')
   }
   if (meta.needsKey) {
-    return String(store.webSearch?.[id]?.apiKey || '').trim() ? t('已配置 Key', 'Key set') : t('未配置 Key', 'No key')
+    if (String(store.webSearch?.[id]?.apiKey || '').trim()) return t('已配置 Key', 'Key set')
+    // DeepSeek：Key 留空但开启「复用凭据」时，仍能借对话的凭据用，列表上别误报「未配置」
+    if (store.webSearch?.[id]?.reuseChatKey) return t('复用对话凭据', 'Reuses chat key')
+    return t('未配置 Key', 'No key')
   }
   // Firecrawl 免 Key 也能用，但填了 Key 说明换成了自己的额度，值得在列表上标出来
   if (id === 'firecrawl') {
@@ -245,9 +248,13 @@ const testRuns = ref<WsTestRun[]>([])
 /** 各源的最近测试状态（列表右侧小圆点：online / offline / untested） */
 const sourceStatus = ref<Record<string, 'online' | 'offline' | 'untested'>>({})
 
-const buildPayload = (provider?: string) => ({
+// 测试用的配置必须带**解析后的 DeepSeek Key**：主进程 setWebSearchConfig 会用这份配置覆盖内部状态，
+// 若传原始 store（Key 为空、只有凭据引用），DeepSeek 源就会被误判为「未配置 Key」。
+const buildPayload = async (provider?: string) => ({
   query: testQuery.value.trim() || 'OpenAI',
-  config: JSON.parse(JSON.stringify(store.webSearch)),
+  config: typeof store.buildWebSearchPayload === 'function'
+    ? await store.buildWebSearchPayload()
+    : JSON.parse(JSON.stringify(store.webSearch)),
   ...(provider ? { provider } : {}),
 })
 
@@ -260,7 +267,7 @@ const runTestSource = async (provider: string) => {
   }
   testing.value = provider
   try {
-    const r: WebSearchTestResult = await api.test(buildPayload(provider))
+    const r: WebSearchTestResult = await api.test(await buildPayload(provider))
     testRuns.value = [{
       provider,
       success: !!r?.success,
@@ -292,7 +299,7 @@ const runTestAll = async () => {
   try {
     for (const id of list) {
       try {
-        const r: WebSearchTestResult = await api.test(buildPayload(id))
+        const r: WebSearchTestResult = await api.test(await buildPayload(id))
         testRuns.value = [...testRuns.value, {
           provider: id,
           success: !!r?.success,
@@ -629,24 +636,25 @@ const showKey = ref(false)
                 <option value="search_pro">{{ t('高阶（search_pro）', 'Advanced (search_pro)') }}</option>
               </select>
             </div>
-            <!-- DeepSeek 官方搜索：走 Anthropic 兼容 Messages + 服务端原生 web_search 工具 -->
+            <!-- DeepSeek 官方搜索：原生 Search API（POST /v1/tools/search），不是模型调用 -->
             <template v-if="currentMeta.id === 'deepseek'">
               <div class="form-group ws-hint-row">
                 <label>{{ t('复用对话凭据', 'Reuse chat key') }}</label>
                 <input type="checkbox" v-model="store.webSearch.deepseek.reuseChatKey" @change="persist" />
                 <span class="ws-hint-inline">
-                  {{ t('留空上面的 Key 时，自动用「大模型 → DeepSeek」的凭据', 'When the key above is empty, use the DeepSeek chat credential') }}
+                  {{ t('上面的 Key 留空时，自动用「大模型 → DeepSeek」的凭据', 'When the key above is empty, use the DeepSeek chat credential') }}
                 </span>
               </div>
-              <div class="form-group">
-                <label>{{ t('模型', 'Model') }}</label>
-                <input v-model="store.webSearch.deepseek.model"
-                       :placeholder="t('留空用默认（deepseek-v4-flash）', 'Empty = default (deepseek-v4-flash)')"
-                       @change="persist" />
+              <div class="form-group ws-hint-row">
+                <label>{{ t('返回正文', 'Return content') }}</label>
+                <input type="checkbox" v-model="store.webSearch.deepseek.needContent" @change="persist" />
+                <span class="ws-hint-inline">
+                  {{ t('让接口在结果里附带网页正文（need_content；每条最多保留约 4000 字符）；更全但响应更大、更慢', 'Ask the API to include page content (need_content; up to ~4,000 chars per result); more complete but larger and slower') }}
+                </span>
               </div>
               <div class="ws-hint">
-                {{ t('每次搜索是一次模型调用（计 token、延迟按 LLM 计）；仅桌面端可用。',
-                     'Each search is a model turn (tokens + LLM latency); desktop only.') }}
+                {{ t('接口：POST {host}/v1/tools/search，Bearer 鉴权；一次请求直接返回结构化结果，不是模型调用。按成功请求次数计费（约 5 元 / 1000 次），QPS 5；408 / 429 / 5xx 可稍后重试。',
+                     'Endpoint: POST {host}/v1/tools/search with Bearer auth; one request returns structured results — no model turn. Billed per successful request (about ¥5 / 1,000), 5 QPS; retry later on 408 / 429 / 5xx.') }}
               </div>
             </template>
           </template>
@@ -680,8 +688,8 @@ const showKey = ref(false)
             <input v-model.number="store.webSearch.maxResults" type="number" min="1" max="20" step="1" @change="persist" />
           </div>
           <div class="ws-hint">
-            {{ t('配置作用于智能体、批量任务与工作流「网络搜索」节点使用的 web_search 工具，改完立即生效（无需重启）；抓取具体网页（web_fetch）不受影响。',
-                 'Applies to the web_search tool used by agents, batch runs and workflow web-search nodes — takes effect immediately. web_fetch is unaffected.') }}
+            {{ t('配置作用于智能体、批量任务与工作流「网络搜索」节点使用的 web_search 工具，改完立即生效（无需重启）；抓取具体网页（web_fetch）在「工具 → 抓取」单独配置。',
+                 'Applies to the web_search tool used by agents, batch runs and workflow web-search nodes — takes effect immediately. Page fetching (web_fetch) is configured separately under Tools → Fetch.') }}
           </div>
           <div v-if="!hasMain" class="ws-hint warn">
             <i class="fa fa-exclamation-triangle"></i>

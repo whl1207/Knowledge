@@ -5,7 +5,7 @@
  * 为什么单独成文件：这两半逻辑要在**两处**跑（桌面走主进程 `electron/main/tools.ts`，
  * 手机 / 网页走渲染层 `src/lib/agent/webSearchRunner.ts`）。抄两份的话，改一处忘一处就会
  * 出现"桌面能搜、手机搜不到"这类只有特定端才复现的问题；而且混在含 Electron 依赖的模块里
- * 根本没法自测。范式同 `src/lib/agent/deepseekSearch.ts`：纯函数 + 自测。
+ * 根本没法自测。范式同 `src/shared/deepseekApi.ts`：纯函数 + 自测。
  *
  * 与其它搜索源最关键的差别：**apiKey 可以留空**。留空时**绝不能**发 `Authorization` 头，
  * 否则 Firecrawl 会把无鉴权请求当成"无效 Key"拒掉，免 Key 通道直接失效。

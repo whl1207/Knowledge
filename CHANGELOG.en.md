@@ -7,6 +7,61 @@
 
 ---
 
+## 2026-10-19
+
+### Added
+
+- **The plugin file capability now has one entry point (`ctx.fs`)**: identical on both halves, with target identity, versions and a literal "change just this one spot" edit, failures reported as stable error codes, and the writable scope still limited to the plugin folder plus paths the user granted.
+- **Plugins can stream from a model directly**: output can be rendered as it arrives, or the model can be asked for JSON matching a given shape that the host parses and checks; failures and cancellation come back as stable error codes.
+- **Delegated agents now have a handle layer**: a plugin can hold a handle to a running delegation, read its state and usage, run several delegations in parallel, and cancel or dispose repeatedly.
+- **Plugins can generate images (permission `image`)**: a panel can do text-to-image or image-to-image with up to 3 reference images; failures come back as error codes instead of throwing, and the service URL and token stay user-configured.
+- **Plugins can subscribe to observability events that belong to them**: calls to their own tools and output from delegations they started (including streaming deltas) are delivered to them, and other sessions and tools no longer leak in.
+- **The delegated agent's working directory can be chosen**: the plugin permissions page gains a working-directory dropdown (default: knowledge-base root) whose options are only the writable folders the user granted; relative paths resolve against it and writes stay inside it.
+- **New Settings → Tools → Fetch page**: `web_fetch`'s direct fetch / DeepSeek Fetch / virtual browser can each be toggled and dragged into a fallback order, with a URL box to test the chain.
+
+### Changed
+
+- **The DeepSeek search source now uses the official Search API**: one request returns structured results (no model turn), billed per successful request, also available on mobile / web, with an option to include page content in the results.
+- **The Knowledge Processing icon is now "layers"**: the old icon was Stack Overflow's brand logo and had nothing to do with the module.
+- **Shortcut-related hints now point to Settings → Models → ASR**: they still said the removed Settings → Speech → ASR, so following them led nowhere.
+
+### Improved
+
+- **The plugin development reference now matches the current plugin API**: the guide and the built-in MCP service cover files (`ctx.fs`), streaming and structured output, delegation handles, image generation and speech, add an "UI-half capabilities" topic with each capability's permission and its two failure shapes, and the self-check now verifies that every capability used is declared and that subscribed event types can actually fire (old spellings only get a migration hint).
+- **BM25 keyword retrieval in the knowledge base now really works for Chinese**: tokenization handles mixed Chinese and English, and the BM25 switches and weights in retrieval settings are no longer ignored by the .kb archive.
+- **Community-based retrieval strategies got their slice fallback and boost fixed**: community members map back to slices correctly, and strategies such as "dense + community" share the same base channels instead of scoring systematically weaker.
+
+### Fixed
+
+- **The speech shortcut was wrongly reported as an invalid key when only a file window was open**: with a file-association launch (no main window) the push-to-talk shortcut now registers and goes to the focused window.
+
+## 2026-10-18
+
+### Added
+
+- **Auto-speak for assistant replies**: tick "Auto speak" under Settings → Models → TTS and each finished reply is read aloud (current chat only).
+- **The app can start the Qwen3-TTS service itself**: set the install folder and click "Start service" to launch the local Python service (same as running the bat by hand), optionally on app start — no cmd window needed, and the folder is a setting rather than hard-coded.
+- **Image generation (Qwen-Image-Edit-2511)**: Settings → Models → Image configures the service URL, model type (local Qwen / Banana2), size, steps, LoRA and token, and can generate right there with 0-3 reference images (no image = text-to-image, images = edit).
+- **The app can start the image service too**: set the install folder and click "Start service" to launch Qwen-Image-Edit-2511 (including its bundled ComfyUI), optionally on app start; only processes it started are stopped on exit.
+
+### Changed
+
+- **Settings navigation**: the Models group now holds Sources / Embedding / TTS / ASR / Image / Credentials, and the former top-level "Speech" group is gone (TTS and ASR moved under Models).
+
+### Fixed
+
+- **Qwen3-TTS failed with `Unsupported languages: ['zh']`**: the language is now sent as one of the server's accepted names (Auto / Chinese / English…), and legacy `zh` values are mapped automatically.
+
+### Improved
+
+- **Qwen3-TTS integration rebuilt on the documented API**: voices are picked from a dropdown filled by `/update_voices`, with language, 0.6B–1.7B model, speed, chunk size and batch size, and the URL auto-detects 7862 (Gradio `/do_job`) versus 9880 (direct API).
+
+## 2026-10-17
+
+### Added
+
+- **The tool registry can show enable state per scope**: a new scope dropdown hides the enable state by default (registry facts only) and can judge it by the global default, by a given agent preset, or by a live session's actual tool list; tools outside that scope are greyed as not enabled (desktop only).
+
 ## 2026-10-16
 
 ### Improved

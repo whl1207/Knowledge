@@ -34,6 +34,8 @@ interface StoredEntry {
   callsPerHour?: number
   relaxFs?: boolean
   relaxMcp?: boolean
+  /** 用户为该插件指定的**工作目录**（被委派 agent 的 cwd）。空 / 缺省 = 用调用方给的默认（知识库根） */
+  workRoot?: string
 }
 
 interface ConfigStore {
@@ -44,12 +46,15 @@ interface ConfigStore {
 export interface PluginAgentConfig {
   limits: PluginAgentLimits
   relax: DelegationRelaxFlags
+  /** 生效的工作目录；**空串 = 默认**（调用方给的知识库根）—— 与面板出现之前逐字节一致 */
+  workRoot: string
 }
 
 /** 未配置插件的默认状态（= 面板出现之前的行为） */
 export const DEFAULT_PLUGIN_AGENT_CONFIG: Readonly<PluginAgentConfig> = Object.freeze({
   limits: { ...DEFAULT_PLUGIN_AGENT_LIMITS },
   relax: Object.freeze({ fs: false, mcp: false }) as DelegationRelaxFlags,
+  workRoot: '',
 })
 
 let store: ConfigStore | null = null
@@ -70,6 +75,8 @@ function loadStore(): ConfigStore {
       if (Number.isFinite(Number((raw as StoredEntry).callsPerHour))) e.callsPerHour = Number((raw as StoredEntry).callsPerHour)
       if ((raw as StoredEntry).relaxFs === true) e.relaxFs = true
       if ((raw as StoredEntry).relaxMcp === true) e.relaxMcp = true
+      const wr = (raw as StoredEntry).workRoot
+      if (typeof wr === 'string' && wr.trim()) e.workRoot = path.resolve(wr)
       if (Object.keys(e).length) byPlugin[id] = e
     }
   } catch {
@@ -97,11 +104,14 @@ function saveStore(): void {
 /** 某插件的委派配置（未配置 → 默认值；坏数据自愈成默认） */
 export function agentConfigOf(pluginId: string): PluginAgentConfig {
   const id = String(pluginId || '').trim()
-  if (!id) return { limits: { ...DEFAULT_PLUGIN_AGENT_LIMITS }, relax: { fs: false, mcp: false } }
+  if (!id) {
+    return { limits: { ...DEFAULT_PLUGIN_AGENT_LIMITS }, relax: { fs: false, mcp: false }, workRoot: '' }
+  }
   const e = loadStore().byPlugin[id]
   return {
     limits: normalizePluginAgentLimits(e),
     relax: { fs: e?.relaxFs === true, mcp: e?.relaxMcp === true },
+    workRoot: typeof e?.workRoot === 'string' ? e.workRoot : '',
   }
 }
 
@@ -136,6 +146,29 @@ export function setAgentRelax(pluginId: string, raw: unknown): PluginAgentConfig
   else delete entry.relaxFs
   if (src.mcp === true) entry.relaxMcp = true
   else delete entry.relaxMcp
+  if (Object.keys(entry).length) data.byPlugin[id] = entry
+  else delete data.byPlugin[id]
+  saveStore()
+  return agentConfigOf(id)
+}
+
+/**
+ * 写**工作目录**（被委派 agent 的 cwd）。
+ *
+ * `''` / `null` = 回到默认（调用方给的知识库根）。
+ *
+ * ⚠️ 本函数**不做授权校验** —— 调用方（`plugin:agent-run` / `plugin:agent:config-set`）必须先确认
+ * 该路径落在插件的**可写文件授权**之内。这里只负责存。
+ * （校验放在两边而不是这里，是因为"读的时候"也要校验一次：授权可能在这之后被撤销。）
+ */
+export function setAgentWorkRoot(pluginId: string, raw: unknown): PluginAgentConfig {
+  const id = String(pluginId || '').trim()
+  if (!id) return agentConfigOf('')
+  const target = typeof raw === 'string' ? raw.trim() : ''
+  const data = loadStore()
+  const entry = data.byPlugin[id] ?? {}
+  if (target) entry.workRoot = path.resolve(target)
+  else delete entry.workRoot
   if (Object.keys(entry).length) data.byPlugin[id] = entry
   else delete data.byPlugin[id]
   saveStore()

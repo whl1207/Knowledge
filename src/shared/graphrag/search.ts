@@ -5,57 +5,115 @@ import {
   buildMapPrompt,
   buildReducePrompt,
 } from '@/shared/graphrag/prompts'
+/**
+ * 中英混排分词器
+ *
+ * 中文没有空格，按空格切分会把整句当成一个 token，导致 BM25 对中文完全失效
+ * （查询词几乎永远匹配不上文档词）。这里采用与离线评测一致的口径：
+ *   - 拉丁词/数字：按字母数字串切分后取整词
+ *   - 中文：连续汉字串切 bigram（相邻两字），同时保留单字以覆盖单字词
+ * 该口径不依赖外部分词库，跨平台一致。
+ */
+export function tokenizeMixed(text: string): string[] {
+  if (!text) return []
+  // 去掉 LaTeX 公式，避免数学符号污染词频
+  const cleaned = String(text).replace(/\$[^$]*\$/g, ' ')
+  const out: string[] = []
+  // 拉丁词与数字
+  const latin = cleaned.match(/[A-Za-z][A-Za-z0-9\-.]{1,}/g) || []
+  for (const w of latin) out.push(w.toLowerCase())
+  // 中文串 → bigram + 单字
+  const cjkRuns = cleaned.match(/[\u4e00-\u9fff]+/g) || []
+  for (const seg of cjkRuns) {
+    for (let i = 0; i < seg.length - 1; i++) out.push(seg.slice(i, i + 2))
+    for (const ch of seg) out.push(ch)
+  }
+  return out
+}
 
 /**
- * BM25 打分（归一化到 [0,1]）
- * 从 knowRAG 抽取为公共工具，聊天与测试共用
+ * BM25 打分（按查询归一化到 [0,1]）
+ *
+ * 使用 tokenizeMixed 分词，因此对中文有效。
+ * 归一化：除以本次查询下的最大分（相对分，便于与余弦相似度融合）。
  */
 export function computeBM25Score(query: string, documents: string[], k1: number = 1.5, b: number = 0.75): number[] {
-    const avgDocLength = documents.reduce((sum, doc) => sum + doc.length, 0) / (documents.length || 1);
-    const scores: number[] = [];
+  const queryTerms = tokenizeMixed(query)
+  const N = documents.length
+  if (!N || !queryTerms.length) return documents.map(() => 0)
 
-    const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+  const docTokens: string[][] = documents.map(d => tokenizeMixed(d))
+  const docLengths = docTokens.map(t => t.length)
+  const avgDocLength = docLengths.reduce((s, x) => s + x, 0) / (N || 1) || 1
 
-    const docFreq: {[term: string]: number} = {};
-    const termFreqs: {[term: string]: number}[] = [];
-
-    for (const doc of documents) {
-        const terms = doc.toLowerCase().split(/\s+/);
-        const tf: {[term: string]: number} = {};
-        const seenTerms = new Set<string>();
-
-        for (const term of terms) {
-            tf[term] = (tf[term] || 0) + 1;
-            if (!seenTerms.has(term)) {
-                docFreq[term] = (docFreq[term] || 0) + 1;
-                seenTerms.add(term);
-            }
-        }
-        termFreqs.push(tf);
+  // 文档频率
+  const docFreq: Record<string, number> = {}
+  const termFreqs: Array<Record<string, number>> = []
+  for (const tokens of docTokens) {
+    const tf: Record<string, number> = {}
+    const seen = new Set<string>()
+    for (const t of tokens) {
+      tf[t] = (tf[t] || 0) + 1
+      if (!seen.has(t)) {
+        docFreq[t] = (docFreq[t] || 0) + 1
+        seen.add(t)
+      }
     }
+    termFreqs.push(tf)
+  }
 
-    const N = documents.length;
-
-    for (let i = 0; i < documents.length; i++) {
-        const doc = documents[i];
-        const tf = termFreqs[i];
-        let score = 0;
-        const docLength = doc.length;
-
-        for (const term of queryTerms) {
-            if (docFreq[term] && tf[term]) {
-                const idf = Math.log((N - (docFreq[term] || 0) + 0.5) / ((docFreq[term] || 0) + 0.5) + 1);
-                const termFreq = tf[term] || 0;
-                const numerator = termFreq * (k1 + 1);
-                const denominator = termFreq + k1 * (1 - b + b * docLength / avgDocLength);
-                score += idf * numerator / denominator;
-            }
-        }
-        scores.push(score);
+  const scores: number[] = []
+  for (let i = 0; i < N; i++) {
+    const tf = termFreqs[i]
+    let score = 0
+    const dl = docLengths[i] || 1
+    for (const term of queryTerms) {
+      const df = docFreq[term] || 0
+      const f = tf[term] || 0
+      if (!df || !f) continue
+      const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1)
+      const numerator = f * (k1 + 1)
+      const denominator = f + k1 * (1 - b + b * dl / avgDocLength)
+      score += idf * numerator / denominator
     }
+    scores.push(score)
+  }
 
-    const maxScore = Math.max(...scores, 1);
-    return scores.map(s => s / maxScore);
+  const maxScore = Math.max(...scores, 1e-9)
+  return scores.map(s => s / maxScore)
+}
+
+/**
+ * 查询与社区报告的相关度（0~1）
+ *
+ * 旧实现用 `query.toLowerCase().includes(title)`，即拿**整条查询**在标题里找子串，
+ * 真实问题几乎不可能被完整包含，导致相关度恒为 0、排序完全由 rating 决定
+ * （与查询无关）。这里改为词项级覆盖率：
+ *   相关度 = 查询词项在报告文本中的出现比例（按词项长度加权，长词更重）
+ */
+export function scoreReportRelevance(
+  query: string,
+  report: { title?: string; summary?: string; findings?: Array<{ summary?: string; explanation?: string }> },
+): number {
+  const qTerms = Array.from(new Set(tokenizeMixed(query)))
+  if (!qTerms.length) return 0
+  const titleTerms = new Set(tokenizeMixed(report.title || ''))
+  const bodyText = [
+    report.summary || '',
+    ...(report.findings || []).map(f => `${f.summary || ''} ${f.explanation || ''}`),
+  ].join(' ')
+  const bodyTerms = new Set(tokenizeMixed(bodyText))
+
+  let totalW = 0
+  let gotW = 0
+  for (const t of qTerms) {
+    // 单字权重低，bigram/整词权重高，避免单字偶然命中虚高
+    const w = t.length >= 2 ? 1 : 0.3
+    totalW += w
+    if (titleTerms.has(t)) gotW += w * 1.5          // 标题命中加权
+    else if (bodyTerms.has(t)) gotW += w
+  }
+  return totalW > 0 ? Math.min(1, gotW / totalW) : 0
 }
 
 /**
@@ -235,22 +293,21 @@ export async function multiStageSearch(
     return { answer: '', mapResults: [], llmCalls: 0 }
   }
 
-  // ---- 1. 选择相关社区（按评分排序取 top-N） ----
+  // ---- 1. 选择相关社区（词项级相关度排序，rating 仅作轻微先验） ----
+  // 旧实现：score = rating*10 + (整条 query 是否为 title/summary 子串 ? 常数 : 0)
+  //   -> 后三项几乎恒为 0，排序完全由 rating 决定，与查询无关。
+  // 新实现：以词项覆盖率为主（0~1），rating 只占 10% 权重作为先验。
+  const maxRating = Math.max(1, ...communityReports.map(r => Number(r.rating) || 0))
+  // 最低相关度门槛：相关性只看词项覆盖率，rating 仅作 10% 先验。
+  // 若完全无词项命中，说明该社区与本查询无关，不应因 rating 高而入选。
+  const MIN_RELEVANCE = 0.25
   const scoredReports = communityReports
     .map(r => {
-      // 简单相关性：查询词在报告中的匹配度
-      const ql = query.toLowerCase()
-      let score = r.rating * 10 // 基础分来自社区的重要性
-      if (r.title.toLowerCase().includes(ql)) score += 30
-      if (r.summary.toLowerCase().includes(ql)) score += 15
-      for (const f of r.findings) {
-        if (f.summary.toLowerCase().includes(ql) || f.explanation.toLowerCase().includes(ql)) {
-          score += 10
-          break
-        }
-      }
-      return { ...r, relevance: score }
+      const rel = scoreReportRelevance(query, r)
+      const prior = (Number(r.rating) || 0) / maxRating   // 0~1
+      return { ...r, relevance: rel * 0.9 + prior * 0.1, termRelevance: rel }
     })
+    .filter(r => r.termRelevance >= MIN_RELEVANCE)
     .sort((a, b) => b.relevance - a.relevance)
     .slice(0, 10) // 最多取 10 个
 
@@ -258,8 +315,11 @@ export async function multiStageSearch(
     return { answer: '', mapResults: [], llmCalls: 0 }
   }
 
-  // ---- 2. Map 阶段：分批并行 ----
-  const BATCH_SIZE = 3
+  // ---- 2. Map 阶段：逐社区分析 ----
+  // 旧实现把 3 个社区塞进一个批次，却把该批所有结论都归因到 batch[0].communityId，
+  // 导致下游「社区 -> 切片」漏掉 2/3 的相关社区。
+  // 现改为一个社区一个批次（BATCH_SIZE = 1），归因精确；批次仍并发执行。
+  const BATCH_SIZE = 1
   const batches: typeof scoredReports[] = []
   for (let i = 0; i < scoredReports.length; i += BATCH_SIZE) {
     batches.push(scoredReports.slice(i, i + BATCH_SIZE))

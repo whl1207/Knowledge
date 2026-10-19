@@ -96,6 +96,12 @@ export interface AikmDshApi {
     setConfig(cfg: Partial<import('@/shared/webSearch').WebSearchConfig>): Promise<import('@/shared/webSearch').WebSearchConfig>
     test(payload?: { query?: string; config?: Partial<import('@/shared/webSearch').WebSearchConfig>; provider?: string }): Promise<import('@/shared/webSearch').WebSearchTestResult>
   }
+  /** 网页抓取通道（设置页「工具 → 抓取」；web_fetch 工具按该配置依次回退） */
+  webFetch: {
+    getConfig(): Promise<import('@/shared/webFetch').WebFetchConfig>
+    setConfig(cfg: Partial<import('@/shared/webFetch').WebFetchConfig>): Promise<import('@/shared/webFetch').WebFetchConfig>
+    test(payload?: { url?: string; config?: Partial<import('@/shared/webFetch').WebFetchConfig> }): Promise<import('@/shared/webFetch').WebFetchTestResult>
+  }
   interfaceConfig: {
     save(config: Record<string, any>): Promise<{ success: boolean; path: string }>
     load(): Promise<Record<string, any> | null>
@@ -196,6 +202,8 @@ export interface AikmDshApi {
       pluginId: string
       limits?: { concurrency?: number; callsPerHour?: number }
       relax?: { fs?: boolean; mcp?: boolean }
+      /** 工作目录（必须落在该插件的可写文件授权内；'' = 回到默认的知识库根） */
+      cwd?: string
       confirm?: boolean
     }): Promise<unknown>
     /** 改写某插件的**工具审批**三态（需 confirm） */
@@ -204,6 +212,12 @@ export interface AikmDshApi {
       state: 'allow' | 'ask' | 'deny'
       confirm?: boolean
     }): Promise<{ pluginId: string; state: 'allow' | 'ask' | 'deny' }>
+    /** 订阅观测事件（types 必须在允许名单内；未知类型报错） */
+    eventsSubscribe(args: { pluginId: string; types: string[] }): Promise<{ pluginId: string; types: string[] }>
+    /** 退订观测事件（不传 types = 全退） */
+    eventsUnsubscribe(args: { pluginId: string; types?: string[] }): Promise<{ pluginId: string; types: string[] }>
+    /** 接收推送的观测事件（载荷 `{ pluginId, type, payload }`）；与上面的 `onEvent`（生命周期通知）分开 */
+    onScopedEvent(cb: (ev: { pluginId: string; type: string; payload: unknown }) => void): () => void
     /**
     * 渲染层半边的日志上报（界面扩展装载失败 / 插件 warn·error）→ 落进插件日志缓冲。
     * 与 preload 的 `dsh.plugin.clientLog` 一致；只读语义的追加，不需要审批。
@@ -228,6 +242,10 @@ export interface AikmDshApi {
       }>
       revokeGrant(options: { id: string; path: string; confirm?: boolean }): Promise<{ removed: boolean }>
       clearGrants(options: { id: string; confirm?: boolean }): Promise<{ removed: boolean }>
+      /** 「先读后写」策略：只读快照（是否开启 + 本会话已观察文件数） */
+      fsPolicyGet(options: { id: string }): Promise<{ id: string; enabled: boolean; observed: number }>
+      /** 开启 / 关闭「先读后写」策略（需 confirm） */
+      fsPolicySet(options: { id: string; enabled: boolean; confirm?: boolean }): Promise<{ id: string; enabled: boolean }>
       /** 为用户选一个**可写**文件夹（写权限的唯一来源；授权模式 write） */
       pickWritableDirectory(options: { id: string; title?: string }): Promise<{
         cancelled: boolean

@@ -23,6 +23,9 @@ import { computeEditDiff, makeEditDiffPreview, countTextLines, type EditDiffFile
 import { parseTodoList } from '@/shared/agentTodo'
 import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
 import { planReviewMessage, type PlanReviewOutcome } from '@/shared/agentPlanReview'
+import { enabledWebFetchChannels, normalizeWebFetchConfig, webFetchChannelMeta } from '@/shared/webFetch'
+import { isBotChallengePage } from '@/shared/webFetchHelpers'
+import { runDeepSeekFetchApi } from '@/shared/deepseekApi'
 import type { TodoItem, AskUserAnswer, AskUserQuestion } from '@/types/agent'
 
 export interface RendererToolResult {
@@ -150,7 +153,7 @@ const SCHEMAS: Record<string, any> = {
     query: str('检索问题'),
     kb: str('按知识库文件名过滤（可选）'),
   }, ['query']),
-  web_fetch: fn('web_fetch', '获取网页内容并转为纯文本。', {
+  web_fetch: fn('web_fetch', '获取网页内容并转为纯文本（按「设置 → 工具 → 抓取」开启的通道依次回退；手机 / 网页端支持直接访问与 DeepSeek Fetch）。', {
     url: str('要抓取的网页地址（http/https）'),
   }, ['url']),
   web_search: fn('web_search', '搜索互联网，返回标题 / 链接 / 摘要列表。', {
@@ -652,29 +655,109 @@ function netErrorHint(e: any): string {
     : msg
 }
 
+/** 直接访问通道（渲染层）：HTTP 请求 + HTML 转文本 */
+async function fetchDirectInRenderer(url: string): Promise<{ content: string; contentType: string }> {
+  const res = await fetch(url, { headers: { Accept: 'text/html,application/json;q=0.9,*/*;q=0.8' } })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const contentType = String(res.headers.get('content-type') || '')
+  const body = await res.text()
+  const content = contentType.includes('json') ? body : htmlToText(body)
+  if (!content.trim()) throw new Error('页面内容为空')
+  // 200 的验证页也是失败（否则会挡住后面的 DeepSeek Fetch 回退）
+  if (isBotChallengePage(content)) throw new Error('目标站点需要人机验证（验证页）')
+  return { content, contentType }
+}
+
+/**
+ * web_fetch（渲染层）：按设置页「工具 → 抓取」的通道顺序依次尝试。
+ *
+ * 渲染层只有 direct / deepseek 两条 HTTP 通道，「虚拟浏览器」需要桌面端的隐藏 Chromium，
+ * 因此在手机上它会明确报「仅桌面端可用」并继续下一个通道（配置里默认就带着它）。
+ */
 async function toolWebFetch(input: any): Promise<RendererToolResult> {
   const url = String(input?.url ?? '').trim()
   if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'url 参数必填且需为 http/https 地址' }
+
+  // 抓取通道配置在渲染层存档里（设置 → 工具 → 抓取）；DeepSeek 的 Key 在这一步解析成明文
+  let rawCfg: any = null
   try {
-    const res = await fetch(url, { headers: { Accept: 'text/html,application/json;q=0.9,*/*;q=0.8' } })
-    if (!res.ok) return { ok: false, error: `抓取失败：HTTP ${res.status}` }
-    const ct = String(res.headers.get('content-type') || '')
-    const body = await res.text()
-    const text = ct.includes('json') ? body : htmlToText(body)
-    return { ok: true, value: { url, contentType: ct, chars: text.length, content: text.slice(0, 40_000), truncated: text.length > 40_000 } }
-  } catch (e: any) {
-    return { ok: false, error: `抓取失败：${netErrorHint(e)}` }
+    const { usestore } = await import('@/store')
+    const store: any = usestore()
+    try {
+      rawCfg = typeof store?.buildWebFetchPayload === 'function'
+        ? await store.buildWebFetchPayload()
+        : store?.webFetch
+    } catch {
+      // 凭据解析失败也照样用原始配置（至少 direct / browser 通道还能工作）
+      rawCfg = store?.webFetch || null
+    }
+  } catch { /* 取不到配置时按默认通道处理 */ }
+
+  const config = normalizeWebFetchConfig(rawCfg)
+  const channels = enabledWebFetchChannels(config)
+  const failures: string[] = []
+
+  for (const channel of channels) {
+    const label = webFetchChannelMeta(channel).label
+    try {
+      if (channel === 'direct') {
+        const r = await fetchDirectInRenderer(url)
+        return {
+          ok: true,
+          value: {
+            url,
+            via: 'direct',
+            contentType: r.contentType,
+            chars: r.content.length,
+            content: r.content.slice(0, 40_000),
+            truncated: r.content.length > 40_000,
+          },
+        }
+      }
+      if (channel === 'deepseek') {
+        const ds: any = config.deepseek || {}
+        const apiKey = String(ds.apiKey || '').trim()
+        if (!apiKey) {
+          throw new Error('未配置 DeepSeek API Key（可在「工具 → 抓取」填，或让对话使用 DeepSeek 以复用凭据）')
+        }
+        const page = await runDeepSeekFetchApi({ url, apiKey, apiHost: ds.apiHost })
+        return {
+          ok: true,
+          value: {
+            url,
+            via: 'deepseek',
+            contentType: 'text/markdown',
+            chars: page.content.length,
+            content: page.content.slice(0, 40_000),
+            truncated: page.content.length > 40_000,
+          },
+        }
+      }
+      // browser
+      throw new Error('虚拟浏览器抓取仅在桌面端可用')
+    } catch (e: any) {
+      failures.push(`${label}：${netErrorHint(e)}`)
+    }
   }
+
+  return { ok: false, error: `抓取失败 —— ${failures.join('；')}` }
 }
 
 async function toolWebSearch(input: any): Promise<RendererToolResult> {
   const query = String(input?.query ?? '').trim()
   if (!query) return { ok: false, error: 'query 参数必填' }
-  // 搜索源配置在渲染层存档里（设置 → 工具 → 搜索）
+  // 搜索源配置在渲染层存档里（设置 → 工具 → 搜索）；DeepSeek 的 Key 在这一步解析成明文
   let cfg: any = null
   try {
     const { usestore } = await import('@/store')
-    cfg = (usestore() as any)?.webSearch || null
+    const store: any = usestore()
+    try {
+      cfg = typeof store?.buildWebSearchPayload === 'function'
+        ? await store.buildWebSearchPayload()
+        : store?.webSearch
+    } catch {
+      cfg = store?.webSearch || null
+    }
   } catch { /* 取不到配置时按未配置处理 */ }
   try {
     const { runRendererWebSearch } = await import('@/lib/agent/webSearchRunner')

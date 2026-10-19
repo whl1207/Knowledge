@@ -544,6 +544,10 @@ export interface PluginAgentOverviewRow {
   callsInWindow: number
   limits: PluginAgentLimits
   relax: { fs: boolean; mcp: boolean }
+  /** 被委派 agent 的**工作目录**（'' = 默认，即知识库根） */
+  workRoot: string
+  /** 可选的候选根 = 该插件的**可写文件夹**授权（用户亲手授权的那些） */
+  workRootOptions: string[]
   /** 用户是否调过（用来区分"默认"与"已自定义"） */
   customized: boolean
   /** 工具审批三态（声明了 fs / shell 的插件，其工具默认要用户确认） */
@@ -580,6 +584,8 @@ export async function collectPluginAgentOverview(): Promise<PluginAgentOverviewR
           callsPerHour: Number(row.limits?.callsPerHour) || 20,
         },
         relax: { fs: row.relax?.fs === true, mcp: row.relax?.mcp === true },
+        workRoot: String(row.workRoot ?? ''),
+        workRootOptions: Array.isArray(row.workRootOptions) ? row.workRootOptions.map((x: unknown) => String(x)) : [],
         customized: row.customized === true,
         toolApproval: row.toolApproval === 'allow' || row.toolApproval === 'deny' ? row.toolApproval : 'ask',
         approvalTools: Array.isArray(row.approvalTools) ? row.approvalTools.map((t: unknown) => String(t)) : [],
@@ -593,7 +599,7 @@ export async function collectPluginAgentOverview(): Promise<PluginAgentOverviewR
 /** 写额度 / 放宽开关（需 confirm；唯一能放开文件 / MCP 工具的入口）；失败返回 false */
 export async function setPluginAgentConfig(
   id: string,
-  patch: { limits?: Partial<PluginAgentLimits>; relax?: { fs?: boolean; mcp?: boolean }; reset?: boolean },
+  patch: { limits?: Partial<PluginAgentLimits>; relax?: { fs?: boolean; mcp?: boolean }; cwd?: string; reset?: boolean },
 ): Promise<boolean> {
   const api = agentBridge()
   if (!api?.setAgentConfig) return false

@@ -46,12 +46,12 @@ export const isBuiltinAgentPreset = (preset: any): boolean =>
 // `_V1` 常量只用于把**旧存档里的旧提示词**一次性订正过来（见 refreshBuiltinAgentPresets）。
 // ---------------------------------------------------------------------------
 
-/** 怎么拿 API 参考（当前）：经 mcp_call 调内置 MCP 服务 builtin-plugin-dev 的 7 个短工具 */
+/** 怎么拿 API 参考（当前）：经 mcp_call 调内置 MCP 服务 builtin-plugin-dev 的 8 个短工具 */
 const PLUGIN_PROMPT_GUIDE = [
   '动手前必须先拿到官方 API 参考（不要凭记忆写，也**不要在磁盘上找 AI-KM 的源码**）：',
   '- **先记住命名规则（否则写完还要改名返工）**：插件文件夹名必须等于清单里的 `aikm.id`，且只能用 ASCII 小写——以 [a-z0-9] 开头、只含 `[a-z0-9._-]`（例：`my-plugin`）。文件夹名带中文 / 大写 / 空格时宿主会**整目录跳过**（插件根本不会出现在列表里）。中文写在清单 `aikm.name`（显示名）与界面文案里；定好英文 id 与目录名再动笔。',
-  '- 用 mcp_call 调内置 MCP 服务 `builtin-plugin-dev`，它按主题拆成 7 个短工具，**按需取用、不要一次全取**：`plugin_dev_host`（本机插件目录 / 命名规则 / 已装插件 / 数据放哪）、`plugin_dev_constraints`（14 条硬性约束）、`plugin_dev_manifest`（package.json 清单字段 + 内置槽位 + 可直接照抄的清单）、`plugin_dev_api`（**界面半边** client.mjs 的 API 速查 + 最小示例全文）、`plugin_dev_api_main`（**主进程半边** index.mjs 的 API 速查 + 注册工具的最小示例全文）、`plugin_dev_faq`（报错对照）、`plugin_dev_templates`（模板目录与安装步骤，正文要传 key，如 {"key":"panel"}），另有 `plugin_dev_check`（自检，见工作方式第 3 步）。',
-  '- 推荐起手三条：host（知道文件夹建在哪）→ constraints（避免加载失败）→ manifest + api（照着写清单与界面半边代码）；要写主进程半边（工具 / 后台能力）时再取 api_main。两半边的 ctx **不能混用**。',
+  '- 用 mcp_call 调内置 MCP 服务 `builtin-plugin-dev`，它按主题拆成 8 个短工具，**按需取用、不要一次全取**：`plugin_dev_host`（本机插件目录 / 命名规则 / 已装插件 / 数据放哪）、`plugin_dev_constraints`（15 条硬性约束）、`plugin_dev_manifest`（package.json 清单字段 + 内置槽位 + 可直接照抄的清单）、`plugin_dev_api`（**界面半边基础**：槽位 / 快捷键 / 文案 / 通知 / 事件 / 应用信息）、`plugin_dev_api_caps`（**界面半边能力**：ctx.fs 文件、ctx.llm 模型、ctx.agent / ctx.agents 委派、ctx.image 生图、ctx.tts 语音，含权限与失败形态）、`plugin_dev_api_main`（**主进程半边** index.mjs 的 API 速查 + 注册工具的最小示例全文）、`plugin_dev_faq`（报错对照）、`plugin_dev_templates`（模板目录与安装步骤，正文要传 key，如 {"key":"panel"}），另有 `plugin_dev_check`（自检，见工作方式第 3 步）。',
+  '- 推荐起手三条：host（知道文件夹建在哪）→ constraints（避免加载失败）→ manifest + api（照着写清单与界面半边）；要用文件 / 模型 / 委派 / 生图时取 api_caps；要写主进程半边（工具 / 后台能力）时再取 api_main。两半边的 ctx **不能混用**。',
   '- 为什么不能去找源码：软件安装目录里没有 `src/`（那是开发仓库才有的），用户的工作区一般是他的知识库、也不是 AI-KM 项目目录；满盘 read_file / search_files / 跑 shell 只会浪费轮次，什么也读不到。这些内容已内联在该 MCP 服务里。',
   '- 只有当工作区里**确实**存在 AI-KM 源码（例如工作区根下有 `src/lib/plugin/devGuide.ts`，说明用户就是在开发 AI-KM 本身）时，才顺手读一眼源码核对；这种情形只是少数。',
 ]
@@ -102,8 +102,8 @@ export const PLUGIN_PROMPT_DELIVERY_V1 = [
 const PLUGIN_PROMPT_WORKFLOW = [
   '工作方式：',
   '1. 先用 ask_user 问清 3 件事：插件要做什么（具体到界面与按钮）、插件文件夹放哪（默认就放上面那个插件目录）、是否需要权限（文件 / 大模型 / 命令）。信息够了就动手，不要反复确认。',
-  '2. 先调 mcp_call（builtin-plugin-dev → plugin_dev_host / plugin_dev_constraints / plugin_dev_manifest / plugin_dev_api）拿参考，再写清单与代码；**要写主进程半边（工具 / 后台能力）时再取 plugin_dev_api_main**。**写代码时只准用这两个话题里列出的 ctx 成员，并按它标注的异步性与返回形状用**：界面半边（client.mjs）与主进程半边（index.mjs）各有一套 ctx，不能混用（界面半边没有 ctx.service / ctx.mcp / ctx.host / ctx.storage）。不要凭名字猜 API——真实翻车案例：ctx.files.readFile、ctx.service(\'office\') 想解析 Excel、ctx.mcp.*、ctx.llm.chatStream 都不存在，运行到那一行就抛 "is not a function"。另外两个「不报错但没数据」的坑：① ctx.files.* 全部是**异步**，必须 await（漏了不会报错，但 res.sheets / res.text 是 undefined）；② pickFiles() 返回 { cancelled, files: [{ path, name, size }] }，**不是路径数组**（取消时 cancelled=true 且不抛错）。读表格用 await ctx.files.readSheet(path)、读二进制用 await ctx.files.readBase64(path)。',
-  '3. **写完必须自检并修到通过**：调 mcp_call（builtin-plugin-dev → plugin_dev_check，参数 dir 传插件目录或 id）——它会用宿主**同一份**校验逻辑检查清单、入口文件，并静态检查两个半边：import / template / 导出形状 / 槽位注册 / **是否调用了宿主不存在的 ctx 成员** / **漏 await、返回形状用错、观察器没断开**（逐条给出正确做法），再返回**宿主真实的加载状态与日志**（含界面半边装载失败的原因）。有 ✗ 就改文件、再跑一次 check，直到没有 ✗ 才交付；也用 shell 跑 `node --check <插件目录>/client.mjs` 兜一层语法。',
+  '2. 先调 mcp_call（builtin-plugin-dev → plugin_dev_host / plugin_dev_constraints / plugin_dev_manifest / plugin_dev_api）拿参考，再写清单与代码；**要用文件 / 模型 / 委派 / 生图时取 plugin_dev_api_caps，要写主进程半边（工具 / 后台能力）时取 plugin_dev_api_main**。**写代码时只准用这些话题里列出的 ctx 成员，并按它标注的异步性、失败形态与返回形状用**：界面半边（client.mjs）与主进程半边（index.mjs）各有一套 ctx，不能混用（界面半边没有 ctx.service / ctx.mcp / ctx.host / ctx.storage）。不要凭名字猜 API——真实翻车案例：ctx.files.readFile、ctx.service(\'office\') 想解析 Excel、ctx.mcp.*、ctx.llm.chatStream 都不存在，运行到那一行就抛 "is not a function"。另外几个「不报错但没数据」的坑：① ctx.fs / ctx.files 全部是**异步**，必须 await（漏了不会报错，但 res.text / res.sheets 是 undefined）；② pickFiles() 返回 { cancelled, files: [{ path, name, size }] }，**不是路径数组**（取消时 cancelled=true 且不抛错）；③ 文件读写用 **ctx.fs**（读写两个半边同形状），选择框仍用 ctx.files；④ 失败分两类：ctx.fs **抛 FS_* 错误码**（按 code 分支），ctx.image.generate / ctx.llm.stream / ctx.agents **不抛**（看 ok / finish.kind / termination）；⑤ 用到的能力必须在清单 permissions 里声明（fs / llm / image / agent.run）。',
+  '3. **写完必须自检并修到通过**：调 mcp_call（builtin-plugin-dev → plugin_dev_check，参数 dir 传插件目录或 id）——它会用宿主**同一份**校验逻辑检查清单、入口文件，并静态检查两个半边：import / template / 导出形状 / 槽位注册 / **是否调用了宿主不存在的 ctx 成员** / **用到的能力有没有申请权限** / **事件类型是否真的会触发** / **漏 await、返回形状用错、观察器没断开**（逐条给出正确做法），再返回**宿主真实的加载状态与日志**（含界面半边装载失败的原因）。有 ✗ 就改文件、再跑一次 check，直到没有 ✗ 才交付；也用 shell 跑 `node --check <插件目录>/client.mjs` 兜一层语法。',
   '4. 改动优先精确替换（replace_in_file / multi_replace），新建文件才用 write_file。',
   '5. 多步任务用 update_plan 列计划、update_todo 维护清单。',
   '6. 不要读用户知识库里的文档 / 笔记来"找参考资料"——插件开发所需的一切都在 builtin-plugin-dev 服务里，与用户的知识库内容无关。',
@@ -688,7 +688,7 @@ function hasAll(text: string, markers: string[]): boolean {
  *
  * 旧版提示词让模型去读 `src/types/plugin.ts` 这类**仓库源码**核对 API：装机后软件里没有源码，
  * 模型于是满盘搜索 AI-KM 的安装目录（用户看到一串 read_file / search_files / shell，什么也读不到）。
- * 现在改为经 `mcp_call` 调内置 MCP 服务 `builtin-plugin-dev`（6 个话题工具 + 1 个自检工具）。
+ * 现在改为经 `mcp_call` 调内置 MCP 服务 `builtin-plugin-dev`（8 个话题工具 + 1 个自检工具）。
  * 同时同步能力配置（开 mcp_call、绑服务、去掉已废弃的工具名）。
  *
  * @returns 是否发生了订正（调用方据此决定是否需要落盘）
@@ -728,8 +728,8 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
     if (guideSpan) {
       const cur = prompt.slice(guideSpan.start, guideSpan.end)
       // ⚠️ 标记必须包含「本次新增的独有内容」：否则老存档（含旧四标记）会被判为"已是当前版"而不订正，
-      // 于是提示词一直停在旧版（还写着"6 个短工具"、永远不提 plugin_dev_api_main）。
-      if (!hasAll(cur, ['plugin_dev_host', 'plugin_dev_check', 'builtin-plugin-dev', '整目录跳过', 'plugin_dev_api_main'])) {
+      // 于是提示词一直停在旧版（还写着旧工具数与旧话题名、永远不提 plugin_dev_api_main）。
+      if (!hasAll(cur, ['plugin_dev_host', 'plugin_dev_check', 'builtin-plugin-dev', '整目录跳过', 'plugin_dev_api_main', 'plugin_dev_api_caps'])) {
         prompt = prompt.slice(0, guideSpan.start) + PLUGIN_PROMPT_GUIDE.join('\n') + '\n\n' + prompt.slice(guideSpan.end)
         promptChanged = true
       }
@@ -751,7 +751,7 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
       const cur = prompt.slice(flowSpan.start)
       // 标记取「当前版本独有」的内容：旧存档里的工作方式已含 plugin_dev_check / update_plan，
       // 只有加上新代标记，老提示词才会被订正到最新（自检覆盖臆造 API、漏 await 与返回形状）。
-      if (!hasAll(cur, ['plugin_dev_check', 'update_plan', '宿主不存在的 ctx', '不是路径数组', 'plugin_dev_api_main'])) {
+      if (!hasAll(cur, ['plugin_dev_check', 'update_plan', '宿主不存在的 ctx', '不是路径数组', 'plugin_dev_api_main', 'plugin_dev_api_caps'])) {
         prompt = prompt.slice(0, flowSpan.start) + PLUGIN_PROMPT_WORKFLOW.join('\n') + '\n'
         promptChanged = true
       }

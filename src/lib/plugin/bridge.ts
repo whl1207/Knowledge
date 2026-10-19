@@ -123,6 +123,8 @@ export interface PluginBridgeApi {
     pluginId: string
     limits?: { concurrency?: number; callsPerHour?: number }
     relax?: { fs?: boolean; mcp?: boolean }
+    /** 工作目录（必须落在该插件的可写文件授权内；'' = 回到默认的知识库根） */
+    cwd?: string
     confirm?: boolean
   }): Promise<unknown>
   /** 改写某插件的**工具审批**三态（需 confirm） */

@@ -2,6 +2,23 @@
 
 import { ElMessage } from 'element-plus'
 import { getPlatform, hasCapability } from '@/platform'
+import { qwen3Synthesize, qwen3ListVoices, resolveQwen3Transport, QWEN3_REFERENCE_VOICE, type Qwen3RequestConfig } from '@/services/tts/qwen3'
+
+// TTS 配置（store 的 tts 对象）→ Qwen3 客户端参数
+function qwen3ConfigFrom(ttsConfig: any, timeoutMs: number): Qwen3RequestConfig {
+    const q = ttsConfig?.qwen3 || {};
+    return {
+        base: ttsConfig?.url || '',
+        protocol: q.protocol,
+        voice: ttsConfig?.voice,
+        lang: q.lang ?? ttsConfig?.language,
+        modelType: q.modelType,
+        speed: q.speed ?? ttsConfig?.rate,
+        chunkSize: q.chunkSize,
+        batch: q.batch,
+        timeoutMs,
+    };
+}
 
 // 音频队列管理类
 class AudioQueue {
@@ -606,154 +623,27 @@ class AudioQueue {
         }
     }
 
-    // 获取Qwen3-TTS音频
+    // Qwen3-TTS 请求配置（把 store 里的 tts/qwen3 配置整理成客户端参数）
+    private qwen3RequestConfig(timeoutMs: number): Qwen3RequestConfig {
+        return qwen3ConfigFrom(this.ttsConfig, timeoutMs);
+    }
+
+    // 获取 Qwen3-TTS 音频（Gradio /do_job 或直连接口一次 POST，见 services/tts/qwen3.ts）
     private async fetchQwen3TTSAudio(text: string, index: number): Promise<string | null> {
-        const ttsConfig = this.ttsConfig;
-        
-        if (!ttsConfig.url) {
-            console.error("[Qwen3-TTS] TTS URL未配置");
+        if (!this.ttsConfig.url) {
+            console.error("[Qwen3-TTS] TTS URL 未配置");
             return null;
         }
-        
-        let controller: AbortController | null = null;
-        let timeoutId: any = null;
-        
+        const startTime = Date.now();
         try {
             console.log(`[Qwen3-TTS] 开始获取音频 (${index}): ${text.substring(0, 50)}...`);
-            
-            // 清理文本
-            const cleanedText = text.replace(/\s+/g, ' ').trim();
-            
-            // 构建Qwen3-TTS请求URL
-            const baseUrl = ttsConfig.url.endsWith('/') ? ttsConfig.url.slice(0, -1) : ttsConfig.url;
-            const url = new URL(baseUrl);
-            
-            // Qwen3-TTS通常使用GET请求
-            // 注意：直接使用文本，URL构造函数会自动编码
-            url.searchParams.set('text', cleanedText);
-            
-            // 设置说话人参数
-            if (ttsConfig.voice) {
-                url.searchParams.set('speaker', ttsConfig.voice);
-            }
-            
-            // 其他可选参数
-            if (ttsConfig.language) {
-                url.searchParams.set('lang', ttsConfig.language);
-            }
-            
-            // 语速参数
-            const speed = ttsConfig.qwen3?.speed || ttsConfig.rate || 1.0;
-            if (speed !== 1.0) {
-                url.searchParams.set('speed', speed.toString());
-            }
-            
-            // 音调参数
-            const pitch = ttsConfig.qwen3?.pitch || ttsConfig.pitch || 1.0;
-            if (pitch !== 1.0) {
-                url.searchParams.set('pitch', pitch.toString());
-            }
-            
-            console.log(`[Qwen3-TTS] 请求URL: ${url.toString()}`);
-            console.log(`[Qwen3-TTS] 实际请求路径: ${url.pathname}${url.search}`);
-            
-            // 创建控制器和超时 - 120秒
-            controller = new AbortController();
-            timeoutId = setTimeout(() => {
-                console.log(`[Qwen3-TTS] 请求超时 (${index}) - 120秒`);
-                if (controller) {
-                    controller.abort();
-                }
-            }, 120000);
-            
-            const startTime = Date.now();
-            console.log(`[Qwen3-TTS] 开始请求 (${index})`);
-            
-            const response = await fetch(url.toString(), {
-                signal: controller.signal,
-                headers: { 
-                    'Accept': 'audio/*, */*',
-                    'User-Agent': 'Mozilla/5.0'
-                }
-            });
-            
-            const endTime = Date.now();
-            console.log(`[Qwen3-TTS] 请求完成 (${index})，耗时: ${endTime - startTime}ms`);
-            
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-                timeoutId = null;
-            }
-            
-            console.log(`[Qwen3-TTS] 响应状态: ${response.status} ${response.statusText}`);
-            
-            if (!response.ok) {
-                console.error(`[Qwen3-TTS] HTTP错误! 状态码: ${response.status}`);
-                return null;
-            }
-            
-            // 检查响应类型
-            const contentType = response.headers.get('content-type') || '';
-            console.log(`[Qwen3-TTS] 响应类型: ${contentType}`);
-            
-            // 获取响应大小
-            const contentLength = response.headers.get('content-length');
-            console.log(`[Qwen3-TTS] 响应大小: ${contentLength || '未知'} bytes`);
-            
-            const audioBlob = await response.blob();
-            console.log(`[Qwen3-TTS] 音频Blob大小: ${audioBlob.size} bytes`);
-            console.log(`[Qwen3-TTS] 音频Blob类型: ${audioBlob.type}`);
-            
-            if (audioBlob.size === 0) {
-                console.error("[Qwen3-TTS] 音频响应为空");
-                return null;
-            }
-            
-            // 检查是否为有效的音频格式
-            const validAudioTypes = ['audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/webm', 'audio/x-wav'];
-            const isAudioType = validAudioTypes.some(type => contentType.includes(type) || audioBlob.type.includes(type));
-            
-            if (!isAudioType && audioBlob.type !== 'application/octet-stream') {
-                console.warn(`[Qwen3-TTS] 可能不是音频格式: ${contentType || audioBlob.type}`);
-                
-                // 尝试读取部分内容查看是什么
-                const firstBytes = await audioBlob.slice(0, 100).arrayBuffer();
-                const decoder = new TextDecoder();
-                const textStart = decoder.decode(firstBytes);
-                console.log(`[Qwen3-TTS] 响应前100字节: ${textStart.substring(0, 50)}...`);
-                
-                if (textStart.includes('html') || textStart.includes('<!DOCTYPE')) {
-                    console.error('[Qwen3-TTS] 响应似乎是HTML页面，不是音频');
-                    return null;
-                }
-            }
-            
-            const audioUrl = URL.createObjectURL(audioBlob);
-            console.log(`[Qwen3-TTS] 创建音频URL成功: ${audioUrl.substring(0, 50)}...`);
-            
-            return audioUrl;
-            
+            const res = await qwen3Synthesize(this.qwen3RequestConfig(180000), text);
+            console.log(`[Qwen3-TTS] 合成完成 (${index})，耗时 ${Date.now() - startTime}ms，${res.transport} · ${res.mime} · ${res.buffer.byteLength} bytes`);
+            return URL.createObjectURL(new Blob([res.buffer], { type: res.mime || 'audio/wav' }));
         } catch (error: any) {
-            console.error(`[Qwen3-TTS] 获取音频失败 (${index}):`, error);
-            
-            if (error.name === 'AbortError') {
-                console.error(`[Qwen3-TTS] 请求被取消/超时 (${index})`);
-            } else if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
-                console.error(`[Qwen3-TTS] 网络错误或CORS问题 (${index})`);
-                console.error(`[Qwen3-TTS] 请检查: 1) Qwen3-TTS服务器是否运行 2) CORS配置 3) 网络连接`);
-            }
-            
-            // 清理超时
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-            }
-            
+            console.error(`[Qwen3-TTS] 获取音频失败 (${index}):`, error?.message || error);
+            console.error('[Qwen3-TTS] 请检查：1) 服务是否启动（Gradio 7862 / 直连接口 9880）2) 服务地址是否正确 3) 是否已在设置里选择音色');
             return null;
-        } finally {
-            // 确保清理超时
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-            }
         }
     }
 
@@ -1035,7 +925,7 @@ export class TTSManager {
         }
     }
 
-    // 测试Qwen3-TTS连接
+    // 测试 Qwen3-TTS 连接：探测接口类型（Gradio /do_job 或直连接口），顺带拉一次音色列表
     async testQwen3TTSConnection(): Promise<{
         success: boolean;
         message: string;
@@ -1045,164 +935,50 @@ export class TTSManager {
         if (!this.ttsConfig.url) {
             return {
                 success: false,
-                message: "Qwen3-TTS URL未配置"
+                message: "Qwen3-TTS 服务地址未配置"
             };
         }
-        
-        let controller: AbortController | null = null;
-        let timeoutId: any = null;
-        
+
+        const base = this.ttsConfig.url;
+        const protocol = this.ttsConfig.qwen3?.protocol;
         try {
-            const url = new URL(this.ttsConfig.url);
-            url.searchParams.set('text', '测试');
-            
-            // 尝试不同的说话人
-            const speakers = ['四川方言', '普通话', 'xiaoyan', 'default'];
-            let testUrl = '';
-            let lastError = null;
-            
-            for (const speaker of speakers) {
-                const testUrlObj = new URL(url.toString());
-                testUrlObj.searchParams.set('speaker', speaker);
-                testUrl = testUrlObj.toString();
-                console.log(`[TTSManager] 测试连接URL: ${testUrl}`);
-                
-                // 清理之前的控制器
-                if (controller) {
-                    controller.abort();
-                }
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                }
-                
-                controller = new AbortController();
-                timeoutId = setTimeout(() => {
-                    console.log(`[TTSManager] 测试连接超时 - 120秒`);
-                    if (controller) {
-                        controller.abort();
-                    }
-                }, 120000);
-                
-                try {
-                    const response = await fetch(testUrl, {
-                        method: 'HEAD',
-                        signal: controller.signal
-                    });
-                    
-                    clearTimeout(timeoutId);
-                    
-                    if (response.ok) {
-                        // 安全地获取headers信息
-                        const headers: Record<string, string> = {};
-                        // 使用forEach而不是entries()
-                        response.headers.forEach((value, key) => {
-                            headers[key] = value;
-                        });
-                        
-                        return {
-                            success: true,
-                            message: `连接成功 (使用说话人: ${speaker})`,
-                            details: {
-                                url: testUrl,
-                                status: response.status,
-                                headers: headers
-                            }
-                        };
-                    } else {
-                        lastError = `HTTP错误: ${response.status} ${response.statusText}`;
-                        console.log(`[TTSManager] HEAD请求失败: ${lastError}`);
-                    }
-                } catch (headError: any) {
-                    lastError = headError.message;
-                    console.log(`[TTSManager] HEAD请求异常: ${lastError}`);
-                    // 继续尝试下一个说话人
-                }
+            const resolved = await resolveQwen3Transport({ base, protocol });
+            let voices: string[] = [];
+            let voiceError = '';
+            try {
+                const listed = await qwen3ListVoices({ base, protocol });
+                voices = listed.voices.filter(v => v !== QWEN3_REFERENCE_VOICE);
+            } catch (e: any) {
+                voiceError = e?.message || String(e);
             }
-            
-            // 如果所有HEAD都失败，尝试GET请求获取详细信息
-            console.log(`[TTSManager] 所有HEAD请求失败，尝试GET请求获取详细信息`);
-            
-            // 使用最后一个测试URL
-            const testUrlObj = new URL(url.toString());
-            testUrlObj.searchParams.set('speaker', speakers[0]);
-            testUrl = testUrlObj.toString();
-            
-            // 清理之前的控制器
-            if (controller) {
-                controller.abort();
-            }
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-            }
-            
-            controller = new AbortController();
-            timeoutId = setTimeout(() => {
-                console.log(`[TTSManager] GET请求超时 - 120秒`);
-                if (controller) {
-                    controller.abort();
-                }
-            }, 120000);
-            
-            const response = await fetch(testUrl, {
-                signal: controller.signal,
-                headers: {
-                    'Accept': 'text/plain, text/html, application/json, */*'
-                }
-            });
-            
-            clearTimeout(timeoutId);
-            
-            const responseText = response.headers.get('content-type')?.includes('text') 
-                ? await response.text().then(t => t.substring(0, 200)).catch(() => '无法读取响应内容')
-                : '非文本响应';
-            
-            // 安全地获取headers信息
-            const headers: Record<string, string> = {};
-            response.headers.forEach((value, key) => {
-                headers[key] = value;
-            });
-            
+
+            const label = resolved.transport === 'gradio' ? 'Gradio /do_job' : '直连接口（一次 POST）';
+            const parts = [`连接成功 · ${label}`, `地址 ${resolved.base}`];
+            if (voices.length) parts.push(`${voices.length} 个音色`);
+            if (voiceError) parts.push(`音色列表不可用：${voiceError.slice(0, 100)}`);
+
             return {
-                success: response.ok,
-                message: response.ok ? '连接成功' : `HTTP错误: ${response.status} ${response.statusText}`,
+                success: true,
+                message: parts.join(' · '),
                 details: {
-                    url: testUrl,
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: headers,
-                    responsePreview: responseText
+                    transport: resolved.transport,
+                    base: resolved.base,
+                    gradioBase: resolved.gradioBase,
+                    voices,
+                    voiceError: voiceError || undefined,
                 }
             };
-            
         } catch (error: any) {
             console.error("[TTSManager] 测试Qwen3-TTS连接失败:", error);
-            
-            // 清理超时
-            if (timeoutId) {
-                clearTimeout(timeoutId);
+            let message = error?.message || String(error);
+            if (error?.name === 'TypeError' && String(message).includes('Failed to fetch')) {
+                message = '网络错误，请检查服务是否运行、地址是否正确';
             }
-            
-            let message = '连接失败';
-            if (error.name === 'AbortError') {
-                message = '连接超时 (120秒)';
-            } else if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
-                message = '网络错误，请检查服务器是否运行';
-            } else if (error.message.includes('Invalid URL')) {
-                message = 'URL格式无效';
-            } else {
-                message = error.message;
-            }
-            
             return {
                 success: false,
-                message: message,
-                details: { error: error.toString() }
+                message: `连接失败：${message}`,
+                details: { error: String(error) }
             };
-        } finally {
-            // 确保清理超时
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-            }
         }
     }
 
@@ -1286,102 +1062,16 @@ export class TTSManager {
             ElMessage.error(`测试失败: ${error.message}`);
         }
     }
-    
-    // 直接获取Qwen3-TTS音频（简化版本）
+
+    // 直接获取Qwen3-TTS音频（调试用：与播放队列同一条合成路径）
     private async fetchQwen3TTSAudioDirectly(text: string): Promise<string | null> {
-        const ttsConfig = this.ttsConfig;
-        
-        if (!ttsConfig.url) {
-            console.error("[TTSManager] TTS URL未配置");
-            return null;
-        }
-        
-        let controller: AbortController | null = null;
-        let timeoutId: any = null;
-        
+        if (!this.ttsConfig.url) return null;
         try {
-            const baseUrl = ttsConfig.url.endsWith('/') ? ttsConfig.url.slice(0, -1) : ttsConfig.url;
-            const url = new URL(baseUrl);
-            
-            // 直接使用文本
-            url.searchParams.set('text', text);
-            
-            if (ttsConfig.voice) {
-                url.searchParams.set('speaker', ttsConfig.voice);
-            }
-            
-            console.log(`[TTSManager] 直接请求完整URL: ${url.toString()}`);
-            
-            // 添加时间戳避免缓存
-            url.searchParams.set('_t', Date.now().toString());
-            
-            // 创建控制器和超时 - 120秒
-            controller = new AbortController();
-            timeoutId = setTimeout(() => {
-                console.log(`[TTSManager] 直接请求超时 - 120秒`);
-                if (controller) {
-                    controller.abort();
-                }
-            }, 120000);
-            
-            const response = await fetch(url.toString(), {
-                signal: controller.signal,
-                headers: { 
-                    'Accept': 'audio/*',
-                    'Cache-Control': 'no-cache'
-                },
-                cache: 'no-cache'
-            });
-            
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-                timeoutId = null;
-            }
-            
-            console.log(`[TTSManager] 直接响应状态: ${response.status} ${response.statusText}`);
-            console.log(`[TTSManager] 直接响应类型: ${response.headers.get('content-type')}`);
-            
-            if (!response.ok) {
-                console.error(`[TTSManager] 直接HTTP错误: ${response.status}`);
-                
-                // 尝试获取错误信息
-                if (response.headers.get('content-type')?.includes('text')) {
-                    const errorText = await response.text();
-                    console.error(`[TTSManager] 错误响应: ${errorText.substring(0, 200)}`);
-                }
-                
-                return null;
-            }
-            
-            const audioBlob = await response.blob();
-            console.log(`[TTSManager] 直接音频大小: ${audioBlob.size} bytes`);
-            console.log(`[TTSManager] 直接音频类型: ${audioBlob.type}`);
-            
-            if (audioBlob.size === 0) {
-                console.error("[TTSManager] 直接音频响应为空");
-                return null;
-            }
-            
-            return URL.createObjectURL(audioBlob);
-            
+            const res = await qwen3Synthesize(qwen3ConfigFrom(this.ttsConfig, 180000), text);
+            return URL.createObjectURL(new Blob([res.buffer], { type: res.mime || 'audio/wav' }));
         } catch (error: any) {
-            console.error(`[TTSManager] 直接获取音频失败:`, error);
-            
-            if (error.name === 'AbortError') {
-                console.error('[TTSManager] 直接请求超时 (120秒)');
-            } else if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
-                console.error('[TTSManager] 网络错误，请检查:');
-                console.error('1. Qwen3-TTS服务器是否启动 (http://localhost:9880)');
-                console.error('2. 服务器是否支持跨域请求 (CORS)');
-                console.error('3. 防火墙或代理设置');
-            }
-            
+            console.error('[TTSManager] 直接获取Qwen3-TTS音频失败:', error?.message || error);
             return null;
-        } finally {
-            // 确保清理超时
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-            }
         }
     }
 

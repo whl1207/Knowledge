@@ -17,7 +17,9 @@
  */
 import {
   ANY_CTX_MEMBERS,
+  CLIENT_CTX_MEMBERS,
   CTX_USAGE_PROSE_RE,
+  MAIN_CTX_MEMBERS,
   checkCtxUsage,
 } from '@/shared/pluginApiMembers'
 import {
@@ -194,6 +196,35 @@ export function runPluginDocsApiSelfTest(): PluginDocsCase[] {
     name: '反面教材清单里没有「其实存在」的成员',
     ok: bogus.length === 0,
     detail: bogus.length ? bogus.join('；') : `${ctxMentions(joined).length} 处 ctx.* 引用、${KNOWN_ABSENT_MENTIONS.size} 条豁免已核对`,
+  })
+
+  // 6) **接口规范 → 文档**的完备性：成员表里每个顶层成员都必须在指南里被写到
+  //    （这是「新增能力却忘了写指南」的回归锁；只查顶层，子成员由第 1 条覆盖）
+  const documented = new Set<string>()
+  for (const m of joined.matchAll(/ctx\.([A-Za-z_$][\w$]*)/g)) documented.add(m[1])
+  const missingClientTops = Object.keys(CLIENT_CTX_MEMBERS).filter((name) => !documented.has(name))
+  const missingMainTops = Object.keys(MAIN_CTX_MEMBERS).filter((name) => !documented.has(name))
+  cases.push({
+    name: '成员表里每个顶层 ctx 成员都在指南里出现过（两半边都不漏）',
+    ok: missingClientTops.length === 0 && missingMainTops.length === 0,
+    detail:
+      missingClientTops.length || missingMainTops.length
+        ? `界面半边缺：${missingClientTops.join(' / ') || '无'}；主进程半边缺：${missingMainTops.join(' / ') || '无'}`
+        : `界面半边 ${Object.keys(CLIENT_CTX_MEMBERS).length} 个、主进程半边 ${Object.keys(MAIN_CTX_MEMBERS).length} 个顶层成员均已写到`,
+  })
+
+  // 7) MCP 话题分桶：每条事实有归属、四个话题都非空
+  //    （话题输出是 `plugin_dev_api` / `_api_caps` / `_api_main` / `_manifest` 的唯一来源）
+  const FACT_TOPICS = ['manifest', 'api', 'api-caps', 'api-main'] as const
+  const emptyTopics = FACT_TOPICS.filter((t) => !PLUGIN_DEV_FACTS.some((f) => f.topic === t))
+  const orphanFacts = PLUGIN_DEV_FACTS.filter((f) => !FACT_TOPICS.includes(f.topic as (typeof FACT_TOPICS)[number]))
+  cases.push({
+    name: '每条 API 事实都归入一个已声明的话题，且四个话题都不为空',
+    ok: emptyTopics.length === 0 && orphanFacts.length === 0,
+    detail:
+      emptyTopics.length || orphanFacts.length
+        ? `空话题：${emptyTopics.join(' / ') || '无'}；无归属事实：${orphanFacts.map((f) => f.name).join(' / ') || '无'}`
+        : `${PLUGIN_DEV_FACTS.length} 条事实分入 ${FACT_TOPICS.length} 个话题（${FACT_TOPICS.map((t) => `${t}=${PLUGIN_DEV_FACTS.filter((f) => f.topic === t).length}`).join('，')}）`,
   })
 
   return cases

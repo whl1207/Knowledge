@@ -15,6 +15,8 @@
 
 import type { PluginId } from '@/types/ids'
 import type { ToolDefinition, ToolRegistryEventMap } from '@/types/tool'
+import type { AgentPluginEventMap } from '@/types/agent'
+import type { PluginFsApi } from '@/shared/fsContract'
 
 /**
  * 宿主 API 主版本。
@@ -32,7 +34,7 @@ export const PLUGIN_HOST_API_VERSION = 1
  * 若把 `'agent'` 扩成"可读可跑"，所有已声明它的老插件会**静默获得烧钱能力**，
  * 违背"声明即合同"。新增独立权限是加法：老插件行为一个字节不变。
  */
-export type PluginPermission = 'fs' | 'shell' | 'net' | 'agent' | 'agent.run' | 'llm'
+export type PluginPermission = 'fs' | 'shell' | 'net' | 'agent' | 'agent.run' | 'llm' | 'image'
 
 /**
  * 插件运行态（对齐 Cordis fiber 状态机的可见投影）。
@@ -214,8 +216,8 @@ export interface PluginHostApi {
   notify(message: string): void
 }
 
-/** 宿主事件目录：工具注册表事件 + 插件生命周期事件 */
-export interface HostEventMap extends ToolRegistryEventMap {
+/** 宿主事件目录：工具注册表事件 + agent 输出事件（按作用域转发给插件）+ 插件生命周期事件 */
+export interface HostEventMap extends ToolRegistryEventMap, AgentPluginEventMap {
   'plugin/loaded': { id: PluginId; tools: string[]; services: string[] }
   'plugin/unloaded': { id: PluginId; reason: string }
   'plugin/error': { id: PluginId; error: string }
@@ -245,6 +247,15 @@ export interface PluginContext {
   effect(fn: () => void | (() => void | Promise<void>)): () => void
 
   readonly host: PluginHostApi
+  /**
+   * 文件能力（**两个半边同形状**）。
+   *
+   * 与 `host.readFile/writeFile/listDir`（只限插件目录）和 `host.granted.*`（用户授权路径）的关系：
+   * `fs` 是那两者的**统一入口** —— 插件目录内免授权，其余路径仍需用户亲自选过的授权；
+   * 契约里多了「目标身份 / 版本 / 字面量编辑」（见 `src/shared/fsContract.ts`）。
+   * 老的两个入口保留（老插件零改动），但新代码请用 `ctx.fs`。
+   */
+  readonly fs: PluginFsApi
   readonly storage: PluginStorage
   readonly log: PluginLogger
 }

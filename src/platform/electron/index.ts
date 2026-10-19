@@ -755,6 +755,38 @@ const hostPort: HostPort = {
       return api.invoke('tts:dispose')
     },
   },
+
+  /** 独立安装的本地 Python 应用（Qwen3-TTS / Qwen-Image-Edit）：按安装目录拉起 / 停止，省掉手动开 cmd */
+  pythonApps: {
+    qwen3tts: makePythonApp('qwen3tts'),
+    qwenImage: makePythonApp('qwenImage'),
+  },
+}
+
+/** 生成一个 Python 应用的调用器（同一组主进程通道，用 id 区分） */
+function makePythonApp(id: 'qwen3tts' | 'qwenImage') {
+  return {
+    async check(dir: string) {
+      const api = ipc()
+      if (!api?.invoke) return { ok: false, error: 'IPC 不可用（请在 Electron 中运行）' }
+      return api.invoke('python-app:check', { id, dir })
+    },
+    async start(dir: string) {
+      const api = ipc()
+      if (!api?.invoke) return { ok: false, error: 'IPC 不可用（请在 Electron 中运行）' }
+      return api.invoke('python-app:start', { id, dir })
+    },
+    async stop() {
+      const api = ipc()
+      if (!api?.invoke) return { ok: false, error: 'IPC 不可用（请在 Electron 中运行）' }
+      return api.invoke('python-app:stop', { id })
+    },
+    async status() {
+      const api = ipc()
+      if (!api?.invoke) return { running: false }
+      return api.invoke('python-app:status', { id })
+    },
+  }
 }
 
 /** LLM 接缝：桌面由主进程代理请求（绕开 CORS/CSP，并按 requestId 缓冲回答以支持 resume） */

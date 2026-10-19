@@ -35,14 +35,19 @@ import type {
   PluginStatus,
   PluginStorage,
 } from '@/types/plugin'
-import type { ToolDefinition } from '@/types/tool'
-import { PluginEventBus, PluginServiceRegistry, createPluginContext } from '@/shared/pluginContext'
+import type { ToolDefinition, ToolRegistryEvent, ToolRegistryEventMap } from '@/types/tool'
+import type { HostEventMap } from '@/types/plugin'
+import { PluginEventBus, PluginServiceRegistry, SCOPED_PLUGIN_EVENTS, createPluginContext } from '@/shared/pluginContext'
+import { agentEventTarget, toolEventTargets } from '@/shared/pluginEventRouting'
+import { ownerOfAgent } from './plugin-owned-agents'
 import { checkApiVersion, isManifestFailure, parseManifest, PLUGIN_MANIFEST_FILE, PLUGIN_MANIFEST_KEY } from '@/shared/pluginManifest'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { shellService } from './shell-service'
 import { isVerbose, logInfo, logWarn } from './log'
 import { isShellAllowed, resolvePolicy } from './sandbox-policy'
 import { createPluginToolRegistrar } from './plugin-tools'
+import { createPluginFs } from './plugin-fs'
+import { clearFsObservations, clearPluginFsPolicy } from './plugin-fs-policy'
 import { assertAccess, clearGrants, listGrants } from './plugin-grants'
 import { abortPluginRuns, clearUsage } from './plugin-agent-budget'
 import { clearConsent } from './plugin-agent-consent'
@@ -146,6 +151,13 @@ class PluginHost {
   private invalidNamedDirsCache: string[] = []
   private services = new PluginServiceRegistry()
   private events = new PluginEventBus()
+  /** 插件观测面的退订函数（`wireToolEvents` 建立；dispose 时撤掉） */
+  private toolEventOffs: Array<() => void> = []
+  /**
+   * scoped 事件的**宿主外观察者**（界面半边通道用）。
+   * 不直接让 plugin-events import 本模块的原因见该模块注释：避免 plugin-host ↔ 通道模块成环。
+   */
+  private scopedObservers: Array<(pluginId: string, type: string, payload: unknown) => void> = []
   private eventSink: ((event: PluginEvent) => void) | null = null
   /** 应用侧注入的内置服务（sessions.list 等宿主能力按名取用） */
   private builtin: Record<string, unknown> = {}
@@ -401,6 +413,8 @@ class PluginHost {
     if (this.initialized) return
     this.eventSink = options.eventSink
     this.builtin = options.builtinServices ?? {}
+    // 插件观测面：把工具注册表的事件接到插件总线（没有这一步，`ctx.on('tool/...')` 永远不会触发）
+    this.wireToolEvents()
     // 自定义插件目录（用户在设置里选的）要在建目录 / 扫描之前就位
     this.customRoot = this.loadState().root
     this.migrateLegacyState()
@@ -426,9 +440,125 @@ class PluginHost {
   }
 
   /** 全量卸载（应用退出时调用） */
+  // ---------------------------------------------------------------------------
+  // 事件转发（插件观测面）
+  //   DSH 把工具与 agent 的观测点放在事件总线上（`tools/result`、`agent/status`、
+  //   `llm/stream` 的逐块增量…），并靠 `Scoped<Agent>` / isolate 做到"agent 作用域的监听器
+  //   只收到那个 agent"。AI-KM 是单进程单总线、没有 isolate，所以作用域过滤在这里显式做：
+  //   **只把事件发给相关插件**（自己注册的工具 / 自己委派出去的 run）。
+  //   不做这一步的后果很具体：`assistant/chunk` 会把你**在别的会话里**的对话推给每个插件。
+  // ---------------------------------------------------------------------------
+
+  /** 工具名 → 拥有它的插件 id（插件工具名必带前缀且不得与宿主工具重名，所以最多命中一个） */
+  private ownerOfToolName(toolName: string): string | null {
+    const name = String(toolName || '').trim()
+    if (!name) return null
+    for (const rec of this.records.values()) {
+      if ((rec.tools ?? []).includes(name)) return rec.id
+    }
+    return null
+  }
+
+  /** `plugin:<id>` → `<id>`（其它作用域返回空串） */
+  private pluginIdOfScope(scope: unknown): string {
+    const s = String(scope ?? '')
+    return s.startsWith('plugin:') ? s.slice('plugin:'.length) : ''
+  }
+
+  /**
+   * 订阅工具注册表的事件并转发（这一步让 `ctx.on('tool/...')` 从"类型上能写、运行期不触发"
+   * 变成事实）。对应 DSH 的 `tools/result`（只读观察）——AI-KM 另外几个 `tool/*` 是管线钩子。
+   */
+  private wireToolEvents(): void {
+    if (this.toolEventOffs.length) return
+    const types: Array<keyof ToolRegistryEventMap> = [
+      'tool/registered',
+      'tool/unregistered',
+      'tool/pre-execute',
+      'tool/post-execute',
+      'tool/error',
+    ]
+    for (const type of types) {
+      this.toolEventOffs.push(toolRegistry.on(type, (ev) => this.forwardToolEvent(ev)))
+    }
+  }
+
+  /**
+   * 注册一个 scoped 事件的宿主外观察者（界面半边通道用）。
+   *
+   * 不直接让 `plugin-events.ts` 反向 import 本模块的私有总线，是为了避免
+   * `plugin-host ↔ plugin-events` 成环（启动路径上的隐患，与本项目其它地方的处置一致）。
+   */
+  observeScopedEvents(cb: (pluginId: string, type: string, payload: unknown) => void): () => void {
+    this.scopedObservers.push(cb)
+    return () => {
+      this.scopedObservers = this.scopedObservers.filter((f) => f !== cb)
+    }
+  }
+
+  /** 发一条 scoped 事件：既进插件总线（主进程半边订阅），也通知宿主外观察者（界面半边通道） */
+  private emitPluginScoped(pluginId: string, type: string, payload: unknown): void {
+    this.events.emitScoped(pluginId, type as keyof HostEventMap, payload as never)
+    for (const cb of Array.from(this.scopedObservers)) {
+      try {
+        cb(pluginId, type, payload)
+      } catch (e) {
+        console.error(`[plugin-host] scoped 观察者异常 (${type}):`, e)
+      }
+    }
+  }
+
+  /** 把一条工具事件按作用域发给相关插件（自己的工具 / 自己发起的调用） */
+  private forwardToolEvent(ev: ToolRegistryEvent): void {
+    if (this.disposed) return
+    const type = String((ev as { type?: unknown })?.type ?? '')
+    if (!SCOPED_PLUGIN_EVENTS.includes(type)) return
+    const anyEv = ev as unknown as { name?: string; scope?: string; ctx?: { scope?: string } }
+    const targets = toolEventTargets({
+      type,
+      name: anyEv.name,
+      scope: anyEv.scope,
+      callerScope: anyEv.ctx?.scope,
+      ownerOfTool: (n) => this.ownerOfToolName(n),
+      knownPlugins: Array.from(this.records.keys()),
+    })
+    if (!targets.length) return
+    const payload = ev as unknown as Record<string, unknown>
+    for (const id of targets) {
+      this.emitPluginScoped(id, type, payload)
+    }
+  }
+
+  /**
+   * 把一条 agent 事件按归属转发给插件（只发给**委派这个 run 的那个插件**）。
+   * 由 `index.ts` 的 `setAgentBroadcast` 调用 —— 那是所有 AgentEvent 的唯一汇聚点。
+   */
+  forwardAgentEvent(ev: { agentId?: unknown; type?: unknown; payload?: unknown }): void {
+    if (this.disposed || !ev) return
+    const type = String(ev.type ?? '')
+    if (!SCOPED_PLUGIN_EVENTS.includes(type)) return
+    const owner = agentEventTarget({
+      agentId: String(ev.agentId ?? ''),
+      ownerOfAgent,
+      knownPlugins: Array.from(this.records.keys()),
+    })
+    if (!owner) return
+    const payload = (ev.payload && typeof ev.payload === 'object' ? ev.payload : {}) as Record<string, unknown>
+    // 载荷里带上 agentId：一个插件可能同时跑多个预设的 run，作者要能分辨是哪一次（DSH 也带 `agent`）
+    this.emitPluginScoped(owner, type, { agentId: String(ev.agentId ?? ''), ...payload })
+  }
+
   async dispose(): Promise<void> {
     return this.withLock(async () => {
       this.disposed = true
+      for (const off of this.toolEventOffs) {
+        try {
+          off()
+        } catch {
+          /* 忽略退订错误 */
+        }
+      }
+      this.toolEventOffs = []
       for (const w of this.watchers) {
         try {
           w.close()
@@ -585,6 +715,10 @@ class PluginHost {
       clearAgentConfig(rec.id)
       // 工具审批状态同理：同名重装不该继承"已允许这个插件调工具"
       clearToolApproval(rec.id)
+      // 「先读后写」的开关也归零：那是用户对**那份代码**的选择，不是对插件名的
+      clearPluginFsPolicy(rec.id)
+      // 事件订阅兜底：disposer 已经撤了，这里防的是"插件自己漏掉 disposer"的泄漏
+      this.events.clearScoped(rec.id)
       this.saveState()
       this.emit({ type: 'plugin/changed', id: rec.id, snapshot: null })
 
@@ -1121,8 +1255,18 @@ class PluginHost {
             this.pluginServiceView(rec, name, { registerPluginTool, hostApi }) as T,
         },
         registerTool: registerPluginTool,
-        subscribeHostEvent: (type, listener) => this.events.on(type, listener),
+        subscribeHostEvent: (type, listener) =>
+          // 工具 / agent 的观测事件**按作用域**分发（只给自己）；生命周期事件对所有插件广播。
+          // 两者都经 `ctx.on` 暴露，由这里按事件类型决定走哪条（见 SCOPED_PLUGIN_EVENTS）。
+          SCOPED_PLUGIN_EVENTS.includes(String(type))
+            ? this.events.onScoped(rec.id, type, listener)
+            : this.events.on(type, listener),
         host: hostApi,
+        fs: createPluginFs({
+          pluginId: rec.id,
+          pluginDir: rec.dir,
+          hasPermission: (rec.manifest.permissions ?? []).includes('fs'),
+        }),
         storage: this.createStorage(rec),
         log,
       })
@@ -1192,6 +1336,13 @@ class PluginHost {
     rec.dispose = null
     rec.tools = []
     rec.services = []
+    // 「先读后写」的**观察状态不跨装载**：否则重载 / 重装后新代码会"继承"上一份代码读过的事实，
+    // 正好绕过这条策略要防的事。（开关本身保留：那是用户对这个插件的选择。）
+    try {
+      clearFsObservations(rec.id)
+    } catch {
+      /* 策略状态清理失败不阻塞卸载 */
+    }
     if (wasActive) {
       this.events.emit('plugin/unloaded', { id: rec.id, reason })
     }

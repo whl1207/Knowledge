@@ -3,6 +3,8 @@
 import { defineStore } from "pinia"
 import { nextTick, markRaw } from "vue"
 import { TTSManager, createTTSManager } from '@/services/tts/manager'
+import { normalizeQwen3Lang, qwen3ListVoices, resetQwen3Cache, QWEN3_REFERENCE_VOICE } from '@/services/tts/qwen3'
+import { qwenImageInfo } from '@/services/image/qwenImage'
 import { AIUtils } from '@/services/ai-utils'
 import type { McpServerConfig } from '@/types/mcp'
 import { generateMcpServerId } from '@/types/mcp'
@@ -13,6 +15,7 @@ import type { FileSortKey } from '@/lib/knowFile/fileSort'
 import { DEFAULT_AGENT_MAX_STEPS, normalizeAgentMaxSteps } from '@/shared/agent-loop-rounds'
 import { ensureBuiltinAgentPresets, refreshBuiltinAgentPresets, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 import { normalizeWebSearchConfig, newWebSearchCustomSource, toCustomProviderId, type WebSearchConfig, type WebSearchCustomSource } from '@/shared/webSearch'
+import { normalizeWebFetchConfig, type WebFetchConfig, type WebFetchChannelId } from '@/shared/webFetch'
 import { BROWSER_SEARCH_ENGINES, DEFAULT_BROWSER_SEARCH_ENGINE } from '@/shared/browserSearch'
 import { migrateLegacyContextWindow } from '@/lib/contextUsage'
 import { deepSeekConfig, deepSeekStyleOf, migrateDeepSeekMerge, normalizeLlmType, normalizeLlmTypeList, DEEPSEEK_LEGACY_TYPE } from '@/shared/llmSources'
@@ -116,6 +119,14 @@ let lastBroadcastLocale = ''
 let lastAppliedWebSearchJson = ''
 /** DeepSeek 搜索凭据的签名（ref|inline）：变化时才重新走 IPC 解析 */
 let lastDeepSeekKeySig = ''
+/** 最近一次解析出的 DeepSeek 搜索明文 Key（非 Key 字段变更时也要带上，否则会把主进程里的 Key 覆盖成空） */
+let lastResolvedDeepSeekSearchKey = ''
+// 上次下发主进程的抓取通道配置（同上，按序列化结果去重）
+let lastAppliedWebFetchJson = ''
+/** DeepSeek 抓取凭据的签名（ref|inline）：变化时才重新走 IPC 解析 */
+let lastDeepSeekFetchKeySig = ''
+/** 最近一次解析出的 DeepSeek 抓取明文 Key（同上，防非 Key 字段变更把主进程 Key 清空） */
+let lastResolvedDeepSeekFetchKey = ''
 
 // 是否持久化标签栏（data/index）：独立文件窗口设 false，避免把新窗口打开的标签写进共享 localStorage，
 // 导致主窗口重启后恢复出独立窗口产生的标签（标签栏只属于独立文件窗口，主窗口不渲染标签栏）
@@ -337,6 +348,8 @@ export const usestore = defineStore('data', {
         mcpServers: [] as McpServerConfig[], // MCP 服务配置（设置页管理，localStorage 持久化）
         // 联网搜索源配置（设置页「工具 → 搜索」管理；默认 Bing 免 Key；localStorage 持久化并下发给主进程）
         webSearch: normalizeWebSearchConfig(null) as WebSearchConfig,
+        // 网页抓取通道配置（设置页「工具 → 抓取」管理；默认 direct → browser，DeepSeek 抓取默认关闭）
+        webFetch: normalizeWebFetchConfig(null) as WebFetchConfig,
         // 局域网协同文件编辑配置（设置页「基础-协作」管理，localStorage 持久化）
         collab: {
             enabled: false, // 主开关：关闭时编辑器状态栏不显示协同图标
@@ -564,13 +577,36 @@ export const usestore = defineStore('data', {
                 pitch: 1.0,
                 emo: '正常',
                 weight: 0.5,
-                // Qwen3-TTS特定配置
+                // 助手回复生成完自动朗读（所有引擎通用；见 home.vue 的 completeAssistantReply）
+                autoSpeak: false,
+                // Qwen3-TTS 配置（Qwen3-TTS-AllinOne：Gradio 网页服务 7862 + FastAPI 直连接口 9880）
                 qwen3: {
-                    available_voices: [] as string[], // 可用声音列表
+                    available_voices: [] as string[], // 音色列表（来自 /update_voices）
                     connected: false, // 连接状态
-                    speed: 1.0, // 语速
-                    pitch: 1.0, // 音调
-                    voices_url: 'http://localhost:7862/gradio_api/call/update_voices', // 刷新音色API地址
+                    speed: 1.0, // 语速（0.1 ~ 2.5）
+                    pitch: 1.0, // 音调（Qwen3 服务端不支持，保留字段兼容旧存档）
+                    // 接口协议：auto=按地址自动识别（Gradio → /do_job；直连接口 → 一次 POST）
+                    protocol: 'auto' as 'auto' | 'gradio' | 'api',
+                    // 实际生效的接口（探测结果，仅展示用）：'' | 'gradio' | 'api'
+                    transport: '' as '' | 'gradio' | 'api',
+                    // 语言类型（服务端词表：Auto / Chinese / English …；旧存档的 zh 会自动映射）
+                    lang: 'Auto',
+                    // 模型类型：0.6B 小参数 / 1.7B 大参数（Gradio /do_job）
+                    modelType: '0.6B' as '0.6B' | '1.7B',
+                    // 分段大小（越大上下文一致性越好，但可能爆显存；100 ~ 900）
+                    chunkSize: 200,
+                    // 并行批次（显存小就改成 1，彻底串行）
+                    batch: 8,
+                    voicesLoading: false, // 音色列表拉取中
+                    voicesError: '', // 最近一次拉取音色列表的错误
+                    // Qwen3-TTS-AllinOne 的安装目录（含 py312 与 app.py）；软件据此拉起服务，不写死在代码里
+                    installDir: '',
+                    // 随软件启动时自动拉起上面这个服务
+                    autoStart: false,
+                    // 服务是否由本应用启动并在运行（运行时状态，不持久化也无妨）
+                    serviceRunning: false,
+                    // 最近一次启动失败的原因（设置页展示）
+                    serviceError: '',
                 },
                 // 本地 ONNX TTS（Kokoro / Piper）配置
                 onnx: {
@@ -584,6 +620,32 @@ export const usestore = defineStore('data', {
                     sampleRate: 0, // 模型采样率
                     numSpeakers: 0, // 说话人数
                 },
+            },
+
+            // 生图（Qwen-Image-Edit-2511 本地 Gradio 应用：默认 http://127.0.0.1:7861）
+            // 只存"怎么调"的参数；模型 / 任务队列都在服务端，这里不碰
+            image: {
+                url: 'http://127.0.0.1:7861',
+                modelType: 'Qwen(本地免费)', // 另一档：Banana2(收费)（云端，需 token）
+                width: 1024,
+                height: 1024,
+                steps: 4,
+                negative: '',
+                lora1: 'None',
+                lora2: 'None',
+                /** 留空 = 用服务端 work/token.json 里保存的 token */
+                token: '',
+                connected: false,
+                version: '', // 服务端 Gradio 版本（测试连接后回填）
+                lastPrompt: '', // 上次用的提示词（重开设置页不用重打）
+                // Qwen-Image-Edit-2511 的安装目录（含 py312 与 app.py）；软件据此拉起服务
+                installDir: '',
+                // 随软件启动时自动拉起上面这个服务
+                autoStart: false,
+                // 服务是否由本应用启动并在运行（运行时状态）
+                serviceRunning: false,
+                // 最近一次启动失败的原因（设置页展示）
+                serviceError: '',
             },
             
             // ASR（语音识别）配置
@@ -1085,21 +1147,32 @@ export const usestore = defineStore('data', {
             const ds = (this.webSearch as any)?.deepseek || {}
             const dsRef = String(ds.apiKeyRef || '')
             const dsInlineKey = String(ds.apiKey || '')
-            // 关键字段签名：变了才需要重新解析凭据（避免每次 saveConfig 都走一次 IPC 解析）
-            const keySig = `${dsRef}|${dsInlineKey}`
+            // 关键字段签名：变了才需要重新解析凭据（避免每次 saveConfig 都走一次 IPC 解析）。
+            // 「复用凭据」开关与对话凭据变化都要算进来：关掉复用必须让主进程丢掉之前解析出的 Key。
+            const reuse = ds.reuseChatKey !== false
+            const chatRef = String((this.AIconfig as any)?.llm?.deepseek?.apiKeyRef || '')
+            const chatInline = String((this.AIconfig as any)?.llm?.deepseek?.api_key || '')
+            const keySig = `${dsRef}|${dsInlineKey}|${reuse ? '1' : '0'}|${reuse ? `${chatRef}|${chatInline ? 'k' : ''}` : ''}`
             const needResolve = keySig !== lastDeepSeekKeySig
             if (needResolve) lastDeepSeekKeySig = keySig
-            const payload = { ...this.webSearch }
+            const payload: any = {
+                ...this.webSearch,
+                deepseek: JSON.parse(JSON.stringify((this.webSearch as any)?.deepseek || {})),
+            }
+            if (lastResolvedDeepSeekSearchKey && (reuse || dsInlineKey || dsRef)) {
+                payload.deepseek.apiKey = lastResolvedDeepSeekSearchKey
+            }
             if (needResolve) {
-                this.resolveDeepSeekSearchKey(dsRef, dsInlineKey)
-                    .then((key) => {
-                        if (key) (payload as any).deepseek = { ...payload.deepseek, apiKey: key }
+                this.buildWebSearchPayload()
+                    .then((resolved) => {
+                        lastResolvedDeepSeekSearchKey = String((resolved as any)?.deepseek?.apiKey || '')
                         // 清空去重标记：key 是异步解析出来的，同一份「非 key 字段」也要重新下发一次
                         lastAppliedWebSearchJson = ''
-                        this.pushWebSearchConfig(api, payload)
+                        this.pushWebSearchConfig(api, resolved)
                     })
                     .catch(() => {
-                        // 解析失败也照样下发一次（让主进程给出"未配置 Key"这类明确报错）
+                        // 解析失败也照样下发一次（让主进程给出"未配置 Key"这类明确报错）；
+                        // 沿用上次解析出的 Key，避免一次临时失败把主进程里可用的 Key 清空
                         lastDeepSeekKeySig = ''
                         this.pushWebSearchConfig(api, payload)
                     })
@@ -1108,14 +1181,35 @@ export const usestore = defineStore('data', {
             this.pushWebSearchConfig(api, payload)
         },
 
-        /** 解析 DeepSeek 搜索用的 Key：凭据引用优先 → deepseek 对话配置的 apiKeyRef → 内联 key */
-        async resolveDeepSeekSearchKey(searchRef: string, inlineKey: string): Promise<string> {
-            if (inlineKey) return inlineKey
+        /**
+         * 生成**带明文 Key** 的搜索配置（主进程下发 / 渲染层直接搜索共用）。
+         *
+         * 为什么必须有这一步：`apiKey` 明文只存在主进程凭据库，store 里可能只有 `apiKeyRef`；
+         * 手机 / 网页端的渲染层执行者没有 IPC 凭据接缝，只有拿到解析后的 Key 才能直连 DeepSeek。
+         */
+        async buildWebSearchPayload(): Promise<WebSearchConfig> {
+            const payload: any = JSON.parse(JSON.stringify(this.webSearch || {}))
+            const ds: any = payload.deepseek || {}
+            const key = await this.resolveDeepSeekSearchKey(String(ds.apiKeyRef || ''), String(ds.apiKey || ''))
+            if (key) ds.apiKey = key
+            payload.deepseek = ds
+            return payload as WebSearchConfig
+        },
+
+        /**
+         * 解析 DeepSeek 官方工具（搜索 / 抓取）的 Key。
+         * 顺序：内联 Key → 凭据引用 → 对话里的 DeepSeek 凭据引用 → 对话里的内联 Key。
+         * `allowChatReuse=false` 时只认前两项（用户关掉了「复用对话凭据」）。
+         */
+        async resolveDeepSeekKey(inlineKeys: string[], refs: string[], allowChatReuse = true): Promise<string> {
+            for (const raw of inlineKeys) {
+                const key = String(raw || '').trim()
+                if (key) return key
+            }
             const resolve = aikmDsh?.credentials?.resolve
-            const names = [searchRef, String((this.AIconfig as any)?.llm?.deepseek?.apiKeyRef || '')]
-                .map((n) => String(n || '').trim())
-                .filter(Boolean)
-            for (const name of names) {
+            const names = [...refs]
+            if (allowChatReuse) names.push(String((this.AIconfig as any)?.llm?.deepseek?.apiKeyRef || ''))
+            for (const name of names.map((n) => String(n || '').trim()).filter(Boolean)) {
                 try {
                     if (resolve) {
                         const r = await resolve(name)
@@ -1123,7 +1217,106 @@ export const usestore = defineStore('data', {
                     }
                 } catch { /* 单个引用解析失败继续试下一个 */ }
             }
+            if (!allowChatReuse) return ''
             return String((this.AIconfig as any)?.llm?.deepseek?.api_key || '')
+        },
+
+        /** 搜索用的 Key：自己的 Key / 凭据引用 → 对话的 DeepSeek 凭据（受 reuseChatKey 控制） */
+        async resolveDeepSeekSearchKey(searchRef: string, inlineKey: string): Promise<string> {
+            const reuse = (this.webSearch as any)?.deepseek?.reuseChatKey !== false
+            return this.resolveDeepSeekKey([inlineKey], [searchRef], reuse)
+        },
+
+        /**
+         * 抓取用的 Key：自己的 Key / 凭据引用优先；
+         * 开启「复用」时再依次复用「工具 → 搜索」里填的 DeepSeek Key / 凭据引用 / 对话凭据。
+         */
+        async resolveDeepSeekFetchKey(fetchRef: string, inlineKey: string): Promise<string> {
+            const inline = String(inlineKey || '').trim()
+            if (inline) return inline
+            // 自己的凭据引用优先（即使关掉「复用」也应生效）
+            const ownRefKey = await this.resolveDeepSeekKey([], [fetchRef], false)
+            if (ownRefKey) return ownRefKey
+            const ds = (this.webSearch as any)?.deepseek || {}
+            const reuse = this.webFetch?.deepseek?.reuseChatKey !== false
+            if (!reuse) return ''
+            return this.resolveDeepSeekKey(
+                [String(ds.apiKey || '')],
+                [String(ds.apiKeyRef || '')],
+                true,
+            )
+        },
+
+        /** 生成**带明文 Key** 的抓取配置（主进程下发 / 渲染层直接抓取共用） */
+        async buildWebFetchPayload(): Promise<WebFetchConfig> {
+            const payload: any = JSON.parse(JSON.stringify(this.webFetch || {}))
+            const ds: any = payload.deepseek || {}
+            const key = await this.resolveDeepSeekFetchKey(String(ds.apiKeyRef || ''), String(ds.apiKey || ''))
+            if (key) ds.apiKey = key
+            payload.deepseek = ds
+            return payload as WebFetchConfig
+        },
+
+        /** 把抓取通道配置推给主进程（web_fetch 工具按该配置依次回退） */
+        applyWebFetchToMain() {
+            const api = typeof window !== 'undefined' ? aikmDsh?.webFetch : null
+            if (!api?.setConfig) return
+            const ds = (this.webFetch as any)?.deepseek || {}
+            const dsRef = String(ds.apiKeyRef || '')
+            const dsInlineKey = String(ds.apiKey || '')
+            // 签名同时覆盖「复用」开关、搜索页的 DeepSeek 配置与对话凭据：
+            // 任何一处变化都要重新解析（否则关掉复用后主进程仍拿着旧 Key）
+            const reuse = ds.reuseChatKey !== false
+            const dsSearch = (this.webSearch as any)?.deepseek || {}
+            const chatRef = String((this.AIconfig as any)?.llm?.deepseek?.apiKeyRef || '')
+            const chatInline = String((this.AIconfig as any)?.llm?.deepseek?.api_key || '')
+            const keySig = [
+                dsRef,
+                dsInlineKey,
+                reuse ? '1' : '0',
+                reuse ? String(dsSearch.apiKey || '') : '',
+                reuse ? String(dsSearch.apiKeyRef || '') : '',
+                reuse ? chatRef : '',
+                reuse && chatInline ? 'k' : '',
+            ].join('|')
+            const needResolve = keySig !== lastDeepSeekFetchKeySig
+            if (needResolve) lastDeepSeekFetchKeySig = keySig
+            const payload: any = {
+                ...this.webFetch,
+                deepseek: JSON.parse(JSON.stringify((this.webFetch as any)?.deepseek || {})),
+            }
+            if (lastResolvedDeepSeekFetchKey && (reuse || dsInlineKey || dsRef)) {
+                payload.deepseek.apiKey = lastResolvedDeepSeekFetchKey
+            }
+            if (needResolve) {
+                this.buildWebFetchPayload()
+                    .then((resolved) => {
+                        lastResolvedDeepSeekFetchKey = String((resolved as any)?.deepseek?.apiKey || '')
+                        lastAppliedWebFetchJson = ''
+                        this.pushWebFetchConfig(api, resolved)
+                    })
+                    .catch(() => {
+                        lastDeepSeekFetchKeySig = ''
+                        this.pushWebFetchConfig(api, payload)
+                    })
+                return
+            }
+            this.pushWebFetchConfig(api, payload)
+        },
+
+        /** 实际下发抓取配置（按序列化去重，失败时清空标记以便下次重试） */
+        pushWebFetchConfig(api: any, payload: any) {
+            try {
+                const json = JSON.stringify(payload)
+                if (json === lastAppliedWebFetchJson) return
+                lastAppliedWebFetchJson = json
+                Promise.resolve(api.setConfig(JSON.parse(json))).catch((e: any) => {
+                    lastAppliedWebFetchJson = ''
+                    console.warn('[webFetch] 下发抓取通道配置失败:', e)
+                })
+            } catch (e) {
+                console.warn('[webFetch] 下发抓取通道配置异常:', e)
+            }
         },
 
         /** 实际下发（按序列化去重，失败时清空标记以便下次重试） */
@@ -1225,6 +1418,41 @@ export const usestore = defineStore('data', {
             })
         },
 
+        // ==================== 网页抓取通道（设置页「工具 → 抓取」） ====================
+
+        /** 更新抓取通道配置（合并默认值 + 持久化 + 推送主进程） */
+        updateWebFetchConfig(patch: Partial<WebFetchConfig>) {
+            this.webFetch = normalizeWebFetchConfig({ ...this.webFetch, ...patch })
+            this.saveConfig()
+        },
+
+        /** 启用 / 停用某个抓取通道（至少保留一个，最后一个不允许关闭） */
+        toggleWebFetchChannel(id: WebFetchChannelId) {
+            const channels = { ...this.webFetch.channels }
+            channels[id] = !channels[id]
+            if (!channels.direct && !channels.deepseek && !channels.browser) return false
+            this.updateWebFetchConfig({ channels })
+            return true
+        },
+
+        /** 调整抓取通道顺序（决定失败后的回退顺序） */
+        reorderWebFetchChannel(id: WebFetchChannelId, toIndex: number) {
+            const order = [...this.webFetch.order]
+            const from = order.indexOf(id)
+            if (from < 0) return
+            const to = Math.max(0, Math.min(order.length - 1, toIndex))
+            if (to === from) return
+            order.splice(from, 1)
+            order.splice(to, 0, id)
+            this.updateWebFetchConfig({ order })
+        },
+
+        /** 重置抓取通道配置为出厂默认（清空 DeepSeek Key，恢复 direct + browser） */
+        resetWebFetchConfig() {
+            this.webFetch = normalizeWebFetchConfig(null)
+            this.saveConfig()
+        },
+
         // 储存配置信息
         saveConfig() {
             // 诊断：llm.type 变更时打印调用栈，便于定位「重启后来源被改成 ollama」的写入点
@@ -1287,6 +1515,9 @@ export const usestore = defineStore('data', {
             // 联网搜索源配置（设置页「工具 → 搜索」；同时推送给主进程供 web_search 工具使用）
             localStorage.setItem('webSearchConfig', JSON.stringify(this.webSearch))
             this.applyWebSearchToMain()
+            // 网页抓取通道配置（设置页「工具 → 抓取」；同时推送给主进程供 web_fetch 工具使用）
+            localStorage.setItem('webFetchConfig', JSON.stringify(this.webFetch))
+            this.applyWebFetchToMain()
             localStorage.setItem('collab', JSON.stringify(this.collab))
             localStorage.setItem('remoteFs', JSON.stringify(this.remoteFs))
             localStorage.setItem('lan', JSON.stringify(this.lan))
@@ -1498,6 +1729,23 @@ export const usestore = defineStore('data', {
                     llm: { ...this.AIconfig.llm, ...savedConfig.llm },
                     tts: { ...this.AIconfig.tts, ...savedConfig.tts },
                     asr: savedConfig.asr ? { ...this.AIconfig.asr, ...savedConfig.asr } : this.AIconfig.asr,
+                }
+
+                // 迁移（生图）：旧存档没有 image 字段时用默认；有则按默认补全新字段
+                if (DEFAULT_AIconfig?.image) {
+                    this.AIconfig.image = { ...DEFAULT_AIconfig.image, ...(this.AIconfig.image || {}) }
+                }
+
+                // 迁移（Qwen3-TTS 接入）：旧存档的 tts.qwen3 只有 available_voices/speed/pitch/voices_url，
+                // 新增的 protocol / lang / modelType / chunkSize / batch 按默认补全；旧的 tts.language（'zh' 等）
+                // 收敛到 qwen3.lang —— 服务端只认 Auto/Chinese/… 词表，直接发 'zh' 会被 500。
+                // 老的 voices_url（写死的 /call/update_voices）已由服务地址自动探测取代。
+                if (this.AIconfig.tts?.qwen3 && DEFAULT_AIconfig?.tts?.qwen3) {
+                    const qwen3Old: any = this.AIconfig.tts.qwen3
+                    const merged: any = { ...DEFAULT_AIconfig.tts.qwen3, ...qwen3Old }
+                    merged.lang = normalizeQwen3Lang(qwen3Old?.lang ?? this.AIconfig.tts.language)
+                    delete merged.voices_url
+                    this.AIconfig.tts.qwen3 = merged
                 }
 
                 // 迁移（标点校验全局化）：旧版本 useLLMPunctuation 布尔 + funasr.puncDir 子配置
@@ -1714,6 +1962,15 @@ export const usestore = defineStore('data', {
                 this.webSearch = normalizeWebSearchConfig(null)
             }
             this.applyWebSearchToMain()
+            // 网页抓取通道配置（缺字段/旧存档自动补齐默认值；读完后推送给主进程）
+            try {
+                const rawFetch = localStorage.getItem('webFetchConfig')
+                this.webFetch = normalizeWebFetchConfig(rawFetch ? JSON.parse(rawFetch) : null)
+            } catch (e) {
+                console.warn('读取抓取通道配置失败，回退默认值:', e)
+                this.webFetch = normalizeWebFetchConfig(null)
+            }
+            this.applyWebFetchToMain()
             // 装备/类型数据（unmannedEquipment/movePlans/mapMarkers/装备配置）已迁移至 SwarmPlanner，不再从 localStorage 恢复
             // Agent 预设：优先读新 key 'agentPresets'；旧 key 'contactAgents' 兼容迁移
             const presetsRaw = localStorage.getItem('agentPresets') ?? localStorage.getItem('contactAgents')
@@ -2597,7 +2854,7 @@ export const usestore = defineStore('data', {
             }
         },
         
-        // 测试Qwen3-TTS连接
+        // 测试Qwen3-TTS连接（顺带探测接口类型：Gradio /do_job 或 直连接口）
         async testQwen3TTSConnection(): Promise<{
             success: boolean;
             message: string;
@@ -2606,7 +2863,9 @@ export const usestore = defineStore('data', {
             if (!this.ttsManager) {
                 this.init();
             }
-            
+            // 手动测试 = 重新探测一次（清掉 60s 的接口缓存），否则刚启动服务还会读到旧结论
+            resetQwen3Cache();
+
             try {
                 const result = await this.ttsManager?.testQwen3TTSConnection() || { 
                     success: false, 
@@ -2615,6 +2874,9 @@ export const usestore = defineStore('data', {
                 
                 // 根据结果中的 success 字段设置连接状态
                 this.AIconfig.tts.qwen3.connected = result.success;
+                if (result.details?.transport === 'gradio' || result.details?.transport === 'api') {
+                    this.AIconfig.tts.qwen3.transport = result.details.transport;
+                }
                 
                 return result;
             } catch (error) {
@@ -2626,7 +2888,172 @@ export const usestore = defineStore('data', {
                 };
             }
         },
-        
+
+        // 拉取 Qwen3-TTS 音色列表（走 Gradio /update_voices；「使用参考音频」需上传参考音频，列表里去掉）
+        async loadQwen3TTSVoices(): Promise<{
+            success: boolean;
+            message: string;
+            voices?: string[];
+        }> {
+            const q = this.AIconfig.tts.qwen3;
+            if (q.voicesLoading) return { success: false, message: '正在获取音色列表…' };
+            q.voicesLoading = true;
+            q.voicesError = '';
+            try {
+                const res = await qwen3ListVoices({
+                    base: this.AIconfig.tts.url || '',
+                    protocol: q.protocol,
+                });
+                const voices = res.voices.filter(v => v && v !== QWEN3_REFERENCE_VOICE);
+                q.available_voices = voices;
+                q.connected = true;
+                // 当前音色不在列表里（或还没选）→ 自动落到第一个，避免播放时才报错
+                if (!this.AIconfig.tts.voice || !voices.includes(this.AIconfig.tts.voice)) {
+                    if (voices.length) this.AIconfig.tts.voice = voices[0];
+                }
+                this.saveConfig();
+                return {
+                    success: true,
+                    message: voices.length
+                        ? `已获取 ${voices.length} 个音色`
+                        : '服务端没有可用音色（请在网页服务的「音色列表」里添加音色）',
+                    voices,
+                };
+            } catch (error: any) {
+                const msg = error?.message || String(error);
+                q.voicesError = msg;
+                q.connected = false;
+                return { success: false, message: msg };
+            } finally {
+                q.voicesLoading = false;
+            }
+        },
+
+        // 更新 Qwen3-TTS 选项（语言 / 模型 / 分段 / 并行批次 / 协议…）并同步到 TTS 管理器、落盘
+        updateQwen3TTS(patch: Record<string, any>) {
+            this.AIconfig.tts.qwen3 = { ...this.AIconfig.tts.qwen3, ...patch };
+            if (patch && 'speed' in patch) this.AIconfig.tts.rate = this.AIconfig.tts.qwen3.speed;
+            if (this.ttsManager) {
+                this.ttsManager.updateConfig(this.AIconfig.tts);
+            }
+            this.saveConfig();
+        },
+
+        // ============ 本地 Python 应用（Qwen3-TTS / Qwen-Image-Edit）的启动 / 停止 ============
+        // 两者都是独立安装的 Python 程序，主进程按「安装目录」拉起（等价于手动双击各自的 bat）。
+        // 只停本应用启动的进程；端口上已有别人开的服务时直接沿用，不抢占。
+
+        // 启动指定应用（id: 'qwen3tts' | 'qwenImage'）
+        async startPythonAppService(id: 'qwen3tts' | 'qwenImage', silent = false): Promise<{ success: boolean; message: string }> {
+            const cfg: any = id === 'qwen3tts' ? this.AIconfig.tts.qwen3 : this.AIconfig.image;
+            const label = id === 'qwen3tts' ? 'Qwen3-TTS' : 'Qwen-Image-Edit';
+            const dir = String(cfg?.installDir || '').trim();
+            if (!dir) return { success: false, message: `请先设置 ${label} 的安装目录（含 py312 与 app.py）` };
+            const api = getPlatform().host.pythonApps?.[id];
+            if (!api) {
+                return { success: false, message: '仅桌面版可以启动本地服务；手机 / 网页请用服务地址连接已在运行的服务' };
+            }
+            cfg.serviceError = '';
+            try {
+                const check = await api.check(dir);
+                if (!check?.ok) {
+                    cfg.serviceError = check?.error || '目录校验失败';
+                    cfg.serviceRunning = false;
+                    return { success: false, message: cfg.serviceError };
+                }
+                const res = await api.start(dir);
+                if (!res?.ok) {
+                    cfg.serviceError = res?.error || '启动失败';
+                    cfg.serviceRunning = false;
+                    return { success: false, message: cfg.serviceError };
+                }
+                // external = 端口上已有别人启动的服务，本应用没有子进程可管
+                cfg.serviceRunning = !res.external;
+                const message = res.external
+                    ? `检测到已有 ${label} 服务在运行（不是本应用启动的），直接沿用`
+                    : (res.alreadyRunning
+                        ? '服务已在本应用内运行'
+                        : `服务已启动（PID ${res.pid ?? '-'}），正在加载模型…`);
+                if (!silent) ElMessage.success(message);
+                return { success: true, message };
+            } catch (error: any) {
+                cfg.serviceError = error?.message || String(error);
+                cfg.serviceRunning = false;
+                return { success: false, message: cfg.serviceError };
+            }
+        },
+
+        // 停止指定应用（只停本应用启动的那个进程）
+        async stopPythonAppService(id: 'qwen3tts' | 'qwenImage', silent = false): Promise<{ success: boolean; message: string }> {
+            const cfg: any = id === 'qwen3tts' ? this.AIconfig.tts.qwen3 : this.AIconfig.image;
+            const label = id === 'qwen3tts' ? 'Qwen3-TTS' : 'Qwen-Image-Edit';
+            const api = getPlatform().host.pythonApps?.[id];
+            if (!api) return { success: false, message: '当前环境不支持停止本地服务' };
+            try {
+                const res = await api.stop();
+                cfg.serviceRunning = false;
+                if (!res?.ok) {
+                    const msg = res?.error || '停止失败';
+                    cfg.serviceError = msg;
+                    return { success: false, message: msg };
+                }
+                cfg.serviceError = '';
+                if (!silent) ElMessage.success(`已停止 ${label} 服务`);
+                return { success: true, message: '已停止' };
+            } catch (error: any) {
+                const msg = error?.message || String(error);
+                cfg.serviceError = msg;
+                return { success: false, message: msg };
+            }
+        },
+
+        // 刷新运行状态（设置页打开 / 轮询用）
+        async refreshPythonAppStatus(id: 'qwen3tts' | 'qwenImage') {
+            const cfg: any = id === 'qwen3tts' ? this.AIconfig.tts.qwen3 : this.AIconfig.image;
+            const api = getPlatform().host.pythonApps?.[id];
+            if (!api?.status) return null;
+            try {
+                const st = await api.status();
+                cfg.serviceRunning = !!st?.running;
+                return st;
+            } catch {
+                return null;
+            }
+        },
+
+        // 应用启动时：勾了「随软件启动」且填了安装目录 → 静默拉起
+        async ensurePythonAppReady(id: 'qwen3tts' | 'qwenImage'): Promise<void> {
+            const cfg: any = id === 'qwen3tts' ? this.AIconfig.tts : this.AIconfig.image;
+            const target: any = id === 'qwen3tts' ? cfg.qwen3 : cfg;
+            // Qwen3-TTS 只在「当前语音类型 = Qwen3-TTS」时才自动拉起
+            if (id === 'qwen3tts' && cfg.type !== 'Qwen3-TTS') return;
+            if (!target?.autoStart || !String(target.installDir || '').trim()) return;
+            const api = getPlatform().host.pythonApps?.[id];
+            if (!api?.status) return;
+            try {
+                const st = await api.status();
+                if (st?.running) {
+                    target.serviceRunning = true;
+                    return;
+                }
+            } catch { /* 下面继续尝试启动 */ }
+            await this.startPythonAppService(id, true);
+        },
+
+        // ---- 兼容旧调用名（TTS 设置页 / App 启动用） ----
+        startQwen3Service(silent = false) {
+            return this.startPythonAppService('qwen3tts', silent);
+        },
+        stopQwen3Service(silent = false) {
+            return this.stopPythonAppService('qwen3tts', silent);
+        },
+        refreshQwen3ServiceStatus() {
+            return this.refreshPythonAppStatus('qwen3tts');
+        },
+        ensureQwen3ServiceReady() {
+            return this.ensurePythonAppReady('qwen3tts');
+        },
+
         // 设置Qwen3-TTS URL
         setQwen3TTSUrl(url: string) {
             this.AIconfig.tts.url = url;
@@ -2668,6 +3095,32 @@ export const usestore = defineStore('data', {
                 this.ttsManager.updateConfig(this.AIconfig.tts);
             }
             this.saveConfig();
+        },
+
+        // 更新生图配置（服务地址 / 模型类型 / 尺寸 / 步数 / Lora / token…）
+        updateImageConfig(patch: Record<string, any>) {
+            this.AIconfig.image = { ...this.AIconfig.image, ...patch };
+            this.saveConfig();
+        },
+
+        // 测试生图服务：读服务端 /config + /info，回填版本号与连接状态
+        async testImageService(): Promise<{ success: boolean; message: string; version?: string }> {
+            const base = String(this.AIconfig.image?.url || '').trim();
+            if (!base) return { success: false, message: '未配置生图服务地址' };
+            try {
+                const info = await qwenImageInfo(base, true);
+                this.AIconfig.image.connected = true;
+                this.AIconfig.image.version = info.version;
+                this.saveConfig();
+                return {
+                    success: true,
+                    message: `连接成功 · Gradio ${info.version || '?'} · ${info.params.length} 个生成参数`,
+                    version: info.version,
+                };
+            } catch (error: any) {
+                this.AIconfig.image.connected = false;
+                return { success: false, message: error?.message || String(error) };
+            }
         },
 
         // 加载本地 ONNX TTS 模型（预建实例，返回模型信息）
@@ -2774,6 +3227,18 @@ export const usestore = defineStore('data', {
                 // 迁移（与 loadConfig 一致）：Qwen3-ASR 网页服务参数补全（asr 浅合并会整体覆盖 qwen3）
                 if (this.AIconfig.asr?.qwen3 && DEFAULT_AIconfig?.asr?.qwen3) {
                     this.AIconfig.asr.qwen3 = { ...DEFAULT_AIconfig.asr.qwen3, ...this.AIconfig.asr.qwen3 }
+                }
+                // 迁移（与 loadConfig 一致）：Qwen3-TTS 参数补全（tts 浅合并会整体覆盖 qwen3）
+                if (this.AIconfig.tts?.qwen3 && DEFAULT_AIconfig?.tts?.qwen3) {
+                    const qwen3Old: any = this.AIconfig.tts.qwen3
+                    const merged: any = { ...DEFAULT_AIconfig.tts.qwen3, ...qwen3Old }
+                    merged.lang = normalizeQwen3Lang(qwen3Old?.lang ?? this.AIconfig.tts.language)
+                    delete merged.voices_url
+                    this.AIconfig.tts.qwen3 = merged
+                }
+                // 迁移（与 loadConfig 一致）：生图配置补全
+                if (DEFAULT_AIconfig?.image) {
+                    this.AIconfig.image = { ...DEFAULT_AIconfig.image, ...(this.AIconfig.image || {}) }
                 }
                 // 迁移（与 loadConfig 一致）：think 布尔值 → 推理强度档位字符串；清理已废弃的 Responses 联网搜索配置
                 if (typeof this.AIconfig.llm.think !== 'string') {
