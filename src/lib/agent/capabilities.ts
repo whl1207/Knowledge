@@ -37,7 +37,20 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'executeCode', tools: ['run_python'] },
   { key: 'runShell', tools: ['shell'] },
   { key: 'webSearch', tools: ['web_search', 'web_fetch'] },
-  { key: 'browseWebsites', tools: ['web_fetch'] },
+  {
+    key: 'browseWebsites',
+    tools: [
+      'web_fetch',
+      'browser_navigate', 'browser_snapshot', 'browser_extract_text', 'browser_extract_markdown',
+      'browser_screenshot', 'browser_wait_for',
+      'browser_click', 'browser_fill', 'browser_press', 'browser_hover', 'browser_select',
+      'browser_upload', 'browser_dialog', 'browser_space_finish',
+      'browser_help', 'browser_list_downloads',
+      'browser_playbook_save', 'browser_playbook_list', 'browser_playbook_get', 'browser_playbook_run',
+      'browser_learning_list', 'browser_learning_get', 'browser_learning_save', 'browser_learning_delete',
+      'browser_wait', 'browser_run',
+    ],
+  },
   { key: 'runSubagent', tools: ['run_subagent', 'job_output', 'job_kill'] },
   { key: 'skills', tools: ['skill'] },
 ]

@@ -17,6 +17,8 @@
  */
 
 import * as fs from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   boundToolResult,
   buildSpillPreview,
@@ -239,6 +241,63 @@ export function runSessionLogSelfTest(): SessionLogCase[] {
     const content = sessionLog.deriveEntries(sid).find((e) => e.msg.role === 'tool')?.msg.content ?? ''
     add('崩溃恢复：模型看到真实结果', content.includes('已跑成功的内容'), content.slice(0, 60))
     add('崩溃恢复：不再出现「结果缺失」', !content.includes('结果缺失'))
+  }
+
+  // 11. 工具图片：日志只存路径，派生时合成一条 synthetic user 图片消息（紧随工具结果之后）
+  {
+    const sid = newSession()
+    const dir = fs.mkdtempSync(join(tmpdir(), 'aikm-selftest-img-'))
+    const imgPath = join(dir, 'shot.png')
+    // 1x1 PNG
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    fs.writeFileSync(imgPath, Buffer.from(pngBase64, 'base64'))
+    try {
+      const call = sessionLog.append(sid, 'tool/call', { callId: 'shot', name: 'browser_screenshot', args: {} })
+      sessionLog.append(sid, 'assistant/message', {
+        content: '',
+        toolCalls: [{ id: 'shot', name: 'browser_screenshot', arguments: {} }],
+      })
+      sessionLog.append(sid, 'tool/result', {
+        callId: 'shot',
+        name: 'browser_screenshot',
+        ok: true,
+        value: '已截图（1x1）',
+        images: [{ mime: 'image/png', path: imgPath, width: 1, height: 1 }],
+        sourceEventSeqs: [call.seq],
+      })
+      const entries = sessionLog.deriveEntries(sid)
+      const toolIndex = entries.findIndex((e) => e.msg.role === 'tool')
+      const imgEntry = entries.find((e) => e.msg.role === 'user' && e.msg.synthetic === true)
+      add('工具图片：派生出一条 synthetic 图片消息', !!imgEntry)
+      add('工具图片：排在 tool 消息之后', !!imgEntry && entries.indexOf(imgEntry) > toolIndex)
+      add('工具图片：data URL 形态正确', String(imgEntry?.msg.images?.[0] || '').startsWith('data:image/png;base64,'))
+      add('工具图片：tool 文本里没有 base64', !String(entries[toolIndex]?.msg.content || '').includes('base64'))
+      const raw = sessionLog.readAll(sid).find((e) => e.type === 'tool/result') as any
+      add('工具图片：日志只存路径不存 base64', !!raw?.images?.[0]?.path && !JSON.stringify(raw).includes(pngBase64.slice(0, 24)))
+
+      // 文件被系统清理：派生不抛错、只是少一张图
+      let tolerated = false
+      try {
+        const sid2 = newSession()
+        const call2 = sessionLog.append(sid2, 'tool/call', { callId: 'gone', name: 'browser_screenshot', args: {} })
+        sessionLog.append(sid2, 'assistant/message', { content: '', toolCalls: [{ id: 'gone', name: 'browser_screenshot', arguments: {} }] })
+        sessionLog.append(sid2, 'tool/result', {
+          callId: 'gone',
+          name: 'browser_screenshot',
+          ok: true,
+          value: 'x',
+          images: [{ mime: 'image/png', path: join(dir, 'missing.png') }],
+          sourceEventSeqs: [call2.seq],
+        })
+        const derived = sessionLog.deriveEntries(sid2)
+        tolerated = derived.every((e) => !e.msg.synthetic)
+      } catch {
+        tolerated = false
+      }
+      add('工具图片：文件丢失时静默跳过', tolerated)
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+    }
   }
 
   return cases

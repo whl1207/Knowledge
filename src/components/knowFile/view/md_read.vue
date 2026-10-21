@@ -964,9 +964,24 @@ ${inlinedHtml}
 </body>
 </html>`
     try {
-      const res = await getPlatform().host.docs.exportPdf({ html: fullHtml, title })
+      // 把当前文档的标题层级一并交给宿主：导出时给 PDF 写书签（目录），
+      // 这样导出的 PDF 再用本软件的 PdfViewer 打开（或其它阅读器）就有目录可跳转。
+      const outline = toc.value
+        .filter((t) => String(t.text || '').trim())
+        .map((t) => ({ title: String(t.text).trim(), level: Number(t.level) || 1 }))
+      const res = await getPlatform().host.docs.exportPdf({
+        html: fullHtml,
+        title,
+        ...(outline.length ? { outline } : {}),
+      })
       if (res && res.success) {
-        ElMessage.success(store.locales === 'zh' ? 'PDF 导出成功' : 'PDF exported successfully')
+        if (outline.length) {
+          ElMessage.success(res.toc === false
+            ? (store.locales === 'zh' ? 'PDF 已导出（目录生成失败，正文可正常阅读）' : 'PDF exported (bookmarks failed; content is still readable)')
+            : (store.locales === 'zh' ? 'PDF 导出成功，已写入目录' : 'PDF exported with bookmarks'))
+        } else {
+          ElMessage.success(store.locales === 'zh' ? 'PDF 导出成功' : 'PDF exported successfully')
+        }
       } else if (res && res.error !== '用户取消') {
         ElMessage.error(store.locales === 'zh' ? 'PDF 导出失败' : 'PDF export failed')
       }

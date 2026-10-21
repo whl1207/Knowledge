@@ -322,6 +322,13 @@ export const usestore = defineStore('data', {
          */
         pluginLauncherOpen: false as boolean,
         /**
+         * 单窗口模式下主内容区是否正在显示「浏览器」模块（点击左侧/顶部地球图标切换）。
+         * 不持久化：重启后回到主面板；多窗口模式仍打开独立浏览器窗口。
+         */
+        browserPanelOpen: false as boolean,
+        /** 多窗口模式下独立浏览器窗口是否打开（主窗口导航图标激活态用；单窗口用 browserPanelOpen） */
+        browserActive: false as boolean,
+        /**
          * 单窗口环境（浏览器 / 安卓）以「应用内浮层」打开的插件面板参数：非空时 App.vue 渲染插件面板浮层。
          * 桌面版一律走真正的独立子窗口，这里保持 null（见 openPluginPanel）。
          */
@@ -430,8 +437,14 @@ export const usestore = defineStore('data', {
             browserSearchTemplate: '', // 自定义搜索 URL 模板（含 {q} 占位符；仅 browserSearchEngine='custom' 时生效）
             browserGridCols: 0, // 新标签页收藏夹网格每行书签数（0=按窗口宽度自动）
             browserAllowEval: false, // 允许 AI 调用 browser_eval 执行任意 JS（默认关闭；改后即刻下发主进程）
+            browserPageBudget: 8, // 每个 Agent 会话最多保留的页面数（超出回收最旧页）
+            browserSnapshotInteractiveOnly: false, // 默认快照只输出可交互节点（省 token）
+            browserDownloadDir: '', // 浏览器下载目录（留空=userData/browser-downloads）
             browserClipDir: '网页剪藏', // 「保存 Markdown 到知识库」落点：知识库根目录下的子文件夹（留空=直接存根目录）
             browserClipFrontMatter: true, // Markdown 剪藏是否附带 YAML front matter（标题/来源/时间，便于知识库视图识别）
+            browserShowBookmarks: true, // 顶部工具栏是否显示「收藏夹」图标
+            browserShowDownloads: true, // 顶部工具栏是否显示「下载」图标
+            browserShowHistory: true, // 顶部工具栏是否显示「历史」图标
             wordExportStylePath: '', // Word 导出样式文件（.docx，可选；留空则用内置默认样式）
             wordExportTemplate: 'gongwen', // Word 导出模板：gongwen=公文(GB/T 9704-2012)/cn=中文论文/en=英文论文(APA)/custom=自定义 .docx
             // 文字对齐模式（仅作用于「浏览视图」md_read 与「可视编辑渲染态」BlockEditor 两处）：
@@ -1992,6 +2005,9 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.browserHomeUrl !== 'string') this.UI.browserHomeUrl = ''
                 // 旧存档可能缺少 browserSaveDir，兜底为空（浏览器保存到当前工作区根目录）
                 if (typeof this.UI.browserSaveDir !== 'string') this.UI.browserSaveDir = ''
+                if (typeof this.UI.browserPageBudget !== 'number' || !Number.isFinite(this.UI.browserPageBudget)) this.UI.browserPageBudget = 8
+                if (typeof this.UI.browserSnapshotInteractiveOnly !== 'boolean') this.UI.browserSnapshotInteractiveOnly = false
+                if (typeof this.UI.browserDownloadDir !== 'string') this.UI.browserDownloadDir = ''
                 // 旧存档可能缺少新标签页内容设置，兜底为「收藏夹网格」
                 if (this.UI.browserNewTab !== 'bookmarks' && this.UI.browserNewTab !== 'blank') this.UI.browserNewTab = 'bookmarks'
                 // 旧存档可能缺少地址栏搜索引擎，兜底为必应；引擎名表外（含历史拼写）一律归一化
@@ -2012,6 +2028,10 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.browserClipDir !== 'string') this.UI.browserClipDir = '网页剪藏'
                 // 旧存档可能缺少 front matter 开关，兜底为开启
                 if (typeof this.UI.browserClipFrontMatter !== 'boolean') this.UI.browserClipFrontMatter = true
+  // 顶部工具栏图标开关：旧存档缺省时全部显示
+  if (typeof this.UI.browserShowBookmarks !== 'boolean') this.UI.browserShowBookmarks = true
+  if (typeof this.UI.browserShowDownloads !== 'boolean') this.UI.browserShowDownloads = true
+  if (typeof this.UI.browserShowHistory !== 'boolean') this.UI.browserShowHistory = true
                 // 旧存档可能缺少 wordExportStylePath，兜底为空（导出用内置默认样式）
                 if (typeof this.UI.wordExportStylePath !== 'string') this.UI.wordExportStylePath = ''
                 // 旧存档可能缺少 wordExportTemplate，兜底为公文模板
@@ -2867,8 +2887,14 @@ export const usestore = defineStore('data', {
                     browserSearchTemplate: this.UI.browserSearchTemplate,
                     browserGridCols: this.UI.browserGridCols,
                     browserAllowEval: this.UI.browserAllowEval,
+                    browserPageBudget: this.UI.browserPageBudget,
+                    browserSnapshotInteractiveOnly: this.UI.browserSnapshotInteractiveOnly,
+                    browserDownloadDir: this.UI.browserDownloadDir,
                     browserClipDir: this.UI.browserClipDir,
                     browserClipFrontMatter: this.UI.browserClipFrontMatter,
+                    browserShowBookmarks: this.UI.browserShowBookmarks !== false,
+                    browserShowDownloads: this.UI.browserShowDownloads !== false,
+                    browserShowHistory: this.UI.browserShowHistory !== false,
                     wordExportStylePath: this.UI.wordExportStylePath,
                     wordExportTemplate: this.UI.wordExportTemplate || 'gongwen',
                     textAlignMode: this.UI.textAlignMode === 'kp' ? 'kp' : 'justify',

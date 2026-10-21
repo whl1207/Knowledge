@@ -19,6 +19,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import * as fs from 'node:fs'
 import { logInfo } from './log'
 import { registerOwnedAgent, unregisterOwnedAgent } from './plugin-owned-agents'
 import { AIUtils } from '@/shared/ai-core'
@@ -45,7 +48,7 @@ import type {
   AskUserAnswer,
 } from '@/types/agent'
 import type { DerivedMessage, DerivedEntry } from '@/types/session-log'
-import type { ToolResult, ToolDefinition, ToolExecutionContext } from '@/types/tool'
+import type { ToolResult, ToolDefinition, ToolExecutionContext, ToolImage } from '@/types/tool'
 import { brand, type ToolName, type AgentId } from '@/types/ids'
 import { runCodeFunctionSchema } from './code-sdk'
 import { askQuestionsDigest, coerceAskAnswers } from '@/shared/agentAsk'
@@ -142,7 +145,40 @@ function toOpenAIMessage(m: DerivedMessage): any {
   const out: any = { role: m.role, content: m.content }
   if (m.role === 'assistant' && m.toolCalls?.length) out.tool_calls = m.toolCalls
   if (m.role === 'tool') out.tool_call_id = m.toolCallId
+  // 图片只随 user 消息进入请求（历史里的工具截图由 session-log 合成 synthetic user 消息）
+  if (m.role === 'user' && m.images?.length) out.images = m.images
   return out
+}
+
+/** 工具图片落盘后的元信息（会话日志只存这个，不存 base64） */
+type SavedToolImage = { mime: string; path: string; width?: number; height?: number }
+
+/**
+ * 工具返回的图片 → 临时文件。
+ *
+ * 为什么必须落盘再引用而不是把 base64 塞进 tool 消息：tool 消息是纯文本、会走工具结果预算，
+ * base64 一旦被掐中段就既不是图片也不是合法数据（截图 90K 字符必被 32K 码点预算截断）。
+ * 落盘后由 `session-log.deriveEntries` 在工具消息之后合成一条图片 user 消息，模型才真正"看得见"。
+ */
+function saveToolImage(sessionId: string, img: ToolImage): SavedToolImage | null {
+  try {
+    if (!img?.data) return null
+    const mime = /^image\/(png|jpeg|webp|gif)$/.test(String(img.mime)) ? String(img.mime) : 'image/jpeg'
+    const ext = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]
+    const safeId = String(sessionId || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_')
+    const dir = join(tmpdir(), 'aikm-tool-images', safeId)
+    fs.mkdirSync(dir, { recursive: true })
+    const file = join(dir, `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`)
+    fs.writeFileSync(file, Buffer.from(img.data, 'base64'))
+    return {
+      mime,
+      path: file,
+      ...(Number.isFinite(img.width) ? { width: Number(img.width) } : {}),
+      ...(Number.isFinite(img.height) ? { height: Number(img.height) } : {}),
+    }
+  } catch {
+    return null
+  }
 }
 
 function parseToolArgs(raw: any): any {
@@ -416,7 +452,7 @@ class AgentImpl implements AgentControl {
    * step 中途抛错时由崩溃恢复逻辑补写（见 `runTurn` 的 catch：复刻 DSH 的 ToolCallRecovery）。
    * 每 step 开始时重置——只为"当前这一步"补写，避免把上一步早已落盘的结果重复写一遍。
    */
-  private stepResults = new Map<string, { name: string; ok: boolean; value?: any; error?: string; preview?: any }>()
+  private stepResults = new Map<string, { name: string; ok: boolean; value?: any; error?: string; preview?: any; images?: SavedToolImage[] }>()
   /** 最近一次请求预算里生效的上下文窗口（供工具结果预算按窗口缩放；见 `pushToolResult`） */
   private effectiveWindowTokens = 0
   /** 最近一次请求预算里的预留输出 token（供压缩基准扣减；见 `compactionBasisTokens`） */
@@ -841,6 +877,7 @@ class AgentImpl implements AgentControl {
             value: rec.value,
             error: rec.error,
             preview: rec.preview,
+            ...(rec.images?.length ? { images: rec.images } : {}),
             ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
           })
           // 只对"从未广播过"的结果补发 UI 事件（原始路径已广播过的不要重复）
@@ -949,18 +986,18 @@ class AgentImpl implements AgentControl {
     let userSeq = 0
     return entries.map(({ msg }) => {
       const out = toOpenAIMessage(msg)
-      if (out.role === 'user' && !msg.compacted) {
+      if (out.role === 'user' && !msg.compacted && !msg.synthetic) {
         userSeq++
         const imgs = this.taskImagesBySeq.get(userSeq)
-        if (imgs?.length) out.images = imgs
+        if (imgs?.length && !out.images) out.images = imgs
       }
       return out
     })
   }
 
-  /** 真实 user 消息条数（压缩摘要消息不计） */
+  /** 真实 user 消息条数（压缩摘要/工具图片合成消息不计） */
   private userSeqOf(entries: DerivedEntry[]): number {
-    return entries.reduce((n, e) => n + (e.msg.role === 'user' && !e.msg.compacted ? 1 : 0), 0)
+    return entries.reduce((n, e) => n + (e.msg.role === 'user' && !e.msg.compacted && !e.msg.synthetic ? 1 : 0), 0)
   }
 
   /**
@@ -999,11 +1036,13 @@ class AgentImpl implements AgentControl {
         content: msg.content,
         toolCalls: msg.toolCalls,
       }
-      if (msg.role === 'user' && !msg.compacted) {
+      if (msg.role === 'user' && !msg.compacted && !msg.synthetic) {
         userSeq++
         const imgs = this.taskImagesBySeq.get(userSeq)
         if (imgs?.length) out.images = imgs.length
       }
+      // 工具截图合成的图片消息：图片本体参与预算（每条按张数计）
+      if (msg.role === 'user' && msg.images?.length) out.images = msg.images.length
       return out
     })
   }
@@ -1509,7 +1548,7 @@ class AgentImpl implements AgentControl {
       result = await toolRegistry.execute(name, args, this.ctx())
     }
 
-    this.pushToolResult({ callId, name, ok: result.ok, value: result.value, error: result.error, preview: result.preview })
+    this.pushToolResult({ callId, name, ok: result.ok, value: result.value, error: result.error, preview: result.preview, images: result.images })
   }
 
   /**
@@ -1532,9 +1571,15 @@ class AgentImpl implements AgentControl {
     value?: any
     error?: string
     preview?: any
+    images?: ToolImage[]
     diagnostic?: boolean
   }): void {
     const { callId, name, ok, value, error, preview, diagnostic } = result
+    // 图片落盘（会话日志只存路径）；最多 4 张，避免一次工具调用把上下文撑爆
+    const savedImages = (result.images || [])
+      .slice(0, 4)
+      .map((img) => saveToolImage(this.id, img))
+      .filter((x): x is SavedToolImage => !!x)
     // 按**本会话窗口**缩放工具结果预算（小窗口的关键）：32K 下单条结果最多约 12% 窗口，
     // 而不是固定 16K 字符（那会占到 1/3 窗口）。取值来自本轮请求预算的生效窗口。
     // 取本轮请求预算的生效窗口；首步（预算尚未算过）回落到 options.contextLimit
@@ -1566,9 +1611,10 @@ class AgentImpl implements AgentControl {
       ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
       ...(bounded.pruned ? { modelValue, omittedChars: bounded.omitted?.count } : {}),
       ...(spillPath ? { spillPath } : {}),
+      ...(savedImages.length ? { images: savedImages } : {}),
     })
     // 记入本步结果集合：step 中途抛错时由崩溃恢复逻辑补写（见 runTurn 的 catch 块）
-    this.stepResults.set(callId, { name, ok, value, error, preview })
+    this.stepResults.set(callId, { name, ok, value, error, preview, images: savedImages.length ? savedImages : undefined })
     this.emit('tool/result', { callId, name, ok, value, error, preview })
     this.emittedResultIds.add(callId)
   }

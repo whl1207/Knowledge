@@ -14,7 +14,7 @@
         class="ba-tab"
         draggable="true"
         :class="{
-          active: t.id === state.activeTabId,
+          active: t.id === state.activeTabId && !settingsTabActive,
           'ba-tab-drop-before': dropHint && dropHint.id === t.id && dropHint.pos === 'before',
           'ba-tab-drop-after': dropHint && dropHint.id === t.id && dropHint.pos === 'after',
         }"
@@ -34,6 +34,12 @@
           {{ t.title || (zh ? '新标签页' : 'New Tab') }}
         </span>
         <i class="fa fa-times ba-tab-close" :title="zh ? '关闭标签页' : 'Close tab'" @click.stop="closeTab(t.id)"></i>
+      </div>
+      <!-- 设置标签页（内部页，不在主进程标签集合里）：像 ego-lite 一样以标签形式打开 -->
+      <div v-if="settingsTabOpen" class="ba-tab ba-tab-settings" :class="{ active: settingsTabActive }" :title="settingsTabActive ? (zh ? '设置（正在显示）' : 'Settings (active)') : (zh ? '切换到设置标签' : 'Switch to settings tab')" @click="toggleSettingsTab">
+        <i class="fa ba-tab-favicon fa-cog"></i>
+        <span class="ba-tab-title">{{ zh ? '设置' : 'Settings' }}</span>
+        <i class="fa fa-times ba-tab-close" :title="zh ? '关闭设置' : 'Close settings'" @click.stop="closeSettingsTab"></i>
       </div>
       <button class="ba-tab-add" :title="zh ? '新建标签页' : 'New tab'" @click="addTab()">
         <i class="fa fa-plus"></i>
@@ -81,22 +87,45 @@
         <span v-if="state.loading" class="ba-addr-loading"><i class="fa fa-spinner fa-spin"></i></span>
       </div>
 
+      <!-- AI 控制：暂停 / 接管（仅在最近有 AI 操作时出现） -->
+      <button v-if="state.agentOwner" class="ba-btn" :class="{ on: state.agentPaused }"
+        :title="state.agentPaused ? (zh ? '继续 AI 操作' : 'Resume AI') : (zh ? '暂停 AI 操作（不动你正在看的页面）' : 'Pause AI')"
+        @click="toggleAgentPaused">
+        <i class="fa" :class="state.agentPaused ? 'fa-play' : 'fa-pause'"></i>
+      </button>
+      <button v-if="state.agentOwner && !state.agentPaused" class="ba-btn"
+        :title="zh ? '接管：把 AI 标签转为普通标签并暂停该会话' : 'Take over: turn AI tabs into normal tabs and pause the session'"
+        @click="handoffAgent">
+        <i class="fa fa-unlock"></i>
+      </button>
+
       <!-- 顶部右侧：⭐ 收藏当前页 / 🏷️ 收藏夹（打开侧栏树状管理）/ ⚙ 设置。其余页面操作折叠进侧栏 -->
       <button class="ba-btn ba-star-btn" :class="{ on: isBookmarked }" :disabled="!state.url"
         :title="isBookmarked ? (zh ? '取消收藏（书签）' : 'Remove bookmark') : (zh ? '收藏当前页（书签）' : 'Bookmark current page') "
         @click="toggleBookmark">
         <i class="fa" :class="isBookmarked ? 'fa-star' : 'fa-star-o'"></i>
       </button>
-      <button class="ba-btn ba-fav-btn" :class="{ on: railOpen && railView === 'bookmarks' }"
+      <button v-if="showBookmarksIcon" class="ba-btn ba-fav-btn" :class="{ on: railOpen && railView === 'bookmarks' }"
         :title="railOpen && railView === 'bookmarks' ? (zh ? '关闭收藏夹' : 'Close bookmarks') : (zh ? '收藏夹（树状管理，可拖拽整理）' : 'Bookmarks (tree manager, drag to organize)') "
         @click="toggleBookmarks">
         <i class="fa fa-tag"></i>
       </button>
-      <button class="ba-btn ba-settings-btn" :class="{ on: railOpen && railView === 'settings' }"
-        :title="railOpen && railView === 'settings' ? (zh ? '关闭右侧设置栏' : 'Close settings panel') : (zh ? '设置（打开右侧栏）' : 'Settings (open side panel)') "
-        @click="toggleSettings">
-        <i class="fa" :class="railOpen && railView === 'settings' ? 'fa-times' : 'fa-cog'"></i>
-        <i v-if="!railOpen && agentBusyDot" class="fa fa-circle ba-settings-busy" :title="zh ? 'AI 正在此标签操作…' : 'AI is operating this tab…'"></i>
+      <button v-if="showHistoryIcon" class="ba-btn" :class="{ on: railOpen && railView === 'history' }"
+        :title="railOpen && railView === 'history' ? (zh ? '关闭历史' : 'Close history') : (zh ? '历史与最近关闭' : 'History & recently closed')"
+        @click="toggleHistory">
+        <i class="fa fa-history"></i>
+      </button>
+      <button v-if="showDownloadsIcon" class="ba-btn ba-dl-btn" :class="{ on: railOpen && railView === 'downloads' }"
+        :title="(railOpen && railView === 'downloads' ? (zh ? '关闭下载列表' : 'Close downloads') : (zh ? '下载列表' : 'Downloads')) + (downloadingCount > 0 ? (zh ? `（${downloadingCount} 个下载进行中）` : ` (${downloadingCount} downloading)`) : '')"
+        @click="toggleDownloads">
+        <i class="fa fa-download"></i>
+        <span v-if="downloadingCount > 0" class="ba-dl-dot" :aria-label="zh ? '有下载进行中' : 'Download in progress'"></span>
+      </button>
+      <button class="ba-btn ba-settings-btn" :class="{ on: settingsTabActive }"
+        :title="settingsTabActive ? (zh ? '设置（正在显示；点标签 × 关闭）' : 'Settings (active; close with ×)') : (settingsTabOpen ? (zh ? '切换到设置标签' : 'Switch to settings tab') : (zh ? '设置（打开独立标签页）' : 'Settings (open as a tab)'))"
+        @click="toggleSettingsTab">
+        <i class="fa fa-cog"></i>
+        <i v-if="!settingsTabActive && agentBusyDot" class="fa fa-circle ba-settings-busy" :title="zh ? 'AI 正在此标签操作…' : 'AI is operating this tab…'"></i>
       </button>
     </div>
 
@@ -105,8 +134,10 @@
       <!-- 左侧：页面内容（新标签搜索首页等 DOM 在原生视图隐藏/空白时露出；有 URL 时由原生视图承载） -->
       <div ref="mainRef" class="ba-main">
         <div class="ba-page">
+          <!-- 设置标签页（内部页）：盖住网页区，隐藏原生视图（主进程 set-overlay） -->
+          <BrowserSettingsPage v-if="settingsTabActive" />
           <!-- 新标签页（收藏夹网格）：整页就是收藏夹 grid——全部平铺、不折叠；搜索已并入顶部地址栏，页内不再放任何搜索/提示条 -->
-          <div v-if="activeTab && !state.url && newTabIsBookmarks" class="ba-home">
+          <div v-else-if="activeTab && !state.url && newTabIsBookmarks" class="ba-home">
             <!-- 收藏夹快捷入口：文件夹形式（顶层 → 点击进入下一级文件夹/书签）；全部展示，超高时本区滚动
                  头部仅保留「返回上一级 / 当前文件夹」；显示方式由 Ctrl+滚轮决定（缩小到下限即列表，往上滚回网格） -->
             <div class="ba-home-bookmarks scoll" @wheel="onHomeWheel">
@@ -114,9 +145,10 @@
                 <span class="ba-home-bm-back" @click="homeUp"><i class="fa fa-arrow-left"></i>{{ zh ? ' 返回' : ' Back' }}</span>
                 <span class="ba-home-bm-crumb" :title="currentDirRel"><i class="fa fa-folder-open-o"></i>{{ currentDirName }}</span>
               </div>
-              <div v-if="!homeBookmarks.length" class="ba-home-bm-empty">
-                <template v-if="homePath.length"><i class="fa fa-folder-open-o"></i>&nbsp;{{ zh ? '该文件夹为空' : 'This folder is empty' }}</template>
-                <template v-else>{{ zh ? '暂无收藏：在任意网页点顶部 ⭐ 即可收藏，之后会显示在这里' : 'No bookmarks yet: click the ⭐ on any page, they will show up here' }}</template>
+              <!-- 空收藏：不再用整段提示，改成一个列表/网格里的占位项 -->
+              <div v-if="!homeBookmarks.length" class="ba-home-bm-placeholder" :class="{ list: homeViewMode === 'list' }">
+                <i class="fa fa-star-o"></i>
+                <span>{{ homePath.length ? (zh ? '该文件夹为空' : 'This folder is empty') : (zh ? '暂无收藏' : 'No bookmarks') }}</span>
               </div>
               <div v-else-if="homeViewMode === 'list'" class="ba-home-bm-list">
                 <div
@@ -239,28 +271,22 @@
         </div>
       </div>
 
-      <!-- 右侧停靠栏（设置 / 收藏夹 双视图，独立模块组件承载；收起时宽 0，展开时网页让出右栏） -->
+      <!-- 右侧停靠栏（收藏夹 / 下载 / 历史；设置已改为独立标签页） -->
       <aside class="ba-rail" :class="{ open: railOpen }">
         <!-- 收起时（宽 0）连同 inert 禁用内部控件聚焦，避免键盘 Tab 落入隐藏栏 -->
         <div class="ba-rail-inner" :inert="!railOpen">
-          <!-- 无头部/关闭按钮（工具栏 ⚙ / 📁 即可开/关侧栏）：内容区直接从顶部开始滚动 -->
+          <!-- 无头部/关闭按钮（工具栏图标即可开/关侧栏）：内容区直接从顶部开始滚动 -->
           <div class="ba-rail-body">
-            <!-- 设置面板（独立模块：BrowserRailSettings） -->
-            <template v-if="railView === 'settings'">
-              <BrowserRailSettings
-                :chip="agentChip"
-                :url="state.url"
-                :active="railOpen && railView === 'settings'"
-                :on-open-external="openExternal"
-                :on-save-page="savePage"
-                :on-save-markdown="saveMarkdown"
-                :on-recycle="recycleAgentTabs"
-                :on-devtools="openDevtools"
-              />
-            </template>
             <!-- 收藏夹面板（独立模块：BrowserBookmarksPanel） -->
-            <template v-else-if="railView === 'bookmarks'">
+            <template v-if="railView === 'bookmarks'">
               <BrowserBookmarksPanel :dir="browserBaseDir()" :items="bmItems" :active="railOpen && railView === 'bookmarks'" @changed="refreshBookmarks" />
+            </template>
+            <!-- 下载 / 历史（P1：从顶部工具栏图标进入，面板复用同一停靠栏） -->
+            <template v-else-if="railView === 'downloads'">
+              <BrowserExtrasPanel mode="downloads" :active="railOpen && railView === 'downloads'" :on-open-tab="openTabByUrl" />
+            </template>
+            <template v-else-if="railView === 'history'">
+              <BrowserExtrasPanel mode="history" :active="railOpen && railView === 'history'" :on-open-tab="openTabByUrl" />
             </template>
           </div>
         </div>
@@ -327,7 +353,8 @@
 import { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
 import { ElMessageBox } from 'element-plus'
-import BrowserRailSettings from '@/components/browser/BrowserRailSettings.vue'
+import BrowserExtrasPanel from '@/components/browser/BrowserExtrasPanel.vue'
+import BrowserSettingsPage from '@/components/browser/BrowserSettingsPage.vue'
 import BrowserBookmarksPanel from '@/components/browser/BrowserBookmarksPanel.vue'
 import { getPlatform } from '@/platform'
 import { BROWSER_SEARCH_ENGINES, browserSearchEngine, browserSearchEngineLabel, buildBrowserSearchUrl } from '@/shared/browserSearch'
@@ -353,6 +380,11 @@ const props = withDefaults(defineProps<{
 
 /** 原生网页视图当前是否应当可见：侧栏标签在前台 + 没有浮层遮盖 */
 const paneVisible = computed(() => !props.embedded || (!!props.paneActive && !props.occluded))
+/**
+ * 本壳实例 id：主页右侧栏与单窗口浏览器页可能先后挂载同一个 WebContentsView，
+ * 旧壳卸载时的 detach 必须被主进程忽略，否则会拆掉新壳的视图。
+ */
+const dockOwner = `ba-${Math.random().toString(36).slice(2, 10)}`
 
 interface TabMeta {
   id: string
@@ -381,9 +413,12 @@ const state = reactive<{
   agentBusyTabId: string | null
   agentTool: string
   allowEval: boolean
+  agentOwner: string | null
+  agentPaused: boolean
 }>({
   tabs: [], activeTabId: null, url: '', title: '', loading: false,
   canGoBack: false, canGoForward: false, agentActive: false, agentBusyTabId: null, agentTool: '', allowEval: false,
+  agentOwner: null, agentPaused: false,
 })
 
 const activeTab = computed(() => state.tabs.find(t => t.id === state.activeTabId) || null)
@@ -392,6 +427,14 @@ const isSecure = computed(() => /^https:/.test(state.url))
 const curIsAgentTab = computed(() => !!(activeTab.value as any)?.agent)
 // agent 状态 chip：跟随当前激活标签
 const agentChip = computed(() => {
+  if (state.agentPaused) {
+    return {
+      cls: 'plain',
+      icon: 'fa-pause',
+      text: zh.value ? '已暂停' : 'Paused',
+      title: zh.value ? 'AI 操作已暂停：点顶部 ▶ 继续，或直接操作当前标签接管' : 'AI paused: press ▶ to resume, or interact with the tab to take over',
+    }
+  }
   // AI 正在操作这个标签（当前标签是 AI 忙碌目标标签）才显示高亮忙碌
   const busy = state.agentActive && !!state.agentBusyTabId && state.activeTabId === state.agentBusyTabId
   if (busy) {
@@ -421,7 +464,45 @@ const agentChip = computed(() => {
 // ===== 右侧停靠栏（设置 / 收藏夹 双视图共用同一栏位）：展开时网页让出右侧宽度（与主进程 browser-agent:set-rail 联动） =====
 const SIDE_RAIL_W = 320 // 与 .ba-rail.open 的宽度一致，须同步主进程让位宽度
 const railOpen = ref(false)
-const railView = ref<'settings' | 'bookmarks'>('settings')
+const railView = ref<'bookmarks' | 'downloads' | 'history'>('bookmarks')
+/** 设置页（像 ego-lite 一样作为独立标签页）：open=标签存在于标签栏；active=当前正在显示 */
+const settingsTabOpen = ref(false)
+const settingsTabActive = ref(false)
+
+/** 激活设置标签：标签存在 + 盖住网页区（隐藏原生视图） */
+const activateSettingsTab = async () => {
+  settingsTabOpen.value = true
+  settingsTabActive.value = true
+  await invoke('browser-agent:set-overlay', { visible: true }).catch(() => {})
+}
+/** 切到其它标签：只取消激活，设置标签仍保留在标签栏（只能手动关闭） */
+const deactivateSettingsTab = () => {
+  if (!settingsTabActive.value) return
+  settingsTabActive.value = false
+  void invoke('browser-agent:set-overlay', { visible: false }).catch(() => {})
+}
+/** 手动关闭（标签上的 ×）：移除标签并恢复网页视图 */
+const closeSettingsTab = () => {
+  const wasActive = settingsTabActive.value
+  settingsTabOpen.value = false
+  settingsTabActive.value = false
+  if (wasActive) void invoke('browser-agent:set-overlay', { visible: false }).catch(() => {})
+}
+/** 工具栏 ⚙ / 设置标签点击：打开或重新激活；不会自动关闭（关闭只能点 ×） */
+const toggleSettingsTab = () => {
+  if (settingsTabActive.value) return
+  void activateSettingsTab()
+}
+/** 顶部工具栏图标可见性（设置 → 浏览器 → 图标；旧配置默认全部显示） */
+const showBookmarksIcon = computed(() => store.UI.browserShowBookmarks !== false)
+const showDownloadsIcon = computed(() => store.UI.browserShowDownloads !== false)
+const showHistoryIcon = computed(() => store.UI.browserShowHistory !== false)
+/** 正在下载/暂停中的数量：>0 时下载图标显示小圆点（不静默） */
+const downloadingCount = ref(0)
+const applyDownloadRows = (rows: any) => {
+  if (!Array.isArray(rows)) return
+  downloadingCount.value = rows.filter((d) => d?.state === 'progressing' || d?.state === 'paused').length
+}
 // 当前标签正被 AI 操作：停靠栏收起时在设置按钮上显示小红点（展开后侧栏内有完整状态行）
 const agentBusyDot = computed(() =>
   !!state.agentActive && !!state.agentBusyTabId && state.activeTabId === state.agentBusyTabId
@@ -434,7 +515,7 @@ const syncRail = async () => {
 }
 
 /** 打开指定侧栏视图；同视图再次点击则收起；切换视图保持展开 */
-const openRail = async (view: 'settings' | 'bookmarks') => {
+const openRail = async (view: 'bookmarks' | 'downloads' | 'history') => {
   if (!railOpen.value) {
     // 展开前先同步可能已在主窗口修改的浏览器偏好，并刷新收藏状态
     syncBrowserPrefs()
@@ -448,8 +529,9 @@ const openRail = async (view: 'settings' | 'bookmarks') => {
   }
   await syncRail()
 }
-const toggleSettings = () => openRail('settings')
 const toggleBookmarks = () => openRail('bookmarks')
+const toggleDownloads = () => openRail('downloads')
+const toggleHistory = () => openRail('history')
 
 // 从主窗口最近写入的 localStorage 同步浏览器偏好（主页/新标签页/搜索/收藏夹/剪藏/AI 开关），
 // 避免主窗口「设置 → 其他 → 浏览器」改动后本独立窗口仍读到旧值
@@ -470,6 +552,9 @@ const syncBrowserPrefs = () => {
         if (typeof ui.browserAllowEval === 'boolean') store.UI.browserAllowEval = ui.browserAllowEval
         if (typeof ui.browserClipDir === 'string') store.UI.browserClipDir = ui.browserClipDir
         if (typeof ui.browserClipFrontMatter === 'boolean') store.UI.browserClipFrontMatter = ui.browserClipFrontMatter
+        if (typeof ui.browserShowBookmarks === 'boolean') store.UI.browserShowBookmarks = ui.browserShowBookmarks
+        if (typeof ui.browserShowDownloads === 'boolean') store.UI.browserShowDownloads = ui.browserShowDownloads
+        if (typeof ui.browserShowHistory === 'boolean') store.UI.browserShowHistory = ui.browserShowHistory
       }
     }
   } catch { /* 忽略 */ }
@@ -513,6 +598,8 @@ const applyState = (s: any) => {
   state.agentBusyTabId = s.agentBusyTabId || null
   state.agentTool = s.agentTool || ''
   state.allowEval = !!s.allowEval
+  state.agentOwner = s.agentOwner || null
+  state.agentPaused = !!s.agentPaused
 }
 
 const onEvent = (payload: any) => applyState(payload)
@@ -555,8 +642,9 @@ watch(() => state.url, () => {
   urlInput.value = state.url || ''
 })
 
-const addTab = async (u?: string) => { await invoke('browser-agent:add-tab', u ? { url: u } : {}).catch(() => {}) }
-const switchTab = async (id: string) => { await invoke('browser-agent:switch-tab', { id }).catch(() => {}) }
+const addTab = async (u?: string) => { deactivateSettingsTab(); await invoke('browser-agent:add-tab', u ? { url: u } : {}).catch(() => {}) }
+const openTabByUrl = (u?: string) => { if (u) { deactivateSettingsTab(); void invoke('browser-agent:add-tab', { url: u }).catch(() => {}) } }
+const switchTab = async (id: string) => { deactivateSettingsTab(); await invoke('browser-agent:switch-tab', { id }).catch(() => {}) }
 const closeTab = async (id: string) => { await invoke('browser-agent:close-tab', { id }).catch(() => {}) }
 // ===== 标签拖拽排序（可视即时重排 + 同步主进程顺序） =====
 const dropHint = ref<{ id: string; pos: 'before' | 'after' } | null>(null)
@@ -595,6 +683,21 @@ const tabDrop = (id: string, _e: DragEvent) => {
   state.tabs = next
   void invoke('browser-agent:move-tab', { id: srcId, toIndex: final }).catch(() => {})
 }
+// AI 控制：暂停 / 继续 / 接管（停靠栏与工具栏共用同一组主进程状态）
+const toggleAgentPaused = async () => {
+  const method = state.agentPaused ? 'browser-agent:resume-agent' : 'browser-agent:pause-agent'
+  const s = await invoke(method, { owner: state.agentOwner }).catch(() => null)
+  if (s) applyState(s)
+  showToast(state.agentPaused
+    ? (zh.value ? '已暂停 AI 操作：该会话的浏览器工具会被拒绝' : 'AI paused: this session\'s browser tools are rejected')
+    : (zh.value ? '已继续 AI 操作' : 'AI resumed'))
+}
+const handoffAgent = async () => {
+  const s = await invoke('browser-agent:handoff-agent', { owner: state.agentOwner }).catch(() => null)
+  if (s) applyState(s)
+  showToast(zh.value ? '已接管：AI 标签已转为普通标签并暂停该会话' : 'Taken over: AI tabs are now normal tabs and the session is paused')
+}
+
 // 回收 AI 会话标签页（保留正在查看的标签）：带数量反馈
 const recycleAgentTabs = async () => {
   const res = await invoke('browser-agent:recycle-agent-tabs').catch(() => null)
@@ -634,6 +737,7 @@ const addrTitle = computed(() => zh.value
 const navigate = async () => {
   const u0 = urlInput.value.trim()
   if (!u0) return
+  deactivateSettingsTab()
   // 非标准链接格式（纯关键词 / 句子）→ 交给所选搜索引擎
   const u = isLikelyUrl(u0)
     ? u0
@@ -641,6 +745,7 @@ const navigate = async () => {
   await invoke('browser-agent:navigate', { url: u }).catch(() => {})
 }
 const action = async (a: string) => {
+  deactivateSettingsTab()
   await invoke('browser-agent:action', { action: a }).catch(() => {})
 }
 /** 把「允许 AI 执行 JS」持久化设置下发给主进程（browser_eval 开关由主进程持有，重启后需重新同步） */
@@ -1113,11 +1218,12 @@ const pushDockRect = () => {
   dockRaf = requestAnimationFrame(() => {
     dockRaf = 0
     const el = mainRef.value
-    if (!el) { void invoke('browser-agent:set-dock-rect', { rect: null }).catch(() => {}); return }
+    if (!el) { void invoke('browser-agent:set-dock-rect', { rect: null, owner: dockOwner }).catch(() => {}); return }
     const r = el.getBoundingClientRect()
     void invoke('browser-agent:set-dock-rect', {
       // 主进程会再乘窗口缩放（CSS px × zoom = DIP）
       rect: { x: r.left, y: r.top, width: r.width, height: r.height },
+      owner: dockOwner,
     }).catch(() => {})
   })
 }
@@ -1127,6 +1233,7 @@ const pushDockVisible = () => {
   if (!props.embedded) return
   void invoke('browser-agent:set-dock-visible', {
     visible: paneVisible.value && !externalOverlayOpen.value,
+    owner: dockOwner,
   }).catch(() => {})
   pushDockRect()
 }
@@ -1152,16 +1259,33 @@ onMounted(async () => {
   unsubBrowserEvents.push(getPlatform().events.on('browser-agent:event', onEvent))
   unsubBrowserEvents.push(getPlatform().events.on('theme-changed', onThemeChanged))
   unsubBrowserEvents.push(getPlatform().events.on('browser-agent:toast', onToastEvent))
+  // 下载进度：图标上的小圆点（面板自身也订阅同一事件）
+  unsubBrowserEvents.push(getPlatform().events.on('browser-agent:downloads', (rows: any) => applyDownloadRows(rows)))
+  void invoke('browser-agent:downloads-list').then((rows: any) => {
+    applyDownloadRows(Array.isArray(rows) ? rows : rows?.data)
+  }).catch(() => {})
+  // 网页右键菜单里「保存整页 / 保存 Markdown」需要渲染层的工作区目录与对话框，主进程只发动作
+  unsubBrowserEvents.push(getPlatform().events.on('browser-agent:menu-action', (payload: any) => {
+    const action = String(payload?.action || '')
+    if (action === 'save-page-full') void savePage('full')
+    else if (action === 'save-markdown') void saveMarkdown()
+  }))
   window.addEventListener('resize', onWinResize)
   window.addEventListener('resize', pushDockRect)
   measureCompact()
   sendBrowserTheme()
   // 独立窗口启动即同步可能已配置好的浏览器偏好，并确保右侧停靠栏为收起初始态
   syncBrowserPrefs()
+  // 下发设置页里的浏览器行为配置（页面预算/默认快照/下载目录）
+  void invoke('browser-agent:set-config', {
+    pageBudget: store.UI?.browserPageBudget || 8,
+    snapshotInteractiveOnly: !!store.UI?.browserSnapshotInteractiveOnly,
+    downloadDir: store.UI?.browserDownloadDir || '',
+  }).catch(() => {})
 
   if (props.embedded) {
     // 停靠：把（可能已存在的）标签视图挂到主窗口，并把矩形交回主进程
-    await invoke('browser-agent:attach-dock').catch(() => {})
+    await invoke('browser-agent:attach-dock', { owner: dockOwner }).catch(() => {})
     if (mainRef.value && typeof ResizeObserver !== 'undefined') {
       dockObserver = new ResizeObserver(() => { measureCompact(); pushDockRect() })
       dockObserver.observe(mainRef.value)
@@ -1186,8 +1310,10 @@ onBeforeUnmount(() => {
   dockObserver?.disconnect(); dockObserver = null
   bodyObserver?.disconnect(); bodyObserver = null
   if (dockRaf) { cancelAnimationFrame(dockRaf); dockRaf = 0 }
+  // 离开时恢复被设置页隐藏的原生网页视图
+  if (settingsTabActive.value) void invoke('browser-agent:set-overlay', { visible: false }).catch(() => {})
   // 离开侧栏：把原生视图从主窗口摘下来（标签与会话保留，下次停靠直接接着用）
-  if (props.embedded) void invoke('browser-agent:detach-dock').catch(() => {})
+  if (props.embedded) void invoke('browser-agent:detach-dock', { owner: dockOwner }).catch(() => {})
 })
 </script>
 
@@ -1215,6 +1341,9 @@ onBeforeUnmount(() => {
 /* 窄侧栏（默认 360px 左右）下按紧凑模式排版：只留标签栏 + 地址栏，工具按钮换行交给 .ba-navbar 自身滚动 */
 .browser-agent-shell.embedded .ba-navbar { padding: 0 4px; gap: 4px; }
 .browser-agent-shell.embedded .ba-tab { flex: 0 1 120px; max-width: 150px; }
+/* 设置标签页（内部页） */
+.ba-tab-settings { flex: 0 0 auto; max-width: 130px; }
+.ba-tab-settings .ba-tab-favicon { color: var(--fontActiveColor); }
 /* ====== ① 标签栏：36px，与主进程 TAB_BAR_H 一致 ====== */
 .ba-tabbar {
   height: 36px;
@@ -1352,6 +1481,24 @@ onBeforeUnmount(() => {
   font-size: 12px;
   transition: all .12s;
   -webkit-app-region: no-drag;
+  position: relative;
+}
+/* 下载进行中：图标右上角琥珀色小圆点（带动画，避免静默） */
+.ba-dl-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e6a23c;
+  box-shadow: 0 0 0 1.5px var(--backgroundColor), 0 0 5px rgba(230, 162, 60, .8);
+  animation: ba-dl-pulse 1.4s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes ba-dl-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .55; transform: scale(.82); }
 }
 .ba-btn:hover { background: color-mix(in srgb, var(--fontColor) 8%, transparent); }
 .ba-btn:disabled { opacity: .35; cursor: default; }
@@ -1549,7 +1696,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden; /* 滚动交给下方书签区 */
-  padding: 14px 22px 16px;
+  padding: 0px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1568,13 +1715,22 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overflow-x: hidden;
 }
-.ba-home-bm-empty {
-  font-size: 12px;
+/* 空收藏占位：一个列表/网格里的占位块（不再用整段操作提示） */
+.ba-home-bm-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 84px;
+  margin-bottom: 8px;
+  border: 1px dashed color-mix(in srgb, var(--fontColor) 18%, transparent);
+  border-radius: 8px;
   color: var(--fontColor);
-  opacity: .5;
-  text-align: center;
-  padding: 14px 0;
+  opacity: .45;
+  font-size: 12px;
 }
+.ba-home-bm-placeholder.list { min-height: 34px; justify-content: flex-start; padding: 0 10px; }
+.ba-home-bm-placeholder i { color: var(--fontActiveColor); }
 /* 新标签页工具条样式已随「网格/列表切换开关」一并移除；显示方式由 Ctrl+滚轮决定 */
 .ba-home-bm-grid {
   display: grid;

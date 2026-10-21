@@ -16,6 +16,7 @@ import { drawioService } from './drawio/drawio-service'
 import { literatureService } from './literature/literature-service'
 import { postgresService } from './postgres/postgres-service'
 import { pluginDevService } from './plugin-dev/plugin-dev-service'
+import { runWithMcpOwner } from './mcp-owner'
 
 /** 单次 MCP 工具调用默认超时（毫秒）；可由服务配置 timeoutMs 覆盖（设置页可改） */
 const DEFAULT_CALL_TIMEOUT_MS = 60000
@@ -357,12 +358,13 @@ class McpRuntimeService {
     return await this.connect(serverId, config)
   }
 
-  /** 调用工具；未连接时自动用配置连接 */
+  /** 调用工具；未连接时自动用配置连接。owner：发起调用的 agent 会话 id（内置服务用它标记自己创建的标签） */
   async callTool(
     serverId: string,
     config: McpServerConfigInput,
     toolName: string,
-    args: Record<string, any>
+    args: Record<string, any>,
+    owner?: string
   ): Promise<McpCallResult> {
     let conn = this.connections.get(serverId)
     if (!conn || conn.status !== 'connected') {
@@ -377,11 +379,12 @@ class McpRuntimeService {
     try {
       // 注意：SDK 的 callTool 签名是 callTool(params, resultSchema?, options?)
       //       第二个参数是 resultSchema（默认 CallToolResultSchema），第三个才是 options
-      const result = await conn.client.callTool(
+      // owner 经 AsyncLocalStorage 传给内置服务（如浏览器 Agent），它不在 MCP 协议里。
+      const result = await runWithMcpOwner(owner, () => conn.client.callTool(
         { name: toolName, arguments: args || {} },
         undefined,
         { timeout: timeoutMs }
-      )
+      ))
       return this.normalizeCallResult(result)
     } catch (err: any) {
       const msg = err?.message || String(err)

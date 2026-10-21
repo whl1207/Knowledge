@@ -10,6 +10,18 @@ import yaml from 'js-yaml'
 import mammoth from "mammoth"
 import { docxToMarkdown } from './office/docx-to-markdown'
 import { asNodeBytes, asUint8 } from './buffer-view'
+
+// 启动期崩溃留痕（尤其 e2e/无窗口环境：Electron 退出时可能不打印任何 stderr）
+try {
+  const log = join(app.getPath('temp'), 'aikm-main-crash.log')
+  fs.writeFileSync(log, `[${new Date().toISOString()}] pid=${process.pid} e2e=${process.env.AIKM_BROWSER_E2E || ''}\n`)
+  process.on('uncaughtException', (err: any) => {
+    try { fs.appendFileSync(log, `uncaught: ${err?.stack || err}\n`) } catch { /* 忽略 */ }
+  })
+  process.on('unhandledRejection', (err: any) => {
+    try { fs.appendFileSync(log, `rejection: ${err?.stack || err}\n`) } catch { /* 忽略 */ }
+  })
+} catch { /* 忽略 */ }
 import xlsx from 'xlsx'
 // PDF 文本提取：主进程是 Node 环境，必须用 pdfjs 的 **legacy 构建**
 // （现代构建面向浏览器，在 Node 里会在导入时打印 "Warning: Please use the `legacy` build…"）
@@ -31,6 +43,7 @@ import { flowAwareExt } from './file-ext'
 import { mcpService } from './mcp-service'
 import { mcpExposeServer, MCP_EXPOSE_PORT } from './mcp-expose'
 import { browserAgentService } from './browser-agent'
+import { importChromiumLogins } from './browser/chrome-import'
 import {
   registerOfficeHostIpc,
   registerOfficeSchemes,
@@ -127,8 +140,12 @@ const IS_DEV = !!DEV_SERVER_URL
 if (IS_DEV) {
   app.setPath('userData', path.join(app.getPath('appData'), `${app.getName()}-dev`))
 }
+// 真实 Electron e2e：独立临时 userData，避免与正在运行的开发/正式实例抢单实例锁与配置
+if (process.env.AIKM_BROWSER_E2E === '1') {
+  app.setPath('userData', path.join(app.getPath('temp'), `aikm-browser-e2e-${process.pid}`))
+}
 
-if (!app.requestSingleInstanceLock()) {
+if (process.env.AIKM_BROWSER_E2E !== '1' && !app.requestSingleInstanceLock()) {
   app.quit()
   process.exit(0)
 }
@@ -456,6 +473,12 @@ app.whenReady().then(async () => {
   app.on('web-contents-created', (_e, contents) => {
     contents.on('did-finish-load', () => requestGuestPolicyFromRenderer())
   })
+  // 真实 Electron 浏览器 e2e（仅显式环境变量触发；正常启动完全不走这里）
+  if (process.env.AIKM_BROWSER_E2E === '1') {
+    void import('./browser/e2e')
+      .then((m) => m.runBrowserE2E())
+      .catch((err) => { console.error('[browser-e2e] failed', err); app.exit(1) })
+  }
 })
 
 app.on('window-all-closed', () => {
@@ -1137,33 +1160,75 @@ ipcMain.handle('browser-agent:set-compact', async (_e, payload: { compact?: bool
 // ==================== 浏览器停靠（主页右侧栏「浏览器」标签） ====================
 // 原生 WebContentsView 挂到**主窗口**上，位置由侧栏里的渲染层上报（与 Office 编辑器同一套做法：
 // 渲染层给 getBoundingClientRect 的 CSS px，主进程按该窗口的 zoomFactor 换算成 DIP）。
-ipcMain.handle('browser-agent:attach-dock', async (event) => {
+ipcMain.handle('browser-agent:attach-dock', async (event, payload: { owner?: string } = {}) => {
   try {
     const host = BrowserWindow.fromWebContents(event.sender)
     if (!host) return { ok: false, error: '宿主窗口不可用' }
-    const res = browserAgentService.attachDock(host)
+    const res = browserAgentService.attachDock(host, payload?.owner)
     return res.ok ? { ok: true, data: browserAgentService.stateSnapshot } : res
   } catch (err: any) {
     return { ok: false, error: String(err?.message || err) }
   }
 })
-ipcMain.handle('browser-agent:set-dock-rect', async (event, payload: { rect?: any } = {}) => {
+ipcMain.handle('browser-agent:set-dock-rect', async (event, payload: { rect?: any; owner?: string } = {}) => {
   const r = payload?.rect
   const rect = r && ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(Number(r[k])))
     ? { x: Number(r.x), y: Number(r.y), width: Number(r.width), height: Number(r.height) }
     : null
   // 渲染层给的是 CSS px，必须按窗口缩放换算（缩放≠100% 时否则会错位）
   const zoom = typeof event.sender.getZoomFactor === 'function' ? event.sender.getZoomFactor() : 1
-  browserAgentService.setDockRect(rect, zoom)
+  browserAgentService.setDockRect(rect, zoom, payload?.owner)
   return { ok: true }
 })
-ipcMain.handle('browser-agent:set-dock-visible', async (_e, payload: { visible?: boolean } = {}) => {
-  browserAgentService.setDockVisible(!!payload?.visible)
+ipcMain.handle('browser-agent:set-dock-visible', async (_e, payload: { visible?: boolean; owner?: string } = {}) => {
+  browserAgentService.setDockVisible(!!payload?.visible, payload?.owner)
   return { ok: true }
 })
-ipcMain.handle('browser-agent:detach-dock', async () => {
-  browserAgentService.detachDock()
+ipcMain.handle('browser-agent:detach-dock', async (_e, payload: { owner?: string } = {}) => {
+  browserAgentService.detachDock(payload?.owner)
   return { ok: true }
+})
+ipcMain.handle('browser-agent:set-overlay', async (_e, payload: { visible?: boolean } = {}) => {
+  browserAgentService.setOverlay(!!payload?.visible)
+  return { ok: true }
+})
+ipcMain.handle('browser-agent:set-config', async (_e, payload: any = {}) => {
+  return { ok: true, data: browserAgentService.setConfig(payload) }
+})
+ipcMain.handle('browser-agent:get-config', async () => {
+  return { ok: true, data: browserAgentService.getConfig() }
+})
+ipcMain.handle('browser-agent:site-data-info', async () => {
+  return { ok: true, data: await browserAgentService.siteDataInfo() }
+})
+ipcMain.handle('browser-agent:clear-site-data', async () => {
+  return { ok: true, data: await browserAgentService.clearSiteData() }
+})
+ipcMain.handle('browser-agent:learnings-list', async () => {
+  return { ok: true, data: browserAgentService.listLearnings() }
+})
+ipcMain.handle('browser-agent:learnings-delete', async (_e, payload: { host?: string } = {}) => {
+  return { ok: true, data: browserAgentService.removeLearning(String(payload?.host || '')) }
+})
+ipcMain.handle('browser-agent:playbooks-list', async (_e, payload: { host?: string } = {}) => {
+  return { ok: true, data: browserAgentService.listPlaybooks(payload?.host ? String(payload.host) : undefined) }
+})
+ipcMain.handle('browser-agent:playbooks-get', async (_e, payload: { host?: string; name?: string } = {}) => {
+  return { ok: true, data: browserAgentService.getPlaybook(String(payload?.host || ''), String(payload?.name || '')) }
+})
+ipcMain.handle('browser-agent:playbooks-approve', async (_e, payload: { host?: string; name?: string; approved?: boolean } = {}) => {
+  return { ok: true, data: browserAgentService.approvePlaybook(String(payload?.host || ''), String(payload?.name || ''), !!payload?.approved) }
+})
+ipcMain.handle('browser-agent:playbooks-delete', async (_e, payload: { host?: string; name?: string } = {}) => {
+  return { ok: true, data: browserAgentService.deletePlaybook(String(payload?.host || ''), String(payload?.name || '')) }
+})
+ipcMain.handle('browser-agent:pick-download-dir', async () => {
+  const res = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+  return { ok: !res.canceled, path: res.canceled ? '' : (res.filePaths[0] || '') }
+})
+ipcMain.handle('browser-agent:import-logins', async (_e, payload: { browser?: string } = {}) => {
+  const kind = payload?.browser === 'edge' ? 'edge' : 'chrome'
+  return { ok: true, data: await importChromiumLogins(kind) }
 })
 ipcMain.handle('browser-agent:is-docked', async () => {
   return { ok: true, data: { docked: browserAgentService.isDocked() } }
@@ -1314,6 +1379,30 @@ ipcMain.handle('browser-agent:bookmark-rename-folder', async (_e, payload: { roo
 ipcMain.handle('browser-agent:clear-bookmarks', async (_e, payload: { root?: string } = {}) => {
   return browserAgentService.clearBookmarks(String(payload?.root || ''))
 })
+
+// ===== 接管 / 暂停（P1）：用户暂停后该 Agent 会话的浏览器工具调用会被拒绝 =====
+ipcMain.handle('browser-agent:pause-agent', async (_e, payload: { owner?: string } = {}) =>
+  browserAgentService.pauseAgent(payload?.owner))
+ipcMain.handle('browser-agent:resume-agent', async (_e, payload: { owner?: string } = {}) =>
+  browserAgentService.resumeAgent(payload?.owner))
+ipcMain.handle('browser-agent:handoff-agent', async (_e, payload: { owner?: string } = {}) =>
+  browserAgentService.handOffAgent(payload?.owner))
+// ===== 下载（P1）：列表 / 打开 / 在文件夹中显示 / 清空 =====
+ipcMain.handle('browser-agent:downloads-list', async () => browserAgentService.listDownloads())
+ipcMain.handle('browser-agent:download-open', async (_e, payload: { id?: string } = {}) =>
+  browserAgentService.openDownload(String(payload?.id || '')))
+ipcMain.handle('browser-agent:download-reveal', async (_e, payload: { id?: string } = {}) =>
+  browserAgentService.showDownloadInFolder(String(payload?.id || '')))
+ipcMain.handle('browser-agent:downloads-clear', async () => browserAgentService.clearDownloads())
+// ===== 浏览历史 / 最近关闭（P1） =====
+ipcMain.handle('browser-agent:history-list', async (_e, payload: { query?: string; limit?: number } = {}) =>
+  browserAgentService.listHistory(String(payload?.query || ''), Number(payload?.limit) || 200))
+ipcMain.handle('browser-agent:history-clear', async () => browserAgentService.clearHistory())
+ipcMain.handle('browser-agent:history-remove', async (_e, payload: { id?: string } = {}) =>
+  browserAgentService.removeHistory(String(payload?.id || '')))
+ipcMain.handle('browser-agent:recently-closed', async () => browserAgentService.recentlyClosed())
+ipcMain.handle('browser-agent:restore-closed', async (_e, payload: { id?: string } = {}) =>
+  browserAgentService.restoreClosed(String(payload?.id || '')))
 
 // ==================== 清理 userData 缓存/临时文件（设置-系统-常用操作） ====================
 // 只删除 Chromium/Electron 可自动再生成的缓存目录，绝不触碰软件数据：
@@ -2340,7 +2429,8 @@ ipcMain.handle('saveTaskFileAuto', async (event, referencePath: string, content:
 
 // 导出 PDF：隐藏窗口渲染 HTML → printToPDF → 保存
 // landscape：幻灯片导出要横向纸张；不传 = 保持原来的竖版（md_read 等调用方不受影响）
-ipcMain.handle('exportPdf', async (event, { html, title, landscape }: { html: string; title: string; landscape?: boolean }) => {
+// outline：Markdown 标题列表；传入时给 PDF 补书签（目录），让 PDF 阅读器（含本软件的 PdfViewer）能显示目录
+ipcMain.handle('exportPdf', async (event, { html, title, landscape, outline }: { html: string; title: string; landscape?: boolean; outline?: { title: string; level: number }[] }) => {
   const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
     title: '导出 PDF',
     defaultPath: `${title || '文档'}.pdf`,
@@ -2373,8 +2463,20 @@ ipcMain.handle('exportPdf', async (event, { html, title, landscape }: { html: st
     pdfWin.destroy()
     pdfWin = null
     try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
-    fs.writeFileSync(result.filePath, asUint8(pdfData))
-    return { success: true, path: result.filePath }
+    // Markdown 导出带标题时补 PDF 书签（目录）；目录失败不影响导出结果，照常写原始 PDF
+    let outBytes = asUint8(pdfData)
+    let toc = false
+    if (Array.isArray(outline) && outline.length) {
+      try {
+        const { addPdfOutline } = await import('./pdf-outline')
+        const withToc = await addPdfOutline(new Uint8Array(pdfData), outline)
+        if (withToc) { outBytes = withToc; toc = true }
+      } catch (err) {
+        console.warn('[exportPdf] 目录生成失败（PDF 照常导出）:', err)
+      }
+    }
+    fs.writeFileSync(result.filePath, asNodeBytes(outBytes))
+    return { success: true, path: result.filePath, toc }
   } catch (error: any) {
     console.error('导出 PDF 失败:', error)
     if (pdfWin && !pdfWin.isDestroyed()) pdfWin.destroy()
@@ -3326,6 +3428,9 @@ ipcMain.handle('clipboard-write-image', async (_event, payload) => {
  */
 function setupDownloadFallback(): void {
   const onWillDownload = (_event: any, item: any, webContents: any) => {
+    // 浏览器 Agent 的标签由 browser-agent.ts 自己接管（保存到 userData/browser-downloads 并进下载列表），
+    // 这里必须让路，否则会把它的路径覆盖成 drawio 目录/系统下载目录。
+    if (webContents && !webContents.isDestroyed?.() && browserAgentService.ownsWebContents(webContents.id)) return
     const name = String(item.getFilename() || 'download')
     const dir = drawioExportDir && fs.existsSync(drawioExportDir) ? drawioExportDir : app.getPath('downloads')
     const target = uniqueFilePath(path.join(dir, name))

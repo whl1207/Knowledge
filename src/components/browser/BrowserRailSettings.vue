@@ -13,6 +13,18 @@
       <span>{{ chip.text }}</span>
     </div>
 
+    <!-- AI 控制（仅在最近有 AI 操作时显示）：暂停/继续 + 接管 -->
+    <div v-if="agentOwner" class="ba-rail-ai-ctrl">
+      <button class="ba-rail-row" :title="agentPaused ? '继续该 AI 会话的浏览器操作' : '暂停 AI 操作（不再动当前页面）'" @click="onPauseAgent?.()">
+        <i class="fa" :class="agentPaused ? 'fa-play' : 'fa-pause'"></i>
+        <span>{{ agentPaused ? (zh ? '继续 AI 操作' : 'Resume AI') : (zh ? '暂停 AI 操作' : 'Pause AI') }}</span>
+      </button>
+      <button v-if="!agentPaused" class="ba-rail-row" title="把 AI 标签转为普通标签，并暂停该会话（之后可继续）" @click="onHandoffAgent?.()">
+        <i class="fa fa-unlock"></i>
+        <span>{{ zh ? '接管当前 AI 标签' : 'Take over AI tabs' }}</span>
+      </button>
+    </div>
+
     <!-- 页面操作 -->
     <div class="ba-rail-sec">{{ zh ? '页面操作' : 'Page actions' }}</div>
     <button class="ba-rail-row" :disabled="!url" :title="zh ? '用系统默认浏览器打开当前页' : 'Open current page in the system browser'" @click="onOpenExternal?.()">
@@ -83,10 +95,17 @@ const props = withDefaults(defineProps<{
   onSaveMarkdown?: () => void
   onRecycle?: () => void
   onDevtools?: () => void
+  /** 最近一次 AI 操作所属会话（有值才显示暂停/接管） */
+  agentOwner?: string | null
+  agentPaused?: boolean
+  onPauseAgent?: () => void
+  onHandoffAgent?: () => void
 }>(), {
   chip: () => ({ cls: 'plain', icon: 'fa-globe', text: '', title: '' }),
   url: '',
   active: false,
+  agentOwner: null,
+  agentPaused: false,
 })
 
 /** Markdown 剪藏落点子目录（提示文案用；实际落点由 BrowserAgentShell 传给主进程） */

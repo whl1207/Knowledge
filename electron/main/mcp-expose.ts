@@ -112,6 +112,15 @@ class McpExposeService {
   private port = MCP_EXPOSE_PORT
   /** 按端点 id 记录「已关闭」状态（默认全部开启，可经 setEnabled 单独开关） */
   private disabledEndpoints = new Map<string, boolean>()
+  /**
+   * 可选访问令牌（环境变量 AIKM_MCP_TOKEN）。
+   *
+   * 本服务监听 127.0.0.1 且默认开启，浏览器里的任意网页都能对 localhost 发请求；
+   * 有 Origin 的跨源请求一律拒绝（见 handleRequest），令牌则用于挡住本机其它进程的
+   * 未授权调用。不设令牌时保持旧行为（本地 MCP 客户端零配置可连），但本机进程仍可调用 ——
+   * 需要强隔离时请设置 AIKM_MCP_TOKEN，并让客户端带 `Authorization: Bearer <token>`。
+   */
+  private readonly token = String(process.env.AIKM_MCP_TOKEN || '').trim()
 
   /** 启动 HTTP MCP 服务（默认 127.0.0.1:43112，可用环境变量 MCP_EXPOSE_PORT 覆盖） */
   async start(port: number = MCP_EXPOSE_PORT): Promise<void> {
@@ -124,6 +133,16 @@ class McpExposeService {
     })
     this.started = true
     logInfo('mcp-expose', `MCP listening on http://127.0.0.1:${port}${MCP_EXPOSE_ENDPOINTS.map(e => e.path).join(' ')}`)
+  }
+
+  /** 只允许本机页面的跨源请求（127.0.0.1 / localhost / ::1），其余 Origin 一律拒绝 */
+  private isAllowedOrigin(origin: string): boolean {
+    try {
+      const u = new URL(origin)
+      return u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '::1' || u.hostname === '[::1]'
+    } catch {
+      return false
+    }
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -144,14 +163,36 @@ class McpExposeService {
       return
     }
 
-    // CORS（供基于浏览器的客户端 / 其他 Electron 渲染进程连接）
-    res.setHeader('Access-Control-Allow-Origin', '*')
+    // 安全边界（P0）：
+    // 1) 带 Origin 的请求只允许本机页面（http://127.0.0.1 / http://localhost）。浏览器里
+    //    任意网页对 localhost 的 fetch 都带自己的 Origin，这里直接 403，堵住"网页驱动用户
+    //    登录态浏览器"的路径；非浏览器 MCP 客户端不发 Origin，不受影响。
+    const origin = String(req.headers.origin || '').trim()
+    if (origin && !this.isAllowedOrigin(origin)) {
+      jsonOut(res, 403, { jsonrpc: '2.0', error: { code: -32001, message: 'Forbidden origin' }, id: null })
+      return
+    }
+    // CORS：只回显被允许的本机 Origin，不再使用 `*`
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin)
+      res.setHeader('Vary', 'Origin')
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, MCP-Protocol-Version, Mcp-Session-Id')
+    // 预检请求不带 Authorization，必须在令牌校验之前放行（否则浏览器客户端永远连不上）
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
       res.end()
       return
+    }
+
+    // 2) 配置了 AIKM_MCP_TOKEN 时，所有实际请求都必须带 `Authorization: Bearer <token>`。
+    if (this.token) {
+      const auth = String(req.headers.authorization || '').trim()
+      if (auth !== `Bearer ${this.token}`) {
+        jsonOut(res, 401, { jsonrpc: '2.0', error: { code: -32002, message: 'Unauthorized: missing or invalid bearer token' }, id: null })
+        return
+      }
     }
 
     // 非 MCP 客户端（如普通浏览器直接访问端点）：返回友好提示而非协议错误
@@ -215,6 +256,8 @@ class McpExposeService {
       service: 'AI-KM builtin MCP expose',
       status: this.started ? 'running' : 'stopped',
       base: `http://127.0.0.1:${this.port}`,
+      authRequired: !!this.token,
+      cors: '仅允许本机 Origin（127.0.0.1 / localhost）；带其它 Origin 的请求返回 403',
       endpoints: MCP_EXPOSE_ENDPOINTS.map(e => ({
         id: e.id,
         name: e.name,

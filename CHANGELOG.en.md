@@ -7,6 +7,79 @@
 
 ---
 
+## 2026-10-21
+
+### Added
+
+- **Browser Agent now works from page snapshots and element refs**: read the interactive snapshot with `ref`s, then click/fill using real mouse and keyboard input (keys, hover, select), with explicit reasons when an element is hidden, occluded or disabled.
+- **New browser wait conditions**: wait for an element to appear/be visible, text to contain, URL to match, load to finish or the network to go idle instead of sleeping blindly.
+- **Pause and take over AI browsing**: pause, resume or take over AI tabs from the toolbar; taking over turns AI tabs into normal tabs and rejects that session's browser tools.
+- **Download list and browsing history**: open, reveal or clear downloads in the browser shell, and browse/reopen history plus recently closed tabs from the side panel.
+- **Downloads and history moved to the top toolbar**: the bookmarks / downloads / history icons can be shown or hidden under “Browser settings → Icons”; the side panel no longer duplicates them.
+- **Scripted multi-step browsing (`browser_run`)**: one script can navigate, snapshot, click, fill, wait and extract in a single round, cutting model round-trips.
+- **Single-window mode embeds the browser in the main window**: the globe icon (now after the four built-in modules and before plugins, in left/bottom/top nav) opens the browser in the main content area; multi-window mode still opens a separate window.
+- **History search now matches the bookmarks search**: same rounded box, search icon and one-click clear.
+- **The browser nav icon shows an active state**: highlighted like other modules when the embedded browser is open (single-window) or the standalone browser window is open (multi-window).
+- **Browser settings page redesigned**: left section nav (General / Behavior / Learnings / Privacy / Cache / About) plus content cards in a settings tab; changes apply instantly and it no longer lives in the narrow side panel.
+- **Help → Design references now includes ego-lite**: observation/action/session semantics, code rounds and the settings-tab pattern.
+- **Settings now covers behavior, privacy and logins**: page budget, interactive-only snapshot default and download folder; cookie/site-data overview and clearing; import logins from local Chrome / Edge (Windows, v10/v11; new App-Bound v20 cookies are skipped with a note).
+- **Site learnings**: `browser_learning_save/list/get/delete` store reusable per-site notes as Markdown (no passwords/cookies), viewable/removable in settings; read them before a repeat site task.
+- **Browser scripts inside PTC**: `run_code` programs get a `browser.*` helper API (goto/snapshot/click/fill/press/waitFor/extract/tabs/finish…), sharing the same tools as `browser_run`.
+- **Cross-origin iframe (OOPIF) support**: snapshots scan interactive nodes inside cross-origin frames and assign refs; click/fill/press/hover/select run via frame DOM + coordinate offsets (upload not supported yet).
+- **Viewport-accurate snapshots**: `browser_snapshot scope="viewport"` filters out off-screen nodes using DOMSnapshot layout bounds; `subtree` targets one ref's subtree.
+- **External MCP gets its own browser partition**: `external:*` owners use `persist:browser-agent-external`, isolated from the in-app login state; download and site-data clearing cover both partitions.
+- **Settings tab stays open when switching tabs**: switching to a page tab only deactivates it; the settings tab stays in the strip, clicking it or ⚙ brings it back, and only its × closes it.
+- **Settings fill wide screens**: the 820px content cap was removed, so cards fill the content pane instead of leaving a large blank area on the right.
+- **Executable site playbooks**: `browser_playbook_save/list/get/run` store repeatable site flows as scripts using the `browser.*` API. The agent can only save drafts, read, and run approved playbooks; Settings → Playbooks lets the user review code, approve/revoke/delete, and any code change requires re-approval.
+- **Download icon shows a live dot**: while downloads are progressing/paused, the toolbar download icon gets an amber pulsing dot and the tooltip shows the active count; it disappears when they finish or are cancelled.
+- **Toolbar icon order changed**: bookmarks (tag) → history → downloads → settings; history sits right after the tag icon and before downloads.
+- **New `browser_help` guide tool**: one concise, generic Web Agent workflow (quickstart by default; topics actions/waits/tabs/script/files/learnings) for external MCP clients to read before a task; it does not open a browser window.
+- **New `browser_list_downloads`**: MCP/agents can inspect download records (name, state, progress, path) without the UI.
+- **Settings header removed**: the settings tab no longer shows the redundant “Browser settings / Changes apply instantly” header; it goes straight to the left sections and content.
+- **Fixed downloads not recorded in the embedded browser**: the docked browser path skipped attaching the `will-download` listener, so files downloaded while the panel stayed empty; the listener is now attached when the embedded browser opens, and progress/completion show up.
+- **Real Electron browser e2e**: `npm run test:browser-e2e` launches real Chromium with a temporary profile and drives a local fixture through navigate → snapshot → fill → click → wait → select → hover → extract → learnings → download → finish, writing JSON results.
+- **Stale refs recover automatically**: when a local DOM change invalidates a ref, the browser re-snapshots, matches the element by role+name and retries once.
+- **Browser settings now open as a tab**: the ⚙ button opens a “Settings” tab in the tab strip (settings + cache); the side panel only keeps bookmarks / downloads / history.
+- **Richer page context menu**: open in system browser, save page (offline HTML), save Markdown to the knowledge base, save as PDF, copy link/image address, open link/image in a new tab, inspect element, navigation and editing items.
+- **Empty-bookmarks hint replaced by a placeholder**: no more long guidance block; a single “No bookmarks” placeholder sits in the list/grid.
+- **Action receipts**: click/fill/key actions now report popups, dialogs, downloads and console errors triggered by the action.
+- **New upload / dialog / finish-space tools**: `browser_upload` picks local files, `browser_dialog` accepts/dismisses alert/confirm/prompt, and `browser_space_finish` closes this session's pages while keeping the ones handed back to the user.
+- **Stable p1/p2 page labels with an 8-page budget**: `browser_list_tabs` shows the label, and the oldest page is recycled beyond 8 per session.
+- **Browser operations from different sessions run in parallel**: operations within one space stay FIFO, while batches / multiple agents no longer queue behind each other.
+- **Snapshot locators are uniqueness-checked**: repeated role+name nodes no longer advertise `loc=`, avoiding wrong recovery later.
+
+### Fixed
+
+- **Browser screenshots are now actually visible to vision models**: the screenshot is delivered as an image instead of truncated base64 text (fewer tokens, and readable).
+- **Agents only operate their own browser tabs**: they no longer rewrite or close the tab you are using, and parallel agents no longer mix up each other's pages.
+- **Browser calls can time out and be stopped**: navigation gives up after 45 s and other operations after 30 s with a readable hint, and the Stop button aborts an in-flight browser call.
+- **Source editor supports Ctrl+V paste**: keyboard paste works again and matches the context menu (multiple cursors included).
+
+### Improved
+
+- **Page text is explicitly marked as untrusted data**: extracted content is wrapped in `untrusted_page_content` and the prompt tells the model to ignore instructions found on pages, reducing prompt-injection risk.
+- Browser text extraction supports `offset` continuation, `browser_wait` is usable again, and the external MCP endpoint now rejects requests from non-local origins.
+
+## 2026-10-20
+
+### Added
+
+- **The PDF context menu can rotate the whole document left or right**: view only — the file is untouched — with the same direction kept across page turns / scrolling and a one-click reset.
+- **PDFs exported from Markdown now carry a table of contents**: the heading hierarchy is written as PDF bookmarks, so this app and other readers show a jumpable outline.
+- **Page management can rotate the whole document**: the toolbar gains “All left” / “All right”, and the rotation is written into the PDF on save.
+
+### Changed
+
+- **The PDF context menu now uses submenus**: “Translation”, “Reading theme” and “Rotate view” live in second-level menus, with Manage pages pinned at the bottom.
+- **The PDF reading theme, translation and page-management entries moved from the status bar into the context menu**: translation now offers page-by-page (overlay as you read) and full-document modes; full translation never overlays the pages, shows progress in the status bar, and its completion hint there saves the result as a Markdown file.
+- **The view selector in the Knowledge Management toolbar moved to the far left**: it now has no border or background and matches the toolbar color, with the left-panel switch right after it.
+- **The leftmost “view” tab in the Knowledge Management tab bar now shows only its icon**: the view name moved to the hover tooltip, leaving horizontal room for file tabs.
+
+### Fixed
+
+- **Rotating a PDF in single-window mode no longer shifts the whole UI up by a dozen pixels**: continuous-reading page jumps no longer use `scrollIntoView` (which scrolled ancestor containers such as the tab bar and toolbar), and stray ancestor scroll is reset after a rotation.
+- **A PDF rotated to landscape was wider than the container even at 100%**: continuous reading now fits the page width in its current orientation, so rotation reflows to the container width and resets horizontal scroll.
+
 ## 2026-10-19
 
 ### Added

@@ -19,7 +19,7 @@ import BlockMd from '@/components/block_md.vue'
 import DocTocPanel from '@/components/knowFile/view/DocTocPanel.vue'
 import { extractMarkdownHeadings, flattenHeadingLevels, loadDocTocWidth, saveDocTocWidth, loadDocTocOpen, saveDocTocOpen, DOC_TOC_MIN_WIDTH, DOC_TOC_MAX_WIDTH } from '@/lib/markdown/toc'
 import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
-import { getPlatform, hasCapability } from '@/platform'
+import { getPlatform, getRuntimeKind, hasCapability } from '@/platform'
 import { droppedFilePath } from '@/platform/droppedFile'
 
 const store = usestore()
@@ -1320,6 +1320,8 @@ const initEditor = function () {
             editorContainer.addEventListener('drop', handleEditorDrop, true)
             editorContainer.addEventListener('dragover', handleEditorDragOver, true)
             editorContainer.addEventListener('contextmenu', showEditorContextMenu, true)
+            // Ctrl/Cmd+V：Monaco 在 Electron 里收不到原生 paste 事件，捕获阶段接管
+            editorContainer.addEventListener('keydown', handleEditorPasteShortcut, true)
         }
         
         editorInitialized.value = true
@@ -1781,6 +1783,7 @@ const destroyEditor = () => {
                 editorContainer.removeEventListener('drop', handleEditorDrop, true)
                 editorContainer.removeEventListener('dragover', handleEditorDragOver, true)
                 editorContainer.removeEventListener('contextmenu', showEditorContextMenu, true)
+                editorContainer.removeEventListener('keydown', handleEditorPasteShortcut, true)
             }
             
             // 移除添加的样式
@@ -1981,16 +1984,55 @@ const copySelectedText = () => {
     }
 }
 
-// 粘贴
-const pasteText = async () => {
-    if (!editor) return
+/**
+ * 读取剪贴板并粘贴到当前选区（支持多光标）。
+ *
+ * 用 Monaco 自带的 `paste` 触发通道（而不是直接 executeEdits），
+ * 这样多光标、粘贴后换行、撤销分组等行为与编辑器原生粘贴保持一致。
+ */
+async function pasteFromClipboard(): Promise<boolean> {
+    if (!editor) return false
+    let text = ''
     try {
-        const text = await navigator.clipboard.readText()
-        editor.executeEdits('paste', [{ range: editor.getSelection()!, text, forceMoveMarkers: true }])
-        editor.focus()
+        text = await navigator.clipboard.readText()
     } catch (e) {
-        // 粘贴失败（权限不足等）
+        // 读剪贴板失败（权限不足 / 非安全上下文等）：保持无操作，不打断编辑器
+        console.warn('读取剪贴板失败:', e)
+        return false
     }
+    if (!text) return true
+    // await 期间编辑器可能已被销毁 / 切文件
+    if (!editor) return false
+    editor.trigger('keyboard', 'paste', { text })
+    editor.focus()
+    return true
+}
+
+/**
+ * Ctrl/Cmd+V 粘贴快捷键（捕获阶段挂在编辑器容器上）。
+ *
+ * Monaco 在浏览器环境里**不绑定** Ctrl+V——它依赖浏览器把按键转成 textarea 的 paste 事件；
+ * 而 Electron 打包后这里收不到该事件，于是「Ctrl+V 没反应、右键菜单粘贴却正常」
+ * （右键走的是 navigator.clipboard）。这里直接接管按键，用同一个剪贴板 API 完成粘贴。
+ *
+ * 只在编辑器文本区拥有焦点时拦截：查找框、建议列表等普通输入框仍走原生粘贴。
+ */
+function handleEditorPasteShortcut(e: KeyboardEvent): void {
+    // 只在桌面壳里接管：浏览器 / 安卓的 Ctrl+V 走原生粘贴，无需也不能替它处理
+    if (getRuntimeKind() !== 'electron') return
+    if (!editor || !editor.hasTextFocus()) return
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+    if (e.key !== 'v' && e.key !== 'V') return
+    // 没有剪贴板 API 时不拦截，交回浏览器原生处理
+    if (!navigator.clipboard?.readText) return
+    e.preventDefault()
+    e.stopPropagation()
+    void pasteFromClipboard()
+}
+
+// 右键菜单「粘贴」：与 Ctrl+V 共用同一条实现
+const pasteText = async () => {
+    await pasteFromClipboard()
 }
 
 // 当前字体大小

@@ -2450,7 +2450,7 @@ async function mcpCall(input: any, ctx: ToolExecutionContext): Promise<ToolResul
   }
 
   try {
-    const res = await mcpService.callTool(serverId, config, toolName, args)
+    const res = await mcpService.callTool(serverId, config, toolName, args, String(ctx?.sessionId || ctx?.agentId || '') || undefined)
     if (res.success) {
       let data: any = res.data
       if (typeof data === 'string') {
@@ -2794,16 +2794,51 @@ async function exportWord(input: any, ctx: ToolExecutionContext): Promise<ToolRe
 
 /** 注册全部核心工具（应用启动时调用一次；幂等） */
 // ============ 浏览器 Agent 工具（M0/M1：进程内 MCP server 同名内核工具，通用智能体可直接调用） ============
+/** 浏览器工具默认超时（导航单独放宽）：页面挂起/弹窗阻塞时给模型可读的失败，而不是永久卡住 step */
+const BROWSER_TOOL_TIMEOUT_MS = 30_000
+const BROWSER_NAV_TIMEOUT_MS = 45_000
+
 const runBrowserAgentTool = (tool: string) => async (args: any, ctx: ToolExecutionContext): Promise<ToolResult> => {
+  const input = (args && typeof args === 'object' && !Array.isArray(args)) ? args : {}
+  // 把调用方 agent 会话 id（agentId/sessionId）传给浏览器服务 → 工具只作用于该会话自己的标签，
+  // 新建的 AI 标签带属主，会话 idle/dispose 时主进程可精确回收。
+  const owner = (ctx?.sessionId || ctx?.agentId) ? String(ctx?.sessionId || ctx?.agentId) : undefined
+  const timeoutMs = tool === 'browser_navigate'
+    ? BROWSER_NAV_TIMEOUT_MS
+    : tool === 'browser_run'
+      ? 90_000
+      : BROWSER_TOOL_TIMEOUT_MS
+  // 超时/用户停止都汇总成一个 AbortController：让浏览器服务停掉加载，且排队中的调用一开始就失败。
+  const ctrl = new AbortController()
+  let abortedBy: 'timeout' | 'user' | null = null
+  const abort = (by: 'timeout' | 'user') => {
+    if (ctrl.signal.aborted) return
+    abortedBy = by
+    ctrl.abort()
+    try { browserAgentService.stopOwner(owner) } catch { /* 忽略 */ }
+  }
+  const onUserAbort = () => abort('user')
+  if (ctx?.signal) {
+    if (ctx.signal.aborted) onUserAbort()
+    else ctx.signal.addEventListener('abort', onUserAbort, { once: true })
+  }
+  const timer = setTimeout(() => abort('timeout'), timeoutMs)
   try {
-    const input = (args && typeof args === 'object' && !Array.isArray(args)) ? args : {}
-    // 把调用方 agent 会话 id（agentId/sessionId）传给浏览器服务 → 新建的 AI 标签带上属主，
-    // 该会话 idle/dispose 时主进程可精确回收它自己的标签（谁结束收谁的，不依赖全局 90s 静默/cap）
-    const owner = (ctx?.sessionId || ctx?.agentId) ? String(ctx?.sessionId || ctx?.agentId) : undefined
-    const text = await browserAgentService.executeTool(tool, input, owner ? { owner } : undefined)
-    return { ok: true, value: text }
+    const result = await browserAgentService.executeTool(tool, input, { owner, signal: ctrl.signal })
+    return { ok: true, value: result.text, images: result.images }
   } catch (err: any) {
-    return { ok: false, error: err?.message || String(err) }
+    const raw = err?.message || String(err)
+    if (abortedBy === 'timeout') {
+      return {
+        ok: false,
+        error: `浏览器工具 ${tool} 超过 ${Math.round(timeoutMs / 1000)} 秒未完成，已中止（页面可能加载挂起、弹出了 alert/confirm，或目标元素一直不出现）。可稍后重试、换用 browser_extract_text 检查页面状态，或让用户先处理页面弹窗。`,
+      }
+    }
+    if (abortedBy === 'user') return { ok: false, error: '浏览器操作已被用户停止' }
+    return { ok: false, error: raw }
+  } finally {
+    clearTimeout(timer)
+    try { ctx?.signal?.removeEventListener('abort', onUserAbort) } catch { /* 忽略 */ }
   }
 }
 

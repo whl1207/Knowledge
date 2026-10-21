@@ -75,6 +75,13 @@ Quiet by default, so a normal run/build only shows what is actionable:
 | `vite build` output | rolls up the file-size table (hundreds of asset lines) plus any warning | `npx vite build --logLevel warn` for warnings/errors only |
 | Chromium / Rollup warnings known to be unfixable here (dynamic-import notices, vite-plugin-electron's rolldown-era `platform` / `codeSplitting` keys) | filtered in `vite.config.ts` (`onRollupWarn`, key-by-key) | edit `IGNORED_ROLLUP_WARNINGS` |
 
+### Test
+
+| Command | What it does |
+|:---|:---|
+| `npm run test:selftest` | Pure-logic suites (no Electron/Chromium), including browser snapshot/actions/events/space queue |
+| `npm run test:browser-e2e` | Real Electron browser e2e: launches the built app with a temporary profile, drives a local fixture through snapshot → click/fill/select/hover/wait → extract, writes JSON results (needs a graphical session) |
+
 ### Build
 
 | Command | Output |

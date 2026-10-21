@@ -3,7 +3,7 @@ import { aikmIpcOrNull } from '@/lib/aikmIpc'
 /**
  * PdfPageEditor.vue — PDF「页面管理」对话框（合并 / 删除 / 调整顺序 / 旋转）。
  *
- * 由 PdfViewer 状态栏的「页面管理」按钮打开：把整份 PDF 拆成一页一张的缩略图卡片，
+ * 由 PdfViewer 右键菜单的「页面管理…」打开：把整份 PDF 拆成一页一张的缩略图卡片，
  * 勾选后可批量删除，拖拽或 ‹ › 按钮调整顺序，↺ ↻ 旋转单页，也可把别的 PDF 合并进来
  * （有勾选时插在最后一页勾选之后，否则追加到末尾）。确认后由 pdf-lib 重新组页，
  * 覆盖原文件或另存为新文件。
@@ -352,6 +352,12 @@ function rotateAt(index: number, delta: number) {
   for (const p of group) p.rotation = normalizeAngle(p.rotation + delta)
 }
 
+/** 整份文档一起旋转（不依赖勾选；用于「全部左转 / 全部右转」） */
+function rotateAll(delta: number) {
+  if (busy.value || !pages.value.length) return
+  for (const p of pages.value) p.rotation = normalizeAngle(p.rotation + delta)
+}
+
 // Chromium 下必须 setData，否则拖拽不会真正开始（拿到的幽灵图也会是空白）
 function onDragStart(index: number, e: DragEvent) {
   dragFrom.value = index
@@ -489,6 +495,16 @@ const cardTitle = (p: PpePage) => zh.value
         </button>
         <button class="ppe-btn" :disabled="busy || loading" @click="resetAll" :title="zh ? '丢弃全部调整，回到原始页序' : 'Discard all changes'">
           <i class="fa fa-undo"></i> {{ zh ? '重置' : 'Reset' }}
+        </button>
+        <span class="ppe-sep"></span>
+        <!-- 整份文档一起旋转（不依赖勾选；保存后把方向写进 PDF） -->
+        <button class="ppe-btn" :disabled="busy || loading || !total" @click="rotateAll(-90)"
+          :title="zh ? '整份文档向左旋转 90°（保存后写入 PDF）' : 'Rotate all pages left 90° (written on save)'">
+          <i class="fa fa-rotate-left"></i> {{ zh ? '全部左转' : 'All left' }}
+        </button>
+        <button class="ppe-btn" :disabled="busy || loading || !total" @click="rotateAll(90)"
+          :title="zh ? '整份文档向右旋转 90°（保存后写入 PDF）' : 'Rotate all pages right 90° (written on save)'">
+          <i class="fa fa-rotate-right"></i> {{ zh ? '全部右转' : 'All right' }}
         </button>
         <span class="ppe-hint">{{ zh ? '拖拽缩略图可调整顺序' : 'Drag a thumbnail to reorder' }}</span>
       </div>

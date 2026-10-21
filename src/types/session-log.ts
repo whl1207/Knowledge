@@ -107,6 +107,14 @@ export interface SessionEventMap {
      * 也为重放/幂等留出空间。旧日志没有这个字段，`deriveEntries` 会退回落到 callId 关联。
      */
     sourceEventSeqs?: number[]
+    /**
+     * 工具返回的图片附件（模型可见）。
+     *
+     * 只落盘路径与尺寸，不落 base64（JSONL 会被截图撑爆）；`deriveEntries` 读取时
+     * 从文件还原成 data URL，并合成一条紧随工具结果之后的图片 user 消息。
+     * 文件可能被系统清理：读不到时该图片静默跳过，不影响会话重建。
+     */
+    images?: Array<{ mime: string; path: string; width?: number; height?: number }>
   }
   'assistant/search-status': {
     status: string
@@ -188,6 +196,13 @@ export interface DerivedMessage {
   name?: string
   /** 该消息由上下文压缩摘要合成（不是真实用户输入：不计入轮次/附图序号） */
   compacted?: boolean
+  /**
+   * 由工具结果合成的图片消息（role='user'，synthetic=true）：
+   * 不是真实用户输入，不计入轮次/附图序号，但图片本身参与模型上下文与预算。
+   */
+  synthetic?: boolean
+  /** 图片附件（data URL 数组；仅 user 消息使用，ai-core 会转成各 provider 的图片块） */
+  images?: string[]
 }
 
 /** 派生消息 + 它来源于哪条事件（供上下文压缩确定事件区间） */

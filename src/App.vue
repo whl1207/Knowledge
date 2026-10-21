@@ -124,8 +124,12 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (store.customTitle && store.customTitle.trim()) {
       return store.customTitle
     }
+    if (store.browserPanelOpen) return store.locales === 'en' ? 'Browser' : '浏览器'
     return panelHeaderText(store.mainPanel, store.locales !== 'en')
   })
+
+  // 导航栏「浏览器」激活态：单窗口=内嵌面板打开；多窗口=独立浏览器窗口开着
+  const browserNavActive = computed(() => store.singleWindowMode ? store.browserPanelOpen : store.browserActive)
 
   // 导航栏布局：left=左侧导航 / bottom=下方导航（默认 top=顶部导航）
   const isLeftNav = computed(() => store.UI.navLayout === 'left')
@@ -367,6 +371,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (store.mainPanel !== key && !(await store.runLeaveGuards())) return
     // 先收网格再切面板：两处都在同一个 tick 内完成，不会先渲染网格再切走
     if (store.pluginLauncherOpen) store.pluginLauncherOpen = false
+    if (store.browserPanelOpen) store.browserPanelOpen = false
     store.mainPanel = key
   }
 
@@ -438,6 +443,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     void syncLanGuestPolicyAtStartup()
     // 主进程主动来拉（它每次重启都回到默认策略，而本窗口不会再挂载一次）→ 收到就重新下发
     getPlatform().events.on('lan:request-guest-policy', () => { void syncLanGuestPolicyAtStartup() })
+    // 独立浏览器窗口开关：主窗口导航图标显示激活态（单窗口模式由 browserPanelOpen 决定）
+    getPlatform().events.on('browser-agent:window-state', (p: any) => { store.browserActive = !!p?.open })
     // 网页端（局域网访客）：向主机对齐模型来源（来源开关 / 地址 / 模型）——
     // 否则网页端用自己那份默认配置，会出现「主机能刷出的模型网页端刷不出来」「关掉的来源还在」
     if (!aikmIpcAvailable()) {
@@ -818,10 +825,23 @@ import { useTallLayout } from '@/composables/useTallLayout'
     return p ? `${p.path}|${p.view || ''}` : 'none'
   })
 
-  // 打开「浏览器 Agent」独立窗口（多标签 + AI 可控制）；携带「浏览器默认页面」作为首个标签（仅手动打开生效）
-  function openBrowserAgent() {
+  // 打开「浏览器 Agent」：单窗口模式内嵌到主内容区（与左侧导航图标一致），多窗口模式打开独立窗口
+  async function openBrowserAgent() {
+    if (!hasCapability('browserAgent')) return
+    if (store.singleWindowMode) {
+      // 与切主面板同一条离开守卫（主页右侧栏 / 知识管理可能还有未保存内容）
+      if (!store.browserPanelOpen && !(await store.runLeaveGuards())) return
+      store.browserPanelOpen = !store.browserPanelOpen
+      if (store.browserPanelOpen) {
+        store.pluginLauncherOpen = false
+        // 浏览器面板与当前主面板互斥：记住 mainPanel 即可，关闭后自然回到原面板
+      }
+      return
+    }
     const home = (store.UI?.browserHomeUrl || '').trim()
-    getPlatform().browserAgent.call('open', { url: home }).catch(() => {})
+    // 独立窗口打开期间导航图标保持激活；窗口关闭时主进程会广播 window-state=false
+    store.browserActive = true
+    getPlatform().browserAgent.call('open', { url: home }).catch(() => { store.browserActive = false })
   }
 </script>
 
@@ -851,7 +871,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
         v-for="btn in coreNavButtons"
         :key="btn.key"
         class="side-nav-item"
-        :class="{ active: store.mainPanel == btn.key }"
+        :class="{ active: store.mainPanel == btn.key && !store.browserPanelOpen }"
         :data-core-key="btn.key"
         @click="selectPanel(btn.key)"
         :title="btn.title"
@@ -859,12 +879,17 @@ import { useTallLayout } from '@/composables/useTallLayout'
         <i :class="btn.icon"></i>
       </div>
 
+      <!-- 浏览器（单窗口=主内容区内嵌；多窗口=独立窗口）：位于四个内置模块之后、插件之前 -->
+      <div v-if="store.isExtraVisible('agent') && hasCapability('browserAgent')" class="side-nav-item" :class="{ active: browserNavActive }" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser' : '浏览器'">
+        <i class="fa fa-globe"></i>
+      </div>
+
       <!-- 插件面板：放不下时**整体**收纳成下面的启动器（判定见 syncNavOverflow） -->
       <div
         v-for="btn in visiblePluginNavButtons"
         :key="btn.key"
         class="side-nav-item"
-        :class="{ active: store.mainPanel == btn.key }"
+        :class="{ active: store.mainPanel == btn.key && !store.browserPanelOpen }"
         :data-plugin-key="btn.key"
         @click="selectPanel(btn.key)"
         :title="btn.title"
@@ -883,10 +908,6 @@ import { useTallLayout } from '@/composables/useTallLayout'
         <i class="fa fa-th-large"></i>
       </div>
 
-      <!-- 浏览器 Agent 独立窗口入口（非主面板，不切换 mainPanel；置于设置按钮左侧；可在「功能 → 导航与模块」里关掉） -->
-      <div v-if="store.isExtraVisible('agent')" class="side-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
-        <i class="fa fa-globe"></i>
-      </div>
       <div
         class="side-nav-item"
         :class="{ active: store.settingsOpen || settingsWindowOpen }"
@@ -912,11 +933,15 @@ import { useTallLayout } from '@/composables/useTallLayout'
               <div
                 v-for="btn in coreNavButtons"
                 :key="btn.key"
-                :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen }"
+                :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen && !store.browserPanelOpen }"
                 :data-core-key="btn.key"
                 @click="selectPanel(btn.key)"
                 :title="btn.title"
               ><i :class="btn.icon"></i></div>
+
+              <!-- 浏览器入口：四个内置模块之后、插件之前（单窗口内嵌 / 多窗口独立窗口） -->
+              <div v-if="store.isExtraVisible('agent') && hasCapability('browserAgent')" class="nav-narrow-hide" :class="{ active: browserNavActive }"
+                @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser' : '浏览器'"><i class="fa fa-globe"></i></div>
 
               <!-- 插件面板：插件少时平铺在这里；放不下时整行隐藏，只留下面的聚合图标。
                    ⚠️ 用 v-show（不是 v-if）：聚合时这一行只是 display:none，行容器与判定用的
@@ -926,7 +951,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
                 <div
                   v-for="btn in visiblePluginNavButtons"
                   :key="btn.key"
-                  :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen }"
+                  :class="{ active: store.mainPanel == btn.key && !store.pluginLauncherOpen && !store.browserPanelOpen }"
                   :data-plugin-key="btn.key"
                   @click="selectPanel(btn.key)"
                   :title="btn.title"
@@ -949,8 +974,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
             <div class="compact-title" :class="{ 'title-hidden': titleHidden }" ref="panelTitleRef"
                  style="font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
-            <!-- 浏览器 Agent 入口：需要独立窗口 + 主进程 WebContentsView，网页模式不可用 -->
-            <div v-if="store.isExtraVisible('agent') && hasCapability('window.chrome')" class="nav-narrow-hide" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent (AI-controllable browser window)' : '浏览器 Agent（AI 可控制的独立浏览器窗口）'"><i class="fa fa-globe"></i></div>
+            <!-- 浏览器入口（旧位置已移到四个内置模块之后） -->
             <div :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
             <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
@@ -989,6 +1013,14 @@ import { useTallLayout } from '@/composables/useTallLayout'
           :enabled-count="pluginEnabledCount"
           @select="openPluginPanel"
         />
+        <!-- 单窗口模式：浏览器模块内嵌在主内容区（与左侧导航图标同一逻辑；原生网页视图由主进程按 .ba-main 矩形定位） -->
+        <div v-else-if="store.browserPanelOpen" class="main-browser">
+          <BrowserAgentShell
+            embedded
+            :pane-active="true"
+            :occluded="store.settingsOpen || !!store.pluginPanelOverlay"
+          />
+        </div>
         <!-- 空导航（所有功能关闭且没有插件面板）：给明确提醒 + 一键恢复 / 前往设置，而不是一片空白 -->
         <div v-else-if="showEmptyNavNotice" class="empty-nav-notice">
           <i class="fa fa-compass empty-nav-icon"></i>
@@ -1023,7 +1055,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
         v-for="btn in coreNavButtons"
         :key="btn.key"
         class="bottom-nav-item"
-        :class="{ active: store.mainPanel == btn.key }"
+        :class="{ active: store.mainPanel == btn.key && !store.browserPanelOpen }"
         :data-core-key="btn.key"
         @click="selectPanel(btn.key)"
         :title="btn.title"
@@ -1031,12 +1063,17 @@ import { useTallLayout } from '@/composables/useTallLayout'
         <i :class="btn.icon"></i>
       </div>
 
+      <!-- 浏览器入口：四个内置模块之后、插件之前 -->
+      <div v-if="store.isExtraVisible('agent') && hasCapability('browserAgent')" class="bottom-nav-item" :class="{ active: browserNavActive }" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser' : '浏览器'">
+        <i class="fa fa-globe"></i>
+      </div>
+
       <!-- 插件面板：插件少时平铺；放不下时整行收起成下面的聚合图标 -->
       <div
         v-for="btn in visiblePluginNavButtons"
         :key="btn.key"
         class="bottom-nav-item"
-        :class="{ active: store.mainPanel == btn.key }"
+        :class="{ active: store.mainPanel == btn.key && !store.browserPanelOpen }"
         :data-plugin-key="btn.key"
         @click="selectPanel(btn.key)"
         :title="btn.title"
@@ -1055,10 +1092,6 @@ import { useTallLayout } from '@/composables/useTallLayout'
         <i class="fa fa-th-large"></i>
       </div>
 
-      <!-- 浏览器 Agent 独立窗口入口（非主面板；置于设置按钮左侧；可在「功能 → 导航与模块」里关掉） -->
-      <div v-if="store.isExtraVisible('agent')" class="bottom-nav-item" @click="openBrowserAgent" :title="store.locales === 'en' ? 'Browser Agent' : '浏览器 Agent'">
-        <i class="fa fa-globe"></i>
-      </div>
       <div
         class="bottom-nav-item"
         :class="{ active: store.settingsOpen || settingsWindowOpen }"
@@ -1550,6 +1583,14 @@ import { useTallLayout } from '@/composables/useTallLayout'
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  .main-browser {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    position: relative;
+    overflow: hidden;
   }
 
   /* ====== 空导航提醒（所有功能关闭且没有插件面板时） ====== */

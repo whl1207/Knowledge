@@ -14,6 +14,10 @@
   // 译文里的公式用 KaTeX 渲染（与思维导图同一套做法：renderToString + 失败不抛）
   import katex from 'katex'
   import 'katex/dist/katex.min.css'
+  // 「另存为」文本文件：桌面版走原生对话框，网页 / 安卓回退为下载（与设置导出等共用同一套实现）
+  import { saveTextFile, MD_FILTERS } from '@/lib/settingsData'
+  // 右键菜单二级菜单：右侧 / 底部空间不足时自动翻转展开方向（与文件视图共用同一套实现）
+  import { createSubmenuHoverFix } from '@/lib/knowFile/overlay'
   // 智能对话面板：与 md_read 共用同一个组件（避免两套对话逻辑漂移）
   const DocChatPanel = defineAsyncComponent(() => import('@/components/knowFile/view/DocChatPanel.vue'))
   // 页面管理（合并 / 删除 / 排序 / 旋转）：懒加载，不用时（含 pdf-lib 约 1MB）不进入首屏
@@ -21,7 +25,7 @@
 
   // pdf.js 运行时资源（worker / CMap / 标准字体）：统一在 @/lib/pdfjs 配置，缺 CMap 会导致整段文字不渲染
   import { PDFJS_RUNTIME_OPTIONS } from '@/lib/pdfjs'
-import { getPlatform, hasCapability } from '@/platform'
+import { getPlatform } from '@/platform'
 
   const store = usestore()
 
@@ -47,6 +51,33 @@ import { getPlatform, hasCapability } from '@/platform'
   const pan = ref({ x: 0, y: 0 }) // 平移偏移
   const isDragging = ref(false)
   const dragStart = ref({ x: 0, y: 0 })
+
+  // === 视图旋转（右键菜单「视图旋转」） ===
+  // **整份文档统一旋转**：只改显示方向，不修改 PDF 文件本身（翻页 / 滚动都沿用同一角度）；
+  // 真正把页面方向写回文件的是「页面管理…」，两者互不影响。
+  // 记录的是用户旋转角（0 / 90 / 180 / 270），最终显示角 = 页面自带旋转（/Rotate）+ 该值。
+  const viewRotation = ref(0)
+  /** 角度归一到 0 / 90 / 180 / 270 */
+  const normalizeDeg = (v: number) => (((Math.round(v / 90) * 90) % 360) + 360) % 360
+  /** 某页最终的显示旋转角（页面自带旋转 + 全局视图旋转） */
+  const pageViewRotation = (page: any) => normalizeDeg((Number(page?.rotate) || 0) + viewRotation.value)
+  /**
+   * 译文层旋转属性 + 尺寸：pdf.js 把文本层按 data-main-rotation 整体旋转（span 坐标仍是未旋转空间），
+   * 译文层用的是同一套坐标，必须挂同一个角度，否则旋转后译文会脱离原文。
+   * 宽高也要用「页面原始宽高 × --scale-factor」：若沿用 inset:0 的显示宽高，
+   * 90° / 270° 时百分比位移的分母就变成了旋转后的尺寸，位置会整体错开。
+   */
+  const syncTransLayerRotation = (
+    layer: HTMLElement | null,
+    rotation: number,
+    rawDims?: { pageWidth: number; pageHeight: number },
+  ) => {
+    if (!layer) return
+    layer.dataset.mainRotation = String(normalizeDeg(rotation))
+    if (!rawDims) return
+    layer.style.width = `calc(var(--scale-factor) * ${rawDims.pageWidth.toFixed(2)}px)`
+    layer.style.height = `calc(var(--scale-factor) * ${rawDims.pageHeight.toFixed(2)}px)`
+  }
   const canvasRef = ref<HTMLCanvasElement | null>(null)
   const viewportRef = ref<HTMLDivElement | null>(null)
   // 单页模式：页面盒（画布 + 可选中文本层都放在盒内，保证同步缩放/平移）
@@ -84,20 +115,11 @@ import { getPlatform, hasCapability } from '@/platform'
   const darkClass = computed(() => (
     darkMode.value === 'off' ? '' : darkMode.value === 'dark' ? 'pdf-dark' : 'pdf-soft'
   ))
-  const cycDarkMode = () => {
-    darkMode.value = darkMode.value === 'off' ? 'dark' : darkMode.value === 'dark' ? 'soft' : 'off'
-    try { localStorage.setItem('pdf_dark_mode', darkMode.value) } catch { /* ignore */ }
+  // 深色阅读：原色 / 反色 / 柔和反色（入口已收进右键菜单，偏好记忆）
+  const setDarkMode = (mode: PdfDarkMode) => {
+    darkMode.value = mode
+    try { localStorage.setItem('pdf_dark_mode', mode) } catch { /* ignore */ }
   }
-  // 图标（Font Awesome 4.7 无 fa-moon，只有 fa-moon-o）：图标表示「当前状态」
-  const darkModeIcon = computed(() => (
-    darkMode.value === 'off' ? 'fa-sun-o' : darkMode.value === 'dark' ? 'fa-moon-o' : 'fa-adjust'
-  ))
-  const darkModeTitle = computed(() => {
-    const zh = store.locales === 'zh'
-    if (darkMode.value === 'off') return zh ? '深色阅读：反色显示 PDF（点击开启）' : 'Dark reading: invert PDF (click to on)'
-    if (darkMode.value === 'dark') return zh ? '深色阅读：反色（黑底白字），点击切换柔和反色' : 'Dark reading: inverted, click for soft'
-    return zh ? '深色阅读：柔和反色（深灰底），点击关闭' : 'Dark reading: soft, click to turn off'
-  })
 
   // 滚轮模式：zoom = 单页缩放（铺满 + 滚轮缩放 / 拖拽平移）；scroll = 多页连续向下滚动阅读
   const wheelMode = ref<'zoom' | 'scroll'>('zoom')
@@ -180,6 +202,17 @@ import { getPlatform, hasCapability } from '@/platform'
   const transJobs: ({ page: number } | { blocks: PdfTextBlock[] })[] = []
   let transWorkerActive = false
 
+  // === 全文翻译（不叠加译文；完成后点状态栏提示另存为 Markdown） ===
+  const fullTransRunning = ref(false)
+  const fullTransDone = ref(false)
+  const fullTransProgress = ref('')
+  const fullTransMsg = ref('')
+  const fullTransSaving = ref(false)
+  let fullTransAbort: AbortController | null = null
+  let fullTransToken = 0
+  /** 全文翻译结果（页码 + 整页译文；只用于另存，不参与页面叠加） */
+  let fullTransResult: { page: number; text: string }[] = []
+
 
   // === 清理 ===
   const cleanup = () => {
@@ -193,6 +226,8 @@ import { getPlatform, hasCapability } from '@/platform'
     fitScale.value = 1
     pan.value = { x: 0, y: 0 }
     isDragging.value = false
+    // 换文件 / 卸载：视图旋转是「这份文件当前长这样」的临时状态，不跨文档沿用
+    viewRotation.value = 0
     // 重新加载 / 卸载时清理右侧面板状态（对话面板由 DocChatPanel 自行按 docKey 清空）
     textExtractRunning.value = false
     textExtractCancelled.value = false
@@ -216,6 +251,15 @@ import { getPlatform, hasCapability } from '@/platform'
     transBlockCache.clear()
     transLayerToken++
     clearTransLayers()
+    // 全文翻译：中止在途请求并清掉结果（换文件后不能把上一份文件的译文另存出去）
+    fullTransToken++
+    fullTransAbort?.abort()
+    fullTransAbort = null
+    fullTransRunning.value = false
+    fullTransDone.value = false
+    fullTransProgress.value = ''
+    fullTransMsg.value = ''
+    fullTransResult = []
     resetScrollMode()
     pageRawSizes.value = []
     textLayerToken++
@@ -246,14 +290,16 @@ import { getPlatform, hasCapability } from '@/platform'
     }
 
     // 计算铺满容器的缩放（同时考虑宽和高），随窗口缩放自动适配
-    const baseViewport = page.getViewport({ scale: 1 })
+    // 旋转角交给 pdf.js 的 viewport：画布与文本层的坐标系一起旋转，不必额外做 CSS 变换
+    const rotation = pageViewRotation(page)
+    const baseViewport = page.getViewport({ scale: 1, rotation })
     const pad = 12
     const containerW = Math.max(1, container.clientWidth - pad * 2)
     const containerH = Math.max(1, container.clientHeight - pad * 2)
     fitScale.value = Math.max(0.01, Math.min(containerW / baseViewport.width, containerH / baseViewport.height))
 
     const finalScale = fitScale.value * userScale.value
-    const viewport = page.getViewport({ scale: finalScale })
+    const viewport = page.getViewport({ scale: finalScale, rotation })
     const dpr = window.devicePixelRatio || 1
 
     // 先同步更新页面盒尺寸与位置获得即时反馈，再异步渲染内容
@@ -276,6 +322,7 @@ import { getPlatform, hasCapability } from '@/platform'
     renderTextLayer(page, viewport, token)
     // 译文叠加层：坐标系与文本层一致（同一 --scale-factor），缩放只需同步变量，无需重算块
     syncTransLayerScale(viewport.scale)
+    syncTransLayerRotation(transLayerRef.value, viewport.rotation, viewport.rawDims)
     if (transOn.value) void paintTransPage(currentPage.value)
 
     const ctx = canvas.getContext('2d')!
@@ -690,7 +737,8 @@ import { getPlatform, hasCapability } from '@/platform'
     for (let p = 1; p <= pdfDoc.numPages; p++) {
       try {
         const page = await pdfDoc.getPage(p)
-        const vp = page.getViewport({ scale: 1 })
+        // 尺寸取「最终显示方向」：旋转 90° 后宽高互换
+        const vp = page.getViewport({ scale: 1, rotation: pageViewRotation(page) })
         sizes.push({ w: vp.width, h: vp.height })
       } catch {
         sizes.push({ w: 0, h: 0 })
@@ -711,7 +759,9 @@ import { getPlatform, hasCapability } from '@/platform'
     renderScaleOf.set(p, scale)
     try {
       const page = await pdfDoc.getPage(p)
-      const viewport = page.getViewport({ scale })
+      const viewport = page.getViewport({ scale, rotation: pageViewRotation(page) })
+      // 连续模式下每页各自旋转：译文层要跟着本页角度走（文本层由 pdf.js 自己挂 data-main-rotation）
+      syncTransLayerRotation(el.querySelector('.pdf-trans-layer') as HTMLElement | null, viewport.rotation, viewport.rawDims)
       const dpr = window.devicePixelRatio || 1
       canvas.width = viewport.width * dpr
       canvas.height = viewport.height * dpr
@@ -798,7 +848,14 @@ import { getPlatform, hasCapability } from '@/platform'
     const container = scrollRef.value
     if (!container) return
     if (pageRawSizes.value.length !== pdfDoc.numPages) await preparePageRawSizes()
-    scrollBaseWidth = pageRawSizes.value[0]?.w || 0
+    // 基准宽度取第 1 页「当前显示方向」的宽度（含全局视图旋转）：
+    // 旋转成横向后按新宽度重新铺满；否则页码宽于容器、横向被裁，100% 也看不全整页。
+    try {
+      const firstPage = await pdfDoc.getPage(1)
+      scrollBaseWidth = firstPage.getViewport({ scale: 1, rotation: pageViewRotation(firstPage) }).width || pageRawSizes.value[0]?.w || 0
+    } catch {
+      scrollBaseWidth = pageRawSizes.value[0]?.w || 0
+    }
     const scale = computeScrollScale()
     container.style.setProperty('--pdf-scroll-scale', String(scale))
     container.style.setProperty('--scale-factor', String(scale))
@@ -819,13 +876,17 @@ import { getPlatform, hasCapability } from '@/platform'
   }
 
   // 连续模式：滚动到指定页
+  // ⚠️ 不用 el.scrollIntoView()：它会连带滚动**所有祖先容器**。单窗口模式（知识管理右侧标签）
+  // 下 PDF 外面还套着标签栏 / 工具栏 / 资源管理器容器，祖先被浏览器滚动后整个应用界面会往上跳十几像素
+  // （独立文件窗口祖先没有可滚动余量，所以只在单窗口模式复现）。这里只改 PDF 自己的滚动容器。
   const scrollToPageEl = (p: number, smooth = true) => {
     const el = pageEls.value[p - 1]
-    if (!el) return
-    el.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' })
+    const container = scrollRef.value
+    if (!el || !container) return
+    container.scrollTo({ top: Math.max(0, el.offsetTop), behavior: smooth ? 'smooth' : 'auto' })
   }
 
-  // 连续模式：按滚动位置同步当前页（以视口顶部为基准，与 scrollIntoView(block:'start') 对齐）
+  // 连续模式：按滚动位置同步当前页（以视口顶部为基准，与 scrollToPageEl 的页顶对齐一致）
   const syncPageFromScroll = () => {
     const container = scrollRef.value
     if (!container || pageEls.value.length === 0 || suppressScrollSync) return
@@ -1304,13 +1365,15 @@ import { getPlatform, hasCapability } from '@/platform'
   const renderPageToImage = async (pageNum: number, maxSide = 0): Promise<string> => {
     if (!pdfDoc) throw new Error('PDF 未加载')
     const page = await pdfDoc.getPage(pageNum)
-    const base = page.getViewport({ scale: 1 })
+    // 截图 / OCR 用「用户当前看到的方向」：页面被右键旋转过时，截图与 OCR 也应是正向的
+    const rotation = pageViewRotation(page)
+    const base = page.getViewport({ scale: 1, rotation })
     let scale = 2 // 2x 保证清晰度
     if (maxSide > 0) {
       const longSide = Math.max(base.width, base.height)
       if (longSide > 0) scale = Math.min(scale, maxSide / longSide)
     }
-    const vp = page.getViewport({ scale })
+    const vp = page.getViewport({ scale, rotation })
     const canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(vp.width))
     canvas.height = Math.max(1, Math.round(vp.height))
@@ -1486,6 +1549,20 @@ import { getPlatform, hasCapability } from '@/platform'
     return (el?.querySelector('.pdf-trans-layer') as HTMLElement | null) || null
   }
 
+  /** 按页补一次译文层旋转属性（新建 / 重排后的图层还没有该属性）。
+   *  只在连续模式用：单页模式只有一个译文层、属于「当前页」，由 renderPage 统一同步；
+   *  否则为别的页补属性会把当前页的角度/宽高改错（旋转后译文偏移）。 */
+  const syncTransLayerRotationForPage = async (pageNum: number) => {
+    if (!isScrollMode.value) return
+    const layer = transLayerFor(pageNum)
+    if (!layer || !pdfDoc) return
+    try {
+      const page = await pdfDoc.getPage(pageNum)
+      const vp = page.getViewport({ scale: 1, rotation: pageViewRotation(page) })
+      syncTransLayerRotation(layer, vp.rotation, vp.rawDims)
+    } catch { /* 读页失败时保持原角度，不影响其它页 */ }
+  }
+
   const clearTransLayers = () => {
     document.querySelectorAll('.pdf-trans-layer').forEach((el) => el.replaceChildren())
   }
@@ -1515,10 +1592,13 @@ import { getPlatform, hasCapability } from '@/platform'
   const ensureTransBlocks = async (pageNum: number): Promise<PdfTextBlock[]> => {
     const hit = transBlockCache.get(pageNum)
     if (hit) return hit
-    if (!pdfDoc) return []
+    const doc = pdfDoc
+    if (!doc) return []
     try {
-      const page = await pdfDoc.getPage(pageNum)
+      const page = await doc.getPage(pageNum)
       const blocks = await buildPageBlocks(page, pageNum)
+      // 等待期间可能换了文件（cleanup 已清缓存）：旧文档的块不能再写回，否则新文档会用到错页的坐标
+      if (pdfDoc !== doc) return []
       transBlockCache.set(pageNum, blocks)
       return blocks
     } catch (err) {
@@ -1580,7 +1660,9 @@ import { getPlatform, hasCapability } from '@/platform'
     const parent = el.parentElement
     const sf = parent ? (parseFloat(getComputedStyle(parent).getPropertyValue('--scale-factor')) || 1) : 1
     const targetH = (b.height + b.fontSize * 0.5) * sf
-    const measure = () => inner.getBoundingClientRect().height
+    // 用 offsetHeight 量布局高度：页面旋转时 getBoundingClientRect 得到的是旋转后的包围盒，
+    // 量出来的就不是内容自身的高度了（90° / 270° 时宽高互换，自适应会误判）。
+    const measure = () => inner.offsetHeight
     const setSize = (f: number) => el.style.setProperty('font-size', `calc(var(--scale-factor) * ${(b.fontSize * f).toFixed(2)}px)`)
     const setLh = (v: number) => el.style.setProperty('line-height', v.toFixed(2))
 
@@ -1620,6 +1702,7 @@ import { getPlatform, hasCapability } from '@/platform'
     if (!layer) return
     layer.replaceChildren()
     if (!transOn.value) return
+    await syncTransLayerRotationForPage(pageNum)
     const blocks = await ensureTransBlocks(pageNum)
     if (token !== transLayerToken || !transOn.value) return
     if (pageNum === currentPage.value) transPageBlocks.value = blocks
@@ -1640,14 +1723,19 @@ import { getPlatform, hasCapability } from '@/platform'
     const pages = [...transPages].filter((p) => !!transLayerFor(p))
     await Promise.all(pages.map(async (p) => {
       const blocks = await ensureTransBlocks(p)
-      if (token !== transLayerToken) return
+      if (token !== transLayerToken || !transOn.value) return
       const layer = transLayerFor(p)
       if (!layer) return
+      await syncTransLayerRotationForPage(p)
+      // 同步旋转是异步的：期间可能已关闭叠加（全文翻译 / 隐藏译文）或换了令牌，画之前必须再确认，
+      // 否则旧的一次刷新会把刚清空的译文层重新画出来（全文翻译过程中就会“叠加”）。
+      if (token !== transLayerToken || !transOn.value) return
       for (const b of blocks) {
         const text = transMap.value[b.id]
         if (text) paintTransBlock(layer, b, text)
       }
     }))
+    if (token !== transLayerToken || !transOn.value) return
     transPageBlocks.value = await ensureTransBlocks(currentPage.value)
   }
 
@@ -1804,19 +1892,13 @@ import { getPlatform, hasCapability } from '@/platform'
     }
   }
 
-  /** 翻译当前页（扫描件无内嵌文字时给出 OCR 提示） */
-  const translateCurrentPage = async () => {
-    const blocks = await ensureTransBlocks(currentPage.value)
-    transPageBlocks.value = blocks
-    if (!blocks.length) {
-      ElMessage.warning(store.locales === 'zh'
-        ? '本页没有可翻译的内嵌文字（扫描件请先用「转化 → OCR 识别」）'
-        : 'No embedded text on this page (use Convert → OCR for scanned pages)')
-      return
-    }
-    transOn.value = true
-    transStarted.add(currentPage.value)
-    enqueueBlocks(blocks)
+  /** 全文翻译进行中时不允许切回「叠加译文」（全文模式要求过程不叠加） */
+  const blockedByFullTranslation = (): boolean => {
+    if (!fullTransRunning.value) return false
+    ElMessage.warning(store.locales === 'zh'
+      ? '全文翻译进行中：请等待完成，或在状态栏点击进度取消'
+      : 'Full translation is running: wait for it or click the progress in the status bar to cancel')
+    return true
   }
 
   /** 只翻选区命中的文本块 */
@@ -1824,6 +1906,7 @@ import { getPlatform, hasCapability } from '@/platform'
     const sel = transCtx.value.selection || pdfSelectionText()
     closeTransCtx()
     if (!sel) return
+    if (blockedByFullTranslation()) return
     const blocks = await ensureTransBlocks(currentPage.value)
     transPageBlocks.value = blocks
     const hits = blocksForSelection(blocks, sel)
@@ -1851,6 +1934,7 @@ import { getPlatform, hasCapability } from '@/platform'
       transMsg.value = zh ? '已隐藏译文，只看原文' : 'Translation hidden'
       return
     }
+    if (blockedByFullTranslation()) return
     transOn.value = true
     // 重新打开：允许把各页重新补翻（缓存命中时不会重复请求）
     transStarted.clear()
@@ -1868,6 +1952,11 @@ import { getPlatform, hasCapability } from '@/platform'
   }
 
   // ---- 右键菜单 ----
+  /** 是否处于「整份文档已旋转」的视图状态（菜单里显示「恢复原始方向」） */
+  const viewRotated = computed(() => viewRotation.value !== 0)
+  /** 二级菜单贴边翻转（右侧 / 底部空间不足时向左 / 向上展开） */
+  const onMenuSubmenuHover = createSubmenuHoverFix('.pdf-container')
+
   const closeTransCtx = () => { if (transCtx.value.visible) transCtx.value = { visible: false, x: 0, y: 0, selection: '' } }
   const closeTransSettings = () => { if (transSettings.value.visible) transSettings.value = { visible: false, x: 0, y: 0 } }
 
@@ -1876,7 +1965,9 @@ import { getPlatform, hasCapability } from '@/platform'
     // 右键点开时浏览器一般保留选区；若已丢失则用快照兜底（点输入框后选区会被清空）
     const sel = pdfSelectionText() || (savedSelectionRanges.length ? savedSelectionRanges.map((r) => r.toString()).join('\n').trim() : '')
     const x = Math.min(e.clientX, Math.max(8, window.innerWidth - 200))
-    const y = Math.min(e.clientY, Math.max(8, window.innerHeight - 160))
+    // 一级菜单只有几个子菜单入口（子菜单向上/向左翻转由 createSubmenuHoverFix 处理），
+    // 这里只保证一级菜单本身别掉出窗口底部
+    const y = Math.min(e.clientY, Math.max(8, window.innerHeight - 240))
     transCtx.value = { visible: true, x, y, selection: sel }
   }
 
@@ -1889,12 +1980,319 @@ import { getPlatform, hasCapability } from '@/platform'
       .catch(() => {})
   }
 
+  /**
+   * 兜底：旋转 / 重排后若浏览器把滚动落到了 PDF 的祖先容器（或 window）上，把它们复位。
+   * 整个应用是定高布局，PDF 的祖先不应出现滚动；单窗口模式下祖先一旦被滚动，
+   * 表现就是「整个 App 界面往上移十几像素」（独立文件窗口没有可滚动余量，所以不复现）。
+   */
+  const resetViewerAncestorScroll = () => {
+    let el: HTMLElement | null = (viewportRef.value || scrollRef.value)?.parentElement || null
+    while (el) {
+      if (el.scrollTop || el.scrollLeft) {
+        el.scrollTop = 0
+        el.scrollLeft = 0
+      }
+      el = el.parentElement
+    }
+    const root = document.scrollingElement as HTMLElement | null
+    if (root && (root.scrollTop || root.scrollLeft)) {
+      root.scrollTop = 0
+      root.scrollLeft = 0
+    }
+    if (window.scrollX || window.scrollY) window.scrollTo(0, 0)
+  }
+
+  /** 连续两帧各复位一次：浏览器的自动滚动可能落在布局后的下一帧 */
+  const scheduleViewerAncestorScrollReset = () => {
+    requestAnimationFrame(() => {
+      resetViewerAncestorScroll()
+      requestAnimationFrame(() => resetViewerAncestorScroll())
+    })
+  }
+
+  /**
+   * 视图旋转变化后同步整份文档：
+   * - 连续模式：所有页面宽高都会互换 → 重算全部页尺寸后重排（保持当前阅读页）；
+   * - 单页模式：清掉连续模式的旧尺寸缓存（下次切到连续模式会按新角度重算），重渲染当前页。
+   */
+  const applyRotationChange = async () => {
+    if (isScrollMode.value) {
+      if (!pdfDoc) return
+      await preparePageRawSizes()
+      await nextTick()
+      await layoutScrollMode()
+      // 旋转后横向重新铺满：把可能遗留的横向滚动复位，整页从左边开始显示
+      if (scrollRef.value) scrollRef.value.scrollLeft = 0
+      await nextTick()
+      scheduleViewerAncestorScrollReset()
+      return
+    }
+    pageRawSizes.value = []
+    // 旋转后页盒宽高互换，旧的平移偏移会偏出可视区 → 回到居中
+    pan.value = { x: 0, y: 0 }
+    await renderPage()
+    await nextTick()
+    scheduleViewerAncestorScrollReset()
+  }
+
+  /** 右键菜单：整份文档向左 / 向右旋转 90°（只改显示，不改 PDF 文件；写回文件请用「页面管理」） */
+  const rotateView = async (delta: number) => {
+    closeTransCtx()
+    if (!pdfDoc || pageCount.value === 0) return
+    viewRotation.value = normalizeDeg(viewRotation.value + delta)
+    await applyRotationChange()
+  }
+
+  /** 右键菜单：恢复整份文档的原始方向（清掉视图旋转；PDF 自带的 /Rotate 不受影响） */
+  const resetViewRotation = async () => {
+    closeTransCtx()
+    if (!pdfDoc || pageCount.value === 0 || viewRotation.value === 0) return
+    viewRotation.value = 0
+    await applyRotationChange()
+  }
+
+  // ---- 翻译的两种模式（右键菜单） ----
+  /** 状态栏进度点击：取消全文翻译 */
+  const cancelFullTranslation = () => {
+    fullTransToken++
+    fullTransAbort?.abort()
+    fullTransAbort = null
+    fullTransRunning.value = false
+    fullTransProgress.value = ''
+    fullTransDone.value = false
+    fullTransMsg.value = store.locales === 'zh' ? '全文翻译已取消' : 'Full translation cancelled'
+  }
+
+  /** 右键菜单：逐页翻译（边看边翻：当前页立即翻，之后滚动 / 翻页到哪翻哪，原地叠加译文） */
+  const startPageTranslation = async () => {
+    const zh = store.locales === 'zh'
+    closeTransCtx()
+    if (!pdfDoc || pageCount.value === 0) return
+    // 两种模式互斥：先停掉全文翻译，避免同时打模型
+    if (fullTransRunning.value) cancelFullTranslation()
+    // 逐页模式接管后，全文翻译的完成 / 取消提示不再适用（否则状态栏一直挂着旧提示）
+    fullTransDone.value = false
+    fullTransMsg.value = ''
+    if (transOn.value) {
+      enqueuePage(currentPage.value, true)
+      if (isScrollMode.value) enqueuePage(visibleScrollPage(), true)
+      transMsg.value = zh
+        ? '逐页翻译进行中：滚动 / 翻页到哪翻到哪'
+        : 'Page-by-page translation: pages translate as you go'
+      return
+    }
+    // 开启逐页叠加前先看当前页有没有内嵌文字：扫描件提示改用 OCR（与旧入口一致）
+    const blocks = await ensureTransBlocks(currentPage.value)
+    transPageBlocks.value = blocks
+    if (!blocks.length) {
+      ElMessage.warning(zh
+        ? '本页没有可翻译的内嵌文字（扫描件请先用「转化 → OCR 识别」），仍会继续翻译其它页'
+        : 'No embedded text on this page (use Convert → OCR for scanned pages); other pages will still be translated')
+    }
+    await toggleTransVisible()
+  }
+
+  /**
+   * 右键菜单：全文翻译。逐页顺序翻译整份文档，**过程中不叠加到页面上**；
+   * 状态栏显示进度，完成后状态栏提示可点击另存为 Markdown。
+   */
+  const startFullTranslation = async () => {
+    const zh = store.locales === 'zh'
+    closeTransCtx()
+    if (!pdfDoc || pageCount.value === 0) return
+    if (fullTransRunning.value) { cancelFullTranslation(); return }
+    const model = transModel.value
+    if (!model) {
+      ElMessage.warning(zh ? '当前来源没有设置模型，请在「翻译设置」里填写模型名' : 'No model selected for the current source')
+      return
+    }
+    // 与「逐页叠加」互斥：先停掉逐页翻译；已叠加的译文一并隐藏（全文过程不往页面画译文）
+    transJobs.length = 0
+    transAbort?.abort()
+    transAbort = null
+    transToken++
+    transRunning.value = false
+    transProgress.value = ''
+    transStarted.clear()
+    if (transOn.value) {
+      transOn.value = false
+      await refreshTransOverlay()
+    }
+    transMsg.value = ''
+
+    const token = ++fullTransToken
+    const ac = new AbortController()
+    fullTransAbort = ac
+    fullTransRunning.value = true
+    fullTransDone.value = false
+    fullTransMsg.value = ''
+    fullTransResult = []
+    const total = pageCount.value
+    const fileKey = transFileKey()
+    const target = transTarget.value
+    const pages: { page: number; text: string }[] = []
+    let failedBlocks = 0
+    let emptyPages = 0
+    fullTransProgress.value = zh ? `全文翻译 0/${total} 页` : `Full translation 0/${total} pages`
+    try {
+      for (let p = 1; p <= total; p++) {
+        if (token !== fullTransToken || ac.signal.aborted) return
+        const blocks = await ensureTransBlocks(p)
+        if (token !== fullTransToken) return
+        // 公式 / 数字碎片不翻译（与逐页模式一致）
+        const targets = blocks.filter((b) => !b.math)
+        if (!targets.length) {
+          emptyPages++
+          fullTransProgress.value = zh ? `全文翻译 ${p}/${total} 页` : `Full translation ${p}/${total} pages`
+          await nextTick()
+          continue
+        }
+        const sourceById = new Map<string, string>()
+        const translated = new Map<string, string>()
+        const pending: { id: string; text: string }[] = []
+        for (const b of targets) {
+          sourceById.set(b.id, b.text)
+          const local = transMap.value[b.id]
+          if (local) { translated.set(b.id, local); continue }
+          const cached = getCached(makeCacheId(fileKey, target, model, b.text))
+          if (cached) translated.set(b.id, cached)
+          else pending.push({ id: b.id, text: b.text })
+        }
+        if (pending.length) {
+          fullTransProgress.value = zh
+            ? `全文翻译 ${p}/${total} 页 · ${pending.length} 段`
+            : `Full translation ${p}/${total} · ${pending.length} blocks`
+          const res = await translateBlocks(pending, {
+            provider: transProvider.value,
+            config: llmConfigByKey(store.AIconfig?.llm, transProvider.value) || {},
+            model,
+            target,
+            zh,
+            signal: ac.signal,
+            onProgress: (done, count) => {
+              if (token !== fullTransToken) return
+              fullTransProgress.value = zh
+                ? `全文翻译 ${p}/${total} 页 · ${done}/${count} 段`
+                : `Full translation ${p}/${total} · ${done}/${count} blocks`
+            },
+            onBlock: (id, text) => {
+              if (token !== fullTransToken) return
+              translated.set(id, text)
+              putCached(makeCacheId(fileKey, target, model, sourceById.get(id) || ''), text)
+            },
+          })
+          failedBlocks += res.failed.length
+          if (res.cancelled) {
+            if (token !== fullTransToken) return
+            fullTransRunning.value = false
+            fullTransProgress.value = ''
+            fullTransMsg.value = zh ? '全文翻译已取消' : 'Full translation cancelled'
+            return
+          }
+          // 取消 / 换文档可能发生在请求期间：令牌变了就别再写进度与结果
+          if (token !== fullTransToken) return
+        }
+        // 按块顺序拼成整页译文（失败块不写入，最后统一提示失败段数）
+        const paragraphs = targets.map((b) => translated.get(b.id)).filter((t): t is string => !!t)
+        if (paragraphs.length) pages.push({ page: p, text: paragraphs.join('\n\n') })
+        fullTransProgress.value = zh ? `全文翻译 ${p}/${total} 页` : `Full translation ${p}/${total} pages`
+        await nextTick()
+      }
+      if (token !== fullTransToken) return
+      fullTransResult = pages
+      fullTransRunning.value = false
+      fullTransProgress.value = ''
+      fullTransDone.value = true
+      const notes: string[] = []
+      if (failedBlocks) notes.push(zh ? `${failedBlocks} 段失败` : `${failedBlocks} block(s) failed`)
+      if (emptyPages) notes.push(zh ? `${emptyPages} 页无可翻译文字` : `${emptyPages} page(s) without translatable text`)
+      const note = notes.length ? (zh ? `（${notes.join('，')}）` : ` (${notes.join(', ')})`) : ''
+      fullTransMsg.value = zh
+        ? `全文翻译完成，点击另存为文件${note}`
+        : `Full translation done, click to save a file${note}`
+    } catch (err) {
+      if (token !== fullTransToken) return
+      fullTransRunning.value = false
+      fullTransProgress.value = ''
+      fullTransDone.value = false
+      const brief = translateErrorText(err, zh)
+      fullTransMsg.value = (zh ? '全文翻译失败：' : 'Full translation failed: ') + brief
+      ElMessage.error(fullTransMsg.value)
+      console.error('[Translate] 全文翻译失败:', err)
+    } finally {
+      if (token === fullTransToken) fullTransAbort = null
+    }
+  }
+
+  /** 本地文档路径：远程预览路径是 `remote:/host:port/...`，不能当成本地落盘路径用 */
+  const localDocPath = (): string => (props.path && !props.path.startsWith('remote:') ? props.path : '')
+
+  /** 全文翻译的默认落盘路径：与原 PDF 同目录的 `<原名>.translated.md`（远程 / base64 预览落到工作区） */
+  const fullTranslationDefaultPath = (): string => {
+    const local = localDocPath()
+    const sep = (local || store.root || '').includes('\\') ? '\\' : '/'
+    const base = (props.path || '').split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'document'
+    const dir = local
+      ? local.replace(/[\\/][^\\/]*$/, '')
+      : String(store.root || '').replace(/[\\/]$/, '')
+    return `${dir}${dir ? sep : ''}${base}.translated.md`
+  }
+
+  /** 全文翻译结果 → Markdown（按页分节，仅译文） */
+  const buildFullTranslationMarkdown = (): string => {
+    const zh = store.locales === 'zh'
+    const name = (props.path || '').split(/[\\/]/).pop() || 'document'
+    const lines: string[] = [`# ${name.replace(/\.[^.]+$/, '')}`, '']
+    for (const pg of fullTransResult) {
+      lines.push(zh ? `## 第 ${pg.page} 页` : `## Page ${pg.page}`, '', pg.text, '')
+    }
+    return lines.join('\n').trimEnd() + '\n'
+  }
+
+  /**
+   * 状态栏完成提示点击：把全文译文另存为 Markdown 文件。
+   * 桌面版弹「另存为」对话框；网页 / 安卓（无 IPC 或对话框不可用）回退为浏览器下载。
+   */
+  const saveFullTranslation = async () => {
+    const zh = store.locales === 'zh'
+    if (fullTransRunning.value || fullTransSaving.value) return
+    if (!fullTransResult.length) {
+      ElMessage.warning(zh ? '没有可保存的译文' : 'No translation to save')
+      return
+    }
+    const content = buildFullTranslationMarkdown()
+    fullTransSaving.value = true
+    try {
+      const savedPath = await saveTextFile(fullTranslationDefaultPath(), content, 'text/markdown;charset=utf-8', MD_FILTERS, zh)
+      if (savedPath === null) return // 用户取消
+      if (savedPath) {
+        fullTransMsg.value = zh ? `已保存：${savedPath}` : `Saved: ${savedPath}`
+        ElMessage.success(fullTransMsg.value)
+        // 让资源管理器 / 文件树感知新文件，不用手动刷新
+        void getPlatform().app.notifyFileChanged({ path: savedPath }).catch(() => {})
+      } else {
+        fullTransMsg.value = zh ? '译文已下载' : 'Translation downloaded'
+        ElMessage.success(fullTransMsg.value)
+      }
+    } catch (err) {
+      console.error('[Translate] 保存全文译文失败:', err)
+      ElMessage.error(zh ? '保存失败' : 'Save failed')
+    } finally {
+      fullTransSaving.value = false
+    }
+  }
+
   const openTransSettings = (e: MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
     closeTransCtx()
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    transSettings.value = { visible: true, x: Math.max(8, rect.right - 272), y: rect.top - 6 }
+    // 入口已从状态栏移到右键菜单：菜单可能贴近窗口边缘，x/y 都要夹在可视区内
+    transSettings.value = {
+      visible: true,
+      x: Math.max(8, Math.min(rect.right - 272, window.innerWidth - 288)),
+      y: Math.max(8, Math.min(rect.top - 6, window.innerHeight - 220)),
+    }
     void fetchTransModels()
   }
 
@@ -1948,7 +2346,8 @@ import { getPlatform, hasCapability } from '@/platform'
 
   // === 监听 ===
   watch([currentPage, userScale], () => { nextTick(() => renderPage()) })
-  watch(currentPage, () => { pan.value = { x: 0, y: 0 }; syncActiveToc() })
+  // 换页时关掉右键菜单：菜单里的「旋转」作用于打开菜单时的那一页，留着会和当前页不一致
+  watch(currentPage, () => { closeTransCtx(); pan.value = { x: 0, y: 0 }; syncActiveToc() })
   // 换页：刷新当前页的叠加层（其余页各自保留自己的译文，不受影响）
   watch(currentPage, () => {
     transMsg.value = '' // 状态栏提示只对应当前页
@@ -2251,11 +2650,6 @@ import { getPlatform, hasCapability } from '@/platform'
         </button>
       </span>
 
-      <!-- 深色阅读：原色 / 反色 / 柔和反色（三态循环，偏好记忆） -->
-      <button class="statusbar-btn" :class="{ active: darkMode !== 'off' }" @click="cycDarkMode" :title="darkModeTitle">
-        <i class="fa" :class="darkModeIcon"></i>
-      </button>
-
       <span class="statusbar-sep"></span>
 
       <!-- 翻页 -->
@@ -2314,12 +2708,22 @@ import { getPlatform, hasCapability } from '@/platform'
         <span>{{ transMsg }}</span>
       </span>
 
+      <!-- 全文翻译：进度可点击取消；完成后点击提示另存为 Markdown 文件 -->
+      <span v-if="fullTransRunning" class="statusbar-item pdf-status-progress" @click="cancelFullTranslation" :title="store.locales==='zh' ? '全文翻译中（不叠加译文），点击取消' : 'Full translation running (no overlay), click to cancel'">
+        <i class="fa fa-spinner fa-spin" style="color:#FF9800;"></i>
+        <span>{{ fullTransProgress }}</span>
+      </span>
+      <span v-else-if="fullTransDone" class="statusbar-item pdf-status-progress" @click="saveFullTranslation" :title="store.locales==='zh' ? '点击另存为 Markdown 文件' : 'Click to save as a Markdown file'">
+        <i class="fa fa-check-circle" style="color:#4CAF50;"></i>
+        <span>{{ fullTransMsg }}</span>
+      </span>
+      <span v-else-if="fullTransMsg" class="statusbar-item pdf-status-progress" :title="store.locales==='zh' ? '全文翻译状态' : 'Full translation status'">
+        <i class="fa fa-language" style="color:#FF9800;"></i>
+        <span>{{ fullTransMsg }}</span>
+      </span>
+
       <span class="statusbar-spacer"></span>
 
-      <!-- 页面管理：合并 / 删除 / 调整顺序 / 旋转（保存后覆盖原文件或另存为新 PDF） -->
-      <button class="statusbar-btn" :class="{ active: pageEditorOpen }" @click="openPageEditor" :title="store.locales==='zh' ? '页面管理：合并 / 删除 / 调整顺序 / 旋转页面' : 'Manage pages: merge / delete / reorder / rotate'">
-        <i class="fa fa-files-o"></i>
-      </button>
       <!-- 转化：PDF → Markdown（仅图标） -->
       <button class="statusbar-btn" :class="{ active: smartPanelOpen && smartMode === 'convert' }" @click="toggleSmartPanel('convert')" :title="store.locales==='zh' ? '转化：PDF 转 Markdown' : 'Convert: PDF → Markdown'">
         <i class="fa fa-file-text-o"></i>
@@ -2328,36 +2732,91 @@ import { getPlatform, hasCapability } from '@/platform'
       <button class="statusbar-btn" :class="{ active: smartPanelOpen && smartMode === 'chat' }" @click="toggleSmartPanel('chat')" :title="store.locales==='zh' ? '智能操作：对 PDF 智能对话' : 'Smart: chat about PDF'">
         <i class="fa fa-magic"></i>
       </button>
-      <!-- 翻译：单击翻译当前页并叠加译文（进行中→取消；已有译文→切换原文/译文）；右键打开翻译设置 -->
-      <button class="statusbar-btn" :class="{ active: transRunning || transOn }"
-        @click="onTransButton" @contextmenu.prevent="openTransSettings"
-        :title="transRunning
-          ? (store.locales==='zh' ? '翻译中，点击取消' : 'Translating, click to cancel')
-          : (transOn
-            ? (store.locales==='zh' ? '已叠加译文（全部页）：点击切回原文；右键选择翻译模型' : 'Translation shown (all pages): click to show original; right-click for model')
-            : (store.locales==='zh' ? '翻译：叠加中文译文（滚动到的页会自动翻译；右键选择翻译模型）' : 'Translate: overlay Chinese (pages are translated as you scroll; right-click for model)'))">
-        <i class="fa" :class="transRunning ? 'fa-spinner fa-spin' : 'fa-language'"></i>
-      </button>
     </div>
 
-    <!-- 右键菜单：选中文字可原地翻译；无选区则翻译整页 -->
-    <div v-if="transCtx.visible" class="context-menu" :style="{ left: transCtx.x + 'px', top: transCtx.y + 'px' }" @click.stop @contextmenu.prevent>
+    <!-- 右键菜单：翻译 / 阅读主题 / 视图旋转 都是二级菜单；页面管理固定在最下面 -->
+    <div v-if="transCtx.visible" class="context-menu" :style="{ left: transCtx.x + 'px', top: transCtx.y + 'px' }"
+      @click.stop @contextmenu.prevent @mouseover="onMenuSubmenuHover">
+      <!-- 选中文字后的即时操作 -->
       <div v-if="transCtx.selection" class="menu-item" @click.stop="translateSelection()">
         <i class="fa fa-language"></i>
-        {{ store.locales==='zh' ? '翻译选中文字（叠在原文上）' : 'Translate selection (overlay)' }}
+        {{ store.locales==='zh' ? '翻译选中文字' : 'Translate selection' }}
       </div>
       <div v-if="transCtx.selection" class="menu-item" @click.stop="copyPdfSelection()">
         <i class="fa fa-copy"></i> {{ store.locales==='zh' ? '复制文字' : 'Copy Text' }}
       </div>
-      <div class="menu-item" @click.stop="closeTransCtx(); translateCurrentPage()">
-        <i class="fa fa-file-text-o"></i> {{ store.locales==='zh' ? '翻译本页并叠加译文' : 'Translate this page (overlay)' }}
+      <div v-if="transCtx.selection" class="menu-divider"></div>
+
+      <!-- 翻译（二级菜单）：逐页（叠加译文，边看边翻）/ 全文（不叠加，完成后另存为文件） -->
+      <div class="menu-item has-submenu">
+        <i class="fa fa-language"></i>
+        <span>{{ store.locales==='zh' ? '翻译' : 'Translation' }}</span>
+        <i class="fa fa-caret-right pdf-submenu-arrow"></i>
+        <ul class="submenu">
+          <li :class="{ current: transOn }" @click.stop="startPageTranslation()"
+            :title="store.locales==='zh' ? '当前页立即翻译并叠加，之后滚动 / 翻页到哪翻译到哪' : 'Translate the current page and keep translating as you scroll'">
+            <i class="fa fa-language"></i> {{ store.locales==='zh' ? '逐页翻译（叠加译文，边看边翻）' : 'Page-by-page (overlay)' }}
+          </li>
+          <li :class="{ current: fullTransRunning }" @click.stop="startFullTranslation()"
+            :title="store.locales==='zh' ? '整份文档逐页翻译，过程中不叠加译文；完成后在状态栏点击提示即可另存为文件' : 'Translate the whole document without overlaying; save it from the status bar when done'">
+            <i class="fa" :class="fullTransRunning ? 'fa-spinner fa-spin' : 'fa-globe'"></i>
+            {{ fullTransRunning
+              ? (store.locales==='zh' ? '取消全文翻译' : 'Cancel full translation')
+              : (store.locales==='zh' ? '全文翻译（不叠加，完成后另存）' : 'Full translation (no overlay)') }}
+          </li>
+          <li v-if="transOn" @click.stop="closeTransCtx(); toggleTransVisible()">
+            <i class="fa fa-eye-slash"></i> {{ store.locales==='zh' ? '隐藏逐页译文，只看原文' : 'Hide page translations' }}
+          </li>
+          <li @click.stop="openTransSettings($event)">
+            <i class="fa fa-cog"></i> {{ store.locales==='zh' ? '翻译设置…' : 'Translation settings…' }}
+          </li>
+        </ul>
       </div>
-      <div v-if="transOn" class="menu-item" @click.stop="closeTransCtx(); toggleTransVisible()">
-        <i class="fa fa-eye-slash"></i> {{ store.locales==='zh' ? '隐藏译文，只看原文（全部页）' : 'Hide translation (all pages)' }}
+
+      <!-- 阅读主题（二级菜单）：原色 / 深色（反色）/ 柔和（深灰底反色） -->
+      <div class="menu-item has-submenu">
+        <i class="fa fa-adjust"></i>
+        <span>{{ store.locales==='zh' ? '阅读主题' : 'Reading theme' }}</span>
+        <i class="fa fa-caret-right pdf-submenu-arrow"></i>
+        <ul class="submenu">
+          <li :class="{ current: darkMode === 'off' }" @click.stop="closeTransCtx(); setDarkMode('off')">
+            <i class="fa fa-sun-o"></i> {{ store.locales==='zh' ? '原色（不反色）' : 'Original colors' }}
+          </li>
+          <li :class="{ current: darkMode === 'dark' }" @click.stop="closeTransCtx(); setDarkMode('dark')">
+            <i class="fa fa-moon-o"></i> {{ store.locales==='zh' ? '深色阅读（反色）' : 'Dark reading (inverted)' }}
+          </li>
+          <li :class="{ current: darkMode === 'soft' }" @click.stop="closeTransCtx(); setDarkMode('soft')">
+            <i class="fa fa-adjust"></i> {{ store.locales==='zh' ? '柔和阅读（深灰底反色）' : 'Soft reading (dark gray)' }}
+          </li>
+        </ul>
       </div>
-      <div class="menu-item" @click.stop="openTransSettings($event)">
-        <i class="fa fa-cog"></i> {{ store.locales==='zh' ? '翻译设置…' : 'Translation settings…' }}
+
+      <!-- 视图旋转（二级菜单）：整份文档统一旋转，翻页 / 滚动都保持同一方向 -->
+      <div class="menu-item has-submenu">
+        <i class="fa fa-rotate-right"></i>
+        <span>{{ store.locales==='zh' ? '视图旋转' : 'Rotate view' }}</span>
+        <i class="fa fa-caret-right pdf-submenu-arrow"></i>
+        <ul class="submenu">
+          <li @click.stop="rotateView(-90)">
+            <i class="fa fa-rotate-left"></i> {{ store.locales==='zh' ? '全部页面向左旋转 90°' : 'Rotate all pages left 90°' }}
+          </li>
+          <li @click.stop="rotateView(90)">
+            <i class="fa fa-rotate-right"></i> {{ store.locales==='zh' ? '全部页面向右旋转 90°' : 'Rotate all pages right 90°' }}
+          </li>
+          <li v-if="viewRotated" @click.stop="resetViewRotation()">
+            <i class="fa fa-undo"></i> {{ store.locales==='zh' ? '恢复原始方向' : 'Reset rotation' }}
+          </li>
+        </ul>
       </div>
+
+      <!-- 页面管理：固定在一级菜单最下面（合并 / 删除 / 排序 / 旋转，保存后覆盖或另存为新 PDF） -->
+      <template v-if="pageCount > 0">
+        <div class="menu-divider"></div>
+        <div class="menu-item" @click.stop="closeTransCtx(); openPageEditor()"
+          :title="store.locales==='zh' ? '合并 / 删除 / 调整顺序 / 旋转页面，可覆盖原文件或另存为新 PDF' : 'Merge / delete / reorder / rotate pages; overwrite or save as a new PDF'">
+          <i class="fa fa-files-o"></i> {{ store.locales==='zh' ? '页面管理…' : 'Manage pages…' }}
+        </div>
+      </template>
     </div>
 
     <!-- 翻译设置（来源 / 模型）：默认跟随系统默认来源，也可临时指定 -->
@@ -2409,6 +2868,9 @@ import { getPlatform, hasCapability } from '@/platform'
   flex-direction: column;
   background: var(--backgroundColor);
   overflow: hidden;
+  /* 旋转 / 重排会改页盒尺寸：禁用「滚动锚定」，避免祖先滚动容器因此自动调整滚动位置
+     （单窗口模式下表现就是整个界面上移十几像素） */
+  overflow-anchor: none;
 }
 .pdf-viewport {
   flex: 1;
@@ -4089,6 +4551,35 @@ import { getPlatform, hasCapability } from '@/platform'
   color: var(--fontActiveColor);
   border-color: var(--fontActiveColor);
 }
+
+/* 右键菜单二级菜单：父项右侧箭头 + 当前生效项（主题 / 逐页翻译） */
+.pdf-container .pdf-submenu-arrow {
+  margin-left: auto;
+  width: 12px;
+  font-size: 10px !important;
+  opacity: 0.55;
+}
+.pdf-container .menu-item.current,
+.pdf-container .submenu li.current {
+  color: var(--fontActiveColor);
+  font-weight: 600;
+}
+/* 二级菜单面板：与一级菜单同色、紧凑（定位 / 显隐 / 翻转沿用 style.css 的全局规则） */
+.pdf-container .context-menu .submenu {
+  padding: 4px;
+  border-radius: 6px;
+  background-color: var(--menuColor);
+}
+.pdf-container .context-menu .submenu li i {
+  width: 12px;
+  font-size: 11px;
+  text-align: center;
+  opacity: 0.75;
+}
+.pdf-container .context-menu .submenu li:not(.menu-divider):hover {
+  background-color: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+}
 </style>
 
 <!--
@@ -4114,6 +4605,21 @@ import { getPlatform, hasCapability } from '@/platform'
   cursor: text;
   user-select: text;
   -webkit-user-select: text;
+}
+/* 页面旋转：pdf.js 会给文本层容器挂 data-main-rotation（span 坐标仍是未旋转空间），
+   官方做法是用 CSS 把整层转过去。译文层坐标与文本层相同，必须加同一角度，
+   否则旋转后译文会脱离原文位置。角度 0 不写规则（保持原样）。 */
+.pdf-text-layer[data-main-rotation='90'],
+.pdf-trans-layer[data-main-rotation='90'] {
+  transform: rotate(90deg) translateY(-100%);
+}
+.pdf-text-layer[data-main-rotation='180'],
+.pdf-trans-layer[data-main-rotation='180'] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+.pdf-text-layer[data-main-rotation='270'],
+.pdf-trans-layer[data-main-rotation='270'] {
+  transform: rotate(270deg) translateX(-100%);
 }
 .pdf-text-layer :is(span, br) {
   color: transparent;
@@ -4155,6 +4661,8 @@ import { getPlatform, hasCapability } from '@/platform'
   z-index: 1;
   overflow: hidden;
   pointer-events: none;
+  /* 与文本层一致：按 data-main-rotation 旋转时以左上角为原点 */
+  transform-origin: 0 0;
 }
 .pdf-trans-item {
   position: absolute;

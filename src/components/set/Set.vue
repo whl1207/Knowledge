@@ -1300,8 +1300,8 @@ onBeforeUnmount(() => {
             <label>{{ store.locales=='zh'?'窗口模式' : 'Window Mode' }}</label>
             <select v-model="store.UI.windowMode" class="layout-select" @change="onWindowModeChange"
                     :title="store.locales=='zh'
-                      ? '单窗口模式：一切都在主窗口内完成——文件在标签页里打开（主页右侧栏 / 知识管理右侧只有一个视图标签 + 文件标签），设置与插件面板以页面内浮层显示，适合安卓、手机网页等单页面环境。多窗口模式：与原来一致——设置 / 插件面板 / 文件各开独立窗口，知识管理不显示标签栏，文件树点文件直接开窗口。安卓 / 网页端没有窗口壳，始终按单窗口方式工作。'
-                      : 'Single-window: everything stays inside the main window — files open in tabs (Home dock / Knowledge Management shows one view tab plus file tabs), Settings and plugin panels appear as in-page overlays; best for Android and single-page web builds. Multi-window: the original behaviour — Settings, plugin panels and files get their own windows, Knowledge Management shows no tab bar, and clicking a file opens a window. Android and web builds have no window chrome and always run single-window.'">
+                      ? '单窗口模式：一切都在主窗口内完成——文件在标签页里打开（主页右侧栏 / 知识管理右侧只有一个视图标签 + 文件标签），浏览器内嵌到主内容区，设置与插件面板以页面内浮层显示，适合安卓、手机网页等单页面环境。多窗口模式：与原来一致——设置 / 插件面板 / 文件 / 浏览器各开独立窗口，知识管理不显示标签栏，文件树点文件直接开窗口。安卓 / 网页端没有窗口壳，始终按单窗口方式工作。'
+                      : 'Single-window: everything stays inside the main window — files open in tabs (Home dock / Knowledge Management shows one view tab plus file tabs), the browser opens inside the main content area, Settings and plugin panels appear as in-page overlays; best for Android and single-page web builds. Multi-window: the original behaviour — Settings, plugin panels, files and the browser get their own windows, Knowledge Management shows no tab bar, and clicking a file opens a window. Android and web builds have no window chrome and always run single-window.'">
               <option value="single">{{ store.locales=='zh'?'单窗口模式（标签页 / 页面内浮层）' : 'Single window (tabs / in-page overlays)' }}</option>
               <option value="multi" :disabled="!hasCapability('window.chrome')">{{ store.locales=='zh'?'多窗口模式（独立窗口）' : 'Multi-window (separate windows)' }}</option>
             </select>

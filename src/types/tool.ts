@@ -51,11 +51,29 @@ export interface PtcRunPreview {
   toolCalls: Array<{ name: string; input?: any; ok: boolean; error?: string }>
 }
 
+/** 工具返回的图片（base64，无 `data:` 前缀）：由 agent-loop 落盘后作为图片内容块交给视觉模型 */
+export interface ToolImage {
+  /** MIME（当前只用于 screenshot 的 image/jpeg） */
+  mime: string
+  /** base64 本体（不含 `data:<mime>;base64,` 前缀） */
+  data: string
+  width?: number
+  height?: number
+}
+
 /** 统一工具结果：ok 为 false 即失败（isError 语义） */
 export interface ToolResult {
   ok: boolean
   value?: unknown
   error?: string
+  /**
+   * 工具返回的图片附件（模型可见）。
+   *
+   * ⚠️ 不要把这些 base64 塞进 `value`：`value` 会走工具结果预算被掐中段，
+   * base64 一旦被截断就既不是图片也不是合法数据。agent-loop 会把它们落到临时文件、
+   * 在工具消息之后追加一条图片消息（各 provider 由 ai-core 转成 image_url / input_image）。
+   */
+  images?: ToolImage[]
   /**
    * UI 专用预览载荷（如编辑类工具的差异行）。
    *

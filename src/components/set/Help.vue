@@ -1440,6 +1440,25 @@ const creditProjects = ref([
       'Runtime is bundled under /drawio and works fully offline; see scripts/fetch-drawio-webapp.mjs for fetching/pruning',
       'Edits are debounce-saved back to the original file by the host; remote files open read-only'
     ]
+  },
+  {
+    key: 'ego-lite', icon: 'fa-github', url: 'https://github.com/citrolabs/ego-lite',
+    nameZh: 'Citro Labs / ego-lite', nameEn: 'Citro Labs / ego-lite',
+    blurbZh: '浏览器 Agent 的观测/动作/会话语义（MIT）', blurbEn: 'Observation, action and session semantics for the browser agent (MIT)',
+    pointsZh: [
+      '页面观测：可访问性树快照 + 稳定 ref（[ref=N]），动作优先用 ref，页面变化后重新快照；同名节点不输出 locator',
+      '可信输入与可操作性：真实鼠标/键盘、滚动进入视野、可见/禁用/遮挡检查、动作回执（popup/dialog/download/console）',
+      '会话语义：每个任务一个 Space、页面 label（p1/p2…）、页面预算、finish({keep})、接管/交还；同会话串行、跨会话并行',
+      '代码轮次：一轮脚本完成多步操作并附最终快照（browser_run），减少模型往返；动作失败自动按 role+name 恢复 ref',
+      '设置作为浏览器标签页、网页右键菜单（打开/保存/导出/检查元素）等交互形态'
+    ],
+    pointsEn: [
+      'Page observation: accessibility snapshot + stable refs ([ref=N]); actions target refs and re-snapshot after changes; duplicate names omit locators',
+      'Trusted input & actionability: real mouse/keyboard, scroll-into-view, visible/disabled/occluded checks, action receipts (popup/dialog/download/console)',
+      'Session semantics: one Space per task, page labels (p1/p2…), page budget, finish({keep}), takeover/hand-off; FIFO per session, parallel across sessions',
+      'Code rounds: one script performs multiple actions and ends with a snapshot (browser_run), cutting model round-trips; stale refs recover by role+name',
+      'Interaction patterns: settings as a browser tab, page context menu (open/save/export/inspect)'
+    ]
   }
 ])
 const crName = (o: { nameZh: string; nameEn: string }, zh: boolean) => (zh ? o.nameZh : o.nameEn)
@@ -1808,9 +1827,9 @@ const translations = {
           { title: '源码编辑', desc: 'Monaco 编辑器直接改 Markdown 原文（含 YAML 头），支持 AI 辅助与拖入图片 / 文件自动生成引用链接；<code>.py</code> / <code>.json</code> 等代码与数据文件也在这里以文本方式打开。' },
           { title: '可视编辑（块编辑）', desc: '块式富文本：输入 <code>/</code> 唤出块类型菜单，块手柄菜单的「转换为」可在标题 / 列表 / 表格 / 代码之间转换。' },
           { title: '思维导图 / 演示', desc: '导图按 Markdown 标题层级生成；演示把 Markdown 转成幻灯片（按 <code>---</code> 或智能切分分页，支持目录 / 全屏 / 主题切换）；两者在触屏上都可左右滑动翻页。' },
-          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>原地翻译</strong>；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）在文件视图里用 iframe 渲染（浏览看效果、源码编辑改 HTML），与其它文件一样进标签页 / 窗口，不再另开内置浏览器。' },
+          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>逐页 / 全文翻译</strong>（全文翻译不叠加译文，完成后可另存为 Markdown）；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）在文件视图里用 iframe 渲染（浏览看效果、源码编辑改 HTML），与其它文件一样进标签页 / 窗口，不再另开内置浏览器。' },
           { title: 'Mermaid 图表（.mmd / .mermaid）', desc: '<strong>浏览</strong>视图把整份源码渲染成一张图，点图可放大 / 平移 / 导出 PNG、SVG；<strong>源码编辑</strong>视图改文本。渲染失败时原地显示错误与源码便于修正；空文件默认直接进源码编辑。' },
-          { title: 'PDF 页面管理', desc: 'PDF 状态栏的「页面管理」把整份 PDF 拆成一页一张的缩略图：可把别的 PDF <strong>合并</strong>进来、勾选后<strong>删除</strong>整页、拖拽缩略图<strong>调整顺序</strong>、单页或整组<strong>旋转</strong>；确认后由 pdf-lib 重新组页，可覆盖原文件或另存为新 PDF（远程预览只能另存）。' }
+          { title: 'PDF 页面管理', desc: 'PDF 右键菜单的「页面管理…」（固定在一级菜单最下面）把整份 PDF 拆成一页一张的缩略图：可把别的 PDF <strong>合并</strong>进来、勾选后<strong>删除</strong>整页、拖拽缩略图<strong>调整顺序</strong>、单页 / 整组 / <strong>全部页面</strong>旋转（工具栏「全部左转 / 全部右转」）；确认后由 pdf-lib 重新组页，可覆盖原文件或另存为新 PDF（远程预览只能另存）。右键菜单里的「翻译」「阅读主题」「视图旋转」都是二级菜单，其中视图旋转作用于<strong>整份文档</strong>（只改显示、不改文件）。' }
         ]
       },
       export: {
@@ -2059,10 +2078,10 @@ const translations = {
       },
       features: {
         title: '核心功能',
-        step1: { title: '📂 文件浏览', desc: '左侧文件树展示目录结构。展开 / 折叠点节点左侧的箭头（单击不再开合）；点击 / 双击文件在<strong>右侧标签页</strong>打开（标签内可切换该文件的多视图；需要独立窗口时右键「在新窗口打开」），安卓 / 网页端同样在右侧标签页显示（安卓上单击文件即打开、单击文件夹即进入）；双击文件夹只让右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）定位到该目录。右键菜单按节点类型区分：文件上「打开」直接列出各视图、「操作」里是 在新窗口打开 / 打开所在位置 / 复制地址 / 系统打开；文件夹与空白处可在「新建」里建 文件夹 / Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架 / Word / Excel / PPT（Office 三种会写入一份空白文档骨架，建好即可打开编辑），并支持 复制 / 粘贴（剪贴板与「文件」视图共用）/ 重命名 / 删除。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下不再左右分栏：文件树变成<strong>整屏抽屉</strong>（工具栏最左的开关打开、左上角 ← 收起，点文件夹 / 文件后自动收起），右侧视图始终占满整屏；返回手势会先关掉当前文件标签，再收起抽屉。' },
+        step1: { title: '📂 文件浏览', desc: '左侧文件树展示目录结构。展开 / 折叠点节点左侧的箭头（单击不再开合）；点击 / 双击文件在<strong>右侧标签页</strong>打开（标签内可切换该文件的多视图；需要独立窗口时右键「在新窗口打开」），安卓 / 网页端同样在右侧标签页显示（安卓上单击文件即打开、单击文件夹即进入）；双击文件夹只让右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）定位到该目录。右键菜单按节点类型区分：文件上「打开」直接列出各视图、「操作」里是 在新窗口打开 / 打开所在位置 / 复制地址 / 系统打开；文件夹与空白处可在「新建」里建 文件夹 / Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架 / Word / Excel / PPT（Office 三种会写入一份空白文档骨架，建好即可打开编辑），并支持 复制 / 粘贴（剪贴板与「文件」视图共用）/ 重命名 / 删除。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下不再左右分栏：文件树变成<strong>整屏抽屉</strong>（工具栏左侧的开关打开、左上角 ← 收起，点文件夹 / 文件后自动收起），右侧视图始终占满整屏；返回手势会先关掉当前文件标签，再收起抽屉。' },
         step2: { title: '🔄 多视图切换', desc: '同一个文件可切换不同视图查看：浏览（渲染）、源码编辑、可视编辑（块编辑/所见即所得）、思维导图、演示；<strong>Word / Excel / PPT</strong> 额外提供「<strong>Office 编辑</strong>」（内嵌真实办公套件，可原地编辑并保存为标准 Office 文件，默认即用该视图打开）。你可以在设置中开启/关闭不需要的视图。' },
         step3: { title: '🔍 全文搜索', desc: '顶部搜索框支持按文件名和内容全文搜索，快速定位所需文件；结果双击在右侧标签页打开，打开后搜索面板保持打开，可连续打开多个结果（按 Esc 或点右上角 ✕ 关闭）。' },
-        step4: { title: '🏷️ 分类管理', desc: '支持按 YAML 属性（状态等）筛选文件、「看板」视图按属性分组并快速记录 / 拖拽改属性（卡片即 Markdown 文件）、「表格」视图按列查看与整理属性（排序 / 筛选 / 批量改值 / 整块粘贴，列按当前「深度」范围的属性生成）、日历视图的甘特模式跟踪项目进度、图谱展示文件关联关系，满足不同维度的管理需求。除「文件」视图外，日历 / 看板 / 表格 / 图谱 / 地图都跟随左侧当前目录取数据；它们与文件视图共用一条顶部工具栏（多视图并排时也只有一条）：最左侧的显示 / 隐藏左侧面板开关 + 视图选择 + 后退 / 前进 / 向上 / 刷新 + 可点击的路径面包屑 + 右侧搜索框（工具栏很窄时导航按钮与面包屑会自动收起，快捷键 Alt+← / Alt+→ / Backspace 仍可用），搜索框也是共用的，各视图语法一致（关键词匹配文件名 / 路径 / 属性值，另支持 状态:待办、优先级>2）；底部状态栏只放各视图自己的设置与计数。' }
+        step4: { title: '🏷️ 分类管理', desc: '支持按 YAML 属性（状态等）筛选文件、「看板」视图按属性分组并快速记录 / 拖拽改属性（卡片即 Markdown 文件）、「表格」视图按列查看与整理属性（排序 / 筛选 / 批量改值 / 整块粘贴，列按当前「深度」范围的属性生成）、日历视图的甘特模式跟踪项目进度、图谱展示文件关联关系，满足不同维度的管理需求。除「文件」视图外，日历 / 看板 / 表格 / 图谱 / 地图都跟随左侧当前目录取数据；它们与文件视图共用一条顶部工具栏（多视图并排时也只有一条）：最左侧的视图选择 + 显示 / 隐藏左侧面板开关 + 后退 / 前进 / 向上 / 刷新 + 可点击的路径面包屑 + 右侧搜索框（工具栏很窄时导航按钮与面包屑会自动收起，快捷键 Alt+← / Alt+→ / Backspace 仍可用），搜索框也是共用的，各视图语法一致（关键词匹配文件名 / 路径 / 属性值，另支持 状态:待办、优先级>2）；底部状态栏只放各视图自己的设置与计数。' }
       },
       smart: {
         title: '🧠 文档智能操作与导出 Word',
@@ -2073,7 +2092,7 @@ const translations = {
         },
         step2: {
           title: '导出 Markdown / Word / PDF',
-          desc: '点状态栏的 ⬇ <strong>导出文档</strong> 图标，菜单里有「导出 Markdown」「导出 Word」「导出 PDF」三项；<strong>导出 Markdown</strong> 同样会弹出<strong>另存为对话框</strong>（默认当前文件所在目录），导出后提示实际保存路径。'
+          desc: '点状态栏的 ⬇ <strong>导出文档</strong> 图标，菜单里有「导出 Markdown」「导出 Word」「导出 PDF」三项；<strong>导出 Markdown</strong> 同样会弹出<strong>另存为对话框</strong>（默认当前文件所在目录），导出后提示实际保存路径。<strong>导出 PDF</strong> 会把 Markdown 标题写成 PDF 书签（目录），用本软件或其它阅读器打开都能直接看到目录并跳转。'
         },
         step3: {
           title: '导出 Word 的另存为对话框',
@@ -2658,7 +2677,7 @@ const translations = {
       features: {
         title: '能力一览',
         tabs: { name: '多标签浏览', desc: '标签可拖拽排序、悬浮关闭；<strong>搜索栏就是地址栏</strong>——输入网址直接打开、输入关键词用所选引擎搜索（地址栏会提示当前引擎），自动补全与加载状态均有提示。' },
-        aiTab: { name: 'AI 会话标签', desc: '智能体打开网页时使用带机器人标记的「AI 会话标签」，与你的手动标签区分；空闲后自动回收，点一下即接管保留。' },
+        aiTab: { name: 'AI 会话标签', desc: '智能体打开网页时使用带机器人标记的「AI 会话标签」，与你的手动标签区分；Agent 只操作自己的 AI 标签，不会改写或关闭你手动打开的标签；空闲后自动回收，点一下即接管保留。' },
         bookmarks: { name: '收藏书签', desc: '收藏常用页面，书签落盘到「浏览器设置 → 收藏夹文件夹」目录；<strong>新标签页整页就是收藏夹网格</strong>（文件夹点进去下钻，全部平铺、不折叠），书签面板可快速打开、编辑与删除。' },
         save: { name: '离线保存整页', desc: '把当前页（含图片、样式等资源）整体保存为离线 HTML，便于归档与后续阅读。' },
         clip: { name: '保存 Markdown 到知识库', desc: '把当前页正文转成干净的 Markdown（保留链接）存进知识库，默认落在根目录的 <code>网页剪藏</code> 子文件夹（可在设置里改），文件带标题 / 来源 / 时间的 YAML 头，可直接在知识管理里阅读、检索与做知识处理。' },
@@ -2681,7 +2700,10 @@ const translations = {
           'AI 会话标签会<strong>空闲自动回收</strong>以免堆积；想保留某个页面就点一下该标签。',
           '「保存 Markdown 到知识库」默认存到知识库根目录的 <code>网页剪藏</code> 子文件夹（可改成别的子目录或直接存根目录）。',
           '缓存管理位于右侧设置栏底部，可查看缓存大小并一键清理（清理前会确认）。',
-          '浏览器 Agent 同时是<strong>内置 MCP 服务（builtin-browser）</strong>：智能体通过 browser_* 工具导航、新建 / 切换 / 关闭标签、读取正文（文本 / Markdown / HTML）、点击、输入、滚动与截图，可在「设置 → 工具 → MCP」中开关与查看函数。截图返回的是<strong>压缩后的 JPEG</strong>（最长边 1024），避免一张大图把模型上下文挤爆。同页还有 <strong>drawio 内置服务（builtin-drawio）</strong>：智能体用 44 个 drawio_* 工具直接创建、查看、修改、布局与导出本地 .drawio 图表。',
+          '浏览器 Agent 同时是<strong>内置 MCP 服务（builtin-browser）</strong>：智能体通过 browser_* 工具导航、新建 / 切换 / 关闭标签、读取正文（文本 / Markdown / HTML）、点击、输入、滚动与截图，可在「设置 → 工具 → MCP」中开关与查看函数。截图会以<strong>图片</strong>形式交给支持视觉的模型（自动缩放到最长边 1024 并压缩；不支持图片的模型只会看到一句说明）。Agent 只能操作自己的会话标签，不会改写或关闭你手动打开的标签。同页还有 <strong>drawio 内置服务（builtin-drawio）</strong>：智能体用 44 个 drawio_* 工具直接创建、查看、修改、布局与导出本地 .drawio 图表。',
+          '单窗口模式下，导航栏的地球图标会在<strong>主内容区</strong>打开浏览器（与主页/知识管理同样切换）；多窗口模式仍打开独立浏览器窗口。图标位于四个内置模块之后、插件之前。',
+          '下载与历史入口在<strong>顶部工具栏右侧</strong>；「浏览器设置 → 图标」可分别隐藏收藏夹、下载、历史图标。',
+          '点顶部 ⚙ 会把<strong>浏览器设置</strong>作为独立标签页打开；在网页里<strong>点右键</strong>可在系统浏览器打开、保存整页（离线 HTML）、保存 Markdown 到知识库、另存为 PDF、复制链接/图片地址、新标签打开链接/图片与检查元素。',
           '知识管理中的 <strong>.html / .htm</strong> 本地网页与普通文件一样在文件视图 / 标签页里打开：<strong>浏览</strong>视图用 iframe 渲染网页，<strong>源码编辑</strong>直接改 HTML；不再另开内置浏览器窗口（需要 AI 操作网页时仍可打开浏览器 Agent）。'
         ]
       }
@@ -2978,9 +3000,9 @@ const translations = {
           { title: 'Source edit', desc: 'Monaco editor over the raw Markdown (incl. YAML front matter), with AI assistance and drag-and-drop to create reference links; code and data files such as <code>.py</code> / <code>.json</code> open as text here too.' },
           { title: 'Visual edit (blocks)', desc: 'Block-based rich text: type <code>/</code> for the block menu, and the block handle’s “Convert to” switches between heading / list / table / code.' },
           { title: 'Mind map / Presentation', desc: 'The mind map follows heading levels; Presentation turns Markdown into slides (split by <code>---</code> or smart splitting, with outline / full-screen / themes); both turn pages with a left / right swipe on touch screens.' },
-          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>in-place translation</strong>; Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' },
+          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>page-by-page / full-document translation</strong> (the full result does not overlay the pages and can be saved as Markdown); Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' },
           { title: 'Mermaid diagrams (.mmd / .mermaid)', desc: 'The <strong>Browse</strong> view renders the whole source file as one diagram — click it to zoom, pan and export PNG / SVG; the <strong>Source</strong> view edits the text. A render error shows the message and the source in place; an empty file opens directly in Source view.' },
-          { title: 'PDF page management', desc: 'The “Manage pages” button in the PDF status bar turns the document into one-thumbnail-per-page cards: <strong>merge</strong> other PDFs in, <strong>delete</strong> selected pages, <strong>drag to reorder</strong>, and <strong>rotate</strong> a page or the whole selection. Confirming rebuilds the file with pdf-lib — overwrite the original or save as a new PDF (remote previews can only be saved as new).' }
+          { title: 'PDF page management', desc: 'The “Manage pages…” item (pinned at the bottom of the PDF context menu) turns the document into one-thumbnail-per-page cards: <strong>merge</strong> other PDFs in, <strong>delete</strong> selected pages, <strong>drag to reorder</strong>, and <strong>rotate</strong> a page, the selection, or <strong>all pages</strong> (toolbar “All left / All right”). Confirming rebuilds the file with pdf-lib — overwrite the original or save as a new PDF (remote previews can only be saved as new). “Translation”, “Reading theme” and “Rotate view” are submenus; the view rotation applies to the <strong>whole document</strong> and is display-only.' }
         ]
       },
       export: {
@@ -3229,10 +3251,10 @@ const translations = {
       },
       features: {
         title: 'Core Features',
-        step1: { title: '📂 File Browsing', desc: 'File tree on the left shows directory structure. Expand / collapse with the arrow on the left of a node (a plain click no longer opens or closes it); on desktop, click / double-click a file to open it in a separate window (open several windows side by side for comparison), while on Android / the web it opens in an in-app overlay window above the main UI (same idea as Settings; on Android a single tap opens a file and a single tap on a folder enters it). Double-clicking a folder brings every view on the right (Files / Kanban / Table / Graph / Map / Calendar) to that folder. The context menu adapts to the node: on a file, "Open" lists the views directly while "Actions" holds Reveal in Folder / Copy Path / System; on a folder or the empty area, "New" creates a folder / Markdown / Excalidraw / draw.io / workflow / data-canvas / scaffold / Word / Excel / PPT file (the Office types get a blank document skeleton written in, so they are ready to edit), plus Copy / Paste (clipboard shared with the file view) / Rename / Delete.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) there is no longer a side-by-side split: the file tree becomes a <strong>full-screen drawer</strong> (open it with the leftmost toolbar switch, close it with the ← inside it or by tapping a folder / file) and the view on the right always fills the screen.' },
+        step1: { title: '📂 File Browsing', desc: 'File tree on the left shows directory structure. Expand / collapse with the arrow on the left of a node (a plain click no longer opens or closes it); on desktop, click / double-click a file to open it in a separate window (open several windows side by side for comparison), while on Android / the web it opens in an in-app overlay window above the main UI (same idea as Settings; on Android a single tap opens a file and a single tap on a folder enters it). Double-clicking a folder brings every view on the right (Files / Kanban / Table / Graph / Map / Calendar) to that folder. The context menu adapts to the node: on a file, "Open" lists the views directly while "Actions" holds Reveal in Folder / Copy Path / System; on a folder or the empty area, "New" creates a folder / Markdown / Excalidraw / draw.io / workflow / data-canvas / scaffold / Word / Excel / PPT file (the Office types get a blank document skeleton written in, so they are ready to edit), plus Copy / Paste (clipboard shared with the file view) / Rename / Delete.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) there is no longer a side-by-side split: the file tree becomes a <strong>full-screen drawer</strong> (open it with the panel switch in the toolbar, close it with the ← inside it or by tapping a folder / file) and the view on the right always fills the screen.' },
         step2: { title: '🔄 Multi-View Switching', desc: 'The same file can be viewed in different modes: Browse (rendered), Edit (source), Visual edit (block / WYSIWYG), Mindmap, Presentation; <strong>Word / Excel / PPT</strong> additionally offer <strong>Office edit</strong> — a real, embedded office suite that edits the document in place and saves a standard Office file (it is the default view for those types). You can enable/disable views in Settings.' },
         step3: { title: '🔍 Full-Text Search', desc: 'The top search bar searches filenames and full text to quickly locate files. Double-click a result to open it in a separate window; the search panel stays open so several results can be opened in a row (close it with Esc or ✕).' },
-        step4: { title: '🏷️ Organization', desc: 'Filter files by YAML attribute (status and more), group and capture on the "Kanban" view (each card is a Markdown file, drag to change an attribute), review and tidy attributes column by column in the "Table" view (sort / filter / batch edit / block paste; its columns come from the attributes inside the current depth), track project timelines with the Calendar view\u2019s Gantt mode, and explore file relationships in the Graph. Except Files, every global view reads the folder selected on the left and they all share one top toolbar (a single bar even when several views are side by side): a leftmost show / hide left panel switch + a view selector + back / forward / up / refresh + a clickable path breadcrumb + a shared search box (when the toolbar gets very narrow the nav buttons and breadcrumb collapse; the Alt+← / Alt+→ / Backspace shortcuts still work) whose syntax is identical everywhere (keywords match file name / path / attribute values, plus 状态:todo or 优先级>2); the bottom status bar keeps only each view\u2019s own settings and counters.' }
+        step4: { title: '🏷️ Organization', desc: 'Filter files by YAML attribute (status and more), group and capture on the "Kanban" view (each card is a Markdown file, drag to change an attribute), review and tidy attributes column by column in the "Table" view (sort / filter / batch edit / block paste; its columns come from the attributes inside the current depth), track project timelines with the Calendar view\u2019s Gantt mode, and explore file relationships in the Graph. Except Files, every global view reads the folder selected on the left and they all share one top toolbar (a single bar even when several views are side by side): a leftmost view selector + show / hide left panel switch + back / forward / up / refresh + a clickable path breadcrumb + a shared search box (when the toolbar gets very narrow the nav buttons and breadcrumb collapse; the Alt+← / Alt+→ / Backspace shortcuts still work) whose syntax is identical everywhere (keywords match file name / path / attribute values, plus 状态:todo or 优先级>2); the bottom status bar keeps only each view\u2019s own settings and counters.' }
       },
       smart: {
         title: '🧠 Document Smart Actions & Word Export',
@@ -3243,7 +3265,7 @@ const translations = {
         },
         step2: {
           title: 'Export Markdown / Word / PDF',
-          desc: 'Click the ⬇ <strong>Export document</strong> icon in the status bar: the menu offers “Export Markdown”, “Export Word” and “Export PDF”. <strong>Export Markdown</strong> also opens a <strong>save-as dialog</strong> (defaults to the folder of the current file) and reports the saved path.'
+          desc: 'Click the ⬇ <strong>Export document</strong> icon in the status bar: the menu offers “Export Markdown”, “Export Word” and “Export PDF”. <strong>Export Markdown</strong> also opens a <strong>save-as dialog</strong> (defaults to the folder of the current file) and reports the saved path. <strong>Export PDF</strong> writes the Markdown headings as PDF bookmarks (outline), so the exported file shows a jumpable table of contents here and in other readers.'
         },
         step3: {
           title: 'The Word “Save as” dialog',

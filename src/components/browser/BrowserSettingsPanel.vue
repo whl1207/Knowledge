@@ -167,6 +167,28 @@
       </div>
     </div>
 
+    <!-- 顶部工具栏图标开关：收藏夹 / 下载 / 历史 -->
+    <div class="bs-row">
+      <label class="bs-label" :title="zh ? '顶部图标' : 'Toolbar icons'">{{ zh ? '图标' : 'Icons' }}</label>
+      <div class="bs-control bs-switch-row bs-icons-row">
+        <button class="bs-icon-toggle" :class="{ on: store.UI.browserShowBookmarks !== false }"
+          :title="zh ? '显示/隐藏「收藏夹」图标' : 'Show/hide the bookmarks icon'"
+          @click="toggleIcon('browserShowBookmarks')">
+          <i class="fa fa-tag"></i><span>{{ zh ? '收藏夹' : 'Bookmarks' }}</span>
+        </button>
+        <button class="bs-icon-toggle" :class="{ on: store.UI.browserShowDownloads !== false }"
+          :title="zh ? '显示/隐藏「下载」图标' : 'Show/hide the downloads icon'"
+          @click="toggleIcon('browserShowDownloads')">
+          <i class="fa fa-download"></i><span>{{ zh ? '下载' : 'Downloads' }}</span>
+        </button>
+        <button class="bs-icon-toggle" :class="{ on: store.UI.browserShowHistory !== false }"
+          :title="zh ? '显示/隐藏「历史」图标' : 'Show/hide the history icon'"
+          @click="toggleIcon('browserShowHistory')">
+          <i class="fa fa-history"></i><span>{{ zh ? '历史' : 'History' }}</span>
+        </button>
+      </div>
+    </div>
+
     <!-- 说明仅在宽版（主应用设置页）显示；紧凑侧栏改为 title 悬浮提示 -->
     <div v-if="!compact" class="bs-hint">
       <i class="fa fa-info-circle"></i>
@@ -205,6 +227,12 @@ const pathLabel = computed(() => {
 })
 
 const allowEval = computed(() => store.UI.browserAllowEval === true)
+
+/** 顶部工具栏图标开关（纯渲染层设置，浏览器窗口下次渲染/重开即生效） */
+const toggleIcon = (key: 'browserShowBookmarks' | 'browserShowDownloads' | 'browserShowHistory') => {
+  store.UI[key] = store.UI[key] === false
+  store.saveConfig()
+}
 
 /** 剪藏 YAML 头开关（纯渲染层设置，下次剪藏生效） */
 const toggleFrontMatter = () => {
@@ -351,6 +379,36 @@ const clearSaveDir = () => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
 }
 .bs-switch.on .bs-switch-knob { left: 18px; }
+/* 工具栏图标开关（收藏夹/下载/历史） */
+.bs-icons-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.bs-icon-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: .55;
+  transition: all .15s;
+}
+.bs-icon-toggle i { font-size: 11px; }
+.bs-icon-toggle.on {
+  opacity: 1;
+  color: var(--fontActiveColor);
+  border-color: color-mix(in srgb, var(--fontActiveColor) 45%, transparent);
+  background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent);
+}
+.browser-settings-panel.compact .bs-icons-row { justify-content: flex-start; }
+
 .bs-hint {
   display: flex;
   align-items: flex-start;

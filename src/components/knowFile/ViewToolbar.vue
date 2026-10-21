@@ -2,8 +2,9 @@
 /**
  * ViewToolbar.vue — 知识管理全局视图的顶部工具栏
  *
- * 文件 / 看板 / 图谱 / 表格 / 地图 / 日历 共用同一份工具栏：最左侧的「显示 / 隐藏左侧面板」开关
- * （收起 / 展开动画由宿主 explorer.vue 负责）、「视图选择」+ 后退 / 前进 / 向上 / 刷新 + 可点击的面包屑，
+ * 文件 / 看板 / 图谱 / 表格 / 地图 / 日历 共用同一份工具栏：最左侧的「视图选择」下拉，
+ * 紧挨着「显示 / 隐藏左侧面板」开关（收起 / 展开动画由宿主 explorer.vue 负责）、
+ * 后退 / 前进 / 向上 / 刷新 + 可点击的面包屑，
  * 右侧是当前目录的搜索框（各视图只负责自己的筛选逻辑，输入框样式与位置在这里统一）。
  *
  * - 导航历史存在 store.knowNavStack（各视图共享一份，切视图不会丢后退能力），
@@ -46,7 +47,7 @@ const emit = defineEmits<{
 const onInput = (e: Event) => emit('update:search', (e.target as HTMLInputElement).value)
 
 // ============ 视图选择 ============
-// 主窗口没有顶部标签栏，视图选择原先放在文件树面板顶部；现移到这里，紧挨折叠图标右侧，
+// 主窗口没有顶部标签栏，视图选择原先放在文件树面板顶部；现移到工具栏最左侧（折叠按钮左边），
 // 这样文件树面板顶部只剩「搜索框 + 4 个按钮」一行。
 /** 视图本地化显示名：store.view / viewList 的内部标识恒为中文（isView / 组件 v-if 都依赖），仅下拉展示随语言切换 */
 const VIEW_NAME_EN: Record<string, string> = {
@@ -79,6 +80,16 @@ onMounted(() => store.knowSyncNav())
 
 <template>
   <div class="file-toolbar">
+    <!-- 视图选择：工具栏最左侧（折叠按钮左边） -->
+    <select
+      v-if="showViewSelect"
+      class="toolbar-view-select"
+      :value="activeGlobalView"
+      :title="zh() ? '选择视图' : 'Select view'"
+      @change="onGlobalViewChange"
+    >
+      <option v-for="v in viewsForGrid" :key="v" :value="v">{{ viewName(v) }}</option>
+    </select>
     <button class="toolbar-btn panel-toggle" :class="{ active: props.panelOpen }" @click="emit('toggle-panel')"
       :title="props.panelOpen ? (zh() ? '隐藏左侧面板' : 'Hide left panel') : (zh() ? '显示左侧面板' : 'Show left panel')">
       <i class="fa" :class="props.panelOpen ? 'fa-outdent' : 'fa-indent'"></i>
@@ -97,16 +108,6 @@ onMounted(() => store.knowSyncNav())
         <i v-if="i < store.knowCrumbs.length - 1" class="fa fa-chevron-right crumb-sep"></i>
       </template>
     </div>
-    <!-- 视图选择：紧挨折叠图标右侧 -->
-    <select
-      v-if="showViewSelect"
-      class="toolbar-view-select"
-      :value="activeGlobalView"
-      :title="zh() ? '选择视图' : 'Select view'"
-      @change="onGlobalViewChange"
-    >
-      <option v-for="v in viewsForGrid" :key="v" :value="v">{{ viewName(v) }}</option>
-    </select>
     <div v-if="props.searchable" class="file-search" @click.stop :title="props.searchTitle || (zh() ? '搜索当前目录' : 'Search current folder')">
       <i class="fa fa-search"></i>
       <input class="file-search-input" :value="props.search" :placeholder="props.placeholder || (zh() ? '搜索…' : 'Search…')" @input="onInput" @keydown.stop @keyup.esc="emit('update:search', '')" />
@@ -150,18 +151,18 @@ onMounted(() => store.knowSyncNav())
 }
 .toolbar-btn:hover:not(:disabled) { background: var(--menuActiveColor); }
 .toolbar-btn:disabled { opacity: 0.35; cursor: default; }
-/* 最左侧的「显示 / 隐藏左侧面板」开关：展开时点亮，与导航按钮之间用竖线分隔 */
+/* 「显示 / 隐藏左侧面板」开关：展开时点亮，与导航按钮之间用竖线分隔 */
 .panel-toggle.active { color: var(--fontActiveColor); }
-/* 视图选择：与工具栏其它控件同高 */
+/* 视图选择：工具栏最左侧；无边框、无底色，颜色与工具栏统一（融入工具栏，不抢视觉） */
 .toolbar-view-select {
   flex-shrink: 0;
   height: 26px;
   max-width: 104px;
   padding: 0 4px;
   box-sizing: border-box;
-  border: 1px solid var(--borderColor);
+  border: none;
   border-radius: 4px;
-  background: var(--backgroundColor);
+  background: transparent;
   color: var(--fontColor);
   font-size: 12px;
   outline: none;

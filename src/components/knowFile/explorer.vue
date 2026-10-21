@@ -51,11 +51,13 @@
               :title="tab.kind === 'file'
                 ? (tab.path || tab.label)
                 : `${store.locales === 'zh' ? '视图' : 'View'}：${tab.label}`"
+              :aria-label="tab.label"
               @click="onTabClick(tab)"
               @keydown.enter="onTabClick(tab)"
             >
               <i class="fa know-tab-icon" :class="tab.icon"></i>
-              <span class="know-tab-text">{{ tab.label }}</span>
+              <!-- 最左侧的「视图」标签只显示图标，名称放在悬停提示里；文件标签仍显示文件名 -->
+              <span v-if="tab.kind === 'file'" class="know-tab-text">{{ tab.label }}</span>
               <i
                 v-if="tab.closable"
                 class="fa fa-times know-tab-close"
@@ -504,7 +506,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     }),
   )
 
-  // 顶部工具栏（面板开关 + 视图选择 + 路径面包屑 + 搜索 + 刷新）：右侧视图共用这一条
+  // 顶部工具栏（视图选择 + 面板开关 + 路径面包屑 + 搜索 + 刷新）：右侧视图共用这一条
   const viewToolbarVisible = computed(() => !!store.root)
   // 只有「地图」没有搜索需求：当前视图是地图时不显示搜索框
   const viewToolbarSearchable = computed(() => activeView.value !== '地图')
@@ -922,6 +924,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
   }
   .know-tab-icon { font-size: 11px; opacity: 0.9; }
   .know-tab-text { overflow: hidden; text-overflow: ellipsis; }
+  /* 最左侧的「视图」标签只有图标（名称见悬停提示）：左右留白略收窄，避免看起来像按坏了的按钮 */
+  .know-tab:not(.is-file) { padding: 0 7px; }
   /* 视图标签是「固定页」：用左侧小竖条与文件标签区分（不可关闭） */
   .know-tab:not(.is-file)::before {
     content: '';

@@ -62,9 +62,10 @@ const SDK_INSTRUCTIONS = `## 为 run_code 编写代码
 \`run_code\` 有两个必填参数：\`code\` —— 一个 async TypeScript 函数的函数体（仅可擦除语法——不用 \`enum\` 或命名空间；类型标注仅供参考，代码运行时按类型剥离执行）—— 以及 \`description\`，对程序所做内容的简短摘要。程序内部：
 
 - 以 \`await tools.name(args)\` 调用工具——对特殊名称用引号访问：\`tools["my-tool"](args)\`。每次调用都解析为该工具的类型化规范 JSON 值。工具参数必须是无损 JSON。
+- 若会话启用了浏览器工具，还可以用 \`browser.*\` 快捷 API：\`await browser.goto(url)\`、\`await browser.snapshot()\`、\`await browser.click(12)\`、\`await browser.fill(12, 'text')\`、\`await browser.press('Enter')\`、\`await browser.waitFor({text:'…'})\`、\`await browser.extract()\`、\`await browser.tabs()\`、\`await browser.finish(['p1'])\`；它们等价于对应的 \`browser_*\` 工具。
 - 失败的调用会以 \`ToolCallError\` 拒绝（reject），其 \`toolName\` 标识失败的工具，\`message\` 是人类可读的说明——用 \`try/catch\` 捕获以处理并继续。
 - 相互独立的只读调用可用 \`Promise.all\` 重叠并发；会改变状态的操作（写文件 / 执行命令等）请自行用 \`await\` 串行，引擎不保证并发写操作的提交顺序。有依赖的操作用 \`await\` 顺序衔接。
-- 用 \`return\` 和/或 \`console.log(...)\` 输出结果。只有你 print 或 return 的内容才是程序输出。成功工具结果若包含图片，会在运行后附加，以便你在下一步检查；其它中间结果不会进入对话，因此只提取你需要的部分。
+- 用 \`return\` 和/或 \`console.log(...)\` 输出结果。只有你 print 或 return 的内容才是程序输出。工具结果以文本进入后续步骤；需要检查页面视觉状态时，把截图保存到文件并在输出里给出路径（程序内的 browser_screenshot 图片暂不会作为附图附加到对话）；其它中间结果不会进入对话，因此只提取你需要的部分。
 
 可用工具：`
 
@@ -116,6 +117,30 @@ export function generateSdkDocs(scope?: string, whitelist?: string[]): string {
     'declare const tools: {',
     '  [K in ToolName]: (args: ToolArgsMap[K]) => Promise<ToolOutputMap[K]>;',
     '}',
+    '',
+    '/** 浏览器快捷 API（仅启用浏览器工具时可用） */',
+    'declare const browser: {',
+    '  goto(url: string, opts?: Record<string, any>): Promise<any>;',
+    '  navigate(url: string, opts?: Record<string, any>): Promise<any>;',
+    '  snapshot(opts?: Record<string, any>): Promise<any>;',
+    '  click(target: number | string | Record<string, any>, opts?: Record<string, any>): Promise<any>;',
+    '  fill(target: number | string | Record<string, any>, text: string, opts?: Record<string, any>): Promise<any>;',
+    '  press(key: string, target?: number | string | Record<string, any>, opts?: Record<string, any>): Promise<any>;',
+    '  hover(target: number | string | Record<string, any>, opts?: Record<string, any>): Promise<any>;',
+    '  select(target: number | string | Record<string, any>, value: any, opts?: Record<string, any>): Promise<any>;',
+    '  upload(target: number | string | Record<string, any>, files: string[], opts?: Record<string, any>): Promise<any>;',
+    '  dialog(accept?: boolean, promptText?: string): Promise<any>;',
+    '  waitFor(spec: string | Record<string, any>): Promise<any>;',
+    '  wait(ms: number): Promise<any>;',
+    '  extract(opts?: Record<string, any>): Promise<any>;',
+    '  markdown(opts?: Record<string, any>): Promise<any>;',
+    '  text(opts?: Record<string, any>): Promise<any>;',
+    '  tabs(): Promise<any>;',
+    '  newTab(url?: string): Promise<any>;',
+    '  switchTab(id: string): Promise<any>;',
+    '  closeTab(id: string): Promise<any>;',
+    '  finish(keep?: string[]): Promise<any>;',
+    '}',
   ].join('\n')
 
   return `${SDK_INSTRUCTIONS}\n\n\`\`\`ts\n${declaration}\n\`\`\``
@@ -162,6 +187,43 @@ export function buildSdkRuntime(execCtx: ToolExecutionContext, calls: InternalTo
     }
   }
   return tools
+}
+
+/** 程序内的 browser.* 快捷 API（对 browser_* 工具的薄封装）
+ * 例如：await browser.goto('https://…'); const s = await browser.snapshot(); await browser.click(12); */
+export function buildBrowserSdk(tools: Record<string, (input?: any) => Promise<any>>): Record<string, (...args: any[]) => Promise<any>> {
+  const call = (name: string) => {
+    const fn = tools[name]
+    if (!fn) throw new ToolCallError(name, `当前会话未启用浏览器工具（${name}）`)
+    return fn
+  }
+  const targetOf = (t: any) => {
+    if (typeof t === 'number') return { ref: t }
+    if (typeof t === 'string') return /^\d+$/.test(t) ? { ref: Number(t) } : { selector: t }
+    return t && typeof t === 'object' ? t : {}
+  }
+  return {
+    goto: (url: string, opts: any = {}) => call('browser_navigate')({ url, ...opts }),
+    navigate: (url: string, opts: any = {}) => call('browser_navigate')({ url, ...opts }),
+    snapshot: (opts: any = {}) => call('browser_snapshot')(opts),
+    click: (target: any, opts: any = {}) => call('browser_click')({ ...targetOf(target), ...opts }),
+    fill: (target: any, text: string, opts: any = {}) => call('browser_fill')({ ...targetOf(target), text, ...opts }),
+    press: (key: string, target?: any, opts: any = {}) => call('browser_press')({ key, ...(target !== undefined ? targetOf(target) : {}), ...opts }),
+    hover: (target: any, opts: any = {}) => call('browser_hover')({ ...targetOf(target), ...opts }),
+    select: (target: any, value: any, opts: any = {}) => call('browser_select')({ ...targetOf(target), ...(typeof value === 'object' ? value : { value }), ...opts }),
+    upload: (target: any, files: string[], opts: any = {}) => call('browser_upload')({ ...targetOf(target), files, ...opts }),
+    dialog: (accept = true, promptText?: string) => call('browser_dialog')({ accept, ...(promptText !== undefined ? { promptText } : {}) }),
+    waitFor: (spec: any) => call('browser_wait_for')(typeof spec === 'string' ? { kind: 'text', value: spec } : spec),
+    wait: (ms: number) => call('browser_wait')({ ms }),
+    extract: (opts: any = {}) => call('browser_extract_markdown')(opts),
+    markdown: (opts: any = {}) => call('browser_extract_markdown')(opts),
+    text: (opts: any = {}) => call('browser_extract_text')(opts),
+    tabs: () => call('browser_list_tabs')({}),
+    newTab: (url?: string) => call('browser_new_tab')({ ...(url ? { url } : {}) }),
+    switchTab: (id: string) => call('browser_switch_tab')({ id }),
+    closeTab: (id: string) => call('browser_close_tab')({ id }),
+    finish: (keep: string[] = []) => call('browser_space_finish')({ keep }),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,10 +333,12 @@ export async function executeCodeProgram(
     warn: (...a: unknown[]) => logs.push({ type: 'warn', text: a.map(fmtConsoleArg).join(' ') }),
     error: (...a: unknown[]) => logs.push({ type: 'error', text: a.map(fmtConsoleArg).join(' ') }),
   }
+  const toolsRuntime = buildSdkRuntime(execCtx, calls)
   const context: Record<string, unknown> = {
     module: { exports: {} },
     console: capturedConsole,
-    tools: buildSdkRuntime(execCtx, calls),
+    tools: toolsRuntime,
+    browser: buildBrowserSdk(toolsRuntime),
     ToolCallError,
     setTimeout,
     clearTimeout,

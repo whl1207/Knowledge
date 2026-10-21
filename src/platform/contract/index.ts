@@ -381,6 +381,9 @@ export type AppEventChannel =
   | 'lan:request-guest-policy'
   | 'browser-agent:event'
   | 'browser-agent:toast'
+  | 'browser-agent:downloads'
+  | 'browser-agent:menu-action'
+  | 'browser-agent:window-state'
   /** 终端输出 / 退出（主进程 → 渲染层；见 TerminalPort） */
   | 'terminal:data'
   | 'terminal:exit'
@@ -518,8 +521,10 @@ export interface DocConvertApi {
   /**
    * 已渲染 HTML → PDF（宿主弹保存框并落盘）。
    * `landscape` 传 true 时按横向纸张打印（幻灯片导出用；不传 = 沿用宿主默认的竖版）。
+   * `outline` 传标题列表时，宿主会给 PDF 写入书签（目录），PDF 阅读器（含本软件 PdfViewer）可直接显示。
+   * 返回 `toc` 表示书签是否成功写入（失败不代表导出失败）。
    */
-  exportPdf(payload: { html: string; title: string; landscape?: boolean }): Promise<{ success: boolean; path?: string; error?: string }>
+  exportPdf(payload: { html: string; title: string; landscape?: boolean; outline?: { title: string; level: number }[] }): Promise<{ success: boolean; path?: string; error?: string; toc?: boolean }>
   /**
    * 幻灯片整本导出：`head` + 每页片段 + `tail` 拼成「一页一份」的打印 HTML，宿主逐页打印后合并成一个 PDF。
    * （一页一份是为了绕开 Chromium 打印分页会把缩放页面盒再拆开的毛病；样式只随 head 走一份。）
@@ -598,8 +603,21 @@ export type BrowserAgentMethod =
   | 'bookmark-mkdir' | 'bookmark-move' | 'bookmark-reorder' | 'bookmark-rename-folder'
   | 'remove-bookmark-folder' | 'clear-bookmark-folder' | 'import-bookmarks' | 'export-bookmarks'
   | 'favicon-batch' | 'cache-info' | 'clear-cache'
+  /** 接管 / 暂停 / 下载 / 历史（P1） */
+  | 'pause-agent' | 'resume-agent' | 'handoff-agent'
+  | 'downloads-list' | 'download-open' | 'download-reveal' | 'downloads-clear'
+  | 'history-list' | 'history-clear' | 'history-remove'
+  | 'recently-closed' | 'restore-closed'
   /** 停靠到主页右侧栏（原生网页视图挂到主窗口，位置由渲染层上报的矩形决定） */
   | 'attach-dock' | 'set-dock-rect' | 'set-dock-visible' | 'detach-dock' | 'is-docked' | 'close'
+  /** 壳层 DOM（设置页）盖住网页区时隐藏原生视图 */
+  | 'set-overlay'
+  | 'set-config' | 'get-config'
+  | 'site-data-info' | 'clear-site-data'
+  | 'learnings-list' | 'learnings-delete'
+  | 'playbooks-list' | 'playbooks-get' | 'playbooks-approve' | 'playbooks-delete'
+  | 'pick-download-dir'
+  | 'import-logins'
 
 /**
  * 浏览器 Agent（桌面专属子系统）。
