@@ -53,6 +53,7 @@ import { sessionLog } from './session-log'
 import { mcpService } from './mcp-service'
 import { browserAgentService } from './browser-agent'
 import { asUint8 } from './buffer-view'
+import { atomicWrite } from './atomic-write'
 import { RUN_CODE_DESCRIPTION, RUN_CODE_INPUT_SCHEMA, runCodeHandler } from './code-sdk'
 import { excludeFromAppZoom } from './window-zoom'
 import { registerTeamTools } from './team-tools'
@@ -129,6 +130,131 @@ function resolveWithinCwd(rawPath: string, ctx: ToolExecutionContext): string | 
     if (abs !== root && !abs.startsWith(root + path.sep)) return null
   }
   return abs
+}
+
+// ---------------------------------------------------------------------------
+// 先读后写（对齐 DSH 的 `fs-observation-policy`）
+// ---------------------------------------------------------------------------
+//
+// 为什么需要：模型凭记忆整体重写一个已有文件，是"改坏用户文件"的头号来源——
+// 它没读过原文，却用自己想象的内容覆盖。DSH 的做法是让 write/edit 在覆盖前必须
+// 有一次成功的 read（记录版本），版本在读取后变了就拒绝并提示重新读。
+//
+// 这里把同一套语义落在核心文件工具上：
+// - read_file 成功 → 记录该文件的 size/mtime/ctime 版本；
+// - write_file / replace_in_file / multi_replace 改**已存在**的文件 → 无观察记录则拒绝；
+//   有记录但版本已变 → 拒绝并提示重新 read；新建文件不受限制；
+// - 本会话内自己刚写过的文件会自动记录新版本，连续修改不需要反复读。
+//
+// 观察状态只存在内存里，**不跨进程 / 会话持久化**（与 DSH 一致）：恢复会话必须重新读。
+
+/**
+ * 是否启用「先读后写」；置 false 或设置环境变量 `AIKM_FS_OBSERVATION=0` 可退回旧行为。
+ * （保留逃生口：某些自动化流程会覆盖自己刚生成的文件，不需要交互式读取。）
+ */
+const FS_OBSERVATION_POLICY = process.env.AIKM_FS_OBSERVATION !== '0'
+/** 每个会话最多记住多少个已读文件（超出按最早记录淘汰） */
+const OBSERVATION_MAX_FILES = 200
+/** 最多保留多少个会话的观察表（防止长进程里 agent 不断新建导致泄漏） */
+const OBSERVATION_MAX_OWNERS = 50
+
+interface FileObservation {
+  version: string
+  size: number
+  mtimeMs: number
+  ctimeMs: number
+}
+
+const observationsByOwner = new Map<string, Map<string, FileObservation>>()
+
+function observationOwner(ctx: ToolExecutionContext): string {
+  return String(ctx.agentId || ctx.sessionId || ctx.cwd || 'default')
+}
+
+/** 观察表的键：规范化绝对路径（Windows 大小写不敏感，统一小写） */
+function observationKey(abs: string): string {
+  const p = path.resolve(abs)
+  return process.platform === 'win32' ? p.toLowerCase() : p
+}
+
+function fileVersionOf(st: fs.Stats): string {
+  return `${st.size}:${Math.trunc(st.mtimeMs)}:${Math.trunc(st.ctimeMs)}`
+}
+
+/** 让本次写入至少把 mtime 推进 1ms：等长覆盖也能产生新版本（版本防护不会静默失效） */
+function nextMtimeMs(abs: string): number | undefined {
+  try {
+    return fs.statSync(abs).mtimeMs + 1
+  } catch {
+    return undefined
+  }
+}
+
+function observationTable(owner: string): Map<string, FileObservation> {
+  let table = observationsByOwner.get(owner)
+  // 重新插入以刷新 Map 的插入顺序：owner 淘汰按"最久未活动"而不是"最早创建"。
+  if (table) observationsByOwner.delete(owner)
+  if (!table) table = new Map()
+  observationsByOwner.set(owner, table)
+  return table
+}
+
+/** 记录一次成功的读取 / 写入：后续修改以这个版本为基准 */
+function noteFileObserved(abs: string, ctx: ToolExecutionContext): void {
+  try {
+    const st = fs.statSync(abs)
+    if (!st.isFile()) return
+    const table = observationTable(observationOwner(ctx))
+    const key = observationKey(abs)
+    table.delete(key)
+    table.set(key, {
+      version: fileVersionOf(st),
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      ctimeMs: st.ctimeMs,
+    })
+    while (table.size > OBSERVATION_MAX_FILES) {
+      const oldest = table.keys().next().value
+      if (oldest === undefined) break
+      table.delete(oldest)
+    }
+    while (observationsByOwner.size > OBSERVATION_MAX_OWNERS) {
+      const oldestOwner = observationsByOwner.keys().next().value
+      if (oldestOwner === undefined) break
+      observationsByOwner.delete(oldestOwner)
+    }
+  } catch {
+    /* 记录失败不影响工具本身；下一次修改会按"未观察"处理（fail-closed 的方向是安全的） */
+  }
+}
+
+/**
+ * 修改已有文件前的门禁。
+ * @returns 拒绝原因；null 表示放行（新建 / 已观察且版本未变 / 策略关闭）
+ */
+function checkMutationObserved(
+  abs: string,
+  ctx: ToolExecutionContext,
+  action: '覆盖' | '修改',
+): string | null {
+  // 只约束 agent 的智能体循环：工作流 / 插件 / 直接调用没有"会话已读"的概念，
+  // 强行要求会误伤正常写入（它们有自己的授权与围栏）。
+  if (!FS_OBSERVATION_POLICY || !ctx.agentId) return null
+  let st: fs.Stats
+  try {
+    st = fs.statSync(abs)
+  } catch {
+    return null // 不存在 → 新建，放行
+  }
+  if (!st.isFile()) return null // 目录等交给工具自身的类型报错
+  const rec = observationsByOwner.get(observationOwner(ctx))?.get(observationKey(abs))
+  if (!rec) {
+    return `拒绝${action}「${abs}」：本会话尚未读取该文件（先读后写策略）。请先用 read_file 读取原文；只改局部请优先用 replace_in_file。`
+  }
+  if (rec.version !== fileVersionOf(st)) {
+    return `拒绝${action}「${abs}」：文件在读取后已被修改（版本已变化）。请重新 read_file 后再重试。`
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +359,7 @@ function defaultTextWindowChars(buf: Buffer): number {
   return buf.toString('utf-8', 0, cut).length
 }
 
-async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const resolved = resolveToolPath(String(input?.path ?? ''), input?.skill, ctx)
   const abs = resolved.abs
   if (!abs) return { ok: false, error: resolved.error || '路径越界或缺失（path 参数必填）' }
@@ -396,15 +522,31 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
   }
 }
 
+/** read_file：主体走 readFileImpl，成功后登记「已读版本」（供先读后写门禁） */
+async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const result = await readFileImpl(input, ctx)
+  if (result.ok) {
+    try {
+      const resolved = resolveToolPath(String(input?.path ?? ''), input?.skill, ctx)
+      if (resolved.abs) noteFileObserved(resolved.abs, ctx)
+    } catch {
+      /* 技能路径解析失败不影响读取结果本身 */
+    }
+  }
+  return result
+}
+
 async function writeFile(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const abs = resolveWithinCwd(String(input?.path ?? ''), ctx)
   if (!abs) return { ok: false, error: '路径越界或缺失（path 参数必填）' }
+  const denied = checkMutationObserved(abs, ctx, '覆盖')
+  if (denied) return { ok: false, error: denied }
   try {
     const content = String(input?.content ?? '')
     const rawPath = String(input?.path ?? '')
     const before = readOldTextForDiff(abs)
-    fs.mkdirSync(path.dirname(abs), { recursive: true })
-    fs.writeFileSync(abs, content, 'utf-8')
+    await atomicWrite(abs, content, { minMtimeMs: nextMtimeMs(abs) })
+    noteFileObserved(abs, ctx)
     // 差异预览：仅在能拿到可读原文时算行级 diff；新建/过大/二进制只给行数摘要
     const created = 'missing' in before
     const diff: EditDiffFilePreview = created
@@ -685,6 +827,8 @@ async function replaceInFile(input: any, ctx: ToolExecutionContext): Promise<Too
   const newRaw = String(input?.new_string ?? '')
   const abs = resolveWithinCwd(rawPath, ctx)
   if (!abs) return { ok: false, error: '路径越界或缺失（path 参数必填）' }
+  const denied = checkMutationObserved(abs, ctx, '修改')
+  if (denied) return { ok: false, error: denied }
   const rd = readTextFileForEdit(rawPath, abs)
   if (!rd.ok) return rd
   const occurrence = input?.occurrence === undefined ? undefined : Number(input.occurrence)
@@ -695,7 +839,8 @@ async function replaceInFile(input: any, ctx: ToolExecutionContext): Promise<Too
   // 差异预览：编辑前文本（rd.text）与编辑后内容（built.content）
   const diff: EditDiffFilePreview = { path: rawPath, ...computeEditDiff(rd.text, built.content) }
   try {
-    fs.writeFileSync(abs, built.content, 'utf-8')
+    await atomicWrite(abs, built.content, { minMtimeMs: nextMtimeMs(abs) })
+    noteFileObserved(abs, ctx)
   } catch (e: any) {
     return { ok: false, error: `写入失败: ${e?.message || String(e)}` }
   }
@@ -730,6 +875,8 @@ async function multiReplace(input: any, ctx: ToolExecutionContext): Promise<Tool
     if (!oldRaw) return { ok: false, error: `「${rawPath}」的 old_string 不能为空` }
     const abs = resolveWithinCwd(rawPath, ctx)
     if (!abs) return { ok: false, error: `路径越界或缺失: ${rawPath}` }
+    const denied = checkMutationObserved(abs, ctx, '修改')
+    if (denied) return { ok: false, error: denied }
     let state = fileCache.get(abs)
     if (!state) {
       const rd = readTextFileForEdit(rawPath, abs)
@@ -766,7 +913,10 @@ async function multiReplace(input: any, ctx: ToolExecutionContext): Promise<Tool
     newContentByAbs.set(edits[0].abs, built.content)
   }
   try {
-    for (const t of targets) fs.writeFileSync(t.abs, t.content, 'utf-8')
+    for (const t of targets) {
+      await atomicWrite(t.abs, t.content, { minMtimeMs: nextMtimeMs(t.abs) })
+      noteFileObserved(t.abs, ctx)
+    }
   } catch (e: any) {
     return { ok: false, error: `写入失败（可能部分文件已写入）: ${e?.message || String(e)}` }
   }
@@ -2866,7 +3016,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('write_file', '写入本地文件（UTF-8，自动创建父目录）。支持绝对路径与相对路径（基于工作区根）。', writeFile, {
+    defineTool('write_file', '写入本地文件（UTF-8，自动创建父目录）。支持绝对路径与相对路径（基于工作区根）。覆盖已有文件前必须先用 read_file 读取原文（先读后写策略；新建文件不需要），只改局部请优先用 replace_in_file。单次 content 建议不超过约 20000 字符：更大的文件请分段写——先 write_file 写第一部分，再用 replace_in_file 在末尾逐段追加（整份文件一次提交容易撞到输出上限而被截断）。', writeFile, {
       inputSchema: {
         type: 'object',
         properties: {
@@ -2878,7 +3028,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('replace_in_file', '在文件中定位一段唯一原文并替换为新内容（UTF-8 文本，精确局部修改，文件其余部分保持不变）。old_string 必须与文件内容精确一致（含缩进与上下文，建议 ≥3 行）——调用前请先用 read_file 读取目标区域，把要改的内容【原样复制】过来，不要凭记忆手写；默认要求全文唯一：出现多处会报错并列出各出现行号（此时请补充更多上下文使其唯一，或传 occurrence 指定第几处），未找到会返回【可直接复制的候选片段】，请据此修正后重试（不要重复提交同一段 old_string）。new_string 传空字符串表示删除该段。替换会保留文件的换行风格（CRLF/LF）。文件较小（约 200 行以内）时直接用 write_file 整写更稳。', replaceInFile, {
+    defineTool('replace_in_file', '在文件中定位一段唯一原文并替换为新内容（UTF-8 文本，精确局部修改，文件其余部分保持不变）。old_string 必须与文件内容精确一致（含缩进与上下文，建议 ≥3 行）——调用前请先用 read_file 读取目标区域，把要改的内容【原样复制】过来，不要凭记忆手写；默认要求全文唯一：出现多处会报错并列出各出现行号（此时请补充更多上下文使其唯一，或传 occurrence 指定第几处），未找到会返回【可直接复制的候选片段】，请据此修正后重试（不要重复提交同一段 old_string）。new_string 传空字符串表示删除该段。替换会保留文件的换行风格（CRLF/LF）。文件较小（约 200 行以内）时直接用 write_file 整写更稳。覆盖已有文件前必须已用 read_file 读过该文件（先读后写策略）。', replaceInFile, {
       inputSchema: {
         type: 'object',
         properties: {
@@ -2892,7 +3042,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('multi_replace', '在一次调用中批量替换多处代码（可跳多个文件），所有替换全部命中才整体落盘（原子）：任一条 old_string 未找到或不唯一都会使整批不生效，避免文件处于"改了一半"的中间态。适合同一文件多处 / 多文件联动的修改；同一文件的替换区间不能重叠。每条 old_string 同样必须先 read_file 读到原文后【原样复制】（含缩进）。单处替换请用 replace_in_file。', multiReplace, {
+    defineTool('multi_replace', '在一次调用中批量替换多处代码（可跳多个文件），所有替换全部命中才写盘（逐文件原子覆盖）：任一条 old_string 未找到或不唯一都会使整批不生效，避免文件处于"改了一半"的中间态。适合同一文件多处 / 多文件联动的修改；同一文件的替换区间不能重叠。每条 old_string 同样必须先 read_file 读到原文后【原样复制】（含缩进），未读过的已有文件会被拒绝（先读后写策略）。单处替换请用 replace_in_file。', multiReplace, {
       inputSchema: {
         type: 'object',
         properties: {

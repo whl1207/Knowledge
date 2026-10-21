@@ -36,6 +36,7 @@ import {
 } from '@/shared/fsContract'
 import { decideEdit, decideRemove, decideWrite, type FsPolicyDecision } from '@/shared/fsPolicy'
 import { isFsPolicyEnabled, noteObserved, observationTableOf } from './plugin-fs-policy'
+import { atomicWrite } from './atomic-write'
 
 const SHEET_MAX_BYTES = 32 * 1024 * 1024
 const SHEET_MAX_ROWS = 20000
@@ -246,40 +247,15 @@ export function createPluginFs(deps: PluginFsDeps): PluginFsApi {
 
 
   /**
-   * 原子写：同目录临时文件 + rename；失败回退直写（网络盘 / 跨设备时 rename 可能不支持）。
+   * 原子写：同目录临时文件 + rename（实现见 `./atomic-write`）。
    *
    * `minMtimeMs`：把落盘后的 mtime **至少推进到它**。为什么需要：等长覆盖（自动保存最典型的
    * 形态）如果落在同一个时间戳刻度内，`size + mtime` 派生的版本**不会变**，于是"版本防护"
    * 静默失效（本仓冒烟测试实际抓到过）。用上一次 stat 的 mtime + 1ms 兜底，可保证
    * **经本 API 的每次写都产生新版本**；外部改动仍按真实 stat 检测。
    */
-  const atomicWrite = async (abs: string, content: string, minMtimeMs?: number): Promise<number> => {
-    const dir = path.dirname(abs)
-    await fs.mkdir(dir, { recursive: true })
-    const tmp = path.join(dir, `.${path.basename(abs)}.${process.pid.toString(36)}-${Date.now().toString(36)}.tmp`)
-    const bytes = Buffer.byteLength(content, 'utf8')
-    const bumpMtime = async (target: string): Promise<void> => {
-      if (typeof minMtimeMs !== 'number' || !Number.isFinite(minMtimeMs)) return
-      const st = await fs.stat(target).catch(() => null)
-      if (!st || st.mtimeMs >= minMtimeMs) return
-      await fs.utimes(target, st.atime, new Date(minMtimeMs)).catch(() => undefined)
-    }
-    try {
-      await fs.writeFile(tmp, content, 'utf8')
-      await bumpMtime(tmp)
-      await fs.rename(tmp, abs)
-      return bytes
-    } catch (e) {
-      await fs.rm(tmp, { force: true }).catch(() => undefined)
-      try {
-        await fs.writeFile(abs, content, 'utf8')
-        await bumpMtime(abs)
-        return bytes
-      } catch {
-        throw e
-      }
-    }
-  }
+  const writeAtomic = (abs: string, content: string, minMtimeMs?: number): Promise<number> =>
+    atomicWrite(abs, content, { minMtimeMs })
 
   const api: PluginFsApi = {
     get available() {
@@ -413,7 +389,7 @@ export function createPluginFs(deps: PluginFsDeps): PluginFsApi {
           ? denyOrApply(decideWrite(policyTable(), t.path, { expectedVersion: opts?.expectedVersion, presence: opts?.presence }), t.path, opts)
           : opts
         const before = await assertVersion(t.path, applied)
-        const bytes = await atomicWrite(t.path, text, before.exists ? before.mtimeMs + 1 : undefined)
+        const bytes = await writeAtomic(t.path, text, before.exists ? before.mtimeMs + 1 : undefined)
         const st = await statOf(t.path)
         observePresent(t.path, st.version)
         return { path: t.path, bytes, version: st.version }
@@ -440,7 +416,7 @@ export function createPluginFs(deps: PluginFsDeps): PluginFsApi {
           const failure = plan as Extract<typeof plan, { ok: false }>
           throw new IPCError(failure.code, failure.message)
         }
-        const bytes = await atomicWrite(t.path, plan.text, st.exists ? st.mtimeMs + 1 : undefined)
+        const bytes = await writeAtomic(t.path, plan.text, st.exists ? st.mtimeMs + 1 : undefined)
         const after = await statOf(t.path)
         observePresent(t.path, after.version)
         return { path: t.path, applied: plan.applied, bytes, version: after.version }

@@ -288,9 +288,10 @@ export interface AgentEventMap {
   /**
    * 运行期提示（非致命，不打断 turn）。
    * - `truncated-continue`：模型输出被 max_tokens 截断，已自动续跑；
-   * - `truncated-giveup`：连续截断达到上限，停止续跑（任务可能未完成，需要用户干预）。
+   * - `truncated-giveup`：连续截断达到上限，停止续跑（任务可能未完成，需要用户干预）；
+   * - `truncated-tool-calls`：带工具调用的一步被截断，本步所有调用均未派发，已提示模型缩小提交量。
    */
-  'agent/notice': { kind: 'truncated-continue' | 'truncated-giveup'; message: string }
+  'agent/notice': { kind: 'truncated-continue' | 'truncated-giveup' | 'truncated-tool-calls'; message: string }
   'agent/error': { message: string }
 }
 

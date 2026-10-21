@@ -412,6 +412,12 @@
               <div class="tool-box-header">
                 <i class="fa" :class="unitToolIcon(unit)"></i>
                 <span class="tool-box-name" :title="unitLabel(unit)">{{ unitLabel(unit) }}</span>
+                <!-- 写入进度：write_file 生成/写入期间显示字数（长文件不再只有一个转圈图标） -->
+                <span
+                  v-if="unitWriteProgress(unit)"
+                  class="tool-box-progress"
+                  :class="{ 'is-error': unit.status === 'error' }"
+                >{{ unitWriteProgress(unit) }}</span>
                 <span class="tool-box-status" :class="unit.status">
                   <i v-if="unit.status === 'running'" class="fa fa-circle-o-notch fa-spin"></i>
                   <i v-else-if="unit.status === 'success'" class="fa fa-check-circle"></i>
@@ -496,7 +502,11 @@
                   </div>
                 </template>
                 <template v-else-if="unit.description === 'write_file'">
-                  <!-- 内容（代码时高亮渲染）与 Python 的 result-box 一致 -->
+                  <!-- 内容（代码时高亮渲染）与 Python 的 result-box 一致。
+                       running / error 时先标一行说明：流式参数≠已落盘，避免把「模型生成的内容」误认为写入成功。 -->
+                  <div v-if="writeFileContentNote(unit)" class="tool-write-note" :class="{ error: unit.status === 'error' }">
+                    {{ writeFileContentNote(unit) }}
+                  </div>
                   <div v-if="getWriteFileContent(unit)" class="tool-result-box scoll" v-html="highlightCodeHtml(getWriteFileContent(unit), getWriteFileLang(unit))"></div>
                 </template>
                 <!-- PTC（run_code）：返回值 + console 日志 + 程序内实际调用的工具（对齐原脚手架「程序」页） -->
@@ -3944,29 +3954,48 @@ const unescapePartialJsonString = (s: string): string => {
   return out
 }
 
+// 流式字段提取缓存：同一份未闭合参数在一次渲染里会被多个模板表达式各取一次
+// （进度字数 / 内容框 / 目标路径），50K 字符的 JSON 反复 parse + regex 会把「正在写入」的
+// 滚动拖卡。只保留最近几份原文即可，旧参数随模型继续输出自然被淘汰。
+const streamedFieldCache = new Map<string, string>()
+const STREAMED_FIELD_CACHE_MAX = 8
+
 // 从流式累积/未闭合的 JSON 参数中提取某个字符串字段的值（run_python→code、write_file→content、
 // update_plan→plan 等；未闭合时从原文按 key 提取并容错反转义；未找到返回 ''）
 const extractStreamedJsonField = (raw: string, key: string): string => {
   if (!raw) return ''
+  const cacheKey = key + '\u0000' + raw
+  const cached = streamedFieldCache.get(cacheKey)
+  if (cached !== undefined) return cached
+  let value = ''
   try {
     const obj = JSON.parse(raw)
-    if (obj && typeof obj[key] === 'string') return obj[key]
+    if (obj && typeof obj[key] === 'string') value = obj[key]
   } catch { /* 未闭合，走部分提取 */ }
-  // 搜索 key 出现的任意位置（write_file 的 path 在前、content 在后，不能用「开头即 key」的匹配）
-  const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"([\\s\\S]*)$`))
-  if (!m) return ''
-  const rest = m[1]
-  // 找到未转义的闭合引号（偶数个反斜杠前缀）
-  let end = -1
-  for (let i = 0; i < rest.length; i++) {
-    if (rest[i] !== '"') continue
-    let bs = 0
-    let j = i - 1
-    while (j >= 0 && rest[j] === '\\') { bs++; j-- }
-    if (bs % 2 === 0) { end = i; break }
+  if (!value) {
+    // 搜索 key 出现的任意位置（write_file 的 path 在前、content 在后，不能用「开头即 key」的匹配）
+    const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"([\\s\\S]*)$`))
+    if (m) {
+      const rest = m[1]
+      // 找到未转义的闭合引号（偶数个反斜杠前缀）
+      let end = -1
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] !== '"') continue
+        let bs = 0
+        let j = i - 1
+        while (j >= 0 && rest[j] === '\\') { bs++; j-- }
+        if (bs % 2 === 0) { end = i; break }
+      }
+      const content = end === -1 ? rest : rest.slice(0, end)
+      value = unescapePartialJsonString(content)
+    }
   }
-  const content = end === -1 ? rest : rest.slice(0, end)
-  return unescapePartialJsonString(content)
+  streamedFieldCache.set(cacheKey, value)
+  if (streamedFieldCache.size > STREAMED_FIELD_CACHE_MAX) {
+    const oldest = streamedFieldCache.keys().next().value
+    if (oldest !== undefined) streamedFieldCache.delete(oldest)
+  }
+  return value
 }
 
 /** 提取 run_python 参数中的代码（已解析对象或流式未闭合 JSON 均支持） */
@@ -4024,12 +4053,85 @@ const ptcResultText = (unit: any): string => formatPtcValue(ptcOutputOf(unit)?.r
  * 用通用的流式字段提取：既支持 `{"path":…,"content":…}`（path 在前），也支持 content 在前
  * 的写法；并且会做与完成态一致的反转义（否则流式期间会显示成 `D:\\a\\b`）。
  * 路径还没流出来时返回 ''——**不要**退回展示原始 JSON，那会把整份文件内容再刷一遍（见 unitArgsText）。
+ * 另外：路径字符串**没闭合**时也返回 ''（对齐 DSH：`file_path` 闭合且解码成功后才展示可打开路径），
+ * 否则界面上会出现半截 `D:\Project\2 Know`，点「打开」还会打开错位置。
  */
 const getWriteFilePath = (unit: any): string => {
   const args = unit.args
   if (!args) return ''
-  if (typeof args === 'string') return extractStreamedJsonField(args, 'path')
+  if (typeof args === 'string') {
+    if (!isStreamedJsonStringClosed(args, 'path')) return ''
+    return extractStreamedJsonField(args, 'path')
+  }
   return typeof args?.path === 'string' ? args.path : ''
+}
+
+/** 流式 JSON 里 `"key": "…"` 的字符串是否已经出现闭合引号（考虑 `\"` / `\\` 转义） */
+const isStreamedJsonStringClosed = (raw: string, key: string): boolean => {
+  if (!raw) return false
+  const m = raw.match(new RegExp(`(?:^|[{,])\\s*"${key}"\\s*:\\s*"`))
+  if (!m || m.index === undefined) return false
+  for (let i = m.index + m[0].length; i < raw.length; i++) {
+    if (raw[i] === '\\') { i++; continue }
+    if (raw[i] === '"') return true
+  }
+  return false
+}
+
+/** 数字千分位（写入字数 / 进度展示） */
+const formatCharCount = (n: number): string => {
+  const v = Math.max(0, Math.floor(Number(n) || 0))
+  return v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+/**
+ * write_file 的字符数：写入中取流式参数里已生成的 content 长度，
+ * 成功时优先用工具结果里的 `bytes`（= 实际落盘内容长度，重开会话后仍准确）。
+ */
+const getWriteFileChars = (unit: any): number => {
+  if (!unit || unit.description !== 'write_file') return 0
+  const r = unit.result
+  if (unit.status === 'success' && r && typeof r === 'object' && typeof r.bytes === 'number') return r.bytes
+  return getWriteFileContent(unit).length
+}
+
+/**
+ * write_file 卡片头部的进度文案。
+ *
+ * 为什么要有：模型生成整份文件内容时，一个 write_file 参数可能几万字、耗时以分钟计，
+ * 旧界面只有一个转圈图标——状态一直不变，看起来就是卡死了。这里把「已生成多少字」
+ * 直接显示在标题旁，数字随流式参数递增，长任务也能看出在推进。
+ */
+const unitWriteProgress = (unit: any): string => {
+  if (!unit || unit.stepType !== 'tool' || unit.description !== 'write_file') return ''
+  const isZh = store.locales == 'zh'
+  const chars = getWriteFileChars(unit)
+  if (unit.status === 'running') {
+    if (!chars) return isZh ? '等待内容…' : 'Waiting…'
+    return isZh ? `已生成 ${formatCharCount(chars)} 字` : `${formatCharCount(chars)} chars`
+  }
+  if (unit.status === 'success') {
+    return chars ? (isZh ? `已写入 ${formatCharCount(chars)} 字` : `${formatCharCount(chars)} chars written`) : ''
+  }
+  // 参数解析失败 / 写入失败：流式内容并没有落盘，不能显示成「已写入」
+  return isZh ? '未写入' : 'Not written'
+}
+
+/**
+ * write_file 内容框上方的说明：只在「参数还在生成」或「失败」时出现。
+ * 失败时模型生成的参数仍会展示（方便用户手动复制抢救），但必须标明**没有写入磁盘**——
+ * 否则整份内容都渲染在卡片里，看起来就像已经写成功了。
+ */
+const writeFileContentNote = (unit: any): string => {
+  if (!unit || unit.description !== 'write_file') return ''
+  const isZh = store.locales == 'zh'
+  if (unit.status === 'running') {
+    return isZh ? '正在接收内容（尚未写入磁盘）' : 'Receiving content — not written to disk yet'
+  }
+  if (unit.status === 'error') {
+    return isZh ? '以下为模型生成的参数内容，未写入磁盘' : 'Model-generated arguments below — nothing was written to disk'
+  }
+  return ''
 }
 
 /** 工具写入 / 改写的文件路径（写入成功才有；write_file / replace_in_file 取 path，multi_replace 取每条替换的 path，export_word 取结果里的输出路径） */
@@ -9295,11 +9397,14 @@ const unitResultText = (unit: any): string => {
       if (typeof r?.description === 'string') return r.description
       return prettyJson(r)
     case 'write_file': {
-      // 只给路径 + 行数摘要（具体差异由编辑预览面板展示，避免整文件重复刷屏）
+      // 只给路径 + 行数/字数摘要（具体差异由编辑预览面板展示，避免整文件重复刷屏）
       if (!r || typeof r !== 'object') return typeof r === 'string' ? r : prettyJson(r)
       const st = r.stats ? ` +${r.stats.added} -${r.stats.removed}` : ''
       const createdTip = r.created ? (isZh ? '（新建）' : ' (new)') : ''
-      return `${isZh ? '写入' : 'Write'} ${r.path ?? ''}${createdTip}${st}`
+      const chars = typeof r.bytes === 'number' && r.bytes > 0
+        ? (isZh ? ` · ${formatCharCount(r.bytes)} 字` : ` · ${formatCharCount(r.bytes)} chars`)
+        : ''
+      return `${isZh ? '写入' : 'Write'} ${r.path ?? ''}${createdTip}${st}${chars}`
     }
     case 'replace_in_file':
     case 'multi_replace': {
@@ -9368,7 +9473,7 @@ const getToolCollapsedText = (unit: any): string => {
   let text = unitResultText(unit) || ''
   if (!String(text).trim() && unit.error) text = unit.error
   if (!String(text).trim()) {
-    if (unit.description === 'write_file') text = getWriteFilePath(unit) || ''
+    if (unit.description === 'write_file') text = getWriteFilePath(unit) || unitWriteProgress(unit) || ''
     else text = unitArgsText(unit) || ''
   }
   return String(text).replace(/\s+/g, ' ').trim()
@@ -11833,6 +11938,32 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 写入进度（write_file 生成 / 写入期间的字数）：等宽数字避免跳动，长任务能看出在推进 */
+.tool-box-progress {
+  margin-left: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--fontColor);
+  opacity: .6;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tool-box-progress.is-error {
+  color: #f44336;
+  opacity: .9;
+}
+/* write_file 内容框上方的说明：running / error 时标明「尚未写入磁盘」 */
+.tool-write-note {
+  padding: 4px 8px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: .65;
+}
+.tool-write-note.error {
+  color: #f44336;
+  opacity: .9;
 }
 .tool-box-status {
   margin-left: auto;

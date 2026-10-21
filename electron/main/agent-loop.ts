@@ -240,6 +240,26 @@ function parseOk(parsed: any): boolean {
   return !!parsed && typeof parsed === 'object' && parsed._raw === undefined
 }
 
+/**
+ * 参数原文是否明显「没写完」：没有收尾的 `}` / `]`，或最后一个字符串引号没闭合。
+ *
+ * 为什么要单独判断：模型一次输出整份大文件时，最常见的失败是输出撞到 max_tokens /
+ * 网关输出上限，JSON 在半截字符串处硬生生断掉。此时 finish_reason 有时拿不到 `length`
+ * （网关直接按 stop 收尾），旧文案只说「JSON 不合法」，会让人误以为是转义写错了。
+ */
+function looksIncompleteJson(raw: string): boolean {
+  const t = String(raw || '').trim()
+  if (!t) return true
+  if (!/[}\]]$/.test(t)) return true
+  let inStr = false
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]
+    if (ch === '\\') { i++; continue }
+    if (ch === '"') inStr = !inStr
+  }
+  return inStr
+}
+
 /** 宽容解析：先按 parseToolArgs（含多层解包），失败再修复裸控制字符后重试 */
 function parseToolArgsLenient(raw: any): any {
   const first = parseToolArgs(raw)
@@ -334,6 +354,16 @@ const SELFHOSTED_PROVIDERS = new Set(['ollama', 'lmstudio', 'custom'])
  * 此时应当明确告知用户（而不是继续烧 token 或静默结束）。
  */
 const MAX_LENGTH_CONTINUES = 3
+
+/**
+ * `finish_reason=length` 时，**带工具调用**的一步最多重试几次。
+ *
+ * 为什么单独设上限：工具参数的 JSON 是流式拼出来的，被 max_tokens 截断时半截 JSON
+ * 无法执行（也没有"续写半个 JSON"的可靠办法）。对齐 DSH 的语义：本步**一个工具都不派发**，
+ * 只回灌"未执行、请分段"的结果，让模型下一 step 自己缩小提交量。连续多次仍撞上限，
+ * 说明单次输出根本装不下，必须停下并明确告知（而不是让模型反复重试烧 token）。
+ */
+const MAX_TRUNCATED_TOOL_SKIPS = 3
 
 const backendInflight = new Map<string, number>()
 /**
@@ -739,6 +769,8 @@ class AgentImpl implements AgentControl {
     this.emittedResultIds = new Set()
     // max_tokens 截断续跑计数（复刻 DSH 把 finish=max-tokens 当"下一步继续"的信号；见 MAX_LENGTH_CONTINUES）
     let lengthContinues = 0
+    // 本 turn 因输出截断而跳过工具调用的次数（见 MAX_TRUNCATED_TOOL_SKIPS）
+    let truncatedToolSkips = 0
     // 循环轮数：由渲染进程按唯一数据源（store.generalAgentMaxSteps / preset.maxSteps）注入；兜底同源默认值
     const maxSteps = this.options.maxSteps ?? DEFAULT_AGENT_MAX_STEPS
 
@@ -805,11 +837,37 @@ class AgentImpl implements AgentControl {
         this.emit('assistant/message', { content: result.content, toolCalls: cleanCalls })
 
         let toolCallsCount = 0
+        let truncatedGiveUp = false
         if (cleanCalls.length) {
-          for (const call of cleanCalls) {
-            await this.executeToolCall(call, step)
+          // 输出被 max_tokens 截断：**一个工具都不派发**（对齐 DSH 的 max-tokens 语义）。
+          // 工具参数的 JSON 是流式拼出来的，截断后既不能执行、也没有可靠的"续写半个 JSON"办法；
+          // 直接回灌「未执行 + 请缩小单次提交量」的合成结果，让模型下一步自己改小，避免
+          // "半截参数被当成失败执行 / 界面上却像写成功了"的歧义。
+          if (this.lastFinishReason === 'length') {
+            truncatedToolSkips++
+            truncatedGiveUp = truncatedToolSkips > MAX_TRUNCATED_TOOL_SKIPS
+            const notice = truncatedGiveUp
+              ? `输出连续 ${MAX_TRUNCATED_TOOL_SKIPS} 次被 max_tokens 截断，已停止派发工具调用。请拆分任务（大文件分段写入）或调高 max_tokens 后重试。`
+              : `模型输出被 max_tokens 截断：本步 ${cleanCalls.length} 个工具调用均未执行，已提示模型缩小单次提交量。`
+            this.emit('agent/notice', { kind: 'truncated-tool-calls', message: notice })
+            if (truncatedGiveUp) {
+              this.setError(notice)
+              this.emit('agent/error', { message: notice })
+            }
+            for (const call of cleanCalls) {
+              const callId = String(call?.id || `call-${step}-${Math.random().toString(36).slice(2, 8)}`)
+              const name = String(call?.name || call?.function?.name || '')
+              const raw = this.streamedArgs.get(callId)
+                || (typeof call?.function?.arguments === 'string' ? call.function.arguments : '')
+              this.rejectToolCall(callId, name, this.truncatedToolCallError(name, raw.length, truncatedGiveUp), step, raw.length)
+            }
+            toolCallsCount = cleanCalls.length
+          } else {
+            for (const call of cleanCalls) {
+              await this.executeToolCall(call, step)
+            }
+            toolCallsCount = cleanCalls.length
           }
-          toolCallsCount = cleanCalls.length
         }
 
         sessionLog.append(this.id, 'step/end', { turn, step, toolCalls: toolCallsCount })
@@ -849,7 +907,9 @@ class AgentImpl implements AgentControl {
 
         // 续跑时不给新的 user 内容：被截断的那半截内容已在历史里（assistant 消息），
         // 模型看到的历史本身就是"说到一半"，直接再请求即从断点继续。
-        owesWork = toolCallsCount > 0 || !!pendingSteer || truncation.shouldContinue
+        // 截断且给了工具调用时，跳过派发后仍要继续一步，把"未执行"的合成结果喂回模型；
+        // 但连续多次仍撞上限（truncatedGiveUp）时不再继续，避免无意义地重试。
+        owesWork = (!truncatedGiveUp && toolCallsCount > 0) || !!pendingSteer || truncation.shouldContinue
         item = pendingSteer
       }
     } catch (err: any) {
@@ -1473,6 +1533,40 @@ class AgentImpl implements AgentControl {
 
   // ---------------- 工具执行 ----------------
 
+  /**
+   * 拒绝一次工具调用（参数无法解析 / 输出被截断 / 其它"没有真正执行"的失败）：
+   * 落 `tool/call`（无 args）+ `tool/result` 诊断，让模型和 UI 都看到这次调用**未执行**。
+   *
+   * 为什么集中收口：调用没执行时也必须成对写 call/result，否则会话日志会把它当成
+   * "工具结果缺失"，下一轮模型会误以为工具跑过 / 需要重跑。
+   */
+  private rejectToolCall(callId: string, name: string, error: string, step: number, argsRawLen?: number): void {
+    const callSeq = sessionLog.append(this.id, 'tool/call', {
+      callId,
+      name,
+      args: undefined,
+      ...(argsRawLen !== undefined ? { argsRawLen } : {}),
+      step,
+    }).seq
+    this.currentCallSeq.set(callId, callSeq)
+    this.emit('tool/call', { callId, name, args: undefined, argsParseFailed: true })
+    this.pushToolResult({ callId, name, ok: false, error, diagnostic: true })
+  }
+
+  /** 输出被 max_tokens 截断、整步工具调用不派发时的模型侧说明 */
+  private truncatedToolCallError(name: string, rawLen: number, giveUp: boolean): string {
+    const head = giveUp
+      ? `本步输出被截断（finish_reason=length），且已连续 ${MAX_TRUNCATED_TOOL_SKIPS} 次因截断跳过工具调用：本次调用未执行。`
+      : '本步输出被截断（finish_reason=length，max_tokens / 上下文长度不够），工具参数 JSON 不完整：本次调用未执行。'
+    const advice = name === 'write_file'
+      ? '如果 content 很大，请分段写入：先写文件骨架，再用 replace_in_file 逐段追加（不要一次提交整份大文件）。'
+      : name === 'run_code' || name === 'run_python'
+        ? '请把程序拆成多次调用、每次只做少量步骤后重试。'
+        : '请缩短单次提交的内容，拆成多次调用后重试。'
+    return `${head}${rawLen ? `（收到 ${rawLen} 字符）` : ''}${advice}`
+      + (giveUp ? '若反复出现，请调高 max_tokens 或改用输出上限更大的模型。' : '')
+  }
+
   private async executeToolCall(call: any, step: number): Promise<void> {
     const name = String(call?.name || call?.function?.name || '')
     const callId = String(call?.id || `call-${step}-${Math.random().toString(36).slice(2, 8)}`)
@@ -1486,16 +1580,18 @@ class AgentImpl implements AgentControl {
       const rawText = String(args._raw)
       const head = rawText.slice(0, 160)
       const tail = rawText.length > 320 ? rawText.slice(-160) : ''
+      const incomplete = looksIncompleteJson(rawText)
       const truncHint = this.lastFinishReason === 'length'
         ? '本步输出被截断（finish_reason=length，max_tokens / 上下文长度不够）'
-        : '参数 JSON 不合法或缺失'
+        : incomplete
+          ? '参数 JSON 不完整（本步输出很可能在生成途中被截断：常见于单次内容太长、撞到 max_tokens 或网关输出上限）'
+          : '参数 JSON 不合法（字符串内的换行 / 引号未正确转义）'
       const error = `工具参数无法解析（${truncHint}，收到 ${rawText.length} 字符）：`
         + `原文开头「${head}」${tail ? `…结尾「${tail}」` : ''}。`
-        + '请缩短一次提交的内容后重试（例如一次 run_code 只做少量步骤、大文件分段写入），并确保 JSON 字符串内的换行/引号已正确转义。'
-      const parseCallSeq = sessionLog.append(this.id, 'tool/call', { callId, name, args: undefined, argsRawLen: rawText.length, step }).seq
-      this.currentCallSeq.set(callId, parseCallSeq)
-      this.emit('tool/call', { callId, name, args: undefined, argsParseFailed: true })
-      this.pushToolResult({ callId, name, ok: false, error, diagnostic: true })
+        + '本次调用未执行（没有写入任何文件）。请缩短一次提交的内容后重试：大文件分段写入——先写骨架，再用 replace_in_file 在末尾逐段追加'
+        + '（例如一次 run_code 只做少量步骤）；并确保 JSON 字符串内的换行/引号已正确转义。'
+        + '若反复出现，请调高 max_tokens 或改用输出上限更大的模型。'
+      this.rejectToolCall(callId, name, error, step, rawText.length)
       return
     }
 

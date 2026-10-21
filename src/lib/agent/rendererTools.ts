@@ -114,7 +114,7 @@ const SCHEMAS: Record<string, any> = {
     offset: num('起始字符偏移（续读时传上次的 nextOffset）'),
     limit: num('单次读取的最大字符数（默认 40000，上限 102400）'),
   }, ['path']),
-  write_file: fn('write_file', '写入文件（UTF-8，自动创建父目录）。已存在则整体覆盖；只改一小段请优先用 replace_in_file。', {
+  write_file: fn('write_file', '写入文件（UTF-8，自动创建父目录）。已存在则整体覆盖；只改一小段请优先用 replace_in_file。单次 content 建议不超过约 20000 字符：更大的文件请分段写——先写第一部分，再用 replace_in_file 逐段追加（整份一次提交容易撞到输出上限而被截断）。', {
     path: str('文件路径'),
     content: str('完整文件内容'),
   }, ['path', 'content']),
