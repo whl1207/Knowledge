@@ -17,7 +17,7 @@
  * （默认取真实插件），Node 侧可用内存实现跑单元验证——见 `AndroidDeps`。
  */
 
-import { Capacitor } from '@capacitor/core'
+import { Capacitor, SystemBars, SystemBarType } from '@capacitor/core'
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem'
 import { SAF_PREFIX, SafFolder, createSafFilesystemAdapter, isSafPath, splitSafPath, safCache, type SafFilesystemAdapter } from '@/platform/android/saf'
 import { createShareAdapter } from '@/platform/android/share'
@@ -199,7 +199,23 @@ export function toRelativePath(path: string): string | null {
   return out.length ? out.join('/') : ''
 }
 
-/** 取父目录（相对路径） */
+/**
+ * 交给 fs 适配器的路径：
+ * - `saf:` / `data:` 原样交给适配器（按前缀路由到 SAF / 私有目录）；
+ * - 其余用 `toRelativePath` 归一化成 Documents 相对路径（拒绝 `..`）。
+ *
+ * 为什么所有路径方法都必须经过它：旧实现先 `toRelativePath` 再直连 Capacitor，
+ * 于是 `saf:知识库/x` 会被当成 Documents 下的 "saf:知识库/x"，读/写/删除/改名/建目录
+ * 全部落到错误位置（或直接失败）——与视频播放、drawio 打开是同一类 SAF 路径 bug。
+ */
+function adapterPath(path: string): string | null {
+  const raw = String(path ?? '')
+  if (raw === '' || raw === '.' || raw === './') return ''
+  if (isSafPath(raw) || raw.startsWith(DATA_PREFIX)) return raw
+  return toRelativePath(raw)
+}
+
+/** 取父目录（相对路径 / SAF 路径通用） */
 function parentOf(rel: string): string {
   const idx = rel.lastIndexOf('/')
   return idx > 0 ? rel.slice(0, idx) : ''
@@ -240,6 +256,38 @@ function bytesToBase64(bytes: Uint8Array): string {
 const localServerUrlCache = new Map<string, string>()
 
 /**
+ * 取「本地服务器」URL：`http://localhost/_capacitor_file_…` / `_capacitor_content_…`。
+ * `<video>` / `<audio>` 直接吃这个地址（原始 `saf:` 路径 WebView 不认识）；
+ * 读字节时也走它，避免整个文件经 Capacitor 桥 base64 往返。
+ */
+async function localServerUrlOf(path: string, deps: AndroidDeps): Promise<string> {
+  const key = String(path || '')
+  if (!key) return ''
+  const cached = localServerUrlCache.get(key)
+  if (cached) return cached
+  try {
+    const convert = (Capacitor as any)?.convertFileSrc
+    if (typeof convert !== 'function') return ''
+    let uri = ''
+    if (isSafPath(key)) {
+      const r = deps.resolveSafUri ? await deps.resolveSafUri(key) : await defaultResolveSafUri(key)
+      uri = r?.uri ? String(r.uri) : ''
+    } else {
+      const r = deps.resolveFileUrl ? await deps.resolveFileUrl(key) : await defaultResolveFileUrl(key)
+      uri = r ? String(r) : ''
+    }
+    if (!uri) return ''
+    const url = String(convert(uri))
+    if (!/^https?:/i.test(url)) return ''
+    if (localServerUrlCache.size > 128) localServerUrlCache.clear()
+    localServerUrlCache.set(key, url)
+    return url
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 经 Capacitor 本地服务器读文件字节（`http://localhost/_capacitor_file_…` / `_capacitor_content_…`）。
  *
  * 为什么必须这么做：原来的读法是**整个文件经 Capacitor 桥搬回来**——原生先 base64，再包成
@@ -252,26 +300,9 @@ const localServerUrlCache = new Map<string, string>()
 async function fetchViaLocalServer(path: string, deps: AndroidDeps): Promise<Uint8Array | null> {
   const key = String(path || '')
   if (!key) return null
+  const url = await localServerUrlOf(key, deps)
+  if (!url) return null
   try {
-    let url = localServerUrlCache.get(key)
-    if (!url) {
-      const core: any = await import('@capacitor/core')
-      const convert = core?.Capacitor?.convertFileSrc
-      if (typeof convert !== 'function') return null
-      let uri = ''
-      if (isSafPath(key)) {
-        const r = deps.resolveSafUri ? await deps.resolveSafUri(key) : await defaultResolveSafUri(key)
-        uri = r?.uri ? String(r.uri) : ''
-      } else {
-        const r = deps.resolveFileUrl ? await deps.resolveFileUrl(key) : await defaultResolveFileUrl(key)
-        uri = r ? String(r) : ''
-      }
-      if (!uri) return null
-      url = String(convert(uri))
-      if (!/^https?:/i.test(url)) return null
-      if (localServerUrlCache.size > 128) localServerUrlCache.clear()
-      localServerUrlCache.set(key, url)
-    }
     const res = await fetch(url)
     if (!res.ok) return null
     // html5mode：没有扩展名的路径会被回退成 index.html，那种响应不能当文件内容
@@ -393,19 +424,19 @@ async function buildTree(fs: AndroidFilesystemAdapter, rel: string, depth: numbe
 }
 
 function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPort {
-  const write = async (rel: string, data: string, encoding?: string) =>
-    fs.writeFile({ path: rel, data, directory: DOCS, encoding, recursive: true })
+  const write = async (path: string, data: string, encoding?: string) =>
+    fs.writeFile({ path, data, directory: DOCS, encoding, recursive: true })
 
   const port: FileSystemPort = {
     async readText(path) {
       // 先试本地服务器直读（大文本，比如 588KB 的插件入口，能省一次几十万字符的桥往返）
       const fast = await fetchViaLocalServer(path, deps)
       if (fast) return new TextDecoder('utf-8').decode(fast)
-      const rel = toRelativePath(path)
-      if (rel === null) return `${READ_ERROR_PREFIX}路径非法`
+      const p = adapterPath(path)
+      if (p === null) return `${READ_ERROR_PREFIX}路径非法`
       try {
         // encoding 必须传：Capacitor 不传编码时按二进制读并返回 base64
-        const res = await fs.readFile({ path: rel, directory: DOCS, encoding: ENCODING })
+        const res = await fs.readFile({ path: p, directory: DOCS, encoding: ENCODING })
         return typeof res.data === 'string' ? res.data : base64ToText(res.data)
       } catch (e: any) {
         return `${READ_ERROR_PREFIX}${e?.message || e}`
@@ -415,13 +446,13 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     async readDataUrl(path) {
       const fast = await fetchViaLocalServer(path, deps)
       if (fast) return `data:${mimeOf(path)};base64,${bytesToBase64(fast)}`
-      const rel = toRelativePath(path)
-      if (rel === null) return `${READ_ERROR_PREFIX}路径非法`
+      const p = adapterPath(path)
+      if (p === null) return `${READ_ERROR_PREFIX}路径非法`
       try {
         // 不传 encoding = 二进制读，两个后端都返回 base64
-        const res = await fs.readFile({ path: rel, directory: DOCS })
+        const res = await fs.readFile({ path: p, directory: DOCS })
         const b64 = typeof res.data === 'string' ? res.data : ''
-        return `data:${mimeOf(rel)};base64,${b64}`
+        return `data:${mimeOf(p)};base64,${b64}`
       } catch (e: any) {
         return `${READ_ERROR_PREFIX}${e?.message || e}`
       }
@@ -431,10 +462,10 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
       // 大文件（ROM / 存档）走本地服务器：原来的桥读法要把整个文件 base64 + JSON 搬两趟
       const fast = await fetchViaLocalServer(path, deps)
       if (fast) return fast
-      const rel = toRelativePath(path)
-      if (rel === null) return null
+      const p = adapterPath(path)
+      if (p === null) return null
       try {
-        const res = await fs.readFile({ path: rel, directory: DOCS })
+        const res = await fs.readFile({ path: p, directory: DOCS })
         const b64 = typeof res.data === 'string' ? res.data : ''
         if (!b64) return null
         const bin = atob(b64)
@@ -446,11 +477,16 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
       }
     },
 
+    // 视频 / 音频播放：把 saf: / data: / 相对路径换成 WebView 能直接加载的本地服务器 URL
+    async urlOf(path) {
+      return localServerUrlOf(path, deps)
+    },
+
     async saveText(path, content) {
-      const rel = toRelativePath(path)
-      if (rel === null) return false
+      const p = adapterPath(path)
+      if (p === null) return false
       try {
-        await write(rel, content, ENCODING)
+        await write(p, content, ENCODING)
         return true
       } catch {
         return false
@@ -458,21 +494,21 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async writeText(path, content) {
-      const rel = toRelativePath(path)
-      if (rel === null) return { success: false, error: '路径非法' }
+      const p = adapterPath(path)
+      if (p === null) return { success: false, error: '路径非法' }
       try {
-        await write(rel, content, ENCODING)
-        return { success: true, path: rel }
+        await write(p, content, ENCODING)
+        return { success: true, path: p }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
       }
     },
 
     async writeBase64(path, base64) {
-      const rel = toRelativePath(path)
-      if (rel === null) return false
+      const p = adapterPath(path)
+      if (p === null) return false
       try {
-        await write(rel, stripDataUrl(base64))
+        await write(p, stripDataUrl(base64))
         return true
       } catch {
         return false
@@ -480,11 +516,11 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async writeBinaryBase64(path, base64) {
-      const rel = toRelativePath(path)
-      if (rel === null) return { success: false, error: '路径非法' }
+      const p = adapterPath(path)
+      if (p === null) return { success: false, error: '路径非法' }
       try {
-        await write(rel, stripDataUrl(base64))
-        return { success: true, path: rel }
+        await write(p, stripDataUrl(base64))
+        return { success: true, path: p }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
       }
@@ -501,32 +537,32 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async createFile(dirPath, fileName) {
-      const rel = toRelativePath(joinRel(dirPath, fileName))
-      if (rel === null) return null
+      const p = adapterPath(joinRel(dirPath, fileName))
+      if (p === null) return null
       try {
-        await write(rel, '', ENCODING)
-        return rel
+        await write(p, '', ENCODING)
+        return p
       } catch {
         return null
       }
     },
 
     async createFolder(dirPath, folderName) {
-      const rel = toRelativePath(joinRel(dirPath, folderName))
-      if (rel === null) return null
+      const p = adapterPath(joinRel(dirPath, folderName))
+      if (p === null) return null
       try {
-        await fs.mkdir({ path: rel, directory: DOCS, recursive: true })
-        return rel
+        await fs.mkdir({ path: p, directory: DOCS, recursive: true })
+        return p
       } catch {
         return null
       }
     },
 
     async deleteFile(path) {
-      const rel = toRelativePath(path)
-      if (rel === null) return false
+      const p = adapterPath(path)
+      if (p === null) return false
       try {
-        await fs.deleteFile({ path: rel, directory: DOCS })
+        await fs.deleteFile({ path: p, directory: DOCS })
         return true
       } catch {
         return false
@@ -534,12 +570,16 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async deleteFolder(path) {
-      const rel = toRelativePath(path)
-      if (rel === null) return { success: false, error: '路径非法' }
-      // 根目录是应用数据目录本身：不允许删除（与桌面/主机侧同一约束）
-      if (rel === '') return { success: false, error: '不允许删除应用目录本身' }
+      const p = adapterPath(path)
+      if (p === null) return { success: false, error: '路径非法' }
+      // 根目录本身（Documents 根 / 授权根 / 私有 data 根）不允许删除
+      const trimmed = p.replace(/\/+$/, '')
+      if (trimmed === '' || trimmed === 'saf:' || trimmed === DATA_PREFIX
+        || (isSafPath(trimmed) && !trimmed.slice(SAF_PREFIX.length).includes('/'))) {
+        return { success: false, error: '不允许删除根目录本身' }
+      }
       try {
-        await fs.rmdir({ path: rel, directory: DOCS, recursive: true })
+        await fs.rmdir({ path: p, directory: DOCS, recursive: true })
         return { success: true }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
@@ -547,47 +587,53 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async copyFile(sourcePath, targetDir) {
-      const src = toRelativePath(sourcePath)
-      const dst = toRelativePath(joinRel(targetDir, fileNameOf(sourcePath)))
+      const srcRaw = String(sourcePath || '')
+      const dstRaw = joinRel(targetDir, fileNameOf(srcRaw))
+      const src = adapterPath(srcRaw)
+      const dst = adapterPath(dstRaw)
       if (!src || !dst) return { success: false, error: '路径非法' }
       try {
         await fs.copy({ from: src, to: dst, directory: DOCS, toDirectory: DOCS })
-        return { success: true, newPath: dst }
+        return { success: true, newPath: dstRaw }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
       }
     },
 
     async moveFile(sourcePath, targetDir) {
-      const src = toRelativePath(sourcePath)
-      const dst = toRelativePath(joinRel(targetDir, fileNameOf(sourcePath)))
+      const srcRaw = String(sourcePath || '')
+      const dstRaw = joinRel(targetDir, fileNameOf(srcRaw))
+      const src = adapterPath(srcRaw)
+      const dst = adapterPath(dstRaw)
       if (!src || !dst) return { success: false, error: '路径非法' }
       try {
         await fs.rename({ from: src, to: dst, directory: DOCS, toDirectory: DOCS })
-        return { success: true, newPath: dst }
+        return { success: true, newPath: dstRaw }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
       }
     },
 
     async renameFile(oldPath, newName) {
-      const src = toRelativePath(oldPath)
-      if (!src || /[\\/]/.test(String(newName))) return { success: false, error: '名称非法' }
-      const dst = toRelativePath(joinRel(parentOf(src), String(newName)))
-      if (!dst) return { success: false, error: '路径非法' }
+      const srcRaw = String(oldPath || '')
+      if (/[\\/]/.test(String(newName))) return { success: false, error: '名称非法' }
+      const dstRaw = joinRel(parentOf(srcRaw), String(newName))
+      const src = adapterPath(srcRaw)
+      const dst = adapterPath(dstRaw)
+      if (!src || !dst) return { success: false, error: '路径非法' }
       try {
         await fs.rename({ from: src, to: dst, directory: DOCS, toDirectory: DOCS })
-        return { success: true, newPath: dst }
+        return { success: true, newPath: dstRaw }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
       }
     },
 
     async ensureDir(dirPath) {
-      const rel = toRelativePath(dirPath)
-      if (rel === null) return { success: false, error: '路径非法' }
+      const p = adapterPath(dirPath)
+      if (p === null) return { success: false, error: '路径非法' }
       try {
-        await fs.mkdir({ path: rel, directory: DOCS, recursive: true })
+        await fs.mkdir({ path: p, directory: DOCS, recursive: true })
         return { success: true }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
@@ -595,9 +641,9 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async listTree(folderPath, depth) {
-      const rel = toRelativePath(folderPath)
-      if (rel === null) return []
-      return await buildTree(fs, rel, Math.min(8, Math.max(1, Number(depth) || 3)))
+      const p = adapterPath(folderPath)
+      if (p === null) return []
+      return await buildTree(fs, p, Math.min(8, Math.max(1, Number(depth) || 3)))
     },
 
     /** 图谱视图用：把嵌套树摊平成 fileList + relationList（与桌面 getFilesRelation 同形状） */
@@ -617,12 +663,15 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async getInfo(path) {
-      const rel = toRelativePath(path)
-      if (rel === null) return null
+      // 不能先 toRelativePath：那会把 `saf:知识库/x.drawio` 当成应用文档目录下的相对路径，
+      // stat 必然失败 → Markdown 里点 .drawio 图表时误报「目标文件不存在」。
+      // 直接把原始路径交给适配器：saf: 走 SAF、data: 走私有目录、其余按 Documents 相对路径。
+      const raw = String(path || '')
+      if (!raw) return null
       try {
-        const st = await fs.stat({ path: rel, directory: DOCS })
+        const st = await fs.stat({ path: raw, directory: DOCS })
         const isDir = st.type === 'directory'
-        const name = fileNameOf(rel)
+        const name = fileNameOf(raw)
         return { type: isDir ? 'folder' : 'file', label: name, extension: extOf(name, isDir) }
       } catch {
         return null
@@ -630,12 +679,12 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async readMetadata(path) {
-      const rel = toRelativePath(path)
-      if (rel === null) return {}
-      let target = rel
+      const p = adapterPath(path)
+      if (p === null) return {}
+      let target = p
       try {
-        const st = await fs.stat({ path: rel, directory: DOCS })
-        if (st.type === 'directory') target = joinRel(rel, '.README.md')
+        const st = await fs.stat({ path: p, directory: DOCS })
+        if (st.type === 'directory') target = joinRel(p, '.README.md')
       } catch {
         return {}
       }
@@ -686,10 +735,10 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     },
 
     async isDirectory(path) {
-      const rel = toRelativePath(path)
-      if (rel === null) return false
+      const p = adapterPath(path)
+      if (p === null) return false
       try {
-        const st = await fs.stat({ path: rel, directory: DOCS })
+        const st = await fs.stat({ path: p, directory: DOCS })
         return st.type === 'directory'
       } catch {
         return false
@@ -767,18 +816,23 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
     async saveRemoteDownload({ dir, name, data }) {
       if (!String(name || '').trim()) return { success: false, error: '文件名无效' }
       const target = joinRel(dir, name)
-      const rel = toRelativePath(target)
-      if (rel === null) return { success: false, error: '路径非法' }
+      const p = adapterPath(target)
+      if (p === null) return { success: false, error: '路径非法' }
       if (!Array.isArray(data)) return { success: false, error: '内容无效' }
       try {
-        const parent = parentOf(rel)
+        const parent = parentOf(p)
         // `saf:` / `data:` 本身就是根：不要再对空前缀做 mkdir
         if (parent && parent !== 'saf:' && parent !== 'data:') {
-          await fs.mkdir({ path: parent, directory: DOCS, recursive: true })
+          let exists = false
+          try {
+            const st = await fs.stat({ path: parent, directory: DOCS })
+            exists = st.type === 'directory'
+          } catch { /* 不存在 → 下面创建 */ }
+          if (!exists) await fs.mkdir({ path: parent, directory: DOCS, recursive: true }).catch(() => undefined)
         }
         // 不传 encoding = 二进制写（两个后端都按 base64 解码后落盘）
-        await write(rel, bytesToBase64(new Uint8Array(data)))
-        return { success: true, path: rel }
+        await write(p, bytesToBase64(new Uint8Array(data)))
+        return { success: true, path: p }
       } catch (e: any) {
         return { success: false, error: String(e?.message || e) }
       }
@@ -963,16 +1017,52 @@ let immersivePreferred = true
 
 async function applyImmersive(hidden: boolean): Promise<boolean> {
   try {
-    const core: any = await import('@capacitor/core')
-    const bars = core?.SystemBars
-    if (!bars) return false
-    const bar = core?.SystemBarType?.StatusBar || 'StatusBar'
-    if (hidden) await bars.hide({ bar })
-    else await bars.show({ bar })
+    const bar = SystemBarType.StatusBar
+    if (hidden) await SystemBars.hide({ bar })
+    else await SystemBars.show({ bar })
     return hidden
   } catch {
     return false
   }
+}
+
+/**
+ * 沉浸式保持器：系统状态栏会在很多时机被系统重新显示 —— 软键盘收起 / 权限或选择器弹窗 /
+ * 切到后台再回来 / Activity 重建。只在启动时 hide 一次不够，用户看到的就是「状态栏一旦出现
+ * 就再也消不掉」。
+ *
+ * 这里在 focus / visibilitychange / Capacitor resume 时重新隐藏（用户主动用
+ * `window.toggleFullscreen` 关掉沉浸式后 `immersivePreferred=false`，不会被强行改回去），
+ * 并在启动后补几次：首次调用常常早于 Activity / WebView 就绪，hide 会静默失败。
+ */
+let immersiveKeeperInstalled = false
+function keepImmersive(): void {
+  if (immersiveKeeperInstalled || typeof window === 'undefined') return
+  immersiveKeeperInstalled = true
+  let lastApply = 0
+  const reapply = () => {
+    if (!immersivePreferred) return
+    const now = Date.now()
+    // 合并 focus / visibility / resume 的连环触发（同一次回到前台只 hide 一次）
+    if (now - lastApply < 250) return
+    lastApply = now
+    void applyImmersive(true)
+  }
+  window.addEventListener('focus', reapply)
+  // 软键盘弹出 / 收起、旋转都会触发 resize，系统常在这时把状态栏放回来。
+  // 收起动画结束时可能还会再放一次，所以延迟补一刀（reapply 自身有 250ms 合并窗口）。
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null
+  window.addEventListener('resize', () => {
+    reapply()
+    if (resizeTimer) clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(reapply, 500)
+  })
+  window.addEventListener('orientationchange', reapply)
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) reapply() })
+  document.addEventListener('resume', reapply as EventListener)
+  document.addEventListener('deviceready', reapply as EventListener)
+  // 首屏 Activity / WebView 尚未就绪时 hide 会失败：补几次，覆盖冷启动窗口
+  for (const ms of [200, 600, 1500, 3000]) setTimeout(reapply, ms)
 }
 
 /** 默认的「路径 → 可共享 uri」解析（saf: 走 SAF document uri，其余走 Capacitor 的 file:// uri） */
@@ -1233,7 +1323,11 @@ export function createAndroidPlatform(deps: AndroidDeps = {}): Platform {
   const fs = makeAdapter(deps)
   const host = deps.speech ? { ...hostPort, tts: deps.speech } : hostPort
   // 沉浸式全屏：应用自带顶栏，隐藏系统状态栏（可用 window.toggleFullscreen 切回来）
-  if (deps.immersive !== false) void applyImmersive(true)
+  // keepImmersive 负责在系统重新显示状态栏后（键盘收起 / 回到前台 / Activity 重建）再隐藏。
+  if (deps.immersive !== false) {
+    void applyImmersive(true)
+    keepImmersive()
+  }
   return {
     kind: 'android',
     capabilities: capabilitiesOf(),

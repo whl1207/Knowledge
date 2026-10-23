@@ -27,6 +27,12 @@
       <div class="toolbar-btn" @click="autoLayoutAndFit" :title="store.locales == 'zh' ? '自动布局（重新排列节点并铺满容器）' : 'Auto layout (rearrange nodes & fit to container)'">
         <i class="fa fa-arrows-alt"></i>
       </div>
+      <!-- 布局切换：力导向 / 层次布局（按关系方向分列，适合先修链） -->
+      <select class="toolbar-select" v-model="layoutMode"
+        :title="store.locales == 'zh' ? '图谱布局：力导向 / 层次布局' : 'Graph layout: force / hierarchy'">
+        <option value="force">{{ store.locales == 'zh' ? '力导向' : 'Force' }}</option>
+        <option value="hierarchy">{{ store.locales == 'zh' ? '层次布局' : 'Hierarchy' }}</option>
+      </select>
       <!-- 手动连线（概念 ↔ 概念；大模型判型；状态在底部状态栏提示） -->
       <div class="toolbar-btn link" :class="{ active: linking }" @click="toggleLinking" :title="store.locales == 'zh' ? '手动连线：点击两个概念节点建立连线，由大模型判断关系类型（仅适用于概念之间；状态见底部状态栏）' : 'Manual link: click two concept nodes to connect; LLM decides the relation type (concepts only); status in the bottom bar'" :style="linking ? { color: '#E91E63' } : {}"><i class="fa fa-link"></i></div>
       <!-- 社区检测 / 生成报告 / 清空本体 -->
@@ -118,8 +124,8 @@
       </div>
     </div>
 
-    <!-- 节点 / 社区报告详情：弹出面板（样式对齐 questionView 的 qb-pick-overlay；不再占用右侧侧边栏） -->
-    <div class="ov-overlay" v-if="(selectedNode && showAssociationPanel) || showReportPanel" @mousedown.self="closePanel">
+    <!-- 节点 / 社区报告详情：右侧标签面板（与图谱并排，不再使用悬浮遮罩） -->
+    <aside class="ov-side" v-if="(selectedNode && showAssociationPanel) || showReportPanel">
       <div class="ov-dialog">
       <div class="panel-header">
         <div class="panel-title">
@@ -285,6 +291,7 @@
             <div v-else class="empty-tip">{{store.locales == 'zh' ? '暂无相关切片' : 'No related blocks'}}</div>
           </template>
         </div>
+      </div>
       <div class="ov-foot">
         <span class="ov-note">
           <i class="fa fa-info-circle"></i>
@@ -299,8 +306,7 @@
         </div>
       </div>
       </div>
-    </div>
-    </div>
+    </aside>
     </div>
   </div>
 </template>
@@ -416,6 +422,8 @@ const svgRef = ref<SVGSVGElement | null>(null)
 
 // 节点类型过滤（仅实体）
 const visibleNodeTypes = ref(['entity'])
+// 图谱布局：force=力导向；hierarchy=层次布局（按关系方向分列）
+const layoutMode = ref<'force' | 'hierarchy'>('force')
 const showSliceNodes = ref(false)
 const showFileNodes = ref(false)
 const showMetaNodes = ref(false)
@@ -425,10 +433,13 @@ const tooltipStyle = ref({})
 const selectedNode = ref<OntologyNode | null>(null)
 const showAssociationPanel = ref(false)
 const showReportPanel = ref(false)
-/** 关闭节点 / 社区报告详情弹出面板（点遮罩、点关闭按钮、点底部「关闭」都走这里） */
+/** 关闭节点 / 社区报告详情右侧面板（点关闭按钮走这里；同时清掉选中态） */
 const closePanel = () => {
   showAssociationPanel.value = false
   showReportPanel.value = false
+  selectedNodeId.value = null
+  selectedNode.value = null
+  resetHighlight()
 }
 /** 问题节点显示开关：问题库问题以节点形式入图，与参考切片连线 */
 const showQuestionNodes = ref(false)
@@ -1960,8 +1971,13 @@ const renderGraph = () => {
   
   simulation.on('tick', ticked)
   simulation.alphaDecay(0.02)
-  // 有新增节点时正常布局（新增节点被链接力从外部拉入）；无新增（如切换社区/过滤）时几乎不动，避免整图重置闪烁
-  simulation.alpha(addedNodeIds.size > 0 ? 0.7 : 0.2)
+  if (layoutMode.value === 'hierarchy') {
+    // 层次布局：节点固定到分层坐标，不再让力导向拉扯
+    applyHierarchyLayout(true)
+  } else {
+    // 有新增节点时正常布局（新增节点被链接力从外部拉入）；无新增（如切换社区/过滤）时几乎不动，避免整图重置闪烁
+    simulation.alpha(addedNodeIds.size > 0 ? 0.7 : 0.2)
+  }
   
   // 记录已渲染的节点/边（用于后续识别"真正新增"的元素，切换社区等过滤不算新增）
   nodeData.forEach((n: any) => { everRenderedNodeIds.add(n.id) })
@@ -2081,11 +2097,100 @@ const fitGraphToContainer = (duration = 400) => {
     .call(zoomBeh.transform as any, d3.zoomIdentity.translate(tx, ty).scale(scale))
 }
 
+// 层次布局：按关系方向（先修 → 后续、实体 → 切片等）计算深度，
+// 再把深度压缩成若干列，适合看先修链；节点锁定坐标后可继续拖动。
+const applyHierarchyLayout = (fit = true) => {
+  const simNodes = (simulation?.nodes() || []) as any[]
+  if (!simNodes.length) return
+
+  const ids = new Set(simNodes.map(n => n.id))
+  const adj = new Map<string, string[]>()
+  const indeg = new Map<string, number>()
+  simNodes.forEach(n => { adj.set(n.id, []); indeg.set(n.id, 0) })
+
+  const links = (simulation?.force('link') as any)?.links?.() || []
+  for (const l of links) {
+    const s = typeof l.source === 'object' ? l.source.id : l.source
+    const t = typeof l.target === 'object' ? l.target.id : l.target
+    if (!ids.has(s) || !ids.has(t) || s === t) continue
+    adj.get(s)!.push(t)
+    indeg.set(t, (indeg.get(t) || 0) + 1)
+  }
+
+  // Kahn 拓扑 + 最长路径深度；有环时把剩余节点补到末尾，避免死循环
+  const depth = new Map<string, number>()
+  simNodes.forEach(n => depth.set(n.id, 0))
+  const queue = simNodes.filter(n => (indeg.get(n.id) || 0) === 0).map(n => n.id)
+  const order: string[] = []
+  while (queue.length) {
+    const u = queue.shift()!
+    order.push(u)
+    for (const v of adj.get(u) || []) {
+      indeg.set(v, (indeg.get(v) || 0) - 1)
+      if ((indeg.get(v) || 0) === 0) queue.push(v)
+    }
+  }
+  if (order.length < simNodes.length) {
+    for (const n of simNodes) if (!order.includes(n.id)) order.push(n.id)
+  }
+  const cap = Math.max(1, simNodes.length - 1)
+  for (const u of order) {
+    const du = depth.get(u) || 0
+    for (const v of adj.get(u) || []) {
+      const next = Math.min(cap, du + 1)
+      if (next > (depth.get(v) || 0)) depth.set(v, next)
+    }
+  }
+
+  let maxDepth = 0
+  for (const d of depth.values()) maxDepth = Math.max(maxDepth, d)
+  // 深层先修链（本知识库可达数百层）压缩成若干列；按深度排序后**均分**到各列，
+  // 避免“浅层节点特别多”把第一列拉成几千像素高。
+  const targetCols = Math.min(24, Math.max(6, Math.round(Math.sqrt(simNodes.length) * 0.7)))
+  const columns = Math.max(1, Math.min(maxDepth + 1, targetCols))
+  const ordered = simNodes.slice().sort((a, b) => (depth.get(a.id)! - depth.get(b.id)!)
+    || String(a.name).localeCompare(String(b.name), 'zh'))
+  const bands: any[][] = Array.from({ length: columns }, () => [])
+  const perBand = ordered.length / columns
+  ordered.forEach((n, idx) => {
+    const band = Math.min(columns - 1, Math.floor(idx / perBand))
+    bands[band].push(n)
+  })
+
+  const colGap = 320
+  const rowGap = 78
+  bands.forEach((list, band) => {
+    const total = (list.length - 1) * rowGap
+    list.forEach((n, i) => {
+      n.x = band * colGap
+      n.y = i * rowGap - total / 2
+      n.fx = n.x
+      n.fy = n.y
+    })
+  })
+
+  if (currentNodes) currentNodes.attr('cx', (d: any) => d.x).attr('cy', (d: any) => d.y)
+  if (currentLabels) currentLabels.attr('x', (d: any) => d.x).attr('y', (d: any) => d.y)
+  if (currentEdges) {
+    currentEdges
+      .attr('x1', (d: any) => d.source?.x ?? 0).attr('y1', (d: any) => d.source?.y ?? 0)
+      .attr('x2', (d: any) => d.target?.x ?? 0).attr('y2', (d: any) => d.target?.y ?? 0)
+  }
+  simNodes.forEach(n => { lastNodeCoords.set(n.id, { x: n.x, y: n.y }) })
+  updateNodePositions()
+  if (simulation) simulation.alpha(0).stop()
+  if (fit) setTimeout(() => fitGraphToContainer(380), 30)
+}
+
 // 自动布局：不重置/不随机，以当前节点坐标为基础温和加热力导向
 // （让重叠节点散开、游离节点归位），收敛后将图谱缩放居中铺满容器
 const autoLayoutAndFit = () => {
   if (!svgRef.value || !g) return
   if (visibleNodes.value.length === 0) return
+  if (layoutMode.value === 'hierarchy') {
+    renderGraph()
+    return
+  }
   // 尚无 simulation（例如刚挂载尚未渲染）时先渲染一次，起点即当前视图坐标
   if (!simulation) renderGraph()
   if (!simulation) return
@@ -2113,6 +2218,21 @@ const autoLayoutAndFit = () => {
 }
 
 // ==================== 监听器 ====================
+// 布局模式切换：重新渲染（力导向 / 层次）
+watch(layoutMode, () => renderGraph())
+
+// 右侧面板开合会改变图谱可用宽度：重新量尺寸，并把力导向中心移到新画布中心
+watch([showAssociationPanel, showReportPanel], async () => {
+  await nextTick()
+  updateSize()
+  if (layoutMode.value === 'hierarchy') {
+    setTimeout(() => fitGraphToContainer(260), 40)
+  } else if (simulation) {
+    simulation.force('center', d3.forceCenter(width / 2, height / 2))
+    simulation.alpha(0.15).restart()
+  }
+})
+
 watch(() => props.ontologyData, (data) => {
   if (data && data.nodes && data.edges) {
     nodes.value = JSON.parse(JSON.stringify(data.nodes))
@@ -2406,11 +2526,16 @@ onBeforeUnmount(() => {
   display: block;
 }
 
-/* ===== 节点 / 社区报告详情：弹出面板（对齐 questionView 的 qb-pick-overlay / qb-pick-dialog） ===== */
-.ov-overlay {
-  position: fixed; inset: 0; z-index: 1200;
-  background: rgba(0, 0, 0, .35);
-  display: flex; align-items: center; justify-content: center;
+/* ===== 节点 / 社区报告详情：右侧标签面板（与图谱并排，不再遮挡画布） ===== */
+.ov-side {
+  width: clamp(260px, 26vw, 340px);
+  flex: 0 0 clamp(260px, 26vw, 340px);
+  height: 100%;
+  min-height: 0;
+  border-left: 1px solid var(--borderColor);
+  background: var(--backgroundColor);
+  display: flex;
+  overflow: hidden;
 }
 .ov-dialog {
   display: flex; flex-direction: column;
@@ -2420,13 +2545,22 @@ onBeforeUnmount(() => {
   border: 1px solid var(--borderColor); border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden;
 }
+/* 右侧面板内：占满侧栏，去掉弹窗边框和阴影 */
+.ov-side .ov-dialog {
+  width: 100%;
+  max-height: none;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
 .ov-flex { flex: 1; }
 .ov-foot {
   display: flex; align-items: center; gap: 6px; padding: 6px 8px;
   border-top: 1px solid var(--borderColor); flex-shrink: 0;
 }
 .ov-foot .kt-btn { padding: 0 12px; }
-.ov-note { font-size: 9px; color: var(--borderColor); }
+.ov-note { font-size: 9px; color: var(--fontColor); }
 .ov-note > i { margin-right: 3px; }
 .ov-dialog .panel-header { flex-shrink: 0; }
 .ov-dialog .panel-tabs { flex-shrink: 0; }
@@ -2842,7 +2976,7 @@ onBeforeUnmount(() => {
 
 .block-file {
   font-size: 8px;
-  color: var(--borderColor);
+  color: var(--fontColor);
 }
 
 .slice-content {
@@ -2903,7 +3037,7 @@ onBeforeUnmount(() => {
 
 .relation-desc {
   font-size: 9px;
-  color: var(--borderColor);
+  color: var(--fontColor);
   margin-bottom: 4px;
 }
 
@@ -2916,7 +3050,7 @@ onBeforeUnmount(() => {
 
 .info-label {
   width: 65px;
-  color: var(--borderColor);
+  color: var(--fontColor);
   flex-shrink: 0;
 }
 

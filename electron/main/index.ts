@@ -3475,9 +3475,24 @@ function svgSizePx(svg: string): { w: number; h: number } {
   return { w: 0, h: 0 }
 }
 
-/** 把图表 SVG 包成「页面尺寸 = 图形尺寸 + 边距」的可打印 HTML（preferCSSPageSize 生效） */
-function buildDiagramHtml(svg: string): string {
+/**
+ * 把图表 SVG 包成可打印的 HTML。
+ *  - 给了纸张尺寸（drawio 页面格式）→ 页面就是这个尺寸，图形等比缩放居中，
+ *    横竖方向与 drawio 里设置的一致（A4 横向就是横向 PDF）；
+ *  - 没给（页面视图关闭 / 老文件）→ 页面尺寸 = 图形尺寸 + 边距，仍按内容裁剪。
+ */
+function buildDiagramHtml(svg: string, page?: { width?: number; height?: number }): string {
   const pad = 24
+  const pw = Math.round(Number(page?.width) || 0)
+  const ph = Math.round(Number(page?.height) || 0)
+  if (pw > 0 && ph > 0) {
+    return `<!doctype html><html><head><meta charset="utf-8"><style>
+@page { size: ${pw}px ${ph}px; margin: 0; }
+html, body { margin: 0; padding: 0; background: #fff; overflow: hidden; }
+.dg { width: ${pw}px; height: ${ph}px; box-sizing: border-box; padding: ${pad}px; overflow: hidden; }
+.dg > svg { display: block; width: 100%; height: 100%; }
+</style></head><body><div class="dg">${svg}</div></body></html>`
+  }
   const size = svgSizePx(svg)
   const w = Math.max(200, Math.round((size.w || 800) + pad * 2))
   const h = Math.max(200, Math.round((size.h || 600) + pad * 2))
@@ -3518,10 +3533,15 @@ async function withPrintWindow<T>(
   }
 }
 
-// drawio「导出为 → PDF」：本地打印通道（printToPDF），离线可用
+// drawio「导出为 → PDF」：本地打印通道（逐页 printToPDF → pdf-lib 合并），离线可用
 ipcMain.handle('drawio-export-pdf', async (event, payload) => {
-  const { defaultPath, title, svg } = payload || {}
-  if (!svg) return { error: '缺少图表内容' }
+  const { defaultPath, title } = payload || {}
+  const pages: Array<{ svg: string; width?: number; height?: number }> = Array.isArray(payload?.pages) && payload.pages.length
+    ? payload.pages
+    : payload?.svg
+      ? [{ svg: String(payload.svg) }]
+      : []
+  if (!pages.length) return { error: '缺少图表内容' }
   const parent = BrowserWindow.fromWebContents(event.sender) || win
   const opts: Electron.SaveDialogOptions = {
     title: title || '导出为 PDF',
@@ -3531,10 +3551,20 @@ ipcMain.handle('drawio-export-pdf', async (event, payload) => {
   const result = parent ? await dialog.showSaveDialog(parent, opts) : await dialog.showSaveDialog(opts)
   if (result.canceled || !result.filePath) return { canceled: true }
   try {
-    const html = buildDiagramHtml(String(svg))
-    const pdfData = await withPrintWindow(html, (wc) => wc.printToPDF({ printBackground: true, preferCSSPageSize: true }))
-    fs.writeFileSync(result.filePath, asUint8(pdfData))
-    return { canceled: false, path: result.filePath }
+    const { PDFDocument } = await import('pdf-lib')
+    const merged = await PDFDocument.create()
+    for (const page of pages) {
+      const svg = String(page?.svg || '')
+      if (!svg) continue
+      const html = buildDiagramHtml(svg, page)
+      const pdfData = await withPrintWindow(html, (wc) => wc.printToPDF({ printBackground: true, preferCSSPageSize: true }))
+      const doc = await PDFDocument.load(asUint8(pdfData), { ignoreEncryption: true })
+      const copied = await merged.copyPages(doc, doc.getPageIndices())
+      for (const p of copied) merged.addPage(p)
+    }
+    if (merged.getPageCount() === 0) return { canceled: false, error: '没有可导出的页' }
+    fs.writeFileSync(result.filePath, asNodeBytes(await merged.save()))
+    return { canceled: false, path: result.filePath, pages: merged.getPageCount() }
   } catch (e: any) {
     console.error('[drawio-pdf] 导出失败', e)
     return { canceled: false, error: String(e?.message || e) }
@@ -3736,8 +3766,10 @@ ipcMain.handle('search', async (event, path, filterText) => {
   return search(path, filterText)
 });
 
+const SEARCH_SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'dist-electron', 'build', 'release', 'out', 'coverage', '.next', '.nuxt', '.cache', '.gradle', '.idea', '.vs', 'vendor', 'android', 'ios', 'resources', '__pycache__', '.venv', 'venv'])
+
 async function search(storePath: string, filterText: string, dirPath: string = storePath, results: any[] = [], floor: number = 1): Promise<any[]> {
-  if (floor > 10) return results
+  if (floor > 10 || results.length >= 2000) return results
   let filterTexts = filterText.split(" ")
   if (filterTexts.indexOf("") > -1) {
     filterTexts.splice(filterTexts.indexOf(""), 1)
@@ -3746,6 +3778,7 @@ async function search(storePath: string, filterText: string, dirPath: string = s
   let list = await fs.promises.readdir(dirPath)
 
   for (let itemPath of list) {
+    if (SEARCH_SKIP_DIRS.has(String(itemPath).toLowerCase())) continue
     const fullPath = path.join(dirPath, itemPath)
     const fileStat = await fs.promises.stat(fullPath)
     const isFile = fileStat.isFile()

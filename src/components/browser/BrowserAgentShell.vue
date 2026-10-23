@@ -133,7 +133,7 @@
     <div class="ba-body">
       <!-- 左侧：页面内容（新标签搜索首页等 DOM 在原生视图隐藏/空白时露出；有 URL 时由原生视图承载） -->
       <div ref="mainRef" class="ba-main">
-        <div class="ba-page">
+        <div ref="pageRef" class="ba-page">
           <!-- 设置标签页（内部页）：盖住网页区，隐藏原生视图（主进程 set-overlay） -->
           <BrowserSettingsPage v-if="settingsTabActive" />
           <!-- 新标签页（收藏夹网格）：整页就是收藏夹 grid——全部平铺、不折叠；搜索已并入顶部地址栏，页内不再放任何搜索/提示条 -->
@@ -269,6 +269,12 @@
           <span class="ba-mini-title">{{ state.title || state.url }}</span>
         </div>
         </div>
+        <!-- 底部状态栏：所有浏览器轻提示固定在左下角；原生网页视图只铺在 .ba-page，不遮挡这一条 -->
+        <div class="ba-statusbar">
+          <transition name="ba-toast-fade">
+            <span v-if="toastMsg" class="ba-toast" :class="{ err: toastKind === 'err' }">{{ toastMsg }}</span>
+          </transition>
+        </div>
       </div>
 
       <!-- 右侧停靠栏（收藏夹 / 下载 / 历史；设置已改为独立标签页） -->
@@ -293,10 +299,7 @@
       </aside>
     </div>
 
-    <!-- 轻提示（显示在标签/地址栏区域；网页视图区域为原生层无法被覆盖） -->
-    <transition name="ba-toast-fade">
-      <div v-if="toastMsg" class="ba-toast" :class="{ err: toastKind === 'err' }">{{ toastMsg }}</div>
-    </transition>
+    <!-- 轻提示已移到底部状态栏左下角（见 .ba-statusbar），避免网页原生层遮挡 -->
 
     <!-- 编辑书签模态框：修改标题 / 网址 -->
     <div v-if="bmEditVisible" class="ba-bm-edit-overlay" @click.self="closeEditBm">
@@ -813,6 +816,9 @@ const refreshBookmarks = async () => {
   }))
 }
 const isBookmarked = computed(() => !!state.url && bmItems.value.some(b => b.kind === 'file' && b.url === state.url))
+/** 把绝对路径转成相对收藏根目录的 rel（乐观更新用） */
+const relFromDir = (dir: string, p: string) =>
+  String(p || '').replace(/\\/g, '/').replace(String(dir || '').replace(/\\/g, '/').replace(/\/+$/, '') + '/', '')
 const toggleBookmark = async () => {
   if (!state.url) return
   const dir = browserBaseDir()
@@ -820,14 +826,31 @@ const toggleBookmark = async () => {
   const hit = bmItems.value.find(b => b.kind === 'file' && b.url === state.url)
   if (hit) {
     const r = await invoke('browser-agent:remove-bookmark', { root: dir, path: hit.path }).catch(() => null)
-    if (r?.ok) showToast(zh.value ? '已取消收藏' : 'Bookmark removed')
-    else showToast(r?.error || (zh.value ? '移除失败' : 'Remove failed'), 'err')
+    if (r?.ok) {
+      // 乐观更新：先让星标/新标签页立即反映，不必等目录扫描
+      bmItems.value = bmItems.value.filter(b => b.path !== hit.path)
+      showToast(zh.value ? '已取消收藏' : 'Bookmark removed')
+    } else {
+      showToast(r?.error || (zh.value ? '移除失败' : 'Remove failed'), 'err')
+    }
   } else {
     const r = await invoke('browser-agent:save-bookmark', { root: dir, url: state.url, title: state.title || state.url }).catch(() => null)
-    if (r?.ok) showToast(zh.value ? `已收藏：${r.path}` : `Saved: ${r.path}`)
-    else showToast(r?.error || (zh.value ? '收藏失败' : 'Save failed'), 'err')
+    if (r?.ok) {
+      if (!r.exists && r.path) {
+        const rel = relFromDir(dir, r.path)
+        const name = rel.split('/').pop()?.replace(/\.html?$/i, '') || (state.title || state.url)
+        bmItems.value = [...bmItems.value, {
+          kind: 'file', rel, name, title: state.title || state.url,
+          path: r.path, url: state.url, icon: '', order: null,
+        }]
+      }
+      showToast(zh.value ? `已收藏：${r.path}` : `Saved: ${r.path}`)
+    } else {
+      showToast(r?.error || (zh.value ? '收藏失败' : 'Save failed'), 'err')
+    }
   }
-  await refreshBookmarks()
+  // 后台校正（保存本身已即时返回，不阻塞点击）
+  void refreshBookmarks()
 }
 
 // ===== 新标签页「收藏夹」快捷入口（文件夹形式：顶层 → 点击进入下一级文件夹/书签） =====
@@ -1189,7 +1212,7 @@ let bmAutoTimer: ReturnType<typeof setInterval> | null = null
 const syncBmAutoTimer = () => {
   const active = railOpen.value && railView.value === 'bookmarks'
   if (active && !bmAutoTimer) {
-    bmAutoTimer = setInterval(() => { void refreshBookmarks() }, 1500)
+    bmAutoTimer = setInterval(() => { void refreshBookmarks() }, 5000)
   } else if (!active && bmAutoTimer) {
     clearInterval(bmAutoTimer)
     bmAutoTimer = null
@@ -1205,6 +1228,8 @@ const unsubBrowserEvents: Array<() => void> = []
 // ===================== 停靠模式：位置上报 / 可见性 / 浮层遮挡 =====================
 const shellRef = ref<HTMLElement | null>(null)
 const mainRef = ref<HTMLElement | null>(null)
+// 网页原生视图只铺在 .ba-page：底部留出状态栏（通知区），避免被原生层盖住
+const pageRef = ref<HTMLElement | null>(null)
 let dockObserver: ResizeObserver | null = null
 let dockRaf = 0
 let bodyObserver: MutationObserver | null = null
@@ -1217,7 +1242,7 @@ const pushDockRect = () => {
   if (dockRaf) return
   dockRaf = requestAnimationFrame(() => {
     dockRaf = 0
-    const el = mainRef.value
+    const el = pageRef.value || mainRef.value
     if (!el) { void invoke('browser-agent:set-dock-rect', { rect: null, owner: dockOwner }).catch(() => {}); return }
     const r = el.getBoundingClientRect()
     void invoke('browser-agent:set-dock-rect', {
@@ -1663,27 +1688,28 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 轻提示（位于标签/地址栏区域，网页原生视图无法被覆盖） */
-.ba-toast {
-  position: fixed;
-  top: 42px;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 70%;
-  padding: 4px 12px;
-  border: 1px solid var(--borderColor);
-  border-radius: 12px;
+/* 底部状态栏：通知固定左下角；原生网页视图只铺在 .ba-page，不会盖住这里 */
+.ba-statusbar {
+  flex: 0 0 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-top: 1px solid var(--borderColor);
   background: var(--menuColor);
+  overflow: hidden;
+}
+.ba-toast {
+  max-width: 100%;
+  padding: 0;
   color: var(--fontColor);
-  font-size: 12px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, .18);
-  pointer-events: none;
+  font-size: 11px;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  z-index: 100;
 }
-.ba-toast.err { border-color: #e81123; color: #e81123; }
+.ba-toast.err { color: #e81123; }
 .ba-toast-fade-enter-active, .ba-toast-fade-leave-active { transition: opacity .18s; }
 .ba-toast-fade-enter-from, .ba-toast-fade-leave-to { opacity: 0; }
 

@@ -55,7 +55,14 @@
               @click="onTabClick(tab)"
               @keydown.enter="onTabClick(tab)"
             >
-              <i class="fa know-tab-icon" :class="tab.icon"></i>
+              <i
+                class="fa know-tab-icon"
+                :class="[tab.icon, { 'know-tab-icon-action': tab.kind === 'file' }]"
+                :title="tab.kind === 'file'
+                  ? (store.locales === 'zh' ? '点击图标选择视图' : 'Click the icon to choose a view')
+                  : ''"
+                @click.stop="tab.kind === 'file' ? openTabViewMenu(tab, $event) : onTabClick(tab)"
+              ></i>
               <!-- 最左侧的「视图」标签只显示图标，名称放在悬停提示里；文件标签仍显示文件名 -->
               <span v-if="tab.kind === 'file'" class="know-tab-text">{{ tab.label }}</span>
               <i
@@ -110,6 +117,7 @@
               embedded
               :path="activeFileTab.path"
               :view="activeFileTab.view"
+              :page="activeFileTab.page"
               :remote-root-id="activeFileTab.remoteRootId"
               :remote-rel="activeFileTab.remoteRel"
               :label="activeFileTab.label"
@@ -147,13 +155,36 @@
         </div>
       </div>
     </div>
+
+    <!-- 文件标签的「视图选择」：点标签栏左侧的文件图标弹出（替代原来 FileWindow 的顶部标题栏）。
+         菜单用 fixed 定位，避免被标签条的横向滚动容器裁掉。 -->
+    <div
+      v-if="tabViewMenu"
+      class="know-tab-view-menu"
+      :style="{ left: tabViewMenu.x + 'px', top: tabViewMenu.y + 'px' }"
+      @click.stop
+      @pointerdown.stop
+    >
+      <button
+        v-for="v in tabViewMenu.views"
+        :key="v"
+        class="know-tab-view-item"
+        :class="{ active: v === tabViewMenu.current }"
+        :title="viewNameOfKey(v)"
+        @click="chooseTabView(v)"
+      >
+        <i :class="viewIconOfKey(v)"></i>
+        <span>{{ viewNameOfKey(v) }}</span>
+      </button>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
   import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue';
   import { usestore, DEFAULT_VIEW } from '@/store'
-  import { VIEW_BROWSE } from '@/lib/knowFile/fileViews'
+  import { VIEW_BROWSE, fileViewByKey } from '@/lib/knowFile/fileViews'
+  import { shouldSkipTextPreview } from '@/lib/knowFile/textPreview'
   // 专属文件类型（白板 / 图表 / 工作流 / 数据画布）的判别、编辑器与视图范围统一取自 fileEditors.ts
   import { detectEditorKind, editorVisibleInView, FILE_EDITORS } from '@/components/knowFile/fileEditors'
   import { ElMessageBox, ElMessage } from 'element-plus'
@@ -345,6 +376,64 @@ import { useTallLayout } from '@/composables/useTallLayout'
     const p = activeTab.value?.path || ''
     return (store.data || []).find((d: any) => d?.path === p) || null
   })
+
+  // 文件标签的视图选择菜单（点标签栏图标弹出；FileWindow 顶部标题栏已移除）
+  interface TabViewMenuState { path: string; x: number; y: number; views: string[]; current: string }
+  const tabViewMenu = ref<TabViewMenuState | null>(null)
+  const viewNameOfKey = (key: string): string => {
+    const def = fileViewByKey(key)
+    return def ? (store.locales === 'zh' ? def.name : def.labelEn) : key
+  }
+  const viewIconOfKey = (key: string): string => fileViewByKey(key)?.icon || 'fa fa-eye'
+  const closeTabViewMenu = () => { tabViewMenu.value = null }
+  const onTabViewMenuOutside = (e: Event) => {
+    if (!tabViewMenu.value) return
+    if (e.type === 'keydown' && (e as KeyboardEvent).key !== 'Escape') return
+    // 点在菜单内部（选项按钮）时不能先关菜单，否则 click 还没派发元素就被移除了
+    if (e.type !== 'keydown' && (e.target as HTMLElement)?.closest?.('.know-tab-view-menu')) return
+    tabViewMenu.value = null
+  }
+
+  /**
+   * 点文件标签的图标 → 选出该文件可用的视图。
+   * 非激活标签先激活（走未保存守卫），等 FileWindow 挂载后从它的 `availableViews` 取选项，
+   * 这样「标签栏里能选什么」与文件窗口实际支持的视图永远一致（含 Office 内核是否可用）。
+   */
+  async function openTabViewMenu(tab: KnowTab, e: MouseEvent) {
+    if (!tab || tab.kind !== 'file' || !tab.path) return
+    e.stopPropagation()
+    const rect = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+    if (tab.id !== activeTabId.value) {
+      if (!(await confirmLeaveActive())) return
+      activateTab(tab)
+      await nextTick()
+      await nextTick()
+      // FileWindow 是按 path keyed 的异步组件：等它真正换到目标文件，避免拿到上一个文件的视图表
+      for (let i = 0; i < 5; i++) {
+        const pane: any = filePaneRef.value
+        if (pane && String(pane.filePath || '') === String(tab.path) && pane.availableViews) break
+        await new Promise((r) => setTimeout(r, 20))
+      }
+    }
+    const pane: any = filePaneRef.value
+    const views: string[] = Array.isArray(pane?.availableViews) ? pane.availableViews.slice() : []
+    if (views.length <= 1) return
+    const current = String(pane?.viewType || activeFileTab.value?.view || views[0])
+    const menuWidth = 180
+    const x = Math.max(6, Math.min((rect?.left || 12), window.innerWidth - menuWidth - 6))
+    const y = Math.max(6, Math.min((rect?.bottom || 40) + 4, window.innerHeight - 240))
+    tabViewMenu.value = { path: tab.path, x, y, views, current }
+  }
+
+  function chooseTabView(view: string) {
+    const menu = tabViewMenu.value
+    tabViewMenu.value = null
+    if (!menu) return
+    // 同一刻 FileWindow 一定对应激活标签；直接调它的 setView 可避免等 props 回写
+    const pane: any = filePaneRef.value
+    if (pane && activeFileTab.value?.path === menu.path && typeof pane.setView === 'function') pane.setView(view)
+    onFileTabViewChange(menu.path, view)
+  }
   /** 文件标签里的文件视图实例：切 / 关标签前问未保存内容 */
   const filePaneRef = ref<any>(null)
   /** 标签条：滚轮左右滑动 / 触摸左右滑动的滚动容器 */
@@ -575,6 +664,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (isTallLayout.value) mode.value = store.root ? '' : 'file'
     // 监听其他窗口保存文件后的内容广播（通道 B）
     unsubFileContent = getPlatform().events.on('file-content-changed', onFileContentChanged)
+    document.addEventListener('mousedown', onTabViewMenuOutside)
+    document.addEventListener('keydown', onTabViewMenuOutside)
   });
 
   // 细长布局 / 工作区变化时调整抽屉：
@@ -598,6 +689,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     window.removeEventListener('mousemove', onDrag);
     window.removeEventListener('mouseup', stopDrag);
     window.removeEventListener('keydown', onSearchKeydown);
+    document.removeEventListener('mousedown', onTabViewMenuOutside)
+    document.removeEventListener('keydown', onTabViewMenuOutside)
     unsubFileContent?.()
     unsubFileContent = null
   });
@@ -639,7 +732,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
       }
       const inf = await getPlatform().fs.getInfo(path); //获取信息
       const attributes = await getPlatform().fs.readMetadata(path); //获取属性
-      const fileContent = await getPlatform().fs.readText(path)
+      const fileContent = shouldSkipTextPreview(path) ? '' : await getPlatform().fs.readText(path)
       // 打开文件：一律用独立窗口打开（原「窗口内打开」模式已去掉）
       store.openFileByMode({
         ...inf,
@@ -936,6 +1029,47 @@ import { useTallLayout } from '@/composables/useTallLayout'
     opacity: 0.35;
   }
   .know-tab.is-file .know-tab-icon { color: var(--fontActiveColor); }
+  /* 文件标签的文件图标 = 视图选择入口（顶部标题栏已移除，视图切换收进标签栏） */
+  .know-tab-icon-action {
+    padding: 2px;
+    margin: -2px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .know-tab-icon-action:hover {
+    background: color-mix(in srgb, var(--fontColor) 14%, transparent);
+  }
+  /* 视图选择菜单（fixed 定位，避免被标签条的横向滚动容器裁掉） */
+  .know-tab-view-menu {
+    position: fixed;
+    z-index: 3200;
+    min-width: 168px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--borderColor);
+    border-radius: 6px;
+    background: var(--backgroundColor);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+  .know-tab-view-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 9px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fontColor);
+    font-size: 12px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .know-tab-view-item i { width: 14px; text-align: center; opacity: 0.8; }
+  .know-tab-view-item:hover { background: var(--menuActiveColor); color: var(--fontActiveColor); }
+  .know-tab-view-item.active { color: var(--fontActiveColor); font-weight: 600; }
   .know-tab-close {
     font-size: 10px;
     opacity: 0;

@@ -436,10 +436,10 @@ export function useAgentRun(deps: AgentRunDeps) {
           ElMessage.error(store.locales == 'zh' ? `执行出错：${v.lastError}` : `Execution error: ${v.lastError}`)
         }
         saveChats()
-        // 第一轮对话完成后提取标题（对齐普通对话：标题为空且已有首条 assistant 回复；
-        // 传 ownerChat 以定位实际所属聊天，用户切走时仍命名正确聊天）
+        // 第一轮对话完成后触发标题润色（对齐 DSH：回退标题已在发送时落好，
+        // 这里只做一次异步润色；具体是否可覆盖由 home 的 titlePinned/titleAuto 判断）
         const finalContent = assistantMsg.content || v.lastAssistantContent || ''
-        if (generateChatTitle && ownerChat && !ownerChat.title && finalContent && !noRealOutput) {
+        if (generateChatTitle && ownerChat && finalContent && !noRealOutput && !ownerChat.titlePinned && !ownerChat.titleRefined) {
           generateChatTitle(finalContent, ownerChat)
         }
         // 会话已结束，退订本会话监听（多对话并行时不影响其它会话）

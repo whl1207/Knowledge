@@ -9,6 +9,7 @@ import { AIUtils } from '@/services/ai-utils'
 import type { McpServerConfig } from '@/types/mcp'
 import { generateMcpServerId } from '@/types/mcp'
 import { normalizeViewName } from '@/lib/knowFile/fileViews'
+import { shouldSkipTextPreview } from '@/lib/knowFile/textPreview'
 import { isFlowDslPath } from '@/shared/flowFile'
 import { detectTaskScaffold, detectRetiredTaskScaffold, isTaskFile, isEmptyTaskFile, RETIRED_SCAFFOLD_LABELS, MERGED_SCAFFOLD_KEYS, MERGED_SCAFFOLD_LABELS } from '@/lib/taskFile'
 import type { FileSortKey } from '@/lib/knowFile/fileSort'
@@ -2377,9 +2378,17 @@ export const usestore = defineStore('data', {
             }
             if (existIndex == null) {
                 const isDataCanvas = !isRemote && String(data.path || '').toLowerCase().endsWith('.data')
+                // 图片 / 音视频 / PDF / PPTX 不需要按文本读：安卓上 readText 会把整个文件经
+                // 本地服务器拉回来再 TextDecoder 解码（几十 MB → 卡死 / OOM），而各自的
+                // 播放器 / 预览器会自己按路径读流。
+                const skipTextPreview = shouldSkipTextPreview(data.path)
                 // 远程文件内容由调用方提供（data.content 已含预览内容），不再读本地磁盘
                 // 数据画布（.data）内容由画布模块自己按路径读取（文件可能十几 MB）：这里仍读一份供「源码编辑」用，但跳过 frontmatter 解析
-                const fileContent = isRemote ? (data.content ?? '') : await getPlatform().fs.readText(data.path)
+                const fileContent = isRemote
+                    ? (data.content ?? '')
+                    : skipTextPreview
+                        ? ''
+                        : await getPlatform().fs.readText(data.path)
                 const attributes = (isRemote || isDataCanvas) ? {} : await getPlatform().fs.readMetadata(data.path)
                 // 新标签插入到第一个位置
                 this.data.unshift({
@@ -2399,6 +2408,10 @@ export const usestore = defineStore('data', {
                 // 标签栏据此恢复上次 / 指定的视图
                 if (target && typeof data.view === 'string' && data.view) {
                     target.view = data.view
+                }
+                // 再次打开同一文件时同步目标页（Markdown 里点内嵌 .drawio 图表 → 定位到那一页）
+                if (target && data.page != null && data.page !== '') {
+                    target.page = data.page
                 }
                 // 远程标签：同步 quickPreview 标记（再次单击预览→仍为预览；双击正式打开/窗口内打开→转为正式打开）
                 if (target && data && isRemote && typeof data.quickPreview === 'boolean') {
@@ -2915,6 +2928,18 @@ export const usestore = defineStore('data', {
             document.documentElement.style.setProperty("--fontColor", this.UI.fontColor);
             document.documentElement.style.setProperty("--fontActiveColor", this.UI.fontActiveColor);
             document.documentElement.style.setProperty("--borderColor", this.UI.borderColor);
+            // 原生控件（select 下拉、滚动条、日期选择器等）按主题明暗选择配色：
+            // 否则深色主题下 select 的箭头/下拉仍是系统浅色，和界面主题不搭。
+            const bgHex = String(this.UI.backgroundColor || '').trim()
+            const m = /^#([0-9a-f]{6})$/i.exec(bgHex)
+            if (m) {
+                const n = parseInt(m[1], 16)
+                const r = (n >> 16) & 255
+                const g = (n >> 8) & 255
+                const b = n & 255
+                const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+                document.documentElement.style.setProperty('color-scheme', lum < 0.5 ? 'dark' : 'light')
+            }
             // 上报主题背景色到主进程，作为新开窗口首帧后备背景（消除加载白屏）
             try { getPlatform().events.emit('theme-background-changed', this.UI.backgroundColor) } catch (e) { /* 无事件总线环境忽略 */ }
             // 广播完整主题 + 语言给其他窗口（任一窗口改主题/语言后，其它窗口立即跟随；

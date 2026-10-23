@@ -10,6 +10,7 @@
   import { FILE_SORT_ITEMS, fileTypeKey, type FileSortKey } from '@/lib/knowFile/fileSort'
   // 文件系统变更：全局单例订阅 + 目录监听租约（见 lib/knowFile/fileWatch.ts）
   import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
+  import { shouldSkipTextPreview } from '@/lib/knowFile/textPreview'
   import { getPlatform, hasCapability, getRuntimeKind } from '@/platform'
   
   const store = usestore()
@@ -822,7 +823,7 @@
       }
       const inf = await getPlatform().fs.getInfo(path); //获取信息
       const attributes = await getPlatform().fs.readMetadata(path); //获取属性
-      const fileContent = await getPlatform().fs.readText(path)
+      const fileContent = shouldSkipTextPreview(path) ? '' : await getPlatform().fs.readText(path)
       store.openFileByMode({
         ...inf,
         attributes: attributes,

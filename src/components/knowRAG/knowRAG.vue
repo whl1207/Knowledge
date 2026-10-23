@@ -7552,14 +7552,15 @@ onBeforeUnmount(() => {
         min-height: 0;
         width: 110px;
         margin: 0;
-        padding: 0 4px;
+        padding: 0 2px;
         font-size: 11px;
         line-height: 1;
         box-sizing: border-box;
-        border: 1px solid var(--borderColor);
-        border-radius: 4px;
-        background-color: var(--backgroundColor);
+        border: none;
+        border-radius: 0;
+        background-color: transparent;
         color: var(--fontColor);
+        outline: none;
         flex-shrink: 0;
     }
     /* 状态栏最左：当前文件夹（小字号 + 文件夹图标，与状态步骤同风格；右分隔线，可收缩截断） */

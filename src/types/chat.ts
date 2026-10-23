@@ -235,6 +235,16 @@ export interface ChatConfig {
 export interface Chat {
   id: string
   title: string
+  /**
+   * 标题来源标记（对齐 DSH 的 title provider 归属）：
+   * - titleAuto=true：当前标题由自动流程（即时回退或 LLM 润色）写入，可继续被自动流程更新；
+   * - titleRefined=true：首条用户消息触发的 LLM 润色已完成，不再重复请求；
+   * - titlePinned=true：用户手动改过标题，自动流程不得覆盖。
+   * 旧存档没有这些字段：非空 title 视为用户标题，保持不覆盖。
+   */
+  titleAuto?: boolean
+  titleRefined?: boolean
+  titlePinned?: boolean
   messages: ChatMessage[]
   config: ChatConfig
   createdAt: number

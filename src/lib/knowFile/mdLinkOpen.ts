@@ -9,7 +9,7 @@
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import { rewriteMdLinkHref } from '@/lib/markdown/mdLinkPolicy'
-import { aikmIpc } from '@/lib/aikmIpc'
+import { getPlatform, hasCapability } from '@/platform'
 
 /** 当前文档所在目录（含结尾 `/`），用于把相对链接解析成绝对路径 */
 export function currentDocDir(): string {
@@ -53,10 +53,16 @@ export async function openMdFileLink(
 ): Promise<boolean> {
   if (!targetPath) return false
   const store = usestore()
-  // 打开前先确认目标存在（远程只读模式跳过校验）：否则会打开后只显示 `Error reading file: ENOENT`
-  if (!opts.isRemote) {
+  // 打开前先确认目标存在（远程只读 / 无文件能力的浏览器模式跳过校验）：
+  // 否则会打开后只显示 `Error reading file: ENOENT`。
+  //
+  // ⚠️ 不能直接用 `aikmIpc.invoke('getInf')`：那是 Electron 专用通道，安卓壳没有 preload，
+  // `invoke` 为 undefined → info 恒为 undefined → 所有本地链接（包括 Markdown 里点的
+  // `.drawio` 图表）都会误报「目标文件不存在：saf:…」。统一走平台层，安卓 / 局域网主机
+  // 各自用真实文件系统校验。
+  if (!opts.isRemote && hasCapability('fs.pathRead')) {
     try {
-      const info = await aikmIpc?.invoke?.('getInf', targetPath)
+      const info = await getPlatform().fs.getInfo(targetPath)
       if (!info) {
         ElMessage.warning(store.locales === 'zh' ? `目标文件不存在：${targetPath}` : `File not found: ${targetPath}`)
         return true
@@ -69,10 +75,14 @@ export async function openMdFileLink(
   const existingIndex = store.data.findIndex((d: any) => d.path === targetPath)
   if (existingIndex >= 0) {
     store.index = existingIndex
-    // 已在本窗口打开：图表窗口可能仍停在别的页，按同样方式通知换页（与主进程命中已开窗口的处理一致；
-    // 单窗口环境（安卓 / 网页端）由 store.openFileWindow 更新应用内文件窗口的 page）
+    // 已在本窗口打开：图表窗口可能仍停在别的页，按同样方式通知换页（与主进程命中已开窗口的处理一致）。
+    // 单窗口模式（安卓 / 网页端）直接更新右侧文件标签的 page；桌面独立窗口才走 openFileWindow。
     if (opts.page != null && opts.page !== '') {
-      store.openFileWindow({ path: targetPath, view: 'read', page: opts.page })
+      if (store.singleWindowMode) {
+        void store.openFileInTab({ ...store.data[existingIndex], page: opts.page })
+      } else {
+        store.openFileWindow({ path: targetPath, view: 'read', page: opts.page })
+      }
     }
     return true
   }

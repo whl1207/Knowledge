@@ -41,7 +41,12 @@
           :title="dockTabTitle(tab, tabs, zh)"
           @click="emit('activate', tab.id)"
         >
-          <i class="fa dock-tab-icon" :class="kindIcon(tab.kind)"></i>
+          <i
+            class="fa dock-tab-icon"
+            :class="[kindIcon(tab.kind), { 'dock-tab-icon-action': tab.kind === 'file' }]"
+            :title="tab.kind === 'file' ? (zh ? '点击图标选择视图' : 'Click the icon to choose a view') : ''"
+            @click.stop="tab.kind === 'file' ? openViewMenu(tab, $event) : emit('activate', tab.id)"
+          ></i>
           <span class="dock-tab-text">{{ dockTabTitle(tab, tabs, zh) }}</span>
           <i
             class="fa fa-times dock-tab-close"
@@ -126,15 +131,35 @@
         </div>
       </template>
     </div>
+
+    <!-- 文件标签的视图选择：点标签栏图标弹出（FileWindow 顶部标题栏已移除） -->
+    <div
+      v-if="viewMenu"
+      class="dock-view-menu"
+      :style="{ left: viewMenu.x + 'px', top: viewMenu.y + 'px' }"
+      @click.stop
+    >
+      <button
+        v-for="v in viewMenu.views"
+        :key="v"
+        class="dock-view-item"
+        :class="{ active: v === viewMenu.current }"
+        @click="chooseView(v)"
+      >
+        <i :class="viewIconOf(v)"></i>
+        <span>{{ viewNameOf(v) }}</span>
+      </button>
+    </div>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ChatDockFiles from './ChatDockFiles.vue'
 import ChatDockTerminal from './ChatDockTerminal.vue'
 import ChatDockBrowser from './ChatDockBrowser.vue'
 import ChatDockFile from './ChatDockFile.vue'
+import { fileViewByKey } from '@/lib/knowFile/fileViews'
 import {
   DOCK_TAB_KINDS,
   dockTabTitle,
@@ -281,6 +306,60 @@ async function confirmLeaveActive(): Promise<boolean> {
   return ok !== false
 }
 
+// ===== 文件标签的视图选择（点标签栏图标弹出）=====
+interface DockViewMenuState { id: string; x: number; y: number; views: string[]; current: string }
+const viewMenu = ref<DockViewMenuState | null>(null)
+const viewNameOf = (key: string): string => {
+  const def = fileViewByKey(key)
+  return def ? (props.zh ? def.name : def.labelEn) : key
+}
+const viewIconOf = (key: string): string => fileViewByKey(key)?.icon || 'fa fa-eye'
+
+async function openViewMenu(tab: ChatDockTab, e: MouseEvent) {
+  if (!tab || tab.kind !== 'file') return
+  e.stopPropagation()
+  const rect = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+  if (tab.id !== props.activeTabId) {
+    if (!(await confirmLeaveActive())) return
+    emit('activate', tab.id)
+    await nextTick()
+    await nextTick()
+    // 等宿主把 activeTabId 切过去、FileWindow 挂载完成，避免拿到上一个文件的视图表
+    for (let i = 0; i < 5; i++) {
+      if (props.activeTabId === tab.id && String(activeFilePane?.filePath || '') === String(tab.path || '') && activeFilePane?.availableViews) break
+      await new Promise((r) => setTimeout(r, 20))
+    }
+  }
+  const views: string[] = Array.isArray(activeFilePane?.availableViews) ? activeFilePane.availableViews.slice() : []
+  if (views.length <= 1) return
+  const current = String(activeFilePane?.viewType || tab.view || views[0])
+  const x = Math.max(6, Math.min((rect?.left || 12), window.innerWidth - 186))
+  const y = Math.max(6, Math.min((rect?.bottom || 40) + 4, window.innerHeight - 240))
+  viewMenu.value = { id: tab.id, x, y, views, current }
+}
+function chooseView(v: string) {
+  const menu = viewMenu.value
+  viewMenu.value = null
+  if (!menu) return
+  if (typeof activeFilePane?.setView === 'function') activeFilePane.setView(v)
+  emit('tab-view-change', menu.id, v)
+}
+const onViewMenuOutside = (e: Event) => {
+  if (!viewMenu.value) return
+  if (e.type === 'keydown' && (e as KeyboardEvent).key !== 'Escape') return
+  // 点在菜单内部时不能先关菜单，否则 click 还没派发元素就被移除了
+  if (e.type !== 'keydown' && (e.target as HTMLElement)?.closest?.('.dock-view-menu')) return
+  viewMenu.value = null
+}
+onMounted(() => {
+  document.addEventListener('mousedown', onViewMenuOutside)
+  document.addEventListener('keydown', onViewMenuOutside)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onViewMenuOutside)
+  document.removeEventListener('keydown', onViewMenuOutside)
+})
+
 defineExpose({ confirmLeaveActive })
 </script>
 
@@ -354,6 +433,45 @@ defineExpose({ confirmLeaveActive })
   opacity: 1;
 }
 .dock-tab-icon { font-size: 11px; }
+/* 文件标签的图标 = 视图选择入口 */
+.dock-tab-icon-action {
+  padding: 2px;
+  margin: -2px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.dock-tab-icon-action:hover { background: color-mix(in srgb, var(--fontColor) 14%, transparent); }
+/* 视图选择菜单（fixed，避免被标签条的横向滚动裁掉） */
+.dock-view-menu {
+  position: fixed;
+  z-index: 3200;
+  min-width: 168px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--backgroundColor);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.dock-view-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dock-view-item i { width: 14px; text-align: center; opacity: 0.8; }
+.dock-view-item:hover { background: var(--menuActiveColor); color: var(--fontActiveColor); }
+.dock-view-item.active { color: var(--fontActiveColor); font-weight: 600; }
 .dock-tab-text { overflow: hidden; text-overflow: ellipsis; }
 .dock-tab-close {
   font-size: 10px;

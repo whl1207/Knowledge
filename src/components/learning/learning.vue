@@ -8,6 +8,7 @@
 defineOptions({ name: 'Learning' })
 import { ref, computed, watch, onMounted, onActivated, onDeactivated } from 'vue'
 import { usestore } from '@/store'
+import { getPlatform } from '@/platform'
 import * as kbAi from '@/shared/kbAiClient'
 import {
   listKbFiles, readKbForLearning,
@@ -207,6 +208,26 @@ function onPick() {
   practice.value = null
   stateMsg.value = ''
   loadSelected()
+}
+
+/** 选择知识库文件夹：加入工作区并重新扫描（与「知识处理」左下角的文件夹图标一致） */
+async function pickKbFolder() {
+  try {
+    const picked = await getPlatform().dialog.pickDirectory()
+    if (!picked) return
+    store.addRoot(picked)
+    const before = new Set(kbFiles.value.map(k => k.path))
+    await scan()
+    const fresh = kbFiles.value.find(k => !before.has(k.path))
+    if (!selectedPath.value && (fresh || kbFiles.value[0])) {
+      selectedPath.value = (fresh || kbFiles.value[0]).path
+      onPick()
+    }
+    liveMsg.value = tr(`已添加知识库文件夹：${picked}`, `KB folder added: ${picked}`)
+  } catch (e: any) {
+    liveMsg.value = tr('选择知识库文件夹失败', 'Failed to pick KB folder')
+    console.error('[learning] pickKbFolder:', e)
+  }
 }
 /** 切回时按需刷新（仅列表变化或所选库 mtime 变化才重载） */
 async function refreshOnActivate() {
@@ -739,7 +760,7 @@ onDeactivated(async () => {
       <h3>{{ tr('欢迎使用学习模块', 'Welcome to Learning') }}</h3>
       <p class="lk-help-desc">{{ tr('学习模块围绕知识库（.kb）做掌握度追踪、间隔复习与考试。开始前请先选择一个工作区文件夹：', 'Learning tracks mastery over your knowledge bases (.kb) with spaced review and exams. Start by picking a workspace folder:') }}</p>
       <ul class="lk-help-list">
-        <li>{{ tr('点击左下角状态栏的「选择知识库」下拉，选择存放 Markdown 文档与 .kb 的文件夹（与「知识处理」同一工作区）', 'Use the "Select KB" dropdown at the bottom-left status bar and choose the folder holding Markdown docs & .kb (same workspace as Knowledge Processing)') }}</li>
+        <li>{{ tr('点击左下角状态栏的文件夹图标选择知识库文件夹，或用「选择知识库」下拉直接选 .kb（与「知识处理」同一工作区）', 'Click the folder icon at the bottom-left status bar to add a KB folder, or use the "Select KB" dropdown to pick a .kb (same workspace as Knowledge Processing)') }}</li>
         <li>{{ tr('若还没有 .kb，可先到「知识处理」切片 / 向量化后保存生成', 'No .kb yet? Slice/embed then save one in Knowledge Processing') }}</li>
       </ul>
     </div>
@@ -901,6 +922,9 @@ onDeactivated(async () => {
     <div class="status-panel">
       <!-- 最左：知识库操作（选择知识库 + 刷新列表，原顶部工具栏；顶部只留标签） -->
       <span class="status-kb-actions">
+        <button class="status-kb-btn" :title="tr('选择知识库文件夹', 'Select KB folder')" @click="pickKbFolder">
+          <i class="fa fa-folder-open"></i>
+        </button>
         <select
           v-model="selectedPath"
           class="status-kb-select"
@@ -1159,19 +1183,21 @@ onDeactivated(async () => {
   align-self: stretch;
 }
 .status-kb-select {
-  height: 100%; min-height: 0; width: 150px; margin: 0; padding: 0 4px;
+  height: 100%; min-height: 0; width: 150px; margin: 0; padding: 0 2px;
   box-sizing: border-box; font-size: 11px; line-height: 1;
-  border: 1px solid var(--borderColor); border-radius: 4px;
-  background: var(--backgroundColor); color: var(--fontColor);
+  border: none; border-radius: 0;
+  background: transparent; color: var(--fontColor);
+  outline: none;
 }
+.status-kb-select:focus { outline: none; }
 .status-kb-select:disabled { opacity: .6; }
 .status-kb-btn {
-  flex-shrink: 0; height: 100%; min-height: 0; padding: 0 5px;
+  flex-shrink: 0; height: 100%; min-height: 0; padding: 0 4px;
   display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--borderColor); border-radius: 4px;
-  background: var(--backgroundColor); color: var(--fontColor);
+  border: none; border-radius: 0;
+  background: transparent; color: var(--fontColor);
   font-size: 11px; line-height: 1; cursor: pointer; box-sizing: border-box;
 }
 .status-kb-btn:disabled { opacity: .6; cursor: default; }
-.status-kb-btn:hover:not(:disabled) { color: var(--fontActiveColor); border-color: var(--fontActiveColor); }
+.status-kb-btn:hover:not(:disabled) { color: var(--fontActiveColor); }
 </style>

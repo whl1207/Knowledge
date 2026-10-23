@@ -38,11 +38,36 @@ import { getPlatform, hasCapability } from '@/platform'
   // 路径标准化（统一分隔符 + 小写），用于 Windows 大小写不敏感比较
   const normPath = (p: string) => String(p || '').replace(/\\/g, '/').toLowerCase()
 
+  /** 本地图片的实际可加载地址（安卓 = Capacitor 本地服务器；桌面 = file:///） */
+  const resolvedLocalSrc = ref('')
+
   const imageSrc = computed(() => {
     if (props.src) return props.src
+    if (resolvedLocalSrc.value) return resolvedLocalSrc.value
     const p = String(innerPath.value || props.path || '').replace(/\\/g, '/')
     return 'file:///' + encodeURI(p).replace(/#/g, '%23').replace(/\?/g, '%3F')
   })
+
+  /**
+   * 安卓上 `saf:` / 相对路径不能直接拼 `file:///`（WebView 加载不到），
+   * 先走平台 `fs.urlOf`；桌面没有该能力时退回 file:///（保持原行为）。
+   */
+  async function resolveLocalSrc() {
+    if (props.src) { resolvedLocalSrc.value = ''; return }
+    const p = String(innerPath.value || props.path || '')
+    if (!p) { resolvedLocalSrc.value = ''; return }
+    const fallback = 'file:///' + encodeURI(p.replace(/\\/g, '/')).replace(/#/g, '%23').replace(/\?/g, '%3F')
+    let url = ''
+    try {
+      url = (await getPlatform().fs.urlOf?.(p)) || ''
+    } catch {
+      url = ''
+    }
+    // 异步返回时可能已切到同目录的下一张
+    if (String(innerPath.value || props.path || '') !== p) return
+    resolvedLocalSrc.value = url || fallback
+  }
+  watch([() => props.src, () => props.path, innerPath], resolveLocalSrc, { immediate: true })
 
   // 默认值
   const enableDragging = props.enableDragging ?? true

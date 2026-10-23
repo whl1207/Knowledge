@@ -15,6 +15,12 @@ import { droppedFilePath } from '@/platform/droppedFile'
 // 获取数据
 const store = usestore()
 const files = ref([]) as any
+/**
+ * 图片缩略图的真实地址（path → URL）。
+ * 安卓上 `saf:` / 相对路径不能拼 `file:///`，要经平台 `fs.urlOf` 换成
+ * Capacitor 本地服务器地址；桌面不填，继续用 file:///。
+ */
+const imageUrls = ref<Record<string, string>>({})
 
 // 右键点击的文件
 const selectFile = ref({}) as any
@@ -106,14 +112,52 @@ const getData = async function () {
 // 获取图片地址（file:// URL）
 // 路径含 # / ? / 空格 / 中文等需编码：# 会被当作 URL fragment、? 会被当作 query，导致 URL 截断加载失败
 const getAddress = function (item: any) {
+  const cached = imageUrls.value[item.path]
+  if (cached) return cached
   const p = String(item.path || '').replace(/\\/g, '/')
   return 'file:///' + encodeURI(p).replace(/#/g, '%23').replace(/\?/g, '%3F')
+}
+
+/** 缩略图按 file:/// 加载失败时，按需经平台 urlOf 再解析一次（覆盖预解析上限之外的图片） */
+async function resolveImageUrl(item: any) {
+  if (!item?.path || imageUrls.value[item.path]) return
+  if (typeof getPlatform().fs.urlOf !== 'function') return
+  try {
+    const url = await getPlatform().fs.urlOf?.(item.path)
+    if (url) imageUrls.value = { ...imageUrls.value, [item.path]: url }
+  } catch {
+    /* 解析失败保留占位图标 */
+  }
 }
 
 // 是否为图片文件（仅真正的文件才按图片渲染；目录永不渲染图片，避免目录被误判为图片导致 file:// 加载失败）
 const isImageFile = function (item: any) {
   return item.type === 'file' && item.extension && ['.jpeg', '.jpg', '.png', '.webp', '.gif', '.bmp', '.svg'].includes(item.extension.toLowerCase())
 }
+
+// 图片缩略图地址解析：只在平台提供 urlOf（安卓）时异步换成本地服务器 URL。
+// 桌面没有该能力，保持 file:///，不增加额外桥调用。
+watch(files, async (list: any[]) => {
+  if (typeof getPlatform().fs.urlOf !== 'function') {
+    imageUrls.value = {}
+    return
+  }
+  const images = (Array.isArray(list) ? list : []).filter((it) => isImageFile(it)).slice(0, 120)
+  if (!images.length) {
+    imageUrls.value = {}
+    return
+  }
+  const next: Record<string, string> = {}
+  await Promise.all(images.map(async (it: any) => {
+    try {
+      const url = await getPlatform().fs.urlOf?.(it.path)
+      if (url) next[it.path] = url
+    } catch {
+      /* 单个失败不影响其它缩略图 */
+    }
+  }))
+  imageUrls.value = next
+}, { immediate: true })
 
 // 应用内无法预览/编辑的文件（可执行/压缩包等）：双击直接用系统默认应用打开
 const SYSTEM_OPEN_EXTS = ['.exe', '.msi', '.dll', '.apk', '.dmg', '.deb', '.rpm', '.iso', '.appimage', '.run', '.bin', '.flatpak', '.snap', '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst']
@@ -148,7 +192,11 @@ const filesContainerRef = ref<HTMLElement | null>(null)
 
 // 从视频中截取一帧作为封面（当前窗口 webSecurity:false，可绘制 file:// 视频；
 // 若解码/绘制失败——如不支持的编码或跨域受限——返回空串，列表回退到文件图标）
-function captureVideoPoster(item: any): Promise<string> {
+async function captureVideoPoster(item: any): Promise<string> {
+  // 安卓 SAF 路径要换成 WebView 能加载的本地服务器 URL（getAddress 的 file:/// 只适用桌面）
+  let playable = ''
+  try { playable = (await getPlatform().fs.urlOf?.(item.path)) || '' } catch { playable = '' }
+  const videoSrc = playable || getAddress(item)
   return new Promise((resolve) => {
     const video = document.createElement('video')
     let settled = false
@@ -196,7 +244,7 @@ function captureVideoPoster(item: any): Promise<string> {
     video.onerror = () => finish('')
     video.muted = true
     video.preload = 'metadata'
-    video.src = getAddress(item)
+    video.src = videoSrc
   })
 }
 
@@ -450,6 +498,11 @@ const isSelected = function (path: string) {
 const tapOpensDirectly = getRuntimeKind() === 'android'
 
 const onItemClick = function (e: MouseEvent, item: any, index: number) {
+  // 双指缩放刚结束：浏览器随后补发的 click 不应被当成「点开文件」
+  if (Date.now() < suppressClickUntil) {
+    e.preventDefault()
+    return
+  }
   if (e.ctrlKey || e.metaKey) {
     // Ctrl：切换选中
     const i = selectedPaths.value.indexOf(item.path)
@@ -477,6 +530,7 @@ const onItemClick = function (e: MouseEvent, item: any, index: number) {
 
 // 双击打开：文件夹进入目录，文件按模式打开
 const onItemDblClick = function (item: any) {
+  if (Date.now() < suppressClickUntil) return
   open(item)
 }
 
@@ -975,19 +1029,57 @@ const setAspectRatio = function (value: 'square' | 'landscape' | 'portrait') {
 }
 
 // Ctrl+滚轮连续缩放图标大小：最小时为列表视图，向上滚动逐级放大（无级调节）
+const applyIconScale = function (next: number) {
+  if (next < ICON_SCALE_MIN) {
+    viewMode.value = 'list'
+  } else {
+    viewMode.value = 'grid'
+    iconScale.value = Math.max(ICON_SCALE_MIN, Math.min(ICON_SCALE_MAX, Math.round(next)))
+  }
+}
+
 const onContainerWheel = function (e: WheelEvent) {
   if (!e.ctrlKey && !e.metaKey) return
   e.preventDefault()
   // 列表视为“略小于最小图标”，向上滚即可回到最小图标网格
-  let s = viewMode.value === 'list' ? ICON_SCALE_MIN - 8 : iconScale.value
+  const base = viewMode.value === 'list' ? ICON_SCALE_MIN - 8 : iconScale.value
   // 每格滚轮约 deltaY=100，按比例换算像素步进（8px/格），保证顺滑
-  s += -e.deltaY / 100 * 8
-  if (s < ICON_SCALE_MIN) {
-    viewMode.value = 'list'
-  } else {
-    viewMode.value = 'grid'
-    iconScale.value = Math.max(ICON_SCALE_MIN, Math.min(ICON_SCALE_MAX, Math.round(s)))
-  }
+  applyIconScale(base + (-e.deltaY / 100) * 8)
+}
+
+// ---- 安卓：双指缩放图标（与 Ctrl+滚轮同一套规则：低于最小值进列表，向上放大回网格） ----
+let pinchActive = false
+let pinchStartDist = 0
+let pinchStartScale = 0
+/** 双指缩放结束后短暂屏蔽 click，避免松手时顺手把文件打开 / 选中 */
+let suppressClickUntil = 0
+
+function touchDistance(touches: TouchList): number {
+  if (touches.length < 2) return 0
+  const a = touches[0]
+  const b = touches[1]
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
+}
+
+function onContainerTouchStart(e: TouchEvent) {
+  if (e.touches.length !== 2) return
+  pinchActive = true
+  pinchStartDist = touchDistance(e.touches)
+  pinchStartScale = viewMode.value === 'list' ? ICON_SCALE_MIN : iconScale.value
+  suppressClickUntil = Date.now() + 800
+}
+
+function onContainerTouchMove(e: TouchEvent) {
+  if (!pinchActive || e.touches.length !== 2) return
+  e.preventDefault()
+  const dist = touchDistance(e.touches)
+  if (!pinchStartDist || !dist) return
+  applyIconScale(pinchStartScale * (dist / pinchStartDist))
+  suppressClickUntil = Date.now() + 800
+}
+
+function onContainerTouchEnd(e: TouchEvent) {
+  if (e.touches.length < 2) pinchActive = false
 }
 
 // 切换文件名显示
@@ -1231,7 +1323,7 @@ onBeforeUnmount(() => {
     <!-- 顶部工具栏（路径面包屑 + 搜索）由 explorer.vue 统一渲染一条，见 ViewToolbar.vue -->
 
     <!-- 文件列表区域 -->
-    <div ref="filesContainerRef" class="files-container scoll" :class="[viewMode, imageAspectRatio]" tabindex="0" @mousedown="onContainerMouseDown" @dragover.prevent @drop="onContainerDrop" @contextmenu.prevent="showViewContextMenu" @keydown="containerKeydown" @click="focusContainer" @wheel="onContainerWheel">
+    <div ref="filesContainerRef" class="files-container scoll" :class="[viewMode, imageAspectRatio]" tabindex="0" @mousedown="onContainerMouseDown" @dragover.prevent @drop="onContainerDrop" @contextmenu.prevent="showViewContextMenu" @keydown="containerKeydown" @click="focusContainer" @wheel="onContainerWheel" @touchstart="onContainerTouchStart" @touchmove="onContainerTouchMove" @touchend="onContainerTouchEnd" @touchcancel="onContainerTouchEnd">
       <!-- 鼠标框选矩形（视口定位，不拦截事件） -->
       <div v-if="marqueeVisible" class="marquee-select" :style="{ left: marqueeRect.left + 'px', top: marqueeRect.top + 'px', width: marqueeRect.width + 'px', height: marqueeRect.height + 'px' }"></div>
       <!-- 网格视图 -->
@@ -1262,7 +1354,7 @@ onBeforeUnmount(() => {
                 fontSize: getImageContainerStyle().iconFontSize 
               }"></i>
               <div v-if="isImageFile(item)" class="img">
-                <img :src="getAddress(item)" loading="lazy" draggable="false" />
+                <img :src="getAddress(item)" loading="lazy" draggable="false" @error="resolveImageUrl(item)" />
               </div>
             </template>
           </div>
@@ -1296,7 +1388,7 @@ onBeforeUnmount(() => {
             <template v-else>
               <i v-if="!isImageFile(item)" :class="item.executable ? 'fa fa-cogs' : store.icon(item.extension)"></i>
               <div v-if="isImageFile(item)" class="list-img">
-                <img :src="getAddress(item)" loading="lazy" draggable="false" />
+                <img :src="getAddress(item)" loading="lazy" draggable="false" @error="resolveImageUrl(item)" />
               </div>
             </template>
           </div>
@@ -1495,6 +1587,9 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   padding: 2px;
   background: var(--backgroundColor);
+  /* 双指缩放交给 JS（与 Ctrl+滚轮同一套图标缩放）；只保留单指纵向滚动，
+     同时禁掉浏览器自己的页面缩放 / 双击放大 */
+  touch-action: pan-y;
 }
 
 /* 网格视图 */

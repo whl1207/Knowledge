@@ -143,7 +143,8 @@
           v-model="currentChat.title" 
           :placeholder="store.locales=='zh' ? '输入聊天标题...' : 'Enter Chat Title...'"
           class="chat-title-input"
-          @change="saveChats"
+          @input="markChatTitlePinned(currentChat, false)"
+          @change="markChatTitlePinned(currentChat, true)"
         />
         <!-- 上下文占用圆环（参考 DeepSeek Harness） -->
         <div v-if="contextUsageVisible" class="context-usage" :title="contextUsageTooltip">
@@ -241,7 +242,8 @@
               v-model="currentChat.title"
               :placeholder="store.locales=='zh' ? '输入聊天标题...' : 'Enter Chat Title...'"
               class="chat-title-input"
-              @change="saveChats"
+              @input="markChatTitlePinned(currentChat, false)"
+              @change="markChatTitlePinned(currentChat, true)"
             />
             <!-- 右侧栏开关（项目组顶栏也要有；样式与左侧 fa-bars 开关一致） -->
             <div
@@ -2619,6 +2621,7 @@ const dispatchQueuedItem = async (chatId: string, item: PendingQueueItem) => {
     charCount: f.charCount,
   }))
   autoScrollEnabled.value = true
+  ensureChatFallbackTitle(chat, item.text)
   switch (chat.mode) {
     case 'swarm':
       await handleSwarmMode(item.text)
@@ -5546,12 +5549,9 @@ const handleSwarmMode = async (message: string) => {
   const named = collectSwarmNamed(message)
   if (named.length) await runNamedTask(named, message, { context: attachmentContext })
   else await runSwarm(message, undefined, { context: attachmentContext })
-  // 首次任务完成后自动生成对话标题（与其它模式一致）
+  // 首次任务完成后再做一次 LLM 标题润色（回退标题已在发送时落好）
   const chat = currentChat.value
-  if (!chat.title?.trim()) {
-    const last = [...(chat.messages || [])].reverse().find((m: any) => m.role === 'assistant' && m.content)
-    if (last?.content) generateChatTitle(last.content, chat)
-  }
+  void maybeRefineChatTitle(chat)
 }
 
 // 点击模式选择区域外部时关闭 Agent 预设 / 共享知识库 / 集群成员 浮层
@@ -6240,8 +6240,12 @@ const clearCurrentChat = async () => {
     
     currentUploads.value = []
     currentChat.value.messages = []
-    // 清空后重新提问应重新生成标题：重置标题与智能体执行展示状态
+    // 清空后重新提问应重新生成标题：重置标题来源标记与智能体执行展示状态
     currentChat.value.title = ''
+    currentChat.value.titleAuto = false
+    currentChat.value.titleRefined = false
+    currentChat.value.titlePinned = false
+    chatTitleAttempted.delete(currentChat.value.id)
     currentChat.value.agentTodos = []
     currentChat.value.agentLastTool = null
     saveChats()
@@ -6494,6 +6498,9 @@ const sendMessage = async (opts?: { forceNewTurn?: boolean }) => {
     }
   }
 
+  // 参照 DSH：首条用户消息一发出就先落一个确定性回退标题；LLM 只做异步润色。
+  ensureChatFallbackTitle(currentChat.value, message)
+
   // 根据当前聊天模式处理（技能模式已并入「智能体」：mode='skill' 的旧存档统一走 agent 循环）
   switch (currentChat.value.mode) {
     case 'swarm':
@@ -6546,7 +6553,7 @@ const {
   skillManager,
   onSkillList: () => handleSkillList(),
   onSkillHelp: (name: string) => handleSkillHelp(name),
-  generateChatTitle: (firstResponse: string, chat?: any) => generateChatTitle(firstResponse, chat),
+  generateChatTitle: (_firstResponse: string, chat?: any) => maybeRefineChatTitle(chat ?? currentChat.value),
   // 智能体运行结束：清空步骤指示器（避免 step-success 等残留显示）
   clearStepIndicator: () => {
     globalExecutionState.value.currentStep = ''
@@ -7094,11 +7101,8 @@ const runWorkflow = async (userInput: string) => {
     // 上面那条助手消息的 executionUnits，渲染出来就是与智能体模式一致的步骤卡片列表
     await runner.run()
 
-    // 生成聊天标题（取最后一条助理消息的内容；传 currentChatData 以定位实际所属聊天）
-    const lastAssistantMsg = [...currentChatData.messages].reverse().find(m => m.role === 'assistant')
-    if (lastAssistantMsg?.content) {
-      generateChatTitle(lastAssistantMsg.content, currentChatData)
-    }
+    // 工作流完成后润色标题（输入仍是首条用户消息，不用最后一条助手输出）
+    void maybeRefineChatTitle(currentChatData)
     
   } catch (error: any) {
     console.error('运行工作流失败:', error)
@@ -7195,11 +7199,8 @@ const completeAssistantReply = (chatData: any, content: string, metadata?: any) 
     delete lastMessage._startTime
   }
 
-  // 只要标题为空，且当前会话已有用户与助手消息，就应在首条有效回复完成时自动命名。
-  // 不能再把条件绑死在“恰好两条消息”上，否则带工具、附件、流程步骤的聊天会永远跳过命名。
-  if (!chatData.title && chatData.messages.some((m: any) => m.role === 'user') && chatData.messages.some((m: any) => m.role === 'assistant')) {
-    generateChatTitle(content, chatData)
-  }
+  // 首条有效回复完成：若标题仍是回退值，用首条用户消息做一次 LLM 润色（不阻塞本轮回复）。
+  void maybeRefineChatTitle(chatData)
 
   chatData.isGenerating = false
   chatData.activeRequestId = undefined
@@ -8359,34 +8360,159 @@ const cancelCurrentRun = () => {
   resetChatExecutionUi(chat)
 }
 
-// 生成聊天标题。chatData 为实际所属聊天（后台推理完成时不能依赖 currentChat.value ——
-// 用户可能已切到其它聊天，导致标题被写到当前激活的聊天）；缺省时回退到当前聊天。
-async function generateChatTitle(firstResponse: string, chatData?: any) {
+// ==================== 会话标题（参照 DSH：首条用户消息 + 即时回退 + 异步润色） ====================
+// DSH 的 session-title 服务：标题只取「第一条符合条件的用户消息」，先落确定性回退，
+// 再由异步提供方润色；较新的修订取代旧请求，用户重命名会钉住标题。
+// 这里保留 AI-KM 的聊天模型快照/还原逻辑，只替换输入与调度口径。
+const TITLE_MAX_BYTES = 80
+const TITLE_FALLBACK_BYTES = 40
+const TITLE_MAX_INPUT_BYTES = 4096
+/** 已经在本次应用运行中尝试过 LLM 标题的聊天（失败后保留回退标题，不反复请求） */
+const chatTitleAttempted = new Set<string>()
+/** 每个聊天的标题修订号：只有最后发起的请求能提交结果 */
+const chatTitleRevision = new Map<string, number>()
+
+/** 按 UTF-8 字节截断，且不切断 Unicode 码点 */
+function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  let out = ''
+  let bytes = 0
+  for (const ch of Array.from(String(text || ''))) {
+    const n = new TextEncoder().encode(ch).length
+    if (bytes + n > maxBytes) break
+    out += ch
+    bytes += n
+  }
+  return out
+}
+
+/** 去掉工具徽章、代码块、Markdown/HTML 标记，只留可读文本 */
+function stripTitleNoise(raw: string): string {
+  let s = String(raw || '')
+  s = s.replace(/<span class="tool-badge">[\s\S]*?<\/span>/g, ' ')
+  s = s.replace(/```[\s\S]*?```/g, ' ')
+  s = s.replace(/`([^`]*)`/g, '$1')
+  s = s.replace(/<[^>]+>/g, ' ')
+  s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+  s = s.replace(/[#>*_~]+/g, ' ')
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+/** 确定性回退标题：中文取前 10 个汉字，其它语言取前 5 个词，最多 40 字节 */
+function fallbackChatTitle(raw: string): string {
+  const clean = stripTitleNoise(raw)
+  if (!clean) return ''
+  const cjkCount = (clean.match(/[\u3400-\u9fff]/g) || []).length
+  let candidate = ''
+  if (cjkCount >= 2) {
+    candidate = Array.from(clean.replace(/[，。！？；：、,.!?;:]/g, ' '))
+      .slice(0, 10)
+      .join('')
+  } else {
+    candidate = clean.split(/\s+/).slice(0, 5).join(' ')
+  }
+  candidate = candidate
+    .replace(/^[\s，。！？；：、,.!?;:]+|[\s，。！？；：、,.!?;:]+$/g, '')
+    .trim()
+  return truncateUtf8Bytes(candidate, TITLE_FALLBACK_BYTES)
+}
+
+/** 清洗模型输出为单行标题（去思考段、前缀、引号、Markdown；硬上限 80 字节） */
+function normalizeChatTitle(raw: string, maxBytes = TITLE_MAX_BYTES): string {
+  const text = splitThinkText(String(raw || '')).content
+  const line = text.split(/\r?\n/).map((s) => s.trim()).find((s) => s.length > 0) || ''
+  let s = line.replace(/^(标题|title)\s*[:：]\s*/i, '')
+  s = s.replace(/^[*"'“”‘’]+|[*"'“”‘’]+$/g, '')
+  s = s.replace(/^#{1,6}\s*/, '')
+  s = stripTitleNoise(s)
+  s = s.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+  s = s.replace(/[。；;]+$/g, '').trim()
+  return truncateUtf8Bytes(s, maxBytes)
+}
+
+/** 第一条有文本的用户消息（DSH 的“首条符合条件的人类消息”） */
+function firstUserMessageText(chat: any): string {
+  for (const m of chat?.messages || []) {
+    if (m?.role !== 'user') continue
+    const text = typeof m.content === 'string' ? m.content : ''
+    if (text.trim()) return text
+  }
+  return ''
+}
+
+/** 送给标题模型的输入：首条用户消息，按 DSH 的 4096 字节预算截断 */
+function firstUserPromptText(chat: any, fallbackText = ''): string {
+  const raw = firstUserMessageText(chat) || fallbackText
+  return truncateUtf8Bytes(stripTitleNoise(raw), TITLE_MAX_INPUT_BYTES)
+}
+
+/** 用户手动改标题 → 钉住，自动流程不再覆盖 */
+function markChatTitlePinned(chat: any, persist = true) {
+  if (!chat) return
+  chat.titlePinned = true
+  chat.titleAuto = false
+  if (persist) saveChats()
+}
+
+/** 首条用户消息发出时立即落确定性回退标题（不等待模型） */
+function ensureChatFallbackTitle(chat: any, currentText = '') {
+  if (!chat || chat.titlePinned || chat.titleRefined) return
+  // 旧存档/用户标题：非自动标题不覆盖
+  if (chat.title && String(chat.title).trim() && chat.titleAuto !== true) return
+  // 已有回退标题：保持，等待 LLM 润色
+  if (chat.title && String(chat.title).trim()) return
+  const source = firstUserMessageText(chat) || currentText
+  const fallback = fallbackChatTitle(source)
+  if (!fallback) return
+  chat.title = fallback
+  chat.titleAuto = true
+  chat.titlePinned = false
+  chat.titleRefined = false
+  saveChats()
+}
+
+/** 首条回复完成后尝试一次异步润色；失败保留回退标题，不重复请求 */
+async function maybeRefineChatTitle(chatData?: any) {
+  const chat = chatData ?? currentChat.value
+  if (!chat) return
+  if (chat.titlePinned || chat.titleRefined) return
+  if (chat.title && String(chat.title).trim() && chat.titleAuto !== true) return
+  if (chatTitleAttempted.has(chat.id)) return
+  if (!firstUserMessageText(chat)) return
+  chatTitleAttempted.add(chat.id)
+  await generateChatTitle('', chat)
+}
+
+// 生成聊天标题的 LLM 润色入口。chatData 为实际所属聊天（后台推理完成时不能依赖
+// currentChat.value —— 用户可能已切到其它聊天，导致标题被写到当前激活的聊天）。
+// 参照 DSH：输入是首条用户消息，不是助手回复的前 100 字；标题不进入模型上下文。
+async function generateChatTitle(_firstResponse: string, chatData?: any) {
   try {
-    // 深度思考过滤：标题只基于最终正文生成——剔除 <think>…</think> 思考段与任何残留标签，
-    // 避免思考内容/标签进入标题（home、工作流、Agent 回调都经此统一入口）
-    const thinkSplit = splitThinkText(String(firstResponse || ''))
-    firstResponse = thinkSplit.content.replace(/<\/?think>/gi, '').trim()
-    if (!firstResponse) return
-
     const targetChat: Chat = chatData ?? currentChat.value
+    if (!targetChat || targetChat.titlePinned || targetChat.titleRefined) return
+    if (targetChat.title && String(targetChat.title).trim() && targetChat.titleAuto !== true) return
 
-    // 已有标题则不覆盖
-    if (targetChat.title && targetChat.title.trim() !== '') {
-      return
+    const userPrompt = firstUserPromptText(targetChat)
+    if (!userPrompt) return
+
+    // LLM 失败也至少有确定性标题
+    if (!targetChat.title || !String(targetChat.title).trim()) {
+      const fallback = fallbackChatTitle(userPrompt)
+      if (fallback) {
+        targetChat.title = fallback
+        targetChat.titleAuto = true
+        saveChats()
+      }
     }
 
-    // 至少需要有一条用户消息和一条助理消息
-    const hasUser = targetChat.messages.some((m: ChatMessage) => m.role === 'user')
-    const hasAssistant = targetChat.messages.some((m: ChatMessage) => m.role === 'assistant')
-    if (!hasUser || !hasAssistant) {
-      return
-    }
+    const revision = (chatTitleRevision.get(targetChat.id) || 0) + 1
+    chatTitleRevision.set(targetChat.id, revision)
 
-    // 标题语言跟随界面语言：英文界面生成英文标题，中文界面生成中文标题（各限 10 字 / 6 词以内）
-    const titlePrompt = (store.locales === 'en')
-      ? `Summarize the following conversation as a short English title (at most 6 words), output the title only:\n${firstResponse.substring(0, 100)}`
-      : `请根据以下对话内容生成一个简短的中文标题（不超过10个字），不要其他内容：\n${firstResponse.substring(0, 100)}`
+    // 标题语言跟随「消息本身」的语言（DSH 口径），而不是界面语言。
+    const payload = JSON.stringify([userPrompt])
+    const titlePrompt = /[\u3400-\u9fff]/.test(userPrompt)
+      ? `请根据用户的第一条消息，为这段对话生成一个简短的中文标题（不超过 10 个汉字）。只输出一行纯文本标题，不要引号、前缀、解释或 Markdown。\n${payload}`
+      : `Create a concise title for this conversation from the user's first message. Return only one line of plain text, with no quotes, prefix, explanation or Markdown. Aim for about 5 words.\n${payload}`
 
     // 标题生成必须用「目标聊天」绑定的模型来源/模型（与 sendChatMessage 一致的快照/应用/恢复）：
     // 智能体/预设会按聊天绑定自定义来源或独立模型，后台会话结束时全局 store.AIconfig.llm
@@ -8451,16 +8577,14 @@ async function generateChatTitle(firstResponse: string, chatData?: any) {
       }
     }
 
-    if (title && String(title).trim()) {
-      // 深度思考过滤兜底：即使已禁用思考，个别后端仍可能返回“思考 + </think> + 标题”形态，
-      // 剥离思考段/残留标签后再作为标题，避免标题混入思考内容
-      const cleanTitle = splitThinkText(String(title)).content
-        .replace(/<\/?think>/gi, '').replace(/["']/g, '').trim()
-      if (cleanTitle) {
-        targetChat.title = cleanTitle
-        saveChats()
-      }
-    }
+    // 后发请求优先：用户改名 / 更新的修订会让旧结果作废
+    if (chatTitleRevision.get(targetChat.id) !== revision || targetChat.titlePinned) return
+    const cleanTitle = normalizeChatTitle(String(title || ''))
+    if (!cleanTitle) return
+    targetChat.title = cleanTitle
+    targetChat.titleAuto = true
+    targetChat.titleRefined = true
+    saveChats()
   } catch (error) {
     console.error('生成标题失败:', error)
   }

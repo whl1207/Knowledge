@@ -120,6 +120,14 @@ export interface FileSystemPort {
   /** 读二进制；不存在或失败返回 null */
   readBinary(path: string): Promise<Uint8Array | null>
   /**
+   * 取可供 `<video>` / `<audio>` **直接加载**的 URL（安卓 = Capacitor 本地服务器地址；
+   * SAF 路径经 `content://` 代理，沙箱路径经 `file://` 代理）。
+   *
+   * 可选：没有该能力的后端不实现，调用方退回原始路径（桌面 Chromium 可直接吃本地路径）。
+   * 失败返回空字符串。
+   */
+  urlOf?(path: string): Promise<string>
+  /**
    * 写文本并返回是否成功（原 `saveFile`）。目录不存在时由宿主创建。
    */
   saveText(path: string, content: string): Promise<boolean>

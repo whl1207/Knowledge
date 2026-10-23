@@ -4,17 +4,27 @@
     <div class="video-wrap" :class="{ playing: isPlaying }">
       <video
         ref="videoEl"
-        :src="currentPath"
+        :src="playUrl || undefined"
         preload="metadata"
         @click="togglePlay"
         @dblclick="toggleFullscreen"
         @timeupdate="onVideoTime"
         @loadedmetadata="onVideoLoaded"
         @loadeddata="onVideoLoaded"
+        @error="onVideoError"
         @play="onMediaPlay"
         @pause="onMediaPause"
         @ended="onMediaEnded"
       ></video>
+
+      <!-- 播放失败（编码不支持 / 路径不可读）：给出原因与「用系统应用打开」兜底 -->
+      <div v-if="playError" class="video-error" @click.stop>
+        <i class="fa fa-exclamation-triangle"></i>
+        <span>{{ playError }}</span>
+        <button type="button" @click.stop="openExternally">
+          {{ store.locales === 'zh' ? '用系统应用打开' : 'Open with system app' }}
+        </button>
+      </div>
 
       <!-- 未播放 / 播放结束遮罩（点击播放/重播） -->
       <div v-if="!isPlaying" class="video-cover" :class="{ ended: videoEnded }" @click="videoEnded ? replayVideo() : togglePlay()">
@@ -83,6 +93,13 @@ const emit = defineEmits<{
 
 // 内部当前播放路径：切集时更新，props.path 变化时同步（与父级分发器标签逻辑分离）
 const currentPath = ref(props.path)
+/**
+ * 实际给 `<video>` 的地址。
+ * 安卓上 `saf:` / 相对路径 WebView 不认识，必须换成 Capacitor 本地服务器 URL
+ * （平台层 `fs.urlOf`）；桌面等没有该能力的后端退回原始路径。
+ */
+const playUrl = ref(props.path)
+const playError = ref('')
 
 const VIDEO_EXTS = ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp', '.ts', '.mpg', '.mpeg']
 
@@ -107,6 +124,54 @@ const currentVideoIndex = ref(-1)
 const hasIpc = hasCapability('fs.pathRead')
 const canNavigateVideos = computed(() => !!currentPath.value && hasIpc)
 const normPath = (p: string) => String(p || '').replace(/\\/g, '/').toLowerCase()
+
+/**
+ * 解析可播放地址并按需重新加载。
+ * 先立刻用原始路径兜底（桌面直接能播），再异步换成平台 URL（安卓本地服务器）。
+ */
+async function resolvePlayUrl(p: string) {
+  playError.value = ''
+  if (!p) {
+    playUrl.value = ''
+    return
+  }
+  const hasUrlResolver = typeof getPlatform().fs.urlOf === 'function'
+  // 有平台解析器（安卓）时先留空，避免 WebView 先拿 saf: 路径报一次 error 闪一下
+  playUrl.value = hasUrlResolver ? '' : p
+  let url = ''
+  try {
+    url = (await getPlatform().fs.urlOf?.(p)) || ''
+  } catch {
+    url = ''
+  }
+  // 异步返回时用户可能已经切到别的视频
+  if (p !== currentPath.value) return
+  playUrl.value = url || p
+  await nextTick()
+  const el = videoEl.value
+  if (!el) return
+  try { el.load() } catch { /* 忽略：错误交给 @error */ }
+  if (autoPlayAfterSwitch) {
+    autoPlayAfterSwitch = false
+    el.play().catch(() => { /* 自动播放被拦截时保留封面按钮 */ })
+  }
+}
+
+/** 播放失败：记录原因（编码不支持 / 路径不可读），并保留「用系统应用打开」出口 */
+function onVideoError() {
+  if (!currentPath.value) return
+  playError.value = store.locales === 'zh'
+    ? '无法播放该视频（编码不支持，或文件路径不可读）'
+    : 'Cannot play this video (unsupported codec or unreadable path)'
+}
+async function openExternally() {
+  if (!currentPath.value) return
+  try {
+    await getPlatform().shell.openWithSystemApp(currentPath.value)
+  } catch (e: any) {
+    console.warn('[MediaVideo] 用系统应用打开失败:', e)
+  }
+}
 
 // 扫描当前视频同目录的全部视频（按文件名自然排序），并定位当前集下标
 async function loadFolderVideos() {
@@ -162,7 +227,7 @@ function jumpToVideo(target: number) {
 // 外部切换标签：同步内部路径（触发下方 watch 重新加载）
 watch(() => props.path, (p) => { if (p) currentPath.value = p })
 
-// 内部/外部切换视频：重置状态并重新加载
+// 内部/外部切换视频：重置状态并重新解析可播放地址
 watch(currentPath, (newPath, oldPath) => {
   if (!newPath || newPath === oldPath) return
   isPlaying.value = false
@@ -170,16 +235,8 @@ watch(currentPath, (newPath, oldPath) => {
   currentTime.value = 0
   duration.value = 0
   loadFolderVideos()
-  nextTick(() => {
-    const el = videoEl.value
-    if (el) { try { el.load() } catch {} }
-    if (autoPlayAfterSwitch) {
-      autoPlayAfterSwitch = false
-      const e = videoEl.value
-      if (e) e.play().catch(() => {})
-    }
-  })
-})
+  void resolvePlayUrl(newPath)
+}, { immediate: true })
 
 // ---------- 播放控制 ----------
 function togglePlay() {
@@ -220,6 +277,7 @@ function onVideoTime() {
   if (el) currentTime.value = el.currentTime || 0
 }
 function onVideoLoaded() {
+  playError.value = ''
   const el = videoEl.value
   if (!el) return
   if (el.duration && isFinite(el.duration)) duration.value = el.duration
@@ -368,6 +426,36 @@ onBeforeUnmount(() => {
 .video-cover.ended {
   background: linear-gradient(180deg, rgba(0, 0, 0, 0.35), rgba(0, 0, 0, 0.6));
 }
+
+/* 播放失败：盖在封面之上，给出原因与系统应用兜底 */
+.video-error {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 13px;
+}
+.video-error i { font-size: 28px; color: #ffb300; }
+.video-error button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.video-error button:hover { background: rgba(255, 255, 255, 0.18); }
 
 /* 播放时隐藏封面（纯画面） */
 .video-wrap.playing .video-cover {

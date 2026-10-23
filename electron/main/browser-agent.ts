@@ -52,6 +52,8 @@ const icon = join(publicDir, 'favicon.ico')
 // Vue 壳顶部两栏高度：标签栏 + 地址/导航栏；WebContentsView 从该高度之下布局
 export const TAB_BAR_H = 36
 export const NAV_BAR_H = 42
+/** 浏览器底部状态栏高度（通知固定在左下角；原生网页视图不覆盖这一条） */
+export const BOTTOM_BAR_H = 24
 export const VIEW_TOP = TAB_BAR_H + NAV_BAR_H
 
 /** 单次返回给模型的正文/HTML 默认上限（可经 MCP 工具 schema 的 maxChars 参数覆盖；不传时默认 30000 字符） */
@@ -269,6 +271,8 @@ class BrowserAgentService {
   private mcpServer: any = null
   /** favicon 缓存：host -> dataURL（内存缓存；首拉后写入 userData/browser-favicons 落盘，跨会话复用） */
   private faviconCache = new Map<string, string>()
+  /** 书签列表短缓存：收藏夹轮询 / 保存后刷新时避免重复遍历工作区 */
+  private bookmarkListCache = new Map<string, { at: number; result: { ok: boolean; items?: any[]; error?: string } }>()
   /**
    * 浏览器工具调用的串行队列。
    *
@@ -605,7 +609,7 @@ class BrowserAgentService {
     for (const tab of this.tabs) {
       const view = this.views.get(tab.id)
       if (!view) continue
-      view.setBounds({ x: 0, y: top, width: availW, height: Math.max(0, h - top) })
+      view.setBounds({ x: 0, y: top, width: availW, height: Math.max(0, h - top - Math.round(BOTTOM_BAR_H * z)) })
       const isBare = !tab.url && !tab.loading // 空白标签（书签首页）
       view.setVisible(tab.id === this.activeTabId && !isBare && !this.overlayHidden)
     }
@@ -3044,8 +3048,8 @@ class BrowserAgentService {
     if (!root || typeof root !== 'string' || !url) return { ok: false, error: !root ? '未设置工作区' : '缺少 URL' }
     const dir = this.bookmarkDir(root)
     try { fs.mkdirSync(dir, { recursive: true }) } catch { /* ignore */ }
-    // 幂等：已存在同 URL 的书签则返回其路径
-    const existing = await this.listBookmarks(root)
+    // 幂等：只检查收藏根目录的直接子项（书签默认放在这里；不再为一次收藏遍历整个工作区）
+    const existing = await this.listBookmarks(root, true)
     const dup = existing.items?.find(b => b.kind === 'file' && b.url === url)
     if (dup) return { ok: true, path: dup.path, exists: true }
     // 顺序：新书签默认追加到根目录同类末尾（取当前最大 order + 1）
@@ -3068,17 +3072,9 @@ class BrowserAgentService {
         : join(dir, `${rawBase}-${n}.html`)
       n++
     }
-    // 收藏时抓取当前标签页的网站图标，内嵌进书签文件（离线/无网络也能显示）。
-    // 链路：① 当前标签实时 favicon → ② 按 host 的内存/磁盘/联网缓存（DDG 图标服务 / 站点 favicon.ico）。
-    // 仅靠 getFavicon() 常因图标尚未触发加载而拿空，导致收藏无图标；加兜底保证绝大多数站点有图。
-    let favData = this.captureFaviconDataUrl()
-    if (!favData) {
-      let host = ''
-      try { host = new URL(url).host.replace(/^www\./, '') || '' } catch { host = '' }
-      if (host) {
-        try { favData = await this.fetchFaviconData(host) } catch { favData = '' }
-      }
-    }
+    // 收藏时只取当前标签已加载的网站图标（同步、零网络请求）。
+    // 没有就留空：新标签页会走 faviconBatch 的磁盘/联网缓存异步补图，绝不阻塞“收藏”点击。
+    const favData = this.captureFaviconDataUrl()
     const html = [
       '<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">',
       // 标记前置：避免大图标 dataURL 把标记挤到文件较后被判定漏过
@@ -3092,6 +3088,7 @@ class BrowserAgentService {
     ].join('\n')
     try {
       fs.writeFileSync(file, html, 'utf8')
+      this.bookmarkListCache.clear()
       return { ok: true, path: file }
     } catch (err: any) {
       return { ok: false, error: err?.message || String(err) }
@@ -3100,6 +3097,7 @@ class BrowserAgentService {
 
   /** 编辑书签：更新标题与目标网址（保留图标/顺序/标记；离线整页快照不允许改地址） */
   async updateBookmark(root: string, filePath: string, title: string, url: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !filePath || typeof filePath !== 'string') return { ok: false, error: '参数不完整' }
     const cleanUrl = String(url ?? '').trim()
     if (!cleanUrl || !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(cleanUrl) || /\s/.test(cleanUrl)) return { ok: false, error: '目标网址无效' }
@@ -3133,21 +3131,29 @@ class BrowserAgentService {
     return { ok: true, path: target }
   }
 
-  /** 列出工作区中的书签（目录树信息：kind=dir/file、顺序标记 order），供收藏夹树状管理 */
-  async listBookmarks(root: string): Promise<{ ok: boolean; items?: Array<{ kind: 'dir' | 'file'; rel: string; name: string; title: string; path: string; url: string; icon: string; order: number | null }>; error?: string }> {
+  /** 列出工作区中的书签（目录树信息：kind=dir/file、顺序标记 order），供收藏夹树状管理。
+   *  shallow=true 时只看根目录直接子项（保存收藏时查重/取序号用，避免遍历整个工作区）。 */
+  async listBookmarks(root: string, shallow = false): Promise<{ ok: boolean; items?: Array<{ kind: 'dir' | 'file'; rel: string; name: string; title: string; path: string; url: string; icon: string; order: number | null }>; error?: string }> {
     if (!root || typeof root !== 'string') return { ok: false, error: '未设置工作区' }
+    const cacheKey = `${root}|${shallow ? 'shallow' : 'deep'}`
+    const cached = this.bookmarkListCache.get(cacheKey)
+    if (cached && Date.now() - cached.at < 2000) return cached.result as any
     const dir = this.bookmarkDir(root)
     const items: Array<{ kind: 'dir' | 'file'; rel: string; name: string; title: string; path: string; url: string; icon: string; order: number | null }> = []
-    const walk = (d: string, prefix: string) => {
+    // 收藏默认存在工作区根目录；工作区里常混有依赖/构建目录，遍历它们会拖慢收藏与刷新
+    const SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'dist-electron', 'build', 'release', 'out', 'coverage', '.next', '.nuxt', '.cache', '.gradle', '.idea', '.vs', 'vendor', 'android', 'ios', 'resources', '__pycache__', '.venv', 'venv'])
+    const walk = (d: string, prefix: string, depth: number) => {
+      if (depth > 8) return
       let ents: fs.Dirent[] = []
       try { ents = fs.readdirSync(d, { withFileTypes: true }) } catch { return }
       // 子目录：按名排序、先建目录节点再递归（空文件夹也展示）
       const dirs = ents.filter(e => e.isDirectory()).map(e => e.name).sort((a, b) => a.localeCompare(b))
       for (const dn of dirs) {
+        if (dn.startsWith('.') || SKIP_DIRS.has(dn.toLowerCase())) continue
         const sub = join(d, dn)
         const rel = prefix ? `${prefix}/${dn}` : dn
         items.push({ kind: 'dir', rel, name: dn, title: dn, path: sub, url: '', icon: '', order: null })
-        walk(sub, rel)
+        if (!shallow) walk(sub, rel, depth + 1)
       }
       // 书签文件：按顺序标记升序（无标记排后按名）
       const files = ents
@@ -3167,12 +3173,15 @@ class BrowserAgentService {
         })
       }
     }
-    walk(dir, '')
-    return { ok: true, items }
+    walk(dir, '', 0)
+    const result = { ok: true, items }
+    this.bookmarkListCache.set(cacheKey, { at: Date.now(), result })
+    return result
   }
 
   /** 移除工作区书签文件（仅允许删除 书签/ 目录内，防穿越） */
   async removeBookmark(root: string, filePath: string): Promise<{ ok: boolean; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !filePath || typeof filePath !== 'string') return { ok: false, error: '参数不完整' }
     const dir = this.bookmarkDir(root)
     const rel = relative(dir, filePath)
@@ -3184,6 +3193,7 @@ class BrowserAgentService {
 
   /** 移动书签文件到其它目录（跨目录整理；目标目录不存在则创建；移动后置于目标末尾） */
   async moveBookmark(root: string, srcPath: string, dstDirRel: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !srcPath || typeof srcPath !== 'string') return { ok: false, error: '参数不完整' }
     const dir = this.bookmarkDir(root)
     if (!this.safeWithinDir(dir, srcPath)) return { ok: false, error: '越界路径，已拒绝' }
@@ -3219,6 +3229,7 @@ class BrowserAgentService {
 
   /** 重排同一目录内书签的显示顺序（orderedPaths=该目录内书签绝对路径的有序数组，按序写顺序标记） */
   async reorderBookmarks(root: string, orderedPaths: string[]): Promise<{ ok: boolean; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !Array.isArray(orderedPaths)) return { ok: false, error: '参数不完整' }
     const dir = this.bookmarkDir(root)
     let okAll = true
@@ -3232,6 +3243,7 @@ class BrowserAgentService {
 
   /** 在书签根目录下新建文件夹（仅单层，用于给书签分组） */
   async createBookmarkFolder(root: string, name: string): Promise<{ ok: boolean; path?: string; rel?: string; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !name) return { ok: false, error: '参数不完整' }
     const clean = String(name).trim().replace(/[\\/:*?"<>|]+/g, '-')
     if (!clean) return { ok: false, error: '文件夹名无效' }
@@ -3247,6 +3259,7 @@ class BrowserAgentService {
 
   /** 重命名收藏夹文件夹（目录改名，内部书签/子目录随目录移动）。安全：仅允许“全部由书签组成”的目录，防误改真实项目目录 */
   async renameBookmarkFolder(root: string, folderPath: string, name: string): Promise<{ ok: boolean; path?: string; rel?: string; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !folderPath || typeof folderPath !== 'string' || !name) return { ok: false, error: '参数不完整' }
     const clean = String(name).trim().replace(/[\\/:*?"<>|]+/g, '-')
     if (!clean) return { ok: false, error: '文件夹名无效' }
@@ -3298,6 +3311,7 @@ class BrowserAgentService {
 
   /** 删除收藏夹里的一个文件夹（递归，含内部书签与子目录）。安全：仅允许删除“全部由书签组成”的目录，防误删真实项目目录 */
   async removeBookmarkFolder(root: string, folderPath: string): Promise<{ ok: boolean; removed?: number; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !folderPath || typeof folderPath !== 'string') return { ok: false, error: '参数不完整' }
     const dir = this.bookmarkDir(root)
     if (!this.safeWithinDir(dir, folderPath)) return { ok: false, error: '越界路径，已拒绝' }
@@ -3312,6 +3326,7 @@ class BrowserAgentService {
 
   /** 清空某个收藏夹文件夹内的全部书签（保留文件夹本身；其下“全部由书签组成”的子目录一并删除） */
   async clearBookmarkFolderContents(root: string, folderPath: string): Promise<{ ok: boolean; removed?: number; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string' || !folderPath || typeof folderPath !== 'string') return { ok: false, error: '参数不完整' }
     const dir = this.bookmarkDir(root)
     if (!this.safeWithinDir(dir, folderPath)) return { ok: false, error: '越界路径，已拒绝' }
@@ -3342,6 +3357,7 @@ class BrowserAgentService {
 
   /** 清空整个收藏：删除收藏根下全部书签文件；“全部由书签组成”的文件夹（导入/分组）一并删除；含真实文件的目录仅清理其内书签并保留 */
   async clearBookmarks(root: string): Promise<{ ok: boolean; removed?: number; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string') return { ok: false, error: '未设置工作区' }
     const dir = this.bookmarkDir(root)
     let removed = 0
@@ -3518,6 +3534,7 @@ class BrowserAgentService {
   }
   /** 导入浏览器书签 HTML（Netscape 格式，兼容 favorites_*.html）：整体导入到收藏根下新建文件夹 */
   async importBookmarksFile(root: string, srcPath: string): Promise<{ ok: boolean; imported?: number; folder?: string; error?: string }> {
+    this.bookmarkListCache.clear()
     if (!root || typeof root !== 'string') return { ok: false, error: '未设置工作区' }
     if (!srcPath || typeof srcPath !== 'string') return { ok: false, error: '缺少书签文件路径' }
     let html = ''

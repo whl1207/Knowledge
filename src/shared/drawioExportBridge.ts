@@ -24,6 +24,13 @@ export interface DrawioExportPayload {
   data: string
 }
 
+/** 一页 PDF：svg 为内容；width/height 是 drawio 纸张尺寸（有则按纸张排版，无则按内容裁剪） */
+export interface DrawioPdfPage {
+  svg: string
+  width?: number
+  height?: number
+}
+
 export interface DrawioExportHost {
   /** 弹原生「另存为」并按内容写盘 */
   save(p: DrawioExportPayload): Promise<{ canceled: boolean; path?: string }>
@@ -31,8 +38,8 @@ export interface DrawioExportHost {
   pick(suggestedName: string): Promise<string | null>
   /** 往已确定的路径写内容 */
   write(path: string, p: { isBase64: boolean; data: string }): Promise<boolean>
-  /** 导出 PDF（本地打印通道：隐藏窗口渲染 SVG → printToPDF），filename 不含扩展名也可 */
-  pdf(p: { filename: string; svg: string }): void | Promise<void>
+  /** 导出 PDF（本地打印通道：隐藏窗口逐页渲染 SVG → printToPDF → 合并），filename 不含扩展名也可 */
+  pdf(p: { filename: string; pages: DrawioPdfPage[] }): void | Promise<void>
   /** 打印（系统打印对话框；drawio 内嵌模式的 window.print 走这里） */
   print(p: { filename: string; svg: string }): void | Promise<void>
 }
@@ -115,6 +122,8 @@ export async function toExportPayload(data: any): Promise<{ isBase64: boolean; d
 interface BridgeState {
   /** 最近一次调用过导出/打印的 EditorUi 实例（window.print 兜底时需要） */
   ui?: any
+  /** PDF 导出进行中（切换页面取图期间防止重复触发） */
+  pdfBusy?: boolean
 }
 
 /**
@@ -220,20 +229,77 @@ export function installDrawioExportBridge(
     return String(xml || '')
   }
 
+  /** 当前页在 drawio 里设置的纸张尺寸（pageWidth/pageHeight）；页面视图关掉时返回 null（按内容裁剪） */
+  const pageSizeOf = (ui: any): { width: number; height: number } | null => {
+    const g = ui?.editor?.graph
+    if (!g || !g.pageFormat) return null
+    if (g.pageVisible === false || g.pageVisible === '0') return null
+    const width = Number(g.pageFormat.width)
+    const height = Number(g.pageFormat.height)
+    return width > 0 && height > 0 ? { width, height } : null
+  }
+
+  /**
+   * 逐页取 SVG。内嵌协议同一时刻只渲染当前页，所以要临时切页：
+   * 取完恢复原页，页面顺序与 drawio 的页签一致。
+   */
+  const collectPages = async (ui: any): Promise<DrawioPdfPage[]> => {
+    const pages: any[] = Array.isArray(ui?.pages) ? ui.pages.slice() : []
+    const start = ui?.currentPage
+    const out: DrawioPdfPage[] = []
+    const snap = () => {
+      const svg = currentSvg(ui)
+      if (!svg) return
+      out.push({ svg, ...(pageSizeOf(ui) || {}) })
+    }
+    if (pages.length <= 1 || typeof ui.selectPage !== 'function') {
+      snap()
+      return out
+    }
+    for (const page of pages) {
+      try {
+        if (ui.currentPage !== page) ui.selectPage(page)
+        // 切页后 pageFormat / 模型都已同步更新，留一拍确保导出读到的就是这一页
+        await new Promise((r) => setTimeout(r, 30))
+        snap()
+      } catch (e) {
+        log('导出 PDF 跳过一页：', e)
+      }
+    }
+    if (start && ui.currentPage !== start) {
+      try {
+        ui.selectPage(start)
+      } catch {
+        /* ignore */
+      }
+    }
+    return out
+  }
+
   // ③ 「导出为 → PDF」：drawio 在浏览器/Electron 下会把 SVG 上传到它的云端导出服务换 PDF
-  //    （离线直接失败），改为走宿主本地打印通道（隐藏窗口 + printToPDF）
+  //    （离线直接失败），改为走宿主本地打印通道（隐藏窗口 + printToPDF）。
+  //    多页图表逐页取 SVG → 每页单独打印 → pdf-lib 合并（一次调用只出一份多页 PDF）。
   const UI2 = w.EditorUi
   if (UI2 && UI2.prototype && typeof UI2.prototype.downloadFile === 'function' && !UI2.prototype[PDF_FLAG]) {
     const original = UI2.prototype.downloadFile
     UI2.prototype.downloadFile = function (format: string, ...rest: any[]) {
       state.ui = this
       if (String(format) === 'pdf') {
-        const svg = currentSvg(this)
-        if (!svg) {
-          log('PDF 导出失败：未能获取当前页 SVG')
-          return
-        }
-        void host.pdf({ filename: baseName(this) + '.pdf', svg })
+        if (state.pdfBusy) return
+        state.pdfBusy = true
+        const ui = this
+        const filename = baseName(ui) + '.pdf'
+        void collectPages(ui)
+          .then((pages) => {
+            if (!pages.length) {
+              log('PDF 导出失败：未能获取图表 SVG')
+              return
+            }
+            return host.pdf({ filename, pages })
+          })
+          .finally(() => {
+            state.pdfBusy = false
+          })
         return
       }
       return original.apply(this, [format, ...rest])

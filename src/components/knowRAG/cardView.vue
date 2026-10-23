@@ -135,8 +135,8 @@ const iconOf = (b: any) => (props.onGetFileIcon ? props.onGetFileIcon(fileInfo(b
         </div>
       </div>
 
-      <!-- 卡片详情：弹出面板（样式对齐 questionView 的 qb-pick-overlay / qb-pick-dialog） -->
-      <div v-if="showDetail && selected" class="cv-overlay" @mousedown.self="onCloseDetail && onCloseDetail()">
+      <!-- 卡片详情：右侧面板（与卡片列表并排，不再使用悬浮遮罩） -->
+      <aside v-if="showDetail && selected" class="cv-side">
         <div class="cv-dialog">
           <div class="cv-head">
             <i class="fa fa-cube"></i>
@@ -250,7 +250,7 @@ const iconOf = (b: any) => (props.onGetFileIcon ? props.onGetFileIcon(fileInfo(b
             </div>
           </div>
         </div>
-      </div>
+      </aside>
     </div>
   </div>
 </template>
@@ -276,16 +276,32 @@ const iconOf = (b: any) => (props.onGetFileIcon ? props.onGetFileIcon(fileInfo(b
 .reasoning-indicator { display: flex; align-items: center; gap: 6px; color: #FF9800; font-size: 10px; height: 30px; }
 .reasoning-indicator i { animation: cspin 1s linear infinite; }
 @keyframes cspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-/* ===== 卡片详情弹出面板（对齐 questionView 的 qb-pick-overlay / qb-pick-dialog） =====
-   z-index 取 980：低于父级「切片完整内容」模态框（modal-overlay = 1000），
-   这样在详情里点关联切片时，切片预览能正常盖在详情面板之上 */
-.cv-overlay { position: fixed; inset: 0; z-index: 980; background: rgba(0, 0, 0, .35); display: flex; align-items: center; justify-content: center; }
+/* ===== 卡片详情右侧面板（与卡片列表并排） ===== */
+.cv-side {
+  width: clamp(300px, 32vw, 420px);
+  flex: 0 0 clamp(300px, 32vw, 420px);
+  height: 100%;
+  min-height: 0;
+  border-left: 1px solid var(--borderColor);
+  background: var(--backgroundColor);
+  display: flex;
+  overflow: hidden;
+}
 .cv-dialog {
   display: flex; flex-direction: column;
   width: min(760px, calc(92vw / var(--ui-zoom, 1)));
   max-height: min(660px, calc(88vh / var(--ui-zoom, 1)));
   background: var(--backgroundColor); border: 1px solid var(--borderColor); border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden;
+}
+/* 右侧面板内：占满侧栏，去掉弹窗边框和阴影 */
+.cv-side .cv-dialog {
+  width: 100%;
+  max-height: none;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 .cv-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--borderColor); font-size: 12px; flex-shrink: 0; }
 .cv-head > i { color: #2196F3; }

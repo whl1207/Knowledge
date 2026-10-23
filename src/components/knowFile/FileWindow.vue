@@ -12,6 +12,7 @@ import md_ppt from '@/components/knowFile/view/md_ppt.vue'
 import OfficeView from '@/components/knowFile/view/OfficeView.vue'
 import { FILE_VIEWS, fileViewByKey, OFFICE_VIEW_KEY } from '@/lib/knowFile/fileViews'
 import { officeTypeForPath, loadOfficeAvailability, type OfficeEditorType } from '@/lib/knowFile/office'
+import { shouldSkipTextPreview } from '@/lib/knowFile/textPreview'
 // 专属文件的判别与编辑器入口统一取自 fileEditors.ts（.drawio / .excalidraw / .flow.yml / .data / .task）
 import { detectEditorKind, FILE_EDITORS } from '@/components/knowFile/fileEditors'
 import { getPlatform, hasCapability } from '@/platform'
@@ -486,7 +487,13 @@ async function confirmLeave(): Promise<boolean> {
   }
 }
 
-defineExpose({ confirmLeave, hasUnsaved, saveActiveView })
+/** 供宿主标签栏调用：切到指定视图（非法 / 不可用视图忽略） */
+function setView(v: string) {
+  const next = String(v || '') as ViewType
+  if (VIEW_TYPES.includes(next) && availableViews.value.includes(next)) selectView(next)
+}
+
+defineExpose({ confirmLeave, hasUnsaved, saveActiveView, availableViews, viewType, showViewSwitcher, filePath, setView })
 
 /** 点到切换器之外 / 按 Esc 就收起下拉面板 */
 function closeViewMenuOnOutside(e: Event) {
@@ -717,6 +724,19 @@ const readErrorHint = computed(() => {
 async function loadLocalFile(): Promise<void> {
   readError.value = ''
   contentLoading.value = true
+  // 图片 / 音视频 / PDF / PPTX 不按文本读：
+  // - 播放器 / 图片组件自己按路径取流；
+  // - PDF 用 PdfViewer 读字节；PPTX 用内嵌 Office 编辑器打开。
+  // 安卓上若在这里 readText，会把整个文件经本地服务器拉回来再按 UTF-8 解码（大文件直接卡死）。
+  if (shouldSkipTextPreview(filePath.value)) {
+    contentLoading.value = false
+    try {
+      await store.addTab({ path: filePath.value, label: fileName.value, type: 'file', extension: fileExt.value })
+    } catch (e: any) {
+      readError.value = String(e?.message || e)
+    }
+    return
+  }
   try {
     const text = await getPlatform().fs.readText(filePath.value)
     const failed = readFailureText(text)
@@ -786,7 +806,10 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="file-window knowfile-menu" :class="{ embedded: props.embedded }">
-    <div class="file-titlebar" :class="{ 'titlebar-embedded': props.embedded }">
+    <!-- 嵌入模式（知识管理右侧标签 / 主页文件栏）：宿主标签栏已经显示文件名，
+         不再重复「视图选择 + 标题」这一整行；视图切换由宿主标签栏的文件图标提供
+         （见 explorer.vue / ChatDock.vue 的标签栏图标菜单）。 -->
+    <div v-if="!props.embedded" class="file-titlebar" :class="{ 'titlebar-embedded': props.embedded }">
       <!-- 视图类型切换（按文件类型过滤；.excalidraw/代码/图片等固定单一视图，不显示）
            用自绘下拉而不是原生 <select>：标题栏是窗口拖动区，原生下拉面板在 Electron 里
            容易一移动鼠标就被系统拖动流程关掉（选项"一闪就没"），自绘面板不受此影响 -->

@@ -88,6 +88,9 @@
             :force-fallback="true"
             :fallback-on-body="true"
             :disabled="!canReorder"
+            :handle="coarsePointer ? '.plugin-nav-grip' : undefined"
+            filter=".plugin-nav-toggle"
+            :touch-start-threshold="8"
           >
             <template #item="{ element: p }">
               <div
@@ -158,10 +161,10 @@
           <span>{{ zh
             ? (orderCustomized
               ? '已按你的拖动顺序排列：导航栏的插件图标与「全部插件」网格都按这个顺序显示'
-              : '按住插件行拖动可调整顺序；导航栏的插件图标顺序会跟着这个顺序走')
+              : '按住左侧 ≡ 图标拖动可调整顺序；导航栏的插件图标顺序会跟着这个顺序走')
             : (orderCustomized
               ? 'Ordered as you dragged: navbar plugin icons and the “All plugins” grid follow it'
-              : 'Drag plugin rows to reorder; the navbar plugin icon order follows it') }}</span>
+              : 'Drag the ≡ handle on the left to reorder; the navbar plugin icon order follows it') }}</span>
         </div>
         <div class="folder-path" :title="rootDir || (zh ? '未设置' : 'Not set')">
           <i class="fa fa-folder"></i> {{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}
@@ -710,6 +713,22 @@ const userOrder = usePluginOrder()
  * 搜索时列表只显示命中的插件，拖动落点会牵扯到看不见的插件（用户没法预期），因此先关掉。
  */
 const canReorder = computed(() => !kw.value && plugins.value.length > 1)
+
+/**
+ * 触摸 / 手写笔（粗指针）设备：只允许从左侧把手开始拖动。
+ *
+ * 为什么不能整行拖：Sortable 的 fallback 模式在触摸设备上会接管 touchstart，
+ * 即使只是点一下插件行 / 开关，也可能被判成"开始拖动"，导致 click 不触发
+ * （安卓上表现为「点不中插件、开关也没反应」）。桌面仍保留整行可拖的手感。
+ */
+const coarsePointer = (() => {
+  try {
+    return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      && window.matchMedia('(pointer: coarse)').matches
+  } catch {
+    return false
+  }
+})()
 
 /**
  * 可拖动的插件列表（v-model 的目标）。
@@ -1733,6 +1752,15 @@ onUnmounted(() => {
   font-size: 10px;
   opacity: 0.3;
   cursor: grab;
+}
+/* 触摸设备：把手是唯一的拖动入口，放大可点区域（不改行高，用负边距吃掉内边距） */
+@media (pointer: coarse) {
+  .plugin-nav-grip {
+    font-size: 12px;
+    padding: 8px 6px;
+    margin: -8px -2px -8px -6px;
+    opacity: 0.55;
+  }
 }
 .plugin-nav-item:hover .plugin-nav-grip { opacity: 0.75; }
 .plugin-nav-drag-list {

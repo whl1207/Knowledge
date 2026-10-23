@@ -80,6 +80,11 @@ select{
   outline: none;
   margin: 5px;
 }
+/* 原生 select 的下拉选项跟随主题（否则深色主题下会是系统白底/浅色字） */
+option {
+  background-color: var(--menuColor);
+  color: var(--fontColor);
+}
 input{
   width: calc(100% - 17px);
   margin: 5px;

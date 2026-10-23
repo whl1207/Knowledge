@@ -300,7 +300,7 @@ const exportHost: DrawioExportHost = {
       .invoke('drawio-export-pdf', {
         defaultPath: defaultExportPath(p.filename),
         title: zh.value ? '导出为 PDF' : 'Export as PDF',
-        svg: p.svg,
+        pages: p.pages,
       })
       .catch((e: any) => {
         ElMessage.error((zh.value ? '导出 PDF 失败: ' : 'PDF export failed: ') + (e?.message || e))
@@ -309,7 +309,7 @@ const exportHost: DrawioExportHost = {
     if (!res) return
     if (res.canceled) ElMessage.info(zh.value ? '已取消导出' : 'Export canceled')
     else if (res.error) ElMessage.error((zh.value ? '导出 PDF 失败: ' : 'PDF export failed: ') + res.error)
-    else ElMessage.success((zh.value ? '已导出 PDF 到 ' : 'PDF exported to ') + res.path)
+    else ElMessage.success(zh.value ? `已导出 PDF（${res.pages ?? 1} 页）到 ${res.path}` : `PDF exported (${res.pages ?? 1} pages) to ${res.path}`)
   },
   async print(p) {
     if (!hasIpc) return
@@ -628,8 +628,12 @@ function onMessage(ev: MessageEvent) {
       send({
         action: 'configure',
         config: {
-          // 原生剪贴板在嵌入场景不可靠，改用 mxClipboard 内部复制粘贴
-          useInternalClipboard: true,
+          // 必须走原生剪贴板：useInternalClipboard 会把复制内容只放进当前 iframe 的
+          // mxClipboard（每个视图 / 每个窗口各一份），别的窗口或外部 draw.io 复制来的
+          // 图表就粘不进来。关掉后 drawio 装上官方 installNativeClipboardHandler，
+          // 复制写出 URL 编码的 mxGraphModel 文本，粘贴时再从系统剪贴板读回，
+          // 跨窗口 / 跨应用（draw.io 桌面版、diagrams.net 网页版）都能互粘。
+          useInternalClipboard: false,
           // 宿主拦截新窗口（主进程已 shell.openExternal 处理外链），避免弹窗逃逸
           suppressNewWindows: true,
         },
