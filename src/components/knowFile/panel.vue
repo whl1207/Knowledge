@@ -1000,6 +1000,21 @@
     return true
   }
 
+  /**
+   * 拖拽开始时把节点路径写进 dataTransfer：
+   * Markdown 编辑器据此插入 `![](图.drawio)` / `[](文件)`（el-tree 自带拖拽没有 File 对象）。
+   */
+  const onTreeNodeDragStart = (node: any, ev: DragEvent) => {
+    const p = node?.data?.path
+    if (!p) return
+    try {
+      ev.dataTransfer?.setData('application/x-aikm-path', String(p))
+      ev.dataTransfer?.setData('text/plain', String(p))
+    } catch {
+      /* 某些环境不允许写自定义类型，忽略 */
+    }
+  }
+
   /** 处理拖放完成 */
   const handleDrop = async (draggingNode: any, dropNode: any, dropType: string, ev: Event) => {
     const sourcePath = draggingNode.data.path
@@ -1470,6 +1485,7 @@
           :allow-drag="allowDrag"
           :allow-drop="allowDrop"
           @node-drop="handleDrop"
+          @node-drag-start="onTreeNodeDragStart"
           @node-click="click"
           @node-contextmenu="handleRightClick"
           @node-expand="handleNodeExpand"

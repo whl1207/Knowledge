@@ -443,6 +443,9 @@ const shellPort: ShellPort = {
   async openByApp() { /* 无系统集成 */ },
   async registerShortcut() { return { success: false, error: 'not-supported' } },
   async unregisterShortcut() { /* 无系统集成 */ },
+  async injectSystemText() { return { success: false, error: 'not-supported' } },
+  async systemDictationStatus() { return { supported: false, error: 'not-supported' } },
+  async setAsrHoldMode() { return { success: false, supported: false, error: 'not-supported' } },
   /** 网页端没有系统分享面板（手机浏览器虽有 Web Share，但绕不过用户手势要求，交由调用方降级） */
   async share() { return { success: false, error: 'not-supported' } },
 }

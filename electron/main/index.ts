@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, globalShortcut, Menu, nativeImage, screen, net, session, clipboard, type WebContents } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, globalShortcut, Menu, nativeImage, screen, net, session, clipboard, webContents, type WebContents } from 'electron'
 import { release, networkInterfaces } from 'node:os'
 import { join, dirname, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -97,6 +97,21 @@ import { registerTtsIpc, disposeTtsService } from './tts-service'
 import { registerPythonAppIpc, disposePythonApps } from './python-app-service'
 import { registerCollabIpc, stopCollab } from './collab-service'
 import { registerRemoteFsIpc, stopRemoteFsAll } from './remote-fs-service'
+// 系统级听写：把识别文本粘贴进当前前台应用（Windows: PowerShell/SendInput；Linux: xdotool/wtype）
+import {
+  injectSystemText,
+  systemDictationStatus,
+  disposeSystemDictation,
+} from './system-dictation'
+// 系统级听写的置顶悬浮提示（独立、非激活、鼠标穿透的小窗口）
+import {
+  updateVoiceOverlay,
+  disposeVoiceOverlay,
+  isVoiceOverlayWindow,
+} from './voice-overlay'
+// 全局键盘抬起事件：Electron globalShortcut 只有 keydown，长按说话必须额外监听 keyup。
+import * as uiohookPkg from 'uiohook-napi'
+const { uIOhook, UiohookKey } = uiohookPkg as any
 import { initMapTiles, registerMapTilesIpc } from './map-tiles'
 import { registerFileAssocIpc, syncFileTypeIcons } from './file-assoc'
 import { getGlobalZoom, setGlobalZoom, stepZoom, excludeFromAppZoom } from './window-zoom'
@@ -143,6 +158,12 @@ if (IS_DEV) {
 // 真实 Electron e2e：独立临时 userData，避免与正在运行的开发/正式实例抢单实例锁与配置
 if (process.env.AIKM_BROWSER_E2E === '1') {
   app.setPath('userData', path.join(app.getPath('temp'), `aikm-browser-e2e-${process.pid}`))
+}
+
+// Linux Wayland：Electron 的 globalShortcut 默认拿不到全局热键，需要走 XDG portal。
+// 不开这个开关时，系统级听写在 Wayland 上会表现为「按快捷键没反应」。
+if (process.platform === 'linux' && String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland') {
+  app.commandLine.appendSwitch('enable-features', 'GlobalShortcutsPortal')
 }
 
 if (process.env.AIKM_BROWSER_E2E !== '1' && !app.requestSingleInstanceLock()) {
@@ -352,6 +373,11 @@ async function createWindow() {
     // 主窗口已真正关闭（直接退出模式，或托盘模式下正在退出）→ 托盘失去意义
     trayService.destroyTray()
     if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close()
+    // 系统悬浮窗是常驻辅助窗口：主窗口真关闭时一并销毁，避免它把「所有窗口已关闭」
+    // 的退出判定一直挡住（隐藏的辅助窗口也算存活窗口）。
+    disposeVoiceOverlay()
+    voiceHostWebContentsId = null
+    lastVoiceState = null
   })
 }
 
@@ -556,6 +582,10 @@ app.on('will-quit', () => {
   disposePythonApps()
   stopCollab().catch(() => {})
   stopRemoteFsAll()
+  // 系统级听写：关闭常驻 PowerShell 助手、全局按键监听与悬浮提示窗
+  stopAsrHoldHook()
+  disposeSystemDictation()
+  disposeVoiceOverlay()
   // 插件宿主：卸载全部插件（撤销其注册与后台资源）
   pluginHost.dispose().catch((err) => console.error('[plugin] dispose error', err))
 })
@@ -1567,14 +1597,21 @@ function getWinBySender(senderId: number): BrowserWindow | null {
 }
 
 /**
- * IPC 操作的「归属窗口」：优先主窗口；主窗口不存在 / 已销毁时（例如只开着「浏览器 Agent」、
- * 文件窗口或设置窗口）退回发起请求的窗口。
- * 旧代码在这些地方直接用主窗口（win!）——主窗口关闭后它就是已销毁对象，调用其 API 会抛
+ * IPC 操作的「归属窗口」：优先发起请求的窗口，其次主窗口，最后任意存活窗口。
+ *
+ * 为什么发起方优先：原生对话框（选文件夹 / 保存文件）会以 parent 窗口为锚点并把它带到前台。
+ * 设置独立窗口里点「打开文件夹」时，如果 parent 写成主窗口，Windows 会把主窗口抬到前面、
+ * 把设置窗口压到后面——这正是「设置里打开文件夹，软件跳到主窗口」的原因。
+ *
+ * 旧代码还曾直接用主窗口（win!）：主窗口关闭后它就是已销毁对象，调用其 API 会抛
  * “Object has been destroyed”。能发出 IPC 说明发起方窗口一定存活，故这里保证返回存活窗口。
  */
 function ipcOwnerWindow(senderId: number): BrowserWindow {
+  const sender = BrowserWindow.getAllWindows()
+    .find(w => !w.isDestroyed() && w.webContents.id === senderId)
+  if (sender) return sender
   if (win && !win.isDestroyed()) return win
-  return BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && w.webContents.id === senderId)!
+  return BrowserWindow.getAllWindows().find(w => !w.isDestroyed())!
 }
 
 ipcMain.handle('toggle-fullscreen', (event) => {
@@ -3480,15 +3517,25 @@ function svgSizePx(svg: string): { w: number; h: number } {
  *  - 给了纸张尺寸（drawio 页面格式）→ 页面就是这个尺寸，图形等比缩放居中，
  *    横竖方向与 drawio 里设置的一致（A4 横向就是横向 PDF）；
  *  - 没给（页面视图关闭 / 老文件）→ 页面尺寸 = 图形尺寸 + 边距，仍按内容裁剪。
+ *  - theme：light（默认，白底）/ dark（深底，给深色图表用）；同时写死 color-scheme，
+ *    避免 light-dark() 跟随系统/应用主题变化。
  */
-function buildDiagramHtml(svg: string, page?: { width?: number; height?: number }): string {
+function buildDiagramHtml(
+  svg: string,
+  page?: { width?: number; height?: number },
+  theme?: 'light' | 'dark',
+): string {
   const pad = 24
+  const dark = theme === 'dark'
+  const bg = dark ? '#1f1f1f' : '#ffffff'
+  const scheme = dark ? 'dark' : 'light'
   const pw = Math.round(Number(page?.width) || 0)
   const ph = Math.round(Number(page?.height) || 0)
   if (pw > 0 && ph > 0) {
     return `<!doctype html><html><head><meta charset="utf-8"><style>
 @page { size: ${pw}px ${ph}px; margin: 0; }
-html, body { margin: 0; padding: 0; background: #fff; overflow: hidden; }
+:root { color-scheme: ${scheme}; }
+html, body { margin: 0; padding: 0; background: ${bg}; overflow: hidden; }
 .dg { width: ${pw}px; height: ${ph}px; box-sizing: border-box; padding: ${pad}px; overflow: hidden; }
 .dg > svg { display: block; width: 100%; height: 100%; }
 </style></head><body><div class="dg">${svg}</div></body></html>`
@@ -3498,7 +3545,8 @@ html, body { margin: 0; padding: 0; background: #fff; overflow: hidden; }
   const h = Math.max(200, Math.round((size.h || 600) + pad * 2))
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 @page { size: ${w}px ${h}px; margin: 0; }
-html, body { margin: 0; padding: 0; background: #fff; }
+:root { color-scheme: ${scheme}; }
+html, body { margin: 0; padding: 0; background: ${bg}; }
 .dg { box-sizing: border-box; padding: ${pad}px; }
 .dg > svg { display: block; }
 </style></head><body><div class="dg">${svg}</div></body></html>`
@@ -3536,6 +3584,7 @@ async function withPrintWindow<T>(
 // drawio「导出为 → PDF」：本地打印通道（逐页 printToPDF → pdf-lib 合并），离线可用
 ipcMain.handle('drawio-export-pdf', async (event, payload) => {
   const { defaultPath, title } = payload || {}
+  const theme: 'light' | 'dark' = payload?.theme === 'dark' ? 'dark' : 'light'
   const pages: Array<{ svg: string; width?: number; height?: number }> = Array.isArray(payload?.pages) && payload.pages.length
     ? payload.pages
     : payload?.svg
@@ -3556,7 +3605,7 @@ ipcMain.handle('drawio-export-pdf', async (event, payload) => {
     for (const page of pages) {
       const svg = String(page?.svg || '')
       if (!svg) continue
-      const html = buildDiagramHtml(svg, page)
+      const html = buildDiagramHtml(svg, page, theme)
       const pdfData = await withPrintWindow(html, (wc) => wc.printToPDF({ printBackground: true, preferCSSPageSize: true }))
       const doc = await PDFDocument.load(asUint8(pdfData), { ignoreEncryption: true })
       const copied = await merged.copyPages(doc, doc.getPageIndices())
@@ -4649,15 +4698,55 @@ ipcMain.handle('registerASRShortcut', async (event, shortcut: string) => {
       .replace('Win', 'CommandOrControl')
     
     const success = globalShortcut.register(electronShortcut, () => {
+      // 长按模式由 uiohook 同时处理 keydown/keyup；globalShortcut 在启用长按后会注销，
+      // 这里再兜一层，避免注销前的极短窗口里重复触发。
+      if (asrHoldMode) return
       // 按下快捷键时，通知渲染进程切换 ASR 状态。
       // 投递给「当前聚焦的那个窗口」：全局语音输入在每个窗口各自初始化，谁在前台就把热键给谁
       // （于是在设置窗口 / 文件窗口 / 浏览器 Agent 窗口里也能直接说话输入当前焦点所在的输入框），
       // 没有聚焦窗口时退回主窗口；主窗口不存在（例如只开了文件窗口）则退回任意存活窗口 ——
       // 否则按了没反应，反而像是注册失败。
-      const target = BrowserWindow.getFocusedWindow()
+      // 已经有一个语音会话在跑（可能是系统级听写，宿主在主窗口）：
+      // 此时无论焦点跑到哪个窗口，热键都应该是「结束本次会话」，而不是在另一个窗口再起一套录音。
+      if (lastVoiceState?.phase && lastVoiceState.phase !== 'idle' && voiceHostWebContentsId != null) {
+        const host = webContents.fromId(voiceHostWebContentsId)
+        if (host && !host.isDestroyed()) {
+          host.send('asr-shortcut-toggle', { system: lastVoiceState.mode === 'system' })
+          return
+        }
+      }
+
+      const focused = BrowserWindow.getFocusedWindow()
+      // 前台不是本应用（或只有我们的非激活悬浮窗 / 窗口已隐藏/最小化）→ 本次是「系统级听写」：
+      // 识别结果由主进程粘贴到当前前台应用，而不是写进应用内 DOM。
+      // 隐藏窗口在某些平台仍可能被 getFocusedWindow() 返回；不额外判可见性的话，
+      // 会走 DOM 路径并可能把字写进一个用户根本看不见的输入框。
+      const focusedUsable = !!focused
+        && !isVoiceOverlayWindow(focused)
+        && focused.isVisible()
+        && !focused.isMinimized()
+      const system = !focusedUsable
+      const target = (focusedUsable ? focused : null)
         || (win && !win.isDestroyed() ? win : null)
-        || BrowserWindow.getAllWindows().find(w => !w.isDestroyed())
-      target?.webContents?.send('asr-shortcut-toggle')
+        || BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && !isVoiceOverlayWindow(w))
+
+      // 长按模式：先等 300ms。按得极短（误触/短按）时不启动录音，也不弹面板，
+      // 让这个按键保持系统原本的行为；真正按住超过阈值才通知渲染层开始。
+      if (system && asrHoldMode) {
+        if (holdKeyHeld) return
+        holdKeyHeld = true
+        const targetWin = target
+        if (!targetWin || targetWin.isDestroyed()) return
+        holdStartTimer = setTimeout(() => {
+          holdStartTimer = null
+          if (!targetWin.isDestroyed()) {
+            targetWin.webContents.send('asr-shortcut-toggle', { system: true })
+          }
+        }, HOLD_START_DELAY_MS)
+        return
+      }
+
+      target?.webContents?.send('asr-shortcut-toggle', { system })
     })
     
     if (success) {
@@ -4686,9 +4775,292 @@ ipcMain.handle('unregisterASRShortcut', async () => {
 // 获取当前 ASR 快捷键状态
 ipcMain.handle('getASRShortcutStatus', async () => {
   return {
-    registered: !!registeredASRShortcut,
-    shortcut: registeredASRShortcut
+    // 长按模式走 uiohook，不注册 globalShortcut，但热键仍然有效
+    registered: !!registeredASRShortcut || asrHoldMode,
+    shortcut: registeredASRShortcut || (asrHoldMode ? asrHoldShortcut : null)
   }
+})
+
+// ==================== 长按说话：全局 keyup 监听 ====================
+
+let asrHoldMode = false
+let asrHoldKeycode: number | null = null
+let asrHookStarted = false
+let asrHookAttached = false
+let asrHookError = ''
+/** 按键松开时语音会话还没上报 active（启动竞态）：在状态到达后补发一次 stop */
+let holdReleasePendingUntil = 0
+/** 长按模式的「最短按住时间」：低于这个时长视为误触/短按，不启动录音和面板 */
+const HOLD_START_DELAY_MS = 300
+let holdKeyHeld = false
+let holdStartTimer: NodeJS.Timeout | null = null
+/** 长按模式使用的快捷键（此时 globalShortcut 会注销，完全由 uiohook 检测） */
+let asrHoldShortcut = ''
+/** CapsLock 作快捷键：按下会切换系统状态，长按触发听写时需补按一次恢复 */
+let holdCapsToggled = false
+/** 注入 CapsLock 恢复时，忽略 uiohook 自己产生的按键事件 */
+let ignoreHoldEventsUntil = 0
+
+/** 把快捷键里的主键（如 Ctrl+Shift+F9 的 F9）映射成 uiohook 的 keycode */
+function mainKeycodeOf(accelerator: string): number | null {
+  const key = String(accelerator || '').split('+').pop()?.trim()
+  if (!key) return null
+  const normalized = /^f\d{1,2}$/i.test(key)
+    ? key.toUpperCase()
+    : (key.length === 1 ? key.toUpperCase() : key)
+  const aliases: Record<string, string> = {
+    ' ': 'Space',
+    Spacebar: 'Space',
+    Esc: 'Escape',
+    Return: 'Enter',
+    Del: 'Delete',
+    Ins: 'Insert',
+    PgUp: 'PageUp',
+    PgDn: 'PageDown',
+    Up: 'ArrowUp',
+    Down: 'ArrowDown',
+    Left: 'ArrowLeft',
+    Right: 'ArrowRight',
+  }
+  const name = aliases[normalized] || normalized
+  const code = (UiohookKey as any)?.[name]
+  return typeof code === 'number' ? code : null
+}
+
+/** 当前快捷键要求的修饰键是否与这次按键完全一致 */
+function matchesHoldShortcut(e: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean }): boolean {
+  const parts = asrHoldShortcut.split('+').map(p => p.trim().toLowerCase())
+  const cmdOrCtrl = parts.includes('commandorcontrol')
+  const wantCtrl = parts.includes('ctrl') || parts.includes('control') || (cmdOrCtrl && process.platform !== 'darwin')
+  const wantMeta = parts.includes('meta') || parts.includes('command') || (cmdOrCtrl && process.platform === 'darwin')
+  const wantShift = parts.includes('shift')
+  const wantAlt = parts.includes('alt')
+  return !!e.ctrlKey === wantCtrl
+    && !!e.shiftKey === wantShift
+    && !!e.altKey === wantAlt
+    && !!e.metaKey === wantMeta
+}
+
+/** 应用窗口在前台时不走系统长按逻辑，交给窗口自己的 keydown/keyup */
+function voiceFocusedWindowUsable(): BrowserWindow | null {
+  const focused = BrowserWindow.getFocusedWindow()
+  if (!focused || isVoiceOverlayWindow(focused)) return null
+  if (!focused.isVisible() || focused.isMinimized()) return null
+  return focused
+}
+
+function restoreCapsLockIfNeeded(): void {
+  if (!holdCapsToggled) return
+  holdCapsToggled = false
+  // 长按 CapsLock 触发听写时，按下那一下已经切换了大小写；这里补按一次恢复原状态。
+  ignoreHoldEventsUntil = Date.now() + 500
+  try { uIOhook.keyTap(UiohookKey.CapsLock) } catch { /* 忽略 */ }
+}
+
+function onGlobalKeydownForHold(e: { keycode?: number; ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean }): void {
+  if (!asrHoldMode || asrHoldKeycode == null) return
+  if (Date.now() < ignoreHoldEventsUntil) return
+  if (Number(e?.keycode) !== asrHoldKeycode) return
+  if (!matchesHoldShortcut(e)) return
+  if (holdKeyHeld) return
+  // 已经有一个会话（例如上一次卡住）→ 不再叠加
+  if (lastVoiceState?.phase && lastVoiceState.phase !== 'idle') return
+
+  holdKeyHeld = true
+  holdCapsToggled = asrHoldKeycode === UiohookKey.CapsLock
+  // 长按模式完全由这里处理（窗口内也已让行）：前台是本应用就走 DOM 落点，否则走系统粘贴
+  const focusedUsable = voiceFocusedWindowUsable()
+  const system = !focusedUsable
+  const target = focusedUsable
+    || (win && !win.isDestroyed() ? win : null)
+    || BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && !isVoiceOverlayWindow(w))
+  if (!target || target.isDestroyed()) {
+    holdKeyHeld = false
+    restoreCapsLockIfNeeded()
+    return
+  }
+
+  // 短按（<300ms）不启动：不清除系统按键行为，CapsLock 仍按正常逻辑切换
+  holdStartTimer = setTimeout(() => {
+    holdStartTimer = null
+    // 超过阈值 = 确实在长按听写，先把 CapsLock 切换恢复掉，避免录制期间大小写被改
+    restoreCapsLockIfNeeded()
+    if (!target.isDestroyed()) {
+      target.webContents.send('asr-shortcut-toggle', { system })
+    }
+  }, HOLD_START_DELAY_MS)
+}
+
+function onGlobalKeyupForHold(e: { keycode?: number }): void {
+  if (Date.now() < ignoreHoldEventsUntil) {
+    // 恢复 CapsLock 的注入事件也会走这里；匹配到主键就清掉按住标记，
+    // 否则下一次真实按键会被 holdKeyHeld 永久挡住。
+    if (asrHoldKeycode != null && Number(e?.keycode) === asrHoldKeycode) holdKeyHeld = false
+    return
+  }
+  if (!asrHoldMode || asrHoldKeycode == null) return
+  if (Number(e?.keycode) !== asrHoldKeycode) return
+  holdKeyHeld = false
+  // 还没到最短按住时间：这是短按，取消启动；不弹面板、不录音。
+  // 注意不要恢复 CapsLock——这次短按本来就该按系统默认行为切换大小写。
+  if (holdStartTimer) {
+    clearTimeout(holdStartTimer)
+    holdStartTimer = null
+    holdReleasePendingUntil = 0
+    holdCapsToggled = false
+    return
+  }
+  if (!lastVoiceState || lastVoiceState.phase === 'idle') {
+    // 会话可能还在异步启动（模型/麦克风预热）：记下这次松开，等 active 状态到了立刻补 stop
+    holdReleasePendingUntil = Date.now() + 1500
+    return
+  }
+  if (voiceHostWebContentsId == null) return
+  const host = webContents.fromId(voiceHostWebContentsId)
+  if (!host || host.isDestroyed()) return
+  try { host.send('asr-hold-stop') } catch { /* 忽略 */ }
+}
+
+function startAsrHoldHook(): boolean {
+  if (asrHookStarted) return true
+  try {
+    if (!asrHookAttached) {
+      uIOhook.on('keydown', onGlobalKeydownForHold)
+      uIOhook.on('keyup', onGlobalKeyupForHold)
+      asrHookAttached = true
+    }
+    uIOhook.start()
+    asrHookStarted = true
+    asrHookError = ''
+    return true
+  } catch (e: any) {
+    asrHookStarted = false
+    asrHookError = String(e?.message || e)
+    if (asrHookAttached) {
+      try { uIOhook.off('keydown', onGlobalKeydownForHold) } catch { /* 忽略 */ }
+      try { uIOhook.off('keyup', onGlobalKeyupForHold) } catch { /* 忽略 */ }
+      asrHookAttached = false
+    }
+    logWarn('ASR', `long-press hook failed: ${asrHookError}`)
+    return false
+  }
+}
+
+function stopAsrHoldHook(): void {
+  holdKeyHeld = false
+  if (holdStartTimer) { clearTimeout(holdStartTimer); holdStartTimer = null }
+  restoreCapsLockIfNeeded()
+  if (!asrHookStarted) return
+  try { uIOhook.stop() } catch { /* 忽略 */ }
+  asrHookStarted = false
+}
+
+// 渲染层在「设置 → 语音 → 输入 → 触发方式」变化时调用
+ipcMain.handle('asr:set-hold-mode', async (_event, payload?: { enabled?: boolean; shortcut?: string }) => {
+  const requested = !!payload?.enabled
+  asrHoldMode = false
+  if (!requested) {
+    asrHoldKeycode = null
+    asrHoldShortcut = ''
+    stopAsrHoldHook()
+    return { success: true, supported: true }
+  }
+  asrHoldShortcut = String(payload?.shortcut || '')
+  // Wayland 下 libuiohook 拿不到原生全局按键（XWayland 也只看得到 X11 窗口），
+  // 强行开启会表现为「松手停不下来」，因此直接退回单点开关。
+  if (process.platform === 'linux' && /wayland/i.test(String(process.env.XDG_SESSION_TYPE || ''))) {
+    stopAsrHoldHook()
+    return { success: false, supported: false, error: 'Wayland 不支持全局按键抬起监听，请使用单点开关' }
+  }
+  asrHoldKeycode = mainKeycodeOf(String(payload?.shortcut || ''))
+  if (asrHoldKeycode == null) {
+    stopAsrHoldHook()
+    return { success: false, supported: false, error: '当前快捷键不支持长按识别' }
+  }
+  const ok = startAsrHoldHook()
+  asrHoldMode = ok
+  // 长按模式必须注销 globalShortcut：否则系统收不到 CapsLock 等按键，
+  // 短按就无法执行它本来的功能（大写键不能切换大小写）。改由 uiohook 检测按下/抬起。
+  if (ok && registeredASRShortcut) {
+    try { globalShortcut.unregister(registeredASRShortcut) } catch { /* 忽略 */ }
+    registeredASRShortcut = null
+  }
+  return {
+    success: ok,
+    supported: ok,
+    error: ok ? undefined : (asrHookError || '全局按键监听启动失败（Linux Wayland 可能不支持）'),
+  }
+})
+
+// ==================== 系统级听写：把识别文本粘贴到前台应用 ====================
+
+// 当前语音会话的「宿主窗口」：谁在跑 ASR，状态就由谁发上来。
+// 独立悬浮窗只负责显示，不跑 ASR；它把「结束 / 取消」动作回传给这个宿主。
+let voiceHostWebContentsId: number | null = null
+let lastVoiceState: any = null
+
+ipcMain.handle('system-dictation:status', async () => systemDictationStatus())
+
+ipcMain.handle('system-dictation:inject', async (_event, payload?: { text?: string; restoreClipboard?: boolean }) => {
+  const text = String(payload?.text ?? '')
+  // 如果录音期间用户把焦点切回了本应用（主窗口 / 设置 / 悬浮窗），
+  // 再发 Ctrl+V 会粘到我们自己窗口里。此时不粘贴，把文字留在剪贴板让用户手动处理。
+  const focused = BrowserWindow.getFocusedWindow()
+  if (focused && focused.isVisible() && !focused.isMinimized() && !isVoiceOverlayWindow(focused)) {
+    return {
+      success: false,
+      copied: true,
+      error: '本应用窗口在前台，已跳过系统粘贴（文字已复制到剪贴板）',
+    }
+  }
+  const result = await injectSystemText(text, {
+    restoreClipboard: payload?.restoreClipboard !== false,
+  })
+  if (!result.success) {
+    logWarn('ASR', `system dictation inject failed: ${result.error || 'unknown'}`)
+  }
+  return result
+})
+
+// 渲染层（语音宿主）每次状态变化都会发上来；主进程据此显示 / 隐藏系统悬浮窗。
+ipcMain.on('voice:state', (event, state?: any) => {
+  const active = (state?.phase && state.phase !== 'idle')
+    || (state?.mode === 'system' && !!state?.notice)
+  if (active) {
+    voiceHostWebContentsId = event.sender.id
+    lastVoiceState = state
+    updateVoiceOverlay(state)
+    // 长按模式：若按键在 active 状态上报前就已松开，这里补发 stop（DOM / system 都适用）
+    if (asrHoldMode && holdReleasePendingUntil && Date.now() <= holdReleasePendingUntil) {
+      holdReleasePendingUntil = 0
+      const host = webContents.fromId(event.sender.id)
+      if (host && !host.isDestroyed()) {
+        try { host.send('asr-hold-stop') } catch { /* 忽略 */ }
+      }
+    }
+    return
+  }
+  // 只有当前宿主发来的「空闲」才允许收起悬浮窗：
+  // 其它窗口初始化时也会发 idle，不能让它把正在进行的系统听写关掉。
+  if (event.sender.id === voiceHostWebContentsId) {
+    lastVoiceState = state
+    updateVoiceOverlay(state)
+  }
+})
+
+// 悬浮窗加载完成后补发一次当前状态（它可能比会话晚创建）
+ipcMain.on('voice:overlay-ready', (event) => {
+  if (lastVoiceState) {
+    try { event.sender.send('voice:overlay-state', lastVoiceState) } catch { /* 忽略 */ }
+  }
+})
+
+// 悬浮窗上的按钮（目前整窗鼠标穿透，保留通道以便以后做可交互浮层）
+ipcMain.on('voice:overlay-action', (_event, action?: string) => {
+  if (voiceHostWebContentsId == null) return
+  const wc = webContents.fromId(voiceHostWebContentsId)
+  if (!wc || wc.isDestroyed()) return
+  try { wc.send('voice:overlay-action', String(action || '')) } catch { /* 忽略 */ }
 })
 
 // ==================== 局域网共享服务器 ====================

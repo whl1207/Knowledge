@@ -38,6 +38,8 @@ export type VoicePhase = 'idle' | 'starting' | 'listening' | 'processing'
 /** 全局语音输入的可见状态（浮层只读这一份） */
 export const voiceState = reactive({
   phase: 'idle' as VoicePhase,
+  /** 本次落点类型：dom=应用内输入框；system=当前前台应用；clipboard=系统输入不可用时的剪贴板兜底 */
+  mode: 'dom' as 'dom' | 'system' | 'clipboard',
   /** 本次落点的展示名（浮层显示「正在输入到：搜索框」） */
   targetLabel: '',
   /** 落点是否已锁定（没有落点时结果只能复制到剪贴板） */
@@ -81,6 +83,52 @@ let noticeTimer: ReturnType<typeof setTimeout> | null = null
 let inited = false
 /** 刚刚失败（缺配置 / 报错）后的冷却截止时间：这段时间内不再重试，避免按住时提示刷屏 */
 let startBlockedUntil = 0
+/** 当前窗口是不是「系统悬浮提示窗」：它只镜像状态，不跑 ASR、不注册热键 */
+let overlayMirror = false
+/** 系统级热键带来的「本次应在当前前台应用里输入」标记 */
+let hostSystemMode = false
+let stateWatchStop: (() => void) | null = null
+let overlayActionUnsub: (() => void) | null = null
+let overlayStateUnsub: (() => void) | null = null
+let publishTimer: ReturnType<typeof setTimeout> | null = null
+
+function isVoiceOverlayWindow(): boolean {
+  return typeof window !== 'undefined' && String(window.location?.hash || '').startsWith('#/voice-overlay')
+}
+
+/** 只挑可结构化克隆的字段发给主进程 / 悬浮窗（不要把整个 reactive 对象发过去） */
+function serializeVoiceState() {
+  return {
+    phase: voiceState.phase,
+    mode: voiceState.mode,
+    targetLabel: voiceState.targetLabel,
+    hasTarget: voiceState.hasTarget,
+    partial: voiceState.partial,
+    notice: voiceState.notice,
+    shortcutDisplay: voiceState.shortcutDisplay,
+    holdToTalk: voiceState.holdToTalk,
+    ready: voiceState.ready,
+  }
+}
+
+/**
+ * 宿主窗口把状态同步给主进程；主进程再转发给独立悬浮窗。
+ * 音频 partial 可能一秒来很多次，做 60ms 合并，避免 IPC 把渲染进程拖慢。
+ */
+function publishVoiceState(immediate = false): void {
+  if (overlayMirror) return
+  const send = () => {
+    publishTimer = null
+    try { getPlatform().events.emit('voice:state', serializeVoiceState()) } catch { /* 宿主不可用时忽略 */ }
+  }
+  if (immediate) {
+    if (publishTimer) { clearTimeout(publishTimer); publishTimer = null }
+    send()
+    return
+  }
+  if (publishTimer) return
+  publishTimer = setTimeout(send, 60)
+}
 
 function isMacPlatform(): boolean {
   return typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || '')
@@ -172,32 +220,65 @@ function maybeAutoSend(target: VoiceTarget | null): void {
   }, 120)
 }
 
-/** 落点写不进去时的兜底：复制到剪贴板，用户可自行粘贴（例如焦点在浏览器 Agent 的网页里） */
-async function fallbackToClipboard(text: string): Promise<void> {
-  let copied = false
+/** 写剪贴板（带超时：权限弹窗挂住时不能把「结果记账」也一起挂住） */
+async function copyTextToClipboard(text: string): Promise<boolean> {
   try {
-    // 加超时：剪贴板权限弹窗挂住时不能把「结果记账」也一起挂住（否则浮层会一直停在识别中）
     await Promise.race([
       navigator.clipboard.writeText(text),
       new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 1500)),
     ])
-    copied = true
-  } catch { copied = false }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 落点写不进去时的兜底：复制到剪贴板，用户可自行粘贴（例如焦点在浏览器 Agent 的网页里） */
+async function fallbackToClipboard(text: string): Promise<void> {
+  const copied = await copyTextToClipboard(text)
+  const isSystem = voiceState.mode === 'system' || voiceState.mode === 'clipboard'
   const msg = copied
-    ? (zh() ? '没有可写入的输入框，识别结果已复制到剪贴板' : 'No input field to type into — the result was copied to the clipboard')
-    : (zh() ? '没有可写入的输入框，识别结果已丢弃' : 'No input field to type into — the result was dropped')
+    ? (isSystem
+        ? (zh() ? '系统级输入不可用，识别结果已复制到剪贴板，可手动粘贴' : 'System input is unavailable — the result was copied to the clipboard; paste it manually')
+        : (zh() ? '没有可写入的输入框，识别结果已复制到剪贴板' : 'No input field to type into — the result was copied to the clipboard'))
+    : (isSystem
+        ? (zh() ? '系统级输入不可用，识别结果已丢弃' : 'System input is unavailable — the result was dropped')
+        : (zh() ? '没有可写入的输入框，识别结果已丢弃' : 'No input field to type into — the result was dropped'))
   warnMessage(msg, copied ? 'info' : 'warning')
 }
 
 /** 一句最终结果：写进锁定的落点（流式引擎会连续来多句，逐句接着写） */
 async function deliverFinal(text: string): Promise<void> {
+  // 系统输入不可用（macOS / Linux 缺 xdotool·wtype）：直接走剪贴板兜底。
+  // 这里是「预期行为」，不要每句都弹一次警告；写成功给一个短提示即可。
+  if (voiceState.mode === 'clipboard') {
+    // 不在应用内弹「已复制」之类的收尾提示；失败时才提示原因
+    if (!(await copyTextToClipboard(text))) await fallbackToClipboard(text)
+    return
+  }
+  // 系统级听写：交给主进程写剪贴板 + 模拟 Ctrl+V，粘贴到当前前台应用。
+  // 不经过 DOM，也不要求应用窗口在前台。
+  if (voiceState.mode === 'system') {
+    let result: { success: boolean; copied?: boolean; error?: string } = { success: false }
+    try {
+      result = await getPlatform().shell.injectSystemText(text, {
+        restoreClipboard: voiceStore?.AIconfig?.asr?.restoreClipboard !== false,
+      })
+    } catch (e: any) {
+      result = { success: false, error: String(e?.message || e) }
+    }
+    if (!result?.success) { await fallbackToClipboard(text); return }
+    // 系统级听写不显示「已输入」之类的收尾提示：文字已经进入目标应用，
+    // 悬浮面板直接随会话结束消失即可。
+    return
+  }
+
   // 先抓住落点：结束会话时 onStatusChange('idle') 会复位 sessionTarget，
   // 而本次写入是异步的（monaco 分支还要等动态 import），不能等到 await 之后再读全局变量
   const target = sessionTarget
   const ok = target ? await insertVoiceText(target, text) : false
   if (!ok) { await fallbackToClipboard(text); return }
-  // 写完给一个短促的「已输入」收尾提示：结束后浮层不会无声消失
-  flashNotice(zh() ? '已输入' : 'Typed')
+  // 识别完成后不再弹「已输入」提示：浮层随会话结束直接收起即可。
   maybeAutoSend(target)
 }
 
@@ -261,9 +342,13 @@ function ensureManager(): ASRManager | null {
 
 // ==================== 会话控制 ====================
 
-/** 开始一次语音输入：锁定当前焦点落点 → 起录音（识别结果写进那个元素） */
-export async function startVoice(): Promise<void> {
+/**
+ * 开始一次语音输入。
+ * @param systemMode true = 系统级听写：不解析 DOM 落点，结果粘贴到当前前台应用。
+ */
+export async function startVoice(systemMode = false): Promise<void> {
   if (!inited) return
+  if (overlayMirror) { getPlatform().events.emit('voice:overlay-action', 'start'); return }
   if (voiceState.phase !== 'idle') return
   // 刚失败过（缺配置 / 报错）→ 冷却期内直接忽略：按住快捷键时宿主会反复触发，
   // 不拦一道就会「浮层闪一下又消失 + 同一条提示反复弹」
@@ -275,12 +360,64 @@ export async function startVoice(): Promise<void> {
     warnMessage(gap)
     return
   }
+  if (systemMode) {
+    if (voiceStore?.AIconfig?.asr?.systemWide === false) {
+      startBlockedUntil = Date.now() + START_COOLDOWN_MS
+      warnMessage(zh()
+        ? '系统级听写已在「设置 → 语音 → 输入」中关闭；请先打开，或把光标点进应用内输入框再按快捷键'
+        : 'System-wide dictation is off (Settings → Voice → ASR). Enable it, or put the caret in an in-app field first.')
+      return
+    }
+    // 环境不支持（网页 / 安卓 / macOS / Linux 没装 xdotool·wtype）时不要直接吞掉本次输入：
+    // 退回「识别完复制到剪贴板」的旧行为，用户仍可手动粘贴。
+    const status = await getPlatform().shell.systemDictationStatus().catch(() => null)
+    if (!status?.supported) {
+      warnOnce('system-unsupported', status?.error || (zh()
+        ? '当前环境不支持系统级输入（需要 Windows PowerShell，或 Linux 的 xdotool / wtype）；本次识别结果会复制到剪贴板'
+        : 'System-wide input is unavailable here (needs Windows PowerShell, or xdotool/wtype on Linux); the result will be copied to the clipboard instead.'))
+      clearNotice()
+      voiceState.mode = 'clipboard'
+      sessionTarget = null
+      voiceState.hasTarget = true
+      voiceState.targetLabel = zh() ? '剪贴板' : 'Clipboard'
+      voiceState.partial = ''
+      voiceState.phase = 'starting'
+      publishVoiceState(true)
+      engineIdle = false
+      const mgr0 = ensureManager()
+      if (!mgr0) {
+        voiceState.phase = 'idle'
+        startBlockedUntil = Date.now() + START_COOLDOWN_MS
+        warnMessage(zh()
+          ? '请先在「设置 → 语音 → 输入」中配置语音识别引擎，再使用语音输入'
+          : 'Configure a speech recognition engine under Settings → Voice → ASR before using voice input')
+        return
+      }
+      try {
+        mgr0.warmup?.().catch(() => { /* 失败静默，start() 里会重试 */ })
+        mgr0.start()
+      } catch (e: any) {
+        voiceState.phase = 'idle'
+        startBlockedUntil = Date.now() + START_COOLDOWN_MS
+        warnMessage(String(e?.message || e))
+      }
+      return
+    }
+  }
   clearNotice()
-  sessionTarget = resolveVoiceTarget(zh())
-  voiceState.hasTarget = !!sessionTarget
-  voiceState.targetLabel = sessionTarget?.label || (zh() ? '未找到输入框' : 'No input field')
+  voiceState.mode = systemMode ? 'system' : 'dom'
+  if (systemMode) {
+    sessionTarget = null
+    voiceState.hasTarget = true
+    voiceState.targetLabel = zh() ? '当前前台应用' : 'Active app'
+  } else {
+    sessionTarget = resolveVoiceTarget(zh())
+    voiceState.hasTarget = !!sessionTarget
+    voiceState.targetLabel = sessionTarget?.label || (zh() ? '未找到输入框' : 'No input field')
+  }
   voiceState.partial = ''
   voiceState.phase = 'starting'
+  publishVoiceState(true)
   engineIdle = false
   const mgr = ensureManager()
   if (!mgr) {
@@ -304,8 +441,14 @@ export async function startVoice(): Promise<void> {
 
 /** 结束一次语音输入：交给引擎出最终文本（写完浮层自动收起） */
 export async function stopVoice(): Promise<void> {
+  if (overlayMirror) {
+    if (voiceState.phase !== 'idle') voiceState.phase = 'processing'
+    getPlatform().events.emit('voice:overlay-action', 'stop')
+    return
+  }
   if (voiceState.phase === 'idle') return
   voiceState.phase = 'processing'
+  publishVoiceState(true)
   try {
     await manager?.stop()
   } catch (e: any) {
@@ -325,15 +468,20 @@ export async function stopVoice(): Promise<void> {
 
 /** 放弃本次语音输入：丢弃音频，不产生文本 */
 export function cancelVoice(): void {
+  if (overlayMirror) {
+    getPlatform().events.emit('voice:overlay-action', 'cancel')
+    return
+  }
   if (voiceState.phase === 'idle') return
   try { manager?.abort?.() } catch { /* 忽略 */ }
   engineIdle = true
   finishSession()
+  publishVoiceState(true)
 }
 
 /** 热键的一次触发：录音中 → 结束；空闲 → 开始（桌面系统级快捷键只有「按下」，无法探测弹起） */
-export async function toggleVoice(): Promise<void> {
-  if (voiceState.phase === 'idle') await startVoice()
+export async function toggleVoice(systemMode = false): Promise<void> {
+  if (voiceState.phase === 'idle') await startVoice(systemMode)
   else await stopVoice()
 }
 
@@ -394,16 +542,22 @@ function onWindowKeydown(e: KeyboardEvent): void {
     return
   }
   if (!matchesShortcutDown(e)) return
+  // 长按模式由主进程全局 keydown/keyup 统一处理：
+  // 这里不 preventDefault，CapsLock 等按键才能保留系统原本功能；
+  // 短按由主进程判定为误触后直接忽略，不会弹面板。
+  if (systemInputMode() === 'hold') return
   e.preventDefault()
   lastSelfHandledAt = Date.now()
   windowPressAt = Date.now()
   windowPressWasActive = voiceState.phase !== 'idle'
   voiceState.lastTrigger = `${zh() ? '窗口按键' : 'window key'} ${new Date().toLocaleTimeString()}`
-  if (!windowPressWasActive) void startVoice()
+  if (!windowPressWasActive) void startVoice(false)
 }
 
 function onWindowKeyup(e: KeyboardEvent): void {
   if (!matchesShortcutKey(e)) return
+  // 长按模式的结束由主进程 keyup 事件负责
+  if (systemInputMode() === 'hold') return
   const pressAt = windowPressAt
   windowPressAt = 0
   if (voiceState.phase === 'idle') return
@@ -420,14 +574,35 @@ function onWindowKeyup(e: KeyboardEvent): void {
  *   ① 窗口内刚刚自己处理过这次按键（前台时窗口监听能识别「按住 / 松开」，比这里准）→ 忽略；
  *   ② 与上一次宿主事件间隔过短 → 认定为「同一次按住」的键盘自动重复，忽略。
  */
-function onHostHotkey(): void {
+/** 长按监听是否真的启动成功；失败时自动退回单点开关，避免「松手也停不下来」 */
+let holdRuntimeSupported = true
+
+function systemInputMode(): 'toggle' | 'hold' {
+  return voiceStore?.AIconfig?.asr?.systemInputMode === 'hold' && holdRuntimeSupported ? 'hold' : 'toggle'
+}
+
+/** 长按模式下主进程发来的「松开快捷键」：只结束系统级会话 */
+function onHoldStop(): void {
+  if (systemInputMode() !== 'hold') return
+  if (voiceState.phase === 'idle') return
+  // 长按既可能在系统输入里用，也可能在应用窗口内用；两种落点都要结束
+  if (voiceState.mode !== 'system' && voiceState.mode !== 'dom') return
+  void stopVoice()
+}
+
+function onHostHotkey(payload?: { system?: boolean }): void {
   const now = Date.now()
   const repeated = lastHostAt > 0 && now - lastHostAt < HOST_REPEAT_MS
   lastHostAt = now
   if (repeated) return
   if (lastSelfHandledAt && now - lastSelfHandledAt < SELF_HANDLED_GUARD_MS) return
-  voiceState.lastTrigger = `${zh() ? '系统快捷键' : 'global shortcut'} ${new Date().toLocaleTimeString()}`
-  void toggleVoice()
+  // 主进程判定「按快捷键时前台不是本应用」→ 本次结果粘贴到当前前台应用
+  hostSystemMode = !!payload?.system
+  // 长按模式：全局快捷键在 Windows 上按住会反复触发 keydown，但会话已经开始了，
+  // 这些重复事件必须忽略；真正的结束只由 keyup（asr-hold-stop）负责。
+  if (systemInputMode() === 'hold' && hostSystemMode && voiceState.phase !== 'idle') return
+  voiceState.lastTrigger = `${hostSystemMode ? (zh() ? '系统快捷键（全局）' : 'global shortcut (system)') : (zh() ? '系统快捷键' : 'global shortcut')} ${new Date().toLocaleTimeString()}`
+  void toggleVoice(hostSystemMode)
 }
 
 /**
@@ -442,19 +617,43 @@ function onHostHotkey(): void {
  */
 async function syncShortcut(): Promise<void> {
   const shortcut = currentShortcut()
+  // 这里看配置本身，而不是 systemInputMode()：后者在监听启动失败时会退回 toggle，
+  // 但默认 CapsLock 若再走 globalShortcut 会吞掉短按，反而更糟。失败就让用户改设置。
+  const wantHold = voiceStore?.AIconfig?.asr?.systemInputMode === 'hold'
+    && voiceStore?.AIconfig?.asr?.systemWide !== false
   voiceState.shortcutDisplay = shortcut ? formatBinding(shortcut, isMacPlatform()) : ''
   voiceState.holdToTalk = !hasCapability('shell.globalShortcut')
   voiceState.ready = !asrConfigGap()
   if (!hasCapability('shell.globalShortcut')) {
     voiceState.hostShortcut = 'unsupported'
     voiceState.hostShortcutError = ''
+    void applyHoldMode(false, '')
     return
   }
   if (!shortcut) {
     voiceState.hostShortcut = 'failed'
     voiceState.hostShortcutError = zh() ? '没有设置快捷键' : 'no shortcut configured'
+    void applyHoldMode(false, '')
     return
   }
+  // 长按模式不需要 globalShortcut：由 uiohook 直接检测 keydown/keyup。
+  // 这样 CapsLock 等按键不会被系统热键吞掉，短按仍能执行原本功能。
+  if (wantHold) {
+    const ok = await applyHoldMode(true, shortcut)
+    if (ok) {
+      voiceState.hostShortcut = 'ok'
+      voiceState.hostShortcutError = ''
+      voiceState.hostShortcutActive = shortcut
+      return
+    }
+    voiceState.hostShortcut = 'failed'
+    voiceState.hostShortcutError = zh()
+      ? '长按监听启动失败，请改用单点开关或换一个快捷键'
+      : 'Hold-to-talk could not start; use Toggle or pick another shortcut'
+    voiceState.hostShortcutActive = ''
+    return
+  }
+  void applyHoldMode(false, '')
   let res = await tryRegisterShortcut(shortcut)
   let used = shortcut
   // 主键被别的软件占用（或系统不允许）时自动退到备选组合：至少保证「按了有反应」，
@@ -486,6 +685,29 @@ async function syncShortcut(): Promise<void> {
   warnOnce(`failed:${shortcut}`, zh()
     ? `快捷键 ${formatBinding(shortcut, isMacPlatform())} 注册失败（备选组合也不可用）：${voiceState.hostShortcutError}。请在「设置 → 模型 → 输入」里换一组，或点「清空」改用右下角的悬浮麦克风。`
     : `Could not register ${formatBinding(shortcut, isMacPlatform())} (fallbacks unavailable too): ${voiceState.hostShortcutError}. Pick another combination under Settings → Models → ASR, or clear it and use the floating mic at the bottom-right.`)
+  void applyHoldMode(false, '')
+}
+
+/** 通知主进程开启/关闭长按模式的全局 keyup 监听；返回是否真正可用 */
+async function applyHoldMode(enabled: boolean, shortcut: string): Promise<boolean> {
+  if (!hasCapability('shell.systemInput')) {
+    holdRuntimeSupported = false
+    return false
+  }
+  try {
+    const res = await getPlatform().shell.setAsrHoldMode({ enabled, shortcut })
+    holdRuntimeSupported = enabled ? !!res?.success : true
+    if (enabled && !res?.success) {
+      warnOnce('hold-mode', res?.error || (zh()
+        ? '长按说话启动失败：当前系统无法监听全局按键抬起'
+        : 'Hold-to-talk failed to start: global key-up listening is unavailable.'))
+    }
+    return enabled ? !!res?.success : true
+  } catch (e: any) {
+    holdRuntimeSupported = !enabled
+    if (enabled) warnOnce('hold-mode', String(e?.message || e))
+    return !enabled
+  }
 }
 
 async function tryRegisterShortcut(accel: string): Promise<{ ok: boolean; error?: string }> {
@@ -517,13 +739,19 @@ export function retryVoiceShortcut(): void {
  * 这里把句柄挂在 window 上，每次安装前先摘掉上一份，做到幂等。
  */
 const HOTKEY_MARK = '__aikmVoiceHotkey'
-type HotkeyInstall = { down: typeof onWindowKeydown; up: typeof onWindowKeyup; unsub: (() => void) | null }
+type HotkeyInstall = {
+  down: typeof onWindowKeydown
+  up: typeof onWindowKeyup
+  unsub: (() => void) | null
+  holdUnsub: (() => void) | null
+}
 
 function installHotkeyListeners(): void {
   const w = window as any
   const prev = w[HOTKEY_MARK] as HotkeyInstall | undefined
   if (prev) {
     try { prev.unsub?.() } catch { /* 旧的退订失败不影响装机 */ }
+    try { prev.holdUnsub?.() } catch { /* 忽略 */ }
     window.removeEventListener('keydown', prev.down, true)
     window.removeEventListener('keyup', prev.up, true)
   }
@@ -531,9 +759,13 @@ function installHotkeyListeners(): void {
   const unsub = hasCapability('shell.globalShortcut')
     ? getPlatform().events.on('asr-shortcut-toggle', onHostHotkey)
     : null
+  // 长按模式：主进程监听全局 keyup 后发这个事件
+  const holdUnsub = hasCapability('shell.globalShortcut')
+    ? getPlatform().events.on('asr-hold-stop', onHoldStop)
+    : null
   window.addEventListener('keydown', onWindowKeydown, true)
   window.addEventListener('keyup', onWindowKeyup, true)
-  w[HOTKEY_MARK] = { down: onWindowKeydown, up: onWindowKeyup, unsub }
+  w[HOTKEY_MARK] = { down: onWindowKeydown, up: onWindowKeyup, unsub, holdUnsub }
 }
 
 function removeHotkeyListeners(): void {
@@ -541,6 +773,7 @@ function removeHotkeyListeners(): void {
   const cur = w[HOTKEY_MARK] as HotkeyInstall | undefined
   if (!cur) return
   try { cur.unsub?.() } catch { /* 忽略 */ }
+  try { cur.holdUnsub?.() } catch { /* 忽略 */ }
   window.removeEventListener('keydown', cur.down, true)
   window.removeEventListener('keyup', cur.up, true)
   delete w[HOTKEY_MARK]
@@ -549,10 +782,32 @@ function removeHotkeyListeners(): void {
 // ==================== 生命周期 ====================
 
 /**
+ * 系统悬浮提示窗：只做「状态镜像」，不跑 ASR、不注册热键、不解析落点。
+ * 主进程把宿主窗口的 voice:state 转发成 voice:overlay-state，这里原样贴进 voiceState。
+ */
+function initVoiceOverlayMirror(storeInstance: any): void {
+  voiceStore = storeInstance
+  overlayMirror = true
+  inited = true
+  overlayStateUnsub?.()
+  overlayStateUnsub = getPlatform().events.on('voice:overlay-state', (state: any) => {
+    if (!state || typeof state !== 'object') return
+    Object.assign(voiceState, state)
+  })
+  // 请求主进程补发当前状态（悬浮窗可能比会话晚创建）
+  getPlatform().events.emit('voice:overlay-ready')
+}
+
+/**
  * 初始化（App.vue 挂载时调用一次；独立窗口各自初始化，主进程会把热键投给**当前聚焦的那个窗口**）。
  * 幂等：重复调用只更新 store、重装一次监听（先摘旧的）、重新同步快捷键。
  */
 export function initGlobalVoice(storeInstance: any): void {
+  // 系统悬浮窗：只镜像状态，绝不初始化 ASR / 热键（否则会出现第二套录音与互抢焦点）
+  if (isVoiceOverlayWindow()) {
+    initVoiceOverlayMirror(storeInstance)
+    return
+  }
   voiceStore = storeInstance
   installVoiceTargetTracking()
   installHotkeyListeners()
@@ -567,27 +822,44 @@ export function initGlobalVoice(storeInstance: any): void {
         void syncShortcut()
       },
     )
+    // 宿主状态 → 主进程 → 系统悬浮窗（只在系统级听写时显示）
+    stateWatchStop = watch(voiceState, () => publishVoiceState(), { deep: true })
+    // 悬浮窗上的「结束 / 取消」（目前整窗鼠标穿透，保留通道）
+    overlayActionUnsub = getPlatform().events.on('voice:overlay-action', (action: string) => {
+      if (action === 'stop') void stopVoice()
+      else if (action === 'cancel') cancelVoice()
+    })
   }
   void syncShortcut()
 }
 
 /** 释放（组件卸载 / 应用退出）：拆监听、销毁麦克风采集图 */
 export function disposeGlobalVoice(): void {
-  removeHotkeyListeners()
-  stopConfigWatch?.()
-  stopConfigWatch = null
-  // 刻意不注销宿主快捷键：快捷键注册在**主进程**（整个应用一份），
-  // 而本函数可能因为某个窗口（设置 / 文件窗口）关闭而被调用——那样会把主窗口的热键一起注销掉。
-  // 主进程随应用退出自然回收，改键走 syncShortcut() 的先注销再注册。
-  manager?.destroy()
-  manager = null
-  sessionTarget = null
-  pendingDeliveries = 0
-  engineIdle = true
-  if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null }
-  voiceState.phase = 'idle'
-  voiceState.partial = ''
-  voiceState.notice = ''
-  resetVoiceTargetTracking()
+  if (!overlayMirror) {
+    removeHotkeyListeners()
+    stopConfigWatch?.()
+    stopConfigWatch = null
+    // 刻意不注销宿主快捷键：快捷键注册在**主进程**（整个应用一份），
+    // 而本函数可能因为某个窗口（设置 / 文件窗口）关闭而被调用——那样会把主窗口的热键一起注销掉。
+    // 主进程随应用退出自然回收，改键走 syncShortcut() 的先注销再注册。
+    manager?.destroy()
+    manager = null
+    sessionTarget = null
+    pendingDeliveries = 0
+    engineIdle = true
+    if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null }
+    voiceState.phase = 'idle'
+    voiceState.partial = ''
+    voiceState.notice = ''
+    resetVoiceTargetTracking()
+  }
+  stateWatchStop?.()
+  stateWatchStop = null
+  overlayActionUnsub?.()
+  overlayActionUnsub = null
+  overlayStateUnsub?.()
+  overlayStateUnsub = null
+  if (publishTimer) { clearTimeout(publishTimer); publishTimer = null }
+  overlayMirror = false
   inited = false
 }

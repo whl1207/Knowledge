@@ -104,6 +104,7 @@ const emit = defineEmits<{
   (e: 'change', md: string): void
   (e: 'save'): void
   (e: 'drop-files', payload: { files: File[]; index: number }): void
+  (e: 'drop-path', payload: { path: string; index: number }): void
   (e: 'asr-toggle'): void
 }>()
 
@@ -1439,17 +1440,27 @@ async function postProcess(ids?: string[]) {
 
 // --- 文件拖入 --------------------------------------------------------------
 
+/** 文件树拖拽带的路径类型（el-tree 没有 File 对象，只能靠它传路径） */
+const AIKM_PATH_MIME = 'application/x-aikm-path'
+
 function onDragOver(e: DragEvent) {
-  if (!e.dataTransfer?.files?.length) return
+  const files = e.dataTransfer?.files
+  const hasPath = !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes(AIKM_PATH_MIME)
+  if ((!files || !files.length) && !hasPath) return
   e.preventDefault()
-  e.dataTransfer.dropEffect = 'copy'
+  e.dataTransfer!.dropEffect = 'copy'
 }
 
 function onDrop(e: DragEvent) {
   const files = e.dataTransfer?.files
-  if (!files?.length) return
+  const path = e.dataTransfer?.getData(AIKM_PATH_MIME) || ''
+  if ((!files || !files.length) && !path) return
   e.preventDefault()
-  emit('drop-files', { files: Array.from(files), index: activeIndex.value })
+  if (files && files.length) {
+    emit('drop-files', { files: Array.from(files), index: activeIndex.value })
+  } else {
+    emit('drop-path', { path, index: activeIndex.value })
+  }
 }
 
 // --- 类型菜单数据 ----------------------------------------------------------

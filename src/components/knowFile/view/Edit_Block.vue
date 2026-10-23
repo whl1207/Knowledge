@@ -235,6 +235,26 @@ const dispatchsave = () => {
 
 // 支持的图片扩展名
 const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif']
+// 图表文件也用图片语法内嵌（浏览视图会把 ![]() 渲染成图表）
+const figureExtensions = ['.drawio', '.dio']
+
+/** 拖入的路径 → 相对链接（同目录 / 子目录才用相对路径） */
+async function linkPathOf(filePath: string): Promise<string> {
+    let linkPath = filePath
+    if (data.value?.path) {
+        const relPath = await getPlatform().fs.relativePath(data.value.path, filePath)
+        if (relPath && !relPath.startsWith('../')) linkPath = relPath
+    }
+    return linkPath
+}
+
+/** 按扩展名决定用图片语法还是文件链接语法 */
+function markdownForPath(filePath: string, linkPath: string): string {
+    const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase()
+    const fileName = filePath.replace(/\\/g, '/').split('/').pop() || 'file'
+    const isImage = imageExtensions.includes(ext) || figureExtensions.includes(ext)
+    return isImage ? buildImageMarkdown(linkPath, fileName) : buildFileLinkMarkdown(linkPath, fileName)
+}
 
 // 处理拖入悬浮
 const handleEditorDragOver = (e: DragEvent) => {
@@ -276,22 +296,18 @@ const onDropFiles = async (payload: { files: File[]; index: number }) => {
     for (const file of payload.files) {
         // Electron 32 起没有 File.path：经 preload 的 webUtils 取真实路径
         const filePath = droppedFilePath(file) || file.name
-        const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase()
-        const isImage = imageExtensions.includes(ext)
-        const fileName = filePath.replace(/\\/g, '/').split('/').pop() || 'file'
-
-        let linkPath = filePath
-        if (data.value.path) {
-            const relPath = await getPlatform().fs.relativePath(data.value.path, filePath)
-            if (relPath && !relPath.startsWith('../')) {
-                linkPath = relPath
-            }
-        }
-
-        texts.push(isImage ? buildImageMarkdown(linkPath, fileName) : buildFileLinkMarkdown(linkPath, fileName))
+        texts.push(markdownForPath(filePath, await linkPathOf(filePath)))
     }
 
     beRef.value?.insertMarkdownAfter(payload.index, texts.join('\n\n'))
+    isDirty.value = true
+}
+
+// 文件树拖入（没有 File 对象，只有路径）
+const onDropPath = async (payload: { path: string; index: number }) => {
+    if (!data.value || !payload?.path) return
+    const md = markdownForPath(payload.path, await linkPathOf(payload.path))
+    beRef.value?.insertMarkdownAfter(payload.index, md)
     isDirty.value = true
 }
 
@@ -710,6 +726,7 @@ defineExpose({
                 @save="saveContent"
                 @asr-toggle="toggleASR"
                 @drop-files="onDropFiles"
+                @drop-path="onDropPath"
             />
         </div>
         <!-- 语音波动条 -->

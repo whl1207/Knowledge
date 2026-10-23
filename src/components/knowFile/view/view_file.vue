@@ -866,6 +866,8 @@ const onItemDragStart = function (e: DragEvent, item: any) {
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move'
     try { e.dataTransfer.setData('text/plain', item.path) } catch { /* ignore */ }
+    // 拖到 Markdown 编辑器时用它插入 ![]() / []()（编辑器不认 el-tree 的内部拖拽数据）
+    try { e.dataTransfer.setData('application/x-aikm-path', item.path) } catch { /* ignore */ }
   }
 }
 const onFolderDragOver = function (e: DragEvent, folder: any) {

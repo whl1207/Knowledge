@@ -1122,6 +1122,9 @@ function makeShellPort(deps: AndroidDeps): ShellPort {
     async openByApp() { /* 历史通道：新代码请用 openWithSystemApp */ },
     async registerShortcut() { return { success: false, error: 'not-supported' } },
     async unregisterShortcut() { /* 无 */ },
+    async injectSystemText() { return { success: false, error: 'not-supported' } },
+    async systemDictationStatus() { return { supported: false, error: 'not-supported' } },
+    async setAsrHoldMode() { return { success: false, supported: false, error: 'not-supported' } },
     async share(path, opts) {
       const payload = await sharePayloadOf(deps, path, opts)
       if (!payload) return { success: false, error: '文件不存在或无法共享' }

@@ -58,6 +58,7 @@
       "node_modules/sherpa-onnx-win-*/**",
       "node_modules/sherpa-onnx-linux-*/**",
       "node_modules/sherpa-onnx-darwin-*/**",
+      "node_modules/uiohook-napi/**",
       "node_modules/node-pty/**",
       "dist-electron/main/tts-worker.js",
       "dist/maps/**"
@@ -311,103 +312,159 @@
       "artifactName": "AI-KM_Mac_${version}_${arch}.${ext}",
       "fileAssociations": [
         {
-          "ext": ["kb"],
+          "ext": [
+            "kb"
+          ],
           "name": "AI-KM Knowledge Base",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["md", "markdown", "mdown", "mkd"],
+          "ext": [
+            "md",
+            "markdown",
+            "mdown",
+            "mkd"
+          ],
           "name": "Markdown Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["txt", "log"],
+          "ext": [
+            "txt",
+            "log"
+          ],
           "name": "Plain Text Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["json", "jsonc"],
+          "ext": [
+            "json",
+            "jsonc"
+          ],
           "name": "JSON Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["html", "htm"],
+          "ext": [
+            "html",
+            "htm"
+          ],
           "name": "HTML Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["css", "scss", "less"],
+          "ext": [
+            "css",
+            "scss",
+            "less"
+          ],
           "name": "Stylesheet",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["xml"],
+          "ext": [
+            "xml"
+          ],
           "name": "XML Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["yaml", "yml"],
+          "ext": [
+            "yaml",
+            "yml"
+          ],
           "name": "YAML Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["toml"],
+          "ext": [
+            "toml"
+          ],
           "name": "TOML Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["csv"],
+          "ext": [
+            "csv"
+          ],
           "name": "CSV Document",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["ts", "tsx", "vue"],
+          "ext": [
+            "ts",
+            "tsx",
+            "vue"
+          ],
           "name": "TypeScript Source File",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["java", "c", "h", "cpp", "hpp", "cs", "go", "rs", "sql"],
+          "ext": [
+            "java",
+            "c",
+            "h",
+            "cpp",
+            "hpp",
+            "cs",
+            "go",
+            "rs",
+            "sql"
+          ],
           "name": "Source Code File",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["excalidraw"],
+          "ext": [
+            "excalidraw"
+          ],
           "name": "Excalidraw Drawing",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["drawio", "dio"],
+          "ext": [
+            "drawio",
+            "dio"
+          ],
           "name": "draw.io Diagram",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["flow", "workflow"],
+          "ext": [
+            "flow",
+            "workflow"
+          ],
           "name": "AI-KM Workflow",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["data"],
+          "ext": [
+            "data"
+          ],
           "name": "AI-KM Data Canvas",
           "role": "Editor",
           "rank": "Alternate"
         },
         {
-          "ext": ["mmd", "mermaid"],
+          "ext": [
+            "mmd",
+            "mermaid"
+          ],
           "name": "Mermaid Diagram",
           "role": "Editor",
           "rank": "Alternate"
@@ -481,6 +538,7 @@
     "tsne-js": "^1.0.3",
     "turndown": "^7.2.0",
     "typescript": "^5.6.3",
+    "uiohook-napi": "^1.5.5",
     "umap-js": "^1.4.0",
     "vue-pdf-embed": "^2.1.3",
     "vuedraggable": "^4.1.0",

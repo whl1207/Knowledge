@@ -94,6 +94,21 @@ const copyBusy = ref(false)
 /** 可选倍率（按钮菜单） */
 const copyScales = COPY_SCALES
 
+// ---- 导出 PDF 预览：先看页面与方向，确认后再弹保存对话框 ----
+type PdfPagePreview = { svg: string; width?: number; height?: number }
+const pdfPreview = ref<{ filename: string; pages: PdfPagePreview[] } | null>(null)
+const pdfSaving = ref(false)
+/** 每页是否导出（与 pdfPreview.pages 同序，默认全选） */
+const pdfSelected = ref<boolean[]>([])
+/** 导出主题：默认白色，避免跟随软件深色主题导出深色背景 */
+const pdfTheme = ref<'light' | 'dark'>('light')
+const pdfSelectedCount = computed(() => pdfSelected.value.filter(Boolean).length)
+const pdfAllSelected = computed(() => pdfSelected.value.length > 0 && pdfSelected.value.every(Boolean))
+function toggleAllPdfPages() {
+  const next = !pdfAllSelected.value
+  pdfSelected.value = pdfSelected.value.map(() => next)
+}
+
 const showAiPanel = ref(false)
 const aiInput = ref('')
 const aiBusy = ref(false)
@@ -229,17 +244,31 @@ function defaultExportPath(filename: string): string {
  * 本来都会失败（浏览器下载被静默处理 / File System Access 在 Electron 未实现）——
  * 统一改走主进程原生保存对话框（IPC：drawio-export-save / -pick / -write）。
  */
+/** 打开的文件名（去扩展名）：导出 / 另存为的默认名统一用它，跟磁盘上的文件保持一致 */
+function exportBaseName(): string {
+  const n = fileName.value.replace(/\.[^.]+$/, '').trim()
+  return n || 'diagram'
+}
+
+/** 把 drawio 自己给的默认名换成「当前打开文件同名」，只保留它的扩展名 */
+function withOpenedName(name: string, fallbackExt: string): string {
+  const ext = (/\.([A-Za-z0-9]+)$/.exec(String(name || ''))?.[1] || fallbackExt).toLowerCase()
+  return `${exportBaseName()}.${ext}`
+}
+
 const exportHost: DrawioExportHost = {
   async save(p) {
     if (!hasIpc) {
       ElMessage.warning(zh.value ? '当前环境无法导出（无 Electron 主进程）' : 'Export unavailable (no Electron main process)')
       return { canceled: true }
     }
+    // 默认名跟打开的文件一致（如 架构图.drawio → 架构图.png），drawio 自己给的常常是 Page-1
+    const outName = withOpenedName(p.filename, 'drawio')
     const res = await aikmIpc
       .invoke('drawio-export-save', {
-        defaultPath: defaultExportPath(p.filename),
+        defaultPath: defaultExportPath(outName),
         title: zh.value ? '导出图表' : 'Export diagram',
-        filters: exportFilters(p.filename, zh.value),
+        filters: exportFilters(outName, zh.value),
         content: p.isBase64 ? undefined : p.data,
         base64: p.isBase64 ? p.data : undefined,
       })
@@ -261,11 +290,12 @@ const exportHost: DrawioExportHost = {
   },
   async pick(suggestedName) {
     if (!hasIpc) return null
+    const outName = withOpenedName(suggestedName, 'drawio')
     const res = await aikmIpc
       .invoke('drawio-export-pick', {
-        defaultPath: defaultExportPath(suggestedName),
+        defaultPath: defaultExportPath(outName),
         title: zh.value ? '另存为' : 'Save as',
-        filters: exportFilters(suggestedName, zh.value),
+        filters: exportFilters(outName, zh.value),
       })
       .catch((e: any) => {
         ElMessage.error((zh.value ? '打开保存对话框失败: ' : 'Save dialog failed: ') + (e?.message || e))
@@ -296,20 +326,11 @@ const exportHost: DrawioExportHost = {
       ElMessage.warning(zh.value ? '当前环境无法导出 PDF' : 'PDF export unavailable')
       return
     }
-    const res = await aikmIpc
-      .invoke('drawio-export-pdf', {
-        defaultPath: defaultExportPath(p.filename),
-        title: zh.value ? '导出为 PDF' : 'Export as PDF',
-        pages: p.pages,
-      })
-      .catch((e: any) => {
-        ElMessage.error((zh.value ? '导出 PDF 失败: ' : 'PDF export failed: ') + (e?.message || e))
-        return null
-      })
-    if (!res) return
-    if (res.canceled) ElMessage.info(zh.value ? '已取消导出' : 'Export canceled')
-    else if (res.error) ElMessage.error((zh.value ? '导出 PDF 失败: ' : 'PDF export failed: ') + res.error)
-    else ElMessage.success(zh.value ? `已导出 PDF（${res.pages ?? 1} 页）到 ${res.path}` : `PDF exported (${res.pages ?? 1} pages) to ${res.path}`)
+    // 先给预览（页面 / 方向 / 页数都看得见），确认后再弹系统保存对话框
+    const pages = p.pages as PdfPagePreview[]
+    pdfPreview.value = { filename: withOpenedName(p.filename, 'pdf'), pages }
+    pdfSelected.value = pages.map(() => true)
+    pdfTheme.value = 'light'
   },
   async print(p) {
     if (!hasIpc) return
@@ -321,6 +342,93 @@ const exportHost: DrawioExportHost = {
       })
     if (res?.error) ElMessage.error((zh.value ? '打印失败: ' : 'Print failed: ') + res.error)
   },
+}
+
+/** PDF 与预览共用的页边距（px，见主进程 buildDiagramHtml 的 pad） */
+const PDF_PAGE_PAD = 24
+
+/** 预览里每一页的真实页面尺寸（有 drawio 纸张尺寸就用它，否则 = 图形尺寸 + 两边距） */
+function pdfPageBox(pg: PdfPagePreview): { w: number; h: number } {
+  const pw = Number(pg.width) || 0
+  const ph = Number(pg.height) || 0
+  if (pw > 0 && ph > 0) return { w: pw, h: ph }
+  const svg = String(pg.svg || '')
+  const wh = /<svg\b[^>]*?\bwidth="([\d.]+)(?:px)?"[^>]*?\bheight="([\d.]+)(?:px)?"/i.exec(svg)
+  if (wh && Number(wh[1]) > 0 && Number(wh[2]) > 0) {
+    return { w: Number(wh[1]) + PDF_PAGE_PAD * 2, h: Number(wh[2]) + PDF_PAGE_PAD * 2 }
+  }
+  const vb = /viewBox="\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)\s*"/i.exec(svg)
+  if (vb && Number(vb[1]) > 0 && Number(vb[2]) > 0) {
+    return { w: Number(vb[1]) + PDF_PAGE_PAD * 2, h: Number(vb[2]) + PDF_PAGE_PAD * 2 }
+  }
+  return { w: 800 + PDF_PAGE_PAD * 2, h: 600 + PDF_PAGE_PAD * 2 }
+}
+
+/** 预览里每一页的宽高比 */
+function pdfPageRatio(pg: PdfPagePreview): string {
+  const { w, h } = pdfPageBox(pg)
+  return `${w} / ${h}`
+}
+
+/**
+ * 预览的页边距：和导出一致是 24px，但要按「预览缩放比」折算。
+ * 百分比 padding 以宽度为基准，正好等于 24 / 页宽 —— 与导出的等比例留白一致。
+ */
+function pdfPagePadding(pg: PdfPagePreview): string {
+  const { w } = pdfPageBox(pg)
+  return `${(PDF_PAGE_PAD / Math.max(1, w)) * 100}%`
+}
+
+/** 预览确认 → 真正写 PDF（系统保存对话框 → 逐页打印 → 合并） */
+async function confirmPdfExport() {
+  const p = pdfPreview.value
+  if (!p || pdfSaving.value) return
+  pdfSaving.value = true
+  try {
+    const picked = p.pages.filter((_, i) => pdfSelected.value[i])
+    if (!picked.length) {
+      ElMessage.warning(zh.value ? '至少勾选一页再导出' : 'Select at least one page to export')
+      return
+    }
+    // 预览数据放在 ref 里会被 Vue 变成 reactive Proxy，直接过 IPC 会因为「无法结构化克隆」
+    // 报 "An object could not be cloned" —— 这里重新组一遍纯对象（只带基本类型）再发。
+    const pages = picked.map((pg) => {
+      const out: { svg: string; width?: number; height?: number } = { svg: String(pg.svg || '') }
+      const w = Number(pg.width)
+      const h = Number(pg.height)
+      if (Number.isFinite(w) && w > 0) out.width = w
+      if (Number.isFinite(h) && h > 0) out.height = h
+      return out
+    })
+    const res = await aikmIpc
+      .invoke('drawio-export-pdf', {
+        defaultPath: defaultExportPath(p.filename),
+        title: zh.value ? '导出为 PDF' : 'Export as PDF',
+        pages,
+        theme: pdfTheme.value,
+      })
+      .catch((e: any) => {
+        ElMessage.error((zh.value ? '导出 PDF 失败: ' : 'PDF export failed: ') + (e?.message || e))
+        return null
+      })
+    if (!res) return
+    if (res.canceled) {
+      ElMessage.info(zh.value ? '已取消导出' : 'Export canceled')
+      return
+    }
+    if (res.error) {
+      ElMessage.error((zh.value ? '导出 PDF 失败: ' : 'PDF export failed: ') + res.error)
+      return
+    }
+    pdfPreview.value = null
+    ElMessage.success(
+      zh.value
+        ? `已导出 PDF（${res.pages ?? pages.length} 页）到 ${res.path}`
+        : `PDF exported (${res.pages ?? pages.length} pages) to ${res.path}`,
+    )
+  } finally {
+    pdfSaving.value = false
+  }
 }
 
 /** 把覆盖样式注入 iframe 文档（跨域时静默跳过，不影响功能） */
@@ -1635,6 +1743,52 @@ watch(themeKey, () => {
         </div>
       </div>
     </div>
+
+    <!-- 导出 PDF 预览：先把每一页按纸张方向画出来，确认后才会弹保存对话框 -->
+    <div v-if="pdfPreview" class="pdf-preview-mask" @click.self="pdfPreview = null">
+      <div class="pdf-preview">
+        <div class="pdf-preview-head">
+          <span>
+            <i class="fa fa-file-pdf-o"></i>
+            {{ zh ? 'PDF 预览' : 'PDF preview' }} ·
+            {{ zh ? `已选 ${pdfSelectedCount} / ${pdfPreview.pages.length} 页` : `${pdfSelectedCount} / ${pdfPreview.pages.length} selected` }}
+          </span>
+          <span class="pdf-preview-head-actions">
+            <button class="pdf-preview-link-btn" :disabled="pdfSaving" @click="toggleAllPdfPages()">
+              {{ pdfAllSelected ? (zh ? '全不选' : 'Select none') : (zh ? '全选' : 'Select all') }}
+            </button>
+            <button class="collab-close" :disabled="pdfSaving" @click="pdfPreview = null" :title="zh ? '关闭' : 'Close'">×</button>
+          </span>
+        </div>
+        <div class="pdf-preview-body">
+          <div v-for="(pg, i) in pdfPreview.pages" :key="i" class="pdf-preview-block">
+            <div
+              class="pdf-preview-page"
+              :class="{ 'is-off': !pdfSelected[i] }"
+              :style="{ aspectRatio: pdfPageRatio(pg), padding: pdfPagePadding(pg), background: pdfTheme === 'dark' ? '#1f1f1f' : '#fff' }"
+              v-html="pg.svg"
+            ></div>
+            <label class="pdf-preview-label">
+              <input v-model="pdfSelected[i]" type="checkbox" />
+              <span>{{ zh ? `第 ${i + 1} / ${pdfPreview.pages.length} 页` : `Page ${i + 1} / ${pdfPreview.pages.length}` }}</span>
+            </label>
+          </div>
+        </div>
+        <div class="pdf-preview-foot">
+          <label class="pdf-preview-theme" :title="zh ? '导出主题：白色 / 深色' : 'Export theme: light / dark'">
+            <select v-model="pdfTheme">
+              <option value="light">{{ zh ? '白色主题' : 'Light' }}</option>
+              <option value="dark">{{ zh ? '深色主题' : 'Dark' }}</option>
+            </select>
+          </label>
+          <button class="collab-mini-btn" :disabled="pdfSaving" @click="pdfPreview = null">{{ zh ? '取消' : 'Cancel' }}</button>
+          <button class="collab-primary-btn" :disabled="pdfSaving || pdfSelectedCount === 0" @click="confirmPdfExport()">
+            <i class="fa fa-download"></i>
+            {{ pdfSaving ? (zh ? '正在导出…' : 'Exporting…') : (zh ? '保存 PDF' : 'Save PDF') }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -2241,5 +2395,174 @@ watch(themeKey, () => {
 .collab-mini-btn:disabled:hover {
   border-color: var(--borderColor, #ddd);
   color: var(--fontColor, #333);
+}
+
+/* ===== 导出 PDF 预览 ===== */
+.pdf-preview-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+}
+.pdf-preview {
+  display: flex;
+  flex-direction: column;
+  width: min(900px, 100%);
+  max-height: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--backgroundColor, #fff);
+  color: var(--fontColor, #333);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.pdf-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--borderColor, #ddd);
+  background: var(--menuColor, #f5f5f5);
+}
+/* 关闭按钮是无边框的图标（.collab-close 只在 .collab-panel-head 里定义过） */
+.pdf-preview-head .collab-close {
+  background: transparent;
+  border: none;
+  color: var(--fontColor, #333);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.pdf-preview-head .collab-close:hover {
+  opacity: 1;
+}
+.pdf-preview-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pdf-preview-link-btn {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fontActiveColor, #409eff);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.pdf-preview-link-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.pdf-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  justify-content: center;
+  align-content: start;
+  gap: 12px;
+  background: var(--menuColor, #f0f0f0);
+}
+/* 窗口窄到放不下三列时再逐级降列，避免每页被压得太小 */
+@media (max-width: 720px) {
+  .pdf-preview-body {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 460px) {
+  .pdf-preview-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.pdf-preview-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pdf-preview-label {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 10px;
+  line-height: 1.3;
+  text-align: center;
+  opacity: 0.75;
+  cursor: pointer;
+  user-select: none;
+}
+.pdf-preview-label input {
+  margin: 0;
+  width: 12px;
+  height: 12px;
+  cursor: pointer;
+}
+.pdf-preview-page {
+  width: 100%;
+  box-sizing: border-box;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  transition: opacity 0.15s;
+}
+.pdf-preview-page.is-off {
+  opacity: 0.3;
+}
+.pdf-preview-page :deep(svg) {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.pdf-preview-theme {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-right: auto; /* 主题靠左，取消 / 保存靠右 */
+  font-size: 12px;
+  opacity: 0.85;
+}
+.pdf-preview-theme select {
+  height: 28px;
+  margin: 0;
+  padding: 0 6px;
+  border: 1px solid var(--borderColor, #ddd);
+  border-radius: 4px;
+  background: var(--inputColor, #fff);
+  color: var(--fontColor, #333);
+  font-size: 12px;
+}
+.pdf-preview-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--borderColor, #ddd);
+  background: var(--menuColor, #f5f5f5);
+}
+/* 面板里的主按钮是 width:100% 的（竖排表单用），放进这条横排底栏会撑满整行；
+   另外两个按钮原本字号 / 内边距不同，这里统一成同高 */
+.pdf-preview-foot .collab-primary-btn,
+.pdf-preview-foot .collab-mini-btn {
+  width: auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  height: 28px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  font-size: 12px;
 }
 </style>

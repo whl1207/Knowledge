@@ -15,7 +15,14 @@
    */
   import { computed, reactive } from 'vue'
   import { usestore } from '@/store'
-  import { cancelVoice, startVoice, stopVoice, voiceOverlayVisible, voiceState } from '@/services/asr/globalVoice'
+  import { startVoice, stopVoice, voiceOverlayVisible, voiceState } from '@/services/asr/globalVoice'
+
+  /**
+   * system=true：这是「系统级听写的独立悬浮窗」，不是应用内浮层。
+   * 它整窗鼠标穿透、不抢焦点，所以不显示可点击的结束 / 取消按钮；
+   * 结束方式改为「再按一次快捷键」，避免点击悬浮窗把前台应用切走。
+   */
+  const props = defineProps<{ system?: boolean }>()
 
   const store = usestore()
   const zh = computed(() => store.locales === 'zh')
@@ -117,39 +124,24 @@
     } catch { /* 写盘失败不影响本次隐藏 */ }
   }
 
-  /** 阶段文案 */
+  /** 阶段文案：应用内和系统悬浮窗使用同一套最短状态 */
   const title = computed(() => {
-    if (voiceState.phase === 'starting') {
-      // 首次使用要加载模型（FunASR 约 230MB），可能等一会儿；说清楚，免得看起来像卡住
-      return zh.value ? '正在启动语音输入…（首次会加载模型，可能需要一会儿）' : 'Starting voice input… (the first run loads the model, this can take a while)'
-    }
+    if (voiceState.phase === 'starting') return zh.value ? '正在启动…' : 'Starting…'
     if (voiceState.phase === 'processing') return zh.value ? '识别中…' : 'Transcribing…'
     if (voiceState.phase === 'listening') return zh.value ? '正在语音输入…' : 'Listening…'
-    return voiceState.notice || ''
+    return ''
   })
 
-  /** 落点提示：有落点说明「正在输入到：xxx」，没有则提前说清会复制到剪贴板 */
-  const targetText = computed(() => {
-    if (voiceState.phase === 'idle') return ''
-    if (voiceState.hasTarget && voiceState.targetLabel) {
-      return (zh.value ? '正在输入到：' : 'Typing into: ') + voiceState.targetLabel
-    }
-    return zh.value ? '未找到输入框：结果会复制到剪贴板' : 'No input field: the result goes to the clipboard'
-  })
+  /**
+   * 应用内是否显示面板：
+   * 系统级听写由独立悬浮窗负责（props.system=true）；应用内这一份必须隐藏，
+   * 否则 AI-KM 窗口在前台/可见时会同时出现两个面板。
+   */
+  const panelVisible = computed(() =>
+    voiceOverlayVisible.value && (props.system || voiceState.mode === 'dom')
+  )
 
-  /** 结束方式提示：与输入卡片上的麦克风按钮同一套手感（按住说话 / 短按切换） */
-  const hint = computed(() => {
-    if (voiceState.phase !== 'listening') return ''
-    return zh.value
-      ? '按住说话、松开结束；短按切换持续收音（Esc 取消）'
-      : 'Hold to talk and release to finish; tap to toggle (Esc cancels)'
-  })
 
-  /** 桌面应用在后台时探测不到松手，只能「按一次开始、再按一次结束」——单独说清楚 */
-  const hintBackground = computed(() => {
-    if (voiceState.phase !== 'listening' || voiceState.holdToTalk) return ''
-    return zh.value ? '应用在后台时：按一次开始、再按一次结束' : 'In the background: press once to start, again to finish'
-  })
 </script>
 
 <template>
@@ -157,7 +149,7 @@
   <Teleport to="body">
     <!-- 常驻悬浮麦克风（空闲时；点击=一次语音输入，按住可拖动位置，录音时换成下面的面板） -->
     <button
-      v-if="!voiceOverlayVisible && voiceState.ready && store.AIconfig?.asr?.floatButton !== false"
+      v-if="!props.system && !voiceOverlayVisible && voiceState.ready && store.AIconfig?.asr?.floatButton !== false"
       class="voice-fab"
       :class="{ dragging: dragPos.right !== null }"
       :style="fabStyle"
@@ -168,41 +160,21 @@
       <span class="voice-fab-close" :title="zh ? '不再显示悬浮麦克风（可在设置 → 语音 → 输入 里重新打开）' : 'Hide the floating mic (re-enable under Settings → Voice → ASR)'" @pointerdown.prevent.stop @click.stop="hideFloatingMic">×</span>
     </button>
 
-    <div v-if="voiceOverlayVisible" class="voice-overlay" :class="`phase-${voiceState.phase}`">
+    <div v-if="panelVisible" class="voice-overlay" :class="[`phase-${voiceState.phase}`, { 'voice-overlay-system': props.system }]">
       <div class="voice-pill">
-        <!-- 图标区：录音 = 麦克风 + 脉冲圈；识别 = 转圈 -->
+        <!-- 左侧只放一个动画：录音=跳动波形；启动/识别=转圈。不再同时出现麦克风脉冲。 -->
         <span class="voice-icon">
-          <template v-if="voiceState.phase === 'processing'">
-            <span class="voice-spin"></span>
-            <i class="fa fa-microphone voice-mic-small"></i>
-          </template>
-          <template v-else>
-            <span class="voice-pulse"></span>
-            <i class="fa fa-microphone"></i>
-          </template>
+          <span v-if="voiceState.phase === 'listening'" class="voice-wave">
+            <span v-for="i in 5" :key="i" class="voice-wave-dot" :style="{ animationDelay: (i * 0.12) + 's' }"></span>
+          </span>
+          <span v-else class="voice-spin"></span>
         </span>
 
         <div class="voice-body">
           <div class="voice-title">
             <span class="voice-title-text">{{ title }}</span>
-            <!-- 录音中的跳动波形：一眼看出麦克风在工作 -->
-            <span v-if="voiceState.phase === 'listening' || voiceState.phase === 'starting'" class="voice-wave">
-              <span v-for="i in 5" :key="i" class="voice-wave-dot" :style="{ animationDelay: (i * 0.12) + 's' }"></span>
-            </span>
           </div>
-          <div v-if="targetText" class="voice-sub">{{ targetText }}</div>
           <div v-if="voiceState.partial" class="voice-partial">{{ voiceState.partial }}</div>
-          <div v-if="hint" class="voice-hint">{{ hint }}</div>
-          <div v-if="hintBackground" class="voice-hint">{{ hintBackground }}</div>
-        </div>
-
-        <div v-if="voiceState.phase !== 'idle'" class="voice-actions">
-          <button class="voice-btn primary" @mousedown.prevent @click="stopVoice">
-            {{ zh ? '结束' : 'Finish' }}
-          </button>
-          <button class="voice-btn" @mousedown.prevent @click="cancelVoice">
-            {{ zh ? '取消' : 'Cancel' }}
-          </button>
         </div>
       </div>
     </div>
@@ -278,17 +250,28 @@
     max-width: min(560px, calc(100vw - 32px));
   }
 
+  /* 系统级听写的独立悬浮窗：组件是 Teleport 到 body 的，父容器的 deep 样式管不到，
+     所以在组件自己身上把面板压到窗口底部（窗口只有 180px 高）。 */
+  .voice-overlay.voice-overlay-system {
+    bottom: 12px;
+  }
+
+  /* 应用内与系统共用同一个小面板：固定 64px 高，只显示「左侧动画 + 状态 + 一行实时文字」。
+     文字变长时不会再把面板撑高。 */
   .voice-pill {
     pointer-events: auto;
     display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 10px 12px;
-    border-radius: 10px;
+    align-items: center;
+    gap: 8px;
+    height: 52px;
+    box-sizing: border-box;
+    padding: 6px 10px;
+    border-radius: 9px;
     background-color: var(--menuColor, #2b2b2b);
     border: 1px solid var(--fontActiveColor, #4c9aff);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     color: var(--fontColor, #eee);
+    overflow: hidden;
     animation: voice-in 0.16s ease-out;
   }
 
@@ -297,133 +280,83 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
-  /* ---- 左侧麦克风 ---- */
+  /* ---- 左侧：唯一动画位（录音=波形，启动/识别=转圈） ---- */
   .voice-icon {
     position: relative;
-    width: 26px;
-    height: 26px;
-    flex: 0 0 26px;
+    width: 22px;
+    height: 22px;
+    flex: 0 0 22px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 50%;
-    background-color: rgba(231, 76, 60, 0.15);
-    color: #e74c3c;
-    font-size: 13px;
-  }
-  .voice-pulse {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    border: 2px solid rgba(231, 76, 60, 0.7);
-    animation: voice-pulse 1.1s ease-out infinite;
-  }
-  @keyframes voice-pulse {
-    0% { transform: scale(0.9); opacity: 0.9; }
-    100% { transform: scale(1.6); opacity: 0; }
   }
   .voice-spin {
     position: absolute;
-    inset: 0;
+    inset: 1px;
     border-radius: 50%;
-    border: 2px solid rgba(255, 255, 255, 0.25);
+    border: 2px solid var(--borderColor, #555);
     border-top-color: var(--fontActiveColor, #4c9aff);
     animation: voice-spin 0.8s linear infinite;
   }
   @keyframes voice-spin {
     to { transform: rotate(360deg); }
   }
-  .voice-mic-small {
-    font-size: 9px;
-    color: var(--fontColor, #eee);
-  }
 
-  /* ---- 中间文字 ---- */
+  /* ---- 中间文字：固定两行高度，实时文字单行省略 ---- */
   .voice-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
     min-width: 0;
+    height: 100%;
     flex: 1 1 auto;
+    overflow: hidden;
   }
   .voice-title {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
-    /* 允许换行：启动阶段那句说明较长，窄窗口下不要被截断 */
-    flex-wrap: wrap;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .voice-title-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .voice-wave {
     display: inline-flex;
-    align-items: flex-end;
-    gap: 3px;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
     height: 14px;
+    width: 22px;
   }
   .voice-wave-dot {
     display: inline-block;
-    width: 3px;
-    height: 4px;
+    width: 2.5px;
+    height: 3px;
     border-radius: 2px;
     background: var(--fontActiveColor, #4c9aff);
     animation: voice-dot 0.6s ease-in-out infinite alternate;
   }
   @keyframes voice-dot {
-    0% { height: 4px; }
-    50% { height: 14px; }
-    100% { height: 4px; }
+    0% { height: 3px; }
+    50% { height: 12px; }
+    100% { height: 3px; }
   }
-  .voice-sub {
-    margin-top: 3px;
-    font-size: 11px;
-    opacity: 0.75;
+  .voice-partial {
+    margin-top: 1px;
+    font-size: 11.5px;
+    line-height: 1.3;
+    opacity: 0.95;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  /* 流式引擎的实时文字：最多两行，避免浮层被撑高 */
-  .voice-partial {
-    margin-top: 4px;
-    font-size: 12px;
-    line-height: 1.4;
-    opacity: 0.95;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .voice-hint {
-    margin-top: 4px;
-    font-size: 10px;
-    opacity: 0.6;
-    white-space: nowrap;
-  }
-
-  /* ---- 右侧按钮 ---- */
-  .voice-actions {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex: 0 0 auto;
-    padding-top: 1px;
-  }
-  .voice-btn {
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    cursor: pointer;
-    color: var(--fontColor, #eee);
-    background-color: transparent;
-    border: 1px solid var(--borderColor, #555);
-    transition: all 0.15s ease;
-  }
-  .voice-btn:hover {
-    border-color: var(--fontActiveColor, #4c9aff);
-    color: var(--fontActiveColor, #4c9aff);
-  }
-  .voice-btn.primary {
-    border-color: var(--fontActiveColor, #4c9aff);
-    color: var(--fontActiveColor, #4c9aff);
-  }
-  .voice-btn.primary:hover {
-    background-color: var(--menuActiveColor, rgba(76, 154, 255, 0.15));
+    max-height: 1.3em;
   }
 </style>

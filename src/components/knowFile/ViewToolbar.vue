@@ -2,10 +2,13 @@
 /**
  * ViewToolbar.vue — 知识管理全局视图的顶部工具栏
  *
- * 文件 / 看板 / 图谱 / 表格 / 地图 / 日历 共用同一份工具栏：最左侧的「视图选择」下拉，
- * 紧挨着「显示 / 隐藏左侧面板」开关（收起 / 展开动画由宿主 explorer.vue 负责）、
- * 后退 / 前进 / 向上 / 刷新 + 可点击的面包屑，
+ * 文件 / 看板 / 图谱 / 表格 / 地图 / 日历 共用同一份工具栏（多窗口模式下）：
+ * 最左侧是「显示 / 隐藏左侧面板」开关（收起 / 展开动画由宿主 explorer.vue 负责），
+ * 紧挨着「视图选择」下拉，再往后是后退 / 前进 / 向上 / 刷新 + 可点击的面包屑，
  * 右侧是当前目录的搜索框（各视图只负责自己的筛选逻辑，输入框样式与位置在这里统一）。
+ *
+ * 单窗口模式下右侧有标签栏（know-tabs），面板开关移到标签栏最左侧（与标签同一条），
+ * 由宿主传 showPanelToggle=false 从这里隐藏，避免两处入口重复。
  *
  * - 导航历史存在 store.knowNavStack（各视图共享一份，切视图不会丢后退能力），
  *   外部改 path（点文件树 / 打开文件）时由本组件调用 store.knowSyncNav() 重置。
@@ -31,12 +34,18 @@ const props = withDefaults(
     /** 左侧文件树面板是否展开（决定开关按钮的图标与提示） */
     panelOpen?: boolean
     /**
+     * 是否显示「显示 / 隐藏左侧面板」开关（默认显示）。
+     * 单窗口模式下开关位置在右侧标签栏最左侧（见 explorer.vue 的 know-tabs），
+     * 由宿主传 false 从这里隐藏，避免同一条界面出现两个入口。
+     */
+    showPanelToggle?: boolean
+    /**
      * 是否显示「视图选择」下拉：知识管理右侧改成标签栏后由标签负责切换视图，
      * 不再需要这个下拉（传 false），避免两套入口对不上。
      */
     showViewSelect?: boolean
   }>(),
-  { search: '', searchable: true, placeholder: '', searchTitle: '', panelOpen: true, showViewSelect: true }
+  { search: '', searchable: true, placeholder: '', searchTitle: '', panelOpen: true, showPanelToggle: true, showViewSelect: true }
 )
 const emit = defineEmits<{
   (e: 'update:search', value: string): void
@@ -80,7 +89,13 @@ onMounted(() => store.knowSyncNav())
 
 <template>
   <div class="file-toolbar">
-    <!-- 视图选择：工具栏最左侧（折叠按钮左边） -->
+    <!-- 显示 / 隐藏左侧面板：多窗口模式放在工具栏最左侧（视图选择左边）；
+         单窗口模式下这个入口在右侧标签栏最左侧（见 explorer.vue） -->
+    <button v-if="props.showPanelToggle" class="toolbar-btn panel-toggle" :class="{ active: props.panelOpen }" @click="emit('toggle-panel')"
+      :title="props.panelOpen ? (zh() ? '隐藏左侧面板' : 'Hide left panel') : (zh() ? '显示左侧面板' : 'Show left panel')">
+      <i class="fa" :class="props.panelOpen ? 'fa-outdent' : 'fa-indent'"></i>
+    </button>
+    <!-- 视图选择 -->
     <select
       v-if="showViewSelect"
       class="toolbar-view-select"
@@ -90,10 +105,6 @@ onMounted(() => store.knowSyncNav())
     >
       <option v-for="v in viewsForGrid" :key="v" :value="v">{{ viewName(v) }}</option>
     </select>
-    <button class="toolbar-btn panel-toggle" :class="{ active: props.panelOpen }" @click="emit('toggle-panel')"
-      :title="props.panelOpen ? (zh() ? '隐藏左侧面板' : 'Hide left panel') : (zh() ? '显示左侧面板' : 'Show left panel')">
-      <i class="fa" :class="props.panelOpen ? 'fa-outdent' : 'fa-indent'"></i>
-    </button>
     
     <span class="toolbar-sep sep-nav"></span>
     <div class="file-nav-btns">
@@ -151,9 +162,9 @@ onMounted(() => store.knowSyncNav())
 }
 .toolbar-btn:hover:not(:disabled) { background: var(--menuActiveColor); }
 .toolbar-btn:disabled { opacity: 0.35; cursor: default; }
-/* 「显示 / 隐藏左侧面板」开关：展开时点亮，与导航按钮之间用竖线分隔 */
+/* 「显示 / 隐藏左侧面板」开关（多窗口模式）：展开时点亮；单窗口模式下这个入口在标签栏 */
 .panel-toggle.active { color: var(--fontActiveColor); }
-/* 视图选择：工具栏最左侧；无边框、无底色，颜色与工具栏统一（融入工具栏，不抢视觉） */
+/* 视图选择：紧挨面板开关右侧；无边框、无底色，颜色与工具栏统一（融入工具栏，不抢视觉） */
 .toolbar-view-select {
   flex-shrink: 0;
   height: 26px;

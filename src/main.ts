@@ -63,6 +63,9 @@ if (typeof navigator !== 'undefined' && !navigator.clipboard?.writeText) {
   }
 }
 
+// 系统级听写的悬浮窗只渲染语音面板，不需要插件运行时 / 渲染层任务 / 全局提示
+const isVoiceOverlayWindow = window.location.hash.startsWith('#/voice-overlay')
+
 createApp(App)
   .use(pinia)
   .component(ElTree.name!, ElTree)
@@ -71,9 +74,11 @@ createApp(App)
 // 渲染层任务接缝：主进程工具（如 export_word）需要 DOM/MathJax/canvas 时
 // 经 `agent/renderer-task` 请求本窗口执行；入口初始化一次，与是否有 agent 会话无关。
 // 动态导入：任务模块会拉起导出管线（markdown-it/MathJax/OOXML），不进首屏 bundle。
-import('@/platform/rendererTasks')
-  .then((m) => m.initRendererTaskRunner())
-  .catch(() => { /* 非 Electron 环境（浏览器 dev）无 preload，忽略 */ })
+if (!isVoiceOverlayWindow) {
+  import('@/platform/rendererTasks')
+    .then((m) => m.initRendererTaskRunner())
+    .catch(() => { /* 非 Electron 环境（浏览器 dev）无 preload，忽略 */ })
+}
 
 // 插件宿主通知（ctx.host.notify → 主进程广播 plugin:notify）：仅在主窗口弹提示，
 // 设置/文件/浏览器等独立窗口不重复弹同一提示。
@@ -84,9 +89,11 @@ if (!isAuxWindowHash(window.location.hash)) {
 }
 // 插件工具同步 + 渲染层插件运行时（界面扩展装载；见 src/lib/plugin/runtime.ts）：
 // 拉取已激活插件、加载其 client 半边、把插件工具推给能力槽推导；插件停用即刻撤销。
-import('@/lib/plugin/runtime')
-  .then((m) => m.initPluginRuntime())
-  .catch(() => { /* 非 Electron 环境无 preload，忽略 */ })
+if (!isVoiceOverlayWindow) {
+  import('@/lib/plugin/runtime')
+    .then((m) => m.initPluginRuntime())
+    .catch(() => { /* 非 Electron 环境无 preload，忽略 */ })
+}
 
 
 // 等首帧绘制完成后再淡出加载层，避免深色遮罩刚移除时应用尚未绘制导致白屏

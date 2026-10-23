@@ -69,6 +69,9 @@ import { useTallLayout } from '@/composables/useTallLayout'
   // 插件面板子窗口（导航栏收纳后的启动器打开的窗口）：hash = #/plugin-panel?id=<面板 key>
   // 同样在 setup 同步阶段判定：首帧即渲染插件壳，避免先闪一帧完整主界面
   const isPluginPanelWindow = ref(typeof window !== 'undefined' && window.location.hash.startsWith('#/plugin-panel'))
+  // 系统级听写的独立悬浮窗（#/voice-overlay）：只渲染语音面板、镜像主窗口状态，
+  // 不跑 ASR、不注册热键、不初始化主界面（否则会多出一套录音并互抢焦点）。
+  const isVoiceOverlayWindow = ref(typeof window !== 'undefined' && window.location.hash.startsWith('#/voice-overlay'))
   /** 插件面板子窗口要显示的插件面板 key 与兜底标题（从 hash 解析，URL 解码） */
   const pluginPanelWindowParams = (() => {
     const hash = typeof window !== 'undefined' ? window.location.hash : ''
@@ -429,9 +432,25 @@ import { useTallLayout } from '@/composables/useTallLayout'
     isSettingsWindow.value = window.location.hash.startsWith('#/settings-window')
     // 检测是否在插件面板子窗口中
     isPluginPanelWindow.value = window.location.hash.startsWith('#/plugin-panel')
+    // 检测是否在系统级听写的悬浮提示窗中
+    isVoiceOverlayWindow.value = window.location.hash.startsWith('#/voice-overlay')
 
     // 独立窗口也需要加载配置（主题等；loadConfig 为同步动作，返回后 store.lan 已就绪）
     store.loadConfig()
+
+    // 系统悬浮窗：只需要主题 + 语音状态镜像，不能初始化主界面/服务/热键
+    if (isVoiceOverlayWindow.value) {
+      // 悬浮窗是常驻复用的：设置里改主题后必须跟着重设 CSS 变量，否则会一直用旧主题
+      getPlatform().events.on('settings-config-changed', (payload: any) => {
+        store.syncConfigFromPeers(payload?.ui, payload?.locales)
+      })
+      getPlatform().events.on('theme-changed', (payload: any) => {
+        store.applyThemeFromBroadcast(payload)
+      })
+      initGlobalVoice(store)
+      return
+    }
+
     // Qwen3-TTS 本地服务：勾了「随软件启动」且填了安装目录时，启动即静默拉起（不用再手动开 cmd）
     void store.ensureQwen3ServiceReady()
     // 生图服务（Qwen-Image-Edit-2511）：同上
@@ -846,8 +865,13 @@ import { useTallLayout } from '@/composables/useTallLayout'
 </script>
 
 <template>
+  <!-- 系统级听写悬浮窗：独立、透明、置顶、不抢焦点；样式复用应用内语音浮层 -->
+  <div v-if="isVoiceOverlayWindow" class="voice-overlay-shell">
+    <VoiceInputOverlay system />
+  </div>
+
   <!-- 文件独立窗口模式 -->
-  <FileWindow v-if="isFileWindow" style="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;" />
+  <FileWindow v-else-if="isFileWindow" style="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;" />
 
   <!-- 浏览器 Agent 独立窗口模式（地址栏/导航壳；网页内容由主进程 WebContentsView 承载于下方区域） -->
   <BrowserAgentShell v-else-if="isBrowserAgentWindow" style="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;" />
@@ -1140,11 +1164,35 @@ import { useTallLayout } from '@/composables/useTallLayout'
   <!-- exit_plan_mode 计划评审弹窗（全局唯一宿主：Approve / 继续完善 / 关闭） -->
   <PlanReviewHost />
   <!-- 全局语音输入提示（唯一的视觉元素：录音波形 / 实时文字 / 落点 / 结束与取消）。
-       放在所有窗口模式之外：主界面、文件窗口、浏览器 Agent 窗口、设置独立窗口共用同一个浮层 -->
-  <VoiceInputOverlay />
+       放在所有窗口模式之外：主界面、文件窗口、浏览器 Agent 窗口、设置独立窗口共用同一个浮层。
+       系统悬浮窗分支已经自己渲染了一份，这里不能重复挂载。 -->
+  <VoiceInputOverlay v-if="!isVoiceOverlayWindow" />
 </template>
 
 <style scoped>
+  /* 系统级听写悬浮窗：窗口本身透明、鼠标穿透，这里只负责把面板摆到底部居中。
+     面板复用 VoiceInputOverlay.vue，只覆盖定位（应用内是 fixed + bottom:92px）。 */
+  .voice-overlay-shell {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0 8px 12px;
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  .voice-overlay-shell :deep(.voice-overlay) {
+    position: static;
+    left: auto;
+    bottom: auto;
+    transform: none;
+    max-width: 100%;
+  }
+  .voice-overlay-shell :deep(.voice-fab) {
+    display: none;
+  }
+
   /* 应用内文件窗口浮层（单窗口环境）：铺满主界面，叠在设置浮层之下（设置 1500）、
      Element Plus 弹窗（2000+）之上——文件窗口里的确认框 / 提示仍需可见。 */
   .file-window-overlay {

@@ -138,9 +138,23 @@ async function releasePunc(): Promise<void> {
         // 清除 wasmPaths 避免库尝试动态加载外部 .mjs 文件
         const ortEnv = ort.env
         delete ortEnv.wasm.wasmPaths
-        session = await ort.InferenceSession.create(msg.modelPath, {
-          // 尝试用 WebGL 后端（WASM 的广播运算有限制）；若 WebGL 不可用则回退到 WASM
-          executionProviders: ['webgl', 'wasm'],
+        // 多线程仅在 crossOriginIsolated 时可用；否则 ORT 会自己退回单线程。
+        try {
+          const hc = (self as any).navigator?.hardwareConcurrency || 2
+          const isolated = typeof SharedArrayBuffer !== 'undefined' && !!(self as any).crossOriginIsolated
+          ortEnv.wasm.numThreads = isolated ? Math.min(4, Math.max(1, hc - 1)) : 1
+          ortEnv.wasm.simd = true
+        } catch { /* 忽略：不同 ORT 版本环境字段可能不存在 */ }
+        const provider = msg.provider === 'webgl' ? 'webgl' : 'wasm'
+        // 默认只用 WASM。int8 量化 Paraformer 在 WebGL 上通常没有优势，
+        // 还会因算子回退产生额外拷贝；只有用户显式选 WebGL 时才尝试。
+        const executionProviders = provider === 'webgl' ? ['webgl', 'wasm'] : ['wasm']
+        // 本地绝对路径由主线程读成字节传进来；URL 才允许直接交给 ORT fetch。
+        const source = msg.modelBytes instanceof ArrayBuffer
+          ? new Uint8Array(msg.modelBytes)
+          : msg.modelPath
+        session = await ort.InferenceSession.create(source, {
+          executionProviders,
           graphOptimizationLevel: 'all'
         })
       }

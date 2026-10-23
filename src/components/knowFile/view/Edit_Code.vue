@@ -1642,17 +1642,23 @@ const openFind = () => { editor?.getAction('actions.find')?.run() }
 
 // 支持的图片扩展名
 const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.ico', '.tiff', '.tif']
+// 图表文件也用图片语法内嵌（浏览视图会把 ![]() 渲染成图表；用链接语法只会变成可点的文件链接）
+const figureExtensions = ['.drawio', '.dio']
+// 从文件树拖过来时带的路径类型（el-tree 的拖拽不带 File 对象，只能靠它传路径）
+const AIKM_PATH_MIME = 'application/x-aikm-path'
 
 // 拖放目标位置（由 dragover 实时更新）
 let dropTargetPosition: monaco.Position | null = null
 
-// 处理拖入悬浮（仅 Markdown 模式下拦截文件拖放）
+// 处理拖入悬浮（仅 Markdown 模式下拦截文件拖放 / 文件树拖拽）
 const handleEditorDragOver = (e: DragEvent) => {
     // 非 Markdown 语言时交给 Monaco 默认处理
     if (editor?.getModel()?.getLanguageId() !== 'markdown') return
 
-    const files = e.dataTransfer?.files
-    if (!files || files.length === 0) return
+    const dt = e.dataTransfer
+    const files = dt?.files
+    const hasTreePath = !!dt && Array.from(dt.types || []).includes(AIKM_PATH_MIME)
+    if ((!files || files.length === 0) && !hasTreePath) return
 
     e.preventDefault()
     e.stopPropagation()
@@ -1691,20 +1697,22 @@ const buildFileLinkMarkdown = (filePath: string, displayName: string): string =>
     return `[${displayName}](${escapeLinkPath(filePath)})`
 }
 
-// 处理拖入文件（仅 Markdown 模式下图片转 Markdown 图片，其他文件转 Markdown 链接）
+// 处理拖入文件 / 文件树节点（仅 Markdown 模式：图片与图表转 Markdown 图片，其他文件转链接）
 const handleEditorDrop = async (e: DragEvent) => {
     if (!editor || !data.value) return
     // 非 Markdown 语言时交给 Monaco 默认处理
     if (editor.getModel()?.getLanguageId() !== 'markdown') return
 
-    const files = e.dataTransfer?.files
-    if (!files || files.length === 0) return
+    const dt = e.dataTransfer
+    const files = dt?.files
+    const treePath = dt?.getData(AIKM_PATH_MIME) || ''
+    if ((!files || files.length === 0) && !treePath) return
 
-    // 只处理单个文件拖入
-    const file = files[0]
+    // 优先用 File 对象（系统拖入），其次用文件树带来的路径
+    const file = files && files.length ? files[0] : null
     // Electron 32 起没有 File.path：经 preload 的 webUtils 取真实路径；
     // 取不到时退回文件名（只能生成一个不带目录的相对链接）
-    const filePath = droppedFilePath(file) || file.name
+    const filePath = file ? droppedFilePath(file) || file.name : treePath
 
     e.preventDefault()
     e.stopPropagation()
@@ -1715,9 +1723,9 @@ const handleEditorDrop = async (e: DragEvent) => {
     dropTargetPosition = null
     if (!dropPosition) return
 
-    // 检查是否为图片
+    // 检查是否为图片 / 图表（两者都用 ![]() 内嵌）
     const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase()
-    const isImage = imageExtensions.includes(ext)
+    const isImage = imageExtensions.includes(ext) || figureExtensions.includes(ext)
 
     // 获取文件名（不含路径）
     const fileName = filePath.replace(/\\/g, '/').split('/').pop() || 'file'

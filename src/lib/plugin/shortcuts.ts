@@ -118,7 +118,10 @@ export function formatBinding(binding: string, isMac = false): string {
   const key =
     parsed.key.length === 1
       ? parsed.key.toUpperCase()
-      : parsed.key.replace(/^arrow/, 'Arrow ').replace(/^f(\d+)$/, (m, d: string) => `F${d}`)
+      : parsed.key
+        .replace(/^arrow/, 'Arrow ')
+        .replace(/^f(\d+)$/, (m, d: string) => `F${d}`)
+        .replace(/^capslock$/, 'CapsLock')
   parts.push(key)
   return parts.join('+')
 }

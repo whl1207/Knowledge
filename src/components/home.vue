@@ -1171,35 +1171,8 @@
                 </div>
               </div>
             </div>
-            <!-- 右侧操作组：语音输入 + 发送（整组贴右下，不拉伸） -->
+            <!-- 右侧操作组：发送（语音输入统一由全局悬浮麦克风 / 快捷键负责） -->
             <div class="input-right-group">
-              <!-- 语音输入按钮 -->
-              <div 
-                v-if="showASRButton"
-                class="button asr-button"
-                :class="{ 
-                  'asr-recording': isASRRecording,
-                  'asr-processing': isASRProcessing
-                }"
-                @mousedown="onASRPress"
-                @mouseup="onASRRelease"
-                @mouseleave="onASRLeave"
-                :title="getASRButtonTitle()"
-              >
-                <!-- 录音中：波形动画 -->
-                <template v-if="isASRRecording">
-                  <span v-for="i in 5" :key="i" class="asr-wave-dot" :style="{ animationDelay: (i * 0.15) + 's' }"></span>
-                </template>
-                <!-- 识别中：旋转圆环 + 麦克风（与录音区分，避免看起来卡住） -->
-                <template v-else-if="isASRProcessing">
-                  <span class="asr-processing-wrap">
-                    <span class="asr-processing-ring"></span>
-                    <i class="fa fa-microphone asr-processing-mic"></i>
-                  </span>
-                </template>
-                <!-- 空闲：麦克风图标 -->
-                <i v-else :class="getASRIcon()"></i>
-              </div>
               <!-- 停止生成 / 发送：同一位置互斥（生成/执行中显示停止，空闲显示发送） -->
               <div 
                 v-if="showStopButton"
@@ -1318,7 +1291,7 @@ import { md, renderMarkdown, highlightCodeHtml, normalizeMermaidSource } from '@
 import { chatHistoryForRequest, compactChat, shouldCompactChat } from '@/lib/agent/chatCompact'
 import { isContextOverflowError } from '@/shared/contextBudget'
 // 输入框草稿：按聊天各自保存（读写纯函数，自测见 chatDraft.selftest.ts）
-import { readChatDraft, writeChatDraft, resolveDraftChat, joinAsrText } from '@/shared/chatDraft'
+import { readChatDraft, writeChatDraft, resolveDraftChat } from '@/shared/chatDraft'
 // 每个聊天自己的工作区 + 按工作区分组（读写纯函数，自测见 chatWorkspace.selftest.ts）
 import { groupByWorkspace, readChatWorkspace } from '@/shared/chatWorkspace'
 // 右侧栏（DSH 同款 dock）：标签页 / 宽度 / 当前标签的纯逻辑（自测见 chatDock.selftest.ts）
@@ -1926,47 +1899,6 @@ const showBranchTitles = ref(false)  // 分支树是否显示标题文字
 const isTTSSpeaking = ref(false)
 const autoScrollEnabled = ref(true)
 
-// ASR 语音输入状态
-const isASRRecording = ref(false)
-const isASRProcessing = ref(false)
-/**
- * 语音输入的出错 / 缺配置提示：统一用 ElMessage（顶部提示条），
- * 不在麦克风按钮旁边挂红色气泡——错误显示只保留这一条通道（与全局语音输入一致）。
- */
-const asrWarn = (message: string) => {
-  console.warn('[ASR] 语音输入:', message)
-  ElMessage({ type: 'warning', duration: 6000, showClose: true, message })
-}
-let asrManagerInstance: any = null
-// funasr-online 流式：实时 partial 写入输入框。记录录音开始时的输入为 base，partial 追加在其后；
-// 每完成一句（VAD/停止）把 base 前滚，避免覆盖用户已输入内容，也支持多句连续
-let asrPartialFill = false
-let asrBaseText = ''
-// 语音输入的归属聊天：进入录音时锁定当时所在的聊天。输入框内容已按聊天分开，
-// 录音过程中切到别的聊天时，识别结果仍写回原来那一栏，不会落到刚打开的新聊天里。
-let asrTargetChatId = ''
-
-/** 语音识别结果的写入目标：录音开始时的那个聊天（找不到时退回当前聊天） */
-const asrTargetChat = (): any => resolveDraftChat(chats.value, asrTargetChatId, currentChatIndex.value)
-
-/** 把识别文本写进目标聊天的草稿（输入框显示的就是当前聊天的草稿），返回写入后的草稿 */
-const applyAsrText = (text: string): string => {
-  const chat = asrTargetChat()
-  if (!chat) return text
-  chat.draft = text
-  return chat.draft
-}
-// ASR 配置跨窗口同步：设置独立窗口保存后，主窗口会整份重载配置（AIconfig 被替换成新对象），
-// 而 ASR 管理器持有的是**创建时的旧对象引用** → 录音时读不到刚设置的模型路径 / 模型目录
-// （现象：设置完语音输入必须重启才能用）。这里在 ASR 配置真正变化时把最新配置推给已有管理器。
-watch(
-  () => JSON.stringify(store.AIconfig.asr || {}),
-  (_json, prev) => {
-    if (prev === undefined) return // 首次只建立基线：管理器创建时用的就是当前配置
-    asrManagerInstance?.updateConfig?.(store.AIconfig.asr)
-  },
-  { immediate: true },
-)
 const isUserScrolling = ref(false)
 const scrollTimeout = ref<NodeJS.Timeout | null>(null)
 const messageContainer = ref<HTMLElement | null>(null)
@@ -2291,14 +2223,6 @@ const updateComposerShift = () => {
 }
 // 空态变化（发第一条消息 / 清空聊天 / 切到别的聊天）后重算位移：布局已更新再测量
 watch(isEmptyChat, () => { void nextTick(updateComposerShift) })
-
-// 是否显示 ASR 语音按钮：ONNX Whisper 本地模式下需配置模型路径否则隐藏
-const showASRButton = computed(() => {
-  if (store.AIconfig.asr.type === 'onnx-whisper' && !store.AIconfig.asr.onnx.modelPath) {
-    return false
-  }
-  return true
-})
 
 let mermaidRenderTimer: number | null = null
 let mermaidLastRunAt = 0
@@ -4640,64 +4564,6 @@ onMounted(async () => {
   // 点击外部关闭 Agent 预设选择浮层
   document.addEventListener('mousedown', onDocMouseDownForPresetPicker)
   
-  // 预初始化 ASR 管理器（必须在注册快捷键之前完成）
-  import('@/services/asr/manager').then(({ createASRManager }) => {
-    asrManagerInstance = createASRManager(store.AIconfig.asr, {
-      onResult: (result: any) => {
-        if (!result.isFinal) {
-          // 流式 partial（funasr-online）：base + 当前句实时文本
-          if (asrPartialFill) {
-            applyAsrText(asrBaseText + result.text)
-          }
-          return
-        }
-        if (asrPartialFill) {
-          // 本句完成：base + 最终文本，并作为下一句的 base（VAD 多句/停止都走这里）
-          asrBaseText = applyAsrText(asrBaseText + result.text)
-        } else {
-          // 非流式：接着已有草稿往后写（连续两句之间补空格）
-          applyAsrText(joinAsrText(asrTargetChat()?.draft ?? '', result.text))
-        }
-        // 识别结果写回的是「进入录音时那个聊天」的草稿；只有在那个聊天还开着时才自动发送
-        if (store.AIconfig.asr.autoSend && (!asrTargetChatId || currentChat.value?.id === asrTargetChatId)) {
-          setTimeout(() => sendMessage(), 100)
-        }
-      },
-      onStatusChange: (status: string) => {
-        if (status === 'idle') {
-          isASRRecording.value = false
-          isASRProcessing.value = false
-          asrPartialFill = false
-        } else if (status === 'listening') {
-          isASRRecording.value = true
-          isASRProcessing.value = false
-        } else if (status === 'processing') {
-          isASRRecording.value = false
-          isASRProcessing.value = true
-        } else if (status === 'error') {
-          isASRRecording.value = false
-          isASRProcessing.value = false
-        }
-      },
-      onError: (error: string) => {
-        isASRRecording.value = false
-        isASRProcessing.value = false
-        asrPartialFill = false
-        // 语音输入的错误 / 缺配置统一用 ElMessage 提示（不在输入框旁边挂红色气泡）
-        asrWarn(error)
-      }
-    })
-
-    // 预热音频采集图（不加载模型）：消除按住录音时开头几秒丢失的问题；失败静默
-    asrManagerInstance.warmup?.().catch(() => {})
-
-    // 不预加载模型，点击录音按钮后再加载
-
-    // 注意：这里**不再**监听 / 注册 ASR 全局快捷键。
-    // 全局语音输入已收敛为一处（App.vue → services/asr/globalVoice.ts）：热键由它统一接管，
-    // 按录音开始时的焦点决定落点（聊天输入框 / 搜索框 / 设置字段…），并统一显示提示浮层。
-    // 本组件保留自己的麦克风按钮（按钮走的是本组件这套「按聊天草稿」的输入逻辑，二者互不干扰）。
-  })
 })
 
 onBeforeUnmount(() => {
@@ -4732,12 +4598,7 @@ onBeforeUnmount(() => {
   unsubAgentStepEvents?.()
   unsubAgentStepEvents = null
   
-  // 清理 ASR（本组件自己的麦克风按钮用的实例）
-  if (asrManagerInstance) {
-    asrManagerInstance.destroy()
-    asrManagerInstance = null
-  }
-  // 全局快捷键由 App.vue 的全局语音输入负责注销（切模块 / 换面板都不该让热键失效）
+  // 语音输入统一由 App.vue 的全局语音输入负责（麦克风 / 热键 / ASR 实例）
 })
 
 // ==================== 技能相关函数 ====================
@@ -8935,115 +8796,6 @@ const exportChatToKb = async (messageIndex?: number | null) => {
     ElMessage.error(store.locales=='zh' ? '导出失败: ' + error.message : 'Export failed: ' + error.message)
   }
 }
-
-// ================ ASR 语音输入 ================
-
-// 获取 ASR 按钮图标
-const getASRIcon = () => {
-  if (isASRProcessing.value) return 'fa fa-spinner fa-spin'
-  if (isASRRecording.value) return 'fa fa-microphone fa-fade'
-  return 'fa fa-microphone'
-}
-
-// 获取 ASR 按钮标题
-const getASRButtonTitle = () => {
-  if (isASRRecording.value) {
-    return store.locales === 'zh' ? '录音中，松开以识别' : 'Recording, release to transcribe'
-  }
-  if (isASRProcessing.value) {
-    return store.locales === 'zh' ? '识别中...' : 'Transcribing...'
-  }
-  return store.locales === 'zh' ? '单击切换·按住说话（语音输入）' : 'Click toggle · Hold to talk (Voice Input)'
-}
-
-let asrPressStartTime = 0
-let asrWasRecordingBeforePress = false
-let asrPointerDown = false // 指针是否仍按在按钮上（区分“按住说话”与“单击切换”）
-const ASR_CLICK_THRESHOLD = 300 // 毫秒，短按视为点击
-
-// 按下按钮（立即录音，不等待模型加载）
-function onASRPress() {
-  asrPointerDown = true
-  asrPressStartTime = Date.now()
-  // 记录按下前的录音状态：短按（单击）切换判断以此为准，
-  // 避免 start() 异步置位 isASRRecording 导致松开时误判为“正在录音”而立刻停止
-  asrWasRecordingBeforePress = isASRRecording.value || isASRProcessing.value
-  
-  if (isASRRecording.value || isASRProcessing.value) return
-  
-  if (!asrManagerInstance) {
-    console.warn('[ASR] 管理器尚未初始化')
-    return
-  }
-  
-  asrManagerInstance.start()
-}
-
-// 松开按钮
-function onASRRelease() {
-  asrPointerDown = false
-  const pressDuration = Date.now() - asrPressStartTime
-  
-  if (pressDuration < ASR_CLICK_THRESHOLD) {
-    // 短按（单击）→ 切换持续收音：
-    // 按下前已在录音/识别 → 关闭（停止）；否则保持 onASRPress 启动的录音（开启）
-    if (asrWasRecordingBeforePress) {
-      stopASR()
-    }
-  } else {
-    // 长按（按住说话）→ 松开停止
-    stopASR()
-  }
-}
-
-// 移出按钮：仅“按住说话”且拖出时取消录音；
-// 单击切换开启的持续收音（指针已松开）移开鼠标不停止
-function onASRLeave() {
-  if (!asrPointerDown) return
-  asrPointerDown = false
-  if (isASRRecording.value) {
-    if (asrManagerInstance) {
-      asrManagerInstance.abort()
-    }
-    isASRRecording.value = false
-    asrPartialFill = false
-  }
-}
-
-// 开始语音识别
-function startASR() {
-  if (isASRRecording.value || isASRProcessing.value) return
-  
-  if (!asrManagerInstance) {
-    console.warn('[ASR] 管理器尚未初始化')
-    return
-  }
-  
-  // 流式引擎（funasr-online；或 Qwen3-ASR 的分段准流式）：
-  // 记录录音开始时的输入为 base（后续片段追加其后，不覆盖已输入）
-  // 输入框内容按聊天分开：这里同时锁定「本次录音写回哪个聊天」
-  asrTargetChatId = currentChat.value?.id ?? ''
-  asrPartialFill = store.AIconfig.asr.type === 'funasr-online'
-    || (store.AIconfig.asr.type === 'qwen3-asr' && store.AIconfig.asr.qwen3.mode === 'segment')
-  if (asrPartialFill) asrBaseText = currentChat.value?.draft ?? ''
-  asrManagerInstance.start()
-}
-
-// 停止语音识别
-async function stopASR() {
-  if (!isASRRecording.value) return
-  isASRProcessing.value = true
-  
-  if (asrManagerInstance) {
-    await asrManagerInstance.stop()
-  }
-  
-  asrPartialFill = false
-  isASRProcessing.value = false
-}
-
-// 注册/更新 ASR 全局快捷键：已收敛到全局语音输入（services/asr/globalVoice.ts），
-// 本组件不再注册，避免两个入口抢同一个热键 / 重复开麦克风。
 
 const toggleSidebar = () => {
   // 细长布局：列表与对话各占满整屏，bars 只承担「回到聊天列表」这一个方向
@@ -13604,90 +13356,6 @@ select {
   padding: 0;
   background: var(--borderColor);
   border-radius: 0;
-}
-
-/* ASR 语音输入按钮 */
-.asr-button {
-  transition: all 0.2s ease;
-  min-width: 30px; /* 略微加宽，容纳波形动画 */
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-
-/* 录音/识别中的波形动画条（参照编辑视图 asr-wave-wrap） */
-.asr-wave-dot {
-  display: inline-block;
-  width: 3px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--fontActiveColor);
-  animation: asr-dot-bounce 0.6s ease-in-out infinite alternate;
-}
-@keyframes asr-dot-bounce {
-  0%   { height: 4px; }
-  50%  { height: 14px; }
-  100% { height: 4px; }
-}
-
-/* ASR 出错 / 缺配置的提示已统一改为 ElMessage（见 asrWarn），这里不再有红色气泡样式 */
-
-.asr-button.asr-recording {
-  animation: asr-pulse 1.2s ease-in-out infinite;
-}
-
-.asr-button.asr-processing {
-  color: var(--fontColor) !important;
-  border-color: var(--fontActiveColor) !important;
-}
-
-/* 识别中：旋转圆环 + 麦克风（处理动画，避免看起来卡住） */
-.asr-processing-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-}
-.asr-processing-ring {
-  position: absolute;
-  inset: 0;
-  border: 2px solid rgba(255, 255, 255, 0.35);
-  border-top-color: var(--fontColor);
-  border-radius: 50%;
-  animation: asr-ring-spin 0.8s linear infinite;
-}
-.asr-processing-mic {
-  font-size: 9px;
-  color: var(--fontColor);
-}
-@keyframes asr-ring-spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes asr-pulse {
-  0%, 100% {
-    transform: scale(1);
-    box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.4);
-  }
-  50% {
-    transform: scale(1.05);
-    box-shadow: 0 0 0 6px rgba(231, 76, 60, 0);
-  }
-}
-
-/* fa-fade 动画覆盖 */
-.fa-fade {
-  animation: fa-fade 1.2s ease-in-out infinite;
-}
-
-@keyframes fa-fade {
-  0% { opacity: 1; }
-  50% { opacity: 0.4; }
-  100% { opacity: 1; }
 }
 
 

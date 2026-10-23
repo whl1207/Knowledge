@@ -276,30 +276,34 @@ export function installDrawioExportBridge(
     return out
   }
 
-  // ③ 「导出为 → PDF」：drawio 在浏览器/Electron 下会把 SVG 上传到它的云端导出服务换 PDF
-  //    （离线直接失败），改为走宿主本地打印通道（隐藏窗口 + printToPDF）。
-  //    多页图表逐页取 SVG → 每页单独打印 → pdf-lib 合并（一次调用只出一份多页 PDF）。
+  // ③ 「导出为 → PDF」：drawio 在离线 / 无法用云端导出服务时，exportPdf 动作会把
+  //    showPrintDialog 的 callback 置空、退回 window.print() —— 在 Electron 里就是那个
+  //    「ELECTRON / 此应用不支持打印预览」的空窗口。这里统一改走宿主本地通道：
+  //    逐页取 SVG → 预览 → printToPDF → pdf-lib 合并成一份多页 PDF。
   const UI2 = w.EditorUi
+  const exportPdf = (ui: any) => {
+    if (state.pdfBusy) return
+    state.pdfBusy = true
+    const filename = baseName(ui) + '.pdf'
+    void collectPages(ui)
+      .then((pages) => {
+        if (!pages.length) {
+          log('PDF 导出失败：未能获取图表 SVG')
+          return
+        }
+        return host.pdf({ filename, pages })
+      })
+      .finally(() => {
+        state.pdfBusy = false
+      })
+  }
+
   if (UI2 && UI2.prototype && typeof UI2.prototype.downloadFile === 'function' && !UI2.prototype[PDF_FLAG]) {
     const original = UI2.prototype.downloadFile
     UI2.prototype.downloadFile = function (format: string, ...rest: any[]) {
       state.ui = this
       if (String(format) === 'pdf') {
-        if (state.pdfBusy) return
-        state.pdfBusy = true
-        const ui = this
-        const filename = baseName(ui) + '.pdf'
-        void collectPages(ui)
-          .then((pages) => {
-            if (!pages.length) {
-              log('PDF 导出失败：未能获取图表 SVG')
-              return
-            }
-            return host.pdf({ filename, pages })
-          })
-          .finally(() => {
-            state.pdfBusy = false
-          })
+        exportPdf(this)
         return
       }
       return original.apply(this, [format, ...rest])
@@ -308,12 +312,23 @@ export function installDrawioExportBridge(
     patched++
   }
 
-  // ④ 「文件 → 打印」：drawio 在浏览器里靠 window.print()（Electron 下什么都不发生，也没法在
-  //    window.print 里拿到 EditorUi 实例）→ 直接在 showPrintDialog 上拦截“本地打印”分支
+  // ④ showPrintDialog 同时承担「导出为 PDF」和「文件 → 打印」两条入口：
+  //    - 标题是 formatPdf → 无论 callback 有没有都走本地 PDF 通道（预览 + 合并）；
+  //    - 其余（真正的打印）→ 仍走窗口打印。
   if (UI2 && UI2.prototype && typeof UI2.prototype.showPrintDialog === 'function' && !UI2.prototype[PRINT_FLAG]) {
     const origPrintDialog = UI2.prototype.showPrintDialog
     UI2.prototype.showPrintDialog = function (title: string, callback?: any) {
       state.ui = this
+      let pdfTitle = ''
+      try {
+        pdfTitle = String(w.mxResources?.get?.('formatPdf') || '')
+      } catch {
+        /* ignore */
+      }
+      if (pdfTitle && (String(title || '') === pdfTitle || String(title || '').trim().toUpperCase() === 'PDF')) {
+        exportPdf(this)
+        return
+      }
       // callback 为空 = drawio 准备走 window.print()（浏览器打印 / 另存为 PDF）
       if (callback == null) {
         const svg = currentSvg(this)

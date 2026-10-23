@@ -719,8 +719,11 @@ class OnnxWhisperRecognizer {
   // 初始化 ONNX Runtime 和加载模型
   async init() {
     if (this.initPromise) return this.initPromise
-    
-    this.initPromise = this._init()
+    // 失败后清掉缓存的 Promise：否则用户换了模型/修好文件后仍会反复拿到同一个 rejected Promise
+    this.initPromise = this._init().catch((e) => {
+      this.initPromise = null
+      throw e
+    })
     return this.initPromise
   }
 
@@ -733,8 +736,11 @@ class OnnxWhisperRecognizer {
         throw new Error('未设置 ONNX 模型路径，请在设置中配置')
       }
 
-      // 在 Web Worker 中加载 onnxruntime-web 并创建推理会话（不阻塞主线程）
-      const info = await this.initSessionInWorker(modelPath)
+      // 在 Web Worker 中加载 onnxruntime-web 并创建推理会话（不阻塞主线程）。
+      // 关键：不能把 Windows 绝对路径直接交给 ORT —— worker 里 fetch(file:///D:/...) 会报
+      // “Failed to fetch”。这里先在渲染层把模型读成字节，再零拷贝转移给 worker。
+      const modelBytes = await this.readModelBytes(modelPath)
+      const info = await this.initSessionInWorker(modelPath, modelBytes)
       this.inputNames = info.inputNames || []
       this.outputNames = info.outputNames || []
       this.inputMetadata = info.inputMetadata || {}
@@ -817,10 +823,40 @@ class OnnxWhisperRecognizer {
     })
   }
 
+  /**
+   * 读取本地 ONNX 模型字节。
+   * URL（http/file/blob）仍交给 ORT 自己 fetch；本地绝对路径必须读成字节，
+   * 否则 worker 内的 fetch 不支持 file://，会直接抛 “Failed to fetch”。
+   */
+  private async readModelBytes(modelPath: string): Promise<ArrayBuffer | null> {
+    if (/^(https?|file|blob):/i.test(modelPath)) return null
+    if (!hasCapability('fs.pathRead')) return null
+    let bytes: Uint8Array | null = null
+    try {
+      bytes = await getPlatform().fs.readBinary(modelPath)
+    } catch (e: any) {
+      throw new Error(`读取 ONNX 模型失败（${modelPath}）：${e?.message || e}`)
+    }
+    if (!bytes || bytes.byteLength === 0) {
+      throw new Error(`读取 ONNX 模型失败（${modelPath}）：文件为空或不存在`)
+    }
+    // 只有整块 buffer 才直接转移；否则切出干净的一段
+    if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+      return bytes.buffer
+    }
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  }
+
   // 在 worker 中创建 ONNX session（成功后缓存，供后续复用）
-  private initSessionInWorker(modelPath: string): Promise<any> {
+  private initSessionInWorker(modelPath: string, modelBytes: ArrayBuffer | null = null): Promise<any> {
     if (this.sessionInitPromise) return this.sessionInitPromise
-    this.sessionInitPromise = this.requestWorker('init', { modelPath }).catch((e) => {
+    const payload: any = { modelPath, provider: this.config.onnx?.provider || 'wasm' }
+    const transfer: Transferable[] = []
+    if (modelBytes) {
+      payload.modelBytes = modelBytes
+      transfer.push(modelBytes)
+    }
+    this.sessionInitPromise = this.requestWorker('init', payload, transfer).catch((e) => {
       this.sessionInitPromise = null
       throw e
     })
@@ -1015,11 +1051,12 @@ class OnnxWhisperRecognizer {
       // 1. 音频预处理 - 重采样到 16kHz
       const resampled = this.resampleAudio(audioData, this.SAMPLE_RATE)
       
-      // 2. 提取 80 维 Mel 频谱特征
-      // 样本范围：Paraformer/SenseVoice 期望 [-32768, 32767]（sherpa-onnx normalize_samples=0，需 ×32768），
-      // Whisper 期望 [-1,1]，保持原样
-      const modelPathLower = this.config.onnx.modelPath.toLowerCase()
-      const sampleScale = modelPathLower.includes('whisper') ? 1 : 32768
+      // 2. 提取 80 维 fbank 特征。
+      // FunASR / sherpa-onnx 的 Paraformer、SenseVoice 前端都吃 [-1,1] 的浮点波形；
+      // 该模型的 am.mvn 均值约 -8~-15，也证明训练特征来自 [-1,1]。
+      // 之前这里对非 Whisper 乘了 32768，整体特征被放大 10 万倍，CMVN 后完全偏离训练分布，
+      // 这是「同一个模型、同一段音频，精度差很多」的核心原因。
+      const sampleScale = 1
       const melSpectrogram = this.computeMelSpectrogram(resampled, sampleScale)
       const nMels = 80
       const numFrames = Math.floor(melSpectrogram.length / nMels)
@@ -1221,10 +1258,16 @@ class OnnxWhisperRecognizer {
   }
 
   // 加载 tokenizer（优先 tokens.txt，回退 FunASR 的 tokens.json）
+  /** 模型同目录文件（统一用 /，Windows 与 Linux 都可用；避免写死反斜杠） */
+  private siblingModelFile(modelPath: string, file: string): string {
+    const normalized = modelPath.replace(/\\/g, '/')
+    const idx = normalized.lastIndexOf('/')
+    return idx >= 0 ? `${normalized.substring(0, idx)}/${file}` : file
+  }
+
   private async loadTokenizer(modelPath: string): Promise<void> {
     try {
-      const sepIdx = Math.max(modelPath.lastIndexOf('\\'), modelPath.lastIndexOf('/'))
-      const modelDir = modelPath.substring(0, sepIdx)
+      const modelDir = this.siblingModelFile(modelPath, '').replace(/\/$/, '')
       const readLocal = async (file: string): Promise<string> => {
         if (!hasCapability('fs.pathRead')) throw new Error('非 Electron 环境')
         return await getPlatform().fs.readText(file)
@@ -1238,7 +1281,7 @@ class OnnxWhisperRecognizer {
 
       // ① tokens.txt（sherpa-onnx 导出）
       try {
-        const content = await readLocalContent(modelDir + '\\tokens.txt')
+        const content = await readLocalContent(`${modelDir}/tokens.txt`)
         if (content) {
           this.parseTxtTokenizer(content)
           console.log(`[ONNX-ASR] tokenizer(tokens.txt) 已加载: ${this.tokenMap.size} 个 token`)
@@ -1248,7 +1291,7 @@ class OnnxWhisperRecognizer {
 
       // ② tokens.json（FunASR 原生导出，如 iic SenseVoiceSmall-onnx）
       try {
-        const json = await readLocalContent(modelDir + '\\tokens.json')
+        const json = await readLocalContent(`${modelDir}/tokens.json`)
         if (json) {
           this.parseJsonTokenizer(json)
           console.log(`[ONNX-ASR] tokenizer(tokens.json) 已加载: ${this.tokenMap.size} 个 token`)
@@ -1395,9 +1438,7 @@ class OnnxWhisperRecognizer {
   // 加载 CMVN 归一化参数（Kaldi 文本格式，兼容单行/跨行/带标签行）
   private async loadMVN(modelPath: string): Promise<void> {
     try {
-      const sepIdx = Math.max(modelPath.lastIndexOf('\\'), modelPath.lastIndexOf('/'))
-      const modelDir = sepIdx >= 0 ? modelPath.substring(0, sepIdx) : ''
-      const mvnPath = modelDir + '\\am.mvn'
+      const mvnPath = this.siblingModelFile(modelPath, 'am.mvn')
       
       let content: string
       if (hasCapability('fs.pathRead')) {
@@ -1480,22 +1521,30 @@ class OnnxWhisperRecognizer {
     }
   }
 
-  // 上下文拼接（LFR：前向 7 帧窗口、步长 6，与 sherpa-onnx ApplyLfr 一致）：80 维 → 560 维 + CMVN 归一化
+  // 上下文拼接（LFR：前向 7 帧窗口、步长 6）：80 维 → 560 维 + CMVN 归一化。
+  // 必须与 FunASR 的 apply_lfr 一致：左侧补 (lfr_m-1)//2 帧首帧，右侧不足时补末帧，
+  // 输出帧数 = ceil(T / lfr_n)。旧实现直接 floor((T-7)/6)+1，会丢开头并整体错位，
+  // 这是同一模型识别精度明显变差的原因之一。
   private spliceContext(melData: Float32Array, numFrames: number, featDim: number): Float32Array {
     const windowSize = 7   // lfr_m
     const windowShift = 6  // lfr_n
     const outDim = windowSize * featDim // 560
-    const numOutFrames = numFrames >= windowSize
-      ? Math.floor((numFrames - windowSize) / windowShift) + 1
-      : 0
+    if (numFrames <= 0) return new Float32Array(0)
+
+    const leftPad = Math.floor((windowSize - 1) / 2) // 3
+    const numOutFrames = Math.ceil(numFrames / windowShift)
     const result = new Float32Array(numOutFrames * outDim)
-    
+
     for (let f = 0; f < numOutFrames; f++) {
-      const srcStart = f * windowShift
       for (let c = 0; c < windowSize; c++) {
-        const srcFrame = srcStart + c
+        // 左补首帧 / 右补末帧（clamp），与 FunASR 的 padding 逻辑等价
+        let srcFrame = f * windowShift + c - leftPad
+        if (srcFrame < 0) srcFrame = 0
+        else if (srcFrame >= numFrames) srcFrame = numFrames - 1
+        const srcBase = srcFrame * featDim
+        const dstBase = f * outDim + c * featDim
         for (let m = 0; m < featDim; m++) {
-          result[f * outDim + c * featDim + m] = melData[srcFrame * featDim + m]
+          result[dstBase + m] = melData[srcBase + m]
         }
       }
     }
@@ -1517,9 +1566,47 @@ class OnnxWhisperRecognizer {
     return audioData
   }
 
-  // 计算 Mel 频谱图（使用 Mel 滤波器组）
-  // sampleScale：Paraformer/SenseVoice 传 32768（样本转 [-32768, 32767]），Whisper 传 1
-  private computeMelSpectrogram(audioData: Float32Array, sampleScale = 32768): Float32Array {
+  // 迭代式 radix-2 FFT（原地）。旧实现用双重循环算每个频点的 DFT，
+  // 每帧约 512×257 次三角运算，10 秒音频就要上亿次——这是 ONNX 本地识别慢的主因之一。
+  private fftInPlace(re: Float32Array, im: Float32Array): void {
+    const n = re.length
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1
+      for (; j & bit; bit >>= 1) j ^= bit
+      j ^= bit
+      if (i < j) {
+        const tr = re[i]; re[i] = re[j]; re[j] = tr
+        const ti = im[i]; im[i] = im[j]; im[j] = ti
+      }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = -2 * Math.PI / len
+      const wRe = Math.cos(ang)
+      const wIm = Math.sin(ang)
+      const half = len >> 1
+      for (let i = 0; i < n; i += len) {
+        let curRe = 1
+        let curIm = 0
+        for (let j = 0; j < half; j++) {
+          const a = i + j
+          const b = a + half
+          const vRe = re[b] * curRe - im[b] * curIm
+          const vIm = re[b] * curIm + im[b] * curRe
+          re[b] = re[a] - vRe
+          im[b] = im[a] - vIm
+          re[a] += vRe
+          im[a] += vIm
+          const nextRe = curRe * wRe - curIm * wIm
+          curIm = curRe * wIm + curIm * wRe
+          curRe = nextRe
+        }
+      }
+    }
+  }
+
+  // 计算 Mel 频谱图（Kaldi/fbank 风格：去直流、预加重、Hamming 窗、功率谱、80 维 log-mel）
+  // audioData 为 [-1,1] 浮点波形；sampleScale 仅用于特殊模型做额外缩放，默认 1。
+  private computeMelSpectrogram(audioData: Float32Array, sampleScale = 1): Float32Array {
     const sampleRate = this.SAMPLE_RATE
     const frameLength = 400  // 25ms @ 16kHz
     const hopLength = 160    // 10ms @ 16kHz
@@ -1527,32 +1614,23 @@ class OnnxWhisperRecognizer {
     const nMels = 80
     const lowHz = 20
     const highHz = 7600
-    
+    const preemph = 0.97
+
     const numFrames = Math.floor((audioData.length - frameLength) / hopLength) + 1
     if (numFrames <= 0) return new Float32Array(0)
-    
-    // 构建 Mel 滤波器组
-    // 将 Hz 转换为 Mel: mel = 2595 * log10(1 + hz/700)
+
+    // Mel 滤波器组：mel = 2595 * log10(1 + hz/700)
     const melLow = 2595 * Math.log10(1 + lowHz / 700)
     const melHigh = 2595 * Math.log10(1 + highHz / 700)
-    const melPoints = new Float32Array(nMels + 2)
-    for (let i = 0; i < nMels + 2; i++) {
-      melPoints[i] = melLow + (melHigh - melLow) / (nMels + 1) * i
-    }
-    
-    // Mel → Hz: hz = 700 * (10^(mel/2595) - 1)
     const hzPoints = new Float32Array(nMels + 2)
     for (let i = 0; i < nMels + 2; i++) {
-      hzPoints[i] = 700 * (Math.pow(10, melPoints[i] / 2595) - 1)
+      const mel = melLow + (melHigh - melLow) / (nMels + 1) * i
+      hzPoints[i] = 700 * (Math.pow(10, mel / 2595) - 1)
     }
-    
-    // Hz → FFT bin index
     const binPoints = new Float32Array(nMels + 2)
     for (let i = 0; i < nMels + 2; i++) {
       binPoints[i] = Math.floor((fftSize + 1) * hzPoints[i] / sampleRate)
     }
-    
-    // 构建三角滤波器权重
     const filterWeights: { start: number; center: number; end: number }[] = []
     for (let m = 0; m < nMels; m++) {
       filterWeights.push({
@@ -1561,43 +1639,50 @@ class OnnxWhisperRecognizer {
         end: binPoints[m + 2]
       })
     }
-    
-    // Hamming 窗（与 sherpa-onnx 一致）
-    const hannWindow = new Float32Array(frameLength)
+
+    // 该 Paraformer 模型的 config.yaml: window=hamming、n_mels=80、25/10ms
+    const window = new Float32Array(frameLength)
     for (let i = 0; i < frameLength; i++) {
-      hannWindow[i] = 0.54 - 0.46 * Math.cos(2 * Math.PI * i / (frameLength - 1))
+      window[i] = 0.54 - 0.46 * Math.cos(2 * Math.PI * i / (frameLength - 1))
     }
-    
+
+    const re = new Float32Array(fftSize)
+    const im = new Float32Array(fftSize)
+    const powerSpec = new Float32Array(fftSize / 2 + 1)
     const melSpectrogram = new Float32Array(numFrames * nMels)
-    
+
     for (let frame = 0; frame < numFrames; frame++) {
       const start = frame * hopLength
-      
-      // 加窗并零填充到 fftSize
-      const windowed = new Float32Array(fftSize)
+
+      // 1) 取一帧并去直流（Kaldi remove_dc_offset=true）
+      let mean = 0
       for (let i = 0; i < frameLength; i++) {
-        if (start + i < audioData.length) {
-          windowed[i] = audioData[start + i] * sampleScale * hannWindow[i]
-        }
+        const v = audioData[start + i] * sampleScale
+        re[i] = v
+        mean += v
       }
-      
-      // 计算功率谱（每个 FFT bin 的 |DFT|^2）
-      const powerSpec = new Float32Array(fftSize / 2 + 1)
+      mean /= frameLength
+      for (let i = 0; i < frameLength; i++) re[i] -= mean
+
+      // 2) 预加重（Kaldi preemph_coeff=0.97）
+      for (let i = frameLength - 1; i > 0; i--) re[i] -= preemph * re[i - 1]
+      re[0] -= preemph * re[0]
+
+      // 3) 加窗 + 零填充
+      for (let i = 0; i < frameLength; i++) re[i] *= window[i]
+      for (let i = frameLength; i < fftSize; i++) re[i] = 0
+      im.fill(0)
+
+      // 4) FFT → 功率谱
+      this.fftInPlace(re, im)
       for (let k = 0; k <= fftSize / 2; k++) {
-        let real = 0, imag = 0
-        for (let i = 0; i < fftSize; i++) {
-          const angle = -2 * Math.PI * k * i / fftSize
-          real += windowed[i] * Math.cos(angle)
-          imag += windowed[i] * Math.sin(angle)
-        }
-        powerSpec[k] = real * real + imag * imag
+        powerSpec[k] = re[k] * re[k] + im[k] * im[k]
       }
-      
-      // 应用 Mel 滤波器组到功率谱
+
+      // 5) Mel 滤波 + log
       for (let mel = 0; mel < nMels; mel++) {
         const { start: fStart, center: fCenter, end: fEnd } = filterWeights[mel]
         let energy = 0
-        
         for (let k = Math.ceil(fStart); k <= Math.floor(fEnd) && k < powerSpec.length; k++) {
           let weight = 0
           if (k <= fCenter) {
@@ -1607,11 +1692,10 @@ class OnnxWhisperRecognizer {
           }
           energy += powerSpec[k] * weight
         }
-        
         melSpectrogram[frame * nMels + mel] = Math.log(Math.max(energy, 1e-10))
       }
     }
-    
+
     return melSpectrogram
   }
 

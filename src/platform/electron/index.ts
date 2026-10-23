@@ -45,6 +45,7 @@ const MODES: Record<CapabilityId, CapabilityMode> = {
   'window.chrome': 'local',
   'shell.systemOpen': 'local',
   'shell.globalShortcut': 'local',
+  'shell.systemInput': 'local',
   'app.shell': 'local',
   'events.bus': 'local',
   'host.lanShare': 'local',
@@ -460,6 +461,24 @@ const shellPort: ShellPort = {
 
   async unregisterShortcut() {
     await ipc()?.invoke('unregisterASRShortcut')
+  },
+
+  async injectSystemText(text, opts) {
+    const api = ipc()
+    if (!api?.invoke) return { success: false, error: 'IPC 不可用（请在 Electron 中运行）' }
+    return api.invoke('system-dictation:inject', { text, restoreClipboard: opts?.restoreClipboard !== false })
+  },
+
+  async systemDictationStatus() {
+    const api = ipc()
+    if (!api?.invoke) return { supported: false, error: 'IPC 不可用（请在 Electron 中运行）' }
+    return api.invoke('system-dictation:status')
+  },
+
+  async setAsrHoldMode(payload) {
+    const api = ipc()
+    if (!api?.invoke) return { success: false, supported: false, error: 'IPC 不可用（请在 Electron 中运行）' }
+    return api.invoke('asr:set-hold-mode', payload)
   },
 
   /** 桌面没有系统分享面板（右键「发送到」不属于本应用职责）：入口按 shell.share 能力隐藏 */

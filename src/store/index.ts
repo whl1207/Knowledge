@@ -31,7 +31,7 @@ import { panelKeys } from '@/lib/plugin/panelRegistry'
 import { getPlatform, hasCapability } from '@/platform'
 import type { OpenFileWindowPayload, OpenPluginPanelPayload } from '@/platform/contract'
 // 语音输入默认快捷键 / 迁移判定：唯一来源（见 src/shared/asrShortcut.ts）
-import { DEFAULT_ASR_SHORTCUT, needsShortcutMigration } from '@/shared/asrShortcut'
+import { DEFAULT_ASR_SHORTCUT, LEGACY_ASR_SHORTCUTS, needsShortcutMigration } from '@/shared/asrShortcut'
 import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
 import { migrateLlmKeys } from '@/lib/llmCredentials'
 declare global {
@@ -179,7 +179,7 @@ export const DEFAULT_VIEW = GLOBAL_VIEW_KEYS[0]
  * 这些窗口不持有工作区、标签栏与主面板导航等主窗口状态，相关保存必须跳过。
  */
 export const isAuxWindowHash = (hash: string): boolean =>
-  /^#\/(settings-window|file-view|browser-agent|plugin-panel)/.test(String(hash || ''))
+  /^#\/(settings-window|file-view|browser-agent|plugin-panel|voice-overlay)/.test(String(hash || ''))
 if (typeof window !== 'undefined' && isAuxWindowHash(window.location?.hash)) persistWorkspace = false
 
 /** 单独写入「工作区」相关键（root / roots / path / remoteRoots） */
@@ -721,6 +721,16 @@ export const usestore = defineStore('data', {
                 punctMode: 'none' as 'none' | 'local' | 'llm',
                 puncDir: '', // 本地标点模型目录（ct-punc onnx 目录；punctMode=local 时使用）
                 shortcut: DEFAULT_ASR_SHORTCUT,
+                // 系统级听写：应用在后台时把识别结果直接粘贴进当前前台应用（Windows/Linux）。
+                // 关闭后，快捷键只在应用窗口内生效，不再尝试跨应用输入。
+                // 只在 Windows / Linux 默认开启；macOS 没有对应注入实现，默认关闭。
+                // 这里不用 hasCapability()：state() 可能在 IPC 桥领取前执行，避免把平台后端提前缓存错。
+                systemWide: typeof navigator === 'undefined'
+                    || (!/mac/i.test(navigator.platform || '') && !/android/i.test(navigator.userAgent || '')),
+                // 系统级听写的触发方式：默认长按大写键说话（短按仍切换大小写）
+                systemInputMode: 'hold' as 'toggle' | 'hold',
+                // 系统级听写粘贴完成后恢复剪贴板原内容（关闭则把识别文字留在剪贴板）
+                restoreClipboard: true,
                 // 常驻悬浮麦克风按钮（右下角小圆钮，点一下就开始语音输入；可关掉，见语音输入设置）
                 floatButton: true,
                 // 悬浮麦克风位置（距右下角的像素偏移；拖动后记住）
@@ -1882,6 +1892,20 @@ export const usestore = defineStore('data', {
                         // （asr 为浅合并，旧存档会整体覆盖 qwen3 对象，缺字段时按默认补全）
                         if (asrNow.qwen3 && DEFAULT_AIconfig?.asr?.qwen3) {
                             asrNow.qwen3 = { ...DEFAULT_AIconfig.asr.qwen3, ...asrNow.qwen3 }
+                        }
+                        // 迁移（系统级听写）：旧存档没有该开关时，只在真正支持的平台默认开启；
+                        // macOS / 网页 / 安卓没有系统级输入能力，默认关闭，避免每次按热键都弹「不支持」。
+                        if (typeof oldAsr.systemWide !== 'boolean') {
+                            asrNow.systemWide = hasCapability('shell.systemInput')
+                        }
+                        if (typeof asrNow.restoreClipboard !== 'boolean') asrNow.restoreClipboard = true
+                        // 迁移（触发方式）：旧存档没有该字段 → 默认长按；如果仍是旧默认快捷键
+                        // Ctrl+Shift+F9 + 单点开关，也一并迁移到「CapsLock + 长按」。
+                        if (typeof oldAsr.systemInputMode !== 'string') {
+                            asrNow.systemInputMode = 'hold'
+                        } else if (oldAsr.systemInputMode === 'toggle'
+                            && LEGACY_ASR_SHORTCUTS.includes(String(oldAsr.shortcut || '').trim())) {
+                            asrNow.systemInputMode = 'hold'
                         }
                     }
                 }

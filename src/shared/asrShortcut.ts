@@ -7,22 +7,19 @@
  *  - 快捷键**很容易与别的软件撞车**，而注册失败时的行为（自动退到备选 + 弹提示）需要说清楚，
  *    否则用户看到的是「已临时改用某某」而实际两组都失败（见 globalVoice.syncShortcut）。
  *
- * 关于默认值的选择（踩过两次）：
- *  1) `Ctrl+Shift+Space` —— 中文输入法 / 其它软件很常占用，实测注册必失败；
- *  2) `Ctrl+Alt+*` —— **Windows 上不要用**：Ctrl+Alt 等同于 AltGr，中文输入法（尤其微软拼音）
- *     会把它当自己的组合，注册同样失败；
- *  所以默认改成带功能键的 `Ctrl+Shift+F9`：功能键很少被其它软件抢，也不与输入法冲突。
- *  依然失败时用户可以自己在设置里改，或点「清空」不用系统级快捷键。
+ * 默认值：`CapsLock`，配合「长按说话」使用 —— 按住大写键说话、松开结束；
+ * 短按仍保留系统原本的大小写切换。长按模式不注册 globalShortcut，因此不会吞掉 CapsLock。
+ * 用户也可以自己在设置里换成功能键组合。
  *
- * 迁移：`MIGRATE_FROM` 里的旧默认值如果是用户**没改过**的（即还等于旧默认），
+ * 迁移：`LEGACY_ASR_SHORTCUTS` 里的旧默认值如果是用户**没改过**的（即还等于旧默认），
  * 启动时换成新默认；用户自己改过的组合不动（见 store 的 loadConfig）。
  */
 
-/** 当前默认快捷键：`Ctrl+Shift+F9`（功能键少被占用，且不与输入法冲突） */
-export const DEFAULT_ASR_SHORTCUT = 'Ctrl+Shift+F9'
+/** 当前默认快捷键：`CapsLock`（按住说话；短按仍是系统大写切换） */
+export const DEFAULT_ASR_SHORTCUT = 'CapsLock'
 
 /** 旧默认值：还等于它的存档会被迁移到新默认（用户改过的值不在此列） */
-export const LEGACY_ASR_SHORTCUTS = ['Ctrl+Shift+Space', 'Ctrl+Alt+M']
+export const LEGACY_ASR_SHORTCUTS = ['Ctrl+Shift+Space', 'Ctrl+Alt+M', 'Ctrl+Shift+F9']
 
 /**
  * 主快捷键被别的软件占用时的备选组合（按顺序尝试，第一个可用的生效）。

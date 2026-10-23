@@ -38,6 +38,8 @@ export type CapabilityId =
   | 'shell.share'
   /** 系统级全局快捷键（浏览器无此能力） */
   | 'shell.globalShortcut'
+  /** 系统级听写：把文字粘贴进当前前台应用（桌面 Windows/Linux） */
+  | 'shell.systemInput'
   /** 应用壳：壳行为配置 / 文件关联 / 数据目录 / 设置窗口状态（桌面主进程维护） */
   | 'app.shell'
   /** 长任务前台服务：长任务期间保持进程存活 + 进度通知（安卓；桌面/网页天然不被回收） */
@@ -308,6 +310,19 @@ export interface ShellPort {
   registerShortcut(accelerator: string): Promise<{ success: boolean; error?: string }>
   /** 注销全局快捷键 */
   unregisterShortcut(): Promise<void>
+  /**
+   * 系统级听写：把一段文字粘贴进**当前前台应用**（桌面 Windows/Linux）。
+   * 主进程写剪贴板并模拟 Ctrl+V；成功后可恢复剪贴板原内容。
+   * 失败时 `copied=true` 表示文字已留在剪贴板，用户可手动粘贴。
+   */
+  injectSystemText(text: string, opts?: { restoreClipboard?: boolean }): Promise<{ success: boolean; copied?: boolean; error?: string }>
+  /** 系统级听写当前环境是否可用（用于设置页提示 / 关闭入口） */
+  systemDictationStatus(): Promise<{ supported: boolean; platform?: string; backend?: string; error?: string }>
+  /**
+   * 长按说话：让主进程监听全局 keyup，松开快捷键时通知语音宿主结束。
+   * 关闭时传 enabled=false；不支持全局键盘监听的环境返回 supported=false。
+   */
+  setAsrHoldMode(payload: { enabled: boolean; shortcut: string }): Promise<{ success: boolean; supported?: boolean; error?: string }>
   /** 分享文件（手机为系统分享面板；支持 Web Share 的浏览器亦可；无能力时调用方隐藏入口） */
   share(path: string, opts?: { title?: string; mime?: string }): Promise<{ success: boolean; error?: string }>
 }
@@ -383,6 +398,16 @@ export type AppEventChannel =
   | 'settings:navigate'
   | 'server-status'
   | 'asr-shortcut-toggle'
+  /** 主进程 → 语音宿主：长按模式松开快捷键，结束本次系统听写 */
+  | 'asr-hold-stop'
+  /** 语音宿主 → 主进程：全局语音状态（主进程据此显示系统悬浮窗） */
+  | 'voice:state'
+  /** 主进程 → 系统悬浮窗：镜像的语音状态 */
+  | 'voice:overlay-state'
+  /** 系统悬浮窗 → 主进程：结束 / 取消动作 */
+  | 'voice:overlay-action'
+  /** 系统悬浮窗 → 主进程：已加载，请求补发当前状态 */
+  | 'voice:overlay-ready'
   | 'mcp-status-changed'
   | 'lan-server-status'
   | 'lan:guest-state'

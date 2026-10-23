@@ -250,6 +250,70 @@ function setFloatButton(on: boolean) {
   store.saveConfig()
 }
 
+/** 系统级听写开关（关闭后快捷键只在应用内生效） */
+function setSystemWide(on: boolean) {
+  store.AIconfig.asr.systemWide = on
+  store.saveConfig()
+}
+
+/** 系统级听写的宿主能力（Windows PowerShell / Linux xdotool·wtype） */
+const systemStatus = ref<{ supported: boolean; backend?: string; error?: string } | null>(null)
+const systemStatusLoading = ref(false)
+async function refreshSystemStatus() {
+  if (systemStatusLoading.value) return
+  systemStatusLoading.value = true
+  try {
+    systemStatus.value = await getPlatform().shell.systemDictationStatus()
+  } catch (e: any) {
+    systemStatus.value = { supported: false, error: String(e?.message || e) }
+  } finally {
+    systemStatusLoading.value = false
+  }
+}
+
+/**
+ * 提示文字统一放 title：面板里只保留「左侧 label + 右侧控件」，
+ * 不再用整段说明把行高撑开（与语音合成页的紧凑布局一致）。
+ */
+const hints = computed(() => {
+  const zh = store.locales === 'zh'
+  return {
+    shortcut: zh
+      ? '默认 CapsLock：按住说话，短按仍然是系统的大小写切换。也可以改成带功能键的组合；Ctrl+Alt+* 在 Windows 上会与输入法冲突。长按模式不会注册系统热键，因此不会吞掉按键本身的功能。'
+      : 'Default is CapsLock: hold to dictate, while a short press still toggles Caps Lock. You can also use a function-key combination; Ctrl+Alt+* conflicts with IMEs on Windows. Hold mode does not register a system hotkey, so the key keeps its normal behaviour.',
+    systemWide: zh
+      ? '开启后，应用在后台时也可以按快捷键说话，识别结果会粘贴到当前前台应用；关闭后快捷键只在应用窗口内生效。需要 Windows PowerShell，或 Linux 的 xdotool / wtype。'
+      : 'When enabled, the shortcut works while the app is in the background and the result is pasted into the active app; when off, the shortcut only works inside this app. Requires Windows PowerShell, or xdotool / wtype on Linux.',
+    inputMode: zh
+      ? '单点开关：按一次开始、再按一次结束。长按说话：按住快捷键说话、松开即结束（更接近对讲机，需要全局按键抬起监听）。'
+      : 'Toggle: press once to start, press again to finish. Hold: hold the shortcut while speaking and release to finish (walkie-talkie style; requires global key-up listening).',
+    clipboard: zh
+      ? '粘贴完成后恢复剪贴板原内容；关闭则把识别文字留在剪贴板，方便手动粘贴。'
+      : 'Restore the previous clipboard contents after pasting; turn this off to leave the recognized text on the clipboard for manual pasting.',
+    floatButton: zh
+      ? '在右下角显示可拖动的悬浮麦克风，点一下开始 / 结束语音输入；关闭后仍可使用快捷键。'
+      : 'Show the draggable floating mic in the bottom-right corner (click to start / stop dictation); the shortcut still works when hidden.',
+    qwenSegment: zh
+      ? '流式（分段准实时）：按住说话时，一停顿超过「停顿切段」就把这一段送去识别，文字边说边出；一直不停顿则到「单段最长」（上限 3 分钟）强切。切点保留「切点重叠」音频，避免切在字中间丢音。注意：该模型本身是整段模型，所以是「说完一句、停顿后约 0.5~1.5 秒出字」，不是逐字上屏；停顿设得太短会切断长句。'
+      : 'Streaming (segmented): while you hold, each pause longer than “Cut on pause” sends that segment for recognition, so text appears as you speak; without pauses it force-cuts at “Max segment length” (up to 3 min). “Cut overlap” keeps audio around each cut point so no syllable is lost. The model itself is offline/whole-utterance, so expect text ~0.5–1.5s after each pause, not per-character streaming; too-short pauses will split long sentences.',
+    qwenEndpoint: zh
+      ? 'Qwen3-ASR 本地网页服务默认地址 http://127.0.0.1:7867（按手册 /run 接口调用：自动上传音频并取回识别文本，支持 30 种语言 + 22 种方言与自动语种识别）。若使用 vLLM / Docker 部署的 OpenAI 兼容服务，地址填 http://localhost:8000/v1/audio/transcriptions 并选「OpenAI 兼容」（仅支持整段识别）。'
+      : 'Qwen3-ASR local web UI default URL is http://127.0.0.1:7867 (called through the documented /run API: audio is uploaded and the recognized text is returned; supports 30 languages + 22 Chinese dialects with auto language ID). For a vLLM/Docker OpenAI-compatible server, set the URL to http://localhost:8000/v1/audio/transcriptions and pick "OpenAI-compatible" (whole-utterance only).',
+    funasrPunct: zh
+      ? '仅在「标点校验模式=大模型」时生效：原文先实时显示，攒够此字数后由大模型一次性补标点并整体替换；0=关闭批处理（每句都校验）。“普通校验（本地标点模型）”不受此限制，句子落定即即时补标点。'
+      : 'Only applies when Punctuation Mode = LLM: show raw text live, then batch-punctuate once this many chars accumulate; 0 = per-sentence. Local ct-punc (Normal mode) punctuates every committed sentence immediately regardless of this value.',
+    funasrGuide: zh
+      ? 'FunASR 官方流式 Paraformer（online）：按住说话实时出字，松开出完整文本。首次使用会加载 ~230MB 双模型；下方「按住说话测试」可边听边验证。开启自动断句后，说完一句停顿约 0.9s 会自动落一句；如配置离线精修模型，松开时会对最后一句做整段二次识别替换。'
+      : 'FunASR official streaming Paraformer (online). First use loads ~230MB models; try the "Hold to Test" button below. With auto-VAD, pausing ~0.9s commits a sentence and keeps listening; if an offline refine model is set, the last utterance is re-recognized on release (2-pass).',
+    punctLocal: zh
+      ? '普通校验 = 本地 ct-punc（CT-Transformer 标点恢复）模型：识别完成后离线补标点，无需联网与大模型，对任意识别引擎生效。'
+      : 'Normal = local ct-punc (CT-Transformer) model: punctuate offline after recognition, works with any ASR engine, no network/LLM needed.',
+    punctLlm: zh
+      ? '大模型校验会对识别文字做错字修正并补全标点；开启后 funasr-online 可用下方“批处理标点阈值”节流（攒够字数一次性处理）。'
+      : 'LLM mode also fixes misheard characters. With funasr-online you can use the batch punct threshold below to process text in batches.',
+  }
+})
+
 /**
  * 状态行里的快捷键部分：把「系统级快捷键是否注册成功 / 实际生效的是哪一组」说清楚。
  * 「按了没反应」时这一行就是判断依据：没有「上次触发」= 按键根本没进到软件。
@@ -314,7 +378,9 @@ async function selectOnnxModel() {
 // 快捷键的注册 / 注销统一由全局语音输入（services/asr/globalVoice.ts）按窗口焦点负责：
 // 窗口在前台时故意不注册（按键进窗口，能识别「按住 / 松开」），切到后台才注册系统级快捷键。
 // 这里不再自己注册，否则会把前台那条更准的路径顶掉（Windows 上系统级快捷键按住会不停重复触发）。
-onMounted(() => {})
+onMounted(() => {
+  void refreshSystemStatus()
+})
 
 onBeforeUnmount(() => {
   // 销毁测试管理器，避免麦克风/会话泄漏
@@ -357,66 +423,6 @@ onBeforeUnmount(() => {
       </select>
     </div>
 
-    <!-- 快捷按键 -->
-    <div class="form-group">
-      <label>{{ store.locales=='zh'?'快捷按键' : 'Shortcut Key' }}</label>
-      <div class="shortcut-input">
-        <input 
-          v-model="store.AIconfig.asr.shortcut" 
-          :placeholder="store.locales=='zh'?'按住说话快捷键（如：Ctrl+Shift+F9）' : 'Push-to-talk shortcut (e.g. Ctrl+Shift+F9)'"
-          @keydown="captureShortcut"
-          readonly
-        />
-        <div class="button" style="width:25px;" @click="resetShortcut" 
-            :title="store.locales=='zh'?'恢复默认快捷键' : 'Reset to default shortcut'">
-          <i class="fa fa-undo"></i>
-        </div>
-        <div class="button" style="width:25px;" @click="clearShortcut" 
-            :title="store.locales=='zh'?'清空（不用系统级快捷键，只留悬浮麦克风）' : 'Clear (no global shortcut; floating mic only)'">
-          <i class="fa fa-ban"></i>
-        </div>
-      </div>
-      <div class="field-hint">
-        {{ store.locales=='zh'
-          ? '点上面的输入框后直接按下想要的组合键即可改（建议用带功能键的组合，如 Ctrl+Shift+F9；Ctrl+Alt+* 在 Windows 上会与输入法冲突）。若这一组已被其它软件占用，下面状态行会提示注册失败 —— 换一组，或点「清空」不用快捷键。'
-          : 'Click the box and press the combination you want (prefer one with a function key, e.g. Ctrl+Shift+F9; Ctrl+Alt+* conflicts with IMEs on Windows). If another app already owns it, the status line below says so — pick another, or click “clear”.' }}
-      </div>
-    </div>
-
-    <!-- 悬浮麦克风：单独一行，样式与下方「选项」一致 -->
-    <div class="form-group">
-      <label>{{ store.locales=='zh'?'悬浮麦克风' : 'Floating Mic' }}</label>
-      <div class="checkbox-group">
-        <label class="checkbox-label" style="width: 100%">
-          <input type="checkbox" :checked="store.AIconfig.asr.floatButton !== false"
-                 @change="setFloatButton(($event.target as HTMLInputElement).checked)" />
-          {{ store.locales=='zh'?'显示悬浮麦克风（右下角小圆钮，可拖动，点一下就能语音输入）' : 'Show the floating mic (bottom-right button, draggable; click to dictate)' }}
-        </label>
-      </div>
-    </div>
-
-    <!-- 状态：配置自检 + 系统级快捷键注册情况 + 最近一次触发（按了没反应时看这一行） -->
-    <div class="form-group">
-      <label>{{ store.locales=='zh'?'状态' : 'Status' }}</label>
-      <div class="asr-diag">
-        {{
-          (voiceState.ready
-            ? (store.locales=='zh'?'引擎配置：已就绪' : 'Engine config: ready')
-            : (store.locales=='zh'?'引擎配置：还缺必填项（见下方对应引擎的参数）' : 'Engine config: missing required fields'))
-          + ' · '
-          + shortcutStatusText
-          + ' · '
-          + (voiceState.lastTrigger
-            ? (store.locales=='zh'?'上次触发：' : 'last trigger: ') + voiceState.lastTrigger
-            : (store.locales=='zh'?'上次触发：无（按下快捷键没有到达软件）' : 'last trigger: none (the shortcut never reached the app)'))
-        }}
-      </div>
-      <div class="button" style="width:auto;padding:0 8px;margin-left:6px;" @click="retryVoiceShortcut()"
-           :title="store.locales=='zh'?'重新注册系统级快捷键' : 'Re-register the global shortcut'">
-        <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'重试注册' : 'Retry' }}
-      </div>
-    </div>
-
     <!-- Whisper API 配置 -->
     <div v-if="store.AIconfig.asr.type === 'whisper-api'">
       <div class="form-group">
@@ -446,6 +452,7 @@ onBeforeUnmount(() => {
       <div class="form-group">
         <label>{{ store.locales=='zh'?'API地址' : 'API URL' }}</label>
         <input v-model="store.AIconfig.asr.qwen3.url" @change="store.saveConfig"
+          :title="hints.qwenEndpoint"
           :placeholder="qwen3Protocol === 'openai' ? 'http://localhost:8000/v1/audio/transcriptions' : 'http://127.0.0.1:7867'"/>
       </div>
       <div class="form-group">
@@ -457,7 +464,7 @@ onBeforeUnmount(() => {
       <template v-if="qwen3Protocol === 'gradio'">
         <div class="form-group">
           <label>{{ store.locales=='zh'?'识别方式' : 'Recognition Mode' }}</label>
-          <select v-model="store.AIconfig.asr.qwen3.mode" @change="store.saveConfig">
+          <select v-model="store.AIconfig.asr.qwen3.mode" :title="hints.qwenSegment" @change="store.saveConfig">
             <option value="segment">{{ store.locales=='zh'?'流式：分段准实时（边说边出）' : 'Streaming: segmented (text while you speak)' }}</option>
             <option value="whole">{{ store.locales=='zh'?'整段：松手后一次识别' : 'Whole: transcribe on release' }}</option>
           </select>
@@ -474,9 +481,6 @@ onBeforeUnmount(() => {
           <div class="form-group">
             <label>{{ store.locales=='zh'?'切点重叠（毫秒）' : 'Cut overlap (ms)' }}</label>
             <input type="number" min="0" max="800" step="50" v-model.number="store.AIconfig.asr.qwen3.overlapMs" @change="store.saveConfig" />
-          </div>
-          <div class="config-description">
-            {{ store.locales=='zh'?'流式（分段准实时）：按住说话时，一停顿超过「停顿切段」就把这一段送去识别，文字边说边出；一直不停顿则到「单段最长」（上限 3 分钟）强切。切点保留「切点重叠」音频，避免切在字中间丢音。注意：该模型本身是整段模型，所以是「说完一句、停顿后约 0.5~1.5 秒出字」，不是逐字上屏；停顿设得太短会切断长句。' : 'Streaming (segmented): while you hold, each pause longer than “Cut on pause” sends that segment for recognition, so text appears as you speak; without pauses it force-cuts at “Max segment length” (up to 3 min). “Cut overlap” keeps audio around each cut point so no syllable is lost. The model itself is offline/whole-utterance, so expect text ~0.5–1.5s after each pause, not per-character streaming; too-short pauses will split long sentences.' }}
           </div>
         </template>
         <div class="form-group">
@@ -516,42 +520,8 @@ onBeforeUnmount(() => {
           <input v-model="store.AIconfig.asr.qwen3.model" :placeholder="store.locales=='zh'?'输入模型名，例如 Qwen/Qwen3-ASR-1.7B' : 'Enter model name, e.g. Qwen/Qwen3-ASR-1.7B'" @change="store.saveConfig"/>
         </div>
       </template>
-      <div class="config-description usage-guide">
-        {{ store.locales=='zh'?'Qwen3-ASR 本地网页服务默认地址 http://127.0.0.1:7867（按手册 /run 接口调用：自动上传音频并取回识别文本，支持 30 种语言 + 22 种方言与自动语种识别）。若使用 vLLM / Docker 部署的 OpenAI 兼容服务，地址填 http://localhost:8000/v1/audio/transcriptions 并选「OpenAI 兼容」（仅支持整段识别）。' : 'Qwen3-ASR local web UI default URL is http://127.0.0.1:7867 (called through the documented /run API: audio is uploaded and the recognized text is returned; supports 30 languages + 22 Chinese dialects with auto language ID). For a vLLM/Docker OpenAI-compatible server, set the URL to http://localhost:8000/v1/audio/transcriptions and pick "OpenAI-compatible" (whole-utterance only).' }}
-      </div>
     </div>
 
-    <!-- 测试按钮 -->
-    <div class="form-group">
-      <label>{{ store.locales=='zh'?'测试功能' : 'Test Function' }}</label>
-      <div class="button-group">
-        <div 
-          class="button" 
-          @mousedown="startASRTest" 
-          @mouseup="stopASRTest"
-          @mouseleave="stopASRTest"
-          :class="{ 'recording': asrTesting }"
-          :title="store.locales=='zh'?'按住测试语音识别' : 'Press and hold to test speech recognition'"
-        >
-          <i :class="asrTesting ? 'fa fa-microphone fa-fade' : 'fa fa-microphone'"></i>
-          {{ asrTesting ? (store.locales=='zh'?'录音中...' : 'Recording...') : (store.locales=='zh'?'按住说话测试' : 'Hold to Test') }}
-        </div>
-        <div class="button" @click="clearASRTestResult" :title="store.locales=='zh'?'清除测试结果' : 'Clear test result'">
-          <i class="fa fa-eraser"></i> {{ store.locales=='zh'?'清除' : 'Clear' }}
-        </div>
-      </div>
-    </div>
-    <!-- 测试结果（独立一行） -->
-    <div v-if="asrTestResult" class="asr-test-result">
-      <div class="result-content scoll">
-        <strong>{{ store.locales=='zh'?'识别结果：' : 'Recognition Result:' }}</strong>{{ asrTestResult }}
-      </div>
-    </div>
-    <div v-if="asrTestError" class="asr-test-result error">
-      <div class="result-content scoll">
-        <strong>{{ store.locales=='zh'?'识别失败：' : 'Recognition Failed:' }}</strong>{{ asrTestError }}
-      </div>
-    </div>
     <!-- ONNX Whisper 配置 -->
     <div v-if="store.AIconfig.asr.type === 'onnx-whisper'">
       <div class="form-group">
@@ -608,6 +578,7 @@ onBeforeUnmount(() => {
         <label>{{ store.locales=='zh'?'模型目录' : 'Model Directory' }}</label>
         <div class="input-with-button">
           <input v-model="store.AIconfig.asr.funasr.dir" 
+                :title="hints.funasrGuide"
                 :placeholder="store.locales=='zh'?'选择含 model_quant.onnx / decoder_quant.onnx / config.yaml 的目录' : 'Dir with model_quant.onnx / decoder_quant.onnx / config.yaml'"
                 @change="store.saveConfig"/>
           <div class="button" style="width:25px;" @click="pickFunasrModelDir"
@@ -617,7 +588,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="form-group">
-        <label>{{ store.locales=='zh'?'离线精修模型（可选，两遍精修）' : 'Offline refine model (optional)' }}</label>
+        <label>{{ store.locales=='zh'?'离线精修模型' : 'Offline refine model (optional)' }}</label>
         <div class="input-with-button">
           <input v-model="store.AIconfig.asr.funasr.refineModel"
                 :placeholder="store.locales=='zh'?'选择离线单文件 onnx，如 sensevoice-small /model.onnx（空则不精修）' : 'Optional offline .onnx (e.g. sensevoice-small); blank = no refinement'"
@@ -629,11 +600,8 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="form-group">
-        <label>{{ store.locales=='zh'?'批处理标点阈值（字）' : 'Punct batch threshold (chars)' }}</label>
-        <input type="number" min="0" max="500" step="10" v-model.number="store.AIconfig.asr.funasr.punctMin" @change="store.saveConfig" />
-        <div class="config-description">
-          {{ store.locales=='zh'?'仅在「标点校验模式=大模型」时生效：原文先实时显示，攒够此字数后由大模型一次性补标点并整体替换；0=关闭批处理（每句都校验）。“普通校验（本地标点模型）”不受此限制，句子落定即即时补标点。' : 'Only applies when Punctuation Mode = LLM: show raw text live, then batch-punctuate once this many chars accumulate; 0 = per-sentence. Local ct-punc (Normal mode) punctuates every committed sentence immediately regardless of this value.' }}
-        </div>
+        <label>{{ store.locales=='zh'?'批处理标点阈值' : 'Punct batch threshold (chars)' }}</label>
+        <input type="number" min="0" max="500" step="10" v-model.number="store.AIconfig.asr.funasr.punctMin" :title="hints.funasrPunct" @change="store.saveConfig" />
       </div>
       <div class="form-group">
         <label>{{ store.locales=='zh'?'选项' : 'Options' }}</label>
@@ -644,28 +612,21 @@ onBeforeUnmount(() => {
           </label>
         </div>
       </div>
-      <div class="config-description usage-guide">
-        {{ store.locales=='zh'?'FunASR 官方流式 Paraformer（online）：按住说话实时出字，松开出完整文本。首次使用会加载 ~230MB 双模型；下方「按住说话测试」可边听边验证。开启自动断句后，说完一句停顿约 0.9s 会自动落一句；如配置离线精修模型，松开时会对最后一句做整段二次识别替换。' : 'FunASR official streaming Paraformer (online). First use loads ~230MB models; try the "Hold to Test" button below. With auto-VAD, pausing ~0.9s commits a sentence and keeps listening; if an offline refine model is set, the last utterance is re-recognized on release (2-pass).' }}
-      </div>
     </div>
     <!-- 标点校验模式（全局，对所有识别引擎生效） -->
     <div class="form-group">
       <label>{{ store.locales=='zh'?'标点校验模式' : 'Punctuation Mode' }}</label>
-      <select v-model="store.AIconfig.asr.punctMode" @change="store.saveConfig">
+      <select v-model="store.AIconfig.asr.punctMode"
+              :title="store.AIconfig.asr.punctMode === 'local' ? hints.punctLocal : (store.AIconfig.asr.punctMode === 'llm' ? hints.punctLlm : '')"
+              @change="store.saveConfig">
         <option value="none">{{ store.locales=='zh'?'无校验' : 'None' }}</option>
         <option value="local">{{ store.locales=='zh'?'普通校验（本地标点模型，离线）' : 'Normal (local ct-punc, offline)' }}</option>
         <option value="llm">{{ store.locales=='zh'?'大模型校验（纠错 + 补标点，需已连接大模型）' : 'LLM proofread + punctuation (LLM must be connected)' }}</option>
       </select>
-      <div class="config-description" v-if="store.AIconfig.asr.punctMode === 'local'">
-        {{ store.locales=='zh'?'普通校验 = 本地 ct-punc（CT-Transformer 标点恢复）模型：识别完成后离线补标点，无需联网与大模型，对任意识别引擎生效。' : 'Normal = local ct-punc (CT-Transformer) model: punctuate offline after recognition, works with any ASR engine, no network/LLM needed.' }}
-      </div>
-      <div class="config-description" v-else-if="store.AIconfig.asr.punctMode === 'llm'">
-        {{ store.locales=='zh'?'大模型校验会对识别文字做错字修正并补全标点；开启后 funasr-online 可用下方“批处理标点阈值”节流（攒够字数一次性处理）。' : 'LLM mode also fixes misheard characters. With funasr-online you can use the batch punct threshold below to process text in batches.' }}
-      </div>
     </div>
     <!-- 本地标点模型目录（punctMode=local，全局） -->
     <div class="form-group" v-if="store.AIconfig.asr.punctMode === 'local'">
-      <label>{{ store.locales=='zh'?'本地标点模型目录（ct-punc）' : 'Local punct model dir (ct-punc)' }}</label>
+      <label>{{ store.locales=='zh'?'本地标点模型目录' : 'Local punct model dir' }}</label>
       <div class="input-with-button">
         <input v-model="store.AIconfig.asr.puncDir"
               :placeholder="store.locales=='zh'?'选择含 model_quant.onnx / config.yaml / tokens.json 的目录' : 'Dir with model_quant.onnx / config.yaml / tokens.json'"
@@ -676,10 +637,124 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-    <!-- 使用方法 -->
-    <div class="config-description usage-guide">
-      {{ store.locales=='zh'?'使用方法：① 选择识别引擎并配置下方相应参数；② 设置快捷按键；③ 把光标点进任意能输入文字的地方（聊天输入框 / 搜索框 / 设置项 / 代码编辑器…），按住快捷键说话、松开即识别（短按 = 切换持续收音；应用在后台时按一次开始、再按一次结束），识别结果会直接写进那个输入框（设置窗口里同样可用），屏幕下方会出现统一的「正在语音输入」提示，显示落点与实时文字（Esc 放弃，没有可写入的输入框时会自动复制到剪贴板）；④ 点击上方「按住说话测试」可验证效果。' : 'How to use: 1) Choose an ASR engine and configure the options below; 2) Set the shortcut key; 3) Put the caret in any text field (chat composer / search box / a settings field / the code editor…), hold the shortcut and speak, then release to transcribe (a short tap toggles continuous listening; in the background press once to start and again to finish) — the result is typed straight into that field (the settings window works too), with one shared “Listening…” indicator at the bottom showing the target and live text (Esc cancels; when there is nothing to type into, the result is copied to the clipboard); 4) Click the "Hold to Test" button above to verify.' }}
+    <!-- 快捷按键：先配好引擎与标点，再配「怎么按」 -->
+    <div class="form-group">
+      <label :title="hints.shortcut">{{ store.locales=='zh'?'快捷按键' : 'Shortcut Key' }}</label>
+      <div class="shortcut-input">
+        <input 
+          v-model="store.AIconfig.asr.shortcut" 
+          :placeholder="store.locales=='zh'?'默认 CapsLock（按住说话；短按切换大小写）' : 'Default CapsLock (hold to dictate; short press still toggles Caps Lock)'"
+          :title="hints.shortcut"
+          @keydown="captureShortcut"
+          readonly
+        />
+        <div class="button" style="width:25px;" @click="resetShortcut" 
+            :title="store.locales=='zh'?'恢复默认快捷键' : 'Reset to default shortcut'">
+          <i class="fa fa-undo"></i>
+        </div>
+        <div class="button" style="width:25px;" @click="clearShortcut" 
+            :title="store.locales=='zh'?'清空（不用系统级快捷键，只留悬浮麦克风）' : 'Clear (no global shortcut; floating mic only)'">
+          <i class="fa fa-ban"></i>
+        </div>
+      </div>
     </div>
+
+    <!-- 输入方式 -->
+    <div class="form-group">
+      <label>{{ store.locales=='zh'?'系统级听写' : 'System input' }}</label>
+      <label class="check-line"
+             :title="hasCapability('shell.systemInput') ? hints.systemWide : (store.locales=='zh'?'当前系统暂不支持系统级输入' : 'System-wide input is not supported on this platform')">
+        <input type="checkbox" :checked="store.AIconfig.asr.systemWide !== false"
+               :disabled="!hasCapability('shell.systemInput')"
+               @change="setSystemWide(($event.target as HTMLInputElement).checked)" />
+        <span>{{ store.locales=='zh'?'在其它应用中直接输入' : 'Type into other apps' }}</span>
+      </label>
+    </div>
+    <div v-if="store.AIconfig.asr.systemWide !== false" class="form-group">
+      <label :title="hints.inputMode">{{ store.locales=='zh'?'触发方式' : 'Trigger' }}</label>
+      <select v-model="store.AIconfig.asr.systemInputMode" :title="hints.inputMode" @change="store.saveConfig">
+        <option value="toggle">{{ store.locales=='zh'?'单点开关（按一次开始 / 再按一次结束）' : 'Toggle (press once to start / again to finish)' }}</option>
+        <option value="hold">{{ store.locales=='zh'?'长按说话（按住开始 / 松开结束）' : 'Hold to talk (hold to start / release to finish)' }}</option>
+      </select>
+    </div>
+    <div v-if="store.AIconfig.asr.systemWide !== false" class="form-group">
+      <label>{{ store.locales=='zh'?'剪贴板' : 'Clipboard' }}</label>
+      <label class="check-line" :title="hints.clipboard">
+        <input type="checkbox" v-model="store.AIconfig.asr.restoreClipboard" @change="store.saveConfig" />
+        <span>{{ store.locales=='zh'?'粘贴后恢复剪贴板' : 'Restore clipboard after pasting' }}</span>
+      </label>
+    </div>
+    <div v-if="store.AIconfig.asr.systemWide !== false && hasCapability('shell.systemInput') && systemStatus && !systemStatus.supported" class="form-group">
+      <label></label>
+      <div class="field-hint warn"
+           :title="systemStatus.error || (store.locales=='zh'?'当前环境不支持系统级输入' : 'System-wide input is unavailable in this environment')">
+        <i class="fa fa-exclamation-triangle"></i>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>{{ store.locales=='zh'?'悬浮麦克风' : 'Floating Mic' }}</label>
+      <label class="check-line" :title="hints.floatButton">
+        <input type="checkbox" :checked="store.AIconfig.asr.floatButton !== false"
+               @change="setFloatButton(($event.target as HTMLInputElement).checked)" />
+        <span>{{ store.locales=='zh'?'显示悬浮麦克风' : 'Show floating mic' }}</span>
+      </label>
+    </div>
+
+    <!-- 状态：配置自检 + 系统级快捷键注册情况 + 最近一次触发（按了没反应时看这一行） -->
+    <div class="form-group status-row">
+      <label>{{ store.locales=='zh'?'状态' : 'Status' }}</label>
+      <div class="asr-diag">
+        {{
+          (voiceState.ready
+            ? (store.locales=='zh'?'引擎配置：已就绪' : 'Engine config: ready')
+            : (store.locales=='zh'?'引擎配置：还缺必填项（见下方对应引擎的参数）' : 'Engine config: missing required fields'))
+          + ' · '
+          + shortcutStatusText
+          + ' · '
+          + (voiceState.lastTrigger
+            ? (store.locales=='zh'?'上次触发：' : 'last trigger: ') + voiceState.lastTrigger
+            : (store.locales=='zh'?'上次触发：无（按下快捷键没有到达软件）' : 'last trigger: none (the shortcut never reached the app)'))
+        }}
+      </div>
+      <div class="button mini" @click="retryVoiceShortcut()"
+           :title="store.locales=='zh'?'重新注册系统级快捷键' : 'Re-register the global shortcut'">
+        <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'重试' : 'Retry' }}
+      </div>
+    </div>
+
+    <!-- 测试功能：与语音合成页一致，放在最后 -->
+    <div class="form-group">
+      <label>{{ store.locales=='zh'?'测试功能' : 'Test Function' }}</label>
+      <div class="button-group">
+        <div 
+          class="button" 
+          @mousedown="startASRTest" 
+          @mouseup="stopASRTest"
+          @mouseleave="stopASRTest"
+          :class="{ 'recording': asrTesting }"
+          :title="store.locales=='zh'?'按住测试语音识别' : 'Press and hold to test speech recognition'"
+        >
+          <i :class="asrTesting ? 'fa fa-microphone fa-fade' : 'fa fa-microphone'"></i>
+          {{ asrTesting ? (store.locales=='zh'?'录音中...' : 'Recording...') : (store.locales=='zh'?'按住说话测试' : 'Hold to Test') }}
+        </div>
+        <div class="button" @click="clearASRTestResult" :title="store.locales=='zh'?'清除测试结果' : 'Clear test result'">
+          <i class="fa fa-eraser"></i> {{ store.locales=='zh'?'清除' : 'Clear' }}
+        </div>
+      </div>
+    </div>
+    <!-- 测试结果（独立一行） -->
+    <div v-if="asrTestResult" class="asr-test-result">
+      <div class="result-content scoll">
+        <strong>{{ store.locales=='zh'?'识别结果：' : 'Recognition Result:' }}</strong>{{ asrTestResult }}
+      </div>
+    </div>
+    <div v-if="asrTestError" class="asr-test-result error">
+      <div class="result-content scoll">
+        <strong>{{ store.locales=='zh'?'识别失败：' : 'Recognition Failed:' }}</strong>{{ asrTestError }}
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -719,7 +794,8 @@ onBeforeUnmount(() => {
 .form-group {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  /* 与语音合成页一致：label 在左、控件在右，一行一个；不让宽 100% 的 select 换行 */
+  flex-wrap: nowrap;
   margin-bottom: 5px;
 }
 
@@ -730,6 +806,64 @@ onBeforeUnmount(() => {
 
 .form-group:last-child {
   margin-bottom: 0;
+}
+
+/* 复选框 + 说明一行（与 TtsSettings 的 .check-line 保持一致） */
+.check-line {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fontColor);
+  opacity: 0.85;
+  line-height: 1.45;
+  cursor: pointer;
+  user-select: none;
+}
+/* 覆盖 .form-group label 的 120px 固定宽度：开关说明是一整行文字，不能被压成 120px */
+.form-group label.check-line {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-shrink: 1;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.check-line input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+.check-line > span {
+  min-width: 0;
+}
+
+/* 状态行：说明占满剩余宽度，重试按钮不再把行撑高 */
+.status-row {
+  align-items: center;
+}
+.status-row .asr-diag {
+  align-self: center;
+}
+.button.mini {
+  flex: 0 0 auto;
+  width: auto;
+  height: 31px;
+  min-height: 31px;
+  padding: 0 10px;
+  margin-left: 6px;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+.field-hint.warn {
+  color: #e6a23c;
+  opacity: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* 状态行（引擎自检 / 快捷键注册 / 最近一次触发） */
@@ -754,7 +888,9 @@ onBeforeUnmount(() => {
 
 .form-group input:not([type="checkbox"]):not([type="radio"]),
 .form-group textarea {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
   padding: 2px 4px;
   border: 1px solid var(--borderColor);
   border-radius: 5px;
@@ -764,8 +900,12 @@ onBeforeUnmount(() => {
   transition: border-color 0.2s ease;
   margin: 0px
 }
-/* 下拉框用正常背景色（不用菜单底色） */
+/* 下拉框用正常背景色（不用菜单底色），并占满 label 右侧剩余宽度 */
 .form-group select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  margin: 0;
   background-color: var(--backgroundColor);
 }
 
@@ -817,26 +957,6 @@ onBeforeUnmount(() => {
   padding: 0 6px;
   margin: 0;
   width: auto;
-}
-
-/* 配置描述文本：位于输入元素下方一行 */
-.config-description {
-  flex-basis: 100%;
-  font-size: 10px;
-  color: var(--fontColor);
-  opacity: 0.7;
-  margin: 0;
-  padding-left: 135px; /* 与 label 宽度对齐，缩进到输入框正下方 */
-  box-sizing: border-box;
-}
-
-/* 底部使用方法说明：全宽显示 */
-.config-description.usage-guide {
-  padding-left: 0;
-  margin-top: 10px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--borderColor);
-  line-height: 1.6;
 }
 
 .button {
@@ -895,6 +1015,7 @@ onBeforeUnmount(() => {
 
 .shortcut-input input {
   cursor: pointer;
+  /* 与其它输入框/下拉框同高（不再单独压成 22px） */
   background-color: var(--menuColor);
   user-select: none;
 }
@@ -908,8 +1029,23 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
+/* 快捷键右侧的「重置 / 清空」两个小按钮：
+   全局 .button 自带 6px 上下 padding，和 22px 高的输入框并排时明显更高。
+   这里改成撑满输入框高度、去掉上下 padding，三者看起来一样高。 */
+.shortcut-input > .button {
+  flex: 0 0 25px;
+  width: 25px;
+  height: auto;
+  align-self: stretch;
+  padding: 0;
+  margin: 0;
+  box-sizing: border-box;
+}
+
 /* 快捷键说明（换一组 / 清空的用法）：小一号、淡一点，跟在输入行下面 */
 .field-hint {
+  flex: 1;
+  min-width: 0;
   margin-top: 4px;
   font-size: 11px;
   line-height: 1.6;
@@ -928,14 +1064,17 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--fontColor);
+  opacity: 0.85;
+  user-select: none;
 }
 
 .checkbox-label input[type="checkbox"] {
   flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   margin: 0;
   cursor: pointer;
   appearance: auto;
@@ -955,8 +1094,8 @@ onBeforeUnmount(() => {
 }
 .settings-group .checkbox-group .checkbox-label input[type="checkbox"] {
   flex: 0 0 auto !important;
-  width: 16px !important;
-  height: 16px !important;
+  width: 14px !important;
+  height: 14px !important;
   margin-right: 8px !important;
   accent-color: var(--fontActiveColor, #4a90d9);
 }

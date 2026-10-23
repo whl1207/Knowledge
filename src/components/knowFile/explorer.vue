@@ -4,12 +4,13 @@
     <div class="explorer-container" :class="{ tall: isTallLayout }">
       <!-- 左侧面板（可调整宽度，始终为文件树；收起 / 展开走宽度过渡动画，见下方 .left-panel-* 类）
            细长窗口（高宽比 > 16:9，如手机竖屏）下改为**覆盖式整屏抽屉**：右侧视图始终占满整屏，
-           抽屉由工具栏最左的开关打开、点文件夹 / 文件（或抽屉左上角的返回）后收起 -->
+           抽屉由右侧标签栏最左的「显示 / 隐藏左侧面板」开关打开、点文件夹 / 文件（或抽屉左上角的返回）后收起
+           （多窗口模式没有标签栏，开关在 ViewToolbar 最左侧） -->
       <Transition name="left-panel" @after-enter="store.resize()" @after-leave="store.resize()">
         <div class="left-wrap" v-if="mode" :style="isTallLayout ? undefined : { '--left-w': leftWidth + 'px' }">
           <panel v-if="mode=='file'" ref="panelRef" class="left-panel" :guard-leave="confirmLeaveActive"
                  @node-opened="onNodeOpened" @open-file="onTreeOpenFile" @open-standalone="onTreeOpenStandalone">
-            <!-- 抽屉左上角返回（细长窗口才有：抽屉盖住了工具栏上的那个开关） -->
+            <!-- 抽屉左上角返回（细长窗口才有：抽屉盖住了标签栏上的那个开关） -->
             <template #toolbar-left>
               <div v-if="isTallLayout" class="panel-home-btn drawer-back" @click="toggleMode('file')"
                 :title="store.locales=='zh'?'收起文件树':'Close file tree'">
@@ -42,6 +43,18 @@
              都收在它里面，用下方工具栏的下拉切换，不再各占一个标签）+ 打开的文件（可关闭，自带多视图选择）。
              标签放不下时支持鼠标滚轮左右滚动 / 触摸屏左右滑动。 -->
         <div v-if="store.singleWindowMode && (store.root || fileTabs.length)" class="know-tabs">
+          <!-- 显示 / 隐藏左侧面板：单窗口模式固定在这条标签栏最左侧（工具栏里不再重复出现） -->
+          <button
+            class="know-tab-action know-tab-panel-toggle"
+            :class="{ active: !!mode }"
+            :title="mode
+              ? (store.locales === 'zh' ? '隐藏左侧面板' : 'Hide left panel')
+              : (store.locales === 'zh' ? '显示左侧面板' : 'Show left panel')"
+            @click="toggleMode('file')"
+          >
+            <i class="fa" :class="mode ? 'fa-outdent' : 'fa-indent'"></i>
+          </button>
+          <span class="know-tab-sep"></span>
           <div ref="tabStripRef" class="know-tab-strip scoll-x" @wheel="onTabStripWheel">
             <div
               v-for="tab in allTabs"
@@ -101,6 +114,7 @@
           v-if="viewToolbarVisible && !activeFileTab"
           v-model:search="store.knowQuery"
           :panel-open="!!mode"
+          :show-panel-toggle="!store.singleWindowMode"
           :searchable="viewToolbarSearchable && !activeFileTab"
           :show-view-select="!activeFileTab"
           :placeholder="store.locales === 'zh' ? '搜索当前目录…（支持 属性:值）' : 'Search this folder… (attr:value)'"
@@ -595,7 +609,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     }),
   )
 
-  // 顶部工具栏（视图选择 + 面板开关 + 路径面包屑 + 搜索 + 刷新）：右侧视图共用这一条
+  // 顶部工具栏（视图选择 + 路径面包屑 + 搜索 + 刷新）：右侧视图共用这一条
+  // （面板开关只在多窗口模式留在这里；单窗口模式移到右侧标签栏最左侧，见 know-tabs）
   const viewToolbarVisible = computed(() => !!store.root)
   // 只有「地图」没有搜索需求：当前视图是地图时不显示搜索框
   const viewToolbarSearchable = computed(() => activeView.value !== '地图')
@@ -1091,12 +1106,32 @@ import { useTallLayout } from '@/composables/useTallLayout'
     font-size: 12px;
   }
   .know-tab-action:hover { opacity: 1; color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontColor) 8%, transparent); }
+  /* 标签栏最左侧的「显示 / 隐藏左侧面板」开关：与工具栏里的按钮同尺寸、同观感 */
+  .know-tabs .know-tab-panel-toggle {
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    opacity: 0.75;
+  }
+  .know-tabs .know-tab-panel-toggle.active { color: var(--fontActiveColor); }
+  /* 开关与标签之间的细竖线（避免看上去像第一个标签） */
+  .know-tab-sep {
+    width: 1px;
+    height: 14px;
+    flex-shrink: 0;
+    margin: 0 3px;
+    background: var(--borderColor);
+  }
   /* 触摸屏（安卓等）：没有 hover，关闭按钮必须常显，否则用户不知道标签能关；
      同时把标签 / 按钮放大到手指好点的尺寸 */
   @media (hover: none) {
     .know-tab { height: 30px; padding: 0 9px; }
     .know-tab-close { opacity: 0.65; padding: 4px; font-size: 11px; }
     .know-tab-action { width: 30px; height: 30px; }
+    .know-tabs .know-tab-panel-toggle { width: 30px; height: 30px; }
   }
 
   /* 文件标签面板：撑满右侧内容区（FileWindow 内部自己排布标题栏 + 视图） */
