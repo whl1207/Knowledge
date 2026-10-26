@@ -1,41 +1,63 @@
 /**
- * remote-fs-service.ts — 局域网远程文件共享（HTTP 只读服务）
+ * remote-fs-service.ts — 局域网远程文件共享（HTTP 服务）
  *
  * 主机在设置 → 协作面板共享一个文件夹，客户端通过「添加远程工作区」访问：
- *   - 只读：仅提供目录列表 / 文件内容 / 下载，不提供写接口（编辑需下载到本地）
+ *   - 默认只读：提供目录列表 / 文件内容 / 下载；
+ *   - 可选「可编辑 Markdown」：只对 .md / .markdown 等笔记文本开放写接口，其他类型仍只读；
  *   - 安全：token 校验 + 路径白名单（强制限定在共享根目录内，防目录穿越）
  *   - 传输：HTTP JSON / 二进制流
  *
  * 路由（所有路径均需带 token）：
- *   GET /fs/info?token=…            → { name, rootPath, port } 共享信息
- *   GET /fs/list?path=相对路径&token=… → JSON 目录树（与 refreshMultiTree 同构：
- *                                       [{ label, path, type, children?, size?, mtime? }]）
- *   GET /fs/read?path=相对路径&token=… → 文件内容（文本原样 / 二进制 base64）
- *   GET /fs/download?path=相对路径&token=… → 原始二进制流（下载用）
- *   GET /fs/store?path=相对路径&token=…  → 商店清单（扫描出该目录下的插件 / 技能，含下载地址）
- *   GET /fs/bundle?path=相对路径&token=… → 目录打包（{ files:[{path,text|base64}] }，安装技能 / 插件用）
+ *   GET  /fs/info?token=…            → { name, rootPath, port, permission } 共享信息
+ *   GET  /fs/list?path=相对路径&token=… → JSON 目录树（与 refreshMultiTree 同构：
+ *                                        [{ label, path, type, children?, size?, mtime? }]）
+ *   GET  /fs/read?path=相对路径&token=… → 文件内容（文本原样 / 二进制 base64）
+ *   GET  /fs/download?path=相对路径&token=… → 原始二进制流（下载用）
+ *   POST /fs/write?token=…            → 保存 Markdown（body: { path: 相对路径, content }；需 permission=md）
+ *   GET  /fs/store?path=相对路径&token=…  → 商店清单（扫描出该目录下的插件 / 技能，含下载地址）
+ *   GET  /fs/bundle?path=相对路径&token=… → 目录打包（{ files:[{path,text|base64}] }，安装技能 / 插件用）
  *
- * 后两条让「共享目录」可以直接当插件商店 / 技能商店的来源：客户端只认 HTTP（渲染层无法用 FTP），
+ * 商店 / 打包两条让「共享目录」可以直接当插件商店 / 技能商店的来源：客户端只认 HTTP（渲染层无法用 FTP），
  * 这里复用了既有的 token、只读与目录穿越防护，不需要新协议 / 新端口。
  */
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { ipcMain, BrowserWindow } from 'electron'
 import { asUint8 } from './buffer-view'
+import { atomicWrite } from './atomic-write'
 
 export const REMOTE_FS_DEFAULT_PORT = 3347
+
+/** 局域网用户权限：readonly=只读（默认） / md=允许编辑 Markdown */
+export type RemoteFsPermission = 'readonly' | 'md'
 
 interface RemoteFsState {
   rootDir: string
   token: string
+  permission: RemoteFsPermission
+}
+
+/** 允许远程编辑的 Markdown 扩展名（其他文件类型一律保持只读） */
+const REMOTE_WRITE_EXT = new Set(['.md', '.markdown', '.mdown', '.mkd'])
+/** /fs/write 请求体上限：Markdown 笔记远小于此，限流避免一次请求吃光内存 */
+const REMOTE_WRITE_MAX_BYTES = 8 * 1024 * 1024
+
+function normalizePermission(value: unknown): RemoteFsPermission {
+  return value === 'md' ? 'md' : 'readonly'
+}
+
+function canWriteRemotely(abs: string): boolean {
+  return REMOTE_WRITE_EXT.has(path.extname(abs).toLowerCase())
 }
 
 let server: Server | null = null
 let serverPort = REMOTE_FS_DEFAULT_PORT
 let state: RemoteFsState | null = null
+/** 服务停止后仍保留最近一次权限设置（设置页回读状态时不会把用户的「可编辑 Markdown」重置掉） */
+let lastPermission: RemoteFsPermission = 'readonly'
 
 // ---------------- 工具 ----------------
 
@@ -300,17 +322,51 @@ function notifyStatus() {
 
 // ---------------- 请求处理 ----------------
 
-function handleRequest(req: IncomingMessage, res: ServerResponse) {
+/** 读取 JSON 请求体（带上限，超限直接断开并报错） */
+function readJsonBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    let settled = false
+    const fail = (err: Error) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    }
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return
+      total += chunk.length
+      if (total > REMOTE_WRITE_MAX_BYTES) {
+        fail(new Error('内容过大'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('error', (err) => fail(err))
+    req.on('end', () => {
+      if (settled) return
+      settled = true
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
+      } catch {
+        reject(new Error('请求内容不是有效 JSON'))
+      }
+    })
+  })
+}
+
+async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') {
     res.statusCode = 204
     res.end()
     return
   }
-  if (req.method !== 'GET') {
-    writeJson(res, 405, { error: '仅支持 GET' })
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    writeJson(res, 405, { error: '仅支持 GET / POST' })
     return
   }
 
@@ -323,20 +379,62 @@ function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return
   }
 
-  const rel = url.searchParams.get('path') || ''
-  const abs = resolveInsideRoot(rel)
-  if (!abs) {
-    writeJson(res, 400, { error: '路径无效或越界' })
-    return
-  }
-
   try {
+    // 保存 Markdown：仅 permission=md 时开放，且只接受共享目录内已存在的 Markdown 文件
+    if (req.method === 'POST') {
+      if (url.pathname !== '/fs/write') {
+        writeJson(res, 404, { error: '未知接口' })
+        return
+      }
+      if (!state || state.permission !== 'md') {
+        writeJson(res, 403, { error: '共享权限为只读，无法保存' })
+        return
+      }
+      let body: any
+      try {
+        body = await readJsonBody(req)
+      } catch (e: any) {
+        writeJson(res, 400, { error: e?.message || '请求内容无效' })
+        return
+      }
+      const rel = typeof body?.path === 'string' ? body.path : ''
+      const content = typeof body?.content === 'string' ? body.content : null
+      const target = resolveInsideRoot(rel)
+      if (!target || !rel) {
+        writeJson(res, 400, { error: '路径无效或越界' })
+        return
+      }
+      if (!canWriteRemotely(target)) {
+        writeJson(res, 403, { error: '当前共享仅允许编辑 Markdown 文件' })
+        return
+      }
+      if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+        writeJson(res, 404, { error: '文件不存在' })
+        return
+      }
+      if (content == null) {
+        writeJson(res, 400, { error: '缺少 content' })
+        return
+      }
+      const size = await atomicWrite(target, content, { minMtimeMs: Date.now() })
+      writeJson(res, 200, { success: true, size })
+      return
+    }
+
+    const rel = url.searchParams.get('path') || ''
+    const abs = resolveInsideRoot(rel)
+    if (!abs) {
+      writeJson(res, 400, { error: '路径无效或越界' })
+      return
+    }
+
     switch (url.pathname) {
       case '/fs/info': {
         writeJson(res, 200, {
           name: path.basename(state.rootDir),
           rootPath: state.rootDir,
           port: serverPort,
+          permission: state.permission,
         })
         return
       }
@@ -345,6 +443,7 @@ function handleRequest(req: IncomingMessage, res: ServerResponse) {
           writeJson(res, 404, { error: '目录不存在' })
           return
         }
+        const rootAbs = path.resolve(state.rootDir)
         const tree = fs.readdirSync(abs, { withFileTypes: true })
           .filter((d) => d.name !== '.git' && d.name !== 'node_modules')
           .sort((a, b) => {
@@ -353,11 +452,14 @@ function handleRequest(req: IncomingMessage, res: ServerResponse) {
           })
           .map((d) => {
             const childAbs = path.join(abs, d.name)
+            // 客户端后续用这个 path 再调 /fs/list、/fs/read：必须是**共享根相对路径**，
+            // 返回绝对路径会让下一层目录被判「越界」而打不开（历史上目录点不开的根因）。
+            const childRel = path.relative(rootAbs, childAbs).split(path.sep).join('/')
             let cstat: fs.Stats | null = null
             try { cstat = fs.statSync(childAbs) } catch { /* ignore */ }
             return {
               label: d.name,
-              path: childAbs,
+              path: childRel,
               type: d.isDirectory() ? 'folder' : 'file',
               size: cstat?.isFile() ? cstat.size : 0,
               mtime: cstat ? Math.floor(cstat.mtimeMs) : 0,
@@ -434,7 +536,14 @@ function handleRequest(req: IncomingMessage, res: ServerResponse) {
 function listenOnce(port: number): Promise<'ok' | 'busy' | 'fatal'> {
   return new Promise((resolve) => {
     let settled = false
-    const s = createServer(handleRequest)
+    const s = createServer((req, res) => {
+      void handleRequest(req, res).catch((e: any) => {
+        try {
+          if (!res.headersSent) writeJson(res, 500, { error: e?.message || '服务器错误' })
+          else res.end()
+        } catch { /* ignore */ }
+      })
+    })
     s.on('error', (e: any) => {
       if (settled) return
       settled = true
@@ -454,21 +563,23 @@ export async function startRemoteFs(opts: {
   port?: number
   rootDir?: string
   token?: string
-} = {}): Promise<{ success: boolean; port?: number; token?: string; error?: string }> {
+  permission?: RemoteFsPermission | string
+} = {}): Promise<{ success: boolean; port?: number; token?: string; permission?: RemoteFsPermission; error?: string }> {
   if (server) return { success: false, error: '远程文件服务已在运行' }
   const rootDir = opts.rootDir || ''
   if (!rootDir || !fs.existsSync(rootDir) || !fs.statSync(rootDir).isDirectory()) {
     return { success: false, error: '共享文件夹无效' }
   }
   const token = opts.token || makeToken()
-  state = { rootDir, token }
+  lastPermission = normalizePermission(opts.permission)
+  state = { rootDir, token, permission: lastPermission }
   const base = opts.port || REMOTE_FS_DEFAULT_PORT
   for (let p = base; p <= base + 20; p++) {
     const r = await listenOnce(p)
     if (r === 'ok') {
       serverPort = p
       notifyStatus()
-      return { success: true, port: p, token }
+      return { success: true, port: p, token, permission: state.permission }
     }
     if (r === 'fatal') {
       state = null
@@ -507,13 +618,26 @@ export function getRemoteFsStatus() {
     rootDir: server && state ? state.rootDir : '',
     token: server && state ? state.token : '',
     name: server && state ? path.basename(state.rootDir) : '',
+    permission: state ? state.permission : lastPermission,
   }
+}
+
+/** 运行中即时切换权限（不必停服；客户端下次 /fs/info 或保存时按新权限校验） */
+export function setRemoteFsPermission(permission: unknown): { success: boolean; permission: RemoteFsPermission } {
+  const next = normalizePermission(permission)
+  lastPermission = next
+  if (state) {
+    state.permission = next
+    notifyStatus()
+  }
+  return { success: true, permission: next }
 }
 
 export function registerRemoteFsIpc() {
   ipcMain.handle('remoteFs:start', async (_e, payload) => startRemoteFs(payload || {}))
   ipcMain.handle('remoteFs:stop', async () => stopRemoteFs())
   ipcMain.handle('remoteFs:getStatus', async () => getRemoteFsStatus())
+  ipcMain.handle('remoteFs:setPermission', async (_e, permission) => setRemoteFsPermission(permission))
 }
 
 export function stopRemoteFsAll() {

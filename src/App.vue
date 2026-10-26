@@ -44,6 +44,7 @@ import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
   // 插件面板全屏时请求隐藏宿主外壳（顶栏 / 左侧导航 / 底部导航）：见 lib/plugin/panelChrome.ts
   import { panelChromeHidden, resetPanelChrome } from '@/lib/plugin/panelChrome'
 import { getPlatform, hasCapability, isHostGuestRuntime } from '@/platform'
+import { hostRuntime } from '@/platform/host'
 import { runTopBackLayer, registerBackLayer, BACK_ORDER } from '@/platform/backLayers'
 import { useTallLayout } from '@/composables/useTallLayout'
 
@@ -99,6 +100,14 @@ import { useTallLayout } from '@/composables/useTallLayout'
   const isTallLayout = useTallLayout()
   store.setTheme()
 
+  // 局域网访客：主机在入口页注入的可见模块 / 插件策略，首帧就应用（避免先闪出全部导航）。
+  // 后续由 /api/agent/info 轮询刷新（见 onMounted 与 home.vue）。
+  if (isBrowser) {
+    const rt = hostRuntime()
+    store.lanGuestVisibleNavs = rt?.navs ?? null
+    store.lanGuestVisiblePlugins = rt?.plugins ?? null
+  }
+
   /**
    * 局域网共享：把「访客权限策略 + 主机模型」下发给主进程（P3/P4 的主机侧据此校验令牌、
    * 限并发、并给访客智能体会话兑上模型与工具白名单）。
@@ -152,7 +161,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
   const navButtonDefs = computed(() => {
     const zh = store.locales === 'zh'
     return panelSlotEntries.value
-      .filter((def) => store.isNavVisible(def.key))
+      .filter((def) =>
+        store.isNavVisible(def.key)
+        // 局域网访客：插件面板按「所属插件」由主机授权（内置面板 pluginId 为空，直接放行）
+        && store.isGuestPluginPanelVisible(def.key, pluginIdOfOwner(def.owner)))
       .map((def) => ({
         key: def.key,
         core: isBuiltinPanel(def.key),
@@ -192,7 +204,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
    */
   const panelVisibilitySignature = computed(
     () =>
-      `${panelSlotEntries.value.map((d) => d.key).join('\u0000')}\u0001${store.hiddenNavs.join('\u0000')}\u0001${store.mainPanel}`,
+      `${panelSlotEntries.value.map((d) => d.key).join('\u0000')}\u0001${store.hiddenNavs.join('\u0000')}\u0001${(store.lanGuestVisibleNavs || []).join('\u0000')}\u0001${(store.lanGuestVisiblePlugins || []).join('\u0000')}\u0001${store.mainPanel}`,
   )
   watch(
     panelVisibilitySignature,
@@ -424,6 +436,14 @@ import { useTallLayout } from '@/composables/useTallLayout'
   )
 
   onMounted(async () => {
+    // 局域网访客：入口页注入的是加载瞬间的策略；挂载后再对齐一次主机最新可见性
+    //（主机改完设置、访客刷新即可看到；不必等打开某个具体模块）
+    if (isBrowser) {
+      void import('@/platform/lanAgentClient')
+        .then(({ lanAgentTransport }) => lanAgentTransport.info())
+        .then((info) => store.applyLanGuestVisibility(info))
+        .catch((e) => console.warn('[lan-guest] 读取主机可见性失败:', e))
+    }
     // 检测是否在文件独立窗口中
     isFileWindow.value = window.location.hash.startsWith('#/file-view')
     // 检测是否在浏览器 Agent 独立窗口中
@@ -1006,7 +1026,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
             <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
               <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
             </div>
-            <div v-if="hasCapability('window.chrome')" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
+            <div v-if="hasCapability('window.chrome')" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-right: 6px;"><i class="fa fa-times"></i></div>
           </template>
           <template v-else>
             <!-- 左侧/下方导航布局：顶栏只保留标题 + 3 个窗口按钮（其余按钮在对应导航栏）；标题水平居中 -->

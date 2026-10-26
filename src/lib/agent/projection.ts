@@ -14,6 +14,19 @@ export interface StepProjectionResult {
   lastTool: any | null
 }
 
+/** 时间线投影选项 */
+export interface StepProjectionOptions {
+  /**
+   * 只投影 turn 编号 >= minTurn 的步骤。
+   *
+   * 为什么需要：跨轮复用同一个 agent 会话（resume）时，主进程 bridge 视图里
+   * 仍保留着上一轮的 steps。新建的 assistant 消息如果直接投影，会把上一轮的
+   * 工具卡片 / 思考过程「追加」到新消息里。runner 传 `startTurn + 1` 即可只
+   * 收本轮的步骤；不传（例如切模块后重新挂接运行中的会话）则投影全部可见步骤。
+   */
+  minTurn?: number
+}
+
 /**
  * 步骤时间线 → `msg.executionUnits`。
  *
@@ -21,12 +34,15 @@ export interface StepProjectionResult {
  * 最后插该 step 的工具调用；思考可出现在工具之前或工具之间。
  * 同 id 合并时「有结果/已结束的优先」，防止中间态快照覆盖掉已带结果的条目。
  */
-export function projectStepsToUnits(msg: any, v: any): StepProjectionResult {
+export function projectStepsToUnits(msg: any, v: any, opts?: StepProjectionOptions): StepProjectionResult {
   const units: any[] = []
   // 服务端搜索激活时（searchEvents 含 search/open/done 事件）：思考段由事件队列切分，
   // 这里不再生成聚合思考单元（仅 reasoning 事件 = 普通推理，仍由本投影生成，按 step 顺序穿插）
   const hasServerSearch = !!(v.searchEvents && v.searchEvents.some((e: any) => e && e.kind !== 'reasoning'))
+  const minTurn = opts?.minTurn
   for (const step of v.steps || []) {
+    // 跨轮 resume：旧 turn 的步骤不进入新消息（turn 缺失的旧数据保持兼容，照常投影）
+    if (minTurn !== undefined && Number(step?.turn) && Number(step.turn) < minTurn) continue
     // 思考单元：该 step 的模型思维链（流式），排在工具调用之前
     if (step.reasoning && !hasServerSearch) {
       units.push({

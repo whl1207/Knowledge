@@ -274,6 +274,9 @@ class AgentBridge {
     // 此时必须沿用该视图，否则新空视图会覆盖已投影的状态/步骤（网页端 SSE 更易命中）。
     const existing = this.sessions.get(id)
     if (existing) {
+      // 会话被 dispose 后同一份日志又被 resume：复用视图对象，但必须重置生命周期字段，
+      // 否则 UI 会一直认为它已销毁。
+      if (existing.disposed) Object.assign(existing, createView(id, options.label))
       if (!existing.label) existing.label = options.label
       return existing
     }
@@ -475,6 +478,14 @@ class AgentBridge {
         view.searchStatus = null
         view.searchEvents = []
         view.stepSettled = false
+        // 这些是「上一轮」的投影状态，不能带进新 turn 的 assistant 消息：
+        // - lastUsage：新消息还没发请求，先显示上一轮 token 数会看起来像已经跑了一轮；
+        // - compaction：上一轮的压缩卡片会再次出现在新消息里（seq 保留，只把相位归零）；
+        // - notice / lastError：上一轮的提示 / 错误不应在成功后再次弹出。
+        view.lastUsage = undefined
+        view.compaction = { seq: view.compaction.seq, phase: 'idle', kind: 'auto' }
+        view.notice = undefined
+        view.lastError = undefined
         break
       case 'agent/step-start':
         view.step = ev.payload.step

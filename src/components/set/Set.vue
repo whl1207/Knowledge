@@ -1095,8 +1095,10 @@ onBeforeUnmount(() => {
           <i class="fa fa-times"></i>
         </div>
       </template>
-      <div v-else class="settings-close" @click="closeSettings" :title="store.locales === 'zh' ? '关闭设置' : 'Close settings'">
-        <i class="fa fa-times"></i>
+      <!-- 单窗口 / 网页端的设置是页面内浮层（不是窗口）：用「返回」而不是窗口关闭 ×，
+           避免和右上角的系统窗口关闭按钮混淆 -->
+      <div v-else class="settings-close" @click="closeSettings" :title="store.locales === 'zh' ? '返回（关闭设置）' : 'Back (close settings)'">
+        <i class="fa fa-arrow-left"></i>
       </div>
     </div>
     <!-- 左侧导航栏（细长窗口下与右侧内容各占满整屏互相切换，见 .tall 样式） -->
@@ -1738,8 +1740,8 @@ onBeforeUnmount(() => {
   background-color: var(--menuColor);
   border: 1px solid var(--borderColor);
   /* 与面板圆角一致，让上边框沿圆角走，避免圆角处被直线切掉 */
-  border-top-left-radius: 10px;
-  border-top-right-radius: 10px;
+  border-top-left-radius: 5px;
+  border-top-right-radius: 5px;
   user-select: none;
 }
 
@@ -1780,6 +1782,10 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: all 0.2s ease;
   font-size: 14px;
+}
+.settings-close:hover {
+  color: var(--fontActiveColor);
+  background-color: var(--menuActiveColor);
 }
 
 /* ====== 独立窗口模式（standalone） ====== */
@@ -1879,7 +1885,7 @@ onBeforeUnmount(() => {
   user-select: none;
   overflow-y: auto;
   /* 与容器/面板圆角一致，避免左下角直角露出 */
-  border-bottom-left-radius: 10px;
+  border-bottom-left-radius: 5px;
 }
 
 /* ====== 一级分组（可折叠） ====== */
@@ -1990,7 +1996,7 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   height: calc(100% - 0px);
   /* 与容器/面板圆角一致，避免右下角直角露出 */
-  border-bottom-right-radius: 10px;
+  border-bottom-right-radius: 5px;
 }
 
 /* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：导航 / 内容各占满整屏互相切换 ======

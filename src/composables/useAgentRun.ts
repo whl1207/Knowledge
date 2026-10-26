@@ -44,6 +44,7 @@ import { presetPresentation } from '@/lib/agent/ptc'
 import type { Chat, ChatMessage, UploadItem } from '@/types/chat'
 import type { AgentOptions } from '@/types/agent'
 import { normalizeAgentMaxSteps, resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
+import { agentSessionSignature } from '@/shared/agentSession'
 import { buildAgentAttachmentContext } from '@/shared/fileAttachmentContext'
 import { normalizeLlmType, resolveLlmSource, resolvePresetLlmType, resolvePresetModel } from '@/shared/llmSources'
 import { AIUtils } from '@/shared/ai-core'
@@ -140,11 +141,20 @@ export function useAgentRun(deps: AgentRunDeps) {
     return { provider: type, config, llmConfig }
   }
 
-  /** 把 agent 会话的流式输出接入聊天消息（复用桥接层的状态投影） */
-  const attachAgentToChat = (viewId: string, assistantMsg: ChatMessage, chatRef?: Chat) => {
+  /**
+   * 把 agent 会话的流式输出接入聊天消息（复用桥接层的状态投影）。
+   *
+   * @param opts.startTurn 本消息对应的新 turn 开始前的 turn 编号。跨轮 resume 时 bridge
+   *   视图里还留着上一轮的 steps：send() 的首次 notify 与 turn-start 之间会把这些旧步骤
+   *   投影进新 assistant 消息（表现为「新任务把上一轮的步骤又追加了一遍」）。传入该值后，
+   *   在 `v.turn` 真正推进到下一轮之前不投影任何状态；projection 再按 turn 兜底过滤。
+   *   切模块后重新挂接运行中的会话（reconcile）不传，保持现有行为。
+   */
+  const attachAgentToChat = (viewId: string, assistantMsg: ChatMessage, chatRef?: Chat, opts?: { startTurn?: number }) => {
     // 本会话已有的订阅先退订（防止重复注册同一 viewId 的监听器）
     const existing = agentChatUnsubs.get(viewId)
     if (existing) { existing(); agentChatUnsubs.delete(viewId) }
+    const startTurn = opts?.startTurn
     let sawRunning = false // 是否进入过 running（防止 send 前初始 idle 误判结束）
     const processedKb = new Set<string>() // 已收集来源的 kb_search 调用
     const handledAsks = new Set<string>() // 已弹窗的 ask_user 提问（按 askId 去重）
@@ -161,7 +171,9 @@ export function useAgentRun(deps: AgentRunDeps) {
     let notifiedCompactSeq = 0 // 已提示过的上下文压缩序号（每次压缩只弹一次完成提示）
     // 思考/工具时间线投影：与集群模式共用同一实现（见 src/lib/agent/projection）
     const projectSteps = (v: any) => {
-      const { lastTool } = projectStepsToUnits(assistantMsg, v)
+      const { lastTool } = projectStepsToUnits(assistantMsg, v, {
+        minTurn: startTurn !== undefined ? startTurn + 1 : undefined,
+      })
       // 输入区右侧的最新工具调用快照（仅统计工具单元，跳过思考单元）
       if (lastTool) {
         const ownerChat = chatRef ?? getCurrentChat()
@@ -178,6 +190,10 @@ export function useAgentRun(deps: AgentRunDeps) {
     }
     const unsub = agentBridge.on((v) => {
       if (v.id !== viewId) return
+      // 跨轮 resume：send() 的首次 notify 发生在主进程 turn-start 之前，view 里仍是上一轮的
+      // steps / token 用量 / 压缩卡片。等 turn 真正推进后再投影，否则新消息会「继承」上一轮显示。
+      // （turn-start 到达时 bridge 已把 v.turn 更新为新 turn，且 steps 已重置。）
+      if (startTurn !== undefined && !(Number(v.turn) > startTurn)) return
       // 是否已进入 running：agentBridge.send() 在发送前会先 notify 一次（status 仍为初始 idle），
       // 必须等到真正 running 后再出现的 idle 才算会话结束，否则一发送就误判完成。
       if (v.status === 'running') sawRunning = true
@@ -589,6 +605,77 @@ export function useAgentRun(deps: AgentRunDeps) {
     void restorePendingPlanReview()
   }
 
+  /**
+   * 彻底释放一个 agent 会话：先退订本窗口的流监听（之后它再发事件也不会写回聊天），
+   * 再 cancel + dispose 主进程会话。清空聊天 / 清空全部聊天记录时使用。
+   *
+   * 与 `stopAgentsInChat`（只停当前轮、保留会话给下一轮 resume）不同：
+   * 这里连会话本身一起释放，下一条消息必然新建会话，不会带着旧日志里的推理历史继续跑。
+   */
+  const disposeAgentSession = (sessionId: string): void => {
+    const id = String(sessionId || '').trim()
+    if (!id) return
+    // 会话若正挂着 ask_user / 计划评审，弹窗也要一起收掉：监听已退订，
+    // 之后不会再有 idle 事件替我们清理，否则清空聊天后弹窗会一直悬着。
+    const view = agentBridge.get(id)
+    if (view?.pendingQuestion?.askId) dismissAsk(view.pendingQuestion.askId)
+    if (view?.pendingPlanReview?.reviewId) dismissPlanReview(view.pendingPlanReview.reviewId)
+    const unsub = agentChatUnsubs.get(id)
+    if (unsub) { unsub(); agentChatUnsubs.delete(id) }
+    agentBridge.cancel(id, 'user').catch(() => { /* 已空闲 / 已不存在 */ })
+    void agentBridge.dispose(id).catch(() => { /* 已销毁 / 传输层不支持 */ })
+  }
+
+  /** 该聊天引用到的全部 agent 会话 id（持久会话 id + 消息上的 view id + 待评审会话） */
+  const collectAgentSessionIds = (chat: any): Set<string> => {
+    const ids = new Set<string>()
+    const add = (v: any) => {
+      const s = String(v ?? '').trim()
+      if (s) ids.add(s)
+    }
+    add(chat?.agentSessionId)
+    add(chat?.pendingPlanReview?.sessionId)
+    for (const m of (chat?.messages || []) as any[]) {
+      if (m && m.role === 'assistant') add(m.agentViewId)
+    }
+    return ids
+  }
+
+  /**
+   * 清空聊天的智能体运行态（调用方负责随后清空 `chat.messages`）。
+   *
+   * 清空聊天后不能只是「UI 没了」：主进程会话还在、`chat.agentSessionId` 还在，
+   * 下一次发送会 resume 同一份日志（带着旧推理/工具证据继续），表现为「智能体还在想」。
+   * 这里停掉并释放会话、清掉会话 id / 签名 / 计划 / 待办 / 评审，下一次发送即从零开始。
+   */
+  const resetAgentChatSession = (chat: any): void => {
+    if (!chat) return
+    // 会话已不在 bridge 里时，聊天存档里的待评审仍可能挂着弹窗
+    if (chat.pendingPlanReview?.reviewId) dismissPlanReview(chat.pendingPlanReview.reviewId)
+    const ids = collectAgentSessionIds(chat)
+    for (const id of ids) disposeAgentSession(id)
+    if (agentSessionId.value && ids.has(agentSessionId.value)) agentSessionId.value = null
+
+    chat.agentSessionId = null
+    chat.agentSessionSignature = null
+    chat.agentPlan = null
+    chat.agentTodos = []
+    chat.agentLastTool = null
+    chat.pendingPlanReview = null
+    chat.planDecision = undefined
+    // 清空时无论旧会话是否还在收尾，都不应让聊天保持「执行中」而挡住下一条消息
+    chat.isGenerating = false
+  }
+
+  /**
+   * 清空全部聊天记录前调用：
+   * 释放所有聊天引用的 agent 会话，避免被清掉的旧会话继续在后台推理并写回孤儿对象。
+   */
+  const resetAllAgentSessions = (): void => {
+    for (const chat of (chatsRef.value || []) as any[]) resetAgentChatSession(chat)
+    agentSessionId.value = null
+  }
+
   /** 手动停止某聊天里所有执行中的智能体会话：
    *  立即取消主进程会话并退订监听、清转圈/解锁，但**保留**已生成的内容与工具时间线记录
    *  （未运行完的任务片段原样留在聊天里，供后续智能体继续读取上下文）。
@@ -680,10 +767,17 @@ export function useAgentRun(deps: AgentRunDeps) {
       return null
     }
     const chat = getCurrentChat()
+    // 清空聊天 / 切换会话可能发生在 create 的异步间隙里：以「发起这次任务时的最后一条消息」
+    // 作为锚点，异步返回后若它已不在聊天里（被清空/被替换），说明本次任务已作废，
+    // 不能再把迟到的 agent 会话挂到已清空的聊天上继续推理。
+    const runAnchor = (chat.messages || [])[chat.messages.length - 1]
+    const runStillCurrent = () => !runAnchor || chat.messages.includes(runAnchor)
+    if (!runStillCurrent()) return null
     try {
       // 多模态附图（上传的图片）：转成 data URL 字符串塞进 options（JSON 安全），
       // 主进程只在内存里持有，并在每次请求时挂回「带图的那条 user 消息」
       const taskImages = await toTaskImages(images)
+      if (!runStillCurrent()) return null
       // 上下文窗口上限：与主页圆环同源解析（手填 > 已加载实例探测 > 记住值 > 模型上限 > 来源默认），
       // 交给主进程做请求前预算检查与主动压缩（P0 上下文压缩）
       const contextLimit = resolveLimitFor(store.AIconfig.llm, {
@@ -696,15 +790,47 @@ export function useAgentRun(deps: AgentRunDeps) {
       const providerKey = String(options.provider || '')
       const modelKey = String(options.llmConfig?.model || options.config?.model || '')
       const tokenScale = getTokenScale(providerKey, modelKey)
+      // 跨轮持久会话：同一个聊天复用上一条 agent 日志（工具证据 / 图片 / 先读后写观察记录都在）。
+      // 配置签名不同（换模型、改系统提示/工具集）或存在待注入的评审裁决时才新建会话。
+      const sessionSignature = agentSessionSignature(options)
+      const canResume = options.provider !== 'lan-host'
+        && !!chat.agentSessionId
+        && chat.agentSessionSignature === sessionSignature
+        && !chat.planDecision
       const view = await agentBridge.create({
         ...options,
+        ...(canResume
+          ? {
+              sessionId: chat.agentSessionId!,
+              resume: true,
+              // 恢复会话时不要重复写种子；历史已经在同一份 session log 里
+              seedHistory: undefined,
+              seedPlan: undefined,
+              seedTodos: undefined,
+              seedPlanDecision: undefined,
+            }
+          : {}),
         contextLimit,
         tokenScale,
         ...(taskImages.length ? { taskImages } : {}),
       })
+      if (!runStillCurrent()) {
+        // 会话创建期间聊天已被清空/替换：释放这个迟到的会话，不写任何消息、不启动推理
+        await agentBridge.cancel(view.id, 'user').catch(() => { /* 已空闲 */ })
+        await agentBridge.dispose(view.id).catch(() => { /* 已销毁 */ })
+        return null
+      }
       // 上一轮「进程重启后补答」的评审裁决已经写进新会话日志，聊天存档里的待交付标记可以清了
       if ((chat as any).planDecision) (chat as any).planDecision = undefined
+      // 回写会话 id / 签名：下一次发送直接 resume（主进程返回新 id 时自动改绑）
+      chat.agentSessionId = view.id
+      chat.agentSessionSignature = sessionSignature
+      chat.schemaVersion = 2
       agentSessionId.value = view.id
+      saveChats()
+      // 本消息对应的新 turn = 当前 turn + 1。resume 时 view.steps 仍是上一轮的，
+      // 记录基线给 attach，避免 send 的首次 notify 把旧步骤投影进新消息。
+      const startTurn = Number(view.turn) || 0
       const assistantMsg: ChatMessage = {
         role: 'assistant', content: '', timestamp: Date.now(),
         executionType: 'skill' as any, isExecuting: true, streaming: true,
@@ -716,7 +842,7 @@ export function useAgentRun(deps: AgentRunDeps) {
         ctxSeedTokens: estimateAgentSeedTokens({
           systemPrompt: options.systemPrompt,
           tools: options.tools,
-          seedHistory: options.seedHistory,
+          seedHistory: canResume ? undefined : options.seedHistory,
         }),
         // 校准系数的记忆键：主进程实测的「真实/估算」比值会回传（agent/step-end.tokenScale），
         // 这里按「来源 + 模型」记住，供后续会话与普通聊天复用（见 lib/contextUsage）
@@ -729,10 +855,12 @@ export function useAgentRun(deps: AgentRunDeps) {
       // 否则 attachAgentToChat 里直接改 push 前的原始对象不触发依赖通知（token 计数/圆环
       // 需重开对话才刷新）。取出 push 后数组末尾的 proxy 作为更新目标。
       const reactiveAssistantMsg = chat.messages[chat.messages.length - 1] as ChatMessage
-      attachAgentToChat(view.id, reactiveAssistantMsg, chat)
+      attachAgentToChat(view.id, reactiveAssistantMsg, chat, { startTurn })
       await agentBridge.send(view.id, userInput)
       return view
     } catch (e: any) {
+      // 清空/切换聊天后异步启动才失败：这次任务已作废，不要再往已清空的聊天里写错误
+      if (!runStillCurrent()) return null
       chat.isGenerating = false
       // 启动/发送失败兜底：占位消息若仍为空，补写错误原因（isExecuting 交由结束清理/对账复位）
       const ghost = chat.messages[chat.messages.length - 1]
@@ -1135,6 +1263,10 @@ export function useAgentRun(deps: AgentRunDeps) {
     reconcileAgentRuns,
     /** 手动停止某聊天里所有执行中的智能体会话（保留记录、立即解锁；home「停止」调用） */
     stopAgentsInChat,
+    /** 清空聊天时释放该聊天的 agent 会话并清掉会话 id/计划/待办（下一次发送从零开始） */
+    resetAgentChatSession,
+    /** 清空全部聊天记录前释放所有 agent 会话（设置页清空聊天记录联动） */
+    resetAllAgentSessions,
     /** 卸载时退订全部 agent 会话的流式订阅（home.vue onUnmounted 调用） */
     disposeAgentRun,
   }

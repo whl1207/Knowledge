@@ -5,17 +5,20 @@
  * 并且会被反复读写（开关、拖宽、加/关标签、切标签）。这些规则不依赖 Vue / DOM，
  * 抽成纯函数后可以直接跑自测（见 chatDock.selftest.ts），避免存档脏数据把界面搞坏。
  *
- * 工具页与 DSH 一致：文件 / 终端 / 浏览器；另外新增 `file` 类型承载「具体文件」标签
- * （点右侧栏文件树里的文件后生成，内容复用文件窗口的多视图选择）。
+ * 工具页与 DSH 一致：文件 / 终端 / 浏览器；`branch` 承载分支对话视图（不再单独占一列）；
+ * `new` 是点「+」先加的空白新标签页（在页内选类型，不弹菜单）；
+ * `file` 承载「具体文件」标签（点文件树里的文件后生成，内容复用文件窗口的多视图选择）。
  */
 
 /**
  * 标签类型：
  *  - files / terminal / browser：右侧栏的「工具页」（DSH 同款）；
+ *  - branch：分支对话视图（与工具页一样放在右侧栏里，不再单独占一列）；
+ *  - new：**空白新标签页**（点「+」先建它，再在面板里选具体类型）；
  *  - file：**具体文件**（点文件树里的文件后生成，标签标题 = 文件名，内容自带多视图切换）。
- * 后三种是用户从「+」菜单手动新建的；file 只能由打开文件产生（见 openFileDockTab）。
+ * new / file 不能从类型选择器直接创建（file 由打开文件产生，new 由「+」产生）。
  */
-export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'file'
+export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'branch' | 'new' | 'file'
 
 export interface ChatDockTab {
   /** 标签唯一 id（同类型可以开多个，如两个终端） */
@@ -45,19 +48,25 @@ export const DOCK_DEFAULT_WIDTH = 360
 export const DOCK_MIN_WIDTH = 260
 export const DOCK_MAX_WIDTH = 900
 
-/** 「+」菜单可新建的标签类型（顺序 = 菜单顺序；file 标签只能由打开文件产生，不在此列） */
-export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser']
+/** 新标签页里可选的类型（顺序 = 选项顺序；new / file 不在此列） */
+export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch']
+
+/** 旧版本自动预置的三标签（用于识别并清掉旧存档，与当前可选项无关） */
+const LEGACY_SEEDED_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser']
 
 const KIND_LABELS: Record<ChatDockTabKind, { zh: string; en: string }> = {
   files: { zh: '文件', en: 'Files' },
   terminal: { zh: '终端', en: 'Terminal' },
   browser: { zh: '浏览器', en: 'Browser' },
+  branch: { zh: '分支', en: 'Branches' },
+  new: { zh: '新标签页', en: 'New tab' },
   file: { zh: '文件', en: 'File' },
 }
 
 /** 类型是否合法（存档里出现未知类型时按非法处理） */
 export function isDockTabKind(value: unknown): value is ChatDockTabKind {
-  return value === 'files' || value === 'terminal' || value === 'browser' || value === 'file'
+  return value === 'files' || value === 'terminal' || value === 'browser'
+    || value === 'branch' || value === 'new' || value === 'file'
 }
 
 /** 路径最后一段（file 标签的默认标题） */
@@ -97,9 +106,9 @@ export function defaultDockState(): ChatDockState {
  * `${kind}-<数字>` 形式。用户手动建的同名标签理论上可能被命中，但概率极低且只是回到空面板。
  */
 function isLegacySeededTabs(tabs: readonly ChatDockTab[]): boolean {
-  if (tabs.length !== 3) return false
+  if (tabs.length !== LEGACY_SEEDED_KINDS.length) return false
   const kinds = tabs.map((t) => t.kind).join(',')
-  if (kinds !== DOCK_TAB_KINDS.join(',')) return false
+  if (kinds !== LEGACY_SEEDED_KINDS.join(',')) return false
   return tabs.every((t) => !t.title?.trim() && /^(files|terminal|browser)-\d+(-\d+)?$/.test(String(t.id || '')))
 }
 
@@ -118,6 +127,7 @@ export function normalizeDockState(raw: unknown): ChatDockState {
   const parsed: ChatDockTab[] = []
   const seen = new Set<string>()
   const seenFilePaths = new Set<string>()
+  let seenBranch = false
   for (const t of Array.isArray(src.tabs) ? src.tabs : []) {
     if (!t || typeof t !== 'object') continue
     const kind = (t as ChatDockTab).kind
@@ -128,6 +138,11 @@ export function normalizeDockState(raw: unknown): ChatDockState {
     if (kind === 'file') {
       if (!path || seenFilePaths.has(path)) continue
       seenFilePaths.add(path)
+    }
+    // 分支视图只有一份（同一个 D3 容器）：旧存档/重复操作产生多个时只保留第一个
+    if (kind === 'branch') {
+      if (seenBranch) continue
+      seenBranch = true
     }
     seen.add(id)
     const title = typeof (t as ChatDockTab).title === 'string' && (t as ChatDockTab).title!.trim()
@@ -171,13 +186,67 @@ export function dockTabTitle(tab: ChatDockTab, tabs: readonly ChatDockTab[] = []
 /** 追加一个标签并切到它（返回新状态，不原地改） */
 export function addDockTab(state: ChatDockState, kind: ChatDockTabKind, seed = Date.now()): ChatDockState {
   if (!isDockTabKind(kind)) return state
+  // 分支只有一份：任何入口新建分支都走复用逻辑
+  if (kind === 'branch') return openBranchDockTab(state, seed)
   const tab = createDockTab(kind, state.tabs, seed)
   return { ...state, open: true, tabs: [...state.tabs, tab], activeTabId: tab.id }
 }
 
 /**
+ * 点「+」新建一个**空白新标签页**（kind='new'）：不再弹出类型菜单，
+ * 先出现标签页，由用户在该页里选 文件 / 终端 / 浏览器 / 分支。
+ */
+export function addDockPlaceholder(state: ChatDockState, seed = Date.now()): ChatDockState {
+  const tab = createDockTab('new', state.tabs, seed)
+  return { ...state, open: true, tabs: [...state.tabs, tab], activeTabId: tab.id }
+}
+
+/**
+ * 在空白新标签页里选定类型（把 'new' 转成目标类型）。
+ *
+ * - 分支视图只有一份：目标类型是 branch 且已存在分支标签时，移除这张空白页并切到已有的；
+ * - 只替换 kind，清掉空白页上可能残留的 title/path/view；
+ * - 返回新状态（不改原对象）。
+ */
+export function configureDockTab(
+  state: ChatDockState,
+  id: string,
+  kind: ChatDockTabKind,
+): ChatDockState {
+  if (!id || !isDockTabKind(kind) || kind === 'new' || kind === 'file') return state
+  const index = state.tabs.findIndex((t) => t.id === id)
+  if (index < 0) return state
+  const tab = state.tabs[index]
+  if (tab.kind === kind) return state
+
+  if (kind === 'branch') {
+    const existing = state.tabs.find((t, i) => i !== index && t.kind === 'branch')
+    if (existing) {
+      const tabs = state.tabs.filter((_, i) => i !== index)
+      return { ...state, open: true, tabs, activeTabId: existing.id }
+    }
+  }
+
+  const next: ChatDockTab = { id: tab.id, kind }
+  const tabs = state.tabs.slice()
+  tabs[index] = next
+  return { ...state, open: true, tabs, activeTabId: next.id }
+}
+
+/**
+ * 打开分支视图：已有分支标签就切过去，否则新建一个（分支视图全局只有一份）。
+ * 分支树与文件/终端一样放在右侧栏的标签页里。
+ */
+export function openBranchDockTab(state: ChatDockState, seed = Date.now()): ChatDockState {
+  const existing = state.tabs.find((t) => t.kind === 'branch')
+  if (existing) return { ...state, open: true, activeTabId: existing.id }
+  const tab = createDockTab('branch', state.tabs, seed)
+  return { ...state, open: true, tabs: [...state.tabs, { id: tab.id, kind: 'branch' }], activeTabId: tab.id }
+}
+
+/**
  * 在右侧栏打开一个文件：已有同路径的文件标签就切过去（并更新视图），否则新建一个 file 标签。
- * 与「+」菜单新建工具页同一套状态：自动展开右侧栏、自动切到新标签。
+ * 与新标签页里选文件同一套状态：自动展开右侧栏、自动切到新标签。
  */
 export function openFileDockTab(
   state: ChatDockState,

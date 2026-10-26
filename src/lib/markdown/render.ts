@@ -14,6 +14,7 @@ import markdownItMathjax from 'markdown-it-mathjax3'
 import hljs from 'highlight.js'
 import { hashContent } from '@/lib/markdown/mermaid'
 import { allowLocalFileLinks } from '@/lib/markdown/mdLinkPolicy'
+import { sanitizeHtml } from '@/lib/markdown/sanitizeHtml'
 
 // ---------------------------------------------------------------------------
 // markdown-it 实例（fence 规则：mermaid 代码块 → 渲染占位，由 renderMermaidDiagrams 处理）
@@ -219,7 +220,10 @@ export const renderMarkdown = (str: string): string => {
     return `<!--PRE${preBlocks.length - 1}-->`
   })
   const rendered = md.render(preprocessMath(wrapBareCodeBlocks(guarded)))
-  return rendered.replace(/<!--PRE(\d+)-->/g, (_, idx) => preBlocks[+idx] ?? '')
+  const restored = rendered.replace(/<!--PRE(\d+)-->/g, (_, idx) => preBlocks[+idx] ?? '')
+  // 内容级消毒：markdown-it 的 html:true 会放行任意标签/事件属性；
+  // 聊天正文、工具结果、计划评审都经过这里，统一在出口消毒。
+  return sanitizeHtml(restored)
 }
 
 /** HTML 转义（配合 dangerouslyUseHTMLString 拼接安全文本时使用） */

@@ -65,6 +65,23 @@ const customActiveIndex = computed(() => store.AIconfig.llm.custom.activeIndex |
 const customActive = (index: number): boolean =>
   store.AIconfig.llm.type === 'custom' && customActiveIndex.value === index
 
+/**
+ * 正在查看的自定义来源索引（与「默认来源」解耦）。
+ * 点左侧的自定义来源只切换右侧查看/编辑的对象，不再顺手把 llm.type 改成 custom；
+ * 默认来源只在点「设为默认」时变更（见 setViewAsDefault）。
+ */
+const viewCustomIndex = ref<number>(customActiveIndex.value)
+
+/**
+ * 当前查看的自定义来源对象：配置块直接绑定它，编辑落到 sources[viewCustomIndex]，
+ * 不会因为「看一眼」就把默认来源的扁平字段改掉。
+ * 兜底：sources 异常缺失时退回扁平对象，界面仍可编辑（下次 ensureCustomSources 会补回）。
+ */
+const customEdit = computed<CustomSource>(() => {
+  const src = customSources.value[viewCustomIndex.value]
+  return src || (store.AIconfig.llm.custom as unknown as CustomSource)
+})
+
 /** 搜索过滤后的自定义来源（保留原索引以便操作） */
 const filteredCustomSources = computed(() => {
   const kw = llmSourceKeyword.value.trim().toLowerCase()
@@ -114,29 +131,22 @@ const ensureCustomSources = () => {
   }
 }
 
-/** 选中某个自定义来源：把该来源配置同步到扁平 custom，并切换到 custom 类型 */
+/** 选中某个自定义来源：只切换右侧查看/编辑的对象，不改默认来源（默认由「设为默认」切换） */
 const selectCustomSource = (index: number) => {
-  const c = store.AIconfig.llm.custom
-  const src = c.sources[index]
+  const src = customSources.value[index]
   if (!src) return
-  c.activeIndex = index
-  c.name = src.name || ''
-  c.api_url = src.api_url || ''
-  c.api_key = src.api_key || ''
-  c.apiKeyRef = src.apiKeyRef || ''
-  c.model = src.model || ''
-  c.embed_model = src.embed_model || ''
-  c.available_models = Array.isArray(src.available_models) ? src.available_models : []
-  store.AIconfig.llm.type = 'custom'
-  applyUseCredFromConfig()
+  viewType.value = 'custom'
+  viewCustomIndex.value = index
+  applyUseCredFromConfig('custom')
   cancelRename()
   // 每个来源独立记忆「下拉/手填」模式：有模型列表 → 下拉；空列表 → 手填兜底
-  customModelMode.value = (c.available_models && c.available_models.length) ? 'select' : 'input'
+  customModelMode.value = (Array.isArray(src.available_models) && src.available_models.length) ? 'select' : 'input'
+  customTestStatus.value = 'idle'
+  customTestMsg.value = ''
   showSourceScreen.value = false   // 细长窗口：点自定义来源即进入整屏配置屏
-  store.saveConfig()
 }
 
-/** 新增自定义来源（自动命名 Custom N / 自定义 N）并激活 */
+/** 新增自定义来源（自动命名 Custom N / 自定义 N）并查看它（是否设为默认仍由用户决定） */
 const addCustomSource = () => {
   const c = store.AIconfig.llm.custom
   ensureCustomSources()
@@ -155,44 +165,61 @@ const addCustomSource = () => {
   selectCustomSource(c.sources.length - 1)
 }
 
-/** 删除自定义来源（若删除的是激活项则切换到相邻来源；否则修正 activeIndex 偏移） */
+/** 删除自定义来源（若删除的是默认来源则切换到相邻来源；查看索引随之修正） */
 const removeCustomSource = (index: number) => {
   const c = store.AIconfig.llm.custom
   if (!Array.isArray(c.sources) || c.sources.length === 0) return
   cancelRename()
-  const wasActive = store.AIconfig.llm.type === 'custom' && customActiveIndex.value === index
-  const removedBeforeActive = customActiveIndex.value > index
+  const wasDefault = store.AIconfig.llm.type === 'custom' && customActiveIndex.value === index
+  const removedBeforeDefault = customActiveIndex.value > index
+  const removedBeforeView = viewCustomIndex.value > index
   c.sources.splice(index, 1)
   if (c.sources.length === 0) {
     // 全部删除后播种一个空来源，保持 custom 类型可用
     ensureCustomSources()
+    viewCustomIndex.value = 0
     store.saveConfig()
     return
   }
-  if (wasActive) {
-    selectCustomSource(Math.min(index, c.sources.length - 1))
-  } else if (removedBeforeActive) {
-    // 删除项在激活项之前：激活来源索引前移一位，扁平字段不变
-    c.activeIndex = customActiveIndex.value - 1
-    store.saveConfig()
+  if (removedBeforeDefault) c.activeIndex = customActiveIndex.value - 1
+  if (wasDefault) {
+    // 删掉的是默认来源：把默认切到相邻来源，并同步扁平字段（主页/RAG/工作流继续可用）
+    c.activeIndex = Math.min(index, c.sources.length - 1)
+    const next = c.sources[c.activeIndex]
+    c.name = next.name || ''
+    c.api_url = next.api_url || ''
+    c.api_key = next.api_key || ''
+    c.apiKeyRef = next.apiKeyRef || ''
+    c.model = next.model || ''
+    c.embed_model = next.embed_model || ''
+    c.available_models = Array.isArray(next.available_models) ? [...next.available_models] : []
   }
+  viewCustomIndex.value = removedBeforeView
+    ? viewCustomIndex.value - 1
+    : Math.min(viewCustomIndex.value, c.sources.length - 1)
+  // 删除后查看对象可能换了：凭据显示模式与「下拉/手填」跟随新对象
+  applyUseCredFromConfig('custom')
+  const nextView = customSources.value[viewCustomIndex.value]
+  customModelMode.value = (Array.isArray(nextView?.available_models) && nextView!.available_models.length) ? 'select' : 'input'
+  store.saveConfig()
 }
 
-/** 把扁平 custom 的编辑同步回 sources[activeIndex]（persist=true 时保存） */
+/**
+ * 把当前查看来源的编辑同步到扁平 custom（仅当查看的就是默认自定义来源时）。
+ * 主页 / RAG / 工作流读的是扁平 custom，绝不能把「正在查看的其它来源」写进去。
+ */
 const syncCustomSource = (persist = true) => {
   const c = store.AIconfig.llm.custom
-  const i = c.activeIndex
-  if (Array.isArray(c.sources) && c.sources[i]) {
-    const s = c.sources[i]
-    // 仅当扁平字段有值（或来源字段本就为空）时才覆盖——
-    // 避免 home 临时切换到其它来源 / 瞬断导致的空白覆盖已保存的地址/密钥/模型等
-    if (c.name || !s.name) s.name = c.name || ''
-    if (c.api_url || !s.api_url) s.api_url = c.api_url || ''
-    if (c.api_key || !s.api_key) s.api_key = c.api_key || ''
-    if (c.apiKeyRef || !s.apiKeyRef) s.apiKeyRef = c.apiKeyRef || ''
-    if (c.model || !s.model) s.model = c.model || ''
-    if (c.embed_model || !s.embed_model) s.embed_model = c.embed_model || ''
-    if (Array.isArray(c.available_models) && c.available_models.length) s.available_models = [...c.available_models]
+  const src = customSources.value[viewCustomIndex.value]
+  if (!src) return
+  if (store.AIconfig.llm.type === 'custom' && c.activeIndex === viewCustomIndex.value) {
+    c.name = src.name || ''
+    c.api_url = src.api_url || ''
+    c.api_key = src.api_key || ''
+    c.apiKeyRef = src.apiKeyRef || ''
+    c.model = src.model || ''
+    c.embed_model = src.embed_model || ''
+    c.available_models = Array.isArray(src.available_models) ? [...src.available_models] : []
   }
   if (persist) store.saveConfig()
 }
@@ -271,12 +298,32 @@ const llmSourceLabel = (key: string): string => {
 // 现行为：点击只切换右侧查看/编辑的来源（viewType），默认只在点「设为默认」时变更。
 const viewType = ref<string>(store.AIconfig.llm.type)
 /** 正在查看的就是默认来源 */
-const isViewingDefault = computed(() => store.AIconfig.llm.type === viewType.value)
+const isViewingDefault = computed(() => {
+  if (viewType.value !== 'custom') return store.AIconfig.llm.type === viewType.value
+  return store.AIconfig.llm.type === 'custom' && customActiveIndex.value === viewCustomIndex.value
+})
 /** 是否正在查看该来源 */
 const llmSourceViewing = (key: string): boolean => viewType.value === key
+/** 是否正在查看该自定义来源（「默认」标识另见 customActive） */
+const customViewing = (index: number): boolean =>
+  viewType.value === 'custom' && viewCustomIndex.value === index
 /** 把当前查看的来源设为默认（真正影响 home / RAG / 工作流使用哪个来源） */
 const setViewAsDefault = () => {
   if (isViewingDefault.value) return
+  if (viewType.value === 'custom') {
+    const c = store.AIconfig.llm.custom
+    const src = customSources.value[viewCustomIndex.value]
+    if (!src) return
+    // 默认自定义来源 = activeIndex + 扁平字段；这里才把查看中的来源同步过去
+    c.activeIndex = viewCustomIndex.value
+    c.name = src.name || ''
+    c.api_url = src.api_url || ''
+    c.api_key = src.api_key || ''
+    c.apiKeyRef = src.apiKeyRef || ''
+    c.model = src.model || ''
+    c.embed_model = src.embed_model || ''
+    c.available_models = Array.isArray(src.available_models) ? [...src.available_models] : []
+  }
   store.AIconfig.llm.type = viewType.value
   applyUseCredFromConfig(viewType.value)
   store.saveConfig()
@@ -328,8 +375,8 @@ const getCurrentConfigHelp = computed(() => {
       return zh() ? 'Azure OpenAI服务配置。需要Azure API密钥和部署信息。' : 'Azure OpenAI service configuration. Requires Azure API key and deployment info.'
     case 'custom':
       return zh()
-        ? `自定义API配置（${customName(customSources.value[customActiveIndex.value])}）。请填写API端点和配置信息。`
-        : `Custom API configuration (${customName(customSources.value[customActiveIndex.value])}). Fill in your API endpoint and configuration.`
+        ? `自定义API配置（${customName(customEdit.value)}）。请填写API端点和配置信息。`
+        : `Custom API configuration (${customName(customEdit.value)}). Fill in your API endpoint and configuration.`
     default:
       return ''
   }
@@ -763,7 +810,7 @@ const applyUseCredFromConfig = (type = store.AIconfig.llm.type) => {
   anthropicUseCred.value = type === 'anthropic' ? hasRef(store.AIconfig.llm.anthropic.apiKeyRef) : false
   googleUseCred.value = type === 'google' ? hasRef(store.AIconfig.llm.google.apiKeyRef) : false
   azureUseCred.value = type === 'azure' ? hasRef(store.AIconfig.llm.azure.apiKeyRef) : false
-  customUseCred.value = type === 'custom' ? hasRef(store.AIconfig.llm.custom.apiKeyRef) : false
+  customUseCred.value = type === 'custom' ? hasRef(customEdit.value?.apiKeyRef) : false
 }
 
 // DeepSeek 的「模型下拉/手填」与余额等合并逻辑见下方「DeepSeek：一个来源 + 接口样式」区块
@@ -884,7 +931,12 @@ const gpuStackModelOptions = computed(() => {
   if (cur && !list.includes(cur)) return [cur, ...list]
   return list
 })
-const refreshGPUStackModels = async () => { await store.getAIconfig(); store.saveConfig() }
+const refreshGPUStackModels = async () => {
+  // 不能走 getAIconfig()：它只测「当前默认来源」，查看 GPUStack 但默认是别的来源时
+  // 会测错对象；这里明确测 GPUStack（与自定义来源的「连接测试」走同一套 api_url+key 逻辑）。
+  await store.testLlmSource('gpustack')
+  contextRefreshTick.value++
+}
 const handleGPUStackModelChange = () => { store.saveConfig() }
 
 // ================ 默认嵌入模型：下拉选择 / 手填兜底 ================
@@ -1049,41 +1101,22 @@ const refreshEmbedFallbackModels = async (key?: string) => {
 // 切换兜底来源 → 自动拉取该来源的模型列表（下拉候选立即有值）
 watch(embedFallbackKey, (v) => { if (v) refreshEmbedFallbackModels(v) })
 
-// ================ 自定义来源：刷新模型 + 下拉/手填兜底 ================
+// ================ 自定义来源：下拉/手填兜底 ================
 
 const customModelMode = ref<'select' | 'input'>('select')
-const customModelLoading = ref(false)
 /** 是否显示下拉（有可用模型列表 且 未切到手填模式） */
 const showCustomSelect = computed(() => {
   if (customModelMode.value !== 'select') return false
-  const list = store.AIconfig.llm.custom.available_models || []
+  const list = customEdit.value.available_models || []
   return list.length > 0
 })
 /** 下拉选项：当前模型不在列表时置于首位（保证可选中） */
 const customModelOptions = computed(() => {
-  const list = (store.AIconfig.llm.custom.available_models || []).filter(Boolean)
-  const cur = String(store.AIconfig.llm.custom.model || '').trim()
+  const list = (customEdit.value.available_models || []).filter(Boolean)
+  const cur = String(customEdit.value.model || '').trim()
   if (cur && !list.includes(cur)) return [cur, ...list]
   return list
 })
-/** 刷新当前自定义来源的可用模型（从 api_url 推导 /models 端点；失败则回退手填） */
-const refreshCustomModels = async () => {
-  const c = store.AIconfig.llm.custom
-  if (!String(c.api_url || '').trim()) {
-    // 未填写 API 地址时不拉取；保留已缓存的模型列表与默认模型/嵌入模型，避免瞬断或暂未填写时丢数据
-    return
-  }
-  customModelLoading.value = true
-  try {
-    await store.getAIconfig() // 内部已按 custom 走 checkCustomConnection 并回填 available_models
-    // 成功拉到列表 → 自动切下拉；失败（空列表）→ 兜底手填
-    const list = store.AIconfig.llm.custom.available_models || []
-    customModelMode.value = list.length ? 'select' : 'input'
-    syncCustomSource()
-  } finally {
-    customModelLoading.value = false
-  }
-}
 const toggleCustomModelMode = () => {
   customModelMode.value = customModelMode.value === 'select' ? 'input' : 'select'
 }
@@ -1092,12 +1125,11 @@ const handleCustomModelChange = () => { syncCustomSource() }
 // ================ 自定义来源：连接测试 ================
 const customTestStatus = ref<'idle' | 'testing' | 'ok' | 'fail'>('idle')
 const customTestMsg = ref('')
-/** 测试当前自定义来源（api_url + api_key/apiKeyRef）：成功则回填模型列表并刷新下拉 */
+/** 测试当前查看的自定义来源（api_url + api_key/apiKeyRef）：成功则回填模型列表并刷新下拉 */
 const testCustomConnection = async () => {
-  const c = store.AIconfig.llm.custom
-  // 扁平 custom 无 id，需取当前激活来源的 id（sources[activeIndex].id）
-  const activeSrcId = (Array.isArray(c.sources) && c.sources[c.activeIndex]) ? c.sources[c.activeIndex].id : undefined
-  const apiUrl = String(c.api_url || '').trim()
+  const src = customEdit.value
+  const activeSrcId = src.id
+  const apiUrl = String(src.api_url || '').trim()
   if (!apiUrl) {
     customTestStatus.value = 'fail'
     customTestMsg.value = zh() ? '请先填写 API 地址' : 'Please fill in the API URL'
@@ -1109,7 +1141,7 @@ const testCustomConnection = async () => {
   customTestMsg.value = zh() ? '测试中...' : 'Testing...'
   try {
     syncCustomSource(false)
-    const cfg = { ...store.AIconfig.llm.custom, api_key: (await store.resolveApiKey(store.AIconfig.llm.custom)) || store.AIconfig.llm.custom.api_key }
+    const cfg = { ...src, api_key: (await store.resolveApiKey(src)) || src.api_key }
     const r = await AIUtils.checkCustomConnection(cfg)
     const models = Array.isArray(r.available_models) ? r.available_models : []
     if (r.online) {
@@ -1121,8 +1153,8 @@ const testCustomConnection = async () => {
       } else {
         customTestMsg.value = zh() ? '连接成功（未获取到模型列表）' : 'Connected (no models)'
       }
-      // 测试成功即回填模型列表并同步到 sources，避免下次只能手填
-      store.AIconfig.llm.custom.available_models = models
+      // 测试成功即回填模型列表到「正在查看的」来源，避免下次只能手填
+      src.available_models = models
       customModelMode.value = models.length ? 'select' : 'input'
       syncCustomSource()
     } else {
@@ -1166,6 +1198,8 @@ onBeforeUnmount(() => {
 // 挂载时：① 测试全部来源连接状态；② 延迟刷新当前来源的模型列表（不覆盖已选模型）；③ 初始化自定义来源列表；④ 窗口关闭前落盘
 onMounted(() => {
   ensureCustomSources()
+  // 初始查看的就是「默认自定义来源」；之后点左侧其它来源只切查看，不改默认
+  viewCustomIndex.value = customActiveIndex.value
   applyUseCredFromConfig()
   // 兼容旧存档：嵌入兜底字段缺失时补默认值（默认 Ollama）；自定义来源需落到具体来源 id
   const fbSetting = store.AIconfig.llm.embeddingFallback
@@ -1266,7 +1300,7 @@ onMounted(() => {
             v-for="cs in filteredCustomSources"
             :key="cs.src.id"
             class="llm-source-item custom"
-            :class="{ active: customActive(cs.index), disabled: store.isLlmSourceDisabled('custom', cs.src.id) }"
+            :class="{ active: customViewing(cs.index), disabled: store.isLlmSourceDisabled('custom', cs.src.id) }"
             @click="selectCustomSource(cs.index)"
             :title="zh() ? '自定义 API' : 'Custom API'"
           >
@@ -1805,23 +1839,23 @@ onMounted(() => {
         <div v-if="viewType === 'custom'" class="llm-config-block">
           <div class="form-group">
             <label>{{ zh()?'来源名称' : 'Source Name' }}</label>
-            <input v-model="store.AIconfig.llm.custom.name"
+            <input v-model="customEdit.name"
                   :placeholder="customDefaultName()"
                   @input="syncCustomSource(false)" @change="syncCustomSource()"/>
           </div>
           <div class="form-group">
             <label>{{ zh()?'API地址' : 'API URL' }}</label>
-            <input v-model="store.AIconfig.llm.custom.api_url"
+            <input v-model="customEdit.api_url"
                   :placeholder="zh()?'完整的API端点地址' : 'Full API endpoint URL'"
                   @input="syncCustomSource(false)" @change="syncCustomSource()"/>
           </div>
           <div class="form-group">
             <label>{{ customUseCred ? (zh()?'凭据引用' : 'Credential') : (zh()?'API密钥' : 'API Key') }}</label>
             <div class="input-with-button">
-              <input v-if="customUseCred" v-model="store.AIconfig.llm.custom.apiKeyRef"
+              <input v-if="customUseCred" v-model="customEdit.apiKeyRef"
                     :placeholder="zh()?'填凭据管理中的名称，优先于 API 密钥' : 'Credential name from Credentials panel; takes precedence'"
                     @input="syncCustomSource(false)" @change="syncCustomSource()"/>
-              <input v-else type="password" v-model="store.AIconfig.llm.custom.api_key"
+              <input v-else type="password" v-model="customEdit.api_key"
                     :placeholder="zh()?'可选的API密钥' : 'Optional API key'"
                     @input="syncCustomSource(false)" @change="syncCustomSource()"/>
               <div class="button" style="width:30px;margin:0px;padding:4px 0px" @click="customUseCred = toggleUseCred(customUseCred)"
@@ -1834,11 +1868,11 @@ onMounted(() => {
             <label>{{ zh()?'模型名称' : 'Model Name' }}</label>
             <!-- 自定义：点底部「连接测试」从 api_url 推导 /models 拉取下拉；拉不到列表时兜底为手填输入框 -->
             <div class="input-with-button">
-              <select v-if="showCustomSelect" v-model="store.AIconfig.llm.custom.model" @change="handleCustomModelChange">
+              <select v-if="showCustomSelect" v-model="customEdit.model" @change="handleCustomModelChange">
                 <option value="">{{ zh()?'请选择模型' : 'Select model' }}</option>
                 <option v-for="m in customModelOptions" :key="m" :value="m">{{ m }}</option>
               </select>
-              <input v-else v-model="store.AIconfig.llm.custom.model"
+              <input v-else v-model="customEdit.model"
                     :placeholder="zh()?'模型标识符（可手填）' : 'Model identifier (or type manually)'"
                     @input="syncCustomSource(false)" @change="syncCustomSource()"/>
               <div class="button" style="width:30px;margin:0px;padding:4px 0px"
@@ -1851,11 +1885,11 @@ onMounted(() => {
           <div class="form-group">
             <label>{{ zh()?'默认嵌入模型' : 'Default Embedding Model' }}</label>
             <div class="input-with-button">
-              <select v-if="embedModelModeOf('custom') === 'select'" v-model="store.AIconfig.llm.custom.embed_model" @change="syncCustomSource()">
+              <select v-if="embedModelModeOf('custom') === 'select'" v-model="customEdit.embed_model" @change="syncCustomSource()">
                 <option value="">{{ zh()?'请选择嵌入模型' : 'Select embedding model' }}</option>
-                <option v-for="m in embedModelOptions('custom', store.AIconfig.llm.custom.available_models, store.AIconfig.llm.custom.embed_model)" :key="m" :value="m">{{ m }}</option>
+                <option v-for="m in embedModelOptions('custom', customEdit.available_models, customEdit.embed_model)" :key="m" :value="m">{{ m }}</option>
               </select>
-              <input v-else v-model="store.AIconfig.llm.custom.embed_model"
+              <input v-else v-model="customEdit.embed_model"
                     :placeholder="zh()?'自定义端点支持嵌入时填模型名' : 'Embedding model if this endpoint supports it'"
                     @input="syncCustomSource(false)" @change="syncCustomSource()"/>
               <div class="button" style="width:30px;margin:0px;padding:4px 0px" @click="toggleEmbedModelMode('custom')"
@@ -1865,7 +1899,7 @@ onMounted(() => {
             </div>
           </div>
           <!-- 上下文窗口（圆环分母）：自定义来源按「激活来源」分别计 -->
-          <ModelContextWindow provider="custom" :config="store.AIconfig.llm.custom" :model="store.AIconfig.llm.custom.model" :refresh-token="contextRefreshTick" />
+          <ModelContextWindow provider="custom" :config="customEdit" :model="customEdit.model" :custom-index="viewCustomIndex" :refresh-token="contextRefreshTick" />
           <!-- 自定义来源：连接测试（置于配置块最下方） -->
           <div class="form-group">
             <label>{{ zh()?'连接测试' : 'Connection Test' }}</label>

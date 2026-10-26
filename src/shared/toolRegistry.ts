@@ -270,13 +270,75 @@ export class ToolRegistry {
 
     // ---- execute 阶段 ----
     let result: ToolResult
+    const external = ctx?.signal
+    const controller = new AbortController()
+    const timeoutMs = Number(def.timeoutMs)
+    let timedOut = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const handlerCtx: ToolExecutionContext = { ...ctx, signal: controller.signal }
+    let externalAborted = !!external?.aborted
+    let resolveAbort: ((r: ToolResult) => void) | null = null
+    const abortPromise = new Promise<ToolResult>((resolve) => {
+      resolveAbort = resolve
+      if (externalAborted) resolve({ ok: false, error: '工具调用已取消（turn cancelled）', code: 'ABORTED' })
+    })
+    const onAbort = () => {
+      externalAborted = true
+      controller.abort(external?.reason)
+      resolveAbort?.({ ok: false, error: '工具调用已取消（turn cancelled）', code: 'ABORTED' })
+    }
+    if (external) {
+      if (external.aborted) controller.abort(external.reason)
+      else external.addEventListener('abort', onAbort, { once: true })
+    }
     try {
-      result = await def.handler(currentInput, ctx)
-    } catch (err: any) {
-      result = {
-        ok: false,
-        error: err?.message || String(err),
+      const handlerPromise = Promise.resolve().then(() => {
+        if (externalAborted) return { ok: false, error: '工具调用已取消（turn cancelled）', code: 'ABORTED' } as ToolResult
+        return def.handler(currentInput, handlerCtx)
+      })
+      // 取消也要能立即收口：handler 不观察 signal 时不能把 turn 永远卡住。
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        const timeoutPromise = new Promise<ToolResult>((resolve) => {
+          timer = setTimeout(() => {
+            timedOut = true
+            const reason = new Error(`工具 ${def.name} 执行超时（${Math.round(timeoutMs)}ms）`)
+            reason.name = 'ToolTimeoutError'
+            controller.abort(reason)
+            resolve({
+              ok: false,
+              error: `工具 ${def.name} 执行超时（${Math.round(timeoutMs)}ms），本次调用已放弃。可缩小任务范围或调高超时后重试。`,
+              code: 'TOOL_TIMEOUT',
+              retryable: true,
+            })
+          }, timeoutMs)
+        })
+        result = await Promise.race([handlerPromise, timeoutPromise, abortPromise])
+        // 超时 / 取消后 handler 仍可能在后台继续；吞掉它后续的 rejection
+        void handlerPromise.catch(() => { /* 已由 timeout/abort 收口 */ })
+      } else {
+        result = await Promise.race([handlerPromise, abortPromise])
+        void handlerPromise.catch(() => { /* 已由 abort 收口 */ })
       }
+    } catch (err: any) {
+      if (externalAborted) {
+        result = { ok: false, error: '工具调用已取消（turn cancelled）', code: 'ABORTED' }
+      } else if (err?.name === 'AbortError' || controller.signal.aborted) {
+        result = {
+          ok: false,
+          error: timedOut ? `工具 ${def.name} 执行超时` : '工具调用已取消',
+          code: timedOut ? 'TOOL_TIMEOUT' : 'ABORTED',
+          retryable: timedOut,
+        }
+      } else {
+        result = {
+          ok: false,
+          error: err?.message || String(err),
+          code: 'TOOL_ERROR',
+        }
+      }
+    } finally {
+      if (timer) clearTimeout(timer)
+      if (external) external.removeEventListener('abort', onAbort)
     }
     if (!result || typeof result !== 'object') {
       result = { ok: true, value: result }

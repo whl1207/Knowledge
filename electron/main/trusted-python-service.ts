@@ -82,7 +82,7 @@ export class TrustedPythonService {
   /**
    * 执行 Python 代码（无任何安全检查）
    */
-  async executeCode(code: string, input: any = '', cwd?: string): Promise<PythonExecutionResult> {
+  async executeCode(code: string, input: any = '', cwd?: string, signal?: AbortSignal): Promise<PythonExecutionResult> {
     try {
       const isPythonInstalled = await this.checkInstallation()
       if (!isPythonInstalled) {
@@ -124,7 +124,8 @@ export class TrustedPythonService {
               maxBuffer: 1024 * 1024 * 50, // 50MB输出限制
               encoding: 'utf-8', // 明确指定编码
               env: env, // 添加环境变量
-              cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+              cwd: resolveExecCwd(cwd), // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+              signal,
             })
             
             // 清理输入文件
@@ -152,7 +153,8 @@ export class TrustedPythonService {
               maxBuffer: 1024 * 1024 * 50,
               encoding: 'utf-8', // 明确指定编码
               env: env, // 添加环境变量
-              cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+              cwd: resolveExecCwd(cwd), // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+              signal,
             })
             
             const executionTime = Date.now() - startTime
@@ -173,7 +175,8 @@ export class TrustedPythonService {
             maxBuffer: 1024 * 1024 * 50,
             encoding: 'utf-8', // 明确指定编码
             env: env, // 添加环境变量
-            cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+            cwd: resolveExecCwd(cwd), // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+            signal,
           })
           
           const executionTime = Date.now() - startTime

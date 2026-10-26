@@ -3,7 +3,8 @@ import { aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, onMounted, onBeforeUnmount, computed, watch, defineAsyncComponent } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchFsRead, downloadRemoteFile } from '@/platform/remoteFs'
+import { fetchFsRead, fetchFsInfo, downloadRemoteFile } from '@/platform/remoteFs'
+import type { RemoteFsPermission } from '@/types/collab'
 import md_read from '@/components/knowFile/view/md_read.vue'
 import Edit_Code from '@/components/knowFile/view/Edit_Code.vue'
 import Edit_Block from '@/components/knowFile/view/Edit_Block.vue'
@@ -79,6 +80,8 @@ const remoteRel = ref('')
 const remoteBase64 = ref('') // 图片/PDF 的裸 base64（无 data: 前缀）
 const remoteText = ref('')   // 远程 Word 转换好的 Markdown
 const remoteLoadError = ref('')
+/** 主机当前授予的共享权限（readonly / md），用于决定 Markdown 是否可切到源码编辑 */
+const remotePermission = ref<RemoteFsPermission>('readonly')
 // draw.io 图表要定位到的页（1 起的序号 / 页名）：来自 URL 的 page 参数，或主进程的换页通知
 const drawioPage = ref('')
 
@@ -104,8 +107,6 @@ const officeType = computed(() => officeTypeForPath(filePath.value))
 const officeReady = computed(
   () => !!officeType.value && officeAvailability.value[officeType.value] === true,
 )
-/** OfficeView 组件实例：用于浮层展开时临时隐藏原生编辑器视图 */
-const officeViewRef = ref<InstanceType<typeof OfficeView> | null>(null)
 const isMaximized = ref(false)
 
 const titleText = computed(() => fileName.value)
@@ -159,12 +160,22 @@ const isRemoteAdvanced = computed(() => {
   if (!isRemoteFile.value) return false
   return fileExt.value === '.md' || fileExt.value === '.docx'
 })
-// 是否显示视图切换器（代码/图片/音视频/pdf/excalidraw/工作流/数据画布等固定单一视图不显示；远程只有单一视图时也不显示）
+// 主机授权「可编辑 Markdown」时，远程 .md 才开放源码编辑（保存走 HTTP 写回主机）
+const isRemoteMarkdown = computed(() => ['.md', '.markdown', '.mdown', '.mkd'].includes(fileExt.value))
+const remoteEditable = computed(() =>
+  isRemoteFile.value && remotePermission.value === 'md' && isRemoteMarkdown.value,
+)
+// 是否显示视图切换器（固定单一视图的文件不显示；远程只有单一视图时也不显示）
 const showViewSwitcher = computed(() => {
-  if (isRemoteFile.value) return availableViews.value.length > 1
+  // 还没拿到文件路径时不要先摆一个「浏览 ⌄」—— 那会在文件加载完成前闪一下
+  if (!filePath.value) return false
+  // 只有一个视图时没有可切换的东西：PPTX / Excel 的内嵌编辑器就是唯一视图，
+  // 标题栏再摆一个「Office 编辑 ⌄」只会让用户以为还能换别的（下拉里只有一项）
+  if (availableViews.value.length <= 1) return false
+  if (isRemoteFile.value) return true
   // 内嵌 Office 编辑器可用时（.docx / .xlsx / .pptx）开放视图切换：
   // 这几类此前没有可切换视图（Excel 固定浏览），有真编辑器后切换才有意义
-  if (availableViews.value.includes(OFFICE_VIEW_KEY as ViewType) && availableViews.value.length > 1) return true
+  if (availableViews.value.includes(OFFICE_VIEW_KEY as ViewType)) return true
   return !isExcalidraw.value && !isDrawio.value && !isFlowDsl.value && !isDataCanvas.value && !isTask.value && !isCodeFile.value && !isMediaFile.value && !isPdfFile.value && !EXCEL_EXTS.includes(fileExt.value)
 })
 // 可切换的视图选项（按文件类型过滤：html 仅浏览/源码编辑；Word 仅浏览/思维导图；csv/tsv 仅浏览/源码编辑）
@@ -185,8 +196,9 @@ const baseAvailableViews = computed<ViewType[]>(() => {
   if (PPTX_EXTS.includes(fileExt.value)) return officeReady.value ? [OFFICE_VIEW_KEY as ViewType] : [...GENERIC_VIEW_TYPES]
   // csv/tsv：浏览（表格/Markdown）+ 源码编辑（原始文本）
   if (TEXT_TABLE_EXTS.includes(fileExt.value)) return ['read', 'edit']
-  // 远程只读：不支持 编辑/块编辑；固定浏览视图；Markdown 额外支持 导图/演示
+  // 远程文件：默认只读；主机授权「可编辑 Markdown」时 .md 额外开放源码编辑
   if (isRemoteFile.value) {
+    if (remoteEditable.value) return ['read', 'edit', 'mindmap', 'presentation']
     return isRemoteAdvanced.value ? ['read', 'mindmap', 'presentation'] : ['read']
   }
   if (isHtmlFile.value) return ['read', 'edit']
@@ -313,6 +325,26 @@ function extFromRel(rel: string): string {
 }
 
 /**
+ * 读取 /fs/info 刷新共享权限并回写 remoteRoots。
+ * 主机可能刚把「只读」改成「可编辑 Markdown」，打开文件时对齐一次即可，不必重启客户端。
+ */
+async function hydrateRemotePermission(root: any): Promise<void> {
+  try {
+    const info = await fetchFsInfo(root)
+    remotePermission.value = info.permission
+    if (root.permission !== info.permission) {
+      root.permission = info.permission
+      const stored = store.remoteRoots.find((r: any) => r.id === root.id)
+      if (stored) stored.permission = info.permission
+      store.saveWorkspace()
+    }
+  } catch {
+    // 拿不到 info 时沿用本地缓存；真正保存时服务端还会再校验一次
+    remotePermission.value = root?.permission === 'md' ? 'md' : 'readonly'
+  }
+}
+
+/**
  * 拉取远程文件内容并建立标签：
  *  - 图片 / PDF：读 base64，供 md_read 图片/PDF 预览
  *  - .docx：主进程 mammoth 转 Markdown 文本
@@ -320,6 +352,7 @@ function extFromRel(rel: string): string {
  *  - 二进制（视频等无法内联预览）：标记错误，提示下载
  */
 async function loadRemoteFile(root: any, rel: string) {
+  await hydrateRemotePermission(root)
   const ext = extFromRel(rel)
   const IMG_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
   // 明确无法内联预览的二进制类型（音视频/压缩包/可执行等）：直接提示下载，避免拉取完整 base64
@@ -337,6 +370,7 @@ async function loadRemoteFile(root: any, rel: string) {
     isRemote: true,
     remoteRootId: root.id,
     remoteRel: rel,
+    remoteEditable: remoteEditable.value,
     content: '',
     remoteBase64: '',
     remoteText: '',
@@ -407,16 +441,16 @@ async function downloadActiveRemote() {
 }
 
 // 独立窗口左上角切换视图类型（浏览/源码编辑/块编辑/导图/演示），标题自动跟随。
-// 用自绘下拉（见模板）：原生 <select> 的面板在标题栏拖动区里会被窗口拖动流程关掉。
+// 不用原生 <select>：标题栏是窗口拖动区，原生 <select> 的面板会被系统拖动流程关掉。
+// 展开方式：点标题栏上的当前视图，右侧**横向滑出**其余视图按钮（宽度 + 透明度过渡）。
+// 为什么排成标题栏里的一行、而不是往下弹浮层：内嵌 Office 编辑器是原生 WebContentsView，
+// 永远绘制在 DOM 之上 —— 浮层要么被它挡住，要么只能先隐藏整个编辑器（下方整片空白）。
+// 横向排在标题栏里则完全不碰编辑器区域，展开/收起也不需要隐藏任何东西。
 const viewSwitcherRef = ref<HTMLElement | null>(null)
 const viewMenuOpen = ref(false)
 
-// 视图切换下拉会覆盖到编辑器区域，而原生 WebContentsView 永远绘制在 DOM 之上 →
-// 展开时先隐藏编辑器视图，收起后恢复（否则下拉被挡住，用户切不了视图）
-watch(viewMenuOpen, (open) => {
-  if (viewType.value !== OFFICE_VIEW_KEY) return
-  officeViewRef.value?.setVisible(!open)
-})
+/** 除当前视图外的其它视图（当前视图由左侧那颗按钮本身表示，避免重复） */
+const otherViews = computed(() => availableViews.value.filter((v) => v !== viewType.value))
 
 function toggleViewMenu() {
   viewMenuOpen.value = !viewMenuOpen.value
@@ -495,7 +529,7 @@ function setView(v: string) {
 
 defineExpose({ confirmLeave, hasUnsaved, saveActiveView, availableViews, viewType, showViewSwitcher, filePath, setView })
 
-/** 点到切换器之外 / 按 Esc 就收起下拉面板 */
+/** 点到切换器之外 / 按 Esc 就收起视图切换条 */
 function closeViewMenuOnOutside(e: Event) {
   if (!viewMenuOpen.value) return
   if (e.type === 'keydown' && (e as KeyboardEvent).key !== 'Escape') return
@@ -505,9 +539,9 @@ function closeViewMenuOnOutside(e: Event) {
   viewMenuOpen.value = false
 }
 
-// 切换文件时收起面板，避免残留
+// 切换文件时收起视图切换条，避免残留
 // （注意：不能同时监听 availableViews —— 它是 computed，文件加载过程中任何相关状态变化
-//  都会让它重新求值，回调里就会把刚打开的下拉又关掉）
+//  都会让它重新求值，回调里就会把刚打开的切换条又关掉）
 watch(() => filePath.value, () => { viewMenuOpen.value = false })
 
 /** 数据画布保存成功：同步内存里的文件内容，并刷新标题栏（画布自己写的盘，无需再读文件） */
@@ -561,7 +595,7 @@ onMounted(async () => {
   } catch (e) {
     console.warn('[office] 内核探测失败:', e)
   }
-  // 视图切换下拉：点到外面 / 按 Esc 收起
+  // 视图切换条：点到外面 / 按 Esc 收起
   document.addEventListener('mousedown', closeViewMenuOnOutside)
   document.addEventListener('keydown', closeViewMenuOnOutside)
   // 监听主题广播（主窗口切换主题后本窗口跟随）
@@ -661,6 +695,10 @@ onMounted(async () => {
       }
     } catch (e) {
       console.error('读取远程文件失败:', e)
+    }
+    // 主机授权编辑、且标签上次停在「源码编辑」时恢复该视图（权限是挂载后才读到的）
+    if (requestedView === 'edit' && remoteEditable.value && availableViews.value.includes('edit')) {
+      viewType.value = 'edit'
     }
     contentLoading.value = false
     return
@@ -810,9 +848,8 @@ onBeforeUnmount(() => {
          不再重复「视图选择 + 标题」这一整行；视图切换由宿主标签栏的文件图标提供
          （见 explorer.vue / ChatDock.vue 的标签栏图标菜单）。 -->
     <div v-if="!props.embedded" class="file-titlebar" :class="{ 'titlebar-embedded': props.embedded }">
-      <!-- 视图类型切换（按文件类型过滤；.excalidraw/代码/图片等固定单一视图，不显示）
-           用自绘下拉而不是原生 <select>：标题栏是窗口拖动区，原生下拉面板在 Electron 里
-           容易一移动鼠标就被系统拖动流程关掉（选项"一闪就没"），自绘面板不受此影响 -->
+      <!-- 视图类型切换（按文件类型过滤；单一视图不显示，见 showViewSwitcher）。
+           点当前视图后，其余视图在标题栏里横向滑出（不往下弹浮层：原生 Office 视图永远盖在 DOM 上）。 -->
       <div v-if="showViewSwitcher" ref="viewSwitcherRef" class="file-view-switcher">
         <button
           type="button"
@@ -825,14 +862,20 @@ onBeforeUnmount(() => {
           <span class="file-view-switcher-label">{{ viewLabel(viewType) }}</span>
           <i class="fa fa-angle-down"></i>
         </button>
-        <div v-if="viewMenuOpen" class="file-view-switcher-menu scoll" @pointerdown.stop>
-          <div
-            v-for="v in availableViews"
+        <!-- 其余视图：横向滑出（宽度 0 → 内容宽度 + 淡入），当前视图不在其中（由左侧按钮表示） -->
+        <div
+          class="file-view-switcher-tabs"
+          :class="{ open: viewMenuOpen }"
+          :aria-hidden="!viewMenuOpen"
+        >
+          <button
+            v-for="v in otherViews"
             :key="v"
-            class="file-view-switcher-item"
-            :class="{ active: v === viewType }"
+            type="button"
+            class="file-view-switcher-tab"
+            :tabindex="viewMenuOpen ? 0 : -1"
             @click.stop="selectView(v)"
-          >{{ viewLabel(v) }}</div>
+          >{{ viewLabel(v) }}</button>
         </div>
       </div>
       <div class="file-titlebar-title" :title="filePath">{{ titleText }}</div>
@@ -850,10 +893,13 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-    <!-- 远程只读提示条（可下载到本地） -->
-    <div v-if="isRemoteFile" class="remote-readonly-bar">
-      <i class="fa fa-cloud" style="color:#42b883"></i>
-      <span>{{ store.locales=='zh'?'远程文件为只读预览':'Remote file (read-only preview)' }}</span>
+    <!-- 远程文件提示条（可下载到本地）。
+         嵌入模式（知识管理右侧标签）由 explorer.vue 统一渲染一条，这里不能再画一条，否则标签栏下方会出现两条。 -->
+    <div v-if="isRemoteFile && !props.embedded" class="remote-readonly-bar" :class="{ writable: remoteEditable }">
+      <i class="fa fa-cloud" :style="{ color: remoteEditable ? '#3a9d6a' : '#42b883' }"></i>
+      <span>{{ remoteEditable
+        ? (store.locales=='zh'?'远程文件 · 可编辑 Markdown':'Remote file · Markdown editable')
+        : (store.locales=='zh'?'远程文件为只读预览':'Remote file (read-only preview)') }}</span>
       <span class="remote-readonly-spacer"></span>
       <span v-if="remoteLoadError" class="remote-readonly-error" :title="remoteLoadError">{{ remoteLoadError }}</span>
       <span class="remote-download-btn" @click="downloadActiveRemote" :title="store.locales=='zh'?'下载到本地':'Download to local'">
@@ -913,7 +959,6 @@ onBeforeUnmount(() => {
     </div>
     <div v-else-if="viewType === 'office'" class="file-view">
       <OfficeView
-        ref="officeViewRef"
         :path="filePath"
         :available="officeReady"
         @saved="onOfficeSaved"
@@ -921,7 +966,12 @@ onBeforeUnmount(() => {
       />
     </div>
     <div v-else-if="viewType === 'edit'" class="file-view">
-      <Edit_Code ref="editCodeRef" />
+      <Edit_Code
+        ref="editCodeRef"
+        :remote-root-id="remoteEditable ? remoteRootId : ''"
+        :remote-rel="remoteEditable ? remoteRel : ''"
+        :remote-editable="remoteEditable"
+      />
     </div>
     <div v-else-if="viewType === 'blockedit'" class="file-view">
       <Edit_Block ref="editBlockRef" />
@@ -1036,8 +1086,11 @@ onBeforeUnmount(() => {
    （浏览器 / 局域网模式没有拖动区，提示照常显示）。 */
 /* 视图类型切换器（位于标题文本左侧；标题栏为 drag 区，切换器需 no-drag 才能点击） */
 .file-view-switcher {
-  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
+  max-width: 60%;
   margin-right: 8px;
   -webkit-app-region: no-drag;
 }
@@ -1049,7 +1102,7 @@ onBeforeUnmount(() => {
   max-width: 130px;
   padding: 0 6px;
   border: none;
-  border-radius: 4px;
+  border-radius: 12px;
   background-color: transparent; /* 与标题栏背景融为一体 */
   color: var(--fontColor);
   font-size: 12px;
@@ -1068,42 +1121,51 @@ onBeforeUnmount(() => {
 .file-view-switcher-btn > i {
   font-size: 11px;
   opacity: 0.7;
+  transition: transform 0.2s ease;
+}
+.file-view-switcher-btn.open > i {
+  transform: rotate(180deg);
 }
 .file-view-switcher-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 下拉面板：自绘（原生 <select> 的面板会被标题栏拖动区关掉），样式跟随主题 */
-.file-view-switcher-menu {
-  position: absolute;
-  top: calc(100% + 2px);
-  left: 0;
-  z-index: 3000;
-  min-width: 120px;
-  max-height: calc(60vh / var(--ui-zoom, 1));
-  overflow-y: auto;
-  padding: 4px;
-  border: 1px solid var(--borderColor);
-  border-radius: 6px;
-  background: var(--backgroundColor);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+/* 其余视图：横向展开（宽度 0 → 内容宽度 + 淡入），收起时反向播放。
+   不往下弹浮层的原因见脚本里的注释：原生 Office 视图永远盖在 DOM 上，浮层只能靠隐藏编辑器让位。 */
+.file-view-switcher-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: max-width 0.22s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.16s ease;
 }
-.file-view-switcher-item {
-  padding: 5px 10px;
-  border-radius: 4px;
-  font-size: 12px;
+.file-view-switcher-tabs.open {
+  max-width: min(520px, 60vw);
+  opacity: 1;
+  pointer-events: auto;
+}
+.file-view-switcher-tab {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
   color: var(--fontColor);
-  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 24px;
   white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
 }
-.file-view-switcher-item:hover {
+.file-view-switcher-tab:hover {
   background-color: var(--menuActiveColor);
   color: var(--fontActiveColor);
-}
-.file-view-switcher-item.active {
-  color: var(--fontActiveColor);
-  font-weight: 600;
 }
 .file-titlebar-actions {
   display: flex;
@@ -1145,6 +1207,10 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid color-mix(in srgb, #42b883 30%, var(--borderColor));
   user-select: none;
   flex-shrink: 0;
+}
+.remote-readonly-bar.writable {
+  background: color-mix(in srgb, #3a9d6a 12%, var(--menuColor));
+  border-bottom-color: color-mix(in srgb, #3a9d6a 38%, var(--borderColor));
 }
 .remote-readonly-spacer {
   flex: 1;

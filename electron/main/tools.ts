@@ -44,6 +44,7 @@ import {
 } from '@/shared/webFetch'
 import { skillService } from './skill-service'
 import { requestQuestions, requestPlanReview, setAgentPlan, setAgentTodos, getAgentTodos, createAgent, getAgent, disposeAgent, awaitAgentTurn, requestRendererTask } from './agent-loop'
+import { searchFilesInRoot, SEARCH_FILES_DESCRIPTION } from './file-search'
 import { jobRegistry } from './job-registry'
 import { parseTodoList } from '@/shared/agentTodo'
 import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
@@ -550,10 +551,10 @@ async function writeFile(input: any, ctx: ToolExecutionContext): Promise<ToolRes
     // 差异预览：仅在能拿到可读原文时算行级 diff；新建/过大/二进制只给行数摘要
     const created = 'missing' in before
     const diff: EditDiffFilePreview = created
-      ? { path: rawPath, created: true, stats: { added: countTextLines(content), removed: 0 }, lines: [] }
+      ? { path: rawPath, absPath: abs, created: true, stats: { added: countTextLines(content), removed: 0 }, lines: [] }
       : 'text' in before
-        ? { path: rawPath, ...computeEditDiff(before.text, content) }
-        : { path: rawPath, lines: [], skipped: before.reason }
+        ? { path: rawPath, absPath: abs, ...computeEditDiff(before.text, content) }
+        : { path: rawPath, absPath: abs, lines: [], skipped: before.reason }
     return {
       ok: true,
       value: {
@@ -837,7 +838,7 @@ async function replaceInFile(input: any, ctx: ToolExecutionContext): Promise<Too
   const built = buildNewContent([loc.edit])
   if (!built.ok) return built
   // 差异预览：编辑前文本（rd.text）与编辑后内容（built.content）
-  const diff: EditDiffFilePreview = { path: rawPath, ...computeEditDiff(rd.text, built.content) }
+  const diff: EditDiffFilePreview = { path: rawPath, absPath: abs, ...computeEditDiff(rd.text, built.content) }
   try {
     await atomicWrite(abs, built.content, { minMtimeMs: nextMtimeMs(abs) })
     noteFileObserved(abs, ctx)
@@ -928,7 +929,7 @@ async function multiReplace(input: any, ctx: ToolExecutionContext): Promise<Tool
       path: edits[0].rawPath,
       replacements: edits.map((ed) => ({ changedLines: { start: ed.startLine, end: ed.endLine }, deleted: ed.newString.length === 0 })),
       stats: d.stats,
-      diff: { path: edits[0].rawPath, ...d } as EditDiffFilePreview,
+      diff: { path: edits[0].rawPath, absPath: abs, ...d } as EditDiffFilePreview,
     }
   })
   return {
@@ -962,8 +963,8 @@ async function runPython(input: any, ctx: ToolExecutionContext): Promise<ToolRes
     const policy = resolvePolicy((ctx as any).sandboxMode, { workspaceRoot: ctx.cwd })
     const sandboxMode: 'safe' | 'workspace' | 'trusted' = policy.mode
     const res = sandboxMode === 'trusted'
-      ? await trustedPythonExecute(code, ctx.cwd)
-      : await pythonService.executeCode(code, input?.input ?? '', ctx.cwd, sandboxMode)
+      ? await trustedPythonExecute(code, ctx.cwd, ctx.signal)
+      : await pythonService.executeCode(code, input?.input ?? '', ctx.cwd, sandboxMode, ctx.signal)
     return {
       ok: !res?.error,
       value: { ...res, sandbox: policy },
@@ -977,8 +978,8 @@ async function runPython(input: any, ctx: ToolExecutionContext): Promise<ToolRes
 // trusted 模式走完整访问服务（与 executePython IPC 一致）
 // 静态导入即可：该服务在 index.ts 里本来就是静态导入的（模块必然已加载），
 // 这里用动态 import 只会让打包器报「dynamic import will not move module into another chunk」。
-async function trustedPythonExecute(code: string, cwd?: string) {
-  return trustedPythonService.executeCode(code, '', cwd)
+async function trustedPythonExecute(code: string, cwd?: string, signal?: AbortSignal) {
+  return trustedPythonService.executeCode(code, '', cwd, signal)
 }
 
 async function runShell(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
@@ -993,7 +994,7 @@ async function runShell(input: any, ctx: ToolExecutionContext): Promise<ToolResu
     }
   }
   try {
-    const res = await shellService.executeCommand(command, ctx.cwd)
+    const res = await shellService.executeCommand(command, ctx.cwd, ctx.signal)
     return { ok: res.success, value: { ...res, sandbox: policy }, error: res.error || undefined }
   } catch (e: any) {
     return { ok: false, error: `shell 执行失败: ${e?.message || String(e)}` }
@@ -1304,12 +1305,9 @@ async function updateTodo(input: any, ctx: ToolExecutionContext): Promise<ToolRe
 // search_files：工作区文本搜索（对齐 index.ts 的 searchInWorkspace 语义）
 // ---------------------------------------------------------------------------
 
-const SEARCH_IGNORE_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'dist-electron', 'release', '.vscode', '.idea', '__pycache__', '.venv', 'venv', 'out', 'build', 'coverage', 'target', 'miniprogram_npm', '.mypy_cache', '.pytest_cache'])
-const SEARCH_BINARY_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.pdf', '.zip', '.rar', '.7z', '.exe', '.dll', '.so', '.dylib', '.woff', '.woff2', '.ttf', '.otf', '.eot', '.mp4', '.mp3', '.wav', '.db', '.sqlite', '.node', '.wasm'])
-
 async function searchFiles(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const query = String(input?.query ?? '').trim()
-  if (!query) return { ok: false, error: 'query 参数必填' }
+  if (!query) return { ok: false, error: 'query 参数必填', code: 'INVALID_ARGS' }
   // 搜索根优先级：skill（技能目录）→ 显式 root（可绝对/相对工作区）→ 工具上下文 cwd
   const skillName = String(input?.skill ?? '').trim()
   let root: string | undefined
@@ -1326,61 +1324,24 @@ async function searchFiles(input: any, ctx: ToolExecutionContext): Promise<ToolR
     root = ctx.cwd
   }
   if (!root) return { ok: false, error: '缺少搜索目录（skill 或 root，或工具上下文 cwd）' }
-  const filePattern = input?.filePattern ? String(input.filePattern) : undefined
-  const maxResults = typeof input?.maxResults === 'number' ? input.maxResults : 30
-  const maxFileSizeMB = typeof input?.maxFileSizeMB === 'number' ? input.maxFileSizeMB : 2
-  const queryLower = query.toLowerCase()
-  const results: any[] = []
-  const maxFileSize = maxFileSizeMB * 1024 * 1024
 
-  const walk = async (dir: string, depth: number): Promise<void> => {
-    if (depth > 12 || results.length >= maxResults) return
-    let entries: fs.Dirent[]
-    try {
-      entries = await fs.promises.readdir(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      if (results.length >= maxResults) return
-      const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (SEARCH_IGNORE_DIRS.has(entry.name)) continue
-        await walk(full, depth + 1)
-        continue
-      }
-      if (!entry.isFile()) continue
-      const ext = path.extname(entry.name).toLowerCase()
-      if (filePattern) {
-        const pattern = filePattern.toLowerCase().replace(/^\./, '')
-        if (ext !== '.' + pattern) continue
-      }
-      if (SEARCH_BINARY_EXT.has(ext)) continue
-      const rel = path.relative(root, full).split(path.sep).join('/')
-      try {
-        const stat = await fs.promises.stat(full)
-        if (stat.size > maxFileSize) continue
-        const content = await fs.promises.readFile(full, 'utf8')
-        const lines = content.split(/\r?\n/)
-        for (let i = 0; i < lines.length; i++) {
-          if (results.length >= maxResults) return
-          const line = lines[i]
-          if (line.toLowerCase().includes(queryLower)) {
-            results.push({ path: rel, line: i + 1, text: line.slice(0, 300) })
-          }
-        }
-      } catch {
-        /* 无法读取的文件跳过 */
-      }
-    }
+  const result = await searchFilesInRoot({
+    root,
+    query,
+    regex: input?.regex === true,
+    caseSensitive: input?.caseSensitive === true,
+    filePattern: input?.filePattern ? String(input.filePattern) : undefined,
+    maxResults: typeof input?.maxResults === 'number' ? input.maxResults : 30,
+    contextLines: typeof input?.contextLines === 'number' ? input.contextLines : 0,
+    maxFileSizeMB: typeof input?.maxFileSizeMB === 'number' ? input.maxFileSizeMB : 2,
+    includeHidden: input?.includeHidden === true,
+    respectGitignore: input?.respectGitignore !== false,
+    signal: ctx.signal,
+  })
+  if (result.ok && result.value && typeof result.value === 'object') {
+    return { ok: true, value: { ...(result.value as Record<string, unknown>), root } }
   }
-
-  try {
-    await walk(root, 0)
-    return { ok: true, value: { query, results } }
-  } catch (e: any) {
-    return { ok: false, error: `搜索失败: ${e?.message || String(e)}` }
-  }
+  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -2957,7 +2918,9 @@ const runBrowserAgentTool = (tool: string) => async (args: any, ctx: ToolExecuti
     ? BROWSER_NAV_TIMEOUT_MS
     : tool === 'browser_run'
       ? 90_000
-      : BROWSER_TOOL_TIMEOUT_MS
+      : tool === 'browser_download_wait'
+        ? 130_000
+        : BROWSER_TOOL_TIMEOUT_MS
   // 超时/用户停止都汇总成一个 AbortController：让浏览器服务停掉加载，且排队中的调用一开始就失败。
   const ctrl = new AbortController()
   let abortedBy: 'timeout' | 'user' | null = null
@@ -3076,15 +3039,21 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('search_files', '按文本搜索文件内容，返回匹配的文件路径、行号与内容片段。默认搜索工作区；传 skill 时搜索该技能目录。', searchFiles, {
+    defineTool('search_files', SEARCH_FILES_DESCRIPTION, searchFiles, {
       inputSchema: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: '搜索关键词' },
+          query: { type: 'string', description: '搜索关键词；regex=true 时按正则解释' },
           root: { type: 'string', description: '可选，搜索根目录（绝对路径或相对工作区根；缺省用工作区根）' },
           skill: { type: 'string', description: '可选。技能名（kebab-case，容错匹配）：在该技能目录内搜索（优先于 root）' },
-          filePattern: { type: 'string', description: '可选，扩展名过滤（如 .ts）' },
-          maxResults: { type: 'number', description: '可选，最大结果数（默认 30）' },
+          filePattern: { type: 'string', description: '可选，文件过滤：".ts" / "*.ts" / "src/**/*.vue"，逗号分隔多个' },
+          regex: { type: 'boolean', description: '可选，query 是否按正则解释（默认 false = 字面量包含）' },
+          caseSensitive: { type: 'boolean', description: '可选，是否大小写敏感（默认 false）' },
+          contextLines: { type: 'number', description: '可选，命中行前后各返回几行上下文（0~5，默认 0）' },
+          maxResults: { type: 'number', description: '可选，最大结果数（默认 30，上限 500）' },
+          includeHidden: { type: 'boolean', description: '可选，是否搜索隐藏目录/文件（默认 false）' },
+          respectGitignore: { type: 'boolean', description: '可选，是否遵守根目录 .gitignore（默认 true）' },
+          maxFileSizeMB: { type: 'number', description: '可选，单文件大小上限 MB（默认 2）' },
         },
         required: ['query'],
       },
@@ -3317,6 +3286,39 @@ export function registerCoreTools(): void {
       },
     }),
   )
+
+  // 每个工具的单次 deadline（注册表执行器统一套 AbortController + 超时结果）。
+  // ask_user / exit_plan_mode 不设：它们本来就要等用户，不能按时间判失败。
+  const CORE_TOOL_TIMEOUTS: Record<string, number> = {
+    read_file: 60_000,
+    write_file: 60_000,
+    replace_in_file: 60_000,
+    multi_replace: 120_000,
+    list_dir: 30_000,
+    search_files: 90_000,
+    run_python: 300_000,
+    shell: 130_000,
+    run_subagent: 3_900_000,
+    job_output: 360_000,
+    job_kill: 30_000,
+    kb_search: 60_000,
+    skill: 30_000,
+    export_word: 120_000,
+    update_plan: 15_000,
+    update_todo: 15_000,
+    mcp_call: 120_000,
+    run_code: 300_000,
+    web_search: 90_000,
+    web_fetch: 90_000,
+  }
+  for (const [name, ms] of Object.entries(CORE_TOOL_TIMEOUTS)) {
+    const def = toolRegistry.get(name)
+    if (def && def.timeoutMs === undefined) def.timeoutMs = ms
+  }
+  // 浏览器工具自己有导航 / 动作超时；这里再加一层上限，避免某个动作把 turn 卡死
+  for (const def of toolRegistry.list()) {
+    if (String(def.name).startsWith('browser_') && def.timeoutMs === undefined) def.timeoutMs = 90_000
+  }
 
   // Agent Teams 协议工具（群聊 = Agent Teams）：主进程只转发，语义在渲染层
   registerTeamTools()

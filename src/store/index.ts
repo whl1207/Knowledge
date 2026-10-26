@@ -351,6 +351,15 @@ export const usestore = defineStore('data', {
          */
         knowActiveFileTabPath: '' as string,
         /**
+         * 知识管理右侧正在浏览的「远程工作区目录」（不持久化）。
+         * 远程文件树里点文件夹 → 文件视图切到远程目录，展示 /fs/list 返回的条目；
+         * 回到本地目录（点本地文件 / 文件夹）时清空，右侧恢复本地视图。
+         */
+        knowRemoteDir: null as { rootId: string; rel: string; label: string } | null,
+        /** 远程目录的导航历史（与本地 knowNavStack 分开，互不污染） */
+        knowRemoteNavStack: [] as Array<{ rootId: string; rel: string; label: string }>,
+        knowRemoteNavIndex: -1 as number,
+        /**
          * 单窗口模式下「在主页右侧栏打开文件」的请求（不持久化）。
          * 主页已经有文件标签的能力，因此单窗口模式里从主页打开文件时优先放进侧栏，
          * 不再叠一层全屏文件浮层（避免两个文件视图同时争用 store.index）。
@@ -367,6 +376,14 @@ export const usestore = defineStore('data', {
          * 目前只有 'agent'（浏览器 Agent 的独立窗口入口）；设置页「功能 → 导航与模块」控制。
          */
         hiddenExtras: [] as string[],
+        /**
+         * 局域网访客（网页端）可见性：由主机「协作 → 共享 → 局域网共享」下发。
+         * 只在访客页使用；null = 未收到策略（不额外限制），[] = 一个都不给。
+         * 与 hiddenNavs 叠加：主机允许 ∩ 访客本地未隐藏。
+         */
+        lanGuestVisibleNavs: null as string[] | null,
+        /** 局域网访客可见的插件 id；null = 未收到策略（不额外限制），[] = 不共享插件 */
+        lanGuestVisiblePlugins: null as string[] | null,
         kbPathToOpen: null as string | null, // 待加载的知识库(.kb)文件路径（从知识库打开时跳转到知识处理模块）
         locales: 'zh', // 语言
         TrustedPython: false, // 兼容旧字段（pythonSandbox 三态模式）
@@ -389,9 +406,11 @@ export const usestore = defineStore('data', {
         // 远程文件共享服务配置（主机，设置页「协作」管理）
         remoteFs: {
             enabled: false, // 是否开启共享文件夹
-            port: 3347, // HTTP 只读文件服务端口
+            port: 3347, // HTTP 文件服务端口
             rootDir: '', // 共享根目录
             token: '', // 访问凭据
+            // 局域网用户权限：readonly=只读（默认） / md=允许直接编辑 Markdown
+            permission: 'readonly' as 'readonly' | 'md',
         },
         // 局域网共享：知识库目录 + 访客（网页端）能力白名单（主机，设置页「协作→共享 / 权限」配置）
         lan: {
@@ -441,6 +460,9 @@ export const usestore = defineStore('data', {
             browserPageBudget: 8, // 每个 Agent 会话最多保留的页面数（超出回收最旧页）
             browserSnapshotInteractiveOnly: false, // 默认快照只输出可交互节点（省 token）
             browserDownloadDir: '', // 浏览器下载目录（留空=userData/browser-downloads）
+            browserBlockDangerousDownloads: true, // 阻止 exe/msi/bat/ps1 等可执行文件下载
+            browserMaxDownloadMB: 2048, // 单文件下载大小上限（MB，0=不限）
+            browserShowActionCursor: true, // AI 动作时在页面内显示光标/标签（视觉反馈）
             browserClipDir: '网页剪藏', // 「保存 Markdown 到知识库」落点：知识库根目录下的子文件夹（留空=直接存根目录）
             browserClipFrontMatter: true, // Markdown 剪藏是否附带 YAML front matter（标题/来源/时间，便于知识库视图识别）
             browserShowBookmarks: true, // 顶部工具栏是否显示「收藏夹」图标
@@ -1074,9 +1096,31 @@ export const usestore = defineStore('data', {
         folderName: (state) => folderLabelOf(dataDirOf(state)),
         // 顶部工具栏：当前目录的面包屑（可点击跳转；与文件视图同一份实现，显示真实路径而非回退后的数据源）
         knowCrumbs: (state) => crumbsOf(state.path || state.root),
-        knowCanBack: (state) => state.knowNavIndex > 0,
-        knowCanForward: (state) => state.knowNavIndex < state.knowNavStack.length - 1,
+        /** 当前是否正在浏览远程工作区目录（右侧文件视图会切到远程列表） */
+        knowRemoteActive: (state) => !!state.knowRemoteDir,
+        /** 远程目录的面包屑：第一段是远程工作区名，后续按 rel 逐级展开 */
+        knowRemoteCrumbs: (state) => {
+            const dir = state.knowRemoteDir
+            if (!dir) return [] as Array<{ label: string; rel: string }>
+            const root = state.remoteRoots.find((r: any) => r.id === dir.rootId)
+            const crumbs: Array<{ label: string; rel: string }> = [
+                { label: root?.name || root?.rootName || (state.locales === 'zh' ? '远程工作区' : 'Remote'), rel: '' },
+            ]
+            let acc = ''
+            for (const part of String(dir.rel || '').split('/').filter(Boolean)) {
+                acc = acc ? `${acc}/${part}` : part
+                crumbs.push({ label: part, rel: acc })
+            }
+            return crumbs
+        },
+        knowCanBack: (state) => state.knowRemoteDir
+            ? state.knowRemoteNavIndex > 0
+            : state.knowNavIndex > 0,
+        knowCanForward: (state) => state.knowRemoteDir
+            ? state.knowRemoteNavIndex < state.knowRemoteNavStack.length - 1
+            : state.knowNavIndex < state.knowNavStack.length - 1,
         knowCanUp: (state) => {
+            if (state.knowRemoteDir) return !!state.knowRemoteDir.rel
             const p = state.path || state.root
             const parent = parentPathOf(p)
             return !!parent && parent !== p
@@ -2033,6 +2077,9 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.browserPageBudget !== 'number' || !Number.isFinite(this.UI.browserPageBudget)) this.UI.browserPageBudget = 8
                 if (typeof this.UI.browserSnapshotInteractiveOnly !== 'boolean') this.UI.browserSnapshotInteractiveOnly = false
                 if (typeof this.UI.browserDownloadDir !== 'string') this.UI.browserDownloadDir = ''
+                if (typeof this.UI.browserBlockDangerousDownloads !== 'boolean') this.UI.browserBlockDangerousDownloads = true
+                if (typeof this.UI.browserMaxDownloadMB !== 'number' || !Number.isFinite(this.UI.browserMaxDownloadMB)) this.UI.browserMaxDownloadMB = 2048
+                if (typeof this.UI.browserShowActionCursor !== 'boolean') this.UI.browserShowActionCursor = true
                 // 旧存档可能缺少新标签页内容设置，兜底为「收藏夹网格」
                 if (this.UI.browserNewTab !== 'bookmarks' && this.UI.browserNewTab !== 'blank') this.UI.browserNewTab = 'bookmarks'
                 // 旧存档可能缺少地址栏搜索引擎，兜底为必应；引擎名表外（含历史拼写）一律归一化
@@ -2192,6 +2239,8 @@ export const usestore = defineStore('data', {
                             port: typeof raw.port === 'number' && raw.port >= 1024 && raw.port <= 65535 ? raw.port : 3347,
                             rootDir: typeof raw.rootDir === 'string' ? raw.rootDir : '',
                             token: typeof raw.token === 'string' ? raw.token : '',
+                            // 旧存档没有 permission：保持「只读」默认，不因升级而意外放宽
+                            permission: raw.permission === 'md' ? 'md' : 'readonly',
                         }
                     }
                 } catch (e) {
@@ -2224,6 +2273,7 @@ export const usestore = defineStore('data', {
                     const parsed = JSON.parse(localStorage.getItem('remoteRoots')!)
                     this.remoteRoots = Array.isArray(parsed)
                         ? parsed.filter((r: any) => r && typeof r.id === 'string' && typeof r.host === 'string')
+                            .map((r: any) => ({ ...r, permission: r.permission === 'md' ? 'md' : 'readonly' }))
                         : []
                 } catch (e) {
                     this.remoteRoots = []
@@ -2437,15 +2487,21 @@ export const usestore = defineStore('data', {
                 if (target && data.page != null && data.page !== '') {
                     target.page = data.page
                 }
-                // 远程标签：同步 quickPreview 标记（再次单击预览→仍为预览；双击正式打开/窗口内打开→转为正式打开）
-                if (target && data && isRemote && typeof data.quickPreview === 'boolean') {
-                    target.quickPreview = data.quickPreview
+                // 远程标签：同步 quickPreview / 可编辑标记与最新内容（主机可能已改过文件）
+                if (target && data && isRemote) {
+                    if (typeof data.quickPreview === 'boolean') target.quickPreview = data.quickPreview
+                    if (typeof data.remoteEditable === 'boolean') target.remoteEditable = data.remoteEditable
+                    if (typeof data.content === 'string') target.content = data.content
+                    if (typeof data.remoteBase64 === 'string') target.remoteBase64 = data.remoteBase64
+                    if (typeof data.remoteText === 'string') target.remoteText = data.remoteText
                 }
             }
-            // 设定打开的路径（远程文件不改变本地工作区路径）
+            // 设定打开的路径（远程文件不改变本地工作区路径，也不退出远程目录浏览）
             if (!isRemote && data.type == 'file') {
+                this.clearRemoteDir()
                 this.path = parentPathOf(data.path);
             } else if (!isRemote) {
+                this.clearRemoteDir()
                 this.path = data.path
             }
         },
@@ -2654,8 +2710,9 @@ export const usestore = defineStore('data', {
         },
 
         // ===== 知识管理全局视图的目录导航（顶部工具栏：后退 / 前进 / 向上 + 面包屑） =====
-        /** 进入目录（记录导航历史；栈指针位置始终等于 path） */
+        /** 进入本地目录（记录导航历史；栈指针位置始终等于 path）；同时退出远程目录浏览 */
         knowEnterDir(dir: string) {
+            this.clearRemoteDir()
             const target = String(dir || '')
             if (!target || target === this.path) return
             this.knowNavStack = this.knowNavStack.slice(0, this.knowNavIndex + 1)
@@ -2663,17 +2720,63 @@ export const usestore = defineStore('data', {
             this.knowNavIndex = this.knowNavStack.length - 1
             this.path = target
         },
+
+        /** 进入远程工作区目录：右侧文件视图切到 /fs/list 的远程条目列表 */
+        knowEnterRemoteDir(payload: { rootId: string; rel?: string; label?: string } | null) {
+            if (!payload?.rootId) return
+            const root = this.remoteRoots.find((r: any) => r.id === payload.rootId)
+            if (!root) return
+            const rel = String(payload.rel || '').replace(/^[/\\]+/, '').replace(/\\/g, '/')
+            const label = String(payload.label || rel.split('/').filter(Boolean).pop() || root.name || '')
+            const next = { rootId: root.id, rel, label }
+            const cur = this.knowRemoteNavStack[this.knowRemoteNavIndex]
+            if (cur && cur.rootId === next.rootId && cur.rel === next.rel) {
+                this.knowRemoteDir = next
+                return
+            }
+            this.knowRemoteNavStack = this.knowRemoteNavStack.slice(0, this.knowRemoteNavIndex + 1)
+            this.knowRemoteNavStack.push(next)
+            this.knowRemoteNavIndex = this.knowRemoteNavStack.length - 1
+            this.knowRemoteDir = next
+        },
+        knowRemoteBack() {
+            if (this.knowRemoteNavIndex <= 0) return
+            this.knowRemoteNavIndex -= 1
+            this.knowRemoteDir = this.knowRemoteNavStack[this.knowRemoteNavIndex]
+        },
+        knowRemoteForward() {
+            if (this.knowRemoteNavIndex >= this.knowRemoteNavStack.length - 1) return
+            this.knowRemoteNavIndex += 1
+            this.knowRemoteDir = this.knowRemoteNavStack[this.knowRemoteNavIndex]
+        },
+        knowRemoteUp() {
+            const dir = this.knowRemoteDir
+            if (!dir?.rel) return
+            const parts = String(dir.rel).split('/').filter(Boolean)
+            parts.pop()
+            this.knowEnterRemoteDir({ rootId: dir.rootId, rel: parts.join('/') })
+        },
+        /** 退出远程目录浏览，回到之前的本地目录 */
+        clearRemoteDir() {
+            if (!this.knowRemoteDir) return
+            this.knowRemoteDir = null
+            this.knowRemoteNavStack = []
+            this.knowRemoteNavIndex = -1
+        },
         knowBack() {
+            if (this.knowRemoteDir) { this.knowRemoteBack(); return }
             if (this.knowNavIndex <= 0) return
             this.knowNavIndex -= 1
             this.path = this.knowNavStack[this.knowNavIndex]
         },
         knowForward() {
+            if (this.knowRemoteDir) { this.knowRemoteForward(); return }
             if (this.knowNavIndex >= this.knowNavStack.length - 1) return
             this.knowNavIndex += 1
             this.path = this.knowNavStack[this.knowNavIndex]
         },
         knowUp() {
+            if (this.knowRemoteDir) { this.knowRemoteUp(); return }
             const p = this.path || this.root
             if (!p) return
             const parent = parentPathOf(p)
@@ -2749,6 +2852,7 @@ export const usestore = defineStore('data', {
         /** 切换当前工作区 */
         setActiveRoot(path: string) {
             if (!path || !this.roots.includes(path)) return
+            this.clearRemoteDir()
             if (this.root === path) return
             this.root = path
             this.path = path
@@ -2776,8 +2880,9 @@ export const usestore = defineStore('data', {
             }
         },
         
-        /** 判断主面板导航按钮是否可见（默认全部可见；隐藏的按钮不会出现在导航栏） */
+        /** 判断主面板导航按钮是否可见（本机隐藏 ∩ 主机给访客的可见清单） */
         isNavVisible(key: string) {
+            if (this.lanGuestVisibleNavs && this.lanGuestVisibleNavs.indexOf(key) === -1) return false
             return this.hiddenNavs.indexOf(key) === -1
         },
 
@@ -2786,7 +2891,38 @@ export const usestore = defineStore('data', {
          * 目前只有 'agent'：浏览器 Agent 的独立窗口入口（左上/右上/底部导航里的地球图标）。
          */
         isExtraVisible(key: string) {
+            if (this.lanGuestVisibleNavs && this.lanGuestVisibleNavs.indexOf(key) === -1) return false
             return this.hiddenExtras.indexOf(key) === -1
+        },
+
+        /**
+         * 判断插件面板对局域网访客是否可见（只在访客页生效）。
+         * 主机按**插件 id**授权（一个插件可能有多个面板）；未配置时不额外限制。
+         */
+        isGuestPluginPanelVisible(panelKey: string, pluginId: string): boolean {
+            if (!this.lanGuestVisiblePlugins) return true
+            if (!pluginId) return true
+            return this.lanGuestVisiblePlugins.indexOf(pluginId) !== -1
+                || this.lanGuestVisiblePlugins.indexOf(panelKey) !== -1
+        },
+
+        /** 应用主机 /api/agent/info 返回的可见性（访客页启动与轮询时调用；只接受数组） */
+        applyLanGuestVisibility(info: { navs?: unknown; plugins?: unknown } | null) {
+            if (!info || typeof info !== 'object') return
+            if (Array.isArray(info.navs)) {
+                this.lanGuestVisibleNavs = info.navs.filter((x): x is string => typeof x === 'string')
+            }
+            if (Array.isArray(info.plugins)) {
+                const next = info.plugins.filter((x): x is string => typeof x === 'string')
+                const changed = (this.lanGuestVisiblePlugins || []).join('\u0000') !== next.join('\u0000')
+                this.lanGuestVisiblePlugins = next
+                // 主机刚分享 / 取消插件：让渲染层插件运行时重新拉取清单并装载 / 卸载界面半边
+                if (changed && this.lanGuestVisiblePlugins) {
+                    void import('@/lib/plugin/runtime')
+                        .then((m) => m.syncClientPlugins())
+                        .catch(() => { /* 插件运行时不可用时忽略 */ })
+                }
+            }
         },
 
         /** 非主面板入口 key 的去重与清洗（只留字符串） */
@@ -2927,6 +3063,9 @@ export const usestore = defineStore('data', {
                     browserPageBudget: this.UI.browserPageBudget,
                     browserSnapshotInteractiveOnly: this.UI.browserSnapshotInteractiveOnly,
                     browserDownloadDir: this.UI.browserDownloadDir,
+                    browserBlockDangerousDownloads: this.UI.browserBlockDangerousDownloads,
+                    browserMaxDownloadMB: this.UI.browserMaxDownloadMB,
+                    browserShowActionCursor: this.UI.browserShowActionCursor,
                     browserClipDir: this.UI.browserClipDir,
                     browserClipFrontMatter: this.UI.browserClipFrontMatter,
                     browserShowBookmarks: this.UI.browserShowBookmarks !== false,
@@ -3791,8 +3930,14 @@ export const usestore = defineStore('data', {
 
                 case 'gpustack': {
                     // GPUStack：连接/模型列表探测复用自定义来源逻辑（api_url = base_url，裸地址自动推导 /v1-openai）
-                    const gpuCfg = { ...llmConfig.gpustack, api_key: (await this.resolveApiKey(llmConfig.gpustack)) || llmConfig.gpustack.api_key };
-                    const gpuResult = await AIUtils.checkCustomConnection({ api_url: gpuCfg.base_url || '', api_key: gpuCfg.api_key });
+                    // ⚠️ 必须带上完整配置：凭据引用（apiKeyRef）与 headers 都在里面；只传 api_url+api_key
+                    // 会把「用凭据管理里的 key」的来源测成 401（自定义来源能连、内置 GPUStack 连不上的根因）。
+                    const gpuCfg = {
+                        ...llmConfig.gpustack,
+                        api_url: llmConfig.gpustack?.base_url || '',
+                        api_key: (await this.resolveApiKey(llmConfig.gpustack)) || llmConfig.gpustack.api_key,
+                    };
+                    const gpuResult = await AIUtils.checkCustomConnection(gpuCfg);
                     this.AIconfig.llm.online = !!gpuResult?.online;
                     const gpuModels = Array.isArray(gpuResult?.available_models) ? gpuResult.available_models : [];
                     if (gpuModels.length > 0) this.AIconfig.llm.gpustack.available_models = gpuModels;
@@ -3889,7 +4034,9 @@ export const usestore = defineStore('data', {
                     }
                     case 'gpustack': {
                         // GPUStack：内置来源，连接探测复用自定义来源逻辑（api_url = base_url）
-                        const r: any = await AIUtils.checkCustomConnection(await withKey({ api_url: llm.gpustack?.base_url || '' }))
+                        // 传完整配置，withKey 才能按 apiKeyRef 解析凭据（与 custom 分支一致）
+                        const gpuCfg = { ...llm.gpustack, api_url: llm.gpustack?.base_url || '' }
+                        const r: any = await AIUtils.checkCustomConnection(await withKey(gpuCfg))
                         ok = !!r?.online; models = r?.available_models || []; status = Number(r?.status || 0)
                         if (models.length) llm.gpustack.available_models = models
                         break

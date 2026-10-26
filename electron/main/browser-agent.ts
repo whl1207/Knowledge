@@ -23,6 +23,8 @@ import {
   pressKey,
   resolveElement,
   selectOption,
+  dragElement,
+  wheelPage,
   BrowserActionError,
   type ActionTarget,
 } from './browser/actions'
@@ -52,8 +54,10 @@ const icon = join(publicDir, 'favicon.ico')
 // Vue 壳顶部两栏高度：标签栏 + 地址/导航栏；WebContentsView 从该高度之下布局
 export const TAB_BAR_H = 36
 export const NAV_BAR_H = 42
-/** 浏览器底部状态栏高度（通知固定在左下角；原生网页视图不覆盖这一条） */
+/** 底部轻提示状态栏高度（仅在壳有提示时升起；原生网页视图此时才让出这一条） */
 export const BOTTOM_BAR_H = 24
+/** 状态栏升降动画时长（ms）：与壳 .ba-statusbar 的 CSS transition 保持一致，原生视图才能同步升降 */
+const BOTTOM_BAR_ANIM_MS = 180
 export const VIEW_TOP = TAB_BAR_H + NAV_BAR_H
 
 /** 单次返回给模型的正文/HTML 默认上限（可经 MCP 工具 schema 的 maxChars 参数覆盖；不传时默认 30000 字符） */
@@ -131,6 +135,8 @@ export interface BrowserTabMeta {
   lastAgentAt?: number
   /** 属主：创建/使用该标签的 agent 会话 id（viewId / agentId / 批次行 id）。会话 idle/结束时可精确回收自己的标签 */
   owner?: string
+  /** 用户通过右键「交给 AI 处理此页」显式授权，Agent 可用 browser_claim_tab 接管 */
+  delegated?: boolean
   /** 本 space 内的页面标签（p1/p2…，对齐 ego-lite 的 Page label；页面清单/工具结果里展示） */
   label?: string
   /** 该标签所在的 session 分区（external:* 属主用独立分区） */
@@ -166,6 +172,15 @@ export interface BrowserDownload {
   totalBytes: number
   startedAt: number
   doneAt?: number
+  /** MIME（来自 DownloadItem.getMimeType） */
+  mime?: string
+  /** 失败/被阻止原因 */
+  error?: string
+  /** 命中危险扩展名 */
+  dangerous?: boolean
+  /** 触发下载的标签/属主（用于 per-space 目录与审计） */
+  tabId?: string
+  owner?: string
 }
 
 /** 浏览历史 / 最近关闭（P1；history 落盘到 userData/browser-history.json） */
@@ -259,6 +274,12 @@ class BrowserAgentService {
   private sideRailW = 0
   /** 紧凑模式（壳隐藏地址/工具条、仅保留标签栏）时地址栏高度按 0 处理，网页区从标签栏下直接开始 */
   private navHidden = false
+  /** 底部轻提示状态栏是否升起（壳内无提示时高度 0；有提示时让出 BOTTOM_BAR_H，网页视图同步缩短） */
+  private bottomBarTarget = 0
+  /** 状态栏当前展开比例（0~1，升降动画的插值结果；与壳 CSS 过渡同步） */
+  private bottomBarProgress = 0
+  /** 状态栏升降动画计时器 */
+  private bottomBarTimer: ReturnType<typeof setInterval> | null = null
   /** 是否已注册「全局缩放变化」回调（窗口重建时不重复注册） */
   private zoomLayoutHooked = false
   /** webContents.id -> 已注入的滚动条 CSS key（导航后需重新注入） */
@@ -299,7 +320,23 @@ class BrowserAgentService {
   /** 动作期间的事件回执（popup/dialog/download/console） */
   private eventBuffer = new BrowserEventBuffer()
   /** 可在设置页调整的浏览器行为（页面预算 / 快照默认 / 下载目录） */
-  private config = { pageBudget: 8, snapshotInteractiveOnly: false, downloadDir: '' }
+  private config = {
+    pageBudget: 8,
+    snapshotInteractiveOnly: false,
+    downloadDir: '',
+    blockDangerousDownloads: true,
+    maxDownloadMB: 2048,
+    showActionCursor: true,
+  }
+  /** 文件选择器拦截：点击触发后等 browser_upload 接管 */
+  private pendingFileChooser = new Map<string, { backendNodeId: number; mode?: string; at: number }>()
+  private fileChooserTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private fileChooserArmed = new Set<string>()
+  /** 下载记录落盘/加载（内存 + userData/browser-download-history.json） */
+  private downloadsLoaded = false
+  private downloadSaveTimer: ReturnType<typeof setTimeout> | null = null
+  /** 进行中的 DownloadItem，用于 wait/cancel/pause/resume/saveAs */
+  private downloadItems = new Map<string, any>()
   /** 待处理的 JS 弹窗（先缓存 600ms 允许模型显式 browser_dialog，超时自动处理） */
   private pendingDialogs = new Map<string, { dialogType: string; message: string; defaultPrompt?: string; timer: ReturnType<typeof setTimeout>; cdp: CdpSession }>()
   /** 下载记录（壳内「下载」面板）；最多保留 50 条 */
@@ -383,6 +420,8 @@ class BrowserAgentService {
       },
     })
     this.win = win
+    // 新窗口从「无提示」状态开始：清掉可能残留的展开高度，首帧网页视图不被底部让位
+    this.resetBottomBar()
     // 独立窗口关闭时清理的是**窗口自己的**状态；停靠模式下的视图不在这里（见 detachDock）
 
     // 全局窗口缩放变化时重排原生视图（壳被缩放后，栏高/侧栏宽的 CSS px 需按 zoom 换算成 DIP）
@@ -418,6 +457,7 @@ class BrowserAgentService {
     win.on('resize', () => this.layout())
     win.on('close', () => {
       this.sideRailW = 0
+      this.resetBottomBar()
       // 停靠模式下的视图挂在主窗口上，**不能**跟着独立窗口一起清掉
       if (!this.dockHost) {
         for (const [, view] of this.views) {
@@ -606,10 +646,12 @@ class BrowserAgentService {
     const availW = Math.max(0, w - Math.round((this.sideRailW || 0) * z))
     // 紧凑模式（壳隐藏地址/工具条）下网页区从标签栏下直接开始，顶栏高度仅剩标签栏
     const top = Math.round((TAB_BAR_H + (this.navHidden ? 0 : NAV_BAR_H)) * z)
+    // 底部轻提示状态栏：无提示时收起（0），有提示时才让出高度（与壳的 .ba-statusbar 显隐同步；动画期间取插值）
+    const bottom = Math.round(BOTTOM_BAR_H * z * this.bottomBarProgress)
     for (const tab of this.tabs) {
       const view = this.views.get(tab.id)
       if (!view) continue
-      view.setBounds({ x: 0, y: top, width: availW, height: Math.max(0, h - top - Math.round(BOTTOM_BAR_H * z)) })
+      view.setBounds({ x: 0, y: top, width: availW, height: Math.max(0, h - top - bottom) })
       const isBare = !tab.url && !tab.loading // 空白标签（书签首页）
       view.setVisible(tab.id === this.activeTabId && !isBare && !this.overlayHidden)
     }
@@ -629,6 +671,40 @@ class BrowserAgentService {
     if (this.navHidden === next) return
     this.navHidden = next
     this.layout()
+  }
+
+  /**
+   * 底部状态栏显隐（壳内只在有轻提示时升起）。
+   * 不能一步到位：壳里的 .ba-statusbar 用 180ms 高度过渡，原生网页视图必须按同一节奏升降，
+   * 否则动画期间会出现「视图盖住提示条」或底部露白。这里用 easeOutCubic 插值逐帧布局。
+   */
+  setBottomBar(visible: boolean) {
+    const target = visible ? 1 : 0
+    if (this.bottomBarTarget === target) return
+    this.bottomBarTarget = target
+    if (this.bottomBarTimer) { clearInterval(this.bottomBarTimer); this.bottomBarTimer = null }
+    const from = this.bottomBarProgress
+    const startedAt = Date.now()
+    const tick = () => {
+      const t = Math.min(1, (Date.now() - startedAt) / BOTTOM_BAR_ANIM_MS)
+      // 与壳 CSS 的 cubic-bezier(.33, 1, .68, 1)（easeOutCubic）保持一致
+      const eased = 1 - Math.pow(1 - t, 3)
+      this.bottomBarProgress = from + (target - from) * eased
+      if (t >= 1) {
+        this.bottomBarProgress = target
+        if (this.bottomBarTimer) { clearInterval(this.bottomBarTimer); this.bottomBarTimer = null }
+      }
+      this.layout()
+    }
+    tick()
+    if (this.bottomBarProgress !== target) this.bottomBarTimer = setInterval(tick, 16)
+  }
+
+  /** 停止状态栏动画并复位（窗口关闭/重建时，避免新窗口首帧沿用上一次的展开高度） */
+  private resetBottomBar() {
+    if (this.bottomBarTimer) { clearInterval(this.bottomBarTimer); this.bottomBarTimer = null }
+    this.bottomBarTarget = 0
+    this.bottomBarProgress = 0
   }
 
   // ===================== 停靠宿主（主页右侧栏「浏览器」标签） =====================
@@ -739,15 +815,18 @@ class BrowserAgentService {
   }
 
   /** 设置页下发的行为配置（页面预算 / 快照默认 / 下载目录） */
-  setConfig(patch: any): { pageBudget: number; snapshotInteractiveOnly: boolean; downloadDir: string } {
+  setConfig(patch: any): { pageBudget: number; snapshotInteractiveOnly: boolean; downloadDir: string; blockDangerousDownloads: boolean; maxDownloadMB: number; showActionCursor: boolean } {
     const p = patch || {}
     if (p.pageBudget !== undefined) this.config.pageBudget = Math.max(2, Math.min(20, Number(p.pageBudget) || 8))
     if (p.snapshotInteractiveOnly !== undefined) this.config.snapshotInteractiveOnly = !!p.snapshotInteractiveOnly
     if (p.downloadDir !== undefined) this.config.downloadDir = String(p.downloadDir || '').trim()
+    if (p.blockDangerousDownloads !== undefined) this.config.blockDangerousDownloads = !!p.blockDangerousDownloads
+    if (p.maxDownloadMB !== undefined) this.config.maxDownloadMB = Math.max(0, Math.min(10240, Number(p.maxDownloadMB) || 0))
+    if (p.showActionCursor !== undefined) this.config.showActionCursor = !!p.showActionCursor
     return { ...this.config }
   }
 
-  getConfig(): { pageBudget: number; snapshotInteractiveOnly: boolean; downloadDir: string } {
+  getConfig(): { pageBudget: number; snapshotInteractiveOnly: boolean; downloadDir: string; blockDangerousDownloads: boolean; maxDownloadMB: number; showActionCursor: boolean } {
     return { ...this.config }
   }
 
@@ -812,6 +891,13 @@ class BrowserAgentService {
       { type: 'separator' },
       { label: t('检查元素', 'Inspect element'), click: () => { try { wc.inspectElement(Number(p.x) || 0, Number(p.y) || 0) } catch { /* 忽略 */ } } },
     )
+    const active = this.activeTab()
+    if (active && !active.agent) {
+      items.push(
+        { type: 'separator' },
+        { label: t('交给 AI 处理此页', 'Hand this page to the AI'), click: () => { this.delegateTab(active.id) } },
+      )
+    }
 
     const menu = Menu.buildFromTemplate(items)
     if (this.hostWindow && !this.hostWindow.isDestroyed()) menu.popup({ window: this.hostWindow })
@@ -1016,6 +1102,7 @@ class BrowserAgentService {
       if (byUser) {
         tab.agent = false
         tab.lastUserAt = Date.now()
+        this.disarmFileChooser(id)
         // 用户接管：该标签后续的弹窗/新窗口按用户行为处理，不再打 agent 属主
         const v = this.views.get(id)
         if (v) this.wcOwner.set(v.webContents.id, null)
@@ -1459,6 +1546,20 @@ class BrowserAgentService {
           .slice(0, 500)
         this.eventBuffer.record(tabId, { kind: 'console', at: Date.now(), level: 'error', text })
       })
+      // 文件选择器：点击触发后拦截原生对话框，记录 backendNodeId，交给 browser_upload 选文件
+      cdp.on('Page.fileChooserOpened', (p: any) => {
+        const backendNodeId = Number(p?.backendNodeId)
+        if (!backendNodeId) return
+        this.pendingFileChooser.set(tabId, { backendNodeId, mode: String(p?.mode || ''), at: Date.now() })
+        const old = this.fileChooserTimers.get(tabId)
+        if (old) clearTimeout(old)
+        const timer = setTimeout(() => {
+          this.pendingFileChooser.delete(tabId)
+          void cdp!.send('Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => { /* 忽略 */ })
+          this.fileChooserTimers.delete(tabId)
+        }, 60_000)
+        this.fileChooserTimers.set(tabId, timer)
+      })
     }
     await cdp.ensure()
     return cdp
@@ -1467,6 +1568,58 @@ class BrowserAgentService {
   /** 当前标签的 ref 表（没有 snapshot 过就是空） */
   private refsFor(tabId: string): Map<number, RefEntry> {
     return this.refsByTab.get(tabId) || new Map()
+  }
+
+  /** 给 AI 标签开启文件选择器拦截（保持开启；用户接管时再关闭），避免原生对话框阻塞 */
+  private async armFileChooser(tabId: string, cdp: CdpSession): Promise<void> {
+    this.pendingFileChooser.delete(tabId)
+    if (this.fileChooserArmed.has(tabId)) return
+    try {
+      await cdp.send('Page.setInterceptFileChooserDialog', { enabled: true }, 3000)
+      this.fileChooserArmed.add(tabId)
+    } catch (err: any) {
+      console.warn('[browser] file chooser intercept failed', err?.message || err)
+    }
+  }
+
+  /** 关闭文件选择器拦截（用户接管/标签关闭时） */
+  private disarmFileChooser(tabId: string): void {
+    const timer = this.fileChooserTimers.get(tabId)
+    if (timer) clearTimeout(timer)
+    this.fileChooserTimers.delete(tabId)
+    this.pendingFileChooser.delete(tabId)
+    if (!this.fileChooserArmed.delete(tabId)) return
+    const cdp = this.cdpByTab.get(tabId)
+    if (cdp) void cdp.send('Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => { /* 忽略 */ })
+  }
+
+  /** 文件已选择 / 放弃：清掉待处理状态（拦截保持开启，下次点击不再竞态） */
+  private clearFileChooser(tabId: string, _cdp: CdpSession): void {
+    const timer = this.fileChooserTimers.get(tabId)
+    if (timer) clearTimeout(timer)
+    this.fileChooserTimers.delete(tabId)
+    this.pendingFileChooser.delete(tabId)
+  }
+
+  /** 页面内动作光标 + 标签（视觉反馈；可用设置关闭） */
+  private async flashAction(wc: WebContents, point: { x: number; y: number } | undefined, label: string): Promise<void> {
+    if (!this.config.showActionCursor || !point) return
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return
+    try {
+      await wc.executeJavaScript(`(() => {
+        const old = document.getElementById('__aikm_action_cursor');
+        if (old) old.remove();
+        const d = document.createElement('div');
+        d.id = '__aikm_action_cursor';
+        d.style.cssText = 'position:fixed;left:${Math.round(point.x)}px;top:${Math.round(point.y)}px;width:16px;height:16px;margin:-8px 0 0 -8px;border:2px solid #409eff;border-radius:50%;pointer-events:none;z-index:2147483647;box-shadow:0 0 0 3px rgba(64,158,255,.25);';
+        const s = document.createElement('span');
+        s.textContent = ${JSON.stringify(String(label || '操作'))};
+        s.style.cssText = 'position:absolute;left:18px;top:-4px;padding:2px 6px;border-radius:4px;background:rgba(32,32,32,.88);color:#fff;font:11px/1.4 system-ui,sans-serif;white-space:nowrap;pointer-events:none;';
+        d.appendChild(s);
+        document.documentElement.appendChild(d);
+        setTimeout(() => d.remove(), 1200);
+      })()`)
+    } catch { /* 页面可能已关闭 */ }
   }
 
   /** 本次动作是否指向跨域 frame 内的 ref */
@@ -1641,6 +1794,7 @@ class BrowserAgentService {
   private clearTabRuntime(tabId: string): void {
     this.refsByTab.delete(tabId)
     this.eventBuffer.clear(tabId)
+    this.disarmFileChooser(tabId)
     const view = this.views.get(tabId)
     if (view) this.wcOwner.delete(view.webContents.id)
     const pd = this.pendingDialogs.get(tabId)
@@ -1820,6 +1974,25 @@ class BrowserAgentService {
           }).join('\n'),
         }
       }
+      if (toolName === 'browser_download_wait') {
+        const r = await this.waitForDownload({
+          id: args?.id ? String(args.id) : '',
+          filename: args?.filename ? String(args.filename) : '',
+          since: Number(args?.since) || 0,
+          timeoutMs: Number(args?.timeoutMs) || 60_000,
+        }, signal)
+        if (!r.download) return { text: `等待下载失败：${r.error || '未知原因'}` }
+        const d = r.download
+        const size = d.totalBytes ? `${d.receivedBytes}/${d.totalBytes}B` : `${d.receivedBytes || 0}B`
+        if (!r.ok) return { text: `下载未完成：${d.filename}（${d.state}，${size}）${d.error ? `\n原因：${d.error}` : ''}\nid=${d.id}` }
+        return { text: `下载完成：${d.filename}（${size}）\nid=${d.id}\n路径：${d.path}${d.mime ? `\nMIME：${d.mime}` : ''}${d.dangerous ? '\n注意：该文件类型有风险，打开前请确认来源' : ''}` }
+      }
+      if (toolName === 'browser_download') {
+        const r = await this.controlDownload(String(args?.id || ''), String(args?.action || ''), args?.path ? String(args.path) : undefined)
+        if (!r.ok) return { text: `下载操作失败：${r.error}` }
+        if (!r.download) return { text: `已执行下载操作：${String(args?.action)}` }
+        return { text: `已执行 ${String(args?.action)}：${r.download.filename}（${r.download.state}）\nid=${r.download.id}${r.download.path ? `\n路径：${r.download.path}` : ''}${r.download.error ? `\n说明：${r.download.error}` : ''}` }
+      }
       if (toolName === 'browser_playbook_save') {
         const r = saveSitePlaybook({
           host: args?.host ? String(args.host) : '',
@@ -1913,6 +2086,7 @@ class BrowserAgentService {
               if (!entry) throw new Error('scope=subtree 需要 root 参数（上一次 browser_snapshot 返回的 ref，如 12）')
               rootBackendNodeId = entry.backendNodeId
             }
+            const oopifFrames = await this.oopifSources(cdp, wc)
             const snap = await captureSnapshot(cdp, {
               maxChars: Number(args?.maxChars) || 8000,
               maxRefs: Number(args?.maxRefs) || 120,
@@ -1920,7 +2094,7 @@ class BrowserAgentService {
               interactiveOnly: args?.interactiveOnly === true || (args?.interactiveOnly === undefined && this.config.snapshotInteractiveOnly),
               viewportOnly: scope === 'viewport',
               rootBackendNodeId,
-              oopifFrames: await this.oopifSources(cdp, wc),
+              oopifFrames,
             })
             this.refsByTab.set(tab.id, snap.refs)
             return {
@@ -1981,6 +2155,10 @@ class BrowserAgentService {
               }).join('\n'),
             }
           }
+          case 'browser_claim_tab': {
+            const tab = this.claimTab(args?.tabId ? String(args.tabId) : undefined, owner)
+            return { text: `已接管用户标签「${tab.title || tab.url || tab.id}」（tabId=${tab.id}${tab.label ? `，label=${tab.label}` : ''}）。后续 snapshot/click 默认作用于它；任务完成后可用 browser_space_finish 保留或交还。` }
+          }
           case 'browser_new_tab': {
             await this.addTab(String(args?.url || ''), { agent: true, owner: owner || undefined })
             const t = this.activeTab()
@@ -2020,6 +2198,7 @@ class BrowserAgentService {
             const { tab, wc } = await this.targetTabFor(args, owner)
             assertNotAborted(signal)
             const cdp = await this.cdpFor(tab.id, wc)
+            await this.armFileChooser(tab.id, cdp)
             const frameRef = this.frameRefFor(tab.id, args)
             if (frameRef) {
               this.startAction(tab.id)
@@ -2030,7 +2209,10 @@ class BrowserAgentService {
               const receipt = await clickElement(cdp, this.refsFor(tab.id), {
                 ref: args?.ref, selector: args?.selector, text: args?.text, index: args?.index,
               }, { button: args?.button, clickCount: args?.clickCount }, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
-              return { text: `${receipt.detail}\n当前页面：${receipt.url || ''}${receipt.title ? ` / ${receipt.title}` : ''}${this.actionNote(tab.id)}\n（点击不保证业务结果；需要时用 browser_snapshot 或 browser_wait_for 确认）` }
+              await sleep(80)
+              void this.flashAction(wc, receipt.point, '点击')
+              const chooser = this.pendingFileChooser.get(tab.id)
+              return { text: `${receipt.detail}\n当前页面：${receipt.url || ''}${receipt.title ? ` / ${receipt.title}` : ''}${this.actionNote(tab.id)}${chooser ? '\n（点击触发了文件选择器：用 browser_upload {files:[绝对路径]} 选择文件，无需 ref）' : ''}\n（点击不保证业务结果；需要时用 browser_snapshot 或 browser_wait_for 确认）` }
             } catch (err) {
               this.throwActionError(err)
             }
@@ -2048,6 +2230,7 @@ class BrowserAgentService {
             this.startAction(tab.id)
             try {
               const receipt = await fillElement(cdp, this.refsFor(tab.id), { ref: args?.ref, selector: args?.selector }, String(args?.text ?? ''), { clear: args?.clear !== false }, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
+              void this.flashAction(wc, receipt.point, '填写')
               return { text: receipt.detail + this.actionNote(tab.id) }
             } catch (err) {
               this.throwActionError(err)
@@ -2059,6 +2242,7 @@ class BrowserAgentService {
             const key = String(args?.key || '').trim()
             if (!key) throw new Error('缺少 key 参数（如 Enter / Tab / Escape / ControlOrMeta+A）')
             const cdp = await this.cdpFor(tab.id, wc)
+            await this.armFileChooser(tab.id, cdp)
             const target = (args?.ref || args?.selector) ? { ref: args?.ref, selector: args?.selector } : null
             const frameRef = this.frameRefFor(tab.id, args)
             if (frameRef) {
@@ -2068,6 +2252,7 @@ class BrowserAgentService {
             this.startAction(tab.id)
             try {
               const receipt = await pressKey(cdp, this.refsFor(tab.id), target, key, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
+              void this.flashAction(wc, receipt.point, '按键')
               return { text: receipt.detail + this.actionNote(tab.id) }
             } catch (err) {
               this.throwActionError(err)
@@ -2085,6 +2270,7 @@ class BrowserAgentService {
             this.startAction(tab.id)
             try {
               const receipt = await hoverElement(cdp, this.refsFor(tab.id), { ref: args?.ref, selector: args?.selector, text: args?.text }, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
+              void this.flashAction(wc, receipt.point, '悬停')
               return { text: receipt.detail + this.actionNote(tab.id) }
             } catch (err) {
               this.throwActionError(err)
@@ -2104,10 +2290,71 @@ class BrowserAgentService {
               const receipt = await selectOption(cdp, this.refsFor(tab.id), { ref: args?.ref, selector: args?.selector }, {
                 value: args?.value, label: args?.label, index: args?.index,
               }, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
+              void this.flashAction(wc, receipt.point, '选择')
               return { text: receipt.detail + this.actionNote(tab.id) }
             } catch (err) {
               this.throwActionError(err)
             }
+          }
+          case 'browser_drag': {
+            const { tab, wc } = await this.targetTabFor(args, owner)
+            assertNotAborted(signal)
+            const from = args?.from || (args?.fromRef !== undefined ? { ref: args.fromRef } : null)
+            const to = args?.to || (args?.toRef !== undefined ? { ref: args.toRef } : null)
+            if (!from || !to) throw new Error('browser_drag 需要 from/to（ref 或 selector 对象）')
+            const cdp = await this.cdpFor(tab.id, wc)
+            this.startAction(tab.id)
+            try {
+              const receipt = await dragElement(cdp, this.refsFor(tab.id), from, to, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
+              return { text: receipt.detail + this.actionNote(tab.id) }
+            } catch (err) {
+              this.throwActionError(err)
+            }
+          }
+          case 'browser_wheel': {
+            const { tab, wc } = await this.targetTabFor(args, owner)
+            assertNotAborted(signal)
+            const cdp = await this.cdpFor(tab.id, wc)
+            try {
+              const receipt = await wheelPage(cdp, {
+                deltaY: Number(args?.deltaY) || 0,
+                deltaX: Number(args?.deltaX) || 0,
+                x: args?.x !== undefined ? Number(args.x) : undefined,
+                y: args?.y !== undefined ? Number(args.y) : undefined,
+              })
+              return { text: receipt.detail }
+            } catch (err) {
+              this.throwActionError(err)
+            }
+          }
+          case 'browser_paste': {
+            const { tab, wc } = await this.targetTabFor(args, owner)
+            assertNotAborted(signal)
+            const text = String(args?.text ?? '')
+            const html = args?.html !== undefined ? String(args.html) : ''
+            if (!text && !html) throw new Error('browser_paste 需要 text 或 html')
+            const cdp = await this.cdpFor(tab.id, wc)
+            const prevText = clipboard.readText()
+            const prevHtml = clipboard.readHTML()
+            clipboard.write({ text, ...(html ? { html } : {}) })
+            const mod = process.platform === 'darwin' ? 4 : 2
+            const key = process.platform === 'darwin' ? 'Meta' : 'Control'
+            const code = process.platform === 'darwin' ? 'MetaLeft' : 'ControlLeft'
+            const vk = process.platform === 'darwin' ? 91 : 17
+            try {
+              await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, modifiers: mod })
+              await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: mod })
+              await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: mod })
+              await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers: mod })
+            } finally {
+              setTimeout(() => {
+                try {
+                  if (prevText || prevHtml) clipboard.write({ text: prevText, ...(prevHtml ? { html: prevHtml } : {}) })
+                  else clipboard.clear()
+                } catch { /* 忽略 */ }
+              }, 300)
+            }
+            return { text: `已粘贴到当前焦点（${text.length} 字符${html ? ' + HTML' : ''}）` }
           }
           case 'browser_upload': {
             const { tab, wc } = await this.targetTabFor(args, owner)
@@ -2124,8 +2371,21 @@ class BrowserAgentService {
             const cdp = await this.cdpFor(tab.id, wc)
             this.startAction(tab.id)
             try {
-              const resolved = await resolveElement(cdp, this.refsFor(tab.id), { ref: args?.ref, selector: args?.selector }, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
+              const hasTarget = args?.ref !== undefined || !!args?.selector
+              let pending = this.pendingFileChooser.get(tab.id)
+              if (!hasTarget && !pending) {
+                // 点击后 fileChooserOpened 事件可能比工具返回晚：最多等 2s
+                for (let i = 0; i < 20 && !pending; i++) {
+                  await sleep(100)
+                  pending = this.pendingFileChooser.get(tab.id)
+                }
+              }
+              if (!hasTarget && !pending) throw new Error('没有待处理的文件选择器：先点击上传按钮，或提供 ref/selector')
+              const resolved = hasTarget
+                ? await resolveElement(cdp, this.refsFor(tab.id), { ref: args?.ref, selector: args?.selector }, { refresh: () => this.refreshRefs(tab.id, wc, cdp) })
+                : { backendNodeId: pending!.backendNodeId, label: '文件选择器' }
               await cdp.send('DOM.setFileInputFiles', { files, backendNodeId: resolved.backendNodeId })
+              this.clearFileChooser(tab.id, cdp)
               return { text: `已向 ${resolved.label} 选择 ${files.length} 个文件：${files.map((f: string) => basename(f)).join('、')}${this.actionNote(tab.id)}` }
             } catch (err) {
               this.throwActionError(err)
@@ -2368,6 +2628,14 @@ class BrowserAgentService {
         inputSchema: { type: 'object', properties: {} },
       },
       {
+        name: 'browser_claim_tab',
+        description: '接管用户显式交给 AI 的标签页。必须先由用户在网页右键选择「交给 AI 处理此页」；未授权会拒绝。接管后 Agent 才能 snapshot/click 该页。',
+        inputSchema: {
+          type: 'object',
+          properties: { tabId: { type: 'string', description: '用户标签 id（省略则用当前激活标签）' } },
+        },
+      },
+      {
         name: 'browser_new_tab',
         description: '新建一个本会话的浏览器标签页（带 URL 则直接导航）；会话空闲后自动回收。',
         inputSchema: {
@@ -2494,6 +2762,45 @@ class BrowserAgentService {
         },
       },
       {
+        name: 'browser_drag',
+        description: '把元素拖到另一个位置（看板/排序/滑块/拖放上传区）。from/to 传 {ref} 或 {selector}。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            from: { type: 'object', description: '起点：{ref} 或 {selector}' },
+            to: { type: 'object', description: '终点：{ref} 或 {selector}' },
+            tabId,
+          },
+          required: ['from', 'to'],
+        },
+      },
+      {
+        name: 'browser_wheel',
+        description: '发送鼠标滚轮（地图/画布/横向列表）。deltaY 向下为正，deltaX 向右为正；x/y 可指定视口坐标。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            deltaY: { type: 'number', description: '纵向滚动量（像素）' },
+            deltaX: { type: 'number', description: '横向滚动量（像素）' },
+            x: { type: 'number', description: '滚轮位置 x（可选，默认视口中心）' },
+            y: { type: 'number', description: '滚轮位置 y（可选，默认视口中心）' },
+            tabId,
+          },
+        },
+      },
+      {
+        name: 'browser_paste',
+        description: '把文本/HTML 粘贴到当前焦点（富文本编辑器、表格）。会写系统剪贴板并在 300ms 后恢复原内容。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', description: '纯文本' },
+            html: { type: 'string', description: '可选 HTML（富文本编辑器用）' },
+            tabId,
+          },
+        },
+      },
+      {
         name: 'browser_upload',
         description: '给文件输入框（input[type=file]）选择本地文件（绝对路径，最多 20 个）；先 snapshot 拿到 ref 再传。',
         inputSchema: {
@@ -2535,6 +2842,32 @@ class BrowserAgentService {
         inputSchema: {
           type: 'object',
           properties: { limit: { type: 'number', description: '最多返回多少条（默认 20）' } },
+        },
+      },
+      {
+        name: 'browser_download_wait',
+        description: '等待下载完成/失败（不再用 sleep 猜）。不传 id 时按 filename/since 找最近一次下载；返回 id、状态、保存路径、大小、MIME。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: '下载 id（可选；来自动作回执或 browser_list_downloads）' },
+            filename: { type: 'string', description: '文件名包含的片段（可选）' },
+            since: { type: 'number', description: '只考虑该时间戳（ms）之后开始的下载' },
+            timeoutMs: { type: 'number', description: '超时（默认 60000，最大 120000）' },
+          },
+        },
+      },
+      {
+        name: 'browser_download',
+        description: '控制下载：cancel 取消、pause 暂停、resume 继续、saveAs 另存为绝对路径（拒绝覆盖）、delete 删除记录与文件。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: '下载 id' },
+            action: { type: 'string', enum: ['cancel', 'pause', 'resume', 'saveAs', 'delete'], description: '操作' },
+            path: { type: 'string', description: 'saveAs 的目标绝对路径' },
+          },
+          required: ['id', 'action'],
         },
       },
       {
@@ -2973,13 +3306,25 @@ class BrowserAgentService {
       const head = this.headOf(p, BrowserAgentService.HEAD_READ)
       // 离线整页快照：优先读保存时写入的本地 file:// 地址（其内 <a href> 均为原站链接，不能当目标）
       const h = head.match(/<meta\s+name=["']aikm-href["'][^>]*content=["']([^"']+)["']/i)
-      if (h?.[1]) return decodeURIComponent(h[1])
+      if (h?.[1]) return decodeURIComponent(this.unescapeAttr(h[1]))
+      // 跳转页：meta refresh / 正文链接写入时都经过 attrSafe（& → &amp;），读回必须还原实体，
+      // 否则带查询参数的 URL（如 ...?a=1&b=2）永远与页面 URL 不相等 → 星标不亮、还会重复收藏。
+      // 也不能 decodeURIComponent：它会把 %E4%B8%AD 这类编码还原成中文，同样破坏比对。
       const m = head.match(/<meta\s+http-equiv=["']?refresh["']?[^>]*?url=(["']?)([^"'>\s]+)\1/i)
-      if (m?.[2]) return decodeURIComponent(m[2])
+      if (m?.[2]) return this.unescapeAttr(m[2])
       const a = head.match(/<a[^>]+href=["']([^"']+)["']/i)
-      if (a?.[1]) return a[1]
+      if (a?.[1]) return this.unescapeAttr(a[1])
     } catch { /* 忽略 */ }
     return ''
+  }
+  /** 还原 HTML 属性实体（&amp; 必须最后处理，避免 &amp;quot; 被二次还原） */
+  private unescapeAttr(s: string): string {
+    return String(s ?? '')
+      .replace(/&quot;/g, '"')
+      .replace(/&#0*39;|&apos;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
   }
   /** 读取书签文件 <title>（首页展示用真实标题，与文件名解耦；重命名文件不影响展示） */
   private titleOfBookmarkHead(p: string): string {
@@ -3694,6 +4039,44 @@ class BrowserAgentService {
   approvePlaybook(host: string, name: string, approved: boolean) { return approveSitePlaybook(host, name, approved) }
   deletePlaybook(host: string, name: string) { return deleteSitePlaybook(host, name) }
 
+  /** 用户把当前页显式交给 AI（右键菜单）：只做标记，等智能体 browser_claim_tab 接管 */
+  delegateTab(tabId?: string): { ok: boolean; tabId?: string; error?: string } {
+    const tab = tabId ? this.tabs.find((t) => t.id === tabId) : this.activeTab()
+    if (!tab) return { ok: false, error: '找不到标签页' }
+    if (tab.agent) return { ok: false, error: '这是 AI 标签，无需移交' }
+    tab.delegated = true
+    this.pushState()
+    this.toast(`已把「${tab.title || tab.url || '当前页'}」交给 AI；智能体可用 browser_claim_tab 接管`)
+    return { ok: true, tabId: tab.id }
+  }
+
+  /** Agent 接管用户显式移交的标签（必须先由用户右键授权） */
+  claimTab(tabId: string | undefined, owner: string | null): BrowserTabMeta {
+    const tab = tabId ? this.tabs.find((t) => t.id === tabId) : this.activeTab()
+    if (!tab) throw new Error('找不到要接管的标签页')
+    if (tab.agent) {
+      if (owner && tab.owner && tab.owner !== owner) throw new Error('该标签属于其他 Agent 会话')
+      return tab
+    }
+    if (!tab.delegated) {
+      throw new Error('该标签未授权给 AI：请用户在网页里右键选择「交给 AI 处理此页」后再接管')
+    }
+    tab.agent = true
+    tab.delegated = false
+    tab.owner = owner || 'ui:handoff'
+    tab.lastAgentAt = Date.now()
+    if (!tab.label) {
+      const key = tab.owner
+      const n = (this.ownerLabelSeq.get(key) || 0) + 1
+      this.ownerLabelSeq.set(key, n)
+      tab.label = `p${n}`
+    }
+    const wc = this.views.get(tab.id)?.webContents
+    if (wc) this.wcOwner.set(wc.id, tab.owner)
+    this.pushState()
+    return tab
+  }
+
   // ===================== 接管 / 暂停（P1） =====================
   /** 当前是否被用户暂停的会话 */
   isOwnerPaused(owner?: string | null): boolean {
@@ -3727,6 +4110,7 @@ class BrowserAgentService {
       if (o && t.owner && t.owner !== o) continue
       t.agent = false
       t.lastUserAt = Date.now()
+      this.disarmFileChooser(t.id)
       const v = this.views.get(t.id)
       if (v) this.wcOwner.set(v.webContents.id, null)
       if (o) delete t.owner
@@ -3737,56 +4121,249 @@ class BrowserAgentService {
   }
 
   // ===================== 下载（P1） =====================
+  private downloadsFile(): string {
+    return join(app.getPath('userData'), 'browser-download-history.json')
+  }
+
+  /** 懒加载下载记录；重启后把未完成项标为 interrupted 并清掉半成品 */
+  private loadDownloads(): void {
+    if (this.downloadsLoaded) return
+    this.downloadsLoaded = true
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.downloadsFile(), 'utf8'))
+      if (!Array.isArray(raw)) return
+      this.downloads = raw.slice(0, 200).map((d: any) => {
+        const rec: BrowserDownload = {
+          id: String(d?.id || ''),
+          filename: String(d?.filename || 'download'),
+          url: String(d?.url || ''),
+          path: String(d?.path || ''),
+          state: d?.state === 'completed' ? 'completed' : (d?.state === 'cancelled' ? 'cancelled' : (d?.state === 'interrupted' ? 'interrupted' : 'interrupted')),
+          receivedBytes: Number(d?.receivedBytes) || 0,
+          totalBytes: Number(d?.totalBytes) || 0,
+          startedAt: Number(d?.startedAt) || Date.now(),
+          ...(d?.doneAt ? { doneAt: Number(d.doneAt) } : {}),
+          ...(d?.mime ? { mime: String(d.mime) } : {}),
+          ...(d?.error ? { error: String(d.error) } : {}),
+          ...(d?.dangerous ? { dangerous: true } : {}),
+          ...(d?.tabId ? { tabId: String(d.tabId) } : {}),
+          ...(d?.owner ? { owner: String(d.owner) } : {}),
+        }
+        if (rec.state === 'progressing' || rec.state === 'paused') {
+          rec.state = 'interrupted'
+          rec.error = rec.error || '应用退出时下载未完成'
+          rec.doneAt = rec.doneAt || Date.now()
+          try { if (rec.path) fs.rmSync(rec.path, { force: true }) } catch { /* 忽略 */ }
+        }
+        return rec
+      }).filter((d: BrowserDownload) => !!d.id)
+    } catch { /* 首次运行/坏文件 */ }
+  }
+
+  private scheduleSaveDownloads(): void {
+    if (this.downloadSaveTimer) return
+    this.downloadSaveTimer = setTimeout(() => {
+      this.downloadSaveTimer = null
+      try {
+        const file = this.downloadsFile()
+        const tmp = `${file}.tmp`
+        fs.writeFileSync(tmp, JSON.stringify(this.downloads.slice(0, 200)), 'utf8')
+        fs.renameSync(tmp, file)
+      } catch { /* 忽略 */ }
+    }, 500)
+  }
+
+  private downloadDirFor(owner?: string): string {
+    const base = this.config.downloadDir || join(app.getPath('userData'), 'browser-downloads')
+    // 外部 MCP/外部 space 单独子目录，避免与应用内下载混在一起
+    return owner && owner.startsWith('external:') ? join(base, 'external') : base
+  }
+
+  private notifyDownloads(): void {
+    this.sendToShell('browser-agent:downloads', this.listDownloads())
+    this.scheduleSaveDownloads()
+  }
+
+  private onWillDownload(item: any, wc: any): void {
+    try {
+      this.loadDownloads()
+      const tab = wc && typeof wc.id === 'number'
+        ? this.tabs.find((t) => this.views.get(t.id)?.webContents.id === wc.id)
+        : undefined
+      const owner = tab?.owner
+      const dir = this.downloadDirFor(owner)
+      fs.mkdirSync(dir, { recursive: true })
+      const rawName = String(item.getFilename() || 'download')
+      const name = this.safeDownloadFileName(rawName)
+      const target = this.uniqueFilePath(join(dir, name))
+      const totalBytes = Number(item.getTotalBytes()) || 0
+      const mime = String(item.getMimeType?.() || '')
+      const ext = (name.match(/\.[^.]+$/) || [''])[0].toLowerCase()
+      const dangerous = ['.exe', '.msi', '.bat', '.cmd', '.ps1', '.scr', '.com', '.pif', '.vbs', '.js', '.jse', '.wsf', '.hta', '.cpl', '.msc'].includes(ext)
+      const rec: BrowserDownload = {
+        id: `dl-${Date.now()}-${++this.downloadSeq}`,
+        filename: name,
+        url: String(item.getURL() || ''),
+        path: target,
+        state: 'progressing',
+        receivedBytes: 0,
+        totalBytes,
+        startedAt: Date.now(),
+        ...(mime ? { mime } : {}),
+        ...(dangerous ? { dangerous: true } : {}),
+        ...(tab ? { tabId: tab.id } : {}),
+        ...(owner ? { owner } : {}),
+      }
+
+      const cancelWith = (reason: string) => {
+        rec.state = 'cancelled'
+        rec.doneAt = Date.now()
+        rec.error = reason
+        rec.path = ''
+        try { item.cancel() } catch { /* 忽略 */ }
+        this.downloads.unshift(rec)
+        if (this.downloads.length > 200) this.downloads.length = 200
+        if (tab) this.eventBuffer.record(tab.id, { kind: 'download', at: Date.now(), downloadId: rec.id, filename: name, path: '', state: 'blocked', error: reason })
+        this.notifyDownloads()
+      }
+      if (dangerous && this.config.blockDangerousDownloads) {
+        cancelWith(`危险文件类型 ${ext || name} 已被阻止（可在浏览器设置 → 行为中允许）`)
+        return
+      }
+      if (this.config.maxDownloadMB > 0 && totalBytes > this.config.maxDownloadMB * 1024 * 1024) {
+        cancelWith(`文件超过大小上限 ${this.config.maxDownloadMB}MB（已阻止）`)
+        return
+      }
+
+      item.setSavePath(target)
+      this.downloadItems.set(rec.id, item)
+      this.downloads.unshift(rec)
+      if (this.downloads.length > 200) this.downloads.length = 200
+      if (tab) this.eventBuffer.record(tab.id, { kind: 'download', at: Date.now(), downloadId: rec.id, filename: name, path: target, state: 'started' })
+      this.notifyDownloads()
+
+      const update = (state?: string) => {
+        try {
+          rec.receivedBytes = Number(item.getReceivedBytes()) || 0
+          rec.totalBytes = Number(item.getTotalBytes()) || rec.totalBytes
+          if (state === 'completed') {
+            rec.state = 'completed'
+            rec.doneAt = Date.now()
+            delete rec.error
+            this.downloadItems.delete(rec.id)
+          } else if (state === 'cancelled' || state === 'interrupted') {
+            rec.state = state
+            rec.doneAt = Date.now()
+            rec.error = rec.error || (state === 'cancelled' ? '下载已取消' : '下载中断')
+            this.downloadItems.delete(rec.id)
+            // 失败/取消时删除半成品，避免留下损坏文件
+            try { if (rec.path) fs.rmSync(rec.path, { force: true }) } catch { /* 忽略 */ }
+          } else {
+            rec.state = item.isPaused() ? 'paused' : 'progressing'
+          }
+          this.notifyDownloads()
+        } catch { /* 忽略 */ }
+      }
+      item.on('updated', (_e: any) => update())
+      item.once('done', (_e: any, state: string) => update(state))
+    } catch (err) {
+      console.warn('[browser] 下载处理失败', err)
+      try { item.cancel() } catch { /* 忽略 */ }
+    }
+  }
+
+  /** 等待某个下载完成/失败（供 Agent 确认，不再靠 sleep） */
+  async waitForDownload(opts: { id?: string; filename?: string; since?: number; timeoutMs?: number } = {}, signal?: AbortSignal): Promise<{ ok: boolean; download?: BrowserDownload; error?: string }> {
+    this.loadDownloads()
+    const id = String(opts.id || '').trim()
+    const filename = String(opts.filename || '').trim().toLowerCase()
+    const since = Number(opts.since) || 0
+    const timeoutMs = Math.max(1000, Math.min(120_000, Number(opts.timeoutMs) || 60_000))
+    const deadline = Date.now() + timeoutMs
+    if (id && !this.downloads.some((d) => d.id === id)) return { ok: false, error: `找不到下载 id=${id}` }
+    while (Date.now() <= deadline) {
+      if (signal?.aborted) return { ok: false, error: '等待下载已取消' }
+      const rec = id
+        ? this.downloads.find((d) => d.id === id)
+        : this.downloads.find((d) => d.startedAt >= since && (!filename || d.filename.toLowerCase().includes(filename)))
+      if (rec && ['completed', 'cancelled', 'interrupted'].includes(rec.state)) {
+        return { ok: rec.state === 'completed', download: { ...rec }, ...(rec.state === 'completed' ? {} : { error: rec.error || `下载${rec.state === 'cancelled' ? '已取消' : '中断'}` }) }
+      }
+      await sleep(200)
+    }
+    return { ok: false, error: `等待下载超时（${Math.round(timeoutMs / 1000)}s）` }
+  }
+
+  /** 控制下载：cancel / pause / resume / saveAs / delete */
+  async controlDownload(id: string, action: string, targetPath?: string): Promise<{ ok: boolean; download?: BrowserDownload; error?: string }> {
+    this.loadDownloads()
+    const rec = this.downloads.find((d) => d.id === id)
+    if (!rec) return { ok: false, error: `找不到下载 id=${id}` }
+    const item = this.downloadItems.get(id)
+    try {
+      if (action === 'cancel') {
+        if (!item) return { ok: false, error: '下载已结束，无法取消' }
+        rec.state = 'cancelled'; rec.doneAt = Date.now(); rec.error = '已取消'
+        item.cancel()
+        try { if (rec.path) fs.rmSync(rec.path, { force: true }) } catch { /* 忽略 */ }
+      } else if (action === 'pause') {
+        if (!item) return { ok: false, error: '下载已结束，无法暂停' }
+        item.pause(); rec.state = 'paused'
+      } else if (action === 'resume') {
+        if (!item) return { ok: false, error: '下载已结束，无法继续' }
+        item.resume(); rec.state = 'progressing'
+      } else if (action === 'saveAs') {
+        const p = String(targetPath || '').trim()
+        if (!p || !isAbsolute(p)) return { ok: false, error: 'saveAs 需要绝对路径' }
+        if (fs.existsSync(p)) return { ok: false, error: '目标文件已存在，拒绝覆盖' }
+        fs.mkdirSync(dirname(p), { recursive: true })
+        if (rec.state === 'completed') {
+          if (!fs.existsSync(rec.path)) return { ok: false, error: '源文件不存在' }
+          try { fs.renameSync(rec.path, p) } catch { fs.copyFileSync(rec.path, p); fs.rmSync(rec.path, { force: true }) }
+        } else if (item) {
+          item.setSavePath(p)
+        } else {
+          return { ok: false, error: '下载已结束，无法另存为' }
+        }
+        rec.path = p
+      } else if (action === 'delete') {
+        if (item) { try { item.cancel() } catch { /* 忽略 */ } }
+        try { if (rec.path) fs.rmSync(rec.path, { force: true }) } catch { /* 忽略 */ }
+        this.downloadItems.delete(id)
+        this.downloads = this.downloads.filter((d) => d.id !== id)
+        this.notifyDownloads()
+        return { ok: true }
+      } else {
+        return { ok: false, error: `不支持的操作：${action}` }
+      }
+      this.notifyDownloads()
+      return { ok: true, download: { ...rec } }
+    } catch (err: any) {
+      return { ok: false, error: err?.message || String(err) }
+    }
+  }
+
   private ensureDownloadListener(): void {
     for (const partition of [BROWSER_PARTITION, EXTERNAL_PARTITION]) {
       if (this.downloadListenerReady.has(partition)) continue
       this.downloadListenerReady.add(partition)
       try {
         const ses = session.fromPartition(partition)
-        ses.on('will-download', (_e: any, item: any, wc: any) => {
-        try {
-          const dir = this.config.downloadDir || join(app.getPath('userData'), 'browser-downloads')
-          fs.mkdirSync(dir, { recursive: true })
-          const rawName = String(item.getFilename() || 'download')
-          const name = rawName.replace(/[\\/:*?"<>|]/g, '_').slice(0, 180) || 'download'
-          const target = this.uniqueFilePath(join(dir, name))
-          item.setSavePath(target)
-          const tab = wc && typeof wc.id === 'number'
-            ? this.tabs.find((t) => this.views.get(t.id)?.webContents.id === wc.id)
-            : undefined
-          if (tab) this.eventBuffer.record(tab.id, { kind: 'download', at: Date.now(), filename: name, path: target, state: 'started' })
-          const rec: BrowserDownload = {
-            id: `dl-${Date.now()}-${++this.downloadSeq}`,
-            filename: name,
-            url: String(item.getURL() || ''),
-            path: target,
-            state: 'progressing',
-            receivedBytes: 0,
-            totalBytes: Number(item.getTotalBytes()) || 0,
-            startedAt: Date.now(),
-          }
-          this.downloads.unshift(rec)
-          if (this.downloads.length > 50) this.downloads.length = 50
-          this.sendToShell('browser-agent:downloads', this.downloads)
-          const update = (state?: string) => {
-            try {
-              rec.receivedBytes = Number(item.getReceivedBytes()) || 0
-              rec.totalBytes = Number(item.getTotalBytes()) || rec.totalBytes
-              if (state === 'completed') { rec.state = 'completed'; rec.doneAt = Date.now() }
-              else if (state === 'cancelled') { rec.state = 'cancelled'; rec.doneAt = Date.now() }
-              else if (state === 'interrupted') { rec.state = 'interrupted'; rec.doneAt = Date.now() }
-              else rec.state = item.isPaused() ? 'paused' : 'progressing'
-              this.sendToShell('browser-agent:downloads', this.downloads)
-            } catch { /* 忽略 */ }
-          }
-          item.on('updated', (_e2: any, state: string) => update(state))
-          item.once('done', (_e2: any, state: string) => update(state))
-        } catch (err) {
-          console.warn('[browser] 下载处理失败', err)
-        }
-      })
+        ses.on('will-download', (_e: any, item: any, wc: any) => this.onWillDownload(item, wc))
       } catch { /* 分区不可用时忽略：下载退回 Electron 默认行为 */ }
     }
+  }
+
+  /** 下载文件名安全化：去路径分隔符/控制字符，拒绝 "."/".." 与 Windows 保留名，避免逃出下载目录 */
+  private safeDownloadFileName(raw: string): string {
+    let name = String(raw || 'download')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/[\u0000-\u001f]/g, '')
+      .trim()
+      .replace(/[. ]+$/g, '')
+      .slice(0, 180)
+    if (!name || name === '.' || name === '..' || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(name)) name = 'download'
+    return name
   }
 
   private uniqueFilePath(target: string): string {
@@ -3801,10 +4378,12 @@ class BrowserAgentService {
   }
 
   listDownloads(): BrowserDownload[] {
+    this.loadDownloads()
     return this.downloads.map((d) => ({ ...d }))
   }
 
   openDownload(id: string): { ok: boolean; error?: string } {
+    this.loadDownloads()
     const rec = this.downloads.find((d) => d.id === id)
     if (!rec) return { ok: false, error: '找不到该下载' }
     if (rec.state !== 'completed' || !fs.existsSync(rec.path)) return { ok: false, error: '文件尚未下载完成或已被删除' }
@@ -3813,6 +4392,7 @@ class BrowserAgentService {
   }
 
   showDownloadInFolder(id: string): { ok: boolean; error?: string } {
+    this.loadDownloads()
     const rec = this.downloads.find((d) => d.id === id)
     if (!rec) return { ok: false, error: '找不到该下载' }
     shell.showItemInFolder(rec.path)
@@ -3820,9 +4400,11 @@ class BrowserAgentService {
   }
 
   clearDownloads(): BrowserDownload[] {
-    this.downloads = []
-    this.sendToShell('browser-agent:downloads', this.downloads)
-    return []
+    this.loadDownloads()
+    // 只清掉已结束的记录；进行中的下载保留，避免"列表消失但文件还在下"
+    this.downloads = this.downloads.filter((d) => d.state === 'progressing' || d.state === 'paused')
+    this.notifyDownloads()
+    return this.listDownloads()
   }
 
   // ===================== 浏览历史 / 最近关闭（P1） =====================

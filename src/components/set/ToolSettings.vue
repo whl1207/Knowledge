@@ -8,6 +8,13 @@
         <div class="tool-list-head">
           <div class="tool-head-info">
             <span class="tool-head-title">{{ store.locales === 'zh' ? `可用工具（${tools.length}）` : `Available Tools (${tools.length})` }}</span>
+            <span
+              v-if="isDefaultWhitelist"
+              class="tool-head-badge"
+              :title="store.locales === 'zh'
+                ? '当前是「默认」态：未写入显式白名单，按注册表默认启用。组内全开 / 全关会写成显式名单（可用右侧「恢复默认」还原）。'
+                : 'Currently “default”: no explicit whitelist is stored, registry defaults apply. Group All / None writes an explicit list (use Reset Default to undo).'"
+            >{{ store.locales === 'zh' ? '默认' : 'Default' }}</span>
             <span class="tool-head-desc" :title="toolHeadHint">
               {{ store.locales === 'zh'
                 ? '配置智能体模式（Agent 循环）执行时可调用的全局默认工具白名单，关闭的工具不会被注入提示词。'
@@ -25,46 +32,52 @@
         </div>
       </div>
 
-      <!-- 工具列表（白名单配置） -->
+      <!-- 工具列表（白名单配置）：按能力域分组，行样式仍由本面板决定（见 ToolGroupList 的 #row 插槽） -->
       <div class="form-group tool-list-group">
-        <div class="tool-list">
-          <div v-for="tool in tools" :key="tool.name" class="tool-item" :class="{ disabled: !enabledSet.has(tool.name) && !tool.alwaysOn }">
-            <div class="tool-icon" :class="{ muted: !enabledSet.has(tool.name) && !tool.alwaysOn }">
-              <i :class="'fa ' + tool.icon"></i>
-            </div>
-            <div class="tool-info">
-              <div class="tool-name-row">
-                <span class="tool-name">{{ tool.srcKind === 'plugin' ? tool.name : (store.locales === 'zh' ? tool.labelZh : tool.labelEn) }}</span>
-                <code v-if="tool.srcKind !== 'plugin'" class="tool-key">{{ tool.name }}</code>
-                <span v-if="tool.alwaysOn" class="tool-badge always-on">{{ store.locales === 'zh' ? '核心' : 'Core' }}</span>
-                <!-- 来源标识：来自某个插件（默认关闭，勾选后通用智能体才能调用） -->
-                <span v-if="tool.srcKind === 'plugin'" class="tool-badge plugin-src"
-                  :title="store.locales === 'zh'
-                    ? `由插件「${tool.srcLabel}」提供；默认关闭，需要在这里勾选后通用智能体才能调用`
-                    : `Provided by plugin “${tool.srcLabel}”; off by default — tick it here so the general agent can call it`">
-                  <i class="fa fa-puzzle-piece"></i> {{ tool.srcLabel }}
-                </span>
+        <ToolGroupList class="tool-groups" :rows="groupRows" layout="grid" @bulk="applyBulk">
+          <template #row="{ row }">
+            <div class="tool-item" :class="{ disabled: !row.on && !row.alwaysOn }">
+              <!-- 上半：图标 / 标题（名称 + 工具名 + 徽标）/ 沙箱与审批 / 开关 -->
+              <div class="tool-main">
+                <div class="tool-icon" :class="{ muted: !row.on && !row.alwaysOn }">
+                  <i :class="'fa ' + row.icon"></i>
+                </div>
+                <div class="tool-info">
+                  <div class="tool-name-row">
+                    <span class="tool-name">{{ row.srcKind === 'plugin' ? row.name : (store.locales === 'zh' ? row.labelZh : row.labelEn) }}</span>
+                    <code v-if="row.srcKind !== 'plugin'" class="tool-key">{{ row.name }}</code>
+                    <span v-if="row.alwaysOn" class="tool-badge always-on">{{ store.locales === 'zh' ? '核心' : 'Core' }}</span>
+                    <!-- 来源标识：来自某个插件（默认关闭，勾选后通用智能体才能调用） -->
+                    <span v-if="row.srcKind === 'plugin'" class="tool-badge plugin-src"
+                      :title="store.locales === 'zh'
+                        ? `由插件「${row.srcLabel}」提供；默认关闭，需要在这里勾选后通用智能体才能调用`
+                        : `Provided by plugin “${row.srcLabel}”; off by default — tick it here so the general agent can call it`">
+                      <i class="fa fa-puzzle-piece"></i> {{ row.srcLabel }}
+                    </span>
+                  </div>
+                  <div class="tool-meta">
+                    <span class="meta-item" :title="store.locales === 'zh' ? '沙箱偏好' : 'Sandbox preference'">
+                      <i class="fa fa-lock"></i> {{ sandboxLabel(row) }}
+                    </span>
+                    <span class="meta-item" :title="store.locales === 'zh' ? '审批要求' : 'Approval requirement'">
+                      <i class="fa fa-gavel"></i> {{ approvalLabel(row) }}
+                    </span>
+                  </div>
+                </div>
+                <div
+                  class="tool-toggle"
+                  :class="{ on: row.on, 'always-on': !!row.alwaysOn }"
+                  :title="row.alwaysOn ? (store.locales === 'zh' ? '核心工具，始终启用' : 'Core tool, always enabled') : (row.on ? (store.locales === 'zh' ? '点击禁用' : 'Click to disable') : (store.locales === 'zh' ? '点击启用' : 'Click to enable'))"
+                  @click="toggleTool(row)"
+                >
+                  <span class="toggle-knob"></span>
+                </div>
               </div>
-              <div class="tool-desc">{{ tool.description }}</div>
-              <div class="tool-meta">
-                <span class="meta-item" :title="store.locales === 'zh' ? '沙箱偏好' : 'Sandbox preference'">
-                  <i class="fa fa-lock"></i> {{ sandboxLabel(tool) }}
-                </span>
-                <span class="meta-item" :title="store.locales === 'zh' ? '审批要求' : 'Approval requirement'">
-                  <i class="fa fa-gavel"></i> {{ approvalLabel(tool) }}
-                </span>
-              </div>
+              <!-- 说明：独占底部一行，占满整卡宽度（悬停看全文），不再挤在标题与元信息之间的窄列里 -->
+              <div v-if="row.description" class="tool-desc" :title="row.description">{{ row.description }}</div>
             </div>
-            <div
-              class="tool-toggle"
-              :class="{ on: enabledSet.has(tool.name), 'always-on': !!tool.alwaysOn }"
-              :title="tool.alwaysOn ? (store.locales === 'zh' ? '核心工具，始终启用' : 'Core tool, always enabled') : (enabledSet.has(tool.name) ? (store.locales === 'zh' ? '点击禁用' : 'Click to disable') : (store.locales === 'zh' ? '点击启用' : 'Click to enable'))"
-              @click="toggleTool(tool)"
-            >
-              <span class="toggle-knob"></span>
-            </div>
-          </div>
-        </div>
+          </template>
+        </ToolGroupList>
       </div>
     </div>
   </div>
@@ -74,6 +87,7 @@
 import { ref, onMounted, watch, computed } from 'vue'
 import { usestore } from '@/store'
 import { getSkillManager } from '@/services/agentSkills'
+import ToolGroupList from '@/components/set/ToolGroupList.vue'
 import { computeEnabledTools, persistableToolNames, whitelistToolRows, type WhitelistToolRow } from '@/lib/agent/toolWhitelist'
 
 const store = usestore()
@@ -88,6 +102,15 @@ const skillManager = getSkillManager(store)
  */
 const allRows = computed<WhitelistToolRow[]>(() => whitelistToolRows())
 
+/**
+ * 渲染行：白名单行 + 当前启用态 + 归一化来源。
+ * `srcKind` 统一成必填（内置 / 插件），分组外壳（ToolGroupList）按它把插件工具归到「MCP 与插件」。
+ */
+type ManageToolRow = Omit<WhitelistToolRow, 'srcKind'> & {
+  srcKind: 'builtin' | 'plugin'
+  on: boolean
+}
+
 // 工具列表头部完整说明（悬停提示）
 const toolHeadHint = computed(() => {
   return store.locales === 'zh'
@@ -99,6 +122,16 @@ const tools = computed<WhitelistToolRow[]>(() => allRows.value)
 
 // 当前启用集合（响应式）
 const enabledSet = ref<Set<string>>(new Set())
+
+/** 是否「默认」态（未写入显式白名单）：判定与 computeEnabledTools 一致（非数组即默认） */
+const isDefaultWhitelist = computed(() => !Array.isArray(store.agentTools))
+
+/** 传给分组外壳的行（顺序沿用注册表，组内顺序因此稳定） */
+const groupRows = computed<ManageToolRow[]>(() => allRows.value.map((row) => ({
+  ...row,
+  on: enabledSet.value.has(row.name),
+  srcKind: row.srcKind === 'plugin' ? 'plugin' : 'builtin',
+})))
 
 // 加载当前启用的工具（优先 store 持久化配置，其次注册表默认）；规则见 lib/agent/toolWhitelist.ts
 const loadEnabled = () => {
@@ -114,13 +147,29 @@ const persist = () => {
   skillManager.setEnabledTools(names)
 }
 
-const toggleTool = (tool: WhitelistToolRow) => {
+const toggleTool = (tool: ManageToolRow) => {
   if (tool.alwaysOn) return
   const next = new Set(enabledSet.value)
   if (next.has(tool.name)) {
     next.delete(tool.name)
   } else {
     next.add(tool.name)
+  }
+  enabledSet.value = next
+  persist()
+}
+
+/**
+ * 组内全开 / 全关：只改传进来的行（分组外壳过滤后交给我们的可见行），恒开工具跳过。
+ * 注意这会把白名单从「默认（null）」落成显式名单 —— 头部因此有「默认 / 显式」提示，
+ * 想回到默认态用「恢复默认」。
+ */
+const applyBulk = ({ rows, on }: { rows: ManageToolRow[]; on: boolean }) => {
+  const next = new Set(enabledSet.value)
+  for (const row of rows) {
+    if (row.alwaysOn) continue
+    if (on) next.add(row.name)
+    else next.delete(row.name)
   }
   enabledSet.value = next
   persist()
@@ -139,7 +188,7 @@ const restoreDefault = () => {
   loadEnabled()
 }
 
-const sandboxLabel = (tool: WhitelistToolRow): string => {
+const sandboxLabel = (tool: ManageToolRow): string => {
   const zh = store.locales === 'zh'
   switch (tool.sandboxPreference) {
     case 'readonly': return zh ? '只读' : 'Read-only'
@@ -149,7 +198,7 @@ const sandboxLabel = (tool: WhitelistToolRow): string => {
   }
 }
 
-const approvalLabel = (tool: WhitelistToolRow): string => {
+const approvalLabel = (tool: ManageToolRow): string => {
   const zh = store.locales === 'zh'
   switch (tool.approvalRequirement) {
     case 'on-request': return zh ? '请求时询问' : 'On Request'
@@ -243,6 +292,12 @@ watch(allRows, () => {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0; max-width: 220px;
 }
+/* 「默认 / 显式」态徽标：写在白名单里的是 null 还是具体名单，用户要能一眼看出来 */
+.tool-head-badge {
+  font-size: 9px; line-height: 1.5; padding: 0 5px; border-radius: 3px;
+  border: 1px solid var(--borderColor); color: var(--fontColor);
+  opacity: 0.7; flex-shrink: 0; cursor: default;
+}
 .tool-actions { display: flex; gap: 5px; flex-shrink: 0; }
 /* 图标按钮：默认仅显示图标（无边框），悬停 title 显示说明 */
 .icon-btn {
@@ -253,21 +308,17 @@ watch(allRows, () => {
   font-size: 12px;
 }
 
-/* 工具列表（占满剩余空间，内部滚动，2-3 列网格） */
+/* 工具列表（占满剩余空间；分组 / 搜索 / 批量由 ToolGroupList 负责，行样式仍在下方） */
 .tool-settings .tool-list-group {
-  flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom:0px
+  flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom:0px;
+  /* 本组是 align-items:flex-start（上面 .form-group 的默认），子级必须自己撑满，
+     否则分组外壳会被收缩到内容宽度，网格只算得出两列、右边剩一大片空白 */
+  align-items: stretch;
 }
-.tool-list {
-  flex: 1; min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 6px;
-  align-content: start;
-  overflow-y: auto; padding-right: 2px; width: 100%;
-}
+.tool-groups { flex: 1; min-height: 0; width: 100%; }
 .tool-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 8px;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 8px;
   border: 1px solid var(--borderColor); border-radius: 5px;
   background: var(--menuColor);
   transition: all .12s;
@@ -276,11 +327,14 @@ watch(allRows, () => {
 .tool-item:hover { border-color: var(--fontActiveColor); }
 .tool-item.disabled { opacity: 0.55; }
 
+/* 上半行：图标 / 标题与元信息 / 开关 */
+.tool-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
 .tool-icon {
-  width: 32px; height: 32px; flex-shrink: 0;
+  width: 28px; height: 28px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
-  border-radius: 5px; color: var(--fontActiveColor); font-size: 15px;
+  border-radius: 5px; color: var(--fontActiveColor); font-size: 13px;
 }
 .tool-icon.muted { background: color-mix(in srgb, var(--fontColor) 8%, transparent); color: var(--fontColor); }
 
@@ -305,8 +359,15 @@ watch(allRows, () => {
   border: 1px solid var(--fontActiveColor);
   background: transparent;
 }
-.tool-desc { font-size: 10px; opacity: 0.75; margin-top: 1px; }
-.tool-meta { display: flex; gap: 10px; margin-top: 2px; }
+/* 说明独占卡片底部一行：整卡宽度、单行省略，悬停 title 看全文（比挤在窄列里换行更紧凑） */
+.tool-desc {
+  font-size: 10px; opacity: 0.7; line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  width: 100%; min-width: 0; cursor: default;
+  /* 同一网格行里卡片被拉齐高度时，说明统一压在底部 */
+  margin-top: auto;
+}
+.tool-meta { display: flex; gap: 10px; margin-top: 1px; }
 .meta-item { font-size: 9px; opacity: 0.6; display: inline-flex; align-items: center; gap: 3px; }
 
 /* 开关 */
@@ -325,8 +386,4 @@ watch(allRows, () => {
 .tool-toggle.on .toggle-knob { left: 16px; }
 .tool-toggle.always-on { cursor: default; opacity: 0.8; }
 .tool-toggle.always-on.on { background: color-mix(in srgb, var(--fontActiveColor) 55%, transparent); }
-
-/* 滚动条 */
-.tool-list::-webkit-scrollbar { width: 4px; }
-.tool-list::-webkit-scrollbar-thumb { background: var(--borderColor); border-radius: 2px; }
 </style>

@@ -52,6 +52,14 @@ export interface CollabSettings {
   autoSaveSeconds: number
 }
 
+/**
+ * 共享文件夹对局域网用户的权限：
+ *  - readonly：默认，只能浏览 / 预览 / 下载；
+ *  - md：在只读之上允许直接编辑 Markdown（仅 .md / .markdown 等文本笔记）。
+ * 其他文件类型仍为只读，避免客户端误改二进制文件。
+ */
+export type RemoteFsPermission = 'readonly' | 'md'
+
 /** 远程文件共享服务状态（主机视角，设置页显示） */
 export interface RemoteFsStatus {
   running: boolean
@@ -60,6 +68,7 @@ export interface RemoteFsStatus {
   rootDir: string
   token: string
   name: string
+  permission: RemoteFsPermission
 }
 
 /** 远程工作区（客户端视角，文件树显示） */
@@ -71,6 +80,8 @@ export interface RemoteRoot {
   token: string
   /** 服务端共享根目录名（仅展示） */
   rootName?: string
+  /** 服务端当前授予的权限（由 /fs/info 返回，用于决定是否允许编辑 Markdown） */
+  permission?: RemoteFsPermission
 }
 
 /** 远程文件树节点（与服务端 /fs/list 输出同构） */

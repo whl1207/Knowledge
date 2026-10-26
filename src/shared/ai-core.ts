@@ -29,6 +29,18 @@ function resolveApiUrl(originalUrl: string): string {
   return `${window.location.origin}/__proxy?url=${encodeURIComponent(originalUrl)}`
 }
 
+/**
+ * 统一的 HTTP 错误：把状态码与 Retry-After 挂到 Error 上，供上层重试分类器读取。
+ * 只改错误对象，不改变已有错误文案（旧调用方按 messages 匹配仍然有效）。
+ */
+function httpError(message: string, response: Response): Error {
+  const err = new Error(message) as Error & { status?: number; retryAfter?: string }
+  err.status = response.status
+  const retryAfter = response.headers.get('retry-after')
+  if (retryAfter) err.retryAfter = retryAfter
+  return err
+}
+
 // 定义消息类型
 export interface AIMessage {
     role: string;
@@ -205,11 +217,13 @@ function buildModelsCandidates(apiUrl: string): string[] {
   return [...new Set(out)]
 }
 
-/** 从 /models 响应中提取模型 id 列表（兼容 {data:[{id}]} / {models:[]} / 字符串数组） */
+/** 从 /models 响应中提取模型 id 列表（兼容 {data:[{id}]} / {models:[]} / GPUStack 管理接口 {items:[{name}]} / 字符串数组） */
 function extractModelIds(data: any): string[] {
-  const pick = (m: any) => (typeof m === 'string' ? m : m?.id)
+  const pick = (m: any) => (typeof m === 'string' ? m : (m?.id || m?.name))
   if (Array.isArray(data?.data)) return data.data.map(pick).filter(Boolean)
   if (Array.isArray(data?.models)) return data.models.map(pick).filter(Boolean)
+  // GPUStack 的 /v1/models 是管理接口，返回 { items: [{ name }] }，与 OpenAI 的 { data: [{ id }] } 不同
+  if (Array.isArray(data?.items)) return data.items.map(pick).filter(Boolean)
   if (Array.isArray(data)) return data.map(pick).filter(Boolean)
   return []
 }
@@ -827,7 +841,7 @@ export class AIUtils {
                 });
 
                 if (!response.ok) {
-                    throw new Error(`LM Studio API错误: ${response.status} ${response.statusText}`);
+                    throw httpError(`LM Studio API错误: ${response.status} ${response.statusText}`, response);
                 }
 
                 const data = await response.json();
@@ -895,8 +909,9 @@ export class AIUtils {
     }
 
     // 检查自定义 API 连接：从 api_url 推导 /models 候选端点逐个探测（OpenAI 兼容 / 网关）
+    // 兼容 GPUStack 这类内置来源：调用方可能直接传该来源配置（只有 base_url，没有 api_url）。
     static async checkCustomConnection(customConfig: any) {
-        const apiUrl = String(customConfig?.api_url || '').trim()
+        const apiUrl = String(customConfig?.api_url || customConfig?.base_url || '').trim()
         if (!apiUrl) return { online: false, available_models: [] }
 
         const candidates = buildModelsCandidates(apiUrl)
@@ -1234,7 +1249,7 @@ export class AIUtils {
                     });
 
                     if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
+                        throw httpError(`HTTP error! status: ${response.status}`, response);
                     }
 
                     if (!response.body) {
@@ -1322,7 +1337,7 @@ export class AIUtils {
                     });
 
                     if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
+                        throw httpError(`HTTP error! status: ${response.status}`, response);
                     }
 
                     const data = await response.json();
@@ -1613,7 +1628,7 @@ export class AIUtils {
             clearTimeout(timeoutId);
 
             if (!response.ok) {
-                throw new Error(`HTTP错误! 状态码: ${response.status}`);
+                throw httpError(`HTTP错误! 状态码: ${response.status}`, response);
             }
 
             const reader = response.body?.getReader();
@@ -1833,7 +1848,7 @@ export class AIUtils {
                         const errData = await response.json();
                         detail = JSON.stringify(errData);
                     } catch (e) { /* ignore */ }
-                    throw new Error(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`);
+                    throw httpError(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`, response);
                 }
                 const result: any = await AIUtils.parseDeepSeekResponsesStream(response, options);
                 clearTimeout(timeoutId);
@@ -1875,7 +1890,7 @@ export class AIUtils {
                     const errData = await response.json();
                     detail = JSON.stringify(errData);
                 } catch (e) { /* ignore */ }
-                throw new Error(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`);
+                throw httpError(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`, response);
             }
 
             if (stream) {
@@ -2063,7 +2078,7 @@ export class AIUtils {
             if (!response.ok) {
                 let detail = '';
                 try { const errData = await response.json(); detail = JSON.stringify(errData); } catch (e) { /* ignore */ }
-                throw new Error(`Anthropic API错误: ${response.status}${detail ? ' ' + detail : ''}`);
+                throw httpError(`Anthropic API错误: ${response.status}${detail ? ' ' + detail : ''}`, response);
             }
             if (body.stream && options?.onStream) {
                 return await AIUtils.parseAnthropicStream(response, options);
@@ -2257,7 +2272,7 @@ export class AIUtils {
             if (!response.ok) {
                 let detail = '';
                 try { const errData = await response.json(); detail = JSON.stringify(errData); } catch (e) { /* ignore */ }
-                throw new Error(`Google API错误: ${response.status}${detail ? ' ' + detail : ''}`);
+                throw httpError(`Google API错误: ${response.status}${detail ? ' ' + detail : ''}`, response);
             }
             if (body.stream && options?.onStream) {
                 return await AIUtils.parseGoogleStream(response, options);
@@ -2721,7 +2736,7 @@ export class AIUtils {
                         } catch { detail = text }
                     }
                 } catch { /* ignore */ }
-                throw new Error(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`);
+                throw httpError(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`, response);
             }
 
             const contentType = response.headers.get('content-type') || '';
@@ -2820,7 +2835,7 @@ export class AIUtils {
                         } catch { detail = text }
                     }
                 } catch { /* ignore */ }
-                throw new Error(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`);
+                throw httpError(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`, response);
             }
 
             const reader = response.body?.getReader();

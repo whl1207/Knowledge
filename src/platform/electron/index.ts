@@ -678,6 +678,11 @@ const hostPort: HostPort = {
       if (!api?.invoke) return { success: false, error: 'not-supported' }
       return api.invoke('exportPdf', payload)
     },
+    async exportPdfOverlay(payload) {
+      const api = ipc()
+      if (!api?.invoke) return { success: false, error: 'not-supported' }
+      return api.invoke('exportPdfOverlay', payload)
+    },
     async printSlidesPdf(payload) {
       const api = ipc()
       if (!api?.invoke) return { success: false, error: 'not-supported' }

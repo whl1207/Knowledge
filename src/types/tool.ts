@@ -67,6 +67,16 @@ export interface ToolResult {
   value?: unknown
   error?: string
   /**
+   * 结构化错误码（模型文本之外的可编程分类；UI / 指标 / 重试策略读取）。
+   * - TOOL_TIMEOUT：工具声明了 timeoutMs 且超时；
+   * - ABORTED：调用方取消（turn cancel / dispose）；
+   * - INVALID_ARGS：入参校验失败；
+   * - UNKNOWN_TOOL / DENIED / NOT_FOUND / IO / UPSTREAM / TOOL_ERROR。
+   */
+  code?: string
+  /** 是否值得让模型原样重试（默认 false；超时/上游抖动可为 true） */
+  retryable?: boolean
+  /**
    * 工具返回的图片附件（模型可见）。
    *
    * ⚠️ 不要把这些 base64 塞进 `value`：`value` 会走工具结果预算被掐中段，
@@ -93,6 +103,12 @@ export interface ToolDefinition {
   inputSchema?: Record<string, unknown>
   /** 执行是否需要用户审批（预留 approval seam） */
   requiresApproval?: boolean
+  /**
+   * 单次调用超时（毫秒）。未声明 = 不设超时（如 ask_user / exit_plan_mode 需要等用户）。
+   * 注册表在 handler 外层套 deadline：超时返回 `{ ok:false, code:'TOOL_TIMEOUT' }`，
+   * 并把派生 AbortSignal 传给 handler；工具应观察 signal 尽快释放资源。
+   */
+  timeoutMs?: number
   /** 真正执行工具 */
   handler: (input: any, ctx: ToolExecutionContext) => Promise<ToolResult> | ToolResult
 }

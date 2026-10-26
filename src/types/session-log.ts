@@ -22,6 +22,7 @@ import type { TodoItem } from '@/types/agent'
 export type SessionEventType =
   | 'session/start' // 会话创建（携带 provider/model 等元数据）
   | 'session/end' // 会话结束（completed / error / aborted / disposed）
+  | 'llm/retry' // LLM 请求重试（仅审计 / UI，不参与 deriveMessages）
   | 'turn/start' // 轮次开始（turn = 零个或多个 step）
   | 'turn/end' // 轮次结束
   | 'step/start' // 步骤开始（step = 一次模型请求 + 它调用的工具）
@@ -45,10 +46,25 @@ export interface SessionEventMap {
     provider?: string
     model?: string
     systemPrompt?: string // 模型可见的 system prompt（"模型可见即已记录"）
+    /**
+     * 会话配置签名（provider/model/systemPrompt/tools 等）。
+     * 跨轮复用时用它判断旧历史是否还能在同一条模型请求面上继续；
+     * 旧日志没有该字段 → 只按 provider/model 宽松比较。
+     */
+    signature?: string
     createdAt: number
   }
   'session/end': {
     status: 'completed' | 'error' | 'aborted' | 'disposed'
+    error?: string
+  }
+  'llm/retry': {
+    attempt: number
+    /** 失败分类：rate_limit / server / timeout / transport / empty_response … */
+    code: string
+    /** 本次等待（毫秒） */
+    delayMs: number
+    provider?: string
     error?: string
   }
   'turn/start': { turn: number }
@@ -75,6 +91,10 @@ export interface SessionEventMap {
     callId: string
     name: string
     ok: boolean
+    /** 结构化错误码（TOOL_TIMEOUT / ABORTED / INVALID_ARGS …；成功时为空） */
+    code?: string
+    /** 是否值得模型原样重试（超时 / 上游抖动） */
+    retryable?: boolean
     /** 工具返回的**原文**（唯一事实源：UI / 审计 / 回放都读它） */
     value?: any
     error?: string

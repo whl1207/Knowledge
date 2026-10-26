@@ -35,6 +35,41 @@
         <button v-if="downloadDir" class="bbs-btn bbs-btn-ghost" @click="downloadDir = ''; apply()">{{ zh ? '恢复默认' : 'Reset' }}</button>
       </div>
     </div>
+    <div class="bbs-row">
+      <div class="bbs-label">
+        <div class="bbs-title">{{ zh ? '阻止可执行文件下载' : 'Block executable downloads' }}</div>
+        <div class="bbs-desc">{{ zh ? '默认阻止 .exe/.msi/.bat/.ps1 等风险类型；被阻止的下载会显示在下载列表并说明原因' : 'Blocks risky types such as .exe/.msi/.bat/.ps1 by default; blocked downloads appear in the list with a reason' }}</div>
+      </div>
+      <div class="bbs-control">
+        <button class="bbs-switch" :class="{ on: blockDangerous }" role="switch" :aria-checked="blockDangerous"
+          @click="blockDangerous = !blockDangerous; apply()">
+          <span class="bbs-knob"></span>
+        </button>
+      </div>
+    </div>
+
+    <div class="bbs-row">
+      <div class="bbs-label">
+        <div class="bbs-title">{{ zh ? '单文件大小上限' : 'Max download size' }}</div>
+        <div class="bbs-desc">{{ zh ? '单位 MB；0=不限。超过上限的下载会被取消并记录原因' : 'MB; 0 = unlimited. Downloads over the limit are cancelled with a recorded reason' }}</div>
+      </div>
+      <div class="bbs-control">
+        <input v-model.number="maxDownloadMB" class="bbs-num" type="number" min="0" max="10240" step="128" @change="apply" />
+        <span class="bbs-unit">MB</span>
+      </div>
+    </div>
+    <div class="bbs-row">
+      <div class="bbs-label">
+        <div class="bbs-title">{{ zh ? '页面内显示 AI 动作光标' : 'Show AI action cursor' }}</div>
+        <div class="bbs-desc">{{ zh ? 'AI 点击/填写/悬停时在页面对应位置显示光标与动作标签，便于你观察它在做什么' : 'Shows a cursor and action label at the point the AI clicks/fills/hovers, so you can see what it is doing' }}</div>
+      </div>
+      <div class="bbs-control">
+        <button class="bbs-switch" :class="{ on: showActionCursor }" role="switch" :aria-checked="showActionCursor"
+          @click="showActionCursor = !showActionCursor; apply()">
+          <span class="bbs-knob"></span>
+        </button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -51,17 +86,27 @@ const invoke = (method: string, payload?: any) =>
 const pageBudget = ref(Number(store.UI?.browserPageBudget) || 8)
 const interactiveOnly = ref(!!store.UI?.browserSnapshotInteractiveOnly)
 const downloadDir = ref(String(store.UI?.browserDownloadDir || ''))
+const blockDangerous = ref(store.UI?.browserBlockDangerousDownloads !== false)
+const maxDownloadMB = ref(Number(store.UI?.browserMaxDownloadMB) || 0)
+const showActionCursor = ref(store.UI?.browserShowActionCursor !== false)
 
 const apply = () => {
   store.UI.browserPageBudget = Math.max(2, Math.min(20, Math.round(Number(pageBudget.value) || 8)))
   pageBudget.value = store.UI.browserPageBudget
   store.UI.browserSnapshotInteractiveOnly = !!interactiveOnly.value
   store.UI.browserDownloadDir = String(downloadDir.value || '').trim()
+  store.UI.browserBlockDangerousDownloads = !!blockDangerous.value
+  store.UI.browserMaxDownloadMB = Math.max(0, Math.min(10240, Math.round(Number(maxDownloadMB.value) || 0)))
+  maxDownloadMB.value = store.UI.browserMaxDownloadMB
+  store.UI.browserShowActionCursor = !!showActionCursor.value
   store.saveConfig()
   void invoke('browser-agent:set-config', {
     pageBudget: store.UI.browserPageBudget,
     snapshotInteractiveOnly: store.UI.browserSnapshotInteractiveOnly,
     downloadDir: store.UI.browserDownloadDir,
+    blockDangerousDownloads: store.UI.browserBlockDangerousDownloads,
+    maxDownloadMB: store.UI.browserMaxDownloadMB,
+    showActionCursor: store.UI.browserShowActionCursor,
   }).catch(() => {})
 }
 
@@ -100,6 +145,7 @@ const pickDir = async () => {
   font-size: 12px;
   text-align: center;
 }
+.bbs-unit { font-size: 11px; opacity: .55; }
 .bbs-input {
   width: 210px;
   height: 26px;

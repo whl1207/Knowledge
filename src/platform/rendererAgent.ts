@@ -27,6 +27,7 @@ import type {
 import type { AgentId } from '@/types/ids'
 import { normalizeLlmType } from '@/shared/llmSources'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
+import { classifyLlmFailure, effectiveRetryDelayMs } from '@/shared/llmRetry'
 import { boundToolResult } from '@/shared/toolResultBudget'
 import { askQuestionsDigest, coerceAskAnswers } from '@/shared/agentAsk'
 import { PLAN_REVIEW_ID_PREFIX, isPlanReviewId, parsePlanReviewReply, type PlanReviewOutcome } from '@/shared/agentPlanReview'
@@ -308,6 +309,8 @@ class RendererAgent {
 
   private async runTurn(first: InboxItem): Promise<void> {
     const turn = ++this.turnCount
+    // 错误属于单轮：继续发新任务时不能沿用上一轮的错误状态
+    this.lastError = undefined
     this.stepInTurn = 0
     this.fire('agent/turn-start', { turn })
     this.turnController = new AbortController()
@@ -433,11 +436,6 @@ class RendererAgent {
     const tools = rendererToolSchemas(this.visibleToolNames())
     const signal = this.turnController?.signal
 
-    const isTransientError = (msg: string) =>
-      /status[:：] ?5\d\d/i.test(msg) ||
-      /HTTP错误!? ?状态码[:：]? ?5\d\d/i.test(msg) ||
-      /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed|network error|Load failed/i.test(msg)
-
     for (let attempt = 0; attempt < MAX_LLM_RETRY; attempt++) {
       let content = ''
       let toolCalls: ToolCall[] = []
@@ -501,11 +499,18 @@ class RendererAgent {
       } catch (err: any) {
         const msg = String(err?.message || err)
         const clean = content === '' && toolCalls.length === 0 && !reasoning
-        if (attempt < MAX_LLM_RETRY - 1 && isTransientError(msg) && clean) {
-          await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt)))
+        const failure = classifyLlmFailure({
+          message: msg,
+          status: Number(err?.status) || undefined,
+          retryAfter: err?.retryAfter,
+          name: String(err?.name || ''),
+        })
+        if (attempt < MAX_LLM_RETRY - 1 && failure.retryable && clean) {
+          const delay = effectiveRetryDelayMs(attempt, failure, { baseMs: 500, maxMs: 10_000 })
+          await new Promise((r) => setTimeout(r, delay))
           continue
         }
-        throw new Error(`模型请求失败（来源 ${provider}）：${msg}`)
+        throw new Error(`模型请求失败（来源 ${provider}，${failure.code}）：${msg}`)
       }
     }
     throw new Error('模型请求失败')

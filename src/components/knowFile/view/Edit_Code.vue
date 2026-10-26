@@ -15,14 +15,27 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/nnfx-dark.min.css'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { diffLines, diffChars, type DiffOp } from '@/lib/diff'
+import { sanitizeHtml } from '@/lib/markdown/sanitizeHtml'
 import BlockMd from '@/components/block_md.vue'
 import DocTocPanel from '@/components/knowFile/view/DocTocPanel.vue'
 import { extractMarkdownHeadings, flattenHeadingLevels, loadDocTocWidth, saveDocTocWidth, loadDocTocOpen, saveDocTocOpen, DOC_TOC_MIN_WIDTH, DOC_TOC_MAX_WIDTH } from '@/lib/markdown/toc'
 import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
 import { getPlatform, getRuntimeKind, hasCapability } from '@/platform'
+import { writeRemoteFile } from '@/platform/remoteFs'
 import { droppedFilePath } from '@/platform/droppedFile'
 
 const store = usestore()
+
+/**
+ * 远程 Markdown（主机授权「可编辑 Markdown」）：
+ * data.path 是 remote:// 标识，不能交给本地 fs.saveText；保存时按 rootId + rel 写回主机。
+ */
+const props = defineProps<{
+  remoteRootId?: string
+  remoteRel?: string
+  remoteEditable?: boolean
+}>()
+const isRemoteEditable = computed(() => props.remoteEditable === true && !!props.remoteRootId && !!props.remoteRel)
 
 // 编辑器实例
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
@@ -50,7 +63,8 @@ let collabStatusUnsub: (() => void) | null = null
 // 组件卸载标志（卸载时不弹结束提示）
 let collabUnmounting = false
 
-const collabEnabled = computed(() => store.collab.enabled)
+// 远程 Markdown 的保存走共享服务的 HTTP 写接口；协同编辑仍只支持本地文件（需要主进程写盘）
+const collabEnabled = computed(() => store.collab.enabled && !isRemoteEditable.value)
 const isCollabActive = computed(() => collab.status.value !== 'idle')
 
 // 打开协同面板时，用设置里的客户端名称预填昵称输入框
@@ -697,7 +711,7 @@ const modifyInferLoading = ref(false)
 let modifyInferAbort: AbortController | null = null
 
 const renderedModifyInfer = computed(() => {
-    return modifyInferResult.value ? customMd.render(modifyInferResult.value) : ''
+    return modifyInferResult.value ? sanitizeHtml(customMd.render(modifyInferResult.value)) : ''
 })
 
 /** 构建“推理”的提示词：有选中时附带前后 MODIFY_CONTEXT_LINES 行上下文 */
@@ -951,7 +965,7 @@ const customMd = new MarkdownIt({
 })
 
 const renderedCustomResult = computed(() => {
-    return customPromptResult.value ? customMd.render(customPromptResult.value) : ''
+    return customPromptResult.value ? sanitizeHtml(customMd.render(customPromptResult.value)) : ''
 })
 
 const getSelectedText = (): { text: string, range: monaco.Selection | null } => {
@@ -1378,7 +1392,32 @@ const saveContent = (): Promise<boolean> => {
 
         try {
             data.value.content = editor.getValue()
-            
+
+            // 远程 Markdown：写回主机的共享服务（不能走本地 fs）
+            if (isRemoteEditable.value) {
+                const root = store.remoteRoots.find((r: any) => r.id === props.remoteRootId)
+                if (!root) {
+                    ElMessage.error(store.locales === 'zh' ? '远程工作区不存在或已删除' : 'Remote workspace not found')
+                    return resolve(false)
+                }
+                writeRemoteFile(root, String(props.remoteRel), data.value.content)
+                    .then(() => {
+                        savedContent = editor?.getModel()?.getValue() || ''
+                        savedVersion = editor?.getModel()?.getAlternativeVersionId() ?? 0
+                        isDirty.value = false
+                        // 通知同一窗口的浏览视图刷新（FileWindow 监听 file-content-changed）
+                        getPlatform().app.notifyFileChanged({ path: data.value.path, content: data.value.content }).catch(() => {})
+                        ElMessage.success(store.locales === 'zh' ? '已保存到共享文件夹' : 'Saved to shared folder')
+                        resolve(true)
+                    })
+                    .catch((error) => {
+                        console.error('远程保存失败:', error)
+                        ElMessage.error(store.locales === 'zh' ? '保存失败: ' + String(error?.message || error) : 'Save failed: ' + String(error?.message || error))
+                        resolve(false)
+                    })
+                return
+            }
+
             if (data.value.path) {
                 getPlatform().fs.saveText(data.value.path, data.value.content)
                     .then((success) => {

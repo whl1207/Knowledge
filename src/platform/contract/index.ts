@@ -559,6 +559,28 @@ export interface DocConvertApi {
    */
   exportPdf(payload: { html: string; title: string; landscape?: boolean; outline?: { title: string; level: number }[] }): Promise<{ success: boolean; path?: string; error?: string; toc?: boolean }>
   /**
+   * 导出「原文 + 译文叠加层」PDF（PDF 全文翻译用）。
+   * `html` 只含逐页的译文块（透明底、页面尺寸与 `pdfPath` / `pdfBase64` 的页面一致）；
+   * 宿主先打印这份叠加层，再用 pdf-lib 逐页叠到原 PDF 上，因此原 PDF 的页面尺寸、
+   * 图片与矢量内容都保留，译文以矢量文字叠加（可搜索 / 可复制）。
+   *
+   * 加密 / 结构损坏的 PDF 无法被 pdf-lib 解析时，宿主返回 `code: 'pdf-lib-unreadable'`
+   * （且**不会**弹保存框）；调用方应改用 `imageBased: true` 再调一次：
+   * 此时 `html` 是已经内联了「原页面截图 + 译文块」的完整页面，宿主直接打印保存。
+   */
+  exportPdfOverlay(payload: {
+    html: string
+    title: string
+    /** 另存为对话框的默认路径（含目录；缺省用 `title.pdf`） */
+    defaultPath?: string
+    /** 原 PDF 的本地路径（与 `pdfBase64` 二选一；远程预览没有本地路径时传 base64） */
+    pdfPath?: string
+    /** 原 PDF 的 base64（不含 data: 前缀） */
+    pdfBase64?: string
+    /** true = html 已是「原页面截图 + 译文」的完整页面，直接打印保存（兼容模式），不再用 pdf-lib 合并 */
+    imageBased?: boolean
+  }): Promise<{ success: boolean; path?: string; pages?: number; error?: string; code?: string }>
+  /**
    * 幻灯片整本导出：`head` + 每页片段 + `tail` 拼成「一页一份」的打印 HTML，宿主逐页打印后合并成一个 PDF。
    * （一页一份是为了绕开 Chromium 打印分页会把缩放页面盒再拆开的毛病；样式只随 head 走一份。）
    */
@@ -631,14 +653,14 @@ export interface LlmPort {
 export type BrowserAgentMethod =
   | 'open' | 'open-file' | 'open-url' | 'set-theme' | 'devtools'
   | 'state' | 'add-tab' | 'switch-tab' | 'close-tab' | 'move-tab' | 'recycle-agent-tabs'
-  | 'navigate' | 'action' | 'set-eval' | 'set-rail' | 'set-compact' | 'save-page' | 'save-markdown'
+  | 'navigate' | 'action' | 'set-eval' | 'set-rail' | 'set-compact' | 'set-bottom-bar' | 'save-page' | 'save-markdown'
   | 'list-bookmarks' | 'save-bookmark' | 'update-bookmark' | 'remove-bookmark'
   | 'bookmark-mkdir' | 'bookmark-move' | 'bookmark-reorder' | 'bookmark-rename-folder'
   | 'remove-bookmark-folder' | 'clear-bookmark-folder' | 'import-bookmarks' | 'export-bookmarks'
   | 'favicon-batch' | 'cache-info' | 'clear-cache'
   /** 接管 / 暂停 / 下载 / 历史（P1） */
   | 'pause-agent' | 'resume-agent' | 'handoff-agent'
-  | 'downloads-list' | 'download-open' | 'download-reveal' | 'downloads-clear'
+  | 'downloads-list' | 'download-open' | 'download-reveal' | 'downloads-clear' | 'download-control'
   | 'history-list' | 'history-clear' | 'history-remove'
   | 'recently-closed' | 'restore-closed'
   /** 停靠到主页右侧栏（原生网页视图挂到主窗口，位置由渲染层上报的矩形决定） */

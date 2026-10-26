@@ -16,6 +16,7 @@
 import type { PluginDataFileStat, PluginEvent, PluginLogLine, PluginSnapshot } from '@/types/plugin'
 import type { AgentRunResult } from '@/lib/plugin/agentContract'
 import { createLocalPluginHost, localPluginHostAvailable } from '@/platform/pluginHost'
+import { hostRuntime } from '@/platform/host'
 import { aikmDsh } from '@/lib/aikmIpc'
 
 /** 客户端插件 bundle（主进程读取后经 IPC 传入，渲染层用 Blob URL 动态 import） */
@@ -153,12 +154,83 @@ export interface PluginBridgeApi {
   onEvent(cb: (ev: PluginEvent) => void): () => void
 }
 
+// ---------------------------------------------------------------------------
+// 局域网访客：主机共享的插件（只读浏览面）
+// ---------------------------------------------------------------------------
+
+/** 主机 HTTP 插件接口：只提供清单 / 客户端 bundle；管理与文件类操作在访客端一律不可用 */
+async function hostPluginApi<T>(path: string): Promise<T> {
+  const res = await fetch(path, { headers: { Accept: 'application/json' } })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.error) msg = j.error
+    } catch { /* ignore */ }
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
+/**
+ * 局域网访客用的插件桥。
+ * 只实现插件运行时真正会调用的 list / clientBundle / clientLog / onEvent；
+ * 其余方法（启停、安装、文件）在网页端没有意义，统一拒绝。
+ */
+function createHostGuestPluginBridge(): PluginBridgeApi {
+  const unsupported = async (): Promise<never> => {
+    throw new Error('局域网访客不能管理主机插件')
+  }
+  const bridge = {
+    list: () => hostPluginApi<{
+      plugins: PluginSnapshot[]
+      rootDir: string
+      customRoot: boolean
+      services: string[]
+    }>('/api/plugins/list'),
+    clientBundle: (id: string) =>
+      hostPluginApi<PluginClientBundle>(`/api/plugins/bundle?id=${encodeURIComponent(id)}`),
+    clientLog: () => {},
+    onEvent: (_cb: (ev: PluginEvent) => void) => () => {},
+    // 以下都是桌面端管理 / 数据能力；访客端明确拒绝（插件界面若调用会收到可读错误）
+    inspect: unsupported,
+    enable: unsupported,
+    disable: unsupported,
+    reload: unsupported,
+    uninstall: unsupported,
+    getConfig: unsupported,
+    setConfig: unsupported,
+    logs: unsupported,
+    openDir: unsupported,
+    dataFiles: unsupported,
+    dataFilesAll: unsupported,
+    removeDataFile: unsupported,
+    clearDataFiles: unsupported,
+    files: {
+      grants: unsupported,
+      revokeGrant: unsupported,
+      clearGrants: unsupported,
+      pickWritableDirectory: unsupported,
+    },
+    rescan: unsupported,
+    install: unsupported,
+    setRoot: unsupported,
+    resetRoot: unsupported,
+  }
+  return bridge as unknown as PluginBridgeApi
+}
+
 /** 取插件桥（不可用时返回 null） */
 export function getPluginBridge(): PluginBridgeApi | null {
   if (typeof window === 'undefined') return null
   const api = aikmDsh?.plugin
   if (api && typeof api.list === 'function') return api as PluginBridgeApi
-  // 非 Electron 平台（安卓 / 局域网网页端）：用渲染层插件宿主（扫插件目录 + 装载界面半边）
+  // 局域网访客页：主机通过 /api/plugins/* 共享清单与客户端 bundle（按主机勾选的插件过滤）
+  if (hostRuntime()) {
+    cachedGuestHost ||= createHostGuestPluginBridge()
+    return cachedGuestHost
+  }
+  // 非 Electron 平台（安卓）：用渲染层插件宿主（扫插件目录 + 装载界面半边）
   try {
     if (localPluginHostAvailable()) {
       cachedLocalHost ||= createLocalPluginHost()
@@ -171,9 +243,11 @@ export function getPluginBridge(): PluginBridgeApi | null {
 }
 
 let cachedLocalHost: PluginBridgeApi | null = null
+let cachedGuestHost: PluginBridgeApi | null = null
 
 /** 当前用的是渲染层宿主（非 Electron）：界面据此调整文案（无插件工具 / 无主进程半边） */
 export function isLocalPluginHost(): boolean {
   if (typeof window === 'undefined') return false
+  if (hostRuntime()) return false // 局域网访客：插件来自主机，不是本机渲染层宿主
   return !aikmDsh?.plugin && localPluginHostAvailable()
 }

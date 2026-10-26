@@ -1,13 +1,14 @@
 /**
  * remoteFs.ts — 远程文件共享客户端工具
  *
- * 对应主进程 remote-fs-service（HTTP 只读）：
- *   GET /fs/info?token=…
- *   GET /fs/list?path=相对路径&token=…  → { tree: RemoteFsNode[] }
- *   GET /fs/read?path=相对路径&token=…  → { text? | base64?, size }
- *   GET /fs/download?path=相对路径&token=… → 二进制流
+ * 对应主进程 remote-fs-service（HTTP；默认只读，可授权编辑 Markdown）：
+ *   GET  /fs/info?token=…            → { name, rootPath, port, permission }
+ *   GET  /fs/list?path=相对路径&token=…  → { tree: RemoteFsNode[] }
+ *   GET  /fs/read?path=相对路径&token=…  → { text? | base64?, size }
+ *   GET  /fs/download?path=相对路径&token=… → 二进制流
+ *   POST /fs/write?token=…            → { success, size }
  */
-import type { RemoteRoot, RemoteFsNode } from '@/types/collab'
+import type { RemoteRoot, RemoteFsNode, RemoteFsPermission } from '@/types/collab'
 import { getPlatform } from '@/platform'
 
 /** 构造远程文件唯一路径标识（用于 tab 的 path 字段） */
@@ -35,6 +36,13 @@ function baseUrl(root: RemoteRoot): string {
   return `http://${r.host}:${r.port}`
 }
 
+/** 远程文件是否可按当前共享权限直接编辑（仅 Markdown + 主机已开放编辑） */
+export function canEditRemoteMarkdown(root: RemoteRoot | null | undefined, rel: string): boolean {
+  if (!root || root.permission !== 'md') return false
+  const clean = String(rel || '').split(/[?#]/)[0].toLowerCase()
+  return ['.md', '.markdown', '.mdown', '.mkd'].some((ext) => clean.endsWith(ext))
+}
+
 function withToken(url: string, token: string): string {
   const sep = url.includes('?') ? '&' : '?'
   return `${url}${sep}token=${encodeURIComponent(token)}`
@@ -54,8 +62,13 @@ async function getJson(root: RemoteRoot, route: string, rel: string): Promise<an
   return res.json()
 }
 
-/** 校验共享是否可用，并获取共享名 */
-export async function fetchFsInfo(root: RemoteRoot): Promise<{ name: string; rootPath: string; port: number }> {
+/** 校验共享是否可用，并获取共享名 / 当前授予的权限 */
+export async function fetchFsInfo(root: RemoteRoot): Promise<{
+  name: string
+  rootPath: string
+  port: number
+  permission: RemoteFsPermission
+}> {
   const url = withToken(`${baseUrl(root)}/fs/info`, root.token)
   const res = await fetch(url)
   if (!res.ok) {
@@ -66,7 +79,8 @@ export async function fetchFsInfo(root: RemoteRoot): Promise<{ name: string; roo
     } catch { /* ignore */ }
     throw new Error(msg)
   }
-  return res.json()
+  const data = await res.json()
+  return { ...data, permission: data?.permission === 'md' ? 'md' : 'readonly' }
 }
 
 /** 列出共享内相对路径的子节点（懒加载用） */
@@ -81,6 +95,30 @@ export async function fetchFsRead(
   rel: string,
 ): Promise<{ text?: string; base64?: string; size: number }> {
   return getJson(root, '/fs/read', rel)
+}
+
+/**
+ * 保存远程 Markdown（仅当主机把共享权限设为「可编辑 Markdown」时成功）。
+ * 服务端会再次校验权限与扩展名，客户端这边的限制只是提前给出更清楚的提示。
+ */
+export async function writeRemoteFile(root: RemoteRoot, rel: string, content: string): Promise<void> {
+  if (!root?.permission || root.permission !== 'md') {
+    throw new Error('共享权限为只读，无法保存')
+  }
+  const url = withToken(`${baseUrl(root)}/fs/write`, root.token)
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: rel, content }),
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.error) msg = j.error
+    } catch { /* ignore */ }
+    throw new Error(msg)
+  }
 }
 
 /**

@@ -34,6 +34,7 @@
   // 点击图表打开编辑器时要把 `data-drawio-path` 里可能残留的百分号编码还原成真实路径
   import { decodeDiagramPath } from '@/shared/drawioRender'
 import { getPlatform, hasCapability } from '@/platform'
+import { sanitizeHtml } from '@/lib/markdown/sanitizeHtml'
   // 智能操作：与当前 md / Word 文档对话（右侧面板，懒加载）
   const DocChatPanel = defineAsyncComponent(() => import('@/components/knowFile/view/DocChatPanel.vue'))
   // Excalidraw 白板 / draw.io 图表（懒加载入口取自 fileEditors.ts，避免 React/Excalidraw 拖慢首屏）
@@ -651,7 +652,7 @@ import { getPlatform, hasCapability } from '@/platform'
         mdBasePath = ''
 
       }
-      prep.value = md.render(preprocessMath(stripped))
+      prep.value = sanitizeHtml(md.render(preprocessMath(stripped)))
       // 目录：直接取本次渲染的标题锚点（与正文 h1~h6 一一对应，含 Word 转出的标题）。
       // 旧实现用正则自行重算标题与锚点，与插件生成的 id 不一致（且 setext/非 # 标题会漏），
       // 导致 Word 文档目录点不动 / 跳到错误章节。

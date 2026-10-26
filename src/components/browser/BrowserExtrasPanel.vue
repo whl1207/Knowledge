@@ -14,10 +14,16 @@
 
     <template v-if="tab === 'downloads'">
       <div v-if="!downloads.length" class="bx-empty">{{ zh ? '暂无下载' : 'No downloads' }}</div>
-      <div v-for="d in downloads" :key="d.id" class="bx-row" :title="d.path">
+      <div v-for="d in downloads" :key="d.id" class="bx-row" :title="d.error || d.path">
         <i class="fa bx-ic" :class="downloadIcon(d)"></i>
         <span class="bx-name" @click="openDownload(d)">{{ d.filename }}</span>
         <span class="bx-meta">{{ downloadMeta(d) }}</span>
+        <button v-if="d.state === 'progressing' || d.state === 'paused'" class="bx-mini" :title="d.state === 'paused' ? (zh ? '继续' : 'Resume') : (zh ? '暂停' : 'Pause')" @click="controlDownload(d, d.state === 'paused' ? 'resume' : 'pause')">
+          <i class="fa" :class="d.state === 'paused' ? 'fa-play' : 'fa-pause'"></i>
+        </button>
+        <button v-if="d.state === 'progressing' || d.state === 'paused'" class="bx-mini" :title="zh ? '取消下载' : 'Cancel download'" @click="controlDownload(d, 'cancel')">
+          <i class="fa fa-times"></i>
+        </button>
         <button v-if="d.state === 'completed'" class="bx-mini" :title="zh ? '在文件夹中显示' : 'Show in folder'" @click="revealDownload(d)">
           <i class="fa fa-folder-open-o"></i>
         </button>
@@ -84,6 +90,7 @@ type DownloadRow = {
   id: string; filename: string; url: string; path: string
   state: 'progressing' | 'paused' | 'completed' | 'cancelled' | 'interrupted'
   receivedBytes: number; totalBytes: number; startedAt: number; doneAt?: number
+  mime?: string; error?: string; dangerous?: boolean
 }
 type HistoryRow = { id: string; url: string; title: string; visitedAt: number; agent?: boolean }
 
@@ -147,7 +154,11 @@ const openDownload = async (d: DownloadRow) => {
 const revealDownload = async (d: DownloadRow) => { await invoke('download-reveal', { id: d.id }).catch(() => {}) }
 const clearDownloads = async () => {
   await invoke('downloads-clear').catch(() => {})
-  downloads.value = []
+  await loadDownloads()
+}
+const controlDownload = async (d: DownloadRow, action: 'pause' | 'resume' | 'cancel') => {
+  await invoke('browser-agent:download-control', { id: d.id, action }).catch(() => {})
+  await loadDownloads()
 }
 const clearHistory = async () => {
   if (!window.confirm(zh.value ? '清空全部浏览历史？' : 'Clear all browsing history?')) return

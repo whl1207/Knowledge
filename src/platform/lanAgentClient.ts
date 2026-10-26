@@ -26,6 +26,10 @@ export interface LanAgentInfo {
   skills: Array<{ name: string; description: string }>
   /** 访客可选的智能体（首位固定为通用智能体） */
   agents: Array<{ id: string; name: string }>
+  /** 访客可见的内置模块 / 入口 key（主机设置） */
+  navs?: string[]
+  /** 访客可见的插件 id（主机设置；按插件面板所属插件过滤） */
+  plugins?: string[]
   maxSteps: number
   sandbox: string
   shareKb: string[]

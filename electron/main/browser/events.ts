@@ -11,7 +11,7 @@
 export type BrowserEvent =
   | { kind: 'dialog'; at: number; dialogType: string; message: string; handled?: 'auto' | 'user'; accepted?: boolean }
   | { kind: 'popup'; at: number; tabId: string; url: string; label?: string }
-  | { kind: 'download'; at: number; filename: string; path?: string; state: string }
+  | { kind: 'download'; at: number; downloadId?: string; filename: string; path?: string; state: string; error?: string }
   | { kind: 'console'; at: number; level: 'error' | 'exception'; text: string }
 
 const MAX_PER_TAB = 50
@@ -52,7 +52,10 @@ export function formatEventNote(events: BrowserEvent[]): string {
     else if (e.kind === 'dialog') {
       const handled = e.handled === 'user' ? '用户处理' : '已自动处理'
       parts.push(`${e.dialogType}("${e.message.slice(0, 120)}") ${handled}${e.accepted === false ? '（取消）' : ''}`)
-    } else if (e.kind === 'download') parts.push(`下载「${e.filename}」${e.state === 'completed' ? '完成' : e.state}`)
+    } else if (e.kind === 'download') {
+      const stateText = e.state === 'completed' ? '完成' : e.state === 'started' ? '开始' : e.state === 'blocked' ? '已阻止' : e.state
+      parts.push(`下载${e.downloadId ? `[${e.downloadId}]` : ''}「${e.filename}」${stateText}${e.error ? `：${e.error}` : ''}`)
+    }
     else if (e.kind === 'console') parts.push(`控制台${e.level === 'exception' ? '异常' : '错误'}：${e.text.slice(0, 120)}`)
   }
   return `\n回执：${parts.join('；')}`

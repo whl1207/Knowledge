@@ -269,8 +269,8 @@
           <span class="ba-mini-title">{{ state.title || state.url }}</span>
         </div>
         </div>
-        <!-- 底部状态栏：所有浏览器轻提示固定在左下角；原生网页视图只铺在 .ba-page，不遮挡这一条 -->
-        <div class="ba-statusbar">
+        <!-- 底部状态栏：只在有轻提示时升起（空状态高度 0，不占位）；原生网页视图只铺在 .ba-page，不遮挡这一条 -->
+        <div class="ba-statusbar" :class="{ show: !!toastMsg }">
           <transition name="ba-toast-fade">
             <span v-if="toastMsg" class="ba-toast" :class="{ err: toastKind === 'err' }">{{ toastMsg }}</span>
           </transition>
@@ -1253,6 +1253,16 @@ const pushDockRect = () => {
   })
 }
 
+/**
+ * 底部状态栏只在有轻提示时升起（无提示时高度 0，不再留一条空白）。
+ * 原生网页视图由主进程按固定底边距摆放，所以状态栏显隐必须同步给主进程；
+ * 停靠模式下矩形来自 .ba-page，变化不被主矩形 ResizeObserver 捕获，需再上报一次。
+ */
+watch(() => !!toastMsg.value, (visible) => {
+  void invoke('browser-agent:set-bottom-bar', { visible }).catch(() => {})
+  if (props.embedded) void nextTick(pushDockRect)
+}, { immediate: true })
+
 /** 页面可见性交回主进程：不可见时它必须 setVisible(false)，否则原生视图会盖住界面 */
 const pushDockVisible = () => {
   if (!props.embedded) return
@@ -1306,6 +1316,9 @@ onMounted(async () => {
     pageBudget: store.UI?.browserPageBudget || 8,
     snapshotInteractiveOnly: !!store.UI?.browserSnapshotInteractiveOnly,
     downloadDir: store.UI?.browserDownloadDir || '',
+    blockDangerousDownloads: store.UI?.browserBlockDangerousDownloads !== false,
+    maxDownloadMB: Number(store.UI?.browserMaxDownloadMB) || 0,
+    showActionCursor: store.UI?.browserShowActionCursor !== false,
   }).catch(() => {})
 
   if (props.embedded) {
@@ -1314,6 +1327,8 @@ onMounted(async () => {
     if (mainRef.value && typeof ResizeObserver !== 'undefined') {
       dockObserver = new ResizeObserver(() => { measureCompact(); pushDockRect() })
       dockObserver.observe(mainRef.value)
+      // .ba-page 的高度会随状态栏升降动画变化（主矩形尺寸不变），单独观察才能让原生视图逐帧跟随
+      if (pageRef.value) dockObserver.observe(pageRef.value)
     }
     watchBodyOverlays()
     pushDockVisible()
@@ -1688,16 +1703,23 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 底部状态栏：通知固定左下角；原生网页视图只铺在 .ba-page，不会盖住这里 */
+/* 底部状态栏：仅有轻提示时占 24px（与主进程 BOTTOM_BAR_H 一致），空状态收成 0 不占位。
+   高度用 easeOutCubic 过渡，主进程同步按同一曲线升降网页视图（见 setBottomBar） */
 .ba-statusbar {
-  flex: 0 0 24px;
-  height: 24px;
+  flex: 0 0 auto;
+  height: 0;
   display: flex;
   align-items: center;
   padding: 0 10px;
-  border-top: 1px solid var(--borderColor);
   background: var(--menuColor);
+  /* 用 inset 阴影画上边框：不参与布局，动画期间不会多出 1px */
+  box-shadow: inset 0 0 0 0 transparent;
   overflow: hidden;
+  transition: height .18s cubic-bezier(.33, 1, .68, 1), box-shadow .18s cubic-bezier(.33, 1, .68, 1);
+}
+.ba-statusbar.show {
+  height: 24px;
+  box-shadow: inset 0 1px 0 var(--borderColor);
 }
 .ba-toast {
   max-width: 100%;
@@ -1710,8 +1732,10 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 .ba-toast.err { color: #e81123; }
-.ba-toast-fade-enter-active, .ba-toast-fade-leave-active { transition: opacity .18s; }
-.ba-toast-fade-enter-from, .ba-toast-fade-leave-to { opacity: 0; }
+/* 提示文字随状态栏升起：稍等条子展开一点再淡入/上移，避免展开途中被原生网页视图裁切 */
+.ba-toast-fade-enter-active { transition: opacity .16s ease .06s, transform .16s ease .06s; }
+.ba-toast-fade-leave-active { transition: opacity .12s ease, transform .12s ease; }
+.ba-toast-fade-enter-from, .ba-toast-fade-leave-to { opacity: 0; transform: translateY(5px); }
 
 /* ====== 收藏按钮 ====== */
 .ba-star-btn.on i { color: #f0b429; }

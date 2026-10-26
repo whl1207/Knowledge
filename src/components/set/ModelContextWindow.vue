@@ -41,7 +41,9 @@ const props = withDefaults(defineProps<{
   refreshToken?: number
   /** 隐藏「上下文窗口」行（本地来源已有「模型加载状态」面板展示生效/上限时用；组件仍挂载，探测与圆环分母照常更新） */
   hideWindow?: boolean
-}>(), { override: true, refreshToken: 0, hideWindow: false })
+  /** 自定义来源：正在查看的来源索引（不传则用默认/激活来源） */
+  customIndex?: number
+}>(), { override: true, refreshToken: 0, hideWindow: false, customIndex: undefined })
 
 const store = usestore()
 const zh = () => store.locales === 'zh'
@@ -49,8 +51,10 @@ const zh = () => store.locales === 'zh'
 /** 探测用来源键（单来源：历史别名 'deepseek-responses' 归一到 'deepseek'） */
 const providerKey = computed(() => normalizeLlmType(props.provider))
 
-/** 自定义来源按激活来源索引分桶（多来源各有各的窗口） */
-const customIdx = computed(() => (providerKey.value === 'custom' ? (store.AIconfig.llm.custom?.activeIndex ?? 0) : undefined))
+/** 自定义来源按来源索引分桶（多来源各有各的窗口；优先用「正在查看」的索引） */
+const customIdx = computed(() => (providerKey.value === 'custom'
+  ? (typeof props.customIndex === 'number' ? props.customIndex : (store.AIconfig.llm.custom?.activeIndex ?? 0))
+  : undefined))
 const cacheKey = computed(() => realContextWindowCacheKey(providerKey.value, props.model || '', customIdx.value))
 
 const loading = ref(false)

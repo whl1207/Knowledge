@@ -28,6 +28,7 @@
   import mermaid from 'mermaid'
   import { ElMessage } from 'element-plus'
 import { getPlatform, hasCapability } from '@/platform'
+import { sanitizeHtml } from '@/lib/markdown/sanitizeHtml'
 
   mermaid.initialize({
     startOnLoad: false,
@@ -1166,7 +1167,7 @@ let unsubWatchedFile: (() => void) | null = null
       const allowSplit = splitMode.value === 'smart'
       let sectionIdx = 0
       for (const section of sections) {
-        let renderedContent = md.render(preprocessMath(section))
+        let renderedContent = sanitizeHtml(md.render(preprocessMath(section)))
         if (renderedContent === '') continue
         // 后处理：为 Python 代码块包裹可运行容器（data-lang 由 highlight 函数注入）
         // 用数据属性 data-code-base64 存储编码后的代码，避免 HTML 实体冲突

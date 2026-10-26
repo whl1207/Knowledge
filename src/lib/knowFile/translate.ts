@@ -57,6 +57,8 @@ export interface PdfTextBlock {
    * 避免「𝑅 1 = 」「(3)」「0.5 0.62」这类碎片被模型改写或产生无意义译文。
    */
   math?: boolean
+  /** 页面未旋转高度（scale=1 px）：叠加层排版时用于限制最后一块不越出页底 */
+  pageHeight?: number
 }
 
 /** 上升部 / 下降部相对字号的近似比例（与 pdf.js 的 fontAscent 度量接近，够用即可） */
@@ -68,6 +70,12 @@ const DESCENT_RATIO = 0.22
  * 正文的词间空隙通常 ≤ 0.5 字号；双栏论文的栏间隙一般 ≥ 1.5 字号，取 1.6 可稳定区分。
  */
 const GUTTER_RATIO = 1.6
+
+/**
+ * 段落内允许的最大行间空隙（字号倍数）。单倍行距时约 0.2、双倍行距约 1.35，
+ * 取 1.5 让双倍行距的正文仍能并成一段；真正的段间距（空一行）通常 ≥ 2.5 个字号，仍会切开。
+ */
+const PARA_GAP_RATIO = 1.5
 
 /**
  * 单块上限：只作病态情况的安全网（正常段落一律完整合成一块，摘要这类长段落不会被截断）。
@@ -120,9 +128,19 @@ interface Segment {
   firstLeft: number
   /** 第二行（正文续行）左边界；单行块为 undefined */
   bodyLeft?: number
+  /** 居中排版（标题 / 图注）：各行中心对齐、左右边界不同；叠加层不再还原首行缩进 */
+  centered?: boolean
 }
 
 const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\uf900-\ufaff]/
+/** 中日韩标点 / 全角符号：与汉字一样，行尾换行不应补空格 */
+const CJK_PUNCT_RE = /[\u3000-\u303f\uff00-\uffef]/
+
+/** 两个字符之间是否不应补空格（CJK 文字或标点相连） */
+function noSpaceBetween(prev: string, next: string): boolean {
+  const cjk = (c: string) => CJK_RE.test(c) || CJK_PUNCT_RE.test(c)
+  return cjk(prev) && cjk(next)
+}
 
 /** 文本项 → scale=1 空间几何（pdf.js 文本层内部用的是同一个翻转矩阵） */
 function itemToRaw(item: any, flip: number[]): RawItem | null {
@@ -151,7 +169,7 @@ function joinItemText(parts: RawItem[]): string {
     if (!s) { s = it.text; continue }
     const prev = s[s.length - 1]
     const next = it.text[0] || ''
-    const needSpace = !/\s$/.test(s) && !/^\s/.test(it.text) && !(CJK_RE.test(prev) && CJK_RE.test(next))
+    const needSpace = !/\s$/.test(s) && !/^\s/.test(it.text) && !noSpaceBetween(prev, next)
     s += (needSpace ? ' ' : '') + it.text
   }
   return s.replace(/\s+/g, ' ').trim()
@@ -233,13 +251,13 @@ function sideLooksLikeColumn(runs: LineRun[]): boolean {
  */
 function detectColumnMid(runs: LineRun[], textLeft: number, textRight: number): number | null {
   const W = textRight - textLeft
-  if (!(W > 40) || runs.length < 6) return null
+  if (!(W > 40) || runs.length < 4) return null
   // 跨栏级别的片段（通栏标题 / 单栏区正文）不参与判定
   const colish = runs.filter((r) => r.box.right - r.box.left <= W * 0.6)
-  if (colish.length < 8) return null
+  if (colish.length < 6) return null
 
   const crossLimit = Math.max(2, Math.round(colish.length * 0.2))
-  const candidates: { mid: number; cross: number; balance: number }[] = []
+  const candidates: { left: number; right: number; cross: number; balance: number }[] = []
   for (let k = 0; k <= 15; k++) {
     const x = textLeft + W * (0.35 + k * 0.02)
     let left = 0, right = 0, cross = 0
@@ -249,19 +267,50 @@ function detectColumnMid(runs: LineRun[], textLeft: number, textRight: number): 
       else cross++
     }
     const balance = Math.min(left, right)
-    if (balance >= 3 && cross <= crossLimit) candidates.push({ mid: x, cross, balance })
+    if (balance >= 3 && cross <= crossLimit) {
+      // 记录分界线两侧的实际边界：同一段无交叉区间里的任意 x 结果相同，
+      // 取两侧边界的中点作为栏间中线，左栏的可用宽度才不会被人为压窄。
+      const leftMax = Math.max(...colish.filter((r) => r.box.right <= x).map((r) => r.box.right))
+      const rightMin = Math.min(...colish.filter((r) => r.box.left >= x).map((r) => r.box.left))
+      candidates.push({ left: leftMax, right: rightMin, cross, balance })
+    }
   }
   candidates.sort((a, b) => a.cross - b.cross || b.balance - a.balance)
   for (const c of candidates) {
-    const leftRuns = colish.filter((r) => r.box.right <= c.mid)
-    const rightRuns = colish.filter((r) => r.box.left >= c.mid)
-    if (sideLooksLikeColumn(leftRuns) && sideLooksLikeColumn(rightRuns)) return c.mid
+    if (!(c.right > c.left)) continue
+    const mid = (c.left + c.right) / 2
+    const leftRuns = colish.filter((r) => r.box.right <= mid)
+    const rightRuns = colish.filter((r) => r.box.left >= mid)
+    if (sideLooksLikeColumn(leftRuns) && sideLooksLikeColumn(rightRuns)) return mid
   }
   return null
 }
 
 /** 列表标号开头（“(iii) ”“3.1 ”“1) ”“• ”）：这类首行会被标号顶到左边距之外，缩进量与后续行不同 */
 const LIST_MARKER_RE = /^\s*(?:\((?:\d{1,2}|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})\)|\d{1,2}(?:\.\d{1,2})*[.)]|[•·▪‣]|[-–—*])\s+/
+
+/**
+ * 段落内多行拼接：
+ * - 英文行尾连字符（含软连字符）且下一行以小写字母开头 → 去掉连字符直接相连（PDF 断词很常见）；
+ * - 中日韩文字之间直接相连（PDF 的换行不是空格，补空格会污染原文）；
+ * - 其余按空格连接。
+ */
+function joinParagraphLines(lines: string[]): string {
+  let out = ''
+  for (const raw of lines) {
+    const t = String(raw || '').replace(/\u00ad/g, '').trim()
+    if (!t) continue
+    if (!out) { out = t; continue }
+    if (/[A-Za-z]-$/.test(out) && /^[a-z]/.test(t)) {
+      out = out.slice(0, -1) + t
+      continue
+    }
+    const prev = out[out.length - 1] || ''
+    const next = t[0] || ''
+    out += noSpaceBetween(prev, next) ? t : ` ${t}`
+  }
+  return out
+}
 
 /**
  * 行片段 → 段落。**不按栏硬切**：所有片段按 y 统一扫描，靠「左边界对齐 + 横向重叠」自然完成
@@ -273,13 +322,14 @@ const LIST_MARKER_RE = /^\s*(?:\((?:\d{1,2}|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})\)|\d
 function groupParagraphs(runs: LineRun[]): Segment[] {
   interface Open {
     texts: string[]; box: LineBox; angle: number; last: LineBox; chars: number; limit?: number
-    colRight: number; firstLeft: number; bodyLeft?: number
+    colRight: number; firstLeft: number; bodyLeft?: number; centered?: boolean
   }
   const out: Segment[] = []
   const open: Open[] = []
   const flush = (p: Open) => out.push({
-    text: p.texts.join(' '), box: p.box, angle: p.angle, lines: p.texts.length,
+    text: joinParagraphLines(p.texts), box: p.box, angle: p.angle, lines: p.texts.length,
     limit: p.limit, colRight: p.colRight, firstLeft: p.firstLeft, bodyLeft: p.bodyLeft,
+    centered: p.centered,
   })
 
   for (const run of runs) {
@@ -290,16 +340,17 @@ function groupParagraphs(runs: LineRun[]): Segment[] {
     // 1) 关掉不再紧接的段落（按 y 扫描，关闭后不可能再被延续）
     for (let i = open.length - 1; i >= 0; i--) {
       const p = open[i]
-      if (box.top - p.box.bottom > Math.max(2.5, p.box.fontSize * 0.75)) { flush(p); open.splice(i, 1) }
+      if (box.top - p.box.bottom > Math.max(2.5, p.box.fontSize * PARA_GAP_RATIO)) { flush(p); open.splice(i, 1) }
     }
 
     // 2) 找最合适的开放段落：垂直最贴近优先，其次横向重叠最大
     let best: Open | null = null
     let bestGap = Infinity
     let bestOverlap = -Infinity
+    let bestCentered = false
     for (const p of open) {
       const gap = box.top - p.box.bottom
-      const tol = Math.max(2.5, p.box.fontSize * 0.75)
+      const tol = Math.max(2.5, p.box.fontSize * PARA_GAP_RATIO)
       if (gap > tol) continue
       if (Math.abs(run.angle - p.angle) > 1) continue
       if (Math.abs(box.fontSize - p.box.fontSize) > p.box.fontSize * 0.35) continue
@@ -311,6 +362,10 @@ function groupParagraphs(runs: LineRun[]): Segment[] {
       // 横向重叠不足（另一栏 / 另一列）→ 不可能是同一段
       const overlap = Math.min(box.right, p.last.right) - Math.max(box.left, p.last.left)
       if (overlap < Math.min(w, lastW) * 0.35) continue
+      // 居中排版（标题 / 图注 / 诗歌）：各行中心对齐，左边界的位移不能当成分栏或新段落
+      const runCenter = (box.left + box.right) / 2
+      const prevCenter = (p.box.left + p.box.right) / 2
+      const sameCenter = Math.abs(runCenter - prevCenter) <= Math.max(2, p.box.fontSize * 0.8)
       // 新列表项 / 新编号标题：本行以标号开头且落在正文左边距上 → 另起一段（否则两类列表项会粘成一块）
       if (LIST_MARKER_RE.test(run.text) && Math.abs(shift) <= p.box.fontSize * 0.9) continue
       // 「段首缩进的首行」还要够宽：首行缩进只是把一行往右挪一点，整行仍应占满大部分栏宽；
@@ -323,6 +378,8 @@ function groupParagraphs(runs: LineRun[]): Segment[] {
         // 列表悬挂标号：首行以“(iii) / 3.1 / • ”开头被顶出去，续行右移对齐
         || (p.bodyLeft == null && p.texts.length === 1 && shift > 0 && shift <= loose
           && LIST_MARKER_RE.test(p.texts[0]))
+        // 居中排版：左边界不同但中心对齐
+        || sameCenter
       if (!leftOk) continue
       // 上一行有没有排满：
       // - 多行段落看自身右边界，没排满说明本段已结束（段末短行）；
@@ -333,22 +390,29 @@ function groupParagraphs(runs: LineRun[]): Segment[] {
         : p.box.right - p.last.right <= fillTol
       if (!filled) {
         if (p.texts.length !== 1) continue
-        // 单行且没排满：像标题。若下一行以大写字母 / 汉字开头（另起新句），判定为新段落，不并；
-        // 若下一行是「标题的续行」（小写开头，如跨行标题），则继续并入。
-        if (/^[A-Z\u3400-\u9fff]/.test(run.text)) continue
+        // 单行且没排满：可能是标题，也可能是「行尾恰好在专有名词 / 缩写后换行」的正文。
+        // 不能只看下一行是不是大写开头（"…the U.S." / "…in Fig. 3" 这类续行很常见）：
+        // - 这一行已占本栏 60% 以上、字号也没变大 → 更像正文，继续并入；
+        // - 这一行以句末标点结束，或只占栏宽一小半 → 像标题，下一行大写 / 汉字就另起一段。
+        const lineEndsSentence = /[.!?。！？]["'”’)\]]?$/.test(p.texts[p.texts.length - 1])
+        const looksLikeHeading = lastW < colW * 0.6 || box.fontSize > p.box.fontSize * 1.05 || lineEndsSentence
+        if (looksLikeHeading && /^[A-Z\u3400-\u9fff]/.test(run.text)) continue
       }
       if (gap < bestGap || (gap === bestGap && overlap > bestOverlap)) {
         best = p
         bestGap = gap
         bestOverlap = overlap
+        // 只有「左边界对不上、但中心对齐」才算居中排版；左边界本来就对齐的普通段落保持缩进还原
+        bestCentered = sameCenter && Math.abs(shift) > p.box.fontSize * 0.9
       }
     }
 
     if (best) {
       // 第二行（正文续行）的左边界：用于还原首行缩进 / 悬挂缩进，并作为后续行的对齐基准
-      if (best.texts.length === 1) {
+      if (best.texts.length === 1 && !bestCentered) {
         best.bodyLeft = box.left
       }
+      if (bestCentered) best.centered = true
       best.texts.push(run.text)
       best.chars += run.text.length
       best.box = {
@@ -469,9 +533,9 @@ export async function buildPageBlocks(page: any, pageNum: number): Promise<PdfTe
     if (seg.text.length < 2) continue
     if (isNoiseBlock(seg, pageHeight)) continue
     const limit = seg.limit != null ? seg.limit - 3 : Infinity
-    // 缩进还原：首行 vs 正文续行的左边界差（scale=1 px）
-    const indentFirst = Math.max(0, seg.firstLeft - seg.box.left)
-    const indentHanging = seg.bodyLeft != null ? Math.max(0, seg.bodyLeft - seg.box.left) : 0
+    // 缩进还原：首行 vs 正文续行的左边界差（scale=1 px）；居中段落没有缩进可言
+    const indentFirst = seg.centered ? 0 : Math.max(0, seg.firstLeft - seg.box.left)
+    const indentHanging = !seg.centered && seg.bodyLeft != null ? Math.max(0, seg.bodyLeft - seg.box.left) : 0
     blocks.push({
       id: `p${pageNum}-${blocks.length}`,
       page: pageNum,
@@ -488,6 +552,7 @@ export async function buildPageBlocks(page: any, pageNum: number): Promise<PdfTe
       indentFirst,
       indentHanging,
       math: isMathBlock(seg.text) || undefined,
+      pageHeight,
     })
   }
   return blocks
@@ -535,15 +600,97 @@ export function blocksForSelection(blocks: PdfTextBlock[], selection: string): P
 }
 
 /**
+ * 单个文本块在叠加层里的可用排版空间（都是 scale=1 px，与块坐标同一套空间）。
+ * 由 {@link planOverlayLayout} 按整页所有块算出：译文不能压到同栏下一块的译文，
+ * 也不能越出页底，否则后画的白色译文框会把超出的文字盖掉（看起来就是「显示不全」）。
+ */
+export interface PdfBlockLayout {
+  /** 译文框宽度：扩展到本栏右界（maxRight），给译文更多换行空间，减少缩小字号的次数 */
+  width: number
+  /** 允许的最大高度：到同栏下一块顶部 / 页底为止 */
+  maxHeight: number
+  /** 理想高度：原段落高度 + 半行；译文偏短时用它作为放大填充的目标 */
+  targetHeight: number
+}
+
+/**
+ * 为整页文本块规划译文叠加框的可用空间。
+ *
+ * 关键点：
+ * - 宽度优先取本栏可用宽度（`maxRight - left`），而不是原段落自身的行宽；学术论文的段末短行、
+ *   缩进段落因此能把译文摊得更开，长译文不容易被压到很小字号。
+ * - 若同一水平线上右侧还有另一块（没有识别出分栏的短页面、表格、图注），
+ *   再把右边界收到那一块的左边，避免白框盖到它。
+ * - 高度取「同栏、下方最近一块」的顶部（或页底）减去一点间距；这样上一块的译文即使比原文长，
+ *   也不会伸进下一块的白框里被盖住。
+ * - 只允许向下多占约 3 行：再往下可能是图 / 表 / 页脚等没有参与翻译的内容，白框不该盖过去。
+ */
+export function planOverlayLayout(blocks: PdfTextBlock[]): Map<string, PdfBlockLayout> {
+  const out = new Map<string, PdfBlockLayout>()
+  const drawable = blocks.filter((b) => b.angle === 0)
+  if (!drawable.length) return out
+
+  let pageBottom = 0
+  for (const b of drawable) {
+    const h = Number(b.pageHeight) || 0
+    if (h > pageBottom) pageBottom = h
+    const bottom = b.top + b.height
+    if (bottom > pageBottom) pageBottom = bottom
+  }
+  const sorted = [...drawable].sort((a, b) => a.top - b.top || a.left - b.left)
+
+  for (let i = 0; i < sorted.length; i++) {
+    const b = sorted[i]
+    let rightLimit = Math.max(b.left + b.width, b.maxRight)
+    // 同一水平带里右侧还有块（分栏 / 表格 / 图注）：白框右边界不越过它。
+    // 只按原块自身的垂直范围判断：通栏标题下方是双栏正文时，不能因为下方右栏的块
+    // 就把标题的白框裁到左栏（标题本来就横跨整页）。
+    const bandTop = b.top - 1
+    const bandBottom = b.top + b.height + 1
+    for (const n of drawable) {
+      if (n.id === b.id || n.left <= b.left + 2) continue
+      if (n.top >= bandBottom || n.top + n.height <= bandTop) continue
+      rightLimit = Math.min(rightLimit, n.left - Math.max(2, b.fontSize * 0.25))
+    }
+    const width = Math.max(1, Math.max(b.width, rightLimit - b.left))
+
+    // 同栏、正下方最近的一块：横向范围必须与「扩展后的本块」有足够重叠
+    let nextTop = Number.POSITIVE_INFINITY
+    for (let j = i + 1; j < sorted.length; j++) {
+      const n = sorted[j]
+      if (n.top <= b.top + 1) continue
+      const overlap = Math.min(b.left + width, n.maxRight) - Math.max(b.left, n.left)
+      const minWidth = Math.min(width, Math.max(1, n.maxRight - n.left))
+      if (overlap > Math.min(8, minWidth * 0.25)) { nextTop = n.top; break }
+    }
+
+    const gap = Math.max(1.5, b.fontSize * 0.15)
+    const limitBottom = Math.min(
+      nextTop === Number.POSITIVE_INFINITY ? pageBottom : nextTop - gap,
+      pageBottom - 1,
+    )
+    const targetHeight = b.height + b.fontSize * 0.5
+    // 向下扩展的安全上限：约 3 行；避免把下方图片 / 表格 / 页脚盖住
+    const cap = b.height + Math.max(b.fontSize * 3, b.height * 0.35)
+    const maxHeight = Math.max(b.height, Math.min(limitBottom - b.top, cap))
+    out.set(b.id, { width, maxHeight, targetHeight })
+  }
+  return out
+}
+
+/**
  * 译文叠加层的定位样式：与 pdf.js 文本层同一坐标系（乘 --scale-factor），缩放自动跟随。
- * 宽度允许超出原块（译文普遍比原文长），但不越过 `maxRight`（双栏页里就是本栏右边界）。
+ * 宽度优先用 `layout.width`（本栏可用宽度），否则退回原块宽度；不越过 `maxRight`
+ * （双栏页里就是本栏右边界 / 表格单元格边界）。
  * 原文的首行缩进 / 悬挂缩进会原样还原（text-indent / padding + 负 text-indent）。
  * 键是 **CSS 属性名（连字符形式）**，可直接 `el.style.setProperty(k, v)`
  * ——注意不要用 camelCase，`setProperty('fontSize', …)` 会被静默忽略。
  */
-export function blockOverlayStyle(b: PdfTextBlock): Record<string, string> {
-  const maxW = Math.max(b.width, b.maxRight - b.left)
-  const width = Math.min(maxW, Math.max(b.width, b.fontSize * 16))
+export function blockOverlayStyle(b: PdfTextBlock, layout?: PdfBlockLayout): Record<string, string> {
+  const width = Math.max(1, layout?.width ?? Math.min(
+    Math.max(b.width, b.maxRight - b.left),
+    Math.max(b.width, b.fontSize * 16),
+  ))
   const px = (v: number) => `calc(var(--scale-factor) * ${v.toFixed(2)}px)`
   const style: Record<string, string> = {
     left: px(b.left - 1),

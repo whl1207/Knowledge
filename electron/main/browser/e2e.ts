@@ -13,7 +13,7 @@
  * 注意：需要图形环境；CI/无头环境请用 xvfb（Linux）或跳过。
  */
 import { app } from 'electron'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { browserAgentService } from '../browser-agent'
@@ -100,6 +100,27 @@ export async function runBrowserE2E(): Promise<void> {
       if (!text.includes('clicked')) throw new Error(`提取文本缺少结果：${text.slice(0, 200)}`)
       return text.slice(0, 200)
     })
+    await step('file_chooser', async () => {
+      await tool('browser_click', { selector: '#file' })
+      const up = await tool('browser_upload', { files: [fixturePath()] })
+      if (!up.includes('文件选择器') && !up.includes('已向')) throw new Error(`文件选择器接管失败：${up.slice(0, 200)}`)
+      const snap = await tool('browser_snapshot', { maxChars: 6000 })
+      if (!snap.includes('files:1')) throw new Error('文件选择后页面未更新 files:1')
+      return 'uploaded'
+    })
+    await step('drag', async () => {
+      await tool('browser_drag', { from: { selector: '#pad' }, to: { selector: '#pad' } })
+      const snap = await tool('browser_snapshot', { maxChars: 6000 })
+      if (!snap.includes('dragged')) throw new Error('拖拽后页面未更新 dragged')
+      return 'dragged'
+    })
+    await step('paste', async () => {
+      await tool('browser_click', { selector: '#paste' })
+      await tool('browser_paste', { text: 'pasted' })
+      const snap = await tool('browser_snapshot', { maxChars: 6000 })
+      if (!snap.includes('pasted')) throw new Error('粘贴后页面未更新 pasted')
+      return 'pasted'
+    })
     await step('playbook_save', async () => {
       await tool('browser_playbook_save', {
         host: 'e2e.example',
@@ -130,19 +151,29 @@ export async function runBrowserE2E(): Promise<void> {
     await step('learning_save', async () => { await tool('browser_learning_save', { host: 'e2e.example', title: 'e2e', notes: 'fixture button updates #out' }); return 'saved' })
     await step('download', async () => {
       await tool('browser_click', { selector: '#dl' })
-      const deadline = Date.now() + 8000
-      let rec: any = null
-      while (Date.now() < deadline) {
-        rec = browserAgentService.listDownloads().find((d) => /aikm-e2e/.test(d.filename))
-        if (rec?.state === 'completed' || rec?.state === 'cancelled' || rec?.state === 'interrupted') break
-        await new Promise((r) => setTimeout(r, 200))
-      }
-      if (!rec) throw new Error('下载列表里没有记录（will-download 未记录）')
-      if (rec.state !== 'completed') throw new Error(`下载记录状态=${rec.state}，received=${rec.receivedBytes}/${rec.totalBytes}`)
+      const waited = await tool('browser_download_wait', { filename: 'aikm-e2e', timeoutMs: 8000 })
+      if (!waited.includes('下载完成')) throw new Error(`等待下载未完成：${waited.slice(0, 300)}`)
+      const rec = browserAgentService.listDownloads().find((d) => /aikm-e2e/.test(d.filename))
+      if (!rec || rec.state !== 'completed') throw new Error(`下载记录状态异常：${rec?.state}`)
       if (!rec.path) throw new Error('下载记录没有 path')
       const listed = await tool('browser_list_downloads')
       if (!listed.includes('aikm-e2e.txt')) throw new Error('browser_list_downloads 未返回下载记录')
+      await new Promise((r) => setTimeout(r, 700))
+      const historyFile = join(app.getPath('userData'), 'browser-download-history.json')
+      if (!existsSync(historyFile)) throw new Error('下载历史未落盘')
+
+      const savePath = join(app.getPath('temp'), `aikm-e2e-save-${Date.now()}.txt`)
+      const saved = await tool('browser_download', { id: rec.id, action: 'saveAs', path: savePath })
+      if (!saved.includes('已执行') || !existsSync(savePath)) throw new Error(`saveAs 失败：${saved}`)
+      const deleted = await tool('browser_download', { id: rec.id, action: 'delete' })
+      if (!deleted.includes('已执行') || existsSync(savePath)) throw new Error(`delete 失败：${deleted}`)
       return `${rec.filename} ${rec.state} ${rec.receivedBytes}B`
+    })
+    await step('download_blocked', async () => {
+      await tool('browser_click', { selector: '#evil' })
+      const waited = await tool('browser_download_wait', { filename: 'evil.exe', timeoutMs: 5000 })
+      if (!/阻止|危险/.test(waited)) throw new Error(`危险文件未被阻止：${waited.slice(0, 300)}`)
+      return 'blocked'
     })
     await step('learning_get', async () => {
       const text = await tool('browser_learning_get', { host: 'e2e.example' })
@@ -150,6 +181,30 @@ export async function runBrowserE2E(): Promise<void> {
       return 'read'
     })
     await step('learning_delete', async () => { await tool('browser_learning_delete', { host: 'e2e.example' }); return 'deleted' })
+    let claimTabId = ''
+    await step('claim_add_user_tab', async () => {
+      await browserAgentService.addTab(pathToFileURL(fixturePath()).toString(), { agent: false })
+      const list = await tool('browser_list_tabs')
+      const matches = [...list.matchAll(/\[用户\][^\n]*tabId=([^\s]+)/g)]
+      if (!matches.length) throw new Error(`找不到用户标签：${list.slice(0, 300)}`)
+      claimTabId = matches[matches.length - 1][1]
+      return claimTabId
+    })
+    await step('claim_delegate', async () => {
+      const delegated = browserAgentService.delegateTab(claimTabId)
+      if (!delegated.ok) throw new Error(`移交失败：${delegated.error}`)
+      return 'delegated'
+    })
+    await step('claim_take', async () => {
+      const claimed = await tool('browser_claim_tab', { tabId: claimTabId })
+      if (!claimed.includes('已接管')) throw new Error(`claim_tab 失败：${claimed.slice(0, 200)}`)
+      return claimTabId
+    })
+    await step('claim_snapshot', async () => {
+      const snap = await tool('browser_snapshot', { tabId: claimTabId, maxChars: 2000 })
+      if (!snap.includes('Browser e2e fixture')) throw new Error('接管后无法快照该标签')
+      return claimTabId
+    })
     await step('finish', async () => { await tool('browser_space_finish', { keep: [] }); return 'closed' })
   } finally {
     const ok = steps.every((s) => s.ok)

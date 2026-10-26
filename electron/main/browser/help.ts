@@ -35,7 +35,8 @@ const ACTIONS = `动作工具（按 ref 操作）
 - browser_press：按键/组合键（Enter/Tab/Escape/ControlOrMeta+A），可带 ref 先聚焦。
 - browser_hover：悬停（展开菜单/tooltip）。
 - browser_select：原生 select，按 value/label/index 选择。
-- browser_upload：给 input[type=file] 选本地文件（绝对路径，≤20 个）。
+- browser_upload：给 input[type=file] 选本地文件（绝对路径，≤20 个）；点击按钮弹出文件选择器时，先 click 再 browser_upload（无需 ref）。
+- browser_drag：拖拽 from → to；browser_wheel：鼠标滚轮；browser_paste：文本/HTML 粘贴到当前焦点。
 - browser_dialog：显式接受/取消 alert/confirm/prompt（弹窗出现后 600ms 内有效，超时自动处理）。
 - browser_scroll：滚动页面（也可先 snapshot 看目标是否已在视口）。
 原则：可操作性检查会拦"不可见/被遮挡/禁用"；不要用 JS 强行点，改成滚动/等待/关闭遮挡层。`
@@ -54,7 +55,8 @@ const TABS = `标签与会话
 - browser_navigate 默认在当前会话标签打开；newTab=true 新开。
 - browser_switch_tab / browser_close_tab 只接受自己的标签。
 - 单会话页面上限默认 8（设置可改），超出回收最旧页。
-- 任务结束：browser_space_finish {keep:["p1"]}；keep 的页面会交还用户，其余关闭。`
+- 任务结束：browser_space_finish {keep:["p1"]}；keep 的页面会交还用户，其余关闭。
+- 用户在网页右键「交给 AI 处理此页」后，用 browser_claim_tab 接管该用户标签（未授权会拒绝）。`
 
 const SCRIPT = `脚本化（多步任务优先）
 - browser_run：写一段 async 脚本，API：goto(url)、snapshot(opts)、click(ref)、fill(ref,text)、press(key)、hover、select、waitFor(spec)、extract()、text()、url()、title()、sleep(ms)。结束后自动附最终快照。
@@ -64,7 +66,7 @@ const SCRIPT = `脚本化（多步任务优先）
 
 const FILES = `文件 / 弹窗 / 下载
 - 上传：browser_upload {ref, files:[绝对路径]}；先 snapshot 找 input[type=file] 的 ref；跨域 iframe 内暂不支持上传。
-- 下载：点击触发后，动作回执会显示"下载「文件名」"；browser_list_downloads 可查状态/路径。
+- 下载：点击触发后，动作回执会显示"下载「文件名」"；用 browser_download_wait 等完成（返回 id/路径/大小），用 browser_download 取消/暂停/继续/另存为/删除；browser_list_downloads 可查历史。危险类型默认阻止。
 - 弹窗：默认 600ms 后自动处理（alert 接受，confirm/prompt 取消）；要保留/确认时在窗口内调用 browser_dialog。
 - 新窗口：window.open/target=_blank 会开新标签并出现在回执里；用 browser_list_tabs 查看并切换。`
 

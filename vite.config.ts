@@ -48,6 +48,25 @@ const ttsWorkerPlugin = {
   },
 }
 
+// 生产构建裁剪：public/excalidraw-assets-dev 是开发版资源（~18MB，未压缩），
+// 只用于本地调试；打包时不应进安装包。public 是整目录复制，故在 closeBundle 删除。
+const createPruneDevAssets = (isBuild: boolean) => ({
+  name: 'prune-dev-assets',
+  closeBundle() {
+    if (!isBuild) return
+    for (const p of ['dist/excalidraw-assets-dev']) {
+      try {
+        if (fs.existsSync(p)) {
+          fs.rmSync(p, { recursive: true, force: true })
+          console.log(`[build] pruned ${p}`)
+        }
+      } catch (err) {
+        console.warn(`[build] failed to prune ${p}:`, (err as Error)?.message)
+      }
+    }
+  },
+})
+
 // 清理 preload 目录里历史遗留的 `index.mjs`（CJS 代码 + .mjs 扩展名，Electron 按 ESM 解析会直接失败）。
 // 必须在**新产物写完之后**删（closeBundle 晚于 writeBundle），否则先删再写失败就什么都没有了。
 const dropStalePreloadMjs = {
@@ -105,6 +124,7 @@ export default defineConfig(({ command }) => {
     resolve: { alias: srcAlias },
     plugins: [
       vue(),
+      createPruneDevAssets(isBuild),
       electron({
         main: {
           // Shortcut of `build.lib.entry`

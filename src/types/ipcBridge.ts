@@ -126,10 +126,12 @@ export interface AikmDshApi {
     onStatus(cb: (status: import('@/types/collab').CollabStatus) => void): () => void
   }
   remoteFs: {
-    start(payload?: { port?: number; rootDir?: string; token?: string }): Promise<{ success: boolean; port?: number; token?: string; error?: string }>
+    start(payload?: { port?: number; rootDir?: string; token?: string; permission?: import('@/types/collab').RemoteFsPermission }): Promise<{ success: boolean; port?: number; token?: string; permission?: import('@/types/collab').RemoteFsPermission; error?: string }>
     stop(): Promise<{ success: boolean }>
-    getStatus(): Promise<{ running: boolean; port: number; ips: string[]; rootDir: string; token: string; name: string }>
-    onStatus(cb: (status: { running: boolean; port: number; ips: string[]; rootDir: string; token: string; name: string }) => void): () => void
+    getStatus(): Promise<import('@/types/collab').RemoteFsStatus>
+    /** 运行中即时切换局域网用户权限（只读 / 可编辑 Markdown） */
+    setPermission(permission: import('@/types/collab').RemoteFsPermission): Promise<{ success: boolean; permission: import('@/types/collab').RemoteFsPermission }>
+    onStatus(cb: (status: import('@/types/collab').RemoteFsStatus) => void): () => void
   }
   mapTiles: {
     list(): Promise<import('../../electron/main/map-tiles').MapTileSource[]>

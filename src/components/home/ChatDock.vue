@@ -6,7 +6,9 @@
      标签内容按类型渲染：
        - files    → ChatDockFiles.vue（工作区文件树）
        - terminal → ChatDockTerminal.vue（node-pty 真终端）
-       - browser  → ChatDockBrowser.vue（主进程 WebContentsView 挂到主窗口） -->
+       - browser  → ChatDockBrowser.vue（主进程 WebContentsView 挂到主窗口）
+       - branch   → 父级通过 #branch 插槽传入（分支对话树，与工具页共用右侧栏）
+       - new      → 空白新标签页：在页内选类型（不弹图标下菜单） -->
 <template>
   <aside
     class="chat-dock"
@@ -56,23 +58,15 @@
         </div>
       </div>
 
-      <!-- 新建标签：文件 / 终端 / 浏览器（与 DSH 一致） -->
-      <div class="dock-add-wrap">
-        <button class="dock-tab-add" :title="zh ? '新建标签（文件 / 终端 / 浏览器）' : 'New tab (Files / Terminal / Browser)'" @click.stop="toggleAddMenu">
-          <i class="fa fa-plus"></i>
-        </button>
-        <div v-if="addMenuOpen" class="dock-add-menu" @click.stop>
-          <button v-for="kind in availableKinds" :key="kind" class="dock-add-item" @click="onAdd(kind)">
-            <i class="fa" :class="kindIcon(kind)"></i>
-            <span>{{ kindLabel(kind) }}</span>
-          </button>
-        </div>
-      </div>
+      <!-- 新建标签：与 DSH 一致，先加一张空白标签页，再在页面里选类型（不弹菜单） -->
+      <button class="dock-tab-add" :title="zh ? '新建标签页' : 'New tab'" @click.stop="emit('add')">
+        <i class="fa fa-plus"></i>
+      </button>
     </div>
 
     <!-- 内容区：每个标签一个常驻面板（切标签只是 v-show，切回来不丢状态；首次激活才挂载） -->
     <div class="chat-dock-body">
-      <!-- 空面板：和新标签页一样，先让用户选一种使用方式（终端 / 文件 / 浏览器） -->
+      <!-- 空面板：和新标签页一样，先让用户选一种使用方式（终端 / 文件 / 浏览器 / 分支） -->
       <div v-if="!tabs.length" class="dock-empty">
         <div class="dock-empty-title">{{ zh ? '选择右侧栏的使用方式' : 'Choose what to show here' }}</div>
         <div class="dock-empty-actions">
@@ -81,7 +75,7 @@
             :key="kind"
             class="dock-empty-btn"
             :title="kindHint(kind)"
-            @click="emit('add', kind)"
+            @click="chooseKind(kind)"
           >
             <i class="fa" :class="kindIcon(kind)"></i>
             <span>{{ kindLabel(kind) }}</span>
@@ -95,14 +89,34 @@
       <template v-for="tab in tabs" :key="tab.id">
         <!-- ⚠️ 文件标签只在**当前激活**时挂载：编辑器视图读的是全局「当前文件」
              （store.data[store.index]），同时挂载两个文件会把内容互相覆盖。
-             工具页（文件树 / 终端 / 浏览器）仍用 everActive + v-show，切回来不丢状态。 -->
+             工具页（文件树 / 终端 / 浏览器 / 分支）仍用 everActive + v-show，切回来不丢状态。 -->
         <div
           v-if="tab.kind === 'file' ? tab.id === activeTabId : everActive.has(tab.id)"
           v-show="tab.id === activeTabId"
           class="dock-pane"
         >
+          <!-- 空白新标签页：先让用户选类型（与 DSH 一致：+ 直接加一页，不在图标下弹菜单） -->
+          <div v-if="tab.kind === 'new'" class="dock-empty">
+            <div class="dock-empty-title">{{ zh ? '选择这个标签页的使用方式' : 'Choose what this tab shows' }}</div>
+            <div class="dock-empty-actions">
+              <button
+                v-for="kind in availableKinds"
+                :key="kind"
+                class="dock-empty-btn"
+                :title="kindHint(kind)"
+                @click="emit('configure', tab.id, kind)"
+              >
+                <i class="fa" :class="kindIcon(kind)"></i>
+                <span>{{ kindLabel(kind) }}</span>
+              </button>
+            </div>
+            <div class="dock-empty-hint">
+              {{ zh ? '选定后这张标签页就会变成对应工具；可以再点「+」加更多' : 'Pick one to turn this tab into that tool; use + to add more' }}
+            </div>
+          </div>
+          <slot v-else-if="tab.kind === 'branch'" name="branch" />
           <ChatDockFiles
-            v-if="tab.kind === 'files'"
+            v-else-if="tab.kind === 'files'"
             :active="tab.id === activeTabId"
             :root-path="chatWorkspace"
             @insert-text="(t: string) => emit('insert-text', t)"
@@ -178,6 +192,8 @@ const props = defineProps<{
   occluded?: boolean
   /** 当前聊天的工作区：文件标签的根目录、终端的工作目录都用它（空 = 跟随全局默认） */
   chatWorkspace?: string
+  /** 当前聊天家族是否有分支：决定新标签页里是否出现「分支」选项 */
+  branchAvailable?: boolean
   zh: boolean
 }>()
 
@@ -185,7 +201,10 @@ const emit = defineEmits<{
   (e: 'update:width', width: number): void
   (e: 'resize-end'): void
   (e: 'activate', id: string): void
-  (e: 'add', kind: ChatDockTabKind): void
+  /** 点「+」→ 不带 kind，宿主加一张空白新标签页；空面板里选类型 → 带 kind 直接建对应标签 */
+  (e: 'add', kind?: ChatDockTabKind): void
+  /** 空白新标签页里选定类型：宿主把该标签从 'new' 转成目标类型 */
+  (e: 'configure', id: string, kind: ChatDockTabKind): void
   (e: 'close-tab', id: string): void
   (e: 'close'): void
   (e: 'insert-text', text: string): void
@@ -200,15 +219,19 @@ const zh = computed(() => props.zh)
 function kindIcon(kind: ChatDockTabKind): string {
   if (kind === 'terminal') return 'fa-terminal'
   if (kind === 'browser') return 'fa-globe'
+  if (kind === 'branch') return 'fa-sitemap'
+  if (kind === 'new') return 'fa-plus'
   if (kind === 'file') return 'fa-file-text-o'
   return 'fa-folder-open-o'
 }
 function kindLabel(kind: ChatDockTabKind): string {
   if (kind === 'terminal') return props.zh ? '终端' : 'Terminal'
   if (kind === 'browser') return props.zh ? '浏览器' : 'Browser'
+  if (kind === 'branch') return props.zh ? '分支' : 'Branch'
+  if (kind === 'new') return props.zh ? '新标签页' : 'New tab'
   return props.zh ? '文件' : 'Files'
 }
-/** 空面板里每个选项的一句话说明 */
+/** 空面板 / 新标签页里每个选项的一句话说明 */
 function kindHint(kind: ChatDockTabKind): string {
   if (kind === 'terminal') {
     return props.zh
@@ -219,6 +242,11 @@ function kindHint(kind: ChatDockTabKind): string {
     return props.zh
       ? '浏览器：在侧栏里直接浏览网页（地址栏 / 多标签 / 收藏都在这里）'
       : 'Browser: browse right inside the panel (address bar, tabs and bookmarks included)'
+  }
+  if (kind === 'branch') {
+    return props.zh
+      ? '分支：查看当前对话的分支树，点击节点切换、右键管理'
+      : 'Branch: view this conversation branch tree; click a node to switch, right-click to manage'
   }
   return props.zh
     ? '文件：浏览当前工作区的文件，可打开或把路径插入输入框'
@@ -236,23 +264,19 @@ watch(
   { immediate: true },
 )
 
-// ===== 新建标签菜单 =====
-/** 只列出当前环境真的能用的类型（安卓 / 纯网页没有 PTY，就不给「终端」入口） */
-const availableKinds = computed(() => DOCK_TAB_KINDS.filter((k) => k !== 'terminal' || hasCapability('terminal')))
-const addMenuOpen = ref(false)
-const toggleAddMenu = () => { addMenuOpen.value = !addMenuOpen.value }
-const onAdd = (kind: ChatDockTabKind) => {
-  addMenuOpen.value = false
-  emit('add', kind)
+// ===== 新标签页的类型选择 =====
+/** 只列出当前环境真的能用的类型（安卓 / 纯网页没有 PTY，就不给「终端」入口；没有分支就不给「分支」） */
+const availableKinds = computed(() => DOCK_TAB_KINDS.filter((k) => {
+  if (k === 'terminal' && !hasCapability('terminal')) return false
+  if (k === 'branch' && !props.branchAvailable) return false
+  return true
+}))
+/** 空面板（没有标签时）直接建标签；空白新标签页则把当前页转成目标类型 */
+function chooseKind(kind: ChatDockTabKind) {
+  const active = props.tabs.find((t) => t.id === props.activeTabId)
+  if (active?.kind === 'new') emit('configure', active.id, kind)
+  else emit('add', kind)
 }
-/** 点空白处关闭菜单（与 home.vue 里预设浮层同一套做法） */
-const onDocMouseDown = (e: MouseEvent) => {
-  if (!addMenuOpen.value) return
-  const el = (e.target as HTMLElement)?.closest?.('.dock-add-wrap')
-  if (!el) addMenuOpen.value = false
-}
-onMounted(() => document.addEventListener('mousedown', onDocMouseDown))
-onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMouseDown))
 
 // ===== 拖动调宽（指针事件 + 左边缘 8px 热区；松手才落盘）=====
 const resizing = ref(false)
@@ -364,7 +388,7 @@ defineExpose({ confirmLeaveActive })
 </script>
 
 <style scoped>
-/* 右侧栏容器：与 .branch-panel 同一套「右侧面板」观感（左边框 + 主题背景） */
+/* 右侧栏容器：与聊天区同一套「右侧面板」观感（左边框 + 主题背景） */
 .chat-dock {
   position: relative;
   flex-shrink: 0;
@@ -499,38 +523,6 @@ defineExpose({ confirmLeaveActive })
 .dock-tab-back { margin-right: 2px; }
 .dock-tab-add:hover,
 .dock-tab-back:hover { opacity: 1; color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontColor) 8%, transparent); }
-
-/* 新建标签菜单 */
-.dock-add-wrap { position: relative; flex-shrink: 0; }
-.dock-add-menu {
-  position: absolute;
-  right: 0;
-  top: 24px;
-  z-index: 30;
-  min-width: 132px;
-  padding: 4px;
-  border: 1px solid var(--borderColor);
-  border-radius: 8px;
-  background: var(--menuColor);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.dock-add-item {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 8px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--fontColor);
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-}
-.dock-add-item:hover { background: var(--menuActiveColor); color: var(--fontActiveColor); }
 
 /* 内容区 */
 .chat-dock-body {

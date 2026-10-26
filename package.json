@@ -1,6 +1,6 @@
 {
   "name": "knowledge",
-  "version": "6.10.21",
+  "version": "6.10.27",
   "main": "dist-electron/main/index.js",
   "description": "AI Knowledge management Software",
   "author": "whl",
@@ -505,6 +505,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "d3": "^7.9.0",
+    "dompurify": "^3.4.11",
     "draggable": "^4.2.0",
     "element-plus": "^2.8.0",
     "highlight.js": "^11.10.0",

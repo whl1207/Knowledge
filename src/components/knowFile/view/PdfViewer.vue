@@ -10,12 +10,10 @@
   import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
   import { ocrImage, ocrProviderLabel, rankOcrModels, hasVisionLikeModel, loadOcrModelPref, saveOcrModelPref, llmConfigByKey, loadOcrSourcePref, saveOcrSourcePref, OCR_SELECTABLE_SOURCES, OCR_MAX_IMAGE_SIDE } from '@/lib/knowFile/ocr'
   // PDF 翻译：分块（带坐标）/ 逐段翻译 / 结果缓存 / 叠加层定位
-  import { buildPageBlocks, blocksForSelection, blockOverlayStyle, splitTexSegments, translateBlocks, translateErrorText, targetLangOfLocale, activeTranslateProvider, sourceModel, makeCacheId, getCached, putCached, clearTranslateCache, translateCacheSize, loadTranslateSourcePref, saveTranslateSourcePref, loadTranslateModelPref, saveTranslateModelPref, type PdfTextBlock } from '@/lib/knowFile/translate'
+  import { buildPageBlocks, blocksForSelection, blockOverlayStyle, planOverlayLayout, splitTexSegments, translateBlocks, translateErrorText, targetLangOfLocale, activeTranslateProvider, sourceModel, makeCacheId, getCached, putCached, clearTranslateCache, translateCacheSize, loadTranslateSourcePref, saveTranslateSourcePref, loadTranslateModelPref, saveTranslateModelPref, type PdfTextBlock, type PdfBlockLayout } from '@/lib/knowFile/translate'
   // 译文里的公式用 KaTeX 渲染（与思维导图同一套做法：renderToString + 失败不抛）
   import katex from 'katex'
   import 'katex/dist/katex.min.css'
-  // 「另存为」文本文件：桌面版走原生对话框，网页 / 安卓回退为下载（与设置导出等共用同一套实现）
-  import { saveTextFile, MD_FILTERS } from '@/lib/settingsData'
   // 右键菜单二级菜单：右侧 / 底部空间不足时自动翻转展开方向（与文件视图共用同一套实现）
   import { createSubmenuHoverFix } from '@/lib/knowFile/overlay'
   // 智能对话面板：与 md_read 共用同一个组件（避免两套对话逻辑漂移）
@@ -147,6 +145,8 @@ import { getPlatform } from '@/platform'
   let skipScaleRelayout = false
 
   let pdfDoc: any = null
+  /** 当前文档的 base64 原始字节：远程预览 / 无本地路径时，导出叠加层 PDF 需要再交给宿主合并 */
+  let pdfSourceBase64 = ''
   let renderTask: any = null
   let loadTimer: ReturnType<typeof setTimeout> | null = null
   let resizeObserver: ResizeObserver | null = null
@@ -194,6 +194,8 @@ import { getPlatform } from '@/platform'
   let transToken = 0 // 翻译会话令牌（取消/换页后丢弃旧结果）
   let transLayerToken = 0 // 叠加层绘制令牌
   const transBlockCache = new Map<number, PdfTextBlock[]>()
+  /** 每页的叠加排版空间（随文本块一起缓存；换文件 / 清缓存时一起清掉） */
+  const transLayoutCache = new Map<number, Map<string, PdfBlockLayout>>()
   /** 已有译文的页（只给这些页画叠加层，避免为未翻译页做昂贵的分块） */
   const transPages = new Set<number>()
   /** 已触发过自动翻译的页（避免滚动时反复入队） */
@@ -202,7 +204,7 @@ import { getPlatform } from '@/platform'
   const transJobs: ({ page: number } | { blocks: PdfTextBlock[] })[] = []
   let transWorkerActive = false
 
-  // === 全文翻译（不叠加译文；完成后点状态栏提示另存为 Markdown） ===
+  // === 全文翻译（不叠加译文；完成后导出「原文 + 译文叠加层」PDF） ===
   const fullTransRunning = ref(false)
   const fullTransDone = ref(false)
   const fullTransProgress = ref('')
@@ -210,8 +212,17 @@ import { getPlatform } from '@/platform'
   const fullTransSaving = ref(false)
   let fullTransAbort: AbortController | null = null
   let fullTransToken = 0
-  /** 全文翻译结果（页码 + 整页译文；只用于另存，不参与页面叠加） */
-  let fullTransResult: { page: number; text: string }[] = []
+  /** 单页的全文翻译结果：整页文本块 + 逐块译文 + 原始页面尺寸（导出叠加层 PDF 用） */
+  interface FullTransPage {
+    page: number
+    blocks: PdfTextBlock[]
+    texts: Record<string, string>
+    /** 页面未旋转时的原始尺寸（scale=1 的 CSS px，与块坐标同一套空间） */
+    width: number
+    height: number
+  }
+  /** 全文翻译结果（逐页保存；只在导出叠加译文 PDF 时使用，不参与页面叠加） */
+  let fullTransResult: FullTransPage[] = []
 
 
   // === 清理 ===
@@ -249,9 +260,10 @@ import { getPlatform } from '@/platform'
     transJobs.length = 0
     transPageBlocks.value = []
     transBlockCache.clear()
+    transLayoutCache.clear()
     transLayerToken++
     clearTransLayers()
-    // 全文翻译：中止在途请求并清掉结果（换文件后不能把上一份文件的译文另存出去）
+    // 全文翻译：中止在途请求并清掉结果（换文件后不能把上一份文件的译文导出出去）
     fullTransToken++
     fullTransAbort?.abort()
     fullTransAbort = null
@@ -259,7 +271,9 @@ import { getPlatform } from '@/platform'
     fullTransDone.value = false
     fullTransProgress.value = ''
     fullTransMsg.value = ''
+    fullTransSaving.value = false
     fullTransResult = []
+    pdfSourceBase64 = ''
     resetScrollMode()
     pageRawSizes.value = []
     textLayerToken++
@@ -413,6 +427,8 @@ import { getPlatform } from '@/platform'
       if (!base64) {
         throw new Error('PDF数据为空')
       }
+      // 导出「叠加译文 PDF」时宿主还要拿到原始字节做合并：本地路径直接给宿主读，远程 / base64 预览用这份
+      pdfSourceBase64 = base64
 
       const binaryStr = atob(base64)
       const bytes = new Uint8Array(binaryStr.length)
@@ -1591,7 +1607,10 @@ import { getPlatform } from '@/platform'
   /** 取某页文本块（带缓存；pdf.js 的 getTextContent 自身也缓存） */
   const ensureTransBlocks = async (pageNum: number): Promise<PdfTextBlock[]> => {
     const hit = transBlockCache.get(pageNum)
-    if (hit) return hit
+    if (hit) {
+      if (!transLayoutCache.has(pageNum)) transLayoutCache.set(pageNum, planOverlayLayout(hit))
+      return hit
+    }
     const doc = pdfDoc
     if (!doc) return []
     try {
@@ -1600,10 +1619,27 @@ import { getPlatform } from '@/platform'
       // 等待期间可能换了文件（cleanup 已清缓存）：旧文档的块不能再写回，否则新文档会用到错页的坐标
       if (pdfDoc !== doc) return []
       transBlockCache.set(pageNum, blocks)
+      // 叠加框的宽度 / 最大高度只跟文本块有关，和译文无关：分块后一次算好，绘制时直接用
+      transLayoutCache.set(pageNum, planOverlayLayout(blocks))
       return blocks
     } catch (err) {
       console.error('[Translate] 文本分块失败:', err)
       return []
+    }
+  }
+
+  /** 取某页的原始尺寸（scale=1、未旋转）：导出叠加层 PDF 时按它算页面盒 */
+  const pageRawSize = async (pageNum: number): Promise<{ width: number; height: number }> => {
+    try {
+      const page = await pdfDoc?.getPage(pageNum)
+      if (!page) return { width: 0, height: 0 }
+      const vp = page.getViewport({ scale: 1, rotation: 0 })
+      return {
+        width: Number(vp.rawDims?.pageWidth) || vp.width || 0,
+        height: Number(vp.rawDims?.pageHeight) || vp.height || 0,
+      }
+    } catch {
+      return { width: 0, height: 0 }
     }
   }
 
@@ -1612,6 +1648,10 @@ import { getPlatform } from '@/platform'
   const TRANS_MAX_FONT_GROW = 1.32
   const TRANS_MAX_LINE_HEIGHT = 1.72
   const TRANS_BASE_LINE_HEIGHT = 1.28
+  /** 长译文优先收紧行距，再缩字号；字号下限按「相对原文」和「绝对像素」双重兜底 */
+  const TRANS_MIN_LINE_HEIGHT = 1.06
+  const TRANS_MIN_FONT_RATIO = 0.42
+  const TRANS_ABS_MIN_FONT_PX = 3.2
 
   /** 单段 TeX → KaTeX HTML（公式写错时不抛异常，返回空串由调用方回退为原文） */
   const renderTex = (tex: string, displayMode: boolean): string => {
@@ -1622,8 +1662,12 @@ import { getPlatform } from '@/platform'
     }
   }
 
-  /** 把译文写进叠加块：`$…$` / `$$…$$` 等 LaTeX 片段交给 KaTeX 渲染，其余按纯文本 */
-  const setTransContent = (el: HTMLElement, text: string) => {
+  /** 把译文写进叠加块：`$…$` / `$$…$$` 等 LaTeX 片段交给 `render` 渲染，其余按纯文本 */
+  const setTransContent = (
+    el: HTMLElement,
+    text: string,
+    render: (tex: string, displayMode: boolean) => string = renderTex,
+  ) => {
     // 外层负责「原段落范围 + 垂直居中」，内层承载内容（保持行内公式与正文同段不断行）
     const inner = document.createElement('div')
     inner.className = 'pdf-trans-inner'
@@ -1633,7 +1677,7 @@ import { getPlatform } from '@/platform'
         continue
       }
       const host = document.createElement('span')
-      const html = renderTex(seg.value, seg.type === 'display')
+      const html = render(seg.value, seg.type === 'display')
       if (html) {
         host.className = seg.type === 'display' ? 'pdf-trans-math-display' : 'pdf-trans-math'
         host.innerHTML = html
@@ -1648,51 +1692,84 @@ import { getPlatform } from '@/platform'
 
   /**
    * 排版自适应：
-   * - 译文比原文长 → 逐步缩小字号（不越出原段落太多）；
-   * - 译文比原文短（中文通常行数更少）→ 先放开行距、再略放大字号，让文字填满原段落范围，
-   *   避免叠加框里留一大片空白（字号/行距都有上限，过度稀疏反而难看）；剩余空白由外层上下均分。
+   * - 译文比原文长 → **先收紧行距、再缩字号**，并以整页规划出的 `layout.maxHeight`
+   *   （同栏下一块顶部 / 页底）为硬上限：宁可字号小一点，也不让文字伸进下一块的白框或越出页底；
+   * - 译文比原文短 → 在不超过 `layout.maxHeight` 的前提下放开行距 / 略放大字号，填满原段落范围，
+   *   避免叠加框里留一大片空白。
    * 注意：这里量的是**内层内容块**的高度 —— 外层有 min-height 且 flex 居中，
    * 用外层的 scrollHeight 会量成「框高」或「居中溢出的一半」，两个方向都会误判。
    */
-  const fitTransItem = (el: HTMLElement, b: PdfTextBlock) => {
+  const fitTransItem = (el: HTMLElement, b: PdfTextBlock, layout?: PdfBlockLayout) => {
     const inner = el.firstElementChild as HTMLElement | null
     if (!inner) return
     const parent = el.parentElement
     const sf = parent ? (parseFloat(getComputedStyle(parent).getPropertyValue('--scale-factor')) || 1) : 1
-    const targetH = (b.height + b.fontSize * 0.5) * sf
+    const targetH = (layout?.targetHeight ?? (b.height + b.fontSize * 0.5)) * sf
+    const maxH = Math.max(1, (layout?.maxHeight ?? (b.height + b.fontSize * 0.5)) * sf)
     // 用 offsetHeight 量布局高度：页面旋转时 getBoundingClientRect 得到的是旋转后的包围盒，
     // 量出来的就不是内容自身的高度了（90° / 270° 时宽高互换，自适应会误判）。
     const measure = () => inner.offsetHeight
+    const tooWide = () => inner.clientWidth > 4 && inner.scrollWidth > inner.clientWidth + 2
     const setSize = (f: number) => el.style.setProperty('font-size', `calc(var(--scale-factor) * ${(b.fontSize * f).toFixed(2)}px)`)
     const setLh = (v: number) => el.style.setProperty('line-height', v.toFixed(2))
+    // 高度超限或内容（尤其是不可换行的展示公式）横向溢出，都算「装不下」：宁可缩字号也不裁切
+    const over = () => measure() > maxH + 1 || tooWide()
 
     let f = 1
-    while (f > 0.62 && measure() > targetH + 1) { f -= 0.06; setSize(f) }
+    let lh = TRANS_BASE_LINE_HEIGHT
+    setSize(f)
+    setLh(lh)
 
-    // 只在「本来就没超（还是原字号）」且是多行段落时才填空，避免放大后反而溢出
-    if (b.lines >= 2 && f === 1) {
-      const minH = targetH * TRANS_FILL_MIN_RATIO
-      let lh = TRANS_BASE_LINE_HEIGHT
-      while (lh < TRANS_MAX_LINE_HEIGHT && measure() < minH) {
-        lh = Math.min(TRANS_MAX_LINE_HEIGHT, lh + 0.06)
+    if (over()) {
+      // 1) 先收紧行距（尽量保住可读字号）
+      while (lh > TRANS_MIN_LINE_HEIGHT && over()) {
+        lh = Math.max(TRANS_MIN_LINE_HEIGHT, lh - 0.04)
         setLh(lh)
       }
-      while (f < TRANS_MAX_FONT_GROW && measure() < minH) { f += 0.05; setSize(f) }
-      // 放大过头（换行变多、变高）→ 回调一点，保证不越出原段落范围
-      while (f > 1 && measure() > targetH + 1) { f -= 0.05; setSize(f) }
+      // 2) 再逐步缩小字号
+      while (over() && f > TRANS_MIN_FONT_RATIO) {
+        f = Math.max(TRANS_MIN_FONT_RATIO, f - 0.04)
+        setSize(f)
+        if (f <= 0.7 && lh > 1.0) {
+          lh = Math.max(1.0, lh - 0.03)
+          setLh(lh)
+        }
+      }
+      // 3) 极端长的译文：继续缩到绝对下限（3.2px），保证内容完整显示而不是被裁掉
+      while (over() && b.fontSize * f > TRANS_ABS_MIN_FONT_PX) {
+        f = Math.max(0.05, f - 0.02)
+        setSize(f)
+      }
+    }
+
+    // 译文偏短：放开行距 / 放大字号填充原段落，但始终不超过可用高度
+    if (b.lines >= 2) {
+      const minH = Math.min(targetH, maxH) * TRANS_FILL_MIN_RATIO
+      while (lh < TRANS_MAX_LINE_HEIGHT && measure() < minH) {
+        const prev = lh
+        lh = Math.min(TRANS_MAX_LINE_HEIGHT, lh + 0.06)
+        setLh(lh)
+        if (over()) { lh = prev; setLh(lh); break }
+      }
+      while (f < TRANS_MAX_FONT_GROW && measure() < minH) {
+        const prev = f
+        f = Math.min(TRANS_MAX_FONT_GROW, f + 0.04)
+        setSize(f)
+        if (over()) { f = prev; setSize(f); break }
+      }
     }
   }
 
   /** 画出单个译文块（旋转文字不叠加，避免定位错乱） */
-  const paintTransBlock = (layer: HTMLElement, b: PdfTextBlock, text: string) => {
+  const paintTransBlock = (layer: HTMLElement, b: PdfTextBlock, text: string, layout?: PdfBlockLayout) => {
     if (b.angle !== 0) return
     const el = document.createElement('div')
     el.className = 'pdf-trans-item'
-    const style = blockOverlayStyle(b)
+    const style = blockOverlayStyle(b, layout)
     for (const k of Object.keys(style)) el.style.setProperty(k, style[k])
     setTransContent(el, text)
     layer.appendChild(el)
-    fitTransItem(el, b)
+    fitTransItem(el, b, layout)
   }
 
   /** 重画「单页」的译文叠加层（不依赖 currentPage：连续阅读时每页各自叠加） */
@@ -1706,9 +1783,10 @@ import { getPlatform } from '@/platform'
     const blocks = await ensureTransBlocks(pageNum)
     if (token !== transLayerToken || !transOn.value) return
     if (pageNum === currentPage.value) transPageBlocks.value = blocks
+    const layout = transLayoutCache.get(pageNum) || planOverlayLayout(blocks)
     for (const b of blocks) {
       const text = transMap.value[b.id]
-      if (text) paintTransBlock(layer, b, text)
+      if (text) paintTransBlock(layer, b, text, layout.get(b.id))
     }
   }
 
@@ -1730,9 +1808,10 @@ import { getPlatform } from '@/platform'
       // 同步旋转是异步的：期间可能已关闭叠加（全文翻译 / 隐藏译文）或换了令牌，画之前必须再确认，
       // 否则旧的一次刷新会把刚清空的译文层重新画出来（全文翻译过程中就会“叠加”）。
       if (token !== transLayerToken || !transOn.value) return
+      const layout = transLayoutCache.get(p) || planOverlayLayout(blocks)
       for (const b of blocks) {
         const text = transMap.value[b.id]
-        if (text) paintTransBlock(layer, b, text)
+        if (text) paintTransBlock(layer, b, text, layout.get(b.id))
       }
     }))
     if (token !== transLayerToken || !transOn.value) return
@@ -1870,7 +1949,10 @@ import { getPlatform } from '@/platform'
           // 即时叠加：画到该块所在页（连续阅读时可能不是当前页）
           const b = blocks.find((x) => x.id === id)
           const layer = transLayerFor(page)
-          if (b && layer && transOn.value) paintTransBlock(layer, b, text)
+          const layout = b
+            ? (transLayoutCache.get(page) || planOverlayLayout(blocks)).get(id)
+            : undefined
+          if (b && layer && transOn.value) paintTransBlock(layer, b, text, layout)
         },
       })
       if (token !== transToken) return
@@ -2094,7 +2176,7 @@ import { getPlatform } from '@/platform'
 
   /**
    * 右键菜单：全文翻译。逐页顺序翻译整份文档，**过程中不叠加到页面上**；
-   * 状态栏显示进度，完成后状态栏提示可点击另存为 Markdown。
+   * 状态栏显示进度，完成后状态栏提示可点击导出「原文 + 译文叠加层」PDF。
    */
   const startFullTranslation = async () => {
     const zh = store.locales === 'zh'
@@ -2130,7 +2212,7 @@ import { getPlatform } from '@/platform'
     const total = pageCount.value
     const fileKey = transFileKey()
     const target = transTarget.value
-    const pages: { page: number; text: string }[] = []
+    const pages: FullTransPage[] = []
     let failedBlocks = 0
     let emptyPages = 0
     fullTransProgress.value = zh ? `全文翻译 0/${total} 页` : `Full translation 0/${total} pages`
@@ -2139,10 +2221,13 @@ import { getPlatform } from '@/platform'
         if (token !== fullTransToken || ac.signal.aborted) return
         const blocks = await ensureTransBlocks(p)
         if (token !== fullTransToken) return
+        const size = await pageRawSize(p)
         // 公式 / 数字碎片不翻译（与逐页模式一致）
         const targets = blocks.filter((b) => !b.math)
         if (!targets.length) {
           emptyPages++
+          // 没有可翻译文字的页也要占一个叠加层页（导出时按页号与原 PDF 对齐）
+          pages.push({ page: p, blocks, texts: {}, width: size.width, height: size.height })
           fullTransProgress.value = zh ? `全文翻译 ${p}/${total} 页` : `Full translation ${p}/${total} pages`
           await nextTick()
           continue
@@ -2192,9 +2277,8 @@ import { getPlatform } from '@/platform'
           // 取消 / 换文档可能发生在请求期间：令牌变了就别再写进度与结果
           if (token !== fullTransToken) return
         }
-        // 按块顺序拼成整页译文（失败块不写入，最后统一提示失败段数）
-        const paragraphs = targets.map((b) => translated.get(b.id)).filter((t): t is string => !!t)
-        if (paragraphs.length) pages.push({ page: p, text: paragraphs.join('\n\n') })
+        // 逐块保留译文与坐标：导出叠加层 PDF 时要按原段落位置画回页面上
+        pages.push({ page: p, blocks, texts: Object.fromEntries(translated), width: size.width, height: size.height })
         fullTransProgress.value = zh ? `全文翻译 ${p}/${total} 页` : `Full translation ${p}/${total} pages`
         await nextTick()
       }
@@ -2208,8 +2292,8 @@ import { getPlatform } from '@/platform'
       if (emptyPages) notes.push(zh ? `${emptyPages} 页无可翻译文字` : `${emptyPages} page(s) without translatable text`)
       const note = notes.length ? (zh ? `（${notes.join('，')}）` : ` (${notes.join(', ')})`) : ''
       fullTransMsg.value = zh
-        ? `全文翻译完成，点击另存为文件${note}`
-        : `Full translation done, click to save a file${note}`
+        ? `全文翻译完成，点击导出叠加译文的 PDF${note}`
+        : `Full translation done, click to export a PDF with the translations${note}`
     } catch (err) {
       if (token !== fullTransToken) return
       fullTransRunning.value = false
@@ -2227,7 +2311,7 @@ import { getPlatform } from '@/platform'
   /** 本地文档路径：远程预览路径是 `remote:/host:port/...`，不能当成本地落盘路径用 */
   const localDocPath = (): string => (props.path && !props.path.startsWith('remote:') ? props.path : '')
 
-  /** 全文翻译的默认落盘路径：与原 PDF 同目录的 `<原名>.translated.md`（远程 / base64 预览落到工作区） */
+  /** 全文翻译的默认落盘路径：与原 PDF 同目录的 `<原名>.translated.pdf`（远程 / base64 预览落到工作区） */
   const fullTranslationDefaultPath = (): string => {
     const local = localDocPath()
     const sep = (local || store.root || '').includes('\\') ? '\\' : '/'
@@ -2235,48 +2319,264 @@ import { getPlatform } from '@/platform'
     const dir = local
       ? local.replace(/[\\/][^\\/]*$/, '')
       : String(store.root || '').replace(/[\\/]$/, '')
-    return `${dir}${dir ? sep : ''}${base}.translated.md`
-  }
-
-  /** 全文翻译结果 → Markdown（按页分节，仅译文） */
-  const buildFullTranslationMarkdown = (): string => {
-    const zh = store.locales === 'zh'
-    const name = (props.path || '').split(/[\\/]/).pop() || 'document'
-    const lines: string[] = [`# ${name.replace(/\.[^.]+$/, '')}`, '']
-    for (const pg of fullTransResult) {
-      lines.push(zh ? `## 第 ${pg.page} 页` : `## Page ${pg.page}`, '', pg.text, '')
-    }
-    return lines.join('\n').trimEnd() + '\n'
+    return `${dir}${dir ? sep : ''}${base}.translated.pdf`
   }
 
   /**
-   * 状态栏完成提示点击：把全文译文另存为 Markdown 文件。
-   * 桌面版弹「另存为」对话框；网页 / 安卓（无 IPC 或对话框不可用）回退为浏览器下载。
+   * 打印窗口里没有应用的字体设置：沿用应用的正文字体栈（Latin 用 system-ui，中文自动回退到
+   * 思源 / 苹方 / 雅黑），这样这里的换行测量与导出结果、屏幕叠加层三者一致。
    */
-  const saveFullTranslation = async () => {
+  const PDF_EXPORT_FONT_STACK = "Inter, system-ui, Avenir, Helvetica, Arial, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', sans-serif"
+
+  /** 导出用公式渲染：打印窗口没有 KaTeX 样式表，改用 Chromium 原生支持的纯 MathML */
+  const renderExportTex = (tex: string, displayMode: boolean): string => {
+    try {
+      return katex.renderToString(tex, { displayMode, throwOnError: false, strict: 'ignore', output: 'mathml' })
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * 全文译文的打印 HTML：只画译文块（白底 + 译文），原 PDF 的页面内容由宿主逐页合并回来。
+   * 页面尺寸沿用 PDF 原始尺寸（pt → 96dpi 的 CSS px），所以合并后位置、字号都与原段落对齐；
+   * 每个 `.pg` 一页，宿主打印出的页数必须与原 PDF 页数一致（空页也会占位）。
+   * `pageImages` 用于兼容模式：传入每页截图（data URL）时，图片画在译文块下面，
+   * 不再需要 pdf-lib 合并原 PDF（加密 / xref 损坏的 PDF 也能导出）。
+   */
+  const buildFullTranslationPdfHtml = (pages: FullTransPage[], pageImages?: (string | null)[]): string => {
+    const first = pages[0]
+    let maxW = 1
+    let maxH = 1
+    for (const p of pages) {
+      if (p.width > maxW) maxW = p.width
+      if (p.height > maxH) maxH = p.height
+    }
+    // 常规 PDF 每页尺寸一致：直接用首页尺寸打印，合并时 1:1 对齐。
+    // 混排尺寸（极少见）取最大页，等比缩放到打印页内再居中；合并时会有轻微拉伸，但内容不丢。
+    const uniform = pages.every((p) => Math.abs(p.width - first.width) < 0.5 && Math.abs(p.height - first.height) < 0.5)
+    const printW = Math.max(1, Math.round((uniform ? first.width : maxW) * 4 / 3))
+    const printH = Math.max(1, Math.round((uniform ? first.height : maxH) * 4 / 3))
+
+    const host = document.createElement('div')
+    host.style.cssText = `position:fixed;left:-100000px;top:0;width:${printW}px;height:${printH}px;`
+      + `visibility:hidden;pointer-events:none;font-family:${PDF_EXPORT_FONT_STACK};`
+    document.body.appendChild(host)
+    const serialized: string[] = []
+    try {
+      for (const pg of pages) {
+        const pageIndex = serialized.length
+        const w = Math.max(1, pg.width)
+        const h = Math.max(1, pg.height)
+        const scale = Math.min(printW / w, printH / h)
+        const offsetX = (printW - w * scale) / 2
+        const offsetY = (printH - h * scale) / 2
+        const pageEl = document.createElement('div')
+        pageEl.style.cssText = `position:relative;width:${printW}px;height:${printH}px;overflow:hidden;`
+        const innerEl = document.createElement('div')
+        innerEl.className = 'pdf-export-inner'
+        innerEl.style.cssText = `position:absolute;left:${offsetX}px;top:${offsetY}px;`
+          + `width:${w * scale}px;height:${h * scale}px;--scale-factor:${scale};`
+        // 必须先挂到文档里再逐块 fitTransItem：脱离文档的节点没有布局，
+        // offsetHeight 恒为 0，会让「译文偏短→放大字号」的分支一路放大到上限（导出后文字过大 / 被裁掉）
+        pageEl.appendChild(innerEl)
+        host.appendChild(pageEl)
+        const layout = planOverlayLayout(pg.blocks)
+        for (const b of pg.blocks) {
+          if (b.angle !== 0) continue // 旋转文字在页面上也不叠加，避免定位错乱
+          const text = pg.texts[b.id]
+          if (!text) continue
+          const blockLayout = layout.get(b.id)
+          const item = document.createElement('div')
+          item.className = 'pdf-trans-item'
+          const style = blockOverlayStyle(b, blockLayout)
+          for (const k of Object.keys(style)) item.style.setProperty(k, style[k])
+          setTransContent(item, text, renderExportTex)
+          innerEl.appendChild(item)
+          // 与屏幕叠加层同一套自适应：按原段落范围 / 可用高度缩放字号与行距
+          fitTransItem(item, b, blockLayout)
+        }
+        // 空页 / 只有公式的页也要占一页（Chromium 对完全空的盒子可能不输出页面）
+        if (!innerEl.childElementCount) innerEl.innerHTML = '&nbsp;'
+        const pageImage = pageImages?.[pageIndex]
+        const imageTag = pageImage
+          ? `<img class="pg-img" style="left:${offsetX}px;top:${offsetY}px;`
+            + `width:${w * scale}px;height:${h * scale}px" src="${pageImage}" alt="">`
+          : ''
+        serialized.push(
+          `<div class="pg" style="width:${printW}px;height:${printH}px">${imageTag}`
+          + `<div class="pdf-export-inner" style="left:${offsetX}px;top:${offsetY}px;`
+          + `width:${w * scale}px;height:${h * scale}px;--scale-factor:${scale}">${innerEl.innerHTML}</div></div>`,
+        )
+        pageEl.remove()
+      }
+    } finally {
+      host.remove()
+    }
+
+    // 样式与组件里的 .pdf-trans-item 保持一致（导出窗口加载不了应用的样式表）
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: ${printW}px ${printH}px; margin: 0; }
+/* 与应用正文的排版开关保持一致，避免导出窗口里的换行 / 字宽和测量时略有偏差 */
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+body { font-family: ${PDF_EXPORT_FONT_STACK}; }
+.pg { position: relative; overflow: hidden; break-after: page; background: #fff; }
+.pg:last-child { break-after: auto; }
+.pg-img { position: absolute; object-fit: fill; }
+.pdf-export-inner { position: absolute; }
+.pdf-trans-item {
+  position: absolute;
+  box-sizing: border-box;
+  padding: 0 2px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: initial;
+  font-family: inherit;
+  background: #ffffff;
+  color: #1f1f1f;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.pdf-trans-item > .pdf-trans-inner { width: 100%; }
+.pdf-trans-item math { font-size: 1em; }
+.pdf-trans-item .katex { font-size: 1em; line-height: 1.1; }
+.pdf-trans-item .katex-display { margin: 0.25em 0; }
+.pdf-trans-item .katex-display > .katex { white-space: normal; }
+</style>
+</head>
+<body>
+${serialized.join('')}
+</body>
+</html>`
+  }
+
+  /**
+   * 兼容模式：把原 PDF 每页渲染成白底 JPEG（未旋转空间，与译文块坐标一致）。
+   * 用于 pdf-lib 读不了的加密 / xref 损坏 PDF——最终 PDF 由 Chromium 直接打印「截图 + 译文块」。
+   */
+  const renderFullTranslationPageImages = async (pages: FullTransPage[]): Promise<(string | null)[]> => {
+    const doc = pdfDoc
+    const images: (string | null)[] = []
+    if (!doc) return pages.map(() => null)
+    for (const pg of pages) {
+      try {
+        const page = await doc.getPage(pg.page)
+        const rawW = Math.max(1, pg.width)
+        const rawH = Math.max(1, pg.height)
+        // 约 150dpi，长边最多 2600px：扫描件也够清晰，同时避免整份 PDF 的截图把内存撑爆
+        const scale = Math.max(0.1, Math.min(1800 / rawW, 2600 / rawH, 2))
+        const viewport = page.getViewport({ scale, rotation: 0 })
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(viewport.width))
+        canvas.height = Math.max(1, Math.round(viewport.height))
+        const ctx = canvas.getContext('2d')
+        if (!ctx) { images.push(null); continue }
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        await page.render({ canvasContext: ctx, viewport, background: '#ffffff' }).promise
+        images.push(canvas.toDataURL('image/jpeg', 0.9))
+        canvas.width = 0
+        canvas.height = 0
+      } catch (err) {
+        console.error('[Translate] 兼容模式渲染页面失败:', pg.page, err)
+        images.push(null)
+      }
+      await nextTick()
+    }
+    return images
+  }
+
+  /**
+   * 状态栏完成提示点击：导出「原文 + 译文叠加层」PDF。
+   * 与 md_read 的 PDF 导出同一条宿主通道（隐藏窗口渲染 HTML → printToPDF → 另存为），
+   * 只是这里打印的是透明底的译文层，再由宿主用 pdf-lib 逐页叠回原 PDF。
+   * 若原 PDF 是加密 / 结构损坏、pdf-lib 解析不了，自动改走兼容模式（原页面截图 + 译文块直出）。
+   */
+  const exportFullTranslationPdf = async () => {
     const zh = store.locales === 'zh'
     if (fullTransRunning.value || fullTransSaving.value) return
     if (!fullTransResult.length) {
-      ElMessage.warning(zh ? '没有可保存的译文' : 'No translation to save')
+      ElMessage.warning(zh ? '没有可导出的译文' : 'No translation to export')
       return
     }
-    const content = buildFullTranslationMarkdown()
+    if (!fullTransResult.some((pg) => Object.keys(pg.texts).length)) {
+      ElMessage.warning(zh ? '没有可导出的译文' : 'No translation to export')
+      return
+    }
+    const sourcePath = localDocPath()
+    if (!sourcePath && !pdfSourceBase64) {
+      ElMessage.error(zh ? '读不到原始 PDF 数据，无法导出叠加译文' : 'Original PDF data is unavailable')
+      return
+    }
+    const title = `${(props.path || '').split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'document'}.translated`
+    const token = fullTransToken
     fullTransSaving.value = true
+    let compatMode = false
     try {
-      const savedPath = await saveTextFile(fullTranslationDefaultPath(), content, 'text/markdown;charset=utf-8', MD_FILTERS, zh)
-      if (savedPath === null) return // 用户取消
-      if (savedPath) {
-        fullTransMsg.value = zh ? `已保存：${savedPath}` : `Saved: ${savedPath}`
-        ElMessage.success(fullTransMsg.value)
-        // 让资源管理器 / 文件树感知新文件，不用手动刷新
-        void getPlatform().app.notifyFileChanged({ path: savedPath }).catch(() => {})
-      } else {
-        fullTransMsg.value = zh ? '译文已下载' : 'Translation downloaded'
-        ElMessage.success(fullTransMsg.value)
+      const html = buildFullTranslationPdfHtml(fullTransResult)
+      let res = await getPlatform().host.docs.exportPdfOverlay({
+        html,
+        title,
+        defaultPath: fullTranslationDefaultPath(),
+        ...(sourcePath ? { pdfPath: sourcePath } : { pdfBase64: pdfSourceBase64 }),
+      })
+      // 加密 / xref 损坏的 PDF：pdf-lib 读不了（且宿主还没弹保存框），改用截图直出
+      if (!res?.success && res?.code === 'pdf-lib-unreadable') {
+        if (!pdfDoc) {
+          ElMessage.error(zh ? '读不到原 PDF 页面，无法生成兼容模式 PDF' : 'Cannot render the original PDF pages')
+          return
+        }
+        compatMode = true
+        ElMessage.info(zh
+          ? '原 PDF 结构特殊（可能已加密），正在生成兼容模式 PDF…'
+          : 'The original PDF is encrypted or malformed; generating a compatible PDF…')
+        const images = await renderFullTranslationPageImages(fullTransResult)
+        if (token !== fullTransToken) return
+        const compatHtml = buildFullTranslationPdfHtml(fullTransResult, images)
+        res = await getPlatform().host.docs.exportPdfOverlay({
+          html: compatHtml,
+          title,
+          defaultPath: fullTranslationDefaultPath(),
+          imageBased: true,
+        })
       }
+      // 导出期间换了文件 / 重新翻译：不要把结果写到新文档的状态栏上
+      if (token !== fullTransToken) return
+      if (res?.success) {
+        const where = res.path || fullTranslationDefaultPath()
+        fullTransMsg.value = compatMode
+          ? (zh ? `已导出叠加译文的 PDF（兼容模式）：${where}` : `Exported PDF with translations (compatible mode): ${where}`)
+          : (zh ? `已导出叠加译文的 PDF：${where}` : `Exported PDF with translations: ${where}`)
+        ElMessage.success(zh ? 'PDF 导出成功' : 'PDF exported successfully')
+        // 让资源管理器 / 文件树感知新文件，不用手动刷新
+        if (res.path) void getPlatform().app.notifyFileChanged({ path: res.path }).catch(() => {})
+        return
+      }
+      if (res?.error === '用户取消') return // 用户取消：保留原完成提示
+      if (res?.error === 'not-supported') {
+        fullTransMsg.value = zh ? '当前环境不支持导出叠加译文的 PDF' : 'PDF export is not supported in this environment'
+        ElMessage.error(fullTransMsg.value)
+        return
+      }
+      fullTransMsg.value = zh ? '导出叠加译文的 PDF 失败' : 'Failed to export PDF with translations'
+      ElMessage.error(zh ? 'PDF 导出失败' : 'PDF export failed')
+      console.error('[Translate] 导出叠加译文 PDF 失败:', res?.error)
     } catch (err) {
-      console.error('[Translate] 保存全文译文失败:', err)
-      ElMessage.error(zh ? '保存失败' : 'Save failed')
+      console.error('[Translate] 导出叠加译文 PDF 失败:', err)
+      ElMessage.error(zh ? 'PDF 导出失败' : 'PDF export failed')
     } finally {
       fullTransSaving.value = false
     }
@@ -2708,13 +3008,13 @@ import { getPlatform } from '@/platform'
         <span>{{ transMsg }}</span>
       </span>
 
-      <!-- 全文翻译：进度可点击取消；完成后点击提示另存为 Markdown 文件 -->
+      <!-- 全文翻译：进度可点击取消；完成后点击提示导出「原文 + 译文叠加层」PDF -->
       <span v-if="fullTransRunning" class="statusbar-item pdf-status-progress" @click="cancelFullTranslation" :title="store.locales==='zh' ? '全文翻译中（不叠加译文），点击取消' : 'Full translation running (no overlay), click to cancel'">
         <i class="fa fa-spinner fa-spin" style="color:#FF9800;"></i>
         <span>{{ fullTransProgress }}</span>
       </span>
-      <span v-else-if="fullTransDone" class="statusbar-item pdf-status-progress" @click="saveFullTranslation" :title="store.locales==='zh' ? '点击另存为 Markdown 文件' : 'Click to save as a Markdown file'">
-        <i class="fa fa-check-circle" style="color:#4CAF50;"></i>
+      <span v-else-if="fullTransDone" class="statusbar-item pdf-status-progress" @click="exportFullTranslationPdf" :title="store.locales==='zh' ? '点击导出叠加译文的 PDF' : 'Click to export a PDF with the translation overlay'">
+        <i class="fa" :class="fullTransSaving ? 'fa-spinner fa-spin' : 'fa-check-circle'" :style="{ color: '#4CAF50' }"></i>
         <span>{{ fullTransMsg }}</span>
       </span>
       <span v-else-if="fullTransMsg" class="statusbar-item pdf-status-progress" :title="store.locales==='zh' ? '全文翻译状态' : 'Full translation status'">
@@ -2747,7 +3047,7 @@ import { getPlatform } from '@/platform'
       </div>
       <div v-if="transCtx.selection" class="menu-divider"></div>
 
-      <!-- 翻译（二级菜单）：逐页（叠加译文，边看边翻）/ 全文（不叠加，完成后另存为文件） -->
+      <!-- 翻译（二级菜单）：逐页（叠加译文，边看边翻）/ 全文（不叠加，完成后导出叠加译文 PDF） -->
       <div class="menu-item has-submenu">
         <i class="fa fa-language"></i>
         <span>{{ store.locales==='zh' ? '翻译' : 'Translation' }}</span>
@@ -2758,11 +3058,11 @@ import { getPlatform } from '@/platform'
             <i class="fa fa-language"></i> {{ store.locales==='zh' ? '逐页翻译（叠加译文，边看边翻）' : 'Page-by-page (overlay)' }}
           </li>
           <li :class="{ current: fullTransRunning }" @click.stop="startFullTranslation()"
-            :title="store.locales==='zh' ? '整份文档逐页翻译，过程中不叠加译文；完成后在状态栏点击提示即可另存为文件' : 'Translate the whole document without overlaying; save it from the status bar when done'">
+            :title="store.locales==='zh' ? '整份文档逐页翻译，过程中不叠加译文；完成后在状态栏点击提示即可导出叠加译文的 PDF' : 'Translate the whole document without overlaying; export the PDF with the overlay from the status bar when done'">
             <i class="fa" :class="fullTransRunning ? 'fa-spinner fa-spin' : 'fa-globe'"></i>
             {{ fullTransRunning
               ? (store.locales==='zh' ? '取消全文翻译' : 'Cancel full translation')
-              : (store.locales==='zh' ? '全文翻译（不叠加，完成后另存）' : 'Full translation (no overlay)') }}
+              : (store.locales==='zh' ? '全文翻译（完成后导出叠加译文 PDF）' : 'Full translation (export overlay PDF)') }}
           </li>
           <li v-if="transOn" @click.stop="closeTransCtx(); toggleTransVisible()">
             <i class="fa fa-eye-slash"></i> {{ store.locales==='zh' ? '隐藏逐页译文，只看原文' : 'Hide page translations' }}

@@ -13,6 +13,21 @@ export ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-
 export npm_config_registry="https://registry.npmmirror.com"
 export NODE_OPTIONS="--max-old-space-size=6144"
 
+# —— node-gyp 原生模块（node-pty / uiohook-napi 等）——
+# node-pty 没有 linux 预编译包，安装时要用 node-gyp 从源码编译；
+# node-gyp 默认去 nodejs.org 下载 Node 头文件，在 WSL 里经常超时/断流，导致 npm install 失败。
+# 优先复用本机已安装的 Node 头文件（node-gyp 的 --nodedir），完全不联网；
+# 找不到本地头文件时再走国内镜像兜底。
+export npm_config_disturl="https://npmmirror.com/mirrors/node"
+export NODEJS_ORG_MIRROR="https://npmmirror.com/mirrors/node"
+for hdr_root in /usr/local /usr /usr/local/node; do
+  if [ -f "$hdr_root/include/node/node.h" ] && [ -f "$hdr_root/include/node/common.gypi" ]; then
+    export npm_config_nodedir="$hdr_root"
+    echo "node-gyp：使用本机 Node 头文件 $hdr_root/include/node（免联网下载）"
+    break
+  fi
+done
+
 # —— 参数解析 ——
 SKIP_INSTALL=0
 for arg in "$@"; do

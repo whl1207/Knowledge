@@ -67,8 +67,11 @@ const VIEW_NAME_EN: Record<string, string> = {
 }
 const viewName = (v: string) => (store.locales === 'zh' ? v : (VIEW_NAME_EN[v] || v))
 
-/** 是否显示视图选择：打开工作区即可用（右侧标签栏出现后由宿主传 showViewSelect=false 关闭） */
-const showViewSelect = computed(() => props.showViewSelect !== false && store.root !== '')
+/** 当前是否在浏览远程工作区目录（工具栏改用远程面包屑与远程导航） */
+const isRemote = computed(() => !!store.knowRemoteDir)
+
+/** 是否显示视图选择：打开工作区即可用（远程目录固定用文件视图；右侧标签栏出现后由宿主传 false 关闭） */
+const showViewSelect = computed(() => props.showViewSelect !== false && store.root !== '' && !isRemote.value)
 /** 可切换的视图清单：主窗口的全局视图（见 store 的 GLOBAL_VIEW_KEYS） */
 const viewsForGrid = computed(() =>
   showViewSelect.value ? store.viewList : []
@@ -79,12 +82,27 @@ const activeGlobalView = computed(() => store.view.find((v: string) => viewsForG
 const onGlobalViewChange = (e: Event) => {
   const v = (e.target as HTMLSelectElement).value
   if (!v) return
+  // 从远程目录切回其它视图：先退出远程浏览，避免「看板/日历」还挂着远程目录
+  if (store.knowRemoteDir) store.clearRemoteDir()
   store.selectView(v)
 }
 
+const navBack = () => isRemote.value ? store.knowRemoteBack() : store.knowBack()
+const navForward = () => isRemote.value ? store.knowRemoteForward() : store.knowForward()
+const navUp = () => isRemote.value ? store.knowRemoteUp() : store.knowUp()
+const goRemoteCrumb = (rel: string) => {
+  const dir = store.knowRemoteDir
+  if (!dir) return
+  store.knowEnterRemoteDir({ rootId: dir.rootId, rel })
+}
+
 // path 被外部改动时同步导航历史（历史栈内当前项始终等于 path）
-watch(() => [store.path, store.root], () => store.knowSyncNav())
-onMounted(() => store.knowSyncNav())
+watch(() => [store.path, store.root], () => {
+  if (!store.knowRemoteDir) store.knowSyncNav()
+})
+onMounted(() => {
+  if (!store.knowRemoteDir) store.knowSyncNav()
+})
 </script>
 
 <template>
@@ -108,12 +126,20 @@ onMounted(() => store.knowSyncNav())
     
     <span class="toolbar-sep sep-nav"></span>
     <div class="file-nav-btns">
-      <button class="toolbar-btn" :disabled="!store.knowCanBack" @click="store.knowBack()" :title="zh() ? '后退 (Alt+←)' : 'Back (Alt+←)'"><i class="fa fa-arrow-left"></i></button>
-      <button class="toolbar-btn" :disabled="!store.knowCanForward" @click="store.knowForward()" :title="zh() ? '前进 (Alt+→)' : 'Forward (Alt+→)'"><i class="fa fa-arrow-right"></i></button>
-      <button class="toolbar-btn" :disabled="!store.knowCanUp" @click="store.knowUp()" :title="zh() ? '向上 (Backspace)' : 'Up (Backspace)'"><i class="fa fa-arrow-up"></i></button>
+      <button class="toolbar-btn" :disabled="!store.knowCanBack" @click="navBack()" :title="zh() ? '后退 (Alt+←)' : 'Back (Alt+←)'"><i class="fa fa-arrow-left"></i></button>
+      <button class="toolbar-btn" :disabled="!store.knowCanForward" @click="navForward()" :title="zh() ? '前进 (Alt+→)' : 'Forward (Alt+→)'"><i class="fa fa-arrow-right"></i></button>
+      <button class="toolbar-btn" :disabled="!store.knowCanUp" @click="navUp()" :title="zh() ? '向上 (Backspace)' : 'Up (Backspace)'"><i class="fa fa-arrow-up"></i></button>
       <button class="toolbar-btn" @click="emit('refresh')" :title="zh() ? '刷新' : 'Refresh'"><i class="fa fa-refresh"></i></button>
     </div>
-    <div class="file-breadcrumb" :title="store.dataDir">
+    <div v-if="isRemote" class="file-breadcrumb remote" :title="'remote: ' + (store.knowRemoteDir?.rel || '/')">
+      <template v-for="(c, i) in store.knowRemoteCrumbs" :key="c.rel || 'root'">
+        <span class="crumb" :class="{ active: i === store.knowRemoteCrumbs.length - 1 }" @click="goRemoteCrumb(c.rel)">
+          <i v-if="i === 0" class="fa fa-cloud remote-crumb-icon"></i>{{ c.label }}
+        </span>
+        <i v-if="i < store.knowRemoteCrumbs.length - 1" class="fa fa-chevron-right crumb-sep"></i>
+      </template>
+    </div>
+    <div v-else class="file-breadcrumb" :title="store.dataDir">
       <template v-for="(c, i) in store.knowCrumbs" :key="c.path">
         <span class="crumb" :class="{ active: i === store.knowCrumbs.length - 1 }" @click="store.knowEnterDir(c.path)">{{ c.label }}</span>
         <i v-if="i < store.knowCrumbs.length - 1" class="fa fa-chevron-right crumb-sep"></i>
@@ -214,6 +240,7 @@ onMounted(() => store.knowSyncNav())
 .crumb:hover { background: var(--menuActiveColor); opacity: 1; }
 .crumb.active { opacity: 1; font-weight: 600; cursor: default; }
 .crumb-sep { font-size: 9px; opacity: 0.5; margin: 0 1px; flex-shrink: 0; }
+.remote-crumb-icon { color: #42b883; margin-right: 4px; font-size: 11px; }
 
 /* ---- 搜索框（工具栏右上角） ---- */
 .file-search {

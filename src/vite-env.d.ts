@@ -18,7 +18,14 @@ declare module '*.vue' {
  */
 declare global {
   interface Window {
-    __AIKM_HOST__?: { fs?: 'off' | 'read' | 'write'; rootName?: string }
+    __AIKM_HOST__?: {
+      fs?: 'off' | 'read' | 'write'
+      rootName?: string
+      /** 访客可见的内置模块 / 入口 key */
+      navs?: string[]
+      /** 访客可见的插件 id */
+      plugins?: string[]
+    }
   }
 }
 

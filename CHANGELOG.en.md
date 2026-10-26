@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-10-27
+
+### Fixed
+
+- **Office editor AI-assistant icons rendered as squares and the AI panel had no title**: Excel's content security policy blocked the icon font, so the icons are now inline and the panel title is restored; the AI entry points and title display correctly in Word, Excel and PowerPoint.
+- **Switching views in a Word window blanked the embedded editor, and PPTX showed a one-item view menu**: the other views now expand horizontally in the title bar (animated) instead of hiding the editor, and single-view files no longer show the switcher.
+
+## 2026-10-26
+
+### Fixed
+
+- **Linux arm64 builds opened with only a process and no window**: fixed the main-process error caused by loading the global-hotkey native dependency during startup; a load failure now only falls back to the single-press shortcut.
+- **Clicking a custom source under Settings → Models → Sources silently made it the default source**: clicking now only views/edits that source, the default still changes via “Set as default”, and edits no longer leak into another source.
+- **GPUStack showed offline and fetched no models in Settings**: the connection test dropped the API key stored in the credential vault (the custom source passed it), and now uses the same full configuration as custom sources.
+
 ## 2026-10-21
 
 ### Added
@@ -29,6 +44,11 @@
 - **Viewport-accurate snapshots**: `browser_snapshot scope="viewport"` filters out off-screen nodes using DOMSnapshot layout bounds; `subtree` targets one ref's subtree.
 - **External MCP gets its own browser partition**: `external:*` owners use `persist:browser-agent-external`, isolated from the in-app login state; download and site-data clearing cover both partitions.
 - **Settings tab stays open when switching tabs**: switching to a page tab only deactivates it; the settings tab stays in the strip, clicking it or ⚙ brings it back, and only its × closes it.
+- **Action reliability P0**: actions retry during resolution/actionability for up to 3s (never after input is dispatched); errors distinguish transient/permanent; stale refs first recover via unique locator, then via a fresh snapshot + role/name.
+- **File chooser & hand-off**: AI clicks that open a native file chooser are intercepted, and `browser_upload` can select files without a ref; `browser_claim_tab` takes over a user tab after the user chooses “Hand this page to the AI”.
+- **New input primitives**: `browser_drag`, `browser_wheel`, and `browser_paste` (text/HTML, restores the clipboard).
+- **In-page action cursor**: clicking/filling/hovering/selecting shows a cursor and action label at the point (toggle under Settings → Behavior).
+- **Download P0–P1 complete**: `browser_download_wait` (wait for completion/failure, returns id/path/size/MIME) and `browser_download` (cancel/pause/resume/saveAs/delete); action receipts carry a downloadId; download history persists across restarts; risky types (exe/msi/bat/ps1…) are blocked by default and a max file size is configurable; external MCP downloads go to an isolated `external` subfolder; the download panel can pause/resume/cancel directly.
 - **Settings fill wide screens**: the 820px content cap was removed, so cards fill the content pane instead of leaving a large blank area on the right.
 - **Executable site playbooks**: `browser_playbook_save/list/get/run` store repeatable site flows as scripts using the `browser.*` API. The agent can only save drafts, read, and run approved playbooks; Settings → Playbooks lets the user review code, approve/revoke/delete, and any code change requires re-approval.
 - **Download icon shows a live dot**: while downloads are progressing/paused, the toolbar download icon gets an amber pulsing dot and the tooltip shows the active count; it disappears when they finish or are cancelled.

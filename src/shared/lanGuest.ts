@@ -29,6 +29,21 @@ export type LanGuestFsAccess = 'off' | 'read' | 'write'
 /** 访客默认可用的对话模式（= 现状，不放开任何主机能力） */
 export const LAN_GUEST_DEFAULT_MODES: LanGuestMode[] = ['normal', 'retrieval']
 
+/**
+ * 主机可控制「局域网用户能看到」的内置模块 / 非主面板入口。
+ * key 与 store.hiddenNavs / hiddenExtras 完全一致（导航与模块页也用这组 key）。
+ */
+export const LAN_GUEST_NAV_OPTIONS: Array<{ key: string; zh: string; en: string; icon: string; extra?: boolean }> = [
+  { key: '主页', zh: '主页', en: 'Home', icon: 'fa fa-home' },
+  { key: '知识管理', zh: '知识管理', en: 'Knowledge Management', icon: 'fa fa-book' },
+  { key: '知识处理', zh: '知识处理', en: 'Knowledge Processing', icon: 'fa fa-layer-group' },
+  { key: '学习', zh: '学习', en: 'Learning', icon: 'fa fa-graduation-cap' },
+  { key: 'agent', zh: '浏览器 Agent', en: 'Browser Agent', icon: 'fa fa-globe', extra: true },
+]
+
+/** 默认：保持现状——访客能看到全部内置模块与浏览器 Agent 入口 */
+export const LAN_GUEST_DEFAULT_NAVS: string[] = LAN_GUEST_NAV_OPTIONS.map((x) => x.key)
+
 /** 访客可选的对话模式清单（agent / skill 走主机侧智能体桥 /api/agent/*） */
 export const LAN_GUEST_MODES: Array<{
   value: LanGuestMode
@@ -92,6 +107,13 @@ export interface LanGuestPolicy {
   presetIds: string[]
   /** 智能体工具白名单（语义同 store.agentTools：null=用默认集，[]=全部禁止，[names]=仅这些） */
   tools: string[] | null
+  /**
+   * 访客能看到的内置模块 / 入口 key（默认全部）。
+   * 对应 LAN_GUEST_NAV_OPTIONS；空数组 = 一个内置模块也不展示。
+   */
+  navs: string[]
+  /** 访客能看到的插件面板所属插件 id（默认空 = 不共享插件面板） */
+  plugins: string[]
   /** 访客沙箱级别（只能比全局更严格） */
   sandbox: LanGuestSandbox
   /** 访客智能体单轮最大步数（防死循环） */
@@ -124,6 +146,8 @@ export function defaultLanGuestPolicy(): LanGuestPolicy {
     modes: [...LAN_GUEST_DEFAULT_MODES],
     presetIds: [],
     tools: [...LAN_GUEST_READONLY_TOOLS],
+    navs: [...LAN_GUEST_DEFAULT_NAVS],
+    plugins: [],
     sandbox: 'safe',
     maxSteps: 20,
     maxConcurrent: 1,
@@ -231,10 +255,20 @@ export function normalizeLanGuestPolicy(raw: any): LanGuestPolicy {
   const tools: string[] | null = raw.tools === null
     ? null
     : (Array.isArray(raw.tools) ? raw.tools.filter((t: any) => typeof t === 'string') : def.tools)
+  // 可见模块：只接受已知 key；显式空数组保留（主机可以真的一个模块都不给）
+  const knownNavs = new Set(LAN_GUEST_NAV_OPTIONS.map((x) => x.key))
+  const navs: string[] = Array.isArray(raw.navs)
+    ? Array.from(new Set<string>(raw.navs.filter((k: any) => typeof k === 'string' && knownNavs.has(k))))
+    : def.navs
   return {
     modes: modes.length ? [...new Set(modes)] : def.modes,
     presetIds: Array.isArray(raw.presetIds) ? raw.presetIds.filter((p: any) => typeof p === 'string') : def.presetIds,
     tools,
+    navs,
+    // 插件面板按插件 id 共享；空 = 不共享（插件可向访客注入界面与主机能力，默认从严）
+    plugins: Array.isArray(raw.plugins)
+      ? Array.from(new Set<string>(raw.plugins.filter((p: any) => typeof p === 'string' && !!p)))
+      : def.plugins,
     sandbox: SANDBOXES.includes(raw.sandbox) ? raw.sandbox : def.sandbox,
     maxSteps: clampInt(raw.maxSteps, 1, 200, def.maxSteps),
     maxConcurrent: clampInt(raw.maxConcurrent, 1, 20, def.maxConcurrent),

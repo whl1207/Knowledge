@@ -24,6 +24,8 @@ export interface ActionReceipt {
   url: string
   title: string
   detail: string
+  /** 实际动作点（视口坐标），用于页面内视觉光标 */
+  point?: { x: number; y: number }
 }
 
 export class BrowserActionError extends Error {
@@ -35,6 +37,45 @@ export class BrowserActionError extends Error {
     this.code = code
     this.hint = hint
   }
+  /** 元素解析/可操作性阶段的瞬态错误可重试；输入一旦发出就不再重试（防重复提交） */
+  get retryable(): boolean {
+    return this.code === 'STALE_REF' || this.code === 'NOT_FOUND' || this.code === 'NOT_VISIBLE' || this.code === 'OCCLUDED'
+  }
+}
+
+export interface ActionRetryOptions {
+  /** 解析/可操作性阶段的重试窗口（默认 3000ms；0 表示不重试） */
+  timeoutMs?: number
+  /** 重试间隔（默认 400ms） */
+  intervalMs?: number
+}
+
+/** 只重试"尚未发出 Input"的解析/可操作性阶段；返回可执行的目标 */
+async function prepareAction(
+  cdp: CdpSession,
+  refs: Map<number, RefEntry>,
+  target: ActionTarget,
+  resolveOpts?: ResolveOptions,
+  retry: ActionRetryOptions = {},
+): Promise<{ resolved: Resolved; probe: Probe }> {
+  const timeoutMs = Math.max(0, Math.min(15_000, retry.timeoutMs ?? 3000))
+  const intervalMs = Math.max(100, Math.min(2000, retry.intervalMs ?? 400))
+  const deadline = Date.now() + timeoutMs
+  let lastErr: unknown
+  for (;;) {
+    try {
+      const resolved = await resolveElement(cdp, refs, target, resolveOpts)
+      const probe = await inspect(cdp, resolved)
+      assertActionable(probe, resolved)
+      return { resolved, probe }
+    } catch (err) {
+      lastErr = err
+      if (!(err instanceof BrowserActionError) || !err.retryable) throw err
+      if (Date.now() + intervalMs > deadline) throw err
+      await sleep(intervalMs)
+    }
+  }
+  throw lastErr
 }
 
 interface Resolved {
@@ -85,31 +126,71 @@ export interface ResolveOptions {
   refresh?: () => Promise<Map<number, RefEntry>>
 }
 
-export async function clickElement(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, opts: { button?: string; clickCount?: number } = {}, resolveOpts?: ResolveOptions): Promise<ActionReceipt> {
-  const resolved = await resolveElement(cdp, refs, target, resolveOpts)
-  const probe = await inspect(cdp, resolved)
-  assertActionable(probe, resolved)
+export async function dragElement(
+  cdp: CdpSession,
+  refs: Map<number, RefEntry>,
+  from: ActionTarget,
+  to: ActionTarget,
+  resolveOpts?: ResolveOptions,
+  retry?: ActionRetryOptions,
+): Promise<ActionReceipt> {
+  const start = await prepareAction(cdp, refs, from, resolveOpts, retry)
+  const endResolved = await resolveElement(cdp, refs, to, resolveOpts)
+  const endProbe = await inspect(cdp, endResolved)
+  if (!endProbe.visible) throw new BrowserActionError('NOT_VISIBLE', `拖拽目标不可见：${endResolved.label}`, '滚动到目标区域后再试')
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.probe.cx, y: start.probe.cy, button: 'none' })
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: start.probe.cx, y: start.probe.cy, button: 'left', buttons: 1, clickCount: 1 })
+  const steps = 8
+  for (let i = 1; i <= steps; i++) {
+    const x = start.probe.cx + ((endProbe.cx - start.probe.cx) * i) / steps
+    const y = start.probe.cy + ((endProbe.cy - start.probe.cy) * i) / steps
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 })
+    await sleep(16)
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: endProbe.cx, y: endProbe.cy, button: 'left', buttons: 0, clickCount: 1 })
+  return await receipt(cdp, 'drag', `已拖拽 ${start.resolved.label} → ${endResolved.label}`)
+}
+
+export async function wheelPage(cdp: CdpSession, opts: { deltaY?: number; deltaX?: number; x?: number; y?: number } = {}): Promise<ActionReceipt> {
+  const deltaY = Math.max(-10_000, Math.min(10_000, Number(opts.deltaY) || 0))
+  const deltaX = Math.max(-10_000, Math.min(10_000, Number(opts.deltaX) || 0))
+  let x = Number(opts.x)
+  let y = Number(opts.y)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    const vp = await cdp.send<any>('Runtime.evaluate', {
+      expression: '({x: window.innerWidth / 2, y: window.innerHeight / 2})',
+      returnByValue: true,
+    }, 5_000).catch(() => null)
+    x = Number(vp?.result?.value?.x) || 400
+    y = Number(vp?.result?.value?.y) || 300
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY })
+  return await receipt(cdp, 'wheel', `已滚动页面（Δx=${deltaX}, Δy=${deltaY}）`)
+}
+
+export async function clickElement(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, opts: { button?: string; clickCount?: number } = {}, resolveOpts?: ResolveOptions, retry?: ActionRetryOptions): Promise<ActionReceipt> {
+  const { resolved, probe } = await prepareAction(cdp, refs, target, resolveOpts, retry)
   const button = normalizeButton(opts.button)
   const clickCount = opts.clickCount === 2 ? 2 : 1
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: probe.cx, y: probe.cy, button: 'none' })
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: probe.cx, y: probe.cy, button, clickCount })
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: probe.cx, y: probe.cy, button, clickCount })
-  return await receipt(cdp, 'click', `已点击 ${resolved.label}${probe.text ? `（${probe.text}）` : ''}`)
+  const out = await receipt(cdp, 'click', `已点击 ${resolved.label}${probe.text ? `（${probe.text}）` : ''}`)
+  out.point = { x: probe.cx, y: probe.cy }
+  return out
 }
 
-export async function hoverElement(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, resolveOpts?: ResolveOptions): Promise<ActionReceipt> {
-  const resolved = await resolveElement(cdp, refs, target, resolveOpts)
-  const probe = await inspect(cdp, resolved)
-  assertActionable(probe, resolved)
+export async function hoverElement(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, resolveOpts?: ResolveOptions, retry?: ActionRetryOptions): Promise<ActionReceipt> {
+  const { resolved, probe } = await prepareAction(cdp, refs, target, resolveOpts, retry)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: probe.cx, y: probe.cy, button: 'none' })
   await sleep(120)
-  return await receipt(cdp, 'hover', `已悬停 ${resolved.label}`)
+  const out = await receipt(cdp, 'hover', `已悬停 ${resolved.label}`)
+  out.point = { x: probe.cx, y: probe.cy }
+  return out
 }
 
-export async function fillElement(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, text: string, opts: { clear?: boolean } = {}, resolveOpts?: ResolveOptions): Promise<ActionReceipt> {
-  const resolved = await resolveElement(cdp, refs, target, resolveOpts)
-  const probe = await inspect(cdp, resolved)
-  assertActionable(probe, resolved)
+export async function fillElement(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, text: string, opts: { clear?: boolean } = {}, resolveOpts?: ResolveOptions, retry?: ActionRetryOptions): Promise<ActionReceipt> {
+  const { resolved, probe } = await prepareAction(cdp, refs, target, resolveOpts, retry)
   // <select> 没有可编辑文本：按 value/label 选中（与 browser_select 同语义）
   if (String(probe.tag || '').toUpperCase() === 'SELECT') {
     const res = await cdp.send<any>('Runtime.callFunctionOn', {
@@ -157,13 +238,13 @@ export async function fillElement(cdp: CdpSession, refs: Map<number, RefEntry>, 
   })
   if (text) await cdp.send('Input.insertText', { text })
   const readback = await readValue(cdp, resolved.objectId)
-  return await receipt(cdp, 'fill', `已输入 ${resolved.label}${readback ? `，当前值：${readback}` : ''}`)
+  const out = await receipt(cdp, 'fill', `已输入 ${resolved.label}${readback ? `，当前值：${readback}` : ''}`)
+  out.point = { x: probe.cx, y: probe.cy }
+  return out
 }
 
-export async function selectOption(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, choice: { value?: string; label?: string; index?: number }, resolveOpts?: ResolveOptions): Promise<ActionReceipt> {
-  const resolved = await resolveElement(cdp, refs, target, resolveOpts)
-  const probe = await inspect(cdp, resolved)
-  assertActionable(probe, resolved)
+export async function selectOption(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget, choice: { value?: string; label?: string; index?: number }, resolveOpts?: ResolveOptions, retry?: ActionRetryOptions): Promise<ActionReceipt> {
+  const { resolved, probe } = await prepareAction(cdp, refs, target, resolveOpts, retry)
   const res = await cdp.send<any>('Runtime.callFunctionOn', {
     objectId: resolved.objectId,
     returnByValue: true,
@@ -186,18 +267,25 @@ export async function selectOption(cdp: CdpSession, refs: Map<number, RefEntry>,
   if (!v?.ok) {
     throw new BrowserActionError('NOT_FOUND', `选择失败：${v?.reason === 'not-select' ? '目标不是 <select>' : '找不到匹配的选项'}${v?.options ? `，可选：${v.options.map((o: any) => o.label || o.value).join(' / ')}` : ''}`)
   }
-  return await receipt(cdp, 'select', `已选择 ${resolved.label} → ${v.label || v.value}`)
+  const out = await receipt(cdp, 'select', `已选择 ${resolved.label} → ${v.label || v.value}`)
+  out.point = { x: probe.cx, y: probe.cy }
+  return out
 }
 
-export async function pressKey(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget | null, keySpec: string, resolveOpts?: ResolveOptions): Promise<ActionReceipt> {
-  if (target && (target.ref !== undefined || target.selector || target.text)) {
-    const resolved = await resolveElement(cdp, refs, target, resolveOpts)
-    const probe = await inspect(cdp, resolved)
-    assertActionable(probe, resolved)
-    await cdp.send('Runtime.callFunctionOn', { objectId: resolved.objectId, returnByValue: true, functionDeclaration: 'function(){ if (this.focus) this.focus(); return true; }' })
-  }
+export async function pressKey(cdp: CdpSession, refs: Map<number, RefEntry>, target: ActionTarget | null, keySpec: string, resolveOpts?: ResolveOptions, retry?: ActionRetryOptions): Promise<ActionReceipt> {
   const parsed = parseKey(keySpec)
   if (!parsed) throw new BrowserActionError('BAD_ARGUMENT', `不支持的按键：${keySpec}`, '示例：Enter / Tab / Escape / ArrowDown / ControlOrMeta+A / a')
+  if (target && (target.ref !== undefined || target.selector || target.text)) {
+    const { resolved, probe } = await prepareAction(cdp, refs, target, resolveOpts, retry)
+    await cdp.send('Runtime.callFunctionOn', { objectId: resolved.objectId, returnByValue: true, functionDeclaration: 'function(){ if (this.focus) this.focus(); return true; }' })
+    const out = await doPress(cdp, parsed, keySpec)
+    out.point = { x: probe.cx, y: probe.cy }
+    return out
+  }
+  return await doPress(cdp, parsed, keySpec)
+}
+
+async function doPress(cdp: CdpSession, parsed: NonNullable<ReturnType<typeof parseKey>>, keySpec: string): Promise<ActionReceipt> {
   const base = {
     key: parsed.key,
     code: parsed.code,
@@ -282,20 +370,55 @@ export async function resolveElement(cdp: CdpSession, refs: Map<number, RefEntry
   try {
     resolvedNode = await cdp.send<any>('DOM.resolveNode', { backendNodeId })
   } catch (err) {
-    // ref 的 backendNodeId 已随 DOM 更新失效：重新快照，按 role+name 唯一匹配找回同一节点后重试一次
-    if (!opts?.refresh || !refEntry) throw err
-    const fresh = await opts.refresh()
-    const candidates = [...fresh.values()].filter((r) => r.role === refEntry!.role && r.name === refEntry!.name)
-    if (candidates.length !== 1) {
-      throw new BrowserActionError('STALE_REF', `ref @${refEntry.ref} 已失效，且无法按「${refEntry.role} ${refEntry.name}」唯一定位`, '先 browser_snapshot 查看当前页面，再用新的 ref 操作')
+    // 1) 先尝试快照里带唯一性证明的 locator（role+name）
+    if (refEntry?.loc) {
+      const byLoc = await resolveByLocator(cdp, refEntry.loc)
+      if (byLoc) {
+        backendNodeId = byLoc
+        label = `@${refEntry.ref} ${refEntry.role}${refEntry.name ? ` "${refEntry.name}"` : ''}（按 locator 恢复）`
+        try {
+          resolvedNode = await cdp.send<any>('DOM.resolveNode', { backendNodeId })
+        } catch { resolvedNode = null }
+      }
     }
-    backendNodeId = candidates[0].backendNodeId
-    label = `@${candidates[0].ref} ${candidates[0].role}${candidates[0].name ? ` "${candidates[0].name}"` : ''}（ref 已自动刷新）`
-    resolvedNode = await cdp.send<any>('DOM.resolveNode', { backendNodeId })
+    // 2) 再重新快照，按 role+name 唯一匹配找回同一节点后重试一次
+    if (!resolvedNode) {
+      if (!opts?.refresh || !refEntry) throw err
+      const fresh = await opts.refresh()
+      const candidates = [...fresh.values()].filter((r) => r.role === refEntry!.role && r.name === refEntry!.name)
+      if (candidates.length !== 1) {
+        throw new BrowserActionError('STALE_REF', `ref @${refEntry.ref} 已失效，且无法按「${refEntry.role} ${refEntry.name}」唯一定位`, '先 browser_snapshot 查看当前页面，再用新的 ref 操作')
+      }
+      backendNodeId = candidates[0].backendNodeId
+      label = `@${candidates[0].ref} ${candidates[0].role}${candidates[0].name ? ` "${candidates[0].name}"` : ''}（ref 已自动刷新）`
+      resolvedNode = await cdp.send<any>('DOM.resolveNode', { backendNodeId })
+    }
   }
   const objectId = resolvedNode?.object?.objectId
   if (!objectId) throw new BrowserActionError('NOT_FOUND', `元素已失效：${label}`, '页面可能已变化，重新 browser_snapshot')
   return { backendNodeId: backendNodeId!, objectId, label }
+}
+
+/** 解析快照的 loc=role:button[name="…"]；只有唯一命中才返回 backendNodeId */
+async function resolveByLocator(cdp: CdpSession, loc: string): Promise<number | null> {
+  const m = /^role:([^\[]+)\[name="((?:[^"\\]|\\.)*)"\]$/.exec(String(loc || ''))
+  if (!m) return null
+  const role = m[1]
+  const name = m[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+  try {
+    const doc = await cdp.send<any>('DOM.getDocument', { depth: 0 }, 8_000)
+    const rootBackend = Number(doc?.root?.backendNodeId)
+    if (!rootBackend) return null
+    const res = await cdp.send<any>('Accessibility.queryAXTree', {
+      backendNodeId: rootBackend,
+      role,
+      accessibleName: name,
+    }, 8_000)
+    const hits = (res?.nodes || []).filter((n: any) => !n?.ignored && typeof n?.backendDOMNodeId === 'number')
+    return hits.length === 1 ? Number(hits[0].backendDOMNodeId) : null
+  } catch {
+    return null
+  }
 }
 
 /** 滚动到视野内 + 可见/禁用/遮挡检查 */

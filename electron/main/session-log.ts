@@ -10,9 +10,10 @@
  *
  * 设计决策：
  * - 顺序号（seq）按会话单调递增，重启后从文件尾部续接；
- * - 写盘使用追加模式（O_APPEND），单事件写入原子性由操作系统保证，
- *   崩溃最多丢失正在写的最后一条事件；
- * - `assistant/chunk` 是流式增量，仅用于 UI 保真与回放，不参与 deriveMessages；
+ * - 写盘走**异步批量队列**（50ms / 256 行触发），append 仍同步返回事件与 seq；
+ *   模型请求前 / turn 结束 / 进程退出前有 flush 屏障，崩溃最多丢最后一个批窗口；
+ * - 事件流在内存中保留一份，append 只 push，不再按文件 mtime 整份重解析（旧的 O(step×log) 热点）；
+ * - `assistant/chunk` 是流式增量，agent-loop 会合并成 ~1KB 一条再落盘，仅用于回放；
  * - 完整的模型可见事实（user/message、assistant/message、tool/call、
  *   tool/result、session/start 的 systemPrompt）全部落盘，保证可重建。
  */
@@ -37,16 +38,6 @@ import { foldPlanTodoEvents, type PlanTodoState } from '@/shared/agentPlanState'
 function sanitizeSessionId(sessionId: string): string {
   // 防路径穿越：只保留安全字符
   return sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')
-}
-
-/** 追加写入（同步、O_APPEND 语义，保证单事件原子性） */
-function appendLine(file: string, line: string): void {
-  const fd = fs.openSync(file, 'a')
-  try {
-    fs.writeSync(fd, line + '\n', null, 'utf8')
-  } finally {
-    fs.closeSync(fd)
-  }
 }
 
 /**
@@ -74,14 +65,28 @@ function toolImageDataUrl(filePath: string, mime: string): string | undefined {
 // ---------------------------------------------------------------------------
 
 class SessionLogStore {
-  /** 内存中的下一顺序号（重启后从文件尾部续接） */
+  /** 内存中的下一顺序号（首次访问时从文件尾部续接） */
   private nextSeq = new Map<string, number>()
   /**
-   * 会话事件解析缓存（key = 文件 size:mtime，append 后自动失效）。
-   * 目的：事件流分段翻页 / derive / 完整性校验不必每次整文件重复解析——
-   * 超大日志下只整文件解析一次即可，避免打开面板与向下翻页时反复卡顿。
+   * 已加载的会话事件（append 后同步追加，读路径不再重新读盘）。
+   *
+   * 关键性能修复：旧实现用「文件 size:mtime」做缓存 key，而每个 `assistant/chunk` 都会
+   * 改变文件 → 下一步 derive 时整份 JSONL 重新 readFile + JSON.parse，长会话是 O(step × log)。
+   * 事件日志是 append-only 的，内存里保留一份后只需在 append 时 push 一条。
    */
-  private parsed = new Map<string, { key: string; events: SessionEvent[] }>()
+  private events = new Map<string, SessionEvent[]>()
+  /**
+   * 待写盘的 JSONL 行。append 保持同步返回（调用方要拿 seq 做 sourceEventSeqs），
+   * 写盘合并成批：50ms 或 256 行触发一次，避免每个流式分片都 open/write/close。
+   */
+  private pending = new Map<string, string[]>()
+  private flushTimer: NodeJS.Timeout | null = null
+  /** 每个会话的写入串行链：保证同一文件的 append 顺序 */
+  private writing = new Map<string, Promise<void>>()
+  /** 崩溃/半写留下的最后一行没有换行：下一次写入前补一个，避免新事件粘在半截 JSON 后面 */
+  private needsLeadingNewline = new Set<string>()
+  /** 目录只建一次（append 是热路径） */
+  private dirReady = false
 
   private dir(): string {
     return join(app.getPath('userData'), 'session-logs')
@@ -92,36 +97,135 @@ class SessionLogStore {
   }
 
   private ensureDir(): void {
+    if (this.dirReady) return
     try {
       fs.mkdirSync(this.dir(), { recursive: true })
+      this.dirReady = true
     } catch (e) {
       console.error('[session-log] 创建目录失败:', e)
     }
   }
-
-  /** 读取某会话日志的下一顺序号（无文件时从 1 开始） */
-  private loadNextSeq(sessionId: string): number {
-    const cached = this.nextSeq.get(sessionId)
-    if (cached !== undefined) return cached
+  /**
+   * 首次访问某会话：读一次文件并建立内存事件数组。
+   * 之后的 append 只 push，不再回读；进程内单写者，外部不会改这份文件。
+   */
+  private load(sessionId: string): SessionEvent[] {
+    const hit = this.events.get(sessionId)
+    if (hit) return hit
+    const list: SessionEvent[] = []
     const file = this.file(sessionId)
-    if (!fs.existsSync(file)) return 1
-    let lastSeq = 0
-    try {
-      const lines = fs.readFileSync(file, 'utf-8').split('\n')
-      for (const line of lines) {
-        if (!line.trim()) continue
-        try {
-          const ev = JSON.parse(line) as SessionEvent
-          if (typeof ev?.seq === 'number' && ev.seq > lastSeq) lastSeq = ev.seq
-        } catch {
-          // 跳过损坏行（容忍半写）
+    if (fs.existsSync(file)) {
+      try {
+        const raw = fs.readFileSync(file, 'utf-8')
+        if (raw.length > 0 && !raw.endsWith('\n')) this.needsLeadingNewline.add(sessionId)
+        const lines = raw.split('\n')
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const ev = JSON.parse(line) as SessionEvent
+            if (ev.sessionId === sessionId) list.push(ev)
+          } catch {
+            // 跳过损坏行（容忍半写）
+          }
         }
+        list.sort((a, b) => a.seq - b.seq)
+      } catch (e) {
+        console.error('[session-log] 读取失败:', e)
       }
-    } catch (e) {
-      console.error('[session-log] 读取顺序号失败:', e)
     }
-    this.nextSeq.set(sessionId, lastSeq + 1)
-    return lastSeq + 1
+    this.events.set(sessionId, list)
+    const last = list.length ? list[list.length - 1].seq : 0
+    this.nextSeq.set(sessionId, last + 1)
+    // 只保留最近访问的少量会话，避免长期运行内存膨胀
+    while (this.events.size > 8) {
+      const oldest = this.events.keys().next().value
+      if (oldest === undefined || oldest === sessionId) break
+      // 还有待写数据就先留着：丢掉内存事件后 nextSeq 会与文件脱节，重启/续写会重号
+      if (this.pending.has(oldest) || this.writing.has(oldest)) break
+      this.events.delete(oldest)
+      this.nextSeq.delete(oldest)
+    }
+    return list
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushTimer) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      void this.flushAll()
+    }, 50)
+    // 不要因为待写队列让 Node 进程无法退出
+    this.flushTimer.unref?.()
+  }
+
+  private enqueue(sessionId: string, line: string): void {
+    const queue = this.pending.get(sessionId)
+    if (queue) queue.push(line)
+    else this.pending.set(sessionId, [line])
+    if ((this.pending.get(sessionId)?.length || 0) >= 256) {
+      void this.flushSession(sessionId)
+    } else {
+      this.scheduleFlush()
+    }
+  }
+
+  /** 把某会话的待写行按顺序追加到文件（同一会话串行） */
+  private async flushSession(sessionId: string): Promise<void> {
+    const queue = this.pending.get(sessionId)
+    if (!queue || queue.length === 0) {
+      const inflight = this.writing.get(sessionId)
+      if (inflight) await inflight
+      return
+    }
+    const lines = queue.splice(0, queue.length)
+    if (queue.length === 0) this.pending.delete(sessionId)
+    this.ensureDir()
+    let data = lines.join('\n') + '\n'
+    if (this.needsLeadingNewline.delete(sessionId)) data = '\n' + data
+    const prev = this.writing.get(sessionId) ?? Promise.resolve()
+    const next = prev.then(() => fs.promises.appendFile(this.file(sessionId), data, 'utf8')).catch((e) => {
+      console.error('[session-log] 追加事件失败:', e)
+    })
+    this.writing.set(sessionId, next)
+    try {
+      await next
+    } finally {
+      if (this.writing.get(sessionId) === next) this.writing.delete(sessionId)
+    }
+  }
+
+  /** 等待某会话（或全部）的待写数据真正落盘（LLM 请求前 / turn 结束时的屏障） */
+  async flush(sessionId?: string): Promise<void> {
+    if (sessionId) {
+      await this.flushSession(sessionId)
+      return
+    }
+    await this.flushAll()
+  }
+
+  private async flushAll(): Promise<void> {
+    const ids = new Set<string>([...this.pending.keys(), ...this.writing.keys()])
+    await Promise.all(Array.from(ids).map((id) => this.flushSession(id)))
+  }
+
+  /** 进程退出前的同步兜底：异步队列还没来得及写的话，用 appendFileSync 一次写完 */
+  flushAllSync(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    this.ensureDir()
+    for (const [sessionId, queue] of Array.from(this.pending.entries())) {
+      if (!queue.length) continue
+      try {
+        let data = queue.join('\n') + '\n'
+        if (this.needsLeadingNewline.delete(sessionId)) data = '\n' + data
+        fs.appendFileSync(this.file(sessionId), data, 'utf8')
+        this.pending.delete(sessionId)
+      } catch (e) {
+        console.error('[session-log] 同步刷盘失败:', e)
+      }
+    }
   }
 
   /**
@@ -134,7 +238,8 @@ class SessionLogStore {
     payload: SessionEventMap[K],
   ): SessionEvent {
     this.ensureDir()
-    const seq = this.loadNextSeq(sessionId)
+    const list = this.load(sessionId)
+    const seq = this.nextSeq.get(sessionId) ?? (list.length ? list[list.length - 1].seq + 1 : 1)
     this.nextSeq.set(sessionId, seq + 1)
     const event = {
       seq,
@@ -143,63 +248,44 @@ class SessionLogStore {
       type,
       ...payload,
     } as SessionEvent
+    list.push(event)
     try {
-      appendLine(this.file(sessionId), JSON.stringify(event))
+      this.enqueue(sessionId, JSON.stringify(event))
     } catch (e) {
       console.error('[session-log] 追加事件失败:', e)
     }
     return event
   }
 
-  /** 文件修改签名（size:mtime），作为解析缓存失效依据 */
-  private statKey(file: string): string | null {
-    try {
-      const st = fs.statSync(file)
-      return `${st.size}:${Math.trunc(st.mtimeMs)}`
-    } catch {
-      return null
-    }
+  /** 是否已有该会话的日志（创建过 session/start 或至少有任何事件） */
+  exists(sessionId: string): boolean {
+    return this.load(sessionId).length > 0
   }
 
-  /** 解析某会话完整事件流（按 seq 升序）并缓存；文件变化后自动重解析 */
-  private getParsed(sessionId: string): SessionEvent[] {
-    const file = this.file(sessionId)
-    if (!fs.existsSync(file)) {
-      this.parsed.delete(sessionId)
-      return []
+  /** 读取 session/start 载荷（跨轮恢复时判断配置是否兼容） */
+  getStart(sessionId: string): SessionEventMap['session/start'] | undefined {
+    const start = this.load(sessionId).find((e) => e.type === 'session/start')
+    return start && start.type === 'session/start' ? start : undefined
+  }
+
+  /** 已完成的 turn 数（恢复会话时续接 turn 编号） */
+  countTurns(sessionId: string): number {
+    return this.load(sessionId).reduce((n, e) => n + (e.type === 'turn/start' ? 1 : 0), 0)
+  }
+
+  /** 最近一条 assistant/message 正文（恢复会话后 `lastContent` 的种子） */
+  lastAssistantContent(sessionId: string): string {
+    const list = this.load(sessionId)
+    for (let i = list.length - 1; i >= 0; i--) {
+      const ev = list[i]
+      if (ev.type === 'assistant/message') return String(ev.content || '')
     }
-    const key = this.statKey(file)
-    const hit = this.parsed.get(sessionId)
-    if (hit && hit.key === key) return hit.events
-    const events: SessionEvent[] = []
-    try {
-      const lines = fs.readFileSync(file, 'utf-8').split('\n')
-      for (const line of lines) {
-        if (!line.trim()) continue
-        try {
-          const ev = JSON.parse(line) as SessionEvent
-          if (ev.sessionId === sessionId) events.push(ev)
-        } catch {
-          // 跳过损坏行
-        }
-      }
-      events.sort((a, b) => a.seq - b.seq)
-    } catch (e) {
-      console.error('[session-log] 读取失败:', e)
-    }
-    this.parsed.set(sessionId, { key: key ?? '', events })
-    // 只保留最近访问的少量会话，避免长期运行内存膨胀
-    while (this.parsed.size > 4) {
-      const oldest = this.parsed.keys().next().value
-      if (oldest === undefined) break
-      this.parsed.delete(oldest)
-    }
-    return events
+    return ''
   }
 
   /** 读取某会话的完整事件流（按 seq 升序） */
   readAll(sessionId: string): SessionEvent[] {
-    return this.getParsed(sessionId)
+    return this.load(sessionId)
   }
 
   /**
@@ -208,7 +294,7 @@ class SessionLogStore {
    */
   readTail(sessionId: string, count: number): SessionEvent[] {
     if (count <= 0) return []
-    return this.getParsed(sessionId).slice(-count)
+    return this.load(sessionId).slice(-count)
   }
 
   /**
@@ -218,7 +304,7 @@ class SessionLogStore {
   readBefore(sessionId: string, beforeSeq: number, count: number): SessionEvent[] {
     if (beforeSeq <= 1 || count <= 0) return []
     const older: SessionEvent[] = []
-    for (const ev of this.getParsed(sessionId)) {
+    for (const ev of this.load(sessionId)) {
       if (ev.seq < beforeSeq) {
         older.push(ev)
         if (older.length > count) older.shift()
@@ -263,7 +349,7 @@ class SessionLogStore {
 
   /** 在某会话日志里找首个命中关键字的聊天正文片段（未命中返回空串） */
   private findSnippet(sessionId: string, kw: string): string {
-    for (const ev of this.getParsed(sessionId)) {
+    for (const ev of this.load(sessionId)) {
       let text = ''
       if (ev.type === 'user/message' || ev.type === 'assistant/message') {
         const c = (ev as any).content
@@ -291,8 +377,11 @@ class SessionLogStore {
 
   /** 删除某会话的事件日志（释放会话时调用） */
   remove(sessionId: string): void {
+    this.flushAllSync()
     this.nextSeq.delete(sessionId)
-    this.parsed.delete(sessionId)
+    this.events.delete(sessionId)
+    this.pending.delete(sessionId)
+    this.needsLeadingNewline.delete(sessionId)
     const file = this.file(sessionId)
     try {
       if (fs.existsSync(file)) fs.unlinkSync(file)
@@ -303,8 +392,11 @@ class SessionLogStore {
 
   /** 清空全部会话日志（删除 session-logs 目录下所有 .jsonl，重置 seq） */
   clearAll(): void {
+    this.flushAllSync()
     this.nextSeq.clear()
-    this.parsed.clear()
+    this.events.clear()
+    this.pending.clear()
+    this.needsLeadingNewline.clear()
     const dir = this.dir()
     if (!fs.existsSync(dir)) return
     try {
@@ -326,6 +418,7 @@ class SessionLogStore {
    * cutoffTs 为空/非法 → 全部清理。返回实际删除数量。
    */
   clearBefore(cutoffTs: number | null): number {
+    this.flushAllSync()
     const dir = this.dir()
     if (!fs.existsSync(dir)) return 0
     let removed = 0
@@ -339,7 +432,9 @@ class SessionLogStore {
             fs.unlinkSync(file)
             const id = entry.slice(0, -'.jsonl'.length)
             this.nextSeq.delete(id)
-            this.parsed.delete(id)
+            this.events.delete(id)
+            this.pending.delete(id)
+            this.needsLeadingNewline.delete(id)
             removed++
           }
         } catch {
@@ -364,17 +459,22 @@ class SessionLogStore {
         const id = entry.slice(0, -'.jsonl'.length)
         let events = 0
         let lastTs = 0
-        try {
-          const stat = fs.statSync(file)
-          // append-only JSONL 一行一事件：只统计非空行即可；不再逐行 JSON.parse，
-          // 避免超大日志在会话列表/打开面板时反复整文件解析卡顿
-          lastTs = stat.mtimeMs
-          const lines = fs.readFileSync(file, 'utf-8').split('\n')
-          for (const line of lines) {
-            if (line.trim()) events++
+        // 已经加载到内存的会话直接读缓存，避免会话列表/日志面板每次整文件扫描
+        const cached = this.events.get(id)
+        if (cached) {
+          events = cached.length
+          lastTs = cached.length ? cached[cached.length - 1].ts : 0
+        } else {
+          try {
+            const stat = fs.statSync(file)
+            lastTs = stat.mtimeMs
+            const lines = fs.readFileSync(file, 'utf-8').split('\n')
+            for (const line of lines) {
+              if (line.trim()) events++
+            }
+          } catch {
+            continue
           }
-        } catch {
-          continue
         }
         out.push({ id, events, lastTs })
       }

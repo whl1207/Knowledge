@@ -4,7 +4,8 @@
   import { ElTree } from 'element-plus'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import type { RemoteRoot, RemoteFsNode } from '@/types/collab'
-  import { fetchFsInfo, fetchFsList, fetchFsRead, downloadRemoteFile, remotePathOf } from '@/platform/remoteFs'
+  import { fetchFsInfo, fetchFsList, downloadRemoteFile, remotePathOf } from '@/platform/remoteFs'
+  import { buildRemotePreviewTab } from '@/lib/knowFile/remotePreview'
   import { FILE_VIEWS as FILE_VIEWS_DEFS, supportsOfficeView } from '@/lib/knowFile/fileViews'
   import { NEW_FILE_TYPES, newFileType, writeNewFileSkeleton, type NewFileTypeKey } from '@/lib/knowFile/newFileTypes'
   import { FILE_SORT_ITEMS, fileTypeKey, type FileSortKey } from '@/lib/knowFile/fileSort'
@@ -89,10 +90,25 @@
   }
 
   const click = function(data: any){
-    // 远程节点：单击=主窗口内快速预览（远程只读，单次点击更顺手）；
-    //         双击=在独立窗口打开（FileWindow）
+    // 远程节点：文件 → 右侧标签栏（单窗口 / 安卓单击即打开，桌面单击快速预览、双击正式打开）；
+    //         文件夹 → 右侧「文件」视图切到该远程目录（与本地文件夹联动同一套观感）
     if (data?.remote) {
-      if (data.type === 'file') handleRemoteFileClick(data)
+      if (data.type === 'file') {
+        handleRemoteFileClick(data)
+        return
+      }
+      emit('node-opened', data)
+      const root = remoteRootOf(data)
+      if (root) {
+        void syncRemoteRootPermission(root)
+        // 远程目录只能在「文件」视图里展示：从看板 / 日历等切回来，避免点了文件夹却停在旧视图
+        store.selectView('文件')
+        store.knowEnterRemoteDir({
+          rootId: root.id,
+          rel: data.remoteRel || '',
+          label: data.isRemoteRoot ? root.name : data.label,
+        })
+      }
       return
     }
     // 点击工作区根目录时切换为当前工作区
@@ -264,6 +280,17 @@
     return store.remoteRoots.find((r: RemoteRoot) => r.id === data.remoteRootId) || null
   }
 
+  /** 进远程目录时同步一次主机权限（只读 ⇄ 可编辑 Markdown），让工具栏 / 标签栏状态不过期 */
+  const syncRemoteRootPermission = async (root: RemoteRoot) => {
+    try {
+      const info = await fetchFsInfo(root)
+      if (root.permission !== info.permission) {
+        root.permission = info.permission
+        store.saveWorkspace()
+      }
+    } catch { /* 离线时沿用本地缓存，真正保存时服务端还会校验 */ }
+  }
+
   /** 刷新远程工作区根节点：清空懒加载缓存并重新拉取内部文件列表 */
   const refreshRemoteRoot = async (data: any) => {
     const root = remoteRootOf(data)
@@ -293,12 +320,12 @@
     store.focusFileTab(tab.path)
   }
 
-  /** 点击远程文件：读取内容并打开预览标签 */
+  /** 点击远程文件：读取内容并打开预览标签（单窗口 / 安卓一律进标签栏） */
   const clickRemoteNode = async (data: any, opts?: { preview?: boolean }) => {
     if (!data || data.type !== 'file') return
-    // 多窗口模式：与历史行为一致，远程文件直接开独立窗口 / 浮层，不在主窗口里塞预览标签
+    // 多窗口模式没有标签栏：右键「预览」等入口仍打开独立文件窗口
     if (!store.singleWindowMode) {
-      openRemoteByMode(data)
+      openRemoteInNewWindow(data)
       return
     }
     // 单窗口模式：远程预览会切到新的文件标签，先处理当前文件标签的未保存内容
@@ -308,85 +335,28 @@
     const rel = relOfRemoteNode(root, data)
     // quickPreview：单击快速预览（主窗口不显示远程只读条）；false/未传 = 正式打开（选到该标签时显示只读条）
     const isPreview = opts?.preview === true
-    try {
-      const ext = (data.label || '').substring(data.label.lastIndexOf('.')) || ''
-      const extLower = ext.toLowerCase()
-      // 图片 / PDF：读取 base64 内联预览
-      const IMG_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
-      if (IMG_EXTS.includes(extLower) || extLower === '.pdf') {
-        const content = await fetchFsRead(root, rel)
-        if (content?.base64 || content?.text) {
-          await addRemoteTab({
-            path: remotePathOf(root, rel),
-            label: data.label,
-            type: 'file',
-            extension: ext,
-            isRemote: true,
-            quickPreview: isPreview,
-            remoteRootId: root.id,
-            remoteRel: rel,
-            // 存储原始 base64（不含 data: 前缀），供 PdfViewer / 图片渲染使用
-            remoteBase64: content.base64 || '',
-            remoteText: content.text || '',
-          })
-          return
-        }
-        await promptDownloadRemote(root, rel, data.label)
-        return
-      }
-      // Word 文档：主进程 mammoth 转 Markdown 后内联预览（.doc 旧格式不支持，仍走下载）
-      if (extLower === '.docx') {
-        const content = await fetchFsRead(root, rel)
-        if (content?.base64) {
-          const md: any = await getPlatform().host.docs.docxToMarkdown({ base64: content.base64 })
-          if (typeof md === 'string' && md) {
-            await addRemoteTab({
-              path: remotePathOf(root, rel),
-              label: data.label,
-              type: 'file',
-              extension: ext,
-              isRemote: true,
-              quickPreview: isPreview,
-              remoteRootId: root.id,
-              remoteRel: rel,
-              content: md,
-              remoteText: md,
-            })
-            return
-          }
-        }
-        await promptDownloadRemote(root, rel, data.label)
-        return
-      }
-      const content = await fetchFsRead(root, rel)
-      const text = content.text ?? ''
-      const isBinary = !content.text
-      // 其余二进制文件（视频等）：提示下载到本地打开
-      if (isBinary) {
-        await promptDownloadRemote(root, rel, data.label)
-        return
-      }
-      await addRemoteTab({
-        path: remotePathOf(root, rel),
-        label: data.label,
-        type: 'file',
-        extension: ext,
-        isRemote: true,
-        quickPreview: isPreview,
-        remoteRootId: root.id,
-        remoteRel: rel,
-        content: text,
-      })
-    } catch (e: any) {
-      ElMessage.error(store.locales === 'zh' ? ('远程文件读取失败: ' + (e?.message || '')) : ('Remote read failed: ' + (e?.message || '')))
+    const result = await buildRemotePreviewTab(root, rel, data.label, isPreview)
+    if (result.ok) {
+      await addRemoteTab(result.tab)
+      return
     }
+    if (result.reason === 'download') {
+      await promptDownloadRemote(root, rel, data.label)
+      return
+    }
+    ElMessage.error(store.locales === 'zh' ? ('远程文件读取失败: ' + (result.error || '')) : ('Remote read failed: ' + (result.error || '')))
   }
 
-  // ---- 远程文件「双击在独立窗口打开」（FileWindow） ----
+  // ---- 远程文件打开：单窗口进标签栏，多窗口才另开窗口 ----
 
-  /** 远程文件单击/双击判定：单击 → 主窗口内快速预览；320ms 内再次点击同一节点 → 双击打开 */
+  /** 远程文件单击/双击判定：单击 → 主窗口内快速预览；320ms 内再次点击同一节点 → 正式打开 */
   const handleRemoteFileClick = (data: any) => {
-    // 安卓：单击即打开（只读预览浮层）——「主窗口内快速预览标签」在单窗口环境里没有落点（点了等于没反应）
+    // 多窗口模式没有右侧标签栏：保持原行为，单击直接开独立窗口
+    if (!store.singleWindowMode) {
+      openRemoteByMode(data)
+      return
+    }
+    // 安卓：单击即正式打开（进右侧标签栏；触摸屏没有可靠的「双击」）
     if (tapOpensDirectly) {
       openRemoteByMode(data)
       return
@@ -411,11 +381,19 @@
     }, REMOTE_DBL_MS)
   }
 
-  /** 双击远程文件：在独立窗口(FileWindow)打开（只读预览） */
+  /**
+   * 正式打开远程文件：
+   *  - 单窗口（安卓 / 网页 / 桌面单窗口）：右侧标签栏，不再弹子窗口；
+   *  - 多窗口（桌面默认）：保留原行为，在独立文件窗口打开。
+   */
   const openRemoteByMode = (data: any) => {
     // 与本地文件一致：细长窗口下收起文件树抽屉，让屏幕交给文件窗口 / 右侧视图
-    emit('node-opened')
-    openRemoteInNewWindow(data)
+    emit('node-opened', data)
+    if (!store.singleWindowMode) {
+      openRemoteInNewWindow(data)
+      return
+    }
+    void clickRemoteNode(data)
   }
 
   /** 在新窗口（FileWindow.vue）打开远程文件：只读，默认浏览视图（可切导图/演示），可下载到本地 */
@@ -526,6 +504,7 @@
       const info = await fetchFsInfo(candidate)
       candidate.name = name || info.name || host
       candidate.rootName = info.name
+      candidate.permission = info.permission
     } catch (e: any) {
       ElMessage.error(store.locales === 'zh' ? ('无法连接共享: ' + (e?.message || '')) : ('Cannot connect: ' + (e?.message || '')))
       return

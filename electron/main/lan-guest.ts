@@ -733,6 +733,9 @@ export function lanGuestInfo() {
     ok: true,
     agent: lanGuestModeAllowed(policy, 'agent'),
     modes: policy.modes,
+    // 网页端导航栏可见性（内置模块 + 浏览器 Agent 入口）与共享插件（按插件 id）
+    navs: policy.navs,
+    plugins: policy.plugins,
     tools,
     skills: guestSkills(),
     maxSteps: policy.maxSteps,

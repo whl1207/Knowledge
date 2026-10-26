@@ -18,6 +18,7 @@ import mathjax3 from 'markdown-it-mathjax3'
 import mark from 'markdown-it-mark'
 import hljs from 'highlight.js'
 import { hashContent } from '@/lib/markdown/mermaid'
+import { sanitizeHtml } from '@/lib/markdown/sanitizeHtml'
 
 /** 共享的 markdown-it 实例（切片卡片用；含 mathjax 公式与 mermaid 占位） */
 export const cardMd: MarkdownIt = new MarkdownIt({
@@ -69,7 +70,7 @@ export const renderCardHtml = (content: string): string => {
   if (!key) return ''
   const hit = htmlCache.get(key)
   if (hit !== undefined) return hit
-  const html = cardMd.render(key)
+  const html = sanitizeHtml(cardMd.render(key))
   if (key.length <= CACHE_MAX_CONTENT) {
     if (htmlCache.size >= CACHE_MAX_ENTRIES) {
       const oldest = htmlCache.keys().next().value

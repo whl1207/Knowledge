@@ -78,7 +78,7 @@ function readClipboardSnapshot(): Electron.Data {
   } catch { /* 忽略 */ }
   try {
     const bookmark = clipboard.readBookmark()
-    if (bookmark && (bookmark.url || bookmark.title)) data.bookmark = bookmark
+    if (bookmark && (bookmark.url || bookmark.title)) (data as any).bookmark = bookmark
   } catch { /* 忽略 */ }
   return data
 }

@@ -259,29 +259,47 @@
                 </select>
                 <span class="exec-config-hint">{{ presentationHint }}</span>
               </div>
-              <div class="preset-tool-list">
-                <div v-for="t in toolRows" :key="t.name"
-                  class="preset-tool-item"
-                  :class="{ on: t.on }"
-                  :title="t.description || t.name"
-                  @click="togglePresetTool(t.name)">
-                  <span class="preset-tool-icon"><i class="fa" :class="t.icon"></i></span>
-                  <span class="preset-tool-info">
-                    <span class="preset-tool-name">{{ t.srcKind === 'plugin' ? t.name : (store.locales === 'zh' ? t.labelZh : t.labelEn) }}</span>
-                    <!-- 来源标识：内置 / 来自某个插件（用户要求：工具名右侧能看出它是内置还是插件给的） -->
-                    <span class="preset-tool-src" :class="t.srcKind"
-                      :title="t.srcKind === 'plugin'
-                        ? (store.locales === 'zh' ? `由插件「${t.srcLabelZh}」提供` : `Provided by plugin “${t.srcLabelEn}”`)
-                        : (store.locales === 'zh' ? '应用内置工具' : 'Built-in tool')">
-                      <i class="fa" :class="t.srcKind === 'plugin' ? 'fa-puzzle-piece' : 'fa-cube'"></i>
-                      {{ t.srcKind === 'plugin' ? t.srcLabelZh : (store.locales === 'zh' ? t.srcLabelZh : t.srcLabelEn) }}
+              <ToolGroupList
+                class="preset-tool-groups"
+                :rows="toolRows"
+                layout="grid"
+                @bulk="applyPresetToolBulk"
+              >
+                <template #row="{ row }">
+                  <div
+                    class="preset-tool-item preset-tool-card"
+                    :class="{ on: row.on }"
+                    :title="row.description || row.name"
+                    @click="togglePresetTool(row.name)"
+                  >
+                    <!-- 上半：图标 / 名称与来源、工具名 / 开关 -->
+                    <span class="preset-tool-main">
+                      <span class="preset-tool-icon"><i class="fa" :class="row.icon"></i></span>
+                      <span class="preset-tool-info">
+                        <span class="preset-tool-name">{{ row.srcKind === 'plugin' ? row.name : (store.locales === 'zh' ? row.labelZh : row.labelEn) }}</span>
+                        <span class="preset-tool-meta">
+                          <!-- 来源标识：内置 / 来自某个插件（用户要求：工具名右侧能看出它是内置还是插件给的） -->
+                          <span class="preset-tool-src" :class="row.srcKind"
+                            :title="row.srcKind === 'plugin'
+                              ? (store.locales === 'zh' ? `由插件「${row.srcLabelZh}」提供` : `Provided by plugin “${row.srcLabelEn}”`)
+                              : (store.locales === 'zh' ? '应用内置工具' : 'Built-in tool')">
+                            <i class="fa" :class="row.srcKind === 'plugin' ? 'fa-puzzle-piece' : 'fa-cube'"></i>
+                            {{ row.srcKind === 'plugin' ? row.srcLabelZh : (store.locales === 'zh' ? row.srcLabelZh : row.srcLabelEn) }}
+                          </span>
+                          <code v-if="row.srcKind !== 'plugin'" class="preset-tool-key">{{ row.name }}</code>
+                        </span>
+                      </span>
+                      <span class="preset-tool-toggle" :class="{ on: row.on }"><i class="preset-toggle-knob"></i></span>
                     </span>
-                    <code v-if="t.srcKind !== 'plugin'" class="preset-tool-key">{{ t.name }}</code>
-                    <span v-if="t.srcKind !== 'plugin' && store.locales === 'zh'" class="preset-tool-desc">{{ t.description }}</span>
-                  </span>
-                  <span class="preset-tool-toggle" :class="{ on: t.on }"><i class="preset-toggle-knob"></i></span>
-                </div>
-              </div>
+                    <!-- 说明：独占底部一行（内置工具描述是中文，英文界面不显示，与原先一致） -->
+                    <span
+                      v-if="row.srcKind !== 'plugin' && store.locales === 'zh'"
+                      class="preset-tool-desc"
+                      :title="row.description"
+                    >{{ row.description }}</span>
+                  </div>
+                </template>
+              </ToolGroupList>
               <div class="preset-tools-hint">
                 <i class="fa fa-info-circle"></i>
                 {{ store.locales === 'en'
@@ -498,6 +516,7 @@ import { mcpManager } from '@/platform/mcpManager'
 import { toolsFromCapabilities, setToolEnabled, toolOn, getPluginToolNames } from '@/lib/agent/capabilities'
 import { pluginDisplayName, pluginToolScopes } from '@/lib/plugin/runtime'
 import { AGENT_TOOL_REGISTRY, type AgentToolInfo } from '@/services/agentSkills'
+import ToolGroupList from '@/components/set/ToolGroupList.vue'
 import {
   scanAgentPresets, writeAgentPreset, removeAgentPreset, agentFilePath,
   openAgentPresetFolder as openPresetFolder, exportAllAgentPresets,
@@ -706,6 +725,33 @@ const togglePresetTool = (tool: string) => {
       caps.knowledgeBaseFiles = []
     }
   }
+}
+
+/**
+ * 组内全开 / 全关：与单工具开关同语义（逐工具写 `caps.enabledTools`），恒开工具跳过。
+ * 关掉 mcp_call / kb_search 时联动清空已关联的服务 / 库文件（与 togglePresetTool 一致），
+ * 否则会出现“工具关了但配置还挂着”的半截状态。
+ */
+const applyPresetToolBulk = ({ rows, on }: { rows: ToolRow[]; on: boolean }) => {
+  const caps = selected.value?.capabilities as any
+  if (!caps) return
+  let turnedOffMcp = false
+  let turnedOffKb = false
+  for (const row of rows) {
+    if (row.alwaysOn) continue
+    const wasOn = toolOn(caps, row.name)
+    setToolEnabled(caps, row.name, on)
+    if (wasOn && !on) {
+      if (row.name === 'mcp_call') turnedOffMcp = true
+      else if (row.name === 'kb_search') turnedOffKb = true
+    }
+  }
+  if (turnedOffMcp) {
+    caps.mcpServerIds = []
+    caps.mcpEquipmentIds = []
+    mcpEquipmentOptions.value = []
+  }
+  if (turnedOffKb) caps.knowledgeBaseFiles = []
 }
 
 // 工具呈现方式（缺省 native）：写入预设顶层 presentation 字段，运行时据此叠 SDK 段 / 补 run_code
@@ -1761,6 +1807,14 @@ onMounted(async () => {
 /* 工具呈现方式（native / PTC）：工具列表上方的单行配置 */
 .preset-pres-row { flex-shrink: 0; }
 .preset-pres-row .exec-config-label { min-width: 52px; font-weight: 600; }
+/* 工具分组外壳（ToolGroupList）：占满剩余高度，列宽比工具管理页更紧凑 */
+.preset-tool-groups { flex: 1 1 auto; min-height: 0; --tgl-min: 180px; }
+/* 工具卡片（仅工具页用；技能 / MCP / 知识库仍复用基础 .preset-tool-item 的横向布局）：
+   上半是图标 / 名称、来源、工具名 / 开关，说明独占底部一行 —— 比原先挤在窄列里省高度 */
+.preset-tool-card { flex-direction: column; align-items: stretch; gap: 2px; }
+.preset-tool-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.preset-tool-meta { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.preset-tool-card .preset-tool-src { align-self: center; }
 .preset-tool-icon {
   width: 22px; height: 22px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
@@ -1793,6 +1847,11 @@ onMounted(async () => {
   font-size: 10px; opacity: 0.75; line-height: 1.4; margin-top: 1px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   line-clamp: 2; overflow: hidden;
+}
+/* 工具卡片的说明：整卡宽度、单行省略（悬停 title 看全文） */
+.preset-tool-card .preset-tool-desc {
+  display: block; margin-top: auto; font-size: 9px; line-height: 1.35; opacity: 0.7;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
 .preset-tool-toggle {
   width: 26px; height: 14px; border-radius: 7px; margin-left: auto; flex-shrink: 0;

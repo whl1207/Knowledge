@@ -129,6 +129,16 @@ export interface AgentOptions {
   tokenScale?: number
   /** 禁用的技能名（技能管理开关关闭的；skill 工具加载时校验拒绝） */
   disabledSkills?: string[]
+  /**
+   * 复用的会话日志 id（跨轮持久会话）。
+   *
+   * 传入且 `resume=true` 时，主进程会尝试从该会话日志继续（不重新写 session/start、
+   * 不重新 seed 历史）；日志不存在 / 配置签名不兼容时自动改用新会话并在返回值里给出新 id。
+   * 聊天页把返回的 id 存进 `chat.agentSessionId`，下一轮直接复用。
+   */
+  sessionId?: string
+  /** 是否尝试复用 `sessionId` 指向的会话日志（默认 false：新建会话） */
+  resume?: boolean
   /** 父 agent id（子代理接缝：父销毁时级联销毁子代理） */
   parentId?: string
     /** MCP 服务 ID（Agent 预设开启 MCP 控制时使用；mcp_call 工具读取） */

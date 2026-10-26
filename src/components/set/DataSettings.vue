@@ -17,6 +17,7 @@ import {
   formatBytes,
   importChats,
   importDataGroup,
+  importLegacyChats,
   lsSizeOf,
   lsTotalBytes,
   readLsJson,
@@ -217,6 +218,17 @@ onMounted(refresh)
           </div>
         </div>
       </div>
+      <!-- 会话日志目录：数据清单里的日志行已有小图标，这里再给一个明确入口 -->
+      <div class="form-group">
+        <label>{{ zh() ? '会话日志目录' : 'Session logs' }}</label>
+        <div class="data-actions">
+          <div class="button data-btn" @click="openDataSubDir('session-logs')"
+               :title="zh() ? '打开 userData/session-logs（不存在时自动创建）' : 'Open userData/session-logs (created if missing)'">
+            <i class="fa fa-folder-open"></i>
+            {{ zh() ? '打开 session-logs' : 'Open session-logs' }}
+          </div>
+        </div>
+      </div>
       <!-- 全部配置备份：与数据清单中「界面与模型配置」同一套实现 -->
       <div class="form-group">
         <label>{{ zh() ? '配置备份' : 'Config Backup' }}</label>
@@ -228,6 +240,16 @@ onMounted(refresh)
           <div class="button data-btn" @click="importRow('config')"
                :title="zh() ? '从 JSON 备份导入全部配置（覆盖当前配置，需确认）' : 'Import all config from JSON (overwrites current, with confirmation)'">
             <i class="fa fa-upload"></i> {{ zh() ? '导入全部配置' : 'Import all' }}
+          </div>
+        </div>
+      </div>
+      <!-- 原始版本聊天 JSON 导入：不做自动兼容，由用户显式选择旧文件 -->
+      <div class="form-group">
+        <label>{{ zh() ? '原始版本聊天' : 'Legacy chats' }}</label>
+        <div class="data-actions">
+          <div class="button data-btn" @click="importLegacyChats(zh(), onImported)"
+               :title="zh() ? '导入旧版 AI-KM 的 ai-chats JSON（裸数组 / 旧整包备份 / 导出包）；与现有聊天合并，不恢复旧的 agent 会话' : 'Import an old AI-KM ai-chats JSON (raw array / old full backup / export package); merges with current chats and does not resume old agent sessions'">
+            <i class="fa fa-upload"></i> {{ zh() ? '导入原始版本 JSON' : 'Import legacy JSON' }}
           </div>
         </div>
       </div>
@@ -281,8 +303,8 @@ onMounted(refresh)
       </div>
       <div class="config-description" style="margin-left:0">
         {{ zh()
-          ? '导入会覆盖对应数据（弹框确认）；聊天记录为合并导入（相同会话跳过）。清空聊天 / 初始化等破坏性操作在「基础 → 常用操作」中。'
-          : 'Import overwrites the related data (with confirmation); chats are merged (same chat skipped). Destructive actions (clear chats, initialize) live under Basic → Common Actions.' }}
+          ? '导入会覆盖对应数据（弹框确认）；聊天记录为合并导入（相同会话跳过）。旧版 AI-KM 的 ai-chats JSON（裸数组 / 旧整包备份 / 导出包）请用上方「原始版本聊天 → 导入原始版本 JSON」，不会自动接管旧 agent 会话。清空聊天 / 初始化等破坏性操作在「基础 → 常用操作」中。'
+          : 'Import overwrites the related data (with confirmation); chats are merged (same chat skipped). For an old AI-KM ai-chats JSON (raw array / old full backup / export package), use Legacy chats → Import legacy JSON above; old agent sessions are not resumed. Destructive actions (clear chats, initialize) live under Basic → Common Actions.' }}
       </div>
     </div>
   </div>

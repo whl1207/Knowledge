@@ -393,10 +393,10 @@ const dsh = {
     },
   },
 
-  /** 局域网远程文件共享（主进程 remote-fs-service，HTTP 只读） */
+  /** 局域网远程文件共享（主进程 remote-fs-service，HTTP；默认只读，可授权编辑 Markdown） */
   remoteFs: {
     /** 启动共享文件夹服务 */
-    start(payload?: { port?: number; rootDir?: string; token?: string }): Promise<{ success: boolean; port?: number; token?: string; error?: string }> {
+    start(payload?: { port?: number; rootDir?: string; token?: string; permission?: import('../main/remote-fs-service').RemoteFsPermission }): Promise<{ success: boolean; port?: number; token?: string; permission?: import('../main/remote-fs-service').RemoteFsPermission; error?: string }> {
       return invokeIpc('remoteFs:start', payload)
     },
     stop(): Promise<{ success: boolean }> {
@@ -409,8 +409,13 @@ const dsh = {
       rootDir: string
       token: string
       name: string
+      permission: import('../main/remote-fs-service').RemoteFsPermission
     }> {
       return invokeIpc('remoteFs:getStatus')
+    },
+    /** 运行中即时切换局域网用户权限 */
+    setPermission(permission: import('../main/remote-fs-service').RemoteFsPermission): Promise<{ success: boolean; permission: import('../main/remote-fs-service').RemoteFsPermission }> {
+      return invokeIpc('remoteFs:setPermission', permission)
     },
     /** 订阅远程文件共享服务状态 */
     onStatus(cb: (status: any) => void): () => void {

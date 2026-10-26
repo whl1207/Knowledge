@@ -56,6 +56,14 @@ export interface EditDiffResult {
 /** 单文件预览（带路径，供 UI 直接渲染） */
 export interface EditDiffFilePreview extends EditDiffResult {
   path: string
+  /**
+   * 实际落盘的绝对路径（UI 专用，供「打开文件」使用）。
+   *
+   * 为什么不能只靠 `path` + 当前工作区拼：工具执行用的是「执行当时」的 cwd
+   * （每聊天自己的工作区），打开按钮可能发生在之后——全局工作区被切换过，
+   * 或者读取的是旧聊天记录 → 拼出来的路径会指到别处（ENOENT）。
+   */
+  absPath?: string
   /** 目标文件此前不存在（新建） */
   created?: boolean
 }

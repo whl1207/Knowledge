@@ -217,6 +217,7 @@ const BROWSER_TOOLS_HINT = [
   '      ⑦ 每个会话的页面有稳定 label（p1/p2…，browser_list_tabs 可见）；任务完成时用 browser_space_finish 关闭本会话页面，要交给用户看的页面放进 keep。',
   '      ⑧ 在某个站点做重复任务前，先用 browser_learning_get/list 读站点经验；成功后把可复用要点用 browser_learning_save 记下来（不要写密码/Cookie）。',
   '      ⑨ 完整可复用流程存成 Playbook：browser_playbook_save 保存草稿，等用户在「设置 → Playbook」批准后再 browser_playbook_run；未批准不要反复尝试运行。',
+  '      ⑩ 拖拽/滚轮/富文本粘贴用 browser_drag / browser_wheel / browser_paste；点击按钮弹出文件选择器时，先 browser_click，再 browser_upload（无需 ref）。用户右键「交给 AI 处理此页」后用 browser_claim_tab 接管。',
 ].join('\n')
 
 /** 根据启用的工具白名单生成“可用工具”说明；供预设智能体在自定义 systemPrompt 之后附加 */

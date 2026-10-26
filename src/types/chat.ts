@@ -234,6 +234,16 @@ export interface ChatConfig {
 /** 聊天会话 */
 export interface Chat {
   id: string
+  /** 聊天存档结构版本（2 起带持久 agent 会话字段；旧存档不再自动迁移，由显式导入转换） */
+  schemaVersion?: number
+  /**
+   * 本聊天复用的 agent 会话 id（跨轮持久会话）。
+   * 旧存档没有该字段时保持 null：不做自动接管；需要旧历史请从
+   * 「设置 → 通用 → 数据 → 原始版本聊天」显式导入，导入后的会话从当前配置新建。
+   */
+  agentSessionId?: string | null
+  /** 创建设置会话时的配置签名（模型/系统提示/工具集变化时切新会话） */
+  agentSessionSignature?: string | null
   title: string
   /**
    * 标题来源标记（对齐 DSH 的 title provider 归属）：

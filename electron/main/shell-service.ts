@@ -40,7 +40,7 @@ export class ShellService {
    * @param command 要执行的命令
    * @param cwd 工作目录（默认主进程 cwd）
    */
-  async executeCommand(command: string, cwd?: string): Promise<ShellExecutionResult> {
+  async executeCommand(command: string, cwd?: string, signal?: AbortSignal): Promise<ShellExecutionResult> {
     const startTime = Date.now()
     try {
       const { stdout, stderr } = await execAsync(command, {
@@ -48,7 +48,9 @@ export class ShellService {
         maxBuffer: 1024 * 1024 * 10, // 10MB 输出限制
         cwd: cwd || process.cwd(), // 工作目录
         windowsHide: true, // Windows 下隐藏控制台窗口
-        encoding: 'buffer' // 取原始字节，用 smart decode 解决 GBK/UTF-8 编码问题
+        encoding: 'buffer', // 取原始字节，用 smart decode 解决 GBK/UTF-8 编码问题
+        // 协作取消：turn cancel / 工具超时都会 abort 这个 signal，Node 会杀掉子进程
+        signal,
       })
       return {
         success: true,

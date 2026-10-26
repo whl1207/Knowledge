@@ -110,8 +110,30 @@ import {
   isVoiceOverlayWindow,
 } from './voice-overlay'
 // 全局键盘抬起事件：Electron globalShortcut 只有 keydown，长按说话必须额外监听 keyup。
-import * as uiohookPkg from 'uiohook-napi'
-const { uIOhook, UiohookKey } = uiohookPkg as any
+// ⚠️ uiohook-napi 是**可选的原生模块**，不能在主进程顶层 `import`：
+//   1) 它在 import 阶段就会 dlopen 原生二进制；预编译产物缺失 / 架构不匹配时（例：Linux arm64
+//      安装包里带的 linux-arm64 预编译其实是 x86-64），顶层 import 会让主进程在创建窗口之前
+//      直接抛错退出 —— 用户看到的就是「只有进程、没有界面」；
+//   2) 它只服务于「按住说话」的全局 keyup 监听，加载失败应该只禁用这个模式，而不是拖垮整个软件。
+// 因此改为按需加载：第一次真正要用时再 require，失败只记一条可读日志并降级为单点快捷键。
+type UiohookApi = { uIOhook: any; UiohookKey: Record<string, number> }
+let uiohookApi: UiohookApi | null = null
+let uiohookLoadError = ''
+function loadUiohook(): UiohookApi | null {
+  if (uiohookApi) return uiohookApi
+  if (uiohookLoadError) return null
+  try {
+    const require_ = createRequire(import.meta.url)
+    const mod: any = require_('uiohook-napi')
+    if (!mod?.uIOhook || !mod?.UiohookKey) throw new Error('uiohook-napi 缺少 uIOhook / UiohookKey 导出')
+    uiohookApi = { uIOhook: mod.uIOhook, UiohookKey: mod.UiohookKey }
+    return uiohookApi
+  } catch (err: any) {
+    uiohookLoadError = `全局按键监听不可用（uiohook-napi 加载失败，长按说话将退回单点模式）：${err?.message || err}`
+    logWarn('uiohook', uiohookLoadError)
+    return null
+  }
+}
 import { initMapTiles, registerMapTilesIpc } from './map-tiles'
 import { registerFileAssocIpc, syncFileTypeIcons } from './file-assoc'
 import { getGlobalZoom, setGlobalZoom, stepZoom, excludeFromAppZoom } from './window-zoom'
@@ -287,6 +309,12 @@ async function createWindow() {
     ...(process.platform === 'linux' ? { frame: false } : { titleBarStyle: 'hidden' }),
     webPreferences: {
       preload: resolvePreload(),
+      // 明确写出安全边界：渲染层只通过 preload 的窄接口访问主进程。
+      // webSecurity 仍为 false（历史原因：本地 file:// 图片 / drawio 资源），
+      // 因此内容级消毒（Markdown / v-html）是必须的另一半防线。
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
       webSecurity: false,
       // 折叠到托管区后窗口不可见：Chromium 默认会节流后台窗口的定时器，
       // 会让渲染层驱动的后台任务（智能体循环 / 采集 / 工作流）变慢，也让托盘任务进度停止更新
@@ -386,17 +414,20 @@ async function createWindow() {
 app.whenReady().then(async () => {
   // 上次「清理缓存」有被进程占用的目录未删掉：启动时窗口尚未创建、无进程占用，此刻补清；
   // 全部清掉才移除标记，仍有残留则保留给下次启动（避免删一半）。
+  // 不 await：缓存清扫可能遍历大目录，不应该挡首屏；失败只记日志。
   try {
     if (fs.existsSync(cacheCleanPendingPath())) {
-      const r = await cleanUserDataCache(false)
-      if (!r.failed.length) fs.rmSync(cacheCleanPendingPath(), { force: true })
-      logInfo('userdata-cache', `startup sweep: freed ${r.freed} B, removed ${r.removed.length}, still locked ${r.failed.length}`
-        + (r.failed.length ? ` [${r.failed.join(', ')}]` : ''))
+      void cleanUserDataCache(false).then((r) => {
+        if (!r.failed.length) fs.rmSync(cacheCleanPendingPath(), { force: true })
+        logInfo('userdata-cache', `startup sweep: freed ${r.freed} B, removed ${r.removed.length}, still locked ${r.failed.length}`
+          + (r.failed.length ? ` [${r.failed.join(', ')}]` : ''))
+      }).catch((e) => logWarn('userdata-cache', 'startup sweep failed', e))
     }
   } catch (e) {
     logWarn('userdata-cache', 'startup sweep failed', e)
   }
-  await pythonService.initialize()
+  // Python 探测/初始化不挡首屏：工具真正执行时会等待服务就绪
+  void pythonService.initialize().catch((e) => console.warn('[python] init failed', e))
   // 工具结果 spill 目录清扫（best-effort，只删形如 aikm-spill-XXXXXX 的旧临时目录）。
   // spill 是缓存语义：过期即删，模型拿到"文件不存在"会重跑工具，不影响正确性。
   try {
@@ -433,7 +464,7 @@ app.whenReady().then(async () => {
   registerPythonAppIpc()
   // 局域网协同文件编辑（WebSocket 服务器 + 房间管理）
   registerCollabIpc()
-  // 局域网远程文件共享（HTTP 只读：目录列表 / 预览 / 下载）
+  // 局域网远程文件共享（HTTP：目录列表 / 预览 / 下载；可授权编辑 Markdown）
   registerRemoteFsIpc()
   // MBTiles 离线地图包服务：内置包扫描 + 用户包挂载注册表 + 瓦片读取
   registerMapTilesIpc()
@@ -450,7 +481,8 @@ app.whenReady().then(async () => {
     // 右键菜单「设置…」：打开 / 聚焦设置独立窗口并定位到「基础」
     openSettings: (nav) => openSettingsWindowFromTray(nav || 'view'),
   })
-  await initMapTiles(join(publicDir, 'maps'))
+  // 离线地图包只影响地图视图，不阻塞首屏
+  void initMapTiles(join(publicDir, 'maps')).catch((e) => console.warn('[map-tiles] init failed', e))
   if (LAUNCH_ARG.browser) {
     // 启动参数 --browser：直接打开「浏览器 Agent」窗口，不创建软件本体主窗口
     browserAgentService.ensureWindow(LAUNCH_ARG.url)
@@ -517,6 +549,8 @@ app.on('before-quit', () => {
   trayService.markQuitting()
   // 终端会话是真的 shell 进程：退出前一律结束，避免留下孤儿进程
   disposeAllTerminals()
+  // 会话日志是异步批量写的：退出前把待写队列同步刷盘，避免最后几条 turn/tool 事件丢失
+  try { sessionLog.flushAllSync() } catch (e) { console.warn('[session-log] quit flush failed', e) }
 })
 
 app.on('second-instance', (_event, commandLine) => {
@@ -596,8 +630,9 @@ ipcMain.handle('open-win', (_, arg) => {
   const childWindow = new BrowserWindow({
     webPreferences: {
       preload: resolvePreload(),
-      nodeIntegration: true,
-      contextIsolation: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
     },
   })
   guardPreload(childWindow)
@@ -719,8 +754,11 @@ function openFileWindow(opts: {
     backgroundColor: themeBackgroundColor,
     webPreferences: {
       preload: resolvePreload(),
-      nodeIntegration: true,
-      contextIsolation: false,
+      // 文件窗口会渲染用户/外部来源的 Markdown，绝不能给它 Node 能力。
+      // 与内容消毒（sanitizeHtml）叠加：即使消毒漏了一种标签，也无法 require/child_process。
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
       webSecurity: false
     },
   })
@@ -1186,6 +1224,11 @@ ipcMain.handle('browser-agent:set-compact', async (_e, payload: { compact?: bool
   browserAgentService.setCompact(!!payload?.compact)
   return { ok: true }
 })
+// 底部状态栏（轻提示区）：壳内无提示时收起为 0，有提示时让出 24px，网页视图同步铺满/缩短
+ipcMain.handle('browser-agent:set-bottom-bar', async (_e, payload: { visible?: boolean } = {}) => {
+  browserAgentService.setBottomBar(!!payload?.visible)
+  return { ok: true }
+})
 
 // ==================== 浏览器停靠（主页右侧栏「浏览器」标签） ====================
 // 原生 WebContentsView 挂到**主窗口**上，位置由侧栏里的渲染层上报（与 Office 编辑器同一套做法：
@@ -1423,6 +1466,8 @@ ipcMain.handle('browser-agent:download-open', async (_e, payload: { id?: string 
   browserAgentService.openDownload(String(payload?.id || '')))
 ipcMain.handle('browser-agent:download-reveal', async (_e, payload: { id?: string } = {}) =>
   browserAgentService.showDownloadInFolder(String(payload?.id || '')))
+ipcMain.handle('browser-agent:download-control', async (_e, payload: { id?: string; action?: string; path?: string } = {}) =>
+  browserAgentService.controlDownload(String(payload?.id || ''), String(payload?.action || ''), payload?.path ? String(payload.path) : undefined))
 ipcMain.handle('browser-agent:downloads-clear', async () => browserAgentService.clearDownloads())
 // ===== 浏览历史 / 最近关闭（P1） =====
 ipcMain.handle('browser-agent:history-list', async (_e, payload: { query?: string; limit?: number } = {}) =>
@@ -2519,6 +2564,100 @@ ipcMain.handle('exportPdf', async (event, { html, title, landscape, outline }: {
     if (pdfWin && !pdfWin.isDestroyed()) pdfWin.destroy()
     try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
     return { success: false, error: error.message }
+  }
+})
+
+// 导出「原文 + 译文叠加层」PDF：先打印透明底的译文层，再用 pdf-lib 逐页叠到原 PDF 上。
+// 这样原 PDF 的页面尺寸、图片与矢量内容都原样保留，译文是矢量文字（可搜索 / 可复制），
+// 文件也不会因为逐页截图而膨胀。调用方（PdfViewer 全文翻译）会保证叠加层页数 = 原 PDF 页数。
+//
+// 兼容模式（imageBased=true）：加密 / xref 损坏的 PDF 无法被 pdf-lib 解析（典型报错
+// “Expected instance of PDFDict, but got instance of undefined”），这时调用方会在 html 里
+// 内联「原页面截图 + 译文块」，宿主直接打印保存，完全不碰 pdf-lib。
+ipcMain.handle('exportPdfOverlay', async (event, payload: {
+  html: string
+  title: string
+  defaultPath?: string
+  pdfPath?: string
+  pdfBase64?: string
+  imageBased?: boolean
+}) => {
+  const html = String(payload?.html || '')
+  if (!html) return { success: false, error: '缺少译文叠加层内容' }
+  const imageBased = payload?.imageBased === true
+  let stage = '读取原 PDF'
+  let doc: any = null
+  let PDFDocumentClass: any = null
+  try {
+    if (!imageBased) {
+      let src: Buffer | null = null
+      if (payload?.pdfPath) src = fs.readFileSync(payload.pdfPath)
+      else if (payload?.pdfBase64) src = Buffer.from(String(payload.pdfBase64), 'base64')
+      if (!src || !src.length) return { success: false, error: '缺少原始 PDF 数据' }
+
+      stage = '加载原 PDF'
+      PDFDocumentClass = (await import('pdf-lib')).PDFDocument
+      try {
+        doc = await PDFDocumentClass.load(asUint8(src), { ignoreEncryption: true, updateMetadata: false })
+        // 页树解析是懒加载的：这里主动触发一次，坏 xref / 加密对象会在此暴露
+        doc.getPageCount()
+      } catch (error: any) {
+        console.error('[exportPdfOverlay] 原 PDF 无法用 pdf-lib 解析，改走兼容模式:', error)
+        return {
+          success: false,
+          code: 'pdf-lib-unreadable',
+          error: `原 PDF 无法用 pdf-lib 解析：${String(error?.message || error)}`,
+        }
+      }
+    }
+
+    const result = await dialog.showSaveDialog(ipcOwnerWindow(event.sender.id), {
+      title: '导出 PDF',
+      defaultPath: String(payload?.defaultPath || `${payload?.title || '文档'}.pdf`),
+      filters: [{ name: 'PDF 文档', extensions: ['pdf'] }]
+    })
+    if (result.canceled || !result.filePath) {
+      return { success: false, error: '用户取消' }
+    }
+
+    if (imageBased) {
+      stage = '生成兼容模式 PDF'
+      const pdfData = await withPrintWindow(html, (wc) =>
+        wc.printToPDF({ printBackground: true, preferCSSPageSize: true }),
+      )
+      stage = '写入 PDF'
+      fs.writeFileSync(result.filePath, asNodeBytes(asUint8(pdfData)))
+      return { success: true, path: result.filePath }
+    }
+
+    stage = '生成译文叠加层'
+    // 叠加层用 CSS 的 @page 尺寸打印（preferCSSPageSize），页面尺寸与页面坐标都沿用 PDF 原始尺寸
+    const overlayBytes = await withPrintWindow(html, (wc) =>
+      wc.printToPDF({ printBackground: true, preferCSSPageSize: true }),
+    )
+    const overlay = await PDFDocumentClass.load(asUint8(overlayBytes), { ignoreEncryption: true })
+    if (overlay.getPageCount() !== doc.getPageCount()) {
+      return {
+        success: false,
+        error: `译文叠加层页数与原 PDF 不一致（${overlay.getPageCount()}/${doc.getPageCount()}）`,
+      }
+    }
+    stage = '合并译文层'
+    // 直接复用已加载的原文档（而不是 copyPages 到新文档），以保留书签 / 链接等原有结构
+    for (let i = 0; i < doc.getPageCount(); i++) {
+      const page = doc.getPage(i)
+      const size = page.getSize()
+      const embedded = await doc.embedPage(overlay.getPage(i))
+      page.drawPage(embedded, { x: 0, y: 0, width: size.width, height: size.height })
+    }
+    stage = '写入 PDF'
+    // 不更新表单字段外观：这份 PDF 只做叠加，不该动原有表单；同时绕开 pdf-lib 对
+    // 某些缺字段的 AcroForm 做 appearance 更新时的异常（典型报错 Expected instance of PDFDict）
+    fs.writeFileSync(result.filePath, asNodeBytes(await doc.save({ updateFieldAppearances: false })))
+    return { success: true, path: result.filePath, pages: doc.getPageCount() }
+  } catch (error: any) {
+    console.error(`[exportPdfOverlay] ${stage}失败:`, error)
+    return { success: false, error: `${stage}失败：${String(error?.message || error)}` }
   }
 })
 
@@ -4823,7 +4962,7 @@ function mainKeycodeOf(accelerator: string): number | null {
     Right: 'ArrowRight',
   }
   const name = aliases[normalized] || normalized
-  const code = (UiohookKey as any)?.[name]
+  const code = loadUiohook()?.UiohookKey?.[name]
   return typeof code === 'number' ? code : null
 }
 
@@ -4854,7 +4993,9 @@ function restoreCapsLockIfNeeded(): void {
   holdCapsToggled = false
   // 长按 CapsLock 触发听写时，按下那一下已经切换了大小写；这里补按一次恢复原状态。
   ignoreHoldEventsUntil = Date.now() + 500
-  try { uIOhook.keyTap(UiohookKey.CapsLock) } catch { /* 忽略 */ }
+  const api = loadUiohook()
+  if (!api) return
+  try { api.uIOhook.keyTap(api.UiohookKey.CapsLock) } catch { /* 忽略 */ }
 }
 
 function onGlobalKeydownForHold(e: { keycode?: number; ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean }): void {
@@ -4867,7 +5008,7 @@ function onGlobalKeydownForHold(e: { keycode?: number; ctrlKey?: boolean; shiftK
   if (lastVoiceState?.phase && lastVoiceState.phase !== 'idle') return
 
   holdKeyHeld = true
-  holdCapsToggled = asrHoldKeycode === UiohookKey.CapsLock
+  holdCapsToggled = asrHoldKeycode === (loadUiohook()?.UiohookKey.CapsLock as number)
   // 长按模式完全由这里处理（窗口内也已让行）：前台是本应用就走 DOM 落点，否则走系统粘贴
   const focusedUsable = voiceFocusedWindowUsable()
   const system = !focusedUsable
@@ -4923,13 +5064,19 @@ function onGlobalKeyupForHold(e: { keycode?: number }): void {
 
 function startAsrHoldHook(): boolean {
   if (asrHookStarted) return true
+  const api = loadUiohook()
+  if (!api) {
+    asrHookStarted = false
+    asrHookError = uiohookLoadError || '全局按键监听不可用'
+    return false
+  }
   try {
     if (!asrHookAttached) {
-      uIOhook.on('keydown', onGlobalKeydownForHold)
-      uIOhook.on('keyup', onGlobalKeyupForHold)
+      api.uIOhook.on('keydown', onGlobalKeydownForHold)
+      api.uIOhook.on('keyup', onGlobalKeyupForHold)
       asrHookAttached = true
     }
-    uIOhook.start()
+    api.uIOhook.start()
     asrHookStarted = true
     asrHookError = ''
     return true
@@ -4937,8 +5084,8 @@ function startAsrHoldHook(): boolean {
     asrHookStarted = false
     asrHookError = String(e?.message || e)
     if (asrHookAttached) {
-      try { uIOhook.off('keydown', onGlobalKeydownForHold) } catch { /* 忽略 */ }
-      try { uIOhook.off('keyup', onGlobalKeyupForHold) } catch { /* 忽略 */ }
+      try { api.uIOhook.off('keydown', onGlobalKeydownForHold) } catch { /* 忽略 */ }
+      try { api.uIOhook.off('keyup', onGlobalKeyupForHold) } catch { /* 忽略 */ }
       asrHookAttached = false
     }
     logWarn('ASR', `long-press hook failed: ${asrHookError}`)
@@ -4951,7 +5098,9 @@ function stopAsrHoldHook(): void {
   if (holdStartTimer) { clearTimeout(holdStartTimer); holdStartTimer = null }
   restoreCapsLockIfNeeded()
   if (!asrHookStarted) return
-  try { uIOhook.stop() } catch { /* 忽略 */ }
+  const api = loadUiohook()
+  if (!api) { asrHookStarted = false; return }
+  try { api.uIOhook.stop() } catch { /* 忽略 */ }
   asrHookStarted = false
 }
 
@@ -4966,6 +5115,12 @@ ipcMain.handle('asr:set-hold-mode', async (_event, payload?: { enabled?: boolean
     return { success: true, supported: true }
   }
   asrHoldShortcut = String(payload?.shortcut || '')
+  // 原生监听模块不可用（如 Linux arm64 预编译架构不匹配）→ 明确告诉界面退回单点模式，
+  // 不要抛出异常（异常会打断 ASR 设置页，而长按只是可选的增强功能）。
+  if (!loadUiohook()) {
+    stopAsrHoldHook()
+    return { success: false, supported: false, error: uiohookLoadError || '全局按键监听不可用，请使用单点开关' }
+  }
   // Wayland 下 libuiohook 拿不到原生全局按键（XWayland 也只看得到 X11 窗口），
   // 强行开启会表现为「松手停不下来」，因此直接退回单点开关。
   if (process.platform === 'linux' && /wayland/i.test(String(process.env.XDG_SESSION_TYPE || ''))) {
@@ -5476,8 +5631,15 @@ function extractProxyAssistantText(raw: string): string {
 function withHostRuntime(html: Buffer | string): Buffer | string {
   const isBuf = Buffer.isBuffer(html)
   const text = isBuf ? html.toString('utf8') : String(html)
-  const cap = lanFsCapability(lanKbDir, getLanGuestPolicy()?.guestFs === 'write')
-  const boot = `<script>window.__AIKM_HOST__=${JSON.stringify({ fs: cap.fs, rootName: cap.root })};</script>`
+  const guestPolicy = getLanGuestPolicy()
+  const cap = lanFsCapability(lanKbDir, guestPolicy?.guestFs === 'write')
+  const boot = `<script>window.__AIKM_HOST__=${JSON.stringify({
+    fs: cap.fs,
+    rootName: cap.root,
+    // 导航可见性随入口页一起下发：网页端首帧就按主机策略收好导航，避免先闪出全部模块
+    navs: guestPolicy?.navs,
+    plugins: guestPolicy?.plugins,
+  })};</script>`
   const out = /<\/head>/i.test(text) ? text.replace(/<\/head>/i, `${boot}</head>`) : boot + text
   return isBuf ? Buffer.from(out, 'utf8') : out
 }
@@ -5566,6 +5728,70 @@ async function startLanServer(port: number): Promise<{ success: boolean; error?:
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json; charset=utf-8')
         res.end(JSON.stringify({ ok: true, fs: caps.fs, rootName: caps.root }))
+        return
+      }
+
+      // ===== 共享插件（网页端导航里的插件面板）=====
+      // 仅返回主机在「协作 → 共享 → 局域网共享」里勾选的插件；bundle 也只允许这些 id。
+      // 插件界面半边在访客浏览器里执行，但工具调用仍走访客白名单，不会获得额外主机权限。
+      if (urlPath.startsWith('/api/plugins')) {
+        const guestPolicy = getLanGuestPolicy()
+        const allowed = new Set(Array.isArray(guestPolicy?.plugins) ? guestPolicy.plugins : [])
+        const route = urlPath.split('?')[0]
+        const sendJson = (code: number, body: unknown) => {
+          res.statusCode = code
+          res.setHeader('Content-Type', 'application/json; charset=utf-8')
+          res.setHeader('Cache-Control', 'no-store')
+          res.end(JSON.stringify(body))
+        }
+        if (req.method !== 'GET') {
+          sendJson(405, { ok: false, error: '仅支持 GET' })
+          return
+        }
+        if (route === '/api/plugins/list') {
+          const plugins = pluginHost.list()
+            .filter((p) => allowed.has(p.id) && p.status === 'active' && p.hasClient)
+            .map((p) => ({
+              id: p.id,
+              name: p.name,
+              version: p.version,
+              apiVersion: p.apiVersion,
+              description: p.description,
+              dir: '',
+              relDir: '',
+              folder: '',
+              status: 'active',
+              enabled: true,
+              permissions: [],
+              inject: [],
+              tools: [],
+              services: [],
+              hasMain: false,
+              hasClient: true,
+              clientEntry: p.clientEntry,
+              config: {},
+              declaredSlots: [],
+              error: null,
+              loadedAt: p.loadedAt,
+            }))
+          sendJson(200, { plugins, rootDir: '', customRoot: false, services: [] })
+          return
+        }
+        if (route === '/api/plugins/bundle') {
+          const id = parseLanQuery(req.url || '').id || ''
+          if (!id || !allowed.has(id)) {
+            sendJson(403, { ok: false, error: '该插件未共享给局域网用户' })
+            return
+          }
+          try {
+            const bundle = pluginHost.readClientBundle(id)
+            sendJson(200, bundle)
+          } catch (e: any) {
+            sendJson(404, { ok: false, error: String(e?.message || e) })
+          }
+          return
+        }
+        sendJson(404, { ok: false, error: '未知接口' })
         return
       }
 

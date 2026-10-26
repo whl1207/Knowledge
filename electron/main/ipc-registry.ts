@@ -47,6 +47,33 @@ export function toPlainPayload(value: unknown): unknown {
   return toPlainJson(value)
 }
 
+/**
+ * 只允许「应用自己的顶层文档」调用 IPC。
+ *
+ * 背景：渲染层会显示用户文件 / 模型输出 / 网页预览；一旦内容层被 XSS 击穿，
+ * `window` 上的 IPC 桥就是权限放大器。这里做两道最低成本的边界：
+ * 1. 拒绝子 frame（iframe / webview 内嵌页面）；
+ * 2. 只接受 file:// 应用文档与本地 dev server 的 http 页面。
+ *
+ * 注意：不校验具体路由（hash 会变），只校验 origin/scheme；插件与自己开的窗口
+ * 仍是同一份应用文档，因此不受影响。
+ */
+function isTrustedIpcSender(event: IpcMainInvokeEvent): boolean {
+  try {
+    const frame = event.senderFrame
+    // 子 frame 一律拒绝（网页预览 / iframe 内的脚本不应拿到宿主 IPC）
+    if (frame && frame.parent) return false
+    const url = String(frame?.url || event.sender.getURL() || '')
+    if (!url) return false
+    if (url.startsWith('file://')) return true
+    if (DEV_SERVER_URL && url.startsWith(DEV_SERVER_URL)) return true
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(url)) return true
+    return false
+  } catch {
+    return false
+  }
+}
+
 /** 注册一个命名空间通道；返回注销函数。重复注册直接抛错（fail-loud）。 */
 export function registerIpc(channel: string, handler: IpcHandler): () => void {
   if (handlers.has(channel)) {
@@ -55,6 +82,9 @@ export function registerIpc(channel: string, handler: IpcHandler): () => void {
   handlers.set(channel, handler)
   ipcMain.handle(channel, async (event, payload): Promise<IpcResponse<any>> => {
     try {
+      if (!isTrustedIpcSender(event)) {
+        throw new IPCError('FORBIDDEN', `拒绝来自不受信任文档的 IPC 调用: ${channel}`)
+      }
       // 入参净化：结构化克隆前剥掉一切非 JSON 值
       const plainPayload = toPlainJson(payload)
       const data = await handler(plainPayload, event)

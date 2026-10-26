@@ -34,6 +34,10 @@ export interface HostRuntimeInfo {
   fs: 'off' | 'read' | 'write'
   /** 共享目录名（仅用于界面提示） */
   rootName: string
+  /** 访客可见的内置模块 / 入口 key；缺省 = 未配置（不额外限制） */
+  navs?: string[]
+  /** 访客可见的插件 id；缺省 = 未配置（不额外限制） */
+  plugins?: string[]
 }
 
 /** 读取主机注入的运行时信息；非局域网访客返回 null */
@@ -42,7 +46,14 @@ export function hostRuntime(): HostRuntimeInfo | null {
   const info = (window as any).__AIKM_HOST__
   if (!info || typeof info !== 'object') return null
   const fs = info.fs === 'read' || info.fs === 'write' ? info.fs : 'off'
-  return { fs, rootName: String(info.rootName || '') }
+  const strings = (v: unknown): string[] | undefined =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined
+  return {
+    fs,
+    rootName: String(info.rootName || ''),
+    navs: strings(info.navs),
+    plugins: strings(info.plugins),
+  }
 }
 
 /** 主机文件接口（与 electron/main/lan-fs-api.ts 的路由一一对应） */
@@ -496,6 +507,7 @@ const hostPort: HostPort = {
   docs: {
     async docxToMarkdown() { return { error: 'not-supported' } },
     async exportPdf() { return { success: false, error: 'not-supported' } },
+    async exportPdfOverlay() { return { success: false, error: 'not-supported' } },
     async printSlidesPdf() { return { success: false, error: 'not-supported' } },
   },
   table: {

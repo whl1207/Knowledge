@@ -166,7 +166,7 @@ export class PythonService {
   /**
    * 执行 Python 代码
    */
-  async executeCode(code: string, input: any = '', cwd?: string, sandboxMode: 'safe' | 'workspace' = 'safe'): Promise<PythonExecutionResult> {
+  async executeCode(code: string, input: any = '', cwd?: string, sandboxMode: 'safe' | 'workspace' = 'safe', signal?: AbortSignal): Promise<PythonExecutionResult> {
     // 梯度 1：Python-lite 沙箱 —— sitecustomize 目录（audit hook + setrlimit），执行后清理
     let sandboxDir: string | null = null
     const cleanupSandbox = () => {
@@ -218,7 +218,8 @@ export class PythonService {
           timeout: 180000, // 180秒超时（给优化求解更多时间）
           maxBuffer: 1024 * 1024 * 10, // 10MB输出限制
           env: buildSandboxEnv(sandboxMode),
-          cwd: resolveExecCwd(cwd) // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+          cwd: resolveExecCwd(cwd), // 工作目录（不存在时回退，避免 spawn cmd.exe ENOENT）
+          signal, // turn 取消 / 工具超时时杀掉 Python 子进程
         })
         
         // 清理临时文件与沙箱目录

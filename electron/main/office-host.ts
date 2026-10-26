@@ -105,7 +105,7 @@ interface EditorAdapter {
    *
    * 顺带隐藏上游 Ribbon 上的「一次性 AI 快捷操作」（AI 总结 / AI 润色 / AI 排版 / 表格检查 /
    * PPT 美化…）：它们与宿主 AI 助手面板重复，只保留一个「打开 AI 助手」入口，并给该入口补一个
-   * 中性图标（见 aikmAiIconCss）。
+   * 中性图标（见 AI_ICON_CSS）。
    */
   hideUiScript?: string
 }
@@ -121,6 +121,11 @@ interface EditorAdapter {
  *
  * React 每次切 Ribbon 页签都会重建这些节点，所以装一个 MutationObserver 常驻重放（自身改动会收敛：
  * 已隐藏/已改名的节点下次不再命中，不会自激循环）。
+ *
+ * ⚠️ 图标用**内联 SVG**，不要改回图标字体：上游各编辑器的 CSP 并不一致 —— Excel 的 index.html
+ * 压根没有 font-src，回落到 default-src 'self' 后 `@font-face` 里的 data: 字体会被拒绝
+ * （控制台：Loading the font 'data:font/woff2;base64,…' violates … Content Security Policy），
+ * 图标于是渲染成缺字方框（☒）。内联 SVG 不经过 CSP 的资源校验，三种编辑器通用。
  */
 const BRAND_CLEANUP_SCRIPT = `(() => {
   const lang = (document.documentElement.lang || '').toLowerCase()
@@ -128,13 +133,38 @@ const BRAND_CLEANUP_SCRIPT = `(() => {
   // 品牌图标：PPT 的折叠竖条有 genspark-mark 类名，Word / Excel 没有类名但三者共用同一 viewBox；
   // Excel 的 AI 面板标题另有一枚 genspark-badge
   const MARKS = 'svg.genspark-mark, svg[viewBox="0 0 130 130.025"], .genspark-badge'
-  // 整块隐藏：上游把「品牌徽标 + 品牌名」放在 AI 面板标题块里（看上去就是账号头像 + 名字），
-  // 另外「登录 Genspark」按钮 —— AI-KM 不提供 Genspark 账号，出现即整块隐藏
-  const BLOCKS = '.ai-panel-title, .ai-login-btn'
+  // 整块隐藏：「登录 Genspark」按钮 —— AI-KM 不提供 Genspark 账号，出现即整块隐藏。
+  // 注意**不要**整块隐藏 .ai-panel-title：它同时承载 AI 面板标题（Word / PPT 里就是 t('aiPanelTitle')
+  // =「AI 助手」），整块藏掉会让面板头部只剩两个动作按钮、既是标题也称不上图标位。
+  // 这里只藏块内的品牌徽标（MARKS 已覆盖），再把标题文字改成中性文案、补上中性图标。
+  const BLOCKS = '.ai-login-btn'
   const isBrandText = (text) => /^genspark(\\s*ai)?$/i.test(text.trim())
-  // 只有图标的入口（PPT 折叠态 .ai-rail、Excel 折叠态 .expand-copilot）：图标藏掉后补个中性文字，
-  // 否则左侧只剩一条空白条，AI 面板再也点不开
-  const ICON_HOSTS = 'button, [role="button"], .ai-rail, .expand-copilot'
+  // 只有图标的入口（PPT 折叠态 .ai-rail、Excel 折叠态 .expand-copilot、AI 面板标题）：
+  // 图标藏掉后补个中性文字 / 中性图标，否则左侧只剩一条空白条，AI 面板再也点不开
+  const ICON_HOSTS = 'button, [role="button"], .ai-rail, .expand-copilot, .ai-panel-title'
+  // Font Awesome 5「magic」字形（U+F0D0）的轮廓，转成 SVG path（viewBox 0 0 512 512）。
+  // AI-KM 界面里的「AI 动作」按钮用的也是这个图标，两处观感一致。
+  const AI_ICON_PATH =
+    'M224 96 208 64 176 48 208 32 224 0 240 32 272 48 240 64Z' +
+    'M80 160 53 107 0 80 53 53 80 0 107 53 160 80 107 107Z' +
+    'M432 288 459 341 512 368 459 395 432 448 405 395 352 368 405 341Z' +
+    'M503 94Q512 104 512 117 512 130 503 139L139 503Q130 512 117 512 104 512 94 503L9 418Q0 408 0 395Q0 382 9 373L373 9Q382 0 395 0Q408 0 418 9Z' +
+    'M359 203 446 117 395 66 309 153Z'
+  const SVG_NS = 'http://www.w3.org/2000/svg'
+  const makeAiIcon = () => {
+    const span = document.createElement('span')
+    span.className = 'aikm-ai-icon'
+    span.setAttribute('aria-hidden', 'true')
+    const svg = document.createElementNS(SVG_NS, 'svg')
+    svg.setAttribute('viewBox', '0 0 512 512')
+    svg.setAttribute('fill', 'currentColor')
+    svg.setAttribute('aria-hidden', 'true')
+    const path = document.createElementNS(SVG_NS, 'path')
+    path.setAttribute('d', AI_ICON_PATH)
+    svg.appendChild(path)
+    span.appendChild(svg)
+    return span
+  }
   const hiddenSelfOrAncestor = (el) => {
     let cur = el
     while (cur && cur.nodeType === 1) {
@@ -152,13 +182,11 @@ const BRAND_CLEANUP_SCRIPT = `(() => {
     }
     const marks = Array.from(document.querySelectorAll(MARKS))
     for (const mark of marks) {
-      // 品牌图标被藏掉后图标位会空着：在「AI 入口」的图标位补一个中性图标（.aikm-ai-icon 的样式
-      // 由主进程 insertCSS 注入，见 aikmAiIconCss）。预设提示词按钮不需要（它们整颗隐藏，且自己带图标）
-      const aiHost = mark.closest('button, [role="button"], .ai-rail, .expand-copilot')
+      // 品牌图标被藏掉后图标位会空着：在「AI 入口」的图标位补一个中性图标（内联 SVG，
+      // 样式见 AI_ICON_CSS）。预设提示词按钮不需要（它们整颗隐藏，且自己带图标）
+      const aiHost = mark.closest(ICON_HOSTS)
       if (aiHost && !aiHost.querySelector('.ai-feature-icon') && !aiHost.querySelector('.aikm-ai-icon')) {
-        const icon = document.createElement('i')
-        icon.className = 'aikm-ai-icon'
-        icon.setAttribute('aria-hidden', 'true')
+        const icon = makeAiIcon()
         mark.parentElement.insertBefore(icon, mark.nextSibling)
         hits.push('ai-icon')
       }
@@ -641,47 +669,26 @@ function notifyHost(entry: ViewEntry | null | undefined, event: string, filePath
 }
 
 /**
- * 「AI 图标」的图标字体 CSS（编辑器渲染层用 insertCSS 注入）。
+ * 中性「AI 图标」的 CSS（编辑器渲染层用 insertCSS 注入）。
  *
- * 编辑器渲染层自带图标全是内联 SVG，没有图标字体；品牌图标被藏掉后 AI 入口的图标位就空了。
- * AI-KM 界面本身用 Font Awesome，这里复用随应用打包的同一份字体（base64 内联；编辑器页面的
- * CSP 是 `font-src 'self' data:`，data: 字体放行），图标风格与宿主一致。
- * 读不到字体（被裁剪的构建产物）时返回空串：AI 入口只剩文字，不影响功能。
+ * 图标本体是**内联 SVG**（在 BRAND_CLEANUP_SCRIPT 里生成），这里只负责尺寸与对齐 ——
+ * 编辑器渲染层自带图标全是内联 SVG，品牌图标被藏掉后 AI 入口的图标位就空了。
+ *
+ * 为什么不用图标字体：上游各编辑器的 CSP 不一致，Excel 的 index.html 没有 font-src
+ * （回落到 default-src 'self'），data: 字体会被 CSP 拒绝，图标显示成缺字方框（☒）。
+ * 内联 SVG 不触发字体/图片的 CSP 校验，三种编辑器都稳。
  */
-let aiIconCss: string | undefined
+const AI_ICON_CSS = `.aikm-ai-icon{display:inline-flex !important;align-items:center;justify-content:center;width:18px;height:18px;flex:0 0 auto;line-height:1;color:inherit;vertical-align:middle}
+.aikm-ai-icon>svg{display:block;width:100%;height:100%;fill:currentColor;stroke:none}`
 
-function aikmAiIconCss(): string {
-  if (aiIconCss !== undefined) return aiIconCss
-  aiIconCss = ''
-  // Font Awesome 5：实心字形文件是 webfonts/fa-solid-900.woff2
-  // （FA4 时代是 fonts/fontawesome-webfont.woff2，字族名也从 FontAwesome 改成了 Font Awesome 5 Free）
-  const rel = path.join('font-awesome', 'webfonts', 'fa-solid-900.woff2')
-  for (const base of [path.join(app.getAppPath(), 'dist'), path.join(app.getAppPath(), 'public')]) {
-    try {
-      const base64 = fs.readFileSync(path.join(base, rel)).toString('base64')
-      // \f0d0 = Font Awesome 的 fa-magic（AI-KM 自己的「AI 动作」按钮也用这个图标）
-      // 该码位在 FA4 与 FA5 里相同；字重声明为 900，与 FA5 的实心字形一致
-      aiIconCss = `@font-face{font-family:'AIKMIconFont';src:url(data:font/woff2;base64,${base64}) format('woff2');font-weight:900;font-style:normal}
-.aikm-ai-icon{display:inline-block !important;font-family:'AIKMIconFont' !important;font-style:normal !important;font-weight:900 !important;font-size:18px !important;line-height:1 !important;color:inherit;text-rendering:auto;-webkit-font-smoothing:antialiased}
-.aikm-ai-icon::before{content:'\\f0d0'}`
-      return aiIconCss
-    } catch {
-      /* 换下一个候选目录 */
-    }
-  }
-  console.warn('[office] 未找到图标字体 font-awesome，AI 入口只显示文字')
-  return aiIconCss
-}
-
-/** 向编辑器渲染层注入图标字体并执行界面精简脚本（两者都只影响编辑器自己的页面） */
+/** 向编辑器渲染层注入图标样式并执行界面精简脚本（两者都只影响编辑器自己的页面） */
 async function simplifyEditorUi(entry: ViewEntry, script: string) {
   const wc = entry.view.webContents
   if (wc.isDestroyed()) return
   try {
-    const css = aikmAiIconCss()
-    if (css) await wc.insertCSS(css, { cssOrigin: 'user' })
+    await wc.insertCSS(AI_ICON_CSS, { cssOrigin: 'user' })
   } catch (e) {
-    console.warn(`[office] ${entry.viewId} 图标字体注入失败:`, (e as Error)?.message || e)
+    console.warn(`[office] ${entry.viewId} 图标样式注入失败:`, (e as Error)?.message || e)
   }
   if (wc.isDestroyed()) return
   try {

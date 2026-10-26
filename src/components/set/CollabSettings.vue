@@ -10,7 +10,9 @@ import { pushLanGuestPolicy } from '@/platform/lanGuestSync'
 import { AGENT_TOOL_REGISTRY } from '@/services/agentSkills'
 import {
   LAN_GUEST_DANGEROUS_TOOLS,
+  LAN_GUEST_DEFAULT_NAVS,
   LAN_GUEST_MODES,
+  LAN_GUEST_NAV_OPTIONS,
   LAN_GUEST_READONLY_TOOLS,
   LAN_GUEST_SANDBOX_OPTIONS,
   LAN_GUEST_FS_OPTIONS,
@@ -20,6 +22,9 @@ import {
 } from '@/shared/lanGuest'
 import { llmSourceLabel, normalizeLlmType } from '@/shared/llmSources'
 import { presetPresentation } from '@/lib/agent/ptc'
+import { PANEL_MAIN_SLOT } from '@/lib/plugin/coreSlots'
+import { pluginDisplayName, pluginIdOfOwner } from '@/lib/plugin/runtime'
+import { useAllSlotEntries } from '@/lib/plugin/useSlots'
 import { getPlatform, hasCapability } from '@/platform'
 
 interface Props {
@@ -241,6 +246,9 @@ if (aikmDsh?.remoteFs) {
     remoteFsRunning.value = status.running
     remoteFsPort.value = status.port
     remoteFsIPs.value = status.ips
+    if (status.permission === 'md' || status.permission === 'readonly') {
+      store.remoteFs.permission = status.permission
+    }
   })
 }
 
@@ -251,6 +259,9 @@ const refreshRemoteFsInfo = async () => {
     remoteFsRunning.value = info.running
     remoteFsPort.value = info.port
     remoteFsIPs.value = info.ips
+    if (info.permission === 'md' || info.permission === 'readonly') {
+      store.remoteFs.permission = info.permission
+    }
   } catch (e) {
     console.error('获取远程文件共享信息失败:', e)
   }
@@ -278,10 +289,12 @@ const startRemoteFsServer = async () => {
       port: store.remoteFs.port,
       rootDir: store.remoteFs.rootDir,
       token: store.remoteFs.token || undefined,
+      permission: store.remoteFs.permission,
     })
     if (result.success) {
       if (result.port) store.remoteFs.port = result.port
       if (result.token) store.remoteFs.token = result.token
+      if (result.permission) store.remoteFs.permission = result.permission
       store.remoteFs.enabled = true
       store.saveConfig()
       ElMessage.success(t('远程文件共享已启动', 'Remote FS started'))
@@ -290,6 +303,25 @@ const startRemoteFsServer = async () => {
     }
   } catch (e: any) {
     ElMessage.error(t('启动失败: ', 'Start failed: ') + e.message)
+  }
+}
+
+/**
+ * 切换局域网用户权限：
+ *  - 服务未运行：只写入配置，下次启动生效；
+ *  - 运行中：立即下发主进程（无需重启，客户端打开文件时会重新读取 /fs/info）。
+ */
+const onRemoteFsPermissionChange = async () => {
+  store.remoteFs.permission = store.remoteFs.permission === 'md' ? 'md' : 'readonly'
+  store.saveConfig()
+  if (!remoteFsRunning.value || !aikmDsh?.remoteFs) return
+  try {
+    const result = await aikmDsh.remoteFs.setPermission(store.remoteFs.permission)
+    if (result?.permission) store.remoteFs.permission = result.permission
+    store.saveConfig()
+    ElMessage.success(t('共享权限已更新', 'Share permission updated'))
+  } catch (e: any) {
+    ElMessage.error(t('权限更新失败: ', 'Permission update failed: ') + (e?.message || e))
   }
 }
 
@@ -321,6 +353,53 @@ const regenerateRemoteFsToken = () => {
 // 默认全只读（仅普通对话 + 知识库检索 = 今天的行为）；写入 / 执行 / 外部调用都要在这里显式允许。
 // 数据模型见 src/shared/lanGuest.ts（后续主进程 /api/agent/* 直接消费同一份）。
 const guest = store.lan.guest
+
+// ---- 局域网用户可见的模块 / 插件（主机在「共享 → 局域网共享」里配置） ----
+/** 当前允许的模块 key；旧存档没这个字段时按默认全部展示（保持升级前行为） */
+const guestNavs = computed<string[]>(() =>
+  Array.isArray(guest.navs) ? guest.navs : LAN_GUEST_DEFAULT_NAVS,
+)
+const guestNavOn = (key: string) => guestNavs.value.includes(key)
+
+/** 主面板槽位里的插件面板：按插件 id 归并（用户勾的是「插件」，不是单个面板） */
+const mainPanelEntries = useAllSlotEntries(PANEL_MAIN_SLOT)
+const shareableGuestPlugins = computed(() => {
+  const map = new Map<string, { id: string; name: string; panels: string[] }>()
+  for (const e of mainPanelEntries.value) {
+    const id = pluginIdOfOwner(e.owner)
+    if (!id) continue
+    const zh = store.locales === 'zh'
+    const title = (zh ? e.titleZh : e.titleEn) || e.titleZh || e.key
+    const cur = map.get(id) || { id, name: pluginDisplayName(id), panels: [] }
+    if (!cur.panels.includes(title)) cur.panels.push(title)
+    map.set(id, cur)
+  }
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name))
+})
+const guestPluginOn = (id: string) => Array.isArray(guest.plugins) && guest.plugins.includes(id)
+
+/** 可见性改动：先写存档，再整份策略下发给主进程（网页端刷新 / 轮询即按新清单过滤） */
+const persistGuestVisibility = () => {
+  store.saveConfig()
+  void syncLanGuestToMain()
+}
+
+const toggleGuestNav = (key: string) => {
+  const next = new Set(guestNavs.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  guest.navs = Array.from(next)
+  persistGuestVisibility()
+}
+
+const toggleGuestPlugin = (id: string) => {
+  if (!id) return
+  const next = new Set(Array.isArray(guest.plugins) ? guest.plugins : [])
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  guest.plugins = Array.from(next)
+  persistGuestVisibility()
+}
 
 /** 访客当前允许的工具集合（null / 非数组时回默认只读集） */
 const guestTools = ref<Set<string>>(new Set(Array.isArray(guest.tools) ? guest.tools : LAN_GUEST_READONLY_TOOLS))
@@ -674,6 +753,48 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+      <!-- 局域网用户可见性：和「通用 → 导航与模块」同一套 key，决定网页端导航栏里出现哪些入口 -->
+      <div class="form-group perm-list-row">
+        <label :title="store.locales=='zh'
+          ? '局域网网页端导航栏里能看到哪些内置模块 / 入口；与访客本机自己的隐藏设置叠加（主机不允许的一定看不到）'
+          : 'Which built-in modules / entries LAN guests see in the navigation bar. Combined with the guest’s own hidden settings.'">
+          {{ store.locales=='zh'?'可见模块' : 'Visible modules' }}
+        </label>
+        <div class="perm-chips">
+          <div v-for="n in LAN_GUEST_NAV_OPTIONS" :key="n.key"
+               class="perm-chip"
+               :class="{ on: guestNavOn(n.key) }"
+               :title="n.key"
+               @click="toggleGuestNav(n.key)">
+            <i class="fa" :class="n.icon" style="font-size:12px;opacity:.75"></i>
+            <span class="perm-chip-name">{{ store.locales=='zh' ? n.zh : n.en }}</span>
+            <span class="perm-switch" :class="{ on: guestNavOn(n.key) }"><i class="perm-switch-knob"></i></span>
+          </div>
+        </div>
+      </div>
+      <div class="form-group perm-list-row">
+        <label :title="store.locales=='zh'
+          ? '勾选后，该插件贡献的面板会出现在局域网网页端的导航里；插件仍按访客工具白名单运行，不会因此获得额外的主机权限'
+          : 'Checked plugins appear in the LAN guest navigation. Their tools still follow the guest whitelist and gain no extra host permissions.'">
+          {{ store.locales=='zh'?'可见插件' : 'Visible plugins' }}
+        </label>
+        <div v-if="shareableGuestPlugins.length" class="perm-chips">
+          <div v-for="p in shareableGuestPlugins" :key="p.id"
+               class="perm-chip"
+               :class="{ on: guestPluginOn(p.id) }"
+               :title="p.panels.length ? p.panels.join(' · ') : p.id"
+               @click="toggleGuestPlugin(p.id)">
+            <i class="fa fa-puzzle-piece" style="font-size:12px;opacity:.75"></i>
+            <span class="perm-chip-name">{{ p.name }}</span>
+            <span class="perm-switch" :class="{ on: guestPluginOn(p.id) }"><i class="perm-switch-knob"></i></span>
+          </div>
+        </div>
+        <div v-else class="config-description" style="margin-left:0">
+          {{ store.locales=='zh'
+            ? '当前没有带导航面板的插件。安装 / 启用插件后，可在这里决定是否共享给局域网用户。'
+            : 'No plugins with navigation panels yet. After installing / enabling one, choose here whether LAN guests can see it.' }}
+        </div>
+      </div>
       <div class="form-group">
         <div class="config-description" style="margin-left:0">
           {{ store.locales=='zh'
@@ -831,6 +952,16 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="form-group">
+        <label>{{ store.locales=='zh'?'局域网用户权限' : 'LAN user permission' }}</label>
+        <select v-model="store.remoteFs.permission" @change="onRemoteFsPermissionChange"
+                :title="store.locales=='zh'
+                  ? '默认只读；选择「可编辑 Markdown」后，局域网客户端可直接修改 .md 笔记（其他文件仍只读）'
+                  : 'Read-only by default; choose “Edit Markdown” to let LAN clients save .md notes (other files stay read-only)'">
+          <option value="readonly">{{ store.locales=='zh'?'只读（默认）' : 'Read-only (default)' }}</option>
+          <option value="md">{{ store.locales=='zh'?'可编辑 Markdown' : 'Edit Markdown' }}</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label>{{ store.locales=='zh'?'端口' : 'Port' }}</label>
         <input v-model.number="store.remoteFs.port" type="number" min="1024" max="65535"
                :disabled="remoteFsRunning"
@@ -861,8 +992,8 @@ onBeforeUnmount(() => {
       <div class="form-group">
         <div class="config-description" style="margin-left:0">
           {{ store.locales=='zh'
-            ? '客户端在「知识管理 → 文件树空白处右键 → 添加远程工作区」中粘贴上面的链接（或分别填写主机、端口、Token），即可只读预览共享文件夹中的文件；编辑时需下载到本地工作区。'
-            : 'On the client, right-click the file tree in Knowledge Management → "Add Remote Workspace" and paste the link above (or fill in Host / Port / Token separately) to preview files read-only; editing requires downloading to a local workspace.' }}
+            ? '客户端在「知识管理 → 文件树空白处右键 → 添加远程工作区」中粘贴上面的链接（或分别填写主机、端口、Token），即可浏览共享文件夹中的文件。默认只读；把「局域网用户权限」设为「可编辑 Markdown」后，客户端可直接编辑并保存 .md 笔记，其他类型仍需下载到本地。'
+            : 'On the client, right-click the file tree in Knowledge Management → "Add Remote Workspace" and paste the link above (or fill in Host / Port / Token separately) to browse the shared folder. Read-only by default; set “LAN user permission” to “Edit Markdown” to let clients edit and save .md notes directly. Other file types still need downloading.' }}
         </div>
       </div>
     </div>
@@ -1038,7 +1169,8 @@ onBeforeUnmount(() => {
   user-select: none; line-height: 1; flex-shrink: 0;
 }
 .form-group input,
-.form-group textarea {
+.form-group textarea,
+.form-group select {
   flex: 1; padding: 2px 4px;
   border: 1px solid var(--borderColor);
   border-radius: 5px;

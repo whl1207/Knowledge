@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatsRef } from '@/store/chats'
 import { getPlatform, hasCapability } from '@/platform'
 import { aikmIpc, aikmIpcOrNull } from '@/lib/aikmIpc'
+import { parseLegacyChatsFile } from '@/shared/legacyChatImport'
 
 /** 浏览器 localStorage 配额按 UTF-16 码元计（key + value 每字符 2 字节），Electron 上限约 100MB */
 export const LOCAL_STORAGE_LIMIT = 100 * 1024 * 1024 // 100MB
@@ -153,6 +154,49 @@ export const parseChatsFile = (text: string, zh = true): any[] => {
   const list = Array.isArray(data) ? data : (data && Array.isArray(data.chats) ? data.chats : null)
   if (!list) throw new Error(zh ? '不是有效的聊天导出文件' : 'not a valid chats export file')
   return list.filter((c: any) => c && typeof c === 'object' && (Array.isArray(c.messages) || c.config))
+}
+
+// ================ 原始版本（旧版 ai-chats）导入 ================
+// 解析/归一化纯函数在 @/shared/legacyChatImport（可单测）；这里只负责文件选择与合并写入。
+
+/** 导入原始版本聊天 JSON：与现有记录合并，同 id 跳过；不恢复旧 agent 会话 */
+export const importLegacyChats = async (zh = true, onDone?: () => void) => {
+  let text = ''
+  try {
+    text = await pickTextFile()
+  } catch (e: any) {
+    ElMessage.error((zh ? '导入失败：' : 'Import failed: ') + (e?.message || String(e)))
+    return
+  }
+  if (!text) return
+  try {
+    const { chats: incoming, invalid } = parseLegacyChatsFile(text, Date.now(), zh)
+    const existing = readStoredChats()
+    const ids = new Set(existing.map((c: any) => String(c?.id ?? '')))
+    const added: any[] = []
+    let skipped = 0
+    for (const chat of incoming) {
+      if (ids.has(String(chat.id))) { skipped++; continue }
+      ids.add(String(chat.id))
+      added.push(chat)
+    }
+    if (!added.length) {
+      ElMessage.info(zh
+        ? `没有新聊天可导入（${skipped} 个已存在${invalid ? `，${invalid} 个无效` : ''}）`
+        : `Nothing new to import (${skipped} already exist${invalid ? `, ${invalid} invalid` : ''})`)
+      return
+    }
+    writeStoredChats([...existing, ...added])
+    const notes: string[] = []
+    if (skipped) notes.push(zh ? `跳过 ${skipped} 个已存在` : `${skipped} skipped`)
+    if (invalid) notes.push(zh ? `${invalid} 个无效` : `${invalid} invalid`)
+    ElMessage.success(zh
+      ? `已导入 ${added.length} 个旧版聊天${notes.length ? `（${notes.join('，')}）` : ''}`
+      : `Imported ${added.length} legacy chats${notes.length ? ` (${notes.join(', ')})` : ''}`)
+    onDone?.()
+  } catch (e: any) {
+    ElMessage.error((zh ? '导入失败：' : 'Import failed: ') + (e?.message || String(e)))
+  }
 }
 
 /** 导出全部聊天记录（含分支 / 知识库来源 / 工具调用时间线等完整字段）为 JSON 备份文件 */

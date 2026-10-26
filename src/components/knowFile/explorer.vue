@@ -42,7 +42,7 @@
         <!-- 右侧标签栏：一个固定的「视图」标签（文件 / 看板 / 表格 / 图谱 / 地图 / 日历
              都收在它里面，用下方工具栏的下拉切换，不再各占一个标签）+ 打开的文件（可关闭，自带多视图选择）。
              标签放不下时支持鼠标滚轮左右滚动 / 触摸屏左右滑动。 -->
-        <div v-if="store.singleWindowMode && (store.root || fileTabs.length)" class="know-tabs">
+        <div v-if="store.singleWindowMode && (store.root || fileTabs.length || store.knowRemoteDir)" class="know-tabs">
           <!-- 显示 / 隐藏左侧面板：单窗口模式固定在这条标签栏最左侧（工具栏里不再重复出现） -->
           <button
             class="know-tab-action know-tab-panel-toggle"
@@ -96,10 +96,13 @@
             <i class="fa fa-times-circle-o"></i>
           </button>
         </div>
-        <!-- 远程只读提示条（远程文件在文件标签里预览时显示；单击快速预览不显示） -->
-        <div v-if="isRemoteFile && !isActiveRemotePreview" class="remote-readonly-bar">
-          <i class="fa fa-cloud" style="color:#42b883"></i>
-          <span>{{ store.locales=='zh'?'远程文件为只读预览':'Remote file (read-only preview)' }}</span>
+        <!-- 远程文件提示条（整个页面只保留这一条；FileWindow 嵌入模式不再重复渲染自己的提示条）。
+             单击快速预览时不显示，正式打开后显示权限状态与下载入口。 -->
+        <div v-if="isRemoteFile && !isActiveRemotePreview" class="remote-readonly-bar" :class="{ writable: activeRemoteEditable }">
+          <i class="fa fa-cloud" :style="{ color: activeRemoteEditable ? '#3a9d6a' : '#42b883' }"></i>
+          <span>{{ activeRemoteEditable
+            ? (store.locales=='zh'?'远程文件 · 可编辑 Markdown':'Remote file · Markdown editable')
+            : (store.locales=='zh'?'远程文件为只读预览':'Remote file (read-only preview)') }}</span>
           <span class="remote-readonly-spacer"></span>
           <span class="remote-download-btn" @click="downloadActiveRemote" :title="store.locales=='zh'?'下载到当前工作区':'Download to current workspace'">
             <i class="fa fa-download"></i> {{ store.locales=='zh'?'下载到本地':'Download' }}
@@ -275,6 +278,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
       if (searchOpen.value) return true
       // 右侧有打开的文件标签：返回手势先关掉它（与浏览器 / 编辑器标签的习惯一致）
       if (isFileTabActive.value) return true
+      // 正在浏览远程目录：先退回上一级远程目录，再退出远程浏览
+      if (store.knowRemoteDir) return true
       return isTallLayout.value && !!mode.value
     },
     () => {
@@ -282,6 +287,11 @@ import { useTallLayout } from '@/composables/useTallLayout'
       if (isFileTabActive.value) {
         const t = activeTab.value
         if (t) void closeFileTab(t)
+        return
+      }
+      if (store.knowRemoteDir) {
+        if (store.knowRemoteDir.rel) store.knowRemoteUp()
+        else store.clearRemoteDir()
         return
       }
       closeDrawer()
@@ -307,7 +317,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
   // 右侧「视图标签」当前显示的全局视图（单选，跟 store.view）。
   // 文件标签激活时右侧显示的是文件内容，这里的值只用于标签栏高亮与切回时恢复。
   const activeView = computed(() => {
-    if (!store.root) return ''
+    // 只打开了远程工作区（没有本地工作区）时，右侧仍要能显示「文件」视图里的远程目录
+    if (!store.root && !store.knowRemoteDir) return ''
     // 兜底默认视图：store.loadConfig 保证 store.view 至少有一个全局视图
     return store.viewList.find((v: string) => store.view.includes(v)) || DEFAULT_VIEW
   })
@@ -611,7 +622,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
   // 顶部工具栏（视图选择 + 路径面包屑 + 搜索 + 刷新）：右侧视图共用这一条
   // （面板开关只在多窗口模式留在这里；单窗口模式移到右侧标签栏最左侧，见 know-tabs）
-  const viewToolbarVisible = computed(() => !!store.root)
+  // 只打开远程工作区时也要显示工具栏（远程面包屑 / 刷新 / 搜索）
+  const viewToolbarVisible = computed(() => !!store.root || !!store.knowRemoteDir)
   // 只有「地图」没有搜索需求：当前视图是地图时不显示搜索框
   const viewToolbarSearchable = computed(() => activeView.value !== '地图')
 
@@ -762,8 +774,11 @@ import { useTallLayout } from '@/composables/useTallLayout'
   // 计算属性：右侧当前是否显示着文件标签（只有文件标签激活时才算「有激活文件」）
   const hasActiveFile = computed(() => !!activeFileTab.value);
 
-  // 计算属性：当前激活文件是否为远程只读文件
+  // 计算属性：当前激活文件是否为远程文件
   const isRemoteFile = computed(() => activeFileTab.value?.isRemote === true)
+
+  // 当前远程文件是否可按主机授权直接编辑（仅 Markdown + 共享权限为「可编辑 Markdown」）
+  const activeRemoteEditable = computed(() => isRemoteFile.value && activeFileTab.value?.remoteEditable === true)
 
   // 计算属性：当前激活远程标签是否来自「单击快速预览」（未正式打开 → 不显示远程只读条；
   // 在标签栏选到该标签或双击正式打开后 quickPreview 会被清除，只读条恢复显示）
@@ -1160,6 +1175,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
     background: color-mix(in srgb, #42b883 10%, var(--menuColor));
     border-bottom: 1px solid color-mix(in srgb, #42b883 30%, var(--borderColor));
     user-select: none;
+  }
+  .remote-readonly-bar.writable {
+    background: color-mix(in srgb, #3a9d6a 12%, var(--menuColor));
+    border-bottom-color: color-mix(in srgb, #3a9d6a 38%, var(--borderColor));
   }
   .remote-readonly-spacer {
     flex: 1;

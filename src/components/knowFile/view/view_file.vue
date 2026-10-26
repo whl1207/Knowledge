@@ -11,10 +11,42 @@ import { isAudioExt, isVideoExt, extractAlbumArt } from '@/lib/knowFile/mediaMet
 import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
 import { getPlatform, hasCapability, getRuntimeKind } from '@/platform'
 import { droppedFilePath } from '@/platform/droppedFile'
+import { fetchFsList, remotePathOf } from '@/platform/remoteFs'
+import { buildRemotePreviewTab } from '@/lib/knowFile/remotePreview'
 
 // 获取数据
 const store = usestore()
 const files = ref([]) as any
+
+// ---- 远程工作区目录浏览（文件树点远程文件夹后，右侧文件视图跟随） ----
+const remoteFiles = ref<any[]>([])
+const remoteLoading = ref(false)
+const remoteError = ref('')
+/** 是否正在显示远程目录（而不是本地目录） */
+const isRemoteDir = computed(() => !!store.knowRemoteDir)
+/** 当前远程目录所属的 RemoteRoot */
+const remoteRoot = computed(() => {
+  const dir = store.knowRemoteDir
+  if (!dir) return null
+  return store.remoteRoots.find((r: any) => r.id === dir.rootId) || null
+})
+const remoteCanEditMarkdown = computed(() => remoteRoot.value?.permission === 'md')
+const remoteFilteredFiles = computed(() => {
+  let arr = [...(remoteFiles.value || [])]
+  const q = String(searchText.value || '').trim().toLowerCase()
+  if (q) arr = arr.filter((f: any) => String(f.label || '').toLowerCase().includes(q))
+  const dir = sortDir.value === 'asc' ? 1 : -1
+  arr.sort((a: any, b: any) => {
+    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
+    let r = 0
+    if (sortKey.value === 'mtime') r = (a.mtime || 0) - (b.mtime || 0)
+    else if (sortKey.value === 'size') r = (a.size || 0) - (b.size || 0)
+    else if (sortKey.value === 'type') r = String(a.extension || '').localeCompare(String(b.extension || ''))
+    else r = String(a.label || '').localeCompare(String(b.label || ''), undefined, { numeric: true, sensitivity: 'base' })
+    return r * dir
+  })
+  return arr
+})
 /**
  * 图片缩略图的真实地址（path → URL）。
  * 安卓上 `saf:` / 相对路径不能拼 `file:///`，要经平台 `fs.urlOf` 换成
@@ -95,7 +127,38 @@ let marqueeAdditive = false
 let marqueeRaf = 0
 let marqueeItemRects: { path: string; rect: DOMRect }[] = []
 
+/** 拉取当前远程目录（/fs/list）；远程模式不走本地 fs */
+const getRemoteData = async function () {
+  const root = remoteRoot.value
+  const dir = store.knowRemoteDir
+  if (!root || !dir) {
+    remoteFiles.value = []
+    return
+  }
+  remoteLoading.value = true
+  remoteError.value = ''
+  try {
+    const list = await fetchFsList(root, dir.rel || '')
+    remoteFiles.value = (Array.isArray(list) ? list : []).map((item: any) => ({
+      ...item,
+      extension: fileTypeKey(item.label),
+      executable: false,
+    }))
+  } catch (error: any) {
+    console.error('[remote-fs] 文件视图加载远程目录失败:', error)
+    remoteFiles.value = []
+    remoteError.value = error?.message || (store.locales === 'zh' ? '远程目录加载失败' : 'Failed to load remote folder')
+  } finally {
+    remoteLoading.value = false
+  }
+}
+
 const getData = async function () {
+  // 远程目录：走 HTTP 列表，不读本地磁盘
+  if (isRemoteDir.value) {
+    await getRemoteData()
+    return
+  }
   // 未打开文件时回退到根目录，方便直接浏览
   const dir = store.path || store.root
   if (!dir) return
@@ -107,6 +170,41 @@ const getData = async function () {
   } catch (error) {
     console.error(error)
   }
+}
+
+/** 打开远程目录条目：文件夹继续下钻，文件在右侧标签栏打开（与文件树单击一致） */
+const openRemoteEntry = async function (item: any) {
+  const root = remoteRoot.value
+  const dir = store.knowRemoteDir
+  if (!root || !dir || !item) return
+  if (item.type === 'folder') {
+    store.knowEnterRemoteDir({ rootId: root.id, rel: item.path, label: item.label })
+    return
+  }
+  // 多窗口模式没有右侧文件标签：远程文件仍走独立文件窗口
+  if (!store.singleWindowMode) {
+    store.openFileWindow({
+      path: remotePathOf(root, item.path),
+      view: 'read',
+      remoteRootId: root.id,
+      remoteRel: item.path,
+      label: item.label,
+    })
+    return
+  }
+  const result = await buildRemotePreviewTab(root, item.path, item.label, false)
+  if (result.ok) {
+    await store.addTab(result.tab)
+    store.focusFileTab(result.tab.path)
+    return
+  }
+  if (result.reason === 'download') {
+    ElMessage.info(store.locales === 'zh'
+      ? '该类型无法直接预览，请在左侧文件树右键「下载到本地工作区」后打开'
+      : 'This type cannot be previewed inline. Download it from the file tree first.')
+    return
+  }
+  ElMessage.error(store.locales === 'zh' ? ('远程文件读取失败: ' + (result.error || '')) : ('Remote read failed: ' + (result.error || '')))
 }
 
 // 获取图片地址（file:// URL）
@@ -396,6 +494,8 @@ const handleSubmenuOverflow = (e: MouseEvent) => {
 const nodeContextmenu = function (event: any, item: any) {
   event.preventDefault()
   event.stopPropagation()
+  // 远程条目只读：不弹本地「重命名 / 删除 / 粘贴」菜单（路径属于主机，不能在客户端改）
+  if (isRemoteDir.value) return
   // 右键未选中的项时先单选它（多选中已选中的项保持选中）
   if (!selectedPaths.value.includes(item.path)) {
     selectedPaths.value = [item.path]
@@ -894,6 +994,8 @@ const onFolderDrop = async function (e: DragEvent, folder: any) {
 }
 const onContainerDrop = async function (e: DragEvent) {
   e.preventDefault()
+  // 远程目录不接受本地文件拖入（写入只开放 Markdown，且由共享服务校验）
+  if (isRemoteDir.value) return
   // 内部拖动（拖到空白）不处理
   if (dragPaths.value.length) {
     dragPaths.value = []
@@ -937,6 +1039,7 @@ const boxesIntersect = function (
 
 const onContainerMouseDown = function (e: MouseEvent) {
   if (e.button !== 0) return
+  if (isRemoteDir.value) return
   const t = e.target as HTMLElement
   const container = e.currentTarget as HTMLElement
   // 文件项/列表头/空态上不启动框选（分别走点击选中 / 排序）
@@ -1240,6 +1343,8 @@ const createNewFile = async function (key: NewFileTypeKey) {
 const showViewMenu = ref(false)
 const viewMenuPos = reactive({ x: 0, y: 0 })
 const showViewContextMenu = function (e: MouseEvent) {
+  // 远程目录只有预览 / 编辑 Markdown，不提供本地文件管理菜单
+  if (isRemoteDir.value) return
   // 如果点击的是文件项，不触发视图菜单
   const target = e.target as HTMLElement
   if (target.closest('.file-item') || target.closest('.list-item')) return
@@ -1260,12 +1365,18 @@ const handleDocumentClick = function () {
 }
 
 watch(() => store.root, () => {
-  getData()
+  if (!isRemoteDir.value) getData()
 })
 
 // 外部修改路径（如打开文件后）时刷新列表；导航历史由工具栏同步（store.knowSyncNav）
 watch(() => store.path, () => {
-  getData()
+  if (!isRemoteDir.value) getData()
+})
+
+// 文件树里选择远程文件夹 / 远程面包屑跳转 / 前进后退
+watch(() => store.knowRemoteDir, () => {
+  if (isRemoteDir.value) getData()
+  else getData()
 })
 
 // 顶部工具栏的「刷新」：重新拉取当前目录
@@ -1328,8 +1439,75 @@ onBeforeUnmount(() => {
     <div ref="filesContainerRef" class="files-container scoll" :class="[viewMode, imageAspectRatio]" tabindex="0" @mousedown="onContainerMouseDown" @dragover.prevent @drop="onContainerDrop" @contextmenu.prevent="showViewContextMenu" @keydown="containerKeydown" @click="focusContainer" @wheel="onContainerWheel" @touchstart="onContainerTouchStart" @touchmove="onContainerTouchMove" @touchend="onContainerTouchEnd" @touchcancel="onContainerTouchEnd">
       <!-- 鼠标框选矩形（视口定位，不拦截事件） -->
       <div v-if="marqueeVisible" class="marquee-select" :style="{ left: marqueeRect.left + 'px', top: marqueeRect.top + 'px', width: marqueeRect.width + 'px', height: marqueeRect.height + 'px' }"></div>
+
+      <!-- ===== 远程工作区目录：只读列表（主机授权 Markdown 时可编辑） =====
+           文件树里点远程文件夹 → store.knowRemoteDir 变化 → 这里拉 /fs/list 并跟随显示 -->
+      <div v-if="isRemoteDir" class="remote-browse">
+        <div class="remote-browse-head">
+          <i class="fa fa-cloud"></i>
+          <span class="remote-browse-path">{{ store.knowRemoteDir?.rel || '/' }}</span>
+          <span class="remote-browse-perm" :class="{ writable: remoteCanEditMarkdown }">
+            {{ remoteCanEditMarkdown
+              ? (store.locales === 'zh' ? '可编辑 Markdown' : 'Markdown editable')
+              : (store.locales === 'zh' ? '只读' : 'Read-only') }}
+          </span>
+        </div>
+        <div v-if="remoteLoading" class="empty-folder">
+          <i class="fa fa-spinner fa-spin"></i>
+          <p>{{ store.locales === 'zh' ? '正在加载远程目录…' : 'Loading remote folder…' }}</p>
+        </div>
+        <div v-else-if="remoteError" class="empty-folder">
+          <i class="fa fa-exclamation-triangle"></i>
+          <p>{{ remoteError }}</p>
+          <button class="remote-retry" @click="getRemoteData">
+            <i class="fa fa-refresh"></i> {{ store.locales === 'zh' ? '重试' : 'Retry' }}
+          </button>
+        </div>
+        <template v-else>
+          <!-- 网格 -->
+          <div v-if="viewMode === 'grid'" class="files-grid"
+               :style="{ gridTemplateColumns: getGridTemplateColumns(), gap: getGridGap() }">
+            <div v-for="item in remoteFilteredFiles" :key="item.path" class="file-item" @click="openRemoteEntry(item)"
+                 @mousemove="showTooltip($event, item)" @mouseleave="hideTooltip">
+              <div class="file-content" :style="{
+                width: getImageContainerStyle().containerWidth,
+                height: getImageContainerStyle().containerHeight,
+                borderColor: item.type === 'folder' ? '#e6a23c' : '#42b883',
+              }">
+                <i :class="item.type === 'folder' ? 'fa fa-folder' : store.icon(item.extension)"
+                   :style="{ fontSize: getImageContainerStyle().iconFontSize, color: item.type === 'folder' ? '#e6a23c' : '#42b883' }"></i>
+              </div>
+              <div v-if="showFileName" class="file-title" :style="{ fontSize: getFileNameFontSize(), maxHeight: getFileNameMaxHeight() }">
+                {{ item.label }}
+              </div>
+            </div>
+          </div>
+          <!-- 列表 -->
+          <div v-if="viewMode === 'list'" class="files-list">
+            <div class="list-header">
+              <span class="list-col-name" @click="setSort('name')">{{ store.locales=='zh'?'名称':'Name' }} <i :class="sortIcon('name')"></i></span>
+              <span class="list-col-time" @click="setSort('mtime')">{{ store.locales=='zh'?'修改时间':'Modified' }} <i :class="sortIcon('mtime')"></i></span>
+              <span class="list-col-size" @click="setSort('size')">{{ store.locales=='zh'?'大小':'Size' }} <i :class="sortIcon('size')"></i></span>
+            </div>
+            <div v-for="item in remoteFilteredFiles" :key="item.path" class="list-item" @click="openRemoteEntry(item)"
+                 @mousemove="showTooltip($event, item)" @mouseleave="hideTooltip">
+              <div class="list-icon" :style="{ color: item.type === 'folder' ? '#e6a23c' : '#42b883' }">
+                <i :class="item.type === 'folder' ? 'fa fa-folder' : store.icon(item.extension)"></i>
+              </div>
+              <span class="list-col-name">{{ item.label }}</span>
+              <span class="list-col-time">{{ formatTime(item.mtime) }}</span>
+              <span class="list-col-size">{{ item.type === 'folder' ? '-' : formatSize(item.size) }}</span>
+            </div>
+          </div>
+          <div v-if="!remoteFilteredFiles.length" class="empty-folder">
+            <i class="fa fa-folder-open"></i>
+            <p>{{ searchText ? (store.locales === 'zh' ? '没有匹配的文件' : 'No matching files') : (store.locales === 'zh' ? '文件夹为空' : 'Empty folder') }}</p>
+          </div>
+        </template>
+      </div>
+
       <!-- 网格视图 -->
-      <div v-if="viewMode === 'grid'" class="files-grid" 
+      <div v-if="!isRemoteDir && viewMode === 'grid'" class="files-grid"
            :style="{ 
              gridTemplateColumns: getGridTemplateColumns(),
              gap: getGridGap() 
@@ -1370,7 +1548,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 列表视图 -->
-      <div v-if="viewMode === 'list'" class="files-list">
+      <div v-if="!isRemoteDir && viewMode === 'list'" class="files-list">
         <div class="list-header">
           <span class="list-col-name" @click="setSort('name')">{{ store.locales=='zh'?'名称':'Name' }} <i :class="sortIcon('name')"></i></span>
           <span class="list-col-time" @click="setSort('mtime')">{{ store.locales=='zh'?'修改时间':'Modified' }} <i :class="sortIcon('mtime')"></i></span>
@@ -1401,7 +1579,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 空文件夹提示 -->
-      <div v-if="files && files.length === 0" class="empty-folder">
+      <div v-if="!isRemoteDir && files && files.length === 0" class="empty-folder">
         <i class="fa fa-folder-open"></i>
         <p>{{ store.locales=='zh'?'文件夹为空':'Empty folder' }}</p>
       </div>
@@ -1409,23 +1587,28 @@ onBeforeUnmount(() => {
 
     <!-- 状态栏：选中数 / 当前视图 / 属性筛选 / 总文件数（右下角）；文件名与宽高比在右键菜单的「显示」里 -->
     <div class="file-statusbar">
-      <span v-if="selectedPaths.length" class="status-selected">
+      <span v-if="selectedPaths.length && !isRemoteDir" class="status-selected">
         <i class="fa fa-check-square-o"></i> {{ store.locales=='zh' ? ('已选 ' + selectedPaths.length + ' 项') : (selectedPaths.length + ' selected') }}
       </span>
       <span class="statusbar-item statusbar-mode" :title="store.locales=='zh'?'当前视图，Ctrl+滚轮切换大小':'View mode, Ctrl+wheel to resize'"><i class="fa fa-th-large"></i> {{ viewModeLabel }}</span>
-      <span class="statusbar-sep"></span>
-      <span class="statusbar-item" :title="store.locales=='zh'?'按 YAML 属性筛选（如状态）':'Filter by YAML attribute'"><i class="fa fa-filter"></i> {{ store.locales=='zh'?'筛选':'Filter' }}</span>
-      <select class="statusbar-select" v-model="attrFilterKey" :title="store.locales=='zh'?'属性名（含状态）':'Attribute (incl. status)'">
-        <option value="">{{ store.locales=='zh'?'全部属性':'All attributes' }}</option>
-        <option v-for="k in attributeKeys" :key="k" :value="k">{{ k }}</option>
-      </select>
-      <select v-if="attrFilterKey" class="statusbar-select" v-model="attrFilterValue" :title="store.locales=='zh'?'属性值':'Attribute value'">
-        <option value="">{{ store.locales=='zh'?'全部值':'All values' }}</option>
-        <option v-for="v in attributeValues" :key="v" :value="v">{{ v }}</option>
-        <option :value="NONE_VALUE">{{ store.locales=='zh'?'（未设置）':'(unset)' }}</option>
-      </select>
-      <button v-if="attrFilterKey" class="statusbar-btn" @click="clearAttrFilter" :title="store.locales=='zh'?'清除筛选':'Clear filter'"><i class="fa fa-times"></i></button>
-      <span class="statusbar-item statusbar-count" :title="store.locales=='zh'?'当前目录文件数':'File count'"><i class="fa fa-file-o"></i> {{ filteredFiles.length }} {{ store.locales=='zh'?'项':'items' }}</span>
+      <template v-if="!isRemoteDir">
+        <span class="statusbar-sep"></span>
+        <span class="statusbar-item" :title="store.locales=='zh'?'按 YAML 属性筛选（如状态）':'Filter by YAML attribute'"><i class="fa fa-filter"></i> {{ store.locales=='zh'?'筛选':'Filter' }}</span>
+        <select class="statusbar-select" v-model="attrFilterKey" :title="store.locales=='zh'?'属性名（含状态）':'Attribute (incl. status)'">
+          <option value="">{{ store.locales=='zh'?'全部属性':'All attributes' }}</option>
+          <option v-for="k in attributeKeys" :key="k" :value="k">{{ k }}</option>
+        </select>
+        <select v-if="attrFilterKey" class="statusbar-select" v-model="attrFilterValue" :title="store.locales=='zh'?'属性值':'Attribute value'">
+          <option value="">{{ store.locales=='zh'?'全部值':'All values' }}</option>
+          <option v-for="v in attributeValues" :key="v" :value="v">{{ v }}</option>
+          <option :value="NONE_VALUE">{{ store.locales=='zh'?'（未设置）':'(unset)' }}</option>
+        </select>
+        <button v-if="attrFilterKey" class="statusbar-btn" @click="clearAttrFilter" :title="store.locales=='zh'?'清除筛选':'Clear filter'"><i class="fa fa-times"></i></button>
+      </template>
+      <span v-else class="statusbar-item remote-status" :title="store.locales=='zh'?'远程工作区目录（由主机共享服务提供）':'Remote workspace folder (served by host)'">
+        <i class="fa fa-cloud"></i> {{ remoteCanEditMarkdown ? (store.locales === 'zh' ? 'Markdown 可编辑' : 'Markdown editable') : (store.locales === 'zh' ? '只读预览' : 'Read-only') }}
+      </span>
+      <span class="statusbar-item statusbar-count" :title="store.locales=='zh'?'当前目录文件数':'File count'"><i class="fa fa-file-o"></i> {{ isRemoteDir ? remoteFilteredFiles.length : filteredFiles.length }} {{ store.locales=='zh'?'项':'items' }}</span>
     </div>
 
     <!-- 悬浮提示（跟随鼠标显示文件信息） -->
@@ -1737,6 +1920,44 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: contain;
 }
+
+/* 远程工作区目录：顶部一条轻量说明，列表复用本地网格 / 列表样式 */
+.remote-browse {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+.remote-browse-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 6px;
+  font-size: 11px;
+  color: var(--fontColor);
+  opacity: .85;
+  flex-shrink: 0;
+}
+.remote-browse-head > i { color: #42b883; }
+.remote-browse-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; }
+.remote-browse-perm {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--borderColor);
+  opacity: .9;
+}
+.remote-browse-perm.writable { color: #3a9d6a; border-color: color-mix(in srgb, #42b883 45%, var(--borderColor)); }
+.remote-retry {
+  margin-top: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  cursor: pointer;
+}
+.remote-status { color: #3a9d6a; }
 
 /* 空文件夹提示 */
 .empty-folder {

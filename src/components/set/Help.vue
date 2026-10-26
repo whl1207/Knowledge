@@ -1827,7 +1827,7 @@ const translations = {
           { title: '源码编辑', desc: 'Monaco 编辑器直接改 Markdown 原文（含 YAML 头），支持 AI 辅助与拖入图片 / 文件自动生成引用链接；<code>.py</code> / <code>.json</code> 等代码与数据文件也在这里以文本方式打开。' },
           { title: '可视编辑（块编辑）', desc: '块式富文本：输入 <code>/</code> 唤出块类型菜单，块手柄菜单的「转换为」可在标题 / 列表 / 表格 / 代码之间转换。' },
           { title: '思维导图 / 演示', desc: '导图按 Markdown 标题层级生成；演示把 Markdown 转成幻灯片（按 <code>---</code> 或智能切分分页，支持目录 / 全屏 / 主题切换）；两者在触屏上都可左右滑动翻页。' },
-          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>逐页 / 全文翻译</strong>（全文翻译不叠加译文，完成后可另存为 Markdown）；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）在文件视图里用 iframe 渲染（浏览看效果、源码编辑改 HTML），与其它文件一样进标签页 / 窗口，不再另开内置浏览器。' },
+          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>逐页 / 全文翻译</strong>（全文翻译不叠加译文，完成后可导出<strong>叠加译文的 PDF</strong>——保留原 PDF 页面内容，译文按原段落位置叠加）；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）在文件视图里用 iframe 渲染（浏览看效果、源码编辑改 HTML），与其它文件一样进标签页 / 窗口，不再另开内置浏览器。' },
           { title: 'Mermaid 图表（.mmd / .mermaid）', desc: '<strong>浏览</strong>视图把整份源码渲染成一张图，点图可放大 / 平移 / 导出 PNG、SVG；<strong>源码编辑</strong>视图改文本。渲染失败时原地显示错误与源码便于修正；空文件默认直接进源码编辑。' },
           { title: 'PDF 页面管理', desc: 'PDF 右键菜单的「页面管理…」（固定在一级菜单最下面）把整份 PDF 拆成一页一张的缩略图：可把别的 PDF <strong>合并</strong>进来、勾选后<strong>删除</strong>整页、拖拽缩略图<strong>调整顺序</strong>、单页 / 整组 / <strong>全部页面</strong>旋转（工具栏「全部左转 / 全部右转」）；确认后由 pdf-lib 重新组页，可覆盖原文件或另存为新 PDF（远程预览只能另存）。右键菜单里的「翻译」「阅读主题」「视图旋转」都是二级菜单，其中视图旋转作用于<strong>整份文档</strong>（只改显示、不改文件）。' }
         ]
@@ -2190,18 +2190,18 @@ const translations = {
       },
       remoteFs: {
         title: '☁️ 远程文件共享（共享文件夹）',
-        overview: '通过<strong>共享文件夹</strong>，可以把本机的一个文件夹<strong>只读共享</strong>给局域网内的其他电脑：对方在「知识管理 → 文件树」中添加为<strong>远程工作区</strong>（云朵图标，恒显示在所有本地工作区最下方），即可浏览、<strong>预览</strong>其中的文件——支持 <strong>Markdown / 文本 / PDF / 图片 / Word</strong>，下载后即可编辑。',
+        overview: '通过<strong>共享文件夹</strong>，可以把本机的一个文件夹共享给局域网内的其他电脑：对方在「知识管理 → 文件树」中添加为<strong>远程工作区</strong>（云朵图标，恒显示在所有本地工作区最下方），即可浏览、<strong>预览</strong>其中的文件——支持 <strong>Markdown / 文本 / PDF / 图片 / Word</strong>。默认只读；主机可在共享设置里开放<strong>可编辑 Markdown</strong>，客户端即可直接修改 .md 笔记。',
         step1: {
           title: '主机端共享',
-          desc: '在 <strong>设置 → 协作 → 共享</strong> 中启动共享文件夹服务，选择共享目录，配置端口（默认 <code>3347</code>）与 Token，然后复制连接地址（<code>remote-fs://IP:端口?token=…</code>）发给局域网内的其他成员。'
+          desc: '在 <strong>设置 → 协作 → 共享</strong> 中启动共享文件夹服务，选择共享目录，配置端口（默认 <code>3347</code>）与 Token；按需把「局域网用户权限」设为<strong>只读</strong>（默认）或<strong>可编辑 Markdown</strong>，然后复制连接地址（<code>remote-fs://IP:端口?token=…</code>）发给局域网内的其他成员。'
         },
         step2: {
           title: '客户端添加远程工作区',
           desc: '在<strong>知识管理 → 文件树空白处右键 → 添加远程工作区</strong>，粘贴上面的链接（或分别填写主机、端口、Token），共享目录即合并进文件树（☁️ 云图标、最下方），可懒加载浏览其中的目录与文件。'
         },
         step3: {
-          title: '预览与下载',
-          desc: '远程文件为<strong>只读预览</strong>：Markdown / 文本直接阅读，<strong>PDF / 图片 / Word</strong> 在「浏览」视图内联预览——PDF 支持翻页缩放、图片支持缩放拖拽、Word（.docx）自动转 Markdown 渲染。需要编辑时点击顶部「<strong>下载到本地</strong>」保存到当前工作区后即可编辑。'
+          title: '预览与编辑',
+          desc: 'Markdown / 文本直接阅读，<strong>PDF / 图片 / Word</strong> 在「浏览」视图内联预览——PDF 支持翻页缩放、图片支持缩放拖拽、Word（.docx）自动转 Markdown 渲染。主机开放「可编辑 Markdown」时，远程 .md 可直接切到<strong>源码编辑</strong>并保存回主机；其他类型仍点击顶部「<strong>下载到本地</strong>」保存到当前工作区后编辑。'
         },
         step4: {
           title: '刷新远程目录',
@@ -2209,7 +2209,7 @@ const translations = {
         },
         note: {
           title: '📌 使用提示：',
-          text: '远程文件为<strong>只读</strong>，修改请先下载到本地工作区；删除远程工作区不会影响主机文件。主机端需保持共享服务运行，且各客户端处于同一局域网、能访问端口 3347。'
+          text: '默认<strong>只读</strong>，只有主机明确设为「可编辑 Markdown」时，客户端才能保存 .md；其他文件修改请先下载到本地工作区。删除远程工作区不会影响主机文件。主机端需保持共享服务运行，且各客户端处于同一局域网、能访问端口 3347。'
         }
       },
     },
@@ -2391,7 +2391,7 @@ const translations = {
         collabGroup: {
           title: '🤝 协作',
           items: {
-            share: { name: '共享', desc: '局域网共享（网页端入口 / 端口 / 知识库目录）与共享文件夹（远程只读文件服务，端口 / 目录 / Token）。' },
+            share: { name: '共享', desc: '局域网共享（网页端入口 / 端口 / 知识库目录）与共享文件夹（远程文件服务：端口 / 目录 / Token，权限默认只读，可开放编辑 Markdown）。' },
             collab: { name: '协同', desc: '协同文件编辑：端口 / 成员上限 / 编辑权限（开放·批准·只读）/ 房间 Token。' },
             perm: { name: '权限', desc: '<strong>局域网访客白名单</strong>：允许的对话模式（默认仅普通 + 知识库）、<strong>可用智能体</strong>（通用智能体固定开放，可选开放 Agent 预设）、智能体工具（默认只读，技能由 <code>skill</code> 工具控制）、<strong>访客用的模型来源与模型</strong>（默认跟随主机当前来源）、并发与步数、<strong>文件访问</strong>（默认关闭；只读可浏览 / 预览 / 检索，可写另可新建 / 保存 / 删除，均限制在「共享」页设置的共享目录内）、沙箱级别与访问令牌（默认不需要）；网页端智能体由主机执行。' }
           }
@@ -2399,7 +2399,7 @@ const translations = {
         tools: {
           title: '🧰 工具',
           items: {
-            tools: { name: '管理', desc: '逐工具开关：启用状态、沙箱偏好与审批要求（共 18 个）。' },
+            tools: { name: '管理', desc: '逐工具开关：按能力域<strong>分组显示</strong>（文件与目录 / 对话与计划 / 联网搜索 / 代码与命令 / 知识与技能 / 子代理 / 浏览器自动化 / MCP 与插件），组头可一键全开 / 全关并显示启用数；顶部支持搜索与「只看已启用」。每行标注启用状态、沙箱偏好与审批要求。' },
             search: { name: '搜索', desc: '联网搜索源：Bing / 百度 / DuckDuckGo / Firecrawl / SearXNG / 博查 / 智谱 / Tavily / Brave / DeepSeek 官方 Search，可同时启用多个并选回退 / 聚合策略，也可添加自定义（内网）源。' },
             fetch: { name: '抓取', desc: '<strong>web_fetch 抓取通道</strong>：直接访问 / DeepSeek Fetch（官方 <code>POST /v1/tools/fetch</code>）/ 虚拟浏览器，三条通道各自开关、拖动排序即回退顺序，并可填 URL 直接测试当前通道链（见下方专述）。' },
             mcp: { name: 'MCP', desc: 'MCP 服务增删启停，预置 <strong>6 个内置服务</strong>（见下方专述）。' },
@@ -3000,7 +3000,7 @@ const translations = {
           { title: 'Source edit', desc: 'Monaco editor over the raw Markdown (incl. YAML front matter), with AI assistance and drag-and-drop to create reference links; code and data files such as <code>.py</code> / <code>.json</code> open as text here too.' },
           { title: 'Visual edit (blocks)', desc: 'Block-based rich text: type <code>/</code> for the block menu, and the block handle’s “Convert to” switches between heading / list / table / code.' },
           { title: 'Mind map / Presentation', desc: 'The mind map follows heading levels; Presentation turns Markdown into slides (split by <code>---</code> or smart splitting, with outline / full-screen / themes); both turn pages with a left / right swipe on touch screens.' },
-          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>page-by-page / full-document translation</strong> (the full result does not overlay the pages and can be saved as Markdown); Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' },
+          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>page-by-page / full-document translation</strong> (the full result does not overlay the pages and can be exported as a <strong>PDF with the translations overlaid</strong> on the original pages); Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' },
           { title: 'Mermaid diagrams (.mmd / .mermaid)', desc: 'The <strong>Browse</strong> view renders the whole source file as one diagram — click it to zoom, pan and export PNG / SVG; the <strong>Source</strong> view edits the text. A render error shows the message and the source in place; an empty file opens directly in Source view.' },
           { title: 'PDF page management', desc: 'The “Manage pages…” item (pinned at the bottom of the PDF context menu) turns the document into one-thumbnail-per-page cards: <strong>merge</strong> other PDFs in, <strong>delete</strong> selected pages, <strong>drag to reorder</strong>, and <strong>rotate</strong> a page, the selection, or <strong>all pages</strong> (toolbar “All left / All right”). Confirming rebuilds the file with pdf-lib — overwrite the original or save as a new PDF (remote previews can only be saved as new). “Translation”, “Reading theme” and “Rotate view” are submenus; the view rotation applies to the <strong>whole document</strong> and is display-only.' }
         ]
@@ -3363,18 +3363,18 @@ const translations = {
       },
       remoteFs: {
         title: '☁️ Remote File Sharing (Shared Folder)',
-        overview: 'With a <strong>shared folder</strong>, you can <strong>read-only share</strong> a local folder to other computers on the LAN: they add it as a <strong>remote workspace</strong> in Knowledge Management (cloud icon, always at the bottom of the local workspaces) to browse and <strong>preview</strong> its files — supporting <strong>Markdown / text / PDF / image / Word</strong>; download to edit.',
+        overview: 'With a <strong>shared folder</strong>, you can share a local folder with other computers on the LAN: they add it as a <strong>remote workspace</strong> in Knowledge Management (cloud icon, always at the bottom of the local workspaces) to browse and <strong>preview</strong> its files — supporting <strong>Markdown / text / PDF / image / Word</strong>. It is read-only by default; the host can allow <strong>Markdown editing</strong> so clients can edit .md notes directly.',
         step1: {
           title: 'Host: Share',
-          desc: 'In <strong>Settings → Collaboration → Sharing</strong>, start the shared-folder service, choose the shared directory, configure the port (default <code>3347</code>) and token, then copy the link (<code>remote-fs://IP:port?token=…</code>) to other LAN members.'
+          desc: 'In <strong>Settings → Collaboration → Sharing</strong>, start the shared-folder service, choose the shared directory, configure the port (default <code>3347</code>) and token, set “LAN user permission” to <strong>Read-only</strong> (default) or <strong>Edit Markdown</strong>, then copy the link (<code>remote-fs://IP:port?token=…</code>) to other LAN members.'
         },
         step2: {
           title: 'Client: Add Remote Workspace',
           desc: 'Right-click the empty area of the file tree in <strong>Knowledge Management → Add Remote Workspace</strong>, paste the link (or fill in host, port, token). The shared directory is merged into the tree (☁️ icon, at the bottom) with lazy loading.'
         },
         step3: {
-          title: 'Preview & Download',
-          desc: 'Remote files are <strong>read-only previews</strong>: Markdown / text read directly; <strong>PDF / image / Word</strong> preview inline in the Browse view — PDF with page flip & zoom, image with zoom & drag, Word (.docx) auto-converted to Markdown. To edit, click "<strong>Download to Local</strong>" on the top bar to save into the current workspace.'
+          title: 'Preview & Edit',
+          desc: 'Markdown / text read directly; <strong>PDF / image / Word</strong> preview inline in the Browse view — PDF with page flip & zoom, image with zoom & drag, Word (.docx) auto-converted to Markdown. When the host allows Markdown editing, remote .md files can switch to the <strong>source editor</strong> and save back to the host; other types still use "<strong>Download to Local</strong>" before editing.'
         },
         step4: {
           title: 'Refresh Remote Directory',
@@ -3382,7 +3382,7 @@ const translations = {
         },
         note: {
           title: '📌 Tip:',
-          text: 'Remote files are <strong>read-only</strong>; download to the local workspace before editing. Removing a remote workspace never affects host files. The host must keep the shared service running and clients must be on the same LAN and able to reach port 3347.'
+          text: 'Read-only by default. Only when the host explicitly enables “Edit Markdown” can clients save .md files; download other file types to the local workspace before editing. Removing a remote workspace never affects host files. The host must keep the shared service running and clients must be on the same LAN and able to reach port 3347.'
         }
       },
     },
@@ -3564,7 +3564,7 @@ const translations = {
         collabGroup: {
           title: '🤝 Collaboration',
           items: {
-            share: { name: 'Sharing', desc: 'LAN sharing (remote web entry / port / KB folder) and shared folder (read-only file service: port / directory / token).' },
+            share: { name: 'Sharing', desc: 'LAN sharing (remote web entry / port / KB folder) and shared folder (remote file service: port / directory / token; read-only by default, Markdown editing optional).' },
             collab: { name: 'Collaborative Editing', desc: 'Collaborative editing: port / max members / edit permission (open \u00b7 approve \u00b7 read-only) / room token.' },
             perm: { name: 'Permissions', desc: '<strong>LAN guest whitelist</strong>: allowed chat modes, agent tools (read-only by default), concurrency and steps, <strong>file access</strong> (off by default; read-only lets guests browse / preview / search the shared folder set on the Sharing tab, read &amp; write also lets them create / save / delete inside it), sandbox level and access token.' }
           }
@@ -3572,7 +3572,7 @@ const translations = {
         tools: {
           title: '🧰 Tools',
           items: {
-            tools: { name: 'Tools', desc: 'Per-tool switches: enablement, sandbox preference and approval (18 tools).' },
+            tools: { name: 'Tools', desc: 'Per-tool switches, now <strong>grouped by capability domain</strong> (Files &amp; Folders / Conversation &amp; Plan / Web Search / Code &amp; Shell / Knowledge &amp; Skills / Subagents / Browser Automation / MCP &amp; Plugins). Each group header shows the enabled count and offers All / None; search and an "enabled only" filter sit on top. Every row shows enablement, sandbox preference and approval.' },
             search: { name: 'Search', desc: 'Web search source: Bing / Baidu / DuckDuckGo / Firecrawl / SearXNG / Bocha / Zhipu / Tavily / Brave / DeepSeek official Search — enable several, add custom LAN sources, and pick fallback / merge strategy.' },
             fetch: { name: 'Fetch', desc: '<strong>web_fetch channels</strong>: direct fetch / DeepSeek Fetch (official <code>POST /v1/tools/fetch</code>) / virtual browser — each can be toggled and dragged into a fallback order, with a URL box to test the current chain (detailed below).' },
             mcp: { name: 'MCP', desc: 'Manage MCP servers; <strong>6 built-in servers</strong> are pre-installed (detailed below).' },

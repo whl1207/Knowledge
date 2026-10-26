@@ -15,16 +15,20 @@ import {
   DOCK_DEFAULT_WIDTH,
   DOCK_MAX_WIDTH,
   DOCK_MIN_WIDTH,
+  DOCK_TAB_KINDS,
   activateDockTab,
   activeDockTab,
+  addDockPlaceholder,
   addDockTab,
   clampDockWidth,
   closeDockTab,
+  configureDockTab,
   createDockTab,
   defaultDockState,
   dockFileNameOf,
   dockTabTitle,
   normalizeDockState,
+  openBranchDockTab,
   openFileDockTab,
   setDockOpen,
   setDockTabView,
@@ -236,6 +240,51 @@ export function runChatDockSelfTest(): ChatDockCase[] {
     // 关掉文件标签后回落到相邻标签
     const closed = closeDockTab({ ...s3, activeTabId: s3.tabs[1].id }, s3.tabs[1].id)
     add('文件标签：关掉当前文件标签 → 落到左邻', closed.tabs.length === 1 && closed.activeTabId === closed.tabs[0].id)
+  }
+
+  // 11. 新标签页：+ 先加空白页，再在页内选类型（不弹菜单）
+  {
+    const s0 = defaultDockState()
+    const s1 = addDockPlaceholder(s0, 9000)
+    add('新标签页：+ 加一张空白页并切过去', s1.tabs.length === 1 && s1.tabs[0].kind === 'new' && s1.activeTabId === s1.tabs[0].id)
+    add('新标签页：自动展开右侧栏', s1.open === true)
+    add('新标签页：标题 = 新标签页', dockTabTitle(s1.tabs[0], s1.tabs, true) === '新标签页')
+    add('新标签页：不原地修改原状态', s0.tabs.length === 0)
+
+    const s2 = configureDockTab(s1, s1.tabs[0].id, 'terminal')
+    add('新标签页：选定类型 → 原地转换', s2.tabs.length === 1 && s2.tabs[0].kind === 'terminal' && s2.tabs[0].id === s1.tabs[0].id)
+    add('新标签页：转换后仍是当前标签', s2.activeTabId === s1.tabs[0].id)
+    add('新标签页：不能转成 new / file', configureDockTab(s2, s2.tabs[0].id, 'new') === s2 && configureDockTab(s2, s2.tabs[0].id, 'file') === s2)
+
+    // 分支标签只有一份：空白页选「分支」且已有分支标签时，丢掉空白页并切到已有的
+    const b1 = openBranchDockTab(s2, 9001)
+    add('分支标签：打开时自动展开并切过去', b1.open === true && activeDockTab(b1)?.kind === 'branch')
+    const b2 = openBranchDockTab(b1, 9002)
+    add('分支标签：重复打开复用（不新增）', b2.tabs.length === b1.tabs.length && b2.activeTabId === b1.activeTabId)
+    add('分支标签：addDockTab 也复用唯一分支', addDockTab(b1, 'branch', 9004).tabs.length === b1.tabs.length)
+
+    const withBlank = addDockPlaceholder(b2, 9003)
+    const merged = configureDockTab(withBlank, withBlank.tabs[withBlank.tabs.length - 1].id, 'branch')
+    add('分支标签：空白页选分支 → 复用已有，空白页消失', merged.tabs.length === b2.tabs.length && activeDockTab(merged)?.kind === 'branch')
+
+    const branchKinds = DOCK_TAB_KINDS.join(',')
+    add('类型：新标签页可选类型包含分支', branchKinds === 'files,terminal,browser,branch', branchKinds)
+  }
+
+  // 12. 分支 / 新标签页的存档归一化
+  {
+    const state = normalizeDockState({
+      open: true,
+      activeTabId: 'b2',
+      tabs: [
+        { id: 'n1', kind: 'new' },
+        { id: 'b1', kind: 'branch' },
+        { id: 'b2', kind: 'branch' },
+      ],
+    })
+    add('归一化：保留空白新标签页', state.tabs.some((t) => t.kind === 'new'))
+    add('归一化：分支标签去重（只留第一个）', state.tabs.filter((t) => t.kind === 'branch').length === 1, JSON.stringify(state.tabs))
+    add('归一化：重复分支导致 activeTabId 失效 → 回落第一个', state.activeTabId === 'n1', String(state.activeTabId))
   }
 
   return cases

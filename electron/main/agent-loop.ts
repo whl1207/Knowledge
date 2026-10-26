@@ -56,6 +56,8 @@ import { PLAN_REVIEW_ID_PREFIX, parsePlanReviewReply, isPlanReviewId, type PlanR
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { normalizeAgentRunResult, type AgentRunResult } from '@/lib/plugin/agentContract'
 import { decideTruncationContinue } from '@/shared/truncation'
+import { agentSessionSignature, canResumeSessionStart } from '@/shared/agentSession'
+import { classifyLlmFailure, effectiveRetryDelayMs } from '@/shared/llmRetry'
 // 上下文预算与压缩（P0）：与渲染层共用同一口径（详见 src/shared/contextBudget.ts）
 import {
   COMPACT_KEEP_TURNS,
@@ -178,6 +180,25 @@ function saveToolImage(sessionId: string, img: ToolImage): SavedToolImage | null
     }
   } catch {
     return null
+  }
+}
+
+/** 稳定序列化工具参数（对象键排序），用于识别「同一工具 + 同一参数」的重复调用 */
+function canonicalToolArgs(value: any): string {
+  const seen = new WeakSet<object>()
+  const sort = (v: any): any => {
+    if (v === null || typeof v !== 'object') return v
+    if (seen.has(v)) return '[circular]'
+    seen.add(v)
+    if (Array.isArray(v)) return v.map(sort)
+    const out: Record<string, any> = {}
+    for (const k of Object.keys(v).sort()) out[k] = sort(v[k])
+    return out
+  }
+  try {
+    return JSON.stringify(sort(value ?? {}))
+  } catch {
+    return String(value)
   }
 }
 
@@ -365,6 +386,41 @@ const MAX_LENGTH_CONTINUES = 3
  */
 const MAX_TRUNCATED_TOOL_SKIPS = 3
 
+/**
+ * 并行安全工具：只读 / 无共享状态，多个调用可以同时跑。
+ * 其余（写文件、执行代码、shell、ask_user、run_code、run_subagent、MCP、插件工具）
+ * 一律独占，保持原有副作用顺序。
+ */
+const PARALLEL_SAFE_TOOLS = new Set([
+  'read_file',
+  'list_dir',
+  'search_files',
+  'kb_search',
+  'web_search',
+  'web_fetch',
+  'browser_snapshot',
+  'browser_extract_text',
+  'browser_screenshot',
+  'browser_list_tabs',
+])
+
+/** 同一 step 内并行工具的上限（有界滚动池，避免一次读几十个文件把 fd / 内存打满） */
+const MAX_PARALLEL_TOOL_CALLS = 4
+
+/** 参数可能很大 / 重复本身有正当理由的工具：不参与重复调用计数（避免序列化 1MB 正文） */
+const REPEAT_TRACK_EXCLUDE = new Set([
+  'write_file',
+  'replace_in_file',
+  'multi_replace',
+  'run_python',
+  'run_code',
+  'export_word',
+  'update_todo',
+  'update_plan',
+  'job_output',
+  'ask_user',
+])
+
 const backendInflight = new Map<string, number>()
 /**
  * 各编排运行（AgentBatch / AgentSwarm …）声明的期望并发：scopeId → 并发数。
@@ -482,7 +538,7 @@ class AgentImpl implements AgentControl {
    * step 中途抛错时由崩溃恢复逻辑补写（见 `runTurn` 的 catch：复刻 DSH 的 ToolCallRecovery）。
    * 每 step 开始时重置——只为"当前这一步"补写，避免把上一步早已落盘的结果重复写一遍。
    */
-  private stepResults = new Map<string, { name: string; ok: boolean; value?: any; error?: string; preview?: any; images?: SavedToolImage[] }>()
+  private stepResults = new Map<string, { name: string; ok: boolean; value?: any; error?: string; code?: string; retryable?: boolean; preview?: any; images?: SavedToolImage[] }>()
   /** 最近一次请求预算里生效的上下文窗口（供工具结果预算按窗口缩放；见 `pushToolResult`） */
   private effectiveWindowTokens = 0
   /** 最近一次请求预算里的预留输出 token（供压缩基准扣减；见 `compactionBasisTokens`） */
@@ -514,17 +570,40 @@ class AgentImpl implements AgentControl {
   /** 本次请求的纯估算值（不含系数，含工具 schema）与条目数：step 结束后用于校准与锚点 */
   private lastRequestEstimate = 0
   private lastRequestEntries = 0
+  /** 本会话配置签名（跨轮复用时判断能否继续；旧会话可能没有） */
+  private sessionSignature: string
+  /**
+   * assistant/chunk 落盘合并缓冲：流式分片仍逐条广播给 UI，但写进会话日志时
+   * 合并成 ~1KB / 120ms 一条，避免一个长回答产生上千次 JSONL append。
+   */
+  private chunkBuffer = ''
+  private chunkBufferStartedAt = 0
+  /** 相同工具 + 相同参数的连续调用计数（循环卫生守卫；每 turn 重置） */
+  private repeatKey = ''
+  private repeatCount = 0
 
-  constructor(options: AgentOptions) {
-    this.id = brand(`agent-${randomUUID()}`)
-    this.options = options
+  constructor(options: AgentOptions, init: { id?: string; resume?: boolean } = {}) {
+    this.id = brand(init.id || `agent-${randomUUID()}`)
+    this.options = { ...options, sessionId: this.id, resume: false }
+    this.sessionSignature = agentSessionSignature(options)
     // 估算校准系数的初始值：渲染层按「来源 + 模型」记住上次实测值（本地后端 tokenizer 偏差可达 ±30%）
     this.tokenScale = clampTokenScale(options.tokenScale)
+    if (init.resume) {
+      // 跨轮 / 跨进程恢复：不重写 session/start，也不重复 seed 历史。
+      // 计划与待办从同一份日志折叠（最后一条胜出），turn 编号接着已有记录走。
+      const replay = sessionLog.projectAgentState(this.id)
+      this._plan = replay.plan
+      this._todos = replay.todos
+      this.turnCount = sessionLog.countTurns(this.id)
+      this.lastAssistantContent = sessionLog.lastAssistantContent(this.id)
+      return
+    }
     // 会话事件日志：创建即写 session/start（模型可见的 systemPrompt 落盘）
     sessionLog.append(this.id, 'session/start', {
       provider: options.provider,
       model: options.llmConfig?.model || options.config?.model,
       systemPrompt: options.systemPrompt,
+      signature: this.sessionSignature,
       createdAt: Date.now(),
     })
     // 会话历史种子：聊天窗口的既有上下文写入本 agent 的日志（模型可见即已记录），
@@ -569,6 +648,42 @@ class AgentImpl implements AgentControl {
   /** 已完成的 turn 数 */
   get currentTurn(): number {
     return this.turnCount
+  }
+
+  /** 当前配置能否继续复用这条日志（供 createAgent 判断是否新建会话） */
+  canResumeWith(options: AgentOptions): boolean {
+    return agentSessionSignature(options) === this.sessionSignature
+  }
+
+  /**
+   * 复用同一会话时把「可原地更新」的运行参数换成最新值。
+   * 不替换 provider/model/tools/systemPrompt——这些变化会走新会话（见 canResumeWith）。
+   */
+  applyResumeOptions(options: AgentOptions): void {
+    Object.assign(this.options, options, { sessionId: this.id, resume: false })
+    this.tokenScale = clampTokenScale(options.tokenScale ?? this.tokenScale)
+  }
+
+  /**
+   * 流式正文写日志：合并相邻分片。
+   * UI 仍逐条收 `assistant/chunk`；会话日志只用于回放，没必要一个 token 一行。
+   */
+  private queueAssistantChunk(chunk: string): void {
+    if (!chunk) return
+    if (!this.chunkBuffer) this.chunkBufferStartedAt = Date.now()
+    this.chunkBuffer += chunk
+    if (this.chunkBuffer.length >= 1024 || Date.now() - this.chunkBufferStartedAt >= 120) {
+      this.flushAssistantChunks()
+    }
+  }
+
+  /** 把合并缓冲写进会话日志（step 结束 / 取消 / turn 结束前调用） */
+  private flushAssistantChunks(): void {
+    if (!this.chunkBuffer) return
+    const content = this.chunkBuffer
+    this.chunkBuffer = ''
+    this.chunkBufferStartedAt = 0
+    sessionLog.append(this.id, 'assistant/chunk', { content })
   }
 
   // ---------------- inbox 语义 ----------------
@@ -669,7 +784,9 @@ class AgentImpl implements AgentControl {
       this.jobId = null
     }
     jobRegistry.cancelForOwner(this.id, 'agent 已销毁')
+    this.flushAssistantChunks()
     sessionLog.append(this.id, 'session/end', { status: 'disposed' })
+    await sessionLog.flush(this.id)
     // 会话销毁：回收该会话仍遗留的浏览器 AI 标签
     try { browserAgentService.recycleOwnerTabs(this.id) } catch { /* 忽略 */ }
     this.notifyIdle()
@@ -742,9 +859,14 @@ class AgentImpl implements AgentControl {
 
   private async runTurn(firstItem: InboxItem): Promise<void> {
     const turn = ++this.turnCount
+    // 错误是「本轮」的事实：上一轮失败后继续发任务时，不能把旧错误带进本轮
+    // （否则本轮正常完成，job 仍会被 finally 标成 failed，UI 的 restore 也会读回旧错误）。
+    this.lastError = undefined
     // 每个 turn（一次任务）的 step 从 1 重新编号：控制台执行时间线从 Step 1 开始，
     // 而不是沿用跨 turn 的全局递增序号（旧实现第二次任务从 Step 2 起）
     this.stepInTurn = 0
+    this.repeatKey = ''
+    this.repeatCount = 0
     sessionLog.append(this.id, 'turn/start', { turn })
     this.emit('agent/turn-start', { turn })
     // 清单的回合边界收口（对齐 DSH todo 投影的 turn/start 语义）：上一轮已全部收口的
@@ -803,6 +925,9 @@ class AgentImpl implements AgentControl {
         this.currentCallSeq.clear()
         // 本 step 的结果集合清零（崩溃恢复只补写当前 step 的结果）
         this.stepResults = new Map()
+        // 持久化屏障：本 step 的输入（用户消息 / 注入上下文）先真正落盘，再发模型请求。
+        // 日志是唯一事实源；崩溃后不应出现「模型已经看过、日志里却还没有」的输入。
+        await sessionLog.flush(this.id)
         const result = await this.runStepWithOverflowRetry(messages)
         item = null // 本 step 的输入已消费
 
@@ -828,6 +953,8 @@ class AgentImpl implements AgentControl {
         if (norm.recovered.length) {
           console.warn(`[agent] 工具参数已用流式原文兜底（callId=${norm.recovered.join(',')}）：最终 tool_calls 缺失/截断参数`)
         }
+        // 先落盘尚未合并的流式正文，保证事件顺序：chunk → assistant/message
+        this.flushAssistantChunks()
         sessionLog.append(this.id, 'assistant/message', {
           content: result.content,
           toolCalls: cleanCalls,
@@ -863,9 +990,8 @@ class AgentImpl implements AgentControl {
             }
             toolCallsCount = cleanCalls.length
           } else {
-            for (const call of cleanCalls) {
-              await this.executeToolCall(call, step)
-            }
+            // 只读工具并行（有界池），写/执行类工具独占；结果按模型顺序提交
+            await this.executeToolCalls(cleanCalls, step)
             toolCallsCount = cleanCalls.length
           }
         }
@@ -934,6 +1060,8 @@ class AgentImpl implements AgentControl {
             callId,
             name: rec.name,
             ok: rec.ok,
+            ...(rec.code ? { code: rec.code } : {}),
+            ...(rec.retryable !== undefined ? { retryable: rec.retryable } : {}),
             value: rec.value,
             error: rec.error,
             preview: rec.preview,
@@ -962,6 +1090,8 @@ class AgentImpl implements AgentControl {
     } finally {
       // 中止可能是抛异常路径（catch 已置 aborted）或 step 之间检查到 signal.aborted
       const wasAborted = aborted || (this.turnController?.signal.aborted ?? false)
+      // 流式正文还没合并落盘（取消 / 抛错 / 只在末尾产出）时补一条，避免回放缺正文
+      this.flushAssistantChunks()
       const reason = wasAborted ? 'cancelled' : 'completed'
       sessionLog.append(this.id, 'turn/end', { turn, reason })
       this.emit('agent/turn-end', { turn, reason })
@@ -976,6 +1106,8 @@ class AgentImpl implements AgentControl {
         }
         this.jobId = null
       }
+      // turn 边界屏障：把本轮的 chunk / tool / turn 事件真正落盘后再回到 idle
+      await sessionLog.flush(this.id)
       this.turnController = null
     }
   }
@@ -1329,19 +1461,17 @@ class AgentImpl implements AgentControl {
     // 从受保护的 credentials.json 解析明文；内联 api_key 保持向后兼容。
     const resolvedConfig = this.resolveConfigWithCredential(config)
 
-    // 瞬态错误自动重试（HTTP 5xx / 网络抖动 / 本地后端瞬时过载）：仅当失败前未产出任何
-    // 内容时重试，避免把已写入会话日志的部分 chunk 重复进模型历史（"模型可见即已记录"）
+    // 瞬态错误自动重试（429 限流 / 5xx / 超时 / 网络抖动 / 空流）：仅当失败前未产出任何
+    // 内容时重试，避免把已写入会话日志的部分 chunk 重复进模型历史（"模型可见即已记录"）。
+    // 分类与退避在 @/shared/llmRetry（纯函数），429 会尊重 provider 的 Retry-After。
     const MAX_LLM_RETRY = 5
-    // AICore 直连抛出的 500 错误为中文格式（HTTP错误! 状态码: 500），同时兼容英文 status: 5xx
-    // 与网络层错误——若不识别，500 不会被当作瞬态错误，导致该行任务直接终止
-    const isTransientError = (msg: string) =>
-      /status[:：] ?5\d\d/i.test(msg) ||
-      /HTTP错误!? ?状态码[:：]? ?5\d\d/i.test(msg) ||
-      /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed|network error/i.test(msg)
 
     for (let attempt = 0; attempt < MAX_LLM_RETRY; attempt++) {
       // 每次尝试重置累积器（重试时不并入上一次残留内容）
       let content = ''
+      // 上一次尝试的流式日志缓冲不能带进重试（否则日志里会出现"旧半截+新正文"的合并块）
+      this.chunkBuffer = ''
+      this.chunkBufferStartedAt = 0
       let toolCalls: any[] = []
       let reasoning: string | undefined
       // 结束原因（finish_reason）：length = 被 max_tokens / 模型上下文截断（“没推理完就结束”的典型原因）
@@ -1353,7 +1483,7 @@ class AgentImpl implements AgentControl {
         toolChoice: 'auto',
         onStream: (chunk: string) => {
           content += chunk
-          sessionLog.append(this.id, 'assistant/chunk', { content: chunk })
+          this.queueAssistantChunk(chunk)
           this.emit('assistant/chunk', { content: chunk })
         },
         onReasoning: (text: string) => {
@@ -1498,9 +1628,17 @@ class AgentImpl implements AgentControl {
       try {
         await p
         // 空流重试：200 但整轮未产出任何内容/工具/推理——远程自托管服务在高并发下可能被
-        // 静默丢弃直接返回空流，这里自动按瞬态再试一次，避免被误判成“正常空结果”
-        if (!content && toolCalls.length === 0 && !reasoning && SELFHOSTED_PROVIDERS.has(provider) && attempt < MAX_LLM_RETRY - 1) {
-          const delay = 500 * Math.pow(2, attempt)
+        // 静默丢弃直接返回空流；云端偶发也会这样。空响应没有计费/副作用风险，所有 provider 都可重试。
+        if (!content && toolCalls.length === 0 && !reasoning && attempt < MAX_LLM_RETRY - 1) {
+          const failure = classifyLlmFailure({ message: 'empty response', name: 'EmptyResponse' })
+          const delay = effectiveRetryDelayMs(attempt, failure, { baseMs: 500, maxMs: 10_000 })
+          sessionLog.append(this.id, 'llm/retry', {
+            attempt: attempt + 1,
+            code: 'empty_response',
+            delayMs: delay,
+            provider,
+            error: '模型返回空流 / 空响应',
+          })
           console.warn(`[agent] LLM 返回空流（${provider}，第 ${attempt + 1} 次，tools=${tools.length}），${delay}ms 后重试`)
           await new Promise((r) => setTimeout(r, delay))
           continue
@@ -1517,12 +1655,32 @@ class AgentImpl implements AgentControl {
         // 仅当失败前未产出任何内容（内容/工具/推理均为空）时重试——
         // 已产出内容说明已写入会话日志，重试会导致模型历史重复
         const clean = content === '' && toolCalls.length === 0 && !reasoning
-        if (attempt < MAX_LLM_RETRY - 1 && isTransientError(msg) && clean) {
-          // 指数退避：500ms / 1s / 2s / 4s / 8s，给本地后端（LM Studio / Ollama）过载或模型重载留出恢复时间
-          const delay = 500 * Math.pow(2, attempt)
-          console.warn(`[agent] LLM 请求失败（第 ${attempt + 1} 次，瞬态错误），${delay}ms 后重试: ${msg}`)
+        const failure = classifyLlmFailure({
+          message: msg,
+          status: Number(err?.status) || undefined,
+          retryAfter: err?.retryAfter,
+          name: String(err?.name || ''),
+        })
+        if (attempt < MAX_LLM_RETRY - 1 && failure.retryable && clean) {
+          const delay = effectiveRetryDelayMs(attempt, failure, { baseMs: 500, maxMs: 10_000 })
+          sessionLog.append(this.id, 'llm/retry', {
+            attempt: attempt + 1,
+            code: failure.code,
+            delayMs: delay,
+            provider,
+            error: msg.slice(0, 500),
+          })
+          console.warn(`[agent] LLM 请求失败（第 ${attempt + 1} 次，${failure.code}），${delay}ms 后重试: ${msg}`)
           await new Promise((r) => setTimeout(r, delay))
           continue
+        }
+        // 已经流出一部分正文后失败/取消：把已交付内容收尾成 assistant/message。
+        // 否则用户看到了半截回答，下一轮模型却完全不知道它说过什么（DSH 的取消语义）。
+        if ((content || reasoning) && !isContextOverflowError(msg)) {
+          this.flushAssistantChunks()
+          sessionLog.append(this.id, 'assistant/message', { content, reasoning })
+          this.lastAssistantContent = content
+          this.emit('assistant/message', { content, toolCalls: [] })
         }
         throw err
       }
@@ -1567,7 +1725,35 @@ class AgentImpl implements AgentControl {
       + (giveUp ? '若反复出现，请调高 max_tokens 或改用输出上限更大的模型。' : '')
   }
 
-  private async executeToolCall(call: any, step: number): Promise<void> {
+  /**
+   * 循环卫生：连续相同工具 + 相同参数时，在下一步注入一条提醒（不阻断、不改结果）。
+   * 阈值对齐 DSH 的 3/5/8；轮询类工具排除，避免正常的 job_output 等待被误判。
+   */
+  private noteToolRepeat(name: string, args: any): void {
+    if (!name || REPEAT_TRACK_EXCLUDE.has(name)) return
+    const key = `${name}:${canonicalToolArgs(args)}`
+    if (key === this.repeatKey) this.repeatCount++
+    else {
+      this.repeatKey = key
+      this.repeatCount = 1
+    }
+    if (this.repeatCount !== 3 && this.repeatCount !== 5 && this.repeatCount !== 8) return
+    const preview = key.length > 360 ? key.slice(0, 360) + '…' : key
+    const text = this.repeatCount === 3
+      ? `[循环提醒] 你正在用完全相同的参数重复调用工具 \`${name}\`。请先检查上一条工具结果，再决定是否换参数/换方法，不要原地打转。`
+      : this.repeatCount === 5
+        ? `[循环提醒] 已连续 5 次用相同参数调用 \`${name}\`，没有产生新进展。请换一个方法、换参数，或直接向用户说明卡点。\n参数：${preview}`
+        : `[循环提醒] 已连续 8 次重复调用 \`${name}\`。继续重复不会产生新信息；请停止重复，总结当前证据与阻塞点，必要时询问用户。`
+    this.inject(text)
+  }
+
+  /** 一次工具调用的执行结果（尚未落日志；由 pushToolOutcome 按模型顺序提交） */
+  private async runToolCall(call: any, step: number): Promise<{
+    callId: string
+    name: string
+    result: ToolResult
+    diagnostic?: boolean
+  }> {
     const name = String(call?.name || call?.function?.name || '')
     const callId = String(call?.id || `call-${step}-${Math.random().toString(36).slice(2, 8)}`)
     const rawArgs = call?.arguments ?? call?.function?.arguments
@@ -1591,20 +1777,38 @@ class AgentImpl implements AgentControl {
         + '本次调用未执行（没有写入任何文件）。请缩短一次提交的内容后重试：大文件分段写入——先写骨架，再用 replace_in_file 在末尾逐段追加'
         + '（例如一次 run_code 只做少量步骤）；并确保 JSON 字符串内的换行/引号已正确转义。'
         + '若反复出现，请调高 max_tokens 或改用输出上限更大的模型。'
-      this.rejectToolCall(callId, name, error, step, rawText.length)
-      return
+      const callSeq = sessionLog.append(this.id, 'tool/call', {
+        callId,
+        name,
+        args: undefined,
+        argsRawLen: rawText.length,
+        step,
+      }).seq
+      this.currentCallSeq.set(callId, callSeq)
+      this.emit('tool/call', { callId, name, args: undefined, argsParseFailed: true })
+      return {
+        callId,
+        name,
+        diagnostic: true,
+        result: { ok: false, error, code: 'INVALID_ARGS' },
+      }
     }
 
     const callSeq = sessionLog.append(this.id, 'tool/call', { callId, name, args, step }).seq
     this.currentCallSeq.set(callId, callSeq)
     this.emit('tool/call', { callId, name, args })
+    this.noteToolRepeat(name, args)
 
-      // 引擎级白名单守卫：即使模型试图调用未启用工具，也直接返回失败而不是执行
-      const toolWhitelist = this.options.tools
-      if (toolWhitelist !== null && Array.isArray(toolWhitelist) && !toolWhitelist.includes(name as any)) {
-        this.pushToolResult({ callId, name, ok: false, error: `工具 ${name} 未启用（不在当前工具白名单中）`, diagnostic: true })
-        return
+    // 引擎级白名单守卫：即使模型试图调用未启用工具，也直接返回失败而不是执行
+    const toolWhitelist = this.options.tools
+    if (toolWhitelist !== null && Array.isArray(toolWhitelist) && !toolWhitelist.includes(name as any)) {
+      return {
+        callId,
+        name,
+        diagnostic: true,
+        result: { ok: false, error: `工具 ${name} 未启用（不在当前工具白名单中）`, code: 'DENIED' },
       }
+    }
 
     // PTC（Code Mode）呈现坍缩守卫：坍缩后模型可见的只有 run_code，
     // 直接点名其它工具（幻觉 / 从技能文档或历史里知道的名字）一律拒绝并指出正确写法。
@@ -1613,10 +1817,13 @@ class AgentImpl implements AgentControl {
     if (this.options.toolsPresentation === 'code' && name !== 'run_code') {
       const error = `PTC（代码模式）下不能直接调用 ${name}：请把该调用写进 run_code 程序的 tools 里`
         + `（程序内 await tools.${name}({ ... })）`
-      this.pushToolResult({ callId, name, ok: false, error, diagnostic: true })
-      return
+      return {
+        callId,
+        name,
+        diagnostic: true,
+        result: { ok: false, error, code: 'DENIED' },
+      }
     }
-
 
     // 引擎级防死循环：同一技能重复加载 → 直接返回"继续执行"提示，不再执行加载
     let result: ToolResult
@@ -1644,7 +1851,75 @@ class AgentImpl implements AgentControl {
       result = await toolRegistry.execute(name, args, this.ctx())
     }
 
-    this.pushToolResult({ callId, name, ok: result.ok, value: result.value, error: result.error, preview: result.preview, images: result.images })
+    return { callId, name, result }
+  }
+
+  /** 把一次工具结果按模型给出的调用顺序提交（日志 / UI / 崩溃恢复记账的唯一入口） */
+  private pushToolOutcome(outcome: { callId: string; name: string; result: ToolResult; diagnostic?: boolean }): void {
+    const { callId, name, result, diagnostic } = outcome
+    this.pushToolResult({
+      callId,
+      name,
+      ok: result.ok,
+      value: result.value,
+      error: result.error,
+      code: result.code,
+      retryable: result.retryable,
+      preview: result.preview,
+      images: result.images,
+      diagnostic,
+    })
+  }
+
+  /** 单个 shell 路径（保留给截断拒绝等同步收口；正常调度走 executeToolCalls） */
+  private async executeToolCall(call: any, step: number): Promise<void> {
+    this.pushToolOutcome(await this.runToolCall(call, step))
+  }
+
+  /**
+   * 工具调度：连续只读调用进有界并行池，独占调用是 barrier；
+   * 结果严格按模型给出的顺序提交，保证 assistant.tool_calls 与 tool 消息配对。
+   */
+  private async executeToolCalls(calls: any[], step: number): Promise<void> {
+    let i = 0
+    while (i < calls.length) {
+      const name = String(calls[i]?.name || calls[i]?.function?.name || '')
+      if (!PARALLEL_SAFE_TOOLS.has(name)) {
+        await this.executeToolCall(calls[i], step)
+        i++
+        continue
+      }
+      // 收集连续的只读调用，成一个并行组
+      const group: any[] = []
+      while (i < calls.length) {
+        const n = String(calls[i]?.name || calls[i]?.function?.name || '')
+        if (!PARALLEL_SAFE_TOOLS.has(n)) break
+        group.push(calls[i])
+        i++
+      }
+      const outcomes = new Array<{ callId: string; name: string; result: ToolResult; diagnostic?: boolean }>(group.length)
+      let next = 0
+      const worker = async (): Promise<void> => {
+        while (true) {
+          const idx = next++
+          if (idx >= group.length) return
+          try {
+            outcomes[idx] = await this.runToolCall(group[idx], step)
+          } catch (e: any) {
+            outcomes[idx] = {
+              callId: String(group[idx]?.id || `call-${step}-${idx}`),
+              name: String(group[idx]?.name || group[idx]?.function?.name || ''),
+              result: { ok: false, error: e?.message || String(e), code: 'TOOL_ERROR' },
+              diagnostic: true,
+            }
+          }
+        }
+      }
+      const workers = Array.from({ length: Math.min(MAX_PARALLEL_TOOL_CALLS, group.length) }, worker)
+      await Promise.all(workers)
+      // 严格按模型顺序提交，避免工具结果乱序导致下一轮历史错位
+      for (const out of outcomes) if (out) this.pushToolOutcome(out)
+    }
   }
 
   /**
@@ -1666,11 +1941,13 @@ class AgentImpl implements AgentControl {
     ok: boolean
     value?: any
     error?: string
+    code?: string
+    retryable?: boolean
     preview?: any
     images?: ToolImage[]
     diagnostic?: boolean
   }): void {
-    const { callId, name, ok, value, error, preview, diagnostic } = result
+    const { callId, name, ok, value, error, preview, diagnostic, code, retryable } = result
     // 图片落盘（会话日志只存路径）；最多 4 张，避免一次工具调用把上下文撑爆
     const savedImages = (result.images || [])
       .slice(0, 4)
@@ -1701,6 +1978,8 @@ class AgentImpl implements AgentControl {
       callId,
       name,
       ok,
+      ...(code ? { code } : {}),
+      ...(retryable !== undefined ? { retryable } : {}),
       value,
       error,
       preview,
@@ -1710,9 +1989,11 @@ class AgentImpl implements AgentControl {
       ...(savedImages.length ? { images: savedImages } : {}),
     })
     // 记入本步结果集合：step 中途抛错时由崩溃恢复逻辑补写（见 runTurn 的 catch 块）
-    this.stepResults.set(callId, { name, ok, value, error, preview, images: savedImages.length ? savedImages : undefined })
+    this.stepResults.set(callId, { name, ok, value, error, code, retryable, preview, images: savedImages.length ? savedImages : undefined })
     this.emit('tool/result', { callId, name, ok, value, error, preview })
     this.emittedResultIds.add(callId)
+    // 工具调用/结果对是崩溃恢复的关键事实：不等到 50ms 批刷，立刻异步落盘
+    void sessionLog.flush(this.id)
   }
 
   private ctx(): ToolExecutionContext {
@@ -1878,21 +2159,47 @@ async function runLlmOnce(opts: {
   }
 }
 
-/** 创建 agent（异步驱动立即启动，返回控制句柄） */
-export function createAgent(options: AgentOptions): AgentControl {
-  // 远端自托管并发基准随 agent 的 llm 通用配置同步（未携带该字段则不改变当前值）
-  setRemoteBackendMaxInflight(options?.llmConfig?.remoteMaxInflight)
-  const agent = new AgentImpl(options)
+/** 把 agent 放进注册表并启动驱动器（创建 / 恢复共用） */
+function attachAgent(agent: AgentImpl, parentId?: string): void {
   agents.set(agent.id, agent)
-  if (options.parentId) {
-    let children = childAgents.get(options.parentId)
+  if (parentId) {
+    let children = childAgents.get(parentId)
     if (!children) {
       children = new Set()
-      childAgents.set(options.parentId, children)
+      childAgents.set(parentId, children)
     }
     children.add(agent.id)
   }
   agent.drive()
+}
+
+/** 创建 agent（异步驱动立即启动，返回控制句柄） */
+export function createAgent(options: AgentOptions): AgentControl {
+  // 远端自托管并发基准随 agent 的 llm 通用配置同步（未携带该字段则不改变当前值）
+  setRemoteBackendMaxInflight(options?.llmConfig?.remoteMaxInflight)
+  const requested = String(options.sessionId || '').trim()
+  if (requested) {
+    const live = agents.get(requested)
+    if (live instanceof AgentImpl) {
+      // 同一聊天重复发送：配置兼容就复用（历史、观察表、计划、工具证据都还在）
+      if (live.canResumeWith(options)) {
+        live.applyResumeOptions(options)
+        return live
+      }
+      // 配置面变了（换模型 / 改系统提示 / 改工具集）：旧会话不能继续接收新历史
+      void live.dispose()
+    } else if (options.resume && sessionLog.exists(requested)) {
+      const start = sessionLog.getStart(requested)
+      if (canResumeSessionStart(start, options)) {
+        const resumed = new AgentImpl(options, { id: requested, resume: true })
+        attachAgent(resumed, options.parentId)
+        return resumed
+      }
+    }
+  }
+  // 新建会话：即使调用方传了 sessionId，也不能把新事件追加到旧日志（签名不兼容）
+  const agent = new AgentImpl(options)
+  attachAgent(agent, options.parentId)
   return agent
 }
 

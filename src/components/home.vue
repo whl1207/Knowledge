@@ -63,6 +63,16 @@
               <i class="fa fa-folder-open-o"></i>
               <span class="chat-group-name">{{ element.head.label }}</span>
               <span class="chat-group-count">{{ element.head.count }}</span>
+              <!-- 在该工作区下新建对话：分组头右侧的 +（消息数量后面） -->
+              <span
+                class="chat-group-add"
+                :title="store.locales == 'zh'
+                  ? `在「${element.head.label}」工作区新建对话`
+                  : `New chat in ${element.head.label}`"
+                @click.stop="createNewChat(element.head.workspace)"
+              >
+                <i class="fa fa-plus"></i>
+              </span>
             </div>
             <div
               class="chat-item"
@@ -101,7 +111,7 @@
                     <div v-else-if="element.chat.mode === 'swarm'" class="mode-icon" title="集群（多智能体协作）">
                       <i class="fa fa-users"></i>
                     </div>
-                    {{ element.chat.title || `聊天 ${element.originalIndex + 1}` }}
+                    {{ element.chat.title || (store.locales == 'zh' ? `聊天 ${element.originalIndex + 1}` : `Chat ${element.originalIndex + 1}`) }}
                   </span>
                   <span class="chat-time">{{ getChatTimeText(element.chat) }}</span>
                   <div class="chat-item-right">
@@ -140,11 +150,13 @@
         <!-- 聊天标题（有历史消息时才显示；空白聊天时头部只留开关/模型等） -->
         <input 
           v-if="!isEmptyChat"
-          v-model="currentChat.title" 
-          :placeholder="store.locales=='zh' ? '输入聊天标题...' : 'Enter Chat Title...'"
+          :key="currentChat.id"
+          :value="currentChat.title"
+          :placeholder="currentChatFallbackTitle"
+          :title="store.locales=='zh' ? '点击修改聊天标题' : 'Click to rename this chat'"
           class="chat-title-input"
-          @input="markChatTitlePinned(currentChat, false)"
-          @change="markChatTitlePinned(currentChat, true)"
+          @input="onChatTitleInput"
+          @change="onChatTitleChange"
         />
         <!-- 上下文占用圆环（参考 DeepSeek Harness） -->
         <div v-if="contextUsageVisible" class="context-usage" :title="contextUsageTooltip">
@@ -188,9 +200,6 @@
             {{ model }}
           </option>
         </select>
-        <div v-if="hasBranches" class="button branch-btn" @click="toggleBranchView" :class="{ active: showBranchView }" :title="store.locales=='zh' ? '分支对话视图' : 'Branch View'">
-          <i class="fa fa-sitemap"></i>
-        </div>
         <div v-if="currentChat.mode === 'retrieval' && currentChat.config.kbPath" class="parameter" :title="store.locales=='zh' ? '知识库片段数量' : 'Knowledge Base Fragment Count'">
           <label>{{ currentChat.config.kbTopK || 5 }}</label>
           <input 
@@ -239,11 +248,13 @@
             </div>
             <input
               v-if="!isEmptyChat"
-              v-model="currentChat.title"
-              :placeholder="store.locales=='zh' ? '输入聊天标题...' : 'Enter Chat Title...'"
+              :key="currentChat.id"
+              :value="currentChat.title"
+              :placeholder="currentChatFallbackTitle"
+              :title="store.locales=='zh' ? '点击修改聊天标题' : 'Click to rename this chat'"
               class="chat-title-input"
-              @input="markChatTitlePinned(currentChat, false)"
-              @change="markChatTitlePinned(currentChat, true)"
+              @input="onChatTitleInput"
+              @change="onChatTitleChange"
             />
             <!-- 右侧栏开关（项目组顶栏也要有；样式与左侧 fa-bars 开关一致） -->
             <div
@@ -414,12 +425,6 @@
               <div class="tool-box-header">
                 <i class="fa" :class="unitToolIcon(unit)"></i>
                 <span class="tool-box-name" :title="unitLabel(unit)">{{ unitLabel(unit) }}</span>
-                <!-- 写入进度：write_file 生成/写入期间显示字数（长文件不再只有一个转圈图标） -->
-                <span
-                  v-if="unitWriteProgress(unit)"
-                  class="tool-box-progress"
-                  :class="{ 'is-error': unit.status === 'error' }"
-                >{{ unitWriteProgress(unit) }}</span>
                 <span class="tool-box-status" :class="unit.status">
                   <i v-if="unit.status === 'running'" class="fa fa-circle-o-notch fa-spin"></i>
                   <i v-else-if="unit.status === 'success'" class="fa fa-check-circle"></i>
@@ -942,7 +947,18 @@
             </div>
             <!-- 对话模式选择下拉框 -->
             <div class="mode-select-wrap">
-              <!-- 已关联项（放在模式下拉**左侧**）：点击重新选择对应的知识库/工作流/Agent 预设 -->
+              <!-- 顺序：工作区 → 对话模式 → 该模式的专属选项 -->
+              <select
+                class="mode-select"
+                :value="modeSelectValue"
+                @change="onModeSelect"
+                :disabled="isAnyExecuting"
+                :title="store.locales=='zh' ? '选择对话模式' : 'Select chat mode'"
+              >
+                <option v-for="m in modeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
+              </select>
+
+              <!-- 已关联项：点击重新选择对应的知识库/工作流/Agent 预设 -->
               <span
                 v-if="currentChat.mode === 'retrieval'"
                 class="mode-linked-chip"
@@ -952,6 +968,25 @@
               >
                 <i class="fa fa-book"></i>
                 <span class="mode-linked-name">{{ getKbLinkedLabel() }}</span>
+              </span>
+              <select
+                v-if="currentChat.mode === 'retrieval'"
+                v-model="currentChat.config.retrievalStrategy"
+                @change="saveChats"
+                class="mode-select strategy-select"
+                :disabled="isAnyExecuting"
+                :title="store.locales=='zh' ? '选择检索策略' : 'Select retrieval strategy'"
+              >
+                <option v-for="s in retrievalStrategyOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
+              </select>
+              <span
+                v-if="currentChat.mode === 'agent' || currentChat.mode === 'agent2'"
+                class="mode-linked-chip"
+                @click="toggleAgentPicker"
+                :title="getAgentButtonTitle()"
+              >
+                <i class="fa fa-user-circle"></i>
+                <span class="mode-linked-name">{{ currentAgentLabel }}</span>
               </span>
               <span
                 v-if="currentChat.mode === 'workflow'"
@@ -963,17 +998,17 @@
                 <i class="fa fa-stumbleupon"></i>
                 <span class="mode-linked-name">{{ currentChat.config.workflowPath ? getLinkedFileName(currentChat.config.workflowPath) : (store.locales=='zh' ? '选择工作流...' : 'Select Workflow...') }}</span>
               </span>
-              <span
-                v-if="currentChat.mode === 'agent' || currentChat.mode === 'agent2'"
-                class="mode-linked-chip"
-                @click="toggleAgentPicker"
-                :title="getAgentButtonTitle()"
-              >
-                <i class="fa fa-user-circle"></i>
-                <span class="mode-linked-name">{{ currentAgentLabel }}</span>
-              </span>
 
-              <!-- 集群模式：仅成员选择入口（勾选顺序即发言顺序）——运行方式已拆成右侧独立下拉 -->
+              <!-- 集群模式：先选运行方式，再选参与成员（勾选顺序即发言顺序） -->
+              <select
+                v-if="currentChat.mode === 'swarm'"
+                v-model="swarmRunMode"
+                class="mode-select swarm-mode-select"
+                :disabled="isAnyExecuting"
+                :title="swarmRunModeTitle"
+              >
+                <option v-for="m in swarmRunModeOptions" :key="m.value" :value="m.value" :title="m.desc">{{ m.label }}</option>
+              </select>
               <span
                 v-if="currentChat.mode === 'swarm'"
                 class="mode-linked-chip"
@@ -984,28 +1019,6 @@
                 <i class="fa fa-users"></i>
                 <span class="mode-linked-name">{{ swarmChipLabel }}</span>
               </span>
-
-              <!-- 集群运行方式：与成员选择分离的独立下拉（选项随对话保存） -->
-              <select
-                v-if="currentChat.mode === 'swarm'"
-                v-model="swarmRunMode"
-                class="mode-select swarm-mode-select"
-                :disabled="isAnyExecuting"
-                :title="swarmRunModeTitle"
-              >
-                <option v-for="m in swarmRunModeOptions" :key="m.value" :value="m.value" :title="m.desc">{{ m.label }}</option>
-              </select>
-
-              <!-- 对话模式下拉：放在「已关联项」胶囊右侧（同一行：胶囊 → 下拉 → 检索策略） -->
-              <select
-                class="mode-select"
-                :value="modeSelectValue"
-                @change="onModeSelect"
-                :disabled="isAnyExecuting"
-                :title="store.locales=='zh' ? '选择对话模式' : 'Select chat mode'"
-              >
-                <option v-for="m in modeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
-              </select>
 
               <!-- 集群成员浮层（成员多选 + 群主总结 + 管理预设；运行方式已移至输入区独立下拉） -->
               <div v-if="showSwarmMemberPicker" class="agent-preset-picker swarm-picker scoll" @click.stop>
@@ -1043,17 +1056,6 @@
               </div>
 
               <!-- 知识库模式：检索策略选择（样式与 mode-select 统一） -->
-              <select
-                v-if="currentChat.mode === 'retrieval'"
-                v-model="currentChat.config.retrievalStrategy"
-                @change="saveChats"
-                class="mode-select strategy-select"
-                :disabled="isAnyExecuting"
-                :title="store.locales=='zh' ? '选择检索策略' : 'Select retrieval strategy'"
-              >
-                <option v-for="s in retrievalStrategyOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
-              </select>
-
               <!-- 网页端（LAN 共享）智能体模式：复用客户端胶囊 + 预设浮层，选项数据直接来自主机 -->
               <!-- Agent 预设选择浮层（含「通用智能体」） -->
               <div v-if="showAgentPresetPicker" class="agent-preset-picker scoll" @click.stop>
@@ -1200,15 +1202,9 @@
       </div>
     </div>
     
-    <!-- 分支图面板 - D3 树状图 -->
-    <div v-if="showBranchView" class="branch-panel">
-      <div class="branch-panel-content">
-        <div ref="d3TreeContainer" class="d3-tree-container" @contextmenu.prevent="onBranchPanelContextMenu($event)"></div>
-      </div>
-    </div>
-
-    <!-- 右侧栏（DSH 同款 dock）：文件 / 终端 / 浏览器；宽度、标签页与开关按聊天各自保存；
-         工作区也用这个聊天自己的（文件树根目录 / 终端 cwd 都跟随它） -->
+    <!-- 右侧栏（DSH 同款 dock）：文件 / 终端 / 浏览器 / 分支；宽度、标签页与开关按聊天各自保存；
+         工作区也用这个聊天自己的（文件树根目录 / 终端 cwd 都跟随它）。
+         分支对话视图也在这里作为一个标签，不再单独占一列。 -->
     <ChatDock
       v-if="dockState.open"
       ref="chatDockRef"
@@ -1218,17 +1214,25 @@
       :narrow="isNarrowLayout"
       :occluded="dockOccluded"
       :chat-workspace="chatWorkspacePath"
+      :branch-available="hasBranches"
       :zh="store.locales == 'zh'"
       @update:width="onDockResize"
       @resize-end="onDockResizeEnd"
       @activate="onDockActivate"
       @add="onDockAddTab"
+      @configure="onDockConfigureTab"
       @close-tab="onDockCloseTab"
       @close="closeDock"
       @insert-text="insertDockText"
       @open-file="onDockOpenFile"
       @tab-view-change="onDockTabViewChange"
-    />
+    >
+      <template #branch>
+        <div class="branch-tree-wrap">
+          <div ref="d3TreeContainer" class="d3-tree-container" @contextmenu.prevent="onBranchPanelContextMenu($event)"></div>
+        </div>
+      </template>
+    </ChatDock>
     
     <!-- 图片预览模态框 -->
     <div v-if="showImagePreview" class="image-preview-modal" @click="closeImagePreview">
@@ -1294,13 +1298,17 @@ import { isContextOverflowError } from '@/shared/contextBudget'
 import { readChatDraft, writeChatDraft, resolveDraftChat } from '@/shared/chatDraft'
 // 每个聊天自己的工作区 + 按工作区分组（读写纯函数，自测见 chatWorkspace.selftest.ts）
 import { groupByWorkspace, readChatWorkspace } from '@/shared/chatWorkspace'
+import { resolveToolFilePath } from '@/lib/agent/toolFilePath'
 // 右侧栏（DSH 同款 dock）：标签页 / 宽度 / 当前标签的纯逻辑（自测见 chatDock.selftest.ts）
 import {
   activateDockTab,
+  addDockPlaceholder,
   addDockTab,
   closeDockTab,
+  configureDockTab,
   defaultDockState,
   normalizeDockState,
+  openBranchDockTab,
   openFileDockTab,
   setDockOpen as setDockOpenState,
   setDockTabView,
@@ -1358,6 +1366,8 @@ const refreshLanHostGuestInfo = async () => {
   try {
     const { lanAgentTransport } = await import('@/platform/lanAgentClient')
     lanHostGuestInfo.value = await lanAgentTransport.info()
+    // 主机可能刚改了「局域网共享 → 可见模块 / 插件」：每次轮询都同步到导航过滤
+    store.applyLanGuestVisibility(lanHostGuestInfo.value)
     const modes = lanHostGuestInfo.value?.modes || []
     if (modes.length) {
       try { localStorage.setItem(LAN_HOST_MODES_KEY, JSON.stringify(modes)) } catch { /* 存储满等忽略 */ }
@@ -1467,6 +1477,14 @@ const dockVisibleActiveTabId = computed(() => {
   const id = dockState.value.activeTabId
   return tabs.some((t) => t.id === id) ? id : tabs[0]?.id
 })
+/** 当前激活的可见标签（分支视图是否打开由它决定：分支已并入右侧栏标签） */
+const activeDockTabView = computed(() =>
+  dockVisibleTabs.value.find((t) => t.id === dockVisibleActiveTabId.value),
+)
+/** 分支树视图是否**正在显示** = 右侧栏展开且当前激活的是 branch 标签（不再单独占一列） */
+const showBranchView = computed(() =>
+  dockState.value.open && activeDockTabView.value?.kind === 'branch',
+)
 
 /** 开关右侧栏（点头部图标） */
 const toggleDock = async () => {
@@ -1481,10 +1499,19 @@ const closeDock = async () => {
   dockState.value = setDockOpenState(dockState.value, false)
   saveChats()
 }
-const onDockAddTab = async (kind: ChatDockTabKind) => {
+const onDockAddTab = async (kind?: ChatDockTabKind) => {
   if (!(await dockConfirmLeave())) return
-  dockState.value = addDockTab(dockState.value, kind)
+  // 「+」不带 kind：先加一张空白新标签页（在页面里选类型，不弹图标下菜单）
+  dockState.value = kind ? addDockTab(dockState.value, kind) : addDockPlaceholder(dockState.value)
   saveChats()
+  if (kind === 'branch') renderBranchTreeSoon()
+}
+/** 空白新标签页里选定了类型：把这张页转成对应标签（分支复用唯一的分支标签） */
+const onDockConfigureTab = async (id: string, kind: ChatDockTabKind) => {
+  if (!(await dockConfirmLeave())) return
+  dockState.value = configureDockTab(dockState.value, id, kind)
+  saveChats()
+  if (kind === 'branch') renderBranchTreeSoon()
 }
 const onDockCloseTab = async (id: string) => {
   // 只有关掉「当前正在编辑的文件」才需要问未保存；关别的标签不会卸载编辑器
@@ -1558,7 +1585,11 @@ const onDockResize = (width: number) => {
   dockState.value = setDockWidthState(dockState.value, width)
 }
 /** 拖宽结束才落盘（拖动过程只改内存，避免每移动一像素写一次 localStorage） */
-const onDockResizeEnd = () => saveChats()
+const onDockResizeEnd = () => {
+  saveChats()
+  // 分支树的 SVG 是固定尺寸，侧栏变宽/变窄后重画一版
+  if (showBranchView.value) renderBranchTreeSoon()
+}
 /**
  * 右侧栏「浏览器」标签的遮挡判断：网页区是原生视图（永远画在 DOM 之上），
  * 主窗口一出现盖住侧栏的浮层，就必须让它先藏起来，否则浮层会被压在网页下面。
@@ -1842,7 +1873,6 @@ const syncMobileWidth = (): void => {
   isMobileWidth.value = window.innerWidth <= MOBILE_MAX_WIDTH
 }
 const isNarrowLayout = computed(() => isTallLayout.value || isMobileWidth.value)
-const showBranchView = ref(false)  // 分支树视图开关
 
 onMounted(() => {
   if (typeof window === 'undefined') return
@@ -2181,6 +2211,13 @@ const onInputContextMenu = (e: MouseEvent) => {
 
 // ==================== 计算属性 ====================
 const currentChat = computed(() => chats.value[currentChatIndex.value])
+
+/** 标题为空时与左侧列表完全一致的兜底文案（输入框用 placeholder 展示，不写进 chat.title） */
+const currentChatFallbackTitle = computed(() =>
+  store.locales == 'zh'
+    ? `聊天 ${currentChatIndex.value + 1}`
+    : `Chat ${currentChatIndex.value + 1}`,
+)
 
 /** 当前聊天没有任何历史消息（含未开始生成）：输入区在剩余空间里垂直居中 */
 const isEmptyChat = computed(() => {
@@ -3023,7 +3060,14 @@ const rootChats = computed<{ chat: Chat; originalIndex: number }[]>({
         placed.add(c.id)
       }
     })
+    // 拖动排序会改变 chats 数组下标；当前聊天必须跟着**同一个 chat.id** 走，
+    // 否则顶部标题输入框（currentChat）会继续读旧下标，和左侧列表选中的那一行不是同一个聊天。
+    const selectedId = chats.value[currentChatIndex.value]?.id
     chats.value = reordered
+    if (selectedId) {
+      const nextIndex = reordered.findIndex(c => c.id === selectedId)
+      if (nextIndex >= 0) currentChatIndex.value = nextIndex
+    }
     saveChats()
   }
 })
@@ -3692,9 +3736,9 @@ const renderD3Tree = () => {
     .attr('transform', d => `translate(${d.x},${d.y})`)
     .style('cursor', 'pointer')
     .on('click', (_event, d) => {
-      switchToBranchChat({ chat: d.data.chat, index: d.data.index, children: [] as any, depth: d.data.depth })
-      // 点击后重绘以更新高亮
-      renderD3Tree()
+      // switchChat 是异步的（先处理未保存文件），切换完成后再由 switchToBranchChat
+      // 在当前聊天的侧栏里重新打开 branch 标签并重绘高亮
+      void switchToBranchChat({ chat: d.data.chat, index: d.data.index, children: [] as any, depth: d.data.depth })
     })
     .on('contextmenu', (event, d) => {
       event.preventDefault()
@@ -3740,18 +3784,20 @@ const renderD3Tree = () => {
     })
 }
 
-// D3 树渲染 watcher
-watch(showBranchView, (newVal) => {
-  if (newVal) {
-    nextTick(() => {
-      // 等两帧，让面板动画完成、布局稳定后再渲染
+/** 分支标签刚挂载 / 切换过去时，等布局稳定再画（下一帧容器才有尺寸） */
+const renderBranchTreeSoon = () => {
+  nextTick(() => {
+    requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          renderD3Tree()
-        })
+        renderD3Tree()
       })
     })
-  }
+  })
+}
+
+// D3 树渲染 watcher：分支标签被激活时渲染
+watch(showBranchView, (newVal) => {
+  if (newVal) renderBranchTreeSoon()
 })
 
 watch(currentBranchFamily, () => {
@@ -4027,7 +4073,11 @@ const getWriteFileChars = (unit: any): number => {
  *
  * 为什么要有：模型生成整份文件内容时，一个 write_file 参数可能几万字、耗时以分钟计，
  * 旧界面只有一个转圈图标——状态一直不变，看起来就是卡死了。这里把「已生成多少字」
- * 直接显示在标题旁，数字随流式参数递增，长任务也能看出在推进。
+ * 显示在折叠摘要与展开后的内容框上方（tool-box-header 不再重复展示），数字随流式参数
+ * 递增，长任务也能看出在推进。
+ *
+ * 注意：运行中显示「已生成」而不是「已写入」——参数还在流式拼接，**还没有落盘**；
+ * 只有工具返回后结果里的 bytes 才是真实写入量。
  */
 const unitWriteProgress = (unit: any): string => {
   if (!unit || unit.stepType !== 'tool' || unit.description !== 'write_file') return ''
@@ -4035,7 +4085,10 @@ const unitWriteProgress = (unit: any): string => {
   const chars = getWriteFileChars(unit)
   if (unit.status === 'running') {
     if (!chars) return isZh ? '等待内容…' : 'Waiting…'
-    return isZh ? `已生成 ${formatCharCount(chars)} 字` : `${formatCharCount(chars)} chars`
+    // args 仍是字符串 = JSON 还没闭合（模型正在生成参数）；已解析成对象 = 工具已开始落盘
+    const writing = typeof unit.args !== 'string'
+    if (isZh) return `${writing ? '正在写入' : '已生成'} ${formatCharCount(chars)} 字`
+    return writing ? `${formatCharCount(chars)} chars — writing` : `${formatCharCount(chars)} chars`
   }
   if (unit.status === 'success') {
     return chars ? (isZh ? `已写入 ${formatCharCount(chars)} 字` : `${formatCharCount(chars)} chars written`) : ''
@@ -4048,12 +4101,27 @@ const unitWriteProgress = (unit: any): string => {
  * write_file 内容框上方的说明：只在「参数还在生成」或「失败」时出现。
  * 失败时模型生成的参数仍会展示（方便用户手动复制抢救），但必须标明**没有写入磁盘**——
  * 否则整份内容都渲染在卡片里，看起来就像已经写成功了。
+ *
+ * 运行中的说明里带上实时字数：卡片展开时正文在增长，这里也给出「已接收多少」，
+ * 不必只靠折叠摘要判断是否在推进。
  */
 const writeFileContentNote = (unit: any): string => {
   if (!unit || unit.description !== 'write_file') return ''
   const isZh = store.locales == 'zh'
   if (unit.status === 'running') {
-    return isZh ? '正在接收内容（尚未写入磁盘）' : 'Receiving content — not written to disk yet'
+    const chars = getWriteFileChars(unit)
+    // 参数仍在流式生成：明确「未落盘」；参数已完整（工具开始写盘）：直接说正在写入
+    const writing = typeof unit.args !== 'string'
+    if (isZh) {
+      if (writing) return chars > 0 ? `正在写入磁盘：${formatCharCount(chars)} 字` : '正在写入磁盘…'
+      return chars > 0
+        ? `正在接收内容：已生成 ${formatCharCount(chars)} 字（尚未写入磁盘）`
+        : '正在接收内容（尚未写入磁盘）'
+    }
+    if (writing) return chars > 0 ? `Writing to disk — ${formatCharCount(chars)} chars` : 'Writing to disk…'
+    return chars > 0
+      ? `Receiving content — ${formatCharCount(chars)} chars so far (not written to disk yet)`
+      : 'Receiving content — not written to disk yet'
   }
   if (unit.status === 'error') {
     return isZh ? '以下为模型生成的参数内容，未写入磁盘' : 'Model-generated arguments below — nothing was written to disk'
@@ -4077,6 +4145,16 @@ const openableToolPaths = (unit: any): string[] => {
     push(unit?.result?.path)
     return out
   }
+  // 优先用工具侧记录的实际落盘绝对路径：它使用的是执行当时的 cwd（每聊天自己的工作区），
+  // 不受之后切换全局工作区 / 读取旧记录影响。旧数据没有 absPath 时再走下面的相对路径拼接。
+  const previewFiles = unit?.preview?.kind === 'edit-diff' && Array.isArray(unit.preview.files)
+    ? unit.preview.files
+    : []
+  const previewAbsPaths = previewFiles.map((f: any) => f?.absPath).filter(Boolean)
+  if (previewAbsPaths.length) {
+    for (const p of previewAbsPaths) push(p)
+    return out
+  }
   const args = unit?.args
   if (!args) return out
   if (typeof args === 'string') {
@@ -4091,12 +4169,15 @@ const openableToolPaths = (unit: any): string[] => {
 
 /** 工具给的是相对路径时，按工作区根目录补成绝对路径（内置浏览器只接受绝对路径） */
 const toAbsoluteToolPath = (p: string): string => {
-  if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/') || p.startsWith('\\\\')) return p
-  // 必须用「当前工作区」而非 roots[0]：与工具 cwd（workspaceRoot）一致，
-  // 否则多工作区时会把相对路径拼到另一个工作区上，导致打开不存在的文件
-  const root = workspaceRoot(store) || (store.roots && store.roots[0]) || ''
-  if (!root) return p
-  return `${String(root).replace(/[\\/]+$/, '')}/${p.replace(/^[\\/]+/, '')}`
+  // 新工具结果优先走 preview.absPath（openableToolPaths 已处理，通常不会进到这里）。
+  // 旧消息没有 absPath 时按「该聊天自己的工作区 → 全局工作区」兜底：agent 执行时的 cwd
+  // 是 `readChatWorkspace(chat, store.root)`，全局 workspaceRoot(store) 之后可能被切到
+  // 别的目录（例如技能目录），再用它拼相对路径就会打开不存在的文件（报 ENOENT）。
+  return resolveToolFilePath(p, {
+    chatWorkspace: readChatWorkspace(currentChat.value, store.root),
+    globalRoot: workspaceRoot(store),
+    fallbackRoots: store.roots || [],
+  })
 }
 
 /**
@@ -5257,8 +5338,12 @@ const closeHomeOverlays = (): boolean => {
   if (showAgentPresetPicker.value) { showAgentPresetPicker.value = false; return true }
   if (showSwarmMemberPicker.value) { showSwarmMemberPicker.value = false; return true }
   if (showSharedKbPicker.value) { showSharedKbPicker.value = false; return true }
-  if (showBranchView.value) { showBranchView.value = false; return true }
-  // 窄屏下右侧栏是整屏二级界面（文件 / 终端 / 浏览器）：返回手势先退出它，再回聊天列表
+  if (showBranchView.value) {
+    const id = activeDockTabView.value?.id
+    if (id) { dockState.value = closeDockTab(dockState.value, id); saveChats() }
+    return true
+  }
+  // 窄屏下右侧栏是整屏二级界面（文件 / 终端 / 浏览器 / 分支）：返回手势先退出它，再回聊天列表
   if (isNarrowLayout.value && dockState.value.open) { void closeDock(); return true }
   return false
 }
@@ -5636,6 +5721,10 @@ const saveChats = () => {
 
 // 设置页「清空聊天记录」联动：外部清空 ai-chats 后重置内存为单个空会话
 const onAiChatsCleared = () => {
+  // 全量清空前先释放所有聊天引用的智能体会话：否则旧会话仍在后台推理，
+  // 并在清空后把结果写回已从列表移除的孤儿聊天对象。
+  resetAllAgentSessions()
+  for (const c of chats.value) c.messages = []
   currentUploads.value = []
   chats.value = [createNewChatData()]
   currentChatIndex.value = 0
@@ -5815,6 +5904,9 @@ function createNewChatData(): Chat {
   const customIndex = isCustom ? (store.AIconfig.llm.custom.activeIndex ?? 0) : undefined
   return {
     id: Date.now().toString(),
+    schemaVersion: 2,
+    agentSessionId: null,
+    agentSessionSignature: null,
     title: '',
     messages: [],
     config: {
@@ -5869,11 +5961,19 @@ function getDefaultModel(llmType: string, customIndex?: number): string {
   }
 }
 
-const createNewChat = async () => {
+/**
+ * 新建聊天。
+ * @param workspace 传入某个工作区路径时，新聊天直接归属该工作区（左侧分组头的 + 用）；
+ *                  空串 / 不传 = 跟随全局默认工作区。
+ */
+const createNewChat = async (workspace?: string) => {
   // 新建聊天会切走当前聊天（侧栏里的文件标签随之卸载）：先处理未保存内容
   if (!(await dockConfirmLeave())) return
   currentUploads.value = []
-  chats.value.push(createNewChatData())
+  const chat = createNewChatData()
+  const ws = String(workspace || '').trim()
+  if (ws) chat.workspace = ws
+  chats.value.push(chat)
   currentChatIndex.value = chats.value.length - 1
   // 细长布局：新建后直接进入整屏对话（列表收起），否则新对话被列表盖住、没法马上输入
   if (isNarrowLayout.value) showSidebar.value = false
@@ -5893,9 +5993,13 @@ const switchChat = async (index: number) => {
   // 输入框内容按聊天各自保存：切走的这一栏草稿即时落盘（重启后仍在，不必等下一次发送）
   saveChats()
   
-  // 切换聊天时，如果新聊天没有分支则隐藏分支面板
+  // 切换聊天时，如果新聊天的侧栏正停在分支标签、但该聊天家族没有分支，则收起这张标签
   if (showBranchView.value && !hasBranches.value) {
-    showBranchView.value = false
+    const id = activeDockTabView.value?.id
+    if (id) {
+      dockState.value = closeDockTab(dockState.value, id)
+      saveChats()
+    }
   }
   
   await checkCurrentModelConnection()
@@ -5957,10 +6061,14 @@ const deleteChat = async (index: number) => {
       delete showKbDetails.value[msg.timestamp]
     })
     
+    const selectedId = currentChat.value?.id
     chats.value.splice(index, 1)
-    if (currentChatIndex.value >= chats.value.length) {
-      currentChatIndex.value = chats.value.length - 1
-    }
+    // 删除位置在当前聊天之前时，数组下标会整体前移：必须按 id 重新定位，
+    // 否则顶部 chat-title-input 会继续读旧下标，显示成另一个聊天的标题。
+    const nextIndex = selectedId ? chats.value.findIndex(c => c.id === selectedId) : -1
+    currentChatIndex.value = nextIndex >= 0
+      ? nextIndex
+      : Math.max(0, Math.min(index, chats.value.length - 1))
     saveChats()
   } catch {
     // 用户取消删除
@@ -6040,6 +6148,7 @@ const deleteBranchTree = async (node: any) => {
   collect(node)
 
   // 按从大到小排序，从后往前删除
+  const selectedId = currentChat.value?.id
   indicesToRemove.sort((a, b) => b - a)
   for (const idx of indicesToRemove) {
     chats.value[idx].messages.forEach(msg => {
@@ -6048,9 +6157,11 @@ const deleteBranchTree = async (node: any) => {
     chats.value.splice(idx, 1)
   }
 
-  if (currentChatIndex.value >= chats.value.length) {
-    currentChatIndex.value = chats.value.length - 1
-  }
+  // 同 deleteChat：删掉前面的分支后，当前聊天要按 id 重新定位，不能沿用旧下标
+  const nextIndex = selectedId ? chats.value.findIndex(c => c.id === selectedId) : -1
+  currentChatIndex.value = nextIndex >= 0
+    ? nextIndex
+    : Math.max(0, Math.min(currentChatIndex.value, chats.value.length - 1))
   saveChats()
 }
 
@@ -6094,6 +6205,12 @@ const clearCurrentChat = async () => {
       // 统一停止：工作流→stopExecution；智能体→取消会话并保留/清理；普通→abort
       stopCurrentGeneration()
     }
+    // 清空 ≠ 暂停：还要释放智能体会话并清掉 sessionId / 签名 / 计划 / 待办，
+    // 否则下一条消息会 resume 旧日志，带着清空前的推理与工具证据继续跑。
+    // 放在 messages 置空之前：reset 需要从消息/待评审里收集仍在执行的 agentViewId。
+    resetAgentChatSession(currentChat.value)
+    // 已排队但还没投递的任务同样不能留：聊天已清空，它们没有可追加的目标。
+    clearPendingQueue(currentChat.value.id)
     
     currentChat.value.messages.forEach(msg => {
       delete showKbDetails.value[msg.timestamp]
@@ -6402,6 +6519,8 @@ const {
   steerRunningAgents,
   reconcileAgentRuns,
   stopAgentsInChat,
+  resetAgentChatSession,
+  resetAllAgentSessions,
   disposeAgentRun,
 } = useAgentRun({  getCurrentChat: () => currentChat.value,
   saveChats,
@@ -8315,6 +8434,24 @@ function markChatTitlePinned(chat: any, persist = true) {
   if (persist) saveChats()
 }
 
+/**
+ * 标题输入框：用 `:value` + 显式写回，而不是 `v-model`。
+ *
+ * 原因：`v-model` 在输入框仍处于聚焦 / IME 组合态时可能不把外部更新（首条消息的
+ * 回退标题、LLM 自动润色）写回 DOM，表现为「左侧列表的 chat-title 已变，顶部
+ * chat-title-input 还是旧值」。这里每次渲染都以 `currentChat.title` 为准；
+ * 输入框再加 `:key="currentChat.id"`，切聊天时直接重建，避免复用上一个聊天的 DOM 值。
+ */
+function onChatTitleInput(e: Event) {
+  const chat = currentChat.value
+  if (!chat) return
+  chat.title = (e.target as HTMLInputElement).value
+  markChatTitlePinned(chat, false)
+}
+function onChatTitleChange() {
+  markChatTitlePinned(currentChat.value, true)
+}
+
 /** 首条用户消息发出时立即落确定性回退标题（不等待模型） */
 function ensureChatFallbackTitle(chat: any, currentText = '') {
   if (!chat || chat.titlePinned || chat.titleRefined) return
@@ -8820,15 +8957,6 @@ const openChatFromList = (index: number) => {
 
 // ==================== 分支对话 ====================
 
-/** 切换分支树视图 */
-const toggleBranchView = () => {
-  showBranchView.value = !showBranchView.value
-  // 切换分支视图时强制显示侧边栏
-  if (showBranchView.value) {
-    showSidebar.value = true
-  }
-}
-
 /** 从某条消息提取简短标签（取前 20 字） */
 const getMessagePreview = (content: string, maxLen = 20): string => {
   if (!content) return '空消息'
@@ -8874,9 +9002,16 @@ const createBranch = (parentIndex: number, msgIndex: number) => {
   switchChat(currentChatIndex.value)
 }
 
-/** 分支树节点点击：切换到该聊天 */
-const switchToBranchChat = (node: BranchTreeNode) => {
-  switchChat(node.index)
+/**
+ * 分支树节点点击：切换到该聊天，并在**目标聊天**的右侧栏里保持分支标签打开
+ * （dock 状态是每个聊天一份；不重新打开的话，切过去后树会随旧聊天的侧栏一起消失）。
+ */
+const switchToBranchChat = async (node: BranchTreeNode) => {
+  await switchChat(node.index)
+  if (currentChatIndex.value !== node.index) return
+  dockState.value = openBranchDockTab(dockState.value)
+  saveChats()
+  renderBranchTreeSoon()
 }
 
 const getModelDisplayName = (config: ChatConfig): string => {
@@ -9349,8 +9484,12 @@ const getToolCollapsedText = (unit: any): string => {
   let text = unitResultText(unit) || ''
   if (!String(text).trim() && unit.error) text = unit.error
   if (!String(text).trim()) {
-    if (unit.description === 'write_file') text = getWriteFilePath(unit) || unitWriteProgress(unit) || ''
-    else text = unitArgsText(unit) || ''
+    if (unit.description === 'write_file') {
+      // 折叠态同时给出「写到哪」和「写了多少」：只显示路径时，用户仍然看不出模型是否在推进
+      text = [getWriteFilePath(unit), unitWriteProgress(unit)].filter(Boolean).join(' · ')
+    } else {
+      text = unitArgsText(unit) || ''
+    }
   }
   return String(text).replace(/\s+/g, ' ').trim()
 }
@@ -9583,17 +9722,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .workspace-picker-item:hover .workspace-picker-remove { opacity: 0.6; }
 .workspace-picker-remove:hover { opacity: 1 !important; color: #e81123; }
 
-/* ====== 分支按钮样式 ====== */
-.branch-btn:hover {
-  background-color: var(--menuActiveColor);
-  color: var(--fontActiveColor);
-}
-.branch-btn.active {
-  background-color: var(--menuActiveColor);
-  color: var(--fontActiveColor);
-  border-color: var(--fontActiveColor);
-}
-
 /* ====== 右侧栏开关（chat-header 最右侧）：与左侧 fa-bars 开关完全同一套样式（无边框、无盒底，
    只有悬停底色与图标本身） ====== */
 .dock-toggle-btn {
@@ -9630,34 +9758,22 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   background-color: var(--menuActiveColor);
 }
 
-/* ====== 分支图面板 - D3 树状图 ====== */
-.branch-panel {
-  width: 240px;
-  border-left: 1px solid var(--borderColor);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  background-color: var(--backgroundColor);
-  animation: branchPanelFadeIn 0.25s ease;
-  overflow: hidden;
-  position: relative;
-}
-
-@keyframes branchPanelFadeIn {
-  from { opacity: 0; transform: translateX(20px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-.branch-panel-content {
+/* ====== 分支图面板 - D3 树状图（作为右侧栏的 branch 标签内容） ====== */
+.branch-tree-wrap {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  position: relative;
   overflow: hidden;
-  padding: 0;
 }
 
 /* D3 树容器 */
 .d3-tree-container {
+  flex: 1;
   width: 100%;
   height: 100%;
+  min-height: 0;
 }
 
 .d3-tree-container svg {
@@ -9857,6 +9973,24 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .chat-group-head > i { font-size: 11px; color: #f0b429; flex-shrink: 0; }
 .chat-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-group-count { font-size: 10px; opacity: 0.7; flex-shrink: 0; }
+/* 分组头右侧的新建按钮：与条数同一行，悬停高亮；点击只在本工作区下开新对话 */
+.chat-group-add {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity .15s, background-color .15s, color .15s;
+}
+.chat-group-add:hover {
+  opacity: 1;
+  color: var(--fontActiveColor);
+  background-color: var(--menuActiveColor);
+}
 
 .chat-item.active {
   border-color: var(--fontActiveColor);
@@ -11815,21 +11949,6 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 写入进度（write_file 生成 / 写入期间的字数）：等宽数字避免跳动，长任务能看出在推进 */
-.tool-box-progress {
-  margin-left: 8px;
-  flex-shrink: 0;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--fontColor);
-  opacity: .6;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.tool-box-progress.is-error {
-  color: #f44336;
-  opacity: .9;
-}
 /* write_file 内容框上方的说明：running / error 时标明「尚未写入磁盘」 */
 .tool-write-note {
   padding: 4px 8px 0;
@@ -12846,9 +12965,8 @@ select {
    悬停 / 激活才给底色反馈。高度也统一（原本下拉 31px、按钮 23px 看着不齐）。 */
 .input-controls .button,
 .input-controls .mode-select {
-  height: 28px;
-  border: 0;
-  border-radius: 6px;
+  height: 29px;
+  border-radius: 4px;
   box-shadow: none;
   color: var(--fontColor);
 }
@@ -12860,19 +12978,24 @@ select {
   justify-content: center;
   padding: 0 7px;
 }
-/* 下拉框：无边框但用**正常背景色**（不用透明 / 菜单底色） */
+/* 下拉框：与左下角「工作区选择」完全同一套观感（同高、同边框、同底色、同字号） */
 .input-controls .mode-select {
-  background-color: var(--backgroundColor);
-  padding: 0 4px;
-  font-size: 12px;
+  height: 29px;
+  padding: 0 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background-color: var(--menuColor);
+  font-size: 11px;
+  box-sizing: border-box;
 }
 .input-controls .button:hover:not(.send-disabled):not(.disabled) {
   background-color: var(--menuActiveColor);
   color: var(--fontActiveColor);
 }
-/* 下拉框悬浮：保持正常背景色系（不用菜单高亮色） */
+/* 下拉框悬浮：与工作区 chip 一致，只变边框/文字色 */
 .input-controls .mode-select:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--fontColor) 7%, var(--backgroundColor));
+  background-color: var(--menuColor);
+  border-color: var(--fontActiveColor);
   color: var(--fontActiveColor);
 }
 
