@@ -1,6 +1,6 @@
 <script setup lang="ts">
-  import { ref, watch, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-  import { usestore, markRawTree, isPathInside } from '@/store'
+  import { ref, watch, computed, onMounted, onBeforeUnmount, nextTick, markRaw } from 'vue'
+  import { usestore, markRawTree, isPathInside, folderLabelOf } from '@/store'
   import { ElTree } from 'element-plus'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import type { RemoteRoot, RemoteFsNode } from '@/types/collab'
@@ -34,14 +34,10 @@
     (e: 'open-standalone', payload: any): void
   }>()
 
-  const filterText = ref('') //搜索并过滤文件
+  const filterText = ref('') //按文件名搜索（全树，有预算；不再用 el-tree 的本地过滤）
   const treeRef = ref<InstanceType<typeof ElTree>>() //树状图数据
   const expandedKeys = ref<string[]>([]); //展开状态数据
 
-  const filterNode = function(value: string, data: any){
-    if (!value) return true
-    return data.label.includes(value)
-  }
   
   //点击操作
   let nodeCount = 0 //点击的次数
@@ -65,6 +61,11 @@
 
   /** 打开文件 / 进入目录（单击即打开与双击打开共用同一套分发） */
   const openOrEnterNode = (data: any) => {
+    // 超大目录的「其余 N 项未显示」提示行：不是真实文件，不参与打开
+    if (data?.isTruncatedHint) {
+      ElMessage.info(store.locales === 'zh' ? '该目录条目过多，已只显示前一部分，请用上方搜索定位文件' : 'Too many entries; use search to locate files')
+      return
+    }
     // 通知宿主（explorer）：细长窗口下据此收起整屏文件树抽屉，把屏幕让给右侧视图
     emit('node-opened', data)
     // 按节点类型分发：
@@ -90,6 +91,11 @@
   }
 
   const click = function(data: any){
+    // 「其余 N 项未显示」提示行：只做提示，不选中/不打开
+    if (data?.isTruncatedHint) {
+      openOrEnterNode(data)
+      return
+    }
     // 远程节点：文件 → 右侧标签栏（单窗口 / 安卓单击即打开，桌面单击快速预览、双击正式打开）；
     //         文件夹 → 右侧「文件」视图切到该远程目录（与本地文件夹联动同一套观感）
     if (data?.remote) {
@@ -232,15 +238,65 @@
   /** 合并后的树：本地工作区 + 远程工作区（远程始终在所有折叠的最下方） */
   const mergedTree = computed(() => [...store.tree, ...remoteTreeData.value])
 
-  /** lazy 模式统一加载：本地节点返回已有 children；远程目录调 /fs/list */
+  /**
+   * 懒加载单个目录：只读「这一层」。
+   *
+   * 这是「选 D 盘不再闪退」的核心 —— 旧实现一次性把整个工作区扫成树再经 IPC 回传
+   * （百万文件 = 数百 MB 对象），必然 OOM。现在内存只与用户实际展开过的目录成正比。
+   */
+  const fetchDirNodes = async (dir: string): Promise<any[]> => {
+    const page = await getPlatform().fs.listDir(dir)
+    const entries = page.entries || []
+    if (page.error && !entries.length) {
+      ElMessage.error(
+        store.locales === 'zh'
+          ? `无法读取目录：${page.error}`
+          : `Cannot read folder: ${page.error}`
+      )
+      return []
+    }
+    const nodes = sortNodeList(entries.map((e: any) => markRaw({ ...e })))
+    // 超大目录只列前 N 项：给一个明确的信息行，避免用户以为文件丢了
+    if (page.truncated) {
+      nodes.push(markRaw({
+        label: store.locales === 'zh'
+          ? `其余 ${Math.max(0, (page.total || 0) - entries.length)} 项未显示，请用上方搜索`
+          : `${Math.max(0, (page.total || 0) - entries.length)} more not shown, use search`,
+        path: `${dir}::truncated`,
+        type: 'file',
+        extension: '',
+        isTruncatedHint: true,
+      }))
+    }
+    return nodes
+  }
+
+  /** lazy 模式统一加载：本地目录按需读一层，远程目录调 /fs/list */
   const loadTreeNode = async (node: any, resolve: (data: any[]) => void) => {
     const data = node?.data
-    // 本地节点：refreshMultiTree 已提供完整 children。
     // 注意：el-tree 在 lazy 模式下挂载时会直接对根节点调 load，此时根节点的 data 是
     // 整个 mergedTree 数组本身（而非带 children 的对象），必须直接 resolve 数组；
     // 否则二次挂载（store.tree 已就绪、data 不再变化、setData 不触发）会只剩空的根节点 → 不显示文件。
-    if (!data?.remote) {
-      resolve(Array.isArray(data) ? data : (data?.children || []))
+    if (Array.isArray(data)) {
+      resolve(data)
+      return
+    }
+    if (!data) {
+      resolve([])
+      return
+    }
+    if (!data.remote) {
+      if (data.type !== 'folder') {
+        resolve([])
+        return
+      }
+      // 懒加载失败也必须 resolve：否则 el-tree 的 loading 会一直转（reject 会变成未处理拒绝）
+      try {
+        resolve(await fetchDirNodes(data.path))
+      } catch (e) {
+        console.error('[knowledge] 读取目录失败:', data?.path, e)
+        resolve([])
+      }
       return
     }
     if (data.type !== 'folder') {
@@ -577,8 +633,10 @@
     return a < b ? -1 : a > b ? 1 : 0
   }
 
-  /** 节点比较器（文件夹始终排在文件前面，与升降序无关） */
+  /** 节点比较器（文件夹始终排在文件前面，与升降序无关；截断提示行固定排最后） */
   const compareNodes = (a: any, b: any): number => {
+    if (a.isTruncatedHint) return 1
+    if (b.isTruncatedHint) return -1
     if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
     let result = 0
     if (sortBy.value === 'mtime') {
@@ -596,29 +654,21 @@
   }
 
   /**
-   * 就地递归排序：直接对数组 sort，仅重排顺序，不复建节点对象
-   * （旧实现 spread 新建节点对象会触发 Vue 深层响应式转换 + 大量 GC，大目录下卡顿数秒）
+   * 对「一个目录」的条目排序（懒加载后不再有整棵树可排）。
+   * 只排当前这一层，不新建节点对象（避免响应式转换与大量 GC）。
    */
-  const sortNodes = (nodes: any[]): void => {
-    nodes.sort(compareNodes)
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i]
-      if (n && Array.isArray(n.children) && n.children.length) {
-        sortNodes(n.children)
-      }
-    }
+  const sortNodeList = (nodes: any[]): any[] => {
+    if (nodes.length > 1) nodes.sort(compareNodes)
+    return nodes
   }
 
-  /** 将排序方式应用到整棵树（就地重排；顶层浅替换触发 el-tree 更新，节点按 node-key 复用，展开状态保留）
-   *  保持工作区根节点顺序不变，仅对每个根节点内部的子节点排序 */
+  /**
+   * 切换排序方式：不在这里遍历（深层节点可能还没加载）。
+   * 浅替换顶层数组 → el-tree setData → 按 expandedKeys 重新展开 →
+   * 每个目录重新 listDir 时由 fetchDirNodes 按新偏好排好。
+   */
   const applySort = () => {
     if (!store.tree || !store.tree.length) return
-    for (const n of store.tree) {
-      if (n && Array.isArray(n.children) && n.children.length) {
-        sortNodes(n.children)
-      }
-    }
-    // 顶层浅替换（节点对象复用，仅更换数组引用）确保「切换排序方式」路径下 el-tree 也能感知新顺序
     store.tree = [...store.tree]
   }
 
@@ -707,6 +757,10 @@
   const treeLoading = ref(true)
 
   // 刷新文件树（支持多个工作区）
+  //
+  // 懒加载后这里只做两件事：① 用工作区列表重建**根层**（零整树扫描，通常 1~3 次 stat）；
+  // ② 触发 el-tree 重新按 expandedKeys 逐级展开 → 每个已展开目录重新 listDir（一层）。
+  // 因此刷新成本只与「用户展开过多少目录」有关，与工作区里有多少文件无关。
   const refreshTree = async function() {
     if (refreshInFlight) {
       refreshQueued = true
@@ -724,43 +778,38 @@
         store.tree = []
         return
       }
-      // treeVersion 存于 store：面板重挂载后仍记得上次版本，数据未变时主进程直接返回 unchanged。
-      // 仅当渲染端已有非空树时才用版本快路径；树为空时传 -1 强制全量加载，避免 unchanged 留下空树
-      let knownVersion = store.tree && store.tree.length ? store.treeVersion : -1
-      // 根目录集合变化（新增/删除工作区）时禁用版本快路径：
-      // 主进程只校验「剩余根」的缓存有效 + 版本一致就返回 unchanged，并不知道根列表少了一项，
-      // 导致渲染端旧树里残留已删除的工作区（表现为仅失去加粗、文件夹仍在列表）。
-      // 顶层根集合不一致时传 -1 强制全量重建。
-      if (knownVersion !== -1) {
-        const curRootPaths = (store.tree || []).map((n: any) => n.path).filter(Boolean)
-        const needRoots = roots
-        if (curRootPaths.join('\n') !== needRoots.join('\n')) {
-          knownVersion = -1
+
+      // 轻量存在性校验：每个根一次 stat（getInfo），不再整树扫描。
+      // 目的是让被删除 / 拔盘的工作区从列表里消失（旧行为），stat 失败时保留（可能只是暂时不可用）。
+      const alive = await Promise.all(roots.map(async (r: string) => {
+        try {
+          return (await getPlatform().fs.getInfo(r)) !== null
+        } catch {
+          return true
         }
+      }))
+      const kept = roots.filter((_r: string, i: number) => alive[i])
+      if (kept.join('\n') !== store.roots.join('\n')) {
+        store.roots = kept
+        if (!kept.includes(store.root)) {
+          store.root = kept[0] || ''
+          store.path = store.root
+        }
+        store.saveConfig()
+        store.saveWorkspace()
       }
-      const result = await getPlatform().fs.refreshTree(roots, knownVersion)
-      if (result.success) {
-        // 数据未变化：保留现有树，跳过整棵树回传与重新处理（markRawTree/排序/展开键修剪）
-        if (result.unchanged) {
-          store.treeVersion = result.version ?? store.treeVersion
-          return
-        }
-        store.treeVersion = result.version ?? store.treeVersion
-        store.tree = markRawTree(result.tree)
-        // 同步工作区列表：过滤掉已不存在（被删除）的路径，保持列表顺序
-        const existing = result.tree.map((n: any) => n.path)
-        if (existing.join('\n') !== store.roots.join('\n')) {
-          store.roots = existing
-          if (!existing.includes(store.root)) {
-            store.root = existing[0] || ''
-            store.path = store.root
-          }
-          store.saveConfig()
-          store.saveWorkspace()
-        }
-        applySort()
-        pruneExpandedKeys()
-      }
+
+      // 根节点直接由工作区列表构造，不需要磁盘扫描
+      store.tree = markRawTree(kept.map((r: string) => markRaw({
+        label: folderLabelOf(r) || r,
+        path: r,
+        type: 'folder',
+        extension: 'folder',
+        isRoot: true,
+      })))
+      pruneExpandedKeys()
+      // 等 el-tree 完成 setData（会按 expandedKeys 递归展开并 listDir）后再收起 loading
+      await nextTick()
     } finally {
       refreshInFlight = false
       treeLoading.value = false
@@ -963,8 +1012,8 @@
   // ---- 拖拽移动文件 ----
   /** 仅文件可拖拽，文件夹不可拖拽 */
   const allowDrag = (node: any) => {
-    // 远程节点只读，禁止拖拽
-    if (node.data?.remote) return false
+    // 远程节点只读，禁止拖拽；「其余 N 项未显示」提示行不是真实条目
+    if (node.data?.remote || node.data?.isTruncatedHint) return false
     return node.data.type === 'file'
   }
 
@@ -1078,6 +1127,8 @@
   //右键菜单逻辑（文件节点）
   const handleRightClick = (event: Event, data: any) => {
     event.preventDefault(); // 阻止默认的右键菜单
+    // 「其余 N 项未显示」提示行不是真实条目：没有可执行的右键操作
+    if (data?.isTruncatedHint) return
     hideTooltip(); // 隐藏文件信息提示，避免其盖住右键菜单
 
     const pos = event as MouseEvent;
@@ -1093,10 +1144,19 @@
     adjustContextMenuPosition();
   };
 
+  // Word 等只读文件：不允许开可编辑/演示视图（菜单里隐藏这几项）
+  const READONLY_VIEW_KEYS = ['edit', 'blockedit', 'presentation']
+
   // 右键「新窗口打开」的视图列表：Word 文档只提供 浏览 / 思维导图（与 FileWindow 的视图列表一致）
   const isWordNode = computed(() => {
     const p = String(contextMenu.value?.node?.path || '').toLowerCase();
     return p.endsWith('.docx') || p.endsWith('.doc');
+  });
+
+  // 右键菜单里 Word 不提供的视图：编辑类一律没有；旧版 .doc 还没有标题层级，导图会是空图
+  const wordHiddenViewKeys = computed(() => {
+    const p = String(contextMenu.value?.node?.path || '').toLowerCase();
+    return p.endsWith('.doc') ? [...READONLY_VIEW_KEYS, 'mindmap'] : READONLY_VIEW_KEYS;
   });
 
   // 「打开」子菜单的视图清单：非 Word / Excel / PPT 文件不列「Office 编辑」（与文件窗口的切换器一致）
@@ -1183,18 +1243,19 @@
     } catch { /* 忽略存储异常 */ }
   }
 
-  /** 清理展开状态中已不存在的路径（如文件被删除/重命名），并同步持久化 */
+  /**
+   * 清理展开状态中已不属于任何工作区的路径，并同步持久化。
+   *
+   * 懒加载后树里只有已展开的节点，不能再靠遍历整棵树来校验：
+   * 被删除的目录在重新展开时 listDir 会失败并返回空，残留的 key 只会多一次空请求，
+   * 因此这里只按「是否还在某个工作区内」做一次 O(展开数) 的剪枝。
+   */
   const pruneExpandedKeys = () => {
-    const valid = new Set<string>()
-    const walk = (nodes: any[]) => {
-      for (const n of nodes) {
-        valid.add(n.path)
-        if (n.children?.length) walk(n.children)
-      }
-    }
-    walk(store.tree)
+    if (!expandedKeys.value.length) return
+    const roots = store.roots
+    if (!roots.length) return
     const before = expandedKeys.value.length
-    expandedKeys.value = expandedKeys.value.filter(p => valid.has(p))
+    expandedKeys.value = expandedKeys.value.filter((p) => roots.some((r: string) => isPathInside(p, r)))
     if (expandedKeys.value.length !== before) saveExpandedKeys()
   }
 
@@ -1322,9 +1383,41 @@
   let disposeFileWatch: (() => void) | null = null;
   let watchAcquired = false;
 
+  /** 重新拉取某个已加载的树节点（文件系统事件只做这一件事，不做整树重扫） */
+  const reloadDirNode = (node: any) => {
+    if (!node) return
+    node.loaded = false
+    node.loading = false
+    node.childNodes = []
+    node.loadData(() => {})
+  }
+
+  /**
+   * 文件系统变化：
+   * - 主进程会给出「发生变化的目录」（payload.dirs）；只刷新这些目录对应的已加载节点；
+   * - 未展开的目录不用管（下次展开时本来就会重新 listDir）；
+   * - 没有目录信息（老版本主进程）时才退回重建根层。
+   */
+  const handleFsChanged = (payload: any) => {
+    const dirs: string[] = Array.isArray(payload?.dirs)
+      ? payload.dirs.map((d: any) => String(d || '')).filter(Boolean)
+      : (payload?.dir ? [String(payload.dir)] : [])
+    if (!dirs.length) {
+      void refreshTree()
+      return
+    }
+    const treeStore = (treeRef.value as any)?.store
+    if (!treeStore) return
+    for (const dir of dirs) {
+      const node = treeStore.getNode(dir)
+      // 只刷新「已经加载过」的节点：没加载说明没展开，重新展开时会读最新内容
+      if (node && node.loaded) reloadDirNode(node)
+    }
+  }
+
   // 监听文件系统变化
   onMounted(async () => {
-    disposeFileWatch = onFileSystemChanged(() => { void refreshTree() });
+    disposeFileWatch = onFileSystemChanged(handleFsChanged);
 
     if (store.root || (store.roots && store.roots.length)) {
       // 恢复上次保存的展开状态（须在树数据加载前调用，node.initialize 才会按 key 展开）
@@ -1345,6 +1438,9 @@
     // 取消订阅（唯一监听本身不解绑，避免 off 不可靠时重复注册）
     disposeFileWatch?.();
     disposeFileWatch = null;
+    // 取消未完成/待执行的搜索：面板已卸载，结果没人用
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
+    searchSeq++
     // 移除文档级点击监听
     document.removeEventListener('click', hideContextMenuOnDocClick);
     // 释放目录监听（最后一个消费者释放后宽限 3s 才真正 stopWatching）
@@ -1396,12 +1492,64 @@
   }
 
 
-  // Word 等只读文件：不允许开可编辑/演示视图（菜单里隐藏这几项）
-  const READONLY_VIEW_KEYS = ['edit', 'blockedit', 'presentation']
+  // ---- 文件树搜索：按「文件名」全树搜索（带预算，绝不整树加载） ----
+  // 懒加载后 el-tree 里只有已展开的节点，旧做法（treeRef.filter）只能过滤到这些节点，
+  // 用户搜深层文件会「明明有却搜不到」。现在改为向主进程请求一层有预算的全树文件名搜索：
+  // 结果数 / 深度 / 时间三重上限 + 请求序号取消，输入再快也不会叠加成多个全盘扫描。
+  const searchResults = ref<any[]>([])
+  const searchLoading = ref(false)
+  const searchTruncated = ref(false)
+  let searchTimer: ReturnType<typeof setTimeout> | null = null
+  let searchSeq = 0
+
+  const parentDirOf = (p: string): string => {
+    const i = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'))
+    return i > 0 ? p.slice(0, i) : ''
+  }
+
+  const runNameSearch = async (kw: string) => {
+    const seq = ++searchSeq
+    searchLoading.value = true
+    try {
+      const roots = (store.roots && store.roots.length ? [...store.roots] : [store.root]).filter(Boolean)
+      const res = await getPlatform().fs.searchNames(roots, kw, { maxResults: 200, requestId: seq })
+      if (seq !== searchSeq) return // 已有更新的输入：丢弃旧结果
+      searchResults.value = (res.results || []).map((r: any) => ({ ...r, dirLabel: parentDirOf(r.path) }))
+      searchTruncated.value = res.truncated
+    } catch {
+      if (seq === searchSeq) {
+        searchResults.value = []
+        searchTruncated.value = false
+      }
+    } finally {
+      if (seq === searchSeq) searchLoading.value = false
+    }
+  }
 
   watch(filterText, (val) => {
-    treeRef.value!.filter(val)
+    const kw = String(val || '').trim()
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
+    if (!kw) {
+      searchSeq++ // 让在途请求作废
+      searchResults.value = []
+      searchTruncated.value = false
+      searchLoading.value = false
+      return
+    }
+    searchLoading.value = true
+    searchTimer = setTimeout(() => { void runNameSearch(kw) }, 250)
   })
+
+  /** 点击搜索结果：切到所属工作区并按文件打开（与树里双击同一套出口） */
+  const openFromSearch = (item: any) => {
+    if (!item?.path) return
+    const owner = store.roots
+      .filter((r: string) => isPathInside(item.path, r))
+      .sort((a: string, b: string) => b.length - a.length)[0]
+    if (owner && owner !== store.root) store.setActiveRoot(owner)
+    emit('node-opened', item)
+    emit('open-file', { data: item })
+  }
 
   // 暴露方法给父组件（新建文件只走文件树右键「新建」，不再往外暴露创建入口）
   defineExpose({
@@ -1447,14 +1595,44 @@
             </div>
           </div>
         </div>
+        <!-- 搜索结果：输入即按文件名全树搜索（有预算，不会拖死主进程）。
+             用 v-show 而不是 v-if 隐藏文件树 —— 否则每次搜索都会重建 el-tree、丢掉展开状态与已加载节点。 -->
+        <template v-else>
+        <div v-if="filterText" class="tree-search-results">
+          <div v-if="searchLoading" class="tree-search-state">
+            <i class="fa fa-spinner fa-spin"></i>
+            <span>{{ store.locales=='zh' ? '正在搜索文件名…' : 'Searching file names…' }}</span>
+          </div>
+          <template v-else>
+            <div v-if="!searchResults.length" class="tree-search-state">
+              <i class="fa fa-search"></i>
+              <span>{{ store.locales=='zh' ? '没有匹配的文件名' : 'No matching file name' }}</span>
+            </div>
+            <div
+              v-for="item in searchResults"
+              :key="item.path"
+              class="tree-search-item"
+              :title="item.path"
+              @click="openFromSearch(item)"
+            >
+              <i :class="store.icon(item.extension)"></i>
+              <span class="tree-search-item-label">{{ item.label }}</span>
+              <span class="tree-search-item-dir">{{ item.dirLabel }}</span>
+            </div>
+            <div v-if="searchTruncated" class="tree-search-state tree-search-truncated">
+              {{ store.locales=='zh'
+                ? `结果过多，仅显示前 ${searchResults.length} 条（请再输入几个字缩小范围）`
+                : `Too many results, showing first ${searchResults.length} (type more to narrow)` }}
+            </div>
+          </template>
+        </div>
         <!-- 单击不展开（expand-on-click-node=false）：展开 / 折叠点节点左侧箭头，双击留给「右侧各视图定位到该目录」，
              否则双击的两次单击会各开合一次，出现先开后收的伸缩闪动 -->
         <el-tree
-          v-else
+          v-show="!filterText"
           ref="treeRef"
           node-key="path"
           :data="mergedTree"
-          :filter-node-method="filterNode"
           :default-expanded-keys="expandedKeys"
           lazy
           :load="loadTreeNode"
@@ -1495,6 +1673,7 @@
           </div>
         </template>
       </el-tree>
+        </template>
       </div>
     </div>
     <div v-if="contextMenu.visible" :style="contextMenu.style" class="context-menu" @click.stop @mouseleave="hideContextMenu">
@@ -1574,7 +1753,7 @@
         <span style="flex:1">{{ store.locales=='zh'?'打开':'Open' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
-          <li v-for="v in contextMenuViews" :key="v.key" v-show="!isWordNode || !READONLY_VIEW_KEYS.includes(v.key)"
+          <li v-for="v in contextMenuViews" :key="v.key" v-show="!isWordNode || !wordHiddenViewKeys.includes(v.key)"
               @click="openInNewWindow(contextMenu.node.path, v.key); hideContextMenu()">
             <i :class="v.icon"></i> {{ store.locales=='zh' ? v.name : v.labelEn }}
           </li>
@@ -1764,6 +1943,59 @@
   }
   .tree-search-clear:hover {
     color: var(--fontActiveColor);
+  }
+
+  /* 全树文件名搜索结果（替换树视图，树本身用 v-show 保留挂载） */
+  .tree-search-results {
+    padding: 2px 0;
+    font-size: 12px;
+  }
+  .tree-search-state {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 14px 10px;
+    color: var(--borderColor);
+    user-select: none;
+  }
+  .tree-search-truncated {
+    padding-top: 6px;
+    padding-bottom: 10px;
+    line-height: 1.5;
+  }
+  .tree-search-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 8px;
+    cursor: pointer;
+    color: var(--fontColor);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .tree-search-item:hover {
+    background-color: var(--menuActiveColor);
+  }
+  .tree-search-item > i {
+    flex-shrink: 0;
+    font-size: 13px;
+  }
+  .tree-search-item-label {
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tree-search-item-dir {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl; /* 路径过长时优先保留末级目录（更接近用户要找的位置） */
+    text-align: right;
+    font-size: 11px;
+    color: var(--borderColor);
+    opacity: .8;
   }
 
   .list {

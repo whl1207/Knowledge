@@ -197,7 +197,7 @@ function docxToolDefinitions(): any[] {
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: '.docx 文件的绝对路径（.doc 旧格式不支持）。path / filePath / file_path 三者等价，任选其一' },
+          path: { type: 'string', description: '.docx 文件的绝对路径（Office 编辑器只支持 .docx；旧版 .doc 的正文请用 read_file 读取）。path / filePath / file_path 三者等价，任选其一' },
           filePath: { type: 'string', description: 'path 的别名，任选其一' },
         },
         required: ['path'],
@@ -645,7 +645,7 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       const abs = path.isAbsolute(p) ? p : path.resolve(p)
       if (!fs.existsSync(abs)) return `文件不存在: ${abs}`
       const ext = path.extname(abs).toLowerCase()
-      if (ext === '.doc') return '不支持旧版 .doc 二进制格式，请先在 Word 中另存为 .docx'
+      if (ext === '.doc') return 'Office 编辑器不支持旧版 .doc 二进制格式（只读正文请用 read_file，或先另存为 .docx）'
       if (ext !== '.docx') return `仅支持 .docx：${abs}`
       let pkg: DocxPackage
       try { pkg = loadDocxPackage(abs) } catch (e: any) { return `打开失败: ${e?.message || String(e)}` }

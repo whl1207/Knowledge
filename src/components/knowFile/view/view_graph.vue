@@ -1032,23 +1032,9 @@ const expandAttribute=async function(indexParam:string|number,state:number){
     openNode(d)
   }
 
-  // 计算文件树的最大深度
-  const getMaxDepth = function(tree: any[], currentDepth: number = 1): number {
-    let max = currentDepth
-    for (const node of tree) {
-      if (node.children && node.children.length > 0) {
-        const childDepth = getMaxDepth(node.children, currentDepth + 1)
-        if (childDepth > max) max = childDepth
-      }
-    }
-    return max
-  }
+  // 文件树改为按目录懒加载后，store.tree 只含根层，不能再由它推算真实层级；
+  // 固定 5 层（与旧下拉上限一致），选到实际不存在的层级只会返回空图谱。
   const maxDepth = ref(5)
-  watch(() => store.tree, (val) => {
-    if (val && val.length > 0) {
-      maxDepth.value = Math.max(getMaxDepth(val), 1)
-    }
-  }, { immediate: true })
 
   // ---- 文件系统变更 → 自动刷新图谱 ----
   // 图谱数据由主进程实时读取目录（含 .md 的 frontmatter 属性与引用关系），

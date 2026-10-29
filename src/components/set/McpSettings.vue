@@ -627,6 +627,12 @@ const docLines = computed<string[]>(() => {
       lines.push('远程提示：serverUrl 必须是 MCP 服务端点；需要鉴权时在「请求头 headers」填写，例如 Authorization: Bearer <token>。')
     }
     if (s?.id === 'builtin-postgres') pushPostgresLines(lines, true)
+    if (s?.id === 'builtin-agent-preset') {
+      lines.push('「智能体设计参考」是供 AI 创建 Agent 预设的内置服务：静态话题（preset_schema / preset_capabilities / preset_example）只读规范，其余工具（preset_list / preset_get / preset_validate / preset_write / preset_reload / preset_delete）会把读写转发给渲染层执行，因此需要桌面端智能体会话；preset_write 是首选写通道，preset_reload 用于 AI 用 write_file 直接写了 .agent 之后的重新扫描与自检。内置「智能体设计师」已绑定本服务（也配了文件读写作为兜底）。')
+    }
+    if (s?.id === 'builtin-skill-dev') {
+      lines.push('「技能设计参考」是供 AI 编写技能的内置服务：skill_dev_schema / writing / constraints / templates / faq 是静态规范；skill_dev_host 取技能目录与已装技能（经渲染层）；skill_dev_check 在主进程直接读盘自检（传绝对路径时不依赖窗口）。内置「技能设计师」已绑定本服务。')
+    }
     if (s?.builtin) pushExternalLines(lines, s.id)
     return lines
   }
@@ -643,6 +649,12 @@ const docLines = computed<string[]>(() => {
     lines.push('Remote: serverUrl must be an MCP endpoint; put auth in headers, e.g. Authorization: Bearer <token>.')
   }
   if (s?.id === 'builtin-postgres') pushPostgresLines(lines, false)
+  if (s?.id === 'builtin-agent-preset') {
+    lines.push('“Agent Design Reference” lets AI create Agent presets: the static topics (preset_schema / preset_capabilities / preset_example) are read-only reference, while the rest (preset_list / preset_get / preset_validate / preset_write / preset_reload / preset_delete) forward to the renderer and therefore need a desktop agent session. preset_write is the preferred write channel; preset_reload rescans and self-checks after the AI wrote a .agent with write_file. The built-in “Agent Designer” agent is bound to it (and also has file tools as a fallback).')
+  }
+  if (s?.id === 'builtin-skill-dev') {
+    lines.push('“Skill Design Reference” teaches AI to write skills: skill_dev_schema / writing / constraints / templates / faq are static reference; skill_dev_host reads the skills folder and installed skills through the renderer; skill_dev_check validates a folder on disk in the main process (an absolute path works even without a window). The built-in “Skill Designer” agent is bound to it.')
+  }
   if (s?.builtin) pushExternalLines(lines, s.id)
   return lines
 })

@@ -3027,13 +3027,8 @@ async function normalizeFiles() {
             if (isPdfFile(target.extension)) {
                 markdown = await extractPdfText(target.path)
             } else {
-                // 注：主进程 readFile 仅支持 .docx（mammoth → turndown 转 Markdown，已忽略图片），旧版 .doc 无法转换
-                if (target.extension?.toLowerCase() === '.doc') {
-                    console.warn('不支持转换旧版 .doc 格式', target.path)
-                    failed++
-                    continue
-                }
-                // Word 文件转换参考 electron/main/index.ts 的 readFile
+                // Word 文件转换参考 electron/main/index.ts 的 readFile：
+                // .docx / .doc 均由主进程按文件头转 Markdown（.doc 为纯文本段落 + 管道表格）
                 const result: any = await getPlatform().fs.readText(target.path)
                 markdown = (typeof result === 'object' && result !== null)
                     ? (result.content || '')

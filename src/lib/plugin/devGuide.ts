@@ -489,8 +489,12 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
   {
     qZh: '启用时提示「界面扩展装载失败」',
     qEn: 'Enabling fails with “failed to load the UI extension”.',
-    aZh: '看「插件 → 管理 → 日志」里的具体原因。最常见的是 client 半边写了 import / require（Blob 模块无法解析裸模块名），或用了模板语法需要编译（只能写渲染函数 h(...)）。',
-    aEn: 'Check Plugins → Manage → Logs for the reason. Most often the UI half uses import/require (a Blob module cannot resolve bare specifiers) or template syntax (write render functions with h(...) instead).',
+    aZh: '看「插件 → 管理 → 日志」里的具体原因。最常见的是 client 半边写了 import / require（Blob 模块无法解析裸模块名），或用了模板语法需要编译（只能写渲染函数 h(...)）。'
+      + '若原因是「槽位 xxx 中 key 重复：yyy」：同一插件重载留下的残留条目宿主会自动接管（日志里有 WARN），'
+      + '仍失败说明是**另一个插件**占用了同一个 key —— 报错里会写明双方 owner（plugin:<id>），改占用方的 key（加上自己的插件前缀）即可。',
+    aEn: 'Check Plugins → Manage → Logs for the reason. Most often the UI half uses import/require (a Blob module cannot resolve bare specifiers) or template syntax (write render functions with h(...) instead). '
+      + 'If it says “duplicate key yyy in slot xxx”: a leftover entry from the same plugin’s previous load is now taken over automatically (a WARN is logged); '
+      + 'if it still fails, **another plugin** owns the same key — the message names both owners (plugin:<id>), so rename the other one with its own plugin prefix.',
   },
   {
     qZh: '提示「槽位未声明：xxx」或清单校验失败',

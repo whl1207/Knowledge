@@ -126,19 +126,8 @@ const navTree = ref<NavItem[]>([
     ]
   },
   {
-    // 插件（一级分组）：管理（本地插件启停 / 安装 / 详情）→ 商店（在线分发入口，P2 预留占位）→ 开发（把指令粘给大模型就能写插件）
-    id: 'plugin-group',
-    icon: 'fa fa-puzzle-piece',
-    title_zh: '插件',
-    title_en: 'Plugins',
-    children: [
-      { id: 'plugin', icon: 'fa fa-puzzle-piece', title_zh: '管理', title_en: 'Manage' },
-      { id: 'plugin-perms', icon: 'fa fa-shield', title_zh: '权限', title_en: 'Permissions' },
-      { id: 'plugin-store', icon: 'fa fa-shopping-cart', title_zh: '商店', title_en: 'Store' },
-      { id: 'plugin-dev', icon: 'fa fa-code', title_zh: '开发', title_en: 'Develop' }
-    ]
-  },
-  {
+    // 技能（一级分组）：管理（本地技能启停 / 编辑）→ 商店（在线分发入口）
+    // 顺序约定：技能 → 智能体 → 插件（三类都是「可扩展的能力」，从轻到重）
     id: 'skill-group',
     icon: 'fa fa-superpowers',
     title_zh: '技能',
@@ -154,9 +143,22 @@ const navTree = ref<NavItem[]>([
     title_zh: '智能体',
     title_en: 'Agent',
     children: [
-      { id: 'agentpreset', icon: 'fa fa-address-book-o', title_zh: '预设', title_en: 'Presets' },
+      { id: 'agentpreset', icon: 'fa fa-address-book-o', title_zh: '管理', title_en: 'Manage' },
       { id: 'agentconsole', icon: 'fa fa-cogs', title_zh: '控制台', title_en: 'Console' },
       { id: 'sessionlog', icon: 'fa fa-list-alt', title_zh: '日志', title_en: 'Session Log' }
+    ]
+  },
+  {
+    // 插件（一级分组）：管理（本地插件启停 / 安装 / 详情）→ 商店（在线分发入口，P2 预留占位）→ 开发（把指令粘给大模型就能写插件）
+    id: 'plugin-group',
+    icon: 'fa fa-puzzle-piece',
+    title_zh: '插件',
+    title_en: 'Plugins',
+    children: [
+      { id: 'plugin', icon: 'fa fa-puzzle-piece', title_zh: '管理', title_en: 'Manage' },
+      { id: 'plugin-perms', icon: 'fa fa-shield', title_zh: '权限', title_en: 'Permissions' },
+      { id: 'plugin-store', icon: 'fa fa-shopping-cart', title_zh: '商店', title_en: 'Store' },
+      { id: 'plugin-dev', icon: 'fa fa-code', title_zh: '开发', title_en: 'Develop' }
     ]
   },
   { id: 'help', icon: 'fa fa-question-circle', title_zh: '帮助', title_en: 'Help' }
@@ -1358,7 +1360,9 @@ onBeforeUnmount(() => {
             <div class="zoom-control">
               <input type="number" v-model.number="store.UI.windowZoom" min="50" max="200" step="5"
                      @change="onZoomInput"
-                     :title="store.locales=='zh'?'缩放比例（50% ~ 200%）' : 'Zoom ratio (50% ~ 200%)'"/>
+                     :title="store.locales=='zh'
+                       ? '使用 Ctrl + / Ctrl - 可随时调整窗口缩放（50% ~ 200%），也可在此直接输入比例。'
+                       : 'Use Ctrl + / Ctrl - to adjust window zoom (50% ~ 200%), or type a ratio here.'"/>
               <span class="range-value">%</span>
               <div class="button zoom-btn" @click="zoomStep(-10)" :title="store.locales=='zh'?'缩小' : 'Zoom out'">
                 <i class="fa fa-search-minus"></i>
@@ -1415,14 +1419,6 @@ onBeforeUnmount(() => {
                   <i class="fa fa-undo"></i> {{ store.locales=='zh'?'恢复AI配置' : 'Reset AI' }}
                 </div>
               </div>
-            </div>
-          </div>
-          <div class="form-group">
-            <label></label>
-            <div class="config-description" style="margin-left:0; line-height:1.5;">
-              {{ store.locales=='zh'
-                ? '使用 Ctrl + / Ctrl - 可随时调整窗口缩放（50% ~ 200%），也可在上方直接输入比例。'
-                : 'Use Ctrl + / Ctrl - to adjust window zoom (50% ~ 200%), or type a ratio above.' }}
             </div>
           </div>
         </div>

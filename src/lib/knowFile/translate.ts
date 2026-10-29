@@ -9,7 +9,7 @@
  * 调用统一走 `AIUtils.sendChat`（与 @/lib/knowFile/ocr 一致）：Electron 下委托主进程，
  * 浏览器 / LAN 模式走代理；纯文本请求，不带图片与工具。
  */
-import { Util } from 'pdfjs-dist'
+import { OPS, Util } from 'pdfjs-dist'
 import { AIUtils } from '@/services/ai-utils'
 import { llmConfigByKey, normalizeLlmType } from '@/shared/llmSources'
 
@@ -57,8 +57,17 @@ export interface PdfTextBlock {
    * 避免「𝑅 1 = 」「(3)」「0.5 0.62」这类碎片被模型改写或产生无意义译文。
    */
   math?: boolean
+  /**
+   * 参考文献条目 / 参考文献区标记：用于识别参考文献范围（仍参与翻译，
+   * 但提示词要求只翻译标题，作者 / 期刊 / DOI 保持原样）。
+   */
+  reference?: boolean
+  /** 表格单元格（同行有多个窄块）：白框只覆盖文字本身，不扩展到单元格边框 */
+  table?: boolean
   /** 页面未旋转高度（scale=1 px）：叠加层排版时用于限制最后一块不越出页底 */
   pageHeight?: number
+  /** 页面未旋转宽度（scale=1 px）：用于判断整页扫描图（不要把整页图当障碍物） */
+  pageWidth?: number
 }
 
 /** 上升部 / 下降部相对字号的近似比例（与 pdf.js 的 fontAscent 度量接近，够用即可） */
@@ -76,6 +85,10 @@ const GUTTER_RATIO = 1.6
  * 取 1.5 让双倍行距的正文仍能并成一段；真正的段间距（空一行）通常 ≥ 2.5 个字号，仍会切开。
  */
 const PARA_GAP_RATIO = 1.5
+/** 同一段内允许的左边界偏移（字号倍数）：列表悬挂缩进常为 0.9~1.1 字宽，0.9 会误切 */
+const INDENT_TOL_RATIO = 1.2
+/** 判定「居中排版」要求的最小左边界位移；小于它更可能是悬挂缩进 */
+const CENTER_MIN_SHIFT_RATIO = 1.2
 
 /**
  * 单块上限：只作病态情况的安全网（正常段落一律完整合成一块，摘要这类长段落不会被截断）。
@@ -240,7 +253,8 @@ function sideLooksLikeColumn(runs: LineRun[]): boolean {
   const lefts = runs.map((r) => r.box.left).sort((a, b) => a - b)
   const median = percentile(lefts, 0.5)
   const aligned = lefts.filter((l) => Math.abs(l - median) <= 2.5).length
-  return aligned >= lefts.length * 0.6
+  // 参考页这类页面：页眉 / 参考文献编号会带来少量不同的左边界，55% 即可认定成栏
+  return aligned >= lefts.length * 0.55
 }
 
 /**
@@ -286,8 +300,11 @@ function detectColumnMid(runs: LineRun[], textLeft: number, textRight: number): 
   return null
 }
 
-/** 列表标号开头（“(iii) ”“3.1 ”“1) ”“• ”）：这类首行会被标号顶到左边距之外，缩进量与后续行不同 */
-const LIST_MARKER_RE = /^\s*(?:\((?:\d{1,2}|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})\)|\d{1,2}(?:\.\d{1,2})*[.)]|[•·▪‣]|[-–—*])\s+/
+/** 参考文献编号（“[5] ” / “[5,6] ”）：这类段落用悬挂缩进，续行经常比栏宽短很多 */
+const REFERENCE_MARKER_RE = /^\s*\[\d{1,4}(?:\s*[-,–]\s*\d{1,4})*\]/
+const REFERENCE_ENTRY_RE = /^\s*\[\d{1,4}(?:\s*[-,–]\s*\d{1,4})*\]\s+/
+/** 列表标号开头（“(iii) ”“3.1 ”“1) ”“• ”“- ”）或参考文献编号（“[5] ”）：这类行永远另起一段 */
+const LIST_MARKER_RE = /^\s*(?:\[\d{1,4}(?:\s*[-,–]\s*\d{1,4})*\]|\((?:\d{1,2}|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})\)|\d{1,2}(?:\.\d{1,2})*[.)]|[•·▪‣]|[-–—*])\s+/
 
 /**
  * 段落内多行拼接：
@@ -301,8 +318,10 @@ function joinParagraphLines(lines: string[]): string {
     const t = String(raw || '').replace(/\u00ad/g, '').trim()
     if (!t) continue
     if (!out) { out = t; continue }
-    if (/[A-Za-z]-$/.test(out) && /^[a-z]/.test(t)) {
-      out = out.slice(0, -1) + t
+    // 行尾断词：保留连字符前的字母、去掉连字符与多余空格（PDF 里常见 "en -" + "tities"）
+    const hyphen = out.match(/([A-Za-z])\s*[-\u00ad\u2010\u2011\u2012\u2013]$/)
+    if (hyphen && /^[a-z]/.test(t)) {
+      out = out.slice(0, out.length - hyphen[0].length) + hyphen[1] + t
       continue
     }
     const prev = out[out.length - 1] || ''
@@ -354,6 +373,8 @@ function groupParagraphs(runs: LineRun[]): Segment[] {
       if (gap > tol) continue
       if (Math.abs(run.angle - p.angle) > 1) continue
       if (Math.abs(box.fontSize - p.box.fontSize) > p.box.fontSize * 0.35) continue
+      // 论文标题 / 大标题后面紧跟小一号的作者、单位行：字号明显变小就视为新块
+      if (p.box.fontSize >= 11 && box.fontSize < p.box.fontSize * 0.85) continue
       if (p.texts.length >= MAX_PARA_LINES || p.chars + run.text.length > MAX_PARA_CHARS) continue
       const lastW = p.last.right - p.last.left
       const refLeft = p.bodyLeft != null ? p.bodyLeft : p.box.left
@@ -362,20 +383,34 @@ function groupParagraphs(runs: LineRun[]): Segment[] {
       // 横向重叠不足（另一栏 / 另一列）→ 不可能是同一段
       const overlap = Math.min(box.right, p.last.right) - Math.max(box.left, p.last.left)
       if (overlap < Math.min(w, lastW) * 0.35) continue
-      // 居中排版（标题 / 图注 / 诗歌）：各行中心对齐，左边界的位移不能当成分栏或新段落
+      // 居中排版（标题 / 图注 / 诗歌）：各行中心对齐，且左边界确实有明显位移。
+      // 列表的项目符号行只是「首行悬挂缩进」（位移约 1 字宽），不能误判成居中，
+      // 否则会跳过 bodyLeft，后续行/新列表项就会被并进同一段。
       const runCenter = (box.left + box.right) / 2
       const prevCenter = (p.box.left + p.box.right) / 2
-      const sameCenter = Math.abs(runCenter - prevCenter) <= Math.max(2, p.box.fontSize * 0.8)
-      // 新列表项 / 新编号标题：本行以标号开头且落在正文左边距上 → 另起一段（否则两类列表项会粘成一块）
-      if (LIST_MARKER_RE.test(run.text) && Math.abs(shift) <= p.box.fontSize * 0.9) continue
+      const centeredShift = Math.abs(shift) > p.box.fontSize * CENTER_MIN_SHIFT_RATIO
+      const rightShift = box.right - p.last.right
+      const pStartsMarker = LIST_MARKER_RE.test(p.texts[0])
+      const sameCenter = centeredShift
+        && !pStartsMarker
+        && !LIST_MARKER_RE.test(run.text)
+        // 左右都明显位移才是居中；只有左边位移、右边仍贴栏右界的是首行缩进 / 悬挂缩进
+        && Math.abs(rightShift) > p.box.fontSize * 0.5
+        && Math.abs(runCenter - prevCenter) <= Math.max(2, p.box.fontSize * 0.8)
+      // 新列表项 / 新参考文献条目：以标号开头的行永远另起一段（不论左边界差多少）；
+      // 否则像 “[6] …” 这种悬挂缩进较大的条目会被并进上一条参考文献。
+      if (LIST_MARKER_RE.test(run.text)) continue
       // 「段首缩进的首行」还要够宽：首行缩进只是把一行往右挪一点，整行仍应占满大部分栏宽；
       // 上方若有很窄的公式碎片（如孤立的 ∫ / ∑），不能当成段落首行被吞进来
       const colW = Math.max(1, p.colRight - p.box.left)
       const firstLineWide = lastW >= colW * 0.4
-      const leftOk = Math.abs(shift) <= p.box.fontSize * 0.9
+      const leftOk = Math.abs(shift) <= p.box.fontSize * INDENT_TOL_RATIO
         // 段首缩进回退：本段只有一行、它是缩进的，下一行退回左边距
         || (p.bodyLeft == null && p.texts.length === 1 && shift < 0 && -shift <= loose && firstLineWide)
-        // 列表悬挂标号：首行以“(iii) / 3.1 / • ”开头被顶出去，续行右移对齐
+        // 首行缩进 / 悬挂缩进但右边仍对齐栏右界：这是同一段的续行（不是居中）
+        || (p.bodyLeft == null && p.texts.length === 1 && shift > 0 && shift <= loose
+          && Math.abs(rightShift) <= p.box.fontSize * 1.5)
+        // 列表悬挂标号：首行以“(iii) / 3.1 / • / [5] ”开头被顶出去，续行右移对齐
         || (p.bodyLeft == null && p.texts.length === 1 && shift > 0 && shift <= loose
           && LIST_MARKER_RE.test(p.texts[0]))
         // 居中排版：左边界不同但中心对齐
@@ -389,21 +424,27 @@ function groupParagraphs(runs: LineRun[]): Segment[] {
         ? p.colRight - p.last.right <= fillTol
         : p.box.right - p.last.right <= fillTol
       if (!filled) {
-        if (p.texts.length !== 1) continue
-        // 单行且没排满：可能是标题，也可能是「行尾恰好在专有名词 / 缩写后换行」的正文。
-        // 不能只看下一行是不是大写开头（"…the U.S." / "…in Fig. 3" 这类续行很常见）：
-        // - 这一行已占本栏 60% 以上、字号也没变大 → 更像正文，继续并入；
-        // - 这一行以句末标点结束，或只占栏宽一小半 → 像标题，下一行大写 / 汉字就另起一段。
-        const lineEndsSentence = /[.!?。！？]["'”’)\]]?$/.test(p.texts[p.texts.length - 1])
-        const looksLikeHeading = lastW < colW * 0.6 || box.fontSize > p.box.fontSize * 1.05 || lineEndsSentence
-        if (looksLikeHeading && /^[A-Z\u3400-\u9fff]/.test(run.text)) continue
+        if (p.texts.length !== 1) {
+          // 参考文献段落用悬挂缩进，续行短是常态：只要左边对齐就继续并入；
+          // DOI / URL 行也常紧贴在上一行之后，上一行略短同样应并入。
+          const isReference = REFERENCE_MARKER_RE.test(p.texts[0])
+          if (!isReference && !/^(?:https?:\/\/|www\.|doi:)/i.test(run.text)) continue
+        } else {
+          // 单行且没排满：可能是标题，也可能是「行尾恰好在专有名词 / 缩写后换行」的正文。
+          // 不能只看下一行是不是大写开头（"…the U.S." / "…in Fig. 3" 这类续行很常见）：
+          // - 这一行已占本栏 60% 以上、字号也没变大 → 更像正文，继续并入；
+          // - 这一行以句末标点结束，或只占栏宽一小半 → 像标题，下一行大写 / 汉字就另起一段。
+          const lineEndsSentence = /[.!?。！？]["'”’)\]]?$/.test(p.texts[p.texts.length - 1])
+          const looksLikeHeading = lastW < colW * 0.6 || box.fontSize > p.box.fontSize * 1.05 || lineEndsSentence
+          if (looksLikeHeading && /^[A-Z\u3400-\u9fff]/.test(run.text)) continue
+        }
       }
       if (gap < bestGap || (gap === bestGap && overlap > bestOverlap)) {
         best = p
         bestGap = gap
         bestOverlap = overlap
-        // 只有「左边界对不上、但中心对齐」才算居中排版；左边界本来就对齐的普通段落保持缩进还原
-        bestCentered = sameCenter && Math.abs(shift) > p.box.fontSize * 0.9
+        // 只有「左边界对不上、但中心对齐且位移明显」才算居中排版；剩余情况保持缩进还原
+        bestCentered = sameCenter
       }
     }
 
@@ -521,7 +562,8 @@ export async function buildPageBlocks(page: any, pageNum: number): Promise<PdfTe
   const rights = runs.map((r) => r.box.right).sort((a, b) => a - b)
   const textLeft = percentile(lefts, 0.1)
   const textRight = percentile(rights, 0.9)
-  const mid = detectColumnMid(runs, textLeft, textRight)
+  const marginRuns = runs.filter((r) => r.box.top >= pageHeight * 0.06 && r.box.bottom <= pageHeight * 0.94)
+  const mid = detectColumnMid(marginRuns.length >= 4 ? marginRuns : runs, textLeft, textRight)
   const areaRight = Math.min(pageWidth - 4, textRight)
   // 每栏的右边界：左栏到栏间中线为止；右栏 / 通栏到文字区右边界
   for (const r of runs) {
@@ -552,8 +594,37 @@ export async function buildPageBlocks(page: any, pageNum: number): Promise<PdfTe
       indentFirst,
       indentHanging,
       math: isMathBlock(seg.text) || undefined,
+      reference: REFERENCE_ENTRY_RE.test(seg.text) || undefined,
       pageHeight,
+      pageWidth,
     })
+  }
+  // 「References / 参考文献」标题之后、同一栏的条目也按参考文献处理
+  const refHeading = blocks.find((b) => b.lines === 1
+    && /^(?:references|bibliography|参考文献|引用文献)$/i.test(b.text.trim()))
+  if (refHeading) {
+    refHeading.reference = true
+    for (const b of blocks) {
+      if (b.id === refHeading.id || b.top <= refHeading.top + 2) continue
+      if (Math.abs(b.left - refHeading.left) <= Math.max(60, b.fontSize * 6)) b.reference = true
+    }
+  }
+  // 表格单元格：同一行有 3 个以上块，且至少一格是窄格。
+  // 这些块的白框必须紧贴文字，不能扩展到单元格边框上。
+  // （不用 2 格行：双栏正文 / 侧栏标题也常并排 2 块，会误判。）
+  const rows: PdfTextBlock[][] = []
+  for (const b of [...blocks].sort((a, c) => a.top - c.top)) {
+    const row = rows.find((r) => Math.abs(r[0].top - b.top) <= 1.5)
+    if (row) row.push(b)
+    else rows.push([b])
+  }
+  const tableWidth = pageWidth * 0.4
+  for (const row of rows) {
+    if (row.length < 3) continue
+    const cells = row.filter((b) => b.width < tableWidth)
+    if (cells.length >= 2) {
+      for (const b of cells) b.table = true
+    }
   }
   return blocks
 }
@@ -600,6 +671,105 @@ export function blocksForSelection(blocks: PdfTextBlock[], selection: string): P
 }
 
 /**
+ * 页面内一张图片（XObject / 内联图 / 遮罩）的占位矩形，坐标为 scale=1 的 CSS px。
+ * 用于叠加排版时避让图片：译文白框不能压在图上，否则会把插图 / 图表盖住。
+ */
+export interface PdfImageRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/**
+ * 从 pdf.js 的绘制指令里取出所有图片占位。
+ *
+ * pdf.js 的 operator list 是「保存状态 → 变换 → 画图 → 恢复」的序列：
+ * 维护一个 CTM 栈，遇到 `paintImage*` 时把单位正方形 (0,0)-(1,1) 用当前 CTM
+ * 变换成页面矩形，再套上与文本块相同的 flip 矩阵（y 轴翻转）即可。
+ * 扫描件的整页背景图也会被取到，由 {@link planOverlayLayout} 过滤掉。
+ */
+export async function buildPageImageRects(page: any): Promise<PdfImageRect[]> {
+  let opList: any
+  try {
+    opList = await page.getOperatorList()
+  } catch (err) {
+    console.warn('[Translate] 读取页面绘制指令失败，跳过图片避让:', err)
+    return []
+  }
+  const vp = page.getViewport({ scale: 1 })
+  const { pageWidth, pageHeight, pageX, pageY } = vp.rawDims
+  const flip = [1, 0, 0, -1, -pageX, pageY + pageHeight]
+  const pageArea = Math.max(1, pageWidth * pageHeight)
+  const rects: PdfImageRect[] = []
+  const stack: number[][] = []
+  let ctm = [1, 0, 0, 1, 0, 0]
+
+  const addUnitRect = () => {
+    const m = Util.transform(flip, ctm)
+    const xs: number[] = []
+    const ys: number[] = []
+    for (const [x, y] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
+      xs.push(m[0] * x + m[2] * y + m[4])
+      ys.push(m[1] * x + m[3] * y + m[5])
+    }
+    const left = Math.min(...xs)
+    const right = Math.max(...xs)
+    const top = Math.min(...ys)
+    const bottom = Math.max(...ys)
+    const width = right - left
+    const height = bottom - top
+    if (!(width > 1) || !(height > 1)) return
+    if (width * height < pageArea * 0.0005) return
+    // 同一个图可能被重复绘制（背景 + 前景）：去重，避免排版时重复计算
+    if (rects.some((r) => Math.abs(r.left - left) < 1 && Math.abs(r.top - top) < 1
+      && Math.abs(r.width - width) < 1 && Math.abs(r.height - height) < 1)) return
+    rects.push({ left, top, width, height })
+  }
+
+  const fns: number[] = opList.fnArray || []
+  const argsAll: any[] = opList.argsArray || []
+  for (let i = 0; i < fns.length; i++) {
+    const fn = fns[i]
+    const args = argsAll[i]
+    switch (fn) {
+      case OPS.save:
+        stack.push(ctm)
+        break
+      case OPS.restore: {
+        const prev = stack.pop()
+        if (prev) ctm = prev
+        break
+      }
+      case OPS.transform: {
+        if (Array.isArray(args) && args.length >= 6) ctm = Util.transform(ctm, args as number[])
+        break
+      }
+      case OPS.paintFormXObjectBegin: {
+        stack.push(ctm)
+        const matrix = Array.isArray(args) ? args[0] : null
+        if (Array.isArray(matrix) && matrix.length >= 6) ctm = Util.transform(ctm, matrix as number[])
+        break
+      }
+      case OPS.paintFormXObjectEnd: {
+        const prev = stack.pop()
+        if (prev) ctm = prev
+        break
+      }
+      case OPS.paintImageXObject:
+      case OPS.paintInlineImageXObject:
+      case OPS.paintImageMaskXObject:
+      case OPS.paintSolidColorImageMask:
+        addUnitRect()
+        break
+      default:
+        break
+    }
+  }
+  return rects
+}
+
+/**
  * 单个文本块在叠加层里的可用排版空间（都是 scale=1 px，与块坐标同一套空间）。
  * 由 {@link planOverlayLayout} 按整页所有块算出：译文不能压到同栏下一块的译文，
  * 也不能越出页底，否则后画的白色译文框会把超出的文字盖掉（看起来就是「显示不全」）。
@@ -611,6 +781,8 @@ export interface PdfBlockLayout {
   maxHeight: number
   /** 理想高度：原段落高度 + 半行；译文偏短时用它作为放大填充的目标 */
   targetHeight: number
+  /** 原段落与图片有较大重叠：白底改为半透明，避免把插图完全盖住 */
+  overImage?: boolean
 }
 
 /**
@@ -619,28 +791,40 @@ export interface PdfBlockLayout {
  * 关键点：
  * - 宽度优先取本栏可用宽度（`maxRight - left`），而不是原段落自身的行宽；学术论文的段末短行、
  *   缩进段落因此能把译文摊得更开，长译文不容易被压到很小字号。
- * - 若同一水平线上右侧还有另一块（没有识别出分栏的短页面、表格、图注），
- *   再把右边界收到那一块的左边，避免白框盖到它。
- * - 高度取「同栏、下方最近一块」的顶部（或页底）减去一点间距；这样上一块的译文即使比原文长，
- *   也不会伸进下一块的白框里被盖住。
+ * - 若同一水平线上右侧还有另一块或图片（分栏、表格、图注），右边界收到它左侧，
+ *   避免白框盖到文字 / 插图。
+ * - 高度取「同栏、下方最近一块 / 图片」的顶部（或页底）减去一点间距；这样上一块的译文即使比原文长，
+ *   也不会伸进下一块的白框或盖住下方图片。
  * - 只允许向下多占约 3 行：再往下可能是图 / 表 / 页脚等没有参与翻译的内容，白框不该盖过去。
+ * - 整页扫描图（面积过半或几乎铺满页面）不算障碍物，否则所有正文都会被它限制。
  */
-export function planOverlayLayout(blocks: PdfTextBlock[]): Map<string, PdfBlockLayout> {
+export function planOverlayLayout(blocks: PdfTextBlock[], images: PdfImageRect[] = []): Map<string, PdfBlockLayout> {
   const out = new Map<string, PdfBlockLayout>()
   const drawable = blocks.filter((b) => b.angle === 0)
   if (!drawable.length) return out
 
   let pageBottom = 0
+  let pageWidth = 0
   for (const b of drawable) {
     const h = Number(b.pageHeight) || 0
     if (h > pageBottom) pageBottom = h
+    const w = Number(b.pageWidth) || 0
+    if (w > pageWidth) pageWidth = w
     const bottom = b.top + b.height
     if (bottom > pageBottom) pageBottom = bottom
   }
+  const pageArea = Math.max(1, pageWidth * pageBottom)
+  // 整页扫描背景：面积超过约七成或几乎铺满页面 → 不作为障碍物
+  const obstacles = images.filter((img) => {
+    const area = img.width * img.height
+    if (area >= pageArea * 0.72) return false
+    return !(pageWidth > 0 && img.width >= pageWidth * 0.88 && img.height >= pageBottom * 0.88)
+  })
   const sorted = [...drawable].sort((a, b) => a.top - b.top || a.left - b.left)
 
   for (let i = 0; i < sorted.length; i++) {
     const b = sorted[i]
+    const gap = Math.max(1.5, b.fontSize * 0.15)
     let rightLimit = Math.max(b.left + b.width, b.maxRight)
     // 同一水平带里右侧还有块（分栏 / 表格 / 图注）：白框右边界不越过它。
     // 只按原块自身的垂直范围判断：通栏标题下方是双栏正文时，不能因为下方右栏的块
@@ -652,7 +836,16 @@ export function planOverlayLayout(blocks: PdfTextBlock[]): Map<string, PdfBlockL
       if (n.top >= bandBottom || n.top + n.height <= bandTop) continue
       rightLimit = Math.min(rightLimit, n.left - Math.max(2, b.fontSize * 0.25))
     }
-    const width = Math.max(1, Math.max(b.width, rightLimit - b.left))
+    // 同一水平带里的图片同理：白框不压到右侧插图 / 图表
+    for (const img of obstacles) {
+      if (img.left <= b.left + 2) continue
+      if (img.top >= bandBottom || img.top + img.height <= bandTop) continue
+      rightLimit = Math.min(rightLimit, img.left - gap)
+    }
+    // 表格单元格：白框严格贴在文字上，不向单元格边框扩张
+    const width = b.table
+      ? Math.max(1, b.width + 0.5)
+      : Math.max(1, Math.max(b.width, rightLimit - b.left))
 
     // 同栏、正下方最近的一块：横向范围必须与「扩展后的本块」有足够重叠
     let nextTop = Number.POSITIVE_INFINITY
@@ -663,17 +856,31 @@ export function planOverlayLayout(blocks: PdfTextBlock[]): Map<string, PdfBlockL
       const minWidth = Math.min(width, Math.max(1, n.maxRight - n.left))
       if (overlap > Math.min(8, minWidth * 0.25)) { nextTop = n.top; break }
     }
+    // 下方图片：译文不能盖到图上（图片顶部通常没有可识别的文本块，单靠 nextTop 看不到它）
+    for (const img of obstacles) {
+      if (img.top <= b.top + 1) continue
+      const overlap = Math.min(b.left + width, img.left + img.width) - Math.max(b.left, img.left)
+      if (overlap <= Math.min(8, width * 0.15)) continue
+      nextTop = Math.min(nextTop, img.top)
+    }
 
-    const gap = Math.max(1.5, b.fontSize * 0.15)
     const limitBottom = Math.min(
       nextTop === Number.POSITIVE_INFINITY ? pageBottom : nextTop - gap,
       pageBottom - 1,
     )
-    const targetHeight = b.height + b.fontSize * 0.5
-    // 向下扩展的安全上限：约 3 行；避免把下方图片 / 表格 / 页脚盖住
-    const cap = b.height + Math.max(b.fontSize * 3, b.height * 0.35)
+    const targetHeight = b.table ? b.height : b.height + b.fontSize * 0.5
+    // 向下扩展的安全上限：约 3 行；表格单元格则严格不超出文字高度，避免盖住边框
+    const cap = b.table ? b.height : b.height + Math.max(b.fontSize * 3, b.height * 0.35)
     const maxHeight = Math.max(b.height, Math.min(limitBottom - b.top, cap))
-    out.set(b.id, { width, maxHeight, targetHeight })
+
+    // 原段落本身压在图上：白底改为半透明，至少让插图透出来
+    const blockArea = Math.max(1, b.width * b.height)
+    const overImage = obstacles.some((img) => {
+      const ow = Math.min(b.left + b.width, img.left + img.width) - Math.max(b.left, img.left)
+      const oh = Math.min(b.top + b.height, img.top + img.height) - Math.max(b.top, img.top)
+      return ow > 2 && oh > 2 && ow * oh >= Math.min(blockArea * 0.15, 300)
+    })
+    out.set(b.id, { width, maxHeight, targetHeight, overImage })
   }
   return out
 }
@@ -687,16 +894,30 @@ export function planOverlayLayout(blocks: PdfTextBlock[]): Map<string, PdfBlockL
  * ——注意不要用 camelCase，`setProperty('fontSize', …)` 会被静默忽略。
  */
 export function blockOverlayStyle(b: PdfTextBlock, layout?: PdfBlockLayout): Record<string, string> {
+  const px = (v: number) => `calc(var(--scale-factor) * ${v.toFixed(2)}px)`
+  // 表格单元格：白框只贴着文字 bbox，不往单元格边框方向留 padding，避免盖住表格线
+  if (b.table) {
+    return {
+      left: px(b.left),
+      top: px(b.top),
+      width: px(Math.max(1, b.width)),
+      'min-height': px(Math.max(1, b.height)),
+      'font-size': px(b.fontSize),
+      'line-height': '1.28',
+      padding: '0 1px',
+    }
+  }
   const width = Math.max(1, layout?.width ?? Math.min(
     Math.max(b.width, b.maxRight - b.left),
     Math.max(b.width, b.fontSize * 16),
   ))
-  const px = (v: number) => `calc(var(--scale-factor) * ${v.toFixed(2)}px)`
+  // 可用高度很紧（参考文献行）时不要把 min-height 撑到下一块上
+  const minH = layout ? Math.min(b.height + 2.4, layout.maxHeight + 1) : b.height + 2.4
   const style: Record<string, string> = {
     left: px(b.left - 1),
     top: px(b.top - 1.2),
     width: px(width + 2),
-    'min-height': px(b.height + 2.4),
+    'min-height': px(minH),
     'font-size': px(b.fontSize),
     'line-height': '1.28',
   }
@@ -790,7 +1011,8 @@ function hashText(s: string): string {
 }
 
 export function makeCacheId(fileKey: string, target: string, model: string, text: string): string {
-  return `${fileKey}|${target}|${model}|${hashText(text)}`
+  // v2：标题 / 关键词 / 参考文献的提示词已调整，旧缓存里的“原样照抄”结果不能复用
+  return `${fileKey}|${target}|${model}|v2|${hashText(text)}`
 }
 
 export function getCached(id: string): string | undefined {
@@ -871,10 +1093,11 @@ function systemPrompt(target: TranslateTarget, zh: boolean): string {
       '严格要求：',
       '1. 逐段输出，每段必须以 [[编号]] 开头，编号与原文完全一致；不得合并、拆分、增删或重排段落；',
       '2. 只输出译文本身，不要任何解释、前后缀、原文复述或 Markdown 代码块；',
-      '3. 保留数字、单位、人名、机构名、专有名词、代码、URL 与引用标记原样；',
-      '4. 数学公式与变量名必须原样保留（不得翻译或改写），并用 LaTeX 表示：行内公式写成 $...$，'
+      '3. 保留数字、单位、人名、机构名、代码、URL 与引用标记原样；但论文标题、章节标题、摘要、关键词以及正文中的普通词必须翻译，不能因为包含专有名词 / 缩写就把整段照抄；',
+      '4. 参考文献条目要翻译论文 / 书名标题；作者、期刊名、DOI / URL、编号保持原样；',
+      '5. 数学公式与变量名必须原样保留（不得翻译或改写），并用 LaTeX 表示：行内公式写成 $...$，'
         + '独立公式写成 $$...$$；原文已是 Unicode 数学符号（如 𝑓、𝜋、∑）时也请转成等价的 LaTeX；',
-      `5. 若某段已是${lang}或无实义内容，仍按原编号原样输出该段。`,
+      `6. 若某段已是${lang}或无实义内容，仍按原编号原样输出该段。`,
     ].join('\n')
   }
   return [
@@ -882,10 +1105,11 @@ function systemPrompt(target: TranslateTarget, zh: boolean): string {
     'Strict requirements:',
     '1. Output passage by passage, each starting with its [[number]] exactly as given; never merge, split, drop or reorder passages;',
     '2. Output only the translation — no explanations, no prefixes/suffixes, no restating the source, no Markdown code fences;',
-    '3. Keep numbers, units, names, organizations, terminology, code, URLs and citation markers unchanged;',
-    '4. Keep every formula and variable name verbatim (never translate or rewrite them) and express math as LaTeX: '
+    '3. Keep numbers, units, names, organizations, code, URLs and citation markers unchanged; but DO translate paper titles, section headings, abstracts, keywords and ordinary prose — never copy a whole passage just because it contains a proper noun or acronym;',
+    '4. For reference entries translate the paper/book title; keep authors, journal names, DOI/URLs and reference numbers unchanged;',
+    '5. Keep every formula and variable name verbatim (never translate or rewrite them) and express math as LaTeX: '
       + 'inline math as $...$, display math as $$...$$; convert Unicode math symbols (e.g. 𝑓, 𝜋, ∑) into equivalent LaTeX;',
-    `5. If a passage is already in ${lang} or has no meaningful content, still output it unchanged under its number.`,
+    `6. If a passage is already in ${lang} or has no meaningful content, still output it unchanged under its number.`,
   ].join('\n')
 }
 

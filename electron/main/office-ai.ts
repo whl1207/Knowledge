@@ -25,7 +25,7 @@ import { logInfo } from './log'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { viewInfoOfWebContents } from './office-host'
-import { docxToMarkdown } from './office/docx-to-markdown'
+import { wordToMarkdown } from './office/word-to-markdown'
 import { sessionLog } from './session-log'
 
 // ==================== 状态 ====================
@@ -727,7 +727,7 @@ function push(sender: WebContents, chunk: Record<string, unknown>) {
  * 这里的实现刻意保持「主进程 + Node fs」这一最小依赖：
  * - 语料：当前文档所在目录（含子目录，深度受控）；
  * - 检索：大小写不敏感的子串匹配（扫描文件数与字节数都有上限，避免大目录卡死）；
- * - 取文：按扩展名分派 —— `.docx` 复用 docxToMarkdown 转 Markdown，其余按 UTF-8 文本读。
+ * - 取文：按扩展名分派 —— `.docx` / `.doc` 复用 wordToMarkdown 转 Markdown，其余按 UTF-8 文本读。
  *
  * 后续若要换成 AI-KM 的向量 / GraphRAG 检索（loadKnowledgeBase / retrieveKnowledge），
  * 只需替换 kbSearch 的实现，其余契约不变。
@@ -740,7 +740,7 @@ const KB_SEARCH_SCAN_BYTES = 256 * 1024
 const KB_READ_CHUNK_CHARS = 24000
 const KB_TEXT_EXTS = new Set([
   '.md', '.markdown', '.mdown', '.mkd', '.mdx', '.txt', '.log', '.rst', '.org',
-  '.docx', '.csv', '.tsv', '.json', '.json5', '.yaml', '.yml', '.toml', '.ini',
+  '.docx', '.doc', '.csv', '.tsv', '.json', '.json5', '.yaml', '.yml', '.toml', '.ini',
   '.html', '.htm', '.xml', '.tex', '.bib', '.js', '.jsx', '.ts', '.tsx', '.vue',
   '.py', '.java', '.c', '.h', '.cpp', '.cs', '.go', '.rs', '.rb', '.php', '.sh',
   '.ps1', '.sql', '.css', '.scss',
@@ -813,12 +813,12 @@ function kbList(docPath: string): KbFileInfo[] {
   return kbWalk(kbRootOf(docPath))
 }
 
-/** 取纯文本（.docx 走统一转换；其余按 UTF-8 读，失败返回空串） */
+/** 取纯文本（.docx / .doc 走统一转换；其余按 UTF-8 读，失败返回空串） */
 async function kbTextOf(file: string): Promise<string> {
   const ext = path.extname(file).toLowerCase()
   try {
-    if (ext === '.docx') {
-      return await docxToMarkdown({ filePath: file, extractImages: false })
+    if (ext === '.docx' || ext === '.doc') {
+      return await wordToMarkdown({ filePath: file, extractImages: false })
     }
     return fs.readFileSync(file, 'utf8')
   } catch {

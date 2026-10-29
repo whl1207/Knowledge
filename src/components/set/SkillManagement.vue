@@ -1,31 +1,41 @@
 <!-- SkillManagement.vue - 技能管理模块 -->
 <template>
   <div class="agent-skill" :class="{ tall: isTallLayout }">
-    <!-- ====== 顶部工具栏（细长窗口下只在技能列表屏显示，下钻后由各屏自己的返回条带路） ====== -->
-    <div class="top-bar" v-show="!isTallLayout || tallScreen === 'list'">
-      <h3>{{ store.locales === 'en' ? 'Skill Management' : '技能管理' }}</h3>
-      <div class="manage-toolbar">
-        <span class="skill-count" v-if="skills.length > 0">{{ skills.length }} {{ store.locales === 'en' ? 'skills' : '个技能' }}</span>
-        <span class="folder-path" :title="store.skillsPath || (store.locales === 'en' ? 'Not set' : '未设置')">
-          <i class="fa fa-folder"></i> {{ store.skillsPath || (store.locales === 'en' ? 'No skills folder set' : '未设置技能文件夹') }}
-        </span>
-        <div class="button icon-btn" @click="openSkillsFolder" :title="store.locales === 'en' ? 'Select skills folder' : '选择技能文件夹'">
-          <i class="fa fa-folder-open"></i>
-        </div>
-        <div class="button icon-btn" @click="refreshSkillList" :disabled="loading" :title="store.locales === 'en' ? 'Refresh skills' : '刷新技能'">
-          <i class="fa" :class="loading ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
-        </div>
-        <div class="button icon-btn" @click="openSkillInExplorer" :disabled="!selectedSkill" :title="store.locales === 'en' ? 'Open in Explorer' : '在资源管理器中打开'">
-          <i class="fa fa-external-link"></i>
-        </div>
-      </div>
-    </div>
-
     <!-- ====== 管理内容 ====== -->
     <div class="manage-content">
       <div class="manage-split">
         <!-- 左侧：技能列表 -->
         <div class="manage-left" v-show="!isTallLayout || tallScreen === 'list'">
+          <!-- 左侧导航工具栏（参照「插件 → 管理」）：安装 / 刷新 / 打开目录 / 选择目录 / 恢复默认 -->
+          <div class="sk-nav-toolbar">
+            <button class="sk-nav-btn primary" @click="installSkill"
+              :title="store.locales === 'en' ? 'Install a skill folder (copies it into the skills folder)' : '安装技能：选择一个技能文件夹复制进技能目录'">
+              <i class="fa fa-plus"></i><span class="sk-nav-btn-label">{{ store.locales === 'en' ? 'Install' : '安装' }}</span>
+            </button>
+            <button class="sk-nav-btn" @click="refreshSkillList" :disabled="loading"
+              :title="store.locales === 'en' ? 'Refresh skills' : '刷新技能'">
+              <i class="fa" :class="loading ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
+            </button>
+            <button class="sk-nav-btn" :disabled="!store.skillsPath" @click="revealSkillsRoot"
+              :title="store.locales === 'en' ? 'Open the skills folder in Explorer' : '在资源管理器中打开技能目录'">
+              <i class="fa fa-external-link"></i>
+            </button>
+            <button class="sk-nav-btn" @click="openSkillsFolder"
+              :title="store.locales === 'en' ? 'Select skills folder' : '选择技能文件夹'">
+              <i class="fa fa-folder-open"></i>
+            </button>
+            <button class="sk-nav-btn" :disabled="isDefaultFolder" @click="resetSkillsFolder"
+              :title="store.locales === 'en' ? 'Back to the default skills folder' : '恢复默认技能文件夹'">
+              <i class="fa fa-undo"></i>
+            </button>
+          </div>
+          <div class="sk-nav-search">
+            <i class="fa fa-search"></i>
+            <input v-model="skillKeyword" spellcheck="false"
+              :placeholder="store.locales === 'en' ? 'Search skills (name / description)' : '搜索技能（名称 / 描述）'" />
+            <i v-if="skillKeyword" class="fa fa-times-circle sk-search-clear" @click="skillKeyword = ''"
+              :title="store.locales === 'en' ? 'Clear' : '清除'"></i>
+          </div>
           <div class="skill-list">
             <div v-if="loading" class="empty-hint" style="height:100%;">
               <i class="fa fa-spinner fa-spin" style="font-size:20px;"></i>
@@ -35,8 +45,11 @@
               <i class="fa fa-cubes" style="font-size:24px;"></i>
               <span>{{ store.skillsPath ? (store.locales === 'en' ? 'No skill files found' : '未找到技能文件') : (store.locales === 'en' ? 'Please set skills folder first' : '请先设置技能文件夹') }}</span>
             </div>
+            <div v-else-if="!filteredSkills.length" class="empty-hint" style="height:auto;padding:12px 4px;">
+              <span>{{ store.locales === 'en' ? `No skills match “${skillKeyword.trim()}”` : `没有匹配「${skillKeyword.trim()}」的技能` }}</span>
+            </div>
             <div
-              v-for="skill in skills"
+              v-for="skill in filteredSkills"
               :key="skill.name"
               class="skill-item"
               :class="{ active: selectedSkill?.name === skill.name }"
@@ -66,6 +79,25 @@
               </span>
             </div>
           </div>
+
+          <!-- 底栏（参照「插件 → 管理」）：数量 + 技能目录（点击选择目录） -->
+          <div class="sk-nav-foot">
+            <div class="sk-foot-row">
+              <span class="sk-foot-count">
+                {{ skillKeyword ? `${filteredSkills.length} / ${skills.length}` : skills.length }}
+                {{ store.locales === 'en' ? 'skills' : '个技能' }}
+              </span>
+              <span class="sk-foot-icons">
+                <i v-if="isDefaultFolder" class="fa fa-home sk-foot-icon" :title="store.locales === 'en' ? 'Default skills folder' : '默认技能目录'"></i>
+                <i v-else-if="store.skillsPath" class="fa fa-undo sk-foot-icon action"
+                  :title="store.locales === 'en' ? 'Restore the default skills folder' : '恢复默认技能目录'" @click="resetSkillsFolder"></i>
+              </span>
+            </div>
+            <div class="sk-foot-path" @click="openSkillsFolder" :title="store.skillsPath || ''">
+              <i class="fa fa-folder"></i>
+              <span class="sk-foot-path-text">{{ store.skillsPath || (store.locales === 'en' ? 'No folder set' : '未设置技能文件夹') }}</span>
+            </div>
+          </div>
         </div>
 
         <!-- 中间：文件树 -->
@@ -83,6 +115,8 @@
               </div>
               <span><i class="fa fa-folder-open-o"></i> {{ selectedSkill.name }}</span>
               <span class="file-count">{{ skillFiles.length }} {{ store.locales === 'en' ? 'files' : '个文件' }}</span>
+              <i class="fa fa-external-link sk-open-dir" @click="openSkillInExplorer"
+                :title="store.locales === 'en' ? 'Open this skill folder in Explorer' : '在资源管理器中打开该技能文件夹'"></i>
             </div>
             <div class="file-tree-body">
               <template v-for="node in fileTree" :key="node.path">
@@ -183,6 +217,8 @@ import { usestore } from '@/store'
 import * as monaco from 'monaco-editor'
 import { ensureMonacoEnvironment } from '@/lib/monaco-env'
 import { getPlatform, hasCapability } from '@/platform'
+import { ensureDefaultSkillsPath, resetSkillsPathToDefault, isDefaultSkillsFolder } from '@/composables/useDefaultStorage'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTallLayout } from '@/composables/useTallLayout'
 
 const store = usestore()
@@ -241,6 +277,17 @@ const saving = ref(false)
 // 技能数据
 const skills = ref<SkillItem[]>([])
 const selectedSkill = ref<SkillItem | null>(null)
+/** 左侧导航搜索词（名称 / 描述） */
+const skillKeyword = ref('')
+/** 过滤后的技能列表（搜索时保持原顺序） */
+const filteredSkills = computed(() => {
+  const kw = skillKeyword.value.trim().toLowerCase()
+  if (!kw) return skills.value
+  return skills.value.filter((s) =>
+    String(s.name || '').toLowerCase().includes(kw) ||
+    String(s.description || '').toLowerCase().includes(kw),
+  )
+})
 const previewFile = ref<SkillFile | null>(null)
 const previewContent = ref('')
 const previewOriginalContent = ref('')
@@ -368,7 +415,77 @@ const openSkillsFolder = async () => {
   if (path) {
     store.skillsPath = path
     store.saveConfig()
+    await refreshDefaultFolderFlag()
     await loadSkillList()
+  }
+}
+
+/** 当前技能目录是否就是默认位置（决定「默认位置」徽标与「恢复默认」按钮是否可用） */
+const isDefaultFolder = ref(false)
+const refreshDefaultFolderFlag = async () => {
+  isDefaultFolder.value = await isDefaultSkillsFolder()
+}
+
+/** 恢复默认技能文件夹（userData/skills）：只改路径，不删除原目录里的文件 */
+const resetSkillsFolder = async () => {
+  const dir = await resetSkillsPathToDefault()
+  if (!dir) {
+    ElMessage.warning(store.locales === 'en' ? 'No default skills folder on this platform' : '当前平台没有默认技能目录')
+    return
+  }
+  await refreshDefaultFolderFlag()
+  await refreshSkillList()
+  ElMessage.success(store.locales === 'en' ? `Back to default folder: ${dir}` : `已恢复默认技能文件夹：${dir}`)
+}
+
+/**
+ * 安装技能（参照「插件 → 管理 → 安装插件」）：
+ * 主进程弹目录选择框 → 复制技能文件夹进技能目录 → 刷新列表。
+ * 同名冲突时先确认，再以 replace 重试。
+ */
+const installSkill = async () => {
+  const api: any = getPlatform().host.skills
+  if (!api?.install) {
+    ElMessage.error(store.locales === 'en' ? 'Installing skills is not supported here' : '当前环境不支持安装技能')
+    return
+  }
+  const run = async (replace = false): Promise<void> => {
+    try {
+      const res = await api.install({ root: store.skillsPath, replace })
+      if (res?.cancelled) return
+      ElMessage.success(store.locales === 'en'
+        ? `Installed skill: ${res?.name || ''}`
+        : `已安装技能：${res?.name || ''}`)
+      await refreshSkillList()
+    } catch (e: any) {
+      if (e?.code === 'SKILL_EXISTS') {
+        try {
+          await ElMessageBox.confirm(
+            store.locales === 'en'
+              ? `${e.message}. Replacing first removes the old copy in the skills folder (skills hold no user data, so this is usually safe).`
+              : `${e.message}。覆盖安装会先删除技能目录里的旧版本（技能本身不含用户数据，通常安全）。`,
+            store.locales === 'en' ? 'Replace?' : '覆盖安装？',
+            { type: 'warning', confirmButtonText: store.locales === 'en' ? 'Replace' : '覆盖安装', cancelButtonText: store.locales === 'en' ? 'Cancel' : '取消' },
+          )
+        } catch {
+          return
+        }
+        return await run(true)
+      }
+      ElMessage.error(e?.message || String(e))
+    }
+  }
+  await run()
+}
+
+/** 在资源管理器中打开技能根目录（未设置时提示） */
+const revealSkillsRoot = async () => {
+  if (!store.skillsPath) return
+  try {
+    const ok = await getPlatform().shell.revealInFolder(store.skillsPath)
+    if (!ok) ElMessage.warning(store.locales === 'en' ? 'Cannot open the folder here' : '当前平台打不开文件夹')
+  } catch {
+    ElMessage.warning(store.locales === 'en' ? 'Cannot open the folder here' : '当前平台打不开文件夹')
   }
 }
 
@@ -591,6 +708,7 @@ const initPreviewEditor = (content: string, filename: string) => {
 
 // 监听 skillsPath 变化
 watch(() => store.skillsPath, async (newPath) => {
+  await refreshDefaultFolderFlag()
   if (newPath) {
     await loadSkillList()
   } else {
@@ -601,6 +719,9 @@ watch(() => store.skillsPath, async (newPath) => {
 // ==================== 生命周期 ====================
 
 onMounted(async () => {
+  // 默认存储位置：技能默认在 userData/skills（首次运行自动就位；用户选过目录则沿用）
+  await ensureDefaultSkillsPath()
+  await refreshDefaultFolderFlag()
   if (store.skillsPath) {
     await loadSkillList()
   }
@@ -780,6 +901,67 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+/* ====== 左侧导航（参照「插件 → 管理」）：安装 / 搜索 / 列表 / 底栏 ====== */
+.sk-nav-toolbar {
+  /* 与「插件 → 管理」工具栏同一行：安装占满剩余宽度，其余四个图标按钮固定 26px */
+  display: flex; flex-wrap: nowrap; gap: 4px;
+  padding: 5px; flex-shrink: 0;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+}
+.sk-nav-btn {
+  flex: 0 0 26px; width: 26px; min-width: 26px; height: 26px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--backgroundColor); color: var(--fontColor);
+  cursor: pointer; font-size: 12px; transition: all .12s;
+}
+.sk-nav-btn:hover:not(:disabled) { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+.sk-nav-btn:disabled { opacity: .4; cursor: not-allowed; }
+.sk-nav-btn.primary {
+  flex: 1 1 auto; width: auto; min-width: 0; padding: 0 6px;
+  border-color: color-mix(in srgb, var(--fontActiveColor) 45%, var(--borderColor));
+  color: var(--fontActiveColor);
+}
+.sk-nav-btn.primary:hover { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
+.sk-nav-btn-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sk-nav-search {
+  display: flex; align-items: center; gap: 6px;
+  margin: 5px; height: 26px; padding: 0 6px; flex-shrink: 0;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--backgroundColor); font-size: 12px; color: var(--borderColor);
+}
+.sk-nav-search input {
+  flex: 1; min-width: 0; margin: 0;
+  border: none; outline: none; background: transparent;
+  color: var(--fontColor); font-size: 12px;
+}
+.sk-search-clear { cursor: pointer; }
+.sk-search-clear:hover { color: var(--fontActiveColor); }
+.sk-nav-foot {
+  flex-shrink: 0; display: flex; flex-direction: column; gap: 3px;
+  padding: 5px 7px; border-top: 1px solid var(--borderColor);
+  background: var(--menuColor);
+}
+.sk-foot-row { display: flex; align-items: center; justify-content: space-between; font-size: 10px; opacity: .8; }
+.sk-foot-icons { display: flex; align-items: center; gap: 6px; }
+.sk-foot-icon { font-size: 10px; }
+.sk-foot-icon.action { cursor: pointer; }
+.sk-foot-icon.action:hover { color: var(--fontActiveColor); opacity: 1; }
+.sk-foot-path {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: 10px; opacity: .65; cursor: pointer;
+}
+.sk-foot-path:hover { opacity: 1; }
+.sk-foot-path i { flex-shrink: 0; }
+.sk-foot-path-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;
+}
+/* 文件树头部的「打开该技能文件夹」 */
+.sk-open-dir { margin-left: 8px; cursor: pointer; opacity: .7; }
+.sk-open-dir:hover { opacity: 1; color: var(--fontActiveColor); }
+
 .folder-path {
   font-size: 11px;
   color: var(--fontColor);
@@ -787,6 +969,17 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 「默认位置」徽标：技能目录仍是 userData/skills（没被用户改成自定义目录） */
+.folder-default-badge {
+  font-style: normal;
+  font-size: 9px;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 6px;
+  border: 1px solid var(--borderColor);
+  opacity: .75;
 }
 
 .skill-count {
@@ -802,8 +995,10 @@ onBeforeUnmount(() => {
 }
 
 .manage-left {
-  width: 180px;
-  min-width: 200px;
+  /* 与「插件 → 管理」左栏一致：230px（安装按钮 + 四个图标按钮能排在一行） */
+  width: 230px;
+  min-width: 230px;
+  flex-shrink: 0;
   border-right: 1px solid var(--borderColor);
   display: flex;
   flex-direction: column;
@@ -812,30 +1007,36 @@ onBeforeUnmount(() => {
 .skill-list {
   flex: 1;
   overflow-y: auto;
-  padding: 4px;
+  /* 与「插件 → 管理」列表一致的左右留白 */
+  padding: 0 4px 4px;
 }
 
 .skill-item {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 4px;
+  gap: 6px;
+  padding: 5px 6px;
   border: 1px solid transparent;
   border-radius: 4px;
   cursor: pointer;
   font-size: 11px;
-  transition: all 0.15s;
+  transition: all .12s;
   margin-bottom: 2px;
+  box-sizing: border-box;
+  /* 与「插件 → 管理」的行高对齐：两行（名称 + 描述）固定 44px，描述为空也不会变矮 */
+  min-height: 44px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .skill-item:hover {
-  background: var(--menuColor);
-  border-color: var(--borderColor);
+  background: color-mix(in srgb, var(--fontColor) 6%, transparent);
+  border-color: transparent;
 }
 
 .skill-item.active {
-  background: rgba(33, 150, 243, 0.12);
-  border-color: #2196F3;
+  background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
+  border-color: var(--fontActiveColor);
 }
 
 .skill-item i {
@@ -851,7 +1052,8 @@ onBeforeUnmount(() => {
 
 .skill-name {
   display: block;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -860,7 +1062,9 @@ onBeforeUnmount(() => {
 .skill-desc {
   display: block;
   font-size: 10px;
-  color: var(--borderColor);
+  color: var(--fontColor);
+  opacity: .55;
+  min-height: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -924,16 +1128,40 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 
-.file-tree-header {
+/* 两列的表头：高度与左侧工具栏（sk-nav-toolbar = 26px 按钮 + 上下 5px padding + 1px 分隔线）
+   完全一致，固定 37px；技能名 / 文件名过长时截断而不换行，表头不会被撑高。 */
+.file-tree-header,
+.file-preview-header {
+  box-sizing: border-box;
+  height: 37px;
+  padding: 0 10px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 6px 10px;
+  justify-content: space-between;
+  gap: 6px;
   font-size: 11px;
-  line-height: 22px;
+  line-height: 1;
   font-weight: 500;
   border-bottom: 1px solid var(--borderColor);
   background: var(--menuColor);
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* 名称占满剩余宽度，超出用省略号（file-count / 图标 / 保存按钮保持可见） */
+.file-tree-header > span:first-of-type,
+.file-preview-header > span:first-of-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-tree-header > .file-count,
+.file-tree-header > .sk-open-dir,
+.file-preview-header > div,
+.file-tree-header > .sk-back,
+.file-preview-header > .sk-back {
   flex-shrink: 0;
 }
 
@@ -959,15 +1187,8 @@ onBeforeUnmount(() => {
 }
 
 .file-preview-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0px 5px;
-  font-size: 11px;
-  border-bottom: 1px solid var(--borderColor);
-  background: var(--menuColor);
-  flex-shrink: 0;
-  height: 34px
+  /* 高度由上面与 .file-tree-header 合并的规则统一为固定 37px */
+  padding: 0 10px;
 }
 
 .file-preview-content {

@@ -21,7 +21,7 @@ import xlsx from 'xlsx'
 import { toolRegistry, defineTool } from '@/shared/toolRegistry'
 import type { ToolResult, ToolExecutionContext } from '@/types/tool'
 import { pythonService } from './python-service'
-import { docxToMarkdown } from './office/docx-to-markdown'
+import { wordToMarkdown } from './office/word-to-markdown'
 import { shellService } from './shell-service'
 import { trustedPythonService } from './trusted-python-service'
 import { logInfo } from './log'
@@ -407,11 +407,11 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
       }
     }
 
-    // Word 文档：.docx 用 mammoth 提取 Markdown 文本（标题 atx / 表格管道化）；.doc 为旧版二进制格式不支持
+    // Word 文档：.docx 走 mammoth（标题 atx / 表格管道化），.doc 走 word-extractor（纯文本 + 管道表格）
     const ext = path.extname(abs).toLowerCase()
-    if (ext === '.docx') {
+    if (ext === '.docx' || ext === '.doc') {
       try {
-        const docText = await parseDocxFile(abs)
+        const docText = await parseWordFile(abs)
         if (!docText || docText.trim().length === 0) {
           return { ok: false, error: 'Word 文档解析结果为空' }
         }
@@ -426,7 +426,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
             nextOffset: win.nextOffset,
             content: win.content,
             size: stat.size,
-            format: 'docx',
+            format: ext === '.docx' ? 'docx' : 'doc',
             totalChars: win.totalChars,
             startOffset: win.startOffset,
             endOffset: win.endOffset,
@@ -436,9 +436,6 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
       } catch (e: any) {
         return { ok: false, error: `Word 解析失败: ${e?.message || String(e)}` }
       }
-    }
-    if (ext === '.doc') {
-      return { ok: false, error: '不支持读取旧版 .doc 二进制格式，请先在 Word 中另存为 .docx 后再读取。' }
     }
 
     // Excel 表格：.xlsx/.xls 用 SheetJS 提取为 Markdown 表格
@@ -2297,10 +2294,10 @@ async function parsePdfBytes(uint8: Uint8Array): Promise<string> {
   return parts.join('\n')
 }
 
-/** 从 .docx 提取 Markdown 文本（统一走 office/docx-to-markdown：atx 标题 / 管道表格 / 编号回填 / 公式 LaTeX；
- *  工具场景只要正文文字，故不提取图片，避免写盘） */
-async function parseDocxFile(filePath: string): Promise<string> {
-  return docxToMarkdown({ filePath, extractImages: false })
+/** 从 Word（.docx / .doc）提取 Markdown 文本（统一走 office/word-to-markdown：atx 标题 / 管道表格 /
+ *  编号回填 / 公式 LaTeX；工具场景只要正文文字，故不提取图片，避免写盘） */
+async function parseWordFile(filePath: string): Promise<string> {
+  return wordToMarkdown({ filePath, extractImages: false })
 }
 
 /** 二维数组 → Markdown 表格（与 index.ts convertToMarkdown 同款） */
@@ -2533,7 +2530,7 @@ async function mcpCall(input: any, ctx: ToolExecutionContext): Promise<ToolResul
   }
   if (!config || typeof config !== 'object') config = {}
 
-  let args = input?.args
+  let args = (input as any)?.args ?? (input as any)?.arguments
   if (typeof args === 'string') {
     try { args = JSON.parse(args) } catch { args = { _raw: args } }
   }
@@ -2549,14 +2546,27 @@ async function mcpCall(input: any, ctx: ToolExecutionContext): Promise<ToolResul
     delete args.server_id
   }
 
+  // 模型常见错误：把工具入参直接放在 mcp_call 顶层（例如 preset_write 的 preset 与 args 平级）。
+  // 按目标工具的 inputSchema 把顶层同名键并入 args（只补缺失的，不覆盖已给的），
+  // 避免「参数其实给了、只是放错层」被前置校验直接拒绝。
+  const toolSchema = mcpService.getToolSchema(serverId, toolName)
+  const schemaProps = toolSchema?.properties && typeof toolSchema.properties === 'object'
+    ? Object.keys(toolSchema.properties)
+    : []
+  const META_KEYS = new Set(['serverId', 'server_id', 'tool', 'toolName', 'args', 'arguments', 'config'])
+  for (const key of schemaProps) {
+    if (META_KEYS.has(key)) continue
+    if (args[key] === undefined && input && input[key] !== undefined) args[key] = input[key]
+  }
+
   // 必填参数前置校验：按工具 schema 检查（别名归一后比较：workbook_id ≡ workbookId、sheet_name ≡ sheetName）。
   // 缺参直接回可操作的提示，不再把空参透传到服务端只换回一句晦涩错误；
   // 会话 ID（workbookId / docId）不在硬拦截之列——见 SESSION_ARG_RE 注释。
-  const missing = missingRequiredArgs(mcpService.getToolSchema(serverId, toolName), args)
+  const missing = missingRequiredArgs(toolSchema, args)
   if (missing.length) {
     return {
       ok: false,
-      error: `mcp_call 调用 ${toolName} 缺少必填参数：${missing.join('、')}（参数名支持别名，如 workbook_id ≡ workbookId、sheet_name ≡ sheetName）`,
+      error: `mcp_call 调用 ${toolName} 缺少必填参数：${missing.join('、')}（参数名支持别名，如 workbook_id ≡ workbookId、sheet_name ≡ sheetName；参数请放进 args，直接放在 mcp_call 顶层也可以）`,
     }
   }
 
@@ -2965,7 +2975,7 @@ export function registerCoreTools(): void {
     )
   }
   toolRegistry.register(
-    defineTool('read_file', '读取本地文件内容（UTF-8；PDF / Word(.docx) / Excel(.xlsx,.xls) 自动提取文本）。支持绝对路径（可读任意位置文件）与相对路径（基于工作区根；传 skill 时基于该技能目录）。单次返回有上限（纯文本约前 100KB、PDF/Word/Excel 前 20000 字符），超出时返回 truncated=true 与 nextOffset——把 nextOffset 作为 offset 再调用一次即可续读后续内容，反复续读直到 truncated=false 即读完全文（limit 可显式指定单次字符数，上限 102400）。超大文本文件（>16MB）只返回开头样本，请改用 run_python 完整处理。', readFile, {
+    defineTool('read_file', '读取本地文件内容（UTF-8；PDF / Word(.docx,.doc) / Excel(.xlsx,.xls) 自动提取文本）。支持绝对路径（可读任意位置文件）与相对路径（基于工作区根；传 skill 时基于该技能目录）。单次返回有上限（纯文本约前 100KB、PDF/Word/Excel 前 20000 字符），超出时返回 truncated=true 与 nextOffset——把 nextOffset 作为 offset 再调用一次即可续读后续内容，反复续读直到 truncated=false 即读完全文（limit 可显式指定单次字符数，上限 102400）。超大文本文件（>16MB）只返回开头样本，请改用 run_python 完整处理。', readFile, {
       inputSchema: {
         type: 'object',
         properties: {

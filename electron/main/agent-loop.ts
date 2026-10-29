@@ -28,6 +28,7 @@ import { AIUtils } from '@/shared/ai-core'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { boundToolResult, buildSpillPreview, shouldSpill } from '@/shared/toolResultBudget'
 import { sessionLog } from './session-log'
+import { recordUsage } from './usage-log'
 import { saveSpillText } from './tool-spill'
 import { jobRegistry } from './job-registry'
 import { browserAgentService } from './browser-agent'
@@ -1537,6 +1538,18 @@ class AgentImpl implements AgentControl {
                 totalTokens: metadata?.total_tokens ?? metadata?.totalTokens ?? ((typeof pt === 'number' ? pt : 0) + (typeof ct === 'number' ? ct : 0)),
               }
             }
+            // 用量账本（只记后续）：智能体/集群/插件 agent 的每一步都记一行。
+            // 重试时 StepUsage 会被下一次覆盖，但账本按「真发生过的请求」逐条记账，
+            // 这正是它比聊天存档里的累计值更准的原因。
+            recordUsage({
+              provider: String(provider || ''),
+              sourceId: provider === 'custom'
+                ? (resolvedConfig?.id ?? config?.id ?? null)
+                : undefined,
+              model: String(resolvedConfig?.model || config?.model || llmConfig?.model || ''),
+              prompt: pt,
+              completion: ct,
+            })
           }
         },
       }

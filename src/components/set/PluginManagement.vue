@@ -19,7 +19,7 @@
           @click="installFromFolder"
           :title="zh ? '从本地文件夹安装插件' : 'Install a plugin from a local folder'"
         >
-          <i class="fa fa-plus"></i><span>{{ zh ? '安装插件' : 'Install' }}</span>
+          <i class="fa fa-plus"></i><span>{{ zh ? '安装' : 'Install' }}</span>
         </button>
         <button class="toolbar-btn" @click="refresh" :title="zh ? '刷新列表' : 'Refresh list'">
           <i class="fa fa-refresh"></i>

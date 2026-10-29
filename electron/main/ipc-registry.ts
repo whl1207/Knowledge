@@ -20,10 +20,12 @@ import * as aiService from './ai-service'
 import * as agentLoop from './agent-loop'
 import { sessionLog } from './session-log'
 import { skillService } from './skill-service'
+import { installSkillFolder } from './skill-install'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { jobRegistry } from './job-registry'
 import { credentialStore } from './credentials'
 import { generateSdkDocs } from './code-sdk'
+import * as usageLog from './usage-log'
 
 type IpcHandler = (payload: any, event: IpcMainInvokeEvent) => Promise<any> | any
 
@@ -294,6 +296,12 @@ export function registerNamespacedIpc(): void {
     skillService.refresh()
     return { success: true }
   })
+  // 「安装技能」：选一个技能文件夹 → 复制进技能目录（与「安装插件」同一套心智）
+  registerIpc('skill:install', (payload) => installSkillFolder({
+    root: String(payload?.root || ''),
+    replace: payload?.replace === true,
+    sourceDir: payload?.sourceDir ? String(payload.sourceDir) : undefined,
+  }))
 
   // ---------------- tools:*（统一工具注册表） ----------------
   registerIpc('tools:list', (payload) => {
@@ -401,6 +409,10 @@ export function registerNamespacedIpc(): void {
     }
   })
   registerIpc('interfaceConfig:path', () => getInterfaceConfigPath())
+
+  // ---------------- usage:*（模型用量账本，只读；见 usage-log.ts） ----------------
+  // 按来源 × 本地日期聚合，渲染层只负责画图；不传参 = 全部历史（账本从启用起才有数据）。
+  registerIpc('usage:summary', () => usageLog.summarize())
 }
 
 /** 软件根目录下的界面配置文件路径（生产=exe 所在目录；开发=项目根目录） */

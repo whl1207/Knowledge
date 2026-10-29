@@ -80,6 +80,17 @@ async function executeTask(kind: string, payload: any): Promise<RendererTaskResu
     const { handleSwarmRoom } = await import('@/composables/swarm/useSwarmRoomTask')
     return await handleSwarmRoom(payload)
   }
+  // AI 自己创建 Agent 预设：内置 MCP 服务 builtin-agent-preset 的工具经这里读写 store.agentPresets
+  // （预设的单一事实源在渲染层，主进程只做 MCP 协议包装与转发）
+  if (kind === 'agent_preset') {
+    const { handleAgentPresetTask } = await import('@/composables/useAgentPresetTask')
+    return await handleAgentPresetTask(payload)
+  }
+  // 技能设计师：技能目录与已装技能清单只存在渲染层（默认 userData/skills，可自定义）
+  if (kind === 'agent_skill') {
+    const { handleAgentSkillTask } = await import('@/composables/useAgentSkillTask')
+    return await handleAgentSkillTask(payload)
+  }
   return { ok: false, error: `未知的渲染层任务类型: ${kind}` }
 }
 

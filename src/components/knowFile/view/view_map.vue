@@ -42,23 +42,9 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
   let unsubMapTiles: (() => void) | null = null
   const isMbSource = (s: string) => s && s.startsWith('mb:')
 
-  // 计算文件树的最大深度
-  const getMaxDepth = function(tree: any[], currentDepth: number = 1): number {
-    let max = currentDepth
-    for (const node of tree) {
-      if (node.children && node.children.length > 0) {
-        const childDepth = getMaxDepth(node.children, currentDepth + 1)
-        if (childDepth > max) max = childDepth
-      }
-    }
-    return max
-  }
+  // 文件树改为按目录懒加载后，store.tree 只含根层，不能再由它推算真实层级；
+  // 固定 5 层（与旧下拉上限一致），选到实际不存在的层级只会返回空列表。
   const maxDepth = ref(5)
-  watch(() => store.tree, (val) => {
-    if (val && val.length > 0) {
-      maxDepth.value = Math.max(getMaxDepth(val), 1)
-    }
-  }, { immediate: true })
 
   // 数据列表：按“仅显示有经纬度”配置过滤
   const filteredData = computed(() => {

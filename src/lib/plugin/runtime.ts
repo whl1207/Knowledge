@@ -708,6 +708,14 @@ async function loadOne(
 ): Promise<void> {
   const log = createClientLogger(snapshot.id)
   try {
+    // 防御：同一个 id 若还留着上一次的句柄（理论上第 2 步已经卸干净），先卸再装。
+    // 不卸就 apply 会让插件第二次注册同一个槽位 key → 直接抛「key 重复」，整块界面丢掉。
+    const previous = loaded.get(snapshot.id)
+    if (previous) {
+      await previous.dispose()
+      loaded.delete(snapshot.id)
+      log.warn('检测到同一插件尚有未卸载的界面扩展，已先卸载再重新装载')
+    }
     // 已经并发取回来的 bundle 直接用；没有就现取（单独调用 loadOne 的路径）
     if (prefetched?.error) throw prefetched.error
     const bundle = prefetched?.bundle ?? (await bridge.clientBundle(snapshot.id))

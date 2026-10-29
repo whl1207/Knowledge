@@ -84,7 +84,7 @@ export async function buildRemotePreviewTab(
       tab.remoteText = content.text || ''
       return { ok: true, tab }
     }
-    if (ext === '.docx') {
+    if (ext === '.docx' || ext === '.doc') {
       const content = await fetchFsRead(root, rel)
       if (!content?.base64) return { ok: false, reason: 'download' }
       const md: any = await getPlatform().host.docs.docxToMarkdown({ base64: content.base64 })

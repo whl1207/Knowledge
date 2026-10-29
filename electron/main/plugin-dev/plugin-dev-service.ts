@@ -1,7 +1,7 @@
 // electron/main/plugin-dev/plugin-dev-service.ts
 // 内置 MCP 服务：插件开发参考（builtin-plugin-dev）
 //
-// 场景：让「插件开发智能体」以及任何其它智能体 / 工作流 MCP 节点 / 外部 MCP 客户端
+// 场景：让「插件设计师」以及任何其它智能体 / 工作流 MCP 节点 / 外部 MCP 客户端
 // 都能读到 AI-KM 官方插件开发参考（约束、清单字段、内置槽位、宿主 API 清单、最小示例、
 // 常见问题、开发模板）与本机插件目录路径，从而**不必**去磁盘上找软件源码
 // （装机后的软件里没有 src/，模型找不到会满盘 read_file / search_files / shell）。

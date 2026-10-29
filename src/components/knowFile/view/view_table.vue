@@ -1223,22 +1223,10 @@ function optionsFor(key: string): string[] {
   return [...set].sort((a, b) => a.localeCompare(b, 'zh', { numeric: true }))
 }
 
-/** 读取深度下拉的上限 */
+/** 读取深度下拉的上限。
+ *  文件树改为按目录懒加载后 store.tree 只含根层，不能再由它推算真实层级，
+ *  固定 5 层（与旧上限一致）；选到实际不存在的层级只会得到空表格。 */
 const maxDepth = ref(5)
-const getMaxDepth = function (tree: any[], currentDepth = 1): number {
-  let max = currentDepth
-  for (const node of tree || []) {
-    if (node?.children?.length) max = Math.max(max, getMaxDepth(node.children, currentDepth + 1))
-  }
-  return max
-}
-watch(
-  () => store.tree,
-  (val) => {
-    if (val && val.length > 0) maxDepth.value = Math.max(getMaxDepth(val), 1)
-  },
-  { immediate: true }
-)
 watch([() => store.root, () => store.path], () => {
   void init()
 })

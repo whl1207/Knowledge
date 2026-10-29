@@ -501,7 +501,7 @@ watch(() => props.kbPath, () => { loadMimicProfile() }, { immediate: true })
 function mimicLive(msg: string) { emit('updateLiveState', msg) }
 function mimicState(msg: string) { emit('updateState', msg) }
 
-/** 读取样卷文本：.pdf 走 pdfjs 逐页取文本（按需加载 pdfjs），.md/.txt/.docx 走主进程 readFile */
+/** 读取样卷文本：.pdf 走 pdfjs 逐页取文本（按需加载 pdfjs），.md/.txt/.docx/.doc 走主进程 readFile */
 async function readExamText(filePath: string): Promise<string> {
   const ext = (filePath.split('.').pop() || '').toLowerCase()
   if (ext === 'pdf') {
@@ -530,11 +530,11 @@ async function readExamText(filePath: string): Promise<string> {
   return text.trim()
 }
 
-/** 导入真题文件（.md/.txt/.docx/.pdf） */
+/** 导入真题文件（.md/.txt/.docx/.doc/.pdf） */
 async function importMimicFile() {
   const path = await getPlatform().dialog.pickFile({
     filters: [
-      { name: store.locales == 'zh' ? '真题/样卷' : 'Reference exam', extensions: ['md', 'txt', 'docx', 'pdf'] },
+      { name: store.locales == 'zh' ? '真题/样卷' : 'Reference exam', extensions: ['md', 'txt', 'docx', 'doc', 'pdf'] },
       { name: store.locales == 'zh' ? '所有文件' : 'All Files', extensions: ['*'] },
     ],
   })

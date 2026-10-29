@@ -5,6 +5,7 @@ import type { ToolRegistrySnapshot, ToolResult, ToolExecutionContext } from '@/t
 import type { WebSearchConfig, WebSearchTestResult } from '@/shared/webSearch'
 import type { WebFetchConfig, WebFetchTestResult } from '@/shared/webFetch'
 import type { JobInfo, JobEvent } from '../main/job-registry'
+import type { UsageSummary } from '../main/usage-log'
 
 // --------- Expose some API to the Renderer process ---------
 // on() 会把监听器包一层匿名函数，off() 必须用同一个包装函数才能真正移除；
@@ -360,6 +361,13 @@ const dsh = {
     },
     path(): Promise<string> {
       return invokeIpc('interfaceConfig:path')
+    },
+  },
+
+  /** 模型用量账本（只读；只记启用之后的请求，按来源 × 本地日期聚合） */
+  usage: {
+    summary(): Promise<UsageSummary> {
+      return invokeIpc('usage:summary')
     },
   },
 

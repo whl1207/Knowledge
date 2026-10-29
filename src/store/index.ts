@@ -295,7 +295,7 @@ export const usestore = defineStore('data', {
         // 顶部工具栏「刷新」递增计数：各视图 watch 它重新拉取自己的数据
         knowRefreshTick: 0 as number,
         skillsPath: "" as string, // 技能文件夹路径
-        agentPresetPath: "" as string, // Agent 预设（.agent 文件）存储文件夹路径（仅会话内生效，不持久化）
+        agentPresetPath: "" as string, // Agent 预设（.agent 文件）存储文件夹路径；空 = 本地存储（localStorage）
         // 工具管理：智能体/技能（Agent 循环）默认可调用的工具白名单（null=默认全集，[]=全部关闭，其他=仅启用列表中的工具）
         agentTools: null as string[] | null,
         // 技能管理：被禁用的技能名（开关关闭的技能不注入智能体、不被 skill 工具加载）
@@ -1632,6 +1632,8 @@ export const usestore = defineStore('data', {
             // 工作区键（root / roots / path）：非主窗口不写（见 persistWorkspace），避免用旧值覆盖主窗口
             if (persistWorkspace && configLoaded) writeWorkspaceKeys(this)
             localStorage.setItem('skillsPath', JSON.stringify(this.skillsPath))
+            // Agent 预设存储文件夹（与技能目录同策略）：持久化后重启仍以该文件夹里的 .agent 为准
+            localStorage.setItem('agentPresetPath', JSON.stringify(this.agentPresetPath))
             localStorage.setItem('agentTools', JSON.stringify(this.agentTools))
             localStorage.setItem('disabledSkills', JSON.stringify(this.disabledSkills))
             localStorage.setItem('skillStoreSources', JSON.stringify(this.skillStoreSources))
@@ -1756,6 +1758,15 @@ export const usestore = defineStore('data', {
             configLoaded = true
             if (localStorage.getItem('skillsPath') !== null) {
                 this.skillsPath = JSON.parse(localStorage.getItem('skillsPath')!)
+            }
+            // Agent 预设文件夹模式（旧存档没有该 key → 保持空 = 本地存储）
+            if (localStorage.getItem('agentPresetPath') !== null) {
+                try {
+                    const p = JSON.parse(localStorage.getItem('agentPresetPath')!)
+                    this.agentPresetPath = typeof p === 'string' ? p : ''
+                } catch {
+                    this.agentPresetPath = ''
+                }
             }
             if (localStorage.getItem('agentTools') !== null) {
                 const parsedTools = JSON.parse(localStorage.getItem('agentTools')!)
@@ -2365,7 +2376,7 @@ export const usestore = defineStore('data', {
                     updatedAt: Date.now(),
                 })
             }
-            // 插件开发参考（builtin-plugin-dev）：让「插件开发智能体」与其它智能体 / 工作流 MCP 节点 /
+            // 插件开发参考（builtin-plugin-dev）：让「插件设计师」与其它智能体 / 工作流 MCP 节点 /
             // 外部 MCP 客户端都能读到官方插件开发指南（详见 electron/main/plugin-dev/plugin-dev-service.ts）
             if (!this.mcpServers.some(s => s && s.id === 'builtin-plugin-dev')) {
                 this.mcpServers.push({
@@ -2375,6 +2386,52 @@ export const usestore = defineStore('data', {
                     builtin: true,
                     autoConnect: true,
                     enabled: true,
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                })
+            }
+            // 智能体设计参考（builtin-agent-preset）：让「智能体设计师」自己读写预设
+            // （读写在渲染层执行，详见 electron/main/agent-preset/agent-preset-service.ts）
+            if (!this.mcpServers.some(s => s && s.id === 'builtin-agent-preset')) {
+                this.mcpServers.push({
+                    id: 'builtin-agent-preset',
+                    name: '智能体设计参考',
+                    transport: 'stdio',
+                    builtin: true,
+                    autoConnect: true,
+                    enabled: true,
+                    // 读写在渲染层、可能要做目录 / 技能库扫描：默认 60 秒太紧，给 180 秒
+                    timeoutMs: 180000,
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                })
+            } else {
+                // 老存档兼容：显示名从「预设管理」改过来；并补上更宽松的调用超时（用户手动改过的不动）
+                const presetSrv = this.mcpServers.find(s => s && s.id === 'builtin-agent-preset')
+                if (presetSrv) {
+                    let touched = false
+                    if (presetSrv.name === '预设管理') {
+                        presetSrv.name = '智能体设计参考'
+                        touched = true
+                    }
+                    if (!presetSrv.timeoutMs) {
+                        presetSrv.timeoutMs = 180000
+                        touched = true
+                    }
+                    if (touched) presetSrv.updatedAt = Date.now()
+                }
+            }
+            // 技能设计参考（builtin-skill-dev）：让「技能设计师」拿到技能目录 / 规范 / 模板并自检
+            // （技能目录在渲染层，详见 electron/main/skill-dev/skill-dev-service.ts）
+            if (!this.mcpServers.some(s => s && s.id === 'builtin-skill-dev')) {
+                this.mcpServers.push({
+                    id: 'builtin-skill-dev',
+                    name: '技能设计参考',
+                    transport: 'stdio',
+                    builtin: true,
+                    autoConnect: true,
+                    enabled: true,
+                    timeoutMs: 180000,
                     createdAt: Date.now(),
                     updatedAt: Date.now(),
                 })

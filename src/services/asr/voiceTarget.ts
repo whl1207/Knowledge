@@ -23,6 +23,14 @@ export type { EditableDescriptor } from './voiceTargetCore'
 const MONACO_SELECTOR = '.monaco-editor'
 /** 其它把真实输入藏在隐藏 textarea 后面的控件（终端等）：不能按文本插入，交给调用方兜底 */
 const PROXY_EDITOR_SELECTOR = '.xterm'
+/**
+ * 自带输入框的「输入卡片」：卡片里除了输入框还有下拉 / 按钮 / 胶囊等控件。
+ * 焦点停在卡片里的这些控件上时，用户显然还是想往这张卡片的输入框里说话 ——
+ * 落点应该是卡片自己的输入框，而不是「上一个碰过的输入框」，更不是「找不到输入框」。
+ * （卡片由各模块自己标记，例如主页输入卡片 `data-voice-composer`；点卡片空白处把焦点交回输入框
+ *   的那一半在 home.vue 的 onComposerCardMouseDown 里，两半合起来才覆盖整张卡片。）
+ */
+const VOICE_COMPOSER_SELECTOR = '[data-voice-composer]'
 
 /** 从真实 DOM 读出「形状描述」（唯一读 DOM 的地方，其余判断都是纯函数） */
 export function readEditableDescriptor(el: Element | null): EditableDescriptor | null {
@@ -116,10 +124,24 @@ function describeTarget(el: HTMLElement, zh: boolean): string {
 }
 
 /**
+ * 一张输入卡片里的「真正的输入框」：第一个可见、可编辑的 input / textarea / contenteditable。
+ * 卡片里其它控件（下拉、按钮、附件胶囊、隐藏的 file input）都不是落点。
+ */
+function firstEditableIn(root: Element): HTMLElement | null {
+  const candidates = root.querySelectorAll<HTMLElement>('textarea, input, [contenteditable="true"]')
+  for (const el of Array.from(candidates)) {
+    const desc = readEditableDescriptor(el)
+    if (desc && isVoiceEditable(desc)) return el
+  }
+  return null
+}
+
+/**
  * 解析本次语音的落点（录音开始时调用一次并锁定：录音中焦点再跑掉也不影响结果落点）：
  *   1. 焦点在 monaco 里 → 代码编辑器分支；
  *   2. 焦点本身是可输入元素 → 直接用它；
- *   3. 焦点在按钮 / 空白处 → 退回「最近一次可输入元素」（仍然挂在文档里时）。
+ *   3. 焦点在输入卡片里的控件上（`data-voice-composer`）→ 用卡片自己的输入框；
+ *   4. 焦点在按钮 / 空白处 → 退回「最近一次可输入元素」（仍然挂在文档里时）。
  * 都没有则返回 null（由控制器兜底：结果复制到剪贴板并提示）。
  */
 export function resolveVoiceTarget(zh: boolean): VoiceTarget | null {
@@ -138,7 +160,14 @@ export function resolveVoiceTarget(zh: boolean): VoiceTarget | null {
   if (activeDesc?.insideProxyEditor) return null
   const tag = active?.tagName?.toUpperCase?.() || ''
   if (tag === 'IFRAME' || tag === 'EMBED' || tag === 'OBJECT') return null
-  // 4. 焦点在按钮 / 空白处 → 退回「最近一次可输入元素」（仍然挂在文档里时）
+  // 4. 焦点停在输入卡片里的控件上（模式下拉 / 附件 / 发送 / 工作区胶囊…）：
+  //    用户还在输入区里，落点就是卡片自己的输入框（卡片自己标了 data-voice-composer）
+  const composer = active?.closest?.(VOICE_COMPOSER_SELECTOR) as HTMLElement | null
+  if (composer) {
+    const inner = firstEditableIn(composer)
+    if (inner) return { kind: 'dom', el: inner, label: describeTarget(inner, zh) }
+  }
+  // 5. 焦点在按钮 / 空白处 → 退回「最近一次可输入元素」（仍然挂在文档里时）
   if (lastEditable && lastEditable.isConnected) {
     const lastDesc = readEditableDescriptor(lastEditable)
     if (lastDesc && isVoiceEditable(lastDesc)) {

@@ -54,6 +54,8 @@ const fsPort: FileSystemPort = {
   async renameFile() { return { success: false, error: 'not-supported' } },
   async ensureDir() { return { success: false, error: 'not-supported' } },
   async listTree() { return [] },
+  async listDir() { return { entries: [], total: 0, truncated: false, error: 'not-supported' } },
+  async searchNames() { return { results: [], truncated: false, scanned: 0, elapsedMs: 0 } },
   async listTreeWithRelations() { return { fileList: [], relationList: [] } },
   async getInfo() { return null },
   async readMetadata() { return {} },

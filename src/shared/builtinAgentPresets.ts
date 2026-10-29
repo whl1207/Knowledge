@@ -2,8 +2,9 @@
  * builtinAgentPresets.ts — 出厂自带的 Agent 预设（内置项）
  *
  * 除「通用智能体」（未绑定预设时的默认自主入口，见 AgentPreset.vue 的 __general__ 虚拟项）外，
- * 软件还内置七个可直接选用的预设：「代码智能体」「办公智能体」「PTC 智能体」「插件开发智能体」
- * 与「Pi 智能体」「DSH 智能体」「Codex 智能体」。
+ * 软件还内置九个可直接选用的预设：「代码智能体」「办公智能体」「PTC 智能体」
+ * 与「Pi 智能体」「DSH 智能体」「Codex 智能体」，以及三个「设计师」——
+ * 「技能设计师」「智能体设计师」「插件设计师」（三者排在其它内置项之后）。
  *
  * 其中后三个是对照开源 harness 的**风格化预设**（只借鉴提示词结构与工具编排思路，不引入外部依赖）：
  *   - Pi 智能体：对齐 pi（极简、不做计划模式与子智能体、工具集小而准、SYSTEM.md / AGENTS.md 式约定文件）；
@@ -28,6 +29,8 @@ export const BUILTIN_AGENT_PRESET_IDS = {
   pi: 'builtin-pi-agent',
   dsh: 'builtin-dsh-agent',
   codex: 'builtin-codex-agent',
+  skillDesigner: 'builtin-skill-designer',
+  designer: 'builtin-preset-designer',
 } as const
 
 /** 内置预设的 id 集合（判定「是否内置项」） */
@@ -38,7 +41,7 @@ export const isBuiltinAgentPreset = (preset: any): boolean =>
   !!preset && typeof preset.id === 'string' && BUILTIN_AGENT_PRESET_ID_SET.has(preset.id)
 
 // ---------------------------------------------------------------------------
-// 「插件开发智能体」提示词里的三段块（当前版本 + 旧版本）
+// 「插件设计师」提示词里的三段块（当前版本 + 旧版本）
 //
 // 旧版要求模型**先读仓库源码**（src/types/plugin.ts 等）来核对 API —— 那是开发仓库才有的路径，
 // 装机后的软件里根本没有源码，于是模型会满盘 read_file / search_files / 跑 shell 去找
@@ -123,6 +126,30 @@ export const PLUGIN_PROMPT_WORKFLOW_V1 = [
 ]
 
 /**
+ * 「智能体设计师」的系统提示（写成常量：预设种子与老存档迁移共用同一份文本）。
+ *
+ * 只走文件：write_file 写 `<预设目录>/<名>.agent` → preset_reload 载入并自检。
+ * MCP 只读规范与现状（preset_host / preset_schema / preset_capabilities / preset_example），
+ * 不走 preset_write（写通道在慢环境容易超时，参数层级也更容易放错）。
+ */
+const DESIGNER_PRESET_PROMPT = [
+  '你是「智能体设计师」，负责给 AI-KM 创建与调整 **Agent 预设**（不是插件、不是技能，也不是代码）。',
+  '预设 = 角色提示词 + 模型 + 逐工具白名单 + 技能 / 知识库 / MCP 绑定；它决定用户选中它之后"能做什么"。',
+  '写入方式：**用 write_file 直接把完整 JSON 写成 `<预设目录>/<预设名>.agent`**，再调 preset_reload 让宿主载入并自检。MCP 服务只用来读规范与现状（preset_host / preset_schema / preset_capabilities / preset_example），不用它写盘。',
+  '',
+  '工作方式：',
+  '1. 先用 ask_user 问清 2 件事：这个预设要让模型干什么（含典型任务与交付物）、需要哪些外部能力（联网 / 知识库 / 某个 MCP 服务 / 跑命令）。信息够了就动手，不要反复确认。',
+  '2. 先 mcp_call（builtin-agent-preset → preset_host）拿**预设目录的绝对路径**；如果它显示不是文件夹模式（没有 folder），告诉用户先在「设置 → 智能体 → 管理 → 存储位置」选一个目录，再继续。',
+  '3. 用 list_dir 看目录里已有的 .agent；有接近的用 read_file 读它当底稿，没有就 mcp_call preset_example 抄一份**完整字段**的模板（字段一个都别少）。规范细节按需读 preset_schema / preset_capabilities。',
+  '4. 用 write_file 写成 `<预设目录>/<预设名>.agent`：文件名 = 预设名（空格与 \\ / : * ? " < > | 换成 _）；内容必须是**合法 JSON**，name / id / systemPrompt / capabilities.enabledTools 必填；工具名严格照 preset_capabilities 逐字抄（例如 shell 不是 run_shell）。',
+  '5. 写完立刻 mcp_call（builtin-agent-preset → preset_reload）：它报告载入 / 跳过的文件与原因，并对已载入的自建预设做字段校验。有 ✗ 就用 replace_in_file / write_file 改文件，再 reload，直到没有 ✗。',
+  '6. 不要开你解释不清的工具：shell / run_subagent / browseWebsites 属高权限，确实需要才开，并说明理由；默认按 preset_capabilities 里的组合起步。',
+  '7. 内置预设（builtin-*）不可覆盖：要改就用 read_file 读回、换 id 与 name 另存为新文件，并告诉用户"原预设没动，新预设叫 X"。',
+  '8. 交付时给出：预设名与在哪选到它（聊天右上角 / 「设置 → 智能体 → 管理」）、启用了哪些工具、绑定了什么服务、文件落在哪个目录，最后问一句"要微调哪个字段"。不要把整份 JSON 贴给用户。',
+  '9. 使用与用户相同的语言回答（用户说中文就用中文）。',
+].join('\n')
+
+/**
  * 内置预设定义（与 store.agentPresets 项结构一致）。
  *
  * 能力同时写 `enabledTools`（逐工具模式的权威数据）与各能力槽布尔（供旧逻辑 / 图标 / 提示词门控读取），
@@ -131,7 +158,7 @@ export const PLUGIN_PROMPT_WORKFLOW_V1 = [
  * 呈现方式写顶层 `presentation`（缺省 native；'ptc' 时运行时自动补 run_code 白名单并叠加
  * `tools:sdk` 段，见 src/lib/agent/presentation.ts）。
  */
-export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
+export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
   {
     id: BUILTIN_AGENT_PRESET_IDS.code,
     name: '代码智能体',
@@ -308,7 +335,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
   },
   {
     id: BUILTIN_AGENT_PRESET_IDS.plugin,
-    name: '插件开发智能体',
+    name: '插件设计师',
     builtin: true,
     tags: ['插件', 'plugin', '扩展'],
     // 跟随聊天右上角的当前来源与模型（与其它内置预设一致）
@@ -317,7 +344,7 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
     temperature: 0.3,
     kbTopK: 3,
     systemPrompt: [
-      '你是「插件开发智能体」，负责给 AI-KM（本软件，Vue 3 + Electron）**从零开发本地插件并在对话里交付可用的文件**。',
+      '你是「插件设计师」，负责给 AI-KM（本软件，Vue 3 + Electron）**从零开发本地插件并在对话里交付可用的文件**。',
       '',
       '插件是什么：',
       '- 一个插件 = 一个文件夹（目录名必须等于清单里的 aikm.id），里面有 package.json（含 aikm 清单）与可选的两个半边：index.mjs（主进程半边，可注册工具）与 client.mjs（界面半边，可加主面板 / 设置页签 / 设置卡片 / 快捷键）。',
@@ -590,7 +617,149 @@ export const BUILTIN_AGENT_PRESETS: ReadonlyArray<Record<string, any>> = [
     loopPromptMode: 'auto',
     loopSections: [],
   },
+  {
+    id: BUILTIN_AGENT_PRESET_IDS.skillDesigner,
+    name: '技能设计师',
+    builtin: true,
+    tags: ['技能', 'skill', '设计'],
+    // 跟随聊天右上角的当前来源与模型（与其它内置预设一致）
+    llmType: '',
+    model: '',
+    // 写文档 + 校结构：温度略低，减少自由发挥
+    temperature: 0.3,
+    kbTopK: 3,
+    /**
+     * 与「插件设计师」同一套逻辑：人格只写一句话，工序与格式规范全部由内置 MCP 服务
+     * `builtin-skill-dev` 按话题提供（host / schema / writing / constraints / templates / faq），
+     * 写完必须用 `skill_dev_check` 自检到没有 ✗ 再交付。
+     * 技能是**磁盘上的目录**（SKILL.md + references / scripts / assets），所以这个预设
+     * 自己带读写文件能力（不像「智能体设计师」那样走唯一写通道）。
+     */
+    systemPrompt: [
+      '你是「技能设计师」，负责给 AI-KM **从零编写技能并在对话里交付可用的文件**（技能不是插件、不是预设）。',
+      '技能 = 一个目录（内含 SKILL.md + 可选资源）；SKILL.md 的 frontmatter 决定它何时被触发，正文是模型照着做的操作手册。',
+      '',
+      '工作方式：',
+      '1. 先用 ask_user 问清 3 件事：这个技能要让 AI 做什么（含典型任务与交付物）、用户会怎么开口触发它、需要脚本 / 模板 / 参考文档吗。信息够了就动手，不要反复确认。',
+      '2. 先 mcp_call（builtin-skill-dev → skill_dev_host）拿技能目录的**绝对路径**与已装技能清单（避免重名，也确认文件写在哪）。',
+      '3. 写之前先取规范：skill_dev_schema（目录结构与 frontmatter 字段）、skill_dev_writing（description 如何写才触发、正文结构与渐进披露）、skill_dev_constraints（硬约束）；要照抄骨架就 skill_dev_templates。',
+      '4. 用 write_file 在 `<技能目录>/<技能名>/` 下写 SKILL.md（目录名 = frontmatter 的 name，全小写 ASCII 短横线）；资源放 references/（按需读的文档）、scripts/（可执行脚本）、assets/（输出模板 / 图标 / 字体）。大文件分段写：先写骨架，再用 replace_in_file 逐段补。',
+      '5. **写完必须自检并修到通过**：mcp_call（builtin-skill-dev → skill_dev_check，dir 传绝对路径或技能名）——它会检查 SKILL.md / frontmatter / 名称与目录是否一致 / description 是否像触发器 / 正文体积 / 引用的资源是否真的存在 / 是否重名，逐条给出 ✗ 与改法。有 ✗ 就改文件再跑，直到没有 ✗。',
+      '6. 不要编造宿主能力：技能正文里让模型做的事必须真的能做成（提到工具就先确认该工具存在，提到脚本就真的写进 scripts/）。',
+      '7. 交付时给出：技能名（用 `$技能名` 显式触发，或在预设「技能」页勾选）、目录路径、怎么重载 / 刷新、以及 2~3 条**试跑用的真实 prompt**（让用户直接拿去验证会不会命中）。不要把整份 SKILL.md 贴给用户。',
+      '8. 使用与用户相同的语言回答（用户说中文就用中文），但 SKILL.md 的 frontmatter `name` 用英文小写。',
+    ].join('\n'),
+    selectedSkills: [],
+    // 写文件 + 读目录 + 检索 + 问用户 + 计划/清单 + MCP。不开 shell / 子代理 / 浏览器
+    // （技能是文档与脚本文件，检查由 skill_dev_check 承担，不需要跑命令）
+    capabilities: {
+      readFiles: true,
+      writeFiles: true,
+      listDirs: true,
+      executeCode: false,
+      runShell: false,
+      webSearch: false,
+      browseWebsites: false,
+      runSubagent: false,
+      skills: false,
+      accessKnowledgeBase: false,
+      mcpAccess: true,
+      mcpServerIds: ['builtin-skill-dev'],
+      mcpEquipmentIds: [],
+      askUser: true,
+      updatePlan: true,
+      updateTodo: true,
+      knowledgeBaseFiles: [],
+      enabledTools: [
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
+        'read_file', 'search_files', 'list_dir',
+        'write_file', 'replace_in_file', 'multi_replace',
+        'mcp_call',
+      ],
+    },
+    seedHistory: true,
+    loopPromptMode: 'auto',
+    loopSections: [],
+  },
+  {
+    id: BUILTIN_AGENT_PRESET_IDS.designer,
+    name: '智能体设计师',
+    builtin: true,
+    tags: ['智能体', 'agent', '设计'],
+    // 跟随聊天右上角的当前来源与模型（与其它内置预设一致）
+    llmType: '',
+    model: '',
+    // 设计类任务要读工具说明、比对字段，温度略低但仍保留一点表达空间
+    temperature: 0.4,
+    kbTopK: 3,
+    /**
+     * 只写文件：`write_file` 把 `.agent` 直接落到预设目录，再 `preset_reload` 载入并自检。
+     * 不再走 preset_validate / preset_write —— MCP 写通道要么超时、要么参数层级容易放错，
+     * 文件路径对模型更直观，也让「写 → 自检 → 改」变成同一种动作。
+     * 规范仍是 MCP 的只读话题（host / schema / capabilities / example），提示词里只写工序。
+     */
+    systemPrompt: DESIGNER_PRESET_PROMPT,
+    selectedSkills: [],
+    // 读 / 写文件是**主写路径**：直接写 .agent（write_file），再 preset_reload 自检；
+    // MCP 只用于读规范与现状（host / schema / capabilities / example）
+    capabilities: {
+      readFiles: true,
+      writeFiles: true,
+      listDirs: true,
+      executeCode: false,
+      runShell: false,
+      webSearch: false,
+      browseWebsites: false,
+      runSubagent: false,
+      skills: false,
+      accessKnowledgeBase: false,
+      mcpAccess: true,
+      mcpServerIds: ['builtin-agent-preset'],
+      mcpEquipmentIds: [],
+      askUser: true,
+      updatePlan: true,
+      updateTodo: true,
+      knowledgeBaseFiles: [],
+      enabledTools: [
+        'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
+        'read_file', 'search_files', 'list_dir',
+        'write_file', 'replace_in_file', 'multi_replace',
+        'mcp_call',
+      ],
+    },
+    seedHistory: true,
+    loopPromptMode: 'auto',
+    loopSections: [],
+  },
 ]
+
+/**
+ * 内置预设的出厂展示顺序：**其他内置智能体在前，三个「设计师」在后**
+ * （技能设计师 → 智能体设计师 → 插件设计师）。
+ *
+ * 为什么在数组定义之后排序而不是重排字面量：预设是按数组顺序插到列表最前的
+ * （见 ensureBuiltinAgentPresets 的逆序 unshift），字面量顺序就是注入顺序；
+ * 用一份显式的 id 顺序表来排序，比在几百行里挪动大段对象更不容易出错，
+ * 也让「谁是设计师、排在哪」一眼可见。Array.prototype.sort 是稳定排序，
+ * 同组内保持字面量顺序。
+ */
+const BUILTIN_PRESET_DISPLAY_ORDER: string[] = [
+  BUILTIN_AGENT_PRESET_IDS.code,
+  BUILTIN_AGENT_PRESET_IDS.office,
+  BUILTIN_AGENT_PRESET_IDS.ptc,
+  BUILTIN_AGENT_PRESET_IDS.pi,
+  BUILTIN_AGENT_PRESET_IDS.dsh,
+  BUILTIN_AGENT_PRESET_IDS.codex,
+  BUILTIN_AGENT_PRESET_IDS.skillDesigner,
+  BUILTIN_AGENT_PRESET_IDS.designer,
+  BUILTIN_AGENT_PRESET_IDS.plugin,
+]
+BUILTIN_AGENT_PRESETS.sort((a, b) => {
+  const ia = BUILTIN_PRESET_DISPLAY_ORDER.indexOf(String(a?.id))
+  const ib = BUILTIN_PRESET_DISPLAY_ORDER.indexOf(String(b?.id))
+  // 未知 id（新增内置项却忘了登记顺序）排到最后，而不是打乱其它项
+  return (ia < 0 ? Number.MAX_SAFE_INTEGER : ia) - (ib < 0 ? Number.MAX_SAFE_INTEGER : ib)
+})
 
 /**
  * 取当前全局 LLM 配置作为内置预设的默认来源 / 模型。
@@ -608,14 +777,18 @@ export function builtinPresetDefaultsFromStore(store: any): { llmType: string; m
 
 /**
  * 幂等注入内置预设：只补缺失的 id，绝不覆盖同名 id 的现有项（用户改过的内容保留）。
- * 补齐的项统一插到列表最前（保持 BUILTIN_AGENT_PRESETS 的展示顺序）。
+ *
+ * 顺序规则（内置在上，自定义在下）：
+ * - 内置项固定排在自定义项之前，内置项之间按 `BUILTIN_AGENT_PRESETS` 的展示顺序
+ *   （三个「设计师」在最后）；
+ * - 自定义项之间保持用户自己的相对顺序（拖动自定义项仍然有效）。
  *
  * 注入时不写具体来源 / 模型（`defaults` 会被忽略）：内置预设**跟随默认**，
  * 运行时读全局当前来源与模型 —— 用户换来源 / 换机器都不必逐个重配。
  *
  * @param list 目标列表（通常是 store.agentPresets，就地修改）
  * @param defaults 兼容旧签名（不再使用）
- * @returns 是否发生了新增（调用方据此决定是否需要落盘）
+ * @returns 是否发生了新增 / 排序变化（调用方据此决定是否需要落盘）
  */
 export function ensureBuiltinAgentPresets(
   list: any[],
@@ -624,21 +797,38 @@ export function ensureBuiltinAgentPresets(
 ): boolean {
   if (!Array.isArray(list)) return false
   let changed = false
-  // 逆序遍历 + unshift：最终顺序与 BUILTIN_AGENT_PRESETS 一致（代码智能体在前）
-  for (let i = BUILTIN_AGENT_PRESETS.length - 1; i >= 0; i--) {
-    const seed = BUILTIN_AGENT_PRESETS[i]
+  // 1) 补缺失项（先追加，顺序由第 2 步统一整理）
+  for (const seed of BUILTIN_AGENT_PRESETS) {
     if (list.some((p: any) => p && p.id === seed.id)) continue
     const item: any = JSON.parse(JSON.stringify(seed))
     // 跟随默认：来源留空（模型随来源一并跟随）
     if (item.llmType) item.llmType = ''
     item.model = ''
-    list.unshift(item)
+    list.push(item)
+    changed = true
+  }
+  // 2) 内置项固定排在**自定义项之前**：内置按展示顺序（三个设计师在最后），
+  //    自定义项之间保持用户自己的相对顺序（拖动自定义项依然有效）。
+  //    之前是「内置项只在自己占的槽位里排序」，于是老存档里内置项在下方时，
+  //    新建/导入的自定义预设会跑到内置项上面 —— 与「内置在上、自定义在下」的预期相反。
+  const builtins = list.filter((p: any) => p && p.builtin === true)
+    .sort((a, b) => builtinDisplayRank(a) - builtinDisplayRank(b))
+  const customs = list.filter((p: any) => !(p && p.builtin === true))
+  const desired = [...builtins, ...customs]
+  if (desired.some((p, i) => p !== list[i])) {
+    list.splice(0, list.length, ...desired)
     changed = true
   }
   return changed
 }
 
-/** 插件开发预设要绑定的 MCP 服务（只补不覆盖：用户自己加的服务保留） */
+/** 内置预设的展示排名（未登记的 id 排到最后，不打乱其它项） */
+function builtinDisplayRank(preset: any): number {
+  const i = BUILTIN_PRESET_DISPLAY_ORDER.indexOf(String(preset?.id))
+  return i < 0 ? Number.MAX_SAFE_INTEGER : i
+}
+
+/** 插件设计师预设要绑定的 MCP 服务（只补不覆盖：用户自己加的服务保留） */
 const PLUGIN_PRESET_MCP_SERVER = 'builtin-plugin-dev'
 
 // ---------------------------------------------------------------------------
@@ -684,7 +874,7 @@ function hasAll(text: string, markers: string[]): boolean {
 }
 
 /**
- * 一次性订正旧存档里「插件开发智能体」的提示词与能力配置。
+ * 一次性订正旧存档里「插件设计师」的提示词与能力配置。
  *
  * 旧版提示词让模型去读 `src/types/plugin.ts` 这类**仓库源码**核对 API：装机后软件里没有源码，
  * 模型于是满盘搜索 AI-KM 的安装目录（用户看到一串 read_file / search_files / shell，什么也读不到）。
@@ -697,7 +887,72 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
   if (!Array.isArray(list)) return false
   let changed = false
 
-  // 0) 所有内置预设：订正「安全策略」在设置里的位置。
+  // 0) 内置预设定名迁移：提示词与名称是**持久化副本**，改过名的内置项
+  //    在老存档里仍是旧名字（用户会看到「插件开发智能体」而不是「插件设计师」）。
+  //    只订正**仍是出厂名**的项，用户自己改过名字的不动；提示词里的自称一并替换。
+  const RENAMED_BUILTINS: Array<{ id: string; from: string; to: string }> = [
+    { id: BUILTIN_AGENT_PRESET_IDS.plugin, from: '插件开发智能体', to: '插件设计师' },
+    { id: BUILTIN_AGENT_PRESET_IDS.designer, from: '预设设计师', to: '智能体设计师' },
+  ]
+  for (const rename of RENAMED_BUILTINS) {
+    const item = list.find((p: any) => p && p.id === rename.id)
+    if (!item || item.builtin !== true) continue
+    if (typeof item.name === 'string' && item.name.trim() === rename.from) {
+      item.name = rename.to
+      changed = true
+    }
+    const renameInText = (text: unknown): string | null => {
+      if (typeof text !== 'string' || !text.includes(rename.from)) return null
+      return text.split(rename.from).join(rename.to)
+    }
+    const nextPrompt = renameInText(item.systemPrompt)
+    if (nextPrompt !== null) {
+      item.systemPrompt = nextPrompt
+      changed = true
+    }
+    if (Array.isArray(item.loopSections)) {
+      for (const s of item.loopSections) {
+        const next = renameInText(s?.text)
+        if (next !== null) {
+          s.text = next
+          changed = true
+        }
+      }
+    }
+  }
+
+  // 0.4) 「智能体设计师」：升级到「只写文件」的工序。
+  //      - 补读写文件工具（老存档只给了 mcp_call）；
+  //      - 提示词若还是旧版（提到 preset_write / 双写路径 / “你不直接改任何文件”），
+  //        整体换成 DESIGNER_PRESET_PROMPT（写 write_file → preset_reload 自检那一套）。
+  //      换完后不再含旧标记，重复执行是幂等的。
+  const designer = list.find((p: any) => p && p.id === BUILTIN_AGENT_PRESET_IDS.designer)
+  if (designer) {
+    const caps: any = designer.capabilities
+    if (caps && Array.isArray(caps.enabledTools)) {
+      for (const tool of ['read_file', 'search_files', 'list_dir', 'write_file', 'replace_in_file', 'multi_replace']) {
+        if (!caps.enabledTools.includes(tool)) {
+          caps.enabledTools.push(tool)
+          changed = true
+        }
+      }
+      for (const key of ['readFiles', 'writeFiles', 'listDirs']) {
+        if (!caps[key]) {
+          caps[key] = true
+          changed = true
+        }
+      }
+    }
+    if (typeof designer.systemPrompt === 'string') {
+      const oldPrompt = ['preset_write', '有两条写路径', '你不直接改任何文件'].some((m) => designer.systemPrompt.includes(m))
+      if (oldPrompt) {
+        designer.systemPrompt = DESIGNER_PRESET_PROMPT
+        changed = true
+      }
+    }
+  }
+
+  // 0.5) 所有内置预设：订正「安全策略」在设置里的位置。
   //    提示词是**持久化副本**，内置预设改名 / 搬家后旧存档仍写着老位置，
   //    模型照着说会把用户指到不存在的地方（安全策略在「通用 → 其他」，不在「工具」）。
   for (const p of list) {

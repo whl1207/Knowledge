@@ -11,7 +11,7 @@
  *  - PDF：PdfViewer 自己读字节；
  *  - PPTX：内嵌 Office 编辑器自己打开（不走文本预览）。
  *
- * 不在此列的 `.docx` / `.xlsx` / `.xls` 仍需文本（Office 管线转 Markdown），
+ * 不在此列的 `.docx` / `.doc` / `.xlsx` / `.xls` 仍需文本（Office 管线转 Markdown），
  * `.html` / `.md` / 代码 / 画布等本来就是文本。
  */
 

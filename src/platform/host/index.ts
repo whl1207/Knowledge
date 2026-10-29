@@ -247,6 +247,39 @@ function fsPortOf(info: HostRuntimeInfo): FileSystemPort {
       return Array.isArray(r?.nodes) ? r.nodes : []
     },
 
+    /** 单层目录读取（懒加载文件树）：主机侧同样只读一层、永不抛出 */
+    async listDir(dirPath, opts) {
+      if (!readable) return { entries: [], total: 0, truncated: false, error: '主机未开启文件访问' }
+      try {
+        const r = await fsApi('list', { path: dirPath, offset: opts?.offset, limit: opts?.limit })
+        if (!r?.ok) return { entries: [], total: 0, truncated: false, error: String(r?.error || '目录读取失败') }
+        return {
+          entries: Array.isArray(r.entries) ? r.entries : [],
+          total: Number(r.total) || 0,
+          truncated: r.truncated === true,
+          ...(r.error ? { error: String(r.error) } : {}),
+        }
+      } catch (e: any) {
+        return { entries: [], total: 0, truncated: false, error: String(e?.message || e) }
+      }
+    },
+
+    /** 按文件名全树搜索：预算与取消都在主机侧做，网页端只负责展示 */
+    async searchNames(roots, keyword, opts) {
+      if (!readable) return { results: [], truncated: false, scanned: 0, elapsedMs: 0 }
+      try {
+        const r = await fsApi('search-names', { roots, keyword, ...(opts || {}) })
+        return {
+          results: Array.isArray(r?.results) ? r.results : [],
+          truncated: r?.truncated === true,
+          scanned: Number(r?.scanned) || 0,
+          elapsedMs: Number(r?.elapsedMs) || 0,
+        }
+      } catch {
+        return { results: [], truncated: false, scanned: 0, elapsedMs: 0 }
+      }
+    },
+
     /** 图谱视图用：把嵌套树摊平成 fileList + relationList（与桌面 getFilesRelation 同形状） */
     async listTreeWithRelations(folderPath, depth) {
       if (!readable) return { fileList: [], relationList: [] }

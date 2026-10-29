@@ -87,6 +87,7 @@ export class SlotHandleImpl {
     if (this.scope.disposed) {
       throw new Error(`[slots] 槽位 ${this.scope.name} 已撤销，不能再注册条目（${String(def?.key)}）`)
     }
+    this.dropStaleOwnEntries(def)
     validateEntry(this.scope, def)
     const record: EntryRecord = { def: { ...def }, seq: seqCounter++, childScopes: [] }
     this.scope.entries.push(record)
@@ -99,6 +100,34 @@ export class SlotHandleImpl {
       for (const child of record.childScopes.splice(0)) child.dispose()
       slotRegistry.notify()
     }
+  }
+
+  /**
+   * 同一 owner 再次注册同一个 key：把上一次装载留下的条目当成**残留**替换掉。
+   *
+   * 为什么需要（真实故障）：插件重载时旧句柄的 disposer 偶尔没跑到（界面半边 `apply()` 抛错、
+   * 渲染层运行时被热更新重建导致「已装载表」丢失等），残留条目会让下一次注册直接抛
+   * 「key 重复」，于是用户点「重新载入」永远失败、只能重启软件 —— 而插件代码本身只注册了一次。
+   *
+   * 边界（不放松真正的接线错误）：
+   *  - 只对 `plugin:<id>` 生效：内置条目（owner = core / 未提供）重复注册仍然抛错；
+   *  - **不同**插件抢占同一个 key 仍然抛错（报错里带上双方 owner）；
+   *  - 被替换条目声明的子槽位随之递归撤销，避免留下孤儿扩展点。
+   */
+  private dropStaleOwnEntries(def: SlotDefinition): void {
+    const owner = typeof def?.owner === 'string' ? def.owner : ''
+    if (!owner.startsWith('plugin:')) return
+    const key = maybeKey(def)
+    const stale = this.scope.entries.filter((e) => maybeKey(e.def) === key && e.def.owner === owner)
+    if (!stale.length) return
+    for (const entry of stale) {
+      const index = this.scope.entries.indexOf(entry)
+      if (index !== -1) this.scope.entries.splice(index, 1)
+      for (const child of entry.childScopes.splice(0)) child.dispose()
+    }
+    console.warn(
+      `[slots] ${this.scope.name}/${key}：${owner} 重复注册，已接管上一次装载的残留条目（${stale.length} 条）`,
+    )
   }
 
   /** 声明子槽位（该条目要渲染的扩展点）；父句柄撤销时递归撤销 */
@@ -130,8 +159,13 @@ function validateEntry(scope: ScopeRecord, def: SlotDefinition): void {
   if (def.kind && def.kind !== scope.kind) {
     throw new Error(`[slots] 槽位 ${scope.name} 的 kind 是 ${scope.kind}，条目 ${def.key} 却声明 ${def.kind}`)
   }
-  if (scope.entries.some((e) => maybeKey(e.def) === def.key)) {
-    throw new Error(`[slots] 槽位 ${scope.name} 中 key 重复：${def.key}`)
+  const duplicated = scope.entries.filter((e) => maybeKey(e.def) === def.key)
+  if (duplicated.length) {
+    // 报出双方 owner：不同插件抢同一个 key 时，只写一个 key 名根本看不出该改谁。
+    const owners = Array.from(new Set(duplicated.map((e) => String(e.def.owner ?? 'unknown')))).join(' / ')
+    throw new Error(
+      `[slots] 槽位 ${scope.name} 中 key 重复：${def.key}（已被 ${owners} 占用，本次来自 ${String(def.owner ?? 'unknown')}）`,
+    )
   }
   if (scope.kind === 'chain' && typeof def.select !== 'function') {
     throw new Error(`[slots] 槽位 ${scope.name} 是 chain，条目 ${def.key} 必须提供 select(owner)`)

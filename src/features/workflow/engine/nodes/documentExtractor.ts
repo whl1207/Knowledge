@@ -1,7 +1,7 @@
 /**
  * document-extractor（文档提取器）执行器
  *
- * 取一个文件变量（本地路径），读成文本。平台层读文本已内置 .docx → Markdown 转换，
+ * 取一个文件变量（本地路径），读成文本。平台层读文本已内置 Word（.docx / .doc）→ Markdown 转换，
  * 因此 word 文档也能直接读取；不支持的二进制格式会给出明确提示。
  */
 import { resolveSelector, stringifyValue } from '../template'

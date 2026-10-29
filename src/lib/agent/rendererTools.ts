@@ -336,7 +336,7 @@ async function toolReadFile(input: any, ctx: RendererToolContext): Promise<Rende
 
   let text: string | null
   if (/\.pdf$/i.test(r.path)) text = await readPdfText(r.path)
-  else if (/\.(docx|xlsx|xls|pptx)$/i.test(r.path)) {
+  else if (/\.(docx|doc|xlsx|xls|pptx)$/i.test(r.path)) {
     return { ok: false, error: '当前环境（手机 / 网页）暂不支持直接读取 Office 文档内容，请在应用里打开该文件查看' }
   } else text = await readTextOrNull(r.path)
 
@@ -546,7 +546,7 @@ async function toolSearchFiles(input: any, ctx: RendererToolContext): Promise<Re
   const maxResults = Math.min(200, Math.max(1, Math.floor(Number(input?.max_results) || 50)))
   const fs = getPlatform().fs
   const hits: Array<{ path: string; line: number; text: string }> = []
-  const skip = /\.(png|jpe?g|gif|webp|ico|pdf|zip|rar|7z|exe|dll|mp[34]|wav|woff2?|ttf|docx|xlsx|pptx|db|sqlite|bin)$/i
+  const skip = /\.(png|jpe?g|gif|webp|ico|pdf|zip|rar|7z|exe|dll|mp[34]|wav|woff2?|ttf|docx|doc|xlsx|pptx|db|sqlite|bin)$/i
   const walk = async (dir: string, depth: number) => {
     if (hits.length >= maxResults || depth > 6) return
     let nodes: any[] = []

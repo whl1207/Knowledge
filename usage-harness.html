@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8" /><title>usage harness</title>
+<style>
+  body { margin: 0; background: #fff; }
+  #host { width: 900px; margin: 20px; }
+</style>
+</head>
+<body>
+<div id="host"></div>
+<script type="module">
+  import { createApp, h } from 'vue'
+  import UsageChart from '/src/components/set/UsageChart.vue'
+
+  const days = {}
+  const today = new Date()
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(today.getTime() - i * 86400000)
+    const key = d.toISOString().slice(0, 10)
+    days[key] = { i: 1000 + i * 37, o: 500 + i * 11 }
+  }
+  createApp({
+    render: () => h(UsageChart, { days, range: 7, zh: true }),
+  }).mount('#host')
+</script>
+</body>
+</html>

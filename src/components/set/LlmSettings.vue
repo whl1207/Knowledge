@@ -9,7 +9,10 @@ import { deepSeekApiStyle } from '@/shared/llmSources'
 import type { LmStudioModelInfo, OllamaModelInfo, OllamaLoadedModel } from '@/shared/ai-core'
 import ModelContextWindow from './ModelContextWindow.vue'
 import LlmTestRow from './LlmTestRow.vue'
+import UsageChart from './UsageChart.vue'
 import { useTallLayout } from '@/composables/useTallLayout'
+import { useUsageSummary } from '@/composables/useUsageSummary'
+import { formatTokenCount, formatTokenCountExact, formatUsageClock, type UsageSourceSummary } from '@/shared/usageStats'
 
 const store = usestore()
 const zh = () => store.locales === 'zh'
@@ -351,6 +354,74 @@ const llmSourceStatus = (key: string): 'online' | 'offline' | 'untested' =>
 /** 自定义来源连接状态（按 source id；store.llmCustomSourceStatus） */
 const customSourceStatusOf = (id: number): 'online' | 'offline' | 'untested' =>
   store.llmCustomSourceStatus[id] || 'untested'
+
+// ================ 用量账本（只记后续，不做历史回填） ================
+// 数据来自主进程 `userData/usage/usage-YYYY-MM.jsonl`：每完成一次模型请求记一行，
+// 按「来源 × 本地日期」聚合。与聊天存档里的 tokenStats 不同，它不会被
+// 「智能体会话累计值」或「字符估算」污染（见 electron/main/usage-log.ts 头注释）。
+// 口径：所有走主进程请求出口的模型调用（聊天 / 知识库 / 工作流 / 智能体 / 集群 / 插件 agent）。
+// 总体用量在「设置 → 通用 → 数据」；这里只展示各来源自己的数字。
+
+const { summary: usageSummary, loading: usageLoading, failed: usageFailed, reload: loadUsage } =
+  useUsageSummary({ auto: showSources.value })
+
+/** 图表时间范围：7 / 30 / 90 / 0（0 = 全部） */
+const usageRange = ref<number>(30)
+
+/** 按来源键索引（键与来源列表一致：内置 key / `custom:<id>`） */
+const usageByKey = computed<Map<string, UsageSourceSummary>>(() => {
+  const map = new Map<string, UsageSourceSummary>()
+  for (const s of usageSummary.value?.sources || []) map.set(s.key, s)
+  return map
+})
+
+/** 某来源的用量（没有记录返回 null，界面上就不显示那一行） */
+const usageFor = (key: string): UsageSourceSummary | null => usageByKey.value.get(key) || null
+
+/** 正在查看的来源的统计键（自定义来源按 id 分开统计） */
+const usageViewKey = computed<string>(() => {
+  if (viewType.value !== 'custom') return viewType.value
+  const id = (customEdit.value as any)?.id
+  return id === undefined || id === null ? 'custom' : `custom:${id}`
+})
+
+/** 当前查看来源的用量：卡片里的总数与每日图都只属于它 */
+const viewUsage = computed(() => usageFor(usageViewKey.value))
+const viewUsageDays = computed(() => viewUsage.value?.days || {})
+
+/** 卡片空状态：账本一条都没有 vs 只是这个来源在范围内没用量 */
+const usageEmptyText = computed(() => {
+  const none = !!usageSummary.value && usageSummary.value.records === 0
+  return zh()
+    ? (none
+      ? '还没有用量记录：从本版本起每次模型请求都会自动记账（不做历史回填），发一次消息就能看到数据。'
+      : '该来源在这个时间范围内没有用量。')
+    : (none
+      ? 'No usage yet: every model request is recorded from this version on (no backfill). Send a message to see data.'
+      : 'No usage for this source in the selected range.')
+})
+
+/** 来源行的悬停提示 */
+function usageRowTitle(s: UsageSourceSummary): string {
+  return zh()
+    ? `总计 ${formatTokenCountExact(s.total)}（输入 ${formatTokenCountExact(s.prompt)} / 输出 ${formatTokenCountExact(s.completion)}）\n今日 ${formatTokenCountExact(s.today)} · 共 ${s.requests} 次请求`
+    : `Total ${formatTokenCountExact(s.total)} (in ${formatTokenCountExact(s.prompt)} / out ${formatTokenCountExact(s.completion)})\nToday ${formatTokenCountExact(s.today)} · ${s.requests} requests`
+}
+
+/** 行内文本（无记录返回空串 → 模板里整行不渲染） */
+const usageText = (key: string): string => {
+  const s = usageFor(key)
+  return s && s.total > 0 ? formatTokenCount(s.total) : ''
+}
+const usageTitle = (key: string): string => {
+  const s = usageFor(key)
+  return s ? usageRowTitle(s) : ''
+}
+
+/** 卡片底部：更新时间 */
+const usageUpdatedText = computed(() => (usageSummary.value ? formatUsageClock(usageSummary.value.generatedAt) : ''))
+
+
 
 // ================ 当前来源的帮助文本 ================
 
@@ -1226,6 +1297,8 @@ onMounted(() => {
     }
   }
   window.addEventListener('beforeunload', flushCustomSave)
+  // 用量账本：进入来源页时拉一次快照（只读，失败静默降级；窗口聚焦刷新见 useUsageSummary）
+  if (showSources.value) void loadUsage()
   setTimeout(async () => {
     if (!showSources.value) return
     // 以「存档中的类型」决定是否自动刷新，避免内存 type 与存档不一致（如应为 custom 却显示 ollama）时
@@ -1275,19 +1348,27 @@ onMounted(() => {
           @click="selectLlmSource(s.key)"
           :title="zh() ? s.descZh : s.descEn"
         >
-          <div class="llm-source-avatar"><i class="fa" :class="s.icon"></i></div>
-          <div class="llm-source-info">
-            <span class="llm-source-name">{{ zh() ? s.labelZh : s.labelEn }}</span>
-            <span class="llm-source-desc">{{ zh() ? s.descZh : s.descEn }}</span>
+          <!-- 第一行：图标 / 标题 / 默认标 / 状态 / 开关（横向排布保持原样） -->
+          <div class="llm-source-main">
+            <div class="llm-source-avatar"><i class="fa" :class="s.icon"></i></div>
+            <div class="llm-source-info">
+              <span class="llm-source-name">{{ zh() ? s.labelZh : s.labelEn }}</span>
+              <span class="llm-source-desc">{{ zh() ? s.descZh : s.descEn }}</span>
+            </div>
+            <span v-if="llmSourceActive(s.key)" class="llm-source-default" :title="zh() ? '默认来源：主页 / 知识库 / 工作流默认用它' : 'Default source: used by home / KB / workflow by default'">{{ zh() ? '默认' : 'Default' }}</span>
+            <span class="llm-source-status" :class="llmSourceStatus(s.key)">
+              <i class="fa" :class="llmSourceStatus(s.key) === 'online' ? 'fa-check-circle' : llmSourceStatus(s.key) === 'offline' ? 'fa-times-circle' : 'fa-circle-thin'"></i>
+            </span>
+            <span class="llm-source-toggle" @click.stop="store.toggleLlmSource(s.key)"
+              :title="store.isLlmSourceDisabled(s.key) ? (zh() ? '启用该来源' : 'Enable source') : (zh() ? '禁用该来源（home/RAG/工作流中不显示）' : 'Disable source (hidden in home/RAG/workflow)')">
+              <i class="fa" :class="store.isLlmSourceDisabled(s.key) ? 'fa-toggle-off' : 'fa-toggle-on'"></i>
+            </span>
           </div>
-          <span v-if="llmSourceActive(s.key)" class="llm-source-default" :title="zh() ? '默认来源：主页 / 知识库 / 工作流默认用它' : 'Default source: used by home / KB / workflow by default'">{{ zh() ? '默认' : 'Default' }}</span>
-          <span class="llm-source-status" :class="llmSourceStatus(s.key)">
-            <i class="fa" :class="llmSourceStatus(s.key) === 'online' ? 'fa-check-circle' : llmSourceStatus(s.key) === 'offline' ? 'fa-times-circle' : 'fa-circle-thin'"></i>
-          </span>
-          <span class="llm-source-toggle" @click.stop="store.toggleLlmSource(s.key)"
-            :title="store.isLlmSourceDisabled(s.key) ? (zh() ? '启用该来源' : 'Enable source') : (zh() ? '禁用该来源（home/RAG/工作流中不显示）' : 'Disable source (hidden in home/RAG/workflow)')">
-            <i class="fa" :class="store.isLlmSourceDisabled(s.key) ? 'fa-toggle-off' : 'fa-toggle-on'"></i>
-          </span>
+          <!-- 第二行：已用 token（整行宽，不再被标题列挤掉；没有记录就不占行） -->
+          <div v-if="usageText(s.key)" class="llm-source-usage" :title="usageTitle(s.key)">
+            <span class="llm-source-usage-label">{{ zh() ? '已用' : 'Used' }}</span>
+            <span class="llm-source-usage-total">{{ usageText(s.key) }}</span>
+          </div>
         </div>
 
         <!-- 自定义来源分组 -->
@@ -1304,29 +1385,37 @@ onMounted(() => {
             @click="selectCustomSource(cs.index)"
             :title="zh() ? '自定义 API' : 'Custom API'"
           >
-            <div class="llm-source-avatar"><i class="fa fa-plug"></i></div>
-            <div class="llm-source-info">
-              <input v-if="renameIndex === cs.index" v-model="renameText"
-                class="llm-source-rename-input" :placeholder="customDefaultName()"
-                @click.stop @keydown.enter="commitRename" @keydown.esc="cancelRename"
-                @blur="commitRename" autofocus />
-              <template v-else>
-                <span class="llm-source-name">{{ customName(cs.src) }}</span>
-                <span class="llm-source-desc">{{ zh() ? '自定义 API' : 'Custom API' }}</span>
-              </template>
+            <!-- 第一行：图标 / 名称 / 默认标 / 删除 / 状态 / 开关 -->
+            <div class="llm-source-main">
+              <div class="llm-source-avatar"><i class="fa fa-plug"></i></div>
+              <div class="llm-source-info">
+                <input v-if="renameIndex === cs.index" v-model="renameText"
+                  class="llm-source-rename-input" :placeholder="customDefaultName()"
+                  @click.stop @keydown.enter="commitRename" @keydown.esc="cancelRename"
+                  @blur="commitRename" autofocus />
+                <template v-else>
+                  <span class="llm-source-name">{{ customName(cs.src) }}</span>
+                  <span class="llm-source-desc">{{ zh() ? '自定义 API' : 'Custom API' }}</span>
+                </template>
+              </div>
+              <span v-if="customActive(cs.index)" class="llm-source-default" :title="zh() ? '默认来源：主页 / 知识库 / 工作流默认用它' : 'Default source: used by home / KB / workflow by default'">{{ zh() ? '默认' : 'Default' }}</span>
+              <div class="llm-source-actions" @click.stop>
+                <i class="fa fa-trash-o" @click="removeCustomSource(cs.index)"
+                  :title="zh() ? '删除' : 'Delete'"></i>
+              </div>
+              <span class="llm-source-status" :class="customSourceStatusOf(cs.src.id)">
+                <i class="fa" :class="customSourceStatusOf(cs.src.id) === 'online' ? 'fa-check-circle' : customSourceStatusOf(cs.src.id) === 'offline' ? 'fa-times-circle' : 'fa-circle-thin'"></i>
+              </span>
+              <span class="llm-source-toggle" @click.stop="store.toggleLlmSource('custom', cs.src.id)"
+                :title="store.isLlmSourceDisabled('custom', cs.src.id) ? (zh() ? '启用该来源' : 'Enable source') : (zh() ? '禁用该来源（home/RAG/工作流中不显示）' : 'Disable source (hidden in home/RAG/workflow)')">
+                <i class="fa" :class="store.isLlmSourceDisabled('custom', cs.src.id) ? 'fa-toggle-off' : 'fa-toggle-on'"></i>
+              </span>
             </div>
-            <span v-if="customActive(cs.index)" class="llm-source-default" :title="zh() ? '默认来源：主页 / 知识库 / 工作流默认用它' : 'Default source: used by home / KB / workflow by default'">{{ zh() ? '默认' : 'Default' }}</span>
-            <div class="llm-source-actions" @click.stop>
-              <i class="fa fa-trash-o" @click="removeCustomSource(cs.index)"
-                :title="zh() ? '删除' : 'Delete'"></i>
+            <!-- 第二行：已用 token（按来源 id 独立统计） -->
+            <div v-if="usageText('custom:' + cs.src.id)" class="llm-source-usage" :title="usageTitle('custom:' + cs.src.id)">
+              <span class="llm-source-usage-label">{{ zh() ? '已用' : 'Used' }}</span>
+              <span class="llm-source-usage-total">{{ usageText('custom:' + cs.src.id) }}</span>
             </div>
-            <span class="llm-source-status" :class="customSourceStatusOf(cs.src.id)">
-              <i class="fa" :class="customSourceStatusOf(cs.src.id) === 'online' ? 'fa-check-circle' : customSourceStatusOf(cs.src.id) === 'offline' ? 'fa-times-circle' : 'fa-circle-thin'"></i>
-            </span>
-            <span class="llm-source-toggle" @click.stop="store.toggleLlmSource('custom', cs.src.id)"
-              :title="store.isLlmSourceDisabled('custom', cs.src.id) ? (zh() ? '启用该来源' : 'Enable source') : (zh() ? '禁用该来源（home/RAG/工作流中不显示）' : 'Disable source (hidden in home/RAG/workflow)')">
-              <i class="fa" :class="store.isLlmSourceDisabled('custom', cs.src.id) ? 'fa-toggle-off' : 'fa-toggle-on'"></i>
-            </span>
           </div>
         </template>
       </div>
@@ -1352,6 +1441,40 @@ onMounted(() => {
           </div>
           <div class="config-description" style="margin-left:0;margin-top:2px;font-size: 10px;">
             {{ getCurrentConfigHelp }}
+          </div>
+        </div>
+
+        <!-- 该来源自己的用量（总用量在「设置 → 通用 → 数据」；这里不做跨来源合计） -->
+        <div v-if="usageSummary" class="llm-usage-card">
+          <div class="llm-usage-head">
+            <span class="llm-usage-title"><i class="fa fa-bar-chart"></i>{{ zh() ? '该来源用量' : 'Usage of this source' }}</span>
+            <span class="llm-usage-scope">
+              {{ viewType === 'custom' ? customName(customEdit) : llmSourceLabel(viewType) }}
+            </span>
+            <span class="llm-usage-spacer"></span>
+            <div class="llm-usage-seg" :title="zh() ? '时间范围' : 'Range'">
+              <span v-for="r in [7, 30, 90, 0]" :key="r" :class="{ active: usageRange === r }"
+                @click="usageRange = r">{{ r === 0 ? (zh() ? '全部' : 'All') : r + (zh() ? '天' : 'd') }}</span>
+            </div>
+            <span class="llm-usage-refresh" :class="{ busy: usageLoading }" @click="loadUsage" :title="zh() ? '刷新用量' : 'Refresh usage'">
+              <i class="fa" :class="usageLoading ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
+            </span>
+          </div>
+
+          <div class="llm-usage-nums">
+            <div class="llm-usage-num"><span class="k">{{ zh() ? '总用量' : 'Total' }}</span><span class="v">{{ formatTokenCount(viewUsage?.total || 0) }}</span></div>
+            <div class="llm-usage-num"><span class="k">{{ zh() ? '今日' : 'Today' }}</span><span class="v">{{ formatTokenCount(viewUsage?.today || 0) }}</span></div>
+            <div class="llm-usage-num"><span class="k">{{ zh() ? '输入' : 'Input' }}</span><span class="v">{{ formatTokenCount(viewUsage?.prompt || 0) }}</span></div>
+            <div class="llm-usage-num"><span class="k">{{ zh() ? '输出' : 'Output' }}</span><span class="v">{{ formatTokenCount(viewUsage?.completion || 0) }}</span></div>
+            <div class="llm-usage-num"><span class="k">{{ zh() ? '请求' : 'Calls' }}</span><span class="v">{{ (viewUsage?.requests || 0).toLocaleString() }}</span></div>
+          </div>
+
+          <UsageChart :days="viewUsageDays" :range="usageRange" :zh="zh()" :empty-text="usageEmptyText" />
+
+          <div class="llm-usage-foot">
+            <span class="llm-usage-note">{{ zh() ? '口径：provider 自报的输入 + 输出，全模式累计' : 'Input + output reported by the provider, all modes' }}</span>
+            <span v-if="usageUpdatedText" class="llm-usage-note">{{ zh() ? '更新于' : 'Updated' }} {{ usageUpdatedText }}</span>
+            <span v-if="usageFailed" class="llm-usage-warn">{{ zh() ? '读取失败' : 'Load failed' }}</span>
           </div>
         </div>
 
@@ -2036,6 +2159,8 @@ onMounted(() => {
 .llm-settings.tall .llm-source-avatar i { font-size: 15px; }
 .llm-settings.tall .llm-source-name { font-size: 14px; }
 .llm-settings.tall .llm-source-desc { font-size: 11px; }
+/* 细长窗口头像更大：第二行缩进跟着对齐（头像 32 + 间距 6） */
+.llm-settings.tall .llm-source-usage { padding-left: 38px; font-size: 11px; }
 .llm-settings.tall .llm-source-group-title { padding: 6px 4px 2px; font-size: 11px; }
 /* 配置屏的返回按钮（只在细长窗口出现） */
 .llm-back {
@@ -2134,11 +2259,14 @@ onMounted(() => {
 .llm-source-actions i.fa-trash-o:hover { background: #fde8e8; color: #e74c3c; }
 
 .llm-source-list { flex: 1; overflow-y: auto; padding: 2px; background-color: var(--backgroundColor); }
+/* 来源行是两行结构：第 1 行 = 图标 / 标题 / 默认 / 状态 / 开关；第 2 行 = 已用 token。
+   外框保持「一个可点条目」的语义（hover / active / disabled 都作用在整块上）。 */
 .llm-source-item {
-  display: flex; align-items: center; gap: 6px;
+  display: block;
   padding: 5px 6px; margin-bottom: 1px; border-radius: 3px;
   cursor: pointer; transition: all .12s; border: 1px solid transparent;
 }
+.llm-source-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .llm-source-item:hover { background: color-mix(in srgb, var(--fontColor) 6%, transparent); }
 .llm-source-item.active { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); border-color: var(--fontActiveColor); }
 .llm-source-avatar {
@@ -2340,4 +2468,61 @@ onMounted(() => {
     width: 100%; flex-basis: 100%;
   }
 }
+
+/* ====== 用量（来源行内数字 + 右侧每日图） ====== */
+/* 行内第二行：占满整行宽度（不再被标题列挤成省略号），左缩进对齐来源名（头像 26px + 间距 6px） */
+.llm-source-usage {
+  display: flex; align-items: baseline; gap: 5px;
+  margin-top: 1px; padding-left: 32px;
+  font-size: 10px; line-height: 14px; color: var(--fontColor);
+  white-space: nowrap; min-width: 0;
+}
+.llm-source-usage-label { opacity: .55; flex-shrink: 0; }
+.llm-source-usage-total { color: var(--fontActiveColor); font-weight: 600; font-variant-numeric: tabular-nums; }
+/* 卡片：与配置块同一套圆角/描边，但更矮更紧凑 */
+.llm-usage-card {
+  border: 1px solid var(--borderColor); border-radius: 6px; padding: 7px 8px 6px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: color-mix(in srgb, var(--fontColor) 2%, transparent);
+}
+.llm-usage-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.llm-usage-title { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; }
+.llm-usage-title i { font-size: 12px; color: var(--fontActiveColor); }
+.llm-usage-scope {
+  font-size: 10px; line-height: 15px; padding: 0 5px; border-radius: 3px;
+  border: 1px solid color-mix(in srgb, var(--fontActiveColor) 40%, transparent);
+  color: var(--fontActiveColor); max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.llm-usage-spacer { flex: 1; min-width: 4px; }
+/* 分段控件（时间范围 / 统计口径）：与项目里其它 seg 控件同款观感 */
+.llm-usage-seg {
+  display: inline-flex; border: 1px solid var(--borderColor); border-radius: 4px; overflow: hidden;
+}
+.llm-usage-seg > span {
+  font-size: 10px; line-height: 18px; padding: 0 6px; cursor: pointer; opacity: .7;
+  transition: all .12s; white-space: nowrap;
+}
+.llm-usage-seg > span + span { border-left: 1px solid var(--borderColor); }
+.llm-usage-seg > span:hover { background: color-mix(in srgb, var(--fontColor) 8%, transparent); opacity: 1; }
+.llm-usage-seg > span.active {
+  background: color-mix(in srgb, var(--fontActiveColor) 14%, transparent);
+  color: var(--fontActiveColor); opacity: 1; font-weight: 600;
+}
+.llm-usage-refresh {
+  width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; cursor: pointer; color: var(--fontColor); opacity: .6; border-radius: 3px;
+}
+.llm-usage-refresh:hover { opacity: 1; background: color-mix(in srgb, var(--fontColor) 8%, transparent); }
+.llm-usage-refresh.busy { opacity: .45; cursor: default; }
+
+/* 数字行：总用量 / 今日 / 输入 / 输出 / 请求 */
+.llm-usage-nums { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.llm-usage-num { display: inline-flex; align-items: baseline; gap: 4px; }
+.llm-usage-num .k { font-size: 10px; opacity: .6; }
+.llm-usage-num .v { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.llm-usage-num:first-child .v { font-size: 16px; color: var(--fontActiveColor); }
+
+/* 图本体在 UsageChart.vue（总体 / 单来源共用），这里只留卡片底部说明 */
+.llm-usage-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 10px; opacity: .62; }
+.llm-usage-warn { color: #f44336; opacity: .9; }
 </style>

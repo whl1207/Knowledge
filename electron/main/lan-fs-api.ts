@@ -133,8 +133,26 @@ interface TreeNode {
 
 const SKIP_ENTRIES = new Set(['.ds_store', 'thumbs.db', 'system volume information', '$recycle.bin'])
 
-function buildTree(root: string, abs: string, depth: number): TreeNode[] {
+/** 搜索时跳过的大目录（与主进程文件树搜索同一套口径） */
+const SEARCH_SKIP_DIRS = new Set([
+  'node_modules', '.git', '.svn', '.hg', 'dist', 'dist-electron', 'build', 'release', 'out',
+  'coverage', '.next', '.nuxt', '.cache', '.gradle', '.idea', '.vs', 'vendor', '__pycache__',
+  '.venv', 'venv',
+])
+
+/** 目录树构建预算：即使网页端请求 depth 12，也不会因为某一层特别宽而把主机拖死 */
+interface TreeBudget {
+  nodes: number
+  maxNodes: number
+  truncated: boolean
+}
+
+function buildTree(root: string, abs: string, depth: number, budget?: TreeBudget): TreeNode[] {
   if (depth <= 0) return []
+  if (budget && budget.nodes >= budget.maxNodes) {
+    budget.truncated = true
+    return []
+  }
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(abs, { withFileTypes: true })
@@ -143,6 +161,10 @@ function buildTree(root: string, abs: string, depth: number): TreeNode[] {
   }
   const out: TreeNode[] = []
   for (const ent of entries) {
+    if (budget && budget.nodes >= budget.maxNodes) {
+      budget.truncated = true
+      break
+    }
     if (SKIP_ENTRIES.has(ent.name.toLowerCase())) continue
     const childAbs = path.join(abs, ent.name)
     let isDir = ent.isDirectory()
@@ -153,6 +175,7 @@ function buildTree(root: string, abs: string, depth: number): TreeNode[] {
     } catch {
       continue
     }
+    budget && budget.nodes++
     const ext = isDir ? 'folder' : path.extname(ent.name).toLowerCase()
     const node: TreeNode = {
       path: childAbs,
@@ -164,7 +187,7 @@ function buildTree(root: string, abs: string, depth: number): TreeNode[] {
       mtime: stat.mtimeMs,
     }
     if (isDir) {
-      node.children = buildTree(root, childAbs, depth - 1)
+      node.children = buildTree(root, childAbs, depth - 1, budget)
       // 目录：大小累加、时间取最新（与桌面 getDirectoryTree 同口径，供排序使用）
       let size = 0
       let mtime = stat.mtimeMs
@@ -181,6 +204,117 @@ function buildTree(root: string, abs: string, depth: number): TreeNode[] {
   out.sort((a, b) => (a.type === b.type ? a.label.localeCompare(b.label) : a.type === 'folder' ? -1 : 1))
   return out
 }
+
+/**
+ * 单层目录读取（网页端 `listDir`）。
+ * 只读一层、单条失败只丢该条的 size/mtime、目录不可读时返回 error 而不是抛错。
+ */
+function readDirPage(root: string, abs: string, offsetRaw: unknown, limitRaw: unknown) {
+  const offset = Math.max(0, Number(offsetRaw) || 0)
+  const limit = Math.min(2000, Math.max(1, Number(limitRaw) || 1000))
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(abs, { withFileTypes: true })
+  } catch (e: any) {
+    return { ok: true, entries: [], total: 0, truncated: false, error: e?.code || String(e?.message || e) }
+  }
+  const visible = entries.filter((ent) => !SKIP_ENTRIES.has(ent.name.toLowerCase()))
+  visible.sort((a, b) => {
+    const ad = a.isDirectory() ? 0 : 1
+    const bd = b.isDirectory() ? 0 : 1
+    if (ad !== bd) return ad - bd
+    return a.name.localeCompare(b.name)
+  })
+  const page = visible.slice(offset, offset + limit)
+  const out = page.map((ent) => {
+    const childAbs = path.join(abs, ent.name)
+    let isDir = ent.isDirectory()
+    let size: number | undefined
+    let mtime: number | undefined
+    try {
+      const st = fs.statSync(childAbs)
+      isDir = st.isDirectory()
+      mtime = st.mtimeMs
+      size = isDir ? undefined : st.size
+    } catch {
+      /* 单条失败：保留名字，size/mtime 留空 */
+    }
+    return {
+      path: childAbs,
+      rel: relOf(root, childAbs),
+      label: ent.name,
+      type: isDir ? 'folder' : 'file',
+      extension: isDir ? 'folder' : path.extname(ent.name).toLowerCase(),
+      size,
+      mtime,
+    }
+  })
+  return { ok: true, entries: out, total: visible.length, truncated: offset + out.length < visible.length }
+}
+
+/**
+ * 按文件名全树搜索（网页端 `searchNames`）：只比文件名、只读目录项，
+ * 结果数 / 深度 / 时间三重预算；超预算返回已完成的部分。
+ */
+function searchNames(root: string, roots: string[], keyword: string, opts: any) {
+  const started = Date.now()
+  const kw = String(keyword || '').toLowerCase().trim()
+  if (!kw) return { ok: true, results: [], truncated: false, scanned: 0, elapsedMs: 0 }
+  const maxResults = Math.min(1000, Math.max(1, Number(opts?.maxResults) || 200))
+  const maxDepth = Math.min(12, Math.max(1, Number(opts?.maxDepth) || 12))
+  const budgetMs = Math.min(5000, Math.max(100, Number(opts?.budgetMs) || 800))
+  const results: any[] = []
+  let scanned = 0
+  let truncated = false
+  const startList = (Array.isArray(roots) && roots.length ? roots : ['.'])
+    .map((r: string) => resolveInRoot(root, String(r)))
+    .filter((p: string | null): p is string => !!p)
+  const stack: Array<{ abs: string; depth: number }> = startList.map((abs: string) => ({ abs, depth: 0 }))
+  while (stack.length) {
+    if (results.length >= maxResults || Date.now() - started > budgetMs || scanned > 200000) {
+      truncated = true
+      break
+    }
+    const { abs, depth } = stack.pop() as { abs: string; depth: number }
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const ent of entries) {
+      scanned++
+      const lower = ent.name.toLowerCase()
+      const childAbs = path.join(abs, ent.name)
+      if (ent.isDirectory()) {
+        if (SKIP_ENTRIES.has(lower) || SEARCH_SKIP_DIRS.has(lower)) continue
+        if (depth + 1 < maxDepth) stack.push({ abs: childAbs, depth: depth + 1 })
+        continue
+      }
+      if (SKIP_ENTRIES.has(lower)) continue
+      if (!ent.name.toLowerCase().includes(kw)) continue
+      let size: number | undefined
+      let mtime: number | undefined
+      try {
+        const st = fs.statSync(childAbs)
+        size = st.size
+        mtime = st.mtimeMs
+      } catch { /* 忽略 */ }
+      results.push({
+        path: childAbs,
+        rel: relOf(root, childAbs),
+        label: ent.name,
+        type: 'file',
+        extension: path.extname(ent.name).toLowerCase(),
+        size,
+        mtime,
+      })
+      if (results.length >= maxResults) { truncated = true; break }
+    }
+  }
+  return { ok: true, results, truncated, scanned, elapsedMs: Date.now() - started }
+}
+
 
 /** 读 YAML frontmatter（与主进程 getConfig 同语义：目录读其 .README.md，非 md 返回空对象） */
 function readMetadata(abs: string): Record<string, unknown> {
@@ -352,7 +486,24 @@ export async function handleLanFsRequest(
       const rootAbs = abs || path.resolve(ctx.root)
       if (!fs.existsSync(rootAbs) || !fs.statSync(rootAbs).isDirectory()) return json(res, 200, { ok: true, nodes: [] }), true
       const depth = Math.min(12, Math.max(1, Number(body.depth) || 4))
-      return json(res, 200, { ok: true, nodes: buildTree(ctx.root, rootAbs, depth), root: relOf(ctx.root, rootAbs) }), true
+      const budget: TreeBudget = { nodes: 0, maxNodes: 20000, truncated: false }
+      const nodes = buildTree(ctx.root, rootAbs, depth, budget)
+      return json(res, 200, { ok: true, nodes, root: relOf(ctx.root, rootAbs), truncated: budget.truncated }), true
+    }
+
+    // 单层目录读取：网页端文件树懒加载走这里（只读一层，不递归）
+    case 'list': {
+      const dirAbs = abs || path.resolve(ctx.root)
+      if (!fs.existsSync(dirAbs) || !fs.statSync(dirAbs).isDirectory()) {
+        return json(res, 200, { ok: true, entries: [], total: 0, truncated: false, error: '不是目录' }), true
+      }
+      return json(res, 200, readDirPage(ctx.root, dirAbs, body.offset, body.limit)), true
+    }
+
+    // 按文件名全树搜索：只比文件名，带预算（网页端文件树搜索框）
+    case 'search-names': {
+      const roots = Array.isArray(body.roots) && body.roots.length ? body.roots : [rawPath || '.']
+      return json(res, 200, searchNames(ctx.root, roots, String(body.keyword ?? ''), body)), true
     }
 
     case 'info': {

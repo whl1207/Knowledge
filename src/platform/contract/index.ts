@@ -100,6 +100,62 @@ export interface WriteResult {
   error?: string
 }
 
+/** 单层目录条目（懒加载文件树的最小单位；字段名与树节点一致，便于直接喂给 el-tree） */
+export interface FsEntry {
+  /** 显示名（文件名 / 目录名） */
+  label: string
+  /** 完整路径 */
+  path: string
+  type: 'file' | 'folder'
+  /** 扩展名（目录为 'folder'） */
+  extension: string
+  /** 文件大小；目录不再汇总（懒加载下无法廉价计算），保持 undefined */
+  size?: number
+  /** 毫秒时间戳 */
+  mtime?: number
+}
+
+/** 单层目录读取选项 */
+export interface ListDirOptions {
+  /** 跳过前 N 条（超大目录分页用） */
+  offset?: number
+  /** 本次最多返回多少条（宿主会钳制上限） */
+  limit?: number
+}
+
+/** 单层目录读取结果：**永不抛出**，读不到时 entries 为空并给出 error */
+export interface ListDirPage {
+  entries: FsEntry[]
+  /** 该目录的条目总数（用于「仅显示前 N 项 / 还有 N 项」提示） */
+  total: number
+  /** 是否因 limit 截断 */
+  truncated: boolean
+  /** 目录本身不可读时的原因（EACCES/ENOENT…）；单个条目失败不影响整体 */
+  error?: string
+}
+
+/** 按文件名全树搜索选项（全部有预算，避免大工作区 OOM） */
+export interface NameSearchOptions {
+  /** 最多返回多少条命中（默认 200，宿主钳制） */
+  maxResults?: number
+  /** 最大递归深度（默认 12，宿主钳制） */
+  maxDepth?: number
+  /** 时间预算（毫秒）：超时返回已完成的部分并置 truncated */
+  budgetMs?: number
+  /** 请求序号：新请求用更大的序号，旧请求在宿主侧尽快中止 */
+  requestId?: number
+}
+
+/** 按文件名全树搜索结果 */
+export interface NameSearchResult {
+  results: FsEntry[]
+  /** 结果被截断（命中上限 / 时间预算 / 被新请求取代） */
+  truncated: boolean
+  /** 实际访问过的目录条目数（诊断用） */
+  scanned: number
+  elapsedMs: number
+}
+
 /** .task 文件读写结果（与主进程同名通道同形） */
 export interface TaskFileResult {
   success: boolean
@@ -112,7 +168,7 @@ export interface TaskFileResult {
 
 export interface FileSystemPort {
   /**
-   * 读文本：`.md`/`.txt`/`.kb` 等按 UTF-8 返回；`.docx` 由 Office 管线转 Markdown；`.pdf` 返回抽取文本。
+   * 读文本：`.md`/`.txt`/`.kb` 等按 UTF-8 返回；`.docx` / `.doc` 由 Office 管线转 Markdown；`.pdf` 返回抽取文本。
    * 失败**不抛错**，返回 `Error reading file: …` 前缀字符串（沿用主进程既有契约，
    * 调用方以 `startsWith('Error reading file')` 判定）。
    */
@@ -167,6 +223,22 @@ export interface FileSystemPort {
   ensureDir(dirPath: string): Promise<{ success: boolean; error?: string }>
   /** 读目录树（懒展开用；depth 默认由宿主决定） */
   listTree(folderPath: string, depth?: number): Promise<any[]>
+  /**
+   * 读**一层**目录（文件树懒加载的唯一数据源）。
+   *
+   * 这是「选择大工作区不再闪退」的关键约定：
+   * - 只读一层，绝不递归；宿主对条目数与耗时都有预算；
+   * - **永不抛出**：目录不可读时返回 `{ entries: [], error }`，单个条目 stat 失败只丢该条的 size/mtime；
+   * - 目录不再汇总 size（懒加载下要遍历整棵子树才能算，正是要避免的事）。
+   */
+  listDir(dirPath: string, opts?: ListDirOptions): Promise<ListDirPage>
+  /**
+   * 按**文件名**全树搜索（文件树搜索框用）。
+   *
+   * 与 `searchFiles`（含正文匹配、会读整个文件）刻意分开：这里只比文件名、只读目录项，
+   * 并且带结果数 / 深度 / 时间三重预算与请求取消，避免在大工作区上把主进程拖死。
+   */
+  searchNames(roots: string[], keyword: string, opts?: NameSearchOptions): Promise<NameSearchResult>
   /** 读一次目录树 + 节点关系（图谱视图用） */
   listTreeWithRelations(folderPath: string, depth?: number): Promise<{ fileList: any[]; relationList: any[] }>
   /** 取单个路径的信息（type/label/extension）；不存在返回 null */
@@ -549,7 +621,7 @@ export interface PythonApi {
 
 /** 文档转换 */
 export interface DocConvertApi {
-  /** .docx 字节（base64）→ Markdown（含图片落盘为 file:/// 引用） */
+  /** .docx / .doc 字节（base64）→ Markdown（.docx 含图片落盘为 file:/// 引用） */
   docxToMarkdown(payload: { base64: string }): Promise<any>
   /**
    * 已渲染 HTML → PDF（宿主弹保存框并落盘）。
@@ -606,6 +678,20 @@ export interface ExcelExportApi {
 export interface SkillsApi {
   /** 设置技能根目录并取回清单（参数沿用旧签名：字符串或字符串数组） */
   list(roots?: string | string[]): Promise<any[]>
+  /**
+   * 安装一个技能文件夹（桌面：弹目录选择框 → 复制进技能目录）。
+   * @param options.root 技能根目录（渲染层传 store.skillsPath）；不传时主进程无法确定落点
+   * @param options.replace 覆盖同名技能
+   */
+  install?(options?: { root?: string; replace?: boolean }): Promise<SkillInstallResult>
+}
+
+/** 「安装技能」结果（cancelled = 用户取消；replaced = 覆盖了已有同名技能） */
+export interface SkillInstallResult {
+  cancelled?: boolean
+  name?: string
+  path?: string
+  replaced?: boolean
 }
 
 /** 宿主侧联网辅助（浏览器受 CORS 限制，无法直接读任意网页） */

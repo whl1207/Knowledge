@@ -8,6 +8,9 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
 import { getPlatform, hasCapability } from '@/platform'
+import UsageChart from './UsageChart.vue'
+import { useUsageSummary } from '@/composables/useUsageSummary'
+import { formatTokenCount, formatTokenCountExact, formatUsageClock, type UsageDayBucket } from '@/shared/usageStats'
 import {
   BACKUP_KEYS,
   LOCAL_STORAGE_LIMIT,
@@ -25,6 +28,25 @@ import {
 
 const store = usestore()
 const zh = () => store.locales === 'zh'
+
+// ================ 模型用量（总体：全部来源合计） ================
+// 账本只记本版本启用之后的请求（不做历史回填），所以这里的总数可能小于聊天里
+// 历史消息自带的 tokenStats 之和——口径以账本为准，页面文案已说明。
+const usageRange = ref<number>(30)
+const {
+  summary: usageSummary,
+  available: usageAvailable,
+  loading: usageLoading,
+  reload: reloadUsage,
+} = useUsageSummary()
+
+const EMPTY_GRAND = {
+  prompt: 0, completion: 0, total: 0, requests: 0, today: 0,
+  days: {} as Record<string, UsageDayBucket>,
+}
+/** 全部来源合计（没有快照时给零值，模板不用到处判空） */
+const usageGrand = computed(() => usageSummary.value?.grand || EMPTY_GRAND)
+const usageUpdatedText = computed(() => (usageSummary.value ? formatUsageClock(usageSummary.value.generatedAt) : ''))
 
 /** 会话日志会话数（主进程 sessionLog 列表；非桌面版 / 读取失败为 null） */
 const sessionLogCount = ref<number | null>(null)
@@ -268,7 +290,54 @@ onMounted(refresh)
       </div>
     </div>
 
-    <!-- ② 数据清单（数量 + 占用 + 前往 / 导出 / 导入 / 清空） -->
+    <!-- ② 模型用量（总体：所有来源合计；各来源明细在「模型 → 来源」） -->
+    <div v-if="usageAvailable" class="settings-group">
+      <h3>{{ zh() ? '模型用量' : 'Model Usage' }}</h3>
+      <div class="config-description" style="margin:0 0 8px 2px;">{{ zh()
+        ? '本机所有模型请求的累计用量（聊天 / 知识库 / 工作流 / 智能体 / 集群 / 插件），按本地日期统计；只统计本版本启用账本之后的请求，不做历史回填。各来源的明细见「模型 → 来源」。'
+        : 'Total token usage of every model request on this machine (chat / KB / workflow / agent / swarm / plugins), bucketed by local date. Only requests recorded since this version (no backfill); per-source detail lives in Models → Sources.' }}</div>
+
+      <div class="form-group">
+        <label>{{ zh() ? '总用量' : 'Total' }}</label>
+        <div class="usage-totals">
+          <span class="usage-total" :title="(zh() ? '全部时间累计' : 'All time') + ' · ' + formatTokenCountExact(usageGrand.total)">
+            <b>{{ formatTokenCount(usageGrand.total) }}</b><i>{{ zh() ? '全部时间' : 'all time' }}</i>
+          </span>
+          <span class="usage-total" :title="(zh() ? '今天（本地日期）' : 'Today (local date)') + ' · ' + formatTokenCountExact(usageGrand.today)">
+            <b>{{ formatTokenCount(usageGrand.today) }}</b><i>{{ zh() ? '今日' : 'today' }}</i>
+          </span>
+          <span class="usage-total" :title="(zh() ? '输入 token' : 'Input tokens') + ' · ' + formatTokenCountExact(usageGrand.prompt)">
+            <b>{{ formatTokenCount(usageGrand.prompt) }}</b><i>{{ zh() ? '输入' : 'input' }}</i>
+          </span>
+          <span class="usage-total" :title="(zh() ? '输出 token' : 'Output tokens') + ' · ' + formatTokenCountExact(usageGrand.completion)">
+            <b>{{ formatTokenCount(usageGrand.completion) }}</b><i>{{ zh() ? '输出' : 'output' }}</i>
+          </span>
+          <span class="usage-total" :title="zh() ? '请求次数：一次模型调用算一次，重试也各算一次' : 'Requests: one per model call, retries counted separately'">
+            <b>{{ usageGrand.requests.toLocaleString() }}</b><i>{{ zh() ? '请求' : 'calls' }}</i>
+          </span>
+        </div>
+      </div>
+
+      <div class="usage-chart-head">
+        <span class="usage-chart-title">{{ zh() ? '每日消耗' : 'Daily usage' }}</span>
+        <div class="usage-range" :title="zh() ? '时间范围' : 'Range'">
+          <span v-for="r in [7, 30, 90, 0]" :key="r" :class="{ active: usageRange === r }"
+            @click="usageRange = r">{{ r === 0 ? (zh() ? '全部' : 'All') : r + (zh() ? '天' : 'd') }}</span>
+        </div>
+        <span class="usage-refresh" :class="{ busy: usageLoading }" @click="reloadUsage" :title="zh() ? '刷新用量' : 'Refresh usage'">
+          <i class="fa" :class="usageLoading ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
+        </span>
+      </div>
+      <UsageChart :days="usageGrand.days" :range="usageRange" :zh="zh()" :empty-text="zh()
+        ? '还没有用量记录：从本版本起每次模型请求都会自动记账（不做历史回填），发一次消息就能看到数据。'
+        : 'No usage yet: every model request is recorded from this version on (no backfill). Send a message to see data.'" />
+      <div class="usage-foot">
+        <span v-if="usageUpdatedText">{{ zh() ? '更新于' : 'Updated' }} {{ usageUpdatedText }}</span>
+        <span>{{ zh() ? '账本文件：数据目录 / usage（按月 JSONL，只读）' : 'Ledger: data folder / usage (monthly JSONL, read-only)' }}</span>
+      </div>
+    </div>
+
+    <!-- ③ 数据清单（数量 + 占用 + 前往 / 导出 / 导入 / 清空） -->
     <div class="settings-group">
       <h3>{{ zh() ? '数据清单' : 'Data Inventory' }}</h3>
       <div class="data-list">
@@ -417,4 +486,27 @@ onMounted(refresh)
 .data-row-label { flex: 0 0 116px; font-size: 12px; }
 .data-row-count { flex: 1; min-width: 0; font-size: 12px; opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .data-row-size { flex: 0 0 76px; text-align: right; font-size: 12px; opacity: .7; }
+
+/* ====== 模型用量（总体：数字行 + 每日图 + 范围切换） ====== */
+.usage-totals { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.usage-total { display: inline-flex; align-items: baseline; gap: 5px; }
+.usage-total b { font-size: 16px; color: var(--fontActiveColor); font-variant-numeric: tabular-nums; }
+.usage-total i { font-style: normal; font-size: 10px; opacity: .6; }
+.usage-chart-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; }
+.usage-chart-title { font-size: 13px; }
+.usage-range { display: inline-flex; border: 1px solid var(--borderColor); border-radius: 4px; overflow: hidden; }
+.usage-range > span { font-size: 10px; line-height: 18px; padding: 0 6px; cursor: pointer; opacity: .7; transition: all .12s; white-space: nowrap; }
+.usage-range > span + span { border-left: 1px solid var(--borderColor); }
+.usage-range > span:hover { background: color-mix(in srgb, var(--fontColor) 8%, transparent); opacity: 1; }
+.usage-range > span.active {
+  background: color-mix(in srgb, var(--fontActiveColor) 14%, transparent);
+  color: var(--fontActiveColor); opacity: 1; font-weight: 600;
+}
+.usage-refresh {
+  width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; cursor: pointer; opacity: .6; border-radius: 3px;
+}
+.usage-refresh:hover { opacity: 1; background: color-mix(in srgb, var(--fontColor) 8%, transparent); }
+.usage-refresh.busy { opacity: .45; cursor: default; }
+.usage-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 10px; opacity: .6; margin-top: 2px; }
 </style>

@@ -176,6 +176,38 @@ const fsPort: FileSystemPort = {
     return api.invoke('getFiles', folderPath, depth)
   },
 
+  /** 单层目录读取（文件树懒加载）：主进程带预算与错误隔离，永不拒绝 */
+  async listDir(dirPath, opts) {
+    const api = ipc()
+    if (!api?.invoke) return { entries: [], total: 0, truncated: false }
+    try {
+      const r = await api.invoke('listDir', dirPath, opts)
+      if (!r || !Array.isArray(r.entries)) {
+        return { entries: [], total: 0, truncated: false, error: r?.error || '目录读取失败' }
+      }
+      return r
+    } catch (e: any) {
+      return { entries: [], total: 0, truncated: false, error: String(e?.message || e) }
+    }
+  },
+
+  /** 按文件名全树搜索（有预算 + 可被新请求取代） */
+  async searchNames(roots, keyword, opts) {
+    const api = ipc()
+    if (!api?.invoke) return { results: [], truncated: false, scanned: 0, elapsedMs: 0 }
+    try {
+      const r = await api.invoke('searchNames', { roots, keyword, ...(opts || {}) })
+      return {
+        results: Array.isArray(r?.results) ? r.results : [],
+        truncated: r?.truncated === true,
+        scanned: Number(r?.scanned) || 0,
+        elapsedMs: Number(r?.elapsedMs) || 0,
+      }
+    } catch {
+      return { results: [], truncated: false, scanned: 0, elapsedMs: 0 }
+    }
+  },
+
   async listTreeWithRelations(folderPath, depth) {
     const api = ipc()
     if (!api?.invoke) return { fileList: [], relationList: [] }
@@ -736,6 +768,23 @@ const hostPort: HostPort = {
       const api = ipc()
       if (!api?.invoke) return []
       return api.invoke('loadSkills', roots)
+    },
+    /** 安装技能文件夹：主进程弹目录选择框 → 复制进技能目录（与「安装插件」同一套心智） */
+    async install(options) {
+      const api = ipc()
+      if (!api?.invoke) return { cancelled: true }
+      const res: any = await api.invoke('skill:install', options || {})
+      // 命名空间通道返回 { ok, data } | { ok:false, error }（见 ipc-registry 的统一信封）：
+      // 这里解包并把 code 带到 Error 上，界面才能区分 SKILL_EXISTS（弹覆盖确认）
+      if (res && typeof res === 'object' && 'ok' in res) {
+        if (!res.ok) {
+          const err: any = new Error(res.error?.message || '安装技能失败')
+          err.code = res.error?.code
+          throw err
+        }
+        return res.data
+      }
+      return res
     },
   },
 

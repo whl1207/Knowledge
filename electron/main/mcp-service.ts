@@ -16,6 +16,8 @@ import { drawioService } from './drawio/drawio-service'
 import { literatureService } from './literature/literature-service'
 import { postgresService } from './postgres/postgres-service'
 import { pluginDevService } from './plugin-dev/plugin-dev-service'
+import { agentPresetService } from './agent-preset/agent-preset-service'
+import { skillDevService } from './skill-dev/skill-dev-service'
 import { runWithMcpOwner } from './mcp-owner'
 
 /** 单次 MCP 工具调用默认超时（毫秒）；可由服务配置 timeoutMs 覆盖（设置页可改） */
@@ -33,6 +35,12 @@ const BUILTIN_SERVERS: Record<string, { createLocalServerPair: (config?: McpServ
   'builtin-literature': literatureService,
   'builtin-postgres': postgresService,
   'builtin-plugin-dev': pluginDevService,
+  // Agent 预设管理：读写在渲染层执行（预设的单一事实源在 store.agentPresets），
+  // 本服务只做 MCP 包装与转发，见 ./agent-preset/agent-preset-service.ts
+  'builtin-agent-preset': agentPresetService,
+  // 技能设计参考：静态话题 + 主进程自检；技能目录经渲染层任务取，
+  // 见 ./skill-dev/skill-dev-service.ts
+  'builtin-skill-dev': skillDevService,
 }
 
 /** 运行时懒加载的 MCP SDK 类集合 */

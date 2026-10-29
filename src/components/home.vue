@@ -880,8 +880,10 @@
           @mousedown="onResizeStart"
           :title="store.locales=='zh' ? '拖动调整输入框高度' : 'Drag to resize input'"
         ></div>
-        <!-- 输入模式 -->
-        <div class="input-container">
+        <!-- 输入模式。data-voice-composer：卡片内任何焦点都算「想往这张卡片的输入框里说话」
+             （全局语音输入的落点解析会读它，见 services/asr/voiceTarget.ts）；点空白处由
+             onComposerCardMouseDown 把光标交回输入框，否则焦点会掉到 body、语音输入找不到落点 -->
+        <div class="input-container" data-voice-composer="true" @mousedown="onComposerCardMouseDown">
           <textarea
             v-model="inputText"
             :placeholder="getInputPlaceholder()"
@@ -894,8 +896,9 @@
           ></textarea>
           <div class="input-controls">
             <!-- 左下角：工作区选择（**每个聊天各自一份**；与 DSH 一样，工作区决定智能体的工作目录，
-                 并注入上下文；右侧栏「文件 / 终端」标签也定位到这里） -->
-            <div class="workspace-select-wrap">
+                 并注入上下文；右侧栏「文件 / 终端」标签也定位到这里）。
+                 只在真正会用到工作区的模式显示：普通 / 知识库 / 工作流不读它（见 showsWorkspaceChip） -->
+            <div v-if="showsWorkspaceChip" class="workspace-select-wrap">
               <span
                 class="workspace-chip"
                 :class="{ empty: !chatWorkspacePath }"
@@ -1023,7 +1026,7 @@
               <!-- 集群成员浮层（成员多选 + 群主总结 + 管理预设；运行方式已移至输入区独立下拉） -->
               <div v-if="showSwarmMemberPicker" class="agent-preset-picker swarm-picker scoll" @click.stop>
                 <div v-if="!(store.agentPresets || []).length" class="preset-picker-empty">
-                  {{ store.locales=='zh' ? '还没有预设：请先在「设置 → 预设」中创建' : 'No presets yet — create one in Settings → Presets' }}
+                  {{ store.locales=='zh' ? '还没有预设：请先在「设置 → 智能体 → 管理」中创建' : 'No presets yet — create one in Settings → Agent → Manage' }}
                 </div>
                 <template v-else>
                   <div
@@ -1107,7 +1110,7 @@
                 type="file" 
                 ref="fileInput"
                 @change="handleFileUpload"
-                accept="image/*,.md,.docx,.pdf,.txt,.html,.htm,.json,.csv,.js,.py,.xlsx,.xls"
+                accept="image/*,.md,.docx,.doc,.pdf,.txt,.html,.htm,.json,.csv,.js,.py,.xlsx,.xls"
                 multiple
                 style="display: none;"
               />
@@ -1662,6 +1665,19 @@ const workspaceChipTitle = computed(() => {
     : (own ? ' (this chat only)' : ' (following the global default)')
   return (zh ? '这个聊天的工作区（智能体工作目录，会注入上下文）：' : 'This chat’s workspace (agent working directory, injected into context): ') + eff + tail
 })
+/**
+ * 是否显示工作区选择器：只有真正会用到「这个聊天的工作区」的模式才显示。
+ * - 智能体 / 技能：chat.workspace 作为工具 cwd 并注入 system prompt（见 useAgentRun / promptContext）；
+ * - 普通 / 知识库：没有工具、也没有 cwd —— 对话与检索只把上下文交给模型；
+ * - 工作流：节点文件一律走绝对路径，智能体 / 工具节点用的是**全局默认工作区**
+ *   （presetOptions → workspaceRoot(store)），同样不读 chat.workspace。
+ * 右侧栏「文件 / 终端」仍按 chatWorkspace 定位（未单独选过就跟随全局默认），所以隐藏它不会让
+ * 右侧栏失去根目录，只是这些模式下不能按聊天改目录。
+ */
+const showsWorkspaceChip = computed(() => {
+  const mode = currentChat.value?.mode || 'normal'
+  return mode !== 'normal' && mode !== 'retrieval' && mode !== 'workflow'
+})
 const toggleWorkspacePicker = () => {
   showWorkspacePicker.value = !showWorkspacePicker.value
   if (showWorkspacePicker.value) {
@@ -2212,6 +2228,12 @@ const onInputContextMenu = (e: MouseEvent) => {
 // ==================== 计算属性 ====================
 const currentChat = computed(() => chats.value[currentChatIndex.value])
 
+// 切到不显示工作区选择器的模式（普通 / 知识库 / 工作流）时收掉浮层，避免切回来时它自己又弹出来。
+// 放在 currentChat 之后：watch 建立时会立刻跑一次 getter 取旧值，提前会撞上 currentChat 的 TDZ。
+watch(showsWorkspaceChip, (visible) => {
+  if (!visible) showWorkspacePicker.value = false
+})
+
 /** 标题为空时与左侧列表完全一致的兜底文案（输入框用 placeholder 展示，不写进 chat.title） */
 const currentChatFallbackTitle = computed(() =>
   store.locales == 'zh'
@@ -2583,6 +2605,7 @@ const dispatchQueuedItem = async (chatId: string, item: PendingQueueItem) => {
   }))
   autoScrollEnabled.value = true
   ensureChatFallbackTitle(chat, item.text)
+  void maybeRefineChatTitle(chat, item.text)
   switch (chat.mode) {
     case 'swarm':
       await handleSwarmMode(item.text)
@@ -2649,6 +2672,47 @@ const onComposerKeydown = (e: KeyboardEvent) => {
  */
 const onSendButtonClick = () => {
   void sendMessage()
+}
+
+/** 输入卡片里「自己处理点击 / 需要自己拿焦点」的元素：卡片不抢它们的焦点 */
+const COMPOSER_NON_BLANK_SELECTOR = [
+  'button', 'a', 'select', 'option', 'label', 'input', 'textarea',
+  '[contenteditable="true"]', '[tabindex]',
+  '[role="button"]', '[role="combobox"]', '[role="listbox"]', '[role="menu"]',
+  '[role="menuitem"]', '[role="option"]', '[role="slider"]', '[role="switch"]', '[role="checkbox"]',
+  '.button',
+].join(', ')
+
+/**
+ * 卡片里可能浮出来、自己还要滚动的面板（工作区选择器 / Agent 预设选择器 / 右键菜单）：
+ * 点它们一律不接管焦点，否则拖它们的滚动条会被 preventDefault 搅乱
+ */
+const COMPOSER_POPUP_SELECTOR = '.workspace-picker, .agent-preset-picker, .context-menu, .scoll'
+
+/**
+ * 点中输入卡片的**空白处**（卡片内边距 / 操作行的空档）时，把光标交回输入框。
+ *
+ * 浏览器只在点中 textarea 本身时才移动焦点；点在卡片其余任何地方，焦点会留在原处（多半掉到 body）。
+ * 而全局语音输入是按「当前焦点」找落点的（见 services/asr/voiceTarget.ts），
+ * 于是「明明在输入区里，按快捷键却提示没有可写入的输入框、结果只能进剪贴板」。
+ * 其它软件的输入框点哪儿都能写，这里对齐同一手感：点卡片 = 把光标放进输入框。
+ * 只接管空白处：按钮 / 下拉 / 胶囊 / 可聚焦元素照常获得焦点（见 COMPOSER_NON_BLANK_SELECTOR）。
+ */
+const onComposerCardMouseDown = (e: MouseEvent) => {
+  if (e.button !== 0) return // 右键留给输入框自己的右键菜单
+  const card = e.currentTarget as HTMLElement | null
+  const target = e.target as HTMLElement | null
+  if (!card || !target || typeof target.closest !== 'function') return
+  // 控件（按钮 / 下拉 / 可聚焦元素）和浮层（选择器面板）保持原有焦点行为
+  if (target.closest(COMPOSER_NON_BLANK_SELECTOR)) return
+  if (target.closest(COMPOSER_POPUP_SELECTOR)) return
+  const el = card.querySelector<HTMLTextAreaElement>('textarea.message-input')
+  if (!el || el.disabled || el.readOnly) return
+  // 先挡掉这次点击的默认行为（移走焦点 / 清掉选区），再自己把光标放到文字末尾
+  e.preventDefault()
+  el.focus({ preventScroll: true })
+  const end = el.value.length
+  try { el.setSelectionRange(end, end) } catch { /* 少数输入类型不支持选区，忽略 */ }
 }
 
 /** 队列面板：插队 / 取消插队（不打断本轮，只是越过排队顺序、尽快投递） */
@@ -4263,7 +4327,7 @@ const imageExtMap: Record<string, string> = {
 /** 判断是否为可解析的文档扩展名 */
 const isParseableFile = (fileName: string): boolean => {
   const ext = fileName.toLowerCase().split('.').pop()
-  return ['md', 'docx', 'pdf', 'txt', 'html', 'htm', 'json', 'csv', 'js', 'py', 'xlsx', 'xls', 'kb'].includes(ext || '')
+  return ['md', 'docx', 'doc', 'pdf', 'txt', 'html', 'htm', 'json', 'csv', 'js', 'py', 'xlsx', 'xls', 'kb'].includes(ext || '')
 }
 
 const handleFileUpload = async (event: Event) => {
@@ -5294,7 +5358,7 @@ const onModeSelect = async (event: Event) => {
       if (!agentBridge.available) {
         ElMessage.warning(store.locales == 'zh' ? '当前环境无法运行智能体集群（缺少智能体循环）' : 'Swarm mode is unavailable in this environment')
       } else if (!(store.agentPresets || []).length) {
-        ElMessage.warning(store.locales == 'zh' ? '还没有 Agent 预设，请先在「设置 → 预设」中创建' : 'No agent presets yet — create one in Settings → Presets')
+        ElMessage.warning(store.locales == 'zh' ? '还没有 Agent 预设，请先在「设置 → 智能体 → 管理」中创建' : 'No agent presets yet — create one in Settings → Agent → Manage')
       } else if (store.skillsPath) {
         // 预热技能目录：成员若启用技能能力，执行时需按需加载 SKILL.md
         void loadSkillList()
@@ -5439,7 +5503,7 @@ const pruneSwarmMissing = () => {
   syncSwarmMembers()
 }
 
-/** 跳转「设置 → 预设」管理成员配置（成员即预设，不做群内特化） */
+/** 跳转「设置 → 智能体 → 管理」管理成员配置（成员即预设，不做群内特化） */
 const goManageAgentPresets = () => {
   showSwarmMemberPicker.value = false
   // 桌面版打开独立设置窗口并定位到「预设」；浏览器/LAN 模式退回窗口内浮层
@@ -6223,7 +6287,7 @@ const clearCurrentChat = async () => {
     currentChat.value.titleAuto = false
     currentChat.value.titleRefined = false
     currentChat.value.titlePinned = false
-    chatTitleAttempted.delete(currentChat.value.id)
+    chatTitleFailures.delete(currentChat.value.id)
     currentChat.value.agentTodos = []
     currentChat.value.agentLastTool = null
     saveChats()
@@ -6478,6 +6542,10 @@ const sendMessage = async (opts?: { forceNewTurn?: boolean }) => {
 
   // 参照 DSH：首条用户消息一发出就先落一个确定性回退标题；LLM 只做异步润色。
   ensureChatFallbackTitle(currentChat.value, message)
+  // 标题只依赖首条用户消息，不依赖本轮产出 → 发送后立刻并发润色，不等推理 / 工作流结束
+  // （智能体一轮可能跑很久，等结束才改名会让人以为「没自动命名」；在途去重 + 失败上限
+  //  保证不会重复请求，结束时的兜底调用也会自行跳过）
+  void maybeRefineChatTitle(currentChat.value, message)
 
   // 根据当前聊天模式处理（技能模式已并入「智能体」：mode='skill' 的旧存档统一走 agent 循环）
   switch (currentChat.value.mode) {
@@ -8343,12 +8411,14 @@ const cancelCurrentRun = () => {
 // ==================== 会话标题（参照 DSH：首条用户消息 + 即时回退 + 异步润色） ====================
 // DSH 的 session-title 服务：标题只取「第一条符合条件的用户消息」，先落确定性回退，
 // 再由异步提供方润色；较新的修订取代旧请求，用户重命名会钉住标题。
-// 这里保留 AI-KM 的聊天模型快照/还原逻辑，只替换输入与调度口径。
+// 这里保留 AI-KM 的聊天模型解析逻辑，只替换输入与调度口径。
 const TITLE_MAX_BYTES = 80
 const TITLE_FALLBACK_BYTES = 40
 const TITLE_MAX_INPUT_BYTES = 4096
-/** 已经在本次应用运行中尝试过 LLM 标题的聊天（失败后保留回退标题，不反复请求） */
-const chatTitleAttempted = new Set<string>()
+/** 正在请求标题的聊天：同一聊天同一时刻只允许一个在途请求（发送时 + 结束时都会触发） */
+const chatTitleInFlight = new Set<string>()
+/** 本次运行中每个聊天的标题失败次数：最多重试一次，之后保留回退标题，不反复打扰模型 */
+const chatTitleFailures = new Map<string, number>()
 /** 每个聊天的标题修订号：只有最后发起的请求能提交结果 */
 const chatTitleRevision = new Map<string, number>()
 
@@ -8469,29 +8539,69 @@ function ensureChatFallbackTitle(chat: any, currentText = '') {
   saveChats()
 }
 
-/** 首条回复完成后尝试一次异步润色；失败保留回退标题，不重复请求 */
-async function maybeRefineChatTitle(chatData?: any) {
+/**
+ * 标题请求用的来源 / 模型（与「发送」同一套口径，别照抄聊天 config）：
+ * - 预设「跟随默认」且用户没在右上角手动选过 → 全局当前来源与模型；
+ * - 绑定来源的预设 → 聊天右上角优先，没选模型时用预设自己的模型兜底；
+ * - 无预设（通用智能体 / 普通对话）→ 聊天配置优先，空则回退全局。
+ *
+ * 旧实现直接拿 `chat.config` 拼配置：智能体模式下 config 里常常没有具体来源/模型
+ * （跟随默认 / 由预设提供），于是标题请求发往空白模型而失败，标题一直停在回退值。
+ */
+function resolveChatTitleTarget(chat: any): { provider: string; model: string; customSourceIndex?: number } {
+  const cfg: any = chat?.config || {}
+  const llm = store.AIconfig.llm
+  const preset: any = (store.agentPresets || []).find((p: any) => p && p.id === cfg.presetId) || null
+  if (chatFollowsGlobalLlm(preset, cfg)) {
+    const provider = normalizeLlmType(String(llm.type || ''))
+    const customSourceIndex = llm.custom?.activeIndex ?? 0
+    return { provider, model: String(getDefaultModel(provider, customSourceIndex) || ''), customSourceIndex }
+  }
+  return {
+    provider: normalizeLlmType(String(cfg.llmType || preset?.llmType || llm.type || '')),
+    model: String(cfg.model || preset?.model || ''),
+    customSourceIndex: typeof cfg.customSourceIndex === 'number' ? cfg.customSourceIndex : undefined,
+  }
+}
+
+/**
+ * 尝试一次异步润色（回退标题已经在发送时落好）。
+ *
+ * 触发点有两处：首条消息**发出时立刻**并发跑一次（智能体 / 工作流要跑很久，等结束才改名
+ * 用户会以为没生效），本轮到结束时再兜一次（覆盖发送时那次失败 / 首条消息晚于发送入库的情况）。
+ * 在途去重 + 失败上限保证最多两次请求，成功后由 `titleRefined` 挡住后续所有调用。
+ *
+ * @param firstText 首条用户消息还没入库时（如智能体刚发出、消息随后才 append）用它兜底
+ */
+async function maybeRefineChatTitle(chatData?: any, firstText = '') {
   const chat = chatData ?? currentChat.value
   if (!chat) return
   if (chat.titlePinned || chat.titleRefined) return
   if (chat.title && String(chat.title).trim() && chat.titleAuto !== true) return
-  if (chatTitleAttempted.has(chat.id)) return
-  if (!firstUserMessageText(chat)) return
-  chatTitleAttempted.add(chat.id)
-  await generateChatTitle('', chat)
+  if (!firstUserMessageText(chat) && !firstText) return
+  if (chatTitleInFlight.has(chat.id)) return
+  if ((chatTitleFailures.get(chat.id) || 0) >= 2) return
+  chatTitleInFlight.add(chat.id)
+  try {
+    const ok = await generateChatTitle('', chat, firstText)
+    if (!ok) chatTitleFailures.set(chat.id, (chatTitleFailures.get(chat.id) || 0) + 1)
+  } finally {
+    chatTitleInFlight.delete(chat.id)
+  }
 }
 
 // 生成聊天标题的 LLM 润色入口。chatData 为实际所属聊天（后台推理完成时不能依赖
 // currentChat.value —— 用户可能已切到其它聊天，导致标题被写到当前激活的聊天）。
 // 参照 DSH：输入是首条用户消息，不是助手回复的前 100 字；标题不进入模型上下文。
-async function generateChatTitle(_firstResponse: string, chatData?: any) {
+/** @returns 是否成功写入润色后的标题（false = 保留回退标题，调用方据此记账重试） */
+async function generateChatTitle(_firstResponse: string, chatData?: any, firstText = ''): Promise<boolean> {
   try {
     const targetChat: Chat = chatData ?? currentChat.value
-    if (!targetChat || targetChat.titlePinned || targetChat.titleRefined) return
-    if (targetChat.title && String(targetChat.title).trim() && targetChat.titleAuto !== true) return
+    if (!targetChat || targetChat.titlePinned || targetChat.titleRefined) return false
+    if (targetChat.title && String(targetChat.title).trim() && targetChat.titleAuto !== true) return false
 
-    const userPrompt = firstUserPromptText(targetChat)
-    if (!userPrompt) return
+    const userPrompt = firstUserPromptText(targetChat, firstText)
+    if (!userPrompt) return false
 
     // LLM 失败也至少有确定性标题
     if (!targetChat.title || !String(targetChat.title).trim()) {
@@ -8512,79 +8622,47 @@ async function generateChatTitle(_firstResponse: string, chatData?: any) {
       ? `请根据用户的第一条消息，为这段对话生成一个简短的中文标题（不超过 10 个汉字）。只输出一行纯文本标题，不要引号、前缀、解释或 Markdown。\n${payload}`
       : `Create a concise title for this conversation from the user's first message. Return only one line of plain text, with no quotes, prefix, explanation or Markdown. Aim for about 5 words.\n${payload}`
 
-    // 标题生成必须用「目标聊天」绑定的模型来源/模型（与 sendChatMessage 一致的快照/应用/恢复）：
-    // 智能体/预设会按聊天绑定自定义来源或独立模型，后台会话结束时全局 store.AIconfig.llm
-    // 并不一定是该聊天的来源/模型——直接用全局配置发标题请求会命中错误来源（或空模型）而生成失败。
-    const llm = store.AIconfig.llm
-    const originalType = llm.type
-    const originalModel = getCurrentModelFromStore()
-    const originalTemperature = llm.temperature
-    const originalMaxTokens = llm.max_tokens
-    const originalStream = llm.stream
-    const originalThink = llm.think
-    // 目标聊天绑定的来源/模型（快照其当前值，便于发送后精确还原被 updateStoreModelConfig 改掉的模型）
-    const targetType = targetChat.config.llmType
-    const readModelByType = (t: string): string => {
-      const saved = llm.type
-      llm.type = t
-      const m = getCurrentModelFromStore()
-      llm.type = saved
-      return m
+    // 标题生成必须用「目标聊天」实际生效的来源/模型（预设跟随默认时聊天配置里没有具体值），
+    // 但**不能**去改写全局 store.AIconfig.llm：标题请求现在与智能体 / 工作流并发跑，
+    // 改全局会把同时发出的其它请求串味（旧实现靠「快照 → 改全局 → 发送 → 还原」，
+    // 并发时会互相踩，且 chat.config 为空时根本发不出去）。这里直接组装本次请求的配置。
+    const target = resolveChatTitleTarget(targetChat)
+    const { config: providerConfig } = resolveLlmSource(store.AIconfig.llm, target.provider, target.customSourceIndex)
+    if (target.model) {
+      providerConfig.model = target.model
+      // azure 的「模型」就是部署名（端点按 deployment 拼）
+      if (target.provider === 'azure') providerConfig.deployment = target.model
     }
-    const originalTargetModel = targetType !== originalType ? readModelByType(targetType) : originalModel
-    // 只要会触碰「自定义来源扁平配置」（applyCustomSourceIndex）就整份快照，用于发送后完整还原
-    const needCustomRestore = originalType === 'custom' || targetType === 'custom'
-    const originalCustom = needCustomRestore
-      ? { ...llm.custom, available_models: [...(llm.custom.available_models || [])] }
-      : null
+    const base = store.AIconfig.llm
+    const llmConfig: any = {
+      ...base,
+      type: target.provider,
+      // 标题只要一行：关掉深度思考，避免模型输出「思考 + 标题」污染结果
+      think: 'none',
+      temperature: typeof targetChat.config?.temperature === 'number' ? targetChat.config.temperature : base.temperature,
+      max_tokens: typeof targetChat.config?.maxTokens === 'number' ? targetChat.config.maxTokens : base.max_tokens,
+    }
 
-    llm.type = targetType
-    if (targetType === 'custom') {
-      store.applyCustomSourceIndex(targetChat.config.customSourceIndex)
-    }
-    updateStoreModelConfig(targetChat.config)
-    // 标题生成不需要深度思考：临时关闭（'none' = 关闭思考），避免标题模型输出“思考 + </think> + 标题”污染标题
-    llm.think = 'none'
-
-    let title = ''
-    try {
-      title = await store.sendToAI([{ role: 'user', content: titlePrompt }])
-    } finally {
-      // 恢复原全局配置（type / 温度 / 生成参数 / 来源与模型）
-      llm.type = originalType
-      llm.temperature = originalTemperature
-      llm.max_tokens = originalMaxTokens
-      llm.stream = originalStream
-      llm.think = originalThink
-      if (needCustomRestore && originalCustom) {
-        const c = llm.custom
-        c.activeIndex = originalCustom.activeIndex
-        c.name = originalCustom.name
-        c.api_url = originalCustom.api_url
-        c.api_key = originalCustom.api_key
-        c.apiKeyRef = originalCustom.apiKeyRef
-        c.model = originalCustom.model
-        c.embed_model = originalCustom.embed_model
-        c.available_models = originalCustom.available_models
-      } else {
-        restoreStoreModelConfig(originalType, originalModel)
-        // 目标来源不同于全局来源时，把被改过的目标来源模型也还原
-        if (targetType !== originalType && targetType !== 'custom') {
-          restoreStoreModelConfig(targetType, originalTargetModel)
-        }
-      }
-    }
+    const title = await AIUtils.sendChat(
+      target.provider,
+      providerConfig,
+      llmConfig,
+      [{ role: 'user', content: titlePrompt }],
+      {},
+    )
 
     // 后发请求优先：用户改名 / 更新的修订会让旧结果作废
-    if (chatTitleRevision.get(targetChat.id) !== revision || targetChat.titlePinned) return
+    if (chatTitleRevision.get(targetChat.id) !== revision || targetChat.titlePinned) return false
     const cleanTitle = normalizeChatTitle(String(title || ''))
-    if (!cleanTitle) return
+    if (!cleanTitle) return false
     targetChat.title = cleanTitle
     targetChat.titleAuto = true
     targetChat.titleRefined = true
     saveChats()
+    return true
   } catch (error) {
     console.error('生成标题失败:', error)
+    return false
   }
 }
 

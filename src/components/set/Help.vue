@@ -1066,6 +1066,102 @@
           </div>
         </section>
 
+        <!-- 技能 -->
+        <section id="skills" class="help-section" v-show="activeSection === 'skills'">
+          <div class="section-header">
+            <div class="section-icon"><i class="fa fa-superpowers"></i></div>
+            <div class="section-title-content">
+              <h2>{{ t('sections.skills.title') }}</h2>
+              <p class="section-desc">{{ t('sections.skills.subtitle') }}</p>
+            </div>
+          </div>
+
+          <div class="section-content">
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.compare.title') }}</h3>
+              <p v-html="t('skillsAgents.compare.desc')"></p>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.compare.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.skill.title') }}</h3>
+              <p v-html="t('skillsAgents.skill.desc')"></p>
+              <div class="view-tips-name">{{ t('skillsAgents.skill.usageTitle') }}</div>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.skill.usage')" :key="i" v-html="item"></li>
+              </ul>
+              <div class="view-tips-name">{{ t('skillsAgents.skill.designTitle') }}</div>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.skill.design')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.storage.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.storage.skillItems')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.faq.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.faq.skillItems')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- 智能体 -->
+        <section id="agents" class="help-section" v-show="activeSection === 'agents'">
+          <div class="section-header">
+            <div class="section-icon"><i class="fa fa-android"></i></div>
+            <div class="section-title-content">
+              <h2>{{ t('sections.agents.title') }}</h2>
+              <p class="section-desc">{{ t('sections.agents.subtitle') }}</p>
+            </div>
+          </div>
+
+          <div class="section-content">
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.agent.title') }}</h3>
+              <p v-html="t('skillsAgents.agent.desc')"></p>
+              <div class="view-tips-name">{{ t('skillsAgents.agent.usageTitle') }}</div>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.agent.usage')" :key="i" v-html="item"></li>
+              </ul>
+              <div class="view-tips-name">{{ t('skillsAgents.agent.designTitle') }}</div>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.agent.design')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.designer.title') }}</h3>
+              <p v-html="t('skillsAgents.designer.desc')"></p>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.designer.items')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.storage.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.storage.agentItems')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+
+            <div class="content-card">
+              <h3>{{ t('skillsAgents.faq.title') }}</h3>
+              <ul class="open-mode-list">
+                <li v-for="(item, i) in t('skillsAgents.faq.agentItems')" :key="i" v-html="item"></li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
         <!-- 插件 -->
         <section id="plugins" class="help-section" v-show="activeSection === 'plugins'">
           <div class="section-header">
@@ -1258,6 +1354,8 @@ const sections = ref([
   { id: 'general-files', icon: 'fa-file-text-o' },
   { id: 'special-files', icon: 'fa-files-o' },
   { id: 'browser', icon: 'fa-globe' },
+  { id: 'skills', icon: 'fa-superpowers' },
+  { id: 'agents', icon: 'fa-android' },
   { id: 'plugins', icon: 'fa-puzzle-piece' },
   { id: 'settings', icon: 'fa-cogs' },
   { id: 'changelog', icon: 'fa-history' },
@@ -1538,10 +1636,6 @@ const settingGroups = ref([
     { icon: 'fa-plug', key: 'mcp' },
     { icon: 'fa-list-ul', key: 'toolregistry' }
   ] },
-  { groupKey: 'plugin', children: [
-    { icon: 'fa-puzzle-piece', key: 'plugin' },
-    { icon: 'fa-shopping-cart', key: 'plugin-store' }
-  ] },
   { groupKey: 'skills', children: [
     { icon: 'fa-drupal', key: 'manage' },
     { icon: 'fa-shopping-cart', key: 'store' }
@@ -1550,6 +1644,10 @@ const settingGroups = ref([
     { icon: 'fa-address-book-o', key: 'presets' },
     { icon: 'fa-cogs', key: 'console' },
     { icon: 'fa-list-alt', key: 'log' }
+  ] },
+  { groupKey: 'plugin', children: [
+    { icon: 'fa-puzzle-piece', key: 'plugin' },
+    { icon: 'fa-shopping-cart', key: 'plugin-store' }
   ] },
   { groupKey: 'helpg', children: [
     { icon: 'fa-question-circle', key: 'help' }
@@ -1563,7 +1661,9 @@ const mcpServices = ref([
   { key: 'drawio' },
   { key: 'literature' },
   { key: 'postgres' },
-  { key: 'pluginDev' }
+  { key: 'pluginDev' },
+  { key: 'agentPreset' },
+  { key: 'skillDev' }
 ])
 
 // 知识处理自定义检索策略类型列表（对应策略配置的四种 kind）
@@ -1683,6 +1783,14 @@ const translations = {
       'browser': {
         title: '浏览器',
         subtitle: '内置网页浏览与 AI 网页操作'
+      },
+      'skills': {
+        title: '技能',
+        subtitle: '给 AI 的操作手册：怎么做'
+      },
+      'agents': {
+        title: '智能体',
+        subtitle: '选来就用的角色：谁来做'
       },
       'plugins': {
         title: '插件',
@@ -1827,7 +1935,7 @@ const translations = {
           { title: '源码编辑', desc: 'Monaco 编辑器直接改 Markdown 原文（含 YAML 头），支持 AI 辅助与拖入图片 / 文件自动生成引用链接；<code>.py</code> / <code>.json</code> 等代码与数据文件也在这里以文本方式打开。' },
           { title: '可视编辑（块编辑）', desc: '块式富文本：输入 <code>/</code> 唤出块类型菜单，块手柄菜单的「转换为」可在标题 / 列表 / 表格 / 代码之间转换。' },
           { title: '思维导图 / 演示', desc: '导图按 Markdown 标题层级生成；演示把 Markdown 转成幻灯片（按 <code>---</code> 或智能切分分页，支持目录 / 全屏 / 主题切换）；两者在触屏上都可左右滑动翻页。' },
-          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>逐页 / 全文翻译</strong>（全文翻译不叠加译文，完成后可导出<strong>叠加译文的 PDF</strong>——保留原 PDF 页面内容，译文按原段落位置叠加）；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）在文件视图里用 iframe 渲染（浏览看效果、源码编辑改 HTML），与其它文件一样进标签页 / 窗口，不再另开内置浏览器。' },
+          { title: '其它文档类型', desc: 'Word 自动转 Markdown 渲染并可导出 Markdown；PDF 支持分页浏览、缩放、OCR 与<strong>逐页 / 全文翻译</strong>（全文翻译不叠加译文，完成后可导出 PDF；在「翻译设置 → 布局」里可选<strong>叠加译文</strong>——保留原页面、译文按原段落位置叠加并避让插图，或<strong>左右对照</strong>——左侧原页面、右侧译文）；Excel 转 Markdown 表格；图片 / 视频 / 纯文本各有对应预览；本地网页（<code>.html</code> / <code>.htm</code>）在文件视图里用 iframe 渲染（浏览看效果、源码编辑改 HTML），与其它文件一样进标签页 / 窗口，不再另开内置浏览器。' },
           { title: 'Mermaid 图表（.mmd / .mermaid）', desc: '<strong>浏览</strong>视图把整份源码渲染成一张图，点图可放大 / 平移 / 导出 PNG、SVG；<strong>源码编辑</strong>视图改文本。渲染失败时原地显示错误与源码便于修正；空文件默认直接进源码编辑。' },
           { title: 'PDF 页面管理', desc: 'PDF 右键菜单的「页面管理…」（固定在一级菜单最下面）把整份 PDF 拆成一页一张的缩略图：可把别的 PDF <strong>合并</strong>进来、勾选后<strong>删除</strong>整页、拖拽缩略图<strong>调整顺序</strong>、单页 / 整组 / <strong>全部页面</strong>旋转（工具栏「全部左转 / 全部右转」）；确认后由 pdf-lib 重新组页，可覆盖原文件或另存为新 PDF（远程预览只能另存）。右键菜单里的「翻译」「阅读主题」「视图旋转」都是二级菜单，其中视图旋转作用于<strong>整份文档</strong>（只改显示、不改文件）。' }
         ]
@@ -1918,7 +2026,7 @@ const translations = {
       },
       dev: {
         title: '开发（写插件的起点）',
-        desc: '不需要先读源码：把<strong>设置 → 插件 → 开发</strong>页里的「通用开发指令」整段复制给任意大模型，写清你要的功能，它产出的文件放进插件目录就能启用。也可以直接在聊天里选<strong>插件开发智能体</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>，能按需取回官方参考，并在交付前用宿主的真实加载状态自检。',
+        desc: '不需要先读源码：把<strong>设置 → 插件 → 开发</strong>页里的「通用开发指令」整段复制给任意大模型，写清你要的功能，它产出的文件放进插件目录就能启用。也可以直接在聊天里选<strong>插件设计师</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>，能按需取回官方参考，并在交付前用宿主的真实加载状态自检。',
         items: [
           '页面提供：如何使用插件（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载，可一键复制）、从零开始的最小插件、可复制的指令模板（界面插件 / 工具插件 / 大模型与文件能力 / 排障指令）、清单与槽位 / API 速查表、常见问题（装载失败、槽位未声明、深色主题白底白字等）。',
           '仓库 <code>examples/plugins/hello-panel</code> 是可直接复制的示例插件（工具 + 界面 + 快捷键 + 双语示例）。'
@@ -2079,7 +2187,7 @@ const translations = {
       features: {
         title: '核心功能',
         step1: { title: '📂 文件浏览', desc: '左侧文件树展示目录结构。展开 / 折叠点节点左侧的箭头（单击不再开合）；点击 / 双击文件在<strong>右侧标签页</strong>打开（标签内可切换该文件的多视图；需要独立窗口时右键「在新窗口打开」），安卓 / 网页端同样在右侧标签页显示（安卓上单击文件即打开、单击文件夹即进入）；双击文件夹只让右侧各视图（文件 / 看板 / 表格 / 图谱 / 地图 / 日历）定位到该目录。右键菜单按节点类型区分：文件上「打开」直接列出各视图、「操作」里是 在新窗口打开 / 打开所在位置 / 复制地址 / 系统打开；文件夹与空白处可在「新建」里建 文件夹 / Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架 / Word / Excel / PPT（Office 三种会写入一份空白文档骨架，建好即可打开编辑），并支持 复制 / 粘贴（剪贴板与「文件」视图共用）/ 重命名 / 删除。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下不再左右分栏：文件树变成<strong>整屏抽屉</strong>（工具栏左侧的开关打开、左上角 ← 收起，点文件夹 / 文件后自动收起），右侧视图始终占满整屏；返回手势会先关掉当前文件标签，再收起抽屉。' },
-        step2: { title: '🔄 多视图切换', desc: '同一个文件可切换不同视图查看：浏览（渲染）、源码编辑、可视编辑（块编辑/所见即所得）、思维导图、演示；<strong>Word / Excel / PPT</strong> 额外提供「<strong>Office 编辑</strong>」（内嵌真实办公套件，可原地编辑并保存为标准 Office 文件，默认即用该视图打开）。你可以在设置中开启/关闭不需要的视图。' },
+        step2: { title: '🔄 多视图切换', desc: '同一个文件可切换不同视图查看：浏览（渲染）、源码编辑、可视编辑（块编辑/所见即所得）、思维导图、演示；<strong>Word（.docx，旧版 .doc 只有浏览）/ Excel / PPT</strong> 额外提供「<strong>Office 编辑</strong>」（内嵌真实办公套件，可原地编辑并保存为标准 Office 文件，默认即用该视图打开）。你可以在设置中开启/关闭不需要的视图。' },
         step3: { title: '🔍 全文搜索', desc: '顶部搜索框支持按文件名和内容全文搜索，快速定位所需文件；结果双击在右侧标签页打开，打开后搜索面板保持打开，可连续打开多个结果（按 Esc 或点右上角 ✕ 关闭）。' },
         step4: { title: '🏷️ 分类管理', desc: '支持按 YAML 属性（状态等）筛选文件、「看板」视图按属性分组并快速记录 / 拖拽改属性（卡片即 Markdown 文件）、「表格」视图按列查看与整理属性（排序 / 筛选 / 批量改值 / 整块粘贴，列按当前「深度」范围的属性生成）、日历视图的甘特模式跟踪项目进度、图谱展示文件关联关系，满足不同维度的管理需求。除「文件」视图外，日历 / 看板 / 表格 / 图谱 / 地图都跟随左侧当前目录取数据；它们与文件视图共用一条顶部工具栏（多视图并排时也只有一条）：最左侧的显示 / 隐藏左侧面板开关与视图选择（单窗口模式下该开关位于右侧标签栏最左侧）+ 后退 / 前进 / 向上 / 刷新 + 可点击的路径面包屑 + 右侧搜索框（工具栏很窄时导航按钮与面包屑会自动收起，快捷键 Alt+← / Alt+→ / Backspace 仍可用），搜索框也是共用的，各视图语法一致（关键词匹配文件名 / 路径 / 属性值，另支持 状态:待办、优先级>2）；底部状态栏只放各视图自己的设置与计数。' }
       },
@@ -2201,7 +2309,7 @@ const translations = {
         },
         step3: {
           title: '预览与编辑',
-          desc: 'Markdown / 文本直接阅读，<strong>PDF / 图片 / Word</strong> 在「浏览」视图内联预览——PDF 支持翻页缩放、图片支持缩放拖拽、Word（.docx）自动转 Markdown 渲染。主机开放「可编辑 Markdown」时，远程 .md 可直接切到<strong>源码编辑</strong>并保存回主机；其他类型仍点击顶部「<strong>下载到本地</strong>」保存到当前工作区后编辑。'
+          desc: 'Markdown / 文本直接阅读，<strong>PDF / 图片 / Word</strong> 在「浏览」视图内联预览——PDF 支持翻页缩放、图片支持缩放拖拽、Word（.docx / .doc）自动转 Markdown 渲染（旧版 .doc 提取正文与表格，复杂排版不还原）。主机开放「可编辑 Markdown」时，远程 .md 可直接切到<strong>源码编辑</strong>并保存回主机；其他类型仍点击顶部「<strong>下载到本地</strong>」保存到当前工作区后编辑。'
         },
         step4: {
           title: '刷新远程目录',
@@ -2362,10 +2470,100 @@ const translations = {
         }
       }
     },
+    skillsAgents: {
+      compare: {
+        title: '🧭 一眼分清：技能 / 智能体 / 插件',
+        desc: '三者都能扩展 AI 的能力，但改的是<strong>不同层</strong>——选错层就会出现「配了却没效果」：',
+        items: [
+          '<strong>技能</strong>：一个目录 + <code>SKILL.md</code>（操作手册）。模型按需读取，改变「这件事<strong>怎么做</strong>」；装再多技能平时也只注入名称与描述，不会拖慢对话。',
+          '<strong>智能体（预设）</strong>：角色提示词 + 模型 + 逐工具白名单 + 技能 / 知识库 / MCP 绑定，决定「<strong>谁来做、能用什么</strong>」；聊天、工作流节点、集群成员、批量任务选的都是它。',
+          '<strong>插件</strong>：能执行代码的扩展（新工具 / 新界面），改变「<strong>软件能做什么</strong>」；需要声明并确认权限，与宿主同进程运行。'
+        ]
+      },
+      skill: {
+        title: '📚 技能：给 AI 的操作手册',
+        desc: '技能 = 一个文件夹，里面必须有 <code>SKILL.md</code>：frontmatter 写 <code>name</code> 与 <code>description</code>，正文写操作步骤；资源放 <code>references/</code>（按需读的文档）、<code>scripts/</code>（脚本）、<code>assets/</code>（输出模板）。系统提示里只放技能名与描述，模型判断需要时才读正文。',
+        usageTitle: '怎么用',
+        usage: [
+          '<strong>显式触发</strong>：聊天里输入 <code>$技能名 任务</code>，例如 <code>$pdf 把这份报告转成 PDF</code>。',
+          '<strong>隐式触发</strong>：直接用自然语言说任务，模型按 <code>description</code> 自动匹配。',
+          '<strong>跟预设走</strong>：在「设置 → 智能体 → 管理 → 技能」里勾选，该预设的系统提示会带上技能库清单。',
+          '<strong>管理</strong>：「设置 → 技能 → 管理」可安装（选一个技能文件夹复制进来）、启用 / 停用、编辑、打开目录、恢复默认；技能目录默认在应用数据目录的 <code>skills</code>，也可以直接把文件夹放进去后点刷新。'
+        ],
+        designTitle: '怎么设计（要点）',
+        design: [
+          '<code>description</code> 是<strong>唯一的自动触发依据</strong>：写清「做什么 + 什么场景 + 用户会怎么说」，宁可主动一点。',
+          '<code>name</code> 只用 <code>[A-Za-z0-9_-]</code>，且与目录名一致（否则 <code>$技能名</code> 触发不了）。',
+          '正文是操作手册而不是角色介绍：何时用 → 前置检查 → 步骤 → 输出格式 → 失败处理 → 检查清单。',
+          '正文控制在 500 行以内；长参考资料拆到 <code>references/</code>，并在正文写清「何时读哪份」。',
+          '引用资源用<strong>以 <code>/</code> 开头的相对路径</strong>（如 <code>/references/schema.md</code>），文件必须真实存在。',
+          '写完让「技能设计师」跑 <code>skill_dev_check</code> 自检到没有 ✗ 再交付。'
+        ]
+      },
+      agent: {
+        title: '🤖 智能体：选来就用的角色',
+        desc: '智能体 = Agent 预设：一份声明，定义角色提示词、模型、逐工具白名单，以及技能 / 知识库 / MCP 的绑定；还可以用「指令段」拼装提示词、把呈现方式切成 PTC。它不写代码，决定的是「这轮对话由谁、带着什么能力来做」。',
+        usageTitle: '怎么用',
+        usage: [
+          '<strong>聊天</strong>：主页输入框右上角 👤 选一个预设即进入智能体模式；选「通用智能体」则自主规划。',
+          '<strong>编排复用</strong>：工作流「智能体」节点、集群成员、批量 / 脚手架任务都直接引用同一个预设——改预设即改它们。',
+          '<strong>网页访客</strong>：主机在「协作 → 权限」里勾选开放的预设，访客端胶囊可切换。',
+          '<strong>管理</strong>：「设置 → 智能体 → 管理」左侧导航与插件管理同一套：安装（多选 <code>.agent</code> 文件）、新建、重新扫描、打开目录、选择目录，底栏显示存储位置。'
+        ],
+        designTitle: '怎么设计（要点）',
+        design: [
+          '先想清楚<strong>任务与交付物</strong>，再决定工具：只读分析就别开写入 / shell；开 <code>shell</code>、<code>run_subagent</code>、<code>browseWebsites</code> 要在说明里讲清理由。',
+          '<strong>工具白名单（enabledTools）是唯一权威</strong>：勾了什么才有什么；能力槽布尔只是镜像。',
+          '提示词写<strong>角色与流程</strong>，不要用「你没有权限」代替权限配置——权限由工具白名单决定。',
+          '长知识不要堆进系统提示：拆成技能（按需读）或接知识库检索（<code>kb_search</code>）。',
+          '内置预设不可覆盖：要改就「恢复默认」或复制成新预设；也可以选「智能体设计师」按需求生成——它用 <code>write_file</code> 把 <code>.agent</code> 写进预设目录，再用 <code>preset_reload</code> 载入并自检。'
+        ]
+      },
+      designer: {
+        title: '🧑‍🎨 让 AI 帮你造：三个设计师',
+        desc: '「设置 → 智能体 → 管理」内置三个「设计师」，逻辑一致：先取规范与现状 → 按你的需求生成 → 交付前自检 → 写入对应位置。',
+        items: [
+          '<strong>技能设计师</strong>：说「做一个把 CSV 汇总成报告的技能」，它会取技能目录、按 schema / 写法指南写 <code>SKILL.md</code> 与资源，再用 <code>skill_dev_check</code> 修到没有 ✗。',
+          '<strong>智能体设计师</strong>：说清任务与需要的外部能力，它会用 <code>preset_host</code> 拿预设目录、读一份最接近的 <code>.agent</code> 当底稿，然后用 <code>write_file</code> 写出新的 <code>.agent</code>，再 <code>preset_reload</code> 载入并自检（报告跳过原因与字段错误），改到没有 ✗ 才交付；内置预设（<code>builtin-*</code>）不会被覆盖。',
+          '<strong>插件设计师</strong>：要新工具 / 新界面时用它写本地插件，交付前用 <code>plugin_dev_check</code> 核对清单、API 与真实加载状态。'
+        ]
+      },
+      storage: {
+        title: '📦 存哪 · 怎么装 · 怎么改',
+        skillItems: [
+          '<strong>技能</strong>：默认 <code>userData/skills</code>，一个技能一个文件夹（文件夹里直接放 <code>SKILL.md</code>）。',
+          '「设置 → 技能 → 管理」顶部<strong>安装</strong>：选一个技能文件夹即复制进来，同名会先确认覆盖；也支持直接把文件夹放进目录后点刷新。',
+          '可换成自定义目录、在资源管理器中打开、恢复默认位置；路径持久化，重启后仍以该目录为准。',
+          '改内容：列表里选中技能 → 右侧文件树 → 内置编辑器改 <code>SKILL.md</code> 或资源文件，保存即生效（目录监听自动刷新）。'
+        ],
+        agentItems: [
+          '<strong>智能体（预设）</strong>：默认 <code>userData/agent-presets</code>，一个预设一个 <code>.agent</code> 文件；内置预设由软件按 id 提供，永不写入该目录。',
+          '「设置 → 智能体 → 管理」顶部<strong>安装</strong>：多选 <code>.agent</code> 文件导入（逐个校验 id、重名与文件名冲突）；也可以直接把文件放进目录后点重新扫描。',
+          '可换成自定义目录、重新扫描、在资源管理器中打开、恢复默认位置，或改回本地存储；路径持久化。',
+          '改内容：选中预设后右侧改名称 / 提示词 / 工具 / 技能 / 知识库 / MCP / 循环；内置预设改坏了可点「恢复默认」。'
+        ]
+      },
+      faq: {
+        title: '❓ 常见问题',
+        skillItems: [
+          '<strong>技能不触发</strong>：多半是 <code>description</code> 太泛 → 把「用户会怎么说」写进去；也可以用 <code>$技能名</code> 显式触发。',
+          '<strong><code>$技能名</code> 没反应</strong>：<code>name</code> 含中文 / 空格 / 点号 → 改成 <code>[A-Za-z0-9_-]</code>，目录名一起改。',
+          '<strong>列表里看不到</strong>：目录里没有 <code>SKILL.md</code>，或 frontmatter 解析失败（YAML 值里有 <code>: </code> 没加引号）→ 用「技能设计师」的 <code>skill_dev_check</code> 查。',
+          '<strong>读不到 references</strong>：正文里要用以 <code>/</code> 开头的相对路径（<code>/references/a.md</code>），且文件真实存在。',
+          '<strong>写错了想重来</strong>：删掉技能目录后重新安装；或让「技能设计师」改到 <code>skill_dev_check</code> 没有 ✗。'
+        ],
+        agentItems: [
+          '<strong>预设选不到 / 工具没生效</strong>：确认预设启用了该工具（工具页 / 能力槽），插件工具还需插件已加载；改完新开一轮对话。',
+          '<strong>内置预设改坏了</strong>：配置页标签栏最右侧「恢复默认」一键还原；内置预设不能删除，也不会被安装覆盖。',
+          '<strong>集群成员没跟着改</strong>：集群成员就是预设引用，改预设即改成员；删预设会让引用悬空，删除前先看有没有被用到。',
+          '<strong>想要一份新预设</strong>：从最接近的预设施改（或复制），也可以选「智能体设计师」——它直接写 <code>.agent</code>，再用 <code>preset_reload</code> 自检到没有 ✗。'
+        ]
+      }
+    },
     settings: {
       overview: {
         title: '设置总览',
-        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 数据 / 关联 / 其他）、<strong>模型</strong>（来源 / 嵌入 / 凭据）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / 抓取 / MCP / 注册表）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（预设 / 控制台 / 日志）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体预设 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
+        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 数据 / 关联 / 其他）、<strong>模型</strong>（来源 / 嵌入 / 凭据）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / 抓取 / MCP / 注册表）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（管理 / 控制台 / 日志）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体管理 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
       },
       groups: {
         basic: {
@@ -2402,7 +2600,7 @@ const translations = {
             tools: { name: '管理', desc: '逐工具开关：按能力域<strong>分组显示</strong>（文件与目录 / 对话与计划 / 联网搜索 / 代码与命令 / 知识与技能 / 子代理 / 浏览器自动化 / MCP 与插件），组头可一键全开 / 全关并显示启用数；顶部支持搜索与「只看已启用」。每行标注启用状态、沙箱偏好与审批要求。' },
             search: { name: '搜索', desc: '联网搜索源：Bing / 百度 / DuckDuckGo / Firecrawl / SearXNG / 博查 / 智谱 / Tavily / Brave / DeepSeek 官方 Search，可同时启用多个并选回退 / 聚合策略，也可添加自定义（内网）源。' },
             fetch: { name: '抓取', desc: '<strong>web_fetch 抓取通道</strong>：直接访问 / DeepSeek Fetch（官方 <code>POST /v1/tools/fetch</code>）/ 虚拟浏览器，三条通道各自开关、拖动排序即回退顺序，并可填 URL 直接测试当前通道链（见下方专述）。' },
-            mcp: { name: 'MCP', desc: 'MCP 服务增删启停，预置 <strong>6 个内置服务</strong>（见下方专述）。' },
+            mcp: { name: 'MCP', desc: 'MCP 服务增删启停，预置 <strong>8 个内置服务</strong>（见下方专述）。' },
             toolregistry: { name: '注册表', desc: '只读查看主进程<strong>实际注册</strong>的工具（名称 / 参数 schema / 作用域，含插件工具；MCP 服务工具不在此列）。<strong>启用状态默认不显示</strong>，用左侧下拉选口径：<strong>全局默认</strong>（「工具管理」的白名单）、某个<strong>智能体预设</strong>（该预设能力槽）、或某个<strong>运行中的会话</strong>（它实际下发给模型的清单）。选了口径后，不在其中的工具会灰化并标出「未启用 / 已禁用 / 不在本会话」；预设口径还会列出注册表里没有的工具（插件未加载 / 由渲染层实现）。' }
           }
         },
@@ -2412,20 +2610,20 @@ const translations = {
             plugin: { name: '管理', desc: '本地插件（工具 / 界面扩展）的发现、启用停用、重载、日志、配置、详情与移除，行内动作都是图标按钮（悬停看说明）；标题栏下方的<strong>搜索框</strong>可按名称 / 插件 id / 文件夹 / 权限 / 工具 / 服务 / 描述 / 状态过滤列表（计数显示「匹配数 / 总数」），标题旁的 ⚠️ 图标悬停可看<strong>安全提示</strong>。插件既能给智能体加工具，也能加界面——主面板（自动出现在导航栏）、设置页签、设置卡片、集群工作台页签，还能注册全局快捷键、提供中英文案；插件可用的宿主能力：<strong>文件</strong>（<code>ctx.fs</code> 读文本 / 读表格 / 读二进制 / 写入（可带版本做乐观并发）/ 只改一处，<code>ctx.files</code> 选文件 / 选文件夹 / 选可写文件夹 / PDF 页面预览，权限 <code>fs</code>，且只能访问你在该插件里亲自选过的路径，<strong>选过一次就会记住（重启软件后不用重选）</strong>，可在「数据 → 文件授权」里逐条或一键撤销，卸载插件会一并清掉），另有<strong>大模型</strong>（<code>ctx.llm</code>：可选来源与模型、结构化输出、边出边显示，权限 <code>llm</code>）、<strong>委派智能体</strong>（<code>ctx.agent</code> / <code>ctx.agents</code>，权限 <code>agent.run</code>）、<strong>生图</strong>（<code>ctx.image</code>，权限 <code>image</code>）、只读的应用信息（预设智能体清单）与<strong>语音朗读</strong>（把一段文本交给应用自带 TTS 念出来，引擎与音色跟随「设置 → 语音」，无需权限）。可从文件夹安装插件包（<code>package.json</code> + <code>aikm</code> 清单），移除时可选择连磁盘文件一起删除；插件目录默认 <code>userData/plugins</code>，也可像技能那样指定到自己的文件夹。<strong>插件可以分文件夹存放</strong>：直接放在插件目录下、或按用途放进各级子文件夹都行（会扫描到第 4 层，插件自己的 <code>node_modules</code> / 隐藏目录不会被误认），列表里每个插件都标出它属于哪个文件夹；<strong>新写的插件会自动发现</strong>（约 1 秒内装载并出现在界面上，不必重启，也不必手动扫描），手动点目录栏的<strong>重新扫描</strong>（🔍+）可作为兜底。每个插件还有<strong>数据</strong>管理（🗄️ 图标）：能看到它占用了多少（设置存 localStorage、存档等大文件存本机 OPFS 的 <code>plugins/&lt;插件 id&gt;/</code>、插件私有数据存主进程的 <code>plugins-data/&lt;插件 id&gt;/</code>），列出每一项明细并可逐项或一键清除，占用不为零时列表里会直接显示大小。<strong>点「重新载入」会连界面半边一起重载</strong>（改完插件的界面代码不必重启软件）；界面半边装载失败时，插件卡片上会直接标出「界面半边装载失败」并给出原因，点「重新载入」即可重试。插件与主进程同进程运行、<strong>不受工作区沙箱保护</strong>，启用前会先列出它申请的权限并要求确认。' },
             'plugin-perms': { name: '权限', desc: '一张表看清你<strong>授予</strong>了插件什么：<strong>声明权限</strong>（权限本身由插件清单决定，这一页改不了它）、<strong>委派同意</strong>、每插件可调的<strong>额度</strong>（并发 × 每小时，默认 1 / 20，上限 3 / 200；旁边是本小时已用，可一键重置）、<strong>工具审批</strong>（声明了 <code>fs</code> / <code>shell</code> 的插件，其工具默认要你确认——点状态图标在「每次询问 / 已允许 / 已拒绝」之间切换，悬停可看到哪些工具会问），以及<strong>工作目录</strong>（被委派智能体在哪个目录里工作：相对路径按它解析、写入也围在它里面，所以只能从你授权过的「可写」文件夹里选，默认 = 知识库根；<strong>它不是沙箱</strong>，命令仍能离开该目录），以及<strong>放宽被委派智能体的工具面</strong>——默认关闭：打开「文件」（<strong>双条件</strong>，还需插件自己声明了 <code>fs</code>）或「MCP」（只含你在 MCP 服务里配置并启用的服务）之后，被委派的智能体才会拿到对应工具。命令执行 / 代码执行 / 技能 / 递归委派<strong>不可放宽</strong>（插件要做这些得自己声明对应权限）。额度与开关都落在主进程、写入前需确认，卸载插件会一并清掉。表头与状态都用图标，悬停看说明。' },
             'plugin-store': { name: '商店', desc: '把<strong>共享目录</strong>当成插件来源：粘贴「协作 → 共享」里那条 <code>remote-fs://ip:port?token=…</code> 地址（或点「本机共享目录」）即可浏览其中的插件并一键安装，无需新协议——共享服务本来就是只读 + 令牌的 HTTP 服务，商店清单由它实时扫描生成（把插件 / 技能文件夹放进共享目录、可分类放子文件夹，不用手写索引文件）。安装前会列出该插件申请的权限并要求确认，装好后可在「管理」里启用 / 重载 / 卸载；同一地址也能加成技能商店的来源。' },
-            'plugin-dev': { name: '开发', desc: '写插件的地方：可以把「通用开发指令」整段复制给任意大模型（产出的文件放进插件目录就能启用），也可以<strong>直接在对话里选「插件开发智能体」</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>（8 个短工具：<code>plugin_dev_host</code> / <code>plugin_dev_constraints</code> / <code>plugin_dev_manifest</code> / <code>plugin_dev_api</code>（界面半边基础）/ <code>plugin_dev_api_caps</code>（界面半边能力：<code>ctx.fs</code> 文件 / <code>ctx.llm</code> 模型 / <code>ctx.agent</code> 委派 / <code>ctx.image</code> 生图 / <code>ctx.tts</code> 语音）/ <code>plugin_dev_api_main</code>（主进程半边）/ <code>plugin_dev_faq</code> / <code>plugin_dev_templates</code>；最小可运行示例用 templates 的 <code>minimal</code> 取），能按需分批拿到这份官方参考（约束 / 清单字段 / 槽位 / 宿主 API / 最小示例）与本机插件目录路径，不需要你手动粘贴，也不会去磁盘上找软件源码。<strong>插件文件夹命名规则在开发指令、模板、硬约束与本 MCP 服务里都会先说明</strong>：文件夹名必须等于清单 <code>aikm.id</code>，且只能用 ASCII 小写 <code>[a-z0-9._-]</code>；带中文 / 大写 / 空格的目录名会被宿主整目录跳过（列表里不出现，管理页会提示），中文写进 <code>aikm.name</code> 与界面文案。页内还有<strong>界面插件 / 设置页签与设置卡片 / 图表 / 工具插件 / 大模型与文件能力</strong>等多个模板（设置页签那节还给了可用的设置分组 id 与设置页 id 清单——分组写错会多出一个同名的「插件」一级菜单）、<strong>排障指令</strong>（把「插件 → 管理 → 日志」里的报错一起粘给模型让它改）、从零开始的最小可运行示例、清单 / 槽位 / API 速查表，以及「如何使用插件」的完整步骤（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载）。' }
+            'plugin-dev': { name: '开发', desc: '写插件的地方：可以把「通用开发指令」整段复制给任意大模型（产出的文件放进插件目录就能启用），也可以<strong>直接在对话里选「插件设计师」</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>（8 个短工具：<code>plugin_dev_host</code> / <code>plugin_dev_constraints</code> / <code>plugin_dev_manifest</code> / <code>plugin_dev_api</code>（界面半边基础）/ <code>plugin_dev_api_caps</code>（界面半边能力：<code>ctx.fs</code> 文件 / <code>ctx.llm</code> 模型 / <code>ctx.agent</code> 委派 / <code>ctx.image</code> 生图 / <code>ctx.tts</code> 语音）/ <code>plugin_dev_api_main</code>（主进程半边）/ <code>plugin_dev_faq</code> / <code>plugin_dev_templates</code>；最小可运行示例用 templates 的 <code>minimal</code> 取），能按需分批拿到这份官方参考（约束 / 清单字段 / 槽位 / 宿主 API / 最小示例）与本机插件目录路径，不需要你手动粘贴，也不会去磁盘上找软件源码。<strong>插件文件夹命名规则在开发指令、模板、硬约束与本 MCP 服务里都会先说明</strong>：文件夹名必须等于清单 <code>aikm.id</code>，且只能用 ASCII 小写 <code>[a-z0-9._-]</code>；带中文 / 大写 / 空格的目录名会被宿主整目录跳过（列表里不出现，管理页会提示），中文写进 <code>aikm.name</code> 与界面文案。页内还有<strong>界面插件 / 设置页签与设置卡片 / 图表 / 工具插件 / 大模型与文件能力</strong>等多个模板（设置页签那节还给了可用的设置分组 id 与设置页 id 清单——分组写错会多出一个同名的「插件」一级菜单）、<strong>排障指令</strong>（把「插件 → 管理 → 日志」里的报错一起粘给模型让它改）、从零开始的最小可运行示例、清单 / 槽位 / API 速查表，以及「如何使用插件」的完整步骤（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载）。' }
           }
         },
         skills: {
           title: '🧩 技能',
           items: {
-            manage: { name: '管理', desc: '技能文件管理：启用 / 停用、编辑（对话中用 $技能名 触发）。' },
+            manage: { name: '管理', desc: '技能文件管理：左侧导航与「插件 → 管理」同一套——顶部<strong>安装</strong>（选一个技能文件夹，复制进技能目录）／刷新／打开目录／选择目录／恢复默认，下方搜索与技能列表，底栏显示数量与技能目录；列表里可启用 / 停用、编辑（对话中用 $技能名 触发）。技能默认存在<strong>应用数据目录的 <code>skills</code></strong>（开箱即用，不用先选目录），也可以直接把技能文件夹放进该目录后点刷新。选「技能设计师」可让它按规范写一个新技能（交付前用 <code>skill_dev_check</code> 自检）。' },
             store: { name: '商店', desc: '从 GitHub 等远程源搜索技能并一键下载安装。' }
           }
         },
         agent: {
           title: '🤖 智能体',
           items: {
-            presets: { name: '预设', desc: '角色 / 模型 / 系统提示与逐工具能力，对话中点 👤 使用；内置「通用智能体」「代码智能体」「办公智能体」「PTC 智能体」「插件开发智能体」与「Pi 智能体」「DSH 智能体」「Codex 智能体」八个预设，开箱可用、可编辑，但不可删除（后三个对照开源 harness 的提示词结构与工具编排：Pi 极简、不设计划与子智能体；DSH 用<strong>指令段</strong>组装人格与能力并带运行护栏；Codex 按只读 / 工作区写入 / 完全访问三档沙箱描述行动边界）。<strong>改坏了不用担心</strong>：内置预设的配置页标签栏最右侧有「恢复默认」，确认后即可把名称 / 模型 / 系统提示 / 工具 / 技能 / MCP / 指令段整体还原成出厂值（用户自建预设不显示该按钮）。「工具」页还可把<strong>呈现方式</strong>切到 PTC（程序化工具调用）＝模型只看到 <code>run_code</code>，用一段程序组合调用该预设启用的工具。' },
+            presets: { name: '管理', desc: '角色 / 模型 / 系统提示与逐工具能力，对话中点 👤 使用；内置十个预设（通用 / 代码 / 办公 / PTC / Pi / DSH / Codex，加上排在最后的三个「设计师」：<strong>技能设计师</strong>、<strong>智能体设计师</strong>、<strong>插件设计师</strong>），开箱可用、可编辑，但不可删除（Pi / DSH / Codex 对照开源 harness 的提示词结构与工具编排：Pi 极简、不设计划与子智能体；DSH 用<strong>指令段</strong>组装人格与能力并带运行护栏；Codex 按只读 / 工作区写入 / 完全访问三档沙箱描述行动边界）。<strong>三个设计师让 AI 在对话里造东西</strong>：技能设计师写技能（规范与自检见内置 MCP 服务 <code>builtin-skill-dev</code>，交付前必须自检到没有 ✗）、智能体设计师建 / 改预设（<code>write_file</code> 写 <code>.agent</code> + <code>preset_reload</code> 自检，内置预设不会被覆盖）、插件设计师写本地插件（<code>builtin-plugin-dev</code>）。<strong>改坏了不用担心</strong>：内置预设的配置页标签栏最右侧有「恢复默认」，确认后即可把名称 / 模型 / 系统提示 / 工具 / 技能 / MCP / 指令段整体还原成出厂值（用户自建预设不显示该按钮）。「工具」页还可把<strong>呈现方式</strong>切到 PTC（程序化工具调用）＝模型只看到 <code>run_code</code>，用一段程序组合调用该预设启用的工具。<strong>预设存哪</strong>：出厂默认存到<strong>应用数据目录的 <code>agent-presets</code></strong>（每个预设一个 <code>.agent</code> 文件）；点左上角文件夹按钮或侧栏存储 chip 可换成别的文件夹、重新扫描、在资源管理器中打开、改回本地存储或恢复默认位置，路径会持久化，内置预设永不写入该目录。<strong>左侧导航与「插件 → 管理」同一套</strong>：顶部<strong>安装</strong>（多选 <code>.agent</code> 文件导入到预设文件夹）／新建／重新扫描／打开目录／选择目录，下方搜索，底栏显示数量与目录；设置导航里这一页已更名为「<strong>管理</strong>」。' },
             console: { name: '控制台', desc: '实时查看执行计划、任务清单、工具调用时间线与后台任务。' },
             log: { name: '日志', desc: '会话事件日志（JSONL）：事件流、消息派发与完整性。' }
           }
@@ -2503,7 +2701,7 @@ const translations = {
       },
       builtinMcp: {
         title: '🧩 内置 MCP 服务（随软件预置）',
-        overview: '设置 → 工具 → <strong>MCP</strong> 面板中预置了六个<strong>进程内内置服务</strong>（启动 / 进入设置页时自动注入、默认启用并自动连接、<strong>不可删除</strong>）：它们不依赖外部进程，其工具可被通用智能体 / Agent 预设 / 工作流 MCP 节点调用，也可「对外 HTTP 暴露」供 Claude Desktop、Cursor 等其他 MCP 客户端接入（见左侧「内置服务：对外 HTTP 暴露」开关）。',
+        overview: '设置 → 工具 → <strong>MCP</strong> 面板中预置了八个<strong>进程内内置服务</strong>（启动 / 进入设置页时自动注入、默认启用并自动连接、<strong>不可删除</strong>）：它们不依赖外部进程，其工具可被通用智能体 / Agent 预设 / 工作流 MCP 节点调用；其中六个也可「对外 HTTP 暴露」供 Claude Desktop、Cursor 等其他 MCP 客户端接入（见左侧「内置服务：对外 HTTP 暴露」开关）。',
         browser: {
           name: '内置浏览器 Agent（builtin-browser）',
           desc: '提供<strong>AI 可控制的真实浏览器窗口</strong>（多标签），暴露 browser_navigate / list_tabs / new_tab / switch_tab / close_tab / get_html / extract_text / extract_markdown / screenshot / click / type / scroll 等 browser_* 工具，让 AI 可以上网查资料、点击填表、抓取并整理页面内容；由主进程浏览器 Agent 服务实现，入口见「知识管理」章节的「浏览器操作」。'
@@ -2526,7 +2724,15 @@ const translations = {
         },
         pluginDev: {
           name: '插件开发参考（builtin-plugin-dev）',
-          desc: '把官方<strong>插件开发指南</strong>作为 MCP 服务提供，按主题拆成 <strong>8 个短工具</strong>（每次只回几百到四千字，小模型也吃得下）：<strong>plugin_dev_host</strong>（本机插件目录的<strong>绝对路径</strong> / 已装插件清单 / 可申请的权限 / 数据放哪）、<strong>plugin_dev_constraints</strong>（15 条硬性约束，含「只准调用指南列出的宿主 API、界面 / 主进程两半边不能混用」「两套失败形态：<code>ctx.fs</code> 抛 <code>FS_*</code> 码，<code>ctx.image</code> / <code>ctx.llm.stream</code> / <code>ctx.agents</code> 看 ok / finish / termination」「用到的能力必须写进 permissions」与「canvas 2D 不认 CSS 变量」）、<strong>plugin_dev_manifest</strong>（<code>package.json</code> 清单字段 + 内置槽位 + 可直接照抄的清单）、<strong>plugin_dev_api</strong>（<strong>界面半边基础</strong> client.mjs 的 API 速查 + 最小可运行示例全文）、<strong>plugin_dev_api_caps</strong>（<strong>界面半边能力</strong>：<code>ctx.fs</code> 文件 / <code>ctx.llm</code> 模型与流 / <code>ctx.agent</code> 与 <code>ctx.agents</code> 委派 / <code>ctx.image</code> 生图 / <code>ctx.tts</code> 语音，含各自的权限与失败形态）、<strong>plugin_dev_api_main</strong>（<strong>主进程半边</strong> index.mjs 的 API 速查 + 注册工具的最小示例全文）、<strong>plugin_dev_faq</strong>（报错对照，含 <code>FS_*</code> 错误码与 <code>ok=false</code> 被当成成功）、<strong>plugin_dev_templates</strong>（模板目录与安装步骤，正文用 <code>key</code> 逐取，如 <code>{"key":"panel"}</code>，另有 <code>llm-files</code> / <code>image</code> 可照抄示例），另有 <strong>plugin_dev_check</strong>（自检：目录名能否作为插件 id、清单 / 入口文件、<strong>是否用了宿主不存在的 ctx 成员</strong>（如 ctx.service / ctx.files.readFile 会逐条报出并给出正解，两半边 ctx 串用也会报）、<strong>用到的能力是否申请了权限</strong>、<strong>订阅的事件类型是否真的会触发</strong>、<strong>漏 await / 返回形状用错 / 观察器没断开 / 把 <code>ctx.locale</code> 的 ref 当字符串用（提示显示 <code>[object Object]</code>）</strong>这类「不报错但没数据」的陷阱，用宿主<strong>同一份</strong>校验逻辑，并返回<strong>宿主真实的加载状态与日志</strong>，含界面半边装载失败的原因；老写法只给「建议迁移」提示）——内容与「设置 → 插件 → 开发」页同源。<strong>插件开发智能体</strong>默认已绑定本服务（经 mcp_call 调用）；其它智能体、工作流 MCP 节点、以及外部 MCP 客户端（<code>/mcp/builtin-plugin-dev</code>）都能用它，从而不必去磁盘上找软件源码。'
+          desc: '把官方<strong>插件开发指南</strong>作为 MCP 服务提供，按主题拆成 <strong>8 个短工具</strong>（每次只回几百到四千字，小模型也吃得下）：<strong>plugin_dev_host</strong>（本机插件目录的<strong>绝对路径</strong> / 已装插件清单 / 可申请的权限 / 数据放哪）、<strong>plugin_dev_constraints</strong>（15 条硬性约束，含「只准调用指南列出的宿主 API、界面 / 主进程两半边不能混用」「两套失败形态：<code>ctx.fs</code> 抛 <code>FS_*</code> 码，<code>ctx.image</code> / <code>ctx.llm.stream</code> / <code>ctx.agents</code> 看 ok / finish / termination」「用到的能力必须写进 permissions」与「canvas 2D 不认 CSS 变量」）、<strong>plugin_dev_manifest</strong>（<code>package.json</code> 清单字段 + 内置槽位 + 可直接照抄的清单）、<strong>plugin_dev_api</strong>（<strong>界面半边基础</strong> client.mjs 的 API 速查 + 最小可运行示例全文）、<strong>plugin_dev_api_caps</strong>（<strong>界面半边能力</strong>：<code>ctx.fs</code> 文件 / <code>ctx.llm</code> 模型与流 / <code>ctx.agent</code> 与 <code>ctx.agents</code> 委派 / <code>ctx.image</code> 生图 / <code>ctx.tts</code> 语音，含各自的权限与失败形态）、<strong>plugin_dev_api_main</strong>（<strong>主进程半边</strong> index.mjs 的 API 速查 + 注册工具的最小示例全文）、<strong>plugin_dev_faq</strong>（报错对照，含 <code>FS_*</code> 错误码与 <code>ok=false</code> 被当成成功）、<strong>plugin_dev_templates</strong>（模板目录与安装步骤，正文用 <code>key</code> 逐取，如 <code>{"key":"panel"}</code>，另有 <code>llm-files</code> / <code>image</code> 可照抄示例），另有 <strong>plugin_dev_check</strong>（自检：目录名能否作为插件 id、清单 / 入口文件、<strong>是否用了宿主不存在的 ctx 成员</strong>（如 ctx.service / ctx.files.readFile 会逐条报出并给出正解，两半边 ctx 串用也会报）、<strong>用到的能力是否申请了权限</strong>、<strong>订阅的事件类型是否真的会触发</strong>、<strong>漏 await / 返回形状用错 / 观察器没断开 / 把 <code>ctx.locale</code> 的 ref 当字符串用（提示显示 <code>[object Object]</code>）</strong>这类「不报错但没数据」的陷阱，用宿主<strong>同一份</strong>校验逻辑，并返回<strong>宿主真实的加载状态与日志</strong>，含界面半边装载失败的原因；老写法只给「建议迁移」提示）——内容与「设置 → 插件 → 开发」页同源。<strong>插件设计师</strong>默认已绑定本服务（经 mcp_call 调用）；其它智能体、工作流 MCP 节点、以及外部 MCP 客户端（<code>/mcp/builtin-plugin-dev</code>）都能用它，从而不必去磁盘上找软件源码。'
+        },
+        agentPreset: {
+          name: '智能体设计参考（builtin-agent-preset）',
+          desc: '让 AI <strong>自己创建 / 修改 Agent 预设</strong>的 MCP 服务，共 10 个工具：<strong>preset_schema</strong>（字段规范 + 硬规则 + 六步工作流）、<strong>preset_capabilities</strong>（能力槽 ↔ 工具名对照 + 四套常见组合）、<strong>preset_example</strong>（两份可照抄的完整 JSON）、<strong>preset_host</strong>（现在是本地存储还是文件夹模式 / 目录路径 / 内置与自建数量）、<strong>preset_list</strong>（现有预设摘要 + 可用工具名 / 技能 / 知识库 / MCP 服务清单）、<strong>preset_get</strong>（单个预设完整 JSON，当底稿改）、<strong>preset_validate</strong>（<strong>干跑校验</strong>：错字段名 / 未知工具名 / 重名 / 非法 id / 越界数值逐条报出，能自动修的记进「已自动修正」）、<strong>preset_write</strong>（<strong>首选写通道</strong>：内部再校验一次，有错直接拒；只能写自建预设，<code>builtin-*</code> 一律拒绝；文件夹模式下写入后落 .agent 文件）、<strong>preset_reload</strong>（AI 用 <code>write_file</code> 直接写了 .agent 之后重新扫描：报告载入 / 跳过原因 + 字段校验结果）、<strong>preset_delete</strong>（删除自建预设）。读写在<strong>渲染层</strong>执行（预设的单一事实源在应用里），所以需要桌面端智能体会话；外部 MCP 客户端只能读前三个静态话题。<strong>智能体设计师</strong>默认已绑定本服务，但写入走文件：它用 <code>write_file</code> 把 <code>.agent</code> 写进预设目录，再用 <code>preset_reload</code> 载入并自检（本服务的 <code>preset_validate</code> / <code>preset_write</code> 仍可供其它智能体使用）。'
+        },
+        skillDev: {
+          name: '技能设计参考（builtin-skill-dev）',
+          desc: '供 AI 编写技能的 MCP 服务，共 7 个工具：<strong>skill_dev_host</strong>（技能目录的<strong>绝对路径</strong> / 是否默认位置 / 已装技能清单 / 怎么触发与刷新）、<strong>skill_dev_schema</strong>（目录结构 references·scripts·assets + frontmatter 字段表 + <code>$技能名</code> 触发规则 + <code>/</code> 相对路径约定）、<strong>skill_dev_writing</strong>（description 怎么写才会触发、三层渐进披露、正文骨架、祈使句与示例、五条反模式）、<strong>skill_dev_constraints</strong>（14 条硬约束：目录名 = name、UTF-8、YAML 冒号要加引号、资源必须真实存在、正文与总大小上限、不写越权内容…）、<strong>skill_dev_templates</strong>（minimal / playbook / scripted / reference 四份可照抄模板，用 <code>key</code> 逐个取）、<strong>skill_dev_faq</strong>（不触发 / 触发过频 / <code>$</code> 没反应 / 列表里看不到 / 读不到 references / 改了不生效 / 重名覆盖…）、<strong>skill_dev_check</strong>（自检：SKILL.md 与 frontmatter 能否解析、name 与目录是否一致、description 是否像触发器、正文体积、引用的资源是否存在、是否与已装技能重名，返回 ✗ / ! / · 与结论）。技能目录默认在<strong>应用数据目录的 <code>skills</code></strong>，可在「设置 → 技能 → 管理」换成别的文件夹，也可一键恢复默认。<strong>技能设计师</strong>默认已绑定本服务。'
         },
         note: {
           title: '📌 使用提示：',
@@ -2857,6 +3063,14 @@ const translations = {
         title: 'Browser',
         subtitle: 'Built-in browsing with AI web actions'
       },
+      'skills': {
+        title: 'Skills',
+        subtitle: 'A playbook for the model: how'
+      },
+      'agents': {
+        title: 'Agents',
+        subtitle: 'A role you pick: who'
+      },
       'plugins': {
         title: 'Plugins',
         subtitle: 'Extend tools & UI'
@@ -3000,7 +3214,7 @@ const translations = {
           { title: 'Source edit', desc: 'Monaco editor over the raw Markdown (incl. YAML front matter), with AI assistance and drag-and-drop to create reference links; code and data files such as <code>.py</code> / <code>.json</code> open as text here too.' },
           { title: 'Visual edit (blocks)', desc: 'Block-based rich text: type <code>/</code> for the block menu, and the block handle’s “Convert to” switches between heading / list / table / code.' },
           { title: 'Mind map / Presentation', desc: 'The mind map follows heading levels; Presentation turns Markdown into slides (split by <code>---</code> or smart splitting, with outline / full-screen / themes); both turn pages with a left / right swipe on touch screens.' },
-          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>page-by-page / full-document translation</strong> (the full result does not overlay the pages and can be exported as a <strong>PDF with the translations overlaid</strong> on the original pages); Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' },
+          { title: 'Other document types', desc: 'Word is converted to Markdown for preview and can be exported back; PDF supports paging, zoom, OCR and <strong>page-by-page / full-document translation</strong> (the full result does not overlay the pages and can be exported as a PDF; under Translation settings → Layout choose <strong>Overlay</strong> — original pages preserved with translations placed over the source paragraphs and kept clear of figures, or <strong>Side by side</strong> — original page on the left, translation on the right); Excel becomes a Markdown table; images / video / plain text have their own previews; local web pages (<code>.html</code> / <code>.htm</code>) open in the <strong>built-in browser</strong>.' },
           { title: 'Mermaid diagrams (.mmd / .mermaid)', desc: 'The <strong>Browse</strong> view renders the whole source file as one diagram — click it to zoom, pan and export PNG / SVG; the <strong>Source</strong> view edits the text. A render error shows the message and the source in place; an empty file opens directly in Source view.' },
           { title: 'PDF page management', desc: 'The “Manage pages…” item (pinned at the bottom of the PDF context menu) turns the document into one-thumbnail-per-page cards: <strong>merge</strong> other PDFs in, <strong>delete</strong> selected pages, <strong>drag to reorder</strong>, and <strong>rotate</strong> a page, the selection, or <strong>all pages</strong> (toolbar “All left / All right”). Confirming rebuilds the file with pdf-lib — overwrite the original or save as a new PDF (remote previews can only be saved as new). “Translation”, “Reading theme” and “Rotate view” are submenus; the view rotation applies to the <strong>whole document</strong> and is display-only.' }
         ]
@@ -3252,7 +3466,7 @@ const translations = {
       features: {
         title: 'Core Features',
         step1: { title: '📂 File Browsing', desc: 'File tree on the left shows directory structure. Expand / collapse with the arrow on the left of a node (a plain click no longer opens or closes it); on desktop, click / double-click a file to open it in a separate window (open several windows side by side for comparison), while on Android / the web it opens in an in-app overlay window above the main UI (same idea as Settings; on Android a single tap opens a file and a single tap on a folder enters it). Double-clicking a folder brings every view on the right (Files / Kanban / Table / Graph / Map / Calendar) to that folder. The context menu adapts to the node: on a file, "Open" lists the views directly while "Actions" holds Reveal in Folder / Copy Path / System; on a folder or the empty area, "New" creates a folder / Markdown / Excalidraw / draw.io / workflow / data-canvas / scaffold / Word / Excel / PPT file (the Office types get a blank document skeleton written in, so they are ready to edit), plus Copy / Paste (clipboard shared with the file view) / Rename / Delete.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) there is no longer a side-by-side split: the file tree becomes a <strong>full-screen drawer</strong> (open it with the panel switch in the toolbar, close it with the ← inside it or by tapping a folder / file) and the view on the right always fills the screen.' },
-        step2: { title: '🔄 Multi-View Switching', desc: 'The same file can be viewed in different modes: Browse (rendered), Edit (source), Visual edit (block / WYSIWYG), Mindmap, Presentation; <strong>Word / Excel / PPT</strong> additionally offer <strong>Office edit</strong> — a real, embedded office suite that edits the document in place and saves a standard Office file (it is the default view for those types). You can enable/disable views in Settings.' },
+        step2: { title: '🔄 Multi-View Switching', desc: 'The same file can be viewed in different modes: Browse (rendered), Edit (source), Visual edit (block / WYSIWYG), Mindmap, Presentation; <strong>Word (.docx; legacy .doc is browse-only) / Excel / PPT</strong> additionally offer <strong>Office edit</strong> — a real, embedded office suite that edits the document in place and saves a standard Office file (it is the default view for those types). You can enable/disable views in Settings.' },
         step3: { title: '🔍 Full-Text Search', desc: 'The top search bar searches filenames and full text to quickly locate files. Double-click a result to open it in a separate window; the search panel stays open so several results can be opened in a row (close it with Esc or ✕).' },
         step4: { title: '🏷️ Organization', desc: 'Filter files by YAML attribute (status and more), group and capture on the "Kanban" view (each card is a Markdown file, drag to change an attribute), review and tidy attributes column by column in the "Table" view (sort / filter / batch edit / block paste; its columns come from the attributes inside the current depth), track project timelines with the Calendar view\u2019s Gantt mode, and explore file relationships in the Graph. Except Files, every global view reads the folder selected on the left and they all share one top toolbar (a single bar even when several views are side by side): a leftmost show / hide left panel switch and view selector (in single-window mode that switch sits at the far left of the tab bar) + back / forward / up / refresh + a clickable path breadcrumb + a shared search box (when the toolbar gets very narrow the nav buttons and breadcrumb collapse; the Alt+← / Alt+→ / Backspace shortcuts still work) whose syntax is identical everywhere (keywords match file name / path / attribute values, plus 状态:todo or 优先级>2); the bottom status bar keeps only each view\u2019s own settings and counters.' }
       },
@@ -3374,7 +3588,7 @@ const translations = {
         },
         step3: {
           title: 'Preview & Edit',
-          desc: 'Markdown / text read directly; <strong>PDF / image / Word</strong> preview inline in the Browse view — PDF with page flip & zoom, image with zoom & drag, Word (.docx) auto-converted to Markdown. When the host allows Markdown editing, remote .md files can switch to the <strong>source editor</strong> and save back to the host; other types still use "<strong>Download to Local</strong>" before editing.'
+          desc: 'Markdown / text read directly; <strong>PDF / image / Word</strong> preview inline in the Browse view — PDF with page flip & zoom, image with zoom & drag, Word (.docx / .doc) auto-converted to Markdown (.doc keeps body text and tables; complex layout is not preserved). When the host allows Markdown editing, remote .md files can switch to the <strong>source editor</strong> and save back to the host; other types still use "<strong>Download to Local</strong>" before editing.'
         },
         step4: {
           title: 'Refresh Remote Directory',
@@ -3535,10 +3749,100 @@ const translations = {
         }
       }
     },
+    skillsAgents: {
+      compare: {
+        title: '🧭 Skills vs Agents vs Plugins',
+        desc: 'All three extend what AI can do, but at <strong>different layers</strong> — picking the wrong layer is why “I configured it but nothing happens”:',
+        items: [
+          '<strong>Skill</strong>: a folder with a <code>SKILL.md</code> (a playbook). The model reads it on demand; it changes <strong>how</strong> a task is done. Adding many skills costs nothing up front — only names and descriptions are injected.',
+          '<strong>Agent (preset)</strong>: role prompt + model + per-tool whitelist + skills / knowledge base / MCP bindings; it decides <strong>who does the work and with what</strong>. Chats, workflow agent nodes, swarm members and batch tasks all select one.',
+          '<strong>Plugin</strong>: an executable extension (new tools / new UI); it changes <strong>what the app can do</strong>, requires declared permissions and runs in the host process.'
+        ]
+      },
+      skill: {
+        title: '📚 Skills: a playbook for the model',
+        desc: 'A skill is a folder that must contain <code>SKILL.md</code>: frontmatter with <code>name</code> and <code>description</code>, then the steps as Markdown. Resources go into <code>references/</code> (read on demand), <code>scripts/</code> and <code>assets/</code>. Only the name and description stay in the system prompt; the body is read when the model decides it needs it.',
+        usageTitle: 'How to use',
+        usage: [
+          '<strong>Explicit</strong>: type <code>$skill-name task</code> in chat, e.g. <code>$pdf turn this report into a PDF</code>.',
+          '<strong>Implicit</strong>: just describe the task; the model matches it against <code>description</code>.',
+          '<strong>Per preset</strong>: tick the skill under Settings → Agent → Manage → Skills, and that preset’s system prompt carries the skill catalog.',
+          '<strong>Manage</strong>: Settings → Skills → Manage — install (pick a skill folder to copy in), enable / disable, edit, open the folder, restore the default. Skills live by default in the application data folder → <code>skills</code>; dropping a folder there and hitting refresh also works.'
+        ],
+        designTitle: 'How to design (essentials)',
+        design: [
+          '<code>description</code> is the <strong>only automatic trigger</strong>: say what it does, when it applies and how users phrase it — leaning slightly “pushy” is better than missing the trigger.',
+          '<code>name</code> must use <code>[A-Za-z0-9_-]</code> only and match the folder name, otherwise <code>$skill-name</code> cannot trigger it.',
+          'The body is a playbook, not a persona: when to use → prerequisites → steps → output format → failure handling → checklist.',
+          'Keep the body under ~500 lines; move long material into <code>references/</code> and state clearly when to read which file.',
+          'Reference resources with a <strong><code>/</code>-prefixed relative path</strong> (e.g. <code>/references/schema.md</code>) and make sure the file exists.',
+          'Finish by running <code>skill_dev_check</code> through Skill Designer until there are no ✗.'
+        ]
+      },
+      agent: {
+        title: '🤖 Agents: a role you pick',
+        desc: 'An agent is an Agent preset: a declarative document defining the role prompt, model, per-tool whitelist and skills / knowledge base / MCP bindings, optionally assembling the prompt from <strong>sections</strong> or switching the presentation to PTC. It writes no code — it decides who runs the turn and with what capabilities.',
+        usageTitle: 'How to use',
+        usage: [
+          '<strong>Chat</strong>: pick a preset from 👤 at the top-right of the composer to enter agent mode; “General Agent” plans autonomously.',
+          '<strong>Reuse in orchestration</strong>: workflow agent nodes, swarm members and batch / scaffold tasks all reference the same preset — editing the preset edits them.',
+          '<strong>Web guests</strong>: the host ticks presets under Collaboration → Permissions and guests can switch from their pill.',
+          '<strong>Manage</strong>: Settings → Agent → Manage uses the same left nav as Plugins → Manage: install (pick one or more <code>.agent</code> files), new, rescan, open folder, select folder, with the storage location in the footer.'
+        ],
+        designTitle: 'How to design (essentials)',
+        design: [
+          'Decide the <strong>task and the deliverable</strong> before the tools: read-only analysis needs no write / shell; explain why when enabling <code>shell</code>, <code>run_subagent</code> or <code>browseWebsites</code>.',
+          'The <strong>tool whitelist (enabledTools) is authoritative</strong>: only ticked tools exist; capability booleans are just mirrors.',
+          'Write <strong>role and process</strong> in the prompt — never “you have no permission” as a substitute for configuration; permissions come from the whitelist.',
+          'Do not stuff long knowledge into the system prompt: make it a skill (read on demand) or attach a knowledge base (<code>kb_search</code>).',
+          'Built-in presets cannot be overwritten: reset them or copy into a new preset; or let Agent Designer generate one, which dry-runs validation before writing.'
+        ]
+      },
+      designer: {
+        title: '🧑‍🎨 Let AI build it: the three designers',
+        desc: 'Settings → Agent → Manage ships three “designer” presets with the same logic: read the spec and current state → generate from your request → self-check before delivery → write to the right place.',
+        items: [
+          '<strong>Skill Designer</strong>: “make a skill that turns a CSV into a report” — it fetches the skills folder, writes <code>SKILL.md</code> and resources following the schema and writing guide, then fixes <code>skill_dev_check</code> findings until there are no ✗.',
+          '<strong>Agent Designer</strong>: describe the task and the external capabilities it needs; it uses <code>preset_host</code> to get the preset folder, reads the closest <code>.agent</code> as a starting point, writes the new <code>.agent</code> with <code>write_file</code>, then runs <code>preset_reload</code> to load and self-check (skipped files and field errors are reported). Built-in presets (<code>builtin-*</code>) are never overwritten.',
+          '<strong>Plugin Designer</strong>: for new tools or UI, it writes a local plugin and runs <code>plugin_dev_check</code> against the manifest, APIs and the real load status before delivering.'
+        ]
+      },
+      storage: {
+        title: '📦 Where things live · install · edit',
+        skillItems: [
+          '<strong>Skills</strong>: default <code>userData/skills</code>, one folder per skill (the folder holds <code>SKILL.md</code> directly).',
+          '“Install” in Settings → Skills → Manage copies a picked skill folder in and asks before replacing a same-named skill; dropping a folder into the directory and refreshing also works.',
+          'Both the default and a custom folder can be used, opened in the file manager and restored to the default; the path is persisted across restarts.',
+          'To edit: select a skill on the left → file tree on the right → edit <code>SKILL.md</code> or resources in the built-in editor; saving takes effect immediately (the directory is watched).'
+        ],
+        agentItems: [
+          '<strong>Agents (presets)</strong>: default <code>userData/agent-presets</code>, one <code>.agent</code> file per preset; built-in presets come from the app and are never written there.',
+          '“Install” in Settings → Agent → Manage imports one or more <code>.agent</code> files (validating id, duplicate names and file-name conflicts); dropping files in and rescanning also works.',
+          'Switch to a custom folder, rescan, open it in the file manager, restore the default location, or go back to local storage; the path is persisted.',
+          'To edit: select a preset and change name / prompt / tools / skills / knowledge base / MCP / loop on the right; a broken built-in preset can be restored with “Reset”.'
+        ]
+      },
+      faq: {
+        title: '❓ FAQ',
+        skillItems: [
+          '<strong>A skill never triggers</strong>: usually a vague <code>description</code> — write in how users phrase it, or trigger explicitly with <code>$skill-name</code>.',
+          '<strong><code>$skill-name</code> does nothing</strong>: the <code>name</code> contains Chinese characters / spaces / dots → use <code>[A-Za-z0-9_-]</code> and rename the folder to match.',
+          '<strong>Missing from the list</strong>: no <code>SKILL.md</code> in the folder, or frontmatter fails to parse (an unquoted <code>: </code> in a YAML value) → check it with Skill Designer’s <code>skill_dev_check</code>.',
+          '<strong>references cannot be read</strong>: use a <code>/</code>-prefixed relative path in the body (<code>/references/a.md</code>) and make sure the file exists.',
+          '<strong>Want to start over</strong>: delete the skill folder and reinstall it, or have Skill Designer fix it until <code>skill_dev_check</code> reports no ✗.'
+        ],
+        agentItems: [
+          '<strong>A preset is missing or a tool does nothing</strong>: confirm the preset enables that tool (Tools tab / capability slot); plugin tools also need the plugin loaded. Start a new turn after editing.',
+          '<strong>A built-in preset got broken</strong>: use “Reset” at the right end of its tab bar; built-in presets cannot be deleted and are never overwritten by installs.',
+          '<strong>Swarm members did not change</strong>: swarm members are preset references, so editing the preset edits them; deleting a preset leaves dangling references — check usage first.',
+          '<strong>Need a new preset</strong>: start from the closest existing preset (or duplicate it), or let Agent Designer create one — it writes the <code>.agent</code> directly and self-checks with <code>preset_reload</code> until there are no ✗.'
+        ]
+      }
+    },
     settings: {
       overview: {
         title: 'Settings Overview',
-        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / Data / Associations / Other), <strong>Models</strong> (Sources / Embedding / Credentials), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / Fetch / MCP / Registry), <strong>Plugins</strong> (Manage / Store / Develop), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Presets / Console / Session Log), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) the nav and the content each fill the screen and switch in place (the category list uses piano-key rows; ← returns to the categories). List-style panels inside Settings — model sources, search sources, MCP, plugin management, skill management / store, and the agent presets / console / session log — behave the same way: a full-screen list and a full-screen detail pane. Skill Management and the Skill Store drill down one screen at a time (skills → file tree → file editor; store: skill grid ⇄ source list ⇄ skill detail), with ← on each screen to go back one level.'
+        description: 'All application configuration lives in the <strong>Settings</strong> panel with a two-level left nav: <strong>General</strong> (Basic / Data / Associations / Other), <strong>Models</strong> (Sources / Embedding / Credentials), <strong>Collaboration</strong> (Sharing / Collaborative Editing / Permissions), <strong>Speech</strong> (TTS / ASR), <strong>Tools</strong> (Tools / Search / Fetch / MCP / Registry), <strong>Skills</strong> (Manage / Store), <strong>Agent</strong> (Manage / Console / Session Log), <strong>Plugins</strong> (Manage / Store / Develop), and <strong>Help</strong>. Click an item on the left to open that panel; global settings (e.g. LLM) apply to Home, Knowledge Processing, Speech, etc.<br>In a tall window (aspect ratio above 16:9, e.g. a phone in portrait) the nav and the content each fill the screen and switch in place (the category list uses piano-key rows; ← returns to the categories). List-style panels inside Settings — model sources, search sources, MCP, plugin management, skill management / store, and agent management / console / session log — behave the same way: a full-screen list and a full-screen detail pane. Skill Management and the Skill Store drill down one screen at a time (skills → file tree → file editor; store: skill grid ⇄ source list ⇄ skill detail), with ← on each screen to go back one level.'
       },
       groups: {
         basic: {
@@ -3575,7 +3879,7 @@ const translations = {
             tools: { name: 'Tools', desc: 'Per-tool switches, now <strong>grouped by capability domain</strong> (Files &amp; Folders / Conversation &amp; Plan / Web Search / Code &amp; Shell / Knowledge &amp; Skills / Subagents / Browser Automation / MCP &amp; Plugins). Each group header shows the enabled count and offers All / None; search and an "enabled only" filter sit on top. Every row shows enablement, sandbox preference and approval.' },
             search: { name: 'Search', desc: 'Web search source: Bing / Baidu / DuckDuckGo / Firecrawl / SearXNG / Bocha / Zhipu / Tavily / Brave / DeepSeek official Search — enable several, add custom LAN sources, and pick fallback / merge strategy.' },
             fetch: { name: 'Fetch', desc: '<strong>web_fetch channels</strong>: direct fetch / DeepSeek Fetch (official <code>POST /v1/tools/fetch</code>) / virtual browser — each can be toggled and dragged into a fallback order, with a URL box to test the current chain (detailed below).' },
-            mcp: { name: 'MCP', desc: 'Manage MCP servers; <strong>6 built-in servers</strong> are pre-installed (detailed below).' },
+            mcp: { name: 'MCP', desc: 'Manage MCP servers; <strong>8 built-in servers</strong> are pre-installed (detailed below).' },
             toolregistry: { name: 'Registry', desc: 'Read-only view of the tools the main process <strong>actually registered</strong> (name / input schema / scope, plugin tools included; MCP service tools are not listed). The <strong>enable state is hidden by default</strong> — pick a scope in the dropdown on the left: <strong>global default</strong> (the whitelist in Tools), an <strong>agent preset</strong> (its capability slots), or a <strong>live session</strong> (what it actually sends to the model). Once a scope is picked, tools outside it are greyed and tagged “off / disabled / not in session”; the preset scope also lists enabled tools missing from the registry (plugin not loaded / renderer-side tool).' }
           }
         },
@@ -3591,14 +3895,14 @@ const translations = {
         skills: {
           title: '🧩 Skills',
           items: {
-            manage: { name: 'Manage', desc: 'Manage skill files: enable / disable, edit (trigger with $skill-name in chat).' },
+            manage: { name: 'Manage', desc: 'Manage skill files: the left navigation mirrors Plugins → Manage — an <strong>Install</strong> button (pick a skill folder, it is copied into the skills folder), refresh, open folder, select folder and restore default, with search, a skill list and a footer showing the count and skills folder. Enable / disable and edit each skill from the list (trigger with $skill-name in chat). Skills live by default in the <strong>application data folder → <code>skills</code></strong> (works out of the box, no folder to pick first); you can also drop a skill folder there and hit refresh. Pick <strong>Skill Designer</strong> to have a new skill written to spec (self-checked with <code>skill_dev_check</code> before delivery).' },
             store: { name: 'Store', desc: 'Search, preview and install skills from remote sources such as GitHub.' }
           }
         },
         agent: {
           title: '🤖 Agent',
           items: {
-            presets: { name: 'Presets', desc: 'Role / model / system prompt and per-tool capabilities; pick with 👤 in chat. Eight built-in presets ship with the app — General Agent, Code Agent, Office Agent, PTC Agent, Plugin Dev Agent, plus Pi Agent, DSH Agent and Codex Agent — ready to use and editable, but not deletable (the last three mirror open-source harnesses in prompt structure and tool orchestration: Pi is minimal with no plan mode or subagents, DSH composes persona and capability through <strong>sections</strong> with runtime guards, Codex spells out the read-only / workspace-write / full-access ladder). <strong>Breaking one is not fatal</strong>: every built-in preset has a “Reset” button at the right end of its tab bar — confirm and its name / model / prompt / tools / skills / MCP / loop sections return to the factory values (user presets do not show it). On the Tools tab you can also set the <strong>presentation</strong> to PTC (programmatic tool call): the model only sees <code>run_code</code> and composes the preset tools inside a program.' },
+            presets: { name: 'Manage', desc: 'Role / model / system prompt and per-tool capabilities; pick with 👤 in chat. Ten built-in presets ship with the app — General Agent, Code Agent, Office Agent, PTC Agent, Pi Agent, DSH Agent, Codex Agent, plus three “designer” presets at the end: <strong>Skill Designer</strong>, <strong>Agent Designer</strong> and <strong>Plugin Designer</strong> — ready to use and editable, but not deletable (the three harness-style ones mirror open-source harnesses in prompt structure and tool orchestration: Pi is minimal with no plan mode or subagents, DSH composes persona and capability through <strong>sections</strong> with runtime guards, Codex spells out the read-only / workspace-write / full-access ladder). <strong>The three designers build things in conversation</strong>: Skill Designer writes skills (rules and self-check live in the <code>builtin-skill-dev</code> MCP service; nothing ships until <code>skill_dev_check</code> has no ✗), Agent Designer creates / edits presets (writes the <code>.agent</code> with <code>write_file</code>, then self-checks through <code>preset_reload</code>; built-in presets are never overwritten), Plugin Designer writes local plugins (<code>builtin-plugin-dev</code>). <strong>Breaking one is not fatal</strong>: every built-in preset has a “Reset” button at the right end of its tab bar — confirm and its name / model / prompt / tools / skills / MCP / loop sections return to the factory values (user presets do not show it). On the Tools tab you can also set the <strong>presentation</strong> to PTC (programmatic tool call): the model only sees <code>run_code</code> and composes the preset tools inside a program. <strong>Where presets live</strong>: by default in the <strong>application data folder → <code>agent-presets</code></strong> (one <code>.agent</code> file per preset). The folder button in the top toolbar (or the storage chip) lets you switch to another folder, rescan it, open it in Explorer, go back to local storage, or restore the default location; the path is persisted and built-in presets are never written into it. <strong>The left navigation mirrors Plugins → Manage</strong>: an <strong>Install</strong> button (pick one or more <code>.agent</code> files to copy into the preset folder), new, rescan, open folder and select folder, with search below and a footer showing the count and folder; this settings page is now called <strong>Manage</strong>.' },
             console: { name: 'Console', desc: 'Watch live plans, task lists, tool-call timelines and background tasks.' },
             log: { name: 'Session Log', desc: 'Session event log (JSONL): event stream, message dispatch and integrity.' }
           }
@@ -3676,7 +3980,7 @@ const translations = {
       },
       builtinMcp: {
         title: '🧩 Built-in MCP Servers (Pre-installed)',
-        overview: 'Under Settings → Tools → <strong>MCP</strong>, six <strong>in-process built-in servers</strong> are pre-created (auto-injected at startup / when opening the page, enabled & auto-connected by default, <strong>cannot be deleted</strong>): they need no external process, their tools can be called by the general agent / Agent presets / workflow MCP nodes, and each can be “externally exposed over HTTP” for other MCP clients (Claude Desktop, Cursor, etc.) via the “External HTTP” toggle on the left.',
+        overview: 'Under Settings → Tools → <strong>MCP</strong>, eight <strong>in-process built-in servers</strong> are pre-created (auto-injected at startup / when opening the page, enabled & auto-connected by default, <strong>cannot be deleted</strong>): they need no external process, their tools can be called by the general agent / Agent presets / workflow MCP nodes, and six of them can be “externally exposed over HTTP” for other MCP clients (Claude Desktop, Cursor, etc.) via the “External HTTP” toggle on the left.',
         browser: {
           name: 'Built-in Browser Agent (builtin-browser)',
           desc: 'Provides an <strong>AI-controllable real browser window</strong> (multi-tab), exposing browser_* tools — browser_navigate / list_tabs / new_tab / switch_tab / close_tab / get_html / extract_text / extract_markdown / screenshot / click / type / scroll — so AI can research online, click & fill forms, and harvest page content; implemented by the main-process browser agent service (entry: see Browser Operation in the Knowledge chapter).'
@@ -3700,6 +4004,14 @@ const translations = {
         pluginDev: {
           name: 'Plugin Development Reference (builtin-plugin-dev)',
           desc: 'Serves the official <strong>plugin development guide</strong> as an MCP service, split into <strong>7 short tools</strong> by topic (each returns only a few hundred to ~3,000 characters, so even small models can digest it): <strong>plugin_dev_host</strong> (absolute path of your plugins folder / installed plugins / where data goes), <strong>plugin_dev_constraints</strong> (the 15 hard constraints, including “call only the host APIs listed in the guide — the two halves are not interchangeable”, the async-ness and return shapes of ctx.files, and “canvas 2D does not resolve CSS variables”), <strong>plugin_dev_manifest</strong> (<code>package.json</code> manifest fields + built-in slots + a copy-paste manifest), <strong>plugin_dev_api</strong> (the <strong>UI half</strong> — client.mjs — API cheat sheet with async/return shapes plus the full minimal runnable example), <strong>plugin_dev_api_main</strong> (the <strong>main-process half</strong> — index.mjs — API cheat sheet plus a minimal tool-registering example), <strong>plugin_dev_faq</strong> (error → cause → fix), <strong>plugin_dev_templates</strong> (template index plus install steps; fetch one body with <code>key</code>, e.g. <code>{"key":"panel"}</code>) — plus <strong>plugin_dev_check</strong>, which self-checks a plugin folder with the host’s <strong>own</strong> validation logic (manifest / entry files / <strong>whether it calls ctx members the host does not have</strong> — ctx.service, ctx.files.readFile … are each reported with the correct alternative, and mixing the two halves is flagged too — plus silent failure traps such as a missing await, misusing the pickFiles return shape, an undisconnected ResizeObserver and using a <code>ctx.locale</code> ref as a string (which renders <code>[object Object]</code>)) and returns the <strong>host’s real load status and logs</strong>, including why the UI half failed to load. Content is shared with Settings → Plugins → Develop. The <strong>plugin development agent</strong> is bound to this server by default (called through mcp_call); other agents, workflow MCP nodes and external MCP clients (<code>/mcp/builtin-plugin-dev</code>) can use it too, so nobody has to hunt for the app’s source on disk.'
+        },
+        agentPreset: {
+          name: 'Agent Design Reference (builtin-agent-preset)',
+          desc: 'The MCP service that lets AI <strong>create and edit Agent presets itself</strong>, with 10 tools: <strong>preset_schema</strong> (field reference + hard rules + a six-step workflow), <strong>preset_capabilities</strong> (capability slot ↔ tool-name map plus four ready-made recipes), <strong>preset_example</strong> (two copy-paste complete JSON presets), <strong>preset_host</strong> (local storage vs folder mode, folder path, built-in / user counts), <strong>preset_list</strong> (existing presets plus available tools, skills, knowledge bases and MCP servers), <strong>preset_get</strong> (one complete preset as a starting point), <strong>preset_validate</strong> (dry run: unknown fields, unknown tool names, duplicate names, invalid ids and out-of-range numbers are each reported; auto-fixes are listed separately), <strong>preset_write</strong> (the <strong>preferred write channel</strong>: re-validates, rejects on errors, only writes user presets — <code>builtin-*</code> is refused — and writes the .agent file in folder mode), <strong>preset_reload</strong> (rescan after the AI wrote a <code>.agent</code> with write_file: reports loaded / skipped files with reasons plus field-validation findings) and <strong>preset_delete</strong>. Reads and writes run in the <strong>renderer</strong> (that is where the preset store lives), so a desktop agent session is required; external MCP clients can only read the three static topics. The built-in <strong>Agent Designer</strong> is bound to it but writes through files (write the <code>.agent</code> with <code>write_file</code>, then <code>preset_reload</code>); its <code>preset_validate</code> / <code>preset_write</code> remain available to other agents. You can create presets like “knowledge-base Q&A”, “code reviewer” or “tool dispatcher” in conversation.'
+        },
+        skillDev: {
+          name: 'Skill Design Reference (builtin-skill-dev)',
+          desc: 'The MCP service that teaches AI to write skills, with 7 tools: <strong>skill_dev_host</strong> (absolute skills-folder path, whether it is the default location, installed skills, how triggering and reloading work), <strong>skill_dev_schema</strong> (folder anatomy references·scripts·assets + frontmatter field reference + <code>$skill-name</code> triggering + the <code>/</code> relative-path convention), <strong>skill_dev_writing</strong> (how to write a description that actually triggers, three-level progressive disclosure, body skeleton, imperative style and examples, five anti-patterns), <strong>skill_dev_constraints</strong> (14 hard rules: folder name = name, UTF-8, quote YAML colons, referenced resources must exist, body and total-size limits, no abusive content …), <strong>skill_dev_templates</strong> (minimal / playbook / scripted / reference, fetched one at a time with <code>key</code>), <strong>skill_dev_faq</strong> (never triggers / triggers too often / <code>$</code> does nothing / missing from the list / cannot read references / changes not picked up / name collisions …) and <strong>skill_dev_check</strong> (validates SKILL.md and frontmatter parsing, name vs folder, whether the description reads like a trigger, body size, whether every referenced resource exists, duplicate names, and returns ✗ / ! / · plus a verdict). The skills folder defaults to the <strong>application data folder → <code>skills</code></strong>; it can be changed (or restored) under Settings → Skills → Management. The built-in <strong>Skill Designer</strong> agent is bound to this service.'
         },
         note: {
           title: '📌 Tip:',

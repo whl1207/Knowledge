@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import * as fs from 'node:fs'
 import { AIUtils, type ContextWindowProbe } from '@/shared/ai-core'
 import { sessionLog } from './session-log'
+import { recordUsage } from './usage-log'
 import type { SessionEvent, DerivedMessage, SessionLogIntegrity } from '@/types/session-log'
 
 export type AIProvider =
@@ -352,6 +353,17 @@ async function runSession(session: AISession, spec: AIRequestSpec): Promise<void
       if (metadata) session.metadata = metadata
       session.completed = true
       session.updatedAt = Date.now()
+      // 用量账本（只记后续）：provider 真报过 usage 才记，拿不到就跳过——
+      // 统计口径必须与「账单」一致，绝不用字符估算填充（见 usage-log.ts）。
+      recordUsage({
+        provider: String(spec.provider || ''),
+        sourceId: spec.provider === 'custom'
+          ? (spec.config?.id ?? spec.config?.sourceId ?? null)
+          : undefined,
+        model: String(spec.config?.model || spec.llmConfig?.model || spec.body?.model || ''),
+        prompt: metadata?.prompt_tokens ?? metadata?.promptTokens,
+        completion: metadata?.completion_tokens ?? metadata?.completionTokens,
+      })
       // 完整助手消息（模型可见）→ 落盘；chunk 流已记录，此处记录最终事实
       sessionLog.append(session.requestId, 'assistant/message', {
         content: session.content,

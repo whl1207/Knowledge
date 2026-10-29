@@ -646,6 +646,82 @@ function fsPortOf(fs: AndroidFilesystemAdapter, deps: AndroidDeps): FileSystemPo
       return await buildTree(fs, p, Math.min(8, Math.max(1, Number(depth) || 3)))
     },
 
+    /**
+     * 单层目录读取（文件树懒加载）：与桌面 listDir 同契约 —— 只读一层、永不抛出、
+     * 目录不汇总 size。SAF 的 readdir 已带 size/mtime，无需逐个 stat。
+     */
+    async listDir(dirPath, opts) {
+      const p = adapterPath(dirPath)
+      if (p === null) return { entries: [], total: 0, truncated: false, error: '路径非法' }
+      let list: Array<{ name: string; type?: string; size?: number; mtime?: number }>
+      try {
+        const res = await fs.readdir({ path: p, directory: DOCS })
+        list = res.files || []
+      } catch (e: any) {
+        return { entries: [], total: 0, truncated: false, error: String(e?.message || e) }
+      }
+      const offset = Math.max(0, Number(opts?.offset) || 0)
+      const limit = Math.min(2000, Math.max(1, Number(opts?.limit) || 1000))
+      const page = list.slice(offset, offset + limit)
+      return {
+        entries: page.map((ent) => {
+          const isDir = ent.type === 'directory'
+          return {
+            label: ent.name,
+            path: joinRel(dirPath, ent.name),
+            type: isDir ? 'folder' : 'file',
+            extension: extOf(ent.name, isDir),
+            size: isDir ? undefined : ent.size,
+            mtime: ent.mtime,
+          }
+        }),
+        total: list.length,
+        truncated: offset + page.length < list.length,
+      }
+    },
+
+    /** 按文件名全树搜索：只比文件名、只读目录项，带结果/深度/时间预算 */
+    async searchNames(roots, keyword, opts) {
+      const kw = String(keyword || '').toLowerCase().trim()
+      const started = Date.now()
+      if (!kw) return { results: [], truncated: false, scanned: 0, elapsedMs: 0 }
+      const maxResults = Math.min(1000, Math.max(1, Number(opts?.maxResults) || 200))
+      const maxDepth = Math.min(12, Math.max(1, Number(opts?.maxDepth) || 12))
+      const budgetMs = Math.min(5000, Math.max(100, Number(opts?.budgetMs) || 800))
+      const results: any[] = []
+      let scanned = 0
+      let truncated = false
+      const stack: Array<{ dir: string; depth: number }> = (Array.isArray(roots) ? roots : [])
+        .filter(Boolean)
+        .map((r: string) => ({ dir: r, depth: 0 }))
+      while (stack.length) {
+        if (results.length >= maxResults || Date.now() - started > budgetMs) { truncated = true; break }
+        const { dir, depth } = stack.pop()!
+        const adapter = adapterPath(dir)
+        if (adapter === null) continue
+        let list: Array<{ name: string; type?: string; size?: number; mtime?: number }>
+        try {
+          const res = await fs.readdir({ path: adapter, directory: DOCS })
+          list = res.files || []
+        } catch { continue }
+        for (const ent of list) {
+          scanned++
+          const isDir = ent.type === 'directory'
+          const child = joinRel(dir, ent.name)
+          if (isDir) {
+            if (depth + 1 < maxDepth) stack.push({ dir: child, depth: depth + 1 })
+            continue
+          }
+          if (String(ent.name).toLowerCase().includes(kw)) {
+            results.push({ label: ent.name, path: child, type: 'file', extension: extOf(ent.name, false), size: ent.size, mtime: ent.mtime })
+            if (results.length >= maxResults) { truncated = true; break }
+          }
+        }
+        if (scanned > 200000) { truncated = true; break }
+      }
+      return { results, truncated, scanned, elapsedMs: Date.now() - started }
+    },
+
     /** 图谱视图用：把嵌套树摊平成 fileList + relationList（与桌面 getFilesRelation 同形状） */
     async listTreeWithRelations(folderPath, depth) {
       const nodes = await port.listTree(folderPath, depth)

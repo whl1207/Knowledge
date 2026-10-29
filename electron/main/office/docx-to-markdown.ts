@@ -1,10 +1,12 @@
 /**
  * .docx → Markdown 转换（mammoth + turndown），主进程统一入口
  *
- * 供三处复用，避免各写一份、行为漂移：
- *  - `index.ts` 的 `readFile`（本地 .docx 预览 / 编辑取文）
- *  - `index.ts` 的 `docxToMarkdown` IPC（远程 .docx 预览）
- *  - `tools.ts` 的 `parseDocxFile`（工具读取 Word 正文）
+ * 供多处复用，避免各写一份、行为漂移（Word 的统一入口是 word-to-markdown.ts，
+ * 它按文件头把 .docx 分派到这里、把 .doc 交给 word-extractor）：
+ *  - `index.ts` 的 `readFile`（本地 Word 预览 / 编辑取文）
+ *  - `index.ts` 的 `docxToMarkdown` IPC（远程 Word 预览）
+ *  - `tools.ts` 的 `read_file`（工具读取 Word 正文）
+ *  - `office-service.ts` 的 `export_markdown`（内存中的 docx 包转 Markdown）
  *
  * 关键点（勿轻易回退为 turndown 默认值）：
  * 1. `headingStyle: 'atx'`：turndown 默认是 setext（`===` / `---`），会让 Word 的

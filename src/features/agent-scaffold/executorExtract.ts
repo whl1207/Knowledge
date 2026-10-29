@@ -3,7 +3,7 @@
  *
  * 一单元 = 一行任务，素材按「内容获取」（contentSource）三态取：
  *   none = 直接使用行数据（单字段取其值；多字段拼成「字段: 值」行）
- *   file = 把行内指定字段当作本地文件路径读取（readFile IPC，支持 md/txt/docx/pdf/xlsx/html）
+ *   file = 把行内指定字段当作本地文件路径读取（readFile IPC，支持 md/txt/docx/doc/pdf/xlsx/html）
  *   url  = 把行内指定字段当作网页地址抓取（顺带解析 title/links 字段，支持链接跟随）
  * → 长内容分段（段落/表格边界安全切分，表格分段自动补表头）
  * → 每段一次 LLM 提取（任务目标支持 {{列名}} 占位符；JSON 三级容错解析 + 最多 2 次强化提示重试）
@@ -102,7 +102,7 @@ export class ExtractExecutor implements PipelineExecutor {
       const filePath = String(unit.data?.[contentField] || unit.data?.filePath || '')
       label = String(unit.data?.relativePath || unit.data?.fileName || filePath)
       if (!filePath) throw new Error('缺少文件路径（请通过「扫描文件夹」生成任务行，或在「内容获取」中指定字段）')
-      // 读取文件内容（readFile 支持 md/txt/docx/pdf/xlsx/html 等转文本）
+      // 读取文件内容（readFile 支持 md/txt/docx/doc/pdf/xlsx/html 等转文本）
       try {
         content = await getPlatform().fs.readText(filePath)
         if (!content || String(content).startsWith('Error reading file:')) {

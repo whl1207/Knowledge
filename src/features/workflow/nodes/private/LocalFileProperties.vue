@@ -84,7 +84,7 @@ function removeTemplate(index: number): void {
 
 async function pickFile(): Promise<void> {
   const path = await getPlatform().dialog.pickFile({
-    filters: [{ name: '文本文件', extensions: ['md', 'txt', 'json', 'csv', 'docx'] }],
+    filters: [{ name: '文本文件', extensions: ['md', 'txt', 'json', 'csv', 'docx', 'doc'] }],
   })
   if (path) set('file_path', path)
 }

@@ -1,32 +1,39 @@
 <!-- AgentPreset.vue - Agent 预设：常用 Agent 模板库管理 -->
 <template>
   <div class="agent-preset" :class="{ tall: isTallLayout }">
-    <!-- ====== 左侧：预设列表（ToDo 风格 top-toolbar：搜索 / 新建 / 打开文件夹） ======
+    <!-- ====== 左侧：智能体导航（参照「插件 → 管理」：安装 / 搜索 / 列表 / 底栏） ======
          细长窗口下与右侧编辑区各占满整屏互相切换（见 .tall 样式） -->
     <div class="contact-sidebar" v-show="!isTallLayout || showNavScreen">
       <div class="top-toolbar contact-toolbar">
         <div class="contact-actions-row">
-          <button class="toolbar-action-btn" @click="addPreset" :title="store.locales === 'en' ? 'New Preset' : '新建预设'">
-            <i class="fa fa-plus"></i>
+          <button class="toolbar-action-btn primary" @click="installAgentFiles"
+            :title="store.locales === 'en' ? 'Install Agent preset(s) from .agent files' : '安装智能体：从 .agent 文件导入到预设文件夹'">
+            <i class="fa fa-plus"></i><span class="ap-toolbar-label">{{ store.locales === 'en' ? 'Install' : '安装' }}</span>
           </button>
-          <button class="toolbar-action-btn" @click="openPresetFolder" :title="store.locales === 'en' ? 'import all .agent files' : '导入其中所有 .agent 文件'">
-            <i class="fa fa-download"></i>
-          </button>
-          <button class="toolbar-action-btn" @click="exportAllPresets" :title="store.locales === 'en' ? 'Export all presets to folder' : '导出全部预设到文件夹'">
-            <i class="fa fa-upload"></i>
-          </button>
-          <button class="toolbar-action-btn" @click="importAgentFile" :title="store.locales === 'en' ? 'Import .agent file' : '导入 .agent 文件'">
+          <button class="toolbar-action-btn" @click="addPreset" :title="store.locales === 'en' ? 'New preset' : '新建预设'">
             <i class="fa fa-file-o"></i>
           </button>
+          <button class="toolbar-action-btn" @click="rescanFolder" :disabled="!store.agentPresetPath"
+            :title="store.locales === 'en' ? 'Rescan preset folder' : '重新扫描预设文件夹'">
+            <i class="fa fa-search-plus"></i>
+          </button>
+          <button class="toolbar-action-btn" @click="revealFolder" :disabled="!store.agentPresetPath"
+            :title="store.locales === 'en' ? 'Open preset folder in Explorer' : '在资源管理器中打开预设文件夹'">
+            <i class="fa fa-external-link"></i>
+          </button>
+          <button class="toolbar-action-btn" @click="chooseFolder"
+            :title="store.locales === 'en' ? 'Select preset folder' : '选择预设文件夹'">
+            <i class="fa fa-folder-open"></i>
+          </button>
         </div>
-        <div class="notes-search-box">
-          <i class="fa fa-search"></i>
-          <input v-model="presetKeyword" class="notes-search-input"
-            :placeholder="store.locales === 'en' ? 'Search presets' : '搜索预设'" />
-          <div v-if="presetKeyword" class="notes-search-clear" @click="presetKeyword = ''" :title="store.locales === 'en' ? 'Clear' : '清除'">
-            <i class="fa fa-times-circle"></i>
-          </div>
-        </div>
+      </div>
+      <!-- 搜索行（与「插件 → 管理」「技能 → 管理」同一套：独立一行、自带边框，不再挤在工具栏里） -->
+      <div class="ap-nav-search">
+        <i class="fa fa-search"></i>
+        <input v-model="presetKeyword" spellcheck="false"
+          :placeholder="store.locales === 'en' ? 'Search presets (name / tags / prompt)' : '搜索预设（名称 / 标签 / 提示词）'" />
+        <i v-if="presetKeyword" class="fa fa-times-circle ap-search-clear" @click="presetKeyword = ''"
+          :title="store.locales === 'en' ? 'Clear' : '清除'"></i>
       </div>
       <div class="contact-sidebar-list scoll">
         <!-- 通用智能体内置项：固定置顶，不可删除 / 拖动 / 右键菜单，仅可调整循环轮数 -->
@@ -37,12 +44,15 @@
           @contextmenu.prevent.stop
           :title="store.locales === 'en' ? 'General agent (built-in; only loop rounds adjustable)' : '通用智能体（内置，仅可调整循环轮数）'"
         >
-          <div class="contact-item-avatar"><i class="fa fa-android"></i></div>
-          <div class="contact-item-info">
-            <span class="contact-item-name">{{ store.locales === 'en' ? 'General Agent' : '通用智能体' }}</span>
-            <span class="contact-item-tags"><span class="contact-tag-chip">{{ store.locales === 'en' ? 'built-in' : '内置' }}</span></span>
+          <div class="ap-nav-top">
+            <span class="ap-nav-icon"><i class="fa fa-android"></i></span>
+            <span class="ap-nav-name">{{ store.locales === 'en' ? 'General Agent' : '通用智能体' }}</span>
+            <span class="contact-item-lock" :title="store.locales === 'en' ? 'Built-in, cannot be deleted' : '内置项，不可删除'"><i class="fa fa-lock"></i></span>
           </div>
-          <span class="contact-item-lock" :title="store.locales === 'en' ? 'Built-in, cannot be deleted' : '内置项，不可删除'"><i class="fa fa-lock"></i></span>
+          <div class="ap-nav-meta">
+            <span class="contact-tag-chip">{{ store.locales === 'en' ? 'built-in' : '内置' }}</span>
+            <span class="ap-nav-meta-text">{{ store.locales === 'en' ? 'default entry' : '默认入口' }}</span>
+          </div>
         </div>
         <div v-if="filteredContacts.length === 0" class="empty-hint" style="height:auto;padding:16px 0;">
           <i class="fa fa-address-book-o" style="font-size:20px;"></i>
@@ -54,6 +64,7 @@
           class="contact-drag-list"
           :animation="150"
           ghost-class="contact-item-ghost"
+          @end="enforcePresetOrder"
         >
           <template #item="{ element }">
             <div
@@ -61,22 +72,47 @@
               class="contact-item" :class="{ active: selectedId === element.id }"
               @click="selectPreset(element.id)"
               @contextmenu.prevent="showPresetMenu($event, element)">
-              <div class="contact-item-avatar"><i class="fa" :class="presetIcon(element)"></i></div>
-              <div class="contact-item-info">
-                <span class="contact-item-name">{{ element.name || (store.locales === 'en' ? 'Unnamed' : '未命名') }}</span>
-                <span v-if="element.builtin || (element.tags && element.tags.length)" class="contact-item-tags">
-                  <span v-if="element.builtin" class="contact-tag-chip">{{ store.locales === 'en' ? 'built-in' : '内置' }}</span>
-                  <span v-for="t in (element.tags || []).slice(0, 3)" :key="t" class="contact-tag-chip">{{ t }}</span>
-                  <span v-if="(element.tags || []).length > 3" class="contact-tag-more">+{{ (element.tags || []).length - 3 }}</span>
+              <div class="ap-nav-top">
+                <span class="ap-nav-icon"><i class="fa" :class="presetIcon(element)"></i></span>
+                <span class="ap-nav-name">{{ element.name || (store.locales === 'en' ? 'Unnamed' : '未命名') }}</span>
+                <span v-if="element.builtin" class="contact-item-lock" :title="store.locales === 'en' ? 'Built-in, cannot be deleted' : '内置项，不可删除'"><i class="fa fa-lock"></i></span>
+                <button v-else class="contact-item-del" @click.stop="removePreset(element.id)" :title="store.locales === 'en' ? 'Delete' : '删除'">
+                  <i class="fa fa-trash"></i>
+                </button>
+              </div>
+              <div class="ap-nav-meta">
+                <span v-if="element.builtin" class="contact-tag-chip">{{ store.locales === 'en' ? 'built-in' : '内置' }}</span>
+                <span v-for="t in (element.tags || []).slice(0, 3)" :key="t" class="contact-tag-chip">{{ t }}</span>
+                <span v-if="(element.tags || []).length > 3" class="contact-tag-more">+{{ (element.tags || []).length - 3 }}</span>
+                <span v-if="!element.builtin && !(element.tags || []).length" class="ap-nav-meta-text">{{ store.locales === 'en' ? 'custom' : '自定义' }}</span>
+                <span class="ap-nav-tools" :title="store.locales === 'en' ? 'Enabled tools' : '启用的工具数'">
+                  <i class="fa fa-wrench"></i>{{ presetToolCount(element) }}
                 </span>
               </div>
-              <span v-if="element.builtin" class="contact-item-lock" :title="store.locales === 'en' ? 'Built-in, cannot be deleted' : '内置项，不可删除'"><i class="fa fa-lock"></i></span>
-              <button v-else class="contact-item-del" @click.stop="removePreset(element.id)" :title="store.locales === 'en' ? 'Delete' : '删除'">
-                <i class="fa fa-trash"></i>
-              </button>
             </div>
           </template>
         </draggable>
+      </div>
+
+      <!-- 底栏（参照「插件 → 管理」）：数量 + 存储位置 + 恢复默认位置；点路径打开存储面板 -->
+      <div class="ap-nav-foot">
+        <div class="ap-foot-row">
+          <span class="ap-foot-count">
+            {{ presetKeyword ? `${filteredContacts.length} / ${store.agentPresets.length}` : store.agentPresets.length }}
+            {{ store.locales === 'en' ? 'presets' : '个预设' }}
+          </span>
+          <span class="ap-foot-icons">
+            <i v-if="presetIsDefaultFolder" class="fa fa-home ap-foot-icon" :title="store.locales === 'en' ? 'Default preset folder' : '默认预设目录'"></i>
+            <i v-else-if="store.agentPresetPath" class="fa fa-undo ap-foot-icon action"
+              :title="store.locales === 'en' ? 'Restore the default preset folder' : '恢复默认预设目录'" @click="resetFolder"></i>
+            <i class="fa fa-sliders ap-foot-icon action" :title="store.locales === 'en' ? 'Preset storage settings' : '预设存储位置设置'" @click="openFolderPanel"></i>
+          </span>
+        </div>
+        <div class="ap-foot-path" @click="openFolderPanel"
+          :title="store.agentPresetPath || (store.locales === 'en' ? 'Presets are stored in localStorage' : '预设存在本地存储中')">
+          <i class="fa" :class="store.agentPresetPath ? 'fa-folder' : 'fa-database'"></i>
+          <span class="ap-foot-path-text">{{ store.agentPresetPath || (store.locales === 'en' ? 'Local storage' : '本地存储') }}</span>
+        </div>
       </div>
     </div>
 
@@ -504,6 +540,87 @@
         </div>
       </div>
     </teleport>
+
+    <!-- 预设存储位置（文件夹管理）：与「插件目录」同一套心智 —— 选目录 / 重新扫描 / 打开目录 / 改回本地 -->
+    <teleport to="body">
+      <div v-if="folderPanelOpen" class="apf-overlay" @click.self="folderPanelOpen = false">
+        <div class="apf-panel">
+          <div class="apf-head">
+            <i class="fa fa-folder-open-o"></i>
+            <span class="apf-title">{{ store.locales === 'en' ? 'Preset storage' : '预设存储位置' }}</span>
+            <button class="apf-close" @click="folderPanelOpen = false"
+              :title="store.locales === 'en' ? 'Close' : '关闭'"><i class="fa fa-times"></i></button>
+          </div>
+          <div class="apf-body">
+            <div class="apf-mode">
+              <span class="apf-badge" :class="{ folder: !!folderInfo.folder }">
+                {{ folderInfo.folder ? (store.locales === 'en' ? 'Folder mode' : '文件夹模式') : (store.locales === 'en' ? 'Local storage' : '本地存储') }}
+              </span>
+              <span v-if="folderInfo.folder" class="apf-path" :title="folderInfo.folder">{{ folderInfo.folder }}</span>
+              <span v-else class="apf-path dim">{{ store.locales === 'en' ? 'browser localStorage (agentPresets)' : '浏览器 localStorage（agentPresets）' }}</span>
+              <em v-if="presetIsDefaultFolder" class="apf-default-badge">{{ store.locales === 'en' ? 'default' : '默认位置' }}</em>
+            </div>
+
+            <div class="apf-hint">
+              <template v-if="folderInfo.folder">
+                {{ store.locales === 'en'
+                  ? 'Each preset is one .agent (JSON) file in this folder. Edits are written back on save, deletes remove the file. Built-in presets are never written here.'
+                  : '文件夹模式下：每个预设 = 文件夹里的一个 .agent（JSON）文件。编辑后自动写回文件，删除预设会删掉对应文件；内置预设永不写入此目录（由软件按 id 提供）。' }}
+              </template>
+              <template v-else>
+                {{ store.locales === 'en'
+                  ? 'Presets live in browser localStorage: they survive restarts but cannot be edited with external tools. Choose a folder to store each preset as a .agent file.'
+                  : '当前预设存在浏览器本地存储：重启不丢，但无法用外部工具编辑 / 版本管理。选择一个文件夹后，每个预设会存成独立的 .agent 文件。' }}
+              </template>
+            </div>
+
+            <div class="apf-actions">
+              <button class="apf-btn primary" :disabled="folderBusy" @click="chooseFolder">
+                <i class="fa fa-folder-o"></i>
+                {{ folderInfo.folder ? (store.locales === 'en' ? 'Change folder…' : '更换文件夹…') : (store.locales === 'en' ? 'Choose folder…' : '选择文件夹…') }}
+              </button>
+              <button class="apf-btn" :disabled="folderBusy || !folderInfo.folder" @click="rescanFolder">
+                <i class="fa fa-refresh"></i> {{ store.locales === 'en' ? 'Rescan' : '重新扫描' }}
+              </button>
+              <button class="apf-btn" :disabled="!folderInfo.folder" @click="revealFolder">
+                <i class="fa fa-external-link"></i> {{ store.locales === 'en' ? 'Open folder' : '在资源管理器中打开' }}
+              </button>
+              <button class="apf-btn" :disabled="folderBusy" @click="exportAllPresets">
+                <i class="fa fa-upload"></i> {{ store.locales === 'en' ? 'Export all…' : '导出全部…' }}
+              </button>
+              <button class="apf-btn" :disabled="folderBusy || !folderInfo.folder" @click="useLocalStorage">
+                <i class="fa fa-database"></i> {{ store.locales === 'en' ? 'Back to local storage' : '改回本地存储' }}
+              </button>
+              <button class="apf-btn" :disabled="folderBusy || !folderInfo.folder || presetIsDefaultFolder" @click="resetFolder">
+                <i class="fa fa-undo"></i> {{ store.locales === 'en' ? 'Default folder' : '恢复默认位置' }}
+              </button>
+            </div>
+
+            <div class="apf-status">
+              <span v-if="folderInfo.folder">
+                <i class="fa fa-file-o"></i>
+                {{ store.locales === 'en' ? `${folderInfo.fileCount} .agent file(s)` : `${folderInfo.fileCount} 个 .agent 文件` }}
+                <span v-if="!folderInfo.exists" class="apf-warn">
+                  {{ store.locales === 'en' ? '(folder unavailable)' : '（目录不可读）' }}
+                </span>
+              </span>
+              <span><i class="fa fa-list"></i> {{ store.locales === 'en' ? `${store.agentPresets.length} preset(s)` : `${store.agentPresets.length} 个预设` }}</span>
+              <span class="apf-status-note">{{ store.locales === 'en' ? 'Built-in presets stay out of the folder.' : '内置预设不写入文件夹。' }}</span>
+            </div>
+
+            <div v-if="lastScan" class="apf-scan">
+              <i class="fa" :class="lastScan.ok ? 'fa-check-circle-o ok' : 'fa-exclamation-triangle err'"></i>
+              <span v-if="lastScan.ok">
+                {{ store.locales === 'en'
+                  ? `Scanned ${lastScan.files} file(s): loaded ${lastScan.loaded}${lastScan.skipped ? `, skipped ${lastScan.skipped} invalid` : ''}${lastScan.skippedBuiltin ? `, ignored ${lastScan.skippedBuiltin} built-in id` : ''}`
+                  : `已扫描 ${lastScan.files} 个文件：载入 ${lastScan.loaded} 个${lastScan.skipped ? `，跳过 ${lastScan.skipped} 个损坏/缺 id` : ''}${lastScan.skippedBuiltin ? `，忽略 ${lastScan.skippedBuiltin} 个占用内置 id 的文件` : ''}` }}
+              </span>
+              <span v-else>{{ store.locales === 'en' ? `Cannot read folder: ${lastScan.error || 'unknown error'}` : `目录不可读：${lastScan.error || '未知错误'}` }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </teleport>
   </div>
 </template>
 
@@ -518,12 +635,14 @@ import { pluginDisplayName, pluginToolScopes } from '@/lib/plugin/runtime'
 import { AGENT_TOOL_REGISTRY, type AgentToolInfo } from '@/services/agentSkills'
 import ToolGroupList from '@/components/set/ToolGroupList.vue'
 import {
-  scanAgentPresets, writeAgentPreset, removeAgentPreset, agentFilePath,
-  openAgentPresetFolder as openPresetFolder, exportAllAgentPresets,
+  scanAgentPresets, writeAgentPreset, removeAgentPreset, agentFilePath, exportAllAgentPresets,
+  chooseAgentPresetFolder, closeAgentPresetFolder, revealAgentPresetFolder, agentPresetFolderInfo,
+  type AgentPresetScanSummary,
 } from '@/composables/useAgentPresets'
+import { ensureDefaultAgentPresetFolder, resetAgentPresetFolderToDefault, isDefaultAgentPresetFolder } from '@/composables/useDefaultStorage'
 import { renderLoopSections } from '@/lib/agent/skill'
 import { AGENT_MAX_STEPS_MAX, DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
-import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset, resetBuiltinAgentPreset, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
+import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset, resetBuiltinAgentPreset, builtinPresetDefaultsFromStore, ensureBuiltinAgentPresets } from '@/shared/builtinAgentPresets'
 import { FOLLOW_DEFAULT_LLM, deepSeekStyleOf, normalizeLlmTypeList, presetFollowsDefaultLlm } from '@/shared/llmSources'
 import { getPlatform, hasCapability } from '@/platform'
 import { useTallLayout } from '@/composables/useTallLayout'
@@ -561,7 +680,12 @@ const presetIcon = (p: any): string =>
           : p?.id === BUILTIN_AGENT_PRESET_IDS.pi ? 'fa-terminal'
             : p?.id === BUILTIN_AGENT_PRESET_IDS.dsh ? 'fa-cubes'
               : p?.id === BUILTIN_AGENT_PRESET_IDS.codex ? 'fa-window-maximize'
-                : 'fa-user'
+                : p?.id === BUILTIN_AGENT_PRESET_IDS.skillDesigner ? 'fa-book'
+                  : p?.id === BUILTIN_AGENT_PRESET_IDS.designer ? 'fa-magic'
+                    : 'fa-user'
+
+/** 列表 meta 行：该预设启用的工具数（旧预设有能力槽、没有 enabledTools 时按能力槽推导） */
+const presetToolCount = (p: any): number => toolsFromCapabilities(p?.capabilities || {}).length
 
 // ====== 标签 ======
 const tagInput = ref('')
@@ -1208,6 +1332,15 @@ const moveLoopSection = (i: number, dir: number) => {
 
 const selectPreset = (id: string) => { selectedId.value = id; activeTab.value = 'general'; showNavScreen.value = false }
 
+/**
+ * 拖动结束后强制「内置在上、自定义在下」：
+ * 允许内置项之间 / 自定义项之间调整顺序，但不允许把自定义项拖到内置项上面
+ * （下一次启动时 ensureBuiltinAgentPresets 也会做同样的整理，这里让拖完立刻归位）。
+ */
+const enforcePresetOrder = () => {
+  if (ensureBuiltinAgentPresets(store.agentPresets as any[])) store.saveConfig()
+}
+
 // ====== 右键菜单：复制 / 导出 .agent ======
 const presetMenu = ref<{ visible: boolean; x: number; y: number; preset: AgentPreset | null }>({
   visible: false, x: 0, y: 0, preset: null,
@@ -1369,81 +1502,263 @@ const exportAllPresets = async () => {
     : `已导出 ${ok}/${store.agentPresets.length} 个预设到文件夹`)
 }
 
-/** 导入单个 .agent 文件到预设列表（并写入预设文件夹，与其它预设一致持久化） */
-const importAgentFile = async () => {
-  const path = await getPlatform().dialog.pickFile({
+// ====== 预设存储位置（文件夹管理，对齐「插件 → 管理」的目录操作）======
+/** 面板开关 */
+const folderPanelOpen = ref(false)
+/** 当前目录现状（空 folder = 本地存储模式） */
+const folderInfo = ref<{ folder: string; exists: boolean; fileCount: number }>({ folder: '', exists: false, fileCount: 0 })
+/** 最近一次扫描结果（选目录 / 重新扫描后展示「载入了几个、跳过了几个」） */
+const lastScan = ref<AgentPresetScanSummary | null>(null)
+/** 目录操作进行中（避免重复点按钮） */
+const folderBusy = ref(false)
+
+/** 路径末段（侧栏 chip 上只显示文件夹名，悬浮才给完整路径） */
+const folderNameOf = (p: string): string => {
+  const parts = String(p || '').split(/[\\/]+/).filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : String(p || '')
+}
+
+/** 当前目录是否是**默认位置**（userData/agent-presets）；决定「默认位置」徽标与「恢复默认位置」按钮 */
+const presetIsDefaultFolder = ref(false)
+const refreshFolderInfo = async () => {
+  folderInfo.value = await agentPresetFolderInfo()
+  presetIsDefaultFolder.value = await isDefaultAgentPresetFolder()
+}
+
+const openFolderPanel = async () => {
+  folderPanelOpen.value = true
+  await refreshFolderInfo()
+}
+
+/** 选择文件夹并启用文件夹模式（文件为准；空目录会把当前自建预设写进去，避免"切过去就空了"） */
+const chooseFolder = async () => {
+  if (folderBusy.value) return
+  folderBusy.value = true
+  try {
+    // 快照：scan 会用文件夹内容替换内存列表，所以必须在此之前把当前自建预设留下来
+    const presetsBefore = (store.agentPresets as any[])
+      .filter((p) => !isBuiltinAgentPreset(p))
+      .map((p) => JSON.parse(JSON.stringify(p)))
+    const summary = await chooseAgentPresetFolder({ seedPresets: presetsBefore })
+    if (!summary) return // 用户取消
+    lastScan.value = summary
+    await refreshFolderInfo()
+    store.ensureBuiltinAgentPresets()
+    if (!summary.ok) {
+      ElMessage.error(store.locales === 'en'
+        ? `Folder selected but cannot be read: ${summary.error || 'unknown error'}`
+        : `已选择文件夹，但读不了：${summary.error || '未知错误'}`)
+      return
+    }
+    const seeded = Number(summary.seeded || 0)
+    ElMessage.success(store.locales === 'en'
+      ? `Folder mode on: loaded ${summary.loaded} preset(s) from ${summary.files} file(s)${summary.skipped ? `, skipped ${summary.skipped}` : ''}${seeded ? `, wrote ${seeded} existing preset(s) into the empty folder` : ''}`
+      : `已启用文件夹模式：从 ${summary.files} 个文件载入 ${summary.loaded} 个预设${summary.skipped ? `，跳过 ${summary.skipped} 个` : ''}${seeded ? `；目录原本是空的，已把 ${seeded} 个现有预设写成 .agent 文件` : ''}`)
+  } finally {
+    folderBusy.value = false
+  }
+}
+
+/** 重新扫描（目录里手动增删 .agent 后不用重启） */
+const rescanFolder = async () => {
+  if (folderBusy.value) return
+  folderBusy.value = true
+  try {
+    const summary = await scanAgentPresets()
+    lastScan.value = summary
+    await refreshFolderInfo()
+    store.ensureBuiltinAgentPresets()
+    if (summary.ok) {
+      ElMessage.success(store.locales === 'en'
+        ? `Rescanned: ${summary.loaded} preset(s)`
+        : `已重新扫描：${summary.loaded} 个预设`)
+    } else {
+      ElMessage.error(store.locales === 'en'
+        ? `Rescan failed: ${summary.error || 'folder unavailable'}`
+        : `重新扫描失败：${summary.error || '目录不可读'}`)
+    }
+  } finally {
+    folderBusy.value = false
+  }
+}
+
+/** 在系统文件管理器里打开预设文件夹 */
+const revealFolder = async () => {
+  if (!folderInfo.value.folder) return
+  const ok = await revealAgentPresetFolder()
+  if (!ok) {
+    ElMessage.warning(store.locales === 'en'
+      ? 'Cannot open the folder on this platform'
+      : '当前平台打不开文件夹（请手动前往该路径）')
+  }
+}
+
+/** 改回本地存储（不删磁盘文件；当前列表写进 localStorage 后保持） */
+const useLocalStorage = async () => {
+  try {
+    await ElMessageBox.confirm(
+      store.locales === 'en'
+        ? 'Switch back to browser localStorage? Current presets stay in the list and are saved there. Files in the folder are NOT deleted.'
+        : '改回浏览器本地存储？当前预设会保留在列表里并写入本地存储；文件夹里的 .agent 文件不会被删除。',
+      store.locales === 'en' ? 'Back to local storage' : '改回本地存储',
+      { type: 'warning', confirmButtonText: store.locales === 'en' ? 'Switch' : '改回', cancelButtonText: store.locales === 'en' ? 'Cancel' : '取消' },
+    )
+  } catch { return }
+  folderBusy.value = true
+  try {
+    await closeAgentPresetFolder()
+    lastScan.value = null
+    await refreshFolderInfo()
+    ElMessage.success(store.locales === 'en' ? 'Now using local storage' : '已改回本地存储')
+  } finally {
+    folderBusy.value = false
+  }
+}
+
+/** 恢复默认预设目录（userData/agent-presets）；不删旧目录里的文件，空目录时会把当前预设落进去 */
+const resetFolder = async () => {
+  if (folderBusy.value) return
+  try {
+    await ElMessageBox.confirm(
+      store.locales === 'en'
+        ? 'Back to the default preset folder (application data → agent-presets)? Files in the current folder are NOT deleted; if the default folder is empty, current presets are written into it.'
+        : '恢复到默认预设目录（应用数据目录 → agent-presets）？当前文件夹里的 .agent 文件不会被删除；默认目录为空时会把当前预设写进去。',
+      store.locales === 'en' ? 'Default preset folder' : '恢复默认预设目录',
+      { type: 'info', confirmButtonText: store.locales === 'en' ? 'Restore' : '恢复', cancelButtonText: store.locales === 'en' ? 'Cancel' : '取消' },
+    )
+  } catch { return }
+  folderBusy.value = true
+  try {
+    const presetsBefore = (store.agentPresets as any[])
+      .filter((p) => !isBuiltinAgentPreset(p))
+      .map((p) => JSON.parse(JSON.stringify(p)))
+    const summary = await resetAgentPresetFolderToDefault(presetsBefore)
+    if (!summary) {
+      ElMessage.warning(store.locales === 'en' ? 'No default preset folder on this platform' : '当前平台没有默认预设目录')
+      return
+    }
+    lastScan.value = summary
+    await refreshFolderInfo()
+    store.ensureBuiltinAgentPresets()
+    if (!summary.ok) {
+      ElMessage.error(store.locales === 'en'
+        ? `Restore failed: ${summary.error || 'unknown error'}`
+        : `恢复默认目录失败：${summary.error || '未知错误'}`)
+      return
+    }
+    ElMessage.success(store.locales === 'en'
+      ? `Default folder in use: ${summary.loaded} preset(s)`
+      : `已恢复默认预设目录：${summary.loaded} 个预设`)
+  } finally {
+    folderBusy.value = false
+  }
+}
+
+/**
+ * 从某个 .agent 文件导入一份预设（「安装」与旧的「导入」共用）。
+ * 校验 id → 剥掉内置标记 → 同名文件冲突检查 → 补齐旧字段 → 写进 store 与预设文件夹。
+ * @returns 导入后的预设 id
+ * @throws 带可读中文原因（调用方负责提示）
+ */
+const importAgentFromPath = async (path: string): Promise<string> => {
+  const text = await getPlatform().fs.readText(path)
+  const data = JSON.parse(text)
+  if (!data || !data.id || typeof data.id !== 'string') {
+    throw new Error(store.locales === 'en' ? 'invalid .agent file (missing id)' : '无效的 .agent 文件（缺少 id）')
+  }
+  if ((store.agentPresets as any[]).some(c => c.id === data.id)) {
+    throw new Error(store.locales === 'en' ? 'this preset already exists' : '该预设已存在')
+  }
+  // 导入的是普通预设：剥掉内置标记（内置预设由软件自己按 id 注入）
+  delete data.builtin
+  // 同名冲突：避免写入时覆盖已有预设的文件（文件名 = 名称清洗后）
+  const dir = store.agentPresetPath
+  if (dir) {
+    const target = agentFilePath(data, dir)
+    const conflict = (store.agentPresets as any[]).find(c => c.id !== data.id && agentFilePath(c, dir) === target)
+    if (conflict) {
+      throw new Error(store.locales === 'en'
+        ? `name conflicts with "${conflict.name}" — rename it first`
+        : `与预设「${conflict.name}」同名，请先重命名再安装`)
+    }
+  }
+  // 补齐/迁移可能缺失的字段（与新建预设、onMounted 迁移一致）
+  if (!Array.isArray(data.selectedSkills)) {
+    data.selectedSkills = data.selectedSkill ? [data.selectedSkill] : []
+    delete data.selectedSkill
+  }
+  if (!data.capabilities) data.capabilities = defaultCapabilities()
+  if (data.capabilities) {
+    if (typeof data.capabilities.askUser === 'undefined') data.capabilities.askUser = true
+    if (typeof data.capabilities.updatePlan === 'undefined') data.capabilities.updatePlan = true
+    if (typeof data.capabilities.updateTodo === 'undefined') data.capabilities.updateTodo = true
+    if (typeof data.capabilities.mcpAccess === 'undefined') {
+      data.capabilities.mcpAccess = false
+      data.capabilities.mcpServerIds = []
+      data.capabilities.mcpEquipmentIds = []
+    } else {
+      if (!Array.isArray(data.capabilities.mcpServerIds) && data.capabilities.mcpServerId) {
+        data.capabilities.mcpServerIds = [data.capabilities.mcpServerId]
+      } else if (!Array.isArray(data.capabilities.mcpServerIds)) {
+        data.capabilities.mcpServerIds = []
+      }
+      if (!Array.isArray(data.capabilities.mcpEquipmentIds)) data.capabilities.mcpEquipmentIds = []
+    }
+  }
+  if (typeof data.maxSteps === 'undefined') data.maxSteps = DEFAULT_AGENT_MAX_STEPS
+  if (typeof data.seedHistory === 'undefined') data.seedHistory = true
+  if (data.loopPromptMode !== 'sections' && data.loopPromptMode !== 'auto') data.loopPromptMode = 'auto'
+  if (!Array.isArray(data.loopSections)) data.loopSections = []
+  if (typeof data.kbTopK === 'undefined') data.kbTopK = 3
+  if (typeof data.temperature === 'undefined') data.temperature = 0.7
+  if (typeof data.llmType === 'undefined') data.llmType = store.AIconfig.llm.type
+  if (typeof data.model === 'undefined') data.model = ''
+  if (!Array.isArray(data.tags)) data.tags = []
+
+  store.agentPresets.push(data)
+  selectedId.value = data.id
+  showNavScreen.value = false   // 细长窗口：安装后直接进编辑屏
+  store.saveConfig()
+  await writeAgentPreset(data)
+  return String(data.id)
+}
+
+/**
+ * 安装智能体：多选 `.agent` 文件 → 逐个导入到预设文件夹
+ * （与「插件 → 管理 → 安装」同一套心智；也支持直接把文件放进文件夹后「重新扫描」）。
+ */
+const installAgentFiles = async () => {
+  if (!store.agentPresetPath) await ensureDefaultAgentPresetFolder()
+  if (!store.agentPresetPath) {
+    await openFolderPanel()
+    ElMessage.warning(store.locales === 'en' ? 'Choose a preset folder first' : '请先选择预设文件夹')
+    return
+  }
+  const paths = await getPlatform().dialog.pickFiles({
     filters: [
       { name: 'Agent Preset', extensions: ['agent'] },
       { name: 'All Files', extensions: ['*'] },
     ],
   })
-  if (!path) return
-  try {
-    const text = await getPlatform().fs.readText(path)
-    const data = JSON.parse(text)
-    if (!data || !data.id || typeof data.id !== 'string') {
-      ElMessage.error(store.locales === 'en' ? 'Invalid .agent file (missing id)' : '无效的 .agent 文件（缺少 id）')
-      return
+  if (!paths?.length) return
+  let ok = 0
+  const failures: string[] = []
+  for (const p of paths) {
+    try {
+      await importAgentFromPath(p)
+      ok++
+    } catch (e: any) {
+      failures.push(`${folderNameOf(p)}：${e?.message || e}`)
     }
-    if ((store.agentPresets as any[]).some(c => c.id === data.id)) {
-      ElMessage.warning(store.locales === 'en' ? 'This preset already exists' : '该预设已存在')
-      return
-    }
-    // 导入的是普通预设：剥掉内置标记（内置预设由软件自己按 id 注入）
-    delete data.builtin
-    // 同名冲突：避免写入时覆盖已有预设的文件（文件名 = 名称清洗后）
-    const dir = store.agentPresetPath
-    if (dir) {
-      const target = agentFilePath(data, dir)
-      const conflict = (store.agentPresets as any[]).find(c => c.id !== data.id && agentFilePath(c, dir) === target)
-      if (conflict) {
-        ElMessage.warning(store.locales === 'en'
-          ? `Name conflicts with "${conflict.name}", please rename it first`
-          : `与预设「${conflict.name}」同名，请先重命名再导入`)
-        return
-      }
-    }
-    // 补齐/迁移可能缺失的字段（与新建预设、onMounted 迁移一致）
-    if (!Array.isArray(data.selectedSkills)) {
-      data.selectedSkills = data.selectedSkill ? [data.selectedSkill] : []
-      delete data.selectedSkill
-    }
-    if (!data.capabilities) data.capabilities = defaultCapabilities()
-    if (data.capabilities) {
-      if (typeof data.capabilities.askUser === 'undefined') data.capabilities.askUser = true
-      if (typeof data.capabilities.updatePlan === 'undefined') data.capabilities.updatePlan = true
-      if (typeof data.capabilities.updateTodo === 'undefined') data.capabilities.updateTodo = true
-      if (typeof data.capabilities.mcpAccess === 'undefined') {
-        data.capabilities.mcpAccess = false
-        data.capabilities.mcpServerIds = []
-        data.capabilities.mcpEquipmentIds = []
-      } else {
-        if (!Array.isArray(data.capabilities.mcpServerIds) && data.capabilities.mcpServerId) {
-          data.capabilities.mcpServerIds = [data.capabilities.mcpServerId]
-        } else if (!Array.isArray(data.capabilities.mcpServerIds)) {
-          data.capabilities.mcpServerIds = []
-        }
-        if (!Array.isArray(data.capabilities.mcpEquipmentIds)) data.capabilities.mcpEquipmentIds = []
-      }
-    }
-    if (typeof data.maxSteps === 'undefined') data.maxSteps = DEFAULT_AGENT_MAX_STEPS
-    if (typeof data.seedHistory === 'undefined') data.seedHistory = true
-    if (data.loopPromptMode !== 'sections' && data.loopPromptMode !== 'auto') data.loopPromptMode = 'auto'
-    if (!Array.isArray(data.loopSections)) data.loopSections = []
-    if (typeof data.kbTopK === 'undefined') data.kbTopK = 3
-    if (typeof data.temperature === 'undefined') data.temperature = 0.7
-    if (typeof data.llmType === 'undefined') data.llmType = store.AIconfig.llm.type
-    if (typeof data.model === 'undefined') data.model = ''
-    if (!Array.isArray(data.tags)) data.tags = []
-
-    store.agentPresets.push(data)
-    selectedId.value = data.id
-    showNavScreen.value = false   // 细长窗口：导入后直接进编辑屏
-    store.saveConfig()
-    await writeAgentPreset(data)
-    ElMessage.success(store.locales === 'en' ? 'Preset imported' : '已导入预设')
-  } catch (e: any) {
-    ElMessage.error(store.locales === 'en' ? `Import failed: ${e?.message || e}` : `导入失败：${e?.message || e}`)
+  }
+  store.ensureBuiltinAgentPresets()
+  if (ok > 0) {
+    ElMessage.success(store.locales === 'en'
+      ? `Installed ${ok} preset(s)${failures.length ? `, skipped ${failures.length}` : ''}`
+      : `已安装 ${ok} 个预设${failures.length ? `，跳过 ${failures.length} 个` : ''}`)
+  }
+  if (failures.length) {
+    ElMessage.warning((store.locales === 'en' ? 'Skipped: ' : '跳过：') + failures.slice(0, 3).join('；'))
   }
 }
 
@@ -1496,8 +1811,13 @@ watch(() => store.agentPresets, () => {
 }, { deep: true })
 
 onMounted(async () => {
-  // .agent 文件模式：先扫描预设文件夹（有 agentPresetPath 时以文件为准）
-  await scanAgentPresets()
+  // 默认存储位置：预设默认存到 userData/agent-presets（老用户会从 localStorage 迁过去）。
+  // 必须在首次扫描之前完成，否则会先按"无文件夹"渲染一屏再跳成文件夹模式。
+  await ensureDefaultAgentPresetFolder()
+  // .agent 文件模式：先扫描预设文件夹（有 agentPresetPath 时以文件为准）；
+  // 扫描结果留在面板里（载入 / 跳过了几个），并把目录现状显示到侧栏 chip
+  lastScan.value = await scanAgentPresets()
+  await refreshFolderInfo()
   // 出厂内置预设（代码智能体 / 办公智能体）幂等兜底：旧存档 / 文件夹模式下缺失也能补上
   store.ensureBuiltinAgentPresets()
   // 兼容迁移：旧数据 selectedSkill(string) → selectedSkills(string[])
@@ -1549,71 +1869,81 @@ onMounted(async () => {
 }
 /* ====== 左侧列表 ====== */
 .contact-sidebar {
-  width: 180px; display: flex; flex-direction: column;
+  /* 与「插件 → 管理」左栏一致：230px（安装按钮 + 四个图标按钮能排在一行） */
+  width: 230px; flex-shrink: 0; display: flex; flex-direction: column;
   border-right: 1px solid var(--borderColor); background: var(--menuColor);
 }
-.contact-sidebar-list { flex: 1; overflow-y: auto; padding: 2px; background-color: var(--backgroundColor); }
-/* ====== 顶部工具栏（ToDo top-toolbar 同款：搜索 / 新建 / 打开文件夹） ====== */
+.contact-sidebar-list { flex: 1; overflow-y: auto; padding: 0 4px 4px; background-color: var(--backgroundColor); }
+/* ====== 顶部工具栏（与「插件 → 管理」一致：只有按钮行，横线在按钮下方） ====== */
 .contact-toolbar {
-  display: flex; flex-direction: column; gap: 5px;
-  flex-shrink: 0;
+  display: flex; flex-shrink: 0;
   padding: 5px; border-bottom: 1px solid var(--borderColor);
   background: var(--menuColor);
 }
-/* 第一行：四个操作按钮均匀分布（新建 / 导入文件夹 / 导出全部 / 导入单个） */
 .contact-actions-row {
-  display: flex; gap: 5px; width: 100%;
+  /* 与「插件 → 管理」工具栏同一行：安装占满剩余宽度，其余四个图标按钮固定 26px */
+  display: flex; gap: 4px; width: 100%; flex-wrap: nowrap;
 }
-.contact-actions-row .toolbar-action-btn {
-  flex: 1; height: 28px;
-}
-.contact-toolbar .notes-search-box {
-  flex: none; width: calc(100% - 14px); min-width: 0; height: 26px;
-  display: flex; align-items: center; gap: 6px;
-  padding: 0 6px;
-  border: 1px solid var(--borderColor); border-radius: 4px;
-  background-color: var(--backgroundColor);
-  color: var(--borderColor); font-size: 12px;
-}
-.contact-toolbar .notes-search-box > i { flex-shrink: 0; font-size: 12px; }
-.contact-toolbar .notes-search-input {
-  flex: 1; min-width: 0;
-  border: none; outline: none; background: transparent;
-  color: var(--fontColor); font-size: 12px; margin: 0;
-}
-.contact-toolbar .notes-search-clear { flex-shrink: 0; cursor: pointer; font-size: 12px; color: var(--borderColor); }
-.contact-toolbar .notes-search-clear:hover { color: var(--fontActiveColor); }
 .contact-toolbar .toolbar-action-btn {
-  flex-shrink: 0; width: 26px; height: 26px;
+  flex-shrink: 0; width: 26px; height: 26px; min-width: 26px;
   display: flex; align-items: center; justify-content: center;
   border: 1px solid var(--borderColor); border-radius: 4px;
   background: var(--backgroundColor); color: var(--fontColor);
   cursor: pointer; font-size: 12px; transition: all .12s;
 }
 .contact-toolbar .toolbar-action-btn:hover { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
-.contact-item {
+/* 搜索行：独立一块（与「插件 → 管理」「技能 → 管理」同一个盒子样式），不再挤在工具栏里 */
+.ap-nav-search {
   display: flex; align-items: center; gap: 6px;
-  padding: 5px 6px; margin-bottom: 1px; border-radius: 3px;
-  cursor: pointer; transition: all .12s; border: 1px solid transparent;
+  margin: 5px; padding: 0 8px; height: 26px; flex-shrink: 0;
+  border: 1px solid var(--borderColor); border-radius: 5px;
+  background: var(--backgroundColor); color: var(--borderColor);
+}
+.ap-nav-search:focus-within { border-color: var(--fontActiveColor); }
+.ap-nav-search > i.fa-search { font-size: 11px; opacity: .6; flex-shrink: 0; }
+.ap-nav-search input {
+  flex: 1; min-width: 0; border: none; outline: none; background: transparent;
+  color: var(--fontColor); font-size: 12px; margin: 0;
+}
+.ap-search-clear { cursor: pointer; font-size: 12px; opacity: .55; flex-shrink: 0; }
+.ap-search-clear:hover { opacity: 1; color: var(--fontActiveColor); }
+/* 左侧列表项：与「插件 → 管理」的 plugin-nav-item 同一套结构（两行：主行 + meta 行） */
+.contact-item {
+  padding: 5px 6px; margin-bottom: 2px; border-radius: 4px;
+  border: 1px solid transparent; cursor: pointer; transition: all .12s;
+  user-select: none; -webkit-user-select: none;
+  box-sizing: border-box; min-height: 44px;
 }
 .contact-item:hover { background: color-mix(in srgb, var(--fontColor) 6%, transparent); }
 .contact-item.active { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); border-color: var(--fontActiveColor); }
-.contact-item-avatar {
-  width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
-  background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent); border-radius: 50%; flex-shrink: 0;
+/* 主行：图标 + 名称 + 右侧锁定/删除 */
+.ap-nav-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ap-nav-icon {
+  width: 16px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--fontColor); opacity: .6;
 }
-.contact-item-avatar i { font-size: 13px; color: var(--fontActiveColor); }
-.contact-item-info { flex: 1; min-width: 0; }
-.contact-item-name { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contact-item.active .ap-nav-icon { color: var(--fontActiveColor); opacity: 1; }
+.ap-nav-name {
+  flex: 1; min-width: 0; font-size: 12px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* meta 行：标签 / 自定义 / 工具数。始终渲染（min-height 占位），没有标签的预设行不会变矮 */
+.ap-nav-meta {
+  display: flex; align-items: center; gap: 4px;
+  margin-top: 2px; padding-left: 22px;
+  min-width: 0; min-height: 14px; font-size: 10px; overflow: hidden;
+}
+.ap-nav-meta-text { opacity: .45; font-size: 9px; white-space: nowrap; }
+.ap-nav-tools {
+  margin-left: auto; flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 9px; opacity: .6;
+}
 /* 左侧列表项：标签展示 */
-.contact-item-tags {
-  display: flex; align-items: center; gap: 2px;
-  margin-top: 2px; overflow: hidden;
-}
 .contact-tag-chip {
   flex-shrink: 0; max-width: 52px;
   font-size: 9px; line-height: 1;
-  padding: 2px 4px; border-radius: 3px;
+  padding: 1px 3px; border-radius: 3px;
   background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
   color: var(--fontActiveColor);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2073,7 +2403,7 @@ onMounted(async () => {
 .agent-preset.tall .contact-item.active {
   background-color: var(--menuActiveColor);
 }
-.agent-preset.tall .contact-item-name {
+.agent-preset.tall .ap-nav-name {
   font-size: 14px;
 }
 .agent-preset.tall .contact-content {
@@ -2128,4 +2458,118 @@ onMounted(async () => {
 }
 .agent-preset.tall .ae-tab-reset { margin-left: 0; }
 .agent-preset.tall .ae-tab-text { display: inline; }
+
+/* ====== 智能体导航（参照「插件 → 管理」）：工具栏主按钮 + 底栏 ====== */
+/* 左栏 230px：安装按钮占满剩余宽度，四个图标按钮固定宽度，全部排在同一行 */
+.contact-actions-row .toolbar-action-btn.primary {
+  /* 安装按钮占满剩余宽度（图标 + 文字），其余四个固定 26px */
+  flex: 1 1 auto; width: auto; min-width: 0; gap: 5px; padding: 0 6px;
+  border-color: color-mix(in srgb, var(--fontActiveColor) 45%, var(--borderColor));
+  color: var(--fontActiveColor);
+}
+.contact-actions-row .toolbar-action-btn.primary:hover { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
+.ap-toolbar-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ap-nav-foot {
+  flex-shrink: 0; display: flex; flex-direction: column; gap: 3px;
+  padding: 5px 7px; border-top: 1px solid var(--borderColor);
+  background: var(--menuColor);
+}
+.ap-foot-row { display: flex; align-items: center; justify-content: space-between; font-size: 10px; opacity: .8; }
+.ap-foot-icons { display: flex; align-items: center; gap: 7px; }
+.ap-foot-icon { font-size: 10px; }
+.ap-foot-icon.action { cursor: pointer; }
+.ap-foot-icon.action:hover { color: var(--fontActiveColor); opacity: 1; }
+.ap-foot-path {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: 10px; opacity: .65; cursor: pointer;
+}
+.ap-foot-path:hover { opacity: 1; }
+.ap-foot-path i { flex-shrink: 0; }
+.ap-foot-path-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;
+}
+
+/* ====== 存储位置 chip（侧栏顶部，一行高） ====== */
+.apf-chip {  display: flex; align-items: center; gap: 5px;
+  margin: 4px 6px 0; padding: 3px 6px;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  font-size: 10px; color: var(--fontColor); opacity: .8;
+  cursor: pointer; min-width: 0;
+}
+.apf-chip:hover { opacity: 1; background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent); }
+.apf-chip i { font-size: 10px; color: var(--fontActiveColor); flex-shrink: 0; }
+.apf-chip.folder { opacity: 1; border-color: color-mix(in srgb, var(--fontActiveColor) 35%, var(--borderColor)); }
+.apf-chip-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.apf-chip-count {
+  flex-shrink: 0; font-size: 9px; padding: 0 4px; border-radius: 6px;
+  background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
+}
+
+/* ====== 预设存储位置面板（teleport 到 body；层级与右键菜单一致） ====== */
+.apf-overlay {
+  position: fixed; inset: 0; z-index: 1600;
+  background: rgba(0, 0, 0, .35);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.apf-panel {
+  width: min(560px, 100%); max-height: 86vh; overflow: auto;
+  background: var(--menuColor); color: var(--fontColor);
+  border: 1px solid var(--borderColor); border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+  font-size: 12px;
+}
+.apf-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 9px 11px; border-bottom: 1px solid var(--borderColor);
+}
+.apf-head i { color: var(--fontActiveColor); }
+.apf-title { font-size: 13px; font-weight: 600; color: var(--fontActiveColor); flex: 1; }
+.apf-close {
+  width: 22px; height: 22px; border: none; background: transparent;
+  color: var(--fontColor); cursor: pointer; border-radius: 3px;
+}
+.apf-close:hover { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
+.apf-body { padding: 10px 11px; display: flex; flex-direction: column; gap: 9px; }
+.apf-mode { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.apf-badge {
+  flex-shrink: 0; padding: 1px 6px; border-radius: 8px; font-size: 10px;
+  border: 1px solid var(--borderColor); opacity: .85;
+}
+.apf-badge.folder { border-color: color-mix(in srgb, var(--fontActiveColor) 45%, var(--borderColor)); color: var(--fontActiveColor); }
+.apf-path {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--monoFont, Consolas, monospace); font-size: 11px;
+  direction: rtl; text-align: left;
+}
+.apf-path.dim { opacity: .6; font-family: inherit; direction: ltr; }
+/* 「默认位置」徽标：目录仍是 userData/agent-presets（没被改成自定义目录） */
+.apf-default-badge {
+  flex-shrink: 0; font-style: normal; font-size: 9px;
+  padding: 0 4px; border-radius: 6px; border: 1px solid var(--borderColor);
+  opacity: .75;
+}
+.apf-hint { font-size: 11px; line-height: 1.55; opacity: .8; }
+.apf-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.apf-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 9px; font-size: 11px; cursor: pointer;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: transparent; color: var(--fontColor);
+}
+.apf-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent); }
+.apf-btn:disabled { opacity: .4; cursor: not-allowed; }
+.apf-btn.primary { border-color: color-mix(in srgb, var(--fontActiveColor) 45%, var(--borderColor)); color: var(--fontActiveColor); }
+.apf-btn.danger:hover:not(:disabled) { color: #f56c6c; border-color: #f56c6c; }
+.apf-status {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  font-size: 10px; opacity: .75; border-top: 1px dashed var(--borderColor); padding-top: 7px;
+}
+.apf-status i { font-size: 10px; }
+.apf-status-note { opacity: .8; }
+.apf-warn { color: #f56c6c; }
+.apf-scan { font-size: 11px; display: flex; align-items: flex-start; gap: 5px; line-height: 1.5; }
+.apf-scan .ok { color: #67c23a; }
+.apf-scan .err { color: #f56c6c; }
 </style>

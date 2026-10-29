@@ -458,6 +458,13 @@ import { useTallLayout } from '@/composables/useTallLayout'
     // 独立窗口也需要加载配置（主题等；loadConfig 为同步动作，返回后 store.lan 已就绪）
     store.loadConfig()
 
+    // 技能 / Agent 预设的默认存储位置（userData/skills、userData/agent-presets）：
+    // 必须在 loadConfig 之后解析，否则会被 localStorage 里的空值覆盖。
+    // 老用户的预设会从 localStorage 迁进默认文件夹（只写空目录，不覆盖任何已有 .agent）。
+    void import('@/composables/useDefaultStorage')
+      .then((m) => m.initDefaultStorage())
+      .catch((e) => console.warn('[storage] 初始化默认存储位置失败:', e))
+
     // 系统悬浮窗：只需要主题 + 语音状态镜像，不能初始化主界面/服务/热键
     if (isVoiceOverlayWindow.value) {
       // 悬浮窗是常驻复用的：设置里改主题后必须跟着重设 CSS 变量，否则会一直用旧主题

@@ -8,7 +8,7 @@ import * as http from 'http'
 import { Worker } from 'worker_threads'
 import yaml from 'js-yaml'
 import mammoth from "mammoth"
-import { docxToMarkdown } from './office/docx-to-markdown'
+import { wordToMarkdown } from './office/word-to-markdown'
 import { asNodeBytes, asUint8 } from './buffer-view'
 
 // 启动期崩溃留痕（尤其 e2e/无窗口环境：Electron 退出时可能不打印任何 stderr）
@@ -35,6 +35,8 @@ import { isVerbose, logInfo, logWarn } from './log'
 import { DEV_SERVER_URL, DIST_DIR, DIST_ELECTRON_DIR, INDEX_HTML, PUBLIC_DIR, resolvePreload } from './run-mode'
 // 「这份文档到底跑没跑 preload」的握手 + 自助恢复（Electron ≤42 的 DevTools/初始空文档竞态，见该文件头注释）
 import { guardPreload } from './preload-guard'
+// 文件树懒加载底座：单层读取 / 文件名全树搜索 / 有预算的整树快照（不依赖 electron，可独立自测）
+import { FS_LIST_SKIP, boundedTreeScan, invalidateDirCache, readDirPage, searchNamesWalk } from './fs-list'
 // 右侧栏「终端」标签的后端：真 PTY（node-pty，见 terminal-service.ts）
 import { disposeAllTerminals, registerTerminalIpc } from './terminal-service'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
@@ -291,6 +293,53 @@ function attachExternalLinkHandling(target: BrowserWindow): void {
   })
 }
 
+// ==================== 崩溃 / 无响应诊断 ====================
+// 背景：大工作区曾出现「闪退」，但应用没有任何一处监听渲染进程退出，
+// 用户只能看到窗口消失，事后也无从定位。这里统一留痕：
+//  - render-process-gone：渲染进程崩溃（最常见是内存不足 OOM）→ 写日志 + 询问是否重载；
+//  - unresponsive：主线程卡住（长时间扫描/死循环）→ 写日志；
+//  - child-process-gone：GPU/工具进程异常 → 写日志。
+// 日志落在系统临时目录的 aikm-main-crash.log（与启动期异常同一份），便于用户回传。
+function appendCrashLog(line: string): void {
+  try {
+    fs.appendFileSync(join(app.getPath('temp'), 'aikm-main-crash.log'), `[${new Date().toISOString()}] ${line}\n`)
+  } catch { /* 忽略 */ }
+}
+
+let crashDialogOpen = false
+
+app.on('render-process-gone', (_event, webContents, details) => {
+  const reason = String(details?.reason || 'unknown')
+  appendCrashLog(`render-process-gone reason=${reason} exitCode=${details?.exitCode}`)
+  if (reason === 'clean-exit') return
+  if (crashDialogOpen) return
+  const target = BrowserWindow.fromWebContents(webContents)
+  // 文件独立窗口（FileWindow）崩了不打扰用户：只留痕，下次打开会重建
+  if (!target || target === win) {
+    crashDialogOpen = true
+    const opts: Electron.MessageBoxOptions = {
+      type: 'error',
+      title: '界面进程已退出',
+      message: '界面进程意外退出（常见原因是目录过大导致内存不足）。',
+      detail: `原因：${reason}\n日志：${join(app.getPath('temp'), 'aikm-main-crash.log')}`,
+      buttons: ['重新加载', '忽略'],
+      defaultId: 0,
+      cancelId: 1,
+    }
+    const asked = target ? dialog.showMessageBox(target, opts) : dialog.showMessageBox(opts)
+    void asked.then((r) => {
+      crashDialogOpen = false
+      if (r.response === 0) {
+        try { target?.reload() } catch { /* 窗口已销毁 */ }
+      }
+    }).catch(() => { crashDialogOpen = false })
+  }
+})
+
+app.on('child-process-gone', (_event, details) => {
+  appendCrashLog(`child-process-gone type=${details?.type} reason=${details?.reason} exitCode=${details?.exitCode}`)
+})
+
 // ==================== 窗口创建 ====================
 
 async function createWindow() {
@@ -323,6 +372,10 @@ async function createWindow() {
   })
   // 「首份文档必须跑过 preload」的兜底：没跑就重载一次（Electron ≤42 已知行为，见该文件头注释）
   guardPreload(win)
+
+  // 主线程无响应（大目录同步扫描 / 死循环）留痕：只写日志，不弹窗打断
+  win.on('unresponsive', () => appendCrashLog('main window unresponsive'))
+  win.on('responsive', () => appendCrashLog('main window responsive again'))
 
   
   if (process.platform === 'linux') {
@@ -1765,161 +1818,45 @@ ipcMain.handle(
   },
 )
 
-// 文件树相关函数
-function getDirectoryTree(directoryPath: string): any {
-  const absolutePath = path.resolve(directoryPath);
-  const stats = fs.statSync(directoryPath);
-  if (stats.isDirectory()) {
-    const files = fs.readdirSync(directoryPath);
-    // 递归统计文件夹总大小与最新的修改时间（用于排序）
-    let size = 0
-    let mtime = stats.mtimeMs
-    const children = files.map(file => {
-      const child = getDirectoryTree(path.join(directoryPath, file));
-      if (child.size) size += child.size
-      if (child.mtime && child.mtime > mtime) mtime = child.mtime
-      return child
-    })
-    const tree = {
-      label: path.basename(directoryPath),
-      type: 'folder',
-      path: absolutePath,
-      children,
-      extension: 'folder',
-      size,
-      mtime
-    }
-    return tree;
-  } else {
-    return {
-      label: path.basename(directoryPath),
-      type: 'file',
-      path: absolutePath,
-      extension: flowAwareExt(directoryPath),
-      mtime: stats.mtimeMs,
-      size: stats.size
-    };
-  }
-}
+// ==================== 文件树（懒加载） ====================
+// 这里只做通道转发：真正的读取、预算、取消与缓存都在 fs-list.ts
+//（不依赖 electron，可独立跑自测；见 scripts/run-selftests.mjs 的 fsList 套件）。
+//
+// 背景：旧实现把整个工作区扫成一棵树再经 IPC 回传。选 D 盘这类工作区
+//（本机实测 204,016 个目录 / 1,673,401 个文件）会构造上百万个节点、序列化数百 MB，
+// 主进程或渲染进程直接 OOM —— 用户看到的就是「闪退」。
+// 现在展开某个目录才读**一层**，内存只与「用户实际展开过的目录数」成正比。
 
-/** 有界并发 map：按输入顺序输出结果，限制同时执行的异步任务数（避免大目录并发 stat 打开过多句柄） */
-async function pMap<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: (R | undefined)[] = new Array(items.length)
-  let index = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
-      const i = index++
-      if (i >= items.length) return
-      results[i] = await fn(items[i])
-    }
-  })
-  await Promise.all(workers)
-  return results as R[]
-}
-
-/** 异步非阻塞目录树扫描：readdir withFileTypes 免类型 stat、仅对文件 stat，有界并发；避免同步 statSync 阻塞主进程 */
-async function getDirectoryTreeAsync(directoryPath: string, dirMtimes?: Map<string, number>): Promise<any> {
-  const absolutePath = path.resolve(directoryPath)
-  const stats = await fs.promises.stat(directoryPath)
-  if (stats.isDirectory()) {
-    // 记录文件夹自身 mtime（用于缓存深层校验：子项增删/重命名时该值变化）
-    if (dirMtimes) dirMtimes.set(absolutePath, Math.round(stats.mtimeMs))
-    const dirents = await fs.promises.readdir(directoryPath, { withFileTypes: true })
-    const children = await pMap(dirents, 64, async (dirent) => {
-      const childPath = path.join(directoryPath, dirent.name)
-      if (dirent.isDirectory()) {
-        return getDirectoryTreeAsync(childPath, dirMtimes)
-      }
-      if (dirent.isFile()) {
-        const s = await fs.promises.stat(childPath)
-        return { label: dirent.name, type: 'file', path: childPath, extension: flowAwareExt(dirent.name), mtime: s.mtimeMs, size: s.size }
-      }
-      // 符号链接等特殊类型：stat 解析（失败则忽略）
-      try {
-        const s = await fs.promises.stat(childPath)
-        if (s.isDirectory()) return getDirectoryTreeAsync(childPath, dirMtimes)
-        return { label: dirent.name, type: 'file', path: childPath, extension: flowAwareExt(dirent.name), mtime: s.mtimeMs, size: s.size }
-      } catch {
-        return null
-      }
-    })
-    const nodes = children.filter((c: any) => c != null)
-    let size = 0
-    let mtime = stats.mtimeMs
-    for (const c of nodes) {
-      if (c.size) size += c.size
-      if (c.mtime && c.mtime > mtime) mtime = c.mtime
-    }
-    return { label: path.basename(directoryPath), type: 'folder', path: absolutePath, children: nodes, extension: 'folder', size, mtime }
-  } else {
-    return { label: path.basename(directoryPath), type: 'file', path: absolutePath, extension: flowAwareExt(directoryPath), mtime: stats.mtimeMs, size: stats.size }
-  }
-}
-
-// ==================== 文件树缓存（按工作区根路径） ====================
-// 目的：启动/重挂载知识管理面板时若每次都全量重扫数万~十余万文件并整树回传（每个节点带完整
-// 绝对路径，JSON 数十 MB、渲染端 parse 出上百 MB 对象），切换面板就会卡顿甚至内存暴涨崩溃。方案：
-//  1. 缓存每个根目录的扫描结果；文件系统监听触发变更时按根失效。
-//  2. 服务缓存前做两层廉价校验：顶层签名（readdir 名称+类型）+ 全目录 mtime 指纹
-//     （只 stat 文件夹、数量远少于文件），可捕获任意深度的增删/重命名。
-//  3. 缓存跨面板切换保留（stopWatching 不清空），配合渲染端持久化 treeVersion：
-//     数据未变时直接返回 unchanged，跳过整棵树回传与渲染端重新处理。
-const treeCache = new Map<string, { tree: any; topNames: string[]; dirMtimes: Map<string, number> }>()
-let treeVersion = 0
-
-/** 读取目录顶层条目签名（文件夹带 '/' 后缀以区分类型），用于缓存廉价校验 */
-async function readTopLevelSignature(directoryPath: string): Promise<string[]> {
+ipcMain.handle('listDir', async (_event, dirPath, opts) => {
   try {
-    const dirents = await fs.promises.readdir(directoryPath, { withFileTypes: true })
-    return dirents.map((d) => (d.isDirectory() ? d.name + '/' : d.name)).sort()
-  } catch {
-    return []
+    return await readDirPage(dirPath, opts?.offset, opts?.limit)
+  } catch (e: any) {
+    return { entries: [], total: 0, truncated: false, error: String(e?.message || e) }
   }
-}
+})
 
-/** 校验某根目录的缓存是否仍有效：顶层签名 + 全目录 mtime 指纹（可捕获任意深度的增删/重命名） */
-async function isTreeCacheValid(directoryPath: string): Promise<boolean> {
-  const topNames = await readTopLevelSignature(directoryPath)
-  const cached = treeCache.get(directoryPath)
-  if (!cached || cached.topNames.length !== topNames.length || !cached.topNames.every((n: string, i: number) => n === topNames[i])) {
-    return false
-  }
-  // 深层校验：仅 stat 缓存中记录的每个文件夹（数量远少于文件），比对扫描时的 mtime。
-  // 文件夹 mtime 在子项增删/重命名时变化 → 可检测知识处理等造成的深层结构变更，而无需全量重扫。
-  const dirMtimes = cached.dirMtimes
-  if (dirMtimes && dirMtimes.size) {
-    for (const [dirPath, mtime] of dirMtimes) {
-      try {
-        if (Math.round((await fs.promises.stat(dirPath)).mtimeMs) !== mtime) return false
-      } catch {
-        return false
-      }
-    }
-  }
-  return true
-}
+// ---- 按文件名全树搜索（文件树搜索框） ----
+// 只比文件名、只读目录项；三重预算（结果数 / 深度 / 时间）+ 请求序号取消：
+// 用户继续输入时旧请求会在 128 个条目内自行退出，不会叠加成多个全盘扫描。
+const nameSearchSeq = new Map<number, number>()
+let nameSearchSeqFallback = 0
 
-/** 带缓存的目录树扫描：顶层与深层结构均未变化时直接返回缓存，避免重复全量重扫/回传 */
-async function getDirectoryTreeCached(directoryPath: string): Promise<any> {
-  const cached = treeCache.get(directoryPath)
-  if (cached && (await isTreeCacheValid(directoryPath))) {
-    return cached.tree
-  }
-  const topNames = await readTopLevelSignature(directoryPath)
-  const dirMtimes = new Map<string, number>()
-  const tree = await getDirectoryTreeAsync(directoryPath, dirMtimes)
-  treeCache.set(directoryPath, { tree, topNames, dirMtimes })
-  treeVersion++
-  return tree
-}
-
-ipcMain.handle('getDirectoryTree', (event, folderPath) => {
-  if (folderPath) {
-    const tree = [getDirectoryTree(folderPath)];
-    fs.watchFile(folderPath, (curr: any, prev: any) => {
-      // （原「文件变化」调试打印已删：每次都刷一行且没有信息量）
+ipcMain.handle('searchNames', async (event, payload) => {
+  const senderId = event.sender.id
+  const requestId = Number(payload?.requestId) || 0
+  const token = requestId || ++nameSearchSeqFallback
+  nameSearchSeq.set(senderId, token)
+  try {
+    return await searchNamesWalk({
+      roots: Array.isArray(payload?.roots) ? payload.roots : [],
+      keyword: String(payload?.keyword || ''),
+      maxResults: payload?.maxResults,
+      maxDepth: payload?.maxDepth,
+      budgetMs: payload?.budgetMs,
+      isStale: () => nameSearchSeq.get(senderId) !== token,
     })
-    return tree;
+  } catch (e: any) {
+    return { results: [], truncated: false, scanned: 0, elapsedMs: 0, error: String(e?.message || e) }
   }
 })
 
@@ -1954,7 +1891,9 @@ function scanFolderRecursive(
   out: any[] = [],
   rootPath: string = dir
 ): any[] {
-  if (opts.maxFiles > 0 && out.length >= opts.maxFiles) return out
+  // 硬上限兜底：调用方传 maxFiles=0（不限）时也不能无限扫盘
+  const cap = opts.maxFiles > 0 ? Math.min(opts.maxFiles, 50000) : 50000
+  if (out.length >= cap) return out
   let entries: fs.Dirent[] = []
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true })
@@ -2022,7 +1961,11 @@ const SYSTEM_ENTRIES = new Set([
   '$windows.~bt', '$windows.~ws', '$winreagent'
 ])
 
+/** 图谱 / 学习等「摊平目录树」接口的节点预算：超限即停，避免百万文件工作区把主进程撑爆 */
+const FLAT_TREE_MAX_NODES = 20000
+
 function getFiles(folderPath: string, depth: number, fileList: any[] = []): any[] {
+  if (fileList.length >= FLAT_TREE_MAX_NODES) return fileList
   let files: string[]
   try {
     files = fs.readdirSync(folderPath);
@@ -2032,16 +1975,17 @@ function getFiles(folderPath: string, depth: number, fileList: any[] = []): any[
   }
   depth--;
 
-  files.forEach(file => {
+  for (const file of files) {
+    if (fileList.length >= FLAT_TREE_MAX_NODES) break
     // 跳过系统保留项（根目录常见，stat/readdir 会权限报错）
-    if (SYSTEM_ENTRIES.has(file.toLowerCase())) return;
+    if (SYSTEM_ENTRIES.has(file.toLowerCase())) continue;
     const filePath = path.join(folderPath, file);
     let stats: fs.Stats
     try {
       stats = fs.statSync(filePath);
     } catch {
       // 权限受限条目（如 DumpStack.log.tmp）无法 stat，跳过
-      return;
+      continue;
     }
     if (stats.isDirectory() && depth > 0) {
       getFiles(filePath, depth, fileList);
@@ -2063,24 +2007,36 @@ function getFiles(folderPath: string, depth: number, fileList: any[] = []): any[
       } catch { /* 元数据读取失败忽略 */ }
       fileList.push(fileData);
     }
-  });
+  }
   return fileList;
 }
 
 async function getFilesRelation(folderPath: string, depth: number, parentIndex: number | undefined, fileList: any[] = [], relationList: any[] = []): Promise<{ fileList: any[], relationList: any[] }> {
-  if (depth <= 0) return { fileList, relationList };
-  
-  const dirents = await fs.promises.readdir(folderPath, { withFileTypes: true })
-  
+  if (depth <= 0 || fileList.length >= FLAT_TREE_MAX_NODES) return { fileList, relationList };
+
+  let dirents: fs.Dirent[]
+  try {
+    dirents = await fs.promises.readdir(folderPath, { withFileTypes: true })
+  } catch {
+    return { fileList, relationList } // 单个目录不可读：跳过，不影响其它目录
+  }
+
   for (const dirent of dirents) {
+    if (fileList.length >= FLAT_TREE_MAX_NODES) break
+    if (FS_LIST_SKIP.has(dirent.name.toLowerCase())) continue
     const filePath = path.join(folderPath, dirent.name)
     let isDir = dirent.isDirectory()
     let stats: any = null
-    if (dirent.isFile() || isDir) {
-      stats = await fs.promises.stat(filePath)
-    } else {
-      // 符号链接等特殊类型：stat 解析（失败则跳过）
-      try { stats = await fs.promises.stat(filePath); isDir = stats.isDirectory() } catch { continue }
+    try {
+      if (dirent.isFile() || isDir) {
+        stats = await fs.promises.stat(filePath)
+      } else {
+        // 符号链接等特殊类型：stat 解析（失败则跳过）
+        stats = await fs.promises.stat(filePath)
+        isDir = stats.isDirectory()
+      }
+    } catch {
+      continue // 扫描期间被删 / 权限受限：跳过该条
     }
 
     const fileData = {
@@ -2982,9 +2938,11 @@ ipcMain.handle('copyFile', async (event, sourcePath: string, targetDir: string) 
   }
 });
 
-function getInf(filePath: string): any {
+// 取单个路径信息：用异步 stat —— 同步 stat 遇到离线网络盘 / 休眠外置盘会把主进程
+//（以及整个界面）钉住到系统超时；刷新工作区时每个根都会调一次，必须非阻塞。
+async function getInf(filePath: string): Promise<any> {
   try {
-    const stats = fs.statSync(filePath);
+    const stats = await fs.promises.stat(filePath);
     const type = stats.isDirectory() ? 'folder' : 'file';
     const label = path.basename(filePath);
     const extension = type === 'folder' ? 'folder' : flowAwareExt(filePath);
@@ -3195,11 +3153,13 @@ ipcMain.handle('readFile', async (event, filePath) => {
     } catch (error: any) {
       return `Error reading file: ${error.message}`;
     }
-  } else if (fileExtension == ".docx") {
+  } else if (fileExtension == ".docx" || fileExtension == ".doc") {
     try {
-      // 统一走 office/docx-to-markdown：提取图片（落盘 file:/// 引用）、标题输出 atx（目录依赖）、
-      // 表格输出管道表格、回填自动编号、OMML 公式转 LaTeX
-      return await docxToMarkdown({ filePath, mediaDir: docxMediaDir() })
+      // 统一走 office/word-to-markdown（按文件头分派）：
+      //  - .docx → mammoth：提取图片（落盘 file:/// 引用）、标题输出 atx（目录依赖）、
+      //    表格输出管道表格、回填自动编号、OMML 公式转 LaTeX
+      //  - .doc（Word 97-2003）→ word-extractor 取纯文本，输出段落 + 管道表格
+      return await wordToMarkdown({ filePath, mediaDir: docxMediaDir() })
     } catch (err) {
       console.error(err);
       throw err;
@@ -3842,14 +3802,15 @@ ipcMain.handle('saveRemoteDownload', async (event, payload) => {
   }
 });
 
-// 远程 Word(.docx) 预览：接收 base64，主进程用 mammoth 转 HTML 后再转 Markdown
+// 远程 Word(.docx / .doc) 预览：接收 base64，主进程按文件头分派后转 Markdown
 ipcMain.handle('docxToMarkdown', async (_event, payload: { base64?: string }) => {
   try {
     const base64 = payload?.base64
     if (!base64) return { error: '参数无效' }
     const buf = Buffer.from(base64, 'base64')
-    // 与本地 readFile 的 .docx 分支完全同款实现（图片落盘 / atx 标题 / 管道表格 / 编号回填 / 公式 LaTeX）
-    return await docxToMarkdown({ buffer: buf, mediaDir: docxMediaDir() })
+    // 与本地 readFile 的 Word 分支完全同款实现（.docx：图片落盘 / atx 标题 / 管道表格 /
+    // 编号回填 / 公式 LaTeX；.doc：纯文本段落 + 管道表格）
+    return await wordToMarkdown({ buffer: buf, mediaDir: docxMediaDir() })
   } catch (error: any) {
     console.error('[docxToMarkdown] 转换失败:', error)
     return { error: error?.message || 'Word 转换失败' }
@@ -3951,24 +3912,40 @@ ipcMain.handle('readFileBinary', async (event, filePath) => {
 })
 
 ipcMain.handle('search', async (event, path, filterText) => {
-  return search(path, filterText)
+  // 内容搜索同样是「大工作区杀手」：这里给它一份 8 秒 / 10 万条目预算，
+  // 超预算就返回已找到的部分，绝不无限扫盘（文件树搜索已改走 searchNames）。
+  return search(path, filterText, path, [], 1, { visited: 0, maxVisited: 100000, deadline: Date.now() + 8000 })
 });
 
 const SEARCH_SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'dist-electron', 'build', 'release', 'out', 'coverage', '.next', '.nuxt', '.cache', '.gradle', '.idea', '.vs', 'vendor', 'android', 'ios', 'resources', '__pycache__', '.venv', 'venv'])
 
-async function search(storePath: string, filterText: string, dirPath: string = storePath, results: any[] = [], floor: number = 1): Promise<any[]> {
+interface ContentSearchBudget { visited: number; maxVisited: number; deadline: number }
+
+async function search(storePath: string, filterText: string, dirPath: string = storePath, results: any[] = [], floor: number = 1, budget?: ContentSearchBudget): Promise<any[]> {
   if (floor > 10 || results.length >= 2000) return results
+  if (budget && (budget.visited >= budget.maxVisited || Date.now() > budget.deadline)) return results
   let filterTexts = filterText.split(" ")
   if (filterTexts.indexOf("") > -1) {
     filterTexts.splice(filterTexts.indexOf(""), 1)
   }
 
-  let list = await fs.promises.readdir(dirPath)
+  let list: string[]
+  try {
+    list = await fs.promises.readdir(dirPath)
+  } catch {
+    return results // 单个目录不可读：跳过
+  }
 
   for (let itemPath of list) {
+    if (budget && (++budget.visited >= budget.maxVisited || Date.now() > budget.deadline)) return results
     if (SEARCH_SKIP_DIRS.has(String(itemPath).toLowerCase())) continue
     const fullPath = path.join(dirPath, itemPath)
-    const fileStat = await fs.promises.stat(fullPath)
+    let fileStat: fs.Stats
+    try {
+      fileStat = await fs.promises.stat(fullPath)
+    } catch {
+      continue // 扫描期间被删 / 权限受限
+    }
     const isFile = fileStat.isFile()
     const dir = {
       label: path.basename(itemPath),
@@ -3980,7 +3957,7 @@ async function search(storePath: string, filterText: string, dirPath: string = s
     } as any
 
     if (!isFile) {
-      await search(storePath, filterText, fullPath, results, floor + 1)
+      await search(storePath, filterText, fullPath, results, floor + 1, budget)
     }
 
     let nameCount = 0
@@ -3993,8 +3970,13 @@ async function search(storePath: string, filterText: string, dirPath: string = s
     let contentArr = []
     let length = 12
 
-    if (dir.extension == ".md") {
-      dir.content = await fs.readFileSync(path.join(dirPath, itemPath), 'utf-8')
+    // 只读不太大的 Markdown：整文件读入是内容搜索最贵的一步，2MB 以上跳过
+    if (dir.extension == ".md" && fileStat.size <= 2 * 1024 * 1024) {
+      try {
+        dir.content = await fs.promises.readFile(path.join(dirPath, itemPath), 'utf-8')
+      } catch {
+        dir.content = ''
+      }
 
       let count = 0
       for (let i = 0; i < filterTexts.length; i++) {
@@ -4003,7 +3985,7 @@ async function search(storePath: string, filterText: string, dirPath: string = s
         }
       }
 
-      if (count >= filterTexts.length) {
+      if (filterTexts.length && count >= filterTexts.length) {
         let index = 0
         let num = 0
         while (index != -1) {
@@ -4535,6 +4517,9 @@ ipcMain.handle('moveFile', async (event, sourcePath: string, targetDir: string) 
 
 let watchers: fs.FSWatcher[] = [];
 let watchTimeout: NodeJS.Timeout | null = null;
+/** 一次防抖窗口内累积的「发生变化的目录」：渲染层据此只刷新对应节点，不做整树重扫 */
+let pendingWatchDirs = new Set<string>();
+let pendingWatchType = 'change';
 
 // 关闭所有文件夹监听
 function closeAllWatchers() {
@@ -4549,6 +4534,7 @@ ipcMain.handle('startWatching', async (event, folderPath: string | string[]) => 
   try {
     // 停止之前的监听
     closeAllWatchers();
+    pendingWatchDirs = new Set();
 
     const paths = (Array.isArray(folderPath) ? folderPath : [folderPath])
       .filter((p: string) => p && fs.existsSync(p));
@@ -4557,34 +4543,44 @@ ipcMain.handle('startWatching', async (event, folderPath: string | string[]) => 
     }
 
     for (const p of paths) {
-      const w = fs.watch(p, { recursive: true }, (eventType, filename) => {
-        if (!filename) return;
-        // 树缓存失效策略（切换「知识管理」卡顿的主因之一）：
-        //  - 'rename' = 新增 / 删除 / 重命名（结构变更）→ 让该根缓存失效，下次刷新重扫；
-        //  - 'change' = 仅文件内容修改 → **保留缓存**：目录自身 mtime 未变，
-        //    isTreeCacheValid 的「顶层签名 + 全目录 mtime」校验会判定有效，
-        //    从而跳过十万级文件的整树重扫 + 数十 MB IPC 回传。
-        //    知识处理模块持续写文件时，这正是每次切回知识管理都要等几秒的根因。
-        // 兜底：若某平台把结构变更报成 'change'，目录 mtime 校验仍会判定失效并重扫。
-        // 代价：被修改文件的 size / mtime 展示会滞后，直到下一次结构变更或缓存重扫。
-        if (eventType === 'rename') treeCache.delete(p);
+      let w: fs.FSWatcher
+      try {
+        w = fs.watch(p, { recursive: true }, (eventType, filename) => {
+          // filename 可能为 null（平台差异）；递归监听时它是相对被监听根的子路径
+          const rel = filename ? String(filename) : ''
+          const changedDir = rel ? path.dirname(path.join(p, rel)) : p
+          // 目录列表缓存失效：改动目录本身与父目录（新建/删除/改名会改父目录 mtime，
+          // 但事件到下一次 listDir 之间仍可能命中旧缓存）
+          invalidateDirCache(changedDir)
+          pendingWatchDirs.add(changedDir)
+          if (eventType === 'rename') pendingWatchType = 'rename'
 
-        // 防抖：避免短时间内多次触发
-        if (watchTimeout) {
-          clearTimeout(watchTimeout);
-        }
-        watchTimeout = setTimeout(() => {
-          // 通知渲染进程文件系统变化
-          if (win && !win.isDestroyed()) {
-            win.webContents.send('fileSystemChanged', {
-              type: eventType,
-              file: filename,
-              folder: p
-            });
-          }
-          watchTimeout = null;
-        }, 300);
-      });
+          // 防抖：避免短时间内多次触发（连续写入时以最后一次为准，期间变更的目录会累积）
+          if (watchTimeout) clearTimeout(watchTimeout);
+          watchTimeout = setTimeout(() => {
+            const dirs = [...pendingWatchDirs]
+            pendingWatchDirs = new Set()
+            // 通知渲染进程文件系统变化。
+            // dir/dirs = 发生变化的目录：渲染层只刷新这些目录对应的树节点；
+            // 未展开的目录无需处理（下次展开时会重新 listDir）。
+            if (win && !win.isDestroyed()) {
+              win.webContents.send('fileSystemChanged', {
+                type: pendingWatchType,
+                file: rel || null,
+                folder: p,
+                dir: dirs[0] || p,
+                dirs,
+              });
+            }
+            watchTimeout = null;
+            pendingWatchType = 'change';
+          }, 300);
+        });
+      } catch (e: any) {
+        // 单个根监听失败（权限 / 不支持递归监听的路径）不影响其它根
+        console.warn('[watch] 无法监听目录:', p, e?.message || e)
+        continue
+      }
       watchers.push(w);
     }
 
@@ -4774,33 +4770,15 @@ ipcMain.handle('unwatchFile', async (event) => {
   }
 })
 
-// 刷新文件树（单工作区）
-ipcMain.handle('refreshTree', async (event, folderPath: string) => {
-  try {
-    if (!folderPath || !fs.existsSync(folderPath)) {
-      return { success: false, error: '文件夹不存在' };
-    }
-    const tree = [getDirectoryTree(folderPath)];
-    return { success: true, tree };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
 // 刷新多个工作区文件树（多工作区支持）
-ipcMain.handle('refreshMultiTree', async (event, folderPaths: string[], knownVersion?: number) => {
+// ⚠️ 文件树已改为按目录懒加载（listDir），这里仅作为**兼容通道**保留：
+// 带硬预算（节点数 / 深度），超限返回 truncated，绝不整盘扫描。
+ipcMain.handle('refreshMultiTree', async (event, folderPaths: string[]) => {
   try {
     const paths = (Array.isArray(folderPaths) ? folderPaths : [])
       .filter((p: string) => p && fs.existsSync(p));
-    // 快速路径：所有根缓存仍有效且渲染端版本一致 → 数据未变，跳过整棵树回传
-    if (typeof knownVersion === 'number') {
-      const allValid = await Promise.all(paths.map((p: string) => isTreeCacheValid(p)))
-      if (allValid.every(Boolean) && knownVersion === treeVersion) {
-        return { success: true, unchanged: true, tree: null, version: treeVersion };
-      }
-    }
-    const tree = await Promise.all(paths.map((p: string) => getDirectoryTreeCached(p)));
-    return { success: true, unchanged: false, tree, version: treeVersion };
+    const { tree, truncated, version } = await boundedTreeScan(paths)
+    return { success: true, unchanged: false, tree, version, truncated };
   } catch (error: any) {
     return { success: false, error: error.message };
   }

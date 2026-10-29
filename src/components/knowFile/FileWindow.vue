@@ -180,8 +180,9 @@ const showViewSwitcher = computed(() => {
 })
 // 可切换的视图选项（按文件类型过滤：html 仅浏览/源码编辑；Word 仅浏览/思维导图；csv/tsv 仅浏览/源码编辑）
 const baseAvailableViews = computed<ViewType[]>(() => {
-  // Word：只读浏览 + 思维导图（不提供编辑/快编辑/演示）
-  if (isWordFile.value) return ['read', 'mindmap']
+  // Word：只读浏览 + 思维导图（不提供编辑/快编辑/演示）。
+  // 旧版 .doc 只有纯文本、没有标题层级，导图会是空图，故只给浏览。
+  if (isWordFile.value) return fileExt.value === '.doc' ? ['read'] : ['read', 'mindmap']
   // 工作流：新窗口固定工作流编辑器（YAML 文本请在知识管理的「源码编辑」里改）
   if (isFlowDsl.value) return ['read']
   // 数据画布：新窗口固定画布（同工作流；JSON 在知识管理里改）
@@ -347,7 +348,7 @@ async function hydrateRemotePermission(root: any): Promise<void> {
 /**
  * 拉取远程文件内容并建立标签：
  *  - 图片 / PDF：读 base64，供 md_read 图片/PDF 预览
- *  - .docx：主进程 mammoth 转 Markdown 文本
+ *  - .docx / .doc：主进程按文件头转 Markdown 文本（.docx 走 mammoth，.doc 走 word-extractor）
  *  - 其余文本类：直接读文本
  *  - 二进制（视频等无法内联预览）：标记错误，提示下载
  */
@@ -386,7 +387,7 @@ async function loadRemoteFile(root: any, rel: string) {
       remoteText.value = c.text || ''
       tab.remoteBase64 = remoteBase64.value
       tab.remoteText = remoteText.value
-    } else if (ext === '.docx') {
+    } else if (ext === '.docx' || ext === '.doc') {
       const c = await fetchFsRead(root, rel)
       if (!c?.base64) throw new Error(store.locales === 'zh' ? '无可用内容' : 'No content')
       const md: any = await getPlatform().host.docs.docxToMarkdown({ base64: c.base64 })

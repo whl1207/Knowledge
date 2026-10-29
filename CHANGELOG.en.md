@@ -7,12 +7,40 @@
 
 ---
 
+## 2026-10-28
+
+### Fixed
+
+- **Agent / workflow chats often kept their generic title**: the title is now refined concurrently right after the first message is sent instead of waiting for the whole run, so it updates within seconds.
+- **Voice dictation reported "no input field" after clicking blank space in the home input card**: clicking the card's padding or the empty part of its control row now puts the caret back in the composer (buttons and dropdowns behave as before), so dictated text lands in the input instead of only the clipboard.
+
+### Improved
+
+- **The workspace picker is hidden in Normal / Knowledge Base / Workflow modes on home**: those modes do not use the chat's own workspace (workflow nodes use the global default folder), so the picker now shows only in Agent / Skill modes.
+
 ## 2026-10-27
+
+### Added
+
+- **Skill / Agent management left navigation now mirrors Plugins → Manage**: an install button plus refresh / rescan / open folder / select folder / restore default, a search box below and a footer with the count and folder path. Skills can be installed by picking a skill folder (copied into the skills folder; collisions ask before replacing) and agents by picking one or more `.agent` files. The settings item formerly called “Presets” is now “Manage”.
+- **The built-in MCP service “Preset Management” was renamed “Agent Design Reference”** (the stored display name is corrected automatically; the service id is unchanged).
+- **A built-in “Agent Designer” agent** (renamed from “Preset Designer”): describe what you need in chat and it creates or adjusts an Agent preset — every write is dry-run validated first (unknown fields, unknown tool names, duplicate names, out-of-range numbers are all reported), and built-in presets can never be overwritten; the companion MCP service `builtin-agent-preset` (9 tools: schema / capability map / example / storage info / list / get / validate / write / delete) can also be bound to other agents and workflow nodes.
+- **Agent Designer now writes files only**: it no longer goes through `preset_write` — it writes the `.agent` into the preset folder with `write_file`, then loads and self-checks with `preset_reload` (reporting skipped files and field errors); the MCP service is used for reading the spec and current state only, and existing designer prompts are upgraded automatically.
+- **Agent Designer can now write files directly**: besides `preset_write` it has file read/write tools, so when an MCP call times out it can write the `.agent` into the preset folder and call the new `preset_reload` to rescan and self-check (reporting skipped files and field problems); the built-in service timeout was also raised from 60 s to 180 s.
+- **Fixed occasional 60-second timeouts in `preset_list` / `preset_validate`**: both used to rescan the skill library and workspace on every call, which blocked the main process on large folders; the skill list now comes from the already-loaded cache and the workspace scan degrades after 4 s (only losing a few “unknown skill / unknown .kb” warnings).
+- **A built-in “Skill Designer” agent**: tell it what the skill should do, how users will trigger it and whether it needs scripts or templates, and it writes the skill folder and self-checks before handing over; the companion MCP service `builtin-skill-dev` (7 tools: skills folder / anatomy / writing guide / hard rules / templates / troubleshooting / `skill_dev_check`) validates frontmatter, folder name, `$` triggering, body size and every referenced resource.
+- **The three “designer” presets were renamed and moved after the other built-ins**: Plugin Dev Agent → **Plugin Designer**, Preset Designer → **Agent Designer**, plus the new **Skill Designer**; the settings sidebar now lists **Skills → Agents → Plugins**.
+- **Skills and Agent presets now have a default storage location**: skills default to the application data folder → `skills`, presets to `agent-presets` (one `.agent` file per preset), so they work out of the box without picking a folder first; both can still be pointed at another folder and restored to the default (existing presets are migrated into the default folder — only an empty folder is written, never overwriting files).
+- **Settings → Agents → Presets has a storage panel**: change folder, rescan, open in Explorer, switch back to local storage, or restore the default location; the path is persisted and built-in presets are never written there.
+- **Word preview / reading now supports legacy `.doc`**: file browsing, chat attachments, knowledge-base normalization and the agent's `read_file` can read Word 97-2003 documents directly (body text and tables become Markdown; complex layout is not preserved), no need to save as `.docx` first.
+- **Settings → Models → Sources now shows how many tokens each source has consumed, with a daily usage chart**: every source row carries its own cumulative usage and the “Usage of this source” card breaks it down into total / today / input / output plus a daily bar chart for the last 7, 30, 90 days or all time.
+- **A new “Model Usage” section in Settings → General → Data**: it shows the combined total of all sources — all time, today, input / output and request count — with a per-day chart (only requests recorded since this version, no backfill).
 
 ### Fixed
 
 - **Office editor AI-assistant icons rendered as squares and the AI panel had no title**: Excel's content security policy blocked the icon font, so the icons are now inline and the panel title is restored; the AI entry points and title display correctly in Word, Excel and PowerPoint.
 - **Switching views in a Word window blanked the embedded editor, and PPTX showed a one-item view menu**: the other views now expand horizontally in the title bar (animated) instead of hiding the editor, and single-view files no longer show the switcher.
+- **The app crashed when choosing a huge workspace such as the D: drive**: the file tree now reads a folder only when it is expanded, so workspace size no longer matters, and the search box looks up file names across the whole workspace with result and time limits.
 
 ## 2026-10-26
 

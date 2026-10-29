@@ -112,6 +112,14 @@ export interface AikmDshApi {
     load(): Promise<Record<string, any> | null>
     path(): Promise<string>
   }
+  /**
+   * 模型用量账本（只读；只记功能启用之后的请求，不做历史回填）。
+   * 统计口径：所有走主进程请求出口的模型调用（聊天 / 知识库 / 工作流 /
+   * 智能体 / 集群 / 插件 agent），按来源 × 本地日期聚合。
+   */
+  usage: {
+    summary(): Promise<import('../../electron/main/usage-log').UsageSummary>
+  }
   collab: {
     getStatus(): Promise<import('@/types/collab').CollabStatus>
     start(payload?: { port?: number; maxMembers?: number; permissionMode?: string; token?: string }): Promise<{ success: boolean; port?: number; error?: string }>

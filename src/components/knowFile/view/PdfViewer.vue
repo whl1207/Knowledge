@@ -10,7 +10,7 @@
   import { loadDocChatWidth, saveDocChatWidth, DOC_CHAT_MIN_WIDTH, DOC_CHAT_MAX_WIDTH } from '@/lib/knowFile/panelWidths'
   import { ocrImage, ocrProviderLabel, rankOcrModels, hasVisionLikeModel, loadOcrModelPref, saveOcrModelPref, llmConfigByKey, loadOcrSourcePref, saveOcrSourcePref, OCR_SELECTABLE_SOURCES, OCR_MAX_IMAGE_SIDE } from '@/lib/knowFile/ocr'
   // PDF 翻译：分块（带坐标）/ 逐段翻译 / 结果缓存 / 叠加层定位
-  import { buildPageBlocks, blocksForSelection, blockOverlayStyle, planOverlayLayout, splitTexSegments, translateBlocks, translateErrorText, targetLangOfLocale, activeTranslateProvider, sourceModel, makeCacheId, getCached, putCached, clearTranslateCache, translateCacheSize, loadTranslateSourcePref, saveTranslateSourcePref, loadTranslateModelPref, saveTranslateModelPref, type PdfTextBlock, type PdfBlockLayout } from '@/lib/knowFile/translate'
+  import { buildPageBlocks, buildPageImageRects, blocksForSelection, blockOverlayStyle, planOverlayLayout, splitTexSegments, translateBlocks, translateErrorText, targetLangOfLocale, activeTranslateProvider, sourceModel, makeCacheId, getCached, putCached, clearTranslateCache, translateCacheSize, loadTranslateSourcePref, saveTranslateSourcePref, loadTranslateModelPref, saveTranslateModelPref, type PdfTextBlock, type PdfBlockLayout, type PdfImageRect } from '@/lib/knowFile/translate'
   // 译文里的公式用 KaTeX 渲染（与思维导图同一套做法：renderToString + 失败不抛）
   import katex from 'katex'
   import 'katex/dist/katex.min.css'
@@ -194,6 +194,8 @@ import { getPlatform } from '@/platform'
   let transToken = 0 // 翻译会话令牌（取消/换页后丢弃旧结果）
   let transLayerToken = 0 // 叠加层绘制令牌
   const transBlockCache = new Map<number, PdfTextBlock[]>()
+  /** 每页的图片占位（用于叠加层避让插图 / 图表） */
+  const transImageCache = new Map<number, PdfImageRect[]>()
   /** 每页的叠加排版空间（随文本块一起缓存；换文件 / 清缓存时一起清掉） */
   const transLayoutCache = new Map<number, Map<string, PdfBlockLayout>>()
   /** 已有译文的页（只给这些页画叠加层，避免为未翻译页做昂贵的分块） */
@@ -212,7 +214,27 @@ import { getPlatform } from '@/platform'
   const fullTransSaving = ref(false)
   let fullTransAbort: AbortController | null = null
   let fullTransToken = 0
-  /** 单页的全文翻译结果：整页文本块 + 逐块译文 + 原始页面尺寸（导出叠加层 PDF 用） */
+  /** 全文翻译结果的导出样式：叠加在原文上 / 左右对照 */
+  type FullTransStyle = 'overlay' | 'side-by-side'
+  const FULL_TRANS_STYLE_KEY = 'pdf-fulltrans-style'
+  const loadFullTransStyle = (): FullTransStyle => {
+    try {
+      const v = localStorage.getItem(FULL_TRANS_STYLE_KEY)
+      return v === 'side-by-side' ? 'side-by-side' : 'overlay'
+    } catch { return 'overlay' }
+  }
+  const fullTransStyle = ref<FullTransStyle>(loadFullTransStyle())
+  const onFullTransStyleChange = () => {
+    try { localStorage.setItem(FULL_TRANS_STYLE_KEY, fullTransStyle.value) } catch { /* 忽略 */ }
+    // 已完成全文翻译时同步状态栏提示，避免提示的导出样式与实际按钮行为不一致
+    if (fullTransDone.value && fullTransResult.length) {
+      const zh = store.locales === 'zh'
+      fullTransMsg.value = fullTransStyle.value === 'side-by-side'
+        ? (zh ? '全文翻译完成，点击导出左右对照 PDF' : 'Full translation done, click to export a side-by-side PDF')
+        : (zh ? '全文翻译完成，点击导出叠加译文的 PDF' : 'Full translation done, click to export a PDF with the translations')
+    }
+  }
+  /** 单页的全文翻译结果：整页文本块 + 逐块译文 + 原始页面尺寸（导出 PDF 用） */
   interface FullTransPage {
     page: number
     blocks: PdfTextBlock[]
@@ -220,6 +242,8 @@ import { getPlatform } from '@/platform'
     /** 页面未旋转时的原始尺寸（scale=1 的 CSS px，与块坐标同一套空间） */
     width: number
     height: number
+    /** 页面图片占位：导出叠加层时避让，避免白框盖住插图 */
+    images: PdfImageRect[]
   }
   /** 全文翻译结果（逐页保存；只在导出叠加译文 PDF 时使用，不参与页面叠加） */
   let fullTransResult: FullTransPage[] = []
@@ -260,6 +284,7 @@ import { getPlatform } from '@/platform'
     transJobs.length = 0
     transPageBlocks.value = []
     transBlockCache.clear()
+    transImageCache.clear()
     transLayoutCache.clear()
     transLayerToken++
     clearTransLayers()
@@ -1604,23 +1629,49 @@ import { getPlatform } from '@/platform'
     transLayerRef.value.style.setProperty('--scale-factor', String(scale))
   }
 
+  /** 取某页的图片占位（带缓存）：叠加层避让插图 / 图表用 */
+  const ensurePageImages = async (pageNum: number): Promise<PdfImageRect[]> => {
+    const hit = transImageCache.get(pageNum)
+    if (hit) return hit
+    const doc = pdfDoc
+    if (!doc) return []
+    try {
+      const page = await doc.getPage(pageNum)
+      const images = await buildPageImageRects(page)
+      if (pdfDoc !== doc) return []
+      transImageCache.set(pageNum, images)
+      return images
+    } catch (err) {
+      console.error('[Translate] 读取页面图片占位失败:', err)
+      transImageCache.set(pageNum, [])
+      return []
+    }
+  }
+
   /** 取某页文本块（带缓存；pdf.js 的 getTextContent 自身也缓存） */
   const ensureTransBlocks = async (pageNum: number): Promise<PdfTextBlock[]> => {
     const hit = transBlockCache.get(pageNum)
     if (hit) {
-      if (!transLayoutCache.has(pageNum)) transLayoutCache.set(pageNum, planOverlayLayout(hit))
+      if (!transLayoutCache.has(pageNum)) {
+        const images = await ensurePageImages(pageNum)
+        transLayoutCache.set(pageNum, planOverlayLayout(hit, images))
+      }
       return hit
     }
     const doc = pdfDoc
     if (!doc) return []
     try {
       const page = await doc.getPage(pageNum)
-      const blocks = await buildPageBlocks(page, pageNum)
+      const [blocks, images] = await Promise.all([
+        buildPageBlocks(page, pageNum),
+        buildPageImageRects(page),
+      ])
       // 等待期间可能换了文件（cleanup 已清缓存）：旧文档的块不能再写回，否则新文档会用到错页的坐标
       if (pdfDoc !== doc) return []
       transBlockCache.set(pageNum, blocks)
-      // 叠加框的宽度 / 最大高度只跟文本块有关，和译文无关：分块后一次算好，绘制时直接用
-      transLayoutCache.set(pageNum, planOverlayLayout(blocks))
+      transImageCache.set(pageNum, images)
+      // 叠加框的宽度 / 最大高度只跟文本块 / 图片有关，和译文无关：分块后一次算好，绘制时直接用
+      transLayoutCache.set(pageNum, planOverlayLayout(blocks, images))
       return blocks
     } catch (err) {
       console.error('[Translate] 文本分块失败:', err)
@@ -1740,6 +1791,12 @@ import { getPlatform } from '@/platform'
         f = Math.max(0.05, f - 0.02)
         setSize(f)
       }
+      // 4) 仍然装不下（极密集的表格 / 参考文献行）：继续缩到约 0.8px。
+      // 宁可字号极小，也不让白框长到下一块上造成文字重叠。
+      while (over() && b.fontSize * f > 0.8) {
+        f = Math.max(0.005, f - 0.005)
+        setSize(f)
+      }
     }
 
     // 译文偏短：放开行距 / 放大字号填充原段落，但始终不超过可用高度
@@ -1765,6 +1822,7 @@ import { getPlatform } from '@/platform'
     if (b.angle !== 0) return
     const el = document.createElement('div')
     el.className = 'pdf-trans-item'
+    if (layout?.overImage) el.classList.add('pdf-trans-over-image')
     const style = blockOverlayStyle(b, layout)
     for (const k of Object.keys(style)) el.style.setProperty(k, style[k])
     setTransContent(el, text)
@@ -1783,7 +1841,7 @@ import { getPlatform } from '@/platform'
     const blocks = await ensureTransBlocks(pageNum)
     if (token !== transLayerToken || !transOn.value) return
     if (pageNum === currentPage.value) transPageBlocks.value = blocks
-    const layout = transLayoutCache.get(pageNum) || planOverlayLayout(blocks)
+    const layout = transLayoutCache.get(pageNum) || planOverlayLayout(blocks, transImageCache.get(pageNum) || [])
     for (const b of blocks) {
       const text = transMap.value[b.id]
       if (text) paintTransBlock(layer, b, text, layout.get(b.id))
@@ -1808,7 +1866,7 @@ import { getPlatform } from '@/platform'
       // 同步旋转是异步的：期间可能已关闭叠加（全文翻译 / 隐藏译文）或换了令牌，画之前必须再确认，
       // 否则旧的一次刷新会把刚清空的译文层重新画出来（全文翻译过程中就会“叠加”）。
       if (token !== transLayerToken || !transOn.value) return
-      const layout = transLayoutCache.get(p) || planOverlayLayout(blocks)
+      const layout = transLayoutCache.get(p) || planOverlayLayout(blocks, transImageCache.get(p) || [])
       for (const b of blocks) {
         const text = transMap.value[b.id]
         if (text) paintTransBlock(layer, b, text, layout.get(b.id))
@@ -1892,11 +1950,11 @@ import { getPlatform } from '@/platform'
     }
     const fileKey = transFileKey()
     const target = transTarget.value
-    // 公式 / 数字碎片（无自然语言）不送去翻译：保留原样，避免被改写或产生无意义译文
+    // 公式 / 数字碎片不送去翻译；参考文献仍交给模型翻译（标题翻译、作者/期刊/DOI 原样）
     const targets = blocks.filter((b) => !b.math)
     const skipped = blocks.length - targets.length
     if (!targets.length) {
-      transMsg.value = zh ? '这些内容以公式 / 数字为主，无需翻译' : 'Formula/number only — nothing to translate'
+      transMsg.value = zh ? '这些内容以公式 / 数字或参考文献为主，无需翻译' : 'Formula/number/reference only — nothing to translate'
       ElMessage.info(transMsg.value)
       return
     }
@@ -1950,7 +2008,7 @@ import { getPlatform } from '@/platform'
           const b = blocks.find((x) => x.id === id)
           const layer = transLayerFor(page)
           const layout = b
-            ? (transLayoutCache.get(page) || planOverlayLayout(blocks)).get(id)
+            ? (transLayoutCache.get(page) || planOverlayLayout(blocks, transImageCache.get(page) || [])).get(id)
             : undefined
           if (b && layer && transOn.value) paintTransBlock(layer, b, text, layout)
         },
@@ -2227,7 +2285,7 @@ import { getPlatform } from '@/platform'
         if (!targets.length) {
           emptyPages++
           // 没有可翻译文字的页也要占一个叠加层页（导出时按页号与原 PDF 对齐）
-          pages.push({ page: p, blocks, texts: {}, width: size.width, height: size.height })
+          pages.push({ page: p, blocks, texts: {}, width: size.width, height: size.height, images: transImageCache.get(p) || [] })
           fullTransProgress.value = zh ? `全文翻译 ${p}/${total} 页` : `Full translation ${p}/${total} pages`
           await nextTick()
           continue
@@ -2278,7 +2336,7 @@ import { getPlatform } from '@/platform'
           if (token !== fullTransToken) return
         }
         // 逐块保留译文与坐标：导出叠加层 PDF 时要按原段落位置画回页面上
-        pages.push({ page: p, blocks, texts: Object.fromEntries(translated), width: size.width, height: size.height })
+        pages.push({ page: p, blocks, texts: Object.fromEntries(translated), width: size.width, height: size.height, images: transImageCache.get(p) || [] })
         fullTransProgress.value = zh ? `全文翻译 ${p}/${total} 页` : `Full translation ${p}/${total} pages`
         await nextTick()
       }
@@ -2291,9 +2349,10 @@ import { getPlatform } from '@/platform'
       if (failedBlocks) notes.push(zh ? `${failedBlocks} 段失败` : `${failedBlocks} block(s) failed`)
       if (emptyPages) notes.push(zh ? `${emptyPages} 页无可翻译文字` : `${emptyPages} page(s) without translatable text`)
       const note = notes.length ? (zh ? `（${notes.join('，')}）` : ` (${notes.join(', ')})`) : ''
-      fullTransMsg.value = zh
-        ? `全文翻译完成，点击导出叠加译文的 PDF${note}`
-        : `Full translation done, click to export a PDF with the translations${note}`
+      const sideBySide = fullTransStyle.value === 'side-by-side'
+      fullTransMsg.value = sideBySide
+        ? (zh ? `全文翻译完成，点击导出左右对照 PDF${note}` : `Full translation done, click to export a side-by-side PDF${note}`)
+        : (zh ? `全文翻译完成，点击导出叠加译文的 PDF${note}` : `Full translation done, click to export a PDF with the translations${note}`)
     } catch (err) {
       if (token !== fullTransToken) return
       fullTransRunning.value = false
@@ -2338,6 +2397,58 @@ import { getPlatform } from '@/platform'
   }
 
   /**
+   * 构造一页「译文叠加层」的 HTML（只含译文块，不含原页面内容）。
+   * 屏幕叠加、叠加导出、左右对照的右半页都复用这一份排版，保证三处位置一致。
+   * 返回值里的 scale / offset / width / height 用来在宿主页面里摆放这一层。
+   */
+  const buildOverlayLayerHtml = (pg: FullTransPage, printW: number, printH: number): {
+    innerHtml: string; scale: number; offsetX: number; offsetY: number; width: number; height: number
+  } => {
+    const w = Math.max(1, pg.width)
+    const h = Math.max(1, pg.height)
+    const scale = Math.min(printW / w, printH / h)
+    const offsetX = (printW - w * scale) / 2
+    const offsetY = (printH - h * scale) / 2
+    const host = document.createElement('div')
+    host.style.cssText = `position:fixed;left:-100000px;top:0;width:${printW}px;height:${printH}px;`
+      + `visibility:hidden;pointer-events:none;font-family:${PDF_EXPORT_FONT_STACK};`
+    document.body.appendChild(host)
+    const pageEl = document.createElement('div')
+    pageEl.style.cssText = `position:relative;width:${printW}px;height:${printH}px;overflow:hidden;`
+    const innerEl = document.createElement('div')
+    innerEl.className = 'pdf-export-inner'
+    innerEl.style.cssText = `position:absolute;left:${offsetX}px;top:${offsetY}px;`
+      + `width:${w * scale}px;height:${h * scale}px;--scale-factor:${scale};`
+    // 必须先挂到文档里再逐块 fitTransItem：脱离文档的节点没有布局，
+    // offsetHeight 恒为 0，会让「译文偏短→放大字号」的分支一路放大到上限（导出后文字过大 / 被裁掉）
+    pageEl.appendChild(innerEl)
+    host.appendChild(pageEl)
+    try {
+      const layout = planOverlayLayout(pg.blocks, pg.images)
+      for (const b of pg.blocks) {
+        if (b.angle !== 0) continue // 旋转文字在页面上也不叠加
+        const text = pg.texts[b.id]
+        if (!text) continue
+        const blockLayout = layout.get(b.id)
+        const item = document.createElement('div')
+        item.className = 'pdf-trans-item'
+        if (blockLayout?.overImage) item.classList.add('pdf-trans-over-image')
+        const style = blockOverlayStyle(b, blockLayout)
+        for (const k of Object.keys(style)) item.style.setProperty(k, style[k])
+        setTransContent(item, text, renderExportTex)
+        innerEl.appendChild(item)
+        // 与屏幕叠加层同一套自适应：按原段落范围 / 可用高度缩放字号与行距
+        fitTransItem(item, b, blockLayout)
+      }
+      // 空页 / 只有公式的页也要占一页（Chromium 对完全空的盒子可能不输出页面）
+      if (!innerEl.childElementCount) innerEl.innerHTML = '&nbsp;'
+      return { innerHtml: innerEl.innerHTML, scale, offsetX, offsetY, width: w * scale, height: h * scale }
+    } finally {
+      host.remove()
+    }
+  }
+
+  /**
    * 全文译文的打印 HTML：只画译文块（白底 + 译文），原 PDF 的页面内容由宿主逐页合并回来。
    * 页面尺寸沿用 PDF 原始尺寸（pt → 96dpi 的 CSS px），所以合并后位置、字号都与原段落对齐；
    * 每个 `.pg` 一页，宿主打印出的页数必须与原 PDF 页数一致（空页也会占位）。
@@ -2358,60 +2469,20 @@ import { getPlatform } from '@/platform'
     const printW = Math.max(1, Math.round((uniform ? first.width : maxW) * 4 / 3))
     const printH = Math.max(1, Math.round((uniform ? first.height : maxH) * 4 / 3))
 
-    const host = document.createElement('div')
-    host.style.cssText = `position:fixed;left:-100000px;top:0;width:${printW}px;height:${printH}px;`
-      + `visibility:hidden;pointer-events:none;font-family:${PDF_EXPORT_FONT_STACK};`
-    document.body.appendChild(host)
     const serialized: string[] = []
-    try {
-      for (const pg of pages) {
-        const pageIndex = serialized.length
-        const w = Math.max(1, pg.width)
-        const h = Math.max(1, pg.height)
-        const scale = Math.min(printW / w, printH / h)
-        const offsetX = (printW - w * scale) / 2
-        const offsetY = (printH - h * scale) / 2
-        const pageEl = document.createElement('div')
-        pageEl.style.cssText = `position:relative;width:${printW}px;height:${printH}px;overflow:hidden;`
-        const innerEl = document.createElement('div')
-        innerEl.className = 'pdf-export-inner'
-        innerEl.style.cssText = `position:absolute;left:${offsetX}px;top:${offsetY}px;`
-          + `width:${w * scale}px;height:${h * scale}px;--scale-factor:${scale};`
-        // 必须先挂到文档里再逐块 fitTransItem：脱离文档的节点没有布局，
-        // offsetHeight 恒为 0，会让「译文偏短→放大字号」的分支一路放大到上限（导出后文字过大 / 被裁掉）
-        pageEl.appendChild(innerEl)
-        host.appendChild(pageEl)
-        const layout = planOverlayLayout(pg.blocks)
-        for (const b of pg.blocks) {
-          if (b.angle !== 0) continue // 旋转文字在页面上也不叠加，避免定位错乱
-          const text = pg.texts[b.id]
-          if (!text) continue
-          const blockLayout = layout.get(b.id)
-          const item = document.createElement('div')
-          item.className = 'pdf-trans-item'
-          const style = blockOverlayStyle(b, blockLayout)
-          for (const k of Object.keys(style)) item.style.setProperty(k, style[k])
-          setTransContent(item, text, renderExportTex)
-          innerEl.appendChild(item)
-          // 与屏幕叠加层同一套自适应：按原段落范围 / 可用高度缩放字号与行距
-          fitTransItem(item, b, blockLayout)
-        }
-        // 空页 / 只有公式的页也要占一页（Chromium 对完全空的盒子可能不输出页面）
-        if (!innerEl.childElementCount) innerEl.innerHTML = '&nbsp;'
-        const pageImage = pageImages?.[pageIndex]
-        const imageTag = pageImage
-          ? `<img class="pg-img" style="left:${offsetX}px;top:${offsetY}px;`
-            + `width:${w * scale}px;height:${h * scale}px" src="${pageImage}" alt="">`
-          : ''
-        serialized.push(
-          `<div class="pg" style="width:${printW}px;height:${printH}px">${imageTag}`
-          + `<div class="pdf-export-inner" style="left:${offsetX}px;top:${offsetY}px;`
-          + `width:${w * scale}px;height:${h * scale}px;--scale-factor:${scale}">${innerEl.innerHTML}</div></div>`,
-        )
-        pageEl.remove()
-      }
-    } finally {
-      host.remove()
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      const pg = pages[pageIndex]
+      const overlay = buildOverlayLayerHtml(pg, printW, printH)
+      const pageImage = pageImages?.[pageIndex]
+      const imageTag = pageImage
+        ? `<img class="pg-img" style="left:${overlay.offsetX}px;top:${overlay.offsetY}px;`
+          + `width:${overlay.width}px;height:${overlay.height}px" src="${pageImage}" alt="">`
+        : ''
+      serialized.push(
+        `<div class="pg" style="width:${printW}px;height:${printH}px">${imageTag}`
+        + `<div class="pdf-export-inner" style="left:${overlay.offsetX}px;top:${overlay.offsetY}px;`
+        + `width:${overlay.width}px;height:${overlay.height}px;--scale-factor:${overlay.scale}">${overlay.innerHtml}</div></div>`,
+      )
     }
 
     // 样式与组件里的 .pdf-trans-item 保持一致（导出窗口加载不了应用的样式表）
@@ -2451,6 +2522,10 @@ body { font-family: ${PDF_EXPORT_FONT_STACK}; }
   justify-content: center;
 }
 .pdf-trans-item > .pdf-trans-inner { width: 100%; }
+/* 原文压在插图上：白底半透明，让图片透出来而不是被整块盖住 */
+.pdf-trans-item.pdf-trans-over-image { background: rgba(255, 255, 255, 0.78); }
+.pdf-container.pdf-dark .pdf-trans-item.pdf-trans-over-image { background: rgba(16, 17, 20, 0.78); }
+.pdf-container.pdf-soft .pdf-trans-item.pdf-trans-over-image { background: rgba(27, 28, 32, 0.78); }
 .pdf-trans-item math { font-size: 1em; }
 .pdf-trans-item .katex { font-size: 1em; line-height: 1.1; }
 .pdf-trans-item .katex-display { margin: 0.25em 0; }
@@ -2459,6 +2534,102 @@ body { font-family: ${PDF_EXPORT_FONT_STACK}; }
 </head>
 <body>
 ${serialized.join('')}
+</body>
+</html>`
+  }
+
+  /**
+   * 左右对照模式的打印 HTML：每页一张横向页面，左侧原页面，右侧「原页面 + 译文叠加层」。
+   * 右侧不重新排版译文，而是沿用原页面的段落 / 分栏 / 图片位置（只把原文用白框盖住、
+   * 在原位置写译文），所以左右两边的版式一一对应；插图同样走避让逻辑。
+   */
+  const buildSideBySidePdfHtml = (pages: FullTransPage[], pageImages: (string | null)[]): string => {
+    const first = pages[0]
+    const printW = Math.max(1, Math.round(first.width * 4 / 3))
+    const printH = Math.max(1, Math.round(first.height * 4 / 3))
+    const spreadW = printW * 2
+    const spreads: string[] = []
+
+    for (let idx = 0; idx < pages.length; idx++) {
+      const pg = pages[idx]
+      const overlay = buildOverlayLayerHtml(pg, printW, printH)
+      const image = pageImages[idx]
+      const leftImage = image
+        ? `<img class="side-img" src="${image}" alt="">`
+        : `<div class="side-missing">${store.locales === 'zh' ? '原页面渲染失败' : 'Original page unavailable'}</div>`
+      const rightBackground = image ? `<img class="side-img side-bg" src="${image}" alt="">` : ''
+      spreads.push(
+        `<div class="spread" style="width:${spreadW}px;height:${printH}px">`
+        + `<div class="side-orig" style="width:${printW}px;height:${printH}px">${leftImage}</div>`
+        + `<div class="side-page" style="width:${printW}px;height:${printH}px">${rightBackground}`
+        + `<div class="pdf-export-inner" style="left:${overlay.offsetX}px;top:${overlay.offsetY}px;`
+        + `width:${overlay.width}px;height:${overlay.height}px;--scale-factor:${overlay.scale}">${overlay.innerHtml}</div>`
+        + `</div></div>`,
+      )
+    }
+
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: ${spreadW}px ${printH}px; margin: 0; }
+html, body { margin: 0; padding: 0; background: #fff; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
+body { font-family: ${PDF_EXPORT_FONT_STACK}; color: #111; }
+.spread {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  overflow: hidden;
+  background: #fff;
+  break-after: page;
+}
+.spread:last-child { break-after: auto; }
+.side-orig,
+.side-page {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: #fff;
+}
+.side-page { box-sizing: border-box; }
+.side-img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.side-bg { position: absolute; left: 0; top: 0; }
+.side-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #999;
+  font-size: 13px;
+}
+.pdf-export-inner { position: absolute; }
+.pdf-trans-item {
+  position: absolute;
+  box-sizing: border-box;
+  padding: 0 2px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: initial;
+  font-family: inherit;
+  background: #ffffff;
+  color: #1f1f1f;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.pdf-trans-item > .pdf-trans-inner { width: 100%; }
+.pdf-trans-item.pdf-trans-over-image { background: rgba(255, 255, 255, 0.78); }
+.pdf-trans-item math { font-size: 1em; }
+.pdf-trans-item .katex { font-size: 1em; line-height: 1.1; }
+.pdf-trans-item .katex-display { margin: 0.25em 0; }
+.pdf-trans-item .katex-display > .katex { white-space: normal; }
+</style>
+</head>
+<body>
+${spreads.join('')}
 </body>
 </html>`
   }
@@ -2500,10 +2671,9 @@ ${serialized.join('')}
   }
 
   /**
-   * 状态栏完成提示点击：导出「原文 + 译文叠加层」PDF。
-   * 与 md_read 的 PDF 导出同一条宿主通道（隐藏窗口渲染 HTML → printToPDF → 另存为），
-   * 只是这里打印的是透明底的译文层，再由宿主用 pdf-lib 逐页叠回原 PDF。
-   * 若原 PDF 是加密 / 结构损坏、pdf-lib 解析不了，自动改走兼容模式（原页面截图 + 译文块直出）。
+   * 状态栏完成提示点击：按当前「全文翻译样式」导出 PDF。
+   * - 叠加：透明译文层 + pdf-lib 叠回原 PDF；pdf-lib 读不了时自动改走截图兼容模式。
+   * - 左右对照：左原文截图 / 右译文，Chromium 直接打印（不经过 pdf-lib，插图不会被白框盖住）。
    */
   const exportFullTranslationPdf = async () => {
     const zh = store.locales === 'zh'
@@ -2518,48 +2688,69 @@ ${serialized.join('')}
     }
     const sourcePath = localDocPath()
     if (!sourcePath && !pdfSourceBase64) {
-      ElMessage.error(zh ? '读不到原始 PDF 数据，无法导出叠加译文' : 'Original PDF data is unavailable')
+      ElMessage.error(zh ? '读不到原始 PDF 数据，无法导出译文 PDF' : 'Original PDF data is unavailable')
       return
     }
+    const sideBySide = fullTransStyle.value === 'side-by-side'
     const title = `${(props.path || '').split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'document'}.translated`
     const token = fullTransToken
     fullTransSaving.value = true
     let compatMode = false
     try {
-      const html = buildFullTranslationPdfHtml(fullTransResult)
-      let res = await getPlatform().host.docs.exportPdfOverlay({
-        html,
-        title,
-        defaultPath: fullTranslationDefaultPath(),
-        ...(sourcePath ? { pdfPath: sourcePath } : { pdfBase64: pdfSourceBase64 }),
-      })
-      // 加密 / xref 损坏的 PDF：pdf-lib 读不了（且宿主还没弹保存框），改用截图直出
-      if (!res?.success && res?.code === 'pdf-lib-unreadable') {
+      let res: { success: boolean; path?: string; error?: string; code?: string } | undefined
+      if (sideBySide) {
         if (!pdfDoc) {
-          ElMessage.error(zh ? '读不到原 PDF 页面，无法生成兼容模式 PDF' : 'Cannot render the original PDF pages')
+          ElMessage.error(zh ? '读不到原 PDF 页面，无法生成左右对照 PDF' : 'Cannot render the original PDF pages')
           return
         }
-        compatMode = true
-        ElMessage.info(zh
-          ? '原 PDF 结构特殊（可能已加密），正在生成兼容模式 PDF…'
-          : 'The original PDF is encrypted or malformed; generating a compatible PDF…')
+        ElMessage.info(zh ? '正在生成左右对照 PDF…' : 'Generating side-by-side PDF…')
         const images = await renderFullTranslationPageImages(fullTransResult)
         if (token !== fullTransToken) return
-        const compatHtml = buildFullTranslationPdfHtml(fullTransResult, images)
+        const html = buildSideBySidePdfHtml(fullTransResult, images)
         res = await getPlatform().host.docs.exportPdfOverlay({
-          html: compatHtml,
+          html,
           title,
           defaultPath: fullTranslationDefaultPath(),
           imageBased: true,
         })
+      } else {
+        const html = buildFullTranslationPdfHtml(fullTransResult)
+        res = await getPlatform().host.docs.exportPdfOverlay({
+          html,
+          title,
+          defaultPath: fullTranslationDefaultPath(),
+          ...(sourcePath ? { pdfPath: sourcePath } : { pdfBase64: pdfSourceBase64 }),
+        })
+        // 加密 / xref 损坏的 PDF：pdf-lib 读不了（且宿主还没弹保存框），改用截图直出
+        if (!res?.success && res?.code === 'pdf-lib-unreadable') {
+          if (!pdfDoc) {
+            ElMessage.error(zh ? '读不到原 PDF 页面，无法生成兼容模式 PDF' : 'Cannot render the original PDF pages')
+            return
+          }
+          compatMode = true
+          ElMessage.info(zh
+            ? '原 PDF 结构特殊（可能已加密），正在生成兼容模式 PDF…'
+            : 'The original PDF is encrypted or malformed; generating a compatible PDF…')
+          const images = await renderFullTranslationPageImages(fullTransResult)
+          if (token !== fullTransToken) return
+          const compatHtml = buildFullTranslationPdfHtml(fullTransResult, images)
+          res = await getPlatform().host.docs.exportPdfOverlay({
+            html: compatHtml,
+            title,
+            defaultPath: fullTranslationDefaultPath(),
+            imageBased: true,
+          })
+        }
       }
       // 导出期间换了文件 / 重新翻译：不要把结果写到新文档的状态栏上
       if (token !== fullTransToken) return
       if (res?.success) {
         const where = res.path || fullTranslationDefaultPath()
-        fullTransMsg.value = compatMode
-          ? (zh ? `已导出叠加译文的 PDF（兼容模式）：${where}` : `Exported PDF with translations (compatible mode): ${where}`)
-          : (zh ? `已导出叠加译文的 PDF：${where}` : `Exported PDF with translations: ${where}`)
+        fullTransMsg.value = sideBySide
+          ? (zh ? `已导出左右对照 PDF：${where}` : `Exported side-by-side PDF: ${where}`)
+          : compatMode
+            ? (zh ? `已导出叠加译文的 PDF（兼容模式）：${where}` : `Exported PDF with translations (compatible mode): ${where}`)
+            : (zh ? `已导出叠加译文的 PDF：${where}` : `Exported PDF with translations: ${where}`)
         ElMessage.success(zh ? 'PDF 导出成功' : 'PDF exported successfully')
         // 让资源管理器 / 文件树感知新文件，不用手动刷新
         if (res.path) void getPlatform().app.notifyFileChanged({ path: res.path }).catch(() => {})
@@ -2567,15 +2758,17 @@ ${serialized.join('')}
       }
       if (res?.error === '用户取消') return // 用户取消：保留原完成提示
       if (res?.error === 'not-supported') {
-        fullTransMsg.value = zh ? '当前环境不支持导出叠加译文的 PDF' : 'PDF export is not supported in this environment'
+        fullTransMsg.value = zh ? '当前环境不支持导出译文 PDF' : 'PDF export is not supported in this environment'
         ElMessage.error(fullTransMsg.value)
         return
       }
-      fullTransMsg.value = zh ? '导出叠加译文的 PDF 失败' : 'Failed to export PDF with translations'
+      fullTransMsg.value = sideBySide
+        ? (zh ? '导出左右对照 PDF 失败' : 'Failed to export side-by-side PDF')
+        : (zh ? '导出叠加译文的 PDF 失败' : 'Failed to export PDF with translations')
       ElMessage.error(zh ? 'PDF 导出失败' : 'PDF export failed')
-      console.error('[Translate] 导出叠加译文 PDF 失败:', res?.error)
+      console.error('[Translate] 导出译文 PDF 失败:', res?.error)
     } catch (err) {
-      console.error('[Translate] 导出叠加译文 PDF 失败:', err)
+      console.error('[Translate] 导出译文 PDF 失败:', err)
       ElMessage.error(zh ? 'PDF 导出失败' : 'PDF export failed')
     } finally {
       fullTransSaving.value = false
@@ -2591,7 +2784,7 @@ ${serialized.join('')}
     transSettings.value = {
       visible: true,
       x: Math.max(8, Math.min(rect.right - 272, window.innerWidth - 288)),
-      y: Math.max(8, Math.min(rect.top - 6, window.innerHeight - 220)),
+      y: Math.max(8, Math.min(rect.top - 6, window.innerHeight - 260)),
     }
     void fetchTransModels()
   }
@@ -3013,7 +3206,9 @@ ${serialized.join('')}
         <i class="fa fa-spinner fa-spin" style="color:#FF9800;"></i>
         <span>{{ fullTransProgress }}</span>
       </span>
-      <span v-else-if="fullTransDone" class="statusbar-item pdf-status-progress" @click="exportFullTranslationPdf" :title="store.locales==='zh' ? '点击导出叠加译文的 PDF' : 'Click to export a PDF with the translation overlay'">
+      <span v-else-if="fullTransDone" class="statusbar-item pdf-status-progress" @click="exportFullTranslationPdf" :title="fullTransStyle === 'side-by-side'
+        ? (store.locales==='zh' ? '点击导出左右对照 PDF' : 'Click to export a side-by-side PDF')
+        : (store.locales==='zh' ? '点击导出叠加译文的 PDF' : 'Click to export a PDF with the translation overlay')">
         <i class="fa" :class="fullTransSaving ? 'fa-spinner fa-spin' : 'fa-check-circle'" :style="{ color: '#4CAF50' }"></i>
         <span>{{ fullTransMsg }}</span>
       </span>
@@ -3058,11 +3253,15 @@ ${serialized.join('')}
             <i class="fa fa-language"></i> {{ store.locales==='zh' ? '逐页翻译（叠加译文，边看边翻）' : 'Page-by-page (overlay)' }}
           </li>
           <li :class="{ current: fullTransRunning }" @click.stop="startFullTranslation()"
-            :title="store.locales==='zh' ? '整份文档逐页翻译，过程中不叠加译文；完成后在状态栏点击提示即可导出叠加译文的 PDF' : 'Translate the whole document without overlaying; export the PDF with the overlay from the status bar when done'">
+            :title="fullTransStyle === 'side-by-side'
+              ? (store.locales==='zh' ? '整份文档逐页翻译；完成后在状态栏点击提示导出「左原文 / 右译文」的左右对照 PDF' : 'Translate the whole document; export a side-by-side PDF (original left, translation right) from the status bar')
+              : (store.locales==='zh' ? '整份文档逐页翻译，过程中不叠加译文；完成后在状态栏点击提示即可导出叠加译文的 PDF' : 'Translate the whole document without overlaying; export the PDF with the overlay from the status bar when done')">
             <i class="fa" :class="fullTransRunning ? 'fa-spinner fa-spin' : 'fa-globe'"></i>
             {{ fullTransRunning
               ? (store.locales==='zh' ? '取消全文翻译' : 'Cancel full translation')
-              : (store.locales==='zh' ? '全文翻译（完成后导出叠加译文 PDF）' : 'Full translation (export overlay PDF)') }}
+              : (store.locales==='zh'
+                ? (fullTransStyle === 'side-by-side' ? '全文翻译（完成后导出左右对照 PDF）' : '全文翻译（完成后导出叠加译文 PDF）')
+                : (fullTransStyle === 'side-by-side' ? 'Full translation (side-by-side PDF)' : 'Full translation (overlay PDF)')) }}
           </li>
           <li v-if="transOn" @click.stop="closeTransCtx(); toggleTransVisible()">
             <i class="fa fa-eye-slash"></i> {{ store.locales==='zh' ? '隐藏逐页译文，只看原文' : 'Hide page translations' }}
@@ -3135,6 +3334,13 @@ ${serialized.join('')}
         <datalist id="pdf-trans-model-list">
           <option v-for="m in transModels" :key="m" :value="m" />
         </datalist>
+      </div>
+      <div class="pdf-trans-settings-row">
+        <label>{{ store.locales==='zh' ? '布局' : 'Layout' }}</label>
+        <select v-model="fullTransStyle" @change="onFullTransStyleChange">
+          <option value="overlay">{{ store.locales==='zh' ? '叠加译文（原文上覆盖）' : 'Overlay on the original' }}</option>
+          <option value="side-by-side">{{ store.locales==='zh' ? '左右对照（左原文 / 右译文）' : 'Side by side (original / translation)' }}</option>
+        </select>
       </div>
       <div class="pdf-trans-settings-tip">
         {{ store.locales==='zh'
@@ -4806,7 +5012,7 @@ ${serialized.join('')}
 }
 .pdf-trans-settings-row label {
   flex: 0 0 auto;
-  width: 34px;
+  width: 44px;
   opacity: 0.8;
   padding: 0px
 }
@@ -4982,6 +5188,10 @@ ${serialized.join('')}
 }
 .pdf-trans-item > .pdf-trans-inner {
   width: 100%;
+}
+/* 原文压在插图上：白底半透明，保留插图可见性（仅屏幕叠加使用；导出时同理） */
+.pdf-trans-item.pdf-trans-over-image {
+  background: rgba(255, 255, 255, 0.78);
 }
 /* 深色 / 柔和阅读下 canvas 被反色，叠加层要配同色底 + 浅色字才不刺眼 */
 .pdf-container.pdf-dark .pdf-trans-item {

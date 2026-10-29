@@ -275,7 +275,10 @@ async function deliverFinal(text: string): Promise<void> {
 
   // 先抓住落点：结束会话时 onStatusChange('idle') 会复位 sessionTarget，
   // 而本次写入是异步的（monaco 分支还要等动态 import），不能等到 await 之后再读全局变量
-  const target = sessionTarget
+  let target = sessionTarget
+  // 录音开始时锁定的元素可能已经不在了（切聊天 / 输入卡片重绘 / 模块切换）：
+  // 只要当前光标还在某个可输入元素里就重新认一次，别因为旧节点被替换就把结果丢给剪贴板
+  if (!target || !target.el?.isConnected) target = resolveVoiceTarget(zh())
   const ok = target ? await insertVoiceText(target, text) : false
   if (!ok) { await fallbackToClipboard(text); return }
   // 识别完成后不再弹「已输入」提示：浮层随会话结束直接收起即可。
