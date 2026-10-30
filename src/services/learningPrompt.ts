@@ -570,7 +570,7 @@ export function solverAgentPrompt(
 【可用工具与用法】
 - kb_search：在当前知识库中检索切片，是本任务的首选工具；可按不同侧面多次调用，不要只查一次就作答。
 - search_files：在工作区文件中按文本查找（找散落在文件里的原文/出处）。
-- read_file / list_dir：需要看原文或了解文件构成时使用（read_file 单次有长度上限，truncated=true 时用 nextOffset 续读）。
+- read_file / list_dir：需要看原文或了解文件构成时使用（read_file 返回带行号内容，offset / limit 以行为单位；末尾写「本次第 a-b 行 / 共 T 行」，没读完就用 offset=下一行 续读）。
 
 【工作方式】
 1. 先判断问题类型：具体问题 → 用 kb_search 检索（关键词不理想时换词重试）；总览/概览类问题（如“整体讲了什么”“有哪些核心概念”）→ 分多轮覆盖不同侧面（topK 可设 10~15），必要时先用 list_dir 了解文件构成。
@@ -589,7 +589,7 @@ Bound knowledge base: ${kb} (${ctx.kbPath})
 [Tools]
 - kb_search: retrieve slices from the bound KB — the primary tool; call it multiple times for different aspects, never answer from a single call.
 - search_files: literal text search across workspace files (locate original text).
-- read_file / list_dir: read original text or inspect the file layout (read_file is length-capped; continue with nextOffset when truncated=true).
+- read_file / list_dir: read original text or inspect the file layout (read_file returns line-numbered content; offset/limit are line numbers — continue with offset=next line until you see end-of-file).
 
 [How to work]
 1. Classify the question: specific → kb_search (retry with other keywords if needed); overview-style ("what does it cover", "list the core concepts") → multiple rounds covering different aspects (topK 10-15), optionally list_dir first.

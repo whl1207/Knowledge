@@ -1308,6 +1308,10 @@ function makeAppPort(deps: AndroidDeps): AppPort {
     async isSettingsWindowOpen() { return false },
     async notifyUiReady() { /* 无宿主握手 */ },
     async notifyFileChanged() { /* 单窗口 */ },
+    /** 后台 shell 任务：浏览器 / 安卓端没有本机 shell，返回空列表 */
+    async listShellJobs() { return { ok: true, jobs: [] } },
+    async killShellJob() { return { ok: false, error: 'not-supported' } },
+    async dismissShellJob() { return { ok: false } },
     async beginLongTask(payload) {
       const r = await longTask.begin(payload || {})
       return r.success ? { success: true } : { success: false, error: r.error }

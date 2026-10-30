@@ -22,7 +22,16 @@ import { toolRegistry, defineTool } from '@/shared/toolRegistry'
 import type { ToolResult, ToolExecutionContext } from '@/types/tool'
 import { pythonService } from './python-service'
 import { wordToMarkdown } from './office/word-to-markdown'
-import { shellService } from './shell-service'
+import {
+  shellService,
+  startShell,
+  resolveShellKind,
+  SHELL_DEFAULT_TIMEOUT_MS,
+  SHELL_MAX_TIMEOUT_MS,
+  type ShellExecutionResult,
+  type ShellRun,
+} from './shell-service'
+import { renderShellText } from '@/shared/shellText'
 import { trustedPythonService } from './trusted-python-service'
 import { logInfo } from './log'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
@@ -44,7 +53,8 @@ import {
 } from '@/shared/webFetch'
 import { skillService } from './skill-service'
 import { requestQuestions, requestPlanReview, setAgentPlan, setAgentTodos, getAgentTodos, createAgent, getAgent, disposeAgent, awaitAgentTurn, requestRendererTask } from './agent-loop'
-import { searchFilesInRoot, SEARCH_FILES_DESCRIPTION } from './file-search'
+import { globFilesInRoot, searchFilesInRoot, SEARCH_FILES_DESCRIPTION } from './file-search'
+import { saveSpillText } from './tool-spill'
 import { jobRegistry } from './job-registry'
 import { parseTodoList } from '@/shared/agentTodo'
 import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
@@ -54,7 +64,24 @@ import { sessionLog } from './session-log'
 import { mcpService } from './mcp-service'
 import { browserAgentService } from './browser-agent'
 import { asUint8 } from './buffer-view'
-import { atomicWrite } from './atomic-write'
+import {
+  atomicWrite,
+  stageWrite,
+  commitStagedChecked,
+  commitStagedCreateIfAbsent,
+  discardStagedWrite,
+  type StagedWrite,
+} from './atomic-write'
+import { broadcastFileChanged } from './file-change-broadcast'
+import { setWorkingDir, workingDirKey, cwdFor } from './working-directory'
+import { getReadCache, setReadCache } from './read-cache'
+import { READ_MAX_LINES, renderReadWindow } from '@/shared/readWindow'
+import {
+  applyLiteralEdits,
+  locateLiteralMatches,
+  type LiteralEdit,
+  type LiteralMatch,
+} from '@/shared/literalEdit'
 import { RUN_CODE_DESCRIPTION, RUN_CODE_INPUT_SCHEMA, runCodeHandler } from './code-sdk'
 import { excludeFromAppZoom } from './window-zoom'
 import { registerTeamTools } from './team-tools'
@@ -79,14 +106,12 @@ import {
 // 路径围栏
 // ---------------------------------------------------------------------------
 
-/** 读取类文件大小上限（100KB，防爆上下文；纯文本的默认窗口即按此字节量折算字符数） */
+/** 读取类文件大小上限（100KB）：超大文件的"开头样本"按这个量取 */
 const READ_CAP_BYTES = 100 * 1024
-/** 纯文本可整文件读入内存的上限（超过则不按字符续读，只给开头样本 + run_python 引导） */
+/** 纯文本可整文件读入内存的上限（超过则只给开头样本 + run_python 引导） */
 const TEXT_FULL_READ_MAX_BYTES = 16 * 1024 * 1024
-/** 单次返回字符数硬上限（防止模型传入超大 limit 撑爆上下文） */
+/** 单次读取的正文字符硬上限（再大就只按行分页，不一次吐完） */
 const MAX_READ_CHARS = 100 * 1024
-/** PDF / Word / Excel 单次返回字符数（默认窗口，沿用原有上限） */
-const DEFAULT_DOC_CHARS = 20000
 
 /**
  * 单次读取的**默认**窗口（字符）：跟随该窗口下工具结果的有界预算（复刻 DSH 的 `read` 分页）。
@@ -230,32 +255,81 @@ function noteFileObserved(abs: string, ctx: ToolExecutionContext): void {
 }
 
 /**
- * 修改已有文件前的门禁。
- * @returns 拒绝原因；null 表示放行（新建 / 已观察且版本未变 / 策略关闭）
+ * 门禁结果：放行时把「模型读到的版本」带出来，供提交时做乐观并发（CAS）比对。
+ *
+ * DSH 的对应设计是 `fs/write-intent` 返回 `{createIfAbsent}` 或 `{replaceIfVersion, version}`，
+ * 由 provider 在写锁内原子执行。这里没有独立 provider，就把"版本"透传出来，交给
+ * `commitStagedChecked` / `commitStagedCreateIfAbsent` 在提交时校验。
+ */
+interface MutationGate {
+  ok: true
+  /** 目标当前是否存在（存在 → replaceIfVersion；不存在 → createIfAbsent） */
+  exists: boolean
+  /** 读到时的版本（exists=false 时为 null） */
+  version: string | null
+  /** 是否来自"本会话已读"的记录（false = 无策略 / 非 agent 调用，仅按当前 stat 兜底） */
+  observed: boolean
+}
+type MutationGateResult = MutationGate | { ok: false; error: string }
+
+/**
+ * 修改已有文件前的门禁（先读后写 + 版本新鲜度）。
+ *
+ * 只约束 agent 的智能体循环：工作流 / 插件 / 直接调用没有"会话已读"的概念，
+ * 强行要求会误伤正常写入（它们有自己的授权与围栏），这里只回当前版本供 CAS 兜底。
+ */
+function evaluateMutation(abs: string, ctx: ToolExecutionContext, action: '覆盖' | '修改'): MutationGateResult {
+  const statNow = (): { exists: boolean; isFile: boolean; version: string | null } => {
+    try {
+      const st = fs.statSync(abs)
+      return { exists: true, isFile: st.isFile(), version: st.isFile() ? fileVersionOf(st) : null }
+    } catch {
+      return { exists: false, isFile: false, version: null }
+    }
+  }
+
+  if (!FS_OBSERVATION_POLICY || !ctx.agentId) {
+    const cur = statNow()
+    if (cur.exists && !cur.isFile) {
+      return { ok: false, error: `无法${action}「${abs}」：目标不是普通文件（是目录或特殊文件）。` }
+    }
+    return { ok: true, exists: cur.exists, version: cur.version, observed: false }
+  }
+
+  const cur = statNow()
+  if (!cur.exists) return { ok: true, exists: false, version: null, observed: false }
+  if (!cur.isFile) {
+    return { ok: false, error: `无法${action}「${abs}」：目标不是普通文件（是目录或特殊文件）。` }
+  }
+  const rec = observationsByOwner.get(observationOwner(ctx))?.get(observationKey(abs))
+  if (!rec) {
+    return {
+      ok: false,
+      error: `拒绝${action}「${abs}」：本会话尚未读取该文件（先读后写策略）。请先用 read_file 读取原文；只改局部请优先用 replace_in_file。`,
+    }
+  }
+  if (rec.version !== cur.version) {
+    return {
+      ok: false,
+      error: `拒绝${action}「${abs}」：文件在读取后已被修改（版本已变化）。请重新 read_file 后再重试。`,
+    }
+  }
+  return { ok: true, exists: true, version: rec.version, observed: true }
+}
+
+/**
+ * 修改已有文件前的门禁（旧签名，返回拒绝原因或 null）。
+ * 只关心"能不能改"的调用方（replace_in_file / multi_replace）用它；它们随后自己读盘，
+ * 并以**自己读到的版本**做提交时 CAS。
  */
 function checkMutationObserved(
   abs: string,
   ctx: ToolExecutionContext,
   action: '覆盖' | '修改',
 ): string | null {
-  // 只约束 agent 的智能体循环：工作流 / 插件 / 直接调用没有"会话已读"的概念，
-  // 强行要求会误伤正常写入（它们有自己的授权与围栏）。
-  if (!FS_OBSERVATION_POLICY || !ctx.agentId) return null
-  let st: fs.Stats
-  try {
-    st = fs.statSync(abs)
-  } catch {
-    return null // 不存在 → 新建，放行
-  }
-  if (!st.isFile()) return null // 目录等交给工具自身的类型报错
-  const rec = observationsByOwner.get(observationOwner(ctx))?.get(observationKey(abs))
-  if (!rec) {
-    return `拒绝${action}「${abs}」：本会话尚未读取该文件（先读后写策略）。请先用 read_file 读取原文；只改局部请优先用 replace_in_file。`
-  }
-  if (rec.version !== fileVersionOf(st)) {
-    return `拒绝${action}「${abs}」：文件在读取后已被修改（版本已变化）。请重新 read_file 后再重试。`
-  }
-  return null
+  const gate = evaluateMutation(abs, ctx, action)
+  // tsconfig.node.json 未开 strict，判别式联合按 ok 收窄不生效，故按字段是否存在收窄
+  return 'error' in gate ? gate.error : null
 }
 
 // ---------------------------------------------------------------------------
@@ -309,55 +383,61 @@ function resolveToolPath(
   return { abs }
 }
 
-/** 解析 read_file 的 offset / limit（单位：字符；缺省或非法值按默认处理） */
-function parseReadWindow(input: any): { offset: number; limit?: number } {
+/** 解析 read_file 的 offset / limit（单位：**行**，1-based；对齐 DSH 的 read） */
+function parseLineWindow(input: any): { offsetLine: number; maxLines: number } {
   const rawOffset = Number(input?.offset)
-  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0
+  const offsetLine = Number.isFinite(rawOffset) && rawOffset >= 1 ? Math.floor(rawOffset) : 1
   const rawLimit = Number(input?.limit)
-  const limit =
-    Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), MAX_READ_CHARS) : undefined
-  return { offset, limit }
+  const maxLines =
+    Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), READ_MAX_LINES) : READ_MAX_LINES
+  return { offsetLine, maxLines }
+}
+
+/** 该会话窗口下 read_file 的正文字符预算（页眉/页脚另留一点余量，免得被二次裁剪砍掉 footer） */
+function readWindowCharBudget(ctx: ToolExecutionContext): number {
+  return Math.max(4000, defaultReadWindowChars(ctx.windowTokens) - 400)
 }
 
 /**
- * 按字符窗口切分已取到的全文。
+ * 把一段文本渲染成 read_file 的结果。
  *
- * `nextOffset`（= 本次结束位置）即**续读锚点**：把它作为下一次调用的 offset 继续读，
- * 反复调用直到 `truncated === false` 即为读完全文。
+ * 关键：`modelText` 是**模型看到的原文**（带行号 + footer），由 `serializeToolValue` 直接透传；
+ * 其余字段只服务 UI / 日志，不进模型上下文。
  */
-function sliceByCharWindow(text: string, offset: number, limit: number) {
-  const totalChars = text.length
-  const startOffset = Math.max(0, Math.min(offset, totalChars))
-  const endOffset = Math.min(startOffset + limit, totalChars)
-  const truncated = endOffset < totalChars
+function buildReadValue(opts: {
+  rawText: string
+  displayPath: string
+  input: any
+  ctx: ToolExecutionContext
+  size: number
+  format?: string
+}): ToolResult {
+  const { offsetLine, maxLines } = parseLineWindow(opts.input)
+  const label = opts.format ? `${opts.displayPath} · ${opts.format}` : opts.displayPath
+  const out = renderReadWindow(opts.rawText, label, {
+    offsetLine,
+    maxLines,
+    maxChars: Math.min(MAX_READ_CHARS, readWindowCharBudget(opts.ctx)),
+  })
+  // tsconfig.node.json 未开 strict：按字段是否存在收窄
+  if ('error' in out) return { ok: false, code: 'FS_NOT_FOUND', error: out.error }
+  const w = out.window
   return {
-    content: text.slice(startOffset, endOffset),
-    totalChars,
-    startOffset,
-    endOffset,
-    truncated,
-    nextOffset: truncated ? endOffset : undefined,
+    ok: true,
+    value: {
+      path: opts.input?.path,
+      format: opts.format,
+      offset: w.startLine,
+      endLine: w.endLine,
+      totalLines: w.totalLines,
+      nextOffset: w.nextOffset,
+      truncated: w.nextOffset !== undefined,
+      capped: w.capped,
+      size: opts.size,
+      // 模型可见的那一份（纯文本，不做 JSON 转义）
+      modelText: w.text,
+    },
   }
-}
-
-/** 窗口被截断 / 已读到末尾时的提示文案（各格式共用，模型据此决定是否续读） */
-function windowNote(
-  label: string,
-  win: ReturnType<typeof sliceByCharWindow>,
-  requestedOffset: number,
-): string | undefined {
-  if (win.truncated) {
-    return `${label}共 ${win.totalChars} 字符，本次返回第 ${win.startOffset}–${win.endOffset} 字符（已截断）。如需继续读取后续内容，请再次调用 read_file 并传 offset=${win.nextOffset}（可反复续读，直到返回的 truncated 为 false）。`
-  }
-  if (requestedOffset > 0) return `已读到${label}末尾（共 ${win.totalChars} 字符）。`
-  return undefined
-}
-
-/** 首个 READ_CAP_BYTES 字节（对齐到完整 UTF-8 字符边界）包含的字符数——纯文本的默认窗口 */
-function defaultTextWindowChars(buf: Buffer): number {
-  let cut = Math.min(READ_CAP_BYTES, buf.length)
-  while (cut > 0 && cut < buf.length && (buf[cut] & 0xc0) === 0x80) cut--
-  return buf.toString('utf-8', 0, cut).length
 }
 
 async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
@@ -382,26 +462,14 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
         if (!pdfText || pdfText.trim().length === 0) {
           return { ok: false, error: 'PDF 解析结果为空（可能是扫描件/图片型 PDF，建议改用 OCR）' }
         }
-        const { offset, limit } = parseReadWindow(input)
-        const win = sliceByCharWindow(pdfText, offset, limit ?? DEFAULT_DOC_CHARS)
-        return {
-          ok: true,
-          value: {
-            // 控制字段（路径 / 续读锚点）排在 content **之前**：超预算的 read_file 结果会被
-            // 掐中段（read_file 走 headOnly 只保开头，见 shared/toolResultBudget.ts），
-            // 把 nextOffset 放在 JSON 尾部会在截断时丢失，模型就再也读不到后半篇。
-            path: input.path,
-            truncated: win.truncated,
-            nextOffset: win.nextOffset,
-            content: win.content,
-            size: stat.size,
-            format: 'pdf',
-            totalChars: win.totalChars,
-            startOffset: win.startOffset,
-            endOffset: win.endOffset,
-            note: windowNote('PDF 文本', win, offset),
-          },
-        }
+        return buildReadValue({
+          rawText: pdfText,
+          displayPath: String(input?.path ?? ''),
+          input,
+          ctx,
+          size: stat.size,
+          format: 'pdf',
+        })
       } catch (e: any) {
         return { ok: false, error: `PDF 解析失败: ${e?.message || String(e)}` }
       }
@@ -415,24 +483,14 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
         if (!docText || docText.trim().length === 0) {
           return { ok: false, error: 'Word 文档解析结果为空' }
         }
-        const { offset, limit } = parseReadWindow(input)
-        const win = sliceByCharWindow(docText, offset, limit ?? DEFAULT_DOC_CHARS)
-        return {
-          ok: true,
-          value: {
-            // 控制字段在前（理由同 PDF 分支：截断时 nextOffset 不能丢）
-            path: input.path,
-            truncated: win.truncated,
-            nextOffset: win.nextOffset,
-            content: win.content,
-            size: stat.size,
-            format: ext === '.docx' ? 'docx' : 'doc',
-            totalChars: win.totalChars,
-            startOffset: win.startOffset,
-            endOffset: win.endOffset,
-            note: windowNote('Word 文本', win, offset),
-          },
-        }
+        return buildReadValue({
+          rawText: docText,
+          displayPath: String(input?.path ?? ''),
+          input,
+          ctx,
+          size: stat.size,
+          format: ext === '.docx' ? 'docx' : 'doc',
+        })
       } catch (e: any) {
         return { ok: false, error: `Word 解析失败: ${e?.message || String(e)}` }
       }
@@ -445,31 +503,21 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
         if (!xlsText || xlsText.trim().length === 0) {
           return { ok: false, error: 'Excel 解析结果为空' }
         }
-        const { offset, limit } = parseReadWindow(input)
-        const win = sliceByCharWindow(xlsText, offset, limit ?? DEFAULT_DOC_CHARS)
-        return {
-          ok: true,
-          value: {
-            // 控制字段在前（理由同 PDF 分支：截断时 nextOffset 不能丢）
-            path: input.path,
-            truncated: win.truncated,
-            nextOffset: win.nextOffset,
-            content: win.content,
-            size: stat.size,
-            format: ext === '.xlsx' ? 'xlsx' : 'xls',
-            totalChars: win.totalChars,
-            startOffset: win.startOffset,
-            endOffset: win.endOffset,
-            note: windowNote('Excel 文本', win, offset),
-          },
-        }
+        return buildReadValue({
+          rawText: xlsText,
+          displayPath: String(input?.path ?? ''),
+          input,
+          ctx,
+          size: stat.size,
+          format: ext === '.xlsx' ? 'xlsx' : 'xls',
+        })
       } catch (e: any) {
         return { ok: false, error: `Excel 解析失败: ${e?.message || String(e)}` }
       }
     }
 
     if (stat.size > TEXT_FULL_READ_MAX_BYTES) {
-      // 超大文本文件：不整文件读入内存（无法按字符续读），只给开头样本 + run_python 引导
+      // 超大文本文件：不整文件读入内存，只给开头样本 + run_python 引导（仍按行号渲染）
       const fd = fs.openSync(abs, 'r')
       const buf = Buffer.alloc(READ_CAP_BYTES)
       const read = fs.readSync(fd, asUint8(buf), 0, READ_CAP_BYTES, 0)
@@ -478,92 +526,244 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
       let cut = read
       while (cut > 0 && cut < read && (buf[cut] & 0xc0) === 0x80) cut--
       const sample = buf.toString('utf-8', 0, cut)
+      const out = renderReadWindow(sample, `${String(input?.path ?? '')}（仅前 100KB 样本）`, {
+        offsetLine: 1,
+        maxLines: READ_MAX_LINES,
+        maxChars: readWindowCharBudget(ctx),
+      })
+      // tsconfig.node.json 未开 strict：按字段是否存在收窄
+  if ('error' in out) return { ok: false, code: 'FS_NOT_FOUND', error: out.error }
+      const note = `（文件 ${stat.size} 字节，超过 16MB：只返回开头样本，不能按行续读；读取全文请用 run_python）`
       return {
         ok: true,
         value: {
           path: input.path,
-          content: sample,
           size: stat.size,
+          totalLines: out.window.totalLines,
           truncated: true,
+          capped: out.window.capped,
           sampleBytes: Buffer.byteLength(sample, 'utf-8'),
-          note: `文件较大（${stat.size} 字节），仅返回开头样本且不支持 offset 续读；如需完整处理，请用 run_python 直接读取（例如 print(open(path, encoding="utf-8").read()[起始:结束])）。`,
+          modelText: `${out.window.text}\n${note}`,
         },
       }
     }
-    // 普通文本：按「字符」窗口切片。
-    // 默认窗口 = min(首个 100KB 字节所含字符数, 该窗口下工具结果预算对应的读取量)——
-    // 后者见 `defaultReadWindowChars`：读得比预算多只会白花 token（返回值随后被掐到窗口 ~12%）。
+
+    // 普通文本：按「行」窗口切片（对齐 DSH 的 read：offset/limit 都是行号）
     const buf = fs.readFileSync(abs)
-    const { offset, limit } = parseReadWindow(input)
-    const win = sliceByCharWindow(
-      buf.toString('utf-8'),
-      offset,
-      limit ?? Math.min(defaultTextWindowChars(buf), defaultReadWindowChars(ctx.windowTokens)),
-    )
-    return {
-      ok: true,
-      value: {
-        // 控制字段在前（理由同 PDF 分支：截断时 nextOffset 不能丢）
-        path: input.path,
-        truncated: win.truncated,
-        nextOffset: win.nextOffset,
-        content: win.content,
-        size: stat.size,
-        totalChars: win.totalChars,
-        startOffset: win.startOffset,
-        endOffset: win.endOffset,
-        note: windowNote('文件', win, offset),
-      },
-    }
+    return buildReadValue({
+      rawText: buf.toString('utf-8'),
+      displayPath: String(input?.path ?? ''),
+      input,
+      ctx,
+      size: stat.size,
+    })
   } catch (e: any) {
     return { ok: false, error: `读取失败: ${e?.message || String(e)}` }
   }
 }
 
+/** read_file 的"同轮重复读取"短路缓存（实现在 read-cache.ts：与 agent-loop 共用，避免循环 import） */
+function readCacheKey(ctx: ToolExecutionContext, abs: string): string {
+  return `${String(ctx.agentId || ctx.sessionId || 'default')}|${observationKey(abs)}`
+}
+
 /** read_file：主体走 readFileImpl，成功后登记「已读版本」（供先读后写门禁） */
 async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const force = input?.force === true
+  const rawPath = String(input?.path ?? '')
+  let abs = ''
+  let version = ''
+  try {
+    const resolved = resolveToolPath(rawPath, input?.skill, ctx)
+    if (resolved.abs) {
+      abs = resolved.abs
+      const st = fs.statSync(abs)
+      if (st.isFile()) version = fileVersionOf(st)
+    }
+  } catch {
+    /* 读不到就不走缓存，交给 readFileImpl 报错 */
+  }
+
+  // 同一轮内、同一路径、同一窗口、版本没变 → 只回"未变化"，不重发整段正文
+  if (abs && version && !force) {
+    const hit = getReadCache(readCacheKey(ctx, abs))
+    const { offsetLine, maxLines } = parseLineWindow(input)
+    if (hit && hit.turn === Number(ctx.turn) && hit.version === version
+      && hit.offset === offsetLine && hit.limit === maxLines) {
+      return {
+        ok: true,
+        value: {
+          path: input?.path,
+          offset: hit.startLine,
+          endLine: hit.endLine,
+          totalLines: hit.totalLines,
+          unchanged: true,
+          modelText: `${rawPath}（共 ${hit.totalLines} 行）\n`
+            + `（第 ${hit.startLine}-${hit.endLine} 行与本次请求相同，内容未变化，不再重复输出。`
+            + '如需重看原文，传 force=true 再读一次。）',
+        },
+      }
+    }
+  }
+
   const result = await readFileImpl(input, ctx)
   if (result.ok) {
     try {
-      const resolved = resolveToolPath(String(input?.path ?? ''), input?.skill, ctx)
-      if (resolved.abs) noteFileObserved(resolved.abs, ctx)
+      if (abs) noteFileObserved(abs, ctx)
+      const value = result.value as any
+      if (abs && value && typeof value.offset === 'number') {
+        const { offsetLine, maxLines } = parseLineWindow(input)
+        setReadCache(readCacheKey(ctx, abs), {
+          turn: Number(ctx.turn) || 0,
+          version,
+          offset: offsetLine,
+          limit: maxLines,
+          startLine: value.offset,
+          endLine: typeof value.endLine === 'number' ? value.endLine : value.offset,
+          totalLines: typeof value.totalLines === 'number' ? value.totalLines : 0,
+        })
+      }
     } catch {
-      /* 技能路径解析失败不影响读取结果本身 */
+      /* 缓存只是优化：失败不影响读取结果 */
     }
   }
   return result
 }
 
+/**
+ * agent 单次写入的字节上限。
+ *
+ * 这不是"模型的输出上限"（那个由 max_tokens 决定），而是**兜底**：真撞到这个数量级，
+ * 说明调用本身就不该走一次 write_file（模型也几乎不可能吐出 1 MiB 参数）。
+ * 与其让 IPC / 磁盘慢慢吞下去，不如立刻返回结构化错误，让模型改成分段写或 run_python 生成。
+ */
+const MAX_AGENT_WRITE_BYTES = 1024 * 1024
+
 async function writeFile(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const abs = resolveWithinCwd(String(input?.path ?? ''), ctx)
   if (!abs) return { ok: false, error: '路径越界或缺失（path 参数必填）' }
-  const denied = checkMutationObserved(abs, ctx, '覆盖')
-  if (denied) return { ok: false, error: denied }
-  try {
-    const content = String(input?.content ?? '')
-    const rawPath = String(input?.path ?? '')
-    const before = readOldTextForDiff(abs)
-    await atomicWrite(abs, content, { minMtimeMs: nextMtimeMs(abs) })
-    noteFileObserved(abs, ctx)
-    // 差异预览：仅在能拿到可读原文时算行级 diff；新建/过大/二进制只给行数摘要
-    const created = 'missing' in before
-    const diff: EditDiffFilePreview = created
-      ? { path: rawPath, absPath: abs, created: true, stats: { added: countTextLines(content), removed: 0 }, lines: [] }
-      : 'text' in before
-        ? { path: rawPath, absPath: abs, ...computeEditDiff(before.text, content) }
-        : { path: rawPath, absPath: abs, lines: [], skipped: before.reason }
+  const content = String(input?.content ?? '')
+  const rawPath = String(input?.path ?? '')
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > MAX_AGENT_WRITE_BYTES) {
+    return {
+      ok: false,
+      code: 'CONTENT_TOO_LARGE',
+      error: `写入内容过大（${bytes} 字节，单次上限 ${MAX_AGENT_WRITE_BYTES} 字节）：本次没有写入任何内容。`
+        + '请拆成多次写入——先 write_file 写骨架，再用 replace_in_file 逐段追加；'
+        + '内容能由程序生成时改用 run_python / run_code 直接写文件。',
+    }
+  }
+
+  // 先读后写门禁；放行时带回"模型读到的版本"，提交阶段据此做 CAS（DSH 的 replaceIfVersion）
+  const gate = evaluateMutation(abs, ctx, '覆盖')
+  if ('error' in gate) return { ok: false, error: gate.error }
+
+  const before = readOldTextForDiff(abs)
+
+  // 内容未变化：不写盘、不推进 mtime、不触发 watcher（否则界面会弹一个"文件已更新"的假变更）
+  if ('text' in before && before.text === content) {
     return {
       ok: true,
       value: {
         path: input.path,
         bytes: content.length,
-        created,
-        stats: diff.stats,
+        byteSize: bytes,
+        created: false,
+        unchanged: true,
+        stats: { added: 0, removed: 0 },
       },
-      preview: makeEditDiffPreview([diff]),
     }
+  }
+
+  // 暂存 → 提交（存在：CAS；不存在：create-if-absent，防止盖掉别人刚建的文件）
+  let staged: StagedWrite
+  try {
+    staged = await stageWrite(abs, content, { minMtimeMs: nextMtimeMs(abs) })
   } catch (e: any) {
-    return { ok: false, error: `写入失败: ${e?.message || String(e)}` }
+    return { ok: false, code: 'WRITE_FAILED', error: `写入失败: ${e?.message || String(e)}` }
+  }
+
+  const rollback = async (): Promise<boolean> => {
+    try {
+      if ('text' in before) {
+        await atomicWrite(abs, before.text, { minMtimeMs: nextMtimeMs(abs) })
+        return true
+      }
+      if ('missing' in before) {
+        fs.rmSync(abs, { force: true })
+        return true
+      }
+    } catch {
+      /* 回滚失败：调用方如实报告 */
+    }
+    return false
+  }
+
+  if (gate.exists) {
+    const committed = await commitStagedForEdit(staged, gate.version ?? '')
+    if ('reason' in committed) {
+      if (committed.reason === 'verify') {
+        const rolledBack = await rollback()
+        return {
+          ok: false,
+          code: 'WRITE_VERIFY_FAILED',
+          error: `${committed.message}${rolledBack ? '；已把原内容写回' : '；回滚未成功，请检查该文件'}`,
+        }
+      }
+      if (committed.reason === 'stale') {
+        return {
+          ok: false,
+          code: 'STALE_VERSION',
+          error: `${committed.message}（${rawPath}）；本次写入已放弃，请重新 read_file 后再试。`,
+        }
+      }
+      return { ok: false, code: 'WRITE_FAILED', error: `写入失败: ${committed.message}` }
+    }
+  } else {
+    const created = await commitStagedCreateIfAbsent(staged)
+    if ('reason' in created) {
+      if (created.reason === 'verify') {
+        const rolledBack = await rollback()
+        return {
+          ok: false,
+          code: 'WRITE_VERIFY_FAILED',
+          error: `${created.message}${rolledBack ? '；已回滚' : '；回滚未成功，请检查该文件'}`,
+        }
+      }
+      if (created.reason === 'exists') {
+        return {
+          ok: false,
+          code: 'FILE_EXISTS',
+          error: `${created.message}（${rawPath}）；本次没有覆盖它。请先 read_file 读一遍，确认后再用 write_file 覆盖。`,
+        }
+      }
+      return { ok: false, code: 'WRITE_FAILED', error: `写入失败: ${created.message}` }
+    }
+  }
+
+  noteFileObserved(abs, ctx)
+  // agent 写盘不走编辑器保存路径，必须自己广播，否则已打开的视图一直是旧内容
+  broadcastFileChanged(abs, content)
+
+  // 差异预览：仅在能拿到可读原文时算行级 diff；新建/过大/二进制只给行数摘要
+  const created = 'missing' in before
+  const diff: EditDiffFilePreview = created
+    ? { path: rawPath, absPath: abs, created: true, stats: { added: countTextLines(content), removed: 0 }, lines: [] }
+    : 'text' in before
+      ? { path: rawPath, absPath: abs, ...computeEditDiff(before.text, content) }
+      : { path: rawPath, absPath: abs, lines: [], skipped: before.reason }
+  return {
+    ok: true,
+    value: {
+      path: input.path,
+      // 字符数（给模型看"写了多少"）；字节数与落盘校验口径一致，便于排查编码差异
+      bytes: content.length,
+      byteSize: bytes,
+      created,
+      stats: diff.stats,
+    },
+    preview: makeEditDiffPreview([diff]),
   }
 }
 
@@ -590,41 +790,14 @@ function readOldTextForDiff(abs: string): { text: string } | { missing: true } |
 // 与 write_file（全量覆盖）互补：模型只给出"待替换原文段 + 新文段"，工具负责
 // 定位、唯一性校验与落盘，不改动文件其余部分。语义要点：
 // - 匹配以整段精确为准，自动做 EOL 归一（兼容 CRLF/LF 差异）；
-// - 未传 occurrence 时要求全文唯一（fail-closed：多处命中宁可报错也不猜测，
-//   防止"以为改 A 处实际改了 B 处"）；错误信息带各出现行号与相似片段提示；
-// - multi_replace 先对全部条目定位，全部唯一命中后才统一写盘（原子性），
-//   任一失败整批不落盘，避免把文件留在"改了一半"的中间态。
+// - 默认要求全文唯一（fail-closed：多处命中宁可报错也不猜测，防止"以为改 A 处实际改了
+//   B 处"）；`occurrence` 指定第几处，`replace_all` 显式全替换；
+// - multi_replace 先对全部条目定位、内存拼装，再**两阶段提交**（全部写临时文件 → 逐个
+//   rename，带版本比对），任一环节失败都不会留下"改了一半"的文件。
+//
+// 换行归一 / 命中收集 / 行号 / 唯一性判定都在 `@/shared/literalEdit`（与渲染层共用一份），
+// 这里只负责：读盘 → 定位（带"可复制候选片段"的错误提示）→ 拼装 → 两阶段落盘。
 // ---------------------------------------------------------------------------
-
-/** 主换行风格：只要文件里出现 CRLF 即按 CRLF 处理，否则按 LF */
-function detectEol(text: string): '\r\n' | '\n' {
-  return text.indexOf('\r\n') !== -1 ? '\r\n' : '\n'
-}
-
-/** 把任意行尾统一为指定 EOL（先归一为 LF 再转目标，避免 CRLF 双重处理） */
-function toFileEol(s: string, eol: '\r\n' | '\n'): string {
-  const lf = s.replace(/\r\n/g, '\n')
-  return eol === '\r\n' ? lf.replace(/\n/g, '\r\n') : lf
-}
-
-/** 收集 needle 在 hay 中的所有命中偏移（升序、互不重叠） */
-function collectOccurrences(hay: string, needle: string): number[] {
-  const hits: number[] = []
-  if (!needle) return hits
-  let from = 0
-  for (;;) {
-    const i = hay.indexOf(needle, from)
-    if (i === -1) break
-    hits.push(i)
-    from = i + needle.length
-  }
-  return hits
-}
-
-/** 计算 [0, idx) 内换行数 + 1 = 该偏移所在 1-based 行号 */
-function lineNumberAt(content: string, idx: number): number {
-  return content.slice(0, idx).split('\n').length
-}
 
 /**
  * 生成"未命中"提示：给出**可直接复制的候选片段**（让模型“抄作业”），而不只是“附近几行”。
@@ -709,116 +882,121 @@ function suggestNearMatch(content: string, oldRaw: string): string {
   return ''
 }
 
-/** 读取文件文本并做编辑前置校验（仅文本文件允许替换） */
-function readTextFileForEdit(rawPath: string, abs: string): { ok: true; text: string } | { ok: false; error: string } {
+/** 读取文件文本并做编辑前置校验（仅文本文件允许替换）；`version` 供落盘前做一次乐观并发比对 */
+function readTextFileForEdit(
+  rawPath: string,
+  abs: string,
+): { ok: true; text: string; version: string } | { ok: false; error: string } {
   try {
-    if (!fs.existsSync(abs)) return { ok: false, error: `文件不存在: ${rawPath}` }
-    if (fs.statSync(abs).isDirectory()) return { ok: false, error: `是目录而非文件: ${rawPath}` }
+    const st = fs.statSync(abs)
+    if (st.isDirectory()) return { ok: false, error: `是目录而非文件: ${rawPath}` }
     const text = fs.readFileSync(abs, 'utf-8')
     if (text.includes('\u0000')) return { ok: false, error: `文件「${rawPath}」疑似二进制（含 NUL 字节），拒绝文本替换。` }
-    return { ok: true, text }
+    return { ok: true, text, version: fileVersionOf(st) }
   } catch (e: any) {
+    if (e?.code === 'ENOENT') return { ok: false, error: `文件不存在: ${rawPath}` }
     return { ok: false, error: `读取失败: ${e?.message || String(e)}` }
   }
 }
 
-/** 定位结果：只定位不改写（原子性由 multi_replace / 单次写盘保证） */
-interface LocatedEdit {
+/** 一次定位结果：命中位置 + 新内容（落盘前统一交给 `applyLiteralEdits` 拼装） */
+interface LocatedEdit extends LiteralEdit {
+  /** 文件绝对路径（按文件分组用） */
   abs: string
+  /** 模型给的原始路径（回执 / 预览里显示） */
   rawPath: string
-  content: string       // 编辑前的原始内容（写回基准）
-  index: number         // 命中偏移（相对 content）
-  oldMatched: string    // 命中的原文段（含文件 EOL）
-  newString: string     // 已统一为文件 EOL 的新文段
-  startLine: number
-  endLine: number
+  /** 这条编辑来自入参的第几条（1-based；replace_all 的派生命中沿用同一个序号） */
+  entry?: number
 }
 
 /**
- * 在单个文件内容中定位一次替换。
- * 匹配策略：先整段精确（原样），未命中再按文件 EOL 归一重试（兼容 CRLF/LF）。
- * 唯一性：不传 occurrence 时要求全文唯一；多处命中给出各出现行号（fail-closed）。
+ * 在单个文件内容中定位替换（`replace_all` 时可能是多笔）。
+ *
+ * 匹配 / 唯一性 / 换行归一 / 空操作拒绝都在 `@/shared/literalEdit`（与渲染层共用一份），
+ * 这里只补"给模型看"的部分：可复制的候选片段、行号、以及下一步该怎么做。
  */
-function locateReplacement(
+function locateReplacements(
   rawPath: string,
   abs: string,
   content: string,
   oldRaw: string,
   newRaw: string,
-  occurrence?: number,
-): { ok: true; edit: LocatedEdit } | { ok: false; error: string } {
-  if (!oldRaw) return { ok: false, error: `old_string 不能为空（${rawPath}）` }
-  const eol = detectEol(content)
-  // 候选串：原样 + 归一为文件 EOL（模型常发 \n 而文件可能是 CRLF）
-  const candidates: string[] = []
-  const norm = toFileEol(oldRaw, eol)
-  if (!candidates.includes(oldRaw)) candidates.push(oldRaw)
-  if (norm !== oldRaw) candidates.push(norm)
-
-  let used = oldRaw
-  let hits: number[] = []
-  for (const c of candidates) {
-    const found = collectOccurrences(content, c)
-    if (found.length > 0) { used = c; hits = found; break }
-  }
-
-  if (hits.length === 0) {
+  opts: { occurrence?: number; replaceAll?: boolean } = {},
+): { ok: true; edits: LocatedEdit[]; hitCount: number } | { ok: false; error: string } {
+  const located = locateLiteralMatches(content, oldRaw, newRaw, opts)
+  // tsconfig.node.json 未开 strict，判别式联合按 `ok` 收窄不生效，故按字段是否存在收窄
+  if ('matches' in located) {
     return {
-      ok: false,
-      error: `old_string 未在文件「${rawPath}」中找到。${suggestNearMatch(content, oldRaw) || '请先用 read_file 读取该文件，再原样复制要修改的片段作为 old_string。'}`,
+      ok: true,
+      hitCount: located.hitCount,
+      edits: located.matches.map((m: LiteralMatch) => ({ ...m, abs, rawPath, newText: located.newText })),
     }
   }
-  if (hits.length > 1 && occurrence === undefined) {
-    const lines = hits.map((i) => lineNumberAt(content, i))
-    return {
-      ok: false,
-      error: `old_string 在文件「${rawPath}」中出现 ${hits.length} 处（第 ${lines.join('、')} 行）。为安全起见未执行替换：请补充更多上下文使其唯一，或传 occurrence 指定第几处（从 1 起）。`,
-    }
-  }
-  const pick = occurrence === undefined ? 0 : occurrence - 1
-  if (occurrence !== undefined && (pick < 0 || pick >= hits.length)) {
-    return {
-      ok: false,
-      error: `occurrence=${occurrence} 越界：old_string 共出现 ${hits.length} 处（occurrence 从 1 开始）。`,
-    }
-  }
-  const index = hits[pick]
-  const oldMatched = content.slice(index, index + used.length)
-  const startLine = lineNumberAt(content, index)
-  const endLine = startLine + oldMatched.split('\n').length - 1
-  return {
-    ok: true,
-    edit: { abs, rawPath, content, index, oldMatched, newString: toFileEol(newRaw, eol), startLine, endLine },
-  }
-}
-
-/** 在内存构造同一文件的一组编辑后的新内容（无 IO，供原子批量） */
-function buildNewContent(edits: LocatedEdit[]): { ok: true; content: string } | { ok: false; error: string } {
-  if (edits.length === 0) return { ok: true, content: '' }
-  const sorted = [...edits].sort((a, b) => a.index - b.index)
-  // 区间重叠防护：同一文件两条替换不得交叠
-  for (let i = 1; i < sorted.length; i++) {
-    const prevEnd = sorted[i - 1].index + sorted[i - 1].oldMatched.length
-    if (sorted[i].index < prevEnd) {
+  switch (located.code) {
+    case 'EMPTY_OLD':
+      return { ok: false, error: `old_string 不能为空（${rawPath}）` }
+    case 'NOOP':
+      return { ok: false, error: `old_string 与 new_string 相同（${rawPath}）：这次替换不会改变任何内容，已跳过（不会写盘）。` }
+    case 'OUT_OF_RANGE':
       return {
         ok: false,
-        error: `文件「${sorted[0].rawPath}」存在区间重叠的替换（第 ${sorted[i - 1].startLine} 行与第 ${sorted[i].startLine} 行），请合并为一条后重试。`,
+        error: `occurrence=${opts.occurrence} 越界：old_string 在「${rawPath}」中共出现 ${located.hits.length} 处（第 ${located.lines.join('、')} 行；occurrence 从 1 开始）。`,
       }
-    }
+    case 'AMBIGUOUS':
+      return {
+        ok: false,
+        error: `old_string 在文件「${rawPath}」中出现 ${located.hits.length} 处（第 ${located.lines.join('、')} 行）。为安全起见未执行替换：请补充更多上下文使其唯一，或传 occurrence 指定第几处（从 1 起）；要把这些出现全部替换掉，传 replace_all: true。`,
+      }
+    default:
+      return {
+        ok: false,
+        error: `old_string 未在文件「${rawPath}」中找到。${suggestNearMatch(content, oldRaw) || '请先用 read_file 读取该文件，再原样复制要修改的片段作为 old_string。'}`,
+      }
   }
-  // 按 index 降序应用（后续编辑发生在更前位置，不影响已应用位置偏移）
-  let current = sorted[0].content
-  for (const ed of [...sorted].sort((a, b) => b.index - a.index)) {
-    const seg = current.slice(ed.index, ed.index + ed.oldMatched.length)
-    if (seg !== ed.oldMatched) {
-      return { ok: false, error: `文件「${ed.rawPath}」应用第 ${ed.startLine} 行替换时校验失败，已整体回滚（未写盘）。` }
-    }
-    current = current.slice(0, ed.index) + ed.newString + current.slice(ed.index + ed.oldMatched.length)
-  }
-  return { ok: true, content: current }
 }
 
-/** 单点精确替换（replace_in_file）：一次只定位一个文件的一处替换 */
+/** 提交一份暂存写入：先做乐观并发比对（版本），再交给 atomic-write 落盘 */
+async function commitStagedForEdit(staged: StagedWrite, expectedVersion: string) {
+  return await commitStagedChecked(staged, expectedVersion, (st) => fileVersionOf(st as fs.Stats))
+}
+
+/** 在内存构造同一文件的一组编辑后的新内容（无 IO，供批量两阶段提交） */
+function buildNewContent(
+  text: string,
+  edits: LocatedEdit[],
+  rawPath: string,
+): { ok: true; content: string } | { ok: false; error: string } {
+  if (edits.length === 0) return { ok: true, content: text }
+  const applied = applyLiteralEdits(text, edits)
+  if ('text' in applied) return { ok: true, content: applied.text }
+  const ordered = [...edits].sort((a, b) => a.index - b.index)
+  const at = Math.min(Math.max(applied.index, 0), ordered.length - 1)
+  if (applied.reason === 'overlap') {
+    const prev = ordered[Math.max(0, at - 1)]
+    const cur = ordered[at]
+    // 公共片段：两条区间真正重叠的字符（用来告诉模型"撞在哪段代码"）
+    const prevEnd = prev.index + prev.length
+    const sharedEnd = Math.min(prevEnd, cur.index + cur.length)
+    const sharedRaw = sharedEnd > cur.index ? text.slice(cur.index, sharedEnd) : ''
+    const shared = sharedRaw.trim().split(/\r?\n/)[0]?.slice(0, 80) || cur.rawPath
+    const who = prev.entry && cur.entry && prev.entry !== cur.entry
+      ? `第 ${prev.entry} 条与第 ${cur.entry} 条替换`
+      : '有两条替换'
+    return {
+      ok: false,
+      error: `文件「${rawPath}」${who}重叠（第 ${Math.min(prev.startLine, cur.startLine)}-${Math.max(prev.startLine, cur.startLine)} 行附近）：`
+        + `两条 old_string 都包含「${shared}」。`
+        + '请把它们合并成一条（两段都写进同一个 old/new），或让其中一条不要包含这段后重试；'
+        + '两条 old_string 不允许共享任何一行。',
+    }
+  }
+  return {
+    ok: false,
+    error: `文件「${rawPath}」应用第 ${ordered[at]?.startLine ?? '?'} 行替换时校验失败（原文已变化），已整体回滚（未写盘）。`,
+  }
+}
+
+/** 单点精确替换（replace_in_file）：一个文件的一处（或 replace_all 时全部）替换 */
 async function replaceInFile(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const rawPath = String(input?.path ?? '')
   const oldRaw = String(input?.old_string ?? '')
@@ -829,109 +1007,267 @@ async function replaceInFile(input: any, ctx: ToolExecutionContext): Promise<Too
   if (denied) return { ok: false, error: denied }
   const rd = readTextFileForEdit(rawPath, abs)
   if (!rd.ok) return rd
-  const occurrence = input?.occurrence === undefined ? undefined : Number(input.occurrence)
-  const loc = locateReplacement(rawPath, abs, rd.text, oldRaw, newRaw, occurrence)
+  const occurrence =
+    input?.occurrence === undefined || input?.occurrence === null ? undefined : Number(input.occurrence)
+  const loc = locateReplacements(rawPath, abs, rd.text, oldRaw, newRaw, {
+    occurrence,
+    replaceAll: input?.replace_all === true,
+  })
   if (!loc.ok) return loc
-  const built = buildNewContent([loc.edit])
+  const built = buildNewContent(rd.text, loc.edits, rawPath)
   if (!built.ok) return built
   // 差异预览：编辑前文本（rd.text）与编辑后内容（built.content）
   const diff: EditDiffFilePreview = { path: rawPath, absPath: abs, ...computeEditDiff(rd.text, built.content) }
+
+  // 先写临时文件 → 版本比对 → rename：读取之后有人保存过就整笔放弃，不覆盖别人的改动
+  let staged: StagedWrite
   try {
-    await atomicWrite(abs, built.content, { minMtimeMs: nextMtimeMs(abs) })
-    noteFileObserved(abs, ctx)
+    staged = await stageWrite(abs, built.content, { minMtimeMs: nextMtimeMs(abs) })
   } catch (e: any) {
     return { ok: false, error: `写入失败: ${e?.message || String(e)}` }
   }
+  const committed = await commitStagedForEdit(staged, rd.version)
+  if ('reason' in committed) {
+    if (committed.reason === 'verify') {
+      // 盘上已是坏文件：把编辑前的原文写回去
+      let rolledBack = false
+      try {
+        await atomicWrite(abs, rd.text, { minMtimeMs: nextMtimeMs(abs) })
+        rolledBack = true
+      } catch {
+        /* 回滚失败如实报告 */
+      }
+      return {
+        ok: false,
+        code: 'WRITE_VERIFY_FAILED',
+        error: `${committed.message}${rolledBack ? '；已把原内容写回' : '；回滚未成功，请检查该文件'}`,
+      }
+    }
+    if (committed.reason === 'stale' || committed.reason === 'missing') {
+      return {
+        ok: false,
+        code: 'STALE_VERSION',
+        error: `${committed.message}（${rawPath}）；本次替换已放弃，请重新 read_file 后重试。`,
+      }
+    }
+    return { ok: false, code: 'WRITE_FAILED', error: `写入失败: ${committed.message}` }
+  }
+  noteFileObserved(abs, ctx)
+  // agent 写盘不走编辑器保存路径，必须自己广播，否则已打开的视图一直是旧内容
+  broadcastFileChanged(abs, built.content)
+
+  const first = loc.edits[0]
+  const last = loc.edits[loc.edits.length - 1]
   return {
     ok: true,
     value: {
       path: rawPath,
-      applied: 1,
-      changedLines: { start: loc.edit.startLine, end: loc.edit.endLine },
-      deleted: loc.edit.newString.length === 0,
+      applied: loc.edits.length,
+      changedLines: { start: first.startLine, end: last.endLine },
+      locations: loc.edits.map((e) => ({ start: e.startLine, end: e.endLine })),
+      deleted: loc.edits.every((e) => e.newText.length === 0),
       stats: diff.stats,
     },
     preview: makeEditDiffPreview([diff]),
   }
 }
 
-/** 批量原子替换（multi_replace）：全部命中才落盘，任一失败整批不生效 */
+/**
+ * 批量替换（multi_replace）：**整批生效或整批不动**。
+ *
+ * 两阶段提交（见 `atomic-write.ts` 的 stage/commit）：
+ * ① 全部条目先定位、在内存拼出每份新内容（任一条失败 → 一个字节都不写）；
+ * ② 全部写成**同目录临时文件**（这一步失败也只是清理临时文件，目标文件没动过）；
+ * ③ 逐个做版本比对 + rename（读取后被人保存过 → 整笔放弃）；
+ * ④ 提交阶段失败时，用写前内容把已提交的文件回滚。
+ *
+ * 这与 DSH 的 `replaceIfVersion` 同口径（乐观并发 + 恢复指引），只是把"单文件原子"
+ * 扩到了多文件。
+ */
 async function multiReplace(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const repls = Array.isArray(input?.replacements) ? input.replacements : []
-  if (repls.length === 0) return { ok: false, error: 'replacements 参数必填（至少一项，数组形式）' }
+  const list = Array.isArray(input?.replacements)
+    ? input.replacements
+    : Array.isArray(input?.edits)
+      ? input.edits
+      : []
+  if (!list.length) return { ok: false, error: 'replacements 参数必填（至少一项，数组形式）' }
+  const fallbackPath = String(input?.path ?? '')
 
-  // 阶段一：解析路径 + 读取文本（同一文件只读一次）
-  interface FileState { rawPath: string; abs: string; text: string }
+  interface FileState {
+    rawPath: string
+    abs: string
+    text: string
+    version: string
+  }
+  interface PendingEdit {
+    index: number
+    rawPath: string
+    oldRaw: string
+    newRaw: string
+    occurrence?: number
+    replaceAll: boolean
+    state: FileState
+  }
+
+  // 阶段一：解析路径 + 读取文本（同一文件只读一次，并记下读到的版本）
   const fileCache = new Map<string, FileState>()
-  const pending: { rawPath: string; oldRaw: string; newRaw: string; state: FileState }[] = []
-  for (const r of repls) {
-    if (!r || typeof r !== 'object') return { ok: false, error: 'replacements 中存在非法项' }
-    const rawPath = String((r as any).path ?? '')
+  const pending: PendingEdit[] = []
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i]
+    if (!r || typeof r !== 'object') return { ok: false, error: `第 ${i + 1} 条：替换项必须是对象` }
+    const rawPath = String((r as any).path ?? fallbackPath ?? '')
     const oldRaw = String((r as any).old_string ?? '')
     const newRaw = String((r as any).new_string ?? '')
-    if (!rawPath) return { ok: false, error: 'replacements 中存在缺 path 的项' }
-    if (!oldRaw) return { ok: false, error: `「${rawPath}」的 old_string 不能为空` }
+    if (!rawPath) return { ok: false, error: `第 ${i + 1} 条：缺 path（也可在顶层传 path 作为默认路径）` }
+    if (!oldRaw) return { ok: false, error: `第 ${i + 1} 条：old_string 不能为空` }
     const abs = resolveWithinCwd(rawPath, ctx)
-    if (!abs) return { ok: false, error: `路径越界或缺失: ${rawPath}` }
+    if (!abs) return { ok: false, error: `第 ${i + 1} 条：路径越界或缺失: ${rawPath}` }
     const denied = checkMutationObserved(abs, ctx, '修改')
     if (denied) return { ok: false, error: denied }
     let state = fileCache.get(abs)
     if (!state) {
       const rd = readTextFileForEdit(rawPath, abs)
       if (!rd.ok) return rd
-      state = { rawPath, abs, text: rd.text }
+      state = { rawPath, abs, text: rd.text, version: rd.version }
       fileCache.set(abs, state)
     }
-    pending.push({ rawPath, oldRaw, newRaw, state })
+    const rawOccurrence = (r as any).occurrence
+    pending.push({
+      index: i,
+      rawPath,
+      oldRaw,
+      newRaw,
+      occurrence: rawOccurrence === undefined || rawOccurrence === null ? undefined : Number(rawOccurrence),
+      replaceAll: (r as any).replace_all === true,
+      state,
+    })
   }
 
-  // 阶段二：全部定位（multi_replace 强制唯一，不接受 occurrence 猜测）
-  const byFile = new Map<string, LocatedEdit[]>()
-  for (let pi = 0; pi < pending.length; pi++) {
-    const p = pending[pi]
-    const loc = locateReplacement(p.rawPath, p.state.abs, p.state.text, p.oldRaw, p.newRaw)
-    if (!loc.ok) {
-      // 任一条失败 → 整批不落盘；标明第几条，便于模型定位（错误内已含候选片段）
-      // 注：tsconfig.node.json 未开 strict，判别式联合的真值收窄不生效，故用 in 收窄
-      const reason = 'error' in loc ? loc.error : '定位失败'
-      return { ok: false, error: `第 ${pi + 1}/${pending.length} 条替换失败：${reason}` }
-    }
-    const arr = byFile.get(p.state.abs) ?? []
-    arr.push(loc.edit)
-    byFile.set(p.state.abs, arr)
+  // 阶段二：全部定位（任一条失败 → 整批不落盘；标明第几条，便于模型定位）
+  const byFile = new Map<string, { state: FileState; edits: LocatedEdit[] }>()
+  for (const p of pending) {
+    const loc = locateReplacements(p.rawPath, p.state.abs, p.state.text, p.oldRaw, p.newRaw, {
+      occurrence: p.occurrence,
+      replaceAll: p.replaceAll,
+    })
+    if ('error' in loc) return { ok: false, error: `第 ${p.index + 1}/${list.length} 条替换失败：${loc.error}` }
+    const bucket = byFile.get(p.state.abs) ?? { state: p.state, edits: [] }
+    // 打上"第几条"标记：重叠报错要能直接指回入参，模型才知道该合并哪两条
+    bucket.edits.push(...loc.edits.map((ed) => ({ ...ed, entry: p.index + 1 })))
+    byFile.set(p.state.abs, bucket)
   }
 
-  // 阶段三：先在内存构造全部目标内容（无副作用），全部成功后再统一写盘
-  const targets: { abs: string; content: string }[] = []
-  const newContentByAbs = new Map<string, string>()
-  for (const edits of byFile.values()) {
-    const built = buildNewContent(edits)
+  // 阶段三：内存里拼出每份新内容（无副作用）
+  interface Target {
+    state: FileState
+    content: string
+    diff: EditDiffFilePreview
+    edits: LocatedEdit[]
+  }
+  const targets: Target[] = []
+  for (const [abs, bucket] of byFile) {
+    const built = buildNewContent(bucket.state.text, bucket.edits, bucket.state.rawPath)
     if (!built.ok) return built
-    targets.push({ abs: edits[0].abs, content: built.content })
-    newContentByAbs.set(edits[0].abs, built.content)
-  }
-  try {
-    for (const t of targets) {
-      await atomicWrite(t.abs, t.content, { minMtimeMs: nextMtimeMs(t.abs) })
-      noteFileObserved(t.abs, ctx)
-    }
-  } catch (e: any) {
-    return { ok: false, error: `写入失败（可能部分文件已写入）: ${e?.message || String(e)}` }
+    targets.push({
+      state: bucket.state,
+      content: built.content,
+      edits: bucket.edits,
+      diff: { path: bucket.state.rawPath, absPath: abs, ...computeEditDiff(bucket.state.text, built.content) },
+    })
   }
 
-  const files = [...byFile.entries()].map(([abs, edits]) => {
-    const after = newContentByAbs.get(abs) ?? ''
-    const d = computeEditDiff(edits[0].content, after)
-    return {
-      path: edits[0].rawPath,
-      replacements: edits.map((ed) => ({ changedLines: { start: ed.startLine, end: ed.endLine }, deleted: ed.newString.length === 0 })),
-      stats: d.stats,
-      diff: { path: edits[0].rawPath, absPath: abs, ...d } as EditDiffFilePreview,
+  // 阶段四：全部写成临时文件（这一步失败：目标文件一个都没动）
+  interface StagedTarget {
+    target: Target
+    staged: StagedWrite
+  }
+  const stagedList: StagedTarget[] = []
+  for (const target of targets) {
+    try {
+      const staged = await stageWrite(target.state.abs, target.content, {
+        minMtimeMs: nextMtimeMs(target.state.abs),
+      })
+      stagedList.push({ target, staged })
+    } catch (e: any) {
+      for (const item of stagedList) await discardStagedWrite(item.staged)
+      return {
+        ok: false,
+        error: `写入失败（未改动任何文件）：${target.state.rawPath}：${e?.message || String(e)}`,
+      }
     }
-  })
+  }
+
+  // 阶段五：逐个提交（版本比对 + rename）
+  const committed: StagedTarget[] = []
+  for (const item of stagedList) {
+    const result = await commitStagedForEdit(item.staged, item.target.state.version)
+    if (!('reason' in result)) {
+      committed.push(item)
+      noteFileObserved(item.target.state.abs, ctx)
+      continue
+    }
+    // 提交失败：把已经提交的文件写回原内容（尽力而为），并清理剩下的临时文件
+    const rolledBack: string[] = []
+    for (const done of committed) {
+      try {
+        await atomicWrite(done.target.state.abs, done.target.state.text, {
+          minMtimeMs: nextMtimeMs(done.target.state.abs),
+        })
+        rolledBack.push(done.target.state.rawPath)
+        noteFileObserved(done.target.state.abs, ctx)
+      } catch {
+        /* 回滚失败：下面如实报告，不谎称已恢复 */
+      }
+    }
+    // 校验失败的这一份：盘上已经是坏文件，也要写回原文
+    if (result.reason === 'verify') {
+      try {
+        await atomicWrite(item.target.state.abs, item.target.state.text, {
+          minMtimeMs: nextMtimeMs(item.target.state.abs),
+        })
+        rolledBack.push(item.target.state.rawPath)
+        noteFileObserved(item.target.state.abs, ctx)
+      } catch {
+        /* 同上 */
+      }
+    }
+    for (const rest of stagedList) {
+      if (!committed.includes(rest)) await discardStagedWrite(rest.staged)
+    }
+    const detail = result.reason === 'io' || result.reason === 'verify'
+      ? `写入失败：${result.message}`
+      : `${result.message}；已放弃本次替换`
+    const rollbackNote = committed.length || result.reason === 'verify'
+      ? rolledBack.length === committed.length + (result.reason === 'verify' ? 1 : 0)
+        ? `（已写入的文件已回滚）`
+        : `（回滚未完全成功：${committed.length + (result.reason === 'verify' ? 1 : 0) - rolledBack.length} 个文件仍是新内容，请检查后再重试）`
+      : '（未改动任何文件）'
+    return {
+      ok: false,
+      code: result.reason === 'verify' ? 'WRITE_VERIFY_FAILED' : result.reason === 'stale' ? 'STALE_VERSION' : 'WRITE_FAILED',
+      error: `${detail}（${item.target.state.rawPath}）${rollbackNote}。请重新 read_file 后重试。`,
+    }
+  }
+
+  // 批量提交全部成功：逐个文件广播，让已打开的视图立刻刷新
+  for (const t of targets) broadcastFileChanged(t.state.abs, t.content)
+
+  const files = targets.map((t) => ({
+    path: t.state.rawPath,
+    replaced: t.edits.length,
+    replacements: t.edits.map((ed) => ({
+      changedLines: { start: ed.startLine, end: ed.endLine },
+      deleted: ed.newText.length === 0,
+    })),
+    stats: t.diff.stats,
+    diff: t.diff,
+  }))
   return {
     ok: true,
-    value: { applied: pending.length, files: files.map((f) => ({ path: f.path, replacements: f.replacements, stats: f.stats })) },
+    value: {
+      applied: files.reduce((n, f) => n + f.replaced, 0),
+      files: files.map((f) => ({ path: f.path, replaced: f.replaced, replacements: f.replacements, stats: f.stats })),
+    },
     preview: makeEditDiffPreview(files.map((f) => f.diff)),
   }
 }
@@ -962,10 +1298,21 @@ async function runPython(input: any, ctx: ToolExecutionContext): Promise<ToolRes
     const res = sandboxMode === 'trusted'
       ? await trustedPythonExecute(code, ctx.cwd, ctx.signal)
       : await pythonService.executeCode(code, input?.input ?? '', ctx.cwd, sandboxMode, ctx.signal)
+    // 与 shell 同口径：脚本报错也是「结果」（带 [exit code: 1] 与 stderr 段），不是工具故障——
+    // 旧实现返回 ok:false，模型只能看到 `ERROR: …` 一行，res.result / logs 里的诊断信息全丢。
+    const stdoutText = String((res as any)?.result ?? (res as any)?.output ?? (res as any)?.rawOutput ?? '')
+    const stderrText = String((res as any)?.error ?? '')
     return {
-      ok: !res?.error,
-      value: { ...res, sandbox: policy },
-      error: res?.error || undefined,
+      ok: true,
+      value: {
+        ...res,
+        sandbox: policy,
+        modelText: renderShellText({
+          stdout: stdoutText,
+          stderr: stderrText,
+          exitCode: (res as any)?.success === false || stderrText ? 1 : 0,
+        }),
+      },
     }
   } catch (e: any) {
     return { ok: false, error: `Python 执行失败: ${e?.message || String(e)}` }
@@ -979,22 +1326,377 @@ async function trustedPythonExecute(code: string, cwd?: string, signal?: AbortSi
   return trustedPythonService.executeCode(code, '', cwd, signal)
 }
 
-async function runShell(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const command = String(input?.command ?? '')
-  if (!command.trim()) return { ok: false, error: 'command 参数必填' }
-  // shell 是最高危执行面：统一策略解析，仅 trusted 放行（fail-closed）
-  const policy = resolvePolicy((ctx as any).sandboxMode, { workspaceRoot: ctx.cwd })
-  if (!isShellAllowed(policy)) {
-    return {
-      ok: false,
-      error: `shell 执行被沙箱策略拒绝：当前模式 ${policy.mode}（enforcement: ${policy.enforcement}）。仅「完全访问（trusted）」模式允许执行 shell 命令，可在「设置 → 通用 → 其他 → 安全策略」中切换。`,
+// ---------------------------------------------------------------------------
+// shell 后台任务（对齐 DSH 的 job 交接：前台超时 → 同一个 job 继续跑）
+// ---------------------------------------------------------------------------
+
+/** 单个后台 shell 任务最多保留多少字符输出（超出丢最旧的） */
+const SHELL_JOB_OUTPUT_MAX = 512 * 1024
+/** 同时最多保留几个后台 shell 任务（防止模型无限开进程） */
+const SHELL_MAX_LIVE_JOBS = 8
+
+/** 消费式输出环：`job_output` 读到的就是"上次之后的新输出"（DSH 同语义） */
+class ShellOutputRing {
+  private parts: string[] = []
+  private size = 0
+  private dropped = 0
+
+  push(text: string): void {
+    if (!text) return
+    this.parts.push(text)
+    this.size += text.length
+    while (this.size > SHELL_JOB_OUTPUT_MAX && this.parts.length > 1) {
+      const head = this.parts.shift()!
+      this.size -= head.length
+      this.dropped += head.length
     }
   }
+
+  consume(): { text: string; dropped: number } {
+    const text = this.parts.join('')
+    const dropped = this.dropped
+    this.parts = []
+    this.size = 0
+    this.dropped = 0
+    return { text, dropped }
+  }
+
+  /** 只看不取（界面轮询用；不影响 job_output 的消费游标） */
+  peek(maxChars = 4000): string {
+    const text = this.parts.join('')
+    return text.length > maxChars ? text.slice(-maxChars) : text
+  }
+}
+
+interface ShellJob {
+  id: string
+  command: string
+  description: string
+  cwd: string
+  run: ShellRun
+  out: ShellOutputRing
+  err: ShellOutputRing
+  startedAt: number
+  finished: boolean
+  exitCode?: number
+  signal?: string
+  error?: string
+  /** 是否由"前台超时转后台"产生 */
+  promoted: boolean
+}
+
+const shellJobs = new Map<string, ShellJob>()
+
+/** 界面用：列出当前后台 shell 任务（含尾部输出；不影响 job_output 的消费游标） */
+export function listShellJobsForUi(): Array<{
+  id: string
+  command: string
+  description: string
+  cwd: string
+  status: 'running' | 'completed' | 'error'
+  exitCode?: number
+  signal?: string
+  startedAt: number
+  output: string
+}> {
+  return Array.from(shellJobs.values())
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .map((job) => ({
+      id: job.id,
+      command: job.command,
+      description: job.description,
+      cwd: job.cwd,
+      status: job.finished ? (job.error ? 'error' : 'completed') : 'running',
+      exitCode: job.exitCode,
+      signal: job.signal,
+      startedAt: job.startedAt,
+      output: [job.out.peek(6000), job.err.peek(2000)].filter(Boolean).join('\n'),
+    }))
+}
+
+/** 界面用：停止一个后台 shell 任务 */
+export function killShellJobForUi(id: string): { ok: boolean; error?: string } {
+  const job = shellJobs.get(String(id || ''))
+  if (!job) return { ok: false, error: `未找到后台任务 ${id}` }
+  if (job.finished) return { ok: true }
+  job.run.killTree()
+  jobRegistry.cancel(job.id, '已在界面停止')
+  return { ok: true }
+}
+
+/** 界面用：移除已结束的任务记录（只清列表，不杀进程） */
+export function dismissShellJobForUi(id: string): { ok: boolean } {
+  const key = String(id || '')
+  const job = shellJobs.get(key)
+  if (job && !job.finished) return { ok: false }
+  shellJobs.delete(key)
+  return { ok: true }
+}
+
+/** 注册一个后台 shell 任务；超出并发上限返回 null（调用方负责回退到前台/杀掉） */
+function registerShellJob(opts: {
+  command: string
+  description: string
+  cwd: string
+  run: ShellRun
+  out: ShellOutputRing
+  err: ShellOutputRing
+  promoted: boolean
+  owner: string
+}): ShellJob | null {
+  // 到上限时先淘汰已结束的任务（它们的输出仍可再读一次，但不再占并发）
+  if (shellJobs.size >= SHELL_MAX_LIVE_JOBS) {
+    for (const [id, job] of shellJobs) {
+      if (job.finished) { shellJobs.delete(id); break }
+    }
+  }
+  if (shellJobs.size >= SHELL_MAX_LIVE_JOBS) return null
+  const title = opts.description || opts.command.slice(0, 80)
+  const info = jobRegistry.start('shell', opts.owner, title, { detail: opts.command.slice(0, 200) })
+  const job: ShellJob = {
+    id: info.id,
+    command: opts.command,
+    description: opts.description,
+    cwd: opts.cwd,
+    run: opts.run,
+    out: opts.out,
+    err: opts.err,
+    startedAt: Date.now(),
+    finished: false,
+    promoted: opts.promoted,
+  }
+  shellJobs.set(info.id, job)
+  void opts.run.waitExit().then((res) => {
+    job.finished = true
+    job.exitCode = res.exitCode
+    job.signal = res.signal
+    job.error = res.error
+    // 退出时的最后一段输出补进环里（流式订阅通常已经拿到了，这里兜底）
+    if (res.stdout) job.out.push(res.stdout.slice(-2000))
+    if (res.stderr) job.err.push(res.stderr.slice(-2000))
+    if (res.error) jobRegistry.fail(info.id, res.error)
+    else jobRegistry.complete(info.id, { exitCode: res.exitCode, signal: res.signal, executionTime: res.executionTime })
+  })
+  return job
+}
+
+/** 把一次 shell 结果转成工具返回值（统一形状 + modelText） */
+function shellResultValue(
+  res: ShellExecutionResult,
+  meta: { command: string; description: string; timeoutMs: number; policy: any; extra?: Record<string, unknown> },
+): ToolResult {
+  return {
+    ok: true,
+    value: {
+      command: meta.command,
+      description: meta.description,
+      cwd: res.cwd,
+      shell: res.shell,
+      exitCode: res.exitCode,
+      signal: res.signal,
+      timedOut: res.timedOut,
+      aborted: res.aborted,
+      truncated: res.truncated,
+      truncatedPaths: res.truncatedPaths,
+      stdout: res.stdout,
+      stderr: res.stderr,
+      executionTime: res.executionTime,
+      sandbox: meta.policy,
+      ...(meta.extra || {}),
+      modelText: renderShellText({
+        ...res,
+        timeoutMs: meta.timeoutMs,
+        ...(res.aborted ? { abortReason: '调用被取消（用户停止 / turn 取消）' } : {}),
+      }),
+    },
+  }
+}
+
+/**
+ * 沙箱拒绝时的一次性升权：带 `sandbox_permissions: 'escalate'` + `justification` 时
+ * 通过 ask_user 的问答通道向用户确认，**只放行这一条命令**（对齐 DSH 的单次升权）。
+ */
+async function escalateShellOnce(
+  input: any,
+  ctx: ToolExecutionContext,
+  command: string,
+): Promise<{ ok: true } | { ok: false; result: ToolResult }> {
+  const policy = resolvePolicy((ctx as any).sandboxMode, { workspaceRoot: ctx.cwd })
+  const denied = (extra: string): { ok: false; result: ToolResult } => ({
+    ok: false,
+    result: {
+      ok: false,
+      code: 'SANDBOX_DENIED',
+      error: `shell 执行被沙箱策略拒绝：当前模式 ${policy.mode}（enforcement: ${policy.enforcement}）。${extra}`,
+    },
+  })
+  const wantsEscalate = String(input?.sandbox_permissions ?? '').trim() === 'escalate'
+  const justification = String(input?.justification ?? '').trim()
+  if (!wantsEscalate || !justification) {
+    return denied(
+      '仅「完全访问（trusted）」模式允许执行 shell。若确实需要执行，可带 sandbox_permissions:"escalate" 与 justification 重新调用——确认后只会放行这一条命令；也可在「设置 → 通用 → 其他 → 安全策略」切换模式。',
+    )
+  }
+  if (!ctx.agentId) {
+    return denied('升权需要向用户确认，但当前不在 agent 会话内，无法发起确认。')
+  }
   try {
-    const res = await shellService.executeCommand(command, ctx.cwd, ctx.signal)
-    return { ok: res.success, value: { ...res, sandbox: policy }, error: res.error || undefined }
+    const answers = await requestQuestions(ctx.agentId, [
+      {
+        id: 'shell-escalate',
+        header: '执行 shell 命令',
+        question: `智能体请求在「${policy.mode}」模式下执行一条 shell 命令：\n\n${command.slice(0, 800)}\n\n理由：${justification.slice(0, 400)}\n\n是否允许本次执行？（只放行这一条）`,
+        options: [
+          { label: '允许执行', description: '仅本次命令，执行后策略不变' },
+          { label: '拒绝', description: '本次不执行' },
+        ],
+      },
+    ])
+    if (Array.isArray(answers) && answers[0]?.selected?.includes('允许执行')) return { ok: true }
+    return {
+      ok: false,
+      result: { ok: false, code: 'SANDBOX_DENIED', error: '用户拒绝了本次 shell 执行（一次性升权未获批准）。' },
+    }
   } catch (e: any) {
-    return { ok: false, error: `shell 执行失败: ${e?.message || String(e)}` }
+    return denied(`未能获得用户确认：${e?.message || String(e)}`)
+  }
+}
+
+/**
+ * shell —— 对齐 DSH 的 `bash` / `pwsh` 语义：
+ * - 每次调用一个全新进程（状态不保留，换目录用 workdir）；
+ * - **非零退出不是工具错误**，而是结果里的一条 `[exit code: N]` 标记；
+ * - 超时 / 取消会杀掉整棵进程树，并分别标记 `[timed out after Xms]` / `[stopped: …]`；
+ * - 前台超时**不杀进程**，转成后台 job（`[still running after Xms; moved to background job <id>]`）；
+ * - 输出超限时只保留尾部，完整内容落盘（标记里给路径，可用 read_file 回读）。
+ */
+async function runShell(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const command = String(input?.command ?? '')
+  if (!command.trim()) return { ok: false, error: 'command 参数必填', code: 'INVALID_ARGS' }
+
+  // shell 是最高危执行面：统一策略解析，仅 trusted 放行；不然走一次性升权（用户确认）
+  const policy = resolvePolicy((ctx as any).sandboxMode, { workspaceRoot: ctx.cwd })
+  if (!isShellAllowed(policy)) {
+    const escalated = await escalateShellOnce(input, ctx, command)
+    // tsconfig.node.json 未开 strict：按字段是否存在收窄
+    if ('result' in escalated) return escalated.result
+  }
+
+  // 方言：Windows 默认 cmd，POSIX 默认 sh；可用 shell 参数指定
+  const kindRes = resolveShellKind(input?.shell)
+  if ('error' in kindRes) return { ok: false, code: 'INVALID_ARGS', error: kindRes.error }
+
+  // workdir：相对路径基于工作区根，绝对路径放行；必须是已存在的目录
+  const rawWorkdir = String(input?.workdir ?? '').trim()
+  let cwd = ctx.cwd || process.cwd()
+  if (rawWorkdir) {
+    const abs = path.isAbsolute(rawWorkdir) ? rawWorkdir : path.resolve(cwd, rawWorkdir)
+    try {
+      if (!fs.statSync(abs).isDirectory()) {
+        return { ok: false, code: 'INVALID_ARGS', error: `workdir 不是目录：${abs}` }
+      }
+      cwd = abs
+    } catch {
+      return { ok: false, code: 'INVALID_ARGS', error: `workdir 不存在：${abs}` }
+    }
+  }
+
+  const rawTimeout = Number(input?.timeoutMs ?? input?.timeout_ms)
+  const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? Math.min(SHELL_MAX_TIMEOUT_MS, Math.max(1000, Math.floor(rawTimeout)))
+    : SHELL_DEFAULT_TIMEOUT_MS
+
+  const description = String(input?.description ?? '').trim()
+  const sessionId = String(ctx.sessionId || ctx.agentId || 'shell')
+  const owner = String(ctx.agentId || ctx.sessionId || 'shell')
+  const runOpts = { cwd, shellKind: kindRes.kind, sessionId }
+
+  // ---- 后台模式：立即返回 job id ----
+  if (input?.run_in_background === true) {
+    const out = new ShellOutputRing()
+    const err = new ShellOutputRing()
+    const run = startShell(command, runOpts)
+    run.onOutput((stream, text) => (stream === 'stdout' ? out : err).push(text))
+    const job = registerShellJob({ command, description, cwd, run, out, err, promoted: false, owner })
+    if (!job) {
+      run.killTree()
+      return { ok: false, code: 'SHELL_FAILED', error: `后台 shell 任务已达上限（${SHELL_MAX_LIVE_JOBS} 个）：请先 job_kill 结束旧任务，或改前台执行。` }
+    }
+    return {
+      ok: true,
+      value: {
+        command,
+        description,
+        cwd,
+        shell: kindRes.kind,
+        jobId: job.id,
+        status: 'running',
+        sandbox: policy,
+        modelText: `started background job ${job.id}\n（用 job_output(job_id="${job.id}") 读取输出，job_kill(job_id="${job.id}") 停止）`,
+      },
+    }
+  }
+
+  // ---- 前台：超时转后台（不杀进程） ----
+  const out = new ShellOutputRing()
+  const err = new ShellOutputRing()
+  const run = startShell(command, runOpts)
+  run.onOutput((stream, text) => (stream === 'stdout' ? out : err).push(text))
+
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let aborted = false
+  const onAbort = () => {
+    aborted = true
+    run.killTree()
+  }
+  if (ctx.signal?.aborted) onAbort()
+  else ctx.signal?.addEventListener('abort', onAbort, { once: true })
+  const timeoutHit = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs)
+    if (timer && typeof (timer as any).unref === 'function') (timer as any).unref()
+  })
+  const first = await Promise.race([
+    run.waitExit().then((r) => ({ kind: 'exit' as const, r })),
+    timeoutHit.then(() => ({ kind: 'timeout' as const })),
+  ])
+  if (timer) clearTimeout(timer)
+  try { ctx.signal?.removeEventListener('abort', onAbort) } catch { /* 忽略 */ }
+
+  if (first.kind === 'exit') {
+    if (first.r.error) return { ok: false, code: 'SHELL_FAILED', error: `shell 启动失败：${first.r.error}` }
+    return shellResultValue({ ...first.r, aborted }, { command, description, timeoutMs, policy })
+  }
+
+  // 取消（turn 停止）：已经杀过进程树，按"被停止"返回，不转后台
+  if (aborted) {
+    const res = { ...(await run.waitExit()), aborted: true, timedOut: false }
+    return shellResultValue(res, { command, description, timeoutMs, policy })
+  }
+
+  // 超时：把它交给后台任务继续跑（DSH 的 promoteOnTimeout）
+  const job = registerShellJob({ command, description, cwd, run, out, err, promoted: true, owner })
+  const so_far_out = out.consume()
+  const so_far_err = err.consume()
+  const partial = renderShellText({ stdout: so_far_out.text, stderr: so_far_err.text })
+  if (!job) {
+    run.killTree()
+    const res = { ...(await run.waitExit()), timedOut: true, aborted: false }
+    return shellResultValue(res, { command, description, timeoutMs, policy })
+  }
+  return {
+    ok: true,
+    value: {
+      command,
+      description,
+      cwd,
+      shell: kindRes.kind,
+      jobId: job.id,
+      timedOut: true,
+      status: 'running',
+      sandbox: policy,
+      modelText: `${partial}\n[still running after ${timeoutMs}ms; moved to background job ${job.id}]\n`
+        + `（用 job_output(job_id="${job.id}") 继续读取输出，job_kill(job_id="${job.id}") 停止）`,
+    },
   }
 }
 
@@ -1099,6 +1801,8 @@ async function kbSearch(input: any, ctx: ToolExecutionContext): Promise<ToolResu
       context: preview,
       blocks: allBlocks.slice(0, 10),
       debug: (input as any)?.debug ? allBlocks : undefined,
+      // 纯文本通道：context 里已经带【知识库：…】分组，直接给模型，免得 JSON 转义整段正文
+      modelText: `检索「${query}」（${allBlocks.length} 段相关切片）\n${preview}`,
     },
   }
 }
@@ -1176,6 +1880,8 @@ async function loadSkill(input: any, ctx: ToolExecutionContext): Promise<ToolRes
       resourceBase: candidate.path,
       fileCount,
       files: sampled.map((f) => f.name),
+      // 纯文本通道：技能指令本身就是 Markdown，别让 JSON 转义把换行变成 \n
+      modelText: instruction,
     },
   }
 }
@@ -1326,7 +2032,9 @@ async function searchFiles(input: any, ctx: ToolExecutionContext): Promise<ToolR
     root,
     query,
     regex: input?.regex === true,
-    caseSensitive: input?.caseSensitive === true,
+    ignoreCase: input?.ignoreCase === true,
+    // 旧调用（caseSensitive:false = 忽略大小写）继续兼容
+    caseSensitive: typeof input?.caseSensitive === 'boolean' ? input.caseSensitive : undefined,
     filePattern: input?.filePattern ? String(input.filePattern) : undefined,
     maxResults: typeof input?.maxResults === 'number' ? input.maxResults : 30,
     contextLines: typeof input?.contextLines === 'number' ? input.contextLines : 0,
@@ -1335,8 +2043,60 @@ async function searchFiles(input: any, ctx: ToolExecutionContext): Promise<ToolR
     respectGitignore: input?.respectGitignore !== false,
     signal: ctx.signal,
   })
+  return attachSearchOverflow(result, ctx, `search-${Date.now()}.txt`)
+}
+
+/**
+ * 把"超出内联上限的完整命中"落盘成 spill 文件，并把定位提示拼到 modelText 末尾。
+ *
+ * 与 DSH 的 `grep` 达到 `grepMaxMatches` 后落盘、返回 locator 的做法一致：
+ * 模型拿到的是"前 N 条 + 一份可回读的完整结果"，而不是一个只能自己缩小范围的死胡同。
+ */
+function attachSearchOverflow(result: ToolResult, ctx: ToolExecutionContext, fileName: string): ToolResult {
+  if (!result.ok || !result.value || typeof result.value !== 'object') return result
+  const value = result.value as Record<string, any>
+  const overflow = typeof value.overflowText === 'string' ? value.overflowText : ''
+  if (!overflow) return result
+  let modelText = String(value.modelText || '')
+  const spill = saveSpillText(String(ctx.sessionId || ctx.agentId || 'agent'), fileName, overflow)
+  modelText += spill
+    ? `\n（完整结果已保存到：${spill.path}\n用 read_file 读取该路径即可看到被省略的命中，可带 offset / limit 分段查看）`
+    : '\n（命中过多，完整列表未能保存；请加 filePattern、缩小 root 或换更精确的关键词后重试）'
+  const { overflowText: _omit, ...rest } = value
+  return { ok: true, value: { ...rest, modelText } }
+}
+
+/** 按路径 / 文件名查找文件（`glob`）：与 `search_files` 同一套遍历与忽略规则 */
+async function globFiles(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const pattern = String(input?.pattern ?? '').trim()
+  if (!pattern) return { ok: false, error: 'pattern 参数必填（如 **/*.md）', code: 'INVALID_ARGS' }
+  const skillName = String(input?.skill ?? '').trim()
+  let root: string | undefined
+  if (skillName) {
+    const dir = resolveSkillDir(skillName)
+    if (!dir.base) return { ok: false, error: dir.error }
+    root = dir.base
+  } else if (input?.root) {
+    const abs = resolveWithinCwd(String(input.root), ctx)
+    if (!abs) return { ok: false, error: `查找根路径越界: ${input.root}` }
+    root = abs
+  } else {
+    root = ctx.cwd
+  }
+  if (!root) return { ok: false, error: '缺少查找目录（skill 或 root，或工具上下文 cwd）' }
+
+  const result = await globFilesInRoot({
+    root,
+    pattern,
+    maxResults: typeof input?.maxResults === 'number' ? input.maxResults : 100,
+    includeHidden: input?.includeHidden === true,
+    respectGitignore: input?.respectGitignore !== false,
+    signal: ctx.signal,
+  })
   if (result.ok && result.value && typeof result.value === 'object') {
-    return { ok: true, value: { ...(result.value as Record<string, unknown>), root } }
+    const merged: ToolResult = { ok: true, value: { ...(result.value as Record<string, unknown>), root } }
+    // 与 search_files 同一套：超出内联上限的完整列表落盘，模型可用 read_file 回读
+    return attachSearchOverflow(merged, ctx, `glob-${Date.now()}.txt`)
   }
   return result
 }
@@ -2464,7 +3224,16 @@ async function webFetch(input: any, ctx: ToolExecutionContext): Promise<ToolResu
   if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'url 参数必填（http/https）' }
   try {
     const r = await runWebFetch(url)
-    return { ok: true, value: { url: r.url, text: r.text, length: r.length, via: r.via } }
+    return {
+      ok: true,
+      value: {
+        url: r.url,
+        text: r.text,
+        length: r.length,
+        via: r.via,
+        modelText: `${r.url}（${r.via}，${r.length} 字符）\n\n${r.text}`,
+      },
+    }
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) }
   }
@@ -2783,7 +3552,44 @@ async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolR
 /** job_output：读取后台任务状态与结果（wait=true 时阻塞等待其结束） */
 async function jobOutput(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const jobId = String(input?.job_id ?? input?.jobId ?? '').trim()
-  if (!jobId) return { ok: false, error: 'job_id 参数必填（run_subagent 返回的 jobId）' }
+  if (!jobId) return { ok: false, error: 'job_id 参数必填（run_subagent / shell 后台返回的 jobId）' }
+
+  // 后台 shell：输出是**消费式**的——每次 job_output 只返回"上次之后的新输出"（DSH 同语义）
+  const shellJob = shellJobs.get(jobId)
+  if (shellJob) {
+    const wait = input?.wait === true
+    const waitTimeout = Math.min(30 * 60 * 1000, Math.max(1000, Number(input?.timeout_ms) || 5 * 60 * 1000))
+    const deadline = Date.now() + waitTimeout
+    while (wait && !shellJob.finished && Date.now() < deadline && !ctx.signal?.aborted) {
+      await new Promise((r) => setTimeout(r, 200))
+    }
+    const out = shellJob.out.consume()
+    const err = shellJob.err.consume()
+    const dropped = out.dropped + err.dropped
+    const text = renderShellText({
+      stdout: out.text,
+      stderr: err.text,
+      exitCode: shellJob.finished ? shellJob.exitCode : undefined,
+      signal: shellJob.signal,
+    })
+    const notes: string[] = []
+    if (dropped > 0) notes.push(`（更早的输出已丢弃：${dropped} 字符；如需完整日志请让命令把输出写进文件）`)
+    if (!shellJob.finished) notes.push(`[still running] 用 job_output(job_id="${shellJob.id}") 继续读取新增输出，job_kill 停止`)
+    return {
+      ok: true,
+      value: {
+        jobId: shellJob.id,
+        kind: 'shell',
+        status: shellJob.finished ? (shellJob.error ? 'error' : 'completed') : 'running',
+        command: shellJob.command,
+        cwd: shellJob.cwd,
+        exitCode: shellJob.exitCode,
+        signal: shellJob.signal,
+        modelText: [text, ...notes].join('\n'),
+      },
+    }
+  }
+
   const job = jobRegistry.get(jobId)
   if (!job) return { ok: false, error: `未找到后台任务 ${jobId}（可能已完成并被清理，或只属于其它会话）` }
 
@@ -2819,6 +3625,27 @@ async function jobOutput(input: any, ctx: ToolExecutionContext): Promise<ToolRes
 async function jobKill(input: any, _ctx: ToolExecutionContext): Promise<ToolResult> {
   const jobId = String(input?.job_id ?? input?.jobId ?? '').trim()
   if (!jobId) return { ok: false, error: 'job_id 参数必填' }
+
+  // 后台 shell：直接杀进程树（连同它拉起的子进程），输出仍可再读一次
+  const shellJob = shellJobs.get(jobId)
+  if (shellJob) {
+    if (shellJob.finished) {
+      return { ok: true, value: { jobId, kind: 'shell', status: 'completed', killed: false, message: '该命令已结束，无需停止。' } }
+    }
+    shellJob.run.killTree()
+    jobRegistry.cancel(jobId, '已被 job_kill 停止')
+    return {
+      ok: true,
+      value: {
+        jobId,
+        kind: 'shell',
+        status: 'cancelled',
+        killed: true,
+        modelText: `[stopped: job_kill]\n已停止该 shell 任务（连同子进程）。可用 job_output 再读一次它退出前的输出。`,
+      },
+    }
+  }
+
   const job = jobRegistry.get(jobId)
   if (!job) return { ok: false, error: `未找到后台任务 ${jobId}` }
   if (job.status !== 'running') return { ok: true, value: { jobId, status: job.status, killed: false, message: `任务已结束（${job.status}），无需停止` } }
@@ -2831,6 +3658,149 @@ async function jobKill(input: any, _ctx: ToolExecutionContext): Promise<ToolResu
     if (child) child.cancel('job-killed')
   }
   return { ok: true, value: { jobId, status: 'cancelled', killed: true, message: '已请求停止；它派生的下级子代理会继续运行到结束。' } }
+}
+
+/**
+ * job_list —— 列出本会话的后台任务（对齐 DSH `tool-jobs` 的 list）。
+ * 模型被打断后不必凭记忆找 jobId：先 list 再 output / kill。
+ */
+async function jobList(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const owner = String(ctx.agentId || ctx.sessionId || '')
+  const kind = String(input?.kind ?? '').trim()
+  const jobs = jobRegistry.list()
+    .filter((job) => (!owner || job.owner === owner) && (!kind || job.kind === kind))
+    .sort((a, b) => b.createdAt - a.createdAt)
+
+  if (!jobs.length) {
+    return { ok: true, value: { jobs: [], modelText: '（当前没有后台任务）' } }
+  }
+  const lines = jobs.map((job) => {
+    const elapsed = Math.max(0, Math.round((Date.now() - job.createdAt) / 1000))
+    const status = job.status === 'running' ? `running ${elapsed}s` : job.status
+    return `- ${job.id}（${job.kind}）${status}：${job.title}`
+  })
+  return {
+    ok: true,
+    value: {
+      jobs: jobs.map((job) => ({
+        id: job.id,
+        kind: job.kind,
+        title: job.title,
+        status: job.status,
+        createdAt: job.createdAt,
+        detail: job.detail,
+        error: job.error,
+      })),
+      modelText: `后台任务（${jobs.length}）\n${lines.join('\n')}\n（用 job_output(job_id) 读输出 / 收结果，job_kill 停止）`,
+    },
+  }
+}
+
+/**
+ * working_directory —— 切换本会话的工作目录（对齐 DSH 的 `working_directory`）。
+ * 只允许切到工作区内；传空字符串重置回工作区根。切换后所有文件工具的相对路径都跟着走。
+ */
+async function workingDirectory(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const key = workingDirKey(ctx)
+  if (!key) return { ok: false, code: 'INVALID_ARGS', error: '当前不在 agent 会话内，无法切换工作目录' }
+  const root = String((ctx as any).workspaceRoot || ctx.cwd || '')
+  const raw = String(input?.path ?? '').trim()
+
+  if (!raw) {
+    setWorkingDir(key, '')
+    return {
+      ok: true,
+      value: { cwd: root, workspaceRoot: root, reset: true, modelText: `工作目录已重置为工作区根：${root}` },
+    }
+  }
+
+  const base = cwdFor({ agentId: ctx.agentId, sessionId: ctx.sessionId, cwd: ctx.cwd }) || process.cwd()
+  const abs = path.resolve(path.isAbsolute(raw) ? raw : path.join(base, raw))
+  let st: fs.Stats
+  try {
+    st = fs.statSync(abs)
+  } catch {
+    return { ok: false, code: 'FS_NOT_FOUND', error: `目录不存在：${abs}` }
+  }
+  if (!st.isDirectory()) return { ok: false, code: 'INVALID_ARGS', error: `不是目录：${abs}` }
+
+  // 只允许在工作区内移动（否则等于让模型把写盘范围挪到工作区外）
+  if (root) {
+    const norm = (p: string) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p))
+    const r = norm(root)
+    const a = norm(abs)
+    if (a !== r && !a.startsWith(r + path.sep)) {
+      return { ok: false, code: 'INVALID_ARGS', error: `只能切到工作区内（${root}）：${abs}` }
+    }
+  }
+  setWorkingDir(key, abs)
+  return {
+    ok: true,
+    value: {
+      cwd: abs,
+      workspaceRoot: root,
+      modelText: `当前工作目录：${abs}（后续文件工具的相对路径都相对它解析；传 path:"" 可重置）`,
+    },
+  }
+}
+
+/** 支持的图片格式（按文件头识别，不信扩展名） */
+const READ_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+
+function sniffImageMime(buf: Buffer): 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif' | null {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg'
+  if (buf.length >= 6) {
+    const head = buf.subarray(0, 6).toString('latin1')
+    if (head === 'GIF87a' || head === 'GIF89a') return 'image/gif'
+  }
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') {
+    return 'image/webp'
+  }
+  return null
+}
+
+/**
+ * read_image —— 把本地图片作为图片内容交给模型（对齐 DSH 的 `read_image`）。
+ * 只认 PNG / JPEG / WebP / GIF（按魔数），单张上限 8MB；模型不支持图片输入时会由接口报错。
+ */
+async function readImage(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const rawPath = String(input?.path ?? '')
+  const abs = resolveWithinCwd(rawPath, ctx)
+  if (!abs) return { ok: false, code: 'INVALID_ARGS', error: '路径越界或缺失（path 参数必填）' }
+  let st: fs.Stats
+  try {
+    st = fs.statSync(abs)
+  } catch {
+    return { ok: false, code: 'FS_NOT_FOUND', error: `文件不存在：${rawPath}` }
+  }
+  if (!st.isFile()) return { ok: false, code: 'INVALID_ARGS', error: `不是文件：${rawPath}` }
+  if (st.size > READ_IMAGE_MAX_BYTES) {
+    return {
+      ok: false,
+      code: 'FS_TOO_LARGE',
+      error: `图片过大（${Math.round(st.size / 1024)} KB，上限 ${READ_IMAGE_MAX_BYTES / 1024 / 1024} MB）：请先压缩 / 裁剪后再读。`,
+    }
+  }
+  const buf = fs.readFileSync(abs)
+  const mime = sniffImageMime(buf)
+  if (!mime) {
+    return {
+      ok: false,
+      code: 'FS_NOT_TEXT',
+      error: `不是受支持的图片（只认 PNG / JPEG / WebP / GIF，按文件头判断）：${rawPath}`,
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      path: rawPath,
+      mime,
+      bytes: st.size,
+      modelText: `图片：${rawPath}（${mime}，${Math.round(st.size / 1024)} KB）`,
+    },
+    images: [{ mime, data: buf.toString('base64') }],
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2975,21 +3945,33 @@ export function registerCoreTools(): void {
     )
   }
   toolRegistry.register(
-    defineTool('read_file', '读取本地文件内容（UTF-8；PDF / Word(.docx,.doc) / Excel(.xlsx,.xls) 自动提取文本）。支持绝对路径（可读任意位置文件）与相对路径（基于工作区根；传 skill 时基于该技能目录）。单次返回有上限（纯文本约前 100KB、PDF/Word/Excel 前 20000 字符），超出时返回 truncated=true 与 nextOffset——把 nextOffset 作为 offset 再调用一次即可续读后续内容，反复续读直到 truncated=false 即读完全文（limit 可显式指定单次字符数，上限 102400）。超大文本文件（>16MB）只返回开头样本，请改用 run_python 完整处理。', readFile, {
+    defineTool('read_file', '读取文本文件，返回**带行号**的内容（PDF / Word / Excel 自动提取文本）。offset / limit 单位都是**行**（默认一次 2000 行、约 50KB）；末尾写「本次第 a-b 行 / 共 T 行」，没读完就用 offset=下一行 续读，直到「已读到文件末尾」。单行超 2000 字符会截断；offset 越界直接报错。传 skill 时按技能目录解析。', readFile, {
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: '文件路径（绝对路径可访问任意文件；相对路径基于工作区根，传 skill 时基于技能目录）' },
-          skill: { type: 'string', description: '可选。技能名（kebab-case，容错匹配）：path 按该技能目录解析，用于读取技能自带资源（如 path="references/x.md"）' },
-          offset: { type: 'integer', description: '可选。起始字符偏移（从 0 起，默认 0）；续读时填上一次返回的 nextOffset' },
-          limit: { type: 'integer', description: '可选。本次最多返回的字符数（默认：纯文本约 100KB、PDF/Word/Excel 20000；上限 102400）' },
+          path: { type: 'string', description: '文件路径（绝对路径可访问任意文件；相对路径基于当前工作目录，传 skill 时基于技能目录）' },
+          skill: { type: 'string', description: '可选。技能名（kebab-case，容错匹配）：path 按该技能目录解析，用于读取技能自带资源' },
+          offset: { type: 'integer', description: '可选。起始行号（1-based，默认 1）；续读时填结果末尾提示里的 offset' },
+          limit: { type: 'integer', description: '可选。本次最多返回多少行（默认 2000，上限 2000）' },
+          force: { type: 'boolean', description: '可选。同一轮内重复读同一窗口会返回"内容未变化"；确实要重看原文时传 true' },
         },
         required: ['path'],
       },
     }),
   )
   toolRegistry.register(
-    defineTool('write_file', '写入本地文件（UTF-8，自动创建父目录）。支持绝对路径与相对路径（基于工作区根）。覆盖已有文件前必须先用 read_file 读取原文（先读后写策略；新建文件不需要），只改局部请优先用 replace_in_file。单次 content 建议不超过约 20000 字符：更大的文件请分段写——先 write_file 写第一部分，再用 replace_in_file 在末尾逐段追加（整份文件一次提交容易撞到输出上限而被截断）。', writeFile, {
+    defineTool('read_image', '读取本地图片并作为图片内容交给模型（PNG / JPEG / WebP / GIF，按文件头识别，单张上限 8MB）。仅当模型支持图片输入时使用；不要用它读文本或 PDF（用 read_file）。', readImage, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '图片路径（绝对路径或相对当前工作目录）' },
+        },
+        required: ['path'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('write_file', '写入文件（UTF-8，自动创建父目录）。覆盖已存在文件前必须先用 read_file 读过（先读后写）；只改局部优先用 replace_in_file。单次建议 ≤20000 字符、硬上限 1 MiB，更大的分段写；写盘后按字节复核，失败会回滚。', writeFile, {
       inputSchema: {
         type: 'object',
         properties: {
@@ -3001,7 +3983,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('replace_in_file', '在文件中定位一段唯一原文并替换为新内容（UTF-8 文本，精确局部修改，文件其余部分保持不变）。old_string 必须与文件内容精确一致（含缩进与上下文，建议 ≥3 行）——调用前请先用 read_file 读取目标区域，把要改的内容【原样复制】过来，不要凭记忆手写；默认要求全文唯一：出现多处会报错并列出各出现行号（此时请补充更多上下文使其唯一，或传 occurrence 指定第几处），未找到会返回【可直接复制的候选片段】，请据此修正后重试（不要重复提交同一段 old_string）。new_string 传空字符串表示删除该段。替换会保留文件的换行风格（CRLF/LF）。文件较小（约 200 行以内）时直接用 write_file 整写更稳。覆盖已有文件前必须已用 read_file 读过该文件（先读后写策略）。', replaceInFile, {
+    defineTool('replace_in_file', '把文件里一段唯一原文替换为新内容（其余部分不变）。old_string 必须从 read_file 读到的原文里原样复制（含缩进）；默认要求全文唯一，命中多处会报行号，可传 occurrence 指定第几处或 replace_all 全部替换。new_string 传空串表示删除；与 old_string 相同会被拒绝。落盘前比对版本，读取后被改过就放弃。', replaceInFile, {
       inputSchema: {
         type: 'object',
         properties: {
@@ -3009,40 +3991,54 @@ export function registerCoreTools(): void {
           old_string: { type: 'string', description: '要被替换的精确原文段（含足够上下文，默认要求全文唯一）' },
           new_string: { type: 'string', description: '替换后的新内容；传空字符串表示删除该段' },
           occurrence: { type: 'integer', description: '可选。old_string 出现多处时指定替换第几处（从 1 起）；不传则要求唯一' },
+          replace_all: { type: 'boolean', description: '可选。true = 替换 old_string 的全部出现（结果里的 applied 是实际替换处数）' },
         },
         required: ['path', 'old_string', 'new_string'],
       },
     }),
   )
   toolRegistry.register(
-    defineTool('multi_replace', '在一次调用中批量替换多处代码（可跳多个文件），所有替换全部命中才写盘（逐文件原子覆盖）：任一条 old_string 未找到或不唯一都会使整批不生效，避免文件处于"改了一半"的中间态。适合同一文件多处 / 多文件联动的修改；同一文件的替换区间不能重叠。每条 old_string 同样必须先 read_file 读到原文后【原样复制】（含缩进），未读过的已有文件会被拒绝（先读后写策略）。单处替换请用 replace_in_file。', multiReplace, {
+    defineTool('multi_replace', '批量替换（可跨文件）：所有条目全部命中才落盘，任一条未命中 / 不唯一则整批不生效（两阶段提交，失败会回滚）。每条 old_string 同样要原样复制；默认唯一，可传 occurrence 或 replace_all。同一文件的替换区间不能重叠；单处替换用 replace_in_file。', multiReplace, {
       inputSchema: {
         type: 'object',
         properties: {
           replacements: {
             type: 'array',
-            description: '要执行的替换列表（按位置降序应用，与顺序无关）',
+            description: '要执行的替换列表（按命中位置应用，与条目顺序无关）',
             items: {
               type: 'object',
               properties: {
-                path: { type: 'string', description: '文件路径（绝对路径或相对工作区根）' },
+                path: { type: 'string', description: '文件路径（绝对路径或相对工作区根；省略时用顶层 path）' },
                 old_string: { type: 'string', description: '要被替换的精确原文段（默认要求在该文件中唯一）' },
                 new_string: { type: 'string', description: '替换后的新内容；传空字符串表示删除该段' },
+                occurrence: { type: 'integer', description: '可选。old_string 命中多处时只替换第几处（从 1 起）' },
+                replace_all: { type: 'boolean', description: '可选。true = 该条把 old_string 的全部出现都替换掉' },
               },
-              required: ['path', 'old_string', 'new_string'],
+              required: ['old_string', 'new_string'],
             },
           },
+          path: { type: 'string', description: '可选。所有条目的默认文件路径（条目自带 path 时以条目为准）' },
         },
         required: ['replacements'],
       },
     }),
   )
   toolRegistry.register(
-    defineTool('list_dir', '列出目录条目（名称与类型）。可用绝对路径查看任意目录（如 D:\\），相对路径基于工作区根；传 skill 时改为列出该技能目录。', listDir, {
+    defineTool('working_directory', '切换本会话的工作目录（之后 read_file / write_file / search_files / shell 等的相对路径都相对它解析）。只能切到工作区内；传 path:"" 重置回工作区根。命令内部的 cd 不会保留，需要换目录就用它或 workdir 参数。', workingDirectory, {
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: '目录路径（绝对路径可访问任意位置；相对路径基于工作区根，传 skill 时基于技能目录；默认 .）' },
+          path: { type: 'string', description: '目标目录（相对当前工作目录或绝对路径；传空字符串 = 重置回工作区根）' },
+        },
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('list_dir', '列出目录条目（名称与类型）。可用绝对路径查看任意目录（如 D:\\），相对路径基于当前工作目录；传 skill 时改为列出该技能目录。', listDir, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '目录路径（绝对路径可访问任意位置；相对路径基于当前工作目录，传 skill 时基于技能目录；默认 .）' },
           skill: { type: 'string', description: '可选。技能名（kebab-case，容错匹配）：改为列出该技能目录（path 相对该目录解析）' },
         },
       },
@@ -3058,14 +4054,30 @@ export function registerCoreTools(): void {
           skill: { type: 'string', description: '可选。技能名（kebab-case，容错匹配）：在该技能目录内搜索（优先于 root）' },
           filePattern: { type: 'string', description: '可选，文件过滤：".ts" / "*.ts" / "src/**/*.vue"，逗号分隔多个' },
           regex: { type: 'boolean', description: '可选，query 是否按正则解释（默认 false = 字面量包含）' },
-          caseSensitive: { type: 'boolean', description: '可选，是否大小写敏感（默认 false）' },
+          ignoreCase: { type: 'boolean', description: '可选，是否忽略大小写（默认 false = 大小写敏感，与 grep / rg 一致）' },
           contextLines: { type: 'number', description: '可选，命中行前后各返回几行上下文（0~5，默认 0）' },
-          maxResults: { type: 'number', description: '可选，最大结果数（默认 30，上限 500）' },
+          maxResults: { type: 'number', description: '可选，内联展示的最大命中数（默认 30，上限 500）；超出的完整列表会另存为临时文件' },
           includeHidden: { type: 'boolean', description: '可选，是否搜索隐藏目录/文件（默认 false）' },
           respectGitignore: { type: 'boolean', description: '可选，是否遵守根目录 .gitignore（默认 true）' },
           maxFileSizeMB: { type: 'number', description: '可选，单文件大小上限 MB（默认 2）' },
         },
         required: ['query'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('glob', '按**路径 / 文件名**查找文件（不是内容搜索；找文件内容用 search_files）。pattern 用 glob 语法：`*.yml` 找任意目录下的 yml 文件，`src/**/*.vue` 限定在 src 下，`**/*` 列出全部文件；不含 `/` 的模式匹配任意深度。结果**按修改时间倒序**（最近改的在前），默认最多 100 条；默认排除 node_modules / .git 等目录并遵守工作区 .gitignore。传 skill 时在该技能目录内查找。返回的路径相对搜索根。', globFiles, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'glob 模式，如 "*.md" / "src/**/*.ts" / "**/*"（必填）' },
+          root: { type: 'string', description: '可选，查找根目录（绝对路径或相对工作区根；缺省用工作区根）' },
+          skill: { type: 'string', description: '可选。技能名：在该技能目录内查找（优先于 root）' },
+          maxResults: { type: 'number', description: '可选，最多返回多少个（默认 100，上限 1000）' },
+          includeHidden: { type: 'boolean', description: '可选，是否包含隐藏目录/文件（默认 false）' },
+          respectGitignore: { type: 'boolean', description: '可选，是否遵守根目录 .gitignore（默认 true）' },
+        },
+        required: ['pattern'],
       },
     }),
   )
@@ -3082,10 +4094,19 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('shell', '执行 shell 命令（仅「完全访问」沙箱模式可用；否则被策略拒绝并返回原因）。', runShell, {
+    defineTool('shell', '执行 shell 命令（默认只允许「完全访问」模式；被拒绝时可带 sandbox_permissions:"escalate" + justification 申请一次性放行）。每次都是新进程：换目录用 workdir，不依赖 `cd`。**非零退出不算失败**（输出带 `[exit code: N]`）。Windows 默认 cmd（可传 shell:"powershell"），macOS/Linux 默认 sh（可传 "bash"）。长命令用 run_in_background:true 拿 job id，再 job_output / job_kill；前台超时也会转后台。超时杀整棵进程树；输出过大只留尾部，完整内容在 `[output truncated; full output: <path>]` 给路径。', runShell, {
       inputSchema: {
         type: 'object',
-        properties: { command: { type: 'string', description: '要执行的 shell 命令' } },
+        properties: {
+          description: { type: 'string', description: '可选。一句话说明这条命令要做什么（5~10 个词），会显示在界面卡片上' },
+          command: { type: 'string', description: '要执行的命令（Windows 默认 cmd 语法；macOS / Linux 默认 sh 语法）' },
+          workdir: { type: 'string', description: '可选。工作目录（相对工作区根，或绝对路径）；缺省用当前工作区' },
+          timeoutMs: { type: 'integer', description: `可选。前台等待的毫秒数（默认 ${SHELL_DEFAULT_TIMEOUT_MS}，上限 ${SHELL_MAX_TIMEOUT_MS}）；超时后会转成后台任务继续跑` },
+          shell: { type: 'string', description: '可选。方言：Windows 可传 "cmd" / "powershell"；macOS / Linux 可传 "sh" / "bash"。缺省用平台默认' },
+          run_in_background: { type: 'boolean', description: '可选。true = 立即返回 job id，用 job_output 读取输出、job_kill 停止（不设执行超时）' },
+          sandbox_permissions: { type: 'string', description: '可选。仅当策略拒绝 shell 且你确实需要执行时传 "escalate"（配合 justification），用户确认后只放行这一条命令' },
+          justification: { type: 'string', description: '可选。向用户说明为什么需要执行这条命令（用用户当前提问的语言写，一句话）' },
+        },
         required: ['command'],
       },
     }),
@@ -3130,6 +4151,16 @@ export function registerCoreTools(): void {
         type: 'object',
         properties: { job_id: { type: 'string', description: '要停止的 jobId' } },
         required: ['job_id'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('job_list', '列出当前会话的后台任务（id / 类型 / 状态 / 标题）。被打断或记不住 jobId 时先用它查，再 job_output 读输出或 job_kill 停止。', jobList, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', description: '可选。按类型过滤：shell / agent 等' },
+        },
       },
     }),
   )

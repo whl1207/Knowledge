@@ -506,6 +506,10 @@ const appPort: AppPort = {
   async isSettingsWindowOpen() { return false },
   async notifyUiReady() { /* 网页端无宿主就绪握手 */ },
   async notifyFileChanged() { /* 单页，无广播对象 */ },
+  /** 后台 shell 任务：浏览器 / 安卓端没有本机 shell，返回空列表 */
+  async listShellJobs() { return { ok: true, jobs: [] } },
+  async killShellJob() { return { ok: false, error: 'not-supported' } },
+  async dismissShellJob() { return { ok: false } },
   /** 网页端不需要长任务保活（标签页不会被系统回收） */
   async beginLongTask() { return { success: false, error: 'not-supported' } },
   async updateLongTask() { return { success: false } },

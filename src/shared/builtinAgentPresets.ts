@@ -203,11 +203,11 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'job_output', 'job_kill', 'skill',
+        'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -260,7 +260,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file',
         'run_python',
         'web_search', 'web_fetch',
@@ -322,11 +322,11 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'job_output', 'job_kill', 'skill',
+        'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -391,11 +391,11 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'mcp_call',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'job_output', 'job_kill', 'skill',
+        'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -450,7 +450,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'shell', 'run_python',
         'web_search', 'web_fetch',
@@ -542,11 +542,11 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'run_python', 'shell',
         'web_search', 'web_fetch',
-        'run_subagent', 'job_output', 'job_kill', 'skill',
+        'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -606,11 +606,11 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'shell', 'run_python',
         'web_search', 'web_fetch',
-        'run_subagent', 'job_output', 'job_kill', 'skill',
+        'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
     },
     seedHistory: true,
@@ -672,7 +672,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'mcp_call',
       ],
@@ -722,7 +722,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       knowledgeBaseFiles: [],
       enabledTools: [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
-        'read_file', 'search_files', 'list_dir',
+        'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
         'mcp_call',
       ],
@@ -930,7 +930,7 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
   if (designer) {
     const caps: any = designer.capabilities
     if (caps && Array.isArray(caps.enabledTools)) {
-      for (const tool of ['read_file', 'search_files', 'list_dir', 'write_file', 'replace_in_file', 'multi_replace']) {
+      for (const tool of ['read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir', 'write_file', 'replace_in_file', 'multi_replace']) {
         if (!caps.enabledTools.includes(tool)) {
           caps.enabledTools.push(tool)
           changed = true

@@ -31,7 +31,7 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'updateTodo', defaultOn: true, tools: ['update_todo'] },
   { key: 'mcpAccess', tools: ['mcp_call'] },
   { key: 'accessKnowledgeBase', needsKnowledgeFiles: true, tools: ['kb_search'] },
-  { key: 'readFiles', tools: ['read_file', 'search_files'] },
+  { key: 'readFiles', tools: ['read_file', 'read_image', 'search_files', 'glob', 'working_directory'] },
   { key: 'listDirs', tools: ['list_dir'] },
   { key: 'writeFiles', tools: ['write_file', 'replace_in_file', 'multi_replace'] },
   { key: 'executeCode', tools: ['run_python'] },
@@ -52,7 +52,7 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
       'browser_wait', 'browser_run',
     ],
   },
-  { key: 'runSubagent', tools: ['run_subagent', 'job_output', 'job_kill'] },
+  { key: 'runSubagent', tools: ['run_subagent', 'job_output', 'job_kill', 'job_list'] },
   { key: 'skills', tools: ['skill'] },
 ]
 

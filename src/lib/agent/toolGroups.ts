@@ -41,7 +41,7 @@ export const TOOL_GROUPS: readonly ToolGroupDef[] = [
     labelZh: '文件与目录',
     labelEn: 'Files & Folders',
     icon: 'fa-folder-open',
-    tools: ['read_file', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files', 'export_word'],
+    tools: ['read_file', 'read_image', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files', 'glob', 'working_directory', 'export_word'],
   },
   {
     id: 'interaction',
@@ -76,7 +76,7 @@ export const TOOL_GROUPS: readonly ToolGroupDef[] = [
     labelZh: '子代理',
     labelEn: 'Subagents',
     icon: 'fa-sitemap',
-    tools: ['run_subagent', 'job_output', 'job_kill'],
+    tools: ['run_subagent', 'job_output', 'job_kill', 'job_list'],
   },
   {
     id: 'browser',

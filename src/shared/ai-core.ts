@@ -1,4 +1,12 @@
 import { aikmIpcAvailable } from '@/lib/aikmIpc'
+import {
+    clampBodyMaxTokens,
+    downgradeBodyMaxTokens,
+    inferLimitModel,
+    inferLimitProvider,
+    isMaxTokensTooLargeError,
+    MAX_TOKENS_RETRY_LIMIT,
+} from './outputTokens'
 // src/shared/ai-core.ts
 // AI 请求执行 + 解析核心（渲染进程与主进程共享的单一数据源）
 //
@@ -833,12 +841,11 @@ export class AIUtils {
                     options.signal.addEventListener('abort', () => controller.abort());
                 }
 
-                const response = await fetch(proxiedEndpoint, {
+                const response = await AIUtils.fetchWithOutputTokenLimit(proxiedEndpoint, {
                     method: 'POST',
                     headers: headers,
-                    body: JSON.stringify(requestBody),
                     signal: controller.signal
-                });
+                }, requestBody, 'lmstudio');
 
                 if (!response.ok) {
                     throw httpError(`LM Studio API错误: ${response.status} ${response.statusText}`, response);
@@ -1236,17 +1243,14 @@ export class AIUtils {
                 try {
                     // 使用 fetch 直接调用 Ollama API（浏览器环境走代理）
                     const ollamaApiUrl = resolveApiUrl(`${ollamaConfig.model_url}/api/chat`)
-                    const response = await fetch(ollamaApiUrl, {
+                    const streamParams = { ...requestParams, stream: true }
+                    const response = await AIUtils.fetchWithOutputTokenLimit(ollamaApiUrl, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({
-                            ...requestParams,
-                            stream: true
-                        }),
                         signal: controller.signal  // 使用我们的 controller.signal
-                    });
+                    }, streamParams, 'ollama');
 
                     if (!response.ok) {
                         throw httpError(`HTTP error! status: ${response.status}`, response);
@@ -1324,17 +1328,14 @@ export class AIUtils {
                     }
 
                     const ollamaApiUrl = resolveApiUrl(`${ollamaConfig.model_url}/api/chat`)
-                    const response = await fetch(ollamaApiUrl, {
+                    const plainParams = { ...requestParams, stream: false }
+                    const response = await AIUtils.fetchWithOutputTokenLimit(ollamaApiUrl, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({
-                            ...requestParams,
-                            stream: false
-                        }),
                         signal: controller.signal
-                    });
+                    }, plainParams, 'ollama');
 
                     if (!response.ok) {
                         throw httpError(`HTTP error! status: ${response.status}`, response);
@@ -1567,6 +1568,45 @@ export class AIUtils {
         return requestBody;
     }
 
+    /**
+     * 发一次模型请求（带输出上限保护），所有协议出口共用：
+     *  1. 发之前把 body 里的 `max_tokens`（各协议字段名不同）夹到该模型**已知**输出上限内
+     *     （未知模型 / 本地后端不动，见 shared/outputTokens.ts）；
+     *  2. 403/400 里若是「max_tokens 太大」（OpenAI / Azure / Anthropic 的常见 400），
+     *     把本次请求的上限减半重试（下限 4096，最多 `MAX_TOKENS_RETRY_LIMIT` 次），
+     *     **不改用户设置**；
+     *  3. 只重试 400 且尚未开始流式输出：错误发生在响应头阶段，重发不会重复已输出的内容。
+     *
+     * 为什么放在这里：聊天、智能体（主进程 agent-loop）、工作流、插件、知识库全部最终
+     * 走到这几个 make*Request / send* 出口，一处收口即可覆盖全部调用方。
+     */
+    static async fetchWithOutputTokenLimit(
+        endpoint: string,
+        init: RequestInit,
+        body: any,
+        providerHint?: string,
+    ): Promise<Response> {
+        const provider = providerHint || inferLimitProvider(endpoint, init.headers)
+        const model = inferLimitModel(endpoint, body)
+        const clamped = clampBodyMaxTokens(body, provider, model)
+        if (clamped) {
+            console.info(`[llm] max_tokens 夹取：${clamped.from} → ${clamped.to}（${provider}/${model} 的输出上限）`)
+        }
+        // body 为对象：每次都按当前 body 重新序列化（降级重试要带上新值）
+        const send = () => fetch(endpoint, { ...init, body: JSON.stringify(body) })
+        let response = await send()
+        for (let attempt = 0; attempt < MAX_TOKENS_RETRY_LIMIT && response.status === 400; attempt++) {
+            let detail = ''
+            try { detail = await response.clone().text() } catch { /* 读不到报文就不降级 */ }
+            if (!isMaxTokensTooLargeError(detail)) break
+            const next = downgradeBodyMaxTokens(body)
+            if (next === null) break
+            console.warn(`[llm] 服务端拒绝 max_tokens（${provider || 'unknown'}/${model || 'unknown'}），降级到 ${next} 重试`)
+            response = await send()
+        }
+        return response
+    }
+
     // 通用的API请求函数
     static async makeAPIRequest(endpoint: string, body: any, headers: Record<string, string>, options?: any) {
         // 浏览器环境走代理
@@ -1618,12 +1658,11 @@ export class AIUtils {
                 else options.signal.addEventListener('abort', onAbort);
             }
 
-            const response = await fetch(endpoint, {
+            const response = await AIUtils.fetchWithOutputTokenLimit(endpoint, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(body),
                 signal: controller.signal
-            });
+            }, body);
 
             clearTimeout(timeoutId);
 
@@ -1836,12 +1875,11 @@ export class AIUtils {
                 else options.signal.addEventListener('abort', onAbort);
             }
             try {
-                const response = await fetch(endpoint, {
+                const response = await AIUtils.fetchWithOutputTokenLimit(endpoint, {
                     method: 'POST',
                     headers: headers,
-                    body: JSON.stringify(body),
                     signal: controller.signal
-                });
+                }, body);
                 if (!response.ok) {
                     let detail = '';
                     try {
@@ -1876,12 +1914,11 @@ export class AIUtils {
         }
 
         try {
-            const response = await fetch(endpoint, {
+            const response = await AIUtils.fetchWithOutputTokenLimit(endpoint, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(body),
                 signal: controller.signal
-            });
+            }, body);
             clearTimeout(timeoutId);
 
             if (!response.ok) {
@@ -2068,12 +2105,11 @@ export class AIUtils {
             else options.signal.addEventListener('abort', onAbort);
         }
         try {
-            const response = await fetch(endpoint, {
+            const response = await AIUtils.fetchWithOutputTokenLimit(endpoint, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(body),
                 signal: controller.signal
-            });
+            }, body);
             clearTimeout(timeoutId);
             if (!response.ok) {
                 let detail = '';
@@ -2262,12 +2298,11 @@ export class AIUtils {
             else options.signal.addEventListener('abort', onAbort);
         }
         try {
-            const response = await fetch(endpoint, {
+            const response = await AIUtils.fetchWithOutputTokenLimit(endpoint, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(body),
                 signal: controller.signal
-            });
+            }, body);
             clearTimeout(timeoutId);
             if (!response.ok) {
                 let detail = '';
@@ -2714,12 +2749,11 @@ export class AIUtils {
                 else options.signal.addEventListener('abort', onAbort);
             }
 
-            const response = await fetch(endpoint, {
+            const response = await AIUtils.fetchWithOutputTokenLimit(endpoint, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(body),
                 signal: controller.signal
-            });
+            }, body);
 
             clearTimeout(timeoutId);
             if (options?.signal) options.signal.removeEventListener('abort', onAbort);
@@ -2814,12 +2848,11 @@ export class AIUtils {
                 else options.signal.addEventListener('abort', onAbort);
             }
 
-            const response = await fetch(endpoint, {
+            const response = await AIUtils.fetchWithOutputTokenLimit(endpoint, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(body),
                 signal: controller.signal
-            });
+            }, body);
 
             clearTimeout(timeoutId);
 

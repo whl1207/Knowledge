@@ -240,8 +240,8 @@ const HEAD_ONLY_TOOLS = new Set<string>([
  * 否则模型会以为"内容就这么多"，得出错误结论（这正是最危险的失败模式）。
  */
 const CONTINUATION_HINTS: Record<string, string> = {
-  read_file: '内容仍不完整：用同一个 read_file 带上 offset = 上次返回的 nextOffset 继续读，'
-    + '反复续读直到 truncated=false 才算读完（不要只读第一段就下结论）。',
+  read_file: '内容仍不完整：用同一个 read_file 带上 offset = 结果末尾提示里的下一行继续读，'
+    + '反复续读直到看到「已读到文件末尾」才算读完（不要只读第一段就下结论）。',
   list_dir: '列表已被截断：目录条目过多。请改用 search_files 按文件名 / 后缀精确检索，或缩小到子目录再列。',
   search_files: '结果已被截断：命中过多。请收窄 pattern（更具体的正则 / 后缀过滤）后重试。',
   kb_search: '命中片段已被截断：请缩小问题范围、换更具体的关键词，或减少 topK 后重新检索。',
@@ -378,17 +378,35 @@ function finishBounded(out: string, before: number, threshold: number): BoundedT
 // ---------------------------------------------------------------------------
 
 /**
+ * 工具可以用 `{ modelText: string, ...meta }` 的形状声明"模型该看到的那一份正文"。
+ *
+ * 为什么需要：`read_file` / `list_dir` / `skill` 这类工具的主体本来就是**纯文本**，
+ * 若一律走 `JSON.stringify`，换行会变成 `\n`、引号变 `\"`——既多花 10~20% token，
+ * 又让模型在复制原文（`old_string`）时容易把转义一起写进去。DSH 的 `read` 是直接
+ * render 成文本块的（`output.render`），这里用 `modelText` 达到同样效果，同时保留
+ * 结构化的 meta 给 UI / 日志用。
+ */
+export function modelTextOf(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const text = (value as { modelText?: unknown }).modelText
+  return typeof text === 'string' ? text : undefined
+}
+
+/**
  * 把工具返回值序列化成**模型可见的那一份文本**。
  *
  * 必须与 `electron/main/session-log.ts` 的 `deriveEntries` 保持同口径
- * （`res.ok ? JSON.stringify(res.value ?? null) : 'ERROR: …'`），否则"被有界化的文本"
- * 和"真正发出去的文本"会是两份东西，阈值就失去意义。
+ * （`res.ok ? (modelText ?? JSON.stringify(res.value ?? null)) : 'ERROR: …'`），否则
+ * "被有界化的文本"和"真正发出去的文本"会是两份东西，阈值就失去意义。
  */
 export function serializeToolValue(ok: boolean, value: unknown, error?: string): string {
   if (!ok) return `ERROR: ${error || '工具执行失败'}`
-  // 与 `deriveMessages` 的历史口径**逐字一致**（`JSON.stringify(res.value ?? null)`，字符串也会带引号）。
-  // 刻意不去"修正"这层引号：这一层的职责只是让**超大**结果变小，任何口径改动都会顺带改变
-  // 所有工具结果的字节，属于超出本层职责的行为变更。
+  // 声明了 modelText 的工具：正文按纯文本透传（不转义、不加引号）
+  const modelText = modelTextOf(value)
+  if (modelText !== undefined) return modelText
+  // 其余工具与 `deriveMessages` 的历史口径**逐字一致**（`JSON.stringify(res.value ?? null)`，
+  // 字符串也会带引号）。刻意不去"修正"这层引号：这一层的职责只是让**超大**结果变小，
+  // 任何口径改动都会顺带改变所有工具结果的字节，属于超出本层职责的行为变更。
   // `undefined` 兜底成 'null'：JSON.stringify(undefined) 返回 undefined（不是字符串），
   // 直接塞进 tool 消息的 content 会变成非字符串，宽松后端可能报错。
   const text = JSON.stringify(value ?? null)

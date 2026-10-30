@@ -184,30 +184,22 @@ export function runToolResultBudgetSelfTest(): BudgetCase[] {
 
   // 10. 提示语本身也不能超出预算（预留机制）
   {
-    const t = boundToolResult('read_file', true, { content: ascii(threshold * 6) }, undefined, budget)
+    const text = `a.md（共 900 行）\n${ascii(threshold * 6, 'L')}\n（本次第 1-900 行，共 900 行；继续读请传 offset=901）`
+    const t = boundToolResult('read_file', true, { path: '/kb/a.md', modelText: text }, undefined, budget)
     const hintChars = countCodePoints(continuationHintFor('read_file'))
     add('read_file：提示语非空', hintChars > 0)
-    add('read_file：命中 headOnly 提示（含 nextOffset）', t.model.includes('nextOffset'))
+    add('read_file：命中续读提示（提到 offset）', t.model.includes('offset'))
     add('read_file：整体在预算内', countCodePoints(t.model) <= threshold)
   }
 
-  // 11. 真实形状：read_file 的续读元数据必须还在（否则分页会断）
+  // 11. read_file 走 modelText：正文是**纯文本**，不做 JSON 转义
   {
-    const value = {
-      // 与 electron/main/tools.ts 和 src/lib/agent/rendererTools.ts 的实际产出**同序**：
-      // 控制字段在 content 之前。顺序一旦回退，超长读取就会被截掉 nextOffset。
-      path: '/kb/big.md',
-      truncated: true,
-      nextOffset: threshold * 3,
-      content: ascii(threshold * 3, 'L'),
-      chars: threshold * 3,
-      lines: 10,
-    }
-    const t = boundToolResult('read_file', true, value, undefined, budget)
-    add('read_file：确实被裁剪了（前提成立）', t.pruned)
-    add('read_file：truncated / nextOffset 仍在头部', t.model.includes('"truncated":true') && t.model.includes('"nextOffset"'))
-    add('read_file：仍能拿到 path', t.model.includes('/kb/big.md'))
-    add('read_file：正文被截断（content 只留开头）', t.model.includes('"content":"LLL'))
+    const text = 'a.md（共 2 行）\n1: hello "world"\n2: 第二行\n（已读到文件末尾：第 1-2 行，共 2 行）'
+    const t = boundToolResult('read_file', true, { path: '/kb/a.md', modelText: text }, undefined, budget)
+    add('read_file：未超预算时不裁剪', !t.pruned)
+    add('read_file：模型可见就是原文（无 JSON 转义）', t.model === text, t.model.slice(0, 40))
+    add('read_file：换行没有被写成 \\n', t.model.includes('\n1: hello'))
+    add('read_file：引号没有被转义', t.model.includes('"world"'))
   }
 
   // 12. 失败结果：短文本不动，长错误也受约束
@@ -223,6 +215,9 @@ export function runToolResultBudgetSelfTest(): BudgetCase[] {
     add('serialize：对象 → JSON', serializeToolValue(true, { a: 1 }) === '{"a":1}')
     add('serialize：undefined → null', serializeToolValue(true, undefined) === 'null')
     add('serialize：失败 → ERROR 前缀', serializeToolValue(false, undefined, 'x') === 'ERROR: x')
+    // modelText：模型看到的正文原样透传（read_file 的行号正文不能变成 JSON 字符串）
+    add('serialize：modelText → 原文透传', serializeToolValue(true, { modelText: 'a\nb "c"' }) === 'a\nb "c"')
+    add('serialize：modelText 优先于其它字段', serializeToolValue(true, { modelText: 'x', path: '/p' }) === 'x')
   }
 
   // 14. 未知工具走默认策略 + 通用提示
@@ -286,13 +281,13 @@ export function runToolResultBudgetSelfTest(): BudgetCase[] {
   }
 
   // 19. 引擎自造诊断（diagnostic）不套工具专属提示
-  //     反例：read_file 的提示说"用 nextOffset 继续读"，但白名单拦截这类消息里根本没有该字段
+  //     反例：read_file 的提示说"用 offset 继续读"，但白名单拦截这类消息里根本没有可得内容
   {
     const longError = 'E'.repeat(threshold * 2)
     const withHint = boundToolResult('read_file', false, undefined, longError, budget)
     const withoutHint = boundToolResult('read_file', false, undefined, longError, budget, { skipContinuationHint: true })
-    add('diagnostic：默认会给 read_file 续读提示（含 nextOffset）', withHint.model.includes('nextOffset'))
-    add('diagnostic：skip 后不再出现误导性的 nextOffset', !withoutHint.model.includes('nextOffset'))
+    add('diagnostic：默认会给 read_file 续读提示（含 offset）', withHint.model.includes('offset'))
+    add('diagnostic：skip 后不再出现误导性的续读提示', !withoutHint.model.includes('offset'))
     add('diagnostic：仍然被裁剪且有标记', withoutHint.pruned && withoutHint.model.includes('middle pruned'))
     add('diagnostic：仍在预算内', countCodePoints(withoutHint.model) <= threshold)
     add('diagnostic：原文不受影响（raw 仍完整）', withoutHint.raw === withHint.raw)
@@ -328,20 +323,13 @@ export function runToolResultBudgetSelfTest(): BudgetCase[] {
   // 21. 关键回归：32K 窗口下，一次 100KB read_file 结果被压到窗口的 ~12% 以内
   {
     const w = 32_000
-    const value = {
-      path: '/kb/big.md',
-      truncated: true,
-      nextOffset: 100_000,
-      content: ascii(100_000, 'L'),
-      chars: 100_000,
-      lines: 900,
-    }
+    const text = `big.md（共 900 行）\n${ascii(100_000, 'L')}\n（已截断：本次第 1-899 行；继续读请传 offset=900）`
+    const value = { path: '/kb/big.md', modelText: text, totalLines: 900, nextOffset: 900 }
     const t = boundToolResult('read_file', true, value, undefined, undefined, { windowTokens: w })
     const budget = toolResultBudgetForWindow(w)
     add('32K：100KB 读取被裁剪', t.pruned)
     add('32K：模型可见不超过该窗口预算', countCodePoints(t.model) <= budget.thresholdChars, `model=${countCodePoints(t.model)} budget=${budget.thresholdChars}`)
-    add('32K：控制字段仍在头部', t.model.includes('"truncated":true') && t.model.includes('"nextOffset"'))
-    add('32K：带续读提示', t.model.includes('nextOffset'))
+    add('32K：续读提示仍在', t.model.includes('offset'))
     // 对比：同一结果在"未知窗口/大窗口保底预算"下明显更大（→ 证明缩放真的生效）
     const tBig = boundToolResult('read_file', true, value, undefined, undefined, { windowTokens: 1_000_000 })
     add('同结果在大窗口预算下明显更大', countCodePoints(tBig.model) > countCodePoints(t.model) * 2, `big=${countCodePoints(tBig.model)} small=${countCodePoints(t.model)}`)

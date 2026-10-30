@@ -112,6 +112,61 @@ export function readSpillText(path: string): string | null {
   }
 }
 
+/** 流式 spill 句柄：边产生边写盘，避免把超大输出整段留在内存里 */
+export interface SpillSink {
+  /** 追加一段（Buffer 原样写；string 按 UTF-8 写） */
+  write(chunk: Buffer | string): void
+  /** 收尾；返回落盘位置（失败为 null） */
+  close(): SpillSaveResult | null
+}
+
+/**
+ * 创建流式 spill 文件（供 shell 这类**边跑边产出**的工具用）。
+ *
+ * 与 `saveSpillText` 的区别只有"何时拿到全文"：这里在输出超限时立刻开始写盘，
+ * 内存里只留尾部窗口；失败返回 null，调用方必须降级为"仅内联尾部"而不是报错。
+ */
+export function createSpillSink(sessionId: string, suggestedName: string): SpillSink | null {
+  const root = spillRoot()
+  if (!root) return null
+  let file = ''
+  let fd = -1
+  try {
+    const dir = join(root, spillSessionDirName(sessionId))
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const fileName = `${randomBytes(6).toString('hex')}-${safeSpillFileName(suggestedName)}`
+    file = join(dir, fileName)
+    fd = fs.openSync(file, 'wx', 0o600)
+  } catch (e: any) {
+    console.warn('[tool-spill] 创建流式 spill 失败，降级为仅有尾部输出:', e?.message || String(e))
+    return null
+  }
+  let closed = false
+  return {
+    write(chunk: Buffer | string): void {
+      if (closed || fd < 0) return
+      try {
+        fs.writeSync(fd, typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk)
+      } catch {
+        /* 写盘失败：停止写入，close 时按已写内容返回 */
+      }
+    },
+    close(): SpillSaveResult | null {
+      if (closed) return null
+      closed = true
+      try {
+        fs.closeSync(fd)
+        const st = fs.statSync(file)
+        return { path: file, bytes: st.size }
+      } catch {
+        return null
+      } finally {
+        fd = -1
+      }
+    },
+  }
+}
+
 /**
  * 启动时 best-effort 清扫过期 spill 目录。
  *

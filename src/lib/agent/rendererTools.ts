@@ -20,6 +20,15 @@
 
 import { getPlatform } from '@/platform'
 import { computeEditDiff, makeEditDiffPreview, countTextLines, type EditDiffFilePreview } from '@/shared/editDiff'
+import {
+  applyLiteralEdits,
+  locateLiteralMatches,
+  type LiteralEdit,
+  type LiteralLocateResult,
+} from '@/shared/literalEdit'
+import { READ_MAX_LINES, renderReadWindow } from '@/shared/readWindow'
+import { compileFileGlobs, matchesFileGlob } from '@/shared/globMatch'
+import { formatGlobText, formatGrepText, type GrepHitText } from '@/shared/searchText'
 import { parseTodoList } from '@/shared/agentTodo'
 import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
 import { planReviewMessage, type PlanReviewOutcome } from '@/shared/agentPlanReview'
@@ -59,7 +68,7 @@ export interface RendererToolContext {
 /** 渲染层能执行的工具（其余一律不暴露给模型） */
 export const RENDERER_TOOL_NAMES = [
   'read_file', 'write_file', 'replace_in_file', 'multi_replace',
-  'list_dir', 'search_files', 'kb_search',
+  'list_dir', 'search_files', 'glob', 'kb_search',
   'web_fetch', 'web_search',
   'ask_user', 'update_plan', 'update_todo', 'exit_plan_mode',
 ] as const
@@ -80,6 +89,9 @@ const HOST_ONLY_HINTS: Record<string, string> = {
   run_subagent: '派生子代理需要桌面端',
   job_output: '后台任务（子代理）需要桌面端',
   job_kill: '后台任务（子代理）需要桌面端',
+  job_list: '后台任务列表需要桌面端',
+  read_image: '把图片交给模型需要桌面端（手机端请让用户直接在应用里打开图片）',
+  working_directory: '切换工作目录需要桌面端（手机端的工作目录由授权目录决定）',
   mcp_call: 'MCP 调用需要桌面端或主机',
   skill: '技能库需要桌面端（技能在文件系统里，手机端请改用 read_file 直接读技能目录）',
   run_code: '代码模式（PTC）需要桌面端的工具注册表',
@@ -109,46 +121,56 @@ const num = (description: string) => ({ type: 'number', description })
 
 /** 工具 schema（与主进程同名工具的 schema 对齐，参数含义一致） */
 const SCHEMAS: Record<string, any> = {
-  read_file: fn('read_file', '读取文件内容（UTF-8 文本；PDF 自动抽取文字）。单次返回有上限，超出时返回 truncated=true 与 nextOffset，把 nextOffset 作为 offset 再调用一次即可续读。', {
+  read_file: fn('read_file', '读取文本文件，返回**带行号**的内容（UTF-8；PDF 自动抽取文字）。offset / limit 单位都是**行**（offset 从 1 起，默认一次 2000 行）：结果末尾会写「本次第 a-b 行 / 共 T 行」，没读完时用 offset=下一行继续读；单行超 2000 字符会截断并标注。', {
     path: str('文件路径（工作区内的相对路径；也接受安卓授权目录的 saf: 路径）'),
-    offset: num('起始字符偏移（续读时传上次的 nextOffset）'),
-    limit: num('单次读取的最大字符数（默认 40000，上限 102400）'),
+    offset: num('起始行号（1-based；续读时传上次末尾提示里的 offset）'),
+    limit: num('本次最多返回多少行（默认 2000，上限 2000）'),
   }, ['path']),
-  write_file: fn('write_file', '写入文件（UTF-8，自动创建父目录）。已存在则整体覆盖；只改一小段请优先用 replace_in_file。单次 content 建议不超过约 20000 字符：更大的文件请分段写——先写第一部分，再用 replace_in_file 逐段追加（整份一次提交容易撞到输出上限而被截断）。', {
+  write_file: fn('write_file', '写入文件（UTF-8，自动创建父目录）。已存在则整体覆盖；只改一小段请优先用 replace_in_file。单次 content 建议不超过约 20000 字符（越大越容易撞到模型 max_tokens 而被截断）：更大的文件请分段写——先写第一部分，再用 replace_in_file 逐段追加。单次硬上限 1 MiB（超过直接拒绝，不写盘）。', {
     path: str('文件路径'),
     content: str('完整文件内容'),
   }, ['path', 'content']),
-  replace_in_file: fn('replace_in_file', '在文件中定位一段唯一原文并替换（其余部分不变）。old_string 必须与文件内容精确一致（建议 ≥3 行）；出现多处会报错，可用 occurrence 指定第几处。new_string 传空字符串表示删除。', {
+  replace_in_file: fn('replace_in_file', '在文件中定位一段唯一原文并替换（其余部分不变）。old_string 必须与文件内容精确一致（建议 ≥3 行）；出现多处会报错并给出行号，可用 occurrence 指定第几处，或传 replace_all=true 一次替换全部。new_string 传空字符串表示删除；old_string 与 new_string 相同会被拒绝。', {
     path: str('文件路径'),
     old_string: str('要替换的原文（须与文件内容精确一致）'),
     new_string: str('替换后的新内容（空字符串 = 删除）'),
     occurrence: num('第几处命中（默认要求全文唯一）'),
+    replace_all: { type: 'boolean', description: 'true = 替换该原文的全部出现' },
   }, ['path', 'old_string', 'new_string']),
-  multi_replace: fn('multi_replace', '在一次调用中批量替换多处（可跨文件），全部命中才整体落盘（原子）。任一未命中或不唯一则整批不生效。', {
-    path: str('当所有 edits 都在同一文件时的文件路径（可与 edits[].path 混用）'),
-    edits: {
+  multi_replace: fn('multi_replace', '在一次调用中批量替换多处（可跨文件）：全部条目定位成功才整体落盘，任一未命中 / 不唯一则整批不生效。适合同一文件多处或多文件联动修改；同一文件的替换区间不能重叠。', {
+    path: str('所有条目的默认文件路径（条目自带 path 时以条目为准）'),
+    replacements: {
       type: 'array',
-      description: '替换条目列表',
+      description: '替换条目列表（按命中位置应用，与条目顺序无关）',
       items: {
         type: 'object',
         properties: {
-          path: str('文件路径（同一批内有 path 时可省）'),
-          old_string: str('要替换的原文'),
+          path: str('文件路径（顶层已给 path 时可省）'),
+          old_string: str('要替换的原文（默认要求在该文件中唯一）'),
           new_string: str('替换后的新内容'),
-          occurrence: num('第几处命中'),
+          occurrence: num('命中多处时只替换第几处（从 1 起）'),
+          replace_all: { type: 'boolean', description: 'true = 该条把全部出现都替换掉' },
         },
         required: ['old_string', 'new_string'],
       },
     },
-  }, ['edits']),
+  }, ['replacements']),
   list_dir: fn('list_dir', '列出目录条目（名称与类型）。', {
     path: str('目录路径（省略 = 工作区根）'),
   }),
-  search_files: fn('search_files', '按文本搜索文件内容，返回文件路径、行号与内容片段。', {
-    query: str('要搜索的文本'),
+  search_files: fn('search_files', '按文本搜索文件内容（默认大小写敏感），返回文件路径、行号与内容片段；结果按文件分组。', {
+    query: str('要搜索的文本（regex=true 时按正则解释）'),
     path: str('搜索起点（省略 = 工作区根）'),
-    max_results: num('最多返回多少条（默认 50）'),
+    regex: { type: 'boolean', description: 'true = query 按正则解释' },
+    ignore_case: { type: 'boolean', description: 'true = 忽略大小写（默认 false = 大小写敏感）' },
+    file_pattern: str('文件过滤：".ts" / "*.ts" / "src/**/*.vue"，逗号分隔'),
+    max_results: num('最多返回多少条（默认 50，上限 200）'),
   }, ['query']),
+  glob: fn('glob', '按**路径 / 文件名**查找文件（不是内容搜索；找内容用 search_files）。`*.md` 找任意目录下的 md，`src/**/*.ts` 限定目录，`**/*` 列出全部；返回路径相对搜索根。', {
+    pattern: str('glob 模式，如 "*.md" / "src/**/*.ts"'),
+    path: str('查找起点（省略 = 工作区根）'),
+    max_results: num('最多返回多少个（默认 100，上限 1000）'),
+  }, ['pattern']),
   kb_search: fn('kb_search', '从本地知识库文件（.kb）检索与查询相关的知识切片。', {
     query: str('检索问题'),
     kb: str('按知识库文件名过滤（可选）'),
@@ -279,7 +301,9 @@ function resolvePath(raw: string, cwd?: string): { path: string } | { error: str
 // 文件工具
 // ---------------------------------------------------------------------------
 
+/** 单次读取的正文字符预算（行窗口内部的字符上限；行数上限用 shared/readWindow 的默认值） */
 const READ_DEFAULT_LIMIT = 40_000
+/** @deprecated 旧字符窗口的 limit 上限；行窗口下由 READ_MAX_LINES 约束 */
 const READ_MAX_LIMIT = 102_400
 const EDIT_DIFF_MAX_CHARS = 400_000
 
@@ -331,8 +355,12 @@ function oldTextForDiff(text: string | null, missing: boolean): string | 'too-la
 async function toolReadFile(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
   const r = resolvePath(String(input?.path ?? ''), ctx.cwd)
   if ('error' in r) return { ok: false, error: r.error }
-  const offset = Math.max(0, Math.floor(Number(input?.offset) || 0))
-  const limit = Math.min(READ_MAX_LIMIT, Math.max(1000, Math.floor(Number(input?.limit) || READ_DEFAULT_LIMIT)))
+  const rawOffset = Number(input?.offset)
+  const offsetLine = Number.isFinite(rawOffset) && rawOffset >= 1 ? Math.floor(rawOffset) : 1
+  const rawLimit = Number(input?.limit)
+  const maxLines = Number.isFinite(rawLimit) && rawLimit > 0
+    ? Math.min(Math.floor(rawLimit), READ_MAX_LINES)
+    : READ_MAX_LINES
 
   let text: string | null
   if (/\.pdf$/i.test(r.path)) text = await readPdfText(r.path)
@@ -341,29 +369,52 @@ async function toolReadFile(input: any, ctx: RendererToolContext): Promise<Rende
   } else text = await readTextOrNull(r.path)
 
   if (text === null) return { ok: false, error: `读取失败或文件不存在：${r.path}` }
-  const slice = text.slice(offset, offset + limit)
-  const nextOffset = offset + slice.length
-  const truncated = nextOffset < text.length
+
+  // 与主进程同一套行窗口（shared/readWindow）：行号 + 行数/字符上限 + 续读锚点
+  const out = renderReadWindow(text, String(input?.path ?? r.path), {
+    offsetLine,
+    maxLines,
+    maxChars: READ_DEFAULT_LIMIT,
+  })
+  if (!out.ok) return { ok: false, error: out.error }
+  const w = out.window
   return {
     ok: true,
     value: {
-      // 控制字段（路径 / 续读锚点）排在 content **之前**：超预算的 read_file 结果会被掐中段
-      // （read_file 走 headOnly 只保开头，见 shared/toolResultBudget.ts），把 nextOffset
-      // 放在尾部会在截断时丢失，模型就再也读不到后半篇。
       path: r.path,
-      truncated,
-      ...(truncated ? { nextOffset } : {}),
-      content: slice,
+      offset: w.startLine,
+      endLine: w.endLine,
+      totalLines: w.totalLines,
+      nextOffset: w.nextOffset,
+      truncated: w.nextOffset !== undefined,
+      capped: w.capped,
       chars: text.length,
-      lines: countTextLines(text),
+      // 模型可见正文（纯文本，不做 JSON 转义）
+      modelText: w.text,
     },
   }
 }
+
+/**
+ * agent 单次写入的字节上限（与主进程 `MAX_AGENT_WRITE_BYTES` 同值）。
+ *
+ * 模型几乎不可能吐出 1 MiB 参数（那是几十万 token），所以这是个**兜底**：真撞上说明
+ * 调用本身就不该一次写完，立刻返回可读错误比让 SAF / IPC 慢慢吞下去更好。
+ */
+const MAX_AGENT_WRITE_BYTES = 1024 * 1024
 
 async function toolWriteFile(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
   const r = resolvePath(String(input?.path ?? ''), ctx.cwd)
   if ('error' in r) return { ok: false, error: r.error }
   const content = String(input?.content ?? '')
+  const bytes = new TextEncoder().encode(content).length
+  if (bytes > MAX_AGENT_WRITE_BYTES) {
+    return {
+      ok: false,
+      error: `写入内容过大（${bytes} 字节，单次上限 ${MAX_AGENT_WRITE_BYTES} 字节）：本次没有写入任何内容。`
+        + '请拆成多次写入——先 write_file 写骨架，再用 replace_in_file 逐段追加。',
+    }
+  }
   const before = await readTextOrNull(r.path)
   const missing = before === null
   try {
@@ -386,108 +437,110 @@ async function toolWriteFile(input: any, ctx: RendererToolContext): Promise<Rend
   }
 }
 
-/** 收集 needle 在 hay 中的所有命中偏移（升序、不重叠） */
-function collectOccurrences(hay: string, needle: string): number[] {
-  const hits: number[] = []
-  if (!needle) return hits
-  let from = 0
-  for (;;) {
-    const i = hay.indexOf(needle, from)
-    if (i === -1) break
-    hits.push(i)
-    from = i + needle.length
-  }
-  return hits
-}
-
-function detectEol(text: string): '\r\n' | '\n' {
-  return text.includes('\r\n') ? '\r\n' : '\n'
-}
-
-function toFileEol(s: string, eol: '\r\n' | '\n'): string {
-  const lf = s.replace(/\r\n/g, '\n')
-  return eol === '\r\n' ? lf.replace(/\n/g, '\r\n') : lf
-}
-
-interface ReplaceEdit { path: string; oldString: string; newString: string; occurrence?: number }
-
-interface PlannedEdit {
+interface ReplaceEdit {
   path: string
-  index: number
-  replaced: string
-  /** 该文件累积后的内容 */
-  content: string
+  oldString: string
+  newString: string
+  occurrence?: number
+  replaceAll?: boolean
 }
 
-/** 定位全部待替换条目（任一失败即返回 error，调用方据此整体不落盘） */
-function planEdits(
-  edits: ReplaceEdit[],
-  files: Map<string, string>,
-): { plans: PlannedEdit[] } | { error: string } {
-  const plans: PlannedEdit[] = []
-  for (let i = 0; i < edits.length; i++) {
-    const e = edits[i]
-    const current = files.get(e.path)
-    if (current === undefined) return { error: `第 ${i + 1} 条：读取失败或文件不存在：${e.path}` }
-    const eol = detectEol(current)
-    const oldEol = toFileEol(e.oldString, eol)
-    const newEol = toFileEol(e.newString, eol)
-    if (!oldEol) return { error: `第 ${i + 1} 条：old_string 不能为空` }
-    const hits = collectOccurrences(current, oldEol)
-    if (!hits.length) {
-      return { error: `第 ${i + 1} 条：未找到 old_string 指定的原文（${e.path}）。请先用 read_file 读取该区域并原样复制，注意缩进与换行。` }
-    }
-    let index = 0
-    if (typeof e.occurrence === 'number' && e.occurrence > 0) {
-      if (e.occurrence > hits.length) {
-        return { error: `第 ${i + 1} 条：occurrence=${e.occurrence} 超出命中数（共 ${hits.length} 处）` }
-      }
-      index = e.occurrence - 1
-    } else if (hits.length > 1) {
-      const lines = hits.map((h) => current.slice(0, h).split('\n').length).join('、')
-      return { error: `第 ${i + 1} 条：old_string 在 ${e.path} 中命中 ${hits.length} 处（行 ${lines}），请补充上下文使其唯一，或传 occurrence 指定第几处` }
-    }
-    const at = hits[index]
-    const content = current.slice(0, at) + newEol + current.slice(at + oldEol.length)
-    files.set(e.path, content)
-    plans.push({ path: e.path, index: i, replaced: e.oldString.slice(0, 60), content })
+/** 把共享层（`@/shared/literalEdit`）的定位失败翻译成给模型看的说明：行号 + 下一步动作 */
+function describeLocateFailure(
+  located: Extract<LiteralLocateResult, { ok: false }>,
+  path: string,
+  occurrence: number | undefined,
+): string {
+  switch (located.code) {
+    case 'EMPTY_OLD':
+      return `old_string 不能为空（${path}）`
+    case 'NOOP':
+      return `old_string 与 new_string 相同（${path}）：这次替换不会改变任何内容，已跳过`
+    case 'OUT_OF_RANGE':
+      return `occurrence=${occurrence} 越界：old_string 在「${path}」中共出现 ${located.hits.length} 处（行 ${located.lines.join('、')}；occurrence 从 1 开始）`
+    case 'AMBIGUOUS':
+      return `old_string 在 ${path} 中命中 ${located.hits.length} 处（行 ${located.lines.join('、')}），请补充上下文使其唯一，或传 occurrence 指定第几处；要把这些出现全部替换掉，传 replace_all: true`
+    default:
+      return `未找到 old_string 指定的原文（${path}）。请先用 read_file 读取该区域并原样复制，注意缩进与换行。`
   }
-  return { plans }
 }
 
+/**
+ * 定位 + 拼装 + 落盘。
+ *
+ * 语义与主进程 `multi_replace` 完全一致（共用 `@/shared/literalEdit`）：全部条目**按原文定位**
+ * （与条目顺序无关）、全部成功才写、任一失败整批不写。差别只在落盘：渲染层平台
+ * （安卓 SAF / 网页）没有"临时文件 + rename"的原子写通道，只能逐文件写，因此写失败时
+ * 如实报告"已写入哪些"，不谎称整批回滚。
+ */
 async function applyEdits(
   edits: ReplaceEdit[],
   ctx: RendererToolContext,
   label: string,
 ): Promise<RendererToolResult> {
   if (!edits.length) return { ok: false, error: '未提供任何替换条目' }
-  const files = new Map<string, string>()
-  const before = new Map<string, string>()
+  const originals = new Map<string, string>()
   for (const e of edits) {
-    if (files.has(e.path)) continue
+    if (originals.has(e.path)) continue
     const text = await readTextOrNull(e.path)
     if (text === null) return { ok: false, error: `${label}：读取失败或文件不存在：${e.path}` }
-    files.set(e.path, text)
-    before.set(e.path, text)
+    originals.set(e.path, text)
   }
-  const planned = planEdits(edits, files)
-  if ('error' in planned) return { ok: false, error: planned.error }
 
-  // 全部命中才落盘（原子）：写失败时直接报错，不留「改了一半」的静默状态
+  // 阶段一：全部定位（任一条失败 → 整批不落盘）
+  const locatedByFile = new Map<string, LiteralEdit[]>()
+  for (let i = 0; i < edits.length; i++) {
+    const e = edits[i]
+    const source = originals.get(e.path) ?? ''
+    const located = locateLiteralMatches(source, e.oldString, e.newString, {
+      occurrence: e.occurrence,
+      replaceAll: e.replaceAll,
+    })
+    if (!located.ok) {
+      return { ok: false, error: `第 ${i + 1} 条：${describeLocateFailure(located, e.path, e.occurrence)}` }
+    }
+    const list = locatedByFile.get(e.path) ?? []
+    for (const match of located.matches) list.push({ ...match, newText: located.newText })
+    locatedByFile.set(e.path, list)
+  }
+
+  // 阶段二：内存拼装（区间重叠 / 命中失效都在这里拦下，不碰磁盘）
+  const after = new Map<string, string>()
+  for (const [path, list] of locatedByFile) {
+    const applied = applyLiteralEdits(originals.get(path) ?? '', list)
+    if (!applied.ok) {
+      return {
+        ok: false,
+        error: applied.reason === 'overlap'
+          ? `文件「${path}」存在区间重叠的替换，请合并为一条后重试（未写盘）`
+          : `文件「${path}」应用替换时校验失败（原文已变化），未写盘`,
+      }
+    }
+    after.set(path, applied.text)
+  }
+
+  // 阶段三：逐文件落盘（失败时说明已经写了哪些）
   const written: string[] = []
   const previews: EditDiffFilePreview[] = []
-  for (const [path, content] of files) {
+  for (const [path, content] of after) {
     const res = await getPlatform().fs.writeText(path, content)
     if (!res?.success) {
-      return { ok: false, error: `写入失败（${path}）：${res?.error || '未知错误'}${written.length ? `；已写入：${written.join('、')}` : ''}` }
+      const done = written.length ? `；已写入：${written.join('、')}` : '；未改动任何文件'
+      return { ok: false, error: `写入失败（${path}）：${res?.error || '未知错误'}${done}` }
     }
     written.push(path)
-    const prev = before.get(path) ?? ''
-    previews.push({ path, ...computeEditDiff(prev, content) })
+    previews.push({ path, ...computeEditDiff(originals.get(path) ?? '', content) })
   }
+
+  const totalReplaced = [...locatedByFile.values()].reduce((n, list) => n + list.length, 0)
   return {
     ok: true,
-    value: { edited: files.size, files: Array.from(files.keys()), replacements: edits.length },
+    value: {
+      applied: totalReplaced,
+      edited: after.size,
+      replacements: totalReplaced,
+      files: [...after.keys()].map((path) => ({ path, replaced: (locatedByFile.get(path) ?? []).length })),
+    },
     preview: makeEditDiffPreview(previews),
   }
 }
@@ -500,11 +553,18 @@ async function toolReplaceInFile(input: any, ctx: RendererToolContext): Promise<
     oldString: String(input?.old_string ?? ''),
     newString: String(input?.new_string ?? ''),
     occurrence: typeof input?.occurrence === 'number' ? input.occurrence : undefined,
+    replaceAll: input?.replace_all === true,
   }], ctx, 'replace_in_file')
 }
 
 async function toolMultiReplace(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
-  const raw = Array.isArray(input?.edits) ? input.edits : []
+  // `replacements` 是主口径（与桌面端同一份 schema）；`edits` 保留为历史别名
+  const raw = Array.isArray(input?.replacements)
+    ? input.replacements
+    : Array.isArray(input?.edits)
+      ? input.edits
+      : []
+  if (!raw.length) return { ok: false, error: 'replacements 参数必填（至少一项，数组形式）' }
   const fallbackPath = input?.path ? resolvePath(String(input.path), ctx.cwd) : null
   if (fallbackPath && 'error' in fallbackPath) return { ok: false, error: fallbackPath.error }
   const edits: ReplaceEdit[] = []
@@ -518,6 +578,7 @@ async function toolMultiReplace(input: any, ctx: RendererToolContext): Promise<R
       oldString: String(e.old_string ?? ''),
       newString: String(e.new_string ?? ''),
       occurrence: typeof e.occurrence === 'number' ? e.occurrence : undefined,
+      replaceAll: e.replace_all === true,
     })
   }
   return await applyEdits(edits, ctx, 'multi_replace')
@@ -538,17 +599,46 @@ async function toolListDir(input: any, ctx: RendererToolContext): Promise<Render
   }
 }
 
+/** 相对路径（渲染层没有 node:path）：把绝对路径去掉 root 前缀，统一 `/` 分隔 */
+function relTo(root: string, abs: string): string {
+  const a = String(abs || '').replace(/\\/g, '/')
+  const r = String(root || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  return r && a.startsWith(r + '/') ? a.slice(r.length + 1) : a
+}
+
 async function toolSearchFiles(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
-  const query = String(input?.query ?? '')
-  if (!query.trim()) return { ok: false, error: 'query 参数必填' }
+  const query = String(input?.query ?? '').trim()
+  if (!query) return { ok: false, error: 'query 参数必填' }
   const root = input?.path ? resolvePath(String(input.path), ctx.cwd) : (ctx.cwd ? { path: ctx.cwd } : { path: '' })
   if ('error' in root) return { ok: false, error: root.error }
-  const maxResults = Math.min(200, Math.max(1, Math.floor(Number(input?.max_results) || 50)))
+  // 默认大小写敏感（与桌面 / rg 同口径）；ignore_case / ignoreCase 显式忽略
+  const ignoreCase = input?.ignore_case === true || input?.ignoreCase === true
+  const regex = input?.regex === true
+  const filePattern = String(input?.file_pattern ?? input?.filePattern ?? '')
+  const patterns = compileFileGlobs(filePattern)
+  const maxHits = Math.min(200, Math.max(1, Math.floor(Number(input?.max_results ?? input?.maxResults) || 50)))
+
+  let matched: (line: string) => boolean
+  try {
+    const flags = ignoreCase ? 'i' : ''
+    if (regex) {
+      const re = new RegExp(query, flags)
+      matched = (line) => re.test(line)
+    } else if (ignoreCase) {
+      const q = query.toLowerCase()
+      matched = (line) => line.toLowerCase().includes(q)
+    } else {
+      matched = (line) => line.includes(query)
+    }
+  } catch (e: any) {
+    return { ok: false, error: `正则表达式不合法：${e?.message || e}` }
+  }
+
   const fs = getPlatform().fs
-  const hits: Array<{ path: string; line: number; text: string }> = []
+  const hits: GrepHitText[] = []
   const skip = /\.(png|jpe?g|gif|webp|ico|pdf|zip|rar|7z|exe|dll|mp[34]|wav|woff2?|ttf|docx|doc|xlsx|pptx|db|sqlite|bin)$/i
   const walk = async (dir: string, depth: number) => {
-    if (hits.length >= maxResults || depth > 6) return
+    if (hits.length >= maxHits || depth > 6) return
     let nodes: any[] = []
     try {
       nodes = await fs.listTree(dir, 1)
@@ -556,23 +646,72 @@ async function toolSearchFiles(input: any, ctx: RendererToolContext): Promise<Re
       return
     }
     for (const node of nodes || []) {
-      if (hits.length >= maxResults) return
+      if (hits.length >= maxHits) return
       if (node?.type === 'folder') { await walk(node.path, depth + 1); continue }
       const name = nameOf(node?.path)
       if (skip.test(name)) continue
+      if (patterns.length && !patterns.some((re) => re.test(relTo(root.path, node.path)))) continue
       const text = await readTextOrNull(node.path)
       if (!text) continue
       const lines = text.split(/\r\n|\r|\n/)
-      for (let i = 0; i < lines.length && hits.length < maxResults; i++) {
-        if (lines[i].includes(query)) hits.push({ path: node.path, line: i + 1, text: lines[i].slice(0, 240) })
+      for (let i = 0; i < lines.length && hits.length < maxHits; i++) {
+        if (matched(lines[i])) hits.push({ path: relTo(root.path, node.path), line: i + 1, text: lines[i].slice(0, 500) })
       }
     }
   }
   await walk(root.path, 0)
+
+  const totalHits = hits.length
+  const fileCount = new Set(hits.map((h) => h.path)).size
+  const modelText = formatGrepText(hits, {
+    root: root.path,
+    query,
+    regex,
+    shown: totalHits,
+    totalHits,
+    files: fileCount,
+    truncated: false,
+  })
+  return { ok: true, value: { query, results: hits, totalHits, truncated: false, regex, ignoreCase, modelText } }
+}
+
+/** 按路径 / 文件名查找文件（移动端）：listTree 有深度上限，结果按路径排序（拿不到 mtime） */
+async function toolGlob(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
+  const pattern = String(input?.pattern ?? '').trim()
+  if (!pattern) return { ok: false, error: 'pattern 参数必填（如 **/*.md）' }
+  const root = input?.path ? resolvePath(String(input.path), ctx.cwd) : (ctx.cwd ? { path: ctx.cwd } : { path: '' })
+  if ('error' in root) return { ok: false, error: root.error }
+  const maxResults = Math.min(1000, Math.max(1, Math.floor(Number(input?.max_results ?? input?.maxResults) || 100)))
+  let nodes: any[] = []
+  try {
+    nodes = await getPlatform().fs.listTree(root.path, 8)
+  } catch (e: any) {
+    return { ok: false, error: `查找失败：${e?.message || String(e)}` }
+  }
+  const found: Array<{ path: string }> = []
+  for (const node of nodes || []) {
+    if (found.length >= maxResults) break
+    if (node?.type === 'folder') continue
+    const rel = relTo(root.path, node.path)
+    if (!matchesFileGlob(rel, pattern)) continue
+    found.push({ path: rel })
+  }
+  found.sort((a, b) => a.path.localeCompare(b.path))
   return {
-    ok: hits.length > 0,
-    value: hits.length ? { query, count: hits.length, matches: hits } : undefined,
-    error: hits.length ? undefined : `未找到包含「${query}」的文件内容`,
+    ok: true,
+    value: {
+      pattern,
+      files: found,
+      totalFound: found.length,
+      truncated: found.length >= maxResults,
+      modelText: formatGlobText(found, {
+        root: root.path,
+        pattern,
+        total: found.length,
+        truncated: found.length >= maxResults,
+        byMtime: false,
+      }),
+    },
   }
 }
 
@@ -841,6 +980,7 @@ export async function executeRendererTool(
       case 'multi_replace': return await toolMultiReplace(input, ctx)
       case 'list_dir': return await toolListDir(input, ctx)
       case 'search_files': return await toolSearchFiles(input, ctx)
+      case 'glob': return await toolGlob(input, ctx)
       case 'kb_search': return await toolKbSearch(input, ctx)
       case 'web_fetch': return await toolWebFetch(input)
       case 'web_search': return await toolWebSearch(input)

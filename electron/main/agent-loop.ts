@@ -31,6 +31,8 @@ import { sessionLog } from './session-log'
 import { recordUsage } from './usage-log'
 import { saveSpillText } from './tool-spill'
 import { jobRegistry } from './job-registry'
+import { cwdFor, forgetWorkingDir } from './working-directory'
+import { clearReadCacheFor } from './read-cache'
 import { browserAgentService } from './browser-agent'
 import { credentialStore } from './credentials'
 import type {
@@ -282,6 +284,24 @@ function looksIncompleteJson(raw: string): boolean {
   return inStr
 }
 
+/**
+ * 参数原文进历史时只保留预览。
+ *
+ * 为什么：解析失败时旧实现把**整段原文**塞进 `arguments: {"_raw": …}`，这条 assistant
+ * 消息会随之后每一步重放给模型——一次截断（10 万字符的半截 content）就把上下文永久占满。
+ * DSH 的做法更彻底：max-tokens 时直接把 tool-call 块丢掉（`dsh-llm` 的 BlockAssembler）。
+ * 这里保留可诊断性（头 + 尾 + 真实长度），但不再把全文留在历史里。
+ */
+const RAW_ARGS_PREVIEW_CHARS = 2000
+
+function previewRawArgs(raw: string): string {
+  const text = String(raw || '')
+  if (text.length <= RAW_ARGS_PREVIEW_CHARS) return text
+  const headLen = 1600
+  const tailLen = RAW_ARGS_PREVIEW_CHARS - headLen
+  return `${text.slice(0, headLen)}\n…（此处省略 ${text.length - RAW_ARGS_PREVIEW_CHARS} 字符）…\n${text.slice(-tailLen)}`
+}
+
 /** 宽容解析：先按 parseToolArgs（含多层解包），失败再修复裸控制字符后重试 */
 function parseToolArgsLenient(raw: any): any {
   const first = parseToolArgs(raw)
@@ -304,8 +324,9 @@ function parseToolArgsLenient(raw: any): any {
  * 在最终 tool_calls 里丢掉或截断了 arguments，而参数增量已完整发出——用流式原文兜底可救回参数；
  * 否则工具会拿空参数执行（表现为 "code 参数必填" 这类误导报错，且模型会反复重试同样的调用）。
  *
- * 解析失败时**不再退化成 `{}`**（那会静默丢掉参数），而是把原文保留到 `_raw` 字段：
- * 它仍是合法 JSON（不会被 vLLM 模板判为 Extra data），模型也能看出自己的参数被截断/畸形。
+ * 解析失败时**不再退化成 `{}`**（那会静默丢掉参数），而是把原文**预览**保留到 `_raw` 字段，
+ * 并附 `_rawLength` / `_rawOmitted`：它仍是合法 JSON（不会被 vLLM 模板判为 Extra data），
+ * 模型也能看出自己的参数被截断/畸形，但几十万字符的半截 content 不会跟着每一步重放。
  */
 function normalizeToolCalls(
   calls: any[] | undefined,
@@ -341,7 +362,12 @@ function normalizeToolCalls(
         } else {
           const raw = chosen || current
           if (callId) failed.push(callId)
-          args = JSON.stringify({ _raw: raw })
+          // 只留预览：整段原文进历史会在之后每一步重放时吃满上下文（见 previewRawArgs）
+          args = JSON.stringify({
+            _raw: previewRawArgs(raw),
+            _rawLength: raw.length,
+            ...(raw.length > RAW_ARGS_PREVIEW_CHARS ? { _rawOmitted: true } : {}),
+          })
         }
       }
     }
@@ -785,6 +811,9 @@ class AgentImpl implements AgentControl {
       this.jobId = null
     }
     jobRegistry.cancelForOwner(this.id, 'agent 已销毁')
+    // 会话级工作目录只活在内存里：会话销毁即清空
+    try { forgetWorkingDir(this.id) } catch { /* 忽略 */ }
+    try { clearReadCacheFor(this.id) } catch { /* 忽略 */ }
     this.flushAssistantChunks()
     sessionLog.append(this.id, 'session/end', { status: 'disposed' })
     await sessionLog.flush(this.id)
@@ -1711,7 +1740,14 @@ class AgentImpl implements AgentControl {
    * 为什么集中收口：调用没执行时也必须成对写 call/result，否则会话日志会把它当成
    * "工具结果缺失"，下一轮模型会误以为工具跑过 / 需要重跑。
    */
-  private rejectToolCall(callId: string, name: string, error: string, step: number, argsRawLen?: number): void {
+  private rejectToolCall(
+    callId: string,
+    name: string,
+    error: string,
+    step: number,
+    argsRawLen?: number,
+    code = 'TRUNCATED_ARGS',
+  ): void {
     const callSeq = sessionLog.append(this.id, 'tool/call', {
       callId,
       name,
@@ -1721,7 +1757,7 @@ class AgentImpl implements AgentControl {
     }).seq
     this.currentCallSeq.set(callId, callSeq)
     this.emit('tool/call', { callId, name, args: undefined, argsParseFailed: true })
-    this.pushToolResult({ callId, name, ok: false, error, diagnostic: true })
+    this.pushToolResult({ callId, name, ok: false, error, diagnostic: true, code })
   }
 
   /** 输出被 max_tokens 截断、整步工具调用不派发时的模型侧说明 */
@@ -1777,16 +1813,20 @@ class AgentImpl implements AgentControl {
     // 输出被截断造成的，会反复重试同样的调用）。这里直接给出可诊断的失败说明。
     if (args && typeof args === 'object' && typeof args._raw === 'string') {
       const rawText = String(args._raw)
+      // 预览模式下 `_raw` 只有头尾两段，真实长度与"是否被裁过"由这两个字段给出
+      const rawLen = Number(args._rawLength) > 0 ? Number(args._rawLength) : rawText.length
+      const omitted = args._rawOmitted === true
       const head = rawText.slice(0, 160)
       const tail = rawText.length > 320 ? rawText.slice(-160) : ''
-      const incomplete = looksIncompleteJson(rawText)
-      const truncHint = this.lastFinishReason === 'length'
+      const incomplete = omitted || looksIncompleteJson(rawText)
+      const truncatedByLength = this.lastFinishReason === 'length'
+      const truncHint = truncatedByLength
         ? '本步输出被截断（finish_reason=length，max_tokens / 上下文长度不够）'
         : incomplete
           ? '参数 JSON 不完整（本步输出很可能在生成途中被截断：常见于单次内容太长、撞到 max_tokens 或网关输出上限）'
           : '参数 JSON 不合法（字符串内的换行 / 引号未正确转义）'
-      const error = `工具参数无法解析（${truncHint}，收到 ${rawText.length} 字符）：`
-        + `原文开头「${head}」${tail ? `…结尾「${tail}」` : ''}。`
+      const error = `工具参数无法解析（${truncHint}，收到 ${rawLen} 字符）：`
+        + `原文开头「${head}」${tail ? `…结尾「${tail}」` : ''}${omitted ? '（中间部分已省略）' : ''}。`
         + '本次调用未执行（没有写入任何文件）。请缩短一次提交的内容后重试：大文件分段写入——先写骨架，再用 replace_in_file 在末尾逐段追加'
         + '（例如一次 run_code 只做少量步骤）；并确保 JSON 字符串内的换行/引号已正确转义。'
         + '若反复出现，请调高 max_tokens 或改用输出上限更大的模型。'
@@ -1794,7 +1834,7 @@ class AgentImpl implements AgentControl {
         callId,
         name,
         args: undefined,
-        argsRawLen: rawText.length,
+        argsRawLen: rawLen,
         step,
       }).seq
       this.currentCallSeq.set(callId, callSeq)
@@ -1803,7 +1843,9 @@ class AgentImpl implements AgentControl {
         callId,
         name,
         diagnostic: true,
-        result: { ok: false, error, code: 'INVALID_ARGS' },
+        // 稳定错误码：截断类（finish=length / JSON 明显没写完）与"真畸形 JSON"要能分开，
+        // 前端据此给"调高 max_tokens"的提示（对齐 DSH 的 FS_* 错误码思路）
+        result: { ok: false, error, code: truncatedByLength || incomplete ? 'TRUNCATED_ARGS' : 'INVALID_ARGS' },
       }
     }
 
@@ -2014,7 +2056,12 @@ class AgentImpl implements AgentControl {
       agentId: this.id,
       sessionId: this.id,
       scope: this.options.scope,
-      cwd: this.options.cwd,
+      // 会话级「当前工作目录」：working_directory 工具可临时切换（仍限制在工作区内）
+      cwd: cwdFor({ agentId: this.id, cwd: this.options.cwd }),
+      // 原始工作区根：working_directory 用它做越界校验与"重置"
+      workspaceRoot: this.options.cwd,
+      // 当前 turn 序号：read_file 用它做"同轮重复读取"的短路（跨轮不复用，避免上下文已压缩）
+      turn: this.turnCount,
       // 本会话生效窗口：读取类工具据此定单次返回量（避免读了又被裁掉，见 tools.ts defaultReadWindowChars）
       windowTokens: this.effectiveWindowTokens > 0 ? this.effectiveWindowTokens : Number(this.options.contextLimit) || undefined,
         // 当前 agent 的工具白名单（供 run_subagent 等工具继承父级配置）

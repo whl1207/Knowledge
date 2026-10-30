@@ -30,6 +30,7 @@ import {
   type SessionEventMap,
 } from '@/types/session-log'
 import { foldPlanTodoEvents, type PlanTodoState } from '@/shared/agentPlanState'
+import { modelTextOf } from '@/shared/toolResultBudget'
 
 // ---------------------------------------------------------------------------
 // 工具函数
@@ -597,7 +598,9 @@ class SessionLogStore {
                   ? res.ok
                     // modelValue：超预算结果的裁剪版（见 types/session-log.ts 与
                     // shared/toolResultBudget.ts）。只在存在时优先，未裁剪时与旧口径逐字一致。
-                    ? (res.modelValue ?? JSON.stringify(res.value ?? null))
+                    // modelText：工具自己声明的"模型可见正文"（纯文本、不做 JSON 转义，
+                    // 见 read_file），与 serializeToolValue 同口径。
+                    ? (res.modelValue ?? modelTextOf(res.value) ?? JSON.stringify(res.value ?? null))
                     : `ERROR: ${res.error || '工具执行失败'}`
                   : 'ERROR: 工具结果缺失（日志不完整）',
               },

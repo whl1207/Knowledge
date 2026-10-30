@@ -126,6 +126,10 @@ const appPort: AppPort = {
   async isSettingsWindowOpen() { return false },
   async notifyUiReady() { /* 无宿主 */ },
   async notifyFileChanged() { /* 单窗口，无可通知对象 */ },
+  /** 后台 shell 任务：浏览器 / 安卓端没有本机 shell，返回空列表 */
+  async listShellJobs() { return { ok: true, jobs: [] } },
+  async killShellJob() { return { ok: false, error: 'not-supported' } },
+  async dismissShellJob() { return { ok: false } },
   /** 浏览器不需要长任务保活（标签页不会被系统回收，切后台由浏览器自行调度） */
   async beginLongTask() { return { success: false, error: 'not-supported' } },
   async updateLongTask() { return { success: false } },

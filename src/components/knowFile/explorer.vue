@@ -660,6 +660,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
     for (let i = 0; i < store.data.length; i++) {
       const tab = store.data[i]
       if (!tab || tab.path !== changedPath) continue
+      // 但这个标签正在被用户编辑（源码 / 可视编辑）时不能覆盖 store：
+      // 编辑器持有未保存缓冲区，直接改 store 会把它冲掉（与 FileWindow 的同类防护一致）。
+      // agent 的 write_file / replace_in_file 现在也会走这条广播，必须挡住这种情况。
+      if (i === store.index && (tab.view === 'edit' || tab.view === 'blockedit')) continue
       tab.content = newContent
     }
   }

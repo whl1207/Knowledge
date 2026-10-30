@@ -62,7 +62,18 @@ import { sessionLog } from './session-log'
 import { cleanupSpillDirs } from './tool-spill'
 import { skillService, parseSkillMetadata } from './skill-service'
 import { registerNamespacedIpc, sendToAll } from './ipc-registry'
-import { registerCoreTools, setWebSearchConfig, getWebSearchConfig, runWebSearch, setWebFetchConfig, getWebFetchConfig, runWebFetch } from './tools'
+import {
+  registerCoreTools,
+  setWebSearchConfig,
+  getWebSearchConfig,
+  runWebSearch,
+  setWebFetchConfig,
+  getWebFetchConfig,
+  runWebFetch,
+  listShellJobsForUi,
+  killShellJobForUi,
+  dismissShellJobForUi,
+} from './tools'
 import { setAgentBroadcast } from './agent-loop'
 // 插件宿主（P0）：插件工具必须在建窗口/建会话之前注册好，见 app.whenReady
 import { initPluginHost, registerPluginIpc } from './plugin-ipc'
@@ -4144,7 +4155,7 @@ ipcMain.handle('executeShell', async (event, params) => {
       console.warn(`[主进程] ${msg}`)
       return { success: false, error: msg, sandbox: policy, denied: true }
     }
-    const result = await shellService.executeCommand(command, cwd)
+    const result = await shellService.executeCommand(command, { cwd })
     logInfo('main', 'shell finished', {
       success: result.success,
       stdoutLength: result.stdout?.length || 0,
@@ -4163,6 +4174,14 @@ ipcMain.handle('executeShell', async (event, params) => {
     return { success: false, error: `shell 执行异常: ${error.message}` }
   }
 })
+
+// ==================== 后台 shell 任务（主页顶栏「后台命令」面板） ====================
+// 只读列表 + 停止；输出是"看而不取"的（不影响模型 job_output 的消费游标）。
+ipcMain.handle('shell-jobs:list', () => {
+  try { return { ok: true, jobs: listShellJobsForUi() } } catch (e: any) { return { ok: false, jobs: [], error: e?.message || String(e) } }
+})
+ipcMain.handle('shell-jobs:kill', (_event, id: string) => killShellJobForUi(String(id || '')))
+ipcMain.handle('shell-jobs:dismiss', (_event, id: string) => dismissShellJobForUi(String(id || '')))
 
 // ==================== 终端（主页右侧栏「终端」标签：真 PTY） ====================
 // 与上面的 executeShell 不同：终端是人自己敲命令的交互界面，**不看安全策略**，任何档位都放行；

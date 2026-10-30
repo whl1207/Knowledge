@@ -20,6 +20,8 @@ import { normalizeWebFetchConfig, type WebFetchConfig, type WebFetchChannelId } 
 import { BROWSER_SEARCH_ENGINES, DEFAULT_BROWSER_SEARCH_ENGINE } from '@/shared/browserSearch'
 import { migrateLegacyContextWindow } from '@/lib/contextUsage'
 import { deepSeekConfig, deepSeekStyleOf, migrateDeepSeekMerge, normalizeLlmType, normalizeLlmTypeList, DEEPSEEK_LEGACY_TYPE } from '@/shared/llmSources'
+// 每次请求的输出上限默认值（与设置页 / 请求侧夹取共用同一份常量，避免各处写死不同数字）
+import { DEFAULT_MAX_TOKENS } from '@/shared/outputTokens'
 // 局域网访客（网页端）能力白名单：默认只读策略 + 旧存档归一化见 src/shared/lanGuest.ts
 import { defaultLanGuestPolicy, normalizeLanGuestPolicy } from '@/shared/lanGuest'
 import { ElMessage } from 'element-plus'
@@ -599,7 +601,10 @@ export const usestore = defineStore('data', {
                 // 通用配置
                 online: false,
                 temperature: 0.7,
-                max_tokens: 16000,
+                // 每次请求的输出上限（聊天创建时会快照到 chat.config.maxTokens）。
+                // 32k：兼顾智能体写文件 / 长文生成不频繁截断，同时被请求侧按模型上限夹取，
+                // 不会因为 gpt-4o / claude-3-haiku 这类小上限模型而 400（见 shared/outputTokens.ts）
+                max_tokens: DEFAULT_MAX_TOKENS,
                 // 上下文窗口上限（历史全局值；已被来源级 contextWindowByProvider 取代，
                 // 旧存档里可能非 0，由 migrateLegacyContextWindow 一次性下沉到来源级后清零）
                 contextWindow: 0,
@@ -2068,6 +2073,18 @@ export const usestore = defineStore('data', {
                     this.AIconfig.asr.shortcut = DEFAULT_ASR_SHORTCUT
                     needPersist = true
                 }
+
+                // 迁移（最大令牌数）：16000 是旧默认值，仍停在它的存档一次性抬到新默认；
+                // 用户显式改过别的值不动。打标记只做一次——之后手动改回 16000 也不会被再次抬上去。
+                try {
+                    if (localStorage.getItem('llm-max-tokens-migrated') !== '1') {
+                        if (this.AIconfig.llm?.max_tokens === 16_000) {
+                            this.AIconfig.llm.max_tokens = DEFAULT_MAX_TOKENS
+                            needPersist = true
+                        }
+                        localStorage.setItem('llm-max-tokens-migrated', '1')
+                    }
+                } catch { /* 隐私模式：忽略标记写入失败 */ }
             }
             if (localStorage.getItem('UI') !== null) {
                 this.UI = JSON.parse(localStorage.getItem('UI')!)

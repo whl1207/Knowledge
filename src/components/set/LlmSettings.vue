@@ -6,6 +6,7 @@ import { AIUtils } from '@/services/ai-utils'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getProviderConfig } from '@/shared/kbAiClient'
 import { deepSeekApiStyle } from '@/shared/llmSources'
+import { MAX_TOKENS_SETTING_MAX, DEFAULT_MAX_TOKENS } from '@/shared/outputTokens'
 import type { LmStudioModelInfo, OllamaModelInfo, OllamaLoadedModel } from '@/shared/ai-core'
 import ModelContextWindow from './ModelContextWindow.vue'
 import LlmTestRow from './LlmTestRow.vue'
@@ -2048,7 +2049,16 @@ onMounted(() => {
           </div>
           <div class="form-group">
             <label>{{ zh()?'最大令牌数' : 'Max Tokens' }}</label>
-            <input type="number" v-model="store.AIconfig.llm.max_tokens" min="100" max="30000" />
+            <input
+              type="number"
+              v-model.number="store.AIconfig.llm.max_tokens"
+              :min="100"
+              :max="MAX_TOKENS_SETTING_MAX"
+              step="1024"
+              :title="zh()
+                ? `每次请求最多生成多少 token（默认 ${DEFAULT_MAX_TOKENS}）。只影响新对话：老对话保留创建时的值。请求时会按所选模型的已知输出上限自动夹取（如 gpt-4o 16384、claude-3-haiku 4096），若服务端仍报 max_tokens 过大则自动降档重试，不会因此中断。`
+                : `Max output tokens per request (default ${DEFAULT_MAX_TOKENS}). Applies to new chats only; existing chats keep their own value. Requests are clamped to each model's known output limit (e.g. gpt-4o 16384, claude-3-haiku 4096) and auto-downgraded once if the server still rejects it.`"
+            />
           </div>
           <div class="form-group">
             <label>{{ zh()?'流式响应' : 'Stream Response' }}</label>

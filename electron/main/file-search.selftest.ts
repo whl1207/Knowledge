@@ -27,16 +27,24 @@ export async function runFileSearchSelfTest(): Promise<FileSearchCase[]> {
     fs.writeFileSync(join(root, '.gitignore'), 'ignored.ts\nnode_modules/\n')
 
     const literal = await searchFilesInRoot({ root, query: 'foo' })
-    add('字面量：命中 a.ts / b.vue / c.md', literal.ok && (literal.value as any).results.length === 3, JSON.stringify((literal.value as any)?.results?.map((r: any) => r.path)))
-    add('字面量：默认不区分大小写（命中 FOO）', (literal.value as any).results.some((r: any) => r.path === 'src/c.md'))
+    const literalPaths = ((literal.value as any)?.results || []).map((r: any) => r.path)
+    add(
+      '字面量：默认大小写敏感，命中 a.ts / b.vue',
+      literal.ok && literalPaths.length === 2 && literalPaths.includes('src/a.ts') && literalPaths.includes('src/b.vue'),
+      JSON.stringify(literalPaths),
+    )
+    add('默认区分大小写：不命中 FOO', !literalPaths.includes('src/c.md'))
     add('默认忽略 node_modules', !(literal.value as any).results.some((r: any) => r.path.includes('node_modules')))
     add('默认遵守 .gitignore', !(literal.value as any).results.some((r: any) => r.path === 'ignored.ts'))
+
+    const ci = await searchFilesInRoot({ root, query: 'foo', ignoreCase: true })
+    add('ignoreCase=true：命中 FOO', (ci.value as any).results.some((r: any) => r.path === 'src/c.md'))
 
     const regex = await searchFilesInRoot({ root, query: 'const\\s+(foo|bar)', regex: true })
     add('正则：命中两行', regex.ok && (regex.value as any).results.length === 2, String((regex.value as any)?.results?.length))
 
-    const cs = await searchFilesInRoot({ root, query: 'foo', caseSensitive: true })
-    add('大小写敏感：不命中 FOO', cs.ok && !(cs.value as any).results.some((r: any) => r.path === 'src/c.md'))
+    const legacyCs = await searchFilesInRoot({ root, query: 'foo', caseSensitive: false })
+    add('旧参数 caseSensitive=false 仍按忽略大小写', (legacyCs.value as any).results.some((r: any) => r.path === 'src/c.md'))
 
     const glob = await searchFilesInRoot({ root, query: 'foo', filePattern: '*.vue' })
     add('文件过滤：只命中 .vue', glob.ok && (glob.value as any).results.length === 1 && (glob.value as any).results[0].path === 'src/b.vue')
@@ -44,14 +52,19 @@ export async function runFileSearchSelfTest(): Promise<FileSearchCase[]> {
     const ctx = await searchFilesInRoot({ root, query: 'bar', contextLines: 1 })
     const hit = (ctx.value as any).results.find((r: any) => r.path === 'src/a.ts')
     add('上下文行：before/after 存在', !!hit?.before?.length && !!hit?.after?.length, JSON.stringify(hit))
+    add('模型可见文本：按文件分组并带行号', typeof (ctx.value as any).modelText === 'string' && /Line \d+:/.test((ctx.value as any).modelText))
 
     const capped = await searchFilesInRoot({ root, query: 'foo', maxResults: 1 })
-    add('截断：maxResults=1 时 truncated=true', capped.ok && (capped.value as any).truncated === true && (capped.value as any).results.length === 1)
+    add(
+      '截断：maxResults=1 时 truncated=true 且另有完整结果文本',
+      capped.ok && (capped.value as any).truncated === true && (capped.value as any).results.length === 1
+        && typeof (capped.value as any).overflowText === 'string',
+    )
 
     const ac = new AbortController()
     ac.abort()
     const aborted = await searchFilesInRoot({ root, query: 'foo', signal: ac.signal })
-    add('取消：已 abort 的 signal 直接返回 ABORTED', aborted.ok === false && aborted.code === 'ABORTED')
+    add('取消：已 abort 的 signal 直接返回 SEARCH_ABORTED', aborted.ok === false && aborted.code === 'SEARCH_ABORTED')
   } finally {
     try { fs.rmSync(root, { recursive: true, force: true }) } catch { /* ignore */ }
   }

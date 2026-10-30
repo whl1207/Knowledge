@@ -167,39 +167,19 @@
               transform="rotate(-90 18 18)"></circle>
           </svg>
         </div>
-        <!-- 集群模式：执行时用各成员预设里的模型，右上角模型选择不参与 → 隐藏 -->
-        <select 
+        <!-- 模型选择：来源（模型类型）+ 模型合成一个面板（点开列出所有启用来源下的可用模型）
+             集群模式各成员用自己预设里的模型，右上角模型选择不参与 → 隐藏 -->
+        <div
           v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
-          v-model="llmTypeSelectModel"
-          class="model-select"
-          title="模型类型"
-          :disabled="isAnyExecuting"
+          ref="modelPickerBtnRef"
+          class="model-picker-btn"
+          :class="{ active: modelPickerVisible, disabled: isAnyExecuting }"
+          :title="modelPickerButtonTitle"
+          @click="toggleModelPicker"
         >
-          <template v-for="type in enabledLlmTypeOptions.types" :key="type">
-            <template v-if="type === 'custom'">
-              <!-- 每个启用的自定义来源一个独立选项（value 编码为 custom:<来源索引>） -->
-              <option v-for="item in enabledLlmTypeOptions.customEnabled" :key="'custom-' + (item.src.id || item.i)" :value="'custom:' + item.i">
-                {{ getCustomSourceLabel(item.src) }}
-              </option>
-            </template>
-            <option v-else :value="type">
-              {{ getLlmTypeDisplayName(type) }}
-            </option>
-          </template>
-        </select>
-        <select 
-          v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
-          v-model="chatModelSelectModel"
-          @click="onModelSelectRefresh"
-          class="model-select"
-          :disabled="!availableModels.length || isAnyExecuting"
-          title="选择模型"
-        >
-          <option value="">select model</option>
-          <option v-for="model in availableModels" :value="model">
-            {{ model }}
-          </option>
-        </select>
+          <span class="model-picker-btn-model">{{ currentModelNameLabel }}</span>
+          <i class="fa fa-angle-down model-picker-btn-caret"></i>
+        </div>
         <div v-if="currentChat.mode === 'retrieval' && currentChat.config.kbPath" class="parameter" :title="store.locales=='zh' ? '知识库片段数量' : 'Knowledge Base Fragment Count'">
           <label>{{ currentChat.config.kbTopK || 5 }}</label>
           <input 
@@ -212,6 +192,8 @@
             :disabled="isAnyExecuting"
           >
         </div>
+        <!-- 后台命令（shell run_in_background / 前台超时转后台）：有任务时才出现 -->
+        <ShellJobsBadge />
         <!-- 右侧栏开关（DSH 同款）：文件 / 终端 / 浏览器，配置按聊天各自保存；
              样式与左侧 fa-bars 开关一致（纯图标，无边框 / 无盒底） -->
         <div
@@ -225,7 +207,111 @@
           <i class="fa fa-columns"></i>
         </div>
       </div>
-      
+
+      <!-- 模型选择面板（来源 + 模型合一）：teleport 到 body，
+           避免被 chat-header 的 overflow 裁剪；位置按按钮矩形固定定位 -->
+      <teleport to="body">
+        <div v-if="modelPickerVisible" class="context-menu-overlay" @click="closeModelPicker" @contextmenu.prevent="closeModelPicker"></div>
+        <div
+          v-if="modelPickerVisible"
+          class="model-picker-panel"
+          :style="{ left: modelPickerPos.left + 'px', top: modelPickerPos.top + 'px' }"
+          @click.stop
+        >
+          <!-- 顶部只有搜索框（不再有标题）：输入即过滤模型名 / 来源名，Esc 关闭，Enter 直接选第一个 -->
+          <div class="model-picker-search">
+            <i class="fa fa-search model-picker-search-icon"></i>
+            <input
+              ref="modelPickerSearchRef"
+              v-model="modelPickerQuery"
+              class="model-picker-search-input"
+              type="text"
+              spellcheck="false"
+              :placeholder="store.locales=='zh' ? '搜索模型' : 'Search models'"
+              @keydown.esc.stop="closeModelPicker"
+              @keydown.enter.prevent="pickFirstModelMatch"
+            />
+            <i
+              class="fa fa-refresh model-picker-refresh"
+              :class="{ 'fa-spin': modelPickerRefreshing }"
+              :title="store.locales=='zh' ? '刷新模型列表（探测当前来源）' : 'Refresh models (probe current source)'"
+              @click.stop="refreshModelPicker"
+            ></i>
+          </div>
+          <div class="model-picker-body scoll">
+            <!-- 预设「跟随默认」但本聊天手动选过模型 → 可在这里改回跟随全局（搜索时不显示） -->
+            <template v-if="!modelPickerQuery.trim() && chatFollowsPresetDefault && !chatFollowsGlobalModel">
+              <div
+                class="model-picker-item model-picker-follow"
+                :title="store.locales=='zh'
+                  ? '清除本聊天的模型覆盖，之后跟随「设置 → 模型」里的当前来源与模型'
+                  : 'Clear this chat’s model override and follow Settings → Models again'"
+                @click="followGlobalModelInPicker"
+              >
+                <i class="fa fa-undo"></i>
+                <span class="model-picker-item-name">
+                  {{ store.locales=='zh' ? `跟随默认（${globalModelLabel}）` : `Follow default (${globalModelLabel})` }}
+                </span>
+              </div>
+              <div class="model-picker-divider"></div>
+            </template>
+            <template v-for="group in visibleModelPickerGroups" :key="group.key">
+              <!-- 来源标题：点击 = 切到该来源并用它的默认模型，随后探测它的模型列表
+                   （没探测过的来源（本地 Ollama / LM Studio 等）也能这样把模型刷出来） -->
+              <div
+                class="model-picker-group"
+                :class="{ current: isCurrentSource(group) }"
+                :title="store.locales=='zh'
+                  ? '点击切换到这个来源并刷新它的模型列表'
+                  : 'Click to switch to this source and refresh its models'"
+                @click.stop="selectLlmSourceInPicker(group)"
+              >
+                <span class="model-picker-group-name">{{ group.label }}</span>
+                <span v-if="isCurrentSource(group)" class="model-picker-group-current">
+                  {{ store.locales=='zh' ? '当前' : 'current' }}
+                </span>
+                <span v-if="group.models.length" class="model-picker-group-count">{{ group.models.length }}</span>
+                <span v-else class="model-picker-group-none">{{ store.locales=='zh' ? '暂无模型' : 'no models' }}</span>
+              </div>
+              <div
+                v-for="model in group.models"
+                :key="group.key + '::' + model"
+                class="model-picker-item"
+                :class="{ active: isModelPickerActive(group, model) }"
+                :title="model"
+                @click="pickModelInPicker(group, model)"
+              >
+                <span class="model-picker-item-name">
+                  <!-- 搜索命中处高亮 -->
+                  <template v-for="(part, pi) in modelPickerNameParts(model)" :key="pi">
+                    <mark v-if="part.hit">{{ part.text }}</mark>
+                    <template v-else>{{ part.text }}</template>
+                  </template>
+                </span>
+                <i v-if="isModelPickerActive(group, model)" class="fa fa-check"></i>
+              </div>
+            </template>
+            <div v-if="!modelPickerGroups.length" class="model-picker-group-empty">
+              {{ store.locales=='zh' ? '没有启用的模型来源：请先在「设置 → 模型」中启用并配置' : 'No model source enabled — enable and configure one in Settings → Models' }}
+            </div>
+            <div v-else-if="!visibleModelPickerGroups.length && modelPickerQuery.trim()" class="model-picker-group-empty">
+              {{ store.locales=='zh' ? '没有匹配的模型' : 'No matching model' }}
+            </div>
+            <!-- 未探测到模型的来源默认收起，点这里展开（点来源名即切换并探测）；搜索时不显示 -->
+            <div
+              v-if="modelPickerEmptyGroupCount"
+              class="model-picker-footer"
+              @click.stop="modelPickerShowEmpty = !modelPickerShowEmpty"
+            >
+              <i class="fa" :class="modelPickerShowEmpty ? 'fa-angle-up' : 'fa-angle-down'"></i>
+              <span>{{ modelPickerShowEmpty
+                ? (store.locales=='zh' ? '收起暂无模型的来源' : 'Hide sources without models')
+                : (store.locales=='zh' ? `展开 ${modelPickerEmptyGroupCount} 个暂无模型的来源` : `Show ${modelPickerEmptyGroupCount} source(s) without models`) }}</span>
+            </div>
+          </div>
+        </div>
+      </teleport>
+
       <!-- 消息区域 -->
       <div 
         class="message-container scoll"
@@ -1127,23 +1213,25 @@
             <!-- 生成状态 / 连接测试 / 执行提示：图标位占附件按钮右侧的空白，
                  只显示图标（完整提示在图标 title 上），大小与附件按钮一致 -->
             <div v-if="showStepInfoContainer" class="step-info-container">
-              <!-- 系统 / 模型服务返回的错误：只显示图标，完整文字在 title 上，点击可关闭 -->
+              <!-- 错误只占一个图标位：「请求失败」与「连接测试失败」是同一次断连的两条记录，
+                   合并显示（带模型名的那条优先），点击一次性清掉，避免三角和红叉并排 -->
               <div
-                v-if="systemErrorText"
+                v-if="composerErrorText"
                 class="step-indicator step-error clickable"
-                :title="systemErrorText"
-                @click="systemErrorText = ''"
+                :title="composerErrorText"
+                @click="clearComposerError"
               >
                 <i class="fa fa-exclamation-triangle"></i>
               </div>
+
+              <!-- 连接测试中的旋转 / 成功提示（有错误时不显示，保持"只有一个图标"） -->
+              <div v-else-if="connectionTestStatus" class="step-indicator" :class="connectionTestClass" :title="connectionTestStatus">
+                <i :class="connectionTestIcon"></i>
+              </div>
+
               <!-- 聊天生成状态（仅图标，提示见 title）- 普通对话时显示（step 状态为空时隐藏，避免 agent 模式出现空白指示器） -->
               <div v-if="currentChat.isGenerating && !isAnotherChatExecuting && (stepIcon || currentStep)" class="step-indicator" :class="stepIndicatorClass" :title="currentStep">
                 <i :class="stepIcon || 'fa fa-refresh fa-spin'"></i>
-              </div>
-
-              <!-- 连接测试状态（仅图标，提示见 title） -->
-              <div v-if="connectionTestStatus" class="step-indicator" :class="connectionTestClass" :title="connectionTestStatus">
-                <i :class="connectionTestIcon"></i>
               </div>
 
               <!-- 统一的执行状态（仅图标，提示见 title） - 只在当前聊天有执行时显示（工作流/技能） -->
@@ -1297,6 +1385,8 @@ import { md, renderMarkdown, highlightCodeHtml, normalizeMermaidSource } from '@
 // 上下文压缩（P0）：普通聊天发送前预算检查 + 旧轮次摘要 + 溢出后自动压缩重试
 import { chatHistoryForRequest, compactChat, shouldCompactChat } from '@/lib/agent/chatCompact'
 import { isContextOverflowError } from '@/shared/contextBudget'
+// 输出上限默认值（与设置页 / 请求侧夹取同一份常量；老聊天的一次性迁移见 loadChatsFromStorage）
+import { DEFAULT_MAX_TOKENS } from '@/shared/outputTokens'
 // 输入框草稿：按聊天各自保存（读写纯函数，自测见 chatDraft.selftest.ts）
 import { readChatDraft, writeChatDraft, resolveDraftChat } from '@/shared/chatDraft'
 // 每个聊天自己的工作区 + 按工作区分组（读写纯函数，自测见 chatWorkspace.selftest.ts）
@@ -1320,6 +1410,7 @@ import {
   type ChatDockTabKind,
 } from '@/shared/chatDock'
 import ChatDock from '@/components/home/ChatDock.vue'
+import ShellJobsBadge from '@/components/home/ShellJobsBadge.vue'
 // PTC（Code Mode）：run_code 输出解析（返回值 / console 日志 / 程序内调用的工具）
 import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/agent/ptc'
 // 工作区根目录：与智能体工具的相对路径锚点（AgentOptions.cwd）保持同一来源
@@ -2857,6 +2948,22 @@ const showStepInfoContainer = computed(() => {
   return false
 })
 
+/**
+ * 输入栏错误位：`systemErrorText`（请求失败）与 `connectionTestStatus`（连接测试失败）
+ * 是同一次断连的两条记录——旧实现各渲染一个图标，一次失败会同时出现三角和红叉。
+ * 这里合并成一个：文案带模型名的那条优先（更能指明是哪个模型连不上）。
+ */
+const composerErrorText = computed(() => {
+  if (connectionTestClass.value === 'step-error' && connectionTestStatus.value) return connectionTestStatus.value
+  return systemErrorText.value
+})
+
+function clearComposerError() {
+  systemErrorText.value = ''
+  // 连接失败提示有自己的 5s 计时器；手动清掉，免得点完三角红叉立刻补位
+  if (connectionTestClass.value === 'step-error') connectionTestStatus.value = ''
+}
+
 const skillLoading = computed({
   get: () => globalExecutionState.value.skillLoading,
   set: (value) => { globalExecutionState.value.skillLoading = value }
@@ -2977,73 +3084,6 @@ const selectAgentItem = (item: { id: string; preset?: any }) => {
   if (item.preset) selectAgentPreset(item.preset)
   else selectGeneralAgent()
 }
-
-const availableModels = computed(() => {
-  // 预设「跟随默认」时聊天配置里的来源为空 → 用实际生效的来源取候选模型
-  const llmType = effectiveChatModelValue.value.provider || currentChat.value.config.llmType
-  const config = store.AIconfig.llm
-  let list: any[] = []
-
-  switch(llmType) {
-    case 'ollama':
-      list = config.ollama.available_models || []
-      break
-    case 'lmstudio':
-      list = config.lmstudio?.available_models || []
-      break
-    case 'openai':
-      list = config.openai.available_models || []
-      break
-    case 'deepseek':
-    case 'deepseek-responses': {
-      // 单来源：按当前接口样式取该样式自己的模型列表；始终包含已配置/默认模型，
-      // 避免下拉框停留在 "select model"（'deepseek-responses' 仅为历史存档别名）
-      const dsCfg = deepSeekStyleOf(llmType, config.deepseek) === 'responses' ? config.deepseekResponses : config.deepseek
-      list = (dsCfg?.available_models || []).filter(Boolean)
-      const model = dsCfg?.model
-      if (model && !list.includes(model)) list = [model, ...list]
-      break
-    }
-    case 'gpustack': {
-      list = config.gpustack?.available_models || []
-      const model = config.gpustack?.model
-      if (model && !list.includes(model)) list = [model, ...list]
-      break
-    }
-    case 'anthropic':
-      list = [config.anthropic.model]
-      break
-    case 'google':
-      list = [config.google.model]
-      break
-    case 'azure':
-      list = config.azure.deployment ? [config.azure.deployment] : []
-      break
-    case 'custom': {
-      // 按聊天绑定的来源取模型列表（多来源下可切换各来源的模型）；绑定来源被禁用时回退到第一个启用来源
-      const c = store.AIconfig.llm.custom
-      const sources = Array.isArray(c?.sources) ? c.sources : []
-      const enabled = (sources as any[])
-        .map((s, i) => ({ s, i }))
-        .filter(({ s }) => !store.isLlmSourceDisabled('custom', s?.id))
-      let idx = typeof effectiveChatModelValue.value.customSourceIndex === 'number'
-        ? (effectiveChatModelValue.value.customSourceIndex as number)
-        : (c?.activeIndex ?? 0)
-      if (sources.length && !enabled.some(({ i }) => i === idx)) idx = enabled[0]?.i ?? c?.activeIndex ?? 0
-      const src = sources[idx]
-      list = (src && Array.isArray(src.available_models)) ? src.available_models.filter(Boolean) : []
-      break
-    }
-    default:
-      return []
-  }
-
-  // 已选模型不在列表时置顶补入：保证右上角「模型种类」始终能显示/保持当前聊天所选模型
-  // （选中预设或切换来源后，即使该来源模型列表尚未拉取，下拉框也能跟随显示所选模型）
-  const currentModel = effectiveChatModelValue.value.model || currentChat.value.config.model
-  if (currentModel && !list.includes(currentModel)) list = [currentModel, ...list]
-  return list
-})
 
 /** 分支树节点接口 */
 interface BranchTreeNode {
@@ -3889,6 +3929,10 @@ const toolIcons: Record<string, string> = {
   'multi_replace': 'fa-files-o',
   'list_dir': 'fa-folder-open-o',
   'search_files': 'fa-search',
+  'read_image': 'fa-image',
+  'working_directory': 'fa-location-arrow',
+  'job_list': 'fa-list',
+  'glob': 'fa-sitemap',
   'web_search': 'fa-search',
   'web_fetch': 'fa-globe',
   'server-search': 'fa-globe',
@@ -3926,6 +3970,10 @@ const getToolLabel = (name: string): string => {
     'multi_replace': isZh ? '多处替换' : 'Multi Replace',
     'list_dir': isZh ? '列出目录' : 'List Directory',
     'search_files': isZh ? '搜索文件' : 'Search Files',
+    'read_image': isZh ? '读取图片' : 'Read Image',
+    'working_directory': isZh ? '工作目录' : 'Working Directory',
+    'job_list': isZh ? '后台任务' : 'Jobs',
+    'glob': isZh ? '查找文件' : 'Glob Files',
     'web_search': isZh ? '搜索' : 'Search',
     'web_fetch': isZh ? '获取网页' : 'Fetch Web',
     'server-search': isZh ? '服务端搜索' : 'Server Search',
@@ -5399,6 +5447,7 @@ const swarmMissingPresets = ref<string[]>([])
 // 系统返回手势看不到，因此在这里声明：① 先关掉本页浮层（预设 / 集群成员 / 共享知识库 / 分支树）
 // ② 再看是否正处在某条对话 → 回到整屏聊天列表（等价于点对话区左上角的 fa-bars）。
 const closeHomeOverlays = (): boolean => {
+  if (modelPickerVisible.value) { closeModelPicker(); return true }
   if (showAgentPresetPicker.value) { showAgentPresetPicker.value = false; return true }
   if (showSwarmMemberPicker.value) { showSwarmMemberPicker.value = false; return true }
   if (showSharedKbPicker.value) { showSharedKbPicker.value = false; return true }
@@ -5826,6 +5875,10 @@ const onChatsChangedRemote = () => {
   } catch { /* 存档损坏时忽略 */ }
 }
 
+/** 老聊天「最大令牌数」一次性迁移标记（16000 是旧全局默认值） */
+const MAX_TOKENS_MIGRATION_KEY = 'ai-chats-max-tokens-migrated'
+const LEGACY_DEFAULT_MAX_TOKENS = 16_000
+
 const loadChatsFromStorage = () => {
   const saved = localStorage.getItem('ai-chats')
   if (saved) {
@@ -5835,6 +5888,10 @@ const loadChatsFromStorage = () => {
       // 恢复关闭前的聊天栏（卸载模块回来回到同一栏）
       const savedIdx = parseInt(localStorage.getItem('ai-chats-index') || '0', 10)
       currentChatIndex.value = Number.isFinite(savedIdx) ? Math.min(Math.max(savedIdx, 0), chats.value.length - 1) : 0
+      // 输出上限迁移只做一次：之后用户手动改回 16000 也不再被抬上去
+      let maxTokensMigrated = false
+      try { maxTokensMigrated = localStorage.getItem(MAX_TOKENS_MIGRATION_KEY) === '1' } catch { /* 隐私模式忽略 */ }
+      let maxTokensLifted = false
       chats.value.forEach(chat => {
         // 兼容旧数据：如果没有mode字段，根据配置推断
         if (chat.mode === undefined) {
@@ -5871,6 +5928,14 @@ const loadChatsFromStorage = () => {
         // effectiveChatModelValue / chatModelContext 解析生效值，不依赖这里的兜底。
         if (chat.config) {
           chat.config.llmType = normalizeLlmType(chat.config.llmType)
+          // 输出上限：老存档的 16000 是旧全局默认值，一次性抬到新默认（用户显式改过的不动）；
+          // 缺失（很老的存档 / 旧导入）也补上默认值，避免请求体里 max_tokens 为空
+          if (typeof chat.config.maxTokens !== 'number' || !(chat.config.maxTokens > 0)) {
+            chat.config.maxTokens = DEFAULT_MAX_TOKENS
+          } else if (!maxTokensMigrated && chat.config.maxTokens === LEGACY_DEFAULT_MAX_TOKENS) {
+            chat.config.maxTokens = DEFAULT_MAX_TOKENS
+            maxTokensLifted = true
+          }
         }
         
         if (chat.online === undefined) chat.online = false
@@ -5957,6 +6022,11 @@ const loadChatsFromStorage = () => {
           }, 100)
         }
       })
+      // 迁移完成：打标记（即使这次没抬到也记下，避免以后新建的 16000 被误判成旧默认值）
+      if (!maxTokensMigrated) {
+        try { localStorage.setItem(MAX_TOKENS_MIGRATION_KEY, '1') } catch { /* 隐私模式忽略 */ }
+        if (maxTokensLifted) saveChats()
+      }
     } catch (e) {
       console.error('加载聊天记录失败:', e)
     }
@@ -6341,16 +6411,6 @@ const onModelSelectRefresh = async () => {
   }
 }
 
-/** 启用的来源选项：内置（过滤禁用）+ 自定义（过滤禁用，保留原索引） */
-const enabledLlmTypeOptions = computed(() => {
-  const types = store.enabledLlmTypes || []
-  const customSources = store.AIconfig.llm.custom?.sources || []
-  const customEnabled = (customSources as any[])
-    .map((src, i) => ({ src, i }))
-    .filter(({ src }) => !store.isLlmSourceDisabled('custom', src?.id))
-  return { types, customEnabled }
-})
-
 /**
  * 当前聊天绑定的 Agent 预设（仅 agent 模式）。
  * 预设的「跟随默认」表示来源与模型都读全局「设置 → 模型」的当前值 → 之后换来源 / 换环境无需重配预设。
@@ -6481,6 +6541,296 @@ const chatModelSelectModel = computed<string>({
     saveChats()
   },
 })
+
+// ==================== 模型选择面板（模型类型 + 模型合一） ====================
+// 右上角只留一个按钮：点开列出所有启用来源下的可用模型（按来源分组），
+// 选中一项即同时确定「来源 + 模型」，省去先选类型再选模型的两次下拉。
+
+/** 面板分组：一个启用的来源一组（每个自定义来源单独一组） */
+interface ModelPickerGroup {
+  /** 分组唯一键（`ollama` / `custom:0`） */
+  key: string
+  /** 应用统一来源标识：`ollama` / `deepseek` / `custom` … */
+  type: string
+  /** 自定义来源索引（type === 'custom' 时有效） */
+  customSourceIndex?: number
+  label: string
+  models: string[]
+}
+
+const modelPickerVisible = ref(false)
+const modelPickerRefreshing = ref(false)
+/** 是否展开「暂无模型」的来源（默认收起：面板先列出真正可选中的模型） */
+const modelPickerShowEmpty = ref(false)
+/** 搜索词：过滤模型名 / 来源名（面板顶部搜索框） */
+const modelPickerQuery = ref('')
+/** 面板位置（fixed 定位：左对齐按钮，贴在按钮下方） */
+const modelPickerPos = ref({ left: 0, top: 0 })
+const modelPickerBtnRef = ref<HTMLElement | null>(null)
+const modelPickerSearchRef = ref<HTMLInputElement | null>(null)
+
+/** 当前生效的来源 / 模型（按钮文字与面板里的勾选都用它，与两个旧下拉的 get 逻辑一致） */
+const currentModelSelection = computed<{ type: string; customSourceIndex?: number; model: string }>(() => {
+  const raw = String(llmTypeSelectModel.value || '')
+  const isCustom = raw.startsWith('custom:')
+  return {
+    type: isCustom ? 'custom' : raw,
+    customSourceIndex: isCustom ? (parseInt(raw.slice('custom:'.length), 10) || 0) : undefined,
+    model: String(chatModelSelectModel.value || ''),
+  }
+})
+
+const currentModelSourceLabel = computed(() =>
+  getLlmTypeDisplayName(currentModelSelection.value.type, currentModelSelection.value.customSourceIndex)
+  || (store.locales == 'zh' ? '未选择来源' : 'No source'))
+
+const currentModelNameLabel = computed(() =>
+  currentModelSelection.value.model || (store.locales == 'zh' ? '选择模型' : 'Select model'))
+
+const modelPickerButtonTitle = computed(() => store.locales == 'zh'
+  ? `当前模型：${currentModelSourceLabel.value} / ${currentModelNameLabel.value}（点击选择模型）`
+  : `Current model: ${currentModelSourceLabel.value} / ${currentModelNameLabel.value} (click to pick)`)
+
+/** 全局默认模型（「跟随默认」那一行显示用）：设置 → 模型 里当前来源的模型 */
+const globalModelLabel = computed(() => {
+  const type = normalizeLlmType(String(store.AIconfig.llm.type || ''))
+  const idx = store.AIconfig.llm.custom?.activeIndex ?? 0
+  const model = getDefaultModel(type, idx) || ''
+  return `${getLlmTypeDisplayName(type, idx)}${model ? ' / ' + model : ''}`
+})
+
+/**
+ * 某个来源当前的模型列表：探测到的 `available_models` + 已配置模型（置顶补入）。
+ * 与 availableModels 的取法保持一致，但可按来源索引取自定义来源。
+ */
+const modelsForLlmSource = (type: string, customIndex?: number): string[] => {
+  const llm = store.AIconfig.llm
+  const arr = (v: any): string[] => (Array.isArray(v) ? v : [])
+  let list: string[] = []
+  let configured = ''
+  switch (type) {
+    case 'ollama':
+      list = arr(llm.ollama?.available_models); configured = llm.ollama?.model || ''
+      break
+    case 'lmstudio':
+      list = arr(llm.lmstudio?.available_models); configured = llm.lmstudio?.model || ''
+      break
+    case 'openai':
+      list = arr(llm.openai?.available_models); configured = llm.openai?.model || ''
+      break
+    case 'deepseek': {
+      // 单来源：模型列表取当前接口样式对应的配置块
+      const cfg: any = deepSeekStyleOf(type, llm.deepseek) === 'responses' ? llm.deepseekResponses : llm.deepseek
+      list = arr(cfg?.available_models); configured = cfg?.model || ''
+      break
+    }
+    case 'gpustack':
+      list = arr(llm.gpustack?.available_models); configured = llm.gpustack?.model || ''
+      break
+    case 'anthropic':
+      list = arr(llm.anthropic?.available_models); configured = llm.anthropic?.model || ''
+      break
+    case 'google':
+      list = arr(llm.google?.available_models); configured = llm.google?.model || ''
+      break
+    case 'azure':
+      list = arr(llm.azure?.available_models); configured = llm.azure?.deployment || ''
+      break
+    case 'custom': {
+      const c = llm.custom
+      const sources = Array.isArray(c?.sources) ? c.sources : []
+      const src: any = typeof customIndex === 'number' ? sources[customIndex] : sources[c?.activeIndex ?? 0]
+      list = arr(src?.available_models).length ? arr(src?.available_models) : arr(c?.available_models)
+      configured = src?.model || c?.model || ''
+      break
+    }
+    default:
+      return []
+  }
+  const out: string[] = []
+  for (const m of list) {
+    const name = typeof m === 'string' ? m.trim() : ''
+    if (name && !out.includes(name)) out.push(name)
+  }
+  if (configured && !out.includes(configured)) out.unshift(configured)
+  return out
+}
+
+/** 面板内容：按 store 里的启用顺序分组，自定义来源拆成多条 */
+const modelPickerGroups = computed<ModelPickerGroup[]>(() => {
+  const groups: ModelPickerGroup[] = []
+  const custom = store.AIconfig.llm.custom
+  const customSources = Array.isArray(custom?.sources) ? custom.sources : []
+  for (const type of (store.enabledLlmTypes || [])) {
+    if (type === 'custom') {
+      customSources.forEach((src: any, i: number) => {
+        if (store.isLlmSourceDisabled('custom', src?.id)) return
+        const name = src?.name && String(src.name).trim()
+        groups.push({
+          key: `custom:${i}`,
+          type: 'custom',
+          customSourceIndex: i,
+          // 未命名的来源用序号区分（多个自定义来源同名时也能分辨）
+          label: name || (store.locales == 'zh' ? `自定义 ${i + 1}` : `Custom ${i + 1}`),
+          models: modelsForLlmSource('custom', i),
+        })
+      })
+      continue
+    }
+    groups.push({
+      key: type,
+      type,
+      label: getLlmTypeDisplayName(type),
+      models: modelsForLlmSource(type),
+    })
+  }
+  return groups
+})
+
+/** 面板里某项是否是当前选中（来源 + 模型都相同） */
+const isCurrentSource = (group: ModelPickerGroup): boolean => {
+  const sel = currentModelSelection.value
+  if (sel.type !== group.type) return false
+  if (group.type !== 'custom') return true
+  return (sel.customSourceIndex ?? store.AIconfig.llm.custom?.activeIndex ?? 0) === (group.customSourceIndex ?? 0)
+}
+
+const isModelPickerActive = (group: ModelPickerGroup, model: string): boolean =>
+  isCurrentSource(group) && currentModelSelection.value.model === model
+
+/**
+ * 面板里真正显示的分组：
+ * - 未搜索：有模型的来源 + 当前来源；其余「暂无模型」的来源收在底部展开项里；
+ * - 搜索中：来源名命中 → 该来源全部模型；否则只留模型名命中的项（空组不显示）。
+ */
+const visibleModelPickerGroups = computed<ModelPickerGroup[]>(() => {
+  const groups = modelPickerGroups.value
+  const q = modelPickerQuery.value.trim().toLowerCase()
+  if (!q) {
+    return modelPickerShowEmpty.value
+      ? groups
+      : groups.filter((g) => g.models.length > 0 || isCurrentSource(g))
+  }
+  const out: ModelPickerGroup[] = []
+  for (const g of groups) {
+    const sourceHit = g.label.toLowerCase().includes(q)
+    const models = sourceHit ? g.models : g.models.filter((m) => m.toLowerCase().includes(q))
+    if (models.length) out.push({ ...g, models })
+  }
+  return out
+})
+
+/** 被收起的「暂无模型」来源数量（0 = 底部不显示展开项；搜索时不显示） */
+const modelPickerEmptyGroupCount = computed(() => {
+  if (modelPickerQuery.value.trim()) return 0
+  return modelPickerGroups.value.filter((g) => !g.models.length && !isCurrentSource(g)).length
+})
+
+/** 把模型名按搜索词切成「命中 / 未命中」片段，用于高亮 */
+const modelPickerNameParts = (name: string): Array<{ text: string; hit: boolean }> => {
+  const q = modelPickerQuery.value.trim()
+  if (!q) return [{ text: name, hit: false }]
+  const idx = name.toLowerCase().indexOf(q.toLowerCase())
+  if (idx < 0) return [{ text: name, hit: false }]
+  const out: Array<{ text: string; hit: boolean }> = []
+  if (idx > 0) out.push({ text: name.slice(0, idx), hit: false })
+  out.push({ text: name.slice(idx, idx + q.length), hit: true })
+  if (idx + q.length < name.length) out.push({ text: name.slice(idx + q.length), hit: false })
+  return out
+}
+
+/** 搜索框里按 Enter：直接选中当前列表里的第一个模型 */
+const pickFirstModelMatch = () => {
+  const group = visibleModelPickerGroups.value.find((g) => g.models.length > 0)
+  const model = group?.models[0]
+  if (group && model) pickModelInPicker(group, model)
+}
+
+const closeModelPicker = () => {
+  modelPickerVisible.value = false
+  modelPickerQuery.value = ''
+}
+
+/** 清除本聊天的模型覆盖，重新跟随全局（预设「跟随默认」时可用；与旧占位项语义一致） */
+const followGlobalModelInPicker = () => {
+  const chat = currentChat.value
+  if (!chat) return
+  chat.config.llmType = ''
+  chat.config.model = ''
+  chat.config.customSourceIndex = undefined
+  chat.config.llmPinned = false
+  saveChats()
+  closeModelPicker()
+}
+
+/** 刷新模型列表：只探测当前生效来源（与旧「选择模型」下拉点开时的刷新一致） */
+const refreshModelPicker = async () => {
+  if (modelPickerRefreshing.value) return
+  modelPickerRefreshing.value = true
+  try { await onModelSelectRefresh() } finally { modelPickerRefreshing.value = false }
+}
+
+/**
+ * 点击来源标题：把聊天切到这个来源（用它自己的默认模型，和旧「模型类型」下拉一致），
+ * 然后探测它的模型列表 —— 没探测过的来源（本地 Ollama / LM Studio 等）也能在面板里刷出模型。
+ * 面板保持打开，探测结果直接出现在该来源下面。
+ */
+const selectLlmSourceInPicker = async (group: ModelPickerGroup) => {
+  const chat = currentChat.value
+  if (!chat) return
+  if (!isCurrentSource(group)) {
+    const list = modelsForLlmSource(group.type, group.customSourceIndex)
+    chat.config.llmType = group.type
+    chat.config.customSourceIndex = group.type === 'custom' ? group.customSourceIndex : undefined
+    chat.config.model = getDefaultModel(group.type, group.customSourceIndex) || list[0] || ''
+    // 在本聊天里显式选定来源 → 不再跟随全局 / 预设默认
+    chat.config.llmPinned = true
+    chat.online = false
+    saveChats()
+  }
+  await refreshModelPicker()
+}
+
+const toggleModelPicker = () => {
+  if (isAnyExecuting.value) return
+  if (modelPickerVisible.value) { closeModelPicker(); return }
+  const rect = modelPickerBtnRef.value?.getBoundingClientRect()
+  const panelWidth = 240
+  const left = rect ? Math.min(rect.left, window.innerWidth - panelWidth - 8) : 8
+  const top = rect ? rect.bottom + 4 : 56
+  modelPickerPos.value = {
+    left: Math.max(8, left),
+    top: Math.max(8, Math.min(top, window.innerHeight - 140)),
+  }
+  modelPickerShowEmpty.value = false
+  modelPickerQuery.value = ''
+  modelPickerVisible.value = true
+  // 打开即可直接输入搜索
+  void nextTick(() => modelPickerSearchRef.value?.focus())
+  void refreshModelPicker()
+}
+
+/**
+ * 选中面板里的一项：来源与模型一起写进当前聊天配置。
+ * 与旧「模型类型」下拉一致：换来源后原连接状态失效；显式选择即钉住本聊天（llmPinned）。
+ */
+const pickModelInPicker = (group: ModelPickerGroup, model: string) => {
+  if (isModelPickerActive(group, model)) { closeModelPicker(); return }
+  const chat = currentChat.value
+  if (!chat) return
+  const sourceChanged = !isCurrentSource(group)
+  chat.config.llmType = group.type
+  chat.config.customSourceIndex = group.type === 'custom' ? group.customSourceIndex : undefined
+  chat.config.model = model
+  chat.config.llmPinned = true
+  if (sourceChanged) chat.online = false
+  saveChats()
+  closeModelPicker()
+}
+
+// 执行中 / 切换聊天时收起面板：面板里显示的是当前聊天的模型，切走即失效
+watch(isAnyExecuting, (running) => { if (running) closeModelPicker() })
+watch(currentChatIndex, () => closeModelPicker())
 
 // ==================== 发送消息 - 统一入口 ====================
 
@@ -9255,6 +9605,9 @@ const toolArgStreamKey = (n: string): string | null => {
     case 'server-search':
     case 'kb_search':
     case 'search_files': return 'query'
+    case 'read_image': return 'path'
+    case 'working_directory': return 'path'
+    case 'glob': return 'pattern'
     case 'skill': return 'name'
     case 'ask_user': return 'question'
     case 'run_subagent': return 'prompt'
@@ -9321,6 +9674,8 @@ const unitArgsText = (unit: any): string => {
       const inner = args?.args && typeof args.args === 'object' && Object.keys(args.args).length ? prettyJson(args.args) : ''
       return [head || 'MCP', inner].filter(Boolean).join('\n')
     }
+    case 'glob':
+      return typeof args?.pattern === 'string' ? args.pattern : prettyJson(args)
     case 'search_files':
       if (typeof args?.query === 'string') {
         return args.filePattern ? `${args.query} (${args.filePattern})` : args.query
@@ -9482,6 +9837,46 @@ const unitResultText = (unit: any): string => {
       if (typeof r === 'string') return r
       if (typeof r?.description === 'string') return r.description
       return prettyJson(r)
+    case 'shell': {
+      // 只显示命令 + 退出状态；正文（stdout/modelText）留给展开面板，避免卡片里刷几百 KB
+      const cmd = String(r?.command ?? '')
+      const code = typeof r?.exitCode === 'number' ? r.exitCode : undefined
+      const suffix = r?.timedOut
+        ? (isZh ? '（超时）' : ' (timed out)')
+        : code !== undefined && code !== 0
+          ? ` · exit ${code}`
+          : ''
+      return `${cmd}${suffix}`
+    }
+    case 'read_image': {
+      return isZh ? `读取图片 ${r?.path ?? ''}` : `Read image ${r?.path ?? ''}`
+    }
+    case 'working_directory': {
+      return isZh ? `工作目录 → ${r?.cwd ?? ''}` : `Working directory → ${r?.cwd ?? ''}`
+    }
+    case 'job_list': {
+      const n = Array.isArray(r?.jobs) ? r.jobs.length : 0
+      return isZh ? `后台任务 ${n} 个` : `${n} background jobs`
+    }
+    case 'glob': {
+      const found = Array.isArray(r?.files) ? r.files.length : 0
+      return isZh ? `找到 ${found} 个文件` : `Found ${found} files`
+    }
+    case 'search_files': {
+      const hits = typeof r?.totalHits === 'number' ? r.totalHits : (Array.isArray(r?.results) ? r.results.length : 0)
+      return isZh ? `找到 ${hits} 处匹配` : `${hits} matches`
+    }
+    case 'read_file': {
+      // 只给路径 + 行区间（正文按行渲染，卡片里再铺全文会刷屏）
+      if (!r || typeof r !== 'object') return typeof r === 'string' ? r : prettyJson(r)
+      const total = typeof r.totalLines === 'number' ? r.totalLines : 0
+      const from = typeof r.offset === 'number' ? r.offset : 1
+      const to = typeof r.endLine === 'number' ? r.endLine : from
+      const range = total > 0 ? `${from}-${to}/${total}` : '0'
+      return isZh
+        ? `读取 ${r.path ?? ''}（${range} 行）`
+        : `Read ${r.path ?? ''} (lines ${range})`
+    }
     case 'write_file': {
       // 只给路径 + 行数/字数摘要（具体差异由编辑预览面板展示，避免整文件重复刷屏）
       if (!r || typeof r !== 'object') return typeof r === 'string' ? r : prettyJson(r)
@@ -10517,27 +10912,246 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   min-width: 0;
 }
 
-.model-select {
-  max-width: 150px;
-  flex: 1;
+/* 模型选择按钮：只显示当前模型名（来源在 title 提示里），外观沿用原 .model-select 的无边框风格 */
+.model-picker-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 180px;
+  min-width: 72px;
   height: 30px;
-  padding: 0 4px;
-  margin: 0px;
-  min-width: 85px;
-  /* 无边框（与输入卡片内的控件风格统一），但保留**正常背景色** */
+  padding: 0 6px;
+  margin: 0;
+  box-sizing: border-box;
+  flex: 0 1 auto;
   border: 0;
   border-radius: 6px;
   background-color: var(--backgroundColor);
   color: var(--fontColor);
   cursor: pointer;
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  user-select: none;
 }
-.model-select:hover:not(:disabled) {
+.model-picker-btn:hover:not(.disabled),
+.model-picker-btn.active {
   /* 悬浮只用中性淡色（不用菜单高亮色）：与正常背景同一色系 */
   background-color: color-mix(in srgb, var(--fontColor) 7%, var(--backgroundColor));
   color: var(--fontActiveColor);
 }
+.model-picker-btn.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+/* 模型名：唯一文字，占满按钮宽度并省略 */
+.model-picker-btn-model {
+  flex: 1;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.model-picker-btn .model-picker-btn-caret {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+/* 模型选择面板（teleport 到 body：fixed 定位，避免被 chat-header 的 overflow 裁剪） */
+.model-picker-panel {
+  position: fixed;
+  z-index: 1000;
+  width: 240px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--menuColor);
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--fontColor);
+}
+/* 顶部搜索框（取代原来的「选择模型」标题） */
+.model-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--borderColor);
+  flex-shrink: 0;
+}
+.model-picker-search-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.55;
+}
+.model-picker-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 12px;
+  outline: none;
+  margin: 0px;
+}
+.model-picker-search-input::placeholder {
+  color: color-mix(in srgb, var(--fontColor) 45%, transparent);
+}
+.model-picker-refresh {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--fontActiveColor);
+}
+.model-picker-refresh:hover {
+  background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
+}
+.model-picker-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+/* 来源分组标题（吸顶，长列表滚动时仍能看到自己属于哪个来源；点击 = 切到该来源并探测） */
+.model-picker-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 3px;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--fontColor) 60%, transparent);
+  white-space: nowrap;
+  position: sticky;
+  top: -4px;
+  background: var(--menuColor);
+  z-index: 1;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.model-picker-group:hover {
+  background: color-mix(in srgb, var(--fontActiveColor) 8%, var(--menuColor));
+}
+.model-picker-group.current {
+  color: var(--fontActiveColor);
+}
+.model-picker-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-picker-group-current {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 14px;
+  color: var(--fontActiveColor);
+  background: color-mix(in srgb, var(--fontActiveColor) 14%, transparent);
+}
+.model-picker-group-count {
+  flex-shrink: 0;
+  min-width: 14px;
+  height: 14px;
+  line-height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  text-align: center;
+  font-size: 9px;
+  background: color-mix(in srgb, var(--fontColor) 12%, transparent);
+}
+/* 来源下没有模型：与数量徽标同位置显示一行灰字 */
+.model-picker-group-none {
+  flex-shrink: 0;
+  font-size: 9px;
+  opacity: 0.7;
+}
+/* 底部「展开 N 个暂无模型的来源」 */
+.model-picker-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--borderColor);
+  font-size: 10px;
+  color: color-mix(in srgb, var(--fontColor) 60%, transparent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.model-picker-footer:hover {
+  color: var(--fontActiveColor);
+  background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent);
+}
+.model-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.model-picker-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 搜索命中片段：只加色加粗，不加浏览器默认的黄底 */
+.model-picker-item-name mark {
+  background: transparent;
+  color: var(--fontActiveColor);
+  font-weight: 600;
+}
+.model-picker-item:hover {
+  background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
+}
+.model-picker-item.active {
+  background: color-mix(in srgb, var(--fontActiveColor) 15%, transparent);
+  color: var(--fontActiveColor);
+}
+.model-picker-item.active i {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.model-picker-group-empty {
+  padding: 4px 8px 8px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: color-mix(in srgb, var(--fontColor) 55%, transparent);
+  white-space: normal;
+}
+/* 「跟随默认」行：预设跟随默认时改回跟随全局 */
+.model-picker-follow {
+  color: var(--fontActiveColor);
+}
+.model-picker-follow i {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  font-size: 11px;
+}
+.model-picker-divider {
+  height: 1px;
+  background: var(--borderColor);
+  margin: 4px 0;
+}
+
 /* 下拉列表项：也用正常背景色（否则展开的选项列表会跟着菜单底色） */
-.model-select option,
 .mode-select option {
   background-color: var(--backgroundColor);
   color: var(--fontColor);

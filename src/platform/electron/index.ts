@@ -582,6 +582,20 @@ const appPort: AppPort = {
     await ipc()?.invoke('notify-file-changed', payload)
   },
 
+  /** 后台 shell 任务（主页顶栏面板）：列表只读、停止杀整棵进程树 */
+  async listShellJobs() {
+    const res: any = await ipc()?.invoke('shell-jobs:list')
+    return res && typeof res === 'object' ? res : { ok: false, jobs: [], error: 'no-response' }
+  },
+  async killShellJob(id: string) {
+    const res: any = await ipc()?.invoke('shell-jobs:kill', id)
+    return res && typeof res === 'object' ? res : { ok: false, error: 'no-response' }
+  },
+  async dismissShellJob(id: string) {
+    const res: any = await ipc()?.invoke('shell-jobs:dismiss', id)
+    return res && typeof res === 'object' ? res : { ok: false }
+  },
+
   /** 桌面进程不会被系统回收，长任务不需要前台保活（能力位为 none，调用方本就不会调） */
   async beginLongTask() {
     return { success: false, error: 'not-supported' }

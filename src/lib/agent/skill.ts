@@ -29,11 +29,14 @@ export { setPluginToolNames as __setPluginToolNamesForTest } from './capabilitie
 /** 技能模式 agent 的默认可见工具（可按技能元数据裁剪） */
 export const SKILL_AGENT_DEFAULT_TOOLS = [
   'read_file',
+  'read_image',
   'write_file',
   'replace_in_file',
   'multi_replace',
   'list_dir',
   'search_files',
+  'glob',
+  'working_directory',
   'run_python',
   'kb_search',
   'web_search',
@@ -96,7 +99,7 @@ export function buildSkillSystemPrompt(
     usageLines.push('- 需要用户补充信息时用 ask_user 提问（不要直接输出问题）：能穷举选项就用 questions + options（可 multi_select 多选、推荐项放第一位并加 "(Recommended)"），一次可问多题，每题都留了自定义回答位。')
   }
   usageLines.push('- 需要引用本地资料时用 read_file / search_files / kb_search；需要执行代码时用 run_python；需要联网时用 web_search + web_fetch。')
-  usageLines.push('- read_file 单次返回有上限：返回 truncated=true 时要用 offset=nextOffset 继续读，直到 truncated=false 才算读完（读长文档 / 大文件时必须续读）。')
+  usageLines.push('- read_file 返回带行号的内容，offset / limit 都是**行**：末尾写「本次第 a-b 行 / 共 T 行」，没读完就用 offset=下一行 继续读，直到看到「已读到文件末尾」才算读完（读长文档 / 大文件时必须续读）。')
   // 资源提示（借鉴 DSH "资源按需加载、结果不枚举技能目录"）：不把全部文件路径
   // 注入上下文（超大型技能可达上万文件，会导致推理被截断），只给技能目录 +
   // 总数 + 少量示例，让模型用 list_dir / search_files / read_file 自行探索。
@@ -187,7 +190,7 @@ export function buildSkillAgentOptions(params: StartSkillAgentParams): AgentOpti
  * 避免漏改一处导致模型不会用（历史上已踩过“工具清单只改一处”的坑）。
  */
 const REPLACE_TOOLS_HINT =
-  '   - replace_in_file / multi_replace：局部精确修改已有文件（在文件某段插入/替换/删除几行时优先用它们，不要用 write_file 把整个大文件整写回去）。硬性要求：① 改文件前先用 read_file 读取目标区域，old_string 必须从读到的原文里【逐字复制】（含缩进、标点、空行），禁止凭记忆手写；② old_string 取 3~10 行为宜（太少易不唯一，太多易抄错漏行）；③ 文件很小（约 200 行以内）时直接用 write_file 整写更稳；④ 未命中时会返回可复制的候选片段，请据此修正后重试，不要重复提交同一段 old_string'
+  '   - replace_in_file / multi_replace：局部精确修改已有文件（在文件某段插入/替换/删除几行时优先用它们，不要用 write_file 把整个大文件整写回去）。硬性要求：① 改文件前先用 read_file 读取目标区域，old_string 必须从读到的原文里【逐字复制】（含缩进、标点、空行），禁止凭记忆手写；② old_string 取 3~10 行为宜（太少易不唯一，太多易抄错漏行）；③ 文件很小（约 200 行以内）时直接用 write_file 整写更稳；④ 未命中时会返回可复制的候选片段，请据此修正后重试，不要重复提交同一段 old_string；⑤ 同一段原文要改多处（相同行出现 N 次）时，在这一条上写 replace_all=true 一次改完（结果里的 applied / replaced 是实际替换处数），不要为每一处各编一个 old_string；⑥ old_string 与 new_string 相同时会被直接拒绝（空操作不写盘）；⑦ multi_replace 的**任意两条 old_string 不允许共享任何一行**——相邻语句拆成两条时最容易在接缝行（如两条都含 `store.add(x);`）撞成"区间重叠"：这时把它们合并成一条（两段都写进同一个 old/new），或让其中一条不包含接缝行；被拒时按报错里的「第几条与第几条 + 共享片段」改'
 
 /**
  * read_file 的分段读取（续读）说明。
@@ -197,7 +200,7 @@ const REPLACE_TOOLS_HINT =
  * 就以为“只有这些内容”。
  */
 const READ_FILE_HINT =
-  '   - read_file：读取文件内容；write_file：写入文件。read_file 单次返回有上限（纯文本约前 100KB、PDF/Word/Excel 前 20000 字符）：返回 truncated=true 时说明只读到一段，必须再用 offset=nextOffset 继续读，反复续读直到 truncated=false（读长文档 / 大文件时不要只读第一段就下结论）；也可用 offset / limit 直接定位到指定字符区间。读**技能自带资源**（SKILL.md 里的 regulations/x.md 这类）时，用 read_file / list_dir / search_files 的 skill 参数（例：read_file({"skill":"技能名","path":"references/x.md"})）；不带 skill 的相对路径锚定的是当前工作区'
+  '   - read_file：读取文本文件（返回带行号的内容，offset / limit 单位都是行，1-based）。末尾会写「本次第 a-b 行 / 共 T 行」：没读到「已读到文件末尾」就必须再用 offset=下一行 继续读（读长文档 / 大文件时不要只读第一段就下结论）；单行超 2000 字符会被截断并标注。读**技能自带资源**（SKILL.md 里的 regulations/x.md 这类）时，用 read_file / list_dir / search_files 的 skill 参数（例：read_file({"skill":"技能名","path":"references/x.md"})）；不带 skill 的相对路径锚定的是当前工作区'
 
 /**
  * 浏览器工具的使用规则。
@@ -225,13 +228,16 @@ export function buildToolUsageContext(enabledTools?: readonly string[] | null): 
   const tools = enabledTools ?? [...SKILL_AGENT_DEFAULT_TOOLS]
   const toolList: string[] = []
   if (toolEnabled(tools, 'list_dir')) toolList.push('   - list_dir：列出目录内容（用户问"某个盘/文件夹里有什么"时优先用它）')
+if (toolEnabled(tools, 'working_directory')) toolList.push('   - working_directory：切换本会话工作目录（只能在工作区内；传空字符串重置）')
     if (toolEnabled(tools, 'update_plan')) toolList.push('   - update_plan：制定/更新执行计划')
     if (toolEnabled(tools, 'exit_plan_mode')) toolList.push('   - exit_plan_mode：把计划提交用户评审（Approve / 继续完善）')
     if (toolEnabled(tools, 'update_todo')) toolList.push('   - update_todo：维护任务清单')
     if (toolEnabled(tools, 'ask_user')) toolList.push('   - ask_user：向用户提问（支持单选 / 多选 / 多题 / 自定义回答）')
   if (toolEnabled(tools, 'read_file') || toolEnabled(tools, 'write_file')) toolList.push(READ_FILE_HINT)
+if (toolEnabled(tools, 'read_image')) toolList.push('   - read_image：把本地图片交给模型看（PNG / JPEG / WebP / GIF，单张 ≤8MB）')
   if (toolEnabled(tools, 'replace_in_file') || toolEnabled(tools, 'multi_replace')) toolList.push(REPLACE_TOOLS_HINT)
-  if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容')
+  if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容（默认大小写敏感，可 regex / filePattern）')
+  if (toolEnabled(tools, 'glob')) toolList.push('   - glob：按路径 / 文件名查找文件（*.md 找任意目录、src/**/*.ts 限定目录；结果按修改时间倒序）')
   if (toolEnabled(tools, 'run_python')) toolList.push('   - run_python：执行 Python 代码（处理数据、计算、批量文件操作等）')
   if (toolEnabled(tools, 'kb_search')) toolList.push('   - kb_search：检索本地知识库')
   if (toolEnabled(tools, 'web_search') || toolEnabled(tools, 'web_fetch')) toolList.push('   - web_search / web_fetch：联网搜索与读取网页')
@@ -241,6 +247,7 @@ export function buildToolUsageContext(enabledTools?: readonly string[] | null): 
   if (toolEnabled(tools, 'mcp_call')) toolList.push('   - mcp_call：调用已启用的 MCP 服务')
   if (toolEnabled(tools, 'shell')) toolList.push('   - shell：执行 Shell 命令（需完全访问）')
   if (toolEnabled(tools, 'run_subagent')) toolList.push('   - run_subagent：派生子代理独立完成子任务（可后台运行，用 job_output 收集结果、job_kill 停止）')
+if (toolEnabled(tools, 'job_list')) toolList.push('   - job_list：列出后台任务（找回 jobId，再用 job_output / job_kill）')
   // 插件提供的工具：上面那串是按内置工具名硬编码的，因此**插件工具必须在这里兜底列出**，
   // 否则"用户勾了插件工具、模型却完全不知道它存在"——勾选等于白勾。
   // 实测踩过：预设里勾了 8 个 mathproof_*，系统提示词的可用工具清单里一个都没有，
@@ -324,9 +331,12 @@ export function buildAutonomousSystemPrompt(
   const tools = enabledTools ?? [...SKILL_AGENT_DEFAULT_TOOLS]
   const toolList: string[] = []
   if (toolEnabled(tools, 'list_dir')) toolList.push('   - list_dir：列出目录内容（用户问"某个盘/文件夹里有什么"时优先用它）')
+if (toolEnabled(tools, 'working_directory')) toolList.push('   - working_directory：切换本会话工作目录（只能在工作区内；传空字符串重置）')
   if (toolEnabled(tools, 'read_file') || toolEnabled(tools, 'write_file')) toolList.push(READ_FILE_HINT)
+if (toolEnabled(tools, 'read_image')) toolList.push('   - read_image：把本地图片交给模型看（PNG / JPEG / WebP / GIF，单张 ≤8MB）')
   if (toolEnabled(tools, 'replace_in_file') || toolEnabled(tools, 'multi_replace')) toolList.push(REPLACE_TOOLS_HINT)
-  if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容')
+  if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容（默认大小写敏感，可 regex / filePattern）')
+  if (toolEnabled(tools, 'glob')) toolList.push('   - glob：按路径 / 文件名查找文件（*.md 找任意目录、src/**/*.ts 限定目录；结果按修改时间倒序）')
   if (toolEnabled(tools, 'run_python')) toolList.push('   - run_python：执行 Python 代码（处理数据、计算、批量文件操作等）')
   if (toolEnabled(tools, 'kb_search')) toolList.push('   - kb_search：检索本地知识库')
   if (toolEnabled(tools, 'web_search') || toolEnabled(tools, 'web_fetch')) toolList.push('   - web_search / web_fetch：联网搜索与读取网页')

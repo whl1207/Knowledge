@@ -79,6 +79,7 @@ export const LAN_GUEST_READONLY_TOOLS: string[] = [
   'read_file',
   'list_dir',
   'search_files',
+  'glob',
   'kb_search',
   'web_search',
   'web_fetch',

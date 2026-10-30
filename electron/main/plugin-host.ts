@@ -1533,7 +1533,11 @@ class PluginHost {
             `shell 被沙箱策略拒绝：当前模式 ${policy.mode}（仅 trusted 放行；调用时需显式传 { policy: 'trusted' }）`,
           )
         }
-        const res = await shellService.executeCommand(command, opts?.cwd)
+        const res = await shellService.executeCommand(command, {
+          cwd: opts?.cwd,
+          // 插件侧调用也要能用上输出上限 / 落盘（spill 按插件 id 单独分目录）
+          sessionId: `plugin-${String(rec.id || rec.dir || 'plugin')}`,
+        })
         this.log(rec, 'warn', `[audit] runShell: ${command}`)
         return {
           code: res.exitCode ?? (res.success ? 0 : -1),

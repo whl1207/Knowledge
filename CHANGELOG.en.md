@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-10-31
+
+### Improved
+
+- **The model panel now opens with a search box**: typing filters by model or source name with highlighted matches, Enter picks the first match and Esc closes it; the panel is narrower and the header button shows only the current model name.
+- **Max tokens default 16000 → 32768, upper limit opened to 262144**: each request is clamped to the selected model's known output limit (e.g. `gpt-4o` 16384, `claude-3-haiku` 4096) and auto-downgrades once if the server still rejects it, so long answers and agent file writes are no longer cut off as often.
+
+## 2026-10-30
+
+### Improved
+
+- **The home "model type" and "model" dropdowns are merged into one model panel**: clicking the model button picks a source and model in one step from every enabled source, clicking a source name switches to it and probes its models, and preset-follows-default chats can return to the global model from the panel.
+
 ## 2026-10-28
 
 ### Fixed

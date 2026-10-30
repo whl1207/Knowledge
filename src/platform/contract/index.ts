@@ -454,6 +454,25 @@ export interface AppPort {
    * 返回退订函数。
    */
   onBackPressed(cb: () => boolean | Promise<boolean>): () => void
+  /** 后台 shell 任务列表（主页顶栏「后台命令」面板；只读，不消费模型侧的输出游标） */
+  listShellJobs(): Promise<{ ok: boolean; jobs: ShellJobUi[]; error?: string }>
+  /** 停止一个后台 shell 任务（杀整棵进程树） */
+  killShellJob(id: string): Promise<{ ok: boolean; error?: string }>
+  /** 移除一条已结束的任务记录 */
+  dismissShellJob(id: string): Promise<{ ok: boolean }>
+}
+
+/** 后台 shell 任务的界面视图（不含完整输出，只有尾部几行） */
+export interface ShellJobUi {
+  id: string
+  command: string
+  description: string
+  cwd: string
+  status: 'running' | 'completed' | 'error'
+  exitCode?: number
+  signal?: string
+  startedAt: number
+  output: string
 }
 
 /**
