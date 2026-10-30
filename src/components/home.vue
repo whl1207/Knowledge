@@ -7219,30 +7219,27 @@ const completeAssistantReply = (chatData: any, content: string, metadata?: any) 
     // 兜底：只要模型回复已结束，就关闭正在执行的 spinner；不再依赖 update_todo 是否同步更新。
     lastMessage.isExecuting = false
 
-    // 记录 Token 统计（优先用 API 返回的 metadata，否则估算）
-    if (metadata) {
-      const promptTokens = metadata.prompt_tokens || metadata.promptTokens || 0
-      const completionTokens = metadata.completion_tokens || metadata.completionTokens || 0
-      const totalTokens = metadata.total_tokens || metadata.totalTokens || (promptTokens + completionTokens)
-      const duration = Date.now() - (lastMessage._startTime || Date.now())
-      const speed = duration > 0 ? (completionTokens / (duration / 1000)) : 0
-      lastMessage.tokenStats = {
-        promptTokens: promptTokens || 0,
-        completionTokens: completionTokens || 0,
-        totalTokens: totalTokens || 0,
-        speed: speed || 0,
-        duration: duration || 0
-      }
-    } else {
-      const duration = Date.now() - (lastMessage._startTime || Date.now())
-      const estimatedTokens = Math.ceil(content.length / 4)
-      lastMessage.tokenStats = {
-        promptTokens: 0,
-        completionTokens: estimatedTokens || 0,
-        totalTokens: estimatedTokens || 0,
-        speed: duration > 0 ? (estimatedTokens / (duration / 1000)) : 0,
-        duration: duration || 0
-      }
+    // 记录 Token 统计（优先用 API 返回的 usage，缺失时估算）。
+    // 注意：部分 OpenAI 兼容服务（本地 vLLM / llama.cpp / ninfer 等）流式只回
+    // finish_reason、不回 usage，此时 metadata 里没有任何 token 字段。若直接按
+    // metadata 取 0，界面会显示「0 tokens」且速度被隐藏，所以这里按输出内容估算。
+    const meta = metadata || {}
+    const promptTokens = Number(meta.prompt_tokens ?? meta.promptTokens ?? 0) || 0
+    const reportedCompletion = meta.completion_tokens ?? meta.completionTokens
+    // 输出 token 估算按正文 + 思考文本计算（思考 token 也计入 completion）
+    const outputChars = (content || '').length + String(lastMessage.reasoning || '').length
+    const completionTokens = (typeof reportedCompletion === 'number' && reportedCompletion > 0)
+      ? reportedCompletion
+      : Math.ceil(outputChars / 4)
+    const totalTokens = Number(meta.total_tokens ?? meta.totalTokens ?? 0) || (promptTokens + completionTokens)
+    const duration = Date.now() - (lastMessage._startTime || Date.now())
+    const speed = duration > 0 && completionTokens > 0 ? (completionTokens / (duration / 1000)) : 0
+    lastMessage.tokenStats = {
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      speed: speed || 0,
+      duration: duration || 0
     }
     delete lastMessage._startTime
   }

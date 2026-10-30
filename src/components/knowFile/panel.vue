@@ -23,6 +23,11 @@
      * 远程文件的单击预览由本组件直接改 store，所以必须在这里也守一次。
      */
     guardLeave?: () => Promise<boolean>
+    /**
+     * 只显示这个工作区（右侧栏文件标签用）：为空 = 沿用全局工作区列表。
+     * 设置后本面板不再改动全局 store.root / store.roots / store.tree，只维护自己的局部树。
+     */
+    scopeRoot?: string
   }>()
 
   /** 宿主（explorer.vue）用 node-opened 收起细长窗口下的整屏文件树抽屉 */
@@ -33,6 +38,30 @@
     /** 显式要求另开窗口 / 浮层（宿主先处理当前文件标签的未保存内容） */
     (e: 'open-standalone', payload: any): void
   }>()
+
+  /**
+   * 右侧栏文件树（scopeRoot 非空）：
+   * - 只从该工作区建树，搜索也只用它；
+   * - 树数据放在局部 ref，不覆盖全局 store.tree（主资源管理器的树还在用）；
+   * - 不切换全局 store.root / roots，删除/新建等操作仍用绝对路径。
+   */
+  const scopeRoot = computed(() => String(props.scopeRoot || '').replace(/[\\/]+$/, ''))
+  const scoped = computed(() => !!scopeRoot.value)
+  const effectiveRoot = computed(() => scopeRoot.value || String(store.root || ''))
+  const effectiveRoots = computed<string[]>(() => {
+    if (scoped.value) return [scopeRoot.value]
+    const roots = (store.roots && store.roots.length ? [...store.roots] : []).filter(Boolean)
+    if (!roots.length && store.root) roots.push(String(store.root))
+    return roots
+  })
+  /** 新建 / 粘贴的默认目录：范围内的面板只看自己的根，不跟随全局 store.path */
+  const currentDir = computed(() => (scoped.value ? scopeRoot.value : String(store.path || store.root || '')))
+  const localTree = ref<any[]>([])
+  const treeData = computed<any[]>(() => (scoped.value ? localTree.value : store.tree))
+  const setTreeData = (next: any[]) => {
+    if (scoped.value) localTree.value = next
+    else store.tree = next
+  }
 
   const filterText = ref('') //按文件名搜索（全树，有预算；不再用 el-tree 的本地过滤）
   const treeRef = ref<InstanceType<typeof ElTree>>() //树状图数据
@@ -78,6 +107,9 @@
       emit('open-file', { data })
       return
     }
+    // 右侧栏文件树只浏览/操作当前工作区：点文件夹交给 el-tree 展开收起，
+    // 不切换全局工作区、不驱动主界面右侧视图。
+    if (scoped.value) return
     // 目录可能属于**另一个工作区**（不在当前 root 下）：先把它所属的工作区设为当前工作区，
     // 否则跨工作区打开文件夹会被下面的 isPathInside 挡掉、右侧各视图拿不到点击的路径（静默无反应）
     const owner = store.roots
@@ -117,14 +149,14 @@
       }
       return
     }
-    // 点击工作区根目录时切换为当前工作区
+    // 点击工作区根目录时切换为当前工作区（右侧栏范围内不切换全局工作区）
     const isRootNode = store.roots.includes(data.path)
-    if (isRootNode) {
+    if (!scoped.value && isRootNode) {
       store.setActiveRoot(data.path)
     }
 
-    // 安卓：单击直接打开/进入（见 tapOpensDirectly 注释）
-    if (tapOpensDirectly) {
+    // 安卓 / 右侧栏文件树：单击直接打开文件（文件夹由 el-tree 单击展开）
+    if (tapOpensDirectly || scoped.value) {
       openOrEnterNode(data)
       return
     }
@@ -162,6 +194,8 @@
 
   // 开始重命名
   const startRename = async function(data: any) {
+    // 范围模式的根由聊天工作区固定，重命名根会让 scopedRoot 立即失效（右键菜单也不提供）
+    if (scoped.value && data?.path === scopeRoot.value) return
     try {
       const { value: newName } = await ElMessageBox.prompt('请输入新名称:', '重命名', {
         confirmButtonText: '确定',
@@ -174,14 +208,16 @@
       if (trimmed === data.label) return
       const result = await getPlatform().fs.renameFile(data.path, trimmed)
       if (result.success) {
-        // 若重命名的是工作区根目录，同步更新工作区列表
+        // 若重命名的是工作区根目录，同步更新工作区列表（右侧栏范围模式不改全局工作区）
         const newPath = result.newPath || data.path
-        const rootIdx = store.roots.indexOf(data.path)
-        if (rootIdx !== -1) {
-          store.roots[rootIdx] = newPath
-        }
-        if (store.root === data.path) {
-          store.root = newPath;
+        if (!scoped.value) {
+          const rootIdx = store.roots.indexOf(data.path)
+          if (rootIdx !== -1) {
+            store.roots[rootIdx] = newPath
+          }
+          if (store.root === data.path) {
+            store.root = newPath;
+          }
         }
         await refreshTreeAndViews();
         ElMessage.success('重命名成功');
@@ -235,8 +271,8 @@
     { immediate: true }
   )
 
-  /** 合并后的树：本地工作区 + 远程工作区（远程始终在所有折叠的最下方） */
-  const mergedTree = computed(() => [...store.tree, ...remoteTreeData.value])
+  /** 合并后的树：本地工作区 + 远程工作区（远程始终在所有折叠的最下方）；右侧栏只显示范围内的工作区 */
+  const mergedTree = computed(() => (scoped.value ? treeData.value : [...treeData.value, ...remoteTreeData.value]))
 
   /**
    * 懒加载单个目录：只读「这一层」。
@@ -668,8 +704,8 @@
    * 每个目录重新 listDir 时由 fetchDirNodes 按新偏好排好。
    */
   const applySort = () => {
-    if (!store.tree || !store.tree.length) return
-    store.tree = [...store.tree]
+    if (!treeData.value || !treeData.value.length) return
+    setTreeData([...treeData.value])
   }
 
   /** 设置排序方式；再次点击同一项切换升/降序 */
@@ -771,11 +807,9 @@
     // 避免重开模块/刷新时 el-tree 重建瞬间闪现"暂无文件"，此时应显示"正在加载"
     treeLoading.value = true
     try {
-      let roots = (store.roots && store.roots.length ? [...store.roots] : []).filter(Boolean)
-      // 兼容：未注册工作区列表但已设置 root 时，视为单一工作区
-      if (!roots.length && store.root) roots = [store.root]
+      const roots = effectiveRoots.value
       if (!roots.length) {
-        store.tree = []
+        setTreeData([])
         return
       }
 
@@ -789,7 +823,7 @@
         }
       }))
       const kept = roots.filter((_r: string, i: number) => alive[i])
-      if (kept.join('\n') !== store.roots.join('\n')) {
+      if (!scoped.value && kept.join('\n') !== store.roots.join('\n')) {
         store.roots = kept
         if (!kept.includes(store.root)) {
           store.root = kept[0] || ''
@@ -800,16 +834,21 @@
       }
 
       // 根节点直接由工作区列表构造，不需要磁盘扫描
-      store.tree = markRawTree(kept.map((r: string) => markRaw({
+      setTreeData(markRawTree(kept.map((r: string) => markRaw({
         label: folderLabelOf(r) || r,
         path: r,
         type: 'folder',
         extension: 'folder',
         isRoot: true,
-      })))
+      }))))
       pruneExpandedKeys()
       // 等 el-tree 完成 setData（会按 expandedKeys 递归展开并 listDir）后再收起 loading
       await nextTick()
+      // 右侧栏：确保当前工作区根是展开的（default-expanded-keys 只在初始化时生效）
+      if (scoped.value && scopeRoot.value) {
+        const rootNode = (treeRef.value as any)?.getNode?.(scopeRoot.value)
+        if (rootNode && !rootNode.expanded) rootNode.expand?.()
+      }
     } finally {
       refreshInFlight = false
       treeLoading.value = false
@@ -827,7 +866,8 @@
    */
   const refreshTreeAndViews = async () => {
     await refreshTree()
-    store.knowRefreshViews()
+    // 右侧栏范围模式只维护自己这棵树，不驱动主界面的日历 / 看板等视图
+    if (!scoped.value) store.knowRefreshViews()
   }
 
   // 通过对话框，打开其他文件
@@ -863,13 +903,13 @@
 
   // 创建文件（类型见 lib/knowFile/newFileTypes.ts：Markdown / Excalidraw / draw.io / 工作流 / 数据画布 / 脚手架 / Office 三件套）
   const createFile = async (fileName: string, fileType: NewFileTypeKey = 'md') => {
-    if (!store.root) {
+    if (!effectiveRoot.value) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
     const def = newFileType(fileType) || NEW_FILE_TYPES[0]
     // 右键某个文件夹时建在它里面；否则建在**当前文件夹**（与「文件」视图一致，不再一律落到工作区根目录）
-    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : (store.path || store.root)
+    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : currentDir.value
     const suffix = def.ext
     const path = await getPlatform().fs.createFile(targetDir, fileName + suffix);
     if (path) {
@@ -882,12 +922,12 @@
   };
 
   const createFolder = async (folderName: string) => {
-    if (!store.root) {
+    if (!effectiveRoot.value) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
     // 与创建文件同一套：右键文件夹时建在它里面，否则建在当前文件夹
-    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : (store.path || store.root)
+    const targetDir = contextMenu.value.node?.type === 'folder' ? contextMenu.value.node.path : currentDir.value
     const dir = await getPlatform().fs.createFolder(targetDir, folderName);
     if (dir) {
       ElMessage.success(`文件夹 "${folderName}" 创建成功`);
@@ -899,7 +939,7 @@
   // 与「文件」视图的 createNewFile（view_file.vue）**完全同一套**：类型在菜单里选好，
   // 弹窗只问文件名（ElMessageBox.prompt）——两处外观/文案/校验保持一致。
   const promptCreateFile = async (fileType: NewFileTypeKey) => {
-    if (!store.root) {
+    if (!effectiveRoot.value) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
@@ -920,7 +960,7 @@
 
   // 通过弹窗创建文件夹（与「文件」视图 createNewFolder 同一套文案/校验）
   const promptCreateFolder = async () => {
-    if (!store.root) {
+    if (!effectiveRoot.value) {
       ElMessage.warning('请先打开一个文件夹');
       return;
     }
@@ -962,9 +1002,9 @@
   /** 粘贴目标目录：右键文件夹 → 它本身；右键文件 → 它所在目录；空白处 → 当前目录 */
   const pasteTargetDir = (): string => {
     const node = contextMenu.value.node
-    if (!node) return store.path || store.root
+    if (!node) return currentDir.value
     if (node.type === 'folder') return node.path
-    return dirOfPath(node.path) || store.path || store.root
+    return dirOfPath(node.path) || currentDir.value
   }
 
   /** 将剪贴板中的文件/文件夹粘贴到目标目录（与「文件」视图共用剪贴板，剪切项走移动） */
@@ -1139,7 +1179,7 @@
       transform: ''
     };
     contextMenu.value.node = data;
-    contextMenu.value.isRoot = store.roots.includes(data.path);
+    contextMenu.value.isRoot = scoped.value ? data.path === scopeRoot.value : store.roots.includes(data.path);
     contextMenu.value.isRemote = data?.remote === true;
     adjustContextMenuPosition();
   };
@@ -1214,7 +1254,9 @@
   const loadExpandedKeys = (root: string) => {
     try {
       const map = JSON.parse(localStorage.getItem(EXPAND_STORAGE_KEY) || '{}')
-      expandedKeys.value = Array.isArray(map[root]) ? map[root] : []
+      const keys = Array.isArray(map[root]) ? map[root] : []
+      // 右侧栏只有当前工作区一个根：默认展开它，打开就是文件列表，而不是一个折叠的根目录
+      expandedKeys.value = scoped.value && root && !keys.includes(root) ? [root, ...keys] : keys
     } catch {
       expandedKeys.value = []
     }
@@ -1222,10 +1264,11 @@
 
   /** 保存当前仓库的展开状态 */
   const saveExpandedKeys = () => {
-    if (!store.root) return
+    const root = effectiveRoot.value
+    if (!root) return
     try {
       const map = JSON.parse(localStorage.getItem(EXPAND_STORAGE_KEY) || '{}')
-      map[store.root] = [...expandedKeys.value]
+      map[root] = [...expandedKeys.value]
       localStorage.setItem(EXPAND_STORAGE_KEY, JSON.stringify(map))
     } catch { /* 忽略存储异常 */ }
   }
@@ -1252,7 +1295,7 @@
    */
   const pruneExpandedKeys = () => {
     if (!expandedKeys.value.length) return
-    const roots = store.roots
+    const roots = effectiveRoots.value
     if (!roots.length) return
     const before = expandedKeys.value.length
     expandedKeys.value = expandedKeys.value.filter((p) => roots.some((r: string) => isPathInside(p, r)))
@@ -1279,11 +1322,14 @@
 
   // 仓库位置变更：清理旧仓库残留的展开状态，并恢复新仓库自己的展开状态
   watch(
-    () => store.root,
+    () => effectiveRoot.value,
     (newRoot, oldRoot) => {
       if (newRoot === oldRoot) return
-      if (oldRoot) clearExpandedKeys(oldRoot)
+      // 右侧栏范围模式可能只是切换聊天工作区：不能删掉旧根在 localStorage 里的展开状态
+      // （同一个根可能正被主资源管理器使用），只切换到新根的记录即可。
+      if (!scoped.value && oldRoot) clearExpandedKeys(oldRoot)
       loadExpandedKeys(newRoot)
+      if (scoped.value) void refreshTree()
     }
   )
 
@@ -1291,11 +1337,12 @@
   watch(
     () => store.roots.join('\n'),
     (newRoots, oldRoots) => {
+      if (scoped.value) return
       if (newRoots === oldRoots) return
       if (store.root || store.roots.length) {
         refreshTree()
       } else {
-        store.tree = []
+        setTreeData([])
       }
     }
   )
@@ -1305,6 +1352,8 @@
     if (!contextMenu.value.node) return
     const node = contextMenu.value.node
     const path = node.path
+    // 范围模式：不允许把整个范围根目录删掉（根节点的右键菜单也不提供删除）
+    if (scoped.value && path === scopeRoot.value) return
     const isFolder = node.type === 'folder'
     const label = node.label
 
@@ -1419,12 +1468,12 @@
   onMounted(async () => {
     disposeFileWatch = onFileSystemChanged(handleFsChanged);
 
-    if (store.root || (store.roots && store.roots.length)) {
+    if (effectiveRoot.value || effectiveRoots.value.length) {
       // 恢复上次保存的展开状态（须在树数据加载前调用，node.initialize 才会按 key 展开）
-      loadExpandedKeys(store.root)
+      loadExpandedKeys(effectiveRoot.value)
       await refreshTree();
       // 启动文件监听（租约：来回切模块时复用现有 watcher，不重建）
-      await acquireFileWatch([...store.roots]);
+      await acquireFileWatch(effectiveRoots.value);
       watchAcquired = true;
     }
   });
@@ -1473,12 +1522,12 @@
   // 「新建」子菜单可用条件：已打开本地工作区，且未右键远程节点（只读）；
   // 文件节点不提供（与「文件」视图一致，避免新建到非同级目录）
   const canCreateInMenu = computed(
-    () => !!store.root && !contextMenu.value.isRemote && (!contextMenu.value.node || contextMenu.value.node.type === 'folder')
+    () => !!effectiveRoot.value && !contextMenu.value.isRemote && (!contextMenu.value.node || contextMenu.value.node.type === 'folder')
   );
 
   // 判断该节点是否为工作区根目录
   const isWorkspaceRoot = (path: string) => {
-    return store.roots.includes(path)
+    return scoped.value ? path === scopeRoot.value : store.roots.includes(path)
   }
 
   // 判断该节点是否已在标签页中打开
@@ -1511,7 +1560,7 @@
     const seq = ++searchSeq
     searchLoading.value = true
     try {
-      const roots = (store.roots && store.roots.length ? [...store.roots] : [store.root]).filter(Boolean)
+      const roots = effectiveRoots.value
       const res = await getPlatform().fs.searchNames(roots, kw, { maxResults: 200, requestId: seq })
       if (seq !== searchSeq) return // 已有更新的输入：丢弃旧结果
       searchResults.value = (res.results || []).map((r: any) => ({ ...r, dirLabel: parentDirOf(r.path) }))
@@ -1543,10 +1592,12 @@
   /** 点击搜索结果：切到所属工作区并按文件打开（与树里双击同一套出口） */
   const openFromSearch = (item: any) => {
     if (!item?.path) return
-    const owner = store.roots
-      .filter((r: string) => isPathInside(item.path, r))
-      .sort((a: string, b: string) => b.length - a.length)[0]
-    if (owner && owner !== store.root) store.setActiveRoot(owner)
+    if (!scoped.value) {
+      const owner = store.roots
+        .filter((r: string) => isPathInside(item.path, r))
+        .sort((a: string, b: string) => b.length - a.length)[0]
+      if (owner && owner !== store.root) store.setActiveRoot(owner)
+    }
     emit('node-opened', item)
     emit('open-file', { data: item })
   }
@@ -1561,11 +1612,11 @@
   <div class="bg" @mouseleave="hideContextMenu">
     <div class="list scoll" v-if="mode=='file'" @contextmenu.prevent="showViewMenu">
       <!-- 未打开工作区时隐藏工具栏（无可用控件），由下方空态引导提供「打开工作区/打开文件」入口 -->
-      <div class="tree-toolbar" :title="store.root" v-if="store.root!='' || store.remoteRoots.length">
+      <div class="tree-toolbar" :title="effectiveRoot" v-if="effectiveRoot!='' || (!scoped && store.remoteRoots.length)">
         <!-- 左侧插槽（细长窗口的抽屉返回按钮；桌面并排布局不用） -->
         <slot name="toolbar-left" />
         <!-- 文件搜索（放在原「视图选择」的位置；视图选择现已常驻顶部工具栏，见 ViewToolbar.vue） -->
-        <div v-if="store.root!=''" class="tree-search-box">
+        <div v-if="effectiveRoot!=''" class="tree-search-box">
           <i class="fa fa-search"></i>
           <input v-model="filterText" class="tree-search-input" :placeholder="store.locales=='zh'?'搜索文件':'search file'"/>
           <div v-if="filterText" class="tree-search-clear" @click="filterText=''" :title="store.locales=='zh'?'清除':'Clear'">
@@ -1577,16 +1628,16 @@
       </div>
       <div class="tree-scroll scoll">
         <!-- 未打开任何工作区：清晰引导新手如何开始使用 -->
-        <div v-if="store.root=='' && !store.remoteRoots.length" class="tree-empty-guide">
+        <div v-if="effectiveRoot=='' && !store.remoteRoots.length" class="tree-empty-guide">
           <div class="guide-inner">
             <i class="fa fa-folder-open-o guide-icon"></i>
             <div class="guide-title">{{ store.locales=='zh' ? '打开工作区开始使用' : 'Open a Workspace to Start' }}</div>
             <div class="guide-desc">{{ store.locales=='zh' ? '选择一个文件夹作为工作区，即可浏览和管理其中的文件与知识库；也可以单独打开一个文件查看。' : 'Pick a folder as your workspace to browse and manage files and knowledge bases, or open a single file directly.' }}</div>
             <div class="guide-actions">
-              <button class="guide-btn guide-btn-primary" @click="openFolderDialog">
+              <button v-if="!scoped" class="guide-btn guide-btn-primary" @click="openFolderDialog">
                 <i class="fa fa-folder-open-o"></i><span>{{ store.locales=='zh' ? '打开本地工作区' : 'Local Workspace' }}</span>
               </button>
-              <button class="guide-btn guide-btn-remote" @click="promptAddRemote">
+              <button v-if="!scoped" class="guide-btn guide-btn-remote" @click="promptAddRemote">
                 <i class="fa fa-cloud"></i><span>{{ store.locales=='zh' ? '连接远程工作区' : 'Remote Workspace' }}</span>
               </button>
               <button class="guide-btn" @click="selectFile">
@@ -1637,7 +1688,7 @@
           lazy
           :load="loadTreeNode"
           :props="{ isLeaf: (data: any) => data.type === 'file' }"
-          :expand-on-click-node="false"
+          :expand-on-click-node="scoped"
           draggable
           :allow-drag="allowDrag"
           :allow-drop="allowDrop"
@@ -1715,20 +1766,20 @@
         <div class="menu-item" v-if="hasClipboard" @click="pasteNode(); hideContextMenu()">
           <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
         </div>
-        <div class="menu-divider"></div>
-        <div class="menu-item" @click="deleteWorkspaceRoot()">
+        <div class="menu-divider" v-if="!scoped"></div>
+        <div class="menu-item" v-if="!scoped" @click="deleteWorkspaceRoot()">
           <i class="fa fa-trash"></i> {{ store.locales=='zh'?'删除该工作区':'Delete Workspace' }}
         </div>
       </template>
       <template v-else>
-      <!-- 空白区域：添加工作区 -->
-      <div class="menu-item" v-if="!contextMenu.node" @click="openFolderDialog(); hideContextMenu()">
+      <!-- 空白区域：添加工作区（右侧栏范围模式不提供，范围固定为当前聊天工作区） -->
+      <div class="menu-item" v-if="!contextMenu.node && !scoped" @click="openFolderDialog(); hideContextMenu()">
         <i class="fa fa-folder-open"></i> {{ store.locales=='zh'?'添加本地工作区':'Add Local Workspace' }}
       </div>
-      <div class="menu-item" v-if="!contextMenu.node" @click="promptAddRemote(); hideContextMenu()">
+      <div class="menu-item" v-if="!contextMenu.node && !scoped" @click="promptAddRemote(); hideContextMenu()">
         <i class="fa fa-cloud" style="color:#42b883"></i> {{ store.locales=='zh'?'连接远程工作区':'Connect Remote Workspace' }}
       </div>
-      <div class="menu-divider" v-if="!contextMenu.node"></div>
+      <div class="menu-divider" v-if="!contextMenu.node && !scoped"></div>
       <!-- 粘贴（一级，空白处右键 → 粘贴到当前目录；剪贴板与「文件」视图共用） -->
       <div class="menu-item" v-if="!contextMenu.node && hasClipboard" @click="pasteNode(); hideContextMenu()">
         <i class="fa fa-paste"></i> {{ store.locales=='zh'?'粘贴':'Paste' }}
@@ -1784,7 +1835,7 @@
         <span style="flex:1">{{ store.locales=='zh'?'操作':'Actions' }}</span>
         <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
         <ul class="submenu">
-          <li @click="openInStandaloneWindow(contextMenu.node.path); hideContextMenu()">
+          <li v-if="!scoped" @click="openInStandaloneWindow(contextMenu.node.path); hideContextMenu()">
             <i class="fa fa-window-restore"></i> {{ store.locales!='zh'
               ? (store.singleWindowMode ? 'Open in window' : 'Open in new window')
               : (store.singleWindowMode ? '在窗口中打开' : '在新窗口打开') }}

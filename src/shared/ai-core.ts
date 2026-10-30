@@ -2903,6 +2903,19 @@ export class AIUtils {
                                 break;
                             }
                             if (parsed.usage) finalUsage = parsed.usage;
+                            // llama.cpp / ninfer 等本地服务不返回标准 usage，但在最后一帧给
+                            // timings（prompt_n / predicted_n）。据此也能拿到真实 token 数，
+                            // 作为未开启 stream_options 或服务端忽略该字段时的兜底。
+                            else if (parsed?.timings && typeof parsed.timings === 'object') {
+                                const pt = Number(parsed.timings.prompt_n);
+                                const ct = Number(parsed.timings.predicted_n);
+                                if (Number.isFinite(pt) || Number.isFinite(ct)) {
+                                    finalUsage = {
+                                        prompt_tokens: Number.isFinite(pt) ? pt : 0,
+                                        completion_tokens: Number.isFinite(ct) ? ct : 0,
+                                    };
+                                }
+                            }
                             const fr = parsed?.choices?.[0]?.finish_reason;
                             if (fr) finishReason = String(fr);
                             // 推理通道（reasoning_content：gemma-4 / vLLM / DeepSeek-R1 等与正文分开返回）：

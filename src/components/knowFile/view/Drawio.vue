@@ -179,6 +179,14 @@ const themeKey = computed<'dark' | 'light'>(() => (isDarkTheme() ? 'dark' : 'lig
 /** 注入到 drawio 文档里的覆盖样式（同源直接操作，保持 public/drawio 与上游完全一致） */
 const FRAME_STYLE_ID = 'aim-drawio-override'
 const FRAME_CSS = [
+  // drawio 页签多时 scrollToPage 用 scrollIntoView({block:'nearest'}) 会横向滚动
+  // **整个 iframe 文档**（实测多页时 body.scrollLeft=15），右侧因此露出一条空白竖条。
+  // 锁死文档级滚动，页签条自己用 .geTabScroller 横向滚动。
+  'html, body { overflow: hidden !important; overflow: clip !important; }',
+  // 底部页签栏右侧给宿主的「复制 / AI / 协同 / 保存」图标让出位置：
+  // 否则多页时 drawio 的页签滚动按钮正好落在这些图标下面，既看不见也点不到。
+  // （AI 面板打开时图标整体左移，但仍位于 iframe 右下角内侧，同样需要预留。）
+  '.geTabContainer { padding-right: 112px !important; }',
   // 隐藏 drawio 自带的 GitHub 品牌链接（底部页签栏右侧），与应用整体风格统一
   '.geTabContainer a[href*="github.com"] { display: none !important; }',
   '.geTabContainer img[src*="github-logo"] { display: none !important; }',

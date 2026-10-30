@@ -634,6 +634,10 @@ const cardTitle = (p: PpePage) => zh.value
   padding: 10px;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+  /* 关键：.ppe-card 带 overflow:hidden，网格项因此没有自动最小高度；
+     在定高的网格容器里 auto 行会被压成几十像素，缩略图被裁掉、内容也撑不出滚动条。
+     显式按内容撑开每一行，总高度超出容器时就会纵向滚动。 */
+  grid-auto-rows: max-content;
   gap: 10px;
   align-content: start;
 }

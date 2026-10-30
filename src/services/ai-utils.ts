@@ -650,6 +650,13 @@ export class AIUtils {
           if (!body.model) body.model = cfg.model
           if (!body.messages) body.messages = messages
           if (body.stream === undefined) body.stream = llmConfig.stream
+          // 流式 usage：OpenAI 兼容服务默认不在流里返回 usage，必须显式 include_usage
+          // （vLLM / llama.cpp / LM Studio 等本地服务均按此约定）。拿不到 usage 时
+          // 首页只能显示 0 tokens 且不显示速度。只对标准 chat/completions 端点注入，
+          // 避免非 OpenAI 协议的自定义端点拒绝该字段；request_body 显式配置时尊重用户。
+          if (body.stream && body.stream_options === undefined && /\/chat\/completions\/?(?:\?.*)?$/i.test(endpoint)) {
+            body.stream_options = { include_usage: true }
+          }
           // 推理强度接线：Qwen3/vLLM 等 OpenAI 兼容后端（GPUStack、本地 vLLM）默认会输出
           // <think>，按 llmConfig.think 下发 chat_template_kwargs.enable_thinking 控制；
           // 若 request_body 已显式声明 chat_template_kwargs 则尊重用户配置、不覆盖。
