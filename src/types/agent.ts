@@ -52,6 +52,13 @@ export interface AgentOptions {
   /** 会话标签（展示用） */
   label?: string
   /**
+   * 浏览器时区（IANA，如 Asia/Shanghai）：渲染层创建 agent 时带上，
+   * 供「时间读数」告诉模型"按这个时区理解日期与时间"（缺失时降级为宿主时区，并提示模型先问用户）。
+   */
+  timeZone?: string
+  /** 是否注入时间读数（默认开；关掉后模型拿不到当前时间与时区） */
+  timeContext?: boolean
+  /**
    * 单个 turn 的最大 step 数（循环轮数；防死循环）。
    * 唯一数据源 = store.generalAgentMaxSteps（默认 500），唯一例外 = 智能体预设的 preset.maxSteps；
    * 见 src/shared/agent-loop-rounds.ts，勿在此层再引入其它默认值。

@@ -806,15 +806,25 @@ import { sanitizeHtml } from '@/lib/markdown/sanitizeHtml'
   
   // 右键菜单状态
   const contextMenu = ref({ visible: false, x: 0, y: 0 })
+  const contextMenuRef = ref<HTMLElement | null>(null)
   const hasSelection = ref(false)
 
-  // 显示右键菜单
+  // 显示右键菜单（贴边时向内收，避免菜单超出窗口；字号行加进来后菜单更高，右下角右键尤其需要）
   const showContextMenu = function(e: MouseEvent) {
     e.preventDefault()
     selectedText.value = window.getSelection()?.toString() || ''
     hasSelection.value = !!selectedText.value
     refreshTTSState()
     contextMenu.value = { visible: true, x: e.clientX, y: e.clientY }
+    nextTick(() => {
+      const el = contextMenuRef.value
+      if (!el) return
+      const pad = 8
+      const rect = el.getBoundingClientRect()
+      const x = Math.max(pad, Math.min(e.clientX, window.innerWidth - rect.width - pad))
+      const y = Math.max(pad, Math.min(e.clientY, window.innerHeight - rect.height - pad))
+      contextMenu.value = { visible: true, x, y }
+    })
     // 朗读进行中时，定时刷新状态（播放可能自动结束）
     if (ttsStateTimer) clearInterval(ttsStateTimer)
     if (isSpeaking.value) {
@@ -1884,14 +1894,25 @@ ${inlinedHtml}
     </div>
     
     <div class="content" :class="{ 'content-full': !showStatusbar, 'align-justify': !kpAlign }" @contextmenu.prevent="showContextMenu">
-      <!-- 右键菜单 -->
-      <div v-if="contextMenu.visible && data && (data.isMd || data.isWord)" 
+      <!-- 右键菜单：复制 / 朗读 / 字号 / 回到顶部（原状态栏里的朗读、字号等图标收纳到这里） -->
+      <div v-if="contextMenu.visible && data && (data.isMd || data.isWord || data.isTxt)" 
+           ref="contextMenuRef"
            class="context-menu" 
            :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
            @click.stop="hideContextMenu">
         <div class="menu-item" v-if="hasSelection" @click.stop="copySelected(); hideContextMenu()"><i class="fa fa-copy"></i> {{store.locales=='zh'?'复制文字':'Copy Text'}}</div>
         <div class="menu-item" v-if="!hasSelection" @click.stop="copyFull(); hideContextMenu()"><i class="fa fa-copy"></i> {{store.locales=='zh'?'复制全文':'Copy Full Text'}}</div>
         <div class="menu-item" @click.stop="speak()"><i :class="isSpeaking ? 'fa fa-stop' : 'fa fa-volume-up'"></i> {{ isSpeaking ? (store.locales=='zh'?'停止朗读':'Stop Reading') : (hasSelection ? (store.locales=='zh'?'朗读选中文字':'Read Selection') : (store.locales=='zh'?'朗读文章':'Read Article')) }}</div>
+        <div class="menu-divider"></div>
+        <!-- 字号：点 A- / A+ 连续调节，菜单不关 -->
+        <div class="menu-item md-ctx-font" @click.stop>
+          <i class="fa fa-font"></i>
+          <span class="md-ctx-font-label">{{ store.locales==='zh' ? '字号' : 'Font size' }}</span>
+          <button class="md-ctx-font-btn" :disabled="readFontSize <= READ_FONT_MIN" @click.stop="changeReadFont(-1)" :title="store.locales==='zh' ? '减小字号 (A-)' : 'Decrease font size (A-)'">A-</button>
+          <span class="md-ctx-font-size">{{ readFontSize }}</span>
+          <button class="md-ctx-font-btn" :disabled="readFontSize >= READ_FONT_MAX" @click.stop="changeReadFont(1)" :title="store.locales==='zh' ? '增大字号 (A+)' : 'Increase font size (A+)'">A+</button>
+        </div>
+        <div class="menu-item" @click.stop="scrollToTop(); hideContextMenu()"><i class="fa fa-arrow-up"></i> {{store.locales=='zh'?'回到顶部':'Back to top'}}</div>
       </div>
       
       <!-- 正在渲染/加载（与可视编辑视图的渲染遮罩一致）：大文档读盘 + 渲染耗时较长，
@@ -1986,7 +2007,8 @@ ${inlinedHtml}
       />
     </aside>
 
-    <!-- 底部状态栏（样式与 PdfViewer / Edit_Code 一致） -->
+    <!-- 底部状态栏（样式与 PdfViewer / Edit_Code 一致）：只放常用开关 + 阅读状态；
+         朗读、字号、复制全文这些偶发操作用右键菜单，避免图标堆成一排 -->
     <div class="md-statusbar" v-if="showStatusbar" @contextmenu.prevent>
       <!-- 操作按钮（左侧） -->
       <!-- 目录开/关 -->
@@ -2005,10 +2027,6 @@ ${inlinedHtml}
       <button class="statusbar-btn" @click="scrollToTop" :title="store.locales==='zh' ? '回到顶部' : 'Back to top'">
         <i class="fa fa-arrow-up"></i>
       </button>
-      <!-- 复制全文 -->
-      <button class="statusbar-btn" @click="copyFull" :title="store.locales==='zh' ? '复制全文' : 'Copy full text'">
-        <i class="fa fa-copy"></i>
-      </button>
       <!-- 导出（md / word） -->
       <span v-if="data.isMd || data.isWord" class="md-sb-export">
         <button class="statusbar-btn" :class="{ active: exportMenuOpen }" @click.stop="toggleExportMenu" :title="store.locales==='zh' ? '导出文档' : 'Export document'">
@@ -2020,17 +2038,6 @@ ${inlinedHtml}
           <div class="md-sb-export-item" @click.stop="chooseExport('pdf')"><i class="fa fa-file-pdf-o"></i>{{ store.locales==='zh' ? '导出 PDF' : 'Export PDF' }}</div>
         </div>
       </span>
-      <!-- 朗读 / 停止 -->
-      <button class="statusbar-btn" :class="{ active: isSpeaking, 'sb-speaking': isSpeaking }" @click="speak" :title="isSpeaking ? (store.locales==='zh' ? '停止朗读' : 'Stop reading') : (store.locales==='zh' ? '朗读全文' : 'Read aloud')">
-        <i :class="isSpeaking ? 'fa fa-stop' : 'fa fa-volume-up'"></i>
-      </button>
-      <!-- 阅读字号调节：A- / A+ -->
-      <button class="statusbar-btn" @click="changeReadFont(-1)" :disabled="readFontSize <= READ_FONT_MIN" :title="store.locales==='zh' ? '减小字号 (A-)' : 'Decrease font size (A-)'">
-        <span class="md-sb-font-label">A-</span>
-      </button>
-      <button class="statusbar-btn" @click="changeReadFont(1)" :disabled="readFontSize >= READ_FONT_MAX" :title="store.locales==='zh' ? '增大字号 (A+)' : 'Increase font size (A+)'">
-        <span class="md-sb-font-label">A+</span>
-      </button>
 
       <span class="statusbar-spacer"></span>
       <span class="statusbar-sep"></span>
@@ -2218,20 +2225,6 @@ ${inlinedHtml}
   .md-statusbar .statusbar-btn:disabled:hover {
     background-color: transparent;
   }
-  /* 字号加减按钮文本（A- / A+） */
-  .md-statusbar .md-sb-font-label {
-    font-weight: 600;
-    font-size: 12px;
-    letter-spacing: -0.5px;
-  }
-  .md-statusbar .statusbar-btn.sb-speaking i {
-    color: #f56c6c;
-    animation: md-sb-pulse 0.9s ease-in-out infinite alternate;
-  }
-  @keyframes md-sb-pulse {
-    from { opacity: 0.5; }
-    to { opacity: 1; }
-  }
   /* 文件外部变更提示 */
   .md-statusbar .md-sb-changed {
     color: #e6a23c;
@@ -2240,6 +2233,10 @@ ${inlinedHtml}
   .md-statusbar .md-sb-changed i {
     opacity: 1;
     animation: md-sb-pulse 0.8s ease-in-out infinite alternate;
+  }
+  @keyframes md-sb-pulse {
+    from { opacity: 0.5; }
+    to { opacity: 1; }
   }
   /* 当前章节文字（超长省略，可收缩） */
   .md-statusbar .md-sb-section {
@@ -2258,6 +2255,44 @@ ${inlinedHtml}
   .md-statusbar .md-sb-progress:hover {
     background-color: var(--menuActiveColor);
     border-radius: 3px;
+  }
+  /* 右键菜单里的字号行：A- / 当前值 / A+；点按钮不关菜单，可连续调 */
+  .md-ctx-font {
+    gap: 6px;
+    cursor: default;
+  }
+  .md-ctx-font:hover {
+    background-color: transparent;
+  }
+  .md-ctx-font-label {
+    flex: 1;
+  }
+  .md-ctx-font-size {
+    min-width: 22px;
+    text-align: center;
+    color: var(--fontActiveColor);
+    font-variant-numeric: tabular-nums;
+  }
+  .md-ctx-font-btn {
+    width: 26px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--borderColor);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fontColor);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .md-ctx-font-btn:hover:not(:disabled) {
+    background-color: var(--menuActiveColor);
+    color: var(--fontActiveColor);
+  }
+  .md-ctx-font-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
   /* 导出下拉菜单 */
   .md-statusbar .md-sb-export {

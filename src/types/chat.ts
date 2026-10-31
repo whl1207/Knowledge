@@ -255,6 +255,11 @@ export interface Chat {
   titleAuto?: boolean
   titleRefined?: boolean
   titlePinned?: boolean
+  /**
+   * 已归档（对齐 DSH 的 session 归档）：默认从聊天列表里隐藏，但**不删除**。
+   * 右键聊天列表可临时「显示已归档的聊天」；切换显示不改动排序与保存位置。
+   */
+  archived?: boolean
   messages: ChatMessage[]
   config: ChatConfig
   createdAt: number

@@ -33,6 +33,7 @@ import { saveSpillText } from './tool-spill'
 import { jobRegistry } from './job-registry'
 import { cwdFor, forgetWorkingDir } from './working-directory'
 import { clearReadCacheFor } from './read-cache'
+import { TIME_CONTEXT_REFRESH_MS, formatTimeContext, isValidTimeZone } from '@/shared/timeContext'
 import { browserAgentService } from './browser-agent'
 import { credentialStore } from './credentials'
 import type {
@@ -68,8 +69,10 @@ import {
   COMPACT_RETAIN_RATIO,
   COMPACT_SYSTEM_PROMPT,
   OVERFLOW_RETRY_LIMIT,
+  PRUNE_KEEP_RECENT,
   buildCompactionPrompt,
-  compactedContextMessage,
+  pruneToolResults,
+  renderCompactedCheckpoint,
   compactionBasisTokens,
   estimateMessagesTokens,
   estimateToolSchemaTokens,
@@ -587,6 +590,21 @@ class AgentImpl implements AgentControl {
   /** 上下文压缩重入守卫（压缩本身是一次 LLM 调用，不能递归触发） */
   private compacting = false
   /**
+   * 剪枝已启用（粘性）：一旦某一步因为压力把早期工具结果剪成"头+尾"，后续步骤沿用同一规则。
+   * 不粘住会来回抖：剪完占用降到阈值下 → 下一步不剪 → 又越线 → 再剪……
+   */
+  private pruneActive = false
+  /**
+   * 自动压缩失败后的退避时间戳：摘要失败 / 摘要没变小都会让历史保持原样，
+   * 而每推进一步又会重新触发——不设退避就会一步一次摘要请求（慢且烧钱）。
+   */
+  private compactFailedAt = 0
+  /** 时间读数：上次注入时刻与「是否已从日志恢复过」（对齐 DSH 的最小间隔语义） */
+  private lastTimeContextAt = 0
+  private timeContextLoaded = false
+  /** 本 turn 开始时刻：时间读数在 step 1 用「本轮之前」的消息做基线 */
+  private turnStartedAt = 0
+  /**
    * 真实用量锚点：上一步请求由 provider 自报的 promptTokens（含 system prompt 与工具 schema）
    * 及当时发出的派生条目数。后续预算 = 锚点 + 新增条目估算，避免纯字符启发式的系统性偏差
    * （本地后端尤其明显；见 contextBudget.calibrateTokenScale）。压缩重写历史后锚点失效 → 置空。
@@ -897,6 +915,8 @@ class AgentImpl implements AgentControl {
     this.stepInTurn = 0
     this.repeatKey = ''
     this.repeatCount = 0
+    // 时间读数的基线：本轮开始前的「上一条模型可见消息」——不含本轮刚提交的这条用户消息
+    this.turnStartedAt = Date.now()
     sessionLog.append(this.id, 'turn/start', { turn })
     this.emit('agent/turn-start', { turn })
     // 清单的回合边界收口（对齐 DSH todo 投影的 turn/start 语义）：上一轮已全部收口的
@@ -948,8 +968,10 @@ class AgentImpl implements AgentControl {
         // 任务进度（0..100；maxSteps 为上限，步骤完成即推进）
         jobRegistry.progress(this.jobId!, Math.min(95, Math.round((stepsInTurn / Math.max(1, maxSteps)) * 100)), `步骤 ${stepsInTurn}/${maxSteps}`)
 
+        // 时间读数（对齐 DSH 的 time-context）在 buildMessages 里、用户输入落盘之后追加，
+        // 这样模型看到的是「用户说了什么 → 现在几点」的正确顺序。
         // item 为 null 时（工具调用后续轮）消息仅由日志历史 + 注入上下文组成
-        const messages = await this.buildMessages(item, injected)
+        const messages = await this.buildMessages(item, injected, { turn, step })
         // 本 step 的工具参数流式累积清零（最终 payload 丢参时按 callId 兜底用）
         this.streamedArgs.clear()
         this.currentCallSeq.clear()
@@ -1156,11 +1178,98 @@ class AgentImpl implements AgentControl {
     return item
   }
 
+  // ---------------- 时间读数（对齐 DSH 的 dsh-time-context） ----------------
+
+  /**
+   * 距上次读数 ≥ {@link TIME_CONTEXT_REFRESH_MS} 时，往持久历史追加一条 user 读数。
+   *
+   * 三行内容（模型可见）：带偏移与时区名的 ISO 时间戳、浏览器时区策略、距上一条模型可见消息
+   * （或上一个读数）的时长。追加的是 `synthetic` 消息：参与模型上下文与预算，但不计入
+   * "真实用户轮次"（否则会打乱附图序号与压缩的轮次口径）。
+   */
+  private maybeAppendTimeContext(turn: number, step: number): void {
+    if (this.options.timeContext === false) return
+    if (this.turnController?.signal.aborted) return
+    const now = Date.now()
+
+    // 恢复会话：日志里可能已有读数（含被压缩遮蔽的），用来延续最小间隔
+    if (!this.timeContextLoaded) {
+      this.timeContextLoaded = true
+      try {
+        for (const ev of sessionLog.readAll(this.id)) {
+          if (ev.type !== 'user/message' || (ev as any).source !== 'time-context') continue
+          const ts = Number(ev.ts) || 0
+          if (ts > this.lastTimeContextAt) this.lastTimeContextAt = ts
+        }
+      } catch {
+        /* 日志不可读：按首次处理 */
+      }
+    }
+    if (this.lastTimeContextAt > 0 && now - this.lastTimeContextAt < TIME_CONTEXT_REFRESH_MS) return
+
+    const requestZone = isValidTimeZone(this.options.timeZone) ? String(this.options.timeZone) : ''
+    const zone = requestZone || this.processTimeZone()
+
+    // 基线：第 1 步 = 上一条模型可见消息；后续步 = 上一条时间读数
+    const sinceStepContext = step > 1 && this.lastTimeContextAt > 0
+    let elapsedMs: number | null = null
+    if (sinceStepContext) {
+      elapsedMs = Math.max(0, now - this.lastTimeContextAt) // 挂钟倒退时钳到 0
+    } else {
+      // step 1：基线是本轮开始前的最后一条模型可见消息（不含本轮刚提交的用户消息）
+      const prev = this.lastModelVisibleTs(now, this.turnStartedAt || now)
+      if (prev > 0) elapsedMs = Math.max(0, now - prev)
+    }
+
+    const content = formatTimeContext({
+      turn,
+      step,
+      now,
+      zone,
+      requestZone: requestZone || undefined,
+      elapsedMs,
+      sinceStepContext,
+    })
+    sessionLog.append(this.id, 'user/message', { content, source: 'time-context', synthetic: true })
+    this.lastTimeContextAt = now
+  }
+
+  /** 宿主进程时区（浏览器时区缺失时的回退） */
+  private processTimeZone(): string {
+    try {
+      const z = Intl.DateTimeFormat().resolvedOptions().timeZone
+      return isValidTimeZone(z) ? z : 'UTC'
+    } catch {
+      return 'UTC'
+    }
+  }
+
+  /** 最近一条「模型可见」消息的时间戳（排除时钟读数与合成消息；`beforeTs` 为上限，不含等于） */
+  private lastModelVisibleTs(before: number, beforeTs?: number): number {
+    const upper = Math.min(before, Number(beforeTs) > 0 ? Number(beforeTs) : before)
+    let latest = 0
+    try {
+      for (const ev of sessionLog.readAll(this.id)) {
+        if (ev.type !== 'user/message' && ev.type !== 'assistant/message') continue
+        if ((ev as any).synthetic) continue
+        const ts = Number(ev.ts) || 0
+        if (ts > 0 && ts < upper && ts > latest) latest = ts
+      }
+    } catch {
+      /* 忽略：没有基线就报告 unavailable */
+    }
+    return latest
+  }
+
   /**
    * 构建本 step 的请求消息（async：可能在请求前触发上下文压缩）。
    * 顺序：先落盘本 step 输入 →（预算检查）必要时压缩旧轮次 → 从日志派生请求消息。
    */
-  private async buildMessages(item: InboxItem | null, injected: InboxItem[]): Promise<any[]> {
+  private async buildMessages(
+    item: InboxItem | null,
+    injected: InboxItem[],
+    ctx: { turn: number; step: number },
+  ): Promise<any[]> {
     // "模型可见即已记录"：本 step 的输入（用户消息 / 注入上下文）先落盘，
     // 再从日志派生历史——工具续轮时原始输入不会丢失，且可完整重建
     if (injected.length > 0) {
@@ -1177,6 +1286,8 @@ class AgentImpl implements AgentControl {
         images: item.images?.length || undefined,
       })
     }
+    // 时间读数：本 step 的输入已落盘，追加一条「现在几点 / 什么时区 / 距上次多久」（按间隔节流）
+    this.maybeAppendTimeContext(ctx.turn, ctx.step)
     // 模型历史从会话日志派生（单一事实源，而不是第二份消息状态）
     let entries = sessionLog.deriveEntries(this.id)
     // 附图任务：记住「第 N 条 user 消息带图」（图片本体不进日志，后续 step / 多轮都从这里复原）
@@ -1192,8 +1303,31 @@ class AgentImpl implements AgentControl {
     if (this.options.contextCompact !== false) {
       const budget = this.requestBudget(entries)
       if (budget.level === 'compact') {
-        console.info(`[agent-compact] ${this.id} 占用约 ${(budget.ratio * 100).toFixed(0)}%（${budget.used}/${budget.limit} tokens，估算×${this.tokenScale.toFixed(2)}${this.tokenAnchor ? '，以真实用量为锚点' : ''}）→ 主动压缩旧轮次`)
-        if (await this.compact('auto')) entries = sessionLog.deriveEntries(this.id)
+        console.info(`[agent-compact] ${this.id} 占用约 ${(budget.ratio * 100).toFixed(0)}%（${budget.used}/${budget.limit} tokens，估算×${this.tokenScale.toFixed(2)}${this.tokenAnchor ? '，以真实用量为锚点' : ''}）→ 先剪枝，再决定是否摘要`)
+        // ① 先剪枝（对齐 DSH 的 tool-result-pruner）：不调模型，常常能直接把占用拉回阈值内
+        const pruned = pruneToolResults(this.toBudgetEntries(entries), { keepRecent: PRUNE_KEEP_RECENT })
+        let handledByPrune = false
+        if (pruned.pruned > 0) {
+          const after = planAgentBudget({
+            limit: this.options.contextLimit,
+            entries: pruned.items,
+            schemaTokens: estimateToolSchemaTokens(this.visibleTools()),
+            anchor: this.tokenAnchor,
+            scale: this.tokenScale,
+          })
+          if (after.level !== 'compact') {
+            this.pruneActive = true
+            handledByPrune = true
+            console.info(`[agent-compact] ${this.id} 剪枝了 ${pruned.pruned} 条工具结果（省约 ${pruned.savedChars} 字符），占用降到 ${(after.ratio * 100).toFixed(0)}%，跳过摘要`)
+          }
+        }
+        // ② 剪枝不够才真正摘要（一次额外的 LLM 调用）；刚失败过的 60 秒内不重试，避免一步一次摘要请求
+        const backoff = Date.now() - this.compactFailedAt < 60_000
+        if (!handledByPrune && backoff) {
+          console.info(`[agent-compact] ${this.id} 上次压缩失败，60 秒内不自动重试（仍可使用手动压缩）`)
+        } else if (!handledByPrune && await this.compact('auto')) {
+          entries = sessionLog.deriveEntries(this.id)
+        }
       }
     }
     // 记录「本次请求的纯估算值与条目数」：step 结束后用 provider 自报的真实计数校准系数 + 建立锚点
@@ -1206,8 +1340,12 @@ class AgentImpl implements AgentControl {
   /** 日志派生条目 → 请求消息（附图按「真实 user 消息序号」挂回；压缩摘要不计入序号） */
   private toRequestMessages(entries: DerivedEntry[]): any[] {
     let userSeq = 0
-    return entries.map(({ msg }) => {
+    const msgs = entries.map(({ msg }) => {
       const out = toOpenAIMessage(msg)
+      // 压缩检查点：模型看到的是「前导语 + <compacted-summary>」；界面里仍显示纯摘要
+      if (msg.compacted && typeof out.content === 'string') {
+        out.content = renderCompactedCheckpoint(out.content)
+      }
       if (out.role === 'user' && !msg.compacted && !msg.synthetic) {
         userSeq++
         const imgs = this.taskImagesBySeq.get(userSeq)
@@ -1215,6 +1353,11 @@ class AgentImpl implements AgentControl {
       }
       return out
     })
+    if (!this.pruneActive) return msgs
+    // 剪枝只改发出去的内容，会话日志与界面仍是原文
+    const items = msgs.map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' }))
+    const pruned = pruneToolResults(items, { keepRecent: PRUNE_KEEP_RECENT })
+    return msgs.map((m, i) => (pruned.items[i] === items[i] ? m : { ...m, content: pruned.items[i].content }))
   }
 
   /** 真实 user 消息条数（压缩摘要/工具图片合成消息不计） */
@@ -1252,10 +1395,11 @@ class AgentImpl implements AgentControl {
   /** 派生条目 → 预算条目（附图按「真实 user 消息序号」折算张数；与请求消息一一对应） */
   private toBudgetEntries(entries: DerivedEntry[]): BudgetMessage[] {
     let userSeq = 0
-    return entries.map(({ msg }) => {
+    const items = entries.map(({ msg }) => {
       const out: BudgetMessage = {
         role: msg.role,
-        content: msg.content,
+        // 与 toRequestMessages 保持同口径：压缩检查点按"前导语 + 标签"估算
+        content: msg.compacted ? renderCompactedCheckpoint(msg.content) : msg.content,
         toolCalls: msg.toolCalls,
       }
       if (msg.role === 'user' && !msg.compacted && !msg.synthetic) {
@@ -1267,6 +1411,8 @@ class AgentImpl implements AgentControl {
       if (msg.role === 'user' && msg.images?.length) out.images = msg.images.length
       return out
     })
+    if (!this.pruneActive) return items
+    return pruneToolResults(items, { keepRecent: PRUNE_KEEP_RECENT }).items
   }
 
   /**
@@ -1287,14 +1433,14 @@ class AgentImpl implements AgentControl {
     this.compacting = true
     try {
       const entries = sessionLog.deriveEntries(this.id)
-      const items = entries.map((e): BudgetMessage => ({
-        role: e.msg.role,
-        content: e.msg.content,
-        toolCalls: e.msg.toolCalls,
-      }))
+      // 摘要前先剪枝（对齐 DSH：摘要器读到的转录本身也更短）；幂等，已剪过的不会再变
+      const items = pruneToolResults(this.toBudgetEntries(entries), { keepRecent: PRUNE_KEEP_RECENT }).items
+      // 溢出恢复要更狠：服务端已经明确说"超窗"了，还按常规保留 16% 尾部多半压不够，
+      // 只会把重试次数耗完（对齐 DSH 的 overflow 路径：绕过常规策略、一次削掉最大的平衡头部）。
+      const aggressive = kind === 'overflow-retry'
       const plan = pickCompactionRangeByTokens(items, {
         // 主口径：按比例保留近期尾部（复刻 DSH 的 retainRatio 0.16）
-        retainRatio: COMPACT_RETAIN_RATIO,
+        retainRatio: aggressive ? Math.min(COMPACT_RETAIN_RATIO, 0.05) : COMPACT_RETAIN_RATIO,
         // 基准是**可用预算**（窗口 − 预留输出 − 工具 schema），不是原始窗口：
         // 小窗口 + 多工具时 schema 占比可观，用原始窗口会高估余量、压缩迟迟不触发。
         contextWindow: compactionBasisTokens({
@@ -1302,8 +1448,8 @@ class AgentImpl implements AgentControl {
           reserve: this.lastBudgetReserve,
           schemaTokens: estimateToolSchemaTokens(this.visibleTools()),
         }),
-        // 安全阀：即使 token 预算允许，最近这几轮也逐字保留
-        keepTurns: COMPACT_KEEP_TURNS,
+        // 安全阀：即使 token 预算允许，最近这几轮也逐字保留（溢出恢复时只保 1 轮）
+        keepTurns: aggressive ? 1 : COMPACT_KEEP_TURNS,
       })
       if (!plan) {
         console.warn(`[agent-compact] ${this.id} 可压缩内容不足（不足 ${COMPACT_MIN_DROP} 条或轮次太少），跳过压缩`)
@@ -1315,13 +1461,14 @@ class AgentImpl implements AgentControl {
       const droppedItems = items.slice(plan.startIndex, plan.endIndex)
       const tokensBefore = estimateMessagesTokens(droppedItems)
       const summary = (await this.summarize(buildCompactionPrompt(droppedItems))) || indexSummary(droppedItems)
-      const replacement: BudgetMessage = { role: 'user', content: compactedContextMessage(summary) }
+      const replacement: BudgetMessage = { role: 'user', content: renderCompactedCheckpoint(summary) }
       const tokensAfter = estimateMessagesTokens([replacement])
       // 硬校验：替换必须**确实更小**（复刻 DSH 的 "summary is not smaller than the shadowed content"）。
       // 没有这条，一旦摘要器返回比原文还长的文本，"压缩"反而会把上下文推得更高，
       // 下一次请求立刻又触发压缩，形成越压越大的死循环。
       if (tokensAfter >= tokensBefore) {
         console.warn(`[agent-compact] ${this.id} 摘要未变小（${tokensBefore} → ${tokensAfter} tokens），放弃本次压缩`)
+        this.compactFailedAt = Date.now()
         this.emit('agent/compaction', { phase: 'end', kind, ok: false })
         return false
       }
@@ -1346,6 +1493,7 @@ class AgentImpl implements AgentControl {
       return true
     } catch (e: any) {
       console.warn(`[agent-compact] ${this.id} 压缩失败（保持原历史）:`, e?.message || e)
+      this.compactFailedAt = Date.now()
       this.emit('agent/compaction', { phase: 'end', kind, ok: false })
       return false
     } finally {

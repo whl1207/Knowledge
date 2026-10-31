@@ -46,6 +46,16 @@ function isBrowserRuntime(): boolean {
   return typeof window !== 'undefined' && !aikmIpcAvailable()
 }
 
+/** 渲染层所在浏览器的 IANA 时区（拿不到返回空串；供时间读数使用） */
+function browserTimeZone(): string {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return typeof zone === 'string' ? zone : ''
+  } catch {
+    return ''
+  }
+}
+
 /**
  * 解析当前环境的智能体传输层：
  * 1. 桌面端 → 主进程（`window.dsh.agent`，IPC）；
@@ -150,10 +160,12 @@ export interface AgentSessionView {
   /**
    * 本 step 是否「模型已给出工具调用、但还有工具没跑完」。
    *
-   * 用途：运行中入队的消息（steer）只应在**确定还有下一个 step** 时投递——
-   * 主进程在 step 结束时 `claimPendingSteer()` 领取，只要有工具调用就必然 `owesWork=true`
-   * 并继续下一个 step；反之（无工具调用）投早了会落在 turn 收尾之后，那条 steer 会另起一个
-   * 没有任何订阅者的 turn（界面会一直转圈）。等工具跑完（awaitingTools=false）再投最稳。
+   * 用途：判断本 step 是否还在工具阶段（界面用来显示"工具执行中"的形态）。
+   *
+   * 注意（踩过的坑）：**不要**用它当 steer 的投递闸门。等 `awaitingTools=false` 时，
+   * 主进程已经在该 step 末尾 `claimPendingSteer()` 过了，投进去只能等**下一个** step
+   * 才被领取——插队看起来就像没生效。正确的做法是「本 step 有工具调用就投」
+   * （见 home.vue 的 canDeliver）：必然还有下一步，且能赶在本次 claim 之前进 inbox。
    */
   awaitingTools: boolean
   lastError?: string
@@ -269,7 +281,12 @@ class AgentBridge {
   async create(options: AgentOptions): Promise<AgentSessionView> {
     this.ensureSubscribed()
     const agent = this.dshAgent()
-    const { id } = await agent.create(this.sanitizeOptions(options))
+    // 浏览器时区：主进程与渲染层通常同机，但局域网访客 / 远程宿主可能不同。
+    // 只在调用方没显式传时补上，供「时间读数」按用户所在时区解释日期与时间。
+    const withZone: AgentOptions = options.timeZone
+      ? options
+      : { ...options, timeZone: browserTimeZone() }
+    const { id } = await agent.create(this.sanitizeOptions(withZone))
     // 创建期间可能已有事件到达（onEvent 发现未知会话会先建占位视图）：
     // 此时必须沿用该视图，否则新空视图会覆盖已投影的状态/步骤（网页端 SSE 更易命中）。
     const existing = this.sessions.get(id)

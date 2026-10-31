@@ -453,23 +453,140 @@ export function pickCompactionRangeByTokens(
 // 摘要提示词
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 工具结果剪枝（对齐 DSH 的 dsh-compaction-tool-result-pruner）
+//
+// 为什么要有这一步：一次摘要 = 一次额外的 LLM 调用（慢、要钱、还可能失败）。
+// 压缩触发后先把超大的工具结果换成「头 + 中间已剪枝 + 尾」，往往就能把占用拉回阈值内，
+// 于是整次摘要都不用做；即使仍要摘要，喂给摘要器的转录也更短。
+// 剪枝是确定性的、不调模型，原始内容仍在会话日志里（只是不发给模型）。
+// ---------------------------------------------------------------------------
+
+/** 单条工具结果超过这么多**字符**才剪枝 */
+export const PRUNE_THRESHOLD_CHARS = 8192
+/** 保留的开头字符数 */
+export const PRUNE_HEAD_CHARS = 4096
+/** 保留的结尾字符数 */
+export const PRUNE_TAIL_CHARS = 1024
+/** 最近的多少条消息永不剪枝（最近的工具结果就是当前工作集，剪了会瞎） */
+export const PRUNE_KEEP_RECENT = 6
+
+export interface PruneResult {
+  items: BudgetMessage[]
+  /** 实际被剪枝的条数 */
+  pruned: number
+  /** 估算省下的字符数 */
+  savedChars: number
+}
+
+/** 按 Unicode 码点切片（不会切碎 emoji 的代理对） */
+function sliceCodePoints(text: string, count: number, fromEnd = false): string {
+  const chars = Array.from(text)
+  if (chars.length <= count) return text
+  return (fromEnd ? chars.slice(-count) : chars.slice(0, count)).join('')
+}
+
+/**
+ * 把较早的、超大的工具结果替换为「头 + 已剪枝标记 + 尾」。
+ *
+ * - 只动 `role === 'tool'`（assistant 的 tool_calls 参数不动：那是模型的意图，改了就变味）；
+ * - 最近 `keepRecent` 条不动；
+ * - 幂等：剪过的内容长度 < 阈值，再跑一次不会变化。
+ */
+export function pruneToolResults(
+  items: readonly BudgetMessage[] | null | undefined,
+  opts: {
+    thresholdChars?: number
+    headChars?: number
+    tailChars?: number
+    keepRecent?: number
+  } = {},
+): PruneResult {
+  const list = Array.isArray(items) ? items : []
+  const threshold = Math.max(500, Number(opts.thresholdChars) || PRUNE_THRESHOLD_CHARS)
+  const head = Math.max(50, Math.min(threshold, Number(opts.headChars) || PRUNE_HEAD_CHARS))
+  const tail = Math.max(0, Math.min(threshold - head, Number(opts.tailChars) || PRUNE_TAIL_CHARS))
+  const keepRecent = Math.max(0, Number(opts.keepRecent ?? PRUNE_KEEP_RECENT))
+  const cutoff = Math.max(0, list.length - keepRecent)
+
+  let pruned = 0
+  let savedChars = 0
+  const out = list.map((m, i) => {
+    const text = typeof m?.content === 'string' ? m.content : ''
+    if (i >= cutoff || m?.role !== 'tool' || Array.from(text).length <= threshold) return m
+    const total = Array.from(text).length
+    const headText = sliceCodePoints(text, head)
+    const tailText = tail > 0 ? sliceCodePoints(text, tail, true) : ''
+    const marker = `\n…（中间已剪枝 ${total - head - tail} 字符；需要原文请重新读取对应资源）…\n`
+    const content = headText + marker + tailText
+    pruned++
+    savedChars += total - Array.from(content).length
+    return { ...m, content }
+  })
+  return { items: out, pruned, savedChars }
+}
+
 /** 压缩器系统提示（要求结构化、可操作、不臆测；语言随对话内容） */
 export const COMPACT_SYSTEM_PROMPT = [
-  '你是对话上下文压缩器。把给定的早期对话压缩成一份结构化摘要，供后续步骤继续工作使用。',
-  '只输出摘要本身：不要前言、不要解释、不要代码围栏。',
-  '必须保留（若原文有）：',
-  '1. 用户任务目标、明确约束与偏好；',
-  '2. 已完成的事实与结论（含关键数字、名称、标识符）；',
-  '3. 涉及的文件路径 / 目录 / 命令 / 接口；',
-  '4. 未决问题、报错原文要点与已试过但失败的方案；',
-  '5. 当前计划与待办进度。',
-  '不要复述原文，不要臆测；无法确定的信息标注「未确认」。',
-  '输出语言与对话内容保持一致（中文对话输出中文）。',
+  '你现在是本 AI 助手的上下文压缩器。把给定的一段较早对话压缩成一份结构化检查点，',
+  '让另一个模型读完后能无缝接手工作，不丢失任何关键上下文。',
+  '',
+  '严格按下面的 Markdown 结构输出（小节一个都不能少，顺序不变；用简洁的要点，不要成段散文；',
+  '某节确实没有内容就写「（无）」，不要删掉该节）：',
+  '',
+  '## 主要请求与意图',
+  '- [用户最初以及后续演进的目标；措辞重要时原样引用]',
+  '',
+  '## 关键技术概念',
+  '- [涉及的技术、框架、模式与约定]',
+  '',
+  '## 文件与代码',
+  '- [精确路径：为什么重要、关键改动或片段]',
+  '',
+  '## 报错与修复',
+  '- [报错原文：如何解决，以及相关的用户反馈]',
+  '',
+  '## 未完成任务',
+  '- [用户明确要求但尚未完成的工作]',
+  '',
+  '## 当前进展',
+  '- [检查点这一刻正在进行的具体工作]',
+  '',
+  '## 下一步',
+  '- [与最近一次请求直接相关的那一个动作；没有就写「（无）」]',
+  '',
+  '## 关键上下文',
+  '- [决策及其理由、约束、用户偏好、未决问题、继续工作所需的数据]',
+  '',
+  '规则：',
+  '- 用简洁的工程语言书写，语言与对话内容保持一致（中文对话输出中文）。',
+  '- 原样保留精确的文件路径、命令、报错字符串、标识符、数值、函数签名与代码片段。',
+  '- 忠实记录用户的反馈与明确指令，尤其是纠正。',
+  '- 如果输入里已经有 <compacted-summary>，那是更早的检查点：保留仍然成立的事实、丢掉已被推翻的，',
+  '  按同一结构合并成一份，不要原样照抄。',
+  '- 不要提到"压缩""摘要"这件事本身，也不要说上下文被截断。',
+  '- 只输出检查点文本：不要调用任何工具，不要做别的事。',
 ].join('\n')
 
-/** 压缩后的历史以该标签包裹后注入（模型据此知道前文已被压缩） */
+/**
+ * 检查点前导语：模型看到摘要时先读这一句，知道"这是既定背景，直接接着干"。
+ *
+ * 为什么放进模型消息而不是只放系统提示：压缩后的历史是**替换**出来的 user 消息，
+ * 没有这句话时模型容易把它当成"用户刚说的一段话"而去复述或确认。
+ */
+export const COMPACT_CHECKPOINT_PREAMBLE =
+  '以下是更早对话的自动检查点，用于释放上下文空间：把它当作既定背景，直接在此基础上继续，'
+  + '不要复述、不要确认、也不要提到这份检查点本身。'
+
+/** 渲染压缩检查点（前导语 + 标签包裹；标签让多级压缩能识别"这是旧检查点"） */
+export function renderCompactedCheckpoint(summary: string): string {
+  const body = String(summary || '').trim()
+  return `${COMPACT_CHECKPOINT_PREAMBLE}\n\n<compacted-summary>\n${body}\n</compacted-summary>`
+}
+
+/** @deprecated 保留旧名以兼容调用方；等价于 renderCompactedCheckpoint */
 export function compactedContextMessage(summary: string): string {
-  return `<compacted_context>\n${summary.trim()}\n</compacted_context>`
+  return renderCompactedCheckpoint(summary)
 }
 
 /**

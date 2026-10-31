@@ -568,7 +568,15 @@ class SessionLogStore {
           }
           break
         case 'user/message':
-          entries.push({ seq: ev.seq, msg: { role: 'user', content: ev.content } })
+          // synthetic：不是真实用户输入（如时间读数），不计入轮次/附图序号，但参与模型上下文与预算
+          entries.push({
+            seq: ev.seq,
+            msg: {
+              role: 'user',
+              content: ev.content,
+              ...((ev as any).synthetic ? { synthetic: true } : {}),
+            },
+          })
           break
         case 'assistant/message': {
           const msg: DerivedMessage = { role: 'assistant', content: ev.content }

@@ -1423,6 +1423,30 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <!-- 工作步骤展示（对齐 DSH 的 ui-chat.transcriptView + collapseTiming） -->
+        <div class="settings-group">
+          <h3>{{ store.locales=='zh' ? '工作步骤展示' : 'Work Step Display' }}</h3>
+          <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
+            ? '对话里工具调用（读文件、执行命令、改文件等）显示多少细节。它只影响过程展示，不影响最终回答。'
+            : 'How much detail to show for tool calls (reading files, running commands, edits). It only affects the process display, never the final answer.' }}</div>
+          <div class="form-group">
+            <label>{{ store.locales=='zh' ? '展示档位' : 'Detail level' }}</label>
+            <select v-model="store.UI.stepDetailMode" class="layout-select" @change="store.saveConfig()">
+              <option value="compact">{{ store.locales=='zh' ? '简洁：只显示工具名与状态' : 'Compact: tool name and status only' }}</option>
+              <option value="standard">{{ store.locales=='zh' ? '标准：折叠为一行摘要，点开看详情' : 'Standard: one-line summary, expand for details' }}</option>
+              <option value="detailed">{{ store.locales=='zh' ? '详细：默认展开参数与结果' : 'Detailed: show args and results by default' }}</option>
+              <option value="verbose">{{ store.locales=='zh' ? '完全展开：全部展开，绝不自动收起' : 'Verbose: everything expanded, never folds' }}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>{{ store.locales=='zh' ? '收起时机' : 'Collapse timing' }}</label>
+            <select v-model="store.UI.stepCollapseTiming" class="layout-select" @change="store.saveConfig()">
+              <option value="completion">{{ store.locales=='zh' ? '回答结束后立即收起' : 'Fold when the answer finishes' }}</option>
+              <option value="next-input">{{ store.locales=='zh' ? '下次有新消息时再收起' : 'Fold on the next message' }}</option>
+            </select>
+          </div>
+        </div>
+
         <!-- 导航与模块（原「通用 → 功能」页，2026-10 合并进「基础」）：模块开关 + 模块子开关（知识管理视图与布局） -->
         <div class="settings-group">
           <h3>{{ store.locales=='zh' ? '导航与模块' : 'Navigation & Modules' }}</h3>

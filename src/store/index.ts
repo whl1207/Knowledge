@@ -479,6 +479,13 @@ export const usestore = defineStore('data', {
             // 空导航提醒：全部功能关闭且没有插件面板时，主界面没有可用页面 →
             // 显示提醒（含一键恢复 / 前往设置）；可在「设置 → 通用 → 基础」里关掉
             emptyNavNotice: true as boolean,
+            // 工作步骤展示档位（对齐 DSH 的 ui-chat.transcriptView）：
+            // compact 简洁 / standard 标准 / detailed 详细 / verbose 完全展开
+            stepDetailMode: 'standard' as 'compact' | 'standard' | 'detailed' | 'verbose',
+            // 工作步骤收起时机（对齐 DSH 的 collapseTiming）：回答结束后 / 下次有新消息时
+            stepCollapseTiming: 'completion' as 'completion' | 'next-input',
+            // 聊天列表是否显示「已归档」的聊天（对齐 DSH 的归档筛选；默认隐藏）
+            showArchivedChats: false as boolean,
         }, // 主题颜色
         AIconfig: {
             // 大模型配置
@@ -2140,6 +2147,15 @@ export const usestore = defineStore('data', {
                 if (this.UI.textAlignMode !== 'justify' && this.UI.textAlignMode !== 'kp') this.UI.textAlignMode = 'justify'
                 // 旧存档可能缺少 emptyNavNotice（空导航提醒），兜底为开启
                 if (typeof this.UI.emptyNavNotice !== 'boolean') this.UI.emptyNavNotice = true
+                // 旧存档缺少工作步骤展示设置：档位兜底 standard、收起时机兜底 completion
+                if (!['compact', 'standard', 'detailed', 'verbose'].includes(String(this.UI.stepDetailMode))) {
+                    this.UI.stepDetailMode = 'standard'
+                }
+                if (!['completion', 'next-input'].includes(String(this.UI.stepCollapseTiming))) {
+                    this.UI.stepCollapseTiming = 'completion'
+                }
+                // 旧存档缺少「显示已归档聊天」：默认隐藏
+                if (typeof this.UI.showArchivedChats !== 'boolean') this.UI.showArchivedChats = false
                 // 旧存档没有「窗口交互模式」：按运行环境给默认值（桌面多窗口 / 手机网页单窗口）
                 if (this.UI.windowMode !== 'single' && this.UI.windowMode !== 'multi') this.UI.windowMode = defaultWindowMode()
                 // 没有窗口壳的环境（安卓 / 局域网网页）无法多窗口：强制单窗口，避免设置页显示一个做不到的选项
@@ -3149,6 +3165,10 @@ export const usestore = defineStore('data', {
                     wordExportTemplate: this.UI.wordExportTemplate || 'gongwen',
                     textAlignMode: this.UI.textAlignMode === 'kp' ? 'kp' : 'justify',
                     emptyNavNotice: this.UI.emptyNavNotice !== false,
+                    stepDetailMode: ['compact', 'standard', 'detailed', 'verbose'].includes(String(this.UI.stepDetailMode))
+                        ? this.UI.stepDetailMode : 'standard',
+                    stepCollapseTiming: this.UI.stepCollapseTiming === 'next-input' ? 'next-input' : 'completion',
+                    showArchivedChats: this.UI.showArchivedChats === true,
                 }
             }
             this.setTheme()

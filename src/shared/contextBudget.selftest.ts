@@ -15,6 +15,10 @@ import {
   estimateMessageTokens,
   pickCompactionRange,
   pickCompactionRangeByTokens,
+  pruneToolResults,
+  renderCompactedCheckpoint,
+  PRUNE_KEEP_RECENT,
+  PRUNE_THRESHOLD_CHARS,
   type BudgetMessage,
 } from './contextBudget'
 
@@ -198,6 +202,47 @@ export function runContextBudgetSelfTest(): BudgetCase[] {
     add('旧接口：保留最近 2 轮（从 u2 起）', plan?.endIndex === 3, `endIndex=${plan?.endIndex}`)
     add('旧接口：startIndex 跳过 system', plan?.startIndex === 1)
     add('旧接口：COMPACT_KEEP_TURNS 默认值仍为 3', COMPACT_KEEP_TURNS === 3)
+  }
+
+  // 11. 工具结果剪枝（对齐 DSH 的 tool-result-pruner）
+  {
+    const bigText = '甲'.repeat(PRUNE_THRESHOLD_CHARS + 5000)
+    const items: BudgetMessage[] = [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'a', name: 'read_file', arguments: {} }] },
+      { role: 'tool', content: bigText },
+      ...Array.from({ length: PRUNE_KEEP_RECENT }, (_, i) => ({ role: 'user' as const, content: `filler-${i}` })),
+    ]
+    const res = pruneToolResults(items)
+    const pruned = res.items[2]
+    add('剪枝：超阈值的老工具结果被改短', res.pruned === 1 && Array.from(String(pruned.content)).length < PRUNE_THRESHOLD_CHARS)
+    add('剪枝：头尾都保留', String(pruned.content).startsWith('甲') && String(pruned.content).endsWith('甲'))
+    add('剪枝：标记里写了剪掉的字符数', String(pruned.content).includes('中间已剪枝'))
+    add('剪枝：省下的字符数大于 0', res.savedChars > 5000)
+
+    const again = pruneToolResults(res.items)
+    add('剪枝：幂等（再跑一次不再变）', again.pruned === 0)
+
+    const tailItems: BudgetMessage[] = [
+      { role: 'user', content: 'u' },
+      { role: 'tool', content: '乙'.repeat(PRUNE_THRESHOLD_CHARS + 1) },
+    ]
+    add('剪枝：最近 keepRecent 条不动', pruneToolResults(tailItems).pruned === 0)
+
+    const nonTool: BudgetMessage[] = [{ role: 'assistant', content: '丙'.repeat(PRUNE_THRESHOLD_CHARS + 1) }, ...Array.from({ length: PRUNE_KEEP_RECENT }, (_, i) => ({ role: 'user' as const, content: `f-${i}` }))]
+    add('剪枝：只动 tool 角色', pruneToolResults(nonTool).pruned === 0)
+
+    const emoji = { role: 'tool' as const, content: '😀'.repeat(PRUNE_THRESHOLD_CHARS + 100) }
+    const emojiRes = pruneToolResults([{ role: 'user', content: 'u' }, emoji, ...Array.from({ length: PRUNE_KEEP_RECENT }, (_, i) => ({ role: 'user' as const, content: `g-${i}` }))])
+    add('剪枝：不切碎 emoji 代理对', !/\uFFFD/.test(String(emojiRes.items[1].content)))
+  }
+
+  // 12. 压缩检查点渲染（前导语 + 标签）
+  {
+    const text = renderCompactedCheckpoint('## 主要请求与意图\n- 做某件事')
+    add('检查点：带前导语', text.startsWith('以下是更早对话的自动检查点'))
+    add('检查点：包在 <compacted-summary> 里', text.includes('<compacted-summary>') && text.includes('</compacted-summary>'))
+    add('检查点：正文原样保留', text.includes('## 主要请求与意图'))
   }
 
   return cases

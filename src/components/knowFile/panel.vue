@@ -1727,7 +1727,7 @@
         </template>
       </div>
     </div>
-    <div v-if="contextMenu.visible" :style="contextMenu.style" class="context-menu" @click.stop @mouseleave="hideContextMenu">
+    <div v-if="contextMenu.visible" :style="contextMenu.style" class="context-menu ctx-narrow" @click.stop @mouseleave="hideContextMenu">
       <!-- 远程节点右键：预览 / 下载 / 删除所属远程工作区 -->
       <template v-if="contextMenu.isRemote && contextMenu.node">
         <template v-if="contextMenu.node.type === 'file'">

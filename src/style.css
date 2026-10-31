@@ -1126,6 +1126,14 @@ pre.hljs .hljs-name {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
 }
 
+/* 文件树面板（panel.vue）与主页聊天（home.vue）共用的窄版菜单：一级菜单只有
+   「打开 / 操作 / 排序 / 重命名 / 复制」这类短词，不必占满 168px 的最小宽度
+   （那样会在文字和右侧箭头之间留出一大片空白），改为与二级菜单一致的 132px 起宽；
+   长条目（如「下载到本地工作区」）仍按内容自动撑开。 */
+.knowfile-menu .context-menu.ctx-narrow {
+  min-width: 132px;
+}
+
 .knowfile-menu .context-menu .menu-item,
 .knowfile-menu .context-menu .submenu li:not(.menu-divider) {
   height: 24px;

@@ -305,7 +305,9 @@ function evaluateMutation(abs: string, ctx: ToolExecutionContext, action: '覆�
   if (!rec) {
     return {
       ok: false,
-      error: `拒绝${action}「${abs}」：本会话尚未读取该文件（先读后写策略）。请先用 read_file 读取原文；只改局部请优先用 replace_in_file。`,
+      error: `拒绝${action}「${abs}」：本会话尚未读取该文件（先读后写策略）。`
+        + '请先用 read_file 读取；只改局部优先用 replace_in_file。'
+        + '如果确实是整篇重写、不需要保留原内容，read_file 传 limit=1 确认文件存在与版本即可（不必读全文），然后再写入。',
     }
   }
   if (rec.version !== cur.version) {

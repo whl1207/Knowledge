@@ -29,6 +29,9 @@ function getPurifier(): any {
     if (name === 'onerror' && data?.attrValue === SAFE_IMG_ONERROR) {
       // 这是 md_read 给本地图片挂的回退；只认这一条精确值
       data.keepAttr = true
+      // 只设 keepAttr 不够：事件属性不在 ALLOWED_ATTR 里，DOMPurify 还会按「属性不合法」删掉，
+      // 必须 forceKeepAttr 才真正留下（否则本地图片的 IPC 兜底永远不会被触发）
+      data.forceKeepAttr = true
       return
     }
     data.keepAttr = false
@@ -50,8 +53,10 @@ export function sanitizeHtml(html: string, opts: SanitizeHtmlOptions = {}): stri
   const p = getPurifier()
   if (!p) return html
   return String(p.sanitize(html, {
-    // Markdown 的图片 / 本地预览链接需要这些 scheme；脚本 / javascript: 仍被 DOMPurify 拒绝
-    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|file|data|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
+    // Markdown 的图片 / 本地预览链接需要这些 scheme；脚本 / javascript: 仍被 DOMPurify 拒绝。
+    // 盘符路径（`D:/…`、`D:\…`）必须显式放行：DOMPurify 会把它当成未知协议 `d:` 判为非法 URL，
+    // 直接删掉整条 src（图片变空白），md_read 拼出来的本地图片路径全是这种形式。
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|file|data|blob):|[a-z]:[\\/]|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
     ADD_ATTR: ['target', 'rel', 'download', 'data-mermaid-hash', 'data-toc-idx', 'data-lang', 'jax'],
     // MathJax 输出的是 <mjx-container> 自定义元素；不显式放行会被 DOMPurify 当成未知标签剥掉，
     // 表现为公式消失（正文其它部分正常），所以这里按标签名精确放行。

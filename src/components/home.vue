@@ -85,7 +85,8 @@
                 'chat-workflow': element.chat.mode === 'workflow',
                 'chat-agent': element.chat.mode === 'agent',
                 'chat-agent2': element.chat.mode === 'agent2',
-                'chat-swarm': element.chat.mode === 'swarm'
+                'chat-swarm': element.chat.mode === 'swarm',
+                archived: element.chat.archived
               }"
               @click="openChatFromList(element.originalIndex)"
               @contextmenu.stop="onChatNavContextMenu($event, element.originalIndex)"
@@ -115,11 +116,7 @@
                   </span>
                   <span class="chat-time">{{ getChatTimeText(element.chat) }}</span>
                   <div class="chat-item-right">
-                    <!-- 删除按钮 -->
-                    <div class="chat-actions" @click.stop="deleteChat(element.originalIndex)" title="删除聊天">
-                      <i class="fa fa-trash"></i>
-                    </div>
-                    <!-- 当前聊天的运行指示器（生成中 / 集群运行中 / 后台执行） -->
+                    <!-- 当前聊天的运行指示器（生成中 / 集群运行中 / 后台执行）；删除走右键菜单 -->
                     <div v-if="isChatRunning(element.chat) || shouldShowBackgroundExecution(element.chat, element.originalIndex)" 
                      class="execution-indicator" 
                      :title="chatRunningTitle(element.chat)">
@@ -481,9 +478,20 @@
           </div>
           <!-- 智能体/工作流模式：工具调用列表（tool-box 风格：标题 + 参数 + 结果，按时间线排列在内容之前） -->
           <div v-if="message.executionUnits && message.executionUnits.length" class="execution-unit-list">
+            <!-- 整轮折叠开关：跑完的轮次可以「收起过程 / 查看过程」来回切（与档位的收起时机配合） -->
+            <button
+              v-if="canFoldTurn(message)"
+              class="execution-fold-row"
+              :class="{ expanded: !isTurnFolded(message) }"
+              @click="toggleTurnFolded(message)"
+            >
+              <i class="fa" :class="isTurnFolded(message) ? 'fa-chevron-right' : 'fa-chevron-down'"></i>
+              <span>{{ isTurnFolded(message) ? turnFoldLabel(message) : (store.locales=='zh' ? '收起过程' : 'Hide details') }}</span>
+            </button>
+            <template v-if="!isTurnFolded(message)">
             <template
-              v-for="(unit, ui) in sortedExecutionUnits(message.executionUnits)"
-              :key="unit.id || ui"
+              v-for="(unit, ui) in displayUnits(message)"
+              :key="unit.id || unit.__groupKey || ui"
             >
             <!-- content 单元（思考/正文）：与最终输出同款 message-content 样式，按时间顺序穿插 -->
             <div
@@ -491,27 +499,32 @@
               class="message-content"
               v-html="renderMarkdown(unitResultText(unit))"
             ></div>
-            <!-- 运行中引导单元：用户在执行期间补充的要求（直接插在它生效的位置，后续步骤排在其下） -->
-            <div
-              v-else-if="unit.stepType === 'guidance'"
-              class="guidance-unit"
-            >
-              <div class="guidance-unit-head">
-                <i class="fa fa-bullhorn"></i>
-                <span>{{ store.locales=='zh' ? '用户引导' : 'User guidance' }}</span>
-                <span class="guidance-unit-time">{{ formatTime(unit.startTime) }}</span>
-              </div>
-              <div class="guidance-unit-body">{{ unitResultText(unit) }}</div>
-            </div>
+            <!-- 运行中引导单元：和工具同一套行样式（图标 + 标题 · 摘要 + 展开），只是图标与标题不同 -->
             <div
               v-else-if="!isToolUnitClosed(message.timestamp, unit.id || ui)"
               class="tool-box"
               :class="{ 'tool-box-collapsed': !isToolUnitExpanded(message.timestamp, unit.id || ui) }"
             >
-              <div class="tool-box-header">
+              <div
+                class="tool-box-header"
+                :class="{ running: unit.status === 'running' }"
+                @click="toggleToolUnitExpanded(message.timestamp, unit.id || ui)"
+              >
                 <i class="fa" :class="unitToolIcon(unit)"></i>
                 <span class="tool-box-name" :title="unitLabel(unit)">{{ unitLabel(unit) }}</span>
-                <span class="tool-box-status" :class="unit.status">
+                <!-- 折叠态单行：标题 · 摘要 · 后缀（大小/差异）· 状态胶囊，一行读完；
+                     引导即使选了「简洁」也显示摘要——那是用户自己说的话，不能只剩一个标题 -->
+                <template v-if="!isToolUnitExpanded(message.timestamp, unit.id || ui) && (stepPolicy.showSummaryLine || unit.stepType === 'guidance') && getToolCollapsedText(unit)">
+                  <span class="tool-box-sep">·</span>
+                  <span class="tool-box-summary" :title="getToolCollapsedText(unit)">{{ getToolCollapsedText(unit) }}</span>
+                </template>
+                <span v-if="unitSuffix(unit)" class="tool-box-suffix">{{ unitSuffix(unit) }}</span>
+                <span v-if="unitDuration(unit)" class="tool-box-duration">{{ unitDuration(unit) }}</span>
+                <!-- 异常（非零退出 / 超时 / 信号）：中性胶囊 + 红点，代替状态图标（对齐 DSH） -->
+                <span v-if="unitExitPill(unit)" class="tool-box-pill" :title="unitExitPillTitle(unit)">
+                  <i class="fa fa-circle"></i>{{ unitExitPill(unit) }}
+                </span>
+                <span v-else-if="unit.stepType !== 'guidance'" class="tool-box-status" :class="unit.status">
                   <i v-if="unit.status === 'running'" class="fa fa-circle-o-notch fa-spin"></i>
                   <i v-else-if="unit.status === 'success'" class="fa fa-check-circle"></i>
                   <i v-else-if="unit.status === 'error'" class="fa fa-times-circle"></i>
@@ -527,35 +540,27 @@
                 >
                   <i class="fa fa-external-link"></i>
                 </span>
-                <!-- 展开/折叠开关：默认折叠只显示单行摘要，点击展开后显示完整输入/输出详情 -->
+                <!-- 网页抓取：URL 可点（外部浏览器打开） -->
                 <span
-                  class="tool-box-toggle"
-                  :class="{ expanded: isToolUnitExpanded(message.timestamp, unit.id || ui) }"
-                  :title="isToolUnitExpanded(message.timestamp, unit.id || ui)
-                    ? (store.locales=='zh' ? '收起' : 'Collapse')
-                    : (store.locales=='zh' ? '展开详情' : 'Expand details')"
-                  @click.stop="toggleToolUnitExpanded(message.timestamp, unit.id || ui)"
+                  v-if="unitOpenUrl(unit)"
+                  class="tool-box-open"
+                  :title="store.locales=='zh' ? `打开链接：${unitOpenUrl(unit)}` : `Open link: ${unitOpenUrl(unit)}`"
+                  @click.stop="openWebResult({ url: unitOpenUrl(unit) })"
                 >
-                  <i class="fa fa-chevron-down"></i>
+                  <i class="fa fa-external-link"></i>
                 </span>
+                <!-- 展开/折叠：整行标题都可点（原先右侧还有一个箭头按钮，重复了，已移除） -->
                 <span
                   v-if="unit.description === 'update_plan' || unit.description === 'update_todo'"
                   class="tool-box-close"
                   :title="store.locales=='zh' ? '关闭' : 'Close'"
-                  @click="closeToolUnit(message.timestamp, unit.id || ui)"
+                  @click.stop="closeToolUnit(message.timestamp, unit.id || ui)"
                 >
                   <i class="fa fa-times"></i>
                 </span>
               </div>
-              <!-- 折叠态：单行摘要（不换行、无多余空格，超出省略；点击摘要也可展开） -->
-              <div
-                v-if="!isToolUnitExpanded(message.timestamp, unit.id || ui)"
-                class="tool-box-preview"
-                :title="getToolCollapsedText(unit) || unitLabel(unit)"
-                @click="toggleToolUnitExpanded(message.timestamp, unit.id || ui)"
-              >{{ getToolCollapsedText(unit) || '…' }}</div>
               <!-- 展开态：完整输入（参数/代码）与输出（结果/思考/计划）详情 -->
-              <template v-else>
+              <template v-if="isToolUnitExpanded(message.timestamp, unit.id || ui)">
                 <div v-if="shouldShowUnitArgs(unit)" class="tool-code-box scoll">
                   <span v-if="unit.description === 'run_code' && getRunCodeProgram(unit)" v-html="highlightCodeHtml(getRunCodeProgram(unit), 'typescript')"></span>
                   <span v-else-if="unit.description === 'run_python' && getRunPythonCode(unit)" v-html="highlightCodeHtml(getRunPythonCode(unit), 'python')"></span>
@@ -629,9 +634,14 @@
                     {{ store.locales == 'zh' ? '程序执行中…' : 'Running program…' }}
                   </div>
                 </template>
-                <div v-else-if="shouldShowUnitResult(unit) && unitResultText(unit)" class="tool-result-box scoll">{{ unitResultText(unit) }}</div>
+                <div
+                  v-else-if="shouldShowUnitResult(unit) && unitResultText(unit)"
+                  class="tool-result-box scoll"
+                  :class="{ 'tool-result-prose': unit.stepType === 'guidance' }"
+                >{{ unitResultText(unit) }}</div>
               </template>
             </div>
+            </template>
             </template>
           </div>
           
@@ -689,114 +699,161 @@
       <!-- 右键菜单 -->
       <teleport to="body">
         <div v-if="contextMenuVisible" class="context-menu-overlay" @click="hideContextMenu" @contextmenu.prevent="hideContextMenu"></div>
-        <div v-if="contextMenuVisible" class="context-menu" :style="{ left: contextMenuPos.x + 'px', top: contextMenuPos.y + 'px' }" @mouseleave="hideContextMenu">
-          <!-- 消息区右键菜单 -->
-          <template v-if="!isInputContextMenu">
-            <div v-if="contextMenuTargetIndex !== null" class="context-menu-item" @click="copyFromMenu">
-              <i class="fa fa-copy"></i> {{ store.locales=='zh' ? '复制文本' : 'Copy Text' }}
-            </div>
-            <div v-if="contextMenuTargetIndex !== null" class="context-menu-item" @click="ttsFromMenu">
-              <i class="fa fa-volume-up"></i> {{ store.locales=='zh' ? '朗读文本' : 'Read Aloud' }}
-            </div>
-            <div v-if="contextMenuTargetIndex !== null" class="context-menu-item" @click="branchFromContextMenu">
-              <i class="fa fa-code-fork"></i> {{ store.locales=='zh' ? '从此处分支' : 'Branch from here' }}
-            </div>
-            <div class="context-menu-item" @click="stopTTSFromMenu" v-if="isTTSSpeaking">
-              <i class="fa fa-stop"></i> {{ store.locales=='zh' ? '停止朗读' : 'Stop Reading' }}
-            </div>
-            <div class="context-menu-item" @click="clearCurrentChatFromMenu">
-              <i class="fa fa-trash"></i> {{ store.locales=='zh' ? '清空聊天' : 'Clear Chat' }}
-            </div>
-            <div class="context-menu-item has-submenu" style="position:relative;">
-              <i class="fa fa-download"></i>
-              <span style="flex:1">{{ contextMenuTargetIndex !== null ? (store.locales=='zh' ? '导出此消息' : 'Export This Message') : (store.locales=='zh' ? '导出全部' : 'Export All') }}</span>
-              <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
-              <ul class="submenu">
-                <li v-if="store.root" @click.stop="exportChatToKbFromMenu"><i class="fa fa-book"></i> {{ store.locales=='zh' ? '知识库' : 'Knowledge Base' }}</li>
-                <li @click.stop="exportChatFromMenu"><i class="fa fa-file-text-o"></i> Markdown</li>
-                <li @click.stop="exportChatToWord"><i class="fa fa-file-word-o"></i> Word</li>
-              </ul>
-            </div>
-          </template>
-          <!-- 输入栏右键菜单：仅粘贴 -->
-          <template v-if="isInputContextMenu">
-            <div class="context-menu-item" @click="pasteToInput">
-              <i class="fa fa-paste"></i> {{ store.locales=='zh' ? '粘贴' : 'Paste' }}
-            </div>
-            <div class="context-menu-item" @click="stopTTSFromMenu" v-if="isTTSSpeaking">
-              <i class="fa fa-stop"></i> {{ store.locales=='zh' ? '停止朗读' : 'Stop Reading' }}
-            </div>
-          </template>
+        <!-- 主页右键菜单与知识管理文件树（panel.vue）共用同一套样式：外层 .knowfile-menu 只作样式作用域、
+             本身不参与布局；菜单用 style.css 的紧凑变体（12px 字号 / 24px 行高 / menuColor 底 / 4px 圆角 hover），
+             .ctx-narrow 让它和文件树面板一样以 132px 起宽（长条目仍按内容撑开）。 -->
+        <div v-if="contextMenuVisible" class="knowfile-menu">
+          <div class="context-menu ctx-narrow" :style="{ left: contextMenuPos.x + 'px', top: contextMenuPos.y + 'px' }" @mouseleave="hideContextMenu">
+            <!-- 消息区右键菜单 -->
+            <template v-if="!isInputContextMenu">
+              <div v-if="contextMenuTargetIndex !== null" class="menu-item" @click="copyFromMenu">
+                <i class="fa fa-copy"></i> {{ store.locales=='zh' ? '复制文本' : 'Copy Text' }}
+              </div>
+              <div v-if="contextMenuTargetIndex !== null" class="menu-item" @click="ttsFromMenu">
+                <i class="fa fa-volume-up"></i> {{ store.locales=='zh' ? '朗读文本' : 'Read Aloud' }}
+              </div>
+              <div v-if="contextMenuTargetIndex !== null" class="menu-item" @click="branchFromContextMenu">
+                <i class="fa fa-code-fork"></i> {{ store.locales=='zh' ? '从此处分支' : 'Branch from here' }}
+              </div>
+              <div class="menu-item" @click="stopTTSFromMenu" v-if="isTTSSpeaking">
+                <i class="fa fa-stop"></i> {{ store.locales=='zh' ? '停止朗读' : 'Stop Reading' }}
+              </div>
+              <!-- 工作步骤展示：档位 + 收起时机（与「设置 → 通用 → 基础」同源） -->
+              <div class="menu-item has-submenu">
+                <i class="fa fa-list-ul"></i>
+                <span style="flex:1">{{ store.locales=='zh' ? '工作步骤展示' : 'Work Step Display' }}</span>
+                <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
+                <ul class="submenu">
+                  <li v-for="opt in STEP_MODE_OPTIONS" :key="opt.id" @click.stop="setStepDetailMode(opt.id)">
+                    <i class="fa" :class="store.UI.stepDetailMode === opt.id ? 'fa-check' : opt.icon"></i>
+                    {{ opt.label }}
+                  </li>
+                </ul>
+              </div>
+              <div class="menu-item has-submenu">
+                <i class="fa fa-clock-o"></i>
+                <span style="flex:1">{{ store.locales=='zh' ? '步骤收起时机' : 'Collapse Timing' }}</span>
+                <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
+                <ul class="submenu">
+                  <li @click.stop="setStepCollapseTiming('completion')">
+                    <i class="fa" :class="store.UI.stepCollapseTiming === 'completion' ? 'fa-check' : 'fa-clock-o'"></i>
+                    {{ store.locales=='zh' ? '回答结束后' : 'On completion' }}
+                  </li>
+                  <li @click.stop="setStepCollapseTiming('next-input')">
+                    <i class="fa" :class="store.UI.stepCollapseTiming === 'next-input' ? 'fa-check' : 'fa-clock-o'"></i>
+                    {{ store.locales=='zh' ? '下次有新消息时' : 'On next message' }}
+                  </li>
+                </ul>
+              </div>
+              <div class="menu-item" @click="clearCurrentChatFromMenu">
+                <i class="fa fa-trash"></i> {{ store.locales=='zh' ? '清空聊天' : 'Clear Chat' }}
+              </div>
+              <div class="menu-item has-submenu">
+                <i class="fa fa-download"></i>
+                <span style="flex:1">{{ contextMenuTargetIndex !== null ? (store.locales=='zh' ? '导出此消息' : 'Export This Message') : (store.locales=='zh' ? '导出全部' : 'Export All') }}</span>
+                <i class="fa fa-chevron-right" style="font-size:10px;width:auto"></i>
+                <ul class="submenu">
+                  <li v-if="store.root" @click.stop="exportChatToKbFromMenu"><i class="fa fa-book"></i> {{ store.locales=='zh' ? '知识库' : 'Knowledge Base' }}</li>
+                  <li @click.stop="exportChatFromMenu"><i class="fa fa-file-text-o"></i> Markdown</li>
+                  <li @click.stop="exportChatToWord"><i class="fa fa-file-word-o"></i> Word</li>
+                </ul>
+              </div>
+            </template>
+            <!-- 输入栏右键菜单：仅粘贴 -->
+            <template v-if="isInputContextMenu">
+              <div class="menu-item" @click="pasteToInput">
+                <i class="fa fa-paste"></i> {{ store.locales=='zh' ? '粘贴' : 'Paste' }}
+              </div>
+              <div class="menu-item" @click="stopTTSFromMenu" v-if="isTTSSpeaking">
+                <i class="fa fa-stop"></i> {{ store.locales=='zh' ? '停止朗读' : 'Stop Reading' }}
+              </div>
+            </template>
+          </div>
         </div>
-        <!-- 聊天列表（消息导航栏）右键菜单：排列方式 + 排序。
-             视觉复用知识管理的紧凑右键菜单（style.css 的 .knowfile-menu 变体）：12px 字号 / 24px 行高 /
-             menuColor 底 / 圆角 hover；这里用 .chat-nav-menu 承载同一套数值，避免与主页普通菜单样式互相影响。 -->
+        <!-- 聊天列表（消息导航栏）右键菜单：排列方式 + 排序。外观同上面的消息菜单
+             （同一套 .knowfile-menu 紧凑菜单 + .ctx-narrow 宽度），只额外带分组小标题。 -->
         <div v-if="chatNavMenuVisible" class="context-menu-overlay" @click="hideChatNavMenu" @contextmenu.prevent="hideChatNavMenu"></div>
-        <div
-          v-if="chatNavMenuVisible"
-          class="context-menu chat-nav-menu"
-          :style="{ left: chatNavMenuPos.x + 'px', top: chatNavMenuPos.y + 'px' }"
-          @mouseleave="hideChatNavMenu"
-        >
-          <div class="chat-nav-section">{{ store.locales == 'zh' ? '消息排列' : 'Message order' }}</div>
-          <div class="menu-item" :class="{ current: chatOrderMode === 'sequence' }" @click="setChatOrderMode('sequence')">
-            <i class="fa fa-list-ul"></i>
-            <span class="menu-label">{{ store.locales == 'zh' ? '按顺序（可拖动）' : 'By sequence (draggable)' }}</span>
-            <i v-if="chatOrderMode === 'sequence'" class="fa fa-check chat-nav-check"></i>
-          </div>
-          <div class="menu-item" :class="{ current: chatOrderMode === 'workspace' }" @click="setChatOrderMode('workspace')">
-            <i class="fa fa-object-group"></i>
-            <span class="menu-label">{{ store.locales == 'zh' ? '按工作区分组' : 'Group by workspace' }}</span>
-            <i v-if="chatOrderMode === 'workspace'" class="fa fa-check chat-nav-check"></i>
-          </div>
-          <div class="menu-divider"></div>
-          <div class="chat-nav-section">{{ store.locales == 'zh' ? '排序' : 'Sort' }}</div>
-          <div class="menu-item" :class="{ current: chatSortMode === 'last' }" @click="setChatSortMode('last')">
-            <i class="fa fa-clock-o"></i>
-            <span class="menu-label">{{ store.locales == 'zh' ? '按最后生成时间' : 'Last generated' }}</span>
-            <i v-if="chatSortMode === 'last'" class="fa fa-check chat-nav-check"></i>
-          </div>
-          <div class="menu-item" :class="{ current: chatSortMode === 'created' }" @click="setChatSortMode('created')">
-            <i class="fa fa-calendar-o"></i>
-            <span class="menu-label">{{ store.locales == 'zh' ? '按创建时间' : 'Created time' }}</span>
-            <i v-if="chatSortMode === 'created'" class="fa fa-check chat-nav-check"></i>
-          </div>
-          <!-- 拖动排序后进入的自定义顺序（不在菜单里直接选，只用来解释当前状态） -->
-          <div v-if="chatSortMode === 'manual'" class="menu-item current" @click="hideChatNavMenu">
-            <i class="fa fa-hand-pointer-o"></i>
-            <span class="menu-label">{{ store.locales == 'zh' ? '自定义顺序（拖动调整）' : 'Custom order (dragged)' }}</span>
-            <i class="fa fa-check chat-nav-check"></i>
-          </div>
-          <!-- 在具体聊天行上右键时，菜单同时带上该行的「删除聊天」（与知识管理「文件菜单里带排序」一致） -->
-          <template v-if="chatNavMenuChatIndex !== null">
-            <div class="menu-divider"></div>
-            <div class="menu-item menu-danger" @click="deleteChatFromSidebarMenu">
-              <i class="fa fa-trash"></i>
-              <span class="menu-label">{{ store.locales == 'zh' ? '删除聊天' : 'Delete Chat' }}</span>
+        <div v-if="chatNavMenuVisible" class="knowfile-menu">
+          <div
+            class="context-menu ctx-narrow chat-nav-menu"
+            :style="{ left: chatNavMenuPos.x + 'px', top: chatNavMenuPos.y + 'px' }"
+            @mouseleave="hideChatNavMenu"
+          >
+            <div class="chat-nav-section">{{ store.locales == 'zh' ? '消息排列' : 'Message order' }}</div>
+            <div class="menu-item" :class="{ current: chatOrderMode === 'sequence' }" @click="setChatOrderMode('sequence')">
+              <i class="fa fa-list-ul"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '按顺序（可拖动）' : 'By sequence (draggable)' }}</span>
+              <i v-if="chatOrderMode === 'sequence'" class="fa fa-check chat-nav-check"></i>
             </div>
-          </template>
+            <div class="menu-item" :class="{ current: chatOrderMode === 'workspace' }" @click="setChatOrderMode('workspace')">
+              <i class="fa fa-object-group"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '按工作区分组' : 'Group by workspace' }}</span>
+              <i v-if="chatOrderMode === 'workspace'" class="fa fa-check chat-nav-check"></i>
+            </div>
+            <div class="menu-divider"></div>
+            <div class="chat-nav-section">{{ store.locales == 'zh' ? '排序' : 'Sort' }}</div>
+            <div class="menu-item" :class="{ current: chatSortMode === 'last' }" @click="setChatSortMode('last')">
+              <i class="fa fa-clock-o"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '按最后生成时间' : 'Last generated' }}</span>
+              <i v-if="chatSortMode === 'last'" class="fa fa-check chat-nav-check"></i>
+            </div>
+            <div class="menu-item" :class="{ current: chatSortMode === 'created' }" @click="setChatSortMode('created')">
+              <i class="fa fa-calendar-o"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '按创建时间' : 'Created time' }}</span>
+              <i v-if="chatSortMode === 'created'" class="fa fa-check chat-nav-check"></i>
+            </div>
+            <!-- 拖动排序后进入的自定义顺序（不在菜单里直接选，只用来解释当前状态） -->
+            <div v-if="chatSortMode === 'manual'" class="menu-item current" @click="hideChatNavMenu">
+              <i class="fa fa-hand-pointer-o"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '自定义顺序（拖动调整）' : 'Custom order (dragged)' }}</span>
+              <i class="fa fa-check chat-nav-check"></i>
+            </div>
+            <!-- 归档筛选（对齐 DSH）：只影响列表显示，不改顺序、不删除 -->
+            <div class="menu-divider"></div>
+            <div class="menu-item" :class="{ current: store.UI.showArchivedChats }" @click="toggleShowArchivedChats">
+              <i class="fa fa-archive"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '显示已归档的聊天' : 'Show archived chats' }}</span>
+              <i v-if="store.UI.showArchivedChats" class="fa fa-check chat-nav-check"></i>
+            </div>
+            <!-- 在具体聊天行上右键时，菜单同时带上该行的「归档 / 删除」 -->
+            <template v-if="chatNavMenuChatIndex !== null">
+              <div class="menu-divider"></div>
+              <div class="menu-item" @click="archiveChatFromSidebarMenu">
+                <i class="fa" :class="chatNavMenuChat?.archived ? 'fa-undo' : 'fa-archive'"></i>
+                <span class="menu-label">{{ chatNavMenuChat?.archived
+                  ? (store.locales == 'zh' ? '取消归档' : 'Unarchive')
+                  : (store.locales == 'zh' ? '归档聊天' : 'Archive chat') }}</span>
+              </div>
+              <div class="menu-item menu-danger" @click="deleteChatFromSidebarMenu">
+                <i class="fa fa-trash"></i>
+                <span class="menu-label">{{ store.locales == 'zh' ? '删除聊天' : 'Delete Chat' }}</span>
+              </div>
+            </template>
+          </div>
         </div>
-        <!-- 分支树右键菜单 -->
+        <!-- 分支树右键菜单（样式同上，与知识管理文件树菜单一致） -->
         <div v-if="branchContextMenuVisible" class="context-menu-overlay" @click="hideBranchContextMenu" @contextmenu.prevent="hideBranchContextMenu"></div>
-        <div v-if="branchContextMenuVisible" ref="branchContextMenuRef" class="context-menu" :style="{ left: branchContextMenuPos.x + 'px', top: branchContextMenuPos.y + 'px' }" @mouseleave="hideBranchContextMenu">
-          <template v-if="branchContextMenuNode">
-            <div class="context-menu-item" @click="deleteBranchFromContextMenu">
-              <i class="fa fa-trash"></i> {{ branchContextMenuNode.depth === 0
-                ? (store.locales=='zh' ? '删除对话' : 'Delete Chat')
-                : (store.locales=='zh' ? '删除分支' : 'Delete Branch')
+        <div v-if="branchContextMenuVisible" class="knowfile-menu">
+          <div ref="branchContextMenuRef" class="context-menu ctx-narrow" :style="{ left: branchContextMenuPos.x + 'px', top: branchContextMenuPos.y + 'px' }" @mouseleave="hideBranchContextMenu">
+            <template v-if="branchContextMenuNode">
+              <div class="menu-item" @click="deleteBranchFromContextMenu">
+                <i class="fa fa-trash"></i> {{ branchContextMenuNode.depth === 0
+                  ? (store.locales=='zh' ? '删除对话' : 'Delete Chat')
+                  : (store.locales=='zh' ? '删除分支' : 'Delete Branch')
+                }}
+              </div>
+              <div class="menu-divider"></div>
+            </template>
+            <div class="menu-item" @click="resetBranchView">
+              <i class="fa fa-undo"></i> {{ store.locales=='zh' ? '重置视图' : 'Reset View' }}
+            </div>
+            <div class="menu-item" @click="toggleBranchTitles">
+              <i class="fa" :class="showBranchTitles ? 'fa-check-square-o' : 'fa-square-o'"></i>
+              {{ showBranchTitles
+                ? (store.locales=='zh' ? '隐藏标题' : 'Hide Titles')
+                : (store.locales=='zh' ? '显示标题' : 'Show Titles')
               }}
             </div>
-            <div class="context-menu-divider"></div>
-          </template>
-          <div class="context-menu-item" @click="resetBranchView">
-            <i class="fa fa-undo"></i> {{ store.locales=='zh' ? '重置视图' : 'Reset View' }}
-          </div>
-          <div class="context-menu-item" @click="toggleBranchTitles">
-            <i class="fa" :class="showBranchTitles ? 'fa-check-square-o' : 'fa-square-o'"></i>
-            {{ showBranchTitles
-              ? (store.locales=='zh' ? '隐藏标题' : 'Hide Titles')
-              : (store.locales=='zh' ? '显示标题' : 'Show Titles')
-            }}
           </div>
         </div>
       </teleport>
@@ -1417,6 +1474,13 @@ import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/ag
 import { workspaceRoot } from '@/lib/agent/promptContext'
 import type { EditDiffFilePreview } from '@/shared/editDiff'
 import type { ChatMode, RelevantBlock, ExecutionUnit, WorkflowUnit, UploadItem, ChatMessage, ChatConfig, Chat, RetrievalStats } from '@/types/chat'
+import {
+  isEditTool as isStepEditTool,
+  isResultFirstTool as isStepResultFirstTool,
+  shouldFoldTurn,
+  normalizeStepCollapseTiming,
+  stepDisplayPolicy,
+} from '@/shared/stepDisplay'
 import { useChatModels } from '@/composables/useChatModels'
 import { usePendingQueue, type PendingQueueItem } from '@/composables/usePendingQueue'
 import { useAgentRun } from '@/composables/useAgentRun'
@@ -1860,6 +1924,9 @@ watch(chatSortMode, (v) => {
 const chatNavMenuVisible = ref(false)
 const chatNavMenuPos = ref({ x: 0, y: 0 })
 const chatNavMenuChatIndex = ref<number | null>(null)
+/** 右键菜单里当前右键的那条聊天（用于「归档 / 取消归档」的状态与文案） */
+const chatNavMenuChat = computed<Chat | undefined>(() =>
+  chatNavMenuChatIndex.value === null ? undefined : chats.value[chatNavMenuChatIndex.value])
 const hideChatNavMenu = () => {
   chatNavMenuVisible.value = false
   chatNavMenuChatIndex.value = null
@@ -1924,7 +1991,9 @@ const chatListEntries = computed<ChatListEntry[]>({
     const flat = sortByChatMode(
       chats.value
         .map((chat, idx) => ({ chat, originalIndex: idx }))
-        .filter((it) => !it.chat.parentId),
+        .filter((it) => !it.chat.parentId)
+        // 已归档的聊天默认隐藏（对齐 DSH 的归档筛选）；切换显示不改动排序与保存位置
+        .filter((it) => store.UI.showArchivedChats === true || !it.chat.archived),
     )
     const asEntry = (it: { chat: Chat; originalIndex: number }): ChatListEntry =>
       ({ key: String(it.chat.id), chat: it.chat, originalIndex: it.originalIndex })
@@ -1960,7 +2029,26 @@ const chatListEntries = computed<ChatListEntry[]>({
     if (sameOrder) return
     // 用户手动拖动即视为「自定义顺序」：否则下一次按「最后生成时间」重排会把刚拖好的位置冲掉
     if (chatSortMode.value !== 'manual') chatSortMode.value = 'manual'
-    rootChats.value = list.map((e) => ({ chat: e.chat, originalIndex: e.originalIndex }))
+    // 已归档且当前不可见的根聊天：**保留它们在根序列里的槽位**（对齐 DSH：归档筛选只影响显示，
+    // 不改变保存的位置）。否则一次拖动会把它们全部挤到末尾，取消显示后顺序就乱了。
+    const hiddenIds = new Set(
+      chats.value
+        .filter((c) => !c.parentId && c.archived && store.UI.showArchivedChats !== true)
+        .map((c) => String(c.id)),
+    )
+    const queue = list.map((e) => e.chat)
+    let qi = 0
+    const nextRoots: Chat[] = []
+    for (const c of chats.value) {
+      if (c.parentId) continue
+      if (hiddenIds.has(String(c.id))) {
+        nextRoots.push(c) // 隐藏项占自己的槽位，不参与重排
+        continue
+      }
+      nextRoots.push(queue[qi++] || c)
+    }
+    while (qi < queue.length) nextRoots.push(queue[qi++])
+    rootChats.value = nextRoots.map((chat) => ({ chat, originalIndex: chats.value.indexOf(chat) }))
   },
 })
 
@@ -2507,12 +2595,18 @@ const {
   canFlush: (chatId: string) => currentChat.value?.id === chatId,
   /**
    * 投递时机（DSH：在**下一个 step 边界**进给正在跑的 agent，不打断本轮）：
-   * 只有当「确定还有下一个 step」时才投——本 step 的模型输出已产生（stepSettled）
-   * 且它调用的工具都已跑完（awaitingTools=false）。此时主进程正走到 step 末尾并
-   * `claimPendingSteer()`，投进去正好在下一个 step 被领取；投早了会落在 turn 收尾之后，
-   * 那条 steer 会另起一个没有订阅者的 turn（界面一直转圈）。
+   *
+   * 关键是要赶在主进程 `claimPendingSteer()` **之前**把消息放进 inbox——它在该 step
+   * 结束（工具跑完）时同步领取，领取到就 `owesWork=true` 继续下一步。所以：
+   * - 本 step 的模型输出已产生（`stepSettled`）且**带工具调用** → 此刻投递最合适：
+   *   主进程必然还有下一步（工具结果要回传），消息正好在本次 step 末尾被领取；
+   * - 本 step **没有工具调用** → turn 会就此收尾，不要投（投进去只会变成没人订阅的
+   *   游离 turn）；这类条目留给队列在收尾后按「新一轮任务」发送。
+   *
+   * 旧实现等「工具都跑完（awaitingTools=false）」再投，而那一刻主进程已经 claim 过，
+   * 于是每条插队都要**晚一个 step** 才生效，看起来就像"插不进去"。
+   *
    * 插队条目（pinned）享受的是**投递优先级**，时机门槛相同（安全第一）。
-   * 若本轮就此结束（没有工具调用）→ 队列等收尾后走 sendAsNewTurn（同样不丢内容）。
    */
   canDeliver: (chatId: string, item: PendingQueueItem) => {
     void item
@@ -2522,9 +2616,11 @@ const {
     if (chat.mode === 'swarm') return true
     const viewId = findRunningAgentViewId(chat)
     if (!viewId) return false
-    const view = agentBridge.get(viewId)
+    const view = agentBridge.get(viewId) as any
     if (!view) return false
-    return isAgentStepSettled(viewId) && view.awaitingTools !== true
+    const lastStep = view.steps?.[view.steps.length - 1]
+    const stepHasTools = (lastStep?.toolCalls?.length || 0) > 0
+    return isAgentStepSettled(viewId) && stepHasTools
   },
   /** 运行中：通过 steer 通道投递（下一个 step 边界生效） */
   push: (chatId: string, item: PendingQueueItem) => pushQueuedToRunningAgent(chatId, item),
@@ -2651,21 +2747,55 @@ const enqueueCurrentInput = (opts?: { pin?: boolean }): boolean => {
  * **不打断本轮**——主进程在下一个 step 边界领取（DSH 的 inbox/steer 语义）。
  * 返回实际受理的会话数（0 = 没有可接收的会话，条目会留在队首稍后重试）。
  */
+/**
+ * 运行中引导 → 记进「当前正在执行的 assistant 消息」的时间线（`guidance` 单元）。
+ *
+ * 为什么不再往对话底部 push 一条 user 消息：那样它永远排在整轮气泡之后，看起来像
+ * "引导跑到了这一轮结束之后"，顺序观感很差。guidance 单元参与 `sortedExecutionUnits`
+ * 的 startTime 排序，正好落在它被领取的那个 step 位置（模板与样式已就绪）。
+ *
+ * 返回 false 表示找不到正在执行的 assistant 消息（极小窗口 / 集群成员各自成消息），
+ * 调用方回退为底部留痕。
+ */
+const appendGuidanceUnit = (chat: any, text: string): boolean => {
+  const msgs: any[] = chat?.messages || []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (!m || m.role !== 'assistant' || m.isExecuting !== true) continue
+    const units = Array.isArray(m.executionUnits) ? m.executionUnits : []
+    units.push({
+      id: `guidance-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      status: 'success',
+      stepType: 'guidance',
+      result: text,
+      startTime: Date.now(),
+      endTime: Date.now(),
+    })
+    m.executionUnits = units
+    return true
+  }
+  return false
+}
+
 const pushQueuedToRunningAgent = async (chatId: string, item: PendingQueueItem): Promise<number> => {
   const chat = (chats.value || []).find((c: any) => c?.id === chatId)
   if (!chat) return 0
   const delivered = await steerRunningAgents(chat, item.text)
   if (!delivered) return 0
-  // 时间线上留痕：作为一条「运行中」用户消息（气泡带提示：不打断本轮，下一个 step 生效）
-  const userMessage: ChatMessage = {
-    role: 'user',
-    content: item.display || item.text,
-    timestamp: Date.now(),
-    steer: true,
-    images: item.images && item.images.length ? item.images : undefined,
-    fileAttachments: item.fileAttachments && item.fileAttachments.length ? item.fileAttachments : undefined,
+  // 时间线留痕：插到正在执行的气泡里（它生效的位置），而不是对话最底部
+  const inTimeline = chat.mode !== 'swarm' && appendGuidanceUnit(chat, item.display || item.text)
+  if (!inTimeline) {
+    // 回退：没有可挂载的执行中消息（如集群成员各自成消息）→ 仍然留一条带「引导」标记的用户消息
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: item.display || item.text,
+      timestamp: Date.now(),
+      steer: true,
+      images: item.images && item.images.length ? item.images : undefined,
+      fileAttachments: item.fileAttachments && item.fileAttachments.length ? item.fileAttachments : undefined,
+    }
+    chat.messages.push(userMessage)
   }
-  chat.messages.push(userMessage)
   autoScrollEnabled.value = true
   if (currentChat.value?.id === chatId) scrollToBottom()
   saveChats()
@@ -4244,6 +4374,12 @@ const writeFileContentNote = (unit: any): string => {
 /** 工具写入 / 改写的文件路径（写入成功才有；write_file / replace_in_file 取 path，multi_replace 取每条替换的 path，export_word 取结果里的输出路径） */
 const openableToolPaths = (unit: any): string[] => {
   const n = String(unit?.description || '')
+  // 读类也给一个「打开」：和 DSH 一样，路径可点开（读完想直接在编辑器里看）
+  if (n === 'read_file') {
+    if (unit?.status && unit.status !== 'success') return []
+    const p = unit?.result?.path || unit?.args?.path
+    return p ? [String(p)] : []
+  }
   const WRITE_TOOLS = ['write_file', 'replace_in_file', 'multi_replace', 'export_word']
   if (!WRITE_TOOLS.includes(n)) return []
   if (unit?.status && unit.status !== 'success') return []
@@ -6215,6 +6351,34 @@ const deleteChatFromSidebarMenu = async () => {
   if (index !== null) {
     await deleteChat(index)
   }
+}
+
+/**
+ * 归档 / 取消归档（对齐 DSH 的 session 归档）：只改列表可见性，**不删除任何消息**。
+ * 归档后如果当前打开的就是它，内容仍留在这里；切走再想回来，先在右键菜单打开「显示已归档的聊天」。
+ */
+const archiveChatFromSidebarMenu = () => {
+  const index = chatNavMenuChatIndex.value
+  if (index === null) return
+  const chat = chats.value[index]
+  hideChatNavMenu()
+  if (!chat) return
+  const nextArchived = !chat.archived
+  if (nextArchived) chat.archived = true
+  else delete chat.archived
+  saveChats()
+  if (nextArchived && store.UI.showArchivedChats !== true && currentChatIndex.value === index) {
+    ElMessage.info(store.locales === 'zh'
+      ? '已归档：该聊天已从列表隐藏。需要找回时，在聊天列表上右键勾选「显示已归档的聊天」'
+      : 'Archived: hidden from the chat list. Right-click the list and enable “Show archived chats” to find it again.')
+  }
+}
+
+/** 显示 / 隐藏已归档的聊天（只影响列表筛选，不改排序与保存位置） */
+const toggleShowArchivedChats = () => {
+  store.UI.showArchivedChats = store.UI.showArchivedChats !== true
+  store.saveConfig()
+  hideChatNavMenu()
 }
 
 const hideBranchContextMenu = () => {
@@ -9551,6 +9715,8 @@ const workflowNodeIcons: Record<string, string> = {
 
 const unitToolIcon = (unit: any): string => {
   if (unit.stepType === 'content') return 'fa-lightbulb-o'
+  // 运行中引导与工具共用行样式，靠图标 + 标题区分
+  if (unit.stepType === 'guidance') return 'fa-bullhorn'
   const toolName = unit.description
   if (toolName && toolIcons[toolName]) return toolIcons[toolName]
   const nodeIcon = workflowNodeIcons[String(unit.nodeType || '')]
@@ -9558,9 +9724,10 @@ const unitToolIcon = (unit: any): string => {
   return unit.nodeType === 'python' ? 'fa-code' : 'fa-cog'
 }
 
-/** 工具单元标题（智能体：工具中文名；工作流：节点名） */
+/** 工具单元标题（智能体：工具中文名；工作流：节点名；引导：用户引导） */
 const unitLabel = (unit: any): string => {
   if (unit.stepType === 'content') return store.locales == 'zh' ? '思考过程' : 'Thinking'
+  if (unit.stepType === 'guidance') return store.locales == 'zh' ? '用户引导' : 'User guidance'
   const toolName = unit.description
   if (toolName) return getToolLabel(toolName)
   if (unit.name) return String(unit.name)
@@ -9571,6 +9738,7 @@ const unitLabel = (unit: any): string => {
 const shouldShowUnitArgs = (unit: any): boolean => {
   const n = unit.description
   if (unit.stepType === 'reasoning' || unit.stepType === 'content') return false // 思考/正文走独立块，无参数区
+  if (unit.stepType === 'guidance') return false // 引导只有正文（展开时由结果块渲染）
   if (n === 'update_plan' || n === 'update_todo') return false // 计划/清单直接以文本呈现，参数区省略
   if (n === 'server-search-visit') return false // 访问网站：无入参
   if (n === 'server-search-query') return false // 旧数据兼容（老卡片：查询词在结果区）
@@ -9578,6 +9746,10 @@ const shouldShowUnitArgs = (unit: any): boolean => {
   // write_file：参数区只展示目标路径。路径还没流出来（模型先写 content）时整个参数框都不显示 ——
   // 否则会退回展示原始 JSON，看起来就是「参数框和结果框显示同一份文件内容」。
   if (n === 'write_file' && !getWriteFilePath(unit)) return false
+  // 差异优先：编辑类工具直接给 diff（参数 JSON 信息密度低，diff 本身就是"改了什么"）
+  if (stepPolicy.value.diffFirst && isStepEditTool(n) && editDiffFilesOf(unit).length > 0) return false
+  // 结果优先：读取/搜索类工具的入参（路径、查询词）已在折叠行摘要里，展开后先看结果
+  if (stepPolicy.value.resultFirst && isStepResultFirstTool(n)) return false
   // server-search：查询词作为入参显示在参数区，结果在结果区（与 web_search 工具卡片一致）
   return true
 }
@@ -9838,15 +10010,8 @@ const unitResultText = (unit: any): string => {
       if (typeof r?.description === 'string') return r.description
       return prettyJson(r)
     case 'shell': {
-      // 只显示命令 + 退出状态；正文（stdout/modelText）留给展开面板，避免卡片里刷几百 KB
-      const cmd = String(r?.command ?? '')
-      const code = typeof r?.exitCode === 'number' ? r.exitCode : undefined
-      const suffix = r?.timedOut
-        ? (isZh ? '（超时）' : ' (timed out)')
-        : code !== undefined && code !== 0
-          ? ` · exit ${code}`
-          : ''
-      return `${cmd}${suffix}`
+      // 只显示命令；退出状态交给行尾的中性胶囊（exit N / 超时 / 信号），别再混进正文
+      return String(r?.command ?? '')
     }
     case 'read_image': {
       return isZh ? `读取图片 ${r?.path ?? ''}` : `Read image ${r?.path ?? ''}`
@@ -9936,11 +10101,108 @@ const closeToolUnit = (msgTs: number, unitId: string | number) => {
   closedToolUnits.value = { ...closedToolUnits.value, [closedToolUnitKey(msgTs, unitId)]: true }
 }
 
-/** 工具卡片展开/折叠状态（key = 消息时间戳 + 单元 id；默认折叠，仅保留单行摘要） */
+// ---------------- 工作步骤展示（四档策略，对齐 DSH） ----------------
+
+/** 当前生效的展示策略（设置 → 通用 → 基础，或聊天头部快捷切换） */
+const stepPolicy = computed(() => stepDisplayPolicy(store.UI.stepDetailMode))
+/** 收起时机：回答结束后 / 下次有新消息时 */
+const stepCollapseTiming = computed(() => normalizeStepCollapseTiming(store.UI.stepCollapseTiming))
+
+/** 右键菜单里的「工作步骤展示」档位项（与设置页同源） */
+const STEP_MODE_OPTIONS = computed(() => [
+  { id: 'compact', icon: 'fa-bars', label: store.locales === 'zh' ? '简洁' : 'Compact' },
+  { id: 'standard', icon: 'fa-list-ul', label: store.locales === 'zh' ? '标准' : 'Standard' },
+  { id: 'detailed', icon: 'fa-list', label: store.locales === 'zh' ? '详细' : 'Detailed' },
+  { id: 'verbose', icon: 'fa-th-list', label: store.locales === 'zh' ? '完全展开' : 'Verbose' },
+] as Array<{ id: string; icon: string; label: string }>)
+
+const setStepDetailMode = (mode: string) => {
+  store.UI.stepDetailMode = mode as any
+  store.saveConfig()
+  hideContextMenu()
+}
+
+const setStepCollapseTiming = (timing: string) => {
+  store.UI.stepCollapseTiming = timing as any
+  store.saveConfig()
+  hideContextMenu()
+}
+
+/** 用户手动展开过的「整轮过程」（key = 消息时间戳）；手动展开优先于策略 */
+const unfoldedTurns = ref<Record<string, boolean>>({})
+
+/** 这一轮是否**可以**折叠（档位允许 + 跑完并记了耗时 + 确有工具步骤） */
+const canFoldTurn = (message: any): boolean => {
+  if (!stepPolicy.value.foldCompletedTurns) return false
+  const units = (message?.executionUnits || []) as any[]
+  const hasToolUnit = units.some((u) => u && u.description
+    && u.stepType !== 'content' && u.stepType !== 'guidance' && u.stepType !== 'reasoning')
+  if (!hasToolUnit) return false
+  // 只折「确实跑完并落了耗时」的轮次：老存档没有 executionTime，保持原样（避免升级后历史记录突然全被折起来）
+  if (!(Number(message?.executionTime) > 0)) return false
+  return true
+}
+
+/** 这一轮的过程现在是否处于折叠状态 */
+const isTurnFolded = (message: any): boolean => {
+  const ts = Number(message?.timestamp) || 0
+  if (ts && unfoldedTurns.value[ts]) return false
+  if (!canFoldTurn(message)) return false
+  let hasNewer = false
+  if (stepCollapseTiming.value === 'next-input') {
+    // O(1) 判断「后面还有没有消息」：和最后一条比时间戳即可（避免每条消息都 indexOf → O(n²)）
+    const msgs = (currentChat.value?.messages || []) as any[]
+    const lastTs = msgs.length ? Number(msgs[msgs.length - 1]?.timestamp) || 0 : 0
+    hasNewer = lastTs > ts
+  }
+  // 三个条件（档位允许折叠 / 已跑完 / 收起时机）只在纯函数里定义一次，便于单测
+  return shouldFoldTurn({
+    policy: stepPolicy.value,
+    isExecuting: message?.isExecuting === true,
+    timing: stepCollapseTiming.value,
+    hasNewerMessage: hasNewer,
+    userExpanded: false,
+  })
+}
+
+const toggleTurnFolded = (message: any) => {
+  const ts = String(Number(message?.timestamp) || 0)
+  unfoldedTurns.value = { ...unfoldedTurns.value, [ts]: !unfoldedTurns.value[ts] }
+}
+
+/** 折叠行文案：已执行 N 步（含耗时，若有） */
+const turnFoldLabel = (message: any): string => {
+  const units = (message?.executionUnits || []) as any[]
+  const steps = units.filter((u) => u && u.description
+    && u.stepType !== 'content' && u.stepType !== 'guidance' && u.stepType !== 'reasoning').length
+  const ms = Number(message?.executionTime) || 0
+  const secs = ms > 0 ? ` · ${(ms / 1000).toFixed(1)}s` : ''
+  return store.locales === 'zh' ? `已执行 ${steps} 步${secs} · 查看过程` : `${steps} steps${secs} · Show details`
+}
+
+/**
+ * 展示用的单元序列：排序 + （简洁档）隐藏已结束的思考段。
+ *
+ * 不做「同名工具合并」：DSH 的 `stepGrouping` 指的是**过程区整体**的分组（折叠/历史/不分组），
+ * 不是把连续的同名工具调用合成一行。合并会让"想单独看某一次结果"时还要多展开一层，
+ * 反而更麻烦——所以这里只保留一到四档的显隐差异。
+ */
+const displayUnits = (message: any): any[] => {
+  const units = sortedExecutionUnits(message?.executionUnits)
+  if (stepPolicy.value.settledReasoningPreview) return units
+  return units.filter((u) => !(u?.stepType === 'reasoning' && u.status !== 'running'))
+}
+
+/** 工具卡片展开/折叠状态（key = 消息时间戳 + 单元 id）
+ *  - 没有记录 → 用当前档位的默认值（详细/完全展开默认展开，简洁/标准默认折叠）；
+ *  - 用户点过 → 以用户为准（策略切换不覆盖手动操作）。 */
 const expandedToolUnits = ref<Record<string, boolean>>({})
 const toolExpandedKey = (msgTs: number, unitId: string | number) => `${msgTs}:${unitId}`
-const isToolUnitExpanded = (msgTs: number, unitId: string | number): boolean =>
-  !!expandedToolUnits.value[toolExpandedKey(msgTs, unitId)]
+const isToolUnitExpanded = (msgTs: number, unitId: string | number): boolean => {
+  const k = toolExpandedKey(msgTs, unitId)
+  const override = expandedToolUnits.value[k]
+  return typeof override === 'boolean' ? override : stepPolicy.value.defaultExpanded
+}
 const toggleToolUnitExpanded = (msgTs: number, unitId: string | number) => {
   const k = toolExpandedKey(msgTs, unitId)
   expandedToolUnits.value = { ...expandedToolUnits.value, [k]: !isToolUnitExpanded(msgTs, unitId) }
@@ -9968,6 +10230,75 @@ const getToolCollapsedText = (unit: any): string => {
  * 执行单元按发生时间排序（思考 / 服务端搜索 / 工具调用按真实时间穿插展示）。
  * 使用 startTime 稳定排序；无 startTime 的旧数据保持原顺序。
  */
+/** 字节数/字符数的紧凑标签（写文件后缀用；对齐 DSH 行尾的 NKB） */
+const sizeLabel = (chars: number): string => {
+  const v = Number(chars) || 0
+  if (v <= 0) return ''
+  if (v < 1024) return `${Math.floor(v)}B`
+  const kb = v / 1024
+  return `${kb >= 10 ? Math.round(kb) : kb.toFixed(1)}KB`
+}
+
+/** 行尾后缀：写文件大小 / 编辑差异统计（失败与停止不显示，避免噪音） */
+const unitSuffix = (unit: any): string => {
+  if (!unit || unit.status === 'error') return ''
+  const n = String(unit.description || '')
+  if (isStepEditTool(n)) {
+    const files = editDiffAllFiles(unit).filter((f: any) => !!f?.stats)
+    if (!files.length) return ''
+    const added = files.reduce((a: number, f: any) => a + (f.stats.added || 0), 0)
+    const removed = files.reduce((a: number, f: any) => a + (f.stats.removed || 0), 0)
+    return `+${added} -${removed}`
+  }
+  if (n === 'write_file') return sizeLabel(getWriteFileChars(unit))
+  return ''
+}
+
+/** 单步耗时：跑完后显示（1.2s / 340ms）；引导不是"执行"，不显示耗时 */
+const unitDuration = (unit: any): string => {
+  if (unit?.stepType === 'guidance') return ''
+  const start = Number(unit?.startTime) || 0
+  const end = Number(unit?.endTime) || 0
+  if (!start || !end || end < start) return ''
+  const ms = end - start
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
+}
+
+/** 有「退出状态」的工具：只有它们用中性胶囊（对齐 DSH：其它错误仍用错误色图标） */
+const EXIT_PILL_TOOLS = new Set(['shell', 'run_python', 'run_code'])
+
+/** 异常胶囊文案：exit N / 信号 / 超时；正常与运行中返回空（不显示胶囊） */
+const unitExitPill = (unit: any): string => {
+  if (!unit || !EXIT_PILL_TOOLS.has(String(unit.description || ''))) return ''
+  if (unit.status === 'running') return ''
+  const r = unit?.result
+  if (!r || typeof r !== 'object') return ''
+  if (r.timedOut) return store.locales === 'zh' ? '超时' : 'timed out'
+  if (r.signal) return String(r.signal)
+  const code = typeof r.exitCode === 'number' ? r.exitCode : undefined
+  if (code !== undefined) return code === 0 ? '' : `exit ${code}`
+  if (r.success === false) return store.locales === 'zh' ? '未正常退出' : 'no exit code'
+  return ''
+}
+
+const unitExitPillTitle = (unit: any): string => {
+  const r = unit?.result || {}
+  const isZh = store.locales === 'zh'
+  if (r?.timedOut) return isZh ? '执行超时，进程树已被终止' : 'Timed out; the process tree was killed'
+  if (r?.signal) return isZh ? `被信号 ${r.signal} 终止` : `Killed by signal ${r.signal}`
+  if (typeof r?.exitCode === 'number') return isZh ? `退出码 ${r.exitCode}（非零表示命令自身报告失败）` : `Exit code ${r.exitCode}`
+  return isZh ? '没有拿到退出码（可能被中断）' : 'No exit code recorded'
+}
+
+/** 可点链接：网页抓取的 URL（与搜索结果一致，走外部浏览器） */
+const unitOpenUrl = (unit: any): string => {
+  if (String(unit?.description || '') !== 'web_fetch') return ''
+  const url = unit?.result?.url || unit?.args?.url
+  return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : ''
+}
+
 const sortedExecutionUnits = (units: any[] | undefined): any[] => {
   if (!units || units.length <= 1) return units || []
   return [...units].sort((a, b) => {
@@ -10510,6 +10841,11 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   padding-right: 4px; /* 与右侧时间之间保留少量间距，尽可能多地显示标题 */
 }
 
+/* 已归档：整行变淡（唯一线索就是颜色；右键可取消归档） */
+.chat-item.archived {
+  opacity: .5;
+}
+
 .chat-item-right {
   display: flex;
   align-items: center;
@@ -10776,15 +11112,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   color: #e74c3c;
 }
 
-.chat-actions {
-  position: relative;
-  right: auto;
-  top: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
 .execution-indicator {
   display: inline-flex;
   align-items: center;
@@ -10801,25 +11128,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(359deg); }
-}
-
-.chat-actions {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.2s;
-  padding: 2px;
-  border-radius: 3px;
-  font-size: 12px;
-}
-
-.chat-item:hover .chat-actions {
-  opacity: 0.6;
-  pointer-events: auto;
-}
-
-.chat-actions:hover {
-  opacity: 1 !important;
-  color: var(--fontActiveColor);
 }
 
 .chat-time {
@@ -11499,41 +11807,6 @@ select {
   white-space: nowrap;
 }
 
-/* 运行中引导单元：直接插在步骤时间线里它生效的位置（后续步骤排在其下，比另发气泡更直观） */
-.guidance-unit {
-  margin: 6px 0;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px dashed var(--accentColorTransparent, rgba(0, 120, 212, 0.35));
-  background: var(--accentColorTransparent, rgba(0, 120, 212, 0.07));
-}
-
-.guidance-unit-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: bold;
-  color: var(--accentColor, #0078d4);
-}
-
-.guidance-unit-time {
-  margin-left: auto;
-  font-weight: normal;
-  font-size: 11px;
-  opacity: 0.7;
-}
-
-.guidance-unit-body {
-  margin-top: 4px;
-  font-size: 13px;
-  color: var(--fontColor);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 200px;
-  overflow: auto;
-}
-
 .message-node-name {
   font-weight: normal;
   font-size: 12px;
@@ -11970,6 +12243,36 @@ select {
 .execution-unit-list :deep(.tool-box) {
   margin-top: 0;
 }
+
+/* 整轮折叠：跑完的轮次可「收起过程 / 查看过程」来回切 */
+.execution-fold-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px dashed color-mix(in srgb, var(--fontColor) 22%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fontColor) 72%, transparent);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.execution-fold-row:hover {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+.execution-fold-row.expanded {
+  border-style: solid;
+  border-color: transparent;
+  padding: 2px 8px;
+  opacity: .75;
+}
+.execution-fold-row.expanded:hover {
+  border-color: color-mix(in srgb, var(--fontColor) 20%, transparent);
+  color: var(--fontActiveColor);
+}
+.execution-fold-row .fa { font-size: 10px; }
 
 /* 智能体模式：任务清单面板（输入框上方；可手动标记/清空） */
 .agent-todos-panel {
@@ -12465,6 +12768,12 @@ select {
   margin-top: 4px;
 }
 /* 工具结果内的列表紧凑化（避免搜索结果等被 markdown 渲染出大间距 ol/li） */
+:deep(.tool-result-box.tool-result-prose) {
+  /* 运行中引导是用户自己写的话，用正文字体而不是等宽（与工具输出的机器文本区分） */
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+}
 :deep(.tool-result-box ol),
 :deep(.tool-result-box ul) {
   margin: 0;
@@ -12485,7 +12794,6 @@ select {
   padding: 6px 8px;
   border: 1px solid var(--borderColor);
   border-radius: 4px;
-  background-color: rgba(0, 0, 0, 0.03);
   white-space: pre-wrap;
   word-break: break-word;
   font-family: monospace;
@@ -12506,8 +12814,14 @@ select {
   padding: 3px 8px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--fontActiveColor);
+  color: var(--fontColor);
   background-color: var(--menuColor);
+  cursor: pointer;
+  /* 没展开/收起箭头了：用悬停底色给出"整行可点"的反馈 */
+  transition: filter .15s;
+}
+:deep(.tool-box-header:hover) {
+  filter: brightness(.94);
 }
 :deep(.tool-box-header i) {
   font-size: 11px;
@@ -12632,11 +12946,84 @@ select {
 
 /* 智能体模式工具调用（tool-box 风格）：标题、状态与错误结果 */
 .tool-box-name {
-  flex: 1;
+  /* 关键：不参与压缩（flex-shrink: 0）——否则长摘要会把标题挤到 0 宽、看起来"消失了" */
+  flex: 0 0 auto;
+  max-width: 46%;
+  min-width: 48px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 标题与摘要之间的分隔符（对齐 DSH 的 `标题 · 摘要`） */
+.tool-box-sep {
+  flex: none;
+  opacity: .35;
+}
+/* 折叠态摘要：占满剩余宽度并省略（basis 0：不因内容太长反过来挤压标题） */
+.tool-box-summary {
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 11px;
+  opacity: .62;
+}
+/* 行尾后缀：写文件大小 / 编辑差异统计 */
+.tool-box-suffix {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--fontColor) 10%, transparent);
+  opacity: .75;
+}
+/* 行尾耗时 */
+.tool-box-duration {
+  flex: none;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: .5;
+}
+/* 异常胶囊：中性底色 + 红点（非零退出 / 超时 / 信号），替代状态图标 */
+.tool-box-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--fontColor) 10%, transparent);
+  color: color-mix(in srgb, var(--fontColor) 80%, transparent);
+  white-space: nowrap;
+}
+.tool-box-pill i {
+  font-size: 6px;
+  color: #f44336;
+}
+/* 运行中：一道高光从左向右扫过整行（比转圈更能表达"正在跑"，且不占位） */
+.tool-box-header.running {
+  position: relative;
+  overflow: hidden;
+}
+.tool-box-header.running::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 35%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--fontActiveColor) 16%, transparent), transparent);
+  animation: toolRowSweep 1.4s linear infinite;
+}
+@keyframes toolRowSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(330%); }
 }
 /* write_file 内容框上方的说明：running / error 时标明「尚未写入磁盘」 */
 .tool-write-note {
@@ -12672,21 +13059,7 @@ select {
   background-color: var(--menuActiveColor);
   color: var(--fontActiveColor);
 }
-/* 展开/折叠开关（状态图标右侧） */
-.tool-box-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
-  cursor: pointer;
-  opacity: .55;
-  flex-shrink: 0;
-  transition: all .15s;
-  color: var(--fontColor);
-}
-/* 「打开」按钮（写入本地网页时出现在展开开关左侧）：按统一方式打开文件（标签 / 窗口） */
+/* 「打开」按钮（写入本地网页时出现在状态图标左侧）：按统一方式打开文件（标签 / 窗口） */
 .tool-box-open {
   display: inline-flex;
   align-items: center;
@@ -12707,37 +13080,6 @@ select {
 }
 .tool-box-open i {
   font-size: 10px;
-}
-.tool-box-toggle:hover {
-  opacity: 1;
-  background-color: var(--menuActiveColor);
-  color: var(--fontActiveColor);
-}
-.tool-box-toggle i {
-  font-size: 10px;
-  transition: transform .18s ease;
-}
-.tool-box-toggle.expanded i {
-  transform: rotate(180deg);
-}
-/* 折叠态单行摘要：不换行、无多余空格，超出省略（点击可展开） */
-.tool-box-preview {
-  display: block;
-  padding: 5px 8px;
-  border-top: 1px solid var(--borderColor);
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--fontColor);
-  opacity: .9;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-  user-select: none;
-}
-.tool-box-preview:hover {
-  background-color: var(--menuColor);
-  color: var(--fontActiveColor);
 }
 .tool-box-status.running i { color: #2196F3; }
 .tool-box-status.success i { color: #4CAF50; }
@@ -14007,107 +14349,10 @@ select {
   z-index: 999;
 }
 
-.context-menu {
-  position: fixed;
-  z-index: 1000;
-  min-width: 150px;
-  background: var(--backgroundColor);
-  border: 1px solid var(--borderColor);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-  padding: 4px 0;
-  font-size: 12px;
-}
-
-.context-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  cursor: pointer;
-  color: var(--fontColor);
-  transition: background 0.1s;
-}
-
-.context-menu-item:hover {
-  background: var(--menuActiveColor);
-}
-
-.context-menu-item i {
-  width: 16px;
-  text-align: center;
-  font-size: 13px;
-}
-
-.context-menu-divider {
-  height: 1px;
-  background: var(--borderColor);
-  margin: 3px 0;
-}
-
-/* 右键菜单子菜单 */
-.context-menu-item.has-submenu {
-  position: relative;
-}
-
-.context-menu-item.has-submenu .submenu {
-  display: none;
-  position: absolute;
-  left: 100%;
-  top: 0;
-  min-width: 160px;
-  background: var(--backgroundColor);
-  border: 1px solid var(--borderColor);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-  padding: 4px 0;
-  list-style: none;
-  margin: 0;
-  z-index: 1001;
-}
-
-.context-menu-item.has-submenu:hover .submenu,
-.context-menu-item.has-submenu .submenu:hover {
-  display: block;
-}
-
-.context-menu-item.has-submenu .submenu li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  cursor: pointer;
-  color: var(--fontColor);
-  font-size: 12px;
-  transition: background 0.1s;
-  white-space: nowrap;
-}
-
-.context-menu-item.has-submenu .submenu li:hover {
-  background: var(--menuActiveColor);
-}
-
-.context-menu-item.has-submenu .submenu li i {
-  width: 16px;
-  text-align: center;
-  font-size: 13px;
-}
-
-/* --------------------------------------------------------------------------
-   聊天列表（消息导航栏）右键菜单：消息排列 + 排序
-   数值照抄知识管理的紧凑右键菜单（style.css 的 .knowfile-menu 变体）：
-   12px 字号 / 24px 行高 / 168px 起宽 / menuColor 底 / 4px 圆角 hover。
-   `.context-menu.chat-nav-menu` 用两个类名压过本组件通用的 .context-menu 规则。
-   -------------------------------------------------------------------------- */
-.context-menu.chat-nav-menu {
-  z-index: 100000;
-  min-width: 168px;
-  padding: 4px;
-  background-color: var(--menuColor);
-  font-size: 12px;
-  user-select: none;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
-}
+/* 菜单主体外观（底色 / 字号 / 行高 / 圆角 hover / 二级菜单 / 宽度）不在本组件重复定义：
+   三个菜单（消息 / 聊天列表 / 分支树）统一复用 style.css 的「知识管理紧凑右键菜单」
+   （.knowfile-menu 变体）+ panel.vue 的 .ctx-narrow 宽度，与文件树面板完全一致。
+   这里只保留主页独有的两块：分组小标题、勾选图标。 */
 
 .chat-nav-menu .chat-nav-section {
   padding: 2px 8px 4px;
@@ -14118,56 +14363,11 @@ select {
   user-select: none;
 }
 
-.chat-nav-menu .menu-item {
-  height: 24px;
-  padding: 0 8px;
-  gap: 6px;
-  font-size: 12px;
-  border-radius: 4px;
-}
-
-.chat-nav-menu .menu-item:hover {
-  background-color: var(--menuActiveColor);
-  color: var(--fontActiveColor);
-}
-
-.chat-nav-menu .menu-item i {
-  width: 12px;
-  font-size: 11px;
-  opacity: 0.75;
-  text-align: center;
-}
-
-.chat-nav-menu .menu-item.current {
-  color: var(--fontActiveColor);
-  font-weight: 600;
-}
-
-/* 危险项（聊天行菜单里的「删除聊天」）：与知识管理一致，hover 变红 */
-.chat-nav-menu .menu-item.menu-danger:hover {
-  color: #e74c3c;
-}
-
+/* 勾选图标：共享规则把 .menu-item i 固定成 12px 宽，这里放开让它按图标自身大小显示 */
 .chat-nav-menu .menu-item .chat-nav-check {
   width: auto;
   font-size: 11px;
   opacity: 0.9;
-}
-
-.chat-nav-menu .menu-label {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-nav-menu .menu-divider {
-  height: 1px;
-  margin: 4px 6px;
-  padding: 0;
-  background: var(--borderColor);
-  border-radius: 0;
 }
 
 

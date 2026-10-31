@@ -75,6 +75,11 @@ export interface SessionEventMap {
     content: string
     source?: string
     /**
+     * 不是真实用户输入（如时间读数）：参与模型上下文与预算，
+     * 但不计入「真实用户轮次」与附图序号（否则会打乱附图挂回与压缩的轮次口径）。
+     */
+    synthetic?: boolean
+    /**
      * 附图数量（只记数量，不落 base64）：图片本体存在 AgentSession 内存里，
      * 请求时按「第几条 user 消息带图」挂回去。写日志只为回放/审计能看到「这条带了图」。
      */

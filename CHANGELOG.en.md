@@ -9,10 +9,29 @@
 
 ## 2026-10-31
 
+### Added
+
+- **Chats can be archived**: right-click a chat to archive / unarchive it and right-click the empty list area to "Show archived chats"; archiving only hides a chat, and toggling the filter never changes the saved order.
+- **Four work-step display levels (compact / standard / detailed / verbose)** with a separate collapse timing (on completion / on the next message), available from the chat right-click menu or Settings → General → Basic; a finished turn can be expanded or collapsed with one click.
+- **Background commands in the home header**: running background shell jobs (including foreground commands that timed out and were moved to the background) show their tail output and can be stopped in one click.
+- **Three new tools**: `read_image` (hand a local image to the model), `working_directory` (switch the session's working directory, inside the workspace only) and `job_list` (list background jobs).
+- **Agents now get a clock reading**: every 10 minutes a "current time + time zone + time since the last exchange" note is injected, so dates and time zones are no longer guessed.
+
 ### Improved
 
+- **Command execution**: a non-zero exit is a result rather than a failure (output carries `[exit code: N]`), timeouts and cancels kill the whole process tree, oversized output keeps its tail while the full text is spilled to a file, and PowerShell plus background runs are supported.
+- **Reading, writing and searching files**: `read_file` pages by line with line numbers, `write_file` verifies before and after writing, `replace_in_file` / `multi_replace` roll the whole batch back on failure, `glob` is new, and `search_files` groups hits by file and is case-sensitive by default.
+- **Tool cards fit in one line**: collapsed rows show title · summary · size / diff · duration, failed commands get a dot-and-exit-code pill, running rows sweep, and written files and fetched links can be opened directly.
+- **Compaction costs less**: oversized tool results are pruned first and a summary is written only when still needed, summaries became structured checkpoints, and overflow recovery is more decisive.
+- **Live guidance lands in the timeline**: it no longer appears at the bottom of the conversation but where it took effect, styled like a tool row.
 - **The model panel now opens with a search box**: typing filters by model or source name with highlighted matches, Enter picks the first match and Esc closes it; the panel is narrower and the header button shows only the current model name.
 - **Max tokens default 16000 → 32768, upper limit opened to 262144**: each request is clamped to the selected model's known output limit (e.g. `gpt-4o` 16384, `claude-3-haiku` 4096) and auto-downgrades once if the server still rejects it, so long answers and agent file writes are no longer cut off as often.
+
+### Fixed
+
+- **Two error icons appeared in the input bar when the model could not be reached**: they are merged into one and a single click clears both.
+- **An "overlapping ranges" rejection for multi-edit did not say what to change**: it now names the entries and the shared text and suggests how to fix it.
+- **Queued guidance still waited for the whole turn**: it is now delivered while tools are running and applies on the next step.
 
 ## 2026-10-30
 
