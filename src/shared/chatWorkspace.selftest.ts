@@ -1,8 +1,8 @@
 /**
  * chatWorkspace.selftest.ts — 每聊天工作区 + 按工作区分组的纯逻辑自测
  *
- * 覆盖：回落到默认工作区、路径末段取名、只差结尾斜杠/分隔符的路径算同组、
- * 组顺序（注册表顺序优先、其余按首次出现、未选择工作区永远最后）、
+ * 覆盖：回落到默认工作区、明确「不使用工作区」、路径末段取名、只差结尾斜杠/分隔符的路径算同组、
+ * 组顺序（注册表顺序优先、其余按首次出现、未选择工作区默认最后 / 可置顶）、
  * 以及「不改动入参」。
  *
  * 用法：`node scripts/run-selftests.mjs chatWorkspace`
@@ -27,6 +27,8 @@ export function runChatWorkspaceSelfTest(): ChatWorkspaceCase[] {
   add('读：chat 为空且无默认 → 空串', readChatWorkspace(undefined, '') === '')
   add('读：两侧都只有空白 → 空串', readChatWorkspace({ workspace: '   ' }, '  ') === '')
   add('读：自己那份会去掉首尾空白', readChatWorkspace({ workspace: '  D:/x  ' }, 'D:/y') === 'D:/x')
+  add('读：明确不使用工作区 → 不回落默认', readChatWorkspace({ noWorkspace: true }, 'D:/default') === '')
+  add('读：noWorkspace=false 仍正常回落', readChatWorkspace({ noWorkspace: false }, 'D:/default') === 'D:/default')
 
   // 2. 路径末段
   add('取名：正斜杠路径', workspaceBaseName('D:/proj/aikm') === 'aikm')
@@ -60,6 +62,8 @@ export function runChatWorkspaceSelfTest(): ChatWorkspaceCase[] {
     add('分组：未选择工作区排最后', groups[groups.length - 1].workspace === '')
     add('分组：未选择工作区用兜底名', groups[groups.length - 1].label === '未选择工作区')
     add('分组：空白路径并入兜底桶', groups[groups.length - 1].items.map((i) => i.id).join(',') === 'x,z')
+    const first = groupByWorkspace(items, (i) => i.ws, { emptyLabel: '未选择工作区', emptyFirst: true })
+    add('分组：emptyFirst 把无工作区置顶', first[0].workspace === '' && first[0].items.map((i) => i.id).join(',') === 'x,z')
   }
 
   // 5. 只差结尾斜杠 / 分隔符 → 同一组（保留首次出现的写法）

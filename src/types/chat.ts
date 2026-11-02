@@ -313,6 +313,11 @@ export interface Chat {
    */
   workspace?: string
   /**
+   * true = 这个聊天明确选择「不使用工作区」（智能体没有工作目录，也不回落到全局默认）。
+   * 与 workspace 互斥：设置其一时会清掉另一个。见 shared/chatWorkspace.ts。
+   */
+  noWorkspace?: boolean
+  /**
    * 右侧栏（DSH 同款 dock）：**每个聊天各自保存**开关 / 宽度 / 标签页集合 / 当前标签。
    * 标签类型为 文件 / 终端 / 浏览器（见 shared/chatDock.ts）。随 chats 一起持久化。
    */

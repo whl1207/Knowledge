@@ -11,14 +11,22 @@
 
 ### Added
 
+- **New Todos and Plan tabs in the right dock**: when the agent produces content via `update_todo` / `update_plan`, the matching tab is created and the dock opens automatically; the old todo panel above the composer is removed, so tasks and plans live in the dock.
+- **Workspace and File entries on the right dock's new-tab page**: the old “Files” entry is renamed “Workspace” (workspace file tree), and a new “File” button lets the user pick a file and open it as a tab; Branch / Todos / Plan are singletons (their entry disappears once the tab exists), and all entry buttons use an equal-width grid.
+- **New chats default to no workspace**: the workspace panel now has a “No workspace” option next to “Follow global default”; when selected the agent has no working directory and Files no longer falls back to the global default.
 - **Images can be inserted into and replaced in Word documents**: new `list_images` (image list with display sizes), `insert_image` (document end / before or after a block / inside a table cell or nested table, PNG/JPEG/GIF/BMP/WebP etc., max width 15.9cm by default) and `replace_image` (replace by index while keeping the original display size and layout by default).
 
 ### Fixed
 
+- **Right-dock width could not be changed by dragging**: the open/close animation wrapper broke the “chat area + dock” room measurement and clamped dragging to the minimum width; it now walks up to the real container, and the handle sits inside the dock so the animation no longer clips it.
 - **The compaction card's before/after token numbers did not match**: both now use the whole-request basis, the replaced old-message size is shown separately, and compaction automatically retries with a more aggressive range when the gain is too small.
 - **Word formatting inside a paragraph was normalized when a match crossed runs**: only the matched characters are replaced now, and untouched runs keep their bold / italic / font size and other formatting (the replacement text takes the formatting of the run where the match starts); the whole-paragraph tool now warns that it loses inline formatting.
 
 ### Improved
+
+- **The right dock now opens and closes with the same animation as the left chat list**: width slide plus fade, with content keeping its own width so it does not reflow; closing the last tab automatically closes the dock.
+- **The agent-picker chip in the composer has a distinct icon**: it now uses `fa-id-badge` instead of the `fa-user-circle` icon used by Agent mode.
+- **Grouping the chat list by workspace**: chats with no workspace are placed at the top and the “No workspace” group title is omitted.
 
 - **Context compaction now follows the DSH mechanism**: for windows ≥256K the trigger is the smaller of “window × 0.8” and “window − output reserve − 64K headroom”, with the retained tail at `(window − output reserve) × 16%`; windows of 8K / 32K / 64K / 128K fall back to the classic 80% rule (64K absolute headroom is too large for them), one extra compaction runs when pressure is still above the threshold (at most once), and tool-result pruning now applies to subsequent requests.
 - **Small-window compaction guards**: if the system prompt plus tool schemas already exceed the compaction threshold, automatic summarization is skipped with a warning (common on 8K windows, where compacting history cannot help), and after a compaction that is still above the threshold the next automatic attempt is throttled for 60 seconds.

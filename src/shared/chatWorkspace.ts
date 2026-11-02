@@ -15,13 +15,17 @@
 /** 能承载「自己的激活工作区」的聊天（只描述本模块需要的形状） */
 export interface WorkspaceHolder {
   workspace?: string
+  /** true = 这个聊天明确选择「不使用工作区」（不回落到全局默认） */
+  noWorkspace?: boolean
 }
 
 /**
  * 读某个聊天实际生效的工作区：自己选过就用自己那份，否则回落到默认工作区。
+ * 明确选择「不使用工作区」时返回 ''（智能体没有工作目录，也不回落到 store.root）。
  * 两侧都为空时返回 ''（上层按「未选择工作区」提示）。
  */
 export function readChatWorkspace(chat: WorkspaceHolder | null | undefined, fallback = ''): string {
+  if (chat?.noWorkspace === true) return ''
   const own = String(chat?.workspace ?? '').trim()
   if (own) return own
   return String(fallback ?? '').trim()
@@ -50,14 +54,15 @@ export interface WorkspaceGroup<T> {
 /**
  * 按工作区把条目分组：
  * - 组顺序：给了 `order`（例如工作区注册表顺序）就按它排，未登记的组按首次出现追加；
- * - **「未选择工作区」永远排最后**（它是一个兜底桶，不是真正的工作区）；
+ * - **「未选择工作区」默认排最后**（它是一个兜底桶，不是真正的工作区）；
+ *   左侧聊天列表需要把无工作区聊天置顶时传 `emptyFirst: true`；
  * - 只在结尾斜杠 / 分隔符上不同的路径算同一组；
  * - 不改动入参。
  */
 export function groupByWorkspace<T>(
   items: readonly T[],
   pathOf: (item: T) => string,
-  opts: { emptyLabel?: string; order?: readonly string[] } = {},
+  opts: { emptyLabel?: string; order?: readonly string[]; emptyFirst?: boolean } = {},
 ): WorkspaceGroup<T>[] {
   const emptyLabel = opts.emptyLabel ?? ''
   const groups = new Map<string, WorkspaceGroup<T>>()
@@ -88,9 +93,9 @@ export function groupByWorkspace<T>(
     })
     .map((entry) => entry.group)
 
-  // 未选择工作区分组永远放最后
+  // 未选择工作区分组：默认排最后；左侧聊天列表需要「无工作区」置顶时传 emptyFirst
   const empty: WorkspaceGroup<T>[] = []
   const rest: WorkspaceGroup<T>[] = []
   for (const g of sorted) (workspaceKey(g.workspace) ? rest : empty).push(g)
-  return [...rest, ...empty]
+  return opts.emptyFirst ? [...empty, ...rest] : [...rest, ...empty]
 }

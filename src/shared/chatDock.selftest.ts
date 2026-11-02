@@ -200,8 +200,8 @@ export function runChatDockSelfTest(): ChatDockCase[] {
   // 9. 标签命名：单标签用类型名，同类型多个带序号，自定义名优先
   {
     const s = threeTabs(6000)
-    add('命名：单个文件标签 = 文件', dockTabTitle(s.tabs[0], s.tabs, true) === '文件')
-    add('命名：英文界面 = Files', dockTabTitle(s.tabs[0], s.tabs, false) === 'Files')
+    add('命名：单个工作区标签 = 工作区', dockTabTitle(s.tabs[0], s.tabs, true) === '工作区')
+    add('命名：英文界面 = Workspace', dockTabTitle(s.tabs[0], s.tabs, false) === 'Workspace')
     const two = addDockTab(s, 'terminal', 7000)
     const terminals = two.tabs.filter((t) => t.kind === 'terminal')
     add('命名：两个终端带序号', dockTabTitle(terminals[1], two.tabs, true) === '终端 2', dockTabTitle(terminals[1], two.tabs, true))
@@ -278,7 +278,16 @@ export function runChatDockSelfTest(): ChatDockCase[] {
     add('分支标签：空白页选分支 → 复用已有，空白页消失', merged.tabs.length === b2.tabs.length && activeDockTab(merged)?.kind === 'branch')
 
     const branchKinds = DOCK_TAB_KINDS.join(',')
-    add('类型：新标签页可选类型包含分支', branchKinds === 'files,terminal,browser,branch', branchKinds)
+    add('类型：新标签页可选类型包含分支与待办 / 计划', branchKinds === 'files,terminal,browser,branch,todos,plan', branchKinds)
+
+    // 待办清单 / 计划也是单例：重复添加只切到已有的那个
+    const withTodos = addDockTab(b2, 'todos', 9101)
+    const todosTab = withTodos.tabs.find((t) => t.kind === 'todos')
+    const withTodosAgain = addDockTab(withTodos, 'todos', 9102)
+    add('待办清单：首次添加一个标签', withTodos.tabs.filter((t) => t.kind === 'todos').length === 1 && !!todosTab)
+    add('待办清单：重复添加复用并切过去', withTodosAgain.tabs.length === withTodos.tabs.length && withTodosAgain.activeTabId === todosTab?.id)
+    const withPlan = addDockTab(withTodos, 'plan', 9201)
+    add('计划：可独立添加', withPlan.tabs.some((t) => t.kind === 'plan'))
   }
 
   // 12. 分支 / 新标签页的存档归一化

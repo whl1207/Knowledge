@@ -81,9 +81,10 @@
             <i class="fa" :class="kindIcon(kind)"></i>
             <span>{{ kindLabel(kind) }}</span>
           </button>
-        </div>
-        <div class="dock-empty-hint">
-          {{ zh ? '可以放多个标签：同一个类型也能开多个' : 'You can keep several tabs, including several of the same kind' }}
+          <button class="dock-empty-btn" :title="zh ? '打开一个文件并作为标签页加入右侧栏' : 'Open a file and add it as a tab'" @click="emit('pick-file')">
+            <i class="fa fa-file-text-o"></i>
+            <span>{{ zh ? '文件' : 'File' }}</span>
+          </button>
         </div>
       </div>
 
@@ -110,16 +111,20 @@
                 <i class="fa" :class="kindIcon(kind)"></i>
                 <span>{{ kindLabel(kind) }}</span>
               </button>
-            </div>
-            <div class="dock-empty-hint">
-              {{ zh ? '选定后这张标签页就会变成对应工具；可以再点「+」加更多' : 'Pick one to turn this tab into that tool; use + to add more' }}
+              <button class="dock-empty-btn" :title="zh ? '打开一个文件并作为标签页加入右侧栏' : 'Open a file and add it as a tab'" @click="emit('pick-file')">
+                <i class="fa fa-file-text-o"></i>
+                <span>{{ zh ? '文件' : 'File' }}</span>
+              </button>
             </div>
           </div>
           <slot v-else-if="tab.kind === 'branch'" name="branch" />
+          <slot v-else-if="tab.kind === 'todos'" name="todos" />
+          <slot v-else-if="tab.kind === 'plan'" name="plan" />
           <ChatDockFiles
             v-else-if="tab.kind === 'files'"
             :active="tab.id === activeTabId"
             :root-path="chatWorkspace"
+            :no-workspace="noWorkspace"
             @insert-text="(t: string) => emit('insert-text', t)"
             @open-file="(p: any) => emit('open-file', p)"
           />
@@ -180,6 +185,7 @@ import {
   DOCK_TAB_KINDS,
   clampDockWidthInRoom,
   dockTabTitle,
+  isSingletonDockKind,
   type ChatDockTab,
   type ChatDockTabKind,
 } from '@/shared/chatDock'
@@ -197,6 +203,8 @@ const props = defineProps<{
   chatWorkspace?: string
   /** 当前聊天家族是否有分支：决定新标签页里是否出现「分支」选项 */
   branchAvailable?: boolean
+  /** 当前聊天是否明确不使用工作区（文件树不再回落全局默认） */
+  noWorkspace?: boolean
   zh: boolean
 }>()
 
@@ -213,6 +221,8 @@ const emit = defineEmits<{
   (e: 'insert-text', text: string): void
   /** 文件树里点了某个文件：宿主把它作为 file 标签打开 */
   (e: 'open-file', payload: { path: string; view?: string; label?: string }): void
+  /** 新标签页 / 空面板里的「文件」入口：打开系统文件选择框，把选中的文件作为 file 标签打开 */
+  (e: 'pick-file'): void
   /** 文件标签里切换了视图：宿主写回该标签的 view */
   (e: 'tab-view-change', id: string, view: string): void
 }>()
@@ -223,6 +233,8 @@ function kindIcon(kind: ChatDockTabKind): string {
   if (kind === 'terminal') return 'fa-terminal'
   if (kind === 'browser') return 'fa-globe'
   if (kind === 'branch') return 'fa-sitemap'
+  if (kind === 'todos') return 'fa-check-square-o'
+  if (kind === 'plan') return 'fa-tasks'
   if (kind === 'new') return 'fa-plus'
   if (kind === 'file') return 'fa-file-text-o'
   return 'fa-folder-open-o'
@@ -231,8 +243,10 @@ function kindLabel(kind: ChatDockTabKind): string {
   if (kind === 'terminal') return props.zh ? '终端' : 'Terminal'
   if (kind === 'browser') return props.zh ? '浏览器' : 'Browser'
   if (kind === 'branch') return props.zh ? '分支' : 'Branch'
+  if (kind === 'todos') return props.zh ? '待办清单' : 'Todos'
+  if (kind === 'plan') return props.zh ? '计划' : 'Plan'
   if (kind === 'new') return props.zh ? '新标签页' : 'New tab'
-  return props.zh ? '文件' : 'Files'
+  return props.zh ? '工作区' : 'Workspace'
 }
 /** 空面板 / 新标签页里每个选项的一句话说明 */
 function kindHint(kind: ChatDockTabKind): string {
@@ -251,9 +265,19 @@ function kindHint(kind: ChatDockTabKind): string {
       ? '分支：查看当前对话的分支树，点击节点切换、右键管理'
       : 'Branch: view this conversation branch tree; click a node to switch, right-click to manage'
   }
+  if (kind === 'todos') {
+    return props.zh
+      ? '待办清单：智能体用 update_todo 维护的任务清单（已有清单时不会再出现这个选项）'
+      : 'Todos: the task list maintained by the agent via update_todo (hidden once a Todos tab exists)'
+  }
+  if (kind === 'plan') {
+    return props.zh
+      ? '计划：智能体用 update_plan 维护的执行计划（已有计划标签时不会再出现这个选项）'
+      : 'Plan: the plan maintained by the agent via update_plan (hidden once a Plan tab exists)'
+  }
   return props.zh
-    ? '文件：浏览当前工作区的文件，可打开或把路径插入输入框'
-    : 'Files: browse the current workspace, open files or insert their paths into the input box'
+    ? '工作区：浏览当前工作区的文件树，可打开文件或把路径插入输入框（要打开某个具体文件请用旁边的「文件」按钮）'
+    : 'Workspace: browse the current workspace file tree, open files or insert their paths into the input box (use the adjacent File button to open a specific file)'
 }
 
 // ===== 首次激活才挂载：避免一上来就把终端全都创建出来（每个终端 = 一个真实 shell 进程） =====
@@ -268,10 +292,12 @@ watch(
 )
 
 // ===== 新标签页的类型选择 =====
-/** 只列出当前环境真的能用的类型（安卓 / 纯网页没有 PTY，就不给「终端」入口；没有分支就不给「分支」） */
+/** 只列出当前环境真的能用的类型（安卓 / 纯网页没有 PTY，就不给「终端」入口；没有分支就不给「分支」；
+ *  分支 / 待办清单 / 计划已有标签时不再提供入口——同一类型只能有一个） */
 const availableKinds = computed(() => DOCK_TAB_KINDS.filter((k) => {
   if (k === 'terminal' && !hasCapability('terminal')) return false
   if (k === 'branch' && !props.branchAvailable) return false
+  if (isSingletonDockKind(k) && props.tabs.some((t) => t.kind === k)) return false
   return true
 }))
 /** 空面板（没有标签时）直接建标签；空白新标签页则把当前页转成目标类型 */
@@ -290,14 +316,28 @@ let mainObserver: ResizeObserver | null = null
 let resizeState: { startX: number; startWidth: number; roomWidth: number } | null = null
 
 /**
+ * 右侧栏 + 聊天区所在的容器（`.ai-chat-container`）。
+ * 组件外面包了一层 `.chat-dock-wrap` 负责开合动画，所以不能再用 `el.parentElement`
+ * 直接找 `.chat-main`，否则 roomWidth 只剩右侧栏自己，拖动会被夹到最小宽度。
+ */
+function roomContainer(): HTMLElement | null {
+  let node: HTMLElement | null = rootEl.value?.parentElement || null
+  while (node) {
+    if (node.querySelector(':scope > .chat-main')) return node
+    node = node.parentElement
+  }
+  return null
+}
+
+/**
  * 聊天区 + 右侧栏的可用总宽（不含左侧聊天列表）。
  * 拖动开始时量一次并缓存：拖宽过程中两者此消彼长，实时相加会互相反馈。
  */
 function measureRoomWidth(): number {
   const el = rootEl.value
   if (!el) return 0
-  const parent = el.parentElement
-  const main = parent?.querySelector(':scope > .chat-main') as HTMLElement | null
+  const container = roomContainer()
+  const main = container?.querySelector(':scope > .chat-main') as HTMLElement | null
   const mainWidth = main?.getBoundingClientRect().width || 0
   const dockWidth = el.getBoundingClientRect().width || props.width || 0
   return mainWidth + dockWidth
@@ -320,7 +360,7 @@ onMounted(() => {
   enforceDockWidthLimit()
   window.addEventListener('resize', enforceDockWidthLimit)
   // 左侧聊天列表展开 / 收起也会改变聊天区可用宽度（窗口本身没 resize）：观察中间区尺寸再收敛
-  const main = rootEl.value?.parentElement?.querySelector(':scope > .chat-main') as HTMLElement | null
+  const main = roomContainer()?.querySelector(':scope > .chat-main') as HTMLElement | null
   if (main && typeof ResizeObserver !== 'undefined') {
     mainObserver = new ResizeObserver(() => enforceDockWidthLimit())
     mainObserver.observe(main)
@@ -473,10 +513,11 @@ defineExpose({ confirmLeaveActive })
 }
 .chat-dock.resizing { transition: none; }
 
-/* 左边缘拖动热区（8px，悬停才显形） */
+/* 左边缘拖动热区（8px，悬停才显形）：放在容器内部，避免被右侧栏开合动画的
+   overflow:hidden wrapper 裁掉（原来 left:-3 会被裁到只剩 5px，拖动很难命中） */
 .chat-dock-resize {
   position: absolute;
-  left: -3px;
+  left: 0;
   top: 0;
   bottom: 0;
   width: 8px;
@@ -496,7 +537,6 @@ defineExpose({ confirmLeaveActive })
   flex-shrink: 0;
   padding: 0 4px;
   border-bottom: 1px solid var(--borderColor);
-  background-color: var(--menuColor);
 }
 .dock-tab-strip {
   display: flex;
@@ -624,16 +664,21 @@ defineExpose({ confirmLeaveActive })
 }
 .dock-empty-title { font-size: 12px; opacity: 0.75; }
 .dock-empty-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
+  /* 等宽网格：工作区 / 文件 / 终端 / 浏览器 / 分支 / 待办 / 计划按钮宽度完全一致 */
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
   gap: 8px;
+  width: min(100%, 340px);
 }
 .dock-empty-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 7px 12px;
   border: 1px solid var(--borderColor);
   border-radius: 8px;

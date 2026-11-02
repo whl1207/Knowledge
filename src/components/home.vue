@@ -912,38 +912,6 @@
           <div class="empty-chat-hint-sub">{{ emptyChatHintSub }}</div>
         </div>
         
-        <!-- 智能体模式：任务清单（update_todo 维护，显示在输入框上方；可手动标记/清空） -->
-        <div v-if="currentChat.agentTodos && currentChat.agentTodos.length" class="agent-todos-panel scoll">
-          <div class="agent-todos-header">
-            <i class="fa fa-tasks"></i>
-            <span>{{ store.locales=='zh' ? '任务清单' : 'Todos' }}</span>
-            <span class="agent-todos-count">{{ currentChat.agentTodos.filter(t => t.status === 'done').length }}/{{ currentChat.agentTodos.length }}</span>
-            <span class="agent-todos-actions">
-              <span class="agent-todos-action" :title="store.locales=='zh' ? '全部标记完成' : 'Mark all done'" @click="markAllTodosDone">
-                <!-- 图标必须是 Font Awesome 4.7 里存在的类：fa-check-double 是 FA5+ 的图标名，
-                     本项目只加载 public/font-awesome（4.7.0），写它会渲染成空白方块 -->
-                <i class="fa fa-check-square-o"></i>
-              </span>
-              <span class="agent-todos-action" :title="store.locales=='zh' ? '清空任务清单' : 'Clear todos'" @click="clearAgentTodos">
-                <i class="fa fa-trash-o"></i>
-              </span>
-            </span>
-          </div>
-          <div class="agent-todos-list">
-            <div
-              v-for="t in currentChat.agentTodos"
-              :key="t.id"
-              class="agent-todo-item"
-              :class="'at-' + t.status"
-              @click="toggleAgentTodo(t.id)"
-              :title="t.status === 'done' ? (store.locales=='zh' ? '点击恢复为未完成' : 'Click to mark not done') : (store.locales=='zh' ? '点击标记完成' : 'Click to mark done')"
-            >
-              <i class="fa" :class="t.status === 'done' ? 'fa-check-circle' : t.status === 'running' ? 'fa-circle-o-notch fa-spin' : t.status === 'cancelled' ? 'fa-ban' : 'fa-circle-o'"></i>
-              <span class="agent-todo-title" :title="t.detail || t.title">{{ t.title }}</span>
-            </div>
-          </div>
-        </div>
-        
         <!-- 图片预览区域 -->
         <div v-if="currentUploads.length > 0" class="preview-area">
           <div class="preview-header">
@@ -1108,6 +1076,16 @@
                   <span class="workspace-picker-name">{{ store.locales == 'zh' ? '跟随全局默认' : 'Follow global default' }}</span>
                   <span class="workspace-picker-path">{{ defaultWorkspacePath || (store.locales == 'zh' ? '（未设置）' : '(none)') }}</span>
                 </div>
+                <div
+                  class="workspace-picker-item composer-panel-item"
+                  :class="{ active: noWorkspaceSelected }"
+                  :title="store.locales == 'zh' ? '不用任何工作区：智能体没有工作目录，也不回落到全局默认' : 'Use no workspace: the agent gets no working directory and does not fall back to the global default'"
+                  @click="useNoWorkspace"
+                >
+                  <i class="fa" :class="noWorkspaceSelected ? 'fa-check-square-o' : 'fa-square-o'"></i>
+                  <span class="workspace-picker-name">{{ store.locales == 'zh' ? '不使用工作区' : 'No workspace' }}</span>
+                  <span class="workspace-picker-path">{{ store.locales == 'zh' ? '智能体无工作目录' : 'agent has no working directory' }}</span>
+                </div>
                 <div class="shared-kb-divider"></div>
                 <div
                   v-for="w in workspaceList"
@@ -1203,7 +1181,7 @@
                 @click="toggleAgentPicker"
                 :title="getAgentButtonTitle()"
               >
-                <i class="fa fa-user-circle"></i>
+                <i class="fa fa-id-badge"></i>
                 <span class="mode-linked-name composer-chip-label">{{ currentAgentLabel }}</span>
               </span>
               <span
@@ -1489,8 +1467,15 @@
     <!-- 右侧栏（DSH 同款 dock）：文件 / 终端 / 浏览器 / 分支；宽度、标签页与开关按聊天各自保存；
          工作区也用这个聊天自己的（文件树根目录 / 终端 cwd 都跟随它）。
          分支对话视图也在这里作为一个标签，不再单独占一列。 -->
+    <!-- 右侧栏开合动画：与左侧聊天列表同一套宽度滑动（内容定宽，过程中不重排） -->
+    <Transition name="dock-slide">
+      <div
+        v-if="dockState.open"
+        class="chat-dock-wrap"
+        :class="{ narrow: isNarrowLayout }"
+        :style="isNarrowLayout ? undefined : { width: dockState.width + 'px' }"
+      >
     <ChatDock
-      v-if="dockState.open"
       ref="chatDockRef"
       :tabs="dockVisibleTabs"
       :active-tab-id="dockVisibleActiveTabId"
@@ -1498,6 +1483,7 @@
       :narrow="isNarrowLayout"
       :occluded="dockOccluded"
       :chat-workspace="chatWorkspacePath"
+      :no-workspace="noWorkspaceSelected"
       :branch-available="hasBranches"
       :zh="store.locales == 'zh'"
       @update:width="onDockResize"
@@ -1509,6 +1495,7 @@
       @close="closeDock"
       @insert-text="insertDockText"
       @open-file="onDockOpenFile"
+      @pick-file="onDockPickFile"
       @tab-view-change="onDockTabViewChange"
     >
       <template #branch>
@@ -1516,7 +1503,56 @@
           <div ref="d3TreeContainer" class="d3-tree-container" @contextmenu.prevent="onBranchPanelContextMenu($event)"></div>
         </div>
       </template>
+      <!-- 待办清单：从输入框上方移到右侧栏标签页；AI 更新 update_todo 时自动建标签并打开 -->
+      <template #todos>
+        <div class="dock-agent-pane">
+          <div v-if="currentChat.agentTodos && currentChat.agentTodos.length" class="agent-todos-panel dock-todos-panel">
+            <div class="agent-todos-header">
+              <i class="fa fa-tasks"></i>
+              <span>{{ store.locales=='zh' ? '任务清单' : 'Todos' }}</span>
+              <span class="agent-todos-count">{{ currentChat.agentTodos.filter(t => t.status === 'done').length }}/{{ currentChat.agentTodos.length }}</span>
+              <span class="agent-todos-actions">
+                <span class="agent-todos-action" :title="store.locales=='zh' ? '全部标记完成' : 'Mark all done'" @click="markAllTodosDone">
+                  <i class="fa fa-check-square-o"></i>
+                </span>
+                <span class="agent-todos-action" :title="store.locales=='zh' ? '清空任务清单' : 'Clear todos'" @click="clearAgentTodos">
+                  <i class="fa fa-trash-o"></i>
+                </span>
+              </span>
+            </div>
+            <div class="agent-todos-list scoll">
+              <div
+                v-for="t in currentChat.agentTodos"
+                :key="t.id"
+                class="agent-todo-item"
+                :class="'at-' + t.status"
+                @click="toggleAgentTodo(t.id)"
+                :title="t.status === 'done' ? (store.locales=='zh' ? '点击恢复为未完成' : 'Click to mark not done') : (store.locales=='zh' ? '点击标记完成' : 'Click to mark done')"
+              >
+                <i class="fa" :class="t.status === 'done' ? 'fa-check-circle' : t.status === 'running' ? 'fa-circle-o-notch fa-spin' : t.status === 'cancelled' ? 'fa-ban' : 'fa-circle-o'"></i>
+                <span class="agent-todo-title" :title="t.detail || t.title">{{ t.title }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="dock-agent-empty">
+            <i class="fa fa-check-square-o"></i>
+            <span>{{ store.locales=='zh' ? '暂无待办清单：智能体调用 update_todo 后会自动出现在这里' : 'No todos yet — they appear here after the agent calls update_todo' }}</span>
+          </div>
+        </div>
+      </template>
+      <!-- 执行计划：update_plan / exit_plan_mode 维护，AI 更新时自动建标签并打开 -->
+      <template #plan>
+        <div class="dock-agent-pane">
+          <div v-if="String(currentChat.agentPlan || '').trim()" class="dock-plan-md scoll" v-html="renderMarkdown(String(currentChat.agentPlan))"></div>
+          <div v-else class="dock-agent-empty">
+            <i class="fa fa-tasks"></i>
+            <span>{{ store.locales=='zh' ? '暂无计划：智能体调用 update_plan 后会自动出现在这里' : 'No plan yet — it appears here after the agent calls update_plan' }}</span>
+          </div>
+        </div>
+      </template>
     </ChatDock>
+      </div>
+    </Transition>
     
     <!-- 图片预览模态框 -->
     <div v-if="showImagePreview" class="image-preview-modal" @click="closeImagePreview">
@@ -1812,6 +1848,8 @@ const onDockCloseTab = async (id: string) => {
   if (id === dockState.value.activeTabId && !(await dockConfirmLeave())) return
   const closing = dockState.value.tabs.find((t) => t.id === id)
   dockState.value = closeDockTab(dockState.value, id)
+  // 右侧栏没有标签页后自动收起（空面板只用在「刚打开右侧栏、还没选类型」时）
+  if (!dockState.value.tabs.length) dockState.value = setDockOpenState(dockState.value, false)
   saveChats()
   // 关掉的是文件标签：同时从全局「已打开文件」列表移除（知识管理标签栏共用这份列表）。
   // 别的聊天还开着同一个文件时保留，避免把那边正在看的标签一起关掉。
@@ -1829,6 +1867,36 @@ const onDockActivate = async (id: string) => {
   if (id === dockState.value.activeTabId) return
   if (!(await dockConfirmLeave())) return
   dockState.value = activateDockTab(dockState.value, id)
+}
+/** 新标签页 / 空面板里的「文件」按钮：打开系统文件框，选中后作为 file 标签打开 */
+const onDockPickFile = async () => {
+  const picked = await getPlatform().dialog.pickFile()
+  if (!picked) return
+  await onDockOpenFile({ path: String(picked) })
+}
+
+/**
+ * 任务清单 / 计划是智能体在运行中产出的：第一次出现（或内容更新）时在右侧栏建对应标签页，
+ * 面板已收起时自动展开并切过去。用户手动关掉标签后，内容不变就不会再被强行打开。
+ */
+const ensureAgentDockTab = (kind: 'todos' | 'plan') => {
+  const chat: any = currentChat.value
+  if (!chat) return
+  const hasData = kind === 'todos'
+    ? Array.isArray(chat.agentTodos) && chat.agentTodos.length > 0
+    : !!String(chat.agentPlan || '').trim()
+  if (!hasData) return
+  const existing = dockState.value.tabs.find((t) => t.kind === kind)
+  if (!existing) {
+    dockState.value = addDockTab(dockState.value, kind)
+    saveChats()
+    return
+  }
+  // 已有标签但右侧栏被收起：AI 更新时自动打开并切到该标签
+  if (!dockState.value.open) {
+    dockState.value = setDockOpenState(activateDockTab(dockState.value, existing.id), true)
+    saveChats()
+  }
 }
 /**
  * 文件树里点了文件：在当前右侧栏里以 file 标签打开。
@@ -1918,12 +1986,14 @@ const insertDockText = (text: string) => {
 const showWorkspacePicker = ref(false)
 /** 当前聊天**自己**选的工作区（空串 = 跟随全局默认） */
 const chatWorkspaceOwn = computed(() => String(chats.value[currentChatIndex.value]?.workspace || '').trim())
-/** 当前聊天实际生效的工作区（自己选过就用自己的，否则用全局默认） */
+/** 当前聊天是否明确选择「不使用工作区」 */
+const noWorkspaceSelected = computed(() => chats.value[currentChatIndex.value]?.noWorkspace === true)
+/** 当前聊天实际生效的工作区（自己选过就用自己的，否则用全局默认；明确不使用则为空） */
 const chatWorkspacePath = computed(() => readChatWorkspace(chats.value[currentChatIndex.value], store.root))
 /** 全局默认工作区（聊天没选过时的兜底） */
 const defaultWorkspacePath = computed(() => String(store.root || '').trim())
 /** 是否跟随默认（用于浮层里给「跟随默认」打勾） */
-const followingDefaultWorkspace = computed(() => !chatWorkspaceOwn.value)
+const followingDefaultWorkspace = computed(() => !noWorkspaceSelected.value && !chatWorkspaceOwn.value)
 /** 可选的路径集合：工作区注册表 + 本聊天的 + 全局默认（去重，保序） */
 const workspaceList = computed<string[]>(() => {
   const out: string[] = []
@@ -1942,14 +2012,20 @@ const baseNameOf = (p: string): string => {
   return parts.length ? parts[parts.length - 1] : String(p || '')
 }
 const workspaceLabel = computed(() => {
+  if (noWorkspaceSelected.value) return store.locales == 'zh' ? '无工作区' : 'No workspace'
   const p = chatWorkspacePath.value
   if (p) return baseNameOf(p)
   return store.locales == 'zh' ? '选择工作区' : 'Choose workspace'
 })
 const workspaceChipTitle = computed(() => {
+  const zh = store.locales == 'zh'
+  if (noWorkspaceSelected.value) {
+    return zh
+      ? '这个聊天未使用工作区：智能体没有工作目录，文件 / 终端也不会指向默认工作区。点这里可重新选择'
+      : 'This chat uses no workspace: the agent has no working directory, and Files / Terminal do not fall back to the default workspace. Click to choose one'
+  }
   const own = chatWorkspaceOwn.value
   const eff = chatWorkspacePath.value
-  const zh = store.locales == 'zh'
   if (!eff) return zh ? '这个聊天还没有工作区：点这里选择（会注入智能体上下文）' : 'No workspace for this chat yet — click to choose (injected into the agent context)'
   const tail = zh
     ? (own ? '（这个聊天专用）' : '（跟随全局默认）')
@@ -1980,6 +2056,7 @@ const setChatWorkspace = (path: string) => {
   const chat = chats.value[currentChatIndex.value]
   if (!chat) return
   chat.workspace = String(path || '').trim() || undefined
+  chat.noWorkspace = false
   showWorkspacePicker.value = false
   saveChats()
 }
@@ -2005,6 +2082,17 @@ const followDefaultWorkspace = () => {
   setChatWorkspace('')
   const zh = store.locales == 'zh'
   ElMessage.success(zh ? '已改为跟随全局默认工作区' : 'Following the global default workspace')
+}
+/** 智能体对话：明确不使用工作区（不回落全局默认；工具 cwd 为空） */
+const useNoWorkspace = () => {
+  const chat = chats.value[currentChatIndex.value]
+  if (!chat) return
+  chat.workspace = undefined
+  chat.noWorkspace = true
+  showWorkspacePicker.value = false
+  saveChats()
+  const zh = store.locales == 'zh'
+  ElMessage.success(zh ? '这个聊天已设为不使用工作区' : 'This chat now uses no workspace')
 }
 const addWorkspaceFromDialog = async () => {
   showWorkspacePicker.value = false
@@ -2159,6 +2247,8 @@ const chatListEntries = computed<ChatListEntry[]>({
       {
         emptyLabel: store.locales == 'zh' ? '未选择工作区' : 'No workspace',
         order: Array.isArray(store.roots) ? store.roots : [],
+        // 无工作区的聊天放在左侧列表最上面，且不显示分组标题（它们没有归属工作区）
+        emptyFirst: true,
       },
     )
     const out: ChatListEntry[] = []
@@ -2166,7 +2256,8 @@ const chatListEntries = computed<ChatListEntry[]>({
       g.items.forEach((it, i) => {
         out.push({
           ...asEntry(it),
-          head: i === 0 ? { workspace: g.workspace, label: g.label, count: g.items.length } : undefined,
+          // 无工作区分组不显示标题：直接把这些聊天排在列表最上面
+          head: i === 0 && g.workspace ? { workspace: g.workspace, label: g.label, count: g.items.length } : undefined,
         })
       })
     }
@@ -6357,6 +6448,18 @@ const saveChats = () => {
   localStorage.setItem('ai-chats-index', String(currentChatIndex.value))
 }
 
+// 任务清单 / 计划：智能体（update_todo / update_plan）第一次产出或内容更新时，
+// 自动在右侧栏建对应标签页；面板收起时自动展开并切过去。必须在 currentChat / saveChats
+// 定义之后注册（watch 会立即求值一次 getter）。
+watch(
+  () => [currentChat.value?.id, currentChat.value?.agentTodos, currentChat.value?.agentPlan] as const,
+  () => {
+    ensureAgentDockTab('todos')
+    ensureAgentDockTab('plan')
+  },
+  { flush: 'post' },
+)
+
 // 设置页「清空聊天记录」联动：外部清空 ai-chats 后重置内存为单个空会话
 const onAiChatsCleared = () => {
   // 全量清空前先释放所有聊天引用的智能体会话：否则旧会话仍在后台推理，
@@ -6586,6 +6689,8 @@ function createNewChatData(): Chat {
     online: false,
     isGenerating: false,
     mode: 'normal',  // 默认普通模式
+    // 新聊天默认不使用工作区（不回落全局默认）；需要时在输入框左下角选择
+    noWorkspace: true,
     // 右侧栏（每聊天独立）：新聊天默认备好 文件/终端/浏览器 三个标签，但初始收起
     dock: defaultDockState(),
   }
@@ -11850,6 +11955,31 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   position: relative;
 }
 
+/* 右侧栏开合动画（与左侧聊天列表 .chat-sidebar 同一套宽度滑动）：
+   wrapper 负责宽度过渡，ChatDock 内容保持自身宽度，动画过程中不重排内容。 */
+.chat-dock-wrap {
+  flex-shrink: 0;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.chat-dock-wrap.narrow {
+  /* 窄屏右侧栏是 fixed 整屏二级界面，wrapper 不占布局宽度 */
+  width: 0 !important;
+  flex: 0 0 0;
+  overflow: visible;
+}
+.dock-slide-enter-active,
+.dock-slide-leave-active {
+  transition: width .22s cubic-bezier(.22, .61, .36, 1), opacity .18s ease;
+  overflow: hidden;
+}
+.dock-slide-enter-from,
+.dock-slide-leave-to {
+  width: 0 !important;
+  opacity: 0;
+}
+
 .chat-header {
   padding: 1px 5px;
   border-bottom: 1px solid var(--borderColor);
@@ -13081,6 +13211,44 @@ select {
   min-width: 0;
 }
 .agent-todo-item.at-done .agent-todo-title { text-decoration: line-through; }
+
+/* 右侧栏：待办清单 / 计划 标签页内容（从输入框上方移过来） */
+.dock-agent-pane { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.dock-todos-panel {
+  flex: 1; min-height: 0; max-height: none; margin: 0;
+  border: 0; border-radius: 0; padding: 8px 10px; box-sizing: border-box;
+  display: flex; flex-direction: column;
+}
+.dock-todos-panel .agent-todos-header { flex-shrink: 0; }
+.dock-todos-panel .agent-todos-list { flex: 1; min-height: 0; overflow-y: auto; }
+.dock-plan-md {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 8px 10px; font-size: 12px; line-height: 1.65;
+  word-break: break-word; color: var(--fontColor);
+}
+.dock-plan-md :deep(p) { margin: 4px 0; }
+.dock-plan-md :deep(ul), .dock-plan-md :deep(ol) { margin: 4px 0; padding-left: 20px; }
+.dock-plan-md :deep(li) { margin: 2px 0; }
+.dock-plan-md :deep(h1), .dock-plan-md :deep(h2), .dock-plan-md :deep(h3), .dock-plan-md :deep(h4) {
+  margin: 8px 0 4px; font-size: 13px; font-weight: 600;
+}
+.dock-plan-md :deep(code) {
+  font-size: 11px; padding: 1px 4px; border-radius: 3px;
+  background: color-mix(in srgb, var(--fontColor) 8%, transparent);
+}
+.dock-plan-md :deep(pre) {
+  margin: 6px 0; padding: 6px 8px; border-radius: 5px; overflow-x: auto;
+  background: color-mix(in srgb, var(--fontColor) 6%, transparent);
+}
+.dock-plan-md :deep(pre code) { background: transparent; padding: 0; }
+.dock-plan-md :deep(strong) { font-weight: 600; }
+.dock-plan-md :deep(table) { border-collapse: collapse; font-size: 11px; }
+.dock-plan-md :deep(th), .dock-plan-md :deep(td) { border: 1px solid var(--borderColor); padding: 3px 6px; }
+.dock-agent-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 18px; text-align: center; font-size: 12px; line-height: 1.6; opacity: .55;
+}
+.dock-agent-empty i { font-size: 22px; }
 
 /* ==================== 待执行队列面板（运行中 Enter 排队 / Ctrl+Enter 插队；
    投递前可编辑、拖动排序、置顶插队、删除、批量清除。不打断当前执行） ==================== */

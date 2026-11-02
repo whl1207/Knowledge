@@ -37,7 +37,9 @@
 
     <div v-else class="dock-empty">
       <i class="fa fa-folder-o"></i>
-      <span>{{ zh ? '这个聊天还没有工作区：用输入框左下角的工作区按钮选择' : 'No workspace for this chat — choose one from the workspace button at the bottom-left of the input box' }}</span>
+      <span>{{ noWorkspace
+        ? (zh ? '这个聊天未使用工作区：右侧栏文件树不指向全局默认目录' : 'This chat uses no workspace — the file tree does not fall back to the global default')
+        : (zh ? '这个聊天还没有工作区：用输入框左下角的工作区按钮选择' : 'No workspace for this chat — choose one from the workspace button at the bottom-left of the input box') }}</span>
     </div>
   </div>
 </template>
@@ -53,6 +55,8 @@ const props = defineProps<{
   active?: boolean
   /** 根目录：当前聊天自己的工作区（空 = 回落全局默认 store.root） */
   rootPath?: string
+  /** true = 当前聊天明确「不使用工作区」，此时不回落 store.root */
+  noWorkspace?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'insert-text', text: string): void
@@ -61,7 +65,10 @@ const emit = defineEmits<{
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
-const rootPath = computed(() => (String(props.rootPath || '').trim() || String(store.root || '')).replace(/[\\/]+$/, ''))
+const rootPath = computed(() => {
+  if (props.noWorkspace) return ''
+  return (String(props.rootPath || '').trim() || String(store.root || '')).replace(/[\\/]+$/, '')
+})
 
 const panelRef = ref<any>(null)
 /** panel 最后点击的节点（文件 / 文件夹），用于「插入相对路径」 */

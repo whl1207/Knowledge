@@ -18,7 +18,7 @@
  *  - file：**具体文件**（点文件树里的文件后生成，标签标题 = 文件名，内容自带多视图切换）。
  * new / file 不能从类型选择器直接创建（file 由打开文件产生，new 由「+」产生）。
  */
-export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'branch' | 'new' | 'file'
+export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'branch' | 'todos' | 'plan' | 'new' | 'file'
 
 export interface ChatDockTab {
   /** 标签唯一 id（同类型可以开多个，如两个终端） */
@@ -54,24 +54,33 @@ export const DOCK_MAX_WIDTH = 900
 export const DOCK_MIN_CHAT_WIDTH = 320
 
 /** 新标签页里可选的类型（顺序 = 选项顺序；new / file 不在此列） */
-export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch']
+export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch', 'todos', 'plan']
 
 /** 旧版本自动预置的三标签（用于识别并清掉旧存档，与当前可选项无关） */
 const LEGACY_SEEDED_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser']
 
 const KIND_LABELS: Record<ChatDockTabKind, { zh: string; en: string }> = {
-  files: { zh: '文件', en: 'Files' },
+  files: { zh: '工作区', en: 'Workspace' },
   terminal: { zh: '终端', en: 'Terminal' },
   browser: { zh: '浏览器', en: 'Browser' },
   branch: { zh: '分支', en: 'Branches' },
+  todos: { zh: '待办清单', en: 'Todos' },
+  plan: { zh: '计划', en: 'Plan' },
   new: { zh: '新标签页', en: 'New tab' },
   file: { zh: '文件', en: 'File' },
+}
+
+/** 同一类型只能有一个标签页（分支 / 待办清单 / 计划） */
+export const SINGLETON_DOCK_KINDS: readonly ChatDockTabKind[] = ['branch', 'todos', 'plan']
+export function isSingletonDockKind(kind: ChatDockTabKind): boolean {
+  return SINGLETON_DOCK_KINDS.includes(kind)
 }
 
 /** 类型是否合法（存档里出现未知类型时按非法处理） */
 export function isDockTabKind(value: unknown): value is ChatDockTabKind {
   return value === 'files' || value === 'terminal' || value === 'browser'
-    || value === 'branch' || value === 'new' || value === 'file'
+    || value === 'branch' || value === 'todos' || value === 'plan'
+    || value === 'new' || value === 'file'
 }
 
 /** 路径最后一段（file 标签的默认标题） */
@@ -152,7 +161,7 @@ export function normalizeDockState(raw: unknown): ChatDockState {
   const parsed: ChatDockTab[] = []
   const seen = new Set<string>()
   const seenFilePaths = new Set<string>()
-  let seenBranch = false
+  const seenSingleton = new Set<ChatDockTabKind>()
   for (const t of Array.isArray(src.tabs) ? src.tabs : []) {
     if (!t || typeof t !== 'object') continue
     const kind = (t as ChatDockTab).kind
@@ -164,10 +173,10 @@ export function normalizeDockState(raw: unknown): ChatDockState {
       if (!path || seenFilePaths.has(path)) continue
       seenFilePaths.add(path)
     }
-    // 分支视图只有一份（同一个 D3 容器）：旧存档/重复操作产生多个时只保留第一个
-    if (kind === 'branch') {
-      if (seenBranch) continue
-      seenBranch = true
+    // 分支 / 待办 / 计划只有一份（旧存档/重复操作产生多个时只保留第一个）
+    if (isSingletonDockKind(kind)) {
+      if (seenSingleton.has(kind)) continue
+      seenSingleton.add(kind)
     }
     seen.add(id)
     const title = typeof (t as ChatDockTab).title === 'string' && (t as ChatDockTab).title!.trim()
@@ -208,11 +217,13 @@ export function dockTabTitle(tab: ChatDockTab, tabs: readonly ChatDockTab[] = []
   return `${label} ${index + 1}`
 }
 
-/** 追加一个标签并切到它（返回新状态，不原地改） */
+/** 追加一个标签并切到它（返回新状态，不原地改）；分支 / 待办 / 计划这类单例标签已有就切过去 */
 export function addDockTab(state: ChatDockState, kind: ChatDockTabKind, seed = Date.now()): ChatDockState {
   if (!isDockTabKind(kind)) return state
-  // 分支只有一份：任何入口新建分支都走复用逻辑
-  if (kind === 'branch') return openBranchDockTab(state, seed)
+  if (isSingletonDockKind(kind)) {
+    const existing = state.tabs.find((t) => t.kind === kind)
+    if (existing) return { ...state, open: true, activeTabId: existing.id }
+  }
   const tab = createDockTab(kind, state.tabs, seed)
   return { ...state, open: true, tabs: [...state.tabs, tab], activeTabId: tab.id }
 }
@@ -244,8 +255,8 @@ export function configureDockTab(
   const tab = state.tabs[index]
   if (tab.kind === kind) return state
 
-  if (kind === 'branch') {
-    const existing = state.tabs.find((t, i) => i !== index && t.kind === 'branch')
+  if (isSingletonDockKind(kind)) {
+    const existing = state.tabs.find((t, i) => i !== index && t.kind === kind)
     if (existing) {
       const tabs = state.tabs.filter((_, i) => i !== index)
       return { ...state, open: true, tabs, activeTabId: existing.id }
