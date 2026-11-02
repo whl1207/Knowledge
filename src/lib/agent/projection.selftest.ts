@@ -8,7 +8,7 @@
  * 用法：`node scripts/run-selftests.mjs projection`
  */
 
-import { projectStepsToUnits } from './projection'
+import { projectStepsToUnits, projectUsage } from './projection'
 
 export interface ProjectionCase { name: string; ok: boolean; detail?: string }
 
@@ -105,6 +105,50 @@ export function runProjectionSelfTest(): ProjectionCase[] {
     const msg: any = { executionUnits: [] }
     projectStepsToUnits(msg, v, { minTurn: 3 })
     add('缺 turn 的旧步骤仍投影', msg.executionUnits.length === 1, `units=${msg.executionUnits.length}`)
+  }
+
+  // 5) 右上角运行信息：轮/步即使本步还没拿到 usage 也要跟着事件推进
+  {
+    const msg: any = {}
+    projectUsage(msg, { turn: 2, step: 4 })
+    add('无 usage 时也投影轮/步', msg.agentTurn === 2 && msg.agentStep === 4, `T${msg.agentTurn}/S${msg.agentStep}`)
+    add('无 usage 时不写 tokenStats', msg.tokenStats === undefined)
+  }
+
+  // 6) 单轮口径 + 缓存命中：总量取 turnUsageTotal（不是会话累计 usageTotal）
+  {
+    const msg: any = {}
+    projectUsage(msg, {
+      turn: 3,
+      step: 5,
+      usageTotal: 999999,          // 会话累计（跨轮）——不应被消息拿走
+      turnUsageTotal: 1200,        // 本轮累计
+      turnPromptTotal: 5000,       // 本轮各步 prompt 之和（缓存比例分母）
+      turnCachedTotal: 3500,       // 本轮命中之和
+      turnCacheReported: true,
+      lastUsage: { promptTokens: 800, completionTokens: 200, totalTokens: 1000, cachedTokens: 600, cacheReported: true },
+    })
+    add('轮/步投影', msg.agentTurn === 3 && msg.agentStep === 5, `T${msg.agentTurn}/S${msg.agentStep}`)
+    add('消息总量取本轮累计而不是会话累计', msg.tokenStats?.totalTokens === 1200, `total=${msg.tokenStats?.totalTokens}`)
+    add('上下文占用仍取最后一步 prompt', msg.tokenStats?.promptTokens === 800, `prompt=${msg.tokenStats?.promptTokens}`)
+    add('缓存字段投影（命中/分母）',
+      msg.tokenStats?.cacheReported === true && msg.tokenStats?.cachedTokens === 3500 && msg.tokenStats?.promptTokensTotal === 5000,
+      `cached=${msg.tokenStats?.cachedTokens} promptTotal=${msg.tokenStats?.promptTokensTotal}`)
+  }
+
+  // 7) 来源不报缓存：不写缓存字段（界面据此不显示缓存比例，而不是显示 0%）
+  {
+    const msg: any = {}
+    projectUsage(msg, {
+      turn: 1,
+      step: 1,
+      turnUsageTotal: 100,
+      turnPromptTotal: 80,
+      turnCacheReported: false,
+      lastUsage: { promptTokens: 80, completionTokens: 20, totalTokens: 100 },
+    })
+    add('来源不报缓存 → 不写缓存字段', msg.tokenStats?.cacheReported === undefined && msg.tokenStats?.cachedTokens === undefined)
+    add('普通 usage 仍投影总量', msg.tokenStats?.totalTokens === 100, `total=${msg.tokenStats?.totalTokens}`)
   }
 
   return cases

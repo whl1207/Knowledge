@@ -1,6 +1,6 @@
 <!-- SkillManagement.vue - 技能管理模块 -->
 <template>
-  <div class="agent-skill" :class="{ tall: isTallLayout }">
+  <div class="agent-skill" :class="{ tall: isTallLayout, 'has-selection': !!selectedSkill }">
     <!-- ====== 管理内容 ====== -->
     <div class="manage-content">
       <div class="manage-split">
@@ -28,64 +28,62 @@
               :title="store.locales === 'en' ? 'Back to the default skills folder' : '恢复默认技能文件夹'">
               <i class="fa fa-undo"></i>
             </button>
+            <button class="sk-nav-btn" :disabled="!store.disabledSkills.length" @click="enableAllSkills"
+              :title="store.locales === 'en' ? 'Enable all skills (clear the disabled list)' : '全部启用：清空被禁用的技能（正常状态下本来就是全开）'">
+              <i class="fa fa-check-square-o"></i>
+            </button>
           </div>
-          <div class="sk-nav-search">
-            <i class="fa fa-search"></i>
-            <input v-model="skillKeyword" spellcheck="false"
-              :placeholder="store.locales === 'en' ? 'Search skills (name / description)' : '搜索技能（名称 / 描述）'" />
-            <i v-if="skillKeyword" class="fa fa-times-circle sk-search-clear" @click="skillKeyword = ''"
-              :title="store.locales === 'en' ? 'Clear' : '清除'"></i>
-          </div>
-          <div class="skill-list">
-            <div v-if="loading" class="empty-hint" style="height:100%;">
+          <!-- 技能列表：按文件夹分组（与「设置 → 工具 → 管理」/ 预设技能共用同一套分组外壳
+               与技能卡片，样式完全一致）。未选中技能时整宽网格；选中后收窄为单列列表。 -->
+          <div v-if="loading" class="sk-state">
+            <div class="empty-hint">
               <i class="fa fa-spinner fa-spin" style="font-size:20px;"></i>
               <span>{{ store.locales === 'en' ? 'Loading...' : '加载中...' }}</span>
             </div>
-            <div v-else-if="skills.length === 0" class="empty-hint" style="height:100%;">
+          </div>
+          <div v-else-if="skills.length === 0" class="sk-state">
+            <div class="empty-hint">
               <i class="fa fa-cubes" style="font-size:24px;"></i>
               <span>{{ store.skillsPath ? (store.locales === 'en' ? 'No skill files found' : '未找到技能文件') : (store.locales === 'en' ? 'Please set skills folder first' : '请先设置技能文件夹') }}</span>
             </div>
-            <div v-else-if="!filteredSkills.length" class="empty-hint" style="height:auto;padding:12px 4px;">
-              <span>{{ store.locales === 'en' ? `No skills match “${skillKeyword.trim()}”` : `没有匹配「${skillKeyword.trim()}」的技能` }}</span>
-            </div>
-            <div
-              v-for="skill in filteredSkills"
-              :key="skill.name"
-              class="skill-item"
-              :class="{ active: selectedSkill?.name === skill.name }"
-              @click="selectSkill(skill)"
-              :title="skill.description"
-            >
-              <i class="fa" :class="skill.metadata?.emoji ? 'fa-smile-o' : 'fa-cube'"></i>
-              <div class="skill-info">
-                <span class="skill-name">
-                  <span v-if="skill.metadata?.emoji" class="skill-emoji">{{ skill.metadata.emoji }}</span>
-                  {{ skill.name }}
-                </span>
-                <span class="skill-desc">{{ skill.description }}</span>
-              </div>
-              <span class="skill-badge" :title="skill.metadata?.version ? (store.locales === 'en' ? `Version: ${skill.metadata.version}` : `版本: ${skill.metadata.version}`) : ''">
-                <span v-if="skill.metadata?.version">v{{ skill.metadata.version }} |</span>
-                {{ (skill.fileCount ?? skill.preview?.files?.length ?? skill.files?.length ?? 0) + 1 }} {{ store.locales === 'en' ? 'files' : '文件' }}
-              </span>
-              <!-- 启用开关：关闭的技能不注入智能体 / 不被 skill 工具加载 -->
-              <span
-                class="skill-enable-toggle"
-                :class="{ on: isSkillEnabled(skill.name) }"
-                :title="isSkillEnabled(skill.name) ? (store.locales === 'en' ? 'Enabled: injected into agent' : '已启用：注入智能体') : (store.locales === 'en' ? 'Disabled: not injected' : '已禁用：不注入智能体')"
-                @click.stop="toggleSkillEnabled(skill.name)"
-              >
-                <span class="skill-enable-knob"></span>
-              </span>
-            </div>
           </div>
+          <ToolGroupList
+            v-else
+            class="sk-groups"
+            :sections="skillSections"
+            :layout="skillListLayout"
+            :search-placeholder="store.locales === 'en' ? 'Search skills (name / description / folder)' : '搜索技能（名称 / 描述 / 文件夹）'"
+            :empty-text="store.locales === 'en' ? 'No matching skills' : '没有匹配的技能'"
+            :only-enabled-text="store.locales === 'en' ? 'Enabled' : '已启用'"
+            :bulk-on-text="store.locales === 'en' ? 'All' : '全开'"
+            :bulk-off-text="store.locales === 'en' ? 'None' : '全关'"
+            @bulk="applySkillBulk"
+          >
+            <template #row="{ row }">
+              <SkillCard
+                :name="row.name"
+                :description="row.description"
+                :emoji="row.emoji"
+                :version="row.version"
+                :file-count="row.fileCount"
+                :on="row.on"
+                :active="selectedSkill?.name === row.name"
+                :compact="narrowSkillList"
+                dim-when-off
+                :toggle-title-on="store.locales === 'en' ? 'Enabled: injected into agents, click to disable' : '已启用：已注入智能体，点击禁用'"
+                :toggle-title-off="store.locales === 'en' ? 'Disabled: not injected, click to enable' : '已禁用：不注入智能体，点击启用'"
+                @open="selectSkill(row.skill)"
+                @toggle="toggleSkillEnabled(row.name)"
+              />
+            </template>
+          </ToolGroupList>
 
           <!-- 底栏（参照「插件 → 管理」）：数量 + 技能目录（点击选择目录） -->
           <div class="sk-nav-foot">
             <div class="sk-foot-row">
               <span class="sk-foot-count">
-                {{ skillKeyword ? `${filteredSkills.length} / ${skills.length}` : skills.length }}
-                {{ store.locales === 'en' ? 'skills' : '个技能' }}
+                {{ skills.length }}{{ store.locales === 'en' ? ' skills' : ' 个技能' }}
+                <template v-if="skills.length"> · {{ enabledSkillCount }}{{ store.locales === 'en' ? ' enabled' : ' 启用' }}</template>
               </span>
               <span class="sk-foot-icons">
                 <i v-if="isDefaultFolder" class="fa fa-home sk-foot-icon" :title="store.locales === 'en' ? 'Default skills folder' : '默认技能目录'"></i>
@@ -100,13 +98,9 @@
           </div>
         </div>
 
-        <!-- 中间：文件树 -->
-        <div class="manage-middle" v-show="!isTallLayout || tallScreen === 'tree'">
-          <div v-if="!selectedSkill" class="empty-hint">
-            <i class="fa fa-hand-pointer-o" style="font-size:28px;"></i>
-            <span>{{ store.locales === 'en' ? 'Select a skill from the left' : '请从左侧选择一个技能' }}</span>
-          </div>
-          <div v-else class="file-tree-container">
+        <!-- 中间：文件树（只有点开技能后才出现；未点开时整个右侧不渲染） -->
+        <div class="manage-middle" v-if="selectedSkill" v-show="!isTallLayout || tallScreen === 'tree'" :class="{ grow: !previewFile }">
+          <div class="file-tree-container">
             <div class="file-tree-header">
               <!-- 细长窗口：文件树整屏时左上角返回（回到整屏技能列表） -->
               <div v-if="isTallLayout" class="sk-back" @click="backToSkillList"
@@ -117,6 +111,9 @@
               <span class="file-count">{{ skillFiles.length }} {{ store.locales === 'en' ? 'files' : '个文件' }}</span>
               <i class="fa fa-external-link sk-open-dir" @click="openSkillInExplorer"
                 :title="store.locales === 'en' ? 'Open this skill folder in Explorer' : '在资源管理器中打开该技能文件夹'"></i>
+              <!-- 宽窗口：关闭当前技能 → 回到整宽技能列表（细长窗口用左上角 ← 返回） -->
+              <i v-if="!isTallLayout" class="fa fa-times sk-close-pane" @click="closeSelection"
+                :title="store.locales === 'en' ? 'Close and back to the skill list' : '关闭当前技能，回到技能列表'"></i>
             </div>
             <div class="file-tree-body">
               <template v-for="node in fileTree" :key="node.path">
@@ -184,8 +181,8 @@
           </div>
         </div>
 
-        <!-- 右侧：编辑器（选中文件时显示） -->
-        <div class="manage-right" v-if="previewFile" v-show="!isTallLayout || tallScreen === 'editor'">
+        <!-- 右侧：编辑器（选中技能并点开文件时显示） -->
+        <div class="manage-right" v-if="selectedSkill && previewFile" v-show="!isTallLayout || tallScreen === 'editor'">
           <div class="file-preview-header">
             <!-- 细长窗口：编辑器整屏时左上角返回（回到整屏文件树） -->
             <div v-if="isTallLayout" class="sk-back" @click="backToFileTree"
@@ -220,6 +217,10 @@ import { getPlatform, hasCapability } from '@/platform'
 import { ensureDefaultSkillsPath, resetSkillsPathToDefault, isDefaultSkillsFolder } from '@/composables/useDefaultStorage'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTallLayout } from '@/composables/useTallLayout'
+import ToolGroupList from '@/components/set/ToolGroupList.vue'
+import SkillCard from '@/components/set/SkillCard.vue'
+import { groupSkillRowsByFolder } from '@/lib/agent/skillFolders'
+import type { GroupableToolRow } from '@/lib/agent/toolGroups'
 
 const store = usestore()
 
@@ -250,14 +251,30 @@ interface SkillItem {
   name: string
   description: string
   path: string
+  /** 分类目录（相对技能根，`/` 分隔；直接放在根下为空串），见 electron/main/skill-service.ts */
+  folder?: string
   metadata: any
   /** 技能目录真实文件总数（files 为受限采样；超大型技能如 1w+ 模板文件） */
   fileCount?: number
   preview: {
     content: string
     files: SkillFile[]
+    /** 技能目录真实文件总数（files 为受限采样；超大型技能如 1w+ 模板文件） */
+    fileCount?: number
   }
   files?: SkillFile[]
+}
+
+/** 分组列表的行数据：ToolGroupList 要的字段（GroupableToolRow）+ 技能卡片要的字段 */
+interface SkillRow extends GroupableToolRow {
+  path: string
+  folder: string
+  emoji: string
+  version: string
+  /** 技能目录文件总数（含 SKILL.md），卡片右下角只显示数量 */
+  fileCount: number
+  /** 原始技能对象（点卡片时交给 selectSkill） */
+  skill: SkillItem
 }
 
 interface TreeNode {
@@ -277,17 +294,40 @@ const saving = ref(false)
 // 技能数据
 const skills = ref<SkillItem[]>([])
 const selectedSkill = ref<SkillItem | null>(null)
-/** 左侧导航搜索词（名称 / 描述） */
-const skillKeyword = ref('')
-/** 过滤后的技能列表（搜索时保持原顺序） */
-const filteredSkills = computed(() => {
-  const kw = skillKeyword.value.trim().toLowerCase()
-  if (!kw) return skills.value
-  return skills.value.filter((s) =>
-    String(s.name || '').toLowerCase().includes(kw) ||
-    String(s.description || '').toLowerCase().includes(kw),
-  )
-})
+
+/** 被禁用的技能名集合（store.disabledSkills 的响应式视图） */
+const disabledSkillSet = computed(() => new Set(store.disabledSkills || []))
+
+/**
+ * 分组列表的行数据：分组外壳要的字段（labelZh/labelEn/icon/description/on/srcKind）
+ * + 技能卡片与选中逻辑要的字段。开关状态直接来自全局禁用名单。
+ */
+const skillRows = computed<SkillRow[]>(() => skills.value.map((s) => ({
+  name: s.name,
+  labelZh: s.name,
+  labelEn: s.name,
+  icon: 'fa-cube',
+  description: s.description || '',
+  on: !disabledSkillSet.value.has(s.name),
+  srcKind: 'builtin',
+  path: s.path,
+  folder: s.folder || '',
+  emoji: String(s.metadata?.emoji || ''),
+  version: String(s.metadata?.version || ''),
+  // 文件数含 SKILL.md（IPC 的文件清单会过滤掉它，这里补上）；优先用真实总数而不是采样数
+  fileCount: (s.fileCount ?? s.preview?.fileCount ?? s.preview?.files?.length ?? s.files?.length ?? 0) + 1,
+  skill: s,
+})))
+
+/** 按文件夹分组（与「智能体预设 → 技能」共用同一份分组逻辑；2~3 级目录显示成 分类 / 子分类） */
+const skillSections = computed(() => groupSkillRowsByFolder(skillRows.value, { zh: store.locales === 'zh' }))
+
+/** 选中技能后（宽窗口）左侧收窄成单列；未选中 / 细长窗口时是整宽网格 */
+const narrowSkillList = computed(() => !!selectedSkill.value && !isTallLayout.value)
+const skillListLayout = computed<'grid' | 'list'>(() => (narrowSkillList.value ? 'list' : 'grid'))
+
+/** 底栏：已启用数量 */
+const enabledSkillCount = computed(() => skillRows.value.filter((r) => r.on).length)
 const previewFile = ref<SkillFile | null>(null)
 const previewContent = ref('')
 const previewOriginalContent = ref('')
@@ -489,10 +529,19 @@ const revealSkillsRoot = async () => {
   }
 }
 
+/** 释放 Monaco 实例（编辑器随 previewFile 的 v-if 一起卸载，实例必须手动销毁） */
+const disposePreviewEditor = () => {
+  if (previewEditor) {
+    previewEditor.dispose()
+    previewEditor = null
+  }
+}
+
 // 加载技能列表
 const loadSkillList = async () => {
   if (!store.skillsPath) {
     skills.value = []
+    closeSelection()
     return
   }
 
@@ -500,6 +549,12 @@ const loadSkillList = async () => {
   try {
     const loaded = await getPlatform().host.skills.list(store.skillsPath)
     skills.value = loaded
+    // 刷新后保持选中：对象是新的（路径 / 文件清单可能变），按名字换上新的；技能没了就收起右侧
+    if (selectedSkill.value) {
+      const fresh = (loaded as SkillItem[]).find((s) => s.name === selectedSkill.value?.name)
+      if (fresh) selectedSkill.value = fresh
+      else closeSelection()
+    }
     addLog('info', `已加载 ${loaded.length} 个技能`)
   } catch (error: any) {
     addLog('error', `加载技能失败: ${error.message}`)
@@ -510,17 +565,33 @@ const loadSkillList = async () => {
 
 // 刷新技能列表
 const refreshSkillList = async () => {
-  selectedSkill.value = null
-  previewFile.value = null
-  previewContent.value = ''
+  closeSelection()
   await loadSkillList()
 }
 
-// 选择技能
+/** 收起右侧（文件树 / 编辑器），回到整宽技能列表 */
+const closeSelection = () => {
+  selectedSkill.value = null
+  previewFile.value = null
+  previewContent.value = ''
+  previewOriginalContent.value = ''
+  expandedFolders.value = new Set()
+  tallScreen.value = 'list'
+  disposePreviewEditor()
+}
+
+// 选择技能：再次点击同一个 = 收起（与工具面板「点开 / 收起」同一套操作逻辑）
 const selectSkill = (skill: SkillItem) => {
+  if (selectedSkill.value?.name === skill.name) {
+    closeSelection()
+    return
+  }
   selectedSkill.value = skill
   previewFile.value = null
   previewContent.value = ''
+  previewOriginalContent.value = ''
+  expandedFolders.value = new Set()
+  disposePreviewEditor()
   tallScreen.value = 'tree'   // 细长窗口：选中技能后整屏进入文件树
   addLog('info', `选中技能: ${skill.name}`)
 }
@@ -536,8 +607,10 @@ const backToFileTree = () => {
 
 // ====== 技能启用开关（关闭的技能不注入智能体 / 不被 skill 工具加载） ======
 
-const isSkillEnabled = (name: string): boolean => {
-  return !store.disabledSkills.includes(name)
+/** 一次写入禁用名单（单个开关 / 组内批量 / 全部启用共用，避免逐条 saveConfig） */
+const persistDisabledSkills = (disabled: Set<string>) => {
+  store.disabledSkills = Array.from(disabled)
+  store.saveConfig()
 }
 
 const toggleSkillEnabled = (name: string) => {
@@ -547,9 +620,26 @@ const toggleSkillEnabled = (name: string) => {
   } else {
     disabled.add(name)
   }
-  store.disabledSkills = Array.from(disabled)
-  store.saveConfig()
+  persistDisabledSkills(disabled)
   addLog('info', `${disabled.has(name) ? '禁用' : '启用'}技能: ${name}`)
+}
+
+/** 组内全开 / 全关：只改该组当前可见的行（与「工具管理」同一套语义），一次落盘 */
+const applySkillBulk = ({ rows, on }: { rows: SkillRow[]; on: boolean }) => {
+  const disabled = new Set(store.disabledSkills)
+  for (const row of rows) {
+    if (on) disabled.delete(row.name)
+    else disabled.add(row.name)
+  }
+  persistDisabledSkills(disabled)
+  addLog('info', `${on ? '启用' : '禁用'} ${rows.length} 个技能（分组批量）`)
+}
+
+/** 全部启用：清空禁用名单（技能默认就是全开，这里是「恢复默认」的等价操作） */
+const enableAllSkills = () => {
+  if (!store.disabledSkills.length) return
+  persistDisabledSkills(new Set())
+  addLog('info', '已启用全部技能')
 }
 
 // 获取文件图标类名
@@ -925,19 +1015,13 @@ onBeforeUnmount(() => {
 }
 .sk-nav-btn.primary:hover { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
 .sk-nav-btn-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sk-nav-search {
-  display: flex; align-items: center; gap: 6px;
-  margin: 5px; height: 26px; padding: 0 6px; flex-shrink: 0;
-  border: 1px solid var(--borderColor); border-radius: 4px;
-  background: var(--backgroundColor); font-size: 12px; color: var(--borderColor);
-}
-.sk-nav-search input {
-  flex: 1; min-width: 0; margin: 0;
-  border: none; outline: none; background: transparent;
-  color: var(--fontColor); font-size: 12px;
-}
-.sk-search-clear { cursor: pointer; }
-.sk-search-clear:hover { color: var(--fontActiveColor); }
+/* 技能列表：分组外壳（ToolGroupList）占满左侧剩余高度。
+   卡片样式在 SkillCard.vue 里统一维护（与「智能体预设 → 技能」完全一致）；
+   列宽与「设置 → 工具 → 管理」的工具网格保持一致（240px 起）。 */
+.sk-groups { flex: 1; min-height: 0; width: 100%; --tgl-min: 240px; padding: 6px 4px 2px; box-sizing: border-box; }
+/* 加载中 / 无技能 / 未设置目录：占满列表区居中提示 */
+.sk-state { flex: 1; min-height: 0; display: flex; }
+.sk-state .empty-hint { flex: 1; height: auto; }
 .sk-nav-foot {
   flex-shrink: 0; display: flex; flex-direction: column; gap: 3px;
   padding: 5px 7px; border-top: 1px solid var(--borderColor);
@@ -961,6 +1045,9 @@ onBeforeUnmount(() => {
 /* 文件树头部的「打开该技能文件夹」 */
 .sk-open-dir { margin-left: 8px; cursor: pointer; opacity: .7; }
 .sk-open-dir:hover { opacity: 1; color: var(--fontActiveColor); }
+/* 文件树头部的「关闭当前技能」（仅宽窗口；细长窗口用左上角 ←） */
+.sk-close-pane { margin-left: 6px; cursor: pointer; opacity: .7; }
+.sk-close-pane:hover { opacity: 1; color: var(--fontActiveColor); }
 
 .folder-path {
   font-size: 11px;
@@ -995,7 +1082,7 @@ onBeforeUnmount(() => {
 }
 
 .manage-left {
-  /* 与「插件 → 管理」左栏一致：230px（安装按钮 + 四个图标按钮能排在一行） */
+  /* 选中技能后：与「插件 → 管理」左栏一致 230px（安装 + 五个图标按钮能排一行） */
   width: 230px;
   min-width: 230px;
   flex-shrink: 0;
@@ -1003,116 +1090,15 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
 }
-
-.skill-list {
-  flex: 1;
-  overflow-y: auto;
-  /* 与「插件 → 管理」列表一致的左右留白 */
-  padding: 0 4px 4px;
-}
-
-.skill-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 6px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 11px;
-  transition: all .12s;
-  margin-bottom: 2px;
-  box-sizing: border-box;
-  /* 与「插件 → 管理」的行高对齐：两行（名称 + 描述）固定 44px，描述为空也不会变矮 */
-  min-height: 44px;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.skill-item:hover {
-  background: color-mix(in srgb, var(--fontColor) 6%, transparent);
-  border-color: transparent;
-}
-
-.skill-item.active {
-  background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
-  border-color: var(--fontActiveColor);
-}
-
-.skill-item i {
-  font-size: 16px;
-  color: #FF9800;
-  flex-shrink: 0;
-}
-
-.skill-info {
-  flex: 1;
+/* 未选中技能：左侧整宽、右侧整块不渲染（列表沿用工具管理面板的样式与操作逻辑） */
+.agent-skill:not(.has-selection) .manage-left {
+  width: auto;
   min-width: 0;
+  flex: 1;
+  border-right: 0;
 }
 
-.skill-name {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skill-desc {
-  display: block;
-  font-size: 10px;
-  color: var(--fontColor);
-  opacity: .55;
-  min-height: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 技能启用开关 */
-.skill-enable-toggle {
-  width: 30px;
-  height: 16px;
-  border-radius: 8px;
-  background: var(--borderColor);
-  position: relative;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all .15s;
-}
-.skill-enable-toggle .skill-enable-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(0,0,0,.25);
-  transition: all .15s;
-}
-.skill-enable-toggle.on { background: var(--fontActiveColor); }
-.skill-enable-toggle.on .skill-enable-knob { left: 16px; }
-
-.skill-emoji {
-  margin-right: 3px;
-  font-size: 14px;
-}
-
-.skill-badge {
-  font-size: 9px;
-  color: var(--borderColor);
-  padding: 1px 5px;
-  border-radius: 8px;
-  background: var(--backgroundColor);
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* 中间列：文件树 */
+/* 中间列：文件树（240px；还没点开文件时占满右侧，避免编辑区空着一大片） */
 .manage-middle {
   width: 240px;
   min-width: 220px;
@@ -1120,6 +1106,12 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.manage-middle.grow {
+  width: auto;
+  min-width: 0;
+  flex: 1;
+  border-right: 0;
 }
 
 .file-tree-container {
@@ -1335,19 +1327,13 @@ onBeforeUnmount(() => {
   border-right: 0;
 }
 .agent-skill.tall .manage-right { width: 100%; }
-/* 技能条目按钢琴键式整宽条目呈现：行高够手指点 */
-.agent-skill.tall .skill-list { padding: 8px; }
-.agent-skill.tall .skill-item {
-  min-height: 56px;
-  padding: 8px 12px;
-  margin-bottom: 4px;
-  border: 1px solid var(--borderColor);
-  border-radius: 8px;
-  background: var(--menuColor);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-}
-.agent-skill.tall .skill-name { font-size: 14px; }
-.agent-skill.tall .skill-desc { font-size: 12px; }
+/* 技能条目按钢琴键式整宽条目呈现：行高够手指点。
+   卡片内部样式由 SkillCard.vue 统一维护，这里用 :deep 放大尺寸（手机竖屏触摸目标） */
+.agent-skill.tall .sk-groups { --tgl-min: 300px; padding: 8px; }
+.agent-skill.tall :deep(.skill-card) { min-height: 56px; padding: 8px 12px; }
+.agent-skill.tall :deep(.skill-card-name) { font-size: 14px; }
+.agent-skill.tall :deep(.skill-card-desc) { font-size: 12px; }
+.agent-skill.tall :deep(.skill-card-icon) { width: 32px; height: 32px; font-size: 15px; }
 /* 文件树条目同样放大（触摸目标够大） */
 .agent-skill.tall .file-item,
 .agent-skill.tall .folder-row { min-height: 34px; }

@@ -28,6 +28,8 @@ function summarize(s: any): any {
     description: String(s?.description || '').slice(0, 300),
     shortDescription: String(s?.shortDescription || '').slice(0, 120),
     path: String(s?.path || ''),
+    /** 分类目录（相对技能根，`/` 分隔；直接放在根下为空串），便于模型按分类整理技能 */
+    folder: String(s?.folder || ''),
     emoji: String(s?.metadata?.emoji || ''),
     version: String(s?.metadata?.version || ''),
     promptVersion: String(s?.promptVersion || ''),

@@ -161,17 +161,30 @@ export function projectKbInfo(msg: any, v: any, processed: Set<string>): void {
 }
 
 /**
- * 真实 token 统计回填：最后一步 promptTokens = 真实上下文占用（圆环用）；
- * totalTokens = 累计消耗。
+ * 真实 token 统计回填：
+ * - 最后一步 promptTokens = 真实上下文占用（圆环用）；
+ * - turnUsageTotal = 本 turn 累计消耗（消息级「对话消耗」右上角信息条以此求和）；
+ * - 缓存命中：本 turn 各步命中之和 / 各步 prompt 之和（来源不报缓存时不写这两项）。
+ * 同时回填轮 / 步（`agentTurn` / `agentStep`）：右上角「第 N 轮 · 第 M 步」即使本步
+ * 还没拿到 usage 也要立刻跟着事件推进。
  */
 export function projectUsage(msg: any, v: any): void {
+  msg.agentTurn = Number(v.turn) || 0
+  msg.agentStep = Number(v.step) || 0
   if (!v.lastUsage) return
-  msg.tokenStats = {
+  const tokenStats: any = {
     promptTokens: v.lastUsage.promptTokens || 0,
     completionTokens: v.lastUsage.completionTokens || 0,
-    totalTokens: v.usageTotal || v.lastUsage.totalTokens || 0,
+    totalTokens: Number(v.turnUsageTotal) || v.usageTotal || v.lastUsage.totalTokens || 0,
     duration: Date.now() - (msg._startTime || Date.now()),
   }
+  if (v.turnCacheReported === true) {
+    tokenStats.cacheReported = true
+    tokenStats.cachedTokens = Number(v.turnCachedTotal) || 0
+    // 分母：本 turn 所有 step 的 prompt 之和（缓存命中率按「每步 prompt 是否命中」统计）
+    tokenStats.promptTokensTotal = Number(v.turnPromptTotal) || tokenStats.promptTokens
+  }
+  msg.tokenStats = tokenStats
 }
 
 /**

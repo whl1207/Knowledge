@@ -1,10 +1,13 @@
 <!--
-  ToolGroupList.vue — 工具列表的「分组外壳」（设置 → 工具 → 管理 / 智能体预设 → 工具 共用）
+  ToolGroupList.vue — 列表的「分组外壳」（设置 → 工具 → 管理 / 智能体预设 → 工具 / 技能管理 / 预设 → 技能 共用）
 
-  只负责“怎么摆”：按能力域分组（归属表见 lib/agent/toolGroups.ts）、折叠、搜索、
-  只看已启用、组内全开 / 全关。**行长什么样由父组件通过 #row 插槽决定** ——
-  两个面板的行样式差别很大（工具管理是带沙箱/审批元信息的网格卡片，预设是紧凑开关卡片），
-  共用一套行标记会互相牵制。
+  只负责“怎么摆”：分组、折叠、搜索、只看已启用、组内全开 / 全关。
+  **分组从哪来由父组件决定**：
+    - 传 `rows`（平铺行）→ 按能力域分组（归属表见 lib/agent/toolGroups.ts），工具面板走这条；
+    - 传 `sections`（已分好组）→ 原样使用，技能面板按文件夹分组走这条
+      （见 lib/agent/skillFolders.ts）。
+  **行长什么样由父组件通过 #row 插槽决定** —— 各面板的行样式差别很大，共用一套行标记
+  会互相牵制。
 
   操作语义：组头计数与批量按钮都只作用于**当前可见的行**（搜索 / 只看已启用过滤之后），
   即“看到什么就改什么”；想改整组就先清空搜索。
@@ -19,7 +22,7 @@
           v-model="searchText"
           class="tgl-search-input"
           type="text"
-          :placeholder="zh ? '搜索工具（名称 / 工具名 / 描述）' : 'Search tools (label / key / description)'"
+          :placeholder="searchPlaceholder || (zh ? '搜索工具（名称 / 工具名 / 描述）' : 'Search tools (label / key / description)')"
           @keydown.esc="searchText = ''"
         />
         <i
@@ -32,11 +35,11 @@
       <button
         class="tgl-tool-btn"
         :class="{ on: onlyEnabled }"
-        :title="zh ? '只显示已启用的工具' : 'Show enabled tools only'"
+        :title="onlyEnabledText || (zh ? '只显示已启用的项' : 'Show enabled only')"
         @click="onlyEnabled = !onlyEnabled"
       >
         <i class="fa fa-filter"></i>
-        <span class="tgl-tool-btn-text">{{ zh ? '已启用' : 'Enabled' }}</span>
+        <span class="tgl-tool-btn-text">{{ onlyEnabledText || (zh ? '已启用' : 'Enabled') }}</span>
       </button>
       <button
         v-if="!searchText"
@@ -70,15 +73,15 @@
             <button
               class="tgl-bulk"
               :disabled="!canEnable(g)"
-              :title="zh ? '启用该组当前可见的全部工具' : 'Enable all tools visible in this group'"
+              :title="zh ? '启用该组当前可见的全部项' : 'Enable all items visible in this group'"
               @click="emitBulk(g, true)"
-            >{{ zh ? '全开' : 'All' }}</button>
+            >{{ bulkOnText || (zh ? '全开' : 'All') }}</button>
             <button
               class="tgl-bulk"
               :disabled="!canDisable(g)"
-              :title="zh ? '禁用该组当前可见的全部工具' : 'Disable all tools visible in this group'"
+              :title="zh ? '禁用该组当前可见的全部项' : 'Disable all items visible in this group'"
               @click="emitBulk(g, false)"
-            >{{ zh ? '全关' : 'None' }}</button>
+            >{{ bulkOffText || (zh ? '全关' : 'None') }}</button>
           </span>
         </div>
 
@@ -92,7 +95,7 @@
 
       <div v-if="!visibleGroups.length" class="tgl-empty">
         <i class="fa fa-search"></i>
-        {{ zh ? '没有匹配的工具' : 'No matching tools' }}
+        {{ emptyText || (zh ? '没有匹配的工具' : 'No matching tools') }}
       </div>
     </div>
   </div>
@@ -104,13 +107,25 @@ import { usestore } from '@/store'
 import { groupToolRows, type GroupableToolRow, type ToolGroupSection } from '@/lib/agent/toolGroups'
 
 const props = withDefaults(defineProps<{
-  /** 平铺的工具行（父组件自己算好 on / srcKind） */
-  rows: T[]
+  /** 平铺的行（按能力域自动分组）；传 sections 时可省略 */
+  rows?: T[]
+  /** 已分好组的数据（如技能按文件夹）；优先于 rows */
+  sections?: ToolGroupSection<T>[]
   /** grid = 多列卡片（工具管理 / 预设），list = 单列 */
   layout?: 'grid' | 'list'
   /** 是否显示组内全开 / 全关 */
   bulk?: boolean
+  /** 搜索框占位文案（不传按“工具”措辞） */
+  searchPlaceholder?: string
+  /** 空态文案（不传按“工具”措辞） */
+  emptyText?: string
+  /** 「只看已启用」按钮文案 */
+  onlyEnabledText?: string
+  /** 组内批量按钮文案 */
+  bulkOnText?: string
+  bulkOffText?: string
 }>(), {
+  rows: () => [],
   layout: 'grid',
   bulk: true,
 })
@@ -125,25 +140,33 @@ const zh = computed(() => store.locales === 'zh')
 const searchText = ref('')
 const onlyEnabled = ref(false)
 
-// 折叠状态：初始按分组表里的 defaultCollapsed（浏览器 / 插件两组），只在本次挂载内有效
-const collapsed = ref<Set<string>>(
-  new Set(groupToolRows(props.rows).filter((g) => g.defaultCollapsed).map((g) => g.id)),
+/** 分组数据：父组件给了 sections 就用它（技能按文件夹），否则按工具能力域自动分 */
+const sections = computed<ToolGroupSection<T>[]>(() =>
+  props.sections && props.sections.length ? props.sections : groupToolRows(props.rows || []),
 )
 
-const sections = computed<ToolGroupSection<T>[]>(() => groupToolRows(props.rows))
+// 折叠状态：初始按分组表的 defaultCollapsed，只在本次挂载内有效
+const collapsed = ref<Set<string>>(
+  new Set(sections.value.filter((g) => g.defaultCollapsed).map((g) => g.id)),
+)
 
-/** 搜索 / 只看已启用过滤后的分组（空组隐藏） */
+/** 搜索 / 只看已启用过滤后的分组（空组隐藏）；搜索同时匹配组名（文件夹 / 能力域） */
 const visibleGroups = computed<ToolGroupSection<T>[]>(() => {
   const q = searchText.value.trim().toLowerCase()
   return sections.value
-    .map((g) => ({
-      ...g,
-      rows: g.rows.filter((row) => {
-        if (onlyEnabled.value && !row.on) return false
-        if (!q) return true
-        return `${row.name} ${row.labelZh} ${row.labelEn} ${row.description}`.toLowerCase().includes(q)
-      }),
-    }))
+    .map((g) => {
+      const groupLabel = `${g.labelZh} ${g.labelEn}`.toLowerCase()
+      return {
+        ...g,
+        rows: g.rows.filter((row) => {
+          if (onlyEnabled.value && !row.on) return false
+          if (!q) return true
+          return `${row.name} ${row.labelZh} ${row.labelEn} ${row.description} ${groupLabel}`
+            .toLowerCase()
+            .includes(q)
+        }),
+      }
+    })
     .filter((g) => g.rows.length > 0)
 })
 

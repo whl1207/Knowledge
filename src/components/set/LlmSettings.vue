@@ -2321,8 +2321,22 @@ onMounted(() => {
   font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 3px;
   color: var(--fontActiveColor); border: 1px solid var(--fontActiveColor); opacity: .9;
 }
-/* 「设为默认」：把当前查看的来源设为默认（点击来源只查看，不再自动改默认） */
-.llm-set-default { width: auto; padding: 2px 8px; font-size: 12px; gap: 4px; }
+/* 「设为默认」：把当前查看的来源设为默认（点击来源只查看，不再自动改默认）
+   做成与 .llm-default-tag 同高的小标签按钮：16px 行高 + 1px 上下边框 = 18px。
+   必须覆盖全局 .button 的 height:23px / margin:5px / padding:3px 8px，
+   否则按钮盒子 29px 高、再加 5px 上下外边距，会把标题行（h3 / 标签）撑高。 */
+.button.llm-set-default {
+  width: auto; height: auto; min-height: 0; margin: 0; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+  font-size: 10px; line-height: 16px; border-radius: 3px;
+  border: 1px solid var(--fontActiveColor); color: var(--fontActiveColor);
+  background: transparent; opacity: .9; white-space: nowrap; flex-shrink: 0;
+}
+.button.llm-set-default > i { font-size: 10px; line-height: 1; }
+.button.llm-set-default:hover {
+  background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
+  opacity: 1;
+}
 /* 嵌入页：不需要左右两栏 */
 .llm-embed-only { display: block; overflow-y: auto; }
 .llm-content-header h3 {

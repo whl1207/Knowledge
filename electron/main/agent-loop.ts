@@ -1732,6 +1732,12 @@ class AgentImpl implements AgentControl {
                 completionTokens: typeof ct === 'number' ? ct : 0,
                 totalTokens: metadata?.total_tokens ?? metadata?.totalTokens ?? ((typeof pt === 'number' ? pt : 0) + (typeof ct === 'number' ? ct : 0)),
               }
+              // 缓存命中（DeepSeek / OpenAI / Anthropic 的 usage 字段各异，ai-core 已归一）
+              const cached = metadata?.cached_tokens ?? metadata?.cachedTokens
+              if (typeof cached === 'number') {
+                stepUsage.cachedTokens = cached
+                stepUsage.cacheReported = metadata?.cache_reported === true || metadata?.cacheReported === true
+              }
             }
             // 用量账本（只记后续）：智能体/集群/插件 agent 的每一步都记一行。
             // 重试时 StepUsage 会被下一次覆盖，但账本按「真发生过的请求」逐条记账，

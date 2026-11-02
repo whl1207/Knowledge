@@ -348,7 +348,7 @@
 
         <!-- 技能（需在「通用」开启技能库） -->
         <div v-if="activeTab === 'skills'" class="ae-tab-body">
-          <div class="cfg-row column cfg-box">
+          <div class="cfg-row column cfg-box preset-skill-box">
             <div class="skill-box-head" style="justify-content:flex-end;">
               <div class="skill-box-actions">
                 <button class="skill-bulk-btn" @click="selectAllSkills" :title="store.locales === 'en' ? 'Select all skills' : '全选所有技能'">
@@ -362,19 +362,34 @@
             <div v-if="skillList.length === 0" class="preset-skill-empty">
               {{ store.locales === 'en' ? 'No available skills, please check skill management' : '暂无可用技能，请到「技能管理」中查看' }}
             </div>
-            <div v-else class="preset-tool-list">
-              <div v-for="sk in skillList" :key="sk.path"
-                class="preset-tool-item"
-                :class="{ on: isSkillSelected(sk.path) }"
-                :title="sk.description"
-                @click="onSkillSelect(sk.path)">
-                <span class="preset-tool-icon"><span v-if="sk.emoji" class="preset-skill-emoji">{{ sk.emoji }}</span><i v-else class="fa fa-cube"></i></span>
-                <span class="preset-tool-info">
-                  <span class="preset-tool-name">{{ sk.name }}</span>
-                  <span class="preset-tool-desc">{{ sk.description }}</span>
-                </span>
-                <span class="preset-tool-toggle" :class="{ on: isSkillSelected(sk.path) }"><i class="preset-toggle-knob"></i></span>
-              </div>
+            <!-- 技能按文件夹分组（与「设置 → 技能 → 管理」共用 ToolGroupList + SkillCard，样式一致） -->
+            <div v-else class="preset-skill-body">
+              <ToolGroupList
+                class="preset-skill-groups"
+                :sections="skillSections"
+                layout="grid"
+                :search-placeholder="store.locales === 'en' ? 'Search skills (name / description / folder)' : '搜索技能（名称 / 描述 / 文件夹）'"
+                :empty-text="store.locales === 'en' ? 'No matching skills' : '没有匹配的技能'"
+                :only-enabled-text="store.locales === 'en' ? 'Selected' : '已选'"
+                :bulk-on-text="store.locales === 'en' ? 'All' : '全选'"
+                :bulk-off-text="store.locales === 'en' ? 'None' : '全不选'"
+                @bulk="applySkillBulk"
+              >
+                <template #row="{ row }">
+                  <SkillCard
+                    :name="row.name"
+                    :description="row.description"
+                    :emoji="row.emoji"
+                    :on="row.on"
+                    compact
+                    highlight-on
+                    :toggle-title-on="store.locales === 'en' ? 'Selected for this agent, click to deselect' : '已选中：该智能体可用，点击取消'"
+                    :toggle-title-off="store.locales === 'en' ? 'Not selected, click to select' : '未选中：点击勾选给该智能体'"
+                    @open="onSkillSelect(row.path)"
+                    @toggle="onSkillSelect(row.path)"
+                  />
+                </template>
+              </ToolGroupList>
             </div>
             <div class="preset-tools-hint">
               <i class="fa fa-info-circle"></i>
@@ -634,6 +649,9 @@ import { toolsFromCapabilities, setToolEnabled, toolOn, getPluginToolNames } fro
 import { pluginDisplayName, pluginToolScopes } from '@/lib/plugin/runtime'
 import { AGENT_TOOL_REGISTRY, type AgentToolInfo } from '@/services/agentSkills'
 import ToolGroupList from '@/components/set/ToolGroupList.vue'
+import SkillCard from '@/components/set/SkillCard.vue'
+import { groupSkillRowsByFolder } from '@/lib/agent/skillFolders'
+import type { GroupableToolRow } from '@/lib/agent/toolGroups'
 import {
   scanAgentPresets, writeAgentPreset, removeAgentPreset, agentFilePath, exportAllAgentPresets,
   chooseAgentPresetFolder, closeAgentPresetFolder, revealAgentPresetFolder, agentPresetFolderInfo,
@@ -985,7 +1003,14 @@ const getModelsForAgent = (agent: AgentPreset): string[] => {
 }
 
 // ====== 技能列表 ======
-interface SkillInfo { name: string; path: string; description: string; emoji: string }
+interface SkillInfo {
+  name: string
+  path: string
+  description: string
+  emoji: string
+  /** 分类目录（相对技能根，`/` 分隔；根下为空串），主进程扫描时给出 */
+  folder?: string
+}
 const skillList = ref<SkillInfo[]>([])
 const loadSkillList = async () => {
   if (!store.skillsPath) { skillList.value = []; return }
@@ -999,6 +1024,7 @@ const loadSkillList = async () => {
         path: s.path,
         description: s.description || '',
         emoji: s.metadata?.emoji || '',
+        folder: s.folder || '',
       }))
   } catch { skillList.value = [] }
 }
@@ -1022,6 +1048,40 @@ const selectAllSkills = () => {
 const selectNoneSkills = () => {
   if (!selected.value) return
   selected.value.selectedSkills = []
+}
+
+/** 分组列表的行数据：ToolGroupList 要的字段（GroupableToolRow）+ 技能卡片 / 选中逻辑要的字段 */
+interface PresetSkillRow extends GroupableToolRow {
+  path: string
+  folder: string
+  emoji: string
+}
+
+const presetSkillRows = computed<PresetSkillRow[]>(() => skillList.value.map((s) => ({
+  name: s.name,
+  labelZh: s.name,
+  labelEn: s.name,
+  icon: 'fa-cube',
+  description: s.description || '',
+  on: isSkillSelected(s.path),
+  srcKind: 'builtin',
+  path: s.path,
+  folder: s.folder || '',
+  emoji: s.emoji || '',
+})))
+
+/** 按文件夹分组（与「设置 → 技能 → 管理」共用 skillFolders 那份逻辑；2~3 级目录显示成 分类 / 子分类） */
+const skillSections = computed(() => groupSkillRowsByFolder(presetSkillRows.value, { zh: store.locales === 'zh' }))
+
+/** 组内全选 / 全不选：只改当前预设的 selectedSkills（与工具 tab 的组内批量同一套语义，只作用于可见行） */
+const applySkillBulk = ({ rows, on }: { rows: PresetSkillRow[]; on: boolean }) => {
+  if (!selected.value) return
+  const paths = new Set(selected.value.selectedSkills || [])
+  for (const row of rows) {
+    if (on) paths.add(row.path)
+    else paths.delete(row.path)
+  }
+  selected.value.selectedSkills = Array.from(paths)
 }
 
 // ====== 知识库文件列表 ======
@@ -2139,6 +2199,12 @@ onMounted(async () => {
 .preset-pres-row .exec-config-label { min-width: 52px; font-weight: 600; }
 /* 工具分组外壳（ToolGroupList）：占满剩余高度，列宽比工具管理页更紧凑 */
 .preset-tool-groups { flex: 1 1 auto; min-height: 0; --tgl-min: 180px; }
+/* 技能分组外壳：与工具分组同一套外壳与高度策略；卡片样式由 SkillCard.vue 统一提供，
+   所以这里的技能卡片和「设置 → 技能 → 管理」里的完全一致 */
+.preset-skill-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.preset-skill-groups { flex: 1 1 auto; min-height: 0; width: 100%; --tgl-min: 180px; }
+/* 技能配置框交给分组外壳滚动，自己不再出滚动条（避免两层滚动） */
+.preset-skill-box { overflow: hidden; }
 /* 工具卡片（仅工具页用；技能 / MCP / 知识库仍复用基础 .preset-tool-item 的横向布局）：
    上半是图标 / 名称、来源、工具名 / 开关，说明独占底部一行 —— 比原先挤在窄列里省高度 */
 .preset-tool-card { flex-direction: column; align-items: stretch; gap: 2px; }

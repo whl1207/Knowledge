@@ -2531,7 +2531,7 @@ const translations = {
       storage: {
         title: '📦 存哪 · 怎么装 · 怎么改',
         skillItems: [
-          '<strong>技能</strong>：默认 <code>userData/skills</code>，一个技能一个文件夹（文件夹里直接放 <code>SKILL.md</code>）。',
+          '<strong>技能</strong>：默认 <code>userData/skills</code>，一个技能一个文件夹（文件夹里直接放 <code>SKILL.md</code>）；可用 2~3 级分类目录整理（如 财务 / 合同审查 / my-skill），设置里的技能列表按文件夹分组显示。',
           '「设置 → 技能 → 管理」顶部<strong>安装</strong>：选一个技能文件夹即复制进来，同名会先确认覆盖；也支持直接把文件夹放进目录后点刷新。',
           '可换成自定义目录、在资源管理器中打开、恢复默认位置；路径持久化，重启后仍以该目录为准。',
           '改内容：列表里选中技能 → 右侧文件树 → 内置编辑器改 <code>SKILL.md</code> 或资源文件，保存即生效（目录监听自动刷新）。'
@@ -2616,7 +2616,7 @@ const translations = {
         skills: {
           title: '🧩 技能',
           items: {
-            manage: { name: '管理', desc: '技能文件管理：左侧导航与「插件 → 管理」同一套——顶部<strong>安装</strong>（选一个技能文件夹，复制进技能目录）／刷新／打开目录／选择目录／恢复默认，下方搜索与技能列表，底栏显示数量与技能目录；列表里可启用 / 停用、编辑（对话中用 $技能名 触发）。技能默认存在<strong>应用数据目录的 <code>skills</code></strong>（开箱即用，不用先选目录），也可以直接把技能文件夹放进该目录后点刷新。选「技能设计师」可让它按规范写一个新技能（交付前用 <code>skill_dev_check</code> 自检）。' },
+            manage: { name: '管理', desc: '技能文件管理：左侧导航与「插件 → 管理」同一套——顶部<strong>安装</strong>（选一个技能文件夹，复制进技能目录）／刷新／打开目录／选择目录／恢复默认／全部启用，下方是搜索框 + <strong>按文件夹分组</strong>的技能卡片列表（支持 2~3 级分类目录，如 财务/合同审查/my-skill，组头显示已启用数并支持组内全开 / 全关），底栏显示数量、已启用数与技能目录。卡片上可启用 / 停用；点开卡片才出现右侧文件树与编辑器（未点开时列表占满整宽，与「工具 → 管理」同一套操作逻辑，再点一次或点右上角 × 收起）。技能默认存在<strong>应用数据目录的 <code>skills</code></strong>（开箱即用，不用先选目录），也可以直接把技能文件夹（可放分类子文件夹）放进该目录后点刷新。选「技能设计师」可让它按规范写一个新技能（交付前用 <code>skill_dev_check</code> 自检）。' },
             store: { name: '商店', desc: '从 GitHub 等远程源搜索技能并一键下载安装。' }
           }
         },
@@ -3810,7 +3810,7 @@ const translations = {
       storage: {
         title: '📦 Where things live · install · edit',
         skillItems: [
-          '<strong>Skills</strong>: default <code>userData/skills</code>, one folder per skill (the folder holds <code>SKILL.md</code> directly).',
+          '<strong>Skills</strong>: default <code>userData/skills</code>, one folder per skill (the folder holds <code>SKILL.md</code> directly); organize them with 2–3 levels of category folders (e.g. Finance / Contract-Review / my-skill) — the settings list groups by folder.',
           '“Install” in Settings → Skills → Manage copies a picked skill folder in and asks before replacing a same-named skill; dropping a folder into the directory and refreshing also works.',
           'Both the default and a custom folder can be used, opened in the file manager and restored to the default; the path is persisted across restarts.',
           'To edit: select a skill on the left → file tree on the right → edit <code>SKILL.md</code> or resources in the built-in editor; saving takes effect immediately (the directory is watched).'
@@ -3895,7 +3895,7 @@ const translations = {
         skills: {
           title: '🧩 Skills',
           items: {
-            manage: { name: 'Manage', desc: 'Manage skill files: the left navigation mirrors Plugins → Manage — an <strong>Install</strong> button (pick a skill folder, it is copied into the skills folder), refresh, open folder, select folder and restore default, with search, a skill list and a footer showing the count and skills folder. Enable / disable and edit each skill from the list (trigger with $skill-name in chat). Skills live by default in the <strong>application data folder → <code>skills</code></strong> (works out of the box, no folder to pick first); you can also drop a skill folder there and hit refresh. Pick <strong>Skill Designer</strong> to have a new skill written to spec (self-checked with <code>skill_dev_check</code> before delivery).' },
+            manage: { name: 'Manage', desc: 'Manage skill files: the left navigation mirrors Plugins → Manage — an <strong>Install</strong> button (pick a skill folder, it is copied into the skills folder), refresh, open folder, select folder, restore default and enable-all, followed by a search box and a skill-card list <strong>grouped by folder</strong> (2–3 levels of category folders such as Finance/Contract-Review/my-skill are supported; each group header shows the enabled count and offers All / None) and a footer with the total, enabled count and skills folder. Enable / disable each skill from its card; click a card to open the file tree + editor on the right (with nothing open the list fills the width, same interaction as Tools → Manage; click again or use the × to close). Skills live by default in the <strong>application data folder → <code>skills</code></strong> (works out of the box, no folder to pick first); you can also drop skill folders (optionally inside category subfolders) there and hit refresh. Pick <strong>Skill Designer</strong> to have a new skill written to spec (self-checked with <code>skill_dev_check</code> before delivery).' },
             store: { name: 'Store', desc: 'Search, preview and install skills from remote sources such as GitHub.' }
           }
         },

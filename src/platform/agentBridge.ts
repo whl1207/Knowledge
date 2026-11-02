@@ -186,6 +186,18 @@ export interface AgentSessionView {
   tokenScale?: number
   /** 本会话累计消耗 token 数（所有 step 的 totalTokens 之和） */
   usageTotal: number
+  /**
+   * 本 turn（本轮任务）累计消耗 token 数。
+   * 与 usageTotal 分开：跨轮 resume 时同一会话里会跑多个 turn，界面右上角
+   * 「对话消耗」要按**单轮/单条消息**口径统计，不能把上一轮的用量带进新消息。
+   */
+  turnUsageTotal: number
+  /** 本 turn 所有 step 的 prompt token 之和（缓存命中率的分母） */
+  turnPromptTotal: number
+  /** 本 turn 所有 step 命中「前缀缓存」的 prompt token 之和 */
+  turnCachedTotal: number
+  /** 本 turn 是否有任一步回报了缓存字段（来源不报缓存时界面不显示缓存比例） */
+  turnCacheReported: boolean
 }
 
 type Listener = (view: AgentSessionView) => void
@@ -215,6 +227,10 @@ function createView(id: string, label?: string): AgentSessionView {
     lastAssistantContent: '',
     serverSearch: false,
     usageTotal: 0,
+    turnUsageTotal: 0,
+    turnPromptTotal: 0,
+    turnCachedTotal: 0,
+    turnCacheReported: false,
     stepSettled: false,
     stepSettleCount: 0,
     awaitingTools: false,
@@ -500,10 +516,15 @@ class AgentBridge {
         view.searchEvents = []
         view.stepSettled = false
         // 这些是「上一轮」的投影状态，不能带进新 turn 的 assistant 消息：
-        // - lastUsage：新消息还没发请求，先显示上一轮 token 数会看起来像已经跑了一轮；
+        // - lastUsage: 新消息还没发请求，先显示上一轮 token 数会看起来像已经跑了一轮；
+        // - 本 turn 的 token / 缓存累计：新 turn 从 0 开始（usageTotal 是会话级累计，保留）；
         // - compaction：上一轮的压缩卡片会再次出现在新消息里（seq 保留，只把相位归零）；
         // - notice / lastError：上一轮的提示 / 错误不应在成功后再次弹出。
         view.lastUsage = undefined
+        view.turnUsageTotal = 0
+        view.turnPromptTotal = 0
+        view.turnCachedTotal = 0
+        view.turnCacheReported = false
         view.compaction = { seq: view.compaction.seq, phase: 'idle', kind: 'auto' }
         view.notice = undefined
         view.lastError = undefined
@@ -529,6 +550,13 @@ class AgentBridge {
         if (u) {
           view.lastUsage = u
           view.usageTotal = (view.usageTotal || 0) + (u.totalTokens || 0)
+          // 本 turn 口径：tokens / prompt 之和 / 缓存命中之和（界面右上角信息条用）
+          view.turnUsageTotal = (view.turnUsageTotal || 0) + (u.totalTokens || 0)
+          view.turnPromptTotal = (view.turnPromptTotal || 0) + (u.promptTokens || 0)
+          if (u.cacheReported) {
+            view.turnCacheReported = true
+            view.turnCachedTotal = (view.turnCachedTotal || 0) + (u.cachedTokens || 0)
+          }
         }
         if (typeof ev.payload.tokenScale === 'number') view.tokenScale = ev.payload.tokenScale
         break

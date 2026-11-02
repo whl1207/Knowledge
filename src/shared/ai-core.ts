@@ -871,8 +871,14 @@ export class AIUtils {
                 }
 
                 const usage = data.usage || {};
+                const usageCache = AIUtils.readUsageCache(usage);
                 options?.onComplete?.(content, usage && (usage.prompt_tokens !== undefined || usage.completion_tokens !== undefined)
-                    ? { prompt_tokens: usage.prompt_tokens || 0, completion_tokens: usage.completion_tokens || 0 }
+                    ? {
+                        prompt_tokens: usage.prompt_tokens || 0,
+                        completion_tokens: usage.completion_tokens || 0,
+                        cached_tokens: usageCache.cachedTokens,
+                        cache_reported: usageCache.cacheReported,
+                    }
                     : undefined);
                 return content;
             }
@@ -1389,6 +1395,40 @@ export class AIUtils {
             }))
     }
 
+    // ==================== 输入缓存命中（各家 usage 字段不同，统一在这里读） ====================
+
+    /**
+     * 从各来源的原始 usage 里读「输入缓存命中 token」数。
+     *
+     * 口径（字段名不同，语义都是「本请求 prompt 中命中前缀缓存的 token」）：
+     * - DeepSeek 官方：`prompt_cache_hit_tokens`（即使 0 也会返回）；
+     * - OpenAI / 兼容：`prompt_tokens_details.cached_tokens`；
+     * - OpenAI Responses：`input_tokens_details.cached_tokens`；
+     * - Anthropic：`cache_read_input_tokens`；
+     * - 其它兼容实现可能直接给 `cached_tokens`。
+     *
+     * `cacheReported` 与 `cachedTokens` 必须分开：**0 命中也是有效信息**（首轮通常全 miss），
+     * 界面据此决定「显示 0%」还是「不显示缓存比例」（来源根本不报缓存）。
+     */
+    static readUsageCache(usage: any): { cachedTokens: number; cacheReported: boolean } {
+        if (!usage || typeof usage !== 'object') return { cachedTokens: 0, cacheReported: false }
+        const candidates = [
+            usage.prompt_cache_hit_tokens,
+            usage.cache_read_input_tokens,
+            usage.prompt_tokens_details?.cached_tokens,
+            usage.input_tokens_details?.cached_tokens,
+            usage.cached_tokens,
+        ]
+        let reported = false
+        let cached = 0
+        for (const raw of candidates) {
+            if (typeof raw !== 'number' || !Number.isFinite(raw)) continue
+            reported = true
+            cached = Math.max(cached, Math.max(0, raw))
+        }
+        return { cachedTokens: Math.round(cached), cacheReported: reported }
+    }
+
     // ==================== 图片入参归一化（各来源多模态接口共用） ====================
     //
     // home / 知识库上传与粘贴的图片有四种形态：裸 base64、data URL、Uint8Array、ArrayBuffer
@@ -1745,7 +1785,13 @@ export class AIUtils {
 
             const completedCalls = toolCallsAcc.filter(tc => tc && tc.function && tc.function.name);
             if (completedCalls.length > 0) options?.onToolCalls?.(completedCalls);
-            options?.onComplete?.(fullContent, finalUsage ? { prompt_tokens: finalUsage.prompt_tokens || 0, completion_tokens: finalUsage.completion_tokens || 0 } : undefined);
+            const usageCache = AIUtils.readUsageCache(finalUsage);
+            options?.onComplete?.(fullContent, finalUsage ? {
+                prompt_tokens: finalUsage.prompt_tokens || 0,
+                completion_tokens: finalUsage.completion_tokens || 0,
+                cached_tokens: usageCache.cachedTokens,
+                cache_reported: usageCache.cacheReported,
+            } : undefined);
             return fullContent;
 
         } catch (error) {
@@ -1894,7 +1940,9 @@ export class AIUtils {
                 options?.onComplete?.(result.content, {
                     prompt_tokens: result.prompt_tokens || 0,
                     completion_tokens: result.completion_tokens || 0,
-                    total_tokens: (result.prompt_tokens || 0) + (result.completion_tokens || 0)
+                    total_tokens: (result.prompt_tokens || 0) + (result.completion_tokens || 0),
+                    cached_tokens: result.cached_tokens || 0,
+                    cache_reported: result.cache_reported === true,
                 });
                 return result.content;
             } catch (error: any) {
@@ -1948,10 +1996,13 @@ export class AIUtils {
             const usage = data.usage || {};
             const promptTokens = usage.input_tokens || 0;
             const completionTokens = usage.output_tokens || 0;
+            const usageCache = AIUtils.readUsageCache(usage);
             options?.onComplete?.(outputText, {
                 prompt_tokens: promptTokens,
                 completion_tokens: completionTokens,
-                total_tokens: promptTokens + completionTokens
+                total_tokens: promptTokens + completionTokens,
+                cached_tokens: usageCache.cachedTokens,
+                cache_reported: usageCache.cacheReported,
             });
             return outputText;
         } catch (error: any) {
@@ -2720,6 +2771,7 @@ export class AIUtils {
         const usage = finalUsage || {};
         const promptTokens = usage.input_tokens || 0;
         const completionTokens = usage.output_tokens || 0;
+        const usageCache = AIUtils.readUsageCache(usage);
         // 自定义函数工具调用（function_call）→ onToolCalls（在 onComplete 之前回传，供外层 ReAct 循环执行）
         const completedFunctionCalls = Array.from(toolCallsAcc.values())
             .filter(c => c.id && c.name)
@@ -2735,6 +2787,8 @@ export class AIUtils {
             needsContinuation,
             prompt_tokens: promptTokens,
             completion_tokens: completionTokens,
+            cached_tokens: usageCache.cachedTokens,
+            cache_reported: usageCache.cacheReported,
         };
     }
 
@@ -2822,8 +2876,14 @@ export class AIUtils {
                 content = feedThinkState(content, thinkSt, (t) => options?.onReasoning?.(t))
             }
 
+            const usageCache = AIUtils.readUsageCache(usage);
             options?.onComplete?.(content, usage && (usage.prompt_tokens !== undefined || usage.completion_tokens !== undefined)
-                ? { prompt_tokens: usage.prompt_tokens || 0, completion_tokens: usage.completion_tokens || 0 }
+                ? {
+                    prompt_tokens: usage.prompt_tokens || 0,
+                    completion_tokens: usage.completion_tokens || 0,
+                    cached_tokens: usageCache.cachedTokens,
+                    cache_reported: usageCache.cacheReported,
+                }
                 : undefined);
             return content;
 
@@ -3021,8 +3081,15 @@ export class AIUtils {
                 throw new Error('模型输出在产生正文前达到 max_tokens 上限（finish_reason=length），请增大 max_tokens 或提高模型上下文长度');
             }
             if (completedCalls.length > 0) options?.onToolCalls?.(completedCalls);
+            const usageCache = AIUtils.readUsageCache(finalUsage);
             options?.onComplete?.(fullContent, finalUsage
-                ? { prompt_tokens: finalUsage.prompt_tokens || 0, completion_tokens: finalUsage.completion_tokens || 0, finish_reason: finishReason }
+                ? {
+                    prompt_tokens: finalUsage.prompt_tokens || 0,
+                    completion_tokens: finalUsage.completion_tokens || 0,
+                    finish_reason: finishReason,
+                    cached_tokens: usageCache.cachedTokens,
+                    cache_reported: usageCache.cacheReported,
+                }
                 : (finishReason ? { finish_reason: finishReason } : undefined));
             return fullContent;
 

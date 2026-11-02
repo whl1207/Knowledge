@@ -11,6 +11,7 @@
        - new      → 空白新标签页：在页内选类型（不弹图标下菜单） -->
 <template>
   <aside
+    ref="rootEl"
     class="chat-dock"
     :class="{ narrow, resizing }"
     :style="narrow ? undefined : { width: width + 'px' }"
@@ -177,6 +178,7 @@ import ChatDockFile from './ChatDockFile.vue'
 import { fileViewByKey } from '@/lib/knowFile/fileViews'
 import {
   DOCK_TAB_KINDS,
+  clampDockWidthInRoom,
   dockTabTitle,
   type ChatDockTab,
   type ChatDockTabKind,
@@ -281,12 +283,62 @@ function chooseKind(kind: ChatDockTabKind) {
 
 // ===== 拖动调宽（指针事件 + 左边缘 8px 热区；松手才落盘）=====
 const resizing = ref(false)
-let resizeState: { startX: number; startWidth: number } | null = null
+/** 组件根节点：求「聊天区 + 右侧栏」可用总宽用（父容器里 .chat-main 与它并排） */
+const rootEl = ref<HTMLElement | null>(null)
+/** 观察中间聊天区尺寸（左侧列表展开 / 收起、窗口缩放）以便及时收敛宽度 */
+let mainObserver: ResizeObserver | null = null
+let resizeState: { startX: number; startWidth: number; roomWidth: number } | null = null
+
+/**
+ * 聊天区 + 右侧栏的可用总宽（不含左侧聊天列表）。
+ * 拖动开始时量一次并缓存：拖宽过程中两者此消彼长，实时相加会互相反馈。
+ */
+function measureRoomWidth(): number {
+  const el = rootEl.value
+  if (!el) return 0
+  const parent = el.parentElement
+  const main = parent?.querySelector(':scope > .chat-main') as HTMLElement | null
+  const mainWidth = main?.getBoundingClientRect().width || 0
+  const dockWidth = el.getBoundingClientRect().width || props.width || 0
+  return mainWidth + dockWidth
+}
+
+/**
+ * 窗口变窄 / 存档里宽度过大：收敛到「给聊天区留够空间」的上限。
+ * 固定上限 900 在普通窗口里不够用，拖到最左边会把右侧栏撑出容器、内容被裁掉。
+ */
+const enforceDockWidthLimit = () => {
+  if (props.narrow) return
+  const allowed = clampDockWidthInRoom(props.width, measureRoomWidth())
+  if (allowed !== props.width) {
+    emit('update:width', allowed)
+    // 收敛结果也落盘，下次打开不会又宽出容器
+    emit('resize-end')
+  }
+}
+onMounted(() => {
+  enforceDockWidthLimit()
+  window.addEventListener('resize', enforceDockWidthLimit)
+  // 左侧聊天列表展开 / 收起也会改变聊天区可用宽度（窗口本身没 resize）：观察中间区尺寸再收敛
+  const main = rootEl.value?.parentElement?.querySelector(':scope > .chat-main') as HTMLElement | null
+  if (main && typeof ResizeObserver !== 'undefined') {
+    mainObserver = new ResizeObserver(() => enforceDockWidthLimit())
+    mainObserver.observe(main)
+  }
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', enforceDockWidthLimit)
+  if (mainObserver) {
+    mainObserver.disconnect()
+    mainObserver = null
+  }
+})
 
 const onResizeMove = (e: PointerEvent) => {
   if (!resizeState) return
-  // 手柄在左边缘：向左拖 = 变宽
-  emit('update:width', resizeState.startWidth + (resizeState.startX - e.clientX))
+  // 手柄在左边缘：向左拖 = 变宽；上限给中间聊天区留出最小宽度
+  const raw = resizeState.startWidth + (resizeState.startX - e.clientX)
+  emit('update:width', clampDockWidthInRoom(raw, resizeState.roomWidth))
 }
 const onResizeUp = () => {
   if (!resizeState) return
@@ -300,7 +352,7 @@ const onResizeUp = () => {
 }
 const onResizeDown = (e: PointerEvent) => {
   e.preventDefault()
-  resizeState = { startX: e.clientX, startWidth: props.width }
+  resizeState = { startX: e.clientX, startWidth: props.width, roomWidth: measureRoomWidth() }
   resizing.value = true
   window.addEventListener('pointermove', onResizeMove)
   window.addEventListener('pointerup', onResizeUp)

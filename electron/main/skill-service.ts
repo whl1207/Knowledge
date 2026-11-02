@@ -8,6 +8,11 @@
  *   经 `skill:change` 事件通知消费方，UI 增量刷新（不再手动 refresh）；
  * - **源与优先级**：source 是展示用元数据而非优先级本身；同 rank 时先注册者胜。
  *
+ * 目录组织：根目录下允许 **分类目录嵌套（2~3 级）**，只要某个目录直接含
+ * `SKILL.md` 就算一个技能；分类层级记录在 `folder`（相对根的父路径，用 `/` 分隔，
+ * 直接放在根下为空串），供技能管理 / 预设按文件夹分组。技能目录内部不再下钻
+ * （references / scripts 等资源目录里的 SKILL.md 不当作独立技能）。
+ *
  * 兼容性：保留主进程原 `loadSkills` 的解析逻辑与返回形状（name/description/
  * path/metadata/source/promptVersion/preview），渲染进程无需改动即可消费。
  */
@@ -41,11 +46,29 @@ export interface SkillFileInfo {
   size: number
 }
 
+/**
+ * 根目录下允许的分类目录层级上限（folder 的路径段数）。
+ * 例：`root/财务/技能`（2 级）与 `root/办公/文档/pdf`（3 级）都在范围内；
+ * 留到 4 是给更深的自定义整理习惯一点冗余，同时避免异常目录结构把扫描拖死。
+ */
+const MAX_FOLDER_DEPTH = 4
+
+/** 单根目录最多访问的目录数（防环 / 超深目录把扫描拖死） */
+const MAX_SCAN_DIRS = 4000
+
+/** 分类目录里不值得下钻的系统目录名 */
+const SKIP_DIR_NAMES = new Set(['node_modules', '__pycache__', '.git', '.svn', '.hg'])
+
 /** 技能候选（provider → registry 的形状；rank 小者优先） */
 export interface SkillCandidate {
   name: string
   description: string
   path: string
+  /**
+   * 技能所在分类（相对技能根的父路径，`/` 分隔；直接放在根下为空串）。
+   * 例：`财务`、`办公/文档`。渲染层据此按文件夹分组（设置 → 技能 / 预设 → 技能）。
+   */
+  folder: string
   metadata: Record<string, any>
   source: string
   promptVersion: string
@@ -145,6 +168,8 @@ export function parseSkillDir(
   provider: string,
   rank: number,
   source: string,
+  /** 相对技能根的父路径（`/` 分隔）；直接放在根下传空串 */
+  folder: string = '',
 ): SkillCandidate | null {
   const skillMdPath = join(skillPath, 'SKILL.md')
   if (!fs.existsSync(skillMdPath)) return null
@@ -195,6 +220,7 @@ export function parseSkillDir(
       name: metadata.name,
       description: metadata.description || '',
       path: skillPath,
+      folder: folder || '',
       metadata,
       source: metadata.source || source,
       promptVersion: computeSkillHash(content),
@@ -208,28 +234,52 @@ export function parseSkillDir(
   }
 }
 
-/** 扫描一个根目录下的全部技能目录 */
+/**
+ * 扫描一个根目录下的全部技能目录（支持分类目录嵌套 2~3 级）。
+ *
+ * 规则：**只要某目录直接含 SKILL.md 就是一个技能**，其父路径记为 `folder`；
+ * 命中技能后不再下钻（技能资源目录里的 SKILL.md 不算独立技能），
+ * 未命中的目录继续向下找，最多 {@link MAX_FOLDER_DEPTH} 层分类、
+ * 整棵树最多访问 {@link MAX_SCAN_DIRS} 个目录（防环 / 防超深）。
+ */
 export function scanSkillRoot(root: string, provider: string, rank: number, source: string): SkillCandidate[] {
   if (!root || !fs.existsSync(root)) return []
   const out: SkillCandidate[] = []
-  let items: string[] = []
-  try {
-    items = fs.readdirSync(root)
-  } catch (e) {
-    console.error(`扫描技能目录 ${root} 失败:`, e)
-    return []
-  }
-  for (const item of items) {
-    const skillPath = join(root, item)
+  let visitedDirs = 0
+
+  const walk = (dir: string, folderParts: string[]) => {
+    if (visitedDirs++ > MAX_SCAN_DIRS) return
+    let entries: fs.Dirent[] = []
     try {
-      const stats = fs.statSync(skillPath)
-      if (!stats.isDirectory()) continue
-      const candidate = parseSkillDir(skillPath, provider, rank, source)
-      if (candidate) out.push(candidate)
+      entries = fs.readdirSync(dir, { withFileTypes: true })
     } catch (e) {
-      console.warn(`技能目录 ${item} 读取失败:`, e)
+      // 单个目录不可读不阻断整个根（权限 / 正在被删除）
+      console.warn(`扫描技能目录 ${dir} 失败:`, e)
+      return
+    }
+    const folder = folderParts.join('/')
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const childName = entry.name
+      if (childName.startsWith('.') || SKIP_DIR_NAMES.has(childName)) continue
+      const childPath = join(dir, childName)
+      if (fs.existsSync(join(childPath, 'SKILL.md'))) {
+        try {
+          const candidate = parseSkillDir(childPath, provider, rank, source, folder)
+          if (candidate) out.push(candidate)
+        } catch (e) {
+          console.warn(`技能目录 ${childPath} 读取失败:`, e)
+        }
+        continue
+      }
+      // 不是技能目录 → 可能是分类目录，继续向下；超过层级上限就不再下钻
+      if (folderParts.length < MAX_FOLDER_DEPTH) {
+        walk(childPath, [...folderParts, childName])
+      }
     }
   }
+
+  walk(root, [])
   return out
 }
 

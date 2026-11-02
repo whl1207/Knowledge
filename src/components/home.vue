@@ -155,27 +155,28 @@
           @input="onChatTitleInput"
           @change="onChatTitleChange"
         />
-        <!-- 上下文占用圆环（参考 DeepSeek Harness） -->
-        <div v-if="contextUsageVisible" class="context-usage" :title="contextUsageTooltip">
-          <svg class="context-ring" viewBox="0 0 36 36">
-            <circle class="context-ring-bg" cx="18" cy="18" r="15.5"></circle>
-            <circle class="context-ring-val" cx="18" cy="18" r="15.5"
-              :style="{ stroke: contextRingColor, strokeDasharray: contextRingLen + ' ' + contextRingCirc }"
-              transform="rotate(-90 18 18)"></circle>
-          </svg>
-        </div>
-        <!-- 模型选择：来源（模型类型）+ 模型合成一个面板（点开列出所有启用来源下的可用模型）
-             集群模式各成员用自己预设里的模型，右上角模型选择不参与 → 隐藏 -->
-        <div
-          v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
-          ref="modelPickerBtnRef"
-          class="model-picker-btn"
-          :class="{ active: modelPickerVisible, disabled: isAnyExecuting }"
-          :title="modelPickerButtonTitle"
-          @click="toggleModelPicker"
-        >
-          <span class="model-picker-btn-model">{{ currentModelNameLabel }}</span>
-          <i class="fa fa-angle-down model-picker-btn-caret"></i>
+        <!-- 右上角运行信息（从左到右依次）：本会话累计多少轮多少步 → 对话消耗的 token
+             （来源回报了缓存命中时带缓存命中比例）→ 上下文占用环。
+             模型选择已移到输入区左下角（与模式等左侧控件同一行、同一套样式）。 -->
+        <div v-if="!isEmptyChat" class="chat-header-stats">
+          <span v-if="agentProgressLabel" class="chat-stat chat-stat-progress" :title="agentProgressTitle">
+            <i class="fas fa-sync-alt"></i>{{ agentProgressLabel }}
+          </span>
+          <span v-if="chatUsageLabel" class="chat-stat chat-stat-tokens" :title="chatUsageTitle">
+            <i class="fas fa-coins"></i>{{ chatUsageLabel }}
+          </span>
+          <span v-if="cacheHitLabel" class="chat-stat chat-stat-cache" :title="cacheHitTitle">
+            <i class="fas fa-bolt"></i>{{ cacheHitLabel }}
+          </span>
+          <!-- 上下文占用圆环（参考 DeepSeek Harness） -->
+          <div v-if="contextUsageVisible" class="context-usage" :title="contextUsageTooltip">
+            <svg class="context-ring" viewBox="0 0 36 36">
+              <circle class="context-ring-bg" cx="18" cy="18" r="15.5"></circle>
+              <circle class="context-ring-val" cx="18" cy="18" r="15.5"
+                :style="{ stroke: contextRingColor, strokeDasharray: contextRingLen + ' ' + contextRingCirc }"
+                transform="rotate(-90 18 18)"></circle>
+            </svg>
+          </div>
         </div>
         <div v-if="currentChat.mode === 'retrieval' && currentChat.config.kbPath" class="parameter" :title="store.locales=='zh' ? '知识库片段数量' : 'Knowledge Base Fragment Count'">
           <label>{{ currentChat.config.kbTopK || 5 }}</label>
@@ -211,7 +212,8 @@
         <div v-if="modelPickerVisible" class="context-menu-overlay" @click="closeModelPicker" @contextmenu.prevent="closeModelPicker"></div>
         <div
           v-if="modelPickerVisible"
-          class="model-picker-panel"
+          class="model-picker-panel composer-panel"
+          :class="{ above: modelPickerAbove }"
           :style="{ left: modelPickerPos.left + 'px', top: modelPickerPos.top + 'px' }"
           @click.stop
         >
@@ -229,7 +231,7 @@
               @keydown.enter.prevent="pickFirstModelMatch"
             />
             <i
-              class="fa fa-refresh model-picker-refresh"
+              class="fas fa-sync-alt model-picker-refresh"
               :class="{ 'fa-spin': modelPickerRefreshing }"
               :title="store.locales=='zh' ? '刷新模型列表（探测当前来源）' : 'Refresh models (probe current source)'"
               @click.stop="refreshModelPicker"
@@ -780,43 +782,86 @@
             :style="{ left: chatNavMenuPos.x + 'px', top: chatNavMenuPos.y + 'px' }"
             @mouseleave="hideChatNavMenu"
           >
-            <div class="chat-nav-section">{{ store.locales == 'zh' ? '消息排列' : 'Message order' }}</div>
-            <div class="menu-item" :class="{ current: chatOrderMode === 'sequence' }" @click="setChatOrderMode('sequence')">
-              <i class="fa fa-list-ul"></i>
-              <span class="menu-label">{{ store.locales == 'zh' ? '按顺序（可拖动）' : 'By sequence (draggable)' }}</span>
-              <i v-if="chatOrderMode === 'sequence'" class="fa fa-check chat-nav-check"></i>
+            <!-- 一级项 → 二级子菜单：排列方式 / 排序 / 显示 / 该聊天的操作。
+                 一级项右侧显示当前值，悬停或点击展开子菜单，避免所有选项挤在一屏。 -->
+            <div class="chat-nav-item" @mouseleave="chatNavSubmenu = null">
+              <div
+                class="menu-item has-submenu"
+                @mouseenter="chatNavSubmenu = 'order'"
+                @click="chatNavSubmenu = 'order'"
+              >
+                <i class="fa fa-list-ul"></i>
+                <span class="menu-label">{{ store.locales == 'zh' ? '排列方式' : 'Order' }}</span>
+                <span class="chat-nav-current">{{ chatOrderModeLabel }}</span>
+                <i class="fa fa-angle-right chat-nav-arrow"></i>
+              </div>
+              <div v-if="chatNavSubmenu === 'order'" class="context-menu ctx-narrow chat-nav-submenu" :class="{ 'submenu-flip': chatNavSubmenuFlip }" @click.stop>
+                <div class="menu-item" :class="{ current: chatOrderMode === 'sequence' }" @click="setChatOrderMode('sequence')">
+                  <i class="fa fa-list-ul"></i>
+                  <span class="menu-label">{{ store.locales == 'zh' ? '按顺序（可拖动）' : 'By sequence (draggable)' }}</span>
+                  <i v-if="chatOrderMode === 'sequence'" class="fa fa-check chat-nav-check"></i>
+                </div>
+                <div class="menu-item" :class="{ current: chatOrderMode === 'workspace' }" @click="setChatOrderMode('workspace')">
+                  <i class="fa fa-object-group"></i>
+                  <span class="menu-label">{{ store.locales == 'zh' ? '按工作区分组' : 'Group by workspace' }}</span>
+                  <i v-if="chatOrderMode === 'workspace'" class="fa fa-check chat-nav-check"></i>
+                </div>
+              </div>
             </div>
-            <div class="menu-item" :class="{ current: chatOrderMode === 'workspace' }" @click="setChatOrderMode('workspace')">
-              <i class="fa fa-object-group"></i>
-              <span class="menu-label">{{ store.locales == 'zh' ? '按工作区分组' : 'Group by workspace' }}</span>
-              <i v-if="chatOrderMode === 'workspace'" class="fa fa-check chat-nav-check"></i>
+
+            <div class="chat-nav-item" @mouseleave="chatNavSubmenu = null">
+              <div
+                class="menu-item has-submenu"
+                @mouseenter="chatNavSubmenu = 'sort'"
+                @click="chatNavSubmenu = 'sort'"
+              >
+                <i class="fa fa-sort-amount-desc"></i>
+                <span class="menu-label">{{ store.locales == 'zh' ? '排序' : 'Sort' }}</span>
+                <span class="chat-nav-current">{{ chatSortModeLabel }}</span>
+                <i class="fa fa-angle-right chat-nav-arrow"></i>
+              </div>
+              <div v-if="chatNavSubmenu === 'sort'" class="context-menu ctx-narrow chat-nav-submenu" :class="{ 'submenu-flip': chatNavSubmenuFlip }" @click.stop>
+                <div class="menu-item" :class="{ current: chatSortMode === 'last' }" @click="setChatSortMode('last')">
+                  <i class="fa fa-clock-o"></i>
+                  <span class="menu-label">{{ store.locales == 'zh' ? '按最后生成时间' : 'Last generated' }}</span>
+                  <i v-if="chatSortMode === 'last'" class="fa fa-check chat-nav-check"></i>
+                </div>
+                <div class="menu-item" :class="{ current: chatSortMode === 'created' }" @click="setChatSortMode('created')">
+                  <i class="fa fa-calendar-o"></i>
+                  <span class="menu-label">{{ store.locales == 'zh' ? '按创建时间' : 'Created time' }}</span>
+                  <i v-if="chatSortMode === 'created'" class="fa fa-check chat-nav-check"></i>
+                </div>
+                <!-- 拖动排序后进入的自定义顺序（不在菜单里直接选，只用来解释当前状态） -->
+                <div v-if="chatSortMode === 'manual'" class="menu-item current" @click="hideChatNavMenu">
+                  <i class="fa fa-hand-pointer-o"></i>
+                  <span class="menu-label">{{ store.locales == 'zh' ? '自定义顺序（拖动调整）' : 'Custom order (dragged)' }}</span>
+                  <i class="fa fa-check chat-nav-check"></i>
+                </div>
+              </div>
             </div>
-            <div class="menu-divider"></div>
-            <div class="chat-nav-section">{{ store.locales == 'zh' ? '排序' : 'Sort' }}</div>
-            <div class="menu-item" :class="{ current: chatSortMode === 'last' }" @click="setChatSortMode('last')">
-              <i class="fa fa-clock-o"></i>
-              <span class="menu-label">{{ store.locales == 'zh' ? '按最后生成时间' : 'Last generated' }}</span>
-              <i v-if="chatSortMode === 'last'" class="fa fa-check chat-nav-check"></i>
+
+            <div class="chat-nav-item" @mouseleave="chatNavSubmenu = null">
+              <div
+                class="menu-item has-submenu"
+                @mouseenter="chatNavSubmenu = 'view'"
+                @click="chatNavSubmenu = 'view'"
+              >
+                <i class="fa fa-eye"></i>
+                <span class="menu-label">{{ store.locales == 'zh' ? '显示' : 'View' }}</span>
+                <span class="chat-nav-current">{{ chatNavViewLabel }}</span>
+                <i class="fa fa-angle-right chat-nav-arrow"></i>
+              </div>
+              <!-- 归档筛选（对齐 DSH）：只影响列表显示，不改顺序、不删除 -->
+              <div v-if="chatNavSubmenu === 'view'" class="context-menu ctx-narrow chat-nav-submenu" :class="{ 'submenu-flip': chatNavSubmenuFlip }" @click.stop>
+                <div class="menu-item" :class="{ current: store.UI.showArchivedChats }" @click="toggleShowArchivedChats(); hideChatNavMenu()">
+                  <i class="fa fa-archive"></i>
+                  <span class="menu-label">{{ store.locales == 'zh' ? '显示已归档的聊天' : 'Show archived chats' }}</span>
+                  <i v-if="store.UI.showArchivedChats" class="fa fa-check chat-nav-check"></i>
+                </div>
+              </div>
             </div>
-            <div class="menu-item" :class="{ current: chatSortMode === 'created' }" @click="setChatSortMode('created')">
-              <i class="fa fa-calendar-o"></i>
-              <span class="menu-label">{{ store.locales == 'zh' ? '按创建时间' : 'Created time' }}</span>
-              <i v-if="chatSortMode === 'created'" class="fa fa-check chat-nav-check"></i>
-            </div>
-            <!-- 拖动排序后进入的自定义顺序（不在菜单里直接选，只用来解释当前状态） -->
-            <div v-if="chatSortMode === 'manual'" class="menu-item current" @click="hideChatNavMenu">
-              <i class="fa fa-hand-pointer-o"></i>
-              <span class="menu-label">{{ store.locales == 'zh' ? '自定义顺序（拖动调整）' : 'Custom order (dragged)' }}</span>
-              <i class="fa fa-check chat-nav-check"></i>
-            </div>
-            <!-- 归档筛选（对齐 DSH）：只影响列表显示，不改顺序、不删除 -->
-            <div class="menu-divider"></div>
-            <div class="menu-item" :class="{ current: store.UI.showArchivedChats }" @click="toggleShowArchivedChats">
-              <i class="fa fa-archive"></i>
-              <span class="menu-label">{{ store.locales == 'zh' ? '显示已归档的聊天' : 'Show archived chats' }}</span>
-              <i v-if="store.UI.showArchivedChats" class="fa fa-check chat-nav-check"></i>
-            </div>
-            <!-- 在具体聊天行上右键时，菜单同时带上该行的「归档 / 删除」 -->
+
+            <!-- 在具体聊天行上右键时：归档 / 删除直接放在一级（高频操作，不折叠） -->
             <template v-if="chatNavMenuChatIndex !== null">
               <div class="menu-divider"></div>
               <div class="menu-item" @click="archiveChatFromSidebarMenu">
@@ -1039,27 +1084,23 @@
             rows="3"
           ></textarea>
           <div class="input-controls">
-            <!-- 左下角：工作区选择（**每个聊天各自一份**；与 DSH 一样，工作区决定智能体的工作目录，
-                 并注入上下文；右侧栏「文件 / 终端」标签也定位到这里）。
-                 只在真正会用到工作区的模式显示：普通 / 知识库 / 工作流不读它（见 showsWorkspaceChip） -->
+            <!-- 工作区选择（每个聊天各自一份；工作区决定智能体工作目录并注入上下文）：
+                 面板里不再放说明文字，说明挂在 chip 的 title 上 -->
             <div v-if="showsWorkspaceChip" class="workspace-select-wrap">
               <span
-                class="workspace-chip"
+                class="workspace-chip composer-chip"
                 :class="{ empty: !chatWorkspacePath }"
                 :title="workspaceChipTitle"
                 @click.stop="toggleWorkspacePicker"
               >
                 <i class="fa fa-folder-open-o"></i>
-                <span class="workspace-chip-name">{{ workspaceLabel }}</span>
-                <i class="fa fa-caret-down workspace-chip-caret"></i>
+                <span class="workspace-chip-name composer-chip-label">{{ workspaceLabel }}</span>
+                <i class="fa fa-caret-down workspace-chip-caret composer-chip-caret"></i>
               </span>
-              <div v-if="showWorkspacePicker" class="workspace-picker scoll" @click.stop>
-                <div class="workspace-picker-title">
-                  {{ store.locales == 'zh' ? '这个聊天的工作区（智能体的工作目录）' : 'This chat’s workspace (agent working directory)' }}
-                </div>
+              <div v-if="showWorkspacePicker" class="workspace-picker composer-panel scoll" @click.stop>
                 <!-- 跟随全局默认：清掉本聊天自己的选择 -->
                 <div
-                  class="workspace-picker-item"
+                  class="workspace-picker-item composer-panel-item"
                   :class="{ active: followingDefaultWorkspace }"
                   @click="followDefaultWorkspace"
                 >
@@ -1071,7 +1112,7 @@
                 <div
                   v-for="w in workspaceList"
                   :key="w"
-                  class="workspace-picker-item"
+                  class="workspace-picker-item composer-panel-item"
                   :class="{ active: !followingDefaultWorkspace && w === chatWorkspaceOwn }"
                   :title="w"
                   @click="pickWorkspace(w)"
@@ -1086,97 +1127,159 @@
                   ></i>
                 </div>
                 <div class="shared-kb-divider"></div>
-                <div class="workspace-picker-item" @click="addWorkspaceFromDialog">
+                <div class="workspace-picker-item composer-panel-item" @click="addWorkspaceFromDialog">
                   <i class="fa fa-folder-open"></i>
                   <span>{{ store.locales == 'zh' ? '打开文件夹…' : 'Open folder…' }}</span>
                 </div>
               </div>
             </div>
-            <!-- 对话模式选择下拉框 -->
+            <!-- 对话模式：自研面板（原生 select 在窄窗口无法收成图标；
+                 面板样式与其它输入区面板统一） -->
             <div class="mode-select-wrap">
               <!-- 顺序：工作区 → 对话模式 → 该模式的专属选项 -->
-              <select
-                class="mode-select"
-                :value="modeSelectValue"
-                @change="onModeSelect"
-                :disabled="isAnyExecuting"
-                :title="store.locales=='zh' ? '选择对话模式' : 'Select chat mode'"
+              <div
+                class="mode-linked-chip composer-chip mode-trigger"
+                :class="{ active: showModePicker, disabled: isAnyExecuting }"
+                :title="currentModeTitle"
+                @click.stop="toggleModePicker"
               >
-                <option v-for="m in modeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
-              </select>
+                <i class="fa" :class="currentModeIcon"></i>
+                <span class="mode-linked-name composer-chip-label">{{ currentModeLabel }}</span>
+                <i class="fa fa-angle-down composer-chip-caret"></i>
+              </div>
+              <div v-if="showModePicker" class="composer-panel mode-picker scoll" @click.stop>
+                <div
+                  v-for="m in modeOptions"
+                  :key="m.value"
+                  class="composer-panel-item"
+                  :class="{ active: modeSelectValue === m.value }"
+                  @click="pickChatMode(m.value)"
+                >
+                  <i class="fa" :class="modeIconOf(m.value)"></i>
+                  <span class="composer-panel-name">{{ m.label }}</span>
+                  <i v-if="modeSelectValue === m.value" class="fa fa-check composer-panel-check"></i>
+                </div>
+              </div>
 
               <!-- 已关联项：点击重新选择对应的知识库/工作流/Agent 预设 -->
               <span
                 v-if="currentChat.mode === 'retrieval'"
-                class="mode-linked-chip"
+                class="mode-linked-chip composer-chip"
                 :class="{ empty: getKbLinkedEmpty() }"
                 @click="selectKnowledgeBase"
                 :title="getKbButtonTitle()"
               >
                 <i class="fa fa-book"></i>
-                <span class="mode-linked-name">{{ getKbLinkedLabel() }}</span>
+                <span class="mode-linked-name composer-chip-label">{{ getKbLinkedLabel() }}</span>
               </span>
-              <select
+              <!-- 检索策略：自研面板，与其它输入区面板样式统一 -->
+              <div
                 v-if="currentChat.mode === 'retrieval'"
-                v-model="currentChat.config.retrievalStrategy"
-                @change="saveChats"
-                class="mode-select strategy-select"
-                :disabled="isAnyExecuting"
-                :title="store.locales=='zh' ? '选择检索策略' : 'Select retrieval strategy'"
+                class="mode-linked-chip composer-chip"
+                :class="{ active: showStrategyPicker, disabled: isAnyExecuting }"
+                :title="currentStrategyTitle"
+                @click.stop="toggleStrategyPicker"
               >
-                <option v-for="s in retrievalStrategyOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
-              </select>
+                <i class="fa fa-filter"></i>
+                <span class="mode-linked-name composer-chip-label">{{ currentStrategyLabel }}</span>
+                <i class="fa fa-angle-down composer-chip-caret"></i>
+              </div>
+              <div v-if="currentChat.mode === 'retrieval' && showStrategyPicker" class="composer-panel strategy-picker scoll" @click.stop>
+                <div
+                  v-for="s in retrievalStrategyOptions"
+                  :key="s.value"
+                  class="composer-panel-item"
+                  :class="{ active: currentChat.config.retrievalStrategy === s.value }"
+                  @click="pickRetrievalStrategy(s.value)"
+                >
+                  <i class="fa fa-filter"></i>
+                  <span class="composer-panel-name">{{ s.label }}</span>
+                  <i v-if="currentChat.config.retrievalStrategy === s.value" class="fa fa-check composer-panel-check"></i>
+                </div>
+              </div>
               <span
                 v-if="currentChat.mode === 'agent' || currentChat.mode === 'agent2'"
-                class="mode-linked-chip"
+                class="mode-linked-chip composer-chip"
                 @click="toggleAgentPicker"
                 :title="getAgentButtonTitle()"
               >
                 <i class="fa fa-user-circle"></i>
-                <span class="mode-linked-name">{{ currentAgentLabel }}</span>
+                <span class="mode-linked-name composer-chip-label">{{ currentAgentLabel }}</span>
               </span>
               <span
                 v-if="currentChat.mode === 'workflow'"
-                class="mode-linked-chip"
+                class="mode-linked-chip composer-chip"
                 :class="{ empty: !currentChat.config.workflowPath, error: workflowError }"
                 @click="selectWorkflow"
                 :title="getWorkflowButtonTitle()"
               >
                 <i class="fa fa-stumbleupon"></i>
-                <span class="mode-linked-name">{{ currentChat.config.workflowPath ? getLinkedFileName(currentChat.config.workflowPath) : (store.locales=='zh' ? '选择工作流...' : 'Select Workflow...') }}</span>
+                <span class="mode-linked-name composer-chip-label">{{ currentChat.config.workflowPath ? getLinkedFileName(currentChat.config.workflowPath) : (store.locales=='zh' ? '选择工作流...' : 'Select Workflow...') }}</span>
               </span>
 
               <!-- 集群模式：先选运行方式，再选参与成员（勾选顺序即发言顺序） -->
-              <select
+              <div
                 v-if="currentChat.mode === 'swarm'"
-                v-model="swarmRunMode"
-                class="mode-select swarm-mode-select"
-                :disabled="isAnyExecuting"
+                class="mode-linked-chip composer-chip"
+                :class="{ active: showSwarmRunModePicker, disabled: isAnyExecuting }"
                 :title="swarmRunModeTitle"
+                @click.stop="toggleSwarmRunModePicker"
               >
-                <option v-for="m in swarmRunModeOptions" :key="m.value" :value="m.value" :title="m.desc">{{ m.label }}</option>
-              </select>
+                <i class="fa fa-random"></i>
+                <span class="mode-linked-name composer-chip-label">{{ currentSwarmRunModeLabel }}</span>
+                <i class="fa fa-angle-down composer-chip-caret"></i>
+              </div>
+              <div v-if="currentChat.mode === 'swarm' && showSwarmRunModePicker" class="composer-panel swarm-runmode-picker scoll" @click.stop>
+                <div
+                  v-for="m in swarmRunModeOptions"
+                  :key="m.value"
+                  class="composer-panel-item"
+                  :class="{ active: swarmRunMode === m.value }"
+                  :title="m.desc"
+                  @click="pickSwarmRunMode(m.value)"
+                >
+                  <i class="fa fa-random"></i>
+                  <span class="composer-panel-name">{{ m.label }}</span>
+                  <i v-if="swarmRunMode === m.value" class="fa fa-check composer-panel-check"></i>
+                </div>
+              </div>
               <span
                 v-if="currentChat.mode === 'swarm'"
-                class="mode-linked-chip"
+                class="mode-linked-chip composer-chip"
                 :class="{ empty: !(currentChat.config.swarmPresetIds || []).length, error: swarmMissingPresets.length > 0 }"
-                @click="showSwarmMemberPicker = !showSwarmMemberPicker; syncSwarmMembers()"
+                @click="toggleSwarmMemberPicker"
                 :title="store.locales=='zh' ? '选择参与成员：勾选顺序即发言顺序（各成员使用自己预设里的模型）' : 'Pick members: tick order = speaking order (each member uses the model from its preset)'"
               >
                 <i class="fa fa-users"></i>
-                <span class="mode-linked-name">{{ swarmChipLabel }}</span>
+                <span class="mode-linked-name composer-chip-label">{{ swarmChipLabel }}</span>
               </span>
 
               <!-- 集群成员浮层（成员多选 + 群主总结 + 管理预设；运行方式已移至输入区独立下拉） -->
-              <div v-if="showSwarmMemberPicker" class="agent-preset-picker swarm-picker scoll" @click.stop>
+              <div v-if="showSwarmMemberPicker" class="agent-preset-picker swarm-picker composer-panel scoll" @click.stop>
+                <!-- 与模型选择面板一致的搜索行：按预设名 / 标签过滤成员 -->
+                <div class="composer-panel-search">
+                  <i class="fa fa-search composer-panel-search-icon"></i>
+                  <input
+                    v-model="agentPickerQuery"
+                    type="text"
+                    class="composer-panel-search-input"
+                    :placeholder="store.locales=='zh' ? '搜索成员预设' : 'Search member presets'"
+                    @keydown.esc.stop="agentPickerQuery = ''"
+                  />
+                  <i v-if="agentPickerQuery" class="fa fa-times-circle composer-panel-search-clear"
+                    :title="store.locales=='zh' ? '清空' : 'Clear'" @click="agentPickerQuery = ''"></i>
+                </div>
                 <div v-if="!(store.agentPresets || []).length" class="preset-picker-empty">
                   {{ store.locales=='zh' ? '还没有预设：请先在「设置 → 智能体 → 管理」中创建' : 'No presets yet — create one in Settings → Agent → Manage' }}
                 </div>
+                <div v-else-if="!swarmPresetFiltered.length" class="preset-picker-empty">
+                  {{ store.locales=='zh' ? '没有匹配的预设' : 'No matching presets' }}
+                </div>
                 <template v-else>
                   <div
-                    v-for="p in store.agentPresets"
+                    v-for="p in swarmPresetFiltered"
                     :key="p.id"
-                    class="preset-picker-item"
+                    class="preset-picker-item composer-panel-item"
                     :class="{ active: (currentChat.config.swarmPresetIds || []).includes(p.id) }"
                     @click="toggleSwarmMember(p.id)"
                     :title="store.locales=='zh' ? '点击勾选/取消（勾选顺序即发言顺序）' : 'Click to toggle (tick order = speaking order)'"
@@ -1187,7 +1290,7 @@
                   </div>
                   <template v-if="swarmMissingPresets.length">
                     <div class="shared-kb-divider"></div>
-                    <div class="preset-picker-item swarm-missing" @click="pruneSwarmMissing()">
+                    <div class="preset-picker-item composer-panel-item swarm-missing" @click="pruneSwarmMissing()">
                       <i class="fa fa-exclamation-triangle"></i>
                       <span>{{ (store.locales=='zh' ? '清理已失效引用 ' : 'Prune missing ') + swarmMissingPresets.length }}</span>
                     </div>
@@ -1196,7 +1299,7 @@
 
                 <!-- 管理预设 -->
                 <div class="shared-kb-divider"></div>
-                <div class="preset-picker-item" @click="goManageAgentPresets()">
+                <div class="preset-picker-item composer-panel-item" @click="goManageAgentPresets()">
                   <i class="fa fa-cog"></i>
                   <span class="swarm-picker-name">{{ store.locales=='zh' ? '管理预设...' : 'Manage presets...' }}</span>
                 </div>
@@ -1205,26 +1308,43 @@
               <!-- 知识库模式：检索策略选择（样式与 mode-select 统一） -->
               <!-- 网页端（LAN 共享）智能体模式：复用客户端胶囊 + 预设浮层，选项数据直接来自主机 -->
               <!-- Agent 预设选择浮层（含「通用智能体」） -->
-              <div v-if="showAgentPresetPicker" class="agent-preset-picker scoll" @click.stop>
+              <div v-if="showAgentPresetPicker" class="agent-preset-picker composer-panel scoll" @click.stop>
+                <!-- 与模型选择面板一致的搜索行：按名称 / 描述过滤智能体 -->
+                <div class="composer-panel-search">
+                  <i class="fa fa-search composer-panel-search-icon"></i>
+                  <input
+                    v-model="agentPickerQuery"
+                    type="text"
+                    class="composer-panel-search-input"
+                    :placeholder="store.locales=='zh' ? '搜索智能体' : 'Search agents'"
+                    @keydown.esc.stop="agentPickerQuery = ''"
+                  />
+                  <i v-if="agentPickerQuery" class="fa fa-times-circle composer-panel-search-clear"
+                    :title="store.locales=='zh' ? '清空' : 'Clear'" @click="agentPickerQuery = ''"></i>
+                </div>
                 <div
-                  v-for="a in agentPickerItems"
+                  v-for="a in agentPickerFiltered"
                   :key="a.id"
-                  class="preset-picker-item"
+                  class="preset-picker-item composer-panel-item"
                   :class="{ active: isAgentItemActive(a) }"
                   :title="a.desc || a.name"
                   @click="selectAgentItem(a)"
                 >
                   <i class="fa" :class="a.id === 'general' ? 'fa-android' : 'fa-user'"></i>
-                  <span>{{ a.name }}</span>
+                  <span class="composer-panel-name">{{ a.name }}</span>
+                  <i v-if="isAgentItemActive(a)" class="fa fa-check composer-panel-check"></i>
                 </div>
                 <div v-if="isBrowser && !agentPickerItems.length" class="preset-picker-empty">
                   {{ store.locales=='zh' ? '主机未开放任何智能体' : 'The host has not opened any agent' }}
                 </div>
+                <div v-else-if="!agentPickerFiltered.length" class="preset-picker-empty">
+                  {{ store.locales=='zh' ? '没有匹配的智能体' : 'No matching agents' }}
+                </div>
               </div>
 
               <!-- 浏览器模式：共享知识库（主机目录）/ 上传自己的文件 选择浮层 -->
-              <div v-if="showSharedKbPicker" class="shared-kb-picker scoll" @click.stop>
-                <div class="preset-picker-item" @click="openKbFilePicker(); showSharedKbPicker = false">
+              <div v-if="showSharedKbPicker" class="shared-kb-picker composer-panel scoll" @click.stop>
+                <div class="preset-picker-item composer-panel-item" @click="openKbFilePicker(); showSharedKbPicker = false">
                   <i class="fa fa-upload"></i>
                   <span>{{ store.locales=='zh' ? '上传 .kb 知识库文件' : 'Upload .kb KB file' }}</span>
                 </div>
@@ -1236,7 +1356,7 @@
                   <div
                     v-for="f in sharedKbList"
                     :key="f.name"
-                    class="preset-picker-item"
+                    class="preset-picker-item composer-panel-item"
                     :class="{ active: currentChat.config.sharedKb?.name === f.name }"
                     @click="pickSharedKb(f.name, f.size)"
                   >
@@ -1248,7 +1368,7 @@
             </div>
             <!-- 文件/图片上传按钮（浏览器模式下知识库模式退化为上传文件）
                  生成 / 执行中也可以继续添加附件（随下一条消息发送，与前一轮互不影响） -->
-            <div class="button" v-if="currentChat.mode === 'normal' || (isBrowser && currentChat.mode === 'retrieval')" @click="onUploadClick" :title="getUploadButtonTitle()">
+            <div class="button composer-icon-btn" v-if="currentChat.mode === 'normal' || (isBrowser && currentChat.mode === 'retrieval')" @click="onUploadClick" :title="getUploadButtonTitle()">
               <i class="fa fa-paperclip"></i>
               <input 
                 type="file" 
@@ -1267,6 +1387,21 @@
                 multiple
                 style="display: none;"
               />
+            </div>
+            <!-- 模型选择（来源 + 模型合一）：放在输入区左下角控件簇的最右侧，
+                 与模式 / 工作区等左侧控件同一套 chip 样式。
+                 集群模式各成员用自己预设里的模型 → 隐藏；网页端由主机执行 → 隐藏。 -->
+            <div
+              v-if="currentChat.mode !== 'swarm' && !hostAgentMode"
+              ref="modelPickerBtnRef"
+              class="mode-linked-chip composer-chip model-chip"
+              :class="{ active: modelPickerVisible, disabled: isAnyExecuting }"
+              :title="modelPickerButtonTitle"
+              @click="toggleModelPicker"
+            >
+              <i class="fa fa-cube"></i>
+              <span class="mode-linked-name composer-chip-label">{{ currentModelNameLabel }}</span>
+              <i class="fa fa-angle-down model-chip-caret composer-chip-caret"></i>
             </div>
             <!-- 生成状态 / 连接测试 / 执行提示：图标位占附件按钮右侧的空白，
                  只显示图标（完整提示在图标 title 上），大小与附件按钮一致 -->
@@ -1835,13 +1970,10 @@ const showsWorkspaceChip = computed(() => {
   return mode !== 'normal' && mode !== 'retrieval' && mode !== 'workflow'
 })
 const toggleWorkspacePicker = () => {
-  showWorkspacePicker.value = !showWorkspacePicker.value
-  if (showWorkspacePicker.value) {
-    // 与同一行的其它浮层互斥，避免叠在一起
-    showAgentPresetPicker.value = false
-    showSharedKbPicker.value = false
-    showSwarmMemberPicker.value = false
-  }
+  const next = !showWorkspacePicker.value
+  // 与同一行的其它浮层互斥，避免叠在一起
+  closeComposerPanels()
+  showWorkspacePicker.value = next
 }
 /** 把某个路径设为**这个聊天**的工作区（不动全局默认） */
 const setChatWorkspace = (path: string) => {
@@ -1925,13 +2057,31 @@ watch(chatSortMode, (v) => {
 const chatNavMenuVisible = ref(false)
 const chatNavMenuPos = ref({ x: 0, y: 0 })
 const chatNavMenuChatIndex = ref<number | null>(null)
+/** 当前展开的二级子菜单（悬停 / 点击一级项展开；null = 收起） */
+const chatNavSubmenu = ref<null | 'order' | 'sort' | 'view'>(null)
+/** 子菜单是否向左展开（右键位置靠窗口右边时，避免子菜单超出视口） */
+const chatNavSubmenuFlip = ref(false)
 /** 右键菜单里当前右键的那条聊天（用于「归档 / 取消归档」的状态与文案） */
 const chatNavMenuChat = computed<Chat | undefined>(() =>
   chatNavMenuChatIndex.value === null ? undefined : chats.value[chatNavMenuChatIndex.value])
 const hideChatNavMenu = () => {
   chatNavMenuVisible.value = false
   chatNavMenuChatIndex.value = null
+  chatNavSubmenu.value = null
 }
+/** 一级项当前值（显示在右端，减少必须点开二级菜单才能确认状态的次数） */
+const chatOrderModeLabel = computed(() => chatOrderMode.value === 'sequence'
+  ? (store.locales == 'zh' ? '顺序' : 'Sequence')
+  : (store.locales == 'zh' ? '按工作区' : 'By workspace'))
+const chatSortModeLabel = computed(() => {
+  if (chatSortMode.value === 'last') return store.locales == 'zh' ? '最后生成' : 'Last generated'
+  if (chatSortMode.value === 'created') return store.locales == 'zh' ? '创建时间' : 'Created'
+  return store.locales == 'zh' ? '自定义' : 'Custom'
+})
+/** 「显示」一级项当前值 */
+const chatNavViewLabel = computed(() => store.locales == 'zh'
+  ? (store.UI.showArchivedChats ? '含已归档' : '不含归档')
+  : (store.UI.showArchivedChats ? 'Archived shown' : 'Archived hidden'))
 
 /**
  * 「最后生成时间」：最后一条消息的时间。
@@ -2245,6 +2395,9 @@ const onChatNavContextMenu = (e: MouseEvent, chatIndex: number | null = null) =>
   hideContextMenu()
   branchContextMenuVisible.value = false
   chatNavMenuChatIndex.value = chatIndex
+  chatNavSubmenu.value = null
+  // 子菜单默认向右展开；右键位置靠近窗口右边（放不下 210px 子菜单）时改为向左
+  chatNavSubmenuFlip.value = e.clientX > Math.max(8, window.innerWidth - 460)
   chatNavMenuPos.value = {
     x: Math.min(e.clientX, Math.max(8, window.innerWidth - 240)),
     // 菜单最高约 240px（行上右键时多一项「删除聊天」）：贴着窗口底部右键时向上收，避免被裁掉
@@ -3197,9 +3350,30 @@ const isAgentItemActive = (item: { id: string }) => {
   return item.id === 'general' ? !currentChat.value.config.presetId : currentChat.value.config.presetId === item.id
 }
 
+/** 智能体选择面板的搜索词（与模型选择面板一致：按名称 / 描述过滤） */
+const agentPickerQuery = ref('')
+
+/** 智能体列表（桌面端：通用智能体 + 预设；网页端：主机开放的智能体） */
+const agentPickerFiltered = computed(() => {
+  const q = agentPickerQuery.value.trim().toLowerCase()
+  if (!q) return agentPickerItems.value
+  return agentPickerItems.value.filter((a) => (String(a.name || '') + ' ' + String(a.desc || '')).toLowerCase().includes(q))
+})
+
+/** 集群成员面板（搜索结果；勾选状态与顺序逻辑不变） */
+const swarmPresetFiltered = computed(() => {
+  const all = store.agentPresets || []
+  const q = agentPickerQuery.value.trim().toLowerCase()
+  if (!q) return all
+  return all.filter((p: any) => (String(p.name || '') + ' ' + (p.tags || []).join(' ')).toLowerCase().includes(q))
+})
+
 /** 打开/关闭智能体浮层（打开时的主机能力刷新见下方 showAgentPresetPicker 的 watch） */
 const toggleAgentPicker = () => {
-  showAgentPresetPicker.value = !showAgentPresetPicker.value
+  const next = !showAgentPresetPicker.value
+  closeComposerPanels()
+  agentPickerQuery.value = ''
+  showAgentPresetPicker.value = next
 }
 
 /** 选中浮层里的项：网页端只改聊天级选择；桌面端沿用原有预设切换（含模型配置跟随） */
@@ -5243,7 +5417,9 @@ const loadSharedKbs = async () => {
 
 // 切换「共享知识库 / 上传」浮层（点击知识库标签触发）
 const toggleSharedKbPicker = async () => {
-  showSharedKbPicker.value = !showSharedKbPicker.value
+  const next = !showSharedKbPicker.value
+  closeComposerPanels()
+  showSharedKbPicker.value = next
   if (showSharedKbPicker.value) await loadSharedKbs()
 }
 
@@ -5496,6 +5672,106 @@ const modeOptions = computed(() => {
   return all
 })
 
+// ==================== 输入区统一「chip + 自研面板」 ====================
+// 原生 select 在窄窗口无法收成图标，且输入区几个浮层（工作区 / 模式 / 模型 / 关联项）样式各异。
+// 这里把模式 / 检索策略 / 集群运行方式也改成 chip + 面板，并统一用 .composer-chip / .composer-panel，
+// 窄窗口（CSS 断点 560px）下所有 chip 自动收成图标（文字与箭头隐藏），点击仍弹出同一套面板。
+const showModePicker = ref(false)
+const showStrategyPicker = ref(false)
+const showSwarmRunModePicker = ref(false)
+
+/** 关闭输入区所有自研面板（打开一个前先清掉其它，避免叠层） */
+const closeComposerPanels = () => {
+  showModePicker.value = false
+  showStrategyPicker.value = false
+  showSwarmRunModePicker.value = false
+  showWorkspacePicker.value = false
+  showAgentPresetPicker.value = false
+  showSharedKbPicker.value = false
+  showSwarmMemberPicker.value = false
+  agentPickerQuery.value = ''
+  closeModelPicker()
+}
+
+/** 各对话模式在 chip / 面板里的图标 */
+const MODE_ICONS: Record<string, string> = {
+  normal: 'fa-comment-o',
+  retrieval: 'fa-book',
+  workflow: 'fa-stumbleupon',
+  agent: 'fa-user-circle',
+  agent2: 'fa-android',
+  skill: 'fa-cubes',
+  swarm: 'fa-users',
+}
+const modeIconOf = (mode: string): string => MODE_ICONS[String(mode)] || 'fa-comment-o'
+
+const currentModeOption = computed(() => modeOptions.value.find(m => m.value === modeSelectValue.value) || modeOptions.value[0])
+const currentModeLabel = computed(() => currentModeOption.value?.label || '')
+const currentModeIcon = computed(() => modeIconOf(modeSelectValue.value))
+const currentModeTitle = computed(() => {
+  const label = currentModeLabel.value
+  return store.locales == 'zh'
+    ? '对话模式：' + label + '（点击切换）'
+    : 'Chat mode: ' + label + ' (click to change)'
+})
+
+const toggleModePicker = () => {
+  if (isAnyExecuting.value) return
+  const next = !showModePicker.value
+  closeComposerPanels()
+  showModePicker.value = next
+}
+/** 面板里选中模式：复用原生 select 的切换逻辑（各模式的清理 / 迁移 / 打开选择器行为不变） */
+const pickChatMode = async (mode: string) => {
+  showModePicker.value = false
+  if (!mode) return
+  await onModeSelect({ target: { value: mode } } as any)
+}
+
+const currentStrategyOption = computed(() =>
+  retrievalStrategyOptions.value.find(s => s.value === currentChat.value.config.retrievalStrategy))
+const currentStrategyLabel = computed(() =>
+  currentStrategyOption.value?.label || (store.locales == 'zh' ? '检索策略' : 'Strategy'))
+const currentStrategyTitle = computed(() => {
+  const label = currentStrategyLabel.value
+  return store.locales == 'zh'
+    ? '知识库检索策略：' + label + '（点击切换）'
+    : 'Retrieval strategy: ' + label + ' (click to change)'
+})
+const toggleStrategyPicker = () => {
+  if (isAnyExecuting.value) return
+  const next = !showStrategyPicker.value
+  closeComposerPanels()
+  showStrategyPicker.value = next
+}
+const pickRetrievalStrategy = (value: string) => {
+  showStrategyPicker.value = false
+  if (!value) return
+  currentChat.value.config.retrievalStrategy = value
+  saveChats()
+}
+
+const currentSwarmRunModeLabel = computed(() =>
+  swarmRunModeOptions.value.find(o => o.value === swarmRunMode.value)?.label || '')
+const toggleSwarmRunModePicker = () => {
+  if (isAnyExecuting.value) return
+  const next = !showSwarmRunModePicker.value
+  closeComposerPanels()
+  showSwarmRunModePicker.value = next
+}
+const pickSwarmRunMode = (value: 'auto' | 'debate' | 'team') => {
+  showSwarmRunModePicker.value = false
+  swarmRunMode.value = value
+}
+/** 集群成员浮层（原 chip 内联开关；改为统一面板后同样互斥；带与模型面板一致的搜索行） */
+const toggleSwarmMemberPicker = () => {
+  const next = !showSwarmMemberPicker.value
+  closeComposerPanels()
+  agentPickerQuery.value = ''
+  showSwarmMemberPicker.value = next
+  if (showSwarmMemberPicker.value) syncSwarmMembers()
+}
+
 // 策略注册表（与 RAG 设置共享；配置 UI 写入 localStorage 后在此合并）
 const strategyRegistryVersion = ref(0)
 const loadPersistedStrategies = () => {
@@ -5689,6 +5965,10 @@ const swarmMissingPresets = ref<string[]>([])
 // ② 再看是否正处在某条对话 → 回到整屏聊天列表（等价于点对话区左上角的 fa-bars）。
 const closeHomeOverlays = (): boolean => {
   if (modelPickerVisible.value) { closeModelPicker(); return true }
+  if (showModePicker.value) { showModePicker.value = false; return true }
+  if (showStrategyPicker.value) { showStrategyPicker.value = false; return true }
+  if (showSwarmRunModePicker.value) { showSwarmRunModePicker.value = false; return true }
+  if (showWorkspacePicker.value) { showWorkspacePicker.value = false; return true }
   if (showAgentPresetPicker.value) { showAgentPresetPicker.value = false; return true }
   if (showSwarmMemberPicker.value) { showSwarmMemberPicker.value = false; return true }
   if (showSharedKbPicker.value) { showSharedKbPicker.value = false; return true }
@@ -5861,12 +6141,16 @@ const onDocMouseDownForPresetPicker = (e: MouseEvent) => {
     const wsWrap = document.querySelector('.workspace-select-wrap') as HTMLElement | null
     if (!wsWrap || !wsWrap.contains(e.target as Node)) showWorkspacePicker.value = false
   }
-  if (!showAgentPresetPicker.value && !showSharedKbPicker.value && !showSwarmMemberPicker.value) return
+  if (!showAgentPresetPicker.value && !showSharedKbPicker.value && !showSwarmMemberPicker.value
+    && !showModePicker.value && !showStrategyPicker.value && !showSwarmRunModePicker.value) return
   const wrap = document.querySelector('.mode-select-wrap') as HTMLElement | null
   if (wrap && !wrap.contains(e.target as Node)) {
     showAgentPresetPicker.value = false
     showSharedKbPicker.value = false
     showSwarmMemberPicker.value = false
+    showModePicker.value = false
+    showStrategyPicker.value = false
+    showSwarmRunModePicker.value = false
   }
 }
 
@@ -6833,8 +7117,13 @@ const modelPickerRefreshing = ref(false)
 const modelPickerShowEmpty = ref(false)
 /** 搜索词：过滤模型名 / 来源名（面板顶部搜索框） */
 const modelPickerQuery = ref('')
-/** 面板位置（fixed 定位：左对齐按钮，贴在按钮下方） */
+/** 面板位置（fixed 定位） */
 const modelPickerPos = ref({ left: 0, top: 0 })
+/**
+ * 面板是否向上弹出：模型选择按钮已移到输入区左下角（贴近窗口底部），
+ * 下方放不下面板时必须往上弹，否则会被视口底边挤成一条。
+ */
+const modelPickerAbove = ref(false)
 const modelPickerBtnRef = ref<HTMLElement | null>(null)
 const modelPickerSearchRef = ref<HTMLInputElement | null>(null)
 
@@ -7018,6 +7307,7 @@ const pickFirstModelMatch = () => {
 const closeModelPicker = () => {
   modelPickerVisible.value = false
   modelPickerQuery.value = ''
+  modelPickerAbove.value = false
 }
 
 /** 清除本聊天的模型覆盖，重新跟随全局（预设「跟随默认」时可用；与旧占位项语义一致） */
@@ -7063,13 +7353,21 @@ const selectLlmSourceInPicker = async (group: ModelPickerGroup) => {
 const toggleModelPicker = () => {
   if (isAnyExecuting.value) return
   if (modelPickerVisible.value) { closeModelPicker(); return }
+  // 打开前先关闭输入区其它自研面板（模式 / 策略 / 工作区 / 关联项），保证同一时刻只有一个面板
+  closeComposerPanels()
   const rect = modelPickerBtnRef.value?.getBoundingClientRect()
   const panelWidth = 240
-  const left = rect ? Math.min(rect.left, window.innerWidth - panelWidth - 8) : 8
-  const top = rect ? rect.bottom + 4 : 56
+  const margin = 8
+  const left = rect ? Math.min(rect.left, window.innerWidth - panelWidth - margin) : margin
+  // 按钮在输入区（贴近窗口底部）：下方空间不足面板最小可用高度时向上弹
+  const minPanelSpace = Math.min(window.innerHeight * 0.5, 360)
+  const spaceBelow = rect ? window.innerHeight - rect.bottom - margin : 0
+  const above = !!rect && spaceBelow < minPanelSpace + 12
+  const rawTop = rect ? (above ? rect.top - 4 : rect.bottom + 4) : 56
+  modelPickerAbove.value = above
   modelPickerPos.value = {
-    left: Math.max(8, left),
-    top: Math.max(8, Math.min(top, window.innerHeight - 140)),
+    left: Math.max(margin, left),
+    top: above ? Math.max(margin, rawTop) : Math.max(margin, Math.min(rawTop, window.innerHeight - 140)),
   }
   modelPickerShowEmpty.value = false
   modelPickerQuery.value = ''
@@ -7853,12 +8151,19 @@ const completeAssistantReply = (chatData: any, content: string, metadata?: any) 
     const totalTokens = Number(meta.total_tokens ?? meta.totalTokens ?? 0) || (promptTokens + completionTokens)
     const duration = Date.now() - (lastMessage._startTime || Date.now())
     const speed = duration > 0 && completionTokens > 0 ? (completionTokens / (duration / 1000)) : 0
+    // 缓存命中（来源回报时才写）：0 命中也要记，界面才会显示「缓存 0%」而不是干脆不显示
+    const cachedRaw = meta.cached_tokens ?? meta.cachedTokens
+    const cacheReported = meta.cache_reported === true || meta.cacheReported === true || typeof cachedRaw === 'number'
+    const cachedTokens = typeof cachedRaw === 'number' ? Math.max(0, cachedRaw) : 0
     lastMessage.tokenStats = {
       promptTokens,
       completionTokens,
       totalTokens,
       speed: speed || 0,
-      duration: duration || 0
+      duration: duration || 0,
+      ...(cacheReported
+        ? { cachedTokens, promptTokensTotal: promptTokens, cacheReported: true }
+        : {}),
     }
     delete lastMessage._startTime
   }
@@ -8794,6 +9099,109 @@ const contextUsageVisible = computed(() =>
   currentChat.value?.mode !== 'swarm' &&
   (currentChat.value?.messages || []).some((m) => m.role === 'assistant')
 )
+// ==================== 右上角运行信息（轮/步 · token · 缓存命中） ====================
+
+/** token 数字缩写：1234 → 1.2k，1234567 → 1.2M（标题栏空间有限，不显示长数字） */
+const formatTokenCompact = (n: number): string => {
+  const v = Math.max(0, Number(n) || 0)
+  if (v >= 1_000_000) return String(Number((v / 1_000_000).toFixed(v >= 10_000_000 ? 0 : 1))) + 'M'
+  if (v >= 1000) return String(Number((v / 1000).toFixed(v >= 10_000 ? 0 : 1))) + 'k'
+  return String(Math.round(v))
+}
+
+/**
+ * 本会话累计「轮 / 步」：按 agentTurn 去重后取每轮最后一步编号求和。
+ * - 轮 = 一次用户任务（会话内累计，取最大 turn 编号，跨轮 resume 时 turn 会持续递增）；
+ * - 步 = 一次模型请求 + 它调用的工具；
+ * 同一轮可能因为切模块重进产生多条 assistant 消息，按 turn 取 max(step) 避免重复计数。
+ */
+const agentSessionProgress = computed<{ turns: number; steps: number } | null>(() => {
+  const byTurn = new Map<number, number>()
+  for (const m of (currentChat.value?.messages || []) as any[]) {
+    if (m?.role !== 'assistant') continue
+    const turn = Number(m.agentTurn) || 0
+    if (turn <= 0) continue
+    byTurn.set(turn, Math.max(byTurn.get(turn) || 0, Number(m.agentStep) || 0))
+  }
+  if (!byTurn.size) return null
+  let steps = 0
+  for (const s of byTurn.values()) steps += s
+  return { turns: Math.max(...byTurn.keys()), steps }
+})
+
+/** 「共 N 轮 · M 步」 */
+const agentProgressLabel = computed(() => {
+  const p = agentSessionProgress.value
+  if (!p) return ''
+  return store.locales == 'zh'
+    ? '共 ' + p.turns + ' 轮 · ' + p.steps + ' 步'
+    : p.turns + ' turns · ' + p.steps + ' steps'
+})
+const agentProgressTitle = computed(() => {
+  const p = agentSessionProgress.value
+  if (!p) return ''
+  return store.locales == 'zh'
+    ? '本会话累计：' + p.turns + ' 轮、' + p.steps + ' 步（轮 = 一次任务；步 = 一次模型请求 + 它调用的工具）'
+    : 'This chat in total: ' + p.turns + ' turns, ' + p.steps + ' steps (turn = one task; step = one model request plus its tool calls)'
+})
+
+/**
+ * 本对话累计消耗 + 缓存命中：
+ * - 累计 = 所有助手消息「单个 turn / 单次回复」的 totalTokens 之和；
+ * - 缓存比例 = 所有回报过缓存的回复：命中 token 之和 / 输入 token 之和。
+ */
+const chatUsageStats = computed(() => {
+  let total = 0
+  let cached = 0
+  let cachePrompt = 0
+  for (const m of (currentChat.value?.messages || []) as any[]) {
+    if (m?.role !== 'assistant' || !m.tokenStats) continue
+    total += Number(m.tokenStats.totalTokens) || 0
+    if (m.tokenStats.cacheReported) {
+      cached += Number(m.tokenStats.cachedTokens) || 0
+      cachePrompt += Number(m.tokenStats.promptTokensTotal ?? m.tokenStats.promptTokens) || 0
+    }
+  }
+  const ratio = cachePrompt > 0 ? Math.max(0, Math.min(1, cached / cachePrompt)) : null
+  return { total, cached, cachePrompt, ratio }
+})
+
+/** 对话消耗的 token（累计） */
+const chatUsageLabel = computed(() => {
+  const t = chatUsageStats.value.total
+  if (!t) return ''
+  return formatTokenCompact(t) + ' tok'
+})
+const chatUsageTitle = computed(() => {
+  const s = chatUsageStats.value
+  const lines = store.locales == 'zh'
+    ? [
+        '本对话累计消耗：' + s.total.toLocaleString() + ' tokens（输入 + 输出，含智能体每一轮工具调用）',
+        s.ratio !== null ? '缓存命中：' + s.cached.toLocaleString() + ' / ' + s.cachePrompt.toLocaleString() + ' 输入 tokens' : '',
+      ]
+    : [
+        'Tokens used in this chat: ' + s.total.toLocaleString() + ' (input + output, including every agent turn and tool call)',
+        s.ratio !== null ? 'Cache hit: ' + s.cached.toLocaleString() + ' / ' + s.cachePrompt.toLocaleString() + ' input tokens' : '',
+      ]
+  return lines.filter(Boolean).join('\n')
+})
+
+/** 缓存命中比例：来源没回报缓存字段时不显示 */
+const cacheHitLabel = computed(() => {
+  const ratio = chatUsageStats.value.ratio
+  if (ratio === null) return ''
+  const pct = Math.round(ratio * 100)
+  return store.locales == 'zh' ? '缓存 ' + pct + '%' : 'Cache ' + pct + '%'
+})
+const cacheHitTitle = computed(() => {
+  const s = chatUsageStats.value
+  if (s.ratio === null) return ''
+  const pct = Math.round(s.ratio * 100)
+  return store.locales == 'zh'
+    ? '输入缓存命中比例：' + pct + '%（命中 ' + s.cached.toLocaleString() + ' / 输入 ' + s.cachePrompt.toLocaleString() + ' tokens；仅统计来源回报了缓存字段的轮次）'
+    : 'Prompt cache hit ratio: ' + pct + '% (' + s.cached.toLocaleString() + ' cached / ' + s.cachePrompt.toLocaleString() + ' input tokens; only turns where the provider reported cache usage)'
+})
+
 const contextRingCirc = 2 * Math.PI * 15.5
 const contextUsagePct = computed(() => {
   if (!contextUsageVisible.value) return 0
@@ -10655,28 +11063,92 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .workspace-chip i { font-size: 11px; flex-shrink: 0; }
 .workspace-chip-name { overflow: hidden; text-overflow: ellipsis; }
 .workspace-chip-caret { font-size: 10px; opacity: 0.6; }
-.workspace-picker {
+/* ====== 输入区下拉：统一 chip（保持左侧原有观感）+ 统一面板 ======
+   工作区 / 对话模式 / 检索策略 / 集群运行方式 / 关联项 / 模型共用同一套外壳与行样式；
+   窄窗口（<=560px）下 chip 收成图标，点击仍弹出同一套面板。 */
+.input-controls .composer-chip {
+  flex-shrink: 0;
+  user-select: none;
+  /* 统一 29px：mode-linked-chip 未设 box-sizing，与工作区 chip 并排时会高 2px */
+  box-sizing: border-box;
+  height: 29px;
+}
+.input-controls .composer-chip .composer-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.input-controls .composer-chip .composer-chip-caret {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.6;
+}
+.input-controls .composer-chip.active {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+.input-controls .composer-chip.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+/* 上传附件：与工作区 / 模式 / 模型等 chip 同款图标控件（29x29、同边框、同底色、同悬停反馈） */
+.input-controls .button.composer-icon-btn {
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background-color: var(--menuColor);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+.input-controls .button.composer-icon-btn:hover:not(.send-disabled):not(.disabled) {
+  background-color: var(--menuColor);
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+/* 输入卡片可用宽度不足时：所有 chip 收成图标（只留图标 + 完整 title 提示），点击仍弹出同一套面板。
+   用容器查询而不是窗口媒体查询：右侧栏展开 / 拖宽会让输入卡片变窄而窗口宽度不变。 */
+@container composer (max-width: 560px) {
+  .input-controls .composer-chip {
+    width: 29px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+  }
+  .input-controls .composer-chip .composer-chip-label,
+  .input-controls .composer-chip .composer-chip-caret {
+    display: none;
+  }
+  .input-controls .composer-chip i {
+    font-size: 12px;
+  }
+  .input-controls .composer-panel {
+    min-width: 200px;
+    max-width: 88vw;
+  }
+}
+
+/* 面板外壳：输入区所有下拉面板统一用这一套（圆角 / 阴影 / 内边距 / 行高完全一致） */
+.composer-panel {
   position: absolute;
   left: 0;
-  bottom: 32px;
-  z-index: 40;
-  min-width: 240px;
-  max-width: 420px;
-  max-height: 320px;
-  overflow: auto;
+  bottom: calc(100% + 6px);
+  z-index: 1000;
+  min-width: 220px;
+  max-width: min(420px, 92vw);
+  max-height: 340px;
+  overflow-y: auto;
   padding: 5px;
+  box-sizing: border-box;
   border: 1px solid var(--borderColor);
   border-radius: 8px;
   background: var(--menuColor);
   box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.16);
 }
-.workspace-picker-title {
-  padding: 5px 8px 6px;
-  font-size: 11px;
-  opacity: 0.6;
-  white-space: nowrap;
-}
-.workspace-picker-item {
+/* 面板行：图标 + 名称 + （可选）右侧勾选；各面板共用 */
+.composer-panel-item {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -10685,10 +11157,81 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   cursor: pointer;
   font-size: 12px;
   color: var(--fontColor);
+  white-space: nowrap;
   min-width: 0;
 }
-.workspace-picker-item:hover { background: var(--menuActiveColor); color: var(--fontActiveColor); }
-.workspace-picker-item.active { color: var(--fontActiveColor); }
+.composer-panel-item > i:first-child {
+  flex-shrink: 0;
+  color: var(--fontActiveColor);
+}
+.composer-panel-item:hover {
+  background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
+}
+.composer-panel-item.active {
+  background: color-mix(in srgb, var(--fontActiveColor) 15%, transparent);
+  color: var(--fontActiveColor);
+}
+.composer-panel-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-panel-check {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fontActiveColor);
+}
+/* 面板顶部搜索行（智能体 / 集群成员；与模型面板的搜索框同一套观感） */
+.composer-panel-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  margin-bottom: 5px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.composer-panel-search-icon {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.55;
+}
+.composer-panel-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 11px;
+}
+.composer-panel-search-input::placeholder {
+  color: color-mix(in srgb, var(--fontColor) 45%, transparent);
+}
+.composer-panel-search-clear {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.5;
+  cursor: pointer;
+}
+.composer-panel-search-clear:hover {
+  opacity: 0.9;
+}
+
+.workspace-picker {
+  min-width: 240px;
+  max-width: 420px;
+}
+.workspace-picker-item {
+  min-width: 0;
+}
 .workspace-picker-name { flex-shrink: 0; }
 .workspace-picker-path {
   flex: 1;
@@ -11077,34 +11620,11 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   color: #2d8cf0;
 }
 
-/* Agent 预设选择浮层 */
+/* Agent 预设选择浮层（外壳 / 行样式由 .composer-panel 统一提供，这里只调尺寸） */
 .agent-preset-picker {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  min-width: 180px;
-  max-width: 220px;
-  max-height: 175px;
-  overflow-y: auto;
-  background: var(--menuColor);
-  border: 1px solid var(--borderColor);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-  z-index: 1000;
-  padding: 4px;
-}
-.preset-picker-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--fontColor);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 220px;
+  max-width: 260px;
+  max-height: 280px;
 }
 /* 集群成员浮层：失效引用（预设已删/改名）提示行 */
 .preset-picker-item.swarm-missing {
@@ -11112,9 +11632,9 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 }
 /* 集群成员浮层：比单纯预设列表内容多（成员 + 总结 + 管理预设），放宽高度与宽度 */
 .agent-preset-picker.swarm-picker {
-  min-width: 200px;
-  max-width: 240px;
-  max-height: 300px;
+  min-width: 240px;
+  max-width: 300px;
+  max-height: 340px;
 }
 /* 集群成员浮层：名称自适应 + 勾选序号徽标（发言顺序） */
 .swarm-picker-name {
@@ -11136,17 +11656,6 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   color: var(--backgroundColor);
   background: #2d8cf0;
 }
-.preset-picker-item:hover {
-  background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
-}
-.preset-picker-item.active {
-  background: color-mix(in srgb, var(--fontActiveColor) 15%, transparent);
-  color: var(--fontActiveColor);
-}
-.preset-picker-item i {
-  color: var(--fontActiveColor);
-  flex-shrink: 0;
-}
 .preset-picker-empty {
   padding: 8px;
   font-size: 11px;
@@ -11154,21 +11663,12 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   text-align: center;
 }
 
-/* 浏览器模式：共享知识库 / 上传 选择浮层 */
+/* 浏览器模式：共享知识库 / 上传 选择浮层（外壳 / 行样式由 .composer-panel 统一提供） */
 .shared-kb-picker {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  min-width: 220px;
-  max-width: 260px;
-  max-height: 220px;
-  overflow-y: auto;
-  background: var(--menuColor);
-  border: 1px solid var(--borderColor);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  min-width: 240px;
+  max-width: 300px;
+  max-height: 260px;
   z-index: 1001;
-  padding: 4px;
 }
 .shared-kb-divider {
   height: 1px;
@@ -11330,7 +11830,7 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  min-width: 210px;
   position: relative;
 }
 
@@ -11357,10 +11857,44 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   display: none;
 }
 
-/* 上下文占用圆环（chat-header 左侧） */
+/* 右上角运行信息（轮/步 · 对话消耗 token · 缓存命中 · 上下文环）：
+   存在感做低——只留小图标 + 弱化文字，不做胶囊边框，避免抢聊天标题的视觉重量 */
+.chat-header-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.chat-stat {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fontColor);
+  opacity: 0.55;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  user-select: none;
+}
+.chat-stat i {
+  font-size: 9px;
+  opacity: 0.85;
+}
+.chat-stat-progress,
+.chat-stat-cache {
+  opacity: 0.55;
+}
+.chat-stat:hover {
+  opacity: 0.8;
+}
+
+/* 上下文占用圆环（chat-header 左侧）：比信息文字略小，弱化成状态点 */
 .context-usage {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -11368,17 +11902,17 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   cursor: default;
 }
 .context-ring {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
 }
 .context-ring-bg {
   fill: none;
   stroke: var(--borderColor);
-  stroke-width: 2.5;
+  stroke-width: 3;
 }
 .context-ring-val {
   fill: none;
-  stroke-width: 3;
+  stroke-width: 3.5;
   stroke-linecap: round;
   transition: stroke-dasharray .3s ease, stroke .3s ease;
 }
@@ -11400,76 +11934,64 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   min-width: 0;
 }
 
-/* 模型选择按钮：只显示当前模型名（来源在 title 提示里），外观沿用原 .model-select 的无边框风格 */
-.model-picker-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 180px;
-  min-width: 72px;
-  height: 30px;
-  padding: 0 6px;
-  margin: 0;
-  box-sizing: border-box;
+/* 输入区左下角的模型选择芯片：外观与工作区 / 对话模式 / 已关联项同一套
+   （基础样式来自 .mode-linked-chip：29px 高、同边框、同底色、同字号） */
+.input-controls .model-chip {
+  max-width: 200px;
+  flex-shrink: 0;
+}
+.input-controls .model-chip .mode-linked-name {
   flex: 0 1 auto;
-  border: 0;
-  border-radius: 6px;
-  background-color: var(--backgroundColor);
-  color: var(--fontColor);
-  cursor: pointer;
-  font-size: 12px;
-  overflow: hidden;
-  white-space: nowrap;
-  user-select: none;
-}
-.model-picker-btn:hover:not(.disabled),
-.model-picker-btn.active {
-  /* 悬浮只用中性淡色（不用菜单高亮色）：与正常背景同一色系 */
-  background-color: color-mix(in srgb, var(--fontColor) 7%, var(--backgroundColor));
-  color: var(--fontActiveColor);
-}
-.model-picker-btn.disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-/* 模型名：唯一文字，占满按钮宽度并省略 */
-.model-picker-btn-model {
-  flex: 1;
   min-width: 0;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-weight: 500;
 }
-.model-picker-btn .model-picker-btn-caret {
+.input-controls .model-chip-caret {
   flex-shrink: 0;
   font-size: 10px;
   opacity: 0.6;
 }
+.input-controls .model-chip.active {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+.input-controls .model-chip.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
-/* 模型选择面板（teleport 到 body：fixed 定位，避免被 chat-header 的 overflow 裁剪） */
+/* 模型选择面板（teleport 到 body：fixed 定位，避免被 chat-header 的 overflow 裁剪）
+   外壳视觉与输入区其它面板一致（.composer-panel 提供圆角 / 边框 / 阴影），这里是定位与高度覆盖 */
 .model-picker-panel {
   position: fixed;
+  bottom: auto;
   z-index: 1000;
   width: 240px;
+  min-width: 0;
+  max-width: min(420px, 92vw);
   max-height: 60vh;
   display: flex;
   flex-direction: column;
   background: var(--menuColor);
   border: 1px solid var(--borderColor);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.16);
   overflow: hidden;
+  padding: 5px;
   font-size: 12px;
   color: var(--fontColor);
 }
-/* 顶部搜索框（取代原来的「选择模型」标题） */
+/* 按钮在输入区（贴近窗口底部）：下方放不下面板时向上弹（top 取按钮上沿，用 -100% 上移） */
+.model-picker-panel.above {
+  transform: translateY(-100%);
+}
+/* 顶部搜索框（取代原来的「选择模型」标题）：与其它面板的行同宽、圆角内嵌 */
 .model-picker-search {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--borderColor);
+  padding: 5px 8px;
+  margin-bottom: 5px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
   flex-shrink: 0;
 }
 .model-picker-search-icon {
@@ -11495,22 +12017,26 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 }
 .model-picker-refresh {
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  line-height: 18px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
   text-align: center;
   border-radius: 4px;
   cursor: pointer;
-  color: var(--fontActiveColor);
+  /* 存在感做低：与搜索框里的图标同级，悬停才提亮 */
+  color: var(--fontColor);
+  font-size: 10px;
+  opacity: 0.45;
 }
 .model-picker-refresh:hover {
-  background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent);
+  opacity: 0.85;
+  background: color-mix(in srgb, var(--fontColor) 8%, transparent);
 }
 .model-picker-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px;
+  padding: 0;
 }
 /* 来源分组标题（吸顶，长列表滚动时仍能看到自己属于哪个来源；点击 = 切到该来源并探测） */
 .model-picker-group {
@@ -11522,7 +12048,7 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   color: color-mix(in srgb, var(--fontColor) 60%, transparent);
   white-space: nowrap;
   position: sticky;
-  top: -4px;
+  top: 0;
   background: var(--menuColor);
   z-index: 1;
   cursor: pointer;
@@ -11587,9 +12113,9 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .model-picker-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   padding: 5px 8px;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -13964,6 +14490,9 @@ select {
   background-color: var(--backgroundColor);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.07);
   transition: border-color .2s ease, box-shadow .2s ease, width .32s ease;
+  /* 输入区芯片的折叠按「卡片实际可用宽度」判断（窗口不变、右侧栏展开/拖宽时也会跟着折叠） */
+  container-type: inline-size;
+  container-name: composer;
 }
 /* 聚焦时卡片高亮（现代输入条的典型反馈） */
 .input-container:focus-within {
@@ -14548,6 +15077,43 @@ select {
   width: auto;
   font-size: 11px;
   opacity: 0.9;
+}
+
+/* ====== 聊天列表右键菜单：一级项 + 二级子菜单 ======
+   一级项右侧显示当前值 + 右箭头，悬停 / 点击展开子菜单（子菜单相对一级项定位，
+   不再让所有选项挤在同一层）。 */
+.chat-nav-menu .chat-nav-item {
+  position: relative;
+}
+.chat-nav-menu .chat-nav-current {
+  margin-left: auto;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  opacity: 0.5;
+}
+.chat-nav-menu .chat-nav-arrow {
+  width: auto;
+  margin-left: 2px;
+  font-size: 11px;
+  opacity: 0.55;
+}
+.chat-nav-menu .chat-nav-submenu {
+  /* 覆盖共享 .context-menu 的 fixed 定位：子菜单要贴着所属一级项 */
+  position: absolute;
+  left: 100%;
+  top: -5px;
+  z-index: 100001;
+  min-width: 210px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+/* 窗口右边空间不足时向左展开 */
+.chat-nav-menu .chat-nav-submenu.submenu-flip {
+  left: auto;
+  right: 100%;
 }
 
 

@@ -67,7 +67,15 @@ interface StepResult {
   content: string
   toolCalls: ToolCall[]
   reasoning?: string
-  usage?: { promptTokens: number; completionTokens: number; totalTokens: number }
+  usage?: {
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+    /** 本步 prompt 命中前缀缓存的 token 数（来源不报缓存时为 undefined） */
+    cachedTokens?: number
+    /** 来源是否回报了缓存字段（0 命中也是有效信息） */
+    cacheReported?: boolean
+  }
   finishReason?: string
 }
 
@@ -482,6 +490,12 @@ class RendererAgent {
                 promptTokens: typeof pt === 'number' ? pt : 0,
                 completionTokens: typeof ct === 'number' ? ct : 0,
                 totalTokens: metadata?.total_tokens ?? metadata?.totalTokens ?? ((typeof pt === 'number' ? pt : 0) + (typeof ct === 'number' ? ct : 0)),
+              }
+              // 缓存命中（ai-core 已把各家 usage 归一成 cached_tokens / cache_reported）
+              const cached = metadata?.cached_tokens ?? metadata?.cachedTokens
+              if (typeof cached === 'number') {
+                usage.cachedTokens = cached
+                usage.cacheReported = metadata?.cache_reported === true || metadata?.cacheReported === true
               }
             }
           }

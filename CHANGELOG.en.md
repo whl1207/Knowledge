@@ -7,6 +7,34 @@
 
 ---
 
+## 2026-11-02
+
+### Added
+
+- **Skills can be organized in multi-level category folders**: skills nested two or three levels deep are discovered and grouped by folder.
+- **Plugin Management supports multi-level category folders**: grouped by folder with collapsible groups, group All / None, and the same cards and search as Skill Management.
+- **Skill Management and preset Skill tabs group by folder**: collapsible group headers show the enabled count and offer group All / None (All / None for preset selection).
+- **Run info in the top-right corner**: total turns / steps for this chat, tokens used (with a cache hit ratio when the provider reports it) and a smaller context ring, using Font Awesome 5 icons.
+- **The agent picker can be searched**: type a name to filter, matching the model picker.
+- **Input-bar selectors are now custom panels**: chat mode / retrieval strategy / swarm run mode match the workspace and model chips and collapse to icons on narrow windows.
+- **The chat list right-click menu has submenus**: Order / Sort / View move into submenus while Archive and Delete stay on the first level.
+
+### Improved
+
+- **Model selection moved to the bottom-left of the input bar**: same style and height as the workspace and mode controls.
+- **Skill Management hides the right pane until a skill is opened**: the list fills the width, and the file tree plus editor appear only after clicking a skill (click again or use × to close).
+- **Plugin Management keeps its detail pane closed by default**: clicking a plugin opens it, and clicking again or × closes it; the card list fills the width while nothing is selected, matching Skill Management.
+- **Skill cards and the upload button are unified**: cards show version / file count / toggle, and the attach button uses the same 29px icon style.
+- **The workspace panel dropped its duplicated explanation**, which now lives in the chip's tooltip.
+- **The Skill Management search box has room above it and the right edge is no longer clipped**; the model panel's refresh button is more subtle.
+- **The "Set as default" button in LLM settings** now matches the "Default" tag height and no longer stretches the title row.
+
+### Fixed
+
+- **The right side of the Skill Management panel was cut off**: width overflow is fixed, so the list and cards show in full.
+- **Input-bar buttons did not collapse after opening or widening the right sidebar**: folding is now based on the input card's actual available width, so buttons become icons when space runs out.
+- **The right sidebar's content was clipped after dragging it fully left**: its maximum width is now computed from the available space, always leaving room for the chat area.
+
 ## 2026-11-01
 
 ### Added

@@ -14,6 +14,7 @@
 import {
   DOCK_DEFAULT_WIDTH,
   DOCK_MAX_WIDTH,
+  DOCK_MIN_CHAT_WIDTH,
   DOCK_MIN_WIDTH,
   DOCK_TAB_KINDS,
   activateDockTab,
@@ -21,6 +22,7 @@ import {
   addDockPlaceholder,
   addDockTab,
   clampDockWidth,
+  clampDockWidthInRoom,
   closeDockTab,
   configureDockTab,
   createDockTab,
@@ -62,6 +64,14 @@ export function runChatDockSelfTest(): ChatDockCase[] {
   add('宽度：过大 → 上限', clampDockWidth(99999) === DOCK_MAX_WIDTH)
   add('宽度：合法值四舍五入保留', clampDockWidth(411.6) === 412, String(clampDockWidth(411.6)))
   add('宽度：字符串数字可用', clampDockWidth('520') === 520)
+
+  // 1b. 按「聊天区 + 右侧栏可用总宽」夹取：拖动到最左也不能把聊天区挤没 / 撑出容器
+  add('房间夹取：宽窗口仍受 900 上限约束', clampDockWidthInRoom(2000, 1400) === DOCK_MAX_WIDTH)
+  add('房间夹取：按房间里给聊天区留 ' + DOCK_MIN_CHAT_WIDTH + 'px', clampDockWidthInRoom(900, 1000) === 1000 - DOCK_MIN_CHAT_WIDTH, String(clampDockWidthInRoom(900, 1000)))
+  add('房间夹取：默认宽度在普通窗口里不超上限', clampDockWidthInRoom(DOCK_DEFAULT_WIDTH, 679) === 679 - DOCK_MIN_CHAT_WIDTH, String(clampDockWidthInRoom(DOCK_DEFAULT_WIDTH, 679)))
+  add('房间夹取：房间极小仍保底右侧栏最小宽度', clampDockWidthInRoom(900, 400) === DOCK_MIN_WIDTH, String(clampDockWidthInRoom(900, 400)))
+  add('房间夹取：roomWidth 非法时只做固定夹取', clampDockWidthInRoom(500, 0) === 500)
+  add('房间夹取：目标值非法时落回默认值', clampDockWidthInRoom('x', 800) === DOCK_DEFAULT_WIDTH)
 
   // 2. 默认状态：空面板（与新标签页一样，用户自己选使用方式）+ 默认收起
   {

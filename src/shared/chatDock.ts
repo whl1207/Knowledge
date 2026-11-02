@@ -47,6 +47,11 @@ export interface ChatDockState {
 export const DOCK_DEFAULT_WIDTH = 360
 export const DOCK_MIN_WIDTH = 260
 export const DOCK_MAX_WIDTH = 900
+/**
+ * 右侧栏最多只能占到「聊天区 + 右侧栏总宽 - 这个值」：
+ * 保证把分隔条一路拖到最左边时，中间聊天区仍然可见、右侧栏内容不会被容器裁掉。
+ */
+export const DOCK_MIN_CHAT_WIDTH = 320
 
 /** 新标签页里可选的类型（顺序 = 选项顺序；new / file 不在此列） */
 export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch']
@@ -80,6 +85,26 @@ export function clampDockWidth(width: unknown): number {
   const n = Math.round(Number(width))
   if (!Number.isFinite(n)) return DOCK_DEFAULT_WIDTH
   return Math.max(DOCK_MIN_WIDTH, Math.min(DOCK_MAX_WIDTH, n))
+}
+
+/**
+ * 按「聊天区 + 右侧栏的可用总宽」夹取右侧栏宽度。
+ *
+ * 固定上限 900 只在超宽窗口下才够用：普通窗口里把分隔条拖到最左边时，
+ * 右侧栏会先被撑到 900，超过容器后内容就被裁掉（表现为「面板显示不全」）。
+ * 这里在固定上限之外再留出 `DOCK_MIN_CHAT_WIDTH` 给中间聊天区。
+ *
+ * @param width 目标宽度
+ * @param roomWidth 聊天区 + 右侧栏可用总宽（不含左侧聊天列表）；非正数时只做固定夹取
+ */
+export function clampDockWidthInRoom(width: unknown, roomWidth: unknown): number {
+  const base = clampDockWidth(width)
+  const room = Number(roomWidth)
+  if (!Number.isFinite(room) || room <= 0) return base
+  // 窗口太窄时「给聊天区留 320」可能与「右侧栏最小 260」冲突：此时以右侧栏最小宽度为准，
+  // 至少保证它自身是完整可用的（再窄就由窄屏整屏模式接管）。
+  const max = Math.max(DOCK_MIN_WIDTH, Math.min(DOCK_MAX_WIDTH, Math.floor(room - DOCK_MIN_CHAT_WIDTH)))
+  return Math.max(DOCK_MIN_WIDTH, Math.min(max, base))
 }
 
 /** 新建一个标签（同类型可多个，id 保证不与已有标签冲突） */

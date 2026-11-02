@@ -9,171 +9,118 @@
   源码改动会触发自动重载（fs.watch）。
 -->
 <template>
-  <div class="plugin-panel" :class="{ tall: isTallLayout }">
+  <div class="plugin-panel" :class="{ tall: isTallLayout, 'has-selection': !!selected }">
+    <div class="manage-content">
+      <div class="manage-split">
     <!-- ===================== 左侧：插件导航（安装 / 搜索 / 启用开关 / 状态） =====================
          细长窗口下与右侧详情各占满整屏互相切换（见 .tall 样式） -->
-    <aside class="plugin-sidebar" v-show="!isTallLayout || showNavScreen">
-      <div class="plugin-toolbar">
-        <button
-          class="toolbar-btn primary"
-          @click="installFromFolder"
-          :title="zh ? '从本地文件夹安装插件' : 'Install a plugin from a local folder'"
+      <div class="manage-left" v-show="!isTallLayout || showNavScreen">
+        <!-- 左侧工具栏：安装 / 刷新 / 重新扫描 / 打开目录 / 选择目录 / 恢复默认（与「技能管理」同一套样式与顺序） -->
+        <div class="sk-nav-toolbar">
+          <button class="sk-nav-btn primary" @click="installFromFolder"
+            :title="zh ? '从本地文件夹安装插件' : 'Install a plugin from a local folder'">
+            <i class="fa fa-plus"></i><span class="sk-nav-btn-label">{{ zh ? '安装' : 'Install' }}</span>
+          </button>
+          <button class="sk-nav-btn" @click="refresh" :title="zh ? '刷新列表' : 'Refresh list'">
+            <i class="fa fa-refresh"></i>
+          </button>
+          <button class="sk-nav-btn" @click="rescan"
+            :title="zh ? '重新扫描插件目录（含子文件夹里的新插件；会装载插件代码，需确认）' : 'Rescan plugins folder (including new plugins in subfolders; loads plugin code, asks for confirmation)'">
+            <i class="fa fa-search-plus"></i>
+          </button>
+          <button class="sk-nav-btn" @click="openDir()" :title="zh ? '在资源管理器中打开插件目录' : 'Open the plugins folder in Explorer'">
+            <i class="fa fa-external-link"></i>
+          </button>
+          <button class="sk-nav-btn" @click="chooseRoot" :title="zh ? '选择插件目录' : 'Select plugins folder'">
+            <i class="fa fa-folder-open"></i>
+          </button>
+          <button class="sk-nav-btn" :disabled="!customRoot" @click="resetRoot"
+            :title="zh ? '恢复默认插件目录（用户数据目录下的 plugins）' : 'Reset to the default plugins folder (userData/plugins)'">
+            <i class="fa fa-undo"></i>
+          </button>
+        </div>
+
+        <div v-if="unavailable" class="sk-state">
+          <div class="empty-hint">
+            <i class="fa fa-info-circle" style="font-size: 20px"></i>
+            <span>{{ zh ? '插件管理在当前环境不可用（找不到可读的插件目录 / 宿主未就绪）' : 'Plugin management is unavailable here (no readable plugins folder / host not ready)' }}</span>
+          </div>
+        </div>
+        <div v-else-if="!plugins.length" class="sk-state">
+          <div class="empty-hint">
+            <i class="fa fa-puzzle-piece" style="font-size: 24px"></i>
+            <span>{{ zh
+              ? '还没有插件。点上方「安装」选择插件文件夹，或把插件文件夹放进插件目录后点「重新扫描」。插件可以直接放在插件目录下，也可以按用途分文件夹存放（会扫描各级子文件夹）。'
+              : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders.' }}</span>
+            <span v-if="androidHost" class="plugin-empty-note">
+              {{ zh
+                ? '安卓：插件目录在应用私有存储里（插件目录用 data: 开头时指向应用私有目录）。用「安装插件」从手机里选插件文件夹最稳妥；把插件直接丢进公共「Documents/plugins」可能因系统权限读不到。'
+                : 'Android: the plugins folder lives in app-private storage (a folder named with the data: prefix). Prefer “Install” to copy a plugin folder from your phone; dropping plugins into public Documents/plugins may be unreadable due to system permissions.' }}
+            </span>
+          </div>
+        </div>
+        <ToolGroupList
+          v-else
+          class="sk-groups"
+          :sections="pluginSections"
+          :layout="pluginListLayout"
+          :search-placeholder="zh ? '搜索插件（名称 / id / 描述 / 文件夹）' : 'Search plugins (name / id / description / folder)'"
+          :empty-text="zh ? '没有匹配的插件' : 'No matching plugins'"
+          :only-enabled-text="zh ? '已启用' : 'Enabled'"
+          :bulk-on-text="zh ? '全开' : 'All'"
+          :bulk-off-text="zh ? '全关' : 'None'"
+          @bulk="applyPluginBulk"
         >
-          <i class="fa fa-plus"></i><span>{{ zh ? '安装' : 'Install' }}</span>
-        </button>
-        <button class="toolbar-btn" @click="refresh" :title="zh ? '刷新列表' : 'Refresh list'">
-          <i class="fa fa-refresh"></i>
-        </button>
-        <button
-          class="toolbar-btn"
-          @click="rescan"
-          :title="zh ? '重新扫描插件目录（含子文件夹里的新插件；会装载插件代码，需确认）' : 'Rescan plugins folder (including new plugins in subfolders; loads plugin code, asks for confirmation)'"
-        >
-          <i class="fa fa-search-plus"></i>
-        </button>
-        <button class="toolbar-btn" @click="openDir()" :title="zh ? '在资源管理器中打开插件目录' : 'Open the plugins folder in Explorer'">
-          <i class="fa fa-external-link"></i>
-        </button>
-        <button class="toolbar-btn" @click="chooseRoot" :title="zh ? '选择插件目录' : 'Select plugins folder'">
-          <i class="fa fa-folder-open"></i>
-        </button>
-      </div>
+          <template #row="{ row }">
+            <PluginCard
+              :name="row.labelZh"
+              :description="row.description"
+              :version="row.version"
+              :tools="row.tools"
+              :status="row.status"
+              :on="row.on"
+              :active="selectedId === row.id"
+              :compact="pluginListLayout === 'list'"
+              dim-when-off
+              :toggle-title-on="zh ? '已启用：点击禁用（工具与界面元素立即消失）' : 'Enabled: click to disable (tools and UI elements disappear immediately)'"
+              :toggle-title-off="zh ? '已禁用：点击启用（会先展示权限并要求确认）' : 'Disabled: click to enable (shows permissions, asks for confirmation)'"
+              @open="selectPlugin(row.id)"
+              @toggle="togglePluginOn(row.id)"
+            />
+          </template>
+        </ToolGroupList>
 
-      <!-- 搜索过滤：名称 / id / 文件夹 / 权限 / 工具 / 描述 / 状态 任一命中即显示 -->
-      <div class="plugin-sidebar-search">
-        <i class="fa fa-search"></i>
-        <input
-          v-model="keyword"
-          spellcheck="false"
-          :placeholder="zh ? '搜索插件（名称 / id / 文件夹 / 权限 / 工具）' : 'Search plugins (name / id / folder / permission / tool)'"
-        />
-        <i
-          v-if="keyword"
-          class="fa fa-times-circle plugin-search-clear"
-          :title="zh ? '清除搜索' : 'Clear search'"
-          @click="keyword = ''"
-        ></i>
-      </div>
+        <!-- 被跳过的插件文件夹：右侧详情收起后仍能在左栏看到提示 -->
+        <div v-if="invalidNamedDirs.length" class="plugin-skipped-hint" :title="invalidNamedDirs.join('\n')">
+          <i class="fa fa-exclamation-circle"></i>
+          <span>{{ zh ? invalidNamedDirs.length + ' 个文件夹被跳过' : invalidNamedDirs.length + ' folder(s) skipped' }}</span>
+        </div>
 
-      <div class="plugin-nav-list scoll">
-        <div v-if="unavailable" class="plugin-empty">
-          <i class="fa fa-info-circle"></i>
-          {{ zh ? '插件管理在当前环境不可用（找不到可读的插件目录 / 宿主未就绪）' : 'Plugin management is unavailable here (no readable plugins folder / host not ready)' }}
-        </div>
-        <div v-else-if="!plugins.length" class="plugin-empty">
-          <span>{{ zh
-            ? '还没有插件。点上方「安装插件」选择插件文件夹，或把插件文件夹放进插件目录后点「重新扫描」。插件可以直接放在插件目录下，也可以按用途分文件夹存放（会扫描各级子文件夹）。'
-            : 'No plugins yet. Click “Install” to pick a plugin folder, or drop one into the plugins folder and click “Rescan”. Plugins may sit directly in the plugins folder or inside category subfolders.' }}</span>
-          <span v-if="androidHost" class="plugin-empty-note">
-            {{ zh
-              ? '安卓：插件目录在应用私有存储里（插件目录用 data: 开头时指向应用私有目录）。用「安装插件」从手机里选插件文件夹最稳妥；把插件直接丢进公共「Documents/plugins」可能因系统权限读不到。'
-              : 'Android: the plugins folder lives in app-private storage (a folder named with the data: prefix). Prefer “Install” to copy a plugin folder from your phone; dropping plugins into public Documents/plugins may be unreadable due to system permissions.' }}
-          </span>
-        </div>
-        <div v-else-if="!filteredPlugins.length" class="plugin-empty">
-          {{ zh ? `没有匹配「${keyword.trim()}」的插件。` : `No plugins match “${keyword.trim()}”.` }}
-          <span class="plugin-empty-clear" @click="keyword = ''">{{ zh ? '清除搜索' : 'Clear search' }}</span>
-        </div>
-        <template v-else>
-          <!-- 拖动排序（vuedraggable）：顺序 = 导航栏插件图标 / 启动器网格的顺序。
-               #item 插槽每条目**只能有一个根节点**（见 src/shared/draggableSlot.selftest.ts），
-               所以行本身必须是插槽唯一根元素，行内的把手/开关放在它里面。 -->
-          <draggable
-            v-model="draggablePlugins"
-            item-key="id"
-            class="plugin-nav-drag-list"
-            :animation="160"
-            ghost-class="plugin-nav-ghost"
-            chosen-class="plugin-nav-chosen"
-            :force-fallback="true"
-            :fallback-on-body="true"
-            :disabled="!canReorder"
-            :handle="coarsePointer ? '.plugin-nav-grip' : undefined"
-            filter=".plugin-nav-toggle"
-            :touch-start-threshold="8"
-          >
-            <template #item="{ element: p }">
-              <div
-                class="plugin-nav-item"
-                :class="{ active: selectedId === p.id, disabled: !p.enabled }"
-                :title="`${p.name} · ${p.id}`"
-                @click="selectPlugin(p.id)"
-              >
-                <div class="plugin-nav-top">
-                  <!-- 拖动把手：整行可拖，这里只是「可以拖」的视觉提示 -->
-                  <i
-                    v-if="canReorder"
-                    class="fa fa-bars plugin-nav-grip"
-                    :title="zh ? '按住拖动调整顺序（导航栏插件图标顺序随之变化）' : 'Drag to reorder (the navbar icon order follows)'"
-                  ></i>
-                  <span class="plugin-nav-icon" :class="`status-${p.status}`"><i :class="statusIcon(p.status)"></i></span>
-                  <span class="plugin-nav-name">{{ p.name }}</span>
-                  <span
-                    class="plugin-nav-toggle"
-                    :class="{ on: p.enabled }"
-                    :title="p.enabled
-                      ? (zh ? '点击禁用（工具与界面元素立即消失）' : 'Click to disable (tools and UI elements disappear immediately)')
-                      : (zh ? '点击启用（会先展示权限并要求确认）' : 'Click to enable (shows permissions and asks for confirmation)')"
-                    @click.stop="setEnabled(p, !p.enabled)"
-                  ><span class="toggle-knob"></span></span>
-                </div>
-                <div class="plugin-nav-meta">
-                  <span class="plugin-nav-status">
-                    <i class="plugin-nav-dot" :class="`status-${p.status}`"></i>{{ statusLabel(p.status) }}
-                  </span>
-                  <span class="plugin-nav-badge">v{{ p.version }}</span>
-                  <span v-if="p.tools.length" class="plugin-nav-tools" :title="zh ? '已注册的工具（scope = plugin:id）' : 'Registered tools (scope = plugin:id)'">
-                    <i class="fa fa-wrench"></i>{{ p.tools.length }}
-                  </span>
-                </div>
-              </div>
-            </template>
-          </draggable>
-        </template>
-      </div>
-
-      <!-- 底部通栏：数量（含搜索命中数）+ 安全声明 / 可注入服务 / 插件目录 -->
-      <div class="plugin-sidebar-foot">
-        <div class="plugin-foot-row">
-          <span class="plugin-foot-count">
-            {{ kw ? `${filteredPlugins.length} / ${plugins.length}` : plugins.length }} {{ zh ? '个插件' : 'plugins' }}
-          </span>
-          <span class="plugin-foot-icons">
-            <i
-              v-if="orderCustomized"
-              class="fa fa-sort-amount-down plugin-foot-icon action"
-              :title="zh ? '导航顺序已自定义：恢复宿主默认顺序（各插件声明 order 的顺序）' : 'Custom nav order: reset to the host default order'"
-              @click="resetOrder"
-            ></i>
-            <i
-              v-if="customRoot"
-              class="fa fa-undo plugin-foot-icon action"
-              :title="zh ? '恢复默认插件目录（用户数据目录下的 plugins）' : 'Reset to the default plugins folder (userData/plugins)'"
-              @click="resetRoot"
-            ></i>
-            <i v-if="services.length" class="fa fa-plug plugin-foot-icon" :title="servicesHint"></i>
-            <i class="fa fa-exclamation-triangle plugin-safe-icon" :title="securityNotice"></i>
-          </span>
-        </div>
-        <!-- 排序提示：拖动顺序 = 导航栏插件图标 / 启动器网格的顺序（用户明确问过这件事，写在界面上） -->
-        <div v-if="canReorder" class="plugin-order-hint">
-          <i class="fa fa-bars"></i>
-          <span>{{ zh
-            ? (orderCustomized
-              ? '已按你的拖动顺序排列：导航栏的插件图标与「全部插件」网格都按这个顺序显示'
-              : '按住左侧 ≡ 图标拖动可调整顺序；导航栏的插件图标顺序会跟着这个顺序走')
-            : (orderCustomized
-              ? 'Ordered as you dragged: navbar plugin icons and the “All plugins” grid follow it'
-              : 'Drag the ≡ handle on the left to reorder; the navbar plugin icon order follows it') }}</span>
-        </div>
-        <div class="folder-path" :title="rootDir || (zh ? '未设置' : 'Not set')">
-          <i class="fa fa-folder"></i> {{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}
+        <!-- 底栏（与技能管理一致）：数量 + 安全声明 / 服务 / 顺序 + 插件目录 -->
+        <div class="sk-nav-foot">
+          <div class="sk-foot-row">
+            <span class="sk-foot-count">
+              {{ plugins.length }}{{ zh ? ' 个插件' : ' plugins' }}
+              <template v-if="plugins.length"> · {{ enabledPluginCount }}{{ zh ? ' 启用' : ' enabled' }}</template>
+            </span>
+            <span class="sk-foot-icons">
+              <i v-if="orderCustomized" class="fa fa-sort-amount-down sk-foot-icon action"
+                :title="zh ? '导航顺序已自定义：恢复宿主默认顺序（各插件声明 order 的顺序）' : 'Custom nav order: reset to the host default order'"
+                @click="resetOrder"></i>
+              <i v-if="services.length" class="fa fa-plug sk-foot-icon" :title="servicesHint"></i>
+              <i class="fa fa-exclamation-triangle sk-foot-icon plugin-safe-icon" :title="securityNotice"></i>
+            </span>
+          </div>
+          <div class="sk-foot-path" @click="openDir()" :title="rootDir || (zh ? '未设置' : 'Not set')">
+            <i class="fa fa-folder"></i>
+            <span class="sk-foot-path-text">{{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}</span>
+          </div>
         </div>
       </div>
-    </aside>
 
     <!-- ===================== 右侧：插件详情（详情 / 配置 / 日志 / 数据） ===================== -->
-    <section class="plugin-content scoll" v-show="!isTallLayout || !showNavScreen">
+    <!-- 右侧详情：默认不显示（与「技能管理」一致），点左侧插件才出现 -->
+    <section v-if="selected" class="plugin-content scoll" v-show="!isTallLayout || !showNavScreen">
       <!-- 细长窗口：详情屏左上角返回（回到整屏插件列表） -->
       <div v-if="isTallLayout" class="plugin-back-bar">
         <div class="plugin-back" @click="showNavScreen = true"
@@ -235,6 +182,13 @@
                 :title="zh ? '在资源管理器中打开该插件目录' : 'Open this plugin folder in Explorer'"
               >
                 <i class="fa fa-folder-open"></i>
+              </button>
+              <button
+                class="head-btn"
+                @click="closeDetail"
+                :title="zh ? '收起详情，回到整宽插件列表（也可以再点一次该插件）' : 'Close details and return to the full-width list (or click the plugin again)'"
+              >
+                <i class="fa fa-times"></i>
               </button>
               <button
                 class="head-btn danger"
@@ -587,14 +541,9 @@
           </div>
         </div>
       </template>
-
-      <div v-else class="plugin-content-empty">
-        <i class="fa fa-cube" style="font-size: 22px"></i>
-        <span>{{ zh
-          ? '在左侧选择一个插件，即可在右侧查看详情 / 配置 / 日志 / 数据。'
-          : 'Select a plugin on the left to view its details, config, logs and data here.' }}</span>
-      </div>
     </section>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -632,9 +581,16 @@ import {
   type PluginGrantEntry,
 } from '@/lib/plugin/pluginData'
 import type { PluginSnapshot, PluginStatus, PluginLogLine, PluginEvent } from '@/types/plugin'
-import draggable from 'vuedraggable'
-// 插件顺序（拖动排序）：导航栏图标 / 启动器网格 / 插件子窗口图标栏都按这份顺序
+// 插件顺序（导航栏图标 / 启动器网格 / 插件子窗口图标栏都按这份顺序；管理面板按它展示）
 import { commitPluginOrder, sortPluginsByOrder, usePluginOrder } from '@/lib/plugin/navOrder'
+// 与「技能管理」共用同一套列表外壳 / 卡片 / 文件夹分组：
+//  - ToolGroupList：分组 / 折叠 / 搜索 / 只看已启用 / 组内全开全关；
+//  - PluginCard：一张插件卡（图标 / 名称 / 描述 / 版本 / 工具数 / 开关）；
+//  - groupSkillRowsByFolder：按 folder 分桶（纯逻辑，与技能面板共用心智模型）。
+import ToolGroupList from './ToolGroupList.vue'
+import PluginCard from './PluginCard.vue'
+import { groupSkillRowsByFolder } from '@/lib/agent/skillFolders'
+import type { GroupableToolRow, ToolGroupSection } from '@/lib/agent/toolGroups'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -655,10 +611,6 @@ const services = ref<string[]>([])
 const unavailable = ref(false)
 /** 目录名不能作为插件 id 而被跳过的插件文件夹（相对插件目录；有清单但名字非法） */
 const invalidNamedDirs = ref<string[]>([])
-/** 搜索关键词（名称 / id / 文件夹 / 权限 / 工具 / 描述 / 状态 任一命中即显示） */
-const keyword = ref('')
-const kw = computed(() => keyword.value.trim().toLowerCase())
-
 /** 安全声明（悬停提示；与「详情 → 权限」配合看该插件申请的宿主能力） */
 const securityNotice = computed(() => (zh.value
   ? '插件以宿主权限运行\n\n插件代码与主进程同进程，不受工作区沙箱保护。启用前请确认来源可信；列表里每条插件的「权限」即该插件申请的宿主能力。'
@@ -669,86 +621,130 @@ const servicesHint = computed(() => (zh.value
   ? `宿主可注入服务（插件 inject 后可用，共 ${services.value.length} 个）：\n${services.value.join('\n')}`
   : `Host services available for inject (${services.value.length}):\n${services.value.join('\n')}`))
 
-/** 搜索过滤后的插件列表（空关键词 = 全部）
- *  顺序 = 用户在插件管理里拖出来的插件顺序（见 lib/plugin/navOrder.ts）；
- *  导航栏图标 / 启动器网格 / 插件子窗口图标栏都以这份顺序为准，三处一致。 */
-const filteredPlugins = computed(() => {
-  const k = kw.value
-  // ⚠️ 必须显式依赖 userOrder（响应式版本号）：`sortPluginsByOrder` 内部读的是 localStorage，
-  // 那是**非响应式**的 —— 不读这一行的话，拖完顺序落盘了，列表却不会重排，看起来就是「拖了没反应」。
-  const order = userOrder.value
-  void order
-  // 先按用户顺序排全量，再按关键词过滤：过滤只影响显示，不影响拖动时的落点计算
-  const sorted = sortPluginsByOrder(plugins.value)
-  if (!k) return sorted
-  return sorted.filter((p) => {
-    const hay = [
-      p.name, p.id, p.folder, p.relDir, p.description, p.error,
-      (p.permissions || []).join(' '),
-      (p.tools || []).join(' '),
-      (p.services || []).join(' '),
-      statusLabel(p.status),
-    ].filter(Boolean).join(' ').toLowerCase()
-    return hay.includes(k)
-  })
-})
+/** 列表行：把 PluginSnapshot 适配成 ToolGroupList 需要的行结构（额外字段留给卡片渲染） */
+interface PluginRow extends GroupableToolRow {
+  id: string
+  version: string
+  tools: string[]
+  status: PluginStatus
+  folder: string
+  plugin: PluginSnapshot
+}
 
-// ---------------------------------------------------------------------------
-// 拖动排序（vuedraggable：真实的拖拽投影 + 跟手动画）
-// ---------------------------------------------------------------------------
-// 为什么用 vuedraggable 而不是手写：
-//  - 手写 HTML5 dragstart/dragover 在 Electron 里收不到事件（窗口拖动区会吞掉，实测无效）；
-//  - 手写 pointer 事件虽然能落盘，但**没有跟手动画**（看不到被拖的块跟着鼠标），
-//    还容易出现「拖动时选中文字」。vuedraggable（内部 Sortable.js）自带：
-//    ghost 投影、跟手位移、animation 过渡，并且用 `handle`/`filter` 精确控制可拖区域。
-//  ⚠️ 它的 #item 插槽每个条目只能有一个根节点（见 src/shared/draggableSlot.selftest.ts）。
-//  ⚠️ `:force-fallback` 下跟着鼠标走的是 Sortable 克隆出来的 ghost（每次 mousemove 写 transform），
-//    所以 **ghost 上绝不能有 CSS transition**（否则永远落后鼠标约一个过渡时长）——
-//    见样式里 `.plugin-nav-chosen / .sortable-fallback` 那条规则，改样式时别把它删了。
-
-/** 响应式的用户顺序（拖动 / 恢复默认后底部提示与按钮要跟着变） */
+/** 响应式的用户顺序（恢复默认顺序后底部图标要跟着变） */
 const userOrder = usePluginOrder()
-/**
- * 是否允许拖动排序：列表里至少 2 个插件、且**没有搜索过滤**。
- * 搜索时列表只显示命中的插件，拖动落点会牵扯到看不见的插件（用户没法预期），因此先关掉。
- */
-const canReorder = computed(() => !kw.value && plugins.value.length > 1)
 
-/**
- * 触摸 / 手写笔（粗指针）设备：只允许从左侧把手开始拖动。
- *
- * 为什么不能整行拖：Sortable 的 fallback 模式在触摸设备上会接管 touchstart，
- * 即使只是点一下插件行 / 开关，也可能被判成"开始拖动"，导致 click 不触发
- * （安卓上表现为「点不中插件、开关也没反应」）。桌面仍保留整行可拖的手感。
- */
-const coarsePointer = (() => {
-  try {
-    return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      && window.matchMedia('(pointer: coarse)').matches
-  } catch {
-    return false
-  }
-})()
-
-/**
- * 可拖动的插件列表（v-model 的目标）。
- *
- * 拖动结束后把**新顺序**落盘，并保持 v-model 的读写闭环：
- *  - 读：`filteredPlugins`（已按用户顺序排好）；
- *  - 写：把新顺序写进 localStorage 并 bump 版本号，`filteredPlugins` 随即重排，
- *    用户看到的顺序与落盘的顺序永远是同一个。
- */
-const draggablePlugins = computed<PluginSnapshot[]>({
-  get: () => filteredPlugins.value,
-  set: (next) => {
-    if (!canReorder.value) return
-    const ids = next.map((p) => p.id)
-    if (ids.length !== filteredPlugins.value.length) return
-    commitPluginOrder(ids.length ? ids : [], ids)
-  },
+/** 平铺行（顺序 = 已保存的插件顺序：导航栏图标 / 启动器网格 / 插件子窗口图标栏都跟它一致） */
+const pluginRows = computed<PluginRow[]>(() => {
+  // ⚠️ 必须显式依赖 userOrder（响应式版本号）：`sortPluginsByOrder` 内部读的是 localStorage，
+  // 那是**非响应式**的 —— 不读这一行的话，顺序落盘了列表却不会重排。
+  void userOrder.value
+  return sortPluginsByOrder(plugins.value).map((p) => ({
+    // ToolGroupList 用 name 作为 key / 搜索字段：用插件 id（全局唯一），显示名放 labelZh/labelEn
+    name: p.id,
+    labelZh: p.name || p.id,
+    labelEn: p.name || p.id,
+    icon: 'fa-puzzle-piece',
+    description: p.description || p.error || '',
+    on: p.enabled,
+    srcKind: 'plugin',
+    id: p.id,
+    version: p.version,
+    tools: p.tools || [],
+    status: p.status,
+    folder: p.folder || '',
+    plugin: p,
+  }))
 })
 
-/** 顺序是否已被用户自定义（底部提示用；空 = 还是宿主顺序） */
+/** 按文件夹分组（2~3 级分类目录；根目录组固定最后）——与技能管理共用同一套纯逻辑。
+ *  组内顺序沿用已保存的插件顺序（导航栏 / 启动器网格与列表顺序一致）。 */
+const pluginSections = computed<ToolGroupSection<PluginRow>[]>(() => {
+  const order = new Map(pluginRows.value.map((row, index) => [row.id, index]))
+  return groupSkillRowsByFolder(pluginRows.value, { zh: zh.value }).map((section) => ({
+    ...section,
+    rows: [...section.rows].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0)),
+  }))
+})
+
+/** 选中插件后左栏收窄成单列卡片；未选中时整宽网格（与技能管理一致） */
+const pluginListLayout = computed<'grid' | 'list'>(() => (selected.value ? 'list' : 'grid'))
+const enabledPluginCount = computed(() => plugins.value.filter((p) => p.enabled).length)
+
+// ---------------------------------------------------------------------------
+// 批量启用 / 禁用（组内全开 / 全关；ToolGroupList 只对「当前可见行」发事件）
+// ---------------------------------------------------------------------------
+/** 批量操作进行中：避免连点导致同一插件被并发启用 / 禁用 */
+const groupBusy = ref(false)
+
+/** 卡片右侧开关：单插件启用 / 禁用（复用详情页同一套确认逻辑） */
+const togglePluginOn = async (id: string) => {
+  const p = plugins.value.find((x) => x.id === id)
+  if (p) await setEnabled(p, !p.enabled)
+}
+
+/**
+ * 组内全开 / 全关（ToolGroupList 的 @bulk，只作用于当前可见行）：
+ * 启用插件 = 装载插件代码（与宿主同进程），按审批约定先弹一次确认（展示数量与名称），
+ * 确认后逐个带 confirm: true 调宿主；失败数量汇总提示，列表刷新后状态一目了然。
+ */
+const applyPluginBulk = async (payload: { rows: PluginRow[]; on: boolean }) => {
+  if (groupBusy.value) return
+  const enable = payload.on
+  const targets = (payload.rows || []).filter((row) => row.on !== enable).map((row) => row.plugin)
+  if (!targets.length) return
+  const shown = targets.slice(0, 6).map((p) => p.name).join(zh.value ? '、' : ', ')
+  const more = targets.length > 6
+    ? (zh.value ? '… 等 ' + targets.length + ' 个' : ' … ' + targets.length + ' plugins in total')
+    : ''
+  const title = zh.value
+    ? (enable ? '批量启用插件' : '批量禁用插件')
+    : (enable ? 'Enable plugins' : 'Disable plugins')
+  const message = enable
+    ? (zh.value
+        ? '将启用当前分组内的 ' + targets.length + ' 个插件：\n' + shown + more + '\n\n插件代码以宿主权限运行，不受工作区沙箱保护；请确认这些插件来源可信。'
+        : 'Enable ' + targets.length + ' plugin(s) in this group:\n' + shown + more + '\n\nPlugin code runs with host privileges and is not confined by the workspace sandbox; only enable plugins you trust.')
+    : (zh.value
+        ? '将禁用当前分组内的 ' + targets.length + ' 个插件：\n' + shown + more + '\n\n禁用后它们的工具与界面元素会立即消失。'
+        : 'Disable ' + targets.length + ' plugin(s) in this group:\n' + shown + more + '\n\nTheir tools and UI elements disappear immediately.')
+  try {
+    await ElMessageBox.confirm(message, title, {
+      type: 'warning',
+      confirmButtonText: zh.value ? '确定' : 'OK',
+      cancelButtonText: zh.value ? '取消' : 'Cancel',
+    })
+  } catch {
+    return
+  }
+  groupBusy.value = true
+  let failed = 0
+  try {
+    const api = bridge()
+    for (const p of targets) {
+      try {
+        await (enable ? api.enable(p.id, true) : api.disable(p.id, true))
+      } catch {
+        failed += 1
+      }
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.message || String(e))
+  } finally {
+    groupBusy.value = false
+  }
+  await refresh()
+  if (failed) {
+    ElMessage.error(zh.value
+      ? '有 ' + failed + ' 个插件操作失败，请看列表里的状态与详情'
+      : failed + ' plugin(s) failed; check their status and details')
+  } else {
+    ElMessage.success(zh.value
+      ? '已' + (enable ? '启用' : '禁用') + ' ' + targets.length + ' 个插件'
+      : (enable ? 'Enabled ' : 'Disabled ') + targets.length + ' plugin(s)')
+  }
+}
+
+/** 顺序是否已被用户自定义（底部图标用；空 = 还是宿主顺序） */
 const orderCustomized = computed(() => userOrder.value.length > 0)
 /** 恢复宿主默认顺序（各插件声明 order 的顺序） */
 function resetOrder() {
@@ -892,8 +888,7 @@ const applyList = (res: any) => {
   customRoot.value = res?.customRoot === true
   services.value = res?.services || []
   invalidNamedDirs.value = Array.isArray(res?.invalidNamedDirs) ? res.invalidNamedDirs : []
-  // 列表到手后若还没有选中项，默认展开第一个可见插件
-  if (!selectedId.value && filteredPlugins.value.length) selectedId.value = filteredPlugins.value[0].id
+  // 与「技能管理」一致：加载后不自动展开详情，右侧保持收起（点某个插件才出现）
   void refreshAllData()
   void syncThenRefreshClients()
 }
@@ -1503,8 +1498,20 @@ const detailShortcuts = computed(() => {
 // 选中与详情加载：右侧「详情 / 配置 / 日志 / 数据」四个分组都按当前选中项取数
 // ---------------------------------------------------------------------------
 const selectPlugin = (id: string) => {
-  if (selectedId.value !== id) selectedId.value = id
+  // 再点一次当前插件 = 收起右侧详情（宽窗口下回到整宽列表；细长窗口由返回键负责）
+  if (selectedId.value === id) {
+    selectedId.value = null
+    showNavScreen.value = true
+    return
+  }
+  selectedId.value = id
   showNavScreen.value = false   // 细长窗口：进入整屏详情屏（宽窗口下两者并排，本状态无意义）
+}
+
+/** 宽窗口：收起详情，回到整宽插件列表 */
+const closeDetail = () => {
+  selectedId.value = null
+  showNavScreen.value = true
 }
 
 /** 切换插件时清空上一份内容，再拉取配置 / 日志 / 数据 */
@@ -1517,17 +1524,15 @@ const loadDetail = async (p: PluginSnapshot | undefined) => {
   await Promise.all([loadConfig(p), loadLogs(p), refreshData(p.id), refreshGrants(p.id), refreshAgent(p.id)])
 }
 
-// 列表变化（首次加载 / 搜索过滤 / 插件被移除）后保证选中项始终有效：
-// 选中项被过滤掉或被移除时自动落到第一个可见插件；插件全没了就清空右侧
+// 列表变化（首次加载 / 刷新 / 插件被移除）后只保证「选中项仍然存在」：
+// 被移除就收起右侧；不自动选中第一个（右侧默认不打开，点插件才出来）。
 watch(
-  () => filteredPlugins.value.map((p) => p.id).join(','),
+  () => plugins.value.map((p) => p.id).join(','),
   () => {
-    const list = filteredPlugins.value
-    if (!list.length) {
-      if (!plugins.value.length) selectedId.value = null
-      return
+    if (selectedId.value && !plugins.value.some((p) => p.id === selectedId.value)) {
+      selectedId.value = null
+      showNavScreen.value = true
     }
-    if (!list.some((p) => p.id === selectedId.value)) selectedId.value = list[0].id
   },
 )
 
@@ -1562,6 +1567,110 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   color: var(--fontColor);
+}
+
+/* ====== 左栏：与「技能管理」同一套布局（manage-content / manage-split / manage-left） ====== */
+.manage-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.manage-split {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.manage-left {
+  width: 230px;
+  min-width: 230px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--borderColor);
+  display: flex;
+  flex-direction: column;
+  background: var(--backgroundColor);
+}
+/* 未选中插件：左侧整宽、右侧详情整块不渲染（点某个插件后左栏收窄、右栏才出现） */
+.plugin-panel:not(.has-selection) .manage-left {
+  width: auto;
+  min-width: 0;
+  flex: 1;
+  border-right: 0;
+}
+
+/* 左侧工具栏（与技能管理相同的 6 个按钮：安装 / 刷新 / 重新扫描 / 打开目录 / 选择目录 / 恢复默认） */
+.sk-nav-toolbar {
+  display: flex; flex-wrap: nowrap; gap: 4px;
+  padding: 5px; flex-shrink: 0;
+  border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor);
+}
+.sk-nav-btn {
+  flex: 0 0 26px; width: 26px; min-width: 26px; height: 26px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--backgroundColor); color: var(--fontColor);
+  cursor: pointer; font-size: 12px; transition: all .12s;
+}
+.sk-nav-btn:hover:not(:disabled) { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+.sk-nav-btn:disabled { opacity: .4; cursor: not-allowed; }
+.sk-nav-btn.primary {
+  flex: 1 1 auto; width: auto; min-width: 0; padding: 0 6px;
+  border-color: color-mix(in srgb, var(--fontActiveColor) 45%, var(--borderColor));
+  color: var(--fontActiveColor);
+}
+.sk-nav-btn.primary:hover { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
+.sk-nav-btn-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 分组列表外壳（ToolGroupList）：占满左栏剩余高度；卡片样式在 PluginCard.vue 里统一维护 */
+.sk-groups { flex: 1; min-height: 0; width: 100%; --tgl-min: 240px; padding: 6px 4px 2px; box-sizing: border-box; }
+.sk-state { flex: 1; min-height: 0; display: flex; }
+.sk-state .empty-hint {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.65;
+  opacity: 0.65;
+}
+
+/* 细长窗口：左栏 / 详情各占满整屏（与技能管理一致） */
+.plugin-panel.tall .manage-left {
+  width: 100%;
+  min-width: 0;
+  border-right: 0;
+}
+.plugin-panel.tall .plugin-content {
+  width: 100%;
+  flex: 1;
+}
+
+/* 底栏：数量 + 目录（与技能管理一致） */
+.sk-nav-foot {
+  flex-shrink: 0; display: flex; flex-direction: column; gap: 3px;
+  padding: 5px 7px; border-top: 1px solid var(--borderColor);
+  background: var(--menuColor);
+}
+.sk-foot-row { display: flex; align-items: center; justify-content: space-between; font-size: 10px; opacity: .8; }
+.sk-foot-icons { display: flex; align-items: center; gap: 6px; }
+.sk-foot-icon { font-size: 10px; }
+.sk-foot-icon.action { cursor: pointer; }
+.sk-foot-icon.action:hover { color: var(--fontActiveColor); opacity: 1; }
+.sk-foot-path {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: 10px; opacity: .65; cursor: pointer;
+}
+.sk-foot-path:hover { opacity: 1; }
+.sk-foot-path i { flex-shrink: 0; }
+.sk-foot-path-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;
 }
 
 /* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：插件列表 / 详情各占满整屏互相切换 ======
@@ -1722,6 +1831,97 @@ onUnmounted(() => {
   cursor: pointer;
   color: var(--fontActiveColor);
   text-decoration: underline;
+}
+
+/* ====== 分类文件夹（与技能管理同一套观感） ======
+   插件放在 1~3 级分类子文件夹时按文件夹分组：组头可折叠、显示已启用数，右侧「全开 / 全关」整组操作。 */
+.plugin-folder-list {
+  padding: 2px 0 4px;
+}
+.plugin-folder + .plugin-folder {
+  border-top: 1px solid var(--borderColor);
+}
+.plugin-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 6px 4px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+}
+.plugin-folder-head:hover {
+  background: var(--menuActiveColor);
+}
+.plugin-folder-caret {
+  width: 10px;
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.6;
+}
+.plugin-folder-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.65;
+}
+.plugin-folder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.plugin-folder-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+.plugin-folder-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.plugin-folder-bulk {
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.plugin-folder-bulk:hover:not(:disabled) {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+  opacity: 1;
+}
+.plugin-folder-bulk:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.plugin-folder-rows {
+  padding: 1px 0 5px;
+}
+.plugin-folder-rows .plugin-nav-item {
+  margin-bottom: 2px;
+}
+/* 被跳过的插件文件夹：右侧详情收起后仍能在左栏看到提示 */
+.plugin-skipped-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 5px 4px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: #e6a23c;
+  background: color-mix(in srgb, #e6a23c 10%, transparent);
+  cursor: default;
 }
 .plugin-nav-item {
   padding: 5px 6px;

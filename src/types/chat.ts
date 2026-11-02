@@ -116,7 +116,23 @@ export interface ChatMessage {
     totalTokens: number // 总 token 数
     speed?: number // 输出速度 (tokens/秒)
     duration?: number // 生成耗时 (毫秒)
+    /** 输入中命中「前缀缓存」的 token 数（来源不报缓存时为 undefined） */
+    cachedTokens?: number
+    /**
+     * 本会话 / 本轮的输入 token 之和（缓存命中率的分母）。
+     * 智能体消息：本 turn 所有 step 的 prompt 之和；普通聊天：等于 promptTokens。
+     */
+    promptTokensTotal?: number
+    /** 来源是否回报了缓存字段（0 命中也是有效信息：显示 0% 而不是「不显示」） */
+    cacheReported?: boolean
   }
+
+  /**
+   * 智能体消息的轮 / 步（右上角「第 N 轮 · 第 M 步」）：
+   * 最后一条 assistant 消息上的值即为最近一次（或正在进行的）执行的进度。
+   */
+  agentTurn?: number
+  agentStep?: number
 
   // 联网搜索信息（DeepSeek Responses API 等服务端联网）
   webSearch?: {

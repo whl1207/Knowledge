@@ -258,6 +258,14 @@ export interface AgentStepUsage {
   promptTokens: number
   completionTokens: number
   totalTokens: number
+  /**
+   * 本步 prompt 中命中「前缀缓存」的 token 数（DeepSeek prompt_cache_hit_tokens /
+   * OpenAI prompt_tokens_details.cached_tokens / Anthropic cache_read_input_tokens）。
+   * 来源不报缓存时为 undefined。
+   */
+  cachedTokens?: number
+  /** 来源是否回报了缓存字段（0 命中也是有效信息：说明首轮全 miss） */
+  cacheReported?: boolean
 }
 
 export interface AgentEventMap {
