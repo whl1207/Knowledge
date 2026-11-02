@@ -20,12 +20,14 @@
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { parseDocumentXml, type DocxReadResult, type DocxOutline, type OfficeBlock } from './docx-reader'
-import { loadDocxPackage, applyFindReplace, saveDocxPackage, buildDocxBuffer, type DocxPackage } from './docx-editor'
+import { bodyLayout, paragraphText, parseDocumentXml, type DocxReadResult, type DocxOutline, type OfficeBlock } from './docx-reader'
+import { loadDocxPackage, applyFindReplace, applyFindReplaceInRange, saveDocxPackage, buildDocxBuffer, type DocxPackage } from './docx-editor'
 // 注意：docx-to-markdown 只依赖 Node + mammoth/turndown（不 import electron），不破坏本模块的“可独立复用”约定
 import { docxToMarkdown } from './docx-to-markdown'
 // 块级编辑（M1.2）：replace / insert / delete / 样式 / Markdown 导入
 import { findTextInBlocks, styleCatalog, replaceParagraphText, insertParagraph, insertTable, insertMarkdown, setParagraphStyle, deleteBlock } from './docx-blocks'
+// 图片（列表 / 插入 / 替换）：直接改 media + rels + Content_Types，保留版式
+import { addDocxImage, listDocxImages, replaceDocxImage } from './docx-images'
 // 样式定义与字符格式（M1.3）：styles.xml 新建 / 修改 / 删除 + run 级字符格式
 import { listStyles, createStyle, updateStyle, deleteStyle, setTextFormat, type RunFormat, type StyleFormat } from './docx-styles'
 // Excel 服务（会话式读写 .xlsx；工具定义与执行器都在 xlsx-service）
@@ -176,6 +178,268 @@ function normPath(p: string): string {
   return String(p || '').trim().replace(/^file:\/\/\//, '')
 }
 
+/**
+ * 在表格块的 XML 里定位第 row 行、第 col 列单元格（1-based）的**字节区间**。
+ * 只统计第一层 w:tr / w:tc（单元格里再嵌套表格时，嵌套表格的行列不会打乱外层计数）。
+ * 返回的 start/end 是相对 blockXml 的偏移，调用方再加块在文档中的绝对偏移。
+ */
+function tableCellOffsets(
+  blockXml: string,
+  row: number,
+  col: number,
+): { start: number; end: number } | { error: string } {
+  const rows: Array<Array<{ start: number; end: number }>> = []
+  let trDepth = 0
+  let tcDepth = 0
+  let currentRow: Array<{ start: number; end: number }> | null = null
+  let currentCell: { start: number; end: number } | null = null
+  const re = /<(\/?)w:(tr|tc)\b[^>]*?(\/?)>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(blockXml)) !== null) {
+    const closing = m[1] === '/'
+    const name = m[2]
+    const selfClosing = m[3] === '/'
+    if (name === 'tr') {
+      if (!closing && !selfClosing) {
+        if (trDepth === 0 && tcDepth === 0) {
+          currentRow = []
+          rows.push(currentRow)
+        }
+        trDepth++
+      } else if (closing) {
+        if (trDepth > 0) trDepth--
+        if (trDepth === 0) currentRow = null
+      }
+      continue
+    }
+    // w:tc
+    if (!closing && !selfClosing) {
+      if (trDepth === 1 && tcDepth === 0) currentCell = { start: m.index, end: -1 }
+      tcDepth++
+    } else if (closing) {
+      if (tcDepth > 0) tcDepth--
+      if (trDepth === 1 && tcDepth === 0 && currentCell && currentRow) {
+        currentCell.end = m.index + m[0].length
+        currentRow.push(currentCell)
+        currentCell = null
+      }
+    } else if (selfClosing && trDepth === 1 && tcDepth === 0 && currentRow) {
+      currentRow.push({ start: m.index, end: m.index + m[0].length })
+    }
+  }
+  if (!rows.length) return { error: '目标块里没有表格行（blockIndex 可能不是表格）' }
+  if (row < 1 || row > rows.length) return { error: `行号 ${row} 超出范围（表格共 ${rows.length} 行）` }
+  const cells = rows[row - 1]
+  if (!cells.length) return { error: `第 ${row} 行没有单元格` }
+  if (col < 1 || col > cells.length) return { error: `列号 ${col} 超出范围（第 ${row} 行共 ${cells.length} 列）` }
+  return cells[col - 1]
+}
+
+/** 表格块 → 第一层行列结构（每格只给相对 blockXml 的区间，供 read_table / 单元格段落定位） */
+function tableStructure(blockXml: string): Array<Array<{ start: number; end: number }>> {
+  const rows: Array<Array<{ start: number; end: number }>> = []
+  let trDepth = 0
+  let tcDepth = 0
+  let currentRow: Array<{ start: number; end: number }> | null = null
+  let currentCell: { start: number; end: number } | null = null
+  const re = /<(\/?)w:(tr|tc)\b[^>]*?(\/?)>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(blockXml)) !== null) {
+    const closing = m[1] === '/'
+    const name = m[2]
+    const selfClosing = m[3] === '/'
+    if (name === 'tr') {
+      if (!closing && !selfClosing) {
+        if (trDepth === 0 && tcDepth === 0) {
+          currentRow = []
+          rows.push(currentRow)
+        }
+        trDepth++
+      } else if (closing) {
+        if (trDepth > 0) trDepth--
+        if (trDepth === 0) currentRow = null
+      }
+      continue
+    }
+    if (!closing && !selfClosing) {
+      if (trDepth === 1 && tcDepth === 0) currentCell = { start: m.index, end: -1 }
+      tcDepth++
+    } else if (closing) {
+      if (tcDepth > 0) tcDepth--
+      if (trDepth === 1 && tcDepth === 0 && currentCell && currentRow) {
+        currentCell.end = m.index + m[0].length
+        currentRow.push(currentCell)
+        currentCell = null
+      }
+    } else if (selfClosing && trDepth === 1 && tcDepth === 0 && currentRow) {
+      currentRow.push({ start: m.index, end: m.index + m[0].length })
+    }
+  }
+  return rows
+}
+
+/**
+ * 单元格里**直接子级**的嵌套表格区间（相对 cellXml）。
+ * 只取第一层嵌套表；更深的层级由递归的 parseDocTable 继续解析。
+ */
+function nestedTableRanges(cellXml: string): Array<{ start: number; end: number }> {
+  const out: Array<{ start: number; end: number }> = []
+  let depth = 0
+  let start = -1
+  const re = /<(\/?)w:tbl\b[^>]*?(\/?)>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(cellXml)) !== null) {
+    const closing = m[1] === '/'
+    const selfClosing = m[3] === '/'
+    if (!closing && !selfClosing) {
+      if (depth === 0) start = m.index
+      depth++
+    } else if (closing) {
+      if (depth > 0) depth--
+      if (depth === 0 && start >= 0) {
+        out.push({ start, end: m.index + m[0].length })
+        start = -1
+      }
+    }
+  }
+  return out
+}
+
+interface ParsedDocParagraph { start: number; end: number; text: string }
+interface ParsedDocCell {
+  start: number
+  end: number
+  paragraphs: ParsedDocParagraph[]
+  /** 该单元格里的嵌套表格（最多解析 depth 层） */
+  tables: ParsedDocTable[]
+}
+interface ParsedDocTable {
+  start: number
+  end: number
+  rows: ParsedDocCell[][]
+}
+
+/** 解析「一个表格的绝对区间」→ 行列单元格（含单元格里的段落与嵌套表格） */
+function parseDocTable(blockXml: string, absStart: number, absEnd: number, depth: number): ParsedDocTable {
+  const tableXml = blockXml.slice(absStart, absEnd)
+  const rows = tableStructure(tableXml).map((row) =>
+    row.map((cell) => parseDocCell(blockXml, absStart + cell.start, absStart + cell.end, depth - 1)))
+  return { start: absStart, end: absEnd, rows }
+}
+
+function parseDocCell(blockXml: string, absStart: number, absEnd: number, depth: number): ParsedDocCell {
+  const cellXml = blockXml.slice(absStart, absEnd)
+  const paragraphs = cellParagraphOffsets(cellXml).map((p) => ({
+    start: absStart + p.start,
+    end: absStart + p.end,
+    text: paragraphText(cellXml.slice(p.start, p.end)),
+  }))
+  const tables = depth > 0
+    ? nestedTableRanges(cellXml).map((t) => parseDocTable(blockXml, absStart + t.start, absStart + t.end, depth))
+    : []
+  return { start: absStart, end: absEnd, paragraphs, tables }
+}
+
+interface CellPathStep { table?: number; row: number; col: number }
+
+/**
+ * 按 cellPath 解析嵌套单元格：
+ *  - 第 1 项 = 外层表格的 row/col（table 字段忽略）；
+ *  - 后续项 = 父单元格里的第 table 个嵌套表（默认 1），再取它的 row/col。
+ * 返回最深单元格的绝对区间与段落（段落已带绝对区间，可直接用于替换）。
+ */
+function resolveCellPath(blockXml: string, path: CellPathStep[]): { cell: ParsedDocCell } | { error: string } {
+  if (!path.length) return { error: 'cellPath 不能为空（至少给外层表格的 row / col）' }
+  let table = parseDocTable(blockXml, 0, blockXml.length, Math.max(1, path.length))
+  let cell: ParsedDocCell | null = null
+  for (let i = 0; i < path.length; i++) {
+    const step = path[i]
+    const rowNo = Number(step?.row)
+    const colNo = Number(step?.col)
+    if (!(Number.isInteger(rowNo) && rowNo >= 1)) return { error: `cellPath[${i}].row 非法（1 起）` }
+    if (!(Number.isInteger(colNo) && colNo >= 1)) return { error: `cellPath[${i}].col 非法（1 起）` }
+    const row = table.rows[rowNo - 1]
+    if (!row) return { error: `cellPath[${i}]：第 ${rowNo} 行超出范围（该层共 ${table.rows.length} 行）` }
+    cell = row[colNo - 1]
+    if (!cell) return { error: `cellPath[${i}]：第 ${colNo} 列超出范围（该层共 ${row.length} 列）` }
+    if (i < path.length - 1) {
+      const tableNo = Number(path[i + 1]?.table) > 0 ? Number(path[i + 1].table) : 1
+      const nested = cell.tables[tableNo - 1]
+      if (!nested) {
+        return { error: `cellPath[${i + 1}]：单元格里没有第 ${tableNo} 个嵌套表格（该单元格共 ${cell.tables.length} 个）` }
+      }
+      table = nested
+    }
+  }
+  return { cell: cell! }
+}
+
+/** read_table 输出：把解析出的表格转成带 path 的 JSON（嵌套表格递归） */
+function parsedTableRows(
+  table: ParsedDocTable,
+  prefix: CellPathStep[],
+  depth: number,
+  withParagraphs: boolean,
+  nestedTableIndex?: number,
+): any[] {
+  return table.rows.map((cells, ri) => ({
+    row: ri + 1,
+    cells: cells.map((cell, ci) => {
+      const step: CellPathStep = nestedTableIndex
+        ? { table: nestedTableIndex, row: ri + 1, col: ci + 1 }
+        : { row: ri + 1, col: ci + 1 }
+      const path = [...prefix, step]
+      const paras = cell.paragraphs.map((p, pi) => ({
+        paragraph: pi + 1,
+        text: p.text.slice(0, MAX_BLOCK_TEXT),
+        charCount: p.text.length,
+      }))
+      const text = cell.paragraphs.map((p) => p.text).join('\n')
+      return {
+        col: ci + 1,
+        path,
+        text: text.slice(0, MAX_BLOCK_TEXT),
+        charCount: text.length,
+        ...(withParagraphs ? { paragraphCount: paras.length, paragraphs: paras } : {}),
+        ...(depth > 1 && cell.tables.length
+          ? {
+            nestedTables: cell.tables.map((t, ti) => ({
+              tableIndex: ti + 1,
+              rows: parsedTableRows(t, path, depth - 1, withParagraphs, ti + 1),
+            })),
+          }
+          : {}),
+      }
+    }),
+  }))
+}
+function cellParagraphOffsets(cellXml: string): Array<{ start: number; end: number }> {
+  const out: Array<{ start: number; end: number }> = []
+  let tblDepth = 0
+  let pStart = -1
+  const re = /<(\/?)w:(tbl|p)\b[^>]*?(\/?)>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(cellXml)) !== null) {
+    const closing = m[1] === '/'
+    const name = m[2]
+    const selfClosing = m[3] === '/'
+    if (name === 'tbl') {
+      if (!closing && !selfClosing) tblDepth++
+      else if (closing && tblDepth > 0) tblDepth--
+      continue
+    }
+    if (tblDepth > 0) continue
+    if (!closing && !selfClosing) pStart = m.index
+    else if (closing && pStart >= 0) {
+      out.push({ start: pStart, end: m.index + m[0].length })
+      pStart = -1
+    } else if (selfClosing) {
+      out.push({ start: m.index, end: m.index + m[0].length })
+    }
+  }
+  return out
+}
+
 // ---------------- 工具定义（schema 与渲染端 mcp 保持一致：object 结构） ----------------
 /**
  * 全部工具 = Word 基础（打开/阅读/替换/保存） + Word 块级编辑（M1.2） + Excel（读写查询，见 xlsx-service）
@@ -218,8 +482,27 @@ function docxToolDefinitions(): any[] {
       },
     },
     {
+      name: 'read_table',
+      description: '读取表格结构（块序号来自 list_blocks）：按行返回单元格文本、单元格内的每个段落（1 起），以及**单元格里嵌套的子表格**（递归，默认 2 层）。大单元格里塞了多段文字（如「第一节标题 + 正文」「第二节标题 + 正文」都在一格）或单元格里又插入了表格时，先用它看清段落号与嵌套表格的 path，再用 find_and_replace_text 的 row / col / paragraph 或 cellPath 精确替换；不需要整格重写。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          docId: { type: 'string', description: 'open_document 返回的会话 ID（docId / doc_id 等价）' },
+          doc_id: { type: 'string', description: 'docId 的别名，任选其一' },
+          index: { type: 'number', description: '表格块序号（1 起；来自 list_blocks）' },
+          block_index: { type: 'number', description: 'index 的别名' },
+          row: { type: 'number', description: '可选：只看这一行（1 起）' },
+          col: { type: 'number', description: '可选：只看这一列（1 起，需同时给 row）' },
+          paragraphs: { type: 'boolean', description: '是否返回单元格内的段落明细（默认 true）' },
+          depth: { type: 'number', description: '嵌套表格解析层数（默认 2，最大 4；嵌套表格在 cell.nestedTables 里）' },
+          limit: { type: 'number', description: '最多返回多少行（默认 200）' },
+        },
+        required: ['docId', 'index'],
+      },
+    },
+    {
       name: 'read_text',
-      description: '读取文档文本：不带块序号返回全文；带 index（或 block_index）只返回该块的完整文本（format=markdown 时表格块输出 Markdown 表格）。',
+      description: '读取文档文本：不带块序号返回全文；带 index（或 block_index）只返回该块的完整文本（format=markdown 时表格块输出 Markdown 表格）。**返回的是纯文本，不含 run 级格式分段**（哪里加粗 / 换字号看不出来）；要看粗体 / 斜体这类段落内格式用 export_markdown（只映射部分行内样式，字体、字号、颜色仍不体现）。表格单元格里有多段文字（如多个章节都在一格）时，用 read_table 看每格的段落号，再用 find_and_replace_text 的 row / col / paragraph 精确替换；普通句子直接用 find_and_replace_text 按子串替换，它只改命中的字符、不需要知道分段。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -246,7 +529,7 @@ function docxToolDefinitions(): any[] {
     },
     {
       name: 'find_and_replace_text',
-      description: 'L1 文本替换：把 find（或 find_text）替换为 replace（或 replacement；默认全部；scope=first 只替换第一处；ignoreCase 忽略大小写）。匹配完整落在同一 w:t 内时原地替换、完整保留该段格式；跨 run 的匹配会整段归一重建（保留段落样式 pStyle 与段首格式，段内其它局部格式可能归一）。替换后需 save_document 写盘。',
+      description: 'L1 文本替换：把 find（或 find_text）替换为 replace（或 replacement；默认全部；scope=first 只替换第一处；ignoreCase 忽略大小写）。匹配落在同一 w:t 内时原地替换；跨 run 时也只替换命中的字符，未命中的 run 与其格式（加粗 / 斜体 / 字号 / 字体 / 颜色）原样保留，替换文本沿用命中起点所在 run 的格式。**支持限定范围**：blockIndex 只改某个块（段落 / 整张表格）；配合 row + col（1-based）只改某个单元格；再加 paragraph（1-based）只改该单元格里的第 N 段；**单元格里嵌套了子表格时用 cellPath**（来自 read_table 的 cell.path，可再配 paragraph 改子表里的某一段）——大单元格里多段文字、子表格里的文字都能精确替换，不会误改别处。**安全选项**：dryRun=true 只统计命中不落改；expectedMatches=N 在命中数与预期不符时整体放弃（避免「本想改 1 处，结果全文替换」）。要改表格里的某句话：把整句原样放进 find、新内容放进 replace，不要用 replace_paragraph 整段替换（会丢掉段内局部格式）。替换后需 save_document 写盘。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -258,8 +541,93 @@ function docxToolDefinitions(): any[] {
           replace_text: { type: 'string', description: 'replace 的别名，任选其一' },
           scope: { type: 'string', enum: ['all', 'first'], description: '默认 all 全部；first 只替换第一处' },
           ignoreCase: { type: 'boolean', description: '是否忽略大小写（默认 false）' },
+          blockIndex: { type: 'number', description: '可选：只在这个块内替换（块序号来自 list_blocks / find_text，1 起）。表格块可配 row + col 进一步限定单元格' },
+          block_index: { type: 'number', description: 'blockIndex 的别名' },
+          row: { type: 'number', description: '可选：表格行号（1 起；需同时给 blockIndex 指向表格块）' },
+          col: { type: 'number', description: '可选：表格列号（1 起；需同时给 blockIndex 与 row）' },
+          paragraph: { type: 'number', description: '可选：只替换该单元格里的第 N 段（1 起；需同时给 blockIndex + row + col；段落号来自 read_table）' },
+          paragraph_index: { type: 'number', description: 'paragraph 的别名' },
+          cellPath: {
+            type: 'array',
+            description: '嵌套表格单元格路径（来自 read_table 的 cell.path）：第 1 项是外层表格的 row/col；后续项用 table 指定父单元格里的第几个子表（默认 1），再给 row/col。例：[{"row":1,"col":2},{"table":1,"row":3,"col":1}]',
+            items: {
+              type: 'object',
+              properties: {
+                table: { type: 'number', description: '父单元格里的第几个嵌套表格（1 起；第 1 项忽略）' },
+                row: { type: 'number', description: '行号（1 起）' },
+                col: { type: 'number', description: '列号（1 起）' },
+              },
+              required: ['row', 'col'],
+            },
+          },
+          cell_path: { type: 'array', description: 'cellPath 的别名' },
+          dryRun: { type: 'boolean', description: 'true = 只统计会替换多少处，不修改内存文档' },
+          dry_run: { type: 'boolean', description: 'dryRun 的别名' },
+          expectedMatches: { type: 'number', description: '预期命中数：实际替换数与它不一致时整体不修改，并返回实际命中数（防误替换）' },
+          expected_matches: { type: 'number', description: 'expectedMatches 的别名' },
         },
         required: ['docId', 'find', 'replace'],
+      },
+    },
+    {
+      name: 'list_images',
+      description: '列出正文里的图片（按出现顺序，1 起）：关系 id、媒体路径、格式、字节数、显示尺寸（EMU / cm）、inline（嵌入型）或 anchor（浮动）。替换图片时用这里的 index。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          docId: { type: 'string', description: 'open_document 返回的会话 ID' },
+          doc_id: { type: 'string', description: 'docId 的别名' },
+        },
+        required: ['docId'],
+      },
+    },
+    {
+      name: 'insert_image',
+      description: '把本地图片插入 .docx（PNG / JPEG / GIF / BMP / WebP / EMF / WMF / SVG）。位置：默认正文末尾；给 index + position（before / after）插到某个块前后；给 cellPath（来自 read_table 的 cell.path）或 blockIndex + row / col 插进表格单元格，可再配 paragraph（before/after 该格第 N 段，默认该格末尾）。默认按 96 DPI 换算并限制最大宽度 15.9cm（可用 widthCm / heightCm / maxWidthCm 覆盖），不改动现有段落、表格与其它图片。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          docId: { type: 'string', description: 'open_document 返回的会话 ID' },
+          doc_id: { type: 'string', description: 'docId 的别名' },
+          imagePath: { type: 'string', description: '本地图片绝对路径' },
+          path: { type: 'string', description: 'imagePath 的别名' },
+          index: { type: 'number', description: '可选：插到第几个块（1 起；省略 = 正文末尾）' },
+          blockIndex: { type: 'number', description: 'index 的别名（也可用于表格块定位）' },
+          position: { type: 'string', enum: ['before', 'after', 'end'], description: '相对块 / 段落的位置（默认 after；index 省略时固定 end）' },
+          cellPath: {
+            type: 'array',
+            description: '可选：插进嵌套表格单元格，路径来自 read_table 的 cell.path，如 [{"row":1,"col":1},{"table":1,"row":2,"col":1}]',
+            items: { type: 'object', properties: { table: { type: 'number' }, row: { type: 'number' }, col: { type: 'number' } }, required: ['row', 'col'] },
+          },
+          cell_path: { type: 'array', description: 'cellPath 的别名' },
+          row: { type: 'number', description: '可选：表格行号（1 起；需同时给 blockIndex 与 col）' },
+          col: { type: 'number', description: '可选：表格列号（1 起；需同时给 blockIndex 与 row）' },
+          paragraph: { type: 'number', description: '可选：表格单元格里的第 N 段（1 起；配合 row/col 或 cellPath）' },
+          widthCm: { type: 'number', description: '可选：显示宽度（cm）；只给一项时按原图宽高比补另一项' },
+          heightCm: { type: 'number', description: '可选：显示高度（cm）' },
+          maxWidthCm: { type: 'number', description: '最大宽度（cm，默认 15.9）' },
+          name: { type: 'string', description: '可选：图片显示名（alt / 选中时的名字）' },
+        },
+        required: ['docId', 'imagePath'],
+      },
+    },
+    {
+      name: 'replace_image',
+      description: '替换正文里已有的第 N 张图片（N 来自 list_images）。默认保留原显示尺寸（版式不变）；可用 keepSize=false + widthCm / heightCm 重设尺寸。支持格式变化（png ↔ jpg 等会自动更新关系与 Content_Types），不动其它图片、段落与表格。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          docId: { type: 'string', description: 'open_document 返回的会话 ID' },
+          doc_id: { type: 'string', description: 'docId 的别名' },
+          imageIndex: { type: 'number', description: '第几张图片（1 起；来自 list_images）' },
+          index: { type: 'number', description: 'imageIndex 的别名' },
+          imagePath: { type: 'string', description: '新图片的本地绝对路径' },
+          path: { type: 'string', description: 'imagePath 的别名' },
+          keepSize: { type: 'boolean', description: '是否保留原显示尺寸（默认 true；false 时按新图尺寸/widthCm/heightCm 重算）' },
+          widthCm: { type: 'number', description: '可选：新显示宽度（cm）' },
+          heightCm: { type: 'number', description: '可选：新显示高度（cm）' },
+        },
+        required: ['docId', 'imageIndex', 'imagePath'],
       },
     },
     {
@@ -350,7 +718,7 @@ function docxEditToolDefinitions(): any[] {
     },
     {
       name: 'replace_paragraph',
-      description: '整段重写：用新文本替换指定块的段落内容，保留该段原有段落样式与段首字符格式（不改变标题级别）。',
+      description: '整段重写：用新文本替换指定块的段落内容，保留该段原有段落样式与段首字符格式（不改变标题级别）。⚠ 这是**整段替换**：段内原有的局部格式（部分加粗 / 斜体 / 不同字号）会被抹成统一格式；只想改段内某句话请改用 find_and_replace_text（按子串替换、保留其余 run 的格式）。',
       inputSchema: {
         type: 'object',
         properties: { ...docId, ...docIdAlias, ...index, text: { type: 'string', description: '新的段落文本（可含换行）' }, content: { type: 'string', description: 'text 的别名' } },
@@ -684,6 +1052,39 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
         blocks: list,
       }, null, 2)
     }
+    case 'read_table': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const layout = bodyLayout(s.pkg.documentXml)
+      if (!layout) return '无法定位文档正文（w:body）'
+      const idx = Number(arg(args, ['index', 'block_index', 'blockIndex']))
+      const blk = layout.blocks.find((b) => b.index === idx)
+      if (!blk) return `块序号 ${idx} 不存在（当前共 1..${layout.blocks.length} 块）`
+      if (blk.kind !== 'table') return `块 ${idx} 不是表格（当前是 ${blk.kind}）`
+      const parsed = parseDocTable(blk.xml, 0, blk.xml.length, Math.max(1, Math.min(4, Number(arg(args, ['depth'])) || 2)))
+      if (!parsed.rows.length) return `块 ${idx} 没有表格行`
+      const wantRow = Number(arg(args, ['row'])) || 0
+      const wantCol = Number(arg(args, ['col'])) || 0
+      if (wantCol > 0 && wantRow <= 0) return '指定 col 时也要给 row（都从 1 开始）'
+      const withParagraphs = args.paragraphs !== false
+      const limit = Math.max(1, Math.min(200, Number(args.limit) || 200))
+      const depth = Math.max(1, Math.min(4, Number(arg(args, ['depth'])) || 2))
+      const rows = parsedTableRows(parsed, [], depth, withParagraphs)
+      const filtered = rows.filter((r) => (wantRow > 0 ? r.row === wantRow : true))
+      const capped = filtered.slice(0, limit)
+      const payload = JSON.stringify({
+        blockIndex: idx,
+        depth,
+        totalRows: parsed.rows.length,
+        totalCols: Math.max(0, ...parsed.rows.map((r) => r.length)),
+        returnedRows: capped.length,
+        truncated: filtered.length > capped.length,
+        note: 'row / col / paragraph 都从 1 开始；嵌套表格在 cell.nestedTables 里，配合 path（来自 read_table 的 cell.path）与 find_and_replace_text 的 cellPath / paragraph 使用',
+        rows: capped,
+      }, null, 2)
+      const budget = MAX_BLOCK_TEXT * 6
+      return payload.length > budget ? payload.slice(0, budget) + '\n…（输出已截断，可用 row / col / depth / limit 缩小范围）' : payload
+    }
     case 'read_text': {
       const s = sessionOf(args)
       if (!s) return sessionError(args)
@@ -949,20 +1350,246 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       const find = String(arg(args, ['find', 'find_text']) ?? '')
       if (!find) return '缺少 find 参数'
       const replace = String(arg(args, ['replace', 'replace_text', 'replacement']) ?? '')
-      const r = applyFindReplace(s.pkg, find, replace, {
-        scope: args.scope === 'first' ? 'first' : 'all',
+      // 可选范围：某个块（段落 / 表格）或表格中的某个单元格
+      let range: { start: number; end: number } | null = null
+      let scopeInfo: Record<string, unknown> | null = null
+      const blockIndexRaw = arg(args, ['blockIndex', 'block_index'])
+      const hasBlock = blockIndexRaw !== undefined && blockIndexRaw !== null && String(blockIndexRaw).trim() !== ''
+      if (hasBlock) {
+        const layout = bodyLayout(s.pkg.documentXml)
+        if (!layout) return '无法定位文档正文（w:body）'
+        const idx = Number(blockIndexRaw)
+        const blk = layout.blocks.find((b) => b.index === idx)
+        if (!blk) return `块序号 ${idx} 不存在（当前共 1..${layout.blocks.length} 块）`
+        const rowRaw = arg(args, ['row'])
+        const colRaw = arg(args, ['col'])
+        const cellPathRaw = arg(args, ['cellPath', 'cell_path'])
+        const cellPath = Array.isArray(cellPathRaw) ? cellPathRaw : null
+        const pRaw = arg(args, ['paragraph', 'paragraph_index', 'cellParagraph'])
+        const hasParagraph = pRaw !== undefined && pRaw !== null && String(pRaw).trim() !== ''
+        if (cellPath && cellPath.length) {
+          // 嵌套表格：cellPath 从外层表格开始，每层 { table?, row, col }；最后一项可以再配 paragraph
+          if (rowRaw !== undefined || colRaw !== undefined) return 'cellPath 与 row / col 二选一（嵌套表格用 cellPath）'
+          if (blk.kind !== 'table') return `块 ${idx} 不是表格，不能用 cellPath`
+          const steps: CellPathStep[] = cellPath.map((step: any, i: number) => ({
+            table: step?.table === undefined || step?.table === null || String(step.table).trim() === '' ? undefined : Number(step.table),
+            row: Number(step?.row),
+            col: Number(step?.col),
+          }))
+          const resolved = resolveCellPath(blk.xml, steps)
+          if ('error' in resolved) return resolved.error
+          const cell = resolved.cell
+          range = { start: blk.start + cell.start, end: blk.start + cell.end }
+          scopeInfo = { blockIndex: idx, kind: 'nested-table-cell', cellPath: steps }
+          if (hasParagraph) {
+            const pIdx = Number(pRaw)
+            if (!(Number.isInteger(pIdx) && pIdx >= 1 && pIdx <= cell.paragraphs.length)) {
+              return `段落号 ${pRaw} 超出范围（该单元格共 ${cell.paragraphs.length} 段；可用 read_table 查看段落号）`
+            }
+            const para = cell.paragraphs[pIdx - 1]
+            range = { start: blk.start + para.start, end: blk.start + para.end }
+            scopeInfo = { ...scopeInfo, kind: 'nested-table-cell-paragraph', paragraph: pIdx }
+          }
+        } else if (rowRaw !== undefined || colRaw !== undefined) {
+          if (blk.kind !== 'table') return `块 ${idx} 不是表格，不能按 row / col 限定`
+          if (rowRaw === undefined || colRaw === undefined) return '按单元格替换需要同时提供 row 与 col（都从 1 开始）'
+          const cell = tableCellOffsets(blk.xml, Number(rowRaw), Number(colRaw))
+          if ('error' in cell) return cell.error
+          range = { start: blk.start + cell.start, end: blk.start + cell.end }
+          scopeInfo = { blockIndex: idx, kind: 'table-cell', row: Number(rowRaw), col: Number(colRaw) }
+          // 只替换单元格里的第 N 段（大单元格里多段文字时最常用）
+          if (hasParagraph) {
+            const cellXml = blk.xml.slice(cell.start, cell.end)
+            const paras = cellParagraphOffsets(cellXml)
+            const pIdx = Number(pRaw)
+            if (!(Number.isInteger(pIdx) && pIdx >= 1 && pIdx <= paras.length)) {
+              return `段落号 ${pRaw} 超出范围（该单元格共 ${paras.length} 段；可用 read_table 查看段落号）`
+            }
+            range = {
+              start: blk.start + cell.start + paras[pIdx - 1].start,
+              end: blk.start + cell.start + paras[pIdx - 1].end,
+            }
+            scopeInfo = { ...scopeInfo, kind: 'table-cell-paragraph', paragraph: pIdx }
+          }
+        } else {
+          range = { start: blk.start, end: blk.end }
+          scopeInfo = { blockIndex: idx, kind: blk.kind }
+        }
+      }
+      const opts = {
+        scope: (args.scope === 'first' ? 'first' : 'all') as 'first' | 'all',
         ignoreCase: !!args.ignoreCase,
-      })
-      if (r.replaced > 0) {
+      }
+      const expectedRaw = arg(args, ['expectedMatches', 'expected_matches'])
+      const expected = expectedRaw === undefined || expectedRaw === null || String(expectedRaw).trim() === ''
+        ? undefined
+        : Number(expectedRaw)
+      const dryRun = arg(args, ['dryRun', 'dry_run']) === true
+      // 在副本上执行：dryRun / expected 不符时原内存文档保持不变
+      const clone: DocxPackage = { ...s.pkg, documentXml: s.pkg.documentXml, modified: s.pkg.modified }
+      const r = range
+        ? applyFindReplaceInRange(clone, range.start, range.end, find, replace, opts)
+        : applyFindReplace(clone, find, replace, opts)
+      const mismatch = expected !== undefined && Number.isFinite(expected) && r.replaced !== expected
+      const applied = !dryRun && !mismatch && r.replaced > 0
+      if (applied) {
+        s.pkg.documentXml = clone.documentXml
+        s.pkg.modified = true
         s.read = parseDocumentXml(s.pkg.documentXml, s.pkg.path, s.pkg.name)
       }
       return JSON.stringify({
         replaced: r.replaced,
         paragraphs: r.paragraphs,
+        ...(scopeInfo ? { scope: scopeInfo } : {}),
+        ...(dryRun ? { dryRun: true } : {}),
+        ...(expected !== undefined ? { expected } : {}),
+        ...(mismatch ? { mismatch: true } : {}),
+        applied,
         modified: s.pkg.modified,
-        note: r.replaced === 0
-          ? '未找到匹配文本，未做任何修改'
-          : (s.pkg.modified ? '已修改内存文档，调用 save_document 写盘' : ''),
+        note: mismatch
+          ? `命中 ${r.replaced} 处，与 expectedMatches=${expected} 不符：未做任何修改`
+          : dryRun
+            ? 'dryRun：只统计命中，未修改内存文档'
+            : r.replaced === 0
+              ? '未找到匹配文本，未做任何修改'
+              : (s.pkg.modified ? '已修改内存文档，调用 save_document 写盘' : ''),
+      }, null, 2)
+    }
+    case 'list_images': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const images = listDocxImages(s.pkg).map((img) => ({
+        index: img.index,
+        relId: img.relId,
+        mediaPath: img.mediaPath,
+        format: img.format,
+        bytes: img.bytes,
+        location: img.location,
+        name: img.name,
+        widthEmu: img.widthEmu,
+        heightEmu: img.heightEmu,
+        widthCm: img.widthEmu ? Number((img.widthEmu / 360000).toFixed(2)) : undefined,
+        heightCm: img.heightEmu ? Number((img.heightEmu / 360000).toFixed(2)) : undefined,
+      }))
+      return JSON.stringify({ count: images.length, images }, null, 2)
+    }
+    case 'replace_image': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const imageIndex = Number(arg(args, ['imageIndex', 'index']))
+      const imagePath = String(arg(args, ['imagePath', 'path']) || '')
+      if (!(Number.isInteger(imageIndex) && imageIndex >= 1)) return '缺少 imageIndex（1 起；可用 list_images 查看）'
+      if (!imagePath) return '缺少 imagePath（新图片的本地绝对路径）'
+      const res = replaceDocxImage(s.pkg, imageIndex, imagePath, {
+        keepSize: arg(args, ['keepSize', 'keep_size']) !== false,
+        widthCm: Number(arg(args, ['widthCm', 'width_cm'])) || undefined,
+        heightCm: Number(arg(args, ['heightCm', 'height_cm'])) || undefined,
+      })
+      if ('error' in res) return res.error
+      return JSON.stringify({
+        replaced: true,
+        ...res,
+        widthCm: res.widthEmu ? Number((res.widthEmu / 360000).toFixed(2)) : undefined,
+        heightCm: res.heightEmu ? Number((res.heightEmu / 360000).toFixed(2)) : undefined,
+        note: '图片已在内存中替换，调用 save_document 写盘',
+      }, null, 2)
+    }
+    case 'insert_image': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const imagePath = String(arg(args, ['imagePath', 'path']) || '')
+      if (!imagePath) return '缺少 imagePath（本地图片绝对路径）'
+      const layout = bodyLayout(s.pkg.documentXml)
+      if (!layout) return '无法定位文档正文（w:body）'
+      const blockIndexRaw = arg(args, ['blockIndex', 'block_index', 'index'])
+      const blockIdx = blockIndexRaw === undefined || blockIndexRaw === null || String(blockIndexRaw).trim() === ''
+        ? undefined
+        : Number(blockIndexRaw)
+      const position = String(arg(args, ['position']) || (blockIdx ? 'after' : 'end')).toLowerCase()
+      const cellPathRaw = arg(args, ['cellPath', 'cell_path'])
+      const cellPath = Array.isArray(cellPathRaw) ? cellPathRaw : null
+      const rowRaw = arg(args, ['row'])
+      const colRaw = arg(args, ['col'])
+      const paragraphRaw = arg(args, ['paragraph', 'paragraph_index', 'cellParagraph'])
+      const hasParagraph = paragraphRaw !== undefined && paragraphRaw !== null && String(paragraphRaw).trim() !== ''
+      let insertAt = layout.appendAt
+      let scopeInfo: Record<string, unknown> = { kind: 'document-end' }
+      let cellStartAbs: number | null = null
+      let cellEndAbs: number | null = null
+      if (cellPath && cellPath.length) {
+        if (blockIdx === undefined) return 'cellPath 需要同时给 blockIndex（表格块序号）'
+        if (rowRaw !== undefined || colRaw !== undefined) return 'cellPath 与 row / col 二选一'
+        const blk = layout.blocks.find((b) => b.index === blockIdx)
+        if (!blk) return `块序号 ${blockIdx} 不存在`
+        if (blk.kind !== 'table') return `块 ${blockIdx} 不是表格，不能用 cellPath`
+        const steps = cellPath.map((step: any) => ({ table: step?.table, row: Number(step?.row), col: Number(step?.col) }))
+        const resolved = resolveCellPath(blk.xml, steps)
+        if ('error' in resolved) return resolved.error
+        cellStartAbs = blk.start + resolved.cell.start
+        cellEndAbs = blk.start + resolved.cell.end
+        scopeInfo = { kind: 'nested-table-cell', blockIndex: blockIdx, cellPath: steps }
+        if (hasParagraph) {
+          const pIdx = Number(paragraphRaw)
+          if (!(Number.isInteger(pIdx) && pIdx >= 1 && pIdx <= resolved.cell.paragraphs.length)) {
+            return `段落号 ${paragraphRaw} 超出范围（该单元格共 ${resolved.cell.paragraphs.length} 段）`
+          }
+          const para = resolved.cell.paragraphs[pIdx - 1]
+          insertAt = blk.start + (position === 'before' ? para.start : para.end)
+          scopeInfo = { ...scopeInfo, kind: 'nested-table-cell-paragraph', paragraph: pIdx }
+        } else {
+          insertAt = (cellEndAbs || blk.end) - '</w:tc>'.length
+        }
+      } else if (rowRaw !== undefined || colRaw !== undefined) {
+        if (blockIdx === undefined) return 'row / col 需要同时给 blockIndex（表格块序号）'
+        const blk = layout.blocks.find((b) => b.index === blockIdx)
+        if (!blk) return `块序号 ${blockIdx} 不存在`
+        if (blk.kind !== 'table') return `块 ${blockIdx} 不是表格`
+        if (rowRaw === undefined || colRaw === undefined) return '按单元格插入需要同时给 row 与 col（1 起）'
+        const cell = tableCellOffsets(blk.xml, Number(rowRaw), Number(colRaw))
+        if ('error' in cell) return cell.error
+        cellStartAbs = blk.start + cell.start
+        cellEndAbs = blk.start + cell.end
+        scopeInfo = { kind: 'table-cell', blockIndex: blockIdx, row: Number(rowRaw), col: Number(colRaw) }
+        if (hasParagraph) {
+          const cellXml = blk.xml.slice(cell.start, cell.end)
+          const paras = cellParagraphOffsets(cellXml)
+          const pIdx = Number(paragraphRaw)
+          if (!(Number.isInteger(pIdx) && pIdx >= 1 && pIdx <= paras.length)) {
+            return `段落号 ${paragraphRaw} 超出范围（该单元格共 ${paras.length} 段）`
+          }
+          insertAt = blk.start + cell.start + (position === 'before' ? paras[pIdx - 1].start : paras[pIdx - 1].end)
+          scopeInfo = { ...scopeInfo, kind: 'table-cell-paragraph', paragraph: pIdx }
+        } else {
+          insertAt = (cellEndAbs || blk.end) - '</w:tc>'.length
+        }
+      } else if (blockIdx !== undefined) {
+        const blk = layout.blocks.find((b) => b.index === blockIdx)
+        if (!blk) return `块序号 ${blockIdx} 不存在`
+        insertAt = position === 'before' ? blk.start : blk.end
+        scopeInfo = { kind: 'block', blockIndex: blockIdx, position: position === 'before' ? 'before' : 'after' }
+      }
+      // 先校验插入点，再把图片写进包（避免校验失败留下孤儿媒体）
+      if (insertAt < 0 || insertAt > s.pkg.documentXml.length) return '插入位置超出文档范围'
+      if (cellStartAbs !== null && cellEndAbs !== null && (insertAt < cellStartAbs || insertAt > cellEndAbs)) {
+        return '插入位置不在目标单元格内'
+      }
+      const added = addDocxImage(s.pkg, imagePath, {
+        widthCm: Number(arg(args, ['widthCm', 'width_cm'])) || undefined,
+        heightCm: Number(arg(args, ['heightCm', 'height_cm'])) || undefined,
+        maxWidthCm: Number(arg(args, ['maxWidthCm', 'max_width_cm'])) || undefined,
+        name: String(arg(args, ['name']) || '') || undefined,
+      })
+      if ('error' in added) return added.error
+      s.pkg.documentXml = s.pkg.documentXml.slice(0, insertAt) + added.paragraphXml + s.pkg.documentXml.slice(insertAt)
+      s.pkg.modified = true
+      s.read = parseDocumentXml(s.pkg.documentXml, s.pkg.path, s.pkg.name)
+      return JSON.stringify({
+        inserted: true,
+        ...added,
+        widthCm: Number((added.widthEmu / 360000).toFixed(2)),
+        heightCm: Number((added.heightEmu / 360000).toFixed(2)),
+        scope: scopeInfo,
+        note: '图片已在内存中插入，调用 save_document 写盘',
       }, null, 2)
     }
     case 'save_document': {

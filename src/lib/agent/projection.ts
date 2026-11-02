@@ -106,6 +106,7 @@ export function projectStepsToUnits(msg: any, v: any, opts?: StepProjectionOptio
         kind: comp.kind,
         droppedMessages: comp.droppedMessages,
         tokensBefore: comp.tokensBefore,
+        requestTokensBefore: comp.requestTokensBefore,
         tokensAfter: comp.tokensAfter,
         chars: comp.chars,
       },

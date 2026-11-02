@@ -156,9 +156,14 @@ export interface SessionEventMap {
     fromSeq: number
     toSeq: number
     summary: string
-    /** 压缩前 / 后的大致 token（估算，用于日志与 UI 展示） */
+    /** 被摘要替换掉的那一段消息压缩前的估算 token（不是整次请求） */
     tokensBefore: number
+    /** 摘要本身的估算 token（不是压缩后的整次请求） */
     tokensAfter: number
+    /** 压缩前整次请求的估算 token（历史 + 工具 schema；与 requestTokensAfter 同口径） */
+    requestTokensBefore?: number
+    /** 压缩后整次请求的估算 token（摘要 + 保留的近期尾部 + 工具 schema） */
+    requestTokensAfter?: number
     /** 被替换掉的消息条数 */
     droppedMessages: number
     /** 触发方式：主动阈值 / 溢出重试 / 用户手动 */

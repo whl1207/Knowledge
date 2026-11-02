@@ -312,8 +312,10 @@ export interface AgentEventMap {
     ok?: boolean
     /** 被摘要替换掉的旧消息条数 */
     droppedMessages?: number
-    /** 这些旧消息压缩前的估算 token */
+    /** 这些旧消息压缩前的估算 token（只代表被替换掉的那一段，不是整次请求） */
     tokensBefore?: number
+    /** 压缩**前**整次请求的估算 token（历史 + 工具 schema；与 tokensAfter 同口径，卡片用它对比） */
+    requestTokensBefore?: number
     /** 压缩**后**的请求历史估算 token（供界面立即更新上下文占用，不必等下一次真实 usage） */
     tokensAfter?: number
     /** progress：摘要目前已经生成的字符数 */

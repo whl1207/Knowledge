@@ -8,15 +8,18 @@
  */
 
 import {
+  COMPACT_HEADROOM_TOKENS,
   COMPACT_KEEP_TURNS,
   COMPACT_MIN_DROP,
   COMPACT_RETAIN_RATIO,
+  compactThresholdTokens,
   computePairingBalance,
   estimateMessageTokens,
   pickCompactionRange,
   pickCompactionRangeByTokens,
   pruneToolResults,
   renderCompactedCheckpoint,
+  planAgentBudget,
   PRUNE_KEEP_RECENT,
   PRUNE_THRESHOLD_CHARS,
   type BudgetMessage,
@@ -243,6 +246,22 @@ export function runContextBudgetSelfTest(): BudgetCase[] {
     add('检查点：带前导语', text.startsWith('以下是更早对话的自动检查点'))
     add('检查点：包在 <compacted-summary> 里', text.includes('<compacted-summary>') && text.includes('</compacted-summary>'))
     add('检查点：正文原样保留', text.includes('## 主要请求与意图'))
+  }
+
+  // 13. DSH 触发阈值：大窗口留出 headroom；小窗口退回 80%（64K 余量对小窗口过大）
+  {
+    add('阈值：128K 窗口按 80%（96K 触发）', compactThresholdTokens({ limit: 128_000, reserve: 8_000 }) === 96_000, String(compactThresholdTokens({ limit: 128_000, reserve: 8_000 })))
+    add('阈值：1M 窗口按 0.8 比例上限（800K）', compactThresholdTokens({ limit: 1_000_000, reserve: 32_000 }) === 800_000, String(compactThresholdTokens({ limit: 1_000_000, reserve: 32_000 })))
+    add('阈值：64K 窗口按 80% 消息预算', compactThresholdTokens({ limit: 65_536, reserve: 5_243 }) === Math.floor((65_536 - 5_243) * 0.8), String(compactThresholdTokens({ limit: 65_536, reserve: 5_243 })))
+    add('阈值：32K 窗口按 80% 消息预算', compactThresholdTokens({ limit: 32_768, reserve: 2_621 }) === Math.floor((32_768 - 2_621) * 0.8), String(compactThresholdTokens({ limit: 32_768, reserve: 2_621 })))
+    add('阈值：8K 窗口按 80% 消息预算', compactThresholdTokens({ limit: 8_192, reserve: 655 }) === Math.floor((8_192 - 655) * 0.8), String(compactThresholdTokens({ limit: 8_192, reserve: 655 })))
+    add('阈值：默认余量是 DSH 的 64K', COMPACT_HEADROOM_TOKENS === 65_536)
+    add('阈值：大窗口可覆盖余量（1M → 768K）', compactThresholdTokens({ limit: 1_000_000, reserve: 32_000, headroomTokens: 200_000 }) === 768_000, String(compactThresholdTokens({ limit: 1_000_000, reserve: 32_000, headroomTokens: 200_000 })))
+    // 预算分级确实走该阈值：95K 字 CJK ≈ 63K tokens < 96K（ok）；150K 字 ≈ 100K tokens ≥ 96K（compact）
+    const under = planAgentBudget({ limit: 128_000, reserve: 8_000, entries: [big('user', 95_000)] })
+    const over = planAgentBudget({ limit: 128_000, reserve: 8_000, entries: [big('user', 150_000)] })
+    add('预算分级：低于阈值时不为 compact', under.level !== 'compact', under.level + ' / ' + under.used)
+    add('预算分级：高于阈值时为 compact', over.level === 'compact', over.level + ' / ' + over.used)
   }
 
   return cases

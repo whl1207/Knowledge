@@ -7,6 +7,26 @@
 
 ---
 
+## 2026-11-03
+
+### Added
+
+- **Images can be inserted into and replaced in Word documents**: new `list_images` (image list with display sizes), `insert_image` (document end / before or after a block / inside a table cell or nested table, PNG/JPEG/GIF/BMP/WebP etc., max width 15.9cm by default) and `replace_image` (replace by index while keeping the original display size and layout by default).
+
+### Fixed
+
+- **The compaction card's before/after token numbers did not match**: both now use the whole-request basis, the replaced old-message size is shown separately, and compaction automatically retries with a more aggressive range when the gain is too small.
+- **Word formatting inside a paragraph was normalized when a match crossed runs**: only the matched characters are replaced now, and untouched runs keep their bold / italic / font size and other formatting (the replacement text takes the formatting of the run where the match starts); the whole-paragraph tool now warns that it loses inline formatting.
+
+### Improved
+
+- **Context compaction now follows the DSH mechanism**: for windows ≥256K the trigger is the smaller of “window × 0.8” and “window − output reserve − 64K headroom”, with the retained tail at `(window − output reserve) × 16%`; windows of 8K / 32K / 64K / 128K fall back to the classic 80% rule (64K absolute headroom is too large for them), one extra compaction runs when pressure is still above the threshold (at most once), and tool-result pruning now applies to subsequent requests.
+- **Small-window compaction guards**: if the system prompt plus tool schemas already exceed the compaction threshold, automatic summarization is skipped with a warning (common on 8K windows, where compacting history cannot help), and after a compaction that is still above the threshold the next automatic attempt is throttled for 60 seconds.
+- **Word table replacement can be scoped and guarded**: `find_and_replace_text` now accepts `blockIndex` / `row` / `col` (only the given table cell), `dryRun` (count only) and `expectedMatches` (abort if the hit count differs), so identical words elsewhere are not replaced by accident.
+- **Large Word table cells can be edited paragraph by paragraph**: the new `read_table` returns each cell's paragraph numbers and text, and `find_and_replace_text` accepts `paragraph` to change only paragraph N of a cell (e.g. a section heading and its body separately) while other paragraphs, the table structure and formatting stay untouched.
+- **Word nested tables can be read and edited**: `read_table` recursively returns tables nested inside a cell with `cell.path`, and `find_and_replace_text` accepts `cellPath` (optionally with `paragraph`) to change one nested cell/paragraph while the outer cell, other nested tables and text outside stay untouched.
+- **Skill / Agent / Plugin Management footers now share one line**: count + path + action icons on a single row; when the left pane narrows (≤300px) the path collapses to a folder icon with the full path in its tooltip, matching across all three panels.
+
 ## 2026-11-02
 
 ### Added
@@ -34,6 +54,7 @@
 - **The right side of the Skill Management panel was cut off**: width overflow is fixed, so the list and cards show in full.
 - **Input-bar buttons did not collapse after opening or widening the right sidebar**: folding is now based on the input card's actual available width, so buttons become icons when space runs out.
 - **The right sidebar's content was clipped after dragging it fully left**: its maximum width is now computed from the available space, always leaving room for the chat area.
+- **The Plugin Designer looked for existing plugins in the wrong place**: `plugin_dev_host` now returns each plugin's real folder (including category subfolders) and warns against guessing "plugins/<id>"; `plugin_dev_check` also resolves a plugin id inside category folders.
 
 ## 2026-11-01
 

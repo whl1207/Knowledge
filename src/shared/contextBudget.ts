@@ -168,6 +168,8 @@ export function planAgentBudget(opts: {
   /** 估算校准系数（真实 / 估算） */
   scale?: number
   reserve?: number
+  /** 额外余量（默认 DSH 的 64K；见 {@link compactThresholdTokens}） */
+  headroomTokens?: number
 }): ContextBudget {
   const scale = clampTokenScale(opts.scale)
   const entries = opts.entries || []
@@ -175,10 +177,25 @@ export function planAgentBudget(opts: {
   if (anchor && Number(anchor.promptTokens) > 0 && entries.length >= Number(anchor.entryCount)) {
     const delta = entries.slice(Number(anchor.entryCount))
     const used = Number(anchor.promptTokens) + estimateMessagesTokens(delta) * scale
-    return planContextBudget({ limit: opts.limit, used, reserve: opts.reserve })
+    return withAgentCompactLevel(planContextBudget({ limit: opts.limit, used, reserve: opts.reserve }), opts.headroomTokens)
   }
   const used = estimateMessagesTokens(entries) * scale + (Number(opts.schemaTokens) || 0)
-  return planContextBudget({ limit: opts.limit, used, reserve: opts.reserve })
+  return withAgentCompactLevel(planContextBudget({ limit: opts.limit, used, reserve: opts.reserve }), opts.headroomTokens)
+}
+
+/**
+ * 把预算里的 `level` 改成 DSH 口径：按「消息 token 是否达到 compactThresholdTokens」判断，
+ * ratio / used 仍保留原来的「已用（含输出预留）/ 窗口」含义，供界面显示不变。
+ */
+function withAgentCompactLevel(budget: ContextBudget, headroomTokens?: number): ContextBudget {
+  const threshold = compactThresholdTokens({
+    limit: budget.limit,
+    reserve: budget.reserve,
+    headroomTokens,
+  })
+  const messageUsed = Math.max(0, budget.used - budget.reserve)
+  budget.level = messageUsed >= threshold ? 'compact' : (budget.ratio >= CONTEXT_WARN_RATIO ? 'warn' : 'ok')
+  return budget
 }
 
 /** 一组消息的 token 估算 */
@@ -372,6 +389,43 @@ export function compactionBasisTokens(opts: { limit?: number; reserve?: number; 
   const reserve = Math.max(0, Number(opts.reserve) || 0)
   const schema = Math.max(0, Number(opts.schemaTokens) || 0)
   return Math.max(1, limit - reserve - schema)
+}
+
+/**
+ * DSH `dsh-compaction-basic` 的默认额外余量（tokens）。
+ *
+ * 触发阈值不是简单的「窗口 × 0.8」：还要给输出与下一轮留出固定的绝对余量，
+ * 否则会在窗口快满时才压，压完仍贴着阈值（表现为「压了像没压」）。
+ */
+export const COMPACT_HEADROOM_TOKENS = 65_536
+
+/** DSH `compactionRetries` 默认值：首次压缩后仍高于阈值时，最多再压几次 */
+export const COMPACT_RETRIES = 1
+
+/**
+ * 压缩触发阈值（**消息 token** 口径，不含输出预留）——复刻 DSH 的
+ * `floor(min(contextWindow × thresholdRatio, contextWindow − reserve − headroom))`。
+ *
+ * 小窗口留不出 64K 余量时退化为「消息预算的一半」作为余量（阈值 ≈ 50%），
+ * 避免出现 DSH 那种 `pressureBudget <= 0` 的无效配置，同时仍保留足够空间。
+ *
+ * @param opts.limit 生效窗口
+ * @param opts.reserve 预留输出 token
+ * @param opts.headroomTokens 额外余量（默认 {@link COMPACT_HEADROOM_TOKENS}）
+ */
+export function compactThresholdTokens(opts: { limit?: number; reserve?: number; headroomTokens?: number }): number {
+  const limit = Number(opts.limit) > 0 ? Number(opts.limit) : FALLBACK_CONTEXT_WINDOW
+  const reserve = Math.max(0, Number(opts.reserve) || 0)
+  const messageBudget = Math.max(1, limit - reserve)
+  const wanted = Number(opts.headroomTokens)
+  const headroomTokens = Number.isFinite(wanted) ? wanted : COMPACT_HEADROOM_TOKENS
+  // 64K 绝对余量只适合大窗口（≥ 256K）。8K / 32K / 64K / 128K 里 64K 余量会占掉
+  // 全部消息预算（甚至出现负 pressureBudget），硬套只会过早/反复压缩；此时退回经典 80% 口径。
+  if (limit < 262_144 || messageBudget <= headroomTokens) {
+    return Math.max(1, Math.floor(messageBudget * CONTEXT_COMPACT_RATIO))
+  }
+  const pressureBudget = Math.max(1, messageBudget - headroomTokens)
+  return Math.max(1, Math.floor(Math.min(limit * CONTEXT_COMPACT_RATIO, pressureBudget)))
 }
 
 /**

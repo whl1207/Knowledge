@@ -67,6 +67,7 @@ import {
   COMPACT_KEEP_TURNS,
   COMPACT_MIN_DROP,
   COMPACT_RETAIN_RATIO,
+  COMPACT_RETRIES,
   COMPACT_SYSTEM_PROMPT,
   OVERFLOW_RETRY_LIMIT,
   PRUNE_KEEP_RECENT,
@@ -74,7 +75,9 @@ import {
   pruneToolResults,
   renderCompactedCheckpoint,
   compactionBasisTokens,
+  compactThresholdTokens,
   estimateMessagesTokens,
+  estimateTokens,
   estimateToolSchemaTokens,
   calibrateTokenScale,
   clampTokenScale,
@@ -599,6 +602,10 @@ class AgentImpl implements AgentControl {
    * 而每推进一步又会重新触发——不设退避就会一步一次摘要请求（慢且烧钱）。
    */
   private compactFailedAt = 0
+  /** 压缩成功但仍高于阈值时的节流：小窗口 / 系统提示+工具过大时不要每一步都再摘要一次 */
+  private compactThrottleUntil = 0
+  /** 「压缩救不了」的原因只警告一次（系统提示 + 工具 schema 已超过阈值） */
+  private compactOverheadWarned = false
   /** 时间读数：上次注入时刻与「是否已从日志恢复过」（对齐 DSH 的最小间隔语义） */
   private lastTimeContextAt = 0
   private timeContextLoaded = false
@@ -1308,6 +1315,9 @@ class AgentImpl implements AgentControl {
         const pruned = pruneToolResults(this.toBudgetEntries(entries), { keepRecent: PRUNE_KEEP_RECENT })
         let handledByPrune = false
         if (pruned.pruned > 0) {
+          // DSH 的修剪会持久改写会话表层；这里等价地把「之后的请求」也切到剪枝版本，
+          // 否则只把剪枝结果用于测量，实际请求仍带着未剪枝的大工具结果（估算也会偏低）。
+          this.pruneActive = true
           const after = planAgentBudget({
             limit: this.options.contextLimit,
             entries: pruned.items,
@@ -1316,17 +1326,41 @@ class AgentImpl implements AgentControl {
             scale: this.tokenScale,
           })
           if (after.level !== 'compact') {
-            this.pruneActive = true
             handledByPrune = true
             console.info(`[agent-compact] ${this.id} 剪枝了 ${pruned.pruned} 条工具结果（省约 ${pruned.savedChars} 字符），占用降到 ${(after.ratio * 100).toFixed(0)}%，跳过摘要`)
           }
         }
-        // ② 剪枝不够才真正摘要（一次额外的 LLM 调用）；刚失败过的 60 秒内不重试，避免一步一次摘要请求
+        // ② 剪枝不够才真正摘要（一次额外的 LLM 调用）；刚失败过的 60 秒内不重试，避免一步一次摘要请求。
+        //    DSH 的 compactionRetries 默认 1：压一次仍高于阈值时会再压一次，而不是等到下一步再重复。
         const backoff = Date.now() - this.compactFailedAt < 60_000
-        if (!handledByPrune && backoff) {
-          console.info(`[agent-compact] ${this.id} 上次压缩失败，60 秒内不自动重试（仍可使用手动压缩）`)
-        } else if (!handledByPrune && await this.compact('auto')) {
-          entries = sessionLog.deriveEntries(this.id)
+        const throttled = Date.now() < this.compactThrottleUntil
+        // 小窗口保护：系统提示 + 工具 schema 是**不可压缩的固定开销**。若它们本身已达到阈值，
+        // 摘要历史永远压不回阈值下——再压只会每步多花一次 LLM 调用（8K/32K 窗口尤其明显）。
+        const thresholdTokens = compactThresholdTokens({ limit: budget.limit, reserve: budget.reserve })
+        const fixedOverhead = estimateTokens(String(this.options.systemPrompt || ''))
+          + estimateToolSchemaTokens(this.visibleTools())
+        const overheadTooLarge = fixedOverhead >= thresholdTokens
+        if (overheadTooLarge && !this.compactOverheadWarned) {
+          this.compactOverheadWarned = true
+          console.warn(`[agent-compact] ${this.id} 系统提示与工具 schema 约 ${fixedOverhead} tokens ≥ 压缩阈值 ${thresholdTokens}：压缩历史无法降到阈值以下，已跳过自动摘要（可减少启用的工具 / 技能，或换更大上下文窗口）`)
+          this.compactThrottleUntil = Date.now() + 60_000
+        }
+        if (!handledByPrune && (backoff || throttled || overheadTooLarge)) {
+          if (backoff) console.info(`[agent-compact] ${this.id} 上次压缩失败，60 秒内不自动重试（仍可使用手动压缩）`)
+          else if (throttled) console.info(`[agent-compact] ${this.id} 压缩后仍高于阈值，60 秒内不重复摘要`)
+        } else if (!handledByPrune) {
+          for (let attempt = 0; attempt <= COMPACT_RETRIES; attempt++) {
+            const ok = await this.compact('auto')
+            if (!ok) break
+            entries = sessionLog.deriveEntries(this.id)
+            const next = this.requestBudget(entries)
+            if (next.level !== 'compact') break
+            if (attempt >= COMPACT_RETRIES) {
+              console.warn(`[agent-compact] ${this.id} 已连续压缩 ${attempt + 1} 次仍高于阈值（估算 ${next.used}/${next.limit} tokens），60 秒内不再重复摘要`)
+              this.compactThrottleUntil = Date.now() + 60_000
+              break
+            }
+          }
         }
       }
     }
@@ -1438,28 +1472,50 @@ class AgentImpl implements AgentControl {
       // 溢出恢复要更狠：服务端已经明确说"超窗"了，还按常规保留 16% 尾部多半压不够，
       // 只会把重试次数耗完（对齐 DSH 的 overflow 路径：绕过常规策略、一次削掉最大的平衡头部）。
       const aggressive = kind === 'overflow-retry'
-      const plan = pickCompactionRangeByTokens(items, {
-        // 主口径：按比例保留近期尾部（复刻 DSH 的 retainRatio 0.16）
-        retainRatio: aggressive ? Math.min(COMPACT_RETAIN_RATIO, 0.05) : COMPACT_RETAIN_RATIO,
-        // 基准是**可用预算**（窗口 − 预留输出 − 工具 schema），不是原始窗口：
-        // 小窗口 + 多工具时 schema 占比可观，用原始窗口会高估余量、压缩迟迟不触发。
-        contextWindow: compactionBasisTokens({
-          limit: this.options.contextLimit,
-          reserve: this.lastBudgetReserve,
-          schemaTokens: estimateToolSchemaTokens(this.visibleTools()),
-        }),
-        // 安全阀：即使 token 预算允许，最近这几轮也逐字保留（溢出恢复时只保 1 轮）
-        keepTurns: aggressive ? 1 : COMPACT_KEEP_TURNS,
+      const schemaTokens = estimateToolSchemaTokens(this.visibleTools())
+      // DSH 的保留预算口径：(`窗口 − 预留输出`) × retainRatio，工具 schema 不参与保留基准
+      // （schema 只影响触发阈值里的余量计算；见 compactThresholdTokens）。
+      const retainBaseTokens = compactionBasisTokens({
+        limit: this.options.contextLimit,
+        reserve: this.lastBudgetReserve,
       })
+      // 压缩**前**的整次请求规模（历史 + 工具 schema）：与 tokensAfter 同口径，
+      // 卡片上「压缩前 → 压缩后」必须比这两个，不能拿"被替换的那几条"去比整次请求。
+      const requestTokensBefore = estimateMessagesTokens(items) + schemaTokens
+      const pickPlan = (retainRatio: number, keepTurns: number) => pickCompactionRangeByTokens(items, {
+        retainRatio,
+        contextWindow: retainBaseTokens,
+        keepTurns,
+      })
+      let plan = pickPlan(aggressive ? Math.min(COMPACT_RETAIN_RATIO, 0.05) : COMPACT_RETAIN_RATIO, aggressive ? 1 : COMPACT_KEEP_TURNS)
       if (!plan) {
         console.warn(`[agent-compact] ${this.id} 可压缩内容不足（不足 ${COMPACT_MIN_DROP} 条或轮次太少），跳过压缩`)
         return false
+      }
+      let droppedTokens = estimateMessagesTokens(items.slice(plan.startIndex, plan.endIndex))
+      /**
+       * 「压了但几乎没减」保护：上下文的大头可能是系统提示 / 工具 schema / 刚保留的近期尾部
+       * （尤其是一条巨大的工具结果），常规 16% 口径只会丢掉几百 tokens，于是每一轮都触发一次
+       * 摘要（还多花一次 LLM 请求），看起来就是"压缩没效果"。
+       * 这种情况下改用更激进的口径再选一次（保留 5% + 只保最近 1 轮），确实能多压才采用。
+       */
+      const minGain = Math.max(512, Math.round(requestTokensBefore * 0.1))
+      if (!aggressive && droppedTokens < minGain) {
+        const fallbackPlan = pickPlan(Math.min(COMPACT_RETAIN_RATIO, 0.05), 1)
+        if (fallbackPlan) {
+          const fallbackTokens = estimateMessagesTokens(items.slice(fallbackPlan.startIndex, fallbackPlan.endIndex))
+          if (fallbackTokens > droppedTokens) {
+            console.info(`[agent-compact] ${this.id} 常规口径只能压缩 ${droppedTokens} tokens（请求约 ${requestTokensBefore}）→ 改用激进口径，预计压缩 ${fallbackTokens} tokens`)
+            plan = fallbackPlan
+            droppedTokens = fallbackTokens
+          }
+        }
       }
       // 界面提示：摘要要额外发一次无工具 LLM 请求，不给提示时这一步看起来像卡住
       this.emit('agent/compaction', { phase: 'start', kind })
       const dropped = entries.slice(plan.startIndex, plan.endIndex)
       const droppedItems = items.slice(plan.startIndex, plan.endIndex)
-      const tokensBefore = estimateMessagesTokens(droppedItems)
+      const tokensBefore = droppedTokens
       const summary = (await this.summarize(buildCompactionPrompt(droppedItems), kind)) || indexSummary(droppedItems)
       const replacement: BudgetMessage = { role: 'user', content: renderCompactedCheckpoint(summary) }
       const tokensAfter = estimateMessagesTokens([replacement])
@@ -1485,16 +1541,18 @@ class AgentImpl implements AgentControl {
         summary,
         tokensBefore,
         tokensAfter,
+        requestTokensBefore,
+        requestTokensAfter: postCompactionTokens,
         droppedMessages: dropped.length,
         kind,
         model: String((this.options.llmConfig?.model || this.options.config?.model || '') || '') || undefined,
       })
-      console.info(`[agent-compact] ${this.id} 已压缩 ${dropped.length} 条消息（约 ${tokensBefore} tokens → 摘要 ${summary.length} 字符，kind=${kind}）`)
+      console.info(`[agent-compact] ${this.id} 已压缩 ${dropped.length} 条消息（约 ${tokensBefore} tokens → 摘要 ${summary.length} 字符，请求约 ${requestTokensBefore} → ${postCompactionTokens} tokens，kind=${kind}）`)
       // 历史被重写：真实用量锚点与「本次请求估算」都失效（条目序号对不上），由下一次请求重新建立
       this.tokenAnchor = null
       this.lastRequestEntries = -1
       this.lastRequestEstimate = 0
-      this.emit('agent/compaction', { phase: 'end', kind, ok: true, droppedMessages: dropped.length, tokensBefore, tokensAfter: postCompactionTokens })
+      this.emit('agent/compaction', { phase: 'end', kind, ok: true, droppedMessages: dropped.length, tokensBefore, requestTokensBefore, tokensAfter: postCompactionTokens })
       return true
     } catch (e: any) {
       console.warn(`[agent-compact] ${this.id} 压缩失败（保持原历史）:`, e?.message || e)

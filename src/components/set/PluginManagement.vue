@@ -96,25 +96,23 @@
           <span>{{ zh ? invalidNamedDirs.length + ' 个文件夹被跳过' : invalidNamedDirs.length + ' folder(s) skipped' }}</span>
         </div>
 
-        <!-- 底栏（与技能管理一致）：数量 + 安全声明 / 服务 / 顺序 + 插件目录 -->
+        <!-- 底栏（与技能 / 智能体管理一致）：一行显示 数量 + 插件目录 + 操作图标；窄栏时路径只留文件夹图标 -->
         <div class="sk-nav-foot">
-          <div class="sk-foot-row">
-            <span class="sk-foot-count">
-              {{ plugins.length }}{{ zh ? ' 个插件' : ' plugins' }}
-              <template v-if="plugins.length"> · {{ enabledPluginCount }}{{ zh ? ' 启用' : ' enabled' }}</template>
-            </span>
-            <span class="sk-foot-icons">
-              <i v-if="orderCustomized" class="fa fa-sort-amount-down sk-foot-icon action"
-                :title="zh ? '导航顺序已自定义：恢复宿主默认顺序（各插件声明 order 的顺序）' : 'Custom nav order: reset to the host default order'"
-                @click="resetOrder"></i>
-              <i v-if="services.length" class="fa fa-plug sk-foot-icon" :title="servicesHint"></i>
-              <i class="fa fa-exclamation-triangle sk-foot-icon plugin-safe-icon" :title="securityNotice"></i>
-            </span>
-          </div>
-          <div class="sk-foot-path" @click="openDir()" :title="rootDir || (zh ? '未设置' : 'Not set')">
+          <span class="sk-foot-count">
+            {{ plugins.length }}{{ zh ? ' 个插件' : ' plugins' }}
+            <template v-if="plugins.length"> · {{ enabledPluginCount }}{{ zh ? ' 启用' : ' enabled' }}</template>
+          </span>
+          <span class="sk-foot-path" @click="openDir()" :title="rootDir || (zh ? '未设置' : 'Not set')">
             <i class="fa fa-folder"></i>
             <span class="sk-foot-path-text">{{ rootDir || (zh ? '未设置插件目录' : 'No plugins folder set') }}</span>
-          </div>
+          </span>
+          <span class="sk-foot-icons">
+            <i v-if="orderCustomized" class="fa fa-sort-amount-down sk-foot-icon action"
+              :title="zh ? '导航顺序已自定义：恢复宿主默认顺序（各插件声明 order 的顺序）' : 'Custom nav order: reset to the host default order'"
+              @click="resetOrder"></i>
+            <i v-if="services.length" class="fa fa-plug sk-foot-icon" :title="servicesHint"></i>
+            <i class="fa fa-exclamation-triangle sk-foot-icon plugin-safe-icon" :title="securityNotice"></i>
+          </span>
         </div>
       </div>
 
@@ -1590,6 +1588,9 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   background: var(--backgroundColor);
+  /* 底栏按左栏可用宽度自适应（窄栏时路径收成图标） */
+  container-type: inline-size;
+  container-name: manage-foot;
 }
 /* 未选中插件：左侧整宽、右侧详情整块不渲染（点某个插件后左栏收窄、右栏才出现） */
 .plugin-panel:not(.has-selection) .manage-left {
@@ -1651,19 +1652,19 @@ onUnmounted(() => {
   flex: 1;
 }
 
-/* 底栏：数量 + 目录（与技能管理一致） */
+/* 底栏：一行显示「数量 + 目录 + 图标」；窄栏时目录只留文件夹图标（container 查询） */
 .sk-nav-foot {
-  flex-shrink: 0; display: flex; flex-direction: column; gap: 3px;
+  flex-shrink: 0; display: flex; flex-direction: row; align-items: center; gap: 6px;
   padding: 5px 7px; border-top: 1px solid var(--borderColor);
-  background: var(--menuColor);
+  background: var(--menuColor); font-size: 10px; min-width: 0;
 }
-.sk-foot-row { display: flex; align-items: center; justify-content: space-between; font-size: 10px; opacity: .8; }
-.sk-foot-icons { display: flex; align-items: center; gap: 6px; }
+.sk-foot-count { flex-shrink: 0; white-space: nowrap; opacity: .8; }
+.sk-foot-icons { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
 .sk-foot-icon { font-size: 10px; }
 .sk-foot-icon.action { cursor: pointer; }
 .sk-foot-icon.action:hover { color: var(--fontActiveColor); opacity: 1; }
 .sk-foot-path {
-  display: flex; align-items: center; gap: 5px; min-width: 0;
+  flex: 1 1 auto; min-width: 18px; display: flex; align-items: center; gap: 5px;
   font-size: 10px; opacity: .65; cursor: pointer;
 }
 .sk-foot-path:hover { opacity: 1; }
@@ -1671,6 +1672,11 @@ onUnmounted(() => {
 .sk-foot-path-text {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   direction: rtl; text-align: left;
+}
+@container manage-foot (max-width: 300px) {
+  .sk-nav-foot { gap: 4px; }
+  .sk-foot-path-text { display: none; }
+  .sk-foot-path { min-width: 14px; flex: 0 0 auto; }
 }
 
 /* ====== 细长窗口（高宽比 > 16:9，如手机竖屏）：插件列表 / 详情各占满整屏互相切换 ======

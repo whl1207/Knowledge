@@ -115,8 +115,10 @@ export interface CompactionView {
   kind: AgentCompactionKind
   /** 被摘要替换掉的旧消息条数（phase='done' 时有效） */
   droppedMessages?: number
-  /** 压缩前这些消息的估算 token */
+  /** 压缩前这些旧消息的估算 token（只代表被替换掉的那一段） */
   tokensBefore?: number
+  /** 压缩前整次请求的估算 token（历史 + 工具 schema；与 tokensAfter 同口径） */
+  requestTokensBefore?: number
   /** 压缩后的请求历史估算 token（摘要 + 保留的近期尾部；供界面立即更新上下文占用） */
   tokensAfter?: number
   /** 运行中：摘要已生成的字符数 */
@@ -711,6 +713,7 @@ class AgentBridge {
             phase: ev.payload.ok === false ? 'failed' : 'done',
             droppedMessages: ev.payload.droppedMessages ?? view.compaction.droppedMessages,
             tokensBefore: ev.payload.tokensBefore ?? view.compaction.tokensBefore,
+            requestTokensBefore: ev.payload.requestTokensBefore ?? view.compaction.requestTokensBefore,
             tokensAfter: ev.payload.tokensAfter ?? view.compaction.tokensAfter,
             endTime: Date.now(),
           }

@@ -67,7 +67,20 @@ export function topicHost(): string {
   lines.push(`- 宿主插件 API 版本：${PLUGIN_HOST_API_VERSION}（清单里写 apiVersion: "^1"）`)
   lines.push(`- 可申请的权限：${SUPPORTED_PLUGIN_PERMISSIONS.join(' / ')}（不申请就用不了对应能力；多申请会让用户多一层顾虑）`)
   const plugins = pluginHost.list()
-  lines.push(`- 当前已装插件：${plugins.length ? plugins.map((p) => `${p.name || p.id}(${p.id}, ${p.status})`).join('、') : '无'}`)
+  if (plugins.length) {
+    lines.push('- 当前已装插件（**插件可以放在分类子文件夹里**；下面是每个插件的真实目录，读文件 / 运行自检请直接用它，不要自己拼路径）：')
+    // 插件多时只列前面一部分，避免这一条话题超出工具结果预算（其余可去「设置 → 插件 → 管理」看）
+    const shown = plugins.slice(0, 30)
+    for (const p of shown) {
+      lines.push(`  - ${p.name || p.id}（id: ${p.id}，状态: ${p.status}）→ ${p.dir}`)
+    }
+    if (plugins.length > shown.length) {
+      lines.push(`  - …共 ${plugins.length} 个插件，其余请在「设置 → 插件 → 管理」里查看`)
+    }
+  } else {
+    lines.push('- 当前已装插件：无')
+  }
+  lines.push('- ⚠ 不要假设插件位于「插件目录/<插件 id>」：分类子文件夹里的插件（例如 `<插件目录>/办公/todo`）不在根目录，按 id 拼路径会得到「目录不存在」。找已有插件以上面列出的真实目录为准；用 `plugin_dev_check` 时也可以直接传插件 id（会在分类子文件夹里解析到真实目录）。')
   lines.push('- 数据放哪：「设置 → 插件 → 数据」按约定统计，请照做：设置 / 结构小的数据放 localStorage，键名以 `aikm.plugin.<插件 id>.` 开头；图片、存档等大文件放本机 OPFS 的 `plugins/<插件 id>/`；主进程半边用 ctx.storage（落在 `userData/plugins-data/<插件 id>/storage.json`）。')
   lines.push('- 写插件所需的全部资料就在本服务这几条工具里（另有「设置 → 插件 → 开发」页的可复制模板），不要去磁盘上找 AI-KM 的源码或安装目录：装机版没有 `src/`，找不到。')
   return lines.join('\n')
@@ -245,7 +258,7 @@ export const PLUGIN_DEV_TOOL_SPECS: readonly PluginDevToolSpec[] = [
   {
     name: 'plugin_dev_host',
     topic: 'host',
-    description: '读取本机插件运行态：插件目录的绝对路径、**插件文件夹命名规则（必须等于清单 id 且只能用 ASCII 小写 [a-z0-9._-]，中文目录名会被宿主整目录跳过）**、是默认目录还是自定义目录、已装插件清单、宿主插件 API 版本、可申请的权限（fs / shell / net / agent / agent.run / llm / image）、插件数据该放在哪。写插件前先取它，就知道该把文件夹建成什么名字、放在哪里。',
+    description: '读取本机插件运行态：插件目录的绝对路径、**插件文件夹命名规则（必须等于清单 id 且只能用 ASCII 小写 [a-z0-9._-]，中文目录名会被宿主整目录跳过）**、是默认目录还是自定义目录、已装插件清单（**每个插件的真实目录**，可能位于分类子文件夹）、宿主插件 API 版本、可申请的权限（fs / shell / net / agent / agent.run / llm / image）、插件数据该放在哪。写插件前先取它，就知道该把文件夹建成什么名字、放在哪里；读已有插件时直接用它给出的目录，不要按 id 猜路径。',
   },
   {
     name: 'plugin_dev_constraints',

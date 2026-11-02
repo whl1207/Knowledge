@@ -94,25 +94,23 @@
         </draggable>
       </div>
 
-      <!-- 底栏（参照「插件 → 管理」）：数量 + 存储位置 + 恢复默认位置；点路径打开存储面板 -->
-      <div class="ap-nav-foot">
-        <div class="ap-foot-row">
-          <span class="ap-foot-count">
-            {{ presetKeyword ? `${filteredContacts.length} / ${store.agentPresets.length}` : store.agentPresets.length }}
-            {{ store.locales === 'en' ? 'presets' : '个预设' }}
-          </span>
-          <span class="ap-foot-icons">
-            <i v-if="presetIsDefaultFolder" class="fa fa-home ap-foot-icon" :title="store.locales === 'en' ? 'Default preset folder' : '默认预设目录'"></i>
-            <i v-else-if="store.agentPresetPath" class="fa fa-undo ap-foot-icon action"
-              :title="store.locales === 'en' ? 'Restore the default preset folder' : '恢复默认预设目录'" @click="resetFolder"></i>
-            <i class="fa fa-sliders ap-foot-icon action" :title="store.locales === 'en' ? 'Preset storage settings' : '预设存储位置设置'" @click="openFolderPanel"></i>
-          </span>
-        </div>
-        <div class="ap-foot-path" @click="openFolderPanel"
+      <!-- 底栏（与技能 / 插件管理一致）：一行显示 数量 + 存储位置 + 操作图标；窄栏时路径只留图标 -->
+      <div class="sk-nav-foot">
+        <span class="sk-foot-count">
+          {{ presetKeyword ? `${filteredContacts.length} / ${store.agentPresets.length}` : store.agentPresets.length }}
+          {{ store.locales === 'en' ? 'presets' : '个预设' }}
+        </span>
+        <span class="sk-foot-path" @click="openFolderPanel"
           :title="store.agentPresetPath || (store.locales === 'en' ? 'Presets are stored in localStorage' : '预设存在本地存储中')">
           <i class="fa" :class="store.agentPresetPath ? 'fa-folder' : 'fa-database'"></i>
-          <span class="ap-foot-path-text">{{ store.agentPresetPath || (store.locales === 'en' ? 'Local storage' : '本地存储') }}</span>
-        </div>
+          <span class="sk-foot-path-text">{{ store.agentPresetPath || (store.locales === 'en' ? 'Local storage' : '本地存储') }}</span>
+        </span>
+        <span class="sk-foot-icons">
+          <i v-if="presetIsDefaultFolder" class="fa fa-home sk-foot-icon" :title="store.locales === 'en' ? 'Default preset folder' : '默认预设目录'"></i>
+          <i v-else-if="store.agentPresetPath" class="fa fa-undo sk-foot-icon action"
+            :title="store.locales === 'en' ? 'Restore the default preset folder' : '恢复默认预设目录'" @click="resetFolder"></i>
+          <i class="fa fa-sliders sk-foot-icon action" :title="store.locales === 'en' ? 'Preset storage settings' : '预设存储位置设置'" @click="openFolderPanel"></i>
+        </span>
       </div>
     </div>
 
@@ -1932,6 +1930,9 @@ onMounted(async () => {
   /* 与「插件 → 管理」左栏一致：230px（安装按钮 + 四个图标按钮能排在一行） */
   width: 230px; flex-shrink: 0; display: flex; flex-direction: column;
   border-right: 1px solid var(--borderColor); background: var(--menuColor);
+  /* 底栏按左栏可用宽度自适应（窄栏时路径收成图标） */
+  container-type: inline-size;
+  container-name: manage-foot;
 }
 .contact-sidebar-list { flex: 1; overflow-y: auto; padding: 0 4px 4px; background-color: var(--backgroundColor); }
 /* ====== 顶部工具栏（与「插件 → 管理」一致：只有按钮行，横线在按钮下方） ====== */
@@ -2535,25 +2536,31 @@ onMounted(async () => {
 }
 .contact-actions-row .toolbar-action-btn.primary:hover { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
 .ap-toolbar-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ap-nav-foot {
-  flex-shrink: 0; display: flex; flex-direction: column; gap: 3px;
+/* 底栏（与技能 / 插件管理同一套）：一行显示 数量 + 存储位置 + 图标；窄栏时路径只留图标 */
+.sk-nav-foot {
+  flex-shrink: 0; display: flex; flex-direction: row; align-items: center; gap: 6px;
   padding: 5px 7px; border-top: 1px solid var(--borderColor);
-  background: var(--menuColor);
+  background: var(--menuColor); font-size: 10px; min-width: 0;
 }
-.ap-foot-row { display: flex; align-items: center; justify-content: space-between; font-size: 10px; opacity: .8; }
-.ap-foot-icons { display: flex; align-items: center; gap: 7px; }
-.ap-foot-icon { font-size: 10px; }
-.ap-foot-icon.action { cursor: pointer; }
-.ap-foot-icon.action:hover { color: var(--fontActiveColor); opacity: 1; }
-.ap-foot-path {
-  display: flex; align-items: center; gap: 5px; min-width: 0;
+.sk-foot-count { flex-shrink: 0; white-space: nowrap; opacity: .8; }
+.sk-foot-icons { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+.sk-foot-icon { font-size: 10px; }
+.sk-foot-icon.action { cursor: pointer; }
+.sk-foot-icon.action:hover { color: var(--fontActiveColor); opacity: 1; }
+.sk-foot-path {
+  flex: 1 1 auto; min-width: 18px; display: flex; align-items: center; gap: 5px;
   font-size: 10px; opacity: .65; cursor: pointer;
 }
-.ap-foot-path:hover { opacity: 1; }
-.ap-foot-path i { flex-shrink: 0; }
-.ap-foot-path-text {
+.sk-foot-path:hover { opacity: 1; }
+.sk-foot-path i { flex-shrink: 0; }
+.sk-foot-path-text {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   direction: rtl; text-align: left;
+}
+@container manage-foot (max-width: 300px) {
+  .sk-nav-foot { gap: 4px; }
+  .sk-foot-path-text { display: none; }
+  .sk-foot-path { min-width: 14px; flex: 0 0 auto; }
 }
 
 /* ====== 存储位置 chip（侧栏顶部，一行高） ====== */

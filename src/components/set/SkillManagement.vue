@@ -78,23 +78,22 @@
             </template>
           </ToolGroupList>
 
-          <!-- 底栏（参照「插件 → 管理」）：数量 + 技能目录（点击选择目录） -->
+          <!-- 底栏（与插件 / 智能体管理一致）：一行显示 数量 + 技能目录 + 操作图标；窄栏时路径只留文件夹图标 -->
           <div class="sk-nav-foot">
-            <div class="sk-foot-row">
-              <span class="sk-foot-count">
-                {{ skills.length }}{{ store.locales === 'en' ? ' skills' : ' 个技能' }}
-                <template v-if="skills.length"> · {{ enabledSkillCount }}{{ store.locales === 'en' ? ' enabled' : ' 启用' }}</template>
-              </span>
-              <span class="sk-foot-icons">
-                <i v-if="isDefaultFolder" class="fa fa-home sk-foot-icon" :title="store.locales === 'en' ? 'Default skills folder' : '默认技能目录'"></i>
-                <i v-else-if="store.skillsPath" class="fa fa-undo sk-foot-icon action"
-                  :title="store.locales === 'en' ? 'Restore the default skills folder' : '恢复默认技能目录'" @click="resetSkillsFolder"></i>
-              </span>
-            </div>
-            <div class="sk-foot-path" @click="openSkillsFolder" :title="store.skillsPath || ''">
+            <span class="sk-foot-count">
+              {{ skills.length }}{{ store.locales === 'en' ? ' skills' : ' 个技能' }}
+              <template v-if="skills.length"> · {{ enabledSkillCount }}{{ store.locales === 'en' ? ' enabled' : ' 启用' }}</template>
+            </span>
+            <span class="sk-foot-path" @click="openSkillsFolder"
+              :title="store.skillsPath || (store.locales === 'en' ? 'No folder set' : '未设置技能文件夹')">
               <i class="fa fa-folder"></i>
               <span class="sk-foot-path-text">{{ store.skillsPath || (store.locales === 'en' ? 'No folder set' : '未设置技能文件夹') }}</span>
-            </div>
+            </span>
+            <span class="sk-foot-icons">
+              <i v-if="isDefaultFolder" class="fa fa-home sk-foot-icon" :title="store.locales === 'en' ? 'Default skills folder' : '默认技能目录'"></i>
+              <i v-else-if="store.skillsPath" class="fa fa-undo sk-foot-icon action"
+                :title="store.locales === 'en' ? 'Restore the default skills folder' : '恢复默认技能目录'" @click="resetSkillsFolder"></i>
+            </span>
           </div>
         </div>
 
@@ -1022,18 +1021,19 @@ onBeforeUnmount(() => {
 /* 加载中 / 无技能 / 未设置目录：占满列表区居中提示 */
 .sk-state { flex: 1; min-height: 0; display: flex; }
 .sk-state .empty-hint { flex: 1; height: auto; }
+/* 底栏：一行显示「数量 + 目录 + 图标」；窄栏时目录只留文件夹图标（container 查询） */
 .sk-nav-foot {
-  flex-shrink: 0; display: flex; flex-direction: column; gap: 3px;
+  flex-shrink: 0; display: flex; flex-direction: row; align-items: center; gap: 6px;
   padding: 5px 7px; border-top: 1px solid var(--borderColor);
-  background: var(--menuColor);
+  background: var(--menuColor); font-size: 10px; min-width: 0;
 }
-.sk-foot-row { display: flex; align-items: center; justify-content: space-between; font-size: 10px; opacity: .8; }
-.sk-foot-icons { display: flex; align-items: center; gap: 6px; }
+.sk-foot-count { flex-shrink: 0; white-space: nowrap; opacity: .8; }
+.sk-foot-icons { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
 .sk-foot-icon { font-size: 10px; }
 .sk-foot-icon.action { cursor: pointer; }
 .sk-foot-icon.action:hover { color: var(--fontActiveColor); opacity: 1; }
 .sk-foot-path {
-  display: flex; align-items: center; gap: 5px; min-width: 0;
+  flex: 1 1 auto; min-width: 18px; display: flex; align-items: center; gap: 5px;
   font-size: 10px; opacity: .65; cursor: pointer;
 }
 .sk-foot-path:hover { opacity: 1; }
@@ -1041,6 +1041,12 @@ onBeforeUnmount(() => {
 .sk-foot-path-text {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   direction: rtl; text-align: left;
+}
+/* 左栏宽度不足（如选中技能后的 230px）：路径收纳成文件夹图标，数量与图标仍保持一行 */
+@container manage-foot (max-width: 300px) {
+  .sk-nav-foot { gap: 4px; }
+  .sk-foot-path-text { display: none; }
+  .sk-foot-path { min-width: 14px; flex: 0 0 auto; }
 }
 /* 文件树头部的「打开该技能文件夹」 */
 .sk-open-dir { margin-left: 8px; cursor: pointer; opacity: .7; }
@@ -1089,6 +1095,9 @@ onBeforeUnmount(() => {
   border-right: 1px solid var(--borderColor);
   display: flex;
   flex-direction: column;
+  /* 底栏按左栏可用宽度自适应（窄栏时路径收成图标） */
+  container-type: inline-size;
+  container-name: manage-foot;
 }
 /* 未选中技能：左侧整宽、右侧整块不渲染（列表沿用工具管理面板的样式与操作逻辑） */
 .agent-skill:not(.has-selection) .manage-left {

@@ -10522,6 +10522,7 @@ const unitResultText = (unit: any): string => {
       // 上下文压缩卡片：摘要生成期间 / 结束 / 失败三态（result 为结构化状态，由主进程事件投影而来）
       const count = typeof r?.droppedMessages === 'number' ? r.droppedMessages : 0
       const before = typeof r?.tokensBefore === 'number' && r.tokensBefore > 0 ? Math.round(r.tokensBefore).toLocaleString() : ''
+      const requestBefore = typeof r?.requestTokensBefore === 'number' && r.requestTokensBefore > 0 ? Math.round(r.requestTokensBefore).toLocaleString() : ''
       const after = typeof r?.tokensAfter === 'number' && r.tokensAfter > 0 ? Math.round(r.tokensAfter).toLocaleString() : ''
       if (r?.phase === 'running') {
         const chars = typeof r?.chars === 'number' && r.chars > 0 ? Math.round(r.chars).toLocaleString() : ''
@@ -10532,9 +10533,24 @@ const unitResultText = (unit: any): string => {
       if (r?.phase === 'failed') {
         return isZh ? '压缩未生效，本次沿用原历史' : 'Compaction did not take effect — history kept as is'
       }
+      // 「压缩前 → 压缩后」必须是同一口径（整次请求）。以前拿"被替换那几条"去比整次请求，
+      // 会出现「压缩前约 637 → 压缩后约 70,178」这种看起来越压越大的数字。
+      const sizeText = requestBefore && after
+        ? (isZh
+          ? `（请求规模约 ${requestBefore} → ${after} tokens${before ? `；本次替换 ${count} 条约 ${before} tokens` : ''}）`
+          : ` (request ~${requestBefore} → ${after} tokens${before ? `; ${count} message(s) replaced, ~${before} tokens` : ''})`)
+        : (before
+          ? (isZh ? `（本次替换约 ${before} tokens${count ? `，共 ${count} 条` : ''}）` : ` (~${before} tokens replaced${count ? `, ${count} message(s)` : ''})`)
+          : '')
+      // 压缩后仍接近原规模（<5% 降幅）时说清原因：大头在最近保留的上下文 / 大工具结果里，
+      // 旧消息已经压成摘要，避免用户以为"压缩没执行"。
+      const littleGain = !!requestBefore && !!after && Number(r.tokensAfter) >= Number(r.requestTokensBefore) * 0.95
+      const note = littleGain
+        ? (isZh ? '；主要占用在最近保留的上下文或工具结果里' : '; most usage is in the retained recent context / tool results')
+        : ''
       return isZh
-        ? `已压缩较早对话（原消息仍保留）${count ? `：已将 ${count} 条较早消息替换为摘要` : ''}${before ? `（压缩前约 ${before} tokens${after ? ` → 压缩后约 ${after} tokens` : ''}）` : ''}`
-        : `Earlier turns were summarized (originals are kept)${count ? ` — ${count} earlier messages replaced by a summary` : ''}${before ? ` (about ${before} tokens before compaction${after ? `, ~${after} after` : ''})` : ''}`
+        ? `已压缩较早对话（原消息仍保留）${count ? `：已将 ${count} 条较早消息替换为摘要` : ''}${sizeText}${note}`
+        : `Earlier turns were summarized (originals are kept)${count ? ` — ${count} earlier messages replaced by a summary` : ''}${sizeText}${note}`
     }
     case 'update_plan':
       // 只显示 plan 字段的值：对象取 plan；字符串视为 plan 本身；其余不显示

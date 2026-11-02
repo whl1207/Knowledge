@@ -271,11 +271,15 @@ function migrationHints(code: string, fileName: string): string[] {
   return hints
 }
 
-/** 解析目标插件目录：允许「插件 id」（在插件目录下找）或绝对 / 相对路径 */
+/** 解析目标插件目录：允许「插件 id」（含分类子文件夹里的插件）或绝对 / 相对路径 */
 function resolveDir(input: string): { dir: string; name: string } | { error: string } {
   const raw = String(input || '').trim()
-  if (!raw) return { error: '缺少 dir 参数：给插件文件夹路径，或直接给插件 id（在插件目录下查找）' }
-  const dirs = path.isAbsolute(raw) ? [raw] : [path.join(pluginHost.rootDir(), raw)]
+  if (!raw) return { error: '缺少 dir 参数：给插件文件夹路径，或直接给插件 id（会在插件目录及其分类子文件夹里查找）' }
+  const dirs: string[] = []
+  // 先按插件 id 查宿主注册表：插件可能在分类子文件夹里（如 办公/todo），不能只在根目录下找
+  const known = pluginHost.list().find((p) => p.id === raw)
+  if (known?.dir) dirs.push(known.dir)
+  dirs.push(...(path.isAbsolute(raw) ? [raw] : [path.join(pluginHost.rootDir(), raw)]))
   for (const dir of dirs) {
     try {
       if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) return { dir, name: path.basename(dir) }
@@ -283,7 +287,7 @@ function resolveDir(input: string): { dir: string; name: string } | { error: str
       /* 继续 */
     }
   }
-  return { error: `找不到插件目录：${raw}（插件目录当前是 ${pluginHost.rootDir()}；也可以直接传插件 id）` }
+  return { error: `找不到插件目录：${raw}（插件目录当前是 ${pluginHost.rootDir()}；也可以直接传插件 id——分类子文件夹里的插件同样能解析）` }
 }
 
 function readText(file: string, max = CLIENT_SOURCE_MAX): string | null {

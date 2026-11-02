@@ -3,7 +3,9 @@
  *
  *  - loadDocxPackage：读 .docx → 保留全部部件（styles/theme/header/footer/media…）的内存包
  *  - applyFindReplace：L1 文本替换 —— 优先「单 w:t 内原地替换」（完全保格式）；
- *    跨 run / 含换行的匹配走「整段归一」（保留 pPr 与段首 run 格式，其余 run 归一）
+ *    跨 run 时做 run 级替换（只改命中字符，未命中的 run 及其 rPr 原样保留，
+ *    替换文本沿用命中起点 run 的格式）；只有 replace 含换行 / 制表符或命中落在
+ *    w:br/w:tab 上时才退回「整段归一」（保留 pPr 与段首 run 格式）
  *  - saveDocxPackage：仅更新 word/document.xml 后增量重打包，写回前自动 .bak，原子 rename
  *
  * 与 docx-zip / docx-reader 配合；纯 Node、零第三方依赖。
@@ -154,10 +156,86 @@ function plainToRuns(text: string, rPr: string): string {
 }
 
 /**
- * 对单个段落替换（返回新段落 xml 与替换次数；无匹配返回 null）。
- * in-place 条件：所有目标匹配完整落在某个 w:t 内，且 replace 不含 \n/\t → 逐 w:t 原地改（保全部 run 与格式）。
- * 否则整段归一重建（保留 pPr 与段首 run 格式，其余 run 归一）。
+ * 跨 run 的保格式替换：只改「匹配覆盖到的字符」，未命中的文本仍留在各自原来的 run 里
+ * （因此它们各自的 rPr —— 加粗 / 斜体 / 字号 / 颜色 —— 原样保留）。
+ * 替换文本插到「匹配起点所在的 run」，沿用该 run 的格式。
+ *
+ * 与旧的「整段归一」区别：旧实现把整段拼成纯文本再用段首格式重建所有 run，
+ * 段内局部格式（例如"5. [参考文献]"加粗、正文不加粗）会全部归一；这里只在
+ * 一个 w:t 内改内容，其它 run 的 XML 一律不动。
+ *
+ * 返回新的段内 XML；无法安全处理（匹配起点落在 w:br/w:tab 等非 w:t 字符上）时返回 null，
+ * 由调用方退回旧的整段归一实现。
  */
+function replaceAcrossRuns(
+  rest: string,
+  spans: { absStart: number; absEnd: number; head: string; content: string; start: number; end: number }[],
+  positions: number[],
+  find: string,
+  replace: string,
+): string | null {
+  /**
+   * 每个 span 上的局部编辑：
+   *  - removals：要删掉的局部字符区间 [from, to)；
+   *  - inserts：在某个局部位置插入的替换文本（只发生在匹配起点所在的 span）。
+   */
+  const edits = spans.map(() => ({ removals: [] as Array<{ from: number; to: number }>, inserts: new Map<number, string>() }))
+  for (const p of positions) {
+    const end = p + find.length
+    // 起点必须落在某个 w:t 的文本范围内（end 恰好等于 last span 的 end 也可以）
+    let startSpan = -1
+    for (let i = 0; i < spans.length; i++) {
+      if (p >= spans[i].start && p < spans[i].end) { startSpan = i; break }
+    }
+    if (startSpan < 0) return null
+    let endSpan = -1
+    for (let i = startSpan; i < spans.length; i++) {
+      if (end > spans[i].start && end <= spans[i].end) { endSpan = i; break }
+    }
+    if (endSpan < 0) return null
+    // 匹配跨越了「非 w:t 的字符」（br/tab 不在 spans 的文本坐标里，会表现为区间跳空）
+    const covered = spans.slice(startSpan, endSpan + 1)
+      .reduce((sum, sp) => sum + Math.max(0, Math.min(end, sp.end) - Math.max(p, sp.start)), 0)
+    if (covered !== find.length) return null
+    // 记录删除区间（按 span 局部坐标）
+    for (let i = startSpan; i <= endSpan; i++) {
+      const sp = spans[i]
+      const from = Math.max(p, sp.start) - sp.start
+      const to = Math.min(end, sp.end) - sp.start
+      if (to > from) edits[i].removals.push({ from, to })
+    }
+    // 替换文本插到匹配起点所在的 span（同一 run 的格式）
+    const local = p - spans[startSpan].start
+    const prev = edits[startSpan].inserts.get(local)
+    edits[startSpan].inserts.set(local, (prev ?? '') + replace)
+  }
+
+  // 重建受影响的 span：按字符位置走一遍，删除命中字符、在起点插入替换文本
+  let outRest = rest
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const sp = spans[i]
+    const edit = edits[i]
+    if (!edit.removals.length && !edit.inserts.size) continue
+    const removed = new Uint8Array(sp.content.length)
+    for (const r of edit.removals) {
+      for (let k = Math.max(0, r.from); k < Math.min(sp.content.length, r.to); k++) removed[k] = 1
+    }
+    let content = ''
+    const chars = Array.from(sp.content)
+    for (let k = 0; k < chars.length; k++) {
+      const ins = edit.inserts.get(k)
+      if (ins) content += ins
+      if (!removed[k]) content += chars[k]
+    }
+    // 插入点可能正好在文本末尾（匹配到 span 末尾）
+    const tailIns = edit.inserts.get(chars.length)
+    if (tailIns) content += tailIns
+    const newRaw = `${sp.head}${encodeXml(content)}</w:t>`
+    outRest = outRest.slice(0, sp.absStart) + newRaw + outRest.slice(sp.absEnd)
+  }
+  return outRest
+}
+
 function replaceSegment(pXml: string, find: string, replace: string, ci: boolean, maxN: number): { xml: string; n: number } | null {
   const close = pXml.lastIndexOf('</w:p>')
   const openEnd = pXml.indexOf('>') + 1
@@ -214,7 +292,14 @@ function replaceSegment(pXml: string, find: string, replace: string, ci: boolean
     return { xml: openTag + pPr + outRest + '</w:p>', n: positions.length }
   }
 
-  // 整段归一：按全文坐标降序拼接 replace，重建 runs（保留 pPr + 段首 rPr）
+  // 跨 run（含命中跨多个 w:t）：优先只改命中字符，未命中的 run 与其 rPr 原样保留
+  if (!/[\n\t]/.test(replace)) {
+    const cross = replaceAcrossRuns(rest, spans, positions, find, replace)
+    if (cross) return { xml: openTag + pPr + cross + '</w:p>', n: positions.length }
+  }
+
+  // 兜底（replace 含换行 / tab，或匹配落在 w:br/w:tab 上）：整段归一，
+  // 保留 pPr 与段首 run 格式；这是旧行为，只在无法做 run 级替换时使用。
   let newText = text
   const desc = positions.slice().sort((a, b) => b - a)
   for (const p of desc) {
@@ -259,6 +344,36 @@ export function applyFindReplace(pkg: DocxPackage, find: string, replace: string
   out += pkg.documentXml.slice(last)
   pkg.documentXml = out
   if (res.replaced > 0) pkg.modified = true
+  return res
+}
+
+/**
+ * 在文档 XML 的指定区间内做文本替换（表格单元格 / 单个块 / 选区用）。
+ *
+ * 与 `applyFindReplace` 完全同一套 run 级替换逻辑，只是把扫描范围限制在 [start, end)：
+ *  - 区间由调用方按块 / 表格单元格定位（见 office-service 的 blockIndex / row / col）；
+ *  - 只影响区间内的段落，区间外的同名文字不会被误替换；
+ *  - 无匹配时原文档不变。
+ */
+export function applyFindReplaceInRange(
+  pkg: DocxPackage,
+  start: number,
+  end: number,
+  find: string,
+  replace: string,
+  opts: FindReplaceOptions = {},
+): FindReplaceResult {
+  const from = Math.max(0, Math.min(pkg.documentXml.length, Math.floor(start)))
+  const to = Math.max(from, Math.min(pkg.documentXml.length, Math.floor(end)))
+  if (to <= from) return { replaced: 0, paragraphs: 0 }
+  const segment = pkg.documentXml.slice(from, to)
+  // 浅拷贝：applyFindReplace 只改 documentXml / modified，entries 等部件原样共用
+  const tmp: DocxPackage = { ...pkg, documentXml: segment, modified: false }
+  const res = applyFindReplace(tmp, find, replace, opts)
+  if (res.replaced > 0) {
+    pkg.documentXml = pkg.documentXml.slice(0, from) + tmp.documentXml + pkg.documentXml.slice(to)
+    pkg.modified = true
+  }
   return res
 }
 

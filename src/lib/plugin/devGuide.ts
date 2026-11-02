@@ -612,7 +612,7 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
   {
     qZh: '界面半边能不能调 MCP 服务 / 宿主内置服务（如用 office 服务解析 Excel）？',
     qEn: 'Can the UI half call MCP or built-in host services (e.g. the office service to parse Excel)?',
-    aZh: '不能。界面半边只有 ctx 上列出的那些成员（**没有 ctx.service / ctx.mcp**），MCP 服务（office / 浏览器 / drawio 等）只暴露给智能体经 mcp_call 调用。要读文件 / 表格用 ctx.fs（readText / sheet.read），要调外部服务请做成**主进程半边**的插件工具（ctx.tool）让智能体调用；写不存在的 API（如 ctx.files.readFile、ctx.service）会在运行时抛 "is not a function"。',
+    aZh: '不能。界面半边只有 ctx 上列出的那些成员（**没有 ctx.service / ctx.mcp**），MCP 服务（office / 浏览器 / drawio 等）只暴露给智能体经 mcp_call 调用。要读文件 / 表格用 ctx.fs（readText / sheet.read），要调外部服务请做成**主进程半边**的插件工具（ctx.tool）让智能体调用。',
     aEn: 'No. The UI half only has the members listed for ctx (**there is no ctx.service / ctx.mcp**); MCP services (office / browser / drawio …) are exposed to agents through mcp_call only. To read a spreadsheet use ctx.fs.sheet.read(path) (.xlsx/.xls/.csv; the old ctx.files.readSheet is an alias), for raw bytes use ctx.fs.readBase64 or readBytes, and for external services ship a **main-process half** tool (ctx.tool) the agent can call. Inventing APIs (ctx.files.readFile, ctx.service …) throws “is not a function” at runtime.',
   },
   {
