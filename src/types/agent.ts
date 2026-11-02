@@ -59,6 +59,11 @@ export interface AgentOptions {
   /** 是否注入时间读数（默认开；关掉后模型拿不到当前时间与时区） */
   timeContext?: boolean
   /**
+   * 旁路请求（如上下文压缩的摘要）的流式进度回调：收到已生成的正文总字符数。
+   * 只给「一次性旁路任务」用——它没有订阅者，靠这个回调把进度转成事件给界面。
+   */
+  onAssistantDelta?: (totalChars: number) => void
+  /**
    * 单个 turn 的最大 step 数（循环轮数；防死循环）。
    * 唯一数据源 = store.generalAgentMaxSteps（默认 500），唯一例外 = 智能体预设的 preset.maxSteps；
    * 见 src/shared/agent-loop-rounds.ts，勿在此层再引入其它默认值。
@@ -294,13 +299,17 @@ export interface AgentEventMap {
   'agent/search-status': { status: string; query?: string; results?: Array<{ title?: string; url?: string }>; action?: any }
   /** phase='start' 表示开始生成摘要；phase='end' 表示结束（ok=false 表示压缩未生效，保持原历史） */
   'agent/compaction': {
-    phase: 'start' | 'end'
+    phase: 'start' | 'progress' | 'end'
     kind: AgentCompactionKind
     ok?: boolean
     /** 被摘要替换掉的旧消息条数 */
     droppedMessages?: number
     /** 这些旧消息压缩前的估算 token */
     tokensBefore?: number
+    /** 压缩**后**的请求历史估算 token（供界面立即更新上下文占用，不必等下一次真实 usage） */
+    tokensAfter?: number
+    /** progress：摘要目前已经生成的字符数 */
+    chars?: number
   }
   /**
    * 运行期提示（非致命，不打断 turn）。

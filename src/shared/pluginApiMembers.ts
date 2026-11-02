@@ -54,6 +54,8 @@ export const CLIENT_CTX_MEMBERS: PluginCtxMembers = {
   // 生图（需 permissions: ['image']；失败不抛异常，看 ok / code）
   image: ['available', 'reason', 'info', 'generate', 'cancelAll'],
   tts: ['available', 'reason', 'speak', 'stop'],
+  // 语音识别（文件转写）：复用「设置 → 语音 → 语音识别」的引擎；失败看 ok / code
+  asr: ['available', 'reason', 'transcribe'],
   shortcuts: ['register', 'list'],
   slots: ['register', 'declare', 'entries'],
   log: ['debug', 'info', 'warn', 'error'],

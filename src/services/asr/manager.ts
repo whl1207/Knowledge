@@ -3,7 +3,7 @@
 
 import { FunasrOnlineMicSession } from '@/services/asr/funasr-online-mic'
 import { Qwen3SegmentMicSession } from '@/services/asr/qwen3-stream-mic'
-import { runQwen3Gradio, toWav16k, type Qwen3GradioOptions } from '@/services/asr/qwen3-gradio'
+import { encodeWavPcm16, runQwen3Gradio, toWav16k, type Qwen3GradioOptions } from '@/services/asr/qwen3-gradio'
 import { getPlatform, hasCapability } from '@/platform'
 import { aikmIpcAvailable } from '@/lib/aikmIpc'
 
@@ -2221,4 +2221,168 @@ export function getAvailableASREngines(): { value: string; label_zh: string; lab
   ]
   
   return engines
+}
+
+/* -------------------------------------------------------------------------
+ * 文件转写（供插件 / 批处理复用）：音频 Blob → 16k 单声道 PCM → 分片识别
+ * ---------------------------------------------------------------------- */
+
+export interface TranscribeAudioOptions {
+  language?: string
+  maxSeconds?: number
+  chunkSeconds?: number
+  signal?: AbortSignal
+  onProgress?: (progress: { done: number; total: number }) => void
+}
+
+function asrError(code: string, message: string): Error {
+  const err = new Error(message) as Error & { code?: string }
+  err.code = code
+  return err
+}
+
+/** 把任意浏览器可解码的音频 Blob 转成 16kHz 单声道 Float32 PCM */
+async function decodeAudioToPcm16k(blob: Blob): Promise<Float32Array> {
+  if (!blob || !blob.size) throw asrError('ASR_EMPTY_AUDIO', '音频为空')
+  if (blob.size > 200 * 1024 * 1024) throw asrError('ASR_AUDIO_TOO_LARGE', '音频过大（上限 200MB）')
+  if (typeof window === 'undefined') throw asrError('ASR_UNSUPPORTED_ENV', '当前环境不支持音频解码')
+  const AnyWindow = window as any
+  const AC = AnyWindow.AudioContext || AnyWindow.webkitAudioContext
+  if (!AC) throw asrError('ASR_UNSUPPORTED_ENV', '当前环境不支持音频解码')
+  const ctx = new AC()
+  let audioBuffer: AudioBuffer
+  try {
+    audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer())
+  } catch (e: any) {
+    throw asrError('ASR_DECODE_FAILED', `音频解码失败：${e?.message || e}`)
+  } finally {
+    try { await ctx.close() } catch (e) { /* ignore */ }
+  }
+  const sampleRate = 16000
+  const frames = Math.max(1, Math.ceil(audioBuffer.duration * sampleRate))
+  const OAC = AnyWindow.OfflineAudioContext || AnyWindow.webkitOfflineAudioContext
+  if (!OAC) throw asrError('ASR_UNSUPPORTED_ENV', '当前环境不支持音频重采样')
+  const offline = new OAC(1, frames, sampleRate)
+  const source = offline.createBufferSource()
+  source.buffer = audioBuffer
+  source.connect(offline.destination)
+  source.start()
+  const rendered = await offline.startRendering()
+  return rendered.getChannelData(0).slice()
+}
+
+async function transcribeWithWhisperApi(config: ASRConfig, wav: Blob, language: string): Promise<string> {
+  const url = String(config.whisper?.url || '').trim()
+  if (!url) throw asrError('ASR_NOT_CONFIGURED', 'Whisper API 地址为空')
+  const form = new FormData()
+  form.append('file', wav, 'chunk.wav')
+  form.append('model', config.whisper?.model || 'whisper-1')
+  form.append('language', (language || config.language || 'zh').split('-')[0] || 'zh')
+  form.append('response_format', 'json')
+  const headers: Record<string, string> = {}
+  if (config.whisper?.api_key) headers.Authorization = `Bearer ${config.whisper.api_key}`
+  const res = await fetch(url, { method: 'POST', headers, body: form })
+  if (!res.ok) throw asrError('ASR_HTTP', `Whisper API 返回 HTTP ${res.status}`)
+  const json: any = await res.json()
+  return String(json?.text || '').trim()
+}
+
+async function transcribeWithQwen3(config: ASRConfig, wav: Blob, language: string): Promise<string> {
+  const qwen = config.qwen3
+  const url = String(qwen?.url || '').trim()
+  if (!url) throw asrError('ASR_NOT_CONFIGURED', 'Qwen3-ASR 地址为空')
+  const openai = qwen?.protocol === 'openai' || /\/audio\/transcriptions(\?|$)/i.test(url)
+  if (openai) {
+    const form = new FormData()
+    form.append('file', wav, 'chunk.wav')
+    form.append('model', qwen?.model || 'Qwen/Qwen3-ASR-1.7B')
+    form.append('language', (language || config.language || 'zh').split('-')[0] || 'zh')
+    form.append('response_format', 'json')
+    const headers: Record<string, string> = {}
+    if (qwen?.api_key) headers.Authorization = `Bearer ${qwen.api_key}`
+    const res = await fetch(url, { method: 'POST', headers, body: form })
+    if (!res.ok) throw asrError('ASR_HTTP', `Qwen3-ASR 返回 HTTP ${res.status}`)
+    const json: any = await res.json()
+    return String(json?.text || '').trim()
+  }
+  return runQwen3Gradio(
+    {
+      base: url,
+      apiKey: qwen?.api_key,
+      langDisp: qwen?.langDisp,
+      returnTs: qwen?.returnTs,
+      splitPunc: qwen?.splitPunc,
+      diarize: qwen?.diarize,
+      maxChars: qwen?.maxChars,
+    },
+    wav,
+    'chunk.wav',
+  )
+}
+
+/**
+ * 把一段音频 Blob 转成文字，复用「设置 → 语音识别」里的当前引擎。
+ * 目前支持 onnx-whisper / whisper-api / qwen3-asr；其余引擎返回 ASR_ENGINE_UNSUPPORTED。
+ * 长音频按 chunkSeconds（默认 30s）切片，逐片识别后换行拼接（默认最多 30 分钟）。
+ */
+export async function transcribeAudioBlob(
+  blob: Blob,
+  config: ASRConfig,
+  options: TranscribeAudioOptions = {},
+): Promise<string> {
+  const pcm = await decodeAudioToPcm16k(blob)
+  const maxSeconds = Math.min(7200, Math.max(10, Number(options.maxSeconds) || 1800))
+  const chunkSeconds = Math.min(60, Math.max(10, Number(options.chunkSeconds) || 30))
+  const chunkSamples = Math.floor(chunkSeconds * 16000)
+  const totalSamples = Math.min(pcm.length, Math.floor(maxSeconds * 16000))
+  const total = Math.max(1, Math.ceil(totalSamples / chunkSamples))
+  const language = options.language || config.language || 'zh'
+  const signal = options.signal
+  const parts: string[] = []
+
+  const checkAbort = () => {
+    if (signal?.aborted) throw asrError('ASR_ABORTED', '转写已取消')
+  }
+
+  if (config.type === 'onnx-whisper') {
+    if (!config.onnx?.modelPath) throw asrError('ASR_NOT_CONFIGURED', '还没有选择 ONNX Whisper 模型')
+    const recognizer = new OnnxWhisperRecognizer(config, {})
+    try {
+      await recognizer.init()
+      if (!recognizer.isModelReady()) throw asrError('ASR_MODEL_NOT_READY', 'ONNX Whisper 模型加载失败')
+      for (let i = 0; i < total; i += 1) {
+        checkAbort()
+        const start = i * chunkSamples
+        const end = Math.min(totalSamples, start + chunkSamples)
+        if (end - start < 1600) break
+        const text = await recognizer.recognizeBuffer(pcm.subarray(start, end))
+        if (text && text.trim()) parts.push(text.trim())
+        options.onProgress?.({ done: i + 1, total })
+      }
+    } finally {
+      try { recognizer.destroy() } catch (e) { /* ignore */ }
+    }
+    return parts.join('\n').trim()
+  }
+
+  if (config.type === 'whisper-api' || config.type === 'qwen3-asr') {
+    for (let i = 0; i < total; i += 1) {
+      checkAbort()
+      const start = i * chunkSamples
+      const end = Math.min(totalSamples, start + chunkSamples)
+      if (end - start < 1600) break
+      const wav = encodeWavPcm16(pcm.subarray(start, end), 16000)
+      const text = config.type === 'whisper-api'
+        ? await transcribeWithWhisperApi(config, wav, language)
+        : await transcribeWithQwen3(config, wav, language)
+      if (text) parts.push(text)
+      options.onProgress?.({ done: i + 1, total })
+    }
+    return parts.join('\n').trim()
+  }
+
+  throw asrError(
+    'ASR_ENGINE_UNSUPPORTED',
+    `当前 ASR 引擎（${config.type}）不支持文件转写；请改用 ONNX Whisper / Whisper API / Qwen3-ASR`,
+  )
 }

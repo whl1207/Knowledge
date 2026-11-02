@@ -28,6 +28,7 @@ import { createPluginImageApi, type PluginImageApi } from './image'
 import { PLUGIN_EVENT_TYPES, createPluginEventsApi } from './events'
 import { listPluginAgentPresets, resolvePluginAgentPreset } from './agentPresetOptions'
 import { createPluginTtsApi, type PluginTtsApi } from './tts'
+import { createPluginAsrApi, type PluginAsrApi } from './asr'
 import { PluginShortcutService, type ShortcutRecord } from './shortcuts'
 import { setPluginDeclaredToolNames, setPluginToolNames } from '@/lib/agent/capabilities'
 import { usestore } from '@/store'
@@ -161,6 +162,12 @@ export interface ClientPluginContext {
    * 不需要声明权限，但 `available` 为 false 时要用 `reason` 给出可读提示。
    */
   readonly tts: PluginTtsApi
+  /**
+   * 语音识别（文件转写）：把音频 Blob 交给「设置 → 语音 → 语音识别」里当前配置的引擎。
+   * 不需要声明权限；`available` 为 false 时用 `reason` 给出可读提示。
+   * 目前支持 onnx-whisper / whisper-api / qwen3-asr；长音频由宿主分片处理。
+   */
+  readonly asr: PluginAsrApi
   /** 快捷键服务：注册全局快捷键（单一监听器，输入框内默认不抢键） */
   readonly shortcuts: {
     register(binding: string, handler: (event: KeyboardEvent) => void, options?: {
@@ -409,6 +416,7 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
       log: deps.log,
     }),
     tts: createPluginTtsApi({ pluginId: snapshot.id, log: deps.log }),
+    asr: createPluginAsrApi(),
     shortcuts: {
       register: (binding, handler, options) =>
         track(sharedShortcutService().register({ binding, handler, ...(options ?? {}) }, owner)),

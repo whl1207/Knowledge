@@ -117,6 +117,10 @@ export interface CompactionView {
   droppedMessages?: number
   /** 压缩前这些消息的估算 token */
   tokensBefore?: number
+  /** 压缩后的请求历史估算 token（摘要 + 保留的近期尾部；供界面立即更新上下文占用） */
+  tokensAfter?: number
+  /** 运行中：摘要已生成的字符数 */
+  chars?: number
   startTime?: number
   endTime?: number
 }
@@ -658,7 +662,8 @@ class AgentBridge {
         return
       }
       case 'agent/compaction':
-        // 上下文压缩：start 起一张「上下文压缩」卡片（running），end 收口（ok=false → failed）
+        // 上下文压缩：start 起一张「上下文压缩」卡片（running），progress 更新摘要已生成字数，
+        // end 收口（ok=false → failed）
         if (ev.payload.phase === 'start') {
           view.compaction = {
             seq: view.compaction.seq + 1,
@@ -666,12 +671,19 @@ class AgentBridge {
             kind: ev.payload.kind,
             startTime: Date.now(),
           }
+        } else if (ev.payload.phase === 'progress') {
+          view.compaction = {
+            ...view.compaction,
+            phase: 'running',
+            chars: ev.payload.chars ?? view.compaction.chars,
+          }
         } else {
           view.compaction = {
             ...view.compaction,
             phase: ev.payload.ok === false ? 'failed' : 'done',
             droppedMessages: ev.payload.droppedMessages ?? view.compaction.droppedMessages,
             tokensBefore: ev.payload.tokensBefore ?? view.compaction.tokensBefore,
+            tokensAfter: ev.payload.tokensAfter ?? view.compaction.tokensAfter,
             endTime: Date.now(),
           }
         }

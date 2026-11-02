@@ -37,6 +37,8 @@ export interface ChatCompactionState {
   coveredCount: number
   /** 压缩前这部分消息的估算 token（展示用） */
   tokensBefore: number
+  /** 压缩后（摘要 + 保留的近期消息）的估算 token：供上下文占用圆环立即更新 */
+  tokensAfter?: number
   at: number
 }
 
@@ -111,10 +113,16 @@ export async function compactChat(
   const prev = String(chat?.compaction?.summary || '').trim()
   const merged = prev && !summary.includes(prev) ? `${prev}\n\n${summary}` : summary
   const coveredCount = plan.offset + plan.endIndex
+  const keptItems = plan.items.slice(plan.endIndex)
   chat.compaction = {
     summary: merged,
     coveredCount,
     tokensBefore: estimateMessagesTokens(droppedItems),
+    // 压缩后的请求规模（摘要 + 保留的近期消息）：圆环在下一轮真实 usage 回来前用它
+    tokensAfter: estimateMessagesTokens([
+      { role: 'user', content: compactedContextMessage(merged) },
+      ...keptItems,
+    ]),
     at: Date.now(),
   } satisfies ChatCompactionState
   return { ok: true, fallback, dropped: plan.dropped, summary: merged }

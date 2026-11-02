@@ -199,6 +199,16 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     descEn: 'Speak text through the app’s own TTS (engine / voice / speed follow Settings → Models → Speech; no permission needed). When unavailable show tts.reason, and never let a speech failure break the main flow.',
   },
   {
+    name: 'ctx.asr.available / reason / transcribe(audio, { language?, maxSeconds?, chunkSeconds?, signal?, onProgress? })',
+    topic: 'api-caps',
+    descZh: '用应用自带的语音识别把音频转成文字（引擎跟随「设置 → 语音 → 语音识别」，不需要权限）。'
+      + '接受 Blob / ArrayBuffer / Uint8Array，返回 { ok, text?, code?, error? }；**失败不抛异常**，不可用时用 reason 给出可读提示。'
+      + '支持 ONNX Whisper / Whisper API / Qwen3-ASR，其余引擎返回 ASR_ENGINE_UNSUPPORTED；长音频按 chunkSeconds 分片、用 onProgress 报进度。',
+    descEn: 'Transcribe audio to text with the app’s own speech recognition (engine follows Settings → Speech; no permission needed). '
+      + 'Accepts Blob / ArrayBuffer / Uint8Array and returns { ok, text?, code?, error? }; **it never throws**, and asr.reason explains unavailability. '
+      + 'ONNX Whisper, Whisper API and Qwen3-ASR are supported (other engines return ASR_ENGINE_UNSUPPORTED); long audio is chunked by chunkSeconds with onProgress.',
+  },
+  {
     name: 'ctx.app.info() / agentPresets() / setChromeHidden(hidden) / chromeHidden()',
     topic: 'api',
     descZh: '只读应用信息与外壳控制：info() → { name, version, language }；agentPresets() → [{ id, name, systemPrompt, role, tools }]（设置里的预设，可让用户选一个当角色）；'

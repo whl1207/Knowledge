@@ -106,6 +106,8 @@ export function projectStepsToUnits(msg: any, v: any, opts?: StepProjectionOptio
         kind: comp.kind,
         droppedMessages: comp.droppedMessages,
         tokensBefore: comp.tokensBefore,
+        tokensAfter: comp.tokensAfter,
+        chars: comp.chars,
       },
       startTime: comp.startTime || Date.now(),
       endTime: comp.phase === 'running' ? undefined : (comp.endTime || Date.now()),

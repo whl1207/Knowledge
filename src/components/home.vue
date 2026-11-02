@@ -520,17 +520,8 @@
                 </template>
                 <span v-if="unitSuffix(unit)" class="tool-box-suffix">{{ unitSuffix(unit) }}</span>
                 <span v-if="unitDuration(unit)" class="tool-box-duration">{{ unitDuration(unit) }}</span>
-                <!-- 异常（非零退出 / 超时 / 信号）：中性胶囊 + 红点，代替状态图标（对齐 DSH） -->
-                <span v-if="unitExitPill(unit)" class="tool-box-pill" :title="unitExitPillTitle(unit)">
-                  <i class="fa fa-circle"></i>{{ unitExitPill(unit) }}
-                </span>
-                <span v-else-if="unit.stepType !== 'guidance'" class="tool-box-status" :class="unit.status">
-                  <i v-if="unit.status === 'running'" class="fa fa-circle-o-notch fa-spin"></i>
-                  <i v-else-if="unit.status === 'success'" class="fa fa-check-circle"></i>
-                  <i v-else-if="unit.status === 'error'" class="fa fa-times-circle"></i>
-                  <i v-else class="fa fa-clock-o"></i>
-                </span>
-                <!-- 写入 / 改写的文件的「打开」按钮：默认打开方式与知识管理一致（multi_replace 多文件时每个文件一个按钮） -->
+                <!-- 写入 / 改写的文件的「打开」按钮：默认打开方式与知识管理一致（multi_replace 多文件时每个文件一个按钮）；
+                     放在状态图标**左侧**，让所有步骤的状态图标都贴在最右，纵向看更整齐 -->
                 <span
                   v-for="(p, pi) in openableToolPaths(unit)"
                   :key="'open' + pi"
@@ -548,6 +539,16 @@
                   @click.stop="openWebResult({ url: unitOpenUrl(unit) })"
                 >
                   <i class="fa fa-external-link"></i>
+                </span>
+                <!-- 异常（非零退出 / 超时 / 信号）：中性胶囊 + 红点，代替状态图标（对齐 DSH） -->
+                <span v-if="unitExitPill(unit)" class="tool-box-pill" :title="unitExitPillTitle(unit)">
+                  <i class="fa fa-circle"></i>{{ unitExitPill(unit) }}
+                </span>
+                <span v-else-if="unit.stepType !== 'guidance'" class="tool-box-status" :class="unit.status">
+                  <i v-if="unit.status === 'running'" class="fa fa-circle-o-notch fa-spin"></i>
+                  <i v-else-if="unit.status === 'success'" class="fa fa-check-circle"></i>
+                  <i v-else-if="unit.status === 'error'" class="fa fa-times-circle"></i>
+                  <i v-else class="fa fa-clock-o"></i>
                 </span>
                 <!-- 展开/折叠：整行标题都可点（原先右侧还有一个箭头按钮，重复了，已移除） -->
                 <span
@@ -4297,6 +4298,110 @@ const isStreamedJsonStringClosed = (raw: string, key: string): boolean => {
 const formatCharCount = (n: number): string => {
   const v = Math.max(0, Math.floor(Number(n) || 0))
   return v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+/**
+ * 提取流式 JSON 里**同一个字段出现多次**时的全部取值（含尾部未闭合的那一段）。
+ *
+ * 用途：`multi_replace` 的参数是 `{"replacements":[{"old_string":…,"new_string":…}, …]}`，
+ * 生成过程中模型会逐条吐 `new_string`，要统计"已经生成了多少字"就得把它们都收齐；
+ * 用 `extractStreamedJsonField`（只取第一处）会严重低估。
+ */
+const extractStreamedStringList = (raw: string, key: string): string[] => {
+  if (!raw) return []
+  const out: string[] = []
+  const re = new RegExp(`"${key}"\\s*:\\s*"`, 'g')
+  let m: RegExpExecArray | null
+  while ((m = re.exec(raw))) {
+    const rest = raw.slice(m.index + m[0].length)
+    // 未转义的闭合引号（偶数个反斜杠前缀）；找不到 = 这段还在流式生成中
+    let end = -1
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] !== '"') continue
+      let bs = 0
+      let j = i - 1
+      while (j >= 0 && rest[j] === '\\') { bs++; j-- }
+      if (bs % 2 === 0) { end = i; break }
+    }
+    const content = end === -1 ? rest : rest.slice(0, end)
+    out.push(unescapePartialJsonString(content))
+    if (end === -1) break // 尾部未闭合：后面不会再有新字段
+    re.lastIndex = m.index + m[0].length + end + 1
+  }
+  return out
+}
+
+/**
+ * 编辑类工具（replace_in_file / multi_replace）**已生成**的新内容字数与替换条数。
+ *
+ * 为什么单独算：这两个工具的参数是一大段 JSON，生成过程中旧界面只能显示 `{"replacements":`
+ * 这种原始片段——用户看不出模型到底写没写、写了多少。按 new_string 统计后就能像
+ * write_file 一样显示「已生成 N 字 · M 处替换」，数字随流式参数递增。
+ */
+/** 编辑类工具的字段名：老/新两套写法都认（`replace_in_file` 与 `multi_replace` 的 schema 曾经漂过） */
+const EDIT_OLD_KEYS = ['old_string', 'find'] as const
+const EDIT_NEW_KEYS = ['new_string', 'replace'] as const
+
+const getEditGenerated = (unit: any): { chars: number; count: number; raw: number } => {
+  const n = String(unit?.description || '')
+  const none = { chars: 0, count: 0, raw: 0 }
+  if (n !== 'replace_in_file' && n !== 'multi_replace') return none
+  const args = unit?.args
+  if (typeof args === 'string') {
+    // 生成顺序通常是 path → old_string → new_string：**old_string 也要计入**，
+    // 否则模型在写 old_string（往往是最长的那段）时进度会一直是「等待内容…」。
+    let chars = 0
+    for (const k of EDIT_OLD_KEYS) for (const s of extractStreamedStringList(args, k)) chars += s.length
+    let newChars = 0
+    let count = 0
+    for (const k of EDIT_NEW_KEYS) {
+      const list = extractStreamedStringList(args, k)
+      count += list.length
+      for (const s of list) newChars += s.length
+    }
+    return { chars: chars + newChars, count, raw: args.length }
+  }
+  if (args && typeof args === 'object') {
+    const pick = (o: any, keys: readonly string[]): string => {
+      for (const k of keys) if (typeof o?.[k] === 'string') return o[k]
+      return ''
+    }
+    const reps: any[] = Array.isArray(args.replacements) ? args.replacements
+      : Array.isArray(args.edits) ? args.edits
+        : [args]
+    let chars = 0
+    let count = 0
+    for (const rep of reps) {
+      chars += pick(rep, EDIT_OLD_KEYS).length + pick(rep, EDIT_NEW_KEYS).length
+      if (pick(rep, EDIT_NEW_KEYS)) count++
+    }
+    let raw = 0
+    try { raw = JSON.stringify(args).length } catch { /* 循环引用等异常，忽略 */ }
+    return { chars, count, raw }
+  }
+  return none
+}
+
+/** 编辑类工具的卡片进度文案（运行中显示已生成字数；成功后交给行尾的 `+N -M` 后缀） */
+const unitEditProgress = (unit: any): string => {
+  if (!unit || unit.stepType !== 'tool') return ''
+  const n = String(unit.description || '')
+  if (n !== 'replace_in_file' && n !== 'multi_replace') return ''
+  const isZh = store.locales == 'zh'
+  const { chars, count, raw } = getEditGenerated(unit)
+  if (unit.status === 'running') {
+    if (!chars) {
+      // 还没解析出 old/new 字段（片段刚开头 / schema 变体）：至少把已接收的原始参数字数显示出来，
+      // 不能一直停在「等待内容…」——用户会以为卡死。
+      if (raw > 0) return isZh ? `参数生成中…（已接收 ${formatCharCount(raw)} 字）` : `Generating… (${formatCharCount(raw)} chars)`
+      return isZh ? '等待内容…' : 'Waiting…'
+    }
+    const parts = [isZh ? `已生成 ${formatCharCount(chars)} 字` : `${formatCharCount(chars)} chars`]
+    if (n === 'multi_replace' && count > 0) parts.push(isZh ? `${count} 处替换` : `${count} replacements`)
+    return parts.join(' · ')
+  }
+  if (unit.status === 'error') return isZh ? '未写入' : 'Not written'
+  return ''
 }
 
 /**
@@ -8666,14 +8771,24 @@ const lastAssistantMessage = computed(() => {
   for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === 'assistant') return msgs[i]
   return undefined
 })
+/** 压缩后、真实 usage 还没回来的这段时间：用主进程算好的「压缩后」用量顶上（否则圆环停在旧值） */
+const contextUsedFromCompaction = computed(() => {
+  const cp: any = (currentChat.value as any)?.compaction
+  // promptAt 只有智能体会话的压缩会写：普通聊天的压缩水位不接管圆环（那边仍用真实 usage）
+  return Number(cp?.tokensAfter) > 0 && cp?.usageSeen !== true && cp?.promptAt !== undefined
+})
 /** 已用 token 是否来自后端回传的真实 usage（否则为估算值，tooltip 会标注「估算」） */
-const contextUsedExact = computed(() => (lastAssistantMessage.value?.tokenStats?.promptTokens || 0) > 0)
-/** 已用 token：最后一条助手的真实 promptTokens 优先，否则按实际请求口径估算（见 lib/contextUsage） */
-const contextUsedTokens = computed(() =>
-  contextUsedExact.value
+const contextUsedExact = computed(() =>
+  !contextUsedFromCompaction.value && (lastAssistantMessage.value?.tokenStats?.promptTokens || 0) > 0
+)
+/** 已用 token：压缩后的估算 > 最后一条助手的真实 promptTokens > 按实际请求口径估算（见 lib/contextUsage） */
+const contextUsedTokens = computed(() => {
+  // 压缩刚结束：用「压缩后基线 + 之后新增内容」估算（estimateChatContextTokens 里已内置该基线）
+  if (contextUsedFromCompaction.value) return estimateChatContextTokens(currentChat.value)
+  return contextUsedExact.value
     ? (lastAssistantMessage.value!.tokenStats!.promptTokens)
     : estimateChatContextTokens(currentChat.value)
-)
+})
 /** 无 assistant 消息时不显示圆环；集群模式不显示（每个成员各有独立上下文，该数值无意义） */
 const contextUsageVisible = computed(() =>
   currentChat.value?.mode !== 'swarm' &&
@@ -9797,6 +9912,11 @@ const unitArgsText = (unit: any): string => {
   // 流式未闭合：args 是原始 JSON 字符串，按工具提取对应字段，避免展示原始 JSON
   if (typeof args === 'string') {
     if (n === 'update_todo') return isZh ? '待办清单更新中...' : 'Updating todos...'
+    // 编辑类工具：参数是一大段 JSON（`{"replacements":[{"old_string":…`），生成中只显示进度，
+    // 不把原始片段铺出来（用户看不出写了多少，还占地方）
+    if (n === 'replace_in_file' || n === 'multi_replace') {
+      return unitEditProgress(unit) || (isZh ? '参数生成中…' : 'Generating arguments…')
+    }
     const key = toolArgStreamKey(n)
     if (key) {
       const v = extractStreamedJsonField(args, key)
@@ -9814,6 +9934,14 @@ const unitArgsText = (unit: any): string => {
   switch (n) {
     case 'run_python':
       return typeof args?.code === 'string' ? args.code : prettyJson(args)
+    case 'replace_in_file':
+    case 'multi_replace': {
+      // 编辑类：运行中给进度；完成后由差异块/结果块说明改了什么，这里不再重复整份 JSON
+      const progress = unitEditProgress(unit)
+      if (progress) return progress
+      const reps = Array.isArray(args?.replacements) ? args.replacements.length : (typeof args?.old_string === 'string' ? 1 : 0)
+      return reps > 0 ? (isZh ? `${reps} 处替换` : `${reps} replacements`) : ''
+    }
     case 'run_code':
       // PTC：参数即模型提交的 TS 程序（模板里按 TS 高亮渲染）
       return typeof args?.code === 'string' ? args.code : prettyJson(args)
@@ -9986,13 +10114,19 @@ const unitResultText = (unit: any): string => {
       // 上下文压缩卡片：摘要生成期间 / 结束 / 失败三态（result 为结构化状态，由主进程事件投影而来）
       const count = typeof r?.droppedMessages === 'number' ? r.droppedMessages : 0
       const before = typeof r?.tokensBefore === 'number' && r.tokensBefore > 0 ? Math.round(r.tokensBefore).toLocaleString() : ''
-      if (r?.phase === 'running') return isZh ? '正在压缩上下文…' : 'Compacting context…'
+      const after = typeof r?.tokensAfter === 'number' && r.tokensAfter > 0 ? Math.round(r.tokensAfter).toLocaleString() : ''
+      if (r?.phase === 'running') {
+        const chars = typeof r?.chars === 'number' && r.chars > 0 ? Math.round(r.chars).toLocaleString() : ''
+        return isZh
+          ? `正在压缩上下文…${chars ? `（摘要已生成 ${chars} 字）` : ''}`
+          : `Compacting context…${chars ? ` (${chars} chars summarized)` : ''}`
+      }
       if (r?.phase === 'failed') {
         return isZh ? '压缩未生效，本次沿用原历史' : 'Compaction did not take effect — history kept as is'
       }
       return isZh
-        ? `已压缩较早对话（原消息仍保留）${count ? `：已将 ${count} 条较早消息替换为摘要` : ''}${before ? `（压缩前约 ${before} tokens）` : ''}`
-        : `Earlier turns were summarized (originals are kept)${count ? ` — ${count} earlier messages replaced by a summary` : ''}${before ? ` (about ${before} tokens before compaction)` : ''}`
+        ? `已压缩较早对话（原消息仍保留）${count ? `：已将 ${count} 条较早消息替换为摘要` : ''}${before ? `（压缩前约 ${before} tokens${after ? ` → 压缩后约 ${after} tokens` : ''}）` : ''}`
+        : `Earlier turns were summarized (originals are kept)${count ? ` — ${count} earlier messages replaced by a summary` : ''}${before ? ` (about ${before} tokens before compaction${after ? `, ~${after} after` : ''})` : ''}`
     }
     case 'update_plan':
       // 只显示 plan 字段的值：对象取 plan；字符串视为 plan 本身；其余不显示
@@ -10208,13 +10342,59 @@ const toggleToolUnitExpanded = (msgTs: number, unitId: string | number) => {
   expandedToolUnits.value = { ...expandedToolUnits.value, [k]: !isToolUnitExpanded(msgTs, unitId) }
 }
 /** 折叠态单行摘要：优先输出，其次输入/路径/错误；压缩换行与连续空白为单个空格（不换行、无多余空格） */
+/**
+ * 搜索 / 查找类工具的一行摘要：**关键词 + 命中数**。
+ * 标准模式下卡片折叠着，只写「找到 N 处匹配」看不出在搜什么，这里把 query / pattern 一并带上。
+ */
+const toolSearchSummary = (unit: any): string => {
+  const n = String(unit?.description || '')
+  if (n !== 'search_files' && n !== 'glob') return ''
+  const isZh = store.locales == 'zh'
+  const args = unit?.args
+  const rawArg = (k: string): string => {
+    if (typeof args === 'string') return extractStreamedJsonField(args, k)
+    if (args && typeof args === 'object' && typeof args[k] === 'string') return String(args[k])
+    return ''
+  }
+  const keyword = rawArg('query') || rawArg('pattern')
+  const r = unit?.result
+  const parts: string[] = []
+  if (keyword) parts.push(`“${keyword}”`)
+  if (unit?.status === 'running') {
+    parts.push(isZh ? '搜索中…' : 'searching…')
+    return parts.join(' ')
+  }
+  if (unit?.status === 'error') {
+    parts.push(isZh ? '失败' : 'failed')
+    return parts.join(' ')
+  }
+  if (n === 'glob') {
+    const found = Array.isArray(r?.files) ? r.files.length : 0
+    parts.push(isZh ? `找到 ${found} 个文件` : `${found} files`)
+  } else {
+    const files = typeof r?.files === 'number' ? r.files : 0
+    const hits = typeof r?.totalHits === 'number' ? r.totalHits : (Array.isArray(r?.results) ? r.results.length : 0)
+    if (files) parts.push(isZh ? `${files} 个文件` : `${files} files`)
+    parts.push(isZh ? `${hits} 处匹配` : `${hits} matches`)
+  }
+  return parts.join(' · ')
+}
+
 const getToolCollapsedText = (unit: any): string => {
   if (!unit) return ''
+  // 搜索 / 查找：摘要里给出关键词 + 命中数（标准模式下不展开也能看明白）
+  const searchSummary = toolSearchSummary(unit)
+  if (searchSummary) return searchSummary.replace(/\s+/g, ' ').trim()
   // 编辑类工具：优先显示 `路径 +N -M`（对齐 pi 的 edit 摘要）
   const diffSummary = editDiffSummary(unit)
   if (diffSummary) return diffSummary.replace(/\s+/g, ' ').trim()
   let text = unitResultText(unit) || ''
   if (!String(text).trim() && unit.error) text = unit.error
+  // 编辑类工具运行中：显示「已生成 N 字 · M 处替换」，而不是原始 JSON 片段
+  if (!String(text).trim()) {
+    const editProgress = unitEditProgress(unit)
+    if (editProgress) text = editProgress
+  }
   if (!String(text).trim()) {
     if (unit.description === 'write_file') {
       // 折叠态同时给出「写到哪」和「写了多少」：只显示路径时，用户仍然看不出模型是否在推进

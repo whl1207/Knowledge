@@ -388,6 +388,18 @@ export function estimateChatContextTokens(chat: any): number {
   const cp = chat?.compaction
   const covered = cp && Number(cp.coveredCount) > 0 ? Math.min(Number(cp.coveredCount), msgs.length) : 0
 
+  // 压缩后的基线（主进程算好的「摘要 + 保留的近期尾部」）优先：
+  // 逐条估算拿不到"哪些消息被摘要替换了"，压缩之后会一直显示压缩前的大小。
+  if (cp && Number(cp.tokensAfter) > 0) {
+    let total = Number(cp.tokensAfter)
+    const at = Number(cp.at) || 0
+    for (const m of msgs) {
+      // 只把压缩之后新增的内容叠上去（助手消息在压缩前就开始了，时间戳更早，不算）
+      if (at > 0 && Number(m?.timestamp) > at && typeof m?.content === 'string') total += estimateTokens(m.content)
+    }
+    return total
+  }
+
   let total = 0
   if (covered > 0 && cp?.summary) total += estimateTokens(String(cp.summary)) + 16
   for (let i = covered; i < msgs.length; i++) {

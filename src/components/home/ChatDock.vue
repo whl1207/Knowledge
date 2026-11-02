@@ -47,7 +47,7 @@
             class="fa dock-tab-icon"
             :class="[kindIcon(tab.kind), { 'dock-tab-icon-action': tab.kind === 'file' }]"
             :title="tab.kind === 'file' ? (zh ? '点击图标选择视图' : 'Click the icon to choose a view') : ''"
-            @click.stop="tab.kind === 'file' ? openViewMenu(tab, $event) : emit('activate', tab.id)"
+            @click.stop="openTabMenu(tab, $event)"
           ></i>
           <span class="dock-tab-text">{{ dockTabTitle(tab, tabs, zh) }}</span>
           <i
@@ -146,7 +146,7 @@
       </template>
     </div>
 
-    <!-- 文件标签的视图选择：点标签栏图标弹出（FileWindow 顶部标题栏已移除） -->
+    <!-- 文件标签的视图选择（md：浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示 …）：点标签图标弹出 -->
     <div
       v-if="viewMenu"
       class="dock-view-menu"
@@ -154,14 +154,15 @@
       @click.stop
     >
       <button
-        v-for="v in viewMenu.views"
-        :key="v"
+        v-for="a in viewMenu.views"
+        :key="a.value"
         class="dock-view-item"
-        :class="{ active: v === viewMenu.current }"
-        @click="chooseView(v)"
+        :class="{ active: a.active }"
+        :title="a.label"
+        @click="chooseView(a.value)"
       >
-        <i :class="viewIconOf(v)"></i>
-        <span>{{ viewNameOf(v) }}</span>
+        <i :class="a.icon"></i>
+        <span>{{ a.label }}</span>
       </button>
     </div>
   </aside>
@@ -331,35 +332,53 @@ async function confirmLeaveActive(): Promise<boolean> {
 }
 
 // ===== 文件标签的视图选择（点标签栏图标弹出）=====
-interface DockViewMenuState { id: string; x: number; y: number; views: string[]; current: string }
-const viewMenu = ref<DockViewMenuState | null>(null)
+interface DockMenuAction { value: string; label: string; icon: string; active: boolean }
+interface DockMenuState { id: string; x: number; y: number; views: DockMenuAction[] }
+const viewMenu = ref<DockMenuState | null>(null)
 const viewNameOf = (key: string): string => {
   const def = fileViewByKey(key)
   return def ? (props.zh ? def.name : def.labelEn) : key
 }
 const viewIconOf = (key: string): string => fileViewByKey(key)?.icon || 'fa fa-eye'
 
-async function openViewMenu(tab: ChatDockTab, e: MouseEvent) {
+/**
+ * 点文件标签的图标：弹出这个文件能选的视图（md 就是 浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示 …）。
+ *
+ * 列表来自 FileWindow 的 `availableViews`（ChatDockFile 负责转发）；切换走 `setView`，
+ * 并回写标签的 `view`，下次激活该标签仍是这个视图。
+ *
+ * 为什么以前"点了没反应"：ChatDockFile 只暴露了 confirmLeave，宿主拿到的
+ * availableViews 永远是 undefined，菜单于是永远没有条目。
+ */
+async function openTabMenu(tab: ChatDockTab, e: MouseEvent) {
   if (!tab || tab.kind !== 'file') return
   e.stopPropagation()
   const rect = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+
   if (tab.id !== props.activeTabId) {
     if (!(await confirmLeaveActive())) return
     emit('activate', tab.id)
     await nextTick()
     await nextTick()
     // 等宿主把 activeTabId 切过去、FileWindow 挂载完成，避免拿到上一个文件的视图表
-    for (let i = 0; i < 5; i++) {
-      if (props.activeTabId === tab.id && String(activeFilePane?.filePath || '') === String(tab.path || '') && activeFilePane?.availableViews) break
+    for (let i = 0; i < 8; i++) {
+      if (props.activeTabId === tab.id && String(activeFilePane?.filePath || '') === String(tab.path || '') && activeFilePane?.availableViews?.length) break
       await new Promise((r) => setTimeout(r, 20))
     }
   }
-  const views: string[] = Array.isArray(activeFilePane?.availableViews) ? activeFilePane.availableViews.slice() : []
-  if (views.length <= 1) return
-  const current = String(activeFilePane?.viewType || tab.view || views[0])
+
+  const list: string[] = Array.isArray(activeFilePane?.availableViews) ? activeFilePane.availableViews.slice() : []
+  if (!list.length) return
+  const current = String(activeFilePane?.viewType || tab.view || list[0] || '')
+  const views: DockMenuAction[] = list.map((v) => ({
+    value: v,
+    label: viewNameOf(v),
+    icon: viewIconOf(v),
+    active: v === current,
+  }))
   const x = Math.max(6, Math.min((rect?.left || 12), window.innerWidth - 186))
   const y = Math.max(6, Math.min((rect?.bottom || 40) + 4, window.innerHeight - 240))
-  viewMenu.value = { id: tab.id, x, y, views, current }
+  viewMenu.value = { id: tab.id, x, y, views }
 }
 function chooseView(v: string) {
   const menu = viewMenu.value

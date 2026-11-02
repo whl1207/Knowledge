@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-11-01
+
+### Added
+
+- **Right-click a spot in the map view to create a file there**: the new Markdown stores the clicked coordinates and appears on the map as a marker at once, and the same menu can copy the coordinates.
+
+### Improved
+
+- **Multi-edit shows "N chars · M replacements generated" while streaming**: progress is visible as with file writes, instead of a raw `{"replacements":` argument fragment.
+- **Markdown tabs in the right sidebar can switch views**: click the tab icon to move between Browse / Source / Visual / Mind Map / Presentation (clicking it did nothing before).
+- **Step cards**: the open-file icon moved to the left of the status icon so every status icon lines up on the far right, and a running compaction now shows "N chars summarized".
+- **Search / find steps show the keyword and hit count in the summary**: e.g. `"TODO" · 3 files · 12 matches`, so standard mode makes it clear what was searched and what it found.
+
+### Fixed
+
+- **The context-usage ring at the top did not drop after compaction**: it now recalculates usage from the summary plus the kept recent turns the moment compaction finishes instead of keeping the pre-compaction number, and the compaction card also shows the size after compaction.
+- **Multi-edit stayed on "Waiting…" while streaming**: it now reports the generated character count (old_string included) and the replacement count, and falls back to "generating… (N chars received)" before those fields appear.
+
 ## 2026-10-31
 
 ### Added

@@ -260,6 +260,25 @@ export interface Chat {
    * 右键聊天列表可临时「显示已归档的聊天」；切换显示不改动排序与保存位置。
    */
   archived?: boolean
+  /**
+   * 上下文压缩水位（两种来源共用同一个字段）：
+   * - **普通聊天**（lib/agent/chatCompact.ts）：`summary` + `coveredCount` + `tokensBefore`，前 N 条不再发送；
+   * - **智能体会话**：`tokensAfter`（摘要 + 保留尾部的估算）供上下文占用圆环在真实 usage 回来前立即更新，
+   *   `usageSeen` 之后让位给真实值。
+   */
+  compaction?: {
+    /** 智能体压缩：压缩后的请求历史估算 token */
+    tokensAfter?: number
+    /** 压缩完成时间（智能体压缩用它统计"之后新增的消息"） */
+    at?: number
+    /** 压缩完成时最后一条助手消息的 promptTokens（判断"新 usage 是否已回来"） */
+    promptAt?: number
+    usageSeen?: boolean
+    /** 普通聊天压缩：结构化摘要与已覆盖的消息条数 */
+    summary?: string
+    coveredCount?: number
+    tokensBefore?: number
+  }
   messages: ChatMessage[]
   config: ChatConfig
   createdAt: number

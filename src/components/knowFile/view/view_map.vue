@@ -3,10 +3,13 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
 
   //加载视图组件
   import { usestore } from '@/store'
-  import { ref ,onMounted,onBeforeUnmount, reactive,watch,computed} from 'vue'
+  import { ref ,onMounted,onBeforeUnmount, reactive,watch,computed,nextTick} from 'vue'
   import 'leaflet/dist/leaflet.css' // 导入 Leaflet 的 CSS 文件
   import * as L from 'leaflet' // 导入 Leaflet 的 JavaScript 文件
   import { createMbtilesLayer } from '@/lib/mbTiles'
+  import { getPlatform } from '@/platform'
+  import { ElMessage, ElMessageBox } from 'element-plus'
+  import { bindDismiss, clampToViewport } from '@/lib/knowFile/overlay'
 
   const store=usestore()
   let sideOpen = ref(false) // 右侧面板（图源 + 数据列表）开关：默认收起
@@ -37,6 +40,15 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
   let polygons = reactive([]) as any //所有多边形
   let data = reactive([]) as any//读取数据
 
+  // 右键菜单：在此处新建文件（把点击处的经纬度写进 frontmatter，建好立刻渲染标记）
+  let ctxMenu = ref(null) as any // { x, y, lat, lng }
+  let menuEl = ref(null) as any
+  // 点击菜单外部 / Esc 收起（.kb-menu 为「点菜单本身不收起」的判定钩子）
+  bindDismiss(computed(() => !!ctxMenu.value), '.kb-menu', () => { ctxMenu.value = null })
+  // 新建文件后的短暂高亮：半径 10 米的圆点在低缩放下几乎看不见，这里用像素圆环标出点击处
+  let highlightLayer: any = null
+  let highlightTimer: any = null
+
   // 已挂载的 MBTiles 离线地图包（内置 + 用户挂载）
   let mapTileSources = ref([]) as any
   let unsubMapTiles: (() => void) | null = null
@@ -46,10 +58,19 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
   // 固定 5 层（与旧下拉上限一致），选到实际不存在的层级只会返回空列表。
   const maxDepth = ref(5)
 
+  /** 是否为可用的数值（空字符串 / null / 非数字都算没有；0 是合法值） */
+  const isNumeric = function (v: any) {
+    return v != null && String(v).trim() !== '' && Number.isFinite(Number(v))
+  }
+  // 是否配置了可用的经纬度：0 是合法值，不能用真值判断（赤道 / 本初子午线上的点也要能画出来）
+  const hasGeo = function (item: any) {
+    return isNumeric(item?.attributes?.纬度) && isNumeric(item?.attributes?.经度)
+  }
+
   // 数据列表：按“仅显示有经纬度”配置过滤
   const filteredData = computed(() => {
     if (!onlyGeo.value) return data
-    return data.filter((item: any) => item.attributes?.纬度 && item.attributes?.经度)
+    return data.filter((item: any) => hasGeo(item))
   })
 
   // 在线源（散文件式离线已移除，仅保留在线源）
@@ -85,7 +106,16 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
   })
 
   const initMap = async function(){
+    if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null }
+    highlightLayer = null
     if(map.target!=null){
+      // 重建前记住当前视野：刷新 / 切换目录 / 新建文件后不会跳回初始中心与缩放
+      try {
+        const c = map.target.getCenter()
+        map.lat = c.lat
+        map.lon = c.lng
+        map.zoomLevel = map.target.getZoom()
+      } catch { /* ignore */ }
       map.target.remove()
     }
     nodes=[]
@@ -111,46 +141,90 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
     map.target.on('zoomend', () => {
       curZoom.value = map.target ? map.target.getZoom() : map.zoomLevel
     })
+    // 右键：在此处新建文件（经纬度写进 frontmatter，建好立即渲染）
+    map.target.on('contextmenu', onMapContextMenu)
     curZoom.value = map.zoomLevel
     tooltipsOn.value = true
-    if(store.root=="") return //如果未设定仓库和路径
-    data = await aikmIpc.invoke("getFiles", store.dataDir, deep.value)
-    //添加节点到地图
-    data.forEach((item: any) => {
-      if (!item.attributes?.纬度 || !item.attributes?.经度) return;
+    await loadData()
+  }
 
-      if (item.attributes.范围?.length > 0) {
-        const polygon = L.polygon(item.attributes.范围, {
-          color: item.attributes.颜色 || '#f03',
-          fillColor: item.attributes.颜色 || '#f03',
-          fillOpacity: 0.5
-        });
-        polygon.bindTooltip(item.label.replace(/\.md$/, ''), {
-          permanent: true,
-          direction: 'right',
-          offset: [10, 0],
-          sticky: true
-        }).openTooltip();
-        polygons.push(polygon);
-        map.polygonsLayer.addLayer(polygon);
-      } else {
-        const marker = L.circle([item.attributes.纬度, item.attributes.经度], {
-          color: item.attributes.颜色 || '#f03',
-          fillColor: item.attributes.颜色 || '#f03',
-          fillOpacity: 0.5,
-          radius: item.attributes.半径 || 10
-        });
-        marker.bindTooltip(item.label.replace(/\.md$/, ''), {
-          permanent: true,
-          direction: 'right',
-          offset: [10, 0],
-          sticky: true
-        }).openTooltip();
-        marker.on('click', () => store.openFileByMode(item));
-        markers.push(marker);
-        map.markersLayer.addLayer(marker);
+  /** 只重读数据并重画标记（不重建地图，保留当前视野）：新建文件后立即生效 */
+  let loadSeq = 0
+  const loadData = async function(){
+    const seq = ++loadSeq // 并发刷新（连续右键新建 / 刷新）时只让最后一次结果落地，避免重复标记
+    data.length = 0
+    markers.length = 0
+    polygons.length = 0
+    if (map.markersLayer) map.markersLayer.clearLayers()
+    if (map.polygonsLayer) map.polygonsLayer.clearLayers()
+    if(store.root=="") return //如果未设定仓库和路径
+    let list: any[] = []
+    try {
+      list = (await aikmIpc.invoke("getFiles", store.dataDir, deep.value)) || []
+    } catch { list = [] }
+    if (seq !== loadSeq) return
+    for (const item of list) data.push(item)
+    //添加节点到地图
+    data.forEach(addGeoNode)
+  }
+
+  /** 把一条文件数据画到地图上：有 范围 画多边形，否则按 纬度 / 经度 画圆点 */
+  const addGeoNode = function(item: any){
+    if (!hasGeo(item)) return;
+
+    if (item.attributes.范围?.length > 0) {
+      const polygon = L.polygon(item.attributes.范围, {
+        color: item.attributes.颜色 || '#f03',
+        fillColor: item.attributes.颜色 || '#f03',
+        fillOpacity: 0.5
+      });
+      polygon.bindTooltip(item.label.replace(/\.md$/, ''), {
+        permanent: true,
+        direction: 'right',
+        offset: [10, 0],
+        sticky: true
+      }).openTooltip();
+      polygons.push(polygon);
+      map.polygonsLayer.addLayer(polygon);
+    } else {
+      const marker = L.circle([item.attributes.纬度, item.attributes.经度], {
+        color: item.attributes.颜色 || '#f03',
+        fillColor: item.attributes.颜色 || '#f03',
+        fillOpacity: 0.5,
+        radius: item.attributes.半径 || 10
+      });
+      marker.bindTooltip(item.label.replace(/\.md$/, ''), {
+        permanent: true,
+        direction: 'right',
+        offset: [10, 0],
+        sticky: true
+      }).openTooltip();
+      marker.on('click', () => store.openFileByMode(item));
+      markers.push(marker);
+      map.markersLayer.addLayer(marker);
+    }
+  }
+
+  /** 新建文件后在地图上闪一个像素圆环（约 3 秒），让新建的点一眼可见 */
+  const flashPoint = function(lat: number, lng: number){
+    if (!map.target) return
+    if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null }
+    if (highlightLayer) { try { map.target.removeLayer(highlightLayer) } catch { /* ignore */ } }
+    highlightLayer = L.circleMarker([lat, lng], {
+      radius: 9,
+      color: '#1f7de0',
+      weight: 2,
+      fillColor: '#1f7de0',
+      fillOpacity: 0.35,
+      interactive: false
+    }).addTo(map.target)
+    highlightTimer = setTimeout(() => {
+      highlightTimer = null
+      if (highlightLayer && map.target && map.target.hasLayer(highlightLayer)) {
+        map.target.removeLayer(highlightLayer)
       }
-    })
+      highlightLayer = null
+    }, 3000)
   }
   const getSource = function () {
     if (map.defaultTileLayer != null) {
@@ -219,6 +293,89 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
     console.log(event)
     //store.addTab(data[i])
   }
+
+  // ===== 右键：在此处新建文件（把点击处的经纬度写进 YAML frontmatter） =====
+  /** 地图右键：记住屏幕坐标与点击处经纬度；菜单渲染后贴边回收进视口 */
+  const onMapContextMenu = function (e: any) {
+    const oe = e?.originalEvent as MouseEvent | undefined
+    ctxMenu.value = {
+      x: oe ? oe.clientX : 0,
+      y: oe ? oe.clientY : 0,
+      lat: Number(e?.latlng?.lat),
+      lng: Number(e?.latlng?.lng)
+    }
+    nextTick(() => {
+      if (!ctxMenu.value) return
+      const p = clampToViewport(menuEl.value, ctxMenu.value.x, ctxMenu.value.y)
+      ctxMenu.value = { ...ctxMenu.value, x: p.x, y: p.y }
+    })
+  }
+
+  /** 右键「在此处新建文件」：当前文件夹建 .md，写入 纬度 / 经度 后立即重画标记（不重建地图） */
+  const createFileAt = async function (pos: any) {
+    const zh = store.locales == 'zh'
+    ctxMenu.value = null
+    const dir = store.dataDir
+    if (!dir) {
+      ElMessage.warning(zh ? '请先打开工作区' : 'Open a workspace first')
+      return
+    }
+    // 与 6 位小数对齐（YAML 里是数字，地图按数字渲染圆点）
+    const lat = Number(Number(pos.lat).toFixed(6))
+    const lng = Number(Number(pos.lng).toFixed(6))
+    const coordText = `${lat.toFixed(6)}, ${lng.toFixed(6)}`
+    const suggestion = (zh ? '地点' : 'Place') + '_' + lat.toFixed(4) + '_' + lng.toFixed(4)
+
+    let name = ''
+    try {
+      const r = await ElMessageBox.prompt(
+        zh ? '文件建在当前文件夹，并写入该处的经纬度（纬度 / 经度）。' : 'The file is created in the current folder and stores these coordinates (lat / lon).',
+        (zh ? '在此处新建文件' : 'New file here') + '  ' + coordText,
+        {
+          confirmButtonText: zh ? '创建' : 'Create',
+          cancelButtonText: zh ? '取消' : 'Cancel',
+          inputValue: suggestion,
+          inputPattern: /\S+/,
+          inputErrorMessage: zh ? '名称不能为空' : 'Name cannot be empty'
+        }
+      )
+      name = String(r?.value || '').trim()
+    } catch { return } // 用户取消
+    if (!name) return
+
+    // 统一成小写 .md：地图的经纬度来自 Markdown frontmatter，只有 `.md` 会被解析
+    const fileName = name.replace(/\.md$/i, '') + '.md'
+    const path = await getPlatform().fs.createFile(dir, fileName)
+    if (!path) {
+      ElMessage.error(zh ? '创建失败（同名文件已存在或目录不可写）' : 'Create failed (name exists or folder not writable)')
+      return
+    }
+    const ok = !!(await getPlatform().fs.saveText(path, `---\n纬度: ${lat}\n经度: ${lng}\n---\n`))
+    // 只重读数据 / 重画标记：地图视野保持不动，新建的点立刻出现
+    await loadData()
+    if (!ok) {
+      ElMessage.warning(zh ? `已新建「${fileName}」，但经纬度写入失败` : `Created "${fileName}" but the coordinates were not saved`)
+      return
+    }
+    flashPoint(lat, lng)
+    ElMessage.success(zh
+      ? `已新建「${fileName}」：${coordText}（点击标记可打开）`
+      : `Created "${fileName}" at ${coordText} (click the marker to open)`)
+  }
+
+  /** 右键「复制坐标」 */
+  const copyCoordsAt = async function (pos: any) {
+    const zh = store.locales == 'zh'
+    ctxMenu.value = null
+    const text = `${Number(pos.lat).toFixed(6)}, ${Number(pos.lng).toFixed(6)}`
+    try {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success((zh ? '已复制坐标：' : 'Copied coordinates: ') + text)
+    } catch {
+      ElMessage.error(zh ? '复制失败' : 'Copy failed')
+    }
+  }
+
   // 手动切换所有 Tooltip 的开关状态
   const toggleTooltips = function() {
     tooltipsOn.value = !tooltipsOn.value
@@ -272,6 +429,7 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
   onBeforeUnmount(() => {
     unsubMapTiles?.()
     unsubMapTiles = null
+    if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null }
     if (map.target) {
       map.target.remove();
     }
@@ -406,6 +564,29 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
               </table>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- 地图右键菜单：在点击处新建文件（把经纬度写进文件）/ 复制坐标。
+           建好只重画标记（见 createFileAt → loadData），地图视野保持不动。 -->
+      <div
+        v-if="ctxMenu"
+        ref="menuEl"
+        class="context-menu kb-menu"
+        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+        @click.stop
+        @contextmenu.prevent
+      >
+        <div class="menu-coord" :title="store.locales=='zh'?'右键点击处的经纬度':'Coordinates of the right-click point'">
+          <i class="fa fa-map-marker"></i>
+          <span>{{ Number(ctxMenu.lat).toFixed(6) }}, {{ Number(ctxMenu.lng).toFixed(6) }}</span>
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" @click="createFileAt(ctxMenu)">
+          <i class="fa fa-plus"></i>{{ store.locales=='zh'?'在此处新建文件':'New file here' }}
+        </div>
+        <div class="menu-item" @click="copyCoordsAt(ctxMenu)">
+          <i class="fa fa-clipboard"></i>{{ store.locales=='zh'?'复制坐标':'Copy coordinates' }}
         </div>
       </div>
     </div>
@@ -581,6 +762,15 @@ import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .ms-empty{ text-align:center; color:var(--borderColor); padding:8px 0; }
+
+  /* 右键菜单里的坐标行：不可点，仅显示右键处的经纬度（值可选中复制） */
+  .menu-coord{
+    display:flex; align-items:center; gap:6px;
+    padding:4px 8px; font-size:11px; color:var(--borderColor);
+    font-variant-numeric: tabular-nums; white-space:nowrap;
+    cursor:default; user-select:text;
+  }
+  .menu-coord i{ width:12px; text-align:center; font-size:11px; opacity:.75; }
 
   /* ===== 底部状态栏（与代码编辑/阅读视图一致观感） ===== */
   .map-statusbar{

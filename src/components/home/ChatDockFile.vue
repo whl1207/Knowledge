@@ -57,7 +57,20 @@ async function confirmLeave(): Promise<boolean> {
   return r !== false
 }
 
-defineExpose({ confirmLeave })
+/**
+ * 宿主（ChatDock）除了「切换前保存」之外，还要能问这个文件有哪些视图、
+ * 当前是哪个视图、以及切到别的视图（标签栏图标菜单用）。
+ *
+ * 注意：必须**转发** FileWindow 的这几个成员 —— 只暴露 confirmLeave 时，
+ * 宿主拿到的 availableViews 永远是 undefined，点标签图标就完全没反应。
+ */
+defineExpose({
+  confirmLeave,
+  get filePath() { return String(fileWindowRef.value?.filePath || '') },
+  get availableViews() { return Array.isArray(fileWindowRef.value?.availableViews) ? fileWindowRef.value.availableViews : [] },
+  get viewType() { return String(fileWindowRef.value?.viewType || '') },
+  setView: (v: string) => { fileWindowRef.value?.setView?.(v) },
+})
 </script>
 
 <style scoped>

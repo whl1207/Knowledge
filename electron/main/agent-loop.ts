@@ -1460,7 +1460,7 @@ class AgentImpl implements AgentControl {
       const dropped = entries.slice(plan.startIndex, plan.endIndex)
       const droppedItems = items.slice(plan.startIndex, plan.endIndex)
       const tokensBefore = estimateMessagesTokens(droppedItems)
-      const summary = (await this.summarize(buildCompactionPrompt(droppedItems))) || indexSummary(droppedItems)
+      const summary = (await this.summarize(buildCompactionPrompt(droppedItems), kind)) || indexSummary(droppedItems)
       const replacement: BudgetMessage = { role: 'user', content: renderCompactedCheckpoint(summary) }
       const tokensAfter = estimateMessagesTokens([replacement])
       // 硬校验：替换必须**确实更小**（复刻 DSH 的 "summary is not smaller than the shadowed content"）。
@@ -1474,6 +1474,11 @@ class AgentImpl implements AgentControl {
       }
       const fromSeq = dropped[0]?.seq ?? entries[plan.startIndex].seq
       const toSeq = dropped[dropped.length - 1]?.seq ?? fromSeq
+      // 压缩**后**的请求历史规模：摘要 + 被保留的近期尾部 + 工具 schema（界面圆环用它立即更新，
+      // 不必等下一次真实 usage；也不要用上面那个"仅摘要"的 tokensAfter，那会严重低估）
+      const keptItems = items.slice(plan.endIndex)
+      const postCompactionTokens = estimateMessagesTokens([replacement, ...keptItems])
+        + estimateToolSchemaTokens(this.visibleTools())
       sessionLog.append(this.id, 'context/compaction', {
         fromSeq,
         toSeq,
@@ -1489,7 +1494,7 @@ class AgentImpl implements AgentControl {
       this.tokenAnchor = null
       this.lastRequestEntries = -1
       this.lastRequestEstimate = 0
-      this.emit('agent/compaction', { phase: 'end', kind, ok: true, droppedMessages: dropped.length, tokensBefore })
+      this.emit('agent/compaction', { phase: 'end', kind, ok: true, droppedMessages: dropped.length, tokensBefore, tokensAfter: postCompactionTokens })
       return true
     } catch (e: any) {
       console.warn(`[agent-compact] ${this.id} 压缩失败（保持原历史）:`, e?.message || e)
@@ -1502,8 +1507,11 @@ class AgentImpl implements AgentControl {
   }
 
   /** 生成压缩摘要（复用当前 provider / 模型；失败返回空串由调用方兜底） */
-  private async summarize(prompt: string): Promise<string> {
+  private async summarize(prompt: string, kind: 'auto' | 'overflow-retry' | 'manual' = 'auto'): Promise<string> {
     try {
+      // 摘要是一次独立 LLM 调用、可能要几十秒：把流式字数节流转成进度事件，
+      // 卡片上就能显示「正在压缩上下文…（已生成 N 字）」，而不是只有一个转圈。
+      let lastEmit = 0
       const text = await runLlmOnce({
         prompt,
         systemPrompt: COMPACT_SYSTEM_PROMPT,
@@ -1511,6 +1519,12 @@ class AgentImpl implements AgentControl {
         config: this.options.config,
         llmConfig: this.options.llmConfig,
         label: '上下文压缩',
+        onAssistantDelta: (chars) => {
+          const now = Date.now()
+          if (now - lastEmit < 300) return
+          lastEmit = now
+          this.emit('agent/compaction', { phase: 'progress', kind, chars })
+        },
       })
       return String(text || '').trim()
     } catch (e: any) {
@@ -1663,6 +1677,10 @@ class AgentImpl implements AgentControl {
           content += chunk
           this.queueAssistantChunk(chunk)
           this.emit('assistant/chunk', { content: chunk })
+          // 旁路请求（上下文压缩摘要）：把已生成字数报给调用方，界面据此显示「已生成 N 字」
+          if (this.options.onAssistantDelta) {
+            try { this.options.onAssistantDelta(content.length) } catch { /* 回调异常不影响流 */ }
+          }
         },
         onReasoning: (text: string) => {
           reasoning = text
@@ -2346,6 +2364,8 @@ async function runLlmOnce(opts: {
   config?: any
   llmConfig?: any
   label?: string
+  /** 流式进度：已生成的正文总字符数（上下文压缩的摘要要用它显示进度） */
+  onAssistantDelta?: (totalChars: number) => void
 }): Promise<string> {
   const agent = new AgentImpl({
     systemPrompt: opts.systemPrompt,
@@ -2355,6 +2375,7 @@ async function runLlmOnce(opts: {
     tools: [],
     maxSteps: 2,
     label: opts.label,
+    onAssistantDelta: opts.onAssistantDelta,
     // 旁路请求自身不参与上下文压缩（防递归）
     contextCompact: false,
   })

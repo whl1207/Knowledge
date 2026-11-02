@@ -199,6 +199,17 @@ export function useAgentRun(deps: AgentRunDeps) {
       if (v.status === 'running') sawRunning = true
       projectKbInfo(assistantMsg, v, processedKb)
       projectUsage(assistantMsg, v)
+      // 上下文占用圆环：压缩刚结束时新一轮真实 usage 还没回来，先用主进程算出的「压缩后」用量顶上，
+      // 否则圆环会一直停在压缩前的旧值（用户看到的就是"压缩了但占用没变"）。
+      // 等这一轮的第一个真实 tokenStats 回来（值变了）就把覆盖标记为已失效，圆环回到真实值。
+      {
+        const owner = chatRef ?? getCurrentChat()
+        const cp: any = (owner as any)?.compaction
+        if (cp && !cp.usageSeen) {
+          const nowPrompt = Number(assistantMsg?.tokenStats?.promptTokens) || 0
+          if (nowPrompt > 0 && nowPrompt !== Number(cp.promptAt)) cp.usageSeen = true
+        }
+      }
       // 校准系数回传：主进程实测的「真实/估算」比值按来源 + 模型记住（聊天模式的预算与圆环复用）
       if (typeof (v as any).tokenScale === 'number' && assistantMsg.ctxScaleKey) {
         const [p, m] = String(assistantMsg.ctxScaleKey).split('::')
@@ -210,6 +221,15 @@ export function useAgentRun(deps: AgentRunDeps) {
       const compaction: any = v.compaction
       if (compaction && compaction.phase === 'done' && compaction.seq > notifiedCompactSeq) {
         notifiedCompactSeq = compaction.seq
+        // 让圆环立刻反映压缩后的规模（记录当时的 promptTokens，用于判断"新 usage 是否已回来"）
+        const owner = chatRef ?? getCurrentChat()
+        if (owner && Number(compaction.tokensAfter) > 0) {
+          ;(owner as any).compaction = {
+            tokensAfter: Number(compaction.tokensAfter),
+            at: Date.now(),
+            promptAt: Number(assistantMsg?.tokenStats?.promptTokens) || 0,
+          }
+        }
         ElMessage.info(compaction.kind === 'overflow-retry'
           ? (store.locales == 'zh'
             ? '上下文超限，已自动压缩较早的对话并重试'

@@ -6,6 +6,7 @@ import { aikmIpc } from '@/lib/aikmIpc'
   import { onFileSystemChanged, acquireFileWatch, releaseFileWatch } from '@/lib/knowFile/fileWatch'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import { parseSearchQuery, matchSearchTerms } from '@/lib/knowFile/itemSearch'
+  import { applyAttributeGraph, ATTRIBUTE_EDGE_COLOR, linkEndIds } from '@/lib/knowFile/attributeGraph'
 import { getPlatform, hasCapability } from '@/platform'
   const store=usestore()
   const graphContainer = ref<HTMLElement | null>(null);
@@ -237,7 +238,8 @@ import { getPlatform, hasCapability } from '@/platform'
       } else {
         // 如果SVG元素已经存在，则更新它的宽度和高度
         svg.attr('width', width.value).attr('height', height.value)
-        simulation.force('center', d3.forceCenter(width.value / 2, height.value / 2))
+        // 静态布局（圆形/树状/同心圆/网格）没有力导向模拟，这里不能直接 .force()
+        if (simulation) simulation.force('center', d3.forceCenter(width.value / 2, height.value / 2))
       }
     }
   }
@@ -304,9 +306,12 @@ import { getPlatform, hasCapability } from '@/platform'
         }
         // 异步读取期间视图可能已卸载/隐藏：此时重绘会留下无法停止的力导向模拟
         if (!graphContainer.value) return
+        // 先刷新字段面板（保留各字段的展开开关），再按开关重建属性节点/边，最后只重绘一次：
+        // 重读数据会把属性节点全部丢掉，不重建就会出现「开关是开的、图上却什么都没有」
+        getAttributes()
+        applyExpandedAttributes()
         renderGraph()
         resize()
-        getAttributes()
       } catch (error) {
         console.error(error);
       }
@@ -318,11 +323,14 @@ import { getPlatform, hasCapability } from '@/platform'
   let graphSearchTimer: any = null
   const fullGraphNodes: any[] = []
   const fullGraphLinks: any[] = []
+  // 只同步「基础数据」（按搜索词裁剪），属性图层由调用方在字段列表就绪后重建：
+  // 上下两层分开，展开/收起才不会把属性节点写回 fullGraphNodes（否则清空搜索后残留幽灵节点）
   const syncGraphView = function () {
     const terms = parseSearchQuery(graphQuery.value)
     if (!terms.length) {
-      data.value.nodes = fullGraphNodes
-      data.value.links = fullGraphLinks
+      // 复制数组：属性展开是在视图层追加节点/边，不能污染 fullGraphNodes / fullGraphLinks
+      data.value.nodes = fullGraphNodes.slice()
+      data.value.links = fullGraphLinks.slice()
       return
     }
     // 与其它视图同一套搜索语法（文件名 / 路径 / 属性值）
@@ -339,6 +347,7 @@ import { getPlatform, hasCapability } from '@/platform'
   }
   const applyGraphSearch = function () {
     syncGraphView()
+    applyExpandedAttributes()
     renderGraph()
   }
   watch(graphQuery, () => {
@@ -493,7 +502,6 @@ import { getPlatform, hasCapability } from '@/platform'
   const nodeBaseStroke = (d: any) => d.type === 'folder' ? '#3a9e5e' : d.type === 'file' ? '#2a7ed6' : '#d47a2a'
   // 稳定标识：文件夹/文件用路径，属性节点用「类型 + 名称」
   const nodeKey = (n: any) => n.path ? 'p:' + n.path : 'a:' + n.type + ':' + n.label
-  const linkEndIds = (l: any) => [l.source?.id ?? l.source, l.target?.id ?? l.target]
 
   // 按当前选中节点重刷高亮：关联节点/相连边保持高亮，其余淡出；未选中时全部还原
   const applyHighlight = function(){
@@ -588,8 +596,8 @@ import { getPlatform, hasCapability } from '@/platform'
                         .force('link', d3.forceLink(allLinks).id((d: any) => d.id))
                         .force('charge', d3.forceManyBody().strength(-250))
                         .force('center', d3.forceCenter(width.value / 2, height.value / 2))
-                        .force('x', d3.forceX(width.value).strength(0.1)) // 添加水平位置限制
-                        .force('y', d3.forceY(height.value).strength(0.1)); // 添加垂直位置限制
+                        .force('x', d3.forceX(width.value / 2).strength(0.1)) // 与 center 一致：都取画布中心
+                        .force('y', d3.forceY(height.value / 2).strength(0.1)); // （原先误写成 width / height）
       } else if (layoutType.value === "circle") {
         // 圆形布局初始化
         const radius = Math.min(width.value, height.value) / 2 - 50; // 定义圆的半径
@@ -744,144 +752,66 @@ import { getPlatform, hasCapability } from '@/platform'
       }
   }
   
-  //获取节点属性
+  // ---- 字段（属性）展开：把 frontmatter 里的属性值变成图上的属性节点 ----
+  // 属性值归一化见 @/lib/knowFile/attributeValues，节点/边重建见 @/lib/knowFile/attributeGraph。
+  // 旧实现直接对属性值调用 .split()，遇到数字/数组/对象就抛 TypeError（图谱视图崩溃的根因）。
   let attributes = ref([]) as any
+
+  /** 收集字段面板的字段列表（保持首次出现顺序，按字段名去重；展开状态按字段名延续） */
   const getAttributes = function(){
-    // 获取所有属性
-    let allProps = [] as any
-    data.value.nodes.forEach((obj: { attributes: any }) => {
-      const props = Object.keys(obj.attributes)
-      for(let i = 0;i<props.length;i++){
-        if(!/^[A-Za-z]+$/.test(props[i])){
-          let t = {
-            name:props[i],
-            state:0,
-            color:'rgba(170, 170, 170, 0.4)'
-          } as any
-          allProps.push(t)
-        }
-      }
-    })
-    // 去除重复属性
-    let result = allProps.filter((obj:any, index:any, self:any) => {
-      // 检查当前对象是否在之前的对象中出现过
-      return (
-        index ===
-        self.findIndex((o:any) => {
-          return JSON.stringify(o) === JSON.stringify(obj)
+    // 文件系统变更会重读数据：已展开的字段不能因为刷新就被悄悄收回
+    const prevState = new Map<string, number>()
+    for (const item of attributes.value) prevState.set(item.name, item.state)
+
+    const result: any[] = []
+    const seen = new Set<string>()
+    // 字段来自文件/文件夹节点（fullGraphNodes 才是未裁剪的基础数据，属性节点自己没有 attributes）
+    const nodes = fullGraphNodes.length ? fullGraphNodes : data.value.nodes
+    for (const node of nodes) {
+      const attrs = node && node.attributes
+      if (!attrs || typeof attrs !== 'object') continue
+      for (const name of Object.keys(attrs)) {
+        // 纯英文键是内部/技术元数据，不进字段面板（沿用原有约定）
+        if (name === '' || /^[A-Za-z]+$/.test(name) || seen.has(name)) continue
+        seen.add(name)
+        result.push({
+          name,
+          state: prevState.get(name) ?? 0,
+          color: ATTRIBUTE_EDGE_COLOR,
         })
-      )
-    })
+      }
+    }
     attributes.value = result
   }
-  //展开所有节点的某一类属性
-const expandAttribute=async function(indexParam:string|number,state:number){
-  // 将参数转换为 number 类型
-  const index = Number(indexParam)
-  
-  if (isNaN(index)) {
-    console.error('Invalid index:', indexParam)
-    return
-  }
-  
-  // 确保 index 在有效范围内
-  if (index < 0 || index >= attributes.value.length) {
-    console.error('Index out of range:', index)
-    return
-  }
-  
-  attributes.value[index].state=state
-  let attribute = attributes.value[index].name //需要展开的属性
-    if(state==1||state==-1){ //如果是创建属性节点
-      //循环遍历节点，并根据属性创建新节点
-      for(let i = 0;i<data.value.nodes.length;i++){
-        //如果该节点有这个属性
-        if(data.value.nodes[i].attributes!=undefined){
-          if(data.value.nodes[i].attributes[attribute]!=undefined){
-            let items =[]
-            //切分属性，根据;和；进行切分
-            if(data.value.nodes[i].attributes[attribute] instanceof Date){
-              items =[store.StampToDate(data.value.nodes[i].attributes[attribute])]
-            }else{
-              items = data.value.nodes[i].attributes[attribute].split(/[;；]/)
-            }
-            //遍历所有items
-            for (const item of items) {
-              //判断节点是否存在
-              let nodeindex=null as number|unknown //是否有重复边，序号
-              //判断属性内容是否是原有节点
-              for (let index = 0;index<data.value.nodes.length;index++) {
-                if(data.value.nodes[index].label==item){
-                  //添加边
-                  nodeindex=index
-                }
-              }
-              if(nodeindex==null){
-                nodeindex=data.value.nodes.length
-                //添加节点
-                data.value.nodes.push({
-                  id:data.value.nodes.length,
-                  label:item,
-                  path:'',
-                  type:attribute,
-                  x:0,
-                  y:0,
-                  vx:0,
-                  vy:0
-                })
-              }
-              //边数据
-              let linkData={
-                id:data.value.links.length,
-                index:data.value.links.length,
-                source:(state==1)?(data.value.nodes[i].id):(nodeindex),
-                target:(state==1)?(nodeindex):(data.value.nodes[i].id),
-                type:attribute,
-                style:{
-                  fill:attributes.value[index].color,
-                  stroke:attributes.value[index].color,
-                },
-              }
-              let edgeState=false //是否有重复边
-              for (const link of data.value.links) {
-                if(link.source==linkData.source && link.target==linkData.target && link.type==linkData.type){
-                  //添加边
-                  edgeState=true
-                }
-              }
-              if(edgeState==false) data.value.links.push(linkData)
-            }
-          }
-        }
-      }
-    }else{
-      //如果是删除行为
-      let filteredNodes = data.value.nodes.filter((node:any) => node.type !== attribute);
-      data.value.nodes = filteredNodes;
 
-      //过滤边，属性有变化会产生bug
-      let filteredEdges = data.value.links.filter((link:any) => link.type !== attribute);
-      data.value.links = filteredEdges;
+  /** 按字段面板记录的开关状态重建属性图层（搜索 / 数据重载后调用，保证视图与开关一致） */
+  const applyExpandedAttributes = function(){
+    applyAttributeGraph(data.value.nodes, data.value.links, attributes.value)
+  }
+
+  /** 展开 / 反向展开 / 收起某个字段（state: 1 展开，-1 反向展开，0 收起） */
+  const expandAttribute = function(indexParam: string|number, state: number){
+    const index = Number(indexParam)
+    if (!Number.isInteger(index) || index < 0 || index >= attributes.value.length) {
+      console.error('Invalid attribute index:', indexParam)
+      return
     }
+    const item = attributes.value[index]
+    if (!item) return
+    // 每次从开关状态整体重建：重复点击、正反方向切换都不会叠出双向边或僵尸节点
+    item.state = state === 0 ? 0 : (state === -1 ? -1 : 1)
+    applyExpandedAttributes()
     renderGraph()
   }
 
-  // 批量展开/收起所有属性
-  const expandAllAttributes = async function() {
-    for (let i = 0; i < attributes.value.length; i++) {
-      if (attributes.value[i].state === 0 || attributes.value[i].state === -1) {
-        await expandAttribute(i, 1)
-      }
-    }
+  // 批量展开/收起：只重建一次属性图层、只重绘一次（逐个调用会做 N 次全量重绘）
+  const setAllAttributes = function(state: 0 | 1){
+    attributes.value.forEach((item: any) => { item.state = state })
+    applyExpandedAttributes()
+    renderGraph()
   }
-  const collapseAllAttributes = async function() {
-    // 从后往前遍历，避免索引偏移
-    for (let i = attributes.value.length - 1; i >= 0; i--) {
-      if (attributes.value[i].state === 1 || attributes.value[i].state === -1) {
-        await expandAttribute(i, 0)
-      }
-    }
-  }
+  const expandAllAttributes = function(){ setAllAttributes(1) }
+  const collapseAllAttributes = function(){ setAllAttributes(0) }
 
   function proxyToRegular(obj:any) {
     return JSON.parse(JSON.stringify(obj));
