@@ -12,7 +12,7 @@
  * `electron/main/session-log.ts`。
  */
 
-import type { TodoItem } from '@/types/agent'
+import type { RunReport, TodoItem } from '@/types/agent'
 
 // ---------------------------------------------------------------------------
 // 事件目录
@@ -37,6 +37,7 @@ export type SessionEventType =
   | 'agent/status' // agent 生命周期状态（idle/running/stopping/disposed）
   | 'plan/write' // 执行计划整值写入（update_plan / exit_plan_mode；最后一条胜出）
   | 'todo/write' // 待办清单整值写入（update_todo；最后一条胜出）
+  | 'report/write' // 运行状态整值写入（report_run；最后一条胜出，null = 清除）
   | 'plan/review' // 计划评审开启（exit_plan_mode 提交，等待用户裁决）
   | 'plan/review-result' // 计划评审裁决（批准 / 继续完善 / 关闭 / 取消）
 
@@ -182,6 +183,14 @@ export interface SessionEventMap {
    * 单一写入口：`AgentImpl.setTodos()`（update_todo 工具）。
    */
   'todo/write': { todos: TodoItem[] }
+  /**
+   * 运行状态上报（整值替换，最后一条胜出）。`report=null` = 清除。
+   * 单一写入口：`AgentImpl.setRunReport()`（report_run 工具）。
+   *
+   * 参照 dsh-superagent-prototype 的结构化 Report：面板只按 `state` 派生条目，
+   * 不从自由文本推断"在等人"。落盘的意义与会话恢复同 `plan/write`。
+   */
+  'report/write': { report: RunReport | null }
   /**
    * 计划评审开启（exit_plan_mode 提交）。落盘的意义：进程重启后「待评审」仍然是
    * 日志折叠出来的事实（`pendingReview`），界面据此恢复那条未完成的决策，

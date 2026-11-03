@@ -261,6 +261,8 @@ export const DELEGATION_SLOT_TIERS: Record<
   askUser: { tier: 'safe' },
   updatePlan: { tier: 'safe' },
   updateTodo: { tier: 'safe' },
+  // 运行状态上报：只写自己的状态（可能进用户的「待我处理」面板），不碰数据/环境
+  reportStatus: { tier: 'safe' },
   // 受权限门控（不可放宽：门槛就是插件自己的权限声明）
   webSearch: { tier: 'gated', needs: 'net' },
   browseWebsites: { tier: 'gated', needs: 'net' },

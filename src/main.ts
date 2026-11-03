@@ -11,6 +11,8 @@ initAikmIpc()
 import { pinia } from '@/store/pinia'
 import { isAuxWindowHash } from '@/store'
 import { ElMessage, ElTree } from 'element-plus';
+// 轻提示（ElMessage）同时收进「待我处理」面板的「动态」段：所有既有调用点都不用改
+import { installNoticeCapture } from '@/lib/noticeCapture';
 import 'element-plus/theme-chalk/index.css';
 import '@/style.css'
 import '@/assets/kb-view.css'
@@ -65,6 +67,10 @@ if (typeof navigator !== 'undefined' && !navigator.clipboard?.writeText) {
 
 // 系统级听写的悬浮窗只渲染语音面板，不需要插件运行时 / 渲染层任务 / 全局提示
 const isVoiceOverlayWindow = window.location.hash.startsWith('#/voice-overlay')
+
+// 轻提示（ElMessage）同时收进「待我处理」面板的「动态」段：观察 body 上新增的提示节点，
+// 不改任何调用点；提示位置由 style.css 的 .el-message 段改为顶部居中（导航栏下方）
+installNoticeCapture()
 
 createApp(App)
   .use(pinia)

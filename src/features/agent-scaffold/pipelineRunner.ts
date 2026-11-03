@@ -21,6 +21,8 @@ import { ExtractExecutor } from './executorExtract'
 import { sinkOf, makeDataRowsSink } from './sinks'
 import { normalizeUrl, hostOf, PIPELINE_TITLE_FIELD, PIPELINE_LINKS_FIELD } from './fetch'
 import { effectiveContentSource, resolveContentField, resolveTextFieldName } from './types'
+// 并发调度判定（含给人预留的 1 个槽位）：纯逻辑，见 slots.ts / slots.selftest.ts
+import { canStart, effectiveConcurrency, reserveInUse, type ConcurrencySnapshot } from './slots'
 import type {
   BatchConfig, BatchRow, BatchCallbacks, BatchWorkerInfo, BatchRowStatus,
   BatchRowTraceStep, BatchRowTraceCall, ExecutorContext, ExecutorDeps, ExecutorOutcome,
@@ -61,7 +63,15 @@ export class BatchAgent {
   /** 当前批量运行的并发声明作用域 id（setConcurrency 运行中改并发时重新声明用） */
   private runScopeId: string = ''
   private activeTasks: Set<Promise<void>> = new Set()
-  private taskQueue: Array<() => Promise<void>> = []
+  /**
+   * 待执行队列。`user = true` 表示人手动触发的（重跑某行 / 重跑命中行），
+   * 它可以使用「并发上限之外的那 1 个保留位」——自动任务永远占不到（见 slots.ts）。
+   */
+  private taskQueue: Array<{ run: () => Promise<void>; user: boolean }> = []
+  /** 正在跑的用户任务数（保留位同一时刻只允许 1 个） */
+  private activeUserTasks: number = 0
+  /** 最近一次向远端声明的并发数（避免每个任务收尾都发一次 IPC） */
+  private lastDeclaredConcurrency: number = 0
   // 并发线程日志追踪 — 固定槽位
   private workers: Map<number, BatchWorkerInfo> = new Map()
   private availableSlots: number[] = []
@@ -158,7 +168,7 @@ export class BatchAgent {
     if (next === this.concurrency) return
     this.concurrency = next
     if (this.isRunning && this.runScopeId) {
-      agentBridge.declareConcurrency(this.runScopeId, next).catch(() => {})
+      this.syncDeclaredConcurrency()
     }
     // 触发 drainQueue：调高并发时立即多拾取排队任务；调低则等当前任务结束后自然收敛
     this.drainQueue()
@@ -176,39 +186,82 @@ export class BatchAgent {
   }
 
   // ==================== 并发任务调度（对齐 CollectFileAgent） ====================
-  private enqueueTask(fn: () => Promise<void>): void {
-    this.taskQueue.push(fn)
-    this.drainQueue()
-  }
 
-  private drainQueue(): void {
-    while (this.taskQueue.length > 0 && this.activeTasks.size < this.currentConcurrency()) {
-      const task = this.taskQueue.shift()!
-      const promise = task().finally(() => {
-        this.activeTasks.delete(promise)
-        this.drainQueue()
-      })
-      this.activeTasks.add(promise)
+  /** 当前并发快照（给纯逻辑判定用） */
+  private concurrencySnapshot(): ConcurrencySnapshot {
+    return {
+      active: this.activeTasks.size,
+      userActive: this.activeUserTasks,
+      userWaiting: this.taskQueue.some((t) => t.user),
     }
   }
 
   /**
-   * 高优先级入队：插到任务队列最前（手动重跑 / 空内容重跑）——
-   * 当前有任一线程空闲即立即执行；全部忙碌时排在本批其它排队任务之前，
-   * 任一线程一结束（drainQueue）即最先被取走。
+   * 把「远端并发声明」同步成当前需要的值（含保留位）。
+   * 只在数值变化时发一次 IPC；批量结束/停止时由 finally 撤销声明。
+   */
+  private syncDeclaredConcurrency(): void {
+    if (!this.isRunning || !this.runScopeId) return
+    const next = effectiveConcurrency(this.currentConcurrency(), this.concurrencySnapshot(), MAX_CONCURRENCY + 1)
+    if (next === this.lastDeclaredConcurrency) return
+    this.lastDeclaredConcurrency = next
+    agentBridge.declareConcurrency(this.runScopeId, next).catch(() => {})
+  }
+
+  private enqueueTask(fn: () => Promise<void>): void {
+    this.taskQueue.push({ run: fn, user: false })
+    this.drainQueue()
+  }
+
+  /**
+   * 调度循环：从队首找**第一个能开始的**任务（不只是队首一个）——
+   * 用户任务的保留位被占时，后面的自动任务仍可继续走普通槽位。
+   */
+  private drainQueue(): void {
+    for (;;) {
+      const base = this.currentConcurrency()
+      const idx = this.taskQueue.findIndex((t) => canStart(t.user ? 'user' : 'auto', base, this.concurrencySnapshot()))
+      if (idx < 0) break
+      const [task] = this.taskQueue.splice(idx, 1)
+      if (task.user) {
+        this.activeUserTasks++
+        const after = this.concurrencySnapshot()
+        if (reserveInUse(base, { ...after, active: after.active + 1 })) {
+          this.log('info', '你手动触发的任务已占用保留并发位（不受自动队列排队限制）')
+        }
+      }
+      const promise: Promise<void> = task.run()
+        .catch(() => { /* 单行失败由 runRow 自己收口，不打断调度 */ })
+        .finally(() => {
+          this.activeTasks.delete(promise)
+          if (task.user) this.activeUserTasks = Math.max(0, this.activeUserTasks - 1)
+          this.syncDeclaredConcurrency()
+          this.drainQueue()
+        })
+      this.activeTasks.add(promise)
+      this.syncDeclaredConcurrency()
+    }
+  }
+
+  /**
+   * 高优先级入队：插到任务队列最前（自动重跑 / 空内容重跑）——
+   * 当前有任一线程空闲即立即执行；全部忙碌时排在本批其它排队任务之前。
    */
   private enqueueTaskFront(fn: () => Promise<void>): void {
-    this.taskQueue.unshift(fn)
+    this.taskQueue.unshift({ run: fn, user: false })
     this.drainQueue()
   }
 
   /**
    * 批量高优先级入队：一次把整块插到队首（`concat` 为 O(n+m)），
    * 取代逐行 `enqueueTaskFront`（每次 unshift 都是 O(n)，选上千行时是 O(n²)）。
+   *
+   * @param user 是否人手动触发的（手动重跑 = true，可用「并发上限之外」的保留位）
    */
-  private enqueueTasksFront(tasks: Array<() => Promise<void>>): void {
+  private enqueueTasksFront(tasks: Array<() => Promise<void>>, opts: { user?: boolean } = {}): void {
     if (!tasks.length) return
-    this.taskQueue = tasks.concat(this.taskQueue)
+    const queued = tasks.map((run) => ({ run, user: !!opts.user }))
+    this.taskQueue = queued.concat(this.taskQueue)
     this.drainQueue()
   }
 
@@ -279,6 +332,7 @@ export class BatchAgent {
     // 使模型侧实际并发与「并发数」设置一致；结束/停止时在 finally 里撤销
     const runScopeId = `agent-batch:${Date.now()}`
     this.runScopeId = runScopeId
+    this.lastDeclaredConcurrency = this.currentConcurrency()
     await agentBridge.declareConcurrency(runScopeId, this.currentConcurrency()).catch(() => {})
 
     const pending = rows.filter((r) => inScope(r) && r.status === 'pending')
@@ -373,6 +427,8 @@ export class BatchAgent {
       this.executor.unsubscribe?.()
       // 撤销本批量声明的远端并发（完成/手动停止都回到全局基准）
       await agentBridge.revokeConcurrency(runScopeId).catch(() => {})
+      this.lastDeclaredConcurrency = 0
+      this.activeUserTasks = 0
       this.isRunning = false
     }
     const stats = this.computeStats()
@@ -735,7 +791,8 @@ export class BatchAgent {
     }
     if (accepted === 0) return 0
     if (!verbose) this.log('info', `批量重跑已入队: ${accepted} 行（优先执行）`)
-    this.enqueueTasksFront(tasks)
+    // 手动重跑 = 用户任务：并发已满时可用「上限之外」的保留位，不会排在自动任务后面
+    this.enqueueTasksFront(tasks, { user: true })
     return accepted
   }
 

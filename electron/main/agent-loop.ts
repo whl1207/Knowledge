@@ -50,6 +50,7 @@ import type {
   TodoItem,
   AskUserQuestion,
   AskUserAnswer,
+  RunReport,
 } from '@/types/agent'
 import type { DerivedMessage, DerivedEntry } from '@/types/session-log'
 import type { ToolResult, ToolDefinition, ToolExecutionContext, ToolImage } from '@/types/tool'
@@ -550,6 +551,8 @@ class AgentImpl implements AgentControl {
   // plan / todos（update_plan、update_todo 工具维护，随 agent/plan、agent/todos 事件广播）
   private _plan: string | null = null
   private _todos: TodoItem[] = []
+  /** 最近一次运行状态上报（report_run 工具；整值替换，null = 清除） */
+  private _runReport: RunReport | null = null
   private lastError: string | undefined
   /** 最近一次 assistant/message 的完整内容（供工作流智能体节点/agent:run 取最终结果） */
   private lastAssistantContent = ''
@@ -747,6 +750,9 @@ class AgentImpl implements AgentControl {
    * 图片只在内存里保存（见 taskImageData），会话日志只记数量。
    */
   send(content: string, source?: string, images?: string[]): void {
+    // 人回了话 = 上一条「在等你」的上报已得到响应：清掉它，
+    // 避免「待我处理」面板挂着过期条目（语义同原型的 waitsForPerson：有新的人类输入就不再等人）。
+    if (this._runReport) this.setRunReport(null)
     let imgs = Array.isArray(images) ? images.filter(Boolean) : []
     if (imgs.length === 0 && !this.optionImagesUsed && this.options.taskImages?.length) {
       imgs = this.options.taskImages.filter(Boolean)
@@ -2349,6 +2355,7 @@ class AgentImpl implements AgentControl {
       step: this.stepInTurn,
       plan: this._plan,
       todos: this._todos,
+      runReport: this._runReport,
       lastError: this.lastError,
       lastAssistantContent: this.lastAssistantContent,
     }
@@ -2368,6 +2375,18 @@ class AgentImpl implements AgentControl {
 
   getTodos(): TodoItem[] {
     return this._todos
+  }
+
+  /**
+   * 上报运行状态（report_run 工具）。**唯一写入口**：先落盘（`report/write`，
+   * 整值替换、最后一条胜出），再广播给 UI——内存状态是日志投影的缓存。
+   *
+   * 参照原型的结构化 Report：面板只认这里写下的 state，不从自由文本猜。
+   */
+  setRunReport(report: RunReport | null): void {
+    this._runReport = report
+    sessionLog.append(this.id, 'report/write', { report })
+    this.emit('agent/report', { report })
   }
 
   /** 设置待办清单（唯一写入口：落盘 `todo/write` → 广播）。 */
@@ -2810,10 +2829,14 @@ export function getAgentState(id: string): AgentStateView | undefined {
     // 活着时以内存里的挂起评审为准（日志里的 `plan/review` 与它一一对应）
     const review = pendingPlanReviews.get(id)?.values().next().value as PendingPlanReview | undefined
     if (review) live.pendingPlanReview = { reviewId: review.reviewId, plan: review.plan }
+    // 挂起中的提问同理：渲染层重载 / 切窗口后要靠它把「正在等你的问题」恢复出来
+    // （提问不落日志，只有内存这一份，所以必须在这里补）
+    const ask = pendingQuestions.get(id)?.values().next().value as PendingQuestion | undefined
+    if (ask) live.pendingQuestion = { askId: ask.askId, question: ask.question || askQuestionsDigest(ask.questions), questions: ask.questions }
     return live
   }
   const replay = sessionLog.projectAgentState(id)
-  if (!replay.plan && !replay.todos.length && !replay.pendingReview) return undefined
+  if (!replay.plan && !replay.todos.length && !replay.pendingReview && !replay.runReport) return undefined
   const state: AgentStateView = {
     id: id as AgentId,
     status: 'disposed',
@@ -2823,6 +2846,7 @@ export function getAgentState(id: string): AgentStateView | undefined {
     step: 0,
     plan: replay.plan,
     todos: replay.todos,
+    runReport: replay.runReport,
   }
   // 进程重启后仍挂着的评审：界面据此恢复那条未完成的决策
   if (replay.pendingReview) state.pendingPlanReview = { ...replay.pendingReview }
@@ -3030,6 +3054,14 @@ export function setAgentTodos(agentId: string, todos: TodoItem[]): boolean {
   const agent = agents.get(agentId)
   if (!agent) return false
   agent.setTodos(todos)
+  return true
+}
+
+/** `report_run` 工具：上报运行状态并广播（整值替换；null = 清除） */
+export function setAgentRunReport(agentId: string, report: RunReport | null): boolean {
+  const agent = agents.get(agentId)
+  if (!agent) return false
+  agent.setRunReport(report)
   return true
 }
 

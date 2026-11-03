@@ -336,18 +336,13 @@ p{
   --el-tag-text-color: var(--fontColor);
 }
 
-/* Element Plus 消息提示样式（ElMessage toast） */
+/* 轻提示（ElMessage）**不再显示为角落 toast**。
+   改为：由 `components/attention/AttentionNoticeChip.vue` 在「待我处理」按钮左侧就地弹出
+   一条小胶囊（几秒后收缩收回），所有提示同时进面板「动态」段可回看。
+   这里只把 ElMessage 的浮层隐藏——**DOM 仍会插入 body**，`lib/noticeCapture.ts` 的
+   MutationObserver 正是靠它把每一条提示收进「动态」，所以不能用「不调用 ElMessage」的方式。 */
 .el-message {
-  background: var(--menuColor) !important;
-  border-color: var(--borderColor) !important;
-  color: var(--fontActiveColor) !important;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important;
-  position: fixed !important;
-  left: 10px !important;
-  right: auto !important;
-  top: auto !important;
-  bottom: 10px !important;
-  transform: none !important;
+  display: none !important;
 }
 
 /* Element Plus 消息框（ElMessageBox）关闭按钮：全局紧凑化，避免默认 40px 触控区高于标题行/确认取消按钮 */

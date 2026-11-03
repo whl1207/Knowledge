@@ -29,6 +29,8 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'askUser', defaultOn: true, tools: ['ask_user'] },
   { key: 'updatePlan', defaultOn: true, tools: ['update_plan', 'exit_plan_mode'] },
   { key: 'updateTodo', defaultOn: true, tools: ['update_todo'] },
+  // 运行状态上报（report_run）：结构化 Report → 「待我处理」面板的 blocked/ready 两类来源
+  { key: 'reportStatus', defaultOn: true, tools: ['report_run'] },
   { key: 'mcpAccess', tools: ['mcp_call'] },
   { key: 'accessKnowledgeBase', needsKnowledgeFiles: true, tools: ['kb_search'] },
   { key: 'readFiles', tools: ['read_file', 'read_image', 'search_files', 'glob', 'working_directory'] },
@@ -46,6 +48,9 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
       'browser_click', 'browser_fill', 'browser_press', 'browser_hover', 'browser_select',
       'browser_upload', 'browser_dialog', 'browser_space_finish', 'browser_claim_tab',
       'browser_drag', 'browser_wheel', 'browser_paste',
+      // 标签页管理 / 诊断 / 兼容动作（与 MCP Web Agent 的 40 个函数保持一一对应）
+      'browser_list_tabs', 'browser_new_tab', 'browser_switch_tab', 'browser_close_tab',
+      'browser_get_html', 'browser_eval', 'browser_type', 'browser_scroll',
       'browser_help', 'browser_list_downloads', 'browser_download_wait', 'browser_download',
       'browser_playbook_save', 'browser_playbook_list', 'browser_playbook_get', 'browser_playbook_run',
       'browser_learning_list', 'browser_learning_get', 'browser_learning_save', 'browser_learning_delete',

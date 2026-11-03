@@ -10,6 +10,7 @@ import { ref, computed, watch, onMounted, onActivated, onDeactivated } from 'vue
 import { usestore } from '@/store'
 import { getPlatform } from '@/platform'
 import * as kbAi from '@/shared/kbAiClient'
+import { choiceLabelsOf } from '@/shared/kbQuestions'
 import {
   listKbFiles, readKbForLearning,
   type LearningKbFile, type LearningKbLoaded,
@@ -482,28 +483,37 @@ function makeItems(blocks: any[], max = 10): PracticeItem[] {
     const cm = (q.choiceMap && typeof q.choiceMap === 'object' && Object.keys(q.choiceMap).length)
       ? q.choiceMap as Record<string, string>
       : null
-    const multi = !!cm && String(exAns || '').includes(',')
+    // 新数据：extraAnswer 是文字答案、answerChoices 是正确标签；
+    // 旧数据：extraAnswer 可能是标签（如 "B"），读档时已 normalize，这里再做一次兜底。
+    const labels = cm
+      ? (Array.isArray(q.answerChoices) && q.answerChoices.length
+        ? q.answerChoices.map((l: string) => String(l).toUpperCase()).filter((l: string) => !!cm[l])
+        : choiceLabelsOf(exAns, cm))
+      : []
+    const choiceAnswer = cm && labels.length
+      ? labels.map((l: string) => cm[l]).filter(Boolean).join('；')
+      : ''
+    const answerText = choiceAnswer || exAns
+    const multi = labels.length > 1
     // 参考答案：选择题把标签翻成"标签. 正文"，读起来才有意义
-    const backText = cm && exAns
-      ? String(exAns).split(',').map(l => {
-          const k = String(l).trim().toUpperCase()
-          return cm[k] ? `${k}. ${cm[k]}` : k
-        }).join('  ·  ')
-      : (exAns || refs[0]?.content || '')
+    const backText = cm && labels.length
+      ? labels.map((l: string) => `${l}. ${cm[l]}`).join('  ·  ')
+      : (answerText || refs[0]?.content || '')
     chosen.push({
       q: q.text,
       back: backText,
-      hasAnswer: !!exAns,
+      hasAnswer: !!answerText,
       // 参考切片始终保留：练习卡第三个标签「参考切片」用 block_md 渲染出处
       slices: refs,
       objKey: f,
       filePath: f,
       blockId: q.srcBlockId,
       entityNames: entityNamesOf(q.srcBlockId),
-      // 判分（P1）：只有问题库自带的独立答案才能当"钥匙"；来源切片正文不能冒充
-      expectedAnswer: exAns || undefined,
+      // 判分（P1）：只有问题库自带的独立答案才能当"钥匙"；来源切片正文不能冒充。
+      // 选择题用正确答案标签集合判分，其它题用文字答案判分。
+      expectedAnswer: cm && labels.length ? labels.join(',') : (answerText || undefined),
       // 选择题按选项标签集合判分；否则按题干/答案长度推断短答或开放题
-      qType: cm ? (multi ? 'multi' : 'choice') : classifyPracticeType(q.text, exAns),
+      qType: cm && labels.length ? (multi ? 'multi' : 'choice') : classifyPracticeType(q.text, answerText),
       choiceMap: cm,
     })
   }

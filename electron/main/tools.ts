@@ -52,11 +52,12 @@ import {
   type WebFetchConfig,
 } from '@/shared/webFetch'
 import { skillService } from './skill-service'
-import { requestQuestions, requestPlanReview, setAgentPlan, setAgentTodos, getAgentTodos, createAgent, getAgent, disposeAgent, awaitAgentTurn, requestRendererTask } from './agent-loop'
+import { requestQuestions, requestPlanReview, setAgentPlan, setAgentTodos, setAgentRunReport, getAgentTodos, createAgent, getAgent, disposeAgent, awaitAgentTurn, requestRendererTask } from './agent-loop'
 import { globFilesInRoot, searchFilesInRoot, SEARCH_FILES_DESCRIPTION } from './file-search'
 import { saveSpillText } from './tool-spill'
 import { jobRegistry } from './job-registry'
 import { parseTodoList } from '@/shared/agentTodo'
+import { normalizeRunReport, runReportStateLabel } from '@/shared/agentRunReport'
 import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
 import { planReviewMessage } from '@/shared/agentPlanReview'
 import type { TodoItem } from '@/types/agent'
@@ -2004,6 +2005,30 @@ async function updateTodo(input: any, ctx: ToolExecutionContext): Promise<ToolRe
     ok: true,
     value: { todos: parsed.todos, counts: parsed.counts, cleared: parsed.cleared, message: parsed.message },
   }
+}
+
+/**
+ * report_run：上报本次运行的状态（参照 dsh-superagent-prototype 的结构化 Report）。
+ *
+ * 为什么需要它：AI-KM 的「待我处理」面板只能显示**结构化的**"需要人"，
+ * 而不是从自由文本里猜。六态里只有 blocked / failed / ready 会进面板；
+ * progress / waiting / dropped 只记录（不打扰人）。
+ *
+ * 用户回话后这条状态会被自动清除（见 AgentImpl.send），避免挂过期条目。
+ */
+async function reportRun(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  if (!ctx.agentId) return { ok: false, error: 'report_run 只能在 agent 会话内使用' }
+  const parsed = normalizeRunReport(input)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  const report = { ...parsed.report, at: Date.now() }
+  if (!setAgentRunReport(ctx.agentId, report)) return { ok: false, error: '会话已结束，无法上报状态' }
+  const label = runReportStateLabel(report.state, true)
+  const message = report.state === 'blocked' || report.state === 'failed' || report.state === 'ready'
+    ? `已记录（${label}），并会出现在用户的「待我处理」面板里。`
+    : report.state === 'dropped'
+      ? `已记录（${label}）；用户不会收到通知，本任务可视为收口。`
+      : `已记录（${label}）；这是内部进度，不会打扰用户。`
+  return { ok: true, value: { state: report.state, accepted: true, message } }
 }
 
 // ---------------------------------------------------------------------------
@@ -4289,6 +4314,24 @@ export function registerCoreTools(): void {
       },
     }),
   )
+  toolRegistry.register(
+    defineTool('report_run', '上报本次运行的状态，让「待我处理」面板知道什么时候需要人。**只在需要人时用**（blocked / failed / ready），或长任务中途给一句进展；不要每步都上报、不要用它写报告。state：progress（还在做）| waiting（等下一轮触发）| ready（有结果等人验收）| blocked（卡住，需要人决定或给资源）| failed（失败，需要人处理）| dropped（没有可做的事，收口用，不通知人）。summary 一句话（面向用户：在做什么 / 卡在哪 / 需要什么，≤300 字）；需要人时在 question 里给**一个**具体问题（≤500 字）。用户回话后这条状态会自动清除。', reportRun, {
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          state: {
+            type: 'string',
+            enum: ['progress', 'waiting', 'ready', 'blocked', 'failed', 'dropped'],
+            description: 'progress 还在做 | waiting 等触发 | ready 有结果等人验收 | blocked 卡住等人 | failed 失败等人处理 | dropped 无需处理（收口）',
+          },
+          summary: { type: 'string', description: '一句话说明现状（面向用户，≤300 字）' },
+          question: { type: 'string', description: '需要人时的一个具体问题（≤500 字；不需要人时省略）' },
+        },
+        required: ['state', 'summary'],
+      },
+    }),
+  )
     toolRegistry.register(
       defineTool('mcp_call', '通过 MCP 服务调用外部工具或控制装备。需要指定 tool 和 args；若 Agent 预设已配置 MCP 服务，可省略 serverId。', mcpCall, {
         inputSchema: {
@@ -4349,6 +4392,7 @@ export function registerCoreTools(): void {
     export_word: 120_000,
     update_plan: 15_000,
     update_todo: 15_000,
+    report_run: 15_000,
     mcp_call: 120_000,
     run_code: 300_000,
     web_search: 90_000,

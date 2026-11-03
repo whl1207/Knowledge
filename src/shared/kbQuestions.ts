@@ -58,11 +58,13 @@ export interface KbQuestion {
   /**
    * 选择题选项（P1-3）：标签 → 选项正文，如 `{ A: "…", B: "…" }`。
    *
-   * 由「知识处理 → 处理配置 → 生成选择题选项」开关控制：打开时问题生成会一并产出选项，
-   * 且 `extraAnswer` 存的是**正确选项标签**（如 `"B"`），学习模块据此走确定性判分。
-   * 关闭（默认）时为 undefined，问题库与以前完全一致。
+   * 由「知识处理 → 处理配置 → 生成选择题选项」开关控制：打开时问题生成会一并产出选项。
+   * **问题库的 `extraAnswer` 始终是文字答案**（正确选项正文），正确选项标签单独存在
+   * `answerChoices` 里，学习模块用它做确定性判分；这样知识库展示的是答案文字而不是“B”。
    */
   choiceMap?: Record<string, string>
+  /** 正确选项标签（如 `['B']` / `['A','C']`）；只有 `choiceMap` 存在时有意义 */
+  answerChoices?: string[]
 }
 
 /** 去重/合并过程产生的审核记录（供「审核与修改」面板逐条通过 / 撤销） */
@@ -299,10 +301,32 @@ export function normalizeChoiceAnswer(answer: string, choiceMap?: Record<string,
   return raw
 }
 
+/** 从答案/选项表提取正确选项标签；认不出返回空数组 */
+export function choiceLabelsOf(answer: string | undefined, choiceMap?: Record<string, string> | null): string[] {
+  if (!choiceMap || !Object.keys(choiceMap).length) return []
+  const normalized = normalizeChoiceAnswer(String(answer || ''), choiceMap)
+  return normalized.split(',').map(s => s.trim().toUpperCase()).filter(l => !!choiceMap[l])
+}
+
 /**
- * 无问题标签时的兜底：按「选项行」把纯问题列表切成带选项的条目。
- * 返回空数组表示"没有可识别的选项区块"，交给旧逻辑处理。
+ * 统一旧/新问题的答案字段：
+ * - 旧数据：`extraAnswer` 存的是正确选项标签（如 "B"），`choiceMap` 有选项；
+ * - 新数据：`extraAnswer` 存文字答案，`answerChoices` 存标签。
+ * 读档时调用一次，把旧数据升级成「文字答案 + 标签」双字段，展示和学习判分互不干扰。
  */
+export function normalizeQuestionAnswerFields<T extends KbQuestion>(q: T): T {
+  const cm = q.choiceMap
+  if (!cm || !Object.keys(cm).length) return q
+  let labels = Array.isArray(q.answerChoices) ? q.answerChoices.map(s => String(s).toUpperCase()).filter(l => !!cm[l]) : []
+  if (!labels.length) labels = choiceLabelsOf(q.extraAnswer, cm)
+  if (!labels.length) return q
+  const text = labels.map(l => cm[l]).filter(Boolean).join('；')
+  q.answerChoices = labels
+  if (text) q.extraAnswer = text
+  return q
+}
+
+
 function parseOptionBlocks(lines: string[]): QuestionAnswerPair[] {
   const out: QuestionAnswerPair[] = []
   let cur: QuestionAnswerPair | null = null

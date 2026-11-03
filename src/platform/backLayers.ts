@@ -93,6 +93,8 @@ export function clearBackLayers(): void {
 export const BACK_ORDER = {
   /** 模块内导航：主页聊天列表、知识管理文件树抽屉、文件阅读内的翻页等 */
   moduleNav: 10,
+  /** 「待我处理」浮层面板（盖在内容之上、设置浮层之下：返回键先关它，再退模块导航） */
+  attentionPanel: 35,
   /** 设置浮层本身（关掉设置回到主界面） */
   settingsOverlay: 40,
   /** 设置：分类列表 ⇄ 设置内容 */

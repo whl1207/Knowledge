@@ -10,7 +10,8 @@
  * - 折叠是纯计算（无 fs / 无 electron），可直接跑自测（见 agentPlanState.selftest.ts）。
  */
 
-import type { TodoItem } from '@/types/agent'
+import type { RunReport, TodoItem } from '@/types/agent'
+import { normalizeRunReport } from './agentRunReport'
 
 /** 计划 + 待办的折叠状态（`plan=null` 表示没有计划；`todos=[]` 表示清单已清空） */
 /** 尚未裁决的计划评审（进程重启后仍在日志里 → UI 可据此恢复这条待办决策） */
@@ -34,11 +35,16 @@ export interface PlanTodoState {
   pendingReview: PendingReviewState | null
   /** 最近一次裁决结果 */
   lastReviewResult: ReviewResultState | null
+  /**
+   * 最近一次运行状态上报（report_run；null = 没有/已清除）。
+   * 与 plan/todos 同为"整值替换、最后一条胜出"，会话销毁后仍可从日志恢复。
+   */
+  runReport: RunReport | null
 }
 
 /** 折叠的初始值（空状态） */
 export function emptyPlanTodoState(): PlanTodoState {
-  return { plan: null, todos: [], pendingReview: null, lastReviewResult: null }
+  return { plan: null, todos: [], pendingReview: null, lastReviewResult: null, runReport: null }
 }
 
 /** 折叠能识别的最小事件形状（避免依赖 SessionEvent 的具体类型定义） */
@@ -49,6 +55,9 @@ export interface PlanTodoEventLike {
   reviewId?: unknown
   verdict?: unknown
   feedback?: unknown
+  report?: unknown
+  /** 事件时间戳（用于给 runReport 补 at；缺失时用当前时间） */
+  ts?: unknown
 }
 
 /**
@@ -67,6 +76,13 @@ export function foldPlanTodoState(state: PlanTodoState, event: PlanTodoEventLike
   }
   if (event.type === 'todo/write') {
     return { ...state, todos: normalizeTodos(event.todos) }
+  }
+  if (event.type === 'report/write') {
+    // 整值替换：null/非法值 = 清除（不让脏数据在面板上变成假待办）
+    const parsed = normalizeRunReport(event.report)
+    if (!parsed.ok) return { ...state, runReport: null }
+    const at = Number(event.ts)
+    return { ...state, runReport: { ...parsed.report, at: Number.isFinite(at) && at > 0 ? at : Date.now() } }
   }
   if (event.type === 'plan/review') {
     const reviewId = String(event.reviewId ?? '').trim()

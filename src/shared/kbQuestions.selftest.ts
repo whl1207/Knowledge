@@ -12,6 +12,8 @@
 
 import {
   normalizeChoiceAnswer,
+  normalizeQuestionAnswerFields,
+  choiceLabelsOf,
   parseQuestionAnswerPairs,
   splitQuestionText,
 } from '@/shared/kbQuestions'
@@ -143,6 +145,20 @@ export function runKbQuestionsSelfTest(): KbQuestionsCase[] {
     add('E3 无选项表 → 原样返回', normalizeChoiceAnswer('粒线体', null) === '粒线体')
     add('E4 认不出来 → 原样返回（绝不硬编）', normalizeChoiceAnswer('完全不相干的回答', M) === '完全不相干的回答')
     add('E5 空白 → 空串', normalizeChoiceAnswer('   ', M) === '')
+  }
+
+  // ==================== F. 答案文字 + 选项标签分离 ====================
+  {
+    const cm = { A: '叶绿体', B: '粒线体' }
+    const oldQ: any = { id: 'q1', text: 't', extraAnswer: 'B', choiceMap: cm }
+    normalizeQuestionAnswerFields(oldQ)
+    add('F1 旧数据：标签答案升级为文字答案', oldQ.extraAnswer === '粒线体')
+    add('F2 旧数据：正确标签单独保存', JSON.stringify(oldQ.answerChoices) === '["B"]')
+    const newQ: any = { id: 'q2', text: 't', extraAnswer: '粒线体', choiceMap: cm, answerChoices: ['B'] }
+    normalizeQuestionAnswerFields(newQ)
+    add('F3 新数据：文字答案保持不变', newQ.extraAnswer === '粒线体')
+    add('F4 标签集合解析', choiceLabelsOf('A,C', { A: '甲', B: '乙', C: '丙' }).join(',') === 'A,C')
+    add('F5 非选择题不改变', normalizeQuestionAnswerFields({ id: 'q3', text: 't', extraAnswer: '自由文本' } as any).extraAnswer === '自由文本')
   }
 
   return cases

@@ -131,7 +131,7 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
-  (e: 'bulk', payload: { rows: T[]; on: boolean }): void
+  (e: 'bulk', payload: { rows: T[]; on: boolean; groupId?: string }): void
 }>()
 
 const store = usestore()
@@ -200,7 +200,7 @@ const canEnable = (g: ToolGroupSection<T>): boolean => g.rows.some((row) => !row
 const canDisable = (g: ToolGroupSection<T>): boolean => g.rows.some((row) => row.on && !row.alwaysOn)
 
 const emitBulk = (g: ToolGroupSection<T>, on: boolean) => {
-  emit('bulk', { rows: g.rows, on })
+  emit('bulk', { rows: g.rows, on, groupId: g.id })
 }
 </script>
 

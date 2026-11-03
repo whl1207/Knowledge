@@ -135,6 +135,7 @@
             <i class="fa fa-android"></i>
             <span>{{ store.locales === 'en' ? 'General Agent' : '通用智能体' }}</span>
             <span class="general-panel-badge">{{ store.locales === 'en' ? 'Built-in' : '内置' }}</span>
+            <span class="prompt-token-badge" :title="promptTokenTitle">{{ promptTokenLabel }}</span>
           </div>
           <div class="general-panel-desc">
             {{ store.locales === 'en'
@@ -273,7 +274,10 @@
               </div>
             </div>
             <div class="cfg-row column system-prompt-row">
-              <label>{{ store.locales === 'en' ? 'System Prompt' : '系统提示' }}</label>
+              <div class="system-prompt-head">
+                <label>{{ store.locales === 'en' ? 'System Prompt' : '系统提示' }}</label>
+                <span class="prompt-token-badge" :title="promptTokenTitle">{{ promptTokenLabel }}</span>
+              </div>
               <textarea class="scoll" v-model="selected.systemPrompt" :placeholder="store.locales === 'en' ? 'e.g. You are a data analyst... (role description goes here)' : '（智能体设定直接写在此处）'" rows="15"></textarea>
             </div>
           </div>
@@ -292,6 +296,19 @@
                   <option value="ptc">PTC</option>
                 </select>
                 <span class="exec-config-hint">{{ presentationHint }}</span>
+              </div>
+              <div class="preset-tool-bulkbar">
+                <span class="preset-tool-count">
+                  {{ store.locales === 'en'
+                    ? `${enabledPresetToolCount} / ${toolRows.length} tools enabled`
+                    : `已启用 ${enabledPresetToolCount} / ${toolRows.length} 个工具` }}
+                </span>
+                <button class="preset-tool-bulkbtn" @click="setAllPresetTools(false)">
+                  <i class="fa fa-toggle-off"></i> {{ store.locales === 'en' ? 'Disable all' : '全部关闭' }}
+                </button>
+                <button class="preset-tool-bulkbtn" @click="setAllPresetTools(true)">
+                  <i class="fa fa-toggle-on"></i> {{ store.locales === 'en' ? 'Enable all' : '全部开启' }}
+                </button>
               </div>
               <ToolGroupList
                 class="preset-tool-groups"
@@ -638,12 +655,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import draggable from 'vuedraggable'
 import { mcpManager } from '@/platform/mcpManager'
-import { toolsFromCapabilities, setToolEnabled, toolOn, getPluginToolNames } from '@/lib/agent/capabilities'
+import { toolsFromCapabilities, setToolEnabled, toolOn, getPluginToolNames, syncCapabilityBooleans, CAPABILITY_TOOL_SLOTS, slotToolsOf } from '@/lib/agent/capabilities'
 import { pluginDisplayName, pluginToolScopes } from '@/lib/plugin/runtime'
 import { AGENT_TOOL_REGISTRY, type AgentToolInfo } from '@/services/agentSkills'
 import ToolGroupList from '@/components/set/ToolGroupList.vue'
@@ -656,7 +673,9 @@ import {
   type AgentPresetScanSummary,
 } from '@/composables/useAgentPresets'
 import { ensureDefaultAgentPresetFolder, resetAgentPresetFolderToDefault, isDefaultAgentPresetFolder } from '@/composables/useDefaultStorage'
-import { renderLoopSections } from '@/lib/agent/skill'
+import { renderLoopSections, SKILL_AGENT_DEFAULT_TOOLS } from '@/lib/agent/skill'
+import { assembleAgentSystemPrompt } from '@/lib/agent/promptContext'
+import { estimateTokens } from '@/shared/contextBudget'
 import { AGENT_MAX_STEPS_MAX, DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { BUILTIN_AGENT_PRESET_IDS, isBuiltinAgentPreset, resetBuiltinAgentPreset, builtinPresetDefaultsFromStore, ensureBuiltinAgentPresets } from '@/shared/builtinAgentPresets'
 import { FOLLOW_DEFAULT_LLM, deepSeekStyleOf, normalizeLlmTypeList, presetFollowsDefaultLlm } from '@/shared/llmSources'
@@ -849,6 +868,8 @@ const toolRows = computed<ToolRow[]>(() => [
   })),
   ...pluginToolRows.value,
 ])
+/** 当前预设实际启用的工具数（与卡片上的工具数同一份数据源） */
+const enabledPresetToolCount = computed(() => toolRows.value.filter((r) => r.on).length)
 
 /** 逐工具开关；关闭 kb_search / mcp_call 时联动清空已关联项（对齐旧 onCapToggle 行为） */
 const togglePresetTool = (tool: string) => {
@@ -872,7 +893,7 @@ const togglePresetTool = (tool: string) => {
  * 关掉 mcp_call / kb_search 时联动清空已关联的服务 / 库文件（与 togglePresetTool 一致），
  * 否则会出现“工具关了但配置还挂着”的半截状态。
  */
-const applyPresetToolBulk = ({ rows, on }: { rows: ToolRow[]; on: boolean }) => {
+const applyPresetToolBulk = ({ rows, on, groupId }: { rows: ToolRow[]; on: boolean; groupId?: string }) => {
   const caps = selected.value?.capabilities as any
   if (!caps) return
   let turnedOffMcp = false
@@ -886,12 +907,52 @@ const applyPresetToolBulk = ({ rows, on }: { rows: ToolRow[]; on: boolean }) => 
       else if (row.name === 'kb_search') turnedOffKb = true
     }
   }
+  // 浏览器自动化有一批工具只存在于能力槽里（browser_learning_* / browser_claim_tab /
+  // browser_playbook_* 等），没有卡片。整组全关/全开时也要一起处理，否则统一工具注册表
+  // 会显示它们仍然开着（用户实测「全关」后还剩 17 个）。
+  if (groupId === 'browser') {
+    const browserTools = slotToolsOf('browseWebsites')
+    const list = new Set<string>(Array.isArray(caps.enabledTools) ? caps.enabledTools : toolsFromCapabilities(caps))
+    for (const name of browserTools) {
+      if (on) list.add(name)
+      else list.delete(name)
+    }
+    caps.enabledTools = Array.from(list)
+    syncCapabilityBooleans(caps)
+  }
   if (turnedOffMcp) {
     caps.mcpServerIds = []
     caps.mcpEquipmentIds = []
     mcpEquipmentOptions.value = []
   }
   if (turnedOffKb) caps.knowledgeBaseFiles = []
+}
+
+/** 一键全部开启 / 关闭当前预设的所有工具（含未出现在卡片里的浏览器扩展工具） */
+const setAllPresetTools = (on: boolean) => {
+  const caps = selected.value?.capabilities as any
+  if (!caps) return
+  // 直接写权威工具集，不逐行 setToolEnabled：能力槽里有一部分浏览器工具
+  // （browser_help / playbook / download 等）并没有对应的工具卡片，逐行关会残留
+  // （用户实测全开 57 → 全关仍 17）。全部关闭就是清空，全部开启取当前可见的全部卡片。
+  // 全部开启 = 能力槽全开（包含没有卡片、只有能力槽才有的浏览器扩展工具）+ 当前可见插件工具；
+  // 全部关闭 = 直接清空权威工具集，避免逐行关时漏掉卡片之外的工具。
+  if (on) {
+    const seeded: any = { ...caps, enabledTools: undefined }
+    for (const slot of CAPABILITY_TOOL_SLOTS) seeded[slot.key] = true
+    const all = new Set<string>(toolsFromCapabilities(seeded))
+    for (const row of toolRows.value) all.add(row.name)
+    caps.enabledTools = Array.from(all)
+  } else {
+    caps.enabledTools = []
+  }
+  syncCapabilityBooleans(caps)
+  if (!on) {
+    caps.mcpServerIds = []
+    caps.mcpEquipmentIds = []
+    caps.knowledgeBaseFiles = []
+    mcpEquipmentOptions.value = []
+  }
 }
 
 // 工具呈现方式（缺省 native）：写入预设顶层 presentation 字段，运行时据此叠 SDK 段 / 补 run_code
@@ -1266,6 +1327,43 @@ const loopGuide = computed(() =>
 const loopPreviewOpen = ref(false)
 /** 预览用：预设能力槽 → 工具名列表（统一数据源 agentCapabilities.ts，与运行时一致） */
 const presetTools = computed<string[]>(() => toolsFromCapabilities((selected.value?.capabilities || {}) as any))
+/** 技能清单 → 系统提示词组装所需的简要技能信息 */
+const promptSkillBriefs = computed(() => skillList.value.map((s) => ({
+  name: s.name,
+  path: s.path,
+  description: s.description,
+})))
+/**
+ * 当前「通用」面板配置下的系统提示词占用（实时估算）：
+ * 与运行时共用 assembleAgentSystemPrompt，因此系统提示、工具说明、技能库、知识库提示、
+ * 指令段 / 工作区提示等配置一改，数字立即跟着变。通用智能体（内置虚拟项）按默认工具集 + 全部技能估算。
+ */
+const promptTokenEstimate = computed(() => {
+  const p = selected.value
+  if (!p) return 0
+  const general = isGeneral.value
+  const assembled = assembleAgentSystemPrompt({
+    store,
+    preset: general ? null : p,
+    tools: general
+      ? (store.agentTools === null ? [...SKILL_AGENT_DEFAULT_TOOLS] : [...store.agentTools])
+      : presetTools.value,
+    enabledSkills: promptSkillBriefs.value,
+    disabledSkills: store.disabledSkills || [],
+    model: p.model || undefined,
+    provider: p.llmType || undefined,
+    workspace: store.root || undefined,
+  })
+  return estimateTokens(assembled.systemPrompt)
+})
+const promptTokenLabel = computed(() => {
+  const zh = store.locales === 'zh'
+  const n = promptTokenEstimate.value.toLocaleString()
+  return zh ? `系统提示词 ≈ ${n} tokens` : `System prompt ≈ ${n} tokens`
+})
+const promptTokenTitle = computed(() => store.locales === 'zh'
+  ? '按当前系统提示词 / 工具 / 技能 / 知识库配置实时估算（不含对话历史与工具 schema）'
+  : 'Live estimate from the current system prompt / tools / skills / knowledge-base config (excludes chat history and tool schemas)')
 /** 预览：渲染指令段为最终 system prompt */
 const loopPromptPreview = computed(() => {
   const p = selected.value
@@ -1418,7 +1516,7 @@ const duplicatePreset = async (preset: AgentPreset | null) => {
   const clone: AgentPreset = {
     ...JSON.parse(JSON.stringify(preset)),
     id: genId(),
-    name: `${preset.name || 'Agent'}${store.locales === 'en' ? ' (copy)' : ' 副本'}`,
+    name: uniquePresetName(`${preset.name || 'Agent'}${store.locales === 'en' ? ' (copy)' : ' 副本'}`),
   }
   // 副本是普通预设：不带内置标记（否则会变成“不可删除”）
   delete (clone as any).builtin
@@ -1489,11 +1587,21 @@ watch(
 
 const genId = () => `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
+/** 生成不重名的预设名：新 Agent / 新 Agent 2 / 新 Agent 3 …（文件夹里也不会互相覆盖） */
+const uniquePresetName = (base: string): string => {
+  const used = new Set((store.agentPresets as any[]).map((p) => String(p?.name || '').trim()).filter(Boolean))
+  const root = String(base || '').trim() || (store.locales === 'en' ? 'New Agent' : '新 Agent')
+  if (!used.has(root)) return root
+  let n = 2
+  while (used.has(`${root} ${n}`)) n++
+  return `${root} ${n}`
+}
+
 /** 新建预设（写入 .agent 文件） */
 const addPreset = async () => {
   const preset: AgentPreset = {
     id: genId(),
-    name: store.locales === 'en' ? 'New Agent' : '新 Agent',
+    name: uniquePresetName(store.locales === 'en' ? 'New Agent' : '新 Agent'),
     tags: [],
     // 默认「跟随默认」：不绑定来源与模型，运行时读全局「设置 → 模型」的当前值
     // （换来源 / 换环境后无需回头逐个改预设；想钉死某个来源时在「通用」页手动选）
@@ -1504,15 +1612,22 @@ const addPreset = async () => {
     kbTopK: 3,
     // 默认全选所有已启用技能（＝与通用智能体一致）
     selectedSkills: [...skillList.value.map(s => s.path)],
-    // 工具能力默认全开（对齐通用智能体默认工具集：读写/搜索/执行代码/浏览网页/技能库）
-    capabilities: {
-      readFiles: true, executeCode: true, webSearch: true, accessKnowledgeBase: false,
-      browseWebsites: true, writeFiles: true, listDirs: true, runShell: false,
-      runSubagent: false, skills: true,
+    // 工具能力默认：读写 / 搜索 / 代码 / 联网搜索 / 技能 / 计划待办，浏览器自动化默认关闭
+    // enabledTools 是唯一权威（显式给出），避免旧模式能力槽推导漏关/多算
+    capabilities: (() => {
+      const caps = defaultCapabilities()
+      Object.assign(caps, {
+        readFiles: true, executeCode: true, webSearch: true,
+        accessKnowledgeBase: false, browseWebsites: false,
+        writeFiles: true, listDirs: true, runShell: false,
+        runSubagent: false, skills: true,
         askUser: true, updatePlan: true, updateTodo: true,
-          mcpAccess: false, mcpServerIds: [], mcpEquipmentIds: [],
+        mcpAccess: false, mcpServerIds: [], mcpEquipmentIds: [],
         knowledgeBaseFiles: [],
-    },
+      })
+      caps.enabledTools = toolsFromCapabilities({ ...caps, enabledTools: undefined })
+      return caps
+    })(),
     maxSteps: DEFAULT_AGENT_MAX_STEPS,
     seedHistory: true,
     loopPromptMode: 'auto',
@@ -1855,18 +1970,39 @@ watch(() => [selected.value?.id, selected.value?.llmType, store.AIconfig.llm.typ
 
 // 编辑自动保存：localStorage 备份 + 防抖写入 .agent 文件（.agent 文件模式）
 let presetSaveTimer: ReturnType<typeof setTimeout> | null = null
+/** 立即把当前内存里的自建预设写回文件夹（内置预设不落盘） */
+const flushPresetFiles = () => {
+  if (!store.agentPresetPath) return
+  for (const c of store.agentPresets as any[]) {
+    // 内置预设不落盘：由软件按 id 幂等提供，避免在用户预设文件夹里多出非自建文件
+    if (isBuiltinAgentPreset(c)) continue
+    // 写入失败不阻塞编辑；下次编辑会再试
+    void writeAgentPreset(c)
+  }
+}
 watch(() => store.agentPresets, () => {
   store.saveConfig()
   if (!store.agentPresetPath) return
   if (presetSaveTimer) clearTimeout(presetSaveTimer)
+  // 200ms 防抖：编辑停下就写盘，同时避免每个按键都触发一次文件写入
   presetSaveTimer = setTimeout(() => {
-    for (const c of store.agentPresets as any[]) {
-      // 内置预设不落盘：由软件按 id 幂等提供，避免在用户预设文件夹里多出非自建文件
-      if (isBuiltinAgentPreset(c)) continue
-      writeAgentPreset(c)
-    }
-  }, 600)
+    presetSaveTimer = null
+    flushPresetFiles()
+  }, 200)
 }, { deep: true })
+// 关闭设置页 / 应用前把未落盘的编辑刷掉，保证把 .agent 文件直接发给别人时是最新内容
+const flushPresetFilesOnHide = () => {
+  if (presetSaveTimer) {
+    clearTimeout(presetSaveTimer)
+    presetSaveTimer = null
+  }
+  flushPresetFiles()
+}
+onBeforeUnmount(() => {
+  flushPresetFilesOnHide()
+  window.removeEventListener('beforeunload', flushPresetFilesOnHide)
+})
+window.addEventListener('beforeunload', flushPresetFilesOnHide)
 
 onMounted(async () => {
   // 默认存储位置：预设默认存到 userData/agent-presets（老用户会从 localStorage 迁过去）。
@@ -2063,6 +2199,19 @@ onMounted(async () => {
   background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
   color: var(--fontActiveColor);
 }
+/* 系统提示词实时占用（通用面板 / 通用标签页） */
+.prompt-token-badge {
+  margin-left: auto;
+  font-size: 10px; font-weight: normal; line-height: 1;
+  padding: 2px 6px; border-radius: 3px;
+  color: var(--fontColor);
+  background: color-mix(in srgb, var(--fontColor) 7%, transparent);
+  white-space: nowrap;
+}
+.system-prompt-head {
+  display: flex; align-items: center; gap: 8px;
+}
+.system-prompt-head .prompt-token-badge { margin-left: auto; }
 .general-panel-desc {
   font-size: 12px; line-height: 1.6; opacity: .85;
   padding: 4px 0 10px; border-bottom: 1px dashed var(--borderColor);
@@ -2198,6 +2347,22 @@ onMounted(async () => {
 /* 工具呈现方式（native / PTC）：工具列表上方的单行配置 */
 .preset-pres-row { flex-shrink: 0; }
 .preset-pres-row .exec-config-label { min-width: 52px; font-weight: 600; }
+/* 工具页：一键全部开启 / 关闭 + 实际启用数量 */
+.preset-tool-bulkbar {
+  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0; padding: 2px 0 6px;
+  font-size: 11px;
+}
+.preset-tool-count { opacity: .65; margin-right: auto; }
+.preset-tool-bulkbtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; font-size: 10px; line-height: 1.2;
+  border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--menuColor); color: var(--fontColor); cursor: pointer;
+}
+.preset-tool-bulkbtn:hover {
+  border-color: var(--fontActiveColor); color: var(--fontActiveColor);
+}
 /* 工具分组外壳（ToolGroupList）：占满剩余高度，列宽比工具管理页更紧凑 */
 .preset-tool-groups { flex: 1 1 auto; min-height: 0; --tgl-min: 180px; }
 /* 技能分组外壳：与工具分组同一套外壳与高度策略；卡片样式由 SkillCard.vue 统一提供，

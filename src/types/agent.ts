@@ -245,6 +245,7 @@ export type AgentEventType =
   | 'agent/plan' // 执行计划更新（update_plan 工具）
   | 'agent/plan-review' // 计划评审请求（exit_plan_mode 工具；用 agent:answer 回裁决）
   | 'agent/todos' // 待办清单更新（update_todo 工具）
+  | 'agent/report' // 运行状态上报（report_run 工具；整值替换，null = 清除）
   | 'agent/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call）
   | 'agent/compaction' // 上下文压缩（旧轮次摘要）：start 事件 → 界面显示「正在压缩上下文…」
   | 'agent/notice' // 非致命的运行期提示（如 max_tokens 截断后自动续跑 / 放弃续跑）
@@ -304,6 +305,14 @@ export interface AgentEventMap {
    */
   'agent/plan-review': { reviewId: string; plan: string }
   'agent/todos': { todos: TodoItem[] }
+  /**
+   * 运行状态上报（report_run 工具）：整值替换、最后一条胜出，`null` = 清除。
+   *
+   * 参照 dsh-superagent-prototype 的结构化 Report：**只有结构化字段能进「待我处理」**，
+   * 不从自由文本推断"在等人"（原型把它列为被否决的概念）。
+   * 消费方：「待我处理」面板按 state 派生条目（blocked/failed → 出问题了；ready → 等你验收）。
+   */
+  'agent/report': { report: RunReport | null }
   'agent/search-status': { status: string; query?: string; results?: Array<{ title?: string; url?: string }>; action?: any }
   /** phase='start' 表示开始生成摘要；phase='end' 表示结束（ok=false 表示压缩未生效，保持原历史） */
   'agent/compaction': {
@@ -459,12 +468,46 @@ export interface PlanState {
   plan: string | null
 }
 
+/**
+ * 运行状态（report_run 工具上报；参照 dsh-superagent-prototype 的 Report 六态）。
+ *
+ * - `progress`：还在干活，只是让人知道进度（不打扰人）；
+ * - `waiting`：等下一轮触发/外部事件（不打扰人）；
+ * - `ready`：有结果等人验收；
+ * - `blocked`：卡住，需要人做决定/给资源；
+ * - `failed`：失败，需要人处理；
+ * - `dropped`：没有可做的事，无需通知（收口用）。
+ */
+export type RunReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+
+/** 一次运行状态上报（整值替换语义；对应会话事件 `report/write`） */
+export interface RunReport {
+  state: RunReportState
+  /** 一句话摘要（面向用户：在做什么 / 卡在哪 / 需要什么），≤300 字 */
+  summary: string
+  /** 需要人时的**一个具体问题**（不写成长报告），≤500 字 */
+  question?: string
+  /** 记录时间（毫秒；由落盘方补） */
+  at: number
+}
+
 /** agent 完整状态快照（agent:state 返回值，供 UI 恢复） */
 export interface AgentStateView extends AgentSummary {
   turn: number
   step: number
   plan: string | null
   todos: TodoItem[]
+  /**
+   * 最近一次运行状态上报（`report_run` 工具）。会话销毁后从日志折叠得出，
+   * 供「待我处理」面板与渲染层重载恢复使用。
+   */
+  runReport?: RunReport | null
+  /**
+   * 仍挂起、等待用户回答的 ask_user 提问。
+   * 会话活着时由主进程内存给出；会话已销毁则没有（提问 Promise 已 reject，不可能再回答）。
+   * 供「待我处理」面板与渲染层重载后的恢复使用。
+   */
+  pendingQuestion?: { askId: string; question: string; questions?: AskUserQuestion[] } | null
   /**
    * 仍待用户裁决的计划评审（exit_plan_mode）。
    * 会话已销毁时由**日志折叠**得出（进程重启后仍在）——界面据此恢复那条未完成的决策。

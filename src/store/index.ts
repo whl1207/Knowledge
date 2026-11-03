@@ -198,11 +198,17 @@ function writeWorkspaceKeys(state: {
 }
 
 /** 通知其它窗口（主窗口）从 localStorage 重新同步配置；仅「设置写盘方」发送 */
-function broadcastSettingsChanged(uiJson: string, locales: string): void {
+function broadcastSettingsChanged(uiJson: string, locales: string, aiConfigJson?: string): void {
     if (!settingsConfigWriter || typeof window === 'undefined') return
     if (!hasCapability('events.bus')) return
     try {
-        getPlatform().events.emit('settings-config-changed', { ui: JSON.parse(uiJson), locales })
+        getPlatform().events.emit('settings-config-changed', {
+            ui: JSON.parse(uiJson),
+            locales,
+            // AI 配置也随广播一起带上：主窗口只 loadConfig 时如果被后续旧内存 saveConfig 覆盖，
+            // 会出现「设置里改了默认模型来源、重启后又变回去」；这里直接同步内存。
+            ...(aiConfigJson ? { aiConfig: JSON.parse(aiConfigJson) } : {}),
+        })
     } catch (e) { /* 忽略 */ }
 }
 
@@ -240,24 +246,28 @@ export function crumbsOf(p: string): { label: string; path: string }[] {
     return arr
 }
 
+/** 用户自建主题（存在 UI.customThemes；与内置 THEMES 分开，可添加 / 删除） */
+export interface CustomTheme {
+    name: string
+    backgroundColor: string
+    borderColor: string
+    menuColor: string
+    menuActiveColor: string
+    fontColor: string
+    fontActiveColor: string
+}
+
 export const THEMES: Record<string, { labelEn: string; backgroundColor: string; borderColor: string; menuColor: string; menuActiveColor: string; fontColor: string; fontActiveColor: string }> = {
     '浅蓝': { labelEn: 'Light Blue', backgroundColor: "#ffffff", borderColor: "#d0d7de", menuColor: "#fafcff", menuActiveColor: "#cde4ff", fontColor: "#1f2328", fontActiveColor: "#03254d" },
     '浅红': { labelEn: 'Light Red', backgroundColor: "#ffffff", borderColor: "#888888", menuColor: "#f0f0f0", menuActiveColor: "#ECD7D6", fontColor: "#111111", fontActiveColor: "#990000" },
     '深色': { labelEn: 'Dark', backgroundColor: "#0D1117", borderColor: "#30363D", menuColor: "#161617", menuActiveColor: "#24272E", fontColor: "#ffffff", fontActiveColor: "#CCA700" },
     '灰色': { labelEn: 'Gray', backgroundColor: "#1e1e1e", borderColor: "#444444", menuColor: "#303030", menuActiveColor: "#4c4c4c", fontColor: "#ffffff", fontActiveColor: "#ffff00" },
-    '暖色': { labelEn: 'Warm Tones', backgroundColor: "#fef6e4", borderColor: "#ff8a8a", menuColor: "#f2e7d5", menuActiveColor: "#fd6d6d", fontColor: "#172c66", fontActiveColor: "#621601" },
     '午夜蓝': { labelEn: 'Midnight Blue', backgroundColor: "#1a1b26", borderColor: "#414868", menuColor: "#24283b", menuActiveColor: "#06318d", fontColor: "#c0caf5", fontActiveColor: "#eaf556" },
-    '极简灰': { labelEn: 'Minimal Gray', backgroundColor: "#ffffff", borderColor: "#dddddd", menuColor: "#f5f5f5", menuActiveColor: "#e0e0e0", fontColor: "#333333", fontActiveColor: "#000000" },
-    '暗夜紫': { labelEn: 'Dark Purple', backgroundColor: "#1a142b", borderColor: "#4a3f6e", menuColor: "#2a1f3a", menuActiveColor: "#5a4a8a", fontColor: "#d4c5ff", fontActiveColor: "#b794f4" },
-    '奶茶色': { labelEn: 'Milk Tea Color', backgroundColor: "#f9f1e7", borderColor: "#d9b99b", menuColor: "#f3e5d5", menuActiveColor: "#e6c9af", fontColor: "#6b4f3c", fontActiveColor: "#aa7a5c" },
-    '薄荷绿': { labelEn: 'Mint Green', backgroundColor: "#f0faf5", borderColor: "#a8e6cf", menuColor: "#e6f7ef", menuActiveColor: "#b8e6d0", fontColor: "#2d6a4f", fontActiveColor: "#1b4332" },
     '樱花粉': { labelEn: 'Cherry Pink', backgroundColor: "#fef0f0", borderColor: "#f5c6c6", menuColor: "#fce4e4", menuActiveColor: "#f8b4b4", fontColor: "#8b3a3a", fontActiveColor: "#5c1a1a" },
     '海洋蓝': { labelEn: 'Ocean Blue', backgroundColor: "#eef5fb", borderColor: "#b3d4f0", menuColor: "#e0edf7", menuActiveColor: "#b8d8f0", fontColor: "#1a5276", fontActiveColor: "#0e2f44" },
     '极光绿': { labelEn: 'Aurora Green', backgroundColor: "#0d1b2a", borderColor: "#1b3a2a", menuColor: "#162a3a", menuActiveColor: "#1a4a3a", fontColor: "#8de0a0", fontActiveColor: "#00ff88" },
-    '复古黄': { labelEn: 'Vintage Yellow', backgroundColor: "#faf3e0", borderColor: "#e8d5a3", menuColor: "#f5ead0", menuActiveColor: "#ecd9a8", fontColor: "#5d4a2a", fontActiveColor: "#8b6914" },
     '暗夜绿': { labelEn: 'Dark Green', backgroundColor: "#0a1f14", borderColor: "#1a3a28", menuColor: "#102a1c", menuActiveColor: "#1a4a30", fontColor: "#a8d5b8", fontActiveColor: "#4ade80" },
     '珊瑚橙': { labelEn: 'Coral Orange', backgroundColor: "#fef5ef", borderColor: "#fad1b0", menuColor: "#fce8d8", menuActiveColor: "#f8c8a8", fontColor: "#7a3a1a", fontActiveColor: "#cc5500" },
-    '冰雪蓝': { labelEn: 'Ice Blue', backgroundColor: "#f0f8ff", borderColor: "#b0d8f0", menuColor: "#e0f0fa", menuActiveColor: "#c0e0f5", fontColor: "#1a4a6a", fontActiveColor: "#0066aa" },
     '巧克力': { labelEn: 'Chocolate', backgroundColor: "#f5efe8", borderColor: "#d4bc9a", menuColor: "#ede0d0", menuActiveColor: "#dcc8a8", fontColor: "#3d2b1f", fontActiveColor: "#6b3a1a" },
 }
 
@@ -267,7 +277,27 @@ export const THEMES: Record<string, { labelEn: string; backgroundColor: string; 
  *  返回 true 表示发生了修正（调用方据此决定是否需要落盘）。 */
 export function normalizeThemeName(ui: any): boolean {
     if (!ui || typeof ui !== 'object') return false
-    if (ui.theme === '自定义' || THEMES[ui.theme]) return false
+    // 旧版唯一自定义项：迁移成一个可命名、可删除的自建主题（颜色沿用当前值）
+    if (ui.theme === '自定义') {
+        const list: CustomTheme[] = Array.isArray(ui.customThemes) ? ui.customThemes : []
+        let name = '我的主题'
+        let n = 2
+        while (list.some((t) => t?.name === name) || THEMES[name]) name = `我的主题 ${n++}`
+        list.push({
+            name,
+            backgroundColor: ui.backgroundColor || '#ffffff',
+            borderColor: ui.borderColor || '#d0d7de',
+            menuColor: ui.menuColor || '#f6f8fa',
+            menuActiveColor: ui.menuActiveColor || '#9ec4f0',
+            fontColor: ui.fontColor || '#1f2328',
+            fontActiveColor: ui.fontActiveColor || '#03254d',
+        })
+        ui.customThemes = list
+        ui.theme = name
+        return true
+    }
+    if (THEMES[ui.theme]) return false
+    if (Array.isArray(ui.customThemes) && ui.customThemes.some((t: any) => t && t.name === ui.theme)) return false
     ui.theme = '浅蓝'
     return true
 }
@@ -375,7 +405,8 @@ export const usestore = defineStore('data', {
         hiddenNavs: [] as string[],
         /**
          * 功能开关（非主面板入口）：被隐藏的右上/左上/底部导航入口 key。
-         * 目前只有 'agent'（浏览器 Agent 的独立窗口入口）；设置页「功能 → 导航与模块」控制。
+         * 目前有 'agent'（浏览器 Agent 的独立窗口入口）与 'attention'（待我处理）；
+         * 设置页「通用 → 基础 → 导航与模块」控制。
          */
         hiddenExtras: [] as string[],
         /**
@@ -435,6 +466,8 @@ export const usestore = defineStore('data', {
             menuActiveColor: "#9ec4f0",
             fontColor: "#1f2328",
             fontActiveColor: "#03254d",
+            /** 用户自建主题（可命名、可删除；内置主题仍在 THEMES 表里） */
+            customThemes: [] as CustomTheme[],
             windowZoom: 100, // 窗口缩放比例（百分比，50~200；由主进程 window-zoom.json 持久化）
             navLayout: 'top' as 'top' | 'left' | 'bottom', // 导航栏布局：top=顶部（默认）/ left=左侧 / bottom=下方
             /**
@@ -476,9 +509,6 @@ export const usestore = defineStore('data', {
             //  - justify（默认）：用 CSS text-align: justify，浏览器原生两端对齐，不跑排版引擎
             //  - kp：开启 Knuth–Plass（K-P）最优断行 + 逐行拉伸的精细排版（长文首次渲染略慢）
             textAlignMode: 'justify' as 'justify' | 'kp',
-            // 空导航提醒：全部功能关闭且没有插件面板时，主界面没有可用页面 →
-            // 显示提醒（含一键恢复 / 前往设置）；可在「设置 → 通用 → 基础」里关掉
-            emptyNavNotice: true as boolean,
             // 工作步骤展示档位（对齐 DSH 的 ui-chat.transcriptView）：
             // compact 简洁 / standard 标准 / detailed 详细 / verbose 完全展开
             stepDetailMode: 'standard' as 'compact' | 'standard' | 'detailed' | 'verbose',
@@ -1720,7 +1750,7 @@ export const usestore = defineStore('data', {
             }
             // 设置独立窗口写盘：额外广播一次完整配置变更，主窗口据此从 localStorage 重新同步
             // （AI 模型来源/工具开关/MCP/Agent 预设等不在 UI 广播范围内，主窗口内存不会自动更新）
-            broadcastSettingsChanged(uiJson, locale)
+            broadcastSettingsChanged(uiJson, locale, JSON.stringify(this.AIconfig))
             // 注意：图片附件不保存到localStorage，因为可能很大
             // 顺手把内联的模型 API Key 搬进主进程凭据库（否则明文会留在 localStorage 里被插件读走）；
             // 无需等待：本函数保持同步，搬完由 secureLlmCredentials 自己再落盘一次。
@@ -2145,9 +2175,7 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.wordExportTemplate !== 'string' || ['gongwen', 'cn', 'en', 'custom'].indexOf(this.UI.wordExportTemplate) === -1) this.UI.wordExportTemplate = 'gongwen'
                 // 旧存档可能缺少 textAlignMode，兜底为浏览器原生两端对齐
                 if (this.UI.textAlignMode !== 'justify' && this.UI.textAlignMode !== 'kp') this.UI.textAlignMode = 'justify'
-                // 旧存档可能缺少 emptyNavNotice（空导航提醒），兜底为开启
-                if (typeof this.UI.emptyNavNotice !== 'boolean') this.UI.emptyNavNotice = true
-                // 旧存档缺少工作步骤展示设置：档位兜底 standard、收起时机兜底 completion
+                // 旧存档可能缺少工作步骤展示设置：档位兜底 standard、收起时机兜底 completion
                 if (!['compact', 'standard', 'detailed', 'verbose'].includes(String(this.UI.stepDetailMode))) {
                     this.UI.stepDetailMode = 'standard'
                 }
@@ -2978,7 +3006,7 @@ export const usestore = defineStore('data', {
 
         /**
          * 判断「非主面板入口」是否可见（默认全部可见）。
-         * 目前只有 'agent'：浏览器 Agent 的独立窗口入口（左上/右上/底部导航里的地球图标）。
+         * 目前有 'attention'（待我处理）与 'agent'（浏览器 Agent 的独立窗口入口）。
          */
         isExtraVisible(key: string) {
             if (this.lanGuestVisibleNavs && this.lanGuestVisibleNavs.indexOf(key) === -1) return false
@@ -3127,10 +3155,16 @@ export const usestore = defineStore('data', {
         },
         
         changeTheme() {
-            // 归一化主题管理：18 个预设主题统一从 THEMES 映射表取值，避免各分支字段不统一（自定义主题不在表中，保持当前 UI 不变）
-            const t = THEMES[this.UI.theme]
+            // 内置主题取自 THEMES；自建主题取自 UI.customThemes；旧版 '自定义' 保持当前颜色。
+            const builtin = THEMES[this.UI.theme]
+            const custom = !builtin
+                ? (this.UI.customThemes || []).find((t: CustomTheme) => t.name === this.UI.theme)
+                : null
+            const t: any = builtin || custom
             if (t) {
+                // 用 spread 保留全部 UI 字段（含 customThemes / 后续新增字段），只覆盖颜色与主题名
                 this.UI = {
+                    ...this.UI,
                     theme: this.UI.theme,
                     backgroundColor: t.backgroundColor,
                     borderColor: t.borderColor,
@@ -3138,43 +3172,72 @@ export const usestore = defineStore('data', {
                     menuActiveColor: t.menuActiveColor,
                     fontColor: t.fontColor,
                     fontActiveColor: t.fontActiveColor,
-                    windowZoom: this.UI.windowZoom,
-                    navLayout: this.UI.navLayout,
-                    // ⚠️ changeTheme 会重建整个 UI 对象：新增的 UI 字段必须在这里带上，否则切主题就丢设置
-                    windowMode: this.UI.windowMode,
-                    closeToTray: this.UI.closeToTray,
-                    browserHomeUrl: this.UI.browserHomeUrl,
-                    browserSaveDir: this.UI.browserSaveDir,
-                    browserNewTab: this.UI.browserNewTab,
-                    browserSearchEngine: this.UI.browserSearchEngine,
-                    browserSearchTemplate: this.UI.browserSearchTemplate,
-                    browserGridCols: this.UI.browserGridCols,
-                    browserAllowEval: this.UI.browserAllowEval,
-                    browserPageBudget: this.UI.browserPageBudget,
-                    browserSnapshotInteractiveOnly: this.UI.browserSnapshotInteractiveOnly,
-                    browserDownloadDir: this.UI.browserDownloadDir,
-                    browserBlockDangerousDownloads: this.UI.browserBlockDangerousDownloads,
-                    browserMaxDownloadMB: this.UI.browserMaxDownloadMB,
-                    browserShowActionCursor: this.UI.browserShowActionCursor,
-                    browserClipDir: this.UI.browserClipDir,
-                    browserClipFrontMatter: this.UI.browserClipFrontMatter,
-                    browserShowBookmarks: this.UI.browserShowBookmarks !== false,
-                    browserShowDownloads: this.UI.browserShowDownloads !== false,
-                    browserShowHistory: this.UI.browserShowHistory !== false,
-                    wordExportStylePath: this.UI.wordExportStylePath,
-                    wordExportTemplate: this.UI.wordExportTemplate || 'gongwen',
-                    textAlignMode: this.UI.textAlignMode === 'kp' ? 'kp' : 'justify',
-                    emptyNavNotice: this.UI.emptyNavNotice !== false,
-                    stepDetailMode: ['compact', 'standard', 'detailed', 'verbose'].includes(String(this.UI.stepDetailMode))
-                        ? this.UI.stepDetailMode : 'standard',
-                    stepCollapseTiming: this.UI.stepCollapseTiming === 'next-input' ? 'next-input' : 'completion',
-                    showArchivedChats: this.UI.showArchivedChats === true,
                 }
             }
             this.setTheme()
             // 立刻落盘 + 广播给其它窗口（含主窗口）：
             // 只调 setTheme 只发 notify-theme-change，主窗口不监听该通道（它走 settings-config-changed），
             // 于是主窗口要等设置窗口关闭（onBeforeUnmount 的 saveConfig）才跟着变主题。
+            this.saveConfig()
+        },
+
+        /** 新增一个自建主题（可带自定义配色；缺省复制当前配色），并立即切换过去 */
+        addCustomTheme(name: string, colors?: Partial<CustomTheme>) {
+            const clean = String(name || '').trim()
+            if (!clean) return false
+            if (THEMES[clean] || clean === '自定义') return false
+            const list: CustomTheme[] = Array.isArray(this.UI.customThemes) ? this.UI.customThemes : []
+            if (list.some((t) => t.name === clean)) return false
+            const theme: CustomTheme = {
+                name: clean,
+                backgroundColor: colors?.backgroundColor || this.UI.backgroundColor,
+                borderColor: colors?.borderColor || this.UI.borderColor,
+                menuColor: colors?.menuColor || this.UI.menuColor,
+                menuActiveColor: colors?.menuActiveColor || this.UI.menuActiveColor,
+                fontColor: colors?.fontColor || this.UI.fontColor,
+                fontActiveColor: colors?.fontActiveColor || this.UI.fontActiveColor,
+            }
+            this.UI.customThemes = [...list, theme]
+            this.UI.theme = clean
+            this.changeTheme()
+            return true
+        },
+
+        /** 删除自建主题；如果删的是当前主题则回到默认浅蓝 */
+        removeCustomTheme(name: string) {
+            const list = Array.isArray(this.UI.customThemes) ? this.UI.customThemes : []
+            this.UI.customThemes = list.filter((t) => t.name !== name)
+            if (this.UI.theme === name) {
+                this.UI.theme = '浅蓝'
+                this.changeTheme()
+            } else {
+                this.saveConfig()
+            }
+        },
+
+        /** 恢复默认主题：删除全部自建主题并切回浅蓝（内置主题不受影响） */
+        resetCustomThemes() {
+            this.UI.customThemes = []
+            this.UI.theme = '浅蓝'
+            this.changeTheme()
+        },
+
+        /** 把当前颜色写回正在编辑的自建主题（颜色卡改色时调用） */
+        syncActiveCustomTheme() {
+            const name = String(this.UI.theme || '')
+            const list = Array.isArray(this.UI.customThemes) ? this.UI.customThemes : []
+            const idx = list.findIndex((t) => t.name === name)
+            if (idx < 0) return
+            list[idx] = {
+                ...list[idx],
+                backgroundColor: this.UI.backgroundColor,
+                borderColor: this.UI.borderColor,
+                menuColor: this.UI.menuColor,
+                menuActiveColor: this.UI.menuActiveColor,
+                fontColor: this.UI.fontColor,
+                fontActiveColor: this.UI.fontActiveColor,
+            }
+            this.UI.customThemes = [...list]
             this.saveConfig()
         },
         
@@ -3271,7 +3334,7 @@ export const usestore = defineStore('data', {
          * - 其余运行态配置（AI 模型来源 / 工具开关 / MCP / Agent 预设等）从 localStorage 重新读取。
          * 标签栏（data/index）与主面板导航（mainPanel）属主窗口自身运行态，设置窗口不维护，重载后原样保留。
          */
-        syncConfigFromPeers(ui?: any, locale?: string) {
+        syncConfigFromPeers(ui?: any, locale?: string, aiConfig?: any) {
             const tabs = this.data
             const tabIndex = this.index
             const panel = this.mainPanel // 主窗口当前面板：不能被配置重载带走（否则会跳回 localStorage 里的旧值）
@@ -3279,6 +3342,9 @@ export const usestore = defineStore('data', {
             try {
                 if (ui && typeof ui === 'object') this.UI = { ...this.UI, ...ui }
                 this.loadConfig()
+                // 设置窗口广播的 AI 配置是权威值：直接覆盖内存，避免主窗口之后用旧 AIconfig 回写 localStorage，
+                // 导致「设置里改了默认模型来源，重启又变回旧来源」。
+                if (aiConfig && typeof aiConfig === 'object') this.AIconfig = aiConfig
                 if (locale === 'zh' || locale === 'en') this.locales = locale
                 this.data = tabs
                 this.index = tabIndex

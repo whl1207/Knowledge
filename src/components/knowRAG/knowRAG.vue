@@ -22,6 +22,8 @@ import {
   parseQuestionAnswerPairs,
   answerText,
   computeBlockQuestionVectors,
+  choiceLabelsOf,
+  normalizeQuestionAnswerFields,
 } from '@/shared/kbQuestions'
 import type { KbQuestion, QuestionAnswerRef } from '@/shared/kbQuestions'
 
@@ -490,8 +492,8 @@ let model = ref({
     questionMergeEnabled: true,
     /**
      * 推理问题时一并生成**选择题选项**（每组 4 个 A–D + 正确答案标签）。
-     * 打开后问题生成改用选择题提示词，问题库记录 choiceMap，
-     * 学习模块据此走确定性判分而不是四档自评。见 docs/设计决策记录.md §五「学习模块 P1-3」。
+     * 打开后问题生成改用选择题提示词，问题库记录 choiceMap + answerChoices（正确标签），
+     * extraAnswer 仍是**文字答案**（正确选项正文）；学习模块据此走确定性判分。
      */
     questionChoiceOptions: true,
     mdsIterations: 50,
@@ -1142,6 +1144,8 @@ const pushQuestion = (q: Partial<KbQuestion> & { text: string }, prepend = false
     extraAnswer: q.extraAnswer,
     // 选择题选项也必须透传（同一类错误：字段复制式构造，漏了就静默丢）
     choiceMap: q.choiceMap,
+    // 正确选项标签单独存（extraAnswer 保持文字答案）
+    answerChoices: q.answerChoices,
   }
   if (prepend) questionBank.value.unshift(full)
   else questionBank.value.push(full)
@@ -1168,6 +1172,12 @@ const replaceBlockReasonedQuestions = (
     if (!t) return
     const ans = answers?.[k]
     const cm = choiceMaps?.[k]
+    // 选择题：把正确选项标签单独存起来；extraAnswer 始终写文字答案（选项正文），
+    // 这样问题库/本体/检索看到的是答案本身，而不是一个孤零零的“B”。
+    const labels = cm && ans ? choiceLabelsOf(ans, cm) : []
+    const textAnswer = labels.length && cm
+      ? labels.map(l => cm[l]).filter(Boolean).join('；')
+      : ans
     pushQuestion({
       text: t,
       qVector: vecs?.[k] || undefined,
@@ -1176,9 +1186,10 @@ const replaceBlockReasonedQuestions = (
       srcLabel: label,
       answerBlocks: [{ blockId, filePath, label }],
       // LLM 顺带生成的答案与问题分开存储（见 KbQuestion.extraAnswer）
-      extraAnswer: ans || undefined,
-      // 选择题选项：有它时 extraAnswer 存的是正确选项**标签**，学习模块据此确定性判分
+      extraAnswer: textAnswer || undefined,
+      // 选择题选项 + 正确标签：学习模块用答案标签判分，知识库展示答案文字
       choiceMap: cm && Object.keys(cm).length ? cm : undefined,
+      answerChoices: labels.length ? labels : undefined,
       origin: 'reasoned',
       status: 'kept',
       createdAt,
@@ -1190,7 +1201,7 @@ const replaceBlockReasonedQuestions = (
 
 /** 整体替换问题库（去重应用 / 导入 / 审核结果落地等） */
 const applyQuestionBank = (list: KbQuestion[]) => {
-  questionBank.value = list || []
+  questionBank.value = (list || []).map(q => normalizeQuestionAnswerFields(q))
   for (const q of questionBank.value) {
     const m = /(\d+)$/.exec(q.id || '')
     if (m) qSeq = Math.max(qSeq, Number(m[1]))
@@ -1284,17 +1295,29 @@ const embedMissingQuestionVectors = async (onMsg?: (msg: string) => void, gate?:
   const todo = questionBank.value.filter(q => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length))
   const BATCH = 16
   let done = 0
+  let embedded = 0
+  let lastError = ''
   for (let start = 0; start < todo.length; start += BATCH) {
     if (gate && !(await gate())) break
     const batch = todo.slice(start, start + BATCH)
     try {
       const embs = await kbEmbed(batch.map(q => q.text))
-      batch.forEach((q, k) => { const v = embs?.[k]; if (v) q.qVector = v })
-    } catch { /* 单批失败继续，其余批次与后续调用仍可补齐 */ }
+      batch.forEach((q, k) => { const v = embs?.[k]; if (v) { q.qVector = v; embedded++ } })
+    } catch (e: any) {
+      // 以前静默吞掉：所有批次失败时仍把 done 当成成功数、状态栏继续显示“已向量化”
+      lastError = String(e?.message || e || '')
+      console.warn('[knowRAG] 问题向量化失败:', e)
+      break
+    }
     done += batch.length
     onMsg?.(`向量化问题 ${done}/${todo.length}`)
   }
-  return done
+  if (lastError) {
+    onMsg?.(store.locales === 'zh'
+      ? `问题向量化失败：${lastError}（已成功 ${embedded}/${todo.length} 条）`
+      : `Question embedding failed: ${lastError} (${embedded}/${todo.length} done)`)
+  }
+  return embedded
 }
 
 /** 设置页「处理配置」修改嵌入模型：确认后用新模型清空并重新向量化切片与问题（维度不一致会破坏检索，故默认重算） */
@@ -1829,11 +1852,15 @@ async function getModel(){
                 store.saveConfig()
             }
         }
-    } catch (error) {
+    } catch (error: any) {
         console.error('Fetch error:', error);
-        kb_state.value = store.locales === 'zh'
-            ? `${kbAi.KB_PROVIDER_LABELS[spec.llmType]?.zh || spec.llmType} 未在运行或配置错误`
-            : `${spec.llmType} is not running or misconfigured`
+        const provider = kbAi.KB_PROVIDER_LABELS[spec.llmType]?.zh || spec.llmType
+        const msg = store.locales === 'zh'
+            ? `${provider} 未在运行或配置错误：${error?.message || error}`
+            : `${spec.llmType} is not running or misconfigured: ${error?.message || error}`
+        kb_state.value = msg
+        // 之前只写状态栏，用户容易错过；模型列表拉取失败直接给提示
+        ElMessage.error(msg)
     }
 }
 
@@ -3211,7 +3238,7 @@ const generateFileSummaries = async () => {
     }
 }
 
-const reasoning = async function(i: number) {
+const reasoning = async function(i: number): Promise<{ ok: boolean; error?: string }> {
     let qBuffer = ''
     // 「生成选择题选项」打开 → 换用选择题提示词；否则沿用可自定义的纯问答提示词。
     // 两份提示词是**整份替换**而不是追加：输出格式必须唯一，否则解析器分不清
@@ -3241,8 +3268,12 @@ const reasoning = async function(i: number) {
         }
         replaceBlockReasonedQuestions(blocks.value[i], texts, vecs, answers, choiceMaps)
         try { scheduleRefreshAtlas(120) } catch (e) {}
-    } catch (error) {
+        return { ok: true }
+    } catch (error: any) {
         console.error("处理失败:", error);
+        // 以前这里只打日志：整批全部失败时 extractQuestionsWithProgress 仍会显示「问题提取完成」，
+        // 用户看不到失败通知、也没有任何问题输出。返回失败让上层汇总状态并提示。
+        return { ok: false, error: String(error?.message || error || '未知错误') }
     }
 }
 
@@ -3251,6 +3282,9 @@ const extractQuestionsWithProgress = async function(startIndex: number = 0) {
     extractProgress.value.totalCount = totalBlocks
     extractProgress.value.isRunning = true
     extractProgress.value.isPaused = false
+    /** 失败切片下标（与首个错误一起汇总，避免“全部失败却显示完成”） */
+    const failedIndices: number[] = []
+    let firstError = ''
     
     for (let i = startIndex; i < totalBlocks; i++) {
         while (extractProgress.value.isPaused) {
@@ -3271,14 +3305,33 @@ const extractQuestionsWithProgress = async function(startIndex: number = 0) {
             `提取问题: ${i+1}/${totalBlocks} (${Math.round((i+1)/totalBlocks*100)}%)` :
             `Extracting: ${i+1}/${totalBlocks} (${Math.round((i+1)/totalBlocks*100)}%)`
         
-        await reasoning(i)
+        const result = await reasoning(i)
+        if (!result.ok) {
+            failedIndices.push(i)
+            if (!firstError) firstError = result.error || ''
+        }
+    }
+    
+    // 失败切片：不要清掉进度、也不要显示“完成”；把断点退回到第一个失败切片，方便点「继续」重试
+    if (failedIndices.length > 0) {
+        extractProgress.value.isRunning = false
+        extractProgress.value.isPaused = false
+        extractProgress.value.currentIndex = failedIndices[0]
+        saveExtractProgress()
+        const failedText = store.locales === 'zh'
+            ? `问题提取失败：${failedIndices.length}/${totalBlocks} 个切片没有产出（${firstError || '模型未返回内容'}）。已保留进度，可修复配置后点「继续」重试。`
+            : `Question extraction failed: ${failedIndices.length}/${totalBlocks} slices produced nothing (${firstError || 'empty model response'}). Progress is kept — fix the config and click Resume to retry.`
+        kb_state.value = failedText
+        ElMessage.error(failedText)
+        return
     }
     
     // 未开启「提取时立即向量化」→ 推理全部结束后统一补一次问题向量：
     // 同一嵌入模型只加载一次，避免 LM Studio 在对话/嵌入模型间反复换载（硬件不足时尤其明显）
     let filled = 0
+    let missing = 0
     if (!model.value.extractEmbedQuestions) {
-        const missing = questionBank.value.filter(q => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length)).length
+        missing = questionBank.value.filter(q => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length)).length
         if (missing > 0) {
             kb_state.value = store.locales === 'zh'
                 ? `提取完成：正在统一补齐 ${missing} 条问题向量（一次性完成，避免反复切换嵌入模型）...`
@@ -3301,10 +3354,29 @@ const extractQuestionsWithProgress = async function(startIndex: number = 0) {
         kb_state.value = store.locales === 'zh' ? '问题提取已停止' : 'Extraction stopped'
         return
     }
+    // 问题已提取，但向量化一条都没成功：不能显示“全部完成”，否则用户以为可以检索了
+    if (filled === 0 && questionBank.value.some(q => q.status !== 'merged' && q.text && !(q.qVector && q.qVector.length))) {
+        const msg = store.locales === 'zh'
+            ? '问题已提取，但向量化失败（嵌入模型 / 兜底嵌入来源不可用），检索暂时无法使用。请检查嵌入模型配置后重新向量化。'
+            : 'Questions were extracted, but embedding failed (embedding model / fallback source unavailable), so retrieval cannot work yet. Check the embedding configuration and re-embed.'
+        kb_state.value = msg
+        ElMessage.error(msg)
+        extractProgress.value.isRunning = false
+        extractProgress.value.isPaused = false
+        return
+    }
 
     extractProgress.value.isRunning = false
     extractProgress.value.isPaused = false
     clearExtractProgress()
+    if (missing > 0 && filled < missing) {
+        const msg = store.locales === 'zh'
+            ? `问题提取完成，但仍有 ${missing - filled} 条问题向量化失败（检查嵌入模型 / 兜底嵌入来源）`
+            : `Extraction complete, but ${missing - filled} questions still failed to embed (check the embedding model / fallback source)`
+        kb_state.value = msg
+        ElMessage.warning(msg)
+        return
+    }
     kb_state.value = store.locales === 'zh'
         ? `问题提取完成！${filled > 0 ? `已统一向量化 ${filled} 条问题` : ''}`
         : `Extraction complete!${filled > 0 ? ` Embedded ${filled} questions in one pass` : ''}`
@@ -4886,7 +4958,7 @@ const loadKnowledgeBases = async function(index?: number) {
             // 恢复问题库（若 .kb 保存了 questions；旧库无此字段则从切片 Q 向后兼容重建）
             // 方案 A：问题库只从 .kb 的 questions 字段恢复（旧库无该字段 → 为空，不再从切片重建）
             if (saveData.questions && Array.isArray(saveData.questions)) {
-                questionBank.value = saveData.questions as KbQuestion[]
+                questionBank.value = (saveData.questions as KbQuestion[]).map(q => normalizeQuestionAnswerFields(q))
                 for (const q of questionBank.value) {
                     const m = /(\d+)$/.exec(q.id || '')
                     if (m) qSeq = Math.max(qSeq, Number(m[1]))

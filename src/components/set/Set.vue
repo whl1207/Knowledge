@@ -33,7 +33,6 @@ import CredentialsPanel from '@/components/set/CredentialsPanel.vue'
 import CollabSettings from '@/components/set/CollabSettings.vue'
 import FileAssocSettings from '@/components/set/FileAssocSettings.vue'
 import DataSettings from '@/components/set/DataSettings.vue'
-import { FILE_VIEWS } from '@/lib/knowFile/fileViews'
 import { ElMessage, ElMessageBox } from 'element-plus'
 // 数据页（DataSettings.vue）与「常用操作」共用：占用统计 / 文件 IO / 聊天记录读取
 import { LOCAL_STORAGE_LIMIT, MD_FILTERS, countEntries, formatBytes, lsTotalBytes, readLsJson, readStoredChats, saveTextFile, stampText } from '@/lib/settingsData'
@@ -57,8 +56,10 @@ const showNavScreen = ref(true)
 useMobileBackScreen('settings:nav', isTallLayout, showNavScreen, BACK_ORDER.settingsNav)
 
 // standalone：本组件作为「设置」独立子窗口的根组件渲染（窗口无系统标题栏，顶栏即拖动区）
+// hideHeader：作为页面内浮层渲染时隐藏自带标题栏（单窗口模式复用主窗口上方导航栏，
+//   顶栏标题显示「设置」、再点一次导航栏设置按钮收起，见 App.vue）
 // initialNav：独立窗口首次打开时要定位的设置分类（主进程经 #/settings-window?nav=xxx 传入）
-const props = defineProps<{ standalone?: boolean; initialNav?: string }>()
+const props = defineProps<{ standalone?: boolean; hideHeader?: boolean; initialNav?: string }>()
 
 // 定义导航分类（支持一级分组 + 二级子项）
 interface NavItem {
@@ -348,28 +349,9 @@ const getTitle = (item:any) => {
   return store.locales === 'zh' ? item.title_zh : item.title_en
 }
 
-// 计算属性：获取视图按钮数据（由 store.viewList 派生，顺序/命名随 store 同步；
-// id 恒为运行时视图标识，供 store.isView / store.selectView 使用）
-// store.viewList 只有主窗口右侧会渲染的视图（6 个全局视图 + 浏览）；「浏览」的名称与图标来自 fileViews.ts
-const VIEW_ICONS: Record<string, string> = {
-  ...Object.fromEntries(FILE_VIEWS.map((v) => [v.name, v.icon])),
-  '文件': 'fa fa-folder', '表格': 'fa fa-table', '图谱': 'fa fa-xing',
-  '看板': 'fa fa-list-ul', '地图': 'fa fa-location-arrow', '日历': 'fa fa-calendar-o',
-}
-const VIEW_TITLE_EN: Record<string, string> = {
-  ...Object.fromEntries(FILE_VIEWS.map((v) => [v.name, v.labelEn])),
-  '文件': 'Files', '表格': 'Table', '图谱': 'Graph',
-  '看板': 'Kanban', '地图': 'Map', '日历': 'Year Calendar',
-}
-const viewButtons = computed(() => store.viewList.map((v: string) => ({
-  id: v,
-  icon: VIEW_ICONS[v] || 'fa fa-file-o',
-  title_zh: v,
-  title_en: VIEW_TITLE_EN[v] || v,
-})))
-
 // 功能开关：控制 App.vue 导航栏按钮的显示/隐藏
-// 主面板（与 store 的 MAIN_PANEL_KEYS 对齐）走 hiddenNav；非主面板但占用导航栏的入口（浏览器 Agent）走 hiddenExtras
+// 主面板（与 store 的 MAIN_PANEL_KEYS 对齐）走 hiddenNav；非主面板但占用导航栏的入口（浏览器 Agent / 待我处理）走 hiddenExtras
+const EXTRA_NAV_KEYS = ['agent', 'attention']
 const navSwitches = computed(() => {
   const zh = store.locales === 'zh'
   const panels: { key: string; icon: string; label: string }[] = [
@@ -377,9 +359,10 @@ const navSwitches = computed(() => {
     { key: '知识管理', icon: 'fa fa-book', label: zh ? '知识管理' : 'Knowledge Management' },
     { key: '知识处理', icon: 'fa fa-layer-group', label: zh ? '知识处理' : 'Knowledge Processing' },
     { key: '学习', icon: 'fa fa-graduation-cap', label: zh ? '学习' : 'Learning' },
+    { key: 'attention', icon: 'fa fa-inbox', label: zh ? '待我处理' : 'Needs me' },
     { key: 'agent', icon: 'fa fa-globe', label: zh ? '浏览器 Agent' : 'Browser Agent' }
   ]
-  return panels.map(p => (p.key === 'agent'
+  return panels.map(p => (EXTRA_NAV_KEYS.indexOf(p.key) !== -1
     ? { ...p, on: store.isExtraVisible(p.key), toggle: () => store.toggleExtra(p.key) }
     : { ...p, on: store.isNavVisible(p.key), toggle: () => store.toggleNav(p.key) }))
 })
@@ -389,13 +372,12 @@ const anyVisiblePanel = () => panelKeys().some(k => store.isNavVisible(k))
 
 /**
  * 功能开关点击：先切换，再判断「一个可用页面都不剩」——全部内置模块被关闭且没有插件面板时，
- * 主界面会进入空导航状态（App.vue 显示空导航提醒，可用 store.UI.emptyNavNotice 关掉），
+ * 主界面会进入空导航状态（App.vue 显示空导航提醒），
  * 设置页这里立刻给出一次同样的提醒，避免用户在独立设置窗口里看不出后果。
  */
 const toggleNavSwitch = (sw: { key: string; label: string; toggle: () => void }) => {
   sw.toggle()
   if (anyVisiblePanel()) return
-  if (store.UI.emptyNavNotice === false) return
   ElMessage.warning({
     message: store.locales === 'zh'
       ? '所有主界面功能都已关闭，且没有启用的插件面板：主界面已没有可用页面。请重新开启一个模块，或在「插件 → 管理」中启用插件。'
@@ -417,12 +399,90 @@ const customColors = computed<{ key: UIColorKey; label: string }[]>(() => [
   { key: 'borderColor', label: store.locales === 'zh' ? '边框颜色' : 'Border Color' }
 ])
 
-// 主题下拉选项：由 THEMES 映射表生成（追加「自定义」项，新增主题时下拉自动同步）
-const themeOptions = computed(() => [...Object.keys(THEMES), '自定义'])
-// 主题显示名（中文直接用主题名；英文用 THEMES 内置 labelEn，「自定义」为补充项）
+// 主题选项：内置主题 + 用户自建主题（不再使用单一「自定义」下拉）
+const themeOptions = computed(() => [
+  ...Object.keys(THEMES),
+  ...(Array.isArray(store.UI.customThemes) ? store.UI.customThemes.map((t: any) => String(t.name || '')) : []),
+])
+/** 该主题名是否用户自建 */
+const isCustomThemeName = (t: string): boolean =>
+  Array.isArray(store.UI.customThemes) && store.UI.customThemes.some((x: any) => x?.name === t)
+// 主题显示名（中文直接用主题名；英文用 THEMES 内置 labelEn，自建主题用用户命名）
 const themeLabel = (t: string) => {
   if (store.locales === 'zh') return t
-  return THEMES[t]?.labelEn || (t === '自定义' ? 'Custom' : t)
+  return THEMES[t]?.labelEn || t
+}
+/** 主题卡片的色块预览（自建主题 / 旧「自定义」用当前颜色） */
+const themeSwatch = (t: string): string => {
+  const custom = Array.isArray(store.UI.customThemes)
+    ? store.UI.customThemes.find((x: any) => x?.name === t)
+    : null
+  const th: any = THEMES[t] || custom
+  if (!th) {
+    return `linear-gradient(135deg, ${store.UI.backgroundColor} 0 45%, ${store.UI.menuColor} 45% 72%, ${store.UI.fontActiveColor} 72%)`
+  }
+  return `linear-gradient(135deg, ${th.backgroundColor} 0 45%, ${th.menuColor} 45% 72%, ${th.fontActiveColor} 72%)`
+}
+const pickTheme = (t: string) => {
+  if (store.UI.theme === t) return
+  store.UI.theme = t
+  store.changeTheme()
+}
+/** 添加主题弹窗：名称 + 6 个颜色 + 实时预览 */
+const themeDraftVisible = ref(false)
+const themeDraftName = ref('')
+const themeDraft = ref<Record<string, string>>({})
+const openAddTheme = () => {
+  const zh = store.locales === 'zh'
+  themeDraftName.value = zh ? `我的主题 ${(store.UI.customThemes?.length || 0) + 1}` : `My Theme ${(store.UI.customThemes?.length || 0) + 1}`
+  themeDraft.value = {
+    backgroundColor: store.UI.backgroundColor,
+    menuColor: store.UI.menuColor,
+    menuActiveColor: store.UI.menuActiveColor,
+    fontColor: store.UI.fontColor,
+    fontActiveColor: store.UI.fontActiveColor,
+    borderColor: store.UI.borderColor,
+  }
+  themeDraftVisible.value = true
+}
+const closeAddTheme = () => { themeDraftVisible.value = false }
+const confirmAddTheme = () => {
+  const zh = store.locales === 'zh'
+  const name = themeDraftName.value.trim()
+  if (!name) { ElMessage.warning(zh ? '请输入主题名' : 'Please enter a theme name'); return }
+  if (THEMES[name] || name === '自定义' || isCustomThemeName(name)) {
+    ElMessage.warning(zh ? '主题名已存在' : 'Theme name already exists')
+    return
+  }
+  if (!store.addCustomTheme(name, themeDraft.value)) {
+    ElMessage.warning(zh ? '主题名已存在' : 'Theme name already exists')
+    return
+  }
+  themeDraftVisible.value = false
+}
+/** 删除自建主题（当前主题会被删除时切回默认浅蓝） */
+const removeTheme = async (name: string) => {
+  const zh = store.locales === 'zh'
+  try {
+    await ElMessageBox.confirm(
+      zh ? `删除主题「${name}」？` : `Delete theme “${name}”?`,
+      zh ? '删除主题' : 'Delete Theme',
+      { confirmButtonText: zh ? '删除' : 'Delete', cancelButtonText: zh ? '取消' : 'Cancel', type: 'warning' },
+    )
+    store.removeCustomTheme(name)
+  } catch { /* 取消 */ }
+}
+/** 恢复默认主题：删除全部自建主题并切回浅蓝 */
+const resetThemes = async () => {
+  const zh = store.locales === 'zh'
+  try {
+    await ElMessageBox.confirm(
+      zh ? '恢复默认主题？将删除全部自建主题并切回「浅蓝」，内置主题不受影响。' : 'Restore default themes? All custom themes will be deleted and the theme resets to Light Blue; built-in themes are untouched.',
+      zh ? '恢复默认' : 'Restore Defaults',
+      { confirmButtonText: zh ? '恢复' : 'Restore', cancelButtonText: zh ? '取消' : 'Cancel', type: 'warning' },
+    )
+    store.resetCustomThemes()
+  } catch { /* 取消 */ }
 }
 
 // 监听模型类型变化，重置连接状态
@@ -1069,9 +1129,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="settings-wrap" :class="{ standalone, tall: isTallLayout }">
-    <!-- 顶部标题栏：标题 + 版本 + 关闭/窗口按钮（独立窗口中整条即为窗口拖动区） -->
-    <div class="settings-header" :class="{ 'settings-header-drag': standalone }">
+  <div class="settings-wrap" :class="{ standalone, tall: isTallLayout, 'header-hidden': hideHeader }">
+    <!-- 顶部标题栏：标题 + 版本 + 关闭/窗口按钮（独立窗口中整条即为窗口拖动区）
+         单窗口模式下由主窗口上方导航栏承担（hideHeader），不再重复显示一条「设置」标题栏 -->
+    <div v-if="!hideHeader" class="settings-header" :class="{ 'settings-header-drag': standalone }">
       <!-- 细长窗口：内容屏左上角的返回（回到设置分类列表） -->
       <div v-if="isTallLayout && !showNavScreen" class="settings-back" @click="showNavScreen = true"
         :title="store.locales === 'zh' ? '返回设置分类' : 'Back to settings list'">
@@ -1282,12 +1343,6 @@ onBeforeUnmount(() => {
               <option value="en">{{ store.locales=='zh'?'英文' : 'English' }}</option>
             </select>
           </div>
-          <!-- 自定义软件标题：定义后顶部标题固定不变，不再随当前面板变化 -->
-          <div class="form-group">
-            <label>{{ store.locales=='zh'?'软件标题' : 'Custom Title' }}</label>
-            <input v-model="store.customTitle" @change="store.saveConfig()"
-                   :placeholder="store.locales=='zh' ? '留空则显示当前面板名称' : 'Leave empty to show current panel name'"/>
-          </div>
           <div class="form-group">
             <label>{{ store.locales=='zh'?'导航栏布局' : 'Navbar Layout' }}</label>
             <select v-model="store.UI.navLayout" class="layout-select" @change="store.saveConfig()">
@@ -1295,9 +1350,6 @@ onBeforeUnmount(() => {
               <option value="left">{{ store.locales=='zh'?'左侧' : 'Left' }}</option>
               <option value="bottom">{{ store.locales=='zh'?'下方' : 'Bottom' }}</option>
             </select>
-            <div class="button fullscreen-btn" @click="toggleFullscreen" :title="store.locales=='zh'?'切换窗口全屏' : 'Toggle window fullscreen'">
-              <i class="fa" :class="isFullscreen ? 'fa-compress' : 'fa-expand'"></i>
-            </div>
           </div>
           <!-- 窗口交互模式：统一决定文件 / 设置 / 插件面板的打开落点（单页面环境推荐单窗口） -->
           <div class="form-group">
@@ -1312,12 +1364,34 @@ onBeforeUnmount(() => {
           </div>
           <div class="form-group">
             <label>{{ store.locales=='zh'?'主题' : 'Theme' }}</label>
-            <!-- 主题选项由 THEMES 映射表生成（追加「自定义」），新增主题时下拉自动同步 -->
-            <select v-model="store.UI.theme" @change="store.changeTheme()">
-              <option v-for="t in themeOptions" :key="t" :value="t">
-                {{ themeLabel(t) }}
-              </option>
-            </select>
+            <!-- 主题改成等宽 grid 卡片按钮；不再用 select -->
+            <div class="theme-grid">
+              <button
+                v-for="t in themeOptions"
+                :key="t"
+                class="theme-option"
+                :class="{ active: store.UI.theme === t }"
+                :style="{ '--theme-swatch': themeSwatch(t) }"
+                @click="pickTheme(t)"
+              >
+                <span class="theme-swatch"></span>
+                <span class="theme-option-label">{{ themeLabel(t) }}</span>
+                <i
+                  v-if="isCustomThemeName(t)"
+                  class="fa fa-times theme-option-remove"
+                  :title="store.locales === 'zh' ? '删除该主题' : 'Delete this theme'"
+                  @click.stop="removeTheme(t)"
+                ></i>
+              </button>
+              <button class="theme-option theme-option-add" @click="openAddTheme">
+                <i class="fa fa-plus"></i>
+                <span>{{ store.locales === 'zh' ? '添加主题' : 'Add Theme' }}</span>
+              </button>
+              <button class="theme-option theme-option-reset" @click="resetThemes">
+                <i class="fa fa-undo"></i>
+                <span>{{ store.locales === 'zh' ? '恢复默认' : 'Restore Defaults' }}</span>
+              </button>
+            </div>
           </div>
           <!-- 文字对齐模式：仅作用于浏览视图（md_read）与可视编辑的渲染态（BlockEditor） -->
           <div class="form-group">
@@ -1330,31 +1404,43 @@ onBeforeUnmount(() => {
               <option value="kp">{{ store.locales=='zh'?'K-P 最优断行' : 'Knuth\u2013Plass optimal' }}</option>
             </select>
           </div>
-          <!-- 自定义主题色卡（仅「自定义」主题显示；已从系统页移至界面页） -->
-          <div v-if="store.UI.theme=='自定义'" class="color-settings">
-            <div class="color-grid">
-              <div
-                v-for="color in customColors"
-                :key="color.key"
-                class="color-card"
-                :title="store.locales=='zh' ? '点击修改' + color.label : 'Click to change ' + color.label"
-              >
-                <div class="color-card-swatch" :style="{ backgroundColor: store.UI[color.key] }">
-                  <input
-                    type="color"
-                    v-model="store.UI[color.key]"
-                    @change="store.changeTheme"
-                    :aria-label="color.label"
-                  />
-                  <i class="fa fa-pencil"></i>
-                </div>
-                <div class="color-card-info">
-                  <span class="color-card-name">{{ color.label }}</span>
-                  <span class="color-card-value">{{ store.UI[color.key] }}</span>
-                </div>
-              </div>
-            </div>
+          <!-- 关闭按钮行为：直接退出 / 折叠到托管区（托盘）
+               —— 折叠后窗口只是隐藏，后台任务继续运行；鼠标悬停托盘图标可看任务数与进度 -->
+          <div class="form-group">
+            <label>{{ store.locales=='zh' ? '关闭按钮行为' : 'Close Button' }}</label>
+            <select v-model="store.UI.closeToTray" class="layout-select" @change="applyCloseBehavior"
+                    :title="store.locales=='zh'
+                      ? '选择「折叠到托管区」后，点关闭只隐藏窗口、后台任务继续运行；鼠标悬停在托管区图标上可查看运行中的任务数与进度（含每个实例的已完成/总数与预计剩余时间），右键可退出。'
+                      : 'With “Collapse to tray”, closing only hides the window while background tasks keep running. Hover the tray icon to see running tasks and progress; right-click to quit.'">
+              <option :value="false">{{ store.locales=='zh' ? '直接退出软件' : 'Quit directly' }}</option>
+              <option :value="true">{{ store.locales=='zh' ? '折叠到托管区（后台继续运行）' : 'Collapse to tray (keep running)' }}</option>
+            </select>
           </div>
+          <!-- 工作步骤展示（对齐 DSH 的 ui-chat.transcriptView + collapseTiming）：
+               并入「软件界面」块——它只是过程展示的细节程度，不单独占一张卡 -->
+          <div class="form-group">
+            <label>{{ store.locales=='zh' ? '工作步骤展示' : 'Work Step Detail' }}</label>
+            <select v-model="store.UI.stepDetailMode" class="layout-select" @change="store.saveConfig()"
+                    :title="store.locales=='zh'
+                      ? '对话里工具调用（读文件、执行命令、改文件等）显示多少细节。只影响过程展示，不影响最终回答。'
+                      : 'How much detail to show for tool calls (reading files, running commands, edits). It only affects the process display, never the final answer.'">
+              <option value="compact">{{ store.locales=='zh' ? '简洁：只显示工具名与状态' : 'Compact: tool name and status only' }}</option>
+              <option value="standard">{{ store.locales=='zh' ? '标准：折叠为一行摘要，点开看详情' : 'Standard: one-line summary, expand for details' }}</option>
+              <option value="detailed">{{ store.locales=='zh' ? '详细：默认展开参数与结果' : 'Detailed: show args and results by default' }}</option>
+              <option value="verbose">{{ store.locales=='zh' ? '完全展开：全部展开，绝不自动收起' : 'Verbose: everything expanded, never folds' }}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>{{ store.locales=='zh' ? '工作步骤收起' : 'Work Step Collapse' }}</label>
+            <select v-model="store.UI.stepCollapseTiming" class="layout-select" @change="store.saveConfig()"
+                    :title="store.locales=='zh'
+                      ? '一轮回答结束后，过程展示什么时候收起：立即收起，或等你下次发消息时再收起。'
+                      : 'When the step display folds after a turn: right away, or when you send the next message.'">
+              <option value="completion">{{ store.locales=='zh' ? '回答结束后立即收起' : 'Fold when the answer finishes' }}</option>
+              <option value="next-input">{{ store.locales=='zh' ? '下次有新消息时再收起' : 'Fold on the next message' }}</option>
+            </select>
+          </div>
+          <!-- 窗口缩放（倒数第三） -->
           <div class="form-group">
             <label>{{ store.locales=='zh'?'窗口缩放' : 'Zoom' }}</label>
             <div class="zoom-control">
@@ -1375,17 +1461,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
-          <!-- 关闭按钮行为：直接退出 / 折叠到托管区（托盘）
-               —— 折叠后窗口只是隐藏，后台任务继续运行；鼠标悬停托盘图标可看任务数与进度 -->
+          <!-- 自定义软件标题（倒数第二）：定义后顶部标题固定不变，不再随当前面板变化 -->
           <div class="form-group">
-            <label>{{ store.locales=='zh' ? '关闭按钮行为' : 'Close Button' }}</label>
-            <select v-model="store.UI.closeToTray" class="layout-select" @change="applyCloseBehavior"
-                    :title="store.locales=='zh'
-                      ? '选择「折叠到托管区」后，点关闭只隐藏窗口、后台任务继续运行；鼠标悬停在托管区图标上可查看运行中的任务数与进度（含每个实例的已完成/总数与预计剩余时间），右键可退出。'
-                      : 'With “Collapse to tray”, closing only hides the window while background tasks keep running. Hover the tray icon to see running tasks and progress; right-click to quit.'">
-              <option :value="false">{{ store.locales=='zh' ? '直接退出软件' : 'Quit directly' }}</option>
-              <option :value="true">{{ store.locales=='zh' ? '折叠到托管区（后台继续运行）' : 'Collapse to tray (keep running)' }}</option>
-            </select>
+            <label>{{ store.locales=='zh'?'软件标题' : 'Custom Title' }}</label>
+            <input v-model="store.customTitle" @change="store.saveConfig()"
+                   :placeholder="store.locales=='zh' ? '留空则显示当前面板名称' : 'Leave empty to show current panel name'"/>
           </div>
           <!-- 配置随软件分发（界面块最下方）：开启后界面配置保存到软件根目录 interface-config.json，便于整机分发 -->
           <div class="form-group">
@@ -1406,6 +1486,10 @@ onBeforeUnmount(() => {
                 <div class="button" @click="openConsole()" :title="store.locales=='zh'?'开发者工具' : 'Developer Tools'">
                   <i class="fa fa-terminal"></i> {{ store.locales=='zh'?'控制台' : 'Console' }}
                 </div>
+                <div class="button" @click="toggleFullscreen" :title="store.locales=='zh'?'切换窗口全屏' : 'Toggle window fullscreen'">
+                  <i class="fa" :class="isFullscreen ? 'fa-compress' : 'fa-expand'"></i>
+                  {{ isFullscreen ? (store.locales=='zh'?'退出全屏' : 'Exit Fullscreen') : (store.locales=='zh'?'全屏' : 'Fullscreen') }}
+                </div>
                 <div class="button" @click="handleInitConfig" :title="store.locales=='zh'?'初始化（将清除全部配置并重启）\n当前本机数据：' + localDataSummary() + '（共 ' + localStorageUsageText + '）' : 'initialization (clears all config and restarts)\nLocal data: ' + localDataSummary() + ' (' + localStorageUsageText + ')'">
                   <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'初始化' : 'initialization' }}
                 </div>
@@ -1423,48 +1507,14 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- 工作步骤展示（对齐 DSH 的 ui-chat.transcriptView + collapseTiming） -->
-        <div class="settings-group">
-          <h3>{{ store.locales=='zh' ? '工作步骤展示' : 'Work Step Display' }}</h3>
-          <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-            ? '对话里工具调用（读文件、执行命令、改文件等）显示多少细节。它只影响过程展示，不影响最终回答。'
-            : 'How much detail to show for tool calls (reading files, running commands, edits). It only affects the process display, never the final answer.' }}</div>
-          <div class="form-group">
-            <label>{{ store.locales=='zh' ? '展示档位' : 'Detail level' }}</label>
-            <select v-model="store.UI.stepDetailMode" class="layout-select" @change="store.saveConfig()">
-              <option value="compact">{{ store.locales=='zh' ? '简洁：只显示工具名与状态' : 'Compact: tool name and status only' }}</option>
-              <option value="standard">{{ store.locales=='zh' ? '标准：折叠为一行摘要，点开看详情' : 'Standard: one-line summary, expand for details' }}</option>
-              <option value="detailed">{{ store.locales=='zh' ? '详细：默认展开参数与结果' : 'Detailed: show args and results by default' }}</option>
-              <option value="verbose">{{ store.locales=='zh' ? '完全展开：全部展开，绝不自动收起' : 'Verbose: everything expanded, never folds' }}</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>{{ store.locales=='zh' ? '收起时机' : 'Collapse timing' }}</label>
-            <select v-model="store.UI.stepCollapseTiming" class="layout-select" @change="store.saveConfig()">
-              <option value="completion">{{ store.locales=='zh' ? '回答结束后立即收起' : 'Fold when the answer finishes' }}</option>
-              <option value="next-input">{{ store.locales=='zh' ? '下次有新消息时再收起' : 'Fold on the next message' }}</option>
-            </select>
-          </div>
-        </div>
-
-        <!-- 导航与模块（原「通用 → 功能」页，2026-10 合并进「基础」）：模块开关 + 模块子开关（知识管理视图与布局） -->
+        <!-- 导航与模块（原「通用 → 功能」页，2026-10 合并进「基础」）：导航入口开关 -->
         <div class="settings-group">
           <h3>{{ store.locales=='zh' ? '导航与模块' : 'Navigation & Modules' }}</h3>
           <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-            ? '主界面导航栏显示的顶层模块（主页、知识管理、知识处理、学习）与其他入口（浏览器 Agent）。关闭某项即从导航栏隐藏；下方依赖它的子开关（知识管理视图等）也会随之不可用。'
-            : 'Entries shown in the main navbar: top-level modules (Home, Knowledge, Knowledge Processing, Learning) and other entries (Browser Agent). Hiding one removes it from the navbar (left / top / bottom layouts alike), and its dependent sub-switches below become unavailable too.' }}</div>
+            ? '主界面导航栏显示的顶层模块（主页、知识管理、知识处理、学习）与其他入口（待我处理、浏览器 Agent）。关闭某项即从导航栏隐藏。'
+            : 'Entries shown in the main navbar: top-level modules (Home, Knowledge, Knowledge Processing, Learning) and other entries (Needs me, Browser Agent). Hiding one removes it from the navbar (left / top / bottom layouts alike).' }}</div>
           
-          <!-- 空导航提醒：全部功能关闭且没有插件面板时，主界面没有任何可用页面——由 App.vue 显示提醒 -->
-          <div class="form-group">
-            <label>{{ store.locales=='zh' ? '空导航提醒' : 'Empty Navbar Notice' }}</label>
-            <select v-model="store.UI.emptyNavNotice" class="layout-select" @change="store.saveConfig()"
-                    :title="store.locales=='zh'
-                      ? '全部功能关闭且没有启用任何插件面板时，主界面没有可用页面：开启则显示提示（含一键恢复与前往设置的入口），关闭则什么都不显示。'
-                      : 'When every feature is off and no plugin panel is enabled, the main window has no usable page: show a notice (with one-click restore and a link to settings) or show nothing.'">
-              <option :value="true">{{ store.locales=='zh' ? '显示提醒' : 'Show notice' }}</option>
-              <option :value="false">{{ store.locales=='zh' ? '不提醒' : 'No notice' }}</option>
-            </select>
-          </div>
+          <!-- 空导航提醒固定显示（不再提供关闭选项） -->
           <div class="nav-switch-list">
             <div
               v-for="sw in navSwitches"
@@ -1485,36 +1535,6 @@ onBeforeUnmount(() => {
                 @click="toggleNavSwitch(sw)"
               >
                 <span class="nav-switch-knob"></span>
-              </div>
-            </div>
-          </div>
-          <!-- 知识管理（模块子开关）：仅知识管理模块开启时显示（主窗口右侧的视图，单选） -->
-          <div v-if="store.isNavVisible('知识管理')" class="settings-group">
-            <h3>{{ store.locales=='zh' ? '知识管理' : 'Knowledge Management' }}</h3>
-            <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-              ? '单窗口模式下，知识管理右侧只有一个固定的「视图」标签（不可关闭）：在这个标签里用顶部工具栏的下拉切换文件 / 看板 / 表格 / 图谱 / 地图 / 日历，6 类视图不再各占一个标签。打开的文件作为可关闭的文件标签叠在右侧，标签内自带视图切换（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示，按文件类型决定），不在此配置；右键文件仍可「在新窗口打开」。多窗口模式不显示标签栏，文件树点文件直接开独立窗口，与原来一致。需先在上方开启「知识管理」；浏览器相关设置（主页 / 新标签页 / 搜索 / 收藏夹 / Markdown 剪藏）在「其他 → 浏览器」。'
-              : 'In single-window mode, Knowledge Management shows a single pinned “view” tab (cannot be closed): switch Files / Kanban / Table / Graph / Map / Year Calendar inside it with the toolbar dropdown — the six views no longer take one tab each. Opened files appear as closable file tabs on top of it, each with its own view switcher (Browse / Source / Visual / Mind Map / Presentation, depending on the file type); right-click a file to open it in a separate window instead. Multi-window mode hides the tab bar and opens files from the tree in their own windows, as before. Requires Knowledge Management enabled above; browser-related settings (home page / save folder) live under Other → Browser.' }}</div>
-            <div class="nav-switch-list">
-              <div
-                v-for="view in viewButtons"
-                :key="view.id"
-                class="nav-switch-item"
-                :class="{ active: store.isView(view.id) }"
-              >
-                <div class="nav-switch-icon">
-                  <i :class="view.icon"></i>
-                </div>
-                <div class="nav-switch-info">
-                  <span class="nav-switch-name">{{ store.locales=='zh' ? view.title_zh : view.title_en }}</span>
-                </div>
-                <div
-                  class="nav-switch-toggle"
-                  :class="{ on: store.isView(view.id) }"
-                  :title="store.isView(view.id) ? (store.locales=='zh' ? '当前视图' : 'Current view') : (store.locales=='zh' ? '切换到此视图' : 'Switch to this view')"
-                  @click="store.selectView(view.id)"
-                >
-                  <span class="nav-switch-knob"></span>
-                </div>
               </div>
             </div>
           </div>
@@ -1738,6 +1758,51 @@ onBeforeUnmount(() => {
     </div>
     </div>
   </div>
+
+  <!-- 添加主题：名称 + 颜色选择 + 实时预览（确认后一次性创建，不再单独维护颜色卡） -->
+  <teleport to="body">
+    <div v-if="themeDraftVisible" class="theme-dialog-overlay" @click.self="closeAddTheme">
+      <div class="theme-dialog" @click.stop>
+        <div class="theme-dialog-head">
+          <i class="fa fa-paint-brush"></i>
+          <span>{{ store.locales === 'zh' ? '添加主题' : 'Add Theme' }}</span>
+        </div>
+        <div class="theme-dialog-name">
+          <label>{{ store.locales === 'zh' ? '主题名称' : 'Theme name' }}</label>
+          <input v-model="themeDraftName" maxlength="40" @keydown.enter.prevent="confirmAddTheme" />
+        </div>
+        <div class="theme-dialog-colors">
+          <label v-for="color in customColors" :key="color.key" class="theme-dialog-color">
+            <span>{{ color.label }}</span>
+            <input type="color" v-model="themeDraft[color.key]" />
+            <code>{{ themeDraft[color.key] }}</code>
+          </label>
+        </div>
+        <div
+          class="theme-preview"
+          :style="{
+            backgroundColor: themeDraft.backgroundColor,
+            borderColor: themeDraft.borderColor,
+            color: themeDraft.fontColor,
+          }"
+        >
+          <div class="theme-preview-head" :style="{ backgroundColor: themeDraft.menuColor, borderColor: themeDraft.borderColor }">
+            {{ store.locales === 'zh' ? '主题预览' : 'Theme preview' }}
+          </div>
+          <div class="theme-preview-body">
+            <span class="theme-preview-active" :style="{ backgroundColor: themeDraft.menuActiveColor, color: themeDraft.fontActiveColor }">
+              {{ store.locales === 'zh' ? '选中项' : 'Selected' }}
+            </span>
+            <span>{{ store.locales === 'zh' ? '普通文字' : 'Body text' }}</span>
+          </div>
+        </div>
+        <div class="theme-dialog-actions">
+          <button class="theme-dialog-btn" @click="closeAddTheme">{{ store.locales === 'zh' ? '取消' : 'Cancel' }}</button>
+          <button class="theme-dialog-btn primary" @click="confirmAddTheme">{{ store.locales === 'zh' ? '添加' : 'Add' }}</button>
+        </div>
+      </div>
+    </div>
+  </teleport>
 </template>
 
 <style scoped>
@@ -1882,6 +1947,14 @@ onBeforeUnmount(() => {
   border-bottom-left-radius: 0;
 }
 
+/* 单窗口模式：自带标题栏隐藏时，内容区补回上边框与直角
+   （那条下边框原本由标题栏提供；顶栏由主窗口上方导航栏承担） */
+.settings-wrap.header-hidden .settings-container {
+  border-top: 1px solid var(--borderColor);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
 .settings-container {
   flex: 1;
   min-height: 0;
@@ -1891,6 +1964,7 @@ onBeforeUnmount(() => {
   border-top: none; /* 标题栏已有下边框，去掉重复上边框 */
   /* 与面板圆角一致，让下边框沿圆角走 */
   border-bottom-left-radius: 10px;
+
   border-bottom-right-radius: 10px;
 }
 
@@ -2631,6 +2705,154 @@ onBeforeUnmount(() => {
   min-width: 0;
   box-sizing: border-box;
 }
+
+/* ====== 主题：等宽 grid 卡片（不用 select） ====== */
+.theme-grid {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 6px;
+}
+.theme-option {
+  height: 34px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.theme-option:hover { border-color: var(--fontActiveColor); }
+.theme-option.active {
+  border-color: var(--fontActiveColor);
+  background: color-mix(in srgb, var(--fontActiveColor) 10%, var(--menuColor));
+  color: var(--fontActiveColor);
+}
+.theme-swatch {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid color-mix(in srgb, var(--borderColor) 70%, transparent);
+  background: var(--theme-swatch);
+}
+.theme-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.theme-option-remove {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 11px;
+  opacity: .55;
+}
+.theme-option-remove:hover { opacity: 1; color: #e81123; }
+.theme-option-add,
+.theme-option-reset {
+  justify-content: center;
+  border-style: dashed;
+  color: var(--fontColor);
+  opacity: .8;
+}
+.theme-option-add:hover,
+.theme-option-reset:hover { opacity: 1; }
+
+/* 添加主题弹窗：名称 + 颜色 + 预览 */
+.theme-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.theme-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 14px;
+  border: 1px solid var(--borderColor);
+  border-radius: 8px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+}
+.theme-dialog-head {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 14px; font-weight: 600; margin-bottom: 12px;
+}
+.theme-dialog-name {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+}
+.theme-dialog-name label { width: 72px; flex-shrink: 0; font-size: 12px; }
+.theme-dialog-name input {
+  flex: 1; min-width: 0; height: 30px; box-sizing: border-box;
+  padding: 0 8px; border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--menuColor); color: var(--fontColor);
+}
+.theme-dialog-colors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.theme-dialog-color {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0; height: 32px; padding: 0 8px;
+  border: 1px solid var(--borderColor); border-radius: 5px;
+  background: var(--menuColor); font-size: 11px;
+}
+.theme-dialog-color > span {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.theme-dialog-color input[type="color"] {
+  width: 22px; height: 22px; flex-shrink: 0; padding: 0; border: none; background: transparent; cursor: pointer;
+}
+.theme-dialog-color code { flex-shrink: 0; font-size: 10px; opacity: .6; }
+.theme-preview {
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.theme-preview-head {
+  padding: 5px 9px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--borderColor);
+}
+.theme-preview-body {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 9px; font-size: 12px;
+}
+.theme-preview-active {
+  padding: 4px 10px; border-radius: 4px; font-size: 12px;
+}
+.theme-dialog-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+.theme-dialog-btn {
+  height: 30px; padding: 0 14px; border-radius: 5px;
+  border: 1px solid var(--borderColor); background: var(--menuColor);
+  color: var(--fontColor); font-size: 12px; cursor: pointer;
+}
+.theme-dialog-btn.primary {
+  border-color: var(--fontActiveColor);
+  background: color-mix(in srgb, var(--fontActiveColor) 12%, var(--menuColor));
+  color: var(--fontActiveColor);
+}
+.theme-dialog-btn:hover { border-color: var(--fontActiveColor); }
 
 /* 窗口缩放控制：输入框 + 步进/重置按钮 */
 .zoom-control {

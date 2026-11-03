@@ -22,7 +22,7 @@
 
 import type {
   AgentEvent, AgentEventMap, AgentEventType, AgentOptions, AgentStateView,
-  AgentStatus, AgentSummary, TodoItem, AskUserAnswer, AskUserQuestion,
+  AgentStatus, AgentSummary, TodoItem, AskUserAnswer, AskUserQuestion, RunReport,
 } from '@/types/agent'
 import type { AgentId } from '@/types/ids'
 import { normalizeLlmType } from '@/shared/llmSources'
@@ -154,6 +154,8 @@ class RendererAgent {
   private turnController: AbortController | null = null
   private plan: string | null = null
   private todos: TodoItem[] = []
+  /** 最近一次运行状态上报（report_run） */
+  private runReport: RunReport | null = null
   private lastError?: string
   private lastAssistantContent = ''
   private lastFinishReason = ''
@@ -188,6 +190,8 @@ class RendererAgent {
   }
 
   toStateView(): AgentStateView {
+    const q = this.pendingQuestion
+    const r = this.pendingPlanReview
     return {
       ...this.toSummary(),
       turn: this.turnCount,
@@ -196,6 +200,10 @@ class RendererAgent {
       todos: this.todos,
       lastError: this.lastError,
       lastAssistantContent: this.lastAssistantContent,
+      // 与主进程同口径：挂起中的提问 / 计划评审要能从状态快照恢复（渲染层重载后仍可见）
+      pendingQuestion: q ? { askId: q.askId, question: askQuestionsDigest(q.questions), questions: q.questions } : null,
+      pendingPlanReview: r ? { reviewId: r.reviewId, plan: r.plan } : null,
+      runReport: this.runReport,
     }
   }
 
@@ -218,9 +226,17 @@ class RendererAgent {
     this.fire('agent/todos', { todos: this.todos })
   }
 
+  /** 运行状态上报（report_run）：整值替换；「待我处理」面板据此派生条目 */
+  setRunReport(report: RunReport | null): void {
+    this.runReport = report
+    this.fire('agent/report', { report })
+  }
+
   // ---------------- 控制 ----------------
 
   push(item: InboxItem): void {
+    // 人回了话 = 上一条「在等你」的上报已得到响应：清掉它（与主进程 AgentImpl.send 同语义）
+    if (item.kind === 'task' && this.runReport) this.setRunReport(null)
     this.inbox.push(item)
     this.fire('agent/inbox', { pending: this.inbox.length })
     if (this.status !== 'running' && this.status !== 'stopping') void this.drive()
@@ -557,6 +573,7 @@ class RendererAgent {
       setPlan: (plan) => this.setPlan(plan),
       setTodos: (todos) => this.setTodos(todos),
       getTodos: () => this.todos,
+      setRunReport: (report) => this.setRunReport(report),
     }
   }
 

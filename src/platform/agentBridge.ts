@@ -12,7 +12,7 @@
  * 列表，执行细节（循环/工具/状态）都在 agent 循环 + 本桥接层。
  */
 
-import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUsage, TodoItem, AgentCompactionKind, AskUserAnswer, AskUserQuestion } from '@/types/agent'
+import type { AgentEvent, AgentOptions, AgentStateView, AgentStatus, AgentStepUsage, TodoItem, AgentCompactionKind, AskUserAnswer, AskUserQuestion, RunReport } from '@/types/agent'
 import type { EditDiffPreview } from '@/shared/editDiff'
 import type { PtcRunPreview } from '@/types/tool'
 import { lanAgentTransport } from '@/platform/lanAgentClient'
@@ -142,6 +142,8 @@ export interface AgentSessionView {
   pendingQuestion: { askId: string; question: string; questions?: AskUserQuestion[] } | null
   /** 待评审的计划（exit_plan_mode）：挂起等待用户裁决，不结束 turn */
   pendingPlanReview: { reviewId: string; plan: string } | null
+  /** 最近一次运行状态上报（report_run 工具；整值替换，null = 没有/已清除） */
+  runReport: RunReport | null
   /** 服务端联网搜索状态（deepseek-responses web_search_call 投影；仅 UI 展示） */
   searchStatus: { status: string; query?: string; results?: Array<{ title?: string; url?: string }>; visitedUrls?: string[] } | null
   /** 上下文压缩状态（旧轮次摘要；start 事件到达后对话时间线显示「正在压缩上下文…」） */
@@ -222,6 +224,7 @@ function createView(id: string, label?: string): AgentSessionView {
     currentStream: '',
     pendingQuestion: null,
     pendingPlanReview: null,
+    runReport: null,
     searchStatus: null,
     compaction: { seq: 0, phase: 'idle', kind: 'auto' },
     searchEvents: [],
@@ -357,6 +360,11 @@ class AgentBridge {
     view.todos = state.todos
     view.inbox = state.pendingInbox
     view.lastError = state.lastError
+    // 渲染层重载后必须把两个挂起态一并恢复，否则「正在等你的提问 / 评审」在界面上凭空消失
+    // （主进程仍挂着 Promise，用户却再也看不到入口 —— 见「待我处理」面板）。
+    view.pendingQuestion = state.pendingQuestion ?? null
+    view.pendingPlanReview = state.pendingPlanReview ?? null
+    view.runReport = state.runReport ?? null
     return view
   }
 
@@ -730,6 +738,10 @@ class AgentBridge {
         break
       case 'agent/todos':
         view.todos = ev.payload.todos
+        break
+      case 'agent/report':
+        // 运行状态上报（report_run）：整值替换；「待我处理」面板据此派生 blocked/ready 条目
+        view.runReport = ev.payload.report
         break
       case 'agent/search-status':
         // 服务端联网搜索结果累积去重（同一会话多次搜索追加，不覆盖已有结果）；

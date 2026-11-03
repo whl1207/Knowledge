@@ -94,11 +94,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElDialog, ElInput, ElRadio, ElRadioGroup } from 'element-plus'
 import type { AskUserAnswer, AskUserQuestion } from '@/types/agent'
-import { ASK_CUSTOM_MAX } from '@/shared/agentAsk'
 import { renderQuestionMarkdown } from '@/lib/markdown/render'
+import { useAskForm } from '@/composables/useAskForm'
 import { usestore } from '@/store'
 const store = usestore()
 
@@ -119,58 +119,17 @@ const title = computed(() => {
   return zh.value ? `${who}智能体提问` : `${who}Agent asks`
 })
 
-/** 每题一份编辑态：单选存单值，多选存数组，自定义回答单独存 */
-const state = reactive<Record<string, { single: string; selected: string[]; custom: string }>>({})
-function reset() {
-  for (const key of Object.keys(state)) delete state[key]
-  for (const q of props.questions) {
-    state[q.id] = { single: '', selected: [], custom: '' }
-  }
-}
-watch(() => props.questions, reset, { immediate: true, deep: false })
-
-/** 惰性取某题的编辑态（正常由上面 watch 预建；这里兜底，模板可安全访问） */
-function pick(id: string) {
-  if (!state[id]) state[id] = { single: '', selected: [], custom: '' }
-  return state[id]
-}
-
-// ---- 分页：多题时一次只显示一题，左右翻页 ----
-const index = ref(0)
-const total = computed(() => props.questions.length)
-const current = computed<AskUserQuestion | undefined>(() => props.questions[index.value])
-function go(step: number) {
-  const next = index.value + step
-  if (next < 0 || next > total.value - 1) return
-  index.value = next
-}
-
-/** 已作答题数（选项或自定义回答任一非空）；翻页进度旁给个提示 */
-const answeredCount = computed(() => props.questions.filter((q) => {
-  const st = state[q.id]
-  if (!st) return false
-  return !!st.single || st.selected.length > 0 || String(st.custom || '').trim() !== ''
-}).length)
+/**
+ * 每题编辑态 / 多题翻页 / 答案批口径统一由 useAskForm 提供（与「待我处理」抽屉的行内表单共用），
+ * 本组件只负责弹窗外壳与 markdown 题目渲染。
+ */
+const { pick, index, total, current, go, answeredCount, isRecommended, buildAnswers } =
+  useAskForm(() => props.questions)
 
 const renderMarkdown = (s: string) => renderQuestionMarkdown(String(s || ''))
 
-/** DSH 约定：推荐项放在第一位并在 label 末尾加 "(Recommended)" —— 这里只做视觉标记，不改 label */
-function isRecommended(label: string): boolean {
-  return /\(\s*recommend(ed)?\s*\)|（\s*推荐\s*）|\(推荐\)/i.test(String(label || ''))
-}
-
 function onSubmit() {
-  const answers: AskUserAnswer[] = props.questions.map((q) => {
-    const st = pick(q.id)
-    const selected = q.multiSelect
-      ? st.selected.slice()
-      : (st.single ? [st.single] : [])
-    const custom = String(st.custom || '').trim().slice(0, ASK_CUSTOM_MAX)
-    const answer: AskUserAnswer = { id: q.id, selected }
-    if (custom) answer.custom = custom
-    return answer
-  })
-  emit('submit', answers)
+  emit('submit', buildAnswers())
 }
 </script>
 

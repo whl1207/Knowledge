@@ -37,6 +37,20 @@ import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
   import AskUserHost from '@/components/agent/AskUserHost.vue'
   // exit_plan_mode 计划评审弹窗宿主（全局唯一：所有入口都经 store/planReview 排队）
   import PlanReviewHost from '@/components/agent/PlanReviewHost.vue'
+  // 「待我处理」收件箱：导航入口 + 贴着入口的浮层面板（提问 / 计划评审等需要人处理的条目）。
+  // 状态全在 store/attention（投影自 agentBridge 的挂起态），本组件只做入口与快捷键。
+  import AttentionPanel from '@/components/attention/AttentionPanel.vue'
+  // 轻提示的就地胶囊：贴在「待我处理」按钮左侧伸出、几秒后收缩收回（不再用角落 toast）
+  import AttentionNoticeChip from '@/components/attention/AttentionNoticeChip.vue'
+  import {
+    badge as attentionBadge,
+    closePanel as closeAttentionPanel,
+    initAttention,
+    panelOpen as attentionPanelOpen,
+    togglePanel,
+  } from '@/store/attention'
+  // 轻提示的未读数（ElMessage 被收进面板「动态」段；有未读时入口显示小蓝点，不影响红色待办角标）
+  import { unreadNoticeCount as attentionUnread } from '@/store/notices'
   // 全局语音输入：**唯一**的视觉提示（状态与识别全在 services/asr/globalVoice.ts）；
   // 这里只负责挂载一次 + 初始化，各模块不需要接任何东西
   import VoiceInputOverlay from '@/components/voice/VoiceInputOverlay.vue'
@@ -61,6 +75,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
   // 桌面版设置走独立子窗口：其开合状态单独记录（settingsWindowOpen），仅用于导航按钮高亮——
   // 不能复用 store.settingsOpen，否则「窗口已打开」会同时点亮主窗口内的设置浮层
   const settingsWindowOpen = ref(false)
+  /** 「待我处理」收件箱的订阅注销函数（主窗口挂载时注册，卸载时释放） */
+  let offAttention: (() => void) | null = null
   const isMaximized = ref(false); // 窗口是否最大化状态
   // 独立窗口标记在 setup 同步阶段按 location.hash 初始化：首帧即渲染对应壳（FileWindow/BrowserAgentShell），
   // 避免先渲染一次完整主界面再切换（独立窗口瞬间闪现整个软件界面）
@@ -132,12 +148,31 @@ import { useTallLayout } from '@/composables/useTallLayout'
 
   // 计算标题文本（内置面板沿用历史文案，插件面板回退到注册表标题；见 lib/plugin/panels.ts）
   const panelTitle = computed(() => {
+    // 单窗口模式下设置是页面内浮层、上方导航栏保持可见：顶栏标题显示「设置」说明当前状态
+    // （设置自己的标题栏已隐藏，见 Set.vue 的 hideHeader）
+    if (store.singleWindowMode && store.settingsOpen) {
+      return store.locales === 'en' ? 'Settings' : '设置'
+    }
     // 自定义标题：界面设置中定义后固定不变，不再随当前面板变化
     if (store.customTitle && store.customTitle.trim()) {
       return store.customTitle
     }
     if (store.browserPanelOpen) return store.locales === 'en' ? 'Browser' : '浏览器'
     return panelHeaderText(store.mainPanel, store.locales !== 'en')
+  })
+
+  /**
+   * 单窗口模式下设置是**页面内浮层**而不是对话框：只盖住内容区，
+   * 上方导航栏（以及左侧 / 底部导航）保持可见、可点。
+   *
+   * 偏移量对应现有外壳尺寸：顶栏 `.mainPanel` 39px、左侧 `.side-nav` 44px、底部 `.bottom-nav` 44px。
+   */
+  const settingsOverlayStyle = computed<Record<string, string> | undefined>(() => {
+    if (!store.singleWindowMode) return undefined
+    const style: Record<string, string> = { top: '39px' }
+    if (isLeftNav.value) style.left = '44px'
+    if (isBottomNav.value) style.bottom = '44px'
+    return style
   })
 
   // 导航栏「浏览器」激活态：单窗口=内嵌面板打开；多窗口=独立浏览器窗口开着
@@ -219,7 +254,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
    * 空导航：所有主面板都被关掉（插件面板也没有）→ 主界面没有任何可用页面。
    * 显示提醒（含「恢复默认导航」与「打开设置」），可用设置 → 通用 → 基础 → 空导航提醒 关掉。
    */
-  const showEmptyNavNotice = computed(() => !navButtons.value.length && store.UI.emptyNavNotice !== false)
+  const showEmptyNavNotice = computed(() => !navButtons.value.length)
 
   /** 一键恢复：把内置模块与其它入口全部重新打开，并回到主页 */
   const restoreDefaultNavs = () => {
@@ -381,7 +416,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
    * 因此把「切面板」和「收网格」绑在同一个入口上，值没变时也照样收网格。
    */
   async function selectPanel(key: string) {
-    // 切换主面板会卸载当前面板（主页右侧栏 / 知识管理的文件标签）：先让它们处理未保存内容，
+// 设置是页面内浮层（单窗口 / 网页端）：点任何模块按钮都先收起设置，否则新面板被它挡着像"没反应"
+if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换主面板会卸载当前面板（主页右侧栏 / 知识管理的文件标签）：先让它们处理未保存内容，
     // 用户取消就留在原面板（见 store.registerLeaveGuard / runLeaveGuards）
     if (store.mainPanel !== key && !(await store.runLeaveGuards())) return
     // 先收网格再切面板：两处都在同一个 tick 内完成，不会先渲染网格再切走
@@ -469,7 +505,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (isVoiceOverlayWindow.value) {
       // 悬浮窗是常驻复用的：设置里改主题后必须跟着重设 CSS 变量，否则会一直用旧主题
       getPlatform().events.on('settings-config-changed', (payload: any) => {
-        store.syncConfigFromPeers(payload?.ui, payload?.locales)
+        store.syncConfigFromPeers(payload?.ui, payload?.locales, payload?.aiConfig)
       })
       getPlatform().events.on('theme-changed', (payload: any) => {
         store.applyThemeFromBroadcast(payload)
@@ -524,6 +560,13 @@ import { useTallLayout } from '@/composables/useTallLayout'
           canGoBack: () => !!store.settingsOpen,
           goBack: () => closeSetPanel(),
         }),
+        // 「待我处理」浮层：返回键先关浮层，再退模块导航
+        registerBackLayer({
+          id: 'app:attention',
+          order: BACK_ORDER.attentionPanel,
+          canGoBack: () => attentionPanelOpen.value,
+          goBack: () => closeAttentionPanel(),
+        }),
       )
     }
 
@@ -547,7 +590,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
     // 子窗口的协同按钮因 store 陈旧而始终不出现。
     if (!isSettingsWindow.value) {
       getPlatform().events.on('settings-config-changed', (payload: any) => {
-        store.syncConfigFromPeers(payload?.ui, payload?.locales)
+        store.syncConfigFromPeers(payload?.ui, payload?.locales, payload?.aiConfig)
       })
     }
 
@@ -556,6 +599,12 @@ import { useTallLayout } from '@/composables/useTallLayout'
     watch(trayTasks, () => scheduleTrayPush(), { deep: true, immediate: true })
 
     if (isFileWindow.value || isBrowserAgentWindow.value || isSettingsWindow.value || isPluginPanelWindow.value) return // 独立窗口无需加载主界面数据
+
+    // ============ 「待我处理」收件箱（仅主窗口） ============
+    // 订阅 agent 视图变化，并从主进程拉一次状态：渲染层刷新 / 重开窗口后，正在等你的
+    // 提问与计划评审不会凭空消失（此前 agentBridge.restore() 不恢复这两个字段）。
+    offAttention = initAttention()
+    window.addEventListener('keydown', onAttentionKeydown)
 
     // ============ 导航栏插件图标收纳：量一次 + 尺寸变化时重算 ============
     // 挂载后先判定一次（此时插件条目可能还没注册完，插件运行时同步完成后上面的 watch 会再触发）；
@@ -625,6 +674,9 @@ import { useTallLayout } from '@/composables/useTallLayout'
     unregisterBack?.()
     unregisterBack = null
     for (const off of unregisterAppLayers.splice(0)) off()
+    offAttention?.()
+    offAttention = null
+    window.removeEventListener('keydown', onAttentionKeydown)
     titleResizeObserver?.disconnect()
     titleResizeObserver = null
     navResizeObserver?.disconnect()
@@ -632,6 +684,17 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (navResizeTimer) { clearTimeout(navResizeTimer); navResizeTimer = null }
     // 释放全局语音输入：注销快捷键、拆监听、销毁麦克风采集图
     disposeGlobalVoice()
+  })
+
+  // 打开设置时收起「待我处理」浮层：设置是 z-index 更高的目的地，浮层留在下面只会被盖住一半
+  watch(() => store.settingsOpen, (open) => {
+    if (open && attentionPanelOpen.value) closeAttentionPanel()
+  })
+
+  // 在 设置 → 通用 → 基础 → 导航与模块 里关掉「待我处理」入口时，浮层若开着也一并收起
+  // （入口没了，浮层会无处可关；键盘快捷键同样由 isExtraVisible 门控）
+  watch(() => store.isExtraVisible('attention'), (visible) => {
+    if (!visible && attentionPanelOpen.value) closeAttentionPanel()
   })
 
   // 主面板切换即落盘（mainPanel 只在主窗口有意义）：
@@ -643,6 +706,8 @@ import { useTallLayout } from '@/composables/useTallLayout'
     resetPanelChrome()
     // 切主面板时收起「插件网格」：网格是导航栏收纳后的入口页，不是主面板本身
     store.pluginLauncherOpen = false
+    // 单窗口模式：设置是盖在内容区上的页面内浮层，切模块时一并收起（否则新面板被挡着）
+    if (store.singleWindowMode && store.settingsOpen) closeSetPanel()
     if (isSettingsWindow.value || isFileWindow.value || isBrowserAgentWindow.value || isPluginPanelWindow.value) return
     try { localStorage.setItem('mainPanel', JSON.stringify(panel)) } catch { /* 写盘失败不影响使用 */ }
   })
@@ -793,6 +858,56 @@ import { useTallLayout } from '@/composables/useTallLayout'
   }
   function closeSetPanel() {
     store.settingsOpen = false
+  }
+
+  /**
+   * 设置按钮：单窗口 / 网页端设置是页面内浮层 —— 点一次打开、再点一次收起（开关语义）。
+   * 多窗口桌面仍交给主进程打开「设置」独立窗口（再点一次是最小化/聚焦该窗口，不在这里关）。
+   */
+  function toggleSettingsPanel() {
+    if (store.singleWindowMode && store.settingsOpen) {
+      closeSetPanel()
+      return
+    }
+    store.openSettings()
+  }
+
+  /**
+   * 打开 / 关闭「待我处理」浮层（导航栏四个入口共用；与 store 的 panelOpen 单一来源）。
+   * 把触发按钮一起传下去：浮层贴着它展开，永不遮挡导航栏。
+   */
+  function onAttentionEntryClick(e: MouseEvent): void {
+    // 抽屉与设置浮层互斥：设置是「目的地」，盖住收件箱时先收起抽屉，避免两层叠着
+    if (!attentionPanelOpen.value && store.settingsOpen) closeSetPanel()
+    togglePanel((e?.currentTarget as HTMLElement) || null)
+  }
+
+  /**
+   * 「待我处理」的全局快捷键：Alt+I 开关、Esc 关闭。
+   * - 输入框 / 文本域 / 可编辑区域内不抢键（用户可能在打字）；
+   * - 输入法组合态（isComposing）不处理；
+   * - 设置独立窗口里不处理（那边没有收件箱）。
+   */
+  function onAttentionKeydown(e: KeyboardEvent): void {
+    if (isSettingsWindow.value) return
+    // 入口被关掉时快捷键也停用（避免"按钮都藏了，面板还能凭空弹出来"）
+    if (!store.isExtraVisible('attention')) return
+    if (e.key === 'Escape') {
+      if (attentionPanelOpen.value) {
+        e.preventDefault()
+        closeAttentionPanel()
+      }
+      return
+    }
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+    if (String(e.key || '').toLowerCase() !== 'i') return
+    if (e.isComposing) return
+    const target = e.target as HTMLElement | null
+    const tag = String(target?.tagName || '').toLowerCase()
+    if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return
+    e.preventDefault()
+    // 键盘打开时没有鼠标事件：store 会自己找当前可见的那个入口来定位
+    togglePanel(null)
   }
 
   /**
@@ -959,10 +1074,22 @@ import { useTallLayout } from '@/composables/useTallLayout'
         <i class="fa fa-th-large"></i>
       </div>
 
+      <!-- 待我处理：紧邻「设置」左侧（可在 设置 → 通用 → 基础 → 导航与模块 里隐藏） -->
+      <div
+        v-if="store.isExtraVisible('attention')"
+        class="side-nav-item attention-entry"
+        :class="{ active: attentionPanelOpen }"
+        @click="onAttentionEntryClick"
+        :title="store.locales === 'en' ? 'Needs me' : '待我处理'"
+      >
+        <i class="fa fa-inbox"></i>
+        <span v-if="attentionBadge" class="attention-badge">{{ attentionBadge }}</span><span v-if="!attentionBadge && attentionUnread" class="attention-dot"></span>
+      </div>
+
       <div
         class="side-nav-item"
         :class="{ active: store.settingsOpen || settingsWindowOpen }"
-        @click="store.openSettings()"
+        @click="toggleSettingsPanel"
         :title="store.locales === 'en' ? 'Settings' : '设置'"
       >
         <i class="fa fa-cogs"></i>
@@ -1025,8 +1152,16 @@ import { useTallLayout } from '@/composables/useTallLayout'
             <div class="compact-title" :class="{ 'title-hidden': titleHidden }" ref="panelTitleRef"
                  style="font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
-            <!-- 浏览器入口（旧位置已移到四个内置模块之后） -->
-            <div :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
+            <!-- 待我处理（顶栏：紧邻「设置」左侧；可在 设置 → 通用 → 基础 → 导航与模块 里隐藏） -->
+            <div
+              v-if="store.isExtraVisible('attention')"
+              class="attention-entry"
+              :class="{ active: attentionPanelOpen }"
+              @click="onAttentionEntryClick"
+              :title="store.locales === 'en' ? 'Needs me' : '待我处理'"
+            ><i class="fa fa-inbox"></i><span v-if="attentionBadge" class="attention-badge">{{ attentionBadge }}</span><span v-if="!attentionBadge && attentionUnread" class="attention-dot"></span></div>
+            <!-- 设置（顶栏右侧） -->
+            <div :class="{active:store.settingsOpen || settingsWindowOpen}" @click="toggleSettingsPanel" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
             <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
             </div>
@@ -1039,8 +1174,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
             <!-- 左侧/下方导航布局：顶栏只保留标题 + 3 个窗口按钮（其余按钮在对应导航栏）；标题水平居中 -->
             <div class="compact-title" style="-webkit-app-region: drag;font-size: 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ panelTitle }}</div>
 
+            <!-- 待我处理（窄窗口也保留：这正是最需要一眼看到「有人在等你」的时候） -->
+            <div v-if="store.isExtraVisible('attention')" class="nav-narrow-only attention-entry" :class="{ active: attentionPanelOpen }" @click="onAttentionEntryClick" :title="store.locales === 'en' ? 'Needs me' : '待我处理'"><i class="fa fa-inbox"></i><span v-if="attentionBadge" class="attention-badge">{{ attentionBadge }}</span><span v-if="!attentionBadge && attentionUnread" class="attention-dot"></span></div>
             <!-- 窗口过窄时：标题收起，右侧只留 设置 + 关闭（设置按钮只在窄窗口出现，宽窗口仍用导航栏里的那个） -->
-            <div class="nav-narrow-only" :class="{active:store.settingsOpen || settingsWindowOpen}" @click="store.openSettings()" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
+            <div class="nav-narrow-only" :class="{active:store.settingsOpen || settingsWindowOpen}" @click="toggleSettingsPanel" :title="store.locales === 'en' ? 'Settings' : '设置'"><i class="fa fa-cogs"></i></div>
             <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="minimizeWindow" title="最小化">
               <i class="fa fa-minus"></i>
             </div>
@@ -1085,6 +1222,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
             <div class="button" @click="restoreDefaultNavs" :title="store.locales === 'en' ? 'Re-enable Home / Knowledge / Knowledge Processing / Learning and the Browser Agent entry' : '重新开启 主页 / 知识管理 / 知识处理 / 学习 与浏览器 Agent 入口'">
               <i class="fa fa-undo"></i> {{ store.locales === 'en' ? 'Restore default nav' : '恢复默认导航' }}
             </div>
+            <!-- 空导航提醒里的「打开设置」是单向动作（此时设置必然没开），不走开关语义 -->
             <div class="button" @click="store.openSettings()" :title="store.locales === 'en' ? 'Open settings' : '打开设置'">
               <i class="fa fa-cogs"></i> {{ store.locales === 'en' ? 'Open settings' : '打开设置' }}
             </div>
@@ -1143,20 +1281,42 @@ import { useTallLayout } from '@/composables/useTallLayout'
         <i class="fa fa-th-large"></i>
       </div>
 
+      <!-- 待我处理：紧邻「设置」左侧（可在 设置 → 通用 → 基础 → 导航与模块 里隐藏） -->
+      <div
+        v-if="store.isExtraVisible('attention')"
+        class="bottom-nav-item attention-entry"
+        :class="{ active: attentionPanelOpen }"
+        @click="onAttentionEntryClick"
+        :title="store.locales === 'en' ? 'Needs me' : '待我处理'"
+      >
+        <i class="fa fa-inbox"></i>
+        <span v-if="attentionBadge" class="attention-badge">{{ attentionBadge }}</span><span v-if="!attentionBadge && attentionUnread" class="attention-dot"></span>
+      </div>
+
       <div
         class="bottom-nav-item"
         :class="{ active: store.settingsOpen || settingsWindowOpen }"
-        @click="store.openSettings()"
+        @click="toggleSettingsPanel"
         :title="store.locales === 'en' ? 'Settings' : '设置'"
       >
         <i class="fa fa-cogs"></i>
       </div>
     </div>
     
-    <!-- 设置面板 -->
-    <div v-if="store.settingsOpen" class="set-overlay" @click="closeSetPanel">
+    <!-- 待我处理浮层：盖在内容区之上、设置浮层之下（z-index 1450）；无遮罩，点外部 / Esc 关闭；
+         轻提示就地胶囊挂在所有窗口模式之外（见下方 AttentionNoticeChip），各窗口都能看到提示 -->
+    <AttentionPanel :open="attentionPanelOpen" @close="closeAttentionPanel" />
+
+    <!-- 设置面板：单窗口模式下是「页面内浮层」——只盖内容区（露出上方导航栏），
+         设置自己的标题栏隐藏（见 Set.vue hideHeader），再点一次导航栏设置按钮收起 -->
+    <div
+      v-if="store.settingsOpen"
+      class="set-overlay"
+      :style="settingsOverlayStyle"
+      @click="closeSetPanel"
+    >
       <div class="settings-panel" @click.stop>
-        <SetPanel/>
+        <SetPanel :hide-header="store.singleWindowMode && !isTallLayout" />
       </div>
     </div>
   </div> <!-- /.container (v-else) -->
@@ -1185,6 +1345,11 @@ import { useTallLayout } from '@/composables/useTallLayout'
       <PluginPanelWindow :plugin-key="store.pluginPanelOverlay.key" overlay />
     </div>
   </div>
+
+  <!-- 轻提示就地胶囊：ElMessage 已不再弹角落 toast，全部改为这里呈现。
+       放在所有窗口模式之外——设置 / 文件 / 浏览器 / 插件子窗口里也需要看到提示；
+       主窗口会贴在「待我处理」按钮左侧，其它窗口没有入口按钮，退化为右上角。 -->
+  <AttentionNoticeChip />
 
   <!-- ask_user 结构化问答弹窗（全局唯一宿主：聊天 / 集群 / 控制台 / 工作流共用） -->
   <AskUserHost />
@@ -1634,6 +1799,40 @@ import { useTallLayout } from '@/composables/useTallLayout'
   .bottom-nav-item.active {
     color: var(--fontActiveColor);
     background-color: var(--menuActiveColor);
+  }
+
+  /* ============ 待我处理（导航栏入口 + 角标） ============
+     入口出现在四种位置：左侧导航 / 顶栏 / 窄窗口顶栏 / 底部导航，都紧邻「设置」左侧。
+     角标绝对定位在图标右上角；数字只算「待我处理」（动态未读用蓝点，P3 才加）。 */
+  .attention-entry { position: relative; }
+  /* 未读小蓝点：只在没有红色待办数字时出现（有真正待办时红色优先） */
+  .attention-dot {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #409eff;
+    pointer-events: none;
+    box-shadow: 0 0 0 1.5px var(--menuColor);
+  }
+  .attention-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 4px;
+    border-radius: 7px;
+    background: #f56c6c;
+    color: #fff;
+    font-size: 9.5px;
+    font-weight: 600;
+    line-height: 14px;
+    text-align: center;
+    pointer-events: none;
+    box-shadow: 0 0 0 1.5px var(--menuColor);
   }
 
   /* 插件收纳启动器（fa fa-th-large）：与普通导航按钮同样式，只是**不参与收缩 / 不被裁掉**——

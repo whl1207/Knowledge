@@ -76,7 +76,7 @@ export function runToolGroupsSelfTest(): ToolGroupsCase[] {
   push('没有工具掉进「其他」兜底组',
     !sections.some((s) => s.id === OTHER_GROUP_ID),
     sections.filter((s) => s.id === OTHER_GROUP_ID).flatMap((s) => s.rows.map((r) => r.name)).join(','))
-  push('全部 8 个能力域都出现（含 MCP 与插件）',
+  push('全部能力域都出现（含 MCP 与插件）',
     sections.length === TOOL_GROUPS.length && sections.some((s) => s.id === INTEGRATION_GROUP_ID),
     sections.map((s) => s.id).join(','))
 
@@ -86,10 +86,11 @@ export function runToolGroupsSelfTest(): ToolGroupsCase[] {
     sectionOf('read_file') === 'files' && sectionOf('write_file') === 'files',
     `${sectionOf('read_file')} / ${sectionOf('write_file')}`)
   push('mcp_call 在「MCP 与插件」', sectionOf('mcp_call') === INTEGRATION_GROUP_ID, sectionOf('mcp_call'))
-  push('browser_* 只在「浏览器自动化」（不按前缀吸走别的工具）',
-    registryNames.filter((n) => n.startsWith('browser_')).every((n) => sectionOf(n) === 'browser') &&
-    sections.find((s) => s.id === 'browser')!.rows.every((r) => r.name.startsWith('browser_')),
-    sections.find((s) => s.id === 'browser')!.rows.map((r) => r.name).join(','))
+  push('browser_* 只在「浏览器自动化 / 扩展」两组（不按前缀吸走别的工具）',
+    registryNames.filter((n) => n.startsWith('browser_')).every((n) => sectionOf(n) === 'browser' || sectionOf(n) === 'browser-extra') &&
+    sections.find((s) => s.id === 'browser')!.rows.every((r) => r.name.startsWith('browser_')) &&
+    sections.find((s) => s.id === 'browser-extra')!.rows.every((r) => r.name.startsWith('browser_')),
+    [sections.find((s) => s.id === 'browser')!, sections.find((s) => s.id === 'browser-extra')!].map((s) => s.rows.map((r) => r.name).join(',')).join(' | '))
   push('web_fetch 属于「联网搜索」而不是浏览器组', sectionOf('web_fetch') === 'web', sectionOf('web_fetch'))
 
   // ---- 4) 插件工具：名字随便起，都归「MCP 与插件」 ----
@@ -122,8 +123,8 @@ export function runToolGroupsSelfTest(): ToolGroupsCase[] {
 
   // ---- 7) 默认折叠：浏览器 / 插件默认收起，常用组默认展开 ----
   const defOf = (id: string) => TOOL_GROUPS.find((g) => g.id === id)!
-  push('浏览器与 MCP/插件默认折叠',
-    !!defOf('browser').defaultCollapsed && !!defOf(INTEGRATION_GROUP_ID).defaultCollapsed)
+  push('浏览器 / 扩展工具 / MCP 与插件默认折叠',
+    !!defOf('browser').defaultCollapsed && !!defOf('browser-extra').defaultCollapsed && !!defOf(INTEGRATION_GROUP_ID).defaultCollapsed)
   push('文件 / 对话 / 联网 默认展开',
     !defOf('files').defaultCollapsed && !defOf('interaction').defaultCollapsed && !defOf('web').defaultCollapsed)
 

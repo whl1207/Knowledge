@@ -75,6 +75,9 @@ _*.txt
 # 内部设计 / 论文材料（不入库；使用说明书与 Linux 打包指南在 manual/）
 docs/
 
+# 外部参考仓库（只读阅研用，目前是 dsh-superagent-prototype；不入库）
+.dsh-superagent-prototype/
+
 # 运行 / 测试产生的任务文件与临时导出（示例数据请另建目录，不要放回仓库）
 *.task.bak
 *.tmp

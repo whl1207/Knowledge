@@ -6,7 +6,7 @@ import * as XLSX from 'xlsx'
 import { usestore } from '@/store'
 import * as kbAi from '@/shared/kbAiClient'
 import block_md from '@/components/block_md.vue'
-import { splitQuestionText, detectDuplicateGroups, answerText } from '@/shared/kbQuestions'
+import { splitQuestionText, detectDuplicateGroups, answerText, choiceLabelsOf } from '@/shared/kbQuestions'
 import { cosineSimilarity } from '@/shared/kbRetrieval'
 import type { KbQuestion, DupGroup, QuestionAnswerRef } from '@/shared/kbQuestions'
 
@@ -423,6 +423,12 @@ const confirmPicker = async () => {
       ...(qText && qText !== (q.text || '') ? { text: qText } : {}),
       // 答案文本留空 → 移除外部答案（此时答案退化为所选切片内容）；非空则作为外部参考答案
       extraAnswer: ans || undefined,
+    }
+    // 选择题：答案文本框如果改成了某个选项正文，同步更新正确标签；否则清掉旧标签，
+    // 避免“答案文字换了、学习模块还按旧选项判分”。
+    if (q.choiceMap && typeof q.choiceMap === 'object' && Object.keys(q.choiceMap).length) {
+      const labels = choiceLabelsOf(ans, q.choiceMap)
+      patch.answerChoices = labels.length ? labels : undefined
     }
     // 仅当知识库存在切片时才允许改参考切片（无切片时保留原 answerBlocks，避免误清空）
     if (hasSlices.value) {

@@ -748,6 +748,12 @@
                   </li>
                 </ul>
               </div>
+              <div class="menu-item" @click="compactContextFromMenu">
+                <i class="fa" :class="compactingContext ? 'fa-spinner fa-spin' : 'fa-compress'"></i>
+                {{ compactingContext
+                  ? (store.locales=='zh' ? '正在压缩上下文…' : 'Compacting context…')
+                  : (store.locales=='zh' ? '压缩上下文' : 'Compact context') }}
+              </div>
               <div class="menu-item" @click="clearCurrentChatFromMenu">
                 <i class="fa fa-trash"></i> {{ store.locales=='zh' ? '清空聊天' : 'Clear Chat' }}
               </div>
@@ -2458,6 +2464,8 @@ const contextMenuVisible = ref(false)
 const contextMenuPos = ref({ x: 0, y: 0 })
 const contextMenuTargetIndex = ref<number | null>(null)
 const isInputContextMenu = ref(false)
+/** 右键「压缩上下文」进行中（避免重复触发） */
+const compactingContext = ref(false)
 /** 右键打开菜单时保存的用户选中文字 */
 const contextMenuSelectedText = ref('')
 
@@ -2534,6 +2542,42 @@ const clearCurrentChatFromMenu = async () => {
   contextMenuVisible.value = false
   contextMenuTargetIndex.value = null
   await clearCurrentChat()
+}
+
+/**
+ * 右键菜单手动压缩上下文：与发送前自动压缩同一套逻辑（旧轮次摘要写入 chat.compaction，
+ * 可见消息不变）。不要求在阈值以上，用户想压就压。
+ */
+const compactContextFromMenu = async () => {
+  hideContextMenu()
+  const chat: any = currentChat.value
+  if (!chat || !Array.isArray(chat.messages) || !chat.messages.length) return
+  if (compactingContext.value) return
+  const zh = store.locales == 'zh'
+  if (chat.isGenerating || globalExecutionState.value.isExecuting) {
+    ElMessage.warning(zh ? '正在生成中，等回答结束后再压缩上下文' : 'Still generating — compact after the current answer finishes')
+    return
+  }
+  compactingContext.value = true
+  try {
+    const before = estimateChatContextTokens(chat)
+    const res = await compactChat(chat, {
+      summarize: async (prompt: string) => runOneShotLlm(prompt),
+    })
+    if (!res.ok) {
+      ElMessage.warning(zh ? `没有压缩：${res.error || '可压缩内容不足'}` : `Nothing compacted: ${res.error || 'not enough old turns'}`)
+      return
+    }
+    saveChats()
+    const after = estimateChatContextTokens(chat)
+    ElMessage.success(zh
+      ? `已压缩 ${res.dropped} 条旧消息${res.fallback ? '（无 LLM 兜底摘要）' : ''}：约 ${formatTokenCompact(before)} → ${formatTokenCompact(after)} tokens`
+      : `Compacted ${res.dropped} old messages${res.fallback ? ' (fallback summary)' : ''}: about ${formatTokenCompact(before)} → ${formatTokenCompact(after)} tokens`)
+  } catch (e: any) {
+    ElMessage.error(zh ? `压缩失败：${e?.message || e}` : `Compaction failed: ${e?.message || e}`)
+  } finally {
+    compactingContext.value = false
+  }
 }
 
 const exportChatFromMenu = () => {
@@ -6736,7 +6780,13 @@ const createNewChat = async (workspace?: string) => {
   currentUploads.value = []
   const chat = createNewChatData()
   const ws = String(workspace || '').trim()
-  if (ws) chat.workspace = ws
+  if (ws) {
+    // 从某个工作区分组头「+」新建：明确归属该工作区（否则会被新聊天的 noWorkspace 默认吃掉）
+    chat.workspace = ws
+    chat.noWorkspace = false
+    // 工作区旁的新建对话默认进入智能体模式（内部 mode = agent2，即「智能体」统一入口）
+    chat.mode = 'agent2'
+  }
   chats.value.push(chat)
   currentChatIndex.value = chats.value.length - 1
   // 细长布局：新建后直接进入整屏对话（列表收起），否则新对话被列表盖住、没法马上输入

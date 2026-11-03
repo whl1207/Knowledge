@@ -11,7 +11,7 @@
  * | `write_file` / `replace_in_file` / `multi_replace` | 同上（真写进手机目录） |
  * | `kb_search` | 渲染层检索（`shared/kbRetrieval`，与主页问答同一套） |
  * | `web_fetch` / `web_search` | 渲染层 `fetch`（受浏览器同源策略约束，失败时给出可操作提示） |
- * | `ask_user` / `update_plan` / `update_todo` | 纯界面状态 |
+ * | `ask_user` / `update_plan` / `update_todo` / `report_run` | 纯界面状态 |
  *
  * 语义尽量对齐主进程实现（返回形状、唯一性校验、原子多替换、差异预览、截断续读），
  * 但**不追求逐字一致**：凡是宿主独有的能力（跑代码 / shell / 子代理 / MCP / 技能 / 插件工具）
@@ -32,10 +32,11 @@ import { formatGlobText, formatGrepText, type GrepHitText } from '@/shared/searc
 import { parseTodoList } from '@/shared/agentTodo'
 import { parseAskQuestions, askAnswersToModel, askAnswersText } from '@/shared/agentAsk'
 import { planReviewMessage, type PlanReviewOutcome } from '@/shared/agentPlanReview'
+import { normalizeRunReport, runReportStateLabel } from '@/shared/agentRunReport'
 import { enabledWebFetchChannels, normalizeWebFetchConfig, webFetchChannelMeta } from '@/shared/webFetch'
 import { isBotChallengePage } from '@/shared/webFetchHelpers'
 import { runDeepSeekFetchApi } from '@/shared/deepseekApi'
-import type { TodoItem, AskUserAnswer, AskUserQuestion } from '@/types/agent'
+import type { TodoItem, AskUserAnswer, AskUserQuestion, RunReport } from '@/types/agent'
 
 export interface RendererToolResult {
   ok: boolean
@@ -59,6 +60,8 @@ export interface RendererToolContext {
   setPlan: (plan: string | null) => void
   setTodos: (todos: TodoItem[]) => void
   getTodos: () => TodoItem[]
+  /** report_run：上报运行状态（整值替换；null = 清除）。与桌面端同一份契约 */
+  setRunReport: (report: RunReport | null) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +73,7 @@ export const RENDERER_TOOL_NAMES = [
   'read_file', 'write_file', 'replace_in_file', 'multi_replace',
   'list_dir', 'search_files', 'glob', 'kb_search',
   'web_fetch', 'web_search',
-  'ask_user', 'update_plan', 'update_todo', 'exit_plan_mode',
+  'ask_user', 'update_plan', 'update_todo', 'exit_plan_mode', 'report_run',
 ] as const
 
 export type RendererToolName = (typeof RENDERER_TOOL_NAMES)[number]
@@ -234,6 +237,11 @@ const SCHEMAS: Record<string, any> = {
   exit_plan_mode: fn('exit_plan_mode', '把已完成的计划提交给用户评审（Approve / 继续完善）。改动大、不可逆、或方向需要用户拍板的任务，先用 update_plan 画出计划，再用本工具请求批准；批准后才开始动手。用户选择「继续完善」时本工具会失败并带回反馈，请修订后重新提交。', {
     plan: str('完整计划文本（Markdown，建议从标题开始）'),
   }, ['plan']),
+  report_run: fn('report_run', '上报本次运行的状态，让「待我处理」面板知道什么时候需要人。只在需要人时用（blocked / failed / ready），或长任务中途给一句进展；不要每步都上报。blocked / failed / ready 会进入用户的面板，progress / waiting / dropped 只记录。summary 一句话（≤300 字）；需要人时在 question 里给一个问题（≤500 字）。用户回话后状态会自动清除。', {
+    state: { type: 'string', enum: ['progress', 'waiting', 'ready', 'blocked', 'failed', 'dropped'], description: 'progress 还在做 | waiting 等触发 | ready 有结果等人验收 | blocked 卡住等人 | failed 失败等人处理 | dropped 无需处理（收口）' },
+    summary: str('一句话说明现状（面向用户，≤300 字）'),
+    question: str('需要人时的一个具体问题（≤500 字；不需要人时省略）'),
+  }, ['state', 'summary']),
 }
 
 /** 按白名单取工具 schema（过滤掉本层不支持的，避免模型调用必然失败的工具） */
@@ -948,6 +956,21 @@ async function toolUpdateTodo(input: any, ctx: RendererToolContext): Promise<Ren
   return { ok: true, value: { todos: parsed.todos, counts: parsed.counts, cleared: parsed.cleared, message: parsed.message } }
 }
 
+/** report_run：与桌面端同一份契约（normalizeRunReport），保证两端判定一致 */
+async function toolReportRun(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
+  const parsed = normalizeRunReport(input)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  const report: RunReport = { ...parsed.report, at: Date.now() }
+  ctx.setRunReport(report)
+  const label = runReportStateLabel(report.state, true)
+  const message = report.state === 'blocked' || report.state === 'failed' || report.state === 'ready'
+    ? `已记录（${label}），并会出现在用户的「待我处理」面板里。`
+    : report.state === 'dropped'
+      ? `已记录（${label}）；用户不会收到通知，本任务可视为收口。`
+      : `已记录（${label}）；这是内部进度，不会打扰用户。`
+  return { ok: true, value: { state: report.state, accepted: true, message } }
+}
+
 async function toolExitPlanMode(input: any, ctx: RendererToolContext): Promise<RendererToolResult> {
   const plan = String(input?.plan ?? '').trim()
   if (!plan) return { ok: false, error: 'plan 参数必填：请提交完整计划（Markdown，从标题开始书写）供用户评审' }
@@ -987,6 +1010,7 @@ export async function executeRendererTool(
       case 'ask_user': return await toolAskUser(input, ctx)
       case 'update_plan': return await toolUpdatePlan(input, ctx)
       case 'update_todo': return await toolUpdateTodo(input, ctx)
+      case 'report_run': return await toolReportRun(input, ctx)
       case 'exit_plan_mode': return await toolExitPlanMode(input, ctx)
       default: return { ok: false, error: hostOnlyToolError(name) }
     }

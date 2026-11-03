@@ -303,10 +303,25 @@ export async function listModels(spec: KbModelSpec): Promise<string[]> {
 /**
  * 文本嵌入。input 为单个字符串或字符串数组，返回同顺序的向量数组（number[][]）。
  * 注意：部分来源（Anthropic / DeepSeek Responses 接口样式 / 不支持嵌入的自定义端点）会抛出明确错误。
+ *
+ * 兜底来源（如 LM Studio 8080）不可达时，会再尝试当前对话来源（如 12345）的嵌入端点：
+ * 两个来源分开配置时，旧实现会直接失败并把异常吞掉，用户只看到控制台报错。
  */
 export async function embed(spec: KbModelSpec, input: string | string[]): Promise<number[][]> {
-  // 当前来源无嵌入模型时，嵌入回退到 embedFallback（如 Ollama）；聊天/处理不受影响
   const eff = effectiveEmbedSpec(spec)
+  try {
+    return await embedWithSpec(eff, input)
+  } catch (e) {
+    // 只有真的换到了兜底来源、且当前来源也声明了嵌入模型时才回退当前来源
+    if (eff !== spec && (spec.embed || spec.config?.embed_model)) {
+      console.warn('[kbAi] 兜底嵌入来源失败，尝试改用当前来源嵌入:', (e as any)?.message || e)
+      return await embedWithSpec(spec, input)
+    }
+    throw e
+  }
+}
+
+async function embedWithSpec(eff: KbModelSpec, input: string | string[]): Promise<number[][]> {
   const type = normalizeLlmType(eff.llmType || 'ollama')
   const cfg = eff.config || {}
   const model = eff.embed || cfg.model || ''
