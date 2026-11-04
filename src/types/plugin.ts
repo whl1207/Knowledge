@@ -14,6 +14,7 @@
  */
 
 import type { PluginId } from '@/types/ids'
+import type { FileViewerDecl } from '@/shared/fileViewers'
 import type { ToolDefinition, ToolRegistryEventMap } from '@/types/tool'
 import type { AgentPluginEventMap } from '@/types/agent'
 import type { PluginFsApi } from '@/shared/fsContract'
@@ -80,6 +81,8 @@ export interface AikmPluginManifest {
   declares?: {
     tools?: string[]
     slots?: string[]
+    /** 声明的文件查看器；真实注册以 ctx.fileViewers.register 为准 */
+    fileViewers?: FileViewerDecl[]
   }
 }
 
@@ -122,6 +125,8 @@ export interface PluginSnapshot {
   config: Record<string, unknown>
   /** 清单声明的槽位（P1 才真正渲染） */
   declaredSlots: string[]
+  /** 清单声明的文件查看器（空 = 没有声明） */
+  declaredFileViewers?: FileViewerDecl[]
   /** 失效原因（status = invalid / failed 时非空） */
   error: string | null
   loadedAt: number | null

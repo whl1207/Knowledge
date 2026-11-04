@@ -346,7 +346,9 @@ export const CONSTRAINTS_ZH = `【必须遵守的硬约束（宿主会校验或�
 3. main 与 client 至少声明一个（main = 主进程半边，client.entry = 界面半边），路径必须是插件目录内的相对路径。
 4. declares.slots 必须列全你要用的所有槽位，出现未知槽位会被拒绝；只允许这些槽位：
    panel.main（主面板 + 导航按钮）、settings.tab（设置页签）、settings.card（插到已有设置页的卡片，需 meta.target）、
-   swarm.workbench.tab（集群工作台页签）、chat.message.actions（聊天消息级按钮）。
+   swarm.workbench.tab（集群工作台页签）、chat.message.actions（聊天消息级按钮）、file.viewer（文件查看器正文）。
+   要接管某种文件格式时，在 declares.fileViewers 里声明扩展名、再调用 ctx.fileViewers.register(def)，
+   并把组件注册到 file.viewer 槽位（key = 查看器 id）。
    settings.tab 的 key 就是设置页 id（用 plugin-<插件 id> 前缀，别占用内置页 id），**meta.group 只能填已存在的一级分组 id（省略即内置「插件」分组，填不存在的 id 会多出一个同名「插件」一级菜单）**；
    settings.card 的 meta.target 必填（内置设置页 id），不写会出现在所有设置页。细节与完整示例见「设置页签 / 设置卡片模板」一节。
 5. 用到宿主能力必须声明 permissions（清单见 plugin_dev_host）；未声明就调用会直接抛错。
@@ -414,7 +416,9 @@ export const CONSTRAINTS_EN = `[Hard constraints the host enforces]
 3. Declare main and/or client (main = main-process half, client.entry = UI half); paths must be relative to the plugin folder.
 4. declares.slots must list every slot you use; unknown slots are rejected. Allowed slots:
    panel.main (main panel + its nav button), settings.tab (settings page tab), settings.card (card injected into an existing settings page, needs meta.target),
-   swarm.workbench.tab (swarm workbench tab), chat.message.actions (per-message buttons).
+   swarm.workbench.tab (swarm workbench tab), chat.message.actions (per-message buttons), file.viewer (file viewer body).
+   To take over a file format, declare the extensions in declares.fileViewers, call ctx.fileViewers.register(def), and register
+   the component into the file.viewer slot (key = viewer id).
    A settings.tab key is the settings page id (prefix it with plugin-<plugin id>, never reuse a built-in page id) and **meta.group may only be an existing top-level group id (omit it for the built-in Plugins group; a non-existent id adds a second “Plugins” top-level menu)**;
    settings.card requires meta.target (a built-in settings page id) — without it the card appears on every settings page. See the “Settings tab / card template” section for the full example.
 5. Host capabilities require permissions (the full list is in plugin_dev_host's output — it is generated from what this build actually supports); calling without declaring throws. Users must confirm the requested

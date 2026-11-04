@@ -1931,6 +1931,7 @@ class PluginHost {
       clientEntry: rec.manifest?.client?.entry ?? null,
       config: { ...rec.config },
       declaredSlots: rec.manifest?.declares?.slots ?? [],
+      declaredFileViewers: rec.manifest?.declares?.fileViewers ?? [],
       error: rec.error,
       loadedAt: rec.loadedAt,
     }

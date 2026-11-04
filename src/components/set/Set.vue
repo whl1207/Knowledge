@@ -79,7 +79,7 @@ const navTree = ref<NavItem[]>([
     children: [
       { id: 'view', icon: 'fa fa-eye', title_zh: '基础', title_en: 'Basic' },
       { id: 'data', icon: 'fa fa-database', title_zh: '数据', title_en: 'Data' },
-      { id: 'fileassoc', icon: 'fa fa-link', title_zh: '关联', title_en: 'Associations' },
+      { id: 'fileassoc', icon: 'fa fa-link', title_zh: '文件', title_en: 'Files' },
       { id: 'other', icon: 'fa fa-ellipsis-h', title_zh: '其他', title_en: 'Other' },
     ]
   },

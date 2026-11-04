@@ -18,6 +18,7 @@
     :remote-root-id="remoteRootId"
     :remote-rel="remoteRel"
     :label="label"
+    surface="dock"
     @update:view="onView"
   />
   <div v-else class="dock-file-empty">

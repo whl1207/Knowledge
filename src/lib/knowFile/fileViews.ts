@@ -65,6 +65,12 @@ export const VIEW_PRESENTATION = nameOfKey('presentation')
 
 /** 「Office 编辑」视图的 key（对 .docx / .xlsx / .pptx 生效；PDF 不在此列，继续用 PdfViewer） */
 export const OFFICE_VIEW_KEY = 'office' as const
+/** 插件查看器视图 key 前缀：`plugin:<viewer-id>` */
+export const PLUGIN_VIEW_PREFIX = 'plugin:'
+export const isPluginViewKey = (v: unknown): v is string =>
+  String(v || '').startsWith(PLUGIN_VIEW_PREFIX)
+export const pluginViewerIdOf = (v: unknown): string =>
+  isPluginViewKey(v) ? String(v).slice(PLUGIN_VIEW_PREFIX.length) : ''
 /** 「Office 编辑」适用的扩展名（与 platform/office.ts 的 EXT_TO_TYPE 一致，改动时一起改） */
 const OFFICE_VIEW_EXTS = ['.docx', '.xlsx', '.xlsm', '.pptx']
 /**

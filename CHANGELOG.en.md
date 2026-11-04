@@ -11,11 +11,17 @@
 
 ### Added
 
+- **Plugins can register file viewers; File Behavior uses responsive Grid cards**: plugins declare `declares.fileViewers` and call `ctx.fileViewers.register` to handle custom formats; Settings → General → Files (formerly Associations) manages in-app views and system default apps in responsive grid cards (one column on narrow windows) — Markdown lists Browse / Source / Visual / Mind Map / Presentation, Word lists Office / Browse / Mind Map, and plugin views are marked by source and can be set as default.
 - **New “Trajectory” tab in the Home right dock**: modelled on the DSH Trajectory view, it groups records by turn — user messages, replies, reasoning, tool calls and compaction — with tool / token / cache / elapsed summaries; opened manually as a new tab and read-only.
 - **Office MCP can convert legacy .doc to .docx**: new `convert_doc_to_docx` uses Microsoft Word COM on Windows and falls back to LibreOffice; if neither is available it fails instead of producing a formatting-lossy text-only .docx. The default output is a same-named .docx next to the source, ready for `open_document`.
 - **Markdown in Learning questions / answers / mistake book**: question stems, answer explanations (including slice content in “summarize this slice”), mistake details and reference slices, exam stems / options / reference answers are rendered as Markdown.
 - **Editable context window**: the Context Window field under Settings → Models → source now accepts a manual override (clear it to return to auto); custom / GPUStack sources also try reading context length from `/v1/models` and similar endpoints.
 - **No workspace path for workspace-less agents**: when a chat explicitly uses no workspace, the system prompt no longer injects the default workspace path and the tool cwd does not fall back to it.
+
+### Fixed
+
+- **Office native views no longer cover Settings / view menus in single-window mode**: the WebContentsView is hidden while a settings overlay or view menu is open and restored afterwards; PowerPoint keeps only the Office editor view.
+- **File Behavior gained a separate default column**: File type / Extension / Available views / In-app default / System default each have their own column, and the selects no longer carry extra margins.
 
 ## 2026-11-03
 

@@ -11,8 +11,12 @@ import Edit_Block from '@/components/knowFile/view/Edit_Block.vue'
 import md_mind from '@/components/knowFile/view/md_mind.vue'
 import md_ppt from '@/components/knowFile/view/md_ppt.vue'
 import OfficeView from '@/components/knowFile/view/OfficeView.vue'
-import { FILE_VIEWS, fileViewByKey, OFFICE_VIEW_KEY } from '@/lib/knowFile/fileViews'
+import FileViewerHost from '@/components/plugin/FileViewerHost.vue'
+import { FILE_VIEWS, fileViewByKey, OFFICE_VIEW_KEY, isPluginViewKey, pluginViewerIdOf, PLUGIN_VIEW_PREFIX } from '@/lib/knowFile/fileViews'
+import { resolvePluginFileViewers } from '@/lib/plugin/fileViewers'
+import { viewerEntryById } from '@/lib/knowFile/fileViewerCatalog'
 import { officeTypeForPath, loadOfficeAvailability, type OfficeEditorType } from '@/lib/knowFile/office'
+import { setOfficeViewsVisible } from '@/lib/knowFile/office'
 import { shouldSkipTextPreview } from '@/lib/knowFile/textPreview'
 // 专属文件的判别与编辑器入口统一取自 fileEditors.ts（.drawio / .excalidraw / .flow.yml / .data / .task）
 import { detectEditorKind, FILE_EDITORS } from '@/components/knowFile/fileEditors'
@@ -50,6 +54,8 @@ const props = defineProps<{
   remoteRootId?: string
   remoteRel?: string
   label?: string
+  /** 插件查看器入口：知识管理 / Home 右侧栏 / 独立文件窗口 */
+  surface?: 'knowledge' | 'dock' | 'window'
 }>()
 
 const emit = defineEmits<{
@@ -88,11 +94,10 @@ const drawioPage = ref('')
 // 独立窗口支持的视图类型（浏览/源码编辑/思维导图/演示/块编辑）
 // 视图 key 顺序 / 显示名统一取自 fileViews.ts（顺序：浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）
 const VIEW_TYPES = FILE_VIEWS.map((v) => v.key)
-// 通用视图集合（不含「Office 编辑」）：Office 视图只对本地 Word / Excel / PPT 有意义，
-// 由 availableViews 按文件类型单独插入，绝不能出现在 Markdown / 代码 / 图片等格式的选项里
-const GENERIC_VIEW_TYPES = VIEW_TYPES.filter((k) => k !== OFFICE_VIEW_KEY)
-type ViewType = (typeof FILE_VIEWS)[number]['key']
+type ViewType = (typeof FILE_VIEWS)[number]['key'] | `plugin:${string}`
 const viewType = ref<ViewType>('read')
+/** 内置视图或插件查看器视图（`plugin:<id>`） */
+const isKnownView = (v: string): v is ViewType => VIEW_TYPES.includes(v as any) || isPluginViewKey(v)
 
 // ---- 内嵌 Office 编辑器（Word / Excel / PPT）----
 // 编辑器内核是按需构建的（npm run office:build），这里先探测各类型是否可用；
@@ -147,12 +152,41 @@ const fileExt = computed(() => {
   const i = filePath.value.lastIndexOf('.')
   return i >= 0 ? filePath.value.substring(i).toLowerCase() : ''
 })
+const viewerSurface = computed<'knowledge' | 'dock' | 'window'>(() => (
+  props.surface || (props.embedded ? 'knowledge' : 'window')
+))
+/** 当前文件可用的插件查看器（按扩展名 / 入口过滤） */
+const pluginViewerOptions = computed(() => (
+  isRemoteFile.value || !filePath.value ? [] : resolvePluginFileViewers(filePath.value, viewerSurface.value)
+))
+/** 是否有插件查看器能接手当前文件（远程文件不接：插件只拿本地路径） */
+const pluginViewerAvailable = computed(() => pluginViewerOptions.value.length > 0)
+/** 该扩展名是否已有内置专属处理（有则不被插件默认抢走，但用户仍可在视图菜单选择插件） */
+const hasBuiltinFormatHandler = computed(() => (
+  isWordFile.value || isHtmlFile.value || isCodeFile.value || isMediaFile.value || isPdfFile.value
+  || isSourceOnlyFile.value || isMarkdownFile.value || isPlainTextFile.value
+  || isExcalidraw.value || isDrawio.value || isFlowDsl.value || isDataCanvas.value || isTask.value
+  || isMermaid.value || EXCEL_EXTS.includes(fileExt.value) || PPTX_EXTS.includes(fileExt.value)
+  || TEXT_TABLE_EXTS.includes(fileExt.value)
+))
 const isCodeFile = computed(() => CODE_FILE_EXTS.includes(fileExt.value))
 // html：提供浏览（默认）与源码编辑两个视图
 const isHtmlFile = computed(() => fileExt.value === '.html')
 const isMediaFile = computed(() => IMAGE_EXTS.includes(fileExt.value) || AUDIO_VIDEO_EXTS.includes(fileExt.value))
-// pdf：固定单一浏览视图，不显示视图切换器
+// PDF：固定单一浏览视图，不显示视图切换器
 const isPdfFile = computed(() => fileExt.value === '.pdf')
+// Markdown：浏览 / 源码 / 可视编辑 / 思维导图 / 演示（唯一保留完整视图组的文本格式）
+const isMarkdownFile = computed(() => ['.md', '.markdown', '.mdown', '.mkd'].includes(fileExt.value))
+// 纯文本：浏览 + 源码编辑即可，不再提供导图 / 演示
+const isPlainTextFile = computed(() => ['.txt', '.log'].includes(fileExt.value))
+// 代码 / 配置 / 样式表：只需要源码编辑；浏览、可视编辑、导图、演示都没有意义
+const SOURCE_ONLY_EXTS = [
+  '.js', '.jsx', '.ts', '.tsx', '.vue', '.py', '.java', '.go', '.rs', '.c', '.cpp', '.h', '.hpp',
+  '.cs', '.php', '.rb', '.sh', '.sql',
+  '.json', '.jsonc', '.yaml', '.yml', '.toml', '.xml', '.ini', '.conf', '.env',
+  '.css', '.scss', '.less',
+]
+const isSourceOnlyFile = computed(() => SOURCE_ONLY_EXTS.includes(fileExt.value))
 // Word 文档（.docx/.doc）：预览为转换后的 Markdown，只提供浏览 / 思维导图两个只读视图
 const isWordFile = computed(() => fileExt.value === '.docx' || fileExt.value === '.doc')
 // 远程文本/Markdown 类（.md / .docx 转换后）才支持 导图/演示 等高级只读视图
@@ -173,10 +207,12 @@ const showViewSwitcher = computed(() => {
   // 标题栏再摆一个「Office 编辑 ⌄」只会让用户以为还能换别的（下拉里只有一项）
   if (availableViews.value.length <= 1) return false
   if (isRemoteFile.value) return true
+  // 有插件查看器时至少要在「插件视图 / 内置视图」之间切换
+  if (pluginViewerAvailable.value) return true
   // 内嵌 Office 编辑器可用时（.docx / .xlsx / .pptx）开放视图切换：
   // 这几类此前没有可切换视图（Excel 固定浏览），有真编辑器后切换才有意义
   if (availableViews.value.includes(OFFICE_VIEW_KEY as ViewType)) return true
-  return !isExcalidraw.value && !isDrawio.value && !isFlowDsl.value && !isDataCanvas.value && !isTask.value && !isCodeFile.value && !isMediaFile.value && !isPdfFile.value && !EXCEL_EXTS.includes(fileExt.value)
+  return !isExcalidraw.value && !isDrawio.value && !isFlowDsl.value && !isDataCanvas.value && !isTask.value && !isCodeFile.value && !isSourceOnlyFile.value && !isPlainTextFile.value && !isMediaFile.value && !isPdfFile.value && !EXCEL_EXTS.includes(fileExt.value)
 })
 // 可切换的视图选项（按文件类型过滤：html 仅浏览/源码编辑；Word 仅浏览/思维导图；csv/tsv 仅浏览/源码编辑）
 const baseAvailableViews = computed<ViewType[]>(() => {
@@ -191,10 +227,18 @@ const baseAvailableViews = computed<ViewType[]>(() => {
   if (isTask.value) return ['read']
   // Mermaid 图表（.mmd / .mermaid）：浏览（渲染图）+ 源码编辑（Monaco 改源码）
   if (isMermaid.value) return ['read', 'edit']
+  // 图片 / 音视频：只提供浏览（播放器 / 图片预览），不再暴露源码编辑 / 导图 / 演示等无关视图
+  if (isMediaFile.value) return ['read']
+  // Markdown 是唯一保留完整五视图的文本格式
+  if (isMarkdownFile.value) return ['read', 'edit', 'blockedit', 'mindmap', 'presentation']
+  // 纯文本：浏览 + 源码编辑
+  if (isPlainTextFile.value) return ['read', 'edit']
+  // 代码 / 配置 / 样式表：只保留源码编辑
+  if (isSourceOnlyFile.value) return ['edit']
   // Excel：默认与唯一视图都是「Office 编辑」（内嵌真表格编辑器）；内核未构建时保持原样
   if (EXCEL_EXTS.includes(fileExt.value)) return officeReady.value ? [OFFICE_VIEW_KEY as ViewType] : ['read']
-  // PPT：同上（内核未构建时退回原有视图集合，避免行为退化）
-  if (PPTX_EXTS.includes(fileExt.value)) return officeReady.value ? [OFFICE_VIEW_KEY as ViewType] : [...GENERIC_VIEW_TYPES]
+  // PPT：固定「Office 编辑」（内核未构建时由 OfficeView 给出构建提示）
+  if (PPTX_EXTS.includes(fileExt.value)) return [OFFICE_VIEW_KEY as ViewType]
   // csv/tsv：浏览（表格/Markdown）+ 源码编辑（原始文本）
   if (TEXT_TABLE_EXTS.includes(fileExt.value)) return ['read', 'edit']
   // 远程文件：默认只读；主机授权「可编辑 Markdown」时 .md 额外开放源码编辑
@@ -203,7 +247,8 @@ const baseAvailableViews = computed<ViewType[]>(() => {
     return isRemoteAdvanced.value ? ['read', 'mindmap', 'presentation'] : ['read']
   }
   if (isHtmlFile.value) return ['read', 'edit']
-  return [...GENERIC_VIEW_TYPES]
+  // 未知格式：先浏览，不再默认塞入编辑 / 导图 / 演示
+  return ['read']
 })
 
 /**
@@ -211,19 +256,41 @@ const baseAvailableViews = computed<ViewType[]>(() => {
  * 只在「本文件是真实的 Word / Excel / PPT + 对应内核已构建 + 非远程只读」时插入，
  * 因此不会给 Markdown / 代码 / 图片 / 远程预览等引入无关视图。
  */
+const pluginTakesOver = computed(() => pluginViewerOptions.value.some((v) => Number(v.priority) > 100))
 const availableViews = computed<ViewType[]>(() => {
-  const base = baseAvailableViews.value
-  if (!officeReady.value || isRemoteFile.value) return base
-  if (base.includes(OFFICE_VIEW_KEY as ViewType)) return base
-  // office 置顶：它是这几类文件的默认视图（也是切换器第一项）
-  return [OFFICE_VIEW_KEY as ViewType, ...base]
+  let list: ViewType[] = [...baseAvailableViews.value]
+  // 插件查看器：每个查看器都是独立的视图项（标题栏菜单 / 标签页菜单都可直接选）；
+  // 高优先级插件接管该格式时，不再暴露内置浏览 / 编辑 / 导图等无关视图。
+  if (pluginViewerAvailable.value) {
+    const pluginViews = pluginViewerOptions.value.map((v) => `${PLUGIN_VIEW_PREFIX}${v.id}` as ViewType)
+    list = pluginTakesOver.value ? pluginViews : [...pluginViews, ...list.filter((v) => !isPluginViewKey(v))]
+  }
+  if (officeReady.value && !isRemoteFile.value && !pluginTakesOver.value && !list.includes(OFFICE_VIEW_KEY as ViewType)) {
+    // office 置顶：它是这几类文件的默认视图（也是切换器第一项）
+    list = [OFFICE_VIEW_KEY as ViewType, ...list]
+  }
+  return list
 })
 // 视图选项显示名
 const viewLabel = (v: ViewType): string => {
+  if (isPluginViewKey(v)) {
+    const e = viewerEntryById(pluginViewerIdOf(v))
+    return e ? (store.locales == 'zh' ? e.titleZh : e.titleEn) : (store.locales == 'zh' ? '插件查看器' : 'Plugin viewer')
+  }
   const def = fileViewByKey(v)
-  if (def) return store.locales == 'zh' ? def.name : def.labelEn
-  return v
+  return def ? (store.locales == 'zh' ? def.name : def.labelEn) : v
 }
+/** 设置 → 通用 → 关联里选的默认查看器（扩展名 → 查看器 id） */
+const preferredView = computed<ViewType | null>(() => {
+  const id = String(store.UI.fileViewerDefaults?.[fileExt.value] || '')
+  if (!id) return null
+  // 表格里内置视图直接存 view key（read / office / edit…）
+  if (VIEW_TYPES.includes(id as any)) return id as ViewType
+  const e = viewerEntryById(id)
+  if (!e) return null
+  if (e.source === 'plugin') return `${PLUGIN_VIEW_PREFIX}${e.id}` as ViewType
+  return e.viewKey ? e.viewKey as ViewType : null
+})
 
 /**
  * 内嵌编辑器保存后：重新读盘并同步 store。
@@ -269,7 +336,7 @@ watch(() => props.page, (p) => {
 watch(() => props.view, (v) => {
   if (!props.embedded) return
   const next = (v || '') as ViewType
-  if (next && VIEW_TYPES.includes(next) && availableViews.value.includes(next) && next !== viewType.value) {
+  if (next && isKnownView(next) && availableViews.value.includes(next) && next !== viewType.value) {
     viewType.value = next
   }
 })
@@ -452,14 +519,21 @@ const viewMenuOpen = ref(false)
 
 /** 除当前视图外的其它视图（当前视图由左侧那颗按钮本身表示，避免重复） */
 const otherViews = computed(() => availableViews.value.filter((v) => v !== viewType.value))
-
+// 插件启用 / 卸载会改变可用视图：当前视图失效时立即回落到第一个可用项
+watch(availableViews, (list) => {
+  if (!list.length) return
+  if (!list.includes(viewType.value)) viewType.value = list[0]
+})
 function toggleViewMenu() {
   viewMenuOpen.value = !viewMenuOpen.value
+  // 原生 Office 视图永远盖在 DOM 上：切换条弹出时先隐藏，收起后恢复
+  setOfficeViewsVisible(!viewMenuOpen.value)
 }
 
 function selectView(v: ViewType) {
   viewMenuOpen.value = false
-  if (VIEW_TYPES.includes(v) && availableViews.value.includes(v)) {
+  setOfficeViewsVisible(true)
+  if (isKnownView(v) && availableViews.value.includes(v)) {
     viewType.value = v
     // 嵌入模式（主页右侧栏 / 知识管理标签）：宿主据此把视图写回标签，切走再回来沿用
     if (props.embedded) emit('update:view', v)
@@ -525,7 +599,7 @@ async function confirmLeave(): Promise<boolean> {
 /** 供宿主标签栏调用：切到指定视图（非法 / 不可用视图忽略） */
 function setView(v: string) {
   const next = String(v || '') as ViewType
-  if (VIEW_TYPES.includes(next) && availableViews.value.includes(next)) selectView(next)
+  if (isKnownView(next) && availableViews.value.includes(next)) selectView(next)
 }
 
 defineExpose({ confirmLeave, hasUnsaved, saveActiveView, availableViews, viewType, showViewSwitcher, filePath, setView })
@@ -538,12 +612,13 @@ function closeViewMenuOnOutside(e: Event) {
   const target = e.target
   if (e.type !== 'keydown' && el && target instanceof Node && el.contains(target)) return
   viewMenuOpen.value = false
+  setOfficeViewsVisible(true)
 }
 
 // 切换文件时收起视图切换条，避免残留
 // （注意：不能同时监听 availableViews —— 它是 computed，文件加载过程中任何相关状态变化
 //  都会让它重新求值，回调里就会把刚打开的切换条又关掉）
-watch(() => filePath.value, () => { viewMenuOpen.value = false })
+watch(() => filePath.value, () => { viewMenuOpen.value = false; setOfficeViewsVisible(true) })
 
 /** 数据画布保存成功：同步内存里的文件内容，并刷新标题栏（画布自己写的盘，无需再读文件） */
 const onDataCanvasSaved = (_path: string, content?: string) => {
@@ -640,17 +715,34 @@ onMounted(async () => {
   // 远程只读：默认浏览视图；代码类文件：默认（且仅）代码编辑视图，忽略 URL 传入的其他视图；其余默认浏览
   viewType.value = isRemoteFile.value
     ? 'read'
-    : isCodeFile.value
+    : isCodeFile.value || isSourceOnlyFile.value
       ? 'edit'
-      : (requestedView && VIEW_TYPES.includes(requestedView) ? requestedView : 'read')
+      : (requestedView && isKnownView(requestedView) ? requestedView as ViewType : 'read')
   // 受限类型（如 Word 只有 浏览/思维导图）收到不支持的视图请求（编辑/快编辑/演示）时回退到浏览
-  if (!availableViews.value.includes(viewType.value)) viewType.value = 'read'
+  if (!availableViews.value.includes(viewType.value)) viewType.value = availableViews.value[0] || 'read'
   // 内核可用时，Word / Excel / PPT 的默认视图就是「Office 编辑」：
   // 打开方（文件树 / 存储层的 openFileByMode）历史上统一给的是「浏览」，这里改正默认；
   // 只在本窗口刚打开、用户尚未操作时执行一次，不覆盖用户的显式切换
   // （远程只读文件不在其列：原生编辑器只能打开本地路径）
   if (officeReady.value && !isRemoteFile.value && viewType.value === 'read') {
     viewType.value = OFFICE_VIEW_KEY as ViewType
+  }
+  // 设置页指定的默认查看器优先（内置视图或插件查看器）
+  if (!isRemoteFile.value && preferredView.value && availableViews.value.includes(preferredView.value)) {
+    viewType.value = preferredView.value
+  }
+  // 插件查看器：未知扩展名默认用优先级最高的插件打开；已有内置专属处理的格式保持原默认，
+  // 用户仍可在视图菜单里手动切到插件查看器。
+  if (!isRemoteFile.value && pluginViewerAvailable.value && viewType.value === 'read' && !hasBuiltinFormatHandler.value) {
+    viewType.value = `${PLUGIN_VIEW_PREFIX}${pluginViewerOptions.value[0].id}` as ViewType
+  }
+  // 插件显式声明更高优先级（>100）时，可覆盖内置格式的默认视图；
+  // 用户在设置页明确选了内置默认视图时不抢。
+  if (
+    !isRemoteFile.value && !preferredView.value && pluginViewerAvailable.value
+    && viewType.value === 'read' && Number(pluginViewerOptions.value[0]?.priority || 0) > 100
+  ) {
+    viewType.value = `${PLUGIN_VIEW_PREFIX}${pluginViewerOptions.value[0].id}` as ViewType
   }
 
   // ★ 根因修复：文件独立窗口只承载「当前这一个文件」。
@@ -954,6 +1046,9 @@ onBeforeUnmount(() => {
     <!-- Mermaid 图表（.mmd / .mermaid）：浏览视图渲染图；源码编辑仍走通用 Edit_Code（Monaco） -->
     <div v-else-if="isMermaid && viewType === 'read'" class="file-view">
       <Mermaid :path="filePath" :content="fileContent" />
+    </div>
+    <div v-else-if="isPluginViewKey(viewType)" class="file-view">
+      <FileViewerHost :path="filePath" :surface="viewerSurface" :viewer-id="pluginViewerIdOf(viewType)" :remote="isRemoteFile" />
     </div>
     <div v-else-if="viewType === 'read'" class="file-view">
       <md_read :path="filePath" :content="fileContent" :loading="contentLoading" :is-remote="isRemoteFile" :remote-base64="remoteBase64" :remote-text="remoteText" @update:path="onMediaPathChange" @reload="onExternalReload" />

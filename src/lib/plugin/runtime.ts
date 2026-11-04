@@ -20,6 +20,7 @@ import { getPluginBridge, type PluginBridgeApi, type PluginClientBundle } from '
 import { createPluginLocaleApi, type PluginLocaleApi } from './locale'
 import { createPluginLlmApi, type PluginLlmApi } from './llm'
 import { createPluginFilesApi, releasePluginPdfCache, type PluginFilesApi } from './files'
+import { listLoadedFileViewers, registerPluginFileViewer, type LoadedFileViewer } from './fileViewers'
 import { createPluginFsApi } from './fs'
 import { createPluginAppApi, type PluginAppApi } from './appApi'
 import { createPluginAgentApi, type PluginAgentApi } from './agent'
@@ -114,6 +115,17 @@ export interface ClientPluginContext {
    * （选一次就记住、跨重启有效，可在「插件 → 数据」里撤销）。
    */
   readonly files: PluginFilesApi
+  /**
+   * 文件查看器：声明「哪些扩展名交给插件渲染」。
+   *
+   * 只注册元数据；正文组件必须同时注册到 `file.viewer` 槽位（key = 返回的 def.id）。
+   * 插件卸载时元数据与槽位条目都会自动撤销，知识管理 / Home 右侧栏会回落到内置查看器。
+   */
+  readonly fileViewers: {
+    register(def: import('@/shared/fileViewers').FileViewerDecl): () => void
+    /** 当前已注册的查看器（诊断 / 自查；不是业务数据源） */
+    list(): LoadedFileViewer[]
+  }
   /**
    * 文件能力（**两个半边同形状**；`ctx.files` 的超集）。
    *
@@ -388,6 +400,10 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
       permitted: (snapshot.permissions ?? []).includes('fs'),
       log: deps.log,
     }),
+    fileViewers: {
+      register: (def) => track(registerPluginFileViewer(snapshot.id, def)),
+      list: () => listLoadedFileViewers().filter((v) => v.pluginId === snapshot.id),
+    },
     fs: createPluginFsApi({
       pluginId: snapshot.id,
       permitted: (snapshot.permissions ?? []).includes('fs'),

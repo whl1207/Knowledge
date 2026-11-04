@@ -151,13 +151,31 @@ export async function officeSetVisible(viewId: string, visible: boolean): Promis
   }
 }
 
+/**
+ * 全局 Office 视图显隐协调。
+ *
+ * WebContentsView 永远盖在 DOM 上；设置浮层 / 右侧栏标签菜单等 DOM 覆盖层打开时，
+ * 必须让当前渲染层里所有 OfficeView 暂时隐藏，关闭后再刷新恢复。
+ */
+const officeVisibilityHandlers = new Set<(visible: boolean) => void>()
+
+export function registerOfficeViewVisibility(handler: (visible: boolean) => void): () => void {
+  officeVisibilityHandlers.add(handler)
+  return () => { officeVisibilityHandlers.delete(handler) }
+}
+
+export function setOfficeViewsVisible(visible: boolean): void {
+  for (const fn of officeVisibilityHandlers) {
+    try { fn(visible) } catch { /* 单个视图失败不影响其它视图 */ }
+  }
+}
+
 export interface OfficeEvent {
   viewId: string
   type: OfficeEditorType
   event: 'saved' | 'crashed' | string
   filePath?: string
 }
-
 /** 订阅编辑器事件；返回取消订阅函数 */
 export function onOfficeEvent(handler: (e: OfficeEvent) => void): () => void {
   const api = ipc()

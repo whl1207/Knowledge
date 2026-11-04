@@ -181,7 +181,9 @@ import ChatDockFiles from './ChatDockFiles.vue'
 import ChatDockTerminal from './ChatDockTerminal.vue'
 import ChatDockBrowser from './ChatDockBrowser.vue'
 import ChatDockFile from './ChatDockFile.vue'
-import { fileViewByKey } from '@/lib/knowFile/fileViews'
+import { fileViewByKey, isPluginViewKey, pluginViewerIdOf } from '@/lib/knowFile/fileViews'
+import { viewerEntryById } from '@/lib/knowFile/fileViewerCatalog'
+import { setOfficeViewsVisible } from '@/lib/knowFile/office'
 import {
   DOCK_TAB_KINDS,
   clampDockWidthInRoom,
@@ -436,10 +438,17 @@ interface DockMenuAction { value: string; label: string; icon: string; active: b
 interface DockMenuState { id: string; x: number; y: number; views: DockMenuAction[] }
 const viewMenu = ref<DockMenuState | null>(null)
 const viewNameOf = (key: string): string => {
+  if (isPluginViewKey(key)) {
+    const e = viewerEntryById(pluginViewerIdOf(key))
+    return e ? (props.zh ? e.titleZh : e.titleEn) : (props.zh ? '插件查看器' : 'Plugin viewer')
+  }
   const def = fileViewByKey(key)
   return def ? (props.zh ? def.name : def.labelEn) : key
 }
-const viewIconOf = (key: string): string => fileViewByKey(key)?.icon || 'fa fa-eye'
+const viewIconOf = (key: string): string => {
+  if (isPluginViewKey(key)) return viewerEntryById(pluginViewerIdOf(key))?.icon || 'fa fa-plug'
+  return fileViewByKey(key)?.icon || 'fa fa-eye'
+}
 
 /**
  * 点文件标签的图标：弹出这个文件能选的视图（md 就是 浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示 …）。
@@ -479,10 +488,13 @@ async function openTabMenu(tab: ChatDockTab, e: MouseEvent) {
   const x = Math.max(6, Math.min((rect?.left || 12), window.innerWidth - 186))
   const y = Math.max(6, Math.min((rect?.bottom || 40) + 4, window.innerHeight - 240))
   viewMenu.value = { id: tab.id, x, y, views }
+  // 原生 Office 视图永远在 DOM 之上：菜单弹出前先让它让位
+  setOfficeViewsVisible(false)
 }
 function chooseView(v: string) {
   const menu = viewMenu.value
   viewMenu.value = null
+  setOfficeViewsVisible(true)
   if (!menu) return
   if (typeof activeFilePane?.setView === 'function') activeFilePane.setView(v)
   emit('tab-view-change', menu.id, v)
@@ -493,6 +505,7 @@ const onViewMenuOutside = (e: Event) => {
   // 点在菜单内部时不能先关菜单，否则 click 还没派发元素就被移除了
   if (e.type !== 'keydown' && (e.target as HTMLElement)?.closest?.('.dock-view-menu')) return
   viewMenu.value = null
+  setOfficeViewsVisible(true)
 }
 onMounted(() => {
   document.addEventListener('mousedown', onViewMenuOutside)

@@ -64,7 +64,7 @@ import PluginBoundary from './PluginBoundary.vue'
 import { useAllSlotEntries, useResolvedSlot, useSlotEntries } from '@/lib/plugin/useSlots'
 import { slotRegistry, type SlotDefinition } from '@/lib/plugin/slots'
 import { SLOT_META_CORE, SLOT_META_KEEP_ALIVE, SLOT_META_PASS_OWNER, SLOT_OWNER_KEY } from '@/shared/pluginSlots'
-import { PANEL_MAIN_SLOT } from '@/lib/plugin/coreSlots'
+import { PANEL_MAIN_SLOT, FILE_VIEWER_SLOT } from '@/lib/plugin/coreSlots'
 
 const props = withDefaults(
   defineProps<{
@@ -74,6 +74,8 @@ const props = withDefaults(
     owner?: unknown
     /** 强制按「多条目」渲染（list 槽位默认即如此） */
     multiple?: boolean
+    /** file.viewer 专用：传给插件查看器组件的当前文件上下文（只读/受限 API） */
+    fileContext?: Record<string, unknown>
   }>(),
   { multiple: false },
 )
@@ -122,6 +124,7 @@ const isCoreEntry = computed(() => !!singleEntry.value?.meta?.[SLOT_META_CORE])
 
 /** 组件渲染所需 props（仅在条目显式要求时传 owner） */
 function componentProps(def: SlotDefinition): Record<string, unknown> {
+  if (props.name === FILE_VIEWER_SLOT) return { file: props.fileContext }
   return def.meta?.[SLOT_META_PASS_OWNER] ? { owner: props.owner } : {}
 }
 

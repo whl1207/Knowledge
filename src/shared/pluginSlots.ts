@@ -57,6 +57,12 @@ export const CORE_PLUGIN_SLOTS: readonly CorePluginSlotDef[] = [
     kind: 'list',
     desc: '聊天消息级操作按钮（追加在消息操作区）',
   },
+  {
+    name: 'file.viewer',
+    kind: 'keyed',
+    desc: '文件查看器正文：key 为 fileViewers[].id；组件通过 file 上下文 prop 读取当前文件',
+    requires: ['component'],
+  },
 ] as const
 
 export const CORE_PLUGIN_SLOT_NAMES: readonly string[] = CORE_PLUGIN_SLOTS.map((s) => s.name)

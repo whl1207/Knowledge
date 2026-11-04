@@ -44,6 +44,7 @@ export const CLIENT_CTX_MEMBERS: PluginCtxMembers = {
     'available', 'reason', 'pickFiles', 'pickDirectory', 'pickWritableDirectory', 'list', 'readText', 'readBase64',
     'readBytes', 'readSheet', 'renderPdfPage', 'openInApp', 'writeText', 'remove',
   ],
+  fileViewers: ['register', 'list'],
   // 文件能力（两侧同形状的超集）：目标身份 / 版本 / 字面量编辑；契约见 src/shared/fsContract.ts
   fs: ['available', 'reason', 'resolve', 'stat', 'readText', 'readBytes', 'readBase64', 'listDir', 'writeText', 'editText', 'remove', 'sheet'],
   app: ['info', 'agentPresets', 'setChromeHidden', 'chromeHidden'],

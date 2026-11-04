@@ -16,6 +16,7 @@ import {
   type PluginPermission,
 } from '@/types/plugin'
 import { CORE_PLUGIN_SLOT_NAMES, unknownPluginSlots } from '@/shared/pluginSlots'
+import { normalizeFileViewerDecl, type FileViewerDecl } from '@/shared/fileViewers'
 
 /** 清单所在的字段名与文件名 */
 export const PLUGIN_MANIFEST_KEY = 'aikm'
@@ -156,6 +157,22 @@ export function parseManifest(raw: unknown, fallbackId?: string): ManifestCheck 
     declares = {}
     if (d.tools) declares.tools = dedupe(d.tools as string[])
     if (d.slots) declares.slots = dedupe(d.slots as string[])
+    if (d.fileViewers !== undefined) {
+      if (!Array.isArray(d.fileViewers)) return fail('bad-declares', 'declares.fileViewers 必须是数组')
+      const viewers: FileViewerDecl[] = []
+      const seen = new Set<string>()
+      for (const item of d.fileViewers) {
+        const checked = normalizeFileViewerDecl(item, idRaw)
+        if (checked.ok === false) return fail('bad-declares', checked.error)
+        if (seen.has(checked.def.id)) return fail('bad-declares', `declares.fileViewers 的 id 重复：${checked.def.id}`)
+        seen.add(checked.def.id)
+        viewers.push(checked.def)
+      }
+      if (viewers.length && !(declares.slots || []).includes('file.viewer')) {
+        return fail('bad-declares', '声明了 declares.fileViewers 时，declares.slots 必须包含 "file.viewer"')
+      }
+      declares.fileViewers = viewers
+    }
   }
 
   return {

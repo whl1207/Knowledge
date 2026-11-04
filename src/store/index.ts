@@ -468,6 +468,8 @@ export const usestore = defineStore('data', {
             fontActiveColor: "#03254d",
             /** 用户自建主题（可命名、可删除；内置主题仍在 THEMES 表里） */
             customThemes: [] as CustomTheme[],
+            /** 文件查看器默认选择：扩展名 → 查看器 id（空 = 自动按优先级） */
+            fileViewerDefaults: {} as Record<string, string>,
             windowZoom: 100, // 窗口缩放比例（百分比，50~200；由主进程 window-zoom.json 持久化）
             navLayout: 'top' as 'top' | 'left' | 'bottom', // 导航栏布局：top=顶部（默认）/ left=左侧 / bottom=下方
             /**
@@ -2190,6 +2192,9 @@ export const usestore = defineStore('data', {
                 if (!hasCapability('window.chrome')) this.UI.windowMode = 'single'
                 // 主题名归一化：旧存档里的 '浅蓝色' 等表外名称 → '浅蓝'（否则主题下拉框空白、changeTheme 失效）
                 normalizeThemeName(this.UI)
+                if (!this.UI.fileViewerDefaults || typeof this.UI.fileViewerDefaults !== 'object' || Array.isArray(this.UI.fileViewerDefaults)) {
+                    this.UI.fileViewerDefaults = {}
+                }
                 this.setTheme()
             } else {
                 // 首次启动没有任何 UI 存档：窗口模式按运行环境取默认值（桌面多窗口 / 手机网页单窗口）

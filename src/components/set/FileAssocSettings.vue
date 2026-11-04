@@ -2,11 +2,11 @@
 <template>
   <div class="file-assoc-settings">
     <div class="settings-group">
-      <h3>{{ zh ? '文件关联（默认打开方式）' : 'File Associations (Default Apps)' }}</h3>
-
-      <div class="form-group">
-        <div class="config-description" style="margin-left:0">{{ intro }}</div>
-      </div>
+      <h3>
+        {{ zh ? '文件行为' : 'File Behavior' }}
+        <i class="fa fa-info-circle fa-title-info" :title="intro"></i>
+        <span class="fa-count">{{ filteredRows.length }} / {{ behaviorRows.length }}</span>
+      </h3>
 
       <!-- 平台 / 开发版提示 -->
       <div class="form-group" v-for="(n, i) in notices" :key="'n' + i">
@@ -21,46 +21,127 @@
         </div>
       </div>
 
-      <template v-else-if="info && info.supported">
-        <!-- 文件类型列表：一行 = 类型图标 + label（类型名）+ 关联级别下拉 -->
-        <div class="form-group" v-for="e in info.entries" :key="e.key">
-          <label :title="labelTitle(e)">
-            <img v-if="iconOf(e.key)" class="fa-type-icon" :src="iconOf(e.key)" alt="" />
-            <span class="fa-type-name">{{ zh ? e.labelZh : e.labelEn }}</span>
-          </label>
-          <select
-            v-if="isSelectable(e)"
-            class="layout-select"
-            :value="modeOf(e.key)"
-            :disabled="busy"
-            :title="selectTitle"
-            @change="onChange(e, $event)"
-          >
-            <option value="none">{{ zh ? '不关联' : 'Not associated' }}</option>
-            <option v-if="info.supportsOpenWith" value="openwith">{{ zh ? '加入「打开方式」' : 'Add to "Open with"' }}</option>
-            <option value="default">{{ zh ? '设为默认打开方式' : 'Set as default' }}</option>
-          </select>
-          <div v-else class="config-description" style="margin-left:0">{{ unsupportedText }}</div>
-          <span
-            v-if="stateOf(e.key).userChoice"
-            class="fa-warn"
-            :title="userChoiceTitle(stateOf(e.key).userChoice)"
-          ><i class="fa fa-exclamation-triangle"></i></span>
-        </div>
-
-        <div class="form-group">
-          <label>{{ zh ? '操作' : 'Actions' }}</label>
-          <div class="button-group">
-            <div class="button" :class="{ disabled: busy }" @click="applyAll('default')" :title="applyAllTitle">
+      <template v-else>
+        <!-- 顶部工具条：搜索 + 批量操作（与工具管理面板一致） -->
+        <div class="fa-toolbar">
+          <div class="fa-search-box">
+            <i class="fa fa-search fa-search-icon"></i>
+            <input
+              v-model="search"
+              type="text"
+              :placeholder="zh ? '搜索文件类型 / 后缀 / 视图' : 'Search type / extension / view'"
+              @keydown.esc="search = ''"
+            />
+            <i v-if="search" class="fa fa-times-circle fa-search-clear" :title="zh ? '清空' : 'Clear'" @click="search = ''"></i>
+          </div>
+          <div class="fa-actions">
+            <div class="button fa-action-btn" :class="{ disabled: busy }" @click="applyAll('default')" :title="applyAllTitle">
               <i class="fa fa-check-circle-o"></i> {{ zh ? '全部设为默认' : 'Set All Default' }}
             </div>
-            <div class="button" :class="{ disabled: busy }" @click="applyAll('none')" :title="clearAllTitle">
+            <div class="button fa-action-btn" :class="{ disabled: busy }" @click="applyAll('none')" :title="clearAllTitle">
               <i class="fa fa-eraser"></i> {{ zh ? '全部取消关联' : 'Clear All' }}
             </div>
-            <div class="button" :class="{ disabled: busy }" @click="load()" :title="zh ? '重新读取系统状态' : 'Reload system state'">
-              <i class="fa fa-refresh"></i> {{ zh ? '刷新状态' : 'Refresh' }}
+            <div class="button fa-action-btn" :class="{ disabled: busy }" @click="load()" :title="zh ? '重新读取系统状态' : 'Reload system state'">
+              <i class="fa fa-refresh"></i> {{ zh ? '刷新' : 'Refresh' }}
             </div>
           </div>
+        </div>
+
+        <div v-if="!filteredRows.length" class="fa-empty">
+          <i class="fa fa-search"></i>
+          <span>{{ zh ? '没有匹配的文件类型' : 'No matching file types' }}</span>
+        </div>
+
+        <!-- Grid 卡片：每个格式一张卡，小窗口自动降为单列，避免表格横向挤压 -->
+        <div v-else class="fa-grid">
+          <article v-for="r in filteredRows" :key="r.key" class="fa-card">
+            <div class="fa-card-head">
+              <img v-if="r.osEntry && iconOf(r.osEntry.key)" class="fa-type-icon" :src="iconOf(r.osEntry.key)" alt="" />
+              <i v-else class="fa fa-type-icon fa-type-icon-fallback" :class="rowIcon(r)"></i>
+              <div class="fa-card-title">
+                <span class="fa-type-name" :title="r.label">{{ r.label }}</span>
+                <span class="fa-exts" :title="r.exts.join(' ')">{{ extSummary(r) }}</span>
+              </div>
+              <span
+                v-if="hasChoice(r)"
+                class="fa-warn fa-card-warn"
+                :title="choiceTitle(r)"
+              ><i class="fa fa-exclamation-triangle"></i></span>
+            </div>
+
+            <div class="fa-field">
+              <span class="fa-field-label">{{ zh ? '应用内默认' : 'In-app default' }}</span>
+              <select
+                v-if="viewOptions(r).length > 1"
+                class="layout-select fa-mini-select"
+                :value="defaultOfExts(r.exts)"
+                :disabled="busy"
+                :title="zh ? '该格式默认用哪个视图 / 查看器（自动 = 按文件窗口默认）' : 'Default view / viewer for this format (Auto = file-window default)'"
+                @change="onDefaultChange(r.exts, $event)"
+              >
+                <option value="">{{ zh ? '自动（按文件窗口默认）' : 'Auto (file-window default)' }}</option>
+                <option v-for="o in viewOptions(r)" :key="o.value" :value="o.value">
+                  {{ zh ? o.titleZh : o.titleEn }}{{ o.source === 'plugin' ? ` · ${o.pluginId}` : '' }}
+                </option>
+              </select>
+              <span v-else class="fa-field-static">{{ viewOptions(r).length ? (zh ? viewOptions(r)[0].titleZh : viewOptions(r)[0].titleEn) : '—' }}</span>
+            </div>
+
+            <div class="fa-field">
+              <span class="fa-field-label">{{ zh ? '系统默认' : 'System default' }}</span>
+              <template v-if="r.osEntries && r.osEntries.length">
+                <select
+                  v-if="r.osEntries.every(isSelectable)"
+                  class="layout-select fa-mini-select"
+                  :value="groupModeOf(r.osEntries)"
+                  :disabled="busy"
+                  :title="zh ? '统一设置这张卡里所有源码 / 配置类型的系统关联' : 'Set the system association for every source/config type in this card'"
+                  @change="onOsGroupChange(r.osEntries, $event)"
+                >
+                  <option value="">{{ zh ? '混合（保持各自）' : 'Mixed (keep each)' }}</option>
+                  <option value="none">{{ zh ? '不关联' : 'Not associated' }}</option>
+                  <option v-if="info?.supportsOpenWith" value="openwith">{{ zh ? '加入「打开方式」' : 'Add to "Open with"' }}</option>
+                  <option value="default">{{ zh ? '设为默认打开方式' : 'Set as default' }}</option>
+                </select>
+                <span v-else class="fa-field-static">{{ unsupportedText }}</span>
+              </template>
+              <template v-else-if="r.osEntry">
+                <select
+                  v-if="isSelectable(r.osEntry)"
+                  class="layout-select fa-mini-select"
+                  :value="modeOf(r.osEntry.key)"
+                  :disabled="busy"
+                  :title="selectTitle"
+                  @change="onChange(r.osEntry, $event)"
+                >
+                  <option value="none">{{ zh ? '不关联' : 'Not associated' }}</option>
+                  <option v-if="info?.supportsOpenWith" value="openwith">{{ zh ? '加入「打开方式」' : 'Add to "Open with"' }}</option>
+                  <option value="default">{{ zh ? '设为默认打开方式' : 'Set as default' }}</option>
+                </select>
+                <span v-else class="fa-field-static">{{ unsupportedText }}</span>
+              </template>
+              <span v-else class="fa-field-static">{{ zh ? '系统未注册' : 'Not registered' }}</span>
+            </div>
+
+            <!-- 可用视图放卡片最下方；卡片等高时统一贴底 -->
+            <div class="fa-field fa-field-views">
+              <span class="fa-field-label">{{ zh ? '可用视图' : 'Views' }}</span>
+              <div class="fa-viewers">
+                <span
+                  v-for="o in viewOptions(r)"
+                  :key="o.value"
+                  class="fa-viewer-chip"
+                  :class="{ plugin: o.source === 'plugin' }"
+                  :title="zh ? o.titleZh : o.titleEn"
+                >
+                  <i class="fa" :class="o.icon || 'fa-file-o'"></i>
+                  <span>{{ zh ? o.titleZh : o.titleEn }}</span>
+                  <em>{{ o.source === 'plugin' ? (zh ? '插件' : 'Plugin') : (zh ? '内置' : 'Built-in') }}</em>
+                </span>
+                <span v-if="!viewOptions(r).length" class="fa-muted">—</span>
+              </div>
+            </div>
+          </article>
         </div>
 
         <div class="form-group">
@@ -76,6 +157,7 @@ import { ref, computed, onMounted } from 'vue'
 import { usestore } from '@/store'
 import { ElMessage } from 'element-plus'
 import { getPlatform, hasCapability } from '@/platform'
+import { fileViewerCatalog, type FileViewerCatalogEntry } from '@/lib/knowFile/fileViewerCatalog'
 
 const store = usestore()
 const zh = computed(() => store.locales === 'zh')
@@ -89,10 +171,182 @@ const icons = ref<Record<string, string>>({})
 /** 文件关联是应用壳能力（桌面主进程维护），网页端没有 */
 const hasIpc = hasCapability('app.shell')
 
+interface FileBehaviorRow {
+  key: string
+  label: string
+  exts: string[]
+  osEntry: any | null
+  /** 合并的系统类型（目前只有「其他源码」卡会一次管理多个系统关联项） */
+  osEntries?: any[]
+  viewers: FileViewerCatalogEntry[]
+}
+
+/** 高优先级插件接管的扩展名：内置卡片不再把这些后缀算进自己的格式组 */
+const takeoverExts = computed(() => new Set(
+  fileViewerCatalog.value
+    .filter((v) => v.source === 'plugin' && Number(v.priority) > 100)
+    .flatMap((v) => v.extensions),
+))
+
+/** 合并「应用内查看器」与「系统文件关联」为一张表：先按系统类型分组，再补插件/内置专属格式 */
+const behaviorRows = computed<FileBehaviorRow[]>(() => {
+  const rows: FileBehaviorRow[] = []
+  const covered = new Set<string>()
+  const takeover = takeoverExts.value
+  const sourceViewer = fileViewerCatalog.value.find((v) => v.id === 'builtin.code')
+  const sourceExts = new Set(sourceViewer?.extensions || [])
+  const sourceOsEntries: any[] = []
+  const osEntries = (info.value?.entries || [])
+  for (const e of osEntries) {
+    const exts = (Array.isArray(e.exts) ? e.exts : []).map((x: string) => {
+      const s = String(x).trim().toLowerCase()
+      return s.startsWith('.') ? s : `.${s}`
+    })
+    // 代码 / 配置 / 样式统一收进一张「其他源码」卡，避免出现很多只有源码编辑的碎片卡
+    if (exts.length && exts.every((x: string) => sourceExts.has(x))) {
+      exts.forEach((x: string) => covered.add(x))
+      sourceOsEntries.push(e)
+    }
+  }
+  if (sourceViewer && sourceOsEntries.length) {
+    const allExts = new Set<string>(sourceViewer.extensions)
+    for (const e of sourceOsEntries) {
+      for (const x of (e.exts || [])) allExts.add(String(x).startsWith('.') ? String(x).toLowerCase() : `.${String(x).toLowerCase()}`)
+    }
+    rows.push({
+      key: 'source-group',
+      label: zh.value ? '其他源码' : 'Other source',
+      exts: [...allExts].filter((x) => !takeover.has(x)),
+      osEntry: null,
+      osEntries: sourceOsEntries,
+      viewers: [sourceViewer],
+    })
+  }
+  for (const e of osEntries) {
+    const exts = (Array.isArray(e.exts) ? e.exts : []).map((x: string) => {
+      const s = String(x).trim().toLowerCase()
+      return s.startsWith('.') ? s : `.${s}`
+    })
+    if (sourceOsEntries.includes(e)) continue
+    exts.forEach((x: string) => covered.add(x))
+    const viewers = fileViewerCatalog.value.filter((v) =>
+      v.extensions.some((x) => exts.includes(x) && (!takeover.has(x) || v.source === 'plugin')),
+    )
+    rows.push({
+      key: `os:${e.key}`,
+      label: zh.value ? (e.labelZh || e.labelEn) : (e.labelEn || e.labelZh),
+      exts,
+      osEntry: e,
+      viewers,
+    })
+  }
+  // 系统没有对应条目的格式（多为插件贡献的自定义格式，或内置音视频/图片等）
+  const seen = new Set<string>()
+  for (const v of fileViewerCatalog.value) {
+    if (v.id === 'builtin.code' && sourceOsEntries.length) continue
+    const effectiveExts = (v.source === 'plugin' ? v.extensions : v.extensions.filter((x) => !takeover.has(x)))
+      .filter((x) => !covered.has(x))
+    if (!effectiveExts.length) continue
+    const extKey = effectiveExts.join(',')
+    if (seen.has(extKey)) {
+      const row = rows.find((r) => r.key === `viewer:${extKey}`)
+      if (row) row.viewers.push(v)
+      continue
+    }
+    seen.add(extKey)
+    rows.push({
+      key: `viewer:${extKey}`,
+      label: zh.value ? v.titleZh : v.titleEn,
+      exts: [...effectiveExts],
+      osEntry: null,
+      viewers: [v],
+    })
+  }
+  // Markdown 是最高频的文本格式，固定放到第一张卡
+  const markdownRank = (r: FileBehaviorRow): number =>
+    r.exts.some((x) => ['.md', '.markdown', '.mdown', '.mkd'].includes(x)) ? 0 : 1
+  return rows.sort((a, b) => markdownRank(a) - markdownRank(b))
+})
+
+/** 卡片图标：系统类型有 PNG 图标时优先；否则用查看器声明的 FA 图标（如「其他源码」的 fa-file-code-o） */
+function rowIcon(r: FileBehaviorRow): string {
+  return r.viewers?.[0]?.icon || 'fa-file-o'
+}
+
+/** 表格第三列的选项：内置格式展开成每个可选视图；插件查看器作为一项 */
+interface FileBehaviorViewOption {
+  value: string
+  titleZh: string
+  titleEn: string
+  icon: string
+  source: 'builtin' | 'plugin'
+  pluginId?: string
+}
+function viewOptions(r: FileBehaviorRow): FileBehaviorViewOption[] {
+  const out: FileBehaviorViewOption[] = []
+  const seen = new Set<string>()
+  for (const v of r.viewers) {
+    if (v.source === 'plugin') {
+      if (!seen.has(v.id)) {
+        seen.add(v.id)
+        out.push({ value: v.id, titleZh: v.titleZh, titleEn: v.titleEn, icon: v.icon, source: 'plugin', pluginId: v.pluginId })
+      }
+      continue
+    }
+    for (const view of (v.views || [])) {
+      if (!view.key || seen.has(view.key)) continue
+      seen.add(view.key)
+      out.push({ value: view.key, titleZh: view.titleZh, titleEn: view.titleEn, icon: view.icon, source: 'builtin' })
+    }
+    // 目录缺少 views 的旧数据兜底
+    if (!(v.views || []).length && v.viewKey && !seen.has(v.viewKey)) {
+      seen.add(v.viewKey)
+      out.push({ value: v.viewKey, titleZh: v.titleZh, titleEn: v.titleEn, icon: v.icon, source: 'builtin' })
+    }
+  }
+  return out
+}
+
+const search = ref('')
+const filteredRows = computed<FileBehaviorRow[]>(() => {
+  const q = search.value.trim().toLowerCase()
+  if (!q) return behaviorRows.value
+  return behaviorRows.value.filter((r) => {
+    const views = viewOptions(r).map((o) => `${o.titleZh} ${o.titleEn}`).join(' ')
+    return `${r.label} ${r.exts.join(' ')} ${views}`.toLowerCase().includes(q)
+  })
+})
+
+/** 合并后只显示代表性后缀：完全取当前卡片的真实 exts，不写死格式名 */
+const extSummary = (r: FileBehaviorRow): string => {
+  const n = r.exts.length
+  if (!n) return '—'
+  const shown = r.exts.slice(0, 4).join(' ')
+  return n > 4 ? `${shown} 等 ${n} 种` : shown
+}
+
+/** 一行覆盖多个后缀时：默认值一致才显示，避免误以为整组已设置 */
+const defaultOfExts = (exts: string[]): string => {
+  const values = exts.map((x) => String(store.UI.fileViewerDefaults?.[x] || ''))
+  const first = values[0] || ''
+  return values.every((v) => v === first) ? first : ''
+}
+
+function onDefaultChange(exts: string[], e: Event) {
+  const value = String((e.target as HTMLSelectElement).value || '')
+  const next = { ...(store.UI.fileViewerDefaults || {}) }
+  for (const x of exts) {
+    if (value) next[x] = value
+    else delete next[x]
+  }
+  store.UI.fileViewerDefaults = next
+  store.saveConfig()
+}
+
 // ---------- 文案 ----------
 const intro = computed(() => zh.value
-  ? '选择哪些文件类型由本软件打开。安装版在安装时已注册这些类型（PDF 除外）；此处可随时调整（写入当前用户，无需管理员权限）。「设为默认」会让双击该类型文件直接在本软件的新窗口中打开。PDF 默认不关联，以免抢占系统 PDF 阅读器，需要时请在此手动选择。每个类型使用各自的图标（PDF 红色、Markdown 蓝色、代码深灰…），在资源管理器里一眼就能分清是哪种文件。'
-  : 'Choose which file types open with this app. The installer already registers them (except PDF); you can adjust at any time (current-user scope, no admin rights). "Set as default" makes double-click open the file in a new app window. PDF is deliberately not associated by default so your system PDF reader stays in charge — pick it here if you want it. Each type gets its own icon (red PDF, blue Markdown, dark code…), so files are easy to tell apart in Explorer.')
+  ? '管理每种文件类型的「应用内查看器」和「系统默认打开方式」。插件可以贡献查看器（表中标注「插件」）；同一格式有多个查看器时，可直接在标题栏的视图菜单里切换，也可在这里设置默认项。系统关联部分：安装版在安装时已注册这些类型（PDF 除外），此处可随时调整（写入当前用户，无需管理员权限）。「设为默认」会让双击该类型文件直接在本软件的新窗口中打开。PDF 默认不关联，以免抢占系统 PDF 阅读器，需要时请在此手动选择。'
+  : 'Manage the in-app viewer and the system default app for each file type. Plugins can contribute viewers (marked “Plugin”); when a format has several viewers, switch them from the view menu in the title bar or pick the default here. System associations: the installer registers these types (except PDF), and you can adjust them here (current-user scope, no admin rights). "Set as default" makes double-click open the file in a new app window. PDF is deliberately not associated by default so your system PDF reader stays in charge — pick it here if you want it.')
 
 const footer = computed(() => zh.value
   ? '提示：Windows 8 及以上版本中，若某类型已被用户通过「打开方式 → 始终使用此应用」选定过默认程序，系统会优先采用该选择（程序无法覆盖）——此时请右键文件 → 打开方式 → 选择其他应用 → AI-KM，并勾选「始终使用」。'
@@ -162,6 +416,29 @@ const extText = (e: any) => (e.exts || []).map((x: string) => '.' + x).join(' ')
 
 const stateOf = (key: string) => states.value[key] || { mode: 'none' }
 const modeOf = (key: string) => stateOf(key).mode || 'none'
+/** 多个系统类型的统一模式：全一致才返回，否则空（混合） */
+const groupModeOf = (entries: any[]): string => {
+  const modes = entries.map((e) => modeOf(e.key))
+  return modes.every((m) => m === modes[0]) ? (modes[0] || 'none') : ''
+}
+const hasChoice = (r: FileBehaviorRow): boolean => {
+  const entries = r.osEntries?.length ? r.osEntries : (r.osEntry ? [r.osEntry] : [])
+  return entries.some((e) => !!stateOf(e.key).userChoice)
+}
+const choiceTitle = (r: FileBehaviorRow): string => {
+  const entries = r.osEntries?.length ? r.osEntries : (r.osEntry ? [r.osEntry] : [])
+  const hit = entries.find((e) => !!stateOf(e.key).userChoice)
+  return hit ? userChoiceTitle(stateOf(hit.key).userChoice) : ''
+}
+/** 统一设置一组系统类型的关联模式（用于「其他源码」合并卡） */
+async function onOsGroupChange(entries: any[], ev: Event) {
+  const mode = String((ev.target as HTMLSelectElement).value || '')
+  if (!mode) return
+  for (const e of entries) {
+    if (!isSelectable(e)) continue
+    await setMode(e.key, mode)
+  }
+}
 const iconOf = (key: string) => icons.value[key] || ''
 /** 该类型在当前平台是否可设置（Linux 上仅支持有 MIME 映射的类型） */
 const isSelectable = (e: any) => !!info.value?.supported && (info.value.platform !== 'linux' || !!e.mime)
@@ -359,4 +636,131 @@ onMounted(load)
   gap: 8px;
 }
 .button-group .button { width: calc(100% - 14px); }
+
+.fa-count {
+  margin-left: 7px;
+  font-size: 10px;
+  font-weight: 400;
+  opacity: .55;
+}
+.fa-title-info {
+  margin-left: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: .55;
+  cursor: help;
+}
+.fa-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+.fa-search-box {
+  flex: 1;
+  min-width: 0;
+  max-width: 300px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background: var(--backgroundColor);
+}
+.fa-search-icon {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  align-self: center;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  opacity: .5;
+  border: 0;
+  background: transparent;
+}
+.fa-search-box > input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
+  border: 0 !important;
+  outline: 0;
+  box-shadow: none !important;
+  background: transparent !important;
+  color: var(--fontColor);
+  font-size: 11px;
+  line-height: normal;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+.fa-search-clear { cursor: pointer; opacity: .55; }
+.fa-actions { display: flex; gap: 5px; flex-shrink: 0; margin-left: auto; }
+.fa-action-btn {
+  width: auto;
+  min-width: 0;
+  padding: 5px 8px;
+  margin: 0;
+  font-size: 10px;
+}
+.fa-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 28px 12px;
+  font-size: 11px;
+  opacity: .5;
+}
+.fa-field-views { align-items: start; }
+
+/* ====== 文件行为：Grid 卡片（小窗口自动单列） ====== */
+.fa-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  grid-auto-rows: 1fr;
+  gap: 7px;
+  align-items: stretch;
+}
+.fa-card {
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--backgroundColor);
+}
+.fa-card:hover { border-color: var(--fontActiveColor); }
+.fa-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; padding-bottom: 4px; border-bottom: 1px solid var(--borderColor); }
+.fa-card-warn { margin-left: auto; flex-shrink: 0; margin-right: 0; }
+.fa-card-title { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.fa-type-icon { width: 18px; height: 18px; flex-shrink: 0; object-fit: contain; }
+.fa-type-icon-fallback { opacity: .45; font-size: 15px; text-align: center; }
+.fa-type-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-exts { font-size: 9px; opacity: .55; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
+.fa-field { display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: center; gap: 6px; min-width: 0; }
+.fa-field-label { font-size: 9px; opacity: .55; white-space: nowrap; }
+.fa-field-static { min-width: 0; font-size: 10px; opacity: .65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-viewers { display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+.fa-viewer-chip {
+  display: inline-flex; align-items: center; gap: 3px; max-width: 100%;
+  padding: 1px 5px; border: 1px solid var(--borderColor); border-radius: 4px;
+  background: var(--menuColor); font-size: 9px;
+}
+.fa-viewer-chip.plugin { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+.fa-viewer-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-viewer-chip em { flex-shrink: 0; font-style: normal; font-size: 8px; opacity: .6; }
+.fa-mini-select { min-width: 0; width: 100%; height: 27px; font-size: 10px; padding: 0 4px; margin: 0; }
+.fa-field select { margin: 0; }
+.fa-muted { font-size: 10px; opacity: .4; }
 </style>

@@ -43,6 +43,7 @@ import {
   officeRefresh,
   onOfficeEvent,
   isOfficeRuntime,
+  registerOfficeViewVisibility,
   type OfficeEditorType,
 } from '@/lib/knowFile/office'
 
@@ -101,6 +102,8 @@ async function open() {
   const res = await officeOpen(props.path, officeRectOf(hostRef.value))
   if (res.ok && res.viewId) {
     viewId.value = res.viewId
+    unregisterVisibility = registerOfficeViewVisibility((visible) => setVisible(visible))
+    if (store.settingsOpen) void officeSetVisible(viewId.value, false)
   } else {
     error.value = res.error || (zh.value ? '编辑器启动失败' : 'Failed to start editor')
   }
@@ -114,6 +117,8 @@ async function close(notifyCancel = true): Promise<boolean> {
   const res = await officeClose(id)
   if (res.ok) {
     viewId.value = ''
+    unregisterVisibility?.()
+    unregisterVisibility = null
     return true
   }
   // 用户点了「取消」：视图仍在主进程里；恢复显示并让父组件切回来
@@ -138,6 +143,10 @@ function setVisible(next: boolean) {
 }
 
 defineExpose({ setVisible })
+
+// 设置浮层 / 右侧栏标签菜单等 DOM 覆盖层打开时，原生视图必须让位
+let unregisterVisibility: (() => void) | null = null
+watch(() => store.settingsOpen, (open) => { setVisible(!open) })
 
 // ---- 向主进程推送 AI-KM 的能力（模型配置 / 主题 / 语言）----
 // 编辑器把模型当宿主能力：必须在它加载渲染层之前推好，否则它的模型选择器一开始是空的。
@@ -200,6 +209,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(async () => {
+  unregisterVisibility?.()
+  unregisterVisibility = null
   window.removeEventListener('resize', pushBounds)
   if (boundsRaf) cancelAnimationFrame(boundsRaf)
   observer?.disconnect()
