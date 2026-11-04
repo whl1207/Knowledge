@@ -209,6 +209,8 @@ export interface AssembleAgentPromptInput {
   includeWorkspaceHint?: boolean
   /** 覆盖工作区：**每个聊天自己的激活工作区**（缺省用全局默认 store.root） */
   workspace?: string
+  /** true = 这个聊天明确不使用工作区：不注入路径到提示词，cwd 也不回落到全局默认 */
+  noWorkspace?: boolean
 }
 
 export interface AssembleAgentPromptResult {
@@ -252,7 +254,9 @@ export function assembleAgentSystemPrompt(input: AssembleAgentPromptInput): Asse
   // 全选 → 启用 skill 工具（与指令段模式无关，须在渲染前生效，{{toolUsage}} 才会包含 skill）
   if (allSkillsSelected && !tools.includes('skill')) tools.push('skill')
 
-  const cwdHintText = input.includeWorkspaceHint === false ? '' : buildWorkspaceHint(store, locales, input.workspace)
+  const cwdHintText = input.noWorkspace === true || input.includeWorkspaceHint === false
+    ? ''
+    : buildWorkspaceHint(store, locales, input.workspace)
   const usedSections = !!preset
     && preset.loopPromptMode === 'sections'
     && Array.isArray(preset.loopSections)
@@ -261,7 +265,9 @@ export function assembleAgentSystemPrompt(input: AssembleAgentPromptInput): Asse
   const resolveSkill: PromptSkillResolver = input.resolveSkill
     ?? ((key: string) => (input.enabledSkills || []).find((s) => s.path === key || s.name === key))
 
-  let cwd: string | undefined = String(input.workspace ?? '').trim() || workspaceRoot(store) || undefined
+  let cwd: string | undefined = input.noWorkspace === true
+    ? undefined
+    : (String(input.workspace ?? '').trim() || workspaceRoot(store) || undefined)
   let systemPrompt: string
   // 勾选了但解析不到的技能（技能目录变更 / 技能改名后 preset.selectedSkills 里的旧路径即会落这里）
   const unresolvedSkills: string[] = []

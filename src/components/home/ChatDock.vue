@@ -120,6 +120,7 @@
           <slot v-else-if="tab.kind === 'branch'" name="branch" />
           <slot v-else-if="tab.kind === 'todos'" name="todos" />
           <slot v-else-if="tab.kind === 'plan'" name="plan" />
+          <slot v-else-if="tab.kind === 'trajectory'" name="trajectory" />
           <ChatDockFiles
             v-else-if="tab.kind === 'files'"
             :active="tab.id === activeTabId"
@@ -235,6 +236,7 @@ function kindIcon(kind: ChatDockTabKind): string {
   if (kind === 'branch') return 'fa-sitemap'
   if (kind === 'todos') return 'fa-check-square-o'
   if (kind === 'plan') return 'fa-tasks'
+  if (kind === 'trajectory') return 'fa-history'
   if (kind === 'new') return 'fa-plus'
   if (kind === 'file') return 'fa-file-text-o'
   return 'fa-folder-open-o'
@@ -245,6 +247,7 @@ function kindLabel(kind: ChatDockTabKind): string {
   if (kind === 'branch') return props.zh ? '分支' : 'Branch'
   if (kind === 'todos') return props.zh ? '待办清单' : 'Todos'
   if (kind === 'plan') return props.zh ? '计划' : 'Plan'
+  if (kind === 'trajectory') return props.zh ? '会话轨迹' : 'Trajectory'
   if (kind === 'new') return props.zh ? '新标签页' : 'New tab'
   return props.zh ? '工作区' : 'Workspace'
 }
@@ -275,6 +278,11 @@ function kindHint(kind: ChatDockTabKind): string {
       ? '计划：智能体用 update_plan 维护的执行计划（已有计划标签时不会再出现这个选项）'
       : 'Plan: the plan maintained by the agent via update_plan (hidden once a Plan tab exists)'
   }
+  if (kind === 'trajectory') {
+    return props.zh
+      ? '会话轨迹：按轮次查看用户消息、模型回复、工具调用、耗时与 token 用量'
+      : 'Trajectory: inspect user turns, replies, tool calls, timings and token usage by turn'
+  }
   return props.zh
     ? '工作区：浏览当前工作区的文件树，可打开文件或把路径插入输入框（要打开某个具体文件请用旁边的「文件」按钮）'
     : 'Workspace: browse the current workspace file tree, open files or insert their paths into the input box (use the adjacent File button to open a specific file)'
@@ -293,7 +301,7 @@ watch(
 
 // ===== 新标签页的类型选择 =====
 /** 只列出当前环境真的能用的类型（安卓 / 纯网页没有 PTY，就不给「终端」入口；没有分支就不给「分支」；
- *  分支 / 待办清单 / 计划已有标签时不再提供入口——同一类型只能有一个） */
+ *  分支 / 待办清单 / 计划 / 会话轨迹已有标签时不再提供入口——同一类型只能有一个） */
 const availableKinds = computed(() => DOCK_TAB_KINDS.filter((k) => {
   if (k === 'terminal' && !hasCapability('terminal')) return false
   if (k === 'branch' && !props.branchAvailable) return false

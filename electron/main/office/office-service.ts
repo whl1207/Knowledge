@@ -28,6 +28,8 @@ import { docxToMarkdown } from './docx-to-markdown'
 import { findTextInBlocks, styleCatalog, replaceParagraphText, insertParagraph, insertTable, insertMarkdown, setParagraphStyle, deleteBlock } from './docx-blocks'
 // 图片（列表 / 插入 / 替换）：直接改 media + rels + Content_Types，保留版式
 import { addDocxImage, listDocxImages, replaceDocxImage } from './docx-images'
+// 旧版 .doc → .docx（Word COM / LibreOffice；独立于 open_document 会话）
+import { convertDocToDocx } from './docx-convert'
 // 样式定义与字符格式（M1.3）：styles.xml 新建 / 修改 / 删除 + run 级字符格式
 import { listStyles, createStyle, updateStyle, deleteStyle, setTextFormat, type RunFormat, type StyleFormat } from './docx-styles'
 // Excel 服务（会话式读写 .xlsx；工具定义与执行器都在 xlsx-service）
@@ -456,12 +458,27 @@ export function toolDefinitions(): any[] {
 function docxToolDefinitions(): any[] {
   return [
     {
-      name: 'open_document',
-      description: '打开本地 .docx 文件：解析为段落/表格块模型，返回 docId、字数、段落数、标题大纲。支持文本替换（find_and_replace_text）与保存（save_document）。',
+      name: 'convert_doc_to_docx',
+      description: '把旧版 .doc 转成 .docx（不依赖 open_document 会话）：Windows 优先调用本机 Microsoft Word COM，找不到 Word 时自动尝试 LibreOffice。两者都不可用时直接报错，不会生成丢失格式的纯文本文件。默认输出到源文件同目录的同名 .docx，转换后可直接用 open_document 打开。',
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: '.docx 文件的绝对路径（Office 编辑器只支持 .docx；旧版 .doc 的正文请用 read_file 读取）。path / filePath / file_path 三者等价，任选其一' },
+          path: { type: 'string', description: '源 .doc 文件的绝对路径（只支持 .doc；.docx 无需转换）' },
+          filePath: { type: 'string', description: 'path 的别名，任选其一' },
+          outputPath: { type: 'string', description: '可选：输出 .docx 的绝对路径；默认源文件同目录同名 .docx' },
+          output_path: { type: 'string', description: 'outputPath 的别名' },
+          overwrite: { type: 'boolean', description: '输出文件已存在时是否覆盖（默认 false）' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'open_document',
+      description: '打开本地 .docx 文件：解析为段落/表格块模型，返回 docId、字数、段落数、标题大纲。支持文本替换（find_and_replace_text）与保存（save_document）。旧版 .doc 请先调用 convert_doc_to_docx 转换。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '.docx 文件的绝对路径（Office 编辑器只支持 .docx；旧版 .doc 先用 convert_doc_to_docx 转换，或仅读取正文请用 read_file）。path / filePath / file_path 三者等价，任选其一' },
           filePath: { type: 'string', description: 'path 的别名，任选其一' },
         },
         required: ['path'],
@@ -1006,6 +1023,20 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
   // Excel 工具由 xlsx-service 提供（会话式 workbookId）
   if (xlsxService.isXlsxTool(name)) return xlsxService.executeXlsxTool(name, args)
   switch (name) {
+    case 'convert_doc_to_docx': {
+      const input = String(arg(args, ['path', 'filePath', 'file_path']) || '')
+      const output = String(arg(args, ['outputPath', 'output_path']) || '')
+      const overwrite = arg(args, ['overwrite']) === true
+      const res = await convertDocToDocx(input, output || undefined, overwrite)
+      if (!res.ok) return JSON.stringify({ ok: false, error: res.error, tried: res.tried }, null, 2)
+      return JSON.stringify({
+        ok: true,
+        outputPath: res.outputPath,
+        converter: res.converter,
+        bytes: res.bytes,
+        note: '转换完成；可直接用 open_document 打开该 .docx',
+      }, null, 2)
+    }
     case 'open_document': {
       const raw = normPath(String(arg(args, ['path', 'filePath', 'file_path']) || ''))
       if (!raw) return '参数缺失：请提供 .docx 文件的 path'
@@ -1013,7 +1044,7 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       const abs = path.isAbsolute(p) ? p : path.resolve(p)
       if (!fs.existsSync(abs)) return `文件不存在: ${abs}`
       const ext = path.extname(abs).toLowerCase()
-      if (ext === '.doc') return 'Office 编辑器不支持旧版 .doc 二进制格式（只读正文请用 read_file，或先另存为 .docx）'
+      if (ext === '.doc') return 'Office 编辑器不支持旧版 .doc 二进制格式：请先调用 convert_doc_to_docx 转成 .docx（或仅读取正文用 read_file）'
       if (ext !== '.docx') return `仅支持 .docx：${abs}`
       let pkg: DocxPackage
       try { pkg = loadDocxPackage(abs) } catch (e: any) { return `打开失败: ${e?.message || String(e)}` }

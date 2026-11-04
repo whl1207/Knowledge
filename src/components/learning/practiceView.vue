@@ -453,10 +453,10 @@ function setTab(tab: 'ans' | 'explain' | 'slices') {
         <span class="lk-sep"></span>
         <button class="lk-btn" @click="emit('close')" :title="tr('结束本组练习', 'End this session')"><i class="fa fa-times"></i></button>
       </div>
-      <!-- 上段：题面正文 -->
+      <!-- 上段：题面正文（Markdown 渲染） -->
       <div class="lk-front scoll">
-        <div class="lk-qtext">{{ item.q }}</div>
-        <div v-if="item.hint" class="lk-qhint">{{ item.hint }}</div>
+        <div class="lk-qtext learn-md"><block_md :content="item.q" :fontSize="'15px'" /></div>
+        <div v-if="item.hint" class="lk-qhint learn-md"><block_md :content="item.hint" :fontSize="'12px'" /></div>
       </div>
 
       <!-- 作答区：判得出分的题在这里写答案 → 检查并揭示 → 按裁决结算 -->
@@ -472,7 +472,7 @@ function setTab(tab: 'ans' | 'explain' | 'slices') {
             :disabled="revealed || settled"
             @click="pickOption(c.label)">
             <span class="lk-choice-l">{{ c.label }}</span>
-            <span class="lk-choice-b">{{ c.body }}</span>
+            <div class="lk-choice-b learn-md"><block_md :content="c.body" :fontSize="'13px'" /></div>
           </button>
           <div v-if="isMultiChoice" class="lk-qhint">{{ tr('多选：选中所有正确项', 'Multiple answers: pick all that apply') }}</div>
         </div>
@@ -577,8 +577,11 @@ function setTab(tab: 'ans' | 'explain' | 'slices') {
           </button>
         </div>
 
-        <!-- 答案 -->
-        <div v-if="midTab === 'ans'" class="lk-btext scoll">{{ item.back || tr('（无答案/正文）', '(no content)') }}</div>
+        <!-- 答案（Markdown 渲染；复述题的 back 就是来源切片正文） -->
+        <div v-if="midTab === 'ans'" class="lk-btext scoll learn-md">
+          <block_md v-if="item.back" :content="item.back" :fontSize="'13px'" />
+          <span v-else>{{ tr('（无答案/正文）', '(no content)') }}</span>
+        </div>
         <!-- 解析（按需生成，流式输出并实时渲染 Markdown；已生成的结果存在 .learning 里，再打开直接显示） -->
         <div v-else-if="midTab === 'explain'" class="lk-diag scoll learn-md">
           <div v-if="explainLoading && !explain" class="lk-diag-loading"><i class="fa fa-spinner fa-spin"></i> {{ tr('正在生成解析…', 'Generating explanation…') }}</div>
@@ -697,7 +700,7 @@ function setTab(tab: 'ans' | 'explain' | 'slices') {
 .lk-caret { display: inline-block; width: 6px; height: 13px; margin-left: 2px; vertical-align: -2px; background: var(--fontActiveColor, #0969da); animation: lk-blink 1s steps(1) infinite; }
 @keyframes lk-blink { 50% { opacity: 0; } }
 /* 答案正文：占满面板、pre-wrap 保留换行、滚动 */
-.lk-btext { flex: 1; min-height: 0; overflow-y: auto; padding: 1px 8px 6px; font-size: 12.5px; line-height: 1.7; color: var(--fontColor, #1f2328); white-space: pre-wrap; }
+.lk-btext { flex: 1; min-height: 0; overflow-y: auto; padding: 1px 8px 6px; font-size: 12.5px; line-height: 1.7; color: var(--fontColor, #1f2328); }
 /* 参考切片容器：占满面板、纵向滚动（scoll 美化滚动条）；每片用 block_md 渲染 */
 .lk-slices { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 8px 6px; display: flex; flex-direction: column; gap: 5px; }
 .lk-slice { border: 1px dashed var(--borderColor, #d0d7de); border-radius: 5px; padding: 4px 6px; flex-shrink: 0; min-width: 0; overflow-wrap: anywhere; }

@@ -1556,6 +1556,10 @@
           </div>
         </div>
       </template>
+      <!-- 会话轨迹：按轮次查看消息 / 工具 / 耗时 / token（DSH Trajectory 的只读投影） -->
+      <template #trajectory>
+        <ChatDockTrajectory :chat="currentChat" :zh="store.locales == 'zh'" />
+      </template>
     </ChatDock>
       </div>
     </Transition>
@@ -1645,6 +1649,7 @@ import {
   type ChatDockTabKind,
 } from '@/shared/chatDock'
 import ChatDock from '@/components/home/ChatDock.vue'
+import ChatDockTrajectory from '@/components/home/ChatDockTrajectory.vue'
 import ShellJobsBadge from '@/components/home/ShellJobsBadge.vue'
 // PTC（Code Mode）：run_code 输出解析（返回值 / console 日志 / 程序内调用的工具）
 import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/agent/ptc'

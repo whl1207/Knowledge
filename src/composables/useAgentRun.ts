@@ -1036,6 +1036,8 @@ export function useAgentRun(deps: AgentRunDeps) {
         mcpContext: mcpCtx,
         // 每个聊天自己的激活工作区（没选过 → 组装函数回落到 store.root）
         workspace: readChatWorkspace(chat, ''),
+        // 明确「不使用工作区」的聊天：不注入路径，cwd 也不回落全局默认
+        noWorkspace: chat.noWorkspace === true,
       })
       options = {
         systemPrompt: assembled.systemPrompt,
@@ -1177,6 +1179,7 @@ export function useAgentRun(deps: AgentRunDeps) {
       provider: resolvePresetLlmType(preset, store) || chat.config.llmType || undefined,
       // 每个聊天自己的激活工作区（没选过 → 组装函数回落到 store.root）
       workspace: readChatWorkspace(chat, ''),
+      noWorkspace: chat.noWorkspace === true,
     })
     const systemPrompt = assembled.systemPrompt
     const tools = assembled.tools

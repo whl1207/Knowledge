@@ -209,7 +209,7 @@ async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
         </div>
         <!-- 详情正文：头部固定，正文在此滚动 -->
         <div class="lk-detail-body scoll">
-          <div class="lk-question">{{ active.a.q }}</div>
+          <div class="lk-question learn-md"><block_md :content="active.a.q" :fontSize="'15px'" /></div>
           <!-- 错因标注 -->
           <div class="lk-errs">
             <span class="lk-errs-title">{{ tr('错因', 'Reason') }}</span>
@@ -223,21 +223,23 @@ async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
             >{{ errText(o) }}</button>
             <button v-if="active.a.errType" class="lk-err clear" @click="emit('updateErr', active.key, active.a.id, '')">{{ tr('清除', 'Clear') }}</button>
           </div>
-          <!-- 答案（优先作答时快照；无快照的旧记录回退当前来源切片） -->
+          <!-- 答案（优先作答时快照；无快照的旧记录回退当前来源切片）；Markdown 渲染 -->
           <div v-if="ansText(active)" class="lk-ref ans">
             <span class="lk-ref-label"><i class="fa" :class="active.a.hasAnswer ? 'fa-check-circle-o' : 'fa-file-text-o'"></i>
-              {{ active.a.hasAnswer ? tr('答案', 'Answer') : tr('参考答案（来源切片）', 'Reference (source slice)') }}</span>{{ ansText(active) }}
+              {{ active.a.hasAnswer ? tr('答案', 'Answer') : tr('参考答案（来源切片）', 'Reference (source slice)') }}</span>
+            <div class="learn-md"><block_md :content="ansText(active)" :fontSize="'13px'" /></div>
           </div>
-          <!-- 参考切片出处（问题库生成答案场景：可与答案对照） -->
+          <!-- 参考切片出处（问题库生成答案场景：可与答案对照）；Markdown 渲染 -->
           <div v-if="active.a.hasAnswer && blockBack(active.a.blockId)" class="lk-ref src">
-            <span class="lk-ref-label"><i class="fa fa-files-o"></i> {{ tr('参考切片（出处）', 'Reference slices') }}</span>{{ blockBack(active.a.blockId) }}
+            <span class="lk-ref-label"><i class="fa fa-files-o"></i> {{ tr('参考切片（出处）', 'Reference slices') }}</span>
+            <div class="learn-md"><block_md :content="blockBack(active.a.blockId)" :fontSize="'13px'" /></div>
           </div>
           <div v-if="!ansText(active)" class="lk-ref none">
             <span class="lk-ref-label">{{ tr('无答案', 'No answer') }}</span>{{ tr('（作答时未记录答案，且对应来源切片已更新/移除）', '(answer was not saved, and the source slice was updated/removed)') }}
           </div>
           <div v-if="explaining[active.a.id]" class="lk-expl"><i class="fa fa-spinner fa-spin"></i> {{ tr('讲解中…', 'Explaining…') }}</div>
-          <div v-else-if="expl[active.a.id]" class="lk-expl">
-            {{ expl[active.a.id] }}
+          <div v-else-if="expl[active.a.id]" class="lk-expl learn-md">
+            <block_md :content="expl[active.a.id]" :fontSize="'13px'" />
             <div class="lk-diag-foot">
               <span v-if="cachedOf(active, 'explain')"><i class="fa fa-database"></i> {{ tr('已存入学习记录', 'Saved to learning record') }}</span>
               <span style="flex:1;"></span>
@@ -291,7 +293,7 @@ async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
 .lk-meta-line { font-size: 11px; color: var(--borderColor, #888); white-space: nowrap; }
 .lk-close { cursor: pointer; border: none; background: none; color: var(--borderColor, #888); font-size: 14px; padding: 2px 4px; border-radius: 4px; }
 .lk-close:hover { color: #d93025; background: var(--menuActiveColor, #eee); }
-.lk-question { font-size: 15px; line-height: 1.7; color: var(--fontColor, #1f2328); padding: 10px 12px 4px; white-space: pre-wrap; }
+.lk-question { font-size: 15px; line-height: 1.7; color: var(--fontColor, #1f2328); padding: 10px 12px 4px; }
 .lk-errs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 8px 12px; }
 .lk-errs-title { font-size: 11px; color: var(--borderColor, #888); margin-right: 2px; }
 .lk-err { cursor: pointer; border: 1px solid var(--borderColor, #d0d7de); background: var(--backgroundColor, #fff); color: var(--fontColor, #1f2328); border-radius: 8px; font-size: 11px; padding: 1px 8px; }
@@ -300,7 +302,7 @@ async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
 .lk-err.c.on { color: #7c4dff; border-color: #7c4dff; }
 .lk-err.p.on { color: #FF9800; border-color: #FF9800; }
 .lk-err.l.on { color: var(--borderColor, #888); border-color: var(--borderColor, #888); }
-.lk-ref { font-size: 12px; color: var(--fontColor, #1f2328); white-space: pre-wrap; line-height: 1.6; margin: 0 12px; border: 1px dashed var(--borderColor, #d0d7de); border-radius: 6px; padding: 8px; }
+.lk-ref { font-size: 12px; color: var(--fontColor, #1f2328); line-height: 1.6; margin: 0 12px; border: 1px dashed var(--borderColor, #d0d7de); border-radius: 6px; padding: 8px; }
 .lk-ref-label { display: block; font-size: 11px; color: #4CAF50; margin-bottom: 2px; }
 .lk-ref.ans .lk-ref-label { color: #4CAF50; }
 .lk-ref.src .lk-ref-label { color: var(--fontActiveColor, #0969da); }
@@ -309,7 +311,7 @@ async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
 .lk-detail-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .lk-btn { cursor: pointer; border: 1px solid var(--borderColor, #d0d7de); background: var(--backgroundColor, #fff); color: var(--fontColor, #1f2328); border-radius: 4px; font-size: 12px; padding: 3px 10px; }
 .lk-btn:hover { background: var(--menuActiveColor, #e5e5e5); }
-.lk-expl { font-size: 12px; line-height: 1.6; color: var(--fontColor, #1f2328); white-space: pre-wrap; background: var(--backgroundColor, #fff); border: 1px solid var(--borderColor, #d0d7de); border-radius: 4px; padding: 6px 8px; margin: 0 12px 10px; }
+.lk-expl { font-size: 12px; line-height: 1.6; color: var(--fontColor, #1f2328); background: var(--backgroundColor, #fff); border: 1px solid var(--borderColor, #d0d7de); border-radius: 4px; padding: 6px 8px; margin: 0 12px 10px; }
 /* 解析页脚：持久化状态 + 重新生成（在 pre-wrap 容器里要恢复正常换行） */
 .lk-diag-foot { display: flex; align-items: center; gap: 6px; margin-top: 4px; padding-top: 3px; border-top: 1px dashed var(--borderColor, #d0d7de); font-size: 10.5px; color: var(--borderColor, #888); white-space: normal; }
 .lk-mini { cursor: pointer; border: none; background: none; padding: 1px 5px; border-radius: 5px; font-size: 10.5px; color: var(--fontActiveColor, #0969da); display: inline-flex; align-items: center; gap: 3px; }

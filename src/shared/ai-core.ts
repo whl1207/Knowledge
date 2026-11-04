@@ -464,6 +464,54 @@ async function fetchOllamaContextWindow(config: any, model: string): Promise<Con
     }
 }
 
+/**
+ * OpenAI 兼容 / 自定义来源的上下文窗口探测：
+ * 1) 先尝试 LM Studio 原生 /api/v0/models（同一端口的自定义来源常见）→ loaded/max_context_length；
+ * 2) 再尝试 /v1/models（部分本地网关会返回 max_context_length / context_length）。
+ * 读不到返回 null，由设置页允许用户手填覆盖。
+ */
+async function fetchOpenAICompatContextWindow(config: any, model: string): Promise<ContextWindowProbe | null> {
+    const raw = stripTrailingSlash(String((config && (config.api_url || config.base_url || config.endpoint)) || ''))
+    if (!raw) return null
+    let base = raw
+    for (const suf of ['/v1/chat/completions', '/chat/completions', '/v1/completions', '/completions', '/v1/responses', '/responses', '/v1/messages', '/messages']) {
+        if (base.endsWith(suf)) { base = stripTrailingSlash(base.slice(0, -suf.length)); break }
+    }
+    const origin = base.replace(/\/v1(?:-openai)?$/, '')
+    const apiKey = String((config && config.api_key) || '')
+    const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+    const pickLimit = (m: any): { limit: number; loaded: boolean } | null => {
+        const loaded = Number(m?.loaded_context_length || m?.context_length_loaded || 0)
+        if (loaded > 0) return { limit: loaded, loaded: true }
+        const candidates = [
+            m?.max_context_length, m?.context_length, m?.max_context, m?.context_window,
+            m?.meta?.n_ctx_train, m?.meta?.n_ctx, m?.meta?.context_length,
+        ]
+        for (const v of candidates) {
+            const n = Number(v || 0)
+            if (n > 0) return { limit: n, loaded: false }
+        }
+        return null
+    }
+    const urls: string[] = []
+    if (origin && origin !== base) urls.push(`${origin}/api/v0/models`)
+    if (base.endsWith('/v1') || base.endsWith('/v1-openai')) urls.push(`${base}/models`)
+    else urls.push(`${base}/v1/models`, `${base}/models`)
+    for (const url of [...new Set(urls)]) {
+        try {
+            const res = await fetch(resolveApiUrl(url), { headers })
+            if (!res.ok) continue
+            const data = await res.json()
+            const list = (data && (data.data || data.models)) || []
+            const hit = list.find((m: any) => sameModelName(m && (m.id || m.model || m.name), model))
+            if (!hit) continue
+            const p = pickLimit(hit)
+            if (p) return { limit: p.limit, from: p.loaded ? 'loaded' : 'model-max' }
+        } catch { /* 尝试下一个端点 */ }
+    }
+    return null
+}
+
 // AI API工具函数（共享核心：主进程执行，渲染进程在浏览器模式兜底直连）
 export class AIUtils {
     // 归一化自定义 api_url 为聊天请求端点（基址自动补 /chat/completions，GPUStack 等本地服务可用基址）
@@ -512,6 +560,9 @@ export class AIUtils {
         try {
             if (provider === 'ollama') return await fetchOllamaContextWindow(config, model)
             if (provider === 'lmstudio') return await fetchLmStudioContextWindow(config, model)
+            if (provider === 'custom' || provider === 'gpustack') {
+                return await fetchOpenAICompatContextWindow(config, model)
+            }
             if (provider === 'google') {
                 const base = 'https://generativelanguage.googleapis.com'
                 const key = (config && config.api_key) || ''

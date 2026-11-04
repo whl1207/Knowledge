@@ -18,7 +18,7 @@
  *  - file：**具体文件**（点文件树里的文件后生成，标签标题 = 文件名，内容自带多视图切换）。
  * new / file 不能从类型选择器直接创建（file 由打开文件产生，new 由「+」产生）。
  */
-export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'branch' | 'todos' | 'plan' | 'new' | 'file'
+export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'branch' | 'todos' | 'plan' | 'trajectory' | 'new' | 'file'
 
 export interface ChatDockTab {
   /** 标签唯一 id（同类型可以开多个，如两个终端） */
@@ -54,7 +54,7 @@ export const DOCK_MAX_WIDTH = 900
 export const DOCK_MIN_CHAT_WIDTH = 320
 
 /** 新标签页里可选的类型（顺序 = 选项顺序；new / file 不在此列） */
-export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch', 'todos', 'plan']
+export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch', 'todos', 'plan', 'trajectory']
 
 /** 旧版本自动预置的三标签（用于识别并清掉旧存档，与当前可选项无关） */
 const LEGACY_SEEDED_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser']
@@ -66,12 +66,13 @@ const KIND_LABELS: Record<ChatDockTabKind, { zh: string; en: string }> = {
   branch: { zh: '分支', en: 'Branches' },
   todos: { zh: '待办清单', en: 'Todos' },
   plan: { zh: '计划', en: 'Plan' },
+  trajectory: { zh: '会话轨迹', en: 'Trajectory' },
   new: { zh: '新标签页', en: 'New tab' },
   file: { zh: '文件', en: 'File' },
 }
 
-/** 同一类型只能有一个标签页（分支 / 待办清单 / 计划） */
-export const SINGLETON_DOCK_KINDS: readonly ChatDockTabKind[] = ['branch', 'todos', 'plan']
+/** 同一类型只能有一个标签页（分支 / 待办清单 / 计划 / 会话轨迹） */
+export const SINGLETON_DOCK_KINDS: readonly ChatDockTabKind[] = ['branch', 'todos', 'plan', 'trajectory']
 export function isSingletonDockKind(kind: ChatDockTabKind): boolean {
   return SINGLETON_DOCK_KINDS.includes(kind)
 }
@@ -79,7 +80,7 @@ export function isSingletonDockKind(kind: ChatDockTabKind): boolean {
 /** 类型是否合法（存档里出现未知类型时按非法处理） */
 export function isDockTabKind(value: unknown): value is ChatDockTabKind {
   return value === 'files' || value === 'terminal' || value === 'browser'
-    || value === 'branch' || value === 'todos' || value === 'plan'
+    || value === 'branch' || value === 'todos' || value === 'plan' || value === 'trajectory'
     || value === 'new' || value === 'file'
 }
 

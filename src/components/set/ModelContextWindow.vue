@@ -156,10 +156,21 @@ const title = computed(() => {
 })
 
 /** 手填覆盖值（0 = 不覆盖）：按来源分别保存，只影响该来源。
-    本页只读展示（不允许在设置页现场改），仅在历史设置迁移过值时才可能非 0。 */
+    自动探测不到或需要强制指定时，可直接在「上下文窗口」输入框填写。 */
 const manualValue = computed(() => manualContextWindow(store.AIconfig.llm, providerKey.value, customIdx.value))
 
-/** 清除该来源的覆盖值（回到自动）——只在确实存在覆盖值时提供 */
+/** 输入框改动：>0 写入手动覆盖，清空则恢复自动 */
+const onManualInput = (e: Event) => {
+  const n = Math.round(Number((e.target as HTMLInputElement)?.value))
+  const llm: any = store.AIconfig.llm
+  const byProvider: Record<string, number> = { ...(llm.contextWindowByProvider || {}) }
+  if (Number.isFinite(n) && n > 0) byProvider[contextWindowKey(providerKey.value, customIdx.value)] = n
+  else delete byProvider[contextWindowKey(providerKey.value, customIdx.value)]
+  llm.contextWindowByProvider = byProvider
+  store.saveConfig()
+}
+
+/** 清除该来源的覆盖值（回到自动） */
 const clearOverride = () => {
   const llm: any = store.AIconfig.llm
   const byProvider: Record<string, number> = { ...(llm.contextWindowByProvider || {}) }
@@ -196,14 +207,17 @@ const clearOverrideTitle = computed(() => (zh()
   <div v-if="!hideWindow" class="form-group">
     <label>{{ zh() ? '上下文窗口' : 'Context Window' }}</label>
     <div class="input-with-button">
-      <input class="ctx-window-value" type="text" readonly :value="displayText" :title="title" />
-    </div>
-  </div>
-  <!-- 窗口上限覆盖：仅在确实存在历史覆盖值时才显示（用于清除），否则整行不出现 -->
-  <div v-if="override !== false && manualValue > 0" class="form-group">
-    <label>{{ zh() ? '窗口上限覆盖' : 'Window Limit Override' }}</label>
-    <div class="input-with-button">
-      <input class="ctx-window-value" type="text" readonly :value="overrideText" :title="overrideTitle" />
+      <input
+        class="ctx-window-value"
+        type="number"
+        min="1"
+        step="1"
+        :value="manualValue > 0 ? manualValue : ''"
+        :placeholder="auto.limit.toLocaleString()"
+        :title="title"
+        @change="onManualInput"
+      />
+      <span class="ctx-window-unit">tokens</span>
       <div v-if="manualValue > 0" class="button" style="width:30px;margin:0px;padding:4px 0px"
         @click="clearOverride" :title="clearOverrideTitle">
         <i class="fa fa-times"></i>
@@ -236,8 +250,9 @@ const clearOverrideTitle = computed(() => (zh()
   display: inline-flex; align-items: center; justify-content: center;
   min-height: 0; padding: 0 6px; margin: 0;
 }
-/* 只读展示值：不改配色（与其它输入框一致），仅鼠标指针不暗示可编辑 */
-.input-with-button > input.ctx-window-value { cursor: default; }
+/* 可编辑值：留空 = 自动；填写 = 手动覆盖 */
+.input-with-button > input.ctx-window-value { cursor: text; }
+.ctx-window-unit { flex-shrink: 0; align-self: center; font-size: 11px; opacity: .55; }
 @media (max-width: 620px) {
   .form-group { flex-wrap: wrap; }
   .form-group > label { width: 100%; min-width: 0; text-align: left; }

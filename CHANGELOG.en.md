@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-11-04
+
+### Added
+
+- **New “Trajectory” tab in the Home right dock**: modelled on the DSH Trajectory view, it groups records by turn — user messages, replies, reasoning, tool calls and compaction — with tool / token / cache / elapsed summaries; opened manually as a new tab and read-only.
+- **Office MCP can convert legacy .doc to .docx**: new `convert_doc_to_docx` uses Microsoft Word COM on Windows and falls back to LibreOffice; if neither is available it fails instead of producing a formatting-lossy text-only .docx. The default output is a same-named .docx next to the source, ready for `open_document`.
+- **Markdown in Learning questions / answers / mistake book**: question stems, answer explanations (including slice content in “summarize this slice”), mistake details and reference slices, exam stems / options / reference answers are rendered as Markdown.
+- **Editable context window**: the Context Window field under Settings → Models → source now accepts a manual override (clear it to return to auto); custom / GPUStack sources also try reading context length from `/v1/models` and similar endpoints.
+- **No workspace path for workspace-less agents**: when a chat explicitly uses no workspace, the system prompt no longer injects the default workspace path and the tool cwd does not fall back to it.
+
 ## 2026-11-03
 
 ### Added

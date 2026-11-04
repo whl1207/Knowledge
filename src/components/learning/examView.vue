@@ -1270,7 +1270,7 @@ const examSummary = computed(() => {
               <i class="fa" :class="q._explaining ? 'fa-spinner fa-spin' : 'fa-commenting-o'"></i> {{ store.locales=='zh'?'生成解析':'Explain' }}
             </span>
           </div>
-          <div class="exam-q-prompt">{{ q.prompt }}</div>
+          <div class="exam-q-prompt learn-md"><block_md :content="q.prompt" :fontSize="'13px'" /></div>
 
           <!-- 选择题选项（左侧选项框含字母，答案文本在框外） -->
           <div v-if="q.type==='single' || q.type==='multi'">
@@ -1280,7 +1280,7 @@ const examSummary = computed(() => {
               <span class="exam-opt-box" :class="q.type">
                 <span class="exam-opt-letter">{{ String.fromCharCode(65 + oi) }}</span>
               </span>
-              <span class="exam-q-option-text">{{ o }}</span>
+              <div class="exam-q-option-text learn-md"><block_md :content="o" :fontSize="'13px'" /></div>
               <i v-if="q.result && q.correctOption.includes(oi)" class="fa exam-opt-flag"
                  :class="q.userOption.includes(oi) ? 'ok fa-check' : 'miss fa-check-circle-o'"
                  :title="q.userOption.includes(oi) ? (store.locales=='zh'?'答对':'Correct') : (store.locales=='zh'?'漏选':'Missed')"></i>
@@ -1307,8 +1307,8 @@ const examSummary = computed(() => {
 
           <!-- 判分结果 -->
           <div v-if="q.result" class="exam-result-box">
-            <div v-if="q.result.comment" class="exam-result-comment">{{ store.locales=='zh'?'解析：':'Comment: ' }}{{ q.result.comment }}</div>
-            <div v-if="q.result.reference" class="exam-result-ref">{{ store.locales=='zh'?'参考答案：':'Reference: ' }}{{ q.result.reference }}</div>
+            <div v-if="q.result.comment" class="exam-result-comment learn-md"><block_md :content="(store.locales=='zh'?'解析：':'Comment: ') + q.result.comment" :fontSize="'12px'" /></div>
+            <div v-if="q.result.reference" class="exam-result-ref learn-md"><block_md :content="(store.locales=='zh'?'参考答案：':'Reference: ') + q.result.reference" :fontSize="'12px'" /></div>
           </div>
         </div>
       </div>
@@ -1550,7 +1550,7 @@ const examSummary = computed(() => {
 .exam-q-card { border: 1px solid var(--borderColor); border-radius: 5px; padding: 5px; margin-bottom: 5px; background: var(--backgroundColor); }
 .exam-q-index { font-weight: bold; font-size: 12px; }
 .exam-q-src { font-size: 10px; color: var(--borderColor); }
-.exam-q-prompt { font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+.exam-q-prompt { font-size: 13px; margin-top: 4px; word-break: break-word; }
 .exam-q-option-text { font-size: 12px; }
 .exam-q-judge { margin-top: 6px; display: flex; gap: 8px; }
 .exam-answer-textarea { width: calc(100% - 4px); margin-top: 6px; min-height: 56px; font-size: 12px; padding: 4px; box-sizing: border-box; }
@@ -1615,8 +1615,8 @@ const examSummary = computed(() => {
 .exam-src-toggle { font-size: 10px; color: var(--borderColor); cursor: pointer; }
 .exam-src-box { border: 1px solid var(--borderColor); border-radius: 4px; padding: 6px; margin-top: 4px; background: var(--menuColor); }
 .exam-result-box { margin-top: 6px; border-top: 1px dashed var(--borderColor); padding-top: 6px; }
-.exam-result-comment { font-size: 12px; margin-top: 3px; color: var(--fontColor); white-space: pre-wrap; }
-.exam-result-ref { font-size: 12px; margin-top: 3px; color: #2196F3; white-space: pre-wrap; }
+.exam-result-comment { font-size: 12px; margin-top: 3px; color: var(--fontColor); }
+.exam-result-ref { font-size: 12px; margin-top: 3px; color: #2196F3; }
 .exam-explain-link { margin-left: auto; cursor: pointer; font-size: 11px; color: #2196F3; white-space: nowrap; }
 .exam-explain-link:hover { text-decoration: underline; }
 
