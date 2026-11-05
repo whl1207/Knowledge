@@ -15,6 +15,7 @@
 - **New built-in sources: GLM (Zhipu), Kimi (Moonshot), MiMo (Xiaomi)**: all use OpenAI-compatible endpoints with the URL prefilled, and Test connection fetches the model list; the source list is grouped into Local / Cloud in Settings.
 - **Provider sites on the model source page**: each source shows where to download the local app or get an API key, shared with the setup guide.
 - **One-click backup / restore on the Data page**: Settings → General → Data → Backup all writes all config plus every chat into one JSON file, and Restore overwrites config while merging chats by id; it also accepts the config exports and chat exports produced earlier.
+- **“Check for updates” button**: Settings → General → Basic → Common Actions now checks the latest GitHub Release against the current version; when a newer one exists it lists the packages for this platform (Windows Setup / Portable, macOS dmg, Linux AppImage / deb) and downloads them through the system browser, or opens the release page; when already current it just reports the version.
 
 ### Removed
 

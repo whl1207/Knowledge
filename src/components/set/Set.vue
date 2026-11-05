@@ -39,6 +39,19 @@ import { LOCAL_STORAGE_LIMIT, MD_FILTERS, countEntries, formatBytes, lsTotalByte
 import { resetOnboarding, markOnboardingDone, writeOnboarding } from '@/components/onboarding/onboardingState'
 // 从「常用操作 → 新手引导」重看时，直接渲染在设置里（设置可能是独立窗口，广播给主窗口会看不见）
 import OnboardingWizard from '@/components/onboarding/OnboardingWizard.vue'
+// 检查更新：读 GitHub Releases 最新版本，按平台挑安装包（下载交给系统浏览器）
+import {
+  assetsForPlatform,
+  compareVersions,
+  currentAppVersion,
+  detectPlatform,
+  fetchLatestRelease,
+  formatAssetSize,
+  platformLabel,
+  releasesPageUrl,
+  type LatestRelease,
+  type ReleaseAsset,
+} from '@/lib/updateCheck'
 import { getPlatform, hasCapability } from '@/platform'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { useMobileBackScreen } from '@/composables/useBackLayer'
@@ -336,6 +349,52 @@ const reopenOnboarding = () => {
 const onGuideStep = (step: number) => { writeOnboarding({ step, done: false }) }
 const onGuideDone = () => { markOnboardingDone(); showOnboardingGuide.value = false }
 const onGuideSuspend = () => { showOnboardingGuide.value = false }
+
+// ================ 检查更新（GitHub Releases） ================
+const updateChecking = ref(false)
+const updateRelease = ref<LatestRelease | null>(null)
+const updateAssets = ref<ReleaseAsset[]>([])
+const updateOtherAssets = ref<ReleaseAsset[]>([])
+const updatePlatform = detectPlatform(getPlatform().kind)
+const currentVersion = currentAppVersion()
+const updatePublishedText = computed(() => {
+  const t = updateRelease.value?.publishedAt
+  if (!t) return ''
+  try { return new Date(t).toLocaleString(store.locales === 'zh' ? 'zh-CN' : 'en-US') } catch { return t }
+})
+/** 检查 GitHub 最新 Release；有更新就弹下载对话框，否则只提示已是最新 */
+const checkForUpdates = async () => {
+  if (updateChecking.value) return
+  updateChecking.value = true
+  try {
+    const rel = await fetchLatestRelease()
+    if (compareVersions(rel.version, currentVersion) <= 0) {
+      ElMessage.success(store.locales === 'zh'
+        ? `已是最新版本（v${currentVersion}）`
+        : `You're on the latest version (v${currentVersion})`)
+      return
+    }
+    const mine = assetsForPlatform(rel.assets, updatePlatform)
+    const picked = new Set(mine.map((a) => a.name))
+    updateAssets.value = mine
+    updateOtherAssets.value = rel.assets.filter((a) => !picked.has(a.name))
+    updateRelease.value = rel
+  } catch (e: any) {
+    ElMessage.warning(store.locales === 'zh'
+      ? `检查更新失败：${e?.message || e}（也可以直接打开 GitHub Releases 页）`
+      : `Update check failed: ${e?.message || e} (you can open the GitHub Releases page)`)
+  } finally {
+    updateChecking.value = false
+  }
+}
+/** 下载交给系统浏览器：Electron 里 window.open 会被主进程接管为 shell.openExternal，大文件不经过渲染进程 */
+const downloadUpdateAsset = (a: ReleaseAsset) => {
+  try { window.open(a.url, '_blank', 'noopener') } catch { /* 忽略 */ }
+}
+const openReleasesPage = () => {
+  try { window.open(updateRelease.value?.pageUrl || releasesPageUrl(), '_blank', 'noopener') } catch { /* 忽略 */ }
+}
+const closeUpdateDialog = () => { updateRelease.value = null }
 const removeWorkspace = (path: string) => {
   ElMessageBox.confirm(
     store.locales === 'zh' ? `确定要从工作区列表中移除 "${path}" 吗？（不会删除磁盘文件）` : `Remove workspace "${path}"? (files on disk are not deleted)`,
@@ -1509,6 +1568,11 @@ onBeforeUnmount(() => {
                 <div class="button" @click="reopenOnboarding" :title="store.locales=='zh'?'重新打开新手引导（语言 / 工作区 / 模型配置）' : 'Reopen the setup guide (language / workspace / model)'">
                   <i class="fa fa-map-signs"></i> {{ store.locales=='zh'?'新手引导' : 'Setup Guide' }}
                 </div>
+                <div class="button" @click="checkForUpdates" :class="{ disabled: updateChecking }"
+                     :title="store.locales=='zh'?'检查 GitHub 上的最新版本；有新版本可直接下载当前平台的安装包' : 'Check the latest release on GitHub; download the package for this platform when there is one'">
+                  <i class="fa" :class="updateChecking ? 'fa-spinner fa-spin' : 'fa-cloud-download'"></i>
+                  {{ store.locales=='zh'?'检查更新' : 'Check Updates' }}
+                </div>
                 <div class="button" @click="handleInitConfig" :title="store.locales=='zh'?'初始化（将清除全部配置并重启）\n当前本机数据：' + localDataSummary() + '（共 ' + localStorageUsageText + '）' : 'initialization (clears all config and restarts)\nLocal data: ' + localDataSummary() + ' (' + localStorageUsageText + ')'">
                   <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'初始化' : 'initialization' }}
                 </div>
@@ -1818,6 +1882,50 @@ onBeforeUnmount(() => {
         <div class="theme-dialog-actions">
           <button class="theme-dialog-btn" @click="closeAddTheme">{{ store.locales === 'zh' ? '取消' : 'Cancel' }}</button>
           <button class="theme-dialog-btn primary" @click="confirmAddTheme">{{ store.locales === 'zh' ? '添加' : 'Add' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 检查更新：有新版本时按当前平台列出安装包（下载交给系统浏览器） -->
+    <div v-if="updateRelease" class="theme-dialog-overlay" @click.self="closeUpdateDialog">
+      <div class="theme-dialog update-dialog" @click.stop>
+        <div class="theme-dialog-head">
+          <i class="fa fa-cloud-download"></i>
+          <span>{{ store.locales === 'zh' ? `发现新版本 v${updateRelease.version}` : `Update available: v${updateRelease.version}` }}</span>
+          <span class="update-current">{{ store.locales === 'zh' ? `当前 v${currentVersion}` : `you have v${currentVersion}` }}</span>
+        </div>
+        <div v-if="updatePublishedText" class="update-meta">
+          {{ store.locales === 'zh' ? '发布于' : 'Published' }} {{ updatePublishedText }}
+        </div>
+
+        <div class="update-section-title">
+          {{ store.locales === 'zh' ? `下载（${platformLabel(updatePlatform, true)}）` : `Download for ${platformLabel(updatePlatform, false)}` }}
+        </div>
+        <div v-if="updateAssets.length" class="update-assets">
+          <button v-for="a in updateAssets" :key="a.name" class="update-asset" :title="a.name" @click="downloadUpdateAsset(a)">
+            <i class="fa fa-download"></i>
+            <span class="update-asset-name">{{ a.name }}</span>
+            <span class="update-asset-size">{{ formatAssetSize(a.size) }}</span>
+          </button>
+        </div>
+        <div v-else class="update-empty">
+          {{ store.locales === 'zh' ? '当前平台没有匹配的安装包，请在 Release 页选择。' : 'No package matches this platform — pick one on the release page.' }}
+        </div>
+
+        <details v-if="updateOtherAssets.length" class="update-others">
+          <summary>{{ store.locales === 'zh' ? `其他平台（${updateOtherAssets.length}）` : `Other platforms (${updateOtherAssets.length})` }}</summary>
+          <div class="update-assets">
+            <button v-for="a in updateOtherAssets" :key="a.name" class="update-asset" :title="a.name" @click="downloadUpdateAsset(a)">
+              <i class="fa fa-download"></i>
+              <span class="update-asset-name">{{ a.name }}</span>
+              <span class="update-asset-size">{{ formatAssetSize(a.size) }}</span>
+            </button>
+          </div>
+        </details>
+
+        <div class="theme-dialog-actions">
+          <button class="theme-dialog-btn" @click="openReleasesPage">{{ store.locales === 'zh' ? '打开 Release 页' : 'Open release page' }}</button>
+          <button class="theme-dialog-btn primary" @click="closeUpdateDialog">{{ store.locales === 'zh' ? '关闭' : 'Close' }}</button>
         </div>
       </div>
     </div>
@@ -2882,6 +2990,28 @@ onBeforeUnmount(() => {
   color: var(--fontActiveColor);
 }
 .theme-dialog-btn:hover { border-color: var(--fontActiveColor); }
+
+/* ====== 检查更新对话框（复用 theme-dialog 的底样式） ====== */
+.update-dialog { width: min(560px, calc(100vw - 32px)); }
+.update-current { margin-left: auto; font-size: 11px; font-weight: 400; opacity: .65; }
+.update-meta { font-size: 11px; opacity: .65; margin: -4px 0 10px; }
+.update-section-title { font-size: 12px; font-weight: 600; margin: 6px 0 6px; }
+.update-assets { display: flex; flex-direction: column; gap: 6px; }
+.update-asset {
+  display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;
+  padding: 8px 10px; border: 1px solid var(--borderColor); border-radius: 6px;
+  background: var(--menuColor); color: var(--fontColor); cursor: pointer;
+  font-size: 12px; text-align: left; transition: border-color .15s, background .15s;
+}
+.update-asset:hover { border-color: var(--fontActiveColor); background: var(--menuActiveColor); }
+.update-asset i { color: var(--fontActiveColor); flex-shrink: 0; }
+.update-asset-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-asset-size { flex-shrink: 0; font-size: 10px; opacity: .6; }
+.update-empty { font-size: 11px; opacity: .7; line-height: 1.6; padding: 8px 2px; }
+.update-others { margin-top: 10px; }
+.update-others summary { font-size: 11px; cursor: pointer; opacity: .75; margin-bottom: 6px; }
+/* 检查中：按钮变灰且不可重复点（事件里也做了并发保护） */
+.action-grid .button.disabled { opacity: .55; pointer-events: none; }
 
 /* 窗口缩放控制：输入框 + 步进/重置按钮 */
 .zoom-control {

@@ -2570,7 +2570,7 @@ const translations = {
         basic: {
           title: '🧭 通用',
           items: {
-            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文字对齐</strong>（两端对齐 / K-P 最优断行）/ <strong>关闭按钮行为</strong> / <strong>配置随软件分发</strong>，路径与常用操作，以及<strong>导航与模块</strong>开关：主界面导航栏的入口（顶层模块：主页 / 知识管理 / 知识处理 / 学习，以及<strong>待我处理</strong>与<strong>浏览器 Agent</strong> 的地球图标——关掉后导航栏不再显示，AI 与知识管理面板仍可打开浏览器）。知识管理的视图切换在知识管理自己的顶部工具栏里。全部关闭且没有插件面板时主界面会显示<strong>空导航提醒</strong>（可在此关闭提醒）。' },
+            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文字对齐</strong>（两端对齐 / K-P 最优断行）/ <strong>关闭按钮行为</strong> / <strong>配置随软件分发</strong>，路径与常用操作（控制台、全屏、<strong>新手引导</strong>、<strong>检查更新</strong>——读 GitHub 最新 Release 并按当前平台给出安装包下载、初始化、清空聊天、导出 Markdown、恢复 AI 配置），以及<strong>导航与模块</strong>开关：主界面导航栏的入口（顶层模块：主页 / 知识管理 / 知识处理 / 学习，以及<strong>待我处理</strong>与<strong>浏览器 Agent</strong> 的地球图标——关掉后导航栏不再显示，AI 与知识管理面板仍可打开浏览器）。知识管理的视图切换在知识管理自己的顶部工具栏里。全部关闭且没有插件面板时主界面会显示<strong>空导航提醒</strong>（可在此关闭提醒）。' },
             data: { name: '数据', desc: '顶部是<strong>模型用量</strong>（全部来源合计与每日消耗）；其下为<strong>使用总览</strong>：本地存储占用、数据目录（可打开所在文件夹）、<strong>一键备份 / 一键恢复</strong>（把全部配置与全部聊天记录打成一个 JSON 文件；恢复时配置覆盖、聊天按 id 合并，也接受旧的配置备份与聊天记录导出）与可清理缓存；底部<strong>数据清单</strong>逐类列出聊天记录 / Agent 预设 / MCP / 配置 / 会话日志的数量与占用，每类可单独导出 / 导入（会话日志可清空或打开所在文件夹），并可直接前往对应设置页。只统计本机数据，工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。' },
             fileassoc: { name: '关联', desc: '按文件类型设置系统默认打开方式，可一键设置 / 全部取消：Windows 写当前用户注册表，Linux 写 ~/.config/mimeapps.list（需 .deb 安装版提供的桌面条目，AppImage / 免安装版要先做桌面集成）；macOS 不允许软件自行修改，安装版会出现在「打开方式」列表里，请在「访达 → 显示简介 → 打开方式」中设置。' },
             other: { name: '其他', desc: '系统状态（Python 检测与<strong>安全策略</strong>：只读安全 / 工作区写入 / 完全访问三档，决定智能体执行代码、命令与联网的权限，改完对所有窗口立即生效并保留）、浏览器、Word 导出与离线地图包（MBTiles）。' }
