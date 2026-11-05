@@ -9,7 +9,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatsRef } from '@/store/chats'
 import { getPlatform, hasCapability } from '@/platform'
 import { aikmIpc, aikmIpcOrNull } from '@/lib/aikmIpc'
-import { parseLegacyChatsFile } from '@/shared/legacyChatImport'
+import { isBuiltinAgentPreset } from '@/shared/builtinAgentPresets'
+import { parseBackupText } from '@/shared/fullBackup'
 
 /** 浏览器 localStorage 配额按 UTF-16 码元计（key + value 每字符 2 字节），Electron 上限约 100MB */
 export const LOCAL_STORAGE_LIMIT = 100 * 1024 * 1024 // 100MB
@@ -156,49 +157,6 @@ export const parseChatsFile = (text: string, zh = true): any[] => {
   return list.filter((c: any) => c && typeof c === 'object' && (Array.isArray(c.messages) || c.config))
 }
 
-// ================ 原始版本（旧版 ai-chats）导入 ================
-// 解析/归一化纯函数在 @/shared/legacyChatImport（可单测）；这里只负责文件选择与合并写入。
-
-/** 导入原始版本聊天 JSON：与现有记录合并，同 id 跳过；不恢复旧 agent 会话 */
-export const importLegacyChats = async (zh = true, onDone?: () => void) => {
-  let text = ''
-  try {
-    text = await pickTextFile()
-  } catch (e: any) {
-    ElMessage.error((zh ? '导入失败：' : 'Import failed: ') + (e?.message || String(e)))
-    return
-  }
-  if (!text) return
-  try {
-    const { chats: incoming, invalid } = parseLegacyChatsFile(text, Date.now(), zh)
-    const existing = readStoredChats()
-    const ids = new Set(existing.map((c: any) => String(c?.id ?? '')))
-    const added: any[] = []
-    let skipped = 0
-    for (const chat of incoming) {
-      if (ids.has(String(chat.id))) { skipped++; continue }
-      ids.add(String(chat.id))
-      added.push(chat)
-    }
-    if (!added.length) {
-      ElMessage.info(zh
-        ? `没有新聊天可导入（${skipped} 个已存在${invalid ? `，${invalid} 个无效` : ''}）`
-        : `Nothing new to import (${skipped} already exist${invalid ? `, ${invalid} invalid` : ''})`)
-      return
-    }
-    writeStoredChats([...existing, ...added])
-    const notes: string[] = []
-    if (skipped) notes.push(zh ? `跳过 ${skipped} 个已存在` : `${skipped} skipped`)
-    if (invalid) notes.push(zh ? `${invalid} 个无效` : `${invalid} invalid`)
-    ElMessage.success(zh
-      ? `已导入 ${added.length} 个旧版聊天${notes.length ? `（${notes.join('，')}）` : ''}`
-      : `Imported ${added.length} legacy chats${notes.length ? ` (${notes.join(', ')})` : ''}`)
-    onDone?.()
-  } catch (e: any) {
-    ElMessage.error((zh ? '导入失败：' : 'Import failed: ') + (e?.message || String(e)))
-  }
-}
-
 /** 导出全部聊天记录（含分支 / 知识库来源 / 工具调用时间线等完整字段）为 JSON 备份文件 */
 export const exportChats = async (zh = true) => {
   const list = readStoredChats()
@@ -242,18 +200,34 @@ export const importChats = async (zh = true, onDone?: () => void) => {
   }
 }
 
-// ================ 按类导出 / 导入（预设 / MCP / 界面与模型配置） ================
+// ================ 按类导出 / 导入（预设 / MCP / 界面、模型与协作配置） ================
 
-/** 配置类存档键（界面 + AI 配置 + 预设 + MCP 等；聊天记录体积大，由「导出聊天」单独备份，这里不重复） */
+/**
+ * 配置类存档键（界面 + AI 配置 + 预设 + MCP + 技能/插件来源 + 协作 + 工作区等）。
+ *
+ * 口径：**只收「会被读取并决定行为」的配置**。
+ * - 运行态 / 探测缓存不收：`llmSourceStatus` / `llmCustomSourceStatus` 是来源在线探测结果，
+ *   导入等于把过期状态复原；
+ * - 界面运行态不收：`view` / `treeSort` / `mainPanel` 是当前视图 / 排序 / 主面板，换机无意义，
+ *   导入还会强行切走用户当前面板；
+ * - 聊天记录体积大，由「导出聊天记录」单独备份，这里不重复；
+ * - 工作区路径（root / roots / path / remoteRoots）是**机器相关**配置：同机恢复有用，
+ *   换机导入后需自行改路径（页面文案已提示）。
+ * - `pythonSandbox`（安全策略三档）与 `agentPresetPath`（预设文件夹）都属于必须随备份走的配置：
+ *   漏掉会让恢复后的权限档位 / 预设位置悄悄回落到默认值。
+ *
+ * 旧备份里可能还带 `llmSourceStatus` / `llmCustomSourceStatus` / `view` / `treeSort` / `mainPanel`：
+ * 它们已不在名单里，导入时自然被忽略（这些键运行时仍会被读写，只是不属于可迁移的配置）。
+ */
 export const BACKUP_KEYS = [
-  'AIconfig', 'UI', 'customLlmSources', 'llmSourceStatus', 'llmDisabledSources', 'llmCustomSourceStatus',
+  'AIconfig', 'UI', 'customLlmSources', 'llmDisabledSources',
   'agentPresets', 'generalAgentMaxSteps', 'mcpServers', 'disabledSkills', 'skillStoreSources',
   'pluginStoreSources', 'agentTools',
   'webSearchConfig',
   'webFetchConfig',
   'hiddenNavs', 'hiddenExtras', 'customTitle', 'interfaceConfigMode', 'collab', 'remoteFs', 'lan',
-  'remoteRoots', 'mapConfig', 'locales', 'roots', 'root', 'path', 'skillsPath', 'treeSort',
-  'view', 'mainPanel',
+  'remoteRoots', 'mapConfig', 'locales', 'roots', 'root', 'path', 'skillsPath', 'agentPresetPath',
+  'pythonSandbox',
 ]
 
 export type DataIoDef = { keys: string[]; kind: string; zh: string; en: string }
@@ -262,21 +236,49 @@ export type DataIoDef = { keys: string[]; kind: string; zh: string; en: string }
 export const DATA_IO: Record<string, DataIoDef> = {
   presets: { keys: ['agentPresets'], kind: 'agent-presets', zh: 'Agent 预设', en: 'Agent presets' },
   mcp: { keys: ['mcpServers'], kind: 'mcp-servers', zh: 'MCP 服务', en: 'MCP servers' },
-  config: { keys: BACKUP_KEYS, kind: 'backup', zh: '界面与模型配置', en: 'UI & model config' },
+  config: { keys: BACKUP_KEYS, kind: 'backup', zh: '界面、模型与协作配置', en: 'UI, model & collab config' },
+}
+
+/** 从 localStorage 收集若干键的当前值（解析失败按原文字符串带走）；count = 实际存在的键数 */
+const collectStoredKeys = (keys: string[]): { data: Record<string, any>; count: number } => {
+  const data: Record<string, any> = {}
+  let count = 0
+  for (const k of keys) {
+    const raw = localStorage.getItem(k)
+    if (raw === null) continue
+    try { data[k] = JSON.parse(raw) } catch { data[k] = raw }
+    count++
+  }
+  return { data, count }
+}
+
+/** 把一份存档数据写回 localStorage，返回命中的键（须在 onImported 之前调用，store 重读的才是新值） */
+const writeStoredConfig = (data: Record<string, any>, keys: string[]): string[] => {
+  const hits = keys.filter(k => data[k] !== undefined)
+  for (const k of hits) {
+    const v = data[k]
+    localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v))
+  }
+  return hits
+}
+
+/** 配置变化后通知其它窗口（主窗口）重新同步界面 / 语言：直接从存档读，不依赖调用方的 store */
+const broadcastConfigChanged = () => {
+  try {
+    const ui = readLsJson('UI')
+    const locale = readLsJson('locales')
+    aikmIpc?.send?.('settings-config-changed', {
+      ui: ui && typeof ui === 'object' ? ui : undefined,
+      locales: locale === 'zh' || locale === 'en' ? locale : undefined,
+    })
+  } catch { /* 忽略 */ }
 }
 
 /** 导出某类数据为 JSON 文件（含 app/kind/exportedAt/data） */
 export const exportDataGroup = async (key: string, zh = true) => {
   const io = DATA_IO[key]
   if (!io) return
-  const data: Record<string, any> = {}
-  let count = 0
-  for (const k of io.keys) {
-    const raw = localStorage.getItem(k)
-    if (raw === null) continue
-    try { data[k] = JSON.parse(raw) } catch { data[k] = raw }
-    count++
-  }
+  const { data, count } = collectStoredKeys(io.keys)
   if (!count) {
     ElMessage.warning(zh ? `当前没有可导出的${io.zh}` : 'Nothing to export')
     return
@@ -294,6 +296,37 @@ export const exportDataGroup = async (key: string, zh = true) => {
   } catch (e: any) {
     ElMessage.error((zh ? '导出失败：' : 'Export failed: ') + (e?.message || String(e)))
   }
+}
+
+/**
+ * 预设已切到「文件夹」存储（`agentPresetPath`）时，把刚导入到 localStorage 的预设同步写成
+ * `.agent` 文件 —— 否则下次 `scanAgentPresets()` 以文件夹为准，会把导入结果整体覆盖掉
+ * （用户看到的现像是「导入成功，但预设没变」）。
+ *
+ * 语义：**合并**，不删除磁盘上原有、备份里没有的预设（覆盖导入也不删别人的文件）。
+ * @returns 成功写入文件夹的预设数（0 = 未启用文件夹模式 / 没有可写项）
+ */
+const syncImportedPresetsToFolder = async (): Promise<number> => {
+  const { usestore } = await import('@/store')
+  const store = usestore() as any
+  const dir = String(store?.agentPresetPath || '')
+  if (!dir) return 0
+  const list = readLsJson('agentPresets')
+  if (!Array.isArray(list) || !list.length) return 0
+  const { scanAgentPresets, writeAgentPreset } = await import('@/composables/useAgentPresets')
+  // 先扫一次：把 id → 文件路径 的映射对齐到当前目录，避免沿用旧目录的路径写错地方
+  await scanAgentPresets()
+  let written = 0
+  for (const preset of list) {
+    if (!preset || typeof preset !== 'object' || !preset.id) continue
+    if (isBuiltinAgentPreset(preset)) continue // 内置预设由软件提供，不落盘
+    if (await writeAgentPreset(preset)) written++
+  }
+  // 再扫一次：列表以文件夹实际内容为准（= 原有 ∪ 导入），内存与磁盘保持一致
+  await scanAgentPresets()
+  // 合并后的列表写回 localStorage 镜像，避免下次启动先读到「只有导入项」的旧镜像
+  try { store?.saveConfig?.() } catch { /* 写盘失败不影响导入结果 */ }
+  return written
 }
 
 /**
@@ -328,24 +361,115 @@ export const importDataGroup = async (key: string, zh = true, onImported?: () =>
         { confirmButtonText: zh ? '导入' : 'Import', cancelButtonText: zh ? '取消' : 'Cancel', type: 'warning' }
       )
     } catch { return /* 用户取消 */ }
-    for (const k of hits) {
-      const v = data[k]
-      localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v))
-    }
+    writeStoredConfig(data, io.keys)
     onImported?.()
-    // 广播给其它窗口（主窗口）重新同步配置：ui / locales 直接从存档读，避免依赖调用方的 store
-    try {
-      const ui = readLsJson('UI')
-      const locale = readLsJson('locales')
-      ;aikmIpc?.send?.('settings-config-changed', {
-        ui: ui && typeof ui === 'object' ? ui : undefined,
-        locales: locale === 'zh' || locale === 'en' ? locale : undefined,
-      })
-    } catch { /* 忽略 */ }
+    // 预设：文件夹模式以磁盘文件为准，导入后必须同步落盘，否则下次扫描会把导入结果覆盖掉
+    let presetsWritten = 0
+    if (hits.includes('agentPresets')) {
+      try { presetsWritten = await syncImportedPresetsToFolder() } catch { presetsWritten = 0 }
+    }
+    broadcastConfigChanged()
+    const extra = presetsWritten
+      ? (zh ? `；其中 ${presetsWritten} 个预设已写入预设文件夹` : `; ${presetsWritten} presets written to the preset folder`)
+      : ''
     ElMessage.success(zh
-      ? `已导入${io.zh}（${hits.length} 项）；该模块若已打开，重新打开后完全生效`
-      : `Imported ${hits.length} entries; reopen the module to apply fully`)
+      ? `已导入${io.zh}（${hits.length} 项）${extra}；该模块若已打开，重新打开后完全生效`
+      : `Imported ${hits.length} entries${extra}; reopen the module to apply fully`)
   } catch (e: any) {
     ElMessage.error((zh ? '导入失败：' : 'Import failed: ') + (e?.message || String(e)))
+  }
+}
+
+// ================ 一键备份 / 一键恢复（配置 + 聊天记录，一个文件） ================
+
+/** 「一键备份」文件的 kind 标识（一个文件同时带 data = 配置、chats = 聊天记录） */
+export const FULL_BACKUP_KIND = 'full'
+
+/**
+ * 一键备份：把全部配置（BACKUP_KEYS）与全部聊天记录写进同一个 JSON。
+ * 不含会话日志、用量账本（都在数据目录里按文件保存）与主进程凭据库（只存在主进程）。
+ */
+export const exportFullBackup = async (zh = true) => {
+  const { data, count } = collectStoredKeys(BACKUP_KEYS)
+  const chats = readStoredChats()
+  if (!count && !chats.length) {
+    ElMessage.warning(zh ? '当前没有可备份的数据' : 'Nothing to back up')
+    return
+  }
+  const payload = {
+    app: 'ai-km', kind: FULL_BACKUP_KIND, version: 1,
+    exportedAt: new Date().toISOString(),
+    appVersion: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '',
+    configCount: count, chatCount: chats.length, data, chats,
+  }
+  try {
+    const target = await saveTextFile(`ai-km-full-${stampText()}.json`, JSON.stringify(payload, null, 2), 'application/json', JSON_FILTERS, zh)
+    if (target === null) return
+    ElMessage.success(zh
+      ? `已备份 ${count} 项配置与 ${chats.length} 个聊天${target ? ` → ${target}` : ''}`
+      : `Backed up ${count} config entries and ${chats.length} chats${target ? ` → ${target}` : ''}`)
+  } catch (e: any) {
+    ElMessage.error((zh ? '备份失败：' : 'Backup failed: ') + (e?.message || String(e)))
+  }
+}
+
+/**
+ * 一键恢复：读「一键备份」文件，同时兼容旧的配置备份（只有 data）与聊天记录导出（只有 chats / 裸数组）。
+ * - 配置：覆盖（只写名单内、且文件里确实有的键；旧名单里的运行态键自然被忽略）
+ * - 聊天：按 id **合并**（已存在的跳过），不删除现有聊天
+ * @param onImported 恢复后的回调（刷新统计 / 重载 store）
+ */
+export const importFullBackup = async (zh = true, onImported?: () => void) => {
+  let text = ''
+  try {
+    text = await pickTextFile()
+  } catch (e: any) {
+    ElMessage.error((zh ? '恢复失败：' : 'Restore failed: ') + (e?.message || String(e)))
+    return
+  }
+  if (!text) return
+  try {
+    // 认文件：一键备份（配置 + 聊天）/ 旧配置备份 / 旧聊天导出 / 裸数组（解析规则见 shared/fullBackup）
+    const { config: configData, chats } = parseBackupText(text)
+    const cfgHits = configData ? BACKUP_KEYS.filter(k => configData[k] !== undefined) : []
+    if (!cfgHits.length && !(chats && chats.length)) {
+      throw new Error(zh ? '不是有效的备份文件（没有可恢复的配置或聊天）' : 'not a valid backup (no config or chats)')
+    }
+    // 聊天按 id 去重（与聊天导入同一套合并规则）
+    const existing = (chats && chats.length) ? readStoredChats() : []
+    const ids = new Set(existing.map((c: any) => String(c?.id ?? '')))
+    const addedChats = (chats || []).filter((c: any) => !ids.has(String(c?.id ?? '')))
+    const skippedChats = (chats?.length || 0) - addedChats.length
+    try {
+      await ElMessageBox.confirm(
+        zh
+          ? `将恢复 ${cfgHits.length} 项配置${chats && chats.length ? `，并合并 ${addedChats.length} 个聊天（跳过 ${skippedChats} 个已存在）` : ''}。\n配置会覆盖当前设置，聊天按 id 合并，均不可撤销。确认恢复？`
+          : `Restore ${cfgHits.length} config entries${chats && chats.length ? ` and merge ${addedChats.length} chats (${skippedChats} already exist)` : ''}?\nConfig is overwritten and chats are merged by id; this cannot be undone. Continue?`,
+        zh ? '一键恢复' : 'Restore',
+        { confirmButtonText: zh ? '恢复' : 'Restore', cancelButtonText: zh ? '取消' : 'Cancel', type: 'warning' }
+      )
+    } catch { return /* 用户取消 */ }
+    if (cfgHits.length) writeStoredConfig(configData!, BACKUP_KEYS)
+    if (addedChats.length) writeStoredChats([...existing, ...addedChats])
+    onImported?.()
+    // 与分类导入同一套收尾：预设落盘 → 广播给主窗口
+    let presetsWritten = 0
+    if (cfgHits.includes('agentPresets')) {
+      try { presetsWritten = await syncImportedPresetsToFolder() } catch { presetsWritten = 0 }
+    }
+    broadcastConfigChanged()
+    const parts: string[] = []
+    if (cfgHits.length) parts.push(zh ? `${cfgHits.length} 项配置` : `${cfgHits.length} config entries`)
+    if (chats && chats.length) {
+      parts.push(zh
+        ? `${addedChats.length} 个聊天（跳过 ${skippedChats} 个已存在）`
+        : `${addedChats.length} chats (${skippedChats} already exist)`)
+    }
+    if (presetsWritten) parts.push(zh ? `${presetsWritten} 个预设已写入预设文件夹` : `${presetsWritten} presets written to the preset folder`)
+    ElMessage.success(zh
+      ? `已恢复：${parts.join('；')}。相关模块重新打开后完全生效`
+      : `Restored: ${parts.join('; ')}. Reopen the related modules to apply fully`)
+  } catch (e: any) {
+    ElMessage.error((zh ? '恢复失败：' : 'Restore failed: ') + (e?.message || String(e)))
   }
 }

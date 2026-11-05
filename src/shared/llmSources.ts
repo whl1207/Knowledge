@@ -22,7 +22,7 @@ export const DEEPSEEK_LEGACY_TYPE = 'deepseek-responses'
 
 /** 内置来源键（不含已合并的 deepseek-responses；custom 由 UI 按来源条目展开） */
 export const LLM_SOURCE_KEYS = [
-  'ollama', 'lmstudio', 'openai', 'deepseek', 'gpustack',
+  'ollama', 'lmstudio', 'openai', 'deepseek', 'glm', 'kimi', 'mimo', 'gpustack',
   'anthropic', 'google', 'azure', 'custom',
 ]
 
@@ -38,11 +38,49 @@ export const LLM_SOURCE_LABELS: Record<string, string> = {
   lmstudio: 'LM Studio',
   openai: 'OpenAI',
   deepseek: 'DeepSeek',
+  glm: 'GLM',
+  kimi: 'Kimi',
+  mimo: 'MiMo',
   gpustack: 'GPUStack',
   anthropic: 'Anthropic',
   google: 'Google',
   azure: 'Azure',
   custom: 'Custom',
+}
+
+/**
+ * 来源分类（设置页 / 新手引导共用一份）：
+ * - local：本地化来源，要在本机装并运行服务（不用 Key 或 Key 可选）；
+ * - cloud：互联网来源，去官网申请 API Key；
+ * - gateway：兼容协议的第三方网关 / 中转站。
+ */
+export type LlmSourceCategory = 'local' | 'cloud' | 'gateway'
+
+export const LLM_SOURCE_CATEGORY: Record<string, LlmSourceCategory> = {
+  ollama: 'local',
+  lmstudio: 'local',
+  gpustack: 'local',
+  deepseek: 'cloud',
+  glm: 'cloud',
+  kimi: 'cloud',
+  mimo: 'cloud',
+  openai: 'cloud',
+  anthropic: 'cloud',
+  google: 'cloud',
+  azure: 'cloud',
+  custom: 'gateway',
+}
+
+/** 来源键 → 分类（未知来源按互联网来源处理） */
+export function llmSourceCategory(type?: string | null): LlmSourceCategory {
+  return LLM_SOURCE_CATEGORY[normalizeLlmType(type)] || 'cloud'
+}
+
+/** 分类的显示名（设置页分组标题 / 引导页分组标题） */
+export const LLM_SOURCE_CATEGORY_LABELS: Record<LlmSourceCategory, { zh: string; en: string }> = {
+  local: { zh: '本地化来源', en: 'Local sources' },
+  cloud: { zh: '互联网来源', en: 'Cloud sources' },
+  gateway: { zh: '自定义网关', en: 'Custom gateways' },
 }
 
 /** 来源键 → 显示名（未知键首字母大写） */

@@ -1,5 +1,7 @@
 <!-- DataSettings.vue — 设置「通用 → 数据」页（独立模块）
- * 本机数据总览（localStorage 占用 / 数据目录 / 可清理缓存）+ 数据清单（数量 / 占用 / 前往 / 导出 / 导入 / 清空会话日志）。
+ * 结构（自上而下）：① 模型用量（全部来源合计）② 使用总览（存储 / 数据目录 / 一键备份 / 缓存）
+ * ③ 数据清单（聊天 / 预设 / MCP / 配置 / 会话日志；逐类导出导入）。
+ * 分工：「一键备份 / 一键恢复」= 配置 + 全部聊天，一个文件；数据清单 = 按类单独导出导入（配置是其中一类）。
      只统计本机数据（localStorage + 应用数据目录），**不扫描工作区文件**（知识库 / 工作流等归「知识管理」）。
      导入导出与文件 IO 集中在 src/lib/settingsData.ts（「基础 → 常用操作」的导出 Markdown 也共用同一套工具）。 -->
 <script setup lang="ts">
@@ -7,7 +9,7 @@ import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usestore } from '@/store'
-import { getPlatform, hasCapability } from '@/platform'
+import { getPlatform } from '@/platform'
 import UsageChart from './UsageChart.vue'
 import { useUsageSummary } from '@/composables/useUsageSummary'
 import { formatTokenCount, formatTokenCountExact, formatUsageClock, type UsageDayBucket } from '@/shared/usageStats'
@@ -17,10 +19,11 @@ import {
   countEntries,
   exportChats,
   exportDataGroup,
+  exportFullBackup,
   formatBytes,
   importChats,
   importDataGroup,
-  importLegacyChats,
+  importFullBackup,
   lsSizeOf,
   lsTotalBytes,
   readLsJson,
@@ -28,6 +31,12 @@ import {
 
 const store = usestore()
 const zh = () => store.locales === 'zh'
+
+/**
+ * 统计版本号：localStorage 不是响应式的，导入 / 清理 / 刷新后靠它让下面的 computed 重新读一次，
+ * 否则「数据清单」与「一键备份」的数量、占用会停在打开页面那一刻。
+ */
+const dataRev = ref(0)
 
 // ================ 模型用量（总体：全部来源合计） ================
 // 账本只记本版本启用之后的请求（不做历史回填），所以这里的总数可能小于聊天里
@@ -66,14 +75,28 @@ const lsText = computed(() => {
 const lsPct = computed(() => Math.min((lsBytes.value / LOCAL_STORAGE_LIMIT) * 100, 100))
 const cacheText = computed(() => formatBytes(cacheBytes.value))
 
+/** 配置类键（备份范围内、且本机确实存在的）——配置行与一键备份的汇总都用它 */
+const cfgKeys = computed(() => {
+  void dataRev.value
+  return BACKUP_KEYS.filter(k => localStorage.getItem(k) !== null)
+})
+/** 聊天会话数（一键备份行显示总量用） */
+const chatCount = computed(() => {
+  void dataRev.value
+  const list = readLsJson('ai-chats')
+  return Array.isArray(list) ? list.length : 0
+})
+/** 一键备份行的汇总文本，如 "25 项配置 · 3 个聊天" */
+const fullText = computed(() => `${cfgKeys.value.length} ${zh() ? '项配置' : 'config items'} · ${chatCount.value} ${zh() ? '个聊天' : 'chats'}`)
+
 /** 数据清单：每类本机数据的数量与占用；nav=跳转目标 / io=可导出导入 / clear=可清空 */
 const dataRows = computed(() => {
+  void dataRev.value
   const chatList = readLsJson('ai-chats')
   const chats = Array.isArray(chatList) ? chatList : []
   const msgCount = chats.reduce((n: number, c: any) => n + (Array.isArray(c?.messages) ? c.messages.length : 0), 0)
   const presetCount = countEntries(readLsJson('agentPresets'))
   const mcpCount = countEntries(readLsJson('mcpServers'))
-  const cfgKeys = BACKUP_KEYS.filter(k => localStorage.getItem(k) !== null)
   return [
     { key: 'chats', icon: 'fa fa-comments-o', label: zh() ? '聊天记录' : 'Chats',
       count: `${chats.length} ${zh() ? '个会话' : 'chats'} · ${msgCount} ${zh() ? '条消息' : 'messages'}`,
@@ -82,16 +105,17 @@ const dataRows = computed(() => {
       count: `${presetCount} ${zh() ? '个' : 'items'}`, bytes: lsSizeOf(['agentPresets']), nav: 'agentpreset', io: true, clear: false, openFolder: '' },
     { key: 'mcp', icon: 'fa fa-plug', label: zh() ? 'MCP 服务' : 'MCP servers',
       count: `${mcpCount} ${zh() ? '个' : 'items'}`, bytes: lsSizeOf(['mcpServers']), nav: 'mcp', io: true, clear: false, openFolder: '' },
+    { key: 'config', icon: 'fa fa-cog', label: zh() ? '界面、模型与协作配置' : 'UI, model & collab config',
+      count: `${cfgKeys.value.length} ${zh() ? '项' : 'keys'}`, bytes: lsSizeOf(cfgKeys.value), nav: '', io: true, clear: false, openFolder: '' },
     { key: 'logs', icon: 'fa fa-list-alt', label: zh() ? '会话日志' : 'Session logs',
       count: sessionLogCount.value == null ? '—' : `${sessionLogCount.value} ${zh() ? '个会话' : 'sessions'}`,
       bytes: 0, nav: 'sessionlog', io: false, clear: true, openFolder: 'session-logs' },
-    { key: 'config', icon: 'fa fa-cog', label: zh() ? '界面与模型配置' : 'UI & model config',
-      count: `${cfgKeys.length} ${zh() ? '项' : 'keys'}`, bytes: lsSizeOf(cfgKeys), nav: 'llm', io: true, clear: false, openFolder: '' },
   ]
 })
 
 /** 刷新统计：本机占用 / 可清理缓存 / 数据目录路径 / 会话日志会话数 */
 const refresh = async () => {
+  dataRev.value++
   lsBytes.value = lsTotalBytes()
   if (!aikmIpcAvailable()) {
     cacheBytes.value = 0
@@ -203,6 +227,10 @@ const onImported = () => {
 const exportRow = (key: string) => (key === 'chats' ? exportChats(zh()) : exportDataGroup(key, zh()))
 /** 行内动作：导入（聊天记录为合并导入，其余为覆盖导入，均需确认） */
 const importRow = (key: string) => (key === 'chats' ? importChats(zh(), onImported) : importDataGroup(key, zh(), onImported))
+/** 一键备份：全部配置 + 全部聊天记录，一个文件（数据清单里的分类导出是它的子集） */
+const backupAll = () => exportFullBackup(zh())
+/** 一键恢复：从一键备份文件恢复（兼容旧的配置备份 / 聊天记录导出） */
+const restoreAll = () => importFullBackup(zh(), onImported)
 /** 前往对应设置页（由 Set.vue 的 settingsNav 监听完成跳转） */
 const goTo = (nav: string) => { store.settingsNav = nav }
 
@@ -211,86 +239,7 @@ onMounted(refresh)
 
 <template>
   <div class="settings-section data-settings">
-    <!-- ① 使用总览 -->
-    <div class="settings-group">
-      <h3>{{ zh() ? '使用总览' : 'Overview' }}</h3>
-      <div class="config-description" style="margin:0 0 8px 2px;">{{ zh()
-        ? '本机数据（聊天 / Agent 预设 / MCP / 会话日志 / 配置）的数量与占用；工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。'
-        : 'Counts and sizes of local data (chats, agent presets, MCP, session logs, config). Workspace files such as knowledge bases, workflows and data canvases are not included (see Knowledge Management).' }}</div>
-      <!-- 本地存储占用（与「其他 → 系统状态」同一口径；占用统计的刷新在下方「刷新」按钮） -->
-      <div class="form-group">
-        <label>{{ zh() ? '本地存储' : 'Local Storage' }}</label>
-        <div class="storage-usage">
-          <div class="storage-bar" :title="lsText">
-            <div class="storage-bar-fill" :style="{ width: lsPct + '%' }"
-                 :class="{ warn: lsPct > 70, danger: lsPct > 90 }"></div>
-          </div>
-          <span class="storage-text">{{ lsText }}</span>
-        </div>
-      </div>
-      <!-- 应用数据目录（配置 / 缓存 / 会话日志所在位置） -->
-      <div class="form-group">
-        <label>{{ zh() ? '数据目录' : 'Data Folder' }}</label>
-        <div class="input-with-button">
-          <input :value="dataDirPath" readonly
-                 :placeholder="zh() ? '（桌面版显示本机数据目录，非桌面版为空）' : '(shown on desktop)'"/>
-          <div class="button" style="width:auto;padding:0 10px;" @click="openDataDir"
-               :title="zh() ? '在系统文件管理器中打开' : 'Open in file manager'">
-            <i class="fa fa-folder-open"></i>
-          </div>
-        </div>
-      </div>
-      <!-- 会话日志目录：数据清单里的日志行已有小图标，这里再给一个明确入口 -->
-      <div class="form-group">
-        <label>{{ zh() ? '会话日志目录' : 'Session logs' }}</label>
-        <div class="data-actions">
-          <div class="button data-btn" @click="openDataSubDir('session-logs')"
-               :title="zh() ? '打开 userData/session-logs（不存在时自动创建）' : 'Open userData/session-logs (created if missing)'">
-            <i class="fa fa-folder-open"></i>
-            {{ zh() ? '打开 session-logs' : 'Open session-logs' }}
-          </div>
-        </div>
-      </div>
-      <!-- 全部配置备份：与数据清单中「界面与模型配置」同一套实现 -->
-      <div class="form-group">
-        <label>{{ zh() ? '配置备份' : 'Config Backup' }}</label>
-        <div class="data-actions">
-          <div class="button data-btn" @click="exportRow('config')"
-               :title="zh() ? '导出全部配置（界面 / 模型 / 预设 / MCP / 技能 / 协作等）为 JSON 备份文件' : 'Export all config (UI / models / presets / MCP / skills / collaboration) as JSON'">
-            <i class="fa fa-download"></i> {{ zh() ? '导出全部配置' : 'Export all' }}
-          </div>
-          <div class="button data-btn" @click="importRow('config')"
-               :title="zh() ? '从 JSON 备份导入全部配置（覆盖当前配置，需确认）' : 'Import all config from JSON (overwrites current, with confirmation)'">
-            <i class="fa fa-upload"></i> {{ zh() ? '导入全部配置' : 'Import all' }}
-          </div>
-        </div>
-      </div>
-      <!-- 原始版本聊天 JSON 导入：不做自动兼容，由用户显式选择旧文件 -->
-      <div class="form-group">
-        <label>{{ zh() ? '原始版本聊天' : 'Legacy chats' }}</label>
-        <div class="data-actions">
-          <div class="button data-btn" @click="importLegacyChats(zh(), onImported)"
-               :title="zh() ? '导入旧版 AI-KM 的 ai-chats JSON（裸数组 / 旧整包备份 / 导出包）；与现有聊天合并，不恢复旧的 agent 会话' : 'Import an old AI-KM ai-chats JSON (raw array / old full backup / export package); merges with current chats and does not resume old agent sessions'">
-            <i class="fa fa-upload"></i> {{ zh() ? '导入原始版本 JSON' : 'Import legacy JSON' }}
-          </div>
-        </div>
-      </div>
-      <!-- 可清理缓存（Chromium 缓存 / Word 预览图片缓存；大小显示在左侧标签内） -->
-      <div class="form-group">
-        <label>{{ zh() ? '可清理缓存' : 'Cache' }}<span class="label-size">{{ cacheText }}</span></label>
-        <div class="data-actions">
-          <div class="button data-btn" @click="refresh()" :title="zh() ? '重新统计占用与缓存大小' : 'Recalculate usage and cache size'">
-            <i class="fa fa-refresh"></i> {{ zh() ? '刷新' : 'Refresh' }}
-          </div>
-          <div class="button data-btn" @click="cleanCache"
-               :title="zh() ? '清理缓存文件（不动配置 / 聊天 / 日志）' : 'Clean cache files (config, chats and logs untouched)'">
-            <i class="fa fa-eraser"></i> {{ zh() ? '清理缓存' : 'Clean' }}
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ② 模型用量（总体：所有来源合计；各来源明细在「模型 → 来源」） -->
+    <!-- ① 模型用量（总体：所有来源合计；各来源明细在「模型 → 来源」） -->
     <div v-if="usageAvailable" class="settings-group">
       <h3>{{ zh() ? '模型用量' : 'Model Usage' }}</h3>
       <div class="config-description" style="margin:0 0 8px 2px;">{{ zh()
@@ -337,13 +286,73 @@ onMounted(refresh)
       </div>
     </div>
 
+    <!-- ② 使用总览（本机占用 / 数据目录 / 一键备份 / 旧版聊天 / 缓存） -->
+    <div class="settings-group">
+      <h3>{{ zh() ? '使用总览' : 'Overview' }}</h3>
+      <div class="config-description" style="margin:0 0 8px 2px;">{{ zh()
+        ? '本页只统计本机数据（localStorage + 应用数据目录）；工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。「一键备份」把配置与聊天记录打成一个文件；单项导出 / 导入在下方数据清单里。'
+        : 'This page counts local data only (localStorage + app data folder); workspace files (knowledge bases, workflows, data canvases) are excluded (see Knowledge Management). Backup all packs config and chats into one file; per-item export / import lives in the inventory below.' }}</div>
+      <!-- 本地存储占用（与「其他 → 系统状态」同一口径；占用统计的刷新在下方「刷新」按钮） -->
+      <div class="form-group">
+        <label>{{ zh() ? '本地存储' : 'Local Storage' }}</label>
+        <div class="storage-usage">
+          <div class="storage-bar" :title="lsText">
+            <div class="storage-bar-fill" :style="{ width: lsPct + '%' }"
+                 :class="{ warn: lsPct > 70, danger: lsPct > 90 }"></div>
+          </div>
+          <span class="storage-text">{{ lsText }}</span>
+        </div>
+      </div>
+      <!-- 应用数据目录（配置 / 缓存 / 会话日志所在位置） -->
+      <div class="form-group">
+        <label>{{ zh() ? '数据目录' : 'Data Folder' }}</label>
+        <div class="input-with-button">
+          <input :value="dataDirPath" readonly
+                 :placeholder="zh() ? '（桌面版显示本机数据目录，非桌面版为空）' : '(shown on desktop)'"/>
+          <div class="button" style="width:auto;padding:0 10px;" @click="openDataDir"
+               :title="zh() ? '在系统文件管理器中打开' : 'Open in file manager'">
+            <i class="fa fa-folder-open"></i>
+          </div>
+        </div>
+      </div>
+      <!-- 一键备份 / 一键恢复：全部配置 + 全部聊天记录打成一个文件；单项导出导入在下方数据清单里 -->
+      <div class="form-group">
+        <label>{{ zh() ? '一键备份' : 'Backup' }}</label>
+        <div class="data-actions cfg-actions">
+          <div class="button data-btn" @click="backupAll"
+               :title="zh() ? '把全部配置与全部聊天记录备份成一个 JSON 文件（不含会话日志 / 用量账本 / 主进程凭据库）' : 'Back up all config and every chat into one JSON file (session logs, usage ledger and the credential store are not included)'">
+            <i class="fa fa-download"></i> {{ zh() ? '一键备份' : 'Backup all' }}
+          </div>
+          <div class="button data-btn" @click="restoreAll"
+               :title="zh() ? '从一键备份文件恢复：配置覆盖、聊天按 id 合并（也接受旧的配置备份 / 聊天记录导出）' : 'Restore from a backup file: config overwritten, chats merged by id (older config / chat exports are accepted too)'">
+            <i class="fa fa-upload"></i> {{ zh() ? '一键恢复' : 'Restore' }}
+          </div>
+          <!-- 汇总贴右（与数据清单的“占用”列同一视觉基线），不放进 label，避免 120px 标签列放不下而换行撑高整行 -->
+          <span class="cfg-count">{{ fullText }}</span>
+        </div>
+      </div>
+      <!-- 可清理缓存（Chromium 缓存 / Word 预览图片缓存；大小显示在左侧标签内） -->
+      <div class="form-group">
+        <label>{{ zh() ? '可清理缓存' : 'Cache' }}<span class="label-size">{{ cacheText }}</span></label>
+        <div class="data-actions">
+          <div class="button data-btn" @click="refresh()" :title="zh() ? '重新统计占用与缓存大小' : 'Recalculate usage and cache size'">
+            <i class="fa fa-refresh"></i> {{ zh() ? '刷新' : 'Refresh' }}
+          </div>
+          <div class="button data-btn" @click="cleanCache"
+               :title="zh() ? '清理缓存文件（不动配置 / 聊天 / 日志）' : 'Clean cache files (config, chats and logs untouched)'">
+            <i class="fa fa-eraser"></i> {{ zh() ? '清理缓存' : 'Clean' }}
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ③ 数据清单（数量 + 占用 + 前往 / 导出 / 导入 / 清空） -->
     <div class="settings-group">
       <h3>{{ zh() ? '数据清单' : 'Data Inventory' }}</h3>
       <div class="data-list">
         <div v-for="row in dataRows" :key="row.key" class="data-row">
           <i class="fa" :class="row.icon"></i>
-          <span class="data-row-label">{{ row.label }}</span>
+          <span class="data-row-label" :title="row.label">{{ row.label }}</span>
           <span class="data-row-count">{{ row.count }}</span>
           <span class="data-row-size">{{ row.bytes ? formatBytes(row.bytes) : '—' }}</span>
           <div class="data-actions">
@@ -372,8 +381,8 @@ onMounted(refresh)
       </div>
       <div class="config-description" style="margin-left:0">
         {{ zh()
-          ? '导入会覆盖对应数据（弹框确认）；聊天记录为合并导入（相同会话跳过）。旧版 AI-KM 的 ai-chats JSON（裸数组 / 旧整包备份 / 导出包）请用上方「原始版本聊天 → 导入原始版本 JSON」，不会自动接管旧 agent 会话。清空聊天 / 初始化等破坏性操作在「基础 → 常用操作」中。'
-          : 'Import overwrites the related data (with confirmation); chats are merged (same chat skipped). For an old AI-KM ai-chats JSON (raw array / old full backup / export package), use Legacy chats → Import legacy JSON above; old agent sessions are not resumed. Destructive actions (clear chats, initialize) live under Basic → Common Actions.' }}
+          ? '导入会覆盖对应数据（弹框确认）；聊天记录为合并导入（相同会话跳过），预设已改用文件夹存储时导入会同时写成 .agent 文件。想连聊天一起备份就点上方「一键备份」；清空聊天 / 初始化等破坏性操作在「基础 → 常用操作」中。'
+          : 'Import overwrites the related data (with confirmation); chats are merged (same chat skipped) and, when presets are stored in a folder, imported presets are also written as .agent files. Use Backup all above to back up config and chats together; destructive actions (clear chats, initialize) live under Basic → Common Actions.' }}
       </div>
     </div>
   </div>
@@ -477,13 +486,16 @@ onMounted(refresh)
 /* label 内附加的数值（如可清理缓存大小）：小号、弱化，紧跟在标题后面 */
 .form-group label .label-size { margin-left: 6px; font-size: 11px; opacity: 0.7; white-space: nowrap; }
 .data-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+/* 一键备份行：按钮靠左、汇总贴右（占满剩余宽度，与数据清单的占用列对齐）；汇总不参与压缩，避免文字溢出卡片 */
+.data-actions.cfg-actions { flex: 1; min-width: 0; }
+.cfg-count { margin-left: auto; padding-left: 8px; font-size: 11px; opacity: .7; white-space: nowrap; flex-shrink: 0; }
 .data-list { display: flex; flex-direction: column; gap: 4px; }
 .data-row {
   display: flex; align-items: center; gap: 8px;
   padding: 5px 8px; border: 1px solid var(--borderColor); border-radius: 4px;
 }
 .data-row > i { width: 14px; flex-shrink: 0; color: var(--fontActiveColor); opacity: .85; }
-.data-row-label { flex: 0 0 116px; font-size: 12px; }
+.data-row-label { flex: 0 0 144px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .data-row-count { flex: 1; min-width: 0; font-size: 12px; opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .data-row-size { flex: 0 0 76px; text-align: right; font-size: 12px; opacity: .7; }
 

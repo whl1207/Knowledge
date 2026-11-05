@@ -25,6 +25,9 @@ export type KbProvider =
   | 'lmstudio'
   | 'openai'
   | 'deepseek'
+  | 'glm'
+  | 'kimi'
+  | 'mimo'
   | 'gpustack'
   | 'anthropic'
   | 'google'
@@ -32,7 +35,7 @@ export type KbProvider =
   | 'custom'
 
 export const KB_PROVIDERS: KbProvider[] = [
-  'ollama', 'lmstudio', 'deepseek', 'gpustack', 'openai',
+  'ollama', 'lmstudio', 'deepseek', 'glm', 'kimi', 'mimo', 'gpustack', 'openai',
   'anthropic', 'google', 'azure', 'custom',
 ]
 
@@ -41,6 +44,9 @@ export const KB_PROVIDER_LABELS: Record<KbProvider, { zh: string; en: string }> 
   lmstudio: { zh: 'LM Studio（本地）', en: 'LM Studio (Local)' },
   openai: { zh: 'OpenAI', en: 'OpenAI' },
   deepseek: { zh: 'DeepSeek', en: 'DeepSeek' },
+  glm: { zh: 'GLM（智谱）', en: 'GLM (Zhipu)' },
+  kimi: { zh: 'Kimi（Moonshot）', en: 'Kimi (Moonshot)' },
+  mimo: { zh: 'MiMo（小米）', en: 'MiMo (Xiaomi)' },
   gpustack: { zh: 'GPUStack（自托管）', en: 'GPUStack (self-hosted)' },
   anthropic: { zh: 'Anthropic Claude', en: 'Anthropic Claude' },
   google: { zh: 'Google Gemini', en: 'Google Gemini' },
@@ -179,6 +185,9 @@ function providerBaseUrl(spec: KbModelSpec): string {
     case 'lmstudio': return cfg.base_url || ''
     case 'openai': return cfg.base_url || ''
     case 'deepseek': return cfg.base_url || ''
+    case 'glm': return cfg.base_url || ''
+    case 'kimi': return cfg.base_url || ''
+    case 'mimo': return cfg.base_url || ''
     case 'gpustack': return cfg.base_url || ''
     case 'azure': return cfg.endpoint || ''
     case 'custom': return cfg.api_url || ''
@@ -220,7 +229,10 @@ export async function listModels(spec: KbModelSpec): Promise<string[]> {
       }
       case 'lmstudio':
       case 'openai':
-      case 'deepseek': {
+      case 'deepseek':
+      case 'glm':
+      case 'kimi':
+      case 'mimo': {
         const base = stripTrailingSlash(providerBaseUrl(spec))
         if (!base) return cfg.available_models || []
         // openai 的 base_url 已含 /v1；lmstudio/deepseek 需补 /v1
@@ -346,6 +358,9 @@ async function embedWithSpec(eff: KbModelSpec, input: string | string[]): Promis
     case 'lmstudio':
     case 'openai':
     case 'deepseek':
+    case 'glm':
+    case 'kimi':
+    case 'mimo':
     case 'gpustack':
     case 'custom': {
       const base = stripTrailingSlash(providerBaseUrl(eff))

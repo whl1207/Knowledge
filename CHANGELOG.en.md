@@ -7,6 +7,32 @@
 
 ---
 
+## 2026-11-05
+
+### Added
+
+- **Setup guide**: shown once for new installs and for anyone upgrading to this version — language / theme / window mode, workspace, source selection, model setup, then module toggles; progress is resumable, collapsible, reopenable from Settings → General → Basic → Common Actions, and adapts to phone-sized portrait windows.
+- **New built-in sources: GLM (Zhipu), Kimi (Moonshot), MiMo (Xiaomi)**: all use OpenAI-compatible endpoints with the URL prefilled, and Test connection fetches the model list; the source list is grouped into Local / Cloud in Settings.
+- **Provider sites on the model source page**: each source shows where to download the local app or get an API key, shared with the setup guide.
+- **One-click backup / restore on the Data page**: Settings → General → Data → Backup all writes all config plus every chat into one JSON file, and Restore overwrites config while merging chats by id; it also accepts the config exports and chat exports produced earlier.
+
+### Removed
+
+- **Removed the “Legacy chats” import**: Settings → General → Data no longer offers the old AI-KM chat JSON import, and the related compatibility code is gone; use Backup all / Restore and the Chats row instead.
+
+### Fixed
+
+- **The info icon next to the File Behavior title was invisible**: Font Awesome 5 picks glyphs by weight, and forcing weight 400 landed on a Regular face without that glyph; it now uses 900 and renders (tooltip unchanged).
+
+- **Config backup now covers the security policy and preset location**: Settings → General → Data → Export all now includes the security policy (read-only / workspace-write / full access) and the preset folder, so restoring no longer silently falls back to the default level and default folder.
+- **Config backup no longer carries runtime state**: source online status, current view / sort order / main panel are skipped on export and also ignored when importing older backups.
+- **Preset import is written to disk**: when presets live in a folder, importing also writes `.agent` files, so "import succeeded but the list did not change" no longer happens.
+
+### Improved
+
+- **Data page layout**: Model Usage now sits at the top; Config Backup is back in the inventory (alongside Chats / Agent presets / MCP servers / Session logs), and the duplicate session-log folder button was removed.
+- **Leaner setup guide**: source selection has its own page grouped by Local / Cloud / Custom gateway, and model setup only fills that source's endpoint or key plus the model name (side by side).
+
 ## 2026-11-04
 
 ### Added

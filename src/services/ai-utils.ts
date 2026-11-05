@@ -534,6 +534,22 @@ export class AIUtils {
         }
         return AIUtils.makeAPIRequest(endpoint, body, headers, options)
       }
+      // GLM / Kimi / MiMo：内置的 OpenAI 兼容互联网来源
+      // 地址已带各家版本段（GLM 是 /api/paas/v4，Kimi / MiMo 是 /v1），统一补 /chat/completions
+      case 'glm':
+      case 'kimi':
+      case 'mimo': {
+        const c = { ...cfg, api_key: apiKey || cfg.api_key }
+        const body = AIUtils.buildOpenAIRequest(c, llmConfig, messages)
+        const base = String(cfg.base_url || '').replace(/\/+$/, '')
+        const endpoint = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          ...(apiKey || cfg.api_key ? { 'Authorization': `Bearer ${apiKey || cfg.api_key}` } : {}),
+        }
+        return AIUtils.makeAPIRequest(endpoint, body, headers, options)
+      }
       case 'anthropic': {
         const headers = {
           'x-api-key': apiKey || cfg.api_key,

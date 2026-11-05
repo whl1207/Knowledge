@@ -36,6 +36,9 @@ import DataSettings from '@/components/set/DataSettings.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 // 数据页（DataSettings.vue）与「常用操作」共用：占用统计 / 文件 IO / 聊天记录读取
 import { LOCAL_STORAGE_LIMIT, MD_FILTERS, countEntries, formatBytes, lsTotalBytes, readLsJson, readStoredChats, saveTextFile, stampText } from '@/lib/settingsData'
+import { resetOnboarding, markOnboardingDone, writeOnboarding } from '@/components/onboarding/onboardingState'
+// 从「常用操作 → 新手引导」重看时，直接渲染在设置里（设置可能是独立窗口，广播给主窗口会看不见）
+import OnboardingWizard from '@/components/onboarding/OnboardingWizard.vue'
 import { getPlatform, hasCapability } from '@/platform'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { useMobileBackScreen } from '@/composables/useBackLayer'
@@ -320,6 +323,19 @@ const addWorkspaceFromInput = () => {
 const activateWorkspace = (path: string) => {
   store.setActiveRoot(path)
 }
+/**
+ * 重看新手引导：直接在**当前窗口**里渲染（设置可能是独立窗口或主窗口内的浮层）。
+ * 以前只广播给主窗口，结果设置窗口在前台时看起来「点了没反应」；现在点哪儿就在哪儿显示，
+ * 完成标记仍是全局的，下次启动不会再自动弹。
+ */
+const showOnboardingGuide = ref(false)
+const reopenOnboarding = () => {
+  resetOnboarding()
+  showOnboardingGuide.value = true
+}
+const onGuideStep = (step: number) => { writeOnboarding({ step, done: false }) }
+const onGuideDone = () => { markOnboardingDone(); showOnboardingGuide.value = false }
+const onGuideSuspend = () => { showOnboardingGuide.value = false }
 const removeWorkspace = (path: string) => {
   ElMessageBox.confirm(
     store.locales === 'zh' ? `确定要从工作区列表中移除 "${path}" 吗？（不会删除磁盘文件）` : `Remove workspace "${path}"? (files on disk are not deleted)`,
@@ -1490,6 +1506,9 @@ onBeforeUnmount(() => {
                   <i class="fa" :class="isFullscreen ? 'fa-compress' : 'fa-expand'"></i>
                   {{ isFullscreen ? (store.locales=='zh'?'退出全屏' : 'Exit Fullscreen') : (store.locales=='zh'?'全屏' : 'Fullscreen') }}
                 </div>
+                <div class="button" @click="reopenOnboarding" :title="store.locales=='zh'?'重新打开新手引导（语言 / 工作区 / 模型配置）' : 'Reopen the setup guide (language / workspace / model)'">
+                  <i class="fa fa-map-signs"></i> {{ store.locales=='zh'?'新手引导' : 'Setup Guide' }}
+                </div>
                 <div class="button" @click="handleInitConfig" :title="store.locales=='zh'?'初始化（将清除全部配置并重启）\n当前本机数据：' + localDataSummary() + '（共 ' + localStorageUsageText + '）' : 'initialization (clears all config and restarts)\nLocal data: ' + localDataSummary() + ' (' + localStorageUsageText + ')'">
                   <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'初始化' : 'initialization' }}
                 </div>
@@ -1803,6 +1822,16 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </teleport>
+
+  <!-- 新手引导（从「常用操作 → 新手引导」重看）：盖在设置之上，完成 / 收起后回到设置 -->
+  <OnboardingWizard
+    v-if="showOnboardingGuide"
+    :start-step="0"
+    :force="true"
+    @step="onGuideStep"
+    @done="onGuideDone"
+    @suspend="onGuideSuspend"
+  />
 </template>
 
 <style scoped>

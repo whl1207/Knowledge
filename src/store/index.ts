@@ -524,7 +524,7 @@ export const usestore = defineStore('data', {
             llm: {
                 // 支持的模型类型
                 // 单来源键列表：DeepSeek 只有一个来源，接口样式由 deepseek.api_style 决定（历史 'deepseek-responses' 已合并）
-                types: ['ollama', 'lmstudio', 'openai', 'deepseek', 'gpustack', 'anthropic', 'google', 'azure', 'custom'],
+                types: ['ollama', 'lmstudio', 'openai', 'deepseek', 'glm', 'kimi', 'mimo', 'gpustack', 'anthropic', 'google', 'azure', 'custom'],
                 type: 'ollama', // 当前使用的类型
                 // Ollama 配置
                 ollama: {
@@ -571,6 +571,30 @@ export const usestore = defineStore('data', {
                     embed_model: '', // 默认嵌入模型（Responses 无嵌入接口，可留空）
                     available_models: [] as string[], // 可用的模型列表
                     apiKeyRef: '', // 凭据引用（路线图 2.3）
+                },
+
+                // 智谱 GLM / Moonshot Kimi / 小米 MiMo：内置的 OpenAI 兼容互联网来源
+                // （地址按各家官方 OpenAI 兼容端点预填；模型名可留空后点「获取模型」）
+                glm: {
+                    api_key: '', apiKeyRef: '',
+                    base_url: 'https://open.bigmodel.cn/api/paas/v4',
+                    model: '', // 点「测试连接」会从 /models 自动拉取并回填
+                    embed_model: '',
+                    available_models: [] as string[],
+                },
+                kimi: {
+                    api_key: '', apiKeyRef: '',
+                    base_url: 'https://api.moonshot.cn/v1',
+                    model: '',
+                    embed_model: '',
+                    available_models: [] as string[],
+                },
+                mimo: {
+                    api_key: '', apiKeyRef: '',
+                    base_url: 'https://api.xiaomimimo.com/v1',
+                    model: 'mimo-v2.6-pro',
+                    embed_model: '',
+                    available_models: [] as string[],
                 },
 
                 // GPUStack 配置（内置来源，自托管推理服务平台；OpenAI 兼容端点默认在 /v1-openai 前缀下）
@@ -990,6 +1014,12 @@ export const usestore = defineStore('data', {
                     return deepSeekConfig(state.AIconfig.llm);
                 case 'gpustack':
                     return state.AIconfig.llm.gpustack;
+                case 'glm':
+                    return state.AIconfig.llm.glm;
+                case 'kimi':
+                    return state.AIconfig.llm.kimi;
+                case 'mimo':
+                    return state.AIconfig.llm.mimo;
                 case 'anthropic':
                     return state.AIconfig.llm.anthropic;
                 case 'google':
@@ -1034,6 +1064,12 @@ export const usestore = defineStore('data', {
                 case 'gpustack':
                     // GPUStack 为自托管服务：本地部署允许无密钥（与 ollama / lmstudio 一致）
                     return true;
+                case 'glm':
+                    return hasKey(config.glm);
+                case 'kimi':
+                    return hasKey(config.kimi);
+                case 'mimo':
+                    return hasKey(config.mimo);
                 case 'anthropic':
                     return hasKey(config.anthropic);
                 case 'google':
@@ -1051,7 +1087,7 @@ export const usestore = defineStore('data', {
         enabledLlmTypes: (state) => {
             // 归一：历史存档里的 'deepseek-responses' 会合并进 'deepseek'（不再出现第二个 DeepSeek 来源）
             const all: string[] = normalizeLlmTypeList(
-                state.AIconfig?.llm?.types || ['ollama', 'lmstudio', 'openai', 'deepseek', 'gpustack', 'anthropic', 'google', 'azure', 'custom']
+                state.AIconfig?.llm?.types || ['ollama', 'lmstudio', 'openai', 'deepseek', 'glm', 'kimi', 'mimo', 'gpustack', 'anthropic', 'google', 'azure', 'custom']
             )
             const disabled = normalizeLlmTypeList(state.llmDisabledSources)
             return all.filter((t: string) => !disabled.includes(t))
@@ -1077,6 +1113,13 @@ export const usestore = defineStore('data', {
                 case 'gpustack':
                     // GPUStack：裸地址自动补 /v1-openai/chat/completions（与自定义来源同一推导规则）
                     return AIUtils.buildCustomChatEndpoint(config.gpustack.base_url);
+                // GLM / Kimi / MiMo：OpenAI 兼容端点（地址已带版本段，统一补 /chat/completions）
+                case 'glm':
+                case 'kimi':
+                case 'mimo': {
+                    const base = String((config as any)[config.type]?.base_url || '').replace(/\/+$/, '')
+                    return base.endsWith('/chat/completions') ? base : `${base}/chat/completions`
+                }
                 case 'anthropic':
                     return 'https://api.anthropic.com/v1/messages';
                 case 'google':
@@ -4108,6 +4151,23 @@ export const usestore = defineStore('data', {
                     if (gpuModels.length > 0) this.AIconfig.llm.gpustack.available_models = gpuModels;
                     break;
                 }
+
+                // GLM / Kimi / MiMo：内置 OpenAI 兼容互联网来源，探测与模型回填与 GPUStack 同一套
+                case 'glm':
+                case 'kimi':
+                case 'mimo': {
+                    const cfg = (llmConfig as any)[type] || {};
+                    const checkCfg = {
+                        ...cfg,
+                        api_url: cfg.base_url || '',
+                        api_key: (await this.resolveApiKey(cfg)) || cfg.api_key,
+                    };
+                    const r: any = await AIUtils.checkCustomConnection(checkCfg);
+                    this.AIconfig.llm.online = !!r?.online;
+                    const models = Array.isArray(r?.available_models) ? r.available_models : [];
+                    if (models.length > 0) (this.AIconfig.llm as any)[type].available_models = models;
+                    break;
+                }
                     
                 case 'anthropic':
                     const anthropicCheckCfg = { ...llmConfig.anthropic, api_key: (await this.resolveApiKey(llmConfig.anthropic)) || llmConfig.anthropic.api_key };
@@ -4204,6 +4264,16 @@ export const usestore = defineStore('data', {
                         const r: any = await AIUtils.checkCustomConnection(await withKey(gpuCfg))
                         ok = !!r?.online; models = r?.available_models || []; status = Number(r?.status || 0)
                         if (models.length) llm.gpustack.available_models = models
+                        break
+                    }
+                    // GLM / Kimi / MiMo：内置 OpenAI 兼容互联网来源（地址 / Key / 模型各自独立）
+                    case 'glm':
+                    case 'kimi':
+                    case 'mimo': {
+                        const cfg = (llm as any)[key] || {}
+                        const r: any = await AIUtils.checkCustomConnection(await withKey({ ...cfg, api_url: cfg.base_url || '' }))
+                        ok = !!r?.online; models = r?.available_models || []; status = Number(r?.status || 0)
+                        if (models.length) { (llm as any)[key].available_models = models; if (!cfg.model) (llm as any)[key].model = models[0] }
                         break
                     }
                     case 'custom': {

@@ -61,6 +61,15 @@ import { getPlatform, hasCapability, isHostGuestRuntime } from '@/platform'
 import { hostRuntime } from '@/platform/host'
 import { runTopBackLayer, registerBackLayer, BACK_ORDER } from '@/platform/backLayers'
 import { useTallLayout } from '@/composables/useTallLayout'
+  // 首次使用引导（参照 DSH 的 onboarding：版本化须知 / 条件步骤 / 进度可恢复 / 可显式重看）
+  import {
+    markOnboardingDone,
+    needsOnboarding,
+    readOnboarding,
+    resetOnboarding,
+    writeOnboarding,
+  } from '@/components/onboarding/onboardingState'
+  const OnboardingWizard = defineAsyncComponent(() => import('@/components/onboarding/OnboardingWizard.vue'))
 
   const lazyPanel = makeLazyPanel
   // ⚠️ 变量名不能叫 Set：会遮蔽全局 Set 构造函数，导致下方 collectRunningTasks 里的 `new Set(...)`
@@ -75,6 +84,55 @@ import { useTallLayout } from '@/composables/useTallLayout'
   // 桌面版设置走独立子窗口：其开合状态单独记录（settingsWindowOpen），仅用于导航按钮高亮——
   // 不能复用 store.settingsOpen，否则「窗口已打开」会同时点亮主窗口内的设置浮层
   const settingsWindowOpen = ref(false)
+  // ============ 首次使用引导（主窗口自己的浮层；设置窗口 / 文件窗口不显示） ============
+  const showOnboarding = ref(false)
+  const onboardingForce = ref(false)
+  const onboardingStep = ref(0)
+  /** 打开引导；force=true 表示用户显式重看（已配好的工作区 / 模型也会列出来） */
+  const startOnboarding = (opts: { force?: boolean } = {}) => {
+    onboardingForce.value = !!opts.force
+    onboardingStep.value = opts.force ? 0 : readOnboarding().step
+    showOnboarding.value = true
+  }
+  const onOnboardingStep = (step: number) => {
+    onboardingStep.value = step
+    writeOnboarding({ step, done: false })
+  }
+  const finishOnboarding = (_kind: 'finished' | 'skipped') => {
+    markOnboardingDone()
+    showOnboarding.value = false
+  }
+  /** 引导是否在等设置关闭后自动回来 */
+  const onboardingResume = ref(false)
+  /** 这次收起后，是否已经看到设置真的打开过（防止刚收起就被当成「设置已关闭」立刻弹回） */
+  const onboardingSawSettings = ref(false)
+  /**
+   * 暂时收起引导（点右上角 ×，或从引导里点「打开完整设置」）。
+   * resume=true 时等设置关掉再放回来——单窗口模式下设置是更上层的页面内浮层，
+   * 两层叠着会互相挡住按钮。
+   */
+  const suspendOnboarding = (opts?: { resume?: boolean }) => {
+    onboardingResume.value = !!opts?.resume
+    onboardingSawSettings.value = false
+    showOnboarding.value = false
+    if (!onboardingResume.value) return
+    // 设置没打开（旧版本 / 平台不支持）时兜底：1.5s 后把引导放回来，别留下一个空界面
+    window.setTimeout(() => {
+      if (onboardingResume.value && !onboardingSawSettings.value && !showOnboarding.value) {
+        onboardingResume.value = false
+        showOnboarding.value = true
+      }
+    }, 1500)
+  }
+  /**
+   * 进入引导的条件：已确认的引导版本 < 当前版本（含老用户升级——本版本首次加入引导，
+   * 所有老用户都会看一次；之后版本号不变就不再出现）。局域网访客不弹。
+   */
+  const maybeAutoStartOnboarding = () => {
+    if (isBrowser) return
+    if (!needsOnboarding()) return
+    startOnboarding()
+  }
   /** 「待我处理」收件箱的订阅注销函数（主窗口挂载时注册，卸载时释放） */
   let offAttention: (() => void) | null = null
   const isMaximized = ref(false); // 窗口是否最大化状态
@@ -591,6 +649,11 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
     if (!isSettingsWindow.value) {
       getPlatform().events.on('settings-config-changed', (payload: any) => {
         store.syncConfigFromPeers(payload?.ui, payload?.locales, payload?.aiConfig)
+        // 设置页「常用操作 → 新手引导」：显式重看，从头开始（不看完成标记）
+        if (payload?.onboarding) {
+          resetOnboarding()
+          startOnboarding({ force: true })
+        }
       })
     }
 
@@ -599,6 +662,19 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
     watch(trayTasks, () => scheduleTrayPush(), { deep: true, immediate: true })
 
     if (isFileWindow.value || isBrowserAgentWindow.value || isSettingsWindow.value || isPluginPanelWindow.value) return // 独立窗口无需加载主界面数据
+
+    // 首次使用引导：仅主窗口；版本化进度、可跳过、中途退出可恢复（参照 DSH 的 onboarding）
+    maybeAutoStartOnboarding()
+
+    // 引导里点「打开完整设置」→ 引导收起；设置关掉后自动放回来（单窗口浮层 / 独立设置窗口都适用）
+    watch([() => store.settingsOpen, settingsWindowOpen], ([open, winOpen]) => {
+      if (!onboardingResume.value || showOnboarding.value) return
+      if (open || winOpen) { onboardingSawSettings.value = true; return }
+      if (!onboardingSawSettings.value) return
+      onboardingResume.value = false
+      onboardingSawSettings.value = false
+      showOnboarding.value = true
+    })
 
     // ============ 「待我处理」收件箱（仅主窗口） ============
     // 订阅 agent 视图变化，并从主进程拉一次状态：渲染层刷新 / 重开窗口后，正在等你的
@@ -1319,6 +1395,16 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
         <SetPanel :hide-header="store.singleWindowMode && !isTallLayout" />
       </div>
     </div>
+    <!-- 首次使用引导：只盖内容区之上的整窗浮层；z-index 低于设置浮层（1500），
+         用户在引导里点「打开模型设置」时设置能盖在它上面，关掉设置后引导仍在 -->
+    <OnboardingWizard
+      v-if="showOnboarding"
+      :start-step="onboardingStep"
+      :force="onboardingForce"
+      @step="onOnboardingStep"
+      @done="finishOnboarding"
+      @suspend="suspendOnboarding"
+    />
   </div> <!-- /.container (v-else) -->
 
   <!-- 应用内文件窗口（安卓 / 网页端等没有窗口壳的环境）：与设置浮层同样盖在主界面上方，

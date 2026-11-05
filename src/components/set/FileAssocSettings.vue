@@ -646,7 +646,9 @@ onMounted(load)
 .fa-title-info {
   margin-left: 6px;
   font-size: 12px;
-  font-weight: 400;
+  /* FA5 的字形分字重：fa-info-circle 只存在于 Solid（900）。
+     这里若写成 400，浏览器会落到 Regular 字体，拿到一个空字形——图标占位但看不见。 */
+  font-weight: 900;
   opacity: .55;
   cursor: help;
 }

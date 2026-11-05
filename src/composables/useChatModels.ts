@@ -99,6 +99,12 @@ export function useChatModels(deps: ChatModelsDeps) {
       case 'custom':
         llmConfig.custom.model = config.model
         break
+      // GLM / Kimi / MiMo：内置 OpenAI 兼容来源
+      case 'glm':
+      case 'kimi':
+      case 'mimo':
+        (llmConfig as any)[config.llmType].model = config.model
+        break
     }
     llmConfig.temperature = config.temperature
     llmConfig.max_tokens = config.maxTokens
@@ -133,6 +139,11 @@ export function useChatModels(deps: ChatModelsDeps) {
       case 'custom':
         llmConfig.custom.model = model
         break
+      case 'glm':
+      case 'kimi':
+      case 'mimo':
+        (llmConfig as any)[type].model = model
+        break
     }
   }
 
@@ -156,6 +167,10 @@ export function useChatModels(deps: ChatModelsDeps) {
         return llmConfig.azure.deployment || ''
       case 'custom':
         return llmConfig.custom.model || ''
+      case 'glm':
+      case 'kimi':
+      case 'mimo':
+        return (llmConfig as any)[llmConfig.type]?.model || ''
       default:
         return ''
     }

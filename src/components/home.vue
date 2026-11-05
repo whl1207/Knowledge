@@ -6769,6 +6769,11 @@ function getDefaultModel(llmType: string, customIndex?: number): string {
     }
     case 'gpustack':
       return store.AIconfig.llm.gpustack?.model || ''
+    // GLM / Kimi / MiMo：内置 OpenAI 兼容来源
+    case 'glm':
+    case 'kimi':
+    case 'mimo':
+      return (store.AIconfig.llm as any)[llmType]?.model || ''
     default:
       return ''
   }
@@ -7344,6 +7349,12 @@ const modelsForLlmSource = (type: string, customIndex?: number): string[] => {
     }
     case 'gpustack':
       list = arr(llm.gpustack?.available_models); configured = llm.gpustack?.model || ''
+      break
+    // GLM / Kimi / MiMo：内置 OpenAI 兼容来源
+    case 'glm':
+    case 'kimi':
+    case 'mimo':
+      list = arr((llm as any)[type]?.available_models); configured = (llm as any)[type]?.model || ''
       break
     case 'anthropic':
       list = arr(llm.anthropic?.available_models); configured = llm.anthropic?.model || ''

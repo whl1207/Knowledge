@@ -14,6 +14,9 @@ import UsageChart from './UsageChart.vue'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { useUsageSummary } from '@/composables/useUsageSummary'
 import { formatTokenCount, formatTokenCountExact, formatUsageClock, type UsageSourceSummary } from '@/shared/usageStats'
+// 每个来源「去哪儿下载 / 去哪儿申请 Key」：与新手引导共用同一份资料表
+import { llmSourceDoc } from '@/shared/llmSourceDocs'
+import { openExternalUrl } from '@/lib/openExternal'
 
 const store = usestore()
 const zh = () => store.locales === 'zh'
@@ -31,18 +34,36 @@ const showSourceScreen = ref(true)
 
 // ================ 模型来源列表（左侧：搜索 + 9 种内置来源 + 自定义来源） ================
 
-interface LlmSourceDef { key: string; icon: string; labelZh: string; labelEn: string; descZh: string; descEn: string }
+interface LlmSourceDef { key: string; icon: string; labelZh: string; labelEn: string; descZh: string; descEn: string; cat: 'local' | 'cloud' }
 
 const llmSources: LlmSourceDef[] = [
-  { key: 'ollama', icon: 'fa-server', labelZh: 'Ollama', labelEn: 'Ollama', descZh: '本地模型', descEn: 'Local model' },
-  { key: 'lmstudio', icon: 'fa-laptop', labelZh: 'LM Studio', labelEn: 'LM Studio', descZh: '本地模型', descEn: 'Local model' },
-  { key: 'deepseek', icon: 'fa-database', labelZh: 'DeepSeek', labelEn: 'DeepSeek', descZh: 'Chat / Responses', descEn: 'Chat / Responses' },
-  { key: 'gpustack', icon: 'fa-cubes', labelZh: 'GPUStack', labelEn: 'GPUStack', descZh: '自托管推理平台', descEn: 'Self-hosted GPU platform' },
-  { key: 'openai', icon: 'fa-cloud', labelZh: 'OpenAI', labelEn: 'OpenAI', descZh: '在线 API', descEn: 'Online API' },
-  { key: 'anthropic', icon: 'fa-comment', labelZh: 'Anthropic', labelEn: 'Anthropic', descZh: 'Claude', descEn: 'Claude' },
-  { key: 'google', icon: 'fa-google', labelZh: 'Google', labelEn: 'Google', descZh: 'Gemini', descEn: 'Gemini' },
-  { key: 'azure', icon: 'fa-windows', labelZh: 'Azure', labelEn: 'Azure', descZh: '微软云', descEn: 'Microsoft Cloud' },
+  // 本地化来源：要在本机装并运行服务（不用 Key 或 Key 可选）
+  { key: 'ollama', icon: 'fa-server', labelZh: 'Ollama', labelEn: 'Ollama', descZh: '本地模型', descEn: 'Local model', cat: 'local' },
+  { key: 'lmstudio', icon: 'fa-laptop', labelZh: 'LM Studio', labelEn: 'LM Studio', descZh: '本地模型', descEn: 'Local model', cat: 'local' },
+  { key: 'gpustack', icon: 'fa-cubes', labelZh: 'GPUStack', labelEn: 'GPUStack', descZh: '自托管推理平台', descEn: 'Self-hosted GPU platform', cat: 'local' },
+  // 互联网来源：去官网申请 API Key
+  { key: 'deepseek', icon: 'fa-database', labelZh: 'DeepSeek', labelEn: 'DeepSeek', descZh: 'Chat / Responses', descEn: 'Chat / Responses', cat: 'cloud' },
+  { key: 'glm', icon: 'fa-cloud', labelZh: 'GLM', labelEn: 'GLM', descZh: '智谱 · OpenAI 兼容', descEn: 'Zhipu · OpenAI compatible', cat: 'cloud' },
+  { key: 'kimi', icon: 'fa-cloud', labelZh: 'Kimi', labelEn: 'Kimi', descZh: 'Moonshot · OpenAI 兼容', descEn: 'Moonshot · OpenAI compatible', cat: 'cloud' },
+  { key: 'mimo', icon: 'fa-cloud', labelZh: 'MiMo', labelEn: 'MiMo', descZh: '小米 · OpenAI 兼容', descEn: 'Xiaomi · OpenAI compatible', cat: 'cloud' },
+  { key: 'openai', icon: 'fa-cloud', labelZh: 'OpenAI', labelEn: 'OpenAI', descZh: '在线 API', descEn: 'Online API', cat: 'cloud' },
+  { key: 'anthropic', icon: 'fa-comment', labelZh: 'Anthropic', labelEn: 'Anthropic', descZh: 'Claude', descEn: 'Claude', cat: 'cloud' },
+  { key: 'google', icon: 'fa-google', labelZh: 'Google', labelEn: 'Google', descZh: 'Gemini', descEn: 'Gemini', cat: 'cloud' },
+  { key: 'azure', icon: 'fa-windows', labelZh: 'Azure', labelEn: 'Azure', descZh: '微软云', descEn: 'Microsoft Cloud', cat: 'cloud' },
 ]
+
+/** 左侧列表按分类分组（本地化 / 互联网）；顺序与新手引导一致 */
+const sourceGroups = computed(() => {
+  const groups: Array<{ key: 'local' | 'cloud'; titleZh: string; titleEn: string; items: LlmSourceDef[] }> = [
+    { key: 'local', titleZh: '本地化来源', titleEn: 'Local sources', items: [] },
+    { key: 'cloud', titleZh: '互联网来源', titleEn: 'Cloud sources', items: [] },
+  ]
+  for (const s of filteredLlmSources.value) {
+    const g = groups.find(x => x.key === s.cat) || groups[1]
+    g.items.push(s)
+  }
+  return groups.filter(g => g.items.length)
+})
 
 // ================ 自定义来源（可添加/重命名/删除，多个并存） ================
 
@@ -301,6 +322,14 @@ const llmSourceLabel = (key: string): string => {
 // 旧行为：点左侧列表或自定义来源即改 `llm.type`，等于「看一下就换默认」（home / RAG / 工作流立刻跟着变）。
 // 现行为：点击只切换右侧查看/编辑的来源（viewType），默认只在点「设为默认」时变更。
 const viewType = ref<string>(store.AIconfig.llm.type)
+/** 当前查看来源的官网 / 文档资料（拿到哪装、去哪申请 Key；未知来源为 undefined） */
+const viewSourceDoc = computed(() => llmSourceDoc(String(viewType.value)))
+/** GLM / Kimi / MiMo：内置 OpenAI 兼容来源的配置块（地址 / Key / 模型） */
+const SIMPLE_SOURCE_KEYS = ['glm', 'kimi', 'mimo']
+const simpleCfg = computed<any>(() => {
+  const t = String(viewType.value)
+  return SIMPLE_SOURCE_KEYS.includes(t) ? (store.AIconfig.llm as any)[t] : null
+})
 /** 正在查看的就是默认来源 */
 const isViewingDefault = computed(() => {
   if (viewType.value !== 'custom') return store.AIconfig.llm.type === viewType.value
@@ -439,6 +468,12 @@ const getCurrentConfigHelp = computed(() => {
       return zh() ? 'DeepSeek 配置：需要 DeepSeek API 密钥；可选接口样式 Chat Completions（默认）/ Responses API；模型 deepseek-flash / deepseek-v4-pro；可查询账户余额。' : 'DeepSeek configuration: requires a DeepSeek API key; choose API style Chat Completions (default) / Responses API; models deepseek-flash / deepseek-v4-pro; account balance query supported.'
     case 'gpustack':
       return zh() ? 'GPUStack 自托管推理平台配置。填服务地址即可（裸地址自动补 /v1-openai），密钥可选。' : 'GPUStack self-hosted inference platform. Fill the server address (bare host auto-appends /v1-openai); API key optional.'
+    case 'glm':
+      return zh() ? '智谱 GLM：在 open.bigmodel.cn 申请 API Key；地址已预填官方 OpenAI 兼容端点（/api/paas/v4），模型名可直接填或点「测试连接」自动拉取。' : 'Zhipu GLM: get an API key at open.bigmodel.cn; the official OpenAI-compatible endpoint (/api/paas/v4) is prefilled. Type a model or fetch the list with Test.'
+    case 'kimi':
+      return zh() ? 'Moonshot Kimi：在 platform.moonshot.cn 申请 API Key；地址已预填官方 OpenAI 兼容端点（/v1）。' : 'Moonshot Kimi: get an API key at platform.moonshot.cn; the official OpenAI-compatible endpoint (/v1) is prefilled.'
+    case 'mimo':
+      return zh() ? '小米 MiMo：在小米开放平台申请 API Key；地址已预填 OpenAI 兼容端点，模型名按平台文档填写或点「测试连接」拉取。' : 'Xiaomi MiMo: get an API key from the Xiaomi platform; the OpenAI-compatible endpoint is prefilled. Type a model or fetch the list with Test.'
     case 'anthropic':
       return zh() ? 'Anthropic Claude API配置。需要Claude API密钥。' : 'Anthropic Claude API configuration. Requires Claude API key.'
     case 'google':
@@ -1341,8 +1376,13 @@ onMounted(() => {
           <i class="fa fa-search" style="font-size:20px;"></i>
           <span>{{ zh() ? '无匹配来源' : 'No matching sources' }}</span>
         </div>
+        <template v-for="group in sourceGroups" :key="group.key">
+          <div class="llm-source-group-title">
+            <span>{{ zh() ? group.titleZh : group.titleEn }}</span>
+            <span class="llm-source-group-count">{{ group.items.length }}</span>
+          </div>
         <div
-          v-for="s in filteredLlmSources"
+          v-for="s in group.items"
           :key="s.key"
           class="llm-source-item"
           :class="{ active: llmSourceViewing(s.key), 'is-default': llmSourceActive(s.key), disabled: store.isLlmSourceDisabled(s.key) }"
@@ -1371,6 +1411,7 @@ onMounted(() => {
             <span class="llm-source-usage-total">{{ usageText(s.key) }}</span>
           </div>
         </div>
+        </template>
 
         <!-- 自定义来源分组 -->
         <template v-if="customSources.length">
@@ -1443,6 +1484,22 @@ onMounted(() => {
           <div class="config-description" style="margin-left:0;margin-top:2px;font-size: 10px;">
             {{ getCurrentConfigHelp }}
           </div>
+        </div>
+
+        <!-- 该来源「去哪儿下载 / 去哪儿申请 Key」：本地部署软件官网或 API 申请页（与新手引导同一份资料） -->
+        <div v-if="viewSourceDoc" class="llm-doc-bar">
+          <i class="fa" :class="viewSourceDoc.kind === 'local' ? 'fa-download' : (viewSourceDoc.kind === 'cloud' ? 'fa-key' : 'fa-plug')"></i>
+          <span class="llm-doc-hint">{{ zh() ? viewSourceDoc.hintZh : viewSourceDoc.hintEn }}</span>
+          <span class="llm-doc-links">
+            <a v-if="viewSourceDoc.siteUrl" class="llm-doc-link" :title="viewSourceDoc.siteUrl"
+               @click="openExternalUrl(viewSourceDoc.siteUrl)">
+              {{ zh() ? viewSourceDoc.siteLabelZh : viewSourceDoc.siteLabelEn }} <i class="fa fa-external-link"></i>
+            </a>
+            <a v-if="viewSourceDoc.docsUrl" class="llm-doc-link" :title="viewSourceDoc.docsUrl"
+               @click="openExternalUrl(viewSourceDoc.docsUrl)">
+              {{ zh() ? viewSourceDoc.docsLabelZh : viewSourceDoc.docsLabelEn }} <i class="fa fa-external-link"></i>
+            </a>
+          </span>
         </div>
 
         <!-- 该来源自己的用量（总用量在「设置 → 通用 → 数据」；这里不做跨来源合计） -->
@@ -1959,6 +2016,27 @@ onMounted(() => {
           <LlmTestRow source-key="gpustack" @refreshed="onSourceRefreshed" />
         </div>
 
+        <!-- GLM / Kimi / MiMo：内置的 OpenAI 兼容互联网来源（各自的地址 / Key / 模型） -->
+        <div v-if="simpleCfg" class="llm-config-block">
+          <div class="form-group">
+            <label>{{ zh() ? 'API密钥' : 'API Key' }}</label>
+            <input type="password" v-model="simpleCfg.api_key"
+                   :placeholder="zh() ? '在官网申请后粘贴到这里' : 'Paste the key from the provider site'"/>
+          </div>
+          <div class="form-group">
+            <label>{{ zh() ? 'API地址' : 'API URL' }}</label>
+            <input v-model="simpleCfg.base_url"
+                   :placeholder="zh() ? 'OpenAI 兼容端点（已预填官方地址）' : 'OpenAI-compatible endpoint (official URL prefilled)'"/>
+          </div>
+          <div class="form-group">
+            <label>{{ zh() ? '模型名称' : 'Model Name' }}</label>
+            <input v-model="simpleCfg.model"
+                   :placeholder="zh() ? '可直接填，或点下方「测试连接」自动拉取' : 'Type one, or fetch the list with Test below'"/>
+          </div>
+          <!-- API 状态测试：同时回填可用模型（内置来源里唯一需要的操作按钮） -->
+          <LlmTestRow :source-key="viewType" @refreshed="onSourceRefreshed" />
+        </div>
+
         <!-- 自定义配置 -->
         <div v-if="viewType === 'custom'" class="llm-config-block">
           <div class="form-group">
@@ -2317,6 +2395,20 @@ onMounted(() => {
 .llm-content-header { border-bottom: 1px solid var(--borderColor); padding-bottom: 5px }
 .llm-content-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .llm-view-hint { font-size: 11px; opacity: .75; }
+/* 来源资料条：官网 / 文档入口（本地部署软件下载站，或 API Key 申请页）
+   放在标题下方，新用户不必先知道「Ollama 去哪下、Key 去哪申请」 */
+.llm-doc-bar {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  margin-top: 8px; padding: 7px 10px;
+  border: 1px solid var(--borderColor); border-radius: 6px;
+  background: var(--menuColor); font-size: 11px; line-height: 1.6;
+}
+.llm-doc-bar > i { color: var(--fontActiveColor); flex-shrink: 0; }
+.llm-doc-hint { flex: 1; min-width: 0; opacity: .8; }
+.llm-doc-links { display: inline-flex; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
+.llm-doc-link { color: var(--fontActiveColor); cursor: pointer; text-decoration: none; white-space: nowrap; }
+.llm-doc-link:hover { text-decoration: underline; }
+.llm-doc-link i { font-size: 10px; margin-left: 2px; }
 .llm-default-tag {
   font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 3px;
   color: var(--fontActiveColor); border: 1px solid var(--fontActiveColor); opacity: .9;
