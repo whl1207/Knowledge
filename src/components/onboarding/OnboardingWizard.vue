@@ -215,19 +215,38 @@ const toggleFeature = (key: string) => {
  * 只在「没有历史导航配置」时套用默认（全新安装）。
  * 升级用户的模块保持原样：引导里能看到当前状态、想关再关，不会被擅自收走。
  */
+/**
+ * 全新安装的默认值只套一次：只开「对话 / 知识管理」，浏览器 Agent 关闭。
+ * 判定「全新」看有没有使用痕迹（聊天 / 工作区 / 已配模型），而不是看某个存档键是否存在——
+ * hiddenNavs / hiddenExtras 在启动时可能已经被其它地方写成空数组，按 null 判断并不可靠。
+ */
+const DEFAULTS_MARKER = 'kb-onboarding-defaults-v1'
+const looksLikeFreshInstall = (): boolean => {
+  try {
+    const chats = JSON.parse(localStorage.getItem('ai-chats') || '[]')
+    if (Array.isArray(chats) && chats.length) return false
+    if (store.roots.length) return false
+    const llm = (store.AIconfig as any)?.llm || {}
+    const hasKey = (c: any) => !!(c?.api_key || c?.apiKeyRef)
+    if (['deepseek', 'glm', 'kimi', 'mimo', 'openai', 'anthropic', 'google', 'azure'].some((k) => hasKey(llm[k]))) return false
+    const hasModel = (c: any) => !!String(c?.model || '').trim()
+    if (hasModel(llm.ollama) || hasModel(llm.lmstudio) || hasModel(llm.gpustack)) return false
+    return true
+  } catch {
+    return false
+  }
+}
 const applyFeatureDefaultsOnce = () => {
   try {
+    if (localStorage.getItem(DEFAULTS_MARKER) === '1') return
+    localStorage.setItem(DEFAULTS_MARKER, '1')
+    if (!looksLikeFreshInstall()) return
     let changed = false
-    if (localStorage.getItem('hiddenNavs') === null) {
-      for (const key of DEFAULT_OFF_MODULES) {
-        if (store.isNavVisible(key)) { store.toggleNav(key); changed = true }
-      }
+    for (const key of DEFAULT_OFF_MODULES) {
+      if (store.isNavVisible(key)) { store.toggleNav(key); changed = true }
     }
-    // 浏览器 Agent 默认关闭（需要时在引导里或设置里打开）
-    if (localStorage.getItem('hiddenExtras') === null) {
-      for (const key of DEFAULT_OFF_EXTRAS) {
-        if (store.isExtraVisible(key)) { store.toggleExtra(key); changed = true }
-      }
+    for (const key of DEFAULT_OFF_EXTRAS) {
+      if (store.isExtraVisible(key)) { store.toggleExtra(key); changed = true }
     }
     if (changed) store.saveConfig()
   } catch { /* 忽略 */ }

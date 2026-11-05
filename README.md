@@ -2,15 +2,31 @@
 
 **A local-first AI knowledge management platform — chat, knowledge bases, ontology modelling, agentic skills, visual workflows and MCP tools in one desktop app.**
 
-Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machine: models can be local (Ollama / LM Studio / GPUStack / ONNX) or remote APIs you configure, and no content is sent anywhere else. The UI and the in-app help are bilingual (Chinese / English).
+Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machine: models can be local (Ollama / LM Studio / GPUStack / ONNX) or remote APIs you configure, and no content is sent anywhere else. A first-run guide walks you through language, theme and window mode, workspace, model source and which modules to show; the UI and the in-app help are bilingual (Chinese / English).
 
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)
-![Version](https://img.shields.io/badge/version-6.10.12-blue)
+![Version](https://img.shields.io/badge/version-6.11.3-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Electron](https://img.shields.io/badge/Electron-30-47848F)
 ![Vue](https://img.shields.io/badge/Vue-3.4-42b883)
 
 ---
+
+## 🏗 Architecture
+
+**English** — [editable source](manual/assets/architecture.drawio)
+
+[![Architecture](manual/assets/architecture.png)](manual/assets/architecture.drawio)
+
+*Five layers, left to right: **renderer experience → agent orchestration → main-process services → platform & local data → models / external systems**, with the key call paths on the right. The editable source is [`manual/assets/architecture.drawio`](manual/assets/architecture.drawio) (open it in draw.io or with this app's own `.drawio` editor); the PNG above is exported from it.*
+
+**中文** — [可编辑源文件](<manual/assets/architecture(zh).drawio>)
+
+[![架构图（中文）](manual/assets/architecture-zh.png)](<manual/assets/architecture(zh).drawio>)
+
+*中文版同结构：体验层 → 智能体与编排 → 核心能力服务 → 平台适配与本地数据 → 模型与外部系统；源文件为 [`architecture(zh).drawio`](<manual/assets/architecture(zh).drawio>)，上图由它导出。*
+
+Both diagrams live with the code, so they cannot drift silently — edit the matching `.drawio` when modules or layers change.
 
 ## ✨ What it does
 
@@ -26,12 +42,14 @@ Built with **Vue 3 + Electron + TypeScript**. Everything runs on your own machin
 | **🤖 Agent Scaffold** | A file type in Knowledge Management (`.task`): table-driven batch agents, per-column table reasoning, link & file collectors; multi-round runs with per-round snapshots, per-row status / filters / retries, trajectory graph and Excel export; can also be driven from external MCP clients |
 | **🧩 Skills & presets** | Codex-style skill import (a folder plus `SKILL.md`), reusable Agent presets (role, model, per-tool switches, attached skills, PTC presentation), skill store |
 | **🔌 Plugins** | Local plugin host: plugins add tools for agents and register main panels / settings tabs / settings cards / swarm tabs / global hotkeys plus bilingual string tables, with declared permissions (`fs` / `shell` / `net` / `agent` / `agent.run` / `llm` / `image`); call the user's models (streaming + structured output), delegate agents, read/write files through `ctx.fs`, and generate images; install from the plugins folder or a shared-folder store; a built-in dev guide and the `builtin-plugin-dev` MCP service let a model write a plugin for you |
-| **🔌 Models, tools & MCP** | Ollama / LM Studio / GPUStack / DeepSeek / OpenAI-compatible and multiple custom providers with per-provider enable + connection test; credential table; per-tool switches; six built-in in-process MCP services (browser agent, Office Word & Excel, draw.io, literature search, PostgreSQL, plugin-dev reference) optionally exposed over HTTP |
+| **🧭 First-run setup** | A short guide (language / theme / window mode → workspace → source → model → modules) shown once per version for new installs **and** upgrades; closing it keeps your place, it can be reopened from **Settings → General → Basic → Common Actions**, and it reflows for phone-sized portrait windows; a fresh install starts with Chat + Knowledge only (Browser Agent off) |
+| **💾 Backup & restore** | **Settings → General → Data**: one-click backup writes all config plus every chat into one JSON; restore overwrites config and merges chats by id (API keys stay in the credential store and are not exported). Per-class export / import remains for chats, presets, MCP and config |
+| **🔌 Models, tools & MCP** | Local sources (Ollama / LM Studio / GPUStack) and cloud sources (DeepSeek / GLM / Kimi / MiMo / OpenAI / Anthropic / Google / Azure) plus multiple custom OpenAI- or Anthropic-compatible providers, grouped by **Local / Cloud** with the provider's download or API-key page shown per source; per-provider enable + connection test; credential table; per-tool switches; eight built-in in-process MCP services (browser agent, Office, draw.io, literature search, PostgreSQL, plugin-dev and skill-dev reference, agent-preset spec) optionally exposed over HTTP |
 | **🌐 Browser** | Built-in browser window (separate from Knowledge Management): multi-tab, bookmarks (a new tab is the bookmark grid), offline page saving, one-click article-to-Markdown clipping into the knowledge base, and AI-controllable pages — agents navigate, read text / Markdown / HTML, click, type and take screenshots through the `browser_*` tools, with auto-recycled AI tabs |
 | **🗣️ Speech** | Local TTS (Kokoro / Piper via ONNX) and ASR (ONNX Whisper, Whisper API, Qwen3-ASR with streaming punctuation) |
-| **📦 Also included** | Learning module (mastery map, review, mistake book, exams), a task kanban inside Knowledge Management (per-attribute grouping, quick capture, drag to change status, archive), offline maps (MBTiles), session logs, bilingual in-app help |
+| **📦 Also included** | Learning module (mastery map, review, mistake book, exams), a task kanban inside Knowledge Management (per-attribute grouping, quick capture, drag to change status, archive), offline maps (MBTiles), session logs, usage ledger, bilingual in-app help |
 
-Background tasks keep running when the window is closed to the tray, closing is guarded while tasks run, and settings live in a separate window.
+Background tasks keep running when the window is closed to the tray, closing is guarded while tasks run, and settings open in their own window — or as an in-page overlay in single-window mode (chosen in the first-run guide or under **Settings → General → Basic**).
 
 ## 🚀 Getting started
 
@@ -178,14 +196,17 @@ Type check the renderer before committing: `npx vue-tsc --noEmit -p tsconfig.jso
 ## 🗂 Project structure
 
 ```
-electron/main/      Electron main process (window, IPC, MCP runtime, AI service, TTS/ASR workers)
-electron/preload/   Preload bridge exposed to the renderer
+electron/main/      Electron main process (window, IPC, MCP runtime, AI service, credentials, TTS/ASR workers)
+electron/preload/   Preload bridge (one-shot claim, never a global IPC handle)
 src/components/     Renderer shell & shared UI (home, knowFile, knowRAG, learning, browser, set)
+src/components/onboarding/  First-run guide (versioned progress + step wizard)
 src/features/       Self-contained subsystems (workflow, data canvas, agent scaffold)
-src/lib/            Shared libraries (markdown / block editor, export, file handling, task files)
-src/services/       Renderer-side services (agent skills, KB reader, speech)
-src/shared/         Code shared by main and renderer (AI core, tool registry, retrieval, search)
+src/lib/            Shared libs (markdown / block editor, export, task files, settings data & backup, external links)
+src/platform/       Platform adapters (Electron / browser-LAN / Android) behind one contract
+src/services/       Renderer-side services (agent skills, KB client, speech)
+src/shared/         Code shared by main and renderer (AI core, LLM sources & provider docs, tool registry, retrieval, search)
 src/store/          Pinia stores (config, chats, swarm, running tasks)
+manual/assets/      Architecture diagrams (EN / 中文, editable .drawio + rendered PNG)
 manual/             User manual (Chinese) and Linux packaging guide
 CHANGELOG.md        Change log (Chinese, primary) — mirrored in English by CHANGELOG.en.md
 ```
@@ -194,6 +215,8 @@ CHANGELOG.md        Change log (Chinese, primary) — mirrored in English by CHA
 
 | Document | Description |
 |:---|:---|
+| [manual/assets/architecture.drawio](manual/assets/architecture.drawio) | Layered architecture diagram (English), editable in draw.io — rendered: [architecture.png](manual/assets/architecture.png) |
+| [manual/assets/architecture(zh).drawio](<manual/assets/architecture(zh).drawio>) | 中文版架构图，可在 draw.io 中编辑 — 渲染图：[architecture-zh.png](manual/assets/architecture-zh.png) |
 | [CHANGELOG.md](CHANGELOG.md) | 更新日志（中文，主档）— every user-visible change, newest first |
 | [CHANGELOG.en.md](CHANGELOG.en.md) | Changelog in English |
 | [manual/使用说明书.md](manual/使用说明书.md) | Complete Chinese user manual (also readable inside the app) — 11 chapters matching the in-app help: quick start, concepts, reasoning, knowledge management, knowledge processing, learning, general files, special files, browser, plugins, settings |
@@ -206,7 +229,7 @@ The changelog shown in **Settings → Help → Changelog** is the same file as t
 
 - All chats, knowledge bases, workflows and logs are stored locally (app data folder + the folders you choose).
 - No telemetry and no cloud sync; network access happens only when you use a remote model, search or MCP service you configured.
-- API keys are kept in your local configuration and are masked in the UI.
+- API keys live in the credential store managed by the main process — the config only keeps a reference, and the UI masks them. The one-click backup contains configuration and chats, **not** API keys (re-enter them after moving machines).
 
 ## 🤝 Contributing
 
