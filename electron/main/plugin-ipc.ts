@@ -19,6 +19,7 @@ import { pluginHost } from './plugin-host'
 import { jobRegistry } from './job-registry'
 import { sessionLog } from './session-log'
 import { requirePluginApproval } from './plugin-approval'
+import { callPluginRpc } from './plugin-rpc-registry'
 
 /** 启动插件宿主（app ready 时调用一次；在创建窗口之前，保证首个会话就能看到插件工具） */
 export function initPluginHost(): Promise<void> {
@@ -236,6 +237,29 @@ export function registerPluginIpc(): void {
     const id = readString(payload?.id, 'id')
     requirePluginApproval(payload, '清除插件数据文件')
     return { removed: pluginHost.clearDataDir(id) }
+  })
+
+  /**
+   * DSH 兼容包界面半边的 fetch 基址（该插件自己的回环 webServer）。
+   * 端口是 OS 分配的，客户端装载时现问一次。
+   */
+  registerIpc('plugin:client-base-url', (payload) => {
+    const id = readString(payload?.id, 'id')
+    if (!pluginHost.get(id)) throw new IPCError('NOT_FOUND', `插件未装载：${id}`)
+    return { url: pluginHost.clientBaseUrl(id) }
+  })
+
+  /**
+   * 插件的界面半边 → 它自己的主进程半边（`ctx.rpc.call` → `ctx.rpcHost.handle`）。
+   *
+   * 只查本插件的方法表：拿不到通用 IPC，也不能借这个通道调别人的服务。
+   * 参数/返回值由 IPC 层做结构化克隆（与其它 `plugin:*` 同一口径）。
+   */
+  registerIpc('plugin:rpc:call', async (payload) => {
+    const pluginId = readString((payload as any)?.pluginId, 'pluginId')
+    if (!pluginHost.get(pluginId)) throw new IPCError('NOT_FOUND', `插件未装载：${pluginId}`)
+    const method = readString((payload as any)?.method, 'method')
+    return await callPluginRpc(pluginId, method, (payload as any)?.args)
   })
 }
 

@@ -15,6 +15,8 @@
  */
 
 import { declareCoreSlots, coreSlotScope, slotRegistry, type SlotDefinition } from './slots'
+import { aikmDsh } from '@/lib/aikmIpc'
+import { createDshClientContext, createScopedFetch, evaluateDshClientBundle } from './clientDshCompat'
 import { ClientEventBus } from './clientEventBus'
 import { getPluginBridge, type PluginBridgeApi, type PluginClientBundle } from './bridge'
 import { createPluginLocaleApi, type PluginLocaleApi } from './locale'
@@ -100,6 +102,17 @@ export interface ClientPluginContext {
   readonly plugin: { id: string; name: string; version: string; dir: string }
   /** 用户在「设置 → 插件 → 配置」里保存的 JSON */
   readonly config: Readonly<Record<string, unknown>>
+  /**
+   * 界面半边 → **本插件自己**的主进程半边（`ctx.rpcHost.handle`）。
+   * 只查本插件的方法表；网页 / 移动端没有主进程插件宿主时调用会抛错。
+   */
+  readonly rpc: {
+    call<T = unknown>(
+      method: string,
+      args?: unknown,
+      options?: { timeoutMs?: number; signal?: AbortSignal },
+    ): Promise<T>
+  }
   /** 宿主注入的 Vue 运行时（单实例；插件不要自带 vue，也不要写 `import ... from 'vue'`） */
   readonly vue: PluginVueApi
   /** 文案服务：中英双语字典 + 响应式取词（切语言自动重渲染） */
@@ -384,10 +397,39 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
     }
   }
 
-  const eventsApi = createPluginEventsApi({ pluginId: snapshot.id, log: deps.log })
+  const eventsApi = createPluginEventsApi({ pluginId: snapshot.id, log: deps.log, bridge: (aikmDsh as any)?.plugin })
   const ctx: ClientPluginContext = {
     plugin: { id: snapshot.id, name: snapshot.name, version: snapshot.version, dir: snapshot.dir },
     config: snapshot.config ?? {},
+    rpc: {
+      async call<T = unknown>(
+        method: string,
+        args?: unknown,
+        options?: { timeoutMs?: number; signal?: AbortSignal },
+      ): Promise<T> {
+        if (options?.signal?.aborted) throw new Error('插件 RPC 已取消')
+        const api = (aikmDsh as any)?.plugin
+        if (!api?.rpcCall) {
+          throw new Error('当前平台没有主进程插件 RPC（网页 / 移动端不可用）')
+        }
+        const pending = api.rpcCall(snapshot.id, String(method), args) as Promise<T>
+        const timeout = Math.max(0, Math.round(Number(options?.timeoutMs) || 0))
+        if (!timeout) return pending
+        return await new Promise<T>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`插件 RPC 超时：${method}`)), timeout)
+          pending.then(
+            (value) => {
+              clearTimeout(timer)
+              resolve(value)
+            },
+            (error) => {
+              clearTimeout(timer)
+              reject(error)
+            },
+          )
+        })
+      },
+    },
     vue: PLUGIN_VUE_API,
     locale: sharedLocaleApi(),
     llm: createPluginLlmApi({
@@ -744,16 +786,35 @@ async function loadOne(
     if (prefetched?.error) throw prefetched.error
     const bundle = prefetched?.bundle ?? (await bridge.clientBundle(snapshot.id))
     if (!bundle?.code) throw new Error('客户端 bundle 为空')
-    const plugin = await importBundle(snapshot.id, bundle.code)
-    const handle = createClientContext({ snapshot, log })
+    const scopedFetch = createScopedFetch(snapshot.clientBaseUrl, window.fetch.bind(window), async () => {
+      try {
+        return (await bridge.clientBaseUrl?.(snapshot.id))?.url ?? null
+      } catch {
+        return null
+      }
+    })
+    const plugin =
+      snapshot.kind === 'dsh'
+        ? evaluateDshClientBundle(bundle.code, scopedFetch)
+        : await importBundle(snapshot.id, bundle.code)
+    const nativeHandle = createClientContext({ snapshot, log })
+    const dshHandle = snapshot.kind === 'dsh' ? createDshClientContext(nativeHandle.ctx, snapshot) : null
+    const applyCtx = dshHandle?.ctx ?? nativeHandle.ctx
+    const dispose = async (): Promise<void> => {
+      try {
+        await dshHandle?.dispose()
+      } finally {
+        await nativeHandle.dispose()
+      }
+    }
     try {
-      await plugin.apply(handle.ctx)
+      await plugin.apply(applyCtx)
     } catch (e) {
       // apply 抛错 → 回滚本次已注册的贡献，不留半成品
-      await handle.dispose()
+      await dispose()
       throw e
     }
-    loaded.set(snapshot.id, { snapshot, loadedAt: snapshot.loadedAt ?? null, ctx: handle.ctx, dispose: handle.dispose })
+    loaded.set(snapshot.id, { snapshot, loadedAt: snapshot.loadedAt ?? null, ctx: applyCtx, dispose })
     clientLoadState.set(snapshot.id, { ok: true, message: '', ts: Date.now() })
     log.info(`${snapshot.name}@${snapshot.version} 界面扩展已装载`)
     // 装载成功也同步给主进程一条（info 级日志默认不转发）：用户在「插件 → 管理 → 日志」、

@@ -257,7 +257,7 @@ export class AIUtils {
     return AICore.translateOpenAIToolsToAnthropic(tools)
   }
 
-  /** 获取模型真实上下文窗口（tokens）：Ollama / LM Studio / Google 可读，其余来源返回 null（按来源默认表兜底） */
+  /** 获取模型真实上下文窗口（tokens）：Ollama / LM Studio / Google / DeepSeek（含兼容网关）可读，读不到返回 null（按标称窗口 / 来源默认表兜底） */
   static fetchModelContextWindow(provider: string, config: any, model: string): Promise<number | null> {
     if (!hostedLlm()) return AICore.fetchModelContextWindow(provider, config, model)
     // Electron：委托主进程 fetch，避免渲染进程 CORS/CSP 拦截本地 Ollama /api/ps、/api/show

@@ -581,7 +581,11 @@ export async function collectPluginAgentOverview(): Promise<PluginAgentOverviewR
         callsInWindow: Number(row.callsInWindow) || 0,
         limits: {
           concurrency: Number(row.limits?.concurrency) || 1,
-          callsPerHour: Number(row.limits?.callsPerHour) || 20,
+          // 0 = 无限，不能用 `|| 20`（会把无限吞回 20）
+          callsPerHour: (() => {
+            const n = Math.floor(Number(row.limits?.callsPerHour))
+            return Number.isFinite(n) && n >= 0 ? n : 20
+          })(),
         },
         relax: { fs: row.relax?.fs === true, mcp: row.relax?.mcp === true },
         workRoot: String(row.workRoot ?? ''),

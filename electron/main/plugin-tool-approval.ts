@@ -21,14 +21,17 @@
  */
 
 import { BrowserWindow, dialog } from 'electron'
+import { randomUUID } from 'node:crypto'
 
 import { IPCError } from '@/types/ipc'
+import type { ApprovalOutcome } from '@/shared/pluginServices'
 import { toolRegistry } from '@/shared/toolRegistry'
 import type { PluginSnapshot } from '@/types/plugin'
 import { registerIpc } from './ipc-registry'
 import { logInfo } from './log'
 import { pluginHost } from './plugin-host'
 import { requirePluginApproval } from './plugin-approval'
+import { hasPluginWaterfall, runPluginWaterfall } from './plugin-waterfall'
 import {
   setToolApproval,
   toolApprovalOf,
@@ -36,7 +39,7 @@ import {
 } from './plugin-tool-approval-store'
 
 /** 同一次运行内，同一个插件的弹框不并发弹两次（并发的工具调用共用同一个答案） */
-const asking = new Map<string, Promise<PluginToolApproval | null>>()
+const asking = new Map<string, Promise<AskDecision>>()
 
 /**
  * 该工具属于哪个已装插件（按插件记录的 `tools` 名单归因）。
@@ -60,31 +63,64 @@ export function approvalToolsOf(pluginId: string): string[] {
   return (snap.tools ?? []).filter((n) => toolRegistry.get(n, `plugin:${snap.id}`)?.requiresApproval === true)
 }
 
+/** 一次询问的结果：三态 + 两个"仅本次"哨兵 + null（问不到） */
+type AskDecision = PluginToolApproval | 'allow-once' | 'deny-once' | null
+
 /**
  * 弹框问一次（只在 `ask` 状态下走到这里）。
  * 返回本次决定；`null` = 没法问（无窗口）→ 调用方按拒绝处理（fail-closed）。
+ *
+ * 先走插件拦截链（`approval/request`）：手机 / 远程插件可以认领这次询问，
+ * 桌面就不弹框；无人认领时回落到原来的弹框。插件的 "allowed-once / rejected"
+ * 用**仅本次**哨兵返回，绝不会把手机的一次同意写成"以后都不问"。
  */
-async function askOnce(plugin: PluginSnapshot, toolName: string): Promise<PluginToolApproval | null> {
-  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-  if (!win || win.isDestroyed()) return null
+async function askOnce(plugin: PluginSnapshot, toolName: string): Promise<AskDecision> {
+  const decideByDialog = async (): Promise<PluginToolApproval | null> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    if (!win || win.isDestroyed()) return null
 
-  const { response } = await dialog.showMessageBox(win, {
-    type: 'question',
-    buttons: ['允许', '每次都问', '拒绝'],
-    defaultId: 2,
-    cancelId: 2,
-    noLink: true,
-    title: '插件想调用工具',
-    message: `插件「${plugin.name}」想调用工具 ${toolName}`,
-    detail:
-      '这个插件声明了文件或命令权限，所以它的工具默认需要你确认。\n\n'
-      + '「允许」= 以后这个插件的工具不再询问；「每次都问」= 每次调用都确认；'
-      + '「拒绝」= 这次及以后都拒绝（可在「设置 → 插件 → 权限」里改回来）。',
-  })
-  const decided: PluginToolApproval = response === 0 ? 'allow' : response === 1 ? 'ask' : 'deny'
-  if (decided !== 'ask') setToolApproval(plugin.id, decided)
-  logInfo('main', `[plugin-tool-approval] [audit] ${plugin.id} → ${decided}（工具 ${toolName}）`)
-  return decided
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['允许', '每次都问', '拒绝'],
+      defaultId: 2,
+      cancelId: 2,
+      noLink: true,
+      title: '插件想调用工具',
+      message: `插件「${plugin.name}」想调用工具 ${toolName}`,
+      detail:
+        '这个插件声明了文件或命令权限，所以它的工具默认需要你确认。\n\n'
+        + '「允许」= 以后这个插件的工具不再询问；「每次都问」= 每次调用都确认；'
+        + '「拒绝」= 这次及以后都拒绝（可在「设置 → 插件 → 权限」里改回来）。',
+    })
+    const decided: PluginToolApproval = response === 0 ? 'allow' : response === 1 ? 'ask' : 'deny'
+    if (decided !== 'ask') setToolApproval(plugin.id, decided)
+    logInfo('main', `[plugin-tool-approval] [audit] ${plugin.id} → ${decided}（工具 ${toolName}）`)
+    return decided
+  }
+
+  if (!hasPluginWaterfall('approval/request')) return decideByDialog()
+
+  let dialogUsed = false
+  let dialogDecision: PluginToolApproval | null = null
+  const outcome = await runPluginWaterfall<ApprovalOutcome>(
+    'approval/request',
+    {
+      requestId: `approval-${randomUUID()}`,
+      toolName,
+      displayReason: `插件「${plugin.name}」想调用工具 ${toolName}`,
+      reason: '插件工具需要用户确认',
+    },
+    async () => {
+      dialogUsed = true
+      dialogDecision = await decideByDialog()
+      if (dialogDecision === null) return 'cancelled'
+      return dialogDecision === 'deny' ? 'rejected' : 'allowed-once'
+    },
+  )
+  if (dialogUsed) return dialogDecision
+  if (outcome === 'allowed-once') return 'allow-once'
+  if (outcome === 'rejected') return 'deny-once'
+  return null
 }
 
 /**
@@ -119,14 +155,16 @@ export function registerPluginToolApproval(): () => void {
       asking.set(owner.id, pending)
     }
     const decided = await pending
-    if (decided === 'allow' || decided === 'ask') return undefined
+    if (decided === 'allow' || decided === 'ask' || decided === 'allow-once') return undefined
     return {
       skip: true,
       result: {
         ok: false,
         error: decided === null
           ? `插件「${owner.name}」的工具需要你确认，但当前没有可用窗口来询问 —— 已按拒绝处理（fail-closed）`
-          : `你拒绝了插件「${owner.name}」的工具调用 ${toolName}`,
+          : decided === 'deny-once'
+            ? `你（通过插件）拒绝了本次调用 ${toolName}`
+            : `你拒绝了插件「${owner.name}」的工具调用 ${toolName}`,
       },
     }
   })

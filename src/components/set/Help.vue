@@ -437,7 +437,7 @@
           </div>
         </section>
 
-        <!-- 知识处理 RAG -->
+        <!-- 知识库 RAG -->
         <section id="know-rag" class="help-section" v-show="activeSection === 'know-rag'">
           <div class="section-header">
             <div class="section-icon"><i class="fa fa-layer-group"></i></div>
@@ -1585,7 +1585,7 @@ const browserFeatures = ref([
 // 浏览器章节「使用步骤」（文案来自国际化数据；显式数组类型，模板 v-for 索引方可参与运算）
 const browserSteps = computed(() => (t('browser.steps.items') || []) as Array<{ title: string; desc: string }>)
 
-// 知识处理问答模式列表
+// 知识库问答模式列表
 const qaModes = ref([
   { id: 1, icon: '🔍', key: 'similarity' },
   { id: 2, icon: '�', key: 'fileEnhance' },
@@ -1596,7 +1596,7 @@ const qaModes = ref([
   { id: 7, icon: '⚡', key: 'agentic' }
 ])
 
-// 知识处理八个标签页（按顶部导航顺序展示）
+// 知识库八个标签页（按顶部导航顺序展示）
 const ragViewItems = ref([
   { n: 1, key: 'qa' },
   { n: 2, key: 'file' },
@@ -1666,7 +1666,7 @@ const mcpServices = ref([
   { key: 'skillDev' }
 ])
 
-// 知识处理自定义检索策略类型列表（对应策略配置的四种 kind）
+// 知识库自定义检索策略类型列表（对应策略配置的四种 kind）
 const strategyKinds = ref([
   { id: 1, icon: '🛤️', key: 'pipeline' },
   { id: 2, icon: '🧩', key: 'mapreduce' },
@@ -1765,7 +1765,7 @@ const translations = {
         subtitle: '文件中心与协作'
       },
       'know-rag': {
-        title: '知识处理',
+        title: '知识库',
         subtitle: 'RAG 知识库'
       },
       'learning': {
@@ -1816,8 +1816,8 @@ const translations = {
       }
     },
     quickStart: {
-      overview: 'AI-KM 是一款<strong>本地优先的桌面 AI 知识管理平台</strong>：AI 对话（RAG 知识问答 / 智能体对话）、文档与白板管理、知识处理（切片向量化构建 .kb 知识库）、掌握式学习与间隔复习、可视化工作流、Agent脚手架与多智能体集群协作、知识管理里的任务看板一应俱全；数据默认保存在本地，支持离线使用。以下 6 步带你快速上手：',
-      tags: ['AI 对话', '知识管理', '知识处理', '掌握式学习', '可视化工作流', 'Agent脚手架', '多智能体集群', '任务看板'],
+      overview: 'AI-KM 是一款<strong>本地优先的桌面 AI 知识管理平台</strong>：AI 对话（RAG 知识问答 / 智能体对话）、文档与白板管理、知识库（切片向量化构建 .kb 知识库）、掌握式学习与间隔复习、可视化工作流、Agent脚手架与多智能体集群协作、知识管理里的任务看板一应俱全；数据默认保存在本地，支持离线使用。以下 6 步带你快速上手：',
+      tags: ['AI 对话', '知识管理', '知识库', '掌握式学习', '可视化工作流', 'Agent脚手架', '多智能体集群', '任务看板'],
       step1: {
         title: '部署 AI 环境',
         items: [
@@ -1879,11 +1879,11 @@ const translations = {
         title: '常见问题（FAQ）',
         items: [
           { q: 'Q：聊天时提示未连接怎么办？', a: '到 <strong>设置 → 模型 → 来源</strong> 确认 AI 类型与地址 / Key 正确，点「测试连接」；本地 Ollama / LM Studio 请确认服务已启动。要让主页默认用它，还要再点一次「设为默认」。' },
-          { q: 'Q：知识处理提示未在运行或模型配置错误？', a: '知识处理跟随全局 AI 配置：确认当前来源已「测试连接 / API 状态」成功、所选模型存在，并配置好<strong>默认嵌入模型</strong>（如 <code>nomic-embed-text</code>）；LM Studio 还要求该嵌入模型已被加载（或在 Server 里开启 Just-In-Time 加载）。' },
+          { q: 'Q：知识库提示未在运行或模型配置错误？', a: '知识库跟随全局 AI 配置：确认当前来源已「测试连接 / API 状态」成功、所选模型存在，并配置好<strong>默认嵌入模型</strong>（如 <code>nomic-embed-text</code>）；LM Studio 还要求该嵌入模型已被加载（或在 Server 里开启 Just-In-Time 加载）。' },
           { q: 'Q：我的数据安全吗？能离线用吗？', a: '所有对话、知识库与配置默认保存在本地，不会上传到第三方服务器（在线 API 请求除外）；使用本地模型（Ollama / LM Studio）即可完全离线，语音识别也可选本地 ONNX Whisper。' },
-          { q: 'Q：新手先学哪个模块？', a: '建议顺序：<strong>设置</strong>（配模型）→ <strong>智能推理</strong>（聊天）→ <strong>知识管理</strong>（建文件 / 看板记任务）→ <strong>知识处理</strong>（建知识库）→ <strong>学习</strong>（复习掌握）→ 通用文件 / 专属文件 → 插件。' },
-          { q: 'Q：PDF 怎么进知识库？', a: '在<strong>知识处理 → 文件</strong>里，对缺少同名 md 的 PDF 点「转换」生成 Markdown，再走切片 → 向量化 → 保存流程。' },
-          { q: 'Q：可以在手机上用吗？', a: '可以。在 <strong>设置 → 协作 → 共享 → 局域网共享</strong> 启动共享，用手机浏览器访问显示的局域网地址即可聊天：网页端会显示<strong>上方导航栏（含设置）</strong>，可像桌面一样切换主页 / 知识管理 / 知识处理 / 学习等面板；最小化、最大化、关闭与「浏览器 Agent」入口是桌面专属（网页里做不了，会自动隐藏）。若还想让手机<strong>浏览 / 编辑主机文件</strong>，到 <strong>协作 → 权限 → 文件访问</strong> 打开「只读」或「可写」：所有操作都由主机代做，且只能访问「共享」页里设置的共享目录，越界请求会被拒绝。模型来源与主机自动对齐：主机在「模型 → 来源」里关掉的来源网页端不再显示，模型探测也由主机执行（桌面端能刷出来的模型，网页端点一下模型下拉同样能刷出来）。' },
+          { q: 'Q：新手先学哪个模块？', a: '建议顺序：<strong>设置</strong>（配模型）→ <strong>智能推理</strong>（聊天）→ <strong>知识管理</strong>（建文件 / 看板记任务）→ <strong>知识库</strong>（建知识库）→ <strong>学习</strong>（复习掌握）→ 通用文件 / 专属文件 → 插件。' },
+          { q: 'Q：PDF 怎么进知识库？', a: '在<strong>知识库 → 文件</strong>里，对缺少同名 md 的 PDF 点「转换」生成 Markdown，再走切片 → 向量化 → 保存流程。' },
+          { q: 'Q：可以在手机上用吗？', a: '可以。在 <strong>设置 → 协作 → 共享 → 局域网共享</strong> 启动共享，用手机浏览器访问显示的局域网地址即可聊天：网页端会显示<strong>上方导航栏（含设置）</strong>，可像桌面一样切换主页 / 知识管理 / 知识库 / 学习等面板；最小化、最大化、关闭与「浏览器 Agent」入口是桌面专属（网页里做不了，会自动隐藏）。若还想让手机<strong>浏览 / 编辑主机文件</strong>，到 <strong>协作 → 权限 → 文件访问</strong> 打开「只读」或「可写」：所有操作都由主机代做，且只能访问「共享」页里设置的共享目录，越界请求会被拒绝。模型来源与主机自动对齐：主机在「模型 → 来源」里关掉的来源网页端不再显示，模型探测也由主机执行（桌面端能刷出来的模型，网页端点一下模型下拉同样能刷出来）。' },
           { q: 'Q：手机上能不看电脑单独用吗？', a: '可以。安卓版可打包成 APK 装到手机（构建方式见 README 的 Android 章节），<strong>离线可用</strong>：文件默认存在应用沙箱里。想访问自己的资料，点「打开文件夹」调起系统界面授权一个目录（如「文档 / 知识库」），之后该目录内的文件可正常浏览、预览、编辑与增删改，重启后授权依然有效；打开文件会在<strong>应用内浮层窗口</strong>里显示（与设置一样），且<strong>单击文件即打开、单击文件夹即进入</strong>。<strong>系统返回手势 / 返回键按界面栈逐级回退</strong>：先关弹窗与界面内浮层，再退设置内部（内容 → 分类列表）、主页（对话 → 聊天列表）、知识管理的文件树抽屉，然后回主页，主页连按两次才退出应用。<strong>智能体也在手机上跑</strong>：可在本机读写手机文件（含授权目录）、检索知识库、抓取网页、提问与维护计划 / 待办，不依赖桌面主机；跑 Python、shell、子代理、MCP、技能这些需要桌面能力的行为会明确提示不可用。在线模型（DeepSeek 等）与<strong>插件</strong>同样不需要主机：插件在手机上由应用本地装载（插件目录在应用私有目录，点「安装插件」可从手机里选文件夹装入，插件里也能调起系统文件选择器读写手机文件），<strong>窗口缩放</strong>（设置 → 基础）在手机上同样生效并会记住。连局域网里的 Ollama / LM Studio 也可直接填 <code>http://192.168.x.x:11434</code>（已放行明文 HTTP）。Office 导出、Python 沙箱、表格、技能库这些重能力在手机上暂不可用。' },
           { q: 'Q：加载知识库后提示检测到未完成的本体构建进度？', a: '这是<strong>断点续建</strong>机制：未跑完的本体构建不会自动继续，需在底部状态栏或「百科」页点「继续」才恢复；清空本体后按钮应显示 ▶ 开始，若仍显示「继续」，重进或再清一次即可。' },
           { q: 'Q：为什么有些实体没有关联到切片？', a: '关联采用「切片文本精确包含实体名」的匹配；模型给出归纳名而原文没有原词时会保留为<strong>孤立概念</strong>，可在「百科」页手动添加实体补关联。' },
@@ -1900,13 +1900,13 @@ const translations = {
         title: '八个关键概念'
       },
       items: {
-        llm: { name: '大模型（LLM）', desc: '软件的<strong>大脑</strong>，负责理解你的话并生成回答。可接本地模型（<code>Ollama</code> / <code>LM Studio</code>，完全离线）或在线模型（<code>DeepSeek</code> / <code>OpenAI</code> / <code>Anthropic</code> / <code>Google</code> / <code>Azure</code> / <code>GPUStack</code> / 自定义），配置在 <strong>设置 → 模型 → 来源</strong>；对话、知识处理、学习、工作流、Agent 共用这份全局配置。' },
+        llm: { name: '大模型（LLM）', desc: '软件的<strong>大脑</strong>，负责理解你的话并生成回答。可接本地模型（<code>Ollama</code> / <code>LM Studio</code>，完全离线）或在线模型（<code>DeepSeek</code> / <code>OpenAI</code> / <code>Anthropic</code> / <code>Google</code> / <code>Azure</code> / <code>GPUStack</code> / 自定义），配置在 <strong>设置 → 模型 → 来源</strong>；对话、知识库、学习、工作流、Agent 共用这份全局配置。' },
         agent: { name: '智能体（Agent）', desc: '<strong>大模型 + 角色设定 + 一组工具</strong>。它会自己规划步骤、调用工具、看结果再决定下一步，直到把任务做完。角色由<strong>Agent 预设</strong>定义（系统提示 / 模型 / 工具 / 技能 / 知识库 / MCP），主页点 👤 选用即进入智能体模式。' },
         tool: { name: '工具（工具调用）', desc: '智能体能主动调用的能力：读写文件、搜索网页、打开网页、执行代码、检索知识库等。你不需要手动点，模型自己决定<strong>用哪个、传什么参数</strong>；带副作用的工具走<strong>审批策略</strong>。' },
         ptc: { name: '程序化工具调用（PTC）', desc: '默认逐个调用工具；PTC 下模型只看到 <code>run_code</code>，它<strong>写一段 TypeScript 程序</strong>在程序里组合调用多个工具（如循环处理 20 个文件再汇总）。往返更少、批处理更省 token，消息里会展示程序、返回值与程序内调用过的工具。' },
         mcp: { name: 'MCP（模型上下文协议）', desc: '接入外部工具能力的通用协议：把一堆函数打包成一个服务，智能体 / 工作流 / 外部客户端按同一套方式调用。软件<strong>内置 6 个进程内 MCP 服务</strong>（浏览器 Agent / Office 文档 / drawio / 文献检索 / PostgreSQL / 插件开发参考），也可接入外部服务或对外开放。' },
         skill: { name: '技能（Skill）', desc: '一份<strong>怎么写、按什么步骤做</strong>的操作手册：一个文件夹 + 一个 <code>SKILL.md</code>。它不提供新工具，而是教智能体用好已有能力；聊天里输入 <code>$技能名 任务</code> 显式触发，或让智能体按描述自动匹配。' },
-        kb: { name: '知识库（.kb）与 RAG', desc: '把你的文档<strong>切片 → 向量化</strong>之后得到的可检索索引。对话时先检索最相关的切片（<strong>RAG</strong>），再交给模型作答——回答有依据、可溯源。由<strong>知识处理</strong>构建，可被主页知识库模式、智能体、工作流与<strong>学习</strong>模块使用。' },
+        kb: { name: '知识库（.kb）与 RAG', desc: '把你的文档<strong>切片 → 向量化</strong>之后得到的可检索索引。对话时先检索最相关的切片（<strong>RAG</strong>），再交给模型作答——回答有依据、可溯源。由<strong>知识库</strong>构建，可被主页知识库模式、智能体、工作流与<strong>学习</strong>模块使用。' },
         plugin: { name: '插件（Plugin）', desc: '给软件本身增加能力的扩展包：既能给智能体<strong>加工具</strong>，也能往界面<strong>加主面板 / 设置页签 / 快捷键</strong>。权限按清单声明（文件 / 命令 / 网络 / 会话日志 / 大模型），未申请的一律拒绝。' }
       },
       more: {
@@ -1915,7 +1915,7 @@ const translations = {
         items: [
           '<strong>工作流（.flow.yml）</strong>：把检索 → 判断 → 生成 → 导出这类步骤用节点和连线画出来，一键按固定流程执行（见<strong>专属文件</strong>）。',
           '<strong>集群</strong>：主页的一种对话模式，多个 Agent 预设作为成员分工协作（见<strong>智能推理</strong>）。',
-          '<strong>本体图谱</strong>：知识处理从文档里抽出的<strong>实体 + 关系</strong>，用于图谱问答与增强检索（见<strong>知识处理</strong>）。',
+          '<strong>本体图谱</strong>：知识库从文档里抽出的<strong>实体 + 关系</strong>，用于图谱问答与增强检索（见<strong>知识库</strong>）。',
           '<strong>脚手架（.task）</strong>：通用 Agent 执行框架，一个文件 = 一个可反复运行的批量任务（见<strong>专属文件</strong>）。',
           '<strong>数据画布（.data）</strong>：无代码数据建模，画布定义对象与字段，再用表单录入、图表查看（见<strong>专属文件</strong>）。'
         ]
@@ -1956,7 +1956,7 @@ const translations = {
         desc: '<strong>专属文件</strong>是本软件自己定义的文件类型：它们都有专属的处理模块或编辑器，在知识管理里新建、双击即用对应视图打开。'
       },
       items: {
-        kb: { name: '知识库 .kb', desc: '由「知识处理」切片 / 向量化生成的可检索索引；双击跳到<strong>知识处理</strong>加载该库。' },
+        kb: { name: '知识库 .kb', desc: '由「知识库」切片 / 向量化生成的可检索索引；双击跳到<strong>知识库</strong>加载该库。' },
         flow: { name: '工作流 .flow.yml', desc: '节点 + 连线的流程编排（可反复运行的固定流程）；双击在独立窗口里打开<strong>工作流画布</strong>。' },
         task: { name: 'Agent脚手架 .task', desc: '一个文件 = 一个可反复运行的批量 Agent 任务；双击在独立窗口里打开<strong>脚手架视图</strong>。' },
         data: { name: '数据画布 .data', desc: '无代码数据建模：对象 + 字段 + 表单 + 图表；双击在独立窗口里打开<strong>数据画布视图</strong>。' }
@@ -1964,8 +1964,8 @@ const translations = {
       kb: {
         title: '知识库文件（.kb）',
         items: [
-          '<strong>怎么来</strong>：在<strong>知识处理</strong>里打开工作区 → 文件 → 切片 → 向量化 → 保存知识库。',
-          '<strong>怎么用</strong>：双击 <code>.kb</code> 会跳到<strong>知识处理</strong>加载它，可检索、问答、重新切片；主页<strong>知识库模式</strong>选中它即进入检索 + 回答；智能体预设开启「访问知识库」后会通过 <code>kb_search</code> 自动检索；<strong>学习</strong>模块也围绕它生成练习与复习内容。',
+          '<strong>怎么来</strong>：在<strong>知识库</strong>里打开工作区 → 文件 → 切片 → 向量化 → 保存知识库。',
+          '<strong>怎么用</strong>：双击 <code>.kb</code> 会跳到<strong>知识库</strong>加载它，可检索、问答、重新切片；主页<strong>知识库模式</strong>选中它即进入检索 + 回答；智能体预设开启「访问知识库」后会通过 <code>kb_search</code> 自动检索；<strong>学习</strong>模块也围绕它生成练习与复习内容。',
           '<strong>在哪管</strong>：一个 <code>.kb</code> 支持多个版本，工具栏可切换 / 保存；学习记录单独存在同目录的 <code>&lt;库名&gt;.learning</code> 里，不会写进 <code>.kb</code>。'
         ]
       },
@@ -2182,7 +2182,7 @@ const translations = {
         excalidraw: { name: '白板', desc: 'Excalidraw 无限画布绘图（.excalidraw 文件专属）：手绘风格图形 / 箭头 / 文字 / 自由笔，编辑后自动写回文件（Ctrl+S 立即保存），无需单独安装' },
         drawio: { name: '图表', desc: 'draw.io 图表绘图（.drawio / .dio 文件专属）：流程图 / 架构图 / UML / ER 图等；编辑器内置，无需单独安装 draw.io，也不联网' },
         flow: { name: '工作流', desc: '工作流文件（.flow.yml / .flow.yaml，文件专属视图）：文件内容是 Dify 应用 DSL，在浏览 / 可视编辑视图直接打开工作流编辑器编排、运行与查看运行日志；源码编辑视图看到的是 YAML 文本' },
-        kb: { name: '知识库文件', desc: '知识库文件（.kb）：存放知识处理（RAG）切分好的知识块与索引，体积较大。双击不会进入文件视图，而是跳到「知识处理」加载该库，可检索、问答与重新切分' },
+        kb: { name: '知识库文件', desc: '知识库文件（.kb）：存放知识库（RAG）切分好的知识块与索引，体积较大。双击不会进入文件视图，而是跳到「知识库」加载该库，可检索、问答与重新切分' },
         task: { name: '脚手架', desc: '脚手架任务文件（.task，文件专属视图）：一个 .task = 一个独立任务，双击在独立窗口里打开脚手架画布（导入表格 / 执行 / 图谱 / 日志 / 结果都在里面），配置与结果都保存在该文件里；旧脚手架的 .task 打开时自动转换配置' }
       },
       features: {
@@ -2234,7 +2234,7 @@ const translations = {
         },
         note: {
           title: '📌 使用提示：',
-          text: '以下操作始终不变：右键文件时「打开」直接列出各视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示，按文件类型给出），打开文件所在位置 / 复制地址 / 系统打开在同级的「操作」里；知识库（.kb）文件一律跳转到知识处理（RAG）模块；脚手架（.task）一律打开它的专属「脚手架」视图；本地网页（.html / .htm）与普通文件一样进文件视图（浏览用 iframe 渲染，可切源码编辑）；远程文件在单窗口模式下单击即进右侧标签预览，多窗口模式下直接开窗口 / 浮层。'
+          text: '以下操作始终不变：右键文件时「打开」直接列出各视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示，按文件类型给出），打开文件所在位置 / 复制地址 / 系统打开在同级的「操作」里；知识库（.kb）文件一律跳转到知识库（RAG）模块；脚手架（.task）一律打开它的专属「脚手架」视图；本地网页（.html / .htm）与普通文件一样进文件视图（浏览用 iframe 渲染，可切源码编辑）；远程文件在单窗口模式下单击即进右侧标签预览，多窗口模式下直接开窗口 / 浮层。'
         }
       },
       drawio: {
@@ -2324,8 +2324,8 @@ const translations = {
     },
     knowRAG: {
       overview: {
-        title: '什么是知识处理？',
-        description: '知识处理（knowRAG）把本地文档构建成<strong>可检索、可学习、可评测的知识库（RAG）</strong>，并<strong>跟随全局 AI 配置</strong>（支持 Ollama / LM Studio / OpenAI / DeepSeek / Anthropic / Google / Azure 等）。顶部按 问答 / 文件 / 切片 / 问题 / 百科 / 本体 / 测试 / 设置 八个标签页组织：选库与转换 → 切片与向量化 → 抽取实体（百科）/ 提取问题（问题）→ 策略化问答与自动化评测 → 保存为 .kb 供「学习」等复用。检索策略可在「策略配置」自定义（处理管线 + 检索管线，内置 相似度 / 文件增强 / 问题增强 / 本体增强 / 多跳 / 社区 / Agentic 等）。'
+        title: '什么是知识库？',
+        description: '知识库（knowRAG）把本地文档构建成<strong>可检索、可学习、可评测的知识库（RAG）</strong>，并<strong>跟随全局 AI 配置</strong>（支持 Ollama / LM Studio / OpenAI / DeepSeek / Anthropic / Google / Azure 等）。顶部按 问答 / 文件 / 切片 / 问题 / 百科 / 本体 / 测试 / 设置 八个标签页组织：选库与转换 → 切片与向量化 → 抽取实体（百科）/ 提取问题（问题）→ 策略化问答与自动化评测 → 保存为 .kb 供「学习」等复用。检索策略可在「策略配置」自定义（处理管线 + 检索管线，内置 相似度 / 文件增强 / 问题增强 / 本体增强 / 多跳 / 社区 / Agentic 等）。'
       },
       workflow: {
         title: '处理流程',
@@ -2362,7 +2362,7 @@ const translations = {
       },
       config: {
         title: '配置说明',
-        description: '知识处理全程使用<strong>全局 AI 配置</strong>的模型（设置 → 模型 → 来源中选择的 AI 来源与模型），无需在此单独配置来源。嵌入、对话、处理模型分别默认取该来源的默认嵌入模型与主模型；嵌入模型可在知识库「设置」中调整。支持多种检索算法：余弦相似度、BM25 及混合检索，检索数量可选按数量 / 按匹配率 / 按字符；检索策略可在「策略配置」中自定义（见下）。'
+        description: '知识库全程使用<strong>全局 AI 配置</strong>的模型（设置 → 模型 → 来源中选择的 AI 来源与模型），无需在此单独配置来源。嵌入、对话、处理模型分别默认取该来源的默认嵌入模型与主模型；嵌入模型可在知识库「设置」中调整。支持多种检索算法：余弦相似度、BM25 及混合检索，检索数量可选按数量 / 按匹配率 / 按字符；检索策略可在「策略配置」中自定义（见下）。'
       },
       strategies: {
         title: '自定义检索策略（处理管线）',
@@ -2564,13 +2564,13 @@ const translations = {
     settings: {
       overview: {
         title: '设置总览',
-        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 数据 / 关联 / 其他）、<strong>模型</strong>（来源 / 嵌入 / 凭据）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / 抓取 / MCP / 注册表）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（管理 / 控制台 / 日志）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识处理、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体管理 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
+        description: '所有应用配置集中在 <strong>设置</strong> 面板，左侧为二级导航：<strong>通用</strong>（基础 / 数据 / 关联 / 其他）、<strong>模型</strong>（来源 / 嵌入 / 凭据）、<strong>协作</strong>（共享 / 协同 / 权限）、<strong>语音</strong>（合成 / 输入）、<strong>工具</strong>（管理 / 搜索 / 抓取 / MCP / 注册表）、<strong>技能</strong>（管理 / 商店）、<strong>智能体</strong>（管理 / 控制台 / 日志）、<strong>插件</strong>（管理 / 商店 / 开发）、<strong>帮助</strong>。点左侧项即进入对应面板；其中的「模型」等全局配置对主页、知识库、语音等模块统一生效。<br>细长窗口（高宽比超过 16:9，如手机竖屏）下导航与内容各占满整屏互相切换（分类列表是钢琴键式条目，左上角 ← 返回分类）；设置内部的列表型面板——模型来源、搜索源、MCP、插件管理、技能管理 / 商店、智能体管理 / 控制台 / 日志——同样是「整屏列表 ⇄ 整屏内容」两屏；技能管理与技能商店内容更多，会逐级整屏下钻（技能列表 → 文件树 → 文件编辑，商店：技能网格 ⇄ 来源列表 ⇄ 技能详情），每屏左上角 ← 回到上一级。'
       },
       groups: {
         basic: {
           title: '🧭 通用',
           items: {
-            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文字对齐</strong>（两端对齐 / K-P 最优断行）/ <strong>关闭按钮行为</strong> / <strong>配置随软件分发</strong>，路径与常用操作（控制台、全屏、<strong>新手引导</strong>、<strong>检查更新</strong>——读 GitHub 最新 Release 并按当前平台给出安装包下载、初始化、清空聊天、导出 Markdown、恢复 AI 配置），以及<strong>导航与模块</strong>开关：主界面导航栏的入口（顶层模块：主页 / 知识管理 / 知识处理 / 学习，以及<strong>待我处理</strong>与<strong>浏览器 Agent</strong> 的地球图标——关掉后导航栏不再显示，AI 与知识管理面板仍可打开浏览器）。知识管理的视图切换在知识管理自己的顶部工具栏里。全部关闭且没有插件面板时主界面会显示<strong>空导航提醒</strong>（可在此关闭提醒）。' },
+            view: { name: '基础', desc: '语言 / 主题 / 窗口缩放 / <strong>文字对齐</strong>（两端对齐 / K-P 最优断行）/ <strong>关闭按钮行为</strong> / <strong>配置随软件分发</strong>，路径与常用操作（控制台、全屏、<strong>新手引导</strong>、<strong>检查更新</strong>——读 GitHub 最新 Release 并按当前平台给出安装包下载、初始化、清空聊天、导出 Markdown、恢复 AI 配置），以及<strong>导航与模块</strong>开关：主界面导航栏的入口（顶层模块：主页 / 知识管理 / 知识库 / 学习，以及<strong>待我处理</strong>与<strong>浏览器 Agent</strong> 的地球图标——关掉后导航栏不再显示，AI 与知识管理面板仍可打开浏览器）。知识管理的视图切换在知识管理自己的顶部工具栏里。全部关闭且没有插件面板时主界面会显示<strong>空导航提醒</strong>（可在此关闭提醒）。' },
             data: { name: '数据', desc: '顶部是<strong>模型用量</strong>（全部来源合计与每日消耗）；其下为<strong>使用总览</strong>：本地存储占用、数据目录（可打开所在文件夹）、<strong>一键备份 / 一键恢复</strong>（把全部配置与全部聊天记录打成一个 JSON 文件；恢复时配置覆盖、聊天按 id 合并，也接受旧的配置备份与聊天记录导出）与可清理缓存；底部<strong>数据清单</strong>逐类列出聊天记录 / Agent 预设 / MCP / 配置 / 会话日志的数量与占用，每类可单独导出 / 导入（会话日志可清空或打开所在文件夹），并可直接前往对应设置页。只统计本机数据，工作区里的知识库、工作流、数据画布等文件不算在内（请在「知识管理」查看）。' },
             fileassoc: { name: '关联', desc: '按文件类型设置系统默认打开方式，可一键设置 / 全部取消：Windows 写当前用户注册表，Linux 写 ~/.config/mimeapps.list（需 .deb 安装版提供的桌面条目，AppImage / 免安装版要先做桌面集成）；macOS 不允许软件自行修改，安装版会出现在「打开方式」列表里，请在「访达 → 显示简介 → 打开方式」中设置。' },
             other: { name: '其他', desc: '系统状态（Python 检测与<strong>安全策略</strong>：只读安全 / 工作区写入 / 完全访问三档，决定智能体执行代码、命令与联网的权限，改完对所有窗口立即生效并保留）、浏览器、Word 导出与离线地图包（MBTiles）。' }
@@ -2609,7 +2609,7 @@ const translations = {
           title: '🔌 插件',
           items: {
             plugin: { name: '管理', desc: '本地插件（工具 / 界面扩展）的发现、启用停用、重载、日志、配置、详情与移除，行内动作都是图标按钮（悬停看说明）；标题栏下方的<strong>搜索框</strong>可按名称 / 插件 id / 文件夹 / 权限 / 工具 / 服务 / 描述 / 状态过滤列表（计数显示「匹配数 / 总数」），标题旁的 ⚠️ 图标悬停可看<strong>安全提示</strong>。插件既能给智能体加工具，也能加界面——主面板（自动出现在导航栏）、设置页签、设置卡片、集群工作台页签，还能注册全局快捷键、提供中英文案；插件可用的宿主能力：<strong>文件</strong>（<code>ctx.fs</code> 读文本 / 读表格 / 读二进制 / 写入（可带版本做乐观并发）/ 只改一处，<code>ctx.files</code> 选文件 / 选文件夹 / 选可写文件夹 / PDF 页面预览，权限 <code>fs</code>，且只能访问你在该插件里亲自选过的路径，<strong>选过一次就会记住（重启软件后不用重选）</strong>，可在「数据 → 文件授权」里逐条或一键撤销，卸载插件会一并清掉），另有<strong>大模型</strong>（<code>ctx.llm</code>：可选来源与模型、结构化输出、边出边显示，权限 <code>llm</code>）、<strong>委派智能体</strong>（<code>ctx.agent</code> / <code>ctx.agents</code>，权限 <code>agent.run</code>）、<strong>生图</strong>（<code>ctx.image</code>，权限 <code>image</code>）、只读的应用信息（预设智能体清单）与<strong>语音朗读</strong>（把一段文本交给应用自带 TTS 念出来，引擎与音色跟随「设置 → 语音」，无需权限）。可从文件夹安装插件包（<code>package.json</code> + <code>aikm</code> 清单），移除时可选择连磁盘文件一起删除；插件目录默认 <code>userData/plugins</code>，也可像技能那样指定到自己的文件夹。<strong>插件可以分文件夹存放</strong>：直接放在插件目录下、或按用途放进各级子文件夹都行（会扫描到第 4 层，插件自己的 <code>node_modules</code> / 隐藏目录不会被误认），列表里每个插件都标出它属于哪个文件夹；<strong>新写的插件会自动发现</strong>（约 1 秒内装载并出现在界面上，不必重启，也不必手动扫描），手动点目录栏的<strong>重新扫描</strong>（🔍+）可作为兜底。每个插件还有<strong>数据</strong>管理（🗄️ 图标）：能看到它占用了多少（设置存 localStorage、存档等大文件存本机 OPFS 的 <code>plugins/&lt;插件 id&gt;/</code>、插件私有数据存主进程的 <code>plugins-data/&lt;插件 id&gt;/</code>），列出每一项明细并可逐项或一键清除，占用不为零时列表里会直接显示大小。<strong>点「重新载入」会连界面半边一起重载</strong>（改完插件的界面代码不必重启软件）；界面半边装载失败时，插件卡片上会直接标出「界面半边装载失败」并给出原因，点「重新载入」即可重试。插件与主进程同进程运行、<strong>不受工作区沙箱保护</strong>，启用前会先列出它申请的权限并要求确认。' },
-            'plugin-perms': { name: '权限', desc: '一张表看清你<strong>授予</strong>了插件什么：<strong>声明权限</strong>（权限本身由插件清单决定，这一页改不了它）、<strong>委派同意</strong>、每插件可调的<strong>额度</strong>（并发 × 每小时，默认 1 / 20，上限 3 / 200；旁边是本小时已用，可一键重置）、<strong>工具审批</strong>（声明了 <code>fs</code> / <code>shell</code> 的插件，其工具默认要你确认——点状态图标在「每次询问 / 已允许 / 已拒绝」之间切换，悬停可看到哪些工具会问），以及<strong>工作目录</strong>（被委派智能体在哪个目录里工作：相对路径按它解析、写入也围在它里面，所以只能从你授权过的「可写」文件夹里选，默认 = 知识库根；<strong>它不是沙箱</strong>，命令仍能离开该目录），以及<strong>放宽被委派智能体的工具面</strong>——默认关闭：打开「文件」（<strong>双条件</strong>，还需插件自己声明了 <code>fs</code>）或「MCP」（只含你在 MCP 服务里配置并启用的服务）之后，被委派的智能体才会拿到对应工具。命令执行 / 代码执行 / 技能 / 递归委派<strong>不可放宽</strong>（插件要做这些得自己声明对应权限）。额度与开关都落在主进程、写入前需确认，卸载插件会一并清掉。表头与状态都用图标，悬停看说明。' },
+            'plugin-perms': { name: '权限', desc: '一张表看清你<strong>授予</strong>了插件什么：<strong>声明权限</strong>（权限本身由插件清单决定，这一页改不了它）、<strong>委派同意</strong>、每插件可调的<strong>额度</strong>（并发 × 每小时，默认 1 / 20，上限 200 / 200；每小时可填 0 或点 ∞ 设为无限；旁边是本小时已用，可一键重置）、<strong>工具审批</strong>（声明了 <code>fs</code> / <code>shell</code> 的插件，其工具默认要你确认——点状态图标在「每次询问 / 已允许 / 已拒绝」之间切换，悬停可看到哪些工具会问），以及<strong>工作目录</strong>（被委派智能体在哪个目录里工作：相对路径按它解析、写入也围在它里面，所以只能从你授权过的「可写」文件夹里选，默认 = 知识库根；<strong>它不是沙箱</strong>，命令仍能离开该目录），以及<strong>放宽被委派智能体的工具面</strong>——默认关闭：打开「文件」（<strong>双条件</strong>，还需插件自己声明了 <code>fs</code>）或「MCP」（只含你在 MCP 服务里配置并启用的服务）之后，被委派的智能体才会拿到对应工具。命令执行 / 代码执行 / 技能 / 递归委派<strong>不可放宽</strong>（插件要做这些得自己声明对应权限）。额度与开关都落在主进程、写入前需确认，卸载插件会一并清掉。表头与状态都用图标，悬停看说明。' },
             'plugin-store': { name: '商店', desc: '把<strong>共享目录</strong>当成插件来源：粘贴「协作 → 共享」里那条 <code>remote-fs://ip:port?token=…</code> 地址（或点「本机共享目录」）即可浏览其中的插件并一键安装，无需新协议——共享服务本来就是只读 + 令牌的 HTTP 服务，商店清单由它实时扫描生成（把插件 / 技能文件夹放进共享目录、可分类放子文件夹，不用手写索引文件）。安装前会列出该插件申请的权限并要求确认，装好后可在「管理」里启用 / 重载 / 卸载；同一地址也能加成技能商店的来源。' },
             'plugin-dev': { name: '开发', desc: '写插件的地方：可以把「通用开发指令」整段复制给任意大模型（产出的文件放进插件目录就能启用），也可以<strong>直接在对话里选「插件设计师」</strong>——它已绑定内置 MCP 服务 <code>builtin-plugin-dev</code>（8 个短工具：<code>plugin_dev_host</code> / <code>plugin_dev_constraints</code> / <code>plugin_dev_manifest</code> / <code>plugin_dev_api</code>（界面半边基础）/ <code>plugin_dev_api_caps</code>（界面半边能力：<code>ctx.fs</code> 文件 / <code>ctx.llm</code> 模型 / <code>ctx.agent</code> 委派 / <code>ctx.image</code> 生图 / <code>ctx.tts</code> 语音）/ <code>plugin_dev_api_main</code>（主进程半边）/ <code>plugin_dev_faq</code> / <code>plugin_dev_templates</code>；最小可运行示例用 templates 的 <code>minimal</code> 取），能按需分批拿到这份官方参考（约束 / 清单字段 / 槽位 / 宿主 API / 最小示例）与本机插件目录路径，不需要你手动粘贴，也不会去磁盘上找软件源码。<strong>插件文件夹命名规则在开发指令、模板、硬约束与本 MCP 服务里都会先说明</strong>：文件夹名必须等于清单 <code>aikm.id</code>，且只能用 ASCII 小写 <code>[a-z0-9._-]</code>；带中文 / 大写 / 空格的目录名会被宿主整目录跳过（列表里不出现，管理页会提示），中文写进 <code>aikm.name</code> 与界面文案。页内还有<strong>界面插件 / 设置页签与设置卡片 / 图表 / 工具插件 / 大模型与文件能力</strong>等多个模板（设置页签那节还给了可用的设置分组 id 与设置页 id 清单——分组写错会多出一个同名的「插件」一级菜单）、<strong>排障指令</strong>（把「插件 → 管理 → 日志」里的报错一起粘给模型让它改）、从零开始的最小可运行示例、清单 / 槽位 / API 速查表，以及「如何使用插件」的完整步骤（安装 → 启用确认权限 → 面板 / 工具 / 快捷键在哪看 → 配置 → 排障 → 卸载）。' }
           }
@@ -2645,11 +2645,11 @@ const translations = {
         },
         step2: {
           title: '分母（窗口上限）从哪里来',
-          desc: '优先级为：<strong>来源级手填 &gt; 后端真实探测 &gt; 模型名关键字 &gt; 来源默认值 &gt; 128K</strong>。Ollama / LM Studio 会主动探测已加载实例的真实窗口（例如本地 Ollama 手动设成 64K 也能被读到），不可探测的来源按模型名 / 来源默认值估算。'
+          desc: '优先级为：<strong>来源级手填 &gt; 后端真实探测 &gt; 模型上限 &gt; 模型标称窗口 &gt; 来源默认值 &gt; 128K</strong>。Ollama / LM Studio 会主动探测已加载实例的真实窗口（例如本地 Ollama 手动设成 64K 也能被读到）；DeepSeek 官方模型标称 <strong>1M</strong>（其 /models 不返回窗口字段，因此显示标称值；兼容网关带 context_length 时以探测值为准）；其余不可探测的来源按模型名 / 来源默认值估算。'
         },
         step3: {
-          title: '「模型」页里的两行只读信息',
-          desc: '设置 → <strong>模型 → 来源</strong>。<strong>Ollama 与 LM Studio</strong> 的配置块有一行 <strong>模型加载状态</strong>：网格逐列列出全部模型及其类型（对话 / 视觉 / 嵌入）、是否已加载、<strong>生效上下文</strong>与<strong>模型上限</strong>的对照（Ollama 还会显示 Modelfile 的 num_ctx），并可 <strong>⬇ 加载 / ⏏ 卸载</strong>（Ollama 走 keep_alive，嵌入模型自动改用 /api/embed；LM Studio 走官方 lms 命令）；不限高度、不出滑块，因此这两个来源不再重复显示「上下文窗口」行。其余来源仍有一行只读的 <strong>上下文窗口</strong>显示圆环实际使用的分母；需要重新探测时，点该块底部的 <strong>API 状态</strong> 即可（各来源的刷新按钮已合并到这一处）。<strong>窗口上限覆盖</strong>行仅在你历史上设置过覆盖值时才会出现（届时可 ✕ 清除）。',
+          title: '「模型」页里的上下文窗口（可编辑）',
+          desc: '设置 → <strong>模型 → 来源</strong>。<strong>Ollama 与 LM Studio</strong> 的配置块有一行 <strong>模型加载状态</strong>：网格逐列列出全部模型及其类型（对话 / 视觉 / 嵌入）、是否已加载、<strong>生效上下文</strong>与<strong>模型上限</strong>的对照（Ollama 还会显示 Modelfile 的 num_ctx），并可 <strong>⬇ 加载 / ⏏ 卸载</strong>（Ollama 走 keep_alive，嵌入模型自动改用 /api/embed；LM Studio 走官方 lms 命令）；不限高度、不出滑块，因此这两个来源不再重复显示「上下文窗口」行。其余来源有一行 <strong>上下文窗口</strong>：输入框里就是当前生效的分母，可直接改写为<strong>该来源的手填覆盖</strong>（旁边标注「自动 / 手动」，✕ 清除），留空恢复自动；判定依据与<strong>自动压缩阈值</strong>写在悬停提示里。需要重新探测时，点该块底部的 <strong>API 状态</strong> 即可（各来源的刷新按钮已合并到这一处）。',
         },
         step4: {
           title: '上下文自动压缩',
@@ -2682,10 +2682,10 @@ const translations = {
       },
       webFetchChannels: {
         title: '🕸️ 网页抓取通道（web_fetch）',
-        overview: '智能体、批量任务与工作流共用 <strong>web_fetch</strong> 工具。在 设置 → 工具 → <strong>抓取</strong> 里三条通道可分别开关并<strong>拖动排序</strong>（列表从上到下即回退顺序）：<strong>直接访问 → DeepSeek Fetch → 虚拟浏览器</strong>。任一通道失败（HTTP 403 / 人机验证页 / 超时 / 空内容）就自动试下一个，全部失败才报错；右上角 ↺ 可恢复默认（清空 DeepSeek Key），底部可填 URL 直接<strong>测试当前通道链</strong>。',
+        overview: '智能体、批量任务与工作流共用 <strong>web_fetch</strong> 工具。在 设置 → 工具 → <strong>抓取</strong> 里三条通道可分别开关并<strong>拖动排序</strong>（列表从上到下即回退顺序）：<strong>直接访问 → DeepSeek Fetch → 虚拟浏览器</strong>。任一通道失败（HTTP 403 / 人机验证页 / 超时 / 空内容）就自动试下一个，全部失败才报错；右上角 ↺ 可恢复默认（清空 DeepSeek Key），底部可填 URL 直接<strong>测试当前通道链</strong>。抓到的 HTML 统一转成 <strong>Markdown</strong>（链接保留为 <code>[文字](URL)</code>，相对地址补成绝对 URL），PDF 仍直接解析正文。',
         step1: {
           title: '直接访问（默认开启）',
-          desc: '内置 HTTP 客户端直接请求页面（带浏览器请求头）：HTML 转纯文本、识别 PDF 并用 pdfjs 提取正文，速度最快。遇到 403 / 验证页 / 空内容即算失败，交给下一通道。'
+          desc: '内置 HTTP 客户端直接请求页面（带浏览器请求头）：HTML 转 Markdown（保留链接、标题、列表与表格），识别 PDF 并用 pdfjs 提取正文，速度最快。遇到 403 / 验证页 / 空内容即算失败，交给下一通道。'
         },
         step2: {
           title: 'DeepSeek Fetch（按需开启）',
@@ -2693,7 +2693,7 @@ const translations = {
         },
         step3: {
           title: '虚拟浏览器（仅桌面端）',
-          desc: '用隐藏的 Chromium 窗口加载页面（真实执行 JS，可通过部分反爬 / 人机验证挑战）再提取正文；速度较慢、占用一个窗口。手机 / 网页端没有这条通道，会自动跳过并在全部失败时说明。'
+          desc: '用隐藏的 Chromium 窗口加载页面（真实执行 JS，可通过部分反爬 / 人机验证挑战），再把正文 HTML 转成 Markdown（链接同样保留）；速度较慢、占用一个窗口。手机 / 网页端没有这条通道，会自动跳过并在全部失败时说明。'
         },
         note: {
           title: '📌 使用提示：',
@@ -2887,7 +2887,7 @@ const translations = {
         aiTab: { name: 'AI 会话标签', desc: '智能体打开网页时使用带机器人标记的「AI 会话标签」，与你的手动标签区分；Agent 只操作自己的 AI 标签，不会改写或关闭你手动打开的标签；空闲后自动回收，点一下即接管保留。' },
         bookmarks: { name: '收藏书签', desc: '收藏常用页面，书签落盘到「浏览器设置 → 收藏夹文件夹」目录；<strong>新标签页整页就是收藏夹网格</strong>（文件夹点进去下钻，全部平铺、不折叠），书签面板可快速打开、编辑与删除。' },
         save: { name: '离线保存整页', desc: '把当前页（含图片、样式等资源）整体保存为离线 HTML，便于归档与后续阅读。' },
-        clip: { name: '保存 Markdown 到知识库', desc: '把当前页正文转成干净的 Markdown（保留链接）存进知识库，默认落在根目录的 <code>网页剪藏</code> 子文件夹（可在设置里改），文件带标题 / 来源 / 时间的 YAML 头，可直接在知识管理里阅读、检索与做知识处理。' },
+        clip: { name: '保存 Markdown 到知识库', desc: '把当前页正文转成干净的 Markdown（保留链接）存进知识库，默认落在根目录的 <code>网页剪藏</code> 子文件夹（可在设置里改），文件带标题 / 来源 / 时间的 YAML 头，可直接在知识管理里阅读、检索与做知识库。' },
         panel: { name: '右侧设置停靠栏', desc: '查看当前标签的 AI 状态（浏览 / AI / 操作中），并执行：在系统浏览器打开、保存整页、保存 Markdown 到知识库、回收 AI 会话标签、控制台、缓存清理（清理前会确认）。' }
       },
       steps: {
@@ -2933,7 +2933,7 @@ const translations = {
       mech: { title: '核心机制' },
       step1: {
         title: '先有知识库，再选库学习',
-        desc: '在「知识处理」切片 / 向量化并保存生成 <code>.kb</code> 后，进入「学习」模块，在左下角状态栏选择该知识库即可开始。下拉会扫描 <strong>全部工作区及其子目录</strong>（工作区在 设置 → 通用 → 基础 → 路径设置 里管理），所以 <code>.kb</code> 不在当前工作区也能选到；同名库会补标所在目录。'
+        desc: '在「知识库」切片 / 向量化并保存生成 <code>.kb</code> 后，进入「学习」模块，在左下角状态栏选择该知识库即可开始。下拉会扫描 <strong>全部工作区及其子目录</strong>（工作区在 设置 → 通用 → 基础 → 路径设置 里管理），所以 <code>.kb</code> 不在当前工作区也能选到；同名库会补标所在目录。'
       },
       step2: {
         title: '掌握度与双门控',
@@ -2963,7 +2963,7 @@ const translations = {
       howto: {
         start: {
           q: '怎么开始一次练习？',
-          a: '先在「知识处理」把文档切片 / 向量化并<strong>保存为 <code>.kb</code></strong>，再进入「学习」模块，在<strong>左下角状态栏选库</strong>（下拉会扫描全部工作区，库不在当前工作区也能选到）。然后在地图点某个文件卡片上的练习图标，或到<strong>复习</strong>标签页对到期的对象一键开练。<br><strong>没有知识库也能练</strong>：问题不足时会自动按切片生成「请用自己的话复述本切片要点」的复述题。'
+          a: '先在「知识库」把文档切片 / 向量化并<strong>保存为 <code>.kb</code></strong>，再进入「学习」模块，在<strong>左下角状态栏选库</strong>（下拉会扫描全部工作区，库不在当前工作区也能选到）。然后在地图点某个文件卡片上的练习图标，或到<strong>复习</strong>标签页对到期的对象一键开练。<br><strong>没有知识库也能练</strong>：问题不足时会自动按切片生成「请用自己的话复述本切片要点」的复述题。'
         },
         card: {
           q: '练习卡上三个按钮 / 标签怎么配合？',
@@ -2971,7 +2971,7 @@ const translations = {
       },
       choice: {
         q: '怎么做题才有选项可点（选择题）？',
-        a: '选项由<strong>问题生成</strong>时一并产出，所以在「知识处理」里开开关：<strong>处理配置 → 生成选择题选项</strong>（默认开）。开启后重新推理问题，题库里每条问题会带上 <code>choiceMap</code>（4 个选项 A–D + 正确选项标签），学习模块的练习卡就会显示成<strong>可点的选项</strong>，并按判分结果结算。<br>也可以按策略单独设：<strong>策略配置 → 处理管线 → 问题语义增强</strong> 步骤上勾「生成选择题选项」，步骤级设置优先于全局。<br><strong>只对之后新推理的问题生效</strong>，已有问题不受影响；想让老问题也变选择题，清空问题库重新推理即可。'
+        a: '选项由<strong>问题生成</strong>时一并产出，所以在「知识库」里开开关：<strong>处理配置 → 生成选择题选项</strong>（默认开）。开启后重新推理问题，题库里每条问题会带上 <code>choiceMap</code>（4 个选项 A–D + 正确选项标签），学习模块的练习卡就会显示成<strong>可点的选项</strong>，并按判分结果结算。<br>也可以按策略单独设：<strong>策略配置 → 处理管线 → 问题语义增强</strong> 步骤上勾「生成选择题选项」，步骤级设置优先于全局。<br><strong>只对之后新推理的问题生效</strong>，已有问题不受影响；想让老问题也变选择题，清空问题库重新推理即可。'
       },
       judge: {
         q: '点「检查并揭示答案」是谁在判分？为什么没写答案也不说我错？',
@@ -3889,7 +3889,7 @@ const translations = {
           title: '🔌 Plugins',
           items: {
             plugin: { name: 'Manage', desc: 'Discovery, enable / disable, reload, logs, config, details and removal for local plugins — every row action is an icon button (hover for the hint); the <strong>search box</strong> under the title filters the list by name / plugin id / folder / permission / tool / service / description / status (the counter shows “matched / total”), and hovering the ⚠️ icon next to the title shows the <strong>security notice</strong>. A plugin can add agent tools <strong>and</strong> UI — a main panel (appears in the nav automatically), settings tabs, settings cards and swarm workbench tabs, plus global shortcuts and zh / en text. Two new host capabilities: <strong>model access</strong> (pick source and model, permission <code>llm</code>) and <strong>file access</strong> (pick files / folders, list directories, read text, <strong>read spreadsheets via <code>readSheet</code></strong> (.xlsx/.xls/.csv — the UI half has no SheetJS, so plugins read tables with it), <strong>read raw bytes</strong> via <code>readBase64</code>, extract PDF text and <strong>render PDF pages</strong>, permission <code>fs</code> — limited to paths you picked inside that plugin, for the current run only), plus read-only app info (agent preset list) and <strong>speech</strong> (hand text to the app’s own TTS; engine and voice follow Settings → Voice; no permission needed). Install a plugin package (a <code>package.json</code> plus an <code>aikm</code> manifest) from a folder, and optionally delete its files when removing it. The plugins folder defaults to <code>userData/plugins</code> but can be pointed at your own folder, like skills (changes reload automatically). <strong>Plugins may live in subfolders</strong>: put them directly in the plugins folder or group them by purpose in nested folders (up to 4 levels deep are scanned; a plugin’s own <code>node_modules</code> / hidden folders are never mistaken for plugins), and every row shows which folder it belongs to. <strong>Newly written plugins are discovered automatically</strong> (loaded and shown in the UI within about a second — no restart, no manual scan); the folder bar’s <strong>Rescan</strong> (🔍+) stays as a fallback. Every plugin also has <strong>data</strong> management (🗄️): see how much it uses (settings in localStorage, large files such as saves in the local OPFS <code>plugins/&lt;plugin id&gt;/</code>, and plugin-private data in the main process <code>plugins-data/&lt;plugin id&gt;/</code>), list every entry and delete them one by one or all at once — the list shows the size when it is not zero. <strong>Reload also re-loads the plugin’s UI half</strong> (no restart needed after editing its client code); if the UI half fails to load, the row is flagged “UI half failed” with the reason and Reload retries it. Plugins run in the main process and are <strong>not confined by the workspace sandbox</strong>; the permissions they request are listed before enabling.' },
-            'plugin-perms': { name: 'Permissions', desc: 'One table showing what you have <strong>granted</strong> each plugin: its <strong>declared permissions</strong> (the manifest decides those — this page cannot change them), <strong>delegation consent</strong>, per-plugin <strong>budget</strong> (concurrency × per hour, default 1 / 20, ceilings 3 / 200, with this hour’s usage beside it and a one-click reset), <strong>tool approval</strong> (plugins declaring <code>fs</code> / <code>shell</code> ask before their tools run — click the state icon to cycle ask / allowed / denied; hover to see which tools ask), and <strong>working directory</strong> (where the delegated agent runs: relative paths resolve against it and writes stay inside it, so it can only be one of the folders you granted as writable — default = KB root; <strong>it is not a sandbox</strong>, commands can still leave it), and <strong>relaxation of the delegated agent’s tool surface</strong> — off by default: only after turning on “file” (<strong>two conditions</strong>: this toggle plus the plugin declaring <code>fs</code>) or “MCP” (limited to the servers you configured and enabled) will the delegated agent receive those tools. Shell / code execution / skills and recursive delegation can <strong>never</strong> be relaxed here (a plugin must declare those permissions itself). Limits and switches live in the main process, every write asks for confirmation, and uninstalling a plugin clears them. Headers and states are icons — hover for the label.' },
+            'plugin-perms': { name: 'Permissions', desc: 'One table showing what you have <strong>granted</strong> each plugin: its <strong>declared permissions</strong> (the manifest decides those — this page cannot change them), <strong>delegation consent</strong>, per-plugin <strong>budget</strong> (concurrency × per hour, default 1 / 20, ceilings 200 / 200, with this hour’s usage beside it and a one-click reset), <strong>tool approval</strong> (plugins declaring <code>fs</code> / <code>shell</code> ask before their tools run — click the state icon to cycle ask / allowed / denied; hover to see which tools ask), and <strong>working directory</strong> (where the delegated agent runs: relative paths resolve against it and writes stay inside it, so it can only be one of the folders you granted as writable — default = KB root; <strong>it is not a sandbox</strong>, commands can still leave it), and <strong>relaxation of the delegated agent’s tool surface</strong> — off by default: only after turning on “file” (<strong>two conditions</strong>: this toggle plus the plugin declaring <code>fs</code>) or “MCP” (limited to the servers you configured and enabled) will the delegated agent receive those tools. Shell / code execution / skills and recursive delegation can <strong>never</strong> be relaxed here (a plugin must declare those permissions itself). Limits and switches live in the main process, every write asks for confirmation, and uninstalling a plugin clears them. Headers and states are icons — hover for the label.' },
             'plugin-store': { name: 'Store', desc: 'Use a <strong>shared folder</strong> as a plugin source: paste the <code>remote-fs://ip:port?token=…</code> address shown under Collaboration → Share (or click “Local share”) to browse and one-click install the plugins inside. No new protocol involved — the share is already a read-only, token-guarded HTTP service, and the store index is scanned on the fly (drop plugin / skill folders into the shared folder, category subfolders included, no hand-written index needed). Installing always lists the requested permissions first; afterwards enable / reload / remove it under Manage. The same address also works as a skill-store source.' },
             'plugin-dev': { name: 'Develop', desc: 'Where you write plugins: copy the general development prompt to any model and drop the returned files into the plugins folder, or simply pick the <strong>“Plugin development agent”</strong> in chat — it is bound to the built-in MCP service <code>builtin-plugin-dev</code> (7 short tools: <code>plugin_dev_host</code> / <code>plugin_dev_constraints</code> / <code>plugin_dev_manifest</code> / <code>plugin_dev_api</code> (UI half) / <code>plugin_dev_api_main</code> (main-process half) / <code>plugin_dev_faq</code> / <code>plugin_dev_templates</code>; fetch the minimal runnable example with the <code>minimal</code> key), which fetches this same official reference (constraints, manifest fields, slots, host API, minimal example) plus your plugins-folder path in small on-demand pieces, with no manual pasting and no hunting for the app’s source on disk. <strong>The folder-naming rule is stated up front</strong> in the dev prompt, the templates, the hard constraints and this MCP service: the folder name must equal the manifest’s <code>aikm.id</code> and be ASCII lowercase <code>[a-z0-9._-]</code>; a folder named in Chinese, with uppercase letters or spaces is skipped entirely (it will not appear in the list — the manager says so), so put Chinese in <code>aikm.name</code> and the UI copy. Also includes UI-plugin / settings-tab-and-card / chart / tool / model-and-file templates (the settings section lists the valid settings-group and settings-page ids — a wrong group id adds a second top-level “Plugins” menu), a debugging prompt (paste the error from Plugins → Manage → Logs so the model can fix it), a minimal runnable example, a manifest / slot / API cheat sheet, and the full “how to use plugins” walkthrough (install → confirm permissions on enable → where panels, tools and shortcuts appear → config → troubleshooting → removal).' }
           }
@@ -3925,11 +3925,11 @@ const translations = {
         },
         step2: {
           title: 'Where the denominator comes from',
-          desc: 'Priority: <strong>manual per-provider value &gt; real backend probe &gt; model-name keyword &gt; provider default &gt; 128K</strong>. Ollama / LM Studio actively probe the real window of the loaded instance (for example a local Ollama manually set to 64K is detected); providers that cannot be probed fall back to the model-name / provider default estimation.'
+          desc: 'Priority: <strong>manual per-provider value &gt; real backend probe &gt; model max &gt; model rated window &gt; provider default &gt; 128K</strong>. Ollama / LM Studio actively probe the real window of the loaded instance (for example a local Ollama manually set to 64K is detected); official DeepSeek models are rated at <strong>1M</strong> (its /models returns no window field, so the rated value is shown; a compatible gateway that reports context_length wins over it); other providers that cannot be probed fall back to the model-name / provider default estimation.'
         },
         step3: {
-          title: 'The two read-only rows under “LLM”',
-          desc: 'In Settings → General → <strong>LLM</strong>, the <strong>Ollama and LM Studio</strong> blocks have a <strong>Loaded Models</strong> row: a grid listing every model with its type (chat / vision / embedding), loaded state, and an <strong>effective-context vs model-max</strong> comparison (Ollama also shows the Modelfile num_ctx), plus <strong>⬇ load / ⏏ unload</strong> buttons (Ollama via keep_alive, falling back to /api/embed for embedding models; LM Studio via the official lms CLI); it grows freely with no scrollbar, so these two sources no longer duplicate a “Context window” row. Other providers keep a read-only <strong>Context window</strong> row showing the denominator the ring actually uses; to re-probe, click <strong>API Status</strong> at the bottom of that block (per-row refresh buttons were merged into it). The <strong>Window override</strong> row appears only when you have a historical override set (then you can ✕ clear it).'
+          title: 'The Context window row under “LLM” (editable)',
+          desc: 'In Settings → General → <strong>LLM</strong>, the <strong>Ollama and LM Studio</strong> blocks have a <strong>Loaded Models</strong> row: a grid listing every model with its type (chat / vision / embedding), loaded state, and an <strong>effective-context vs model-max</strong> comparison (Ollama also shows the Modelfile num_ctx), plus <strong>⬇ load / ⏏ unload</strong> buttons (Ollama via keep_alive, falling back to /api/embed for embedding models; LM Studio via the official lms CLI); it grows freely with no scrollbar, so these two sources no longer duplicate a “Context window” row. Other providers have an editable <strong>Context window</strong> row whose input shows the effective denominator: type another number to override that provider (marked auto / manual, ✕ clears), clear it to return to auto; the reason and the <strong>auto-compaction threshold</strong> are in the tooltip. To re-probe, click <strong>API Status</strong> at the bottom of that block (per-row refresh buttons were merged into it).'
         },
         step4: {
           title: 'Automatic context compaction',
@@ -3962,10 +3962,10 @@ const translations = {
       },
       webFetchChannels: {
         title: '🕸️ Web Fetch Channels (web_fetch)',
-        overview: 'Agents, batch runs and workflows share the <strong>web_fetch</strong> tool. Under Settings → Tools → <strong>Fetch</strong> the three channels can be toggled and <strong>dragged into order</strong> (top to bottom = fallback order): <strong>direct fetch → DeepSeek Fetch → virtual browser</strong>. When one fails (HTTP 403 / challenge page / timeout / empty body) the next is tried automatically, and an error is returned only when all fail. The ↺ button restores defaults (clears the DeepSeek key); the URL box at the bottom <strong>tests the current chain</strong>.',
+        overview: 'Agents, batch runs and workflows share the <strong>web_fetch</strong> tool. Under Settings → Tools → <strong>Fetch</strong> the three channels can be toggled and <strong>dragged into order</strong> (top to bottom = fallback order): <strong>direct fetch → DeepSeek Fetch → virtual browser</strong>. When one fails (HTTP 403 / challenge page / timeout / empty body) the next is tried automatically, and an error is returned only when all fail. The ↺ button restores defaults (clears the DeepSeek key); the URL box at the bottom <strong>tests the current chain</strong>. Fetched HTML is converted to <strong>Markdown</strong> (links kept as <code>[text](URL)</code>, relative URLs made absolute); PDFs are still parsed directly.',
         step1: {
           title: 'Direct fetch (on by default)',
-          desc: 'Requests the page with the built-in HTTP client (browser headers): HTML becomes plain text, PDFs are detected and parsed with pdfjs. Fastest. A 403 / challenge page / empty body counts as a failure and falls through to the next channel.'
+          desc: 'Requests the page with the built-in HTTP client (browser headers): HTML becomes Markdown (links, headings, lists and tables preserved), PDFs are detected and parsed with pdfjs. Fastest. A 403 / challenge page / empty body counts as a failure and falls through to the next channel.'
         },
         step2: {
           title: 'DeepSeek Fetch (enable when needed)',
@@ -3973,7 +3973,7 @@ const translations = {
         },
         step3: {
           title: 'Virtual browser (desktop only)',
-          desc: 'Loads the page in a hidden Chromium window (runs JavaScript, gets past some bot challenges) and extracts the text. Slower and uses a window. Mobile / web has no such channel, so it is skipped automatically and mentioned when everything fails.'
+          desc: 'Loads the page in a hidden Chromium window (runs JavaScript, gets past some bot challenges), then converts the body HTML to Markdown (links preserved too). Slower and uses a window. Mobile / web has no such channel, so it is skipped automatically and mentioned when everything fails.'
         },
         note: {
           title: '📌 Tip:',

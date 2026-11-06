@@ -396,6 +396,32 @@ async function fillOllamaModelDetails(base: string, models: OllamaModelInfo[], c
 }
 
 /**
+ * 上下文窗口探测的超时（毫秒）。
+ *
+ * 探测都在**打开设置页 / 切模型**时自动触发，而用户填的地址可能是不可达的内网网关：
+ * 没有超时时 fetch 会挂到系统级超时（几十秒），设置页看起来像"卡死"。
+ * 只影响探测这一个只读 GET，不影响真正的聊天请求（那边有自己的重试与超时策略）。
+ *
+ * 本机地址给 8 秒（本地 Ollama / LM Studio 正常是毫秒级）；远程网关给 20 秒，
+ * 避免慢网络下把一次成功的探测误判成"读不到"（误判会退回较小的来源默认窗口，导致过早压缩）。
+ */
+const CONTEXT_PROBE_TIMEOUT_MS = 8_000
+const CONTEXT_PROBE_TIMEOUT_REMOTE_MS = 20_000
+
+/** 带超时的探测请求：统一走 resolveApiUrl（网页/访客需要代理），失败时抛 AbortError 由调用方吞掉 */
+async function probeFetch(originalUrl: string, init: RequestInit = {}): Promise<Response> {
+    const local = /\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(originalUrl)
+    const timeout = local ? CONTEXT_PROBE_TIMEOUT_MS : CONTEXT_PROBE_TIMEOUT_REMOTE_MS
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeout)
+    try {
+        return await fetch(resolveApiUrl(originalUrl), { ...init, signal: controller.signal })
+    } finally {
+        clearTimeout(timer)
+    }
+}
+
+/**
  * Ollama 实际生效的上下文窗口，按「真实生效程度」依次探测：
  *  1) /api/ps 中已加载实例的 context_length = 当前真正生效的 num_ctx（from: loaded）。
  *     用户在 Ollama 侧的所有手动设置（桌面端「上下文长度」、环境变量 OLLAMA_CONTEXT_LENGTH、
@@ -409,7 +435,7 @@ async function fillOllamaModelDetails(base: string, models: OllamaModelInfo[], c
 async function fetchOllamaContextWindow(config: any, model: string): Promise<ContextWindowProbe | null> {
     const base = stripTrailingSlash(String((config && config.model_url) || 'http://127.0.0.1:11434'))
     try {
-        const psRes = await fetch(resolveApiUrl(`${base}/api/ps`))
+        const psRes = await probeFetch(`${base}/api/ps`)
         if (psRes.ok) {
             const ps = await psRes.json()
             const hit = ((ps && ps.models) || []).find((m: any) => sameModelName(m && (m.name || m.model), model))
@@ -417,7 +443,7 @@ async function fetchOllamaContextWindow(config: any, model: string): Promise<Con
             if (typeof loaded === 'number' && loaded > 0) return { limit: loaded, from: 'loaded' }
         }
     } catch { /* /api/ps 不可用（旧版本/未加载）：继续向下探测 */ }
-    const res = await fetch(resolveApiUrl(`${base}/api/show`), {
+    const res = await probeFetch(`${base}/api/show`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model, stream: false }),
@@ -450,28 +476,43 @@ async function fetchOllamaContextWindow(config: any, model: string): Promise<Con
     const base = stripTrailingSlash(String((config && config.base_url) || ''))
     if (!base) return null
     try {
-        const res = await fetch(resolveApiUrl(`${base}/api/v0/models`))
-        if (!res.ok) return null
-        const data = await res.json()
-        const list = (data && (data.data || data.models)) || []
-        const hit = list.find((m: any) => sameModelName(m && (m.id || m.model || m.name), model))
-        const loaded = hit && Number(hit.loaded_context_length || 0)
-        if (loaded > 0) return { limit: loaded, from: 'loaded' }
-        const max = hit && Number(hit.max_context_length || 0)
-        return max > 0 ? { limit: max, from: 'model-max' } : null
+        const res = await probeFetch(`${base}/api/v0/models`)
+        if (res.ok) {
+            const data = await res.json()
+            const list = (data && (data.data || data.models)) || []
+            const hit = list.find((m: any) => sameModelName(m && (m.id || m.model || m.name), model))
+            const loaded = hit && Number(hit.loaded_context_length || 0)
+            if (loaded > 0) return { limit: loaded, from: 'loaded' }
+            const max = hit && Number(hit.max_context_length || 0)
+            if (max > 0) return { limit: max, from: 'model-max' }
+        }
     } catch {
-        return null
+        /* 旧版 LM Studio 没有 /api/v0/models，或服务没起：继续走兼容端点 */
     }
+    // 兜底：原生端点不可用时，OpenAI 兼容 /v1/models 在部分版本里也会带 max_context_length
+    return await fetchOpenAICompatContextWindow({ base_url: base }, model)
 }
 
 /**
- * OpenAI 兼容 / 自定义来源的上下文窗口探测：
+ * OpenAI 兼容来源（自定义 / GPUStack / DeepSeek / GLM / Kimi / MiMo）的上下文窗口探测：
  * 1) 先尝试 LM Studio 原生 /api/v0/models（同一端口的自定义来源常见）→ loaded/max_context_length；
  * 2) 再尝试 /v1/models（部分本地网关会返回 max_context_length / context_length）。
- * 读不到返回 null，由设置页允许用户手填覆盖。
+ * 读不到返回 null：调用方按「模型标称窗口 / 来源默认值」展示，设置页也允许用户手填覆盖。
+ *
+ * 兼容的端点形态（不同网关的 /models 位置不一致，逐个试）：
+ *   `<base>/v1/models`、`<base>/models`，以及 base 末尾是版本段（如 GLM 的 /api/paas/v4）时的 `<base>/models`；
+ *   base 是裸地址时还会试 `<origin>/api/v0/models`（LM Studio 原生端点）。
+ * 兼容的窗口字段（各家命名不同）：loaded_context_length / max_context_length / context_length /
+ *   context_window / max_input_tokens / max_model_len（vLLM）/ n_ctx_train（llama.cpp）/ model_max_length（HF）。
+ *
+ * ⚠️ DeepSeek / GLM / Kimi / MiMo 官方 /models 目前只返回模型 id（没有窗口字段），所以官方来源这里正常
+ * 会返回 null；上层（src/lib/contextUsage.ts）再按模型标称窗口兜底。走兼容网关时若带窗口字段，
+ * 这里读到的真实值优先级高于标称窗口。
  */
 async function fetchOpenAICompatContextWindow(config: any, model: string): Promise<ContextWindowProbe | null> {
-    const raw = stripTrailingSlash(String((config && (config.api_url || config.base_url || config.endpoint)) || ''))
+    const rawFull = stripTrailingSlash(String((config && (config.api_url || config.base_url || config.endpoint)) || ''))
+    // Azure 风格的端点常带 `?api-version=...`：探测 /models 时要先把查询串去掉
+    const raw = rawFull.split(/[?#]/)[0]
     if (!raw) return null
     let base = raw
     for (const suf of ['/v1/chat/completions', '/chat/completions', '/v1/completions', '/completions', '/v1/responses', '/responses', '/v1/messages', '/messages']) {
@@ -479,13 +520,17 @@ async function fetchOpenAICompatContextWindow(config: any, model: string): Promi
     }
     const origin = base.replace(/\/v1(?:-openai)?$/, '')
     const apiKey = String((config && config.api_key) || '')
-    const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+    // OpenAI 兼容网关用 Bearer；Azure 风格的自定义网关读 `api-key`。两个都带，互不影响。
+    const headers: Record<string, string> = apiKey
+        ? { Authorization: `Bearer ${apiKey}`, 'api-key': apiKey }
+        : {}
     const pickLimit = (m: any): { limit: number; loaded: boolean } | null => {
         const loaded = Number(m?.loaded_context_length || m?.context_length_loaded || 0)
         if (loaded > 0) return { limit: loaded, loaded: true }
         const candidates = [
             m?.max_context_length, m?.context_length, m?.max_context, m?.context_window,
-            m?.meta?.n_ctx_train, m?.meta?.n_ctx, m?.meta?.context_length,
+            m?.max_input_tokens, m?.model_max_length, m?.max_model_len,
+            m?.meta?.n_ctx_train, m?.meta?.n_ctx, m?.meta?.context_length, m?.meta?.max_model_len,
         ]
         for (const v of candidates) {
             const n = Number(v || 0)
@@ -493,17 +538,33 @@ async function fetchOpenAICompatContextWindow(config: any, model: string): Promi
         }
         return null
     }
+    /**
+     * 模型名匹配：除了完全一致，还兼容「带发布者前缀」的 id
+     * （LM Studio / vLLM 的 id 可能是 `qwen/qwen3-8b`，配置里常只写 `qwen3-8b`）。
+     */
+    const sameModel = (id: any): boolean => {
+        const norm = (s: any) => String(s || '').trim().toLowerCase().replace(/:(latest|default)$/, '')
+        const a = norm(id)
+        const b = norm(model)
+        if (!a || !b) return false
+        if (a === b) return true
+        const tail = (x: string) => x.split('/').filter(Boolean).pop() || x
+        return tail(a) === tail(b)
+    }
     const urls: string[] = []
     if (origin && origin !== base) urls.push(`${origin}/api/v0/models`)
     if (base.endsWith('/v1') || base.endsWith('/v1-openai')) urls.push(`${base}/models`)
     else urls.push(`${base}/v1/models`, `${base}/models`)
     for (const url of [...new Set(urls)]) {
         try {
-            const res = await fetch(resolveApiUrl(url), { headers })
+            const res = await probeFetch(url, { headers })
             if (!res.ok) continue
             const data = await res.json()
-            const list = (data && (data.data || data.models)) || []
-            const hit = list.find((m: any) => sameModelName(m && (m.id || m.model || m.name), model))
+            // 各家 /models 形状：OpenAI {data:[…]}、LM Studio {models:[…]}、GPUStack 管理接口 {items:[…]}、裸数组
+            const list = Array.isArray(data)
+                ? data
+                : ((data && (data.data || data.models || data.items)) || [])
+            const hit = list.find((m: any) => sameModel(m && (m.id || m.model || m.name)))
             if (!hit) continue
             const p = pickLimit(hit)
             if (p) return { limit: p.limit, from: p.loaded ? 'loaded' : 'model-max' }
@@ -551,25 +612,31 @@ export class AIUtils {
     /**
      * 获取模型真实上下文窗口（tokens）——带来源信息，供上层按可信度排序（见 src/lib/contextUsage.ts）：
      *  - Ollama → /api/ps 已加载实例的 context_length（loaded）> Modelfile num_ctx（model-file）> 模型上限（model-max）；
-     *  - LM Studio → /api/v0/models 的 loaded_context_length（loaded）> max_context_length（model-max）；
+     *  - LM Studio → /api/v0/models 的 loaded_context_length（loaded）> max_context_length（model-max），
+     *    原生端点缺失时回退 OpenAI 兼容 /models；
+     *  - DeepSeek / GLM / Kimi / MiMo / GPUStack / 自定义 → OpenAI 兼容 /models（官方只返回 id → null；
+     *    兼容网关若带 context_length 等字段则采用，source=model-max）；
      *  - Google → /models 的 inputTokenLimit（model-max）；
-     *  - 其余来源无法读取 → null
+     *  - OpenAI / Azure / Anthropic 官方不提供窗口字段（Azure 的 model 还是部署名）→ null，按标称/默认表。
      */
     static async fetchModelContextWindowDetail(provider: string, config: any, model: string): Promise<ContextWindowProbe | null> {
         if (!provider || !model) return null
+        // 历史别名（DeepSeek Responses 已合并为单来源 + api_style）也要能走对分支
+        const p = String(provider) === 'deepseek-responses' ? 'deepseek' : String(provider)
         try {
-            if (provider === 'ollama') return await fetchOllamaContextWindow(config, model)
-            if (provider === 'lmstudio') return await fetchLmStudioContextWindow(config, model)
-            if (provider === 'custom' || provider === 'gpustack') {
+            if (p === 'ollama') return await fetchOllamaContextWindow(config, model)
+            if (p === 'lmstudio') return await fetchLmStudioContextWindow(config, model)
+            if (p === 'custom' || p === 'gpustack' || p === 'deepseek'
+                || p === 'glm' || p === 'kimi' || p === 'mimo') {
                 return await fetchOpenAICompatContextWindow(config, model)
             }
-            if (provider === 'google') {
+            if (p === 'google') {
                 const base = 'https://generativelanguage.googleapis.com'
                 const key = (config && config.api_key) || ''
-                const response = await fetch(resolveApiUrl(`${base}/v1beta/models?key=${encodeURIComponent(key)}`))
+                const response = await probeFetch(`${base}/v1beta/models?key=${encodeURIComponent(key)}`)
                 if (!response.ok) return null
                 const data = await response.json()
-                const found = ((data && data.models) || []).find((m: any) => m && m.name === `models/${model}`)
+                const found = ((data && data.models) || []).find((m: any) => m && (m.name === `models/${model}` || m.name === model))
                 const limit = found && found.inputTokenLimit
                 return typeof limit === 'number' && limit > 0 ? { limit, from: 'model-max' } : null
             }

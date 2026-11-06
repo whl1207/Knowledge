@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import * as fs from 'node:fs'
 import { logInfo } from './log'
 import { registerOwnedAgent, unregisterOwnedAgent } from './plugin-owned-agents'
+import { hasPluginWaterfall, runPluginWaterfall } from './plugin-waterfall'
 import { AIUtils } from '@/shared/ai-core'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { boundToolResult, buildSpillPreview, shouldSpill } from '@/shared/toolResultBudget'
@@ -103,6 +104,20 @@ const extraSubscribers = new Set<(ev: AgentEvent) => void>()
 /** 设置 agent 事件广播（main/index.ts 在 app ready 时注入） */
 export function setAgentBroadcast(fn: ((ev: AgentEvent) => void) | null): void {
   broadcast = fn
+}
+
+/**
+ * 新建会话时的宿主钩子（插件宿主注入）。
+ *
+ * 为什么不用事件总线：`createAgent` 在 agent 注册前就该发 `session/created`，
+ * 而 agent 事件广播带的是"已存在的 agent id"；用钩子避免 agent-loop → plugin-host 的循环依赖。
+ */
+let sessionCreatedListener: ((info: { sessionId: string; cwd?: string; agentPreset?: string }) => void) | null = null
+
+export function setSessionCreatedListener(
+  fn: ((info: { sessionId: string; cwd?: string; agentPreset?: string }) => void) | null,
+): void {
+  sessionCreatedListener = fn
 }
 
 /**
@@ -2507,12 +2522,37 @@ export function createAgent(options: AgentOptions): AgentControl {
         attachAgent(resumed, options.parentId)
         return resumed
       }
+    } else if (!options.resume && !sessionLog.exists(requested)) {
+      /*
+       * 调用方给了 id、又没有旧日志：**就用这个 id 新建**。
+       *
+       * 为什么必须这样：DSH 插件把微信会话 id 当稳定键（绑定、事件流、/list 全按它查）。
+       * 旧行为会静默生成 `agent-<uuid>`，于是插件看到的 sessionId 与事件里的 agentId 对不上：
+       * 消息能进 agent、推理也完成了，但流式事件因为没有匹配的绑定而被丢掉——微信那头就没回复。
+       */
+      const created = new AgentImpl(options, { id: requested })
+      attachAgent(created, options.parentId)
+      notifySessionCreated(created, options)
+      return created
     }
   }
   // 新建会话：即使调用方传了 sessionId，也不能把新事件追加到旧日志（签名不兼容）
   const agent = new AgentImpl(options)
   attachAgent(agent, options.parentId)
+  notifySessionCreated(agent, options)
   return agent
+}
+
+/** 新建会话后的宿主钩子（`session/created`）；异常不影响创建 */
+function notifySessionCreated(agent: AgentControl, options: AgentOptions): void {
+  try {
+    sessionCreatedListener?.({
+      sessionId: String(agent.id),
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+    })
+  } catch (e) {
+    console.error('[agent-loop] session/created 监听器异常:', e)
+  }
 }
 
 /** 按 id 取 agent */
@@ -2593,6 +2633,24 @@ const pendingQuestions = new Map<string, Map<string, PendingQuestion>>()
  * @param digest 纯文本摘要（事件载荷的 question 字段）
  */
 export function requestQuestions(agentId: string, questions: AskUserQuestion[], digest?: string): Promise<AskUserAnswer[]> {
+  // 有插件认领（微信 / 远程桥）就先走拦截链；没有就走原来的渲染层提问
+  if (!hasPluginWaterfall('user-questions/request')) {
+    return requestQuestionsDirect(agentId, questions, digest)
+  }
+  return runPluginWaterfall<AskUserAnswer[]>(
+    'user-questions/request',
+    { agentId, questions, ...(digest ? { digest } : {}) },
+    () => requestQuestionsDirect(agentId, questions, digest),
+  )
+}
+
+/**
+ * 直接向渲染层提问（不经过插件拦截链）。
+ *
+ * 单独导出是为了让插件服务（`ctx.userQuestions.ask`）在 fallback 里调用它——
+ * 若回调 `requestQuestions` 会再次进入拦截链，形成 "next() → 再拦截" 的递归。
+ */
+export function requestQuestionsDirect(agentId: string, questions: AskUserQuestion[], digest?: string): Promise<AskUserAnswer[]> {
   return new Promise<AskUserAnswer[]>((resolve, reject) => {
     const askId = `ask-${randomUUID()}`
     let map = pendingQuestions.get(agentId)

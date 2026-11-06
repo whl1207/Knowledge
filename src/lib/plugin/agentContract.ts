@@ -44,10 +44,10 @@ export const AGENT_RUN_LIMITS = {
   maxSteps: { default: 20, min: 1, max: 60 },
   maxTokens: { default: 30_000, min: 1_000, max: 200_000, enforced: false as boolean },
   maxDepth: { default: 1, min: 0, max: 2 },
-  /** 每个插件同时在飞的委派数 */
-  concurrency: { default: 1, max: 3 },
-  /** 每个插件每小时可发起的委派数（本窗口内计数） */
-  callsPerHour: { default: 20, max: 200 },
+  /** 每个插件同时在飞的委派数（默认 1，上限 200） */
+  concurrency: { default: 1, max: 200 },
+  /** 每个插件每小时可发起的委派数（本窗口内计数）；**0 = 不限制** */
+  callsPerHour: { default: 20, max: 200, unlimited: 0 },
   windowMs: 60 * 60_000,
 } as const
 
@@ -147,8 +147,9 @@ export const DEFAULT_PLUGIN_AGENT_LIMITS: Readonly<PluginAgentLimits> = Object.f
 })
 
 /**
- * 把面板 / 存档里读到的额度钳到合法区间。非法或非正数**回落默认值**（不是回落最小值）：
+ * 把面板 / 存档里读到的额度钳到合法区间。非法值**回落默认值**（不是回落最小值）：
  * 坏存档不该把插件悄悄锁成 1 次/小时。天花板见 `AGENT_RUN_LIMITS`。
+ * `callsPerHour = 0` 是合法的「无限」，不会被回落成 20。
  */
 export function normalizePluginAgentLimits(raw: unknown): PluginAgentLimits {
   const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
@@ -157,9 +158,15 @@ export function normalizePluginAgentLimits(raw: unknown): PluginAgentLimits {
     if (!Number.isFinite(n) || n <= 0) return dflt
     return Math.max(1, Math.min(max, n))
   }
+  // 每小时次数允许 0（= 无限），这是唯一允许非正数的额度；负数/非法值仍回落默认
+  const callsPerHour = (() => {
+    const n = Math.floor(Number(src.callsPerHour))
+    if (!Number.isFinite(n) || n < 0) return DEFAULT_PLUGIN_AGENT_LIMITS.callsPerHour
+    return Math.min(AGENT_RUN_LIMITS.callsPerHour.max, n)
+  })()
   return {
     concurrency: clamp(src.concurrency, AGENT_RUN_LIMITS.concurrency.max, DEFAULT_PLUGIN_AGENT_LIMITS.concurrency),
-    callsPerHour: clamp(src.callsPerHour, AGENT_RUN_LIMITS.callsPerHour.max, DEFAULT_PLUGIN_AGENT_LIMITS.callsPerHour),
+    callsPerHour,
   }
 }
 
@@ -383,6 +390,14 @@ export interface AgentRunResult {
   turn: number
   /** v1：事后报告（主进程尚不做硬性 token 拦截，见 AGENT_RUN_LIMITS.maxTokens.enforced） */
   usage?: { inputTokens: number; outputTokens: number }
+  /**
+   * 被宿主裁掉的工具（D5 工具面）：插件申请了、但按权限天花板没放行的名字。
+   *
+   * 为什么要回给插件：典型场景是「申请了 read_image，但用户还没在 设置 → 插件 → 权限
+   * 打开文件放宽」——模型看不到这个工具，就会自己编一个失败原因（例如"图片路径不可用"），
+   * 插件只能照转，用户完全不知道要去开开关。把 denied 明确回传，插件才能给出可执行的提示。
+   */
+  deniedTools?: string[]
 }
 
 const TERMINATIONS: readonly AgentRunTermination[] = [
@@ -443,6 +458,7 @@ export function normalizeAgentRunResult(raw: {
   cancelled?: unknown
   turn?: unknown
   usage?: unknown
+  deniedTools?: unknown
 }): AgentRunResult {
   let termination: AgentRunTermination
   if (isAgentRunTermination(raw.termination)) {
@@ -465,6 +481,10 @@ export function normalizeAgentRunResult(raw: {
     turn: Number.isFinite(Number(raw.turn)) ? Math.max(0, Math.floor(Number(raw.turn))) : 0,
   }
   if (typeof raw.error === 'string' && raw.error.trim() !== '') result.error = raw.error
+  if (Array.isArray(raw.deniedTools)) {
+    const denied = raw.deniedTools.map((x) => String(x || '').trim()).filter(Boolean)
+    if (denied.length) result.deniedTools = denied
+  }
   const usage = raw.usage as { inputTokens?: unknown; outputTokens?: unknown } | undefined
   if (usage && Number.isFinite(Number(usage.inputTokens)) && Number.isFinite(Number(usage.outputTokens))) {
     result.usage = { inputTokens: Number(usage.inputTokens), outputTokens: Number(usage.outputTokens) }
@@ -494,6 +514,8 @@ export function canStartCall(
   windowMs: number = AGENT_RUN_LIMITS.windowMs,
 ): { ok: boolean; used: number; limit: number; timestamps: number[] } {
   const kept = pruneCallWindow(timestamps, now, windowMs)
+  // limit <= 0 是「无限」：只裁剪窗口、不拒绝（used 仍回报，便于界面显示频率）
+  if (!(limit > 0)) return { ok: true, used: kept.length, limit: 0, timestamps: kept }
   return { ok: kept.length < limit, used: kept.length, limit, timestamps: kept }
 }
 

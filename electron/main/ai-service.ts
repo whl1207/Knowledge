@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import * as fs from 'node:fs'
 import { AIUtils, type ContextWindowProbe } from '@/shared/ai-core'
 import { sessionLog } from './session-log'
+import { credentialStore } from './credentials'
 import { recordUsage } from './usage-log'
 import type { SessionEvent, DerivedMessage, SessionLogIntegrity } from '@/types/session-log'
 
@@ -617,11 +618,24 @@ export async function check(payload: { provider: string; config: any; apiStyle?:
   }
 }
 
-/** 读取模型真实上下文窗口（tokens）：Ollama /api/show、Google /models 可读；主进程直接 fetch（渲染进程有 CORS/CSP 限制） */
+/**
+ * 探测用配置：把 `apiKeyRef`（凭据名）解析成主进程受保护的明文。
+ * DeepSeek 等云端来源的 /models 需要鉴权，只配了凭据引用时也能读；内联 api_key 原样保留。
+ * 凭据不存在时退回原配置（探测失败由上层按标称窗口兜底，不影响设置页可用）。
+ */
+function withResolvedCredential(config: any): any {
+  if (!config || typeof config !== 'object') return config
+  const ref = config.apiKeyRef
+  if (typeof ref !== 'string' || !ref.trim() || config.api_key) return config
+  const value = credentialStore.resolveValue(ref.trim())
+  return value ? { ...config, api_key: value } : config
+}
+
+/** 读取模型真实上下文窗口（tokens）：Ollama /api/show、Google /models、DeepSeek /models 可读；主进程直接 fetch（渲染进程有 CORS/CSP 限制） */
 export async function fetchModelContextWindow(payload: { provider: string; config: any; model: string }): Promise<number | null> {
   const { provider, config, model } = payload || {}
   try {
-    return await AIUtils.fetchModelContextWindow(provider, config || {}, model)
+    return await AIUtils.fetchModelContextWindow(provider, withResolvedCredential(config || {}), model)
   } catch (e: any) {
     console.error('[ai] 读取模型上下文窗口失败:', e)
     return null
@@ -635,7 +649,7 @@ export async function fetchModelContextWindow(payload: { provider: string; confi
 export async function fetchModelContextWindowDetail(payload: { provider: string; config: any; model: string }): Promise<ContextWindowProbe | null> {
   const { provider, config, model } = payload || {}
   try {
-    return await AIUtils.fetchModelContextWindowDetail(provider, config || {}, model)
+    return await AIUtils.fetchModelContextWindowDetail(provider, withResolvedCredential(config || {}), model)
   } catch (e: any) {
     console.error('[ai] 读取模型上下文窗口失败:', e)
     return null

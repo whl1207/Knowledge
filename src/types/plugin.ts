@@ -18,6 +18,7 @@ import type { FileViewerDecl } from '@/shared/fileViewers'
 import type { ToolDefinition, ToolRegistryEventMap } from '@/types/tool'
 import type { AgentPluginEventMap } from '@/types/agent'
 import type { PluginFsApi } from '@/shared/fsContract'
+import type { PluginServices } from '@/shared/pluginServices'
 
 /**
  * 宿主 API 主版本。
@@ -29,13 +30,33 @@ export const PLUGIN_HOST_API_VERSION = 1
 /**
  * 插件权限类别：声明即向用户公开，未声明则对应宿主能力直接拒绝。
  *
- * ⚠️ `'agent'` 与 `'agent.run'` 是**两件事**，别合并：
- * - `'agent'`：只读会话日志摘要（`ctx.host.sessions.list()`，**主进程半边**能力）；
+ * ⚠️ `'agent'` / `'agent.observe'` / `'agent.control'` / `'agent.run'` 是**四件事**，别合并：
+ * - `'agent'`：只读会话日志摘要（`ctx.host.sessions.list()` / `ctx.sessions.list()`，**主进程半边**）；
+ * - `'agent.observe'`：全局订阅所有会话的 agent 事件（含正文增量；`ctx.on(..., { global: true })`）；
+ * - `'agent.control'`：创建/发消息/取消/换模型（`ctx.sessionController.*`）；
  * - `'agent.run'`：调一次受预算约束的委派智能体（`ctx.agent.run()`，**界面半边**能力）。
  * 若把 `'agent'` 扩成"可读可跑"，所有已声明它的老插件会**静默获得烧钱能力**，
  * 违背"声明即合同"。新增独立权限是加法：老插件行为一个字节不变。
+ *
+ * 资源类新增权限同样各自独立：`'net.listen'`（开 HTTP 路由）、`'process.spawn'`（起子进程）、
+ * `'secrets'`（插件私有密钥）、`'schedule'`（定时器）、`'attachments'`（附件存取）。
+ * 它们只在本文件声明；**判权实现随服务面落地**（见 `src/shared/pluginServices.ts`）。
  */
-export type PluginPermission = 'fs' | 'shell' | 'net' | 'agent' | 'agent.run' | 'llm' | 'image'
+export type PluginPermission =
+  | 'fs'
+  | 'shell'
+  | 'net'
+  | 'agent'
+  | 'agent.observe'
+  | 'agent.control'
+  | 'agent.run'
+  | 'llm'
+  | 'image'
+  | 'net.listen'
+  | 'process.spawn'
+  | 'secrets'
+  | 'schedule'
+  | 'attachments'
 
 /**
  * 插件运行态（对齐 Cordis fiber 状态机的可见投影）。
@@ -111,6 +132,8 @@ export interface PluginSnapshot {
   status: PluginStatus
   /** 用户选择（持久化）：false = 已禁用 */
   enabled: boolean
+  /** `aikm` = 原生清单；`dsh` = 只有 package.json.dsh 的兼容包（P4） */
+  kind?: 'aikm' | 'dsh'
   permissions: PluginPermission[]
   inject: string[]
   /** 已注册工具名（scope = `plugin:<id>`） */
@@ -121,6 +144,11 @@ export interface PluginSnapshot {
   hasClient: boolean
   /** 渲染层半边入口（相对插件目录；无 client 半边为 null） */
   clientEntry: string | null
+  /**
+   * DSH 兼容包的界面半边要 fetch 的基址（该插件自己的回环 webServer）。
+   * 原生插件 / 没有 webServer 时为 undefined。
+   */
+  clientBaseUrl?: string
   /** 插件配置（用户在设置页「插件 → 配置」里保存的 JSON；渲染层半边可读） */
   config: Record<string, unknown>
   /** 清单声明的槽位（P1 才真正渲染） */
@@ -226,10 +254,29 @@ export interface HostEventMap extends ToolRegistryEventMap, AgentPluginEventMap 
   'plugin/loaded': { id: PluginId; tools: string[]; services: string[] }
   'plugin/unloaded': { id: PluginId; reason: string }
   'plugin/error': { id: PluginId; error: string }
+  /** 新会话建立（真实 id 在 agent 注册前就发出，避免"打开会话却收不到"） */
+  'session/created': { sessionId: string; cwd?: string; agentPreset?: string }
 }
 
-/** 插件上下文：所有注册方法返回 disposer，卸载时逆序执行 */
-export interface PluginContext {
+/**
+ * 事件订阅选项。
+ *
+ * - `global`：订阅**所有**会话的事件（需要 `agent.observe`）；默认只收自己委派 / 自己会话的。
+ * - `prepend`：预置到监听器链前面（预留给兼容层，原生插件一般不用）。
+ */
+export interface PluginSubscribeOptions {
+  readonly global?: boolean
+  readonly prepend?: boolean
+}
+
+/**
+ * 插件上下文：所有注册方法返回 disposer，卸载时逆序执行。
+ *
+ * 同时继承宿主服务面（`ctx.sessions` / `ctx.sessionController` / …，见
+ * `src/shared/pluginServices.ts`）。服务是**按插件装配**的：没声明对应权限就没有该成员，
+ * 运行期访问会抛 `PLUGIN_PERMISSION_DENIED` / `PLUGIN_SERVICE_UNAVAILABLE`（不是 undefined）。
+ */
+export interface PluginContext extends PluginServices {
   readonly plugin: {
     id: PluginId
     name: string
@@ -247,7 +294,11 @@ export interface PluginContext {
   /** 读取服务（未就绪返回 undefined；配合 inject 一般不会遇到） */
   getService<T = unknown>(name: string): T | undefined
   /** 订阅宿主事件 */
-  on<T extends keyof HostEventMap>(type: T, listener: (ev: HostEventMap[T]) => void): () => void
+  on<T extends keyof HostEventMap>(
+    type: T,
+    listener: (ev: HostEventMap[T]) => void,
+    options?: PluginSubscribeOptions,
+  ): () => void
   /** 注册副作用：`fn` 立即执行，其返回的清理函数在卸载时调用；返回值可提前撤销本效果 */
   effect(fn: () => void | (() => void | Promise<void>)): () => void
 
@@ -268,5 +319,9 @@ export interface PluginContext {
 /** 插件模块的期望导出形状（默认导出或具名 `apply` 皆可） */
 export interface AikmPluginModule {
   inject?: string[]
-  apply(ctx: PluginContext): void | Promise<void>
+  /**
+   * DSH 的 apply 签名是 `apply(ctx, config)`：第二个参数是宿主解析出的配置
+   * （DSH 插件常直接用它，而不是读 ctx.config）。AI-KM 原生插件可以忽略它。
+   */
+  apply(ctx: PluginContext, config?: Record<string, unknown>): void | Promise<void>
 }

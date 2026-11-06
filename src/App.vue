@@ -70,6 +70,15 @@ import { useTallLayout } from '@/composables/useTallLayout'
     writeOnboarding,
   } from '@/components/onboarding/onboardingState'
   const OnboardingWizard = defineAsyncComponent(() => import('@/components/onboarding/OnboardingWizard.vue'))
+  // 启动时的更新提示（节流 24h；「跳过此版本」只压制这里的提醒，手动检查仍会弹）
+  import {
+    compareVersions,
+    currentAppVersion,
+    fetchLatestRelease,
+    markAutoChecked,
+    readSkippedVersion,
+    shouldAutoCheck,
+  } from '@/lib/updateCheck'
 
   const lazyPanel = makeLazyPanel
   // ⚠️ 变量名不能叫 Set：会遮蔽全局 Set 构造函数，导致下方 collectRunningTasks 里的 `new Set(...)`
@@ -132,6 +141,29 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (isBrowser) return
     if (!needsOnboarding()) return
     startOnboarding()
+  }
+
+  /**
+   * 启动时静默检查一次新版本（24 小时节流，失败不打扰）：
+   * 有新版且没被「跳过此版本」就提示一句，告诉用户去哪里下载；不弹模态框。
+   */
+  const autoCheckUpdate = async () => {
+    if (isBrowser) return
+    if (!shouldAutoCheck()) return
+    markAutoChecked()
+    try {
+      const rel = await fetchLatestRelease()
+      if (compareVersions(rel.version, currentAppVersion()) <= 0) return
+      if (readSkippedVersion() === rel.version) return
+      ElMessage({
+        type: 'info',
+        duration: 9000,
+        showClose: true,
+        message: store.locales === 'zh'
+          ? `发现新版本 v${rel.version}：设置 → 通用 → 基础 → 常用操作 → 检查更新，可直接下载对应平台的安装包`
+          : `Version v${rel.version} is available: Settings → General → Basic → Common Actions → Check Updates to download the package for your platform`,
+      })
+    } catch { /* 启动检查失败保持安静 */ }
   }
   /** 「待我处理」收件箱的订阅注销函数（主窗口挂载时注册，卸载时释放） */
   let offAttention: (() => void) | null = null
@@ -665,6 +697,9 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
 
     // 首次使用引导：仅主窗口；版本化进度、可跳过、中途退出可恢复（参照 DSH 的 onboarding）
     maybeAutoStartOnboarding()
+
+    // 启动时静默查一次新版（24h 节流；跳过此版本后不再提示）
+    void autoCheckUpdate()
 
     // 引导里点「打开完整设置」→ 引导收起；设置关掉后自动放回来（单窗口浮层 / 独立设置窗口都适用）
     watch([() => store.settingsOpen, settingsWindowOpen], ([open, winOpen]) => {
@@ -1295,7 +1330,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
               : '所有主界面功能都已关闭，且没有启用的插件面板，主界面没有可显示的页面。请在「设置 → 通用 → 基础 → 导航与模块」中重新开启一个模块，或在「插件 → 管理」中启用插件。' }}
           </div>
           <div class="empty-nav-actions">
-            <div class="button" @click="restoreDefaultNavs" :title="store.locales === 'en' ? 'Re-enable Home / Knowledge / Knowledge Processing / Learning and the Browser Agent entry' : '重新开启 主页 / 知识管理 / 知识处理 / 学习 与浏览器 Agent 入口'">
+            <div class="button" @click="restoreDefaultNavs" :title="store.locales === 'en' ? 'Re-enable Home / Knowledge Management / Knowledge Base and the Browser Agent entry' : '重新开启 主页 / 知识管理 / 知识库 与浏览器 Agent 入口'">
               <i class="fa fa-undo"></i> {{ store.locales === 'en' ? 'Restore default nav' : '恢复默认导航' }}
             </div>
             <!-- 空导航提醒里的「打开设置」是单向动作（此时设置必然没开），不走开关语义 -->

@@ -40,6 +40,8 @@ import type { HostEventMap } from '@/types/plugin'
 import { PluginEventBus, PluginServiceRegistry, SCOPED_PLUGIN_EVENTS, createPluginContext } from '@/shared/pluginContext'
 import { agentEventTarget, toolEventTargets } from '@/shared/pluginEventRouting'
 import { ownerOfAgent } from './plugin-owned-agents'
+import { setSessionCreatedListener } from './agent-loop'
+import { createDshContext, synthesizeDshManifest } from './plugin-dsh-compat'
 import { checkApiVersion, isManifestFailure, parseManifest, PLUGIN_MANIFEST_FILE, PLUGIN_MANIFEST_KEY } from '@/shared/pluginManifest'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { shellService } from './shell-service'
@@ -48,6 +50,15 @@ import { isShellAllowed, resolvePolicy } from './sandbox-policy'
 import { createPluginToolRegistrar } from './plugin-tools'
 import { createPluginFs } from './plugin-fs'
 import { clearFsObservations, clearPluginFsPolicy } from './plugin-fs-policy'
+import {
+  createPluginHostServices,
+  hostServiceNamesFor,
+  hostServiceStubsFor,
+  isHostServiceName,
+  HOST_SERVICE_PERMISSIONS,
+  type PluginHostServices,
+} from './plugin-services'
+import type { PluginServiceName, PluginServices } from '@/shared/pluginServices'
 import { assertAccess, clearGrants, listGrants } from './plugin-grants'
 import { abortPluginRuns, clearUsage } from './plugin-agent-budget'
 import { clearConsent } from './plugin-agent-consent'
@@ -99,6 +110,8 @@ interface PluginRecord {
   manifest: AikmPluginManifest | null
   status: PluginStatus
   enabled: boolean
+  /** `aikm` = 原生清单；`dsh` = 只有 package.json.dsh 的兼容包（P4） */
+  kind: 'aikm' | 'dsh'
   error: string | null
   loadedAt: number | null
   /**
@@ -113,6 +126,8 @@ interface PluginRecord {
   /** 运行态（卸载时清空） */
   context: PluginContext | null
   dispose: (() => Promise<void>) | null
+  /** 按插件装配的宿主服务（会话面等）；卸载时 dispose 掉它持有的物理 agent */
+  hostServices: PluginHostServices | null
   tools: string[]
   services: string[]
 }
@@ -413,6 +428,11 @@ class PluginHost {
     if (this.initialized) return
     this.eventSink = options.eventSink
     this.builtin = options.builtinServices ?? {}
+    // 新会话 → 全局观测（`session/created`；没有 agent.observe 的插件收不到）
+    setSessionCreatedListener((info) => {
+      if (this.disposed) return
+      this.events.emit('session/created', info)
+    })
     // 插件观测面：把工具注册表的事件接到插件总线（没有这一步，`ctx.on('tool/...')` 永远不会触发）
     this.wireToolEvents()
     // 自定义插件目录（用户在设置里选的）要在建目录 / 扫描之前就位
@@ -522,6 +542,9 @@ class PluginHost {
       ownerOfTool: (n) => this.ownerOfToolName(n),
       knownPlugins: Array.from(this.records.keys()),
     })
+    // 全局观测（需要 agent.observe）：作用域之外再发一份到全局总线。
+    // 放在 targets 判空之前——宿主工具没有归属插件，但全局订阅者仍要收到。
+    this.events.emit(type as never, ev as never)
     if (!targets.length) return
     const payload = ev as unknown as Record<string, unknown>
     for (const id of targets) {
@@ -537,15 +560,18 @@ class PluginHost {
     if (this.disposed || !ev) return
     const type = String(ev.type ?? '')
     if (!SCOPED_PLUGIN_EVENTS.includes(type)) return
+    const payload = (ev.payload && typeof ev.payload === 'object' ? ev.payload : {}) as Record<string, unknown>
+    // 载荷里带上 agentId：一个插件可能同时跑多个预设的 run，作者要能分辨是哪一次（DSH 也带 `agent`）
+    const envelope = { agentId: String(ev.agentId ?? ''), ...payload }
+    // 全局观测（需要 agent.observe）先发：即使没有 owner（宿主会话），订阅者也要收到
+    this.events.emit(type as never, envelope as never)
     const owner = agentEventTarget({
       agentId: String(ev.agentId ?? ''),
       ownerOfAgent,
       knownPlugins: Array.from(this.records.keys()),
     })
     if (!owner) return
-    const payload = (ev.payload && typeof ev.payload === 'object' ? ev.payload : {}) as Record<string, unknown>
-    // 载荷里带上 agentId：一个插件可能同时跑多个预设的 run，作者要能分辨是哪一次（DSH 也带 `agent`）
-    this.emitPluginScoped(owner, type, { agentId: String(ev.agentId ?? ''), ...payload })
+    this.emitPluginScoped(owner, type, envelope)
   }
 
   async dispose(): Promise<void> {
@@ -651,6 +677,16 @@ class PluginHost {
   /** 服务名清单（设置页展示宿主能力面） */
   serviceNames(): string[] {
     return this.services.list()
+  }
+
+  /**
+   * DSH 兼容包的界面半边 fetch 基址（该插件自己的回环 webServer）。
+   * 端口是 OS 分配的，只能在监听后才拿到，所以按需读。
+   */
+  clientBaseUrl(id: string): string | null {
+    const rec = this.records.get(id as PluginId)
+    const port = (rec?.hostServices?.services as Record<string, any> | undefined)?.webServer?.port
+    return typeof port === 'number' && port > 0 ? `http://127.0.0.1:${port}` : null
   }
 
   // ---------------------------------------------------------------------------
@@ -1020,13 +1056,16 @@ class PluginHost {
     return out
   }
 
-  /** 目录是否「就是一个插件」：有 package.json 且 JSON 可解析、含 aikm 清单字段（清单内容合法性交给 readManifest 判定） */
+  /** 目录是否「就是一个插件」：有 package.json 且 JSON 可解析、含 aikm 或 dsh 清单字段（合法性交给 readManifest 判定） */
   private looksLikePluginDir(dir: string): boolean {
     const file = path.join(dir, PLUGIN_MANIFEST_FILE)
     if (!fs.existsSync(file)) return false
     try {
       const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
-      return !!raw && typeof raw === 'object' && !!(raw as Record<string, unknown>)[PLUGIN_MANIFEST_KEY]
+      return !!raw && typeof raw === 'object' && (
+        !!(raw as Record<string, unknown>)[PLUGIN_MANIFEST_KEY] ||
+        !!(raw as Record<string, unknown>).dsh
+      )
     } catch {
       // package.json 存在但坏了：大概率是用户正在编辑的插件 → 当作插件处理，让它在列表里显示错误原因
       return true
@@ -1066,6 +1105,7 @@ class PluginHost {
       manifest: null,
       status: 'discovered',
       enabled,
+      kind: 'aikm',
       error: null,
       loadedAt: null,
       epoch: 0,
@@ -1074,6 +1114,7 @@ class PluginHost {
       logs: [],
       context: null,
       dispose: null,
+      hostServices: null,
       tools: [],
       services: [],
     }
@@ -1084,6 +1125,7 @@ class PluginHost {
     rec.config = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig) ? rawConfig : {}
 
     const read = this.readManifest(dir)
+    rec.kind = read.kind
     const manifest = read.manifest
     if (!manifest) {
       rec.manifest = null
@@ -1094,6 +1136,10 @@ class PluginHost {
     }
     rec.manifest = manifest
     rec.inject = manifest.inject ?? []
+    // 兼容包：用户没存过配置时，用 cordis.patch.yml 里的默认配置（如 autoStart）
+    if (read.kind === 'dsh' && Object.keys(rec.config).length === 0 && Object.keys(read.dshConfig).length) {
+      rec.config = read.dshConfig
+    }
     const versionCheck = checkApiVersion(manifest.apiVersion)
     if (!versionCheck.ok) {
       rec.status = 'invalid'
@@ -1121,10 +1167,16 @@ class PluginHost {
    */
   private readManifest(
     dir: string,
-  ): { manifest: AikmPluginManifest | null; problem: string | null; message: string | null } {
+  ): {
+    manifest: AikmPluginManifest | null
+    problem: string | null
+    message: string | null
+    kind: 'aikm' | 'dsh'
+    dshConfig: Record<string, unknown>
+  } {
     const file = path.join(dir, PLUGIN_MANIFEST_FILE)
     if (!fs.existsSync(file)) {
-      return { manifest: null, problem: 'no-manifest', message: `缺少 ${PLUGIN_MANIFEST_FILE}` }
+      return { manifest: null, problem: 'no-manifest', message: `缺少 ${PLUGIN_MANIFEST_FILE}`, kind: 'aikm', dshConfig: {} }
     }
     let raw: unknown
     try {
@@ -1134,13 +1186,20 @@ class PluginHost {
         manifest: null,
         problem: 'bad-json',
         message: `package.json 不是合法 JSON：${e instanceof Error ? e.message : String(e)}`,
+        kind: 'aikm',
+        dshConfig: {},
       }
     }
     const parsed = parseManifest(raw, path.basename(dir))
     if (isManifestFailure(parsed)) {
-      return { manifest: null, problem: parsed.problem, message: parsed.message }
+      // 没有 aikm 但有 dsh：当成兼容包（P4）
+      const synth = synthesizeDshManifest(raw, dir, path.basename(dir))
+      if (synth) {
+        return { manifest: synth.manifest, problem: null, message: null, kind: 'dsh', dshConfig: synth.config }
+      }
+      return { manifest: null, problem: parsed.problem, message: parsed.message, kind: 'aikm', dshConfig: {} }
     }
-    return { manifest: parsed.manifest, problem: null, message: null }
+    return { manifest: parsed.manifest, problem: null, message: null, kind: 'aikm', dshConfig: {} }
   }
 
   // ---------------------------------------------------------------------------
@@ -1182,11 +1241,20 @@ class PluginHost {
       }
       rec.dispose = null
       rec.context = null
+      rec.hostServices?.dispose()
+      rec.hostServices = null
       rec.tools = []
       rec.services = []
     }
 
-    const missing = rec.inject.filter((name) => !this.services.has(name))
+    const deniedBefore = this.injectWithoutPermission(rec, rec.inject)
+    if (deniedBefore.length) {
+      rec.status = 'failed'
+      rec.error = `注入的宿主服务缺少权限声明：${this.describeMissingPermissions(deniedBefore)}`
+      this.pushChanged(rec)
+      return
+    }
+    const missing = rec.inject.filter((name) => !this.hasInjectedService(rec, name))
     if (missing.length) {
       rec.status = 'pending'
       rec.error = `等待依赖服务：${missing.join('、')}`
@@ -1209,7 +1277,15 @@ class PluginHost {
       if (!plugin) throw new Error('插件模块未导出 apply(ctx)（默认导出或具名 apply 均可）')
 
       const inject = dedupe([...(rec.manifest.inject ?? []), ...(plugin.inject ?? [])])
-      const missingAfter = inject.filter((name) => !this.services.has(name))
+      const deniedAfter = this.injectWithoutPermission(rec, inject)
+      if (deniedAfter.length) {
+        rec.inject = inject
+        rec.status = 'failed'
+        rec.error = `注入的宿主服务缺少权限声明：${this.describeMissingPermissions(deniedAfter)}`
+        this.pushChanged(rec)
+        return
+      }
+      const missingAfter = inject.filter((name) => !this.hasInjectedService(rec, name))
       if (missingAfter.length) {
         rec.inject = inject
         rec.status = 'pending'
@@ -1235,12 +1311,22 @@ class PluginHost {
         }
       }
       const hostApi = this.createHostApi(rec)
+      const permissions = rec.manifest.permissions ?? []
+      const hostEnv = createPluginHostServices({ pluginId: rec.id, permissions, log })
+      rec.hostServices = hostEnv
+      // 已实现且已授权的服务 + 未授权服务的抛错桩（缺权限时不是 undefined）
+      const hostServices = {
+        ...hostServiceStubsFor(permissions),
+        ...hostEnv.services,
+      } as PluginServices
       const handle = createPluginContext({
         id: rec.id,
         name: rec.manifest.name,
         version: rec.manifest.version,
         dir: rec.dir,
         config: rec.config,
+        // DSH 兼容契约：原生主进程半边也能 ctx.get('homePaths') 拿到插件数据目录
+        dataDir: this.pluginDataDir(rec.id),
         services: {
           provide: (name, impl) => {
             const off = this.services.provide(name, impl)
@@ -1251,30 +1337,58 @@ class PluginHost {
             }
           },
           // ⚠️ 两个内置服务必须**按插件特化**，不能把宿主原件给出去（详见 pluginServiceView 的注释）
+          // 宿主服务（会话面等）优先于全局注册表：它们才是按插件装配的那一份
           get: <T = unknown,>(name: string) =>
-            this.pluginServiceView(rec, name, { registerPluginTool, hostApi }) as T,
+            (this.pluginServiceView(rec, name, { registerPluginTool, hostApi })
+              ?? (hostServices as Record<string, unknown>)[name]) as T,
         },
         registerTool: registerPluginTool,
-        subscribeHostEvent: (type, listener) =>
+        subscribeHostEvent: (type, listener, options) => {
+          const typeName = String(type)
+          // 全局观测会把**别人的会话正文**推给插件：必须显式声明 agent.observe
+          const needsObserve = SCOPED_PLUGIN_EVENTS.includes(typeName) || typeName === 'session/created'
+          if (typeName === 'session/created' && !options?.global) {
+            throw new Error('订阅 session/created 需要 { global: true }（它是全机事件，不属于某个 agent）')
+          }
+          if (options?.global) {
+            if (needsObserve && !(rec.manifest.permissions ?? []).includes('agent.observe')) {
+              throw new Error(
+                `订阅全局事件 ${typeName} 需要 agent.observe 权限（在 package.json 的 aikm.permissions 里声明）`,
+              )
+            }
+            return this.events.on(type, listener)
+          }
           // 工具 / agent 的观测事件**按作用域**分发（只给自己）；生命周期事件对所有插件广播。
           // 两者都经 `ctx.on` 暴露，由这里按事件类型决定走哪条（见 SCOPED_PLUGIN_EVENTS）。
-          SCOPED_PLUGIN_EVENTS.includes(String(type))
+          return SCOPED_PLUGIN_EVENTS.includes(typeName)
             ? this.events.onScoped(rec.id, type, listener)
-            : this.events.on(type, listener),
+            : this.events.on(type, listener)
+        },
         host: hostApi,
         fs: createPluginFs({
           pluginId: rec.id,
           pluginDir: rec.dir,
+          dataDir: this.pluginDataDir(rec.id),
           hasPermission: (rec.manifest.permissions ?? []).includes('fs'),
         }),
         storage: this.createStorage(rec),
         log,
+        hostServices,
       })
 
-      rec.context = handle.ctx
+      // DSH 兼容包：把 AI-KM ctx 包成 Cordis 形状（P4）。原生插件直接用 handle.ctx。
+      const applyCtx =
+        rec.kind === 'dsh'
+          ? createDshContext(handle.ctx, {
+              pluginId: rec.id,
+              config: rec.config,
+              home: this.pluginDataDir(rec.id),
+            })
+          : handle.ctx
+      rec.context = applyCtx as PluginContext
       rec.dispose = handle.dispose
 
-      await plugin.apply(handle.ctx)
+      await plugin.apply(applyCtx, rec.config)
 
       // apply 期间被卸载/重载：立即撤销这次注册结果，避免泄漏
       if (rec.epoch !== epoch) {
@@ -1303,6 +1417,8 @@ class PluginHost {
       if (rec.epoch === epoch) {
         rec.context = null
         rec.dispose = null
+        rec.hostServices?.dispose()
+        rec.hostServices = null
         rec.tools = []
         rec.services = []
       }
@@ -1334,6 +1450,8 @@ class PluginHost {
     }
     rec.context = null
     rec.dispose = null
+    rec.hostServices?.dispose()
+    rec.hostServices = null
     rec.tools = []
     rec.services = []
     // 「先读后写」的**观察状态不跨装载**：否则重载 / 重装后新代码会"继承"上一份代码读过的事实，
@@ -1406,7 +1524,7 @@ class PluginHost {
       for (const rec of Array.from(this.records.values())) {
         if (rec.status !== 'discovered' && rec.status !== 'pending') continue
         if (!rec.enabled) continue
-        if (!rec.inject.every((name) => this.services.has(name))) continue
+        if (!rec.inject.every((name) => this.hasInjectedService(rec, name))) continue
         const before = rec.status
         await this.loadPlugin(rec)
         // 只有「状态真的变了」才算推进：否则(如已 dispose/清单失效)会退化成
@@ -1441,6 +1559,34 @@ class PluginHost {
   // ---------------------------------------------------------------------------
   // 宿主能力（权限判定见 docs/plan 的 §五 安全模型）
   // ---------------------------------------------------------------------------
+
+  /**
+   * 该插件是否可用某个注入依赖：全局服务注册表（插件间 provide / 宿主内置）**或**
+   * 已实现且插件已声明对应权限的宿主服务。
+   */
+  private hasInjectedService(rec: PluginRecord, name: string): boolean {
+    if (this.services.has(name)) return true
+    if (!isHostServiceName(name)) return false
+    return hostServiceNamesFor(rec.manifest?.permissions ?? []).includes(name as PluginServiceName)
+  }
+
+  /**
+   * `inject` 里"服务存在、但插件没声明对应权限"的名字。
+   *
+   * 这类必须 **fail-loud**：若当普通缺失处理，插件会永远停在 pending，用户只看到
+   * "等待依赖服务"，永远不知道是权限没声明。
+   */
+  private injectWithoutPermission(rec: PluginRecord, inject: readonly string[]): string[] {
+    const allowed = new Set(hostServiceNamesFor(rec.manifest?.permissions ?? []))
+    return inject.filter((name) => isHostServiceName(name) && !allowed.has(name))
+  }
+
+  /** 把"缺权限的注入"拼成可读文案（带上是哪个权限） */
+  private describeMissingPermissions(names: readonly string[]): string {
+    return names
+      .map((name) => `${name}（需要 ${HOST_SERVICE_PERMISSIONS[name] ?? '未知权限'}）`)
+      .join('、')
+  }
 
   /**
    * 插件看到的**服务视图**。
@@ -1922,6 +2068,7 @@ class PluginHost {
       folder: this.folderOf(rec),
       status: rec.status,
       enabled: rec.enabled,
+      kind: rec.kind,
       permissions: rec.manifest?.permissions ?? [],
       inject: rec.inject,
       tools: rec.tools.slice(),
@@ -1929,6 +2076,7 @@ class PluginHost {
       hasMain: !!rec.manifest?.main,
       hasClient: !!rec.manifest?.client,
       clientEntry: rec.manifest?.client?.entry ?? null,
+      ...(rec.kind === 'dsh' && this.clientBaseUrl(rec.id) ? { clientBaseUrl: this.clientBaseUrl(rec.id) as string } : {}),
       config: { ...rec.config },
       declaredSlots: rec.manifest?.declares?.slots ?? [],
       declaredFileViewers: rec.manifest?.declares?.fileViewers ?? [],

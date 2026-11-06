@@ -181,14 +181,27 @@ const isMarkdownFile = computed(() => ['.md', '.markdown', '.mdown', '.mkd'].inc
 const isPlainTextFile = computed(() => ['.txt', '.log'].includes(fileExt.value))
 // 代码 / 配置 / 样式表：只需要源码编辑；浏览、可视编辑、导图、演示都没有意义
 const SOURCE_ONLY_EXTS = [
-  '.js', '.jsx', '.ts', '.tsx', '.vue', '.py', '.java', '.go', '.rs', '.c', '.cpp', '.h', '.hpp',
-  '.cs', '.php', '.rb', '.sh', '.sql',
-  '.json', '.jsonc', '.yaml', '.yml', '.toml', '.xml', '.ini', '.conf', '.env',
+  '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.vue', '.py', '.java', '.go', '.rs', '.c', '.cpp', '.h', '.hpp',
+  '.cs', '.php', '.rb', '.sh', '.ps1', '.bat', '.cmd', '.lua', '.kt', '.kts', '.swift', '.dart', '.scala', '.r', '.pl',
+  '.ex', '.exs', '.erl', '.clj', '.cljs', '.cljc', '.fs', '.fsx', '.vb', '.asm', '.s',
+  '.sql',
+  '.json', '.jsonc', '.yaml', '.yml', '.toml', '.xml', '.ini', '.conf', '.env', '.properties',
   '.css', '.scss', '.less',
+  '.tex', '.bib', '.proto', '.graphql', '.gql', '.prisma', '.gradle',
 ]
 const isSourceOnlyFile = computed(() => SOURCE_ONLY_EXTS.includes(fileExt.value))
 // Word 文档（.docx/.doc）：预览为转换后的 Markdown，只提供浏览 / 思维导图两个只读视图
 const isWordFile = computed(() => fileExt.value === '.docx' || fileExt.value === '.doc')
+// 是否属于文件类型表里已登记的类型。未登记的（.mjs、.log、无扩展名等）默认给源码编辑，
+// 不再默认塞进只读浏览视图（浏览仍可手动切换）。
+const isKnownFileType = computed(() => (
+  isWordFile.value || isHtmlFile.value || isCodeFile.value || isSourceOnlyFile.value
+  || isPlainTextFile.value || isMarkdownFile.value || isMediaFile.value || isPdfFile.value
+  || isExcalidraw.value || isDrawio.value || isFlowDsl.value || isDataCanvas.value || isTask.value
+  || isMermaid.value || EXCEL_EXTS.includes(fileExt.value) || PPTX_EXTS.includes(fileExt.value)
+  || TEXT_TABLE_EXTS.includes(fileExt.value)
+))
+const isUnknownFileType = computed(() => !isKnownFileType.value)
 // 远程文本/Markdown 类（.md / .docx 转换后）才支持 导图/演示 等高级只读视图
 const isRemoteAdvanced = computed(() => {
   if (!isRemoteFile.value) return false
@@ -247,8 +260,8 @@ const baseAvailableViews = computed<ViewType[]>(() => {
     return isRemoteAdvanced.value ? ['read', 'mindmap', 'presentation'] : ['read']
   }
   if (isHtmlFile.value) return ['read', 'edit']
-  // 未知格式：先浏览，不再默认塞入编辑 / 导图 / 演示
-  return ['read']
+  // 未登记的格式（.mjs / 无扩展名 / 其它文本）：源码编辑 + 浏览，默认编辑（见 viewType 初始化）
+  return ['read', 'edit']
 })
 
 /**
@@ -712,12 +725,15 @@ onMounted(async () => {
   fileName.value = remoteLabel
     || filePath.value.replace(/\\/g, '/').split('/').pop()
     || '文件'
-  // 远程只读：默认浏览视图；代码类文件：默认（且仅）代码编辑视图，忽略 URL 传入的其他视图；其余默认浏览
+  // 远程只读：默认浏览视图；代码类文件：默认（且仅）代码编辑视图，忽略 URL 传入的其他视图；
+  // 未登记的扩展名（.mjs 等）：默认源码编辑（有插件查看器时仍让插件接手）；其余默认浏览
   viewType.value = isRemoteFile.value
     ? 'read'
     : isCodeFile.value || isSourceOnlyFile.value
       ? 'edit'
-      : (requestedView && isKnownView(requestedView) ? requestedView as ViewType : 'read')
+      : requestedView && isKnownView(requestedView)
+        ? requestedView as ViewType
+        : (!isKnownFileType.value && !pluginViewerAvailable.value ? 'edit' : 'read')
   // 受限类型（如 Word 只有 浏览/思维导图）收到不支持的视图请求（编辑/快编辑/演示）时回退到浏览
   if (!availableViews.value.includes(viewType.value)) viewType.value = availableViews.value[0] || 'read'
   // 内核可用时，Word / Excel / PPT 的默认视图就是「Office 编辑」：

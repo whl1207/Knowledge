@@ -1,21 +1,24 @@
 <!-- ModelContextWindow.vue - 模型来源「上下文窗口」行（各来源配置块复用）
-     整行只读展示：该模型的上下文窗口（= 主页右上角圆环的分母）+ 历史手动覆盖值。
-     本页不提供修改入口；刷新入口已统一到各来源配置块底部的「API 状态」按钮（通过 refreshToken 触发重探）。
+     一行可编辑的窗口值：输入框里就是圆环实际使用的分母（= 主页右上角圆环的分母）。
+     留空 / 保持自动值 = 用自动判定结果；直接改成别的数字 = 为该来源手填覆盖（再点 ✕ 回到自动）。
      hideWindow=true 时只隐藏「上下文窗口」行（组件仍挂载 → 探测与圆环分母继续更新），
      用于本地来源（Ollama / LM Studio）已有「模型加载状态」面板展示生效/上限的场景。
 
      自动判定优先级见 @/lib/contextUsage.resolveContextLimit：
-       已加载实例实际值 > 上次读到的实际值 > 模型上限 > 模型名/来源默认值 > 未知兜底
+       已加载实例实际值 > 上次读到的实际值 > 模型上限 > 模型标称窗口 > 来源默认值 > 未知兜底
 
      说明（实测 Ollama 0.34）：Ollama 桌面端「上下文长度」不在 Modelfile 里，也没有公开 HTTP 接口可读，
      只体现在「已加载实例」的 /api/ps 上 → 在块底部点一次「API 状态」即可重新读取，
-     读到「实际生效值」会自动记住（跨会话），主页圆环的分母即以此为据。 -->
+     读到「实际生效值」会自动记住（跨会话），主页圆环的分母即以此为据。
+     DeepSeek 官方 /models 不返回窗口字段，因此按「DeepSeek 官方模型标称 1M」展示；
+     兼容网关若返回 context_length，会以探测到的真实值为准。 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { usestore } from '@/store'
 import { AIUtils } from '@/services/ai-utils'
 import {
   contextWindowKey,
+  customManualKeyById,
   manualContextWindow,
   probedContextWindow,
   rememberProbedContextWindow,
@@ -26,6 +29,7 @@ import {
   hasProbedRealContextWindow,
   setCachedRealContextWindow,
 } from '@/lib/contextUsage'
+import { compactThresholdTokens } from '@/shared/contextBudget'
 import { normalizeLlmType } from '@/shared/llmSources'
 
 const props = withDefaults(defineProps<{
@@ -35,15 +39,13 @@ const props = withDefaults(defineProps<{
   config?: any
   /** 当前选择的模型标识（空 = 未选择） */
   model?: string
-  /** 是否显示「窗口上限覆盖」只读行（默认显示；注意布尔 prop 缺省会被 Vue 当作 false，必须显式给默认值） */
-  override?: boolean
   /** 外部刷新令牌：值变化时强制重新探测（来源配置块内的刷新按钮统一收到「API 状态」行） */
   refreshToken?: number
   /** 隐藏「上下文窗口」行（本地来源已有「模型加载状态」面板展示生效/上限时用；组件仍挂载，探测与圆环分母照常更新） */
   hideWindow?: boolean
   /** 自定义来源：正在查看的来源索引（不传则用默认/激活来源） */
   customIndex?: number
-}>(), { override: true, refreshToken: 0, hideWindow: false, customIndex: undefined })
+}>(), { refreshToken: 0, hideWindow: false, customIndex: undefined })
 
 const store = usestore()
 const zh = () => store.locales === 'zh'
@@ -83,7 +85,7 @@ watch(() => [providerKey.value, props.model], () => { void probe() }, { immediat
 // 外部（API 状态按钮）要求刷新时强制重探一遍
 watch(() => props.refreshToken, () => { void probe(true) })
 
-/** 自动判定到的窗口（不含手填覆盖，覆盖单独一行） */
+/** 自动判定到的窗口（不含手填覆盖；覆盖值在输入框里单独标注「手动」） */
 const auto = computed(() => {
   void tick.value
   return resolveContextLimit({
@@ -101,18 +103,10 @@ const sourceLabel = computed(() => {
     case 'real': return zh() ? '模型实际 context' : 'model context'
     case 'probed': return zh() ? '上次读到的实际值' : 'last seen actual'
     case 'model-default': return zh() ? '模型上限' : 'model max'
-    case 'model-name': return zh() ? '模型名默认值' : 'model-name default'
-    case 'provider-default': return zh() ? '来源默认值' : 'provider default'
+    case 'model-name': return zh() ? '模型标称窗口' : 'model rated window'
+    case 'provider-default': return zh() ? '来源默认窗口' : 'provider default'
     default: return zh() ? '未知来源，按 128K 估算' : 'unknown, assumed 128K'
   }
-})
-
-/** 圆环实际使用的分母（手动覆盖优先），没有覆盖时就是自动判定值 */
-const displayText = computed(() => {
-  if (!props.model) return zh() ? '未选择模型' : 'No model selected'
-  // 展示行只留数值：来源（模型上限 / 模型名默认值 / 上次读到的实际值…）与判定依据放 title
-  const n = manualValue.value > 0 ? manualValue.value : auto.value.limit
-  return `${n.toLocaleString()} tokens`
 })
 
 const title = computed(() => {
@@ -121,7 +115,7 @@ const title = computed(() => {
     real: '来自后端「已加载实例」的真实值（Ollama /api/ps、LM Studio loaded_context_length），已包含在 Ollama 侧手动设置的上下文长度',
     probed: '模型当前未加载，读不到实时值 → 用上次实际读到的值',
     'model-default': '模型能力上限（模型未加载时只能读到它；也可能与手动设置的实际生效值不同）',
-    'model-name': '按模型名推断的默认窗口（该来源不提供可读的窗口信息）',
+    'model-name': '按模型名从已知模型表取到的标称窗口（该来源的接口不返回窗口信息）',
     'provider-default': '该来源不提供可读的窗口信息 → 按来源默认值估算',
     unknown: '无法判定来源与模型 → 按 128K 估算',
   }
@@ -129,7 +123,7 @@ const title = computed(() => {
     real: 'From the loaded backend instance (Ollama /api/ps, LM Studio loaded_context_length); includes the context length set manually in Ollama',
     probed: 'Model not loaded, no live value → using the last value actually read',
     'model-default': 'Model capability max (all that is readable while the model is unloaded; may differ from the effective value)',
-    'model-name': 'Window inferred from the model name (this source exposes no readable window info)',
+    'model-name': 'Rated window from the known model table (this source exposes no readable window info)',
     'provider-default': 'This source exposes no window info → estimated from the provider default',
     unknown: 'Unknown source/model → assumed 128K',
   }
@@ -149,9 +143,22 @@ const title = computed(() => {
       : `Effective: ${auto.value.limit.toLocaleString()} tokens (${sourceLabel.value})`)
   }
   lines.push(zhText ? (how[auto.value.source] || '') : (howEn[auto.value.source] || ''))
+  // DeepSeek 官方 /models 不带窗口字段：显式说明 1M 是官方标称值，避免被当成「没读到」
+  if (providerKey.value === 'deepseek' && !manual) {
+    lines.push(zhText
+      ? 'DeepSeek 官方模型标称 1M 窗口；其 /models 不返回窗口字段，因此按模型标称值显示（不是探测失败）。'
+      : 'Official DeepSeek models are rated at 1M; its /models returns no window field, so the rated value is shown (not a failed probe).')
+  }
+  // 压缩阈值：占用（历史 + 工具 schema，不含输出预留）达到它就压缩旧轮次——不是等到窗口上限才动。
+  // 用户看到的「明明几十万窗口，九万就压缩」多数就是把这行和上面的窗口上限混为一谈了。
+  const effLimit = manual > 0 ? manual : auto.value.limit
+  const compactAt = compactThresholdTokens({ limit: effLimit })
   lines.push(zhText
-    ? '主页右上角圆环即以此为分母；在下方「API 状态」点一次即可重新读取。'
-    : 'Used as the denominator of the context ring on the home page; click the API Status button below to re-read.')
+    ? `自动压缩阈值：约 ${compactAt.toLocaleString()} tokens（占用达到它就摘要旧轮次；窗口 ${effLimit.toLocaleString()} 是硬上限，不是压缩线）`
+    : `Auto-compaction at about ${compactAt.toLocaleString()} tokens (old turns are summarized there; the ${effLimit.toLocaleString()} window is the hard limit, not the compaction line)`)
+  lines.push(zhText
+    ? '输入框里的数字就是当前生效值：改成别的数字 = 为这个来源手填覆盖（✕ 清除），清空 = 自动判定。在下方「API 状态」点一次即可重新读取。'
+    : 'The number in the field is the effective value: type another number to override this source (✕ clears), clear it for auto. Click API Status below to re-read.')
   return lines.filter(Boolean).join('\n')
 })
 
@@ -159,46 +166,53 @@ const title = computed(() => {
     自动探测不到或需要强制指定时，可直接在「上下文窗口」输入框填写。 */
 const manualValue = computed(() => manualContextWindow(store.AIconfig.llm, providerKey.value, customIdx.value))
 
-/** 输入框改动：>0 写入手动覆盖，清空则恢复自动 */
+/** 手填值要写的键：自定义来源同时写「按来源 id」与「按索引」
+ *  —— 旧读取路径仍只认索引键，id 键让来源增删/排序后手填值不失效 */
+const manualKeys = (): string[] => {
+  const keys = [contextWindowKey(providerKey.value, customIdx.value)]
+  if (providerKey.value === 'custom') {
+    const srcs = Array.isArray(store.AIconfig.llm.custom?.sources) ? store.AIconfig.llm.custom.sources : []
+    const idx = typeof customIdx.value === 'number' ? customIdx.value : (store.AIconfig.llm.custom?.activeIndex ?? 0)
+    const id = srcs[idx]?.id
+    if (typeof id === 'number') keys.push(customManualKeyById(id))
+  }
+  return keys
+}
+
+/**
+ * 输入框改动：填入别的数字 = 为该来源写入手动覆盖；清空（或恰好等于自动判定值）= 恢复自动。
+ *
+ * 输入框里默认显示的就是自动判定值（= 圆环分母），所以「点进去没改就失焦」不应该把自动值
+ * 钉成覆盖值——否则换了模型 / 本地窗口变了，这个来源还卡在旧数字上。
+ */
 const onManualInput = (e: Event) => {
-  const n = Math.round(Number((e.target as HTMLInputElement)?.value))
+  const input = e.target as HTMLInputElement
+  const n = Math.round(Number(input?.value))
+  const autoN = auto.value.limit
+  const useAuto = !(Number.isFinite(n) && n > 0) || n === autoN
   const llm: any = store.AIconfig.llm
   const byProvider: Record<string, number> = { ...(llm.contextWindowByProvider || {}) }
-  if (Number.isFinite(n) && n > 0) byProvider[contextWindowKey(providerKey.value, customIdx.value)] = n
-  else delete byProvider[contextWindowKey(providerKey.value, customIdx.value)]
+  const keys = manualKeys()
+  if (useAuto) for (const k of keys) delete byProvider[k]
+  else for (const k of keys) byProvider[k] = n
   llm.contextWindowByProvider = byProvider
   store.saveConfig()
+  // 清空 / 输成自动值后，输入框要重新显示自动判定值（Vue 的 :value 在数据未变时不会回写）
+  if (input && useAuto) input.value = String(autoN)
 }
 
 /** 清除该来源的覆盖值（回到自动） */
 const clearOverride = () => {
   const llm: any = store.AIconfig.llm
   const byProvider: Record<string, number> = { ...(llm.contextWindowByProvider || {}) }
-  delete byProvider[contextWindowKey(providerKey.value, customIdx.value)]
+  for (const k of manualKeys()) delete byProvider[k]
   llm.contextWindowByProvider = byProvider
   store.saveConfig()
 }
 
-/** 覆盖行展示文本（只读）：也只留数值/无，说明放 title */
-const overrideText = computed(() => {
-  const m = manualValue.value
-  return m > 0 ? `${m.toLocaleString()} tokens` : (zh() ? '无' : 'None')
-})
-
-const overrideTitle = computed(() => {
-  const autoN = auto.value.limit.toLocaleString()
-  const head = manualValue.value > 0
-    ? (zh() ? `该来源存在手动覆盖值：圆环以它为分母（只读展示）。` : `A manual override exists for this source: the ring uses it (read-only).`)
-    : (zh() ? `该来源未设置覆盖值，圆环直接用上方「上下文窗口」的自动判定值（当前 ${autoN}）。` : `No override for this source: the ring uses the auto value above (currently ${autoN}).`)
-  const tail = zh()
-    ? '上下文窗口由后端 / LM Studio / Ollama 设置决定，此页仅展示，不提供修改入口；改完后在下方「API 状态」点一次即可重新读取。'
-    : 'The context window is decided by the backend / LM Studio / Ollama settings; this page only displays it. After changing it, click the API Status button below once.'
-  return `${head}\n${tail}`
-})
-
 const clearOverrideTitle = computed(() => (zh()
-  ? '清除该来源的历史覆盖值（回到自动判定）'
-  : 'Clear the historical override for this source (back to auto)'))
+  ? '清除该来源的手填覆盖值（回到自动判定）'
+  : 'Clear the manual override for this source (back to auto)'))
 </script>
 
 <template>
@@ -207,17 +221,19 @@ const clearOverrideTitle = computed(() => (zh()
   <div v-if="!hideWindow" class="form-group">
     <label>{{ zh() ? '上下文窗口' : 'Context Window' }}</label>
     <div class="input-with-button">
+      <!-- 直接显示当前生效值（自动判定值或手填覆盖值）；改成别的数字即覆盖，留空即自动 -->
       <input
         class="ctx-window-value"
         type="number"
         min="1"
         step="1"
-        :value="manualValue > 0 ? manualValue : ''"
-        :placeholder="auto.limit.toLocaleString()"
+        :value="manualValue > 0 ? manualValue : auto.limit"
         :title="title"
         @change="onManualInput"
       />
-      <span class="ctx-window-unit">tokens</span>
+      <span class="ctx-window-unit">
+        tokens<span class="ctx-window-mode">{{ manualValue > 0 ? (zh() ? ' · 手动' : ' · manual') : (zh() ? ' · 自动' : ' · auto') }}</span>
+      </span>
       <div v-if="manualValue > 0" class="button" style="width:30px;margin:0px;padding:4px 0px"
         @click="clearOverride" :title="clearOverrideTitle">
         <i class="fa fa-times"></i>
@@ -250,7 +266,7 @@ const clearOverrideTitle = computed(() => (zh()
   display: inline-flex; align-items: center; justify-content: center;
   min-height: 0; padding: 0 6px; margin: 0;
 }
-/* 可编辑值：留空 = 自动；填写 = 手动覆盖 */
+/* 可编辑值：显示当前生效值；改成别的数字 = 手填覆盖，清空 = 自动 */
 .input-with-button > input.ctx-window-value { cursor: text; }
 .ctx-window-unit { flex-shrink: 0; align-self: center; font-size: 11px; opacity: .55; }
 @media (max-width: 620px) {

@@ -14,12 +14,14 @@ import type { PluginId } from '@/types/ids'
 import type { ToolDefinition } from '@/types/tool'
 import { AGENT_PLUGIN_EVENT_TYPES } from '@/types/agent'
 import type { PluginFsApi } from '@/shared/fsContract'
+import type { PluginServices } from '@/shared/pluginServices'
 import type {
   HostEventMap,
   PluginContext,
   PluginHostApi,
   PluginLogger,
   PluginStorage,
+  PluginSubscribeOptions,
 } from '@/types/plugin'
 
 // ---------------------------------------------------------------------------
@@ -221,12 +223,26 @@ export interface PluginContextDeps {
   subscribeHostEvent: <T extends keyof HostEventMap>(
     type: T,
     listener: (ev: HostEventMap[T]) => void,
+    options?: PluginSubscribeOptions,
   ) => () => void
   host: PluginHostApi
   /** 文件能力（两侧同形状；主进程直接实现，渲染层经 IPC） */
   fs: PluginFsApi
   storage: PluginStorage
   log: PluginLogger
+  /**
+   * 按插件装配的宿主服务（`ctx.sessions` / `ctx.sessionController` / …）。
+   * 只包含"已实现且插件已声明对应权限"的服务；其余成员不存在（访问抛结构化错误）。
+   */
+  hostServices?: PluginServices
+  /**
+   * 插件私有数据目录（`userData/plugins-data/<id>` 的绝对路径）。
+   *
+   * 对应 DSH 的 `ctx.get('homePaths').home`：DSH 兼容层（plugin-dsh-compat）一直用它把
+   * 插件状态写进 AI-KM 的插件数据目录；原生插件以前拿不到这个值，只能用相对 `ctx.fs` 猜。
+   * 两边共用同一个契约后，插件按 DSH 写法拿 home 也能在 AI-KM 原生跑（反之亦然）。
+   */
+  dataDir?: string
 }
 
 export interface PluginContextHandle {
@@ -254,6 +270,9 @@ export function createPluginContext(deps: PluginContextDeps): PluginContextHandl
   }
 
   const ctx: PluginContext = {
+    // 宿主服务面：只展开"已实现且插件已声明权限"的服务；未提供的成员在 plugin-host 里
+    // 会装抛错桩（不是 undefined），因此这里不需要再放占位对象。
+    ...(deps.hostServices || {}),
     plugin: { id: deps.id, name: deps.name, version: deps.version, dir: deps.dir },
     config: deps.config,
 
@@ -266,11 +285,20 @@ export function createPluginContext(deps: PluginContextDeps): PluginContextHandl
     },
 
     getService<T = unknown>(name: string) {
+      // DSH 兼容契约：`ctx.get('homePaths')` → 插件私有数据目录（与 DSH 兼容层同一个 home）
+      if (name === 'homePaths' && deps.dataDir) return { home: deps.dataDir } as T
+      // 宿主服务优先（按插件装配的那份），再回落到全局服务注册表（插件间 provide 的）
+      const host = deps.hostServices as Record<string, unknown> | undefined
+      if (host && name in host) return host[name] as T
       return deps.services.get<T>(name)
     },
 
-    on<T extends keyof HostEventMap>(type: T, listener: (ev: HostEventMap[T]) => void) {
-      return track(deps.subscribeHostEvent(type, listener))
+    on<T extends keyof HostEventMap>(
+      type: T,
+      listener: (ev: HostEventMap[T]) => void,
+      options?: PluginSubscribeOptions,
+    ) {
+      return track(deps.subscribeHostEvent(type, listener, options))
     },
 
     effect(fn: () => void | (() => void | Promise<void>)) {

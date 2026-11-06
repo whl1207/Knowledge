@@ -145,6 +145,27 @@ const dsh = {
     list(): Promise<Array<{ id: string; events: number; lastTs: number }>> {
       return invokeIpc('sessionLog:list')
     },
+    /**
+     * 外部渠道（微信等）的会话摘要，按最近活动倒序；首页「导入外部会话」用。
+     */
+    agentSummaries(): Promise<
+      Array<{
+        id: string
+        events: number
+        lastTs: number
+        createdAt: number
+        provider: string
+        model: string
+        title: string
+        preview: string
+      }>
+    > {
+      return invokeIpc('sessionLog:agentSummaries')
+    },
+    /** 读某个 agent 会话的全部事件（导入记录 / 只读查看） */
+    agentEvents(sessionId: string): Promise<SessionEvent[]> {
+      return invokeIpc('sessionLog:agentEvents', { sessionId })
+    },
     search(keyword: string): Promise<Array<{ id: string; snippet: string }>> {
       return invokeIpc('sessionLog:search', { keyword })
     },
@@ -522,6 +543,20 @@ const dsh = {
       return invokeIpc('plugin:client-bundle', { id })
     },
     /**
+     * DSH 兼容包界面半边的 fetch 基址（该插件自己的回环 webServer）。
+     * 返回 `{ url: null }` = 没有 webServer（相对路径 fetch 会失败）。
+     */
+    clientBaseUrl(id: string): Promise<{ url: string | null }> {
+      return invokeIpc('plugin:client-base-url', { id })
+    },
+    /**
+     * 界面半边 → **本插件自己**的主进程半边（`ctx.rpc.call`）。
+     * 主进程只查该插件注册的方法（`ctx.rpcHost.handle`），拿不到通用 IPC。
+     */
+    rpcCall(pluginId: string, method: string, args?: unknown): Promise<unknown> {
+      return invokeIpc('plugin:rpc:call', { pluginId, method, args })
+    },
+    /**
      * 插件委派智能体（`ctx.agent.run` 的主进程侧）。
      * 判权 / 同意 / 预算 / D5 工具裁剪 / 步数裁定**全在主进程**；这里只是通道。
      */
@@ -739,6 +774,20 @@ const dsh = {
         sheets: Array<{ name: string; headers: string[]; rows: unknown[][]; truncated: boolean }>
       }> {
         return ipcRenderer.invoke('plugin:files:read-sheet', options)
+      },
+      /**
+       * 把图片/二进制落成**临时文件**并返回绝对路径（给智能体的 read_image 用）。
+       * 落盘位置是 `userData/plugins-data/<id>/tmp/`，**不在插件目录**里：
+       * 插件目录被宿主监视，写文件会触发热重载（面板重置、在飞任务被取消）。
+       */
+      saveTemp(options: {
+        id: string
+        name?: string
+        mime?: string
+        base64?: string
+        dataUrl?: string
+      }): Promise<{ path: string; name: string; bytes: number }> {
+        return ipcRenderer.invoke('plugin:files:save-temp', options)
       },
       /** 该插件记住的路径（用户选过的文件 / 文件夹；跨重启有效，可在「插件 → 数据」里撤销） */
       grants(options: { id: string }): Promise<{

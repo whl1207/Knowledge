@@ -159,14 +159,16 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
       + 'Failures and cancellation **do not throw** — just read finish in your for-await loop. Image content blocks are rejected for now (LLM_UNSUPPORTED_CONTENT).',
   },
   {
-    name: 'ctx.files.pickFiles / pickDirectory / pickWritableDirectory / list / readText / readBase64 / readBytes / readSheet / renderPdfPage / openInApp / writeText / remove',
+    name: 'ctx.files.pickFiles / pickDirectory / pickWritableDirectory / saveTempFile / list / readText / readBase64 / readBytes / readSheet / renderPdfPage / openInApp / writeText / remove',
     topic: 'api-caps',
     descZh: '文件能力的**旧入口**（权限 fs，全部 Promise）：选择框与预览留在这里 —— pickFiles({accept,multiple})→{cancelled,files}、'
       + 'pickDirectory / pickWritableDirectory（写权限唯一来源）、renderPdfPage→{dataUrl}、openInApp。'
+      + '**saveTempFile({name,mime,base64|dataUrl})→{path,bytes}** 把 dataURL / 字节落成临时文件（落在插件数据目录 plugins-data/<id>/tmp，**不在插件目录**里，写这里不会触发热重载），返回的**绝对路径**可直接交给智能体的 read_image。'
       + '读写（list/readText/readBase64/readBytes/readSheet/writeText/remove）与 ctx.fs 同名方法行为一致；**新代码请直接用 ctx.fs**（多目标身份 / 版本 / editText）。'
       + '只能访问用户为该插件**选过**的路径（记住、跨重启、可在「插件 → 数据」撤销）。',
     descEn: 'The **legacy entry** for file access (permission fs, everything returns a Promise): pickers and previews stay here — '
       + 'pickFiles({accept,multiple})→{cancelled,files}, pickDirectory / pickWritableDirectory (the only source of write access), renderPdfPage→{dataUrl}, openInApp. '
+      + '**saveTempFile({name,mime,base64|dataUrl})→{path,bytes}** writes a dataURL / bytes to a temp file under the plugin data dir (plugins-data/<id>/tmp, **not** the plugin folder, so it does not trigger a hot reload) and returns an absolute path ready for the agent’s read_image. '
       + 'The read/write spellings (list / readText / readBase64 / readBytes / readSheet / writeText / remove) behave like their ctx.fs counterparts; '
       + '**use ctx.fs in new code** (target identity, versions, editText). Only paths the user picked for this plugin are readable.',
   },
@@ -315,6 +317,30 @@ export const PLUGIN_DEV_FACTS: readonly PluginDevFact[] = [
     topic: 'api-main',
     descZh: '提供 / 依赖宿主或其它插件的服务：service() 返回注销函数；依赖用清单 inject 声明（服务未就绪时插件停在 pending，就绪后自动装载）。',
     descEn: 'Provide or depend on services from the host or other plugins: service() returns a disposer; declare dependencies in the manifest inject (the plugin stays pending until they appear, then loads automatically).',
+  },
+  {
+    name: '主进程半边：ctx.waterfall.on(event, handler) / ctx.approval.request(request) / ctx.userQuestions.ask(questions, { sessionId })',
+    topic: 'api-main',
+    descZh: '需要人在回路时的三个入口（都要 agent.control）：ctx.waterfall.on 注册"回答者"，认领 approval/request 或 user-questions/request，调用 next() 交给下一个（最后是宿主弹框）；ctx.approval.request 主动发起一次确认（返回 allowed-once / rejected / cancelled）；ctx.userQuestions.ask 主动提问，无人认领时回落到桌面提问 UI（必须传 sessionId，否则抛 PLUGIN_UNSUPPORTED）。',
+    descEn: 'The three human-in-the-loop entry points (all need agent.control): ctx.waterfall.on registers an answerer that can claim approval/request or user-questions/request and calls next() to pass it on (the host dialog is last); ctx.approval.request asks for one confirmation (returns allowed-once / rejected / cancelled); ctx.userQuestions.ask asks questions and falls back to the desktop prompt UI when nobody claims it (sessionId is required, otherwise PLUGIN_UNSUPPORTED).',
+  },
+  {
+    name: '主进程半边：ctx.webServer.register(...) / ctx.process.spawn(...) / ctx.secrets.{get,set,delete,keys} / ctx.schedule.{after,every,dailyAt} / ctx.attachments.{save,read,list,remove} / ctx.rpcHost.handle(method, fn)（界面半边用 ctx.rpc.call）',
+    topic: 'api-main',
+    descZh: '资源类服务（各自一个权限）：ctx.webServer 每个插件一个独立 http 服务（只绑 127.0.0.1，卸载即关，支持 exact/prefix/upgrade/fallback）；ctx.process 只启动白名单二进制（cloudflared / git / node）且参数必须是数组，卸载杀进程；ctx.secrets 用系统加密存插件密钥（界面半边拿不到明文）；ctx.schedule 的定时器卸载即清；ctx.attachments 收发文件（上限 64MB，更大的走 ctx.fs 授权目录）；ctx.rpcHost.handle 注册只给**自己界面半边**调用的方法，界面半边对应 ctx.rpc.call（网页 / 移动端没有主进程时不可用）。',
+    descEn: 'Resource services (one permission each): ctx.webServer gives each plugin its own loopback http server (exact/prefix/upgrade/fallback, closed on unload); ctx.process only starts allow-listed binaries (cloudflared / git / node) with an argument array and kills the tree on unload; ctx.secrets stores plugin secrets with OS encryption (the UI half never sees plaintext); ctx.schedule timers are cleared on unload; ctx.attachments sends/receives files (64MB cap; use ctx.fs grants for bigger); ctx.rpcHost.handle registers methods callable only by this plugin’s own UI half, which uses ctx.rpc.call (unavailable on web/mobile without the main process).',
+  },
+  {
+    name: '主进程半边：ctx.sessions.{get, list, transcript} / ctx.sessionController.{create, prompt, cancel, list, modelCatalog, selectModel, projections} / ctx.sessionProjections.cachedSnapshot / ctx.agents.{create, ensureSession, get} / ctx.workspaceRegistry.{list, get, resolveByPath, create}',
+    topic: 'api-main',
+    descZh: '宿主会话面（需要 agent 或 agent.control 权限）：ctx.sessions 只读（列表 / 头部 / 历史投影；读正文 transcript 还要 agent.observe）；ctx.sessionController 建会话、发消息（queue/steer）、取消、列模型、换模型；ctx.sessionProjections 是不激活 agent 也能读的投影缓存；ctx.agents 是同一套会话的句柄；ctx.workspaceRegistry 目前只有一个工作区（userData/plugins-data/<id>/workspace），create() 不支持新建。'
+      + 'create 按 sessionId 幂等 adopt；换模型在**下一条 prompt** 生效（会重建 agent，逻辑 id 不变，暂不支持跨来源）；'
+      + '会话工具面按插件权限裁剪，工作目录默认 userData/plugins-data/<id>/workspace。'
+      + '这四项和 ctx.tool / ctx.fs 一样，是**主进程半边**的成员，界面半边没有。',
+    descEn: 'Host session surface (needs agent or agent.control): ctx.sessions is read-only (list / header / transcript); ctx.sessionController creates sessions, sends prompts (queue/steer), cancels, lists models and switches model; ctx.sessionProjections is a cache readable without activating an agent; ctx.agents exposes handles over the same sessions. '
+      + 'create is idempotent per sessionId; a model switch takes effect on the **next prompt** (the agent is rebuilt, the logical id stays, cross-provider is not supported yet); '
+      + 'the session tool surface is trimmed to the plugin permissions and the default cwd is userData/plugins-data/<id>/workspace. '
+      + 'All four live on the **main half**; the UI half has none of them.',
   },
   {
     name: '主进程半边：ctx.host.granted.{list, readText, writeText, listDir, remove} / ctx.host.readFile|writeFile|listDir / ctx.host.runShell(command, { cwd }) / ctx.host.fetch(url, init) / ctx.host.sessions.list() / ctx.host.notify(message)',
@@ -546,7 +572,7 @@ export const PLUGIN_DEV_FAQ: readonly PluginDevFaq[] = [
     qEn: 'ctx.agent.run hits a budget error (concurrency / hourly cap), or runs fewer steps than requested.',
     aZh: '预算**由宿主裁定，只紧不松**，插件只能申请更小的值：'
       + '\n  · timeoutMs 默认 10 分钟、上限 30 分钟；maxSteps 默认 20、上限 60，且与预设自己的步数上限取 min；'
-      + '\n  · 每个插件最多同时 1 个委派、每小时 20 次（本窗口内计数，跨重启保留）——超了会**抛错**，不会静默降级；'
+      + '\n  · 每个插件默认最多同时 1 个委派、每小时 20 次（本窗口内计数，跨重启保留；用户可在「插件 → 权限」调高，或设为无限）——超了会**抛错**，不会静默降级；'
       + '\n  · 所以"我要 500 步"不会给你 500 步。真要更多，请用户到「插件 → 数据」里看用量，或把长任务拆成多次、'
       + '并在界面里给进度提示（每次委派都是一次独立会话，没有跨会话记忆）。',
     aEn: 'The budget is **host-decided and only tightens** — a plugin can only ask for less: timeoutMs 10 min default / 30 max; maxSteps 20 default / 60 max, and min() with the preset\'s own cap; at most 1 concurrent delegation and 20 calls per hour per plugin (counted in a window, persisted across restarts). Exceeding them **throws** rather than silently degrading, so asking for 500 steps will not give you 500. For long work, split it into several calls and show progress in the UI (each delegation is an isolated session with no cross-session memory).',
@@ -720,9 +746,9 @@ ${CONSTRAINTS_ZH}
 - ctx.on(type, listener) → 返回取消订阅函数（只收到属于自己的工具 / 委派事件）；ctx.effect(fn) → 登记副作用并自动清理
 - ctx.app.info() / ctx.app.agentPresets() / ctx.app.setChromeHidden(hidden) / ctx.app.chromeHidden()（全屏面板时隐藏宿主外壳）
 - ctx.llm（需要 llm 权限）：{ available, reason, sources(), current(), models(source), chat({ source, model, system, messages, temperature, maxTokens, think, timeoutMs, schema }), stream({ messages, schema }) }——要模型只回 JSON 就传 schema（结果在 value），要边出边显示用 stream（一定以 finish 结束，看 finish.kind）
-- ctx.files（需要 fs 权限；**选择框与预览**，全部异步）：{ available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] }（取消时 cancelled=true 且不抛错，路径取 files[0].path）, pickDirectory() → { cancelled, dir: { path, name } }, pickWritableDirectory()（**能写文件的唯一来源**）, renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
+- ctx.files（需要 fs 权限；**选择框与预览**，全部异步）：{ available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] }（取消时 cancelled=true 且不抛错，路径取 files[0].path）, pickDirectory() → { cancelled, dir: { path, name } }, pickWritableDirectory()（**能写文件的唯一来源**）, saveTempFile({ name, mime?, base64? | dataUrl? }) → { path, name, bytes }（落插件数据目录 tmp，返回绝对路径给 read_image；不触发插件热重载）, renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
 - ctx.fs（需要 fs 权限，**两个半边同形状，读写都用它**）：{ available, reason, resolve(path) → { targetKey, displayPath }, stat(path) → { exists, isDir, size, version }, readText(path) → { text, pages, pdf }, readBytes(path) → { bytes: Uint8Array, size }, readBase64(path) → { base64, size }, listDir(dir) → { dir, entries: [{ name, path, isDir, size }] }, writeText(path, text, { expectedVersion?, presence? }) → { path, bytes, version }, editText(path, [{ find, replace, all? }]) → { applied }, remove(path) → { removed }, sheet.read(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } }——**失败抛异常，按 err.code（FS_* 族）分支，不要解析 message**
-- ctx.agent（需要 agent.run，仅桌面端）：{ available, reason, presets(), run(presetId, input, { timeoutMs, maxSteps }), cancelAll() } → { ok, termination, output, usage? }（只有 termination === 'completed' 算成功）
+- ctx.agent（需要 agent.run，仅桌面端）：{ available, reason, presets(), run(presetId, input, { timeoutMs, maxSteps }), cancelAll() } → { ok, termination, output, usage?, deniedTools? }（只有 termination === 'completed' 算成功；deniedTools = 你申请了但被权限天花板裁掉的工具，典型是 read_image 需要用户在「插件 → 权限」打开文件放宽）
 - ctx.agents（句柄层，同样需要 agent.run）：{ available, reason, presets(), create({ preset, input }) → 句柄（whenIdle / result / usage / stream / cancel / dispose）, get(id), list(), cancelAll() }
 - ctx.image（需要 image 权限）：{ available, reason, info(), generate({ prompt, negative?, width?, height?, steps?, reference? }), cancelAll() } → { ok, images: [{ url }], code?, error? }（**失败不抛**，看 r.ok / r.code）
 - ctx.tts：{ available, reason, speak(text, { stopPrevious }), stop() }（不需要权限）
@@ -731,6 +757,7 @@ ${CONSTRAINTS_ZH}
   **没有 execute** —— 执行宿主工具只能由智能体循环发起，与 DSH 工具服务的公开面一致）
 - ctx.tool({ name, description, inputSchema, handler })：inputSchema 是 JSON Schema；handler(input) 返回可 JSON 序列化的结果（{ ok, value?, error? }）
 - ctx.service(name, value)、ctx.getService(name)、ctx.on(type, listener)（工具与 agent 观测）、ctx.effect(fn)
+- ctx.get('homePaths') → { home }（插件私有数据目录的绝对路径；与 DSH 兼容层的 homePaths 同一个目录，**建议**把状态 / 临时文件写在这里，而不是写插件目录——插件目录被宿主监视，写文件会触发热重载）
 - ctx.storage.{get,set,delete,keys}（插件私有键值，落在 userData/plugins-data/<插件 id>/）
 - ctx.fs（与界面半边同形状；插件目录内免授权，其余路径需用户授权）
 - ctx.host.readFile / writeFile / listDir（只能碰**插件自己的目录**）、ctx.host.granted.{list, readText, writeText, listDir, remove}（用户授权过的路径，写只认可写授权）
@@ -773,9 +800,9 @@ UI half apply(ctx):
 - ctx.on(type, listener) → returns an unsubscribe function (you only receive your own tool / delegation events); ctx.effect(fn) → registers a disposable side effect
 - ctx.app.info() / ctx.app.agentPresets() / ctx.app.setChromeHidden(hidden) / ctx.app.chromeHidden() (hide host chrome for a fullscreen panel)
 - ctx.llm (needs the llm permission): { available, reason, sources(), current(), models(source), chat({ source, model, system, messages, temperature, maxTokens, think, timeoutMs, schema }), stream({ messages, schema }) } — pass schema for JSON-only replies (result in value) and use stream for incremental output (always ends with finish; check finish.kind)
-- ctx.files (needs the fs permission; **pickers and previews**, all async): { available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] } (cancellation sets cancelled=true and does not throw; take files[0].path), pickDirectory() → { cancelled, dir: { path, name } }, pickWritableDirectory() (**the only source of write access**), renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
+- ctx.files (needs the fs permission; **pickers and previews**, all async): { available, reason, pickFiles({ accept: 'any'|'pdf'|'text', multiple }) → { cancelled, files: [{ path, name, size }] } (cancellation sets cancelled=true and does not throw; take files[0].path), pickDirectory() → { cancelled, dir: { path, name } }, pickWritableDirectory() (**the only source of write access**), saveTempFile({ name, mime?, base64? | dataUrl? }) → { path, name, bytes } (writes to the plugin data dir tmp and returns an absolute path for read_image; no hot reload), renderPdfPage(path, { page, scale, maxWidth }) → { dataUrl, pageCount, width, height }, openInApp(path, view) }
 - ctx.fs (needs the fs permission; **same shape on both halves — use it for reads and writes**): { available, reason, resolve(path) → { targetKey, displayPath }, stat(path) → { exists, isDir, size, version }, readText(path) → { text, pages, pdf }, readBytes(path) → { bytes: Uint8Array, size }, readBase64(path) → { base64, size }, listDir(dir) → { dir, entries: [{ name, path, isDir, size }] }, writeText(path, text, { expectedVersion?, presence? }) → { path, bytes, version }, editText(path, [{ find, replace, all? }]) → { applied }, remove(path) → { removed }, sheet.read(path) → { sheetCount, sheets: [{ name, headers, rows, truncated }] } } — **failures throw; branch on err.code (the FS_* family), never parse the message**
-- ctx.agent (needs agent.run, desktop only): { available, reason, presets(), run(presetId, input, { timeoutMs, maxSteps }), cancelAll() } → { ok, termination, output, usage? } (only termination === 'completed' counts as success)
+- ctx.agent (needs agent.run, desktop only): { available, reason, presets(), run(presetId, input, { timeoutMs, maxSteps }), cancelAll() } → { ok, termination, output, usage?, deniedTools? } (only termination === 'completed' counts as success; deniedTools lists tools you requested but the permission ceiling clipped — typically read_image needs the user to turn on the file relaxation under Plugins → Permissions)
 - ctx.agents (handle layer, also needs agent.run): { available, reason, presets(), create({ preset, input }) → handle (whenIdle / result / usage / stream / cancel / dispose), get(id), list(), cancelAll() }
 - ctx.image (needs the image permission): { available, reason, info(), generate({ prompt, negative?, width?, height?, steps?, reference? }), cancelAll() } → { ok, images: [{ url }], code?, error? } (**failures never throw** — check r.ok / r.code)
 - ctx.tts: { available, reason, speak(text, { stopPrevious }), stop() } (no permission needed)
@@ -784,6 +811,7 @@ Main-process half apply(ctx):
   register / list / metadata — **no execute**. Running host tools is the agent loop's job, matching DSH's tool-service surface)
 - ctx.tool({ name, description, inputSchema, handler }): inputSchema is JSON Schema; handler(input) returns JSON-serialisable data ({ ok, value?, error? })
 - ctx.service(name, value), ctx.getService(name), ctx.on(type, listener) (tool and agent observability), ctx.effect(fn)
+- ctx.get('homePaths') → { home } (absolute path of the plugin data dir; the same directory as the DSH compat layer's homePaths — **prefer** writing state / temp files here, not in the plugin folder: the folder is watched and writes trigger a hot reload)
 - ctx.storage.{get,set,delete,keys} (private key/value store under userData/plugins-data/<plugin id>/)
 - ctx.fs (same shape as the UI half; free inside the plugin folder, otherwise the user must grant the path)
 - ctx.host.readFile / writeFile / listDir (**the plugin’s own folder only**), ctx.host.granted.{list, readText, writeText, listDir, remove} (user-granted paths; writes need a writable grant)

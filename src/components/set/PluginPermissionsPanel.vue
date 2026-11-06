@@ -99,25 +99,32 @@
                     class="pp-num"
                     type="number"
                     min="1"
-                    max="3"
+                    max="200"
                     :disabled="!row.agentRunDeclared"
                     :value="draftOf(row).concurrency"
-                    :title="zh ? '并发上限（默认 1，最大 3）' : 'Concurrency limit (default 1, max 3)'"
+                    :title="zh ? '并发上限（默认 1，最大 200）' : 'Concurrency limit (default 1, max 200)'"
                     @input="edit(row, { concurrency: Number(($event.target as HTMLInputElement).value) })"
                   />
                   <span class="pp-sep">×</span>
                   <input
                     class="pp-num pp-num-wide"
                     type="number"
-                    min="1"
+                    min="0"
                     max="200"
                     :disabled="!row.agentRunDeclared"
                     :value="draftOf(row).callsPerHour"
-                    :title="zh ? '每小时调用上限（默认 20，最大 200）' : 'Calls per hour (default 20, max 200)'"
-                    @input="edit(row, { callsPerHour: Number(($event.target as HTMLInputElement).value) })"
+                    :title="zh ? '每小时调用上限（默认 20，最大 200；0 或点 ∞ = 无限）' : 'Calls per hour (default 20, max 200; 0 or ∞ = unlimited)'"
+                    @input="edit(row, { callsPerHour: ($event.target as HTMLInputElement).value === '' ? draftOf(row).callsPerHour : Number(($event.target as HTMLInputElement).value) })"
                   />
+                  <button
+                    class="pp-inf"
+                    :class="{ 'is-on': draftOf(row).callsPerHour === 0 }"
+                    :disabled="!row.agentRunDeclared"
+                    :title="zh ? '不限每小时次数（再点一次恢复 20 次/小时）' : 'Unlimited calls per hour (click again to restore 20/hour)'"
+                    @click="edit(row, { callsPerHour: draftOf(row).callsPerHour === 0 ? 20 : 0 })"
+                  >∞</button>
                   <span class="pp-usage" :title="zh ? '本小时已用 / 上限（滑动窗口）' : 'Used this hour / limit (sliding window)'">
-                    <b>{{ row.callsInWindow }}</b><span v-if="row.inFlight" class="pp-inflight">+{{ row.inFlight }}</span>
+                    <b>{{ row.callsInWindow }}</b><span class="pp-lim">/{{ draftOf(row).callsPerHour === 0 ? '∞' : draftOf(row).callsPerHour }}</span><span v-if="row.inFlight" class="pp-inflight">+{{ row.inFlight }}</span>
                   </span>
                   <i
                     class="fa fa-refresh pp-icon-link"
@@ -226,7 +233,7 @@ const helpText = computed(() =>
   zh.value
     ? '这一页管的是「你授予了什么」——权限本身由插件清单声明，这里改不了。'
       + '三态图标：? 每次询问、✓ 已允许、⛔ 已拒绝，点一下切换（工具审批只管声明了 fs / shell 的插件，默认要问）。'
-      + '额度＝并发 × 每小时（默认 1 / 20，上限 3 / 200），旁边是本小时已用，点 ↻ 重置。'
+      + '额度＝并发 × 每小时（默认 1 / 20，上限 200 / 200；每小时填 0 或点 ∞ = 无限），旁边是本小时已用，点 ↻ 重置。'
       + '工作目录（文件夹图标）＝被委派智能体在哪个目录里工作：相对路径按它解析、写入也围在它里面，'
       + '所以只能从你授权过的「可写」文件夹里选（默认 = 知识库根；⚠ 它不是沙箱，命令仍能离开该目录）。'
       + '两个放宽开关（文件 / MCP）默认关：文件还需插件自己声明 fs；MCP 只含你在「MCP 服务」里配置并启用的服务；'
@@ -234,7 +241,7 @@ const helpText = computed(() =>
       + '额度与开关都落在主进程、写入前要确认，卸载插件会一并清掉。'
     : 'This page is what you grant — the permissions themselves come from each plugin manifest and cannot be changed here. '
       + 'Tri-state icons: ? asks, ✓ allowed, ⛔ denied — click to cycle (tool approval only concerns plugins declaring fs / shell; they ask by default). '
-      + 'Budget = concurrency × per hour (default 1 / 20, ceilings 3 / 200) with this hour’s usage beside it; click ↻ to reset. '
+      + 'Budget = concurrency × per hour (default 1 / 20, ceilings 200 / 200; 0 or ∞ per hour = unlimited) with this hour’s usage beside it; click ↻ to reset. '
       + 'Working directory (folder icon) = where the delegated agent runs: relative paths resolve against it and writes stay inside it, so it can only be one of the folders you granted as writable (default = KB root; ⚠ not a sandbox — commands can still leave it). '
       + 'The two relaxation toggles (file / MCP) are off by default: file also requires the plugin to declare fs; MCP only covers servers you configured and enabled; '
       + 'shell / code execution / skills / recursive delegation can never be relaxed. '
@@ -310,17 +317,22 @@ const onSave = async (row: PluginAgentOverviewRow) => {
   const d = draftOf(row)
   // 钳到面板承诺的区间（服务端还会再钳一次；这里只是别让用户看到自己填了 99 却生效 3）
   const limits = {
-    concurrency: Math.max(1, Math.min(3, Math.floor(d.concurrency) || 1)),
-    callsPerHour: Math.max(1, Math.min(200, Math.floor(d.callsPerHour) || 20)),
+    concurrency: Math.max(1, Math.min(200, Math.floor(d.concurrency) || 1)),
+    // 0 = 无限（合法值，不能 `|| 20` 吞掉）；非法值回落默认 20
+    callsPerHour: (() => {
+      const n = Math.floor(Number(d.callsPerHour))
+      return Number.isFinite(n) && n >= 0 ? Math.min(200, n) : 20
+    })(),
   }
   const relax = { fs: d.relaxFs, mcp: d.relaxMcp }
+  const perHourText = limits.callsPerHour === 0 ? (zh.value ? '无限' : 'unlimited') : `${limits.callsPerHour}`
   try {
     await ElMessageBox.confirm(
       zh.value
-        ? `修改「${row.name}」的委派额度与放宽设置？\n副本：并发 ${limits.concurrency}、每小时 ${limits.callsPerHour} 次`
+        ? `修改「${row.name}」的委派额度与放宽设置？\n副本：并发 ${limits.concurrency}、每小时 ${perHourText}`
           + `\n放宽：文件工具 ${relax.fs ? '开' : '关'}、MCP ${relax.mcp ? '开' : '关'}`
           + (relax.fs || relax.mcp ? '\n\n注意：放宽后，被委派的智能体会拿到对应工具。' : '')
-        : `Update delegation limits for “${row.name}”?\nConcurrency ${limits.concurrency}, ${limits.callsPerHour}/hour`
+        : `Update delegation limits for “${row.name}”?\nConcurrency ${limits.concurrency}, ${perHourText}/hour`
           + `\nRelaxation: file tools ${relax.fs ? 'on' : 'off'}, MCP ${relax.mcp ? 'on' : 'off'}`,
       zh.value ? '插件权限' : 'Plugin permissions',
       { type: 'warning', confirmButtonText: zh.value ? '确定' : 'OK', cancelButtonText: zh.value ? '取消' : 'Cancel' },
@@ -758,6 +770,30 @@ const onResetUsage = async (row: PluginAgentOverviewRow) => {
 .pp-num-wide {
   width: 54px;
 }
+/* 「无限」开关：0 次/小时 = 不限制；点一下在 0 与 20 之间切换 */
+.pp-inf {
+  height: 20px;
+  width: 20px;
+  margin: 0 0 0 2px;
+  padding: 0;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background-color: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.65;
+}
+.pp-inf.is-on {
+  opacity: 1;
+  color: var(--fontActiveColor);
+  border-color: var(--fontActiveColor);
+}
+.pp-inf:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
 
 /* ====== 三态图标按钮（委派 / 工具审批）====== */
 .pp-state {
@@ -856,6 +892,10 @@ const onResetUsage = async (row: PluginAgentOverviewRow) => {
   margin-left: 6px;
   font-variant-numeric: tabular-nums;
   opacity: 0.8;
+}
+.pp-lim {
+  opacity: 0.5;
+  margin-left: 1px;
 }
 .pp-inflight {
   opacity: 0.6;

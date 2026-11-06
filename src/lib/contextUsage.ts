@@ -2,7 +2,8 @@
  * contextUsage.ts — 主页右上角「上下文占用圆环」的两个输入：已用 token（估算）与窗口上限
  *
  * 历史问题（本模块集中修复）：
- *  1) 上限写死 1M → DeepSeek(128K) / OpenAI(128K) / Anthropic(200K) 的占用率被低估几十倍；
+ *  1) 上限写死 1M 或按来源粗估 128K → DeepSeek(1M) / OpenAI(128K) / Anthropic(200K) 的占用率算错；
+ *     DeepSeek 的 128K 兜底会让压缩阈值落在约 9.4 万（「1M 上下文九万就压缩」），现已按官方 1M；
  *  2) Ollama 只认模型上限（还写死了 `llama.context_length`），而手动调小的上下文长度不可见；
  *  3) 回退估算只累加消息正文，漏掉知识库召回片段 / 工具调用结果 / system prompt / 工具 schema / 图片；
  *  4) 手填的「窗口上限」是全局单值，切换来源后仍然生效（分母变成别的来源的值）。
@@ -46,13 +47,25 @@ export {
 /** 完全无法判定窗口时的兜底分母（主流云端模型常见档位；tooltip 会显式标注「未知」） */
 export const UNKNOWN_CONTEXT_WINDOW = FALLBACK_CONTEXT_WINDOW
 
-/** 来源默认窗口（tokens）：仅在模型名关键字未命中时使用 */
+/**
+ * 来源默认窗口（tokens）：仅在模型名关键字未命中时使用。
+ *
+ * ⚠️ DeepSeek 官方模型是 **1M** 窗口（见 src/shared/outputTokens.ts 的口径），不能再写成 128K：
+ * 分母被压成 128K 后，压缩阈值只有约 9.4 万 tokens——这就是「明明 1M 上下文，九万就压缩」
+ * 的根因。DeepSeek 兼容网关的窗口更小时，用「上下文窗口」输入框手填覆盖即可。
+ */
 const PROVIDER_CONTEXT_WINDOW: Record<string, number> = {
   openai: 128_000,
-  deepseek: 128_000,
+  deepseek: 1_000_000,
   anthropic: 200_000,
   google: 1_048_576,
   azure: 128_000,
+  // GLM / Kimi / MiMo：官方 /models 只返回模型 id（不带窗口字段），按各自公开档位兜底；
+  // 设置页会尝试探测兼容网关里的真实值，探测不到时可手填覆盖。
+  //   GLM-4.6：最大上下文 200K（智谱迁移文档）；Kimi K2 0905：上下文 256K；MiMo 暂按 128K。
+  glm: 200_000,
+  kimi: 262_144,
+  mimo: 128_000,
   // 本地自托管：仅在 /api/show 等都读不到时的最后兜底。
   // 注意 Ollama 未手动设置时默认按模型自身的 context_length 加载（/api/show 通常能读到，会盖住这里）；
   // 手动调小时则以 /api/ps 的已加载实例窗口为准。
@@ -69,7 +82,9 @@ const MODEL_CONTEXT_WINDOW: Array<[RegExp, number]> = [
   [/gpt-5|o1-|o3-|o4-/i, 200_000],
   [/claude/i, 200_000],
   [/gemini/i, 1_048_576],
-  [/deepseek/i, 128_000],
+  // DeepSeek 官方模型一律 1M（deepseek-flash / deepseek-v4-* / 旧 API 名 deepseek-chat、deepseek-reasoner
+  // 现在都指向同一代大窗口模型）。这里若再留 128K，压缩阈值会被算成约 9.4 万，一开会话就触发压缩。
+  [/deepseek/i, 1_000_000],
 ]
 
 /** 来源键：自定义来源按「激活来源索引」分别计（不同来源窗口可能完全不同） */
@@ -128,7 +143,7 @@ export function resolveContextLimit(opts: {
   if (real > 0) return { limit: real, source: 'model-default' }
   const byModel = modelContextWindow(opts.model)
   if (byModel) return { limit: byModel, source: 'model-name' }
-  const byProvider = PROVIDER_CONTEXT_WINDOW[String(opts.provider || '')]
+  const byProvider = PROVIDER_CONTEXT_WINDOW[normalizeLlmType(String(opts.provider || ''))]
   if (byProvider) return { limit: byProvider, source: 'provider-default' }
   return { limit: UNKNOWN_CONTEXT_WINDOW, source: 'unknown' }
 }
@@ -225,10 +240,30 @@ export function migrateLegacyContextWindow(llm: any): boolean {
   return true
 }
 
-/** 读取某来源的手填覆盖值（0 = 自动） */
+/** 手填覆盖值的「按来源 id」键：索引会随来源增删/排序漂移，id 不会 */
+export function customManualKeyById(id: number): string {
+  return `customId:${id}`
+}
+
+/**
+ * 读取某来源的手填覆盖值（0 = 自动）。
+ *
+ * 自定义来源优先按 **来源 id** 取（`customId:<id>`），再回退到旧的「按索引」键（`custom:<idx>`）：
+ * 索引会因「增删来源 / 拖动排序 / 临时路由」而变，只认索引会让手填的窗口在换位置后
+ * 悄悄失效、退回 128K 兜底——表现就是「明明填了 256K，九万就压缩」。
+ */
 export function manualContextWindow(llm: any, provider: string, customSourceIndex?: number | null): number {
   const byProvider = llm?.contextWindowByProvider
   if (!byProvider || typeof byProvider !== 'object') return 0
+  if (normalizeLlmType(String(provider || '')) === 'custom') {
+    const srcs = Array.isArray(llm?.custom?.sources) ? llm.custom.sources : []
+    const idx = typeof customSourceIndex === 'number' && customSourceIndex >= 0 ? customSourceIndex : 0
+    const id = srcs[idx]?.id
+    if (typeof id === 'number') {
+      const byId = Number(byProvider[customManualKeyById(id)] || 0)
+      if (byId > 0) return byId
+    }
+  }
   return Number(byProvider[contextWindowKey(provider, customSourceIndex)] || 0)
 }
 

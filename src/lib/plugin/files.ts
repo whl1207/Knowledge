@@ -107,6 +107,17 @@ export interface PluginFilesApi {
    * 界面半边拿不到 SheetJS，读表格请用它，不要自己解析二进制。
    */
   readSheet(path: string, options?: { maxRows?: number; maxSheets?: number }): Promise<PluginSheetResult>
+  /**
+   * 把图片 / 二进制写成**临时文件**，返回绝对路径（交给智能体的 `read_image` 读）。
+   *
+   * 为什么需要：界面里 `renderPdfPage` / canvas 拿到的是 dataURL，而 `read_image` 只要绝对路径。
+   * **不要**把它写进插件目录（`ctx.host.writeFile` 或相对路径写文件都落在那里）：插件目录被
+   * 宿主监视，写文件会触发「插件已重载」——面板重置、正在跑的委派被取消，用户看到的就是
+   * 「点一下按钮页面跳走」。临时文件由主进程落在 `plugins-data/<id>/tmp/`，并按数量自动清理。
+   *
+   * 仅桌面端；网页 / 移动端调用会抛错。
+   */
+  saveTempFile(options: { name: string; mime?: string; base64?: string; dataUrl?: string }): Promise<{ path: string; name: string; bytes: number }>
   /** 把 PDF 的某一页渲染成 PNG data URL（视觉预览） */
   renderPdfPage(path: string, options?: { page?: number; scale?: number; maxWidth?: number }): Promise<PluginPdfPageResult>
   /** 用应用内置查看器打开文件（独立窗口；Markdown / PDF 等走各自视图） */
@@ -420,6 +431,22 @@ export function createPluginFilesApi(deps: FilesApiDeps): PluginFilesApi {
         })
       }
       throw new Error('当前平台暂不支持读取表格（Excel / CSV 解析需要桌面版）')
+    },
+
+    async saveTempFile(options) {
+      guard()
+      if (!(typeof window !== 'undefined' && aikmDsh?.plugin?.files)) {
+        throw new Error('当前平台不支持临时文件（需要桌面端主进程写盘）')
+      }
+      const base64 = String(options?.base64 ?? '')
+      const dataUrl = String(options?.dataUrl ?? '')
+      if (!base64 && !dataUrl) throw new Error('saveTempFile 需要 base64 或 dataUrl')
+      return ipc().saveTemp({
+        id: deps.pluginId,
+        name: String(options?.name || 'file'),
+        ...(options?.mime ? { mime: String(options.mime) } : {}),
+        ...(base64 ? { base64 } : { dataUrl }),
+      })
     },
 
     async renderPdfPage(filePath, options) {

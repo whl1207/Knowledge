@@ -67,10 +67,44 @@ let modelSources: { llm: any; disabled: string[] } | null = null
 let shareDir = ''
 /** 允许访客使用的智能体预设档案（渲染层组装后推送；id=general 为通用智能体，不在列表里） */
 let hostAgents: LanGuestAgentProfile[] = []
+/**
+ * 本机「通用智能体」档案（**不按访客白名单裁剪**）。
+ *
+ * 为什么不直接用 `hostAgents` 里的 general：那份是按局域网访客工具白名单裁剪过的，
+ * 插件会话（如微信）有自己的权限面，套用访客白名单会把 fs/shell 授权也一起剪掉。
+ */
+let localGeneralAgent: LanGuestAgentProfile | null = null
 
 export function setLanGuestPolicy(raw: unknown): LanGuestPolicy {
   policy = normalizeLanGuestPolicy(raw)
   return policy
+}
+
+/** 当前已推送的智能体档案（含首位「通用智能体」，id=general） */
+export function getLanGuestAgents(): LanGuestAgentProfile[] {
+  return hostAgents
+}
+
+/** 本机通用智能体档案（未按访客白名单裁剪；插件会话默认用它） */
+export function getLocalGeneralAgent(): LanGuestAgentProfile | null {
+  return localGeneralAgent
+}
+
+/** 接收本机通用智能体档案（只保留合法项；缺省为 null） */
+export function setLocalGeneralAgent(raw: unknown): void {
+  if (raw && typeof raw === 'object') {
+    const item = raw as any
+    if (typeof item.id === 'string' && item.id && item.options && typeof item.options === 'object') {
+      localGeneralAgent = {
+        id: String(item.id),
+        name: String(item.name || item.id),
+        desc: typeof item.desc === 'string' ? item.desc : '',
+        options: item.options as Record<string, any>,
+      }
+      return
+    }
+  }
+  localGeneralAgent = null
 }
 
 /** 接收访客可用智能体档案（只保留名称/选项均合法的项） */
@@ -210,6 +244,15 @@ export async function probeLanModelSources(timeoutMs = 3500): Promise<{ llm: any
 /** 最近一次由渲染层下发的模型来源快照（不触发探测） */
 export function getLanModelSources(): { llm: any; disabled: string[] } {
   return modelSources ? { llm: modelSources.llm, disabled: modelSources.disabled } : { llm: null, disabled: [] }
+}
+
+/**
+ * 最近一次由渲染层下发的主机模型配置（含 provider 与密钥）。
+ *
+ * ⚠️ 只在主进程内部使用：插件服务拿它来创建会话 / 换模型，**绝不**下发给网页端或插件。
+ */
+export function getLanGuestHostLlm(): LanGuestHostLlm | null {
+  return hostLlm
 }
 
 // ---------------------------------------------------------------------------

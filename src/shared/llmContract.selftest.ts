@@ -14,6 +14,7 @@ import {
   schemaInstruction,
   toPlainMessages,
   toChatMessages,
+  withSchemaInstruction,
   type LlmChunk,
 } from '@/shared/llmContract'
 
@@ -102,6 +103,35 @@ export function runLlmContractSelfTest(): SelfTestCase[] {
     schemaInstruction({ name: 'risk', schema }).includes('"required"'),
     schemaInstruction({ name: 'risk', schema }).slice(0, 40),
   )
+
+  // ---- schema 指令必须放在开头（LM Studio 的 Jinja 模板拒收 user 之后的 system） ----
+  {
+    const userFirst: Array<{ role: 'user' | 'system'; content: string }> = [{ role: 'user', content: '提取字段' }]
+    const out = withSchemaInstruction(userFirst, { schema })
+    check(
+      '没有 system → 在最前面插一条（system 必须在开头，否则 LM Studio 400）',
+      out.length === 2 && out[0].role === 'system' && out[1].role === 'user' && out[0].content.includes('JSON Schema'),
+      out.map((m) => m.role).join(' / '),
+    )
+    check('不修改入参（返回新数组）', userFirst.length === 1, String(userFirst.length))
+  }
+  {
+    const withSystem = [
+      { role: 'system' as const, content: '你是提取器' },
+      { role: 'user' as const, content: '提取字段' },
+    ]
+    const out = withSchemaInstruction(withSystem, { schema })
+    check(
+      '已有 system → 追加到该条、位置不变（不新增第二条 system）',
+      out.length === 2 && out[0].role === 'system' && out[0].content.startsWith('你是提取器') && out[0].content.includes('JSON Schema'),
+      `${out.length} 条 / ${out[0].content.slice(0, 20)}`,
+    )
+    check('不修改入参 system 内容', withSystem[0].content === '你是提取器')
+  }
+  {
+    const plain = [{ role: 'user' as const, content: '你好' }]
+    check('没有 schema → 原样返回', withSchemaInstruction(plain, undefined) === plain)
+  }
 
   // ---- 错误分类 ----
   check('401 → LLM_AUTH', classifyLlmError(new Error('HTTP 401 unauthorized'), false) === 'LLM_AUTH')

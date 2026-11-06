@@ -414,9 +414,38 @@ export const exportFullBackup = async (zh = true) => {
 }
 
 /**
+ * 恢复前快照：把**当前**配置与聊天写到数据目录的 backups/ 下，万一恢复选错文件还能回退。
+ * 失败不阻断恢复（返回空串，界面只用它拼提示）。
+ */
+const writePreRestoreSnapshot = async (): Promise<string> => {
+  try {
+    const { data, count } = collectStoredKeys(BACKUP_KEYS)
+    const chats = readStoredChats()
+    if (!count && !chats.length) return ''
+    const payload = {
+      app: 'ai-km', kind: FULL_BACKUP_KIND, version: 1,
+      exportedAt: new Date().toISOString(),
+      reason: 'auto-before-restore',
+      configCount: count, chatCount: chats.length, data, chats,
+    }
+    const dirRes: any = await getPlatform().app.dataDirPath()
+    const baseDir = dirRes?.path ? String(dirRes.path).replace(/[\\/]+$/, '') : ''
+    if (!baseDir) return ''
+    const dir = `${baseDir}/backups`
+    try { await (getPlatform() as any).fs.ensureDir(dir) } catch { /* 目录已存在 / 建不出来时继续尝试写 */ }
+    const file = `${dir}/ai-km-pre-restore-${stampText()}.json`
+    await getPlatform().fs.writeText(file, JSON.stringify(payload, null, 2))
+    return file
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 一键恢复：读「一键备份」文件，同时兼容旧的配置备份（只有 data）与聊天记录导出（只有 chats / 裸数组）。
  * - 配置：覆盖（只写名单内、且文件里确实有的键；旧名单里的运行态键自然被忽略）
  * - 聊天：按 id **合并**（已存在的跳过），不删除现有聊天
+ * - 恢复前先自动快照当前状态到 数据目录/backups/（失败不阻断）
  * @param onImported 恢复后的回调（刷新统计 / 重载 store）
  */
 export const importFullBackup = async (zh = true, onImported?: () => void) => {
@@ -449,6 +478,8 @@ export const importFullBackup = async (zh = true, onImported?: () => void) => {
         { confirmButtonText: zh ? '恢复' : 'Restore', cancelButtonText: zh ? '取消' : 'Cancel', type: 'warning' }
       )
     } catch { return /* 用户取消 */ }
+    // 恢复前快照（失败不阻断；成功则在结果里给出路径）
+    const snapshot = await writePreRestoreSnapshot()
     if (cfgHits.length) writeStoredConfig(configData!, BACKUP_KEYS)
     if (addedChats.length) writeStoredChats([...existing, ...addedChats])
     onImported?.()
@@ -466,9 +497,12 @@ export const importFullBackup = async (zh = true, onImported?: () => void) => {
         : `${addedChats.length} chats (${skippedChats} already exist)`)
     }
     if (presetsWritten) parts.push(zh ? `${presetsWritten} 个预设已写入预设文件夹` : `${presetsWritten} presets written to the preset folder`)
+    const snapNote = snapshot
+      ? (zh ? `恢复前的状态已快照到 ${snapshot}` : `Previous state saved to ${snapshot}`)
+      : ''
     ElMessage.success(zh
-      ? `已恢复：${parts.join('；')}。相关模块重新打开后完全生效`
-      : `Restored: ${parts.join('; ')}. Reopen the related modules to apply fully`)
+      ? `已恢复：${parts.join('；')}。相关模块重新打开后完全生效${snapNote ? `；${snapNote}` : ''}`
+      : `Restored: ${parts.join('; ')}. Reopen the related modules to apply fully${snapNote ? `; ${snapNote}` : ''}`)
   } catch (e: any) {
     ElMessage.error((zh ? '恢复失败：' : 'Restore failed: ') + (e?.message || String(e)))
   }

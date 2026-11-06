@@ -783,7 +783,18 @@ export function useAgentRun(deps: AgentRunDeps) {
     images?: Array<string | Uint8Array | ArrayBuffer>,
   ) => {
     if (!agentBridge.available) {
-      ElMessage.error(store.locales == 'zh' ? '智能体当前不可用（环境缺少执行智能体循环的能力）' : 'Agent Loop is unavailable in this environment')
+      const message = store.locales == 'zh'
+        ? '智能体当前不可用：环境缺少执行智能体循环的能力'
+        : 'Agent Loop is unavailable in this environment'
+      ElMessage.error(message)
+      try {
+        const chat = getCurrentChat()
+        chat.messages.push({ role: 'assistant', content: message, timestamp: Date.now() } as ChatMessage)
+        saveChats()
+        scrollToBottom()
+      } catch {
+        /* 没有当前聊天时只提示 */
+      }
       return null
     }
     const chat = getCurrentChat()
@@ -889,7 +900,18 @@ export function useAgentRun(deps: AgentRunDeps) {
           ? `启动智能体失败：${e?.message || e}`
           : `Failed to start agent: ${e?.message || e}`
         ghost.streaming = false
+      } else {
+        // create 还没走到“插入占位消息”就失败了：补一条可见错误，避免用户只看到自己的消息、以为没反应
+        chat.messages.push({
+          role: 'assistant',
+          content: store.locales == 'zh'
+            ? `启动智能体失败：${e?.message || e}`
+            : `Failed to start agent: ${e?.message || e}`,
+          timestamp: Date.now(),
+        } as ChatMessage)
       }
+      saveChats()
+      scrollToBottom()
       ElMessage.error(store.locales == 'zh' ? `启动智能体失败：${e?.message || e}` : `Failed to start agent: ${e?.message || e}`)
       return null
     }

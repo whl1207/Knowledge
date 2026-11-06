@@ -166,6 +166,22 @@ let persistWorkspace = true
 let configLoaded = false
 
 /**
+ * 「默认自定义来源」的唯一所有者（**按来源 id**，不按索引）。
+ *
+ * 参照 DSH 的 agentDefaultModel：默认模型/来源是一份**独立持久化的设置**，只由设置页
+ * 「设为默认」这类显式入口写入；而「这个对话/这个工作流节点用哪个来源」属于**会话级选择**
+ * （chat.config.customSourceIndex / 节点的 custom:<index>），路由时必须原样带上，
+ * **绝不写回这份默认值**。
+ *
+ * 为什么必须拆开：`llm.custom.activeIndex` 一直被 home / 智能体 / 工作流当成「临时路由状态」
+ * 改写（见 applyCustomSourceIndex 的调用点）。只要请求期间发生一次 saveConfig
+ * （关窗口、改界面、预设任务落盘…），临时来源就会被当成默认写进存档——现象正是
+ * 「设了第二个为默认，重新打开又回到第一个」。落盘时用 projectCustomDefault() 按这份默认值
+ * 导出，临时值就再也进不了存档。
+ */
+let customDefaultSourceId: number | null = null
+
+/**
  * 主窗口右侧可选的「全局视图」（顺序即设置页与顶部工具栏视图下拉的展示顺序）。
  * 主窗口一次只显示一个视图（单选），候选就是这几个；
  * 文件形式视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示）不进这份清单 —— 文件一律在独立窗口打开，
@@ -195,6 +211,43 @@ function writeWorkspaceKeys(state: {
     localStorage.setItem('roots', JSON.stringify(Array.isArray(state.roots) ? state.roots : []))
     localStorage.setItem('path', JSON.stringify(state.path || ''))
     localStorage.setItem('remoteRoots', JSON.stringify(Array.isArray(state.remoteRoots) ? state.remoteRoots : []))
+}
+
+/** 默认自定义来源在 sources 里的索引（按 id 认；找不到时回退 activeIndex，再回退 0） */
+function customDefaultIndexOf(c: any): number {
+    const srcs = Array.isArray(c?.sources) ? c.sources : []
+    if (srcs.length === 0) return 0
+    if (customDefaultSourceId !== null) {
+        const byId = srcs.findIndex((s: any) => s && s.id === customDefaultSourceId)
+        if (byId >= 0) return byId
+    }
+    const ai = typeof c?.activeIndex === 'number' ? c.activeIndex : 0
+    return ai >= 0 && ai < srcs.length ? ai : 0
+}
+
+/**
+ * 落盘投影：只导出「默认来源」的 activeIndex 与扁平字段。
+ *
+ * 运行期的 `activeIndex` / 扁平字段可能正被某个请求临时套用成它自己的来源
+ * （见 applyCustomSourceIndex），那份临时值属于运行时状态，不该进存档——
+ * 存档里只留默认值，重启后照旧是用户设的那个来源。
+ */
+function projectCustomDefault(c: any): any {
+    if (!c || !Array.isArray(c.sources) || c.sources.length === 0) return c
+    const idx = customDefaultIndexOf(c)
+    const src = c.sources[idx]
+    if (!src) return c
+    return {
+        ...c,
+        activeIndex: idx,
+        name: src.name || '',
+        api_url: src.api_url || '',
+        api_key: src.api_key || '',
+        apiKeyRef: src.apiKeyRef || '',
+        model: src.model || '',
+        embed_model: src.embed_model || '',
+        available_models: Array.isArray(src.available_models) ? src.available_models : [],
+    }
 }
 
 /** 通知其它窗口（主窗口）从 localStorage 重新同步配置；仅「设置写盘方」发送 */
@@ -348,6 +401,8 @@ export const usestore = defineStore('data', {
         index: null as any, // 打开的文件序号
         view: [] as any, // 视图
         mainPanel: "主页" as any, // 主面板
+        /** 旧存档 mainPanel='学习' 迁移标记：知识处理挂载后自动打开学习-总览 */
+        pendingLearningOpen: false,
         /**
          * 导航栏插件收纳启动器（fa fa-th-large）是否已点开：
          * 为 true 时主内容区渲染「插件网格」而不是当前主面板（见 App.vue 的 plugin-launcher-active）。
@@ -1741,13 +1796,22 @@ export const usestore = defineStore('data', {
             localStorage.setItem('locales', JSON.stringify(this.locales))
             // 安全策略（沙箱三态）：落盘后主窗口经 settings-config-changed → loadConfig 同步给 Agent 执行
             localStorage.setItem('pythonSandbox', JSON.stringify(this.pythonSandbox))
-            localStorage.setItem('AIconfig', JSON.stringify(this.AIconfig))
+            // 自定义来源落盘投影：默认来源独立于「临时路由」，只导默认值（见 customDefaultSourceId 注释）。
+            // 请求中途保存 / 关窗口保存都不会再把聊天或节点临时绑定的来源写成默认。
+            const customPersisted = projectCustomDefault(this.AIconfig?.llm?.custom)
+            const aiPayload = customPersisted === this.AIconfig?.llm?.custom
+                ? this.AIconfig
+                : { ...this.AIconfig, llm: { ...this.AIconfig.llm, custom: customPersisted } }
+            localStorage.setItem('AIconfig', JSON.stringify(aiPayload))
             // 自定义来源独立双写存档：与 AIconfig 保持一致；即使 AIconfig 合并异常也能从独立键恢复
             try {
-                const cc = this.AIconfig?.llm?.custom
+                const cc = customPersisted
+                const defSrc = Array.isArray(cc?.sources) ? cc.sources[customDefaultIndexOf(cc)] : undefined
                 localStorage.setItem('customLlmSources', JSON.stringify({
                     sources: Array.isArray(cc?.sources) ? cc.sources : [],
                     activeIndex: typeof cc?.activeIndex === 'number' ? cc.activeIndex : 0,
+                    // 默认来源按 id 持久化：来源增删/排序变化后仍然认得出是哪一个（参照 DSH 的 provider+model 选择）
+                    defaultSourceId: defSrc && typeof defSrc.id === 'number' ? defSrc.id : null,
                     name: cc?.name || '',
                     api_url: cc?.api_url || '',
                     api_key: cc?.api_key || '',
@@ -1795,7 +1859,7 @@ export const usestore = defineStore('data', {
             }
             // 设置独立窗口写盘：额外广播一次完整配置变更，主窗口据此从 localStorage 重新同步
             // （AI 模型来源/工具开关/MCP/Agent 预设等不在 UI 广播范围内，主窗口内存不会自动更新）
-            broadcastSettingsChanged(uiJson, locale, JSON.stringify(this.AIconfig))
+            broadcastSettingsChanged(uiJson, locale, JSON.stringify(aiPayload))
             // 注意：图片附件不保存到localStorage，因为可能很大
             // 顺手把内联的模型 API Key 搬进主进程凭据库（否则明文会留在 localStorage 里被插件读走）；
             // 无需等待：本函数保持同步，搬完由 secureLlmCredentials 自己再落盘一次。
@@ -1918,6 +1982,11 @@ export const usestore = defineStore('data', {
                 if (this.mainPanel === '工作流管理') this.mainPanel = '知识管理'
                 // 待办管理模块已删除（任务改在「知识管理 → 看板」视图里做），旧存档同样落到「知识管理」
                 if (this.mainPanel === '灵感管理' || this.mainPanel === '待办管理') this.mainPanel = '知识管理'
+                // 学习主面板已并入知识处理：旧存档迁移到知识处理，并由模块挂载后打开学习-总览
+                if (this.mainPanel === '学习') {
+                    this.mainPanel = '知识处理'
+                    this.pendingLearningOpen = true
+                }
             }
             // 旧存档：数据画布已并入知识管理（.data 文件视图），不能落到已删除的面板
             if (this.mainPanel === '数据画布') this.mainPanel = '知识管理'
@@ -2128,8 +2197,15 @@ export const usestore = defineStore('data', {
                         const cc = this.AIconfig?.llm?.custom
                         if (cc && Array.isArray(sc?.sources) && sc.sources.length > 0) {
                             cc.sources = sc.sources
-                            cc.activeIndex = (typeof sc.activeIndex === 'number' && sc.activeIndex >= 0 && sc.activeIndex < sc.sources.length)
-                                ? sc.activeIndex : 0
+                            // 默认来源按 id 认（索引会随来源增删/排序漂移）；老存档没有 defaultSourceId 时回退 activeIndex
+                            const defId = typeof sc.defaultSourceId === 'number' ? sc.defaultSourceId : null
+                            const byId = defId === null ? -1 : cc.sources.findIndex((s: any) => s && s.id === defId)
+                            cc.activeIndex = byId >= 0
+                                ? byId
+                                : ((typeof sc.activeIndex === 'number' && sc.activeIndex >= 0 && sc.activeIndex < sc.sources.length)
+                                    ? sc.activeIndex : 0)
+                            const defSrc = cc.sources[cc.activeIndex]
+                            customDefaultSourceId = (defSrc && typeof defSrc.id === 'number') ? defSrc.id : null
                             cc.name = sc.name || ''
                             cc.api_url = sc.api_url || ''
                             cc.api_key = sc.api_key || ''
@@ -3393,6 +3469,14 @@ export const usestore = defineStore('data', {
                 // 设置窗口广播的 AI 配置是权威值：直接覆盖内存，避免主窗口之后用旧 AIconfig 回写 localStorage，
                 // 导致「设置里改了默认模型来源，重启又变回旧来源」。
                 if (aiConfig && typeof aiConfig === 'object') this.AIconfig = aiConfig
+                // 广播载荷里的 custom.activeIndex 是设置窗口按「默认来源」导出的（见 projectCustomDefault），
+                // 因此这里同步默认值本身；否则主窗口仍按旧默认落盘。
+                {
+                    const cc = this.AIconfig?.llm?.custom
+                    const srcs = Array.isArray(cc?.sources) ? cc.sources : []
+                    const src = srcs[typeof cc?.activeIndex === 'number' ? cc.activeIndex : 0]
+                    if (src && typeof src.id === 'number') customDefaultSourceId = src.id
+                }
                 if (locale === 'zh' || locale === 'en') this.locales = locale
                 this.data = tabs
                 this.index = tabIndex
@@ -3887,9 +3971,34 @@ export const usestore = defineStore('data', {
         },
 
         /**
+         * 把当前（或指定索引）的自定义来源登记为「默认来源」——**唯一**允许改默认值的入口，
+         * 由设置页「设为默认」、删除来源、新手引导等显式动作调用。
+         * 请求路由请用 applyCustomSourceIndex()：那条路径只改运行时状态，不会动这份默认值。
+         */
+        markCustomSourceAsDefault(index?: number) {
+            const c = this.AIconfig?.llm?.custom
+            const srcs = Array.isArray(c?.sources) ? c.sources : []
+            if (srcs.length === 0) { customDefaultSourceId = null; return }
+            const idx = (typeof index === 'number' && index >= 0 && index < srcs.length)
+                ? index
+                : ((typeof c.activeIndex === 'number' && c.activeIndex >= 0 && c.activeIndex < srcs.length) ? c.activeIndex : 0)
+            const src = srcs[idx]
+            customDefaultSourceId = (src && typeof src.id === 'number') ? src.id : null
+        },
+
+        /** 默认自定义来源的索引（只读；索引由 id 现算，来源增删后不会漂） */
+        customDefaultIndex(): number {
+            return customDefaultIndexOf(this.AIconfig?.llm?.custom)
+        },
+
+        /**
          * 把某个自定义来源（默认当前激活）同步到扁平 custom。
          * home 按聊天绑定的自定义来源路由/测试时用：先 apply 聊天绑定的索引，
          * 请求结束后由调用方恢复设置页当前激活来源。
+         *
+         * ⚠️ 这里改的 activeIndex / 扁平字段是**运行时路由状态**，默认来源另由
+         * markCustomSourceAsDefault() 持有，落盘时按那份默认值导出（见 projectCustomDefault），
+         * 所以请求中途保存不会把临时来源写成默认。
          */
         applyCustomSourceIndex(index?: number) {
             const c = this.AIconfig?.llm?.custom
@@ -3981,7 +4090,14 @@ export const usestore = defineStore('data', {
                         const cc = this.AIconfig?.llm?.custom
                         if (cc && Array.isArray(sc?.sources) && sc.sources.length > 0) {
                             cc.sources = sc.sources
-                            cc.activeIndex = (typeof sc.activeIndex === 'number' && sc.activeIndex >= 0 && sc.activeIndex < sc.sources.length) ? sc.activeIndex : 0
+                            const defId = typeof sc.defaultSourceId === 'number' ? sc.defaultSourceId : null
+                            const byId = defId === null ? -1 : cc.sources.findIndex((s: any) => s && s.id === defId)
+                            cc.activeIndex = byId >= 0
+                                ? byId
+                                : ((typeof sc.activeIndex === 'number' && sc.activeIndex >= 0 && sc.activeIndex < sc.sources.length)
+                                    ? sc.activeIndex : 0)
+                            const defSrc = cc.sources[cc.activeIndex]
+                            customDefaultSourceId = (defSrc && typeof defSrc.id === 'number') ? defSrc.id : null
                             cc.name = sc.name || ''
                             cc.api_url = sc.api_url || ''
                             cc.api_key = sc.api_key || ''
@@ -4901,6 +5017,7 @@ export const usestore = defineStore('data', {
                         }],
                         activeIndex: 0,
                     };
+                    customDefaultSourceId = null;
                     break;
             }
             this.AIconfig.llm.online = false;

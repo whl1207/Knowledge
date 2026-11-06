@@ -9,7 +9,7 @@
 import { buildLanEmbedPayload, buildLanLlmPayload, buildLanModelSourcesPayload } from '@/platform/lanKb'
 import { buildGuestAgentProfiles } from '@/platform/lanGuestAgents'
 import { getSkillManager } from '@/services/agentSkills'
-import { defaultLanGuestPolicy, effectiveGuestTools } from '@/shared/lanGuest'
+import { defaultLanGuestPolicy, effectiveGuestTools, LAN_GUEST_GENERAL_AGENT } from '@/shared/lanGuest'
 import { getPlatform, hasCapability } from '@/platform'
 
 /** 下发一次完整策略（无宿主能力的环境直接返回 false，不抛错） */
@@ -26,14 +26,22 @@ export async function pushLanGuestPolicy(store: any): Promise<boolean> {
   }
   // payload 必须整体 JSON 净化：policy/llm/agents 都含 store 响应式对象，
   // 直接 invoke 会抛 “An object could not be cloned.”
+  const skillManager = getSkillManager(store)
+  // 本机通用智能体：**不按访客白名单裁剪**——插件会话（微信等）有自己的权限面。
+  const localGeneralAgent =
+    (await buildGuestAgentProfiles(store, [], { skillManager })).find(
+      (agent) => agent.id === LAN_GUEST_GENERAL_AGENT,
+    ) ?? null
   const payload = JSON.parse(JSON.stringify({
     policy: guest,
     llm: buildLanLlmPayload(store, guest),
     // 主机可用的模型来源（网页端据此对齐来源开关 / 地址 / 模型；见 buildLanModelSourcesPayload）
     modelSources: buildLanModelSourcesPayload(store),
+    // 本机通用智能体（插件会话默认用它推理；与访客白名单无关）
+    generalAgent: localGeneralAgent,
     // 可用智能体档案（预设提示词/工具/知识库/MCP 只有渲染层拿得到）
     agents: await buildGuestAgentProfiles(store, guest.presetIds || [], {
-      skillManager: getSkillManager(store),
+      skillManager,
       guestTools: effectiveGuestTools(guest),
     }),
   }))

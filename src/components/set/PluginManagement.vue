@@ -503,8 +503,8 @@
                   }}</b>
                   <span class="detail-note">
                     {{ zh
-                      ? `本小时已用 ${agentStatus.callsInWindow} 次，正在跑 ${agentStatus.inFlight} 个（并发上限 1、每小时 20 次）`
-                      : `${agentStatus.callsInWindow} call(s) this hour, ${agentStatus.inFlight} running (cap: 1 concurrent, 20/hour)` }}
+                      ? `本小时已用 ${agentStatus.callsInWindow} 次，正在跑 ${agentStatus.inFlight} 个（额度可在「插件权限」里调，每小时可设为无限）`
+                      : `${agentStatus.callsInWindow} call(s) this hour, ${agentStatus.inFlight} running (limits are adjustable under Plugin permissions; calls per hour can be unlimited)` }}
                   </span>
                 </template>
               </span>
@@ -847,10 +847,17 @@ const PERMISSION_HINTS: Record<string, [string, string]> = {
   fs: ['文件读写（本插件目录内；带此权限的插件工具默认需要审批）', 'File read/write (inside its own folder; plugin tools with it require approval by default)'],
   shell: ['执行命令（仍受 trusted 沙箱策略约束）', 'Run shell commands (still bound by the trusted sandbox policy)'],
   net: ['发起网络请求', 'Make network requests'],
-  agent: ['读取会话日志（只读）', 'Read session logs (read-only)'],
+  agent: ['读取会话摘要（只读；不含对话正文）', 'Read session summaries (read-only; not message text)'],
+  'agent.observe': ['全局观察所有会话的智能体事件（含对话正文；微信 / 远程类插件用）', 'Observe agent events of all sessions (including message text; for chat / remote bridges)'],
+  'agent.control': ['创建会话、代你发消息、取消任务、切换模型', 'Create sessions, send messages on your behalf, cancel tasks, switch models'],
   'agent.run': ['调用你配置的模型跑一次独立智能体会话（消耗额度；受宿主预算与首次调用确认约束，委派出的智能体拿不到文件 / 命令类工具）', 'Run one isolated agent session on your configured model (consumes quota; bounded by host budget and a first-use confirmation, and the delegated agent gets no file/shell tools)'],
   llm: ['调用你配置的大模型来源（会消耗额度 / 算力）', 'Call your configured model sources (consumes quota / compute)'],
   image: ['生图：调用你在「设置 → 模型 → 生图」里配置的服务（占用本地算力 / 队列；插件拿不到服务地址与 token）', 'Image generation: calls the service you configured under Settings → Models → Image (uses local compute / queue; the plugin never sees the URL or token)'],
+  'net.listen': ['注册本机 HTTP 路由（每个插件独立服务，默认只绑 127.0.0.1）', 'Register local HTTP routes (a per-plugin server, bound to 127.0.0.1 by default)'],
+  'process.spawn': ['启动白名单子进程（如 cloudflared）', 'Spawn allow-listed child processes (e.g. cloudflared)'],
+  secrets: ['读写插件私有密钥（加密保存；界面半边拿不到明文）', "Read/write the plugin's private secrets (encrypted; the UI half never sees plaintext)"],
+  schedule: ['注册定时任务', 'Register scheduled timers'],
+  attachments: ['读写插件附件（收发的文件 / 图片）', 'Read/write plugin attachments (files and images)'],
 }
 
 const permissionHint = (permissions: string[]): string => {

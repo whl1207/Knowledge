@@ -17,9 +17,9 @@ import {
   checkAgainstSchema,
   classifyLlmError,
   extractJson,
-  schemaInstruction,
   toPlainMessages,
   toChatMessages,
+  withSchemaInstruction,
   type ChatMessageInput,
   type LlmChunk,
   type LlmErrorCode,
@@ -320,9 +320,9 @@ export function createPluginLlmApi(deps: LlmApiDeps): PluginLlmApi {
       for (const m of converted.messages) messages.push({ role: m.role, content: m.content })
       if (!messages.length) throw llmError('LLM_FAILED', 'chat 需要至少一条消息')
 
-      // 结构化输出：把约束写进最后一条 system 指令（不依赖 provider 私有参数）
+      // 结构化输出：把约束并入**开头**的 system（LM Studio 等严格模板不接受 system 出现在 user 之后）
       const schema = request?.schema && typeof request.schema === 'object' ? request.schema : undefined
-      if (schema) messages.push({ role: 'system', content: schemaInstruction(schema) })
+      const outgoing = withSchemaInstruction(messages, schema)
 
       const llmConfig: any = {
         stream: false,
@@ -350,7 +350,7 @@ export function createPluginLlmApi(deps: LlmApiDeps): PluginLlmApi {
       const startedAt = Date.now()
       try {
         const text = String(
-          (await AIUtils.sendChat(source, cfg, llmConfig, messages as any, { signal: controller.signal })) ?? '',
+          (await AIUtils.sendChat(source, cfg, llmConfig, outgoing as any, { signal: controller.signal })) ?? '',
         ).trim()
         const result: PluginLlmChatResult = { text, source, model, elapsedMs: Date.now() - startedAt }
         if (!schema) return result
@@ -424,7 +424,7 @@ export function createPluginLlmApi(deps: LlmApiDeps): PluginLlmApi {
           for (const m of plain.messages) messages.push({ role: m.role, content: m.content })
           if (!messages.length) throw llmError('LLM_FAILED', 'stream 需要至少一条消息')
           const schema = request?.schema && typeof request.schema === 'object' ? request.schema : undefined
-          if (schema) messages.push({ role: 'system', content: schemaInstruction(schema) })
+          const outgoing = withSchemaInstruction(messages, schema)
 
           const llmConfig: any = {
             stream: true,
@@ -439,7 +439,7 @@ export function createPluginLlmApi(deps: LlmApiDeps): PluginLlmApi {
           }
 
           push({ type: 'block-start', block: { kind: 'text' } })
-          const full = await AIUtils.sendChat(source, cfg, llmConfig, messages as any, {
+          const full = await AIUtils.sendChat(source, cfg, llmConfig, outgoing as any, {
             signal: controller.signal,
             onStream: (chunk: string) => {
               const delta = String(chunk ?? '')

@@ -259,6 +259,11 @@ export interface Chat {
   agentSessionId?: string | null
   /** 创建设置会话时的配置签名（模型/系统提示/工具集变化时切新会话） */
   agentSessionSignature?: string | null
+  /**
+   * 外部渠道（微信等）的原始会话 id。
+   * 仅用于「已导入」去重与溯源；不参与 agent 恢复（导入后的继续对话会新建会话并用历史做种子）。
+   */
+  externalSessionId?: string | null
   title: string
   /**
    * 标题来源标记（对齐 DSH 的 title provider 归属）：

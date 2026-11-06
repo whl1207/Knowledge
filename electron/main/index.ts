@@ -100,6 +100,7 @@ import {
   setLanModelSources,
   setLanPolicyRequester,
   setLanShareDir,
+  setLocalGeneralAgent,
   getLanModelSources,
   probeLanModelSources,
   refreshPolicyFromRenderer,
@@ -6108,6 +6109,8 @@ ipcMain.handle('lan:setGuest', async (_e, payload?: any) => {
   // 访客可用智能体档案（渲染层组装：预设提示词/工具/知识库/MCP），主进程据此叠加盟客策略限制。
   // ⚠️ 仅在 payload 明确带 agents 时才覆盖：局部下发（旧版本渲染层）不能把清单清空。
   if (payload && Object.prototype.hasOwnProperty.call(payload, 'agents')) setLanGuestAgents(payload.agents)
+  // 本机通用智能体（未按访客白名单裁剪）：插件会话默认用它推理
+  if (payload && Object.prototype.hasOwnProperty.call(payload, 'generalAgent')) setLocalGeneralAgent(payload.generalAgent)
   // 诊断日志（默认静默，AIKM_VERBOSE=1 输出）：网页端能不能用智能体模式完全取决于这条策略是否到位
   logInfo('lan-guest', `guest policy updated: modes=[${p.modes.join(',')}]`
     + ` tools=${Array.isArray(p.tools) ? p.tools.length : 'default'} maxSteps=${p.maxSteps} maxConcurrent=${p.maxConcurrent}`

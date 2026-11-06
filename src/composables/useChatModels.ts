@@ -200,11 +200,10 @@ export function useChatModels(deps: ChatModelsDeps) {
   }
   const restoreChatCustomConfig = (snap: any) => {
     if (!snap) return
+    // 回到「默认来源」（不是探测开始时的旧值）：探测期间设置页可能刚改过默认来源
     const c = store.AIconfig.llm.custom
-    c.activeIndex = snap.activeIndex
-    c.name = snap.name; c.api_url = snap.api_url; c.api_key = snap.api_key; c.apiKeyRef = snap.apiKeyRef
-    c.model = snap.model; c.embed_model = snap.embed_model
-    c.available_models = snap.available_models
+    c.activeIndex = store.customDefaultIndex()
+    store.applyCustomSourceIndex()
   }
   /** 把拉取到的自定义来源模型列表写回 sources[idx]（home 下拉显示最新模型用） */
   const syncCustomModelsToSource = (config: any) => {

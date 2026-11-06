@@ -124,6 +124,33 @@ export const formatAssetSize = (bytes: number): string => {
 /** GitHub Releases 最新版本页面（检查失败时的兜底入口） */
 export const releasesPageUrl = (): string => RELEASES_PAGE
 
+/** 「跳过此版本」：只压制启动时的自动提醒，手动点「检查更新」仍然会弹对话框 */
+const SKIP_KEY = 'kb-skip-update-version'
+const AUTO_CHECK_KEY = 'kb-update-auto-checked-at'
+
+export const readSkippedVersion = (): string => {
+  try { return String(localStorage.getItem(SKIP_KEY) || '') } catch { return '' }
+}
+export const writeSkippedVersion = (version: string): void => {
+  try { localStorage.setItem(SKIP_KEY, String(version || '')) } catch { /* 隐私模式忽略 */ }
+}
+export const clearSkippedVersion = (): void => {
+  try { localStorage.removeItem(SKIP_KEY) } catch { /* 忽略 */ }
+}
+
+/** 启动自动检查的节流（默认 24 小时一次） */
+export const shouldAutoCheck = (everyMs = 24 * 60 * 60 * 1000): boolean => {
+  try {
+    const last = Number(localStorage.getItem(AUTO_CHECK_KEY) || 0)
+    return !last || Date.now() - last > everyMs
+  } catch {
+    return true
+  }
+}
+export const markAutoChecked = (): void => {
+  try { localStorage.setItem(AUTO_CHECK_KEY, String(Date.now())) } catch { /* 忽略 */ }
+}
+
 /** 拉取最新 Release（只读；失败抛错，由界面提示） */
 export const fetchLatestRelease = async (): Promise<LatestRelease> => {
   let res: Response

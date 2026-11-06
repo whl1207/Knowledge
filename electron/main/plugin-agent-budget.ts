@@ -94,7 +94,7 @@ export interface AcquireResult {
 }
 
 /**
- * 每个插件的并发上限 —— **由用户在「插件 → 插件权限」里调**（默认 1，天花板 3）。
+ * 每个插件的并发上限 —— **由用户在「插件 → 插件权限」里调**（默认 1，天花板 200）。
  *
  * 判定数据在 `plugin-agent-config.ts`；这里只读，不重复实现钳制（钳制在契约层的
  * `normalizePluginAgentLimits`，存进去的就是生效的）。

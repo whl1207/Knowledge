@@ -49,9 +49,11 @@ import {
   formatAssetSize,
   platformLabel,
   releasesPageUrl,
+  writeSkippedVersion,
   type LatestRelease,
   type ReleaseAsset,
 } from '@/lib/updateCheck'
+import { collectDiagnostics, copyToClipboard } from '@/lib/diagnostics'
 import { getPlatform, hasCapability } from '@/platform'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { useMobileBackScreen } from '@/composables/useBackLayer'
@@ -260,6 +262,35 @@ watch(() => store.settingsNav, (nav) => {
   }
 }, { immediate: true })
 
+// ================ 设置搜索（按当前语言匹配分类与条目，点结果直接跳转） ================
+const navKeyword = ref('')
+interface NavHit { id: string; title: string; group: string; icon: string }
+const navSearchHits = computed<NavHit[]>(() => {
+  const kw = navKeyword.value.trim().toLowerCase()
+  if (!kw) return []
+  const out: NavHit[] = []
+  for (const group of navTreeAll.value) {
+    const groupTitle = getTitle(group)
+    // 分类名命中（如「模型」）时，把它下面的条目全部列出来，否则搜分类名会一无所获
+    const groupHit = groupTitle.toLowerCase().includes(kw) || group.id.toLowerCase().includes(kw)
+    if (group.children?.length) {
+      for (const child of group.children) {
+        const title = getTitle(child)
+        if (groupHit || title.toLowerCase().includes(kw) || child.id.toLowerCase().includes(kw)) {
+          out.push({ id: child.id, title, group: groupTitle, icon: child.icon || 'fa fa-angle-right' })
+        }
+      }
+    } else if (groupHit) {
+      out.push({ id: group.id, title: groupTitle, group: '', icon: group.icon || 'fa fa-cog' })
+    }
+  }
+  return out
+})
+const pickSearchHit = (id: string) => {
+  applyNav(id)
+  navKeyword.value = ''
+}
+
 // 手风琴式折叠/展开一级分组：点击哪个就只展开哪个，其他全部折叠
 const toggleGroup = (id: string) => {
   const set = new Set(expandedGroups.value)
@@ -395,6 +426,50 @@ const openReleasesPage = () => {
   try { window.open(updateRelease.value?.pageUrl || releasesPageUrl(), '_blank', 'noopener') } catch { /* 忽略 */ }
 }
 const closeUpdateDialog = () => { updateRelease.value = null }
+/** 跳过此版本：只压制启动时的自动提醒（手动点「检查更新」仍会弹） */
+const skipUpdateVersion = () => {
+  const v = updateRelease.value?.version || ''
+  if (v) writeSkippedVersion(v)
+  ElMessage.info(store.locales === 'zh'
+    ? `已跳过 v${v}：启动时不再提醒，手动检查仍会显示`
+    : `Skipped v${v}: no startup reminder; manual checks still show it`)
+  closeUpdateDialog()
+}
+/** Release 说明预览：去掉 Markdown 记号，最多取前面几行 */
+const updateNotesText = computed(() => {
+  const raw = updateRelease.value?.notes || ''
+  return raw
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^#{1,6}\s*/, '').replace(/^[-*+]\s+/, '· ').trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .join('\n')
+})
+
+// ================ 诊断信息（复制给作者排障） ================
+const collectingDiag = ref(false)
+const diagText = ref('')
+const diagVisible = ref(false)
+const copyDiagnostics = async () => {
+  if (collectingDiag.value) return
+  collectingDiag.value = true
+  try {
+    const text = await collectDiagnostics()
+    const ok = await copyToClipboard(text)
+    if (ok) {
+      ElMessage.success(store.locales === 'zh' ? '诊断信息已复制，可直接粘贴反馈' : 'Diagnostics copied to clipboard')
+    } else {
+      // 剪贴板被拒（部分环境没有权限）：把文本摊开，用户自己复制
+      diagText.value = text
+      diagVisible.value = true
+      ElMessage.warning(store.locales === 'zh' ? '无法写入剪贴板，已打开文本，请手动复制' : 'Clipboard unavailable — text opened, copy it manually')
+    }
+  } catch (e: any) {
+    ElMessage.warning((store.locales === 'zh' ? '收集诊断信息失败：' : 'Failed to collect diagnostics: ') + (e?.message || e))
+  } finally {
+    collectingDiag.value = false
+  }
+}
 const removeWorkspace = (path: string) => {
   ElMessageBox.confirm(
     store.locales === 'zh' ? `确定要从工作区列表中移除 "${path}" 吗？（不会删除磁盘文件）` : `Remove workspace "${path}"? (files on disk are not deleted)`,
@@ -432,8 +507,7 @@ const navSwitches = computed(() => {
   const panels: { key: string; icon: string; label: string }[] = [
     { key: '主页', icon: 'fa fa-home', label: zh ? '主页' : 'Home' },
     { key: '知识管理', icon: 'fa fa-book', label: zh ? '知识管理' : 'Knowledge Management' },
-    { key: '知识处理', icon: 'fa fa-layer-group', label: zh ? '知识处理' : 'Knowledge Processing' },
-    { key: '学习', icon: 'fa fa-graduation-cap', label: zh ? '学习' : 'Learning' },
+    { key: '知识处理', icon: 'fa fa-layer-group', label: zh ? '知识库' : 'Knowledge Base' },
     { key: 'attention', icon: 'fa fa-inbox', label: zh ? '待我处理' : 'Needs me' },
     { key: 'agent', icon: 'fa fa-globe', label: zh ? '浏览器 Agent' : 'Browser Agent' }
   ]
@@ -1234,14 +1308,35 @@ onBeforeUnmount(() => {
         </div>
       </template>
       <!-- 单窗口 / 网页端的设置是页面内浮层（不是窗口）：用「返回」而不是窗口关闭 ×，
-           避免和右上角的系统窗口关闭按钮混淆 -->
-      <div v-else class="settings-close" @click="closeSettings" :title="store.locales === 'zh' ? '返回（关闭设置）' : 'Back (close settings)'">
-        <i class="fa fa-arrow-left"></i>
+           避免和右上角的系统窗口关闭按钮混淆。细长窗口内容屏左上角已有「返回分类」，
+           右侧必须改成 ×（关闭设置），否则会出现两个一模一样的左箭头。 -->
+      <div v-else class="settings-close" @click="closeSettings" :title="isTallLayout ? (store.locales === 'zh' ? '关闭设置' : 'Close settings') : (store.locales === 'zh' ? '返回（关闭设置）' : 'Back (close settings)')">
+        <i class="fa" :class="isTallLayout ? 'fa-times' : 'fa-arrow-left'"></i>
       </div>
     </div>
     <!-- 左侧导航栏（细长窗口下与右侧内容各占满整屏互相切换，见 .tall 样式） -->
     <div class="settings-container">
     <div class="settings-nav scoll" v-show="!isTallLayout || showNavScreen">
+      <!-- 设置搜索：分类多、面板深，直接按名字跳过去 -->
+      <div class="nav-search">
+        <i class="fa fa-search"></i>
+        <input v-model="navKeyword" :placeholder="store.locales == 'zh' ? '搜索设置项…' : 'Search settings…'"
+               @keydown.esc="navKeyword = ''" />
+        <i v-if="navKeyword" class="fa fa-times-circle nav-search-clear" :title="store.locales == 'zh' ? '清空' : 'Clear'"
+           @click="navKeyword = ''"></i>
+      </div>
+      <template v-if="navKeyword">
+        <div v-for="hit in navSearchHits" :key="hit.id" class="nav-item nav-hit" @click="pickSearchHit(hit.id)"
+             :title="hit.group ? `${hit.group} / ${hit.title}` : hit.title">
+          <i :class="hit.icon"></i>
+          <span>{{ hit.title }}</span>
+          <span v-if="hit.group" class="nav-hit-group">{{ hit.group }}</span>
+        </div>
+        <div v-if="!navSearchHits.length" class="nav-search-empty">
+          {{ store.locales == 'zh' ? '没有匹配的设置项' : 'No matching setting' }}
+        </div>
+      </template>
+      <template v-else>
       <template v-for="item in navTreeAll" :key="item.id">
         <!-- 一级分组（可折叠，含二级子项） -->
         <div v-if="item.children && item.children.length" class="nav-group">
@@ -1275,6 +1370,7 @@ onBeforeUnmount(() => {
           <i :class="item.icon"></i>
           <span>{{ getTitle(item) }}</span>
         </div>
+      </template>
       </template>
     </div>
 
@@ -1573,6 +1669,11 @@ onBeforeUnmount(() => {
                   <i class="fa" :class="updateChecking ? 'fa-spinner fa-spin' : 'fa-cloud-download'"></i>
                   {{ store.locales=='zh'?'检查更新' : 'Check Updates' }}
                 </div>
+                <div class="button" @click="copyDiagnostics" :class="{ disabled: collectingDiag }"
+                     :title="store.locales=='zh'?'复制版本 / 平台 / 数据目录 / 已配来源等诊断信息，方便反馈问题' : 'Copy version / platform / data folder / configured sources for bug reports'">
+                  <i class="fa" :class="collectingDiag ? 'fa-spinner fa-spin' : 'fa-stethoscope'"></i>
+                  {{ store.locales=='zh'?'诊断信息' : 'Diagnostics' }}
+                </div>
                 <div class="button" @click="handleInitConfig" :title="store.locales=='zh'?'初始化（将清除全部配置并重启）\n当前本机数据：' + localDataSummary() + '（共 ' + localStorageUsageText + '）' : 'initialization (clears all config and restarts)\nLocal data: ' + localDataSummary() + ' (' + localStorageUsageText + ')'">
                   <i class="fa fa-refresh"></i> {{ store.locales=='zh'?'初始化' : 'initialization' }}
                 </div>
@@ -1594,8 +1695,8 @@ onBeforeUnmount(() => {
         <div class="settings-group">
           <h3>{{ store.locales=='zh' ? '导航与模块' : 'Navigation & Modules' }}</h3>
           <div class="config-description" style="margin:0 0 8px 2px;">{{ store.locales=='zh'
-            ? '主界面导航栏显示的顶层模块（主页、知识管理、知识处理、学习）与其他入口（待我处理、浏览器 Agent）。关闭某项即从导航栏隐藏。'
-            : 'Entries shown in the main navbar: top-level modules (Home, Knowledge, Knowledge Processing, Learning) and other entries (Needs me, Browser Agent). Hiding one removes it from the navbar (left / top / bottom layouts alike).' }}</div>
+            ? '主界面导航栏显示的顶层模块（主页、知识管理、知识库）与其他入口（待我处理、浏览器 Agent）。关闭某项即从导航栏隐藏。'
+            : 'Entries shown in the main navbar: top-level modules (Home, Knowledge Management, Knowledge Processing) and other entries (Needs me, Browser Agent). Hiding one removes it from the navbar (left / top / bottom layouts alike).' }}</div>
           
           <!-- 空导航提醒固定显示（不再提供关闭选项） -->
           <div class="nav-switch-list">
@@ -1923,9 +2024,27 @@ onBeforeUnmount(() => {
           </div>
         </details>
 
+        <pre v-if="updateNotesText" class="update-notes">{{ updateNotesText }}</pre>
+
         <div class="theme-dialog-actions">
+          <button class="theme-dialog-btn" @click="skipUpdateVersion">
+            {{ store.locales === 'zh' ? '跳过此版本' : 'Skip this version' }}
+          </button>
           <button class="theme-dialog-btn" @click="openReleasesPage">{{ store.locales === 'zh' ? '打开 Release 页' : 'Open release page' }}</button>
           <button class="theme-dialog-btn primary" @click="closeUpdateDialog">{{ store.locales === 'zh' ? '关闭' : 'Close' }}</button>
+        </div>
+      </div>
+    </div>
+    <!-- 诊断信息（剪贴板不可用时展示文本，供手动复制） -->
+    <div v-if="diagVisible" class="theme-dialog-overlay" @click.self="diagVisible = false">
+      <div class="theme-dialog update-dialog" @click.stop>
+        <div class="theme-dialog-head">
+          <i class="fa fa-stethoscope"></i>
+          <span>{{ store.locales === 'zh' ? '诊断信息' : 'Diagnostics' }}</span>
+        </div>
+        <textarea class="diag-text" readonly :value="diagText" rows="12"></textarea>
+        <div class="theme-dialog-actions">
+          <button class="theme-dialog-btn primary" @click="diagVisible = false">{{ store.locales === 'zh' ? '关闭' : 'Close' }}</button>
         </div>
       </div>
     </div>
@@ -2119,6 +2238,37 @@ onBeforeUnmount(() => {
   border-bottom-left-radius: 5px;
 }
 
+/* ====== 设置搜索（左栏顶部） ====== */
+.nav-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 2px 6px;
+  padding: 0 8px;
+  height: 28px;
+  box-sizing: border-box;
+  border: 1px solid var(--borderColor);
+  border-radius: 5px;
+  background: var(--backgroundColor);
+}
+.nav-search > i.fa-search { font-size: 11px; opacity: .55; flex-shrink: 0; }
+.nav-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 12px;
+}
+.nav-search-clear { font-size: 11px; opacity: .55; cursor: pointer; flex-shrink: 0; }
+.nav-search-clear:hover { opacity: 1; }
+.nav-hit-group { margin-left: auto; font-size: 10px; opacity: .5; white-space: nowrap; }
+.nav-search-empty { padding: 10px 10px; font-size: 11px; opacity: .6; }
+.nav-item.nav-hit { display: flex; align-items: center; gap: 8px; }
+
 /* ====== 一级分组（可折叠） ====== */
 .nav-group {
   display: flex;
@@ -2241,76 +2391,72 @@ onBeforeUnmount(() => {
   border-bottom-right-radius: 0;
 }
 
-/* 细长窗口的导航 = 钢琴键式列表：每项一条整宽「琴键」（图标 + 文字），行高够手指点。
-   层级靠**缩进 + 视觉轻重**区分（与桌面一致）：一级分组是加粗的宽键（带展开箭头），
-   二级子项缩进一层、键更轻，一眼能看出归属。
-   （窄窗口的 40px 图标条规则只作用于 :not(.tall)，这里不必再覆盖它。） */
+/* 细长窗口的导航 = 紧凑列表（与桌面条目同一档尺寸，不再放大成 44px 大卡片）：
+   层级靠缩进 + 视觉轻重区分；内容最大 560px 居中，避免整屏一条长键。 */
 .settings-wrap.tall .settings-nav {
   padding: 8px;
-  gap: 4px;
+  padding-left: max(8px, calc((100% - 560px) / 2));
+  padding-right: max(8px, calc((100% - 560px) / 2));
+  gap: 2px;
   background-color: var(--backgroundColor);
 }
 .settings-wrap.tall .nav-group {
-  gap: 4px;
+  gap: 2px;
   margin: 0;
   padding: 0;
 }
 /* 二级子项缩进 + 左侧竖线（与桌面同款「挂在分组下」的观感） */
 .settings-wrap.tall .nav-group-children {
-  gap: 4px;
-  margin: 0 0 6px 16px;
-  padding-left: 6px;
+  gap: 2px;
+  margin: 0 0 4px 12px;
+  padding-left: 4px;
   border-left: 1px solid var(--borderColor);
 }
 .settings-wrap.tall .nav-group-header,
 .settings-wrap.tall .nav-item {
   box-sizing: border-box;
   width: 100%;
-  min-height: 44px;
-  padding: 0 12px;
+  min-height: 34px;
+  padding: 0 10px;
   margin: 0;
   justify-content: flex-start;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid var(--borderColor);
-  border-radius: 8px;
+  border-radius: 5px;
   background-color: var(--menuColor);
-  /* 琴键的立体感：上缘一道浅高光 + 轻微投影 */
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--backgroundColor) 60%, transparent), 0 1px 2px rgba(0, 0, 0, 0.06);
   transition: transform 0.08s ease, background-color 0.15s ease, border-color 0.15s ease;
 }
-/* 一级分组：底色深一档、文字加粗（层级比子项重） */
+/* 一级分组：文字加粗（层级比子项重） */
 .settings-wrap.tall .nav-group-header {
   opacity: 1;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 /* 二级子项：更矮、更轻（底色回到页面底色），配合缩进明确「属于上一级」 */
 .settings-wrap.tall .nav-item-sub {
-  min-height: 40px;
-  padding: 0 12px;
+  min-height: 32px;
+  padding: 0 10px;
   margin: 0;
   background-color: var(--backgroundColor);
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
 }
 .settings-wrap.tall .nav-group-header span,
 .settings-wrap.tall .nav-item span {
   display: inline;
   flex: 1;
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .settings-wrap.tall .nav-group-header i,
 .settings-wrap.tall .nav-item i {
-  width: 18px;
-  font-size: 14px;
+  width: 16px;
+  font-size: 13px;
 }
-/* 按下去的「琴键」：略微内凹（缩小 + 去掉投影） */
+/* 按下去的条目：略微内凹 */
 .settings-wrap.tall .nav-group-header:active,
 .settings-wrap.tall .nav-item:active {
-  transform: scale(0.99);
-  box-shadow: none;
+  transform: scale(0.995);
   background-color: var(--menuActiveColor);
 }
 .settings-wrap.tall .nav-item.active {
@@ -3010,6 +3156,36 @@ onBeforeUnmount(() => {
 .update-empty { font-size: 11px; opacity: .7; line-height: 1.6; padding: 8px 2px; }
 .update-others { margin-top: 10px; }
 .update-others summary { font-size: 11px; cursor: pointer; opacity: .75; margin-bottom: 6px; }
+/* Release 说明预览：最多 8 行，超出滚动 */
+.update-notes {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow: auto;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  opacity: .85;
+}
+/* 诊断文本：等宽、可全选 */
+.diag-text {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  resize: vertical;
+}
 /* 检查中：按钮变灰且不可重复点（事件里也做了并发保护） */
 .action-grid .button.disabled { opacity: .55; pointer-events: none; }
 

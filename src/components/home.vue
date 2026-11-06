@@ -867,6 +867,13 @@
               </div>
             </div>
 
+            <!-- 全局动作：导入微信等外部渠道的 agent 会话 -->
+            <div class="menu-divider"></div>
+            <div class="menu-item" @click="openExternalSessionsFromNavMenu">
+              <i class="fa fa-weixin"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '导入外部会话' : 'Import external sessions' }}</span>
+            </div>
+
             <!-- 在具体聊天行上右键时：归档 / 删除直接放在一级（高频操作，不折叠） -->
             <template v-if="chatNavMenuChatIndex !== null">
               <div class="menu-divider"></div>
@@ -1043,6 +1050,14 @@
           @mousedown="onResizeStart"
           :title="store.locales=='zh' ? '拖动调整输入框高度' : 'Drag to resize input'"
         ></div>
+        <!-- 没有可用模型时的引导：比只报「AI服务未连接」更好懂，配好后自动消失 -->
+        <div v-if="needsModelSetup" class="model-setup-hint">
+          <i class="fa fa-plug"></i>
+          <span>{{ store.locales == 'zh' ? '还没有可用的模型来源，先配置一个再对话。' : 'No model source is configured yet — set one up before chatting.' }}</span>
+          <button class="button model-setup-btn" @click="store.openSettings('llm')">
+            {{ store.locales == 'zh' ? '去配置模型' : 'Set up a model' }}
+          </button>
+        </div>
         <!-- 输入模式。data-voice-composer：卡片内任何焦点都算「想往这张卡片的输入框里说话」
              （全局语音输入的落点解析会读它，见 services/asr/voiceTarget.ts）；点空白处由
              onComposerCardMouseDown 把光标交回输入框，否则焦点会掉到 body、语音输入找不到落点 -->
@@ -1584,11 +1599,75 @@
 
     <!-- 导出为 Word：另存为对话框（导出样式 + 保存位置；聊天无源目录时默认落系统下载目录） -->
     <WordExportDialog v-model="wordExportVisible" :markdown="wordExportMarkdown" :title="wordExportTitle" />
+
+    <!-- 外部会话（微信等）：只读导入为聊天记录；导入后是一条普通聊天，发送时带上历史作为种子 -->
+    <Teleport to="body">
+      <div v-if="externalSessionsOpen" class="external-sessions-mask" @click.self="externalSessionsOpen = false">
+        <div class="external-sessions-panel" role="dialog" aria-modal="true">
+          <header class="external-sessions-head">
+            <div class="external-sessions-title">
+              <i class="fa fa-weixin"></i>
+              <span>{{ store.locales == 'zh' ? '外部会话' : 'External sessions' }}</span>
+              <span class="external-sessions-count">{{ externalSessions.length }}</span>
+            </div>
+            <div class="external-sessions-actions">
+              <button class="external-sessions-btn" :disabled="externalSessionsLoading" @click="loadExternalSessions">
+                <i class="fa fa-refresh" :class="{ 'fa-spin': externalSessionsLoading }"></i>
+                {{ store.locales == 'zh' ? '刷新' : 'Refresh' }}
+              </button>
+              <button class="external-sessions-btn" @click="externalSessionsOpen = false">
+                <i class="fa fa-times"></i>
+              </button>
+            </div>
+          </header>
+          <p class="external-sessions-hint">
+            {{ store.locales == 'zh'
+              ? '来自微信等渠道的 agent 会话。导入后出现在左侧聊天列表，可直接继续对话（历史会作为上下文带入）。'
+              : 'Agent sessions from WeChat and other channels. Import one into the chat list to continue with its history as context.' }}
+          </p>
+          <div v-if="externalSessionsLoading" class="external-sessions-empty">
+            <i class="fa fa-spinner fa-spin"></i>
+            {{ store.locales == 'zh' ? '读取中…' : 'Loading…' }}
+          </div>
+          <div v-else-if="externalSessionsError" class="external-sessions-empty external-sessions-error">
+            <i class="fa fa-exclamation-triangle"></i>
+            {{ externalSessionsError }}
+          </div>
+          <div v-else-if="externalSessions.length === 0" class="external-sessions-empty">
+            <i class="fa fa-inbox"></i>
+            {{ store.locales == 'zh' ? '没有可导入的会话（微信里先聊一句）' : 'No sessions to import yet' }}
+          </div>
+          <div v-else class="external-sessions-list scoll">
+            <button
+              v-for="row in externalSessions"
+              :key="row.id"
+              class="external-sessions-row"
+              :title="row.preview || row.id"
+              @click="openExternalSessionRow(row)"
+            >
+              <span class="external-sessions-row-main">
+                <span class="external-sessions-row-title">{{ row.title }}</span>
+                <span class="external-sessions-row-preview">{{ row.preview || row.id }}</span>
+              </span>
+              <span class="external-sessions-row-meta">
+                <span v-if="importedChatIndexFor(row.id) >= 0" class="external-sessions-imported">
+                  {{ store.locales == 'zh' ? '已导入' : 'Imported' }}
+                </span>
+                <span v-else>{{ formatExternalTime(row.lastTs) }}</span>
+                <i :class="importedChatIndexFor(row.id) >= 0 ? 'fa fa-external-link' : 'fa fa-download'"></i>
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
 import { aikmIpcAvailable } from '@/lib/aikmIpc'
+import { projectSessionEvents } from '@/lib/agent/sessionLogImport'
+import { anyModelConfigured } from '@/components/onboarding/onboardingState'
 import { ref, computed, watch, nextTick, onMounted, onUpdated, onBeforeUnmount, type Ref } from 'vue'
 import { usestore } from '@/store'
 import { retrieveKnowledge, resolveStrategyId } from '@/shared/kbRetrieval'
@@ -1605,7 +1684,7 @@ import { hashContent, renderMermaidSvgLenient, getCachedSvgLenient, clearMermaid
 import MermaidViewer from '@/components/MermaidViewer.vue'
 import WordExportDialog from '@/components/export/WordExportDialog.vue'
 import { AIUtils } from '@/services/ai-utils'
-import { chatFollowsGlobalLlm, deepSeekStyleOf, normalizeLlmType, presetFollowsDefaultLlm, resolveLlmSource } from '@/shared/llmSources'
+import { chatFollowsGlobalLlm, deepSeekConfig, deepSeekStyleOf, normalizeLlmType, presetFollowsDefaultLlm, resolveLlmSource } from '@/shared/llmSources'
 import { BUILTIN_AGENT_PRESET_IDS, builtinPresetDefaultsFromStore, ensureBuiltinAgentPresets } from '@/shared/builtinAgentPresets'
 import {
   estimateChatContextTokens,
@@ -1690,6 +1769,12 @@ import { isReadFailureText, readFailureReason } from '@/shared/readText'
 
 const store = usestore()
 
+/**
+ * 还没有任何可用模型来源 → 输入框上方给一条「去配置模型」提示。
+ * 比只在发送时抛「AI服务未连接」更容易理解；配好后自动消失。
+ */
+const needsModelSetup = computed(() => !anyModelConfigured((store.AIconfig as any)?.llm))
+
 // 局域网访客网页（主机投递）：知识库退化为上传文件、智能体交给主机执行。
 // ⚠️ 不能写成「无 ipcRenderer」——安卓壳也没有 ipcRenderer，但它有真实文件系统与本地智能体循环。
 const isBrowser = isHostGuestRuntime()
@@ -1759,6 +1844,291 @@ const isFirstInit = ensureInitialChat(createNewChatData)
 const chats = chatsRef as Ref<Chat[]>
 // 当前聊天索引提升为模块级共享 ref：卸载模块后保留现场，重进回到同一聊天栏
 const currentChatIndex = currentChatIndexRef
+
+// ==================== 外部会话（微信等渠道）导入 ====================
+// 微信插件的会话是主进程 agent-loop 会话，不在 chats 里；这里把它们列为可导入项。
+// 导入后是一条普通聊天（mode=agent2）：历史作为种子上下文，后续发送会新建 agent 接着聊。
+interface ExternalSessionRow {
+  id: string
+  events: number
+  lastTs: number
+  createdAt: number
+  provider: string
+  model: string
+  title: string
+  preview: string
+}
+const externalSessionsOpen = ref(false)
+const externalSessionsLoading = ref(false)
+const externalSessionsError = ref('')
+const externalSessions = ref<ExternalSessionRow[]>([])
+/** 外部会话 → 已导入的聊天下标（-1 = 还没导入）；面板据此把“已导入”的也留在列表里 */
+const importedChatIndexFor = (sessionId: string): number =>
+  chats.value.findIndex((chat) => {
+    const external = String((chat as any)?.externalSessionId || '').trim()
+    if (external && external === sessionId) return true
+    const agent = String((chat as any)?.agentSessionId || '').trim()
+    return !!agent && agent === sessionId
+  })
+
+const formatExternalTime = (ts: number): string => {
+  if (!ts) return ''
+  const date = new Date(ts)
+  const now = new Date()
+  const sameDay = date.toDateString() === now.toDateString()
+  return sameDay
+    ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+    : `${date.getMonth() + 1}/${date.getDate()}`
+}
+
+const openExternalSessions = () => {
+  externalSessionsOpen.value = true
+  void loadExternalSessions()
+}
+
+/** 左侧导航栏右键菜单入口：先收菜单，再开面板 */
+const openExternalSessionsFromNavMenu = () => {
+  hideChatNavMenu()
+  openExternalSessions()
+}
+
+const loadExternalSessions = async () => {
+  if (!aikmIpcAvailable()) {
+    externalSessionsError.value = '桌面端才支持导入外部会话'
+    return
+  }
+  externalSessionsLoading.value = true
+  externalSessionsError.value = ''
+  try {
+    const { aikmDsh } = await import('@/lib/aikmIpc')
+    const rows = (await aikmDsh?.sessionLog?.agentSummaries?.()) || []
+    // 不再过滤“已导入”：面板要能看到最近会话（已导入的显示徽标，点击直接跳转）
+    externalSessions.value = rows
+  } catch (error) {
+    externalSessionsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    externalSessionsLoading.value = false
+  }
+}
+
+/** 面板行点击：已导入就跳到那条聊天，否则导入 */
+const openExternalSessionRow = async (row: ExternalSessionRow) => {
+  const index = importedChatIndexFor(row.id)
+  if (index >= 0) {
+    currentChatIndex.value = index
+    externalSessionsOpen.value = false
+    return
+  }
+  await importExternalSession(row)
+}
+
+const importExternalSession = async (row: ExternalSessionRow) => {  try {
+    const { aikmDsh } = await import('@/lib/aikmIpc')
+    const events = (await aikmDsh?.sessionLog?.agentEvents?.(row.id)) || []
+    // 投影成聊天消息：按 turn 聚合工具调用 / 思考 / 正文（不再只取 user+assistant 两句）
+    const messages: any[] = projectSessionEvents(events as any[])
+    if (messages.length === 0) {
+      externalSessionsError.value = '这个会话没有可导入的文本消息'
+      return
+    }
+    const chat = createNewChatData()
+    chat.title = row.title || `微信 ${row.id.slice(-6)}`
+    chat.mode = 'agent2'
+    chat.messages = messages
+    const start = (events as any[]).find((event) => event?.type === 'session/start')
+    for (const message of messages as any[]) {
+      if (message.role !== 'assistant') continue
+      message.isExecuting = false
+      message.streaming = false
+      message.executionType = 'skill'
+      if (start?.model) message.model = String(start.model)
+    }
+    if (start?.provider && start.provider !== 'custom') {
+      chat.config.llmType = String(start.provider)
+      if (start.model) chat.config.model = String(start.model)
+    } else if (start?.provider === 'custom' && start.model) {
+      // 自定义来源必须能对上一个真实 source；对不上就保留当前全局配置，
+      // 否则会把聊天钉在一个不存在的 source 上，发送时直接“启动智能体失败”。
+      const sources = (store.AIconfig.llm as any)?.custom?.sources
+      const index = Array.isArray(sources)
+        ? sources.findIndex((source: any) => String(source?.model || '') === String(start.model))
+        : -1
+      if (index >= 0) {
+        chat.config.llmType = 'custom'
+        chat.config.model = String(start.model)
+        chat.config.customSourceIndex = index
+      }
+    }
+    // 记录来源会话：用于“已导入”跳转与溯源（不冒充 chat.agentSessionId）
+    chat.externalSessionId = row.id
+    ;(chat as any).externalMirror = true
+    chat.agentSessionId = null
+    chat.agentSessionSignature = null
+    chats.value.unshift(chat)
+    currentChatIndex.value = 0
+    saveChats()
+    externalSessionsOpen.value = false
+  } catch (error) {
+    externalSessionsError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+// ==================== 外部会话实时镜像（微信继续聊，这里同步显示） ====================
+// 导入是一个快照；这里订阅 agent 事件，把**同一来源会话**（externalSessionId）的新消息、
+// 工具步骤、运行状态实时写回导入的聊天，达到"在 home 里看着微信那边干活"的效果。
+let stopExternalMirror: (() => void) | null = null
+
+const mirrorChatForAgent = (agentId: string): any | undefined => {
+  const id = String(agentId || '').trim()
+  if (!id) return undefined
+  return (chats.value || []).find(
+    (chat: any) => String(chat?.externalSessionId || '') === id && chat?.externalMirror !== false,
+  )
+}
+
+const mirrorAssistantMessage = (chat: any): any => {
+  const last = chat.messages?.[chat.messages.length - 1]
+  if (last && last.role === 'assistant' && last.__externalMirror && last.streaming) return last
+  chat.messages.push({
+    role: 'assistant',
+    content: '',
+    timestamp: Date.now(),
+    streaming: true,
+    isExecuting: true,
+    executionType: 'skill',
+    executionUnits: [],
+    model: chat.config?.model,
+    __externalMirror: true,
+    __mirrorStartedAt: Date.now(),
+  })
+  return chat.messages[chat.messages.length - 1]
+}
+
+const handleExternalAgentEvent = (event: any) => {
+  const agentId = String(event?.agentId || '')
+  const chat = mirrorChatForAgent(agentId)
+  if (!chat) return
+  const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {}
+  const type = String(event?.type || '')
+  const strip = (text: unknown): string => String(text || '').split(/\n{1,2}\[渠道：/)[0].trim()
+  try {
+    switch (type) {
+      case 'user/message': {
+        const content = strip(payload.content)
+        if (!content) break
+        chat.messages.push({ role: 'user', content, timestamp: Date.now() })
+        break
+      }
+      case 'agent/turn-start': {
+        chat.isGenerating = true
+        const message = mirrorAssistantMessage(chat)
+        message.__mirrorStartedAt = Date.now()
+        if (typeof payload.turn === 'number') message.agentTurn = payload.turn
+        break
+      }
+      case 'agent/step-start': {
+        const message = mirrorAssistantMessage(chat)
+        if (typeof payload.step === 'number') message.agentStep = payload.step
+        break
+      }
+      case 'assistant/reasoning': {
+        const text = String(payload.content || '')
+        if (!text) break
+        const message = mirrorAssistantMessage(chat)
+        message.reasoning = String(message.reasoning || '') + text
+        break
+      }
+      case 'assistant/chunk': {
+        const text = String(payload.content || '')
+        if (!text) break
+        const message = mirrorAssistantMessage(chat)
+        message.content = String(message.content || '') + text
+        break
+      }
+      case 'assistant/message': {
+        const message = mirrorAssistantMessage(chat)
+        const text = String(payload.content || '')
+        if (text) message.content = text
+        break
+      }
+      case 'tool/call': {
+        const message = mirrorAssistantMessage(chat)
+        const units = Array.isArray(message.executionUnits) ? message.executionUnits : []
+        message.executionUnits = [
+          ...units,
+          {
+            id: String(payload.callId || `tool-${units.length}`),
+            description: String(payload.name || 'tool'),
+            args: payload.args,
+            status: 'running',
+            startTime: Date.now(),
+          },
+        ]
+        break
+      }
+      case 'tool/result': {
+        const message = mirrorAssistantMessage(chat)
+        const units = Array.isArray(message.executionUnits) ? message.executionUnits : []
+        const id = String(payload.callId || '')
+        const index = units.findIndex((unit: any) => String(unit?.id || '') === id)
+        if (index >= 0) {
+          units[index] = {
+            ...units[index],
+            status: payload.ok === false ? 'error' : 'success',
+            ...(payload.ok === false ? { error: String(payload.error || '工具执行失败') } : { result: payload.value }),
+            endTime: Date.now(),
+          }
+          message.executionUnits = [...units]
+        }
+        break
+      }
+      case 'agent/status': {
+        if (payload.status === 'error') {
+          const message = mirrorAssistantMessage(chat)
+          if (!message.content) message.content = '运行出错（详情见微信侧/日志）'
+          message.streaming = false
+          message.isExecuting = false
+          chat.isGenerating = false
+          saveChats()
+        }
+        break
+      }
+      case 'agent/turn-end':
+      case 'turn/end': {
+        const message = mirrorAssistantMessage(chat)
+        const startedAt = Number(message.__mirrorStartedAt) || 0
+        if (startedAt > 0) message.executionTime = Math.max(0, Date.now() - startedAt)
+        message.streaming = false
+        message.isExecuting = false
+        chat.isGenerating = false
+        saveChats()
+        break
+      }
+      default:
+        break
+    }
+  } catch {
+    /* 镜像失败不能影响主流程 */
+  }
+}
+
+const ensureExternalMirror = async () => {
+  if (stopExternalMirror || !aikmIpcAvailable()) return
+  try {
+    const { aikmDsh } = await import('@/lib/aikmIpc')
+    stopExternalMirror = aikmDsh?.agent?.onEvent?.(handleExternalAgentEvent) ?? null
+  } catch {
+    stopExternalMirror = null
+  }
+}
+
+onMounted(() => {
+  void ensureExternalMirror()
+})
+onBeforeUnmount(() => {
+  stopExternalMirror?.()
+  stopExternalMirror = null
+})
+
 // 持久化当前聊天栏（供应用重启后恢复）。
 // ⚠️ **不能加 immediate**：initialized 阶段会先把默认值 0 写进 localStorage，
 // 而恢复手在 onMounted 的 loadChatsFromStorage() 里才读——读到的就是被覆盖掉的 0，
@@ -9120,16 +9490,10 @@ const sendChatMessage = async (message: string) => {
   } finally {
     store.AIconfig.llm.type = originalType
     if (originalType === 'custom' && originalCustom) {
-      // 恢复设置页当前激活的自定义来源配置（applyCustomSourceIndex 可能已切到聊天绑定的来源）
+      // 恢复到「默认来源」而不是请求开始时的旧值：这一轮里设置页可能刚改过默认来源
       const c = store.AIconfig.llm.custom
-      c.activeIndex = originalCustom.activeIndex
-      c.name = originalCustom.name
-      c.api_url = originalCustom.api_url
-      c.api_key = originalCustom.api_key
-      c.apiKeyRef = originalCustom.apiKeyRef
-      c.model = originalCustom.model
-      c.embed_model = originalCustom.embed_model
-      c.available_models = originalCustom.available_models
+      c.activeIndex = store.customDefaultIndex()
+      store.applyCustomSourceIndex()
     } else if (originalType === currentChatData.config.llmType) {
       restoreStoreModelConfig(originalType, originalModel)
     }
@@ -9199,7 +9563,9 @@ const loadContextWindowReal = async (force = false) => {
       && (Date.now() - contextWindowCacheAt(key)) > refreshAfter
     if (!canRefresh) return
   }
-  const cfg = (llm as any)[provider] || {}
+  // 探测用配置：DeepSeek 是单来源 + 接口样式，两种样式的 Key / 地址要互相补齐
+  // （/models 需要鉴权；取错块就会漏掉 Key，只能回落标称窗口）
+  const cfg = provider === 'deepseek' ? deepSeekConfig(llm) : ((llm as any)[provider] || {})
   // 用带来源的探测：loaded = 已加载实例真正生效的值（含 Ollama 手动设置的上下文长度），
   // 它才能压过「上次记住的值」；模型未加载时拿到的只能是模型上限（model-max）。
   const probe = await AIUtils.fetchModelContextWindowDetail(provider, cfg, model)
@@ -9394,8 +9760,8 @@ const contextLimitSourceLabel = computed(() => {
     case 'real': return zh ? '模型实际 context' : 'model context'
     case 'probed': return zh ? '上次读到的实际值' : 'last seen actual'
     case 'model-default': return zh ? '模型上限（未读到实际值）' : 'model max (not probed)'
-    case 'model-name': return zh ? '模型名默认值' : 'model-name default'
-    case 'provider-default': return zh ? '来源默认值' : 'provider default'
+    case 'model-name': return zh ? '模型标称窗口' : 'model rated window'
+    case 'provider-default': return zh ? '来源默认窗口' : 'provider default'
     default: return zh ? '来源未知，按 128K 估算' : 'source unknown, assumed 128K'
   }
 })
@@ -10867,8 +11233,10 @@ const canFoldTurn = (message: any): boolean => {
   const hasToolUnit = units.some((u) => u && u.description
     && u.stepType !== 'content' && u.stepType !== 'guidance' && u.stepType !== 'reasoning')
   if (!hasToolUnit) return false
-  // 只折「确实跑完并落了耗时」的轮次：老存档没有 executionTime，保持原样（避免升级后历史记录突然全被折起来）
-  if (!(Number(message?.executionTime) > 0)) return false
+  // 只折「确实跑完并落了耗时」的轮次：老存档没有 executionTime，保持原样（避免升级后历史记录突然全被折起来）。
+  // 外部导入的聊天是快照，旧数据可能没有 executionTime；它没有“老存档突袭折叠”的顾虑，允许按步骤折叠。
+  const importedChat = !!currentChat.value?.externalSessionId
+  if (!(Number(message?.executionTime) > 0) && !importedChat) return false
   return true
 }
 
@@ -14728,6 +15096,31 @@ select {
   transition: transform .32s cubic-bezier(.22, .61, .36, 1);
 }
 
+/* 「还没有可用模型」提示条：贴在输入卡片上方，配好模型后自动消失 */
+.model-setup-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  border: 1px dashed var(--borderColor);
+  border-radius: 8px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.model-setup-hint > i { color: var(--fontActiveColor); flex-shrink: 0; }
+.model-setup-hint > span { flex: 1; min-width: 0; opacity: .85; }
+.model-setup-btn {
+  flex-shrink: 0;
+  height: 26px;
+  margin: 0;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 /* 输入卡片：包住输入框与下方操作行（模式选择 / 附件 / 语音 / 发送）。
    有消息时**通栏**（不限制最大宽度）；只有空白聊天时才收窄居中（见下方 .empty-chat 规则）。 */
 .input-container {
@@ -14758,6 +15151,7 @@ select {
 }
 /* 空白聊天：卡片 / 引导提示 / 上方面板统一收窄居中，保证三者对齐 */
 .chat-main.empty-chat .input-container,
+.chat-main.empty-chat .model-setup-hint,
 .chat-main.empty-chat .empty-chat-hint,
 .chat-main.empty-chat .input-area > .agent-todos-panel,
 .chat-main.empty-chat .input-area > .pending-queue-panel,
@@ -15366,5 +15760,154 @@ select {
   right: 100%;
 }
 
+/* ---------- 外部会话导入（微信等渠道） ---------- */
+.external-sessions-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100002;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+.external-sessions-panel {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(72vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--borderColor);
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+.external-sessions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.external-sessions-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.external-sessions-count {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 400;
+  text-align: center;
+  background: var(--menuActiveColor);
+  color: var(--fontColor);
+}
+.external-sessions-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.external-sessions-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--borderColor);
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 12px;
+  cursor: pointer;
+}
+.external-sessions-btn:hover:not(:disabled) {
+  background: var(--menuActiveColor);
+}
+.external-sessions-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.external-sessions-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.7;
+}
+.external-sessions-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 12px;
+  font-size: 13px;
+  opacity: 0.7;
+}
+.external-sessions-error {
+  color: #e5484d;
+  opacity: 1;
+}
+.external-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.external-sessions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.external-sessions-row:hover {
+  background: var(--menuActiveColor);
+  border-color: var(--borderColor);
+}
+.external-sessions-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.external-sessions-row-title {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.external-sessions-row-preview {
+  font-size: 12px;
+  opacity: 0.65;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.external-sessions-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  font-size: 11px;
+  opacity: 0.65;
+}
+.external-sessions-imported {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--menuActiveColor);
+  font-size: 10px;
+  opacity: 0.9;
+}
 
 </style>

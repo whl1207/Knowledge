@@ -16,7 +16,7 @@ import { PANEL_MAIN_SLOT } from './coreSlots'
 import { applyPluginOrder } from './navOrder'
 
 /** 内置主面板 key（顺序即默认导航顺序；勿改字符串） */
-export const BUILTIN_PANEL_KEYS = ['主页', '知识管理', '知识处理', '学习'] as const
+export const BUILTIN_PANEL_KEYS = ['主页', '知识管理', '知识处理'] as const
 
 /**
  * 内置主面板的历史标题文案（与迁移前 App.vue 的 switch 完全一致，
@@ -25,7 +25,7 @@ export const BUILTIN_PANEL_KEYS = ['主页', '知识管理', '知识处理', '�
 const LEGACY_TITLE_TEXT: Record<string, { zh: string; en: string }> = {
   主页: { zh: '主页', en: 'home' },
   知识管理: { zh: '知识管理', en: 'Knowledge Management' },
-  知识处理: { zh: '知识处理', en: 'Knowledge Processing' },
+  知识处理: { zh: '知识库', en: 'Knowledge Base' },
   学习: { zh: '学习', en: 'Learning' },
 }
 

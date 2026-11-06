@@ -9,7 +9,8 @@
    *   ② 正在输入到哪个框（落点名，纯文本输入框没有自己的录音提示，这是唯一的反馈）；
    *   ③ 刚才那句话（流式引擎的实时文字，说完即写入落点）。
    *
-   * 状态全部来自 globalVoice.ts 的 voiceState —— 本组件不发指令、不做判断，只做展示与两个按钮。
+   * 状态全部来自 globalVoice.ts 的 voiceState —— 本组件不发指令、不做判断，只做展示和两个点击动作
+   * （点面板 = 结束录音并识别；✕ = 收起悬浮麦克风）。
    * 注意：**报错 / 缺配置不走这里**（统一由 globalVoice 用 ElMessage 弹出）——
    * 这个浮层只表示「正在录音 / 正在识别 / 刚写完」，不用红色去显示错误。
    */
@@ -63,23 +64,34 @@
     }
   }
 
-  let drag: { startX: number; startY: number; baseRight: number; baseBottom: number; moved: boolean } | null = null
+  let drag: { startX: number; startY: number; baseRight: number; baseBottom: number; moved: boolean; touch: boolean } | null = null
 
   const onFabPointerDown = (e: PointerEvent) => {
     // 只处理主键 / 触摸；✕ 的点击由它自己 stop
     if (e.button !== 0) return
     e.preventDefault() // 关键：不让输入框丢焦点，落点仍是用户点进去的那个框
     const base = clampPos(dragPos.right ?? savedPos().right, dragPos.bottom ?? savedPos().bottom)
-    drag = { startX: e.clientX, startY: e.clientY, baseRight: base.right, baseBottom: base.bottom, moved: false }
+    drag = {
+      startX: e.clientX,
+      startY: e.clientY,
+      baseRight: base.right,
+      baseBottom: base.bottom,
+      moved: false,
+      touch: e.pointerType === 'touch',
+    }
     window.addEventListener('pointermove', onFabPointerMove)
     window.addEventListener('pointerup', onFabPointerUp)
+    // 触摸被系统夺走（来电 / 手势 / 页面滚动）时收尾，否则本次按下会一直挂着，
+    // 下一次抬起会被当成「点击」去开始 / 结束语音
+    window.addEventListener('pointercancel', onFabPointerCancel)
   }
 
   const onFabPointerMove = (e: PointerEvent) => {
     if (!drag) return
     const dx = e.clientX - drag.startX
     const dy = e.clientY - drag.startY
-    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return
+    // 手指比鼠标抖：触屏把「这算拖动还是点击」的阈值放宽，点一下不会因为抖动变成拖动
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < (drag.touch ? 10 : 4)) return
     drag.moved = true
     const next = clampPos(drag.baseRight - dx, drag.baseBottom - dy)
     dragPos.right = next.right
@@ -89,6 +101,7 @@
   const onFabPointerUp = () => {
     window.removeEventListener('pointermove', onFabPointerMove)
     window.removeEventListener('pointerup', onFabPointerUp)
+    window.removeEventListener('pointercancel', onFabPointerCancel)
     const moved = !!drag?.moved
     drag = null
     if (moved) {
@@ -106,6 +119,16 @@
     dragPos.bottom = null
     if (voiceState.phase === 'idle') void startVoice()
     else void stopVoice()
+  }
+
+  /** 触摸被系统取消（来电 / 手势 / 页面滚动夺走指针）：丢掉这次按下，不开始也不结束 */
+  const onFabPointerCancel = () => {
+    window.removeEventListener('pointermove', onFabPointerMove)
+    window.removeEventListener('pointerup', onFabPointerUp)
+    window.removeEventListener('pointercancel', onFabPointerCancel)
+    drag = null
+    dragPos.right = null
+    dragPos.bottom = null
   }
 
   /** 悬浮麦克风提示：把当前快捷键一并说清 */
@@ -141,6 +164,65 @@
     voiceOverlayVisible.value && (props.system || voiceState.mode === 'dom')
   )
 
+  /**
+   * 面板本身也是「结束并识别」的入口。
+   *
+   * 为什么必须有：录音一开始，悬浮麦克风就会被面板取代（见模板里的 v-if 互斥）。
+   * 桌面还能按快捷键 / Esc，触屏（Windows 触屏、安卓、手机网页）没有这些输入方式，
+   * 面板若不响应点击，录音就永远停不下来 —— 也就永远等不到识别结果。
+   *
+   * 只在「收音中」可点：启动中（正在加载模型）点它没有可识别的内容，
+   * 识别中再点一次也只会重复结束。系统悬浮窗整窗鼠标穿透，不能点。
+   */
+  const canFinish = computed(() => !props.system && voiceState.phase === 'listening')
+  const finishHint = computed(() => zh.value
+    ? '点击面板结束录音并开始识别'
+    : 'Tap the panel to stop recording and transcribe')
+
+  /** 按下的起点：手指在面板上滑动（想滚动页面）不能当成点击 */
+  let pillPress: { id: number; x: number; y: number } | null = null
+
+  const onPillPointerDown = (e: PointerEvent) => {
+    if (!canFinish.value || e.button !== 0) return
+    // 关键：不让输入框丢焦点 —— 落点仍是用户点进去的那个框；
+    // 触屏上还能避免软键盘收起、视口跟着跳一下
+    e.preventDefault()
+    pillPress = { id: e.pointerId, x: e.clientX, y: e.clientY }
+    // 捕获指针：手指 / 鼠标移出面板范围后才抬起，也能收到 pointerup
+    try { (e.currentTarget as HTMLElement | null)?.setPointerCapture?.(e.pointerId) } catch { /* 不支持就靠 pointerup */ }
+  }
+
+  /** 这次按下被判成「滑动」时，吞掉紧随其后的 click（否则滑动也会结束一次录音） */
+  let swallowClick = false
+
+  const onPillPointerUp = (e: PointerEvent) => {
+    const press = pillPress
+    pillPress = null
+    if (!press || press.id !== e.pointerId) return
+    try { (e.currentTarget as HTMLElement | null)?.releasePointerCapture?.(e.pointerId) } catch { /* 忽略 */ }
+    if (!canFinish.value) return
+    // 滑动距离过大 = 用户想滚页面，不当作点击；触屏给宽一点，手指总会抖
+    if (Math.abs(e.clientX - press.x) + Math.abs(e.clientY - press.y) > 10) {
+      swallowClick = true
+      setTimeout(() => { swallowClick = false }, 300)
+      return
+    }
+    void stopVoice()
+  }
+
+  /** 触摸被系统取消（来电 / 手势 / 滚动夺走指针）：清掉本次按下，别让下一次抬起误触发 */
+  const onPillPointerCancel = () => { pillPress = null }
+
+  /**
+   * 兜底：只有 click（没有 pointerdown/up 序列）时也能结束。
+   * 读屏软件（TalkBack / VoiceOver）的「双击激活」、键盘触发的 click 都走这条；
+   * 常规鼠标 / 触摸已经在 pointerup 里结束并进入 processing，这里的 canFinish 会是 false，不会重复调用。
+   */
+  const onPillClick = () => {
+    if (swallowClick || !canFinish.value) return
+    void stopVoice()
+  }
+
 
 </script>
 
@@ -161,7 +243,17 @@
     </button>
 
     <div v-if="panelVisible" class="voice-overlay" :class="[`phase-${voiceState.phase}`, { 'voice-overlay-system': props.system }]">
-      <div class="voice-pill">
+      <div
+        class="voice-pill"
+        :class="{ 'voice-pill-tappable': canFinish }"
+        :role="canFinish ? 'button' : undefined"
+        :title="canFinish ? finishHint : undefined"
+        :aria-label="canFinish ? finishHint : undefined"
+        @pointerdown="onPillPointerDown"
+        @pointerup="onPillPointerUp"
+        @pointercancel="onPillPointerCancel"
+        @click="onPillClick"
+      >
         <!-- 左侧只放一个动画：录音=跳动波形；启动/识别=转圈。不再同时出现麦克风脉冲。 -->
         <span class="voice-icon">
           <span v-if="voiceState.phase === 'listening'" class="voice-wave">
@@ -176,6 +268,12 @@
           </div>
           <div v-if="voiceState.partial" class="voice-partial">{{ voiceState.partial }}</div>
         </div>
+
+        <!-- 触屏没有悬浮提示可以看：把「点这里结束」做成常驻的小按钮，手指一看就知道能按 -->
+        <span v-if="canFinish" class="voice-finish" aria-hidden="true">
+          <span class="voice-finish-square"></span>
+          <span class="voice-finish-text">{{ zh ? '结束' : 'Finish' }}</span>
+        </span>
       </div>
     </div>
   </Teleport>
@@ -273,6 +371,42 @@
     color: var(--fontColor, #eee);
     overflow: hidden;
     animation: voice-in 0.16s ease-out;
+  }
+
+  /* 可点的一版：整块面板就是「结束并识别」的按钮。
+     触屏没有 hover，所以反馈只放在 :active（按下瞬间），hover 端沿用 pointer 光标。 */
+  .voice-pill-tappable {
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .voice-pill-tappable:active {
+    border-color: var(--fontColor, #eee);
+    filter: brightness(1.12);
+  }
+
+  /* 右侧常驻的「结束」小按钮：给触屏一个看得见、按得到的收尾入口 */
+  .voice-finish {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    box-sizing: border-box;
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    color: var(--fontActiveColor, #4c9aff);
+    opacity: 0.9;
+  }
+  .voice-finish-square {
+    width: 7px;
+    height: 7px;
+    border-radius: 1.5px;
+    background: currentColor;
   }
 
   @keyframes voice-in {

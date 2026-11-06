@@ -38,6 +38,7 @@ import { resolvePolicy, isShellAllowed } from './sandbox-policy'
 import { retrieveKnowledge } from '@/shared/kbRetrieval'
 import { keywordSearchBlocks } from '@/services/learningSearch'
 import { isBotChallengePage, extractDoiFromUrl, fetchDoiViaCrossref } from '@/shared/webFetchHelpers'
+import { htmlToMarkdown } from '@/shared/htmlToMarkdown'
 import { computeEditDiff, makeEditDiffPreview, countTextLines, EDIT_DIFF_MAX_CHARS, type EditDiffFilePreview } from '@/shared/editDiff'
 import { toolResultBudgetForWindow } from '@/shared/toolResultBudget'
 import {
@@ -2995,19 +2996,9 @@ async function webSearch(input: any): Promise<ToolResult> {
   }
 }
 
-/** 从 HTML 提取正文文本（去掉 script/style/标签，压缩空白） */
-function extractTextFromHtml(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 /**
  * 反爬兜底：用 Electron 无头 BrowserWindow 加载页面（真实 Chromium 执行 JS，
- * 可过知乎 zh-zse-ck 等 JS 加密挑战），页面加载完成后提取正文文本。
+ * 可过知乎 zh-zse-ck 等 JS 加密挑战），页面加载完成后提取正文并转成 Markdown。
  * 仅作为 webFetch 直接 fetch 失败（403/网络错误）时的降级通道。
  */
 async function fetchViaBrowser(url: string, timeoutMs = 25000): Promise<string> {
@@ -3044,9 +3035,22 @@ async function fetchViaBrowser(url: string, timeoutMs = 25000): Promise<string> 
         try {
           // 等一小段让页面 JS 渲染（知乎挑战/懒加载内容）
           await new Promise(r => setTimeout(r, 1200))
-          const text = await wc.executeJavaScript(`document.body ? document.body.innerText : ''`)
-          if (text && String(text).trim().length > 0) {
-            finish(() => resolve(String(text).trim()))
+          // 取正文 HTML 而不是 innerText：innerText 天生没有 href，链接会全丢。
+          // 清理与截断在页面内做（避免几 MB 的 HTML 过 IPC），转换在本地做。
+          const html = await wc.executeJavaScript(`(() => {
+            const body = document.body
+            if (!body) return ''
+            const clone = body.cloneNode(true)
+            clone.querySelectorAll('script,style,noscript,template,iframe,object,embed').forEach((n) => n.remove())
+            // 内联 data: 图片常有几百 KB base64，会白白吃掉下面的 200k 预算
+            clone.querySelectorAll('img[src^="data:"]').forEach((n) => n.remove())
+            const out = clone.innerHTML || ''
+            return out.length > 200000 ? out.slice(0, 200000) : out
+          })()`)
+          // 相对链接按页面最终地址绝对化（隐藏窗口加载后 location 可能已被重定向）
+          const text = htmlToMarkdown(String(html || ''), { baseUrl: wc.getURL() || url })
+          if (text.trim().length > 0) {
+            finish(() => resolve(text))
           } else {
             finish(() => reject(new Error('页面无内容')))
           }
@@ -3113,7 +3117,7 @@ async function parseXlsxFile(filePath: string): Promise<string> {
 }
 
 /**
- * 直接访问通道：HTTP 请求 + HTML 正文提取 / PDF 解析。
+ * 直接访问通道：HTTP 请求 + HTML→Markdown 正文提取 / PDF 解析。
  * 失败（HTTP 非 2xx / 超时 / 内容为空 / 反爬验证页）一律抛错，由上层决定是否回退。
  * 命中反爬验证页且目标是 DOI 时，先试 Crossref 元数据（无需 Key），失败再抛错。
  */
@@ -3138,7 +3142,8 @@ async function fetchViaDirect(url: string, doi: string | null): Promise<{ text: 
     const isPdfUrl = /\.pdf($|\?)/i.test(url)
     const isPdfMagic = buf.length >= 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46 // %PDF
     if (ctype.includes('application/pdf') || isPdfUrl || isPdfMagic) {
-      // PDF 文档：用 pdfjs-dist 提取正文文本（不能按 HTML 文本解码，否则得到 %PDF 乱码）
+      // PDF 文档：用 pdfjs-dist 提取正文文本
+      //（PDF 判断先于 HTML 转换——二进制按 HTML 解码只会得到 %PDF 乱码）
       let pdfText = ''
       try {
         pdfText = await parsePdfBytes(buf)
@@ -3151,7 +3156,9 @@ async function fetchViaDirect(url: string, doi: string | null): Promise<{ text: 
       return { text: pdfText, via: 'pdf' }
     }
     const html = new TextDecoder().decode(buf)
-    const text = extractTextFromHtml(html)
+    // HTML → Markdown：链接保留为 [文字](URL)、图片 ![alt](src)，相对地址按最终地址绝对化。
+    // 不再用正则剥标签取纯文本 —— 那样页内链接的 URL 会全部丢失，模型无法顺着链接继续抓。
+    const text = htmlToMarkdown(html, { baseUrl: res.url || url })
     if (text.length <= 50) throw new Error('页面内容为空')
     // 检测到反爬验证页（人机验证/WAF/Cloudflare）：不当作成功内容返回
     if (isBotChallengePage(text)) {
@@ -3184,8 +3191,15 @@ async function fetchViaDeepSeek(url: string, config: WebFetchConfig): Promise<st
 /**
  * 执行一次网页抓取（web_fetch 工具与设置页「测试抓取」共用）。
  *
- * 按配置里的顺序依次尝试**已开启**的通道：direct → deepseek → browser（顺序可调）。
- * 每个通道失败都只记下原因并继续；全部失败时抛错，错误信息里带每个通道的具体原因。
+ * 按配置里的顺序依次尝试**已开启**的通道：direct → deepseek → browser（顺序与开关都来自
+ * 设置页「工具 → 抓取」，本次 Markdown 改造不动这套回退逻辑）。每个通道失败都只记下原因并继续；
+ * 全部失败时抛错，错误信息里带每个通道的具体原因。
+ *
+ * 各通道的输出格式：
+ * - direct：PDF 仍走 pdfjs 直接提取正文（先于 HTML 判断）；HTML 转 Markdown；
+ * - deepseek：服务端返回的就是 Markdown，原样采用；
+ * - browser：页面内取正文 HTML 后在本地转 Markdown。
+ * 三条通道最终给模型的都是同一形态的正文，因此回退不会改变结果口径。
  */
 export async function runWebFetch(
   rawUrl: string,
@@ -4364,7 +4378,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('web_fetch', '获取网页完整内容（自动过滤 HTML 标签）。按设置页「工具 → 抓取」中开启的通道（直接访问 / DeepSeek Fetch / 虚拟浏览器）依次尝试并自动回退。用于 web_search 之后深入阅读具体页面并提取信息。', webFetch, {
+    defineTool('web_fetch', '获取网页正文并转为 Markdown（保留链接、标题、列表与表格；相对地址已补成绝对 URL）。按设置页「工具 → 抓取」中开启的通道（直接访问 / DeepSeek Fetch / 虚拟浏览器）依次尝试并自动回退。用于 web_search 之后深入阅读具体页面并提取信息；正文里的链接可直接用于下一步抓取。', webFetch, {
       inputSchema: {
         type: 'object',
         properties: { url: { type: 'string', description: '要抓取的网页 URL' } },

@@ -8,7 +8,8 @@
  * 设计见 `docs/plan/插件能力面向DSH风格收敛-设计方案（逐文件）.md` §四。
  *
  * 授权模型（**未改变**）：
- * - 插件自己的目录：读写都放行（与主进程半边 `ctx.host.readFile/writeFile` 的既有语义一致）；
+ * - 插件自己的目录 / 插件私有数据目录（`plugins-data/<id>`）：读写都放行（与主进程半边
+ *   `ctx.host.readFile/writeFile` 的既有语义一致；临时文件与附件落在数据目录里）；
  * - 用户授权过的路径：`plugin-grants.assertAccess` 判读/写（只读授权下写 → `FS_READ_ONLY_GRANT`）；
  * - 其余：`FS_NOT_GRANTED`。
  */
@@ -51,6 +52,12 @@ export interface PluginFsDeps {
   pluginId: string
   /** 插件目录（绝对路径）；其中的读写不需要用户授权 */
   pluginDir: string
+  /**
+   * 插件私有数据目录（`userData/plugins-data/<id>`，绝对路径）。
+   * 与插件目录一样免授权：临时文件（`ctx.files.saveTempFile`）、附件、导出物都落在这里，
+   * 插件要能读回自己刚写的东西；但它**不在**宿主的插件目录监视范围内，写这里不会触发热重载。
+   */
+  dataDir?: string
   /** 清单是否声明了 `fs` 权限 */
   hasPermission: boolean
 }
@@ -126,6 +133,7 @@ function looksBinary(buffer: Buffer): boolean {
 
 export function createPluginFs(deps: PluginFsDeps): PluginFsApi {
   const pluginDir = normalizeFsPath(deps.pluginDir)
+  const dataDir = normalizeFsPath(deps.dataDir || '')
 
   const requirePermission = (): void => {
     if (!deps.hasPermission) {
@@ -153,9 +161,10 @@ export function createPluginFs(deps: PluginFsDeps): PluginFsApi {
     throw new IPCError(code, error instanceof Error ? error.message : String(error))
   }
 
-  /** 读：插件目录内放行；否则要求用户在授权清单里选过这个路径 */
+  /** 读：插件目录 / 插件私有数据目录内放行；否则要求用户在授权清单里选过这个路径 */
   const assertReadable = (abs: string): void => {
     if (pluginDir && isInsideDir(pluginDir, abs)) return
+    if (dataDir && isInsideDir(dataDir, abs)) return
     try {
       assertAccess(deps.pluginId, abs, 'read')
     } catch (e) {
@@ -163,9 +172,10 @@ export function createPluginFs(deps: PluginFsDeps): PluginFsApi {
     }
   }
 
-  /** 写：插件目录内放行；否则**只认可写授权**（只读授权 → FS_READ_ONLY_GRANT） */
+  /** 写：插件目录 / 插件私有数据目录内放行；否则**只认可写授权**（只读授权 → FS_READ_ONLY_GRANT） */
   const assertWritable = (abs: string): void => {
     if (pluginDir && isInsideDir(pluginDir, abs)) return
+    if (dataDir && isInsideDir(dataDir, abs)) return
     try {
       assertAccess(deps.pluginId, abs, 'write')
     } catch (e) {

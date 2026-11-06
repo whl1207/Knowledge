@@ -163,6 +163,8 @@ const applyDraft = (): string => {
     c.api_key = v.api_key
     c.model = v.model
     c.activeIndex = i
+    // 引导里「配置模型」= 显式设置默认来源（默认值只由这类入口写）
+    store.markCustomSourceAsDefault?.(i)
   } else {
     const b = (llm[type] = llm[type] || { available_models: [] })
     if ('model_url' in b) b.model_url = v.base_url
@@ -192,11 +194,10 @@ interface FeatureDef { key: string; icon: string; zh: string; en: string; descZh
 const FEATURES: FeatureDef[] = [
   { key: '主页', icon: 'fa-home', zh: '对话', en: 'Chat', descZh: '和模型聊天；切到「智能体」后它会自己规划、调用工具', descEn: 'Chat with models; Agent mode plans and uses tools' },
   { key: '知识管理', icon: 'fa-book', zh: '知识管理', en: 'Knowledge', descZh: '文件、知识库、工作流、数据画布都在这里', descEn: 'Files, knowledge bases, workflows, data canvases' },
-  { key: '知识处理', icon: 'fa-layer-group', zh: '知识处理', en: 'Knowledge processing', descZh: '把资料切片、向量化，生成可检索的知识库', descEn: 'Slice and embed documents into a searchable knowledge base' },
-  { key: '学习', icon: 'fa-graduation-cap', zh: '学习', en: 'Learning', descZh: '用知识库刷题、复习，记录掌握度', descEn: 'Practice, review and track mastery' },
+  { key: '知识处理', icon: 'fa-layer-group', zh: '知识库', en: 'Knowledge Base', descZh: '把资料切片、向量化，生成可检索的知识库', descEn: 'Slice and embed documents into a searchable knowledge base' },
 ]
 /** 首次安装的默认：只开「对话」和「知识管理」；浏览器 Agent 默认关闭 */
-const DEFAULT_OFF_MODULES = ['知识处理', '学习']
+const DEFAULT_OFF_MODULES = ['知识处理']
 const DEFAULT_OFF_EXTRAS = ['agent']
 /** 其他导航入口（与设置页「导航与模块」同一组 key：hiddenExtras） */
 const EXTRA_FEATURES: FeatureDef[] = [

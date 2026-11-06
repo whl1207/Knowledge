@@ -58,10 +58,22 @@ export interface PluginEventsApi {
 interface EventsApiDeps {
   pluginId: string
   log: { warn(...args: unknown[]): void; info(...args: unknown[]): void }
+  /**
+   * 宿主注入的 scoped 事件桥。原生插件半边**不能**读 `window.aikmDsh`（preload 只暴露一次性领取函数），
+   * 由 runtime 把 `aikmDsh.plugin` 传进来；网页 / 移动端没有就保持 undefined。
+   */
+  bridge?: {
+    eventsSubscribe(args: { pluginId: string; types: string[] }): Promise<{ pluginId: string; types: string[] }>
+    eventsUnsubscribe?(args: { pluginId: string; types?: string[] }): Promise<{ pluginId: string; types: string[] }>
+    onScopedEvent(cb: (ev: { pluginId: string; type: string; payload: unknown }) => void): () => void
+  } | null
 }
 
 export function createPluginEventsApi(deps: EventsApiDeps): PluginEventsApi {
-  const bridge = typeof window !== 'undefined' ? (window as any).aikmDsh?.plugin : null
+  const bridge =
+    deps.bridge ??
+    (typeof window !== 'undefined' ? ((window as any).aikmDsh?.plugin as EventsApiDeps['bridge']) : null) ??
+    null
   const supported =
     typeof bridge?.eventsSubscribe === 'function' && typeof bridge?.onScopedEvent === 'function'
   const reason = supported
@@ -83,7 +95,7 @@ export function createPluginEventsApi(deps: EventsApiDeps): PluginEventsApi {
     if (disposed || !pending.length) return
     const types = pending
     pending = []
-    void bridge
+    void bridge!
       .eventsSubscribe({ pluginId: deps.pluginId, types })
       .then((res: { types?: string[] }) => {
         for (const t of res?.types ?? types) registered.add(t)

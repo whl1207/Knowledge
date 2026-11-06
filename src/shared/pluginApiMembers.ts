@@ -42,7 +42,7 @@ export const CLIENT_CTX_MEMBERS: PluginCtxMembers = {
   llm: ['available', 'reason', 'sources', 'current', 'models', 'chat', 'stream'],
   files: [
     'available', 'reason', 'pickFiles', 'pickDirectory', 'pickWritableDirectory', 'list', 'readText', 'readBase64',
-    'readBytes', 'readSheet', 'renderPdfPage', 'openInApp', 'writeText', 'remove',
+    'readBytes', 'readSheet', 'saveTempFile', 'renderPdfPage', 'openInApp', 'writeText', 'remove',
   ],
   fileViewers: ['register', 'list'],
   // 文件能力（两侧同形状的超集）：目标身份 / 版本 / 字面量编辑；契约见 src/shared/fsContract.ts
@@ -59,6 +59,8 @@ export const CLIENT_CTX_MEMBERS: PluginCtxMembers = {
   asr: ['available', 'reason', 'transcribe'],
   shortcuts: ['register', 'list'],
   slots: ['register', 'declare', 'entries'],
+  // 界面半边调用本插件主进程半边注册的方法（ctx.rpcHost.handle）；无需权限
+  rpc: ['call'],
   log: ['debug', 'info', 'warn', 'error'],
   on: null, // (type, listener) => 取消订阅函数
   effect: null, // (fn) => 登记副作用并自动清理
@@ -85,6 +87,22 @@ export const CLIENT_CTX_ABSENT: Record<string, string> = {
 export const MAIN_CTX_MEMBERS: PluginCtxMembers = {
   plugin: null,
   config: null,
+  // 宿主服务面（按插件装配；缺权限时是抛错桩，不是 undefined）
+  // 形状的单一事实源见 src/shared/pluginServices.ts
+  sessions: ['get', 'list', 'transcript'],
+  sessionController: ['create', 'prompt', 'cancel', 'list', 'modelCatalog', 'selectModel', 'projections'],
+  sessionProjections: ['cachedSnapshot'],
+  agents: ['create', 'ensureSession', 'get'],
+  workspaceRegistry: ['list', 'get', 'resolveByPath', 'create'],
+  approval: ['request'],
+  userQuestions: ['ask'],
+  waterfall: ['on'],
+  webServer: ['register', 'registerUpgrade', 'registerFallback', 'port'],
+  process: ['spawn'],
+  secrets: ['get', 'set', 'delete', 'keys'],
+  schedule: ['after', 'every', 'dailyAt'],
+  attachments: ['save', 'read', 'list', 'remove'],
+  rpcHost: ['handle'],
   tool: null, // (def) => disposer
   service: null, // (name, impl) => disposer
   getService: null, // (name) => impl | undefined

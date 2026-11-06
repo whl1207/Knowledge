@@ -152,7 +152,11 @@ export function registerPluginAgentIpc(): void {
         }
       }
 
-      return await runDelegatedAgent(options, input, budget, pluginId, controller.signal)
+      const result = await runDelegatedAgent(options, input, budget, pluginId, controller.signal)
+      // 把 D5 裁掉的工具回传给插件：插件才能把「read_image 不在工具列表里」翻译成
+      // 「去 设置 → 插件 → 权限 打开文件放宽」，而不是照抄模型编出来的失败原因。
+      if (filtered.denied.length) result.deniedTools = filtered.denied.slice()
+      return result
     } finally {
       untrack()
       releaseSlot(pluginId)
@@ -285,7 +289,7 @@ export function registerPluginAgentIpc(): void {
     }
     const cfg = agentConfigOf(pluginId)
     console.info(
-      `[plugin-agent] [audit] ${pluginId} 额度=${cfg.limits.concurrency}/${cfg.limits.callsPerHour}` +
+      `[plugin-agent] [audit] ${pluginId} 额度=${cfg.limits.concurrency}/${cfg.limits.callsPerHour === 0 ? '∞' : cfg.limits.callsPerHour}` +
         ` 放宽 fs=${cfg.relax.fs === true} mcp=${cfg.relax.mcp === true}` +
         ` 工作目录=${cfg.workRoot || '(默认：知识库根)'}${wantsReset ? '（已撤销自定义）' : ''}`,
     )

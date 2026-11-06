@@ -178,7 +178,7 @@ const SCHEMAS: Record<string, any> = {
     query: str('检索问题'),
     kb: str('按知识库文件名过滤（可选）'),
   }, ['query']),
-  web_fetch: fn('web_fetch', '获取网页内容并转为纯文本（按「设置 → 工具 → 抓取」开启的通道依次回退；手机 / 网页端支持直接访问与 DeepSeek Fetch）。', {
+  web_fetch: fn('web_fetch', '获取网页正文并转为 Markdown（保留链接、标题、列表与表格；相对地址已补成绝对 URL，可直接用于下一步抓取）。按「设置 → 工具 → 抓取」开启的通道依次回退；手机 / 网页端支持直接访问与 DeepSeek Fetch。', {
     url: str('要抓取的网页地址（http/https）'),
   }, ['url']),
   web_search: fn('web_search', '搜索互联网，返回标题 / 链接 / 摘要列表。', {
@@ -779,21 +779,6 @@ async function toolKbSearch(input: any, ctx: RendererToolContext): Promise<Rende
 // 联网（渲染层 fetch；受浏览器同源策略约束，失败时给出可操作提示）
 // ---------------------------------------------------------------------------
 
-function htmlToText(html: string): string {
-  return String(html || '')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 /** 浏览器网络错误的统一提示（跨域 / 无网络 / 被拦都会落到这里） */
 function netErrorHint(e: any): string {
   const msg = String(e?.message || e)
@@ -802,17 +787,27 @@ function netErrorHint(e: any): string {
     : msg
 }
 
-/** 直接访问通道（渲染层）：HTTP 请求 + HTML 转文本 */
+/**
+ * 直接访问通道（渲染层）：HTTP 请求 + HTML → Markdown。
+ *
+ * 与主进程 `fetchViaDirect` 同一套转换（`@/shared/htmlToMarkdown`）：链接保留为
+ * `[文字](URL)`、相对地址按页面最终地址绝对化。转换器按需动态加载（独立 chunk，
+ * 约 14 KB），只有真的抓到 HTML 时才加载，不拖累首页。
+ */
 async function fetchDirectInRenderer(url: string): Promise<{ content: string; contentType: string }> {
   const res = await fetch(url, { headers: { Accept: 'text/html,application/json;q=0.9,*/*;q=0.8' } })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const contentType = String(res.headers.get('content-type') || '')
   const body = await res.text()
-  const content = contentType.includes('json') ? body : htmlToText(body)
+  let content = body
+  if (!contentType.includes('json')) {
+    const { htmlToMarkdown } = await import('@/shared/htmlToMarkdown')
+    content = htmlToMarkdown(body, { baseUrl: res.url || url })
+  }
   if (!content.trim()) throw new Error('页面内容为空')
   // 200 的验证页也是失败（否则会挡住后面的 DeepSeek Fetch 回退）
   if (isBotChallengePage(content)) throw new Error('目标站点需要人机验证（验证页）')
-  return { content, contentType }
+  return { content, contentType: contentType.includes('json') ? contentType : 'text/markdown' }
 }
 
 /**

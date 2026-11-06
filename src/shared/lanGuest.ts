@@ -36,8 +36,7 @@ export const LAN_GUEST_DEFAULT_MODES: LanGuestMode[] = ['normal', 'retrieval']
 export const LAN_GUEST_NAV_OPTIONS: Array<{ key: string; zh: string; en: string; icon: string; extra?: boolean }> = [
   { key: '主页', zh: '主页', en: 'Home', icon: 'fa fa-home' },
   { key: '知识管理', zh: '知识管理', en: 'Knowledge Management', icon: 'fa fa-book' },
-  { key: '知识处理', zh: '知识处理', en: 'Knowledge Processing', icon: 'fa fa-layer-group' },
-  { key: '学习', zh: '学习', en: 'Learning', icon: 'fa fa-graduation-cap' },
+  { key: '知识处理', zh: '知识库', en: 'Knowledge Base', icon: 'fa fa-layer-group' },
   { key: 'agent', zh: '浏览器 Agent', en: 'Browser Agent', icon: 'fa fa-globe', extra: true },
 ]
 

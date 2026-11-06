@@ -121,8 +121,8 @@ export function topicManifest(): string {
     '1. apiVersion 必须写字符串 "^1"（写数字 2 会被判定为「要求宿主 API 2，当前 1」而拒绝；写 1 会按 "1" 处理）。',
     '2. 槽位写进 declares.slots —— **不要**写进 inject：inject 只放宿主**服务名**（如 ["tools"]），写槽位会被直接驳回。',
     '3. 声明了 main 就必须真的有那个文件：只写界面半边就**不要**写 main（否则报「入口文件不存在：index.mjs」）。',
-    '4. 用到的权限（fs / shell / net / agent / agent.run / llm / image）必须写进 permissions，否则调用时抛错；**不使用就不要申请**（启用时会把它们列给用户确认）。',
-    '5. 用了 ctx.fs / ctx.llm / ctx.image / ctx.agent.run / ctx.host.runShell / ctx.host.fetch / ctx.host.sessions，就必须声明对应的 fs / llm / image / agent.run / shell / net / agent；plugin_dev_check 会做这条交叉校验。',
+    '4. 用到的权限（fs / shell / net / net.listen / agent / agent.observe / agent.control / agent.run / llm / image / process.spawn / secrets / schedule / attachments）必须写进 permissions，否则调用时抛错；**不使用就不要申请**（启用时会把它们列给用户确认）。',
+    '5. 用了 ctx.fs / ctx.llm / ctx.image / ctx.agent.run / ctx.host.runShell / ctx.host.fetch / ctx.host.sessions / ctx.sessions / ctx.sessionProjections / ctx.sessionController / ctx.agents / ctx.approval / ctx.userQuestions / ctx.waterfall / ctx.webServer / ctx.process / ctx.secrets / ctx.schedule / ctx.attachments，就必须声明对应的 fs / llm / image / agent.run / shell / net / agent / agent.control / net.listen / process.spawn / secrets / schedule / attachments；plugin_dev_check 会做这条交叉校验。',
   ].join('\n')
 }
 

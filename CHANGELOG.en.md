@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-11-07
+
+### Fixed
+
+- **Voice input could not be stopped on touch screens**: the “Listening…” panel is now tappable as a whole (with a “Finish” hint on the right) — tap it to stop recording and start transcription; clicking it with a mouse works too.
+
+### Improved
+
+- **The floating mic is friendlier to touch**: the drag threshold is relaxed for touch, so a slight finger wobble is no longer taken as a drag.
+
+## 2026-11-06
+
+### Added
+
+- **Plugins can save rendered output as temp files**: `ctx.files.saveTempFile({ name, mime, dataUrl | base64 })` returns an absolute path for the agent’s `read_image`; files land in the plugin data dir `plugins-data/<id>/tmp/` (not the plugin folder, so writing them no longer triggers a hot reload) and are pruned automatically; the plugin data dir is now readable/writable through `ctx.fs` too.
+- **Plugin API keeps moving toward DSH parity**: native main-half plugins can now use `ctx.get('homePaths')` for the plugin data dir (the same `home` as in the DSH compat layer); a plugin’s `apply` accepts DSH’s `(ctx, config)` signature (second argument optional).
+- **A plugin's delegation “calls per hour” limit can now be unlimited**: set the per-hour number to 0 or click ∞ under Settings → Plugins → Permissions to remove the hourly call limit (the concurrency cap still applies); the default remains 20 calls/hour.
+- **A plugin's delegation concurrency cap is now 200 (was 3)**: still configured per plugin and defaulting to 1; each slot runs a real session, so raise it only when the plugin and model quotas can take it.
+- **Native plugins now receive agent step events**: the UI half’s `ctx.on('agent/step-start' | 'tool/call' | …)` goes through the host’s `aikmDsh` bridge (it used to read only `window.aikmDsh`, which native plugins never had, logging “needs desktop main-process forwarding”); plugin panels can show the model’s step numbers and tool names. Web/mobile still lacks this channel.
+
+### Fixed
+
+- **Plugin structured output got a 400 on LM Studio (plugins only saw LLM_FAILED)**: `ctx.llm.chat/stream` appended the “JSON only” instruction as a trailing system message, but LM Studio’s template requires system to come first; it is now merged into the leading system message (or inserted at the front).
+- **Delegated-agent results now report clipped tools**: `ctx.agent.run` returns `deniedTools`, so a plugin can point the user at the file relaxation switch instead of repeating a model-invented failure reason (seen in the travel-expense vision test).
+- **DeepSeek's 1M window was treated as 128K, compacting at about 90K tokens**: the source default and model table now resolve to the official 1M, moving the compaction threshold back to about 800K tokens.
+- **API Status did not refresh DeepSeek's context window**: it now forces a re-probe like every other source; the Context Window field shows the effective value marked auto / manual, typing a number overrides that source, and clearing it returns to auto.
+- **GLM / Kimi / MiMo never probed their context window**: they now probe the OpenAI-compatible `/models` and show a Context Window row in Settings; LM Studio falls back to `/v1/models` when the native endpoint is missing; probes time out (8 s local / 20 s remote) so an unreachable URL no longer leaves Settings spinning; source defaults follow the published sizes (GLM-4.6 200K, Kimi K2 256K).
+- **Files with unlisted types now open in the source editor**: text files such as `.mjs` that are not in the file-type table no longer default to the read-only preview; `.mjs`/`.cjs` etc. were also added to the code table, and the preview remains one click away.
+
 ## 2026-11-05
 
 ### Added
@@ -16,6 +45,11 @@
 - **Provider sites on the model source page**: each source shows where to download the local app or get an API key, shared with the setup guide.
 - **One-click backup / restore on the Data page**: Settings → General → Data → Backup all writes all config plus every chat into one JSON file, and Restore overwrites config while merging chats by id; it also accepts the config exports and chat exports produced earlier.
 - **“Check for updates” button**: Settings → General → Basic → Common Actions now checks the latest GitHub Release against the current version; when a newer one exists it lists the packages for this platform (Windows Setup / Portable, macOS dmg, Linux AppImage / deb) and downloads them through the system browser, or opens the release page; when already current it just reports the version.
+- **Settings search**: a search box at the top of the settings sidebar matches category and page names (e.g. “Models” lists every source and credential page under it); clicking a result jumps straight there.
+- **Automatic snapshot before a full restore**: before overwriting, the current config and chats are written to `backups/ai-km-pre-restore-*.json` in the data folder, and the result message shows the path, so picking the wrong file is recoverable.
+- **Setup entry when no model is configured**: the Home composer shows a hint with a “Set up a model” button until a source is configured, instead of only failing with “AI service not connected” on send.
+- **One-click diagnostics**: Settings → General → Basic → Common Actions → Diagnostics copies version / platform / data folder / configured sources / workspace and preset counts; when the clipboard is unavailable the text opens in a dialog instead.
+- **Startup update reminder**: checks GitHub at most once a day and, unless the version was skipped, points to where to download it; the update dialog also previews the first lines of the release notes.
 
 ### Removed
 

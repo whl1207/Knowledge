@@ -42,7 +42,7 @@ function checkClientCtxUsage(code: string): string[] {
 /** `ctx.files` 上返回 Promise 的成员：忘了 await 时读属性会得到 undefined */
 const ASYNC_FILES_MEMBERS = [
   'pickFiles', 'pickDirectory', 'pickWritableDirectory', 'list', 'readText', 'readBase64', 'readBytes', 'readSheet',
-  'renderPdfPage', 'openInApp', 'writeText', 'remove',
+  'saveTempFile', 'renderPdfPage', 'openInApp', 'writeText', 'remove',
 ]
 
 /** `ctx.fs` 上返回 Promise 的成员（两级成员 `sheet.read` 另行判断） */
@@ -210,6 +210,21 @@ const MAIN_PERMISSION_RULES: readonly PermissionRule[] = [
   { re: /\bctx\s*\.\s*host\s*\.\s*runShell\s*\(/, permission: 'shell', label: 'ctx.host.runShell' },
   { re: /\bctx\s*\.\s*host\s*\.\s*fetch\s*\(/, permission: 'net', label: 'ctx.host.fetch' },
   { re: /\bctx\s*\.\s*host\s*\.\s*sessions\s*\./, permission: 'agent', label: 'ctx.host.sessions' },
+  // 宿主服务面（P1：会话面）。与 src/shared/pluginServices.ts 的权限表一致
+  { re: /\bctx\s*\.\s*sessions\s*\./, permission: 'agent', label: 'ctx.sessions' },
+  { re: /\bctx\s*\.\s*sessionProjections\s*\./, permission: 'agent', label: 'ctx.sessionProjections' },
+  { re: /\bctx\s*\.\s*sessionController\s*\./, permission: 'agent.control', label: 'ctx.sessionController' },
+  { re: /\bctx\s*\.\s*agents\s*\./, permission: 'agent.control', label: 'ctx.agents' },
+  { re: /\bctx\s*\.\s*workspaceRegistry\s*\./, permission: 'agent', label: 'ctx.workspaceRegistry' },
+  { re: /\bctx\s*\.\s*approval\s*\./, permission: 'agent.control', label: 'ctx.approval' },
+  { re: /\bctx\s*\.\s*userQuestions\s*\./, permission: 'agent.control', label: 'ctx.userQuestions' },
+  { re: /\bctx\s*\.\s*waterfall\s*\./, permission: 'agent.control', label: 'ctx.waterfall' },
+  // P3 资源类服务
+  { re: /\bctx\s*\.\s*webServer\s*\./, permission: 'net.listen', label: 'ctx.webServer' },
+  { re: /\bctx\s*\.\s*process\s*\./, permission: 'process.spawn', label: 'ctx.process' },
+  { re: /\bctx\s*\.\s*secrets\s*\./, permission: 'secrets', label: 'ctx.secrets' },
+  { re: /\bctx\s*\.\s*schedule\s*\./, permission: 'schedule', label: 'ctx.schedule' },
+  { re: /\bctx\s*\.\s*attachments\s*\./, permission: 'attachments', label: 'ctx.attachments' },
 ]
 
 /**

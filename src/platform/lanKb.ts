@@ -6,8 +6,27 @@
 // 远端网页端（无 ipcRenderer）在 home 知识库模式通过这些接口「选择终端设定的文件夹中现有的
 // 知识库」来使用；也可继续上传自己的文件作为知识库。主机端负责把知识库目录 + 嵌入配置同步给主进程。
 import * as kbAi from '@/shared/kbAiClient'
-import { normalizeLlmType, normalizeLlmTypeList, resolveLlmSource } from '@/shared/llmSources'
+import { LLM_SOURCE_KEYS, normalizeLlmType, normalizeLlmTypeList, resolveLlmSource } from '@/shared/llmSources'
 import { resolveLimitFor } from '@/lib/contextUsage'
+
+/**
+ * 全局 `llm.type` 为空时，推断"真正配了东西"的来源。
+ *
+ * 真实场景：老用户的模型只在某个聊天里选过，`AIconfig.llm.type` 一直是空的，
+ * 但 `llm.custom.sources`（或 ollama 的 model）里其实有可用模型。默认 ollama 会
+ * 让插件/访客拿到空模型，所以先找有模型或密钥的来源。
+ */
+function inferLlmType(llm: any): string {
+  const custom = Array.isArray(llm?.custom?.sources) ? llm.custom.sources : []
+  const ready = (cfg: any): boolean =>
+    !!cfg && (!!String(cfg.model || '').trim() || !!cfg.api_key || !!cfg.apiKeyRef)
+  if (custom.some(ready)) return 'custom'
+  for (const key of LLM_SOURCE_KEYS) {
+    if (key === 'custom') continue
+    if (ready(llm?.[key])) return normalizeLlmType(key)
+  }
+  return 'ollama'
+}
 
 export interface SharedKbFile {
   name: string
@@ -127,10 +146,12 @@ export function buildLanLlmPayload(
   policy?: { guestLlmType?: string; guestLlmModel?: string },
 ): { provider: string; config: any; llmConfig: any; contextLimit: number } {
   const llm = store?.AIconfig?.llm || {}
-  // 来源：访客指定（含 custom:<索引>）优先，否则跟随主机当前激活来源
+  // 来源：访客指定（含 custom:<索引>）优先，否则跟随主机当前激活来源；
+  // 全局 type 为空时按"哪个来源真的配了模型/密钥"推断（很多老配置只在聊天里选过模型，
+  // 全局 type 一直是空的——直接默认 ollama 会让插件拿到空模型）。
   const rawType = String(policy?.guestLlmType || '').trim()
   const customIdx = rawType.startsWith('custom:') ? (parseInt(rawType.slice('custom:'.length), 10) || 0) : undefined
-  const type = rawType ? normalizeLlmType(rawType) : normalizeLlmType(llm.type || 'ollama')
+  const type = rawType ? normalizeLlmType(rawType) : inferLlmType(llm)
   const { config } = resolveLlmSource(llm, type, customIdx)
   const guestConfig = { ...(config || {}) }
   // 模型：访客指定则覆盖来源当前模型

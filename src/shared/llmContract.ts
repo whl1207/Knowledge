@@ -273,3 +273,28 @@ export function schemaInstruction(schema: LlmSchemaRequest): string {
     `它必须满足下面的 JSON Schema：\n${JSON.stringify(schema.schema ?? {}, null, 2)}`
   )
 }
+
+/**
+ * 把「只输出 JSON」的 schema 指令并入消息序列**开头**。
+ *
+ * 为什么必须放开头：LM Studio / 部分 llama.cpp 的 Jinja 模板要求 system 消息在最前面，
+ * 出现在 user 之后会直接 400（`Jinja Exception: System message must be at the beginning`）；
+ * 插件侧只会看到 `LLM_FAILED`。OpenAI / Anthropic / Google 等对 system 位置宽松，放开头同样有效。
+ *
+ * 规则：已有 system → 追加到该条（保持位置不变，不新增一条）；没有 → 在最前面插一条。
+ * 返回新数组，不修改入参。
+ */
+export function withSchemaInstruction<T extends { role: string; content: string }>(
+  messages: T[],
+  schema?: LlmSchemaRequest,
+): T[] {
+  if (!schema) return messages
+  const instruction = schemaInstruction(schema)
+  const index = messages.findIndex((m) => m.role === 'system')
+  if (index >= 0) {
+    const copy = messages.slice()
+    copy[index] = { ...copy[index], content: `${copy[index].content}\n\n${instruction}` }
+    return copy
+  }
+  return [{ role: 'system', content: instruction } as T, ...messages]
+}

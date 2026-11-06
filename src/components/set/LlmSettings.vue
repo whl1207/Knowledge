@@ -5,7 +5,7 @@ import { usestore } from '@/store'
 import { AIUtils } from '@/services/ai-utils'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getProviderConfig } from '@/shared/kbAiClient'
-import { deepSeekApiStyle } from '@/shared/llmSources'
+import { deepSeekApiStyle, deepSeekConfigForStyle } from '@/shared/llmSources'
 import { MAX_TOKENS_SETTING_MAX, DEFAULT_MAX_TOKENS } from '@/shared/outputTokens'
 import type { LmStudioModelInfo, OllamaModelInfo, OllamaLoadedModel } from '@/shared/ai-core'
 import ModelContextWindow from './ModelContextWindow.vue'
@@ -137,9 +137,12 @@ const ensureCustomSources = () => {
       available_models: Array.isArray(c.available_models) ? c.available_models : [],
     }]
     c.activeIndex = 0
+    store.markCustomSourceAsDefault(0)
   }
   if (typeof c.activeIndex !== 'number' || c.activeIndex < 0 || c.activeIndex >= c.sources.length) {
     c.activeIndex = 0
+    // 索引失效后落到第一个来源：默认值跟着更新（否则默认会指向一个已不存在的位置）
+    store.markCustomSourceAsDefault(0)
   }
   // 扁平字段与激活来源对齐：即使重启后扁平字段未及时对齐，设置页也显示正确的地址/密钥/模型
   const src = c.sources[c.activeIndex]
@@ -222,6 +225,8 @@ const removeCustomSource = (index: number) => {
   viewCustomIndex.value = removedBeforeView
     ? viewCustomIndex.value - 1
     : Math.min(viewCustomIndex.value, c.sources.length - 1)
+  // 删除来源会改变默认来源的位置：按 id 重新登记，避免默认跟着索引漂到别的来源
+  if (wasDefault || removedBeforeDefault) store.markCustomSourceAsDefault(c.activeIndex)
   // 删除后查看对象可能换了：凭据显示模式与「下拉/手填」跟随新对象
   applyUseCredFromConfig('custom')
   const nextView = customSources.value[viewCustomIndex.value]
@@ -356,6 +361,8 @@ const setViewAsDefault = () => {
     c.model = src.model || ''
     c.embed_model = src.embed_model || ''
     c.available_models = Array.isArray(src.available_models) ? [...src.available_models] : []
+    // 「设为默认」是默认来源的唯一写入点（参照 DSH：默认选择独立于请求路由，路由不再写它）
+    store.markCustomSourceAsDefault(viewCustomIndex.value)
   }
   store.AIconfig.llm.type = viewType.value
   applyUseCredFromConfig(viewType.value)
@@ -936,6 +943,8 @@ const dsStyle = computed<'chat' | 'responses'>({
 })
 /** 当前接口样式对应的配置对象（两种样式字段结构一致：api_key/base_url/model/embed_model/available_models） */
 const dsCfg = computed<any>(() => (dsStyle.value === 'responses' ? store.AIconfig.llm.deepseekResponses : store.AIconfig.llm.deepseek))
+/** 上下文窗口探测用配置：两种接口样式的 Key / 地址互相补齐（当前块可能只记了模型，DeepSeek /models 需要鉴权） */
+const dsProbeCfg = computed<any>(() => deepSeekConfigForStyle(store.AIconfig.llm, dsStyle.value))
 /** 嵌入模型「下拉/手填」模式按接口样式分别记忆（本地 UI 键，非来源键） */
 const dsEmbedKey = computed(() => (dsStyle.value === 'responses' ? 'deepseek#responses' : 'deepseek'))
 /** API 密钥/凭据引用切换：两种样式各自记忆 */
@@ -1821,9 +1830,10 @@ onMounted(() => {
               </div>
             </div>
           </div>
-          <!-- 上下文窗口（圆环分母）：DeepSeek 单来源，按“来源+当前模型”分桶 -->
+          <!-- 上下文窗口（圆环分母）：DeepSeek 单来源，按“来源+当前模型”分桶；
+               refresh-token 与其余来源一致 → 点块底部「API 状态」会强制重探（否则一直停在旧的否定缓存上） -->
           <ModelContextWindow provider="deepseek"
-            :config="dsCfg" :model="dsCfg.model" />
+            :config="dsProbeCfg" :model="dsCfg.model" :refresh-token="contextRefreshTick" />
           <!-- API 状态测试（置于配置块最下方；测当前接口样式） -->
           <LlmTestRow source-key="deepseek" @refreshed="onSourceRefreshed" />
         </div>
@@ -2033,6 +2043,9 @@ onMounted(() => {
             <input v-model="simpleCfg.model"
                    :placeholder="zh() ? '可直接填，或点下方「测试连接」自动拉取' : 'Type one, or fetch the list with Test below'"/>
           </div>
+          <!-- 上下文窗口（圆环分母）：GLM / Kimi / MiMo 按「来源 + 模型」分桶；
+               这几家官方 /models 不带窗口字段时按模型标称 / 来源默认兜底，可手填覆盖 -->
+          <ModelContextWindow v-if="simpleCfg" :provider="viewType" :config="simpleCfg" :model="simpleCfg.model" :refresh-token="contextRefreshTick" />
           <!-- API 状态测试：同时回填可用模型（内置来源里唯一需要的操作按钮） -->
           <LlmTestRow :source-key="viewType" @refreshed="onSourceRefreshed" />
         </div>

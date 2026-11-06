@@ -86,6 +86,8 @@ export interface PluginBridgeApi {
     }>
   }
   clientBundle(id: string): Promise<PluginClientBundle>
+  /** DSH 兼容包界面半边的 fetch 基址（只有桌面端有主进程 webServer） */
+  clientBaseUrl?(id: string): Promise<{ url: string | null }>
   /**
    * 插件委派智能体（`ctx.agent.run` 的主进程侧）。
    *
@@ -190,6 +192,8 @@ function createHostGuestPluginBridge(): PluginBridgeApi {
     }>('/api/plugins/list'),
     clientBundle: (id: string) =>
       hostPluginApi<PluginClientBundle>(`/api/plugins/bundle?id=${encodeURIComponent(id)}`),
+    // 访客端没有主进程 webServer：DSH 兼容包的相对路径 fetch 会失败
+    clientBaseUrl: async () => ({ url: null }),
     clientLog: () => {},
     onEvent: (_cb: (ev: PluginEvent) => void) => () => {},
     // 以下都是桌面端管理 / 数据能力；访客端明确拒绝（插件界面若调用会收到可读错误）

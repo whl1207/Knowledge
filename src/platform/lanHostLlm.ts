@@ -89,6 +89,8 @@ export function applyHostLlmSources(store: any, data: LanHostLlmSources | null):
     target.custom.sources = list
     const activeIndex = list.findIndex((s: any) => s?.id === hostActiveId)
     target.custom.activeIndex = activeIndex >= 0 ? activeIndex : 0
+    // 主机下发的就是「默认来源」：登记到默认值（网页端本地没有独立设置入口）
+    store.markCustomSourceAsDefault?.(target.custom.activeIndex)
   }
   if (Array.isArray(data?.disabled)) store.llmDisabledSources = [...data.disabled]
   return true

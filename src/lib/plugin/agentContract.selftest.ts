@@ -178,14 +178,34 @@ export function runAgentContractSelfTest(): AgentContractCase[] {
     })
   }
   {
-    const big = normalizePluginAgentLimits({ concurrency: 99, callsPerHour: 9999 })
+    const big = normalizePluginAgentLimits({ concurrency: 999, callsPerHour: 9999 })
     const junk = normalizePluginAgentLimits({ concurrency: -3, callsPerHour: 'x' })
     cases.push({
-      name: '每插件额度：超天花板钳到上限（3 / 200）；非法值回落**默认**而不是锁成最小值',
+      name: '每插件额度：超天花板钳到上限（200 / 200）；非法值回落**默认**而不是锁成最小值',
       ok:
-        big.concurrency === 3 && big.callsPerHour === 200 &&
+        big.concurrency === 200 && big.callsPerHour === 200 &&
         junk.concurrency === 1 && junk.callsPerHour === 20,
       detail: `big=${JSON.stringify(big)} junk=${JSON.stringify(junk)}`,
+    })
+  }
+  {
+    const zero = normalizePluginAgentLimits({ callsPerHour: 0 })
+    const neg = normalizePluginAgentLimits({ callsPerHour: -1 })
+    cases.push({
+      name: '每小时 0 = 无限（原样保留）；负数仍回落默认 20',
+      ok: zero.callsPerHour === 0 && neg.callsPerHour === 20,
+      detail: `zero=${JSON.stringify(zero)} neg=${JSON.stringify(neg)}`,
+    })
+  }
+  {
+    const now = 1_700_000_000_000
+    const stamps = Array.from({ length: 500 }, (_, i) => now - i * 1000)
+    const unlimited = canStartCall(stamps, now, 0)
+    const limited = canStartCall(stamps, now, 20)
+    cases.push({
+      name: 'canStartCall：limit=0 不拒绝（500 次也放行），limit=20 仍拒',
+      ok: unlimited.ok === true && unlimited.limit === 0 && limited.ok === false,
+      detail: `unlimited=${unlimited.ok}/${unlimited.used} limited=${limited.ok}/${limited.used}`,
     })
   }
   {
@@ -272,6 +292,26 @@ export function runAgentContractSelfTest(): AgentContractCase[] {
       detail: bad.length ? bad.map(([raw]) => JSON.stringify(raw)).join('；') : `${casesIn.length} 例全对`,
     })
   }
+  {
+    const r = normalizeAgentRunResult({
+      termination: 'completed',
+      output: '{}',
+      deniedTools: ['read_image', '  ', 'list_dir'],
+    })
+    cases.push({
+      name: 'deniedTools 回传给插件（去空项；用于“read_image 被裁掉 → 去开文件放宽”）',
+      ok: Array.isArray(r.deniedTools) && r.deniedTools.length === 2
+        && r.deniedTools.includes('read_image') && r.deniedTools.includes('list_dir'),
+      detail: JSON.stringify(r.deniedTools),
+    })
+    const none = normalizeAgentRunResult({ output: 'x', deniedTools: [] })
+    cases.push({
+      name: '没有裁掉任何工具时不带 deniedTools（不制造空字段）',
+      ok: none.deniedTools === undefined,
+      detail: String(none.deniedTools),
+    })
+  }
+
   {
     const r = normalizeAgentRunResult({ turn: -5, usage: { inputTokens: 12, outputTokens: Number('x') } })
     cases.push({

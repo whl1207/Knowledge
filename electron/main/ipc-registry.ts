@@ -121,6 +121,61 @@ export function registerNamespacedIpc(): void {
   registerIpc('sessionLog:list', () => {
     return sessionLog.listSessions()
   })
+  /**
+   * 外部渠道（微信等）产生的 agent 会话摘要：首页「外部会话」用。
+   * 只读：不改 agent、不写日志。
+   */
+  registerIpc('sessionLog:agentSummaries', () => {
+    const clean = (text: unknown): string => (typeof text === 'string' ? text : '').replace(/\s+/g, ' ').trim()
+    // 渠道提示会拼在用户正文后面（`你好\n\n[渠道：微信] ...`）：展示时剥掉，否则标题全是提示词
+    const stripChannel = (text: string): string => text.split(/\n{1,2}\[渠道：/)[0].trim()
+    const cut = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text)
+    const isNoise = (text: string): boolean =>
+      /^Time sampled while preparing/i.test(text) ||
+      /^Browser time zone for this request/i.test(text) ||
+      /^\[渠道：/.test(text)
+    const userText = (event: any): string => stripChannel(clean(event?.content))
+    return sessionLog
+      .listSessions()
+      .filter((s) => s.events > 0)
+      .sort((a, b) => b.lastTs - a.lastTs)
+      .slice(0, 80)
+      .map((meta) => {
+        let events: ReturnType<typeof sessionLog.readAll>
+        try {
+          events = sessionLog.readAll(meta.id)
+        } catch {
+          return null
+        }
+        const start = events.find((e) => e.type === 'session/start') as any
+        const users = events.filter((e) => e.type === 'user/message') as any[]
+        const firstUser = users.find((e) => !isNoise(userText(e)))
+        const lastUser = [...users].reverse().find((e) => !isNoise(userText(e)))
+        const lastAssistant = [...events].reverse().find(
+          (e) => e.type === 'assistant/message' && clean((e as any).content) !== '',
+        ) as any
+        const title = cut(firstUser ? userText(firstUser) : '', 40)
+        if (!title) return null
+        return {
+          id: meta.id,
+          events: meta.events,
+          lastTs: meta.lastTs,
+          createdAt: typeof start?.ts === 'number' ? start.ts : 0,
+          provider: clean(start?.provider),
+          model: clean(start?.model),
+          title,
+          // 没有助手回复时退回最后一条用户消息，面板不会看起来“空白/没有最近消息”
+          preview: cut(clean(lastAssistant?.content) || (lastUser ? userText(lastUser) : ''), 80),
+        }
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null)
+  })
+  /** 读外部会话的全部事件（首页导入记录用） */
+  registerIpc('sessionLog:agentEvents', (payload) => {
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId.trim() : ''
+    if (!sessionId) throw new IPCError('INVALID_ARGUMENT', '缺少 sessionId')
+    return sessionLog.readAll(sessionId)
+  })
   registerIpc('sessionLog:search', (payload) => {
     const keyword = payload?.keyword
     if (typeof keyword !== 'string') throw new IPCError('INVALID_ARGUMENT', '缺少 keyword')

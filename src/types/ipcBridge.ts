@@ -30,6 +30,21 @@ export interface IpcRendererApi {
 export interface AikmDshApi {
   sessionLog: {
     list(): Promise<Array<{ id: string; events: number; lastTs: number }>>
+    /** 外部渠道（微信等）的会话摘要，按最近活动倒序 */
+    agentSummaries(): Promise<
+      Array<{
+        id: string
+        events: number
+        lastTs: number
+        createdAt: number
+        provider: string
+        model: string
+        title: string
+        preview: string
+      }>
+    >
+    /** 读某个 agent 会话的全部事件（导入记录用） */
+    agentEvents(sessionId: string): Promise<import('@/types/session-log').SessionEvent[]>
     search(keyword: string): Promise<Array<{ id: string; snippet: string }>>
     events(requestId: string, opts?: { limit?: number; beforeSeq?: number }): Promise<import('@/types/session-log').SessionEvent[]>
     derive(requestId: string): Promise<import('@/types/session-log').DerivedMessage[]>

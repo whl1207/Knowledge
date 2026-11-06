@@ -79,27 +79,17 @@ const BUILTIN_PANELS: BuiltinPanelSpec[] = [
   },
   {
     key: '知识处理',
-    titleZh: '知识处理',
-    titleEn: 'Knowledge Processing',
+    titleZh: '知识库',
+    titleEn: 'Knowledge Base',
     // FA5 原生图标（不是 v4-shims 别名）：知识处理 = 切片 / 分层建库 / 向量化 / 检索问答，
     // fa-layer-group 正好是「一层层切片叠起来」的意象，且 14px 下轮廓清晰。
     // 原来用的 fa-stack-overflow 是 Stack Overflow 的**品牌 logo**（FA5 里属 Brands 字族，
     // 靠 v4-shims 才能显示），语义与知识处理无关。
     icon: 'fa fa-layer-group',
     order: 30,
-    component: lazyPanel(() => import('@/components/knowRAG/knowRAG.vue'), 'Knowledge'),
+    component: lazyPanel(() => import('@/components/KnowledgeBase/KnowledgeBase.vue'), 'Knowledge'),
     // 切换主面板时知识处理不销毁，切片/构建等后台任务继续
     keepAlive: 'Knowledge',
-  },
-  {
-    key: '学习',
-    titleZh: '学习',
-    titleEn: 'Learning',
-    icon: 'fa fa-graduation-cap',
-    order: 40,
-    component: lazyPanel(() => import('@/components/learning/learning.vue'), 'Learning'),
-    // 切换主面板时学习模块不销毁，练习/考试作答状态保留
-    keepAlive: 'Learning',
   },
 ]
 

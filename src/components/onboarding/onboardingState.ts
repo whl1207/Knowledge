@@ -77,6 +77,9 @@ export const anyModelConfigured = (llm: any): boolean => {
   if (hasKey(l.deepseek) || hasKey(l.openai) || hasKey(l.anthropic) || hasKey(l.google) || hasKey(l.azure)) return true
   if (hasKey(l.glm) || hasKey(l.kimi) || hasKey(l.mimo)) return true
   const customSources = Array.isArray(l.custom?.sources) ? l.custom.sources : []
-  if (customSources.some((c: any) => hasKey(c)) || hasKey(l.custom)) return true
+  // 自定义来源可能指向本地 / 内网服务（LM Studio、vLLM、Ollama 网关），**没有 api_key**。
+  // 只要有模型名就算可用；否则「明明配了自定义模型却提示先配置一个」。
+  if (customSources.some((c: any) => hasKey(c) || hasModel(c))) return true
+  if (hasKey(l.custom) || hasModel(l.custom)) return true
   return hasModel(l.ollama) || hasModel(l.lmstudio) || hasModel(l.gpustack)
 }

@@ -16,7 +16,8 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import * as path from 'node:path'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { IPCError } from '@/types/ipc'
 import { pluginHost } from './plugin-host'
 import { requirePluginApproval } from './plugin-approval'
@@ -24,6 +25,10 @@ import { addGrant, clearGrants, listGrants, revokeGrant } from './plugin-grants'
 import { asFsError, createPluginFs } from './plugin-fs'
 import { fsPolicySnapshot, isFsPolicyEnabled, setFsPolicyEnabled } from './plugin-fs-policy'
 import type { FsEdit, PluginFsApi } from '@/shared/fsContract'
+
+/** 插件临时文件（`userData/plugins-data/<id>/tmp/`）：单文件上限与保留个数 */
+const TEMP_MAX_BYTES = 32 * 1024 * 1024
+const TEMP_KEEP = 200
 
 /** 插件是否声明了 fs 权限（未声明一律拒绝） */
 function requireFsPermission(pluginId: string): void {
@@ -42,6 +47,18 @@ function readPluginId(payload: unknown): string {
   return id
 }
 
+/** 按文件头判断是不是受支持的图片（与 read_image 的 sniff 同一套魔数） */
+function looksLikeImage(bytes: Buffer): boolean {
+  if (bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true // PNG
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true // JPEG
+  if (bytes.length >= 4 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return true // GIF8
+  if (bytes.length >= 12
+    && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return true // RIFF….WEBP
+  return false
+}
+
 /** 按载荷构造该插件的文件能力（判权 + 目录由宿主快照决定，插件无法伪造） */
 function fsFor(payload: { id?: string }): PluginFsApi {
   const pluginId = readPluginId(payload)
@@ -51,6 +68,7 @@ function fsFor(payload: { id?: string }): PluginFsApi {
   return createPluginFs({
     pluginId,
     pluginDir: snapshot.dir,
+    dataDir: path.join(app.getPath('userData'), 'plugins-data', pluginId),
     hasPermission: snapshot.permissions.includes('fs'),
   })
 }
@@ -225,6 +243,76 @@ export function registerPluginFilesIpc(): void {
         maxRows: payload?.maxRows,
         maxSheets: payload?.maxSheets,
       })
+    }),
+  )
+
+  // -------------------------------------------------------------------------
+  // 插件临时文件（`ctx.files.saveTempFile`）
+  //
+  // 为什么需要：插件常把「界面里渲染出来的图片」交给智能体的 read_image 读（扫描件识别、
+  // 报表截图…）。界面半边手里只有 dataURL，而 read_image 要的是**绝对路径**。
+  //
+  // 不能写到插件目录（`ctx.host.writeFile` / `ctx.fs` 的相对路径都落在那里）：
+  // 宿主用 fs.watch 监视插件目录做热重载，写一个文件就会触发「插件已重载」，
+  // 界面状态被重置、在飞的委派被取消——表现就是「点一下按钮面板跳走 / 恢复初始状态」。
+  // 所以临时文件统一落到 `userData/plugins-data/<id>/tmp/`（不在监视范围内），
+  // 由主进程按 mtime 只保留最近 TEMP_KEEP 个，插件不用自己清理。
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle(
+    'plugin:files:save-temp',
+    handle(async (payload: { id?: string; name?: string; mime?: string; base64?: string; dataUrl?: string }) => {
+      const pluginId = readPluginId(payload)
+      requireFsPermission(pluginId)
+      let base64 = String(payload?.base64 ?? '').trim()
+      if (!base64) {
+        const m = /^data:[^;]*;base64,(.*)$/s.exec(String(payload?.dataUrl ?? ''))
+        if (m) base64 = m[1]
+      }
+      if (!base64) throw new IPCError('INVALID_ARGUMENT', '缺少图片数据（base64 / dataUrl）')
+      let bytes: Buffer
+      try {
+        bytes = Buffer.from(base64, 'base64')
+      } catch {
+        throw new IPCError('INVALID_ARGUMENT', '图片数据不是合法的 base64')
+      }
+      if (!bytes.length) throw new IPCError('INVALID_ARGUMENT', '图片数据为空')
+      if (bytes.length > TEMP_MAX_BYTES) {
+        throw new IPCError('INVALID_ARGUMENT', `临时文件过大（${bytes.length} 字节 > ${TEMP_MAX_BYTES}）`)
+      }
+      const safe = String(payload?.name || 'file')
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+        .replace(/^\.+/, '')
+        .slice(0, 80) || 'file'
+      // 声称是图片就校验文件头：把二进制当 UTF-8 字符串写的旧写法会产出 EF BF BD 开头的"PNG"，
+      // 那时 read_image 才报错，排查起来绕一大圈。这里直接拒绝，并说清原因。
+      const claimsImage = /^image\//i.test(String(payload?.mime || '')) || /\.(png|jpe?g|webp|gif)$/i.test(safe)
+      if (claimsImage && !looksLikeImage(bytes)) {
+        throw new IPCError(
+          'INVALID_ARGUMENT',
+          '图片数据不是有效的 PNG / JPEG / WebP / GIF（文件头不匹配）：请按字节传 base64，不要把它当字符串写',
+        )
+      }
+      const dir = path.join(app.getPath('userData'), 'plugins-data', pluginId, 'tmp')
+      await fs.mkdir(dir, { recursive: true })
+      const file = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`
+      const abs = path.join(dir, file)
+      await fs.writeFile(abs, bytes)
+      // 清理：按 mtime 只留最近 TEMP_KEEP 个（失败不影响本次保存）
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true })
+        const rows: Array<{ name: string; mtime: number }> = []
+        for (const entry of entries) {
+          if (!entry.isFile()) continue
+          const stat = await fs.stat(path.join(dir, entry.name)).catch(() => null)
+          if (stat) rows.push({ name: entry.name, mtime: stat.mtimeMs })
+        }
+        rows.sort((a, b) => b.mtime - a.mtime)
+        for (const row of rows.slice(TEMP_KEEP)) {
+          await fs.unlink(path.join(dir, row.name)).catch(() => { /* 已被别的进程删掉 */ })
+        }
+      } catch { /* 清理失败不影响本次保存 */ }
+      return { path: abs, name: safe, bytes: bytes.length }
     }),
   )
 

@@ -163,8 +163,8 @@ const runTest = async () => {
 
     <div class="wf-desc">
       <i class="fa fa-info-circle"></i>
-      {{ t('web_fetch 工具（智能体、批量任务、工作流共用）按下面的顺序依次尝试已开启的抓取方式：某个通道失败（HTTP 403 / 验证页 / 超时 / 空内容）就自动回退到下一个，全部失败才返回错误。',
-           'The web_fetch tool (shared by agents, batch runs and workflows) tries the enabled channels below in order: when one fails (HTTP 403 / challenge page / timeout / empty body) it falls back to the next, and only reports an error when all fail.') }}
+      {{ t('web_fetch 工具（智能体、批量任务、工作流共用）按下面的顺序依次尝试已开启的抓取方式：某个通道失败（HTTP 403 / 验证页 / 超时 / 空内容）就自动回退到下一个，全部失败才返回错误。抓到的 HTML 统一转成 Markdown（链接保留、相对地址补全），PDF 仍直接解析正文。',
+           'The web_fetch tool (shared by agents, batch runs and workflows) tries the enabled channels below in order: when one fails (HTTP 403 / challenge page / timeout / empty body) it falls back to the next, and only reports an error when all fail. Fetched HTML is converted to Markdown (links kept, relative URLs resolved); PDFs are still parsed directly.') }}
     </div>
 
     <!-- 抓取方式列表 -->
