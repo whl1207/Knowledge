@@ -9,12 +9,28 @@
 
 ## 2026-11-07
 
+### Added
+
+- **Learning is now part of the Knowledge Base module**: the left nav gains Overview / Map / Review / Mistakes / Exam, Learning shares the module status bar, and the old top-level Learning entry is gone.
+- **The knowledge overview is now a four-ring graph**: files / slices / entities / questions show 50–80 nodes, labels are hidden for hover tooltips, nodes are placed clockwise by similarity, and more relevant nodes are larger.
+- **The QA graph and evidence now share one panel**: after an answer the graph moves to the right, matching nodes are highlighted and others dimmed; the panel switches between Graph / Sources / Entities / Questions, and clicking a node shows its Markdown in place instead of navigating away.
+- **Knowledge-base settings moved into the toolbar**: Version Management, Strategies and Other Settings are toolbar buttons, the settings page no longer has its own sidebar, and “Settings” is removed from the module nav.
+- **The ontology node panel was redesigned**: tabs are gone; a Markdown description and property grid are shown together, related slices and nodes expand below, selected-node details float above the graph, and the legend moved to the bottom-left.
+- **Knowledge bases are archived per folder**: newly saved .kb files go to `知识库/<name>/`, learning records sit beside them, and the toolbar offers “Organize KB folders”.
+- **A “Learning tutor” QA mode**: the composer switches between normal Q&A and tutor mode, and Review / Practice / Exam add an “Ask” action that prefills the question in QA.
+
 ### Fixed
 
-- **Voice input could not be stopped on touch screens**: the “Listening…” panel is now tappable as a whole (with a “Finish” hint on the right) — tap it to stop recording and start transcription; clicking it with a mouse works too.
+- **An unreachable embedding service no longer crashes the whole module**: retrieval failure is reported in the answer area as “Retrieval failed” instead of triggering “Extension failed”.
+- **A blank placeholder appeared below the QA composer**: the empty file/slice container no longer takes up half the height.
+- **The knowledge overview no longer treats slice count as similarity**: entities are ordered by actual retrieval score, so a hub entity no longer always comes first.
 
 ### Improved
 
+- **Voice input could not be stopped on touch screens**: the “Listening…” panel is now tappable as a whole (with a “Finish” hint on the right) — tap it to stop recording and start transcription; clicking it with a mouse works too.
+- **The slice panel renders less on first paint**: cards show a plain-text excerpt until they enter the viewport or are clicked, search is debounced, and load-more uses a scroll sentinel.
+- **The file panel is easier to search and preview**: search / filter / sort, stable row keys, hover tooltips, a draggable splitter, file metadata, a collapsible summary and a preview skeleton.
+- **Sources / Entities / Questions lists are sorted by retrieval score**: all three sort by similarity and are capped by the evidence-count setting.
 - **The floating mic is friendlier to touch**: the drag threshold is relaxed for touch, so a slight finger wobble is no longer taken as a drag.
 
 ## 2026-11-06
