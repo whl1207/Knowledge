@@ -192,6 +192,191 @@ function buildTableXml(rows: string[][], opts: { header?: boolean; widths?: numb
   return `<w:tbl>${tblPr}<w:tblGrid>${grid}</w:tblGrid>${trs}</w:tbl>`
 }
 
+// ==================== 表格行列 ====================
+
+/** 取某标签在 XML 中的顶层重复片段（嵌套同名标签只取最外层） */
+function topLevelSpans(xml: string, tag: string): Array<{ start: number; end: number; xml: string }> {
+  const re = new RegExp(`<${tag}\\b|</${tag}>`, 'g')
+  const out: Array<{ start: number; end: number; xml: string }> = []
+  let depth = 0
+  let start = -1
+  let m: RegExpExecArray | null
+  while ((m = re.exec(xml))) {
+    if (m[0].startsWith('</')) {
+      if (depth > 0) {
+        depth--
+        if (depth === 0 && start >= 0) {
+          out.push({ start, end: m.index + m[0].length, xml: xml.slice(start, m.index + m[0].length) })
+          start = -1
+        }
+      }
+    } else {
+      if (depth === 0) start = m.index
+      depth++
+    }
+  }
+  return out
+}
+
+/** 改写一行里各单元格的第一个 w:t（保留单元格/段落/run 格式） */
+function fillTableRow(rowXml: string, values: string[]): string {
+  const cells = topLevelSpans(rowXml, 'w:tc')
+  let out = rowXml
+  for (let ci = cells.length - 1; ci >= 0; ci--) {
+    const cell = cells[ci]
+    let used = false
+    const cellXml = cell.xml.replace(/(<w:t\b[^>]*>)([\s\S]*?)(<\/w:t>)/g, (_m, open: string, _old: string, close: string) => {
+      if (used) return open + close
+      used = true
+      return open + encodeXml(String(values[ci] ?? '')) + close
+    })
+    out = out.slice(0, cell.start) + cellXml + out.slice(cell.end)
+  }
+  return out
+}
+
+/** 改写单元格第一个 w:t（保留格式） */
+function fillTableCell(cellXml: string, value: string): string {
+  let used = false
+  return cellXml.replace(/(<w:t\b[^>]*>)([\s\S]*?)(<\/w:t>)/g, (_m, open: string, _old: string, close: string) => {
+    if (used) return open + close
+    used = true
+    return open + encodeXml(value) + close
+  })
+}
+
+/** 在表格末尾追加一列；values 按行填（缺省为空），同步补 tblGrid */
+export function appendTableColumn(pkg: DocxPackage, index: number, values: string[] = []): EditResult {
+  const layout = bodyLayout(pkg.documentXml)
+  if (!layout) return { ok: false, error: '无法定位文档正文' }
+  const blk = layout.blocks.find(b => b.index === index)
+  if (!blk) return { ok: false, error: `块 ${index} 不存在` }
+  if (blk.kind !== 'table') return { ok: false, error: `块 ${index} 不是表格` }
+  let table = blk.xml
+  const rows = topLevelSpans(table, 'w:tr')
+  let cols = 0
+  for (let ri = rows.length - 1; ri >= 0; ri--) {
+    const row = rows[ri]
+    const cells = topLevelSpans(row.xml, 'w:tc')
+    cols = Math.max(cols, cells.length)
+    if (!cells.length) continue
+    const last = cells[cells.length - 1]
+    const cellXml = fillTableCell(last.xml, String(values[ri] ?? ''))
+    const newRow = row.xml.slice(0, last.end) + cellXml + row.xml.slice(last.end)
+    table = table.slice(0, row.start) + newRow + table.slice(row.end)
+  }
+  if (!cols) return { ok: false, error: '表格没有单元格，无法追加列' }
+  table = table.replace(/(<w:tblGrid\b[^>]*>)([\s\S]*?)(<\/w:tblGrid>)/, (_m, open: string, inner: string, close: string) =>
+    `${open}${inner}<w:gridCol w:w="2400"/>${close}`)
+  splice(pkg, blk.start, blk.end, table)
+  markModified(pkg)
+  return { ok: true, index: blk.index, detail: `已在表格块 ${index} 末尾追加 1 列（共 ${cols + 1} 列）` }
+}
+
+/** 删除表格第 col 列（1 起）；合并单元格可能不完整 */
+export function deleteTableColumn(pkg: DocxPackage, index: number, col: number): EditResult {
+  const layout = bodyLayout(pkg.documentXml)
+  if (!layout) return { ok: false, error: '无法定位文档正文' }
+  const blk = layout.blocks.find(b => b.index === index)
+  if (!blk) return { ok: false, error: `块 ${index} 不存在` }
+  if (blk.kind !== 'table') return { ok: false, error: `块 ${index} 不是表格` }
+  let table = blk.xml
+  const rows = topLevelSpans(table, 'w:tr')
+  if (!Number.isInteger(col) || col < 1) return { ok: false, error: `列号 ${col} 无效` }
+  for (let ri = rows.length - 1; ri >= 0; ri--) {
+    const row = rows[ri]
+    const cells = topLevelSpans(row.xml, 'w:tc')
+    if (col > cells.length) continue
+    const target = cells[col - 1]
+    const newRow = row.xml.slice(0, target.start) + row.xml.slice(target.end)
+    table = table.slice(0, row.start) + newRow + table.slice(row.end)
+  }
+  table = table.replace(/(<w:tblGrid\b[^>]*>)([\s\S]*?)(<\/w:tblGrid>)/, (_m, open: string, inner: string, close: string) => {
+    const cols = [...inner.matchAll(/<w:gridCol\b[^>]*\/>/g)]
+    if (!cols.length) return `${open}${inner}${close}`
+    let i = 0
+    return open + inner.replace(/<w:gridCol\b[^>]*\/>/g, (m) => (i++ === col - 1 ? '' : m)) + close
+  })
+  splice(pkg, blk.start, blk.end, table)
+  markModified(pkg)
+  return { ok: true, index: blk.index, detail: `已删除表格块 ${index} 第 ${col} 列` }
+}
+
+/** 在表格末尾追加一行；values 按列填第一个文本 run，缺省为空 */
+export function appendTableRow(pkg: DocxPackage, index: number, values: string[] = []): EditResult {
+  const layout = bodyLayout(pkg.documentXml)
+  if (!layout) return { ok: false, error: '无法定位文档正文' }
+  const blk = layout.blocks.find(b => b.index === index)
+  if (!blk) return { ok: false, error: `块 ${index} 不存在` }
+  if (blk.kind !== 'table') return { ok: false, error: `块 ${index} 不是表格` }
+  const rows = topLevelSpans(blk.xml, 'w:tr')
+  if (!rows.length) return { ok: false, error: '表格没有行，无法追加' }
+  const last = rows[rows.length - 1]
+  const newRow = fillTableRow(last.xml, values)
+  const insertAt = blk.start + blk.xml.lastIndexOf('</w:tbl>')
+  if (insertAt < blk.start) return { ok: false, error: '无法定位表格结束标签' }
+  splice(pkg, insertAt, insertAt, newRow)
+  markModified(pkg)
+  return { ok: true, index: blk.index, detail: `已在表格块 ${index} 末尾追加 1 行（共 ${rows.length + 1} 行）` }
+}
+
+/** 删除表格第 row 行（1 起） */
+export function deleteTableRow(pkg: DocxPackage, index: number, row: number): EditResult {
+  const layout = bodyLayout(pkg.documentXml)
+  if (!layout) return { ok: false, error: '无法定位文档正文' }
+  const blk = layout.blocks.find(b => b.index === index)
+  if (!blk) return { ok: false, error: `块 ${index} 不存在` }
+  if (blk.kind !== 'table') return { ok: false, error: `块 ${index} 不是表格` }
+  const rows = topLevelSpans(blk.xml, 'w:tr')
+  if (!Number.isInteger(row) || row < 1 || row > rows.length) return { ok: false, error: `行号 ${row} 超出范围（1..${rows.length}）` }
+  const target = rows[row - 1]
+  splice(pkg, blk.start + target.start, blk.start + target.end, '')
+  markModified(pkg)
+  return { ok: true, index: blk.index, detail: `已删除表格块 ${index} 第 ${row} 行` }
+}
+
+// ==================== 修订接受 / 拒绝 ====================
+
+function removeXmlElements(xml: string, tag: string): string {
+  const spans = topLevelSpans(xml, tag)
+  let out = xml
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const s = spans[i]
+    out = out.slice(0, s.start) + out.slice(s.end)
+  }
+  return out
+}
+
+function unwrapXmlTag(xml: string, tag: string): string {
+  return xml
+    .replace(new RegExp(`<${tag}\\b[^>]*>`, 'g'), '')
+    .replace(new RegExp(`</${tag}>`, 'g'), '')
+}
+
+/** 接受全部修订：删除 w:del，保留 w:ins 内容 */
+export function acceptAllRevisions(pkg: DocxPackage): EditResult {
+  const before = pkg.documentXml
+  let xml = removeXmlElements(before, 'w:del')
+  xml = unwrapXmlTag(xml, 'w:ins')
+  if (xml === before) return { ok: true, detail: '没有待接受的修订' }
+  pkg.documentXml = xml
+  markModified(pkg)
+  return { ok: true, detail: '已接受全部修订' }
+}
+
+/** 拒绝全部修订：删除 w:ins，恢复 w:del 内容 */
+export function rejectAllRevisions(pkg: DocxPackage): EditResult {
+  const before = pkg.documentXml
+  let xml = removeXmlElements(before, 'w:ins')
+  xml = unwrapXmlTag(xml, 'w:del')
+  // 拒绝修订后，删除标记里的文字恢复为普通文本
+  xml = xml.replace(/<w:delText\b/g, '<w:t').replace(/<\/w:delText>/g, '</w:t>')
+  if (xml === before) return { ok: true, detail: '没有待拒绝的修订' }
+  pkg.documentXml = xml
+  markModified(pkg)
+  return { ok: true, detail: '已拒绝全部修订' }
+}
+
 // ==================== 编辑操作 ====================
 
 export interface EditResult {

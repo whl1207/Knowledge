@@ -14,6 +14,8 @@ import { readZipEntryText } from './docx-zip'
 export interface OfficeBlock {
   /** 1-based 段落/块序号（在文档中的绝对位置） */
   index: number
+  /** 稳定块 ID：内容不变时跨会话/跨编辑保持不变（用于 Agent 定位，避免序号前移后改错块） */
+  blockId?: string
   kind: 'paragraph' | 'table'
   /** 该块的纯文本（表格为全部单元格文本按行拼接） */
   text: string
@@ -27,6 +29,7 @@ export interface OfficeBlock {
 
 export interface DocxOutline {
   index: number
+  blockId?: string
   level: number
   text: string
 }
@@ -241,6 +244,23 @@ export function bodyLayout(documentXml: string): BodyLayout | null {
 
 // ==================== 主入口 ====================
 
+/** 内容哈希（FNV-1a）：同一块内容不变时 ID 稳定，用于替代易漂移的序号 */
+function blockHash(xml: string): string {
+  let h = 2166136261
+  for (let i = 0; i < xml.length; i++) {
+    h ^= xml.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0).toString(36)
+}
+
+function stableBlockId(kind: string, xml: string, seen: Map<string, number>): string {
+  const base = `${kind}_${blockHash(xml)}`
+  const n = seen.get(base) || 0
+  seen.set(base, n + 1)
+  return `${base}_${n}`
+}
+
 /** 从已解出的 word/document.xml 解析为块模型（读入口与编辑后同步共用） */
 export function parseDocumentXml(documentXml: string, filePath: string, name: string): DocxReadResult {
   const result: DocxReadResult = { path: filePath, name: name || path.basename(filePath), blocks: [], headings: [], wordCount: 0 }
@@ -256,19 +276,30 @@ export function parseDocumentXml(documentXml: string, filePath: string, name: st
     }
     const blocks: OfficeBlock[] = []
     const headings: DocxOutline[] = []
+    const seenIds = new Map<string, number>()
     for (const b of layout.blocks) {
       if (b.index === undefined) continue
+      const blockId = (() => {
+        const paraId = /w14:paraId="([0-9A-Fa-f]+)"/.exec(b.xml)
+        if (paraId) {
+          const base = `p_${paraId[1].toUpperCase()}`
+          const n = seenIds.get(base) || 0
+          seenIds.set(base, n + 1)
+          return n ? `${base}_${n}` : base
+        }
+        return stableBlockId(b.kind, b.xml, seenIds)
+      })()
       if (b.kind === 'paragraph') {
         const text = paragraphText(b.xml).trim()
         const style = styleOf(b.xml)
         const level = headingLevelOf(b.xml)
-        const blk: OfficeBlock = { index: b.index, kind: 'paragraph', text, ...(style !== undefined ? { style } : {}), ...(level !== undefined ? { headingLevel: level } : {}) }
+        const blk: OfficeBlock = { index: b.index, blockId, kind: 'paragraph', text, ...(style !== undefined ? { style } : {}), ...(level !== undefined ? { headingLevel: level } : {}) }
         blocks.push(blk)
-        if (level !== undefined && text) headings.push({ index: b.index, level, text })
+        if (level !== undefined && text) headings.push({ index: b.index, blockId, level, text })
       } else if (b.kind === 'table') {
         const rows = tableRows(b.xml)
         const flat = rows.map(r => r.join(' | ')).join('\n')
-        blocks.push({ index: b.index, kind: 'table', text: flat, table: rows })
+        blocks.push({ index: b.index, blockId, kind: 'table', text: flat, table: rows })
       }
     }
     result.blocks = blocks

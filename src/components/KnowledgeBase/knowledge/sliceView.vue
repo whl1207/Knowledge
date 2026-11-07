@@ -311,7 +311,7 @@ const showMoreFooter = computed(() => {
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   align-items: start;
   align-content: start;
-  padding: 0 5px;
+  padding: 5px;
   position: relative;
   box-sizing: border-box;
 }

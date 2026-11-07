@@ -17,13 +17,279 @@
  * 4. 类型差异全部集中在 ADAPTERS 表，宿主逻辑与类型无关。
  */
 import { app, ipcMain, protocol, net, BrowserWindow, WebContentsView, type WebContents } from 'electron'
+import { setDocumentRenderHook, setEditorBridge } from './office/office-service'
+import { randomUUID } from 'node:crypto'
 import { logInfo } from './log'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 
-const require_ = createRequire(import.meta.url)
+const require_ = createRequire(
+  (typeof __filename !== 'undefined' ? __filename : import.meta.url) as string,
+)
+
+// GenOffice 编辑器命令桥：复杂编辑交给编辑器自身执行，避免 AI-KM 直接拼 OOXML
+const editorReady = new Set<string>()
+const editorRequests = new Map<string, { resolve: (v: any) => void; timer: ReturnType<typeof setTimeout> }>()
+const hiddenEditors = new Map<string, { window: BrowserWindow; viewId: string; timer: ReturnType<typeof setTimeout> | null }>()
+
+function normPathKey(p: string): string {
+  return path.resolve(p).toLowerCase()
+}
+
+export async function releaseHiddenEditor(p: string): Promise<void> {
+  const key = normPathKey(p)
+  const item = hiddenEditors.get(key)
+  if (!item) return
+  hiddenEditors.delete(key)
+  if (item.timer) clearTimeout(item.timer)
+  try { await autoSaveView(item.viewId) } catch { /* ignore */ }
+  try { await closeView(item.viewId) } catch { /* ignore */ }
+  try { if (!item.window.isDestroyed()) item.window.destroy() } catch { /* ignore */ }
+}
+
+export async function ensureHeadlessEditor(p: string): Promise<boolean> {
+  if (findViewByPath(p)) return true
+  const key = normPathKey(p)
+  const existing = hiddenEditors.get(key)
+  if (existing && !existing.window.isDestroyed()) return true
+  const win = new BrowserWindow({
+    show: true,
+    x: -20000,
+    y: -20000,
+    width: 1280,
+    height: 1600,
+    skipTaskbar: true,
+    focusable: false,
+    opacity: 1,
+    webPreferences: { backgroundThrottling: false, paintWhenInitiallyHidden: true },
+  })
+  const res = await openInWindow(win, p)
+  if (!res.ok || !res.viewId) {
+    try { win.destroy() } catch { /* ignore */ }
+    return false
+  }
+  setViewBounds(res.viewId, { x: 0, y: 0, width: 1280, height: 1600 }, 1)
+  const item = { window: win, viewId: res.viewId, timer: null as ReturnType<typeof setTimeout> | null }
+  item.timer = setTimeout(() => { void releaseHiddenEditor(p) }, 120000)
+  hiddenEditors.set(key, item)
+  return true
+}
+
+function touchHiddenEditor(p: string): void {
+  const item = hiddenEditors.get(normPathKey(p))
+  if (!item) return
+  if (item.timer) clearTimeout(item.timer)
+  item.timer = setTimeout(() => { void releaseHiddenEditor(p) }, 120000)
+}
+
+function findViewByPath(filePath: string): ViewEntry | undefined {
+  const target = path.resolve(filePath).toLowerCase()
+  return Array.from(state.views.values()).find(v => path.resolve(v.filePath).toLowerCase() === target)
+}
+
+function findViewByWebContents(id: number): ViewEntry | undefined {
+  return Array.from(state.views.values()).find(v => v.view.webContents.id === id)
+}
+
+async function sendEditorCommand(filePath: string, command: string, payload: any, timeoutMs = 30000): Promise<{ ok: boolean; result?: any; error?: string }> {
+  let entry = findViewByPath(filePath)
+  if (!entry) {
+    const ok = await ensureHeadlessEditor(filePath)
+    if (!ok) return { ok: false, error: 'EDITOR_NOT_OPEN' }
+    entry = findViewByPath(filePath)
+  }
+  if (!entry) return { ok: false, error: 'EDITOR_NOT_OPEN' }
+  touchHiddenEditor(filePath)
+  // 等渲染器发出 docs:mcp-ready（文档模型加载完成后才处理命令）
+  const start = Date.now()
+  while (!editorReady.has(entry.viewId) && Date.now() - start < 8000) {
+    await new Promise(r => setTimeout(r, 100))
+  }
+  if (!editorReady.has(entry.viewId)) return { ok: false, error: 'EDITOR_NOT_READY' }
+  const requestId = randomUUID()
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      editorRequests.delete(requestId)
+      resolve({ ok: false, error: 'EDITOR_TIMEOUT' })
+    }, Math.max(1000, Math.min(120000, timeoutMs)))
+    editorRequests.set(requestId, { resolve, timer })
+    try {
+      entry.view.webContents.send('docs:mcp-command', { requestId, command, payload })
+    } catch (e: any) {
+      clearTimeout(timer)
+      editorRequests.delete(requestId)
+      resolve({ ok: false, error: String(e?.message || e) })
+    }
+  })
+}
+
+setEditorBridge({
+  hasView: (filePath) => !!findViewByPath(filePath),
+  ensureView: (filePath) => ensureHeadlessEditor(filePath),
+  command: sendEditorCommand,
+})
+
+// Office MCP 截图：复用已打开的 GenOffice 视图，截当前可见页并落临时 PNG
+setDocumentRenderHook(async (filePath, opts = {}) => {
+  const target = path.resolve(filePath).toLowerCase()
+  const entry = Array.from(state.views.values()).find(v => path.resolve(v.filePath).toLowerCase() === target)
+  if (!entry) return { ok: false, error: 'NOT_OPEN' }
+  const hidden = hiddenEditors.get(normPathKey(filePath))
+  let restoreHidden = false
+  try {
+    // 隐藏窗口没有 display surface，capturePage 会得到空白图；截图时临时显示在屏幕外可见位置
+    if (hidden) {
+      hidden.window.setOpacity(1)
+      hidden.window.setPosition(0, 0)
+      hidden.window.showInactive()
+      restoreHidden = true
+      await new Promise(r => setTimeout(r, 500))
+    }
+    const wc = entry.view.webContents
+    // 等待 GenOffice 文档模型加载完成（.pv-page 出现前截图会得到“正在打开…”界面）
+    const readyStart = Date.now()
+    while (!editorReady.has(entry.viewId) && Date.now() - readyStart < 10000) {
+      await new Promise(r => setTimeout(r, 120))
+    }
+    // editorReady 只代表 editor 与 doc 对象存在；分页 DOM 可能仍在渲染“正在打开…”
+    for (let i = 0; i < 80; i++) {
+      const count = Number(await wc.executeJavaScript(`document.querySelectorAll('.pv-page').length`, true)) || 0
+      if (count > 0) break
+      await new Promise(r => setTimeout(r, 150))
+    }
+    // GenOffice 文档页容器 .pv-page：读取每页尺寸与位置
+    const pages: Array<{ index: number; x: number; y: number; width: number; height: number }> = await wc.executeJavaScript(`
+      (() => {
+        const list = [...document.querySelectorAll('.pv-page')]
+        return list.map((el, i) => {
+          const r = el.getBoundingClientRect()
+          return { index: i, x: r.x, y: r.y, width: r.width, height: r.height }
+        })
+      })()
+    `, true)
+    const dir = path.join(app.getPath('temp'), 'ai-km-office-render')
+    fs.mkdirSync(dir, { recursive: true })
+    const wanted = opts.all
+      ? pages.slice(0, 50)
+      : (() => {
+        const n = Math.max(1, Number(opts.page) || 1)
+        return pages.filter(p => p.index === n - 1)
+      })()
+    if (!wanted.length) {
+      // 该渲染器没有 .pv-page：用 .page-wrap + .page-gap 计算分页盒子（当前 GenOffice 文档版式）
+      const boxes: Array<{ page: number; x: number; docY: number; w: number; h: number }> = await wc.executeJavaScript(`
+        (() => {
+          const wrap = document.querySelector('.page-wrap')
+          if (!wrap) return []
+          const wr = wrap.getBoundingClientRect()
+          const top = wr.top + scrollY
+          const gaps = [...document.querySelectorAll('.page-gap')]
+            .filter(el => !el.closest('.page-hf'))
+            .map(el => { const r = el.getBoundingClientRect(); return { y: r.top + scrollY, h: r.height } })
+            .sort((a, b) => a.y - b.y)
+          const out = []
+          let start = top
+          for (let i = 0; i < gaps.length + 1; i++) {
+            const end = i < gaps.length ? gaps[i].y : top + wrap.scrollHeight
+            if (end > start + 20) out.push({ page: i + 1, x: wr.left, docY: start, w: wr.width, h: end - start })
+            if (i < gaps.length) start = gaps[i].y + gaps[i].h
+          }
+          return out
+        })()
+      `, true).catch(() => [])
+      const wantedBoxes = opts.all ? boxes.slice(0, 50) : boxes.filter(b => b.page === Math.max(1, Number(opts.page) || 1))
+      if (wantedBoxes.length) {
+        const rendered: Array<{ page: number; path: string; width?: number; height?: number }> = []
+        for (const b of wantedBoxes) {
+          await wc.executeJavaScript(`window.scrollTo(0, Math.max(0, ${b.docY} - 30))`, true)
+          await new Promise(r => setTimeout(r, 220))
+          const wr = await wc.executeJavaScript(`(() => { const el = document.querySelector('.page-wrap'); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left, y: r.top } })()`, true)
+          if (!wr) continue
+          const full = await wc.capturePage()
+          const fullSize = full.getSize()
+          const viewWidth = entry.bounds?.width || 1280
+          const scale = fullSize.width / Math.max(1, viewWidth)
+          const cropRect = {
+            x: Math.max(0, Math.round(wr.x * scale)),
+            y: Math.max(0, Math.round(wr.y * scale)),
+            width: Math.max(1, Math.round(b.w * scale)),
+            height: Math.max(1, Math.round(b.h * scale)),
+          }
+          const image = full.crop(cropRect)
+          const png = image.toPNG()
+          const out = path.join(dir, `${entry.viewId}-p${b.page}-${Date.now()}.png`)
+          fs.writeFileSync(out, png)
+          const size = image.getSize()
+          rendered.push({ page: b.page, path: out, width: size.width, height: size.height })
+        }
+        if (!opts.all && rendered.length) {
+          return { ok: true, path: rendered[0].path, width: rendered[0].width, height: rendered[0].height, pages: rendered, totalPages: boxes.length }
+        }
+        return { ok: true, pages: rendered, totalPages: boxes.length }
+      }
+      // 没有分页容器：退回截当前可见区域
+      const debug = await wc.executeJavaScript(`
+        Array.from(document.querySelectorAll('[class*="page"],[class*="Page"]')).slice(0, 40).map(el => {
+          const r = el.getBoundingClientRect()
+          return { cls: String(el.className).slice(0, 80), x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+        })
+      `, true).catch(() => null)
+      const image = await wc.capturePage()
+      const png = image.toPNG()
+      const out = path.join(dir, `${entry.viewId}-${Date.now()}.png`)
+      fs.writeFileSync(out, png)
+      const size = image.getSize()
+      return { ok: true, path: out, width: size.width, height: size.height, pages: [{ page: 1, path: out, width: size.width, height: size.height }], totalPages: pages.length, debug: { dom: debug } }
+    }
+    const rendered: Array<{ page: number; path: string; width?: number; height?: number }> = []
+    for (const p of wanted) {
+      await wc.executeJavaScript(`document.querySelectorAll('.pv-page')[${p.index}]?.scrollIntoView({block:'center'})`, true)
+      await new Promise(r => setTimeout(r, 180))
+      const rect = await wc.executeJavaScript(`
+        (() => {
+          const el = document.querySelectorAll('.pv-page')[${p.index}]
+          if (!el) return null
+          const r = el.getBoundingClientRect()
+          return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+        })()
+      `, true)
+      if (!rect) continue
+      // capturePage 在缩放显示器上返回整窗物理像素；先截整窗再按页面矩形裁剪
+      const full = await wc.capturePage()
+      const fullSize = full.getSize()
+      const viewWidth = entry.bounds?.width || 1280
+      const scale = fullSize.width / Math.max(1, viewWidth)
+      const cropRect = {
+        x: Math.max(0, Math.round(rect.x * scale)),
+        y: Math.max(0, Math.round(rect.y * scale)),
+        width: Math.max(1, Math.round(rect.width * scale)),
+        height: Math.max(1, Math.round(rect.height * scale)),
+      }
+      const image = full.crop(cropRect)
+      const png = image.toPNG()
+      const out = path.join(dir, `${entry.viewId}-p${p.index + 1}-${Date.now()}.png`)
+      fs.writeFileSync(out, png)
+      const size = image.getSize()
+      rendered.push({ page: p.index + 1, path: out, width: size.width, height: size.height })
+    }
+    if (!opts.all && rendered.length) {
+      const viewport = await wc.executeJavaScript(`({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio, scrollY })`, true).catch(() => null)
+      return { ok: true, path: rendered[0].path, width: rendered[0].width, height: rendered[0].height, pages: rendered, totalPages: pages.length, debug: { viewport, page: pages[0] } }
+    }
+    return { ok: true, pages: rendered, totalPages: pages.length }
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) }
+  } finally {
+    if (restoreHidden && hidden) {
+      try {
+        hidden.window.setOpacity(1)
+        hidden.window.setPosition(-20000, -20000)
+      } catch { /* ignore */ }
+    }
+  }
+})
 
 export type EditorType = 'docs' | 'sheets' | 'slides'
 
@@ -958,6 +1224,11 @@ export function disposeWindowViews(hostWindow: BrowserWindow) {
 
 /** 应用退出时回收 */
 export function disposeAll() {
+  for (const item of hiddenEditors.values()) {
+    if (item.timer) clearTimeout(item.timer)
+    try { if (!item.window.isDestroyed()) item.window.destroy() } catch { /* ignore */ }
+  }
+  hiddenEditors.clear()
   for (const entry of [...state.views.values()]) destroyView(entry, false)
   state.views.clear()
 }
@@ -984,6 +1255,11 @@ export async function openInWindow(hostWindow: BrowserWindow, filePath: string):
       showView(entry)
       return { ok: true, viewId: entry.viewId, type, filePath }
     }
+  }
+
+  // 同一文件已有隐藏 Worker：先保存并关闭，再交给可见窗口，避免双写
+  if (hiddenEditors.has(normPathKey(filePath))) {
+    await releaseHiddenEditor(filePath)
   }
 
   let mod: any
@@ -1035,6 +1311,21 @@ function windowFromEvent(event: Electron.IpcMainInvokeEvent): BrowserWindow | nu
 
 /** 注册渲染层可调用的 IPC（主窗口与文件窗口共用） */
 export function registerOfficeHostIpc() {
+  // GenOffice MCP 命令桥：渲染器就绪信号 + 命令结果
+  ipcMain.on('docs:mcp-ready', (event) => {
+    const entry = findViewByWebContents(event.sender.id)
+    if (entry) editorReady.add(entry.viewId)
+  })
+  ipcMain.on('docs:mcp-result', (_event, message: any) => {
+    const requestId = String(message?.requestId || '')
+    const pending = requestId ? editorRequests.get(requestId) : null
+    if (!pending) return
+    clearTimeout(pending.timer)
+    editorRequests.delete(requestId)
+    if (message?.ok === true) pending.resolve({ ok: true, result: message.result })
+    else pending.resolve({ ok: false, error: String(message?.error || 'EDITOR_COMMAND_FAILED') })
+  })
+
   if (state.initialized) return
   state.initialized = true
 

@@ -17,7 +17,7 @@
  * 仅依赖 Node + docx-reader / docx-editor / docx-to-markdown / docx-blocks / docx-styles / xlsx-*（均不 import electron），
  * 内核可复用于未来独立 stdio CLI。
  */
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { bodyLayout, paragraphText, parseDocumentXml, type DocxReadResult, type DocxOutline, type OfficeBlock } from './docx-reader'
@@ -25,7 +25,7 @@ import { loadDocxPackage, applyFindReplace, applyFindReplaceInRange, saveDocxPac
 // 注意：docx-to-markdown 只依赖 Node + mammoth/turndown（不 import electron），不破坏本模块的“可独立复用”约定
 import { docxToMarkdown } from './docx-to-markdown'
 // 块级编辑（M1.2）：replace / insert / delete / 样式 / Markdown 导入
-import { findTextInBlocks, styleCatalog, replaceParagraphText, insertParagraph, insertTable, insertMarkdown, setParagraphStyle, deleteBlock } from './docx-blocks'
+import { findTextInBlocks, styleCatalog, replaceParagraphText, insertParagraph, insertTable, insertMarkdown, setParagraphStyle, deleteBlock, appendTableRow, deleteTableRow, appendTableColumn, deleteTableColumn, acceptAllRevisions, rejectAllRevisions } from './docx-blocks'
 // 图片（列表 / 插入 / 替换）：直接改 media + rels + Content_Types，保留版式
 import { addDocxImage, listDocxImages, replaceDocxImage } from './docx-images'
 // 旧版 .doc → .docx（Word COM / LibreOffice；独立于 open_document 会话）
@@ -74,9 +74,228 @@ interface OfficeSession {
   read: DocxReadResult
   openedAt: number
   lastUseAt: number
+  /** 会话版本：每次保存成功 +1（用于 expectedRevision 乐观锁） */
+  revision: number
+  /** 打开/上次保存时的文件内容 hash：用于发现外部程序修改 */
+  baseHash: string
+  /** 文档复杂度特征：决定是否允许走 OOXML 写路径 */
+  features: DocxFeatures
+  editPolicy: 'ooxml-safe' | 'genoffice-required'
+}
+
+interface DocxFeatures {
+  hasMergedCells: boolean
+  hasNestedTables: boolean
+  hasTrackedChanges: boolean
+  hasFields: boolean
+  hasContentControls: boolean
+  hasTextBoxes: boolean
+  hasComments: boolean
+  hasFootnotes: boolean
+  hasCharts: boolean
+}
+
+function analyzeDocxFeatures(pkg: DocxPackage, blocks: OfficeBlock[]): DocxFeatures {
+  const xml = pkg.documentXml || ''
+  const tableCount = blocks.filter(b => b.kind === 'table').length
+  const rawTableCount = (xml.match(/<w:tbl\b/g) || []).length
+  return {
+    hasMergedCells: /<w:(gridSpan|vMerge)\b/.test(xml),
+    hasNestedTables: rawTableCount > tableCount,
+    hasTrackedChanges: /<w:(ins|del)\b/.test(xml),
+    hasFields: /<w:(fldSimple|instrText)\b/.test(xml),
+    hasContentControls: /<w:sdt\b/.test(xml),
+    hasTextBoxes: /<w:txbxContent\b/.test(xml),
+    hasComments: pkg.entries.some(e => e.name === 'word/comments.xml') || /<w:commentReference\b/.test(xml),
+    hasFootnotes: /<w:footnoteReference\b/.test(xml) || pkg.entries.some(e => e.name === 'word/footnotes.xml'),
+    hasCharts: pkg.entries.some(e => /^word\/charts\//.test(e.name)) || /<w:chart\b/.test(xml),
+  }
+}
+
+/** 复杂文档不允许用 OOXML 字符串编辑；必须交给 GenOffice */
+function requiresGenOffice(features: DocxFeatures): boolean {
+  return features.hasMergedCells
+    || features.hasNestedTables
+    || features.hasTrackedChanges
+    || features.hasFields
+    || features.hasContentControls
+    || features.hasTextBoxes
+    || features.hasComments
+    || features.hasFootnotes
 }
 
 const sessions = new Map<string, OfficeSession>()
+
+/** 页面截图回调：由 office-host 注入（复用内置 GenOffice 渲染器），无桌面编辑器时返回不可用 */
+let documentRenderHook: ((path: string, opts?: { page?: number; all?: boolean }) => Promise<{ ok: boolean; path?: string; pages?: Array<{ page: number; path: string; width?: number; height?: number }>; width?: number; height?: number; totalPages?: number; error?: string }>) | null = null
+export function setDocumentRenderHook(fn: typeof documentRenderHook): void {
+  documentRenderHook = fn
+}
+
+/** 是否存在该文件的 GenOffice 视图（由 office-host 注入，不 import electron） */
+interface EditorBridge {
+  hasView: (path: string) => boolean
+  ensureView: (path: string) => Promise<boolean>
+  command: (path: string, command: string, payload: any, timeoutMs?: number) => Promise<{ ok: boolean; result?: any; error?: string }>
+}
+let editorBridge: EditorBridge | null = null
+export function setEditorBridge(bridge: EditorBridge | null): void {
+  editorBridge = bridge
+}
+
+function escapeHtml(s: string): string {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * 简单/复杂文档的 GenOffice 路由：
+ * - 编辑器已打开 → 文本级编辑与保存走 GenOffice，避免两套内存状态互相覆盖；
+ * - 未打开 → 简单文档继续 OOXML，复杂文档由 ooxmlWriteGuard 拦截。
+ */
+async function routeToEditor(s: OfficeSession, name: string, args: Record<string, any>): Promise<string | null> {
+  if (!editorBridge?.hasView(s.pkg.path)) return null
+  try {
+    if (name === 'replace_paragraph') {
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined) return JSON.stringify({ ok: false, code: 'INVALID_BLOCK', hint: '缺少 index / blockId' }, null, 2)
+      const text = String(arg(args, ['text', 'content', 'newText']) ?? '')
+      const res = await editorBridge.command(s.pkg.path, 'replace_blocks', {
+        startBlockIndex: idx - 1,
+        endBlockIndex: idx - 1,
+        html: `<p>${escapeHtml(text)}</p>`,
+      })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    if (name === 'find_and_replace_text') {
+      const scope = String(arg(args, ['scope']) || 'all').toLowerCase()
+      if (scope === 'first') {
+        return JSON.stringify({ ok: false, code: 'EDITOR_OP_UNSUPPORTED', hint: 'GenOffice 路由暂不支持只替换第一处，请用 OOXML 简单文档或替换全部' }, null, 2)
+      }
+      const idx = resolveBlockIndex(s, args)
+      const find = String(arg(args, ['find', 'find_text']) ?? '')
+      const replace = String(arg(args, ['replace', 'replace_text', 'replacement']) ?? '')
+      const op: any = {
+        op: 'findReplace',
+        find,
+        replace,
+        ...(arg(args, ['ignoreCase', 'ignore_case']) === true ? {} : { matchCase: true }),
+      }
+      if (idx !== undefined) op.target = { blockIndexes: [idx - 1] }
+      const res = await editorBridge.command(s.pkg.path, 'apply_ops', { ops: [op] })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    if (name === 'insert_paragraph') {
+      const text = String(arg(args, ['text', 'content']) ?? '')
+      const idx = resolveBlockIndex(s, args)
+      const last = Math.max(0, s.read.blocks.length - 1)
+      const res = await editorBridge.command(s.pkg.path, 'insert_content', {
+        html: `<p>${escapeHtml(text)}</p>`,
+        afterBlockIndex: idx === undefined ? last : idx - 1,
+      })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    if (name === 'insert_table') {
+      const rows = Array.isArray(args.rows) ? args.rows : []
+      if (!rows.length) return JSON.stringify({ ok: false, code: 'INVALID_TABLE', hint: 'rows 不能为空' }, null, 2)
+      const cols = Math.max(...rows.map((r: any) => Array.isArray(r) ? r.length : 1))
+      const htmlRows = rows.map((row: any, ri: number) => {
+        const cells = Array.isArray(row) ? row : [row]
+        const tag = ri === 0 && arg(args, ['header']) !== false ? 'th' : 'td'
+        return `<tr>${Array.from({ length: cols }, (_, ci) => `<${tag}>${escapeHtml(String(cells[ci] ?? ''))}</${tag}>`).join('')}</tr>`
+      }).join('')
+      const idx = resolveBlockIndex(s, args)
+      const last = Math.max(0, s.read.blocks.length - 1)
+      const res = await editorBridge.command(s.pkg.path, 'insert_content', {
+        html: `<table>${htmlRows}</table>`,
+        afterBlockIndex: idx === undefined ? last : idx - 1,
+      })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    if (name === 'delete_block') {
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined) return JSON.stringify({ ok: false, code: 'INVALID_BLOCK', hint: '缺少 blockId / index' }, null, 2)
+      const res = await editorBridge.command(s.pkg.path, 'apply_ops', {
+        ops: [{ op: 'deleteBlocks', target: { blockIndexes: [idx - 1] } }],
+      })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    if (name === 'set_paragraph_style') {
+      const idx = resolveBlockIndex(s, args)
+      const level = arg(args, ['headingLevel', 'heading_level', 'level'])
+      if (idx === undefined || level === undefined) {
+        return JSON.stringify({ ok: false, code: 'EDITOR_OP_UNSUPPORTED', hint: 'GenOffice 路由目前仅支持按 headingLevel 设置标题；样式名设置请在编辑器中完成' }, null, 2)
+      }
+      const res = await editorBridge.command(s.pkg.path, 'apply_ops', {
+        ops: [{ op: 'setHeadingLevel', target: { blockIndexes: [idx - 1] }, level: Number(level) }],
+      })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    if (name === 'set_text_format') {
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined) return JSON.stringify({ ok: false, code: 'INVALID_BLOCK', hint: '缺少 blockId / index' }, null, 2)
+      const fmt: any = { op: 'setFont', target: { blockIndexes: [idx - 1] } }
+      const map: Array<[string[], string]> = [
+        [['bold'], 'bold'], [['italic'], 'italic'], [['strike'], 'strike'],
+        [['underline'], 'underline'], [['color'], 'color'], [['fontSize', 'font_size'], 'fontSize'],
+        [['font'], 'font'],
+      ]
+      for (const [keys, field] of map) {
+        const v = arg(args, keys)
+        if (v !== undefined) fmt[field] = v
+      }
+      const res = await editorBridge.command(s.pkg.path, 'apply_ops', { ops: [fmt] })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    if (name.startsWith('table_')) {
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined) return JSON.stringify({ ok: false, code: 'INVALID_BLOCK', hint: '缺少 blockId / index' }, null, 2)
+      const block = s.read.blocks.find(b => b.index === idx)
+      if (!block || block.kind !== 'table') return JSON.stringify({ ok: false, code: 'NOT_A_TABLE', hint: '目标块不是表格' }, null, 2)
+      const rows = block.table || []
+      const cols = Math.max(1, ...rows.map(r => r.length))
+      const values = Array.isArray(args.values) ? args.values : []
+      if (values.length) {
+        return JSON.stringify({ ok: false, code: 'EDITOR_OP_UNSUPPORTED', hint: 'GenOffice 路由暂不支持追加行列时同时填值；请先增行/列，再用 find_and_replace_text' }, null, 2)
+      }
+      let op: any
+      if (name === 'table_append_row') op = { op: 'insertTableRow', target: { blockIndexes: [idx - 1] }, row: Math.max(0, rows.length - 1), position: 'after' }
+      else if (name === 'table_delete_row') op = { op: 'deleteTableRow', target: { blockIndexes: [idx - 1] }, row: Math.max(0, Number(arg(args, ['row'])) - 1) }
+      else if (name === 'table_append_column') op = { op: 'insertTableColumn', target: { blockIndexes: [idx - 1] }, col: Math.max(0, cols - 1), position: 'after' }
+      else op = { op: 'deleteTableColumn', target: { blockIndexes: [idx - 1] }, col: Math.max(0, Number(arg(args, ['col'])) - 1) }
+      const res = await editorBridge.command(s.pkg.path, 'apply_ops', { ops: [op] })
+      return JSON.stringify({ ok: res.ok, backend: 'genoffice', result: res.result, error: res.error }, null, 2)
+    }
+    return JSON.stringify({
+      ok: false,
+      code: 'EDITOR_OP_UNSUPPORTED',
+      hint: `该操作（${name}）尚未接入 GenOffice 路由；复杂文档请在编辑器中手动完成，或等待后续版本`,
+    }, null, 2)
+  } catch (e: any) {
+    return JSON.stringify({ ok: false, code: 'EDITOR_BRIDGE_ERROR', error: String(e?.message || e) }, null, 2)
+  }
+}
+
+/** 复杂文档禁止 OOXML 写路径：返回错误字符串；null 表示允许 */
+function ooxmlWriteGuard(s: OfficeSession): string | null {
+  if (s.editPolicy !== 'genoffice-required') return null
+  const editorOpen = !!editorBridge?.hasView(s.pkg.path)
+  return JSON.stringify({
+    ok: false,
+    code: 'EDITOR_REQUIRED',
+    editorOpen,
+    hint: editorOpen
+      ? '该文档包含复杂结构，已禁止 OOXML 字符串编辑；请通过 GenOffice 编辑器执行结构编辑'
+      : '该文档包含合并单元格 / 域 / 修订 / 批注等复杂结构，已禁止 OOXML 字符串编辑；请先在 GenOffice 编辑器中打开后再操作',
+    features: s.features,
+  }, null, 2)
+}
+
+const OOXML_WRITE_TOOLS = new Set([
+  'replace_paragraph', 'insert_paragraph', 'insert_table', 'insert_markdown',
+  'set_paragraph_style', 'set_text_format', 'delete_block', 'find_and_replace_text',
+  'insert_image', 'replace_image', 'table_append_row', 'table_delete_row',
+  'table_append_column', 'table_delete_column',
+])
 
 function capSessions(): void {
   if (sessions.size <= MAX_SESSIONS) return
@@ -96,8 +315,25 @@ function findSession(docId: string): OfficeSession | null {
 
 /** 编辑后同步块模型（list_blocks / read_text / document_info 立即反映修改） */
 function refreshRead(s: OfficeSession): void {
+  const oldBlocks = s.read.blocks.slice()
   s.read = parseDocumentXml(s.pkg.documentXml, s.pkg.path, s.pkg.name)
   enrichHeadingsByStyle(s)
+  // 稳定 blockId：内容未变的块按原 ID 继承；被编辑的块按同序号继承；插入的新块才生成新 ID
+  const used = new Set<string>()
+  for (const b of s.read.blocks) {
+    if (b.blockId && oldBlocks.some(o => o.blockId === b.blockId)) used.add(b.blockId)
+  }
+  for (const b of s.read.blocks) {
+    if (b.blockId && used.has(b.blockId)) continue
+    const candidate = oldBlocks.find(o => o.index === b.index && o.kind === b.kind && o.blockId && !used.has(o.blockId))
+    if (candidate?.blockId) {
+      b.blockId = candidate.blockId
+      used.add(candidate.blockId)
+    }
+  }
+  // 同步标题大纲里的 blockId（parse 后可能已被替换）
+  const byIndex = new Map(s.read.blocks.map(b => [b.index, b.blockId]))
+  for (const h of s.read.headings) h.blockId = byIndex.get(h.index)
 }
 
 /**
@@ -119,7 +355,7 @@ function enrichHeadingsByStyle(s: OfficeSession): void {
     if (b.headingLevel === undefined && b.style && levelOf.has(b.style)) {
       b.headingLevel = levelOf.get(b.style)
     }
-    if (b.headingLevel !== undefined && b.text) headings.push({ index: b.index, level: b.headingLevel, text: b.text })
+    if (b.headingLevel !== undefined && b.text) headings.push({ index: b.index, blockId: b.blockId, level: b.headingLevel, text: b.text })
   }
   s.read.headings = headings
 }
@@ -144,6 +380,19 @@ function arg(args: Record<string, any>, keys: string[]): any {
 const DOC_ID_KEYS = ['docId', 'doc_id', 'documentId', 'document_id', 'docid']
 /** 文件路径的可用别名 */
 const DOC_PATH_KEYS = ['path', 'filePath', 'file_path', 'filepath', 'file']
+
+/** 解析块定位：优先稳定 blockId，其次 1-based 序号 */
+function resolveBlockIndex(s: OfficeSession, args: Record<string, any>): number | undefined {
+  const id = String(arg(args, ['blockId', 'block_id']) || '')
+  if (id) {
+    const hit = s.read.blocks.find(b => b.blockId === id)
+    return hit?.index
+  }
+  const raw = arg(args, ['index', 'block_index', 'blockIndex', 'paragraphIndex'])
+  if (raw === undefined || raw === null || String(raw).trim() === '') return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : undefined
+}
 
 /**
  * 按别名解析会话（docId / doc_id / documentId …）：
@@ -173,6 +422,26 @@ function sessionError(args: Record<string, any>): string {
     return `缺少 docId 参数：请先调用 open_document 获取 docId，并在后续调用中把它原样放进 args 传入。${list}`
   }
   return `docId「${id}」已失效（主进程重启、已被 close_document 关闭，或同时打开的文档超过 ${MAX_SESSIONS} 个被淘汰）。请重新 open_document 后再试。${list}`
+}
+
+/** 文件内容 hash（用于外部修改检测） */
+function hashFile(p: string): string {  try {
+    return createHash('sha256').update(fs.readFileSync(p)).digest('hex')
+  } catch {
+    return ''
+  }
+}
+
+/** 从 OOXML 片段提取可见文本（w:t） */
+function xmlVisibleText(xml: string): string {
+  return [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map(m => m[1]
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&'))
+    .join('')
 }
 
 /** 资源路径清理：去掉 ./ 段，只用于显示，不用于路径穿越 */
@@ -508,6 +777,8 @@ function docxToolDefinitions(): any[] {
           doc_id: { type: 'string', description: 'docId 的别名，任选其一' },
           index: { type: 'number', description: '表格块序号（1 起；来自 list_blocks）' },
           block_index: { type: 'number', description: 'index 的别名' },
+          blockId: { type: 'string', description: '表格稳定块 ID（见 list_blocks），优先于 index' },
+          block_id: { type: 'string', description: 'blockId 的别名' },
           row: { type: 'number', description: '可选：只看这一行（1 起）' },
           col: { type: 'number', description: '可选：只看这一列（1 起，需同时给 row）' },
           paragraphs: { type: 'boolean', description: '是否返回单元格内的段落明细（默认 true）' },
@@ -560,6 +831,8 @@ function docxToolDefinitions(): any[] {
           ignoreCase: { type: 'boolean', description: '是否忽略大小写（默认 false）' },
           blockIndex: { type: 'number', description: '可选：只在这个块内替换（块序号来自 list_blocks / find_text，1 起）。表格块可配 row + col 进一步限定单元格' },
           block_index: { type: 'number', description: 'blockIndex 的别名' },
+          blockId: { type: 'string', description: '稳定块 ID（见 list_blocks），优先于 blockIndex' },
+          block_id: { type: 'string', description: 'blockId 的别名' },
           row: { type: 'number', description: '可选：表格行号（1 起；需同时给 blockIndex 指向表格块）' },
           col: { type: 'number', description: '可选：表格列号（1 起；需同时给 blockIndex 与 row）' },
           paragraph: { type: 'number', description: '可选：只替换该单元格里的第 N 段（1 起；需同时给 blockIndex + row + col；段落号来自 read_table）' },
@@ -656,6 +929,9 @@ function docxToolDefinitions(): any[] {
           docId: { type: 'string', description: 'open_document 返回的会话 ID（docId / doc_id 等价）' },
           doc_id: { type: 'string', description: 'docId 的别名，任选其一' },
           backup: { type: 'boolean', description: '写回前是否备份原文件（默认 true）' },
+          expectedRevision: { type: 'number', description: 'open_document / 上次 save 返回的 revision；不一致时拒绝保存（乐观锁）' },
+          expected_revision: { type: 'number', description: 'expectedRevision 的别名' },
+          force: { type: 'boolean', description: '检测到文件被外部修改时仍强制覆盖（默认 false）' },
         },
         required: ['docId'],
       },
@@ -673,6 +949,11 @@ function docxToolDefinitions(): any[] {
         required: ['docId'],
       },
     },
+    {
+      name: 'list_sessions',
+      description: '列出当前所有 Word 文档会话（docId、路径、revision、是否有未保存修改、最后使用时间）。',
+      inputSchema: { type: 'object', properties: {} },
+    },
   ]
 }
 
@@ -680,7 +961,7 @@ function docxToolDefinitions(): any[] {
 function docxEditToolDefinitions(): any[] {
   const docId = { docId: { type: 'string', description: 'open_document 返回的会话 ID（docId / doc_id 等价）' } }
   const docIdAlias = { doc_id: { type: 'string', description: 'docId 的别名，任选其一' } }
-  const index = { index: { type: 'number', description: '块序号（1 起，见 list_blocks / find_text）' }, block_index: { type: 'number', description: 'index 的别名，任选其一' } }
+  const index = { index: { type: 'number', description: '块序号（1 起，见 list_blocks / find_text）' }, block_index: { type: 'number', description: 'index 的别名，任选其一' }, blockId: { type: 'string', description: '稳定块 ID（见 list_blocks，优先于 index）' }, block_id: { type: 'string', description: 'blockId 的别名' } }
   const position = { position: { type: 'string', enum: ['before', 'after', 'end'], description: '插入位置：before/after 相对 index 块；end（或省略 index）= 追加到正文末尾' } }
   // 字符级格式（create_style / update_style / set_text_format 共用）
   const runFmt = {
@@ -734,12 +1015,70 @@ function docxEditToolDefinitions(): any[] {
       inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias }, required: ['docId'] },
     },
     {
+      name: 'validate_document',
+      description: '保存前检查文档结构：XML 能否解析、必需部件是否存在、图片关系是否完整、表格/正文是否异常。返回 errors / warnings；errors 非空时不要直接保存。',
+      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias }, required: ['docId'] },
+    },
+    {
+      name: 'render_document',
+      description: '用内置 GenOffice 渲染器截取文档页面并保存为 PNG。可指定 page（1 起）；all=true 渲染全部页面。需要该文件已经在 AI-KM 的 Office 编辑器中打开；返回单页 path 或 pages 列表。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId,
+          ...docIdAlias,
+          page: { type: 'number', description: '页码（1 起）；省略且 all=false 时渲染当前页' },
+          all: { type: 'boolean', description: 'true = 渲染全部页面（最多 50 页）' },
+        },
+        required: ['docId'],
+      },
+    },
+    {
+      name: 'list_header_footer',
+      description: '列出文档的页眉/页脚部件及文本内容（只读；不改页眉页脚）。',
+      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias }, required: ['docId'] },
+    },
+    {
+      name: 'list_comments',
+      description: '列出文档批注（只读：作者、日期、正文）。',
+      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias }, required: ['docId'] },
+    },
+    {
+      name: 'list_revisions',
+      description: '列出文档修订记录（w:ins / w:del，只读：类型、作者、日期、文本）。',
+      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias }, required: ['docId'] },
+    },
+    {
+      name: 'accept_all_revisions',
+      description: '接受全部修订：删除删除标记内容，保留插入内容。复杂文档也可执行（专门处理修订）。',
+      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias }, required: ['docId'] },
+    },
+    {
+      name: 'reject_all_revisions',
+      description: '拒绝全部修订：删除插入内容，恢复被删除内容。复杂文档也可执行（专门处理修订）。',
+      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias }, required: ['docId'] },
+    },
+    {
+      name: 'set_header_footer',
+      description: '修改已有页眉/页脚文本（kind=header|footer，index 从 1 起）。仅支持已存在页眉/页脚部件的文档；不创建新部件，图片与版式保持不变。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId, ...docIdAlias,
+          kind: { type: 'string', enum: ['header', 'footer'], description: '页眉还是页脚' },
+          index: { type: 'number', description: '第几个该类型部件（1 起，默认 1）' },
+          text: { type: 'string', description: '新文本（空串 = 清空）' },
+        },
+        required: ['docId', 'kind', 'text'],
+      },
+    },
+    {
       name: 'replace_paragraph',
       description: '整段重写：用新文本替换指定块的段落内容，保留该段原有段落样式与段首字符格式（不改变标题级别）。⚠ 这是**整段替换**：段内原有的局部格式（部分加粗 / 斜体 / 不同字号）会被抹成统一格式；只想改段内某句话请改用 find_and_replace_text（按子串替换、保留其余 run 的格式）。',
       inputSchema: {
         type: 'object',
         properties: { ...docId, ...docIdAlias, ...index, text: { type: 'string', description: '新的段落文本（可含换行）' }, content: { type: 'string', description: 'text 的别名' } },
-        required: ['docId', 'index', 'text'],
+        required: ['docId', 'text'],
       },
     },
     {
@@ -803,7 +1142,7 @@ function docxEditToolDefinitions(): any[] {
           style: { type: 'string', description: '段落样式名 / styleId（如 “标题 1”、“Heading1”、空串=清除）' },
           headingLevel: { type: 'number', description: '标题级别 1-6（与 style 二选一）' },
         },
-        required: ['docId', 'index'],
+        required: ['docId'],
       },
     },
     {
@@ -888,13 +1227,54 @@ function docxEditToolDefinitions(): any[] {
           ignoreCase: { type: 'boolean', description: '查找是否忽略大小写（默认 false）' },
           ...runFmt,
         },
-        required: ['docId', 'index'],
+        required: ['docId'],
       },
     },
     {
       name: 'delete_block',
-      description: '删除指定块（段落或表格）。删除后后续块序号会前移，需重新 list_blocks 确认。',
-      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias, ...index }, required: ['docId', 'index'] },
+      description: '删除指定块（段落或表格）。删除后后续块序号会前移，需重新 list_blocks 确认；优先用 blockId 定位。',
+      inputSchema: { type: 'object', properties: { ...docId, ...docIdAlias, ...index }, required: ['docId'] },
+    },
+    {
+      name: 'table_append_row',
+      description: '在表格末尾追加一行：按 values 依次填入各列（保留最后一行的单元格/段落格式）。用 list_blocks 或 read_table 定位表格块；优先用 blockId。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...docId,
+          ...docIdAlias,
+          ...index,
+          values: { type: 'array', items: { type: 'string' }, description: '各列文本（按表格列顺序；缺省为空）' },
+        },
+        required: ['docId'],
+      },
+    },
+    {
+      name: 'table_delete_row',
+      description: '删除表格的第 row 行（1 起）。用 list_blocks / read_table 定位表格块与行号；优先用 blockId。',
+      inputSchema: {
+        type: 'object',
+        properties: { ...docId, ...docIdAlias, ...index, row: { type: 'number', description: '要删除的行号（1 起）' } },
+        required: ['docId', 'row'],
+      },
+    },
+    {
+      name: 'table_append_column',
+      description: '在表格末尾追加一列：按行填 values（缺省为空），保留最后一列的单元格格式，并同步 tblGrid。',
+      inputSchema: {
+        type: 'object',
+        properties: { ...docId, ...docIdAlias, ...index, values: { type: 'array', items: { type: 'string' }, description: '各行的文本（按行顺序）' } },
+        required: ['docId'],
+      },
+    },
+    {
+      name: 'table_delete_column',
+      description: '删除表格第 col 列（1 起）；合并单元格的表格可能只能删除部分单元格，请先用 read_table 检查。',
+      inputSchema: {
+        type: 'object',
+        properties: { ...docId, ...docIdAlias, ...index, col: { type: 'number', description: '要删除的列号（1 起）' } },
+        required: ['docId', 'col'],
+      },
     },
   ]
 }
@@ -1022,6 +1402,20 @@ function markdownFromBlocks(s: OfficeSession): string {
 async function executeTool(name: string, args: Record<string, any> = {}): Promise<string> {
   // Excel 工具由 xlsx-service 提供（会话式 workbookId）
   if (xlsxService.isXlsxTool(name)) return xlsxService.executeXlsxTool(name, args)
+  if (OOXML_WRITE_TOOLS.has(name)) {
+    const s = sessionOf(args)
+    if (s) {
+      if (s.editPolicy === 'genoffice-required' && editorBridge && !editorBridge.hasView(s.pkg.path)) {
+        await editorBridge.ensureView(s.pkg.path)
+      }
+      if (editorBridge?.hasView(s.pkg.path)) {
+        const routed = await routeToEditor(s, name, args)
+        if (routed) return routed
+      }
+      const guard = ooxmlWriteGuard(s)
+      if (guard) return guard
+    }
+  }
   switch (name) {
     case 'convert_doc_to_docx': {
       const input = String(arg(args, ['path', 'filePath', 'file_path']) || '')
@@ -1051,17 +1445,26 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       const read = parseDocumentXml(pkg.documentXml, abs, pkg.name)
       if (read.error || !pkg.documentXml) return `打开失败: ${read.error || '缺少 word/document.xml'}`
       const docId = randomUUID()
-      sessions.set(docId, { docId, pkg, read, openedAt: Date.now(), lastUseAt: Date.now() })
+      const baseHash = hashFile(abs)
+      const features = analyzeDocxFeatures(pkg, read.blocks)
+      sessions.set(docId, {
+        docId, pkg, read, openedAt: Date.now(), lastUseAt: Date.now(),
+        revision: 1, baseHash, features,
+        editPolicy: requiresGenOffice(features) ? 'genoffice-required' : 'ooxml-safe',
+      })
       capSessions()
       enrichHeadingsByStyle(sessions.get(docId)!)
       return JSON.stringify({
         docId,
+        revision: 1,
+        editPolicy: sessions.get(docId)!.editPolicy,
+        features,
         name: read.name,
         path: abs,
         wordCount: read.wordCount,
         paragraphCount: read.blocks.length,
         tableCount: read.blocks.filter(b => b.kind === 'table').length,
-        headings: read.headings.slice(0, 100).map(h => ({ index: h.index, level: h.level, text: h.text.slice(0, 80) })),
+        headings: read.headings.slice(0, 100).map(h => ({ index: h.index, blockId: h.blockId, level: h.level, text: h.text.slice(0, 80) })),
       }, null, 2)
     }
     case 'list_blocks': {
@@ -1070,7 +1473,7 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       const start = Math.max(1, Number(arg(args, ['start', 'from']) || 1) || 1)
       const limit = Math.min(MAX_LIST_BLOCKS, Math.max(1, Number(args.limit) || 100))
       const list = s.read.blocks.slice(start - 1, start - 1 + limit).map(b => {
-        const line: any = { index: b.index, kind: b.kind }
+        const line: any = { index: b.index, blockId: b.blockId, kind: b.kind }
         if (b.headingLevel !== undefined) line.headingLevel = b.headingLevel
         if (b.style) line.style = b.style
         line.text = (b.text || '').slice(0, MAX_BLOCK_TEXT)
@@ -1088,7 +1491,8 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       if (!s) return sessionError(args)
       const layout = bodyLayout(s.pkg.documentXml)
       if (!layout) return '无法定位文档正文（w:body）'
-      const idx = Number(arg(args, ['index', 'block_index', 'blockIndex']))
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
       const blk = layout.blocks.find((b) => b.index === idx)
       if (!blk) return `块序号 ${idx} 不存在（当前共 1..${layout.blocks.length} 块）`
       if (blk.kind !== 'table') return `块 ${idx} 不是表格（当前是 ${blk.kind}）`
@@ -1114,7 +1518,19 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
         rows: capped,
       }, null, 2)
       const budget = MAX_BLOCK_TEXT * 6
-      return payload.length > budget ? payload.slice(0, budget) + '\n…（输出已截断，可用 row / col / depth / limit 缩小范围）' : payload
+      if (payload.length <= budget) return payload
+      // 超长时返回合法 JSON 的截断结果（不要切成半截 JSON，否则调用方无法解析）
+      const small = capped.slice(0, 5)
+      return JSON.stringify({
+        blockIndex: idx,
+        depth,
+        totalRows: parsed.rows.length,
+        totalCols: Math.max(0, ...parsed.rows.map((r) => r.length)),
+        returnedRows: small.length,
+        truncated: true,
+        note: '输出过长，仅返回前 5 行；可用 row / col / depth / limit 缩小范围',
+        rows: small,
+      }, null, 2)
     }
     case 'read_text': {
       const s = sessionOf(args)
@@ -1177,16 +1593,19 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
         tableCount: blocks.filter(b => b.kind === 'table').length,
         imageCount: s.pkg.entries.filter(e => /^word\/media\//.test(e.name)).length,
         headingCount: s.read.headings.length,
-        headings: s.read.headings.slice(0, 150).map(h => ({ index: h.index, level: h.level, text: h.text.slice(0, 80) })),
+        headings: s.read.headings.slice(0, 150).map(h => ({ index: h.index, blockId: h.blockId, level: h.level, text: h.text.slice(0, 80) })),
         styles,
         modified: s.pkg.modified,
+        revision: s.revision,
+        editPolicy: s.editPolicy,
+        features: s.features,
       }, null, 2)
     }
     case 'replace_paragraph': {
       const s = sessionOf(args)
       if (!s) return sessionError(args)
-      const idx = Number(arg(args, ['index', 'block_index', 'paragraphIndex']))
-      if (!Number.isFinite(idx)) return '缺少 index（块序号，见 list_blocks / find_text）'
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
       const text = String(arg(args, ['text', 'content', 'newText']) ?? '')
       const r = replaceParagraphText(s.pkg, idx, text)
       if (!r.ok) return r.error || '替换失败'
@@ -1198,9 +1617,9 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       if (!s) return sessionError(args)
       const text = String(arg(args, ['text', 'content']) ?? '')
       if (!text) return '缺少 text 参数'
-      const idxRaw = arg(args, ['index', 'block_index', 'afterIndex'])
+      const idxRaw = resolveBlockIndex(s, args)
       const r = insertParagraph(s.pkg, {
-        index: idxRaw !== undefined ? Number(idxRaw) : undefined,
+        index: idxRaw,
         position: arg(args, ['position', 'where']) ? String(arg(args, ['position', 'where'])).toLowerCase() : undefined,
         text,
         style: arg(args, ['style', 'styleId']) !== undefined ? String(arg(args, ['style', 'styleId'])) : undefined,
@@ -1215,9 +1634,9 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       if (!s) return sessionError(args)
       const rows = Array.isArray(args.rows) ? args.rows : null
       if (!rows || !rows.length) return '缺少 rows 参数（二维数组，如 [["姓名","金额"],["张三","100"]]）'
-      const idxRaw = arg(args, ['index', 'block_index'])
+      const idxRaw = resolveBlockIndex(s, args)
       const r = insertTable(s.pkg, {
-        index: idxRaw !== undefined ? Number(idxRaw) : undefined,
+        index: idxRaw,
         position: arg(args, ['position', 'where']) ? String(arg(args, ['position', 'where'])).toLowerCase() : undefined,
         rows: rows.map((row: any) => (Array.isArray(row) ? row.map((c: any) => String(c ?? '')) : [String(row ?? '')])),
         header: arg(args, ['header']) !== false,
@@ -1231,9 +1650,9 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       if (!s) return sessionError(args)
       const md = String(arg(args, ['markdown', 'text', 'content']) ?? '')
       if (!md.trim()) return '缺少 markdown 参数'
-      const idxRaw = arg(args, ['index', 'block_index'])
+      const idxRaw = resolveBlockIndex(s, args)
       const r = insertMarkdown(s.pkg, md, {
-        index: idxRaw !== undefined ? Number(idxRaw) : undefined,
+        index: idxRaw,
         position: arg(args, ['position', 'where']) ? String(arg(args, ['position', 'where'])).toLowerCase() : undefined,
       })
       if (!r.ok) return r.error || '插入失败'
@@ -1243,8 +1662,8 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
     case 'set_paragraph_style': {
       const s = sessionOf(args)
       if (!s) return sessionError(args)
-      const idx = Number(arg(args, ['index', 'block_index']))
-      if (!Number.isFinite(idx)) return '缺少 index（块序号）'
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
       const styleRaw = arg(args, ['style', 'styleId', 'style_id'])
       const levelRaw = arg(args, ['headingLevel', 'heading_level', 'level'])
       if (styleRaw === undefined && levelRaw === undefined) return '需提供 style（样式名/ID，如 “标题 1”/Heading1，空串 = 清除样式）或 headingLevel（1-6）'
@@ -1329,8 +1748,8 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
     case 'set_text_format': {
       const s = sessionOf(args)
       if (!s) return sessionError(args)
-      const idx = Number(arg(args, ['index', 'block_index']))
-      if (!Number.isFinite(idx)) return '缺少 index（块序号，见 list_blocks / find_text）'
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
       const findRaw = arg(args, ['find', 'find_text', 'query', 'text'])
       const r = setTextFormat(s.pkg, idx, {
         ...runFormatFromArgs(args),
@@ -1354,12 +1773,58 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
     case 'delete_block': {
       const s = sessionOf(args)
       if (!s) return sessionError(args)
-      const idx = Number(arg(args, ['index', 'block_index']))
-      if (!Number.isFinite(idx)) return '缺少 index（块序号）'
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
       const r = deleteBlock(s.pkg, idx)
       if (!r.ok) return r.error || '删除失败'
       refreshRead(s)
       return JSON.stringify({ ok: true, detail: r.detail, totalBlocks: s.read.blocks.length, modified: s.pkg.modified, note: '删除后后续块序号会前移，请重新 list_blocks；修改在内存中生效，请调用 save_document 写盘' }, null, 2)
+    }
+    case 'table_append_row': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
+      const values = Array.isArray(args.values) ? args.values.map((v: any) => String(v ?? '')) : []
+      const r = appendTableRow(s.pkg, idx, values)
+      if (!r.ok) return r.error || '追加行失败'
+      refreshRead(s)
+      return JSON.stringify({ ok: true, detail: r.detail, modified: s.pkg.modified, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
+    }
+    case 'table_delete_row': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
+      const row = Number(arg(args, ['row']))
+      if (!Number.isFinite(row)) return '缺少 row（行号，1 起）'
+      const r = deleteTableRow(s.pkg, idx, row)
+      if (!r.ok) return r.error || '删除行失败'
+      refreshRead(s)
+      return JSON.stringify({ ok: true, detail: r.detail, modified: s.pkg.modified, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
+    }
+    case 'table_append_column': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
+      const values = Array.isArray(args.values) ? args.values.map((v: any) => String(v ?? '')) : []
+      const r = appendTableColumn(s.pkg, idx, values)
+      if (!r.ok) return r.error || '追加列失败'
+      refreshRead(s)
+      return JSON.stringify({ ok: true, detail: r.detail, modified: s.pkg.modified, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
+    }
+    case 'table_delete_column': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const idx = resolveBlockIndex(s, args)
+      if (idx === undefined || !Number.isFinite(idx)) return '缺少 index / blockId（块定位见 list_blocks）'
+      const col = Number(arg(args, ['col']))
+      if (!Number.isFinite(col)) return '缺少 col（列号，1 起）'
+      const r = deleteTableColumn(s.pkg, idx, col)
+      if (!r.ok) return r.error || '删除列失败'
+      refreshRead(s)
+      return JSON.stringify({ ok: true, detail: r.detail, modified: s.pkg.modified, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
     }
     case 'export_markdown': {
       const s = sessionOf(args)
@@ -1384,12 +1849,16 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       // 可选范围：某个块（段落 / 表格）或表格中的某个单元格
       let range: { start: number; end: number } | null = null
       let scopeInfo: Record<string, unknown> | null = null
-      const blockIndexRaw = arg(args, ['blockIndex', 'block_index'])
+      const blockIndexRaw = arg(args, ['blockIndex', 'block_index', 'blockId', 'block_id'])
       const hasBlock = blockIndexRaw !== undefined && blockIndexRaw !== null && String(blockIndexRaw).trim() !== ''
       if (hasBlock) {
         const layout = bodyLayout(s.pkg.documentXml)
         if (!layout) return '无法定位文档正文（w:body）'
-        const idx = Number(blockIndexRaw)
+        const blockId = String(arg(args, ['blockId', 'block_id']) || '')
+        const idx = blockId
+          ? Number(s.read.blocks.find(b => b.blockId === blockId)?.index)
+          : Number(blockIndexRaw)
+        if (!Number.isFinite(idx)) return `blockId 不存在：${blockId}（可重新 list_blocks）`
         const blk = layout.blocks.find((b) => b.index === idx)
         if (!blk) return `块序号 ${idx} 不存在（当前共 1..${layout.blocks.length} 块）`
         const rowRaw = arg(args, ['row'])
@@ -1466,9 +1935,10 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
       if (applied) {
         s.pkg.documentXml = clone.documentXml
         s.pkg.modified = true
-        s.read = parseDocumentXml(s.pkg.documentXml, s.pkg.path, s.pkg.name)
+        refreshRead(s)
       }
       return JSON.stringify({
+        ok: r.replaced > 0 && !mismatch,
         replaced: r.replaced,
         paragraphs: r.paragraphs,
         ...(scopeInfo ? { scope: scopeInfo } : {}),
@@ -1623,12 +2093,185 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
         note: '图片已在内存中插入，调用 save_document 写盘',
       }, null, 2)
     }
+    case 'validate_document': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const errors: string[] = []
+      const warnings: string[] = []
+      const names = new Set(s.pkg.entries.map(e => e.name))
+      if (!names.has('[Content_Types].xml')) errors.push('缺少 [Content_Types].xml')
+      if (!names.has('_rels/.rels')) errors.push('缺少 _rels/.rels')
+      if (!names.has('word/document.xml') || !s.pkg.documentXml) errors.push('缺少 word/document.xml')
+      if (s.read.error) errors.push(String(s.read.error))
+      if (!s.read.blocks.length) warnings.push('正文没有可识别的段落或表格')
+      let imageCount = 0
+      try {
+        const imgs = listDocxImages(s.pkg)
+        imageCount = Array.isArray(imgs) ? imgs.length : 0
+      } catch (e: any) {
+        errors.push(`图片关系解析失败: ${e?.message || String(e)}`)
+      }
+      for (const b of s.read.blocks) {
+        if (b.kind === 'table' && (!b.table || !b.table.length)) warnings.push(`表格块 ${b.index} 没有行`)
+      }
+      return JSON.stringify({
+        ok: errors.length === 0,
+        revision: s.revision,
+        modified: s.pkg.modified,
+        blockCount: s.read.blocks.length,
+        imageCount,
+        errors,
+        warnings,
+      }, null, 2)
+    }
+    case 'render_document': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      if (!documentRenderHook) return JSON.stringify({ ok: false, error: 'RENDER_UNAVAILABLE', hint: '当前环境没有可用的 GenOffice 渲染器' }, null, 2)
+      const res = await documentRenderHook(s.pkg.path, {
+        page: Number(arg(args, ['page'])) || undefined,
+        all: arg(args, ['all']) === true,
+      })
+      return JSON.stringify({ ...res, docId: s.docId, note: '页面由 GenOffice 编辑器渲染；文件必须已在编辑器中打开' }, null, 2)
+    }
+    case 'list_header_footer': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const parts = s.pkg.entries.filter(e => /^word\/(header|footer)\d*\.xml$/i.test(e.name))
+      const items = parts.map(e => ({
+        part: e.name,
+        kind: /header/i.test(e.name) ? 'header' : 'footer',
+        text: xmlVisibleText(e.data.toString('utf8')).slice(0, MAX_BLOCK_TEXT),
+      }))
+      return JSON.stringify({ count: items.length, items }, null, 2)
+    }
+    case 'list_comments': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const part = s.pkg.entries.find(e => e.name === 'word/comments.xml')
+      if (!part) return JSON.stringify({ count: 0, items: [] }, null, 2)
+      const xml = part.data.toString('utf8')
+      const items = [...xml.matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)].map((m, i) => {
+        const attrs = m[1]
+        const attr = (name: string) => {
+          const hit = new RegExp(`w:${name}="([^"]*)"`).exec(attrs)
+          return hit ? hit[1] : ''
+        }
+        return { index: i + 1, id: attr('id'), author: attr('author'), date: attr('date'), text: xmlVisibleText(m[2]).slice(0, MAX_BLOCK_TEXT) }
+      })
+      return JSON.stringify({ count: items.length, items }, null, 2)
+    }
+    case 'list_revisions': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const xml = s.pkg.documentXml
+      const items: any[] = []
+      const re = /<w:(ins|del)\b([^>]*)>([\s\S]*?)<\/w:\1>/g
+      let m: RegExpExecArray | null
+      while ((m = re.exec(xml))) {
+        const attrs = m[2]
+        const attr = (name: string) => {
+          const hit = new RegExp(`w:${name}="([^"]*)"`).exec(attrs)
+          return hit ? hit[1] : ''
+        }
+        items.push({
+          index: items.length + 1,
+          type: m[1] === 'ins' ? 'insert' : 'delete',
+          author: attr('author'),
+          date: attr('date'),
+          text: xmlVisibleText(m[3]).slice(0, MAX_BLOCK_TEXT),
+        })
+      }
+      return JSON.stringify({ count: items.length, items: items.slice(0, 500) }, null, 2)
+    }
+    case 'accept_all_revisions': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const r = acceptAllRevisions(s.pkg)
+      refreshRead(s)
+      return JSON.stringify({ ok: r.ok, detail: r.detail, modified: s.pkg.modified, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
+    }
+    case 'reject_all_revisions': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const r = rejectAllRevisions(s.pkg)
+      refreshRead(s)
+      return JSON.stringify({ ok: r.ok, detail: r.detail, modified: s.pkg.modified, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
+    }
+    case 'set_header_footer': {
+      const s = sessionOf(args)
+      if (!s) return sessionError(args)
+      const kind = String(arg(args, ['kind']) || '').toLowerCase()
+      if (kind !== 'header' && kind !== 'footer') return 'kind 必须是 header 或 footer'
+      const index = Math.max(1, Number(arg(args, ['index'])) || 1)
+      const part = s.pkg.entries.filter(e => new RegExp(`^word/${kind}\\d*\\.xml$`, 'i').test(e.name)).sort((a, b) => a.name.localeCompare(b.name))[index - 1]
+      if (!part) return JSON.stringify({ ok: false, code: 'HEADER_FOOTER_NOT_FOUND', hint: '该文档没有对应的页眉/页脚部件；当前版本不创建新部件' }, null, 2)
+      const text = String(arg(args, ['text']) ?? '')
+      let xml = part.data.toString('utf8')
+      let used = false
+      xml = xml.replace(/(<w:t\b[^>]*>)([\s\S]*?)(<\/w:t>)/g, (_m, open: string, _old: string, close: string) => {
+        if (used) return open + close
+        used = true
+        return open + escapeHtml(text) + close
+      })
+      if (!used && text) {
+        const closeTag = kind === 'header' ? '</w:hdr>' : '</w:ftr>'
+        xml = xml.replace(closeTag, `<w:p><w:r><w:t xml:space="preserve">${escapeHtml(text)}</w:t></w:r></w:p>${closeTag}`)
+      }
+      part.data = Buffer.from(xml, 'utf8')
+      s.pkg.modified = true
+      return JSON.stringify({ ok: true, part: part.name, text, modified: true, note: '修改在内存中生效，请调用 save_document 写盘' }, null, 2)
+    }
     case 'save_document': {
       const s = sessionOf(args)
       if (!s) return sessionError(args)
+      const expected = arg(args, ['expectedRevision', 'expected_revision'])
+      if (expected !== undefined && Number(expected) !== s.revision) {
+        return JSON.stringify({
+          ok: false,
+          code: 'REVISION_CONFLICT',
+          expectedRevision: Number(expected),
+          currentRevision: s.revision,
+          hint: '文档版本已变化，请重新读取后再保存',
+        }, null, 2)
+      }
+      const currentHash = hashFile(s.pkg.path)
+      if (s.baseHash && currentHash && currentHash !== s.baseHash && arg(args, ['force']) !== true) {
+        return JSON.stringify({
+          ok: false,
+          code: 'EXTERNAL_CHANGE',
+          path: s.pkg.path,
+          hint: '文件已被外部程序修改；请重新 open_document，或传 force=true 强制覆盖',
+        }, null, 2)
+      }
+      if (editorBridge?.hasView(s.pkg.path)) {
+        const res = await editorBridge.command(s.pkg.path, 'save_document', {
+          path: s.pkg.path,
+          overwrite: true,
+        })
+        if (!res.ok) return JSON.stringify({ ok: false, code: 'EDITOR_SAVE_FAILED', error: res.error }, null, 2)
+        s.revision += 1
+        s.baseHash = hashFile(s.pkg.path)
+        return JSON.stringify({ saved: true, revision: s.revision, path: s.pkg.path, backend: 'genoffice' }, null, 2)
+      }
       const res = saveDocxPackage(s.pkg, { backup: arg(args, ['backup']) !== false })
       if (!res.ok) return `保存失败: ${res.error || '未知错误'}`
-      return JSON.stringify({ saved: true, path: res.path, backup: res.backup }, null, 2)
+      s.revision += 1
+      s.baseHash = hashFile(s.pkg.path)
+      return JSON.stringify({ saved: true, revision: s.revision, path: res.path, backup: res.backup }, null, 2)
+    }
+    case 'list_sessions': {
+      const open = Array.from(sessions.values()).sort((a, b) => b.lastUseAt - a.lastUseAt)
+      return JSON.stringify({
+        count: open.length,
+        sessions: open.map(s => ({
+          docId: s.docId,
+          path: s.pkg.path,
+          revision: s.revision,
+          modified: s.pkg.modified,
+          lastUseAt: new Date(s.lastUseAt).toISOString(),
+        })),
+      }, null, 2)
     }
     case 'close_document': {
       const s = sessionOf(args)
@@ -1643,6 +2286,11 @@ async function executeTool(name: string, args: Record<string, any> = {}): Promis
     default:
       return `未知工具: ${name}`
   }
+}
+
+// 测试/内部调用入口（不经过 MCP SDK；仍走同一工具执行内核）
+export async function executeOfficeTool(name: string, args: Record<string, any> = {}): Promise<string> {
+  return executeTool(name, args)
 }
 
 // ---------------- 共享单例 Server（内置连接与对外暴露共用，可同时 connect 多个 transport） ----------------
@@ -1665,7 +2313,15 @@ async function ensureServer(): Promise<any> {
         const args = (req?.params?.arguments && typeof req.params.arguments === 'object') ? req.params.arguments : {}
         try {
           const text = await executeTool(toolName, args)
-          return { content: [{ type: 'text', text }] }
+          let structuredContent: any = undefined
+          try {
+            const parsed = JSON.parse(text)
+            if (parsed && typeof parsed === 'object') structuredContent = parsed
+          } catch { /* 非 JSON 输出只返回 text */ }
+          return {
+            content: [{ type: 'text', text }],
+            ...(structuredContent !== undefined ? { structuredContent } : {}),
+          }
         } catch (err: any) {
           return { isError: true, content: [{ type: 'text', text: `错误: ${err?.message || String(err)}` }] }
         }

@@ -7,12 +7,13 @@
  * 写：xlsx-editor 直接改 OOXML 部件（保留样式 / 公式 / 图表 / 图片），保存走 .bak + 原子替换。
  * 只读格式：.xls（BIFF）/ .csv 可读可查，但不支持写回（会提示先另存为 .xlsx）。
  */
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { WorkBook } from 'xlsx'
 import * as XR from './xlsx-reader'
 import * as XE from './xlsx-editor'
+import * as XL from './xlsx-layout'
 
 const MAX_SESSIONS = 12 // 内存会话上限，超出淘汰最旧
 const MAX_OUT_CHARS = 30000 // 单次工具输出上限（硬顶，可由 maxChars 参数下调）
@@ -41,9 +42,29 @@ interface WorkbookSession {
   cache: { revision: number; wb: WorkBook } | null
   openedAt: number
   lastUseAt: number
+  /** 打开/上次保存时的文件 hash，用于发现外部修改 */
+  baseHash: string
 }
 
 const sessions = new Map<string, WorkbookSession>()
+
+function hashFile(p: string): string {
+  try { return createHash('sha256').update(fs.readFileSync(p)).digest('hex') } catch { return '' }
+}
+
+function rangeRefs(range: string): string[] {
+  const m = /^([A-Za-z]+)(\d+)(?::([A-Za-z]+)(\d+))?$/.exec(String(range || '').trim())
+  if (!m) return []
+  const c1 = XE.colToNum(m[1].toUpperCase())
+  const c2 = m[3] ? XE.colToNum(m[3].toUpperCase()) : c1
+  const r1 = Number(m[2])
+  const r2 = m[4] ? Number(m[4]) : r1
+  const out: string[] = []
+  for (let r = Math.min(r1, r2); r <= Math.max(r1, r2); r++) {
+    for (let c = Math.min(c1, c2); c <= Math.max(c1, c2); c++) out.push(`${XE.numToCol(c)}${r}`)
+  }
+  return out
+}
 
 function capSessions(): void {
   if (sessions.size <= MAX_SESSIONS) return
@@ -102,7 +123,7 @@ function openSession(rawPath: any): WorkbookSession | string {
     try { pkg = XE.loadXlsxPackage(abs) } catch { pkg = null }
   }
   const workbookId = randomUUID()
-  const session: WorkbookSession = { workbookId, path: abs, pkg, cache: { revision: 0, wb }, openedAt: Date.now(), lastUseAt: Date.now() }
+  const session: WorkbookSession = { workbookId, path: abs, pkg, cache: { revision: 0, wb }, openedAt: Date.now(), lastUseAt: Date.now(), baseHash: hashFile(abs) }
   sessions.set(workbookId, session)
   capSessions()
   return session
@@ -273,6 +294,85 @@ export function toolDefinitions(): any[] {
       name: 'list_sheets',
       description: '列出已打开工作簿（或按 path 直接打开的文件）的全部工作表：名称、是否隐藏、行列数、数据范围、表头与前几行预览。通常可省略——open_workbook 的结果已含表头。',
       inputSchema: { type: 'object', properties: { ...wbId }, required: [] },
+    },
+    {
+      name: 'validate_workbook',
+      description: '检查工作簿：公式数量、错误值（#REF!/#VALUE!/#DIV/0! 等）、空表、外部链接。保存前建议先跑一次。',
+      inputSchema: { type: 'object', properties: { ...wbId }, required: [] },
+    },
+    {
+      name: 'recalculate_workbook',
+      description: '标记工作簿在下次 Excel/GenOffice 打开时完整重算（写入 fullCalcOnLoad）。当前不内置公式计算引擎。',
+      inputSchema: { type: 'object', properties: { ...wbId }, required: [] },
+    },
+    {
+      name: 'clear_range',
+      description: '清空指定区域的值（保留单元格样式）。range 如 A1:D20；改完需 save_workbook。',
+      inputSchema: {
+        type: 'object',
+        properties: { ...wbId, ...sheet, range: { type: 'string', description: 'A1 区域，如 A1:D20' } },
+        required: ['range'],
+      },
+    },
+    {
+      name: 'insert_rows',
+      description: '在指定行前插入空行（不自动改写公式引用；合并区域需自行检查）。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, at: { type: 'number', description: '行号（1 起）' }, count: { type: 'number', description: '插入行数（默认 1）' } }, required: ['at'] },
+    },
+    {
+      name: 'delete_rows',
+      description: '删除指定行并上移后续行（不自动改写公式引用）。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, at: { type: 'number', description: '起始行号（1 起）' }, count: { type: 'number', description: '删除行数（默认 1）' } }, required: ['at'] },
+    },
+    {
+      name: 'insert_columns',
+      description: '在指定列前插入空列（不自动改写公式引用）。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, at: { type: 'number', description: '列号（1 起）' }, count: { type: 'number', description: '插入列数（默认 1）' } }, required: ['at'] },
+    },
+    {
+      name: 'delete_columns',
+      description: '删除指定列并左移后续列（不自动改写公式引用）。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, at: { type: 'number', description: '起始列号（1 起）' }, count: { type: 'number', description: '删除列数（默认 1）' } }, required: ['at'] },
+    },
+    {
+      name: 'set_column_width',
+      description: '设置列宽（Excel 字符宽度单位）。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, at: { type: 'number', description: '起始列号（1 起）' }, count: { type: 'number', description: '列数（默认 1）' }, width: { type: 'number', description: '宽度' } }, required: ['at', 'width'] },
+    },
+    {
+      name: 'set_row_height',
+      description: '设置行高（磅）。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, at: { type: 'number', description: '行号（1 起）' }, height: { type: 'number', description: '高度（磅）' } }, required: ['at', 'height'] },
+    },
+    {
+      name: 'freeze_panes',
+      description: '冻结窗格：row / col 为冻结后首个可滚动单元格（1 起）。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, row: { type: 'number', description: '行（1 起）' }, col: { type: 'number', description: '列（1 起）' } }, required: ['row', 'col'] },
+    },
+    {
+      name: 'merge_cells',
+      description: '合并单元格区域，如 ["A1:B2"]。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, ranges: { type: 'array', items: { type: 'string' }, description: 'A1 区域数组' } }, required: ['ranges'] },
+    },
+    {
+      name: 'unmerge_cells',
+      description: '取消合并；省略 ranges = 取消全部。',
+      inputSchema: { type: 'object', properties: { ...wbId, ...sheet, ranges: { type: 'array', items: { type: 'string' }, description: '可选：要取消的区域' } } },
+    },
+    {
+      name: 'add_data_validation',
+      description: '添加数据验证；type=list 时 formula1 用逗号分隔选项，或引用区域。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...wbId, ...sheet,
+          range: { type: 'string', description: 'A1 区域' },
+          type: { type: 'string', description: 'list / whole / decimal / date / textLength' },
+          formula1: { type: 'string', description: '验证公式或列表' },
+          prompt: { type: 'string', description: '输入提示（可选）' },
+        },
+        required: ['range', 'type', 'formula1'],
+      },
     },
     {
       name: 'read_sheet',
@@ -476,7 +576,7 @@ export function toolDefinitions(): any[] {
     {
       name: 'save_workbook',
       description: '把当前会话写回磁盘：仅替换改动过的部件（样式/公式/图表/图片原样保留），写回前自动备份为 <文件>.bak，原子覆盖。',
-      inputSchema: { type: 'object', properties: { ...wbId, backup: { type: 'boolean', description: '是否备份（默认 true）' } }, required: ['workbookId'] },
+      inputSchema: { type: 'object', properties: { ...wbId, backup: { type: 'boolean', description: '是否备份（默认 true）' }, expectedRevision: { type: 'number', description: 'open_workbook / 上次 save 返回的 revision；不一致时拒绝保存' }, expected_revision: { type: 'number', description: 'expectedRevision 别名' }, force: { type: 'boolean', description: '外部已修改时强制覆盖（默认 false）' } }, required: ['workbookId'] },
     },
     {
       name: 'close_workbook',
@@ -507,6 +607,7 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
         workbookId: s.workbookId,
         name: meta.name,
         path: s.path,
+        revision: s.pkg?.revision || 0,
         sheetCount: meta.sheetCount,
         sheets: meta.sheets,
         writable: !!s.pkg,
@@ -525,6 +626,99 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
         return { index: i, name: n, hidden: hidden.has(n) || undefined, rows: meta?.rowCount ?? 0, cols: meta?.colCount ?? 0, range: meta?.range || '', header: meta?.header, preview: meta?.preview }
       })
       return clip(JSON.stringify({ path: s.path, sheetCount: sheets.length, sheets, dirty: s.pkg ? s.pkg.modified : false }, null, 2), outBudget('list_sheets', args))
+    }
+
+    case 'validate_workbook': {
+      const s = sessionOf(args)
+      if (typeof s === 'string') return s
+      const wb = currentWorkbook(s)
+      const errors: any[] = []
+      const warnings: string[] = []
+      let formulas = 0
+      for (const name of wb.SheetNames) {
+        const ws = wb.Sheets[name]
+        if (!ws) continue
+        if (!ws['!ref']) warnings.push(`工作表「${name}」没有数据范围`)
+        if (s.pkg) formulas += XE.formulaCells(s.pkg, name).size
+        for (const ref of Object.keys(ws)) {
+          if (ref.startsWith('!')) continue
+          const c: any = ws[ref]
+          if (!c || typeof c !== 'object') continue
+          if (c.t === 'e' || (typeof c.v === 'string' && /^#(REF|VALUE|DIV\/0|NAME|N\/A|NUM|NULL)/.test(c.v))) {
+            errors.push({ sheet: name, cell: ref, formula: c.f || undefined, value: c.v })
+          }
+        }
+      }
+      return JSON.stringify({ ok: errors.length === 0, workbookId: s.workbookId, revision: s.pkg?.revision || 0, formulas, errorCount: errors.length, errors: errors.slice(0, 100), warnings }, null, 2)
+    }
+
+    case 'recalculate_workbook': {
+      const s = sessionOf(args)
+      if (typeof s === 'string') return s
+      const ro = needWritable(s)
+      if (ro) return ro
+      let xml = XE.readPart(s!.pkg!, 'xl/workbook.xml')
+      if (!xml) return '缺少 xl/workbook.xml'
+      const calc = '<calcPr calcId="0" fullCalcOnLoad="1"/>'
+      xml = /<calcPr\b[^>]*\/>/.test(xml) ? xml.replace(/<calcPr\b[^>]*\/>/, calc) : xml.replace('</workbook>', `${calc}</workbook>`)
+      XE.writePart(s!.pkg!, 'xl/workbook.xml', xml)
+      return JSON.stringify({ ok: true, revision: s!.pkg!.revision, note: '已标记下次打开时完整重算；保存后生效' }, null, 2)
+    }
+
+    case 'clear_range': {
+      const s = sessionOf(args)
+      if (typeof s === 'string') return s
+      const ro = needWritable(s)
+      if (ro) return ro
+      const wb = currentWorkbook(s)
+      const sheetName = resolveSheet(s, wb, arg(args, ['sheet', 'sheetName', 'sheet_name']))
+      if (!sheetName) return '工作簿没有工作表'
+      const range = String(arg(args, ['range']) || '')
+      const refs = rangeRefs(range)
+      if (!refs.length) return `无法解析区域：${range}`
+      const updates = refs.map(ref => ({ sheet: sheetName, ref, clear: true }))
+      const res = XE.applyCellUpdates(s!.pkg!, updates, sheetName)
+      s!.cache = null
+      return JSON.stringify({ ok: res.ok, sheet: sheetName, range, cleared: refs.length, errors: res.errors, revision: s!.pkg!.revision, note: '修改在内存中生效，请调用 save_workbook 写盘' }, null, 2)
+    }
+
+    case 'insert_rows': case 'delete_rows': case 'insert_columns': case 'delete_columns': {
+      const s = sessionOf(args)
+      if (typeof s === 'string') return s
+      const ro = needWritable(s)
+      if (ro) return ro
+      const wb = currentWorkbook(s)
+      const sheetName = resolveSheet(s, wb, arg(args, ['sheet', 'sheetName', 'sheet_name']))
+      if (!sheetName) return '工作簿没有工作表'
+      const at = Number(arg(args, ['at', 'row', 'col']))
+      const count = Number(arg(args, ['count'])) || 1
+      const r = name === 'insert_rows' ? XL.insertRows(s!.pkg!, sheetName, at, count)
+        : name === 'delete_rows' ? XL.deleteRows(s!.pkg!, sheetName, at, count)
+          : name === 'insert_columns' ? XL.insertColumns(s!.pkg!, sheetName, at, count)
+            : XL.deleteColumns(s!.pkg!, sheetName, at, count)
+      if (!r.ok) return r.error || '操作失败'
+      s!.cache = null
+      return JSON.stringify({ ok: true, detail: r.detail, revision: s!.pkg!.revision, note: '公式引用不会自动更新；修改需 save_workbook 写盘' }, null, 2)
+    }
+
+    case 'set_column_width': case 'set_row_height': case 'freeze_panes': case 'merge_cells': case 'unmerge_cells': case 'add_data_validation': {
+      const s = sessionOf(args)
+      if (typeof s === 'string') return s
+      const ro = needWritable(s)
+      if (ro) return ro
+      const wb = currentWorkbook(s)
+      const sheetName = resolveSheet(s, wb, arg(args, ['sheet', 'sheetName', 'sheet_name']))
+      if (!sheetName) return '工作簿没有工作表'
+      let r: XL.LayoutResult
+      if (name === 'set_column_width') r = XL.setColumnWidth(s!.pkg!, sheetName, Number(arg(args, ['at'])), Number(arg(args, ['count'])) || 1, Number(arg(args, ['width'])))
+      else if (name === 'set_row_height') r = XL.setRowHeight(s!.pkg!, sheetName, Number(arg(args, ['at'])), Number(arg(args, ['height'])))
+      else if (name === 'freeze_panes') r = XL.freezePanes(s!.pkg!, sheetName, Number(arg(args, ['row'])), Number(arg(args, ['col'])))
+      else if (name === 'merge_cells') r = XL.mergeCells(s!.pkg!, sheetName, Array.isArray(args.ranges) ? args.ranges : [])
+      else if (name === 'unmerge_cells') r = XL.unmergeCells(s!.pkg!, sheetName, Array.isArray(args.ranges) ? args.ranges : undefined)
+      else r = XL.addDataValidation(s!.pkg!, sheetName, String(arg(args, ['range']) || ''), { type: String(arg(args, ['type']) || 'list'), formula1: String(arg(args, ['formula1']) || ''), prompt: arg(args, ['prompt']) ? String(arg(args, ['prompt'])) : undefined })
+      if (!r.ok) return r.error || '操作失败'
+      s!.cache = null
+      return JSON.stringify({ ok: true, detail: r.detail, revision: s!.pkg!.revision, note: '修改在内存中生效，请调用 save_workbook 写盘' }, null, 2)
     }
 
     case 'read_sheet': {
@@ -739,11 +933,20 @@ export async function executeXlsxTool(name: string, rawArgs: Record<string, any>
       if (typeof s === 'string') return s
       const ro = needWritable(s)
       if (ro) return ro
-      if (!s!.pkg!.modified) return JSON.stringify({ saved: false, path: s!.path, note: '没有未保存的修改，未写盘' }, null, 2)
+      if (!s!.pkg!.modified) return JSON.stringify({ saved: false, path: s!.path, revision: s!.pkg!.revision, note: '没有未保存的修改，未写盘' }, null, 2)
+      const expected = arg(args, ['expectedRevision', 'expected_revision'])
+      if (expected !== undefined && Number(expected) !== s!.pkg!.revision) {
+        return JSON.stringify({ ok: false, code: 'REVISION_CONFLICT', expectedRevision: Number(expected), currentRevision: s!.pkg!.revision, hint: '工作簿版本已变化，请重新读取后再保存' }, null, 2)
+      }
+      const currentHash = hashFile(s!.path)
+      if (s!.baseHash && currentHash && currentHash !== s!.baseHash && arg(args, ['force']) !== true) {
+        return JSON.stringify({ ok: false, code: 'EXTERNAL_CHANGE', path: s!.path, hint: '文件已被外部程序修改；请重新 open_workbook，或传 force=true 强制覆盖' }, null, 2)
+      }
       const res = XE.saveXlsxPackage(s!.pkg!, { backup: arg(args, ['backup']) !== false })
       if (!res.ok) return `保存失败: ${res.error || '未知错误'}`
       s!.cache = null
-      return JSON.stringify({ saved: true, path: res.path, backup: res.backup }, null, 2)
+      s!.baseHash = hashFile(s!.path)
+      return JSON.stringify({ saved: true, path: res.path, revision: s!.pkg!.revision, backup: res.backup }, null, 2)
     }
 
     case 'close_workbook': {
