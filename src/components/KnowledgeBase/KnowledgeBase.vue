@@ -8511,6 +8511,7 @@ onBeforeUnmount(() => {
         outline: none;
         flex: 0 0 auto;
         max-width: 140px;
+        margin: 0px
     }
     .qa-select:hover,
     .qa-select:focus {
