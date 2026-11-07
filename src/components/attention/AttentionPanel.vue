@@ -242,7 +242,7 @@ function noticeIcon(kind: NoticeKind): string {
 <style scoped>
 .attention-pop {
   position: fixed;
-  z-index: 1450;
+  z-index: 1550;
   display: flex;
   flex-direction: column;
   overflow: hidden;

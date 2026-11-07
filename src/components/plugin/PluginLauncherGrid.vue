@@ -14,20 +14,30 @@
 -->
 <template>
   <div class="plugin-launcher-grid">
-    <div v-if="!entries.length" class="plg-empty">
+    <!-- 插件面板搜索：插件较多时直接筛选 -->
+    <div v-if="entries.length" class="plg-search">
+      <i class="fa fa-search"></i>
+      <input v-model="keyword" :placeholder="zh ? '搜索插件…' : 'Search plugins…'" @keydown.esc="keyword = ''" />
+      <i v-if="keyword" class="fa fa-times-circle" @click="keyword = ''"></i>
+      <i class="fa fa-cogs plg-settings" :title="zh ? '插件管理设置' : 'Plugin settings'" @click="$emit('settings')"></i>
+    </div>
+
+    <div v-if="!filteredEntries.length" class="plg-empty">
       <i class="fa fa-puzzle-piece plg-empty-icon"></i>
-      <div class="plg-empty-title">{{ zh ? '没有启用中的插件面板' : 'No enabled plugin panel' }}</div>
+      <div class="plg-empty-title">{{ keyword ? (zh ? '没有匹配的插件' : 'No matching plugin') : (zh ? '没有启用中的插件面板' : 'No enabled plugin panel') }}</div>
       <div class="plg-empty-text">
-        {{ zh
-          ? '插件启用后，它的主面板会出现在这里。可前往「设置 → 插件 → 管理」启用插件。'
-          : 'Once a plugin is enabled, its main panel shows up here. Enable plugins under Settings → Plugins → Manage.' }}
+        {{ keyword
+          ? (zh ? '换个关键词试试。' : 'Try another keyword.')
+          : (zh
+            ? '插件启用后，它的主面板会出现在这里。可前往「设置 → 插件 → 管理」启用插件。'
+            : 'Once a plugin is enabled, its main panel shows up here. Enable plugins under Settings → Plugins → Manage.') }}
       </div>
     </div>
 
     <!-- 直接铺网格：不放「全部插件 / 计数 / 点击以子窗口打开」这类页头（计数在底部状态栏） -->
     <div v-else class="plg-grid scoll">
       <div
-        v-for="e in entries"
+        v-for="e in filteredEntries"
         :key="e.key"
         class="plg-card"
         :class="{ active: e.key === highlight }"
@@ -81,7 +91,7 @@ export interface PluginLauncherEntry {
 </script>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = withDefaults(
   defineProps<{
@@ -98,10 +108,19 @@ const props = withDefaults(
   { zh: true, highlight: '', totalCount: 0, enabledCount: 0 },
 )
 
-defineEmits<{ (e: 'select', key: string): void }>()
+defineEmits<{ (e: 'select', key: string): void; (e: 'settings'): void }>()
 
 /** 未启用 = 总数 - 已启用（负数不出，避免调用方传错时显示成 "-1 个"） */
 const disabledCount = computed(() => Math.max(0, props.totalCount - props.enabledCount))
+
+const keyword = ref('')
+const filteredEntries = computed(() => {
+  const kw = keyword.value.trim().toLowerCase()
+  if (!kw) return props.entries
+  return props.entries.filter(e =>
+    `${e.title || ''} ${e.pluginName || ''} ${e.description || ''}`.toLowerCase().includes(kw),
+  )
+})
 </script>
 
 <style scoped>
@@ -113,6 +132,32 @@ const disabledCount = computed(() => Math.max(0, props.totalCount - props.enable
   overflow: hidden;
   background-color: var(--backgroundColor);
   color: var(--fontColor);
+}
+
+.plg-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin: 8px 12px 0;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--backgroundColor);
+  color: var(--fontColor);
+}
+.plg-search .fa { font-size: 11px; opacity: .55; flex-shrink: 0; cursor: pointer; }
+.plg-search .plg-settings { opacity: .8; padding-left: 6px; border-left: 1px solid var(--borderColor); }
+.plg-search .plg-settings:hover { opacity: 1; color: var(--fontActiveColor); }
+.plg-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 12px;
 }
 
 /* 插件卡片网格：按可用宽度自动换列（最小 200px），窗口越宽列越多。

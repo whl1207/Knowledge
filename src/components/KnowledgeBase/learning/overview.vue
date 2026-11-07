@@ -36,6 +36,20 @@ const pct = computed(() => {
   const n = active.value.length
   return n ? Math.round((counted.value.mastered / n) * 100) : 0
 })
+const totalActive = computed(() => active.value.length)
+const masteryRingStyle = computed(() => {
+  const total = Math.max(1, totalActive.value)
+  const m = (counted.value.mastered / total) * 100
+  const l = ((counted.value.mastered + counted.value.learning) / total) * 100
+  return {
+    background: `conic-gradient(#3fb950 0 ${m}%, #d29922 ${m}% ${l}%, var(--borderColor) ${l}% 100%)`,
+  }
+})
+const masteryLegend = computed(() => [
+  { key: 'mastered', color: '#3fb950', label: tr('已掌握', 'Mastered'), count: counted.value.mastered },
+  { key: 'learning', color: '#d29922', label: tr('学习中', 'Learning'), count: counted.value.learning },
+  { key: 'new', color: 'var(--borderColor)', label: tr('未开始', 'New'), count: counted.value.nnew },
+])
 const acc = computed(() =>
   props.totalPractice ? Math.round((props.totalCorrect / props.totalPractice) * 100) : 0
 )
@@ -97,35 +111,39 @@ function doNext() {
 </script>
 
 <template>
-  <div class="lk-body">
-    <!-- 顶部条：下一步建议 -->
-    <div class="lk-card lk-next" @click="doNext">
-      <div class="lk-next-ico"><i class="fa" :class="next.icon"></i></div>
-      <div class="lk-next-main">
-        <div class="lk-next-label">{{ tr('下一步建议', 'Next step') }}</div>
-        <div class="lk-next-text">{{ props.store.locales === 'zh' ? next.zh : next.en }}</div>
+  <div class="lk-body scoll">
+    <!-- 顶部：下一步建议（主视觉） -->
+    <div class="lk-hero" @click="doNext">
+      <div class="lk-hero-icon"><i class="fa" :class="next.icon"></i></div>
+      <div class="lk-hero-main">
+        <span class="lk-hero-eyebrow">{{ tr('下一步建议', 'Next step') }}</span>
+        <div class="lk-hero-text">{{ props.store.locales === 'zh' ? next.zh : next.en }}</div>
       </div>
-      <button v-if="next.btn" class="lk-btn lk-btn-go" @click.stop="doNext"><i class="fa fa-play"></i> {{ props.store.locales === 'zh' ? next.btn.zh : next.btn.en }}</button>
+      <button v-if="next.btn" class="lk-hero-cta" @click.stop="doNext">
+        {{ props.store.locales === 'zh' ? next.btn.zh : next.btn.en }}
+        <i class="fa fa-arrow-right"></i>
+      </button>
     </div>
 
-    <!-- 主区：左=掌握统计条 + 连续学习趋势；右=文件状态 2×2 -->
+    <!-- 主区：左=KPI + 趋势；右=掌握环图 -->
     <div class="lk-main">
       <div class="lk-left">
-        <!-- 左·上：整体掌握 / 正确率 / 累计练习（原在底部状态栏，现置顶） -->
-        <div class="lk-card lk-stats">
-          <div class="lk-stat" :title="tr('已掌握文件数 / 有效文件数', 'mastered / active files')">
-            <i class="fa fa-tasks"></i>
-            <div class="lk-stat-body"><span class="lk-stat-lbl">{{ tr('整体掌握', 'Mastery') }}</span><b>{{ pct }}%</b></div>
+        <!-- KPI：整体掌握 / 正确率 / 累计练习 -->
+        <div class="lk-kpis">
+          <div class="lk-kpi">
+            <span class="lk-kpi-label">{{ tr('整体掌握', 'Mastery') }}</span>
+            <div class="lk-kpi-value">{{ pct }}<i>%</i></div>
+            <span class="lk-kpi-sub">{{ counted.mastered }} / {{ totalActive }} {{ tr('文件', 'files') }}</span>
           </div>
-          <span class="lk-stat-sep"></span>
-          <div class="lk-stat" :title="tr('历史答题正确率', 'historical accuracy')">
-            <i class="fa fa-signal"></i>
-            <div class="lk-stat-body"><span class="lk-stat-lbl">{{ tr('正确率', 'Accuracy') }}</span><b>{{ acc }}%</b></div>
+          <div class="lk-kpi">
+            <span class="lk-kpi-label">{{ tr('正确率', 'Accuracy') }}</span>
+            <div class="lk-kpi-value">{{ acc }}<i>%</i></div>
+            <span class="lk-kpi-sub">{{ totalCorrect }} / {{ totalPractice }} {{ tr('作答', 'answers') }}</span>
           </div>
-          <span class="lk-stat-sep"></span>
-          <div class="lk-stat" :title="tr('累计练习次数', 'total practice count')">
-            <i class="fa fa-pencil-square-o"></i>
-            <div class="lk-stat-body"><span class="lk-stat-lbl">{{ tr('累计练习', 'Total practice') }}</span><b>{{ totalPractice }}</b></div>
+          <div class="lk-kpi">
+            <span class="lk-kpi-label">{{ tr('累计练习', 'Practice') }}</span>
+            <div class="lk-kpi-value">{{ totalPractice }}<i>{{ tr('次', 'x') }}</i></div>
+            <span class="lk-kpi-sub">{{ tr('连续', 'Streak') }} {{ streak }} {{ tr('天', 'd') }}</span>
           </div>
         </div>
         <!-- 左·下：连续打卡 + 7/30 天柱状 -->
@@ -155,25 +173,27 @@ function doNext() {
 
       </div>
 
-      <!-- 右：文件状态 2×2（已掌握 / 学习中 / 未开始 / 到期） -->
+      <!-- 右：整体掌握环图 -->
       <div class="lk-card lk-mastery">
         <div class="lk-m-title">{{ tr('整体掌握', 'Overall mastery') }}</div>
-        <div class="lk-m-grid">
-          <div class="lk-card lk-mstat m" :title="tr('已掌握', 'Mastered')">
-            <i class="fa fa-check-circle"></i>
-            <b>{{ counted.mastered }}</b>
+        <div class="lk-ring-wrap">
+          <div class="lk-ring" :style="masteryRingStyle">
+            <div class="lk-ring-hole">
+              <b>{{ counted.mastered }}</b>
+              <span>/ {{ totalActive }}</span>
+            </div>
           </div>
-          <div class="lk-card lk-mstat l" :title="tr('学习中', 'Learning')">
-            <i class="fa fa-pencil"></i>
-            <b>{{ counted.learning }}</b>
-          </div>
-          <div class="lk-card lk-mstat n" :title="tr('未开始', 'New')">
-            <i class="fa fa-circle-o"></i>
-            <b>{{ counted.nnew }}</b>
-          </div>
-          <div class="lk-card lk-mstat d" :title="tr('到期', 'Due')">
-            <i class="fa fa-refresh"></i>
-            <b>{{ counted.due }}</b>
+          <div class="lk-ring-legend">
+            <div v-for="item in masteryLegend" :key="item.key" class="lk-ring-item">
+              <i class="lk-ring-dot" :style="{ background: item.color }"></i>
+              <span>{{ item.label }}</span>
+              <b>{{ item.count }}</b>
+            </div>
+            <div v-if="counted.due" class="lk-ring-item due">
+              <i class="lk-ring-dot"></i>
+              <span>{{ tr('到期复习', 'Due') }}</span>
+              <b>{{ counted.due }}</b>
+            </div>
           </div>
         </div>
       </div>
@@ -241,5 +261,93 @@ function doNext() {
   .lk-main { grid-template-columns: 1fr; overflow-y: auto; align-content: start; }
   .lk-trend-card, .lk-mastery { min-height: 0; }
   .lk-t-chart { min-height: 140px; }
+}
+/* ===== 新版总览：主视觉 / KPI / 环图 ===== */
+.lk-hero {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; flex-shrink: 0; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--fontActiveColor) 28%, var(--borderColor));
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 0 0, color-mix(in srgb, var(--fontActiveColor) 18%, transparent), transparent 55%),
+    linear-gradient(135deg, var(--menuColor), var(--backgroundColor));
+  transition: border-color .2s, transform .2s;
+}
+.lk-hero:hover { border-color: var(--fontActiveColor); transform: translateY(-1px); }
+.lk-hero-icon {
+  width: 42px; height: 42px; border-radius: 12px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--fontActiveColor); color: var(--backgroundColor);
+  font-size: 20px; box-shadow: 0 6px 18px color-mix(in srgb, var(--fontActiveColor) 28%, transparent);
+}
+.lk-hero-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.lk-hero-eyebrow { font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: var(--fontActiveColor); opacity: .8; }
+.lk-hero-text { font-size: 15px; line-height: 1.45; font-weight: 500; color: var(--fontColor); }
+.lk-hero-cta {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  height: 32px; padding: 0 13px; border: 0; border-radius: 8px;
+  background: var(--fontActiveColor); color: var(--backgroundColor);
+  font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.lk-hero-cta:hover { opacity: .9; }
+.lk-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; flex-shrink: 0; }
+.lk-kpi {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 10px 12px; border: 1px solid var(--borderColor); border-radius: 11px;
+  background: var(--backgroundColor);
+}
+.lk-kpi-label { font-size: 9px; letter-spacing: .04em; color: var(--fontColor); opacity: .55; white-space: nowrap; }
+.lk-kpi-value { font-size: 28px; line-height: 1.05; font-weight: 700; color: var(--fontColor); letter-spacing: -.02em; }
+.lk-kpi-value i { font-size: 12px; font-style: normal; font-weight: 500; margin-left: 2px; opacity: .45; }
+.lk-kpi-sub { font-size: 9px; color: var(--fontColor); opacity: .45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lk-mastery { padding: 12px 14px; gap: 8px; }
+.lk-m-title { font-size: 11px; font-weight: 600; opacity: .8; }
+.lk-ring-wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; gap: 18px; flex-wrap: wrap; }
+.lk-ring {
+  width: 132px; height: 132px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 6px 22px color-mix(in srgb, var(--fontActiveColor) 12%, transparent);
+}
+.lk-ring-hole {
+  width: 92px; height: 92px; border-radius: 50%; background: var(--backgroundColor);
+  display: flex; align-items: center; justify-content: center; gap: 3px;
+  border: 1px solid var(--borderColor);
+}
+.lk-ring-hole b { font-size: 25px; font-weight: 700; color: var(--fontColor); }
+.lk-ring-hole span { font-size: 10px; color: var(--fontColor); opacity: .5; }
+.lk-ring-legend { display: flex; flex-direction: column; gap: 7px; min-width: 100px; }
+.lk-ring-item { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--fontColor); }
+.lk-ring-item b { margin-left: auto; font-size: 12px; }
+.lk-ring-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.lk-ring-item.due { color: #d93025; }
+.lk-ring-item.due .lk-ring-dot { background: #d93025; }
+@media (max-width: 500px) {
+  .lk-kpis { grid-template-columns: 1fr 1fr; }
+  .lk-kpi-value { font-size: 24px; }
+  .lk-hero { align-items: flex-start; flex-wrap: wrap; }
+  .lk-hero-cta { margin-left: 54px; }
+  .lk-ring-wrap { gap: 12px; }
+}
+@media (max-width: 700px) {
+  .lk-body { height: 100%; min-height: 0; overflow-y: auto; padding: 8px; }
+  .lk-main { display: flex; flex-direction: column; flex: 0 0 auto; overflow: visible; gap: 8px; }
+  .lk-left { flex: 0 0 auto; gap: 8px; }
+  .lk-kpis { grid-template-columns: 1fr 1fr; }
+  .lk-kpi:last-child { grid-column: 1 / -1; }
+  .lk-hero { padding: 12px; gap: 10px; border-radius: 12px; }
+  .lk-hero-text { font-size: 14px; }
+  .lk-hero-cta { width: 100%; margin-left: 0; justify-content: center; }
+  .lk-trend-card { flex: 0 0 auto; min-height: 210px; }
+  .lk-t-note { display: none; }
+  .lk-mastery { min-height: 235px; }
+  .lk-ring-wrap { flex-direction: column; gap: 10px; }
+}
+@media (max-width: 420px) {
+  .lk-kpis { grid-template-columns: 1fr; }
+  .lk-kpi:last-child { grid-column: auto; }
+  .lk-ring { width: 112px; height: 112px; }
+  .lk-ring-hole { width: 78px; height: 78px; }
+  .lk-ring-hole b { font-size: 22px; }
+  .lk-hero-icon { width: 38px; height: 38px; font-size: 18px; }
 }
 </style>

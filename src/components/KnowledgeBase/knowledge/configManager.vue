@@ -527,7 +527,7 @@ const scanKnowledgeBases = async () => {
   emit('updateState', t('正在扫描知识库文件...', 'Scanning knowledge base files...'))
 
   try {
-    const result = await aikmIpc.invoke("getFilesRelation", props.store.root, 1)
+    const result = await aikmIpc.invoke("getFilesRelation", props.store.root, 3)
     if (!result) {
       knowledgeBases.value = []
       return
@@ -648,8 +648,8 @@ const deleteKnowledgeBase = async (index: number) => {
   try {
     await ElMessageBox.confirm(
       t(
-        `确定要删除知识库文件 "${kbFile.label}" 吗？此操作不可恢复。`,
-        `Are you sure you want to delete knowledge base file "${kbFile.label}"? This action cannot be undone.`
+        `确定要删除知识库 "${kbFile.label}" 吗？会连同所在库文件夹（含学习记录、试卷库）一起删除，此操作不可恢复。`,
+        `Delete "${kbFile.label}"? The whole KB folder (including learning records and exam papers) will be removed. This cannot be undone.`
       ),
       t('提示', 'Confirm'),
       { confirmButtonText: t('确定', 'OK'), cancelButtonText: t('取消', 'Cancel'), type: 'warning' }
@@ -657,13 +657,34 @@ const deleteKnowledgeBase = async (index: number) => {
   } catch { return }
   
   try {
-    const success = await getPlatform().fs.deleteFile(kbFile.path)
+    const normalized = String(kbFile.path || '').replace(/\\/g, '/')
+    const parts = normalized.split('/')
+    const fileName = parts.pop() || ''
+    const parent = parts.join('/')
+    const parentName = parts[parts.length - 1] || ''
+    const kbBase = fileName.replace(/\.kb$/i, '')
+    // 方案 A：<知识库>/<库名>/<库名>.kb —— 删除整个库文件夹（含 .learning / .exams.json）
+    // 旧版根目录 .kb：只删除 .kb 及其同名侧车，绝不删除整个工作区
+    let success = false
+    if (parent && parentName === kbBase) {
+      const res = await getPlatform().fs.deleteFolder(parent)
+      success = !!res?.success
+    } else {
+      success = await getPlatform().fs.deleteFile(kbFile.path)
+      if (success) {
+        const stem = normalized.replace(/\.kb$/i, '')
+        await getPlatform().fs.deleteFile(stem + '.learning')
+        await getPlatform().fs.deleteFile(stem + '.exams.json')
+      }
+    }
     if (success) {
       knowledgeBases.value.splice(index, 1)
       emit('updateState', t(
         `已删除知识库: ${kbFile.label}`,
         `Deleted knowledge base: ${kbFile.label}`
       ))
+    } else {
+      emit('updateState', t('删除失败：文件夹可能被占用', 'Delete failed: folder may be in use'))
     }
   } catch (error:any) {
     console.error(t('删除知识库出错:', 'Error deleting knowledge base:'), error)

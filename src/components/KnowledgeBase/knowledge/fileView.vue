@@ -219,7 +219,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-show="summaryOpen" class="file-summary-body scoll">{{ currentFileSummary }}</div>
       </div>
-      <div class="file-preview-body">
+      <div class="file-preview-body scoll">
         <div v-if="previewLoading" class="file-preview-loading">
           <div class="file-skeleton"></div>
           <div class="file-skeleton short"></div>

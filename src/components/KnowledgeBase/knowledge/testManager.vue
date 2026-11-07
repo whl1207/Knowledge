@@ -307,21 +307,52 @@ const testResults = ref<TestResult[]>([])
 const rankAnalysisResults = ref<RankAnalysisResult[]>([])
 const lastUpdateTime = ref('')
 const isExporting = ref(false)
-const activeTab = ref('test') // 'test' | 'rank' | 'batch'
+const activeTab = ref('home') // 'home' | 'cases' | 'test' | 'rank'
 
 // ===== 问题列表分段加载（参照切片标签页：问题过多时向下滚动分批渲染） =====
 const TEST_LOAD_CHUNK = 50
 const displayedQuestions = ref(TEST_LOAD_CHUNK)
 const isLoadingMoreRows = ref(false)
 const testScrollRef = ref<HTMLElement | null>(null)
-const hasMoreQuestions = computed(() => displayedQuestions.value < test.questions.length)
-const visibleQuestionCount = computed(() => Math.min(displayedQuestions.value, test.questions.length))
+const caseSearch = ref('')
+const caseFilter = ref<'all' | 'tested' | 'untested' | 'no-ref'>('all')
+const filteredCaseIndices = computed(() => {
+  const kw = caseSearch.value.trim().toLowerCase()
+  const out: number[] = []
+  test.questions.forEach((q, idx) => {
+    if (caseFilter.value === 'tested' && !testResults.value[idx]) return
+    if (caseFilter.value === 'untested' && testResults.value[idx]) return
+    if (caseFilter.value === 'no-ref' && rowGoldCount(idx) > 0) return
+    if (kw) {
+      const hay = `${q || ''} ${test.answers?.[idx] || ''}`.toLowerCase()
+      if (!hay.includes(kw)) return
+    }
+    out.push(idx)
+  })
+  return out
+})
+const hasMoreQuestions = computed(() => displayedQuestions.value < filteredCaseIndices.value.length)
+const visibleQuestionCount = computed(() => Math.min(displayedQuestions.value, filteredCaseIndices.value.length))
 // 可见问题的原始索引（0-based），模板 v-for 直接用原始索引访问 test.questions / testResults 等
-const visibleRows = computed(() => Array.from({ length: visibleQuestionCount.value }, (_, i) => i))
+const visibleRows = computed(() => filteredCaseIndices.value.slice(0, visibleQuestionCount.value))
+const caseComposition = computed(() => {
+  const total = test.questions.length
+  let withRef = 0
+  let answerOnly = 0
+  let incomplete = 0
+  test.questions.forEach((q, idx) => {
+    const hasRef = rowGoldCount(idx) > 0
+    const hasAnswer = !!String(test.answers?.[idx] || '').trim()
+    if (hasRef) withRef++
+    else if (hasAnswer) answerOnly++
+    if (!String(q || '').trim() || (!hasRef && !hasAnswer)) incomplete++
+  })
+  return { total, withRef, answerOnly, incomplete, fromBank: testSource.value === 'external' ? 0 : total, fromImport: testSource.value === 'external' ? total : 0 }
+})
 
 function appendMoreQuestions() {
   if (!hasMoreQuestions.value) return
-  displayedQuestions.value = Math.min(displayedQuestions.value + TEST_LOAD_CHUNK, test.questions.length)
+  displayedQuestions.value = Math.min(displayedQuestions.value + TEST_LOAD_CHUNK, filteredCaseIndices.value.length)
 }
 
 function loadMoreQuestions() {
@@ -363,7 +394,11 @@ function resetQuestionPaging() {
 }
 
 watch(() => test.questions.length, () => { resetQuestionPaging() })
-watch(() => activeTab.value, (v) => { if (v === 'test') nextTick(() => fillTestViewportIfShort()) })
+watch([caseSearch, caseFilter], () => { resetQuestionPaging(); nextTick(() => fillTestViewportIfShort()) })
+watch(() => activeTab.value, (v) => {
+  if (v === 'test' || v === 'cases') nextTick(() => fillTestViewportIfShort())
+  if (v === 'rank') rankRowsLimit.value = RANK_ROWS_CHUNK
+})
 
 // 判定基准（切片命中 ↔ 答案命中）或答案命中子策略（精准/模糊）变化 → 旧结果口径失效，清空重测，避免误读
 const clearJudgementResults = () => {
@@ -2933,6 +2968,37 @@ const batchLiveText = computed(() => {
   ].filter(Boolean).join(' · ')
   return tail ? `${head}\n${tail}` : head
 })
+
+const testMetrics = computed(() => {
+  const results = testResults.value.filter(Boolean)
+  const tested = results.length
+  const hit = results.filter(r => (r.slices || []).some((s: any) => s.containsAnswer)).length
+  const ranks = rankAnalysisResults.value.filter(Boolean)
+  const avgHitRate = ranks.length
+    ? ranks.reduce((sum, r) => sum + (Number(r.hitRate) || 0), 0) / ranks.length
+    : (tested ? results.reduce((sum, r) => sum + ((r.slices || []).some((s: any) => s.containsAnswer) ? 1 : 0), 0) / tested : 0)
+  const times = results.map(r => Number(r.recallTimeMs) || 0).filter(t => t > 0)
+  const avgTime = times.length ? times.reduce((a, b) => a + b, 0) / times.length : 0
+  return {
+    tested,
+    total: test.questions.length,
+    recall: tested ? hit / tested : 0,
+    hitRate: avgHitRate,
+    avgTime,
+  }
+})
+
+const rankMetrics = computed(() => {
+  const rows = rankAnalysisResults.value.filter(Boolean)
+  const tested = rows.length
+  const hitRate = tested ? rows.reduce((s, r) => s + (Number(r.hitRate) || 0), 0) / tested : 0
+  const complete = tested ? rows.filter(r => (Number(r.hitRate) || 0) >= 1).length / tested : 0
+  const ranked = rows.filter(r => Number(r.firstRank) > 0)
+  const avgRank = ranked.length ? ranked.reduce((s, r) => s + Number(r.firstRank), 0) / ranked.length : 0
+  const times = rows.map(r => Number(r.timeMs) || 0).filter(t => t > 0)
+  const avgTime = times.length ? times.reduce((a, b) => a + b, 0) / times.length : 0
+  return { tested, hitRate, complete, avgRank, avgTime }
+})
 // ===== 后台任务登记：批量测试运行期间登记为「后台运行任务」=====
 // 界面上的进度只走底部状态栏（updateLiveState）；这里登记只为「关闭窗口前提醒」与托盘悬停提示，
 // 避免几十分钟的评测被误关窗口静默杀掉。
@@ -2982,10 +3048,46 @@ const expandedStrategyLabel = computed(() =>
   allStrategyStats.value.find(s => s.strategyId === expandedStrategy.value)?.label || expandedStrategy.value)
 const strategyDetailRows = computed(() =>
   rankAnalysisResults.value.filter(r => r.algorithm === expandedStrategy.value))
+// 位次分析主表按批渲染：几千条一次性挂载会明显卡顿
+const RANK_ROWS_CHUNK = 100
+const rankRowsLimit = ref(RANK_ROWS_CHUNK)
+const rankRows = computed(() => rankAnalysisResults.value.slice(0, rankRowsLimit.value))
+const hasMoreRankRows = computed(() => rankRowsLimit.value < rankAnalysisResults.value.length)
+function loadMoreRankRows(): void {
+  if (!hasMoreRankRows.value) return
+  rankRowsLimit.value = Math.min(rankRowsLimit.value + RANK_ROWS_CHUNK, rankAnalysisResults.value.length)
+}
+function onRankScroll(event: Event): void {
+  const el = event.target as HTMLElement
+  if (!el) return
+  if (el.scrollHeight - el.scrollTop - el.clientHeight < 240) loadMoreRankRows()
+}
+
+// 位次明细按批渲染：避免几千行一次挂载导致打开卡顿
+const RANK_DETAIL_CHUNK = 100
+const rankDetailLimit = ref(RANK_DETAIL_CHUNK)
+const rankDetailRows = computed(() => strategyDetailRows.value.slice(0, rankDetailLimit.value))
+const hasMoreRankDetail = computed(() => rankDetailLimit.value < strategyDetailRows.value.length)
+function loadMoreRankDetail(): void {
+  if (!hasMoreRankDetail.value) return
+  rankDetailLimit.value = Math.min(rankDetailLimit.value + RANK_DETAIL_CHUNK, strategyDetailRows.value.length)
+}
+function onRankDetailScroll(event: Event): void {
+  const el = event.target as HTMLElement
+  if (!el) return
+  if (el.scrollHeight - el.scrollTop - el.clientHeight < 240) loadMoreRankDetail()
+}
 /** 打开某策略/变体的位次明细弹出面板（点击策略召回对比行） */
-const openStrategyDetail = (id: string) => { expandedStrategy.value = id }
+const openStrategyDetail = (id: string) => {
+  expandedStrategy.value = id
+  rankDetailLimit.value = RANK_DETAIL_CHUNK
+  nextTick(() => {
+    const el = document.querySelector('.tm-rank-modal .tm-dlg-body') as HTMLElement | null
+    if (el) el.scrollTop = 0
+  })
+}
 /** 关闭位次明细弹出面板 */
-const closeStrategyDetail = () => { expandedStrategy.value = '' }
+const closeStrategyDetail = () => { expandedStrategy.value = ''; rankDetailLimit.value = RANK_DETAIL_CHUNK }
 
 // 召回完整性：成分命中数（x/y）与徽标（完整/部分/缺失）。
 // 对复合问题（参考答案含多个 | 成分）而言：hitRate=1 需全部成分所在的切片都被检索到 = 召回完整。
@@ -4377,199 +4479,81 @@ const clearTestCases = () => {
 
     <!-- 工具栏（kt-* 统一：单行图标按钮 + title；三个页面切换为按钮样式） -->
     <div class="kt-toolbar">
-      <div class="kt-btn" :class="{ active: activeTab === 'test' }" :title="store.locales=='zh' ? '测试结果' : 'Test Results'" @click="activeTab = 'test'">
-        <i class="fa fa-table"></i>
+      <div class="kt-btn kt-tab" :class="{ active: activeTab === 'home' }" :title="store.locales=='zh' ? '测试主页' : 'Test Home'" @click="activeTab = 'home'">
+        <i class="fa fa-home"></i><span class="kt-tab-text">{{ store.locales=='zh' ? '主页' : 'Home' }}</span>
       </div>
-      <div class="kt-btn" :class="{ active: activeTab === 'rank' }" :title="store.locales=='zh' ? '位次分析' : 'Rank Analysis'" @click="activeTab = 'rank'">
-        <i class="fa fa-line-chart"></i>
+      <div class="kt-btn kt-tab" :class="{ active: activeTab === 'cases' }" :title="store.locales=='zh' ? '测试用例' : 'Test Cases'" @click="activeTab = 'cases'">
+        <i class="fa fa-list-alt"></i><span class="kt-tab-text">{{ store.locales=='zh' ? '测试用例' : 'Cases' }}</span>
       </div>
-      <div class="kt-btn" :class="{ active: activeTab === 'batch' }" :title="store.locales=='zh' ? '批量测试面板' : 'Batch Panel'" @click="activeTab = 'batch'">
-        <i class="fa fa-tasks"></i>
+      <div class="kt-btn kt-tab" :class="{ active: activeTab === 'test' }" :title="store.locales=='zh' ? '测试结果' : 'Test Results'" @click="activeTab = 'test'">
+        <i class="fa fa-table"></i><span class="kt-tab-text">{{ store.locales=='zh' ? '测试结果' : 'Results' }}</span>
       </div>
-      <span class="kt-sep"></span>
-      <!-- 读取测试用例：按当前上限（可在右侧输入框快速设置）从问题库重新派生问题（会覆盖外部导入的独立用例） -->
-      <div class="kt-btn" @click="readTestCasesFromBank"
-           :title="store.locales=='zh' ? '读取测试用例：按右侧「上限」从问题库重新派生并刷新问题（会覆盖外部导入的独立用例）' : 'Read test cases: re-derive questions from the question bank (respects the max limit at right; replaces imported standalone cases)'">
-        <i class="fa fa-download"></i>
-      </div>
-      <input
-        type="number"
-        class="kt-input"
-        style="width:62px;"
-        min="1"
-        max="5000"
-        step="1"
-        v-model.number="maxCasesInput"
-        @change="onMaxCasesChange"
-        :title="store.locales=='zh' ? '测试用例上限（1-5000）：回车或失焦后按新上限重新派生测试用例' : 'Max test cases (1-5000): re-derive on Enter/blur'"
-      />
-      <!-- 导入外部 Excel 测试用例（独立测试集：仅用于评测知识库，不写入问题库/知识库） -->
-      <div class="kt-btn" @click="importTestCasesFromExcel" :disabled="test.isRunning"
-           :title="store.locales=='zh' ? '导入测试用例：从外部 Excel 读取独立测试集（仅用于评测，不写入问题库/知识库）。支持 问题/参考答案/对应切片 三列或仅问题：第 3 列填参考切片（JSON、blockId、hash 或 filePath）即可按「切片命中」对比是否召回；无切片时自动切「答案命中」' : 'Import test cases: load a standalone test set from Excel (evaluation only, not written to the question bank). Supports Question / Reference-Answer / Linked-Slice columns: fill col 3 with the reference slice(s) (JSON, blockId, hash or filePath) to compare recall via Slice-Hit; falls back to Answer Hit when no slices'">
-        <i class="fa fa-file-excel-o"></i>
-      </div>
-      <!-- 清空测试用例：清空当前问题/答案/关联切片列表（结果与统计一并清空；不影响问题库/知识库） -->
-      <div class="kt-btn" @click="clearTestCases" :disabled="test.isRunning"
-           :title="store.locales=='zh' ? '清空测试用例：清空当前 问题/答案/关联切片 列表（结果与统计一并清空）；问题库用例可点「读取测试用例」重新派生' : 'Clear test cases: empty the current question/answer/linked-slice list (results & stats cleared too); question-bank cases can be restored via \'Read test cases\''">        <i class="fa fa-trash"></i>
+      <div class="kt-btn kt-tab" :class="{ active: activeTab === 'rank' }" :title="store.locales=='zh' ? '位次分析' : 'Rank Analysis'" @click="activeTab = 'rank'">
+        <i class="fa fa-line-chart"></i><span class="kt-tab-text">{{ store.locales=='zh' ? '位次分析' : 'Rank' }}</span>
       </div>
       <span class="kt-sep"></span>
-      <!-- 评测用嵌入模型（当前模型来源可用模型；留空=跟随设置中的嵌入模型）：只影响本知识库评测/检索，
-              不改动设置里的嵌入模型；切换后旧向量清空并按需用新模型重新生成；选择随 .kb 保存 -->
-      <select class="kt-select" style="width:175px;" v-model="testEmbedSel" @change="onTestEmbedModelChange"
-                 :disabled="test.isRunning || prewarmRunning"
-                 :title="(store.locales=='zh' ? '评测用嵌入模型：只影响本知识库评测/检索时使用的嵌入模型，不改动设置里的嵌入模型；留空=跟随设置。切换后旧向量会被清空，评测/问答时按需用新模型重新生成；选择随 .kb 保存' : 'Evaluation embedding model: affects only this KB\'s evaluation/retrieval; the settings embed model is untouched; empty = follow settings. Switching clears old vectors (re-derived on demand); the choice is saved with the .kb') + (props.model?.embed ? (store.locales=='zh' ? `｜设置在用：${props.model.embed}` : ` | settings: ${props.model.embed}`) : '')">
-           <option value="">{{ followEmbedLabel }}</option>
-           <option v-for="m in embedModelOptions" :key="m" :value="m">{{ m }}</option>
-      </select>
-      <div class="kt-btn" @click="refreshEmbedModels" :title="store.locales=='zh' ? '刷新嵌入模型列表（从当前 AI 来源拉取）' : 'Refresh embed model list (fetch from the current AI source)'">
-           <i class="fa fa-refresh"></i>
-      </div>
-      <span class="kt-sep"></span>
-      <!-- 批量测试（当前策略）/ 暂停 / 继续 / 停止：仅前两个面板（测试结果/位次分析）显示 -->
-      <template v-if="activeTab === 'test' || activeTab === 'rank'">
-        <template v-if="test.isRunning && batchRunKind === 'one'">
-          <div class="kt-btn" v-if="batchCtl.paused" @click="continueBatchTest"
-               :title="store.locales=='zh' ? '继续批量测试' : 'Resume batch test'">
-            <i class="fa fa-play"></i>
-          </div>
-          <div class="kt-btn" v-else @click="pauseBatchTest"
-               :title="store.locales=='zh' ? '暂停批量测试（当前问题跑完后停下，可继续）' : 'Pause batch test (stops after the current question, resumable)'">
-            <i class="fa fa-pause"></i>
-          </div>
-          <div class="kt-btn" @click="stopBatchTest"
-               :title="store.locales=='zh' ? '停止批量测试（已测结果保留）' : 'Stop batch test (keep tested results)'">
-            <i class="fa fa-stop"></i>
-          </div>
-        </template>
-        <div v-else class="kt-btn" @click="runBatchTest" :disabled="test.isRunning"
-             :title="store.locales=='zh' ? '批量测试（当前策略）：用当前策略跑全部问题' : 'Batch test (current strategy): run all questions'">
-          <i class="fa fa-play"></i>
-        </div>
-      </template>
+      <!-- 运行状态：开始/暂停/停止统一放到「主页」 -->
+      <span class="kt-label" style="font-size:10px;opacity:.55;">
+        {{ test.isRunning ? (store.locales=='zh' ? '测试运行中…' : 'Running…') : (store.locales=='zh' ? '在主页开始测试' : 'Start from Home') }}
+      </span>
 
-      <!-- 批量测试面板工具栏按钮组（仅该标签显示；窗口窄时右侧溢出隐藏，不显示横向滑块）。
-           容器带 gap 保证 kt-btn 之间始终有间隔；导出按钮经 margin-left:auto 推到最右 -->
-      <div v-if="activeTab === 'batch'" style="display:flex;align-items:center;flex:1;flex-wrap:nowrap;overflow:hidden;min-width:0;gap:5px;">
-        <!-- 批量测试（全部策略）/ 暂停 / 继续 / 停止 -->
-        <template v-if="test.isRunning && batchRunKind === 'all'">
-          <div class="kt-btn" v-if="batchCtl.paused" @click="continueBatchTest"
-               :title="store.locales=='zh' ? '继续批量测试所有策略' : 'Resume all-strategy test'">
-            <i class="fa fa-play"></i>
-          </div>
-          <div class="kt-btn" v-else @click="pauseBatchTest"
-               :title="store.locales=='zh' ? '暂停批量测试（当前问题跑完后停下，可继续）' : 'Pause batch test (stops after the current question, resumable)'">
-            <i class="fa fa-pause"></i>
-          </div>
-          <div class="kt-btn" @click="stopBatchTest"
-               :title="store.locales=='zh' ? '停止批量测试（已测结果与统计保留）' : 'Stop batch test (keep tested results & stats)'">
-            <i class="fa fa-stop"></i>
-          </div>
-        </template>
-        <div v-else class="kt-btn" @click="runAllStrategyTest" :disabled="test.isRunning"
-             :title="store.locales=='zh'
-               ? (ablationEnabledVariants.length
-                 ? `批量测试所有配置：${ablationEnabledVariants.length} 个消融组（策略/变体）各跑一遍全部问题，统计召回率与 Hit@K`
-                 : '批量测试所有策略：每个策略跑一遍全部问题，统计召回准确率（如需参数消融，先在批量面板配置消融组）')
-               : (ablationEnabledVariants.length
-                 ? `Test all configured groups: ${ablationEnabledVariants.length} ablation group(s) over all questions`
-                 : 'Test all strategies: run all questions for every strategy')">
-          <i class="fa fa-play"></i>
-        </div>
-        <!-- 重复次数（仅「全部策略」批量生效）：同批问题重复 N 轮，各指标以均值±标准差呈现 -->
-        <input v-model="test.repeat" type="number" min="1" max="5" class="kt-input" style="width:42px;"
-               :disabled="test.isRunning"
-               :title="store.locales=='zh' ? '重复次数（仅「批量测试所有策略」生效）：同一批问题重复跑 N 轮，指标以均值±标准差呈现，用于判断策略差异是否稳定（默认 1）' : 'Repeat count (all-strategy test only): run the same questions N times and report mean ± std (default 1)'"/>
-        <!-- Hit@K 统计的 K 上限（仅影响导出的「Hit@K曲线」工作表；界面上不画曲线，导出后用 Excel 自行处理） -->
-        <input v-model="test.hitKMax" type="number" min="0" :max="HIT_K_POOL_CAP" class="kt-input" style="width:42px;"
-               :disabled="test.isRunning"
-               :title="store.locales=='zh'
-                 ? `Hit@K 统计的 K 上限（导出 Excel 的「Hit@K曲线」工作表用）：0=跟随切片数量（当前 ${test.searchNum}）；填 1~${HIT_K_POOL_CAP} 可统计更深的召回位次（需重新跑批量测试才有对应数据；改数值后已有的位次数据可直接重算）`
-                 : `K cap for the exported Hit@K sheet: 0 = follow the slice count (now ${test.searchNum}); 1..${HIT_K_POOL_CAP} for deeper ranks (re-run to collect deeper data)`" />
-        <!-- 清空批量测试结果 -->
-        <div class="kt-btn" @click="clearAllResults" :disabled="test.isRunning || prewarmRunning"
-             :title="store.locales=='zh' ? '清空批量测试结果 / 位次 / 统计（释放内存）' : 'Clear batch results / stats (free memory)'">
-          <i class="fa fa-eraser"></i>
-        </div>
-        <!-- 策略配置（消融实验）：组列表 / 参数 / 将执行清单都在弹出面板里 -->
-        <div class="kt-btn" :class="{ on: configPanelOpen }" @click="openConfigPanel()"
-             :title="store.locales=='zh'
-               ? `策略配置（消融实验）：配置 ${ablation.runs.length} 组（启用 ${ablationEnabledVariants.length} 组）、设置各组策略参数，并预览「批量测试所有策略」将执行哪些策略/组`
-               : `Strategy config (ablation): ${ablation.runs.length} group(s), ${ablationEnabledVariants.length} enabled; tune params and preview what the batch run will test`">
-          <i class="fa fa-flask"></i>
-        </div>
-        <!-- 配对显著性检验（同一批问题、与基线配对做 McNemar / Wilcoxon）：内容较宽，放入弹出面板 -->
-        <div class="kt-btn" :class="{ on: sigPanelOpen }"
-             :style="{ opacity: allStrategyStats.length ? 1 : .45 }"
-             @click="allStrategyStats.length && (sigPanelOpen = true)"
-             :title="store.locales=='zh'
-               ? '配对显著性检验：同一批问题下与基线配对，命中差异用 McNemar 精确检验、位次差异用 Wilcoxon 符号秩检验（需先跑测试）'
-               : 'Paired significance: McNemar (hits) + Wilcoxon signed-rank (ranks) vs the baseline (run a test first)'">
-          <i class="fa fa-balance-scale"></i>
-        </div>
-        <!-- 预热入口（仅当有可勾选项时显示）：摘要生成 / 各类向量缓存都在浮层里操作 -->
-        <div v-if="availablePrewarmItems.length > 0" class="kt-btn"
-             :class="{ on: prewarmPanelOpen, warn: prewarmRunning }"
-             @click="prewarmPanelOpen = !prewarmPanelOpen"
-             :title="store.locales=='zh' ? '预热 / 向量缓存：生成缺失摘要、补齐各类向量（已有数据自动跳过，耗时不计入检索）' : 'Pre-warm / vector caches: generate missing summaries, fill missing vectors (existing data is skipped)'">
-          <i class="fa" :class="prewarmRunning ? 'fa-spinner fa-spin' : 'fa-fire'"></i>
-        </div>
-        <!-- 导出（固定放最右：margin-left:auto 吸收左侧剩余空间，与操作按钮自然分隔） -->
-        <div class="kt-btn" style="margin-left:auto;" @click="exportAllTestData" :disabled="isExporting" :title="store.locales=='zh'?'导出全部测试数据（汇总+位次+切片明细）':'Export all test data (summary+rank+slices)'">
-          <i class="fa fa-database"></i>
-        </div>
-        <div class="kt-btn" @click="exportAllStrategyStats" :disabled="isExporting" :title="store.locales=='zh'?'导出策略召回对比汇总 (Excel)':'Export strategy recall comparison (Excel)'">
-          <i class="fa fa-table"></i>
-        </div>
-      </div>
-
-      <!-- 问题行操作 / 策略 / 数量 / 统计（仅测试结果/位次分析标签显示） -->
-      <template v-if="activeTab === 'test' || activeTab === 'rank'">
-        <div class="kt-btn" @click="clearAllResults" :disabled="test.isRunning"
-             :title="store.locales=='zh' ? '清空所有测试结果/位次/统计（释放内存）' : 'Clear all test results / stats (free memory)'">
-          <i class="fa fa-eraser"></i>
-        </div>
-        <span class="kt-sep"></span>
-
-        <select 
-          v-model="test.currentAlgorithm" 
-          class="kt-select" style="width:110px;"
-          :title="store.locales=='zh' ? '选择检索策略' : 'Select search strategy'"
-        >
-          <option v-for="algo in algorithmOptions" :key="algo.value" :value="algo.value">
-            {{ algo.label }}
-          </option>
-        </select>
-        
-        <!-- 命中判定基准：切片精准命中（默认，按关联切片身份）/ 答案命中（按参考答案文本，旧口径）/ 大模型判定（仅智能路由） -->
-        <select v-model="test.hitMode" class="kt-select" style="width:104px;"
-                :title="store.locales=='zh' ? '命中判定：切片精准命中=检索到该问题的关联切片才算命中（推荐默认）；答案命中=按参考答案文本匹配（可在右侧选择 精准/模糊 子策略）；大模型判定=由对话模型对比检索片段与问题/参考答案判定命中与位次（仅智能路由类策略可用，判定调用计入成本、不计入检索时间）' : 'Hit rule: Slice = hit only when the linked slice is recalled (default); Answer = match by reference-answer text; LLM = the chat model judges whether the retrieved snippets answer the question (agentic strategies only)'">
-          <option value="slice">{{ store.locales=='zh' ? '切片命中' : 'Slice Hit' }}</option>
-          <option value="text">{{ store.locales=='zh' ? '答案命中' : 'Answer Hit' }}</option>
-          <option value="llm" :disabled="!llmJudgeAvailable">
-            {{ store.locales=='zh' ? '大模型判定' : 'LLM Judge' }}{{ llmJudgeAvailable ? '' : (store.locales=='zh' ? '（仅智能路由）' : ' (agentic only)') }}
-          </option>
-        </select>
-
-        <!-- 答案命中子策略（仅选中「答案命中」时显示）：精准=切片须完整包含某段参考答案；模糊=原有模糊口径 -->
-        <select v-if="test.hitMode === 'text'" v-model="test.matchMode" class="kt-select" style="width:96px;"
-                :title="store.locales=='zh' ? '答案命中策略：精准=切片须完整包含某段参考答案（按 | 分段，任一整段包含即命中，去掉模糊兜底）；模糊=整段/反向前缀50字/分段任一/词比例任一命中（旧口径）' : 'Answer-hit strategy: Exact = slice must fully contain an answer segment (split by |, any whole segment); Fuzzy = whole / reverse-50-prefix / any part / word-ratio (legacy)'">
-          <option value="precise">{{ store.locales=='zh' ? '精准命中' : 'Exact Hit' }}</option>
-          <option value="fuzzy">{{ store.locales=='zh' ? '模糊命中' : 'Fuzzy Hit' }}</option>
-        </select>
-
-        <!-- 切片数量选择 -->
-        <input v-model="test.searchNum" type="number" class="kt-input" style="width:42px;" :title="store.locales=='zh'?'切片数量':'Slice Count'"/>
-      </template>
-      
       <!-- 已测/总题数（仅空闲时显示；运行中的进度/耗时/当前策略与题号都在下方状态栏，见 batchLiveText） -->
       <span v-if="!test.isRunning" class="kt-label" style="margin-left:auto;font-size:12px;"
             :title="store.locales=='zh' ? '已测问题数 / 问题总数（运行中的进度与预计剩余见底部状态栏）' : 'Tested / total questions (live progress shows in the status bar)'">
         {{ testResults.filter(Boolean).length }} / {{ test.questions.length }}
       </span>
+      <!-- 每个页签最右侧：只显示当前页需要的数据操作 -->
+      <template v-if="activeTab === 'test'">
+        <button class="kt-btn" @click="exportAllTestData" :disabled="isExporting" :title="store.locales=='zh' ? '导出全部测试数据（汇总+位次+切片明细）' : 'Export all test data'"><i class="fa fa-database"></i></button>
+        <button class="kt-btn" @click="clearAllResults" :disabled="test.isRunning" :title="store.locales=='zh' ? '清空测试结果' : 'Clear results'"><i class="fa fa-eraser"></i></button>
+      </template>
+      <template v-else-if="activeTab === 'rank'">
+        <button class="kt-btn" @click="exportAllStrategyStats" :disabled="isExporting" :title="store.locales=='zh' ? '导出策略召回对比' : 'Export strategy comparison'"><i class="fa fa-table"></i></button>
+        <button class="kt-btn" :disabled="!allStrategyStats.length" @click="allStrategyStats.length && (sigPanelOpen = true)" :title="store.locales=='zh' ? '配对显著性检验' : 'Paired significance'"><i class="fa fa-balance-scale"></i></button>
+      </template>
+    </div>
+
+    <!-- 运行状态条：进度 / 当前策略 / 耗时；暂停与停止仍在工具栏 -->
+    <div v-if="test.isRunning" class="tm-runbar">
+      <span class="tm-runbar-text">{{ batchLiveText || (store.locales=='zh' ? '正在测试…' : 'Running…') }}</span>
+      <div class="tm-runbar-track"><i :style="{ width: `${Math.max(0, Math.min(100, Number(test.progress) || 0))}%` }"></i></div>
+      <span class="tm-runbar-pct">{{ (Number(test.progress) || 0).toFixed(0) }}%</span>
     </div>
     
     <!-- 测试结果表格区域 -->
-    <div v-if="activeTab === 'test'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+    <div v-if="activeTab === 'test' || activeTab === 'cases'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+      <div v-if="activeTab === 'cases'" class="tm-case-tools kt-toolbar">
+        <div class="tm-case-search">
+          <i class="fa fa-search"></i>
+          <input v-model="caseSearch" :placeholder="store.locales=='zh' ? '搜索问题 / 参考答案…' : 'Search questions / answers…'" />
+          <i v-if="caseSearch" class="fa fa-times-circle" @click="caseSearch = ''"></i>
+        </div>
+        <select v-model="caseFilter" class="tm-case-filter kt-select">
+          <option value="all">{{ store.locales=='zh' ? '全部用例' : 'All cases' }}</option>
+          <option value="tested">{{ store.locales=='zh' ? '已测' : 'Tested' }}</option>
+          <option value="untested">{{ store.locales=='zh' ? '未测' : 'Untested' }}</option>
+          <option value="no-ref">{{ store.locales=='zh' ? '无关联切片' : 'No linked slice' }}</option>
+        </select>
+        <span class="tm-case-count">{{ visibleRows.length }} / {{ filteredCaseIndices.length }}</span>
+        <span class="tm-case-compose" :title="store.locales=='zh' ? '测试用例构成：有关联切片 / 仅参考答案 / 不完整' : 'Case composition: linked slices / answer only / incomplete'">
+          {{ store.locales=='zh' ? '共' : 'All' }} {{ caseComposition.total }}
+          · {{ store.locales=='zh' ? '有切片' : 'slice' }} {{ caseComposition.withRef }}
+          · {{ store.locales=='zh' ? '仅答案' : 'answer' }} {{ caseComposition.answerOnly }}
+          · {{ store.locales=='zh' ? '库' : 'bank' }} {{ caseComposition.fromBank }}
+          · {{ store.locales=='zh' ? '导入' : 'imported' }} {{ caseComposition.fromImport }}
+          <template v-if="caseComposition.incomplete"> · <span class="tm-case-bad">{{ store.locales=='zh' ? '不完整' : 'incomplete' }} {{ caseComposition.incomplete }}</span></template>
+        </span>
+        <button class="kt-btn tm-case-tool" @click="readTestCasesFromBank" :title="store.locales=='zh' ? '从问题库读取测试用例（覆盖当前导入用例）' : 'Read cases from question bank'"><i class="fa fa-download"></i></button>
+        <input v-model.number="maxCasesInput" type="number" min="1" max="5000" step="1" class="kt-input tm-case-max" :title="store.locales=='zh' ? '读取上限' : 'Max cases'" @change="onMaxCasesChange" />
+        <button class="kt-btn tm-case-tool" @click="importTestCasesFromExcel" :disabled="test.isRunning" :title="store.locales=='zh' ? '导入外部 Excel 测试用例' : 'Import test cases from Excel'"><i class="fa fa-file-excel-o"></i></button>
+        <button class="kt-btn tm-case-tool" @click="clearTestCases" :disabled="test.isRunning" :title="store.locales=='zh' ? '清空测试用例' : 'Clear test cases'"><i class="fa fa-trash"></i></button>
+      </div>
+      <div v-if="activeTab === 'test'" class="tm-metrics">
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '已测' : 'Tested' }}</span><b>{{ testMetrics.tested }}<i>/{{ testMetrics.total }}</i></b></div>
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '召回率' : 'Recall' }}</span><b>{{ testMetrics.tested ? (testMetrics.recall * 100).toFixed(1) : '-' }}<i>%</i></b></div>
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '切片命中率' : 'Hit rate' }}</span><b>{{ testMetrics.tested ? (testMetrics.hitRate * 100).toFixed(1) : '-' }}<i>%</i></b></div>
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '平均耗时' : 'Avg time' }}</span><b>{{ testMetrics.avgTime ? testMetrics.avgTime.toFixed(0) : '-' }}<i>ms</i></b></div>
+      </div>
       <div ref="testScrollRef" class="scoll" style="flex:1;overflow:auto;" @scroll="handleTestScroll">
         <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;">
           <thead style="position:sticky;top:0;background-color:var(--menuColor);">
@@ -4582,7 +4566,11 @@ const clearTestCases = () => {
                 <div style="font-weight:bold;">{{ store.locales=='zh' ? '参考答案' : 'Answer' }}</div>
                 <div style="font-size:9px;color:var(--borderColor);">{{ store.locales=='zh' ? '关联切片（命中基准）' : 'linked slices (hit ref)' }}</div>
               </th>
-              <th v-for="n in parseInt(test.searchNum)" :key="n" style="padding:5px;border:1px solid var(--borderColor);text-align:left;width:auto;">
+              <th v-if="activeTab === 'cases'" style="padding:5px;border:1px solid var(--borderColor);text-align:center;width:58px;">{{ store.locales=='zh' ? '来源' : 'Source' }}</th>
+              <th v-if="activeTab === 'cases'" style="padding:5px;border:1px solid var(--borderColor);text-align:center;width:58px;">{{ store.locales=='zh' ? '状态' : 'Status' }}</th>
+              <th v-if="activeTab === 'cases'" style="padding:5px;border:1px solid var(--borderColor);text-align:center;width:58px;">{{ store.locales=='zh' ? '切片数' : 'Slices' }}</th>
+              <th v-if="activeTab === 'cases'" style="padding:5px;border:1px solid var(--borderColor);text-align:center;width:42px;">{{ store.locales=='zh' ? '操作' : 'Run' }}</th>
+              <th v-if="activeTab !== 'cases'" v-for="n in parseInt(test.searchNum)" :key="n" style="padding:5px;border:1px solid var(--borderColor);text-align:left;width:auto;">
                 <div style="font-weight:bold;">{{ store.locales=='zh' ? '切片 ' : 'Slice ' }}{{ n }}</div>
                 <div style="font-size:9px;color:var(--borderColor);">{{ store.locales=='zh' ? '位次:' : 'Rank:' }}{{ n }}</div>
               </th>
@@ -4594,13 +4582,22 @@ const clearTestCases = () => {
               
               <!-- 问题列：问题输入 + 操作/状态行 -->
               <td style="padding:5px;border:1px solid var(--borderColor);vertical-align:top;width:200px;">
+                <input
+                  v-if="activeTab === 'cases'"
+                  v-model="test.questions[qIndex]"
+                  class="tm-case-input"
+                  :placeholder="store.locales=='zh' ? '输入问题 ' : 'Enter question ' + (qIndex + 1)"
+                  @keydown.ctrl.enter="runSingleTest(qIndex)"
+                />
                 <textarea
+                  v-else
                   v-model="test.questions[qIndex]" class="scoll" style="width:calc(100% - 8px);min-height:56px;padding:4px;font-size:12px;resize:vertical;border:1px solid var(--borderColor);border-radius:3px;"
+                  :readonly="true"
                   :placeholder="store.locales=='zh' ? '输入问题 ' : 'Enter question ' + (qIndex + 1)"
                   @keydown.ctrl.enter="runSingleTest(qIndex)"
                 ></textarea>
-                <!-- 操作 / 状态 / 算法 / 分段数（问题列下方） -->
-                <div style="margin-top:4px;font-size:10px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+                <!-- 操作 / 状态 / 算法 / 分段数（测试结果页显示；测试用例页保持单行干净） -->
+                <div v-if="activeTab !== 'cases'" style="margin-top:4px;font-size:10px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
                   <span @click="runSingleTest(qIndex)" :title="store.locales=='zh' ? '单独测试 (Ctrl+Enter)' : 'Test individually (Ctrl+Enter)'">
                     <i class="fa fa-play"></i>
                   </span>
@@ -4639,11 +4636,21 @@ const clearTestCases = () => {
 
               <!-- 参考答案列：答案输入 + 关联切片图标（命中基准，点击查看） -->
               <td style="padding:5px;border:1px solid var(--borderColor);vertical-align:top;width:200px;">
-                <textarea v-model="test.answers[qIndex]" class="scoll" style="width:calc(100% - 8px);min-height:56px;padding:4px;font-size:12px;resize:vertical;border:1px solid var(--borderColor);border-radius:3px;"
+                <input
+                  v-if="activeTab === 'cases'"
+                  v-model="test.answers[qIndex]"
+                  class="tm-case-input"
+                  :placeholder="store.locales=='zh' ? '参考答案 ' : 'Answer ' + (qIndex + 1)"
+                  @keydown.ctrl.enter="runSingleTest(qIndex)"
+                />
+                <textarea
+                  v-else
+                  v-model="test.answers[qIndex]" class="scoll" style="width:calc(100% - 8px);min-height:56px;padding:4px;font-size:12px;resize:vertical;border:1px solid var(--borderColor);border-radius:3px;"
+                  :readonly="true"
                   :placeholder="store.locales=='zh' ? '参考答案 ' : 'Answer ' + (qIndex + 1)"
                   @keydown.ctrl.enter="runSingleTest(qIndex)"
                 ></textarea>
-                <div v-if="rowGoldCount(qIndex) > 0" class="tm-gold-ic"
+                <div v-if="activeTab !== 'cases' && rowGoldCount(qIndex) > 0" class="tm-gold-ic"
                      :class="rowGoldHitCount(qIndex) >= rowGoldCount(qIndex) ? 'all' : (rowGoldHitCount(qIndex) > 0 ? 'some' : 'none')"
                      @click="openGoldPreview(qIndex)"
                      :title="store.locales=='zh' ? `查看该问题的 ${rowGoldCount(qIndex)} 个关联切片（命中判定基准）：绿色=已被检索召回` : `View ${rowGoldCount(qIndex)} linked slice(s) (hit reference): green = recalled`">
@@ -4651,10 +4658,20 @@ const clearTestCases = () => {
                   <span class="tm-gold-dot">{{ rowGoldHitCount(qIndex) }}/{{ rowGoldCount(qIndex) }}</span>
                 </div>
               </td>
+              <template v-if="activeTab === 'cases'">
+                <td class="tm-case-meta">{{ testSource === 'external' ? (store.locales=='zh' ? '导入' : 'Import') : (store.locales=='zh' ? '库' : 'Bank') }}</td>
+                <td class="tm-case-meta">
+                  <span :class="{ 'tm-case-tested': !!testResults[qIndex] }">{{ testResults[qIndex] ? (store.locales=='zh' ? '已测' : 'Tested') : (store.locales=='zh' ? '未测' : 'New') }}</span>
+                </td>
+                <td class="tm-case-meta">{{ rowGoldCount(qIndex) || '-' }}</td>
+                <td class="tm-case-meta">
+                  <button class="tm-case-run" :disabled="test.isRunning" @click="runSingleTest(qIndex)" :title="store.locales=='zh' ? '单独测试' : 'Run'"><i class="fa fa-play"></i></button>
+                </td>
+              </template>
               
               
               <!-- 切片结果单元格 -->
-              <td v-for="n in parseInt(test.searchNum)" :key="'result-' + qIndex + '-' + n" style="padding:5px;border:1px solid var(--borderColor);vertical-align:top;position:relative;width:auto;" :class="getScoreClass(qIndex, n-1)">
+              <td v-if="activeTab !== 'cases'" v-for="n in parseInt(test.searchNum)" :key="'result-' + qIndex + '-' + n" style="padding:5px;border:1px solid var(--borderColor);vertical-align:top;position:relative;width:auto;" :class="getScoreClass(qIndex, n-1)">
                 <template v-if="testResults[qIndex] && testResults[qIndex].slices && testResults[qIndex].slices[n-1]">
                   <!-- 总分：水平+垂直居中于整个切片结果单元格（与模态框一致用 slice.score，缺失时回退 overallScore） -->
                   <div class="slice-cell">
@@ -4699,7 +4716,14 @@ const clearTestCases = () => {
 
     <!-- 位次分析页面 -->
     <div v-if="activeTab === 'rank'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
-      <div class="scoll" style="flex:1;overflow:auto;">
+      <div class="tm-metrics tm-metrics-5">
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '位次记录' : 'Rows' }}</span><b>{{ rankMetrics.tested }}</b></div>
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '平均命中率' : 'Hit rate' }}</span><b>{{ rankMetrics.tested ? (rankMetrics.hitRate * 100).toFixed(1) : '-' }}<i>%</i></b></div>
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '完整率' : 'Complete' }}</span><b>{{ rankMetrics.tested ? (rankMetrics.complete * 100).toFixed(1) : '-' }}<i>%</i></b></div>
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '平均最优位次' : 'Avg rank' }}</span><b>{{ rankMetrics.avgRank ? rankMetrics.avgRank.toFixed(1) : '-' }}</b></div>
+        <div class="tm-metric"><span>{{ store.locales=='zh' ? '平均耗时' : 'Avg time' }}</span><b>{{ rankMetrics.avgTime ? rankMetrics.avgTime.toFixed(0) : '-' }}<i>ms</i></b></div>
+      </div>
+      <div class="scoll" style="flex:1;overflow:auto;" @scroll="onRankScroll">
         <table style="width:100%;border-collapse:collapse;font-size:12px;">
           <thead style="position:sticky;top:0;background-color:var(--menuColor);">
             <tr>
@@ -4718,7 +4742,7 @@ const clearTestCases = () => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(result, idx) in rankAnalysisResults" :key="idx"
+            <tr v-for="(result, idx) in rankRows" :key="idx"
                 :style="{backgroundColor: idx % 2 === 0 ? 'var(--backgroundColor)' : 'var(--menuColor)'}">
               <td style="padding:8px;border:1px solid var(--borderColor);vertical-align:top;word-break:break-word;max-width:200px;">
                 {{ result.question }}
@@ -4783,12 +4807,104 @@ const clearTestCases = () => {
             </tr>
           </tbody>
         </table>
+        <div v-if="hasMoreRankRows" class="tm-rank-more">
+          <button @click="loadMoreRankRows">
+            {{ store.locales=='zh' ? `加载更多（剩余 ${rankAnalysisResults.length - rankRowsLimit} 条）` : `Load more (${rankAnalysisResults.length - rankRowsLimit} left)` }}
+          </button>
+        </div>
       </div>
     </div>
 
-    <!-- 批量测试面板页面（批量测试 / 预热 / 用例管理 / 策略召回对比；顶部按钮见工具栏） -->
-    <div v-if="activeTab === 'batch'" style="flex:1;border-radius:5px;padding:5px;display:flex;flex-direction:column;overflow:hidden;">
+    <!-- 主页：测试配置 + 运行 + 批量/消融 + 策略对比 -->
+    <div v-if="activeTab === 'home'" style="flex:1;border-radius:5px;padding:5px;display:flex;flex-direction:column;overflow:hidden;">
       <div class="scoll" style="flex:1;overflow:auto;">
+        <div class="tm-home-head">
+          <div class="tm-home-title"><i class="fa fa-home"></i> {{ store.locales=='zh' ? '测试主页' : 'Test Home' }}</div>
+          <span class="tm-home-state">{{ test.isRunning ? (batchCtl.paused ? (store.locales=='zh' ? '已暂停' : 'Paused') : (store.locales=='zh' ? '运行中' : 'Running')) : (store.locales=='zh' ? '待开始' : 'Ready') }}</span>
+          <span style="flex:1"></span>
+          <template v-if="test.isRunning">
+            <button class="kt-btn" v-if="batchCtl.paused" @click="continueBatchTest"><i class="fa fa-play"></i> {{ store.locales=='zh' ? '继续' : 'Resume' }}</button>
+            <button class="kt-btn" v-else @click="pauseBatchTest"><i class="fa fa-pause"></i> {{ store.locales=='zh' ? '暂停' : 'Pause' }}</button>
+            <button class="kt-btn" @click="stopBatchTest"><i class="fa fa-stop"></i> {{ store.locales=='zh' ? '停止' : 'Stop' }}</button>
+          </template>
+          <template v-else>
+            <button class="kt-btn primary" :disabled="!test.questions.length" @click="runBatchTest"><i class="fa fa-play"></i> {{ store.locales=='zh' ? '开始测试' : 'Start test' }}</button>
+            <button class="kt-btn" :disabled="!test.questions.length" @click="runAllStrategyTest"><i class="fa fa-tasks"></i> {{ store.locales=='zh' ? '全部策略' : 'All strategies' }}</button>
+          </template>
+        </div>
+
+        <div class="tm-home-grid">
+          <div class="tm-home-card tm-set-card">
+            <div class="tm-home-card-title"><i class="fa fa-list-alt"></i> {{ store.locales=='zh' ? '测试集' : 'Test set' }}</div>
+            <div class="tm-set-head">
+              <div class="tm-set-total"><b>{{ caseComposition.total }}</b><span>{{ store.locales=='zh' ? '条用例' : 'cases' }}</span></div>
+              <span class="tm-set-source">{{ testSource === 'external' ? (store.locales=='zh' ? '导入' : 'Imported') : (store.locales=='zh' ? '知识库' : 'Bank') }}</span>
+            </div>
+            <div class="tm-set-bar" :title="store.locales=='zh' ? '有切片 / 仅答案 / 不完整' : 'slices / answer only / incomplete'">
+              <i class="ok" :style="{ width: `${caseComposition.total ? (caseComposition.withRef / caseComposition.total) * 100 : 0}%` }"></i>
+              <i class="mid" :style="{ width: `${caseComposition.total ? (caseComposition.answerOnly / caseComposition.total) * 100 : 0}%` }"></i>
+              <i class="bad" :style="{ width: `${caseComposition.total ? (caseComposition.incomplete / caseComposition.total) * 100 : 0}%` }"></i>
+            </div>
+            <div class="tm-set-stats">
+              <div><b>{{ caseComposition.withRef }}</b><span>{{ store.locales=='zh' ? '有切片' : 'Slices' }}</span></div>
+              <div><b>{{ caseComposition.answerOnly }}</b><span>{{ store.locales=='zh' ? '仅答案' : 'Answer' }}</span></div>
+              <div><b>{{ caseComposition.incomplete }}</b><span>{{ store.locales=='zh' ? '不完整' : 'Incomplete' }}</span></div>
+            </div>
+            <button class="kt-btn tm-set-manage" @click="activeTab = 'cases'"><i class="fa fa-pencil"></i> {{ store.locales=='zh' ? '管理用例' : 'Manage cases' }}</button>
+          </div>
+          <div class="tm-home-card">
+            <div class="tm-home-card-title"><i class="fa fa-sliders"></i> {{ store.locales=='zh' ? '检索设置' : 'Retrieval' }}</div>
+            <div class="tm-home-row">
+              <span>{{ store.locales=='zh' ? '策略' : 'Strategy' }}</span>
+              <select v-model="test.currentAlgorithm" class="kt-select" :disabled="test.isRunning">
+                <option v-for="algo in algorithmOptions" :key="algo.value" :value="algo.value">{{ algo.label }}</option>
+              </select>
+            </div>
+            <div class="tm-home-row">
+              <span>{{ store.locales=='zh' ? '命中判定' : 'Hit mode' }}</span>
+              <select v-model="test.hitMode" class="kt-select" :disabled="test.isRunning">
+                <option value="slice">{{ store.locales=='zh' ? '切片命中' : 'Slice' }}</option>
+                <option value="text">{{ store.locales=='zh' ? '答案命中' : 'Answer' }}</option>
+                <option value="llm" :disabled="!llmJudgeAvailable">{{ store.locales=='zh' ? '大模型判定' : 'LLM' }}</option>
+              </select>
+            </div>
+            <div class="tm-home-row">
+              <span>{{ store.locales=='zh' ? '切片数量' : 'Top K' }}</span>
+              <input v-model.number="test.searchNum" type="number" min="1" max="100" class="kt-input" :disabled="test.isRunning" />
+            </div>
+            <div class="tm-home-row">
+              <span>{{ store.locales=='zh' ? '嵌入模型' : 'Embed' }}</span>
+              <select v-model="testEmbedSel" class="kt-select" @change="onTestEmbedModelChange" :disabled="test.isRunning || prewarmRunning">
+                <option value="">{{ followEmbedLabel }}</option>
+                <option v-for="m in embedModelOptions" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="tm-home-card">
+            <div class="tm-home-card-title"><i class="fa fa-play-circle"></i> {{ store.locales=='zh' ? '运行设置' : 'Run' }}</div>
+            <div class="tm-home-row">
+              <span>{{ store.locales=='zh' ? '重复次数' : 'Repeat' }}</span>
+              <input v-model="test.repeat" type="number" min="1" max="5" class="kt-input" :disabled="test.isRunning" />
+            </div>
+            <div class="tm-home-row">
+              <span>Hit@K 上限</span>
+              <input v-model="test.hitKMax" type="number" min="0" :max="HIT_K_POOL_CAP" class="kt-input" :disabled="test.isRunning" />
+            </div>
+            <div class="tm-home-row">
+              <span>{{ store.locales=='zh' ? '消融组' : 'Ablation' }}</span>
+              <button class="kt-btn tm-home-wide" @click="openConfigPanel()"><i class="fa fa-flask"></i> {{ ablationEnabledVariants.length }} / {{ ablation.runs.length }}</button>
+            </div>
+            <button v-if="availablePrewarmItems.length" class="kt-btn" style="width:auto;padding:0 9px;margin-top:5px;" @click="prewarmPanelOpen = true"><i class="fa fa-fire"></i> {{ store.locales=='zh' ? '预热 / 向量缓存' : 'Pre-warm' }}</button>
+          </div>
+        </div>
+
+        <div class="tm-home-metrics">
+          <div class="tm-home-metric"><span>{{ store.locales=='zh' ? '上次已测' : 'Tested' }}</span><b>{{ testMetrics.tested }}<i>/{{ testMetrics.total }}</i></b></div>
+          <div class="tm-home-metric"><span>{{ store.locales=='zh' ? '召回率' : 'Recall' }}</span><b>{{ testMetrics.tested ? (testMetrics.recall * 100).toFixed(1) : '-' }}<i>%</i></b></div>
+          <div class="tm-home-metric"><span>{{ store.locales=='zh' ? '命中率' : 'Hit' }}</span><b>{{ testMetrics.tested ? (testMetrics.hitRate * 100).toFixed(1) : '-' }}<i>%</i></b></div>
+          <div class="tm-home-metric"><span>{{ store.locales=='zh' ? '平均耗时' : 'Time' }}</span><b>{{ testMetrics.avgTime ? testMetrics.avgTime.toFixed(0) : '-' }}<i>ms</i></b></div>
+        </div>
+
         <!-- ===== 策略配置（消融实验）：全部在工具栏「烧瓶」按钮打开的弹出面板里（此处不占内容区） ===== -->
 
         <!-- 策略召回对比 -->
@@ -4904,7 +5020,7 @@ const clearTestCases = () => {
           <div class="kt-btn" :title="store.locales=='zh' ? '关闭' : 'Close'" @click="closeStrategyDetail"><i class="fa fa-times"></i></div>
         </div>
 
-        <div class="tm-dlg-body scoll">
+        <div class="tm-dlg-body scoll" @scroll="onRankDetailScroll">
           <table class="as-table as-detail-table">
             <thead>
               <tr>
@@ -4921,7 +5037,7 @@ const clearTestCases = () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(r, i) in strategyDetailRows" :key="i">
+              <tr v-for="(r, i) in rankDetailRows" :key="i">
                 <td style="text-align:center;">{{ i + 1 }}</td>
                 <td :title="r.question">{{ r.question }}</td>
                 <td style="text-align:center;font-weight:bold;" :style="{ color: completenessBadge(r).color }">
@@ -4953,9 +5069,14 @@ const clearTestCases = () => {
               </tr>
             </tbody>
           </table>
+          <div v-if="hasMoreRankDetail" class="tm-rank-more">
+            <button @click="loadMoreRankDetail">
+              {{ store.locales=='zh' ? `加载更多（剩余 ${strategyDetailRows.length - rankDetailLimit} 条）` : `Load more (${strategyDetailRows.length - rankDetailLimit} left)` }}
+            </button>
+          </div>
         </div>
 
-        <div class="tm-dlg-foot">
+        <div class="tm-dlg-foot kt-toolbar">
           <span class="ae-note">{{ store.locales=='zh' ? '「在线延迟」= 本地计算 + 单条查询嵌入 + 对话模型；悬停单元格看拆分' : 'Online = local + one query embed + LLM; hover a cell for the breakdown' }}</span>
           <span style="flex:1"></span>
           <div class="kt-btn ok" @click="closeStrategyDetail"><i class="fa fa-check"></i><span class="pw-run-label">{{ store.locales=='zh' ? '关闭' : 'Close' }}</span></div>
@@ -5034,7 +5155,7 @@ const clearTestCases = () => {
           </table>
         </div>
 
-        <div class="tm-dlg-foot">
+        <div class="tm-dlg-foot kt-toolbar">
           <span class="ae-note">{{ store.locales=='zh' ? '想补充对比项？在「策略配置」里增加消融组后重跑批量测试即可' : 'Add ablation groups in Strategy config and re-run to extend the comparison' }}</span>
           <span style="flex:1"></span>
           <div class="kt-btn ok" @click="sigPanelOpen = false"><i class="fa fa-check"></i><span class="pw-run-label">{{ store.locales=='zh' ? '关闭' : 'Close' }}</span></div>
@@ -5244,7 +5365,7 @@ const clearTestCases = () => {
         </div>
 
         <!-- 操作：复制 / 重置 / 删除该组；右侧「检索次数」+ 完成（次数即批量测试将执行的检索总数） -->
-        <div class="tm-dlg-foot">
+        <div class="tm-dlg-foot kt-toolbar">
           <template v-if="ablationEditRun">
             <div class="kt-btn" :title="store.locales=='zh' ? '复制该组（新 id，便于只改一个参数做对照）' : 'Duplicate group'"
                  @click="duplicateAblationRun(ablationEditRun)"><i class="fa fa-copy"></i><span class="pw-run-label">{{ store.locales=='zh' ? '复制该组' : 'Copy' }}</span></div>
@@ -5783,6 +5904,14 @@ const clearTestCases = () => {
   padding: 6px 8px; border-top: 1px solid var(--borderColor); flex-shrink: 0;
 }
 .tm-dlg-foot .kt-btn { padding: 0 12px; }
+.tm-dlg-foot.kt-toolbar { border-bottom: 0; padding: 4px 6px; justify-content: flex-end; overflow: hidden; }
+.as-group-tabs button {
+  height: 29px; padding: 0 7px; font-size: 10px; cursor: pointer;
+  border: 1px solid var(--borderColor); border-radius: 5px;
+  background: var(--backgroundColor); color: var(--fontColor);
+}
+.as-group-tabs button:hover { border-color: var(--fontActiveColor); color: var(--fontActiveColor); }
+.as-group-tabs button.on { border-color: var(--fontActiveColor); color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); }
 /* 策略配置：左右布局（左=策略组导航，右=详细配置）；宽度比通用面板略宽 */
 .tm-dlg.tm-abl-modal { width: min(920px, calc(94vw / var(--ui-zoom, 1))); }
 .tm-dlg.tm-sig-modal { width: min(880px, calc(92vw / var(--ui-zoom, 1))); }
@@ -5918,4 +6047,89 @@ const clearTestCases = () => {
 /* 工具栏无需横向滑块（覆盖 kb-view.css 的 overflow-x:auto）：空间不足时内容裁切，保持单行 */
 .kt-toolbar { overflow-x: hidden; }
 
+/* ===== 测试面板 P0/P1：页签文字 / 运行状态 / 指标卡 / 用例筛选 ===== */
+.kt-tab { width: auto !important; min-width: 29px; padding: 0 7px !important; gap: 4px; }
+.kt-tab-text { font-size: 10px; white-space: nowrap; }
+.tm-runbar {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 5px 9px; border-bottom: 1px solid var(--borderColor);
+  background: var(--menuColor); font-size: 10px; color: var(--fontColor);
+}
+.tm-runbar-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre-line; }
+.tm-runbar-track { flex: 0 0 160px; height: 5px; border-radius: 3px; background: var(--borderColor); overflow: hidden; }
+.tm-runbar-track i { display: block; height: 100%; background: var(--fontActiveColor); transition: width .2s; }
+.tm-runbar-pct { flex: 0 0 auto; color: var(--fontActiveColor); font-weight: 600; }
+.tm-case-tools { display: flex; align-items: center; gap: 5px; flex-shrink: 0; padding: 4px 7px; border-bottom: 1px solid var(--borderColor); flex-wrap: nowrap; min-width: 0; }
+.tm-case-tools.kt-toolbar { padding: 4px 6px; border-bottom: 1px solid var(--borderColor); flex-wrap: nowrap; overflow: hidden; }
+.tm-case-search { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 140px; max-width: 320px; height: 29px; padding: 0 7px; border: 1px solid var(--borderColor); border-radius: 5px; background: var(--backgroundColor); color: var(--fontColor); }
+.tm-case-search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--fontColor); font-size: 10px; }
+.tm-case-search .fa { font-size: 9px; opacity: .55; flex-shrink: 0; }
+.tm-case-filter { flex: 0 0 108px; height: 29px; border: 1px solid var(--borderColor); border-radius: 5px; background: var(--backgroundColor); color: var(--fontColor); font-size: 10px; outline: none; }
+.tm-case-count { font-size: 9px; color: var(--fontColor); opacity: .5; white-space: nowrap; }
+.tm-case-compose { font-size: 9px; color: var(--fontColor); opacity: .5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-case-bad { color: #f56c6c; opacity: .9; }
+.tm-case-input { width: calc(100% - 8px); height: 26px; box-sizing: border-box; margin: 0; padding: 0 4px; border: 0; border-radius: 0; background: transparent; color: var(--fontColor); font-size: 12px; outline: none; }
+.tm-case-input:focus { border: 0; outline: none; }
+.tm-case-meta { padding: 5px 3px; border: 1px solid var(--borderColor); text-align: center; font-size: 10px; color: var(--fontColor); opacity: .75; vertical-align: middle; white-space: nowrap; }
+.tm-case-tested { color: #3fb950; opacity: 1; }
+.tm-case-run { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--fontActiveColor); font-size: 10px; cursor: pointer; }
+.tm-case-run:hover { background: var(--menuActiveColor); }
+.tm-case-tool { flex: 0 0 29px; width: 29px !important; min-width: 29px; height: 29px; padding: 0 !important; }
+.tm-case-max { flex: 0 0 50px; width: 50px !important; height: 29px; padding: 0 4px; font-size: 10px; }
+.tm-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; flex-shrink: 0; padding: 6px 7px; border-bottom: 1px solid var(--borderColor); }
+.tm-metrics-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.tm-metric { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; border: 1px solid var(--borderColor); border-radius: 6px; background: var(--backgroundColor); min-width: 0; }
+.tm-metric span { font-size: 9px; color: var(--fontColor); opacity: .55; }
+.tm-metric b { font-size: 17px; line-height: 1.15; color: var(--fontColor); }
+.tm-metric b i { font-size: 9px; font-style: normal; margin-left: 2px; opacity: .45; }
+@media (max-width: 700px) {
+  .kt-tab-text { display: none; }
+  .tm-metrics { grid-template-columns: 1fr 1fr; }
+  .tm-runbar-track { flex: 1; }
+  .tm-case-tools { flex-wrap: wrap; }
+  .tm-case-search { max-width: none; }
+  .tm-case-compose { flex: 1 1 100%; }
+}
+.tm-rank-more { display: flex; justify-content: center; padding: 8px; }
+.tm-rank-more button { cursor: pointer; border: 1px solid var(--borderColor); border-radius: 5px; background: var(--backgroundColor); color: var(--fontColor); font-size: 10px; padding: 4px 12px; }
+.tm-rank-more button:hover { color: var(--fontActiveColor); border-color: var(--fontActiveColor); }
+/* ===== 测试主页：配置卡 / 运行 / 指标 ===== */
+.tm-home-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 7px 8px; border: 1px solid var(--borderColor); border-radius: 8px; background: var(--menuColor); margin-bottom: 6px; }
+.tm-home-title { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--fontColor); }
+.tm-home-title .fa { color: var(--fontActiveColor); }
+.tm-home-state { font-size: 9px; padding: 1px 6px; border-radius: 8px; background: var(--backgroundColor); color: var(--fontColor); opacity: .65; }
+.tm-home-head .kt-btn.primary { background: var(--fontActiveColor); border-color: var(--fontActiveColor); color: var(--backgroundColor); padding: 0 10px; width: auto; }
+.tm-home-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 6px; }
+.tm-home-card { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--borderColor); border-radius: 8px; background: var(--backgroundColor); min-width: 0; }
+.tm-home-card-title { display: flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: var(--fontColor); margin-bottom: 2px; }
+.tm-home-card-title .fa { color: var(--fontActiveColor); }
+.tm-home-row { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--fontColor); min-width: 0; }
+.tm-home-row > span { flex: 0 0 62px; opacity: .6; }
+.tm-home-row > .kt-select, .tm-home-row > .kt-input { flex: 1 1 0; width: 100%; max-width: none; min-width: 0; height: 25px; font-size: 10px; box-sizing: border-box; flex-shrink: 1; }
+.tm-home-wide { flex: 1 1 0; width: 100% !important; height: 25px; padding: 0 7px; font-size: 10px; }
+.tm-set-card { gap: 6px; }
+.tm-set-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 6px; }
+.tm-set-total { display: flex; align-items: baseline; gap: 4px; }
+.tm-set-total b { font-size: 28px; line-height: 1; color: var(--fontColor); letter-spacing: -.02em; }
+.tm-set-total span { font-size: 9px; opacity: .5; }
+.tm-set-source { font-size: 9px; padding: 2px 7px; border-radius: 9px; background: var(--menuColor); color: var(--fontActiveColor); white-space: nowrap; }
+.tm-set-bar { display: flex; height: 6px; border-radius: 3px; background: var(--borderColor); overflow: hidden; }
+.tm-set-bar i { display: block; height: 100%; transition: width .2s; }
+.tm-set-bar i.ok { background: #3fb950; }
+.tm-set-bar i.mid { background: #d29922; }
+.tm-set-bar i.bad { background: #f56c6c; }
+.tm-set-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.tm-set-stats > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.tm-set-stats b { font-size: 15px; color: var(--fontColor); line-height: 1.1; }
+.tm-set-stats span { font-size: 9px; opacity: .5; }
+.tm-set-manage { width: 100% !important; margin-top: auto; height: 26px; font-size: 10px; }
+.tm-home-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-bottom: 6px; }
+.tm-home-metric { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; border: 1px solid var(--borderColor); border-radius: 6px; background: var(--backgroundColor); }
+.tm-home-metric span { font-size: 9px; opacity: .55; }
+.tm-home-metric b { font-size: 17px; color: var(--fontColor); }
+.tm-home-metric b i { font-size: 9px; font-style: normal; margin-left: 2px; opacity: .45; }
+@media (max-width: 700px) {
+  .tm-home-grid { grid-template-columns: 1fr; }
+  .tm-home-metrics { grid-template-columns: 1fr 1fr; }
+}
 </style>

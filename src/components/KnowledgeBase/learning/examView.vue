@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, reactive, watch } from 'vue'
+import { ref, computed, reactive, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ElMessageBox } from 'element-plus'
+import { exportMarkdownAsWord } from '@/lib/export/md-to-docx'
 import block_md from '@/components/block_md.vue'
 import { usestore } from '@/store'
 import * as kbAi from '@/shared/kbAiClient'
@@ -85,6 +87,28 @@ interface ExamQuestion {
   _explaining?: boolean
 }
 
+/** 保存到 <库名>.exams.json 的一张试卷（模板 + 本次作答 + 成绩） */
+interface SavedExamPaper {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  mode: 'random' | 'select' | 'manual' | 'mimic'
+  types: Record<ExamQuestionType, boolean>
+  count: number
+  elapsed: number
+  graded: boolean
+  flagged: string[]
+  questions: ExamQuestion[]
+}
+
+interface ExamPaperFile {
+  version: number
+  kb: string
+  updatedAt: string
+  papers: SavedExamPaper[]
+}
+
 const examTypeLabels: Record<ExamQuestionType, { zh: string, en: string }> = {
   single: { zh: '单选题', en: 'Single Choice' },
   multi: { zh: '多选题', en: 'Multi Choice' },
@@ -103,9 +127,33 @@ const countValue = computed<number>({
 const examTypes = reactive<Record<ExamQuestionType, boolean>>({ single: true, multi: true, judge: true, essay: true })
 const examQuestions = ref<ExamQuestion[]>([])
 const examGenerating = ref(false)
+const examStartedAt = ref(0)
+const examElapsed = ref(0)
+let examTimer: ReturnType<typeof setInterval> | null = null
+const flaggedIds = ref<string[]>([])
+const showNavigator = ref(true)
 const examGrading = ref(false)
 const examGraded = ref(false)
+const examStarted = ref(false)
+const examPhase = computed<'setup' | 'answering' | 'result'>(() => examGraded.value ? 'result' : (examStarted.value && examQuestions.value.length ? 'answering' : 'setup'))
 const examSummaryOpen = ref(false)  // 考试结果弹窗开关（判分完成后可切换）
+// ===== 试卷库：<库名>.exams.json（模板 + 作答 + 成绩） =====
+const papers = ref<SavedExamPaper[]>([])
+const paperLibraryOpen = ref(false)
+const currentPaperId = ref('')
+const currentPaperTitle = ref('')
+const paperSaving = ref(false)
+const paperLoading = ref(false)
+const paperMsg = ref('')
+const paperFilePath = computed(() => {
+  const p = String(props.kbPath || '').trim()
+  return p ? p.replace(/\.kb$/i, '') + '.exams.json' : ''
+})
+const paperKbName = computed(() => {
+  const p = String(props.kbPath || '').trim()
+  if (!p) return ''
+  return (p.replace(/\\/g, '/').split('/').pop() || '').replace(/\.kb$/i, '')
+})
 
 // 自选切片：按在可用切片中的下标勾选；支持「按文件 / 按切片」两类勾选
 const examSliceKeyword = ref('')
@@ -372,6 +420,11 @@ function isLikelyUnanswerable(q: ExamQuestion, slice: ExamSourceSlice): boolean 
 // 生成题目：随机采样 / 自选切片 → 逐片调用大模型出题，生成一题立即出现在答题区
 async function generateExamQuestions() {
   if (examGenerating.value) return
+  currentPaperId.value = ''
+  currentPaperTitle.value = ''
+  examStarted.value = false
+  examGraded.value = false
+  examSummaryOpen.value = false
   const usable = examUsableSlices.value
   let pool: ExamSourceSlice[] = []
   let target = 0
@@ -623,6 +676,11 @@ async function generateMimicOne(
 /** 按风格档案生成试卷（新题追加到已有题之后，与其它模式一致） */
 async function generateMimicQuestions() {
   if (examGenerating.value) return
+  currentPaperId.value = ''
+  currentPaperTitle.value = ''
+  examStarted.value = false
+  examGraded.value = false
+  examSummaryOpen.value = false
   if (!mimicProfile.value) { mimicLive(store.locales == 'zh' ? '请先分析真题风格' : 'Analyze the exam style first'); return }
   const usable = examUsableSlices.value
   if (!usable.length) { mimicLive(store.locales == 'zh' ? '知识库切片为空，无法出题' : 'No slices available'); return }
@@ -722,6 +780,13 @@ function toggleManualOptionCorrect(oi: number) {
 
 // 手动添加题目到试卷
 function addManualExamQuestion() {
+  if (!examQuestions.value.length) {
+    currentPaperId.value = ''
+    currentPaperTitle.value = ''
+    examStarted.value = false
+    examGraded.value = false
+    examSummaryOpen.value = false
+  }
   const prompt = examDraft.prompt.trim()
   if (!prompt) {
     emit('updateState', store.locales=='zh' ? '请输入题干' : 'Enter the question stem')
@@ -831,13 +896,28 @@ async function explainOneQuestion(q: ExamQuestion) {
 }
 
 // 交卷判分：客观题本机比对（立即，零大模型依赖）+ 问答题由大模型评分
-async function gradeExam() {
+async function submitExam(): Promise<void> {
+  const n = unansweredCount.value
+  if (n > 0) {
+    try {
+      await ElMessageBox.confirm(
+        store.locales === 'zh' ? `还有 ${n} 题未作答，确定仍然交卷吗？` : `${n} question(s) unanswered. Submit anyway?`,
+        store.locales === 'zh' ? '交卷确认' : 'Submit exam',
+        {
+          confirmButtonText: store.locales === 'zh' ? '仍然交卷' : 'Submit anyway',
+          cancelButtonText: store.locales === 'zh' ? '继续答题' : 'Keep answering',
+          type: 'warning',
+        },
+      )
+    } catch { return }
+  }
+  await gradeExam(n > 0)
+}
+
+async function gradeExam(forceUnanswered = false) {
   if (examGrading.value) return
-  const unanswered = examQuestions.value.filter(q =>
-    (q.type === 'essay' && !(q.userEssay || '').trim()) ||
-    ((q.type === 'single' || q.type === 'multi') && !q.userOption.length) ||
-    (q.type === 'judge' && q.userJudge == null))
-  if (unanswered.length) {
+  const unanswered = examQuestions.value.filter(q => !hasAnswer(q))
+  if (unanswered.length && !forceUnanswered) {
     emit('updateLiveState', store.locales=='zh' ? `还有 ${unanswered.length} 题未作答，请完成后再交卷` : `${unanswered.length} unanswered, finish first`)
     return
   }
@@ -897,7 +977,7 @@ async function gradeExam() {
     }
     if (trackedRows.length) emit('examGraded', trackedRows)
     examGraded.value = true
-    examSummaryOpen.value = true  // 判分完成自动弹出结果
+    examSummaryOpen.value = false  // 结果改为结果页，不再弹窗
     emit('updateLiveState', store.locales=='zh' ? '判分完成' : 'Grading completed')
   } catch (e) {
     console.error('判分失败:', e)
@@ -910,19 +990,24 @@ async function gradeExam() {
 // 清除交卷状态，保留题目与已作答内容，可修改答案后重新交卷
 function resetExamGrading() {
   examGraded.value = false
+  examStarted.value = true
   examSummaryOpen.value = false
   for (const q of examQuestions.value) {
     q.result = null
     q._showSrc = false
     q._explaining = false
   }
+  if (examQuestions.value.length) startTimer()
 }
 
 // 清空重来
 function resetExam() {
   examQuestions.value = []
+  currentPaperId.value = ''
+  currentPaperTitle.value = ''
   examGraded.value = false
   examSummaryOpen.value = false
+  resetTimerAndFlags()
   examSelectedSliceIdx.value = []
   examSliceKeyword.value = ''
   examFileKeyword.value = ''
@@ -1026,7 +1111,297 @@ function exportExamExcel() {
   }
 }
 
-// 判分汇总
+// ===== 考试阶段 / 计时 / 题号导航 =====
+function hasAnswer(q: ExamQuestion): boolean {
+  if (q.type === 'essay') return !!(q.userEssay || '').trim()
+  if (q.type === 'judge') return q.userJudge != null
+  return Array.isArray(q.userOption) && q.userOption.length > 0
+}
+const answeredCount = computed(() => examQuestions.value.filter(hasAnswer).length)
+const unansweredCount = computed(() => examQuestions.value.filter(q => !hasAnswer(q)).length)
+const timerText = computed(() => {
+  const sec = Math.max(0, Math.floor(examElapsed.value / 1000))
+  const h = String(Math.floor(sec / 3600)).padStart(2, '0')
+  const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0')
+  const s = String(sec % 60).padStart(2, '0')
+  return h === '00' ? `${m}:${s}` : `${h}:${m}:${s}`
+})
+function startTimer(initialMs = 0): void {
+  stopTimer()
+  examStartedAt.value = Date.now() - initialMs
+  examElapsed.value = initialMs
+  examTimer = setInterval(() => { examElapsed.value = Date.now() - examStartedAt.value }, 1000)
+}
+function stopTimer(): void {
+  if (examTimer) { clearInterval(examTimer); examTimer = null }
+}
+function toggleFlag(q: ExamQuestion): void {
+  flaggedIds.value = flaggedIds.value.includes(q.id)
+    ? flaggedIds.value.filter(id => id !== q.id)
+    : [...flaggedIds.value, q.id]
+}
+function scrollToQuestion(qid: string): void {
+  const el = document.getElementById('exam-q-' + qid)
+  el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+function startExam(): void {
+  if (!examQuestions.value.length) return
+  examStarted.value = true
+  stopTimer()
+  startTimer(0)
+}
+function resetTimerAndFlags(): void {
+  stopTimer()
+  examStarted.value = false
+  examStartedAt.value = 0
+  examElapsed.value = 0
+  flaggedIds.value = []
+}
+watch(() => examQuestions.value.length, (n) => {
+  if (n > 0 && examStarted.value && !examGraded.value && !examTimer) startTimer()
+  if (!n) resetTimerAndFlags()
+})
+watch(examGraded, (graded) => {
+  if (graded) {
+    examElapsed.value = Math.max(examElapsed.value, examStartedAt.value ? Date.now() - examStartedAt.value : 0)
+    stopTimer()
+  }
+})
+onBeforeUnmount(stopTimer)
+
+const wrongQuestions = computed(() => examQuestions.value.filter(q => q.result && q.result.correct === false))
+const typeBreakdown = computed(() => {
+  const rows = Object.keys(examTypeLabels).map((key) => {
+    const qs = examQuestions.value.filter(q => q.type === key)
+    const correct = qs.filter(q => q.result?.correct).length
+    return { type: key, total: qs.length, correct }
+  })
+  return rows.filter(r => r.total > 0)
+})
+
+// ===== 试卷库读写：同目录 <库名>.exams.json =====
+function paperId(): string {
+  return `paper_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+function paperTime(ts: number): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+function snapshotQuestion(q: ExamQuestion): ExamQuestion {
+  const copy: ExamQuestion = JSON.parse(JSON.stringify({
+    ...q,
+    sourceSlices: (q.sourceSlices || []).map(s => ({ ...s, content: String(s.content || '').slice(0, 500) })),
+    _showSrc: false,
+    _explaining: false,
+  }))
+  return copy
+}
+async function loadPaperLibrary(): Promise<void> {
+  paperMsg.value = ''
+  if (!paperFilePath.value) { papers.value = []; return }
+  paperLoading.value = true
+  try {
+    const result: any = await getPlatform().fs.readText(paperFilePath.value)
+    const raw = typeof result === 'string' ? result : (result?.content || '')
+    if (!raw) { papers.value = []; return }
+    const data = JSON.parse(raw) as ExamPaperFile
+    papers.value = (Array.isArray(data?.papers) ? data.papers : [])
+      .filter(p => p && p.id && Array.isArray(p.questions))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+  } catch (e: any) {
+    // 文件不存在是正常空库；解析失败才提示
+    if (String(e?.message || e).includes('ENOENT')) papers.value = []
+    else paperMsg.value = store.locales === 'zh' ? '试卷库读取失败' : 'Failed to read paper library'
+    papers.value = []
+  } finally {
+    paperLoading.value = false
+  }
+}
+async function persistPaperLibrary(): Promise<boolean> {
+  if (!paperFilePath.value) {
+    paperMsg.value = store.locales === 'zh' ? '请先保存知识库，试卷库需要写入 .kb 同目录' : 'Save the KB first; the paper library lives beside the .kb'
+    return false
+  }
+  const payload: ExamPaperFile = {
+    version: 1,
+    kb: paperKbName.value,
+    updatedAt: new Date().toISOString(),
+    papers: papers.value,
+  }
+  const ok = await getPlatform().fs.saveText(paperFilePath.value, JSON.stringify(payload, null, 2))
+  paperMsg.value = ok
+    ? (store.locales === 'zh' ? `已保存 ${papers.value.length} 张试卷` : `${papers.value.length} paper(s) saved`)
+    : (store.locales === 'zh' ? '试卷库写入失败' : 'Failed to write paper library')
+  return !!ok
+}
+async function saveCurrentPaper(): Promise<void> {
+  if (!examQuestions.value.length) {
+    paperMsg.value = store.locales === 'zh' ? '当前没有可保存的题目' : 'No questions to save'
+    return
+  }
+  if (!paperFilePath.value) {
+    paperMsg.value = store.locales === 'zh' ? '自动知识库请先保存为 .kb，再保存试卷' : 'Save the auto KB as .kb first'
+    return
+  }
+  if (paperSaving.value) return
+  const zh = store.locales === 'zh'
+  const defaultTitle = currentPaperTitle.value || `${paperKbName.value || (zh ? '知识库' : 'KB')} ${zh ? '考试' : 'Exam'} ${paperTime(Date.now())}`
+  let title = defaultTitle
+  try {
+    const { value } = await ElMessageBox.prompt(zh ? '试卷名称：' : 'Paper title:', zh ? '保存试卷' : 'Save paper', {
+      inputValue: defaultTitle,
+      confirmButtonText: zh ? '保存' : 'Save',
+      cancelButtonText: zh ? '取消' : 'Cancel',
+      inputValidator: (v: string) => !!(v && v.trim()) || (zh ? '名称不能为空' : 'Title is required'),
+    })
+    title = String(value || '').trim() || defaultTitle
+  } catch { return }
+  paperSaving.value = true
+  try {
+    const existing = papers.value.find(p => p.id === currentPaperId.value)
+    const now = Date.now()
+    const paper: SavedExamPaper = {
+      id: existing?.id || paperId(),
+      title,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      mode: examMode.value,
+      types: { ...examTypes },
+      count: countValue.value,
+      elapsed: examElapsed.value,
+      graded: examGraded.value,
+      flagged: [...flaggedIds.value],
+      questions: examQuestions.value.map(snapshotQuestion),
+    }
+    const idx = papers.value.findIndex(p => p.id === paper.id)
+    if (idx >= 0) papers.value[idx] = paper
+    else papers.value.push(paper)
+    papers.value.sort((a, b) => b.updatedAt - a.updatedAt)
+    currentPaperId.value = paper.id
+    currentPaperTitle.value = title
+    await persistPaperLibrary()
+    emit('updateState', zh ? `已保存试卷：${title}` : `Paper saved: ${title}`)
+  } finally {
+    paperSaving.value = false
+  }
+}
+async function openPaper(p: SavedExamPaper): Promise<void> {
+  const zh = store.locales === 'zh'
+  if (examQuestions.value.length) {
+    try {
+      await ElMessageBox.confirm(zh ? '打开试卷会替换当前试卷，继续？' : 'Opening will replace the current paper. Continue?', zh ? '打开试卷' : 'Open paper', {
+        confirmButtonText: zh ? '打开' : 'Open',
+        cancelButtonText: zh ? '取消' : 'Cancel',
+      })
+    } catch { return }
+  }
+  stopTimer()
+  examQuestions.value = (p.questions || []).map(q => snapshotQuestion(q))
+  examGraded.value = !!p.graded
+  examStarted.value = true
+  examElapsed.value = Number(p.elapsed) || 0
+  flaggedIds.value = Array.isArray(p.flagged) ? [...p.flagged] : []
+  examMode.value = p.mode || 'random'
+  if (p.mode === 'mimic') mimicCount.value = Number(p.count) || mimicCount.value
+  else examCount.value = Number(p.count) || examCount.value
+  if (p.types) Object.assign(examTypes, p.types)
+  examSummaryOpen.value = false
+  currentPaperId.value = p.id
+  currentPaperTitle.value = p.title
+  paperLibraryOpen.value = false
+  if (!examGraded.value) startTimer(Number(p.elapsed) || 0)
+}
+async function deletePaper(p: SavedExamPaper): Promise<void> {
+  const zh = store.locales === 'zh'
+  try {
+    await ElMessageBox.confirm(zh ? `删除试卷「${p.title}」？` : `Delete "${p.title}"?`, zh ? '删除试卷' : 'Delete paper', { type: 'warning' })
+  } catch { return }
+  papers.value = papers.value.filter(x => x.id !== p.id)
+  if (currentPaperId.value === p.id) currentPaperId.value = ''
+  await persistPaperLibrary()
+}
+async function renamePaper(p: SavedExamPaper): Promise<void> {
+  const zh = store.locales === 'zh'
+  try {
+    const { value } = await ElMessageBox.prompt(zh ? '新的试卷名称：' : 'New title:', zh ? '重命名试卷' : 'Rename paper', {
+      inputValue: p.title,
+      inputValidator: (v: string) => !!(v && v.trim()) || (zh ? '名称不能为空' : 'Title is required'),
+    })
+    const title = String(value || '').trim()
+    if (!title) return
+    p.title = title
+    p.updatedAt = Date.now()
+    if (currentPaperId.value === p.id) currentPaperTitle.value = title
+    papers.value.sort((a, b) => b.updatedAt - a.updatedAt)
+    await persistPaperLibrary()
+  } catch { /* cancel */ }
+}
+async function copyPaper(p: SavedExamPaper): Promise<void> {
+  const now = Date.now()
+  const copy: SavedExamPaper = {
+    ...JSON.parse(JSON.stringify(p)),
+    id: paperId(),
+    title: `${p.title} ${store.locales === 'zh' ? '副本' : 'copy'}`,
+    createdAt: now,
+    updatedAt: now,
+  }
+  papers.value.push(copy)
+  papers.value.sort((a, b) => b.updatedAt - a.updatedAt)
+  await persistPaperLibrary()
+}
+
+function paperToMarkdown(p: SavedExamPaper): string {
+  const zh = store.locales === 'zh'
+  const lines: string[] = [`# ${p.title}`, '']
+  lines.push(zh ? `保存时间：${paperTime(p.updatedAt)}` : `Saved: ${paperTime(p.updatedAt)}`)
+  if (p.graded) {
+    const total = p.questions.reduce((s, q) => s + (q.result?.score || 0), 0)
+    const correct = p.questions.filter(q => q.result?.correct).length
+    lines.push('', zh
+      ? `得分：${(total / Math.max(1, p.questions.length)).toFixed(1)} · 正确 ${correct}/${p.questions.length}`
+      : `Score: ${(total / Math.max(1, p.questions.length)).toFixed(1)} · ${correct}/${p.questions.length} correct`)
+  }
+  p.questions.forEach((q, i) => {
+    lines.push('', `## ${i + 1}. ${q.prompt}`, '', `**${zh ? '题型' : 'Type'}：** ${examTypeLabel(q.type)}`)
+    if (q.type === 'single' || q.type === 'multi') {
+      q.options.forEach((o, oi) => lines.push(`- ${String.fromCharCode(65 + oi)}. ${o}`))
+      const correct = q.correctOption.map(oi => String.fromCharCode(65 + oi)).join('、')
+      lines.push('', `**${zh ? '正确答案' : 'Answer'}：** ${correct || '-'}`)
+      if (p.graded) {
+        const user = (q.userOption || []).map(oi => String.fromCharCode(65 + oi)).join('、') || '-'
+        lines.push(`**${zh ? '你的答案' : 'Your answer'}：** ${user}`)
+      }
+    } else if (q.type === 'judge') {
+      lines.push('', `**${zh ? '正确答案' : 'Answer'}：** ${q.judgeAnswer ? (zh ? '正确' : 'True') : (zh ? '错误' : 'False')}`)
+      if (p.graded) lines.push(`**${zh ? '你的答案' : 'Your answer'}：** ${q.userJudge == null ? '-' : q.userJudge ? (zh ? '正确' : 'True') : (zh ? '错误' : 'False')}`)
+    } else {
+      lines.push('', `**${zh ? '参考答案' : 'Reference'}：** ${q.essayRef || '-'}`)
+      if (p.graded) lines.push('', `**${zh ? '你的答案' : 'Your answer'}：** ${q.userEssay || '-'}`)
+    }
+    if (p.graded && q.result) {
+      lines.push('', `**${zh ? '得分' : 'Score'}：** ${q.result.score}`)
+      if (q.result.comment) lines.push('', `**${zh ? '评语' : 'Comment'}：** ${q.result.comment}`)
+      if (q.result.reference && q.type === 'essay') lines.push('', `**${zh ? '标准答案' : 'Reference answer'}：** ${q.result.reference}`)
+    }
+  })
+  return lines.join('\n')
+}
+
+async function exportPaperWord(p: SavedExamPaper): Promise<void> {
+  try {
+    await exportMarkdownAsWord(paperToMarkdown(p), { title: p.title })
+  } catch (e: any) {
+    emit('updateState', store.locales === 'zh' ? `导出 Word 失败：${String(e?.message || e)}` : `Word export failed: ${String(e?.message || e)}`)
+  }
+}
+onMounted(() => { void loadPaperLibrary() })
+watch(() => props.kbPath, () => {
+  currentPaperId.value = ''
+  currentPaperTitle.value = ''
+  void loadPaperLibrary()
+})
 const examSummary = computed(() => {
   const qs = examQuestions.value
   if (!qs.length || !examGraded.value) return null
@@ -1043,83 +1418,51 @@ const examSummary = computed(() => {
 
 <template>
   <div class="exam-manager">
-    <!-- 工具栏（出题方式 / 题型 / 题数 / 生成 / 交卷 / 结果 / 清空） -->
-    <div class="exam-toolbar">
-      <!-- 计入学习对象开关（图标按钮，说明见 title） -->
-      <div class="button" :class="{ active: examTrack }" @click="toggleExamTrack" :title="examTrackTitle">
-        <i class="fa" :class="examTrack ? 'fa-link' : 'fa-unlink'"></i>
+    <!-- 顶部：三阶段 + 当前阶段操作（设置/答题/结果） -->
+    <div class="exam-toolbar exam-toolbar-v2">
+      <div class="exam-phases">
+        <span class="exam-phase" :class="{ on: examPhase === 'setup', done: examPhase !== 'setup' }"><b>1</b><span class="exam-phase-label">{{ store.locales === 'zh' ? '设置' : 'Setup' }}</span></span>
+        <i class="fa fa-angle-right exam-phase-sep"></i>
+        <span class="exam-phase" :class="{ on: examPhase === 'answering', done: examPhase === 'result' }"><b>2</b><span class="exam-phase-label">{{ store.locales === 'zh' ? '答题' : 'Answer' }}</span></span>
+        <i class="fa fa-angle-right exam-phase-sep"></i>
+        <span class="exam-phase" :class="{ on: examPhase === 'result' }"><b>3</b><span class="exam-phase-label">{{ store.locales === 'zh' ? '结果' : 'Result' }}</span></span>
       </div>
-      <span style="width:1px;height:16px;background:var(--borderColor);flex-shrink:0;margin:0 2px;"></span>
-      <!-- 出题方式切换 -->
-      <div class="button" :class="{active: examMode==='random'}" @click="examMode='random'"
-           :title="store.locales=='zh'?'出题方式：随机从切片库采样出题':'Random slices'"><i class="fa fa-random"></i></div>
-      <div class="button" :class="{active: examMode==='select'}" @click="examMode='select'"
-           :title="store.locales=='zh'?'出题方式：勾选切片后出题':'Select slices'"><i class="fa fa-list-ul"></i></div>
-      <div class="button" :class="{active: examMode==='manual'}" @click="examMode='manual'"
-           :title="store.locales=='zh'?'出题方式：手动输入题目':'Manual input'"><i class="fa fa-pencil"></i></div>
-      <div class="button" :class="{active: examMode==='mimic'}" @click="examMode='mimic'"
-           :title="store.locales=='zh'?'出题方式：真题仿写（导入样卷 → 分析风格 → 按其次风格出题）':'Mimic exam (import a reference exam → analyze style → generate)'"><i class="fa fa-clone"></i></div>
-      <span style="width:1px;height:16px;background:var(--borderColor);flex-shrink:0;margin:0 2px;"></span>
-      <!-- 题型勾选（图标 + title 说明） -->
-      <div v-for="(t, key) in examTypes" :key="key" class="button" :class="{active: t}" @click="toggleExamType(key)"
-           :title="store.locales=='zh' ? ('题型：' + examTypeLabel(key) + (t ? '（已开启，点击关闭）' : '（已关闭，点击开启）')) : ('Type: ' + examTypeLabel(key) + (t ? ' (on, click to off)' : ' (off, click to on)'))">
-        <i class="fa" :class="examTypeIcon(key)"></i>
-      </div>
-      <span style="width:1px;height:16px;background:var(--borderColor);flex-shrink:0;margin:0 2px;"></span>
-      <!-- 题数（随机/自选/仿写模式；自选时勾选切片较多则随机抽取） -->
-      <template v-if="examMode !== 'manual'">
-        <span style="font-size:11px;color:var(--borderColor);white-space:nowrap;">{{ store.locales=='zh'?'题数':'N' }}</span>
-        <input v-model.number="countValue" type="number" min="1" max="50" step="1" style="width:46px;"
-               :title="examMode==='mimic'
-                 ? (store.locales=='zh' ? '本次仿写题目数量' : 'Number of mimic questions')
-                 : examMode==='random'
-                 ? (store.locales=='zh' ? '生成题目数量（随机采样切片数）' : 'Number of questions (random slices)')
-                 : (store.locales=='zh' ? '生成题目数量（勾选切片较多时随机抽取）' : 'Number of questions (sample from selected)')"/>
+      <span class="exam-spacer"></span>
+      <template v-if="examPhase === 'answering'">
+        <span class="exam-head-stat">{{ store.locales === 'zh' ? `已答 ${answeredCount}/${examQuestions.length}` : `${answeredCount}/${examQuestions.length} answered` }}</span>
+        <span class="exam-head-stat"><i class="fa fa-clock-o"></i> {{ timerText }}</span>
+        <button class="exam-tool-btn ghost" @click="showNavigator = !showNavigator" :title="store.locales === 'zh' ? '题号导航' : 'Question navigator'">
+          <i class="fa fa-th"></i>
+        </button>
+        <button class="exam-tool-btn primary" :disabled="examGrading || examGenerating" @click="submitExam">
+          <i class="fa" :class="examGrading ? 'fa-spinner fa-spin' : 'fa-check'"></i>
+          {{ examGrading ? (store.locales === 'zh' ? '判分中…' : 'Grading…') : (store.locales === 'zh' ? '交卷' : 'Submit') }}
+        </button>
       </template>
-      <span style="width:1px;height:16px;background:var(--borderColor);flex-shrink:0;margin:0 2px;"></span>
-      <!-- 自选面板开关 -->
-      <div v-if="examMode === 'select'" class="button" :class="{active: examSelectOpen}" @click="examSelectOpen = !examSelectOpen"
-           :title="store.locales=='zh' ? (examSelectOpen ? '收起自选面板' : '展开自选面板') : 'Toggle select panel'">
-        <i class="fa fa-columns"></i>
-      </div>
-      <!-- 仿写面板开关 -->
-      <div v-if="examMode === 'mimic'" class="button" :class="{active: mimicPanelOpen}" @click="mimicPanelOpen = !mimicPanelOpen"
-           :title="store.locales=='zh' ? (mimicPanelOpen ? '收起真题面板' : '展开真题面板') : 'Toggle reference-exam panel'">
-        <i class="fa fa-columns"></i>
-      </div>
-      <!-- 操作按钮 -->
-      <div v-if="examMode !== 'manual'" class="button" @click="examMode === 'mimic' ? generateMimicQuestions() : generateExamQuestions()" :disabled="examGenerating"
-           :title="examMode === 'mimic'
-             ? (store.locales=='zh'?'按真题风格生成题目（需先分析风格）':'Generate in the reference exam style (analyze style first)')
-             : (store.locales=='zh'?'生成题目：根据所选切片由大模型生成题目':'Generate questions from slices')">
-        <i class="fa" :class="examGenerating ? 'fa-spinner fa-spin' : 'fa-magic'"></i>
-      </div>
-      <div class="button" @click="gradeExam" :disabled="examGrading || !examQuestions.length || examGenerating"
-           :title="store.locales=='zh'?'交卷判分：客观题本机判定 + 问答题大模型评分':'Submit and grade'">
-        <i class="fa" :class="examGrading ? 'fa-spinner fa-spin' : 'fa-check'"></i>
-      </div>
-      <div v-if="examGraded && examQuestions.length" class="button" @click="resetExamGrading"
-           :title="store.locales=='zh'?'清除交卷状态，重新作答（保留题目与已填答案）':'Clear grading and retry'">
-        <i class="fa fa-undo"></i>
-      </div>
-      <div v-if="examGraded && examSummary" class="button" :class="{active: examSummaryOpen}" @click="examSummaryOpen = !examSummaryOpen"
-           :title="store.locales=='zh' ? (examSummaryOpen ? '关闭考试结果弹窗' : '查看考试结果') : 'Toggle exam result'">
-        <i class="fa fa-bar-chart"></i>
-      </div>
-      <div class="button" @click="resetExam" :title="store.locales=='zh'?'清空试卷重新开始':'Reset exam'">
-        <i class="fa fa-eraser"></i>
-      </div>
-      <div class="button" @click="exportExamExcel" :disabled="!examQuestions.length"
-           :title="store.locales=='zh'?'导出题目为 Excel':'Export questions to Excel'">
+      <template v-else-if="examPhase === 'result'">
+        <button class="exam-tool-btn ghost" @click="resetExamGrading"><i class="fa fa-undo"></i> {{ store.locales === 'zh' ? '重新作答' : 'Retry' }}</button>
+        <button class="exam-tool-btn primary" @click="resetExam"><i class="fa fa-plus"></i> {{ store.locales === 'zh' ? '新试卷' : 'New exam' }}</button>
+      </template>
+      <template v-else>
+        <span class="exam-head-stat">{{ examGenerating ? (store.locales === 'zh' ? '正在生成…' : 'Generating…') : examQuestions.length ? (store.locales === 'zh' ? `已生成 ${examQuestions.length} 题，点击开始答题` : `${examQuestions.length} questions ready — start when ready`) : (store.locales === 'zh' ? '配置试卷后生成' : 'Configure and generate') }}</span>
+      </template>
+      <button v-if="examQuestions.length" class="exam-tool-btn ghost" @click="saveCurrentPaper" :disabled="paperSaving" :title="store.locales === 'zh' ? '保存到试卷库' : 'Save to paper library'">
+        <i class="fa" :class="paperSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i>
+        {{ store.locales === 'zh' ? '保存' : 'Save' }}
+      </button>
+      <button class="exam-tool-btn ghost" @click="paperLibraryOpen = true" :title="store.locales === 'zh' ? '管理已保存的试卷' : 'Manage saved papers'">
+        <i class="fa fa-folder-open-o"></i>
+        {{ store.locales === 'zh' ? '试卷库' : 'Papers' }}
+        <span v-if="papers.length" class="exam-paper-count">{{ papers.length }}</span>
+      </button>
+      <button v-if="examQuestions.length" class="exam-tool-btn ghost" @click="exportExamExcel" :title="store.locales === 'zh' ? '导出 Excel' : 'Export Excel'">
         <i class="fa fa-file-excel-o"></i>
-      </div>
-      <span v-if="examGrading" style="font-size:11px;color:#FF9800;white-space:nowrap;"><i class="fa fa-spinner fa-spin"></i> {{ store.locales=='zh' ? '判分中...' : 'Grading...' }}</span>
+      </button>
     </div>
-
     <!-- 考试页面（随机/自选切片出题 → 答题 → 大模型判分） -->
     <div class="exam-main">
       <!-- 真题仿写面板（mimic 模式 + 开启时显示） -->
-      <div v-if="examMode==='mimic' && mimicPanelOpen" class="exam-select-panel">
+      <div v-if="examMode==='mimic' && mimicPanelOpen && examPhase === 'setup'" class="exam-select-panel">
         <div class="exam-select-toolbar">
           <span class="exam-editor-title" style="font-size:12px;"><i class="fa fa-clone"></i> {{ store.locales=='zh'?'真题仿写':'Mimic exam' }}</span>
           <span class="exam-spacer"></span>
@@ -1153,62 +1496,106 @@ const examSummary = computed(() => {
         </div>
       </div>
 
-      <!-- 左侧自选面板（select 模式 + 开启时显示；参照集群关系面板的文件面板样式） -->
-      <div v-if="examMode==='select' && examSelectOpen" class="exam-select-panel">
-        <div class="exam-select-toolbar">
-          <!-- 分类切换：按文件 / 按切片 -->
-          <div class="exam-seg">
-            <div class="exam-mode-btn" :class="{active: examSelKind==='file'}" @click="examSelKind='file'" :title="store.locales=='zh'?'按文件勾选（勾选=选中该文件全部切片）':'Select by file'"><i class="fa fa-file-text-o"></i> {{ store.locales=='zh'?'文件':'Files' }}</div>
-            <div class="exam-mode-btn" :class="{active: examSelKind==='slice'}" @click="examSelKind='slice'" :title="store.locales=='zh'?'按切片勾选（逐个切片选择）':'Select by slice'"><i class="fa fa-th-large"></i> {{ store.locales=='zh'?'切片':'Slices' }}</div>
-          </div>
-          <span class="exam-spacer"></span>
-          <button class="exam-panel-btn" @click="selectAllExamSlices" :title="store.locales=='zh'?'全选':'Select all'"><i class="fa fa-check-square-o"></i></button>
-          <button class="exam-panel-btn" @click="clearExamSliceSelection" :title="store.locales=='zh'?'清空':'Clear'"><i class="fa fa-square-o"></i></button>
-          <button class="exam-panel-btn" @click="examSelectOpen=false" :title="store.locales=='zh'?'收起面板':'Collapse'"><i class="fa fa-times"></i></button>
-        </div>
-        <div class="exam-select-search">
-          <input v-if="examSelKind==='file'" v-model="examFileKeyword" class="exam-select-search-input" :placeholder="store.locales=='zh'?'搜索文件…':'Search files…'" />
-          <input v-else v-model="examSliceKeyword" class="exam-select-search-input" :placeholder="store.locales=='zh'?'搜索切片…':'Search slices…'" />
-        </div>
-        <div class="exam-select-list scoll">
-          <!-- 按文件勾选 -->
-          <template v-if="examSelKind==='file'">
-            <div v-for="f in examFilteredFiles" :key="f.key" class="exam-slice-item"
-                 :class="{on: isExamFileAllSelected(f), part: isExamFilePartSelected(f)}"
-                 @click="toggleExamFile(f)" :title="f.label">
-              <i class="fa exam-icon-check" :class="isExamFileAllSelected(f) ? 'fa-check-square-o' : (isExamFilePartSelected(f) ? 'fa-minus-square-o' : 'fa-square-o')"></i>
-              <i class="exam-icon-file" :class="store.icon(f.extension) || 'fa-file-text-o'"></i>
-              <span class="exam-name">{{ f.label }}</span>
-              <span class="exam-count">({{ f.count }})</span>
-              <span class="exam-spacer"></span>
-              <span class="exam-sel-num" :style="{color: isExamFileAllSelected(f) ? '#4CAF50' : 'var(--borderColor)'}">
-                {{ f.idxs.filter(i => examSelectedSliceIdx.includes(i)).length }}/{{ f.count }}
-              </span>
-            </div>
-            <div v-if="examFilteredFiles.length===0" class="exam-select-empty">
-              {{ store.locales=='zh'?'无可用文件':'No files' }}
-            </div>
-          </template>
-          <!-- 按切片勾选 -->
-          <template v-else>
-            <div v-for="f in examFilteredSlices" :key="f.idx" class="exam-slice-item" :class="{on: examSelectedSliceIdx.includes(f.idx)}" @click="toggleExamSlice(f.idx)">
-              <i class="fa exam-icon-check" :class="examSelectedSliceIdx.includes(f.idx) ? 'fa-check-square-o' : 'fa-square-o'"></i>
-              <span class="exam-name exam-name-sm">{{ f.block.label }}</span>
-              <span class="exam-slice-preview">{{ String(f.block.A).trim().slice(0, 50) }}</span>
-            </div>
-            <div v-if="examFilteredSlices.length===0" class="exam-select-empty">
-              {{ store.locales=='zh'?'无可用切片（请先切片入库）':'No usable slices' }}
-            </div>
-          </template>
-        </div>
-        <div class="exam-select-footer">
-          <i class="fa fa-check-circle-o exam-icon-check"></i>
-          <span>{{ examSelectedSliceIdx.length }} {{ store.locales=='zh'?'个切片已选':'slices selected' }}</span>
-        </div>
-      </div>
-
       <!-- 右侧主区 -->
       <div class="exam-body">
+
+      <!-- 设置阶段：出题方式 / 题型 / 题数 / 生成 -->
+      <div v-if="examPhase === 'setup'" class="exam-setup scoll" :class="{ 'has-grid': examMode === 'select' }">
+        <div class="exam-setup-head">
+          <span class="exam-setup-title"><i class="fa fa-sliders"></i> {{ store.locales === 'zh' ? '设置试卷' : 'Exam setup' }}</span>
+          <span class="exam-setup-sub">{{ store.locales === 'zh' ? '选好后直接生成' : 'Configure, then generate' }}</span>
+          <span class="exam-spacer"></span>
+          <label v-if="examMode !== 'manual'" class="exam-setup-count">
+            {{ store.locales === 'zh' ? '题数' : 'N' }}
+            <input v-model.number="countValue" type="number" min="1" max="50" step="1" />
+          </label>
+          <button class="exam-track-toggle" :class="{ on: examTrack }" @click="toggleExamTrack" :title="examTrackTitle">
+            <i class="fa" :class="examTrack ? 'fa-link' : 'fa-unlink'"></i>
+            {{ store.locales === 'zh' ? '计入学习' : 'Track' }}
+          </button>
+        </div>
+        <div v-if="examQuestions.length && !examGenerating" class="exam-ready">
+          <span><i class="fa fa-check-circle"></i> {{ store.locales === 'zh' ? `已生成 ${examQuestions.length} 题` : `${examQuestions.length} question(s) ready` }}</span>
+          <button class="exam-tool-btn primary" @click="startExam"><i class="fa fa-play"></i> {{ store.locales === 'zh' ? '开始答题' : 'Start exam' }}</button>
+          <button class="exam-tool-btn ghost" @click="resetExam"><i class="fa fa-rotate-left"></i> {{ store.locales === 'zh' ? '重新出题' : 'Regenerate' }}</button>
+        </div>
+        <div class="exam-inline-row">
+          <span class="exam-inline-label">{{ store.locales === 'zh' ? '出题方式' : 'Source' }}</span>
+          <div class="exam-mode-grid">
+            <button class="exam-mode-card" :class="{ on: examMode === 'random' }" @click="examMode = 'random'">
+              <i class="fa fa-random"></i>
+              <b>{{ store.locales === 'zh' ? '随机切片' : 'Random' }}</b>
+              <span>{{ store.locales === 'zh' ? '随机采样' : 'Sample' }}</span>
+            </button>
+            <button class="exam-mode-card" :class="{ on: examMode === 'select' }" @click="examMode = 'select'; examSelectOpen = true">
+              <i class="fa fa-list-ul"></i>
+              <b>{{ store.locales === 'zh' ? '自选切片' : 'Select' }}</b>
+              <span>{{ store.locales === 'zh' ? '按文件/切片' : 'Files/slices' }}</span>
+            </button>
+            <button class="exam-mode-card" :class="{ on: examMode === 'manual' }" @click="examMode = 'manual'">
+              <i class="fa fa-pencil"></i>
+              <b>{{ store.locales === 'zh' ? '手动出题' : 'Manual' }}</b>
+              <span>{{ store.locales === 'zh' ? '自己输入' : 'Write your own' }}</span>
+            </button>
+            <button class="exam-mode-card" :class="{ on: examMode === 'mimic' }" @click="examMode = 'mimic'; mimicPanelOpen = true">
+              <i class="fa fa-clone"></i>
+              <b>{{ store.locales === 'zh' ? '真题仿写' : 'Mimic' }}</b>
+              <span>{{ store.locales === 'zh' ? '按样卷风格' : 'Follow style' }}</span>
+            </button>
+          </div>
+        </div>
+        <div class="exam-inline-row">
+          <span class="exam-inline-label">{{ store.locales === 'zh' ? '题型' : 'Types' }}</span>
+          <div class="exam-type-chips">
+            <button v-for="(t, key) in examTypes" :key="key" class="exam-type-chip" :class="{ on: t }" @click="toggleExamType(key)">
+              <i class="fa" :class="examTypeIcon(key)"></i> {{ examTypeLabel(key) }}
+            </button>
+          </div>
+        </div>
+        <div class="exam-setup-row exam-setup-actions">
+          <span class="exam-spacer"></span>
+          <button v-if="examMode !== 'manual'" class="exam-tool-btn primary" :disabled="examGenerating" @click="examMode === 'mimic' ? generateMimicQuestions() : generateExamQuestions()">
+            <i class="fa" :class="examGenerating ? 'fa-spinner fa-spin' : 'fa-magic'"></i>
+            {{ examGenerating ? (store.locales === 'zh' ? '生成中…' : 'Generating…') : (store.locales === 'zh' ? '生成试卷' : 'Generate exam') }}
+          </button>
+        </div>
+        <div v-if="examMode === 'manual'" class="exam-setup-hint">
+          {{ store.locales === 'zh' ? '在下方编辑器添加题目；添加第一题后自动进入答题。' : 'Add questions in the editor below; the first one starts the exam.' }}
+        </div>
+
+        <!-- 自选切片：设置卡下方的 grid 卡片，不再使用左侧列表 -->
+        <div v-if="examMode === 'select'" class="exam-slice-grid-wrap">
+          <div class="exam-slice-grid-toolbar">
+            <div class="exam-seg">
+              <button class="exam-mode-btn" :class="{ active: examSelKind === 'file' }" @click="examSelKind = 'file'"><i class="fa fa-file-text-o"></i> {{ store.locales === 'zh' ? '按文件' : 'Files' }}</button>
+              <button class="exam-mode-btn" :class="{ active: examSelKind === 'slice' }" @click="examSelKind = 'slice'"><i class="fa fa-th-large"></i> {{ store.locales === 'zh' ? '按切片' : 'Slices' }}</button>
+            </div>
+            <input v-if="examSelKind === 'file'" v-model="examFileKeyword" class="exam-slice-grid-search" :placeholder="store.locales === 'zh' ? '搜索文件…' : 'Search files…'" />
+            <input v-else v-model="examSliceKeyword" class="exam-slice-grid-search" :placeholder="store.locales === 'zh' ? '搜索切片…' : 'Search slices…'" />
+            <span class="exam-spacer"></span>
+            <span class="exam-slice-grid-count">{{ examSelectedSliceIdx.length }} {{ store.locales === 'zh' ? '已选' : 'selected' }}</span>
+            <button class="exam-tool-btn ghost" @click="selectAllExamSlices">{{ store.locales === 'zh' ? '全选' : 'All' }}</button>
+            <button class="exam-tool-btn ghost" @click="clearExamSliceSelection">{{ store.locales === 'zh' ? '清空' : 'Clear' }}</button>
+          </div>
+          <div v-if="examSelKind === 'file'" class="exam-slice-grid scoll">
+            <button v-for="f in examFilteredFiles" :key="f.key" class="exam-slice-card" :class="{ on: isExamFileAllSelected(f), part: isExamFilePartSelected(f) }" @click="toggleExamFile(f)" :title="f.label">
+              <i class="exam-slice-card-check fa" :class="isExamFileAllSelected(f) ? 'fa-check-square-o' : (isExamFilePartSelected(f) ? 'fa-minus-square-o' : 'fa-square-o')"></i>
+              <i class="exam-slice-card-file fa" :class="store.icon(f.extension) || 'fa-file-text-o'"></i>
+              <span class="exam-slice-card-name">{{ f.label }}</span>
+              <span class="exam-slice-card-meta">{{ f.idxs.filter(i => examSelectedSliceIdx.includes(i)).length }}/{{ f.count }} {{ store.locales === 'zh' ? '切片' : 'slices' }}</span>
+            </button>
+            <div v-if="examFilteredFiles.length === 0" class="exam-select-empty">{{ store.locales === 'zh' ? '无可用文件' : 'No files' }}</div>
+          </div>
+          <div v-else class="exam-slice-grid scoll">
+            <button v-for="f in examFilteredSlices" :key="f.idx" class="exam-slice-card slice" :class="{ on: examSelectedSliceIdx.includes(f.idx) }" @click="toggleExamSlice(f.idx)">
+              <i class="exam-slice-card-check fa" :class="examSelectedSliceIdx.includes(f.idx) ? 'fa-check-square-o' : 'fa-square-o'"></i>
+              <span class="exam-slice-card-name">{{ f.block.label }}</span>
+              <span class="exam-slice-card-preview">{{ String(f.block.A).trim().slice(0, 70) }}</span>
+            </button>
+            <div v-if="examFilteredSlices.length === 0" class="exam-select-empty">{{ store.locales === 'zh' ? '无可用切片（请先切片入库）' : 'No usable slices' }}</div>
+          </div>
+        </div>
+      </div>
 
       <!-- 手动出题编辑器 -->
       <div v-if="examMode==='manual'" class="exam-editor">
@@ -1250,12 +1637,48 @@ const examSummary = computed(() => {
       </div>
 
       <!-- 答题区 -->
-      <div class="scoll exam-answer-area">
+      <div v-if="examPhase !== 'setup'" class="scoll exam-answer-area">
+        <!-- 题号导航 -->
+        <div v-if="showNavigator" class="exam-nav-grid">
+          <button v-for="(q, qi) in examQuestions" :key="'nav-' + q.id" class="exam-nav-btn"
+            :class="{ answered: hasAnswer(q), flagged: flaggedIds.includes(q.id), wrong: q.result && q.result.correct === false }"
+            @click="scrollToQuestion(q.id)" :title="q.prompt">
+            {{ qi + 1 }}
+          </button>
+        </div>
+
+        <!-- 结果阶段：结果页替代弹窗 -->
+        <div v-if="examPhase === 'result' && examSummary" class="exam-result-page">
+          <div class="exam-result-score">
+            <span class="exam-result-avg">{{ examSummary.avg.toFixed(1) }}</span>
+            <span class="exam-result-unit">{{ store.locales === 'zh' ? '分' : 'pts' }}</span>
+          </div>
+          <div class="exam-result-main">
+            <div class="exam-result-row">
+              <span>{{ store.locales === 'zh' ? '正确率' : 'Accuracy' }}</span>
+              <b>{{ (examSummary.rate * 100).toFixed(0) }}%</b>
+              <span>{{ store.locales === 'zh' ? '答对' : 'Correct' }}</span>
+              <b>{{ examSummary.correctCount }}/{{ examSummary.count }}</b>
+              <span><i class="fa fa-clock-o"></i> {{ timerText }}</span>
+            </div>
+            <div class="exam-result-types">
+              <span v-for="r in typeBreakdown" :key="r.type">{{ examTypeLabel(r.type) }} {{ r.correct }}/{{ r.total }}</span>
+              <span v-if="wrongQuestions.length" class="exam-result-wrong">✕ {{ wrongQuestions.length }} {{ store.locales === 'zh' ? '错题' : 'wrong' }}</span>
+            </div>
+            <div class="exam-result-actions">
+              <button v-if="wrongQuestions.length" class="exam-tool-btn ghost" @click="scrollToQuestion(wrongQuestions[0].id)"><i class="fa fa-exclamation-circle"></i> {{ store.locales === 'zh' ? '查看错题' : 'View wrong' }}</button>
+              <button class="exam-tool-btn ghost" @click="resetExamGrading"><i class="fa fa-undo"></i> {{ store.locales === 'zh' ? '重新作答' : 'Retry' }}</button>
+              <button class="exam-tool-btn ghost" @click="resetExam"><i class="fa fa-plus"></i> {{ store.locales === 'zh' ? '新试卷' : 'New exam' }}</button>
+              <button class="exam-tool-btn ghost" @click="exportExamExcel"><i class="fa fa-file-excel-o"></i> {{ store.locales === 'zh' ? '导出成绩' : 'Export' }}</button>
+            </div>
+          </div>
+        </div>
+
         <div v-if="examQuestions.length===0" class="exam-empty">
           <i class="fa fa-graduation-cap exam-empty-icon"></i>
           {{ store.locales=='zh' ? '暂无题目。选择出题方式后点「生成题目」，或切到「手动输入」添加题目。' : 'No questions yet. Generate from slices or add manually.' }}
         </div>
-        <div v-for="(q, qi) in examQuestions" :key="q.id" class="exam-q-card">
+        <div v-for="(q, qi) in examQuestions" :key="q.id" class="exam-q-card" :id="'exam-q-' + q.id">
           <div class="exam-flex">
             <span class="exam-q-index">{{ qi + 1 }}.</span>
             <span class="exam-type-badge" :class="q.type">{{ examTypeLabel(q.type) }}</span>
@@ -1271,6 +1694,9 @@ const examSummary = computed(() => {
               <i class="fa" :class="q._explaining ? 'fa-spinner fa-spin' : 'fa-commenting-o'"></i> {{ store.locales=='zh'?'生成解析':'Explain' }}
             </span>
             <span class="exam-explain-link" @click="emit('ask', q.prompt)"><i class="fa fa-comments-o"></i> {{ store.locales=='zh'?'问一下':'Ask' }}</span>
+            <button class="exam-flag-btn" :class="{ on: flaggedIds.includes(q.id) }" @click="toggleFlag(q)" :title="store.locales === 'zh' ? '标记此题' : 'Flag question'">
+              <i class="fa" :class="flaggedIds.includes(q.id) ? 'fa-flag' : 'fa-flag-o'"></i>
+            </button>
           </div>
           <div class="exam-q-prompt learn-md"><block_md :content="q.prompt" :fontSize="'13px'" /></div>
 
@@ -1350,6 +1776,45 @@ const examSummary = computed(() => {
           </div>
         </div>
       </div>
+      </div>
+    </div>
+
+    <!-- 试卷库：管理 <库名>.exams.json 中的试卷 -->
+    <div v-if="paperLibraryOpen" class="exam-paper-backdrop" @click.self="paperLibraryOpen = false">
+      <div class="exam-paper-modal">
+        <div class="exam-paper-head">
+          <span><i class="fa fa-folder-open-o"></i> {{ store.locales === 'zh' ? '试卷库' : 'Paper library' }}</span>
+          <span v-if="paperKbName" class="exam-paper-kb">{{ paperKbName }}.exams.json</span>
+          <button class="exam-tool-btn ghost" @click="paperLibraryOpen = false"><i class="fa fa-times"></i></button>
+        </div>
+        <div class="exam-paper-toolbar">
+          <button class="exam-tool-btn primary" :disabled="paperSaving || !examQuestions.length" @click="saveCurrentPaper">
+            <i class="fa" :class="paperSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i>
+            {{ store.locales === 'zh' ? '保存当前试卷' : 'Save current paper' }}
+          </button>
+          <span class="exam-paper-msg">{{ paperMsg }}</span>
+          <span class="exam-spacer"></span>
+          <button class="exam-tool-btn ghost" @click="loadPaperLibrary" :disabled="paperLoading"><i class="fa fa-refresh" :class="{ 'fa-spin': paperLoading }"></i></button>
+        </div>
+        <div class="exam-paper-list scoll">
+          <div v-if="!papers.length" class="exam-paper-empty">
+            <i class="fa fa-folder-open-o"></i>
+            <span>{{ paperFilePath ? (store.locales === 'zh' ? '还没有保存的试卷' : 'No saved papers') : (store.locales === 'zh' ? '自动知识库请先保存为 .kb' : 'Save the auto KB as .kb first') }}</span>
+          </div>
+          <div v-for="p in papers" :key="p.id" class="exam-paper-row" :class="{ current: currentPaperId === p.id }">
+            <div class="exam-paper-main">
+              <b :title="p.title">{{ p.title }}</b>
+              <span>{{ p.questions.length }} {{ store.locales === 'zh' ? '题' : 'questions' }} · {{ p.graded ? (store.locales === 'zh' ? '已判分' : 'graded') : (store.locales === 'zh' ? '未判分' : 'ungraded') }} · {{ paperTime(p.updatedAt) }}</span>
+            </div>
+            <div class="exam-paper-actions">
+              <button class="exam-tool-btn ghost" @click="openPaper(p)">{{ store.locales === 'zh' ? '打开' : 'Open' }}</button>
+              <button class="exam-tool-btn ghost" @click="renamePaper(p)">{{ store.locales === 'zh' ? '重命名' : 'Rename' }}</button>
+              <button class="exam-tool-btn ghost" @click="copyPaper(p)">{{ store.locales === 'zh' ? '复制' : 'Copy' }}</button>
+              <button class="exam-tool-btn ghost" @click="exportPaperWord(p)"><i class="fa fa-file-word-o"></i> Word</button>
+              <button class="exam-tool-btn ghost danger" @click="deletePaper(p)"><i class="fa fa-trash-o"></i></button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1735,5 +2200,137 @@ const examSummary = computed(() => {
   font-size: 12px;
   font-weight: bold;
   color: #FF9800;
+}
+/* ===== 三阶段考试 UI ===== */
+.exam-toolbar-v2 { min-height: 34px; flex-wrap: wrap; gap: 5px; padding: 4px 7px; }
+.exam-phases { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.exam-phase { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 7px; border-radius: 11px; font-size: 10px; color: var(--fontColor); opacity: .5; }
+.exam-phase b { width: 15px; height: 15px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; background: var(--borderColor); color: var(--backgroundColor); }
+.exam-phase.on { opacity: 1; color: var(--fontActiveColor); background: var(--menuActiveColor); }
+.exam-phase.on b { background: var(--fontActiveColor); color: var(--backgroundColor); }
+.exam-phase.done { opacity: .8; }
+.exam-phase-sep { font-size: 9px; opacity: .3; }
+.exam-head-stat { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--fontColor); opacity: .65; white-space: nowrap; }
+.exam-tool-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 26px; padding: 0 9px; border: 1px solid var(--borderColor); border-radius: 5px; background: var(--backgroundColor); color: var(--fontColor); font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.exam-tool-btn:hover:not(:disabled) { background: var(--menuActiveColor); color: var(--fontActiveColor); }
+.exam-tool-btn.primary { background: var(--fontActiveColor); border-color: var(--fontActiveColor); color: var(--backgroundColor); font-weight: 600; }
+.exam-tool-btn.primary:hover:not(:disabled) { opacity: .9; }
+.exam-tool-btn.ghost { background: transparent; }
+.exam-tool-btn:disabled { opacity: .55; cursor: default; }
+.exam-setup { flex: 0 1 auto; max-height: 100%; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
+.exam-setup.has-grid { flex: 1; overflow: hidden; }
+.exam-manager input, .exam-manager select { margin: 0; }
+.exam-setup-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.exam-ready { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--fontActiveColor); border-radius: 8px; background: var(--menuActiveColor); font-size: 11px; color: var(--fontColor); }
+.exam-ready > span { display: inline-flex; align-items: center; gap: 5px; }
+.exam-ready .fa-check-circle { color: #3fb950; }
+.exam-setup-title { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--fontColor); }
+.exam-setup-title .fa { color: var(--fontActiveColor); }
+.exam-setup-sub { font-size: 9px; color: var(--fontColor); opacity: .5; }
+.exam-inline-row { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: 6px; }
+.exam-inline-label { font-size: 9px; color: var(--fontColor); opacity: .5; white-space: nowrap; }
+.exam-setup-actions { padding-top: 0; border-top: 0; justify-content: flex-end; }
+.exam-setup-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--fontColor); }
+.exam-setup-title .fa { color: var(--fontActiveColor); }
+.exam-setup-title span { font-size: 10px; font-weight: 400; opacity: .55; margin-left: 4px; }
+.exam-setup-label { font-size: 10px; letter-spacing: .04em; text-transform: uppercase; opacity: .5; margin-top: 2px; }
+.exam-mode-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.exam-mode-card { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 9px 10px; border: 1px solid var(--borderColor); border-radius: 8px; background: var(--backgroundColor); color: var(--fontColor); text-align: left; cursor: pointer; }
+.exam-mode-card i { font-size: 14px; color: var(--fontActiveColor); }
+.exam-mode-card b { font-size: 11px; font-weight: 600; }
+.exam-mode-card span { font-size: 9px; opacity: .55; line-height: 1.35; }
+.exam-mode-card:hover { border-color: var(--fontActiveColor); }
+.exam-mode-card.on { border-color: var(--fontActiveColor); background: var(--menuActiveColor); }
+.exam-type-chips { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.exam-type-chip { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 9px; border: 1px solid var(--borderColor); border-radius: 13px; background: transparent; color: var(--fontColor); font-size: 10px; cursor: pointer; }
+.exam-type-chip.on { border-color: var(--fontActiveColor); color: var(--fontActiveColor); background: var(--menuActiveColor); }
+.exam-setup-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid var(--borderColor); }
+.exam-setup-count { display: inline-flex; align-items: center; gap: 5px; padding: 0; font-size: 11px; color: var(--fontColor); }
+.exam-setup-count input { width: 48px; height: 26px; box-sizing: border-box; border: 1px solid var(--borderColor); border-radius: 4px; background: var(--backgroundColor); color: var(--fontColor); font-size: 11px; text-align: center; }
+.exam-track-toggle { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 1px solid var(--borderColor); border-radius: 5px; background: transparent; color: var(--fontColor); font-size: 10px; cursor: pointer; }
+.exam-track-toggle.on { border-color: var(--fontActiveColor); color: var(--fontActiveColor); background: var(--menuActiveColor); }
+.exam-setup-hint { font-size: 10px; color: var(--fontColor); opacity: .55; }
+.exam-nav-grid { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; padding: 4px 0 8px; }
+.exam-nav-btn { width: 24px; height: 24px; border: 1px solid var(--borderColor); border-radius: 5px; background: var(--backgroundColor); color: var(--fontColor); font-size: 10px; cursor: pointer; }
+.exam-nav-btn.answered { border-color: #3fb950; color: #3fb950; }
+.exam-nav-btn.flagged { box-shadow: inset 0 0 0 1px #d29922; }
+.exam-nav-btn.wrong { border-color: #f56c6c; color: #f56c6c; }
+.exam-flag-btn { margin-left: 2px; width: 22px; height: 22px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--fontColor); opacity: .5; cursor: pointer; }
+.exam-flag-btn.on, .exam-flag-btn:hover { opacity: 1; color: #d29922; }
+.exam-result-page { display: flex; align-items: stretch; gap: 14px; padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--borderColor); border-radius: 9px; background: var(--menuColor); }
+.exam-result-score { display: flex; align-items: baseline; gap: 3px; flex-shrink: 0; }
+.exam-result-avg { font-size: 34px; line-height: 1; font-weight: 700; color: var(--fontActiveColor); }
+.exam-result-unit { font-size: 11px; opacity: .55; }
+.exam-result-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.exam-result-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 10px; color: var(--fontColor); opacity: .8; }
+.exam-result-row b { color: var(--fontActiveColor); font-size: 11px; }
+.exam-result-types { display: flex; gap: 8px; flex-wrap: wrap; font-size: 10px; color: var(--fontColor); opacity: .65; }
+.exam-result-wrong { color: #f56c6c; opacity: 1; }
+.exam-result-actions { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 2px; }
+@media (max-width: 700px) {
+  .exam-mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .exam-inline-row { grid-template-columns: 1fr; gap: 3px; }
+  .exam-result-page { flex-direction: column; }
+  .exam-phase { padding: 0 4px; }
+  .exam-phase span { display: none; }
+}
+/* 自选切片：设置卡下方 grid 卡片 */
+.exam-slice-grid-wrap { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; padding-top: 6px; border-top: 1px solid var(--borderColor); }
+.exam-slice-grid-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.exam-slice-grid-search { flex: 1 1 150px; min-width: 100px; height: 26px; box-sizing: border-box; padding: 0 7px; border: 1px solid var(--borderColor); border-radius: 5px; background: var(--backgroundColor); color: var(--fontColor); font-size: 10px; outline: none; }
+.exam-slice-grid-count { font-size: 10px; color: var(--fontActiveColor); white-space: nowrap; }
+.exam-slice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; flex: 1; min-height: 0; max-height: none; overflow-y: auto; align-content: start; padding: 2px; }
+.exam-slice-card { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-height: 62px; padding: 8px 9px; box-sizing: border-box; border: 1px solid var(--borderColor); border-radius: 7px; background: var(--backgroundColor); color: var(--fontColor); text-align: left; cursor: pointer; overflow: hidden; }
+.exam-slice-card:hover { border-color: var(--fontActiveColor); }
+.exam-slice-card.on { border-color: var(--fontActiveColor); background: var(--menuActiveColor); }
+.exam-slice-card.part { border-style: dashed; }
+.exam-slice-card-check { position: absolute; top: 6px; right: 6px; font-size: 11px; opacity: .6; }
+.exam-slice-card.on .exam-slice-card-check { opacity: 1; color: var(--fontActiveColor); }
+.exam-slice-card-file { font-size: 13px; color: var(--fontActiveColor); }
+.exam-slice-card-name { font-size: 10px; font-weight: 600; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.exam-slice-card-meta { font-size: 9px; opacity: .55; }
+.exam-slice-card-preview { font-size: 9px; line-height: 1.4; opacity: .55; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* 试卷库 */
+.exam-paper-count { display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 14px; padding: 0 4px; border-radius: 7px; background: var(--fontActiveColor); color: var(--backgroundColor); font-size: 9px; }
+.exam-paper-backdrop { position: fixed; inset: 0; z-index: 80; background: rgba(0, 0, 0, .28); display: flex; align-items: center; justify-content: center; padding: 18px; box-sizing: border-box; }
+.exam-paper-modal { width: min(680px, 100%); max-height: min(78vh, 620px); display: flex; flex-direction: column; border: 1px solid var(--borderColor); border-radius: 10px; background: var(--backgroundColor); box-shadow: 0 18px 50px rgba(0, 0, 0, .28); overflow: hidden; }
+.exam-paper-head { display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-bottom: 1px solid var(--borderColor); font-size: 12px; font-weight: 600; color: var(--fontColor); }
+.exam-paper-head .fa { color: var(--fontActiveColor); }
+.exam-paper-kb { font-size: 9px; font-weight: 400; opacity: .45; margin-left: 2px; }
+.exam-paper-head .exam-tool-btn { margin-left: auto; border: 0; }
+.exam-paper-toolbar { display: flex; align-items: center; gap: 6px; padding: 7px 11px; border-bottom: 1px solid var(--borderColor); flex-wrap: wrap; }
+.exam-paper-msg { font-size: 9px; color: var(--fontColor); opacity: .55; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.exam-paper-list { flex: 1; min-height: 90px; overflow-y: auto; padding: 7px 11px 11px; }
+.exam-paper-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 34px 10px; color: var(--borderColor); font-size: 11px; text-align: center; }
+.exam-paper-empty .fa { font-size: 22px; }
+.exam-paper-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid var(--borderColor); border-radius: 7px; margin-bottom: 6px; background: var(--backgroundColor); }
+.exam-paper-row.current { border-color: var(--fontActiveColor); background: var(--menuActiveColor); }
+.exam-paper-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.exam-paper-main b { font-size: 11px; color: var(--fontColor); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.exam-paper-main span { font-size: 9px; color: var(--fontColor); opacity: .55; }
+.exam-paper-actions { display: flex; gap: 2px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.exam-paper-actions .exam-tool-btn { height: 23px; padding: 0 5px; font-size: 9px; border-color: transparent; }
+.exam-tool-btn.danger { color: #f56c6c; }
+.exam-tool-btn.danger:hover { background: rgba(245, 108, 108, .1); color: #f56c6c; }
+@media (max-width: 700px) {
+  .exam-paper-row { align-items: flex-start; flex-direction: column; }
+  .exam-paper-actions { width: 100%; justify-content: flex-start; }
+  .exam-paper-msg { max-width: 100%; }
+}
+@media (max-width: 700px) {
+  .exam-toolbar-v2 { padding: 4px 6px; gap: 4px; }
+  .exam-phase { padding: 0 4px; }
+  .exam-phase-label { display: none; }
+  .exam-head-stat { display: none; }
+  .exam-setup { padding: 6px; gap: 5px; }
+  .exam-slice-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .exam-slice-grid-toolbar .exam-slice-grid-search { flex: 1 1 100%; }
+  .exam-paper-backdrop { padding: 8px; }
+  .exam-paper-modal { max-height: 88vh; }
+}
+@media (max-width: 460px) {
+  .exam-mode-grid { grid-template-columns: 1fr; }
+  .exam-inline-row { grid-template-columns: 1fr; }
+  .exam-tool-btn { height: 25px; padding: 0 7px; font-size: 10px; }
 }
 </style>

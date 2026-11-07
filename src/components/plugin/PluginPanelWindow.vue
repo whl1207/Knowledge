@@ -24,6 +24,8 @@
   <div class="plugin-panel-window" :class="{ overlay }">
     <!-- 顶栏：拖动区 + 本插件图标 + 标题 + 窗口按钮 -->
     <div v-show="!chromeHidden" class="ppw-header">
+      <!-- 浮层模式：只让顶栏左侧区域参与窗口拖动，右侧留给浮层关闭按钮，避免拖动区吃掉点击 -->
+      <div v-if="overlay" class="ppw-drag-region"></div>
       <!-- 左上角只放**本插件的那个图标**（静态标识，不参与切换）：
            一个窗口 = 一个插件，换插件请回主窗口的「全部插件」里点 -->
       <div class="ppw-plugin-icon" :title="activeTitle"><i :class="activeIcon"></i></div>
@@ -189,9 +191,26 @@ function closeWindow() { void getPlatform().window.close() }
   color: var(--fontColor);
   overflow: hidden;
 }
-/* 浮层形态：由主窗口里的容器决定尺寸与圆角，这里铺满容器即可 */
+/* 浮层形态：由主窗口里的容器决定尺寸与圆角，这里铺满容器即可。
+   顶栏普通区域 no-drag，单独用 .ppw-drag-region 提供拖动区（避开右上角关闭按钮）。 */
 .plugin-panel-window.overlay .ppw-header {
   -webkit-app-region: no-drag;
+}
+.plugin-panel-window.overlay .ppw-drag-region {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 44px;
+  bottom: 0;
+  -webkit-app-region: drag;
+  z-index: 0;
+}
+.plugin-panel-window.overlay .ppw-header > *:not(.ppw-drag-region) {
+  position: relative;
+  z-index: 1;
+}
+.plugin-panel-window.overlay .ppw-header-spacer {
+  pointer-events: none;
 }
 
 .ppw-header {

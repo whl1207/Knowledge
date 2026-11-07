@@ -1522,6 +1522,17 @@ onBeforeUnmount(() => {
               <option value="bottom">{{ store.locales=='zh'?'下方' : 'Bottom' }}</option>
             </select>
           </div>
+          <div class="form-group">
+            <label>{{ store.locales=='zh'?'插件导航显示' : 'Plugin Navigation' }}</label>
+            <select v-model="store.UI.pluginNavMode" class="layout-select" @change="store.saveConfig()"
+                    :title="store.locales=='zh'
+                      ? '平铺：插件图标始终排在导航栏；面板：始终收成一个可搜索的插件面板；自动：只有放不下时才收成面板'
+                      : 'Flat: keep plugin icons in the navbar; Panel: always collapse them into a searchable panel; Auto: collapse only when they do not fit'">
+              <option value="auto">{{ store.locales=='zh'?'自动（放不下时收纳）' : 'Auto (collapse when needed)' }}</option>
+              <option value="flat">{{ store.locales=='zh'?'始终平铺' : 'Always flat' }}</option>
+              <option value="panel">{{ store.locales=='zh'?'始终收起为插件面板' : 'Always collapsed panel' }}</option>
+            </select>
+          </div>
           <!-- 窗口交互模式：统一决定文件 / 设置 / 插件面板的打开落点（单页面环境推荐单窗口） -->
           <div class="form-group">
             <label>{{ store.locales=='zh'?'窗口模式' : 'Window Mode' }}</label>

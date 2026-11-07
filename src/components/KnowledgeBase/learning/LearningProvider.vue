@@ -47,6 +47,7 @@ const emit = defineEmits<{
   (e: 'navigate', page: string): void
   (e: 'status', text: string): void
   (e: 'ask', question: string): void
+  (e: 'counts', counts: { due: number; mistakes: number }): void
 }>()
 
 const store = usestore()
@@ -766,6 +767,12 @@ const learningStatus = computed(() => {
   return ''
 })
 watch(learningStatus, (v) => emit('status', v), { immediate: true })
+// 导航可见性：复习 / 错题本为空时不显示
+watch(
+  [() => dueList.value.length, () => wrongList.value.length],
+  ([due, mistakes]) => emit('counts', { due, mistakes }),
+  { immediate: true },
+)
 
 const learningCtx = reactive({
   store, kb, ldata, practice, model, explains,

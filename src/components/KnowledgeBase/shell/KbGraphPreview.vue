@@ -332,11 +332,33 @@ const legend = computed(() => [
   { state: 'pending', label: props.zh ? '待向量化' : 'Pending' },
   { state: 'empty', label: props.zh ? '未切片' : 'Unsliced' },
 ])
+const hubTitle = computed(() => {
+  const lines = props.zh
+    ? [
+        '知识库概览',
+        `${totalFiles.value} 文件 · ${totalBlocks.value} 切片 · ${totalEntities.value} 实体 · ${totalQuestions.value} 问题`,
+        `已向量化 ${readySlices.value}/${totalBlocks.value} 切片`,
+        statusText.value,
+      ]
+    : [
+        'Knowledge overview',
+        `${totalFiles.value} files · ${totalBlocks.value} slices · ${totalEntities.value} entities · ${totalQuestions.value} questions`,
+        `${readySlices.value}/${totalBlocks.value} slices embedded`,
+        statusText.value,
+      ]
+  return lines.join('\n')
+})
 const ringLegend = computed(() => [
   { key: 'file', color: '#58a6ff', label: props.zh ? '文件' : 'Files' },
   { key: 'slice', color: '#ff7b72', label: props.zh ? '切片' : 'Slices' },
   { key: 'entity', color: '#a371f7', label: props.zh ? '实体' : 'Entities' },
   { key: 'question', color: '#2dd4bf', label: props.zh ? '问题' : 'Questions' },
+])
+const ringMeta = computed(() => [
+  { key: 'file' as const, color: '#58a6ff', label: props.zh ? '文件' : 'Files', count: fileNodes.value.length },
+  { key: 'slice' as const, color: '#ff7b72', label: props.zh ? '切片' : 'Slices', count: sliceNodes.value.length },
+  { key: 'entity' as const, color: '#a371f7', label: props.zh ? '实体' : 'Entities', count: entityNodes.value.length },
+  { key: 'question' as const, color: '#2dd4bf', label: props.zh ? '问题' : 'Questions', count: questionNodes.value.length },
 ])
 </script>
 
@@ -360,6 +382,18 @@ const ringLegend = computed(() => [
     </div>
 
     <svg v-else class="kbg-svg" :viewBox="`0 0 ${layout.W} ${layout.H}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="props.zh ? '知识库结构图' : 'Knowledge structure graph'">
+      <g class="kbg-orbits">
+        <g v-for="ring in ringMeta" :key="'orbit-' + ring.key" v-show="ring.count > 0">
+          <ellipse
+            :cx="layout.cx"
+            :cy="layout.cy"
+            :rx="layout.rings[ring.key].rx"
+            :ry="layout.rings[ring.key].ry"
+            class="kbg-orbit"
+            :class="'orbit-' + ring.key"
+          />
+        </g>
+      </g>
       <g class="kbg-edges">
         <line
           v-for="node in allNodes"
@@ -382,12 +416,12 @@ const ringLegend = computed(() => [
       </g>
 
       <g class="kbg-hub">
+        <title>{{ hubTitle }}</title>
         <circle v-if="props.isEmbedded" class="kbg-hub-pulse" :cx="layout.cx" :cy="layout.cy" r="38" />
         <circle class="kbg-hub-circle" :cx="layout.cx" :cy="layout.cy" r="34" />
-        <text class="kbg-hub-title" :x="layout.cx" :y="layout.cy - 2" text-anchor="middle">{{ props.zh ? '知识库' : 'KB' }}</text>
-        <text class="kbg-hub-sub" :x="layout.cx" :y="layout.cy + 14" text-anchor="middle">
-          {{ totalFiles }} {{ props.zh ? '文件' : 'files' }} · {{ totalBlocks }} {{ props.zh ? '切片' : 'slices' }}
-        </text>
+        <foreignObject :x="layout.cx - 16" :y="layout.cy - 16" width="32" height="32" class="kbg-hub-icon-wrap">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="kbg-hub-icon"><i class="fa fa-database"></i></div>
+        </foreignObject>
       </g>
 
       <g
@@ -399,6 +433,7 @@ const ringLegend = computed(() => [
         :transform="`translate(${node.x} ${node.y})`"
         @click.stop="emit('select', { node, item: node.item })"
       >
+        <circle class="kbg-halo" :r="node.r + 4" />
         <circle :r="node.r" />
         <text
           v-if="node.showLabel && node.label"
@@ -481,6 +516,29 @@ const ringLegend = computed(() => [
   width: 100%;
   display: block;
 }
+/* 四圈轨道：让“文件→切片→实体→问题”的层次一眼可见 */
+.kbg-orbit {
+  fill: none;
+  stroke-width: 1;
+  stroke-dasharray: 2 6;
+  opacity: .26;
+}
+.orbit-file { stroke: #58a6ff; }
+.orbit-slice { stroke: #ff7b72; }
+.orbit-entity { stroke: #a371f7; }
+.orbit-question { stroke: #2dd4bf; }
+.kbg-orbit-label {
+  font-size: 8.5px;
+  letter-spacing: .04em;
+  opacity: .7;
+  paint-order: stroke;
+  stroke: var(--backgroundColor);
+  stroke-width: 2px;
+}
+.orbit-label-file { fill: #58a6ff; }
+.orbit-label-slice { fill: #ff7b72; }
+.orbit-label-entity { fill: #a371f7; }
+.orbit-label-question { fill: #2dd4bf; }
 .kbg-edge {
   stroke: var(--borderColor);
   stroke-width: 1;
@@ -492,6 +550,23 @@ const ringLegend = computed(() => [
 }
 .kbg-hub-circle {
   fill: var(--fontActiveColor);
+}
+.kbg-hub-icon-wrap {
+  overflow: visible;
+  pointer-events: none;
+}
+.kbg-hub-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--backgroundColor);
+  font-size: 16px;
+  pointer-events: none;
+}
+.kbg-hub:hover .kbg-hub-circle {
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--fontActiveColor) 65%, transparent));
 }
 .kbg-hub-title {
   fill: var(--backgroundColor);
@@ -536,6 +611,16 @@ const ringLegend = computed(() => [
   stroke: color-mix(in srgb, var(--backgroundColor) 65%, transparent);
   stroke-width: 1.5;
 }
+.kbg-node .kbg-halo {
+  stroke: none;
+  opacity: .13;
+  transition: r .3s ease, opacity .3s ease;
+}
+.kbg-node.ring-file .kbg-halo { fill: #58a6ff; }
+.kbg-node.ring-slice .kbg-halo { fill: #ff7b72; }
+.kbg-node.ring-entity .kbg-halo { fill: #a371f7; }
+.kbg-node.ring-question .kbg-halo { fill: #2dd4bf; }
+.kbg-node:hover .kbg-halo { opacity: .3; }
 .kbg-node.st-ready circle { fill: #3fb950; }
 .kbg-node.st-pending circle { fill: #d29922; }
 .kbg-node.st-empty circle { fill: var(--borderColor); }

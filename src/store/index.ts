@@ -527,6 +527,7 @@ export const usestore = defineStore('data', {
             fileViewerDefaults: {} as Record<string, string>,
             windowZoom: 100, // 窗口缩放比例（百分比，50~200；由主进程 window-zoom.json 持久化）
             navLayout: 'top' as 'top' | 'left' | 'bottom', // 导航栏布局：top=顶部（默认）/ left=左侧 / bottom=下方
+            pluginNavMode: 'auto' as 'auto' | 'flat' | 'panel', // 插件导航：auto=放不下才收纳 / flat=始终平铺 / panel=始终收进可搜索的插件面板
             /**
              * 窗口交互模式（统一「打开文件 / 设置 / 插件面板」的落点）：
              *  - multi：多窗口（桌面默认）——设置、文件窗口、插件面板各开独立窗口；
@@ -2250,6 +2251,8 @@ export const usestore = defineStore('data', {
                 if (typeof this.UI.windowZoom !== 'number' || !isFinite(this.UI.windowZoom)) this.UI.windowZoom = 100
                 // 旧存档可能缺少 navLayout，兜底为顶部导航
                 if (this.UI.navLayout !== 'top' && this.UI.navLayout !== 'left' && this.UI.navLayout !== 'bottom') this.UI.navLayout = 'top'
+                // 旧存档缺少插件导航模式：默认自动（放不下才收纳）
+                if (this.UI.pluginNavMode !== 'flat' && this.UI.pluginNavMode !== 'panel') this.UI.pluginNavMode = 'auto'
                 // 旧存档里的「文件打开方式」（fileOpenMode：新窗口 / 窗口内）已取消：文件一律在新窗口打开
                 delete (this.UI as any).fileOpenMode
                 // 旧存档里的「视图布局」（layout：横向 / 纵向）已取消：主窗口一次只显示一个视图，不再有并排方向

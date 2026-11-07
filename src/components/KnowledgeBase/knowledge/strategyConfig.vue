@@ -74,22 +74,10 @@
           </div>
         </div>
 
-        <!-- Tab 栏（名称/类型下方；仅管线组合需要 tab 切换；社区全局 / 智能路由合并为一页） -->
-        <div v-if="selected.kind === 'pipeline'" class="ae-tabs">
-          <button class="ae-tab" :class="{ on: activeTab === 'ingest' }" @click="activeTab = 'ingest'">
-            <i class="fa fa-cogs"></i> <span class="ae-tab-text">{{ t('处理管线', 'Ingest') }}</span>
-            <span v-if="missingIngestDeps.length" class="sc-dep-badge" :title="t('检索管线缺少依赖的处理原语', 'Retrieval pipeline missing required ingestion primitives')">{{ missingIngestDeps.length }}</span>
-          </button>
-          <button class="ae-tab" :class="{ on: activeTab === 'pipeline' }" @click="activeTab = 'pipeline'">
-            <i class="fa fa-cubes"></i> <span class="ae-tab-text">{{ t('检索管线', 'Pipeline') }}</span>
-          </button>
-          <button class="ae-tab" :class="{ on: activeTab === 'params' }" @click="activeTab = 'params'">
-            <i class="fa fa-sliders"></i> <span class="ae-tab-text">{{ t('检索参数', 'Params') }}</span>
-          </button>
-        </div>
-
-        <!-- 处理管线（仅管线组合，tab 页） -->
-        <div v-if="activeTab === 'ingest' && selected.kind === 'pipeline'" class="ae-tab-body">
+        <!-- 详细设置：处理管线 / 检索管线 / 检索参数合并为一页（不再分 Tab） -->
+        <!-- 处理管线 -->
+        <div v-if="selected.kind === 'pipeline'" class="ae-tab-body">
+          <div class="sc-section-title"><i class="fa fa-cogs"></i> {{ t('处理管线', 'Ingestion pipeline') }}</div>
           <div class="cap-body">
             <!-- 检索管线依赖缺失提示：检索管线有步骤但处理管线缺依赖原语 -->
             <div v-if="missingIngestDeps.length" class="sc-dep-warn">
@@ -140,8 +128,9 @@
           </div>
         </div>
 
-        <!-- 检索管线：查询阶段原语编辑（仅管线组合，tab 页） -->
-        <div v-if="activeTab === 'pipeline' && selected.kind === 'pipeline'" class="ae-tab-body">
+        <!-- 检索管线 -->
+        <div v-if="selected.kind === 'pipeline'" class="ae-tab-body">
+          <div class="sc-section-title"><i class="fa fa-cubes"></i> {{ t('检索管线', 'Retrieval pipeline') }}</div>
           <div class="cap-body">
             <!-- 问题增强通道开关：策略含 dense_score 步骤时显示；联动增强权重与处理管线的 semantic_enhance -->
             <div v-if="hasDenseScore" class="cfg-row sc-channel-row">
@@ -193,8 +182,9 @@
           </div>
         </div>
 
-        <!-- 检索参数（仅管线组合，tab 页） -->
-        <div v-if="activeTab === 'params' && selected.kind === 'pipeline'" class="ae-tab-body">
+        <!-- 检索参数 -->
+        <div v-if="selected.kind === 'pipeline'" class="ae-tab-body">
+          <div class="sc-section-title"><i class="fa fa-sliders"></i> {{ t('检索参数', 'Retrieval parameters') }}</div>
           <div class="cfg-row column cfg-box">
             <div class="cfg-row">
               <label>{{ t('召回数量', 'TopK') }}</label>
@@ -1124,8 +1114,10 @@ onMounted(() => { load(); syncResetHeight() })
 .ae-tab i { font-size: 10px; }
 .ae-tab:hover { opacity: 1; color: var(--fontActiveColor); }
 .ae-tab.on { opacity: 1; color: var(--fontActiveColor); font-weight: 600; border-color: var(--borderColor); background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent); }
-.ae-tab-body { display: flex; flex-direction: column; gap: 5px; flex: 1; min-height: 0; }
-.ae-tab-body > .cfg-box { flex: 1 1 auto; min-height: 0; }
+.ae-tab-body { display: flex; flex-direction: column; gap: 5px; flex: 0 0 auto; min-height: auto; }
+.ae-tab-body > .cfg-box { flex: 0 0 auto; min-height: auto; }
+.sc-section-title { display: flex; align-items: center; gap: 5px; padding: 2px 1px 1px; font-size: 10px; font-weight: 600; letter-spacing: .03em; color: var(--fontColor); opacity: .62; }
+.sc-section-title .fa { color: var(--fontActiveColor); font-size: 10px; }
 
 /* 配置表单 */
 .cfg-row { display: flex; align-items: center; gap: 5px; }
@@ -1142,6 +1134,9 @@ onMounted(() => { load(); syncResetHeight() })
   flex: none; width: 15px; height: 15px; padding: 0; margin: 2px 4px 0 0;
 }
 .cfg-box { gap: 5px; padding: 6px; border: 1px solid var(--borderColor); border-radius: 6px; overflow-y: auto; }
+/* 详细配置整体只由 .ae-body 滚动，内部配置块不再各自滚动 */
+.ae-body .cfg-box { overflow: visible; }
+.ae-body .cap-body { flex: 0 0 auto; min-height: auto; }
 .cfg-box > label { min-width: 0; font-weight: 600; }
 .cap-body { display: flex; flex-direction: column; gap: 5px; flex: 1; min-height: 0; }
 .skill-box-head { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }

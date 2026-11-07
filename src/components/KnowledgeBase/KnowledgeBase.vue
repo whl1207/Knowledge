@@ -181,6 +181,8 @@ const showKbMenu = ref(false)
 const navCollapsed = ref(false)
 const learnTab = ref('overview')
 const learningStatus = ref('')
+const learnDueCount = ref(0)
+const learnMistakeCount = ref(0)
 /** 配置页当前分组：由工具栏三个按钮切换，不再有设置页内部导航 */
 const configGroup = ref<'knowledgebase' | 'strategy' | 'process'>('knowledgebase')
 let prompt = ref("")
@@ -343,6 +345,8 @@ const questionBadCount = ref(0)
 // 独立性评审活动状态：进行中/完成汇总（底部状态栏常驻显示，不受 6s 自动清除影响）
 const questionReviewStatus = ref('')
 const questionReviewRunning = ref(false)
+const questionViewRef = ref<any>(null)
+const fullPipelineRunning = ref(false)
 
 // 底部状态栏（prep-status-panel）显示的当前状态行：所有 kb_state 更新都会反映到面板，避免弹窗刷屏
 let kbPanelMsg = ref('')
@@ -464,8 +468,8 @@ const navGroups = computed<NavGroup[]>(() => {
             items: [
                 { key: 'learn-overview', label: t('总览', 'Overview'), icon: 'fa-dashboard' },
                 { key: 'learn-map', label: t('地图', 'Map'), icon: 'fa-map-o' },
-                { key: 'learn-review', label: t('复习', 'Review'), icon: 'fa-refresh' },
-                { key: 'learn-mistakes', label: t('错题本', 'Mistakes'), icon: 'fa-exclamation-circle' },
+                ...(learnDueCount.value > 0 ? [{ key: 'learn-review', label: t('复习', 'Review'), icon: 'fa-refresh', count: learnDueCount.value }] : []),
+                ...(learnMistakeCount.value > 0 ? [{ key: 'learn-mistakes', label: t('错题本', 'Mistakes'), icon: 'fa-exclamation-circle', count: learnMistakeCount.value }] : []),
                 { key: 'learn-exam', label: t('考试', 'Exam'), icon: 'fa-graduation-cap' },
             ],
         },
@@ -498,6 +502,10 @@ const currentKbLabel = computed(() => {
         : (zh.value ? '未选择知识库' : 'No KB')
 })
 const currentKbPath = computed(() => String(knowledgeBases.value[selectedKbIndex.value]?.path || ''))
+const isAutoKb = computed(() => {
+    const kb: any = knowledgeBases.value[selectedKbIndex.value]
+    return !kb?.path || !!kb?.auto
+})
 
 const kbHealthKind = computed<'ok' | 'warn'>(() => {
     if (!store.root) return 'warn'
@@ -541,6 +549,16 @@ function selectSection(key: string): void {
         learningStatus.value = ''
     }
     if (isNarrow.value) showSectionList.value = false
+}
+
+/** 复习/错题本为空时隐藏导航；若正停在被隐藏页面则回到总览 */
+function applyLearnCounts(counts: { due: number; mistakes: number }): void {
+    learnDueCount.value = Math.max(0, Number(counts?.due) || 0)
+    learnMistakeCount.value = Math.max(0, Number(counts?.mistakes) || 0)
+    if (viewMode.value !== 'learn') return
+    if ((learnTab.value === 'review' && !learnDueCount.value) || (learnTab.value === 'mistakes' && !learnMistakeCount.value)) {
+        learnTab.value = 'overview'
+    }
 }
 
 /** 工具栏三个配置按钮：直接打开配置页对应分组 */
@@ -589,6 +607,92 @@ async function runPrimaryAction(): Promise<unknown> {
     if (!isSliced.value) return sliceOnly()
     if (!isEmbedded.value) return embedBlocks()
     return runIncrementalUpdate()
+}
+
+/**
+ * 自动知识库一键加工：转化文件 → 切片 → 向量化 → 提取问题 → 独立性评审
+ * → 提取本体 → 检测社区 → 推理报告。阶段进度复用 prepState（底部状态栏）。
+ */
+async function runFullPipeline(): Promise<void> {
+    if (fullPipelineRunning.value) return
+    if (!store.root) {
+        ElMessage.warning(store.locales === 'zh' ? '请先选择知识库文件夹' : 'Please select a KB folder first')
+        return
+    }
+    fullPipelineRunning.value = true
+    resetPrepState()
+    prepState.active = true
+    _suppressKbMsg = true
+    const zh = store.locales === 'zh'
+    const stages = zh
+        ? ['转化文件', '切片', '向量化', '提取问题', '独立性审核', '提取本体', '检测社区', '推理报告']
+        : ['Convert files', 'Slice', 'Embed', 'Extract questions', 'Independence review', 'Extract ontology', 'Detect communities', 'Reason reports']
+    prepState.steps = stages.map((step, i) => ({
+        step: `${i + 1}/${stages.length} ${step}`,
+        status: i === 0 ? 'running' as const : 'pending' as const,
+        detail: '',
+    }))
+
+    const step = (i: number, status: 'pending' | 'running' | 'done' | 'error', detail = '') => {
+        setPrepStep(i, status, detail)
+        if (status === 'running') kb_state.value = `${stages[i]}…`
+    }
+    let current = 0
+    try {
+        step(0, 'running', zh ? '正在把 PDF/Word 转为 Markdown…' : 'Converting PDF/Word to Markdown…')
+        await normalizeFiles()
+        step(0, 'done', zh ? '文件转化完成' : 'Files converted')
+
+        current = 1
+        step(1, 'running', zh ? '正在读取文件并按策略切分…' : 'Reading files and slicing…')
+        await sliceOnly(true, (detail) => step(1, 'running', detail))
+        if (!blocks.value.length) throw new Error(zh ? '没有可切片的文档' : 'No documents to slice')
+        step(1, 'done', zh ? `切片完成：${blocks.value.length} 个` : `Sliced: ${blocks.value.length}`)
+
+        current = 2
+        step(2, 'running', zh ? '正在生成切片向量…' : 'Generating embeddings…')
+        await embedBlocks((detail) => step(2, 'running', detail))
+        if (!isEmbedded.value) throw new Error(zh ? '向量化未完成，请检查嵌入模型' : 'Embedding did not finish; check the embed model')
+        step(2, 'done', zh ? '切片向量化完成' : 'Slice embeddings done')
+
+        current = 3
+        step(3, 'running', zh ? '正在提取问题…' : 'Extracting questions…')
+        await startExtract()
+        step(3, 'done', zh ? `问题提取完成：${questionBank.value.length} 条` : `Questions: ${questionBank.value.length}`)
+
+        current = 4
+        step(4, 'running', zh ? '正在做独立性审核…' : 'Reviewing independence…')
+        await nextTick()
+        if (questionViewRef.value?.runReview) await questionViewRef.value.runReview()
+        step(4, 'done', zh ? '独立性审核完成' : 'Independence review done')
+
+        current = 5
+        step(5, 'running', zh ? '正在提取本体…' : 'Extracting ontology…')
+        await startBuildOntology((detail) => step(5, 'running', detail))
+        step(5, 'done', zh ? `本体完成：${globalEntities.value.size} 个实体` : `Ontology: ${globalEntities.value.size} entities`)
+
+        current = 6
+        step(6, 'running', zh ? '正在检测社区…' : 'Detecting communities…')
+        detectCommunities()
+        step(6, 'done', zh ? `社区检测完成：${communityResult.value?.count ?? 0} 个` : `Communities: ${communityResult.value?.count ?? 0}`)
+
+        current = 7
+        step(7, 'running', zh ? '正在推理社区报告…' : 'Reasoning community reports…')
+        await generateCommunityReportsAction((detail) => step(7, 'running', detail))
+        step(7, 'done', zh ? '社区报告完成' : 'Community reports done')
+
+        kb_state.value = zh ? '一键加工完成' : 'Full pipeline complete'
+        ElMessage.success(zh ? '一键加工完成：知识库已可问答、学习与评测' : 'Full pipeline complete: ready for Q&A, learning and tests')
+    } catch (e: any) {
+        const msg = String(e?.message || e || '')
+        step(current, 'error', msg || (zh ? '处理失败' : 'Failed'))
+        kb_state.value = zh ? `一键加工中断：${msg || '处理失败'}` : `Pipeline stopped: ${msg || 'failed'}`
+        console.warn('[知识库] 一键加工失败:', e)
+    } finally {
+        fullPipelineRunning.value = false
+        prepState.active = false
+        _suppressKbMsg = false
+    }
 }
 
 // 只显示文件夹名称（悬停时显示完整路径）
@@ -7246,6 +7350,10 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="mt-right">
+                <button v-if="isAutoKb && store.root && (!isNarrow || !showSectionList)" class="mt-secondary" :disabled="fullPipelineRunning" :title="zh ? '一键完成转化、切片、向量化、问题、本体、社区与报告' : 'Run conversion, slicing, embedding, questions, ontology, communities and reports in one go'" @click="runFullPipeline">
+                    <i class="fa" :class="fullPipelineRunning ? 'fa-spinner fa-spin' : 'fa-bolt'"></i>
+                    {{ fullPipelineRunning ? (zh ? '加工中…' : 'Processing…') : (zh ? '一键加工' : 'Full pipeline') }}
+                </button>
                 <button v-if="!isNarrow || !showSectionList" class="mt-primary" @click="runPrimaryAction">{{ primaryLabel }}</button>
                 <div class="mt-config-btns">
                     <button class="mt-config-btn" :class="{ active: viewMode === 'set' && configGroup === 'knowledgebase' }" :title="zh ? '版本管理' : 'Versions'" @click="openConfig('knowledgebase')">
@@ -7448,6 +7556,7 @@ onBeforeUnmount(() => {
                 :preferred-kb-path="currentKbPath"
                 @navigate="(p: string) => { learnTab = p; viewMode = 'learn' }"
                 @status="(s: string) => learningStatus = s"
+                @counts="applyLearnCounts"
                 @ask="onLearningAsk"
             />
         </KeepAlive>
@@ -7611,6 +7720,7 @@ onBeforeUnmount(() => {
         <!-- 问题视图（常驻保活：v-show 切走不销毁组件，独立性评审等会话内状态 / 滚动位置得以保留） -->
         <div v-show="viewMode=='question'" class="question-view-host">
             <questionView
+                ref="questionViewRef"
                 :model="model"
                 :question-bank="questionBank"
                 :blocks="blocks"
@@ -8005,6 +8115,24 @@ onBeforeUnmount(() => {
         background: var(--menuActiveColor);
         color: var(--fontActiveColor);
     }
+    .mt-secondary {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        height: 26px;
+        padding: 0 8px;
+        box-sizing: border-box;
+        border: 1px solid var(--fontActiveColor);
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fontActiveColor);
+        font: inherit;
+        font-size: 11px;
+        white-space: nowrap;
+        cursor: pointer;
+    }
+    .mt-secondary:hover:not(:disabled) { background: var(--menuActiveColor); }
+    .mt-secondary:disabled { opacity: .6; cursor: default; }
     .mt-primary {
         height: 26px;
         padding: 0 10px;

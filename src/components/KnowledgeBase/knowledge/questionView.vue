@@ -585,6 +585,7 @@ const runReview = async () => {
     emit('updateReviewRunning', false)
   }
 }
+defineExpose({ runReview })
 
 // ---------------- 批量整理 + 审核（重复分组，只判组不改库；逐组由用户决定） ----------------
 const threshold = computed(() => Number(props.model?.questionDedupThreshold) || 0.85)

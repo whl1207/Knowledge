@@ -243,6 +243,10 @@ import { useTallLayout } from '@/composables/useTallLayout'
     if (store.singleWindowMode && store.settingsOpen) {
       return store.locales === 'en' ? 'Settings' : '设置'
     }
+    // 插件收纳面板打开时，顶栏标题跟随当前状态（有自定义标题也以插件面板为准）
+    if (store.pluginLauncherOpen) {
+      return store.locales === 'en' ? 'All plugins' : '全部插件'
+    }
     // 自定义标题：界面设置中定义后固定不变，不再随当前面板变化
     if (store.customTitle && store.customTitle.trim()) {
       return store.customTitle
@@ -430,8 +434,16 @@ import { useTallLayout } from '@/composables/useTallLayout'
    * 收纳后一个都不渲染（导航栏上只留 `fa fa-th-large` 启动器）。用「过滤后的列表」而不是
    * 在 `v-for` 上加 `v-if`：Vue 3 里同一元素上的 `v-if` 优先级高于 `v-for`，拿不到循环变量。
    */
+  const pluginNavMode = computed(() => store.UI.pluginNavMode || 'auto')
+  /** 插件区最终显示为聚合面板还是平铺：auto 由宽度判定，flat/panel 由用户设置强制 */
+  const pluginLauncherVisible = computed(() => {
+    if (!pluginNavButtons.value.length) return false
+    if (pluginNavMode.value === 'panel') return true
+    if (pluginNavMode.value === 'flat') return false
+    return navOverflow.value.launcherVisible
+  })
   const visiblePluginNavButtons = computed(() =>
-    navOverflow.value.launcherVisible ? [] : pluginNavButtons.value,
+    pluginLauncherVisible.value ? [] : pluginNavButtons.value,
   )
 
   /** 当前布局下「插件图标」所在的容器：顶栏 = .panel-nav；左/下导航 = 整个导航栏 */
@@ -491,6 +503,7 @@ import { useTallLayout } from '@/composables/useTallLayout'
    * 关闭网格由「点任一主面板导航按钮」（见 selectPanel）或再点一次启动器完成。
    */
   function togglePluginLauncher() {
+    if (store.singleWindowMode && store.settingsOpen) closeSetPanel()
     store.pluginLauncherOpen = !store.pluginLauncherOpen
     nextTick(syncNavOverflow)
   }
@@ -988,8 +1001,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
    * 把触发按钮一起传下去：浮层贴着它展开，永不遮挡导航栏。
    */
   function onAttentionEntryClick(e: MouseEvent): void {
-    // 抽屉与设置浮层互斥：设置是「目的地」，盖住收件箱时先收起抽屉，避免两层叠着
-    if (!attentionPanelOpen.value && store.settingsOpen) closeSetPanel()
+    // 「待我处理」不关闭设置浮层：用户可能在设置中随手查看收件箱，设置保持原状
     togglePanel((e?.currentTarget as HTMLElement) || null)
   }
 
@@ -1100,6 +1112,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
   // 打开「浏览器 Agent」：单窗口模式内嵌到主内容区（与左侧导航图标一致），多窗口模式打开独立窗口
   async function openBrowserAgent() {
     if (!hasCapability('browserAgent')) return
+    if (store.singleWindowMode && store.settingsOpen) closeSetPanel()
     if (store.singleWindowMode) {
       // 与切主面板同一条离开守卫（主页右侧栏 / 知识管理可能还有未保存内容）
       if (!store.browserPanelOpen && !(await store.runLeaveGuards())) return
@@ -1176,7 +1189,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
 
       <!-- 收纳后的启动器：fa fa-th-large，点开在主面板用 grid 列出插件 -->
       <div
-        v-if="navOverflow.launcherVisible"
+        v-if="pluginLauncherVisible"
         class="side-nav-item nav-launcher"
         :class="{ active: store.pluginLauncherOpen }"
         @click="togglePluginLauncher"
@@ -1236,7 +1249,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
                    ⚠️ 用 v-show（不是 v-if）：聚合时这一行只是 display:none，行容器与判定用的
                    内置图标都还在，重量时不必临时改样式（判定全程只读 DOM，见 syncNavOverflow 第 3 条）。
                    行上的 data-plugin-row 是给判定层认「这一行就是被判定对象」用的。 -->
-              <div v-show="!navOverflow.launcherVisible" class="panel-nav-plugins" data-plugin-row>
+              <div v-show="!pluginLauncherVisible" class="panel-nav-plugins" data-plugin-row>
                 <div
                   v-for="btn in visiblePluginNavButtons"
                   :key="btn.key"
@@ -1250,7 +1263,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
               <!-- 聚合图标：只在插件图标放不下时出现（此时上面那行整行收起）。
                    nav-launcher 这个类名是给判定层排除「聚合图标」用的（决定平铺时它并不存在） -->
               <div
-                v-if="navOverflow.launcherVisible"
+                v-if="pluginLauncherVisible"
                 class="nav-launcher"
                 :class="{ active: store.pluginLauncherOpen }"
                 @click="togglePluginLauncher"
@@ -1311,6 +1324,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
           :total-count="pluginTotalCount"
           :enabled-count="pluginEnabledCount"
           @select="openPluginPanel"
+          @settings="store.openSettings('plugin')"
         />
         <!-- 单窗口模式：浏览器模块内嵌在主内容区（与左侧导航图标同一逻辑；原生网页视图由主进程按 .ba-main 矩形定位） -->
         <div v-else-if="store.browserPanelOpen" class="main-browser">
@@ -1383,7 +1397,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
 
       <!-- 收纳后的启动器 -->
       <div
-        v-if="navOverflow.launcherVisible"
+        v-if="pluginLauncherVisible"
         class="bottom-nav-item nav-launcher"
         :class="{ active: store.pluginLauncherOpen }"
         @click="togglePluginLauncher"
@@ -1414,7 +1428,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
       </div>
     </div>
     
-    <!-- 待我处理浮层：盖在内容区之上、设置浮层之下（z-index 1450）；无遮罩，点外部 / Esc 关闭；
+    <!-- 待我处理浮层：盖在内容区之上；不关闭设置浮层，需要时显示在设置之上；无遮罩，点外部 / Esc 关闭；
          轻提示就地胶囊挂在所有窗口模式之外（见下方 AttentionNoticeChip），各窗口都能看到提示 -->
     <AttentionPanel :open="attentionPanelOpen" @close="closeAttentionPanel" />
 
@@ -1582,6 +1596,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
     font-size: 16px;
     cursor: pointer;
     color: var(--fontColor);
+    -webkit-app-region: no-drag;
   }
   .plugin-panel-dialog-close:hover {
     color: var(--fontActiveColor);
