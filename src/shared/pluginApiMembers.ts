@@ -106,6 +106,8 @@ export const MAIN_CTX_MEMBERS: PluginCtxMembers = {
   tool: null, // (def) => disposer
   service: null, // (name, impl) => disposer
   getService: null, // (name) => impl | undefined
+  // DSH 兼容取服务：ctx.get('homePaths') → { home }（plugin-host 按插件注入 dataDir）
+  get: null, // (name) => impl | undefined
   on: null, // (type, listener) => disposer
   effect: null, // (fn) => disposer
   host: ['readFile', 'writeFile', 'listDir', 'runShell', 'fetch', 'sessions', 'granted', 'notify'],

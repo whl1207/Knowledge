@@ -39,7 +39,7 @@ export interface AgentContractCase {
 /** 危险工具的"必须被拒"清单（零权限插件下） */
 const MUST_BE_DENIED_WHEN_UNPRIVILEGED = [
   'read_file', 'search_files', 'list_dir', 'write_file', 'replace_in_file', 'multi_replace',
-  'run_python', 'shell', 'mcp_call', 'skill', 'run_subagent', 'job_output', 'job_kill', 'kb_search',
+  'run_code', 'shell', 'mcp_call', 'skill', 'run_subagent', 'job_output', 'job_kill', 'kb_search',
 ]
 
 export function runAgentContractSelfTest(): AgentContractCase[] {
@@ -234,7 +234,7 @@ export function runAgentContractSelfTest(): AgentContractCase[] {
     // 命令 / 代码执行 / 技能 / 递归委派 仍然进不来（永不放宽）。
     const all: PluginPermission[] = ['fs', 'shell', 'net', 'agent', 'agent.run', 'llm']
     const set = delegableToolSet(all, { fs: true, mcp: true })
-    const stillDenied = ['shell', 'run_python', 'skill', 'run_subagent', 'job_output', 'job_kill'].filter((t) => set.has(t))
+    const stillDenied = ['shell', 'run_code', 'skill', 'run_subagent', 'job_output', 'job_kill'].filter((t) => set.has(t))
     const neverTier = neverRelaxableSlots()
     cases.push({
       name: '**两个开关全开 + 全部权限声明** → 命令 / 代码 / 技能 / 递归委派仍然进不来',

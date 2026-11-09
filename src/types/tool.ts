@@ -36,6 +36,12 @@ export interface ToolExecutionContext {
   windowTokens?: number
   /** 取消信号 */
   signal?: AbortSignal
+  /**
+   * 本会话模型是否支持图片输入：
+   * - false（已确认不支持）→ read_image / 截图工具直接返回文本说明，不产出图片；
+   * - true / 缺省 → 按原样产出图片（请求层仍会在服务端拒绝时自动去图重放）。
+   */
+  vision?: boolean
   /** 额外上下文 */
   [key: string]: unknown
 }

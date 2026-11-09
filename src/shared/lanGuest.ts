@@ -71,7 +71,7 @@ export const LAN_GUEST_MODES: Array<{
 
 /**
  * 访客默认可用的工具：只读 + 检索/联网。
- * 绝不含写入（write_file / replace_in_file / multi_replace）、执行（run_python / shell / run_code）
+ * 绝不含写入（write_file / replace_in_file / multi_replace）、执行（run_code / shell / run_code）
  * 与外部能力（mcp_call / skill / run_subagent / export_word）。
  */
 export const LAN_GUEST_READONLY_TOOLS: string[] = [
@@ -89,7 +89,7 @@ export const LAN_GUEST_DANGEROUS_TOOLS: ReadonlySet<string> = new Set([
   'write_file',
   'replace_in_file',
   'multi_replace',
-  'run_python',
+  'run_code',
   'shell',
   'run_code',
   'run_subagent',

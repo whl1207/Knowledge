@@ -7,6 +7,30 @@
 
 ---
 
+## 2026-11-10
+
+### Fixed
+
+- **Settings no longer overwrite each other across windows**: with several windows open, settings, model sources and newly added agents are not reset by another window’s older state.
+- **Built-in preset tool toggles no longer revert**: tools you unchecked are not added back after a restart.
+- **New agents are no longer lost in folder mode**: a newly created agent no longer disappears when Settings is reopened.
+- **Image-read failures no longer abort the whole run**: when the model cannot take images the image is skipped and the task continues instead of stopping.
+- **Closing a question suspends it instead of stopping**: Close / “Answer later” moves the question into “Needs me”; only “Abort” stops the agent.
+- **Plugin panel title is centred again**: fixed the title offset in overlay mode.
+- **Expanded agent tools show the real result**: file reads show the content, commands show the output, searches show file or hit lists; the top and bottom panes are no longer identical.
+- **Large knowledge bases no longer freeze or crash on ask**: the stalls and crashes on large retrievals are fixed, with less repeated work.
+- **Closing the settings window by the system now saves**: closing via Alt+F4 or similar no longer drops the last edit.
+
+### Removed
+
+- **MDS / MDS(M) / PCA removed from retrieval methods**: they are dimensionality-reduction/visualization methods, not retrieval strategies; only CS / CS(M) remain, and older knowledge bases fall back to CS.
+- **Unused t-SNE / UMAP dimensionality settings removed**: fewer dead settings and a smaller bundle.
+
+### Improved
+
+- **Merged cosine (CS(M)) now actually uses question vectors**: it blends related questions, so CS(M) is no longer identical to plain CS.
+- **Knowledge-base retrieval and question lists are smoother**: question indexes and answer text are cached and reused, making filtering and retrieval faster.
+
 ## 2026-11-07
 
 ### Added

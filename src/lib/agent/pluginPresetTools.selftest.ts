@@ -35,7 +35,7 @@ export interface PluginPresetToolsCase {
 const PI_BASE = [
   'ask_user', 'read_file', 'search_files', 'list_dir',
   'write_file', 'replace_in_file', 'multi_replace',
-  'shell', 'run_python', 'web_search', 'web_fetch', 'skill',
+  'shell', 'run_code', 'web_search', 'web_fetch', 'skill',
 ]
 
 const MPG = [

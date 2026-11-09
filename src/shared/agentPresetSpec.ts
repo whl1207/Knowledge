@@ -101,7 +101,7 @@ const CAPABILITY_NOTES: Record<string, string> = {
   readFiles: '读文件 + 按内容/文件名搜索',
   listDirs: '列目录',
   writeFiles: '写文件 / 精确替换 / 多段替换',
-  executeCode: '执行 Python',
+  executeCode: '执行代码（run_code）',
   runShell: '执行 shell 命令（能力最大的槽位，按需才开）',
   webSearch: '联网搜索 + 抓取网页',
   browseWebsites: '内置浏览器操作（会真实点击/填写，谨慎开启）',
@@ -112,7 +112,7 @@ const CAPABILITY_NOTES: Record<string, string> = {
 /** 预设的常见组合（给模型「照着改」的起点，而不是从零想） */
 const PRESET_RECIPES: Array<{ name: string; when: string; tools: string[] }> = [
   { name: '只读分析', when: '读代码 / 查资料 / 出结论，不改任何东西', tools: ['read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir', 'web_search', 'web_fetch', 'ask_user', 'update_todo'] },
-  { name: '编码助手', when: '要改文件并验证', tools: ['read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir', 'write_file', 'replace_in_file', 'multi_replace', 'run_python', 'shell', 'update_plan', 'exit_plan_mode', 'update_todo', 'ask_user'] },
+  { name: '编码助手', when: '要改文件并验证', tools: ['read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir', 'write_file', 'replace_in_file', 'multi_replace', 'run_code', 'shell', 'update_plan', 'exit_plan_mode', 'update_todo', 'ask_user'] },
   { name: '知识库问答', when: '只答用户资料里的内容（先关联 .kb）', tools: ['kb_search', 'read_file', 'read_image', 'working_directory', 'ask_user'] },
   { name: '工具调度', when: '经 MCP 调外部服务（Office / 浏览器 / 自定义）', tools: ['mcp_call', 'ask_user', 'update_todo'] },
 ]

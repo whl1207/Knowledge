@@ -70,21 +70,39 @@
       <!-- 空面板：和新标签页一样，先让用户选一种使用方式（终端 / 文件 / 浏览器 / 分支） -->
       <div v-if="!tabs.length" class="dock-empty">
         <div class="dock-empty-title">{{ zh ? '选择右侧栏的使用方式' : 'Choose what to show here' }}</div>
-        <div class="dock-empty-actions">
-          <button
-            v-for="kind in availableKinds"
-            :key="kind"
-            class="dock-empty-btn"
-            :title="kindHint(kind)"
-            @click="chooseKind(kind)"
-          >
-            <i class="fa" :class="kindIcon(kind)"></i>
-            <span>{{ kindLabel(kind) }}</span>
-          </button>
-          <button class="dock-empty-btn" :title="zh ? '打开一个文件并作为标签页加入右侧栏' : 'Open a file and add it as a tab'" @click="emit('pick-file')">
-            <i class="fa fa-file-text-o"></i>
-            <span>{{ zh ? '文件' : 'File' }}</span>
-          </button>
+        <div class="dock-empty-group">
+          <div class="dock-empty-group-title">{{ zh ? '工作区与工具' : 'Workspace & tools' }}</div>
+          <div class="dock-empty-actions">
+            <button
+              v-for="kind in primaryKinds"
+              :key="kind"
+              class="dock-empty-btn"
+              :title="kindHint(kind)"
+              @click="chooseKind(kind)"
+            >
+              <i class="fa" :class="kindIcon(kind)"></i>
+              <span>{{ kindLabel(kind) }}</span>
+            </button>
+            <button class="dock-empty-btn" :title="zh ? '打开一个文件并作为标签页加入右侧栏' : 'Open a file and add it as a tab'" @click="emit('pick-file')">
+              <i class="fa fa-file-text-o"></i>
+              <span>{{ zh ? '文件' : 'File' }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="uniqueKinds.length" class="dock-empty-group">
+          <div class="dock-empty-group-title">{{ zh ? '唯一面板' : 'Single panels' }}</div>
+          <div class="dock-empty-actions">
+            <button
+              v-for="kind in uniqueKinds"
+              :key="kind"
+              class="dock-empty-btn"
+              :title="kindHint(kind)"
+              @click="chooseKind(kind)"
+            >
+              <i class="fa" :class="kindIcon(kind)"></i>
+              <span>{{ kindLabel(kind) }}</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -100,27 +118,46 @@
           <!-- 空白新标签页：先让用户选类型（与 DSH 一致：+ 直接加一页，不在图标下弹菜单） -->
           <div v-if="tab.kind === 'new'" class="dock-empty">
             <div class="dock-empty-title">{{ zh ? '选择这个标签页的使用方式' : 'Choose what this tab shows' }}</div>
-            <div class="dock-empty-actions">
-              <button
-                v-for="kind in availableKinds"
-                :key="kind"
-                class="dock-empty-btn"
-                :title="kindHint(kind)"
-                @click="emit('configure', tab.id, kind)"
-              >
-                <i class="fa" :class="kindIcon(kind)"></i>
-                <span>{{ kindLabel(kind) }}</span>
-              </button>
-              <button class="dock-empty-btn" :title="zh ? '打开一个文件并作为标签页加入右侧栏' : 'Open a file and add it as a tab'" @click="emit('pick-file')">
-                <i class="fa fa-file-text-o"></i>
-                <span>{{ zh ? '文件' : 'File' }}</span>
-              </button>
+            <div class="dock-empty-group">
+              <div class="dock-empty-group-title">{{ zh ? '工作区与工具' : 'Workspace & tools' }}</div>
+              <div class="dock-empty-actions">
+                <button
+                  v-for="kind in primaryKinds"
+                  :key="kind"
+                  class="dock-empty-btn"
+                  :title="kindHint(kind)"
+                  @click="emit('configure', tab.id, kind)"
+                >
+                  <i class="fa" :class="kindIcon(kind)"></i>
+                  <span>{{ kindLabel(kind) }}</span>
+                </button>
+                <button class="dock-empty-btn" :title="zh ? '打开一个文件并作为标签页加入右侧栏' : 'Open a file and add it as a tab'" @click="emit('pick-file')">
+                  <i class="fa fa-file-text-o"></i>
+                  <span>{{ zh ? '文件' : 'File' }}</span>
+                </button>
+              </div>
+            </div>
+            <div v-if="uniqueKinds.length" class="dock-empty-group">
+              <div class="dock-empty-group-title">{{ zh ? '唯一面板' : 'Single panels' }}</div>
+              <div class="dock-empty-actions">
+                <button
+                  v-for="kind in uniqueKinds"
+                  :key="kind"
+                  class="dock-empty-btn"
+                  :title="kindHint(kind)"
+                  @click="emit('configure', tab.id, kind)"
+                >
+                  <i class="fa" :class="kindIcon(kind)"></i>
+                  <span>{{ kindLabel(kind) }}</span>
+                </button>
+              </div>
             </div>
           </div>
           <slot v-else-if="tab.kind === 'branch'" name="branch" />
           <slot v-else-if="tab.kind === 'todos'" name="todos" />
           <slot v-else-if="tab.kind === 'plan'" name="plan" />
           <slot v-else-if="tab.kind === 'trajectory'" name="trajectory" />
+          <ChatDockJobs v-else-if="tab.kind === 'jobs'" :active="tab.id === activeTabId" />
           <ChatDockFiles
             v-else-if="tab.kind === 'files'"
             :active="tab.id === activeTabId"
@@ -181,6 +218,7 @@ import ChatDockFiles from './ChatDockFiles.vue'
 import ChatDockTerminal from './ChatDockTerminal.vue'
 import ChatDockBrowser from './ChatDockBrowser.vue'
 import ChatDockFile from './ChatDockFile.vue'
+import ChatDockJobs from './ChatDockJobs.vue'
 import { fileViewByKey, isPluginViewKey, pluginViewerIdOf } from '@/lib/knowFile/fileViews'
 import { viewerEntryById } from '@/lib/knowFile/fileViewerCatalog'
 import { setOfficeViewsVisible } from '@/lib/knowFile/office'
@@ -239,6 +277,7 @@ function kindIcon(kind: ChatDockTabKind): string {
   if (kind === 'todos') return 'fa-check-square-o'
   if (kind === 'plan') return 'fa-tasks'
   if (kind === 'trajectory') return 'fa-history'
+  if (kind === 'jobs') return 'fa-tasks'
   if (kind === 'new') return 'fa-plus'
   if (kind === 'file') return 'fa-file-text-o'
   return 'fa-folder-open-o'
@@ -250,6 +289,7 @@ function kindLabel(kind: ChatDockTabKind): string {
   if (kind === 'todos') return props.zh ? '待办清单' : 'Todos'
   if (kind === 'plan') return props.zh ? '计划' : 'Plan'
   if (kind === 'trajectory') return props.zh ? '会话轨迹' : 'Trajectory'
+  if (kind === 'jobs') return props.zh ? '后台任务' : 'Jobs'
   if (kind === 'new') return props.zh ? '新标签页' : 'New tab'
   return props.zh ? '工作区' : 'Workspace'
 }
@@ -285,6 +325,11 @@ function kindHint(kind: ChatDockTabKind): string {
       ? '会话轨迹：按轮次查看用户消息、模型回复、工具调用、耗时与 token 用量'
       : 'Trajectory: inspect user turns, replies, tool calls, timings and token usage by turn'
   }
+  if (kind === 'jobs') {
+    return props.zh
+      ? '后台任务：查看 shell / 子代理 / 知识库构建等长任务的进度与输出，可停止'
+      : 'Jobs: follow shell, subagent and KB build tasks, inspect output and stop them'
+  }
   return props.zh
     ? '工作区：浏览当前工作区的文件树，可打开文件或把路径插入输入框（要打开某个具体文件请用旁边的「文件」按钮）'
     : 'Workspace: browse the current workspace file tree, open files or insert their paths into the input box (use the adjacent File button to open a specific file)'
@@ -310,6 +355,9 @@ const availableKinds = computed(() => DOCK_TAB_KINDS.filter((k) => {
   if (isSingletonDockKind(k) && props.tabs.some((t) => t.kind === k)) return false
   return true
 }))
+/** 类型分组：常用工具 vs 唯一面板（分支 / 待办 / 计划 / 轨迹 / 后台任务） */
+const primaryKinds = computed(() => availableKinds.value.filter(k => k === 'files' || k === 'terminal' || k === 'browser'))
+const uniqueKinds = computed(() => availableKinds.value.filter(k => k === 'branch' || k === 'todos' || k === 'plan' || k === 'trajectory' || k === 'jobs'))
 /** 空面板（没有标签时）直接建标签；空白新标签页则把当前页转成目标类型 */
 function chooseKind(kind: ChatDockTabKind) {
   const active = props.tabs.find((t) => t.id === props.activeTabId)
@@ -684,6 +732,8 @@ defineExpose({ confirmLeaveActive })
   color: var(--fontColor);
 }
 .dock-empty-title { font-size: 12px; opacity: 0.75; }
+.dock-empty-group { display: flex; flex-direction: column; gap: 6px; width: min(100%, 340px); }
+.dock-empty-group-title { font-size: 9px; letter-spacing: .04em; opacity: .45; text-align: left; padding-left: 2px; }
 .dock-empty-actions {
   /* 等宽网格：工作区 / 文件 / 终端 / 浏览器 / 分支 / 待办 / 计划按钮宽度完全一致 */
   display: grid;

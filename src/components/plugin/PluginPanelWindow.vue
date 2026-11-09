@@ -205,8 +205,15 @@ function closeWindow() { void getPlatform().window.close() }
   -webkit-app-region: drag;
   z-index: 0;
 }
-.plugin-panel-window.overlay .ppw-header > *:not(.ppw-drag-region) {
+/* 浮层里除拖动层外的子元素要压在拖动层之上。⚠️ 必须排除标题：
+   标题是绝对定位居中的（left/top:50% + translate(-50%,-50%)），一旦被这条
+   通用规则改成 position:relative，那两个偏移会作用在流式位置上，把标题
+   往右下推半格 —— 正是「插件标题错位、没有居中」的根因。这里只给它抬 z-index。 */
+.plugin-panel-window.overlay .ppw-header > *:not(.ppw-drag-region):not(.ppw-title) {
   position: relative;
+  z-index: 1;
+}
+.plugin-panel-window.overlay .ppw-title {
   z-index: 1;
 }
 .plugin-panel-window.overlay .ppw-header-spacer {

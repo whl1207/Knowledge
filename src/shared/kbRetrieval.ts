@@ -358,9 +358,26 @@ export async function retrieveKnowledge(
 
     // 3.5 精简模式懒补全：.kb 未保存向量数据（config.saveVectors=false）时，首次问答按当前
     //     嵌入模型重新推导切片/问题/文件级摘要索引向量（会话内缓存）；已存向量的 KB 无缺失则零开销。
+    //     ⚠️ 只补当前策略真正会用到的通道：similarity 不需要问题向量 / 文件摘要向量，
+    //     以前无条件补会在「6000 个问题」的库上首次提问连发几百次嵌入请求（慢机直接卡死）。
     await ensureMissingBlockVectors(blocks, embedSpec)
-    await ensureMissingQuestionVectors(questions, embedSpec)
-    await ensureMissingFileIndexVectors(fileIndex, embedSpec)
+    // 策略在补全前就确定（后面第 7 步复用同一份，避免重复解析）
+    const strategyId = resolveStrategyId(config.strategy)
+    const strategyDef = getStrategies().find((s) => s.id === strategyId)
+    const steps: any[] = Array.isArray((strategyDef as any)?.steps) ? (strategyDef as any).steps : []
+    const usesQuestionChannel = !!strategyDef && (
+      strategyDef.kind === 'agentic' ||
+      strategyDef.kind === 'hybrid' ||
+      steps.some((st: any) => st.primitive === 'dense_score'
+        && (st.params?.summaryWeight === undefined || Number(st.params.summaryWeight) > 0))
+    )
+    const usesFileIndex = !!strategyDef && (
+      strategyDef.kind === 'agentic' ||
+      strategyDef.kind === 'hybrid' ||
+      steps.some((st: any) => st.primitive === 'file_score')
+    )
+    if (usesQuestionChannel) await ensureMissingQuestionVectors(questions, embedSpec)
+    if (usesFileIndex) await ensureMissingFileIndexVectors(fileIndex, embedSpec)
 
     // 4. 验证模型一致性（如果知识库中有存储向量）
     if (config.debug && kbConfig?.embedModel) {
@@ -386,7 +403,7 @@ export async function retrieveKnowledge(
     )
 
     // 7. 依据检索策略执行：相似度走本地等价路径；其余走 RAG 策略框架（本体/多跳/社区/Agentic/自定义）；失败回退相似度
-    const strategyId = resolveStrategyId(config.strategy)
+    // strategyId / strategyDef 在第 3.5 步已解析（用于决定补哪些向量）
     let context = ''
     let relevantBlocks: RelevantBlock[] = []
     let selectedCount = 0
@@ -415,7 +432,6 @@ export async function retrieveKnowledge(
       let sr: any = null
       // 主页可执行：pipeline（无需对话模型）；agentic（智能路由）需要对话模型做工具路由
       // （mapreduce 需要完整社区上下文，仍回退相似度）
-      const strategyDef = getStrategies().find(s => s.id === strategyId)
       const canRunStrategy = !!strategyDef && (
         strategyDef.kind === 'pipeline' ||
         (strategyDef.kind === 'agentic' && !!String(spec?.chat || '').trim())

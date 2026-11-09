@@ -71,6 +71,9 @@ export async function resetSkillsPathToDefault(): Promise<string> {
 /** 进行中的预设初始化（自动初始化与设置页 onMounted 可能同时触发，合并成一次） */
 let presetInitInFlight: Promise<AgentPresetScanSummary | null> | null = null
 
+/** 用户显式选择「本地存储」的标记：有此标记时启动不再自动切回默认文件夹 */
+export const AGENT_PRESET_LOCAL_MODE_KEY = 'agentPresetLocalMode'
+
 /**
  * 确保预设存储有值：为空时切到默认目录，并把当前内存里的自建预设落进去
  * （老用户迁移；空目录才会写，已有 .agent 文件的目录一律不碰）。
@@ -79,6 +82,11 @@ let presetInitInFlight: Promise<AgentPresetScanSummary | null> | null = null
 export async function ensureDefaultAgentPresetFolder(seedPresets?: any[]): Promise<AgentPresetScanSummary | null> {
   const store = usestore() as any
   if (String(store.agentPresetPath || '')) return null
+  // 用户刚点过「改回本地存储」：尊重选择，别下次进设置又自动切成文件夹模式
+  // （否则本地模式期间新建的预设会被旧文件夹列表覆盖，表现为「新增的智能体没了」）。
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem(AGENT_PRESET_LOCAL_MODE_KEY) === '1') return null
+  } catch { /* 无 localStorage 时按默认逻辑处理 */ }
   if (presetInitInFlight) return await presetInitInFlight
   presetInitInFlight = (async () => {
     const dir = await defaultAgentPresetFolder()

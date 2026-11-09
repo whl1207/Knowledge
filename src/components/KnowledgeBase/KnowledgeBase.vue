@@ -2,7 +2,7 @@
 <script setup lang="ts">
 import { aikmDsh, aikmIpc } from '@/lib/aikmIpc'
 defineOptions({ name: 'Knowledge' })
-import {onMounted,onBeforeUnmount,onActivated,onDeactivated,ref, nextTick,computed, watch, reactive, defineAsyncComponent} from 'vue'
+import {onMounted,onBeforeUnmount,onActivated,onDeactivated,ref, nextTick,computed, watch, reactive, toRaw, defineAsyncComponent} from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as kbAi from '@/shared/kbAiClient'
 import type { KbModelSpec, KbProvider } from '@/shared/kbAiClient'
@@ -138,7 +138,6 @@ const handleNodeClick = (node:any) => {
   console.log('点击节点:', node)
 }
 
-import { Matrix,SingularValueDecomposition } from 'ml-matrix'
 import {usestore} from '@/store'
 import { useTallLayout } from '@/composables/useTallLayout'
 import { getPlatform, hasCapability } from '@/platform'
@@ -400,6 +399,12 @@ const handleSearch = async () => {
     const q = prompt.value
     if (!q || !q.trim()) {
         ElMessage.warning(store.locales == 'zh' ? '请输入问题' : 'Please enter a question')
+        return
+    }
+    // 并发守卫：一次提问会跑「嵌入 + 全量打分 + BM25/策略」，上千切片时本身就很重；
+    // 连续点发送/回车会让多份检索同时压在主线程上（内存翻倍、结果互相覆盖、慢机被杀）。
+    if (qaGenerating.value) {
+        ElMessage.info(store.locales == 'zh' ? '上一次提问还在检索中，请稍候…' : 'The previous question is still running')
         return
     }
     if (!getEnabledStrategies().some(s => s.id === queryMethod.value)) {
@@ -950,15 +955,6 @@ let model = ref({
      * extraAnswer 仍是**文字答案**（正确选项正文）；学习模块据此走确定性判分。
      */
     questionChoiceOptions: true,
-    mdsIterations: 50,
-    mdsEpsilon: 0.1,
-    pcaComponents: 2,
-    tsnePerplexity: 30,
-    tsneIterations: 1000,
-    tsneLearningRate: 200,
-    umapNeighbors: 15,
-    umapMinDist: 0.1,
-    umapSpread: 1.0,
     // 基础通道权重：问题增强 0.7 + 切片 0.3。
     // 0.7 来自参数网格实测（612 题，IN/LOO 两种协议）：sw=0.7 时 IN 95.1% / LOO 84.0%，
     // 在「查询接近题库已有问题」与「查询换说法」两种场景下都稳健。
@@ -1895,8 +1891,18 @@ const handleTestEmbedModelChange = async (next: string): Promise<boolean> => {
 /** 问题参考答案文本（外部答案优先，否则聚合答案切片内容） */
 const resolveQuestionAnswerText = (q: KbQuestion): string => answerText(q, blocks.value, ' | ')
 
-/** 问题增强索引（供 buildRetrievalContext 注入 dense_score 的问题增强通道） */
-const questionVectorsByBlockIndex = () => computeBlockQuestionVectors(questionBank.value)
+/**
+ * 问题增强索引（供 buildRetrievalContext 注入 dense_score 的问题增强通道）。
+ * 模板直接绑这个 computed；旧实现每个渲染/chunk 都重建 6000+ 项 Map。
+ * 依赖「问题 id/状态/来源切片/向量长度」这些浅字段，向量写回时只重建一次。
+ */
+const questionVectorsByBlockCache = computed(() => {
+    const sig = (questionBank.value || [])
+        .map((q: any) => `${q?.id || ''}:${q?.status || ''}:${q?.srcBlockId || ''}:${q?.qVector?.length || 0}`)
+        .join('|')
+    void sig
+    return computeBlockQuestionVectors(toRaw(questionBank.value) as any)
+})
 
 /** 未向量化的问题数（测试页预热项「问题向量缓存」的状态显示与是否已就绪判断） */
 const questionVectorMissingCount = computed(() =>
@@ -1936,7 +1942,13 @@ const deriveTestCasesFromBank = () => {
     syncTestCasesFromBank(false)
   }, 350)
 }
-watch(questionBank, deriveTestCasesFromBank, { deep: true })
+// 只监听「会影响测试用例派生」的浅字段（问题增删 / 文本 / 答案 / 来源切片数量）。
+// 旧实现用 deep watch：每批嵌入写回 qVector（6329 条 × 1024 维）都会触发一次深遍历，
+// 单次约 1–2 秒，补向量期间足以把主线程拖死。
+const questionBankDeriveKey = () => (questionBank.value || [])
+  .map((q: any) => `${q?.id || ''}:${String(q?.text || '').length}:${String(q?.extraAnswer || '').length}:${q?.status || ''}:${Array.isArray(q?.answerBlocks) ? q.answerBlocks.length : 0}`)
+  .join('|')
+watch(questionBankDeriveKey, deriveTestCasesFromBank, { flush: 'post' })
 /** 手动刷新（测试页「读取测试用例」按钮）：切回问题库来源，忽略自动派生守卫，按当前上限重新从问题库派生测试用例 */
 const refreshTestCasesFromBank = () => {
   if (_deriveTimer) { clearTimeout(_deriveTimer); _deriveTimer = null }
@@ -4043,11 +4055,25 @@ const ensureIngestionReady = async (sid: string): Promise<boolean> => {
     if (!def || !def.ingestionSteps?.length) return true
     if (blocks.value.length === 0) return true
 
-    // 语义增强（semantic_enhance → Q_vector）：切片尚未全部增强时需补跑
+    // 语义增强（semantic_enhance）：方案 A 起「语义增强」写的是**问题库的问题向量**
+    // （切片的 Q/Q_vector 已被本原语主动清理），因此就绪判定必须看问题库，而不是切片：
+    // 旧实现看 b.Q_vector，恒为 0 < blocks.length，导致每次提问都重跑整条处理管线
+    // （上千问题逐批嵌入，慢机直接卡死）。
     const needSemantic = def.ingestionSteps.some(st => st.primitive === 'semantic_enhance')
     if (needSemantic) {
-        const enhancedCount = blocks.value.filter((b: any) => b.Q_vector && b.Q_vector.length > 0).length
-        if (enhancedCount < blocks.value.length) {
+        const activeQuestions = questionBank.value.filter((q: any) => q && q.status !== 'merged' && String(q.text || '').trim())
+        const missingVectors = activeQuestions.filter((q: any) => !(q.qVector && q.qVector.length)).length
+        if (missingVectors > 0) {
+            // 自动补向量只处理小批量：上千条问题逐批嵌入会把「提问」按钮卡住几分钟
+            //（慢机上就是假死/被系统杀）。大批量交给问题页的「补全向量」显式入口。
+            const AUTO_EMBED_MAX = 200
+            if (missingVectors > AUTO_EMBED_MAX) {
+                kb_state.value = store.locales === 'zh'
+                    ? `问题库有 ${missingVectors} 条缺向量（超过自动补全上限 ${AUTO_EMBED_MAX}），本次按已有向量检索；可到「问题」页点「补全向量」。`
+                    : `${missingVectors} questions lack vectors (auto-embed limit ${AUTO_EMBED_MAX}); retrieving with available vectors. Run "Embed missing" on the Questions page.`
+                console.warn(`[KB] 跳过自动补问题向量：${missingVectors} 条`)
+                return true
+            }
             await runStrategyIngestion(sid)
             return true
         }
@@ -4610,41 +4636,14 @@ const pipelineChat = async function(strategyId: string, prompt: string, method: 
         blocks.value.sort((a:any,b:any) => (b.p||0) - (a.p||0))
     }
 
-    const allVectors = [];
-    const allBlocks = [] as Array<{ 
-        originalIndex: number, 
-        type: 'A' | 'Q', 
-        label: string, 
-        content: string 
-    }>;
-    
-    blocks.value.forEach((b: any, index: number) => {
-        allVectors.push(b.A_vector);
-        allBlocks.push({
-            originalIndex: index,
-            type: 'A',
-            label: b.label,
-            content: b.A
-        });
-    });
-    
-    allVectors.push(queryEmbedding);
-    
-    if (model.value.searchMethod === "MDS") {
-        const mdsResult = computeMDS(allVectors, model.value.mdsIterations, model.value.mdsEpsilon);
-        processDimensionalityReductionResults(mdsResult);
-    } else if(model.value.searchMethod === "MDS(M)") {
-        const mergedVectors = await computeMergedEmbeddings();
-        mergedVectors.push(queryEmbedding);
-        const mdsResult = computeMDS(mergedVectors, model.value.mdsIterations, model.value.mdsEpsilon);
-        processMergedDimensionalityReductionResults(mdsResult);
-    } else if(model.value.searchMethod === "PCA") {
-        const pcaResult = computePCA(allVectors);
-        processDimensionalityReductionResults(pcaResult);
-    } else if (model.value.searchMethod === "CS(M)") {
-        const mergedVectors = await computeMergedEmbeddings();
-        for(let i = 0; i < blocks.value.length; i++) {
-            blocks.value[i].p = cosineSimilarity(queryEmbedding, mergedVectors[i]);
+    // 检索方法只剩 CS / CS(M)：MDS / MDS(M) / PCA 是降维可视化方法，不是检索度量，
+    // 也不属于任何检索策略；旧 .kb 里保存的这些值统一按 CS 处理，避免用 2D 距离覆盖策略分。
+    const searchMethod = String(model.value.searchMethod || 'CS') === 'CS(M)' ? 'CS(M)' : 'CS'
+    if (searchMethod === 'CS(M)') {
+        // 合并余弦：把切片向量与关联问题向量按 7:3 融合（无问题向量时退化为切片向量）。
+        for (let i = 0; i < blocks.value.length; i++) {
+            const vec = await mergedVectorFor(toRaw(blocks.value[i]) as any)
+            blocks.value[i].p = vec && vec.length ? cosineSimilarity(queryEmbedding, vec) : 0
         }
     }
     
@@ -4666,15 +4665,24 @@ const pipelineChat = async function(strategyId: string, prompt: string, method: 
             num++;
         }
     } else if(model.value.searchMode == "按匹配率"){
+        // 匹配率模式以前对「所有 p ≥ 阈值」的切片无上限拼接：阈值被调低 / 用了降维分时
+        // 可能把上千条切片全塞进 prompt（上下文爆掉、内存翻倍）。这里同时限条数与字符量。
+        const maxByRatio = Math.max((Number(model.value.searchNum) || 5) * 3, 50)
+        const maxChars = Math.max(20_000, Number(model.value.searchCharacter) || 0)
+        let totalChars = content.length
         for (let i = 0; i < blocks.value.length; i++) {
-            if(blocks.value[i].p >= model.value.matchRatio) {
-                content += "《" + blocks.value[i].label + "》：";
-                content += blocks.value[i].A + "。";
-                blocks.value[i].state = true;
-                num++;
-            } else {
-                break;
+            if (blocks.value[i].p < model.value.matchRatio) {
+                break
             }
+            if (num >= maxByRatio) break
+            const blockContent = "《" + blocks.value[i].label + "》：";
+            const body = blocks.value[i].A + "。";
+            if (totalChars + blockContent.length + body.length > maxChars) break
+            content += blockContent;
+            content += body;
+            totalChars += blockContent.length + body.length
+            blocks.value[i].state = true;
+            num++;
         }
     } else if(model.value.searchMode == "按字符"){
         let currentLength = content.length;
@@ -4691,7 +4699,9 @@ const pipelineChat = async function(strategyId: string, prompt: string, method: 
         }
     }
     
-    console.log(content);
+    // 不要 console.log 整段 prompt：上千切片时它可能有几 MB，开着 DevTools 会长期持有这份字符串
+    // （既污染控制台，也让内存峰值下不来）。
+
     if (viewMode.value === 'atlas') {
         if (atlasModuleRef.value) {
             setTimeout(() => {
@@ -4748,56 +4758,37 @@ const pipelineChat = async function(strategyId: string, prompt: string, method: 
     
     return true;
 
-    function processDimensionalityReductionResults(points: number[][]) {
-        const queryPoint = points[points.length - 1];
-        const blockSimilarities = new Map<number, number[]>();
-        
-        for(let i = 0; i < allBlocks.length; i++) {
-            const originalIndex = allBlocks[i].originalIndex;
-            const point = points[i];
-            
-            const dx = point[0] - queryPoint[0];
-            const dy = point[1] - queryPoint[1];
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            const similarity = 1 / (1 + distance);
-            
-            if(!blockSimilarities.has(originalIndex)) {
-                blockSimilarities.set(originalIndex, []);
-            }
-            blockSimilarities.get(originalIndex)!.push(similarity);
+    /**
+     * 「合并向量」：切片向量 + 关联问题向量的加权融合（7:3），无问题向量时原样返回切片向量。
+     *
+     * 为什么这样定义：方案 A 之后切片不再保存 Q_vector，旧 `computeMergedEmbeddings`
+     * 直接返回 A_vector，导致 CS(M) 与 CS 完全等价——选项看起来“没用”。
+     * 问题库的问题向量本来就通过 questionVectorsByBlock 关联到切片，这里用它做融合，
+     * 既恢复 (M) 的语义，也复用「问题增强」通道，不额外发嵌入请求。
+     */
+    async function mergedVectorFor(block: any): Promise<number[] | null> {
+        const base = toRaw(block?.A_vector) as number[] | undefined
+        if (!base || !base.length) return null
+        const qv = questionVectorsByBlockCache.value.get(String(block?.id ?? '')) || []
+        if (!qv.length) return base
+        const dim = base.length
+        const acc = new Array<number>(dim).fill(0)
+        let used = 0
+        for (const v of qv.slice(0, 4)) {
+            const vec = toRaw(v) as number[] | undefined
+            if (!vec || vec.length !== dim) continue
+            for (let j = 0; j < dim; j++) acc[j] += Number(vec[j] || 0)
+            used++
         }
-        
-        blocks.value.forEach((block:any, index:any) => {
-            const similarities = blockSimilarities.get(index) || [];
-            block.p = similarities.length > 0 ? 
-                similarities.reduce((a, b) => a + b, 0) / similarities.length : 
-                0;
-        });
-    }
-    
-    async function computeMergedEmbeddings() {
-        // 方案 A：切片不再拼问题文本；合并向量 = 切片内容向量 A_vector（已预计算，缺失时才补 embed）
-        const mergedVectors = [];
-        for (const block of blocks.value) {
-            if (block.A_vector && block.A_vector.length) mergedVectors.push(block.A_vector)
-            else {
-                const embeddings = await kbEmbed(block.A || '')
-                mergedVectors.push(embeddings?.[0])
-            }
-        }
-        return mergedVectors;
-    }
-
-    function processMergedDimensionalityReductionResults(points: number[][]) {
-        const queryPoint = points[points.length - 1];
-            
-        for(let i = 0; i < blocks.value.length; i++) {
-            const point = points[i];
-            const dx = point[0] - queryPoint[0];
-            const dy = point[1] - queryPoint[1];
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            blocks.value[i].p = 1 / (1 + distance);
-        }
+        if (!used) return base
+        const out = new Array<number>(dim)
+        for (let j = 0; j < dim; j++) out[j] = 0.7 * Number(base[j] || 0) + 0.3 * (acc[j] / used)
+        // 归一化（余弦本身会归一，但保持向量在合理尺度，距离类方法也受益）
+        let norm = 0
+        for (let j = 0; j < dim; j++) norm += out[j] * out[j]
+        norm = Math.sqrt(norm)
+        if (norm > 1e-12) for (let j = 0; j < dim; j++) out[j] /= norm
+        return out
     }
 }
 
@@ -4806,7 +4797,9 @@ const buildRetrievalContext = (query: string): RetrievalContext => {
     const modelCfg = model.value
     return {
         query,
-        blocks: blocks.value,
+        // ⚠️ 必须 toRaw：blocks 是深响应式数组，直接把响应式代理交给向量点积会让每个元素读取
+        // 都走 Proxy get + 依赖追踪（实测慢 200+ 倍，上千条切片时足以卡死主线程）。
+        blocks: toRaw(blocks.value),
         entities: Array.from(globalEntities.value.values()).map((e: any) => ({
             id: e.id,
             name: e.name,
@@ -4823,7 +4816,7 @@ const buildRetrievalContext = (query: string): RetrievalContext => {
         communityResult: communityResult.value as any,
         fileIndex: fileIndex.value as Map<string, any>,
         // 问题增强索引：问题库 → 关联切片（dense_score 的问题增强分 max 池化）
-        questionVectorsByBlock: questionVectorsByBlockIndex(),
+        questionVectorsByBlock: questionVectorsByBlockCache.value,
         config: {
             url: modelCfg.url,
             // 评测用嵌入模型优先（与 buildKbSpec/向量化用的模型保持一致）
@@ -4920,84 +4913,6 @@ const hybridChat = async function(strategyId: string, prompt: string) {
 }
 
 
-function computeMDS(vectors: number[][], iterations: number, epsilon: number): number[][] {
-    const n = vectors.length;
-    if (n === 0) return [];
-    
-    const distances = Matrix.zeros(n, n);
-    for (let i = 0; i < n; i++) {
-        for (let j = 0; j < n; j++) {
-            distances.set(i, j, 1 - cosineSimilarity(vectors[i], vectors[j]));
-        }
-    }
-    
-    const H = Matrix.eye(n).sub(Matrix.ones(n, n).mul(1 / n));
-    
-    const D2 = Matrix.zeros(n, n);
-    for (let i = 0; i < n; i++) {
-        for (let j = 0; j < n; j++) {
-            const val = distances.get(i, j);
-            D2.set(i, j, val * val);
-        }
-    }
-    
-    const B = H.mmul(D2).mmul(H).mul(-0.5);
-    
-    const svd = new SingularValueDecomposition(B);
-    const U = svd.leftSingularVectors;
-    const s = svd.diagonal;
-    
-    const sqrtS = Matrix.zeros(n, n);
-    for (let i = 0; i < s.length; i++) {
-        sqrtS.set(i, i, Math.sqrt(Math.max(s[i], 0)));
-    }
-    
-    const X = U.mmul(sqrtS);
-    
-    const result: number[][] = [];
-    for (let i = 0; i < n; i++) {
-        result.push([X.get(i, 0), X.get(i, 1)]);
-    }
-    
-    return result;
-}
-
-function computePCA(vectors: number[][]): number[][] {
-    const n = vectors.length;
-    if (n === 0) return [];
-    
-    const matrix = new Matrix(vectors);
-    
-    const means = [];
-    for (let j = 0; j < matrix.columns; j++) {
-        let sum = 0;
-        for (let i = 0; i < matrix.rows; i++) {
-            sum += matrix.get(i, j);
-        }
-        means[j] = sum / matrix.rows;
-    }
-    
-    for (let i = 0; i < matrix.rows; i++) {
-        for (let j = 0; j < matrix.columns; j++) {
-            matrix.set(i, j, matrix.get(i, j) - means[j]);
-        }
-    }
-    
-    const covMatrix = matrix.transpose().mmul(matrix).mul(1 / (matrix.rows - 1));
-    
-    const svd = new SingularValueDecomposition(covMatrix);
-    const eigenvectors = svd.leftSingularVectors;
-    
-    const result: number[][] = [];
-    for (let i = 0; i < matrix.rows; i++) {
-        const row = matrix.getRow(i);
-        const pc1 = row.reduce((sum, val, j) => sum + val * eigenvectors.get(j, 0), 0);
-        const pc2 = row.reduce((sum, val, j) => sum + val * eigenvectors.get(j, 1), 0);
-        result.push([pc1, pc2]);
-    }
-    
-    return result;
-}
 
 async function organizeKbFiles(): Promise<void> {
     showKbMenu.value = false
@@ -5394,7 +5309,11 @@ const loadKnowledgeBases = async function(index?: number) {
             if (sc.bm25K1 !== undefined) model.value.bm25K1 = sc.bm25K1
             if (sc.bm25B !== undefined) model.value.bm25B = sc.bm25B
             if (sc.cosineWeight !== undefined) model.value.cosineWeight = sc.cosineWeight
-            if (sc.searchMethod !== undefined) model.value.searchMethod = sc.searchMethod
+            // 旧 .kb 可能保存了 MDS / MDS(M) / PCA：它们属于降维可视化，不是检索度量，
+            // 也不被任何检索策略消费；加载时统一归一到 CS，避免继续用 2D 距离覆盖策略分。
+            if (sc.searchMethod !== undefined) {
+                model.value.searchMethod = String(sc.searchMethod) === 'CS(M)' ? 'CS(M)' : 'CS'
+            }
             if (sc.searchMode !== undefined) model.value.searchMode = sc.searchMode
             if (sc.searchNum !== undefined) model.value.searchNum = sc.searchNum
             if (sc.matchRatio !== undefined) model.value.matchRatio = sc.matchRatio
@@ -7764,7 +7683,7 @@ onBeforeUnmount(() => {
                 :testData="testData"
                 :onRefreshTestCases="refreshTestCasesFromBank"
                 :fileIndex="fileIndex"
-                :questionVectorsByBlock="questionVectorsByBlockIndex()"
+                :questionVectorsByBlock="questionVectorsByBlockCache"
                 :strategyVersion="strategyVersion"
                 :ensureCommunityReports="ensureCommunityReports"
                 :ensureSliceVectors="ensureTestVectors"

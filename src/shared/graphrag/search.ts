@@ -79,7 +79,10 @@ export function computeBM25Score(query: string, documents: string[], k1: number 
     scores.push(score)
   }
 
-  const maxScore = Math.max(...scores, 1e-9)
+  // 用循环求最大值：Math.max(...scores) 在 >65535 条文档时会 RangeError（栈参数上限），
+  // 且上千条时也会把整个数组展开成参数（额外的内存峰值）。
+  let maxScore = 1e-9
+  for (const s of scores) if (s > maxScore) maxScore = s
   return scores.map(s => s / maxScore)
 }
 

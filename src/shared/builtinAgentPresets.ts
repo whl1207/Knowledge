@@ -176,7 +176,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       '1. 先探查再动手：用 list_dir / search_files / read_file 了解项目结构与现有实现，不要凭猜测改代码。',
       '2. 改动最小化、精确化：优先用 replace_in_file / multi_replace 做局部修改，保持原有代码风格；新建文件才用 write_file，非必要不整体重写文件。',
       '3. 多步任务先用 update_plan 列出简短计划（每步一句话），执行过程中逐步更新；用 update_todo 维护任务清单。',
-      '4. 改动后尽量验证：用 run_python 或 shell 运行测试 / 构建（如 npm run build、npx tsc --noEmit），发现报错继续修，不要交付未经验证的结论。',
+      '4. 改动后尽量验证：用 run_code 或 shell 运行测试 / 构建（如 npm run build、npx tsc --noEmit），发现报错继续修，不要交付未经验证的结论。',
       '5. 不猜测、不编造：不确定的 API、路径、依赖先读文件或搜索确认；关键信息缺失时用 ask_user 询问用户。',
       '6. 汇报时说明改了哪些文件（文件路径用行内代码）、为什么这样改、如何验证，保持简洁。',
       '7. 使用与用户相同的语言回答（用户说中文就用中文）。',
@@ -205,7 +205,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
-        'run_python', 'shell',
+        'run_code', 'shell',
         'web_search', 'web_fetch',
         'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
@@ -228,7 +228,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       '',
       '主要职责：',
       '- 起草与润色公文、报告、方案、邮件、会议纪要等书面材料，输出结构清晰、措辞得体的 Markdown。',
-      '- 处理表格与数据：用 run_python 读取、清洗、统计 CSV / Excel 数据，必要时产出汇总表。',
+      '- 处理表格与数据：用 run_code 读取、清洗、统计 CSV / Excel 数据，必要时产出汇总表。',
       '- 交付正式文档：需要 Word 文件时用 export_word 导出 .docx；读写已有 Office 文档 / 表格 / 演示文稿时优先调用已启用的 Office MCP 服务（mcp_call；注意 open_document / open_workbook 返回的 docId / workbookId 在后续每次调用中都必须原样带上）。',
       '- 需要流程图、示意图时可用 drawio 服务；需要外部资料时用 web_search / web_fetch 查证后引用。',
       '',
@@ -262,7 +262,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file',
-        'run_python',
+        'run_code',
         'web_search', 'web_fetch',
         'skill', 'mcp_call', 'export_word',
       ],
@@ -295,7 +295,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       '3. 修改既有文件优先 tools.replace_in_file / tools.multi_replace，新建文件才用 tools.write_file，非必要不整体重写。',
       '4. 多步任务先用 tools.update_plan 列出简短计划（每步一句话），用 tools.update_todo 维护清单，执行中逐步更新。',
       '5. 用 return / console.log 输出结果，只取你真正需要的片段，不要把大文件全文打回上下文。',
-      '6. 程序报错就修程序重试；改动后尽量用 tools.run_python / tools.shell 跑测试或构建验证，不要交付未经验证的结论。',
+      '6. 程序报错就修程序重试；改动后尽量用 tools.run_code / tools.shell 跑测试或构建验证，不要交付未经验证的结论。',
       '7. 不猜测、不编造：不确定的 API、路径、依赖先读文件或搜索确认；关键信息缺失时用 tools.ask_user 询问用户。',
       '8. 汇报时说明改了哪些文件（文件路径用行内代码）、为什么这样改、如何验证，保持简洁。',
       '9. 使用与用户相同的语言回答（用户说中文就用中文）。',
@@ -324,7 +324,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
-        'run_python', 'shell',
+        'run_code', 'shell',
         'web_search', 'web_fetch',
         'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
@@ -393,7 +393,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
         'mcp_call',
         'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
-        'run_python', 'shell',
+        'run_code', 'shell',
         'web_search', 'web_fetch',
         'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
@@ -421,7 +421,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       '2. 改动最小：优先 replace_in_file / multi_replace 做局部替换；只有新建文件才用 write_file，不整体重写。',
       '3. 一步做完：能一次解决就一次解决，不要先写计划、不要为"看起来更规范"把简单事拆成多轮。',
       '4. 说完就做：调用工具前用一两句话说明你要做什么，然后立刻执行。',
-      '5. 验证再交付：用 shell / run_python 跑测试或构建（如 npm run build、npx tsc --noEmit），报错就继续修，不交付未经验证的结论。',
+      '5. 验证再交付：用 shell / run_code 跑测试或构建（如 npm run build、npx tsc --noEmit），报错就继续修，不交付未经验证的结论。',
       '6. 项目约定优先：工作区里若有 AGENTS.md / CLAUDE.md / SYSTEM.md 之类的说明文件（从当前目录逐级向上找，就近优先），先读它并遵守；与本提示词冲突时，以用户的项目文件为准。',
       '7. 如实说明边界：能不能写文件、跑命令取决于用户在「设置 → 通用 → 其他 → 安全策略」里选的档位（只读安全 / 工作区写入 / 完全访问）；被拒绝时直说原因，不要绕路，也不要假装做过。',
       '8. 汇报简洁：改了哪些文件（路径用行内代码）、为什么这样改、怎么验证，几行说完，不贴整份代码。',
@@ -452,7 +452,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
         'ask_user',
         'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
-        'shell', 'run_python',
+        'shell', 'run_code',
         'web_search', 'web_fetch',
         'skill',
       ],
@@ -544,7 +544,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
-        'run_python', 'shell',
+        'run_code', 'shell',
         'web_search', 'web_fetch',
         'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
@@ -578,7 +578,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
       '2. 结束回合前把任务完全解决，不交付半成品、也不留给用户"你应该能猜到"的改动。',
       '3. 改动精准、最小：优先 replace_in_file / multi_replace，保持原有代码风格；新建文件才用 write_file。',
       '4. 用补丁式思维改代码：先看清上下文再替换，且替换必须唯一、可复现。',
-      '5. 改完必须验证：用 shell / run_python 跑测试或构建（npm run build、npx tsc --noEmit、pytest 等），失败就继续修到通过。',
+      '5. 改完必须验证：用 shell / run_code 跑测试或构建（npm run build、npx tsc --noEmit、pytest 等），失败就继续修到通过。',
       '6. 需要外部资料时用 web_search / web_fetch 查证并给出出处；彼此独立的调研可以交给 run_subagent 并行。',
       '7. 提问的时机：只有真正无法从工作区推断、且会改变结果的信息才用 ask_user；权限类问题不要用 ask_user 代替对沙箱档位的说明。',
       '8. 最终汇报像给同事交接工作：简短分段小标题、按重要性排序的要点、文件路径用行内代码，写清验证方式与未决项。',
@@ -608,7 +608,7 @@ export const BUILTIN_AGENT_PRESETS: Array<Record<string, any>> = [
         'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo',
         'read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir',
         'write_file', 'replace_in_file', 'multi_replace',
-        'shell', 'run_python',
+        'shell', 'run_code',
         'web_search', 'web_fetch',
         'run_subagent', 'job_output', 'job_list', 'job_kill', 'skill',
       ],
@@ -883,8 +883,23 @@ function hasAll(text: string, markers: string[]): boolean {
  *
  * @returns 是否发生了订正（调用方据此决定是否需要落盘）
  */
-export function refreshBuiltinAgentPresets(list: any[]): boolean {
+/**
+ * 内置预设「能力字段」迁移版本。
+ *
+ * 为什么需要版本号：下面 0.4 / 0.6 两段是**一次性升级**（老存档缺工具时补齐），
+ * 但早期实现把"缺什么补什么"当成幂等归一化，每次 loadConfig 都跑 —— 用户主动
+ * 取消勾选某个工具后，下次启动又被塞回来（「内置工具改了会自动重置」）。
+ * 现在只在该版本标记缺失时跑一次；之后内置预设的 enabledTools 完全由用户编辑决定。
+ */
+export const BUILTIN_PRESET_CAPABILITY_MIGRATION_VERSION = 1
+
+export function refreshBuiltinAgentPresets(
+  list: any[],
+  opts: { capabilityMigration?: boolean } = {},
+): boolean {
   if (!Array.isArray(list)) return false
+  // 缺省 true 兼容旧调用与自测；store 会按 localStorage 里的版本标记只在首次传 false。
+  const capabilityMigration = opts.capabilityMigration !== false
   let changed = false
 
   // 0) 内置预设定名迁移：提示词与名称是**持久化副本**，改过名的内置项
@@ -929,7 +944,8 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
   const designer = list.find((p: any) => p && p.id === BUILTIN_AGENT_PRESET_IDS.designer)
   if (designer) {
     const caps: any = designer.capabilities
-    if (caps && Array.isArray(caps.enabledTools)) {
+    // ⚠️ 只有一次性的能力迁移才补工具；用户自己取消勾选的工具不能被"幂等补齐"重加回来。
+    if (capabilityMigration && caps && Array.isArray(caps.enabledTools)) {
       for (const tool of ['read_file', 'read_image', 'working_directory', 'search_files', 'glob', 'list_dir', 'write_file', 'replace_in_file', 'multi_replace']) {
         if (!caps.enabledTools.includes(tool)) {
           caps.enabledTools.push(tool)
@@ -1019,7 +1035,7 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
   }
 
   const caps = item.capabilities
-  if (caps && Array.isArray(caps.enabledTools)) {
+  if (capabilityMigration && caps && Array.isArray(caps.enabledTools)) {
     if (caps.enabledTools.includes('plugin_dev_guide')) {
       caps.enabledTools = caps.enabledTools.filter((t: string) => t !== 'plugin_dev_guide')
       changed = true
@@ -1029,12 +1045,12 @@ export function refreshBuiltinAgentPresets(list: any[]): boolean {
       changed = true
     }
   }
-  if (caps && !caps.mcpAccess) {
+  if (capabilityMigration && caps && !caps.mcpAccess) {
     caps.mcpAccess = true
     changed = true
   }
   if (caps && !Array.isArray(caps.mcpServerIds)) caps.mcpServerIds = []
-  if (caps && !caps.mcpServerIds.includes(PLUGIN_PRESET_MCP_SERVER)) {
+  if (capabilityMigration && caps && !caps.mcpServerIds.includes(PLUGIN_PRESET_MCP_SERVER)) {
     caps.mcpServerIds.push(PLUGIN_PRESET_MCP_SERVER)
     changed = true
   }

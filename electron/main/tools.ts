@@ -20,7 +20,6 @@ import * as PDFJS from 'pdfjs-dist/legacy/build/pdf.mjs'
 import xlsx from 'xlsx'
 import { toolRegistry, defineTool } from '@/shared/toolRegistry'
 import type { ToolResult, ToolExecutionContext } from '@/types/tool'
-import { pythonService } from './python-service'
 import { wordToMarkdown } from './office/word-to-markdown'
 import {
   shellService,
@@ -32,7 +31,6 @@ import {
   type ShellRun,
 } from './shell-service'
 import { renderShellText } from '@/shared/shellText'
-import { trustedPythonService } from './trusted-python-service'
 import { logInfo } from './log'
 import { resolvePolicy, isShellAllowed } from './sandbox-policy'
 import { retrieveKnowledge } from '@/shared/kbRetrieval'
@@ -110,7 +108,7 @@ import {
 
 /** 读取类文件大小上限（100KB）：超大文件的"开头样本"按这个量取 */
 const READ_CAP_BYTES = 100 * 1024
-/** 纯文本可整文件读入内存的上限（超过则只给开头样本 + run_python 引导） */
+/** 纯文本可整文件读入内存的上限（超过则只给开头样本 + run_code 引导） */
 const TEXT_FULL_READ_MAX_BYTES = 16 * 1024 * 1024
 /** 单次读取的正文字符硬上限（再大就只按行分页，不一次吐完） */
 const MAX_READ_CHARS = 100 * 1024
@@ -521,7 +519,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
     }
 
     if (stat.size > TEXT_FULL_READ_MAX_BYTES) {
-      // 超大文本文件：不整文件读入内存，只给开头样本 + run_python 引导（仍按行号渲染）
+      // 超大文本文件：不整文件读入内存，只给开头样本 + run_code 引导（仍按行号渲染）
       const fd = fs.openSync(abs, 'r')
       const buf = Buffer.alloc(READ_CAP_BYTES)
       const read = fs.readSync(fd, asUint8(buf), 0, READ_CAP_BYTES, 0)
@@ -537,7 +535,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
       })
       // tsconfig.node.json 未开 strict：按字段是否存在收窄
   if ('error' in out) return { ok: false, code: 'FS_NOT_FOUND', error: out.error }
-      const note = `（文件 ${stat.size} 字节，超过 16MB：只返回开头样本，不能按行续读；读取全文请用 run_python）`
+      const note = `（文件 ${stat.size} 字节，超过 16MB：只返回开头样本，不能按行续读；读取全文请用 run_code）`
       return {
         ok: true,
         value: {
@@ -639,7 +637,7 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
  *
  * 这不是"模型的输出上限"（那个由 max_tokens 决定），而是**兜底**：真撞到这个数量级，
  * 说明调用本身就不该走一次 write_file（模型也几乎不可能吐出 1 MiB 参数）。
- * 与其让 IPC / 磁盘慢慢吞下去，不如立刻返回结构化错误，让模型改成分段写或 run_python 生成。
+ * 与其让 IPC / 磁盘慢慢吞下去，不如立刻返回结构化错误，让模型改成分段写或 run_code 生成。
  */
 const MAX_AGENT_WRITE_BYTES = 1024 * 1024
 
@@ -655,7 +653,7 @@ async function writeFile(input: any, ctx: ToolExecutionContext): Promise<ToolRes
       code: 'CONTENT_TOO_LARGE',
       error: `写入内容过大（${bytes} 字节，单次上限 ${MAX_AGENT_WRITE_BYTES} 字节）：本次没有写入任何内容。`
         + '请拆成多次写入——先 write_file 写骨架，再用 replace_in_file 逐段追加；'
-        + '内容能由程序生成时改用 run_python / run_code 直接写文件。',
+        + '内容能由程序生成时改用 run_code 直接写文件，或用 shell 生成。',
     }
   }
 
@@ -1292,44 +1290,6 @@ async function listDir(input: any, ctx: ToolExecutionContext): Promise<ToolResul
   }
 }
 
-async function runPython(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const code = String(input?.code ?? '')
-  if (!code.trim()) return { ok: false, error: 'code 参数必填' }
-  try {
-    // 统一沙箱策略解析（路线图 2.5）：ctx.sandboxMode 可为 'safe' | 'workspace' | 'trusted'
-    const policy = resolvePolicy((ctx as any).sandboxMode, { workspaceRoot: ctx.cwd })
-    const sandboxMode: 'safe' | 'workspace' | 'trusted' = policy.mode
-    const res = sandboxMode === 'trusted'
-      ? await trustedPythonExecute(code, ctx.cwd, ctx.signal)
-      : await pythonService.executeCode(code, input?.input ?? '', ctx.cwd, sandboxMode, ctx.signal)
-    // 与 shell 同口径：脚本报错也是「结果」（带 [exit code: 1] 与 stderr 段），不是工具故障——
-    // 旧实现返回 ok:false，模型只能看到 `ERROR: …` 一行，res.result / logs 里的诊断信息全丢。
-    const stdoutText = String((res as any)?.result ?? (res as any)?.output ?? (res as any)?.rawOutput ?? '')
-    const stderrText = String((res as any)?.error ?? '')
-    return {
-      ok: true,
-      value: {
-        ...res,
-        sandbox: policy,
-        modelText: renderShellText({
-          stdout: stdoutText,
-          stderr: stderrText,
-          exitCode: (res as any)?.success === false || stderrText ? 1 : 0,
-        }),
-      },
-    }
-  } catch (e: any) {
-    return { ok: false, error: `Python 执行失败: ${e?.message || String(e)}` }
-  }
-}
-
-// trusted 模式走完整访问服务（与 executePython IPC 一致）
-// 静态导入即可：该服务在 index.ts 里本来就是静态导入的（模块必然已加载），
-// 这里用动态 import 只会让打包器报「dynamic import will not move module into another chunk」。
-async function trustedPythonExecute(code: string, cwd?: string, signal?: AbortSignal) {
-  return trustedPythonService.executeCode(code, '', cwd, signal)
-}
-
 // ---------------------------------------------------------------------------
 // shell 后台任务（对齐 DSH 的 job 交接：前台超时 → 同一个 job 继续跑）
 // ---------------------------------------------------------------------------
@@ -1863,7 +1823,7 @@ async function loadSkill(input: any, ctx: ToolExecutionContext): Promise<ToolRes
   const fileCount = candidate.preview.fileCount ?? candidate.preview.files?.length ?? 0
   const instruction = [
     `技能「${candidate.name}」已加载成功。`,
-    '请立即按照下面的技能指令继续执行任务（生成代码用 run_python 执行、需要资料用 read_file / kb_search、需要联网用 web_search）。',
+    '请立即按照下面的技能指令继续执行任务（生成代码用 run_code 执行、需要资料用 read_file / kb_search、需要联网用 web_search）。',
     '不要再次调用 skill 工具重复加载本技能。',
     `技能目录：${candidate.path}（共 ${fileCount} 个文件）。资源按需加载：不要枚举或读取全部文件，需要时用 read_file / list_dir / search_files 并**传 skill="${candidate.name}" + 相对路径**（例：read_file({"skill":"${candidate.name}","path":"references/x.md"})）查找读取——这样不受当前工作区影响（注意：不带 skill 的相对路径锚定的是当前工作区）。`,
     sampled.length > 0
@@ -3439,7 +3399,7 @@ function resolveChildTools(input: any, ctx: ToolExecutionContext): string[] {
     // 父级 = 全部工具：按该作用域可见的工具清单物化（等价继承，且能去掉 run_subagent）
     return toolRegistry.list(ctx.scope).map((d) => String(d.name)).filter((t) => t !== 'run_subagent')
   }
-  return ['read_file', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files', 'run_python', 'kb_search', 'web_search', 'web_fetch', 'ask_user', 'update_plan', 'update_todo']
+  return ['read_file', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files', 'run_code', 'kb_search', 'web_search', 'web_fetch', 'ask_user', 'update_plan', 'update_todo']
 }
 
 /** 子代理默认系统提示（无 systemPrompt / member 时用） */
@@ -3823,6 +3783,17 @@ async function readImage(input: any, ctx: ToolExecutionContext): Promise<ToolRes
       error: `图片过大（${Math.round(st.size / 1024)} KB，上限 ${READ_IMAGE_MAX_BYTES / 1024 / 1024} MB）：请先压缩 / 裁剪后再读。`,
     }
   }
+  // 已知模型不支持图片输入：不要先读盘再发出去（那会让下一次请求 400、整轮中止）。
+  // 直接返回可继续的错误，模型可改用 read_file / 让用户换视觉模型。
+  if (ctx.vision === false) {
+    return {
+      ok: false,
+      code: 'VISION_UNSUPPORTED',
+      retryable: false,
+      error: `当前模型不支持图片输入，本次未发送图片：${rawPath}（${Math.round(st.size / 1024)} KB）。`
+        + '任务可以继续：改用 read_file 读取同目录的文本/说明，或提示用户切换到支持视觉的模型；不要重复调用 read_image。',
+    }
+  }
   const buf = fs.readFileSync(abs)
   const mime = sniffImageMime(buf)
   if (!mime) {
@@ -3958,7 +3929,7 @@ const runBrowserAgentTool = (tool: string) => async (args: any, ctx: ToolExecuti
   }
   const timer = setTimeout(() => abort('timeout'), timeoutMs)
   try {
-    const result = await browserAgentService.executeTool(tool, input, { owner, signal: ctrl.signal })
+    const result = await browserAgentService.executeTool(tool, input, { owner, signal: ctrl.signal, vision: ctx.vision })
     return { ok: true, value: result.text, images: result.images }
   } catch (err: any) {
     const raw = err?.message || String(err)
@@ -4001,7 +3972,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('read_image', '读取本地图片并作为图片内容交给模型（PNG / JPEG / WebP / GIF，按文件头识别，单张上限 8MB）。仅当模型支持图片输入时使用；不要用它读文本或 PDF（用 read_file）。', readImage, {
+    defineTool('read_image', '读取本地图片并作为图片内容交给模型（PNG / JPEG / WebP / GIF，按文件头识别，单张上限 8MB）。模型不支持图片输入时会返回可继续的错误（任务不中断），此时改用 read_file 读文本或提示用户切换视觉模型；不要用它读文本或 PDF（用 read_file）。', readImage, {
       inputSchema: {
         type: 'object',
         properties: {
@@ -4123,18 +4094,6 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('run_python', '执行 Python 代码。沙箱档位由用户在「设置 → 通用 → 其他 → 安全策略」统一决定（只读安全 / 工作区写入 / 完全访问），工具本身没有 sandbox 参数；档位不够时报错会说明当前档位与去哪切换。第三方库（pandas / openpyxl / scipy 等）在工作区写入与完全访问下均可正常导入，只有 os / subprocess / socket 这类系统级模块在非完全访问档位被拦。', runPython, {
-      inputSchema: {
-        type: 'object',
-        properties: {
-          code: { type: 'string', description: '要执行的 Python 代码' },
-          input: { description: '作为 input 注入执行环境的输入' },
-        },
-        required: ['code'],
-      },
-    }),
-  )
-  toolRegistry.register(
     defineTool('shell', '执行 shell 命令（默认只允许「完全访问」模式；被拒绝时可带 sandbox_permissions:"escalate" + justification 申请一次性放行）。每次都是新进程：换目录用 workdir，不依赖 `cd`。**非零退出不算失败**（输出带 `[exit code: N]`）。Windows 默认 cmd（可传 shell:"powershell"），macOS/Linux 默认 sh（可传 "bash"）。长命令用 run_in_background:true 拿 job id，再 job_output / job_kill；前台超时也会转后台。超时杀整棵进程树；输出过大只留尾部，完整内容在 `[output truncated; full output: <path>]` 给路径。', runShell, {
       inputSchema: {
         type: 'object',
@@ -4221,7 +4180,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('skill', '加载一个已安装技能的完整指令（只调用一次）。返回的技能指令就是你接下来要执行的步骤：加载成功后请立即按指令行动（写代码用 run_python 执行），不要再调用 skill 重复加载。', loadSkill, {
+    defineTool('skill', '加载一个已安装技能的完整指令（只调用一次）。返回的技能指令就是你接下来要执行的步骤：加载成功后请立即按指令行动（写代码用 run_code 执行），不要再调用 skill 重复加载。', loadSkill, {
       inputSchema: {
         type: 'object',
         properties: { name: { type: 'string', description: '技能名（kebab-case）' } },
@@ -4396,7 +4355,6 @@ export function registerCoreTools(): void {
     multi_replace: 120_000,
     list_dir: 30_000,
     search_files: 90_000,
-    run_python: 300_000,
     shell: 130_000,
     run_subagent: 3_900_000,
     job_output: 360_000,
@@ -4408,7 +4366,6 @@ export function registerCoreTools(): void {
     update_todo: 15_000,
     report_run: 15_000,
     mcp_call: 120_000,
-    run_code: 300_000,
     web_search: 90_000,
     web_fetch: 90_000,
   }

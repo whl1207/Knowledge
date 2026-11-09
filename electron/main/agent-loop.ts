@@ -63,7 +63,8 @@ import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { normalizeAgentRunResult, type AgentRunResult } from '@/lib/plugin/agentContract'
 import { decideTruncationContinue } from '@/shared/truncation'
 import { agentSessionSignature, canResumeSessionStart } from '@/shared/agentSession'
-import { classifyLlmFailure, effectiveRetryDelayMs } from '@/shared/llmRetry'
+import { classifyLlmFailure, effectiveRetryDelayMs, parseHttpStatus } from '@/shared/llmRetry'
+import { isImageUnsupportedError, modelSupportsVision } from '@/shared/visionSupport'
 // 上下文预算与压缩（P0）：与渲染层共用同一口径（详见 src/shared/contextBudget.ts）
 import {
   COMPACT_KEEP_TURNS,
@@ -461,7 +462,6 @@ const REPEAT_TRACK_EXCLUDE = new Set([
   'write_file',
   'replace_in_file',
   'multi_replace',
-  'run_python',
   'run_code',
   'export_word',
   'update_todo',
@@ -603,6 +603,18 @@ class AgentImpl implements AgentControl {
   // 只保留最近 4 个带图任务，避免长会话/多次传图长期占内存。
   private taskImagesBySeq = new Map<number, string[]>()
   private optionImagesUsed = false
+  /**
+   * 本会话是否已确认「模型不支持图片输入」。
+   *
+   * 一旦服务端因图片 400，就把本会话后续请求里的图片全部省略（会话日志与界面不动），
+   * 让 agent 用文本/路径继续任务，而不是整轮中止。只有真正被服务端拒绝时才置真；
+   * 名称启发式判不出时不会预先拦（避免误伤自命名视觉模型）。
+   */
+  private imagesSuppressed = false
+  /** 去图是「猜测」（400 但服务端没给图片相关正文）：若去图重放仍失败，要撤销抑制 */
+  private imagesSuppressionGuessed = false
+  /** 视觉能力缓存：undefined=未算过（三态里「不知道」也缓存成 null） */
+  private visionSupportCache: { value: boolean | undefined } | null = null
 
   // 当前 turn 对应的后台任务（路线图 2.4；turn 结束/取消时完成或取消）
   private jobId: string | null = null
@@ -1406,6 +1418,16 @@ class AgentImpl implements AgentControl {
         const imgs = this.taskImagesBySeq.get(userSeq)
         if (imgs?.length && !out.images) out.images = imgs
       }
+      // 模型不支持图片（服务端已确认）：请求投影里去掉图片并留一句可执行说明。
+      // ⚠️ 只改发出去的内容，会话日志与界面仍保留图片（换视觉模型后还能恢复）。
+      if (this.imagesSuppressed && out.images) {
+        delete out.images
+        if (typeof out.content === 'string') {
+          out.content += msg.synthetic
+            ? '\n\n（图片已省略：当前模型不支持图片输入。请根据工具返回的文本/路径继续；需要看图时提示用户改用支持视觉的模型，不要重复调用读图/截图工具。）'
+            : '\n\n（随消息附带的图片已省略：当前模型不支持图片输入。请只依据以上文本继续。）'
+        }
+      }
       return out
     })
     if (!this.pruneActive) return msgs
@@ -1460,10 +1482,10 @@ class AgentImpl implements AgentControl {
       if (msg.role === 'user' && !msg.compacted && !msg.synthetic) {
         userSeq++
         const imgs = this.taskImagesBySeq.get(userSeq)
-        if (imgs?.length) out.images = imgs.length
+        if (imgs?.length && !this.imagesSuppressed) out.images = imgs.length
       }
-      // 工具截图合成的图片消息：图片本体参与预算（每条按张数计）
-      if (msg.role === 'user' && msg.images?.length) out.images = msg.images.length
+      // 工具截图合成的图片消息：图片本体参与预算（每条按张数计）；已去图时不占预算
+      if (msg.role === 'user' && msg.images?.length && !this.imagesSuppressed) out.images = msg.images.length
       return out
     })
     if (!this.pruneActive) return items
@@ -1688,6 +1710,40 @@ class AgentImpl implements AgentControl {
         return await this.runStep(current)
       } catch (err: any) {
         const msg = err?.message || String(err)
+        const status = Number(err?.status) || parseHttpStatus(msg)
+        const explicitImageError = isImageUnsupportedError(msg, status)
+        const hasImages = current.some((m) => Array.isArray(m?.images) && m.images.length > 0)
+        // 有些后端（如 Ollama）只回「HTTP error! status: 400」，正文丢失：
+        // 请求里确实带图 + 400 时也按「图片可能不被支持」去图重放一次（猜测，失败会撤销抑制）。
+        const guessedImageError = !explicitImageError && hasImages && status === 400 && !isContextOverflowError(msg)
+        // 图片自愈（先于溢出自愈）：服务端明确说「不支持图片」时，去掉本会话的图片重放一次。
+        // 为什么要重放而不是直接结束：read_image / 截图是辅助手段，图片看不了不代表任务做不了；
+        // 直接把 400 抛给 runTurn 会让整个 turn 中止（现象正是「不是多模态模型而中止」）。
+        if (!this.imagesSuppressed && (explicitImageError || guessedImageError)) {
+          const imageCount = current.reduce((n, m) => n + (Array.isArray(m?.images) ? m.images.length : 0), 0)
+          this.imagesSuppressed = true
+          this.imagesSuppressionGuessed = !explicitImageError
+          const notice = explicitImageError
+            ? `当前模型不支持图片输入（已省略 ${imageCount || '全部'} 张图片继续执行）。可改用 read_file / 文本工具，或让用户切换到支持视觉的模型。`
+            : `含图片的请求被服务端拒绝（已省略 ${imageCount || '全部'} 张图片重试一次）。若仍失败，请检查模型/接口配置。`
+          console.warn(`[agent] ${this.id} 图片请求被拒（${msg.slice(0, 200)}）→ 去图重放本 step`)
+          sessionLog.append(this.id, 'llm/retry', {
+            attempt: attempt + 1,
+            code: 'image_unsupported',
+            delayMs: 0,
+            provider: this.options.provider,
+            error: msg.slice(0, 500),
+          })
+          try { this.emit('agent/notice', { kind: 'image-unsupported', message: notice }) } catch { /* 事件失败不影响重放 */ }
+          // 请求投影层已经按 imagesSuppressed 去图并补了说明；这里只需重新派生历史
+          current = this.toRequestMessages(sessionLog.deriveEntries(this.id))
+          continue
+        }
+        // 「猜测式去图」重放后仍然失败，且错误仍与图片无关 → 撤销抑制，别让本会话以后都看不到图
+        if (this.imagesSuppressed && this.imagesSuppressionGuessed && !explicitImageError) {
+          this.imagesSuppressed = false
+          this.imagesSuppressionGuessed = false
+        }
         if (attempt >= OVERFLOW_RETRY_LIMIT || !isContextOverflowError(msg)) throw err
         console.warn(`[agent-compact] ${this.id} 上下文超限（第 ${attempt + 1} 次）→ 压缩后重放本 step：${msg}`)
         const ok = await this.compact('overflow-retry')
@@ -2018,7 +2074,7 @@ class AgentImpl implements AgentControl {
       : '本步输出被截断（finish_reason=length，max_tokens / 上下文长度不够），工具参数 JSON 不完整：本次调用未执行。'
     const advice = name === 'write_file'
       ? '如果 content 很大，请分段写入：先写文件骨架，再用 replace_in_file 逐段追加（不要一次提交整份大文件）。'
-      : name === 'run_code' || name === 'run_python'
+      : name === 'run_code'
         ? '请把程序拆成多次调用、每次只做少量步骤后重试。'
         : '请缩短单次提交的内容，拆成多次调用后重试。'
     return `${head}${rawLen ? `（收到 ${rawLen} 字符）` : ''}${advice}`
@@ -2145,7 +2201,7 @@ class AgentImpl implements AgentControl {
       } else if (skillName && this.loadedSkills.has(skillName)) {
         result = {
           ok: true,
-          value: `技能「${skillName}」已在之前的步骤中加载过。请立即按已获得的技能指令继续执行任务（生成代码用 run_python 执行），不要再次调用 skill 工具。`,
+          value: `技能「${skillName}」已在之前的步骤中加载过。请立即按已获得的技能指令继续执行任务（生成代码用 run_code 执行），不要再次调用 skill 工具。`,
         }
       } else {
         result = await toolRegistry.execute(name, args, this.ctx())
@@ -2302,6 +2358,21 @@ class AgentImpl implements AgentControl {
     void sessionLog.flush(this.id)
   }
 
+  /**
+   * 本会话模型的图片输入能力（三态）。只看「确定不支持」时才提前拦 read_image；
+   * 不知道时仍交给请求层：真的 400 了再触发「去图重放」（见 runStepWithOverflowRetry）。
+   */
+  private modelVision(): boolean | undefined {
+    if (this.visionSupportCache) return this.visionSupportCache.value
+    const config: any = this.options.config || {}
+    const model = String(config.model || this.options.llmConfig?.model || config.embed_model || '')
+    const value = modelSupportsVision(this.options.provider, model, {
+      supportsVision: (this.options as any).supportsVision,
+    })
+    this.visionSupportCache = { value }
+    return value
+  }
+
   private ctx(): ToolExecutionContext {
     return {
       agentId: this.id,
@@ -2311,6 +2382,9 @@ class AgentImpl implements AgentControl {
       cwd: cwdFor({ agentId: this.id, cwd: this.options.cwd }),
       // 原始工作区根：working_directory 用它做越界校验与"重置"
       workspaceRoot: this.options.cwd,
+      // read_image / browser_screenshot 用它判断「图片发了也白发」：false 时直接返回文本说明。
+      // undefined（不知道）按「可能支持」处理，请求层再做去图兜底。
+      vision: this.imagesSuppressed ? false : (this.modelVision() !== false),
       // 当前 turn 序号：read_file 用它做"同轮重复读取"的短路（跨轮不复用，避免上下文已压缩）
       turn: this.turnCount,
       // 本会话生效窗口：读取类工具据此定单次返回量（避免读了又被裁掉，见 tools.ts defaultReadWindowChars）

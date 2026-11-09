@@ -102,7 +102,7 @@ export function runToolRegistryViewSelfTest(): ToolRegistryViewCase[] {
   const legacyCaps = { readFiles: true, executeCode: false, knowledgeBaseFiles: [] }
   const legacy = presetEnabledNames(legacyCaps)
   push('旧模式：能力槽布尔 → 工具名',
-    legacy.has('read_file') && legacy.has('search_files') && !legacy.has('run_python'),
+    legacy.has('read_file') && legacy.has('search_files') && !legacy.has('run_code'),
     [...legacy].join(','))
   push('旧模式：askUser / updatePlan / updateTodo 缺省开启',
     legacy.has('ask_user') && legacy.has('update_plan') && legacy.has('exit_plan_mode') && legacy.has('update_todo'),

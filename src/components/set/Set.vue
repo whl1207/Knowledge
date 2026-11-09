@@ -1205,10 +1205,19 @@ const onPeerThemeChanged = (payload: any) => {
 /** theme-changed 广播退订句柄（设置独立窗口挂载时登记） */
 let unsubPeerTheme: (() => void) | null = null
 
+/**
+ * 窗口被系统关闭（Alt+F4 / 主进程销毁）时 Vue 的 onBeforeUnmount 不一定执行，
+ * 设置页里有大量 v-model 输入靠「某次 saveConfig」顺带落盘。这里补一道 beforeunload，
+ * 保证最后一次编辑能写进存档（saveConfig 内部有多窗口三路比较，不会覆盖别处的新值）。
+ */
+const flushSettingsOnUnload = () => { try { store.saveConfig() } catch { /* 忽略 */ } }
+
 // 组件挂载时初始化
 onMounted(async () => {
     // Esc 键关闭设置面板
     window.addEventListener('keydown', onSettingsKeydown)
+    // 系统级关闭（Alt+F4）不保证跑 onBeforeUnmount：补一道落盘
+    window.addEventListener('beforeunload', flushSettingsOnUnload)
 
     if (props.standalone) {
       // 独立窗口：顶栏即拖动区，窗口标题显示「设置」
@@ -1269,6 +1278,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onSettingsKeydown)
+  window.removeEventListener('beforeunload', flushSettingsOnUnload)
   unsubPeerTheme?.()
   unsubPeerTheme = null
   mbUnsub?.()

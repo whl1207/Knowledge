@@ -566,7 +566,6 @@
               <template v-if="isToolUnitExpanded(message.timestamp, unit.id || ui)">
                 <div v-if="shouldShowUnitArgs(unit)" class="tool-code-box scoll">
                   <span v-if="unit.description === 'run_code' && getRunCodeProgram(unit)" v-html="highlightCodeHtml(getRunCodeProgram(unit), 'typescript')"></span>
-                  <span v-else-if="unit.description === 'run_python' && getRunPythonCode(unit)" v-html="highlightCodeHtml(getRunPythonCode(unit), 'python')"></span>
                   <template v-else-if="unit.description === 'write_file'">
                     <div v-if="getWriteFilePath(unit)" :title="getWriteFilePath(unit)">{{ getWriteFilePath(unit) }}</div>
                   </template>
@@ -638,10 +637,10 @@
                   </div>
                 </template>
                 <div
-                  v-else-if="shouldShowUnitResult(unit) && unitResultText(unit)"
+                  v-else-if="shouldShowUnitResult(unit) && unitResultBody(unit)"
                   class="tool-result-box scoll"
                   :class="{ 'tool-result-prose': unit.stepType === 'guidance' }"
-                >{{ unitResultText(unit) }}</div>
+                >{{ unitResultBody(unit) }}</div>
               </template>
             </div>
             </template>
@@ -2121,12 +2120,45 @@ const ensureExternalMirror = async () => {
   }
 }
 
+/** 后台任务出现时自动打开右侧栏的「后台任务」页（对齐 DSH 的任务面板）。 */
+function autoOpenJobsDock(): void {
+  let state = dockState.value
+  let tab = state.tabs.find(t => t.kind === 'jobs')
+  if (!tab) {
+    state = addDockTab(state, 'jobs')
+    tab = state.tabs[state.tabs.length - 1]
+  }
+  if (!tab) return
+  state = setDockOpenState(activateDockTab(state, tab.id), true)
+  dockState.value = state
+  saveChats()
+}
+
+let stopJobsWatch: (() => void) | null = null
+async function ensureJobsWatch(): Promise<void> {
+  if (stopJobsWatch || !aikmIpcAvailable()) return
+  try {
+    const { aikmDsh } = await import('@/lib/aikmIpc')
+    stopJobsWatch = aikmDsh?.jobs?.onEvent?.((ev: any) => {
+      if (ev?.type !== 'job/start') return
+      // agent 自身的 turn 不作为「后台任务」弹侧栏，避免每个回合都抢面板
+      if (ev.job?.kind === 'agent') return
+      autoOpenJobsDock()
+    }) ?? null
+  } catch {
+    stopJobsWatch = null
+  }
+}
+
 onMounted(() => {
   void ensureExternalMirror()
+  void ensureJobsWatch()
 })
 onBeforeUnmount(() => {
   stopExternalMirror?.()
   stopExternalMirror = null
+  stopJobsWatch?.()
+  stopJobsWatch = null
 })
 
 // 持久化当前聊天栏（供应用重启后恢复）。
@@ -4755,7 +4787,6 @@ const toolIcons: Record<string, string> = {
   'server-search-visit': 'fa-external-link',
   'context-compact': 'fa-compress',
   'run_code': 'fa-file-code-o',
-  'run_python': 'fa-code',
   'shell': 'fa-terminal',
   'kb_search': 'fa-book',
   // Agentic（智能路由）知识库检索的工具单元图标
@@ -4796,7 +4827,6 @@ const getToolLabel = (name: string): string => {
     'server-search-visit': isZh ? '访问网站' : 'Visited',
     'context-compact': isZh ? '上下文压缩' : 'Context compaction',
     'run_code': isZh ? '程序化调用' : 'Run Code',
-    'run_python': isZh ? '执行Python' : 'Run Python',
     'shell': isZh ? '执行Shell' : 'Run Shell',
     'kb_search': isZh ? '知识库检索' : 'Knowledge Search',
     // Agentic（智能路由）知识库检索的工具单元（与智能体工具卡片同一套标签/图标）
@@ -4860,7 +4890,7 @@ const unescapePartialJsonString = (s: string): string => {
 const streamedFieldCache = new Map<string, string>()
 const STREAMED_FIELD_CACHE_MAX = 8
 
-// 从流式累积/未闭合的 JSON 参数中提取某个字符串字段的值（run_python→code、write_file→content、
+// 从流式累积/未闭合的 JSON 参数中提取某个字符串字段的值（run_code→code、write_file→content、
 // update_plan→plan 等；未闭合时从原文按 key 提取并容错反转义；未找到返回 ''）
 const extractStreamedJsonField = (raw: string, key: string): string => {
   if (!raw) return ''
@@ -4896,14 +4926,6 @@ const extractStreamedJsonField = (raw: string, key: string): string => {
     if (oldest !== undefined) streamedFieldCache.delete(oldest)
   }
   return value
-}
-
-/** 提取 run_python 参数中的代码（已解析对象或流式未闭合 JSON 均支持） */
-const getRunPythonCode = (unit: any): string => {
-  const args = unit.args
-  if (!args) return ''
-  if (typeof args === 'string') return extractStreamedJsonField(args, 'code')
-  return typeof args?.code === 'string' ? args.code : ''
 }
 
 /** 提取 run_code 参数中的程序代码（已解析对象或流式未闭合 JSON 均支持） */
@@ -8989,7 +9011,7 @@ watch(
   }
 )
 
-const sendChatMessage = async (message: string) => {
+const sendChatMessageCore = async (message: string) => {
   const currentChatData = currentChat.value
   
   const { content: msgContent, images, fileAttachments } = buildUserMessageFromUploads(message)
@@ -9498,6 +9520,20 @@ const sendChatMessage = async (message: string) => {
       restoreStoreModelConfig(originalType, originalModel)
     }
     saveChats()
+  }
+}
+
+/**
+ * 发送入口包装：在整段发送流程（含检索阶段）标记「临时模型路由」。
+ * 期间 saveConfig 不落盘 AIconfig —— 否则聊天绑定的来源/模型会被当成用户默认设置写死
+ * （现象：改过的模型来源/配置重开又变回去）。内部 finally 仍负责把类型/模型还原。
+ */
+const sendChatMessage = async (message: string) => {
+  store.beginTemporaryLlmRoute?.()
+  try {
+    await sendChatMessageCore(message)
+  } finally {
+    store.endTemporaryLlmRoute?.()
   }
 }
 
@@ -10829,7 +10865,6 @@ const toolArgStreamKey = (n: string): string | null => {
     case 'read_file':
     case 'list_dir':
     case 'write_file': return 'path'
-    case 'run_python': return 'code'
     case 'run_code': return 'code'
     case 'shell': return 'command'
     case 'web_fetch': return 'url'
@@ -10877,8 +10912,6 @@ const unitArgsText = (unit: any): string => {
     return raw
   }
   switch (n) {
-    case 'run_python':
-      return typeof args?.code === 'string' ? args.code : prettyJson(args)
     case 'replace_in_file':
     case 'multi_replace': {
       // 编辑类：运行中给进度；完成后由差异块/结果块说明改了什么，这里不再重复整份 JSON
@@ -11002,13 +11035,6 @@ const unitResultText = (unit: any): string => {
     case 'reasoning':
       // 思考文本：直接返回全量字符串（流式更新）
       return typeof r === 'string' ? r : prettyJson(r)
-    case 'run_python': {
-      // 只显示执行返回的结果（output/result 字段），不显示完整对象
-      if (typeof r === 'string') return r
-      const out = r?.output ?? r?.result ?? r?.stdout ?? r?.text
-      if (typeof out === 'string' && out.trim()) return out
-      return prettyJson(r)
-    }
     case 'run_code': {
       // PTC：折叠摘要 = 返回值（字符串直接用；无返回值时提示程序内调用了几次工具）
       const out = ptcOutputOf(unit)
@@ -11159,6 +11185,62 @@ const unitResultText = (unit: any): string => {
       if (typeof r === 'string') return r
       return prettyJson(r)
   }
+}
+
+/**
+ * 展开后的「结果正文」：与折叠摘要分开。
+ *
+ * `unitResultText` 给的是**摘要**（读文件只显示路径+行区间、shell 只显示命令），
+ * 折叠行用它很合适；但展开后如果仍用它，就会出现「上面参数是路径/命令，下面结果
+ * 还是同一句路径/命令」——用户看不到真正的结果。这里对读文件/命令执行改用工具
+ * 返回的 `modelText`（文件正文 / stdout+stderr），其他工具仍走摘要。
+ */
+const UNIT_RESULT_BODY_MAX = 20_000
+/** 展开后应直接展示 modelText 的工具（折叠摘要只有路径/命令/计数，容易与参数区重复） */
+const MODEL_TEXT_RESULT_TOOLS = new Set([
+  'read_file', 'shell', 'glob', 'search_files', 'kb_search',
+  'job_list', 'job_output', 'working_directory', 'web_fetch',
+])
+const clampResultBody = (text: string): string => {
+  if (!text) return ''
+  if (text.length <= UNIT_RESULT_BODY_MAX) return text
+  return text.slice(0, UNIT_RESULT_BODY_MAX)
+    + `\n\n…（仅显示前 ${UNIT_RESULT_BODY_MAX} 字；完整内容见模型上下文或已落盘文件）`
+}
+const unitResultBody = (unit: any): string => {
+  const r = unit?.result !== undefined && unit?.result !== null
+    ? unit.result
+    : unit?.resultPreview !== undefined && unit?.resultPreview !== null
+      ? unit.resultPreview
+      : unit?.streamContent
+  if (r === undefined || r === null || r === '') return ''
+  const n = unit?.description
+  const isZh = store.locales == 'zh'
+  // 读图：展开后给格式/大小，不再只重复路径
+  if (n === 'read_image' && typeof r === 'object') {
+    const mime = String(r.mime || '')
+    const bytes = Number(r.bytes) || 0
+    const size = bytes > 0 ? `${Math.round(bytes / 1024)} KB` : ''
+    const meta = [mime, size].filter(Boolean).join(' · ')
+    if (meta) return isZh ? `图片信息：${meta}` : `Image: ${meta}`
+  }
+  // 这些工具的折叠摘要只是「路径 / 命令 / 命中数」，展开后应当展示真正的结果：
+  // 文件正文、stdout/stderr、文件列表、命中片段、后台任务列表、工作目录确认……
+  // 统一优先用工具返回的 modelText（工具自己声明的“模型可见正文”）。
+  if (MODEL_TEXT_RESULT_TOOLS.has(String(n)) && typeof r?.modelText === 'string' && r.modelText.trim()) {
+    return clampResultBody(r.modelText)
+  }
+  const summary = unitResultText(unit)
+  const argsText = unitArgsText(unit)
+  // 通用兜底：摘要与参数文本一模一样（工具把入参原样回显）时，优先用 modelText / 原始结果，
+  // 避免「上下都一样」；两者都不同则保持原有摘要。
+  if (summary && argsText && summary.trim() === argsText.trim()) {
+    if (typeof r?.modelText === 'string' && r.modelText.trim() && r.modelText.trim() !== summary.trim()) {
+      return clampResultBody(r.modelText)
+    }
+    if (typeof r === 'string' && r.trim() !== summary.trim()) return clampResultBody(r)
+  }
+  return clampResultBody(summary)
 }
 
 /** 格式化 JSON（对象 → 缩进 JSON；字符串原样） */
@@ -11410,7 +11492,7 @@ const unitDuration = (unit: any): string => {
 }
 
 /** 有「退出状态」的工具：只有它们用中性胶囊（对齐 DSH：其它错误仍用错误色图标） */
-const EXIT_PILL_TOOLS = new Set(['shell', 'run_python', 'run_code'])
+const EXIT_PILL_TOOLS = new Set(['shell', 'run_code'])
 
 /** 异常胶囊文案：exit N / 信号 / 超时；正常与运行中返回空（不显示胶囊） */
 const unitExitPill = (unit: any): string => {

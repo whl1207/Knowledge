@@ -113,7 +113,7 @@ export function runToolResultBudgetSelfTest(): BudgetCase[] {
   {
     add('read_file 走 headOnly', budgetForTool('read_file').strategy === 'headOnly')
     add('list_dir / search_files 走 headOnly', budgetForTool('list_dir').strategy === 'headOnly' && budgetForTool('search_files').strategy === 'headOnly')
-    add('shell / run_python 走 headTail', budgetForTool('shell').strategy === 'headTail' && budgetForTool('run_python').strategy === 'headTail')
+    add('shell / run_code 走 headTail', budgetForTool('shell').strategy === 'headTail' && budgetForTool('run_code').strategy === 'headTail')
   }
 
   // 6. 码点切分：emoji 不能被切成半个（否则模型看到乱码）

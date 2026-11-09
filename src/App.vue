@@ -15,6 +15,18 @@ import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
   import { defaultLanGuestPolicy } from '@/shared/lanGuest'
   const store=usestore()
 
+  // ⚠️ 必须在**任何子组件挂载之前**同步读一次配置：
+  // 子组件的 onMounted 早于父组件 onMounted（Vue 挂载顺序），而子组件里有不少
+  // 「初始化即 saveConfig」的逻辑（模型列表刷新、默认存储位置、聊天迁移…）。
+  // 若等到父组件 onMounted 才 loadConfig，那些保存会先把内存里的出厂默认值写回存档，
+  // 表现为偶发的「配置全丢 / 来源被重置」。setup 阶段父组件先执行，这里读盘最稳。
+  try {
+    store.loadConfig()
+  } catch (e) {
+    // 读盘失败不能让整个应用白屏：退回默认值，用户仍可在设置里重配
+    console.error('[store] 启动读取配置失败（继续用默认值）:', e)
+  }
+
   // 主面板与槽位：内置面板也走 plugin.main 槽位注册（见 lib/plugin/panels.ts）；
   // 面板本体渲染在下方模板的 <PluginSlot name="panel.main">，导航按钮由同一条目派生。
   // ⚠️ 查询走 vue-free 的 panelRegistry；panels.ts 负责注册内置面板（含静态组件 import）
@@ -595,7 +607,8 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
     isVoiceOverlayWindow.value = window.location.hash.startsWith('#/voice-overlay')
 
     // 独立窗口也需要加载配置（主题等；loadConfig 为同步动作，返回后 store.lan 已就绪）
-    store.loadConfig()
+    // ⚠️ 已在 setup 顶部读过一次（必须早于子组件挂载，见那里的注释）；这里不再重复读，
+    // 否则会把子组件在挂载期间做出的修改用 localStorage 的旧值覆盖掉。
 
     // 技能 / Agent 预设的默认存储位置（userData/skills、userData/agent-presets）：
     // 必须在 loadConfig 之后解析，否则会被 localStorage 里的空值覆盖。

@@ -86,7 +86,7 @@ export const preprocessMath = (str: string): string => {
   })
 
   // 保护 HTML <pre>...</pre>（工具代码/结果框等原生预格式化文本）：
-  // 原生展示，不做任何数学/markdown 处理，避免 run_python 等代码中的 $ _ \ 等被误解析
+  // 原生展示，不做任何数学/markdown 处理，避免 run_code 等代码中的 $ _ \ 等被误解析
   result = result.replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/gi, (m) => {
     blocks.push(m)
     return `\x00BLOCK${blocks.length - 1}\x00`

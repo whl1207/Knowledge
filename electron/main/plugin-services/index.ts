@@ -117,7 +117,7 @@ function toolsFor(permissions: readonly PluginPermission[]): string[] {
     for (const name of ['write_file', 'replace_in_file', 'multi_replace']) out.add(name)
   }
   if (permissions.includes('shell')) {
-    for (const name of ['shell', 'run_python', 'run_code']) out.add(name)
+    for (const name of ['shell', 'run_code']) out.add(name)
   }
   if (permissions.includes('agent.run')) out.add('run_subagent')
   return Array.from(out)

@@ -450,6 +450,8 @@ async function callLLMFallback(agent: SwarmAgent, prompt: string, ragContext?: s
     : [{ role: 'user' as const, content: finalPrompt }]
   const origType = store.AIconfig.llm.type
   if (!generic) store.AIconfig.llm.type = agent.llmType || origType
+  // 临时路由期间禁止 saveConfig 把该来源写成全局默认（见 store 的 temporaryLlmRouteDepth）
+  store.beginTemporaryLlmRoute?.()
   try {
     const result = await store.sendToAI(messages, {
       onStream,
@@ -457,6 +459,7 @@ async function callLLMFallback(agent: SwarmAgent, prompt: string, ragContext?: s
     return typeof result === 'string' ? result : (result as any)?.text || (result as any)?.content || ''
   } finally {
     store.AIconfig.llm.type = origType
+    store.endTemporaryLlmRoute?.()
   }
 }
 

@@ -505,7 +505,7 @@ app.whenReady().then(async () => {
   credentialStore.load()
   // PostgreSQL MCP：注入作者消歧持久缓存文件（跨会话复用，避免重复扫大表）
   postgresService.setResolveCacheFile(path.join(app.getPath('userData'), 'pg-author-cache.json'))
-  // 统一工具注册表：注册核心工具（read_file / write_file / run_python / kb_search / skill …）
+  // 统一工具注册表：注册核心工具（read_file / write_file / run_code / kb_search / skill …）
   registerCoreTools()
   // 命名空间 IPC 通道（agent:* / sessionLog:* / skill:* / tools:*）
   registerNamespacedIpc()

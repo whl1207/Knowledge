@@ -1,6 +1,6 @@
 <!-- /questionView.vue - 问题库（Question Bank）标签页 -->
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount, toRaw } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import * as XLSX from 'xlsx'
 import { usestore } from '@/store'
@@ -349,7 +349,7 @@ const pickerQueryText = (): string => {
 const runLlmRecommend = async () => {
   const ctx = picker.value
   if (!ctx || llmRecRunning.value) return
-  const blocks = (props.blocks || []).filter((b: any) => b && (b.A || '').trim())
+  const blocks = (toRaw(props.blocks || []) as any[]).filter((b: any) => b && (b.A || '').trim())
   if (!blocks.length) { pickMsg.value = zh.value ? '知识库暂无切片' : 'No slices in KB'; return }
   const query = pickerQueryText()
   if (!query) { pickMsg.value = zh.value ? '请先输入问题/答案，再让模型推荐切片' : 'Type a question/answer first'; return }
@@ -593,7 +593,7 @@ const sliceEvidence = computed(() => !!props.model?.questionSliceEvidence)
 const groups = ref<DupGroup[]>([])
 const showDup = ref(false)
 const runDetect = () => {
-  groups.value = detectDuplicateGroups(activeQuestions.value, {
+  groups.value = detectDuplicateGroups(toRaw(activeQuestions.value) as any, {
     threshold: threshold.value,
     cosineSimilarity,
     sliceEvidence: sliceEvidence.value,
@@ -781,8 +781,19 @@ const exportTemplate = () => {
 const complexCount = ref(5)
 const complexRunning = ref(false)
 const generateComplex = async () => {
-  const blocks = (props.blocks || []).filter((b: any) => b.A && b.A.trim())
-  if (blocks.length < 2) { emit('updateState', zh.value ? '切片不足（≥2），无法生成复合问题' : 'Need ≥2 slices'); return }
+  // toRaw + 候选池上限：旧实现每次做 30 轮 × 全库余弦，向量还是响应式代理
+  // （1500 条 ≈ 22s、3000 条 ≈ 45s 的主线程冻结）。这里最多取 400 条做配对，
+  // 语义相关配对的命中率不变，开销从 O(n) 降到常数级。
+  const allBlocks = (toRaw(props.blocks || []) as any[]).filter((b: any) => b.A && b.A.trim())
+  if (allBlocks.length < 2) { emit('updateState', zh.value ? '切片不足（≥2），无法生成复合问题' : 'Need ≥2 slices'); return }
+  const COMPLEX_POOL_MAX = 400
+  let blocks = allBlocks
+  if (allBlocks.length > COMPLEX_POOL_MAX) {
+    blocks = []
+    for (let i = 0; i < allBlocks.length && blocks.length < COMPLEX_POOL_MAX; i += Math.max(1, Math.floor(allBlocks.length / COMPLEX_POOL_MAX))) {
+      blocks.push(allBlocks[i])
+    }
+  }
   const MAX_GEN = Math.max(1, Math.min(20, Number(complexCount.value) || 5))
   // 语义相关配对：A_vector 余弦落在 [0.35, 0.8]，优先跨文件
   const pairs: any[][] = []

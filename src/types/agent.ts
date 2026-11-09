@@ -34,6 +34,11 @@ export interface AgentOptions {
   config?: any
   /** 通用 LLM 配置（temperature/max_tokens/...） */
   llmConfig?: any
+  /**
+   * 显式声明该模型是否支持图片输入（三态：true/false，缺省=按来源+模型名启发式判断）。
+   * false 时 read_image / 截图会直接返回文本说明，不再把图片发给服务端（避免 400 中止整轮）。
+   */
+  supportsVision?: boolean
   /** 工具白名单：null=全部，[]=全部关闭，其他=仅列表内的工具 */
   tools?: string[] | null
   /**
@@ -118,7 +123,7 @@ export interface AgentOptions {
   }
   /**
    * 沙箱模式（'safe' | 'workspace' | 'trusted'）：传给工具执行上下文，
-   * 由统一策略解析（sandbox-policy）决定 run_python/shell 的放行级别；
+   * 由统一策略解析（sandbox-policy）决定 run_code/shell 的放行级别；
    * 缺省视为 'safe'（fail-closed）。
    */
   sandboxMode?: 'safe' | 'workspace' | 'trusted'
@@ -336,7 +341,7 @@ export interface AgentEventMap {
    * - `truncated-giveup`：连续截断达到上限，停止续跑（任务可能未完成，需要用户干预）；
    * - `truncated-tool-calls`：带工具调用的一步被截断，本步所有调用均未派发，已提示模型缩小提交量。
    */
-  'agent/notice': { kind: 'truncated-continue' | 'truncated-giveup' | 'truncated-tool-calls'; message: string }
+  'agent/notice': { kind: 'truncated-continue' | 'truncated-giveup' | 'truncated-tool-calls' | 'image-unsupported'; message: string }
   'agent/error': { message: string }
 }
 

@@ -21,6 +21,11 @@
 import { AIUtils } from '@/services/ai-utils'
 import { normalizeLlmType } from '@/shared/llmSources'
 import { prepareImageDataUrl } from '@/lib/image/prepareImage'
+import { isVisionLikeModel } from '@/shared/visionSupport'
+
+// 视觉能力判定已抽到共享模块（聊天 / 智能体请求也要用同一份规则）；
+// 这里保留同名导出，OCR 面板的既有 import 不用改。
+export { isVisionLikeModel }
 
 /** Ollama 生成参数（options），仅列出 OCR 需要的字段 */
 export interface OcrGenOptions {
@@ -166,38 +171,6 @@ export { llmConfigByKey } from '@/shared/llmSources'
 
 /** 模型名里含 ocr → 最可能是 OCR 专用模型（deepseek-ocr / glm-ocr / olmocr / nanonets-ocr …） */
 const OCR_NAME_RE = /ocr/i
-/**
- * 通用视觉/多模态模型名关键词（挑不到 ocr 时退而求其次）。
- * 取值刻意保守，只认「明确带 vision/vl/多模态」的命名，避免把纯文本模型误判为能识图
- * （例如 granite-3.1-8b-instruct、llama-3.2-3b、gemma-3-1b 这类文本模型不能进来自动选中）。
- */
-const VISION_NAME_RE = /(vision|multimodal|llava|bakllava|moondream|minicpm-v|internvl|florence|pixtral|idefics|smolvlm|janus|glm-?4v|qwen.*vl|[-_.]vl[-_.\d]|gemma-?3-(?:4|12|27)b|llama-?3\.2-(?:11|90)b)/i
-
-/** 云厂商模型名里没有视觉关键词 → 按来源补规则 */
-const PROVIDER_VISION_HINTS: Record<string, RegExp> = {
-  // DeepSeek：deepseek-flash 支持图像理解（旧名 deepseek-v4-flash-vision-exp 仍可调用）
-  deepseek: /(flash|vision)/i,
-  openai: /(gpt-4o|gpt-4\.1|gpt-4-turbo|gpt-5|o3|o4)/i,
-  anthropic: /claude/i,
-  google: /gemini/i,
-}
-
-/** 已知不支持图像理解的模型（按来源排除） */
-const PROVIDER_NON_VISION: Record<string, RegExp> = {
-  // DeepSeek 官方模型表：图像理解「deepseek-flash 支持 / deepseek-v4-pro 不支持」
-  deepseek: /(v4-pro|reasoner)/i,
-}
-
-/** 单个模型是否「看起来能识图」（带来源上下文，云厂商命名按 PROVIDER_* 规则判定） */
-export function isVisionLikeModel(name: string, provider?: string): boolean {
-  const s = String(name || '').trim()
-  if (!s) return false
-  const p = provider ? normalizeLlmType(provider) : undefined
-  if (p && PROVIDER_NON_VISION[p]?.test(s)) return false
-  if (OCR_NAME_RE.test(s) || VISION_NAME_RE.test(s)) return true
-  const hint = p ? PROVIDER_VISION_HINTS[p] : undefined
-  return !!hint && hint.test(s)
-}
 
 /**
  * 来源模型列表排序：OCR 专用 → 视觉模型 → 其它。

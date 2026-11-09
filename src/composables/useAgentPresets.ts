@@ -95,8 +95,26 @@ export const scanAgentPresets = async (): Promise<AgentPresetScanSummary> => {
         pushIssue(String(f.path), e instanceof SyntaxError ? 'JSON 解析失败（不是合法 JSON）' : String(e?.message || e))
       }
     }
-    // 以文件夹内 .agent 文件为准（不做 localStorage → 文件夹的自动同步迁移）
-    store.agentPresets = presets
+    // 以文件夹内 .agent 文件为准（不做 localStorage → 文件夹的自动同步迁移），
+    // **但内置预设不是文件、也永远不会落盘**：不能因为扫描文件夹就把内存里
+    // 用户对内置预设的编辑（工具勾选 / 名称 / 提示词）丢掉。
+    // 做法：先保留本窗口内存里的内置项，再拼上文件夹里的自建项；
+    // 缺失的内置 id 仍由 ensureBuiltinAgentPresets 按出厂值补齐。
+    const builtinsBefore = (Array.isArray(store.agentPresets) ? store.agentPresets : [])
+      .filter((p: any) => p && isBuiltinAgentPreset(p))
+    // 自建项兜底：内存里有、磁盘上还没有的（新建后写盘失败 / 写盘还没完成就重扫）
+    // 不能直接丢掉 —— 先尝试补写，成功的一并保留。否则「新建智能体 → 重开设置就没了」。
+    const diskIds = new Set(presets.map((p: any) => String(p?.id || '')))
+    const missingCustom = (Array.isArray(store.agentPresets) ? store.agentPresets : [])
+      .filter((p: any) => p && p.id && !isBuiltinAgentPreset(p) && !diskIds.has(String(p.id)))
+    const recovered: any[] = []
+    for (const p of missingCustom) {
+      try {
+        if (await writeAgentPreset(p)) recovered.push(p)
+      } catch { /* 单个失败不阻塞扫描 */ }
+    }
+    const custom = [...presets, ...recovered]
+    store.agentPresets = [...builtinsBefore, ...custom]
     // 内置预设按 id 幂等兜底：文件夹模式以文件为准，但内置项不能因文件夹缺文件而消失
     ensureBuiltinAgentPresets(store.agentPresets as any[], builtinPresetDefaultsFromStore(store))
     summary.ok = true
@@ -193,6 +211,8 @@ export const applyAgentPresetFolder = async (
   const before: any[] = Array.isArray(store.agentPresets) ? JSON.parse(JSON.stringify(store.agentPresets)) : []
   const persist = opts.persist !== false
   store.agentPresetPath = dir
+  // 进入文件夹模式：清掉「本地存储」标记，下次启动不再自动切回（当前已是文件夹）
+  try { localStorage.removeItem('agentPresetLocalMode') } catch { /* 非桌面/无 localStorage 忽略 */ }
   if (persist) store.saveConfig?.()
   let summary = await scanAgentPresets()
   if (!summary.ok) {
@@ -204,25 +224,33 @@ export const applyAgentPresetFolder = async (
     return summary
   }
   const seeds = (opts.seedPresets || []).filter((p) => p && p.id && !isBuiltinAgentPreset(p))
-  if (summary.files === 0 && seeds.length) {
+  // 不再只在「空目录」播种：只写「内存里有、磁盘上还没有」的自建项。
+  // 旧逻辑在目录已有旧文件时什么都不写，于是用户从「本地存储」切回文件夹模式后，
+  // 期间新建的预设会被磁盘旧列表整体覆盖（表现为新增智能体消失）。
+  const currentIds = new Set((store.agentPresets as any[] || []).map((p: any) => String(p?.id || '')))
+  const missingSeeds = seeds.filter((p) => !currentIds.has(String(p.id)))
+  if (missingSeeds.length) {
     let seeded = 0
-    for (const preset of seeds) {
+    for (const preset of missingSeeds) {
       try {
         if (await writeAgentPreset(preset)) seeded++
       } catch { /* 单个失败计入下面的一致性判断 */ }
     }
-    if (seeded !== seeds.length) {
-      // 任一文件没写成 → 整体回滚（已写出的文件留在磁盘上，不删，用户可重试）
+    if (summary.files === 0 && seeded !== missingSeeds.length) {
+      // 空目录 + 写不进去 → 整体回滚（已写出的文件留在磁盘上，不删，用户可重试）
       store.agentPresetPath = ''
       store.agentPresets = before
       if (persist) store.saveConfig?.()
       summary.ok = false
       summary.seeded = seeded
-      summary.error = `无法把 ${seeds.length} 个预设全部写入目标文件夹（成功 ${seeded} 个），已保留原来的存储位置`
+      summary.error = `无法把 ${missingSeeds.length} 个预设全部写入目标文件夹（成功 ${seeded} 个），已保留原来的存储位置`
       return summary
     }
-    summary = await scanAgentPresets()
-    summary.seeded = seeded
+    if (seeded > 0) {
+      summary = await scanAgentPresets()
+      summary.seeded = seeded
+      return summary
+    }
   }
   if (persist) store.saveConfig?.()
   return summary
@@ -246,6 +274,9 @@ export const closeAgentPresetFolder = async (): Promise<void> => {
   const store = usestore() as any
   store.agentPresetPath = ''
   agentPresetFileMap.clear()
+  // 记住「用户显式选择了本地存储」：启动时 ensureDefaultAgentPresetFolder 不再自动切回文件夹，
+  // 否则本地模式期间新建的预设会被旧文件夹列表整体覆盖。
+  try { localStorage.setItem('agentPresetLocalMode', '1') } catch { /* 忽略 */ }
   store.saveConfig?.()
 }
 

@@ -608,7 +608,7 @@ class RendererAgent {
       : '本步输出被截断（finish_reason=length，max_tokens / 上下文长度不够），工具参数 JSON 不完整：本次调用未执行。'
     const advice = name === 'write_file'
       ? '如果 content 很大，请分段写入：先写文件骨架，再用 replace_in_file 逐段追加（不要一次提交整份大文件）。'
-      : name === 'run_code' || name === 'run_python'
+      : name === 'run_code'
         ? '请把程序拆成多次调用、每次只做少量步骤后重试。'
         : '请缩短单次提交的内容，拆成多次调用后重试。'
     return `${head}${rawLen ? `（收到 ${rawLen} 字符）` : ''}${advice}`

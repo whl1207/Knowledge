@@ -278,7 +278,7 @@ export function runChatDockSelfTest(): ChatDockCase[] {
     add('分支标签：空白页选分支 → 复用已有，空白页消失', merged.tabs.length === b2.tabs.length && activeDockTab(merged)?.kind === 'branch')
 
     const branchKinds = DOCK_TAB_KINDS.join(',')
-    add('类型：新标签页可选类型包含分支、待办、计划与轨迹', branchKinds === 'files,terminal,browser,branch,todos,plan,trajectory', branchKinds)
+    add('类型：新标签页可选类型包含分支、待办、计划、轨迹与后台任务', branchKinds === 'files,terminal,browser,branch,todos,plan,trajectory,jobs', branchKinds)
 
     // 待办清单 / 计划也是单例：重复添加只切到已有的那个
     const withTodos = addDockTab(b2, 'todos', 9101)

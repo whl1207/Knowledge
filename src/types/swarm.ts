@@ -22,7 +22,7 @@ export type SwarmRunMode = 'auto' | 'debate'
 export interface SwarmCapabilities {
   readFiles: boolean          // 读取文件 → read_file / search_files
   listDirs: boolean           // 列出目录 → list_dir
-  executeCode: boolean        // 执行代码 → run_python
+  executeCode: boolean        // 执行代码 → run_code
   webSearch: boolean          // 搜索网页 → web_search
   browseWebsites: boolean     // 浏览网站 → web_fetch
   writeFiles: boolean         // 写入文件 → write_file

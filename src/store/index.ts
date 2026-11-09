@@ -14,7 +14,7 @@ import { isFlowDslPath } from '@/shared/flowFile'
 import { detectTaskScaffold, detectRetiredTaskScaffold, isTaskFile, isEmptyTaskFile, RETIRED_SCAFFOLD_LABELS, MERGED_SCAFFOLD_KEYS, MERGED_SCAFFOLD_LABELS } from '@/lib/taskFile'
 import type { FileSortKey } from '@/lib/knowFile/fileSort'
 import { DEFAULT_AGENT_MAX_STEPS, normalizeAgentMaxSteps } from '@/shared/agent-loop-rounds'
-import { ensureBuiltinAgentPresets, refreshBuiltinAgentPresets, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
+import { ensureBuiltinAgentPresets, refreshBuiltinAgentPresets, builtinPresetDefaultsFromStore, BUILTIN_PRESET_CAPABILITY_MIGRATION_VERSION } from '@/shared/builtinAgentPresets'
 import { normalizeWebSearchConfig, newWebSearchCustomSource, toCustomProviderId, type WebSearchConfig, type WebSearchCustomSource } from '@/shared/webSearch'
 import { normalizeWebFetchConfig, type WebFetchConfig, type WebFetchChannelId } from '@/shared/webFetch'
 import { BROWSER_SEARCH_ENGINES, DEFAULT_BROWSER_SEARCH_ENGINE } from '@/shared/browserSearch'
@@ -145,6 +145,16 @@ let persistMainPanel = true
 let settingsConfigWriter = false
 
 /**
+ * 运行期「临时模型路由」的嵌套计数（聊天 / 集群把 store.AIconfig.llm 临时改成
+ * 会话绑定的来源与模型，请求结束后才恢复）。
+ *
+ * 期间任何 saveConfig 都不能把这份临时值写进存档：否则「A 聊天用了 Ollama」
+ * 会被当成用户把默认来源改成了 Ollama（现象：调整的模型来源/配置重开又没了）。
+ * 由 beginTemporaryLlmRoute()/endTemporaryLlmRoute() 成对维护。
+ */
+let temporaryLlmRouteDepth = 0
+
+/**
  * 是否持久化「工作区」相关键（root / roots / path / remoteRoots）。
  *
  * 为什么需要这个开关：工作区既能在主窗口里增删（文件面板 / 顶部工具栏），也能在设置窗口的
@@ -265,7 +275,158 @@ function broadcastSettingsChanged(uiJson: string, locales: string, aiConfigJson?
     } catch (e) { /* 忽略 */ }
 }
 
-// 预设主题配色表（设置页「界面-主题」18 个预设主题；changeTheme 统一从表取值，下拉框由 Object.keys 生成，labelEn 供英文界面展示）
+// ---------------------------------------------------------------------------
+// 多窗口配置写盘：按 key 的乐观并发（避免旧窗口整份快照覆盖别处的新设置）
+//
+// 背景：每个窗口各持一份 store 内存快照。设置窗口、主窗口、文件/插件/浏览器子窗口
+// 都会在各自的 saveConfig 里把 AIconfig / agentPresets / mcpServers / UI… 整份写回
+// localStorage。只要两个窗口同时开着，最后写盘的那个就会用自己的旧值覆盖别人的新值
+// （现象：设置里加了智能体 / 换了模型来源，重开设置又没了）。
+//
+// 做法：记录「本窗口上次同步到的值」（base）。写盘时三路比较：
+//   - 本窗口没改过（next === base）而 localStorage 已被别人改过（stored !== base）
+//     → 远端更新，**跳过写入**，不覆盖；
+//   - 本窗口改过（next !== base）→ 本地写，最后一次修改生效；
+//   - 都没改 → 照写（幂等）。
+// 跳过写入时 base 保持旧值，后续仍不会覆盖远端；等到本窗口真正改动该 key 时才接管。
+// 注意：base 必须用「上次读到的值」而不是「当前内存值」，否则跳过一次后下一次又会被当成
+// 本地修改而覆盖远端。快照点 = loadConfig 末尾、syncConfigFromPeers 末尾。
+// ---------------------------------------------------------------------------
+const SHARED_CONFIG_KEYS = [
+    'interfaceConfigMode', 'locales', 'pythonSandbox', 'AIconfig', 'customLlmSources',
+    'llmSourceStatus', 'llmDisabledSources', 'llmCustomSourceStatus', 'UI', 'mapConfig',
+    'agentPresets', 'generalAgentMaxSteps', 'mcpServers', 'webSearchConfig', 'webFetchConfig',
+    'collab', 'remoteFs', 'lan', 'skillsPath', 'agentPresetPath', 'agentTools',
+    'disabledSkills', 'skillStoreSources', 'pluginStoreSources',
+    // 导航/标题/视图这类界面配置也被各窗口整份写回：一并做三路比较，避免子窗口把主窗口刚改的导航覆盖
+    'hiddenNavs', 'hiddenExtras', 'customTitle', 'view', 'treeSort',
+] as const
+
+/** key → 本窗口上次同步到的序列化值（null = 当时不存在） */
+const sharedConfigBase = new Map<string, string | null>()
+
+/** 把当前 localStorage 里的共享配置快照成 base（loadConfig / syncConfigFromPeers 末尾调用） */
+function snapshotSharedConfigBase(): void {
+    if (typeof localStorage === 'undefined') return
+    for (const key of SHARED_CONFIG_KEYS) sharedConfigBase.set(key, localStorage.getItem(key))
+}
+
+/**
+ * 带三路比较地写一个共享配置键。
+ * @returns true=已写入；false=远端更新（本地未改）而跳过
+ */
+function commitSharedConfig(key: string, next: string): boolean {
+    if (typeof localStorage === 'undefined') return false
+    const base = sharedConfigBase.has(key) ? (sharedConfigBase.get(key) ?? null) : null
+    const stored = localStorage.getItem(key)
+    // base 是本窗口上次读到的值：与它不同才算「本窗口改过」
+    const localChanged = next !== base
+    const remoteChanged = stored !== base
+    if (remoteChanged && !localChanged) {
+        // 别的窗口在本窗口读盘之后改过这个键，而本窗口没改它 → 以远端为准，不覆盖
+        return false
+    }
+    localStorage.setItem(key, next)
+    sharedConfigBase.set(key, next)
+    return true
+}
+
+/** 解析 JSON 数组；不是数组返回 null */
+function parseJsonArray(raw: string | null): any[] | null {
+    if (!raw) return null
+    try {
+        const v = JSON.parse(raw)
+        return Array.isArray(v) ? v : null
+    } catch {
+        return null
+    }
+}
+
+/** 两个对象/值是否等价（预设对象来自同一份 JSON，键序稳定；这里再做一次排序兜底） */
+function sameJsonValue(a: any, b: any): boolean {
+    if (a === b) return true
+    try { return stableJson(a) === stableJson(b) } catch { return false }
+}
+function stableJson(v: any): string {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v)
+    if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']'
+    return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + stableJson(v[k])).join(',') + '}'
+}
+
+/**
+ * 按 id 对「数组型配置」做三路合并（agentPresets 等）。
+ *
+ * 场景：设置窗口开着时，主窗口里的 AI 用 preset_write 新建了一个预设；
+ * 用户在设置里又新建一个 → 两个窗口都「改过」agentPresets。
+ * 纯 last-writer-wins 会让后者把前者的新增整份覆盖掉（现象：刚加的智能体又没了）。
+ * 这里按 id 合并：
+ * - 双方都有：本地改过用本地，否则远端改过用远端，都没改用本地；
+ * - 只有本地有：本地新增 → 保留；远端删除且本地未改 → 尊重删除；
+ * - 只有远端有：远端新增 → 保留；本地删除且远端未改 → 尊重删除。
+ * 顺序：本地顺序在前，远端新增的按远端顺序追加。
+ */
+function mergeById(baseJson: string | null, storedJson: string | null, nextJson: string): string | null {
+    const base = parseJsonArray(baseJson)
+    const remote = parseJsonArray(storedJson)
+    const local = parseJsonArray(nextJson)
+    if (!base || !remote || !local) return null
+    const idOf = (p: any): string => String(p?.id ?? '')
+    const baseMap = new Map(base.map((p) => [idOf(p), p]))
+    const remoteMap = new Map(remote.map((p) => [idOf(p), p]))
+    const localMap = new Map(local.map((p) => [idOf(p), p]))
+    const order: string[] = []
+    const pushed = new Set<string>()
+    for (const p of local) { const id = idOf(p); if (id && !pushed.has(id)) { pushed.add(id); order.push(id) } }
+    for (const p of remote) { const id = idOf(p); if (id && !pushed.has(id)) { pushed.add(id); order.push(id) } }
+    const out: any[] = []
+    for (const id of order) {
+        const inBase = baseMap.has(id)
+        const inLocal = localMap.has(id)
+        const inRemote = remoteMap.has(id)
+        const b = baseMap.get(id)
+        const l = localMap.get(id)
+        const r = remoteMap.get(id)
+        if (inLocal && inRemote) {
+            const localChanged = !sameJsonValue(l, b)
+            const remoteChanged = !sameJsonValue(r, b)
+            out.push(localChanged ? l : (remoteChanged ? r : l))
+        } else if (inLocal) {
+            // 本地新增，或远端删除：本地改过就保留本地，否则尊重远端删除
+            if (inBase && !inRemote && sameJsonValue(l, b)) continue
+            out.push(l)
+        } else if (inRemote) {
+            // 远端新增，或本地删除：远端改过就保留远端，否则尊重本地删除
+            if (inBase && !inLocal && sameJsonValue(r, b)) continue
+            out.push(r)
+        }
+    }
+    return JSON.stringify(out)
+}
+
+/**
+ * commitSharedConfig 的「双方都改过时按 id 合并」版本。
+ * @returns 最终写入的 JSON（跳过时返回 null）
+ */
+function commitSharedConfigMerged(key: string, next: string): string | null {
+    if (typeof localStorage === 'undefined') return null
+    const base = sharedConfigBase.has(key) ? (sharedConfigBase.get(key) ?? null) : null
+    const stored = localStorage.getItem(key)
+    const localChanged = next !== base
+    const remoteChanged = stored !== base
+    if (remoteChanged && !localChanged) return null
+    let value = next
+    if (remoteChanged && localChanged) {
+        value = mergeById(base, stored, next) || next
+    }
+    localStorage.setItem(key, value)
+    sharedConfigBase.set(key, value)
+    return value
+}
+
+/**
+ * 预设主题配色表（设置页「界面-主题」18 个预设主题；changeTheme 统一从表取值，
+ * 下拉框由 Object.keys 生成，labelEn 供英文界面展示）
+ */
 /** 跨平台取父目录：Windows 盘符根 / Linux 根正确归位（返回父目录或空串） */
 export function parentPathOf(p: string): string {
     if (!p) return ''
@@ -1763,52 +1924,63 @@ export const usestore = defineStore('data', {
 
         // 储存配置信息
         saveConfig() {
+            // 读盘前内存里全是默认值：此时写盘会把工作区 / 模型 / 预设整份写成出厂值。
+            // 正常路径下 App 在挂载前已 loadConfig；子组件早于父组件的 onMounted 触发的保存
+            // 一律挡掉，等配置真正读进来后再写。
+            if (!configLoaded) {
+                console.warn('[saveConfig] 配置尚未加载，已跳过本次写入（避免用默认值覆盖存档）')
+                return
+            }
             // 诊断：llm.type 变更时打印调用栈，便于定位「重启后来源被改成 ollama」的写入点
             try {
                 const savedRaw = localStorage.getItem('AIconfig')
                 const prevType = savedRaw ? (JSON.parse(savedRaw)?.llm?.type) : 'none'
                 const curType = this.AIconfig?.llm?.type
-                if (curType !== prevType) {
+                // 临时路由期间的差异是预期行为（不落盘），不要刷诊断栈
+                if (temporaryLlmRouteDepth === 0 && curType !== prevType) {
                     console.warn(`[AIconfig] llm.type 变更: ${prevType} → ${curType}\n` + new Error().stack)
                 }
             } catch { /* 诊断日志，忽略解析错误 */ }
             // 工作区键（root / roots / path）：非主窗口不写（见 persistWorkspace），避免用旧值覆盖主窗口
             if (persistWorkspace && configLoaded) writeWorkspaceKeys(this)
-            localStorage.setItem('skillsPath', JSON.stringify(this.skillsPath))
+            commitSharedConfig('skillsPath', JSON.stringify(this.skillsPath))
             // Agent 预设存储文件夹（与技能目录同策略）：持久化后重启仍以该文件夹里的 .agent 为准
-            localStorage.setItem('agentPresetPath', JSON.stringify(this.agentPresetPath))
-            localStorage.setItem('agentTools', JSON.stringify(this.agentTools))
-            localStorage.setItem('disabledSkills', JSON.stringify(this.disabledSkills))
-            localStorage.setItem('skillStoreSources', JSON.stringify(this.skillStoreSources))
-            localStorage.setItem('pluginStoreSources', JSON.stringify(this.pluginStoreSources))
+            commitSharedConfig('agentPresetPath', JSON.stringify(this.agentPresetPath))
+            commitSharedConfig('agentTools', JSON.stringify(this.agentTools))
+            commitSharedConfig('disabledSkills', JSON.stringify(this.disabledSkills))
+            commitSharedConfig('skillStoreSources', JSON.stringify(this.skillStoreSources))
+            commitSharedConfig('pluginStoreSources', JSON.stringify(this.pluginStoreSources))
             // 独立窗口不持久化标签（见 persistTabs），避免污染主窗口标签栏
             if (persistTabs) {
                 localStorage.setItem('data', JSON.stringify(this.data))
                 localStorage.setItem('index', JSON.stringify(this.index))
             }
-            localStorage.setItem('view', JSON.stringify(this.view))
-            localStorage.setItem('treeSort', JSON.stringify(this.treeSort))
+            commitSharedConfig('view', JSON.stringify(this.view))
+            commitSharedConfig('treeSort', JSON.stringify(this.treeSort))
             // mainPanel 只在主窗口有意义：独立窗口写入会覆盖主窗口当前面板（见 persistMainPanel 注释）
             if (persistMainPanel) localStorage.setItem('mainPanel', JSON.stringify(this.mainPanel))
-            localStorage.setItem('hiddenNavs', JSON.stringify(this.hiddenNavs))
-            localStorage.setItem('hiddenExtras', JSON.stringify(this.hiddenExtras))
-            localStorage.setItem('customTitle', JSON.stringify(this.customTitle))
-            localStorage.setItem('interfaceConfigMode', JSON.stringify(this.interfaceConfigMode))
-            localStorage.setItem('locales', JSON.stringify(this.locales))
+            commitSharedConfig('hiddenNavs', JSON.stringify(this.hiddenNavs))
+            commitSharedConfig('hiddenExtras', JSON.stringify(this.hiddenExtras))
+            commitSharedConfig('customTitle', JSON.stringify(this.customTitle))
+            const wroteInterfaceConfigMode = commitSharedConfig('interfaceConfigMode', JSON.stringify(this.interfaceConfigMode))
+            commitSharedConfig('locales', JSON.stringify(this.locales))
             // 安全策略（沙箱三态）：落盘后主窗口经 settings-config-changed → loadConfig 同步给 Agent 执行
-            localStorage.setItem('pythonSandbox', JSON.stringify(this.pythonSandbox))
+            commitSharedConfig('pythonSandbox', JSON.stringify(this.pythonSandbox))
             // 自定义来源落盘投影：默认来源独立于「临时路由」，只导默认值（见 customDefaultSourceId 注释）。
             // 请求中途保存 / 关窗口保存都不会再把聊天或节点临时绑定的来源写成默认。
             const customPersisted = projectCustomDefault(this.AIconfig?.llm?.custom)
             const aiPayload = customPersisted === this.AIconfig?.llm?.custom
                 ? this.AIconfig
                 : { ...this.AIconfig, llm: { ...this.AIconfig.llm, custom: customPersisted } }
-            localStorage.setItem('AIconfig', JSON.stringify(aiPayload))
+            // 临时模型路由期间（聊天/集群把 llm 临时改成会话绑定的来源）绝不落盘模型配置：
+            // 那份值是运行时路由状态，不是用户设的默认来源。请求结束恢复后再由下一次保存写回。
+            const inTemporaryLlmRoute = temporaryLlmRouteDepth > 0
+            const wroteAiConfig = !inTemporaryLlmRoute && commitSharedConfig('AIconfig', JSON.stringify(aiPayload))
             // 自定义来源独立双写存档：与 AIconfig 保持一致；即使 AIconfig 合并异常也能从独立键恢复
             try {
                 const cc = customPersisted
                 const defSrc = Array.isArray(cc?.sources) ? cc.sources[customDefaultIndexOf(cc)] : undefined
-                localStorage.setItem('customLlmSources', JSON.stringify({
+                if (!inTemporaryLlmRoute) commitSharedConfig('customLlmSources', JSON.stringify({
                     sources: Array.isArray(cc?.sources) ? cc.sources : [],
                     activeIndex: typeof cc?.activeIndex === 'number' ? cc.activeIndex : 0,
                     // 默认来源按 id 持久化：来源增删/排序变化后仍然认得出是哪一个（参照 DSH 的 provider+model 选择）
@@ -1822,34 +1994,47 @@ export const usestore = defineStore('data', {
                     available_models: Array.isArray(cc?.available_models) ? cc.available_models : [],
                 }))
             } catch (e) { /* 独立存档写入失败不影响主存档 */ }
-            localStorage.setItem('llmSourceStatus', JSON.stringify(this.llmSourceStatus))
-            localStorage.setItem('llmDisabledSources', JSON.stringify(this.llmDisabledSources))
-            localStorage.setItem('llmCustomSourceStatus', JSON.stringify(this.llmCustomSourceStatus))
-            localStorage.setItem('UI', JSON.stringify(this.UI))
-            localStorage.setItem('mapConfig', JSON.stringify(this.mapConfig))
+            commitSharedConfig('llmSourceStatus', JSON.stringify(this.llmSourceStatus))
+            commitSharedConfig('llmDisabledSources', JSON.stringify(this.llmDisabledSources))
+            commitSharedConfig('llmCustomSourceStatus', JSON.stringify(this.llmCustomSourceStatus))
+            const wroteUi = commitSharedConfig('UI', JSON.stringify(this.UI))
+            commitSharedConfig('mapConfig', JSON.stringify(this.mapConfig))
             // 注意：装备/类型数据已迁移至 SwarmPlanner，不再在此管理
-            localStorage.setItem('agentPresets', JSON.stringify(this.agentPresets))
-            localStorage.setItem('generalAgentMaxSteps', JSON.stringify(this.generalAgentMaxSteps))
-            localStorage.setItem('mcpServers', JSON.stringify(this.mcpServers))
+            // 预设是「两个窗口都可能在改」的数组：双方都改过时按 id 三路合并，
+            // 避免设置窗口用旧列表覆盖掉主窗口里 AI 新建的预设（反之亦然）。
+            {
+                const localPresetJson = JSON.stringify(this.agentPresets)
+                const mergedPresetJson = commitSharedConfigMerged('agentPresets', localPresetJson)
+                if (mergedPresetJson && mergedPresetJson !== localPresetJson) {
+                    try {
+                        const mergedList = JSON.parse(mergedPresetJson)
+                        if (Array.isArray(mergedList)) this.agentPresets = mergedList
+                    } catch { /* 合并结果解析失败时保留内存原值 */ }
+                }
+            }
+            commitSharedConfig('generalAgentMaxSteps', JSON.stringify(this.generalAgentMaxSteps))
+            commitSharedConfig('mcpServers', JSON.stringify(this.mcpServers))
             // 联网搜索源配置（设置页「工具 → 搜索」；同时推送给主进程供 web_search 工具使用）
-            localStorage.setItem('webSearchConfig', JSON.stringify(this.webSearch))
+            commitSharedConfig('webSearchConfig', JSON.stringify(this.webSearch))
             this.applyWebSearchToMain()
             // 网页抓取通道配置（设置页「工具 → 抓取」；同时推送给主进程供 web_fetch 工具使用）
-            localStorage.setItem('webFetchConfig', JSON.stringify(this.webFetch))
+            commitSharedConfig('webFetchConfig', JSON.stringify(this.webFetch))
             this.applyWebFetchToMain()
-            localStorage.setItem('collab', JSON.stringify(this.collab))
-            localStorage.setItem('remoteFs', JSON.stringify(this.remoteFs))
-            localStorage.setItem('lan', JSON.stringify(this.lan))
+            commitSharedConfig('collab', JSON.stringify(this.collab))
+            commitSharedConfig('remoteFs', JSON.stringify(this.remoteFs))
+            commitSharedConfig('lan', JSON.stringify(this.lan))
             if (persistWorkspace) localStorage.setItem('remoteRoots', JSON.stringify(this.remoteRoots))
             // 界面配置随软件分发：开启时同步写入软件根目录（fire-and-forget，界面配置以该文件为准）
-            if (this.interfaceConfigMode && aikmDsh?.interfaceConfig) {
+            // 仅在本次真的写成（未被其它窗口的新值挡下）时写文件，避免用旧开关状态覆盖分发配置
+            if (wroteInterfaceConfigMode && this.interfaceConfigMode && aikmDsh?.interfaceConfig) {
                 aikmDsh.interfaceConfig.save(this.gatherInterfaceConfig()).catch(() => {})
             }
             // UI / 语言变更广播到其它窗口（子窗口/文件窗口等），保证其即时应用（如 Word 导出模板、主题、语言等）
-            // 复用 notify-theme-change → theme-changed 通道；接收方 applyThemeFromBroadcast 合并 UI + 语言
+            // 复用 notify-theme-change → theme-changed 通道；接收方 applyThemeFromBroadcast 合并 UI + 语言。
+            // ⚠️ 只在 UI 真的写盘（未被其它窗口的新值挡下）时广播：否则会把本窗口的旧 UI 推给刚改过的窗口。
             const uiJson = JSON.stringify(this.UI)
             const locale = this.locales
-            if (uiJson !== lastBroadcastUiJson || locale !== lastBroadcastLocale) {
+            if (wroteUi && (uiJson !== lastBroadcastUiJson || locale !== lastBroadcastLocale)) {
                 lastBroadcastUiJson = uiJson
                 lastBroadcastLocale = locale
                 if (typeof window !== 'undefined' && hasCapability('events.bus')) {
@@ -1859,8 +2044,9 @@ export const usestore = defineStore('data', {
                 }
             }
             // 设置独立窗口写盘：额外广播一次完整配置变更，主窗口据此从 localStorage 重新同步
-            // （AI 模型来源/工具开关/MCP/Agent 预设等不在 UI 广播范围内，主窗口内存不会自动更新）
-            broadcastSettingsChanged(uiJson, locale, JSON.stringify(aiPayload))
+            // （AI 模型来源/工具开关/MCP/Agent 预设等不在 UI 广播范围内，主窗口内存不会自动更新）。
+            // ⚠️ AIconfig 没写成（远端更新）时不能广播本窗口的旧副本，否则会把主窗口刚改的内存推回去。
+            broadcastSettingsChanged(uiJson, locale, wroteAiConfig ? JSON.stringify(aiPayload) : undefined)
             // 注意：图片附件不保存到localStorage，因为可能很大
             // 顺手把内联的模型 API Key 搬进主进程凭据库（否则明文会留在 localStorage 里被插件读走）；
             // 无需等待：本函数保持同步，搬完由 secureLlmCredentials 自己再落盘一次。
@@ -2407,7 +2593,14 @@ export const usestore = defineStore('data', {
             // 内置 Agent 预设兜底注入（幂等）：代码智能体 / 办公智能体，只补缺失项，不覆盖用户编辑
             if (ensureBuiltinAgentPresets(this.agentPresets as any[], builtinPresetDefaultsFromStore(this))) needPersist = true
             // 迁移（插件开发预设）：旧提示词要求模型去读仓库源码核对 API，装机后没有源码会满盘搜索 → 订正为 plugin_dev_guide 工具
-            if (refreshBuiltinAgentPresets(this.agentPresets as any[])) needPersist = true
+            // ⚠️ 能力字段（enabledTools / mcpAccess / mcpServerIds）只做一次性迁移：
+            // 这段以前每次 loadConfig 都"缺什么补什么"，用户取消勾选的内置工具下次启动又被加回来。
+            const presetCapKey = 'builtin-preset-capability-migration'
+            const presetCapDone = Number(localStorage.getItem(presetCapKey) || 0) >= BUILTIN_PRESET_CAPABILITY_MIGRATION_VERSION
+            if (refreshBuiltinAgentPresets(this.agentPresets as any[], { capabilityMigration: !presetCapDone })) needPersist = true
+            if (!presetCapDone) {
+                try { localStorage.setItem(presetCapKey, String(BUILTIN_PRESET_CAPABILITY_MIGRATION_VERSION)) } catch { /* 忽略 */ }
+            }
             // 协同文件编辑配置（含默认值兜底，兼容旧存档无此 key）
             if (localStorage.getItem('collab') !== null) {
                 try {
@@ -2480,6 +2673,8 @@ export const usestore = defineStore('data', {
             }
 
             // 迁移结果统一落盘（此时 llmSourceStatus / llmDisabledSources 已读入内存，不会被覆盖）
+            // 先记下「本窗口读到的共享配置」作为多窗口三路比较的基线；迁移改动会被视为本地修改并写盘。
+            snapshotSharedConfigBase()
             if (needPersist) this.saveConfig()
             // 老装机升级：把历史遗留的内联 API Key 搬进主进程凭据库（幂等；浏览器/安卓无凭据接缝则不动）
             void this.secureLlmCredentials()
@@ -3456,6 +3651,18 @@ export const usestore = defineStore('data', {
         },
 
         /**
+         * 进入 / 退出「临时模型路由」：期间 saveConfig 跳过 AIconfig / customLlmSources 的落盘，
+         * 避免聊天请求把会话级来源写成全局默认（见 temporaryLlmRouteDepth 注释）。
+         * 成对调用；嵌套调用按深度计数。
+         */
+        beginTemporaryLlmRoute() {
+            temporaryLlmRouteDepth++
+        },
+        endTemporaryLlmRoute() {
+            temporaryLlmRouteDepth = Math.max(0, temporaryLlmRouteDepth - 1)
+        },
+
+        /**
          * 同步「设置独立窗口写盘后」的配置（仅主窗口调用）：
          * - UI 合并广播载荷（主题/语言/导航显隐/自定义标题/缩放/布局…）后重设 CSS 变量；
          * - 其余运行态配置（AI 模型来源 / 工具开关 / MCP / Agent 预设等）从 localStorage 重新读取。
@@ -3484,6 +3691,9 @@ export const usestore = defineStore('data', {
                 this.data = tabs
                 this.index = tabIndex
                 this.mainPanel = panel
+                // 广播同步完成后，本窗口内存 = 远端最新值：更新三路比较基线，
+                // 否则下一次 saveConfig 会把「刚同步进来的值」当成自己的本地修改再写一遍。
+                snapshotSharedConfigBase()
                 this.setTheme()
             } finally {
                 themeBroadcastGuard = false

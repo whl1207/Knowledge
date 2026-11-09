@@ -552,6 +552,27 @@ function mergeAnswerRefs(primary: KbQuestion, dup: KbQuestion): { refs: Question
   return { refs, extra }
 }
 
+/**
+ * 切片 id → 切片 的索引缓存。
+ *
+ * `answerText` 被问题列表/筛选/导出/评审**逐条**调用；旧实现每次调用都遍历全库
+ * 重建一次 Map —— 6000 问 × 1500 片 ≈ 900 万次 set，切一次筛选就卡几秒。
+ * 这里按 blocks 数组对象缓存（WeakMap，不阻止回收）；长度或首尾 id 变了就重建。
+ */
+const blockIndexCache = new WeakMap<object, { len: number; first: string; last: string; map: Map<string, any> }>()
+
+function blockMapOf(blocks: any[]): Map<string, any> {
+    const key = blocks as unknown as object
+    const first = String(blocks[0]?.id ?? '')
+    const last = String(blocks[blocks.length - 1]?.id ?? '')
+    const hit = blockIndexCache.get(key)
+    if (hit && hit.len === blocks.length && hit.first === first && hit.last === last) return hit.map
+    const map = new Map<string, any>()
+    for (const b of blocks) map.set(b.id, b)
+    blockIndexCache.set(key, { len: blocks.length, first, last, map })
+    return map
+}
+
 /** 把一条问题的参考答案拼成文本（优先外部答案；否则按答案切片 A 拼接，主答案在前） */
 export function answerText(q: KbQuestion, blocks?: any[], sep: string = ' | '): string {
   if (q.extraAnswer && q.extraAnswer.trim()) return q.extraAnswer.trim()
@@ -560,8 +581,7 @@ export function answerText(q: KbQuestion, blocks?: any[], sep: string = ' | '): 
     return refs.map(r => r.label || r.blockId).join(sep)
   }
   const parts: string[] = []
-  const byId = new Map<string, any>()
-  for (const b of blocks) byId.set(b.id, b)
+  const byId = blockMapOf(blocks)
   for (const r of refs) {
     const b = byId.get(r.blockId) || (r.filePath && blocks.find(x => x.filePath === r.filePath && x.label === r.label))
     const t = (b?.A || '').trim()

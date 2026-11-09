@@ -58,12 +58,43 @@ export function submitAsk(answers: AskUserAnswer[]): void {
   settle(queue.value[0], (w) => w.resolve(answers))
 }
 
-/** 用户取消当前弹窗（调用 onCancel → 通常是中止 turn） */
-export function cancelAsk(): void {
+/**
+ * 「稍后回答」的哨兵错误：弹窗被挂起时用它收口 Promise，调用方据此区分
+ * 「用户暂时不想答」与「用户明确中止」——**不能**触发 onCancel（那会停掉整个 turn）。
+ */
+export class AskSuspendedError extends Error {
+  constructor() {
+    super('提问已挂起')
+    this.name = 'AskSuspendedError'
+  }
+}
+
+/**
+ * 挂起当前弹窗（关闭 / 点「稍后回答」）：只把弹窗从队列里收走，
+ * **不中止 agent turn**。问题仍留在主进程会话的 pendingQuestion 里，
+ * 因此会出现在「待我处理」收件箱中，可在那里回答或明确停止会话。
+ */
+export function suspendAsk(): void {
+  settle(queue.value[0], (w) => w.reject(new AskSuspendedError()))
+}
+
+/**
+ * 用户明确中止当前弹窗（调用 onCancel → 通常是中止 turn）。
+ * 只有弹窗里的「中止任务」/别处显式的 Stop 才能走到这里。
+ */
+export function abortAsk(): void {
   const cur = queue.value[0]
   const onCancel = cur?.onCancel
-  settle(cur, (w) => w.reject(new Error('用户取消了提问')))
+  settle(cur, (w) => w.reject(new Error('用户中止了提问')))
   try { onCancel?.() } catch { /* 收口失败不影响队列 */ }
+}
+
+/**
+ * 兼容旧调用名：语义已收窄为「明确中止」。
+ * @deprecated 新代码请用 suspendAsk()（挂起）或 abortAsk()（中止）
+ */
+export function cancelAsk(): void {
+  abortAsk()
 }
 
 /**

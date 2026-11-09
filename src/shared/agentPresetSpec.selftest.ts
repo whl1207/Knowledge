@@ -35,7 +35,7 @@ export interface AgentPresetSpecCase {
 
 const TOOLS = [
   'read_file', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files',
-  'kb_search', 'web_search', 'web_fetch', 'run_python', 'shell', 'mcp_call', 'skill',
+  'kb_search', 'web_search', 'web_fetch', 'run_code', 'shell', 'mcp_call', 'skill',
   'ask_user', 'update_plan', 'exit_plan_mode', 'update_todo', 'run_subagent', 'job_output', 'job_kill',
 ]
 

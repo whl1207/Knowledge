@@ -62,7 +62,7 @@ export const TOOL_GROUPS: readonly ToolGroupDef[] = [
     labelZh: '代码与命令',
     labelEn: 'Code & Shell',
     icon: 'fa-code',
-    tools: ['run_python', 'shell'],
+    tools: ['run_code', 'shell'],
   },
   {
     id: 'knowledge',

@@ -37,7 +37,8 @@ export const SKILL_AGENT_DEFAULT_TOOLS = [
   'search_files',
   'glob',
   'working_directory',
-  'run_python',
+  'run_code',
+  'shell',
   'kb_search',
   'web_search',
   'web_fetch',
@@ -98,7 +99,7 @@ export function buildSkillSystemPrompt(
   if (toolEnabled(tools, 'ask_user')) {
     usageLines.push('- 需要用户补充信息时用 ask_user 提问（不要直接输出问题）：能穷举选项就用 questions + options（可 multi_select 多选、推荐项放第一位并加 "(Recommended)"），一次可问多题，每题都留了自定义回答位。')
   }
-  usageLines.push('- 需要引用本地资料时用 read_file / search_files / kb_search；需要执行代码时用 run_python；需要联网时用 web_search + web_fetch。')
+  usageLines.push('- 需要引用本地资料时用 read_file / search_files / kb_search；需要执行代码时用 run_code；需要跑 Python / 构建命令时用 shell；需要联网时用 web_search + web_fetch。')
   usageLines.push('- read_file 返回带行号的内容，offset / limit 都是**行**：末尾写「本次第 a-b 行 / 共 T 行」，没读完就用 offset=下一行 继续读，直到看到「已读到文件末尾」才算读完（读长文档 / 大文件时必须续读）。')
   // 资源提示（借鉴 DSH "资源按需加载、结果不枚举技能目录"）：不把全部文件路径
   // 注入上下文（超大型技能可达上万文件，会导致推理被截断），只给技能目录 +
@@ -238,7 +239,8 @@ if (toolEnabled(tools, 'read_image')) toolList.push('   - read_image：把本地
   if (toolEnabled(tools, 'replace_in_file') || toolEnabled(tools, 'multi_replace')) toolList.push(REPLACE_TOOLS_HINT)
   if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容（默认大小写敏感，可 regex / filePattern）')
   if (toolEnabled(tools, 'glob')) toolList.push('   - glob：按路径 / 文件名查找文件（*.md 找任意目录、src/**/*.ts 限定目录；结果按修改时间倒序）')
-  if (toolEnabled(tools, 'run_python')) toolList.push('   - run_python：执行 Python 代码（处理数据、计算、批量文件操作等）')
+  if (toolEnabled(tools, 'run_code')) toolList.push('   - run_code：执行代码片段（处理数据、计算、批量文件操作等）')
+  if (toolEnabled(tools, 'shell')) toolList.push('   - shell：执行 shell 命令（可运行 Python / 构建 / 测试）')
   if (toolEnabled(tools, 'kb_search')) toolList.push('   - kb_search：检索本地知识库')
   if (toolEnabled(tools, 'web_search') || toolEnabled(tools, 'web_fetch')) toolList.push('   - web_search / web_fetch：联网搜索与读取网页')
   if (toolEnabled(tools, 'browser_navigate') || toolEnabled(tools, 'browser_extract_text')) toolList.push(BROWSER_TOOLS_HINT)
@@ -337,7 +339,8 @@ if (toolEnabled(tools, 'read_image')) toolList.push('   - read_image：把本地
   if (toolEnabled(tools, 'replace_in_file') || toolEnabled(tools, 'multi_replace')) toolList.push(REPLACE_TOOLS_HINT)
   if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容（默认大小写敏感，可 regex / filePattern）')
   if (toolEnabled(tools, 'glob')) toolList.push('   - glob：按路径 / 文件名查找文件（*.md 找任意目录、src/**/*.ts 限定目录；结果按修改时间倒序）')
-  if (toolEnabled(tools, 'run_python')) toolList.push('   - run_python：执行 Python 代码（处理数据、计算、批量文件操作等）')
+  if (toolEnabled(tools, 'run_code')) toolList.push('   - run_code：执行代码片段（处理数据、计算、批量文件操作等）')
+  if (toolEnabled(tools, 'shell')) toolList.push('   - shell：执行 shell 命令（可运行 Python / 构建 / 测试）')
   if (toolEnabled(tools, 'kb_search')) toolList.push('   - kb_search：检索本地知识库')
   if (toolEnabled(tools, 'web_search') || toolEnabled(tools, 'web_fetch')) toolList.push('   - web_search / web_fetch：联网搜索与读取网页')
   if (toolEnabled(tools, 'browser_navigate') || toolEnabled(tools, 'browser_extract_text')) toolList.push(BROWSER_TOOLS_HINT)

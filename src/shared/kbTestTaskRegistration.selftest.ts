@@ -188,7 +188,7 @@ export function runKbTestTaskRegistrationSelfTest(): KbTestTaskCase[] {
 
   // 3. 真实文件：testManager.vue 的登记 / 注销生命周期
   try {
-    const src = readFileSync(join(repoRoot(), 'src', 'components', 'knowRAG', 'testManager.vue'), 'utf8')
+    const src = readFileSync(join(repoRoot(), 'src', 'components', 'KnowledgeBase', 'knowledge', 'testManager.vue'), 'utf8')
     const report = inspectKbTestTaskRegistration(src)
     add('testManager.vue：登记 → 注销生命周期完整（关窗不再误拦「知识库评测」）', report.issues.length === 0, report.issues.join(' | '))
     add('testManager.vue：两条批量测试路径都注销后台任务',

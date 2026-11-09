@@ -262,7 +262,7 @@ const TEMPLATES: Record<SkillDevTemplateKey, { title: string; body: string }> = 
       '3. 把脚本输出的 Markdown 原样返回给用户；脚本报错就把 stderr 前 10 行贴给用户并说明原因。',
       '',
       '## 失败处理',
-      '- 缺 python：告诉用户需要安装 Python 3，并给出替代方案（用 run_python 工具手工统计）。',
+      '- 缺 python：告诉用户需要安装 Python 3，并给出替代方案（用 run_code 工具手工统计）。',
       '```',
     ].join('\n'),
   },

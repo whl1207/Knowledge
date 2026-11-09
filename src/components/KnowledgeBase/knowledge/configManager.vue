@@ -145,13 +145,10 @@ const configItems = computed<ConfigItem[]>(() => [
     type: 'select',
     options: [
       { value: 'CS', label: t('余弦相似度 (CS)', 'Cosine Similarity (CS)') },
-      { value: 'CS(M)', label: t('合并余弦相似度 (CS(M))', 'Merged Cosine Similarity (CS(M))') },
-      { value: 'MDS', label: t('多维缩放 (MDS)', 'Multidimensional Scaling (MDS)') },
-      { value: 'MDS(M)', label: t('合并多维缩放 (MDS(M))', 'Merged MDS (MDS(M))') },
-      { value: 'PCA', label: t('主成分分析 (PCA)', 'Principal Component Analysis (PCA)') }
+      { value: 'CS(M)', label: t('合并余弦相似度 (CS(M))', 'Merged Cosine Similarity (CS(M))') }
     ],
-    description: '向量相似度计算方法',
-    descriptionEn: 'Vector similarity calculation method'
+    description: '向量相似度计算方法。MDS / MDS(M) / PCA 属于降维可视化方法，不参与检索排序，已从检索方法中移除',
+    descriptionEn: 'Vector similarity method. MDS / MDS(M) / PCA are dimensionality-reduction/visualization methods, not retrieval metrics; they have been removed from the retrieval method list'
   },
   {
     group: 'search',
@@ -429,43 +426,6 @@ const configItems = computed<ConfigItem[]>(() => [
     step: 1,
     description: '本体构建时每批处理的切片数量（1-50）',
     descriptionEn: 'Number of slices per batch when building ontology (1-50)'
-  },
-  {
-    group: 'search',
-    key: 'mdsIterations',
-    label: 'MDS迭代次数',
-    labelEn: 'MDS Iterations',
-    type: 'number',
-    min: 10,
-    max: 1000,
-    show: () => props.model.searchMethod.includes('MDS'),
-    description: 'MDS算法的最大迭代次数',
-    descriptionEn: 'Maximum iterations for MDS algorithm'
-  },
-  {
-    group: 'search',
-    key: 'mdsEpsilon',
-    label: 'MDS收敛阈值',
-    labelEn: 'MDS Convergence Threshold',
-    type: 'number',
-    min: 0.001,
-    max: 1,
-    step: 0.001,
-    show: () => props.model.searchMethod.includes('MDS'),
-    description: 'MDS算法的收敛判断阈值',
-    descriptionEn: 'Convergence threshold for MDS algorithm'
-  },
-  {
-    group: 'search',
-    key: 'pcaComponents',
-    label: 'PCA主成分数量',
-    labelEn: 'PCA Components',
-    type: 'number',
-    min: 2,
-    max: 10,
-    show: () => props.model.searchMethod === 'PCA',
-    description: 'PCA降维后的维度数量',
-    descriptionEn: 'Number of dimensions after PCA reduction'
   }
 ])
 

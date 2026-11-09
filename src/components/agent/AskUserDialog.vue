@@ -23,7 +23,8 @@
     align-center
     append-to-body
     :close-on-click-modal="false"
-    @close="$emit('cancel')"
+    :close-on-press-escape="true"
+    @close="onSoftClose"
   >
     <div class="au-body scoll">
       <div v-if="current" class="au-q">
@@ -85,7 +86,12 @@
         </div>
         <div class="au-foot-main">
           <span class="au-hint">{{ zh ? '未作答的题目会以「跳过」返回给智能体' : 'Unanswered questions are returned as skipped' }}</span>
-          <el-button size="small" @click="$emit('cancel')">{{ zh ? '取消' : 'Cancel' }}</el-button>
+          <button
+            class="au-abort"
+            :title="zh ? '中止这次任务（会真的停止智能体，不是稍后回答）' : 'Abort this run (actually stops the agent)'"
+            @click="onAbort"
+          >{{ zh ? '中止任务' : 'Abort' }}</button>
+          <el-button size="small" @click="onSoftClose">{{ zh ? '稍后回答' : 'Answer later' }}</el-button>
           <el-button size="small" type="primary" @click="onSubmit">{{ zh ? '提交' : 'Submit' }}</el-button>
         </div>
       </div>
@@ -95,7 +101,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ElButton, ElCheckbox, ElCheckboxGroup, ElDialog, ElInput, ElRadio, ElRadioGroup } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElDialog, ElInput, ElMessageBox, ElRadio, ElRadioGroup } from 'element-plus'
 import type { AskUserAnswer, AskUserQuestion } from '@/types/agent'
 import { renderQuestionMarkdown } from '@/lib/markdown/render'
 import { useAskForm } from '@/composables/useAskForm'
@@ -110,8 +116,40 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'submit', answers: AskUserAnswer[]): void
-  (e: 'cancel'): void
+  /** 关闭 = 挂起：只收起弹窗，不中止智能体；问题仍在「待我处理」里 */
+  (e: 'suspend'): void
+  /** 明确中止任务：只有这个动作会停掉整个 turn */
+  (e: 'abort'): void
 }>()
+
+/** 防止 el-dialog 的 close 与按钮点击重复发一次 suspend */
+let settled = false
+function onSoftClose() {
+  if (settled) return
+  settled = true
+  emit('suspend')
+}
+async function onAbort() {
+  if (settled) return
+  try {
+    await ElMessageBox.confirm(
+      zh.value
+        ? '中止这次任务会真的停止智能体（不是稍后回答）。确定中止吗？'
+        : 'Aborting really stops the agent (unlike answering later). Abort now?',
+      zh.value ? '中止任务' : 'Abort run',
+      { type: 'warning', confirmButtonText: zh.value ? '中止' : 'Abort', cancelButtonText: zh.value ? '继续' : 'Keep running' },
+    )
+  } catch {
+    return
+  }
+  settled = true
+  emit('abort')
+}
+function onSubmit() {
+  if (settled) return
+  settled = true
+  emit('submit', buildAnswers())
+}
 
 const zh = computed(() => store.locales !== 'en')
 const title = computed(() => {
@@ -127,10 +165,6 @@ const { pick, index, total, current, go, answeredCount, isRecommended, buildAnsw
   useAskForm(() => props.questions)
 
 const renderMarkdown = (s: string) => renderQuestionMarkdown(String(s || ''))
-
-function onSubmit() {
-  emit('submit', buildAnswers())
-}
 </script>
 
 <style scoped>
@@ -184,6 +218,12 @@ function onSubmit() {
 /* 底部按钮按内容宽：全局 style.css / 其他组件里存在 button{width:100%} 之类的规则，
    不写死宽度时按钮会被撑满整行、把左边的提示挤成竖排 */
 .au-foot-main :deep(.el-button) { width: auto; flex: none; }
+/* 「中止任务」是破坏性操作：低强调的文字按钮，和「稍后回答」区分开，避免误点 */
+.au-abort {
+  flex: none; border: 0; background: transparent; color: #e03131;
+  font-size: 11px; padding: 2px 4px; cursor: pointer; border-radius: 3px;
+}
+.au-abort:hover { background: color-mix(in srgb, #e03131 12%, transparent); }
 </style>
 
 <!--

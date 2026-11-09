@@ -39,6 +39,7 @@ export const RUN_CODE_INPUT_SCHEMA: Record<string, unknown> = {
         '程序内用 await tools.name(args) 调用工具，用 return 和/或 console.log(...) 输出结果。',
     },
     description: { type: 'string', description: '程序所做内容的简短摘要' },
+    timeoutMs: { type: 'number', description: '可选：本次执行超时（毫秒，默认 120000，最大 300000；不会完全关闭 deadline）' },
   },
   required: ['code', 'description'],
 }
@@ -359,7 +360,7 @@ export async function executeCodeProgram(
       ok: false,
       error: truncated
         ? `程序不完整或被截断（${msg}）。请写一个**较短且完整**的程序：不要内嵌超大的字符串或大量数据；`
-          + '需要时拆成多个 run_code 小步，或用 tools.run_python 传较短的代码（让 Python 自己读文件/联网）。'
+          + '需要时拆成多个 run_code 小步，或用 tools.run_code 传较短的代码（让 Python 自己读文件/联网）。'
         : `程序解析失败: ${msg}`,
     }
   }
@@ -404,7 +405,11 @@ export async function executeCodeProgram(
 /** run_code 工具实现：把 code（async 函数体）连同 agent 执行上下文交给 executeCodeProgram；
  *  回给模型的值只含「返回值 / 日志 / 子调用摘要」，程序内完整入参经 preview 发给界面。 */
 export async function runCodeHandler(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const res = await executeCodeProgram(input?.code, ctx)
+  const rawTimeout = Number(input?.timeoutMs)
+  const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? Math.min(300_000, Math.max(1_000, Math.floor(rawTimeout)))
+    : 120_000
+  const res = await executeCodeProgram(input?.code, ctx, { timeoutMs })
   if (!res.ok) return res
   const output = res.value as PtcRunOutput
   return {

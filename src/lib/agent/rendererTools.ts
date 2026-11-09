@@ -87,7 +87,6 @@ export function isRendererTool(name: string): boolean {
 
 /** 宿主独有能力（点名调用时给出比「未知工具」更有用的说明） */
 const HOST_ONLY_HINTS: Record<string, string> = {
-  run_python: '执行 Python 需要桌面端（手机 / 网页没有本地运行时）',
   shell: '执行 shell 命令需要桌面端',
   run_subagent: '派生子代理需要桌面端',
   job_output: '后台任务（子代理）需要桌面端',
