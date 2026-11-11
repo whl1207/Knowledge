@@ -15,6 +15,7 @@ import { detectTaskScaffold, detectRetiredTaskScaffold, isTaskFile, isEmptyTaskF
 import type { FileSortKey } from '@/lib/knowFile/fileSort'
 import { DEFAULT_AGENT_MAX_STEPS, normalizeAgentMaxSteps } from '@/shared/agent-loop-rounds'
 import { ensureBuiltinAgentPresets, refreshBuiltinAgentPresets, builtinPresetDefaultsFromStore, BUILTIN_PRESET_CAPABILITY_MIGRATION_VERSION } from '@/shared/builtinAgentPresets'
+import { migratePresetToolBundles, syncCapabilityBooleans } from '@/lib/agent/capabilities'
 import { normalizeWebSearchConfig, newWebSearchCustomSource, toCustomProviderId, type WebSearchConfig, type WebSearchCustomSource } from '@/shared/webSearch'
 import { normalizeWebFetchConfig, type WebFetchConfig, type WebFetchChannelId } from '@/shared/webFetch'
 import { BROWSER_SEARCH_ENGINES, DEFAULT_BROWSER_SEARCH_ENGINE } from '@/shared/browserSearch'
@@ -2601,6 +2602,17 @@ export const usestore = defineStore('data', {
             if (!presetCapDone) {
                 try { localStorage.setItem(presetCapKey, String(BUILTIN_PRESET_CAPABILITY_MIGRATION_VERSION)) } catch { /* 忽略 */ }
             }
+            // 把旧的「一份巨大 enabledTools」升级为「能力包 + 单工具覆盖」：
+            // 之后新增工具只要登记进对应能力域，所有选该域的预设会自动获得它，
+            // 同时保留用户原来的精确选择（未选中的工具写入 overrides.exclude）。
+            let presetsBundled = false
+            for (const p of this.agentPresets as any[]) {
+                if (p?.capabilities && migratePresetToolBundles(p.capabilities)) {
+                    syncCapabilityBooleans(p.capabilities)
+                    presetsBundled = true
+                }
+            }
+            if (presetsBundled) needPersist = true
             // 协同文件编辑配置（含默认值兜底，兼容旧存档无此 key）
             if (localStorage.getItem('collab') !== null) {
                 try {

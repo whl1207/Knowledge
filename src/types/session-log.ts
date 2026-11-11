@@ -32,6 +32,7 @@ export type SessionEventType =
   | 'assistant/message' // 助手完整消息（模型可见）
   | 'tool/call' // 模型发起的工具调用（模型可见）
   | 'tool/result' // 工具执行结果（模型可见）
+  | 'tools/change' // 本 turn 模型可见工具集变化（能力包 / 插件 / PTC 生效结果）
   | 'assistant/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call，仅 UI 保真）
   | 'context/compaction' // 上下文压缩（旧轮次摘要；deriveMessages 据此替换被覆盖区间）
   | 'agent/status' // agent 生命周期状态（idle/running/stopping/disposed）
@@ -141,6 +142,18 @@ export interface SessionEventMap {
      * 文件可能被系统清理：读不到时该图片静默跳过，不影响会话重建。
      */
     images?: Array<{ mime: string; path: string; width?: number; height?: number }>
+  }
+  'tools/change': {
+    /** 本 turn 实际生效的模型可见工具名（PTC 下只有 run_code） */
+    tools: string[]
+    /** 相对上一个 turn 新增 / 移除的工具 */
+    added: string[]
+    removed: string[]
+    turn: number
+    /** native / code（PTC）；旧日志没有 */
+    presentation?: string
+    /** 触发原因：turn 开始重新解析，或会话恢复后的首次记录 */
+    reason?: string
   }
   'assistant/search-status': {
     status: string

@@ -13,6 +13,15 @@
  * AGENT_TOOL_REGISTRY 维护。
  */
 
+import {
+  applyToolGates,
+  autoToolsOf,
+  migrateCapsToToolBundles,
+  selectedToolsOf,
+  setToolOverride,
+  type ToolGateEnv,
+} from './toolBundles'
+
 /** 能力槽 → 工具（顺序即 toolsFromCapabilities 的 push 顺序，须与历史各调用点一致） */
 export interface CapabilityToolSlot {
   /** 能力槽字段名（AgentPresetCapabilities / SwarmCapabilities 的布尔能力键） */
@@ -137,29 +146,39 @@ function withPluginTools(base: string[]): string[] {
 
 /**
  * 按能力槽组装工具白名单（统一入口）。
- * - **逐工具模式（新，caps.enabledTools 为数组）**：直接以启用的工具集为准，精确到单个工具
- *   （如写入文件只开 replace_in_file、不开 write_file）。
- * - **旧模式（无 enabledTools）**：由能力槽布尔推导（含 askUser/updatePlan/updateTodo 缺省开启）。
- * @param caps 能力槽对象（AgentPresetCapabilities / SwarmCapabilities）
+ * - **自动模式（caps.toolMode === 'auto'）**：由 `toolBundles + toolOverrides` 解析，
+ *   新工具只要登记进对应能力域就会自动进入预设；
+ * - **逐工具模式（caps.enabledTools 为数组）**：以显式工具集为准（旧预设 / 手工模式）；
+ * - **旧模式（无 enabledTools）**：由能力槽布尔推导。
  * @param opts.includeMcp mcp_call 是否并入（默认并入；swarm 需经 agentMcpConfig 单独判定，传 false 自行追加）
+ * @param opts.env 运行环境（视觉 / 工作区 / 沙箱 / 知识库 / MCP / 浏览器 / 交互 / 嵌套）。
+ *   传了才做硬门控；不传保持旧行为（供工具预览等无环境调用方使用）。
  */
-export function toolsFromCapabilities(caps: any, opts: { includeMcp?: boolean } = {}): string[] {
+export function toolsFromCapabilities(
+  caps: any,
+  opts: { includeMcp?: boolean; env?: ToolGateEnv; zh?: boolean } = {},
+): string[] {
   if (!caps) return []
-  // —— 逐工具模式（新）：显式启用集 ——
-  if (Array.isArray(caps.enabledTools)) {
-    const set = new Set<string>(caps.enabledTools as string[])
+  const autoMode = caps.toolMode === 'auto'
+  const finalize = (base: string[]): string[] => {
+    const set = new Set<string>(base)
     // 历史语义保持一致：知识库检索需已关联文件才真正注入（避免“开了检索却无库可检”）
     const hasKb = Array.isArray(caps.knowledgeBaseFiles) && caps.knowledgeBaseFiles.length
     if (!hasKb) set.delete('kb_search')
     // 兼容旧路径（图谱等直接置 accessKnowledgeBase=true 并关联文件、未同步工具集）：
-    // 只要“访问知识库能力 + 已关联文件”成立即注入 kb_search，避免模型检索失效
-    if (hasKb && caps.accessKnowledgeBase && !set.has('kb_search')) set.add('kb_search')
+    // 只要“访问知识库能力 + 已关联文件”成立即注入 kb_search，避免模型检索失效。
+    // 自动模式下不反向补：用户没选知识域就不该被能力槽镜像塞进来。
+    if (!autoMode && hasKb && caps.accessKnowledgeBase && !set.has('kb_search')) set.add('kb_search')
     // 子代理整族一起开：run_subagent 的后台模式要靠 job_output 收结果、job_kill 停止，
     // 只开 run_subagent 会让模型拿到一个永远收不到结果的 jobId。
     if (set.has('run_subagent')) { set.add('job_output'); set.add('job_kill') }
     if (opts.includeMcp === false) set.delete('mcp_call')
-    return withPluginTools(Array.from(set))
+    let out = withPluginTools(Array.from(set))
+    if (opts.env) out = applyToolGates(out, opts.env, opts.zh !== false)
+    return out
   }
+  if (autoMode && Array.isArray(caps.toolBundles)) return finalize(autoToolsOf(caps))
+  if (Array.isArray(caps.enabledTools)) return finalize(caps.enabledTools as string[])
   // —— 旧模式：由能力槽布尔推导 ——
   const out: string[] = []
   for (const slot of CAPABILITY_TOOL_SLOTS) {
@@ -170,7 +189,7 @@ export function toolsFromCapabilities(caps: any, opts: { includeMcp?: boolean } 
     if (on && slot.needsKnowledgeFiles && !(Array.isArray(caps?.knowledgeBaseFiles) && caps.knowledgeBaseFiles.length)) on = false
     if (on) out.push(...slot.tools)
   }
-  return withPluginTools(out)
+  return finalize(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -180,25 +199,51 @@ export function toolsFromCapabilities(caps: any, opts: { includeMcp?: boolean } 
 //   供仍读取布尔值的旧逻辑（门控 / 图标 / 提示词 / 图谱）继续工作，避免两套并存失配。
 // ---------------------------------------------------------------------------
 
-/** 读取某 agent/preset 的有效工具集（逐工具优先；旧模式由能力槽推导）。只读不落盘 */
-export function effectiveToolsOf(caps: any): string[] {
-  return toolsFromCapabilities(caps)
+/** 读取某 agent/preset 的有效工具集（自动包 / 逐工具 / 旧能力槽）。只读不落盘 */
+export function effectiveToolsOf(caps: any, opts: { includeMcp?: boolean; env?: ToolGateEnv; zh?: boolean } = {}): string[] {
+  return toolsFromCapabilities(caps, opts)
+}
+
+/** 统一入口（P1）：带上运行环境做门控；聊天 / 集群 / 工作流等应优先用它 */
+export function resolvePresetTools(caps: any, env: ToolGateEnv = {}, zh = true): string[] {
+  return toolsFromCapabilities(caps, { env, zh })
+}
+
+/** 旧预设升级为「包 + 覆盖」模式；返回是否发生变化（幂等） */
+export function migratePresetToolBundles(caps: any): boolean {
+  return migrateCapsToToolBundles(caps)
 }
 
 /**
- * 某工具当前是否启用。
+ * 某工具当前是否被用户勾选（自动模式 = 包 ∪ include ∖ exclude；插件仍按“可用”判定）。
+ * 与 `toolOn` 的区别：不应用运行门控 / 知识库注入过滤，专门供设置界面显示开关状态。
+ */
+export function selectedToolOn(caps: any, tool: string): boolean {
+  if (!caps) return false
+  if (isPluginTool(tool)) return toolOn(caps, tool)
+  if (caps.toolMode === 'auto') return selectedToolsOf(caps).includes(String(tool))
+  if (Array.isArray(caps.enabledTools)) return caps.enabledTools.includes(String(tool))
+  return toolsFromCapabilities(caps).includes(String(tool))
+}
+
+/**
+ * 某工具当前是否启用（含运行时过滤：插件不可用 / 无知识库等）。
  *
  * ⚠️ 这里必须走 `toolsFromCapabilities` 而不是直接 `caps.enabledTools.includes(tool)`：
  * 前者才会应用"插件工具必须仍然存在"这条剔除规则。否则插件卸载后，预设界面会把一个
  * 已经不可用的工具显示成"开着"，用户点它一下就写进 `enabledTools`，接着又"显示开、实际调不到"。
  */
-export function toolOn(caps: any, tool: string): boolean {
-  return effectiveToolsOf(caps).includes(tool)
+export function toolOn(caps: any, tool: string, opts: { env?: ToolGateEnv; zh?: boolean } = {}): boolean {
+  return effectiveToolsOf(caps, opts).includes(tool)
 }
 
-/** 能力槽当前是否开启（逐工具模式 = 该槽任一工具开启；旧模式 = 布尔值本身）。供 UI 门控/展示 */
+/** 能力槽当前是否开启（自动模式看包；逐工具模式看工具；旧模式 = 布尔值本身）。供 UI 门控/展示 */
 export function capabilityOn(caps: any, key: string): boolean {
   if (!caps) return false
+  if (caps.toolMode === 'auto') {
+    const slot = CAPABILITY_TOOL_SLOTS.find((s) => s.key === key)
+    return !!slot && slot.tools.some((t) => selectedToolsOf(caps).includes(t))
+  }
   if (Array.isArray(caps.enabledTools)) {
     const slot = CAPABILITY_TOOL_SLOTS.find((s) => s.key === key)
     return !!slot && slot.tools.some((t) => caps.enabledTools.includes(t))
@@ -208,23 +253,32 @@ export function capabilityOn(caps: any, key: string): boolean {
 
 /** 若尚无 enabledTools，则由能力槽推导并落盘（把旧数据升级为逐工具模式）。返回是否发生升级 */
 export function ensureEnabledTools(caps: any): boolean {
-  if (!caps || Array.isArray(caps.enabledTools)) return false
+  if (!caps || caps.toolMode === 'auto') return false
+  if (Array.isArray(caps.enabledTools)) return false
   caps.enabledTools = toolsFromCapabilities(caps)
   syncCapabilityBooleans(caps)
   return true
 }
 
-/** 由 enabledTools 反推各能力槽布尔（镜像；供仍读布尔值的旧逻辑/门控/图标/图谱继续工作） */
+/** 由当前选择集反推各能力槽布尔（镜像；供仍读布尔值的旧逻辑/门控/图标/图谱继续工作） */
 export function syncCapabilityBooleans(caps: any): void {
-  if (!caps || !Array.isArray(caps.enabledTools)) return
+  if (!caps) return
+  const base = caps.toolMode === 'auto'
+    ? selectedToolsOf(caps)
+    : (Array.isArray(caps.enabledTools) ? caps.enabledTools : null)
+  if (!base) return
   for (const slot of CAPABILITY_TOOL_SLOTS) {
-    caps[slot.key] = slot.tools.some((t) => caps.enabledTools.includes(t))
+    caps[slot.key] = slot.tools.some((t) => base.includes(t))
   }
 }
 
-/** 开关单个工具（逐工具模式）：自动升级→增删→同步能力槽布尔镜像 */
+/** 开关单个工具：自动模式写 overrides；逐工具模式增删 enabledTools；最后同步能力槽镜像 */
 export function setToolEnabled(caps: any, tool: string, on: boolean): void {
   if (!caps) return
+  if (setToolOverride(caps, tool, on)) {
+    syncCapabilityBooleans(caps)
+    return
+  }
   ensureEnabledTools(caps)
   const list = caps.enabledTools
   const i = list.indexOf(tool)

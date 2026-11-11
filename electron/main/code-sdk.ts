@@ -368,7 +368,15 @@ export async function executeCodeProgram(
   // ---- 3. 执行（Promise.race：超时 / 取消） ----
   const timeoutMs = opts?.timeoutMs ?? 120_000
   const ctxObj = vm.createContext(context)
-  const runPromise = script.runInContext(ctxObj) as Promise<unknown>
+  let runPromise: Promise<unknown>
+  try {
+    // vm 的同步执行也要有 deadline：`while(true){}` 这类同步死循环会阻塞事件循环，
+    // 下面 Promise.race 的 setTimeout 永远没机会触发，整个主进程/agent 会假死。
+    // runInContext 的 timeout 只能中断**同步**执行（异步部分仍由下面的定时器兜底）。
+    runPromise = script.runInContext(ctxObj, { timeout: Math.max(1000, timeoutMs) }) as Promise<unknown>
+  } catch (e: any) {
+    return { ok: false, error: `程序执行失败: ${e?.message || String(e)}`, value: { logs, toolCalls: calls } }
+  }
 
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeoutPromise = new Promise<never>((_, reject) => {

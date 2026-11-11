@@ -15,6 +15,7 @@
  */
 
 import { usestore } from '@/store'
+import { migratePresetToolBundles, syncCapabilityBooleans } from '@/lib/agent/capabilities'
 import { ensureBuiltinAgentPresets, isBuiltinAgentPreset, builtinPresetDefaultsFromStore } from '@/shared/builtinAgentPresets'
 import { getPlatform } from '@/platform'
 
@@ -117,6 +118,10 @@ export const scanAgentPresets = async (): Promise<AgentPresetScanSummary> => {
     store.agentPresets = [...builtinsBefore, ...custom]
     // 内置预设按 id 幂等兜底：文件夹模式以文件为准，但内置项不能因文件夹缺文件而消失
     ensureBuiltinAgentPresets(store.agentPresets as any[], builtinPresetDefaultsFromStore(store))
+    // 从磁盘载入的旧预设也升级为「能力包 + 覆盖」：与 localStorage 路径同一套迁移
+    for (const p of store.agentPresets as any[]) {
+      if (p?.capabilities && migratePresetToolBundles(p.capabilities)) syncCapabilityBooleans(p.capabilities)
+    }
     summary.ok = true
   } catch (e: any) {
     summary.error = String(e?.message || e)

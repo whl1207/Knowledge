@@ -29,6 +29,14 @@ import {
   type ToolRegistrySnapshot,
 } from '@/types/tool'
 
+/**
+ * 未声明 timeoutMs 的工具统一兜底（P3）。
+ * 与 DSH 的「timeoutMs 仅声明、由策略包装层强制执行」不同，AI-KM 的注册表本身
+ * 已经实现了 timeout/abort 竞速；这里只补一个默认值，避免插件工具或新工具
+ * 忘记声明时把整个 agent turn 永久卡住。需要更长的工具可显式声明更大的 timeoutMs。
+ */
+const DEFAULT_TOOL_TIMEOUT_MS = 10 * 60 * 1000
+
 // ---------------------------------------------------------------------------
 // 最小类型化事件发射器
 // ---------------------------------------------------------------------------
@@ -244,7 +252,16 @@ export class ToolRegistry {
     // ---- pre-execute 阶段 ----
     let currentInput = input
     for (const hook of this.preHooks) {
-      const out = await hook({ name: def.name, input: currentInput, ctx })
+      let out: any
+      try {
+        out = await hook({ name: def.name, input: currentInput, ctx })
+      } catch (err: any) {
+        // 前置钩子（插件审批 / 权限门禁 / 审计）抛错时不能把整个 agent turn 打断：
+        // 转成一次「本次调用未执行」的工具失败，模型可以据此改道或向用户说明。
+        const message = `工具 ${def.name} 的前置校验失败，本次调用未执行：${err?.message || String(err)}`
+        this.emitter.emit({ type: 'tool/error', name: def.name, error: message })
+        return { ok: false, error: message, code: 'TOOL_HOOK_ERROR', retryable: false }
+      }
       if (out && typeof out === 'object') {
         if ('skip' in out && out.skip) {
           const shortCircuit: ToolResult = out.result ?? { ok: true, value: null }
@@ -272,7 +289,10 @@ export class ToolRegistry {
     let result: ToolResult
     const external = ctx?.signal
     const controller = new AbortController()
-    const timeoutMs = Number(def.timeoutMs)
+    const declaredTimeout = Number(def.timeoutMs)
+    const timeoutMs = Number.isFinite(declaredTimeout) && declaredTimeout > 0
+      ? declaredTimeout
+      : DEFAULT_TOOL_TIMEOUT_MS
     let timedOut = false
     let timer: ReturnType<typeof setTimeout> | null = null
     const handlerCtx: ToolExecutionContext = { ...ctx, signal: controller.signal }
@@ -347,8 +367,13 @@ export class ToolRegistry {
 
     // ---- post-execute 阶段 ----
     for (const hook of this.postHooks) {
-      const out = await hook({ name: def.name, input: currentInput, ctx, result })
-      if (out && typeof out === 'object') result = out
+      try {
+        const out = await hook({ name: def.name, input: currentInput, ctx, result })
+        if (out && typeof out === 'object') result = out
+      } catch (err: any) {
+        // 后置钩子是「加工结果」，失败不应把已经成功的工具调用变成失败，更不能中断 agent。
+        console.error(`[toolRegistry] 工具 ${def.name} 的后置钩子异常（已忽略）:`, err)
+      }
     }
     this.emitter.emit({
       type: 'tool/post-execute',

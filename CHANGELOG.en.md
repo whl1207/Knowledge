@@ -9,6 +9,14 @@
 
 ## 2026-11-10
 
+### Added
+
+- **Agent presets now use capability bundles with per-tool overrides**: Read-only / Coding / Knowledge Q&A / Office / Browser / All tools fill the tool set in one click, new tools join selected bundles automatically, and every tool inside each group remains individually toggleable.
+- **Automatic tool gating**: when vision, sandbox, knowledge base or MCP conditions are not met, the settings page marks the tool “auto” and runtime hides it, so the UI no longer promises tools that cannot run.
+- **Tool-set changes are written to the session log**: Settings → Agents → Logs shows tools added/removed each turn, including the PTC run_code collapse.
+- **Tool set is frozen for the current turn**: changing settings or plugins mid-run no longer changes this turn’s tool schema; it applies from the next turn.
+- **Default timeout for tools without one**: a plugin or new tool that forgets to declare a timeout can no longer hang forever (10 minutes by default).
+
 ### Fixed
 
 - **Settings no longer overwrite each other across windows**: with several windows open, settings, model sources and newly added agents are not reset by another window’s older state.
@@ -18,6 +26,7 @@
 - **Closing a question suspends it instead of stopping**: Close / “Answer later” moves the question into “Needs me”; only “Abort” stops the agent.
 - **Plugin panel title is centred again**: fixed the title offset in overlay mode.
 - **Expanded agent tools show the real result**: file reads show the content, commands show the output, searches show file or hit lists; the top and bottom panes are no longer identical.
+- **Agent tool errors no longer abort the whole run**: a plugin approval failure, a result that cannot be serialized, or a tool’s own error only fails that call, so the agent can continue or choose another path.
 - **Large knowledge bases no longer freeze or crash on ask**: the stalls and crashes on large retrievals are fixed, with less repeated work.
 - **Closing the settings window by the system now saves**: closing via Alt+F4 or similar no longer drops the last edit.
 

@@ -288,27 +288,29 @@
         <div v-if="activeTab === 'tools'" class="ae-tab-body">
           <div class="cfg-row column cfg-box">
             <div class="cap-body">
-              <!-- 工具呈现方式（对齐 DeepSeek-Harness：一个 agent 只用一种呈现，此处按预设声明） -->
-              <div class="exec-config-item preset-pres-row">
-                <span class="exec-config-label">{{ store.locales === 'en' ? 'Presentation' : '呈现方式' }}</span>
-                <select v-model="presentationValue" class="loop-mode-select">
-                  <option value="native">{{ store.locales === 'en' ? 'One by one' : '逐个调用' }}</option>
-                  <option value="ptc">PTC</option>
-                </select>
-                <span class="exec-config-hint">{{ presentationHint }}</span>
-              </div>
-              <div class="preset-tool-bulkbar">
-                <span class="preset-tool-count">
-                  {{ store.locales === 'en'
-                    ? `${enabledPresetToolCount} / ${toolRows.length} tools enabled`
-                    : `已启用 ${enabledPresetToolCount} / ${toolRows.length} 个工具` }}
-                </span>
-                <button class="preset-tool-bulkbtn" @click="setAllPresetTools(false)">
-                  <i class="fa fa-toggle-off"></i> {{ store.locales === 'en' ? 'Disable all' : '全部关闭' }}
-                </button>
-                <button class="preset-tool-bulkbtn" @click="setAllPresetTools(true)">
-                  <i class="fa fa-toggle-on"></i> {{ store.locales === 'en' ? 'Enable all' : '全部开启' }}
-                </button>
+              <!-- 工具呈现方式 + 能力模板：同一行，说明文字只放 title，不占界面高度 -->
+              <div class="preset-tool-config-row">
+                <div class="preset-tool-config-item" :title="presentationHint">
+                  <span class="exec-config-label">{{ store.locales === 'en' ? 'Presentation' : '呈现方式' }}</span>
+                  <select v-model="presentationValue" class="loop-mode-select" :title="presentationHint">
+                    <option value="native">{{ store.locales === 'en' ? 'One by one' : '逐个调用' }}</option>
+                    <option value="ptc">PTC</option>
+                  </select>
+                </div>
+                <div class="preset-tool-config-item" :title="toolProfileHint">
+                  <span class="exec-config-label">{{ store.locales === 'en' ? 'Profile' : '能力模板' }}</span>
+                  <select
+                    class="loop-mode-select preset-tool-profile-select"
+                    :value="activeToolProfile"
+                    :title="toolProfileHint"
+                    @change="onToolProfileChange"
+                  >
+                    <option v-for="p in TOOL_PROFILES" :key="p.id" :value="p.id">
+                      {{ store.locales === 'en' ? p.labelEn : p.labelZh }}
+                    </option>
+                    <option value="custom">{{ store.locales === 'en' ? 'Custom' : '自定义' }}</option>
+                  </select>
+                </div>
               </div>
               <ToolGroupList
                 class="preset-tool-groups"
@@ -316,10 +318,28 @@
                 layout="grid"
                 @bulk="applyPresetToolBulk"
               >
+                <!-- 与搜索 / 已启用过滤 / 展开收起同一条工具条，不再单独占一行 -->
+                <template #toolbar-before>
+                  <span class="preset-tool-count">
+                    {{ store.locales === 'en'
+                      ? `${enabledPresetToolCount}/${toolRows.length}`
+                      : `已启用 ${enabledPresetToolCount} / ${toolRows.length}` }}
+                  </span>
+                  <button
+                    class="preset-tool-bulkbtn"
+                    :title="store.locales === 'en' ? 'Disable all tools' : '全部关闭'"
+                    @click="setAllPresetTools(false)"
+                  ><i class="fa fa-toggle-off"></i></button>
+                  <button
+                    class="preset-tool-bulkbtn"
+                    :title="store.locales === 'en' ? 'Enable all tools' : '全部开启'"
+                    @click="setAllPresetTools(true)"
+                  ><i class="fa fa-toggle-on"></i></button>
+                </template>
                 <template #row="{ row }">
                   <div
                     class="preset-tool-item preset-tool-card"
-                    :class="{ on: row.on }"
+                    :class="{ on: row.on, gated: row.on && !!row.gateReason }"
                     :title="row.description || row.name"
                     @click="togglePresetTool(row.name)"
                   >
@@ -338,6 +358,11 @@
                             {{ row.srcKind === 'plugin' ? row.srcLabelZh : (store.locales === 'zh' ? row.srcLabelZh : row.srcLabelEn) }}
                           </span>
                           <code v-if="row.srcKind !== 'plugin'" class="preset-tool-key">{{ row.name }}</code>
+                          <span
+                            v-if="row.on && row.gateReason"
+                            class="preset-tool-gate"
+                            :title="row.gateReason"
+                          ><i class="fa fa-pause-circle"></i> {{ store.locales === 'en' ? 'auto' : '自动' }}</span>
                         </span>
                       </span>
                       <span class="preset-tool-toggle" :class="{ on: row.on }"><i class="preset-toggle-knob"></i></span>
@@ -660,7 +685,11 @@ import { usestore } from '@/store'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import draggable from 'vuedraggable'
 import { mcpManager } from '@/platform/mcpManager'
-import { toolsFromCapabilities, setToolEnabled, toolOn, getPluginToolNames, syncCapabilityBooleans, CAPABILITY_TOOL_SLOTS, slotToolsOf } from '@/lib/agent/capabilities'
+import { toolsFromCapabilities, setToolEnabled, toolOn, getPluginToolNames, isPluginTool, syncCapabilityBooleans, selectedToolOn, migratePresetToolBundles, CAPABILITY_TOOL_SLOTS, slotToolsOf } from '@/lib/agent/capabilities'
+import { TOOL_PROFILES, profileOfBundles, profileOfTools } from '@/lib/agent/toolProfiles'
+import { autoToolsOf, groupTools as bundleGroupTools, selectedToolsOf, setBundleEnabled, toolGateReason as sharedToolGateReason, type ToolGateEnv } from '@/lib/agent/toolBundles'
+import { TOOL_GROUPS } from '@/lib/agent/toolGroups'
+import { modelSupportsVision } from '@/shared/visionSupport'
 import { pluginDisplayName, pluginToolScopes } from '@/lib/plugin/runtime'
 import { AGENT_TOOL_REGISTRY, type AgentToolInfo } from '@/services/agentSkills'
 import ToolGroupList from '@/components/set/ToolGroupList.vue'
@@ -768,6 +797,12 @@ interface AgentPresetCapabilities {
       mcpEquipmentIds?: string[]
       /** 逐工具启用集（精确到工具名；缺省/undefined = 旧模式，由下方能力槽布尔推导） */
       enabledTools?: string[]
+      /** 'auto' = 由 toolBundles + toolOverrides 解析（新）；'custom'/缺省 = enabledTools 旧模式 */
+      toolMode?: 'auto' | 'custom'
+      /** 已选能力域（TOOL_GROUPS.id）；新工具登记进这些域后会自动进入预设 */
+      toolBundles?: string[]
+      /** 单工具偏差：include 额外加、exclude 单独关 */
+      toolOverrides?: { include?: string[]; exclude?: string[] }
   knowledgeBaseFiles: string[]
 }
 interface AgentPreset {
@@ -824,7 +859,14 @@ const defaultCapabilities = (): AgentPresetCapabilities => ({
 
 // 工具标签页：逐真实工具行（内置来自 AGENT_TOOL_REGISTRY；插件来自已激活插件同步过来的名单）
 // 每行带 **来源**：内置，或某个插件（方案 B：插件工具与内置工具一视同仁，勾了才生效）
-type ToolRow = AgentToolInfo & { on: boolean; srcKind: 'builtin' | 'plugin'; srcLabelZh: string; srcLabelEn: string }
+type ToolRow = AgentToolInfo & {
+  on: boolean
+  srcKind: 'builtin' | 'plugin'
+  srcLabelZh: string
+  srcLabelEn: string
+  /** 自动门控原因（仍可手动开关；运行时会被对应条件过滤） */
+  gateReason?: string
+}
 
 /** `plugin:math-proof-graph` → `math-proof-graph`；非插件 scope 返回空串 */
 const pluginNameOfScope = (scope: unknown): string => {
@@ -858,24 +900,97 @@ const pluginToolRows = computed<ToolRow[]>(() => {
   })
 })
 
+/** 工具是否被用户勾选：自动模式看包 + 覆盖；旧模式看 enabledTools（插件仍按可用判定） */
+const presetToolSelected = (caps: any, name: string): boolean => selectedToolOn(caps, name)
+
 const toolRows = computed<ToolRow[]>(() => [
   ...AGENT_TOOL_REGISTRY.map((t) => ({
     ...t,
-    on: toolOn(selected.value?.capabilities, t.name),
+    on: presetToolSelected(selected.value?.capabilities, t.name),
     srcKind: 'builtin' as const,
     srcLabelZh: '内置',
     srcLabelEn: 'Built-in',
+    gateReason: presetToolGateReason(t.name),
   })),
   ...pluginToolRows.value,
 ])
 /** 当前预设实际启用的工具数（与卡片上的工具数同一份数据源） */
 const enabledPresetToolCount = computed(() => toolRows.value.filter((r) => r.on).length)
 
+/**
+ * 当前模型是否支持图片输入（三态）。只用于界面提示「read_image 会自动暂停」，
+ * 不改变用户的选择；运行时的图片降级由 agent-loop 处理。
+ */
+const presetVisionSupport = computed<boolean | undefined>(() => {
+  const p: any = selected.value
+  if (!p) return undefined
+  const provider = String(p.llmType || store.AIconfig.llm.type || '')
+  const cfg: any = store.AIconfig.llm as any
+  let model = String(p.model || '')
+  if (!model) {
+    if (provider === 'custom') model = String(cfg.custom?.model || '')
+    else model = String(cfg?.[provider]?.model || '')
+  }
+  return modelSupportsVision(provider, model)
+})
+
+/**
+ * 当前工具集匹配的能力模板；手工增删后自动显示「自定义」。
+ * 插件工具不参与模板匹配（模板只管理内置工具，插件工具仍按用户勾选）。
+ */
+const activeToolProfile = computed(() => {
+  const caps = selected.value?.capabilities as any
+  // 自动模式按能力域集合匹配：单工具覆盖不会把「编码助手」跳成「自定义」。
+  if (caps?.toolMode === 'auto') return profileOfBundles(caps.toolBundles)
+  // 旧模式按实际工具集匹配（不经过运行时过滤）。
+  const builtin = (Array.isArray(caps?.enabledTools) ? caps.enabledTools : toolsFromCapabilities(caps))
+    .filter((t: string) => !isPluginTool(t))
+  return profileOfTools(builtin)
+})
+
+/** 预设编辑界面的门控环境：与聊天运行时同一套字段，界面提示和实际过滤保持一致 */
+const presetGateEnv = computed<ToolGateEnv>(() => {
+  const caps: any = selected.value?.capabilities
+  const mcpServers = Array.isArray(caps?.mcpServerIds) ? caps.mcpServerIds.length : 0
+  const mcpEquipment = Array.isArray(caps?.mcpEquipmentIds) ? caps.mcpEquipmentIds.length : 0
+  const sandboxMode = String(store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe'))
+  return {
+    supportsVision: presetVisionSupport.value,
+    sandboxMode,
+    hasKnowledge: Array.isArray(caps?.knowledgeBaseFiles) && caps.knowledgeBaseFiles.length > 0,
+    hasMcpServers: !!caps?.mcpAccess && (mcpServers + mcpEquipment > 0),
+    browserAvailable: caps?.browseWebsites ? undefined : false,
+    interactive: true,
+    nestedDepth: 0,
+  }
+})
+
+/** 自动门控原因：只影响展示与运行时过滤，不改变用户勾选（勾选仍可手动改） */
+const presetToolGateReason = (tool: string): string => {
+  if (!selected.value?.capabilities) return ''
+  return sharedToolGateReason(tool, presetGateEnv.value, store.locales === 'zh')
+}
+
+/** 选择能力模板：写入该场景的能力域（新工具以后会自动进入这些域）；插件工具保持原样 */
+const onToolProfileChange = (event: Event) => {
+  const id = String((event.target as HTMLSelectElement).value || '')
+  const caps = selected.value?.capabilities as any
+  if (!caps || !id || id === 'custom') return
+  const profile = TOOL_PROFILES.find((p) => p.id === id)
+  if (!profile) return
+  const pluginTools = selectedToolsOf(caps).filter((t: string) => isPluginTool(t))
+  caps.toolMode = 'auto'
+  caps.toolBundles = profile.groups.slice()
+  caps.toolOverrides = pluginTools.length ? { include: pluginTools } : {}
+  caps.enabledTools = autoToolsOf(caps)
+  syncCapabilityBooleans(caps)
+}
+
 /** 逐工具开关；关闭 kb_search / mcp_call 时联动清空已关联项（对齐旧 onCapToggle 行为） */
 const togglePresetTool = (tool: string) => {
   const caps = selected.value?.capabilities as any
   if (!caps) return
-  const wasOn = toolOn(caps, tool)
+  const wasOn = presetToolSelected(caps, tool)
   setToolEnabled(caps, tool, !wasOn)
   if (wasOn) {
     if (tool === 'mcp_call') {
@@ -896,11 +1011,30 @@ const togglePresetTool = (tool: string) => {
 const applyPresetToolBulk = ({ rows, on, groupId }: { rows: ToolRow[]; on: boolean; groupId?: string }) => {
   const caps = selected.value?.capabilities as any
   if (!caps) return
+  // 自动模式：当前可见行覆盖整组时，直接切换能力域（以后该域新增工具会自动跟随）；
+  // 搜索/过滤导致只看到部分行时，退回逐工具覆盖，避免误改没显示的工具。
+  if (caps.toolMode === 'auto' && groupId) {
+    const groupTools = bundleGroupTools(groupId)
+    const noPlugins = rows.every((r) => r.srcKind !== 'plugin')
+    if (noPlugins && groupTools.length > 0 && rows.length === groupTools.length) {
+      setBundleEnabled(caps, groupId, on)
+      // 浏览器的「全开/全关」历史上同时覆盖核心与扩展两组，保持一致
+      if (groupId === 'browser') setBundleEnabled(caps, 'browser-extra', on)
+      syncCapabilityBooleans(caps)
+      if (!on && groupId === 'integration') {
+        caps.mcpServerIds = []
+        caps.mcpEquipmentIds = []
+        mcpEquipmentOptions.value = []
+      }
+      if (!on && groupId === 'knowledge') caps.knowledgeBaseFiles = []
+      return
+    }
+  }
   let turnedOffMcp = false
   let turnedOffKb = false
   for (const row of rows) {
     if (row.alwaysOn) continue
-    const wasOn = toolOn(caps, row.name)
+    const wasOn = presetToolSelected(caps, row.name)
     setToolEnabled(caps, row.name, on)
     if (wasOn && !on) {
       if (row.name === 'mcp_call') turnedOffMcp = true
@@ -910,7 +1044,7 @@ const applyPresetToolBulk = ({ rows, on, groupId }: { rows: ToolRow[]; on: boole
   // 浏览器自动化有一批工具只存在于能力槽里（browser_learning_* / browser_claim_tab /
   // browser_playbook_* 等），没有卡片。整组全关/全开时也要一起处理，否则统一工具注册表
   // 会显示它们仍然开着（用户实测「全关」后还剩 17 个）。
-  if (groupId === 'browser') {
+  if (caps.toolMode !== 'auto' && groupId === 'browser') {
     const browserTools = slotToolsOf('browseWebsites')
     const list = new Set<string>(Array.isArray(caps.enabledTools) ? caps.enabledTools : toolsFromCapabilities(caps))
     for (const name of browserTools) {
@@ -932,21 +1066,28 @@ const applyPresetToolBulk = ({ rows, on, groupId }: { rows: ToolRow[]; on: boole
 const setAllPresetTools = (on: boolean) => {
   const caps = selected.value?.capabilities as any
   if (!caps) return
-  // 直接写权威工具集，不逐行 setToolEnabled：能力槽里有一部分浏览器工具
-  // （browser_help / playbook / download 等）并没有对应的工具卡片，逐行关会残留
-  // （用户实测全开 57 → 全关仍 17）。全部关闭就是清空，全部开启取当前可见的全部卡片。
-  // 全部开启 = 能力槽全开（包含没有卡片、只有能力槽才有的浏览器扩展工具）+ 当前可见插件工具；
-  // 全部关闭 = 直接清空权威工具集，避免逐行关时漏掉卡片之外的工具。
-  if (on) {
+  if (caps.toolMode === 'auto') {
+    if (on) {
+      caps.toolBundles = TOOL_GROUPS.map((g) => g.id)
+      const plugins = toolRows.value.filter((r) => r.srcKind === 'plugin').map((r) => r.name)
+      caps.toolOverrides = plugins.length ? { include: plugins } : {}
+    } else {
+      caps.toolBundles = []
+      caps.toolOverrides = {}
+    }
+    caps.enabledTools = autoToolsOf(caps)
+    syncCapabilityBooleans(caps)
+  } else if (on) {
     const seeded: any = { ...caps, enabledTools: undefined }
     for (const slot of CAPABILITY_TOOL_SLOTS) seeded[slot.key] = true
     const all = new Set<string>(toolsFromCapabilities(seeded))
     for (const row of toolRows.value) all.add(row.name)
     caps.enabledTools = Array.from(all)
+    syncCapabilityBooleans(caps)
   } else {
     caps.enabledTools = []
+    syncCapabilityBooleans(caps)
   }
-  syncCapabilityBooleans(caps)
   if (!on) {
     caps.mcpServerIds = []
     caps.mcpEquipmentIds = []
@@ -966,6 +1107,9 @@ const presentationValue = computed<string>({
 const presentationHint = computed(() => (store.locales === 'en'
   ? 'One by one: every enabled tool is exposed as a function schema. PTC: the model only sees run_code and composes the enabled tools inside a TypeScript program (run_code is turned on automatically and is not listed here).'
   : '逐个调用：每个启用的工具以函数 schema 暴露给模型。PTC（程序化工具调用）：模型只看到 run_code，用一段 TypeScript 程序组合调用下面启用的工具（run_code 自动启用，不在列表中）。'))
+const toolProfileHint = computed(() => (store.locales === 'en'
+  ? 'Apply a profile to fill this preset’s built-in tools in one click; every group and individual tool below still toggles as before.'
+  : '选择模板可一键填入该场景的内置工具；下方仍按组 / 按工具逐项开关，和以前一样。'))
 
 // ====== LLM 来源 ======
 const llmTypes = computed<string[]>(() => {
@@ -1626,6 +1770,9 @@ const addPreset = async () => {
         knowledgeBaseFiles: [],
       })
       caps.enabledTools = toolsFromCapabilities({ ...caps, enabledTools: undefined })
+      // 新预设直接进入「能力包 + 覆盖」模式：以后新增工具会自动跟随对应能力域
+      migratePresetToolBundles(caps)
+      syncCapabilityBooleans(caps)
       return caps
     })(),
     maxSteps: DEFAULT_AGENT_MAX_STEPS,
@@ -2344,19 +2491,22 @@ onMounted(async () => {
 }
 .preset-tool-item:hover { border-color: var(--fontActiveColor); }
 .preset-tool-item.on { border-color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 8%, transparent); }
-/* 工具呈现方式（native / PTC）：工具列表上方的单行配置 */
-.preset-pres-row { flex-shrink: 0; }
-.preset-pres-row .exec-config-label { min-width: 52px; font-weight: 600; }
-/* 工具页：一键全部开启 / 关闭 + 实际启用数量 */
-.preset-tool-bulkbar {
-  display: flex; align-items: center; gap: 6px;
-  flex-shrink: 0; padding: 2px 0 6px;
-  font-size: 11px;
+/* 工具页：呈现方式 + 能力模板同一行；两栏等宽占满整行，说明只放 title，不占界面高度 */
+.preset-tool-config-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center; gap: 18px; width: 100%;
+  flex-shrink: 0; padding: 2px 0 4px; font-size: 11px;
 }
-.preset-tool-count { opacity: .65; margin-right: auto; }
+.preset-tool-config-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.preset-tool-config-item .exec-config-label { min-width: 52px; font-weight: 600; }
+.preset-tool-config-item .loop-mode-select { flex: 1 1 auto; width: auto; min-width: 0; }
+.preset-tool-profile-select { width: auto; flex: 1 1 auto; min-width: 0; }
+/* 工具页：计数 + 全部开关放进 ToolGroupList 的同一条工具条（图标按钮，文案走 title） */
+.preset-tool-count { opacity: .65; flex-shrink: 0; font-size: 10px; white-space: nowrap; }
 .preset-tool-bulkbtn {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 3px 8px; font-size: 10px; line-height: 1.2;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; flex-shrink: 0;
+  font-size: 11px; line-height: 1.2;
   border: 1px solid var(--borderColor); border-radius: 4px;
   background: var(--menuColor); color: var(--fontColor); cursor: pointer;
 }
@@ -2374,6 +2524,15 @@ onMounted(async () => {
 /* 工具卡片（仅工具页用；技能 / MCP / 知识库仍复用基础 .preset-tool-item 的横向布局）：
    上半是图标 / 名称、来源、工具名 / 开关，说明独占底部一行 —— 比原先挤在窄列里省高度 */
 .preset-tool-card { flex-direction: column; align-items: stretch; gap: 2px; }
+/* 自动门控中的工具：仍可手动开关，只做弱化提示，避免被误以为已关闭 */
+.preset-tool-card.gated { border-style: dashed; opacity: .82; }
+.preset-tool-gate {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 9px; line-height: 1.4; padding: 0 4px; border-radius: 3px;
+  color: #c47f00; border: 1px solid color-mix(in srgb, #c47f00 45%, transparent);
+  background: color-mix(in srgb, #c47f00 9%, transparent);
+  flex-shrink: 0;
+}
 .preset-tool-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .preset-tool-meta { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .preset-tool-card .preset-tool-src { align-self: center; }

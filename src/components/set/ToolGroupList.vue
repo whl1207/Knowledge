@@ -16,6 +16,8 @@
   <div class="tgl">
     <!-- 工具条：搜索 / 只看已启用 / 展开收起（固定在组列表上方，不随列表滚动） -->
     <div class="tgl-toolbar">
+      <!-- 父页面可把「计数 / 全部开关」等操作塞进同一条工具条，避免再多一行 -->
+      <slot name="toolbar-before" />
       <div class="tgl-search">
         <i class="fa fa-search tgl-search-icon"></i>
         <input
@@ -39,7 +41,6 @@
         @click="onlyEnabled = !onlyEnabled"
       >
         <i class="fa fa-filter"></i>
-        <span class="tgl-tool-btn-text">{{ onlyEnabledText || (zh ? '已启用' : 'Enabled') }}</span>
       </button>
       <button
         v-if="!searchText"

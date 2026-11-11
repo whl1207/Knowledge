@@ -209,8 +209,32 @@ function saveToolImage(sessionId: string, img: ToolImage): SavedToolImage | null
   }
 }
 
-/** 稳定序列化工具参数（对象键排序），用于识别「同一工具 + 同一参数」的重复调用 */
-function canonicalToolArgs(value: any): string {
+/**
+ * 把工具返回值转成**一定可序列化**的文本。
+ *
+ * 工具（尤其插件工具）可能返回循环引用 / BigInt / 函数等 JSON 不友好的值；
+ * 旧路径会在 `JSON.stringify` 处抛错并冒泡到 runTurn，把整个 turn 结束。
+ * 这里用带循环检测的 replacer 兜底，最多保留 100K 字符。
+ */
+function safeToolValueText(value: any): string {
+  const seen = new WeakSet<object>()
+  try {
+    const text = JSON.stringify(value, (_key, v) => {
+      if (typeof v === 'bigint') return `${v}n`
+      if (v && typeof v === 'object') {
+        if (seen.has(v)) return '[Circular]'
+        seen.add(v)
+      }
+      return v
+    })
+    const out = typeof text === 'string' ? text : String(value ?? '')
+    return out.length > 100_000 ? out.slice(0, 100_000) + '…' : out
+  } catch (e: any) {
+    return `[工具结果无法序列化：${e?.message || String(e)}]`
+  }
+}
+
+/** 稳定序列化工具参数（对象键排序），用于识别「同一工具 + 同一参数」的重复调用 */function canonicalToolArgs(value: any): string {
   const seen = new WeakSet<object>()
   const sort = (v: any): any => {
     if (v === null || typeof v !== 'object') return v
@@ -663,6 +687,13 @@ class AgentImpl implements AgentControl {
   /** 相同工具 + 相同参数的连续调用计数（循环卫生守卫；每 turn 重置） */
   private repeatKey = ''
   private repeatCount = 0
+  /**
+   * 本 turn 冻结的工具定义（P2）：turn 开始时解析一次，运行中注册 / 设置变化
+   * 不会改变本 turn 模型可见 schema 与可执行集合；下个 turn 再重新解析。
+   */
+  private frozenToolDefs: ToolDefinition[] | null = null
+  /** 上一 turn 记录进会话日志的模型可见工具名，用于产出 tools/change 的 added / removed */
+  private lastToolSnapshot: string[] | null = null
 
   constructor(options: AgentOptions, init: { id?: string; resume?: boolean } = {}) {
     this.id = brand(init.id || `agent-${randomUUID()}`)
@@ -957,7 +988,11 @@ class AgentImpl implements AgentControl {
     this.repeatCount = 0
     // 时间读数的基线：本轮开始前的「上一条模型可见消息」——不含本轮刚提交的这条用户消息
     this.turnStartedAt = Date.now()
+    // P2：先冻结本 turn 的工具定义，再写 turn/start；`tools/change` 记录的是
+    // 「本 turn 实际下发给模型」的集合，而不是实时注册表（后者可能在本 turn 中途变化）。
+    this.frozenToolDefs = this.visibleToolDefs()
     sessionLog.append(this.id, 'turn/start', { turn })
+    this.logToolSetChange(turn)
     this.emit('agent/turn-start', { turn })
     // 清单的回合边界收口（对齐 DSH todo 投影的 turn/start 语义）：上一轮已全部收口的
     // 清单不带进新任务——旧清单留在界面上会被误读成本轮计划；仍有未完成项时保留
@@ -1200,6 +1235,7 @@ class AgentImpl implements AgentControl {
       }
       // turn 边界屏障：把本轮的 chunk / tool / turn 事件真正落盘后再回到 idle
       await sessionLog.flush(this.id)
+      this.frozenToolDefs = null
       this.turnController = null
     }
   }
@@ -1679,6 +1715,36 @@ class AgentImpl implements AgentControl {
     return selected.filter((d) => d.name !== 'run_code')
   }
 
+  /** 本 turn 模型实际可见的工具名（PTC 坍缩后只有 run_code） */
+  private modelVisibleToolNames(): string[] {
+    if (this.options.toolsPresentation === 'code') return ['run_code']
+    const defs = this.frozenToolDefs ?? this.visibleToolDefs()
+    return defs.map((d) => d.name)
+  }
+
+  /**
+   * 把本 turn 的工具集变化写入会话日志（P2）。
+   * 这不是模型消息，而是审计 / 回放事实：设置 → 智能体 → 日志里可直接看到
+   * 「第 N 轮启用了哪些工具、相对上一轮加了/减了什么」，包括 PTC 坍缩为 run_code。
+   */
+  private logToolSetChange(turn: number): void {
+    const tools = this.modelVisibleToolNames()
+    const previous = this.lastToolSnapshot
+    const added = previous ? tools.filter((n) => !previous.includes(n)) : tools.slice()
+    const removed = previous ? previous.filter((n) => !tools.includes(n)) : []
+    const changed = previous === null || added.length > 0 || removed.length > 0
+    this.lastToolSnapshot = tools
+    if (!changed) return
+    sessionLog.append(this.id, 'tools/change', {
+      tools,
+      added,
+      removed,
+      turn,
+      presentation: this.options.toolsPresentation === 'code' ? 'code' : 'native',
+      reason: previous === null ? 'initial' : 'turn-start',
+    })
+  }
+
   /** 无 LLM 兜底摘要：保留「谁说了什么 + 工具调用与关键参数」的可操作索引 */
   private visibleTools(): any[] {
     // PTC（Code Mode）：能力目录（options.tools）不变，但模型可见的工具
@@ -1686,7 +1752,9 @@ class AgentImpl implements AgentControl {
     if (this.options.toolsPresentation === 'code') {
       return [runCodeFunctionSchema() as any]
     }
-    return this.visibleToolDefs().map((d) => ({
+    // P2：使用本 turn 冻结的定义，而不是每次重新读实时注册表。
+    const defs = this.frozenToolDefs ?? this.visibleToolDefs()
+    return defs.map((d) => ({
       type: 'function',
       function: {
         name: d.name,
@@ -2161,7 +2229,18 @@ class AgentImpl implements AgentControl {
     this.emit('tool/call', { callId, name, args })
     this.noteToolRepeat(name, args)
 
-    // 引擎级白名单守卫：即使模型试图调用未启用工具，也直接返回失败而不是执行
+    // 引擎级白名单守卫：即使模型试图调用未启用工具，也直接返回失败而不是执行。
+    // P2：本 turn 已冻结工具集时，以冻结集合为准（运行中新注册的工具本 turn 不可见，
+    // 也不能通过幻觉名字绕过）。
+    const frozenNames = this.frozenToolDefs?.map((d) => String(d.name))
+    if (frozenNames && name !== 'run_code' && !frozenNames.includes(name)) {
+      return {
+        callId,
+        name,
+        diagnostic: true,
+        result: { ok: false, error: `工具 ${name} 不在本 turn 冻结的工具集中（下个 turn 生效）`, code: 'DENIED' },
+      }
+    }
     const toolWhitelist = this.options.tools
     if (toolWhitelist !== null && Array.isArray(toolWhitelist) && !toolWhitelist.includes(name as any)) {
       return {
@@ -2184,6 +2263,16 @@ class AgentImpl implements AgentControl {
         name,
         diagnostic: true,
         result: { ok: false, error, code: 'DENIED' },
+      }
+    }
+    // 反向守卫：native 模式没有 run_code 这个模型可见工具（visibleToolDefs 已滤掉），
+    // 模型若凭历史 / 文档幻觉出该名字，直接拒绝，避免绕过能力目录直接执行代码。
+    if (this.options.toolsPresentation !== 'code' && name === 'run_code') {
+      return {
+        callId,
+        name,
+        diagnostic: true,
+        result: { ok: false, error: 'run_code 只在 PTC（代码模式）下可用；请按当前工具列表逐项调用', code: 'DENIED' },
       }
     }
 
@@ -2210,7 +2299,18 @@ class AgentImpl implements AgentControl {
         if (skillName && result.ok) this.loadedSkills.add(skillName)
       }
     } else {
-      result = await toolRegistry.execute(name, args, this.ctx())
+      try {
+        result = await toolRegistry.execute(name, args, this.ctx())
+      } catch (e: any) {
+        // 注册表内部理论上已收口；这里再兜一层，保证 pre/post 钩子或注册表自身的异常
+        // 不会冒泡成 turn 级错误。
+        result = {
+          ok: false,
+          error: `工具 ${name} 执行异常：${e?.message || String(e)}`,
+          code: 'TOOL_ERROR',
+          retryable: false,
+        }
+      }
     }
 
     return { callId, name, result }
@@ -2219,23 +2319,52 @@ class AgentImpl implements AgentControl {
   /** 把一次工具结果按模型给出的调用顺序提交（日志 / UI / 崩溃恢复记账的唯一入口） */
   private pushToolOutcome(outcome: { callId: string; name: string; result: ToolResult; diagnostic?: boolean }): void {
     const { callId, name, result, diagnostic } = outcome
-    this.pushToolResult({
-      callId,
-      name,
-      ok: result.ok,
-      value: result.value,
-      error: result.error,
-      code: result.code,
-      retryable: result.retryable,
-      preview: result.preview,
-      images: result.images,
-      diagnostic,
-    })
+    try {
+      this.pushToolResult({
+        callId,
+        name,
+        ok: result.ok,
+        value: result.value,
+        error: result.error,
+        code: result.code,
+        retryable: result.retryable,
+        preview: result.preview,
+        images: result.images,
+        diagnostic,
+      })
+    } catch (e: any) {
+      // 结果记账 / 序列化 / 落盘任何一步出错，都不能把 turn 打断：补一条最短的失败结果，
+      // 保证 assistant.tool_calls 有对应的 tool 消息（否则下一轮模型会看到「结果缺失」）。
+      const message = `工具 ${name || '(unknown)'} 的结果处理失败：${e?.message || String(e)}`
+      console.error(`[agent] ${this.id} ${message}`)
+      try {
+        sessionLog.append(this.id, 'tool/result', {
+          callId,
+          name,
+          ok: false,
+          error: message,
+          code: 'TOOL_RESULT_ERROR',
+        })
+      } catch { /* 日志也失败时只能放弃这一条，但仍然不能让 turn 停止 */ }
+      try { this.emit('tool/result', { callId, name, ok: false, error: message }) } catch { /* 忽略 */ }
+    }
   }
 
   /** 单个 shell 路径（保留给截断拒绝等同步收口；正常调度走 executeToolCalls） */
   private async executeToolCall(call: any, step: number): Promise<void> {
-    this.pushToolOutcome(await this.runToolCall(call, step))
+    try {
+      this.pushToolOutcome(await this.runToolCall(call, step))
+    } catch (e: any) {
+      // 非并行路径也必须兜底：任何工具/记账异常都只能变成「本次调用失败」，
+      // 不能冒泡到 runTurn 的 catch 把整个 turn 结束。
+      const name = String(call?.name || call?.function?.name || '')
+      this.pushToolOutcome({
+        callId: String(call?.id || `call-${step}-error`),
+        name,
+        diagnostic: true,
+        result: { ok: false, error: `工具 ${name || '(unknown)'} 执行异常：${e?.message || String(e)}`, code: 'TOOL_ERROR' },
+      })
+    }
   }
 
   /**
@@ -2319,10 +2448,26 @@ class AgentImpl implements AgentControl {
     // 而不是固定 16K 字符（那会占到 1/3 窗口）。取值来自本轮请求预算的生效窗口。
     // 取本轮请求预算的生效窗口；首步（预算尚未算过）回落到 options.contextLimit
     const windowTokens = this.effectiveWindowTokens > 0 ? this.effectiveWindowTokens : Number(this.options.contextLimit) || undefined
-    const bounded = boundToolResult(name, ok, value, error, undefined, {
-      skipContinuationHint: !!diagnostic,
-      windowTokens,
-    })
+    // 工具返回值可能包含循环引用 / BigInt / 函数（插件工具尤其常见）：boundToolResult 内部会
+    // JSON.stringify，一旦抛错就会冒泡到 runTurn、把整个 turn 结束。这里兜底成可序列化文本。
+    let logValue: any = value
+    let bounded: ReturnType<typeof boundToolResult>
+    try {
+      bounded = boundToolResult(name, ok, value, error, undefined, {
+        skipContinuationHint: !!diagnostic,
+        windowTokens,
+      })
+    } catch (e: any) {
+      logValue = safeToolValueText(value)
+      const modelText = logValue.length > 16_384 ? logValue.slice(0, 16_384) + '\n\n[... result truncated ...]' : logValue
+      bounded = {
+        raw: logValue,
+        model: modelText,
+        pruned: modelText.length !== logValue.length,
+        originalChars: logValue.length,
+      }
+      console.warn(`[agent] ${this.id} 工具 ${name} 的结果无法正常序列化，已转为文本继续：${e?.message || String(e)}`)
+    }
     let modelValue = bounded.model
     let spillPath: string | undefined
     if (bounded.pruned && shouldSpill(bounded.raw, windowTokens)) {
@@ -2342,7 +2487,7 @@ class AgentImpl implements AgentControl {
       ok,
       ...(code ? { code } : {}),
       ...(retryable !== undefined ? { retryable } : {}),
-      value,
+      value: logValue,
       error,
       preview,
       ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
@@ -2351,8 +2496,8 @@ class AgentImpl implements AgentControl {
       ...(savedImages.length ? { images: savedImages } : {}),
     })
     // 记入本步结果集合：step 中途抛错时由崩溃恢复逻辑补写（见 runTurn 的 catch 块）
-    this.stepResults.set(callId, { name, ok, value, error, code, retryable, preview, images: savedImages.length ? savedImages : undefined })
-    this.emit('tool/result', { callId, name, ok, value, error, preview })
+    this.stepResults.set(callId, { name, ok, value: logValue, error, code, retryable, preview, images: savedImages.length ? savedImages : undefined })
+    this.emit('tool/result', { callId, name, ok, value: logValue, error, preview })
     this.emittedResultIds.add(callId)
     // 工具调用/结果对是崩溃恢复的关键事实：不等到 50ms 批刷，立刻异步落盘
     void sessionLog.flush(this.id)

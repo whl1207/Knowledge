@@ -21,6 +21,7 @@ import { chatsRef } from '@/store/chats'
 // 运行中「引导」：集群成员（发言中的 agent 会话）也接受 steer，其会话 id 记在 swarmState
 import { agentRunStates, running as swarmRunning, swarmRunChatId } from '@/store/swarmState'
 import { toolsFromCapabilities } from '@/lib/agent/capabilities'
+import { modelSupportsVision } from '@/shared/visionSupport'
 // ask_user 结构化问答：弹窗排队在 store/askUser（渲染由全局 AskUserHost 承担）
 import { requestUserAnswers, questionsOf, dismissAsk } from '@/store/askUser'
 // exit_plan_mode 计划评审：弹窗排队在 store/planReview（渲染由全局 PlanReviewHost 承担）
@@ -1151,7 +1152,28 @@ export function useAgentRun(deps: AgentRunDeps) {
   }
 
   /** 预设能力槽 → 工具白名单（统一数据源：src/lib/agent/capabilities.ts，与预设工具标签页同步） */
-  const buildPresetTools = (caps: any): string[] => toolsFromCapabilities(caps)
+  const buildPresetTools = (caps: any, env?: any): string[] => toolsFromCapabilities(caps, env ? { env } : {})
+
+  /**
+   * 预设工具的运行门控环境（P1）：模型视觉、工作区、沙箱、知识库、MCP、交互性。
+   * 与 AgentPreset 工具页的提示共用 toolBundles.toolGateReason，避免界面说能用、运行时又不可用。
+   */
+  const buildPresetToolGateEnv = (caps: any, preset: any, chat: any) => {
+    const llmType = String(preset?.llmType || store.AIconfig.llm.type || '')
+    const { provider, config } = buildAgentProviderConfig(llmType)
+    const model = String(chat?.config?.model || preset?.model || config?.model || '')
+    const mcpIds: string[] = Array.isArray(caps?.mcpServerIds)
+      ? caps.mcpServerIds
+      : (caps?.mcpServerId ? [caps.mcpServerId] : [])
+    return {
+      supportsVision: modelSupportsVision(provider, model),
+      sandboxMode: store.pythonSandbox || (store.TrustedPython ? 'trusted' : 'safe'),
+      hasKnowledge: Array.isArray(caps?.knowledgeBaseFiles) && caps.knowledgeBaseFiles.length > 0,
+      hasMcpServers: !!caps?.mcpAccess && mcpIds.length > 0,
+      interactive: true,
+      nestedDepth: 0,
+    }
+  }
 
 
   /** 已启用的 MCP 服务（设置 → MCP 服务中 enabled !== false 的）→ mcp_call 工具上下文 */
@@ -1177,7 +1199,8 @@ export function useAgentRun(deps: AgentRunDeps) {
 
     // system prompt 组装：统一交给 @/lib/agent/promptContext（与批量/集群/工作流节点同一实现）
     // 覆盖：自定义提示 + 工具说明 / 通用自主规划 / 指令段模式（{{cwd}} 等）/ 知识库能力 / 所选技能 / 工作区
-    const baseTools = buildPresetTools(preset.capabilities || {})
+    const toolGateEnv = buildPresetToolGateEnv(preset.capabilities || {}, preset, chat)
+    const baseTools = buildPresetTools(preset.capabilities || {}, toolGateEnv)
     const mcpIds: string[] = preset.capabilities?.mcpServerIds || (preset.capabilities?.mcpServerId ? [preset.capabilities.mcpServerId] : [])
     // 预设启用的 MCP 服务及其真实工具清单（含 serverId，模型据此调用 mcp_call）
     const mcpCtx = (preset.capabilities?.mcpAccess && mcpIds.length > 0)

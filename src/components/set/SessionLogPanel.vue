@@ -112,11 +112,48 @@
               <div class="slp-event-head" @click="toggleEvent(ev.seq)">
                 <span class="slp-seq">{{ ev.seq }}</span>
                 <span class="slp-type">{{ ev.type }}</span>
+                <span v-if="toolChangeSummary(ev)" class="slp-tools-change-inline">
+                  +{{ toolChangeSummary(ev)!.added.length }} / -{{ toolChangeSummary(ev)!.removed.length }}
+                  · {{ toolChangeSummary(ev)!.tools.length }} {{ isZh ? '个' : 'tools' }}
+                </span>
                 <span class="slp-time">{{ time(ev.ts) }}</span>
                 <i class="fa fa-chevron-down slp-toggle" :class="{ open: !!openEvents[ev.seq] }"></i>
               </div>
               <div v-if="openEvents[ev.seq]" class="slp-event-body">
-                <pre>{{ pretty(payloadOf(ev)) }}</pre>
+                <template v-if="toolChangeSummary(ev)">
+                  <div class="slp-tools-change">
+                    <div class="slp-tools-change-head">
+                      <span class="slp-tools-change-title">
+                        <i class="fa fa-wrench"></i>
+                        {{ isZh ? '工具集变化' : 'Tool set change' }}
+                      </span>
+                      <span class="slp-tools-change-meta">
+                        {{ isZh ? '第' : 'turn' }} {{ toolChangeSummary(ev)!.turn }} {{ isZh ? '轮' : '' }}
+                        · {{ toolChangeSummary(ev)!.tools.length }} {{ isZh ? '个工具' : 'tools' }}
+                        <template v-if="toolChangeSummary(ev)!.presentation === 'code'"> · PTC</template>
+                      </span>
+                    </div>
+                    <div v-if="toolChangeSummary(ev)!.added.length" class="slp-tools-change-row">
+                      <span class="slp-tools-change-label add">{{ isZh ? '新增' : 'Added' }}</span>
+                      <span v-for="t in toolChangeSummary(ev)!.added" :key="'a-' + t" class="slp-tool-chip add">{{ t }}</span>
+                    </div>
+                    <div v-if="toolChangeSummary(ev)!.removed.length" class="slp-tools-change-row">
+                      <span class="slp-tools-change-label remove">{{ isZh ? '移除' : 'Removed' }}</span>
+                      <span v-for="t in toolChangeSummary(ev)!.removed" :key="'r-' + t" class="slp-tool-chip remove">{{ t }}</span>
+                    </div>
+                    <div v-if="!toolChangeSummary(ev)!.added.length && !toolChangeSummary(ev)!.removed.length" class="slp-tools-change-note">
+                      {{ isZh ? '本会话初始工具集' : 'Initial tool set for this session' }}
+                    </div>
+                    <details class="slp-tools-change-raw">
+                      <summary>{{ isZh ? '查看全部 / 原始 JSON' : 'Show all / raw JSON' }}</summary>
+                      <div class="slp-tools-change-all">
+                        <span v-for="t in toolChangeSummary(ev)!.tools" :key="'t-' + t" class="slp-tool-chip">{{ t }}</span>
+                      </div>
+                      <pre>{{ pretty(payloadOf(ev)) }}</pre>
+                    </details>
+                  </div>
+                </template>
+                <pre v-else>{{ pretty(payloadOf(ev)) }}</pre>
               </div>
             </div>
             <!-- 底部加载状态 -->
@@ -355,6 +392,24 @@ function pretty(v: any): string {
 function payloadOf(ev: SessionEvent): Record<string, unknown> {
   const { seq, ts, sessionId: _sid, type: _t, ...payload } = ev as any
   return payload
+}
+
+/** tools/change 的结构化摘要（设置 → 智能体 → 日志里直接可读） */
+function toolChangeSummary(ev: SessionEvent): {
+  tools: string[]
+  added: string[]
+  removed: string[]
+  turn: number
+  presentation?: string
+} | null {
+  if (ev.type !== 'tools/change') return null
+  return {
+    tools: Array.isArray(ev.tools) ? ev.tools : [],
+    added: Array.isArray(ev.added) ? ev.added : [],
+    removed: Array.isArray(ev.removed) ? ev.removed : [],
+    turn: Number(ev.turn) || 0,
+    ...(ev.presentation ? { presentation: String(ev.presentation) } : {}),
+  }
 }
 
 function toggleEvent(seq: number): void {
@@ -971,6 +1026,27 @@ defineExpose({ sessions, sessionId, refreshSessions, selectSession, load, clearA
 .slp-toggle.open { transform: rotate(180deg); }
 .slp-event-body { border-top: 1px dashed var(--borderColor); padding: 6px 8px; background: var(--menuColor); }
 .slp-event-body pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; font-family: monospace; }
+.slp-event-tools-change .slp-type { color: #13a8a8; }
+.slp-tools-change-inline { color: #13a8a8; font-size: 10px; font-family: monospace; }
+.slp-tools-change { font-size: 11px; display: flex; flex-direction: column; gap: 5px; }
+.slp-tools-change-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.slp-tools-change-title { font-weight: 600; color: var(--fontColor); }
+.slp-tools-change-meta { color: #888; font-size: 10px; }
+.slp-tools-change-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.slp-tools-change-label { font-size: 10px; opacity: .7; min-width: 30px; }
+.slp-tools-change-label.add { color: #389e0d; }
+.slp-tools-change-label.remove { color: #cf1322; }
+.slp-tool-chip {
+  display: inline-block; padding: 0 5px; border-radius: 3px;
+  border: 1px solid var(--borderColor); font-family: monospace; font-size: 10px;
+  background: var(--backgroundColor); color: var(--fontColor);
+}
+.slp-tool-chip.add { border-color: #389e0d; color: #389e0d; }
+.slp-tool-chip.remove { border-color: #cf1322; color: #cf1322; }
+.slp-tools-change-note { color: #888; font-size: 10px; }
+.slp-tools-change-raw summary { cursor: pointer; color: #888; font-size: 10px; }
+.slp-tools-change-all { display: flex; flex-wrap: wrap; gap: 3px; padding: 4px 0; }
+.slp-tools-change-raw pre { margin-top: 4px; max-height: 220px; overflow: auto; }
 
 /* ====== 派生消息 ====== */
 .slp-msg { border-left: 3px solid #888; margin-bottom: 6px; padding: 4px 8px; background: var(--menuColor); border-radius: 4px; }
