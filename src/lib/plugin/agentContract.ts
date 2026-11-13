@@ -278,6 +278,7 @@ export const DELEGATION_SLOT_TIERS: Record<
   readFiles: { tier: 'denied', relaxable: 'fs' },
   listDirs: { tier: 'denied', relaxable: 'fs' },
   writeFiles: { tier: 'denied', relaxable: 'fs' },
+  presentFiles: { tier: 'denied', relaxable: 'fs' },
   mcpAccess: { tier: 'denied', relaxable: 'mcp' },
   // 永不放宽
   executeCode: { tier: 'denied' },

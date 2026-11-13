@@ -28,6 +28,7 @@ import { hasPluginWaterfall, runPluginWaterfall } from './plugin-waterfall'
 import { AIUtils } from '@/shared/ai-core'
 import { toolRegistry } from '@/shared/toolRegistry'
 import { boundToolResult, buildSpillPreview, shouldSpill } from '@/shared/toolResultBudget'
+import { repairTextToolCalls, parseXmlToolArgs } from '@/shared/toolCallRepair'
 import { sessionLog } from './session-log'
 import { recordUsage } from './usage-log'
 import { saveSpillText } from './tool-spill'
@@ -216,6 +217,19 @@ function saveToolImage(sessionId: string, img: ToolImage): SavedToolImage | null
  * 旧路径会在 `JSON.stringify` 处抛错并冒泡到 runTurn，把整个 turn 结束。
  * 这里用带循环检测的 replacer 兜底，最多保留 100K 字符。
  */
+/** 校验 present 返回的交付文件（只接受非空绝对路径 + 可选说明）。 */
+function presentedFilesOf(value: any): Array<{ path: string; description?: string }> {
+  const raw = Array.isArray(value?.files) ? value.files : []
+  const files: Array<{ path: string; description?: string }> = []
+  for (const f of raw) {
+    const p = String(f?.path ?? '').trim()
+    if (!p) continue
+    const description = String(f?.description ?? '').trim().slice(0, 200)
+    files.push({ path: p, ...(description ? { description } : {}) })
+  }
+  return files
+}
+
 function safeToolValueText(value: any): string {
   const seen = new WeakSet<object>()
   try {
@@ -1056,6 +1070,8 @@ class AgentImpl implements AgentControl {
         // 日志是唯一事实源；崩溃后不应出现「模型已经看过、日志里却还没有」的输入。
         await sessionLog.flush(this.id)
         const result = await this.runStepWithOverflowRetry(messages)
+        // 模型把工具调用写成 XML 正文时，先修复成结构化 tool_calls，避免本步没有工具可执行而结束循环
+        this.rescueTextToolCalls(result)
         item = null // 本 step 的输入已消费
 
         // 真实用量校准：provider 自报的 promptTokens 就是**这份请求**的真实计数
@@ -1723,6 +1739,30 @@ class AgentImpl implements AgentControl {
   }
 
   /**
+   * 修复「模型把工具调用写成 XML 正文」的情况：部分本地/网关模型不按 function calling
+   * 返回结构化 tool_calls，而是在 content 里写 <tool_call><function=...>。若直接把它当
+   * 最终回答，循环会因为「没有工具调用」而结束。这里只在没有任何结构化调用时尝试修复，
+   * 且工具名必须是本 turn 冻结集合里的真实工具，避免把普通正文误判成调用。
+   */
+  private rescueTextToolCalls(result: { content: string; toolCalls?: any[]; finishReason?: string }): void {
+    if (this.options.toolsPresentation === 'code') return
+    if (result.finishReason === 'length') return
+    if (Array.isArray(result.toolCalls) && result.toolCalls.length) return
+    const repaired = repairTextToolCalls(result.content, this.modelVisibleToolNames())
+    if (!repaired) return
+    result.content = repaired.cleaned
+    result.toolCalls = repaired.calls.map((c) => ({
+      id: `call-${randomUUID()}`,
+      type: 'function',
+      function: { name: c.name, arguments: JSON.stringify(c.args) },
+    }))
+    this.emit('agent/notice', {
+      kind: 'tool-call-recovered',
+      message: `模型把工具调用写成了 XML 文本，已自动修复并继续执行：${repaired.calls.map((c) => c.name).join('、')}`,
+    })
+  }
+
+  /**
    * 把本 turn 的工具集变化写入会话日志（P2）。
    * 这不是模型消息，而是审计 / 回放事实：设置 → 智能体 → 日志里可直接看到
    * 「第 N 轮启用了哪些工具、相对上一轮加了/减了什么」，包括 PTC 坍缩为 run_code。
@@ -2181,7 +2221,19 @@ class AgentImpl implements AgentControl {
     const name = String(call?.name || call?.function?.name || '')
     const callId = String(call?.id || `call-${step}-${Math.random().toString(36).slice(2, 8)}`)
     const rawArgs = call?.arguments ?? call?.function?.arguments
-    const args = parseToolArgs(rawArgs)
+    let args = parseToolArgs(rawArgs)
+    // 有的 provider 会把 XML 形态的参数原文塞进 arguments：能从 <parameter=...> 里
+    // 提出真实参数时直接修复，不要因为 JSON 不合法就拒绝整个调用。
+    if (args && typeof args === 'object' && typeof args._raw === 'string') {
+      const xmlArgs = parseXmlToolArgs(String(args._raw), name)
+      if (xmlArgs) {
+        args = xmlArgs
+        this.emit('agent/notice', {
+          kind: 'tool-call-recovered',
+          message: `工具 ${name} 的参数是 XML 文本，已自动提取参数并继续执行`,
+        })
+      }
+    }
 
     // 参数解析失败（normalizeToolCalls 已把畸形/截断的原文放进 `_raw`）：
     // 不再用空参数去执行工具——那会得到 "code 参数必填" 这类误导性报错（模型看不出参数是它自己
@@ -2495,6 +2547,29 @@ class AgentImpl implements AgentControl {
       ...(spillPath ? { spillPath } : {}),
       ...(savedImages.length ? { images: savedImages } : {}),
     })
+    // 交付物：present 成功后才发布会话事件（失败 / 被阻止不产生交付）。
+    // 与 DSH 的 tools/result → deliverables/presented 口径一致；UI 从工具结果投影卡片。
+    if (ok && name === 'present') {
+      const files = presentedFilesOf(value)
+      if (files.length) {
+        sessionLog.append(this.id, 'deliverables/presented', {
+          turn: Number((value as any)?.turn) || this.turnCount,
+          callId,
+          files,
+        })
+      }
+    }
+    // PTC：present 是 run_code 程序内的子调用，不会单独经过本函数；从预览里收集交付文件
+    if (ok && name === 'run_code' && (preview as any)?.kind === 'ptc-run') {
+      const files = presentedFilesOf({ files: ((preview as any).toolCalls || []).flatMap((c: any) => c?.name === 'present' ? c.files || [] : []) })
+      if (files.length) {
+        sessionLog.append(this.id, 'deliverables/presented', {
+          turn: this.turnCount,
+          callId,
+          files,
+        })
+      }
+    }
     // 记入本步结果集合：step 中途抛错时由崩溃恢复逻辑补写（见 runTurn 的 catch 块）
     this.stepResults.set(callId, { name, ok, value: logValue, error, code, retryable, preview, images: savedImages.length ? savedImages : undefined })
     this.emit('tool/result', { callId, name, ok, value: logValue, error, preview })

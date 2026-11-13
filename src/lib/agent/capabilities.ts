@@ -45,6 +45,7 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'readFiles', tools: ['read_file', 'read_image', 'search_files', 'glob', 'working_directory'] },
   { key: 'listDirs', tools: ['list_dir'] },
   { key: 'writeFiles', tools: ['write_file', 'replace_in_file', 'multi_replace'] },
+  { key: 'presentFiles', defaultOn: true, tools: ['present'] },
   { key: 'executeCode', tools: ['run_code'] },
   { key: 'runShell', tools: ['shell'] },
   { key: 'webSearch', tools: ['web_search', 'web_fetch'] },

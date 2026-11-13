@@ -7,6 +7,32 @@
 
 ---
 
+## 2026-11-13
+
+### Fixed
+
+- **Opening a skill file no longer fails with ENOENT**: reading a relative file inside a skill directory now records the resolved absolute path, so the step’s Open button goes straight to the skill file.
+
+---
+
+## 2026-11-12
+
+### Improved
+
+- **New “Deliverables” capability**: agents can declare final files with `present`; after the reply finishes, deliverable cards support preview/open, and the session log records the declarations.
+- **Messages sent while running now queue first**: Enter only adds to the pending queue; click “Steer” to deliver at the next step. Per-row and “steer all” actions are available, with no automatic insertion.
+- **Automatic repair of XML tool calls**: when a model writes `<tool_call><function=…>` as plain text, the system extracts the tool name and arguments and continues instead of ending the loop because no structured tool call was returned.
+
+---
+
+## 2026-11-11
+
+### Improved
+
+- **ask_user no longer submits before all questions are answered**: the primary button goes to the next question / unanswered ones, and only submits when everything is answered; “Submit skipped” remains available for an explicit skip.
+
+---
+
 ## 2026-11-10
 
 ### Added

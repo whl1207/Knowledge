@@ -26,6 +26,7 @@ import type {
 } from '@/types/agent'
 import type { AgentId } from '@/types/ids'
 import { normalizeLlmType } from '@/shared/llmSources'
+import { parseXmlToolArgs, repairTextToolCalls } from '@/shared/toolCallRepair'
 import { DEFAULT_AGENT_MAX_STEPS } from '@/shared/agent-loop-rounds'
 import { classifyLlmFailure, effectiveRetryDelayMs } from '@/shared/llmRetry'
 import { boundToolResult } from '@/shared/toolResultBudget'
@@ -373,6 +374,23 @@ class RendererAgent {
         if (this.turnController.signal.aborted) break
         this.lastFinishReason = result.finishReason || ''
 
+        // 模型把工具调用写成 XML 正文时，修复成结构化调用；否则本步没有工具可执行会结束循环
+        if (!result.toolCalls.length && this.lastFinishReason !== 'length' && this.options.toolsPresentation !== 'code') {
+          const repaired = repairTextToolCalls(result.content, this.visibleToolNames())
+          if (repaired) {
+            result.content = repaired.cleaned
+            result.toolCalls = repaired.calls.map((c) => ({
+              id: `call-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+              name: c.name,
+              arguments: JSON.stringify(c.args),
+            }))
+            this.fire('agent/notice', {
+              kind: 'tool-call-recovered',
+              message: `模型把工具调用写成了 XML 文本，已自动修复并继续执行：${repaired.calls.map((c) => c.name).join('、')}`,
+            })
+          }
+        }
+
         // 工具参数在最终 payload 里缺失/截断时，用流式原文兜底
         const calls = result.toolCalls.map((c) => {
           const raw = this.streamedArgs.get(String(c.id))
@@ -619,7 +637,19 @@ class RendererAgent {
     const name = String(call?.name || '')
     const callId = String(call?.id || `call-${step}-${Math.random().toString(36).slice(2, 8)}`)
     const args = call?.arguments
-    const parsed = typeof args === 'object' && args !== null ? args : parseToolArgs(args)
+    let parsed = typeof args === 'object' && args !== null ? args : parseToolArgs(args)
+
+    // 参数是 XML 文本（<parameter=...>）时自动提取，避免把「格式不对」当成不可恢复错误
+    if (parsed && typeof parsed === 'object' && typeof parsed._raw === 'string') {
+      const xmlArgs = parseXmlToolArgs(String(parsed._raw), name)
+      if (xmlArgs) {
+        parsed = xmlArgs
+        this.fire('agent/notice', {
+          kind: 'tool-call-recovered',
+          message: `工具 ${name} 的参数是 XML 文本，已自动提取参数并继续执行`,
+        })
+      }
+    }
 
     // 参数解析失败：不再用空参数执行（否则得到「参数必填」这类误导性报错）
     if (parsed && typeof parsed === 'object' && typeof parsed._raw === 'string') {

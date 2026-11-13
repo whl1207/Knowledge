@@ -156,6 +156,8 @@ export interface InternalToolCall {
   input: any
   ok: boolean
   error?: string
+  /** present 子调用声明的交付文件（供外层 run_code 预览 / 交付物卡片投影） */
+  files?: Array<{ path: string; description?: string }>
 }
 
 /** 失败的工具调用在程序内以 ToolCallError 拒绝（对齐 DSH 的失败契约） */
@@ -182,7 +184,11 @@ export function buildSdkRuntime(execCtx: ToolExecutionContext, calls: InternalTo
   for (const def of defs) {
     tools[def.name] = async (input: any) => {
       const res = await toolRegistry.execute(def.name, input ?? {}, execCtx)
-      calls.push({ name: def.name, input: input ?? {}, ok: res.ok, error: res.error })
+      const call: InternalToolCall = { name: def.name, input: input ?? {}, ok: res.ok, error: res.error }
+      if (def.name === 'present' && res.ok && Array.isArray((res.value as any)?.files)) {
+        call.files = (res.value as any).files
+      }
+      calls.push(call)
       if (!res.ok) throw new ToolCallError(def.name, res.error || `工具 ${def.name} 执行失败`)
       return res.value
     }
@@ -423,6 +429,6 @@ export async function runCodeHandler(input: any, ctx: ToolExecutionContext): Pro
   return {
     ok: true,
     value: buildModelFacingOutput(output),
-    preview: { kind: 'ptc-run', toolCalls: output.toolCalls.map((c) => ({ name: c.name, input: c.input, ok: c.ok, error: c.error })) },
+    preview: { kind: 'ptc-run', toolCalls: output.toolCalls.map((c) => ({ name: c.name, input: c.input, ok: c.ok, error: c.error, ...(c.files ? { files: c.files } : {}) })) },
   }
 }

@@ -85,14 +85,29 @@
           ><i class="fa fa-chevron-right"></i></button>
         </div>
         <div class="au-foot-main">
-          <span class="au-hint">{{ zh ? '未作答的题目会以「跳过」返回给智能体' : 'Unanswered questions are returned as skipped' }}</span>
+          <span class="au-hint">
+            <template v-if="allAnswered">{{ zh ? `已答完 ${total} 题，确认后提交` : `All ${total} answered — review then submit` }}</template>
+            <template v-else>{{ zh ? `还有 ${total - answeredCount} 题未答；先按「下一题」逐题确认` : `${total - answeredCount} unanswered — use “Next” to review each question` }}</template>
+          </span>
           <button
             class="au-abort"
             :title="zh ? '中止这次任务（会真的停止智能体，不是稍后回答）' : 'Abort this run (actually stops the agent)'"
             @click="onAbort"
           >{{ zh ? '中止任务' : 'Abort' }}</button>
           <el-button size="small" @click="onSoftClose">{{ zh ? '稍后回答' : 'Answer later' }}</el-button>
-          <el-button size="small" type="primary" @click="onSubmit">{{ zh ? '提交' : 'Submit' }}</el-button>
+          <el-button
+            v-if="canSkipSubmit"
+            size="small"
+            :title="zh ? '把未作答的题目按「跳过」返回并提交' : 'Return unanswered questions as skipped and submit'"
+            @click="onSkipSubmit"
+          >{{ zh ? '跳过并提交' : 'Submit skipped' }}</el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :disabled="primaryDisabled"
+            :title="primaryTitle"
+            @click="onPrimary"
+          >{{ primaryLabel }}</el-button>
         </div>
       </div>
     </template>
@@ -151,6 +166,44 @@ function onSubmit() {
   emit('submit', buildAnswers())
 }
 
+/** 底部主按钮：未答完时先去下一题 / 补答，答完才真正提交 */
+const primaryDisabled = computed(() =>
+  !allAnswered.value
+  && index.value >= total.value - 1
+  && firstUnansweredIndex.value === index.value
+)
+const primaryLabel = computed(() => {
+  if (allAnswered.value) return zh.value ? '提交' : 'Submit'
+  if (index.value < total.value - 1) return zh.value ? '下一题' : 'Next'
+  if (firstUnansweredIndex.value === index.value) return zh.value ? '请先回答本题' : 'Answer this first'
+  return zh.value ? '补答未答' : 'Go to unanswered'
+})
+const primaryTitle = computed(() => {
+  if (allAnswered.value) return zh.value ? '提交全部答案' : 'Submit all answers'
+  if (index.value < total.value - 1) return zh.value ? '还有题目未答，先进入下一题' : 'More questions remain; go to the next one'
+  return zh.value ? '还有题目未答，先补答（也可用「跳过并提交」）' : 'Some questions are unanswered; go back to them (or submit with skips)'
+})
+const onPrimary = () => {
+  if (settled) return
+  if (allAnswered.value) {
+    onSubmit()
+    return
+  }
+  if (index.value < total.value - 1) {
+    go(1)
+    return
+  }
+  if (firstUnansweredIndex.value >= 0 && firstUnansweredIndex.value !== index.value) {
+    index.value = firstUnansweredIndex.value
+  }
+}
+/** 明确跳过未答题并提交（只有已答过至少一题时才出现，避免误把空表单交出去） */
+const canSkipSubmit = computed(() => !allAnswered.value && answeredCount.value > 0)
+const onSkipSubmit = () => {
+  if (settled || !canSkipSubmit.value) return
+  onSubmit()
+}
+
 const zh = computed(() => store.locales !== 'en')
 const title = computed(() => {
   const who = props.source ? `${props.source} · ` : ''
@@ -161,7 +214,7 @@ const title = computed(() => {
  * 每题编辑态 / 多题翻页 / 答案批口径统一由 useAskForm 提供（与「待我处理」抽屉的行内表单共用），
  * 本组件只负责弹窗外壳与 markdown 题目渲染。
  */
-const { pick, index, total, current, go, answeredCount, isRecommended, buildAnswers } =
+const { pick, index, total, current, go, answeredCount, allAnswered, firstUnansweredIndex, isRecommended, buildAnswers } =
   useAskForm(() => props.questions)
 
 const renderMarkdown = (s: string) => renderQuestionMarkdown(String(s || ''))

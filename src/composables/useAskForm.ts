@@ -32,6 +32,12 @@ export interface AskFormApi {
   go: (step: number) => void
   /** 已作答题数（选项或自定义任一非空） */
   answeredCount: ComputedRef<number>
+  /** 是否所有题都已作答 */
+  allAnswered: ComputedRef<boolean>
+  /** 第一道未作答题的下标；全部答完时为 -1 */
+  firstUnansweredIndex: ComputedRef<number>
+  /** 某题是否已作答（选项或自定义任一非空） */
+  isAnswered: (id: string) => boolean
   /** 是否 DSH 约定的"推荐项"（只做视觉标记，不改 label） */
   isRecommended: (label: string) => boolean
   /** 按 questions 原顺序产出答案批；未作答的题 = selected 空且无 custom（跳过） */
@@ -67,11 +73,15 @@ export function useAskForm(getQuestions: () => AskUserQuestion[] | undefined): A
     index.value = next
   }
 
-  const answeredCount = computed(() => questions.value.filter((q) => {
-    const st = state[q.id]
+  const answeredCount = computed(() => questions.value.filter((q) => isAnswered(q.id)).length)
+  const allAnswered = computed(() => total.value > 0 && answeredCount.value === total.value)
+  const firstUnansweredIndex = computed(() => questions.value.findIndex((q) => !isAnswered(q.id)))
+
+  function isAnswered(id: string): boolean {
+    const st = state[id]
     if (!st) return false
     return !!st.single || st.selected.length > 0 || String(st.custom || '').trim() !== ''
-  }).length)
+  }
 
   function isRecommended(label: string): boolean {
     return /\(\s*recommend(ed)?\s*\)|（\s*推荐\s*）|\(推荐\)/i.test(String(label || ''))
@@ -88,5 +98,5 @@ export function useAskForm(getQuestions: () => AskUserQuestion[] | undefined): A
     })
   }
 
-  return { state, pick, index, total, current, go, answeredCount, isRecommended, buildAnswers }
+  return { state, pick, index, total, current, go, answeredCount, allAnswered, firstUnansweredIndex, isAnswered, isRecommended, buildAnswers }
 }

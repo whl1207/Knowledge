@@ -54,7 +54,7 @@ export interface ToolExecutionContext {
  */
 export interface PtcRunPreview {
   kind: 'ptc-run'
-  toolCalls: Array<{ name: string; input?: any; ok: boolean; error?: string }>
+  toolCalls: Array<{ name: string; input?: any; ok: boolean; error?: string; files?: Array<{ path: string; description?: string }> }>
 }
 
 /** 工具返回的图片（base64，无 `data:` 前缀）：由 agent-loop 落盘后作为图片内容块交给视觉模型 */

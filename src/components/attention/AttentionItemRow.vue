@@ -119,9 +119,25 @@
           <button class="at-nav" :disabled="index >= total - 1" @click.stop="go(1)"><i class="fa fa-chevron-right"></i></button>
         </div>
         <div class="at-inline-btns">
-          <span class="at-hint">{{ zh ? '未作答的题目会以「跳过」返回' : 'Unanswered questions are returned as skipped' }}</span>
+          <span class="at-hint">
+            <template v-if="allAnswered">{{ zh ? `已答完 ${total} 题` : `All ${total} answered` }}</template>
+            <template v-else>{{ zh ? `还有 ${total - answeredCount} 题未答；先按「下一题」` : `${total - answeredCount} unanswered — use “Next”` }}</template>
+          </span>
           <el-button size="small" @click="answering = false">{{ zh ? '取消' : 'Cancel' }}</el-button>
-          <el-button size="small" type="primary" :disabled="busy" @click="submitAnswer">{{ zh ? '提交' : 'Submit' }}</el-button>
+          <el-button
+            v-if="canSkipSubmit"
+            size="small"
+            :disabled="busy"
+            :title="zh ? '把未作答的题目按「跳过」返回并提交' : 'Return unanswered questions as skipped and submit'"
+            @click="onSkipSubmit"
+          >{{ zh ? '跳过并提交' : 'Submit skipped' }}</el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :disabled="primaryDisabled"
+            :title="primaryTitle"
+            @click="onPrimary"
+          >{{ primaryLabel }}</el-button>
         </div>
       </div>
     </div>
@@ -168,8 +184,45 @@ const moreActions = computed<AttentionAction[]>(() => props.item.actions.filter(
 const planHtml = computed(() => renderQuestionMarkdown(String(props.item.payload.plan || '')))
 const renderMarkdown = (s: string) => renderQuestionMarkdown(String(s || ''))
 
-const { pick, index, total, current, go, answeredCount, isRecommended, buildAnswers } =
+const { pick, index, total, current, go, answeredCount, allAnswered, firstUnansweredIndex, isRecommended, buildAnswers } =
   useAskForm(() => props.item.payload.questions)
+
+const primaryDisabled = computed(() =>
+  busy.value
+  || (!allAnswered.value && index.value >= total.value - 1 && firstUnansweredIndex.value === index.value)
+)
+const primaryLabel = computed(() => {
+  if (allAnswered.value) return zh.value ? '提交' : 'Submit'
+  if (index.value < total.value - 1) return zh.value ? '下一题' : 'Next'
+  if (firstUnansweredIndex.value === index.value) return zh.value ? '请先回答本题' : 'Answer this first'
+  return zh.value ? '补答未答' : 'Go to unanswered'
+})
+const primaryTitle = computed(() => {
+  if (allAnswered.value) return zh.value ? '提交全部答案' : 'Submit all answers'
+  if (index.value < total.value - 1) return zh.value ? '还有题目未答，先进入下一题' : 'More questions remain; go to the next one'
+  return zh.value ? '还有题目未答，先补答（也可用「跳过并提交」）' : 'Some questions are unanswered; go back to them (or submit with skips)'
+})
+const canSkipSubmit = computed(() => !allAnswered.value && answeredCount.value > 0)
+
+function onPrimary(): void {
+  if (busy.value) return
+  if (allAnswered.value) {
+    void submitAnswer()
+    return
+  }
+  if (index.value < total.value - 1) {
+    go(1)
+    return
+  }
+  if (firstUnansweredIndex.value >= 0 && firstUnansweredIndex.value !== index.value) {
+    index.value = firstUnansweredIndex.value
+  }
+}
+
+function onSkipSubmit(): void {
+  if (busy.value || !canSkipSubmit.value) return
+  void submitAnswer()
+}
 
 async function onAction(action: AttentionAction): Promise<void> {
   if (!action || busy.value) return

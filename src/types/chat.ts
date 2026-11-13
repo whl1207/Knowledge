@@ -66,6 +66,13 @@ export interface UploadItem {
   charCount?: number // 解析后的字符数
 }
 
+/** present 声明的交付文件（只记录路径与说明，不复制内容） */
+export interface ChatDeliverable {
+  path: string
+  description?: string
+  turn?: number
+}
+
 /** 聊天消息 */
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -85,6 +92,8 @@ export interface ChatMessage {
   streaming?: boolean
   executionName?: string
   executionUnits?: (ExecutionUnit | WorkflowUnit)[]
+  /** 本轮 present 声明的交付文件（去重后按首次声明顺序；仅助手消息） */
+  deliverables?: ChatDeliverable[]
   executionProgress?: {
     completed: number
     total: number

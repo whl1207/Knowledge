@@ -42,7 +42,7 @@ import { readChatWorkspace } from '@/shared/chatWorkspace'
 // 工具呈现方式：PTC = 补 run_code 白名单 + 系统提示叠加 tools:sdk 段（统一实现在 lib/agent/presentation）
 import { applyToolPresentation } from '@/lib/agent/presentation'
 import { presetPresentation } from '@/lib/agent/ptc'
-import type { Chat, ChatMessage, UploadItem } from '@/types/chat'
+import type { Chat, ChatMessage, ChatDeliverable, UploadItem } from '@/types/chat'
 import type { AgentOptions } from '@/types/agent'
 import { normalizeAgentMaxSteps, resolveAgentMaxSteps } from '@/shared/agent-loop-rounds'
 import { agentSessionSignature } from '@/shared/agentSession'
@@ -189,6 +189,39 @@ export function useAgentRun(deps: AgentRunDeps) {
         }
       }
     }
+    /**
+     * present 交付物投影：只认成功的 present 调用，按路径去重（后一次说明覆盖前一次）。
+     * 与 DSH 的 deliverables/presented 事件投影同口径；工具结果在这里是唯一事实源。
+     */
+    const projectDeliverables = (v: any) => {
+      const byPath = new Map<string, ChatDeliverable>()
+      for (const step of v.steps || []) {
+        for (const call of step.toolCalls || []) {
+          if (call.name === 'present' && call.status === 'success') {
+            const files = Array.isArray(call.result?.files) ? call.result.files : []
+            for (const f of files) {
+              const p = String(f?.path ?? '').trim()
+              if (!p) continue
+              const description = String(f?.description ?? '').trim().slice(0, 200)
+              byPath.set(p, { path: p, ...(description ? { description } : {}), ...(Number(v.turn) > 0 ? { turn: Number(v.turn) } : {}) })
+            }
+          }
+          // PTC：present 在 run_code 程序内执行，结果在 preview.toolCalls 里
+          if (call.name === 'run_code' && call.preview?.kind === 'ptc-run') {
+            for (const sub of call.preview.toolCalls || []) {
+              if (sub.name !== 'present' || !sub.ok) continue
+              for (const f of sub.files || []) {
+                const p = String(f?.path ?? '').trim()
+                if (!p) continue
+                const description = String(f?.description ?? '').trim().slice(0, 200)
+                byPath.set(p, { path: p, ...(description ? { description } : {}), ...(Number(v.turn) > 0 ? { turn: Number(v.turn) } : {}) })
+              }
+            }
+          }
+        }
+      }
+      if (byPath.size) assistantMsg.deliverables = Array.from(byPath.values())
+    }
     const unsub = agentBridge.on((v) => {
       if (v.id !== viewId) return
       // 跨轮 resume：send() 的首次 notify 发生在主进程 turn-start 之前，view 里仍是上一轮的
@@ -218,6 +251,8 @@ export function useAgentRun(deps: AgentRunDeps) {
       }
       // 思考/工具调用 → executionUnits 时间线 + 输入区快照
       projectSteps(v)
+      // present 交付物 → 本轮尾部的交付卡片（失败 / 被阻止的调用不会进来）
+      projectDeliverables(v)
       // 上下文压缩完成提示（时间线里的卡片由投影生成，这里再给一次可见提示，与普通聊天同口径）
       const compaction: any = v.compaction
       if (compaction && compaction.phase === 'done' && compaction.seq > notifiedCompactSeq) {

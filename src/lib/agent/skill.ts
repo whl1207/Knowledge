@@ -33,6 +33,7 @@ export const SKILL_AGENT_DEFAULT_TOOLS = [
   'write_file',
   'replace_in_file',
   'multi_replace',
+  'present',
   'list_dir',
   'search_files',
   'glob',
@@ -224,6 +225,10 @@ const BROWSER_TOOLS_HINT = [
   '      ⑩ 拖拽/滚轮/富文本粘贴用 browser_drag / browser_wheel / browser_paste；点击按钮弹出文件选择器时，先 browser_click，再 browser_upload（无需 ref）。用户右键「交给 AI 处理此页」后用 browser_claim_tab 接管。',
 ].join('\n')
 
+/** 交付物声明说明（与工具清单两处共用，避免模型有了工具却不知道何时用） */
+const PRESENT_HINT =
+  '   - present：把已经完成的最终文件声明为交付物（只记录路径与说明，不复制内容）。在文件最终确定后再调用；一次通常 1-2 个、最多 4 个。适合用户需要单独打开/下载的最终产物（Office 文档、表格、幻灯片、PDF、图片、压缩包等）；不要用它列改过的源码文件，也不要在文件还没写完时调用。调用后用户在本轮结束看到交付卡片。'
+
 /** 根据启用的工具白名单生成“可用工具”说明；供预设智能体在自定义 systemPrompt 之后附加 */
 export function buildToolUsageContext(enabledTools?: readonly string[] | null): string {
   const tools = enabledTools ?? [...SKILL_AGENT_DEFAULT_TOOLS]
@@ -237,6 +242,7 @@ if (toolEnabled(tools, 'working_directory')) toolList.push('   - working_directo
   if (toolEnabled(tools, 'read_file') || toolEnabled(tools, 'write_file')) toolList.push(READ_FILE_HINT)
 if (toolEnabled(tools, 'read_image')) toolList.push('   - read_image：把本地图片交给模型看（PNG / JPEG / WebP / GIF，单张 ≤8MB）')
   if (toolEnabled(tools, 'replace_in_file') || toolEnabled(tools, 'multi_replace')) toolList.push(REPLACE_TOOLS_HINT)
+  if (toolEnabled(tools, 'present')) toolList.push(PRESENT_HINT)
   if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容（默认大小写敏感，可 regex / filePattern）')
   if (toolEnabled(tools, 'glob')) toolList.push('   - glob：按路径 / 文件名查找文件（*.md 找任意目录、src/**/*.ts 限定目录；结果按修改时间倒序）')
   if (toolEnabled(tools, 'run_code')) toolList.push('   - run_code：执行代码片段（处理数据、计算、批量文件操作等）')
@@ -337,6 +343,7 @@ if (toolEnabled(tools, 'working_directory')) toolList.push('   - working_directo
   if (toolEnabled(tools, 'read_file') || toolEnabled(tools, 'write_file')) toolList.push(READ_FILE_HINT)
 if (toolEnabled(tools, 'read_image')) toolList.push('   - read_image：把本地图片交给模型看（PNG / JPEG / WebP / GIF，单张 ≤8MB）')
   if (toolEnabled(tools, 'replace_in_file') || toolEnabled(tools, 'multi_replace')) toolList.push(REPLACE_TOOLS_HINT)
+  if (toolEnabled(tools, 'present')) toolList.push(PRESENT_HINT)
   if (toolEnabled(tools, 'search_files')) toolList.push('   - search_files：按文本搜索文件内容（默认大小写敏感，可 regex / filePattern）')
   if (toolEnabled(tools, 'glob')) toolList.push('   - glob：按路径 / 文件名查找文件（*.md 找任意目录、src/**/*.ts 限定目录；结果按修改时间倒序）')
   if (toolEnabled(tools, 'run_code')) toolList.push('   - run_code：执行代码片段（处理数据、计算、批量文件操作等）')

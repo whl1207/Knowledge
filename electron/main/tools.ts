@@ -413,6 +413,8 @@ function buildReadValue(opts: {
   ctx: ToolExecutionContext
   size: number
   format?: string
+  /** 实际读取的绝对路径（技能文件时与 input.path 的相对路径不同；供 UI「打开」使用） */
+  absPath?: string
 }): ToolResult {
   const { offsetLine, maxLines } = parseLineWindow(opts.input)
   const label = opts.format ? `${opts.displayPath} · ${opts.format}` : opts.displayPath
@@ -428,6 +430,7 @@ function buildReadValue(opts: {
     ok: true,
     value: {
       path: opts.input?.path,
+      ...(opts.absPath ? { absPath: opts.absPath } : {}),
       format: opts.format,
       offset: w.startLine,
       endLine: w.endLine,
@@ -442,8 +445,50 @@ function buildReadValue(opts: {
   }
 }
 
-async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
-  const resolved = resolveToolPath(String(input?.path ?? ''), input?.skill, ctx)
+/**
+ * present：把已经存在的最终文件声明为交付物（对齐 DSH present）。
+ *
+ * 只记录绝对路径与说明，不复制内容；相对路径按 Session 当前工作目录解析，
+ * 绝对路径允许指向工作区外（与 DSH 一致）。路径必须存在且是普通文件。
+ */
+const PRESENT_MAX_FILES = 8
+
+async function presentFiles(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const rawFiles = Array.isArray(input?.files) ? input.files : []
+  if (rawFiles.length === 0) return { ok: false, error: 'present 需要至少一个文件' }
+  if (rawFiles.length > PRESENT_MAX_FILES) {
+    return { ok: false, error: `present 一次最多 ${PRESENT_MAX_FILES} 个文件` }
+  }
+  ctx.signal?.throwIfAborted()
+  const cwd = String(ctx.cwd || '').trim() || process.cwd()
+  const files: Array<{ path: string; description?: string }> = []
+  for (const raw of rawFiles) {
+    const provided = String(raw?.path ?? '').trim()
+    if (!provided) return { ok: false, error: 'present 的文件路径不能为空' }
+    const abs = path.isAbsolute(provided) ? path.resolve(provided) : path.resolve(cwd, provided)
+    let entry: fs.Stats
+    try {
+      entry = fs.lstatSync(abs)
+    } catch {
+      return { ok: false, code: 'FS_NOT_FOUND', error: `交付文件不存在：${provided}` }
+    }
+    if (entry.isSymbolicLink()) return { ok: false, error: `不能交付符号链接：${provided}` }
+    if (!entry.isFile()) return { ok: false, error: `不是普通文件：${provided}` }
+    const description = String(raw?.description ?? '').trim().slice(0, 200)
+    files.push({ path: abs, ...(description ? { description } : {}) })
+  }
+  ctx.signal?.throwIfAborted()
+  return {
+    ok: true,
+    value: {
+      turn: Number(ctx.turn) || 0,
+      files,
+      modelText: files.map((f) => `Presented ${f.path}`).join('\n'),
+    },
+  }
+}
+
+async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {  const resolved = resolveToolPath(String(input?.path ?? ''), input?.skill, ctx)
   const abs = resolved.abs
   if (!abs) return { ok: false, error: resolved.error || '路径越界或缺失（path 参数必填）' }
   try {
@@ -471,6 +516,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
           ctx,
           size: stat.size,
           format: 'pdf',
+          absPath: abs,
         })
       } catch (e: any) {
         return { ok: false, error: `PDF 解析失败: ${e?.message || String(e)}` }
@@ -492,6 +538,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
           ctx,
           size: stat.size,
           format: ext === '.docx' ? 'docx' : 'doc',
+          absPath: abs,
         })
       } catch (e: any) {
         return { ok: false, error: `Word 解析失败: ${e?.message || String(e)}` }
@@ -512,6 +559,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
           ctx,
           size: stat.size,
           format: ext === '.xlsx' ? 'xlsx' : 'xls',
+          absPath: abs,
         })
       } catch (e: any) {
         return { ok: false, error: `Excel 解析失败: ${e?.message || String(e)}` }
@@ -540,6 +588,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
         ok: true,
         value: {
           path: input.path,
+          absPath: abs,
           size: stat.size,
           totalLines: out.window.totalLines,
           truncated: true,
@@ -558,6 +607,7 @@ async function readFileImpl(input: any, ctx: ToolExecutionContext): Promise<Tool
       input,
       ctx,
       size: stat.size,
+      absPath: abs,
     })
   } catch (e: any) {
     return { ok: false, error: `读取失败: ${e?.message || String(e)}` }
@@ -4032,6 +4082,28 @@ export function registerCoreTools(): void {
           path: { type: 'string', description: '可选。所有条目的默认文件路径（条目自带 path 时以条目为准）' },
         },
         required: ['replacements'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('present', '把已经存在的最终文件声明为交付物（只记录路径与说明，不复制内容）。在文件最终确定后再调用：一次通常 1-2 个、最多 4 个；用户在本轮结束后看到交付卡片，可用默认应用打开。不要用它列改过的源码文件；只有用户需要单独打开/下载的最终产物才用。', presentFiles, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          files: {
+            type: 'array',
+            description: '交付文件列表（通常 1-2 个，最多 4 个）',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: '已存在的普通文件路径（绝对路径或相对当前工作目录）' },
+                description: { type: 'string', description: '可选。给用户看的简短说明' },
+              },
+              required: ['path'],
+            },
+          },
+        },
+        required: ['files'],
       },
     }),
   )

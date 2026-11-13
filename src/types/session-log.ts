@@ -33,6 +33,7 @@ export type SessionEventType =
   | 'tool/call' // 模型发起的工具调用（模型可见）
   | 'tool/result' // 工具执行结果（模型可见）
   | 'tools/change' // 本 turn 模型可见工具集变化（能力包 / 插件 / PTC 生效结果）
+  | 'deliverables/presented' // present 声明的交付文件（本轮结束后展示卡片）
   | 'assistant/search-status' // 服务端联网搜索状态（deepseek-responses web_search_call，仅 UI 保真）
   | 'context/compaction' // 上下文压缩（旧轮次摘要；deriveMessages 据此替换被覆盖区间）
   | 'agent/status' // agent 生命周期状态（idle/running/stopping/disposed）
@@ -154,6 +155,14 @@ export interface SessionEventMap {
     presentation?: string
     /** 触发原因：turn 开始重新解析，或会话恢复后的首次记录 */
     reason?: string
+  }
+  'deliverables/presented': {
+    /** 声明所属 turn */
+    turn: number
+    /** 发起 present 的 callId */
+    callId: string
+    /** 交付文件（只记录路径与说明，不复制内容） */
+    files: Array<{ path: string; description?: string }>
   }
   'assistant/search-status': {
     status: string

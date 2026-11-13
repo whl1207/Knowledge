@@ -41,7 +41,7 @@ export const TOOL_GROUPS: readonly ToolGroupDef[] = [
     labelZh: '文件与目录',
     labelEn: 'Files & Folders',
     icon: 'fa-folder-open',
-    tools: ['read_file', 'read_image', 'write_file', 'replace_in_file', 'multi_replace', 'list_dir', 'search_files', 'glob', 'working_directory', 'export_word'],
+    tools: ['read_file', 'read_image', 'write_file', 'replace_in_file', 'multi_replace', 'present', 'list_dir', 'search_files', 'glob', 'working_directory', 'export_word'],
   },
   {
     id: 'interaction',

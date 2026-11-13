@@ -668,6 +668,34 @@
             class="message-content"
             v-html="renderMarkdown(renderedContent(message))"
           ></div>
+
+          <!-- 交付物卡片（present 声明；本轮结束后出现在最终回复之后，与 DSH turn tail 一致） -->
+          <div
+            v-if="message.role === 'assistant' && !message.isExecuting && deliverableFilesOf(message).length"
+            class="deliverable-card"
+          >
+            <div class="deliverable-head">
+              <i class="fa fa-gift"></i>
+              <span>{{ store.locales == 'zh' ? '交付文件' : 'Deliverables' }}</span>
+              <span class="deliverable-count">{{ deliverableFilesOf(message).length }}</span>
+            </div>
+            <div class="deliverable-list">
+              <div
+                v-for="(file, fi) in deliverableFilesOf(message)"
+                :key="file.path + ':' + fi"
+                class="deliverable-item"
+                :title="file.description ? `${file.path}\n${file.description}` : file.path"
+                @click="openDeliverableFile(file)"
+              >
+                <span class="deliverable-icon"><i class="fa" :class="deliverableIcon(file.path)"></i></span>
+                <span class="deliverable-info">
+                  <span class="deliverable-name">{{ deliverableName(file.path) }}</span>
+                  <span class="deliverable-desc">{{ file.description || deliverableTypeLabel(file.path) }}</span>
+                </span>
+                <i class="fa fa-external-link deliverable-open"></i>
+              </div>
+            </div>
+          </div>
           
           <!-- 思考中占位（仅当完全无内容且生成中时显示；联网搜索中不显示；与 message-content 解耦，避免流式正文被隐藏时误显三点动画） -->
           <div
@@ -974,7 +1002,15 @@
             <i class="fa fa-tasks"></i>
             <span>{{ store.locales=='zh' ? '待执行队列' : 'Queued' }} ({{ pendingQueue().length }})</span>
             <span class="pending-queue-hint">
-              {{ store.locales=='zh' ? '不打断当前执行：轮到它的 step 边界投给智能体' : 'the run continues — delivered at its turn' }}
+              {{ store.locales=='zh' ? '运行中先排队；点「插话发送」才在下一个 step 生效' : 'queued while running — click Steer to deliver at the next step' }}
+            </span>
+            <span
+              v-if="isCurrentChatRunning && pendingQueue().length > 1"
+              class="pending-queue-steer-all"
+              :title="store.locales=='zh' ? '插话发送全部排队消息（按当前顺序）' : 'Steer all queued messages in order'"
+              @click.stop="steerAllPending"
+            >
+              <i class="fa fa-paper-plane"></i>
             </span>
             <span
               class="pending-queue-clear"
@@ -1001,11 +1037,20 @@
               <span class="pending-queue-text">{{ pq.display || pq.text }}</span>
               <span class="pending-queue-actions">
                 <span
+                  v-if="isCurrentChatRunning"
+                  class="pq-action pq-action-steer"
+                  :class="{ active: steeringPendingId === pq.id }"
+                  :title="store.locales=='zh' ? '插话发送：把这条消息投给正在执行的智能体（下一个 step 生效，不打断本轮）' : 'Steer: deliver this message into the running agent (next step, without interrupting)'"
+                  @click.stop="steerPendingItem(pq.id)"
+                >
+                  <i class="fa" :class="steeringPendingId === pq.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i>
+                </span>
+                <span
                   class="pq-action"
                   :class="{ active: pq.pinned }"
                   :title="pq.pinned
-                    ? (store.locales=='zh' ? '取消插队，回到排队顺序' : 'Cancel queue jump')
-                    : (store.locales=='zh' ? '插队：越过排队顺序，尽快在下一个 step 投递（不打断执行）' : 'Jump the queue: delivered before normal queued messages (run continues)')"
+                    ? (store.locales=='zh' ? '取消置顶排队' : 'Cancel queue jump')
+                    : (store.locales=='zh' ? '置顶排队：排在普通排队之前（仍需点「插话发送」）' : 'Move to the front of the queue (still needs Steer)')"
                   @click.stop="togglePendingItemPin(pq.id)"
                 >
                   <i class="fa fa-bolt"></i>
@@ -3256,10 +3301,10 @@ const isCurrentChatRunning = computed(() => {
   return false
 })
 
-// ==================== 待执行队列（对齐 DSH：排队 / 插队 都在下一个 step 边界生效） ====================
-// 运行中按 Enter 的输入不再被丢弃，且**不打断当前执行**：先入队，等 agent 走到下一个 step 边界时
-// 通过 steer 通道投给它（主进程 claimPendingSteer 在 step 结束时领取），与 DSH 的 inbox 语义一致。
-// Ctrl+Enter = 插队（越过排队顺序、尽快投递，仍然不打断本轮）；「停止」(■) 才是真正打断。
+// ==================== 待执行队列（对齐 DSH：先排队，点「插话发送」才进下一步） ====================
+// 运行中按 Enter 的输入不丢弃、不打断当前执行：先进入渲染层队列；用户点「插话发送」后
+// 才通过 steer 通道投给正在执行的 agent（主进程 claimPendingSteer 在 step 结束时领取）。
+// Ctrl+Enter = 置顶排队（只调整顺序）；「停止」(■) 才是真正打断。
 // 队列在渲染层是唯一事实源：投递前可编辑 / 拖动排序 / 置顶插队 / 删除 / 批量删除。
 const {
   pending: pendingQueue,
@@ -3386,7 +3431,7 @@ const dropLeftoverInboxForIdleChats = () => {
   }
 }
 
-/** 当前聊天是否处于「排队模式」（运行中）：此时 Enter 入队、Ctrl+Enter 插队 */
+/** 当前聊天是否处于「排队模式」（运行中）：此时 Enter 入队、Ctrl+Enter 置顶排队 */
 const composerQueuing = computed(() =>
   isCurrentChatRunning.value || isQueueBusy(currentChat.value?.id)
 )
@@ -3421,8 +3466,7 @@ const buildPendingItem = (opts?: { raw?: string }): Omit<PendingQueueItem, 'id' 
 
 /**
  * 入队当前输入并清空输入区（运行中按 Enter / Ctrl+Enter 的路径）。
- * `pin=true`（Ctrl+Enter）= 插队：标记投递优先级（不等 step 边界信号、优先于普通排队条目），
- * 位置仍由用户拖动决定，不打断当前执行。
+ * `pin=true`（Ctrl+Enter）= 置顶排队：只调整顺序，不自动投递；真正投递需点「插话发送」。
  */
 const enqueueCurrentInput = (opts?: { pin?: boolean }): boolean => {
   const item = buildPendingItem()
@@ -3433,8 +3477,8 @@ const enqueueCurrentInput = (opts?: { pin?: boolean }): boolean => {
   currentUploads.value = []
   autoScrollEnabled.value = true
   saveChats()
-  // 立刻尝试投递一次：插队条目会马上进 agent 的 inbox（仍然在下一个 step 边界被领取）
-  void flushPendingQueue()
+  // 注意：入队 ≠ 投递。运行中只进入队列，等用户点「插话发送」或本轮结束后
+  // 才通过 steer / 新轮送出（与 DSH 的 QueueDock 一致）。
   return true
 }
 
@@ -3549,7 +3593,7 @@ const dispatchQueuedItem = async (chatId: string, item: PendingQueueItem) => {
   if (!chat.draft) chat.draft = draftBeforeDispatch
 }
 
-/** 输入区键盘：Enter=排队，Ctrl/Cmd+Enter=插队，Shift+Enter=换行（都在下一个 step 边界生效，不打断本轮） */
+/** 输入区键盘：Enter=排队，Ctrl/Cmd+Enter=置顶排队，Shift+Enter=换行（真正插话需点队列里的「插话发送」） */
 const onComposerKeydown = (e: KeyboardEvent) => {
   if (e.key !== 'Enter') return
   if (e.shiftKey) return // 换行（由模板的 shift.exact 处理）
@@ -3559,12 +3603,12 @@ const onComposerKeydown = (e: KeyboardEvent) => {
   const queuing = composerQueuing.value
   e.preventDefault()
   if (mod) {
-    // Ctrl+Enter：插队（越过排队顺序，仍然不打断本轮执行）
+    // Ctrl+Enter：置顶排队（只调整顺序，仍需点「插话发送」）
     if (queuing) {
       if (enqueueCurrentInput({ pin: true })) {
         ElMessage.success(store.locales == 'zh'
-          ? '已插队：不打断当前执行，智能体在下一个 step 带上这条'
-          : 'Jumped the queue: the run continues; the agent picks this up at its next step')
+          ? '已置顶排队：不打断当前执行，点队列里的「插话发送」后才会在下一个 step 生效'
+          : 'Moved to the front of the queue: use Steer in the queue to deliver it at the next step')
       }
       return
     }
@@ -3572,11 +3616,11 @@ const onComposerKeydown = (e: KeyboardEvent) => {
     return
   }
   if (queuing) {
-    // Enter：排队（不打断本轮），轮到它的 step 边界自动投递
+    // Enter：排队；真正投递由用户点「插话发送」或本轮结束后触发
     if (enqueueCurrentInput()) {
       ElMessage.success(store.locales == 'zh'
-        ? '已加入待执行队列：不打断当前执行，轮到它的 step 会带上（Ctrl+Enter 可插队）'
-        : 'Queued: the run continues; it is delivered at its turn (Ctrl+Enter to jump the queue)')
+        ? '已加入待执行队列：不打断当前执行；点「插话发送」或本轮结束后发送'
+        : 'Queued: the run continues; click Steer or wait for the turn to finish')
     }
     return
   }
@@ -3632,15 +3676,69 @@ const onComposerCardMouseDown = (e: MouseEvent) => {
   try { el.setSelectionRange(end, end) } catch { /* 少数输入类型不支持选区，忽略 */ }
 }
 
-/** 队列面板：插队 / 取消插队（不打断本轮，只是越过排队顺序、尽快投递） */
+/** 队列面板：插队 / 取消插队（只调整排队优先顺序；真正投递需点「插话发送」） */
 const togglePendingItemPin = (id: string) => {
   const item = pendingQueue().find((it) => it.id === id)
   if (!item) return
   togglePendingPin(id)
   ElMessage.info(!item.pinned
-    ? (store.locales == 'zh' ? '已插队：不打断当前执行，排在普通排队消息之前' : 'Jumped the queue — delivered before normal queued messages')
-    : (store.locales == 'zh' ? '已取消插队，回到排队顺序' : 'Queue jump cancelled'))
-  void flushPendingQueue()
+    ? (store.locales == 'zh' ? '已置顶排队：排在普通排队消息之前（仍需点「插话发送」）' : 'Moved to the front of the queue (still needs Steer)')
+    : (store.locales == 'zh' ? '已取消置顶排队' : 'Queue jump cancelled'))
+}
+
+/** 正在插话发送的队列条目（防连点；同一时间只投一条，保持顺序） */
+const steeringPendingId = ref('')
+
+/**
+ * 手动「插话发送」：把一条排队消息通过 steer 通道投给正在执行的 agent，
+ * 主进程在下一个 step 边界领取（不打断本轮）。这与 DSH 队列面板的
+ * 「Steer queued message」一致：入队不等于投递，用户点按钮才插到下一步。
+ */
+const steerPendingItem = async (id: string) => {
+  if (!isCurrentChatRunning.value) {
+    ElMessage.info(store.locales == 'zh' ? '当前没有正在执行的智能体；排队消息会在本轮结束后作为新任务发送' : 'No running agent; the queued message will start a new turn')
+    return
+  }
+  if (steeringPendingId.value) return
+  const item = pendingQueue().find((it) => it.id === id)
+  const chat = currentChat.value
+  if (!item || !chat) return
+  steeringPendingId.value = id
+  try {
+    const delivered = await pushQueuedToRunningAgent(chat.id, item)
+    if (delivered) {
+      removePendingItem(id)
+      saveChats()
+      ElMessage.success(store.locales == 'zh' ? '已插话发送：智能体将在下一个 step 带上这条要求' : 'Steered: the agent will pick it up at its next step')
+    } else {
+      ElMessage.warning(store.locales == 'zh' ? '当前没有可接收的智能体会话，消息仍留在队列' : 'No running agent session accepted it; the message stays queued')
+    }
+  } finally {
+    steeringPendingId.value = ''
+  }
+}
+
+/** 插话发送全部排队消息（按当前队列顺序，遇到失败即停，剩余保留） */
+const steerAllPending = async () => {
+  if (!isCurrentChatRunning.value) {
+    ElMessage.info(store.locales == 'zh' ? '当前没有正在执行的智能体' : 'No running agent')
+    return
+  }
+  if (steeringPendingId.value) return
+  const chatId = currentChat.value?.id
+  if (!chatId) return
+  for (const item of [...pendingQueue()]) {
+    if (!isCurrentChatRunning.value) break
+    steeringPendingId.value = item.id
+    try {
+      const delivered = await pushQueuedToRunningAgent(chatId, item)
+      if (!delivered) break
+      removePendingItem(item.id)
+      saveChats()
+    } finally {
+      steeringPendingId.value = ''
+    }
+  }
 }
 
 /** 队列面板：把条目取回输入框编辑（编辑是队列独有的能力——投递出去后无法再改） */
@@ -3727,7 +3825,6 @@ const onPendingDrop = (targetId: string) => {
 const movePendingItem = (id: string, delta: number) => {
   movePendingBy(id, delta)
   saveChats()
-  void flushPendingQueue()
 }
 
 // 输入行内的「系统错误」提示（图标 + 悬停 title 显示完整错误）：
@@ -3830,7 +3927,7 @@ const isSendButtonDisabled = computed(() => {
   const isSwarm = chat.mode === 'swarm'
   // 网页端（局域网共享）智能体模式：模型来自主机，不要求本端选模型
   const hostAgent = isBrowser && (chat.mode === 'agent' || chat.mode === 'agent2' || chat.mode === 'skill')
-  // 运行中：输入不锁死——Enter / 点击发送按钮 = 加入待执行队列（本轮结束后自动发）；Ctrl+Enter 插队
+  // 运行中：输入不锁死——Enter / 点击发送按钮 = 加入待执行队列；点队列里的「插话发送」才进下一步
   const canQueueInput = composerQueuing.value && (!!inputText.value.trim() || currentUploads.value.length > 0)
   return Boolean(
     (!canQueueInput && isExecuting.value) ||
@@ -5188,6 +5285,24 @@ const openableToolPaths = (unit: any): string[] => {
   // 读类也给一个「打开」：和 DSH 一样，路径可点开（读完想直接在编辑器里看）
   if (n === 'read_file') {
     if (unit?.status && unit.status !== 'success') return []
+    // 技能资源（read_file 带 skill 参数）的 args.path 是相对技能目录的路径，
+    // 必须优先用工具解析后的绝对路径；否则会按聊天工作区拼出一个不存在的路径（ENOENT）。
+    const absPath = unit?.result?.absPath
+    if (absPath) return [String(absPath)]
+    // 兼容旧消息（没有 absPath）：按 skill 名找到技能目录，再拼相对路径
+    const skillName = String(unit?.args?.skill || '').trim()
+    const relPath = String(unit?.args?.path || '').trim()
+    if (skillName && relPath) {
+      const skill = skillManager.getSkill(skillName)
+        || skillManager.getSkills().find((s) => String(s.name || '').toLowerCase() === skillName.toLowerCase())
+      if (skill?.path) {
+        return [resolveToolFilePath(relPath, {
+          chatWorkspace: skill.path,
+          globalRoot: workspaceRoot(store),
+          fallbackRoots: [],
+        })]
+      }
+    }
     const p = unit?.result?.path || unit?.args?.path
     return p ? [String(p)] : []
   }
@@ -5251,6 +5366,60 @@ const openToolWrittenFile = (p: string) => {
     return
   }
   store.openFileByMode({ path: toAbsoluteToolPath(p), type: 'file' })
+}
+
+/** 本轮 present 交付物：优先读消息上的投影；旧消息从成功的 present 工具单元回退提取 */
+const deliverableFilesOf = (message: any): Array<{ path: string; description?: string; turn?: number }> => {
+  const explicit = Array.isArray(message?.deliverables) ? message.deliverables : []
+  if (explicit.length) return explicit
+  const out: Array<{ path: string; description?: string; turn?: number }> = []
+  const seen = new Set<string>()
+  for (const unit of message?.executionUnits || []) {
+    if (unit?.description !== 'present' || unit?.status !== 'success') continue
+    const files = Array.isArray(unit?.result?.files) ? unit.result.files : []
+    for (const f of files) {
+      const p = String(f?.path ?? '').trim()
+      if (!p || seen.has(p)) continue
+      seen.add(p)
+      out.push({
+        path: p,
+        ...(f?.description ? { description: String(f.description) } : {}),
+      })
+    }
+  }
+  return out
+}
+
+const deliverableName = (p: string): string => {
+  const parts = String(p || '').split(/[\\/]/)
+  return parts[parts.length - 1] || p
+}
+
+const deliverableExt = (p: string): string => {
+  const name = deliverableName(p)
+  const i = name.lastIndexOf('.')
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : ''
+}
+
+const deliverableIcon = (p: string): string => {
+  const ext = deliverableExt(p)
+  if (['doc', 'docx', 'odt', 'rtf'].includes(ext)) return 'fa-file-word-o'
+  if (['xls', 'xlsx', 'csv', 'ods'].includes(ext)) return 'fa-file-excel-o'
+  if (['ppt', 'pptx', 'odp'].includes(ext)) return 'fa-file-powerpoint-o'
+  if (ext === 'pdf') return 'fa-file-pdf-o'
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp'].includes(ext)) return 'fa-file-image-o'
+  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 'fa-file-archive-o'
+  if (['md', 'txt', 'json', 'yml', 'yaml', 'xml', 'html', 'css', 'js', 'ts', 'vue'].includes(ext)) return 'fa-file-text-o'
+  return 'fa-file-o'
+}
+
+const deliverableTypeLabel = (p: string): string => {
+  const ext = deliverableExt(p)
+  return ext ? ext.toUpperCase() : (store.locales == 'zh' ? '文件' : 'File')
+}
+
+const openDeliverableFile = (file: { path: string }) => {
+  openToolWrittenFile(String(file?.path || ''))
 }
 
 /** 根据 write_file 目标路径的扩展名推断代码语言（highlight.js） */
@@ -5673,14 +5842,8 @@ onMounted(async () => {
     }
   })
 
-  // 待执行队列续投：三类触发点
-  // 1) step 边界信号（本 step 模型输出已产生 + 工具已跑完 = 主进程即将 claimPendingSteer）
-  //    —— 队列消息在这里投给正在跑的 agent，与 DSH「下一个 step 生效」一致；
-  // 2) 任意聊天「由执行中转为空闲」（切到别的对话后台跑完也算）—— 剩余条目回退为新一轮任务发送；
-  // 3) 兜底：会话已空闲却仍有残留 inbox（投递刚好卡在 turn 收尾）→ 丢弃它们并让队列走新轮路径，
-  //    避免主进程把它们当新 turn 跑起来而界面没有任何订阅者（会一直转圈）。
-  // 注意：不能把 agent 视图对象当依赖（它不是 Vue 响应式），所以用 agentStepSignal 计数触发。
-  watch(agentStepSignal, () => { void flushPendingQueue() })
+  // 待执行队列：运行中只排队，不自动投递；点「插话发送」才进 steer（与 DSH QueueDock 一致）。
+  // 本轮收尾后，剩余条目回退为新一轮任务发送。
   watch(
     () => (chats.value || []).map((c: any) => (c?.isGenerating ? 1 : 0)).join('') + '|' +
       ((globalExecutionState.value.isExecuting ? globalExecutionState.value.chatId : '') || '') + '|' +
@@ -7975,12 +8138,12 @@ const sendMessage = async (opts?: { forceNewTurn?: boolean }) => {
   const message = inputText.value.trim()
   const forceNewTurn = opts?.forceNewTurn === true
 
-  // 运行中：入队（不打断本轮），轮到它的 step 边界自动投递给正在执行的 agent
+  // 运行中：入队（不打断本轮）；用户点「插话发送」后才进下一个 step，或本轮结束后发送
   if (!forceNewTurn && (isCurrentChatRunning.value || (currentChat.value?.mode === 'swarm' && swarmRunning.value && swarmRunChatId.value === currentChat.value?.id))) {
     if (enqueueCurrentInput()) {
       ElMessage.success(store.locales == 'zh'
-        ? '已加入待执行队列：不打断当前执行，轮到它的 step 会带上（Ctrl+Enter 可插队）'
-        : 'Queued: the run continues and picks it up at its next step (Ctrl+Enter to jump the queue)')
+        ? '已加入待执行队列：不打断当前执行；点「插话发送」后才在下一个 step 生效（Ctrl+Enter 置顶排队）'
+        : 'Queued: the run continues; click Steer to deliver it at the next step (Ctrl+Enter moves it to the front)')
     }
     return
   }
@@ -8050,8 +8213,7 @@ const sendMessage = async (opts?: { forceNewTurn?: boolean }) => {
     default:
       await sendChatMessage(message)
   }
-  // 本轮发送出去后，若可能还有排队条目（快速模式已收尾），尝试续发下一条
-  void flushPendingQueue()
+  // 本轮发送出去后不自动续投；剩余队列等本轮结束或用户点「插话发送」
 }
 
 // ==================== Agent 循环模式（agent2）/ 技能新路径 / 预设工具 ====================
@@ -10673,6 +10835,7 @@ const createBranch = (parentIndex: number, msgIndex: number) => {
       tokenStats: m.tokenStats ? { ...m.tokenStats } : undefined,
       webSearch: m.webSearch ? { ...m.webSearch, results: m.webSearch.results ? [...m.webSearch.results] : undefined } : undefined,
       executionUnits: m.executionUnits ? [...m.executionUnits] : undefined,
+      deliverables: m.deliverables ? m.deliverables.map((d: any) => ({ ...d })) : undefined,
       executionStats: m.executionStats ? { ...m.executionStats, errors: m.executionStats.errors ? [...m.executionStats.errors] : undefined } : undefined,
       executionProgress: m.executionProgress ? { ...m.executionProgress } : undefined
     })),
@@ -13768,6 +13931,62 @@ select {
 
 /* ==================== 待执行队列面板（运行中 Enter 排队 / Ctrl+Enter 插队；
    投递前可编辑、拖动排序、置顶插队、删除、批量清除。不打断当前执行） ==================== */
+/* 交付物卡片（present）：本轮结束后出现在最终回复之后 */
+.deliverable-card {
+  margin-top: 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--menuColor);
+}
+.deliverable-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--borderColor);
+  background: color-mix(in srgb, var(--fontActiveColor) 6%, transparent);
+}
+.deliverable-count {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  opacity: .6;
+}
+.deliverable-list { display: flex; flex-direction: column; }
+.deliverable-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--borderColor) 65%, transparent);
+  transition: background .12s;
+}
+.deliverable-item:last-child { border-bottom: 0; }
+.deliverable-item:hover { background: color-mix(in srgb, var(--fontActiveColor) 7%, transparent); }
+.deliverable-icon {
+  width: 26px; height: 26px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--fontColor) 8%, transparent);
+  color: var(--fontActiveColor);
+  font-size: 13px;
+}
+.deliverable-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.deliverable-name {
+  font-size: 12px; color: var(--fontColor);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.deliverable-desc {
+  font-size: 10px; opacity: .6;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.deliverable-open { flex-shrink: 0; font-size: 11px; opacity: .55; }
+.deliverable-item:hover .deliverable-open { opacity: 1; color: var(--fontActiveColor); }
+
 .pending-queue-panel {
   margin-bottom: 5px;
   border: 1px solid var(--borderColor, #333);
@@ -13792,6 +14011,22 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.pending-queue-steer-all {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  color: #13a8a8;
+  opacity: .8;
+  transition: all .15s;
+}
+.pending-queue-steer-all:hover { opacity: 1; background-color: var(--menuActiveColor); }
+.pending-queue-steer-all + .pending-queue-clear { margin-left: 0; }
 .pending-queue-clear {
   margin-left: auto;
   display: inline-flex;
@@ -13890,6 +14125,9 @@ select {
 }
 /* 已插队条目的 ⚡ 常亮（面板收起悬停也能看出这条要插队） */
 .pq-action.active { opacity: 1; color: #f39c12; }
+.pq-action-steer { color: #13a8a8; }
+.pq-action-steer:hover { color: #13a8a8; }
+.pq-action-steer.active { color: #13a8a8; }
 .pq-action-remove:hover { color: #e74c3c; }
 
 /* 队列态发送按钮（运行中点击 = 加入待执行队列） */
