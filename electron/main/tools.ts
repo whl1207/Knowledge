@@ -20,6 +20,14 @@ import * as PDFJS from 'pdfjs-dist/legacy/build/pdf.mjs'
 import xlsx from 'xlsx'
 import { toolRegistry, defineTool } from '@/shared/toolRegistry'
 import type { ToolResult, ToolExecutionContext } from '@/types/tool'
+import * as chatStore from './chat-store'
+import {
+  createTask as createScheduledTask,
+  decorateTask,
+  editTask as editScheduledTask,
+  listTasks as listScheduledTasks,
+  viewTask as viewScheduledTask,
+} from './schedule-service'
 import { wordToMarkdown } from './office/word-to-markdown'
 import {
   shellService,
@@ -3997,7 +4005,207 @@ const runBrowserAgentTool = (tool: string) => async (args: any, ctx: ToolExecuti
   }
 }
 
+/** 当前会话对应的聊天 id（聊天存档已迁到主进程，按 agentSessionId 反查） */
+async function resolveChatIdForSession(sessionId?: string): Promise<string> {
+  if (!sessionId) return ''
+  try {
+    const info = await chatStore.loadChats()
+    const hit = (info.chats || []).find((c: any) => c && String(c.agentSessionId || '') === String(sessionId))
+    return hit ? String(hit.id || '') : ''
+  } catch {
+    return ''
+  }
+}
+
+/** 定时任务工具共用：把模型的 target 解析成服务层的 target */
+async function resolveScheduleTarget(raw: any, ctx: ToolExecutionContext): Promise<{ ok: true; target: any } | { ok: false; error: string }> {
+  const kind = String(raw?.kind || 'this_chat')
+  if (kind === 'this_chat' || kind === 'chat') {
+    const chatId = await resolveChatIdForSession(ctx.sessionId)
+    if (!chatId) return { ok: false, error: '找不到当前会话对应的聊天：请改用 target.kind = new_chat_once / new_chat' }
+    return { ok: true, target: { kind: 'chat', chatId } }
+  }
+  if (kind === 'new_chat_once' || kind === 'new_chat') {
+    return { ok: true, target: { kind, ...(raw?.title ? { title: String(raw.title) } : {}) } }
+  }
+  return { ok: false, error: 'target.kind 需要 this_chat / new_chat_once / new_chat' }
+}
+
+/** 委派子代理不能管理宿主定时任务（对齐 DSH 的 schedule 工具守卫） */
+function scheduleDelegationGuard(ctx: ToolExecutionContext): ToolResult | null {
+  const depth = Number((ctx as any).swarmDepth) || 0
+  if (depth > 0) {
+    return { ok: false, code: 'subagent_session', error: '委派的子代理不能创建或修改定时任务' }
+  }
+  return null
+}
+
+async function scheduleCreateTool(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const guarded = scheduleDelegationGuard(ctx)
+  if (guarded) return guarded
+  const resolved = await resolveScheduleTarget(input?.target, ctx)
+  if (!resolved.ok) return { ok: false, code: 'schedule_input_invalid', error: resolved.error }
+  const res = await createScheduledTask({
+    title: input?.title,
+    prompt: input?.prompt,
+    timing: input?.timing,
+    target: resolved.target,
+  })
+  if (!res.ok) return { ok: false, code: res.code, error: res.message }
+  return { ok: true, value: decorateTask(res.task) }
+}
+
+async function scheduleListTool(input: any): Promise<ToolResult> {
+  const list = listScheduledTasks({
+    active: typeof input?.active === 'boolean' ? input.active : undefined,
+    limit: input?.limit,
+    offset: input?.offset,
+  })
+  return {
+    ok: true,
+    value: {
+      items: list.items.map((t) => decorateTask(t)),
+      total: list.total,
+      limit: list.limit,
+      offset: list.offset,
+    },
+  }
+}
+
+async function scheduleViewTool(input: any): Promise<ToolResult> {
+  const res = viewScheduledTask(String(input?.id || ''))
+  if (!res.ok) return { ok: false, code: res.code, error: res.message }
+  return { ok: true, value: decorateTask(res.task) }
+}
+
+async function scheduleEditTool(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const guarded = scheduleDelegationGuard(ctx)
+  if (guarded) return guarded
+  const action = String(input?.action || '')
+  if (action !== 'update' && action !== 'delete') {
+    return { ok: false, code: 'schedule_input_invalid', error: 'action 需要 update / delete' }
+  }
+  if (action === 'delete') {
+    const res = await editScheduledTask({ id: String(input?.id || ''), action: 'delete', expectedUpdatedAt: input?.expectedUpdatedAt })
+    if (!res.ok) return { ok: false, code: res.code, error: res.message }
+    return { ok: true, value: { id: input?.id, deleted: true } }
+  }
+  const patch: any = {}
+  for (const key of ['title', 'prompt', 'timing', 'active'] as const) {
+    if (input?.[key] !== undefined) patch[key] = input[key]
+  }
+  if (input?.target !== undefined) {
+    const resolved = await resolveScheduleTarget(input.target, ctx)
+    if (!resolved.ok) return { ok: false, code: 'schedule_input_invalid', error: resolved.error }
+    patch.target = resolved.target
+  }
+  if (!Object.keys(patch).length) {
+    return { ok: false, code: 'schedule_input_invalid', error: '至少要改一项：title / prompt / timing / target / active' }
+  }
+  const res = await editScheduledTask({
+    id: String(input?.id || ''),
+    action: 'update',
+    patch,
+    expectedUpdatedAt: input?.expectedUpdatedAt,
+  })
+  if (!res.ok) return { ok: false, code: res.code, error: res.message }
+  return { ok: true, value: res.task ? decorateTask(res.task) : { id: input?.id } }
+}
+
 export function registerCoreTools(): void {
+  // ============ 自动化任务（定时投递；工具与设置页共用同一份主进程服务） ============
+  toolRegistry.register(
+    defineTool(
+      'schedule_create',
+      '创建定时任务：到点把一段指令投递到目标对话（执行由对话里的 Agent 完成）。'
+        + '**仅在用户明确要求安排未来/重复的事情时调用**；用户此前对当前运行任务的明确授权仍然有效。'
+        + 'title ≤120 字；prompt 是每个发生时刻投递的指令；timing 见下；target 默认投递到本对话。',
+      scheduleCreateTool,
+      {
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: '任务名（≤120 字，用用户的语言）' },
+            prompt: { type: 'string', description: '每个发生时刻投递到对话的指令（不能为空）' },
+            timing: {
+              type: 'object',
+              description: '时间规则：kind = at / every / daily / weekly / cron / rrule。'
+                + 'at 用 at（ISO，如 2026-11-20T09:00:00.000Z）；every 用 everySeconds（≥60）；'
+                + 'daily/weekly 用 time（HH:mm）+ timeZone（IANA，如 Asia/Shanghai），weekly 另需 weekdays（1=周一…7=周日）；'
+                + 'cron 用 expression（五段：分 时 日 月 周）+ timeZone；'
+                + 'rrule 用 rrule（两行：DTSTART;TZID=…:yyyyMMddThhmmss 与 RRULE:FREQ=…）。',
+              properties: {
+                kind: { type: 'string', enum: ['at', 'every', 'daily', 'weekly', 'cron', 'rrule'] },
+                at: { type: 'string' },
+                everySeconds: { type: 'integer' },
+                time: { type: 'string' },
+                timeZone: { type: 'string' },
+                weekdays: { type: 'array', items: { type: 'integer' } },
+                expression: { type: 'string' },
+                rrule: { type: 'string' },
+              },
+              required: ['kind'],
+            },
+            target: {
+              type: 'object',
+              description: '投递目标：this_chat（本对话，默认）/ new_chat_once（新建对话并复用）/ new_chat（每次新建）；新建时可给 title。',
+              properties: {
+                kind: { type: 'string', enum: ['this_chat', 'new_chat_once', 'new_chat'] },
+                title: { type: 'string' },
+              },
+            },
+          },
+          required: ['title', 'prompt', 'timing'],
+        },
+      },
+    ),
+  )
+  toolRegistry.register(
+    defineTool('schedule_list', '列出宿主上的定时任务（含其它会话创建的），活动任务按下次运行时间排序。', scheduleListTool, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          active: { type: 'boolean', description: 'true 只看已开启；false 只看暂停/已结束；省略看全部' },
+          limit: { type: 'integer', description: '1~500，默认 100' },
+          offset: { type: 'integer', description: '分页偏移' },
+        },
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('schedule_view', '按 id 查看一个定时任务（规则、目标、状态、最近一次投递）。', scheduleViewTool, {
+      inputSchema: {
+        type: 'object',
+        properties: { id: { type: 'string', description: '任务 id' } },
+        required: ['id'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool(
+      'schedule_edit',
+      '修改 / 暂停 / 恢复 / 删除定时任务。action=update 时至少改一项；active=false 暂停，active=true 恢复（需要未来发生时刻）。'
+        + '带 expectedUpdatedAt 时若任务已被改过会返回 schedule_conflict；action=delete 不接受其它字段。',
+      scheduleEditTool,
+      {
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: '任务 id' },
+            action: { type: 'string', enum: ['update', 'delete'] },
+            title: { type: 'string' },
+            prompt: { type: 'string' },
+            timing: { type: 'object', description: '同 schedule_create 的 timing' },
+            target: { type: 'object', description: '同 schedule_create 的 target' },
+            active: { type: 'boolean', description: 'false 暂停 / true 恢复' },
+            expectedUpdatedAt: { type: 'string', description: '可选：读取时的 updatedAt（CAS）' },
+          },
+          required: ['id', 'action'],
+        },
+      },
+    ),
+  )
+
   // ============ 浏览器 Agent 工具（进程内 MCP server 同名内核工具；单一 schema 来源 = browserAgentService.toolDefinitions()） ============
   for (const def of browserAgentService.toolDefinitions()) {
     toolRegistry.register(

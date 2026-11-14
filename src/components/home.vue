@@ -38,6 +38,10 @@
         <div v-else class="chat-search-toggle" @click="openSearch" :title="store.locales == 'zh' ? '搜索聊天' : 'Search chats'">
           <i class="fa fa-search"></i>
         </div>
+        <!-- 自动化任务（定时投递指令到对话） -->
+        <div class="chat-new-btn chat-schedule-btn" @click="openSchedulePanel" :title="store.locales == 'zh' ? '自动化任务' : 'Scheduled tasks'">
+          <i class="fa fa-clock-o"></i>
+        </div>
         <!-- 新建聊天按钮 -->
         <div class="chat-new-btn" @click="onToolbarNewChat" :title="store.locales == 'zh' ? '新建聊天' : 'New chat'">
           <i class="fa fa-plus"></i>
@@ -133,7 +137,18 @@
     </div>
     
     <!-- 主聊天区域 -->
-    <div class="chat-main" :class="{ 'sidebar-hidden': !showSidebar, 'empty-chat': isEmptyChat && !isTeamChat }"
+    <!-- 自动化任务：**替换消息导航右侧的全部面板**（对话面板 + 右侧栏），左侧聊天列表保留 -->
+    <div v-if="showSchedulePanel" class="chat-main schedule-host">
+      <SchedulePanel
+        :chats="chats"
+        :current-chat-id="currentChat?.id"
+        :current-chat="currentChat"
+        :sidebar-visible="showSidebar"
+        @toggle-sidebar="toggleSidebar"
+        @close="showSchedulePanel = false"
+      />
+    </div>
+    <div v-show="!showSchedulePanel" class="chat-main" :class="{ 'sidebar-hidden': !showSidebar, 'empty-chat': isEmptyChat && !isTeamChat }"
       :style="{ '--composer-shift': composerShift + 'px' }">
       <!-- 聊天头部（项目组模式改用 SwarmTeamStream 顶栏：开关 + 标题与页签同排一行） -->
       <div v-if="!isTeamChat" class="chat-header" ref="chatHeaderRef" @wheel="handleHeaderWheel">
@@ -1722,6 +1737,9 @@
 
 <script setup lang="ts">
 import { aikmIpcAvailable } from '@/lib/aikmIpc'
+import { loadChatArchive, scheduleChatArchiveSave, flushChatArchiveSync, clearChatArchive } from '@/lib/chatArchive'
+import SchedulePanel from '@/components/schedule/SchedulePanel.vue'
+import { ackScheduleDelivery, onScheduleEvent, pendingScheduleDeliveries, type SchedulePendingItem } from '@/lib/scheduleClient'
 import { projectSessionEvents } from '@/lib/agent/sessionLogImport'
 import { anyModelConfigured } from '@/components/onboarding/onboardingState'
 import { ref, computed, watch, nextTick, onMounted, onUpdated, onBeforeUnmount, type Ref } from 'vue'
@@ -5806,6 +5824,86 @@ const startAgentReconcileTimer = () => {
   }, 3000)
 }
 
+// ==================== 自动化任务（到点投递到对话收件箱） ====================
+const showSchedulePanel = ref(false)
+/** 打开自动化任务：整块替换消息导航右侧的面板（对话 + 右侧栏）；再点一次收起 */
+const openSchedulePanel = () => {
+  showSchedulePanel.value = !showSchedulePanel.value
+}
+let unsubScheduleDeliver: (() => void) | null = null
+
+/** 应用任务指定的执行智能体：agentPresetId = 用该预设；agentMode='normal' = 不带预设的普通对话 */
+const applyScheduledAgent = (chat: any, tpl: any): boolean => {
+  if (!chat || !tpl) return false
+  if (tpl.agentMode === 'normal') {
+    chat.mode = 'normal'
+    if (chat.config) delete chat.config.presetId
+    return true
+  }
+  if (tpl.agentPresetId) {
+    chat.mode = 'agent'
+    chat.config = { ...(chat.config || {}), presetId: String(tpl.agentPresetId) }
+    return true
+  }
+  return false
+}
+
+/** 把一条待投递落进目标聊天；返回是否已确认（ack） */
+const deliverScheduledItem = async (item: SchedulePendingItem) => {
+  const p = item.pending
+  const tpl: any = p.target.chatTemplate
+  let chatId = p.target.chatId || ''
+  if (!chatId) {
+    // new_chat_once / new_chat：新建对话（可套用创建时快照的模型配置 / 工作区 / 智能体）
+    const created: any = createNewChatData()
+    if (tpl?.config && typeof tpl.config === 'object') created.config = { ...created.config, ...tpl.config }
+    if (tpl) {
+      if (tpl.workspace) { created.workspace = String(tpl.workspace); created.noWorkspace = false }
+      else if (tpl.noWorkspace) created.noWorkspace = true
+    }
+    applyScheduledAgent(created, tpl)
+    const title = String(p.target.title || p.title || '').trim()
+    if (title) created.title = title
+    chats.value = [created, ...chats.value]
+    chatId = created.id
+    saveChats()
+  } else if (!chats.value.some((c: any) => String(c?.id) === chatId)) {
+    // 目标对话已被删除：确认掉，避免永远 pending（任务本身保留，下次投递会用新对话）
+    await ackScheduleDelivery({ taskId: item.taskId, scheduledAt: p.scheduledAt })
+    return
+  }
+  // 投递到已有对话时，也按任务指定的智能体切换（否则「用什么智能体执行」这个选项形同虚设）
+  const targetChat: any = chats.value.find((c: any) => String(c?.id) === chatId)
+  if (targetChat && applyScheduledAgent(targetChat, tpl)) saveChats()
+  const isCurrent = String(currentChat.value?.id || '') === chatId
+  if (isCurrent && currentChat.value?.isGenerating !== true) {
+    // 当前对话空闲：走待执行队列 → 以正常一轮发送（消息不会写两份）
+    enqueuePendingItem({ text: p.prompt, display: p.prompt, mode: 'normal' })
+    void flushPendingQueue()
+  } else {
+    // 其它对话 / 正在执行：作为一条带「定时投递」标记的用户消息落进那个对话
+    if (targetChat) {
+      targetChat.messages = [...(targetChat.messages || []), {
+        role: 'user',
+        content: p.prompt,
+        timestamp: Date.now(),
+        scheduleId: item.taskId,
+        scheduleAt: p.scheduledAt,
+      }]
+      saveChats()
+    }
+  }
+  await ackScheduleDelivery({ taskId: item.taskId, scheduledAt: p.scheduledAt, chatId })
+}
+
+/** 拉取所有未确认的投递并落进收件箱（启动补投 + 收到广播时调用） */
+const deliverScheduledPending = async () => {
+  try {
+    const { items } = await pendingScheduleDeliveries()
+    for (const item of items) await deliverScheduledItem(item)
+  } catch { /* 非桌面端没有调度服务 */ }
+}
+
 onMounted(async () => {
   // 初次渲染后立即恢复/渲染已有消息里的 mermaid 图
   void nextTick(() => refreshRenderedMermaid())
@@ -5821,7 +5919,7 @@ onMounted(async () => {
   window.addEventListener('resize', updateComposerShift)
   // 手机模式（细长窗口或窄窗口）：列表/对话整屏切换；高宽比判定与窗口监听见 useTallLayout
   if (isFirstInit || chats.value.length === 0) {
-    loadChatsFromStorage()
+    await loadChatsFromStorage()
   }
   // 待执行队列从存储恢复（只保留仍存在的聊天），并尝试续发已空闲聊天的条目
   restorePendingQueue(new Set((chats.value || []).map((c: any) => String(c?.id ?? ''))))
@@ -5832,6 +5930,11 @@ onMounted(async () => {
   startAgentReconcileTimer()
   // 监听设置页「清空聊天记录」事件
   window.addEventListener('ai-chats-cleared', onAiChatsCleared)
+  // 关窗 / 刷新前把防抖中的存档同步送出去（invoke 可能来不及，用 send）
+  window.addEventListener('beforeunload', onBeforeUnloadChatArchive)
+  // 自动化任务：启动补投 + 订阅主进程的到点投递
+  unsubScheduleDeliver = onScheduleEvent({ deliver: () => { void deliverScheduledPending() } })
+  void deliverScheduledPending()
   // 监听设置独立窗口的聊天记录变更（导入/清空）→ 从本地存档重新加载
   unsubChatsChanged = getPlatform().events.on('chats-changed', onChatsChangedRemote)
   // 网页端（局域网共享）：拉取主机能力概览，决定可用对话模式（默认只含 普通 + 知识库）
@@ -5925,6 +6028,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', updateComposerShift)
   store.saveConfig()
   window.removeEventListener('ai-chats-cleared', onAiChatsCleared)
+  window.removeEventListener('beforeunload', onBeforeUnloadChatArchive)
+  unsubScheduleDeliver?.()
+  unsubScheduleDeliver = null
   unsubChatsChanged?.()
   unsubChatsChanged = null
   if (scrollTimeout.value) {
@@ -5937,6 +6043,8 @@ onBeforeUnmount(() => {
   // 继续写入模块级共享 chats，重进组件自动恢复实时状态
   // 仅持久化现场（供整体重启后恢复）
   saveChats()
+  // 防抖中的最后一份必须同步送出：unmount 后 IPC 可能已来不及
+  flushChatArchiveSync(chats.value)
   
   // 清理 Agent 预设浮层外部点击监听
   document.removeEventListener('mousedown', onDocMouseDownForPresetPicker)
@@ -7094,8 +7202,15 @@ const setStep = (step: string, icon: string, stepClass: string) => {
 // ==================== 保存和加载聊天 ====================
 
 const saveChats = () => {
-  localStorage.setItem('ai-chats', JSON.stringify(chats.value))
+  // 存档正文在主进程（`<userData>/chats.json`）：这里只做防抖提交，
+  // 浏览器 / 安卓端由 chatArchive 自动回退 localStorage。
+  scheduleChatArchiveSave(chats.value)
   localStorage.setItem('ai-chats-index', String(currentChatIndex.value))
+}
+
+/** 关窗 / 刷新前的尽力保存：用 send 不等回包，进程退出时也能送到主进程 */
+const onBeforeUnloadChatArchive = () => {
+  flushChatArchiveSync(chats.value)
 }
 
 // 任务清单 / 计划：智能体（update_todo / update_plan）第一次产出或内容更新时，
@@ -7110,7 +7225,7 @@ watch(
   { flush: 'post' },
 )
 
-// 设置页「清空聊天记录」联动：外部清空 ai-chats 后重置内存为单个空会话
+// 设置页「清空聊天记录」联动：外部清空存档后重置内存为单个空会话
 const onAiChatsCleared = () => {
   // 全量清空前先释放所有聊天引用的智能体会话：否则旧会话仍在后台推理，
   // 并在清空后把结果写回已从列表移除的孤儿聊天对象。
@@ -7121,6 +7236,7 @@ const onAiChatsCleared = () => {
   currentChatIndex.value = 0
   // 清空聊天记录时队列一并作废（队列条目指向的聊天已不存在）
   clearPendingQueueAll()
+  void clearChatArchive()
   saveChats()
 }
 
@@ -7130,14 +7246,13 @@ const onAiChatsCleared = () => {
  * 正在执行/流式时不做整体替换（避免打断当前回答），只把新增的聊天追加进来。
  */
 let unsubChatsChanged: (() => void) | null = null
-const onChatsChangedRemote = () => {
+const onChatsChangedRemote = async () => {
   try {
-    const saved = localStorage.getItem('ai-chats')
-    const incoming: any[] = saved ? (JSON.parse(saved) || []) : []
+    const incoming: any[] = (await loadChatArchive()).chats || []
     const busy = globalExecutionState.value.isExecuting || currentChat.value?.isGenerating === true
     if (!busy) {
       if (Array.isArray(incoming) && incoming.length) {
-        loadChatsFromStorage()
+        await loadChatsFromStorage()
         void nextTick(() => refreshRenderedMermaid())
       } else {
         onAiChatsCleared() // 存档被清空
@@ -7157,11 +7272,10 @@ const onChatsChangedRemote = () => {
 const MAX_TOKENS_MIGRATION_KEY = 'ai-chats-max-tokens-migrated'
 const LEGACY_DEFAULT_MAX_TOKENS = 16_000
 
-const loadChatsFromStorage = () => {
-  const saved = localStorage.getItem('ai-chats')
-  if (saved) {
-    try {
-      const loadedChats = JSON.parse(saved)
+const loadChatsFromStorage = async () => {
+  try {
+    const loadedChats = (await loadChatArchive()).chats
+    if (Array.isArray(loadedChats) && loadedChats.length) {
       chats.value = loadedChats
       // 恢复关闭前的聊天栏（卸载模块回来回到同一栏）
       const savedIdx = parseInt(localStorage.getItem('ai-chats-index') || '0', 10)
@@ -7305,9 +7419,9 @@ const loadChatsFromStorage = () => {
         try { localStorage.setItem(MAX_TOKENS_MIGRATION_KEY, '1') } catch { /* 隐私模式忽略 */ }
         if (maxTokensLifted) saveChats()
       }
-    } catch (e) {
-      console.error('加载聊天记录失败:', e)
     }
+  } catch (e) {
+    console.error('加载聊天记录失败:', e)
   }
 }
 
@@ -12730,6 +12844,10 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   min-width: 210px;
   position: relative;
 }
+
+/* 自动化任务占位：替换消息导航右侧的面板（对话 + 右侧栏），左侧聊天列表保留 */
+.schedule-host { padding: 0; border: 0; }
+.schedule-host > * { flex: 1 1 auto; min-height: 0; }
 
 /* 右侧栏开合动画（与左侧聊天列表 .chat-sidebar 同一套宽度滑动）：
    wrapper 负责宽度过渡，ChatDock 内容保持自身宽度，动画过程中不重排内容。 */

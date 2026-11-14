@@ -26,10 +26,15 @@ import { jobRegistry } from './job-registry'
 import { credentialStore } from './credentials'
 import { generateSdkDocs } from './code-sdk'
 import * as usageLog from './usage-log'
+import * as chatStore from './chat-store'
+import * as schedule from './schedule-service'
 
 type IpcHandler = (payload: any, event: IpcMainInvokeEvent) => Promise<any> | any
 
 const handlers = new Map<string, IpcHandler>()
+
+/** 已经触发过「归档准入」的聊天 id（避免每次保存都重复删除任务） */
+const archivedSeen = new Set<string>()
 
 /**
  * 把任意值净化为纯 JSON（structured clone 安全）。
@@ -170,6 +175,58 @@ export function registerNamespacedIpc(): void {
       })
       .filter((row): row is NonNullable<typeof row> => row !== null)
   })
+
+  // ---------------- chats:*（聊天存档：主进程单一事实源） ----------------
+  /** 读整份存档（渲染层启动时唯一入口；不存在时 exists=false，由渲染层决定是否迁移） */
+  registerIpc('chats:load', async () => chatStore.loadChats())
+  /** 保存整份存档（渲染层防抖后调用；主进程合并写，失败不抛给对话流） */
+  registerIpc('chats:save', async (payload) => {
+    const chats = payload?.chats
+    if (!Array.isArray(chats)) throw new IPCError('INVALID_ARGUMENT', 'chats 必须是数组')
+    await chatStore.saveChats(chats)
+    // 归档准入（对齐 DSH archiveAdmission）：聊天一旦归档，投递给它的任务随之删除
+    const archived = chats
+      .filter((c: any) => c && c.archived === true && c.id)
+      .map((c: any) => String(c.id))
+    for (const id of archived) {
+      if (archivedSeen.has(id)) continue
+      archivedSeen.add(id)
+      void schedule.disposeForChat(id)
+    }
+    if (archived.length === 0 && archivedSeen.size) archivedSeen.clear()
+    return { savedAt: Date.now(), chats: chats.length }
+  })
+  /** 清空存档（设置页「清空聊天记录」） */
+  registerIpc('chats:clear', async () => {
+    await chatStore.clearChats()
+    return { ok: true }
+  })
+  /** 存档概况（诊断 / 设置页展示占用） */
+  registerIpc('chats:stat', async () => chatStore.statChats())
+  /**
+   * 退出前的尽力保存：渲染层用 `send`（不等回包）把最后一份送过来。
+   * 走 `on` 而不是 `invoke`，进程关闭时也能送达。
+   */
+  ipcMain.on('chats:save-async', (_event, payload: any) => {
+    const chats = payload?.chats
+    if (Array.isArray(chats)) void chatStore.saveChats(chats)
+  })
+
+  // ---------------- schedule:*（自动化任务：持久化 + 计时 + 投递） ----------------
+  // 到点投递通过 `schedule:deliver` 广播给渲染层；渲染层入队成功后 `schedule:ack` 写回执。
+  schedule.setScheduleBroadcast(sendToAll)
+  void schedule.loadSchedules()
+  registerIpc('schedule:list', (payload) => schedule.listTasks(payload || {}))
+  registerIpc('schedule:catalog', () => schedule.listTasks({ limit: 500 }))
+  registerIpc('schedule:view', (payload) => schedule.viewTask(String(payload?.id || '')))
+  registerIpc('schedule:history', (payload) => schedule.taskHistory(String(payload?.id || ''), payload?.limit))
+  registerIpc('schedule:create', (payload) => schedule.createTask(payload))
+  registerIpc('schedule:edit', (payload) => schedule.editTask(payload))
+  registerIpc('schedule:run', (payload) => schedule.runTaskNow(String(payload?.id || '')))
+  registerIpc('schedule:pending', () => ({ items: schedule.pendingDeliveries() }))
+  registerIpc('schedule:ack', (payload) => schedule.ackDelivery(payload))
+  registerIpc('schedule:deleteInactive', () => schedule.deleteInactive())
+  registerIpc('schedule:chatDisposed', (payload) => schedule.disposeForChat(String(payload?.chatId || '')))
   /** 读外部会话的全部事件（首页导入记录用） */
   registerIpc('sessionLog:agentEvents', (payload) => {
     const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId.trim() : ''

@@ -19,6 +19,7 @@ import { batchMcpServers, AgentExecutor } from './executorAgent'
 import { LlmExecutor } from './executorLlm'
 import { ExtractExecutor } from './executorExtract'
 import { sinkOf, makeDataRowsSink } from './sinks'
+import { buildEvidence } from './evidence'
 import { normalizeUrl, hostOf, PIPELINE_TITLE_FIELD, PIPELINE_LINKS_FIELD } from './fetch'
 import { effectiveContentSource, resolveContentField, resolveTextFieldName } from './types'
 // 并发调度判定（含给人预留的 1 个槽位）：纯逻辑，见 slots.ts / slots.selftest.ts
@@ -632,6 +633,10 @@ export class BatchAgent {
         await this.executor.cleanup?.(row)   // 清理观察状态 + dispose 会话 + 置空 row.viewId
       }
       row.finishedAt = new Date().toISOString()
+      // 证据层（可选）：trace 已在上面落盘，结果在 sink 中；默认 off 时不生成任何字段
+      if (this.config.evidenceEnabled) {
+        row.evidence = buildEvidence(row)
+      }
       this.callbacks.onRowUpdate?.(row)
       this.computeProgress()
 

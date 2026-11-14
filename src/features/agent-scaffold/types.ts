@@ -33,6 +33,48 @@ export interface BatchRowTraceStep {
   toolCalls: BatchRowTraceCall[]
 }
 
+// ==================== 证据层（可选，默认 off） ====================
+/**
+ * 证据状态：与论文中的 Evidence state 保持同一套词表。
+ * generic 任务通常只会出现 sufficient / incomplete / conflicting / out_of_scope；
+ * stale / ambiguous 需要时间戳或多候选信息。
+ */
+export type EvidenceState =
+  | 'sufficient'
+  | 'conflicting'
+  | 'stale'
+  | 'incomplete'
+  | 'ambiguous'
+  | 'out_of_scope'
+
+/** 行级认知动作：不是 agent tool，而是 attempt 级编排动作 */
+export type EpistemicAction =
+  | 'answer'
+  | 'retrieve_more'
+  | 'switch_executor'
+  | 'ask_human'
+  | 'abstain'
+
+/** 一条来源：来自现有 tool call / 输入字段，不新增工具 */
+export interface EvidenceSource {
+  kind: 'web' | 'file' | 'kb' | 'mcp' | 'doi' | 'openalex' | 'crossref' | 'tool' | 'input'
+  locator: string
+  label?: string
+  quote?: string
+  retrievedAt?: string
+  toolCallId?: string
+}
+
+/** 一行的证据判定（轻量版：先存 state/action/sources，图在 UI 侧投影） */
+export interface EvidenceDecision {
+  state: EvidenceState
+  action: EpistemicAction
+  answer?: string
+  rationale?: string
+  sources: EvidenceSource[]
+  generatedAt: string
+}
+
 /** 工作单元：一行 = 一个独立任务（数据 + 状态 + 结果 + 过程快照） */
 export interface PipelineUnit {
   id: string
@@ -65,6 +107,11 @@ export interface PipelineUnit {
   trace?: BatchRowTraceStep[]
   /** 本轮推理步骤数（会话实际步数；过程快照只保留最后 10 步，此值用于展示与统计） */
   stepsCount?: number
+  /**
+   * 证据判定（可选）：只有 config.evidenceEnabled 时生成。
+   * 默认 off，旧任务文件没有该字段；UI 的「证据」页签只在有该字段时出现。
+   */
+  evidence?: EvidenceDecision
   /** 源专属元数据（urls 的 depth/parentUrl、folder 的 size/relativePath…）——Step 3 接入 */
   meta?: Record<string, any>
   /**
@@ -269,6 +316,11 @@ export interface PipelineConfig {
    * 默认 true（未设置 = 开启，旧任务文件行为不变）。行详情的“过程”回看不受影响。
    */
   graphEnabled?: boolean
+  /**
+   * 是否启用「证据」页签：默认 false（旧任务 / 普通批量 agent 完全不受影响）。
+   * 开启后每行结束时从 trace/结果生成 EvidenceDecision；不新增 agent 工具。
+   */
+  evidenceEnabled?: boolean
   /**
    * 保存任务文件时是否一并写入**图谱数据**（行过程快照 trace / 步骤数；图谱与行详情的数据来源）。
    * 默认 false = 不保留（任务文件更小）；勾选后重开任务文件仍可看图谱。

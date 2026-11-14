@@ -36,6 +36,7 @@ import DataSettings from '@/components/set/DataSettings.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 // 数据页（DataSettings.vue）与「常用操作」共用：占用统计 / 文件 IO / 聊天记录读取
 import { LOCAL_STORAGE_LIMIT, MD_FILTERS, countEntries, formatBytes, lsTotalBytes, readLsJson, readStoredChats, saveTextFile, stampText } from '@/lib/settingsData'
+import { chatArchiveStat } from '@/lib/chatArchive'
 import { resetOnboarding, markOnboardingDone, writeOnboarding } from '@/components/onboarding/onboardingState'
 // 从「常用操作 → 新手引导」重看时，直接渲染在设置里（设置可能是独立窗口，广播给主窗口会看不见）
 import OnboardingWizard from '@/components/onboarding/OnboardingWizard.vue'
@@ -774,12 +775,16 @@ const localStoragePct = computed(() => {
 
 
 // 本机数据概览文本（初始化确认框用）：列出会被清空的各类数据数量
+// 聊天存档已迁到主进程：模板里要同步读取，所以启动时拉一份概况缓存（chats/messages 计数）
+const chatStat = ref({ chats: 0, messages: 0 })
+void chatArchiveStat().then((s) => {
+  chatStat.value = { chats: s.chats, messages: s.messages || 0 }
+}).catch(() => { /* 读不到就保持 0 */ })
+
 const localDataSummary = (): string => {
   const zh = store.locales === 'zh'
-  const chats = readStoredChats()
-  const msgCount = chats.reduce((n: number, c: any) => n + (Array.isArray(c?.messages) ? c.messages.length : 0), 0)
   const parts = [
-    zh ? `聊天 ${chats.length} 个会话（${msgCount} 条消息）` : `chats: ${chats.length} (${msgCount} messages)`,
+    zh ? `聊天 ${chatStat.value.chats} 个会话（${chatStat.value.messages} 条消息）` : `chats: ${chatStat.value.chats} (${chatStat.value.messages} messages)`,
     zh ? `Agent 预设 ${countEntries(readLsJson('agentPresets'))} 个` : `agent presets: ${countEntries(readLsJson('agentPresets'))}`,
     zh ? `MCP ${countEntries(readLsJson('mcpServers'))} 个` : `MCP servers: ${countEntries(readLsJson('mcpServers'))}`,
   ]
@@ -907,7 +912,7 @@ const chatToMarkdown = (chat: any, parentTitle = ''): string => {
 /** 导出全部聊天记录为 Markdown：一个文件汇总所有会话，按创建时间排序并标注分支来源 */
 const handleExportChatsMarkdown = async () => {
   const zh = store.locales === 'zh'
-  const list = readStoredChats()
+  const list = await readStoredChats()
   if (!list.length) {
     ElMessage.warning(zh ? '当前没有聊天记录可导出' : 'No chat history to export')
     return

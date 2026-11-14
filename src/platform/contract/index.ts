@@ -486,6 +486,10 @@ export type AppEventChannel =
   | 'open-file-request'
   | 'theme-changed'
   | 'chats-changed'
+  /** 自动化任务：任务被其它窗口/定时器改变（UI 重新拉取目录） */
+  | 'schedule:changed'
+  /** 自动化任务：到点投递（渲染层登记进目标聊天的收件箱后 ack） */
+  | 'schedule:deliver'
   | 'settings:navigate'
   | 'server-status'
   | 'asr-shortcut-toggle'

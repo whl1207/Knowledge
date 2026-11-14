@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatsRef } from '@/store/chats'
 import { getPlatform, hasCapability } from '@/platform'
 import { aikmIpc, aikmIpcOrNull } from '@/lib/aikmIpc'
+import { loadChatArchive, scheduleChatArchiveSave, flushChatArchive } from '@/lib/chatArchive'
 import { isBuiltinAgentPreset } from '@/shared/builtinAgentPresets'
 import { parseBackupText } from '@/shared/fullBackup'
 
@@ -125,22 +126,22 @@ export const stampText = (): string => {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
-// ================ 聊天记录导入 / 导出（主窗口与设置窗口共享同一份 localStorage 存档 ai-chats） ================
+// ================ 聊天记录导入 / 导出（存档正文在主进程 chats.json；浏览器端回退 localStorage） ================
 
-/** 当前聊天列表（优先内存，回退 localStorage） */
-export const readStoredChats = (): any[] => {
+/** 当前聊天列表（优先内存，回退存档） */
+export const readStoredChats = async (): Promise<any[]> => {
   if (Array.isArray(chatsRef.value) && chatsRef.value.length) return chatsRef.value
   try {
-    const saved = localStorage.getItem('ai-chats')
-    const list = saved ? JSON.parse(saved) : []
+    const list = (await loadChatArchive()).chats
     return Array.isArray(list) ? list : []
   } catch { return [] }
 }
 
 /** 写回聊天存档；不动 ai-chats-index（主窗口加载时会自行 clamp） */
-export const writeStoredChats = (list: any[]) => {
-  localStorage.setItem('ai-chats', JSON.stringify(list))
+export const writeStoredChats = async (list: any[]) => {
   if (Array.isArray(chatsRef.value) && chatsRef.value.length) chatsRef.value = list
+  scheduleChatArchiveSave(list)
+  await flushChatArchive()
   window.dispatchEvent(new CustomEvent('ai-chats-changed'))
   // 独立设置窗口场景：通知其它窗口（主窗口）重新加载，否则主窗口下次 saveChats 会把导入结果覆盖掉
   try { aikmIpc?.send?.('chats-changed') } catch { /* 忽略 */ }
@@ -159,7 +160,7 @@ export const parseChatsFile = (text: string, zh = true): any[] => {
 
 /** 导出全部聊天记录（含分支 / 知识库来源 / 工具调用时间线等完整字段）为 JSON 备份文件 */
 export const exportChats = async (zh = true) => {
-  const list = readStoredChats()
+  const list = await readStoredChats()
   if (!list.length) {
     ElMessage.warning(zh ? '当前没有聊天记录可导出' : 'No chat history to export')
     return
@@ -184,7 +185,7 @@ export const importChats = async (zh = true, onDone?: () => void) => {
       ElMessage.warning(zh ? '文件中没有可导入的聊天记录' : 'No chats found in the file')
       return
     }
-    const existing = readStoredChats()
+    const existing = await readStoredChats()
     const ids = new Set(existing.map((c: any) => String(c?.id ?? '')))
     const added = incoming.filter((c: any) => !ids.has(String(c?.id ?? '')))
     const skipped = incoming.length - added.length
@@ -192,7 +193,7 @@ export const importChats = async (zh = true, onDone?: () => void) => {
       ElMessage.info(zh ? `未发现新聊天（${skipped} 个已存在）` : `Nothing new (${skipped} already exist)`)
       return
     }
-    writeStoredChats([...existing, ...added])
+    await writeStoredChats([...existing, ...added])
     ElMessage.success(zh ? `已导入 ${added.length} 个聊天${skipped ? `（跳过 ${skipped} 个已存在）` : ''}` : `Imported ${added.length} chats${skipped ? ` (${skipped} skipped)` : ''}`)
     onDone?.()
   } catch (e: any) {
@@ -391,7 +392,7 @@ export const FULL_BACKUP_KIND = 'full'
  */
 export const exportFullBackup = async (zh = true) => {
   const { data, count } = collectStoredKeys(BACKUP_KEYS)
-  const chats = readStoredChats()
+  const chats = await readStoredChats()
   if (!count && !chats.length) {
     ElMessage.warning(zh ? '当前没有可备份的数据' : 'Nothing to back up')
     return
@@ -420,7 +421,7 @@ export const exportFullBackup = async (zh = true) => {
 const writePreRestoreSnapshot = async (): Promise<string> => {
   try {
     const { data, count } = collectStoredKeys(BACKUP_KEYS)
-    const chats = readStoredChats()
+    const chats = await readStoredChats()
     if (!count && !chats.length) return ''
     const payload = {
       app: 'ai-km', kind: FULL_BACKUP_KIND, version: 1,
@@ -465,7 +466,7 @@ export const importFullBackup = async (zh = true, onImported?: () => void) => {
       throw new Error(zh ? '不是有效的备份文件（没有可恢复的配置或聊天）' : 'not a valid backup (no config or chats)')
     }
     // 聊天按 id 去重（与聊天导入同一套合并规则）
-    const existing = (chats && chats.length) ? readStoredChats() : []
+    const existing = (chats && chats.length) ? await readStoredChats() : []
     const ids = new Set(existing.map((c: any) => String(c?.id ?? '')))
     const addedChats = (chats || []).filter((c: any) => !ids.has(String(c?.id ?? '')))
     const skippedChats = (chats?.length || 0) - addedChats.length
@@ -481,7 +482,7 @@ export const importFullBackup = async (zh = true, onImported?: () => void) => {
     // 恢复前快照（失败不阻断；成功则在结果里给出路径）
     const snapshot = await writePreRestoreSnapshot()
     if (cfgHits.length) writeStoredConfig(configData!, BACKUP_KEYS)
-    if (addedChats.length) writeStoredChats([...existing, ...addedChats])
+    if (addedChats.length) await writeStoredChats([...existing, ...addedChats])
     onImported?.()
     // 与分类导入同一套收尾：预设落盘 → 广播给主窗口
     let presetsWritten = 0

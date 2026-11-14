@@ -397,6 +397,16 @@
                 </label>
               </div>
             </div>
+            <!-- 证据页签：默认关闭；开启后从现有 trace/结果生成 EvidenceDecision，不新增工具 -->
+            <div class="form-group">
+              <label>{{ en() ? 'Evidence' : '证据' }}</label>
+              <div class="keep-file-box">
+                <label class="keep-file-check" :title="evidenceEnabledTitle">
+                  <input type="checkbox" v-model="config.evidenceEnabled" />
+                  <span>{{ en() ? 'Enable evidence tab' : '启用「证据」标签页' }}</span>
+                </label>
+              </div>
+            </div>
             <!-- 随任务文件保留：图谱数据（行过程快照 / 步骤数）与运行日志（主日志 + 各线程）默认不保留，
                  勾选后才会写进 .task 文件（重开任务文件仍可看图谱 / 日志，但文件更大） -->
             <div class="form-group">
@@ -1139,7 +1149,7 @@
                页签对应的操作（复制 / 编辑等）在底部按钮栏，与状态选择、删除、关闭同一行 -->
           <div class="detail-head-row">
             <div class="detail-tabs">
-              <button v-for="t in DETAIL_TABS" :key="t.key" class="detail-tab" :class="{ active: detailTab === t.key }"
+              <button v-for="t in detailTabs" :key="t.key" class="detail-tab" :class="{ active: detailTab === t.key }"
                       :title="en() ? t.hintEn : t.hintZh" @click="detailTab = t.key">
                 <i class="fa" :class="t.icon"></i> {{ en() ? t.en : t.zh }}
               </button>
@@ -1160,7 +1170,12 @@
             <pre class="detail-input-pre scoll">{{ renderRowPrompt(selectedRow, selectedRowIndex) }}</pre>
           </div>
 
-          <!-- 页签 2：过程（步骤 / 推理 / 工具参数与结果）：运行中实时更新，完成后仍可回看（数据来自内存会话，重启/读取任务后不可用） -->
+          <!-- 页签 2：证据（可选；状态 / 动作 / 来源 / 原文片段） -->
+          <div v-show="detailTab === 'evidence'" class="detail-section detail-evidence">
+            <EvidencePanel :row="selectedRow" :zh="!en()" />
+          </div>
+
+          <!-- 页签 3：过程（步骤 / 推理 / 工具参数与结果）：运行中实时更新，完成后仍可回看（数据来自内存会话，重启/读取任务后不可用） -->
           <div v-show="detailTab === 'process'" class="detail-section detail-process-section">
             <div class="detail-process-body scoll">
               <!-- 运行中的联网搜索提示（活跃状态归「过程」） -->
@@ -1227,7 +1242,7 @@
             </div>
           </div>
 
-          <!-- 页签 3：输出（提取数据 / 写回列 / 结果 / 错误；可编辑） -->
+          <!-- 页签 4：输出（提取数据 / 写回列 / 结果 / 错误；可编辑） -->
           <div v-show="detailTab === 'output'" class="detail-section detail-output">
             <div class="detail-output-body scoll">
               <template v-if="selectedRow.status === 'running'">
@@ -1359,6 +1374,7 @@ import { agentBridge } from '@/platform/agentBridge'
 import BlockMd from '@/components/block_md.vue'
 import StatusMultiSelect from '@/features/agent-scaffold/StatusMultiSelect.vue'
 import KnowledgeGraphViewer from '@/features/agent-scaffold/KnowledgeGraphViewer.vue'
+import EvidencePanel from '@/features/agent-scaffold/EvidencePanel.vue'
 import { buildCrawlGraph, buildAccessGraph, type PipelineGraph } from '@/features/agent-scaffold/graph'
 import { normalizeUrl } from '@/features/agent-scaffold/fetch'
 import { effectiveContentSource, migratePipelineConfig, resolveContentField, type PipelineUnit, type PipelineRound, type PipelineRoundSummary } from '@/features/agent-scaffold/types'
@@ -1435,8 +1451,11 @@ const applyPreset = (key: string) => {
   if (!preset) return
   // 用户已写的文本保留（换预设不清空输入：任务指令 / 文本内容）
   const keep = { template: config.template, textInput: config.textInput }
+  // 证据是“用户显式开启的采集能力”，换预设时不要被默认值重置回 off
+  const keepEvidence = config.evidenceEnabled === true
   for (const k of PRESET_SHAPE_KEYS) delete (config as any)[k]
   Object.assign(config, defaultPipelineConfig(key, !en()))
+  config.evidenceEnabled = keepEvidence
   config.sourceKind = preset.source
   if (keep.template) config.template = keep.template
   if (keep.textInput) config.textInput = keep.textInput
@@ -2623,6 +2642,11 @@ const mcpServerNameOf = (id: string): string => {
 }
 /** 图谱总开关：关闭后不构建任何图谱数据（节点/边），也不显示「图谱」标签页；行详情的过息快照不受影响 */
 const graphEnabled = computed(() => config.graphEnabled !== false)
+/** 证据页签总开关：默认关闭；开启后只对已生成 evidence 的行显示内容 */
+const evidenceEnabled = computed(() => config.evidenceEnabled === true)
+const evidenceEnabledTitle = computed(() => en()
+  ? 'Capture row-level evidence from existing tool calls and show an Evidence tab. No new agent tools are added and the task result is unchanged.'
+  : '从现有工具调用/结果中采集行级证据，并在行详情显示「证据」页签；不新增 agent 工具，不改变任务结果。')
 /** 关闭图谱时的空投影（共用同一对象，避免每次新建） */
 const EMPTY_GRAPH: PipelineGraph = { nodes: [], edges: [] }
 /** 图谱开关的悬停说明 */
@@ -3378,16 +3402,24 @@ const showRowDetail = ref(false)
 /** 行详情页签（任务 / 过程 / 输出）：**不随打开其他行重置**，连续核对多行时停在同一页签 */
 const DETAIL_TABS = [
   { key: 'task' as const, zh: '任务', en: 'Task', icon: 'fa-file-text-o', hintZh: '占位符替换后真正发给该行的任务', hintEn: 'The prompt actually sent for this row (after placeholder substitution)' },
+  { key: 'evidence' as const, zh: '证据', en: 'Evidence', icon: 'fa-shield', hintZh: '证据状态、认知动作、来源与原文片段（仅开启证据模式时显示）', hintEn: 'Evidence state, epistemic action, sources and quoted spans (only when evidence mode is enabled)' },
   { key: 'process' as const, zh: '过程', en: 'Process', icon: 'fa-sitemap', hintZh: '推理步骤与工具调用（运行中实时更新；会话结束后不可用）', hintEn: 'Reasoning steps and tool calls (live while running; unavailable after the session ends)' },
   { key: 'output' as const, zh: '输出', en: 'Output', icon: 'fa-commenting-o', hintZh: '提取数据 / 写回列 / 结果文本，可编辑', hintEn: 'Extracted data / written-back columns / result text — editable' },
 ]
-const detailTab = ref<'task' | 'process' | 'output'>('task')
+const detailTab = ref<'task' | 'evidence' | 'process' | 'output'>('task')
 // 按 id 从当前 rows 动态解析：rows 数组被替换/行数据更新时始终指向最新行；
 // computed 惰性——agent 就地修改行（rows 引用与 id 不变）不会触发重算，10w+ 行仍 O(1)
 const selectedRow = computed(() => {
   const id = selectedRowId.value
   if (!id) return null
   return rows.value.find(r => r.id === id) || null
+})
+/** 证据页签只在开启证据模式或该行已有 evidence 时出现 */
+const detailTabs = computed(() => DETAIL_TABS.filter(t =>
+  t.key !== 'evidence' || evidenceEnabled.value || Boolean(selectedRow.value?.evidence)
+))
+watch(evidenceEnabled, (on) => {
+  if (!on && detailTab.value === 'evidence') detailTab.value = 'task'
 })
 type LiveToolCall = {
   callId: string
@@ -5635,6 +5667,8 @@ const applySavedResultToRow = (t: BatchRow, s: any, newIndex: number) => {
   t.emptyRetryCount = s.emptyRetryCount || 0
   // 推理步数：随文件保存的数字（无则清空，以免串行）；过程快照（图谱数据）里有更全的信息，稍后 applyPendingTraces 会再写一遍
   t.stepsCount = typeof s.stepsCount === 'number' ? s.stepsCount : undefined
+  // 证据判定（可选；旧任务文件没有该字段）
+  t.evidence = s.evidence
   // 逐列写回（旧表格定向推理 / 纯 LLM + 单独结果）：保存的每行写回值合并回行数据；
   // 若当前已是结构化提取（「表格定向推理」已统一），则把旧写回值转成数据表记录（详情 / 导出照常展示）
   if (s.values && typeof s.values === 'object') {
@@ -5953,6 +5987,8 @@ const buildRoundResults = (): any[] => rows.value.map(r => {
     key: rowKeyOf(r.data),
     // 推理步数：仅一个数字，总是随文件保存（不依赖「保留图谱数据」）——重开后步数列 / 步数筛选 / 导出都还能用
     stepsCount: typeof r.stepsCount === 'number' ? r.stepsCount : undefined,
+    // 证据判定（可选；默认 off 时为 undefined，不增加旧任务文件体积）
+    evidence: r.evidence,
   }
   // 逐列写回（纯 LLM + 单独结果）：写回列的值随任务文件保存，重开后仍可预览 / 导出
   if (writeBackColumns.value.length) {
@@ -8012,7 +8048,7 @@ textarea:disabled {
   padding-bottom: 5px;
   border-bottom: 1px solid var(--borderColor);
 }
-.detail-tabs { display: flex; align-items: center; gap: 4px; flex: none; }
+.detail-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; min-width: 0; }
 .detail-tab {
   display: inline-flex;
   align-items: center;

@@ -44,6 +44,8 @@ export const PIPELINE_PRESETS: Record<string, PipelinePreset> = {
             autoSaveHours: 2,
             // 图谱默认开启（可在任务页「执行与配置」里关闭：不投影、不显示图谱标签页）
             graphEnabled: true,
+            // 证据页签默认关闭：普通批量 agent 完全不受影响；需要时在任务页开启
+            evidenceEnabled: false,
             // 保存任务文件时默认不保留图谱数据 / 运行日志（勾选后才写进文件，见任务页「随任务文件保留」）
             keepTrace: false,
             keepLogs: false,

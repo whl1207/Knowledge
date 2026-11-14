@@ -5,6 +5,7 @@
  * 不含任何密钥（只报「哪些来源已配置」，不读 api_key）。
  */
 import { getPlatform } from '@/platform'
+import { chatArchiveStat } from '@/lib/chatArchive'
 import { currentAppVersion } from '@/lib/updateCheck'
 import { readOnboarding } from '@/components/onboarding/onboardingState'
 
@@ -71,8 +72,9 @@ export const collectDiagnostics = async (): Promise<string> => {
   }
 
   try {
-    const chats = JSON.parse(localStorage.getItem('ai-chats') || '[]')
-    add('chats', Array.isArray(chats) ? chats.length : 0)
+    const stat = await chatArchiveStat()
+    add('chats', stat.chats)
+    add('chatsStore', stat.store)
   } catch { add('chats', '?') }
 
   const onb = readOnboarding()

@@ -2,6 +2,7 @@
 
 import { defineStore } from "pinia"
 import { nextTick, markRaw } from "vue"
+import { clearChatArchive } from '@/lib/chatArchive'
 import { TTSManager, createTTSManager } from '@/services/tts/manager'
 import { normalizeQwen3Lang, qwen3ListVoices, resetQwen3Cache, QWEN3_REFERENCE_VOICE, gpustackListModels, gpustackListVoices } from '@/services/tts/qwen3'
 import { qwenImageInfo } from '@/services/image/qwenImage'
@@ -1499,10 +1500,10 @@ export const usestore = defineStore('data', {
             this.saveConfig()
         },
         
-        // 清空全部聊天记录（ai-chats / ai-chats-index），并通知已挂载的主页聊天模块重置内存
+        // 清空全部聊天记录（主进程 chats.json / 浏览器端 localStorage），并通知已挂载的主页聊天模块重置内存
         clearAllChats() {
-            localStorage.removeItem('ai-chats')
             localStorage.removeItem('ai-chats-index')
+            void clearChatArchive()
             if (typeof window !== 'undefined') {
                 window.dispatchEvent(new CustomEvent('ai-chats-cleared'))
                 // 独立设置窗口场景：通知其它窗口（主窗口）也重置内存，
