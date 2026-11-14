@@ -35,7 +35,7 @@
         <i class="fa fa-arrow-left"></i>
       </button>
 
-      <div class="dock-tab-strip scoll-x">
+      <div ref="tabStripRef" class="dock-tab-strip scoll-x" @wheel="onTabStripWheel">
         <div
           v-for="tab in tabs"
           :key="tab.id"
@@ -269,6 +269,20 @@ const emit = defineEmits<{
 }>()
 
 const zh = computed(() => props.zh)
+
+/** 标签条：滚轮纵向转横向滚动；横向滚轮（触控板 / Shift+滚轮）保持原生 */
+const tabStripRef = ref<HTMLElement | null>(null)
+function onTabStripWheel(e: WheelEvent): void {
+  const el = tabStripRef.value
+  if (!el || el.scrollWidth <= el.clientWidth + 1) return
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1
+  const dx = (e.deltaX || 0) * unit
+  const dy = (e.deltaY || 0) * unit
+  const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy
+  if (!delta) return
+  el.scrollLeft += delta
+  e.preventDefault()
+}
 
 function kindIcon(kind: ChatDockTabKind): string {
   if (kind === 'terminal') return 'fa-terminal'
@@ -615,7 +629,14 @@ defineExpose({ confirmLeaveActive })
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
+  /* 标签过多时不要底部横向滚动条：鼠标滚轮换横向、触屏直接拖动 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
 }
+.dock-tab-strip::-webkit-scrollbar { height: 0; }
 .dock-tab {
   display: inline-flex;
   align-items: center;

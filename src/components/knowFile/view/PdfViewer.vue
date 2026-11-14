@@ -49,6 +49,9 @@ import { getPlatform } from '@/platform'
   const pan = ref({ x: 0, y: 0 }) // 平移偏移
   const isDragging = ref(false)
   const dragStart = ref({ x: 0, y: 0 })
+  /** 整个 PDF 视图（含状态栏）作为全屏元素 */
+  const rootRef = ref<HTMLElement | null>(null)
+  const isFullscreen = ref(false)
 
   // === 视图旋转（右键菜单「视图旋转」） ===
   // **整份文档统一旋转**：只改显示方向，不修改 PDF 文件本身（翻页 / 滚动都沿用同一角度）；
@@ -662,7 +665,19 @@ import { getPlatform } from '@/platform'
 
   // 拖拽平移（仅在放大时启用；在文字上按下则保留原生框选）
   const onViewportMouseDown = (e: MouseEvent) => {
-    if (!pdfDoc || userScale.value <= 1 || e.button !== 0) return
+    if (!pdfDoc) return
+    // 鼠标中键：和 DSH 一样是「抓手拖动」，不是浏览器中键自动滚动
+    if (e.button === 1) {
+      e.preventDefault()
+      isDragging.value = true
+      dragStart.value = { x: e.clientX - pan.value.x, y: e.clientY - pan.value.y }
+      if (pageBoxRef.value) pageBoxRef.value.style.cursor = 'grabbing'
+      document.addEventListener('mousemove', onViewportMouseMove)
+      document.addEventListener('mouseup', onViewportMouseUp)
+      document.addEventListener('selectstart', preventSelect)
+      return
+    }
+    if (userScale.value <= 1 || e.button !== 0) return
     if (isOnTextSpan(e)) return
     isDragging.value = true
     dragStart.value = { x: e.clientX - pan.value.x, y: e.clientY - pan.value.y }
@@ -688,12 +703,69 @@ import { getPlatform } from '@/platform'
     document.removeEventListener('selectstart', preventSelect)
   }
 
+  // 连续阅读模式：鼠标中键拖动滚动容器（不触发浏览器中键自动滚动 / 文本选择）
+  let scrollDragStart = { x: 0, y: 0, left: 0, top: 0 }
+  const onScrollMouseDown = (e: MouseEvent) => {
+    if (e.button !== 1) return
+    const el = scrollRef.value
+    if (!el) return
+    e.preventDefault()
+    isDragging.value = true
+    scrollDragStart = {
+      x: e.clientX,
+      y: e.clientY,
+      left: el.scrollLeft,
+      top: el.scrollTop,
+    }
+    document.addEventListener('mousemove', onScrollMouseMove)
+    document.addEventListener('mouseup', onScrollMouseUp)
+    document.addEventListener('selectstart', preventSelect)
+  }
+  const onScrollMouseMove = (e: MouseEvent) => {
+    if (!isDragging.value) return
+    const el = scrollRef.value
+    if (!el) return
+    e.preventDefault()
+    el.scrollLeft = scrollDragStart.left - (e.clientX - scrollDragStart.x)
+    el.scrollTop = scrollDragStart.top - (e.clientY - scrollDragStart.y)
+  }
+  const onScrollMouseUp = () => {
+    isDragging.value = false
+    document.removeEventListener('mousemove', onScrollMouseMove)
+    document.removeEventListener('mouseup', onScrollMouseUp)
+    document.removeEventListener('selectstart', preventSelect)
+  }
+
   const preventSelect = (e: Event) => e.preventDefault()
 
   // 双击复位到铺满状态（双击文字时保留选词，不复位）
   const resetFit = () => {
     userScale.value = 1
     pan.value = { x: 0, y: 0 }
+  }
+
+  /** 全屏：把 PDF 容器（含底部状态栏）放进浏览器全屏；再点一次退出 */
+  const toggleFullscreen = async () => {
+    const el = rootRef.value
+    if (!el) return
+    try {
+      if (document.fullscreenElement === el) {
+        await document.exitFullscreen()
+      } else {
+        await el.requestFullscreen()
+      }
+    } catch (e: any) {
+      ElMessage.warning((store.locales === 'zh' ? '无法进入全屏：' : 'Fullscreen unavailable: ') + String(e?.message || e))
+    }
+  }
+  const onFullscreenChange = () => {
+    isFullscreen.value = !!rootRef.value && document.fullscreenElement === rootRef.value
+    // 全屏后容器尺寸变化：等一帧让浏览器完成布局，再按新尺寸重新铺满
+    void nextTick(() => {
+      if (!pdfDoc) return
+      if (isScrollMode.value) applyScrollZoom()
+      else renderPage()
+    })
   }
 
   const onViewportDblClick = (e: MouseEvent) => {
@@ -2875,6 +2947,7 @@ ${spreads.join('')}
     // 右键菜单 / 翻译设置弹层：点击别处或滚动时关闭
     document.addEventListener('mousedown', onDocMouseDownCloseMenus, true)
     window.addEventListener('scroll', onDocScrollCloseMenus, true)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
   })
   onBeforeUnmount(() => {
     cleanup()
@@ -2885,8 +2958,11 @@ ${spreads.join('')}
     document.removeEventListener('mousedown', onDocMouseDownClearSelection, true)
     document.removeEventListener('mousedown', onDocMouseDownCloseMenus, true)
     window.removeEventListener('scroll', onDocScrollCloseMenus, true)
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
     document.removeEventListener('mousemove', onViewportMouseMove)
     document.removeEventListener('mouseup', onViewportMouseUp)
+    document.removeEventListener('mousemove', onScrollMouseMove)
+    document.removeEventListener('mouseup', onScrollMouseUp)
     document.removeEventListener('selectstart', preventSelect)
     if (transShowTimer) { clearTimeout(transShowTimer); transShowTimer = null }
     window.removeEventListener('mousemove', onPanelResize, true)
@@ -2895,7 +2971,7 @@ ${spreads.join('')}
 </script>
 
 <template>
-  <div class="pdf-container" :class="darkClass">
+  <div ref="rootRef" class="pdf-container" :class="[darkClass, { 'pdf-dragging': isDragging }]">
     <!-- 顶部：PDF 阅读主区 + 右侧智能操作面板 -->
     <div class="pdf-body">
     <!-- 左侧目录（PDF 书签）：共用 DocTocPanel，结构与样式与其他视图完全一致 -->
@@ -2918,6 +2994,7 @@ ${spreads.join('')}
     <div v-if="!isScrollMode" ref="viewportRef" class="pdf-viewport"
       @wheel.prevent.stop="handleWheel"
       @mousedown="onViewportMouseDown"
+      @auxclick.prevent
       @contextmenu.prevent="onPdfContextMenu"
       @dblclick="onViewportDblClick">
       <div v-if="loading" class="pdf-loading">
@@ -2943,7 +3020,7 @@ ${spreads.join('')}
     </div>
 
     <!-- 内容区 B：连续阅读模式（滚轮向下顺序阅读多页，页面懒渲染） -->
-    <div v-else ref="scrollRef" class="pdf-scroll scoll" @scroll.passive="onScrollModeScroll" @wheel="onScrollWheel" @contextmenu.prevent="onPdfContextMenu">
+    <div v-else ref="scrollRef" class="pdf-scroll scoll" @scroll.passive="onScrollModeScroll" @wheel="onScrollWheel" @mousedown="onScrollMouseDown" @auxclick.prevent @contextmenu.prevent="onPdfContextMenu">
       <div v-if="loading" class="pdf-loading">
         <i class="fa fa-spinner fa-spin"></i>
         <span>{{ store.locales === 'zh' ? '正在加载PDF...' : 'Loading PDF...' }}</span>
@@ -3168,7 +3245,10 @@ ${spreads.join('')}
         <i class="fa fa-plus"></i>
       </button>
       <button class="statusbar-btn" @click="resetFit" :title="store.locales==='zh' ? '适应窗口 / 复位' : 'Fit / Reset'">
-        <i class="fa fa-expand"></i>
+        <i class="fa fa-arrows-alt"></i>
+      </button>
+      <button class="statusbar-btn" @click="toggleFullscreen" :title="isFullscreen ? (store.locales==='zh' ? '退出全屏' : 'Exit fullscreen') : (store.locales==='zh' ? '全屏' : 'Fullscreen')">
+        <i class="fa" :class="isFullscreen ? 'fa-compress' : 'fa-expand'"></i>
       </button>
       <span v-if="userScale !== 1 || isScrollMode" class="pdf-statusbar-hint">{{ isScrollMode ? (store.locales==='zh' ? '滚轮连续阅读 / Ctrl+滚轮缩放' : 'Wheel to scroll / Ctrl+wheel to zoom') : (store.locales==='zh' ? '滚轮缩放 / 拖拽移动 / 双击复位' : 'Wheel / Drag / Dbl-click reset') }}</span>
 
@@ -3378,6 +3458,19 @@ ${spreads.join('')}
      （单窗口模式下表现就是整个界面上移十几像素） */
   overflow-anchor: none;
 }
+.pdf-container:fullscreen,
+.pdf-container:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+}
+/* 中键 / 左键拖动：整块 PDF（含文字层）统一抓手光标，避免文字层把光标变回 text */
+.pdf-container.pdf-dragging,
+.pdf-container.pdf-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
 .pdf-viewport {
   flex: 1;
   position: relative;
@@ -3393,6 +3486,7 @@ ${spreads.join('')}
 .pdf-scroll {
   --pdf-scroll-scale: 1;
   flex: 1;
+  cursor: grab;
   min-height: 0;
   position: relative;
   overflow-y: auto;

@@ -49,7 +49,7 @@ function walkSize(dir: string): { bytes: number; files: number } {
   let bytes = 0
   let files = 0
   const walk = (d: string): void => {
-    let entries: ReturnType<typeof readdirSync>
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>
     try {
       entries = readdirSync(d, { withFileTypes: true })
     } catch {

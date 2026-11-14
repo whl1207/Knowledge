@@ -1305,7 +1305,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
             <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
               <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
             </div>
-            <div v-if="hasCapability('window.chrome')" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-right: 6px;"><i class="fa fa-times"></i></div>
+            <div v-if="hasCapability('window.chrome')" class="app-window-close" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-right: 6px;"><i class="fa fa-times"></i></div>
           </template>
           <template v-else>
             <!-- 左侧/下方导航布局：顶栏只保留标题 + 3 个窗口按钮（其余按钮在对应导航栏）；标题水平居中 -->
@@ -1321,7 +1321,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
             <div v-if="hasCapability('window.chrome')" class="nav-narrow-hide" @click="maximizeWindow" title="最大化/还原">
               <i class="fa" :class="isMaximized ? 'fa-compress' : 'fa-window-maximize'"></i>
             </div>
-            <div v-if="hasCapability('window.chrome')" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
+            <div v-if="hasCapability('window.chrome')" class="app-window-close" @click="closeWindow" :title="store.locales === 'en' ? 'Close' : '关闭'" style="font-size:16px;margin-top: 6px;margin-right: 6px;"><i class="fa fa-times"></i></div>
           </template>
         </div>
       </div>

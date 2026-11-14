@@ -7,10 +7,39 @@
 
 ---
 
-## 2026-11-13
+## 2026-11-14
+
+### Improved
+
+- **More compact PDF page cards**: the source / page-number text under each page is gone, leaving only the four move-left, move-right, rotate-left and rotate-right icons.
+- **PDF viewer supports middle-button grab panning**: hold the middle button to drag the page / continuous reading content like a canvas, without the browser's middle-click auto-scroll.
+- **PDF viewer now has a fullscreen button**: the fit-to-window action uses its own icon, and reading can toggle fullscreen.
 
 ### Fixed
 
+- **The right sidebar no longer shows a horizontal scrollbar when tabs overflow**: the mouse wheel scrolls the tab strip horizontally, and touch users can drag it directly.
+
+---
+
+## 2026-11-13
+
+### Improved
+
+- **Long runs render through a step window**: only the latest 50 execution steps are mounted; scrolling up or clicking “Show earlier steps” loads more, so hundreds of steps no longer bog down the UI.
+- **New “Deliverables” capability**: agents can declare final files with `present`; after the reply finishes, deliverable cards support preview/open, and the session log records the declarations.
+- **New chats default to agent mode**: new conversations no longer start in plain chat; the mode menu can still switch back.
+- **Composer grows with content**: the input grows as you type and scrolls internally at the cap; the drag handle still adjusts the height.
+
+### Fixed
+
+- **Plugin toasts sit next to the window close button**: plugin light notifications in the top-right of the main window now stop just left of the close button instead of floating in the middle of the nav; plugin-window titles stay on the left.
+- **The back button on narrow settings pages now sits left of the title**: it shares a row with the current category title instead of floating above it, and the top border is visible again in narrow windows.
+- **Settings navigation no longer collapses into a left icon strip on narrow windows**: icons, labels and group headings stay visible instead of shrinking to icons only.
+- **The settings panel now matches other pages at the bottom**: its container uses `border-box`, so its border no longer adds extra height.
+- **Finished background jobs now show their duration**: completed / stopped / failed jobs display how long they actually ran, not only the status.
+- **The background-commands panel is no longer hidden behind the chat**: it now uses a fixed overlay so it always renders above the conversation.
+- **Status icons align at the far right on plan / todo steps**: the close button now sits to the left of the status icon, matching other steps.
+- **The agent name in the composer is no longer cut to three characters**: preset names size to their content and only ellipsize when genuinely long.
 - **Opening a skill file no longer fails with ENOENT**: reading a relative file inside a skill directory now records the resolved absolute path, so the step’s Open button goes straight to the skill file.
 
 ---
@@ -19,7 +48,6 @@
 
 ### Improved
 
-- **New “Deliverables” capability**: agents can declare final files with `present`; after the reply finishes, deliverable cards support preview/open, and the session log records the declarations.
 - **Messages sent while running now queue first**: Enter only adds to the pending queue; click “Steer” to deliver at the next step. Per-row and “steer all” actions are available, with no automatic insertion.
 - **Automatic repair of XML tool calls**: when a model writes `<tool_call><function=…>` as plain text, the system extracts the tool name and arguments and continues instead of ending the loop because no structured tool call was returned.
 

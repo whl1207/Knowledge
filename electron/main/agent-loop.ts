@@ -37,6 +37,7 @@ import { cwdFor, forgetWorkingDir } from './working-directory'
 import { clearReadCacheFor } from './read-cache'
 import { TIME_CONTEXT_REFRESH_MS, formatTimeContext, isValidTimeZone } from '@/shared/timeContext'
 import { browserAgentService } from './browser-agent'
+import { mcpService } from './mcp-service'
 import { credentialStore } from './credentials'
 import type {
   AgentOptions,
@@ -2218,10 +2219,10 @@ class AgentImpl implements AgentControl {
     result: ToolResult
     diagnostic?: boolean
   }> {
-    const name = String(call?.name || call?.function?.name || '')
     const callId = String(call?.id || `call-${step}-${Math.random().toString(36).slice(2, 8)}`)
     const rawArgs = call?.arguments ?? call?.function?.arguments
     let args = parseToolArgs(rawArgs)
+    let name = String(call?.name || call?.function?.name || '')
     // 有的 provider 会把 XML 形态的参数原文塞进 arguments：能从 <parameter=...> 里
     // 提出真实参数时直接修复，不要因为 JSON 不合法就拒绝整个调用。
     if (args && typeof args === 'object' && typeof args._raw === 'string') {
@@ -2232,6 +2233,33 @@ class AgentImpl implements AgentControl {
           kind: 'tool-call-recovered',
           message: `工具 ${name} 的参数是 XML 文本，已自动提取参数并继续执行`,
         })
+      }
+    }
+    // 模型直接点名 MCP 工具（如 Office 的 open_document）而不是 mcp_call 时：
+    // 只要该工具在唯一已连接服务里，就自动改写成 mcp_call({serverId, tool, args})。
+    // 这样不会因为“open_document 不在本 turn 冻结集合”被拒绝，也符合 mcp_call 的统一入口。
+    const directMcpFrozenNames = this.frozenToolDefs?.map((d) => String(d.name))
+    if (name !== 'mcp_call' && directMcpFrozenNames && !directMcpFrozenNames.includes(name)) {
+      const hits = mcpService.findServersByTool(name)
+      if (hits.length === 1) {
+        if (!directMcpFrozenNames.includes('mcp_call')) {
+          return {
+            callId,
+            name: 'mcp_call',
+            diagnostic: true,
+            result: {
+              ok: false,
+              error: `检测到 MCP 工具 ${name}，但本会话没有启用 mcp_call。请在「设置 → 工具 → 管理」启用 mcp_call 后重试。`,
+              code: 'DENIED',
+            },
+          }
+        }
+        args = { serverId: hits[0].serverId, tool: name, args: args && typeof args === 'object' ? args : {} }
+        this.emit('agent/notice', {
+          kind: 'tool-call-recovered',
+          message: `模型直接调用了 MCP 工具 ${name}，已自动转成 mcp_call（serverId=${hits[0].serverId}）`,
+        })
+        name = 'mcp_call'
       }
     }
 

@@ -32,8 +32,7 @@
 
       <div class="ppw-title" :title="activeTitle">{{ activeTitle }}</div>
 
-      <!-- 弹性占位：把三个窗口按钮顶到顶栏最右（与主窗口顶栏同一做法）。
-           标题是绝对定位居中的，不参与流式布局，所以这个占位才是把按钮推到右边的那一项。 -->
+      <!-- 弹性占位：把窗口按钮顶到顶栏最右，标题保持左侧 -->
       <div class="ppw-header-spacer" style="flex:1;min-width:0;"></div>
 
       <template v-if="!overlay">
@@ -252,11 +251,9 @@ function closeWindow() { void getPlatform().window.close() }
 }
 
 .ppw-title {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  /* 插件标题固定在左侧；中间留白由 spacer 承担 */
   max-width: 40%;
+  padding: 0 8px 0 2px;
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;

@@ -69,16 +69,27 @@ function captureAnchor(): void {
 
 const chipStyle = computed<Record<string, string>>(() => {
   const r = anchorRect.value
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1200
   const vh = typeof window !== 'undefined' ? window.innerHeight : 800
   if (!r) return { top: '48px', right: '12px' }
-  const top = Math.min(Math.max(4, r.top + r.height / 2 - 14), vh - 34)
-  const style: Record<string, string> = { top: `${top}px` }
+  const style: Record<string, string> = {}
   if (anchorInRail.value) {
     // 左侧竖直导航栏：按钮左边是窗口边缘，改为从按钮**右侧**伸出
+    style.top = `${Math.min(Math.max(4, r.top + r.height / 2 - 14), vh - 34)}px`
     style.left = `${r.right + 6}px`
+    return style
+  }
+  // 顶栏 / 底部导航 / 窄窗口：贴到窗口右上角关闭按钮的左侧，避免通知停在导航栏中间
+  const closeEl = typeof document !== 'undefined'
+    ? document.querySelector<HTMLElement>('.mainPanel .app-window-close')
+    : null
+  const cr = closeEl?.getBoundingClientRect()
+  if (cr && cr.width > 0) {
+    style.top = `${Math.min(Math.max(4, cr.top + cr.height / 2 - 14), vh - 34)}px`
+    style.right = `${vw - cr.left + 6}px`
   } else {
-    // 顶栏 / 底部导航 / 窄窗口：贴在按钮**左侧**（用 right 定位，不依赖胶囊自身宽度）
-    style.right = `${(typeof window !== 'undefined' ? window.innerWidth : 1200) - r.left + 6}px`
+    style.top = `${Math.min(Math.max(4, r.top + r.height / 2 - 14), vh - 34)}px`
+    style.right = `${vw - r.left + 6}px`
   }
   return style
 })

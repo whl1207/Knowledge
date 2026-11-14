@@ -537,9 +537,6 @@ const cardTitle = (p: PpePage) => zh.value
               <i class="fa fa-check ppe-check"></i>
             </div>
             <div class="ppe-card-foot">
-              <span class="ppe-src" :title="cardTitle(p)">
-                {{ (p.src === 0 ? (zh ? '原 PDF' : 'Original') : srcNames[p.src]) }} · P{{ p.index + 1 }}
-              </span>
               <span class="ppe-card-btns">
                 <button class="ppe-mini" :disabled="busy || i === 0" @click.stop="moveTo(i, i - 1)" :title="zh ? '前移' : 'Move up'"><i class="fa fa-arrow-left"></i></button>
                 <button class="ppe-mini" :disabled="busy || i === total - 1" @click.stop="moveTo(i, i + 1)" :title="zh ? '后移' : 'Move down'"><i class="fa fa-arrow-right"></i></button>
@@ -695,11 +692,11 @@ const cardTitle = (p: PpePage) => zh.value
 .ppe-card-foot {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 2px;
-  padding: 4px 4px 4px 6px;
+  padding: 4px;
   border-top: 1px solid var(--borderColor);
 }
-.ppe-src { flex: 1; min-width: 0; font-size: 11px; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ppe-card-btns { display: flex; gap: 1px; }
 .ppe-mini {
   width: 20px;

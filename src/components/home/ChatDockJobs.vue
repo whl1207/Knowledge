@@ -91,14 +91,30 @@ function dotClass(job: JobInfo): string {
   if (job.status === 'cancelled') return 'fa-ban cdj-muted'
   return 'fa-check-circle cdj-done'
 }
+function formatDuration(ms: number): string {
+  const total = Math.max(1, Math.round(ms / 1000))
+  if (total < 60) return `${total}s`
+  const sec = total % 60
+  const min = Math.floor(total / 60)
+  if (min < 60) return `${min}m ${String(sec).padStart(2, '0')}s`
+  const hour = Math.floor(min / 60)
+  return `${hour}h ${String(min % 60).padStart(2, '0')}m`
+}
 function statusText(job: JobInfo): string {
-  if (job.status === 'running') {
-    const elapsed = job.createdAt ? Math.max(1, Math.round((Date.now() - job.createdAt) / 1000)) : 0
-    return elapsed ? `${elapsed}s` : (zh.value ? '运行中' : 'running')
-  }
-  if (job.status === 'cancelled') return zh.value ? '已停止' : 'stopped'
-  if (job.status === 'error') return zh.value ? '失败' : 'error'
-  return zh.value ? '完成' : 'done'
+  const shell = shellJobs.value.find(s => s.id === job.id)
+  const start = Number(job.createdAt) || Number(shell?.startedAt) || 0
+  // running 用当前时间；完成 / 停止用 job-registry 的 updatedAt（shell 任务同样有这条 registry 记录）
+  const end = job.status === 'running'
+    ? Date.now()
+    : (Number(job.updatedAt) || 0)
+  const duration = start > 0 && end >= start ? formatDuration(end - start) : ''
+  if (job.status === 'running') return duration || (zh.value ? '运行中' : 'running')
+  const label = job.status === 'cancelled'
+    ? (zh.value ? '已停止' : 'stopped')
+    : job.status === 'error'
+      ? (zh.value ? '失败' : 'error')
+      : (zh.value ? '完成' : 'done')
+  return duration ? `${label} · ${duration}` : label
 }
 function outputOf(job: JobInfo): string {
   const shell = shellJobs.value.find(s => s.id === job.id)

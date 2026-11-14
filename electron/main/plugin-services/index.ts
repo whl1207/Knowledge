@@ -307,7 +307,7 @@ export function createPluginHostServices(opts: PluginHostServicesOptions): Plugi
     return { options, model }
   }
 
-  const services: Partial<PluginServices> = {}
+  const services: any = {}
   const names: PluginServiceName[] = []
   /** 卸载时要主动释放的资源（server / 子进程 / 定时器） */
   const resourceDisposers: Array<() => void> = []

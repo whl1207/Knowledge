@@ -85,10 +85,6 @@
           ><i class="fa fa-chevron-right"></i></button>
         </div>
         <div class="au-foot-main">
-          <span class="au-hint">
-            <template v-if="allAnswered">{{ zh ? `已答完 ${total} 题，确认后提交` : `All ${total} answered — review then submit` }}</template>
-            <template v-else>{{ zh ? `还有 ${total - answeredCount} 题未答；先按「下一题」逐题确认` : `${total - answeredCount} unanswered — use “Next” to review each question` }}</template>
-          </span>
           <button
             class="au-abort"
             :title="zh ? '中止这次任务（会真的停止智能体，不是稍后回答）' : 'Abort this run (actually stops the agent)'"
@@ -266,15 +262,24 @@ const renderMarkdown = (s: string) => renderQuestionMarkdown(String(s || ''))
 .au-nav:disabled { opacity: .35; cursor: default; }
 .au-pager-count { font-size: 11px; opacity: .8; min-width: 62px; text-align: center; }
 .au-pager-answered { margin-left: 4px; opacity: .7; }
-.au-foot-main { display: flex; align-items: center; gap: 6px; }
-.au-hint { flex: 1; min-width: 0; text-align: left; font-size: 11px; opacity: .55; }
+.au-foot-main { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 /* 底部按钮按内容宽：全局 style.css / 其他组件里存在 button{width:100%} 之类的规则，
-   不写死宽度时按钮会被撑满整行、把左边的提示挤成竖排 */
-.au-foot-main :deep(.el-button) { width: auto; flex: none; }
-/* 「中止任务」是破坏性操作：低强调的文字按钮，和「稍后回答」区分开，避免误点 */
+   不写死宽度时按钮会被撑满整行；四个按钮统一高度、去掉 el-button 默认左外边距 */
+.au-foot-main :deep(.el-button) {
+  width: auto; flex: none;
+  height: 24px; padding: 0 10px;
+  margin-left: 0 !important;
+  font-size: 11px; white-space: nowrap;
+}
+/* 「中止任务」是破坏性操作：红色描边按钮，和「稍后回答」同高，避免误点 */
 .au-abort {
-  flex: none; border: 0; background: transparent; color: #e03131;
-  font-size: 11px; padding: 2px 4px; cursor: pointer; border-radius: 3px;
+  flex: none; box-sizing: border-box;
+  height: 24px; padding: 0 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #e03131; border-radius: 4px;
+  background: transparent; color: #e03131;
+  font-size: 11px; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: all .12s;
 }
 .au-abort:hover { background: color-mix(in srgb, #e03131 12%, transparent); }
 </style>

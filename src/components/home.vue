@@ -491,6 +491,17 @@
               <span>{{ isTurnFolded(message) ? turnFoldLabel(message) : (store.locales=='zh' ? '收起过程' : 'Hide details') }}</span>
             </button>
             <template v-if="!isTurnFolded(message)">
+            <button
+              v-if="hiddenUnitCount(message) > 0"
+              class="execution-earlier"
+              :title="store.locales == 'zh' ? '加载更早的执行步骤（也会在上滑到顶部时自动加载）' : 'Load earlier steps (also loads when scrolling to the top)'"
+              @click="loadEarlierUnits(message)"
+            >
+              <i class="fa fa-history"></i>
+              {{ store.locales == 'zh'
+                ? `显示更早的 ${hiddenUnitCount(message)} 个步骤`
+                : `Show ${hiddenUnitCount(message)} earlier steps` }}
+            </button>
             <template
               v-for="(unit, ui) in displayUnits(message)"
               :key="unit.id || unit.__groupKey || ui"
@@ -542,6 +553,15 @@
                 >
                   <i class="fa fa-external-link"></i>
                 </span>
+                <!-- 计划 / 清单步骤的关闭按钮：放在状态图标**左侧**，保证所有步骤的状态图标都贴在最右 -->
+                <span
+                  v-if="unit.description === 'update_plan' || unit.description === 'update_todo'"
+                  class="tool-box-close"
+                  :title="store.locales=='zh' ? '关闭' : 'Close'"
+                  @click.stop="closeToolUnit(message.timestamp, unit.id || ui)"
+                >
+                  <i class="fa fa-times"></i>
+                </span>
                 <!-- 异常（非零退出 / 超时 / 信号）：中性胶囊 + 红点，代替状态图标（对齐 DSH） -->
                 <span v-if="unitExitPill(unit)" class="tool-box-pill" :title="unitExitPillTitle(unit)">
                   <i class="fa fa-circle"></i>{{ unitExitPill(unit) }}
@@ -553,14 +573,6 @@
                   <i v-else class="fa fa-clock-o"></i>
                 </span>
                 <!-- 展开/折叠：整行标题都可点（原先右侧还有一个箭头按钮，重复了，已移除） -->
-                <span
-                  v-if="unit.description === 'update_plan' || unit.description === 'update_todo'"
-                  class="tool-box-close"
-                  :title="store.locales=='zh' ? '关闭' : 'Close'"
-                  @click.stop="closeToolUnit(message.timestamp, unit.id || ui)"
-                >
-                  <i class="fa fa-times"></i>
-                </span>
               </div>
               <!-- 展开态：完整输入（参数/代码）与输出（结果/思考/计划）详情 -->
               <template v-if="isToolUnitExpanded(message.timestamp, unit.id || ui)">
@@ -1114,7 +1126,7 @@
             ref="textInput"
             class="message-input scoll"
             style="width:100%"
-            rows="3"
+            rows="1"
           ></textarea>
           <div class="input-controls">
             <!-- 工作区选择（每个聊天各自一份；工作区决定智能体工作目录并注入上下文）：
@@ -1242,7 +1254,7 @@
               </div>
               <span
                 v-if="currentChat.mode === 'agent' || currentChat.mode === 'agent2'"
-                class="mode-linked-chip composer-chip"
+                class="mode-linked-chip composer-chip agent-linked-chip"
                 @click="toggleAgentPicker"
                 :title="getAgentButtonTitle()"
               >
@@ -2226,6 +2238,35 @@ const inputText = computed<string>({
     writeChatDraft(chats.value, currentChatIndex.value, value)
   },
 })
+
+// ==================== 输入框自动增高（对齐 DSH 的 composer） ====================
+const textInput = ref<HTMLTextAreaElement | null>(null)
+/** 用户拖动过的高度作为下限；内容更少时保持用户拖动的大小，内容更多时继续长高 */
+const composerManualHeight = ref<number | null>(null)
+const COMPOSER_MIN_HEIGHT = 42
+const COMPOSER_MAX_HEIGHT = 240
+
+const autoResizeComposer = () => {
+  const el = textInput.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.overflowY = 'hidden'
+  const min = composerManualHeight.value
+    ? Math.max(COMPOSER_MIN_HEIGHT, composerManualHeight.value)
+    : COMPOSER_MIN_HEIGHT
+  el.style.minHeight = `${min}px`
+  const natural = Math.max(el.scrollHeight, min)
+  const height = Math.min(natural, COMPOSER_MAX_HEIGHT)
+  el.style.height = `${height}px`
+  el.style.overflowY = natural > COMPOSER_MAX_HEIGHT ? 'auto' : 'hidden'
+}
+
+watch(inputText, () => { void nextTick(autoResizeComposer) })
+watch(() => chats.value[currentChatIndex.value]?.id, () => {
+  composerManualHeight.value = null
+  void nextTick(autoResizeComposer)
+})
+onMounted(() => { void nextTick(autoResizeComposer) })
 
 // ==================== 右侧栏（DSH 同款 dock）：每个聊天各自一份 ====================
 // 与输入框草稿同一套做法：状态挂在 chat 上（chat.dock），随 chats 一起持久化。
@@ -4633,6 +4674,11 @@ const handleScroll = () => {
       clearTimeout(scrollTimeout.value)
       scrollTimeout.value = null
     }
+  }
+  // 长步骤窗口：上滑到顶部时自动加载更早的步骤（等价于点开「显示更早的 N 个步骤」）
+  if (container.scrollTop < 80) {
+    const earlier = container.querySelector<HTMLElement>('.execution-earlier')
+    earlier?.click()
   }
 }
 
@@ -7292,7 +7338,7 @@ function createNewChatData(): Chat {
     createdAt: Date.now(),
     online: false,
     isGenerating: false,
-    mode: 'normal',  // 默认普通模式
+    mode: 'agent2',  // 新对话默认智能体模式（普通聊天仍可在模式菜单切换）
     // 新聊天默认不使用工作区（不回落全局默认）；需要时在输入框左下角选择
     noWorkspace: true,
     // 右侧栏（每聊天独立）：新聊天默认备好 文件/终端/浏览器 三个标签，但初始收起
@@ -10037,7 +10083,8 @@ const onResizeStart = (e: MouseEvent) => {
 
   const onMouseMove = (ev: MouseEvent) => {
     const delta = startY - ev.clientY // 上拖为正（变大），下拖为负（变小）
-    const newHeight = Math.max(40, startHeight + delta) // 最小 40px
+    const newHeight = Math.max(COMPOSER_MIN_HEIGHT, startHeight + delta)
+    composerManualHeight.value = newHeight
     textarea.style.height = newHeight + 'px'
     textarea.style.minHeight = newHeight + 'px'
     // 移除 rows 属性，改用固定像素高度
@@ -10049,6 +10096,7 @@ const onResizeStart = (e: MouseEvent) => {
     document.removeEventListener('mouseup', onMouseUp)
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
+    void nextTick(autoResizeComposer)
   }
 
   document.addEventListener('mousemove', onMouseMove)
@@ -11529,10 +11577,50 @@ const turnFoldLabel = (message: any): string => {
  * 不是把连续的同名工具调用合成一行。合并会让"想单独看某一次结果"时还要多展开一层，
  * 反而更麻烦——所以这里只保留一到四档的显隐差异。
  */
-const displayUnits = (message: any): any[] => {
+const filteredDisplayUnits = (message: any): any[] => {
   const units = sortedExecutionUnits(message?.executionUnits)
   if (stepPolicy.value.settledReasoningPreview) return units
   return units.filter((u) => !(u?.stepType === 'reasoning' && u.status !== 'running'))
+}
+
+/**
+ * 长步骤窗口：一步 400 个工具调用时不要把 400 个 tool-box 全部挂到 DOM。
+ * 只渲染最后 50 个；用户向上滚到顶部（或点「显示更早步骤」）时再按 50 递增加载，
+ * 与 DSH 的历史步骤懒加载同一思路。已折叠的整轮不进入这里。
+ */
+const EXECUTION_UNIT_WINDOW = 50
+const executionUnitWindows = ref<Record<string, number>>({})
+const executionWindowKey = (message: any): string => String(Number(message?.timestamp) || 0)
+const executionWindowSize = (message: any): number => {
+  const key = executionWindowKey(message)
+  return Math.max(EXECUTION_UNIT_WINDOW, Number(executionUnitWindows.value[key]) || EXECUTION_UNIT_WINDOW)
+}
+const hiddenUnitCount = (message: any): number => {
+  const units = filteredDisplayUnits(message)
+  return Math.max(0, units.length - executionWindowSize(message))
+}
+const displayUnits = (message: any): any[] => {
+  const units = filteredDisplayUnits(message)
+  const size = executionWindowSize(message)
+  return units.length > size ? units.slice(units.length - size) : units
+}
+
+/** 展开更早的步骤；把新增内容上方的高度补回 scrollTop，避免视口突然跳走 */
+const loadEarlierUnits = (message: any) => {
+  const key = executionWindowKey(message)
+  const before = hiddenUnitCount(message)
+  if (before <= 0) return
+  const container = messageContainer.value
+  const beforeHeight = container?.scrollHeight || 0
+  executionUnitWindows.value = {
+    ...executionUnitWindows.value,
+    [key]: executionWindowSize(message) + EXECUTION_UNIT_WINDOW,
+  }
+  void nextTick(() => {
+    if (!container) return
+    const delta = container.scrollHeight - beforeHeight
+    if (delta > 0) container.scrollTop += delta
+  })
 }
 
 /** 工具卡片展开/折叠状态（key = 消息时间戳 + 单元 id）
@@ -12563,6 +12651,15 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .mode-linked-chip.error {
   border-color: rgba(231, 76, 60, 0.5);
   color: #e74c3c;
+}
+
+/* 智能体预设名按内容自适应：80px 会把「通用智能体」截成「通用智…」。
+   仍保留上限，避免超长自建预设把整行工具条挤爆。 */
+.mode-linked-chip.agent-linked-chip {
+  max-width: min(220px, 42vw);
+}
+.mode-linked-chip.agent-linked-chip .mode-linked-name {
+  max-width: 180px;
 }
 
 .mode-linked-name {
@@ -13804,6 +13901,27 @@ select {
   color: var(--fontActiveColor);
 }
 .execution-fold-row .fa { font-size: 10px; }
+
+/* 长步骤窗口：只渲染最近 N 步，向上滚/点击时加载更早步骤 */
+.execution-earlier {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 3px 8px;
+  border: 1px dashed color-mix(in srgb, var(--fontColor) 22%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fontColor) 62%, transparent);
+  font-size: 11px;
+  cursor: pointer;
+}
+.execution-earlier:hover {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+.execution-earlier .fa { font-size: 10px; }
 
 /* 智能体模式：任务清单面板（输入框上方；可手动标记/清空） */
 .agent-todos-panel {
@@ -15642,8 +15760,8 @@ select {
 .message-input {
   box-sizing: border-box;
   width: 100%;
-  min-height: 60px;
-  max-height: 120px;
+  min-height: 42px;
+  max-height: 240px;
   font-size: 12px;
   /* 内边距与卡片一致地保持紧凑（文字区左右对称，不再留 20px 右侧空白） */
   padding: 6px 6px 2px;
@@ -15653,6 +15771,7 @@ select {
   border-radius: 6px;
   background-color: var(--backgroundColor);
   resize: none;
+  overflow-y: auto;
 }
 
 .input-controls {

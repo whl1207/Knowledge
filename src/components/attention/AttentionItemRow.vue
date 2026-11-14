@@ -119,10 +119,6 @@
           <button class="at-nav" :disabled="index >= total - 1" @click.stop="go(1)"><i class="fa fa-chevron-right"></i></button>
         </div>
         <div class="at-inline-btns">
-          <span class="at-hint">
-            <template v-if="allAnswered">{{ zh ? `已答完 ${total} 题` : `All ${total} answered` }}</template>
-            <template v-else>{{ zh ? `还有 ${total - answeredCount} 题未答；先按「下一题」` : `${total - answeredCount} unanswered — use “Next”` }}</template>
-          </span>
           <el-button size="small" @click="answering = false">{{ zh ? '取消' : 'Cancel' }}</el-button>
           <el-button
             v-if="canSkipSubmit"

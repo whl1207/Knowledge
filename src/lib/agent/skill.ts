@@ -53,6 +53,7 @@ export const SKILL_AGENT_DEFAULT_TOOLS = [
   'browser_wait_for',
   'browser_run',
   'skill',
+  'mcp_call',
   'ask_user',
   'update_plan',
   'update_todo',

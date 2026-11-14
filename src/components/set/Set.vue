@@ -499,6 +499,17 @@ const getTitle = (item:any) => {
   return store.locales === 'zh' ? item.title_zh : item.title_en
 }
 
+/** 当前设置页标题（窄屏内容页的返回按钮与它同一行） */
+const activeNavTitle = computed(() => {
+  const id = activeNav.value
+  for (const group of navTreeAll.value) {
+    if (group.id === id) return getTitle(group)
+    const child = group.children?.find((c) => c.id === id)
+    if (child) return getTitle(child)
+  }
+  return ''
+})
+
 // 功能开关：控制 App.vue 导航栏按钮的显示/隐藏
 // 主面板（与 store 的 MAIN_PANEL_KEYS 对齐）走 hiddenNav；非主面板但占用导航栏的入口（浏览器 Agent / 待我处理）走 hiddenExtras
 const EXTRA_NAV_KEYS = ['agent', 'attention']
@@ -1288,10 +1299,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="settings-wrap" :class="{ standalone, tall: isTallLayout, 'header-hidden': hideHeader }">
+  <div class="settings-wrap" :class="{ standalone, tall: isTallLayout, 'header-hidden': hideHeader || isTallLayout }">
     <!-- 顶部标题栏：标题 + 版本 + 关闭/窗口按钮（独立窗口中整条即为窗口拖动区）
          单窗口模式下由主窗口上方导航栏承担（hideHeader），不再重复显示一条「设置」标题栏 -->
-    <div v-if="!hideHeader" class="settings-header" :class="{ 'settings-header-drag': standalone }">
+    <div v-if="!hideHeader && !isTallLayout" class="settings-header" :class="{ 'settings-header-drag': standalone }">
       <!-- 细长窗口：内容屏左上角的返回（回到设置分类列表） -->
       <div v-if="isTallLayout && !showNavScreen" class="settings-back" @click="showNavScreen = true"
         :title="store.locales === 'zh' ? '返回设置分类' : 'Back to settings list'">
@@ -1386,6 +1397,17 @@ onBeforeUnmount(() => {
 
     <!-- 右侧设置内容（细长窗口下与左侧导航各占满整屏互相切换，见 .tall 样式） -->
     <div class="settings-content scoll" v-show="!isTallLayout || !showNavScreen">
+      <!-- 窄屏内容页：返回按钮放在标题左侧，不做整条标题栏 -->
+      <div v-if="isTallLayout && !showNavScreen" class="settings-tall-head">
+        <button
+          class="settings-tall-back"
+          :title="store.locales === 'zh' ? '返回设置分类' : 'Back to settings'"
+          @click="showNavScreen = true"
+        >
+          <i class="fa fa-arrow-left"></i>
+        </button>
+        <span class="settings-tall-title">{{ activeNavTitle }}</span>
+      </div>
       <!-- 系统状态（原「系统配置」改名：Python / 安全策略 / 本地存储等运行状态；随「其他」分区显示） -->
       <div v-if="activeNav === 'other'" class="settings-section">
         <div class="settings-group">
@@ -2089,12 +2111,14 @@ onBeforeUnmount(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  box-sizing: border-box;
 }
 
 /* 顶部标题栏：标题 + 关闭按钮 */
 .settings-header {
   flex-shrink: 0;
   height: 34px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -2235,6 +2259,8 @@ onBeforeUnmount(() => {
 .settings-container {
   flex: 1;
   min-height: 0;
+  box-sizing: border-box;
+  position: relative;
   display: flex;
   background-color: var(--backgroundColor);
   border: 1px solid var(--borderColor);
@@ -2248,6 +2274,7 @@ onBeforeUnmount(() => {
 .settings-nav {
   width: 170px;
   height: calc(100% - 10px);
+  box-sizing: border-box;
   background-color: var(--menuColor);
   border-right: 1px solid var(--borderColor);
   display: flex;
@@ -2394,6 +2421,7 @@ onBeforeUnmount(() => {
 
 .settings-content {
   flex: 1;
+  box-sizing: border-box;
   overflow-x: hidden;
   overflow-y: auto;
   height: calc(100% - 0px);
@@ -2412,81 +2440,114 @@ onBeforeUnmount(() => {
   border-bottom-right-radius: 0;
 }
 
-/* 细长窗口的导航 = 紧凑列表（与桌面条目同一档尺寸，不再放大成 44px 大卡片）：
-   层级靠缩进 + 视觉轻重区分；内容最大 560px 居中，避免整屏一条长键。 */
+/* 细长窗口也复用桌面版设置导航（搜索 + 分组 + 条目），不再换成手机专属的卡片列表；
+   导航页整屏时限制最大宽度并居中，点击条目后进入内容页。 */
 .settings-wrap.tall .settings-nav {
-  padding: 8px;
-  padding-left: max(8px, calc((100% - 560px) / 2));
-  padding-right: max(8px, calc((100% - 560px) / 2));
-  gap: 2px;
-  background-color: var(--backgroundColor);
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 5px;
+  gap: 0;
+  background-color: var(--menuColor);
+}
+/* 细长窗口的内容页：返回按钮与页标题同一行，不做整条标题栏 */
+.settings-tall-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 2px;
+  color: var(--fontColor);
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+.settings-tall-back {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--menuColor);
+  color: var(--fontColor);
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-tall-back:hover {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+}
+.settings-tall-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .settings-wrap.tall .nav-group {
-  gap: 2px;
+  gap: 0;
   margin: 0;
   padding: 0;
 }
-/* 二级子项缩进 + 左侧竖线（与桌面同款「挂在分组下」的观感） */
+/* 复用桌面版导航的缩进 / 行高 / 底色，不再把每一项画成独立卡片 */
 .settings-wrap.tall .nav-group-children {
-  gap: 2px;
-  margin: 0 0 4px 12px;
-  padding-left: 4px;
+  gap: 0;
+  margin: 0 0 4px 14px;
+  padding-left: 6px;
   border-left: 1px solid var(--borderColor);
 }
 .settings-wrap.tall .nav-group-header,
 .settings-wrap.tall .nav-item {
   box-sizing: border-box;
-  width: 100%;
-  min-height: 34px;
-  padding: 0 10px;
-  margin: 0;
+  width: auto;
+  min-height: 0;
+  padding: 8px 10px;
+  margin-bottom: 5px;
   justify-content: flex-start;
   gap: 8px;
-  border: 1px solid var(--borderColor);
-  border-radius: 5px;
-  background-color: var(--menuColor);
-  transition: transform 0.08s ease, background-color 0.15s ease, border-color 0.15s ease;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
-/* 一级分组：文字加粗（层级比子项重） */
 .settings-wrap.tall .nav-group-header {
-  opacity: 1;
-  font-size: 13px;
+  opacity: 0.8;
+  font-size: 12px;
   font-weight: 600;
 }
-/* 二级子项：更矮、更轻（底色回到页面底色），配合缩进明确「属于上一级」 */
 .settings-wrap.tall .nav-item-sub {
-  min-height: 32px;
-  padding: 0 10px;
-  margin: 0;
-  background-color: var(--backgroundColor);
+  min-height: 0;
+  padding: 8px 10px;
+  margin-bottom: 5px;
+  background-color: transparent;
 }
 .settings-wrap.tall .nav-group-header span,
 .settings-wrap.tall .nav-item span {
   display: inline;
   flex: 1;
-  font-size: 13px;
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .settings-wrap.tall .nav-group-header i,
 .settings-wrap.tall .nav-item i {
-  width: 16px;
-  font-size: 13px;
+  width: 20px;
+  font-size: 14px;
 }
-/* 按下去的条目：略微内凹 */
 .settings-wrap.tall .nav-group-header:active,
 .settings-wrap.tall .nav-item:active {
-  transform: scale(0.995);
+  transform: none;
   background-color: var(--menuActiveColor);
 }
 .settings-wrap.tall .nav-item.active {
-  border-color: var(--fontActiveColor);
+  border: 0;
   background-color: var(--menuActiveColor);
   color: var(--fontActiveColor);
 }
 .settings-wrap.tall .nav-item-sub.active::before {
-  display: none;
+  display: block;
 }
 
 .settings-group {
@@ -3476,45 +3537,9 @@ onBeforeUnmount(() => {
 /* 窄窗口（宽度 ≤ 600px）且**不是**细长窗口时：导航退化成 40px 图标条（细长窗口走整屏的钢琴键列表，
    见下方 .settings-wrap.tall 的一组规则；用 :not(.tall) 把两者分开，否则手机上只会看到图标） */
 @media (max-width: 600px) {
-  .settings-wrap:not(.tall) .settings-nav {
-    width: 40px;
-    min-width: 40px;
-  }
-  
-  .settings-wrap:not(.tall) .nav-item span {
-    display: none;
-  }
-  
-  .settings-wrap:not(.tall) .nav-item {
-    justify-content: center;
-    padding: 10px 10px;
-  }
+  /* 设置导航保持完整的「图标 + 文字」列表：不再在窄窗口收成 40px 图标条，
+     避免看起来像被挤到左侧的一条工具栏。窄窗口只调整表单排版。 */
 
-  /* 窄模式：隐藏一级分组，二级全部展开 */
-  .settings-wrap:not(.tall) .nav-group-header {
-    display: none;
-  }
-  .settings-wrap:not(.tall) .nav-group-children {
-    display: flex !important; /* 覆盖 v-show 折叠，二级始终展开 */
-    margin-left: 0;
-    padding-left: 0;
-    border-left: none;
-  }
-  .settings-wrap:not(.tall) .nav-item-sub {
-    justify-content: center;
-    padding: 4px 0;
-  }
-  .settings-wrap:not(.tall) .nav-item-sub i {
-    font-size: 13px;
-    width: 22px;
-    height: 22px;
-    line-height: 22px;
-    color: var(--fontColor);
-  }
-  .settings-wrap:not(.tall) .nav-item-sub.active::before {
-    display: none;
-  }
-  
   .form-group {
     display: grid;
     /* 显式单列占满整行：避免隐式 auto 列宽度不确定 */

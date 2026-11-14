@@ -1351,7 +1351,7 @@ class PluginHost {
             throw new Error('订阅 session/created 需要 { global: true }（它是全机事件，不属于某个 agent）')
           }
           if (options?.global) {
-            if (needsObserve && !(rec.manifest.permissions ?? []).includes('agent.observe')) {
+            if (needsObserve && !(rec.manifest?.permissions ?? []).includes('agent.observe')) {
               throw new Error(
                 `订阅全局事件 ${typeName} 需要 agent.observe 权限（在 package.json 的 aikm.permissions 里声明）`,
               )

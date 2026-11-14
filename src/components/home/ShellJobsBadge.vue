@@ -14,33 +14,35 @@
       <span class="sj-count">{{ runningCount || jobs.length }}</span>
     </button>
 
-    <div v-if="open" class="sj-panel">
-      <div class="sj-head">
-        <span>{{ zh ? '后台命令' : 'Background commands' }}</span>
-        <span class="sj-head-sub">{{ runningCount ? (zh ? `${runningCount} 个运行中` : `${runningCount} running`) : (zh ? '全部结束' : 'all done') }}</span>
-      </div>
-      <div class="sj-list scoll">
-        <div v-for="job in jobs" :key="job.id" class="sj-job">
-          <div class="sj-row">
-            <i class="fa sj-dot" :class="dotClass(job)"></i>
-            <span class="sj-cmd" :title="job.command">{{ job.description || job.command }}</span>
-            <span class="sj-meta">{{ statusText(job) }}</span>
-            <button v-if="job.status === 'running'" class="sj-btn stop" @click.stop="stop(job)">
-              {{ zh ? '停止' : 'Stop' }}
-            </button>
-            <button v-else class="sj-btn" @click.stop="dismiss(job)">
-              {{ zh ? '清除' : 'Clear' }}
-            </button>
+    <Teleport to="body">
+      <div v-if="open" ref="panelRef" class="sj-panel" :style="panelStyle">
+        <div class="sj-head">
+          <span>{{ zh ? '后台命令' : 'Background commands' }}</span>
+          <span class="sj-head-sub">{{ runningCount ? (zh ? `${runningCount} 个运行中` : `${runningCount} running`) : (zh ? '全部结束' : 'all done') }}</span>
+        </div>
+        <div class="sj-list scoll">
+          <div v-for="job in jobs" :key="job.id" class="sj-job">
+            <div class="sj-row">
+              <i class="fa sj-dot" :class="dotClass(job)"></i>
+              <span class="sj-cmd" :title="job.command">{{ job.description || job.command }}</span>
+              <span class="sj-meta">{{ statusText(job) }}</span>
+              <button v-if="job.status === 'running'" class="sj-btn stop" @click.stop="stop(job)">
+                {{ zh ? '停止' : 'Stop' }}
+              </button>
+              <button v-else class="sj-btn" @click.stop="dismiss(job)">
+                {{ zh ? '清除' : 'Clear' }}
+              </button>
+            </div>
+            <pre v-if="job.output" class="sj-out">{{ tail(job.output) }}</pre>
           </div>
-          <pre v-if="job.output" class="sj-out">{{ tail(job.output) }}</pre>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { usestore } from '@/store'
 import { getPlatform } from '@/platform'
 import type { ShellJobUi } from '@/platform/contract'
@@ -50,11 +52,36 @@ const zh = computed(() => store.locales === 'zh')
 const jobs = ref<ShellJobUi[]>([])
 const open = ref(false)
 const rootRef = ref<HTMLElement | null>(null)
+const panelRef = ref<HTMLElement | null>(null)
+/** 面板 teleport 到 body，按按钮矩形 fixed 定位（避免被 chat-header 的 overflow 裁剪 / 被对话盖住） */
+const panelStyle = ref<Record<string, string>>({ top: '0px', right: '0px' })
+
+function updatePanelPosition(): void {
+  const el = rootRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const width = Math.min(460, window.innerWidth * 0.8)
+  // 右对齐按钮；窗口太窄时至少留 8px，避免面板左边超出视口
+  const right = Math.max(8, Math.min(window.innerWidth - rect.right, window.innerWidth - width - 8))
+  const maxTop = Math.max(8, window.innerHeight - 140)
+  panelStyle.value = {
+    top: `${Math.min(rect.bottom + 6, maxTop)}px`,
+    right: `${right}px`,
+  }
+}
 
 let timer: ReturnType<typeof setInterval> | null = null
 let busy = false
 
 const runningCount = computed(() => jobs.value.filter((j) => j.status === 'running').length)
+
+// 任务被清空后根节点会卸载：先收起面板并移除定位监听，避免监听泄漏
+watch(jobs, (list) => {
+  if (list.length || !open.value) return
+  open.value = false
+  window.removeEventListener('resize', updatePanelPosition)
+  window.removeEventListener('scroll', updatePanelPosition, true)
+})
 
 async function refresh(): Promise<void> {
   if (busy || typeof document !== 'undefined' && document.hidden) return
@@ -71,7 +98,15 @@ async function refresh(): Promise<void> {
 
 function toggle(): void {
   open.value = !open.value
-  if (open.value) void refresh()
+  if (open.value) {
+    void refresh()
+    void nextTick(updatePanelPosition)
+    window.addEventListener('resize', updatePanelPosition)
+    window.addEventListener('scroll', updatePanelPosition, true)
+  } else {
+    window.removeEventListener('resize', updatePanelPosition)
+    window.removeEventListener('scroll', updatePanelPosition, true)
+  }
 }
 
 async function stop(job: ShellJobUi): Promise<void> {
@@ -109,9 +144,12 @@ function tail(text: string): string {
 
 function onDocClick(e: MouseEvent): void {
   if (!open.value) return
-  const el = rootRef.value
-  if (el && e.target instanceof Node && el.contains(e.target)) return
+  const target = e.target
+  if (!(target instanceof Node)) return
+  if (rootRef.value?.contains(target) || panelRef.value?.contains(target)) return
   open.value = false
+  window.removeEventListener('resize', updatePanelPosition)
+  window.removeEventListener('scroll', updatePanelPosition, true)
 }
 
 onMounted(() => {
@@ -122,6 +160,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('mousedown', onDocClick)
+  window.removeEventListener('resize', updatePanelPosition)
+  window.removeEventListener('scroll', updatePanelPosition, true)
   if (timer) clearInterval(timer)
   timer = null
 })
@@ -147,9 +187,7 @@ onBeforeUnmount(() => {
 .sj-count { font-variant-numeric: tabular-nums; }
 
 .sj-panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
+  position: fixed;
   width: 460px;
   max-width: min(80vw, 460px);
   max-height: 60vh;
@@ -159,7 +197,7 @@ onBeforeUnmount(() => {
   border: 1px solid color-mix(in srgb, var(--fontColor) 18%, transparent);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
-  z-index: 3000;
+  z-index: 10000;
   overflow: hidden;
 }
 
