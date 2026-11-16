@@ -139,6 +139,8 @@ export function useAgentRun(deps: AgentRunDeps) {
     }
     // 聊天级温度覆盖（Agent 预设选中时由 selectAgentPreset 写入）
     if (typeof chat.config.temperature === 'number') llmConfig.temperature = chat.config.temperature
+    // 聊天级「思考强度」覆盖（模型选择面板里改；缺省跟随全局「设置 → 模型」）
+    if (chat.config.reasoningEffort) llmConfig.think = chat.config.reasoningEffort
     return { provider: type, config, llmConfig }
   }
 

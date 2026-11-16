@@ -215,6 +215,11 @@ export interface ChatConfig {
   maxTokens: number
   stream: boolean
   functionIndex: number
+  /**
+   * 本聊天的「思考强度」覆盖（模型选择面板里改；缺省 / undefined = 跟随「设置 → 模型」的全局值）。
+   * none = 关闭深度思考；low/medium/high/max = 逐级加强（不支持该档位的后端由 ai-core 自动降级）。
+   */
+  reasoningEffort?: 'none' | 'low' | 'medium' | 'high' | 'max'
   kbPath?: string
   kbTopK?: number
   /** 知识库检索策略：similarity=相似度, ontology=本体, multiHop=多跳, community=社区, agentic=Agentic */

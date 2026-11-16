@@ -5,8 +5,13 @@
   插件图标收纳成一个 `fa fa-th-large` 图标；点它之后主面板的内容区就渲染本网格，
   用 grid 列出全部插件面板，点一张卡片即以子窗口形态打开该插件。
 
-  卡片布局：**第一行 = 图标 + 面板名**，下面三行 = 插件描述（超出用省略号裁剪）。
+  卡片布局：**第一行 = 图标 + 面板名 + 「在新窗口打开」按钮**，下面三行 = 插件描述（超出用省略号裁剪）。
   这里刻意不再放「插件名」：面板名通常就等于插件名，两行写同一句话看不出信息量（踩过）。
+
+  两种打开方式（刻意分开）：
+  - 点卡片 / 标题：沿用原来的 `select`（多窗口模式 = 独立子窗口；单窗口模式 = 应用内浮层）；
+  - 点标题右侧的 `fa-external-link` 按钮：**强制**开独立子窗口（单窗口模式下也能并排看），
+    没有窗口壳时退回应用内浮层。按钮用 `@click.stop`，不会顺带触发卡片点击。
 
   底部状态栏：与知识库（knowRAG）底部状态栏同款样式，显示「共 N 个插件 / 已启用 M 个」。
   计数来自插件清单（不是面板条目数）—— 一个插件可能有多个面板、也可能一个面板都没有，
@@ -44,10 +49,19 @@
         :title="e.description ? `${e.title} — ${e.description}` : e.title"
         @click="$emit('select', e.key)"
       >
-        <!-- 第一行：图标 + 标题 -->
+        <!-- 第一行：图标 + 标题 + 「在新窗口打开」按钮（按钮只避开卡片点击，标题点击行为不变） -->
         <div class="plg-card-head">
           <div class="plg-card-icon"><i :class="e.icon"></i></div>
           <div class="plg-card-title">{{ e.title }}</div>
+          <button
+            class="plg-card-open"
+            type="button"
+            :title="zh ? '在新窗口打开' : 'Open in new window'"
+            :aria-label="zh ? '在新窗口打开' : 'Open in new window'"
+            @click.stop="$emit('open-window', e.key)"
+          >
+            <i class="fa fa-external-link"></i>
+          </button>
         </div>
         <!-- 下面三行：插件描述（没有描述时不占位） -->
         <div v-if="e.description" class="plg-card-desc">{{ e.description }}</div>
@@ -108,7 +122,11 @@ const props = withDefaults(
   { zh: true, highlight: '', totalCount: 0, enabledCount: 0 },
 )
 
-defineEmits<{ (e: 'select', key: string): void; (e: 'settings'): void }>()
+defineEmits<{
+  (e: 'select', key: string): void
+  (e: 'open-window', key: string): void
+  (e: 'settings'): void
+}>()
 
 /** 未启用 = 总数 - 已启用（负数不出，避免调用方传错时显示成 "-1 个"） */
 const disabledCount = computed(() => Math.max(0, props.totalCount - props.enabledCount))
@@ -217,6 +235,38 @@ const filteredEntries = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 「在新窗口打开」：只在卡片悬停/聚焦时显形，平时不抢视觉；点它不会触发卡片点击 */
+.plg-card-open {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s ease, background-color .12s ease, border-color .12s ease;
+}
+.plg-card:hover .plg-card-open,
+.plg-card.active .plg-card-open,
+.plg-card-open:focus-visible {
+  opacity: .65;
+}
+.plg-card-open:hover {
+  opacity: 1;
+  border-color: var(--borderColor);
+  background-color: var(--backgroundColor);
+}
+/* 触屏/无悬停设备：常显，否则点不到 */
+@media (hover: none) {
+  .plg-card-open { opacity: .6; }
 }
 /* 下面三行：插件描述，超出用省略号裁剪（完整内容在卡片 title 提示里） */
 .plg-card-desc {

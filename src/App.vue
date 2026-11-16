@@ -553,6 +553,29 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
     void store.openPluginPanel({ key, pluginId: btn?.pluginId, title: btn?.title, icon: btn?.icon })
   }
 
+  /**
+   * 卡片右上角「在新窗口打开」：**强制**走独立子窗口，不受单窗口模式影响
+   * （单窗口模式下点标题/卡片仍是应用内打开，这里给需要并排对照的用户一个出口）。
+   * 没有窗口壳（浏览器 / 安卓 / 局域网访客）或主进程未重启时，退回应用内浮层。
+   */
+  async function openPluginPanelInWindow(key: string) {
+    const btn = pluginNavButtons.value.find((b) => b.key === key)
+    const payload = { key, pluginId: btn?.pluginId, title: btn?.title, icon: btn?.icon }
+    if (hasCapability('window.chrome')) {
+      try {
+        const opened = await getPlatform().window.openPluginPanelWindow(payload)
+        if (opened) return
+      } catch (e: any) {
+        // 子窗口通道不可用（例如主进程还是旧版）：告诉用户原因，再退回浮层
+        console.warn('[openPluginPanelInWindow] 打开插件子窗口失败，回退应用内浮层:', e)
+        ElMessage?.warning?.(store.locales === 'en'
+          ? `Could not open a separate window: ${e?.message || e}`
+          : `打开独立窗口失败：${e?.message || e}`)
+      }
+    }
+    store.pluginPanelOverlay = { ...payload }
+  }
+
   // 输入变化 → 重新判定。⚠️ 这里**只放输入**（按钮数量 / 布局 / 语言 / 启动器开关 / 外壳显隐），
   // 绝不能放判定结果本身（`navOverflow`）—— 否则就是「自己 watch 自己」的无限闭环，
   // 见 syncNavOverflow 上方注释（真实的卡死原因）。
@@ -1337,6 +1360,7 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
           :total-count="pluginTotalCount"
           :enabled-count="pluginEnabledCount"
           @select="openPluginPanel"
+          @open-window="openPluginPanelInWindow"
           @settings="store.openSettings('plugin')"
         />
         <!-- 单窗口模式：浏览器模块内嵌在主内容区（与左侧导航图标同一逻辑；原生网页视图由主进程按 .ba-main 矩形定位） -->

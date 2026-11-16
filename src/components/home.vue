@@ -323,6 +323,33 @@
                 : (store.locales=='zh' ? `展开 ${modelPickerEmptyGroupCount} 个暂无模型的来源` : `Show ${modelPickerEmptyGroupCount} source(s) without models`) }}</span>
             </div>
           </div>
+          <div v-if="!modelPickerQuery.trim()" class="model-picker-divider"></div>
+          <!-- 思考强度：本聊天的覆盖值（缺省跟随「设置 → 模型」）。放在搜索框下方一条细行，
+               不打断模型列表；搜索时隐藏，避免干扰结果 -->
+          <div v-if="!modelPickerQuery.trim()" class="model-picker-effort">
+            <span class="model-picker-effort-label">
+              <i class="fa fa-lightbulb-o"></i>
+              {{ store.locales=='zh' ? '思考强度' : 'Reasoning' }}
+            </span>
+            <div class="model-picker-effort-chips">
+              <button
+                v-for="opt in reasoningEffortOptions"
+                :key="opt.value"
+                type="button"
+                class="model-picker-effort-chip"
+                :class="{ active: effectiveReasoningEffort === opt.value, off: opt.value === 'none' && effectiveReasoningEffort !== 'none' }"
+                :title="opt.title"
+                @click.stop="setReasoningEffort(opt.value)"
+              >{{ opt.label }}</button>
+            </div>
+            <button
+              v-if="currentChat?.config?.reasoningEffort"
+              type="button"
+              class="model-picker-effort-reset"
+              :title="store.locales=='zh' ? `恢复跟随设置页（当前 ${globalReasoningLabel}）` : `Follow Settings again (now ${globalReasoningLabel})`"
+              @click.stop="setReasoningEffort(null)"
+            ><i class="fa fa-undo"></i></button>
+          </div>
         </div>
       </teleport>
 
@@ -8335,10 +8362,44 @@ const pickModelInPicker = (group: ModelPickerGroup, model: string) => {
   closeModelPicker()
 }
 
+/**
+ * 「思考强度」选项：与「设置 → 模型 → 推理强度」同一套档位（none/low/medium/high/max）。
+ * 不支持推理的后端会由 ai-core 自动忽略/降级，所以这里不按来源隐藏。
+ */
+const reasoningEffortOptions = computed(() => {
+  const zh = store.locales == 'zh'
+  return [
+    { value: 'none', label: zh ? '关闭' : 'Off', title: zh ? '直接作答，不做深度思考（最快、最省 token）' : 'Answer directly, no deep reasoning (fastest, cheapest)' },
+    { value: 'low', label: zh ? '低' : 'Low', title: zh ? '轻度思考：只对复杂问题多推理几步' : 'Light reasoning: a few extra steps on hard questions' },
+    { value: 'medium', label: zh ? '中' : 'Medium', title: zh ? '中等思考：平衡速度与质量' : 'Balanced reasoning between speed and quality' },
+    { value: 'high', label: zh ? '高' : 'High', title: zh ? '深度思考：更慢，但复杂任务更稳' : 'Deep reasoning: slower, steadier on complex tasks' },
+    { value: 'max', label: zh ? '最高' : 'Max', title: zh ? '最大推理预算：最慢，适合难题（后端支持才生效）' : 'Largest reasoning budget: slowest, for hard problems (if supported)' },
+  ] as const
+})
+/** 本聊天实际生效的思考强度（本聊天覆盖 > 全局设置 > none） */
+const effectiveReasoningEffort = computed(() => String(currentChat.value?.config?.reasoningEffort || store.AIconfig.llm.think || 'none'))
+/** 全局设置的档位名（用于「恢复跟随」的提示） */
+const globalReasoningLabel = computed(() => {
+  const v = String(store.AIconfig.llm.think || 'none')
+  return reasoningEffortOptions.value.find((o) => o.value === v)?.label || v
+})
+/** 设置本聊天的思考强度；传 null = 清除覆盖、恢复跟随设置页 */
+const setReasoningEffort = (value: 'none' | 'low' | 'medium' | 'high' | 'max' | null) => {
+  const chat = currentChat.value
+  if (!chat) return
+  if (value === null) delete chat.config.reasoningEffort
+  else chat.config.reasoningEffort = value
+  saveChats()
+  const zh = store.locales == 'zh'
+  const label = value === null
+    ? (zh ? `思考强度已恢复为跟随设置（${globalReasoningLabel.value}）` : `Reasoning now follows Settings (${globalReasoningLabel.value})`)
+    : (zh ? `思考强度：${reasoningEffortOptions.value.find((o) => o.value === value)?.label}` : `Reasoning: ${reasoningEffortOptions.value.find((o) => o.value === value)?.label}`)
+  ElMessage.success(label)
+}
+
 // 执行中 / 切换聊天时收起面板：面板里显示的是当前聊天的模型，切走即失效
 watch(isAnyExecuting, (running) => { if (running) closeModelPicker() })
 watch(currentChatIndex, () => closeModelPicker())
-
 // ==================== 发送消息 - 统一入口 ====================
 
 /**
@@ -13126,6 +13187,84 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   opacity: 0.85;
   background: color-mix(in srgb, var(--fontColor) 8%, transparent);
 }
+/* 思考强度：搜索框下方一条紧凑的「标签 + 分段按钮」，只占一行高度 */
+.model-picker-effort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.model-picker-effort-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--fontColor) 62%, transparent);
+  white-space: nowrap;
+}
+.model-picker-effort-label i {
+  font-size: 10px;
+  opacity: 0.8;
+}
+.model-picker-effort-chips {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding: 2px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fontColor) 6%, transparent);
+}
+.model-picker-effort-chip {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fontColor) 72%, transparent);
+  font-size: 10px;
+  line-height: 20px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color .12s ease, color .12s ease;
+}
+.model-picker-effort-chip:hover {
+  background: color-mix(in srgb, var(--fontColor) 10%, transparent);
+  color: var(--fontColor);
+}
+.model-picker-effort-chip.active {
+  background: var(--menuActiveColor);
+  color: var(--fontActiveColor);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fontActiveColor) 45%, transparent);
+}
+/* 未选中「关闭」时把关闭档位压暗一点，避免一眼看成已启用 */
+.model-picker-effort-chip.off {
+  color: color-mix(in srgb, var(--fontColor) 45%, transparent);
+}
+.model-picker-effort-reset {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fontColor) 55%, transparent);
+  font-size: 10px;
+  cursor: pointer;
+}
+.model-picker-effort-reset:hover {
+  background: color-mix(in srgb, var(--fontColor) 10%, transparent);
+  color: var(--fontColor);
+}
 .model-picker-body {
   flex: 1;
   min-height: 0;
@@ -15953,6 +16092,19 @@ select {
   gap: 5px;
   /* 与输入框保持固定间距（空态卡片 / 常规态一致） */
   margin-top: 4px;
+  /* 窗口/侧栏变窄时控件一行放不下：换行而不是溢出卡片
+     （以前 nowrap + 不换行，工作区/模式/模型/附件/语音/发送 一排全是固定宽，窄面板一定溢出） */
+  flex-wrap: wrap;
+  row-gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+/* 可压缩的 chip：标题过长时让文字省略，别把整行顶出面板 */
+.input-controls .composer-chip,
+.input-controls .mode-linked-chip,
+.input-controls .model-chip {
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* 输入行操作控件（对话模式 / 附件 / 语音 / 发送）：统一为**无边框**控件——

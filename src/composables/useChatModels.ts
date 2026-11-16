@@ -109,6 +109,8 @@ export function useChatModels(deps: ChatModelsDeps) {
     llmConfig.temperature = config.temperature
     llmConfig.max_tokens = config.maxTokens
     llmConfig.stream = config.stream
+    // 聊天级思考强度覆盖（模型选择面板里改；缺省跟随全局设置）
+    if (config.reasoningEffort) llmConfig.think = config.reasoningEffort
   }
 
   /** 恢复全局 store 的模型配置（连接测试后还原） */
