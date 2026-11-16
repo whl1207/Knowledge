@@ -44,9 +44,22 @@ export interface ChatDockState {
 }
 
 /** 默认宽度（DSH 的右侧栏也在 320~380 一带） */
+/** 右侧栏默认宽度 */
 export const DOCK_DEFAULT_WIDTH = 360
+/** 右侧栏最小宽度 */
 export const DOCK_MIN_WIDTH = 260
+/**
+ * 「普通窗口」的推荐上限：房间再大也不超过它 —— 只用于 `clampDockWidth()`（拿不到房间宽时，
+ * 例如读存档）。实际拖动时的上限由 `clampDockWidthInRoom()` 按窗口宽放行到 DOCK_MAX_WIDTH_ABS。
+ */
 export const DOCK_MAX_WIDTH = 900
+/**
+ * 硬上限（大窗口 / 带鱼屏）：dock 本身再大也不超过它。
+ * 以前这里只有 900：2K/4K 屏上右侧栏拖到 900 就卡住，剩下的宽度只能浪费在聊天区。
+ */
+export const DOCK_MAX_WIDTH_ABS = 2400
+/** 大窗口下 dock 最多占「聊天区 + 右侧栏」的 72%，再大就把对话区压得没有意义 */
+export const DOCK_MAX_ROOM_RATIO = 0.72
 /**
  * 右侧栏最多只能占到「聊天区 + 右侧栏总宽 - 这个值」：
  * 保证把分隔条一路拖到最左边时，中间聊天区仍然可见、右侧栏内容不会被容器裁掉。
@@ -91,19 +104,24 @@ export function dockFileNameOf(path: unknown): string {
   return parts.length ? parts[parts.length - 1] : String(path || '')
 }
 
-/** 宽度夹取：NaN / 越界 / 存档脏值一律落回合法区间 */
+/** 宽度夹取：NaN / 越界 / 存档脏值一律落回合法区间（拿不到房间宽时用硬上限） */
 export function clampDockWidth(width: unknown): number {
   const n = Math.round(Number(width))
   if (!Number.isFinite(n)) return DOCK_DEFAULT_WIDTH
-  return Math.max(DOCK_MIN_WIDTH, Math.min(DOCK_MAX_WIDTH, n))
+  return Math.max(DOCK_MIN_WIDTH, Math.min(DOCK_MAX_WIDTH_ABS, n))
 }
 
 /**
  * 按「聊天区 + 右侧栏的可用总宽」夹取右侧栏宽度。
  *
- * 固定上限 900 只在超宽窗口下才够用：普通窗口里把分隔条拖到最左边时，
- * 右侧栏会先被撑到 900，超过容器后内容就被裁掉（表现为「面板显示不全」）。
- * 这里在固定上限之外再留出 `DOCK_MIN_CHAT_WIDTH` 给中间聊天区。
+ * 三个上限取最小：
+ * 1. `room - DOCK_MIN_CHAT_WIDTH`：给中间聊天区至少留 320px；
+ * 2. `room * DOCK_MAX_ROOM_RATIO`（且不低于 DOCK_MAX_WIDTH）：大窗口下按比例放行 ——
+ *    以前写死 900，2K/4K 屏拖到 900 就到头了；现在 1920 宽能给到约 1224，2560 宽约 1685；
+ * 3. `DOCK_MAX_WIDTH_ABS`：硬上限，避免脏存档把 dock 撑到荒唐的宽度。
+ *
+ * 窗口太窄时「留 320」可能与「右侧栏最小 260」冲突：此时以右侧栏最小宽度为准，
+ * 至少保证它自身是完整可用的（再窄就由窄屏整屏模式接管）。
  *
  * @param width 目标宽度
  * @param roomWidth 聊天区 + 右侧栏可用总宽（不含左侧聊天列表）；非正数时只做固定夹取
@@ -112,9 +130,9 @@ export function clampDockWidthInRoom(width: unknown, roomWidth: unknown): number
   const base = clampDockWidth(width)
   const room = Number(roomWidth)
   if (!Number.isFinite(room) || room <= 0) return base
-  // 窗口太窄时「给聊天区留 320」可能与「右侧栏最小 260」冲突：此时以右侧栏最小宽度为准，
-  // 至少保证它自身是完整可用的（再窄就由窄屏整屏模式接管）。
-  const max = Math.max(DOCK_MIN_WIDTH, Math.min(DOCK_MAX_WIDTH, Math.floor(room - DOCK_MIN_CHAT_WIDTH)))
+  const byChat = Math.floor(room - DOCK_MIN_CHAT_WIDTH)
+  const byRatio = Math.max(DOCK_MAX_WIDTH, Math.floor(room * DOCK_MAX_ROOM_RATIO))
+  const max = Math.max(DOCK_MIN_WIDTH, Math.min(DOCK_MAX_WIDTH_ABS, byChat, byRatio))
   return Math.max(DOCK_MIN_WIDTH, Math.min(max, base))
 }
 

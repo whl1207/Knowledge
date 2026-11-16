@@ -732,7 +732,7 @@ import { getPlatform, hasCapability } from '@/platform'
     margin: 4px 0;
     padding: 2px 10px;
     border-left: 3px solid var(--borderColor);
-    color: var(--borderColor);
+    color: var(--fontColor);
   }
   .dchat-html :deep(pre),
   .dchat-html :deep(pre.hljs) {

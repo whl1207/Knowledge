@@ -164,7 +164,10 @@ async function ensureFolderScanned(): Promise<void> {
   const store = usestore() as any
   if (!store.agentPresetPath) return
   if (agentPresetFileMap.size > 0) return
-  await scanAgentPresets()
+  // 预设文件夹可能被指到很大的目录 / 慢盘 / 网络盘：扫描不能无限等，否则主进程那侧
+  // 20 秒的渲染层任务超时会先到，报成「渲染层未响应」，看起来像窗口不在场。
+  // 扫不动就先用内存里已有的预设继续，下一次调用再试。
+  await withTimeout(scanAgentPresets(), 6_000, null as any)
 }
 
 /**
@@ -184,7 +187,8 @@ async function hostInfo(deep = true): Promise<any> {
       fileCount = agentPresetFileMap.size
     } else {
       try {
-        const result = await getPlatform().fs.listTreeWithRelations(folder, 1)
+        // 同上：列大目录也可能很慢，超时就按「读不到」处理，别把整次工具调用拖死
+        const result = await withTimeout(getPlatform().fs.listTreeWithRelations(folder, 1), 6_000, null as any)
         const files: any[] = (result?.fileList || []).filter((f: any) => String(f?.path || '').endsWith('.agent'))
         folderExists = true
         fileCount = files.length

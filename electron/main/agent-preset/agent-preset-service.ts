@@ -30,7 +30,7 @@ const MAX_OUTPUT = 30000
  * 超时后 runRendererOp 会**再试一次**，两次合计 40 秒 < 老存档里 MCP 默认的 60 秒，
  * 这样「窗口偶发卡一下」不会直接变成「调用超时」。
  */
-const RENDERER_TIMEOUT_MS = 20_000
+const RENDERER_TIMEOUT_MS = 25_000
 
 /** 静态话题：纯文本，主进程即可回答 */
 const STATIC_TOPICS: Record<string, () => string> = {
@@ -80,7 +80,12 @@ async function runRendererOp(op: string, args: Record<string, any> = {}): Promis
     } catch (e2: any) {
       const msg2 = String(e2?.message || e2)
       if (msg2.includes('渲染层未响应')) {
-        throw new Error(`${msg2}：预设读写需要 AI-KM 窗口在场；请确认应用窗口没有被关闭。若反复出现，可在「设置 → 工具 → MCP」里调大该服务的调用超时后重试。`)
+        // 按真正的原因给建议：窗口不在场 vs 窗口在但忙/重载（处理方式完全不同）
+        const noWindow = msg2.includes('没有可用的 AI-KM 窗口')
+        const advice = noWindow
+          ? '预设读写需要 AI-KM 窗口在场：请先打开应用窗口（或关闭「折叠到托管区」后重开），再重试。'
+          : '窗口在场但没能及时处理：可能是窗口正在重载、主进程/渲染进程正忙（大目录扫描、导出、插件重载）或弹窗在等操作；稍后重试通常就好。'
+        throw new Error(`${msg2}。${advice}若反复出现，可在「设置 → 工具 → MCP」里调大该服务的调用超时。`)
       }
       throw e2
     }

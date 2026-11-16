@@ -31,6 +31,7 @@ import { boundToolResult, buildSpillPreview, shouldSpill } from '@/shared/toolRe
 import { repairTextToolCalls, parseXmlToolArgs } from '@/shared/toolCallRepair'
 import { sessionLog } from './session-log'
 import { recordUsage } from './usage-log'
+import { recordTiming } from './timing-log'
 import { saveSpillText } from './tool-spill'
 import { jobRegistry } from './job-registry'
 import { cwdFor, forgetWorkingDir } from './working-directory'
@@ -3143,19 +3144,36 @@ const pendingRendererTasks = new Map<string, Map<string, PendingRendererTask>>()
 
 /**
  * 请求渲染进程执行一项任务，Promise 挂起到渲染层回传结果。
- * 无人 claim（窗口全部关闭 / 未初始化接缝）或超时 → reject（默认 3 分钟）。
+ * 无人 claim（窗口全部关闭 / 未初始化接缝）或超时 → reject。
+ *
+ * 超时文案要能区分「窗口不在场」和「窗口在但忙/重载」：这两种的处理方式完全不同
+ * （前者必须打开窗口，后者重试或调大超时即可），所以这里现取一次窗口数写进错误里，
+ * 并把耗时记到 timing.log，出问题不用开 DevTools 也能定位。
  */
 export function requestRendererTask(agentId: string, kind: string, payload: any, timeoutMs = 3 * 60 * 1000): Promise<any> {
   return new Promise<any>((resolve, reject) => {
     const taskId = `rtask-${randomUUID()}`
+    const startedAt = Date.now()
     let map = pendingRendererTasks.get(agentId)
     if (!map) {
       map = new Map()
       pendingRendererTasks.set(agentId, map)
     }
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       map!.delete(taskId)
-      reject(new Error('渲染层未响应（可能所有窗口都不可执行该任务）'))
+      let windows = -1
+      try {
+        const { BrowserWindow } = await import('electron')
+        windows = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed()).length
+      } catch { /* 非 Electron 环境（单测）拿不到窗口数 */ }
+      const waited = Math.round(timeoutMs / 1000)
+      const reason = windows === 0
+        ? `没有可用的 AI-KM 窗口（应用窗口已关闭或已销毁）`
+        : windows > 0
+          ? `等待 ${waited}s 仍无结果；当前有 ${windows} 个窗口，可能正在重载、被长任务卡住或在等用户操作`
+          : `等待 ${waited}s 仍无结果（无法确认窗口数量）`
+      recordTiming('renderer-task-timeout', Date.now() - startedAt, `kind=${kind} agent=${agentId} windows=${windows}`)
+      reject(new Error(`渲染层未响应（${reason}）`))
     }, timeoutMs)
     map.set(taskId, { taskId, kind, claimed: false, resolve, reject, timer })
     emitTo(agentId, 'agent/renderer-task', { taskId, kind, payload })
@@ -3167,6 +3185,7 @@ export function claimRendererTask(agentId: string, taskId: string): boolean {
   const t = pendingRendererTasks.get(agentId)?.get(taskId)
   if (!t || t.claimed) return false
   t.claimed = true
+  recordTiming('renderer-task-claim', 0, `kind=${t.kind} agent=${agentId}`)
   return true
 }
 

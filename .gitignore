@@ -93,3 +93,6 @@ public/maps/*.mbtiles
 # Python 缓存
 __pycache__/
 *.pyc
+
+# App icon generator (scripts/* is ignored by default; this one must be tracked)
+!scripts/make-icon.py
