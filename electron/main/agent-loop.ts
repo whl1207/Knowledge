@@ -1946,7 +1946,8 @@ class AgentImpl implements AgentControl {
             // 与渲染层同一语义：新串是旧串的前缀扩展 → 覆盖（全量快照），否则拼接（增量片段）
             this.streamedArgs.set(id, frag.length > prev.length && frag.startsWith(prev) ? frag : prev + frag)
           }
-          this.emit('agent/tool-args', { callId, name, argsFragment })
+          // argsRaw 是**主进程累积后的完整原文**：渲染层据此对齐参数（丢一两个增量也不会卡住）
+          this.emit('agent/tool-args', { callId, name, argsFragment, argsRaw: id ? (this.streamedArgs.get(id) || '') : String(argsFragment || '') })
         },
         // 服务端联网搜索状态（deepseek-responses web_search_call）：透传给渲染进程展示
         // 「正在联网搜索…/搜到 N 条结果 + 来源链接」，与普通聊天的 message.webSearch 一致

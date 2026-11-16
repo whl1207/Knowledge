@@ -95,7 +95,11 @@ if (!isAuxWindowHash(window.location.hash)) {
 }
 // 插件工具同步 + 渲染层插件运行时（界面扩展装载；见 src/lib/plugin/runtime.ts）：
 // 拉取已激活插件、加载其 client 半边、把插件工具推给能力槽推导；插件停用即刻撤销。
-if (!isVoiceOverlayWindow) {
+// ⚠️ 插件面板子窗口（#/plugin-panel）**不在这里**全量初始化：由窗口自己按 URL 里的
+// `plugin=<id>` 只装载那一个插件（否则几十个 client.mjs 都要在本窗口重新 import，
+// 点开插件面板要等好几秒）。见 components/plugin/PluginPanelWindow.vue。
+const isPluginPanelWindow = window.location.hash.startsWith('#/plugin-panel')
+if (!isVoiceOverlayWindow && !isPluginPanelWindow) {
   import('@/lib/plugin/runtime')
     .then((m) => m.initPluginRuntime())
     .catch(() => { /* 非 Electron 环境无 preload，忽略 */ })

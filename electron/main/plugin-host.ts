@@ -1843,6 +1843,29 @@ class PluginHost {
   private startWatcher(): void {
     const root = this.pluginsRoot()
     /**
+     * 插件**运行期数据**的改动不算代码改动，不触发热重载。
+     *
+     * 为什么必须过滤：插件目录里除了代码，还有它自己写的运行产物（`cache/` 解密库、
+     * `keys.json`、生成的 `run.cmd` / `ping.cmd`、Python 的 `__pycache__` …）。这些文件
+     * 在插件**每一次干活**时都会变；旧逻辑一律当成「插件被修改」→ 卸载重载 → 界面面板重建，
+     * 用户看到的就是「打开插件面板一直闪烁」，而且会形成
+     * 「写入 → 重载 → 重新初始化 → 再写入」的死循环。
+     */
+    const NOISE_DIRS = new Set(['cache', 'data', 'temp', 'tmp', 'node_modules', '__pycache__', 'plugins-data'])
+    const NOISE_FILES = new Set(['run.cmd', 'ping.cmd', 'keys.json', 'thumbs.db', 'desktop.ini', 'package-lock.json'])
+    const NOISE_EXT = /\.(log|db|db-wal|db-shm|sqlite|sqlite3|pyc|tmp|lock|bak)$/i
+    const isRuntimeNoise = (relPath: string): boolean => {
+      const segs = relPath.split(/[\\/]/).filter(Boolean)
+      if (!segs.length) return false
+      for (let i = 0; i < segs.length - 1; i += 1) {
+        if (NOISE_DIRS.has(segs[i].toLowerCase())) return true
+      }
+      const base = segs[segs.length - 1].toLowerCase()
+      if (NOISE_FILES.has(base)) return true
+      return NOISE_EXT.test(base)
+    }
+
+    /**
      * 目录改动 → 定位所属插件。
      * 深层扫描后 `filename` 的第一段可能只是「分类文件夹」，不能再按第一段当插件 id
      * （否则子文件夹里的插件永远收不到热重载）；这里按绝对路径落在哪个插件目录里来找。
@@ -1852,7 +1875,10 @@ class PluginHost {
       if (!filename) return
       const first = filename.split(/[\\/]/)[0]
       if (!first || first.startsWith('.')) return
-      const rec = this.recordForPath(path.resolve(base, filename))
+      const abs = path.resolve(base, filename)
+      const rec = this.recordForPath(abs)
+      // 运行期产物（cache / keys.json / run.cmd / *.db …）不是代码改动：不重载，也不触发重扫
+      if (isRuntimeNoise(rec ? path.relative(rec.dir, abs) : filename)) return
       if (!rec) {
         // 落在任何已登记插件之外：可能是**新插件文件夹**（写插件时最常见）、被删掉的插件，
         // 或插件根目录下的散碎文件。以前这里直接 return —— 结果新写好的插件要等重启

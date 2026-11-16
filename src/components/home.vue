@@ -838,9 +838,10 @@
         <div v-if="chatNavMenuVisible" class="context-menu-overlay" @click="hideChatNavMenu" @contextmenu.prevent="hideChatNavMenu"></div>
         <div v-if="chatNavMenuVisible" class="knowfile-menu">
           <div
+            ref="chatNavMenuRef"
             class="context-menu ctx-narrow chat-nav-menu"
             :style="{ left: chatNavMenuPos.x + 'px', top: chatNavMenuPos.y + 'px' }"
-            @mouseleave="hideChatNavMenu"
+            @mouseleave="onChatNavMenuMouseLeave"
           >
             <!-- 一级项 → 二级子菜单：排列方式 / 排序 / 显示 / 该聊天的操作。
                  一级项右侧显示当前值，悬停或点击展开子菜单，避免所有选项挤在一屏。 -->
@@ -2661,6 +2662,8 @@ watch(chatSortMode, (v) => {
 /** 聊天列表（消息导航栏）右键菜单状态：排列方式 + 排序；在聊天行上右键时额外记住该行索引（菜单里带删除） */
 const chatNavMenuVisible = ref(false)
 const chatNavMenuPos = ref({ x: 0, y: 0 })
+/** 菜单根节点：打开后量一次真实尺寸再决定「向下展开还是向上翻」 */
+const chatNavMenuRef = ref<HTMLElement | null>(null)
 const chatNavMenuChatIndex = ref<number | null>(null)
 /** 当前展开的二级子菜单（悬停 / 点击一级项展开；null = 收起） */
 const chatNavSubmenu = ref<null | 'order' | 'sort' | 'view'>(null)
@@ -2673,6 +2676,13 @@ const hideChatNavMenu = () => {
   chatNavMenuVisible.value = false
   chatNavMenuChatIndex.value = null
   chatNavSubmenu.value = null
+}
+/** 菜单打开时刻：吸附定位后菜单会「跳」一下，跳变瞬间产生的 mouseleave 不能当成用户移开 */
+let chatNavMenuOpenedAt = 0
+/** 鼠标离开菜单主体：刚打开 250ms 内忽略（避免定位跳变把菜单立刻关掉） */
+const onChatNavMenuMouseLeave = () => {
+  if (Date.now() - chatNavMenuOpenedAt < 250) return
+  hideChatNavMenu()
 }
 /** 一级项当前值（显示在右端，减少必须点开二级菜单才能确认状态的次数） */
 const chatOrderModeLabel = computed(() => chatOrderMode.value === 'sequence'
@@ -3008,12 +3018,30 @@ const onChatNavContextMenu = (e: MouseEvent, chatIndex: number | null = null) =>
   chatNavSubmenu.value = null
   // 子菜单默认向右展开；右键位置靠近窗口右边（放不下 210px 子菜单）时改为向左
   chatNavSubmenuFlip.value = e.clientX > Math.max(8, window.innerWidth - 460)
-  chatNavMenuPos.value = {
-    x: Math.min(e.clientX, Math.max(8, window.innerWidth - 240)),
-    // 菜单最高约 240px（行上右键时多一项「删除聊天」）：贴着窗口底部右键时向上收，避免被裁掉
-    y: Math.min(e.clientY, Math.max(8, window.innerHeight - 260)),
-  }
+  // 先按鼠标位置放（保持「菜单贴着指针」的手感），打开后再量真实高度决定是否向上翻。
+  // 旧实现用固定常量 260 夹取 y：窗口不高时会被硬拽到很上面，看起来就像「菜单只会出现在上面」。
+  const anchorX = Math.min(e.clientX, Math.max(8, window.innerWidth - 240))
+  const anchorY = Math.min(e.clientY, Math.max(8, window.innerHeight - 40))
+  chatNavMenuPos.value = { x: anchorX, y: anchorY }
+  chatNavMenuOpenedAt = Date.now()
   chatNavMenuVisible.value = true
+  void nextTick(() => {
+    const el = chatNavMenuRef.value
+    if (!el) return
+    const margin = 8
+    const rect = el.getBoundingClientRect()
+    const width = rect.width || el.offsetWidth || 200
+    const height = rect.height || el.offsetHeight || 240
+    // 放不下就向指针的另一侧翻（右下角右键 → 菜单向上、向左展开），再兜底夹进视口
+    let x = e.clientX
+    let y = e.clientY
+    if (x + width > window.innerWidth - margin) x = e.clientX - width
+    if (y + height > window.innerHeight - margin) y = e.clientY - height
+    chatNavMenuPos.value = {
+      x: Math.max(margin, Math.min(x, Math.max(margin, window.innerWidth - width - margin))),
+      y: Math.max(margin, Math.min(y, Math.max(margin, window.innerHeight - height - margin))),
+    }
+  })
 }
 
 const onMessageContextMenu = (e: MouseEvent) => {
@@ -5205,9 +5233,11 @@ const extractStreamedStringList = (raw: string, key: string): string[] => {
  * 这种原始片段——用户看不出模型到底写没写、写了多少。按 new_string 统计后就能像
  * write_file 一样显示「已生成 N 字 · M 处替换」，数字随流式参数递增。
  */
-/** 编辑类工具的字段名：老/新两套写法都认（`replace_in_file` 与 `multi_replace` 的 schema 曾经漂过） */
-const EDIT_OLD_KEYS = ['old_string', 'find'] as const
-const EDIT_NEW_KEYS = ['new_string', 'replace'] as const
+/** 编辑类工具的字段名：各家模型 / 插件工具的写法都认（schema 曾经漂过好几版） */
+const EDIT_OLD_KEYS = ['old_string', 'oldText', 'old_text', 'find', 'search', 'old'] as const
+const EDIT_NEW_KEYS = ['new_string', 'newText', 'new_text', 'replace', 'replaceText', 'replacement', 'new'] as const
+/** 批量替换的数组字段名（多文件形式还会再嵌套一层） */
+const EDIT_LIST_KEYS = ['replacements', 'edits', 'changes', 'patches', 'operations'] as const
 
 const getEditGenerated = (unit: any): { chars: number; count: number; raw: number } => {
   const n = String(unit?.description || '')
@@ -5233,9 +5263,25 @@ const getEditGenerated = (unit: any): { chars: number; count: number; raw: numbe
       for (const k of keys) if (typeof o?.[k] === 'string') return o[k]
       return ''
     }
-    const reps: any[] = Array.isArray(args.replacements) ? args.replacements
-      : Array.isArray(args.edits) ? args.edits
-        : [args]
+    // 各种编辑类参数形状都尽量认：{replacements|edits|changes|patches|operations: [...]}，
+    // 以及多文件形式 {edits:[{path, replacements:[...]}]}（嵌套一层）。
+    const listOf = (o: any): any[] => {
+      for (const k of EDIT_LIST_KEYS) {
+        if (Array.isArray(o?.[k])) return o[k]
+      }
+      return []
+    }
+    const flatten = (items: any[], depth = 0): any[] => {
+      if (!items.length || depth > 1) return items
+      const out: any[] = []
+      for (const it of items) {
+        const nested = listOf(it)
+        if (nested.length) out.push(...nested)
+        else out.push(it)
+      }
+      return out
+    }
+    const reps: any[] = flatten(listOf(args).length ? listOf(args) : [args])
     let chars = 0
     let count = 0
     for (const rep of reps) {
@@ -5257,6 +5303,14 @@ const unitEditProgress = (unit: any): string => {
   const isZh = store.locales == 'zh'
   const { chars, count, raw } = getEditGenerated(unit)
   if (unit.status === 'running') {
+    // 参数是对象 = 已经流完并解析成功，此刻是「工具在写盘」，不是「模型在生成参数」。
+    // 旧实现两种阶段共用一句「参数生成中…（已接收 N 字）」，N 取的是整份 JSON 长度（常量），
+    // 看起来就是「一直在生成、数字不动」。这里按阶段分开说。
+    if (typeof unit.args !== 'string') {
+      const parts = [isZh ? '正在写入…' : 'Writing…']
+      if (count > 0) parts.push(isZh ? `${count} 处替换` : `${count} replacements`)
+      return parts.join(' · ')
+    }
     if (!chars) {
       // 还没解析出 old/new 字段（片段刚开头 / schema 变体）：至少把已接收的原始参数字数显示出来，
       // 不能一直停在「等待内容…」——用户会以为卡死。
@@ -5264,7 +5318,7 @@ const unitEditProgress = (unit: any): string => {
       return isZh ? '等待内容…' : 'Waiting…'
     }
     const parts = [isZh ? `已生成 ${formatCharCount(chars)} 字` : `${formatCharCount(chars)} chars`]
-    if (n === 'multi_replace' && count > 0) parts.push(isZh ? `${count} 处替换` : `${count} replacements`)
+    if (count > 0) parts.push(isZh ? `${count} 处替换` : `${count} replacements`)
     return parts.join(' · ')
   }
   if (unit.status === 'error') return isZh ? '未写入' : 'Not written'

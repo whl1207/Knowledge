@@ -47,15 +47,16 @@
       <PluginSlot v-if="panelReady" :name="PANEL_MAIN_SLOT" :owner="activeKey" />
       <div v-else class="ppw-empty">
         <i class="fa fa-puzzle-piece ppw-empty-icon"></i>
-        <div class="ppw-empty-title">{{ zh ? '正在载入插件…' : 'Loading plugins…' }}</div>
-        <div class="ppw-empty-text">
+        <div class="ppw-empty-title">{{ targetUnavailable ? (zh ? '插件不可用' : 'Plugin unavailable') : (zh ? '正在载入插件…' : 'Loading plugins…') }}</div>
+        <div v-if="targetUnavailable" class="ppw-empty-text">{{ targetUnavailable }}</div>
+        <div v-else class="ppw-empty-text">
           {{ zh
             ? '插件界面扩展还在装载中，装载完成后这里会自动显示该插件面板。'
             : 'The plugin UI is still loading; this panel will appear automatically once it is ready.' }}
         </div>
         <!-- 每个插件窗口都要在本窗口重新装载一遍插件界面半边（本进程自己一份槽位注册表），
              所以新窗口看到这句是正常的；一直停在这里才需要排查 → 给出排查方向 -->
-        <div class="ppw-empty-hint">
+        <div v-if="!targetUnavailable" class="ppw-empty-hint">
           {{ zh
             ? '每个插件窗口都会在本窗口独立装载一次插件界面扩展，插件多时需要几秒。若一直停在这里：请在「插件 → 管理」确认该插件已启用、清单里声明了 client 半边，并查看装载失败原因。'
             : 'Each plugin window loads the plugin UIs itself, which can take a few seconds. If it never finishes: check under Plugins → Manage that the plugin is enabled, that its manifest declares a client half, and read the failure reason below.' }}
@@ -86,7 +87,7 @@ import { useAllSlotEntries, useSlotVersion } from '@/lib/plugin/useSlots'
 import { panelTitleOf, isBuiltinPanel } from '@/lib/plugin/panelRegistry'
 import { panelChromeHidden } from '@/lib/plugin/panelChrome'
 import { applyPluginOrder } from '@/lib/plugin/navOrder'
-import { clientPluginLoadStates, pluginDisplayName } from '@/lib/plugin/runtime'
+import { clientPluginLoadStates, initPluginRuntime, pluginDisplayName, pluginStatuses } from '@/lib/plugin/runtime'
 import PluginSlot from '@/components/plugin/PluginSlot.vue'
 import { ref } from 'vue'
 
@@ -102,6 +103,29 @@ const props = withDefaults(
 
 const store = usestore()
 const zh = computed(() => store.locales !== 'en')
+
+/**
+ * 本窗口要装的插件 id（主进程开窗口时写进 hash 的 `&plugin=`）。
+ * 有了它，本窗口只需要 import 这一个插件的 client.mjs —— 旧实现每个插件窗口都会把
+ * **全部**插件的界面半边重新装载一遍（几十个文件、约 9MB），所以点开插件面板要等好几秒。
+ */
+const windowPluginId = (() => {
+  try {
+    const hash = String(window.location.hash || '')
+    const q = hash.indexOf('?')
+    if (q < 0) return ''
+    return new URLSearchParams(hash.substring(q + 1)).get('plugin') || ''
+  } catch {
+    return ''
+  }
+})()
+
+// 在 **setup 阶段**就触发（不是 onMounted）：initPluginRuntime 会先同步 declareCoreSlots()，
+// 槽位表/kind 在子组件挂载前就已就绪，PluginSlot 才拿得到正确的槽位类型。
+if (!props.overlay) {
+  // 没有 plugin 参数（旧主进程 / 开发期未重启）：退回全量装载，保证面板仍能出现
+  void initPluginRuntime(windowPluginId ? { onlyPlugin: windowPluginId } : undefined)
+}
 
 /**
  * 本窗口只显示「一个插件」——所以顶栏左上角只放**它自己的一个图标**，不做插件间切换。
@@ -156,6 +180,23 @@ const failedLoads = computed(() => {
   return Object.entries(clientPluginLoadStates())
     .filter(([, state]) => !state.ok)
     .map(([id, state]) => ({ id, name: pluginDisplayName(id), message: state.message }))
+})
+
+/**
+ * 目标插件当前是不是「没启用 / 无效 / 装载失败」。
+ *
+ * 未启用的插件**不会**被装载（主进程不 import 它的 index.mjs，渲染层也不装载 client 半边），
+ * 所以这里不能一直显示「正在载入插件…」——要直接告诉用户去启用，否则就是永远等下去。
+ */
+const targetUnavailable = computed(() => {
+  void slotVersion.value
+  if (!windowPluginId) return ''
+  const state = clientPluginLoadStates()[windowPluginId]
+  if (state && !state.ok) return state.message ? `装载失败：${state.message}` : '装载失败'
+  const status = pluginStatuses.value[windowPluginId]
+  if (status === 'disabled') return zh.value ? '该插件已停用：请在「插件 → 管理」里启用后再打开' : 'Plugin is disabled'
+  if (status === 'invalid' || status === 'failed') return zh.value ? '该插件装载失败：请到插件管理查看原因' : 'Plugin failed to load'
+  return ''
 })
 
 const activeTitle = computed(() => {

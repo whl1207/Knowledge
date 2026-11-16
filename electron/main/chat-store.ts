@@ -20,6 +20,7 @@
 
 import { app } from 'electron'
 import { promises as fsp } from 'node:fs'
+import { renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWrite } from './atomic-write'
 
@@ -42,8 +43,23 @@ let dirty: any[] | null = null
 let inFlight: Promise<void> | null = null
 let lastSavedAt = 0
 let lastBytes = 0
+/** 上一次留备份的时间（每小时最多复制一份，避免每次保存都拷十几 MB） */
+let lastBackupAt = 0
+
+/** 写新档前留一份 `chats.json.bak`（一小时一次）：存档被错误覆盖时还能手工救回 */
+async function maybeBackup(): Promise<void> {
+  if (Date.now() - lastBackupAt < 3_600_000) return
+  const path = archivePath()
+  try {
+    const st = await fsp.stat(path)
+    if (!st.size) return
+    await fsp.copyFile(path, `${path}.bak`)
+    lastBackupAt = Date.now()
+  } catch { /* 没有旧档 / 复制失败都不影响写入 */ }
+}
 
 async function writeArchive(chats: any[]): Promise<void> {
+  await maybeBackup()
   const payload = { version: VERSION, savedAt: Date.now(), chats }
   const text = JSON.stringify(payload)
   lastBytes = await atomicWrite(archivePath(), text)
@@ -67,15 +83,60 @@ async function flushLoop(): Promise<void> {
 }
 
 /** 保存整份聊天存档（合并写；不抛错——流式保存失败不应打断对话） */
-export function saveChats(chats: any[]): Promise<void> {
-  dirty = Array.isArray(chats) ? chats : []
+export async function saveChats(chats: any[]): Promise<void> {
+  const list = Array.isArray(chats) ? chats : []
+  // 空数组不可能是「一份正常存档」：多半是渲染层启动竞态 / 状态没加载完。
+  // 宁可丢掉这次写入，也不能把已有存档清空（明确清空走 clearChats）。
+  if (!list.length) {
+    console.warn('[chat-store] 拒绝用空数组覆盖存档（saveChats）')
+    return
+  }
+  // 全是空会话（没任何消息）也算可疑写入：只在「确实还没有任何存档」时放行，
+  // 否则保留旧档——启动竞态时渲染层很容易拿着一个空聊天来保存
+  const hasContent = list.some((c: any) => Array.isArray(c?.messages) && c.messages.length > 0)
+  if (!hasContent) {
+    const info = await loadChats().catch(() => null)
+    if (info?.chats?.some((c: any) => Array.isArray(c?.messages) && c.messages.length > 0)) {
+      console.warn('[chat-store] 跳过空会话存档写入（旧档里已有会话）')
+      return
+    }
+  }
+  dirty = list
   if (!inFlight) inFlight = flushLoop()
-  return inFlight
+  await inFlight
 }
 
 /** 等待当前写入落地（测试 / 退出前用） */
 export async function flushChats(): Promise<void> {
   if (inFlight) await inFlight
+}
+
+/**
+ * **同步**写一份存档：退出前 / 关窗时用。
+ * 异步写在进程退场时可能来不及落盘，`before-quit` 里必须走这条。
+ */
+export function saveChatsSync(chats: any[]): void {
+  const list = Array.isArray(chats) ? chats : []
+  if (!list.length) return
+  try {
+    const payload = { version: VERSION, savedAt: Date.now(), chats: list }
+    const path = archivePath()
+    const tmp = `${path}.sync-tmp`
+    writeFileSync(tmp, JSON.stringify(payload), 'utf8')
+    renameSync(tmp, path)
+    lastSavedAt = payload.savedAt
+    lastBytes = 0
+  } catch (e) {
+    console.error('[chat-store] 退出前同步写失败:', e)
+  }
+}
+
+/** 退出前把还没落盘的合并写同步刷掉（`before-quit` 里调用） */
+export function flushChatsSync(): void {
+  if (!dirty) return
+  const data = dirty
+  dirty = null
+  saveChatsSync(data)
 }
 
 export async function loadChats(): Promise<ChatArchiveInfo> {

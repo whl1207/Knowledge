@@ -221,22 +221,34 @@ export function registerPluginIpc(): void {
     return { id, entries: pluginHost.listDataFiles(id) }
   })
 
-  /** 一次列出所有插件的主进程侧数据（列表页显示占用用；只走一遍数据根目录） */
-  registerIpc('plugin:data-files-all', () => ({ byId: pluginHost.listAllDataFiles() }))
+  /** 一次列出所有插件的主进程侧数据（列表页显示占用用；只走一遍数据根目录）。
+   *  这个调用要同步 walk `plugins-data/<id>/`，而插件面板每次刷新（含 plugin/changed 触发的
+   *  重载）都会要一次 → 做 3 秒短缓存，避免连续开合面板反复扫盘。 */
+  let dataFilesCache: { at: number; value: { byId: Record<string, unknown> } } | null = null
+  registerIpc('plugin:data-files-all', () => {
+    if (dataFilesCache && Date.now() - dataFilesCache.at < 3000) return dataFilesCache.value
+    const value = { byId: pluginHost.listAllDataFiles() as Record<string, unknown> }
+    dataFilesCache = { at: Date.now(), value }
+    return value
+  })
 
   /** 删除插件主进程数据目录里的一个文件 / 子目录（会真的删磁盘文件 → 需要 confirm） */
   registerIpc('plugin:data-remove-file', (payload) => {
     const id = readString(payload?.id, 'id')
     requirePluginApproval(payload, '删除插件数据文件')
     const name = readString(payload?.name, 'name')
-    return { removed: pluginHost.removeDataFile(id, name) }
+    const res = { removed: pluginHost.removeDataFile(id, name) }
+    dataFilesCache = null
+    return res
   })
 
   /** 删除插件整个主进程数据目录（会真的删磁盘文件 → 需要 confirm） */
   registerIpc('plugin:data-clear-files', (payload) => {
     const id = readString(payload?.id, 'id')
     requirePluginApproval(payload, '清除插件数据文件')
-    return { removed: pluginHost.clearDataDir(id) }
+    const res = { removed: pluginHost.clearDataDir(id) }
+    dataFilesCache = null
+    return res
   })
 
   /**

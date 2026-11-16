@@ -27,6 +27,7 @@ import { credentialStore } from './credentials'
 import { generateSdkDocs } from './code-sdk'
 import * as usageLog from './usage-log'
 import * as chatStore from './chat-store'
+import { recordTiming } from './timing-log'
 import * as schedule from './schedule-service'
 
 type IpcHandler = (payload: any, event: IpcMainInvokeEvent) => Promise<any> | any
@@ -205,11 +206,20 @@ export function registerNamespacedIpc(): void {
   registerIpc('chats:stat', async () => chatStore.statChats())
   /**
    * 退出前的尽力保存：渲染层用 `send`（不等回包）把最后一份送过来。
-   * 走 `on` 而不是 `invoke`，进程关闭时也能送达。
+   * 走 `on` 而不是 `invoke`，进程关闭时也能送达；**同步落盘**，
+   * 因为此时异步写很可能赶不上进程退场（这是「关窗后会话丢失」的第二个隐患）。
    */
   ipcMain.on('chats:save-async', (_event, payload: any) => {
     const chats = payload?.chats
-    if (Array.isArray(chats)) void chatStore.saveChats(chats)
+    if (Array.isArray(chats)) chatStore.saveChatsSync(chats)
+  })
+
+  /**
+   * 渲染层性能埋点（fire-and-forget）：`<userData>/timing.log` 按行追加。
+   * 只用于定位「打开某个面板卡几秒」这类问题；不返回任何内容。
+   */
+  ipcMain.on('diag:timing', (_event, payload: any) => {
+    recordTiming(String(payload?.label || 'unknown'), Number(payload?.ms) || 0, payload?.extra ? String(payload.extra) : undefined)
   })
 
   // ---------------- schedule:*（自动化任务：持久化 + 计时 + 投递） ----------------

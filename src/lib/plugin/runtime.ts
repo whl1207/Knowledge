@@ -15,6 +15,7 @@
  */
 
 import { declareCoreSlots, coreSlotScope, slotRegistry, type SlotDefinition } from './slots'
+import { reportTiming } from './perf'
 import { aikmDsh } from '@/lib/aikmIpc'
 import { createDshClientContext, createScopedFetch, evaluateDshClientBundle } from './clientDshCompat'
 import { ClientEventBus } from './clientEventBus'
@@ -622,6 +623,13 @@ const clientLoadState = new Map<string, { ok: boolean; message: string; ts: numb
 let syncing: Promise<void> | null = null
 /** 同步期间又有新请求：**不能丢**，本轮结束后必须再跑一遍 */
 let syncPending = false
+/** 调用方顺手递过来的插件清单（避免同一轮里重复 IPC） */
+let pendingList: PluginSnapshot[] | null = null
+/** 桥还没就绪时的重试（见 initPluginRuntime） */
+let bridgeRetryTimer: ReturnType<typeof setTimeout> | null = null
+let bridgeRetryCount = 0
+/** 只装载指定插件（插件面板子窗口用：一个窗口只需要它自己那个插件的界面半边） */
+let onlyPluginFilter = ''
 let initialized = false
 
 /**
@@ -634,11 +642,25 @@ let initialized = false
  * 会把整个渲染层插件运行时**永久**卡死（之后桥出现了也不会再初始化）。现在只有真拿到桥才置位，
  * 失败只是本次返回，下次调用仍可重试。
  */
-export async function initPluginRuntime(): Promise<void> {
+export async function initPluginRuntime(opts?: { onlyPlugin?: string }): Promise<void> {
   if (initialized) return
+  if (opts?.onlyPlugin) onlyPluginFilter = String(opts.onlyPlugin)
   declareCoreSlots() // 幂等（内部 coreScopes 非空即返回）
   const bridge = getPluginBridge()
-  if (!bridge) return
+  if (!bridge) {
+    // 桥还没就绪：**重试**，别把第一次同步留给「用户打开插件面板」那一刻。
+    // 一打插件的客户端半边（几十个文件、好几 MB）会在那一下全部 import，
+    // 表现出来就是「点开插件面板卡几秒」。
+    if (!bridgeRetryTimer && bridgeRetryCount < 40) {
+      bridgeRetryCount += 1
+      bridgeRetryTimer = setTimeout(() => {
+        bridgeRetryTimer = null
+        if (!initialized) void initPluginRuntime()
+      }, 250)
+    }
+    return
+  }
+  bridgeRetryCount = 0
   initialized = true
   // 每**窗口**一条订阅，与插件数量、启停、重载次数无关；它随窗口存活，故有意不保存 unsubscribe。
   // 插件自身的订阅一律经 ctx.on（已由 disposer 托管，见 layoutClientPlugin 里的 track）。
@@ -657,7 +679,9 @@ export async function initPluginRuntime(): Promise<void> {
  * 第一次同步的进行期间而被丢掉，于是**界面上那份（客户端半边）永远不再重试**：用户改好文件、
  * 点「重新载入」看着没反应，只有重启软件（全新一次同步）才恢复。排队后最后一次状态一定会被应用。
  */
-export function syncClientPlugins(): Promise<void> {
+export function syncClientPlugins(list?: PluginSnapshot[]): Promise<void> {
+  // 调用方刚拿到的清单可以直接传进来：省一次 plugin:list 往返（管理面板打开时会用）
+  if (Array.isArray(list)) pendingList = list
   if (syncing) {
     syncPending = true
     return syncing
@@ -665,25 +689,38 @@ export function syncClientPlugins(): Promise<void> {
   syncing = (async () => {
     do {
       syncPending = false
-      await doSync()
+      const provided = pendingList
+      pendingList = null
+      await doSync(provided)
     } while (syncPending)
   })().finally(() => {
     syncing = null
     syncPending = false
+    pendingList = null
   })
   return syncing
 }
 
-async function doSync(): Promise<void> {
+async function doSync(provided?: PluginSnapshot[] | null): Promise<void> {
+  const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
   const bridge = getPluginBridge()
   if (!bridge) return
   let plugins: PluginSnapshot[]
-  try {
-    const res = await bridge.list()
-    plugins = res.plugins ?? []
-  } catch (e) {
-    console.warn('[plugin-runtime] 拉取插件清单失败:', e)
-    return
+  if (provided && provided.length) {
+    plugins = provided
+  } else {
+    try {
+      const res = await bridge.list()
+      plugins = res.plugins ?? []
+    } catch (e) {
+      console.warn('[plugin-runtime] 拉取插件清单失败:', e)
+      return
+    }
+  }
+
+  if (onlyPluginFilter) {
+    // 插件面板子窗口：只保留目标插件，避免在本窗口把全部 client.mjs 都 import 一遍
+    plugins = plugins.filter((p) => p.id === onlyPluginFilter)
   }
 
   // 0) 插件显示名 / 描述 / 状态（导航收纳启动器要按插件名分组、卡片给出插件用途，
@@ -722,11 +759,13 @@ async function doSync(): Promise<void> {
   // 2) 卸载：不再需要（禁用 / 卸载 / 加载失败 / 不再有 client 半边）的插件，
   //    以及主进程重新装载过的（loadedAt 变了）——否则改完界面半边点「重新载入」界面不会更新
   const wanted = plugins.filter((p) => p.status === 'active' && p.hasClient && p.clientEntry)
+  let removedAny = false
   for (const [id, handle] of Array.from(loaded.entries())) {
     const still = wanted.find((p) => p.id === id)
     if (still && handle.loadedAt === still.loadedAt) continue
     await handle.dispose()
     loaded.delete(id)
+    removedAny = true
     bus.emit('plugin/unloaded', { id })
   }
 
@@ -737,7 +776,7 @@ async function doSync(): Promise<void> {
   //  - 而 `apply()` 的顺序必须保持与清单一致（槽位 key 冲突、日志顺序都依赖它），所以只并行"取"不并行"装"。
   const toLoad = wanted.filter((p) => !loaded.has(p.id))
   const prefetched = new Map<string, { bundle?: PluginClientBundle; error?: unknown }>()
-  await mapLimit(toLoad, 3, async (p) => {
+  await mapLimit(toLoad, 6, async (p) => {
     try {
       prefetched.set(p.id, { bundle: await bridge.clientBundle(p.id) })
     } catch (e) {
@@ -747,9 +786,15 @@ async function doSync(): Promise<void> {
   for (const p of toLoad) {
     if (loaded.has(p.id)) continue
     await loadOne(bridge, p, prefetched.get(p.id))
+    // 逐个装载之间让出一帧：一次装载十几个插件（每个都要 import 客户端 bundle）会长时间
+    // 占住渲染线程，界面看起来就是「卡几秒」。让出后列表/导航可以先画出来，进度也能动。
+    if (toLoad.length > 1) await new Promise<void>((resolve) => setTimeout(resolve, 0))
   }
 
-  slotRegistry.notify()
+  // 只有真的装了 / 卸了才通知：无变化时通知会让整个界面把所有槽位重算一遍
+  // （插件面板每次刷新列表都会走到这里，白白触发全量重渲染）
+  if (removedAny || toLoad.length) slotRegistry.notify()
+  reportTiming('plugin-do-sync', (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0, `load=${toLoad.length} total=${plugins.length}`)
 }
 
 /** 有上限的并发 map（稳定优先：不把桥 / 文件系统一次性打爆） */

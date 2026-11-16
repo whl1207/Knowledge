@@ -59,6 +59,7 @@ import { postgresService } from './postgres/postgres-service'
 import * as aiService from './ai-service'
 import { lmStudioCli } from './lmstudio-cli'
 import { sessionLog } from './session-log'
+import * as chatStore from './chat-store'
 import { cleanupSpillDirs } from './tool-spill'
 import { skillService, parseSkillMetadata } from './skill-service'
 import { registerNamespacedIpc, sendToAll } from './ipc-registry'
@@ -616,6 +617,8 @@ app.on('before-quit', () => {
   disposeAllTerminals()
   // 会话日志是异步批量写的：退出前把待写队列同步刷盘，避免最后几条 turn/tool 事件丢失
   try { sessionLog.flushAllSync() } catch (e) { console.warn('[session-log] quit flush failed', e) }
+  // 聊天存档同理：合并写可能还在队列里，退出前同步刷一次，避免最后一次会话丢失
+  try { chatStore.flushChatsSync() } catch (e) { console.warn('[chat-store] quit flush failed', e) }
 })
 
 app.on('second-instance', (_event, commandLine) => {
@@ -1151,7 +1154,7 @@ ipcMain.handle('open-settings-window', (event, payload?: { nav?: string }) => {
 // 每个插件面板一个窗口（重复打开只聚焦），关掉即销毁。
 const pluginPanelWindows = new Map<string, BrowserWindow>()
 
-function openPluginPanelWindow(opts: { key: string; title?: string; icon?: string }, anchor?: BrowserWindow | null): BrowserWindow | null {
+function openPluginPanelWindow(opts: { key: string; title?: string; icon?: string; pluginId?: string }, anchor?: BrowserWindow | null): BrowserWindow | null {
   const key = String(opts?.key || '').trim()
   if (!key) return null
 
@@ -1208,6 +1211,9 @@ function openPluginPanelWindow(opts: { key: string; title?: string; icon?: strin
   // 面板 key 可能是中文（历史 key 如「知识管理」），一律 URL 编码后放进 hash，渲染层解码
   let hash = `/plugin-panel?id=${encodeURIComponent(key)}`
   if (opts?.title) hash += `&title=${encodeURIComponent(String(opts.title))}`
+  // 带上归属插件 id：面板子窗口只需要装这一个插件的界面半边，
+  // 否则每个窗口都要把全部插件（几十个 client.mjs、约 9MB）重新 import 一遍 → 打开要等好几秒
+  if (opts?.pluginId) hash += `&plugin=${encodeURIComponent(String(opts.pluginId))}`
   if (DEV_SERVER_URL) {
     childWindow.loadURL(`${url}#${hash}`)
   } else {
@@ -1221,7 +1227,7 @@ ipcMain.handle('open-plugin-panel-window', async (event, payload?: { key?: strin
     const key = typeof payload?.key === 'string' ? payload.key : ''
     if (!key) return false
     const w = openPluginPanelWindow(
-      { key, title: payload?.title, icon: payload?.icon },
+      { key, title: payload?.title, icon: payload?.icon, pluginId: typeof payload?.pluginId === 'string' ? payload.pluginId : '' },
       BrowserWindow.fromWebContents(event.sender),
     )
     return !!w && !w.isDestroyed()

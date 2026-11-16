@@ -581,6 +581,7 @@ import {
 import type { PluginSnapshot, PluginStatus, PluginLogLine, PluginEvent } from '@/types/plugin'
 // 插件顺序（导航栏图标 / 启动器网格 / 插件子窗口图标栏都按这份顺序；管理面板按它展示）
 import { commitPluginOrder, sortPluginsByOrder, usePluginOrder } from '@/lib/plugin/navOrder'
+import { reportTiming } from '@/lib/plugin/perf'
 // 与「技能管理」共用同一套列表外壳 / 卡片 / 文件夹分组：
 //  - ToolGroupList：分组 / 折叠 / 搜索 / 只看已启用 / 组内全开全关；
 //  - PluginCard：一张插件卡（图标 / 名称 / 描述 / 版本 / 工具数 / 开关）；
@@ -786,13 +787,16 @@ const refreshClientStates = () => {
 }
 
 /** 同步界面半边（幂等）后再取装载结果：主进程事件与同步完成之间没有顺序保证，所以主动等一次 */
-const syncThenRefreshClients = async () => {
+const syncThenRefreshClients = async (list?: PluginSnapshot[]) => {
+  const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
   try {
-    await syncClientPlugins()
+    // 传上刚拿到的清单：少一次 plugin:list 往返，也避免渲染层重复投影
+    await syncClientPlugins(list)
   } catch {
     /* 同步失败不影响列表展示 */
   }
   refreshClientStates()
+  reportTiming('plugin-panel-client-sync', (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0, `plugins=${plugins.value.length}`)
 }
 /** 槽位注册表快照（详情面板用它把「界面位置」归到具体插件） */
 const slotSnapshot = useSlotSnapshot()
@@ -870,16 +874,46 @@ const permissionHint = (permissions: string[]): string => {
   return `${head}\n${lines.join('\n')}`
 }
 
+/**
+ * 后台任务（每插件数据统计 / 界面半边同步）：合并到一次、并推迟到列表首帧之后。
+ *
+ * 为什么：以前 `applyList` 里直接 `void refreshAllData()` + `void syncThenRefreshClients()`，
+ * 打开面板的同时就要扫 localStorage + 走 OPFS + 拉主进程数据目录 + 同步所有插件客户端，
+ * 几十个插件时会和列表渲染抢主线程，表现出来就是「点开插件面板卡几秒」。
+ */
+let bgTimer: ReturnType<typeof setTimeout> | null = null
+let lastDataAt = 0
+let lastDataKey = ''
+const pluginKeyOf = (list: PluginSnapshot[]) => list.map((p) => `${p.id}:${p.status}`).join(',')
+
+const scheduleBackground = (list: PluginSnapshot[]) => {
+  if (bgTimer) return
+  bgTimer = setTimeout(() => {
+    bgTimer = null
+    const key = pluginKeyOf(list)
+    // 数据统计比较贵：插件集合与状态都没变、且 15s 内算过，就不再重复扫
+    if (key !== lastDataKey || Date.now() - lastDataAt > 15000) {
+      lastDataKey = key
+      lastDataAt = Date.now()
+      void refreshAllData()
+    }
+    void syncThenRefreshClients(list)
+  }, 30)
+}
+
 const refresh = async () => {
   const api = bridgeOrNull()
   if (!api) {
     unavailable.value = true
     return
   }
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now())
   try {
     const res = await api.list()
     applyList(res)
     unavailable.value = false
+    const dt = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0
+    reportTiming('plugin-panel-list', dt, `plugins=${plugins.value.length}`)
   } catch (e: any) {
     console.error('[PluginManagement] 加载插件列表失败:', e)
     unavailable.value = true
@@ -894,8 +928,8 @@ const applyList = (res: any) => {
   services.value = res?.services || []
   invalidNamedDirs.value = Array.isArray(res?.invalidNamedDirs) ? res.invalidNamedDirs : []
   // 与「技能管理」一致：加载后不自动展开详情，右侧保持收起（点某个插件才出现）
-  void refreshAllData()
-  void syncThenRefreshClients()
+  // 重活推后：先让列表画出来，再做数据统计 / 客户端同步
+  scheduleBackground(plugins.value)
 }
 
 // ---------------------------------------------------------------------------
@@ -929,11 +963,13 @@ const refreshAllData = async () => {
     pluginData.value = {}
     return
   }
+  const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
   try {
     pluginData.value = await collectAllPluginData(ids)
   } catch (e) {
     console.error('[PluginManagement] 统计插件数据失败:', e)
   }
+  reportTiming('plugin-panel-data-stats', (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0, `plugins=${ids.length}`)
 }
 
 const refreshData = async (id: string) => {
@@ -1547,16 +1583,28 @@ watch(selectedId, () => {
 
 onMounted(async () => {
   await refresh()
-  // 主进程推送：状态变更 / 日志 / 通知（节流到下一帧，避免重载期间连续刷列表）
+  // 主进程推送：状态变更 / 日志 / 通知（状态变更做 250ms 合并：一次启用会连发好几条事件）
   offEvent = bridge()?.onEvent?.((ev: PluginEvent) => {
-    if (ev.type === 'plugin/changed') void refresh()
+    if (ev.type === 'plugin/changed') scheduleRefresh()
     else if (ev.type === 'plugin/notify') ElMessage.info(`[${ev.id}] ${ev.message}`)
   }) ?? null
 })
 
+/** 合并 plugin/changed 引发的刷新（连续事件只重载一次列表） */
+let changeTimer: ReturnType<typeof setTimeout> | null = null
+const scheduleRefresh = () => {
+  if (changeTimer) return
+  changeTimer = setTimeout(() => {
+    changeTimer = null
+    void refresh()
+  }, 250)
+}
+
 onUnmounted(() => {
   offEvent?.()
   offEvent = null
+  if (changeTimer) { clearTimeout(changeTimer); changeTimer = null }
+  if (bgTimer) { clearTimeout(bgTimer); bgTimer = null }
 })
 </script>
 

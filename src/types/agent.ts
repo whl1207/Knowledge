@@ -287,7 +287,19 @@ export interface AgentEventMap {
   'tool/call': { callId: string; name: string; args: any; /** 参数解析失败（畸形/被截断）：已回退到错误提示，不再执行工具 */ argsParseFailed?: boolean }
   /** preview：UI 专用差异预览（不进模型上下文，见 ToolResult.preview） */
   'tool/result': { callId: string; name: string; ok: boolean; value?: any; error?: string; preview?: any }
-  'agent/tool-args': { callId: string; name: string; argsFragment: string }
+  'agent/tool-args': {
+    callId: string
+    name: string
+    argsFragment: string
+    /**
+     * 主进程侧的**完整累积原文**（可选）。
+     *
+     * 有了它，渲染层不必依赖「每个增量都收到、且顺序正确」也能拿到正确进度：
+     * 只要任何一个事件到达，就能把参数整体对齐到主进程的最新状态——
+     * 之前会卡在「参数生成中…（已接收 16 字）」，就是增量在渲染层丢失后没有被纠正。
+     */
+    argsRaw?: string
+  }
   'agent/question': {
     askId: string
     /**

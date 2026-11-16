@@ -1410,14 +1410,21 @@ export class AIUtils {
                                 // 工具调用（function calling）
                                 if (data.message?.tool_calls && data.message.tool_calls.length > 0) {
                                     for (const tc of data.message.tool_calls) {
-                                        if (tc.function?.name && !toolCallsAcc.some(t => t.function?.name === tc.function.name)) {
+                                        if (!tc.function?.name) continue
+                                        // 按 **id** 去重，而不是按工具名：同一轮里模型完全可能连续调用
+                                        // 多次同名工具（例如 3 处 replace_in_file）。旧实现按 name 去重，
+                                        // 第 2 个起的同名调用既不登记也不回传参数，界面上那张卡片就一直
+                                        // 停在第一个片段的「参数生成中…（已接收 96 字）」。
+                                        const callId = tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+                                        if (!toolCallsAcc.some(t => t && t.id === callId)) {
+                                            const argsText = typeof tc.function.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function.arguments ?? '')
                                             toolCallsAcc.push({
-                                                id: tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                                                id: callId,
                                                 type: 'function',
-                                                function: { name: tc.function.name, arguments: typeof tc.function.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function.arguments ?? '') }
+                                                function: { name: tc.function.name, arguments: argsText }
                                             });
                                             // 参数整段回传（Ollama 非增量，一次给出）；arguments 可能是对象，规范化为字符串避免 UI 显示 [object Object]
-                                            options?.onToolCallArgs?.(toolCallsAcc[toolCallsAcc.length - 1].id, tc.function.name, typeof tc.function.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function.arguments ?? ''))
+                                            options?.onToolCallArgs?.(callId, tc.function.name, argsText)
                                         }
                                     }
                                 }

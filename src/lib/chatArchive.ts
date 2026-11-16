@@ -16,6 +16,8 @@ import { aikmIpc, aikmIpcAvailable } from '@/lib/aikmIpc'
 const LS_CHATS = 'ai-chats'
 /** 防抖窗口：流式回答期间高频调用，合并成一次 IPC + 一次落盘 */
 const SAVE_DEBOUNCE_MS = 400
+/** localStorage 兜底上限（超过就别写了，必然配额失败） */
+const LEGACY_MIRROR_MAX_BYTES = 4 * 1024 * 1024
 
 interface ArchivePayload {
   chats: any[]
@@ -49,9 +51,34 @@ function readLegacyChats(): any[] {
 
 function writeLegacyChats(list: any[]): void {
   try {
-    localStorage.setItem(LS_CHATS, JSON.stringify(list))
+    const text = JSON.stringify(list)
+    // localStorage 配额约 10MB：十几 MB 的存档写进去必然抛 QuotaExceeded，
+    // 白白卡住主线程还可能把已有兜底数据挤掉——超过阈值就只告警不写。
+    if (text.length > LEGACY_MIRROR_MAX_BYTES) {
+      console.warn('[chatArchive] 存档过大，跳过 localStorage 兜底（' + Math.round(text.length / 1024 / 1024) + 'MB）')
+      return
+    }
+    localStorage.setItem(LS_CHATS, text)
   } catch (e) {
     console.warn('[chatArchive] localStorage 写入失败（浏览器端配额）:', e)
+  }
+}
+
+/**
+ * 跨进程 / 落盘前先转成纯对象。
+ *
+ * **这是「重启后会话消失」的根因**：渲染层的 `chats.value` 是 Vue 的响应式 Proxy，
+ * 结构化克隆（`ipcRenderer.invoke` 的参数序列化）**不支持 Proxy**，会抛
+ * `An object could not be cloned`。于是 `chats:save` 每次都失败，主进程只在
+ * 首次迁移那一刻写过一份快照；之后所有会话都只活在内存里，退出即丢。
+ * `JSON.parse(JSON.stringify())` 会把 Proxy 摊平成普通对象（顺带丢弃不可序列化字段）。
+ */
+function toPlain<T>(value: T): T {
+  try {
+    return JSON.parse(JSON.stringify(value)) as T
+  } catch (e) {
+    console.warn('[chatArchive] 存档序列化失败，按原样发送:', e)
+    return value
   }
 }
 
@@ -85,18 +112,25 @@ export async function loadChatArchive(): Promise<{ chats: any[]; migrated: boole
 let pending: any[] | null = null
 let timer: ReturnType<typeof setTimeout> | null = null
 let lastPromise: Promise<void> | null = null
+/** 实际使用的防抖窗口：大存档（序列化慢）会自动拉长到 1500ms */
+let debounceMs = SAVE_DEBOUNCE_MS
 
 async function doSave(chats: any[]): Promise<void> {
   if (!desktop()) {
     writeLegacyChats(chats)
     return
   }
+  // 关键：必须换成纯对象，否则 Proxy 过不了结构化克隆（见 toPlain 注释）
+  const startedAt = Date.now()
+  const plain = toPlain(chats)
+  // 十几 MB 的存档序列化很贵：一旦发现慢，就把防抖窗口拉长，避免流式回答期间反复卡主线程
+  if (Date.now() - startedAt > 60) debounceMs = 1500
   try {
-    await invokeIpc('chats:save', { chats })
+    await invokeIpc('chats:save', { chats: plain })
   } catch (e) {
     // 主进程写失败时留一份 localStorage 兜底，下一次保存成功后清掉
     console.warn('[chatArchive] 主进程保存失败，写 localStorage 兜底:', e)
-    writeLegacyChats(chats)
+    writeLegacyChats(plain)
   }
 }
 
@@ -107,7 +141,7 @@ export function scheduleChatArchiveSave(chats: any[]): void {
   timer = setTimeout(() => {
     timer = null
     void flushChatArchive()
-  }, SAVE_DEBOUNCE_MS)
+  }, debounceMs)
 }
 
 /** 立即把待保存的一份送出去（切模块 / 关窗前调用） */
@@ -144,7 +178,8 @@ export function flushChatArchiveSync(chats?: any[]): void {
     return
   }
   try {
-    aikmIpc.send('chats:save-async', { chats: data })
+    // 同一个坑：退出前用 send 也一样要过结构化克隆，Proxy 会抛
+    aikmIpc.send('chats:save-async', { chats: toPlain(data) })
   } catch {
     writeLegacyChats(data)
   }

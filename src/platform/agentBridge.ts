@@ -496,6 +496,22 @@ class AgentBridge {
     return view.steps[view.steps.length - 1]
   }
 
+  /**
+   * 按 callId 在**所有 step** 里找工具调用。
+   *
+   * 之前只看最后一个 step：一旦 step 边界（`agent/step-start`）比参数增量先到，
+   * 后续增量就会被挂到新 step 上 —— 用户看到的那张卡片永远停在首个片段
+   * （「参数生成中…（已接收 16 字）」不再变化），工具结果也可能落到另一张卡片上。
+   */
+  private findToolCall(view: AgentSessionView, callId: string): any | null {
+    if (!callId) return null
+    for (let i = view.steps.length - 1; i >= 0; i -= 1) {
+      const hit = view.steps[i]?.toolCalls?.find((c) => c.callId === callId)
+      if (hit) return hit
+    }
+    return null
+  }
+
   private onEvent(ev: AgentEvent): void {
     let view = this.sessions.get(ev.agentId)
     if (!view) {
@@ -626,7 +642,7 @@ class AgentBridge {
           const callId = String(ev.payload.callId || '')
           // 该 callId 可能已由 assistant/message 预登记：存在则补齐更准确的 name/args，
           // 避免同一工具调用登记两条（后登记的 running 空结果会覆盖前一条的结果）
-          const existing = s.toolCalls.find(c => c.callId === callId)
+          const existing = this.findToolCall(view, callId)
           if (existing) {
             if (ev.payload.name) existing.name = ev.payload.name
             const incoming = ev.payload.args
@@ -650,7 +666,8 @@ class AgentBridge {
       }
       case 'tool/result': {
         const s = this.lastStep(view)
-        const tc = s?.toolCalls.find((c) => c.callId === ev.payload.callId)
+        // 用 callId 在所有 step 里找：step 边界与结果事件不一定同序
+        const tc = this.findToolCall(view, String(ev.payload.callId || ''))
         if (tc) {
           tc.status = ev.payload.ok ? 'success' : 'error'
           tc.result = ev.payload.value
@@ -671,25 +688,30 @@ class AgentBridge {
         if (s) {
           const callId = String(ev.payload.callId || '')
           const frag = String(ev.payload.argsFragment || '')
+          const full = typeof ev.payload.argsRaw === 'string' ? ev.payload.argsRaw : ''
           if (!callId) break
-          const existing = s.toolCalls.find((c) => c.callId === callId)
+          const existing = this.findToolCall(view, callId)
           if (existing) {
             existing.status = 'running'
             if (ev.payload.name) existing.name = ev.payload.name
-            if (frag) {
+            if (full) {
+              existing._argsRaw = full
+            } else if (frag) {
               // 兼容「增量片段」（OpenAI/DeepSeek 拼接）与「全量快照」（Gemini/Ollama 覆盖）：
               // 新串是旧串的前缀扩展 → 覆盖；否则拼接
               const prev = existing._argsRaw || ''
               existing._argsRaw = frag.length > prev.length && frag.startsWith(prev) ? frag : prev + frag
+            }
+            if (full || frag) {
               // 尽力解析为对象（JSON 未闭合时保留原始字符串，前端从原文流式提取 content）
-              try { existing.args = JSON.parse(existing._argsRaw) } catch { existing.args = existing._argsRaw }
+              try { existing.args = JSON.parse(existing._argsRaw || '') } catch { existing.args = existing._argsRaw }
             }
           } else {
             s.toolCalls.push({
               callId,
               name: ev.payload.name || '',
               args: '',
-              _argsRaw: frag,
+              _argsRaw: full || frag,
               status: 'running',
               startTime: Date.now(),
             })
