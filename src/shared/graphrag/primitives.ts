@@ -186,6 +186,12 @@ export interface RetrievalServices {
   agenticChat(messages: any[], tools: any[]): Promise<{ content: string; tool_calls: any[] }>
   cosineSimilarity(a: number[], b: number[]): number
   computeBM25(query: string, docs: string[], k1: number, b: number): number[]
+  /**
+   * 可选：直接问向量库要「查询向量 → 切片分数」（topN 候选 id→余弦分）。
+   * 3.2 的 `.kb` 不内联向量，且 Agentic/Hybrid 的子查询向量不在主查询候选集里，
+   * 所以 dense_score 每次算分时用这个函数查一次库，而不是只看内存 vectors。
+   */
+  querySliceScores?(queryVector: number[], topN?: number): Promise<Map<string, number>>
 }
 
 export interface RetrievalContext {
@@ -315,6 +321,17 @@ export async function denseScore(ctx: RetrievalContext, params: any = {}): Promi
   const BM25_WEIGHT = params.bm25Weight ?? config.bm25Weight
   const COSINE_WEIGHT = bm25Enabled ? 1 - BM25_WEIGHT : 1
 
+  // 子查询/多跳每轮都可能有新的查询向量：先问向量库要一次 topN 切片分（3.2 下内存无向量）。
+  let dbSliceScores: Map<string, number> | null = null
+  if (queryEmbedding && services.querySliceScores) {
+    try {
+      dbSliceScores = await services.querySliceScores(
+        queryEmbedding,
+        Math.max(300, Math.min(3000, Number(config.searchNum || 5) * 40)),
+      )
+    } catch { dbSliceScores = null }
+  }
+
   const scores = new Map<string, number>()
   // 分解分（切片/问题 原始通道分）：随 scores 一并回传，管线累积到 meta 供结果分项展示（不影响排序）
   const details = new Map<string, { sliceScore: number; questionScore: number; bm25Score: number; hasQ: boolean }>()
@@ -337,7 +354,10 @@ export async function denseScore(ctx: RetrievalContext, params: any = {}): Promi
         } catch { /* 单条失败忽略 */ }
       }
     }
-    if (b.A_vector && queryEmbedding) {
+    const dbScore = dbSliceScores?.get(String(b.id))
+    if (dbScore !== undefined) {
+      sliceScore = dbScore
+    } else if (b.A_vector && queryEmbedding) {
       try { sliceScore = services.cosineSimilarity(queryEmbedding, b.A_vector) } catch { sliceScore = 0 }
     }
     const bm25Score = bm25Enabled ? (bm25Scores[i] || 0) : 0

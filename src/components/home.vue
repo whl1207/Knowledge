@@ -180,6 +180,10 @@
           <span v-if="chatUsageLabel" class="chat-stat chat-stat-tokens" :title="chatUsageTitle">
             <i class="fas fa-coins"></i>{{ chatUsageLabel }}
           </span>
+          <!-- 推理速度：最近一步模型请求的 tok/s（不含工具执行，与 DSH 同口径） -->
+          <span v-if="chatSpeedLabel" class="chat-stat chat-stat-speed" :title="chatSpeedTitle">
+            <i class="fas fa-tachometer"></i>{{ chatSpeedLabel }}
+          </span>
           <span v-if="cacheHitLabel" class="chat-stat chat-stat-cache" :title="cacheHitTitle">
             <i class="fas fa-bolt"></i>{{ cacheHitLabel }}
           </span>
@@ -2868,12 +2872,16 @@ const isNarrowLayout = computed(() => isTallLayout.value || isMobileWidth.value)
 onMounted(() => {
   if (typeof window === 'undefined') return
   window.addEventListener('resize', syncMobileWidth)
+  // 模型面板是 teleport 到 body 的 fixed 面板：窗口缩放后要跟着按钮重新落位
+  window.addEventListener('resize', onWindowResizeForModelPicker)
   syncMobileWidth()
 })
 onBeforeUnmount(() => {
   unregisterLeaveGuard?.()
   if (typeof window === 'undefined') return
   window.removeEventListener('resize', syncMobileWidth)
+  window.removeEventListener('resize', onWindowResizeForModelPicker)
+  if (modelPickerRepositionRaf) { cancelAnimationFrame(modelPickerRepositionRaf); modelPickerRepositionRaf = 0 }
 })
 
 // ==================== 安卓返回手势（本模块内的界面栈） ====================
@@ -8317,11 +8325,13 @@ const selectLlmSourceInPicker = async (group: ModelPickerGroup) => {
   await refreshModelPicker()
 }
 
-const toggleModelPicker = () => {
-  if (isAnyExecuting.value) return
-  if (modelPickerVisible.value) { closeModelPicker(); return }
-  // 打开前先关闭输入区其它自研面板（模式 / 策略 / 工作区 / 关联项），保证同一时刻只有一个面板
-  closeComposerPanels()
+/**
+ * 计算并落位模型面板（position: fixed，靠按钮矩形换算）。
+ *
+ * 打开时与**窗口尺寸变化时**都走这里：面板是 teleport 到 body 的 fixed 元素，
+ * 只算一次的话缩放窗口后它就停在旧坐标上（离按钮越来越远）。
+ */
+const positionModelPicker = () => {
   const rect = modelPickerBtnRef.value?.getBoundingClientRect()
   const panelWidth = 240
   const margin = 8
@@ -8336,6 +8346,25 @@ const toggleModelPicker = () => {
     left: Math.max(margin, left),
     top: above ? Math.max(margin, rawTop) : Math.max(margin, Math.min(rawTop, window.innerHeight - 140)),
   }
+}
+
+/** 窗口缩放时重排面板位置：用 rAF 合并连续的 resize（拖拽缩放会连发几十次） */
+let modelPickerRepositionRaf = 0
+const onWindowResizeForModelPicker = () => {
+  if (!modelPickerVisible.value) return
+  if (modelPickerRepositionRaf) return
+  modelPickerRepositionRaf = requestAnimationFrame(() => {
+    modelPickerRepositionRaf = 0
+    if (modelPickerVisible.value) positionModelPicker()
+  })
+}
+
+const toggleModelPicker = () => {
+  if (isAnyExecuting.value) return
+  if (modelPickerVisible.value) { closeModelPicker(); return }
+  // 打开前先关闭输入区其它自研面板（模式 / 策略 / 工作区 / 关联项），保证同一时刻只有一个面板
+  closeComposerPanels()
+  positionModelPicker()
   modelPickerShowEmpty.value = false
   modelPickerQuery.value = ''
   modelPickerVisible.value = true
@@ -8343,6 +8372,13 @@ const toggleModelPicker = () => {
   void nextTick(() => modelPickerSearchRef.value?.focus())
   void refreshModelPicker()
 }
+
+// 布局变化（左侧聊天列表开合、右侧栏宽度 / 开合、进入窄屏整屏模式）也会让按钮位移：
+// 面板开着时跟着重排，避免"面板停在旧位置、和按钮分家"。
+watch(
+  () => [showSidebar.value, dockState.value.open, dockState.value.width, isNarrowLayout.value, composerManualHeight.value, isEmptyChat.value],
+  () => onWindowResizeForModelPicker(),
+)
 
 /**
  * 选中面板里的一项：来源与模型一起写进当前聊天配置。
@@ -10196,8 +10232,60 @@ const chatUsageTitle = computed(() => {
   return lines.filter(Boolean).join('\n')
 })
 
-/** 缓存命中比例：来源没回报缓存字段时不显示 */
-const cacheHitLabel = computed(() => {
+/**
+ * 推理速度（tok/s）：取最近一条带 speed 的助手消息。
+ * speed 的口径 = 最近一步模型请求的 completionTokens / 该步耗时（agent loop 的 genMs，
+ * 不含工具执行与排队），与 DSH 的「xx tok/s」一致；用整条消息耗时当分母会把速度算低一个量级。
+ */
+const chatSpeedSample = computed<{ speed: number; completionTokens: number; duration: number } | null>(() => {
+  const msgs = (currentChat.value?.messages || []) as any[]
+  // 从最后一条助手消息往前找；若它正在生成但还没跑完第一步（没有 speed），
+  // 不拿上一条的速度冒充本轮读数，宁可不显示。
+  let lastAssistant: any = null
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    if (msgs[i]?.role === 'assistant') { lastAssistant = msgs[i]; break }
+  }
+  const runningButNoSample = lastAssistant && !(Number(lastAssistant?.tokenStats?.speed) > 0)
+    && (lastAssistant.streaming === true || lastAssistant.isExecuting === true)
+  if (runningButNoSample) return null
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const m = msgs[i]
+    if (m?.role !== 'assistant' || !m.tokenStats) continue
+    const speed = Number(m.tokenStats.speed) || 0
+    if (speed > 0) {
+      return {
+        speed,
+        completionTokens: Number(m.tokenStats.completionTokens) || 0,
+        duration: Number(m.tokenStats.duration) || 0,
+      }
+    }
+  }
+  return null
+})
+/** 速度文案：≥100 取整（避免抖动），否则保留一位小数 */
+const chatSpeedLabel = computed(() => {
+  const s = chatSpeedSample.value
+  if (!s) return ''
+  return (s.speed >= 100 ? String(Math.round(s.speed)) : s.speed.toFixed(1)) + ' tok/s'
+})
+const chatSpeedTitle = computed(() => {
+  const s = chatSpeedSample.value
+  if (!s) return ''
+  const lines = store.locales == 'zh'
+    ? [
+        '推理速度：' + s.speed.toFixed(1) + ' tok/s',
+        '按**最近一步模型请求**计算：输出 ' + s.completionTokens.toLocaleString() + ' tokens ÷ 该步耗时（不含工具执行与排队）',
+        '支持推理的后端才会有输出 token 用量；本地后端不回传 usage 时按文本长度估算',
+      ]
+    : [
+        'Inference speed: ' + s.speed.toFixed(1) + ' tok/s',
+        'Measured on the latest model request: ' + s.completionTokens.toLocaleString() + ' output tokens ÷ that step’s duration (tool execution excluded)',
+        'Requires providers that report usage; local backends without usage are estimated from text length',
+      ]
+  return lines.join('\n')
+})
+
+/** 缓存命中比例：来源没回报缓存字段时不显示 */const cacheHitLabel = computed(() => {
   const ratio = chatUsageStats.value.ratio
   if (ratio === null) return ''
   const pct = Math.round(ratio * 100)
@@ -13041,6 +13129,13 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
 .chat-stat-progress,
 .chat-stat-cache {
   opacity: 0.55;
+}
+/* 推理速度：比累计 token 稍显眼一点（它是"现在跑多快"，不是历史账） */
+.chat-stat-speed {
+  opacity: 0.7;
+}
+.chat-stat-speed i {
+  color: var(--fontActiveColor);
 }
 .chat-stat:hover {
   opacity: 0.8;

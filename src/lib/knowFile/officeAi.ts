@@ -38,7 +38,12 @@ function chatEndpointOf(rawUrl: string, provider: string): string {
   if (/\/chat\/completions$/i.test(url) || /\/completions$/i.test(url)) return url
   // 显式写成 GPUStack 风格基址的来源，仍按 /v1-openai 前缀补全（保持既有行为）
   if (/\/v1-openai$/i.test(url)) return `${url}/chat/completions`
-  if (provider === 'gpustack' || provider === 'custom') {
+  if (provider === 'gpustack') {
+    const viaUtil = (AIUtils as any)?.buildCustomChatEndpoint
+    if (typeof viaUtil === 'function') return String(viaUtil(url, { gpuStackDefault: true }) || '')
+    return `${url}/v1-openai/chat/completions`
+  }
+  if (provider === 'custom') {
     const viaUtil = (AIUtils as any)?.buildCustomChatEndpoint
     if (typeof viaUtil === 'function') return String(viaUtil(url) || '')
     return `${url}/v1/chat/completions`

@@ -363,7 +363,7 @@ async function embedWithSpec(eff: KbModelSpec, input: string | string[]): Promis
     case 'mimo':
     case 'gpustack':
     case 'custom': {
-      const base = stripTrailingSlash(providerBaseUrl(eff))
+      const base = stripTrailingSlash(providerBaseUrl(eff)).replace(/\/(v1\/)?embeddings$/i, '')
       // GPUStack 用 /v1-openai 前缀；openai 的 base_url 已含 /v1；其余补 /v1
       const url = base.endsWith('/v1-openai')
         ? `${base}/embeddings`

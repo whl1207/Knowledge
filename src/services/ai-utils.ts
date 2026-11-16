@@ -249,8 +249,8 @@ export class AIUtils {
   }
 
   /** 归一化自定义 api_url 为聊天请求端点（基址自动补 /chat/completions） */
-  static buildCustomChatEndpoint(apiUrl: string): string {
-    return AICore.buildCustomChatEndpoint(apiUrl)
+  static buildCustomChatEndpoint(apiUrl: string, opts?: { gpuStackDefault?: boolean }): string {
+    return AICore.buildCustomChatEndpoint(apiUrl, opts)
   }
 
   static translateOpenAIToolsToAnthropic(tools: any[]): any[] {
@@ -526,7 +526,7 @@ export class AIUtils {
         // GPUStack：内置自托管来源，OpenAI 兼容端点（裸地址自动补 /v1-openai/chat/completions）
         const c = { ...cfg, api_key: apiKey || cfg.api_key }
         const body = AIUtils.buildOpenAIRequest(c, llmConfig, messages)
-        const endpoint = AIUtils.buildCustomChatEndpoint(cfg.base_url)
+        const endpoint = AIUtils.buildCustomChatEndpoint(cfg.base_url, { gpuStackDefault: true })
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
@@ -681,7 +681,17 @@ export class AIUtils {
           }
           headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey || cfg.api_key}`, ...(cfg.headers || {}) }
         }
-        return AIUtils.makeAPIRequest(endpoint, body, headers, options)
+        try {
+          return await AIUtils.makeAPIRequest(endpoint, body, headers, options)
+        } catch (e: any) {
+          // 兼容老配置：裸地址过去按 GPUStack 风格拼 /v1-openai/chat/completions。
+          // 自定义来源现在默认按通用 OpenAI 兼容 /v1/chat/completions；404 时再兜底试一次 GPUStack 风格。
+          if (e?.status === 404) {
+            const alt = AIUtils.buildCustomChatEndpoint(cfg.api_url, { gpuStackDefault: true })
+            if (alt && alt !== endpoint) return await AIUtils.makeAPIRequest(alt, body, headers, options)
+          }
+          throw e
+        }
       }
       default:
         throw new Error(`不支持的模型来源: ${provider}`)

@@ -370,7 +370,10 @@ class RendererAgent {
         item = null
 
         this.streamedArgs.clear()
+        // 模型请求计时（不含工具执行）：界面「xx tok/s」= completionTokens / genMs
+        const genStartedAt = Date.now()
         const result = await this.runStep()
+        const genMs = Math.max(1, Date.now() - genStartedAt)
         if (this.turnController.signal.aborted) break
         this.lastFinishReason = result.finishReason || ''
 
@@ -443,7 +446,7 @@ class RendererAgent {
           }
         }
 
-        this.fire('agent/step-end', { turn, step, toolCalls: toolCallsCount, usage: result.usage })
+        this.fire('agent/step-end', { turn, step, toolCalls: toolCallsCount, usage: result.usage, genMs })
 
         const pendingSteer = this.claimPendingSteer()
         if (pendingSteer) this.fire('agent/inbox', { pending: this.inbox.length })

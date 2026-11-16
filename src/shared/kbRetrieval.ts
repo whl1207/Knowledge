@@ -12,6 +12,50 @@ import { getPlatform } from '@/platform'
 
 // ==================== 类型定义 ====================
 
+// ==================== 向量库适配器（.kbdb） ====================
+/**
+ * 检索时按需读取 `.kbdb` 的桥。由宿主注入：
+ * - 主进程：直接用 `KbVectorStore`（kb_search 工具就跑在主进程）；
+ * - 渲染层：走 `kb:vector:*` IPC（见 src/lib/kbVectorDb.ts）。
+ * shared 层不直接依赖 IPC，保证两边都能用同一套检索代码。
+ */
+export interface KbVectorDbAdapter {
+  /** 该 .kb 是否有可用的向量库（文件存在且有向量） */
+  has(kbPath: string): Promise<boolean>
+  /** 库里的向量条数（用于判断库是否覆盖全部切片） */
+  count(kbPath: string): Promise<number>
+  /** topK 近邻（id + 余弦分数） */
+  query(kbPath: string, vector: number[], topK: number): Promise<Array<{ id: string; score: number }>>
+  /** 按 id 取回向量（只取候选，避免整库搬运） */
+  vectors(kbPath: string, ids: string[]): Promise<Map<string, number[]>>
+  /** 可选：按文件取回文件级摘要向量（file_vectors 表，含内容 hash） */
+  fileVectors?(kbPath: string, files: string[]): Promise<Map<string, { vector: number[]; hash: string }>>
+}
+
+let vectorDbAdapter: KbVectorDbAdapter | null = null
+
+/** 由宿主在启动时注入；传 null 关闭（测试/无 .kbdb 环境） */
+export function setKbVectorDbAdapter(adapter: KbVectorDbAdapter | null): void {
+  vectorDbAdapter = adapter
+}
+
+/**
+ * 构造「查询向量 → 库内候选切片分」。
+
+ * 供 `RetrievalServices.querySliceScores` 使用：dense_score 在每次子查询/多跳时
+ * 都能直接问库要 topN 切片分，不再受「主查询候选回填」的限制。
+ * 没有注入适配器或库不可用时返回 undefined（调用方回退内存向量）。
+ */
+export function makeVectorDbSliceScorer(
+  kbPath: string,
+): ((queryVector: number[], topN?: number) => Promise<Map<string, number>>) | undefined {
+  if (!vectorDbAdapter || !kbPath) return undefined
+  return async (queryVector: number[], topN = 300): Promise<Map<string, number>> => {
+    const hits = await vectorDbAdapter!.query(kbPath, queryVector, Math.max(1, Math.min(3000, topN)))
+    return new Map(hits.map((h) => [String(h.id), Number(h.score) || 0]))
+  }
+}
+
 export interface KnowledgeBlock {
   filePath: string
   label: string
@@ -274,6 +318,21 @@ async function ensureMissingQuestionVectors(questions: any[] | undefined, spec: 
 // ==================== 主函数 ====================
 
 /**
+ * 为「3.2（向量在 .kbdb，.kb 不内联）」的检索补齐旁路向量：
+ * 文件摘要索引向量 + 问题向量。retrieveKnowledge 内部会按策略调用，
+ * KB 模块自己的 runStrategy 路径没有这些字段，需要显式补一次（结果缓存在内存对象上）。
+ */
+export async function ensureSideVectorsForStrategy(
+  fileIndex: Map<string, any>,
+  questions: any[] | undefined,
+  spec: KbModelSpec,
+): Promise<{ files: number; questions: number }> {
+  const files = await ensureMissingFileIndexVectors(fileIndex, spec)
+  const qs = await ensureMissingQuestionVectors(questions, spec)
+  return { files, questions: qs }
+}
+
+/**
  * 知识库检索函数
  * 
  * @param query 查询问题
@@ -334,6 +393,26 @@ export async function retrieveKnowledge(
     // 1. 加载知识库（包括配置信息）
     const { blocks, fileSummaries, fileIndex, kbConfig, ontology, communityReports, communityResult, questions } = await loadKnowledgeBase(kbPath)
 
+    // 1.5 文件级摘要向量：3.2 的 .kb 不内联它们，优先从 .kbdb 的 file_vectors 表取回；
+    //     缺失时交给后面的 ensureMissingFileIndexVectors 按需嵌入。
+    if (vectorDbAdapter?.fileVectors && fileIndex && fileIndex.size > 0) {
+      const missing = [...fileIndex.entries()].some(([, e]) => !e?.vector?.length)
+      if (missing) {
+        try {
+          const got = await vectorDbAdapter.fileVectors(kbPath, [...fileIndex.keys()])
+          for (const [f, meta] of got) {
+            const entry = fileIndex.get(f)
+            if (!entry || entry.vector?.length || !meta?.vector?.length) continue
+            // 摘要 hash 不一致说明文件内容变了：不用旧向量，交给 ensureMissingFileIndexVectors 重算
+            const stale = !!entry.contentHash && !!meta.hash && entry.contentHash !== meta.hash
+            if (!stale) entry.vector = meta.vector
+          }
+        } catch (e) {
+          console.warn('[kbRetrieval] 从 .kbdb 取文件向量失败（将按需重算）:', e)
+        }
+      }
+    }
+
     // 2. 组装统一模型规格（多来源：ollama / openai / deepseek / ...）
     const spec = buildSpecFromOptions(config)
 
@@ -356,11 +435,30 @@ export async function retrieveKnowledge(
     if (!spec.chat) spec.chat = spec.config?.model || effectiveEmbedModel
     if (!spec.process) spec.process = spec.config?.model || spec.chat
 
-    // 3.5 精简模式懒补全：.kb 未保存向量数据（config.saveVectors=false）时，首次问答按当前
-    //     嵌入模型重新推导切片/问题/文件级摘要索引向量（会话内缓存）；已存向量的 KB 无缺失则零开销。
-    //     ⚠️ 只补当前策略真正会用到的通道：similarity 不需要问题向量 / 文件摘要向量，
-    //     以前无条件补会在「6000 个问题」的库上首次提问连发几百次嵌入请求（慢机直接卡死）。
-    await ensureMissingBlockVectors(blocks, embedSpec)
+    // 向量库模型校验：换过嵌入模型后旧库向量语义/维度不一致，检索会"能跑但变差"
+    const storeModel = String((kbConfig as any)?.vectorStore?.model || '')
+    if (storeModel && effectiveEmbedModel && storeModel !== effectiveEmbedModel) {
+      console.warn(`[kbRetrieval] 向量库模型 ${storeModel} 与当前嵌入模型 ${effectiveEmbedModel} 不一致；建议在版本管理中「重建向量库」`)
+    }
+
+    // 3.4 向量库（.kbdb）：默认优先走向量库计算。
+    //     - 库里的向量数 ≥ 切片数（完整）：库就是唯一来源，内联向量不再参与（只有候选切片回填向量）；
+    //     - 3.2 的 .kb（无内联向量）但库不完整：也用库，缺的切片按 0 分；
+    //     - 有内联向量且库不完整：退回原来的内联计算（避免部分索引漏检）。
+    const hasInlineBlockVectors = blocks.some((b: any) => Array.isArray(b?.A_vector) && b.A_vector.length > 0)
+    let vectorDbCount = 0
+    if (vectorDbAdapter) {
+      try {
+        vectorDbCount = await vectorDbAdapter.count(kbPath)
+      } catch {
+        vectorDbCount = 0
+      }
+    }
+    const dbComplete = blocks.length > 0 && vectorDbCount >= blocks.length
+    const useVectorDb = !!(vectorDbAdapter && vectorDbCount > 0 && (dbComplete || !hasInlineBlockVectors))
+    // 3.5 精简模式懒补全：.kb 未保存向量数据（config.saveVectors=false）且没有向量库时，
+    //     首次问答按当前嵌入模型重新推导切片向量（会话内缓存）。
+    if (!useVectorDb) await ensureMissingBlockVectors(blocks, embedSpec)
     // 策略在补全前就确定（后面第 7 步复用同一份，避免重复解析）
     const strategyId = resolveStrategyId(config.strategy)
     const strategyDef = getStrategies().find((s) => s.id === strategyId)
@@ -394,6 +492,41 @@ export async function retrieveKnowledge(
 
     if (!queryEmbedding) {
       throw new Error('查询向量化失败')
+    }
+
+    // 5.5 向量库（.kbdb）：只把 topN 候选切片的向量取回来，参与后续打分。
+    //     `.kb` 里仍有内联向量时 useVectorDb=false，完全走原路径；只有 3.2（不再内联）才走这里。
+    if (useVectorDb && vectorDbAdapter) {
+      try {
+        const topN = Math.max(300, Math.min(3000, Number(config.topK) * 40 || 300))
+        const hits = await vectorDbAdapter.query(kbPath, queryEmbedding, topN)
+        if (hits.length) {
+          const ids = hits.map((h) => String(h.id))
+          const vecs = await vectorDbAdapter.vectors(kbPath, ids)
+          const byId = new Map<string, any>()
+          for (const b of blocks as any[]) byId.set(String(b?.id ?? ''), b)
+          let hydrated = 0
+          const candidateIds = new Set(ids)
+          for (const id of ids) {
+            const b = byId.get(id)
+            const v = vecs.get(id)
+            if (b && v && v.length) {
+              b.A_vector = v
+              hydrated += 1
+            }
+          }
+          // 库覆盖全部切片时，让库成为唯一来源：非候选切片的向量清掉，
+          // 避免「库算完又把漏检的内联向量算进来」，保证默认按向量库计算。
+          if (dbComplete) {
+            for (const b of blocks as any[]) {
+              if (!candidateIds.has(String(b?.id ?? ''))) b.A_vector = undefined
+            }
+          }
+          if (config.debug) console.log(`[kbRetrieval] 向量库命中 ${hits.length} 个候选，回填 ${hydrated} 个切片向量（dbComplete=${dbComplete}）`)
+        }
+      } catch (e) {
+        console.warn('[kbRetrieval] 向量库检索失败，回退内联/重算向量:', e)
+      }
     }
 
     // 6. 批量计算文件摘要向量
@@ -441,7 +574,7 @@ export async function retrieveKnowledge(
       } else {
         try {
           const ctx = buildRetrievalContextFromKb({
-            query, blocks, kbConfig, ontology, communityReports, communityResult, fileIndex, questions,
+            query, kbPath, blocks, kbConfig, ontology, communityReports, communityResult, fileIndex, questions,
             spec, embedSpec, embedModel: effectiveEmbedModel, config,
           })
           // Agentic：收集工具调用轨迹（主页按智能体工具卡片样式展示）+ 只做召回（回答仍由聊天流程统一生成）
@@ -637,6 +770,8 @@ function upsertAgentStep(list: AgentStep[], step: AgentStep): void {
  */
 function buildRetrievalContextFromKb(params: {
   query: string
+  /** 知识库路径：用于让 dense_score 在子查询时直接查 .kbdb（3.2 无内联向量） */
+  kbPath?: string
   blocks: KnowledgeBlock[]
   questions?: KbQuestion[]
   kbConfig?: KnowledgeBaseConfig
@@ -747,11 +882,18 @@ function buildRetrievalContextFromKb(params: {
     // 接入真实 BM25 实现（computeBM25Score 已改为中英混排分词，对中文有效）。
     // 旧实现注入 `() => []` 空数组，且该函数是 truthy 会覆盖默认实现，
     // 导致即使 bm25Enabled=true，BM25 分数也恒为 0（静默失效）。
-    services: kbAi.buildRetrievalServices(
-      spec,
-      { cosineSimilarity, computeBM25: computeBM25Score },
-      embedSpec,
-    ),
+    services: {
+      ...kbAi.buildRetrievalServices(
+        spec,
+        { cosineSimilarity, computeBM25: computeBM25Score },
+        embedSpec,
+      ),
+      // 子查询/多跳每轮查库：3.2 的内存切片没有向量，不能只靠候选回填
+      ...(() => {
+        const scorer = makeVectorDbSliceScorer(String(params.kbPath || ''))
+        return scorer ? { querySliceScores: scorer } : {}
+      })(),
+    },
   }
 }
 

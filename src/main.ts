@@ -13,6 +13,8 @@ import { isAuxWindowHash } from '@/store'
 import { ElMessage, ElTree } from 'element-plus';
 // 轻提示（ElMessage）同时收进「待我处理」面板的「动态」段：所有既有调用点都不用改
 import { installNoticeCapture } from '@/lib/noticeCapture';
+import { setKbVectorDbAdapter } from '@/shared/kbRetrieval'
+import { getVectorDbInfo, queryVectorDb, getVectorDbVectors, getFileVectorsFromDb } from '@/lib/kbVectorDb'
 import 'element-plus/theme-chalk/index.css';
 import '@/style.css'
 import '@/assets/kb-view.css'
@@ -104,6 +106,30 @@ if (!isVoiceOverlayWindow && !isPluginPanelWindow) {
     .then((m) => m.initPluginRuntime())
     .catch(() => { /* 非 Electron 环境无 preload，忽略 */ })
 }
+
+// 知识库检索的向量库适配器（.kbdb）：渲染层走 IPC；
+// 主进程没内置 node:sqlite / 没建向量库时 has() 返回 false，检索自动回退 `.kb` 内联向量。
+setKbVectorDbAdapter({
+  async has(kbPath: string): Promise<boolean> {
+    try {
+      const info = await getVectorDbInfo(kbPath)
+      return !!(info?.exists && info.stats.vectors > 0)
+    } catch {
+      return false
+    }
+  },
+  async count(kbPath: string): Promise<number> {
+    try {
+      const info = await getVectorDbInfo(kbPath)
+      return Number(info?.stats?.vectors) || 0
+    } catch {
+      return 0
+    }
+  },
+  query: (kbPath: string, vector: number[], topK: number) => queryVectorDb(kbPath, vector, topK),
+  vectors: (kbPath: string, ids: string[]) => getVectorDbVectors(kbPath, ids),
+  fileVectors: (kbPath: string, files: string[]) => getFileVectorsFromDb(kbPath, files),
+})
 
 
 // 等首帧绘制完成后再淡出加载层，避免深色遮罩刚移除时应用尚未绘制导致白屏

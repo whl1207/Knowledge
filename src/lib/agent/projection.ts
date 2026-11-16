@@ -179,6 +179,10 @@ export function projectUsage(msg: any, v: any): void {
     totalTokens: Number(v.turnUsageTotal) || v.usageTotal || v.lastUsage.totalTokens || 0,
     duration: Date.now() - (msg._startTime || Date.now()),
   }
+  // 推理速度（tok/s）：最近一步模型请求的 completionTokens / 该步耗时。
+  // 不能用「消息总耗时」当分母 —— 里面还含工具执行与排队，会把速度算低一个量级。
+  const stepSpeed = Number(v.lastSpeed) || 0
+  if (stepSpeed > 0) tokenStats.speed = stepSpeed
   if (v.turnCacheReported === true) {
     tokenStats.cacheReported = true
     tokenStats.cachedTokens = Number(v.turnCachedTotal) || 0

@@ -29,6 +29,8 @@ import * as usageLog from './usage-log'
 import * as chatStore from './chat-store'
 import { recordTiming } from './timing-log'
 import * as schedule from './schedule-service'
+import { closeCachedKbVectorStore, isVectorStoreAvailable, kbdbPathFor, openCachedKbVectorStore, vectorStoreAvailability } from './kb-vector-store'
+import { streamSlimLegacyKb } from './kb-stream-slim'
 
 type IpcHandler = (payload: any, event: IpcMainInvokeEvent) => Promise<any> | any
 
@@ -535,6 +537,200 @@ export function registerNamespacedIpc(): void {
   // ---------------- usage:*（模型用量账本，只读；见 usage-log.ts） ----------------
   // 按来源 × 本地日期聚合，渲染层只负责画图；不传参 = 全部历史（账本从启用起才有数据）。
   registerIpc('usage:summary', () => usageLog.summarize())
+
+  // ---------------- kb:vector:*（知识库向量库 .kbdb，P0：存储 + 查询） ----------------
+  // 说明：这是存储层，尚未接管现有检索路径；渲染层可以先用这些通道做迁移/对比实验。
+  registerIpc('kb:vector:available', () => {
+    const probe = vectorStoreAvailability()
+    return {
+      ...probe,
+      electron: process.versions.electron,
+      // 通道已注册本身就是一个信息：能收到这个返回，说明主进程至少有这版代码
+      channel: 'kb:vector',
+    }
+  })
+
+  const requireVectorStore = (): void => {
+    if (!isVectorStoreAvailable()) {
+      throw new IPCError('UNSUPPORTED', '当前运行时未内置 node:sqlite（.kbdb 向量库不可用）')
+    }
+  }
+  /** 读库路径：正式 `.kbdb` 不存在时回退同目录的 `xxx.portable.kbdb`（拷贝/分享场景） */
+  const resolveReadDbPath = (kbPath: string, explicit?: string): string => {
+    const base = String(explicit || '').trim() || kbdbPathFor(kbPath)
+    if (fs.existsSync(base)) return base
+    const alt = base.replace(/\.kbdb$/i, '') + '.portable.kbdb'
+    return fs.existsSync(alt) ? alt : base
+  }
+  const storeOf = (payload: any, opts: { readOnly?: boolean } = {}) => {
+    const kbPath = String(payload?.kbPath || '').trim()
+    if (!kbPath) throw new IPCError('INVALID_ARGUMENT', '缺少 kbPath')
+    const explicit = String(payload?.kbdbPath || '').trim()
+    const dbPath = opts.readOnly ? resolveReadDbPath(kbPath, explicit) : (explicit || kbdbPathFor(kbPath))
+    return { kbPath, store: openCachedKbVectorStore(dbPath) }
+  }
+
+  registerIpc('kb:vector:stats', (payload) => {
+    requireVectorStore()
+    const kbPath = String(payload?.kbPath || '').trim()
+    if (!kbPath) throw new IPCError('INVALID_ARGUMENT', '缺少 kbPath')
+    const dbPath = resolveReadDbPath(kbPath, String(payload?.kbdbPath || '').trim())
+    // 只查状态时不要顺手建库：文件不存在直接返回 exists:false（否则打开面板就会生成空 .kbdb）
+    if (!fs.existsSync(dbPath)) {
+      return {
+        ok: true,
+        exists: false,
+        path: dbPath,
+        stats: { chunks: 0, vectors: 0, dim: 0, model: '', metric: 'cosine', bytes: 0 },
+      }
+    }
+    const store = openCachedKbVectorStore(dbPath)
+    return { ok: true, exists: true, path: store.path, stats: store.stats(), portable: /\.portable\.kbdb$/i.test(store.path) }
+  })
+
+  /** 删除 `.kbdb`（含 -wal/-shm），并关掉缓存里的句柄 */
+  registerIpc('kb:vector:delete', (payload) => {
+    requireVectorStore()
+    const kbPath = String(payload?.kbPath || '').trim()
+    if (!kbPath) throw new IPCError('INVALID_ARGUMENT', '缺少 kbPath')
+    const dbPath = String(payload?.kbdbPath || '').trim() || kbdbPathFor(kbPath)
+    closeCachedKbVectorStore(dbPath)
+    let removed = 0
+    for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      try {
+        if (fs.existsSync(f)) {
+          fs.unlinkSync(f)
+          removed += 1
+        }
+      } catch { /* 被占用时跳过，状态栏会提示 */ }
+    }
+    return { ok: true, removed }
+  })
+
+  /** 批量写入/更新切片向量（迁移或重新向量化后调用；hash 未变的块会跳过） */
+  registerIpc('kb:vector:upsert', (payload) => {
+    requireVectorStore()
+    const { kbPath, store } = storeOf(payload)
+    const chunks = Array.isArray(payload?.chunks) ? payload.chunks : []
+    if (!chunks.length) throw new IPCError('INVALID_ARGUMENT', 'chunks 为空')
+    const model = String(payload?.model || '')
+    const dim = Number(payload?.dim) || Number(chunks[0]?.vector?.length) || 0
+    if (!dim) throw new IPCError('INVALID_ARGUMENT', '缺少向量维度 dim')
+    const quant = String(payload?.quant || '') === 'int8' ? 'int8' : ''
+    store.writeMeta({
+      kb_path: kbPath,
+      model,
+      dim,
+      metric: String(payload?.metric || 'cosine'),
+      ...(quant ? { quant } : {}),
+    })
+    const res = store.upsertChunks(chunks, quant ? { quant } : {})
+    return { ok: true, ...res, stats: store.stats() }
+  })
+
+  /** topK 查询：返回命中的 id/分数，并按需回带正文（hydrate=false 时只给 id） */
+  registerIpc('kb:vector:query', (payload) => {
+    requireVectorStore()
+    const { store } = storeOf(payload, { readOnly: true })
+    const vector = Array.isArray(payload?.vector) ? payload.vector : []
+    if (!vector.length) throw new IPCError('INVALID_ARGUMENT', '缺少查询向量')
+    const topK = Math.max(1, Math.min(5000, Number(payload?.topK) || 10))
+    const file = payload?.file ? String(payload.file) : undefined
+    const hits = store.query(vector, topK, file ? { file } : undefined)
+    const chunks = payload?.hydrate === false ? [] : store.getChunks(hits.map((h) => h.id))
+    return { ok: true, hits, chunks, stats: store.stats() }
+  })
+
+  /** 按 id 取向量（检索时只取候选切片，避免把整库向量搬进渲染层） */
+  registerIpc('kb:vector:vectors', (payload) => {
+    requireVectorStore()
+    const { store } = storeOf(payload, { readOnly: true })
+    const ids = Array.isArray(payload?.ids) ? payload.ids.map((x: any) => String(x)).filter(Boolean) : []
+    if (!ids.length) return { ok: true, vectors: [] }
+    const map = store.getVectors(ids)
+    return { ok: true, vectors: Array.from(map.entries()).map(([id, vector]) => ({ id, vector })) }
+  })
+
+  /** 文件级摘要向量（fileIndex）：3.2 下不写进 .kb，统一存库 */
+  registerIpc('kb:vector:file-upsert', (payload) => {
+    requireVectorStore()
+    const { store } = storeOf(payload)
+    const items = Array.isArray(payload?.items) ? payload.items : []
+    if (!items.length) return { ok: true, written: 0, skipped: 0 }
+    const res = store.upsertFileVectors(items, { quant: String(payload?.quant || '') })
+    return { ok: true, ...res }
+  })
+
+  registerIpc('kb:vector:file-vectors', (payload) => {
+    requireVectorStore()
+    const { store } = storeOf(payload, { readOnly: true })
+    const files = Array.isArray(payload?.files) ? payload.files.map((x: any) => String(x)).filter(Boolean) : []
+    if (!files.length) return { ok: true, vectors: [] }
+    const map = store.getFileVectors(files)
+    return { ok: true, vectors: Array.from(map.entries()).map(([file, v]) => ({ file, vector: v.vector, hash: v.hash })) }
+  })
+
+  registerIpc('kb:vector:reconcile', (payload) => {
+    requireVectorStore()
+    const { store } = storeOf(payload)
+    const blockIds = Array.isArray(payload?.blockIds) ? payload.blockIds.map((x: any) => String(x)) : []
+    const files = Array.isArray(payload?.files) ? payload.files.map((x: any) => String(x)) : []
+    return { ok: true, ...store.reconcile(blockIds, files) }
+  })
+
+  registerIpc('kb:vector:replace', (payload) => {
+    requireVectorStore()
+    const target = String(payload?.targetKbPath || '').trim()
+    const temp = String(payload?.tempKbPath || '').trim()
+    if (!target || !temp) throw new IPCError('INVALID_ARGUMENT', '缺少 targetKbPath/tempKbPath')
+    const targetDb = kbdbPathFor(target)
+    const tempDb = kbdbPathFor(temp)
+    if (!fs.existsSync(tempDb)) throw new IPCError('INVALID_ARGUMENT', '临时向量库不存在')
+    closeCachedKbVectorStore(targetDb)
+    closeCachedKbVectorStore(tempDb)
+    for (const f of [targetDb, `${targetDb}-wal`, `${targetDb}-shm`]) {
+      try { if (fs.existsSync(f)) fs.rmSync(f, { force: true }) } catch { /* ignore */ }
+    }
+    fs.renameSync(tempDb, targetDb)
+    return { ok: true, path: targetDb }
+  })
+
+  /** 超大 .kb（>512MB）流式迁移：边读边写 .kbdb + 瘦身 .kb，不整文件读入内存 */
+  registerIpc('kb:vector:slim-large', async (payload) => {
+    requireVectorStore()
+    const kbPath = String(payload?.kbPath || '').trim()
+    if (!kbPath) throw new IPCError('INVALID_ARGUMENT', '缺少 kbPath')
+    if (!/\.kb$/i.test(kbPath)) throw new IPCError('INVALID_ARGUMENT', '不是 .kb 文件')
+    return await streamSlimLegacyKb(kbPath)
+  })
+
+  /** 删除某个文件的所有切片（文件被删/改名时用） */
+  registerIpc('kb:vector:delete-file', (payload) => {
+    requireVectorStore()
+    const { store } = storeOf(payload)
+    const file = String(payload?.file || '').trim()
+    if (!file) throw new IPCError('INVALID_ARGUMENT', '缺少 file')
+    return { ok: true, deleted: store.deleteByFile(file), stats: store.stats() }
+  })
+
+  /** 只关句柄不删文件（移动知识库目录前用） */
+  registerIpc('kb:vector:close', (payload) => {
+    requireVectorStore()
+    const kbPath = String(payload?.kbPath || '').trim()
+    if (!kbPath) throw new IPCError('INVALID_ARGUMENT', '缺少 kbPath')
+    const dbPath = String(payload?.kbdbPath || '').trim() || kbdbPathFor(kbPath)
+    closeCachedKbVectorStore(dbPath)
+    return { ok: true }
+  })
+
+  /** 导出干净单文件（拷给同事用；不带 -wal/-shm） */
+  registerIpc('kb:vector:vacuum', (payload) => {
+    requireVectorStore()
+    const { store } = storeOf(payload)
+    const target = String(payload?.target || '').trim() || `${store.path}.portable`
+    store.vacuumInto(target)
+    return { ok: true, target, bytes: fs.statSync(target).size }
+  })
 }
 
 /** 软件根目录下的界面配置文件路径（生产=exe 所在目录；开发=项目根目录） */

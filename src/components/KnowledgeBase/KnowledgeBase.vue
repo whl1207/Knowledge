@@ -60,8 +60,9 @@ import { collectCommunityContext } from '@/shared/graphrag/community'
 
 // KB 文件级通用工具（文件类型判定/规范化/格式化/Markdown 预处理），父壳与视图子组件共享
 import { isPdfFile, isWordFile, isImageFile, isMediaFile, stripFrontmatter, mdPathOf, hasCorrespondingMd, isKbSidecarFile } from '@/lib/kbFile'
+import { closeVectorDbHandle, kbdbPathOf, getVectorDbInfo, buildVectorChunks, upsertVectorChunks, formatVectorBytes, hydrateBlockVectorsFromDb, deleteVectorDb, upsertFileVectorsToDb, reconcileVectorDb, replaceVectorDb, slimLegacyKb, type KbVectorDbInfo } from '@/lib/kbVectorDb'
 // 检索基础：余弦相似度等（单一实现，父壳与 headless/子组件共享）
-import { cosineSimilarity } from '@/shared/kbRetrieval'
+import { cosineSimilarity, ensureSideVectorsForStrategy, makeVectorDbSliceScorer } from '@/shared/kbRetrieval'
 import { matchSliceKeyword } from '@/shared/kbSliceSearch'
 import { kbTestSnapshot } from '@/store/kbTestSnapshot'
 
@@ -707,6 +708,62 @@ const rootFolderName = computed(() => {
     return parts[parts.length - 1] || store.root
 })
 
+// ==================== 测试结果侧车文件 + 知识库说明 ====================
+/** 测试结果文件后缀：与 .kb 同目录的 <库名>.testdata.json */
+const TESTDATA_SUFFIX = '.testdata.json'
+function testDataSidecarName(kbFileName: string): string {
+    return String(kbFileName || '').replace(/\.kb$/i, '') + TESTDATA_SUFFIX
+}
+function testDataSidecarPathOf(kbPath: string): string {
+    return String(kbPath || '').replace(/\.kb$/i, '') + TESTDATA_SUFFIX
+}
+/** 同名目录（<dir>/<name>.kb → <dir>），用于拼接侧车文件路径 */
+function dirOfPath(path: string): string {
+    const normalized = String(path || '').replace(/\\/g, '/')
+    const at = normalized.lastIndexOf('/')
+    return at > 0 ? normalized.slice(0, at) : ''
+}
+/** 知识库说明：从 .kb 载入、保存时写回；版本管理页可直接编辑 */
+const kbDescription = ref('')
+
+/**
+ * 旧 .kb（内联 testData）→ 侧车文件迁移（3.1）。
+ *
+ * 顺序很重要：先写 `<库名>.testdata.json`，成功后才把 .kb 重写成
+ * `testData: null + config.testDataFile`；任一步失败都保持原文件不动
+ * （数据仍在 .kb 里，下次保存还会再尝试分离），不会把测试结果弄丢。
+ */
+async function migrateInlineTestData(kbPath: string, data: any): Promise<void> {
+    try {
+        const fileName = String(kbPath).replace(/\\/g, '/').split('/').pop() || ''
+        const sidecarName = testDataSidecarName(fileName)
+        const sidecarPath = testDataSidecarPathOf(kbPath)
+        const payload = {
+            version: 1,
+            savedAt: new Date().toISOString(),
+            kb: fileName,
+            data: data.testData ?? null,
+        }
+        const sideOk = await getPlatform().fs.saveText(sidecarPath, JSON.stringify(payload))
+        if (!sideOk) return
+        const next = {
+            ...data,
+            description: String(data.description || kbDescription.value || ''),
+            testData: null,
+            config: { ...(data.config || {}), version: '3.1', testDataFile: sidecarName },
+        }
+        const kbOk = await getPlatform().fs.saveText(kbPath, JSON.stringify(next))
+        if (!kbOk) return
+        model.value.saveTestResults = true
+        console.info('[knowRAG] 测试结果已分离到侧车文件:', sidecarPath)
+        kb_state.value = store.locales === 'zh'
+            ? `测试结果已分离到 ${sidecarName}，.kb 体积已减小`
+            : `Test results moved to ${sidecarName}; .kb is smaller now`
+    } catch (e) {
+        console.warn('[knowRAG] 测试结果迁移失败（原 .kb 保持不变）:', e)
+    }
+}
+
 // 当前问答的佐证（证据）列表
 let currentEvidence = ref<Array<{
     id: string
@@ -963,6 +1020,10 @@ let model = ref({
     sliceWeight: 0.3,
     // 是否把向量数据写入 .kb 文件（false=精简模式：不存向量、KB 文件更小，首次问答按需重新向量化）
     saveVectors: true,
+    // 3.2：保存时自动写入 <库名>.kbdb（默认开）；关掉后不再自动建库，已有库仍增量同步
+    autoVectorDb: true,
+    // 向量库精度：float32 / int8（约 1/4 体积）；改变后需「重建向量库」重写
+    vectorQuant: 'float32' as 'float32' | 'int8',
     // 是否把「测试页结果」写入 .kb 文件（默认 false=不写）：测试用例本来就会保存，这里额外保存
     // 检索结果/位次分析/策略召回对比/检索过程，重新加载即可复现对比数据（不重跑），代价是 KB 变大
     saveTestResults: false,
@@ -2550,6 +2611,58 @@ const openFolder = async function() {
     }
 }
 
+// ==================== 知识库路径选择器（与 home 的工作区选择同口径）====================
+// 点 mt-path 不再直接弹系统文件夹框：先列出已打开过的工作区（store.roots），
+// 选中即切过去；想加新目录再点「选择新文件夹…」走系统对话框。
+const showPathPicker = ref(false)
+/** 可选工作区：工作区注册表 + 当前根（去重、保序；当前根可能还没登记） */
+const workspaceOptions = computed<Array<{ path: string; name: string }>>(() => {
+    const out: Array<{ path: string; name: string }> = []
+    const push = (p: any) => {
+        const v = String(p || '').trim()
+        if (!v || out.some((o) => o.path === v)) return
+        const parts = v.split(/[\\/]/).filter(Boolean)
+        out.push({ path: v, name: parts[parts.length - 1] || v })
+    }
+    ;(Array.isArray(store.roots) ? store.roots : []).forEach(push)
+    push(store.root)
+    return out
+})
+/** 打开/关闭路径选择器；与知识库版本菜单互斥，避免两个浮层叠在一起 */
+function togglePathPicker(): void {
+    showPathPicker.value = !showPathPicker.value
+    if (showPathPicker.value) showKbMenu.value = false
+}
+// 反向互斥：点开知识库版本菜单时收起路径选择器（否则两个 .mt-menu 会同时展开）
+watch(showKbMenu, (open) => { if (open) showPathPicker.value = false })
+/** 切到已打开的工作区：登记为当前根，再重新载入文件与知识库列表 */
+async function switchWorkspace(path: string): Promise<void> {
+    showPathPicker.value = false
+    const target = String(path || '').trim()
+    if (!target || target === String(store.root || '').trim()) return
+    try {
+        // 已登记过就用 setActiveRoot（保留 roots 顺序、清掉远端目录状态）；新目录走 addRoot
+        if (Array.isArray(store.roots) && store.roots.includes(target)) store.setActiveRoot(target)
+        else store.addRoot(target)
+        // 与 init 同一套顺序：载入文件（会清空切片/问题库等旧数据）→ 重扫 .kb 列表 → 回到自动知识库
+        await loadFolderFiles(store.root)
+        await scanKnowledgeBases()
+        selectedKbIndex.value = 0
+        lastLoadedKbPath = null
+        await loadKnowledgeBases(0)
+        const zh = store.locales === 'zh'
+        ElMessage.success(zh ? `已切换到工作区：${rootFolderName.value}` : `Switched workspace: ${rootFolderName.value}`)
+    } catch (error) {
+        console.error('切换工作区失败', error)
+        ElMessage.error(store.locales === 'zh' ? '切换工作区失败' : 'Failed to switch workspace')
+    }
+}
+/** 选择一个新的文件夹（系统对话框）：注册为工作区并作为当前根 */
+async function pickNewFolder(): Promise<void> {
+    showPathPicker.value = false
+    await openFolder()
+}
+
 const sliceOnly = async function(noSwitch?: boolean, onProgress?: (detail: string) => void) {
     // 后台任务（路线图 2.4）：知识库构建注册为 kb-build job，进度实时上报
     let kbJob: string | null = null
@@ -2771,14 +2884,25 @@ const sliceOnly = async function(noSwitch?: boolean, onProgress?: (detail: strin
 }
 
 // ==================== 向量化阶段（与切片分离） ====================
+/**
+ * `.kb` 3.2：向量只存 `.kbdb`，内存里的切片没有 A_vector。
+ * 这类库在界面上仍应视为「已向量化」（向量由检索时按候选回填），否则会误报未向量化并触发全量重嵌入。
+ */
+const kbVectorStoreBacked = ref(false)
+/** 向量库里的向量条数（3.2）：只有 ≥ 当前切片数才算"已向量化"，新增文件后不会误判就绪 */
+const kbVectorStoreCount = ref(0)
 // 已切片且已向量化的切片数
 const embeddedCount = computed(() => {
+    if (kbVectorStoreBacked.value) return Math.min(kbVectorStoreCount.value, blocks.value.length)
     return blocks.value.filter((b: any) => b.A_vector && b.A_vector.length > 0).length
 })
 // 切片阶段是否完成（存在切片数据）
 const isSliced = computed(() => blocks.value.length > 0)
-// 向量化阶段是否完成（所有切片都已向量化）
+// 向量化阶段是否完成（所有切片都已向量化；向量库承载时按库里条数判断）
 const isEmbedded = computed(() => {
+    if (kbVectorStoreBacked.value) {
+        return blocks.value.length > 0 && kbVectorStoreCount.value >= blocks.value.length
+    }
     return blocks.value.length > 0 && blocks.value.every((b: any) => b.A_vector && b.A_vector.length > 0)
 })
 
@@ -4601,25 +4725,58 @@ const autoCheckIncremental = async () => {
     await runIncrementalUpdate()
 }
 
+/**
+ * KB 模块四个策略问答（pipeline / agentic / hybrid / community）的统一入口：
+ * ensureKbReady → 3.2 候选向量回填 → 构建 RetrievalContext → runStrategy → 统一回填切片分。
+ * 各策略只保留自己的 UI 回调与结果渲染，避免四份「准备 + 检索」样板代码漂移。
+ */
+const runKbStrategy = async (
+    strategyId: string,
+    prompt: string,
+    hooks: {
+        onProgress?: (msg: string) => void
+        onStream?: (chunk: string) => void
+        onEvidence?: (evidence: any[]) => void
+        onAgentStep?: (step: any) => void
+    } = {},
+): Promise<{ sr: any; started: () => boolean } | null> => {
+    if (!prompt) return null
+    if (!(await ensureKbReady())) return null
+    if (!blocks.value.length) {
+        ElMessage.warning(store.locales == 'zh' ? '请先加载知识库' : 'Please load the knowledge base first')
+        return null
+    }
+    await hydrateKbVectorsForQuery(prompt)
+    let streamStarted = false
+    const sr = await runStrategy(strategyId, prompt, buildRetrievalContext(prompt), {
+        onProgress: hooks.onProgress || ((msg: string) => { kb_state.value = msg }),
+        onStream: hooks.onStream
+            ? (chunk: string) => {
+                if (!streamStarted) streamStarted = true
+                hooks.onStream!(chunk)
+            }
+            : undefined,
+        onEvidence: hooks.onEvidence,
+        onAgentStep: hooks.onAgentStep,
+    })
+    for (let i = 0; i < blocks.value.length; i++) {
+        blocks.value[i].p = sr?.scores?.get(blocks.value[i].id) || 0
+    }
+    blocks.value.sort((a: any, b: any) => (b.p || 0) - (a.p || 0))
+    return { sr, started: () => streamStarted }
+}
+
 const pipelineChat = async function(strategyId: string, prompt: string, method: string = 'similarity') {
-    // 提问前自动完成切片/向量化（未就绪时）
-    if (!(await ensureKbReady())) return false
     result.value = store.locales == 'zh' ? "正在思考..." : 'Thinking...'
     
     const queryEmbeddings = await kbEmbed(prompt);
     const queryEmbedding = queryEmbeddings?.[0];
     
     try {
-        // 统一走策略框架：dense_score + 可选的 entity_link/graph_hop/boost 由 runStrategy 完成
-        const ctx = buildRetrievalContext(prompt)
-        sr = await runStrategy(strategyId, prompt, ctx, {
-            onProgress: (msg: string) => { kb_state.value = msg }
-        })
-        for (let i = 0; i < blocks.value.length; i++) {
-            blocks.value[i].p = sr.scores.get(blocks.value[i].id) || 0
-        }
-
-        blocks.value.sort((a:any,b:any) => (b.p||0) - (a.p||0))
+        // 统一入口：ensure/回填/跑策略/回填分数都在 runKbStrategy 里
+        const run = await runKbStrategy(strategyId, prompt)
+        if (!run) return false
+        sr = run.sr
     } catch (err) {
         console.error('相似度计算失败:', err)
         for (let i = 0; i < blocks.value.length; i++) {
@@ -4836,33 +4993,57 @@ const buildRetrievalContext = (query: string): RetrievalContext => {
             agentSubQueryWeight: modelCfg.agentSubQueryWeight ?? 0.5,
             agentToolTopN: modelCfg.agentToolTopN ?? 15,
         },
-        services: kbAi.buildRetrievalServices(buildKbSpec(), { cosineSimilarity, computeBM25: computeBM25Score }),
+        services: (() => {
+            const base = kbAi.buildRetrievalServices(buildKbSpec(), { cosineSimilarity, computeBM25: computeBM25Score })
+            const scorer = makeVectorDbSliceScorer(String(currentKbPath.value || lastLoadedKbPath || ''))
+            return scorer ? { ...base, querySliceScores: scorer } : base
+        })(),
     }
 }
 
 // ====== Agentic RAG（LLM 自主多轮检索，参照集群的 kb_search 方案） ======
 /** Agentic 检索：LLM 自主路由检索原语（OAG-RAG，检索循环在策略框架 runStrategy('agentic') 内） */
+/**
+ * 3.2 的 `.kb` 不内联向量；KB 模块自己的策略检索（runStrategy 直接读 blocks[].A_vector）
+ * 在检索前需要先把候选切片的向量从 `.kbdb` 补回内存，否则 dense_score 全 0。
+ */
+const hydrateKbVectorsForQuery = async (query: string): Promise<void> => {
+    if (!query || !blocks.value.length) return
+    if (blocks.value.some((b: any) => Array.isArray(b.A_vector) && b.A_vector.length)) return
+    const kbPath = String(currentKbPath.value || lastLoadedKbPath || '')
+    if (!kbPath) return
+    try {
+        const embs = await kbEmbed(query)
+        const qv = embs?.[0]
+        if (!qv?.length) return
+        const n = Math.max(300, Number(model.value.searchNum || 5) * 40)
+        const cnt = await hydrateBlockVectorsFromDb(kbPath, qv, blocks.value as any[], n)
+        if (cnt) console.info(`[knowRAG] 已从 .kbdb 补回 ${cnt} 个候选切片向量`)
+        // 3.2 的 .kb 不存 fileIndex/question 向量：用当前嵌入模型按需补一次（内存缓存）
+        try {
+            const filled = await ensureSideVectorsForStrategy(fileIndex.value as Map<string, any>, questionBank.value, buildKbSpec())
+            if (filled.files || filled.questions) {
+                console.info(`[knowRAG] 已补算旁路向量：文件 ${filled.files}、问题 ${filled.questions}`)
+            }
+        } catch (e) {
+            console.warn('[knowRAG] 补算文件/问题向量失败（本次仅用切片向量）:', e)
+        }
+    } catch { /* 库不可用：保持原样（按 0 分处理） */ }
+}
+
 const agenticChat = async function(prompt: string) {
     if (!prompt) return
-    // 提问前自动完成切片/向量化（未就绪时）
-    if (!(await ensureKbReady())) return
-    if (!blocks.value.length) {
-        ElMessage.warning(store.locales == 'zh' ? '请先加载知识库' : 'Please load the knowledge base first')
-        return
-    }
     result.value = store.locales == 'zh' ? '正在规划检索策略...' : 'Planning retrieval strategy...'
     currentEvidence.value = []
     agentSteps.value = []
     let streamStarted = false
-    const ctx = buildRetrievalContext(prompt)
-    const sr = await runStrategy('agentic', prompt, ctx, {
-        onProgress: (msg: string) => { kb_state.value = msg },
+    const run = await runKbStrategy('agentic', prompt, {
         onStream: (chunk: string) => {
             if (!streamStarted) { streamStarted = true; result.value = '' }
             result.value += chunk
         },
         onEvidence: (evidence: any[]) => { currentEvidence.value = pickTopKByScore(evidence, model.value.evidenceTopK) },
-        onAgentStep: (step) => {
+        onAgentStep: (step: any) => {
             // 每次工具调用都独立追加一条（支持同一轮内同一个工具被多次调用，如并行检索多个定义）；
             // running 追加新条目，done/error 从后往前回填最近一条同轮同工具仍为 running 的条目
             if (step.status === 'running') {
@@ -4880,24 +5061,16 @@ const agenticChat = async function(prompt: string) {
             agentSteps.value.push(step)
         },
     })
-    return !!sr
+    return !!run
 }
 
 // ====== 多路混合（hybrid）：确定性多通道召回 + 统一排序 ======
 const hybridChat = async function(strategyId: string, prompt: string) {
     if (!prompt) return
-    // 提问前自动完成切片/向量化（未就绪时）
-    if (!(await ensureKbReady())) return
-    if (!blocks.value.length) {
-        ElMessage.warning(store.locales == 'zh' ? '请先加载知识库' : 'Please load the knowledge base first')
-        return
-    }
     result.value = store.locales == 'zh' ? '正在多路召回...' : 'Multi-channel recall...'
     currentEvidence.value = []
     let streamStarted = false
-    const ctx = buildRetrievalContext(prompt)
-    const sr = await runStrategy(strategyId, prompt, ctx, {
-        onProgress: (msg: string) => { kb_state.value = msg },
+    const run = await runKbStrategy(strategyId, prompt, {
         onStream: (chunk: string) => {
             if (!streamStarted) { streamStarted = true; result.value = '' }
             result.value += chunk
@@ -4905,17 +5078,52 @@ const hybridChat = async function(strategyId: string, prompt: string) {
         // hybrid 的证据已按原始问题统一重排，取全局分数 topK
         onEvidence: (evidence: any[]) => { currentEvidence.value = pickTopKByScore(evidence, model.value.evidenceTopK) },
     })
+    if (!run) return
     // 兜底：流式未启动但已有答案（如无流式服务）
-    if (!streamStarted && sr.answer) {
-        result.value = sr.answer
+    if (!run.started() && run.sr?.answer) {
+        result.value = run.sr.answer
     }
-    return !!sr
+    return true
 }
 
 
 
-async function organizeKbFiles(): Promise<void> {
-    showKbMenu.value = false
+/**
+ * 超大 .kb（>512MB，内联向量）流式迁移：
+ * 主进程边读边把向量写进 .kbdb、把 .kb 重写成 3.2 瘦身版；原文件备份为 .legacy.bak。
+ * 这样不会因为 V8 字符串上限而打不开。
+ */
+const migrateLegacyKb = async (pathOverride?: string) => {
+    if (!pathOverride) showKbMenu.value = false
+    const zh = store.locales === 'zh'
+    let picked = String(pathOverride || '')
+    if (!picked) {
+        try {
+            picked = String((await getPlatform().dialog.pickFile({
+                filters: [{ name: zh ? '知识库' : 'Knowledge Base', extensions: ['kb'] }],
+                properties: ['openFile'],
+            } as any)) || '')
+        } catch { return }
+    }
+    if (!picked) return
+    kb_state.value = zh ? '正在流式迁移超大 .kb（向量写库 + 瘦身）…' : 'Streaming migration: vectors → .kbdb, shrinking .kb…'
+    try {
+        const res = await slimLegacyKb(picked)
+        if (!res?.ok) {
+            kb_state.value = zh ? `流式迁移失败：${res?.error || '未知错误'}` : `Streaming migration failed: ${res?.error || 'unknown'}`
+            return
+        }
+        await scanKnowledgeBases()
+        kb_state.value = zh
+            ? `迁移完成：${res.blocks} 个切片 / ${res.vectors} 条向量，.kb ${formatVectorBytes(res.beforeBytes || 0)} → ${formatVectorBytes(res.afterBytes || 0)}（备份 ${res.backupPath}）`
+            : `Migration done: ${res.blocks} blocks / ${res.vectors} vectors, .kb ${formatVectorBytes(res.beforeBytes || 0)} → ${formatVectorBytes(res.afterBytes || 0)} (backup ${res.backupPath})`
+        ElMessage.success(zh ? '超大 .kb 已迁移，现在可以正常打开' : 'Large .kb migrated; it can be opened now')
+    } catch (e: any) {
+        kb_state.value = zh ? `流式迁移失败：${e?.message || e}` : `Streaming migration failed: ${e?.message || e}`
+    }
+}
+
+async function organizeKbFiles(): Promise<void> {    showKbMenu.value = false
     if (!store.root) return
     try {
         await ElMessageBox.confirm(
@@ -4944,25 +5152,44 @@ async function organizeKbFiles(): Promise<void> {
         if (!movedKb.success) continue
         moved++
         const stem = f.path.replace(/\.kb$/i, '')
+        await closeVectorDbHandle(f.path)
         await getPlatform().fs.moveFile(`${stem}.learning`, folder)
         await getPlatform().fs.moveFile(`${stem}.learning.json`, folder)
+        // 测试结果侧车（3.1 起）跟着 .kb 一起走
+        await getPlatform().fs.moveFile(`${stem}.testdata.json`, folder)
+        // 向量库（.kbdb）也一起搬；-wal/-shm 是它的运行时文件
+        await getPlatform().fs.moveFile(`${stem}.kbdb`, folder)
+        await getPlatform().fs.moveFile(`${stem}.kbdb-wal`, folder)
+        await getPlatform().fs.moveFile(`${stem}.kbdb-shm`, folder)
     }
     await scanKnowledgeBases()
     ElMessage.success(store.locales === 'zh' ? `已整理 ${moved} 个知识库` : `Organized ${moved} KB(s)`)
 }
 
-const save = async function(){
+const save = async function(opts?: { targetPath?: string }){
     const now = new Date();
     const timestamp = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')}_${now.getHours().toString().padStart(2, '0')}-${now.getMinutes().toString().padStart(2, '0')}-${now.getSeconds().toString().padStart(2, '0')}`;
     
     // 精简模式：关闭「保存向量数据」时，不把向量写入 .kb（切片/文件摘要/问题向量），
     // 首次问答用当前嵌入模型按需重新推导（模块内 ensureKbReady 与外部 kbRetrieval 均已支持懒补全）
     const persistVectors = model.value.saveVectors !== false
+    // 测试结果单独存侧车文件：<库名>.testdata.json（同一文件夹）。
+    // 之前写进 .kb 会让一个 65 块的知识库膨胀到 68MB（实测 63% 是测试数据），
+    // 打开/保存都变慢；分开后 .kb 只留切片与配置。
+    const persistTestData = model.value.saveTestResults === true
+    const autoVectorDb = model.value.autoVectorDb !== false
     
-    // 弹出输入框获取知识库名称（而非默认保存为时间名）
+    // 目标路径：传了 targetPath = 「保存当前版本」（覆盖，不弹命名框）；
+    // 否则弹输入框（保存为新版本）。
     // 新结构：每个知识库一个文件夹 <root>/知识库/<名称>/<名称>.kb；学习记录同目录 <名称>.learning
+    const explicitTarget = String(opts?.targetPath || '').trim().replace(/\\/g, '/')
     let kbFolderName = timestamp
     let kbFileName = `${timestamp}.kb`
+    if (explicitTarget) {
+        const parts = explicitTarget.split('/')
+        kbFileName = parts.pop() || kbFileName
+        kbFolderName = kbFileName.replace(/\.kb$/i, '')
+    } else {
     try {
         const loadedPath = String(knowledgeBases.value[selectedKbIndex.value]?.path || '')
         const loadedName = loadedPath
@@ -4988,13 +5215,105 @@ const save = async function(){
     } catch {
         return // 用户取消保存
     }
-    
+    }
+
+    // 保存目标路径 + 向量库现状
+    // - **自动写入**：只要当前内存里有向量（首次保存/重新向量化后），就自动建/更新 `.kbdb`，
+    //   不再需要用户手动点「写入向量库」；
+    // - 库里有「向量数 ≥ 切片数」时，`.kb` 直接写 3.2（不内联 A_vector，体积明显变小），
+    //   检索默认走向量库；否则维持内联（缺向量的切片还没入库时不冒险瘦身）；
+    // - 保存为新版本（目标没有 .kbdb、但当前库有）：把向量库一起"迁移"过去 —— 能从内存写到新库就写，
+    //   内存里本来就没有向量（3.2 加载）时直接复制旧 .kbdb；
+    // - 这一步也顺带解决了大库迁移：保存时直接从内存写 .kbdb，不需要先 JSON.parse 整个旧 .kb。
+    const kbPath = explicitTarget || `${store.root}/知识库/${kbFolderName}/${kbFileName}`
+    const kbDir = kbPath.slice(0, kbPath.lastIndexOf('/'))
+    const kbdbName = kbdbPathOf(kbFileName)
+    const sourceKbPath = String(lastLoadedKbPath || '')
+    const isNewTarget = !!sourceKbPath && sourceKbPath.replace(/\\/g, '/') !== kbPath.replace(/\\/g, '/')
+    let sourceDbInfo: KbVectorDbInfo | null = null
+    if (isNewTarget) {
+        try { sourceDbInfo = await getVectorDbInfo(sourceKbPath) } catch { sourceDbInfo = null }
+    }
+    let vectorDbInfo: KbVectorDbInfo | null = null
+    try { vectorDbInfo = await getVectorDbInfo(kbPath) } catch { vectorDbInfo = null }
+    const dbExists = !!vectorDbInfo?.exists
+    // 换过嵌入模型：旧库向量与当前模型不可比，直接写库会污染索引 → 要求先重建
+    if (dbExists && vectorDbInfo?.stats.model && model.value.embed && vectorDbInfo.stats.model !== model.value.embed) {
+        kb_state.value = store.locales === 'zh'
+            ? `嵌入模型已变更（库：${vectorDbInfo.stats.model}，当前：${model.value.embed}）：请先在「版本 → 向量库 → 重建向量库」后再保存`
+            : `Embed model changed (DB: ${vectorDbInfo.stats.model}, current: ${model.value.embed}); rebuild the vector DB before saving`
+        ElMessage.warning(kb_state.value)
+        return
+    }
+    const seedDbFromSource = !dbExists && !!sourceDbInfo?.exists
+    // 精度变更只能通过「重建向量库」生效：已有库沿用原精度，避免 float32/int8 混写导致解码错乱
+    const desiredQuant = model.value.vectorQuant === 'int8' ? 'int8' : 'float32'
+    const existingQuant = String(vectorDbInfo?.stats.quant || 'float32')
+    const writeQuant = dbExists || seedDbFromSource ? existingQuant : desiredQuant
+    const vectorChunks = buildVectorChunks(blocks.value as any)
+    // 有向量就自动写库（无需手动迁移）；库已存在时也总是同步（新增/变更增量写入）。
+    // 「自动写入向量库」关掉后不再自动建新库，但已有库仍同步，避免 .kb 瘦身时丢向量。
+    const shouldWriteDb = dbExists || seedDbFromSource || (autoVectorDb && vectorChunks.total > 0)
+    let useDbAsSource = false
+    let vectorDbWriteFailed = false
+    if (shouldWriteDb) {
+        try {
+            if (vectorChunks.total > 0) {
+                await upsertVectorChunks(kbPath, vectorChunks.chunks, {
+                    model: model.value.embed,
+                    dim: vectorDbInfo?.stats.dim || sourceDbInfo?.stats.dim || vectorChunks.dim || undefined,
+                    quant: writeQuant,
+                    onProgress: (done, total) => {
+                        kb_state.value = store.locales === 'zh' ? `正在写入向量库 ${done}/${total}…` : `Writing vector DB ${done}/${total}…`
+                    },
+                })
+            } else if (seedDbFromSource && sourceKbPath) {
+                // 3.2 加载的旧库：内存里没有向量，直接把旧 .kbdb 复制到新版本目录
+                const srcStem = sourceKbPath.replace(/\\/g, '/').replace(/\.kb$/i, '')
+                await closeVectorDbHandle(sourceKbPath)
+                await getPlatform().fs.copyFile(`${srcStem}.kbdb`, kbDir)
+            }
+            vectorDbInfo = await getVectorDbInfo(kbPath)
+            // 文件级摘要向量也写进 .kbdb（3.2 的 .kb 不再内联它们）；带 hash，摘要未变则跳过
+            const fileVecItems = [...fileIndex.value.entries()]
+                .filter(([, e]: any) => Array.isArray(e?.vector) && e.vector.length > 0)
+                .map(([file, e]: any) => ({ file: String(file), vector: e.vector as number[], hash: String(e?.contentHash || '') }))
+            if (fileVecItems.length) {
+                await upsertFileVectorsToDb(kbPath, fileVecItems, writeQuant)
+            }
+            // 清理已删除文件/切片的向量，避免 .kbdb 只增不减
+            try {
+                const blockIds = blocks.value.map((b: any) => String(b?.id ?? '')).filter(Boolean)
+                const files = new Set<string>(fileIndex.value.keys())
+                for (const b of blocks.value as any[]) {
+                    const f = String(b?.filePath || b?.path || '')
+                    if (f) files.add(f)
+                }
+                await reconcileVectorDb(kbPath, blockIds, [...files])
+            } catch (e) {
+                console.warn('[knowRAG] 清理向量库旧数据失败（不影响保存）:', e)
+            }
+        } catch (e) {
+            // 写库失败就不瘦身：宁可 .kb 大一点，也不能让向量只存在内存里
+            console.error('[knowRAG] 写入/迁移向量库失败，本次维持内联向量:', e)
+            vectorDbWriteFailed = true
+        }
+        useDbAsSource = !vectorDbWriteFailed && !!vectorDbInfo?.exists
+            && vectorDbInfo.stats.vectors > 0
+            && vectorDbInfo.stats.vectors >= blocks.value.length
+    }
+    // 库存在但还不完整（例如刚加了新文件）→ 本次仍写内联，别把没入库的向量丢掉
+    const writeInlineVectors = useDbAsSource ? false : (persistVectors || shouldWriteDb)
+    // 3.2（向量在 .kbdb）时，文件摘要/文件索引/问题向量也一起不写进 .kb：
+    // 这些通道在检索时会按需补算，留在 .kb 里会让文件白白大 1MB+（1103 就是 fileIndex 占 1MB）。
+    const writeSideVectors = persistVectors && !useDbAsSource
+
     const fileSummaryData = {} as any
     fileSummaries.value.forEach((value: any, key: string) => {
         fileSummaryData[key] = {
             content: value.content,
             // 精简模式：文件摘要向量不落盘（检索时按需重新向量化）
-            ...(persistVectors ? { vector: value.vector } : {})
+            ...(writeSideVectors ? { vector: value.vector } : {})
         }
     })
     
@@ -5003,7 +5322,7 @@ const save = async function(){
         fileIndexData[key] = {
             content: value.content,
             // 精简模式：文件级摘要索引向量不落盘
-            ...(persistVectors ? { vector: value.vector } : {}),
+            ...(writeSideVectors ? { vector: value.vector } : {}),
             contentHash: value.contentHash
         }
     })
@@ -5094,11 +5413,22 @@ const save = async function(){
             // 不改动设置里的嵌入模型；随 .kb 落盘，下次加载自动恢复选择
             testEmbedModel: model.value.testEmbed || '',
             timestamp: new Date().toISOString(),
-            version: "3.0",
-            // false=精简模式：向量未写入 .kb（加载时据此恢复开关并标记）
-            saveVectors: persistVectors,
-            // 是否把测试页结果写入 .kb（false 时写入 null，显式覆盖旧文件中的测试结果）
-            saveTestResults: model.value.saveTestResults === true,
+            // 3.2：向量只存 .kbdb（.kb 不再内联 A_vector）；3.1：测试结果侧车文件
+            version: useDbAsSource ? "3.2" : "3.1",
+            // false=精简模式/向量在 .kbdb：向量未写入 .kb
+            saveVectors: writeInlineVectors,
+            // 3.2：向量库引用（.kbdb 与 .kb 同目录）；检索时按 id 从库里取候选向量
+            ...(useDbAsSource && vectorDbInfo
+                ? { vectorStore: { kind: 'kbdb', file: kbdbName, dim: vectorDbInfo.stats.dim, model: model.value.embed, metric: 'cosine', quant: vectorDbInfo.stats.quant || 'float32', vectors: vectorDbInfo.stats.vectors } }
+                : {}),
+            // 是否把测试页结果写入侧车文件（false 时 .kb 不记 testDataFile，但历史侧车文件保留）
+            saveTestResults: persistTestData,
+            // 3.2：保存时自动写入 <库名>.kbdb（关掉后不自动建库；已有库仍增量同步）
+            autoVectorDb,
+            // 向量库精度（float32 / int8），随 .kb 保存，重建时据此重写
+            vectorQuant: model.value.vectorQuant === 'int8' ? 'int8' : 'float32',
+            // 测试结果侧车文件名（仅记录文件名，解析时拼同目录；空=没有测试结果文件）
+            ...(persistTestData ? { testDataFile: testDataSidecarName(kbFileName) } : {}),
             summaryWeight: model.value.summaryWeight,
             sliceWeight: model.value.sliceWeight,
             ontologyBatchSize: model.value.ontologyBatchSize,
@@ -5130,8 +5460,9 @@ const save = async function(){
         blocks: blocks.value.map((block: any) => {
             // 方案 A：切片不再保存问题相关字段（Q/Q_vector/Q_vectors），问题只存问题库
             const { fileSummaryScore, sliceScore, bm25Score, fileSummaryContent, A_overlap, Q, Q_vector, Q_vectors, A_vector, ...rest } = block
-            // 精简模式：A_vector 也不写入 .kb（KB 体积大幅缩小；仅落盘剥离，内存中的向量保留）
-            return persistVectors ? { ...rest, A_vector } : rest
+            // 3.2：向量在 .kbdb 里，.kb 不写 A_vector；其余情况与原来一致（精简模式也不写）
+            if (useDbAsSource) return rest
+            return writeInlineVectors ? { ...rest, A_vector } : rest
         }),
         ontology: ontologySaveData,
         communityResult: communityResult.value ? {
@@ -5142,10 +5473,12 @@ const save = async function(){
         } : null,
         communityReports: communityReports.value,
         testCases: testCases.value,
-        // 测试页结果（检索结果/位次分析/策略召回对比/检索过程）：仅在勾选「保存测试结果到 KB 文件」时落盘
-        testData: model.value.saveTestResults === true ? (testData.value || null) : null,
-        // 精简模式：问题向量(qVector)不写入 .kb（内存保留；问题语义增强/首次问答按需补全）
-        questions: persistVectors
+        // 说明文字：在「版本管理」里编辑，随 .kb 保存（供同事/未来的自己识别这份库的用途）
+        description: kbDescription.value,
+        // 测试页结果不再写进 .kb：另存 <库名>.testdata.json（见下方写盘顺序）
+        testData: null,
+        // 精简模式 / 3.2：问题向量(qVector)不写入 .kb（内存保留；首次问答按需补全）
+        questions: writeSideVectors
             ? questionBank.value
             : questionBank.value.map((q: any) => {
                 const { qVector, ...qRest } = q || {}
@@ -5160,24 +5493,194 @@ const save = async function(){
     const missingHint = missingCount
         ? (store.locales === 'zh' ? `；注意：有 ${missingCount} 个文件已不在当前文件夹（其切片仍保留，可在「文件」页清理）` : `; note: ${missingCount} file(s) are missing from the folder (slices kept; clean up in the File view)`)
         : ''
-    getPlatform().fs.saveText(`${store.root}/知识库/${kbFolderName}/${kbFileName}`, JSON.stringify(saveData))
-        .then((success) => {
-            if (success) {
-                const savedLabel = `${kbFolderName}/${kbFileName}`
-                kb_state.value = (persistVectors
-                    ? (store.locales === 'zh' ? `文件 ${savedLabel} 保存成功` : `${savedLabel} saved`)
-                    : (store.locales === 'zh'
-                        ? `文件 ${savedLabel} 保存成功（精简模式：未写入向量数据，首次问答将重新推导）`
-                        : `${savedLabel} saved (slim mode: no vectors stored, re-derived on first Q&A)`)) + missingHint;
-            } else {
-                kb_state.value = '文件保存失败';
+    const sidecarPath = testDataSidecarPathOf(kbPath)
+    const savedLabel = `${kbFolderName}/${kbFileName}`
+    const testDataLabel = `${kbFolderName}/${testDataSidecarName(kbFileName)}`
+    // 「保存为新版本」时目标库文件夹可能还不存在（saveFile 不建目录）：
+    // 先显式建目录，否则侧车写入会失败并连累 .kb 一起不写。
+    try {
+        await getPlatform().fs.ensureDir(kbDir)
+    } catch { /* 已存在/无权限：下面写入失败会有明确提示 */ }
+    // 写盘顺序：测试结果侧车先落盘，成功后才写 .kb（避免 .kb 指向一个不存在的 testDataFile）；
+    // 侧车写失败时**不阻断 .kb**，改为把测试结果内联回 .kb 并在状态栏说明（数据不丢）。
+    // 这里必须 await：写完再重建版本列表并选中新版本（以前是 "void" 异步 + 立刻扫描，
+    // 扫描时文件还没落盘 → 版本下拉里看不到刚保存的版本）。
+    const writeOk = await (async (): Promise<boolean> => {
+        try {
+            let sidecarFailed = false
+            if (persistTestData) {
+                const payload = {
+                    version: 1,
+                    savedAt: new Date().toISOString(),
+                    kb: kbFileName,
+                    data: testData.value ?? null,
+                }
+                const sideRes = await getPlatform().fs.writeText(sidecarPath, JSON.stringify(payload))
+                const sideOk = !!sideRes?.success
+                if (!sideOk) {
+                    sidecarFailed = true
+                    console.error('[knowRAG] 测试结果侧车写入失败，改为内联进 .kb:', sidecarPath, sideRes?.error)
+                    ;(saveData as any).testData = testData.value ?? null
+                    if (saveData.config) delete (saveData.config as any).testDataFile
+                }
+            } else if ((saveData.config as any)?.testDataFile) {
+                delete (saveData.config as any).testDataFile
             }
-        })
-        .catch((error) => {
+            const success = await getPlatform().fs.saveText(kbPath, JSON.stringify(saveData))
+            if (success) {
+                // 自愈：向量库已经完整（vectors ≥ 切片数），但本次仍写成了内联向量
+                // （旧渲染层代码/竞态/写库判断失败都可能造成）→ 立即重写成 3.2 瘦身版，
+                // 保证"库完整时 .kb 一定不含 A_vector"，不会出现保存后体积反而变大。
+                if (!useDbAsSource && vectorDbInfo?.exists && blocks.value.length > 0
+                    && vectorDbInfo.stats.vectors >= blocks.value.length) {
+                    try {
+                        for (const b of (saveData.blocks as any[])) delete b.A_vector
+                        // 文件摘要 / 文件索引 / 问题向量也一起移除（3.2 下检索按需补算）
+                        for (const v of Object.values((saveData as any).fileSummaries || {})) delete (v as any).vector
+                        for (const v of Object.values((saveData as any).fileIndex || {})) delete (v as any).vector
+                        for (const q of ((saveData as any).questions || [])) delete (q as any).qVector
+                        ;(saveData.config as any).version = '3.2'
+                        ;(saveData.config as any).saveVectors = false
+                        ;(saveData.config as any).vectorStore = {
+                            kind: 'kbdb', file: kbdbName, dim: vectorDbInfo.stats.dim,
+                            model: model.value.embed, metric: 'cosine', quant: vectorDbInfo.stats.quant || 'float32', vectors: vectorDbInfo.stats.vectors,
+                        }
+                        const reOk = await getPlatform().fs.saveText(kbPath, JSON.stringify(saveData))
+                        if (reOk) {
+                            useDbAsSource = true
+                            console.warn('[knowRAG] 保存后检测到向量库完整，已自动把 .kb 重写为 3.2（移除内联向量）')
+                        }
+                    } catch (e) {
+                        console.warn('[knowRAG] 保存后自动瘦身失败（.kb 保持内联）:', e)
+                    }
+                } else if (!useDbAsSource && vectorDbInfo?.exists) {
+                    console.warn(`[knowRAG] 向量库不完整（${vectorDbInfo.stats.vectors}/${blocks.value.length}），本次写内联向量`)
+                }
+                const zh = store.locales === 'zh'
+                const parts: string[] = []
+                parts.push(zh ? `文件 ${savedLabel} 保存成功` : `${savedLabel} saved`)
+                if (!writeInlineVectors && !useDbAsSource) parts.push(zh ? '精简模式：未写入向量数据，首次问答将重新推导' : 'slim mode: no vectors, re-derived on first Q&A')
+                if (useDbAsSource) parts.push(zh ? '向量已写入 .kbdb，.kb 不再内联（体积减小）' : 'vectors written to .kbdb; .kb no longer inlines them (smaller file)')
+                if (sidecarFailed) parts.push(zh ? `测试结果文件写入失败，已内联保存进 .kb` : 'test-results file failed; saved inline in the .kb')
+                else if (persistTestData) parts.push(zh ? `测试结果单独存为 ${testDataLabel}` : `test results kept in ${testDataLabel}`)
+                // 让用户直接看到这次保存落盘的体积（以及为什么没瘦身）
+                if (!useDbAsSource && vectorDbInfo?.exists) {
+                    parts.push(zh
+                        ? `向量库不完整（${vectorDbInfo.stats.vectors}/${blocks.value.length}），本次写内联向量`
+                        : `vector DB incomplete (${vectorDbInfo.stats.vectors}/${blocks.value.length}); vectors kept inline this time`)
+                }
+                try {
+                    const listing = await getPlatform().fs.listTreeWithRelations(kbDir, 1)
+                    const sizeOf = (name: string) => Number((listing?.fileList || []).find((f: any) => f?.label === name)?.size) || 0
+                    const kbSize = sizeOf(kbFileName)
+                    const dbSize = sizeOf(kbdbName)
+                    if (kbSize) {
+                        parts.push(zh
+                            ? `.kb ${formatVectorBytes(kbSize)}${dbSize ? ` + .kbdb ${formatVectorBytes(dbSize)}` : ''}`
+                            : `.kb ${formatVectorBytes(kbSize)}${dbSize ? ` + .kbdb ${formatVectorBytes(dbSize)}` : ''}`)
+                    }
+                } catch { /* 体积展示失败不影响保存 */ }
+                // 保存为新版本：学习记录 / 试卷库跟着复制过去（测试结果已在上面按开关单独写）
+                if (isNewTarget) {
+                    const copied: string[] = []
+                    const srcStem = sourceKbPath.replace(/\\/g, '/').replace(/\.kb$/i, '')
+                    for (const suffix of ['.learning', '.learning.json', '.exams.json']) {
+                        const src = `${srcStem}${suffix}`
+                        try {
+                            const res = await getPlatform().fs.copyFile(src, kbDir)
+                            if (res?.success) copied.push(suffix)
+                        } catch { /* 源文件不存在：跳过 */ }
+                    }
+                    if (copied.length) parts.push(zh ? `已迁移 ${copied.join('、')}` : `migrated ${copied.join(', ')}`)
+                }
+                kb_state.value = parts.filter(Boolean).join(zh ? '；' : '; ') + missingHint
+                kbVectorStoreBacked.value = useDbAsSource
+                kbVectorStoreCount.value = useDbAsSource ? blocks.value.length : 0
+                return true
+            }
+            kb_state.value = '文件保存失败';
+            return false
+        } catch (error) {
             console.error(error);
             kb_state.value = '文件保存出错';
-        })
+            return false
+        }
+    })()
+    // 立即重建版本列表并选中刚保存的那一版（下拉里马上可见）
     await scanKnowledgeBases()
+    if (writeOk) {
+        const idx = knowledgeBases.value.findIndex((kb: any) => String(kb.path).replace(/\\/g, '/') === kbPath.replace(/\\/g, '/'))
+        if (idx >= 0) selectedKbIndex.value = idx
+        lastLoadedKbPath = kbPath
+    }
+}
+
+/**
+ * 保存当前版本：直接覆盖当前 `.kb`（不弹命名框），并做与「保存为新版本」相同的
+ * 向量库增量同步 / 测试结果侧车 / 3.2 瘦身逻辑。
+ */
+const saveCurrentVersion = async () => {
+    const p = currentKbPath.value || String(lastLoadedKbPath || '')
+    if (!p) {
+        // 自动知识库（没有 .kb 文件）：走"另存"流程，让用户输入名称后保存
+        await save()
+        return
+    }
+    await save({ targetPath: p })
+}
+/** 是否可"保存当前版本"：有已加载的 .kb，或自动知识库已经有文件/切片可保存 */
+const canSaveCurrentVersion = computed(() => !!(currentKbPath.value || lastLoadedKbPath || blocks.value.length > 0 || files.value.length > 0))
+
+/**
+ * 重建向量库（版本管理 → 向量库 → 重建）：
+ * 1) 3.2 的 .kb 没有内联向量 → 先重新向量化全部切片；
+ * 2) 再保存当前版本（保存流程会自动 upsert .kbdb + 瘦身 .kb）。
+ */
+const handleRebuildVectorDb = async () => {
+    if (!blocks.value.length) {
+        ElMessage.warning(store.locales === 'zh' ? '请先加载知识库' : 'Load a knowledge base first')
+        return
+    }
+    const kbPath = String(currentKbPath.value || lastLoadedKbPath || '')
+    if (!kbPath) {
+        ElMessage.warning(store.locales === 'zh' ? '请先保存一个知识库版本' : 'Save a KB version first')
+        return
+    }
+    const missing = blocks.value.filter((b: any) => !Array.isArray(b.A_vector) || !b.A_vector.length).length
+    if (missing > 0) {
+        kb_state.value = store.locales === 'zh'
+            ? `重建向量库：正在重新向量化 ${missing} 个切片…`
+            : `Rebuilding vector DB: re-embedding ${missing} slices…`
+        try {
+            await embedBlocks()
+        } catch (e: any) {
+            kb_state.value = store.locales === 'zh' ? `重新向量化失败：${e?.message || e}` : `Re-embed failed: ${e?.message || e}`
+            return
+        }
+    }
+    // 先在临时库里建好（含当前精度），成功后原子替换旧库；中途失败旧库不受影响
+    const tmpKb = kbPath.replace(/\.kb$/i, '') + '.rebuild.kb'
+    const desiredQuant = model.value.vectorQuant === 'int8' ? 'int8' : 'float32'
+    try {
+        const { chunks, total, dim } = buildVectorChunks(blocks.value as any)
+        if (!total) throw new Error(store.locales === 'zh' ? '没有可用向量' : 'no vectors available')
+        await deleteVectorDb(tmpKb).catch(() => {})
+        await upsertVectorChunks(tmpKb, chunks, {
+            model: model.value.embed, dim, quant: desiredQuant,
+            onProgress: (done, all) => { kb_state.value = store.locales === 'zh' ? `重建向量库 ${done}/${all}…` : `Rebuilding vector DB ${done}/${all}…` },
+        })
+        const fileItems = [...fileIndex.value.entries()]
+            .filter(([, e]: any) => Array.isArray(e?.vector) && e.vector.length > 0)
+            .map(([file, e]: any) => ({ file: String(file), vector: e.vector as number[], hash: String(e?.contentHash || '') }))
+        if (fileItems.length) await upsertFileVectorsToDb(tmpKb, fileItems, desiredQuant)
+        await replaceVectorDb(kbPath, tmpKb)
+        kb_state.value = store.locales === 'zh' ? '向量库已重建，正在保存 .kb…' : 'Vector DB rebuilt; saving .kb…'
+    } catch (e: any) {
+        await deleteVectorDb(tmpKb).catch(() => {})
+        kb_state.value = store.locales === 'zh' ? `重建向量库失败：${e?.message || e}` : `Rebuild failed: ${e?.message || e}`
+        return
+    }
+    await saveCurrentVersion()
 }
 
 const loadKnowledgeBases = async function(index?: number) {
@@ -5214,13 +5717,19 @@ const loadKnowledgeBases = async function(index?: number) {
         
         const version = saveData.config?.version || "1.0"
         
-        if (version !== "3.0" && version !== "2.5" && version !== "2.4") {
+        if (version !== "3.2" && version !== "3.1" && version !== "3.0" && version !== "2.5" && version !== "2.4") {
             throw new Error(`不支持的知识库版本: ${version}，请使用版本 2.4+ 的知识库文件`)
         }
         
         if (!saveData.blocks || !saveData.config || !saveData.fileSummaries) {
             throw new Error('知识库文件格式错误')
         }
+        
+        // 说明文字（版本管理页编辑）随 .kb 恢复
+        kbDescription.value = String(saveData.description || '')
+        // 3.2：向量在 .kbdb（.kb 里没有 A_vector）——界面按「已向量化」处理，检索时按候选回填向量
+        kbVectorStoreBacked.value = !!saveData.config?.vectorStore
+        kbVectorStoreCount.value = Number(saveData.config?.vectorStore?.vectors) || 0
         
         fileSummaries.value.clear()
         Object.entries(saveData.fileSummaries).forEach(([key, value]: [string, any]) => {
@@ -5280,12 +5789,35 @@ const loadKnowledgeBases = async function(index?: number) {
         // 精简模式开关：.kb 记录了 saveVectors=false 时恢复（后续保存默认仍不写向量）
         if (saveData.config.saveVectors !== undefined) {
             model.value.saveVectors = saveData.config.saveVectors !== false
+        model.value.autoVectorDb = saveData.config.autoVectorDb !== false
+        model.value.vectorQuant = saveData.config.vectorQuant === 'int8' ? 'int8' : 'float32'
         }
         // 测试结果开关与快照：开关随 .kb 恢复；快照存在即恢复（哪怕当前开关被关掉，先展示已有数据，重存时才按开关丢弃）
         if (saveData.config.saveTestResults !== undefined) {
             model.value.saveTestResults = saveData.config.saveTestResults === true
         }
-        testData.value = (saveData as any).testData || null
+        // 测试页结果：3.1 起在侧车文件 <库名>.testdata.json（同目录）；旧版 .kb 里是内联 testData
+        const sidecarName = String(saveData.config.testDataFile || '')
+        const legacyTestData = (saveData as any).testData || null
+        if (sidecarName) {
+            const sidecarPath = `${dirOfPath(kbFile.path)}/${sidecarName}`
+            try {
+                const sidecarText = await getPlatform().fs.readText(sidecarPath)
+                const parsed = JSON.parse(sidecarText)
+                testData.value = parsed?.data ?? parsed ?? null
+            } catch (e) {
+                // 侧车缺失/损坏不阻断加载：测试页只是没数据，切片与检索不受影响
+                testData.value = null
+                console.warn('[knowRAG] 测试结果文件读取失败:', sidecarPath, e)
+                kb_state.value = store.locales === 'zh'
+                    ? `已加载 ${kbFile.label}，但测试结果文件 ${sidecarName} 缺失或损坏`
+                    : `Loaded ${kbFile.label}, but ${sidecarName} is missing or broken`
+            }
+        } else {
+            testData.value = legacyTestData
+            // 旧格式：把内联测试结果搬到侧车文件，并重写成 3.1（后台执行，失败不影响使用）
+            if (legacyTestData) void migrateInlineTestData(kbFile.path, saveData)
+        }
         if (saveData.config.ontologyBatchSize !== undefined) {
             model.value.ontologyBatchSize = saveData.config.ontologyBatchSize
         }
@@ -5522,9 +6054,32 @@ const loadKnowledgeBases = async function(index?: number) {
         autoCheckIncremental()
     } catch (error:any) {
         console.error('加载知识库出错:', error)
-        kb_state.value = store.locales === 'zh' ? 
-            `加载知识库出错: ${error.message}` : 
-            `Error loading knowledge base: ${error.message}`
+        const msg = String(error?.message || error || '')
+        // 超大 .kb（内联向量/测试结果）会撞 V8 字符串上限：提供流式迁移并自动重新加载
+        if (/string length|too long|ERR_STRING_TOO_LONG|Invalid string/i.test(msg)) {
+            const zh = store.locales === 'zh'
+            try {
+                await ElMessageBox.confirm(
+                    zh
+                        ? `这个 .kb 文件太大（${msg}），无法一次性读入内存。是否流式迁移为 3.2（向量写入 .kbdb、移除内联向量，原文件备份为 .legacy.bak）后自动重新加载？`
+                        : `This .kb is too large to load as one string (${msg}). Migrate it in streaming mode (vectors → .kbdb, remove inline vectors, original backed up as .legacy.bak) and reload?`,
+                    zh ? '知识库过大' : 'Oversized knowledge base',
+                    { confirmButtonText: zh ? '流式迁移' : 'Migrate', cancelButtonText: zh ? '取消' : 'Cancel', type: 'warning' },
+                )
+            } catch { return }
+            try {
+                await migrateLegacyKb(kbFile.path)
+                await scanKnowledgeBases()
+                const idx = knowledgeBases.value.findIndex((k: any) => String(k.path).replace(/\\/g, '/') === String(kbFile.path).replace(/\\/g, '/'))
+                if (idx >= 0) await loadKnowledgeBases(idx)
+            } catch (e: any) {
+                kb_state.value = zh ? `流式迁移失败：${e?.message || e}` : `Streaming migration failed: ${e?.message || e}`
+            }
+            return
+        }
+        kb_state.value = store.locales === 'zh'
+            ? `加载知识库出错: ${msg}`
+            : `Error loading knowledge base: ${msg}`
     }
 }
 
@@ -5611,8 +6166,37 @@ function scheduleRefreshAtlas(delay = 180) {
     }
 }
 
-const handleLoadKnowledgeBase = async (index: number) => {
-    await loadKnowledgeBases(index)
+const handleLoadKnowledgeBase = async (target: number | string) => {
+    // 版本管理面板按**路径**请求加载：两个面板的排序不同（父级按 mtime、配置页按文件名），
+    // 传索引会加载到另一份库，所以这里优先按路径解析，索引仅作兼容回退。
+    if (typeof target === 'string' && target) {
+        const idx = knowledgeBases.value.findIndex((k: any) => k?.path === target)
+        if (idx >= 0) { await loadKnowledgeBases(idx); return }
+    }
+    await loadKnowledgeBases(typeof target === 'number' ? target : 0)
+}
+
+/**
+ * 版本管理面板改了说明（写入 .kb）→ 同步主模块内存里的 kbDescription，
+ * 否则主模块下一次「保存」会用旧值把新说明覆盖掉。
+ */
+const handleKbDescriptionSaved = (payload: { path: string; description: string }) => {
+    if (!payload?.path) return
+    if (String(lastLoadedKbPath || '') === String(payload.path)) {
+        kbDescription.value = String(payload.description || '')
+    }
+}
+
+/** 版本管理里重命名了知识库 → 更新已加载路径、重建版本列表并选中新名字 */
+const handleKbRenamed = async (payload: { oldPath: string; newPath: string; newName: string }) => {
+    const norm = (p: string) => String(p || '').replace(/\\/g, '/')
+    if (!payload?.newPath) return
+    if (lastLoadedKbPath && norm(lastLoadedKbPath) === norm(payload.oldPath)) {
+        lastLoadedKbPath = payload.newPath
+    }
+    await scanKnowledgeBases()
+    const idx = knowledgeBases.value.findIndex((k: any) => norm(k.path) === norm(payload.newPath))
+    if (idx >= 0) selectedKbIndex.value = idx
 }
 
 /** 按路径打开知识库文件（从知识库模块双击 .kb 文件跳转而来） */
@@ -6631,6 +7215,8 @@ const clearOntology = async () => {
 /** 重置知识库所有状态（与初始化进入模块一致：清除切片/文件摘要/本体/社区/报告/测试用例等） */
 const resetKbState = () => {
     blocks.value = []
+    kbVectorStoreBacked.value = false
+    kbVectorStoreCount.value = 0
     files.value = []
     documents.value = [{ name: '全部' }]
     documentName.value = '全部'
@@ -7079,21 +7665,20 @@ const communityChat = async (userPrompt: string) => {
     result.value = ''
     const appendResult = (msg: string) => { result.value += msg + '\n\n' }
     appendResult(store.locales === 'zh' ? '社区搜索启动中...' : 'Community search starting...')
-
     let summaryStarted = false
-    const ctx = buildRetrievalContext(userPrompt)
-    const sr = await runStrategy('community', userPrompt, ctx, {
+    const run = await runKbStrategy('community', userPrompt, {
         onProgress: (msg: string) => { appendResult(msg) },
         onStream: (chunk: string) => {
             if (!summaryStarted) { summaryStarted = true; result.value += '\n---\n\n' }
             result.value += chunk
         },
     })
-
+    if (!run) return false
+    const sr = run.sr
     if (!sr.meta.mapResults?.length) {
         appendResult(store.locales === 'zh' ? '未生成中间结果' : 'No intermediate results generated')
     }
-    if (!summaryStarted && sr.answer) {
+    if (!run.started() && sr.answer) {
         result.value += (sr.answer || (store.locales === 'zh' ? '未找到相关信息' : 'No relevant information found'))
     }
     currentEvidence.value = filterEvidenceTopK(sr.evidence, model.value.evidenceTopK)
@@ -7226,10 +7811,40 @@ onBeforeUnmount(() => {
                     <span class="mt-section-title">{{ activeSectionLabel }}</span>
                 </template>
                 <template v-else>
-                    <button class="mt-path" :title="store.root || (zh ? '未选择文件夹' : 'No folder')" @click="openFolder">
-                        <i class="fa fa-folder-o"></i>
-                        <span>{{ rootFolderName }}</span>
-                    </button>
+                    <!-- 路径选择：列出已打开的工作区 + 「选择新文件夹…」（与 home 的工作区选择同口径） -->
+                    <div class="mt-path-wrap">
+                        <button
+                            class="mt-path"
+                            :title="store.root || (zh ? '未选择文件夹' : 'No folder')"
+                            @click.stop="togglePathPicker"
+                        >
+                            <i class="fa fa-folder-o"></i>
+                            <span>{{ rootFolderName }}</span>
+                            <i class="fa fa-angle-down mt-path-caret"></i>
+                        </button>
+                        <div v-if="showPathPicker" class="mt-menu-backdrop" @click="showPathPicker = false"></div>
+                        <div v-if="showPathPicker" class="mt-menu mt-path-menu" @click.stop>
+                            <div v-if="!workspaceOptions.length" class="mt-menu-empty">
+                                {{ zh ? '还没有打开过工作区' : 'No workspace opened yet' }}
+                            </div>
+                            <button
+                                v-for="w in workspaceOptions"
+                                :key="'ws-' + w.path"
+                                class="mt-menu-item"
+                                :class="{ active: w.path === store.root }"
+                                :title="w.path"
+                                @click="switchWorkspace(w.path)"
+                            >
+                                <i class="fa" :class="w.path === store.root ? 'fa-folder-open-o' : 'fa-folder-o'"></i>
+                                <span class="mt-menu-label">{{ w.name }}</span>
+                                <span v-if="w.path === store.root" class="mt-menu-tag">{{ zh ? '当前' : 'current' }}</span>
+                            </button>
+                            <div class="mt-menu-sep"></div>
+                            <button class="mt-menu-item" @click="pickNewFolder">
+                                <i class="fa fa-plus"></i>{{ zh ? '选择新文件夹…' : 'Choose a new folder…' }}
+                            </button>
+                        </div>
+                    </div>
                     <span v-if="!isNarrow" class="mt-sep"></span>
                 </template>
 
@@ -7257,6 +7872,9 @@ onBeforeUnmount(() => {
                         <button class="mt-menu-item" @click="organizeKbFiles">
                             <i class="fa fa-folder-o"></i>{{ zh ? '整理为知识库文件夹' : 'Organize KB folders' }}
                         </button>
+                        <button class="mt-menu-item" @click="migrateLegacyKb()">
+                            <i class="fa fa-magic"></i>{{ zh ? '迁移超大 .kb（流式）' : 'Migrate oversized .kb (streaming)' }}
+                        </button>
                         <button class="mt-menu-item" @click="openFolderFromMenu">
                             <i class="fa fa-folder-open-o"></i>{{ zh ? '打开文件夹' : 'Open folder' }}
                         </button>
@@ -7274,15 +7892,23 @@ onBeforeUnmount(() => {
                     {{ fullPipelineRunning ? (zh ? '加工中…' : 'Processing…') : (zh ? '一键加工' : 'Full pipeline') }}
                 </button>
                 <button v-if="!isNarrow || !showSectionList" class="mt-primary" @click="runPrimaryAction">{{ primaryLabel }}</button>
+                <button
+                    v-if="!isNarrow || !showSectionList"
+                    class="mt-secondary mt-save-version"
+                    :disabled="!canSaveCurrentVersion || prepState.active || fullPipelineRunning"                    :title="zh ? '保存当前版本：直接覆盖当前 .kb；自动知识库会先让你输入名称（含向量库自动写入）' : 'Save current version: overwrite the current .kb; the auto KB will ask for a name first (vector DB is written automatically)'"
+                    @click="saveCurrentVersion"
+                >
+                    <i class="fa fa-save"></i><span>{{ zh ? '保存' : 'Save' }}</span>
+                </button>
                 <div class="mt-config-btns">
-                    <button class="mt-config-btn" :class="{ active: viewMode === 'set' && configGroup === 'knowledgebase' }" :title="zh ? '版本管理' : 'Versions'" @click="openConfig('knowledgebase')">
-                        <i class="fa fa-database"></i><span>{{ zh ? '版本管理' : 'Versions' }}</span>
+                    <button class="mt-config-btn" :class="{ active: viewMode === 'set' && configGroup === 'knowledgebase' }" :title="zh ? '版本' : 'Versions'" @click="openConfig('knowledgebase')">
+                        <i class="fa fa-database"></i><span>{{ zh ? '版本' : 'Versions' }}</span>
                     </button>
-                    <button class="mt-config-btn" :class="{ active: viewMode === 'set' && configGroup === 'strategy' }" :title="zh ? '策略配置' : 'Strategies'" @click="openConfig('strategy')">
-                        <i class="fa fa-cubes"></i><span>{{ zh ? '策略配置' : 'Strategies' }}</span>
+                    <button class="mt-config-btn" :class="{ active: viewMode === 'set' && configGroup === 'strategy' }" :title="zh ? '策略' : 'Strategies'" @click="openConfig('strategy')">
+                        <i class="fa fa-cubes"></i><span>{{ zh ? '策略' : 'Strategies' }}</span>
                     </button>
-                    <button class="mt-config-btn" :class="{ active: viewMode === 'set' && configGroup === 'process' }" :title="zh ? '其他配置' : 'Other settings'" @click="openConfig('process')">
-                        <i class="fa fa-cogs"></i><span>{{ zh ? '其他配置' : 'Other' }}</span>
+                    <button class="mt-config-btn" :class="{ active: viewMode === 'set' && configGroup === 'process' }" :title="zh ? '设置' : 'Settings'" @click="openConfig('process')">
+                        <i class="fa fa-cogs"></i><span>{{ zh ? '设置' : 'Settings' }}</span>
                     </button>
                 </div>
             </div>
@@ -7628,8 +8254,11 @@ onBeforeUnmount(() => {
                             :initial-group="configGroup"
                             @updateState="(state:any) => kb_state = state"
                             @loadKnowledgeBase="handleLoadKnowledgeBase"
+                            @kbDescriptionSaved="handleKbDescriptionSaved"
+                            @kbRenamed="handleKbRenamed"
                             @strategiesChanged="refreshStrategies"
                             @embed-model-change="handleEmbedModelChange"
+                            @rebuildVectorDb="handleRebuildVectorDb"
                         />
                     </div>
 
@@ -7641,6 +8270,7 @@ onBeforeUnmount(() => {
             <questionView
                 ref="questionViewRef"
                 :model="model"
+                :kb-path="currentKbPath || lastLoadedKbPath || ''"
                 :question-bank="questionBank"
                 :blocks="blocks"
                 :files="files"
@@ -7671,6 +8301,7 @@ onBeforeUnmount(() => {
             <testManager
                 :store="store"
                 :blocks="blocks"
+                :kb-path="currentKbPath || lastLoadedKbPath || ''"
                 :files="files"
                 :model="model"
                 :getModel="getModel"
@@ -7960,6 +8591,28 @@ onBeforeUnmount(() => {
     .mt-path {
         max-width: 180px;
     }
+    /* 路径选择器：按钮 + 下拉面板（面板样式复用 .mt-menu，与知识库版本菜单同一套） */
+    .mt-path-wrap {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        min-width: 0;
+    }
+    .mt-path-caret {
+        flex: 0 0 auto;
+        font-size: 9px;
+        opacity: .55;
+    }
+    .mt-path-menu {
+        left: 0;
+        min-width: 260px;
+        max-width: min(420px, 80vw);
+    }
+    /* 路径可能很长：菜单项里显示文件夹名，完整路径走 title；路径次要信息用弱化颜色小字 */
+    .mt-path-menu .mt-menu-label {
+        flex: 1;
+        min-width: 0;
+    }
     .mt-path span,
     .mt-kb-name {
         min-width: 0;
@@ -8069,6 +8722,11 @@ onBeforeUnmount(() => {
     .mt-primary:hover {
         opacity: .9;
     }
+    /* 「保存当前版本」：与主按钮同高，但弱化成次级按钮（避免和"增量更新"抢主操作） */
+    .mt-save-version {
+        height: 26px;
+    }
+    .main.narrow .mt-save-version span { display: none; }
     .mt-kb-wrap {
         position: relative;
         display: inline-flex;

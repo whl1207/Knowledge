@@ -3,13 +3,16 @@ import { ref, computed, reactive, watch, onMounted, onBeforeUnmount, nextTick } 
 import block_md from '@/components/block_md.vue'
 import * as XLSX from 'xlsx'
 import {usestore} from '@/store'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { runStrategy, runStrategyWith, getEnabledStrategies, getStrategy } from '@/shared/graphrag/strategy'
 import type { AgentStep, StrategyDef } from '@/shared/graphrag/strategy'
 import { computeBM25Score } from '@/shared/graphrag/search'
 import { INGESTION_PRIMITIVES, prewarmEntityVectors, entityVectorCacheStats } from '@/shared/graphrag/primitives'
 import type { RetrievalContext, IngestionContext } from '@/shared/graphrag/primitives'
-import { cosineSimilarity } from '@/shared/kbRetrieval'
+import { cosineSimilarity, makeVectorDbSliceScorer } from '@/shared/kbRetrieval'
+import { buildVectorChunks, upsertVectorChunks, queryVectorDb, getVectorDbVectors, deleteVectorDb } from '@/lib/kbVectorDb'
 import { setRunningTask } from '@/store/runningTasks'
+import { getPlatform } from '@/platform'
 import * as kbAi from '@/shared/kbAiClient'
 const store=usestore()
 
@@ -31,6 +34,8 @@ interface TestCaseRef { srcBlockId?: string; blockIds: string[] }
 interface Props {
   store: any
   blocks: any[]
+  /** 当前 .kb 路径：让评测里的 dense_score 能查 .kbdb（3.2 无内联向量） */
+  kbPath?: string
   model: any
   getModel: () => Promise<void>
   files?: any[]
@@ -1340,6 +1345,11 @@ const retrievalServicesOf = (spec: any): ReturnType<typeof kbAi.buildRetrievalSe
   }
   const services: ReturnType<typeof kbAi.buildRetrievalServices> = {
     ...base,
+    // 3.2：评测里的子查询/多跳也直接查 .kbdb（否则内存无向量 → dense_score 全 0）
+    ...(() => {
+      const scorer = makeVectorDbSliceScorer(String(props.kbPath || ''))
+      return scorer ? { querySliceScores: scorer } : {}
+    })(),
     embed: async (text: string) => {
       const hit = lookup(text)
       if (hit) { if (timingBucket) timingBucket.embedHits++; return hit }
@@ -2544,6 +2554,173 @@ const stopBatchTest = () => {
 }
 
 // 批量测试（使用当前算法）
+// ===== 向量库质量评测（测试页）：int8 量化误差 + 端到端自测 =====
+const vectorEvalRunning = ref(false)
+/**
+ * 1) 端到端自测：把当前切片写成临时 .kbdb，用切片自己的向量查询，top1 必须是它自己（分数≈1）；
+ * 2) int8 量化误差：同一批切片另写一个 int8 库，float32 vs int8 的 top10 重合率 / top1 一致率 / 分数差。
+ */
+const runVectorQualityEval = async () => {
+  const zh = store.locales === 'zh'
+  const kb = String(props.kbPath || '')
+  if (!kb) {
+    ElMessage.warning(zh ? '请先加载/保存一个知识库（需要 .kb 路径）' : 'Load/save a KB first (need the .kb path)')
+    return
+  }
+  if (vectorEvalRunning.value) return
+  // 评测样本：留空=全部测试用例；填数字=只抽前 N 条
+  let sampleLimit = 0
+  try {
+    const ans = await ElMessageBox.prompt(
+      zh ? '评测样本数（留空 = 全部测试用例）' : 'Sample size (empty = all test cases)',
+      zh ? '量化/自测' : 'Quant & E2E',
+      {
+        confirmButtonText: zh ? '开始' : 'Start',
+        cancelButtonText: zh ? '取消' : 'Cancel',
+        inputPlaceholder: zh ? '例如 100' : 'e.g. 100',
+        inputValidator: (v: string) => (!v || /^\d+$/.test(String(v).trim())) ? true : (zh ? '请输入整数' : 'Enter an integer'),
+      },
+    )
+    sampleLimit = Number(String(ans?.value || '').trim()) || 0
+  } catch { return }
+  vectorEvalRunning.value = true
+  const tmpKb = kb.replace(/\.kb$/i, '') + '.q8eval.kb'
+  try {
+    await props.getModel?.()
+    const services = retrievalServicesOf(kbSpec())
+    let chunks = buildVectorChunks(props.blocks as any).chunks
+    // 3.2：内存切片没有向量 → 从 .kbdb 批量取回（用于生成评估用的临时库）
+    if (!chunks.length) {
+      const ids = (props.blocks || []).map((b: any) => String(b?.id ?? '')).filter(Boolean)
+      const vecMap = new Map<string, number[]>()
+      for (let i = 0; i < ids.length; i += 400) {
+        const batch = ids.slice(i, i + 400)
+        try {
+          const got = await getVectorDbVectors(kb, batch)
+          for (const [id, v] of got) vecMap.set(String(id), v)
+        } catch { /* 忽略单批失败 */ }
+      }
+      const rebuilt = (props.blocks || []).map((b: any, i: number) => ({
+        id: String(b?.id || `b-${i}`),
+        filePath: String(b?.filePath || b?.path || ''),
+        label: String(b?.label || ''),
+        A: String(b?.A || ''),
+        contentHash: String(b?.contentHash || `i-${i}`),
+        A_vector: vecMap.get(String(b?.id ?? '')),
+      }))
+      chunks = buildVectorChunks(rebuilt as any).chunks
+    }
+    if (!chunks.length) {
+      ElMessage.warning(zh ? '当前知识库没有可用的切片向量（请先向量化或重建向量库）' : 'No slice vectors available (embed or rebuild the vector DB first)')
+      return
+    }
+    const dim = chunks[0].vector.length
+
+    // 临时 float32 库（端到端自测）
+    const tmpF32Kb = kb.replace(/\.kb$/i, '') + '.e2e.kb'
+    await deleteVectorDb(tmpF32Kb).catch(() => {})
+    await upsertVectorChunks(tmpF32Kb, chunks, { model: String(props.model?.embed || ''), dim, quant: 'float32' })
+
+    // int8 临时库
+    await deleteVectorDb(tmpKb).catch(() => {})
+    await upsertVectorChunks(tmpKb, chunks, { model: String(props.model?.embed || ''), dim, quant: 'int8' })
+
+    // 查询：默认跑全部测试用例问题（不再只取前 8 条）；没有测试用例时用前 10 个切片正文
+    const queryTexts: string[] = []
+    for (const q of (props.testCases?.questions || [])) if (String(q || '').trim()) queryTexts.push(String(q))
+    if (!queryTexts.length) {
+      for (const c of chunks.slice(0, 10)) if (String(c.text || '').trim()) queryTexts.push(String(c.text).slice(0, 200))
+    }
+    if (sampleLimit > 0 && queryTexts.length > sampleLimit) queryTexts.length = sampleLimit
+    // 预嵌入全部测试问题（命中 queryVecCache，避免评测阶段逐条请求）
+    try { await prewarmTestQueries() } catch { /* 预热失败不阻断 */ }
+
+    let e2ePass = 0
+    let e2eTotal = 0
+    let top1Match = 0
+    let overlapSum = 0
+    let scoreDeltaSum = 0
+    let scoreDeltaN = 0
+    let embeddedQueries = 0
+    for (let qi = 0; qi < queryTexts.length; qi += 1) {
+      const text = queryTexts[qi]
+      if (qi % 5 === 0) {
+        emit('updateState', zh ? `量化评测：${qi + 1}/${queryTexts.length}…` : `Quant evaluation: ${qi + 1}/${queryTexts.length}…`)
+      }
+      let qv: number[] | undefined
+      try { qv = await services.embed(text) } catch { continue }
+      if (!qv?.length) continue
+      embeddedQueries += 1
+      const f32 = await queryVectorDb(tmpF32Kb, qv, 10)
+      const q8 = await queryVectorDb(tmpKb, qv, 10)
+      if (!f32.length || !q8.length) continue
+      if (f32[0].id === q8[0].id) top1Match += 1
+      const f32Ids = new Set(f32.map((h) => h.id))
+      const overlap = q8.filter((h) => f32Ids.has(h.id)).length
+      overlapSum += overlap / Math.max(1, f32.length)
+      const q8Map = new Map(q8.map((h) => [h.id, h.score]))
+      for (const h of f32) {
+        const s = q8Map.get(h.id)
+        if (typeof s === 'number') { scoreDeltaSum += Math.abs(s - h.score); scoreDeltaN += 1 }
+      }
+    }
+
+    // 端到端自测独立抽样：最多 50 个切片，用自身向量查临时库，top1 必须是它自己
+    const selfSamples = chunks.slice(0, Math.min(50, chunks.length))
+    for (const c of selfSamples) {
+      e2eTotal += 1
+      const selfHits = await queryVectorDb(tmpF32Kb, c.vector, 1)
+      if (selfHits[0]?.id === c.id && selfHits[0]?.score > 0.99) e2ePass += 1
+    }
+
+    const n = Math.max(1, embeddedQueries)
+    const report = [
+      zh ? `端到端自测：${e2ePass}/${e2eTotal} 命中自身（top1 分数 > 0.99）` : `E2E self-test: ${e2ePass}/${e2eTotal} self top1 (>0.99)`,
+      zh ? `int8 与 float32 top10 平均重合率：${(overlapSum / n * 100).toFixed(1)}%` : `int8 vs float32 mean top10 overlap: ${(overlapSum / n * 100).toFixed(1)}%`,
+      zh ? `top1 一致率：${(top1Match / n * 100).toFixed(1)}%` : `top1 match: ${(top1Match / n * 100).toFixed(1)}%`,
+      zh ? `平均分数差：${(scoreDeltaSum / Math.max(1, scoreDeltaN)).toFixed(4)}` : `mean score delta: ${(scoreDeltaSum / Math.max(1, scoreDeltaN)).toFixed(4)}`,
+      zh ? `样本：${embeddedQueries}/${queryTexts.length} 个查询（全部测试用例）/ ${chunks.length} 个切片 / ${dim} 维` : `samples: ${embeddedQueries}/${queryTexts.length} queries (all test cases) / ${chunks.length} slices / ${dim}-dim`,
+    ].join('\n')
+    ElMessageBox.alert(report, zh ? '向量库质量评测' : 'Vector DB quality evaluation', { confirmButtonText: zh ? '导出报告' : 'Export report' })
+      .then(async () => {
+        try {
+          const dir = kb.replace(/[\\/][^\\/]+$/, '')
+          const target = await getPlatform().dialog.saveFile({
+            defaultPath: `${dir}/quant-eval.json`,
+            filters: [{ name: 'JSON', extensions: ['json'] }],
+          } as any)
+          if (!target) return
+          const payload = {
+            savedAt: new Date().toISOString(),
+            kbPath: kb,
+            blocks: chunks.length,
+            dim,
+            queries: embeddedQueries,
+            totalQueries: queryTexts.length,
+            sampleLimit,
+            metrics: {
+              e2ePass, e2eTotal,
+              top10Overlap: overlapSum / n,
+              top1MatchRate: top1Match / n,
+              meanScoreDelta: scoreDeltaSum / Math.max(1, scoreDeltaN),
+            },
+          }
+          const ok = await getPlatform().fs.saveText(String(target), JSON.stringify(payload, null, 2))
+          if (ok) ElMessage.success(zh ? '评测报告已导出' : 'Report exported')
+        } catch (e: any) {
+          ElMessage.error((zh ? '导出失败：' : 'Export failed: ') + (e?.message || e))
+        }
+      })
+      .catch(() => { /* 用户关闭弹窗 */ })
+  } catch (e: any) {
+    ElMessage.error((zh ? '评测失败：' : 'Evaluation failed: ') + (e?.message || e))
+  } finally {
+    await deleteVectorDb(tmpKb).catch(() => {})
+    await deleteVectorDb(kb.replace(/\.kb$/i, '') + '.e2e.kb').catch(() => {})
+    vectorEvalRunning.value = false
+  }
+}
+
 const runBatchTest = async () => {
   // 已有批量测试（当前 / 全部策略）在跑：避免并发写进度与结果
   if (test.isRunning) {
@@ -4828,8 +5005,12 @@ const clearTestCases = () => {
             <button class="kt-btn" @click="stopBatchTest"><i class="fa fa-stop"></i> {{ store.locales=='zh' ? '停止' : 'Stop' }}</button>
           </template>
           <template v-else>
-            <button class="kt-btn primary" :disabled="!test.questions.length" @click="runBatchTest"><i class="fa fa-play"></i> {{ store.locales=='zh' ? '开始测试' : 'Start test' }}</button>
-            <button class="kt-btn" :disabled="!test.questions.length" @click="runAllStrategyTest"><i class="fa fa-tasks"></i> {{ store.locales=='zh' ? '全部策略' : 'All strategies' }}</button>
+            <button class="kt-btn" :disabled="!test.questions.length" @click="runBatchTest" :title="store.locales=='zh' ? '用当前选中的策略/参数跑全部测试用例' : 'Run all test cases with the currently selected strategy/params'"><i class="fa fa-play"></i> {{ store.locales=='zh' ? '当前策略测试' : 'Test current strategy' }}</button>
+            <button class="kt-btn" :disabled="!test.questions.length" @click="runAllStrategyTest" :title="store.locales=='zh' ? '所有已启用策略/消融变体各跑一遍，横向对比指标' : 'Run every enabled strategy/ablation variant and compare metrics'"><i class="fa fa-tasks"></i> {{ store.locales=='zh' ? '全部策略横评' : 'Compare all strategies' }}</button>
+            <button class="kt-btn" :disabled="vectorEvalRunning || !blocks.length" @click="runVectorQualityEval">
+              <i class="fa" :class="vectorEvalRunning ? 'fa-spinner fa-spin' : 'fa-flask'"></i>
+              {{ vectorEvalRunning ? (store.locales=='zh' ? '评测中…' : 'Evaluating…') : (store.locales=='zh' ? '量化/自测' : 'Quant & E2E') }}
+            </button>
           </template>
         </div>
 
@@ -6099,6 +6280,10 @@ const clearTestCases = () => {
 .tm-home-title .fa { color: var(--fontActiveColor); }
 .tm-home-state { font-size: 9px; padding: 1px 6px; border-radius: 8px; background: var(--backgroundColor); color: var(--fontColor); opacity: .65; }
 .tm-home-head .kt-btn.primary { background: var(--fontActiveColor); border-color: var(--fontActiveColor); color: var(--backgroundColor); padding: 0 10px; width: auto; }
+/* 测试页顶栏三个按钮（开始测试/全部策略/量化自测）统一尺寸：
+   之前只有 primary 带 padding，另外两个是 padding:0，字少显得更小 */
+.tm-home-head .kt-btn { height: 32px; min-height: 32px; padding: 0 12px; font-size: 12px; }
+.tm-home-head .kt-btn.primary { height: 32px; min-height: 32px; padding: 0 12px; }
 .tm-home-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 6px; }
 .tm-home-card { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--borderColor); border-radius: 8px; background: var(--backgroundColor); min-width: 0; }
 .tm-home-card-title { display: flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: var(--fontColor); margin-bottom: 2px; }

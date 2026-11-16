@@ -279,7 +279,19 @@ export interface AgentEventMap {
   'agent/turn-start': { turn: number }
   'agent/turn-end': { turn: number; reason: string }
   'agent/step-start': { turn: number; step: number }
-  'agent/step-end': { turn: number; step: number; toolCalls: number; usage?: AgentStepUsage; /** 估算校准系数（真实/估算，渲染层按来源+模型持久化后回传复用） */ tokenScale?: number }
+  'agent/step-end': {
+    turn: number
+    step: number
+    toolCalls: number
+    usage?: AgentStepUsage
+    /** 估算校准系数（真实/估算，渲染层按来源+模型持久化后回传复用） */
+    tokenScale?: number
+    /**
+     * 本步**模型请求**耗时（毫秒，不含工具执行）。
+     * 用于界面显示推理速度（completionTokens / genMs）——「xx tok/s」与 DSH 同口径。
+     */
+    genMs?: number
+  }
   'agent/inbox': { pending: number }
   'assistant/chunk': { content: string }
   'assistant/reasoning': { text: string }

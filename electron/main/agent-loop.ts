@@ -1071,7 +1071,10 @@ class AgentImpl implements AgentControl {
         // 持久化屏障：本 step 的输入（用户消息 / 注入上下文）先真正落盘，再发模型请求。
         // 日志是唯一事实源；崩溃后不应出现「模型已经看过、日志里却还没有」的输入。
         await sessionLog.flush(this.id)
+        // 模型请求计时（不含工具执行）：界面「xx tok/s」用 completionTokens / genMs
+        const genStartedAt = Date.now()
         const result = await this.runStepWithOverflowRetry(messages)
+        const genMs = Math.max(1, Date.now() - genStartedAt)
         // 模型把工具调用写成 XML 正文时，先修复成结构化 tool_calls，避免本步没有工具可执行而结束循环
         this.rescueTextToolCalls(result)
         item = null // 本 step 的输入已消费
@@ -1142,7 +1145,7 @@ class AgentImpl implements AgentControl {
         }
 
         sessionLog.append(this.id, 'step/end', { turn, step, toolCalls: toolCallsCount })
-        this.emit('agent/step-end', { turn, step, toolCalls: toolCallsCount, usage: result.usage, tokenScale: this.tokenScale })
+        this.emit('agent/step-end', { turn, step, toolCalls: toolCallsCount, usage: result.usage, tokenScale: this.tokenScale, genMs })
 
         // 工具调用欠一次请求（继续下一 step 携带工具结果），
         // 或运行期间收到了 steer（转向下一 step）→ 继续

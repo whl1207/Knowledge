@@ -159,6 +159,28 @@ function stripTrailingSlash(s: string): string {
   return String(s || '').replace(/\/+$/, '')
 }
 
+/**
+ * 本地 OpenAI 兼容服务（LM Studio 等）的 base_url 归一化：
+ * 用户可能填 `http://127.0.0.1:12345`、`.../v1`、甚至 `.../v1/chat/completions`，
+ * 统一去掉末尾的 /v1 与聊天路由后缀，避免拼出 `/v1/v1/chat/completions` 这种 404。
+ */
+function normalizeLocalBaseUrl(raw: string, defaultBase: string): string {
+  let base = stripTrailingSlash(String(raw || defaultBase).trim())
+  base = base.replace(/\/(v1\/)?chat\/completions$/i, '')
+  base = base.replace(/\/v1$/i, '')
+  return stripTrailingSlash(base)
+}
+
+/** 错误信息里的端点：去掉 query（避免把 api-key 之类带进日志/界面） */
+function safeEndpointForError(url: string): string {
+  try {
+    const u = new URL(String(url || ''))
+    return `${u.origin}${u.pathname}`
+  } catch {
+    return String(url || '')
+  }
+}
+
 /** 常见「聊天/补全/响应」请求路由后缀（用于推导基址与判断是否已是完整端点） */
 const CHAT_ROUTE_SUFFIXES = [
   '/v1/chat/completions', '/chat/completions',
@@ -189,7 +211,7 @@ function isBareHostUrl(url: string): boolean {
     return false
   }
 }
-function buildCustomChatEndpoint(apiUrl: string): string {
+function buildCustomChatEndpoint(apiUrl: string, opts?: { gpuStackDefault?: boolean }): string {
   const url = stripTrailingSlash(apiUrl)
   if (!url) return url
   for (const suf of CHAT_ROUTE_SUFFIXES) {
@@ -197,7 +219,14 @@ function buildCustomChatEndpoint(apiUrl: string): string {
   }
   if (url.endsWith('/v1-openai')) return `${url}/chat/completions`
   if (url.endsWith('/v1')) return `${url}/chat/completions`
-  if (isBareHostUrl(url)) return `${url}/v1-openai/chat/completions`
+  // 裸地址的默认风格：
+  // - 自定义来源 → 通用 OpenAI 兼容 `/v1/chat/completions`（LM Studio/vLLM/llama.cpp/Ollama 兼容层）
+  // - GPUStack 内置来源 → `/v1-openai/chat/completions`
+  // 以前一律按 GPUStack 处理，导致「自定义 API 填 http://127.0.0.1:12345」被拼成
+  // `/v1-openai/chat/completions`，普通 OpenAI 兼容服务直接 404。
+  if (isBareHostUrl(url)) {
+    return opts?.gpuStackDefault ? `${url}/v1-openai/chat/completions` : `${url}/v1/chat/completions`
+  }
   return url
 }
 
@@ -576,8 +605,8 @@ async function fetchOpenAICompatContextWindow(config: any, model: string): Promi
 // AI API工具函数（共享核心：主进程执行，渲染进程在浏览器模式兜底直连）
 export class AIUtils {
     // 归一化自定义 api_url 为聊天请求端点（基址自动补 /chat/completions，GPUStack 等本地服务可用基址）
-    static buildCustomChatEndpoint(apiUrl: string): string {
-        return buildCustomChatEndpoint(apiUrl)
+    static buildCustomChatEndpoint(apiUrl: string, opts?: { gpuStackDefault?: boolean }): string {
+        return buildCustomChatEndpoint(apiUrl, opts)
     }
 
     // 检查Ollama连接
@@ -923,7 +952,7 @@ export class AIUtils {
                 requestBody.tool_choice = options?.toolChoice || 'auto';
             }
 
-            const endpoint = `${lmstudioConfig.base_url}/v1/chat/completions`;
+            const endpoint = `${normalizeLocalBaseUrl(lmstudioConfig.base_url, 'http://127.0.0.1:1234')}/v1/chat/completions`;
             const headers: Record<string, string> = {
                 'Content-Type': 'application/json'
             };
@@ -966,7 +995,7 @@ export class AIUtils {
                 }, requestBody, 'lmstudio');
 
                 if (!response.ok) {
-                    throw httpError(`LM Studio API错误: ${response.status} ${response.statusText}`, response);
+                    throw httpError(`LM Studio API错误: ${response.status} ${response.statusText}（${safeEndpointForError(endpoint)}）`, response);
                 }
 
                 const data = await response.json();
@@ -3053,7 +3082,7 @@ export class AIUtils {
                         } catch { detail = text }
                     }
                 } catch { /* ignore */ }
-                throw httpError(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}`, response);
+                throw httpError(`HTTP错误! 状态码: ${response.status}${detail ? ' ' + detail : ''}（${safeEndpointForError(endpoint)}）`, response);
             }
 
             const reader = response.body?.getReader();

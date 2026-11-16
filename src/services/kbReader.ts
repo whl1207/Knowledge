@@ -52,7 +52,7 @@ export async function listKbFiles(roots: string[]): Promise<LearningKbFile[]> {
 }
 
 /** 只读加载 .kb 并整理为学习模块可用的轻量结构（剥离向量/评分等运行期大字段不在此做，直接取所需字段） */
-const KB_VERSION_ALLOWED = new Set(['2.4', '2.5', '3.0'])
+const KB_VERSION_ALLOWED = new Set(['2.4', '2.5', '3.0', '3.1', '3.2'])
 export async function readKbForLearning(kbPath: string): Promise<LearningKbLoaded | null> {
   try {
     const kb = await loadKnowledgeBase(kbPath)

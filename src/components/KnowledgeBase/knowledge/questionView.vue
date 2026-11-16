@@ -8,6 +8,7 @@ import * as kbAi from '@/shared/kbAiClient'
 import block_md from '@/components/block_md.vue'
 import { splitQuestionText, detectDuplicateGroups, answerText, choiceLabelsOf } from '@/shared/kbQuestions'
 import { cosineSimilarity } from '@/shared/kbRetrieval'
+import { hydrateBlockVectorsFromDb } from '@/lib/kbVectorDb'
 import type { KbQuestion, DupGroup, QuestionAnswerRef } from '@/shared/kbQuestions'
 
 defineOptions({ name: 'QuestionView' })
@@ -18,6 +19,8 @@ interface Props {
   model: any
   questionBank: KbQuestion[]
   blocks: any[]
+  /** 当前 .kb 路径：3.2 无内联向量时，从 .kbdb 补候选向量 */
+  kbPath?: string
   files?: any[]
   // 提取进度（父壳维护，与 .kb 保存/恢复联动）
   extractProgress?: any
@@ -359,6 +362,10 @@ const runLlmRecommend = async () => {
     // 1) 向量召回（切片可能未向量化，失败时退化为关键词打分）
     let qv: number[] | undefined
     try { const em = await kbEmbed(query); qv = em?.[0] } catch { /* 忽略向量失败 */ }
+    // 3.2：内存切片没有 A_vector，先从 .kbdb 补候选；失败则退化为关键词打分
+    if (qv?.length && props.kbPath) {
+      try { await hydrateBlockVectorsFromDb(String(props.kbPath), qv, blocks as any[], 300) } catch { /* 忽略 */ }
+    }
     const kw = query.toLowerCase()
     const tokens = kw.split(/[？?。；;，,、\s\n]+/).filter((t: string) => t.length > 1)
     const scored: { b: any; s: number }[] = []

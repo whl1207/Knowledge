@@ -19,6 +19,7 @@ import { lanAgentTransport } from '@/platform/lanAgentClient'
 import { rendererAgentTransport } from '@/platform/rendererAgent'
 import { isHostGuestRuntime } from '@/platform'
 import { aikmDsh, aikmIpcAvailable } from '@/lib/aikmIpc'
+import { estimateTokens } from '@/shared/contextBudget'
 
 /**
  * 传输层：桌面端 = `window.dsh.agent`（IPC），网页端（局域网共享）= `/api/agent/*`（HTTP + SSE）。
@@ -186,6 +187,11 @@ export interface AgentSessionView {
   serverSearch: boolean
   /** 最近一步 LLM 的真实 token 用量（promptTokens = 真实上下文占用） */
   lastUsage?: AgentStepUsage
+  /**
+   * 最近一步的推理速度（tok/s = 该步 completionTokens / 模型请求耗时）。
+   * 与「整条消息耗时」不同：不含工具执行与排队，界面上显示才与 DSH 的 xx tok/s 同口径。
+   */
+  lastSpeed?: number
   /** 估算校准系数（主进程实测的「真实/估算」比值；渲染层按来源 + 模型持久化后回传复用） */
   tokenScale?: number
   /** 本会话累计消耗 token 数（所有 step 的 totalTokens 之和） */
@@ -547,6 +553,8 @@ class AgentBridge {
         // - compaction：上一轮的压缩卡片会再次出现在新消息里（seq 保留，只把相位归零）；
         // - notice / lastError：上一轮的提示 / 错误不应在成功后再次弹出。
         view.lastUsage = undefined
+        // 推理速度同理：新 turn 还没跑第一步，不能沿用上一轮的速度读数
+        view.lastSpeed = undefined
         view.turnUsageTotal = 0
         view.turnPromptTotal = 0
         view.turnCachedTotal = 0
@@ -585,6 +593,19 @@ class AgentBridge {
           }
         }
         if (typeof ev.payload.tokenScale === 'number') view.tokenScale = ev.payload.tokenScale
+        // 推理速度：只按本步模型请求耗时算（genMs 由 agent loop 计时，不含工具执行）
+        const genMs = Number(ev.payload.genMs) || 0
+        if (genMs > 0) {
+          const completion = Number(u?.completionTokens) || 0
+          if (completion > 0) {
+            view.lastSpeed = completion / (genMs / 1000)
+          } else if (s) {
+            // 本地后端（vLLM / llama.cpp 等）流式不回 usage：按本步文本估算输出 tokens，
+            // 这样「xx tok/s」仍然有读数，只是标着估算口径。
+            const est = estimateTokens((s.stream || '') + (s.reasoning || ''))
+            if (est > 0) view.lastSpeed = est / (genMs / 1000)
+          }
+        }
         break
       }
       case 'assistant/chunk': {

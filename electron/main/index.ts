@@ -76,6 +76,8 @@ import {
   dismissShellJobForUi,
 } from './tools'
 import { setAgentBroadcast } from './agent-loop'
+import { setKbVectorDbAdapter } from '@/shared/kbRetrieval'
+import { isVectorStoreAvailable, kbdbPathFor, openCachedKbVectorStore } from './kb-vector-store'
 // 插件宿主（P0）：插件工具必须在建窗口/建会话之前注册好，见 app.whenReady
 import { initPluginHost, registerPluginIpc } from './plugin-ipc'
 import { registerPluginFilesIpc } from './plugin-files'
@@ -584,6 +586,9 @@ app.whenReady().then(async () => {
     //（DSH 靠 Scoped<Agent> 做到"agent 作用域的监听器只收到那个 agent"；这里是它的显式版）
     pluginHost.forwardAgentEvent(ev)
   })
+
+  // 知识库检索的向量库适配器（.kbdb）：主进程直接读 SQLite，不经过渲染层 IPC
+  registerKbVectorAdapter()
   // 技能目录变更广播：skill-service 的 watcher 发现 added/removed/changed 后
   // 推送 skill:change，渲染进程增量刷新技能列表
   skillService.onChange((kind, names) => {
@@ -5632,8 +5637,50 @@ function extractProxyAssistantText(raw: string): string {
  *
  * 每次请求现算，因此主机改权限档位 / 换共享目录后，访客刷新即生效，无需重启服务。
  */
-function withHostRuntime(html: Buffer | string): Buffer | string {
-  const isBuf = Buffer.isBuffer(html)
+/**
+ * 注册知识库检索的 `.kbdb` 适配器（主进程直接用 SQLite store，不经渲染层 IPC）。
+ * 没有 node:sqlite 的运行时直接跳过，检索自动回退 `.kb` 内联向量。
+ */
+function registerKbVectorAdapter(): void {
+  if (!isVectorStoreAvailable()) return
+  setKbVectorDbAdapter({
+    async has(kbPath: string): Promise<boolean> {
+      try {
+        const dbPath = kbdbPathFor(kbPath)
+        if (!fs.existsSync(dbPath)) return false
+        return openCachedKbVectorStore(dbPath).stats().vectors > 0
+      } catch {
+        return false
+      }
+    },
+    async count(kbPath: string): Promise<number> {
+      try {
+        const dbPath = kbdbPathFor(kbPath)
+        if (!fs.existsSync(dbPath)) return 0
+        return openCachedKbVectorStore(dbPath).stats().vectors
+      } catch {
+        return 0
+      }
+    },
+    async query(kbPath: string, vector: number[], topK: number) {
+      return openCachedKbVectorStore(kbdbPathFor(kbPath)).query(vector, topK)
+    },
+    async vectors(kbPath: string, ids: string[]) {
+      return openCachedKbVectorStore(kbdbPathFor(kbPath)).getVectors(ids)
+    },
+    async fileVectors(kbPath: string, files: string[]) {
+      try {
+        const dbPath = kbdbPathFor(kbPath)
+        if (!fs.existsSync(dbPath)) return new Map<string, { vector: number[]; hash: string }>()
+        return openCachedKbVectorStore(dbPath).getFileVectors(files)
+      } catch {
+        return new Map<string, { vector: number[]; hash: string }>()
+      }
+    },
+  })
+}
+
+function withHostRuntime(html: Buffer | string): Buffer | string {  const isBuf = Buffer.isBuffer(html)
   const text = isBuf ? html.toString('utf8') : String(html)
   const guestPolicy = getLanGuestPolicy()
   const cap = lanFsCapability(lanKbDir, guestPolicy?.guestFs === 'write')

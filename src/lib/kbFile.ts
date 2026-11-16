@@ -53,7 +53,19 @@ export function mdPathOf(filePath: string): string {
 /** 知识库侧车文件（.kb 本体 / .learning 学习记录）：不应作为普通可切片文档进入文件视图 */
 export function isKbSidecarFile(path?: string | null): boolean {
     const p = (path || '').toLowerCase()
-    return p.endsWith('.kb') || p.endsWith('.learning') || p.endsWith('.learning.json')
+    // 与 .kb 同目录的附属文件都不算普通文档：
+    // - .learning / .learning.json：学习记录与索引
+    // - .testdata.json：测试结果侧车（3.1 起从 .kb 里分出来）
+    // - .exams.json：试卷库侧车（与知识库一起保存，但不是知识文档）
+    // - .kbdb / -wal / -shm：向量库
+    return p.endsWith('.kb')
+        || p.endsWith('.learning')
+        || p.endsWith('.learning.json')
+        || p.endsWith('.testdata.json')
+        || p.endsWith('.exams.json')
+        || p.endsWith('.kbdb')
+        || p.endsWith('.kbdb-wal')
+        || p.endsWith('.kbdb-shm')
 }
 
 /** PDF/Word/图片 是否已规范化：给定文件列表中已存在同名 .md 文档 */
