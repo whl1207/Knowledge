@@ -1485,3 +1485,19 @@ pre.hljs .hljs-formula { font-style: italic; }
   white-space: nowrap;
   text-align: left;
 }
+
+/* ===== Markdown 渲染（md_read / md_ppt / md_mind / block_md / agent 回答）代码块自动换行 =====
+   之前 pre.hljs 固定 overflow-x:auto + code white-space:pre，长行只能横向滚动；
+   阅读场景改为按宽度折行（保留缩进与空行，不改变复制内容）。 */
+pre.hljs,
+pre.hljs code,
+.agent-question-markdown pre code,
+.learn-md pre code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+pre.hljs {
+  overflow-x: hidden;
+  max-width: 100%;
+}

@@ -2014,7 +2014,9 @@ const examSummary = computed(() => {
 .exam-answer-area { flex: 1; overflow: auto; padding: 5px; min-height: 0; }
 .exam-empty { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--borderColor); }
 .exam-empty-icon { font-size: 32px; display: block; margin-bottom: 8px; }
-.exam-q-card { border: 1px solid var(--borderColor); border-radius: 5px; padding: 5px; margin-bottom: 5px; background: var(--backgroundColor); }
+/* 答题卡：不再每张题卡套边框，改用细分隔线，减少边框噪音 */
+.exam-q-card { border: 0; border-bottom: 1px solid color-mix(in srgb, var(--borderColor) 45%, transparent); border-radius: 0; padding: 8px 4px; margin-bottom: 0; background: transparent; }
+.exam-q-card:last-child { border-bottom: 0; }
 .exam-q-index { font-weight: bold; font-size: 12px; }
 .exam-q-src { font-size: 10px; color: var(--borderColor); }
 .exam-q-prompt { font-size: 13px; margin-top: 4px; word-break: break-word; }
@@ -2034,23 +2036,24 @@ const examSummary = computed(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 8px;
-  margin: 3px 6px 3px 0;
+  padding: 5px 8px;
+  margin: 2px 6px 2px 0;
   border-radius: 4px;
-  border: 1px solid var(--borderColor);
+  border: 0;
   cursor: pointer;
   font-size: 12px;
-  background: var(--backgroundColor);
+  background: transparent;
   user-select: none;
+  transition: background-color .12s;
 }
-.exam-option:hover { border-color: var(--fontActiveColor); }
+.exam-option:hover { background: var(--menuColor); }
 /* 判分后配色通道分离：
    - 蓝色 = 你已选（.selected 最后声明，保证不被绿色/红色吞掉，始终可见）
    - 绿色 ✓ = 正确答案（含你漏选的项）
    - 红色 ✗ = 你多选/选错 */
-.exam-option.correct { border-color: #4CAF50; background: rgba(76, 175, 80, .10); }
-.exam-option.wrong { border-color: #f44336; background: rgba(244, 67, 54, .08); }
-.exam-option.selected { border-color: #2196F3; background: rgba(33, 150, 243, .10); }
+.exam-option.correct { background: rgba(76, 175, 80, .10); box-shadow: inset 2px 0 0 #4CAF50; }
+.exam-option.wrong { background: rgba(244, 67, 54, .10); box-shadow: inset 2px 0 0 #f44336; }
+.exam-option.selected { background: color-mix(in srgb, var(--fontActiveColor) 12%, transparent); box-shadow: inset 2px 0 0 var(--fontActiveColor); }
 /* 选项框：单选圆形 / 多选方形，字母序号在框内，答案文本在框外 */
 .exam-opt-box {
   flex-shrink: 0;
@@ -2072,15 +2075,15 @@ const examSummary = computed(() => {
 .exam-option.wrong .exam-opt-box { border-color: #f44336; background: rgba(244, 67, 54, .15); }
 .exam-option.wrong .exam-opt-letter { color: #f44336; }
 /* 你已选：蓝色框 + 蓝色字母（最后声明，叠加对错时仍显示选中态） */
-.exam-option.selected .exam-opt-box { border-color: #2196F3; background: rgba(33, 150, 243, .15); }
-.exam-option.selected .exam-opt-letter { color: #2196F3; }
+.exam-option.selected .exam-opt-box { border-color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 15%, transparent); }
+.exam-option.selected .exam-opt-letter { color: var(--fontActiveColor); }
 /* 判分状态图标：✓ 正确 / ✗ 选错，独立于选中态显示 */
 .exam-opt-flag { margin-left: 4px; font-size: 12px; flex-shrink: 0; }
 .exam-opt-flag.ok { color: #4CAF50; }
 .exam-opt-flag.miss { color: #4CAF50; opacity: .8; }
 .exam-opt-flag.bad { color: #f44336; }
 .exam-src-toggle { font-size: 10px; color: var(--borderColor); cursor: pointer; }
-.exam-src-box { border: 1px solid var(--borderColor); border-radius: 4px; padding: 6px; margin-top: 4px; background: var(--menuColor); }
+.exam-src-box { border: 0; border-radius: 4px; padding: 6px; margin-top: 4px; background: var(--menuColor); }
 .exam-result-box { margin-top: 6px; border-top: 1px dashed var(--borderColor); padding-top: 6px; }
 .exam-result-comment { font-size: 12px; margin-top: 3px; color: var(--fontColor); }
 .exam-result-ref { font-size: 12px; margin-top: 3px; color: #2196F3; }

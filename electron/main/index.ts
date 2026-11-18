@@ -1121,6 +1121,15 @@ function openSettingsWindowFromTray(nav = 'view'): void {
   createSettingsWindow(nav, anchor)
 }
 
+ipcMain.handle('close-settings-window', () => {
+  try {
+    if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close()
+    return { ok: true }
+  } catch (error: any) {
+    return { ok: false, error: String(error?.message || error) }
+  }
+})
+
 ipcMain.handle('open-settings-window', (event, payload?: { nav?: string }) => {
   try {
     const nav = typeof payload?.nav === 'string' ? payload.nav : ''

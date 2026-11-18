@@ -63,10 +63,16 @@
       >
         <template #item="{ element }">
           <div class="chat-row-wrap">
-            <div v-if="element.head" class="chat-group-head" :title="element.head.workspace || (store.locales == 'zh' ? '未选择工作区' : 'No workspace')">
-              <i class="fa fa-folder-open-o"></i>
+            <div
+              v-if="element.head"
+              class="chat-group-head"
+              :class="{ collapsed: element.collapsed }"
+              :title="(element.head.workspace || (store.locales == 'zh' ? '未选择工作区' : 'No workspace')) + (store.locales == 'zh' ? ' · 点击折叠/展开 · 右键更多' : ' · click to collapse/expand · right-click for more')"
+              @click="toggleWorkspaceCollapsed(element.head.workspace)"
+              @contextmenu.prevent.stop="onChatNavContextMenu($event, null, element.head.workspace)"
+            >
+              <i class="fa" :class="element.collapsed ? 'fa-folder-o' : 'fa-folder-open-o'"></i>
               <span class="chat-group-name">{{ element.head.label }}</span>
-              <span class="chat-group-count">{{ element.head.count }}</span>
               <!-- 在该工作区下新建对话：分组头右侧的 +（消息数量后面） -->
               <span
                 class="chat-group-add"
@@ -80,7 +86,7 @@
             </div>
             <div
               class="chat-item"
-              v-show="isChatMatched(element.chat)"
+              v-show="isChatMatched(element.chat) && !element.collapsed"
               :class="{ 
                 active: activeRootIndex === element.originalIndex,
                 generating: isChatRunning(element.chat),
@@ -874,6 +880,11 @@
             :style="{ left: chatNavMenuPos.x + 'px', top: chatNavMenuPos.y + 'px' }"
             @mouseleave="onChatNavMenuMouseLeave"
           >
+            <!-- 右键工作区分组时：直接复用这个菜单，顶部多一项「在文件夹中显示」 -->
+            <div v-if="wsMenuWorkspace" class="menu-item chat-nav-ws-item" @click="revealWorkspaceInFolder">
+              <i class="fa fa-folder-open-o"></i>
+              <span class="menu-label">{{ store.locales == 'zh' ? '在文件夹中显示' : 'Show in folder' }}</span>
+            </div>
             <!-- 一级项 → 二级子菜单：排列方式 / 排序 / 显示 / 该聊天的操作。
                  一级项右侧显示当前值，悬停或点击展开子菜单，避免所有选项挤在一屏。 -->
             <div class="chat-nav-item" @mouseleave="chatNavSubmenu = null">
@@ -2671,6 +2682,29 @@ watch(chatOrderMode, (v) => {
   try { localStorage.setItem(CHAT_ORDER_KEY, v) } catch { /* 隐私模式等忽略 */ }
 })
 
+// ==================== 工作区分组折叠 ====================
+/** 已折叠的工作区分组（按工作区绝对路径记录，跨重启保留） */
+const CHAT_WS_COLLAPSED_KEY = 'ai-chats-ws-collapsed'
+function readCollapsedWorkspaces(): Set<string> {
+  try {
+    const raw = localStorage.getItem(CHAT_WS_COLLAPSED_KEY)
+    const arr = raw ? JSON.parse(raw) : []
+    return new Set(Array.isArray(arr) ? arr.map((x: any) => String(x)) : [])
+  } catch { return new Set() }
+}
+const collapsedWorkspaces = ref<Set<string>>(readCollapsedWorkspaces())
+watch(collapsedWorkspaces, (v) => {
+  try { localStorage.setItem(CHAT_WS_COLLAPSED_KEY, JSON.stringify([...v])) } catch { /* 忽略 */ }
+}, { deep: true })
+/** 点击分组头：折叠/展开该工作区下的会话 */
+const toggleWorkspaceCollapsed = (workspace?: string) => {
+  if (!workspace) return
+  const next = new Set(collapsedWorkspaces.value)
+  if (next.has(workspace)) next.delete(workspace)
+  else next.add(workspace)
+  collapsedWorkspaces.value = next
+}
+
 /**
  * 排序方式（全局偏好，默认「最后生成时间」）：
  * - last：最后生成时间倒序（最近有消息的排前面）；
@@ -2707,6 +2741,25 @@ const hideChatNavMenu = () => {
   chatNavMenuVisible.value = false
   chatNavMenuChatIndex.value = null
   chatNavSubmenu.value = null
+  wsMenuWorkspace.value = ''
+}
+
+// ==================== 工作区分组右键（复用聊天列表右键菜单） ====================
+/** 当前右键的工作区（为空 = 普通聊天列表右键，不显示「在文件夹中显示」） */
+const wsMenuWorkspace = ref('')
+/** 在系统文件管理器中定位工作区文件夹 */
+const revealWorkspaceInFolder = async () => {
+  const dir = wsMenuWorkspace.value
+  hideChatNavMenu()
+  if (!dir) return
+  try {
+    const ok = await getPlatform().shell.revealInFolder(dir)
+    if (ok) return
+    const res = await getPlatform().shell.openWithSystemApp(dir)
+    if (!res?.success) ElMessage.warning(store.locales == 'zh' ? `打开文件夹失败：${res?.error || dir}` : `Failed to open folder: ${res?.error || dir}`)
+  } catch (e: any) {
+    ElMessage.warning((store.locales == 'zh' ? '打开文件夹失败：' : 'Failed to open folder: ') + (e?.message || e))
+  }
 }
 /** 菜单打开时刻：吸附定位后菜单会「跳」一下，跳变瞬间产生的 mouseleave 不能当成用户移开 */
 let chatNavMenuOpenedAt = 0
@@ -2779,7 +2832,9 @@ interface ChatListEntry {
   chat: Chat
   originalIndex: number
   /** 分组头信息（仅分组模式、且仅每组第一条有） */
-  head?: { workspace: string; label: string; count: number }
+  head?: { workspace: string; label: string }
+  /** 该工作区分组是否已折叠（分组头可见、会话隐藏） */
+  collapsed?: boolean
 }
 
 const chatListEntries = computed<ChatListEntry[]>({
@@ -2811,11 +2866,13 @@ const chatListEntries = computed<ChatListEntry[]>({
     )
     const out: ChatListEntry[] = []
     for (const g of groups) {
+      const isCollapsed = !!g.workspace && collapsedWorkspaces.value.has(g.workspace)
       g.items.forEach((it, i) => {
         out.push({
           ...asEntry(it),
           // 无工作区分组不显示标题：直接把这些聊天排在列表最上面
-          head: i === 0 && g.workspace ? { workspace: g.workspace, label: g.label, count: g.items.length } : undefined,
+          head: i === 0 && g.workspace ? { workspace: g.workspace, label: g.label } : undefined,
+          collapsed: isCollapsed,
         })
       })
     }
@@ -3042,7 +3099,7 @@ const hideContextMenu = () => {
  * 聊天列表（消息导航栏）右键：工具栏、列表空白处、聊天行都能打开「消息排列 + 排序」菜单。
  * 在聊天行上右键时传入该行索引，菜单底部会多一项「删除聊天」；输入框保留系统粘贴菜单。
  */
-const onChatNavContextMenu = (e: MouseEvent, chatIndex: number | null = null) => {
+const onChatNavContextMenu = (e: MouseEvent, chatIndex: number | null = null, workspace = '') => {
   const target = e.target as HTMLElement | null
   if (!target) return
   if (chatIndex === null && target.closest('input, textarea, [contenteditable="true"]')) return
@@ -3050,6 +3107,8 @@ const onChatNavContextMenu = (e: MouseEvent, chatIndex: number | null = null) =>
   hideContextMenu()
   branchContextMenuVisible.value = false
   chatNavMenuChatIndex.value = chatIndex
+  // 只有右键分组头时才显示「在文件夹中显示」；右键聊天行/空白处不显示
+  wsMenuWorkspace.value = chatIndex === null ? String(workspace || '') : ''
   chatNavSubmenu.value = null
   // 子菜单默认向右展开；右键位置靠近窗口右边（放不下 210px 子菜单）时改为向左
   chatNavSubmenuFlip.value = e.clientX > Math.max(8, window.innerWidth - 460)
@@ -12691,17 +12750,22 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 6px 2px;
-  margin-bottom: 2px;
+  box-sizing: border-box;
+  /* 与会话行同高（.chat-item 的 min-height 30px + padding 4px 6px + margin 4px） */
+  min-height: 30px;
+  padding: 4px 6px;
+  margin-bottom: 4px;
   font-size: 11px;
   color: var(--fontColor);
   opacity: 0.72;
   user-select: none;
-  cursor: default;
+  cursor: pointer;
+  border-radius: 4px;
 }
+.chat-group-head:hover { opacity: 1; background: var(--menuColor); }
+.chat-group-head.collapsed { opacity: 0.85; }
 .chat-group-head > i { font-size: 11px; color: #f0b429; flex-shrink: 0; }
 .chat-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-group-count { font-size: 10px; opacity: 0.7; flex-shrink: 0; }
 /* 分组头右侧的新建按钮：与条数同一行，悬停高亮；点击只在本工作区下开新对话 */
 .chat-group-add {
   flex-shrink: 0;
@@ -16586,6 +16650,12 @@ select {
    不再让所有选项挤在同一层）。 */
 .chat-nav-menu .chat-nav-item {
   position: relative;
+}
+/* 右键工作区分组时置顶的「在文件夹中显示」：与下面的排列/排序项分开一层 */
+.chat-nav-menu .chat-nav-ws-item {
+  border-bottom: 1px solid var(--borderColor);
+  margin-bottom: 3px;
+  padding-bottom: 5px;
 }
 .chat-nav-menu .chat-nav-current {
   margin-left: auto;

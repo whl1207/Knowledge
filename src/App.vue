@@ -1512,8 +1512,6 @@ if (store.singleWindowMode && store.settingsOpen) closeSetPanel()    // 切换�
        保证「点插件 → 以子窗口形态打开」在这些平台上也有可见反馈（独立窗口调用是空操作）。 -->
   <div v-if="store.pluginPanelOverlay" class="plugin-panel-overlay" :class="{ 'single-window': store.singleWindowMode }" @click="store.closePluginPanelOverlay()">
     <div class="plugin-panel-dialog" @click.stop>
-      <div class="plugin-panel-dialog-close" @click="store.closePluginPanelOverlay()"
-           :title="store.locales === 'en' ? 'Close' : '关闭'"><i class="fa fa-times"></i></div>
       <PluginPanelWindow :plugin-key="store.pluginPanelOverlay.key" overlay />
     </div>
   </div>

@@ -389,6 +389,24 @@ function fmtDbTime(s?: string): string {
 const kbFiles = ref<KbSideFile[]>([])
 const kbFilesLoading = ref(false)
 
+// 详情页按文件卡片组织：.kb / .kbdb 单独大卡，其余附属文件进两列小卡
+const kbMainFile = computed(() => kbFiles.value.find((f) => f.role === 'kb'))
+const kbDbFile = computed(() => kbFiles.value.find((f) => f.role === 'kbdb'))
+const kbRuntimeFiles = computed(() => kbFiles.value.filter((f) => f.role === 'kbdb-runtime'))
+const kbSideFiles = computed(() => kbFiles.value.filter((f) => !['kb', 'kbdb', 'kbdb-runtime'].includes(f.role)))
+
+/** 时间戳（毫秒）→ 本地可读时间 */
+function fmtMsTime(ms?: number): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+}
+
+/** 导航/标题里显示知识库名：去掉 .kb 后缀（文件卡片里仍显示完整文件名） */
+function displayKbName(label?: string): string {
+  return String(label || '').replace(/\.kb$/i, '')
+}
+
 const KB_SIDE_FILE_ROLES: Array<{ test: (name: string, stem: string) => boolean; role: KbSideFile['role']; zh: string; en: string; icon: string }> = [
   { test: (n, s) => n.toLowerCase() === `${s}.kb`.toLowerCase(), role: 'kb', zh: '知识库', en: 'Knowledge base', icon: 'fa-database' },
   { test: (n, s) => n.toLowerCase() === `${s}.kbdb`.toLowerCase(), role: 'kbdb', zh: '向量库', en: 'Vector DB', icon: 'fa-cubes' },
@@ -1292,7 +1310,7 @@ const handleStrategiesChanged = () => {
                     >
                       <div class="kb-nav-icon"><i class="fa" :class="kb.path === selectedKbPath ? 'fa-database' : 'fa-folder-o'"></i></div>
                       <div class="kb-nav-main">
-                        <div class="kb-nav-name">{{ kb.label }}</div>
+                        <div class="kb-nav-name">{{ displayKbName(kb.label) }}</div>
                         <div class="kb-nav-sub">
                           <span v-if="kb.config?.version" class="kb-ver-badge">v{{ kb.config.version }}</span>
                           <span>{{ getSaveTimeText(kb.config?.timestamp) }}</span>
@@ -1316,34 +1334,42 @@ const handleStrategiesChanged = () => {
                   <div class="kb-detail-head">
                     <div class="kb-detail-title">
                       <i class="fa fa-database"></i>
-                      <span :title="selectedKb.label">{{ selectedKb.label }}</span>
+                      <span :title="selectedKb.label">{{ displayKbName(selectedKb.label) }}</span>
                       <span v-if="selectedKb.config?.version" class="kb-ver-badge">v{{ selectedKb.config.version }}</span>
                     </div>
                     <div class="kb-detail-actions">
-                      <button class="button icon-btn" :disabled="renamingKb" :title="t('重命名知识库（同步改文件夹与所有同名文件）', 'Rename the KB (folder and all same-named files)')" @click="renameSelectedKb">
-                        <i class="fa" :class="renamingKb ? 'fa-spinner fa-spin' : 'fa-i-cursor'"></i>
-                      </button>
-                      <button class="button icon-btn" :title="t('打开知识库所在文件夹', 'Open the containing folder')" @click="openKbFolder">
-                        <i class="fa fa-folder-open-o"></i>
-                      </button>
-                      <button class="button icon-btn" :title="t('加载此知识库', 'Load this knowledge base')" @click="loadSelectedKb">
-                        <i class="fa fa-play"></i>
-                      </button>
-                      <button class="button icon-btn danger" :title="t('删除此知识库', 'Delete this knowledge base')" @click="deleteSelectedKb">
-                        <i class="fa fa-trash"></i>
-                      </button>
+                      <span v-if="selectedKb.metadata?.hasEmbeddings" class="kb-status-tag c-green"><i class="fa fa-check-circle"></i> {{ t('已向量化', 'Embedded') }}</span>
+                      <span v-if="selectedKb.config?.vectorStore" class="kb-status-tag c-teal"><i class="fa fa-cubes"></i> {{ t('向量库', 'Vector DB') }}</span>
+                      <span v-else-if="selectedKb.config?.saveVectors === false" class="kb-status-tag c-orange"><i class="fa fa-file-archive-o"></i> {{ t('精简（向量按需）', 'Slim') }}</span>
+                      <span v-if="selectedKb.metadata?.hasQuestions" class="kb-status-tag c-blue"><i class="fa fa-question-circle"></i> {{ t('有问题', 'Questions') }}</span>
                     </div>
                   </div>
 
-                  <!-- 说明：可编辑，保存在 .kb 的 description 字段 -->
-                  <div class="kb-detail-section">
-                    <div class="kb-detail-section-title">
+                  <!-- 详情工具栏：加载 / 重命名 / 打开文件夹 / 删除（不塞进卡片） -->
+                  <div class="kb-detail-toolbar">
+                    <button class="button kb-vec-btn" @click="loadSelectedKb">
+                      <i class="fa fa-play"></i>{{ t('加载', 'Load') }}
+                    </button>
+                    <button class="button kb-vec-btn" :disabled="renamingKb" @click="renameSelectedKb">
+                      <i class="fa" :class="renamingKb ? 'fa-spinner fa-spin' : 'fa-i-cursor'"></i>{{ t('重命名', 'Rename') }}
+                    </button>
+                    <button class="button kb-vec-btn" @click="openKbFolder">
+                      <i class="fa fa-folder-open-o"></i>{{ t('打开文件夹', 'Open folder') }}
+                    </button>
+                    <button class="button kb-vec-btn danger" @click="deleteSelectedKb">
+                      <i class="fa fa-trash"></i>{{ t('删除', 'Delete') }}
+                    </button>
+                  </div>
+
+                  <!-- 说明：放在工具栏下方、文件卡片上方 -->
+                  <div class="kb-desc-panel">
+                    <div class="kb-card-desc-head">
                       <span>{{ t('说明', 'Description') }}</span>
                       <span v-if="!editingDescription" class="kb-detail-link" @click="startEditDescription">
                         <i class="fa fa-pencil"></i>{{ selectedKb.description ? t('编辑', 'Edit') : t('添加', 'Add') }}
                       </span>
                     </div>
-                    <div v-if="!editingDescription" class="kb-detail-desc" :class="{ empty: !selectedKb.description }">
+                    <div v-if="!editingDescription" class="kb-card-desc-text" :class="{ empty: !selectedKb.description }">
                       {{ selectedKb.description || t('还没有说明：点「添加」写一句这份知识库的用途 / 适用范围，会保存在 .kb 里', 'No description yet: click Add to note what this KB is for; it is stored in the .kb') }}
                     </div>
                     <div v-else class="kb-detail-desc-edit">
@@ -1363,107 +1389,66 @@ const handleStrategiesChanged = () => {
                     </div>
                   </div>
 
-                  <!-- 概况 -->
-                  <div class="kb-detail-section">
-                    <div class="kb-detail-section-title"><span>{{ t('概况', 'Overview') }}</span></div>
-                    <div class="kb-detail-grid">
-                      <div class="kb-detail-kv"><span class="k">{{ t('切片', 'Blocks') }}</span><span class="v">{{ selectedKb.metadata?.blockCount || selectedKb.config?.blockCount || 0 }}</span></div>
-                      <div class="kb-detail-kv"><span class="k">{{ t('文件', 'Files') }}</span><span class="v">{{ selectedKb.metadata?.fileCount ?? '?' }}</span></div>
-                      <div class="kb-detail-kv"><span class="k">{{ t('问题', 'Questions') }}</span><span class="v">{{ selectedKb.metadata?.questionCount ?? '?' }}</span></div>
-                      <div class="kb-detail-kv"><span class="k">{{ t('实体 / 关系', 'Entities / Relations') }}</span><span class="v">{{ selectedKb.ontology?.entities || 0 }} / {{ selectedKb.ontology?.relations || 0 }}</span></div>
-                      <div class="kb-detail-kv"><span class="k">{{ t('社区 / 报告', 'Communities / Reports') }}</span><span class="v">{{ selectedKb.ontology?.communityCount || 0 }} / {{ selectedKb.ontology?.communityReportCount || 0 }}</span></div>
-                      <div class="kb-detail-kv"><span class="k">{{ t('向量维度', 'Vector dim') }}</span><span class="v">{{ selectedKb.metadata?.avgVectorDimension || '—' }}</span></div>
+                  <!-- .kb 主卡：版本/统计/模型（说明已上移到工具栏下方） -->
+                  <div class="kb-card kb-card-main">
+                    <div class="kb-card-head">
+                      <i class="fa fa-database kb-card-icon"></i>
+                      <span class="kb-card-name" :title="selectedKb.label">{{ selectedKb.label }}</span>
+                      <span class="kb-card-role">{{ t('知识库', 'Knowledge base') }}</span>
+                      <span class="kb-card-size">{{ kbMainFile ? formatVectorBytes(kbMainFile.size) : '' }}</span>
                     </div>
+                    <div class="kb-card-stats">
+                      <span>{{ t('切片', 'Blocks') }} <b>{{ selectedKb.metadata?.blockCount || selectedKb.config?.blockCount || 0 }}</b></span>
+                      <span>{{ t('文件', 'Files') }} <b>{{ selectedKb.metadata?.fileCount ?? '?' }}</b></span>
+                      <span>{{ t('问题', 'Questions') }} <b>{{ selectedKb.metadata?.questionCount ?? '?' }}</b></span>
+                      <span>{{ t('实体/关系', 'Entities/Relations') }} <b>{{ selectedKb.ontology?.entities || 0 }} / {{ selectedKb.ontology?.relations || 0 }}</b></span>
+                      <span>{{ t('社区/报告', 'Communities/Reports') }} <b>{{ selectedKb.ontology?.communityCount || 0 }} / {{ selectedKb.ontology?.communityReportCount || 0 }}</b></span>
+                    </div>
+                    <div class="kb-card-meta">
+                      <span><i class="fa fa-cube"></i>{{ t('嵌入模型', 'Embed model') }} <b>{{ selectedKb.config?.embedModel || '—' }}</b></span>
+                      <span><i class="fa fa-clock-o"></i>{{ t('保存', 'Saved') }} <b>{{ getSaveTimeText(selectedKb.config?.timestamp) }}</b></span>
+                      <span><i class="fa fa-database"></i>{{ t('向量', 'Vectors') }} <b>{{ selectedKb.config?.vectorStore ? t('存于 .kbdb', 'In .kbdb') : (selectedKb.config?.saveVectors === false ? t('按需推导', 'On-demand') : t('内联 .kb', 'Inline')) }}</b></span>
+                    </div>
+                    <div class="kb-card-path" :title="selectedKb.path + ' — ' + t('点击打开所在文件夹', 'click to open the containing folder')" @click="openKbFolder">{{ selectedKb.path }}</div>
                   </div>
 
-                  <!-- 存储 -->
-                  <div class="kb-detail-section">
-                    <div class="kb-detail-section-title"><span>{{ t('存储', 'Storage') }}</span></div>
-                    <div class="kb-detail-row"><span class="k">{{ t('嵌入模型', 'Embed model') }}</span><span class="v">{{ selectedKb.config?.embedModel || '—' }}</span></div>
-                    <div class="kb-detail-row"><span class="k">{{ t('保存时间', 'Saved at') }}</span><span class="v">{{ getSaveTimeText(selectedKb.config?.timestamp) }}</span></div>
-                    <div class="kb-detail-row"><span class="k">{{ t('向量', 'Vectors') }}</span><span class="v">{{ selectedKb.config?.vectorStore ? t('存于 .kbdb（.kb 不内联）', 'In .kbdb (.kb slim)') : (selectedKb.config?.saveVectors === false ? t('精简（首次问答按需推导）', 'Slim (on-demand)') : t('已写入 .kb', 'Stored in .kb')) }}</span></div>
-                    <div class="kb-detail-row">
-                      <span class="k">{{ t('测试结果', 'Test results') }}</span>
-                      <span class="v">
-                        <template v-if="selectedKb.config?.testDataFile">
-                          <i class="fa fa-file-text-o"></i> {{ selectedKb.config.testDataFile }}
-                          <span class="kb-detail-hint">{{ t('（单独文件，与 .kb 同目录）', '(separate file next to the .kb)') }}</span>
-                        </template>
-                        <template v-else>{{ t('未保存', 'Not saved') }}</template>
-                      </span>
+                  <!-- .kbdb 向量库卡：状态/统计/模型/时间/操作都在这里 -->
+                  <div v-if="vectorDbAvailable === false" class="kb-card kb-card-db">
+                    <div class="kb-card-head">
+                      <i class="fa fa-cubes kb-card-icon"></i>
+                      <span class="kb-card-name">{{ kbDbFile?.name || '*.kbdb' }}</span>
+                      <span class="kb-card-role">{{ t('向量库', 'Vector DB') }}</span>
                     </div>
-                    <div class="kb-detail-row">
-                      <span class="k">{{ t('路径', 'Path') }}</span>
-                      <span class="v kb-detail-path" :title="selectedKb.path + ' — ' + t('点击打开所在文件夹', 'click to open the containing folder')" @click="openKbFolder">{{ selectedKb.path }}</span>
-                    </div>
-                  </div>
-
-                  <!-- 相关文件：一个文件一张卡片（含 .learning / 试卷库 / 测试结果 / 向量库） -->
-                  <div class="kb-detail-section">
-                    <div class="kb-detail-section-title">
-                      <span>{{ t('文件', 'Files') }}</span>
-                      <span v-if="kbFilesLoading" class="kb-detail-hint">{{ t('读取中…', 'loading…') }}</span>
-                      <span v-else class="kb-detail-hint">{{ kbFiles.length }} {{ t('个', 'files') }}</span>
-                    </div>
-                    <div v-if="kbFiles.length" class="kb-file-grid">
-                      <div
-                        v-for="f in kbFiles"
-                        :key="f.path"
-                        class="kb-file-card"
-                        :title="f.path + '\n' + t('点击在文件管理器中定位', 'Click to reveal in the file manager')"
-                        @click="revealKbFile(f)"
-                      >
-                        <i class="fa kb-file-icon" :class="f.icon"></i>
-                        <div class="kb-file-main">
-                          <div class="kb-file-name" :title="f.name">{{ f.name }}</div>
-                          <div class="kb-file-meta">
-                            <span class="kb-file-role">{{ t(f.roleLabel, f.roleEn) }}</span>
-                            <span class="kb-file-size">{{ formatVectorBytes(f.size) }}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    <div v-else-if="!kbFilesLoading" class="kb-vec-note">{{ t('还没有相关文件', 'No related files yet') }}</div>
-                  </div>
-
-                  <!-- 向量库（.kbdb）：状态 + 写入/重建 / 导出便携包 / 删除 -->
-                  <div class="kb-detail-section">
-                    <div class="kb-detail-section-title">
-                      <span>{{ t('向量库（.kbdb）', 'Vector DB (.kbdb)') }}</span>
-                      <span v-if="vectorDbLoading" class="kb-detail-hint">{{ t('读取中…', 'loading…') }}</span>
-                    </div>
-                    <div v-if="vectorDbAvailable === false" class="kb-vec-note">
+                    <div class="kb-vec-note">
                       <div class="kb-vec-note-text">{{ vectorDbUnavailableText }}</div>
                       <button class="button kb-vec-btn" @click="retryVectorDbProbe">
                         <i class="fa fa-refresh"></i>{{ t('重试检测', 'Retry') }}
                       </button>
                     </div>
-                    <template v-else>
-                      <div class="kb-detail-row">
-                        <span class="k">{{ t('状态', 'Status') }}</span>
-                        <span class="v">
-                          <template v-if="vectorDb?.exists">
-                            <i class="fa fa-check-circle" style="color:#4CAF50"></i>
-                            {{ vectorDb.stats.vectors }} {{ t('条向量', 'vectors') }} · {{ vectorDb.stats.dim }} {{ t('维', 'dim') }} · {{ formatVectorBytes(vectorDb.stats.bytes) }}<template v-if="vectorDb.stats.quant === 'int8'"> · int8</template>
-                          </template>
-                          <template v-else>{{ t('未创建（.kb 内联向量仍可检索）', 'Not created (the .kb inline vectors still work)') }}</template>
-                        </span>
+                  </div>
+                  <div v-else class="kb-card kb-card-db" :class="{ empty: !vectorDb?.exists }">
+                    <div class="kb-card-head">
+                      <i class="fa fa-cubes kb-card-icon"></i>
+                      <span class="kb-card-name">{{ kbDbFile?.name || selectedKb.label.replace(/\.kb$/i, '') + '.kbdb' }}</span>
+                      <span class="kb-card-role">{{ t('向量库', 'Vector DB') }}</span>
+                      <span class="kb-card-size">{{ kbDbFile ? formatVectorBytes(kbDbFile.size) : '' }}</span>
+                      <span v-if="vectorDbLoading" class="kb-card-hint">{{ t('读取中…', 'loading…') }}</span>
+                    </div>
+                    <template v-if="vectorDb?.exists">
+                      <div class="kb-card-stats">
+                        <span>{{ t('向量', 'Vectors') }} <b>{{ vectorDb.stats.vectors }}</b></span>
+                        <span>{{ t('维度', 'Dim') }} <b>{{ vectorDb.stats.dim }}</b></span>
+                        <span>{{ t('精度', 'Quant') }} <b>{{ vectorDb.stats.quant || 'float32' }}</b></span>
+                        <span v-if="kbRuntimeFiles.length">{{ t('运行时文件', 'Runtime files') }} <b>{{ kbRuntimeFiles.length }}</b></span>
                       </div>
-                      <div v-if="vectorDb?.exists" class="kb-detail-row">
-                        <span class="k">{{ t('文件', 'File') }}</span>
-                        <span class="v kb-detail-path" :title="vectorDb.path">{{ vectorDb.path }}</span>
-                        <span v-if="vectorDb.portable" class="kb-detail-hint">{{ t('（便携包回退）', '(portable fallback)') }}</span>
-                      </div>
-                      <div v-if="vectorDb?.exists && (vectorDb.stats.createdAt || vectorDb.stats.updatedAt)" class="kb-detail-row">
-                        <span class="k">{{ t('创建 / 更新', 'Created / Updated') }}</span>
-                        <span class="v">{{ fmtDbTime(vectorDb.stats.createdAt) || '—' }} / {{ fmtDbTime(vectorDb.stats.updatedAt) || '—' }}</span>
-                      </div>
-                      <div v-if="vectorDb?.exists" class="kb-detail-row">
-                        <span class="k">{{ t('精度 / 模型', 'Quant / Model') }}</span>
-                        <span class="v">{{ vectorDb.stats.quant || 'float32' }} · {{ vectorDb.stats.model || '—' }}</span>
+                      <div class="kb-card-meta">
+                        <span><i class="fa fa-cube"></i>{{ t('模型', 'Model') }} <b>{{ vectorDb.stats.model || '—' }}</b></span>
+                        <span><i class="fa fa-clock-o"></i>{{ t('创建', 'Created') }} <b>{{ fmtDbTime(vectorDb.stats.createdAt) || '—' }}</b></span>
+                        <span><i class="fa fa-clock-o"></i>{{ t('更新', 'Updated') }} <b>{{ fmtDbTime(vectorDb.stats.updatedAt) || '—' }}</b></span>
+                        <span v-if="vectorDb.portable" class="kb-card-hint">{{ t('（便携包回退）', '(portable fallback)') }}</span>
                       </div>
                       <div
-                        v-if="vectorDb?.exists && vectorDb.stats.model && selectedKb.config?.embedModel && vectorDb.stats.model !== selectedKb.config.embedModel"
+                        v-if="vectorDb.stats.model && selectedKb.config?.embedModel && vectorDb.stats.model !== selectedKb.config.embedModel"
                         class="kb-vec-warn"
                       >
                         <i class="fa fa-exclamation-triangle"></i>
@@ -1471,11 +1456,11 @@ const handleStrategiesChanged = () => {
                         {{ vectorDb.stats.model }} ≠ {{ selectedKb.config.embedModel }}，
                         {{ t('检索结果会变差，建议「重建向量库」', 'retrieval quality will degrade; rebuild the vector DB') }}
                       </div>
-                      <div class="kb-vec-actions">
+                      <div class="kb-card-actions">
                         <button class="button kb-vec-btn" :disabled="vectorDbBusy" @click="migrateVectors"
                           :title="t('把 .kb 里已有的向量批量写入 .kbdb（内容未变的块会跳过）', 'Copy the .kb inline vectors into .kbdb (unchanged chunks are skipped)')">
                           <i class="fa" :class="vectorDbBusy && vectorDbProgress ? 'fa-spinner fa-spin' : 'fa-database'"></i>
-                          {{ vectorDb?.exists ? t('更新向量库', 'Update vectors') : t('写入向量库', 'Write vectors') }}
+                          {{ t('更新向量库', 'Update vectors') }}
                         </button>
                         <button class="button kb-vec-btn" :disabled="vectorDbBusy" @click="rebuildVectors"
                           :title="t('重新向量化全部切片并重建 .kbdb（换过嵌入模型/库损坏时用）', 'Re-embed all slices and rebuild .kbdb (use after changing the embed model or if the DB is damaged)')">
@@ -1494,19 +1479,44 @@ const handleStrategiesChanged = () => {
                         <i class="fa fa-spinner fa-spin"></i> {{ vectorDbProgress }}
                       </div>
                     </template>
+                    <template v-else>
+                      <div class="kb-card-meta">
+                        <span>{{ t('未创建（.kb 内联向量仍可检索）', 'Not created (the .kb inline vectors still work)') }}</span>
+                      </div>
+                      <div class="kb-card-actions">
+                        <button class="button kb-vec-btn" :disabled="vectorDbBusy" @click="migrateVectors">
+                          <i class="fa fa-database"></i>{{ t('写入向量库', 'Write vectors') }}
+                        </button>
+                        <button class="button kb-vec-btn" :disabled="vectorDbBusy" @click="rebuildVectors">
+                          <i class="fa fa-refresh"></i>{{ t('重建向量库', 'Rebuild') }}
+                        </button>
+                      </div>
+                    </template>
                   </div>
 
-                  <!-- 状态 -->
-                  <div class="kb-detail-section">
-                    <div class="kb-detail-section-title"><span>{{ t('状态', 'Status') }}</span></div>
-                    <div class="kb-status">
-                      <span v-if="selectedKb.metadata?.hasEmbeddings" class="kb-status-tag c-green"><i class="fa fa-check-circle"></i> {{ t('已向量化', 'Embedded') }}</span>
-                      <span v-if="selectedKb.config?.vectorStore" class="kb-status-tag c-teal"><i class="fa fa-cubes"></i> {{ t('向量库', 'Vector DB') }}</span>
-                      <span v-else-if="selectedKb.config?.saveVectors === false" class="kb-status-tag c-orange"><i class="fa fa-file-archive-o"></i> {{ t('精简（向量按需）', 'Slim') }}</span>
-                      <span v-if="selectedKb.metadata?.hasQuestions" class="kb-status-tag c-blue"><i class="fa fa-question-circle"></i> {{ t('有问题', 'Questions') }}</span>
-                      <span v-if="!selectedKb.metadata?.hasEmbeddings" class="kb-status-tag c-grey"><i class="fa fa-circle-o"></i> {{ t('未向量化', 'No vectors') }}</span>
+                  <!-- 附属文件：测试结果 / 学习记录 / 试卷库 / 学习索引 / 便携包，两列小卡 -->
+                  <div v-if="kbSideFiles.length" class="kb-card-grid">
+                    <div
+                      v-for="f in kbSideFiles"
+                      :key="f.path"
+                      class="kb-card kb-card-small"
+                      :title="f.path + '\n' + t('点击在文件管理器中定位', 'Click to reveal in the file manager')"
+                      @click="revealKbFile(f)"
+                    >
+                      <div class="kb-card-head">
+                        <i class="fa kb-card-icon" :class="f.icon"></i>
+                        <span class="kb-card-name" :title="f.name">{{ f.name }}</span>
+                        <span class="kb-card-size">{{ formatVectorBytes(f.size) }}</span>
+                      </div>
+                      <div class="kb-card-meta">
+                        <span>{{ t(f.roleLabel, f.roleEn) }}</span>
+                        <span>{{ fmtMsTime(f.mtime) }}</span>
+                      </div>
                     </div>
                   </div>
+                  <div v-else-if="!kbFilesLoading" class="kb-vec-note">{{ t('还没有相关文件', 'No related files yet') }}</div>
+
+                  <!-- 状态标签已合并到头部标题右侧 -->
                 </div>
               </div>
             </div>
@@ -1874,6 +1884,54 @@ const handleStrategiesChanged = () => {
 }
 
 /* 相关文件：一个文件一张卡（图标 + 文件名 + 角色 + 大小） */
+/* ===== 详情页文件卡片（.kb / .kbdb 大卡 + 附属文件小卡） ===== */
+.kb-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 7px;
+  background: var(--menuColor);
+  box-sizing: border-box;
+}
+.kb-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.kb-card-icon { flex: 0 0 16px; width: 16px; text-align: center; font-size: 13px; color: var(--fontActiveColor); }
+.kb-card-name { min-width: 0; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-card-role { flex: 0 0 auto; font-size: 10px; opacity: .55; }
+.kb-card-size { flex: 0 0 auto; margin-left: auto; font-size: 10px; opacity: .7; font-variant-numeric: tabular-nums; }
+.kb-card-hint { flex: 0 0 auto; font-size: 10px; opacity: .55; }
+.kb-card-stats { display: flex; flex-wrap: wrap; gap: 3px 12px; font-size: 10.5px; opacity: .85; }
+.kb-card-stats b { font-weight: 600; opacity: .95; }
+.kb-card-meta { display: flex; flex-wrap: wrap; gap: 3px 12px; font-size: 10px; opacity: .68; }
+.kb-card-meta b { font-weight: 500; opacity: .9; }
+.kb-card-meta i { margin-right: 4px; opacity: .7; }
+.kb-card-desc { padding-top: 5px; border-top: 1px dashed var(--borderColor); }
+.kb-card-desc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; font-size: 10.5px; opacity: .7; }
+.kb-card-desc-text { font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.kb-card-desc-text.empty { opacity: .5; }
+.kb-card-path { font-size: 9.5px; opacity: .5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.kb-card-path:hover { color: var(--fontActiveColor); text-decoration: underline; }
+.kb-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+/* 详情顶部工具栏：加载 / 重命名 / 打开文件夹 / 删除 */
+.kb-detail-toolbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 3px 0 6px; margin-bottom: 2px; }
+/* 工具栏下方的说明面板（不塞进 .kb 卡片） */
+.kb-desc-panel {
+  padding: 7px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 7px;
+  background: var(--backgroundColor);
+  box-sizing: border-box;
+}
+.kb-desc-panel .kb-card-desc-head { margin-bottom: 4px; }
+.kb-card-db { border-color: color-mix(in srgb, var(--fontActiveColor) 28%, var(--borderColor)); }
+.kb-card-db.empty { opacity: .85; }
+.kb-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; }
+.kb-card-small { margin-bottom: 0; padding: 6px 8px; gap: 4px; cursor: pointer; }
+.kb-card-small:hover { border-color: var(--fontActiveColor); }
+
 .kb-file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; }
 .kb-file-card {
   display: flex; align-items: center; gap: 8px;

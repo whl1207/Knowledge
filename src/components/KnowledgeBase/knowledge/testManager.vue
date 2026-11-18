@@ -6025,7 +6025,6 @@ const clearTestCases = () => {
 .kt-btn { position: relative; }
 .kt-disabled { opacity: .5; pointer-events: none; }
 
-/* ===== 策略配置面板 / 消融组列表（弹层内：固定列宽 + 输入框不再溢出单元格） ===== */
 .tm-abl-table { table-layout: fixed; }
 .tm-abl-table tbody tr { cursor: pointer; }
 .tm-abl-table td { vertical-align: middle; }

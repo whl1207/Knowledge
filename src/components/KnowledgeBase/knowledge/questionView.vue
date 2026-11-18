@@ -9,6 +9,7 @@ import block_md from '@/components/block_md.vue'
 import { splitQuestionText, detectDuplicateGroups, answerText, choiceLabelsOf } from '@/shared/kbQuestions'
 import { cosineSimilarity } from '@/shared/kbRetrieval'
 import { hydrateBlockVectorsFromDb } from '@/lib/kbVectorDb'
+import { renderCardHtml } from '@/lib/markdown/cardMd'
 import type { KbQuestion, DupGroup, QuestionAnswerRef } from '@/shared/kbQuestions'
 
 defineOptions({ name: 'QuestionView' })
@@ -51,6 +52,11 @@ const emit = defineEmits<{
 const store = props.store || usestore()
 const zh = computed(() => store.locales == 'zh')
 
+/** 问题/答案按 markdown + LaTeX 渲染（与切片卡片共用渲染器与 HTML 缓存） */
+function renderQHtml(text?: string): string {
+  return renderCardHtml(String(text || ''))
+}
+
 // 模型规格（与 knowRAG / testManager 同一构建方式）
 const kbSpec = () => kbAi.buildSpecFromModel(props.model, store)
 const kbEmbed = async (input: string | string[]) => kbAi.embed(kbSpec(), input)
@@ -90,6 +96,13 @@ const originLabel = (o?: string) => {
   const v = map[o || ''] || ['', '']
   return zh.value ? v[0] : v[1]
 }
+/** 问题来源的图标（替代文字标签，放到卡片右上角） */
+const originIcon = (o?: string): string => ({
+  reasoned: 'fa-lightbulb-o',
+  manual: 'fa-hand-paper-o',
+  imported: 'fa-download',
+  complex: 'fa-object-group',
+}[o || ''] || 'fa-tag')
 
 // ---------------- 搜索 / 筛选 / 展开 ----------------
 const keyword = ref('')
@@ -1010,49 +1023,47 @@ const generateComplex = async () => {
 
     <!-- ========== 问题列表（滚动分批加载） ========== -->
     <div ref="qListEl" class="qb-scroll qb-list" @scroll="handleQListScroll">
+      <div class="qb-masonry">
       <div v-if="!filtered.length" class="qb-empty">
         <i :class="activeQuestions.length ? 'fa fa-search' : 'fa fa-question-circle-o'"></i>
         <div v-if="activeQuestions.length === 0">{{ zh ? '暂无问题：先在「切片」页推理问题，或点击上方「提取问题」' : 'No questions yet: reason slices first or click "Extract"' }}</div>
         <div v-else>{{ zh ? '没有匹配的问题' : 'No matching questions' }}</div>
       </div>
-      <div v-for="(q, qi) in displayedQ" :key="q.id" class="qb-item" :class="{ 'qb-item-bad': reviewBad(q) }">
-        <div class="qb-item-inner">
-          <span class="qb-idx">{{ qi + 1 }}</span>
-          <div class="qb-main">
-            <!-- 展示态：问题文本在左，qb-meta 全部要素（标签/来源/状态/操作）在同一行右侧，更紧凑 -->
-            <div class="qb-line">
-                <div class="qb-text" :title="fileTitle(q) || undefined">
-                  <span v-if="q.status === 'merged'" class="qb-text-merged">{{ q.text }}</span>
-                  <span v-else>{{ q.text }}</span>
-                </div>
-                <div class="qb-meta">
-                  <span v-if="reviewMap.get(q.id)" class="qb-tag" :class="reviewBad(q) ? 'qb-tag-bad' : 'qb-tag-ok'" :title="reviewBad(q) ? (zh ? '不合适：' + reviewReason(q) + '（点击忽略，不再标为不合适）' : 'Unsuitable: ' + reviewReason(q) + ' (click to ignore)') : ''" @click="reviewBad(q) && dismissReview(q.id)">{{ reviewBad(q) ? (zh ? '不合适' : 'bad') : '✔' }}</span>
-                  <span v-if="q.origin" class="qb-tag" :class="q.origin === 'reasoned' ? 'qb-tag-r' : q.origin === 'complex' ? 'qb-tag-c' : ''" :title="zh ? '问题来源' : 'origin'">{{ originLabel(q.origin) }}</span>
-                  <span v-if="q.srcBlockId" class="qb-meta-item" :title="zh ? '来源切片' : 'source slice'"><i class="fa fa-tag"></i> {{ q.srcBlockId }}</span>
-                  <span class="qb-meta-item" :title="zh ? '参考切片数' : 'reference slices'"><i class="fa fa-gavel"></i> {{ q.answerBlocks?.length || 0 }}</span>
-                  <span class="qb-meta-item qb-vec" :class="(q.qVector && q.qVector.length) ? 'ok' : 'warn'"
-                    :title="(q.qVector && q.qVector.length) ? (zh ? '已向量化（' + q.qVector.length + 'd），点击重新向量化' : 'embedded (' + q.qVector.length + 'd), click to re-embed') : (zh ? '未向量化，参与检索前需补全' : 'no vector yet')"
-                    @click.stop="(q.qVector && q.qVector.length) && reVectorize(q)">
-                    <i class="fa" :class="(q.qVector && q.qVector.length) ? 'fa-check-circle' : 'fa-exclamation-circle'"></i>
-                  </span>
-                  <span class="qb-ops">
-                    <!-- 问题配置：编辑问题文本 + 参考答案 + 参考切片（原「编辑问题文本」入口已并入此模态框） -->
-                    <span class="qb-link" :class="{ on: hasSlices && (q.answerBlocks?.length || q.extraAnswer) }" :title="zh ? '问题配置：编辑问题文本、参考答案与参考切片（可搜索或由大模型推荐切片）' : 'Question config: edit question text, answer and reference slices (search or let LLM recommend)'" @click.stop="openPickerEdit(q)"><i class="fa fa-cog"></i></span>
-                    <!-- 已向量化时点击绿色“已向量化”图标即可重新向量化，不再重复显示磁铁图标 -->
-                    <span v-if="!(q.qVector && q.qVector.length)" class="qb-link" @click.stop="reVectorize(q)" :title="zh ? '向量化（补全缺失向量）' : 'Embed (fill missing vector)'"><i class="fa fa-magnet"></i></span>
-                    <span class="qb-link qb-del" @click.stop="removeQ(q)" :title="zh ? '删除' : 'Delete'"><i class="fa fa-trash-o"></i></span>
-                  </span>
-                </div>
-            </div>
-            <!-- 问题答案（提取/手动生成，独立于参考切片；点右侧 ⚙ 打开“问题配置”一并编辑） -->
-            <div v-if="q.extraAnswer" class="qb-answer" :title="zh ? '该问题的答案（与问题分开存储；点右侧 ⚙ 打开“问题配置”可一并编辑）' : 'Answer (stored separately from question text)'">
-              <i class="fa fa-check-circle-o"></i> {{ q.extraAnswer }}
-            </div>
-          </div>
+      <div v-for="(q, qi) in displayedQ" :key="q.id" class="qb-card" :class="{ 'qb-card-bad': reviewBad(q) }">
+        <div class="qb-card-head">
+          <span class="qb-card-idx">{{ qi + 1 }}</span>
+          <span class="qb-card-ops">
+            <span
+              v-if="reviewMap.get(q.id)"
+              class="qb-op-ic"
+              :class="reviewBad(q) ? 'qb-op-bad' : 'qb-op-ok'"
+              :title="reviewBad(q) ? (zh ? '不合适：' + reviewReason(q) + '（点击忽略，不再标为不合适）' : 'Unsuitable: ' + reviewReason(q) + ' (click to ignore)') : (zh ? '已通过独立性评审' : 'passed review')"
+              @click.stop="reviewBad(q) && dismissReview(q.id)"
+            ><i class="fa" :class="reviewBad(q) ? 'fa-exclamation-triangle' : 'fa-check-circle'"></i></span>
+            <span
+              v-if="q.origin"
+              class="qb-op-ic qb-origin-ic"
+              :class="'qb-origin-' + q.origin"
+              :title="originLabel(q.origin)"
+            ><i class="fa" :class="originIcon(q.origin)"></i></span>
+            <span class="qb-card-quick">
+              <span class="qb-meta-item" :title="zh ? '参考切片数' : 'reference slices'"><i class="fa fa-gavel"></i>{{ q.answerBlocks?.length || 0 }}</span>
+              <span class="qb-meta-item qb-vec" :class="(q.qVector && q.qVector.length) ? 'ok' : 'warn'"
+                :title="(q.qVector && q.qVector.length) ? (zh ? '已向量化（' + q.qVector.length + 'd）' : 'embedded (' + q.qVector.length + 'd)') : (zh ? '未向量化，参与检索前需补全' : 'no vector yet')">
+                <i class="fa" :class="(q.qVector && q.qVector.length) ? 'fa-check-circle' : 'fa-exclamation-circle'"></i>
+              </span>
+            </span>
+            <span class="qb-link" :class="{ on: hasSlices && (q.answerBlocks?.length || q.extraAnswer) }" :title="zh ? '问题配置：编辑问题文本、参考答案与参考切片（可搜索或由大模型推荐切片）' : 'Question config: edit question text, answer and reference slices (search or let LLM recommend)'" @click.stop="openPickerEdit(q)"><i class="fa fa-cog"></i></span>
+            <span v-if="!(q.qVector && q.qVector.length)" class="qb-link" @click.stop="reVectorize(q)" :title="zh ? '向量化（补全缺失向量）' : 'Embed (fill missing vector)'"><i class="fa fa-magnet"></i></span>
+            <span class="qb-link qb-del" @click.stop="removeQ(q)" :title="zh ? '删除' : 'Delete'"><i class="fa fa-trash-o"></i></span>
+          </span>
         </div>
+        <div class="qb-card-body" :class="{ 'qb-text-merged': q.status === 'merged' }" v-html="renderQHtml(q.text)"></div>
+        <div v-if="q.extraAnswer" class="qb-card-answer" :title="zh ? '该问题的答案（与问题分开存储；点右上角 ⚙ 打开「问题配置」可一并编辑）' : 'Answer (stored separately from question text)'" v-html="renderQHtml(q.extraAnswer)"></div>
       </div>
       <div v-if="hasMoreQ" class="qb-loadmore">
         <i class="fa fa-angle-double-down"></i> {{ zh ? '下滑加载更多' : 'scroll for more' }} <span class="qb-loadmore-num">{{ displayedQ.length }}/{{ filtered.length }}</span>
+      </div>
       </div>
     </div>
 
@@ -1213,6 +1224,75 @@ const generateComplex = async () => {
 .qb-dup-actions { display: flex; gap: 6px; margin-top: 4px; }
 /* 列表 / 空态 */
 .qb-list { flex: 1; overflow: auto; min-height: 0; }
+/* 瀑布流：内层多列容器按内容高度自适应（不产生横向滚动），卡片避免跨列断裂 */
+.qb-masonry {
+  column-width: 300px;
+  column-gap: 8px;
+  padding: 8px;
+  box-sizing: border-box;
+}
+.qb-card {
+  break-inside: avoid;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0 0 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--backgroundColor);
+  box-sizing: border-box;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.qb-card:hover { border-color: var(--fontActiveColor); background: var(--menuColor); }
+.qb-card-bad { border-color: color-mix(in srgb, #F56C6C 55%, var(--borderColor)); }
+.qb-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.qb-card-idx { flex: 0 0 auto; font-size: 10px; opacity: .5; }
+.qb-card-tags { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; flex: 1; }
+.qb-card-ops { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; }
+/* 参考切片数 + 向量状态：紧贴在设置按钮左侧，不再底部单独一行 */
+.qb-card-quick { display: inline-flex; align-items: center; gap: 6px; margin-right: 0; font-size: 10px; opacity: .6; }
+.qb-card-quick .qb-meta-item { display: inline-flex; align-items: center; gap: 2px; }
+.qb-card-quick .qb-vec.ok { color: #4CAF50; opacity: 1; }
+.qb-card-quick .qb-vec.warn { color: #E6A23C; opacity: 1; }
+/* 卡片右上角四个图标（切片数/向量/设置/删除）与文字统一 10px */
+.qb-card-ops .qb-link { font-size: 10px; margin-left: 0; line-height: 1; }
+.qb-card-ops .qb-quick, .qb-card-ops i { font-size: 10px; }
+/* 来源/评审标识：图标化，和右侧操作按钮同一套尺寸/颜色/间距（不再用蓝/紫强调色） */
+.qb-op-ic { display: inline-flex; align-items: center; margin-left: 0; font-size: 10px; line-height: 1; color: var(--borderColor); opacity: .75; cursor: default; }
+.qb-op-ok { color: #4CAF50; opacity: .85; }
+.qb-op-bad { color: #F56C6C; opacity: 1; cursor: pointer; }
+.qb-origin-reasoned, .qb-origin-complex, .qb-origin-manual, .qb-origin-imported { color: var(--fontColor); opacity: .85; }
+/* 内容由 markdown 渲染成 <p> 等块级元素，不能再叠加 pre-wrap：
+   HTML 字符串里的换行会被当成可见空行（表现为卡片底部总有一块空白） */
+.qb-card-body { flex: 0 0 auto; min-width: 0; font-size: 12px; line-height: 1.6; white-space: normal; word-break: break-word; }
+.qb-text-merged { color: var(--borderColor); text-decoration: line-through; }
+.qb-card-answer {
+  font-size: 11px;
+  line-height: 1.55;
+  opacity: .75;
+  border-top: 1px dashed var(--borderColor);
+  padding-top: 5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.qb-card-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 9.5px; opacity: .55; }
+.qb-card-foot .qb-meta-item { display: inline-flex; align-items: center; gap: 3px; }
+.qb-masonry .qb-empty { column-span: all; min-height: 220px; height: auto; }
+.qb-masonry .qb-loadmore { column-span: all; }
+/* v-html 渲染的 markdown/公式：去掉首尾段距、限制公式宽度 */
+.qb-card-body :deep(p), .qb-card-answer :deep(p) { margin: 0 0 4px; }
+.qb-card-body :deep(p:last-child), .qb-card-answer :deep(p:last-child) { margin-bottom: 0; }
+.qb-card-body :deep(ul), .qb-card-body :deep(ol) { margin: 2px 0; padding-left: 18px; }
+.qb-card-body :deep(svg), .qb-card-answer :deep(svg) { max-width: 100%; height: auto; }
+/* MathJax 输出：只限宽、不要 overflow——overflow 会让公式出现上下/左右滚动条 */
+.qb-card-body :deep(mjx-container), .qb-card-answer :deep(mjx-container) { max-width: 100%; }
+.qb-card-body :deep(mjx-container svg), .qb-card-answer :deep(mjx-container svg) { max-width: 100%; height: auto; }
+.qb-card-body :deep(.hljs) { font-size: 10.5px; }
 .qb-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--borderColor); font-size: 12px; text-align: center; padding: 10px; gap: 4px; }
 .qb-empty i { font-size: 22px; }
 /* 滚动分批加载：底部加载更多提示 */

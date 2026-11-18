@@ -35,10 +35,14 @@
       <!-- 弹性占位：把窗口按钮顶到顶栏最右，标题保持左侧 -->
       <div class="ppw-header-spacer" style="flex:1;min-width:0;"></div>
 
-      <template v-if="!overlay">
-        <div v-if="hasCapability('window.chrome')" class="ppw-btn" @click="minimizeWindow" :title="zh ? '最小化' : 'Minimize'"><i class="fa fa-minus"></i></div>
-        <div v-if="hasCapability('window.chrome')" class="ppw-btn" @click="maximizeWindow" :title="zh ? '最大化/还原' : 'Maximize / Restore'"><i class="fa" :class="maximized ? 'fa-compress' : 'fa-window-maximize'"></i></div>
-        <div v-if="hasCapability('window.chrome')" class="ppw-btn ppw-close" @click="closeWindow" :title="zh ? '关闭' : 'Close'"><i class="fa fa-times"></i></div>
+      <!-- 窗口按钮区：与主窗口顶栏一致（设置 / 最小化 / 最大化 / 关闭）；
+           单窗口浮层形态在最左侧多一个「退出插件」，只关插件、不关应用 -->
+      <div v-if="overlay" class="ppw-btn ppw-exit" @click="exitPlugin" :title="zh ? '退出插件' : 'Exit plugin'"><i class="fa fa-sign-out"></i></div>
+      <div v-if="overlay" class="ppw-btn" @click="openSettings" :title="zh ? '设置' : 'Settings'"><i class="fa fa-cogs"></i></div>
+      <template v-if="hasCapability('window.chrome')">
+        <div class="ppw-btn" @click="minimizeWindow" :title="zh ? '最小化' : 'Minimize'"><i class="fa fa-minus"></i></div>
+        <div class="ppw-btn" @click="maximizeWindow" :title="zh ? '最大化/还原' : 'Maximize / Restore'"><i class="fa" :class="maximized ? 'fa-compress' : 'fa-window-maximize'"></i></div>
+        <div class="ppw-btn ppw-close" @click="closeWindow" :title="zh ? '关闭' : 'Close'"><i class="fa fa-times"></i></div>
       </template>
     </div>
 
@@ -81,6 +85,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import { usestore } from '@/store'
+import { aikmIpc } from '@/lib/aikmIpc'
 import { getPlatform, hasCapability } from '@/platform'
 import { PANEL_MAIN_SLOT } from '@/lib/plugin/coreSlots'
 import { useAllSlotEntries, useSlotVersion } from '@/lib/plugin/useSlots'
@@ -219,6 +224,28 @@ function maximizeWindow() {
   void getPlatform().window.toggleMaximize()
 }
 function closeWindow() { void getPlatform().window.close() }
+/** 单窗口浮层：退出插件（只收起插件面板，不关应用窗口） */
+function exitPlugin() { store.closePluginPanelOverlay() }
+/**
+ * 设置：与主窗口「设置」按钮同语义——已打开则关闭，未打开则打开。
+ * - 单窗口模式：设置是应用内浮层（settingsOpen）；
+ * - 多窗口模式：设置是独立窗口，已打开时关闭它（主进程 close-settings-window）。
+ */
+async function openSettings() {
+  if (store.singleWindowMode) {
+    if (store.settingsOpen) { store.settingsOpen = false; return }
+    store.openSettings()
+    return
+  }
+  try {
+    const st: any = await getPlatform().app.isSettingsWindowOpen()
+    if (st?.open) {
+      await aikmIpc.invoke('close-settings-window')
+      return
+    }
+  } catch { /* 查询失败时按「未打开」处理 */ }
+  store.openSettings()
+}
 </script>
 
 <style scoped>
@@ -323,6 +350,14 @@ function closeWindow() { void getPlatform().window.close() }
 }
 .ppw-close {
   font-size: 16px;
+}
+/* 单窗口浮层：退出插件（只关插件面板） */
+.ppw-exit {
+  color: #E6A23C;
+}
+.ppw-exit:hover {
+  color: #F56C6C !important;
+  background-color: color-mix(in srgb, #F56C6C 14%, transparent) !important;
 }
 
 .ppw-body {
