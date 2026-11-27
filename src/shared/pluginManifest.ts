@@ -26,6 +26,7 @@ export const PLUGIN_MANIFEST_FILE = 'package.json'
 export const SUPPORTED_PLUGIN_PERMISSIONS: readonly PluginPermission[] = [
   'fs', 'shell', 'net', 'agent', 'agent.observe', 'agent.control', 'agent.run', 'llm', 'image',
   'net.listen', 'process.spawn', 'secrets', 'schedule', 'attachments',
+  'browser.embed', 'browser.observe',
 ]
 
 export type ManifestProblem =

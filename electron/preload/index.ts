@@ -583,6 +583,20 @@ const dsh = {
     agentStatus(args: { pluginId: string }): Promise<{ consent: 'allow' | 'ask' | 'deny'; inFlight: number; callsInWindow: number }> {
       return invokeIpc('plugin:agent:status', args)
     },
+    browserViewCreate(args: { pluginId: string; url?: string; allowedHosts?: string[] }): Promise<{ id: string; url: string }> {
+      return invokeIpc('plugin:browser-view:create', args)
+    },
+    browserViewCommand(args: { pluginId: string; viewId: string; action: string; args?: unknown }): Promise<any> {
+      return invokeIpc('plugin:browser-view:command', args)
+    },
+    browserViewDestroy(args: { pluginId: string; viewId: string }): Promise<{ ok: boolean }> {
+      return invokeIpc('plugin:browser-view:destroy', args)
+    },
+    browserViewOnEvent(cb: (event: any) => void): () => void {
+      const handler = (_e: unknown, payload: any) => { try { cb(payload) } catch { /* 忽略 */ } }
+      ipcRenderer.on('plugin:browser-view:event', handler)
+      return () => { ipcRenderer.off('plugin:browser-view:event', handler) }
+    },
     /** 改写委派同意（需 confirm；撤销 = 'ask'，改为拒绝 = 'deny'，以后不再询问 = 'allow'） */
     setAgentConsent(args: {
       pluginId: string

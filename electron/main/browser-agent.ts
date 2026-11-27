@@ -33,6 +33,7 @@ import { runBrowserCode } from './browser/code-runtime'
 import { BrowserEventBuffer, formatEventNote } from './browser/events'
 import { KeyedQueue } from './browser/space-queue'
 import { saveSiteLearning, listSiteLearnings, getSiteLearning, deleteSiteLearning } from './browser/learnings'
+import { RECORDER_SCRIPT, buildPlaybookCode, buildRecordingNotes, type RecordedBrowserStep } from './browser/recorder'
 import { buildBrowserHelp } from './browser/help'
 import {
   saveSitePlaybook, listSitePlaybooks, getSitePlaybook, approveSitePlaybook,
@@ -159,6 +160,15 @@ export interface BrowserAgentState {
   agentOwner: string | null
   /** 该会话是否已被用户暂停/接管（暂停后工具调用会被拒绝） */
   agentPaused: boolean
+  /** 正在录制的操作（null=未录制） */
+  recording?: BrowserRecordingState | null
+}
+
+export interface BrowserRecordingState {
+  tabId: string
+  host: string
+  startedAt: number
+  steps: number
 }
 
 /** 浏览器下载记录（P1：壳内下载列表；文件落在 userData/browser-downloads） */
@@ -259,12 +269,67 @@ const BROWSER_PARTITION = 'persist:browser-agent'
 /** 外部 MCP（external:* 属主）使用独立分区：不共享应用内登录态，便于隔离/审计 */
 const EXTERNAL_PARTITION = 'persist:browser-agent-external'
 
+/**
+ * 内网地址判定：这些地址经常使用自签名 / 内部 CA 证书，Chromium 会报
+ * ERR_CERT_AUTHORITY_INVALID（-202）并直接拒绝加载。
+ *
+ * 只对**内网 / 本机**放宽证书校验；公网地址仍走 Chromium 默认校验，
+ * 避免把浏览器标签变成"任何自签名证书都能过"的后门。
+ */
+const isPrivateCertificateHost = (hostname: string): boolean => {
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
+  if (!host) return false
+  if (host === 'localhost' || host.endsWith('.localhost')) return true
+  if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.internal')) return true
+  if (host === '::1' || /^127\./.test(host)) return true
+  if (/^10\./.test(host) || /^192\.168\./.test(host)) return true
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true
+  if (/^169\.254\./.test(host)) return true
+  // IPv6 ULA（fc00::/7）
+  if (/^f[cd][0-9a-f]{2}:/i.test(host)) return true
+  // 无点号的局域网主机名（如 wiki、gitlab）
+  if (!host.includes('.') && !/^\d+$/.test(host)) return true
+  return false
+}
+
+/** 每个分区只装一次证书策略；分区创建后调用（见 createTabView） */
+const certPolicyInstalled = new Set<string>()
+function installBrowserCertificatePolicy(partition: string): void {
+  if (!partition || certPolicyInstalled.has(partition)) return
+  certPolicyInstalled.add(partition)
+  try {
+    session.fromPartition(partition).setCertificateVerifyProc((request, callback) => {
+      if (!request.errorCode) return callback(0)
+      const host = String(request.hostname || '')
+      if (isPrivateCertificateHost(host)) {
+        console.warn(`[browser] 接受内网地址的无效证书：${host}（errorCode=${request.errorCode}）`)
+        return callback(0)
+      }
+      // -3 = 使用 Chromium 默认校验（公网证书错误仍然失败）
+      callback(-3)
+    })
+  } catch (e) {
+    certPolicyInstalled.delete(partition)
+    console.warn('[browser] 安装证书校验策略失败：', e)
+  }
+}
+
 class BrowserAgentService {
   private win: BrowserWindow | null = null
   private tabs: BrowserTabMeta[] = []
   private views = new Map<string, WebContentsView>()
   private activeTabId: string | null = null
   private allowEval = false
+  /** 用户操作录制器（同一时间只录一个标签） */
+  private recorder: {
+    tabId: string
+    host: string
+    url: string
+    startedAt: number
+    steps: RecordedBrowserStep[]
+    lastClickAt: number
+    cleanup: () => void
+  } | null = null
   private agentActive = false
   private agentBusyTabId: string | null = null
   private agentTool = ''
@@ -456,6 +521,7 @@ class BrowserAgentService {
     })
     win.on('resize', () => this.layout())
     win.on('close', () => {
+      if (this.recorder) void this.stopRecording(false)
       this.sideRailW = 0
       this.resetBottomBar()
       // 停靠模式下的视图挂在主窗口上，**不能**跟着独立窗口一起清掉
@@ -486,6 +552,8 @@ class BrowserAgentService {
 
   /** 创建并挂载一个标签视图 */
   private createTabView(partition: string = BROWSER_PARTITION): WebContentsView {
+    // 放在 new WebContentsView 之前：首次创建该分区时就把证书策略装上
+    installBrowserCertificatePolicy(partition)
     const view = new WebContentsView({
       webPreferences: {
         nodeIntegration: false,
@@ -1119,6 +1187,7 @@ class BrowserAgentService {
 
   /** 关闭标签；关到空时自动新建空白标签 */
   closeTab(id: string) {
+    if (this.recorder?.tabId === id) void this.stopRecording(false)
     this.clearTabRuntime(id)
     const idx = this.tabs.findIndex(t => t.id === id)
     if (idx < 0) return
@@ -4542,8 +4611,215 @@ class BrowserAgentService {
       allowEval: this.allowEval,
       agentOwner: this.lastAgentOwner,
       agentPaused: this.isOwnerPaused(this.lastAgentOwner),
+      recording: this.recorder
+        ? { tabId: this.recorder.tabId, host: this.recorder.host, startedAt: this.recorder.startedAt, steps: this.recorder.steps.filter((s) => s.type !== 'goto').length }
+        : null,
     }
     this.sendToShell('browser-agent:event', state)
+  }
+
+  /**
+   * 开始录制当前标签页里的用户操作。
+   *
+   * 页面内事件 → console.log 前缀 → 主进程过滤；导航由 did-navigate 单独记录。
+   * 只记录可复现的语义动作；密码 / 隐藏字段 / 文件选择器一律跳过。
+   */
+  async startRecording(): Promise<{ ok: boolean; tabId?: string; error?: string }> {
+    if (this.recorder) return { ok: false, error: '已经在录制中，请先停止当前录制' }
+    const tab = this.activeTab()
+    const view = tab ? this.views.get(tab.id) : undefined
+    const wc = view?.webContents
+    if (!tab || !wc || wc.isDestroyed()) return { ok: false, error: '当前没有可录制的网页标签' }
+    const url = String(tab.url || '')
+    if (!/^https?:/i.test(url)) return { ok: false, error: '只能录制 http / https 页面' }
+    const host = normalizePlaybookHost('', url)
+    const steps: RecordedBrowserStep[] = [{ type: 'goto', url }]
+    let cleanup = () => { /* 占位，安装完监听器后替换 */ }
+    this.recorder = {
+      tabId: tab.id,
+      host,
+      url,
+      startedAt: Date.now(),
+      steps,
+      lastClickAt: 0,
+      cleanup: () => cleanup(),
+    }
+
+    const onConsole = (_event: any, _level: number, message: string) => {
+      const rec = this.recorder
+      if (!rec || rec.tabId !== tab.id) return
+      const text = String(message || '')
+      const prefix = '__AIKM_RECORD__'
+      const at = text.indexOf(prefix)
+      if (at < 0) return
+      let payload: any
+      try { payload = JSON.parse(text.slice(at + prefix.length)) } catch { return }
+      const type = String(payload?.type || '')
+      const selector = String(payload?.selector || '')
+      if (type === 'click') {
+        rec.lastClickAt = Date.now()
+        if (selector) rec.steps.push({ type: 'click', selector, text: String(payload?.text || '') })
+      } else if (type === 'fill') {
+        if (selector) rec.steps.push({ type: 'fill', selector, value: String(payload?.value ?? '') })
+      } else if (type === 'select') {
+        if (selector) rec.steps.push({ type: 'select', selector, value: String(payload?.value ?? ''), label: String(payload?.label || '') })
+      } else {
+        return
+      }
+      this.sendToShell('browser-agent:training-event', {
+        at: Date.now(),
+        type,
+        tabId: rec.tabId,
+        selector,
+        ...(type === 'click' ? { text: String(payload?.text || '') } : {}),
+        ...(type === 'fill' ? { value: String(payload?.value ?? '') } : {}),
+        ...(type === 'select' ? { value: String(payload?.value ?? ''), label: String(payload?.label || '') } : {}),
+      })
+      this.pushState()
+    }
+    const onNavigate = (_event: any, targetUrl: string) => {
+      const rec = this.recorder
+      if (!rec || rec.tabId !== tab.id) return
+      const next = String(targetUrl || '')
+      if (!/^https?:/i.test(next)) return
+      // 点击导致的跳转已经由 click 步骤覆盖，不再重复插入 goto
+      if (Date.now() - rec.lastClickAt < 1500) return
+      const last = rec.steps[rec.steps.length - 1]
+      if (last?.type === 'goto' && last.url === next) return
+      rec.steps.push({ type: 'goto', url: next })
+      this.sendToShell('browser-agent:training-event', { at: Date.now(), type: 'goto', tabId: rec.tabId, url: next })
+      this.pushState()
+    }
+    const onNavigateInPage = (_event: any, targetUrl: string, isMainFrame: boolean) => {
+      if (isMainFrame) onNavigate(_event, targetUrl)
+    }
+    const onLoad = () => {
+      if (!this.recorder || this.recorder.tabId !== tab.id) return
+      void wc.executeJavaScript(RECORDER_SCRIPT, true).catch(() => { /* 页面可能已关闭 */ })
+    }
+    cleanup = () => {
+      try { wc.removeListener('console-message', onConsole) } catch { /* 忽略 */ }
+      try { wc.removeListener('did-navigate', onNavigate) } catch { /* 忽略 */ }
+      try { wc.removeListener('did-navigate-in-page', onNavigateInPage) } catch { /* 忽略 */ }
+      try { wc.removeListener('did-finish-load', onLoad) } catch { /* 忽略 */ }
+      try { void wc.executeJavaScript('window.__AIKM_RECORDING__ = false;', true).catch(() => {}) } catch { /* 忽略 */ }
+    }
+    wc.on('console-message', onConsole)
+    wc.on('did-navigate', onNavigate)
+    wc.on('did-navigate-in-page', onNavigateInPage)
+    wc.on('did-finish-load', onLoad)
+    try {
+      await wc.executeJavaScript(RECORDER_SCRIPT, true)
+    } catch (e: any) {
+      cleanup()
+      this.recorder = null
+      return { ok: false, error: `无法在页面内启动录制：${e?.message || String(e)}` }
+    }
+    this.pushState()
+    this.toast('录制中：在页面上正常操作，完成后点录制按钮停止')
+    return { ok: true, tabId: tab.id }
+  }
+
+  /** 停止录制；save=true 时保存为 Playbook 草稿 + 站点经验（需用户批准后才可执行） */
+  async stopRecording(save = true): Promise<{ ok: boolean; name?: string; host?: string; steps?: number; error?: string }> {
+    const rec = this.recorder
+    if (!rec) return { ok: false, error: '当前没有正在进行的录制' }
+    this.recorder = null
+    rec.cleanup()
+    if (!save) {
+      this.pushState()
+      this.toast('已取消录制')
+      return { ok: false }
+    }
+    const actions = rec.steps.filter((s) => s.type !== 'goto')
+    if (!actions.length) {
+      this.pushState()
+      this.toast('录制结束，但没有捕捉到可复用的操作')
+      return { ok: false, error: '没有捕捉到操作' }
+    }
+    const name = `录制流程 ${new Date(rec.startedAt).toLocaleString('zh-CN', { hour12: false })}`
+    const description = `用户录制于 ${new Date(rec.startedAt).toISOString()}，共 ${actions.length} 个操作。`
+    const code = buildPlaybookCode(rec.steps)
+    const saved = saveSitePlaybook({ host: rec.host, url: rec.url, name, description, code })
+    if (!saved.ok) {
+      this.pushState()
+      this.toast(`保存 Playbook 失败：${saved.error || '未知原因'}`)
+      return { ok: false, error: saved.error || '保存失败' }
+    }
+    try {
+      saveSiteLearning({
+        host: rec.host,
+        url: rec.url,
+        title: name,
+        notes: buildRecordingNotes(rec.url, rec.steps),
+      })
+    } catch { /* 站点经验写失败不影响 Playbook */ }
+    this.pushState()
+    this.toast(`已保存录制「${name}」：Playbook 草稿需在「浏览器设置 → Playbook」查看并批准；站点经验已写入。`)
+    return { ok: true, name, host: rec.host, steps: actions.length }
+  }
+
+  /**
+   * 导出当前站点的训练数据（录制经验 + Playbook + 站点经验），供 site-training 插件导入。
+   * 只用系统保存对话框；文件格式是普通 JSON，避免引入 zip 依赖。
+   */
+  async exportTrainingPackage(hostInput = ''): Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }> {
+    const requestedHost = String(hostInput || '').trim()
+    const tab = requestedHost ? undefined : this.activeTab()
+    const url = String(tab?.url || '')
+    if (!requestedHost && !/^https?:/i.test(url)) return { ok: false, error: '当前没有可导出的网页' }
+    const host = requestedHost ? normalizePlaybookHost(requestedHost) : normalizePlaybookHost('', url)
+    /** 从 Playbook 的第一条 browser.goto 里取起始 URL（从「站点经验」导出时没有活动标签） */
+    const firstGotoOf = (code: string): string => {
+      const m = String(code || '').match(/browser\.goto\(\s*("(?:[^"\\]|\\.)*")/)
+      if (!m) return ''
+      try {
+        const target = JSON.parse(m[1])
+        const u = new URL(String(target))
+        return /^https?:$/i.test(u.protocol) ? u.toString() : ''
+      } catch { return '' }
+    }
+    const playbooks = listSitePlaybooks(host).map((meta) => {
+      const full = getSitePlaybook(host, meta.name)
+      const code = full.ok && full.playbook ? full.playbook.code : ''
+      return {
+        name: meta.name,
+        description: meta.description,
+        approved: !!meta.approved,
+        createdAt: meta.updatedAt,
+        code,
+        startUrl: firstGotoOf(code),
+      }
+    }).filter((p) => p.code)
+    const learning = getSiteLearning(host)
+    if (!playbooks.length && !learning.content) {
+      return { ok: false, error: '当前站点还没有可导出的录制经验或 Playbook' }
+    }
+    const activeUrlOk = /^https?:/i.test(url) && normalizePlaybookHost('', url) === host
+    const startUrl = activeUrlOk ? url : (playbooks.find((p) => p.startUrl)?.startUrl || '')
+    const data = {
+      format: 'aikm-training',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      site: { host, url: startUrl, title: String(tab?.title || '') },
+      startUrl,
+      experiences: playbooks,
+      learning: learning.content || '',
+    }
+    const name = `${host}-training.json`
+    const picked = await dialog.showSaveDialog({
+      title: '导出站点训练数据',
+      defaultPath: name,
+      filters: [{ name: 'AI-KM Training', extensions: ['json'] }],
+    })
+    if (picked.canceled || !picked.filePath) return { ok: false, canceled: true }
+    try {
+      fs.writeFileSync(picked.filePath, JSON.stringify(data, null, 2), 'utf8')
+      this.toast(`已导出站点训练数据：${picked.filePath}`)
+      return { ok: true, path: picked.filePath }
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) }
+    }
   }
 
   get stateSnapshot(): BrowserAgentState {
@@ -4562,6 +4838,9 @@ class BrowserAgentService {
       allowEval: this.allowEval,
       agentOwner: this.lastAgentOwner,
       agentPaused: this.isOwnerPaused(this.lastAgentOwner),
+      recording: this.recorder
+        ? { tabId: this.recorder.tabId, host: this.recorder.host, startedAt: this.recorder.startedAt, steps: this.recorder.steps.filter((s) => s.type !== 'goto').length }
+        : null,
     }
   }
 }

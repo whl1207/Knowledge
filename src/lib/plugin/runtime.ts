@@ -28,6 +28,7 @@ import { createPluginFsApi } from './fs'
 import { createPluginAppApi, type PluginAppApi } from './appApi'
 import { createPluginAgentApi, type PluginAgentApi } from './agent'
 import { createPluginAgentsApi, type PluginAgentsApi } from './agents'
+import { createPluginBrowserViewApi, type PluginBrowserViewApi } from './browserView'
 import { createPluginImageApi, type PluginImageApi } from './image'
 import { PLUGIN_EVENT_TYPES, createPluginEventsApi } from './events'
 import { listPluginAgentPresets, resolvePluginAgentPreset } from './agentPresetOptions'
@@ -174,6 +175,8 @@ export interface ClientPluginContext {
    * - `stream()` 只产出终态：增量文本请订阅 `ctx.on('assistant/chunk', …)`（按作用域只给自己）。
    */
   readonly agents: PluginAgentsApi
+  /** 受控内嵌浏览器（权限 browser.embed；操作观察另需 browser.observe） */
+  readonly browserView: PluginBrowserViewApi
   /**
    * 生图（权限 `image`）：`generate()` 返回可直接显示的图片 URL。
    *
@@ -469,6 +472,12 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
       resolvePreset: resolvePluginAgentPreset,
       listPresets: listPluginAgentPresets,
     }),
+    browserView: createPluginBrowserViewApi({
+      pluginId: snapshot.id,
+      permitted: (snapshot.permissions ?? []).includes('browser.embed'),
+      bridge: () => getPluginBridge(),
+      log: deps.log,
+    }),
     image: createPluginImageApi({
       pluginId: snapshot.id,
       permitted: (snapshot.permissions ?? []).includes('image'),
@@ -534,6 +543,7 @@ function createClientContext(deps: ClientContextDeps): { ctx: ClientPluginContex
 
   const dispose = async (): Promise<void> => {
     disposed = true
+    try { await ctx.browserView.destroyAll() } catch (e) { deps.log.warn('销毁内嵌浏览器失败', e) }
     for (const fn of disposers.splice(0).reverse()) await safeRun(fn)
     releasePluginPdfCache(snapshot.id)
     slotRegistry.notify()

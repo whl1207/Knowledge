@@ -44,7 +44,7 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
   { key: 'accessKnowledgeBase', needsKnowledgeFiles: true, tools: ['kb_search'] },
   { key: 'readFiles', tools: ['read_file', 'read_image', 'search_files', 'glob', 'working_directory'] },
   { key: 'listDirs', tools: ['list_dir'] },
-  { key: 'writeFiles', tools: ['write_file', 'replace_in_file', 'multi_replace'] },
+  { key: 'writeFiles', tools: ['write_file', 'replace_in_file', 'multi_replace', 'apply_patch'] },
   { key: 'presentFiles', defaultOn: true, tools: ['present'] },
   { key: 'executeCode', tools: ['run_code'] },
   { key: 'runShell', tools: ['shell'] },
@@ -67,7 +67,7 @@ export const CAPABILITY_TOOL_SLOTS: CapabilityToolSlot[] = [
       'browser_wait', 'browser_run',
     ],
   },
-  { key: 'runSubagent', tools: ['run_subagent', 'job_output', 'job_kill', 'job_list'] },
+  { key: 'runSubagent', tools: ['run_subagent', 'job_output', 'job_kill', 'job_list', 'list_agents'] },
   { key: 'skills', tools: ['skill'] },
 ]
 

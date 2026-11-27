@@ -82,6 +82,7 @@ import { isVectorStoreAvailable, kbdbPathFor, openCachedKbVectorStore } from './
 import { initPluginHost, registerPluginIpc } from './plugin-ipc'
 import { registerPluginFilesIpc } from './plugin-files'
 import { registerPluginAgentIpc } from './plugin-agent'
+import { pluginBrowserViewService, registerPluginBrowserViewIpc } from './plugin-browser-view'
 import { registerPluginToolApproval, registerPluginToolApprovalIpc } from './plugin-tool-approval'
 import { attachPluginEventForwarding, registerPluginEventsIpc } from './plugin-events'
 import { pluginHost } from './plugin-host'
@@ -517,6 +518,8 @@ app.whenReady().then(async () => {
   registerPluginIpc()
   registerPluginFilesIpc()
   registerPluginAgentIpc()
+  registerPluginBrowserViewIpc()
+  pluginBrowserViewService.setWindowProvider(() => win)
   // 插件工具的审批执行点（pre-execute 门禁）：声明了 fs / shell 的插件，其工具默认要用户确认。
   // 必须在插件宿主起来之后注册 —— 它按工具名归因到已装插件。
   registerPluginToolApproval()
@@ -1368,6 +1371,11 @@ ipcMain.handle('browser-agent:learnings-list', async () => {
 ipcMain.handle('browser-agent:learnings-delete', async (_e, payload: { host?: string } = {}) => {
   return { ok: true, data: browserAgentService.removeLearning(String(payload?.host || '')) }
 })
+ipcMain.handle('browser-agent:export-training', async (_e, payload: { host?: string } = {}) =>
+  browserAgentService.exportTrainingPackage(String(payload?.host || '')))
+ipcMain.handle('browser-agent:record-start', async () => browserAgentService.startRecording())
+ipcMain.handle('browser-agent:record-stop', async (_e, payload: { save?: boolean } = {}) =>
+  browserAgentService.stopRecording(payload?.save !== false))
 ipcMain.handle('browser-agent:playbooks-list', async (_e, payload: { host?: string } = {}) => {
   return { ok: true, data: browserAgentService.listPlaybooks(payload?.host ? String(payload.host) : undefined) }
 })

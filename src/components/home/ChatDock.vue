@@ -157,6 +157,7 @@
           <slot v-else-if="tab.kind === 'todos'" name="todos" />
           <slot v-else-if="tab.kind === 'plan'" name="plan" />
           <slot v-else-if="tab.kind === 'trajectory'" name="trajectory" />
+          <slot v-else-if="tab.kind === 'recall'" name="recall" />
           <ChatDockJobs v-else-if="tab.kind === 'jobs'" :active="tab.id === activeTabId" />
           <ChatDockFiles
             v-else-if="tab.kind === 'files'"
@@ -292,6 +293,7 @@ function kindIcon(kind: ChatDockTabKind): string {
   if (kind === 'plan') return 'fa-tasks'
   if (kind === 'trajectory') return 'fa-history'
   if (kind === 'jobs') return 'fa-tasks'
+  if (kind === 'recall') return 'fa-book'
   if (kind === 'new') return 'fa-plus'
   if (kind === 'file') return 'fa-file-text-o'
   return 'fa-folder-open-o'
@@ -304,6 +306,7 @@ function kindLabel(kind: ChatDockTabKind): string {
   if (kind === 'plan') return props.zh ? '计划' : 'Plan'
   if (kind === 'trajectory') return props.zh ? '会话轨迹' : 'Trajectory'
   if (kind === 'jobs') return props.zh ? '后台任务' : 'Jobs'
+  if (kind === 'recall') return props.zh ? '知识召回' : 'Recall'
   if (kind === 'new') return props.zh ? '新标签页' : 'New tab'
   return props.zh ? '工作区' : 'Workspace'
 }
@@ -344,6 +347,11 @@ function kindHint(kind: ChatDockTabKind): string {
       ? '后台任务：查看 shell / 子代理 / 知识库构建等长任务的进度与输出，可停止'
       : 'Jobs: follow shell, subagent and KB build tasks, inspect output and stop them'
   }
+  if (kind === 'recall') {
+    return props.zh
+      ? '知识召回：按对话轮次查看每一轮实际召回的知识片段、相似度与正文'
+      : 'Recall: inspect the chunks retrieved for each conversation turn, with scores and content'
+  }
   return props.zh
     ? '工作区：浏览当前工作区的文件树，可打开文件或把路径插入输入框（要打开某个具体文件请用旁边的「文件」按钮）'
     : 'Workspace: browse the current workspace file tree, open files or insert their paths into the input box (use the adjacent File button to open a specific file)'
@@ -371,7 +379,7 @@ const availableKinds = computed(() => DOCK_TAB_KINDS.filter((k) => {
 }))
 /** 类型分组：常用工具 vs 唯一面板（分支 / 待办 / 计划 / 轨迹 / 后台任务） */
 const primaryKinds = computed(() => availableKinds.value.filter(k => k === 'files' || k === 'terminal' || k === 'browser'))
-const uniqueKinds = computed(() => availableKinds.value.filter(k => k === 'branch' || k === 'todos' || k === 'plan' || k === 'trajectory' || k === 'jobs'))
+const uniqueKinds = computed(() => availableKinds.value.filter(k => k === 'branch' || k === 'todos' || k === 'plan' || k === 'trajectory' || k === 'jobs' || k === 'recall'))
 /** 空面板（没有标签时）直接建标签；空白新标签页则把当前页转成目标类型 */
 function chooseKind(kind: ChatDockTabKind) {
   const active = props.tabs.find((t) => t.id === props.activeTabId)

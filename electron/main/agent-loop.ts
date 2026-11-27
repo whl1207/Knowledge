@@ -474,7 +474,7 @@ const MAX_LENGTH_CONTINUES = 3
  * 只回灌"未执行、请分段"的结果，让模型下一 step 自己缩小提交量。连续多次仍撞上限，
  * 说明单次输出根本装不下，必须停下并明确告知（而不是让模型反复重试烧 token）。
  */
-const MAX_TRUNCATED_TOOL_SKIPS = 3
+const MAX_TRUNCATED_TOOL_SKIPS = 6
 
 /**
  * 并行安全工具：只读 / 无共享状态，多个调用可以同时跑。
@@ -502,6 +502,7 @@ const REPEAT_TRACK_EXCLUDE = new Set([
   'write_file',
   'replace_in_file',
   'multi_replace',
+  'apply_patch',
   'run_code',
   'export_word',
   'update_todo',
@@ -613,6 +614,10 @@ class AgentImpl implements AgentControl {
   private lastAssistantContent = ''
   /** 最近一步 LLM 的 finish_reason（length = 被 max_tokens/上下文截断；用于参数解析失败的诊断提示） */
   private lastFinishReason = ''
+  /** 因工具参数被截断而临时抬高的输出上限（下一 step 生效，成功一次后复位） */
+  private maxTokensBoost = 0
+  /** 最近一次实际请求使用的路由（子代理继承父会话最新选择，而不是创建时的旧配置） */
+  private lastRequestRoute: { provider: string; model: string } | null = null
   /**
    * 本 step 工具参数流式增量累积（callId → JSON 原文）。
    * 仅用于最终 tool_calls 丢参/截断时兜底（见 normalizeToolCalls），每 step 开始前清空。
@@ -1032,6 +1037,7 @@ class AgentImpl implements AgentControl {
     this.emittedResultIds = new Set()
     // max_tokens 截断续跑计数（复刻 DSH 把 finish=max-tokens 当"下一步继续"的信号；见 MAX_LENGTH_CONTINUES）
     let lengthContinues = 0
+    this.maxTokensBoost = 0
     // 本 turn 因输出截断而跳过工具调用的次数（见 MAX_TRUNCATED_TOOL_SKIPS）
     let truncatedToolSkips = 0
     // 循环轮数：由渲染进程按唯一数据源（store.generalAgentMaxSteps / preset.maxSteps）注入；兜底同源默认值
@@ -1121,13 +1127,18 @@ class AgentImpl implements AgentControl {
           if (this.lastFinishReason === 'length') {
             truncatedToolSkips++
             truncatedGiveUp = truncatedToolSkips > MAX_TRUNCATED_TOOL_SKIPS
+            // 下一次续跑给更大的输出预算（每次 +8192，上限 32768），而不是立刻判死。
+            const curMax = Number(this.options.llmConfig?.max_tokens ?? this.options.config?.max_tokens ?? 0) || 0
+            this.maxTokensBoost = Math.min(32768, Math.max(this.maxTokensBoost, curMax + 8192, 16384))
             const notice = truncatedGiveUp
               ? `输出连续 ${MAX_TRUNCATED_TOOL_SKIPS} 次被 max_tokens 截断，已停止派发工具调用。请拆分任务（大文件分段写入）或调高 max_tokens 后重试。`
               : `模型输出被 max_tokens 截断：本步 ${cleanCalls.length} 个工具调用均未执行，已提示模型缩小单次提交量。`
             this.emit('agent/notice', { kind: 'truncated-tool-calls', message: notice })
+            // DSH 的语义：max-tokens 是「本轮输出空间用尽」的终止原因，不是会话错误。
+            // 这里只提示、不把 agent 置为 error；会话保持可继续，用户/父代理可以再发「继续」。
+            // 已经为本步抬高了 maxTokens 预算（见 maxTokensBoost），下一轮会带着更大预算重试。
             if (truncatedGiveUp) {
-              this.setError(notice)
-              this.emit('agent/error', { message: notice })
+              console.warn(`[agent] ${this.id} ${notice}`)
             }
             for (const call of cleanCalls) {
               const callId = String(call?.id || `call-${step}-${Math.random().toString(36).slice(2, 8)}`)
@@ -1177,7 +1188,10 @@ class AgentImpl implements AgentControl {
           console.warn(`[agent] ${this.id} ${message}`)
         }
         // 一旦这一步不再被截断，额度复位（后续新的截断重新享有完整额度）
-        if (!truncation.truncated) lengthContinues = 0
+        if (!truncation.truncated) {
+          lengthContinues = 0
+          this.maxTokensBoost = 0
+        }
 
         // 续跑时不给新的 user 内容：被截断的那半截内容已在历史里（assistant 消息），
         // 模型看到的历史本身就是"说到一半"，直接再请求即从断点继续。
@@ -1890,9 +1904,19 @@ class AgentImpl implements AgentControl {
 
   private async runStepInner(messages: any[]): Promise<{ content: string; toolCalls: any[]; reasoning?: string; usage?: AgentStepUsage; finishReason?: string }> {
     const { provider, config } = this.options
+    this.lastRequestRoute = {
+      provider,
+      model: String((config as any)?.model || (this.options.llmConfig as any)?.model || ''),
+    }
     // Agent/批量工具循环强制关闭深度思考：thinking 模式下（尤其 GPUStack 畸形输出：缺 <think> 开标签、
     // 思考以正文流出）会把思考内容混入/挤掉正文，导致最终无正文结果。home 单轮问答仍由全局推理强度控制。
     const llmConfig = { ...(this.options.llmConfig || {}), think: 'none' }
+    // 工具参数（尤其 write_file 的大段 content）被 max_tokens 截断时，临时提高本步输出上限再试；
+    // 仅限制在 32768 内，避免超过模型/网关输出上限直接 400。
+    if (this.maxTokensBoost > 0) {
+      const current = Number(llmConfig.max_tokens) || 0
+      llmConfig.max_tokens = Math.min(32768, Math.max(current, this.maxTokensBoost))
+    }
     const signal = this.turnController?.signal
     const tools = this.visibleTools()
     let stepUsage: AgentStepUsage | undefined
@@ -2187,7 +2211,7 @@ class AgentImpl implements AgentControl {
       ? `本步输出被截断（finish_reason=length），且已连续 ${MAX_TRUNCATED_TOOL_SKIPS} 次因截断跳过工具调用：本次调用未执行。`
       : '本步输出被截断（finish_reason=length，max_tokens / 上下文长度不够），工具参数 JSON 不完整：本次调用未执行。'
     const advice = name === 'write_file'
-      ? '如果 content 很大，请分段写入：先写文件骨架，再用 replace_in_file 逐段追加（不要一次提交整份大文件）。'
+      ? '如果 content 很大，请分段写入：每次 content 控制在 6000 字符以内；先 write_file 写骨架，再用 replace_in_file 逐段追加（不要一次提交整份大文件）。'
       : name === 'run_code'
         ? '请把程序拆成多次调用、每次只做少量步骤后重试。'
         : '请缩短单次提交的内容，拆成多次调用后重试。'
@@ -2644,6 +2668,11 @@ class AgentImpl implements AgentControl {
       windowTokens: this.effectiveWindowTokens > 0 ? this.effectiveWindowTokens : Number(this.options.contextLimit) || undefined,
         // 当前 agent 的工具白名单（供 run_subagent 等工具继承父级配置）
         tools: this.options.tools,
+        // 父级模型配置：子代理缺省必须与父会话一致，否则会退回 ollama/空 model（提示 model not found）
+        provider: this.options.provider,
+        model: this.lastRequestRoute?.model || String((this.options.config as any)?.model || (this.options.llmConfig as any)?.model || ''),
+        config: this.options.config,
+        llmConfig: this.options.llmConfig,
         // 群成员注册表（swarm 注入；run_subagent(member) 以成员设定建子代理）
         swarmMembers: (this.options as any)?.swarmMembers,
         // 子代理嵌套深度与调用链（tools.ts runSubagent 递归守卫读取）

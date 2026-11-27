@@ -1690,13 +1690,15 @@ const examSummary = computed(() => {
             <span class="exam-src-toggle" @click="q._showSrc = !q._showSrc">
               <i class="fa" :class="q._showSrc ? 'fa-caret-down' : 'fa-caret-right'"></i> {{ store.locales=='zh'?'查看依据切片':'View source slices' }} ({{ q.sourceSlices.length }})
             </span>
-            <span v-if="q.result && q.type !== 'essay'" class="exam-explain-link" @click="explainOneQuestion(q)">
-              <i class="fa" :class="q._explaining ? 'fa-spinner fa-spin' : 'fa-commenting-o'"></i> {{ store.locales=='zh'?'生成解析':'Explain' }}
+            <span class="exam-q-actions">
+              <span v-if="q.result && q.type !== 'essay'" class="exam-explain-link" @click="explainOneQuestion(q)">
+                <i class="fa" :class="q._explaining ? 'fa-spinner fa-spin' : 'fa-commenting-o'"></i> {{ store.locales=='zh'?'生成解析':'Explain' }}
+              </span>
+              <span class="exam-explain-link" @click="emit('ask', q.prompt)"><i class="fa fa-comments-o"></i> {{ store.locales=='zh'?'问一下':'Ask' }}</span>
+              <button class="exam-flag-btn" :class="{ on: flaggedIds.includes(q.id) }" @click="toggleFlag(q)" :title="store.locales === 'zh' ? '标记此题' : 'Flag question'">
+                <i class="fa" :class="flaggedIds.includes(q.id) ? 'fa-flag' : 'fa-flag-o'"></i>
+              </button>
             </span>
-            <span class="exam-explain-link" @click="emit('ask', q.prompt)"><i class="fa fa-comments-o"></i> {{ store.locales=='zh'?'问一下':'Ask' }}</span>
-            <button class="exam-flag-btn" :class="{ on: flaggedIds.includes(q.id) }" @click="toggleFlag(q)" :title="store.locales === 'zh' ? '标记此题' : 'Flag question'">
-              <i class="fa" :class="flaggedIds.includes(q.id) ? 'fa-flag' : 'fa-flag-o'"></i>
-            </button>
           </div>
           <div class="exam-q-prompt learn-md"><block_md :content="q.prompt" :fontSize="'13px'" /></div>
 
@@ -2087,7 +2089,9 @@ const examSummary = computed(() => {
 .exam-result-box { margin-top: 6px; border-top: 1px dashed var(--borderColor); padding-top: 6px; }
 .exam-result-comment { font-size: 12px; margin-top: 3px; color: var(--fontColor); }
 .exam-result-ref { font-size: 12px; margin-top: 3px; color: #2196F3; }
-.exam-explain-link { margin-left: auto; cursor: pointer; font-size: 11px; color: #2196F3; white-space: nowrap; }
+/* 题目右上角操作组：生成解析 / 问一下 / 标记 统一靠右，间距一致 */
+.exam-q-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.exam-explain-link { margin-left: 0; cursor: pointer; font-size: 11px; color: #2196F3; white-space: nowrap; }
 .exam-explain-link:hover { text-decoration: underline; }
 
 /* 考试结果弹窗（判分汇总） */

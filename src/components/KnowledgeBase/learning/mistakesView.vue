@@ -6,8 +6,7 @@ import { explainPrompt, diagramPrompt } from '@/services/learningPrompt'
 import { explainCacheKey } from '@/services/learningRecord'
 import type { ErrType } from '@/services/learningRecord'
 
-const props = defineProps<{
-  store: any
+const props = defineProps<{  store: any
   kb: any
   model: any
   /** 知识库内容语言（'en' 时 AI 讲解用英文，否则优先中文） */
@@ -25,7 +24,7 @@ const emit = defineEmits<{
   explainDrop: [key: string]
   ask: [question: string]
 }>()
-function askActive(): void {
+/** 错题列表里的题干：按 markdown + 公式渲染（HTML 有缓存，列表批量渲染也够快） */function askActive(): void {
   const w = active.value
   if (!w) return
   const parts = [w.a.q]
@@ -195,7 +194,7 @@ async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
           <span style="flex:1;"></span>
           <span class="lk-time">{{ fmt(w.a.at) }}</span>
         </div>
-        <div class="lk-q">{{ w.a.q }}</div>
+        <div class="lk-q"><block_md :content="w.a.q" :fontSize="'12px'" /></div>
       </div>
     </div>
 
@@ -292,7 +291,11 @@ async function regenExplain(w: WrongItem, kind: 'explain' | 'diagram') {
 .lk-etag.procedure { color: #FF9800; border-color: #FF9800; }
 .lk-etag.careless { color: var(--borderColor, #888); }
 .lk-time { font-size: 10px; color: var(--borderColor, #888); white-space: nowrap; }
-.lk-q { font-size: 12px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--fontColor, #1f2328); }
+.lk-q { font-size: 12px; line-height: 1.5; max-height: 44px; overflow: hidden; color: var(--fontColor, #1f2328); word-break: break-word; }
+.lk-q :deep(.mddiv) { max-height: 44px; overflow: hidden; line-height: 1.5; }
+.lk-q :deep(p) { margin: 0; }
+.lk-q :deep(img) { max-height: 36px; border-radius: 3px; }
+.lk-q :deep(svg), .lk-q :deep(mjx-container) { max-width: 100%; }
 /* 右侧详情 */
 .lk-detail-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--borderColor, #d0d7de); flex-shrink: 0; flex-wrap: wrap; }
 /* 头部操作按钮紧凑，随头部固定 */

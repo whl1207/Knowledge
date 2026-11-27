@@ -128,7 +128,7 @@ const SCHEMAS: Record<string, any> = {
     offset: num('起始行号（1-based；续读时传上次末尾提示里的 offset）'),
     limit: num('本次最多返回多少行（默认 2000，上限 2000）'),
   }, ['path']),
-  write_file: fn('write_file', '写入文件（UTF-8，自动创建父目录）。已存在则整体覆盖；只改一小段请优先用 replace_in_file。单次 content 建议不超过约 20000 字符（越大越容易撞到模型 max_tokens 而被截断）：更大的文件请分段写——先写第一部分，再用 replace_in_file 逐段追加。单次硬上限 1 MiB（超过直接拒绝，不写盘）。', {
+  write_file: fn('write_file', '写入文件（UTF-8，自动创建父目录）。已存在则整体覆盖；只改一小段请优先用 replace_in_file。单次 content 建议不超过约 6000 字符（越大越容易撞到模型 max_tokens 而被截断）：更大的文件请分段写——先写第一部分，再用 replace_in_file 逐段追加。单次硬上限 1 MiB（超过直接拒绝，不写盘）。', {
     path: str('文件路径'),
     content: str('完整文件内容'),
   }, ['path', 'content']),

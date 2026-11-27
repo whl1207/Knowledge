@@ -153,7 +153,7 @@ export function toolGateReason(tool: string, env: ToolGateEnv = {}, zh = true): 
   if (env.supportsVision === false && (name === 'read_image' || name === 'browser_screenshot')) {
     return zh ? '当前模型不支持图片输入' : 'Current model cannot take images'
   }
-  if (env.sandboxMode === 'safe' && (name === 'shell' || ['write_file', 'replace_in_file', 'multi_replace'].includes(name))) {
+  if (env.sandboxMode === 'safe' && (name === 'shell' || ['write_file', 'replace_in_file', 'multi_replace', 'apply_patch'].includes(name))) {
     return zh ? '「只读」沙箱模式不可写入 / 执行命令' : 'Writes and shell are disabled in read-only sandbox mode'
   }
   if (env.hasKnowledge === false && name === 'kb_search') {

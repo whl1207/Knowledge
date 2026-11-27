@@ -203,19 +203,6 @@
             </svg>
           </div>
         </div>
-        <div v-if="currentChat.mode === 'retrieval' && currentChat.config.kbPath" class="parameter" :title="store.locales=='zh' ? '知识库片段数量' : 'Knowledge Base Fragment Count'">
-          <label>{{ currentChat.config.kbTopK || 5 }}</label>
-          <input 
-            type="range" 
-            v-model.number="currentChat.config.kbTopK" 
-            min="3" 
-            max="20" 
-            step="1"
-            class="param-slider"
-            :disabled="isAnyExecuting"
-          >
-        </div>
-        <!-- 后台命令（shell run_in_background / 前台超时转后台）：有任务时才出现 -->
         <ShellJobsBadge />
         <!-- 右侧栏开关（DSH 同款）：文件 / 终端 / 浏览器，配置按聊天各自保存；
              样式与左侧 fa-bars 开关一致（纯图标，无边框 / 无盒底） -->
@@ -438,6 +425,17 @@
             
             <!-- 右侧信息：时间 + Token统计 -->
             <span class="message-right-info">
+              <!-- 知识召回：每条助手消息关联自己那一轮的召回，点击在右侧栏查看 -->
+              <span
+                v-if="message.role === 'assistant' && message.kbInfo?.relevantBlocks?.length && !message.isExecuting"
+                class="kb-recall-badge"
+                :class="{ active: activeRecallKey === recallKeyOf(message, index) }"
+                :title="store.locales=='zh' ? '在右侧栏查看本轮召回的知识片段' : 'View this turn’s recalled chunks in the side panel'"
+                @click.stop="openRecallForMessage(message, index)"
+              >
+                <i class="fa fa-book"></i>
+                <span>{{ message.kbInfo.relevantBlocks.length }}</span>
+              </span>
               <!-- Token 统计 - 仅对 assistant 消息显示 -->
               <span v-if="message.role === 'assistant' && message.tokenStats" class="token-stats" :title="getTokenTooltip(message)">
                 <span class="token-count">
@@ -489,27 +487,6 @@
           </div>
           
           <!-- 知识库来源（仅助理消息显示） -->
-          <div v-if="message.role === 'assistant' && message.kbInfo?.relevantBlocks?.length && !message.isExecuting" class="kb-sources">
-            <div class="kb-sources-header">
-              <i class="fa fa-book"></i>
-              <span>{{ store.locales=='zh' ? '参考了' : 'Sources' }} {{ message.kbInfo.relevantBlocks.length }} {{ store.locales=='zh' ? '个知识片段' : 'knowledge chunks' }}</span>
-            </div>
-            <div
-              v-for="(block, bi) in message.kbInfo.relevantBlocks"
-              :key="bi"
-              class="kb-block-item"
-              @click="toggleKbBlock(bi)"
-            >
-              <div class="kb-block-header">
-                <span class="kb-block-label">{{ block.label || ('#' + (bi+1)) }}</span>
-                <span class="kb-block-score">{{ (block.similarity * 100).toFixed(0) }}%</span>
-                <i class="fa fa-chevron-down" :class="{ expanded: expandedKbBlock === bi }"></i>
-              </div>
-              <div v-if="expandedKbBlock === bi" class="kb-block-content scoll">{{ block.content }}</div>
-            </div>
-          </div>
-          <!-- 联网搜索状态与来源（普通聊天显示；智能体模式的结果已内联到「服务端搜索」tool-box 卡片中，
-               避免同一结果重复展示） -->
           <div v-if="message.role === 'assistant' && message.webSearch && message.executionType !== 'skill'" class="web-search-info">
             <div v-if="message.webSearch.status === 'searching'" class="web-search-status">
               <i class="fa fa-globe fa-spin"></i>
@@ -1310,6 +1287,25 @@
                   <i v-if="currentChat.config.retrievalStrategy === s.value" class="fa fa-check composer-panel-check"></i>
                 </div>
               </div>
+              <!-- 召回数量：从聊天头部移到输入区，和知识库 / 策略等 chip 一起 -->
+              <div
+                v-if="currentChat.mode === 'retrieval' && currentChat.config.kbPath"
+                class="kb-topk-chip composer-chip"
+                :title="store.locales=='zh' ? '本轮从知识库召回的片段数量（3–20）' : 'Number of chunks retrieved from the knowledge base (3–20)'"
+              >
+                <i class="fa fa-cubes"></i>
+                <span class="composer-chip-label">{{ store.locales=='zh' ? '召回' : 'TopK' }}</span>
+                <input
+                  class="kb-topk-input"
+                  type="number"
+                  min="3"
+                  max="20"
+                  step="1"
+                  :value="currentChat.config.kbTopK || 5"
+                  :disabled="isAnyExecuting"
+                  @input="onKbTopKInput"
+                />
+              </div>
               <span
                 v-if="currentChat.mode === 'agent' || currentChat.mode === 'agent2'"
                 class="mode-linked-chip composer-chip agent-linked-chip"
@@ -1689,6 +1685,15 @@
       <template #trajectory>
         <ChatDockTrajectory :chat="currentChat" :zh="store.locales == 'zh'" />
       </template>
+      <!-- 知识召回：按轮次查看本轮实际召回的切片（替代消息气泡里的 kb-sources） -->
+      <template #recall>
+        <ChatDockRecall
+          :entries="recallEntries"
+          :active-key="activeRecallKey"
+          :zh="store.locales == 'zh'"
+          @select="selectRecallEntry"
+        />
+      </template>
     </ChatDock>
       </div>
     </Transition>
@@ -1843,9 +1848,11 @@ import {
   setDockWidth as setDockWidthState,
   type ChatDockState,
   type ChatDockTabKind,
+  type ChatDockRecallEntry,
 } from '@/shared/chatDock'
 import ChatDock from '@/components/home/ChatDock.vue'
 import ChatDockTrajectory from '@/components/home/ChatDockTrajectory.vue'
+import ChatDockRecall from '@/components/home/ChatDockRecall.vue'
 import ShellJobsBadge from '@/components/home/ShellJobsBadge.vue'
 // PTC（Code Mode）：run_code 输出解析（返回值 / console 日志 / 程序内调用的工具）
 import { extractPtcRunOutput, formatPtcValue, type PtcRunOutput } from '@/lib/agent/ptc'
@@ -3009,11 +3016,6 @@ const openMermaidModal = (source: string) => { mermaidViewerRef.value?.open({ so
 
 // 状态变量
 const retrievalStats = ref<RetrievalStats | null>(null)
-const expandedKbBlock = ref<number | null>(null)
-
-const toggleKbBlock = (index: number) => {
-  expandedKbBlock.value = expandedKbBlock.value === index ? null : index
-}
 
 // 打开联网搜索结果对应的网页
 const openWebResult = (result: any) => {
@@ -3328,6 +3330,104 @@ const onInputContextMenu = (e: MouseEvent) => {
 
 // ==================== 计算属性 ====================
 const currentChat = computed(() => chats.value[currentChatIndex.value])
+
+// ==================== 知识召回（右侧栏，按轮次关联） ====================
+/** 一条助手消息的稳定键：优先 requestId，旧存档没有时用 timestamp + 下标 */
+const recallKeyOf = (message: any, index: number) =>
+  `${String(message?.requestId || message?.timestamp || 0)}-${index}`
+
+/** 当前对话里所有带召回结果的助手消息（每一轮一份，互不覆盖） */
+const recallEntries = computed<ChatDockRecallEntry[]>(() => {
+  const msgs: any[] = currentChat.value?.messages || []
+  const out: ChatDockRecallEntry[] = []
+  let userTurn = 0
+  msgs.forEach((message, index) => {
+    if (message?.role === 'user') userTurn += 1
+    let blocks = message?.role === 'assistant' ? message?.kbInfo?.relevantBlocks : null
+    let kbPath = message?.kbInfo?.kbPath || ''
+    // 智能体模式：知识库检索来自 kb_search 工具结果，不在 message.kbInfo 里
+    if (message?.role === 'assistant' && (!Array.isArray(blocks) || !blocks.length)) {
+      const kbUnits = (Array.isArray(message.executionUnits) ? message.executionUnits : [])
+        .filter((u: any) => u?.description === 'kb_search' && u?.status === 'success' && Array.isArray(u?.result?.blocks) && u.result.blocks.length)
+      if (kbUnits.length) {
+        blocks = kbUnits.flatMap((u: any) => u.result.blocks)
+        kbPath = String(kbUnits[0]?.result?.kbPaths?.[0] || kbUnits[0]?.result?.kbPath || 'agent-kb')
+      }
+    }
+    if (!Array.isArray(blocks) || !blocks.length) return
+    let question = ''
+    for (let j = index - 1; j >= 0; j -= 1) {
+      if (msgs[j]?.role === 'user') {
+        question = String(msgs[j].content || '').replace(/\s+/g, ' ').trim().slice(0, 72)
+        break
+      }
+    }
+    out.push({
+      key: recallKeyOf(message, index),
+      turn: Math.max(1, userTurn),
+      question,
+      kbPath,
+      blocks: blocks.map((b: any) => ({
+        label: String(b?.label || ''),
+        content: String(b?.content || ''),
+        similarity: typeof b?.similarity === 'number' ? b.similarity : undefined,
+      })),
+    })
+  })
+  return out
+})
+
+/** 当前侧栏显示的召回轮次（默认最近一轮） */
+const activeRecallKey = ref('')
+watch(recallEntries, (list, previous) => {
+  const lastKey = list.length ? list[list.length - 1].key : ''
+  const previousLastKey = previous && previous.length ? previous[previous.length - 1].key : ''
+  // 用户停在最新一轮时自动跟随新回复；手动选了旧轮次则保持不动
+  if (!activeRecallKey.value || activeRecallKey.value === previousLastKey || !list.some((entry) => entry.key === activeRecallKey.value)) {
+    activeRecallKey.value = lastKey
+  }
+}, { immediate: true })
+
+const selectRecallEntry = (key: string) => {
+  if (key) activeRecallKey.value = key
+}
+
+/** 输入区「召回数量」：夹在 3–20，写回当前聊天配置 */
+const onKbTopKInput = (e: Event) => {
+  const chat = currentChat.value
+  if (!chat) return
+  const raw = Number((e.target as HTMLInputElement).value)
+  if (!Number.isFinite(raw)) return
+  chat.config.kbTopK = Math.max(3, Math.min(20, Math.round(raw)))
+  saveChats()
+}
+
+/** 打开（或切到）右侧栏的「知识召回」标签 */
+const openRecallDock = () => {
+  const existing = dockState.value.tabs.find((tab) => tab.kind === 'recall')
+  if (existing) {
+    dockState.value = setDockOpenState(activateDockTab(dockState.value, existing.id), true)
+  } else {
+    dockState.value = addDockTab(dockState.value, 'recall')
+  }
+  saveChats()
+}
+
+/** 点某条助手消息上的「召回 N」：选中该轮的召回并打开右侧栏 */
+const openRecallForMessage = (message: any, index: number) => {
+  activeRecallKey.value = recallKeyOf(message, index)
+  openRecallDock()
+}
+
+// 智能体模式：kb_search 产生新的召回结果时，自动打开右侧「知识召回」。
+// 用户正停在其他标签（文件 / 终端）时不抢焦点；仅在侧栏收起、空面板或已经在该标签时打开。
+watch(() => recallEntries.value.length, (next, previous) => {
+  if (next <= (previous || 0)) return
+  const mode = String(currentChat.value?.mode || '')
+  if (mode !== 'agent' && mode !== 'agent2') return
+  const kind = activeDockTabView.value?.kind
+  if (!dockState.value.open || !kind || kind === 'recall') openRecallDock()
+})
 
 // 切到不显示工作区选择器的模式（普通 / 知识库 / 工作流）时收掉浮层，避免切回来时它自己又弹出来。
 // 放在 currentChat 之后：watch 建立时会立刻跑一次 getter 取旧值，提前会撞上 currentChat 的 TDZ。
@@ -12337,6 +12437,42 @@ const scrollDetailsContentToBottom = (element: HTMLElement) => {
   box-sizing: border-box;
   height: 29px;
 }
+/* 召回数量：输入区 chip（从聊天头部的滑块移下来） */
+.kb-topk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--borderColor);
+  border-radius: 4px;
+  background-color: var(--menuColor);
+  font-size: 11px;
+  color: var(--fontColor);
+  cursor: default;
+}
+.kb-topk-chip i { font-size: 11px; flex-shrink: 0; }
+.kb-topk-chip .composer-chip-label { font-size: 11px; }
+.kb-topk-input {
+  width: 22px;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fontColor);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  outline: none;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.kb-topk-input::-webkit-inner-spin-button,
+.kb-topk-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.kb-topk-input:disabled { opacity: .55; }
 .input-controls .composer-chip .composer-chip-label {
   min-width: 0;
   overflow: hidden;
@@ -16451,6 +16587,28 @@ select {
   color: var(--borderColor);
   flex-shrink: 0;
 }
+
+/* 知识召回入口：每条助手消息一个，点击在右侧栏打开对应轮次 */
+.kb-recall-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+  height: 18px;
+  border: 1px solid var(--borderColor);
+  border-radius: 9px;
+  color: var(--fontColor);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color .15s, color .15s, background-color .15s;
+}
+.kb-recall-badge:hover,
+.kb-recall-badge.active {
+  border-color: var(--fontActiveColor);
+  color: var(--fontActiveColor);
+  background: var(--menuActiveColor);
+}
+.kb-recall-badge .fa { font-size: 9px; }
 
 /* Token 统计样式 */
 .token-stats {

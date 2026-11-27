@@ -33,6 +33,7 @@ export const SKILL_AGENT_DEFAULT_TOOLS = [
   'write_file',
   'replace_in_file',
   'multi_replace',
+  'apply_patch',
   'present',
   'list_dir',
   'search_files',

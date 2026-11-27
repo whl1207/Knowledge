@@ -13,6 +13,8 @@
  */
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { usestore } from '@/store'
+import { getPlatform } from '@/platform'
+import TurndownService from 'turndown'
 import {
   LIST_TYPES,
   createBlock,
@@ -172,28 +174,51 @@ function editableText(b: Block): string {
 }
 
 /** 把快照写回模型（撤销/重做用） */
-function applySnapshot(s: Snapshot) {
+/** 最近一次在正文块里的光标位置；撤销/菜单操作时作为 activeElement 不在 textarea 的兜底 */
+const lastCaret = reactive({ index: 0, offset: 0 })
+
+/** 防止撤销/重做在异常情况下递归触发（历史上出现过撤销后再次回调导致死循环） */
+let restoringSnapshot = false
+
+/** 保留当前滚动位置，避免撤销后视口跳回文档开头 */
+function applySnapshot(s: Snapshot, keepScroll = true) {
+  if (restoringSnapshot) return
+  restoringSnapshot = true
+  const scrollTop = keepScroll ? rootRef.value?.scrollTop : undefined
+  const prevBlocks = doc.value.blocks
   doc.value = parseMarkdown(s.md)
+  // 尽量沿用旧 block id：撤销通常只改一两块，复用 id 后 refreshRendered 能按签名跳过未变块，
+  // 避免整篇重建导致大文档 Ctrl+Z 卡住。
+  doc.value.blocks.forEach((b, i) => {
+    if (prevBlocks[i]) b.id = prevBlocks[i].id
+  })
   ensurePlaceholderBlock()
-  blockHtml.clear()
-  blockSig.clear()
   editingId.value = null
   const idx = Math.max(0, Math.min(s.index, doc.value.blocks.length - 1))
   scheduleStats()
-  refreshRendered(true)
-  nextTick(() => focusBlock(idx, s.offset))
+  refreshRendered()
+  nextTick(() => {
+    try {
+      if (scrollTop != null && rootRef.value) rootRef.value.scrollTop = scrollTop
+      focusBlock(idx, s.offset)
+    } finally {
+      window.setTimeout(() => { restoringSnapshot = false }, 0)
+    }
+  })
 }
 
 function currentSnapshot(label: string, md: string): Snapshot {
   const el = document.activeElement as HTMLElement | null
-  let index = activeIndex.value
-  let offset = 0
+  let index = lastCaret.index
+  let offset = lastCaret.offset
   if (el && el.tagName === 'TEXTAREA' && el.hasAttribute('data-id')) {
     const id = el.getAttribute('data-id')!
     const i = doc.value.blocks.findIndex((b) => b.id === id)
     if (i >= 0) {
       index = i
       offset = (el as HTMLTextAreaElement).selectionStart ?? 0
+      lastCaret.index = index
+      lastCaret.offset = offset
     }
   }
   return { md, index, offset, label }
@@ -203,7 +228,11 @@ function currentSnapshot(label: string, md: string): Snapshot {
 function commit(label: string, opts: { focus?: Caret | null; coalesce?: boolean } = {}) {
   if (!opts.coalesce) history.breakCoalesce()
   const md = serializeMarkdown(doc.value)
-  history.commit(currentSnapshot(label, md))
+  const snap = currentSnapshot(label, md)
+  // 第一次编辑前，初始快照还停在打开文件时的第 0 块；把它的光标挪到本次编辑处，
+  // 撤销时才不会“跳回文档开头”。
+  if (!history.canUndo) history.setInitialCaret(snap.index, snap.offset)
+  history.commit(snap)
   emit('change', md)
   if (opts.focus) focusBlock(opts.focus.index, opts.focus.offset)
   // 连续输入时只有当前块在变（且它正在编辑、会被跳过），无需全量刷新
@@ -308,6 +337,8 @@ function focusBlock(index: number, offset: number) {
     el.focus()
     const off = toEnd ? el.value.length : Math.min(offset, el.value.length)
     el.setSelectionRange(off, off)
+    lastCaret.index = index
+    lastCaret.offset = off
     grow(el)
     scrollIntoViewIfNeeded(el)
   })
@@ -351,7 +382,19 @@ function hasRenderedSelection(): boolean {
 }
 
 /** 渲染态点击：复选框就地勾选，链接放行，拖选文字时不进编辑（留给复制），其余进入编辑 */
+/** 图片上按下即拖整块（不触发浏览器原生“拖图片”行为） */
+function onRenderedPointerDown(index: number, e: PointerEvent) {
+  if ((e.target as HTMLElement)?.tagName !== 'IMG') return
+  suppressRenderedClick = false
+  onHandleDown(index, e)
+}
+
 function onRenderedClick(index: number, e: MouseEvent) {
+  if (suppressRenderedClick) {
+    suppressRenderedClick = false
+    e.preventDefault()
+    return
+  }
   const t = e.target as HTMLElement
   if (t instanceof HTMLInputElement && t.type === 'checkbox') {
     e.preventDefault()
@@ -643,6 +686,8 @@ function onInput(i: number, e: Event) {
   const el = e.target as HTMLTextAreaElement
   const b = doc.value.blocks[i]
   if (!b) return
+  lastCaret.index = i
+  lastCaret.offset = el.selectionStart ?? 0
   if (b.type === 'code') setContentText(b, el.value)
   else if (b.type === 'math' || formulaParagraph(b)) setFormulaText(b, el.value)
   else setBlockText(b, el.value)
@@ -762,8 +807,28 @@ function previewMermaid(b: Block) {
   mermaidViewerRef.value?.open({ source, title: b.props.lang ? `${b.props.lang} 图表` : undefined })
 }
 
+/** 聚焦正文块：同时记录光标位置，供撤销/菜单操作兜底 */
+function onFocusBlock(i: number, e: FocusEvent) {
+  activeIndex.value = i
+  const el = e.target as HTMLTextAreaElement
+  lastCaret.index = i
+  lastCaret.offset = el.selectionStart ?? 0
+}
+
 function onBlockClick(i: number, e: MouseEvent) {
+  const el = e.target as HTMLTextAreaElement
+  if (el && el.tagName === 'TEXTAREA') {
+    lastCaret.index = i
+    lastCaret.offset = el.selectionStart ?? 0
+  }
   maybeSlash(i, e.target as HTMLTextAreaElement)
+}
+
+/** 右键块：渲染态打开块菜单（含复制/粘贴）；输入框内保留浏览器原生文本菜单 */
+function onBlockContextMenu(i: number, e: MouseEvent) {
+  const t = e.target as HTMLElement | null
+  if (t?.closest('textarea, input, [contenteditable="true"], .monaco-editor')) return
+  openBlockMenu(i, e)
 }
 
 // --- 键盘 ------------------------------------------------------------------
@@ -778,10 +843,66 @@ function wrapSelection(el: HTMLTextAreaElement, before: string, after = before) 
   el.setSelectionRange(s + before.length, s + before.length + sel.length)
 }
 
+// --- 选中文字浮动工具条 -------------------------------------------------------
+
+const selBar = reactive({ open: false, x: 0, y: 0, index: -1, start: 0, end: 0 })
+
+function hideSelBar() {
+  selBar.open = false
+}
+
+/** 选区变化时更新浮条位置：贴近选区所在行上方 */
+function updateSelBar(i: number, el: HTMLTextAreaElement) {
+  const s = el.selectionStart ?? 0
+  const e = el.selectionEnd ?? 0
+  if (s === e || document.activeElement !== el) {
+    hideSelBar()
+    return
+  }
+  const rect = el.getBoundingClientRect()
+  const lh = parseFloat(getComputedStyle(el).lineHeight) || 18
+  const line = el.value.slice(0, s).split('\n').length - 1
+  selBar.index = i
+  selBar.start = s
+  selBar.end = e
+  selBar.x = Math.max(8, Math.min(rect.left + 12, window.innerWidth - 300))
+  selBar.y = Math.max(8, rect.top + line * lh - 38)
+  selBar.open = true
+}
+
+function onSelectBar(i: number, e: Event) {
+  selectionTick.value++
+  const el = e.target as HTMLTextAreaElement
+  if (el && el.tagName === 'TEXTAREA') updateSelBar(i, el)
+}
+
+function applySelWrap(before: string, after = before) {
+  const i = selBar.index
+  const el = textareaEl(blocks.value[i]?.id || '')
+  if (!el) return
+  el.focus()
+  el.setSelectionRange(selBar.start, selBar.end)
+  wrapSelection(el, before, after)
+  nextTick(() => updateSelBar(i, el))
+}
+
+function applySelLink() {
+  const url = window.prompt(zh.value ? '链接地址（可留空只保留文字）' : 'Link URL (leave empty for text only)', 'https://')
+  if (url === null) return
+  if (!url.trim()) applySelWrap('', '')
+  else applySelWrap('[', `](${url.trim()})`)
+}
+
+function applySelMath() {
+  applySelWrap('$', '$')
+}
+
 function onKeydown(i: number, e: KeyboardEvent) {
   const el = e.target as HTMLTextAreaElement
   const b = doc.value.blocks[i]
   if (!b) return
+  lastCaret.index = i
+  lastCaret.offset = el.selectionStart ?? 0
   const mod = e.ctrlKey || e.metaKey
 
   // 撤销 / 重做
@@ -823,6 +944,7 @@ function onKeydown(i: number, e: KeyboardEvent) {
 
   if (mod && !e.altKey) {
     const k = e.key.toLowerCase()
+    if (k === 'v' && e.shiftKey) { plainPasteOnce = true; return } // 让浏览器继续触发 paste，onPaste 只取纯文本
     if (k === 'b') { e.preventDefault(); wrapSelection(el, '**'); return }
     if (k === 'i') { e.preventDefault(); wrapSelection(el, '*'); return }
     if (k === 'e') { e.preventDefault(); wrapSelection(el, '`'); return }
@@ -911,18 +1033,37 @@ function onDividerKeydown(i: number, e: KeyboardEvent) {
   }
 }
 
+let lastUndoAt = 0
 function doUndo() {
+  if (restoringSnapshot) return
+  const now = Date.now()
+  if (now - lastUndoAt < 80) return // 按住 Ctrl+Z 时避免每 30ms 重建一次整篇
+  lastUndoAt = now
   const s = history.undo()
   if (!s) return
   applySnapshot(s)
   emit('change', serializeMarkdown(doc.value))
+  flashUndoToast(zh.value ? '已撤销' : 'Undone')
 }
 
 function doRedo() {
+  if (restoringSnapshot) return
+  const now = Date.now()
+  if (now - lastUndoAt < 80) return
+  lastUndoAt = now
   const s = history.redo()
   if (!s) return
   applySnapshot(s)
   emit('change', serializeMarkdown(doc.value))
+  flashUndoToast(zh.value ? '已重做' : 'Redone')
+}
+
+const undoToast = ref('')
+let undoToastTimer: number | null = null
+function flashUndoToast(text: string) {
+  undoToast.value = text
+  if (undoToastTimer) window.clearTimeout(undoToastTimer)
+  undoToastTimer = window.setTimeout(() => { undoToast.value = '' }, 1400)
 }
 
 // --- 粘贴 / 插入 -----------------------------------------------------------
@@ -942,11 +1083,76 @@ function insertMarkdownAfter(index: number, md: string, focusFirst = true) {
   commit('structure', { focus })
 }
 
-function onPaste(i: number, e: ClipboardEvent) {
-  const text = e.clipboardData?.getData('text/plain') ?? ''
-  if (!text.includes('\n')) return // 单行走默认行为
+let turndown: TurndownService | null = null
+let plainPasteOnce = false
+
+/** 网页 / Word 复制来的 HTML → Markdown（保留标题、列表、表格、链接） */
+function htmlToMarkdown(html: string): string {
+  if (!turndown) {
+    turndown = new TurndownService({
+      headingStyle: 'atx',
+      codeBlockStyle: 'fenced',
+      bulletListMarker: '-',
+      emDelimiter: '*',
+      strongDelimiter: '**',
+    })
+    turndown.keep(['table', 'thead', 'tbody', 'tr', 'th', 'td'])
+  }
+  return turndown.turndown(html).replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/** 剪贴板图片落到文档同目录 assets/，返回插入用的相对路径 */
+async function saveClipboardImage(file: File, dir: string, index: number): Promise<string> {
+  const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')
+  const name = `paste-${Date.now()}-${index}.${ext}`
+  const rel = `assets/${name}`
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+  const assetsDir = dir.replace(/[\\/]+$/, '') + '/assets'
+  await getPlatform().fs.ensureDir(assetsDir)
+  const ok = await getPlatform().fs.writeBase64(assetsDir + '/' + name, dataUrl)
+  if (!ok) throw new Error('write failed')
+  return rel
+}
+
+async function onPaste(i: number, e: ClipboardEvent) {
+  const plain = plainPasteOnce
+  plainPasteOnce = false
+  const cd = e.clipboardData
+  if (!cd) return
+
+  // 1) 截图 / 复制图片：保存到 assets 并插入
+  const images = Array.from(cd.files || []).filter((f) => f.type.startsWith('image/'))
+  if (images.length) {
+    e.preventDefault()
+    const dir = props.path ? props.path.replace(/[\\/][^\\/]+$/, '') : props.basePath
+    if (!dir) return
+    try {
+      const rels: string[] = []
+      for (let k = 0; k < images.length; k++) rels.push(await saveClipboardImage(images[k], dir, k))
+      insertMarkdownAfter(i, rels.map((r) => `![](${r})`).join('\n\n'), true)
+    } catch (err) {
+      console.warn('[paste image] failed', err)
+    }
+    return
+  }
+
+  // 2) 富文本优先转 Markdown（纯文本粘贴时跳过）
+  const text = cd.getData('text/plain') ?? ''
+  const html = plain ? '' : cd.getData('text/html') ?? ''
+  let md = ''
+  if (html.trim()) {
+    try { md = htmlToMarkdown(html) } catch { md = '' }
+  }
+  if (!md.trim()) md = text
+  md = md.replace(/\r\n?/g, '\n')
+  if (!md.includes('\n')) return // 单行走浏览器默认粘贴
   e.preventDefault()
-  const chunks = text.replace(/\r\n?/g, '\n').split(/\n{2,}/).map((c) => c.trimEnd()).filter((c) => c.trim() !== '')
+  const chunks = md.split(/\n{2,}/).map((c) => c.trimEnd()).filter((c) => c.trim() !== '')
   if (!chunks.length) return
   insertMarkdownAfter(i, chunks.join('\n\n'))
 }
@@ -1018,7 +1224,7 @@ function applySlash(item: BlockTypeItem) {
 
 // --- 块菜单（左侧手柄下拉） -------------------------------------------------
 
-const menu = reactive({ open: false, x: 0, y: 0, index: -1, subIndex: 0 })
+const menu = reactive({ open: false, x: 0, y: 0, index: -1, subIndex: 0, image: false })
 const menuRef = ref<HTMLElement | null>(null)
 /** 「转换为」子菜单的落位（top 为相对父项的偏移；left=右侧放不下时改为向左展开） */
 const typeSub = reactive({ left: false, top: -4 })
@@ -1040,16 +1246,55 @@ function clampMenuRect() {
 }
 
 function openBlockMenu(i: number, e: MouseEvent) {
-  const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
-  const pos = clampMenu(r.left, r.bottom + 4, 200, 260)
+  const target = e.target as HTMLElement | null
+  const isImage = !!target?.closest('img')
+  const r = e.type === 'contextmenu'
+    ? { left: e.clientX, bottom: e.clientY - 2 }
+    : (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const pos = clampMenu(r.left, r.bottom + 4, 220, 320)
   menu.open = true
   menu.index = i
   menu.subIndex = 0
+  menu.image = isImage
   typeSub.left = false
   typeSub.top = -4
   menu.x = pos.x
   menu.y = pos.y
   clampMenuRect()
+}
+
+/** 修改当前图片的宽度 / 对齐（写成 HTML img，Markdown 渲染器支持） */
+function applyImageStyle(kind: 'width' | 'align', value: string) {
+  const i = menu.index
+  const b = doc.value.blocks[i]
+  menu.open = false
+  if (!b) return
+  const body = bodyOf(b)
+  const htmlMatch = body.match(/<img\b[^>]*>/i)
+  const mdMatch = body.match(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/)
+  if (!htmlMatch && !mdMatch) return
+  const raw = htmlMatch ? htmlMatch[0] : mdMatch![0]
+  const src = /src=["']([^"']+)["']/i.exec(raw)?.[1] || mdMatch?.[2] || ''
+  const alt = /alt=["']([^"']*)["']/i.exec(raw)?.[1] || mdMatch?.[1] || ''
+  const style = /style=["']([^"']*)["']/i.exec(raw)?.[1] || ''
+  const styles = new Map<string, string>()
+  style.split(';').map((s) => s.trim()).filter(Boolean).forEach((s) => {
+    const idx = s.indexOf(':')
+    if (idx > 0) styles.set(s.slice(0, idx).trim(), s.slice(idx + 1).trim())
+  })
+  if (kind === 'width') {
+    styles.set('width', `${value}%`)
+    styles.set('height', 'auto')
+  } else {
+    styles.set('display', 'block')
+    if (value === 'center') { styles.set('margin-left', 'auto'); styles.set('margin-right', 'auto') }
+    else if (value === 'right') { styles.set('margin-left', 'auto'); styles.set('margin-right', '0') }
+    else { styles.set('margin-left', '0'); styles.set('margin-right', 'auto') }
+  }
+  const styleText = Array.from(styles.entries()).map(([k, v]) => `${k}:${v}`).join(';')
+  const img = `<img src="${src}" alt="${alt}" style="${styleText}">`
+  setBlockText(b, body.replace(raw, img))
+  commit('structure', { focus: { index: i, offset: -1 } })
 }
 
 /**
@@ -1078,10 +1323,88 @@ function menuSetType(item: BlockTypeItem) {
   commit('structure', { focus: c })
 }
 
-function menuDuplicate() {
+const copiedBlockMd = ref('')
+/** 多块选择：shift+点击块形成连续范围 */
+const multi = reactive({ from: -1, to: -1 })
+const multiActive = computed(() => multi.from >= 0 && multi.to >= 0)
+const multiCount = computed(() => (multiActive.value ? Math.abs(multi.to - multi.from) + 1 : 0))
+
+function inMulti(i: number): boolean {
+  if (!multiActive.value) return false
+  const a = Math.min(multi.from, multi.to)
+  const b = Math.max(multi.from, multi.to)
+  return i >= a && i <= b
+}
+
+function clearMulti() {
+  multi.from = -1
+  multi.to = -1
+}
+
+function onBlockPointerDown(i: number, e: PointerEvent) {
+  if (!e.shiftKey && multiActive.value && (e.target as HTMLElement)?.tagName !== 'TEXTAREA') clearMulti()
+}
+
+function onBlockShiftClick(i: number, e: MouseEvent) {
+  const t = e.target as HTMLElement
+  if (t?.tagName === 'TEXTAREA') return
+  e.preventDefault()
+  const anchor = multiActive.value ? multi.from : activeIndex.value
+  multi.from = Math.min(anchor, i)
+  multi.to = Math.max(anchor, i)
+}
+
+function multiMarkdown(): { from: number; count: number; md: string } {
+  const from = Math.min(multi.from, multi.to)
+  const to = Math.max(multi.from, multi.to)
+  const blocks = doc.value.blocks.slice(from, to + 1)
+  return { from, count: blocks.length, md: serializeMarkdown({ ...doc.value, blocks }).trimEnd() }
+}
+
+function copyMulti() {
+  const { md } = multiMarkdown()
+  copiedBlockMd.value = md
+  navigator.clipboard?.writeText(md).catch(() => {})
+}
+
+function cutMulti() {
+  const { from, count, md } = multiMarkdown()
+  copiedBlockMd.value = md
+  navigator.clipboard?.writeText(md).catch(() => {})
+  doc.value.blocks.splice(from, count)
+  ensurePlaceholderBlock()
+  clearMulti()
+  commit('structure', { focus: { index: Math.max(0, from - 1), offset: -1 } })
+}
+
+function deleteMulti() {
+  const { from, count } = multiMarkdown()
+  doc.value.blocks.splice(from, count)
+  ensurePlaceholderBlock()
+  clearMulti()
+  commit('structure', { focus: { index: Math.max(0, from - 1), offset: -1 } })
+}
+
+function menuCopy() {
+  const i = menu.index
+  const b = doc.value.blocks[i]
+  menu.open = false
+  if (!b) return
+  const md = serializeMarkdown({ ...doc.value, blocks: [b] }).trimEnd()
+  copiedBlockMd.value = md
+  navigator.clipboard?.writeText(md).catch(() => {})
+}
+
+async function menuPaste() {
+
   const i = menu.index
   menu.open = false
-  insertMarkdownAfter(i, serializeMarkdown({ ...doc.value, blocks: [doc.value.blocks[i]] }).trimEnd(), false)
+  let md = copiedBlockMd.value
+  if (!md.trim()) {
+    try { md = (await navigator.clipboard.readText()) || '' } catch { /* 无剪贴板权限时忽略 */ }
+  }
+  if (!md.trim()) return
+  insertMarkdownAfter(i, md, true)
 }
 
 function menuDelete() {
@@ -1106,6 +1429,9 @@ function menuIndent(delta: number) {
 
 const dragState = reactive({ active: false, from: -1, to: -1, y: 0, x: 0, text: '', indent: 0 })
 let dragRects: Array<{ top: number; height: number }> = []
+let dragStart = { x: 0, y: 0 }
+let dragMoved = false
+let suppressRenderedClick = false
 
 function onHandleDown(i: number, e: PointerEvent) {
   if (e.button !== 0) return
@@ -1116,6 +1442,8 @@ function onHandleDown(i: number, e: PointerEvent) {
     const r = n.getBoundingClientRect()
     return { top: r.top, height: r.height }
   })
+  dragStart = { x: e.clientX, y: e.clientY }
+  dragMoved = false
   dragState.active = true
   dragState.from = i
   dragState.to = i
@@ -1137,6 +1465,7 @@ function computeDrop(y: number): number {
 
 function onDragMove(e: PointerEvent) {
   if (!dragState.active) return
+  if (Math.abs(e.clientX - dragStart.x) > 3 || Math.abs(e.clientY - dragStart.y) > 3) dragMoved = true
   dragState.y = e.clientY
   dragState.x = e.clientX
   dragState.to = computeDrop(e.clientY)
@@ -1153,6 +1482,7 @@ function onDragMove(e: PointerEvent) {
 function onDragUp() {
   const { active, from, to } = dragState
   dragState.active = false
+  if (dragMoved) suppressRenderedClick = true
   window.removeEventListener('pointermove', onDragMove)
   window.removeEventListener('pointerup', onDragUp)
   window.removeEventListener('pointercancel', onDragUp)
@@ -1670,6 +2000,7 @@ function jumpToHeading(index: number) {
 /** 滚动时高亮所在章节（节流，避免每个滚动事件都量一堆 DOM） */
 let scrollTick: ReturnType<typeof setTimeout> | null = null
 function onEditorScroll() {
+  hideSelBar()
   if (scrollTick) return
   scrollTick = setTimeout(() => {
     scrollTick = null
@@ -2261,6 +2592,7 @@ onBeforeUnmount(() => {
             'be-editing': editingId === b.id,
             'be-flash': flashId === b.id,
             'be-dragging': dragState.active && dragState.from === i,
+            'be-multi': inMulti(i),
             'be-drop-before': dragState.active && dragState.to === i,
           },
         ]"
@@ -2268,6 +2600,9 @@ onBeforeUnmount(() => {
         :data-id="b.id"
         :data-diagram="isMermaidBlock(b) ? '1' : undefined"
         :style="{ paddingLeft: 6 + b.indentLevel * 22 + 'px' }"
+        @pointerdown="onBlockPointerDown(i, $event)"
+        @click.shift.stop="onBlockShiftClick(i, $event)"
+        @contextmenu.prevent.stop="onBlockContextMenu(i, $event)"
       >
         <div class="be-gutter">
           <button class="be-btn be-add" :title="zh ? '在下方插入' : 'Add below'" @click.stop="insertEmptyAfter(i)">
@@ -2328,6 +2663,7 @@ onBeforeUnmount(() => {
               class="be-rendered scoll"
               :data-sig="renderSig(b)"
               v-html="blockHtml.get(b.id) || ''"
+              @pointerdown="onRenderedPointerDown(i, $event)"
               @click="onRenderedClick(i, $event)"
             ></div>
             <!-- 代码 / mermaid：右上角操作图标 -->
@@ -2357,11 +2693,12 @@ onBeforeUnmount(() => {
               spellcheck="false"
               @input="onInput(i, $event)"
               @keydown="onKeydown(i, $event)"
-              @focus="activeIndex = i"
+              @paste="onPaste(i, $event)"
+              @focus="onFocusBlock(i, $event)"
               @blur="onBlur(i)"
               @click="onBlockClick(i, $event)"
-              @select="selectionTick++"
-              @keyup="selectionTick++"
+              @select="onSelectBar(i, $event)"
+              @keyup="onSelectBar(i, $event)"
             ></textarea>
           </div>
         </div>
@@ -2393,6 +2730,32 @@ onBeforeUnmount(() => {
         <i class="fa fa-spinner fa-spin fa-2x"></i>
         <span>{{ zh ? '正在渲染…' : 'Rendering…' }}</span>
       </div>
+    </div>
+
+    <!-- 选中文字浮条：加粗 / 斜体 / 行内代码 / 链接 / 公式 / 高亮 -->
+    <div
+      v-if="selBar.open"
+      class="be-selbar"
+      :style="{ left: selBar.x + 'px', top: selBar.y + 'px' }"
+      @mousedown.prevent
+    >
+      <button class="be-selbar-btn" :title="zh ? '加粗 (Ctrl+B)' : 'Bold (Ctrl+B)'" @mousedown.prevent.stop="applySelWrap('**')"><b>B</b></button>
+      <button class="be-selbar-btn" :title="zh ? '斜体 (Ctrl+I)' : 'Italic (Ctrl+I)'" @mousedown.prevent.stop="applySelWrap('*')"><i>I</i></button>
+      <button class="be-selbar-btn" :title="zh ? '行内代码 (Ctrl+E)' : 'Inline code (Ctrl+E)'" @mousedown.prevent.stop="applySelWrap('`')"><i class="fa fa-code"></i></button>
+      <button class="be-selbar-btn" :title="zh ? '链接 (Ctrl+K)' : 'Link (Ctrl+K)'" @mousedown.prevent.stop="applySelLink"><i class="fa fa-link"></i></button>
+      <button class="be-selbar-btn" :title="zh ? '行内公式' : 'Inline math'" @mousedown.prevent.stop="applySelMath">∑</button>
+      <button class="be-selbar-btn" :title="zh ? '高亮' : 'Highlight'" @mousedown.prevent.stop="applySelWrap('==')"><i class="fa fa-paint-brush"></i></button>
+    </div>
+
+    <!-- 撤销/重做轻提示 -->
+    <div v-if="undoToast" class="be-undo-toast">{{ undoToast }}</div>
+
+    <!-- 多块选择批量操作条 -->
+    <div v-if="multiActive" class="be-batchbar" @mousedown.prevent>      <span class="be-batchbar-count">{{ zh ? `已选 ${multiCount} 块` : `${multiCount} blocks selected` }}</span>
+      <button class="be-selbar-btn" :title="zh ? '复制' : 'Copy'" @mousedown.prevent.stop="copyMulti"><i class="fa fa-copy"></i></button>
+      <button class="be-selbar-btn" :title="zh ? '剪切' : 'Cut'" @mousedown.prevent.stop="cutMulti"><i class="fa fa-scissors"></i></button>
+      <button class="be-selbar-btn" :title="zh ? '删除' : 'Delete'" @mousedown.prevent.stop="deleteMulti"><i class="fa fa-trash-o"></i></button>
+      <button class="be-selbar-btn" :title="zh ? '取消选择' : 'Clear'" @mousedown.prevent.stop="clearMulti"><i class="fa fa-times"></i></button>
     </div>
 
     <!-- 底部状态栏（样式对齐 md_read / Edit_Code） -->
@@ -2514,7 +2877,19 @@ onBeforeUnmount(() => {
       <div class="be-menu-item" @mousedown.prevent.stop="menuIndent(1)"><i class="fa fa-indent"></i>{{ zh ? '增加缩进' : 'Indent' }}</div>
       <div class="be-menu-item" @mousedown.prevent.stop="menuIndent(-1)"><i class="fa fa-outdent"></i>{{ zh ? '减少缩进' : 'Outdent' }}</div>
       <div class="be-menu-sep"></div>
-      <div class="be-menu-item" @mousedown.prevent.stop="menuDuplicate()"><i class="fa fa-copy"></i>{{ zh ? '复制' : 'Duplicate' }}</div>
+      <div class="be-menu-item" @mousedown.prevent.stop="menuCopy()"><i class="fa fa-copy"></i>{{ zh ? '复制' : 'Copy' }}</div>
+      <div class="be-menu-item" @mousedown.prevent.stop="menuPaste()"><i class="fa fa-clipboard"></i>{{ zh ? '粘贴到下方' : 'Paste below' }}</div>
+      <template v-if="menu.image">
+        <div class="be-menu-sep"></div>
+        <div class="be-menu-item" @mousedown.prevent.stop="applyImageStyle('width', '100')"><i class="fa fa-arrows-h"></i>{{ zh ? '图片宽度 100%' : 'Image width 100%' }}</div>
+        <div class="be-menu-item" @mousedown.prevent.stop="applyImageStyle('width', '75')"><i class="fa fa-arrows-h"></i>{{ zh ? '图片宽度 75%' : 'Image width 75%' }}</div>
+        <div class="be-menu-item" @mousedown.prevent.stop="applyImageStyle('width', '50')"><i class="fa fa-arrows-h"></i>{{ zh ? '图片宽度 50%' : 'Image width 50%' }}</div>
+        <div class="be-menu-item" @mousedown.prevent.stop="applyImageStyle('width', '25')"><i class="fa fa-arrows-h"></i>{{ zh ? '图片宽度 25%' : 'Image width 25%' }}</div>
+        <div class="be-menu-sep"></div>
+        <div class="be-menu-item" @mousedown.prevent.stop="applyImageStyle('align', 'left')"><i class="fa fa-align-left"></i>{{ zh ? '图片左对齐' : 'Image left' }}</div>
+        <div class="be-menu-item" @mousedown.prevent.stop="applyImageStyle('align', 'center')"><i class="fa fa-align-center"></i>{{ zh ? '图片居中' : 'Image center' }}</div>
+        <div class="be-menu-item" @mousedown.prevent.stop="applyImageStyle('align', 'right')"><i class="fa fa-align-right"></i>{{ zh ? '图片右对齐' : 'Image right' }}</div>
+      </template>
       <div class="be-menu-item be-danger" @mousedown.prevent.stop="menuDelete()"><i class="fa fa-trash-o"></i>{{ zh ? '删除' : 'Delete' }}</div>
     </div>
 
@@ -3166,6 +3541,12 @@ onBeforeUnmount(() => {
 .be-rendered :deep(img) {
   max-width: 100%;
   border-radius: 4px;
+  /* 图片按下即拖动整块，禁用浏览器原生拖图（否则拖出来只是半透明缩略图） */
+  -webkit-user-drag: none;
+  cursor: grab;
+}
+.be-rendered :deep(img):active {
+  cursor: grabbing;
 }
 
 .be-rendered :deep(table) {
@@ -3210,6 +3591,66 @@ onBeforeUnmount(() => {
 }
 
 /* --- 底部状态栏（与 md_read / Edit_Code 一致） --- */
+/* 选中文字浮动工具条 */
+.be-selbar {
+  position: fixed;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--menuColor);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .25);
+}
+.be-selbar-btn {
+  width: 26px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fontColor);
+  cursor: pointer;
+  font-size: 12px;
+}
+.be-selbar-btn:hover { background: var(--menuActiveColor); color: var(--fontActiveColor); }
+
+/* 多块选择 */
+.be-block.be-multi { background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent); }
+.be-batchbar {
+  position: fixed;
+  top: 56px;
+  right: 18px;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--borderColor);
+  border-radius: 6px;
+  background: var(--menuColor);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .25);
+}
+.be-batchbar-count { margin: 0 6px 0 2px; font-size: 11px; opacity: .75; white-space: nowrap; }
+.be-undo-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 48px;
+  transform: translateX(-50%);
+  z-index: 300;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--backgroundColor) 85%, #000);
+  border: 1px solid var(--borderColor);
+  color: var(--fontColor);
+  font-size: 11px;
+  pointer-events: none;
+}
+
 .be-statusbar {
   flex: 0 0 auto;
   display: flex;

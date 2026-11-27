@@ -7,6 +7,74 @@
 
 ---
 
+## 2026-11-27
+
+### Added
+
+- **Knowledge recall sidebar**: in KB mode the recall count now lives in the composer, and retrieved chunks move from chat bubbles into a right sidebar with per-turn switching, scores and content.
+- **Agent-mode recall**: `kb_search` results now feed the knowledge recall panel; it opens automatically when the sidebar is closed, without stealing focus from other tabs.
+- **Embedded browser**: a controlled `ctx.browserView` lets plugins embed a web page in their panel with navigation, back / forward, reload, bounds, visibility and screenshots.
+- **Browser recording**: capture clicks, input and navigation, then save a Playbook draft and site learning; each site learning can export its training data.
+
+### Fixed
+
+- **Internal HTTPS**: browser tabs accept self-signed certificates for local and private hosts while public sites keep strict validation.
+
+---
+
+## 2026-11-23
+
+### Added
+
+- **GPUStack onboarding**: the GPUStack source now asks for an API key and validates the endpoint, key and model.
+
+### Improved
+
+- **Source selection**: onboarding source cards stay switchable after a choice, and field bottom spacing is removed.
+
+---
+
+## 2026-11-21
+
+### Added
+
+- **Batch file patches**: new `apply_patch` preflights the whole operation set, then commits in order across create / update / delete / move; a mid-commit failure keeps and lists the operations that already succeeded.
+- **Subagent model routing**: subagents inherit the parent session's latest requested model and accept an optional `model` argument; added a running-subagent list and a concurrency cap.
+
+### Fixed
+
+- **Large writes being interrupted**: removed the 1 MiB per-write cap and adjusted output-truncation handling, so large files no longer fail at the tool layer.
+- **Subagents reporting a missing model**: subagents no longer fall back to the default `ollama` or an empty model.
+
+### Improved
+
+- **File mutation results**: write / replace results now include the operation, before/after character counts and a diff preview the UI can render directly.
+- **Output truncation**: when a reply hits `max_tokens`, the next step gets a larger output budget and the session stays usable after repeated retries.
+
+---
+
+## 2026-11-18
+
+### Added
+
+- **Visual editor improvements**: a selection toolbar for bold / italic / code / link / formula / highlight, plus multi-block selection for batch copy / cut / delete.
+- **Images and pasting**: images can be dragged as whole blocks and resized / aligned from the context menu; screenshots and HTML-to-Markdown pasting are supported.
+
+### Improved
+
+- **Knowledge base version details**: `.kb` / `.kbdb` / sidecar files are shown as separate cards, actions moved to a toolbar, and `.kb` suffixes are hidden in navigation and titles.
+- **Question page**: a masonry card layout with Markdown and formula rendering, with status icons moved to the right.
+- **Exam answering**: cleaner question and option borders, selection / correctness shown by background and side bars, and actions aligned to the right.
+- **App icon**: a dark triangular graph with a central hexagonal “AI”.
+
+### Fixed
+
+- **Block editor undo**: Ctrl+Z no longer jumps to the document start or freezes; undo keeps the scroll position and shows a brief notice.
+- **Block copy**: the block menu's Copy now only copies; use Paste below to insert.
+- **Workspace sidebar**: removed the insert-relative-path button, and knowledge-base tabs no longer change file font weight in the sidebar.
+
+---
+
 ## 2026-11-14
 
 ### Improved

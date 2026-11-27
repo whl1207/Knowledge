@@ -26,7 +26,7 @@ export interface ToolProfileDef {
   include?: string[]
 }
 
-const WRITE_TOOLS = ['write_file', 'replace_in_file', 'multi_replace']
+const WRITE_TOOLS = ['write_file', 'replace_in_file', 'multi_replace', 'apply_patch']
 const EXPORT_TOOL = 'export_word'
 
 /**

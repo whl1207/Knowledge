@@ -73,6 +73,19 @@ export class SnapshotHistory {
     this.lastAt = 0
   }
 
+  /**
+   * 修正「初始快照」的光标位置。
+   *
+   * 打开文件时初始快照记为第 0 块；用户跳到中间某块做第一次编辑后按 Ctrl+Z，
+   * 撤销回到的正是这个初始快照 —— 不修正就会把光标/视口拉回文档开头。
+   * 只允许在只有初始快照（或撤销回初始态）时调用。
+   */
+  setInitialCaret(index: number, offset: number): void {
+    if (this.stack.length === 0) return
+    this.stack[0].index = index
+    this.stack[0].offset = offset
+  }
+
   undo(): Snapshot | null {
     if (!this.canUndo) return null
     this.pos -= 1

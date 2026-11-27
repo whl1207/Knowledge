@@ -105,6 +105,12 @@ export interface PluginBridgeApi {
     budget?: { timeoutMs?: number; maxSteps?: number; maxTokens?: number }
     options: unknown
   }): Promise<AgentRunResult>
+  /** 内嵌浏览器视图（需要 browser.embed；仅桌面端） */
+  browserViewCreate?(args: { pluginId: string; url?: string; allowedHosts?: string[] }): Promise<{ id: string; url: string }>
+  browserViewCommand?(args: { pluginId: string; viewId: string; action: string; args?: unknown }): Promise<any>
+  browserViewDestroy?(args: { pluginId: string; viewId: string }): Promise<{ ok: boolean }>
+  /** 订阅内嵌浏览器事件；返回退订函数 */
+  browserViewOnEvent?(cb: (event: any) => void): () => void
   /** 各插件的委派用量快照（设置页展示；只读；同为桌面端可选能力） */
   agentUsage?(): Promise<Record<string, { inFlight: number; callsInWindow: number }>>
   /** 取消某插件全部在飞委派（插件面板的「停止」按钮；同为桌面端可选能力） */

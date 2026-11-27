@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""生成 AI-KM 应用图标（玻璃卡片：三层错落卡片 + 节点图）。
+"""生成 AI-KM 应用图标（三角图谱 + 中央六边形 AI）。
 
-唯一的图标源文件。跑一次同时产出：
+唯一图标源文件。跑一次同时产出：
 
 - resources/icons/ai-km-icon.svg       矢量母版
 - resources/icons/ai-km-icon-2048.png  位图母版（2048×2048）
@@ -9,7 +9,13 @@
 - public/icon.png                      Windows 安装包 / 窗口图标（512）
 - public/favicon-16.png / favicon-32.png / favicon.ico（多尺寸）
 
-依赖：Python 3 + Pillow（本机已装）。用法：
+设计：
+- 深色圆角底 + 轻微中心光晕；
+- 三个角上的圆形节点（青→蓝紫渐变），中间平顶六边形；
+- 三个圆各连到六边形一条边的中点，线不进入圆/六边形内部；
+- 六边形正中一枚 “AI” 小字。
+
+依赖：Python 3 + Pillow。用法：
 
     python scripts/make-icon.py          # 重新生成全部尺寸
     python scripts/make-icon.py --check  # 只检查现有文件是否齐全，不写盘
@@ -21,27 +27,23 @@ import math
 import os
 import sys
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 S = 512          # 逻辑尺寸（SVG 视口）
 SS = 4           # 超采样倍数：先画 2048 再缩小
-
-BG_TOP, BG_BOTTOM = '#131A2A', '#06080F'
-HAZE = '#6D5BFF'
-CARD_COLORS = [
-    # (x0, y0, x1, y1, radius, angle, 渐变起, 渐变止, 不透明度)
-    (150, 210, 386, 434, 26, 14, '#6D8BFF', '#2B3AA8', 0.82),
-    (136, 178, 386, 416, 28, 6, '#22D3EE', '#116E86', 0.85),
-    (122, 140, 388, 394, 30, -6, '#BFE9FF', '#C4B5FD', 0.75),
-]
-NODES = [(196, 218), (196, 312), (300, 264)]
-EDGES = [((196, 218), (196, 312)), ((196, 218), (300, 264)), ((196, 312), (300, 264))]
-NODE_R = [22, 22, 26]
-TOP_ANGLE = -6          # 顶卡的旋转角，节点图跟着转
+BG_TOP, BG_BOTTOM = '#111B2E', '#06090F'
+EDGE = '#38BDF8'
+NODE_TOP, NODE_BOTTOM = '#22D3EE', '#7C6CFF'
+RING = '#E0F2FE'
+HEX_FILL = '#0F1E3C'
+AI_COLOR = '#E0F2FE'
+CIRCLE_R = 0.080 * S
+HEX_R = 0.135 * S
+ORBIT_R = 0.32 * S
+LINE_W = 0.028 * S
 
 
-# ------------------------------------------------------------------ 基础工具
 def hx(color: str) -> tuple[int, int, int]:
     return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
 
@@ -50,171 +52,130 @@ def lerp(a, b, t: float):
     return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
-def sample(stops, t: float):
-    stops = [(p, hx(c)) for p, c in stops]
-    if t <= stops[0][0]:
-        return stops[0][1]
-    for i in range(1, len(stops)):
-        if t <= stops[i][0]:
-            t0, c0 = stops[i - 1]
-            t1, c1 = stops[i]
-            return lerp(c0, c1, (t - t0) / max(1e-6, t1 - t0))
-    return stops[-1][1]
-
-
-def radial_background(stops, radius=112):
-    """深色径向渐变 + 圆角方形裁切（透明圆角）。"""
+def radial_background(top: str, bottom: str) -> Image.Image:
+    """深色竖向渐变 + 圆角方形裁剪（透明圆角）。"""
     W = S * SS
     img = Image.new('RGBA', (W, W), (0, 0, 0, 0))
     grad = Image.new('RGBA', (W, W))
-    draw = ImageDraw.Draw(grad)
-    cx, cy, rad = W / 2, W * 0.45, W * 0.80
+    d = ImageDraw.Draw(grad)
     for y in range(W):
-        for x in range(0, W, 2):
-            t = min(1.0, math.hypot(x - cx, y - cy) / rad)
-            draw.line([(x, y), (x + 1, y)], fill=sample(stops, t) + (255,))
+        d.line([(0, y), (W, y)], fill=lerp(hx(top), hx(bottom), y / max(1, W - 1)) + (255,))
     mask = Image.new('L', (W, W), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, W - 1], radius=radius * SS, fill=255)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, W - 1], radius=int(S * 0.22 * SS), fill=255)
     img.paste(grad, (0, 0), mask)
     return img
 
 
-def rotated_tile(w, h, radius, stops, alpha, angle):
-    """圆角矩形 + 横向渐变，按 angle 旋转。"""
-    w, h = int(w), int(h)
-    mask = Image.new('L', (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=radius, fill=255)
-    tile = Image.new('RGBA', (w, h), (0, 0, 0, 0))
-    grad = Image.new('RGBA', (w, h))
-    gd = ImageDraw.Draw(grad)
-    for x in range(w):
-        gd.line([(x, 0), (x, h)], fill=sample(stops, x / max(1, w - 1)) + (255,))
-    tile.paste(grad, (0, 0), mask)
-    tile.putalpha(tile.getchannel('A').point(lambda v: int(v * alpha)))
-    if angle:
-        tile = tile.rotate(angle, resample=Image.BICUBIC, expand=True)
-    return tile
-
-
-def tile_edge(w, h, radius, angle, pct=255):
-    """卡片描边（旋转后贴回）。"""
-    w, h = int(w), int(h)
-    edge = Image.new('L', (w, h), 0)
-    ImageDraw.Draw(edge).rounded_rectangle(
-        [0, 0, w - 1, h - 1], radius=radius, outline=pct, width=max(1, int(3 * SS))
-    )
-    if angle:
-        edge = edge.rotate(angle, resample=Image.BICUBIC, expand=True)
-    return edge
-
-
-def paint(img, mask, stops, alpha=255):
-    """用横向渐变填充 mask。"""
+def add_glow(img: Image.Image) -> None:
     W = img.width
-    grad = Image.new('RGBA', (W, W))
-    gd = ImageDraw.Draw(grad)
-    for x in range(W):
-        gd.line([(x, 0), (x, W)], fill=sample(stops, x / (W - 1)) + (255,))
-    if alpha < 255:
-        grad.putalpha(grad.getchannel('A').point(lambda v: int(v * alpha / 255)))
-    img.paste(grad, (0, 0), mask)
-
-
-def mask_poly(pts):
-    W = S * SS
-    m = Image.new('L', (W, W), 0)
-    ImageDraw.Draw(m).polygon([(x * SS, y * SS) for x, y in pts], fill=255)
-    return m
-
-
-def mask_line(pts, width, closed=False):
-    W = S * SS
-    m = Image.new('L', (W, W), 0)
-    d = ImageDraw.Draw(m)
-    p = [(x * SS, y * SS) for x, y in pts]
-    d.line(p + ([p[0]] if closed else []), fill=255, width=int(width * SS), joint='curve')
-    r = width * SS / 2
-    for x, y in (p if closed else (p[0], p[-1])):
-        d.ellipse([x - r, y - r, x + r, y + r], fill=255)
-    return m
-
-
-def disc(img, cx, cy, r, color):
-    ImageDraw.Draw(img).ellipse(
-        [(cx - r) * SS, (cy - r) * SS, (cx + r) * SS, (cy + r) * SS], fill=hx(color) + (255,)
+    halo = Image.new('RGBA', (W, W), (0, 0, 0, 0))
+    ImageDraw.Draw(halo).ellipse(
+        [W * 0.18, W * 0.12, W * 0.82, W * 0.78], fill=hx('#3B82F6') + (40,)
     )
+    halo = halo.filter(ImageFilter.GaussianBlur(S * 0.13 * SS))
+    img.alpha_composite(halo)
 
 
-def glow(img, cx, cy, r, color, alpha=90):
-    W = img.width
-    size = int(r * 2 * SS)
-    halo = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(halo)
-    for i in range(40, 0, -1):
-        t = i / 40
-        rr = r * SS * t
-        d.ellipse([size / 2 - rr, size / 2 - rr, size / 2 + rr, size / 2 + rr],
-                  fill=hx(color) + (int(alpha * (1 - t) ** 2),))
-    img.alpha_composite(halo.filter(ImageFilter.GaussianBlur(8)),
-                        (int(cx * SS - size / 2), int(cy * SS - size / 2)))
+def pt(deg: float, r: float) -> tuple[float, float]:
+    a = math.radians(deg)
+    return (S / 2 + r * math.cos(a), S / 2 - r * math.sin(a))
 
 
-def rotate_pts(pts, deg, cx=256, cy=256):
-    rad = math.radians(deg)
-    out = []
-    for x, y in pts:
-        dx, dy = x - cx, y - cy
-        out.append((cx + dx * math.cos(rad) - dy * math.sin(rad),
-                    cy + dx * math.sin(rad) + dy * math.cos(rad)))
-    return out
+def grad_color(y: float):
+    return lerp(hx(NODE_TOP), hx(NODE_BOTTOM), max(0.0, min(1.0, y / S)))
 
 
-# ------------------------------------------------------------------ 画图标
 def render() -> Image.Image:
-    img = radial_background([(0, BG_TOP), (1, BG_BOTTOM)])
-    glow(img, 300, 300, 200, HAZE, 80)
+    img = radial_background(BG_TOP, BG_BOTTOM)
+    add_glow(img)
+    d = ImageDraw.Draw(img)
 
-    # 三层卡片：底 → 中 → 顶
-    for (x0, y0, x1, y1, radius, angle, c0, c1, alpha) in CARD_COLORS:
-        w, h = x1 - x0, y1 - y0
-        tile = rotated_tile(w * SS, h * SS, radius * SS, [(0, c0), (1, c1)], alpha, angle)
-        img.alpha_composite(tile, (int(x0 * SS - (tile.width - w * SS) / 2),
-                                   int(y0 * SS - (tile.height - h * SS) / 2)))
-        edge = tile_edge(w * SS, h * SS, radius * SS, angle)
-        big = Image.new('L', (S * SS, S * SS), 0)
-        big.paste(edge, (int(x0 * SS - (edge.width - w * SS) / 2), int(y0 * SS - (edge.height - h * SS) / 2)))
-        # 与定稿图一致的描边：淡蓝 → 淡紫，透明度 150
-        paint(img, big, [(0, '#BFE9FF'), (1, '#A78BFA')], 150)
+    circles = [pt(90, ORBIT_R), pt(210, ORBIT_R), pt(330, ORBIT_R)]
+    # 平顶六边形：顶点在 0/60/…，顶部是平边；连接点落在三条边的中点
+    hexagon = [pt(a, HEX_R) for a in (0, 60, 120, 180, 240, 300)]
+    targets = [pt(a, HEX_R * math.cos(math.radians(30))) for a in (90, 210, 330)]
 
-    # 顶卡上的节点图（随卡片 -6° 旋转）
-    nodes = rotate_pts(NODES, TOP_ANGLE)
-    for a, b in EDGES:
-        paint(img, mask_line([rotate_pts([a], TOP_ANGLE)[0], rotate_pts([b], TOP_ANGLE)[0]], 8),
-              [(0, '#BFE9FF'), (1, '#FFFFFF')], 170)
-    for (cx, cy), r in zip(nodes, NODE_R):
-        disc(img, cx, cy, r, '#EAF9FF')
+    lw = int(LINE_W * SS)
+    # 圆 → 六边形边中点：线画到边内侧，随后被六边形填充盖住，避免接缝
+    for cc, hv in zip(circles, targets):
+        dx, dy = hv[0] - cc[0], hv[1] - cc[1]
+        dist = math.hypot(dx, dy) or 1
+        ux, uy = dx / dist, dy / dist
+        pa = (cc[0] + ux * CIRCLE_R, cc[1] + uy * CIRCLE_R)
+        pb = (hv[0] + ux * S * 0.020, hv[1] + uy * S * 0.020)
+        d.line(
+            [(pa[0] * SS, pa[1] * SS), (pb[0] * SS, pb[1] * SS)],
+            fill=hx(EDGE) + (255,), width=lw,
+        )
+
+    # 六边形：深色填充 + 亮青描边
+    d.polygon(
+        [(x * SS, y * SS) for x, y in hexagon],
+        fill=hx(HEX_FILL) + (255,), outline=hx(EDGE) + (255,), width=lw,
+    )
+
+    # 中央 “AI”：优先用 Segoe UI Bold，缺失时退回默认字体
+    font_size = int(0.078 * S * SS)
+    font = None
+    for name in ('segoeuib.ttf', 'arialbd.ttf', 'DejaVuSans-Bold.ttf'):
+        try:
+            font = ImageFont.truetype(name, font_size)
+            break
+        except OSError:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    text = 'AI'
+    bbox = d.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx = S * SS / 2 - tw / 2 - bbox[0]
+    ty = S * SS / 2 - th / 2 - bbox[1] - 0.004 * S * SS
+    d.text((tx, ty), text, font=font, fill=hx(AI_COLOR) + (255,))
+
+    # 三个圆节点：渐变填充 + 浅色描边，内部不画任何线
+    node_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    nd = ImageDraw.Draw(node_layer)
+    for (x, y) in circles:
+        r = CIRCLE_R * SS
+        cx, cy = x * SS, y * SS
+        size = int(r * 2) + 2
+        mask = Image.new('L', (size, size), 0)
+        ImageDraw.Draw(mask).ellipse([0, 0, size - 1, size - 1], fill=255)
+        fill = Image.new('RGBA', (size, size))
+        fd = ImageDraw.Draw(fill)
+        top_color, bottom_color = grad_color(y - CIRCLE_R), grad_color(y + CIRCLE_R)
+        for yy in range(size):
+            fd.line([(0, yy), (size, yy)], fill=lerp(top_color, bottom_color, yy / max(1, size - 1)) + (255,))
+        fill.putalpha(mask)
+        node_layer.alpha_composite(fill, (int(cx - size / 2), int(cy - size / 2)))
+        nd.ellipse(
+            [cx - r, cy - r, cx + r, cy + r],
+            outline=hx(RING) + (235,), width=max(6, int(S * 0.010 * SS)),
+        )
+    img.alpha_composite(node_layer)
     return img
 
 
 # ------------------------------------------------------------------ SVG 母版
 SVG = '''<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
 <defs>
-<radialGradient id="bg" cx="50%" cy="45%" r="80%"><stop stop-color="#131A2A"/><stop offset="1" stop-color="#06080F"/></radialGradient>
-<linearGradient id="c1" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#6D8BFF"/><stop offset="1" stop-color="#2B3AA8"/></linearGradient>
-<linearGradient id="c2" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#22D3EE"/><stop offset="1" stop-color="#116E86"/></linearGradient>
-<linearGradient id="c3" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#BFE9FF"/><stop offset="1" stop-color="#C4B5FD"/></linearGradient>
-<radialGradient id="haze"><stop stop-color="#6D5BFF" stop-opacity=".5"/><stop offset="1" stop-color="#6D5BFF" stop-opacity="0"/></radialGradient>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#111B2E"/><stop offset="1" stop-color="#06090F"/></linearGradient>
+<radialGradient id="haze"><stop stop-color="#3B82F6" stop-opacity=".28"/><stop offset="1" stop-color="#3B82F6" stop-opacity="0"/></radialGradient>
+<linearGradient id="node" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#22D3EE"/><stop offset="1" stop-color="#7C6CFF"/></linearGradient>
 </defs>
 <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-<circle cx="300" cy="300" r="220" fill="url(#haze)"/>
-<g transform="rotate(14 268 322)"><rect x="150" y="210" width="236" height="224" rx="26" fill="url(#c1)" opacity=".82" stroke="#BFE9FF" stroke-opacity=".45" stroke-width="3"/></g>
-<g transform="rotate(6 261 297)"><rect x="136" y="178" width="250" height="238" rx="28" fill="url(#c2)" opacity=".85" stroke="#BFE9FF" stroke-opacity=".45" stroke-width="3"/></g>
-<g transform="rotate(-6 255 267)"><rect x="122" y="140" width="266" height="254" rx="30" fill="url(#c3)" opacity=".75" stroke="#FFFFFF" stroke-opacity=".5" stroke-width="3"/></g>
-<g transform="rotate(-6 255 267)">
-<polyline points="196,218 196,312" stroke="#BFE9FF" stroke-width="8" stroke-linecap="round" stroke-opacity=".7"/>
-<polyline points="196,218 300,264" stroke="#BFE9FF" stroke-width="8" stroke-linecap="round" stroke-opacity=".7"/>
-<polyline points="196,312 300,264" stroke="#BFE9FF" stroke-width="8" stroke-linecap="round" stroke-opacity=".7"/>
-<circle cx="196" cy="218" r="22" fill="#EAF9FF"/><circle cx="196" cy="312" r="22" fill="#EAF9FF"/><circle cx="300" cy="264" r="26" fill="#EAF9FF"/>
+<circle cx="256" cy="230" r="180" fill="url(#haze)"/>
+<g stroke="#38BDF8" stroke-width="14" stroke-linecap="round">
+<line x1="256" y1="133.12" x2="256" y2="196.14"/>
+<line x1="149.58" y1="317.44" x2="204.16" y2="285.93"/>
+<line x1="362.42" y1="317.44" x2="307.84" y2="285.93"/>
+</g>
+<polygon points="325.12,256 290.56,196.14 221.44,196.14 186.88,256 221.44,315.86 290.56,315.86" fill="#0F1E3C" stroke="#38BDF8" stroke-width="14" stroke-linejoin="round"/>
+<text x="256" y="256" text-anchor="middle" dominant-baseline="central" font-family="Segoe UI, Arial, sans-serif" font-size="40" font-weight="700" fill="#E0F2FE">AI</text>
+<g stroke="#E0F2FE" stroke-width="5" fill="url(#node)">
+<circle cx="256" cy="92.16" r="40.96"/>
+<circle cx="114.1" cy="337.92" r="40.96"/>
+<circle cx="397.9" cy="337.92" r="40.96"/>
 </g>
 </svg>
 '''

@@ -16,9 +16,14 @@
           <div class="bls-meta">{{ r.title }} · {{ formatDate(r.updatedAt) }} · {{ formatBytes(r.bytes) }}</div>
           <div class="bls-preview">{{ r.preview }}</div>
         </div>
-        <button class="bls-del" :title="zh ? '删除该站点经验' : 'Delete learning'" @click="remove(r.host)">
-          <i class="fa fa-trash-o"></i>
-        </button>
+        <div class="bls-row-actions">
+          <button class="bls-export" :disabled="!!exporting" :title="zh ? '导出该站点的训练数据（经验 + Playbook）' : 'Export training data for this site (learning + playbooks)'" @click="exportLearning(r.host)">
+            <i class="fa" :class="exporting === r.host ? 'fa-spinner fa-spin' : 'fa-download'"></i>
+          </button>
+          <button class="bls-del" :title="zh ? '删除该站点经验' : 'Delete learning'" @click="remove(r.host)">
+            <i class="fa fa-trash-o"></i>
+          </button>
+        </div>
       </div>
     </div>
     <div class="bls-actions">
@@ -30,7 +35,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { usestore } from '@/store'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getPlatform } from '@/platform'
 
 const store = usestore()
@@ -41,6 +46,7 @@ const invoke = (method: string, payload?: any) =>
 interface Row { host: string; title: string; updatedAt: number; bytes: number; preview: string }
 const rows = ref<Row[]>([])
 const busy = ref(false)
+const exporting = ref('')
 
 const formatDate = (t: number) => new Date(t).toLocaleString()
 const formatBytes = (n: number) => n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`
@@ -64,6 +70,22 @@ const remove = async (host: string) => {
   await refresh()
 }
 
+/** 只导出这一条站点经验（连同该站点的 Playbook），供 site-training 插件导入 */
+const exportLearning = async (host: string) => {
+  if (exporting.value) return
+  exporting.value = host
+  try {
+    const res: any = await invoke('browser-agent:export-training', { host })
+    if (res?.canceled) return
+    if (res?.ok) ElMessage.success(zh.value ? '训练数据已导出' : 'Training data exported')
+    else ElMessage.warning(res?.error || (zh.value ? '没有可导出的数据' : 'Nothing to export'))
+  } catch (e: any) {
+    ElMessage.error((e && e.message) || String(e))
+  } finally {
+    exporting.value = ''
+  }
+}
+
 onMounted(() => { void refresh() })
 </script>
 
@@ -79,10 +101,28 @@ onMounted(() => { void refresh() })
 .bls-host { font-size: 12px; font-weight: 600; }
 .bls-meta { font-size: 11px; opacity: .55; margin: 1px 0 3px; }
 .bls-preview { font-size: 11px; opacity: .7; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.bls-del { flex: 0 0 auto; width: 24px; height: 24px; border: none; border-radius: 5px; background: transparent; color: var(--fontColor); opacity: .5; cursor: pointer; }
+.bls-row-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; }
+.bls-export, .bls-del {
+  flex: 0 0 auto; width: 24px; height: 24px; margin: 0; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box; line-height: 1;
+  border: none; border-radius: 5px; background: transparent; color: var(--fontColor);
+  font-size: 12px; opacity: .5; cursor: pointer;
+}
+.bls-export i, .bls-del i { font-size: 12px; line-height: 1; }
+.bls-export:hover { opacity: 1; color: var(--fontActiveColor); background: color-mix(in srgb, var(--fontActiveColor) 10%, transparent); }
 .bls-del:hover { opacity: 1; color: #e05a5a; background: color-mix(in srgb, #e05a5a 10%, transparent); }
+.bls-export:disabled { opacity: .35; cursor: default; }
 .bls-actions { display: flex; justify-content: flex-end; }
-.bls-btn { height: 25px; padding: 0 9px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--borderColor); border-radius: 6px; background: transparent; color: var(--fontColor); font-size: 12px; cursor: pointer; }
+.bls-btn {
+  height: 24px; margin: 0; padding: 0 8px;
+  display: inline-flex; align-items: center; gap: 4px;
+  box-sizing: border-box; line-height: 1;
+  border: 1px solid var(--borderColor); border-radius: 5px;
+  background: transparent; color: var(--fontColor);
+  font-size: 11px; cursor: pointer;
+}
+.bls-btn i { font-size: 11px; line-height: 1; }
 .bls-btn:hover { color: var(--fontActiveColor); border-color: var(--fontActiveColor); }
 .bls-btn:disabled { opacity: .5; cursor: default; }
 </style>

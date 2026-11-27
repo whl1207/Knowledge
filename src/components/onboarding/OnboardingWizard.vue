@@ -69,7 +69,7 @@ const activeSource = computed(() => {
       const ds = l.deepseek || {}
       return { endpoint: ds.base_url || '', model: ds.model || '', key: ds.api_key || ds.apiKeyRef || '', local: false }
     }
-    case 'gpustack': return { endpoint: l.gpustack?.base_url || '', model: l.gpustack?.model || '', key: l.gpustack?.api_key || '', local: true }
+    case 'gpustack': return { endpoint: l.gpustack?.base_url || '', model: l.gpustack?.model || '', key: l.gpustack?.api_key || '', local: true, needsKey: true }
     case 'glm':
     case 'kimi':
     case 'mimo': {
@@ -90,9 +90,11 @@ const activeSource = computed(() => {
 })
 
 /** 已配置：云端来源看凭据，本地来源看模型名（与「能不能直接开始聊天」一致） */
-const modelConfigured = computed(() => activeSource.value.local
-  ? !!String(activeSource.value.model || '').trim()
-  : !!String(activeSource.value.key || '').trim())
+const modelConfigured = computed(() => {
+  const src = activeSource.value
+  if (src.needsKey) return !!String(src.key || '').trim() && !!String(src.model || '').trim()
+  return src.local ? !!String(src.model || '').trim() : !!String(src.key || '').trim()
+})
 
 // ---------- 步骤 1：选择来源（展开分三类，和原来一样）；步骤 2：配置选中的来源 ----------
 type OnbCategory = 'local' | 'cloud' | 'gateway'
@@ -110,11 +112,17 @@ const pickGroups = computed(() => {
   return groups.filter((g) => g.items.length)
 })
 const picked = ref(activeType.value)
+const pickSource = (id: string) => {
+  picked.value = id
+  testState.value = ''
+  testDetail.value = ''
+}
 const pickedCategory = computed<OnbCategory>(() => llmSourceCategory(picked.value) as OnbCategory)
 
 /** 本地/网关要填地址；互联网来源只填 API Key；三者都可以填模型名（留空则测试时自动选第一个） */
 const showAddress = computed(() => pickedCategory.value !== 'cloud')
-const showKey = computed(() => pickedCategory.value !== 'local')
+// GPUStack 是本地化分类，但网关本身要求 API Key
+const showKey = computed(() => pickedCategory.value !== 'local' || picked.value === 'gpustack')
 
 const draft = ref({ base_url: '', api_key: '', model: '' })
 const pickedDoc = computed(() => llmSourceDoc(picked.value))
@@ -543,16 +551,16 @@ const setWindowMode = (mode: 'single' | 'multi') => {
               <div class="ob-src-group-title">{{ zh ? group.titleZh : group.titleEn }}</div>
               <div class="ob-src-grid">
                 <button v-for="id in group.items" :key="id" class="ob-src" :class="{ on: picked === id }"
-                        :title="docName(id)" @click="picked = id">
-                  <span class="ob-src-name">{{ docName(id) }}</span>
+                        :aria-pressed="picked === id" :title="docName(id)" @click="pickSource(id)">
+                  <span class="ob-src-name">{{ docName(id) }}<span v-if="picked === id" class="ob-src-check">✓ 已选</span></span>
                   <span class="ob-src-kind">{{ zh ? group.titleZh : group.titleEn }}</span>
                 </button>
               </div>
             </div>
             <p class="ob-hint">
               <i class="fa fa-info-circle"></i>
-              {{ t('选一个来源，点「下一步」填它的地址 / API Key；本地部署的先去官网装好软件。',
-                'Pick a source and press Next to fill its endpoint / API key; for local sources install the app first.') }}
+              {{ t('已选「' + docName(picked) + '」。其它来源不会被禁用，点另一张卡片即可切换；点「下一步」再填地址 / API Key。',
+                'Selected “' + docName(picked) + '”. Other sources stay clickable — tap another card to switch, then press Next to fill its endpoint / API key.') }}
             </p>
           </template>
 
@@ -744,7 +752,7 @@ const setWindowMode = (mode: 'single' | 'multi') => {
 .ob-head h2 { margin: 0 0 6px; font-size: 17px; color: var(--fontActiveColor); }
 .ob-head p { margin: 0; font-size: 12px; line-height: 1.65; opacity: .7; }
 .ob-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 24px 14px; }
-.ob-field { margin-bottom: 16px; }
+.ob-field { margin-bottom: 0; }
 .ob-field-label { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
 .ob-chips { display: flex; gap: 8px; }
 /* 紧凑下拉 / 输入框：模型步骤只用「分类 + 来源 + 2~3 个输入框」，不铺满整屏 */
@@ -841,6 +849,7 @@ const setWindowMode = (mode: 'single' | 'multi') => {
 .ob-src:hover { border-color: var(--fontActiveColor); }
 .ob-src.on { border-color: var(--fontActiveColor); background: var(--menuActiveColor); color: var(--fontActiveColor); }
 .ob-src-name { font-size: 12px; font-weight: 600; }
+.ob-src-check { margin-left: 6px; font-size: 9px; font-weight: 500; opacity: .8; }
 .ob-src-kind { font-size: 10px; opacity: .6; }
 .ob-src.on .ob-src-kind { opacity: .8; }
 /* 来源资料：本地部署下载站 / API Key 申请页（与设置页的链接同源） */

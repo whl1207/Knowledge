@@ -690,14 +690,7 @@ async function readFile(input: any, ctx: ToolExecutionContext): Promise<ToolResu
   return result
 }
 
-/**
- * agent 单次写入的字节上限。
- *
- * 这不是"模型的输出上限"（那个由 max_tokens 决定），而是**兜底**：真撞到这个数量级，
- * 说明调用本身就不该走一次 write_file（模型也几乎不可能吐出 1 MiB 参数）。
- * 与其让 IPC / 磁盘慢慢吞下去，不如立刻返回结构化错误，让模型改成分段写或 run_code 生成。
- */
-const MAX_AGENT_WRITE_BYTES = 1024 * 1024
+/** agent 单次写入不再设字节上限（对齐 DSH：写入工具不做人为截断）；仍保留暂存/回滚与读后写门禁。 */
 
 async function writeFile(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const abs = resolveWithinCwd(String(input?.path ?? ''), ctx)
@@ -705,15 +698,6 @@ async function writeFile(input: any, ctx: ToolExecutionContext): Promise<ToolRes
   const content = String(input?.content ?? '')
   const rawPath = String(input?.path ?? '')
   const bytes = Buffer.byteLength(content, 'utf8')
-  if (bytes > MAX_AGENT_WRITE_BYTES) {
-    return {
-      ok: false,
-      code: 'CONTENT_TOO_LARGE',
-      error: `写入内容过大（${bytes} 字节，单次上限 ${MAX_AGENT_WRITE_BYTES} 字节）：本次没有写入任何内容。`
-        + '请拆成多次写入——先 write_file 写骨架，再用 replace_in_file 逐段追加；'
-        + '内容能由程序生成时改用 run_code 直接写文件，或用 shell 生成。',
-    }
-  }
 
   // 先读后写门禁；放行时带回"模型读到的版本"，提交阶段据此做 CAS（DSH 的 replaceIfVersion）
   const gate = evaluateMutation(abs, ctx, '覆盖')
@@ -821,6 +805,9 @@ async function writeFile(input: any, ctx: ToolExecutionContext): Promise<ToolRes
       bytes: content.length,
       byteSize: bytes,
       created,
+      operation: created ? 'create' : 'update',
+      beforeChars: 'text' in before ? before.text.length : 0,
+      afterChars: content.length,
       stats: diff.stats,
     },
     preview: makeEditDiffPreview([diff]),
@@ -1126,6 +1113,9 @@ async function replaceInFile(input: any, ctx: ToolExecutionContext): Promise<Too
       changedLines: { start: first.startLine, end: last.endLine },
       locations: loc.edits.map((e) => ({ start: e.startLine, end: e.endLine })),
       deleted: loc.edits.every((e) => e.newText.length === 0),
+      operation: 'update',
+      beforeChars: rd.text.length,
+      afterChars: built.content.length,
       stats: diff.stats,
     },
     preview: makeEditDiffPreview([diff]),
@@ -1329,6 +1319,193 @@ async function multiReplace(input: any, ctx: ToolExecutionContext): Promise<Tool
       files: files.map((f) => ({ path: f.path, replaced: f.replaced, replacements: f.replacements, stats: f.stats })),
     },
     preview: makeEditDiffPreview(files.map((f) => f.diff)),
+  }
+}
+
+﻿/**
+ * apply_patch锛氭暣鍖呴妫€ + 閫愭搷浣滄彁浜ょ殑鎵归噺鏂囦欢鍙樻洿銆? *
+ * 涓?multi_replace 鐨勫尯鍒細
+ * - 鍙法鏂囦欢 create / update / delete / move锛? * - 棰勬闃舵鍙湪鍐呭瓨妯℃嫙锛屼换涓€鎿嶄綔澶辫触 鈫?涓€涓瓧鑺傞兘涓嶅啓锛? * - 鎻愪氦闃舵鎸夐『搴忔墽琛岋紱涓€斿け璐ヤ笉鍥炴粴宸插畬鎴愭搷浣滐紙淇濈暀宸茬煡褰卞搷锛夛紝
+ *   骞跺湪閿欒閲屽垪鍑?completed锛屽墠绔粛鍙睍绀哄凡瀹屾垚鎿嶄綔鐨?diff銆? * 璇诲悗鍐欓棬绂佷繚鐣欙細update/delete/move 浠嶈姹傚厛 read_file銆? */
+type ApplyPatchOp = {
+  action: 'create' | 'update' | 'delete' | 'move'
+  path?: string
+  from?: string
+  to?: string
+  content?: string
+  old_string?: string
+  new_string?: string
+  replace_all?: boolean
+}
+
+type ApplyPatchPlan = {
+  op: ApplyPatchOp
+  action: ApplyPatchOp['action']
+  raw: string
+  abs: string
+  absTo?: string
+  before: string | null
+  after: string | null
+  diff?: EditDiffFilePreview
+}
+
+function patchPreviewFile(p: ApplyPatchPlan): EditDiffFilePreview | null {
+  const before = p.before ?? ''
+  const after = p.after ?? ''
+  if (p.action === 'create') {
+    return { path: p.raw, absPath: p.abs, created: true, stats: { added: countTextLines(after), removed: 0 }, lines: [] }
+  }
+  if (p.action === 'delete') {
+    return { path: p.raw, absPath: p.abs, ...computeEditDiff(before, ''), created: false }
+  }
+  return { path: p.raw, absPath: p.abs, ...computeEditDiff(before, after) }
+}
+
+async function applyPatch(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
+  const rawOps: ApplyPatchOp[] = Array.isArray(input?.operations) ? input.operations : []
+  if (!rawOps.length) return { ok: false, error: 'operations 不能为空' }
+  if (rawOps.length > 200) return { ok: false, error: '单次 apply_patch 最多 200 个操作' }
+
+  const sim = new Map<string, string | null>()
+  const plans: ApplyPatchPlan[] = []
+  const readSim = (abs: string): string | null => {
+    if (sim.has(abs)) return sim.get(abs) ?? null
+    if (!fs.existsSync(abs)) return null
+    if (!fs.statSync(abs).isFile()) throw new Error(`不是普通文件: ${abs}`)
+    const text = fs.readFileSync(abs, 'utf-8')
+    sim.set(abs, text)
+    return text
+  }
+  const fail = (message: string, i: number): ToolResult => ({
+    ok: false,
+    code: 'PATCH_PREFLIGHT_FAILED',
+    error: `第 ${i + 1} 个操作预检失败：${message}（整包未写入）`,
+  })
+
+  // ---- 预检：全部在内存模拟 ----
+  for (let i = 0; i < rawOps.length; i++) {
+    const op = rawOps[i] || ({} as ApplyPatchOp)
+    try {
+      if (op.action === 'create') {
+        const raw = String(op.path ?? '')
+        const abs = resolveWithinCwd(raw, ctx)
+        if (!abs) return fail('路径越界或缺失', i)
+        if (readSim(abs) !== null) return fail(`目标已存在（${raw}），请改用 update`, i)
+        const content = String(op.content ?? '')
+        sim.set(abs, content)
+        plans.push({ op, action: 'create', raw, abs, before: null, after: content })
+      } else if (op.action === 'update') {
+        const raw = String(op.path ?? '')
+        const abs = resolveWithinCwd(raw, ctx)
+        if (!abs) return fail('路径越界或缺失', i)
+        const denied = checkMutationObserved(abs, ctx, '修改')
+        if (denied) return fail(denied, i)
+        const before = readSim(abs)
+        if (before === null) return fail(`文件不存在（${raw}）`, i)
+        const loc = locateReplacements(raw, abs, before, String(op.old_string ?? ''), String(op.new_string ?? ''), {
+          replaceAll: op.replace_all === true,
+        })
+        if (loc.ok === false) return fail((loc as any).error || '替换定位失败', i)
+        const built = buildNewContent(before, loc.edits, raw)
+        if (built.ok === false) return fail((built as any).error || '拼接失败', i)
+        sim.set(abs, built.content)
+        const diff: EditDiffFilePreview = { path: raw, absPath: abs, ...computeEditDiff(before, built.content) }
+        plans.push({ op, action: 'update', raw, abs, before, after: built.content, diff })
+      } else if (op.action === 'delete') {
+        const raw = String(op.path ?? '')
+        const abs = resolveWithinCwd(raw, ctx)
+        if (!abs) return fail('路径越界或缺失', i)
+        const denied = checkMutationObserved(abs, ctx, '修改')
+        if (denied) return fail(denied, i)
+        const before = readSim(abs)
+        if (before === null) return fail(`文件不存在（${raw}）`, i)
+        sim.set(abs, null)
+        plans.push({ op, action: 'delete', raw, abs, before, after: null })
+      } else if (op.action === 'move') {
+        const raw = String(op.from ?? op.path ?? '')
+        const rawTo = String(op.to ?? '')
+        const abs = resolveWithinCwd(raw, ctx)
+        const absTo = resolveWithinCwd(rawTo, ctx)
+        if (!abs || !absTo) return fail('路径越界或缺失', i)
+        if (abs === absTo) return fail('from 与 to 相同', i)
+        const denied = checkMutationObserved(abs, ctx, '修改')
+        if (denied) return fail(denied, i)
+        const before = readSim(abs)
+        if (before === null) return fail(`源文件不存在（${raw}）`, i)
+        if (readSim(absTo) !== null) return fail(`目标已存在（${rawTo}）`, i)
+        sim.set(abs, null)
+        sim.set(absTo, before)
+        plans.push({ op, action: 'move', raw, abs, absTo, before, after: before })
+      } else {
+        return fail('未知 action（仅支持 create/update/delete/move）', i)
+      }
+    } catch (e: any) {
+      return fail(e?.message || String(e), i)
+    }
+  }
+
+  // ---- 提交：顺序执行，失败不回滚已完成操作 ----
+  const completed: Array<{ index: number; action: string; path: string }> = []
+  const completedPreview = () => makeEditDiffPreview(
+    plans.slice(0, completed.length).map(patchPreviewFile).filter(Boolean) as EditDiffFilePreview[],
+  )
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i]
+    const tag = `第 ${i + 1} 个操作`
+    try {
+      if (p.action === 'create') {
+        const staged = await stageWrite(p.abs, p.after ?? '', { minMtimeMs: nextMtimeMs(p.abs) })
+        const r = await commitStagedCreateIfAbsent(staged)
+        if ('reason' in r) {
+          return { ok: false, code: 'PATCH_PARTIAL', error: `${tag}：创建失败（${r.reason}）。已完成 ${completed.length}/${plans.length} 个操作。`, preview: completedPreview() }
+        }
+      } else if (p.action === 'update') {
+        const rd = readTextFileForEdit(p.raw, p.abs)
+        if (rd.ok === false) {
+          return { ok: false, code: 'PATCH_PARTIAL', error: `${tag}：${rd.error}。已完成 ${completed.length}/${plans.length} 个操作。`, preview: completedPreview() }
+        }
+        if (rd.text !== (p.before ?? '')) {
+          return { ok: false, code: 'STALE_VERSION', error: `${tag}：文件已被修改（${p.raw}），请重新 read_file 后重试。已完成 ${completed.length}/${plans.length} 个操作。`, preview: completedPreview() }
+        }
+        const staged = await stageWrite(p.abs, p.after ?? '', { minMtimeMs: nextMtimeMs(p.abs) })
+        const r = await commitStagedForEdit(staged, rd.version)
+        if ('reason' in r) {
+          return { ok: false, code: 'PATCH_PARTIAL', error: `${tag}：写入失败（${r.reason}）。已完成 ${completed.length}/${plans.length} 个操作。`, preview: completedPreview() }
+        }
+      } else if (p.action === 'delete') {
+        fs.rmSync(p.abs, { force: false })
+      } else if (p.action === 'move') {
+        fs.renameSync(p.abs, p.absTo!)
+      }
+      noteFileObserved(p.action === 'move' ? p.absTo! : p.abs, ctx)
+      broadcastFileChanged(p.action === 'delete' ? p.abs : p.action === 'move' ? p.absTo! : p.abs, p.action === 'delete' ? '' : (p.after ?? ''))
+      completed.push({ index: i, action: p.action, path: p.raw })
+    } catch (e: any) {
+      return {
+        ok: false,
+        code: 'PATCH_PARTIAL',
+        error: `${tag}：${e?.message || String(e)}。已完成 ${completed.length}/${plans.length} 个操作：`
+          + completed.map((c) => `#${c.index + 1} ${c.action} ${c.path}`).join('；'),
+        preview: completedPreview(),
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      applied: completed.length,
+      operations: plans.map((p, i) => ({
+        index: i,
+        action: p.action,
+        path: p.raw,
+        beforeChars: (p.before ?? '').length,
+        afterChars: (p.after ?? '').length,
+        stats: p.diff?.stats,
+      })),
+      files: completed.map((c) => c.path),
+    },
+    preview: makeEditDiffPreview(plans.map(patchPreviewFile).filter(Boolean) as EditDiffFilePreview[]),
   }
 }
 
@@ -3435,6 +3612,9 @@ const SUBAGENT_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
 const SUBAGENT_MAX_TIMEOUT_MS = 60 * 60 * 1000
 /** 运行期 job 记录：jobId → 子代理会话（供 job_output / job_kill 定位真实 agent） */
 const subagentJobs = new Map<string, { childId: string; label: string; owner: string; startedAt: number }>()
+/** 活跃子代理（含前台/后台），用于容量限制与 list_agents */
+const activeSubagents = new Map<string, { label: string; owner: string; startedAt: number; background: boolean }>()
+const MAX_ACTIVE_SUBAGENTS = 8
 
 function clampSubagentTimeout(v: unknown): number {
   const n = Number(v)
@@ -3464,6 +3644,18 @@ function resolveChildTools(input: any, ctx: ToolExecutionContext): string[] {
 const SUBAGENT_DEFAULT_SYSTEM_PROMPT =
   '你是一个子代理（subagent），负责独立完成父任务分配给你的子任务：自己做调研、自己动手改文件，' +
   '最后直接输出可被父代理采用的结果（结论 + 依据 + 涉及的文件路径）。不要反问父代理，信息不足时按最合理的假设推进并说明假设。'
+
+async function listActiveAgents(): Promise<ToolResult> {
+  const agents = Array.from(activeSubagents.entries()).map(([id, v]) => ({
+    id,
+    label: v.label,
+    owner: v.owner,
+    background: v.background,
+    startedAt: v.startedAt,
+    runningMs: Date.now() - v.startedAt,
+  }))
+  return { ok: true, value: { agents, maxActive: MAX_ACTIVE_SUBAGENTS } }
+}
 
 async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolResult> {
   const prompt = String(input?.prompt ?? '')
@@ -3500,15 +3692,37 @@ async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolR
   }
 
   const childTools = resolveChildTools(input, ctx)
+  if (activeSubagents.size >= MAX_ACTIVE_SUBAGENTS) {
+    return {
+      ok: false,
+      code: 'ACTIVATION_LIMIT_REACHED',
+      error: `同时运行的子代理已达上限（${MAX_ACTIVE_SUBAGENTS}）：请等已有子代理结束，或先汇总它们的 job_output，不要继续派生。`,
+    }
+  }
 
   const labelBase = String(input?.description ?? '').trim() || prompt.replace(/\s+/g, ' ').slice(0, 24)
   const label = memberName ? `subagent:${memberName}` : `subagent:${labelBase}`
 
+  const parentConfig = (ctx as any).config || {}
+  const parentLlmConfig = (ctx as any).llmConfig || {}
+  const parentModel = String((ctx as any).model || '')
+  /** 合并模型配置：空字符串/undefined 不覆盖父级（成员预设里常带空 model，会把父级 model 冲掉） */
+  const mergeFilled = (...sources: any[]) => {
+    const out: Record<string, any> = {}
+    for (const src of sources) {
+      if (!src || typeof src !== 'object') continue
+      for (const [k, v] of Object.entries(src)) {
+        if (v !== undefined && v !== null && v !== '') out[k] = v
+      }
+    }
+    return out
+  }
   const child = createAgent({
     systemPrompt: String(input?.systemPrompt || member?.systemPrompt || SUBAGENT_DEFAULT_SYSTEM_PROMPT),
-    provider: input?.provider || member?.provider || 'ollama',
-    config: input?.config ?? member?.config,
-    llmConfig: input?.llmConfig ?? member?.llmConfig,
+    provider: input?.provider || member?.provider || (ctx as any).provider || 'ollama',
+    // 以父级模型配置为底，再叠加群成员 / 调用方显式覆盖：避免成员只配了一部分字段时丢掉 model
+    config: mergeFilled(parentConfig, parentModel ? { model: parentModel } : {}, member?.config, input?.config, input?.model ? { model: String(input.model) } : {}),
+    llmConfig: mergeFilled(parentLlmConfig, member?.llmConfig, input?.llmConfig),
     tools: Array.isArray(input?.tools) ? childTools : (member?.tools ?? childTools),
     cwd: member?.cwd || ctx.cwd,
     label,
@@ -3525,6 +3739,8 @@ async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolR
     swarmChain: [...((ctx as any).swarmChain || []), memberName].filter(Boolean),
   })
 
+  activeSubagents.set(child.id, { label, owner: parentId, startedAt: Date.now(), background: input?.run_in_background === true })
+
   const timeoutMs = clampSubagentTimeout(input?.timeout_ms ?? input?.timeoutMs)
   const background = input?.run_in_background === true
   // 后台模式必须能收结果：调用方白名单里没有 job_output 时，jobId 交出去也收不回来——
@@ -3532,6 +3748,8 @@ async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolR
   if (background) {
     const callerTools = (ctx as any).tools
     if (Array.isArray(callerTools) && !callerTools.includes('job_output')) {
+      activeSubagents.delete(child.id)
+      void disposeAgent(child.id)
       return {
         ok: false,
         error: 'run_in_background 需要 job_output 工具来收集结果，但当前会话的工具白名单里没有它：' +
@@ -3556,6 +3774,7 @@ async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolR
         jobRegistry.fail(job.id, `子代理执行失败: ${e?.message || String(e)}`)
       } finally {
         subagentJobs.delete(job.id)
+        activeSubagents.delete(child.id)
         await disposeAgent(child.id)
       }
     })()
@@ -3596,6 +3815,7 @@ async function runSubagent(input: any, ctx: ToolExecutionContext): Promise<ToolR
   } catch (e: any) {
     return { ok: false, error: `子代理执行失败: ${e?.message || String(e)}` }
   } finally {
+    activeSubagents.delete(child.id)
     await disposeAgent(child.id)
   }
 }
@@ -4241,7 +4461,7 @@ export function registerCoreTools(): void {
     }),
   )
   toolRegistry.register(
-    defineTool('write_file', '写入文件（UTF-8，自动创建父目录）。覆盖已存在文件前必须先用 read_file 读过（先读后写）；只改局部优先用 replace_in_file。单次建议 ≤20000 字符、硬上限 1 MiB，更大的分段写；写盘后按字节复核，失败会回滚。', writeFile, {
+    defineTool('write_file', '写入文件（UTF-8，自动创建父目录）。覆盖已存在文件前必须先用 read_file 读过（先读后写）；只改局部优先用 replace_in_file。单次建议 ≤6000 字符、硬上限 1 MiB，更大的文件分段写（先写骨架再用 replace_in_file 追加）；写盘后按字节复核，失败会回滚。', writeFile, {
       inputSchema: {
         type: 'object',
         properties: {
@@ -4290,6 +4510,34 @@ export function registerCoreTools(): void {
           path: { type: 'string', description: '可选。所有条目的默认文件路径（条目自带 path 时以条目为准）' },
         },
         required: ['replacements'],
+      },
+    }),
+  )
+  toolRegistry.register(
+    defineTool('apply_patch', '跨文件批量补丁：所有操作先整包预检（任一失败则一个字节都不写），通过后按顺序提交；提交中途失败不回滚已完成操作，会返回已完成列表与已完成部分的 diff。支持 create / update / delete / move。update / delete / move 仍需先 read_file（读后写门禁）。', applyPatch, {
+      inputSchema: {
+        type: 'object',
+        properties: {
+          operations: {
+            type: 'array',
+            description: '按顺序执行的操作列表；预检全部通过才会开始提交',
+            items: {
+              type: 'object',
+              properties: {
+                action: { type: 'string', enum: ['create', 'update', 'delete', 'move'], description: '操作类型' },
+                path: { type: 'string', description: 'create/update/delete 的目标路径；move 时为源路径' },
+                from: { type: 'string', description: 'move 的源路径（与 path 二选一）' },
+                to: { type: 'string', description: 'move 的目标路径' },
+                content: { type: 'string', description: 'create 的完整文件内容' },
+                old_string: { type: 'string', description: 'update 的待替换原文（默认要求唯一匹配）' },
+                new_string: { type: 'string', description: 'update 的替换文本' },
+                replace_all: { type: 'boolean', description: 'update 时是否替换全部匹配' },
+              },
+              required: ['action'],
+            },
+          },
+        },
+        required: ['operations'],
       },
     }),
   )
@@ -4401,6 +4649,7 @@ export function registerCoreTools(): void {
           member: { type: 'string', description: '可选。群成员名（AgentSwarm 群聊场景下以该成员的角色/模型/工具/知识库执行；无群成员名册时会报错）' },
           systemPrompt: { type: 'string', description: '可选。子代理系统提示词；缺省用通用子代理提示（member 时用成员设定）' },
           provider: { type: 'string', description: '可选。LLM provider；缺省继承调用方（member 时用成员的 provider）' },
+          model: { type: 'string', description: '可选。子代理模型；缺省继承父会话最近一次请求的 model' },
           config: { type: 'object', description: '可选。provider 配置' },
           llmConfig: { type: 'object', description: '可选。通用 LLM 配置' },
           maxSteps: { type: 'number', description: '可选。子代理单轮最大 step 数（默认 10，上限 50）' },
@@ -4412,6 +4661,10 @@ export function registerCoreTools(): void {
       },
     }),
   )
+  toolRegistry.register(
+    defineTool('list_agents', '列出当前仍在运行的子代理（前台/后台）。用于确认还有哪些子任务没结束，再决定继续派生还是先收结果。', listActiveAgents, { inputSchema: { type: 'object', properties: {} } }),
+  )
+
   toolRegistry.register(
     defineTool('job_output', '收集后台任务（run_subagent run_in_background=true 启动的子代理）的状态与结果。默认立即返回当前状态；wait=true 时阻塞等待到任务结束（或超时）。任务结束前只能拿到状态，结束后 result 里是子代理的最终输出。', jobOutput, {
       inputSchema: {

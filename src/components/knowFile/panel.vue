@@ -1711,7 +1711,7 @@
           </div>
         </template>
         <template #default="{ node, data }">
-          <div class="custom-tree-node" :class="{ 'tab-open': isTabOpen(data.path), 'tab-active': isActiveTab(data.path), 'workspace-root': isWorkspaceRoot(data.path), 'remote-root': data.remote }">
+          <div class="custom-tree-node" :class="{ 'tab-open': !scoped && isTabOpen(data.path), 'tab-active': !scoped && isActiveTab(data.path), 'workspace-root': isWorkspaceRoot(data.path), 'remote-root': data.remote }">
             <span class="tree-content" @mousemove="showTooltip($event, data)" @mouseleave="hideTooltip">
               <i v-if="data.remote" :class="data.isRemoteRoot ? 'fa fa-cloud' : (data.type === 'folder' ? 'fa fa-folder' : 'fa fa-file-text-o')" style="color:#42b883"></i>
               <i v-else :class="store.icon(data.extension)"></i> &nbsp; 

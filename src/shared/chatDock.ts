@@ -18,7 +18,7 @@
  *  - file：**具体文件**（点文件树里的文件后生成，标签标题 = 文件名，内容自带多视图切换）。
  * new / file 不能从类型选择器直接创建（file 由打开文件产生，new 由「+」产生）。
  */
-export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'branch' | 'todos' | 'plan' | 'trajectory' | 'jobs' | 'new' | 'file'
+export type ChatDockTabKind = 'files' | 'terminal' | 'browser' | 'branch' | 'todos' | 'plan' | 'trajectory' | 'jobs' | 'recall' | 'new' | 'file'
 
 export interface ChatDockTab {
   /** 标签唯一 id（同类型可以开多个，如两个终端） */
@@ -30,6 +30,21 @@ export interface ChatDockTab {
   path?: string
   /** file 标签：当前视图（浏览 / 源码编辑 / 可视编辑 / 思维导图 / 演示 / Office 编辑） */
   view?: string
+}
+
+export interface ChatDockRecallBlock {
+  label?: string
+  content?: string
+  similarity?: number
+}
+
+/** 右侧栏「知识召回」里的一轮：与该轮助手消息的 kbInfo 对应 */
+export interface ChatDockRecallEntry {
+  key: string
+  turn: number
+  question: string
+  kbPath?: string
+  blocks: ChatDockRecallBlock[]
 }
 
 export interface ChatDockState {
@@ -67,7 +82,7 @@ export const DOCK_MAX_ROOM_RATIO = 0.72
 export const DOCK_MIN_CHAT_WIDTH = 320
 
 /** 新标签页里可选的类型（顺序 = 选项顺序；new / file 不在此列） */
-export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch', 'todos', 'plan', 'trajectory', 'jobs']
+export const DOCK_TAB_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser', 'branch', 'todos', 'plan', 'trajectory', 'jobs', 'recall']
 
 /** 旧版本自动预置的三标签（用于识别并清掉旧存档，与当前可选项无关） */
 const LEGACY_SEEDED_KINDS: readonly ChatDockTabKind[] = ['files', 'terminal', 'browser']
@@ -81,12 +96,13 @@ const KIND_LABELS: Record<ChatDockTabKind, { zh: string; en: string }> = {
   plan: { zh: '计划', en: 'Plan' },
   trajectory: { zh: '会话轨迹', en: 'Trajectory' },
   jobs: { zh: '后台任务', en: 'Jobs' },
+  recall: { zh: '知识召回', en: 'Recall' },
   new: { zh: '新标签页', en: 'New tab' },
   file: { zh: '文件', en: 'File' },
 }
 
 /** 同一类型只能有一个标签页（分支 / 待办清单 / 计划 / 会话轨迹） */
-export const SINGLETON_DOCK_KINDS: readonly ChatDockTabKind[] = ['branch', 'todos', 'plan', 'trajectory', 'jobs']
+export const SINGLETON_DOCK_KINDS: readonly ChatDockTabKind[] = ['branch', 'todos', 'plan', 'trajectory', 'jobs', 'recall']
 export function isSingletonDockKind(kind: ChatDockTabKind): boolean {
   return SINGLETON_DOCK_KINDS.includes(kind)
 }
@@ -95,7 +111,7 @@ export function isSingletonDockKind(kind: ChatDockTabKind): boolean {
 export function isDockTabKind(value: unknown): value is ChatDockTabKind {
   return value === 'files' || value === 'terminal' || value === 'browser'
     || value === 'branch' || value === 'todos' || value === 'plan' || value === 'trajectory'
-    || value === 'jobs' || value === 'new' || value === 'file'
+    || value === 'jobs' || value === 'recall' || value === 'new' || value === 'file'
 }
 
 /** 路径最后一段（file 标签的默认标题） */

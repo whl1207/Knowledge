@@ -5,7 +5,6 @@
      面板自身的右键菜单（新建 / 重命名 / 删除 / 复制粘贴 / 拖拽移动 / 排序）全部保留；
      点击文件仍通过 open-file 事件交给 home.vue，在右侧栏里以文件标签打开。
 
-     额外保留原右侧栏的「插入相对路径」：panel 的 node-opened 会带出最后点击的节点，
      把它插进输入框，方便直接让智能体读取该文件。 -->
 <template>
   <div class="dock-files knowfile-menu">
@@ -14,7 +13,6 @@
       ref="panelRef"
       :scope-root="rootPath"
       @open-file="onOpenFile"
-      @node-opened="onNodeOpened"
     >
       <template #toolbar>
         <button
@@ -23,14 +21,6 @@
           @click="refresh"
         >
           <i class="fa fa-refresh"></i>
-        </button>
-        <button
-          v-if="lastNodePath"
-          class="dock-icon-btn"
-          :title="zh ? '把相对路径插入输入框' : 'Insert relative path into the input box'"
-          @click="insertPath"
-        >
-          <i class="fa fa-level-down"></i>
         </button>
       </template>
     </Panel>
@@ -71,8 +61,6 @@ const rootPath = computed(() => {
 })
 
 const panelRef = ref<any>(null)
-/** panel 最后点击的节点（文件 / 文件夹），用于「插入相对路径」 */
-const lastNodePath = ref('')
 
 function fileNameOf(p: string): string {
   const parts = String(p || '').replace(/\\/g, '/').split('/').filter(Boolean)
@@ -80,19 +68,7 @@ function fileNameOf(p: string): string {
 }
 
 /** 相对工作区根的路径（统一 / 分隔；根外路径原样返回） */
-function relativeToRoot(p: string): string {
-  const root = rootPath.value.replace(/\\/g, '/')
-  const full = String(p || '').replace(/\\/g, '/')
-  if (root && (full === root || full.startsWith(root + '/'))) {
-    return full.slice(root.length).replace(/^\/+/, '')
-  }
-  return full
-}
 
-function onNodeOpened(data?: any): void {
-  if (!data?.path || data?.isTruncatedHint) return
-  lastNodePath.value = String(data.path)
-}
 
 /** panel.vue 的 open-file 载荷 → 右侧栏标签载荷 */
 function onOpenFile(payload?: { data?: any; view?: string }): void {
@@ -102,19 +78,12 @@ function onOpenFile(payload?: { data?: any; view?: string }): void {
   emit('open-file', { path: String(data.path), view: payload?.view, label })
 }
 
-function insertPath(): void {
-  if (!lastNodePath.value) return
-  const rel = relativeToRoot(lastNodePath.value)
-  if (!rel) return
-  emit('insert-text', '`' + rel + '`')
-}
 
 function refresh(): void {
   void panelRef.value?.refreshTree?.()
 }
 
 // 工作区切换：清掉上一个工作区留下的「插入路径」目标
-watch(rootPath, () => { lastNodePath.value = '' })
 
 // 标签重新激活时刷新一次（与 DSH 文件页「切回来看到最新」一致）
 watch(

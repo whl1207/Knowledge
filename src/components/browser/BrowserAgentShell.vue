@@ -100,6 +100,16 @@
       </button>
 
       <!-- 顶部右侧：⭐ 收藏当前页 / 🏷️ 收藏夹（打开侧栏树状管理）/ ⚙ 设置。其余页面操作折叠进侧栏 -->
+      <!-- 录制用户操作 → 生成 Site Playbook 草稿 + 站点经验，供 Agent 下次复用 -->
+      <button class="ba-btn ba-record-btn" :class="{ on: !!state.recording, recording: !!state.recording }"
+        :disabled="recordingBusy || (!state.recording && !state.url)"
+        :title="state.recording
+          ? (zh ? `停止录制（已记录 ${state.recording.steps} 步，保存为 Playbook 草稿）` : `Stop recording (${state.recording.steps} steps; save as Playbook draft)`)
+          : (zh ? '录制操作：录完后保存为站点 Playbook / 经验，Agent 下次可复用' : 'Record actions: save the flow as a site Playbook / learning for the agent')"
+        @click="toggleRecording">
+        <i class="fa" :class="state.recording ? 'fa-stop-circle' : 'fa-dot-circle-o'"></i>
+        <span v-if="state.recording" class="ba-record-count">{{ state.recording.steps }}</span>
+      </button>
       <button class="ba-btn ba-star-btn" :class="{ on: isBookmarked }" :disabled="!state.url"
         :title="isBookmarked ? (zh ? '取消收藏（书签）' : 'Remove bookmark') : (zh ? '收藏当前页（书签）' : 'Bookmark current page') "
         @click="toggleBookmark">
@@ -418,10 +428,11 @@ const state = reactive<{
   allowEval: boolean
   agentOwner: string | null
   agentPaused: boolean
+  recording: { tabId: string; host: string; startedAt: number; steps: number } | null
 }>({
   tabs: [], activeTabId: null, url: '', title: '', loading: false,
   canGoBack: false, canGoForward: false, agentActive: false, agentBusyTabId: null, agentTool: '', allowEval: false,
-  agentOwner: null, agentPaused: false,
+  agentOwner: null, agentPaused: false, recording: null,
 })
 
 const activeTab = computed(() => state.tabs.find(t => t.id === state.activeTabId) || null)
@@ -603,9 +614,59 @@ const applyState = (s: any) => {
   state.allowEval = !!s.allowEval
   state.agentOwner = s.agentOwner || null
   state.agentPaused = !!s.agentPaused
+  state.recording = s.recording && s.recording.tabId
+    ? {
+        tabId: String(s.recording.tabId),
+        host: String(s.recording.host || ''),
+        startedAt: Number(s.recording.startedAt) || 0,
+        steps: Number(s.recording.steps) || 0,
+      }
+    : null
 }
 
 const onEvent = (payload: any) => applyState(payload)
+
+// ===== 训练事件桥（轻量同源通道）=====
+// 训练插件写命令到 localStorage 并派发同窗事件；浏览器壳把录制事件写回 localStorage。
+// 只在本机同源页面间共享，不经过网络；训练插件和浏览器壳都需要处于打开状态。
+const TRAIN_EVENTS_KEY = 'aikm.browser.training.events'
+const TRAIN_COMMAND_KEY = 'aikm.browser.training.command'
+let trainSessionId = ''
+const trainCommand = async (cmd: any) => {
+  const action = String(cmd?.action || '')
+  if (action === 'start') {
+    trainSessionId = String(cmd?.sessionId || 'train-' + Date.now())
+    try {
+      localStorage.setItem(TRAIN_EVENTS_KEY, JSON.stringify({ sessionId: trainSessionId, active: true, events: [], updatedAt: Date.now() }))
+    } catch { /* 忽略 */ }
+    await invoke('browser-agent:record-start').catch(() => null)
+  } else if (action === 'stop') {
+    await invoke('browser-agent:record-stop', { save: false }).catch(() => null)
+    try {
+      const prev = JSON.parse(localStorage.getItem(TRAIN_EVENTS_KEY) || '{}')
+      localStorage.setItem(TRAIN_EVENTS_KEY, JSON.stringify({ ...prev, active: false, updatedAt: Date.now() }))
+    } catch { /* 忽略 */ }
+    trainSessionId = ''
+  }
+}
+const onTrainingEvent = (payload: any) => {
+  if (!trainSessionId || !payload) return
+  try {
+    const prev = JSON.parse(localStorage.getItem(TRAIN_EVENTS_KEY) || '{}')
+    const events = Array.isArray(prev.events) ? prev.events : []
+    events.push({ ...payload, at: Number(payload.at) || Date.now() })
+    if (events.length > 300) events.splice(0, events.length - 300)
+    localStorage.setItem(TRAIN_EVENTS_KEY, JSON.stringify({ sessionId: trainSessionId, active: true, events, updatedAt: Date.now() }))
+  } catch { /* 忽略 */ }
+}
+const onTrainCommand = (event: Event) => {
+  const detail = (event as CustomEvent).detail
+  if (detail) void trainCommand(detail)
+}
+const onTrainStorage = (event: StorageEvent) => {
+  if (event.key !== TRAIN_COMMAND_KEY || !event.newValue) return
+  try { void trainCommand(JSON.parse(event.newValue)) } catch { /* 忽略 */ }
+}
 
 // 主题广播：主窗口切换主题后应用（更新 store.UI + 重设 CSS 变量），本窗口跟随
 const onThemeChanged = (ui: any) => {
@@ -747,6 +808,26 @@ const navigate = async () => {
     : buildBrowserSearchUrl(u0, store.UI?.browserSearchEngine, store.UI?.browserSearchTemplate)
   await invoke('browser-agent:navigate', { url: u }).catch(() => {})
 }
+const recordingBusy = ref(false)
+const toggleRecording = async () => {
+  if (recordingBusy.value) return
+  recordingBusy.value = true
+  try {
+    if (state.recording) {
+      const r: any = await invoke('browser-agent:record-stop', { save: true })
+      if (r?.ok) showToast(r?.name ? (zh.value ? `已保存录制：${r.name}` : `Recording saved: ${r.name}`) : (zh.value ? '录制已保存' : 'Recording saved'))
+      else if (r?.error) showToast(r.error, 'err')
+    } else {
+      const r: any = await invoke('browser-agent:record-start')
+      if (!r?.ok) showToast(r?.error || (zh.value ? '无法开始录制' : 'Cannot start recording'), 'err')
+    }
+  } catch (e: any) {
+    showToast(e?.message || String(e), 'err')
+  } finally {
+    recordingBusy.value = false
+  }
+}
+
 const action = async (a: string) => {
   deactivateSettingsTab()
   await invoke('browser-agent:action', { action: a }).catch(() => {})
@@ -1296,6 +1377,9 @@ onMounted(async () => {
   unsubBrowserEvents.push(getPlatform().events.on('browser-agent:toast', onToastEvent))
   // 下载进度：图标上的小圆点（面板自身也订阅同一事件）
   unsubBrowserEvents.push(getPlatform().events.on('browser-agent:downloads', (rows: any) => applyDownloadRows(rows)))
+  unsubBrowserEvents.push(getPlatform().events.on('browser-agent:training-event', onTrainingEvent))
+  window.addEventListener('aikm-training-command', onTrainCommand as EventListener)
+  window.addEventListener('storage', onTrainStorage)
   void invoke('browser-agent:downloads-list').then((rows: any) => {
     applyDownloadRows(Array.isArray(rows) ? rows : rows?.data)
   }).catch(() => {})
@@ -1346,6 +1430,8 @@ onBeforeUnmount(() => {
   for (const off of unsubBrowserEvents.splice(0)) { try { off() } catch { /* 忽略 */ } }
   window.removeEventListener('resize', onWinResize)
   window.removeEventListener('resize', pushDockRect)
+  window.removeEventListener('aikm-training-command', onTrainCommand as EventListener)
+  window.removeEventListener('storage', onTrainStorage)
   if (bmAutoTimer) { clearInterval(bmAutoTimer); bmAutoTimer = null }
   dockObserver?.disconnect(); dockObserver = null
   bodyObserver?.disconnect(); bodyObserver = null
@@ -1542,6 +1628,22 @@ onBeforeUnmount(() => {
 }
 .ba-btn:hover { background: color-mix(in srgb, var(--fontColor) 8%, transparent); }
 .ba-btn:disabled { opacity: .35; cursor: default; }
+/* 录制：进行中红色停止图标 + 步数角标 */
+.ba-record-btn.recording { color: #e74c3c; background: color-mix(in srgb, #e74c3c 10%, transparent); }
+.ba-record-count {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 2px;
+  border-radius: 7px;
+  background: #e74c3c;
+  color: #fff;
+  font-size: 8px;
+  line-height: 13px;
+  text-align: center;
+}
 /* 地址栏 */
 .ba-addr {
   flex: 1;

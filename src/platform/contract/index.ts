@@ -511,6 +511,7 @@ export type AppEventChannel =
   | 'browser-agent:toast'
   | 'browser-agent:downloads'
   | 'browser-agent:menu-action'
+  | 'browser-agent:training-event'
   | 'browser-agent:window-state'
   /** 终端输出 / 退出（主进程 → 渲染层；见 TerminalPort） */
   | 'terminal:data'
@@ -779,6 +780,7 @@ export type BrowserAgentMethod =
   | 'set-config' | 'get-config'
   | 'site-data-info' | 'clear-site-data'
   | 'learnings-list' | 'learnings-delete'
+  | 'record-start' | 'record-stop' | 'export-training'
   | 'playbooks-list' | 'playbooks-get' | 'playbooks-approve' | 'playbooks-delete'
   | 'pick-download-dir'
   | 'import-logins'

@@ -57,6 +57,8 @@ export type PluginPermission =
   | 'secrets'
   | 'schedule'
   | 'attachments'
+  | 'browser.embed'
+  | 'browser.observe'
 
 /**
  * 插件运行态（对齐 Cordis fiber 状态机的可见投影）。

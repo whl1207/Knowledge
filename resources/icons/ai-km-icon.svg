@@ -1,20 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
 <defs>
-<radialGradient id="bg" cx="50%" cy="45%" r="80%"><stop stop-color="#131A2A"/><stop offset="1" stop-color="#06080F"/></radialGradient>
-<linearGradient id="c1" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#6D8BFF"/><stop offset="1" stop-color="#2B3AA8"/></linearGradient>
-<linearGradient id="c2" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#22D3EE"/><stop offset="1" stop-color="#116E86"/></linearGradient>
-<linearGradient id="c3" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#BFE9FF"/><stop offset="1" stop-color="#C4B5FD"/></linearGradient>
-<radialGradient id="haze"><stop stop-color="#6D5BFF" stop-opacity=".5"/><stop offset="1" stop-color="#6D5BFF" stop-opacity="0"/></radialGradient>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#111B2E"/><stop offset="1" stop-color="#06090F"/></linearGradient>
+<radialGradient id="haze"><stop stop-color="#3B82F6" stop-opacity=".28"/><stop offset="1" stop-color="#3B82F6" stop-opacity="0"/></radialGradient>
+<linearGradient id="node" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#22D3EE"/><stop offset="1" stop-color="#7C6CFF"/></linearGradient>
 </defs>
 <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-<circle cx="300" cy="300" r="220" fill="url(#haze)"/>
-<g transform="rotate(14 268 322)"><rect x="150" y="210" width="236" height="224" rx="26" fill="url(#c1)" opacity=".82" stroke="#BFE9FF" stroke-opacity=".45" stroke-width="3"/></g>
-<g transform="rotate(6 261 297)"><rect x="136" y="178" width="250" height="238" rx="28" fill="url(#c2)" opacity=".85" stroke="#BFE9FF" stroke-opacity=".45" stroke-width="3"/></g>
-<g transform="rotate(-6 255 267)"><rect x="122" y="140" width="266" height="254" rx="30" fill="url(#c3)" opacity=".75" stroke="#FFFFFF" stroke-opacity=".5" stroke-width="3"/></g>
-<g transform="rotate(-6 255 267)">
-<polyline points="196,218 196,312" stroke="#BFE9FF" stroke-width="8" stroke-linecap="round" stroke-opacity=".7"/>
-<polyline points="196,218 300,264" stroke="#BFE9FF" stroke-width="8" stroke-linecap="round" stroke-opacity=".7"/>
-<polyline points="196,312 300,264" stroke="#BFE9FF" stroke-width="8" stroke-linecap="round" stroke-opacity=".7"/>
-<circle cx="196" cy="218" r="22" fill="#EAF9FF"/><circle cx="196" cy="312" r="22" fill="#EAF9FF"/><circle cx="300" cy="264" r="26" fill="#EAF9FF"/>
+<circle cx="256" cy="230" r="180" fill="url(#haze)"/>
+<g stroke="#38BDF8" stroke-width="14" stroke-linecap="round">
+<line x1="256" y1="133.12" x2="256" y2="196.14"/>
+<line x1="149.58" y1="317.44" x2="204.16" y2="285.93"/>
+<line x1="362.42" y1="317.44" x2="307.84" y2="285.93"/>
+</g>
+<polygon points="325.12,256 290.56,196.14 221.44,196.14 186.88,256 221.44,315.86 290.56,315.86" fill="#0F1E3C" stroke="#38BDF8" stroke-width="14" stroke-linejoin="round"/>
+<text x="256" y="256" text-anchor="middle" dominant-baseline="central" font-family="Segoe UI, Arial, sans-serif" font-size="40" font-weight="700" fill="#E0F2FE">AI</text>
+<g stroke="#E0F2FE" stroke-width="5" fill="url(#node)">
+<circle cx="256" cy="92.16" r="40.96"/>
+<circle cx="114.1" cy="337.92" r="40.96"/>
+<circle cx="397.9" cy="337.92" r="40.96"/>
 </g>
 </svg>
